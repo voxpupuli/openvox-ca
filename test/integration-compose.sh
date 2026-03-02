@@ -660,9 +660,9 @@ puppet-ca-ctl setup --cadir "$_SETUP_DIR" --hostname "setup-test-${RUN_ID}.examp
     && pass "puppet-ca-ctl setup creates ca_crl.pem" \
     || fail "puppet-ca-ctl setup creates ca_crl.pem"
 
-[ -f "$_SETUP_DIR/serial" ] \
-    && pass "puppet-ca-ctl setup creates serial file" \
-    || fail "puppet-ca-ctl setup creates serial file"
+[ -f "$_SETUP_DIR/inventory.txt" ] \
+    && pass "puppet-ca-ctl setup creates inventory.txt" \
+    || fail "puppet-ca-ctl setup creates inventory.txt"
 
 # CA cert CN must match hostname
 openssl x509 -noout -subject -in "$_SETUP_DIR/ca_crt.pem" 2>/dev/null \
