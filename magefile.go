@@ -22,6 +22,8 @@ import (
 	"archive/tar"
 	"bufio"
 	"bytes"
+	"compress/gzip"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"os"
@@ -47,7 +49,7 @@ import (
 
 // ── Namespaces ────────────────────────────────────────────────────────────────
 
-type Build mg.Namespace // build:all  build:fips
+type Build mg.Namespace // build:all  build:fips  build:dist
 type Test mg.Namespace  // test:unit  test:integcompose  test:integcomposefips  test:loadcompose  test:bench  test:puppet  test:puppetfips
 type Dev mg.Namespace   // dev:check  dev:tidy    dev:clean  dev:container
 
@@ -165,6 +167,79 @@ func (Build) FIPS() error {
 	return sh.RunWith(env, "go", "build",
 		"-o", filepath.Join(binDir, "puppet-ca-ctl"),
 		"./cmd/puppet-ca-ctl")
+}
+
+// Dist cross-compiles release artifacts for all supported platforms and writes
+// them to dist/. Each artifact is a .tar.gz containing puppet-ca and
+// puppet-ca-ctl. A SHA-256 checksums.txt is also written to dist/.
+//
+// Artifacts produced:
+//
+//	puppet-ca_linux_amd64.tar.gz       (standard; CGO_ENABLED=0)
+//	puppet-ca_linux_arm64.tar.gz       (standard; CGO_ENABLED=0)
+//	puppet-ca_linux_amd64_fips.tar.gz  (FIPS; GOEXPERIMENT=boringcrypto)
+func (Build) Dist() error {
+	distDir := "dist"
+	if err := os.MkdirAll(distDir, 0755); err != nil {
+		return err
+	}
+
+	type variant struct {
+		name string
+		env  map[string]string
+	}
+	variants := []variant{
+		{
+			name: "puppet-ca_linux_amd64",
+			env:  map[string]string{"CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "amd64"},
+		},
+		{
+			name: "puppet-ca_linux_arm64",
+			env:  map[string]string{"CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "arm64"},
+		},
+		{
+			name: "puppet-ca_linux_amd64_fips",
+			env:  map[string]string{"CGO_ENABLED": "1", "GOOS": "linux", "GOARCH": "amd64", "GOEXPERIMENT": "boringcrypto"},
+		},
+	}
+
+	var checksums []string
+	for _, v := range variants {
+		fmt.Printf("Building %s...\n", v.name)
+
+		tmpDir, err := os.MkdirTemp("", "puppet-ca-dist-*")
+		if err != nil {
+			return err
+		}
+
+		for _, cmd := range []string{"puppet-ca", "puppet-ca-ctl"} {
+			if err := sh.RunWith(v.env, "go", "build",
+				"-o", filepath.Join(tmpDir, cmd),
+				"./cmd/"+cmd); err != nil {
+				os.RemoveAll(tmpDir)
+				return fmt.Errorf("build %s for %s: %w", cmd, v.name, err)
+			}
+		}
+
+		archive := filepath.Join(distDir, v.name+".tar.gz")
+		if err := createTarGz(archive, tmpDir, []string{"puppet-ca", "puppet-ca-ctl"}); err != nil {
+			os.RemoveAll(tmpDir)
+			return fmt.Errorf("archive %s: %w", v.name, err)
+		}
+		os.RemoveAll(tmpDir)
+
+		sum, err := sha256File(archive)
+		if err != nil {
+			return err
+		}
+		checksums = append(checksums, fmt.Sprintf("%s  %s\n", sum, filepath.Base(archive)))
+	}
+
+	return os.WriteFile(
+		filepath.Join(distDir, "checksums.txt"),
+		[]byte(strings.Join(checksums, "")),
+		0644,
+	)
 }
 
 // ── test:* ────────────────────────────────────────────────────────────────────
@@ -524,6 +599,56 @@ func runComposeWithSpinner(extraEnv map[string]string, spinMsg string, args ...s
 	mu.Unlock()
 
 	return cmdErr
+}
+
+func createTarGz(dst, srcDir string, files []string) error {
+	f, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	gz := gzip.NewWriter(f)
+	tw := tar.NewWriter(gz)
+
+	for _, name := range files {
+		data, err := os.ReadFile(filepath.Join(srcDir, name))
+		if err != nil {
+			tw.Close()
+			gz.Close()
+			return err
+		}
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0755, Size: int64(len(data))}); err != nil {
+			tw.Close()
+			gz.Close()
+			return err
+		}
+		if _, err := tw.Write(data); err != nil {
+			tw.Close()
+			gz.Close()
+			return err
+		}
+	}
+
+	if err := tw.Close(); err != nil {
+		gz.Close()
+		return err
+	}
+	return gz.Close()
+}
+
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
 func tarLayer(files map[string]string, dirs []string) (v1.Layer, error) {

@@ -1,5 +1,6 @@
 # Compiled binaries
 bin/
+dist/
 puppet-ca
 puppet-ca-ctl
 *.exe
