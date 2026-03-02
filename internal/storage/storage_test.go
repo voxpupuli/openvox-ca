@@ -84,29 +84,13 @@ var _ = Describe("StorageService", func() {
 	Describe("Serial", func() {
 		BeforeEach(func() {
 			Expect(store.EnsureDirs()).To(Succeed())
-			Expect(store.WriteSerial("0001")).To(Succeed())
 		})
 
-		It("IncrementSerial returns the current value and advances the file", func() {
-			val, err := store.IncrementSerial()
+		It("WriteSerial persists the value to the serial file", func() {
+			Expect(store.WriteSerial("DEADBEEF")).To(Succeed())
+			data, err := os.ReadFile(filepath.Join(tmpDir, "serial"))
 			Expect(err).NotTo(HaveOccurred())
-			Expect(val).To(Equal("0001"))
-
-			val2, err := store.IncrementSerial()
-			Expect(err).NotTo(HaveOccurred())
-			Expect(val2).To(Equal("0002"))
-		})
-
-		It("returns an error when the serial file is missing", func() {
-			Expect(os.Remove(filepath.Join(tmpDir, "serial"))).To(Succeed())
-			_, err := store.IncrementSerial()
-			Expect(err).To(HaveOccurred())
-		})
-
-		It("returns an error when the serial file contains invalid data", func() {
-			Expect(os.WriteFile(filepath.Join(tmpDir, "serial"), []byte("ZZZZ"), 0644)).To(Succeed())
-			_, err := store.IncrementSerial()
-			Expect(err).To(HaveOccurred())
+			Expect(string(data)).To(Equal("DEADBEEF"))
 		})
 	})
 

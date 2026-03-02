@@ -622,3 +622,152 @@ var _ = Describe("CA sign rejects CA:TRUE extension", func() {
 		Expect(err.Error()).To(ContainSubstring("2.5.29.19"))
 	})
 })
+
+// --- Issue #8: cert improvements ---
+
+// newIssuedCert is a helper that initialises a CA backed by dir, signs a
+// certificate for subject, and returns the parsed certificate.
+func newIssuedCert(dir, subject string) (*x509.Certificate, *ca.CA) {
+	store := storage.New(dir)
+	myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+	Expect(store.EnsureDirs()).To(Succeed())
+	Expect(os.WriteFile(store.CAKeyPath(), cachedKeyPEM, 0640)).To(Succeed())
+	Expect(os.WriteFile(store.CACertPath(), cachedCrtPEM, 0644)).To(Succeed())
+	Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
+	Expect(store.WriteSerial("0001")).To(Succeed())
+	Expect(os.WriteFile(store.InventoryPath(), []byte{}, 0644)).To(Succeed())
+	Expect(myCA.Init()).To(Succeed())
+
+	csrPEM, err := testutil.GenerateCSR(subject)
+	Expect(err).NotTo(HaveOccurred())
+	_, err = myCA.SaveRequest(subject, csrPEM)
+	Expect(err).NotTo(HaveOccurred())
+	certPEM, err := myCA.Sign(subject)
+	Expect(err).NotTo(HaveOccurred())
+
+	block, _ := pem.Decode(certPEM)
+	Expect(block).NotTo(BeNil())
+	cert, err := x509.ParseCertificate(block.Bytes)
+	Expect(err).NotTo(HaveOccurred())
+	return cert, myCA
+}
+
+var _ = Describe("Issued certificate properties (issue #8)", func() {
+	var tmpDir string
+
+	BeforeEach(func() {
+		var err error
+		tmpDir, err = os.MkdirTemp("", "puppet-ca-issue8-test")
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	AfterEach(func() { os.RemoveAll(tmpDir) })
+
+	// --- Netscape Comment removed ---
+
+	It("does not embed the Netscape Comment extension in issued certificates", func() {
+		oidNetscapeComment := asn1.ObjectIdentifier{2, 16, 840, 1, 113730, 1, 13}
+		cert, _ := newIssuedCert(tmpDir, "ns-comment-node")
+
+		for _, ext := range cert.Extensions {
+			Expect(ext.Id.Equal(oidNetscapeComment)).To(BeFalse(),
+				"signed cert must not carry the deprecated Netscape Comment extension (OID 2.16.840.1.113730.1.13)")
+		}
+	})
+
+	// --- Randomised serial numbers ---
+
+	It("issues certificates with random (non-sequential) serial numbers", func() {
+		// Sign two certs and verify the serials are different.
+		cert1, _ := newIssuedCert(tmpDir, "serial-node-1")
+
+		tmpDir2, err := os.MkdirTemp("", "puppet-ca-issue8-serial-test2")
+		Expect(err).NotTo(HaveOccurred())
+		defer os.RemoveAll(tmpDir2)
+		cert2, _ := newIssuedCert(tmpDir2, "serial-node-2")
+
+		Expect(cert1.SerialNumber.Cmp(cert2.SerialNumber)).NotTo(Equal(0),
+			"two independently issued certs must not share the same serial number")
+	})
+
+	It("issues certificates with 128-bit random serial numbers", func() {
+		cert, _ := newIssuedCert(tmpDir, "large-serial-node")
+
+		// Serial must be positive and fit within 128 bits.
+		Expect(cert.SerialNumber.Sign()).To(Equal(1),
+			"serial number must be positive")
+		Expect(cert.SerialNumber.BitLen()).To(BeNumerically("<=", 128),
+			"serial number must fit within 128 bits")
+	})
+
+	// --- CRL Distribution Points ---
+
+	It("embeds CRL Distribution Points when CRLURLs is configured", func() {
+		crlURL := "http://puppet-ca:8140/puppet-ca/v1/certificate_revocation_list/ca"
+
+		store := storage.New(tmpDir)
+		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CRLURLs = []string{crlURL}
+		Expect(store.EnsureDirs()).To(Succeed())
+		Expect(os.WriteFile(store.CAKeyPath(), cachedKeyPEM, 0640)).To(Succeed())
+		Expect(os.WriteFile(store.CACertPath(), cachedCrtPEM, 0644)).To(Succeed())
+		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial("0001")).To(Succeed())
+		Expect(os.WriteFile(store.InventoryPath(), []byte{}, 0644)).To(Succeed())
+		Expect(myCA.Init()).To(Succeed())
+
+		csrPEM, err := testutil.GenerateCSR("cdp-node")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = myCA.SaveRequest("cdp-node", csrPEM)
+		Expect(err).NotTo(HaveOccurred())
+		certPEM, err := myCA.Sign("cdp-node")
+		Expect(err).NotTo(HaveOccurred())
+
+		block, _ := pem.Decode(certPEM)
+		Expect(block).NotTo(BeNil())
+		cert, err := x509.ParseCertificate(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(cert.CRLDistributionPoints).To(ContainElement(crlURL))
+	})
+
+	It("does not embed CRL Distribution Points when CRLURLs is not configured", func() {
+		cert, _ := newIssuedCert(tmpDir, "no-cdp-node")
+		Expect(cert.CRLDistributionPoints).To(BeEmpty())
+	})
+
+	// --- Configurable CRL validity ---
+
+	It("honours CRLValidityDays when generating a CRL on revocation", func() {
+		store := storage.New(tmpDir)
+		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CRLValidityDays = 90
+		Expect(store.EnsureDirs()).To(Succeed())
+		Expect(os.WriteFile(store.CAKeyPath(), cachedKeyPEM, 0640)).To(Succeed())
+		Expect(os.WriteFile(store.CACertPath(), cachedCrtPEM, 0644)).To(Succeed())
+		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial("0001")).To(Succeed())
+		Expect(os.WriteFile(store.InventoryPath(), []byte{}, 0644)).To(Succeed())
+		Expect(myCA.Init()).To(Succeed())
+
+		csrPEM, err := testutil.GenerateCSR("crl-validity-node")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = myCA.SaveRequest("crl-validity-node", csrPEM)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = myCA.Sign("crl-validity-node")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(myCA.Revoke("crl-validity-node")).To(Succeed())
+
+		crlPEM, err := store.GetCRL()
+		Expect(err).NotTo(HaveOccurred())
+		block, _ := pem.Decode(crlPEM)
+		Expect(block).NotTo(BeNil())
+		crl, err := x509.ParseRevocationList(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+
+		window := crl.NextUpdate.Sub(crl.ThisUpdate)
+		expected := 90 * 24 * time.Hour
+		Expect(window).To(BeNumerically("~", expected, time.Minute),
+			"CRL NextUpdate should be ~90 days after ThisUpdate")
+	})
+})

@@ -9,3 +9,4 @@
 - [x] Subject regex not applied in SaveRequest
 - [x] CSR not deleted after signing
 - [x] GET /certificate_status always returned "signed", never "revoked"
+- [x] Allow configuring more certificate options (#8) — randomised 128-bit serial numbers (removes sequential `serial` file); deprecated Netscape Comment extension removed from issued certs; CRL Distribution Points embedded when `--crl-url` is set; CRL validity configurable via `crl_validity_days`; Puppet-arc OID extensions (pp_cli_auth, pp_preshared_key, etc.) are carried over from submitted CSRs

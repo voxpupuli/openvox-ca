@@ -23,6 +23,9 @@ A drop-in replacement for Puppet Server's built-in CA, written in Go. It impleme
 - **CA import** — replace a bootstrapped CA with an external cert/key pair offline
 - **Server-side key generation** — issue cert+key pairs without a node-submitted CSR; configurable RSA (2048/3072/4096) or ECDSA (P-256/P-384/P-521)
 - **Configurable key algorithms** — CA and leaf certificates can use RSA or ECDSA; ECDSA support for both bootstrapped CAs and generated leaf certs
+- **Random serial numbers** — every issued leaf certificate gets a cryptographically random 128-bit serial (CA/Browser Forum guidance)
+- **CRL Distribution Points** — optionally embed a CRL URL in every issued certificate (`--crl-url`) so verifiers can automatically fetch the CRL
+- **Configurable CRL validity** — control how long each published CRL is valid (`crl_validity_days`)
 - **FIPS-compatible** — standard library only (`crypto/x509`, `net/http`); no CGO by default
 - **`puppet-ca-ctl`** — operator CLI matching `tvaughan-server-ca` subcommands
 
@@ -66,6 +69,8 @@ mage build:fips   # → bin/puppet-ca-fips  (GOEXPERIMENT=boringcrypto)
 | `--puppet-server-file` | `""` | Path to a file of CNs granted admin API access (one per line; `#` comments and blank lines ignored) |
 | `--no-pp-cli-auth` | `false` | Disable `pp_cli_auth` extension as an admin credential; require CN allow list only |
 | `--no-tls-required` | `false` | Allow plain HTTP on non-loopback addresses; use only behind a trusted TLS proxy or in test environments |
+| `--ocsp-url` | `""` | OCSP responder URL to embed in issued certificates |
+| `--crl-url` | `""` | CRL distribution point URL to embed in issued certificates |
 | `--daemon` | `false` | Fork to background (not recommended in containers) |
 | `--logfile` | `""` | Write JSON logs to this file instead of stderr |
 | `--verbosity` / `-v` | `0` | Verbosity: `0`=Info, `1`=Debug, `2`=Trace |
@@ -99,6 +104,7 @@ autosign_config: ""
 logfile: ""
 verbosity: 0
 ocsp_url: ""
+crl_url: ""
 # Key generation options (applied only when bootstrapping a new CA or generating leaf certs).
 ca_key_algo: ""       # "rsa" (default) or "ecdsa"
 ca_key_size: 0        # RSA: 2048/3072/4096 (default 4096); ECDSA: 256/384/521 (default 256)
@@ -110,10 +116,13 @@ ca_subject_ou: ""
 ca_subject_country: ""
 ca_subject_locality: ""
 ca_subject_province: ""
-# Validity and path length (ca_* apply only when bootstrapping; leaf_validity_days applies on every signing operation).
+# Validity and path length.
+# ca_* apply only when bootstrapping a new CA.
+# leaf_validity_days and crl_validity_days apply on every signing / revocation operation.
 ca_path_length: -1    # -1 = unconstrained, 0 = leaf certs only, N = N levels of intermediates
 ca_validity_days: 0   # 0 = built-in default (~5 years); positive integer overrides
 leaf_validity_days: 0 # 0 = built-in default (~5 years); positive integer overrides
+crl_validity_days: 0  # 0 = built-in default (30 days); positive integer overrides
 ```
 
 **Environment variables (mirrors CLI flags):**
@@ -134,6 +143,7 @@ leaf_validity_days: 0 # 0 = built-in default (~5 years); positive integer overri
 | `--no-pp-cli-auth` | `PUPPET_CA_NO_PP_CLI_AUTH` |
 | `--no-tls-required` | `PUPPET_CA_NO_TLS_REQUIRED` |
 | `--ocsp-url` | `PUPPET_CA_OCSP_URL` |
+| `--crl-url` | `PUPPET_CA_CRL_URL` |
 
 **Environment variables (config file / env var only — no CLI flag):**
 
@@ -151,6 +161,7 @@ leaf_validity_days: 0 # 0 = built-in default (~5 years); positive integer overri
 | `ca_path_length` | `PUPPET_CA_CA_PATH_LENGTH` |
 | `ca_validity_days` | `PUPPET_CA_CA_VALIDITY_DAYS` |
 | `leaf_validity_days` | `PUPPET_CA_LEAF_VALIDITY_DAYS` |
+| `crl_validity_days` | `PUPPET_CA_CRL_VALIDITY_DAYS` |
 
 > **Note:** `--daemon` is intentionally excluded from config file and environment
 > variable support because `PUPPET_CA_DAEMON` is used internally as the daemon fork
@@ -218,14 +229,17 @@ csr_pem=$(cat)
   ca_crt.pem          CA certificate
   ca_pub.pem          CA public key
   ca_crl.pem          Certificate Revocation List
-  serial              Next serial number (hex)
-  inventory.txt       Signed certificate log
+  inventory.txt       Signed certificate log (hex serial, dates, subject per line)
   signed/             Issued certificates
   requests/           Pending CSRs
   private/
     ca_key.pem        CA private key  (mode 0640)
     {subject}_key.pem Server-side generated private keys (mode 0640)
 ```
+
+> **Note:** Serial numbers are now cryptographically random (128-bit). The `serial`
+> file used by older Puppet CAs for sequential serial tracking is no longer
+> written or read by this server.
 
 ## API reference
 

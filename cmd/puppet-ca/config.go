@@ -45,6 +45,7 @@ type serverConfig struct {
 	NoPpCliAuth      bool   `yaml:"no_pp_cli_auth"`
 	NoTLSRequired    bool   `yaml:"no_tls_required"`
 	OCSPUrl          string `yaml:"ocsp_url"`
+	CRLUrl           string `yaml:"crl_url"`
 
 	// Key generation options (apply only when bootstrapping a new CA).
 	CAKeyAlgo   string `yaml:"ca_key_algo"`
@@ -60,10 +61,12 @@ type serverConfig struct {
 	CASubjectProvince string `yaml:"ca_subject_province"`
 
 	// Validity and path length options (apply only when bootstrapping a new CA,
-	// except LeafValidityDays which applies on every signing operation).
+	// except LeafValidityDays and CRLValidityDays which apply on every
+	// signing/revocation operation).
 	CAPathLength     int `yaml:"ca_path_length"`     // -1=unconstrained (default), 0=leaf-only, N=N levels
 	CAValidityDays   int `yaml:"ca_validity_days"`   // 0 = built-in default (~5 years)
 	LeafValidityDays int `yaml:"leaf_validity_days"` // 0 = built-in default (~5 years)
+	CRLValidityDays  int `yaml:"crl_validity_days"`  // 0 = built-in default (30 days)
 }
 
 // loadServerConfig applies built-in defaults, optionally loads a YAML config
@@ -142,6 +145,9 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("PUPPET_CA_OCSP_URL"); v != "" {
 		cfg.OCSPUrl = v
 	}
+	if v := os.Getenv("PUPPET_CA_CRL_URL"); v != "" {
+		cfg.CRLUrl = v
+	}
 	if v := os.Getenv("PUPPET_CA_CA_KEY_ALGO"); v != "" {
 		cfg.CAKeyAlgo = v
 	}
@@ -186,6 +192,11 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("PUPPET_CA_LEAF_VALIDITY_DAYS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.LeafValidityDays = n
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_CRL_VALIDITY_DAYS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.CRLValidityDays = n
 		}
 	}
 }

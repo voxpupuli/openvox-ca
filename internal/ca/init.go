@@ -258,7 +258,7 @@ func (c *CA) bootstrapCA() error {
 	crlTemplate := &x509.RevocationList{
 		Number:     big.NewInt(1),
 		ThisUpdate: now,
-		NextUpdate: now.Add(CRLValidity),
+		NextUpdate: now.Add(c.crlValidity()),
 	}
 	crlBytes, err := x509.CreateRevocationList(rand.Reader, crlTemplate, c.CACert, c.CAKey)
 	if err != nil {
@@ -267,11 +267,6 @@ func (c *CA) bootstrapCA() error {
 	crlPEM := pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlBytes})
 	if err := c.Storage.UpdateCRL(crlPEM); err != nil {
 		return fmt.Errorf("failed to write initial CRL: %w", err)
-	}
-
-	// Initialise serial file.
-	if err := c.Storage.WriteSerial("0001"); err != nil {
-		return fmt.Errorf("failed to write serial: %w", err)
 	}
 
 	// Touch inventory.

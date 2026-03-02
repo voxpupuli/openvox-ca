@@ -76,8 +76,17 @@ type CA struct {
 
 	// OCSPURLs, when non-nil, causes newly issued certs to embed an AIA
 	// extension pointing at the OCSP responder. Set before calling Init().
-	OCSPURLs    []string
-	serialIndex map[string]string         // padded uppercase hex serial → subject; protected by mu
+	OCSPURLs []string
+
+	// CRLURLs, when non-nil, causes newly issued certs to embed a CRL
+	// Distribution Points extension (RFC 5280 §4.2.1.13) so that verifiers
+	// can automatically retrieve the CRL. Set before calling Init().
+	CRLURLs []string
+
+	// CRLValidityDays overrides the default CRL validity window. Zero uses the
+	// built-in default (30 days).
+	CRLValidityDays int
+	serialIndex map[string]string         // uppercase hex serial (no leading zeros) → subject; protected by mu
 	ocspCache   map[string]ocspCacheEntry // same key; protected by mu
 	mu          sync.RWMutex
 }

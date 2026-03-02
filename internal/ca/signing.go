@@ -35,9 +35,25 @@ import (
 const (
 	// certValidity is the lifetime issued to CA and leaf certificates.
 	certValidity = 5 * 365 * 24 * time.Hour
-	// CRLValidity is the validity window written into every CRL.
+	// CRLValidity is the default validity window written into every CRL.
 	CRLValidity = 30 * 24 * time.Hour
 )
+
+// crlValidity returns the CA's configured CRL validity period.
+// When CRLValidityDays is zero the package-level CRLValidity default is used.
+func (c *CA) crlValidity() time.Duration {
+	if c.CRLValidityDays > 0 {
+		return time.Duration(c.CRLValidityDays) * 24 * time.Hour
+	}
+	return CRLValidity
+}
+
+// serialHexStr formats a serial number as uppercase hexadecimal without
+// leading zeros. This is the canonical key used in the serial index and
+// OCSP cache, and the form written to the inventory file.
+func serialHexStr(n *big.Int) string {
+	return fmt.Sprintf("%X", n)
+}
 
 // ErrCertExists is returned by SaveRequest when a valid (non-revoked) certificate
 // already exists for the requested subject.
@@ -140,12 +156,13 @@ func (c *CA) signWithDuration(subject string, ttl time.Duration) ([]byte, error)
 		}
 	}
 
-	serialStr, err := c.Storage.IncrementSerial()
+	// Generate a random 128-bit serial number (CA/Browser Forum guidance).
+	serialLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serialInt, err := rand.Int(rand.Reader, serialLimit)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get serial: %w", err)
+		return nil, fmt.Errorf("failed to generate serial for %s: %w", subject, err)
 	}
-	serialInt := new(big.Int)
-	fmt.Sscanf(serialStr, "%x", serialInt)
+	serialStr := serialHexStr(serialInt)
 
 	now := time.Now().UTC()
 
@@ -192,12 +209,11 @@ func (c *CA) signWithDuration(subject string, ttl time.Duration) ([]byte, error)
 		DNSNames: csr.DNSNames,
 	}
 
-	// Netscape Comment extension (OID 2.16.840.1.113730.1.13).
-	nsComment, _ := asn1.Marshal("Puppet Server Internal Certificate")
-	template.ExtraExtensions = append(template.ExtraExtensions, pkix.Extension{
-		Id:    OIDNetscapeComment,
-		Value: nsComment,
-	})
+	// CRL Distribution Points — embed CRL URL(s) when configured so that
+	// verifiers can automatically fetch the CRL (RFC 5280 §4.2.1.13).
+	if len(c.CRLURLs) > 0 {
+		template.CRLDistributionPoints = c.CRLURLs
+	}
 
 	// Authority Information Access — embed OCSP URL when configured.
 	if len(c.OCSPURLs) > 0 {

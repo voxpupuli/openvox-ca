@@ -46,7 +46,9 @@ func (c *CA) Revoke(subject string) error {
 	}
 
 	serialInt := new(big.Int)
-	fmt.Sscanf(serialStr, "%x", serialInt)
+	if _, ok := serialInt.SetString(serialStr, 16); !ok {
+		return fmt.Errorf("malformed serial %q for subject %s in inventory", serialStr, subject)
+	}
 
 	// 2. Load CRL
 	crlPEM, err := c.Storage.GetCRL()
@@ -79,7 +81,7 @@ func (c *CA) Revoke(subject string) error {
 		Number:                    nextNum,
 		RevokedCertificateEntries: revokedCerts,
 		ThisUpdate:                time.Now(),
-		NextUpdate:                time.Now().Add(CRLValidity),
+		NextUpdate:                time.Now().Add(c.crlValidity()),
 	}
 
 	crlBytes, err := x509.CreateRevocationList(rand.Reader, template, c.CACert, c.CAKey)
@@ -94,7 +96,8 @@ func (c *CA) Revoke(subject string) error {
 
 	// Invalidate the cached OCSP response for this serial so the next query
 	// returns the correct Revoked status instead of a stale Good response.
-	delete(c.ocspCache, serialStr)
+	// Use the same normalised key as the OCSP index (uppercase hex, no padding).
+	delete(c.ocspCache, serialHexStr(serialInt))
 
 	slog.Debug("Certificate revoked", "subject", subject, "serial", serialStr)
 	return nil

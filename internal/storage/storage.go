@@ -17,7 +17,6 @@
 package storage
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,45 +56,6 @@ func (s *StorageService) EnsureDirs() error {
 		}
 	}
 	return nil
-}
-
-// IncrementSerial reads the serial file, returns the current value, and increments it in the file.
-func (s *StorageService) IncrementSerial() (string, error) {
-	s.serialMu.Lock()
-	defer s.serialMu.Unlock()
-
-	path := filepath.Join(s.baseDir, "serial")
-
-	// Read current
-	content, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// Initialize if missing (Plan says Init handles this, but good to be safe)
-			return "", fmt.Errorf("serial file not found: %w", err)
-		}
-		return "", err
-	}
-
-	// Parse
-	val := new(int64)
-	n, err := fmt.Sscanf(string(content), "%x", val)
-	if err != nil || n != 1 {
-		return "", fmt.Errorf("invalid serial file at %s", path)
-	}
-
-	// Prepare return value (padded)
-	ret := fmt.Sprintf("%04X", *val)
-
-	// Increment
-	nextVal := *val + 1
-	nextHex := fmt.Sprintf("%04X", nextVal)
-
-	// Write back
-	if err := os.WriteFile(path, []byte(nextHex), FilePermPublic); err != nil {
-		return "", err
-	}
-
-	return ret, nil
 }
 
 func (s *StorageService) WriteSerial(val string) error {

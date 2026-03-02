@@ -25,6 +25,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"time"
 
@@ -79,6 +80,10 @@ func extractNonce(reqDER []byte) (pkix.Extension, bool) {
 }
 
 // buildSerialIndex populates c.serialIndex from the on-disk inventory file.
+// Serials are normalised to uppercase hex without leading zeros (via
+// serialHexStr) so that lookups are consistent regardless of whether the
+// inventory was written by this version (random serials) or an older version
+// (zero-padded sequential serials).
 // It must be called while c.mu is already held by the caller.
 func (c *CA) buildSerialIndex() error {
 	data, err := c.Storage.ReadInventory()
@@ -90,7 +95,13 @@ func (c *CA) buildSerialIndex() error {
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	for scanner.Scan() {
 		if serial, subject, ok := parseInventoryLine(scanner.Text()); ok {
-			c.serialIndex[serial] = subject
+			n := new(big.Int)
+			if _, ok := n.SetString(serial, 16); !ok {
+				slog.Warn("buildSerialIndex: skipping malformed serial in inventory",
+					"serial", serial, "subject", subject)
+				continue
+			}
+			c.serialIndex[serialHexStr(n)] = subject
 		}
 	}
 	return scanner.Err()
@@ -110,8 +121,9 @@ func (c *CA) OCSPResponse(reqDER []byte) ([]byte, error) {
 		return nil, fmt.Errorf("parsing OCSP request: %w", err)
 	}
 
-	// Compute the cache key in the same format used by signWithDuration/revoke.
-	serialHex := fmt.Sprintf("%04X", req.SerialNumber)
+	// Compute the cache key in the same format used by signWithDuration/revoke:
+	// uppercase hex without leading zeros.
+	serialHex := serialHexStr(req.SerialNumber)
 
 	// Fast path: check cache with a read lock (only when no nonce).
 	if !hasNonce {

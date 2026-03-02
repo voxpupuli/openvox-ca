@@ -134,6 +134,7 @@ if $DO_UP; then
         --cadir=/data \
         --autosign-config=false \
         --no-tls-required \
+        --crl-url="http://localhost:8140/puppet-ca/v1/certificate_revocation_list/ca" \
         -v=1
 
     printf '# Waiting for CA to become ready'
@@ -265,6 +266,28 @@ openssl verify -CAfile "$WORK_DIR/ca.pem" "$WORK_DIR/node.crt" >/dev/null 2>&1 \
 openssl x509 -noout -subject -in "$WORK_DIR/node.crt" 2>/dev/null | grep -qF "$_HOST" \
     && pass "Signed cert CN matches submitted subject" \
     || fail "Signed cert CN matches submitted subject"
+
+# Signed cert must NOT carry the deprecated Netscape Comment extension (OID 2.16.840.1.113730.1.13).
+_cert_text=$(openssl x509 -text -noout -in "$WORK_DIR/node.crt" 2>/dev/null) || true
+grep -qF "2.16.840.1.113730.1.13" <<< "$_cert_text" \
+    && fail "Signed cert must not contain Netscape Comment OID (2.16.840.1.113730.1.13)" \
+    || pass "Signed cert does not contain deprecated Netscape Comment extension"
+
+# Serial number must be random (large). Any realistic sequential CA would
+# never reach 2^32; a 128-bit random serial is almost certainly far larger.
+_serial_dec=$(openssl x509 -noout -serial -in "$WORK_DIR/node.crt" 2>/dev/null \
+    | sed 's/serial=//' | tr '[:lower:]' '[:upper:]') || true
+# Convert hex serial to decimal using openssl or printf for comparison.
+_serial_len="${#_serial_dec}"
+[ "$_serial_len" -ge 16 ] \
+    && pass "Signed cert serial number appears random (≥16 hex digits)" \
+    || fail "Signed cert serial number appears sequential or too small" \
+           "serial hex: $_serial_dec (${_serial_len} digits)"
+
+# CRL Distribution Point URL must be present (we started with --crl-url).
+grep -qF "certificate_revocation_list" <<< "$_cert_text" \
+    && pass "Signed cert contains CRL Distribution Point extension" \
+    || fail "Signed cert missing CRL Distribution Point extension"
 
 # CSR should be gone after signing (deleted by sign()).
 assert_http 404 "CSR deleted after signing (GET returns 404)" \

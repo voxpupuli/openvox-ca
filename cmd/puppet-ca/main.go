@@ -63,6 +63,7 @@ func main() {
 		noPpCliAuth      bool
 		noTLSRequired    bool
 		ocspURL          string
+		crlURL           string
 		configFile       string
 	)
 
@@ -120,6 +121,9 @@ func main() {
 			}
 			if cmd.Flags().Changed("ocsp-url") {
 				cfg.OCSPUrl = ocspURL
+			}
+			if cmd.Flags().Changed("crl-url") {
+				cfg.CRLUrl = crlURL
 			}
 			// --- Validation ---
 			if cfg.CADir == "" {
@@ -248,6 +252,10 @@ func main() {
 			if cfg.OCSPUrl != "" {
 				myCA.OCSPURLs = []string{cfg.OCSPUrl}
 			}
+			if cfg.CRLUrl != "" {
+				myCA.CRLURLs = []string{cfg.CRLUrl}
+			}
+			myCA.CRLValidityDays = cfg.CRLValidityDays
 
 			// Apply key and subject config (validated before use in bootstrapCA/Generate).
 			if cfg.CAKeyAlgo != "" || cfg.CAKeySize != 0 {
@@ -383,6 +391,7 @@ func main() {
 	f.BoolVar(&noPpCliAuth, "no-pp-cli-auth", false, "Disable pp_cli_auth extension as an admin credential; require CN allow list only")
 	f.BoolVar(&noTLSRequired, "no-tls-required", false, "Allow plain HTTP on non-loopback addresses (use only behind a trusted TLS proxy or in test environments)")
 	f.StringVar(&ocspURL, "ocsp-url", "", "OCSP responder URL to embed in issued certificates (e.g. http://puppet-ca:8140/ocsp)")
+	f.StringVar(&crlURL, "crl-url", "", "CRL distribution point URL to embed in issued certificates (e.g. http://puppet-ca:8140/puppet-ca/v1/certificate_revocation_list/ca)")
 
 	if err := cmd.Execute(); err != nil {
 		os.Exit(1)
