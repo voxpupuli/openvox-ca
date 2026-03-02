@@ -152,6 +152,8 @@ func (c *CA) signWithDuration(subject string, ttl time.Duration) ([]byte, error)
 	validity := certValidity
 	if ttl > 0 {
 		validity = ttl
+	} else if c.LeafValidityDays > 0 {
+		validity = time.Duration(c.LeafValidityDays) * 24 * time.Hour
 	}
 
 	// Cap validity to the CA certificate's remaining lifetime.

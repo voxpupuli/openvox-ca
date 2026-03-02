@@ -248,6 +248,37 @@ func main() {
 			if cfg.OCSPUrl != "" {
 				myCA.OCSPURLs = []string{cfg.OCSPUrl}
 			}
+
+			// Apply key and subject config (validated before use in bootstrapCA/Generate).
+			if cfg.CAKeyAlgo != "" || cfg.CAKeySize != 0 {
+				myCA.CAKeyConfig = ca.KeyConfig{
+					Algo: ca.KeyAlgo(cfg.CAKeyAlgo),
+					Size: cfg.CAKeySize,
+				}
+				if err := ca.ValidateKeyConfig(myCA.CAKeyConfig); err != nil {
+					return fmt.Errorf("invalid ca_key_algo / ca_key_size: %w", err)
+				}
+			}
+			if cfg.LeafKeyAlgo != "" || cfg.LeafKeySize != 0 {
+				myCA.LeafKeyConfig = ca.KeyConfig{
+					Algo: ca.KeyAlgo(cfg.LeafKeyAlgo),
+					Size: cfg.LeafKeySize,
+				}
+				if err := ca.ValidateKeyConfig(myCA.LeafKeyConfig); err != nil {
+					return fmt.Errorf("invalid leaf_key_algo / leaf_key_size: %w", err)
+				}
+			}
+			myCA.CASubject = ca.CASubjectConfig{
+				Org:      cfg.CASubjectOrg,
+				OrgUnit:  cfg.CASubjectOU,
+				Country:  cfg.CASubjectCountry,
+				Locality: cfg.CASubjectLocality,
+				Province: cfg.CASubjectProvince,
+			}
+			myCA.CAPathLength = cfg.CAPathLength
+			myCA.CAValidityDays = cfg.CAValidityDays
+			myCA.LeafValidityDays = cfg.LeafValidityDays
+
 			if err := myCA.Init(); err != nil {
 				slog.Error("Failed to initialise CA", "error", err)
 				os.Exit(1)

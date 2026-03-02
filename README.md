@@ -21,7 +21,8 @@ A drop-in replacement for Puppet Server's built-in CA, written in Go. It impleme
 - **Autosigning** — `true`, glob-pattern file, or executable plugin modes
 - **mTLS support** — optional HTTPS with per-endpoint tier-based client certificate authorization
 - **CA import** — replace a bootstrapped CA with an external cert/key pair offline
-- **Server-side key generation** — issue cert+key pairs without a node-submitted CSR
+- **Server-side key generation** — issue cert+key pairs without a node-submitted CSR; configurable RSA (2048/3072/4096) or ECDSA (P-256/P-384/P-521)
+- **Configurable key algorithms** — CA and leaf certificates can use RSA or ECDSA; ECDSA support for both bootstrapped CAs and generated leaf certs
 - **FIPS-compatible** — standard library only (`crypto/x509`, `net/http`); no CGO by default
 - **`puppet-ca-ctl`** — operator CLI matching `tvaughan-server-ca` subcommands
 
@@ -74,6 +75,8 @@ mage build:fips   # → bin/puppet-ca-fips  (GOEXPERIMENT=boringcrypto)
 All flags can be set via a YAML config file or environment variables. Precedence
 (highest → lowest): **CLI flag** → **environment variable** → **config file** → **built-in default**.
 
+Key generation and CA subject options are intentionally **not** exposed as CLI flags — they are one-time bootstrap decisions that belong in a config file or environment variable. Use the config file or `PUPPET_CA_CA_KEY_ALGO` / `PUPPET_CA_CA_SUBJECT_*` env vars to set them.
+
 The config file is located by checking, in order:
 1. `--config /path/to/config.yaml` (explicit flag)
 2. `PUPPET_CA_CONFIG` environment variable
@@ -96,9 +99,24 @@ autosign_config: ""
 logfile: ""
 verbosity: 0
 ocsp_url: ""
+# Key generation options (applied only when bootstrapping a new CA or generating leaf certs).
+ca_key_algo: ""       # "rsa" (default) or "ecdsa"
+ca_key_size: 0        # RSA: 2048/3072/4096 (default 4096); ECDSA: 256/384/521 (default 256)
+leaf_key_algo: ""     # "rsa" (default) or "ecdsa"
+leaf_key_size: 0      # RSA: 2048/3072/4096 (default 2048); ECDSA: 256/384/521 (default 256)
+# CA certificate subject fields (applied only when bootstrapping a new CA).
+ca_subject_org: ""
+ca_subject_ou: ""
+ca_subject_country: ""
+ca_subject_locality: ""
+ca_subject_province: ""
+# Validity and path length (ca_* apply only when bootstrapping; leaf_validity_days applies on every signing operation).
+ca_path_length: -1    # -1 = unconstrained, 0 = leaf certs only, N = N levels of intermediates
+ca_validity_days: 0   # 0 = built-in default (~5 years); positive integer overrides
+leaf_validity_days: 0 # 0 = built-in default (~5 years); positive integer overrides
 ```
 
-**Environment variables:**
+**Environment variables (mirrors CLI flags):**
 
 | Flag | Environment variable |
 |------|---------------------|
@@ -116,6 +134,23 @@ ocsp_url: ""
 | `--no-pp-cli-auth` | `PUPPET_CA_NO_PP_CLI_AUTH` |
 | `--no-tls-required` | `PUPPET_CA_NO_TLS_REQUIRED` |
 | `--ocsp-url` | `PUPPET_CA_OCSP_URL` |
+
+**Environment variables (config file / env var only — no CLI flag):**
+
+| Config key | Environment variable |
+|------------|---------------------|
+| `ca_key_algo` | `PUPPET_CA_CA_KEY_ALGO` |
+| `ca_key_size` | `PUPPET_CA_CA_KEY_SIZE` |
+| `leaf_key_algo` | `PUPPET_CA_LEAF_KEY_ALGO` |
+| `leaf_key_size` | `PUPPET_CA_LEAF_KEY_SIZE` |
+| `ca_subject_org` | `PUPPET_CA_CA_SUBJECT_ORG` |
+| `ca_subject_ou` | `PUPPET_CA_CA_SUBJECT_OU` |
+| `ca_subject_country` | `PUPPET_CA_CA_SUBJECT_COUNTRY` |
+| `ca_subject_locality` | `PUPPET_CA_CA_SUBJECT_LOCALITY` |
+| `ca_subject_province` | `PUPPET_CA_CA_SUBJECT_PROVINCE` |
+| `ca_path_length` | `PUPPET_CA_CA_PATH_LENGTH` |
+| `ca_validity_days` | `PUPPET_CA_CA_VALIDITY_DAYS` |
+| `leaf_validity_days` | `PUPPET_CA_LEAF_VALIDITY_DAYS` |
 
 > **Note:** `--daemon` is intentionally excluded from config file and environment
 > variable support because `PUPPET_CA_DAEMON` is used internally as the daemon fork
@@ -270,7 +305,7 @@ All endpoints are served under both the bare path and `/puppet-ca/v1/<path>`, so
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/generate/{subject}` | Generate RSA key + cert server-side; optional `?dns=alt.name` |
+| `POST` | `/generate/{subject}` | Generate key + cert server-side; optional `?dns=alt.name`. Key algorithm follows `--leaf-key-algo` / `--leaf-key-size` (default: RSA 2048) |
 
 Response:
 

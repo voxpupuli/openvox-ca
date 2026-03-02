@@ -18,6 +18,8 @@ package testutil
 
 import (
 	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1"
@@ -85,6 +87,65 @@ func GenerateTestCA() ([]byte, []byte, []byte, error) {
 
 	// Encode
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certBytes})
+	crlPEM := pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlBytes})
+
+	return keyPEM, certPEM, crlPEM, nil
+}
+
+// GenerateTestCAECDSA generates a P-256 ECDSA CA for testing purposes.
+// Returns PEM-encoded Key (EC PRIVATE KEY), Cert, and empty CRL.
+func GenerateTestCAECDSA() ([]byte, []byte, []byte, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serialNumber, _ := rand.Int(rand.Reader, serialNumberLimit)
+
+	pubDER, _ := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	subjectKeyID := sha1.Sum(pubDER)
+
+	template := &x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			CommonName:   "Puppet CA: Test ECDSA",
+			Organization: []string{"Puppet Test"},
+		},
+		NotBefore:             time.Now().Add(-1 * time.Hour),
+		NotAfter:              time.Now().Add(1 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		SubjectKeyId:          subjectKeyID[:],
+	}
+
+	certBytes, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	cert, err := x509.ParseCertificate(certBytes)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	crlTemplate := &x509.RevocationList{
+		Number:     big.NewInt(1),
+		ThisUpdate: time.Now(),
+		NextUpdate: time.Now().Add(24 * time.Hour),
+	}
+	crlBytes, err := x509.CreateRevocationList(rand.Reader, crlTemplate, cert, key)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certBytes})
 	crlPEM := pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlBytes})
 

@@ -17,8 +17,9 @@
 package ca
 
 import (
+	"bytes"
+	"crypto"
 	"crypto/rand"
-	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
@@ -32,6 +33,9 @@ import (
 // ImportCA imports an external CA cert/key into a storage directory.
 // It validates the cert/key pair, writes the files, and initialises
 // the serial and inventory files when they are absent.
+//
+// Supported key formats: RSA PKCS1 ("RSA PRIVATE KEY"), EC SEC1
+// ("EC PRIVATE KEY"), and PKCS8 ("PRIVATE KEY") for both RSA and ECDSA.
 //
 // crlPEM may be nil; when nil a fresh empty CRL is generated and written.
 //
@@ -55,27 +59,56 @@ func ImportCA(store *storage.StorageService, certBundlePEM, keyPEM, crlPEM []byt
 	if keyBlock == nil {
 		return fmt.Errorf("private-key does not contain a valid PEM block")
 	}
-	// Accept both PKCS1 ("BEGIN RSA PRIVATE KEY", Go/Puppet-generated) and
-	// PKCS8 ("BEGIN PRIVATE KEY", openssl-3.x default) formats.
-	var caKey *rsa.PrivateKey
-	if k1, err1 := x509.ParsePKCS1PrivateKey(keyBlock.Bytes); err1 == nil {
-		caKey = k1
-	} else if k8, err8 := x509.ParsePKCS8PrivateKey(keyBlock.Bytes); err8 == nil {
-		var ok bool
-		caKey, ok = k8.(*rsa.PrivateKey)
-		if !ok {
-			return fmt.Errorf("CA private key is not an RSA key")
+
+	var caKey crypto.Signer
+	switch keyBlock.Type {
+	case "RSA PRIVATE KEY":
+		k, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
+		if err != nil {
+			return fmt.Errorf("failed to parse RSA PKCS1 private key: %w", err)
 		}
-	} else {
-		return fmt.Errorf("failed to parse CA private key (PKCS1: %v; PKCS8: %v)", err1, err8)
+		caKey = k
+	case "EC PRIVATE KEY":
+		k, err := x509.ParseECPrivateKey(keyBlock.Bytes)
+		if err != nil {
+			return fmt.Errorf("failed to parse EC private key: %w", err)
+		}
+		caKey = k
+	case "PRIVATE KEY":
+		k, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
+		if err != nil {
+			return fmt.Errorf("failed to parse PKCS8 private key: %w", err)
+		}
+		signer, ok := k.(crypto.Signer)
+		if !ok {
+			return fmt.Errorf("PKCS8 private key does not implement crypto.Signer")
+		}
+		caKey = signer
+	default:
+		// Try PKCS1, then PKCS8, regardless of header for compatibility.
+		if k1, err1 := x509.ParsePKCS1PrivateKey(keyBlock.Bytes); err1 == nil {
+			caKey = k1
+		} else if k8, err8 := x509.ParsePKCS8PrivateKey(keyBlock.Bytes); err8 == nil {
+			signer, ok := k8.(crypto.Signer)
+			if !ok {
+				return fmt.Errorf("PKCS8 private key does not implement crypto.Signer")
+			}
+			caKey = signer
+		} else {
+			return fmt.Errorf("failed to parse CA private key (PKCS1: %v; PKCS8: %v)", err1, err8)
+		}
 	}
 
-	// --- Verify key matches cert ---
-	certPubKey, ok := caCert.PublicKey.(*rsa.PublicKey)
-	if !ok {
-		return fmt.Errorf("CA certificate does not contain an RSA public key")
+	// --- Verify key matches cert (algorithm-agnostic) ---
+	certPubDER, err := x509.MarshalPKIXPublicKey(caCert.PublicKey)
+	if err != nil {
+		return fmt.Errorf("failed to marshal cert public key: %w", err)
 	}
-	if caKey.PublicKey.N.Cmp(certPubKey.N) != 0 || caKey.PublicKey.E != certPubKey.E {
+	keyPubDER, err := x509.MarshalPKIXPublicKey(caKey.Public())
+	if err != nil {
+		return fmt.Errorf("failed to marshal private key's public component: %w", err)
+	}
+	if !bytes.Equal(certPubDER, keyPubDER) {
 		return fmt.Errorf("private key does not match the certificate's public key")
 	}
 
@@ -95,7 +128,7 @@ func ImportCA(store *storage.StorageService, certBundlePEM, keyPEM, crlPEM []byt
 	}
 
 	// --- Write CA public key ---
-	pubKeyBytes, err := x509.MarshalPKIXPublicKey(&caKey.PublicKey)
+	pubKeyBytes, err := x509.MarshalPKIXPublicKey(caKey.Public())
 	if err == nil {
 		pubKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubKeyBytes})
 		_ = os.WriteFile(store.CAPubKeyPath(), pubKeyPEM, storage.FilePermPublic)

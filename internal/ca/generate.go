@@ -18,7 +18,6 @@ package ca
 
 import (
 	"crypto/rand"
-	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -33,9 +32,12 @@ type GenerateResult struct {
 	CertificatePEM []byte
 }
 
-// Generate creates a fresh RSA key pair for subject, signs a certificate for it
+// Generate creates a fresh key pair for subject, signs a certificate for it
 // without requiring a client-submitted CSR, saves the private key to
 // private/{subject}_key.pem, and returns both PEMs.
+//
+// The key algorithm and size are controlled by CA.LeafKeyConfig; defaults
+// to RSA 2048 when not set.
 //
 // Returns ErrCertExists (wrapped) if a valid (non-revoked) certificate already
 // exists for subject.
@@ -48,8 +50,13 @@ func (c *CA) Generate(subject string, dnsAltNames []string) (*GenerateResult, er
 		return nil, err
 	}
 
-	// Generate a 2048-bit RSA key (leaf cert; CA uses 4096).
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	// Resolve leaf key config; fall back to default if not set.
+	leafCfg := c.LeafKeyConfig
+	if leafCfg.Algo == "" {
+		leafCfg = DefaultLeafKeyConfig
+	}
+
+	key, err := generateKey(leafCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate key for %s: %w", subject, err)
 	}
@@ -79,16 +86,16 @@ func (c *CA) Generate(subject string, dnsAltNames []string) (*GenerateResult, er
 		return nil, fmt.Errorf("failed to sign generated cert for %s: %w", subject, err)
 	}
 
-	// Save the private key to private/{subject}_key.pem (mode 0640).
-	keyPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "RSA PRIVATE KEY",
-		Bytes: x509.MarshalPKCS1PrivateKey(key),
-	})
+	// Encode and save the private key.
+	keyPEM, err := marshalPrivateKeyPEM(key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal private key for %s: %w", subject, err)
+	}
 	if err := c.Storage.SavePrivateKey(subject, keyPEM); err != nil {
 		return nil, fmt.Errorf("failed to save private key for %s: %w", subject, err)
 	}
 
-	slog.Debug("Certificate generated", "subject", subject)
+	slog.Debug("Certificate generated", "subject", subject, "algo", string(leafCfg.Algo))
 	return &GenerateResult{
 		PrivateKeyPEM:  keyPEM,
 		CertificatePEM: certPEM,

@@ -38,6 +38,18 @@ var serverEnvVars = []string{
 	"PUPPET_CA_NO_PP_CLI_AUTH",
 	"PUPPET_CA_NO_TLS_REQUIRED",
 	"PUPPET_CA_OCSP_URL",
+	"PUPPET_CA_CA_KEY_ALGO",
+	"PUPPET_CA_CA_KEY_SIZE",
+	"PUPPET_CA_LEAF_KEY_ALGO",
+	"PUPPET_CA_LEAF_KEY_SIZE",
+	"PUPPET_CA_CA_SUBJECT_ORG",
+	"PUPPET_CA_CA_SUBJECT_OU",
+	"PUPPET_CA_CA_SUBJECT_COUNTRY",
+	"PUPPET_CA_CA_SUBJECT_LOCALITY",
+	"PUPPET_CA_CA_SUBJECT_PROVINCE",
+	"PUPPET_CA_CA_PATH_LENGTH",
+	"PUPPET_CA_CA_VALIDITY_DAYS",
+	"PUPPET_CA_LEAF_VALIDITY_DAYS",
 }
 
 // clearServerEnv unsets all PUPPET_CA_* vars and restores them after the test.
@@ -132,6 +144,9 @@ func TestLoadServerConfigDefaults(t *testing.T) {
 	if cfg.Verbosity != 0 {
 		t.Errorf("Verbosity = %d; want 0", cfg.Verbosity)
 	}
+	if cfg.CAPathLength != -1 {
+		t.Errorf("CAPathLength = %d; want -1 (unconstrained)", cfg.CAPathLength)
+	}
 }
 
 // --- loadServerConfig: YAML file ---
@@ -154,6 +169,18 @@ autosign_config: "true"
 logfile: /var/log/puppet-ca.log
 verbosity: 1
 ocsp_url: http://ocsp.example.com/ocsp
+ca_key_algo: ecdsa
+ca_key_size: 384
+leaf_key_algo: rsa
+leaf_key_size: 3072
+ca_subject_org: Example Org
+ca_subject_ou: IT
+ca_subject_country: US
+ca_subject_locality: Springfield
+ca_subject_province: IL
+ca_path_length: 1
+ca_validity_days: 3650
+leaf_validity_days: 1825
 `
 	cfgFile := writeTempConfig(t, content)
 
@@ -180,6 +207,18 @@ ocsp_url: http://ocsp.example.com/ocsp
 		{"LogFile", cfg.LogFile, "/var/log/puppet-ca.log"},
 		{"Verbosity", cfg.Verbosity, 1},
 		{"OCSPUrl", cfg.OCSPUrl, "http://ocsp.example.com/ocsp"},
+		{"CAKeyAlgo", cfg.CAKeyAlgo, "ecdsa"},
+		{"CAKeySize", cfg.CAKeySize, 384},
+		{"LeafKeyAlgo", cfg.LeafKeyAlgo, "rsa"},
+		{"LeafKeySize", cfg.LeafKeySize, 3072},
+		{"CASubjectOrg", cfg.CASubjectOrg, "Example Org"},
+		{"CASubjectOU", cfg.CASubjectOU, "IT"},
+		{"CASubjectCountry", cfg.CASubjectCountry, "US"},
+		{"CASubjectLocality", cfg.CASubjectLocality, "Springfield"},
+		{"CASubjectProvince", cfg.CASubjectProvince, "IL"},
+		{"CAPathLength", cfg.CAPathLength, 1},
+		{"CAValidityDays", cfg.CAValidityDays, 3650},
+		{"LeafValidityDays", cfg.LeafValidityDays, 1825},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
@@ -331,6 +370,76 @@ func TestApplyServerEnvEachVar(t *testing.T) {
 			check: func(c *serverConfig) bool { return c.OCSPUrl == "http://ocsp.example.com" },
 			desc:  "OCSPUrl",
 		},
+		{
+			name: "CA_KEY_ALGO", envKey: "PUPPET_CA_CA_KEY_ALGO", envVal: "ecdsa",
+			check: func(c *serverConfig) bool { return c.CAKeyAlgo == "ecdsa" },
+			desc:  "CAKeyAlgo",
+		},
+		{
+			name: "CA_KEY_SIZE", envKey: "PUPPET_CA_CA_KEY_SIZE", envVal: "384",
+			check: func(c *serverConfig) bool { return c.CAKeySize == 384 },
+			desc:  "CAKeySize",
+		},
+		{
+			name: "LEAF_KEY_ALGO", envKey: "PUPPET_CA_LEAF_KEY_ALGO", envVal: "rsa",
+			check: func(c *serverConfig) bool { return c.LeafKeyAlgo == "rsa" },
+			desc:  "LeafKeyAlgo",
+		},
+		{
+			name: "LEAF_KEY_SIZE", envKey: "PUPPET_CA_LEAF_KEY_SIZE", envVal: "3072",
+			check: func(c *serverConfig) bool { return c.LeafKeySize == 3072 },
+			desc:  "LeafKeySize",
+		},
+		{
+			name: "CA_SUBJECT_ORG", envKey: "PUPPET_CA_CA_SUBJECT_ORG", envVal: "Example Org",
+			check: func(c *serverConfig) bool { return c.CASubjectOrg == "Example Org" },
+			desc:  "CASubjectOrg",
+		},
+		{
+			name: "CA_SUBJECT_OU", envKey: "PUPPET_CA_CA_SUBJECT_OU", envVal: "IT",
+			check: func(c *serverConfig) bool { return c.CASubjectOU == "IT" },
+			desc:  "CASubjectOU",
+		},
+		{
+			name: "CA_SUBJECT_COUNTRY", envKey: "PUPPET_CA_CA_SUBJECT_COUNTRY", envVal: "US",
+			check: func(c *serverConfig) bool { return c.CASubjectCountry == "US" },
+			desc:  "CASubjectCountry",
+		},
+		{
+			name: "CA_SUBJECT_LOCALITY", envKey: "PUPPET_CA_CA_SUBJECT_LOCALITY", envVal: "Springfield",
+			check: func(c *serverConfig) bool { return c.CASubjectLocality == "Springfield" },
+			desc:  "CASubjectLocality",
+		},
+		{
+			name: "CA_SUBJECT_PROVINCE", envKey: "PUPPET_CA_CA_SUBJECT_PROVINCE", envVal: "IL",
+			check: func(c *serverConfig) bool { return c.CASubjectProvince == "IL" },
+			desc:  "CASubjectProvince",
+		},
+		{
+			name: "CA_PATH_LENGTH_0", envKey: "PUPPET_CA_CA_PATH_LENGTH", envVal: "0",
+			check: func(c *serverConfig) bool { return c.CAPathLength == 0 },
+			desc:  "CAPathLength=0",
+		},
+		{
+			name: "CA_PATH_LENGTH_1", envKey: "PUPPET_CA_CA_PATH_LENGTH", envVal: "1",
+			check: func(c *serverConfig) bool { return c.CAPathLength == 1 },
+			desc:  "CAPathLength=1",
+		},
+		{
+			name: "CA_PATH_LENGTH_neg1", envKey: "PUPPET_CA_CA_PATH_LENGTH", envVal: "-1",
+			check: func(c *serverConfig) bool { return c.CAPathLength == -1 },
+			desc:  "CAPathLength=-1 (unconstrained)",
+		},
+		{
+			name: "CA_VALIDITY_DAYS", envKey: "PUPPET_CA_CA_VALIDITY_DAYS", envVal: "3650",
+			check: func(c *serverConfig) bool { return c.CAValidityDays == 3650 },
+			desc:  "CAValidityDays",
+		},
+		{
+			name: "LEAF_VALIDITY_DAYS", envKey: "PUPPET_CA_LEAF_VALIDITY_DAYS", envVal: "1825",
+			check: func(c *serverConfig) bool { return c.LeafValidityDays == 1825 },
+			desc:  "LeafValidityDays",
+		},
 	}
 
 	for _, tc := range tests {
@@ -352,8 +461,11 @@ func TestApplyServerEnvInvalidValues(t *testing.T) {
 	t.Setenv("PUPPET_CA_PORT", "not-a-number")
 	t.Setenv("PUPPET_CA_VERBOSITY", "bad")
 	t.Setenv("PUPPET_CA_NO_TLS_REQUIRED", "maybe")
+	t.Setenv("PUPPET_CA_CA_VALIDITY_DAYS", "not-a-number")
+	t.Setenv("PUPPET_CA_LEAF_VALIDITY_DAYS", "bad")
+	t.Setenv("PUPPET_CA_CA_PATH_LENGTH", "not-a-number")
 
-	cfg := &serverConfig{Port: 8140, Verbosity: 0}
+	cfg := &serverConfig{Port: 8140, Verbosity: 0, CAPathLength: -1}
 	applyServerEnv(cfg)
 
 	if cfg.Port != 8140 {
@@ -364,6 +476,34 @@ func TestApplyServerEnvInvalidValues(t *testing.T) {
 	}
 	if cfg.NoTLSRequired {
 		t.Error("NoTLSRequired changed on bad input: want false")
+	}
+	if cfg.CAValidityDays != 0 {
+		t.Errorf("CAValidityDays changed on bad input: got %d, want 0", cfg.CAValidityDays)
+	}
+	if cfg.LeafValidityDays != 0 {
+		t.Errorf("LeafValidityDays changed on bad input: got %d, want 0", cfg.LeafValidityDays)
+	}
+	if cfg.CAPathLength != -1 {
+		t.Errorf("CAPathLength changed on bad input: got %d, want -1", cfg.CAPathLength)
+	}
+}
+
+// TestApplyServerEnvCAValidityDaysZeroIgnored verifies that a zero or negative
+// value for PUPPET_CA_CA_VALIDITY_DAYS and PUPPET_CA_LEAF_VALIDITY_DAYS is
+// silently ignored (only positive values are applied).
+func TestApplyServerEnvValidityDaysZeroIgnored(t *testing.T) {
+	clearServerEnv(t)
+	t.Setenv("PUPPET_CA_CA_VALIDITY_DAYS", "0")
+	t.Setenv("PUPPET_CA_LEAF_VALIDITY_DAYS", "-5")
+
+	cfg := &serverConfig{}
+	applyServerEnv(cfg)
+
+	if cfg.CAValidityDays != 0 {
+		t.Errorf("CAValidityDays should stay 0 when env is 0, got %d", cfg.CAValidityDays)
+	}
+	if cfg.LeafValidityDays != 0 {
+		t.Errorf("LeafValidityDays should stay 0 when env is negative, got %d", cfg.LeafValidityDays)
 	}
 }
 

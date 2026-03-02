@@ -17,21 +17,65 @@
 package ca
 
 import (
-	"crypto/rsa"
+	"crypto"
 	"crypto/x509"
 	"sync"
 
 	"github.com/tvaughan/puppet-ca/internal/storage"
 )
 
+// CASubjectConfig holds optional X.509 subject fields for a bootstrapped CA
+// certificate. Zero fields use defaults; CommonName in the signed cert is
+// always derived from Hostname as "Puppet CA: <hostname>" unless overridden
+// by the Org/OrgUnit/Country/Locality/Province fields below.
+type CASubjectConfig struct {
+	Org      string
+	OrgUnit  string
+	Country  string
+	Locality string
+	Province string
+}
+
 type CA struct {
 	Storage        *storage.StorageService
 	CACert         *x509.Certificate
-	CAKey          *rsa.PrivateKey
+	CAKey          crypto.Signer
 	AutosignConfig AutosignConfig
 	Hostname       string
-	// OCSPURLs, when non-nil, causes newly issued certs to embed an AIA extension
-	// pointing at the OCSP responder. Set before calling Init().
+
+	// CAKeyConfig controls the algorithm and key size used when bootstrapping a
+	// new CA certificate. Zero value uses DefaultCAKeyConfig (RSA 4096).
+	// Ignored when a CA already exists on disk.
+	CAKeyConfig KeyConfig
+
+	// LeafKeyConfig controls the algorithm and key size for server-side
+	// generated leaf certificates (Generate). Zero value uses
+	// DefaultLeafKeyConfig (RSA 2048).
+	LeafKeyConfig KeyConfig
+
+	// CASubject holds optional subject DN fields for a bootstrapped CA
+	// certificate. Ignored when a CA already exists on disk.
+	CASubject CASubjectConfig
+
+	// CAPathLength sets the BasicConstraints pathLenConstraint on a bootstrapped
+	// CA certificate. -1 (the default) means no constraint (unconstrained). 0
+	// means no intermediate CAs are allowed. N > 0 means up to N levels of
+	// intermediate CAs. Ignored when a CA already exists on disk.
+	CAPathLength int
+
+	// CAValidityDays overrides the default CA certificate lifetime when
+	// bootstrapping a new CA. Zero uses the built-in default (~5 years).
+	// Ignored when a CA already exists on disk.
+	CAValidityDays int
+
+	// LeafValidityDays overrides the default leaf certificate lifetime used
+	// when signing CSRs and generating server-side key pairs. Zero uses the
+	// built-in default (~5 years). A per-request cert_ttl always takes
+	// precedence over this value.
+	LeafValidityDays int
+
+	// OCSPURLs, when non-nil, causes newly issued certs to embed an AIA
+	// extension pointing at the OCSP responder. Set before calling Init().
 	OCSPURLs    []string
 	serialIndex map[string]string         // padded uppercase hex serial → subject; protected by mu
 	ocspCache   map[string]ocspCacheEntry // same key; protected by mu
@@ -43,6 +87,7 @@ func New(s *storage.StorageService, autosignCfg AutosignConfig, hostname string)
 		Storage:        s,
 		AutosignConfig: autosignCfg,
 		Hostname:       hostname,
+		CAPathLength:   -1, // unconstrained by default
 		serialIndex:    make(map[string]string),
 		ocspCache:      make(map[string]ocspCacheEntry),
 	}

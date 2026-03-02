@@ -45,6 +45,25 @@ type serverConfig struct {
 	NoPpCliAuth      bool   `yaml:"no_pp_cli_auth"`
 	NoTLSRequired    bool   `yaml:"no_tls_required"`
 	OCSPUrl          string `yaml:"ocsp_url"`
+
+	// Key generation options (apply only when bootstrapping a new CA).
+	CAKeyAlgo   string `yaml:"ca_key_algo"`
+	CAKeySize   int    `yaml:"ca_key_size"`
+	LeafKeyAlgo string `yaml:"leaf_key_algo"`
+	LeafKeySize int    `yaml:"leaf_key_size"`
+
+	// CA certificate subject fields (apply only when bootstrapping a new CA).
+	CASubjectOrg      string `yaml:"ca_subject_org"`
+	CASubjectOU       string `yaml:"ca_subject_ou"`
+	CASubjectCountry  string `yaml:"ca_subject_country"`
+	CASubjectLocality string `yaml:"ca_subject_locality"`
+	CASubjectProvince string `yaml:"ca_subject_province"`
+
+	// Validity and path length options (apply only when bootstrapping a new CA,
+	// except LeafValidityDays which applies on every signing operation).
+	CAPathLength     int `yaml:"ca_path_length"`     // -1=unconstrained (default), 0=leaf-only, N=N levels
+	CAValidityDays   int `yaml:"ca_validity_days"`   // 0 = built-in default (~5 years)
+	LeafValidityDays int `yaml:"leaf_validity_days"` // 0 = built-in default (~5 years)
 }
 
 // loadServerConfig applies built-in defaults, optionally loads a YAML config
@@ -52,8 +71,9 @@ type serverConfig struct {
 // loading.
 func loadServerConfig(configFile string) (*serverConfig, error) {
 	cfg := &serverConfig{
-		Host: "0.0.0.0",
-		Port: 8140,
+		Host:         "0.0.0.0",
+		Port:         8140,
+		CAPathLength: -1, // unconstrained; 0 = leaf-only, N = N levels of intermediates
 	}
 
 	if configFile != "" {
@@ -121,6 +141,52 @@ func applyServerEnv(cfg *serverConfig) {
 	}
 	if v := os.Getenv("PUPPET_CA_OCSP_URL"); v != "" {
 		cfg.OCSPUrl = v
+	}
+	if v := os.Getenv("PUPPET_CA_CA_KEY_ALGO"); v != "" {
+		cfg.CAKeyAlgo = v
+	}
+	if v := os.Getenv("PUPPET_CA_CA_KEY_SIZE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.CAKeySize = n
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_LEAF_KEY_ALGO"); v != "" {
+		cfg.LeafKeyAlgo = v
+	}
+	if v := os.Getenv("PUPPET_CA_LEAF_KEY_SIZE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.LeafKeySize = n
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_CA_SUBJECT_ORG"); v != "" {
+		cfg.CASubjectOrg = v
+	}
+	if v := os.Getenv("PUPPET_CA_CA_SUBJECT_OU"); v != "" {
+		cfg.CASubjectOU = v
+	}
+	if v := os.Getenv("PUPPET_CA_CA_SUBJECT_COUNTRY"); v != "" {
+		cfg.CASubjectCountry = v
+	}
+	if v := os.Getenv("PUPPET_CA_CA_SUBJECT_LOCALITY"); v != "" {
+		cfg.CASubjectLocality = v
+	}
+	if v := os.Getenv("PUPPET_CA_CA_SUBJECT_PROVINCE"); v != "" {
+		cfg.CASubjectProvince = v
+	}
+	if v := os.Getenv("PUPPET_CA_CA_PATH_LENGTH"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.CAPathLength = n
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_CA_VALIDITY_DAYS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.CAValidityDays = n
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_LEAF_VALIDITY_DAYS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.LeafValidityDays = n
+		}
 	}
 }
 
