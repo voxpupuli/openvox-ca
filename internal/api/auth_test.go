@@ -576,7 +576,6 @@ var _ = Describe("Auth Middleware", func() {
 	})
 
 	// ── pp_cli_auth extension ──────────────────────────────────────────────────
-	// pp_cli_auth is always checked when TLS auth is configured; no flag needed.
 
 	Context("pp_cli_auth extension grants admin access (no CN in allow list)", func() {
 		var muxNoCNList http.Handler
@@ -615,6 +614,48 @@ var _ = Describe("Auth Middleware", func() {
 			rr := httptest.NewRecorder()
 			muxNoCNList.ServeHTTP(rr, req)
 			Expect(rr.Code).To(Equal(http.StatusForbidden))
+		})
+	})
+
+	// ── NoPpCliAuth=true disables the extension check ─────────────────────────
+
+	Context("NoPpCliAuth=true disables pp_cli_auth as an admin credential", func() {
+		var muxNoPpCli http.Handler
+
+		BeforeEach(func() {
+			srv := api.New(myCA)
+			srv.AuthConfig = &api.AuthConfig{
+				CACert:      caCert,
+				AllowList:   map[string]bool{},
+				NoPpCliAuth: true,
+			}
+			muxNoPpCli = srv.Routes()
+		})
+
+		It("denies POST /sign/all even with a valid pp_cli_auth cert", func() {
+			clientCert := issueClientCertWithPpCliAuth("openvox-server", caCert, caKey)
+			req := httptest.NewRequest("POST", "/sign/all", nil)
+			req = withClientCert(req, clientCert)
+			rr := httptest.NewRecorder()
+			muxNoPpCli.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusForbidden))
+		})
+
+		It("still allows POST /sign/all for a CN in the allow list", func() {
+			srv := api.New(myCA)
+			srv.AuthConfig = &api.AuthConfig{
+				CACert:      caCert,
+				AllowList:   map[string]bool{"puppet-server": true},
+				NoPpCliAuth: true,
+			}
+			muxWithCN := srv.Routes()
+
+			clientCert := issueClientCert("puppet-server", caCert, caKey)
+			req := httptest.NewRequest("POST", "/sign/all", nil)
+			req = withClientCert(req, clientCert)
+			rr := httptest.NewRecorder()
+			muxWithCN.ServeHTTP(rr, req)
+			Expect(rr.Code).NotTo(Equal(http.StatusForbidden))
 		})
 	})
 })

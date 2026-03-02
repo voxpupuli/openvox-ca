@@ -16,8 +16,8 @@ FROM quay.io/centos/centos:stream10
 # openssl: CSR generation and cert verification in integration tests
 RUN dnf install -y curl openssl && dnf clean all && \
     useradd -m puppet && \
-    mkdir -p /etc/puppetlabs/puppet/ssl/ca /data && \
-    chown -R puppet:puppet /etc/puppetlabs/puppet /data
+    mkdir -p /etc/puppetlabs/puppet/ssl/ca /etc/puppet-ca /data && \
+    chown -R puppet:puppet /etc/puppetlabs/puppet /etc/puppet-ca /data
 
 COPY bin/puppet-ca     /usr/local/bin/puppet-ca
 COPY bin/puppet-ca-ctl /usr/local/bin/puppet-ca-ctl

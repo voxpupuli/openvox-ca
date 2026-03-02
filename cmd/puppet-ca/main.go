@@ -48,20 +48,22 @@ func isLoopback(host string) bool {
 
 func main() {
 	var (
-		caDir         string
-		autosignVal   string
-		host          string
-		port          int
-		hostname      string
-		daemon        bool
-		verbosity     int
-		logFile       string
-		tlsCert       string
-		tlsKey        string
-		puppetServers string
-		noTLSRequired bool
-		ocspURL       string
-		configFile    string
+		caDir            string
+		autosignVal      string
+		host             string
+		port             int
+		hostname         string
+		daemon           bool
+		verbosity        int
+		logFile          string
+		tlsCert          string
+		tlsKey           string
+		puppetServers    string
+		puppetServerFile string
+		noPpCliAuth      bool
+		noTLSRequired    bool
+		ocspURL          string
+		configFile       string
 	)
 
 	cmd := &cobra.Command{
@@ -106,6 +108,12 @@ func main() {
 			}
 			if cmd.Flags().Changed("puppet-server") {
 				cfg.PuppetServer = puppetServers
+			}
+			if cmd.Flags().Changed("puppet-server-file") {
+				cfg.PuppetServerFile = puppetServerFile
+			}
+			if cmd.Flags().Changed("no-pp-cli-auth") {
+				cfg.NoPpCliAuth = noPpCliAuth
 			}
 			if cmd.Flags().Changed("no-tls-required") {
 				cfg.NoTLSRequired = noTLSRequired
@@ -199,6 +207,10 @@ func main() {
 						"Only use --no-tls-required behind a trusted TLS proxy or in test environments.")
 				}
 			}
+			if !tlsConfigured && (cfg.PuppetServer != "" || cfg.PuppetServerFile != "") {
+				slog.Warn("--puppet-server / --puppet-server-file have no effect without TLS; " +
+					"all endpoints are accessible without authentication in plain HTTP mode.")
+			}
 
 			// --- Storage & Directories ---
 			store := storage.New(absCADir)
@@ -247,17 +259,23 @@ func main() {
 			// Wire mTLS auth middleware when TLS is configured.
 			if cfg.TLSCert != "" && cfg.TLSKey != "" {
 				allowList := map[string]bool{}
-				if cfg.PuppetServer != "" {
-					for _, cn := range strings.Split(cfg.PuppetServer, ",") {
-						cn = strings.TrimSpace(cn)
-						if cn != "" {
-							allowList[cn] = true
-						}
+				for _, cn := range strings.Split(cfg.PuppetServer, ",") {
+					cn = strings.TrimSpace(cn)
+					if cn != "" {
+						allowList[cn] = true
 					}
 				}
+				fileCNs, err := loadPuppetServerFile(cfg.PuppetServerFile)
+				if err != nil {
+					return err
+				}
+				for _, cn := range fileCNs {
+					allowList[cn] = true
+				}
 				srv.AuthConfig = &api.AuthConfig{
-					CACert:    myCA.CACert,
-					AllowList: allowList,
+					CACert:      myCA.CACert,
+					AllowList:   allowList,
+					NoPpCliAuth: cfg.NoPpCliAuth,
 				}
 			}
 
@@ -330,6 +348,8 @@ func main() {
 	f.StringVar(&tlsCert, "tls-cert", "", "Path to TLS server certificate PEM (enables HTTPS)")
 	f.StringVar(&tlsKey, "tls-key", "", "Path to TLS server private key PEM (enables HTTPS)")
 	f.StringVar(&puppetServers, "puppet-server", "", "Comma-separated list of puppet-server CNs allowed admin access")
+	f.StringVar(&puppetServerFile, "puppet-server-file", "", "Path to a file of puppet-server CNs allowed admin access (one per line; # comments and blank lines ignored)")
+	f.BoolVar(&noPpCliAuth, "no-pp-cli-auth", false, "Disable pp_cli_auth extension as an admin credential; require CN allow list only")
 	f.BoolVar(&noTLSRequired, "no-tls-required", false, "Allow plain HTTP on non-loopback addresses (use only behind a trusted TLS proxy or in test environments)")
 	f.StringVar(&ocspURL, "ocsp-url", "", "OCSP responder URL to embed in issued certificates (e.g. http://puppet-ca:8140/ocsp)")
 

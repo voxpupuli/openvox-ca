@@ -375,10 +375,14 @@ func (Dev) Check() error {
 	return sh.Run("go", "vet", "./...")
 }
 
-// Tidy runs go mod tidy.
+// Tidy runs go mod tidy and go fmt on any files that need it.
 func (Dev) Tidy() error {
 	fmt.Println("Tidying modules...")
-	return sh.Run("go", "mod", "tidy")
+	if err := sh.Run("go", "mod", "tidy"); err != nil {
+		return err
+	}
+	fmt.Println("Formatting code...")
+	return sh.Run("go", "fmt", "./...")
 }
 
 // Clean removes the bin/ directory.

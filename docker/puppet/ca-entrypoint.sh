@@ -15,6 +15,17 @@ CA_DIR=/data
 TLS_CERT="${CA_DIR}/signed/puppet-ca.pem"
 TLS_KEY="${CA_DIR}/private/puppet-ca_key.pem"
 
+# Write the puppet-server admin allow file.  Using --puppet-server-file
+# (rather than --puppet-server) exercises the file-based CN allow list in the
+# integration stack so it is tested end-to-end alongside the inline flag.
+SERVERS_FILE=/etc/puppet-ca/servers.txt
+mkdir -p "$(dirname "$SERVERS_FILE")"
+cat > "$SERVERS_FILE" <<'EOF'
+# Puppet server CNs allowed CA admin access.
+# One CN per line; # comments and blank lines are ignored.
+puppet-master
+EOF
+
 # Phase 2 passthrough: if the TLS cert was already generated (e.g. container
 # restart), skip directly to the real CA startup.
 if [ -s "${TLS_CERT}" ] && [ -s "${TLS_KEY}" ]; then
@@ -25,7 +36,7 @@ if [ -s "${TLS_CERT}" ] && [ -s "${TLS_KEY}" ]; then
         --autosign-config=true \
         --tls-cert="${TLS_CERT}" \
         --tls-key="${TLS_KEY}" \
-        --puppet-server=puppet-master \
+        --puppet-server-file="${SERVERS_FILE}" \
         "$@"
 fi
 
@@ -87,5 +98,5 @@ exec /usr/local/bin/puppet-ca \
     --autosign-config=true \
     --tls-cert="${TLS_CERT}" \
     --tls-key="${TLS_KEY}" \
-    --puppet-server=puppet-master \
+    --puppet-server-file="${SERVERS_FILE}" \
     "$@"

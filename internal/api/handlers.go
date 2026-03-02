@@ -38,8 +38,9 @@ import (
 // AuthConfig is the mTLS authorization configuration wired into the server.
 // Nil means no mTLS enforcement (plain HTTP / dev mode).
 type AuthConfig struct {
-	CACert    *x509.Certificate
-	AllowList map[string]bool // admin CNs (puppet-server hostnames)
+	CACert      *x509.Certificate
+	AllowList   map[string]bool // admin CNs (puppet-server hostnames)
+	NoPpCliAuth bool            // when true, pp_cli_auth extension does not grant admin access
 }
 
 type Server struct {

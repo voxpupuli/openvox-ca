@@ -34,6 +34,8 @@ var serverEnvVars = []string{
 	"PUPPET_CA_TLS_CERT",
 	"PUPPET_CA_TLS_KEY",
 	"PUPPET_CA_PUPPET_SERVER",
+	"PUPPET_CA_PUPPET_SERVER_FILE",
+	"PUPPET_CA_NO_PP_CLI_AUTH",
 	"PUPPET_CA_NO_TLS_REQUIRED",
 	"PUPPET_CA_OCSP_URL",
 }
@@ -146,6 +148,8 @@ no_tls_required: true
 tls_cert: /etc/ssl/cert.pem
 tls_key: /etc/ssl/key.pem
 puppet_server: puppet-master
+puppet_server_file: /etc/puppet-ca/servers.txt
+no_pp_cli_auth: true
 autosign_config: "true"
 logfile: /var/log/puppet-ca.log
 verbosity: 1
@@ -170,6 +174,8 @@ ocsp_url: http://ocsp.example.com/ocsp
 		{"TLSCert", cfg.TLSCert, "/etc/ssl/cert.pem"},
 		{"TLSKey", cfg.TLSKey, "/etc/ssl/key.pem"},
 		{"PuppetServer", cfg.PuppetServer, "puppet-master"},
+		{"PuppetServerFile", cfg.PuppetServerFile, "/etc/puppet-ca/servers.txt"},
+		{"NoPpCliAuth", cfg.NoPpCliAuth, true},
 		{"AutosignConfig", cfg.AutosignConfig, "true"},
 		{"LogFile", cfg.LogFile, "/var/log/puppet-ca.log"},
 		{"Verbosity", cfg.Verbosity, 1},
@@ -301,6 +307,16 @@ func TestApplyServerEnvEachVar(t *testing.T) {
 			desc:  "PuppetServer",
 		},
 		{
+			name: "PUPPET_SERVER_FILE", envKey: "PUPPET_CA_PUPPET_SERVER_FILE", envVal: "/etc/puppet-ca/servers.txt",
+			check: func(c *serverConfig) bool { return c.PuppetServerFile == "/etc/puppet-ca/servers.txt" },
+			desc:  "PuppetServerFile",
+		},
+		{
+			name: "NO_PP_CLI_AUTH_true", envKey: "PUPPET_CA_NO_PP_CLI_AUTH", envVal: "true",
+			check: func(c *serverConfig) bool { return c.NoPpCliAuth },
+			desc:  "NoPpCliAuth=true",
+		},
+		{
 			name: "NO_TLS_REQUIRED_true", envKey: "PUPPET_CA_NO_TLS_REQUIRED", envVal: "true",
 			check: func(c *serverConfig) bool { return c.NoTLSRequired },
 			desc:  "NoTLSRequired=true",
@@ -348,6 +364,113 @@ func TestApplyServerEnvInvalidValues(t *testing.T) {
 	}
 	if cfg.NoTLSRequired {
 		t.Error("NoTLSRequired changed on bad input: want false")
+	}
+}
+
+// --- loadPuppetServerFile ---
+
+func TestLoadPuppetServerFileEmpty(t *testing.T) {
+	cns, err := loadPuppetServerFile("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cns != nil {
+		t.Errorf("expected nil slice for empty path, got %v", cns)
+	}
+}
+
+func TestLoadPuppetServerFileMissing(t *testing.T) {
+	_, err := loadPuppetServerFile("/nonexistent/path/servers.txt")
+	if err == nil {
+		t.Error("expected error for missing file, got nil")
+	}
+}
+
+func TestLoadPuppetServerFileParsing(t *testing.T) {
+	content := `
+# primary puppet server
+puppet.example.com
+
+# compile masters
+compile-01.example.com
+compile-02.example.com
+
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "servers.txt")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cns, err := loadPuppetServerFile(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := []string{"puppet.example.com", "compile-01.example.com", "compile-02.example.com"}
+	if len(cns) != len(want) {
+		t.Fatalf("got %d CNs, want %d: %v", len(cns), len(want), cns)
+	}
+	for i, cn := range cns {
+		if cn != want[i] {
+			t.Errorf("cns[%d] = %q; want %q", i, cn, want[i])
+		}
+	}
+}
+
+func TestLoadPuppetServerFileCommentsAndBlanks(t *testing.T) {
+	content := "# comment\n\n  \n# another comment\npuppet.example.com\n"
+	dir := t.TempDir()
+	path := filepath.Join(dir, "servers.txt")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cns, err := loadPuppetServerFile(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cns) != 1 || cns[0] != "puppet.example.com" {
+		t.Errorf("got %v; want [puppet.example.com]", cns)
+	}
+}
+
+func TestLoadPuppetServerFileInlineComments(t *testing.T) {
+	content := "puppet.example.com # primary\ncompile-01.example.com # compile master\n"
+	dir := t.TempDir()
+	path := filepath.Join(dir, "servers.txt")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cns, err := loadPuppetServerFile(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"puppet.example.com", "compile-01.example.com"}
+	if len(cns) != len(want) {
+		t.Fatalf("got %v; want %v", cns, want)
+	}
+	for i, cn := range cns {
+		if cn != want[i] {
+			t.Errorf("cns[%d] = %q; want %q", i, cn, want[i])
+		}
+	}
+}
+
+func TestLoadPuppetServerFileEmpty_file(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "empty.txt")
+	if err := os.WriteFile(path, []byte("# just a comment\n\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cns, err := loadPuppetServerFile(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cns) != 0 {
+		t.Errorf("expected empty slice for comment-only file, got %v", cns)
 	}
 }
 

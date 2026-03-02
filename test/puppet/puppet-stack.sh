@@ -88,7 +88,7 @@ pdb_query() {
 }
 
 # ── Helper: CA admin operation via master's mTLS cert ────────────────────
-# The CA's --puppet-server=puppet-master flag allows the master cert as admin.
+# The CA's --puppet-server-file allows the master cert as admin.
 ca_admin_put() {   # subject json-body
     local subject="$1" body="$2"
     exec_master curl -sf -o /dev/null -w '%{http_code}' \
@@ -332,6 +332,83 @@ _revoke_st=$(exec_master curl -s -o /dev/null -w '%{http_code}' \
 [[ "$_revoke_st" =~ ^2 ]] \
     && pass "Cert revocation returns 2xx" \
     || fail "Cert revocation returns 2xx" "got HTTP $_revoke_st"
+
+# ═════════════════════════════════════════════════════════════════════════
+# Group 1b — puppet-server-file admin auth
+# Verifies that the file-based CN allow list grants the puppet-master cert
+# CA admin access, and that a cert whose CN is absent from the file is denied.
+# ═════════════════════════════════════════════════════════════════════════
+printf '\n# Group 1b — puppet-server-file admin auth\n'
+
+_srv_file=$(exec_ca cat /etc/puppet-ca/servers.txt 2>/dev/null) || true
+
+[ -n "$_srv_file" ] \
+    && pass "puppet-server-file exists on CA container" \
+    || fail "puppet-server-file exists on CA container" "file empty or missing"
+
+grep -qF "puppet-master" <<< "$_srv_file" \
+    && pass "puppet-server-file contains puppet-master CN" \
+    || fail "puppet-server-file contains puppet-master CN" "file content: $_srv_file"
+
+# An admin operation (list all cert statuses) must succeed using the master
+# cert, which is authorised solely via puppet-server-file.
+_srv_file_admin_st=$(exec_master curl -s -o /dev/null -w '%{http_code}' \
+    --cacert /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem \
+    --cert   /etc/puppetlabs/puppet/ssl/certs/puppet-master.pem \
+    --key    /etc/puppetlabs/puppet/ssl/private_keys/puppet-master.pem \
+    "https://puppet-ca:8140/puppet-ca/v1/certificate_statuses/any" \
+    2>/dev/null) || true
+[[ "$_srv_file_admin_st" =~ ^2 ]] \
+    && pass "Admin endpoint accessible via puppet-server-file CN" \
+    || fail "Admin endpoint accessible via puppet-server-file CN" "got HTTP $_srv_file_admin_st"
+
+# A cert whose CN is NOT in the file must be rejected for admin operations.
+# Use the CA's /generate endpoint (requires master admin cert) to obtain a
+# fresh key+cert pair, then probe an admin endpoint with it and expect 403.
+_probe_cn="probe-noadmin-${RUN_ID}"
+_probe_gen_ok=0
+exec_master bash -c "
+    set -e
+    _json=\$(curl -sf \
+        --cacert /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem \
+        --cert   /etc/puppetlabs/puppet/ssl/certs/puppet-master.pem \
+        --key    /etc/puppetlabs/puppet/ssl/private_keys/puppet-master.pem \
+        -X POST \
+        'https://puppet-ca:8140/puppet-ca/v1/generate/${_probe_cn}')
+    printf '%s' \"\$_json\" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+open(\"/tmp/probe.key\", \"w\").write(d[\"private_key\"])
+open(\"/tmp/probe.crt\", \"w\").write(d[\"certificate\"])
+'
+    chmod 600 /tmp/probe.key
+" 2>/dev/null || _probe_gen_ok=$?
+
+if [ "$_probe_gen_ok" -eq 0 ]; then
+    _probe_st=$(exec_master curl -s -o /dev/null -w '%{http_code}' \
+        --cacert /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem \
+        --cert   /tmp/probe.crt \
+        --key    /tmp/probe.key \
+        "https://puppet-ca:8140/puppet-ca/v1/certificate_statuses/any" \
+        2>/dev/null) || true
+    [ "$_probe_st" = "403" ] \
+        && pass "Non-listed CN rejected for admin endpoint (403)" \
+        || fail "Non-listed CN rejected for admin endpoint (403)" "got HTTP $_probe_st"
+
+    # Revoke and clean up the probe cert.
+    exec_master curl -sf -o /dev/null \
+        --cacert /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem \
+        --cert   /etc/puppetlabs/puppet/ssl/certs/puppet-master.pem \
+        --key    /etc/puppetlabs/puppet/ssl/private_keys/puppet-master.pem \
+        -X PUT -H "Content-Type: application/json" \
+        -d '{"desired_state":"revoked"}' \
+        "https://puppet-ca:8140/puppet-ca/v1/certificate_status/${_probe_cn}" \
+        2>/dev/null || true
+    exec_master rm -f /tmp/probe.key /tmp/probe.crt 2>/dev/null || true
+else
+    fail "Non-listed CN rejected for admin endpoint (403)" \
+         "could not generate probe cert for ${_probe_cn}"
+fi
 
 # ═════════════════════════════════════════════════════════════════════════
 # Group 2 — Puppet master reachability (port 8140 from host)

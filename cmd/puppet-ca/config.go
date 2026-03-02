@@ -17,9 +17,11 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -29,18 +31,20 @@ import (
 //
 //	built-in defaults → config file → env vars → CLI flags
 type serverConfig struct {
-	CADir          string `yaml:"cadir"`
-	AutosignConfig string `yaml:"autosign_config"`
-	Host           string `yaml:"host"`
-	Port           int    `yaml:"port"`
-	Hostname       string `yaml:"hostname"`
-	Verbosity      int    `yaml:"verbosity"`
-	LogFile        string `yaml:"logfile"`
-	TLSCert        string `yaml:"tls_cert"`
-	TLSKey         string `yaml:"tls_key"`
-	PuppetServer  string `yaml:"puppet_server"`
-	NoTLSRequired bool   `yaml:"no_tls_required"`
-	OCSPUrl       string `yaml:"ocsp_url"`
+	CADir            string `yaml:"cadir"`
+	AutosignConfig   string `yaml:"autosign_config"`
+	Host             string `yaml:"host"`
+	Port             int    `yaml:"port"`
+	Hostname         string `yaml:"hostname"`
+	Verbosity        int    `yaml:"verbosity"`
+	LogFile          string `yaml:"logfile"`
+	TLSCert          string `yaml:"tls_cert"`
+	TLSKey           string `yaml:"tls_key"`
+	PuppetServer     string `yaml:"puppet_server"`
+	PuppetServerFile string `yaml:"puppet_server_file"`
+	NoPpCliAuth      bool   `yaml:"no_pp_cli_auth"`
+	NoTLSRequired    bool   `yaml:"no_tls_required"`
+	OCSPUrl          string `yaml:"ocsp_url"`
 }
 
 // loadServerConfig applies built-in defaults, optionally loads a YAML config
@@ -102,6 +106,14 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("PUPPET_CA_PUPPET_SERVER"); v != "" {
 		cfg.PuppetServer = v
 	}
+	if v := os.Getenv("PUPPET_CA_PUPPET_SERVER_FILE"); v != "" {
+		cfg.PuppetServerFile = v
+	}
+	if v := os.Getenv("PUPPET_CA_NO_PP_CLI_AUTH"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.NoPpCliAuth = b
+		}
+	}
 	if v := os.Getenv("PUPPET_CA_NO_TLS_REQUIRED"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.NoTLSRequired = b
@@ -110,6 +122,39 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("PUPPET_CA_OCSP_URL"); v != "" {
 		cfg.OCSPUrl = v
 	}
+}
+
+// loadPuppetServerFile reads a file containing puppet-server CNs, one per
+// line. '#' characters and everything after them are stripped (covering both
+// full-line and inline comments). Blank lines are skipped. Returns nil, nil
+// when path is empty.
+func loadPuppetServerFile(path string) ([]string, error) {
+	if path == "" {
+		return nil, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading puppet-server file %s: %w", path, err)
+	}
+	defer f.Close()
+	var cns []string
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := sc.Text()
+		// Strip inline comments (anything from '#' onward).
+		if i := strings.IndexByte(line, '#'); i >= 0 {
+			line = line[:i]
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		cns = append(cns, line)
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("reading puppet-server file %s: %w", path, err)
+	}
+	return cns, nil
 }
 
 // resolveConfigFile returns the config file path to use:

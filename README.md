@@ -62,6 +62,8 @@ mage build:fips   # → bin/puppet-ca-fips  (GOEXPERIMENT=boringcrypto)
 | `--tls-cert` | `""` | Server TLS certificate PEM (enables HTTPS when set with `--tls-key`) |
 | `--tls-key` | `""` | Server TLS private key PEM |
 | `--puppet-server` | `""` | Comma-separated CNs granted admin API access (mTLS only) |
+| `--puppet-server-file` | `""` | Path to a file of CNs granted admin API access (one per line; `#` comments and blank lines ignored) |
+| `--no-pp-cli-auth` | `false` | Disable `pp_cli_auth` extension as an admin credential; require CN allow list only |
 | `--no-tls-required` | `false` | Allow plain HTTP on non-loopback addresses; use only behind a trusted TLS proxy or in test environments |
 | `--daemon` | `false` | Fork to background (not recommended in containers) |
 | `--logfile` | `""` | Write JSON logs to this file instead of stderr |
@@ -87,6 +89,8 @@ hostname: puppet.example.com
 tls_cert: /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem
 tls_key:  /etc/puppetlabs/puppet/ssl/ca/ca_key.pem
 puppet_server: puppet.example.com
+puppet_server_file: ""
+no_pp_cli_auth: false
 no_tls_required: false
 autosign_config: ""
 logfile: ""
@@ -108,6 +112,8 @@ ocsp_url: ""
 | `--tls-cert` | `PUPPET_CA_TLS_CERT` |
 | `--tls-key` | `PUPPET_CA_TLS_KEY` |
 | `--puppet-server` | `PUPPET_CA_PUPPET_SERVER` |
+| `--puppet-server-file` | `PUPPET_CA_PUPPET_SERVER_FILE` |
+| `--no-pp-cli-auth` | `PUPPET_CA_NO_PP_CLI_AUTH` |
 | `--no-tls-required` | `PUPPET_CA_NO_TLS_REQUIRED` |
 | `--ocsp-url` | `PUPPET_CA_OCSP_URL` |
 
@@ -288,7 +294,7 @@ In plain HTTP mode (no TLS), all endpoints are accessible without authentication
 
 A client certificate is considered an admin credential if **either** condition is met:
 
-1. **CN allow list** — the certificate's Common Name appears in the `--puppet-server` comma-separated list.
+1. **CN allow list** — the certificate's Common Name appears in the `--puppet-server` comma-separated list or in the file pointed to by `--puppet-server-file` (one CN per line; `#` comments and blank lines ignored). Both sources can be used simultaneously; their CNs are merged.
 2. **`pp_cli_auth` extension** — the certificate carries the Puppet authorization extension OID `1.3.6.1.4.1.34380.1.3.39` with the UTF8String value `"true"`. OpenVox Server embeds this extension in its own certificate by default, so the `puppetserver ca` CLI can authenticate without being listed by CN.
 
 The `pp_cli_auth` check is enabled by default. Disable it with `--no-pp-cli-auth` (or `no_pp_cli_auth: true` in the config file) if you prefer strict CN-only authorization.

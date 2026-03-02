@@ -42,10 +42,11 @@ func hasPpCliAuth(cert *x509.Certificate) bool {
 }
 
 // isAdmin reports whether the client is authorized for admin-only operations.
-// A client is an admin if its CN is in the allow list, or if the certificate
-// carries the pp_cli_auth extension (ca.OIDPpCliAuth) with value "true".
+// A client is an admin if its CN is in the allow list, or (unless NoPpCliAuth
+// is set) if the certificate carries the pp_cli_auth extension
+// (ca.OIDPpCliAuth) with value "true".
 func isAdmin(cfg *AuthConfig, clientCert *x509.Certificate, clientCN string) bool {
-	return cfg.AllowList[clientCN] || hasPpCliAuth(clientCert)
+	return cfg.AllowList[clientCN] || (!cfg.NoPpCliAuth && hasPpCliAuth(clientCert))
 }
 
 type authTier int
