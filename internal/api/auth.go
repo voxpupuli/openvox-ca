@@ -98,9 +98,18 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 
 		clientCN := clientCert.Subject.CommonName
 
-		// Check whether the client cert has been revoked.
-		if myCA.IsRevoked(clientCN) {
-			slog.Debug("Auth: client cert is revoked", "cn", clientCN)
+		// Check whether the presented cert's serial appears in the CRL.
+		// We check the serial of the actual presented certificate — not the
+		// serial of whatever cert happens to be on disk for the same CN —
+		// so that old revoked credentials are rejected even after a
+		// re-issuance for the same CN.  Fail-closed: a CRL read error is
+		// also treated as a denial.
+		if revoked, err := myCA.IsRevokedSerial(clientCert.SerialNumber); err != nil || revoked {
+			if err != nil {
+				slog.Warn("Auth: CRL check failed (denying)", "cn", clientCN, "error", err)
+			} else {
+				slog.Debug("Auth: client cert is revoked", "cn", clientCN)
+			}
 			http.Error(w, "access denied", http.StatusForbidden)
 			return
 		}

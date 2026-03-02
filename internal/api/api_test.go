@@ -884,4 +884,81 @@ var _ = Describe("API Workflow", func() {
 		})
 	})
 
+	Context("per-IP rate limiting on CSR submission", func() {
+		It("should return 429 when the per-IP limit is exceeded within the window", func() {
+			// Build a server with a tight limit of 2 requests/minute.
+			limitedServer := api.New(myCA)
+			limitedServer.CSRRateLimit = 2
+			limitedMux := limitedServer.Routes()
+
+			// First two requests succeed (200 or 409 — both mean the limiter allowed them through).
+			for i := 0; i < 2; i++ {
+				csrPEM, err := testutil.GenerateCSR("rl-node")
+				Expect(err).NotTo(HaveOccurred())
+				req := httptest.NewRequest("PUT", "/certificate_request/rl-node", bytes.NewReader(csrPEM))
+				rr := httptest.NewRecorder()
+				limitedMux.ServeHTTP(rr, req)
+				Expect(rr.Code).NotTo(Equal(http.StatusTooManyRequests))
+			}
+
+			// Third request from the same IP must be rate-limited.
+			csrPEM, err := testutil.GenerateCSR("rl-node")
+			Expect(err).NotTo(HaveOccurred())
+			req := httptest.NewRequest("PUT", "/certificate_request/rl-node", bytes.NewReader(csrPEM))
+			rr := httptest.NewRecorder()
+			limitedMux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusTooManyRequests))
+		})
+
+		It("should not rate-limit when CSRRateLimit is zero (default)", func() {
+			// The shared server has no rate limit set; submit many requests.
+			for i := 0; i < 5; i++ {
+				csrPEM, err := testutil.GenerateCSR("nolimit-node")
+				Expect(err).NotTo(HaveOccurred())
+				req := httptest.NewRequest("PUT", "/certificate_request/nolimit-node", bytes.NewReader(csrPEM))
+				rr := httptest.NewRecorder()
+				mux.ServeHTTP(rr, req)
+				Expect(rr.Code).NotTo(Equal(http.StatusTooManyRequests))
+			}
+		})
+	})
+
+	Context("serial_number in status response is a full decimal string", func() {
+		It("should return serial_number as a non-empty decimal string without truncation", func() {
+			subject := "serial-node"
+			csrPEM, err := testutil.GenerateCSR(subject)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Submit CSR and sign it.
+			mux.ServeHTTP(httptest.NewRecorder(),
+				httptest.NewRequest("PUT", "/certificate_request/"+subject, bytes.NewReader(csrPEM)))
+			body, _ := json.Marshal(api.PutStatusBody{DesiredState: "signed"})
+			mux.ServeHTTP(httptest.NewRecorder(),
+				httptest.NewRequest("PUT", "/certificate_status/"+subject, bytes.NewReader(body)))
+
+			// Fetch the signed cert and parse its serial for comparison.
+			certRR := httptest.NewRecorder()
+			mux.ServeHTTP(certRR, httptest.NewRequest("GET", "/certificate/"+subject, nil))
+			Expect(certRR.Code).To(Equal(http.StatusOK))
+			block, _ := pem.Decode(certRR.Body.Bytes())
+			Expect(block).NotTo(BeNil())
+			cert, err := x509.ParseCertificate(block.Bytes)
+			Expect(err).NotTo(HaveOccurred())
+			expectedSerial := cert.SerialNumber.Text(10)
+
+			// Fetch status and confirm serial_number matches exactly.
+			statusRR := httptest.NewRecorder()
+			mux.ServeHTTP(statusRR, httptest.NewRequest("GET", "/certificate_status/"+subject, nil))
+			Expect(statusRR.Code).To(Equal(http.StatusOK))
+
+			var resp api.CertStatusResponse
+			Expect(json.Unmarshal(statusRR.Body.Bytes(), &resp)).To(Succeed())
+			Expect(resp.SerialNumber).NotTo(BeNil())
+			// Must be a pure decimal string.
+			Expect(*resp.SerialNumber).To(MatchRegexp(`^[0-9]+$`))
+			// Must be the full, un-truncated value.
+			Expect(*resp.SerialNumber).To(Equal(expectedSerial))
+		})
+	})
+
 })

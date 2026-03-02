@@ -265,8 +265,34 @@ var _ = Describe("Auth Middleware", func() {
 	// ── Revoked client cert ────────────────────────────────────────────────────
 
 	Context("revoked client cert", func() {
-		It("returns 403 even though the cert is CA-signed", func() {
-			// Register the CN in the CA so Revoke can find it in inventory.
+		It("returns 403 when the presented cert's serial is in the CRL", func() {
+			// Sign a cert through the CA so its serial is tracked.
+			csrPEM, err := testutil.GenerateCSR("revoked-client")
+			Expect(err).NotTo(HaveOccurred())
+			_, err = myCA.SaveRequest("revoked-client", csrPEM)
+			Expect(err).NotTo(HaveOccurred())
+			certPEM, err := myCA.Sign("revoked-client")
+			Expect(err).NotTo(HaveOccurred())
+
+			// Parse the issued cert so we can present it in the TLS request.
+			block, _ := pem.Decode(certPEM)
+			issuedCert, err := x509.ParseCertificate(block.Bytes)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Revoke the cert — its serial is now in the CRL.
+			Expect(myCA.Revoke("revoked-client")).To(Succeed())
+
+			// Present the revoked cert; the middleware checks its serial
+			// directly against the CRL and must deny access.
+			req := httptest.NewRequest("GET", "/certificate_request/revoked-client", nil)
+			req = withClientCert(req, issuedCert)
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusForbidden))
+		})
+
+		It("allows a cert whose serial is NOT in the CRL even when another cert for the same CN was revoked", func() {
+			// Sign and revoke "revoked-client".
 			csrPEM, err := testutil.GenerateCSR("revoked-client")
 			Expect(err).NotTo(HaveOccurred())
 			_, err = myCA.SaveRequest("revoked-client", csrPEM)
@@ -275,14 +301,90 @@ var _ = Describe("Auth Middleware", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(myCA.Revoke("revoked-client")).To(Succeed())
 
-			// Issue a fresh TLS cert with the revoked CN.
-			// IsRevoked looks up the on-disk cert for the CN, reads its serial
-			// number, and checks whether that serial is in the CRL.  The TLS-
-			// presented cert's serial is not consulted; only the CN is used to
-			// locate the revoked record on disk.
-			clientCert := issueClientCert("revoked-client", caCert, caKey)
+			// A separately-issued cert with the same CN but a different serial
+			// (not in the CRL) must pass the revocation check.
+			freshCert := issueClientCert("revoked-client", caCert, caKey)
 			req := httptest.NewRequest("GET", "/certificate_request/revoked-client", nil)
-			req = withClientCert(req, clientCert)
+			req = withClientCert(req, freshCert)
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			// The cert is not revoked — access is denied only if it also
+			// fails the tier check (self-or-admin: CN matches path subject).
+			Expect(rr.Code).NotTo(Equal(http.StatusForbidden))
+		})
+	})
+
+	// ── Revocation bypass prevention (re-issuance regression) ─────────────────
+	// Before the fix, IsRevoked looked up the cert *on disk* for the CN and
+	// checked that cert's serial.  After a revocation + re-issuance the disk
+	// cert had a new (clean) serial, so the old revoked cert would pass.
+	// IsRevokedSerial checks the serial of the PRESENTED cert, closing the gap.
+
+	Context("revocation bypass prevention after re-issuance", func() {
+		It("denies an old revoked cert even after the same CN has been re-issued", func() {
+			// Step 1: issue the first cert for "puppet-server" (admin CN).
+			csrPEM1, err := testutil.GenerateCSR("puppet-server")
+			Expect(err).NotTo(HaveOccurred())
+			_, err = myCA.SaveRequest("puppet-server", csrPEM1)
+			Expect(err).NotTo(HaveOccurred())
+			certPEM1, err := myCA.Sign("puppet-server")
+			Expect(err).NotTo(HaveOccurred())
+			block1, _ := pem.Decode(certPEM1)
+			oldCert, err := x509.ParseCertificate(block1.Bytes)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Step 2: revoke it — serial1 is now in the CRL.
+			Expect(myCA.Revoke("puppet-server")).To(Succeed())
+
+			// Step 3: re-register and sign a new cert for the same CN.
+			csrPEM2, err := testutil.GenerateCSR("puppet-server")
+			Expect(err).NotTo(HaveOccurred())
+			_, err = myCA.SaveRequest("puppet-server", csrPEM2) // evicts the revoked cert
+			Expect(err).NotTo(HaveOccurred())
+			certPEM2, err := myCA.Sign("puppet-server")
+			Expect(err).NotTo(HaveOccurred())
+			block2, _ := pem.Decode(certPEM2)
+			newCert, err := x509.ParseCertificate(block2.Bytes)
+			Expect(err).NotTo(HaveOccurred())
+
+			// OLD cert (revoked serial) must be denied — regression test.
+			req := httptest.NewRequest("POST", "/sign/all", nil)
+			req = withClientCert(req, oldCert)
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusForbidden))
+
+			// NEW cert (clean serial, same admin CN) must be allowed.
+			req2 := httptest.NewRequest("POST", "/sign/all", nil)
+			req2 = withClientCert(req2, newCert)
+			rr2 := httptest.NewRecorder()
+			mux.ServeHTTP(rr2, req2)
+			Expect(rr2.Code).NotTo(Equal(http.StatusForbidden))
+		})
+	})
+
+	// ── CRL unavailable → fail-closed ─────────────────────────────────────────
+
+	Context("CRL unavailable", func() {
+		It("returns 403 when the CRL file cannot be read (fail-closed)", func() {
+			// Sign a cert through the CA so it is a valid client cert.
+			csrPEM, err := testutil.GenerateCSR("crl-test-node")
+			Expect(err).NotTo(HaveOccurred())
+			_, err = myCA.SaveRequest("crl-test-node", csrPEM)
+			Expect(err).NotTo(HaveOccurred())
+			certPEM, err := myCA.Sign("crl-test-node")
+			Expect(err).NotTo(HaveOccurred())
+			block, _ := pem.Decode(certPEM)
+			issuedCert, err := x509.ParseCertificate(block.Bytes)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Remove the CRL file to simulate a disk fault.
+			Expect(os.Remove(store.CRLPath())).To(Succeed())
+
+			// The middleware must deny the request (fail-closed) rather than
+			// allowing access because it cannot check revocation status.
+			req := httptest.NewRequest("GET", "/certificate_request/crl-test-node", nil)
+			req = withClientCert(req, issuedCert)
 			rr := httptest.NewRecorder()
 			mux.ServeHTTP(rr, req)
 			Expect(rr.Code).To(Equal(http.StatusForbidden))

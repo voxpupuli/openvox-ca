@@ -139,7 +139,27 @@ func (c *CA) findSerialForSubject(subject string) (string, error) {
 	return last, nil
 }
 
+// IsRevokedSerial reports whether the given serial number appears in the
+// current CRL.  Unlike IsRevoked, this checks the serial of the certificate
+// directly rather than looking up whatever cert happens to be on disk for a
+// given CN.  The caller should pass cert.SerialNumber from the certificate
+// that is actually being evaluated (e.g. the TLS-presented peer certificate).
+//
+// Returns (false, err) when the CRL cannot be read or parsed; callers that use
+// this result for an authentication decision should treat an error as a denial
+// (fail-closed).
+func (c *CA) IsRevokedSerial(serial *big.Int) (bool, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	revoked, _, err := c.isRevokedSerial(serial)
+	return revoked, err
+}
+
 // IsRevoked checks whether the certificate for subject appears in the CRL.
+// It looks up the cert currently on disk for subject and checks that cert's
+// serial — it is suitable for display purposes (e.g. certificate status
+// responses) but NOT for authentication decisions.  For auth, use
+// IsRevokedSerial with the serial of the presented certificate instead.
 // Returns false (not an error) if the subject has no signed cert.
 func (c *CA) IsRevoked(subject string) bool {
 	certPEM, err := c.Storage.GetCert(subject)

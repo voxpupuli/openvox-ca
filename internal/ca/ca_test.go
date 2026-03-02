@@ -24,6 +24,7 @@ import (
 	"encoding/asn1"
 	"encoding/pem"
 	"errors"
+	"math/big"
 	"os"
 	"path/filepath"
 	"time"
@@ -384,6 +385,43 @@ var _ = Describe("CA Revocation", func() {
 
 	It("returns an error when revoking a subject with no inventory entry", func() {
 		Expect(myCA.Revoke("never-signed")).To(HaveOccurred())
+	})
+
+	It("IsRevokedSerial returns true for a revoked certificate's serial", func() {
+		csrPEM, err := testutil.GenerateCSR("serial-revoke-node")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = myCA.SaveRequest("serial-revoke-node", csrPEM)
+		Expect(err).NotTo(HaveOccurred())
+		certPEM, err := myCA.Sign("serial-revoke-node")
+		Expect(err).NotTo(HaveOccurred())
+
+		block, _ := pem.Decode(certPEM)
+		cert, err := x509.ParseCertificate(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+
+		// Before revocation: serial is not in CRL.
+		revoked, err := myCA.IsRevokedSerial(cert.SerialNumber)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(revoked).To(BeFalse())
+
+		// After revocation: serial appears in CRL.
+		Expect(myCA.Revoke("serial-revoke-node")).To(Succeed())
+		revoked, err = myCA.IsRevokedSerial(cert.SerialNumber)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(revoked).To(BeTrue())
+	})
+
+	It("IsRevokedSerial returns false for an unknown serial", func() {
+		unknownSerial := new(big.Int).SetInt64(999999)
+		revoked, err := myCA.IsRevokedSerial(unknownSerial)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(revoked).To(BeFalse())
+	})
+
+	It("IsRevokedSerial returns an error when the CRL file is missing", func() {
+		Expect(os.Remove(store.CRLPath())).To(Succeed())
+		_, err := myCA.IsRevokedSerial(new(big.Int).SetInt64(1))
+		Expect(err).To(HaveOccurred())
 	})
 })
 

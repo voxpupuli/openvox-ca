@@ -46,6 +46,12 @@ type AuthConfig struct {
 type Server struct {
 	CA         *ca.CA
 	AuthConfig *AuthConfig
+	// CSRRateLimit is the maximum number of CSR submissions allowed per IP
+	// address per minute on the unauthenticated PUT /certificate_request
+	// endpoint. Zero (the default) disables rate limiting.
+	CSRRateLimit int
+
+	csrLimiter *ipRateLimiter
 }
 
 func New(c *ca.CA) *Server {
@@ -56,6 +62,10 @@ func New(c *ca.CA) *Server {
 // Puppet agents use the /puppet-ca/v1/ prefix; we support both bare and prefixed paths
 // so the Go CA can be used directly or behind a stripping proxy.
 func (s *Server) Routes() http.Handler {
+	if s.CSRRateLimit > 0 {
+		s.csrLimiter = newIPRateLimiter(s.CSRRateLimit, time.Minute)
+	}
+
 	mux := http.NewServeMux()
 
 	routes := []struct {
@@ -109,7 +119,9 @@ type CertStatusResponse struct {
 	// Always present, empty map when none exist.
 	AuthorizationExtensions map[string]string `json:"authorization_extensions"`
 	// Populated when signed or revoked.
-	SerialNumber *int64  `json:"serial_number,omitempty"`
+	// SerialNumber is a decimal string to preserve the full 128-bit value
+	// without loss; int64 would silently truncate random CA/B-Forum serials.
+	SerialNumber *string `json:"serial_number,omitempty"`
 	NotBefore    *string `json:"not_before,omitempty"`
 	NotAfter     *string `json:"not_after,omitempty"`
 }
@@ -272,6 +284,11 @@ func (s *Server) handleGetRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePutRequest(w http.ResponseWriter, r *http.Request) {
+	if s.csrLimiter != nil && !s.csrLimiter.Allow(clientIP(r)) {
+		http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+		return
+	}
+
 	subject := r.PathValue("subject")
 	if err := ca.ValidateSubject(subject); err != nil {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
@@ -428,7 +445,7 @@ func noNilSlice(s []string) []string {
 func certStatusFromCert(subject string, certPEM []byte, state string) CertStatusResponse {
 	cert := parseCert(certPEM)
 	fp := fingerprint(certPEM)
-	serial := cert.SerialNumber.Int64()
+	serial := cert.SerialNumber.Text(10) // decimal string; preserves full 128-bit value
 	nb := cert.NotBefore.UTC().Format(time.RFC3339)
 	na := cert.NotAfter.UTC().Format(time.RFC3339)
 	dnsNames := noNilSlice(cert.DNSNames)

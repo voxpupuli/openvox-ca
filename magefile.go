@@ -180,6 +180,9 @@ func (Build) FIPS() error {
 //	puppet-ca_linux_amd64_fips.tar.gz  (FIPS; GOEXPERIMENT=boringcrypto)
 func (Build) Dist() error {
 	distDir := "dist"
+	if err := os.RemoveAll(distDir); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(distDir, 0755); err != nil {
 		return err
 	}
@@ -203,32 +206,33 @@ func (Build) Dist() error {
 		},
 	}
 
+	bins := []string{"puppet-ca", "puppet-ca-ctl"}
+
 	var checksums []string
 	for _, v := range variants {
 		fmt.Printf("Building %s...\n", v.name)
 
-		tmpDir, err := os.MkdirTemp("", "puppet-ca-dist-*")
-		if err != nil {
-			return err
-		}
-
-		for _, cmd := range []string{"puppet-ca", "puppet-ca-ctl"} {
-			if err := sh.RunWith(v.env, "go", "build",
-				"-o", filepath.Join(tmpDir, cmd),
-				"./cmd/"+cmd); err != nil {
-				os.RemoveAll(tmpDir)
-				return fmt.Errorf("build %s for %s: %w", cmd, v.name, err)
-			}
-		}
-
 		archive := filepath.Join(distDir, v.name+".tar.gz")
-		if err := createTarGz(archive, tmpDir, []string{"puppet-ca", "puppet-ca-ctl"}); err != nil {
-			os.RemoveAll(tmpDir)
-			return fmt.Errorf("archive %s: %w", v.name, err)
-		}
-		os.RemoveAll(tmpDir)
+		sum, err := func() (string, error) {
+			tmpDir, err := os.MkdirTemp("", "puppet-ca-dist-*")
+			if err != nil {
+				return "", err
+			}
+			defer os.RemoveAll(tmpDir)
 
-		sum, err := sha256File(archive)
+			for _, cmd := range bins {
+				if err := sh.RunWith(v.env, "go", "build",
+					"-o", filepath.Join(tmpDir, cmd),
+					"./cmd/"+cmd); err != nil {
+					return "", fmt.Errorf("build %s for %s: %w", cmd, v.name, err)
+				}
+			}
+
+			if err := createTarGz(archive, tmpDir, bins); err != nil {
+				return "", fmt.Errorf("archive %s: %w", v.name, err)
+			}
+			return sha256File(archive)
+		}()
 		if err != nil {
 			return err
 		}
@@ -601,7 +605,7 @@ func runComposeWithSpinner(extraEnv map[string]string, spinMsg string, args ...s
 	return cmdErr
 }
 
-func createTarGz(dst, srcDir string, files []string) error {
+func createTarGz(dst, srcDir string, files []string) (retErr error) {
 	f, err := os.Create(dst)
 	if err != nil {
 		return err
@@ -609,32 +613,38 @@ func createTarGz(dst, srcDir string, files []string) error {
 	defer f.Close()
 
 	gz := gzip.NewWriter(f)
+	defer func() {
+		if err := gz.Close(); err != nil && retErr == nil {
+			retErr = err
+		}
+	}()
 	tw := tar.NewWriter(gz)
+	defer func() {
+		if err := tw.Close(); err != nil && retErr == nil {
+			retErr = err
+		}
+	}()
 
 	for _, name := range files {
-		data, err := os.ReadFile(filepath.Join(srcDir, name))
+		src := filepath.Join(srcDir, name)
+		fi, err := os.Stat(src)
 		if err != nil {
-			tw.Close()
-			gz.Close()
 			return err
 		}
-		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0755, Size: int64(len(data))}); err != nil {
-			tw.Close()
-			gz.Close()
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0755, Size: fi.Size()}); err != nil {
 			return err
 		}
-		if _, err := tw.Write(data); err != nil {
-			tw.Close()
-			gz.Close()
+		rf, err := os.Open(src)
+		if err != nil {
+			return err
+		}
+		_, err = io.Copy(tw, rf)
+		rf.Close()
+		if err != nil {
 			return err
 		}
 	}
-
-	if err := tw.Close(); err != nil {
-		gz.Close()
-		return err
-	}
-	return gz.Close()
+	return nil
 }
 
 func sha256File(path string) (string, error) {
