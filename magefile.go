@@ -248,17 +248,48 @@ func (Build) Dist() error {
 
 // ── test:* ────────────────────────────────────────────────────────────────────
 
-// Unit runs the unit test suite.
+// Unit runs the unit test suite with coverage, piping output through tparse
+// for a colorful per-package summary table.
 // internal/testutil is excluded (test helpers verified transitively).
 func (Test) Unit() error {
 	fmt.Println("Running unit tests...")
-	return sh.RunV("go", "test", "-v",
+
+	pkgs := []string{
 		"./cmd/puppet-ca/...",
 		"./cmd/puppet-ca-ctl/...",
 		"./internal/api/...",
 		"./internal/ca/...",
 		"./internal/storage/...",
-	)
+	}
+
+	testArgs := append([]string{"test", "-json", "-cover", "-coverprofile=coverage.out"}, pkgs...)
+	testCmd := exec.Command("go", testArgs...)
+	tparseCmd := exec.Command("go", "tool", "tparse", "-all")
+
+	pipe, err := testCmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	testCmd.Stderr = os.Stderr
+	tparseCmd.Stdin = pipe
+	tparseCmd.Stdout = os.Stdout
+	tparseCmd.Stderr = os.Stderr
+
+	if err := testCmd.Start(); err != nil {
+		return err
+	}
+	if err := tparseCmd.Start(); err != nil {
+		testCmd.Wait() //nolint:errcheck
+		return err
+	}
+
+	testErr := testCmd.Wait()
+	tparseErr := tparseCmd.Wait()
+
+	if testErr != nil {
+		return testErr
+	}
+	return tparseErr
 }
 
 // IntegCompose builds the binaries locally then runs the multi-host compose

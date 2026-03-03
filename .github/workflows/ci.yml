@@ -45,6 +45,17 @@ jobs:
         run: go install github.com/magefile/mage@v1.15.0
       - name: Run unit tests
         run: mage test:unit
+      - name: Coverage summary
+        if: always()
+        continue-on-error: true
+        run: |
+          if [ ! -f coverage.out ]; then exit 0; fi
+          {
+            echo "## Test coverage"
+            echo '```'
+            go tool cover -func=coverage.out
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ── Puppet stack integration tests ──────────────────────────────────────────
   # Runs the full OpenVox 8 stack: Go CA (TLS) → OpenVox Server (WEBrick) →

@@ -233,4 +233,67 @@ var _ = Describe("StorageService", func() {
 			Expect(err).To(HaveOccurred())
 		})
 	})
+
+	// --- ListCSRs ---
+
+	Describe("ListCSRs", func() {
+		BeforeEach(func() {
+			Expect(store.EnsureDirs()).To(Succeed())
+		})
+
+		It("returns an empty slice when no CSRs are present", func() {
+			subjects, err := store.ListCSRs()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(subjects).To(BeEmpty())
+		})
+
+		It("returns subjects for all .pem files in the requests directory", func() {
+			for _, sub := range []string{"alpha", "beta", "gamma"} {
+				Expect(store.SaveCSR(sub, []byte("fake"))).To(Succeed())
+			}
+			subjects, err := store.ListCSRs()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(subjects).To(ConsistOf("alpha", "beta", "gamma"))
+		})
+
+		It("ignores non-.pem files in the requests directory", func() {
+			Expect(store.SaveCSR("real-node", []byte("fake"))).To(Succeed())
+			// Write a stray non-PEM file directly into the directory.
+			Expect(os.WriteFile(filepath.Join(store.CSRDir(), "ignore.txt"), []byte("x"), 0644)).To(Succeed())
+			subjects, err := store.ListCSRs()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(subjects).To(ConsistOf("real-node"))
+		})
+	})
+
+	// --- ListCerts ---
+
+	Describe("ListCerts", func() {
+		BeforeEach(func() {
+			Expect(store.EnsureDirs()).To(Succeed())
+		})
+
+		It("returns an empty slice when no certs are present", func() {
+			subjects, err := store.ListCerts()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(subjects).To(BeEmpty())
+		})
+
+		It("returns subjects for all .pem files in the signed directory", func() {
+			for _, sub := range []string{"node-1", "node-2", "node-3"} {
+				Expect(store.SaveCert(sub, []byte("fake"))).To(Succeed())
+			}
+			subjects, err := store.ListCerts()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(subjects).To(ConsistOf("node-1", "node-2", "node-3"))
+		})
+
+		It("ignores non-.pem files in the signed directory", func() {
+			Expect(store.SaveCert("real-cert", []byte("fake"))).To(Succeed())
+			Expect(os.WriteFile(filepath.Join(store.SignedDir(), "stray.log"), []byte("x"), 0644)).To(Succeed())
+			subjects, err := store.ListCerts()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(subjects).To(ConsistOf("real-cert"))
+		})
+	})
 })
