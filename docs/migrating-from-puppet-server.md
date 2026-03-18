@@ -72,7 +72,7 @@ echo "CA imported into $NEW_CADIR"
 ```
 
 This creates the directory structure, writes the CA cert/key/CRL, and
-initialises `inventory.txt` and `serial`.
+initialises `inventory.txt` and `serial` (the serial file is written for compatibility but is not used at runtime — puppet-ca generates random serial numbers).
 
 ## Step 4: Copy signed certificates
 

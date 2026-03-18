@@ -46,8 +46,8 @@ func GenerateTestCA() ([]byte, []byte, []byte, error) {
 	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
 	serialNumber, _ := rand.Int(rand.Reader, serialNumberLimit)
 
-	pubBytes, _ := asn1.Marshal(key.PublicKey)
-	subjectKeyID := sha1.Sum(pubBytes)
+	pubDER, _ := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	subjectKeyID := sha1.Sum(pubDER)
 
 	template := &x509.Certificate{
 		SerialNumber: serialNumber,

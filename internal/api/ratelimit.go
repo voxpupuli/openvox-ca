@@ -50,6 +50,10 @@ func newIPRateLimiter(maxReqs int, window time.Duration) *ipRateLimiter {
 	}
 }
 
+// maxRateLimitEntries caps the number of tracked IPs to prevent unbounded
+// memory growth under a distributed attack with many unique source IPs.
+const maxRateLimitEntries = 100_000
+
 // Allow reports whether the request from ip should be allowed.
 // Returns false when the per-window request count has been exceeded.
 func (l *ipRateLimiter) Allow(ip string) bool {
@@ -59,6 +63,10 @@ func (l *ipRateLimiter) Allow(ip string) bool {
 
 	e, ok := l.entries[ip]
 	if !ok || now.Sub(e.start) >= l.window {
+		// Evict stale entries periodically to bound memory usage.
+		if len(l.entries) >= maxRateLimitEntries {
+			l.evictExpired(now)
+		}
 		l.entries[ip] = &rlEntry{start: now, count: 1}
 		return true
 	}
@@ -67,6 +75,16 @@ func (l *ipRateLimiter) Allow(ip string) bool {
 	}
 	e.count++
 	return true
+}
+
+// evictExpired removes all entries whose window has elapsed. Must be called
+// with l.mu held.
+func (l *ipRateLimiter) evictExpired(now time.Time) {
+	for ip, e := range l.entries {
+		if now.Sub(e.start) >= l.window {
+			delete(l.entries, ip)
+		}
+	}
 }
 
 // clientIP extracts the remote IP address from r, stripping the port.

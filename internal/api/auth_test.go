@@ -474,9 +474,9 @@ var _ = Describe("Auth Middleware", func() {
 			Expect(rr.Code).To(Equal(http.StatusForbidden))
 		})
 
-		It("returns 403 for GET /certificate_request/{other-node}", func() {
+		It("returns 403 for DELETE /certificate_request/{other-node}", func() {
 			clientCert := issueClientCert("node-a", caCert, caKey)
-			req := httptest.NewRequest("GET", "/certificate_request/node-b", nil)
+			req := httptest.NewRequest("DELETE", "/certificate_request/node-b", nil)
 			req = withClientCert(req, clientCert)
 			rr := httptest.NewRecorder()
 			mux.ServeHTTP(rr, req)

@@ -56,18 +56,29 @@ func (c *CA) Revoke(subject string) error {
 		return fmt.Errorf("failed to load CRL: %w", err)
 	}
 	block, _ := pem.Decode(crlPEM)
+	if block == nil {
+		return fmt.Errorf("failed to decode CRL PEM")
+	}
 	crl, err := x509.ParseRevocationList(block.Bytes)
 	if err != nil {
 		return fmt.Errorf("failed to parse CRL: %w", err)
 	}
 
-	// 3. Prepare New CRL
+	// 3. Check for duplicate revocation — a serial that's already in the CRL
+	// should not be appended again (prevents unbounded CRL growth on retries).
+	for _, entry := range crl.RevokedCertificateEntries {
+		if entry.SerialNumber.Cmp(serialInt) == 0 {
+			slog.Info("Certificate already revoked", "subject", subject, "serial", serialStr)
+			return nil
+		}
+	}
+
+	// 4. Prepare New CRL
 	newRevoked := x509.RevocationListEntry{
 		SerialNumber:   serialInt,
 		RevocationTime: time.Now(),
 	}
 
-	// Copy existing revoked
 	revokedCerts := crl.RevokedCertificateEntries
 	revokedCerts = append(revokedCerts, newRevoked)
 

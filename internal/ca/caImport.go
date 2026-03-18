@@ -18,7 +18,6 @@ package ca
 
 import (
 	"bytes"
-	"crypto"
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
@@ -60,43 +59,9 @@ func ImportCA(store *storage.StorageService, certBundlePEM, keyPEM, crlPEM []byt
 		return fmt.Errorf("private-key does not contain a valid PEM block")
 	}
 
-	var caKey crypto.Signer
-	switch keyBlock.Type {
-	case "RSA PRIVATE KEY":
-		k, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
-		if err != nil {
-			return fmt.Errorf("failed to parse RSA PKCS1 private key: %w", err)
-		}
-		caKey = k
-	case "EC PRIVATE KEY":
-		k, err := x509.ParseECPrivateKey(keyBlock.Bytes)
-		if err != nil {
-			return fmt.Errorf("failed to parse EC private key: %w", err)
-		}
-		caKey = k
-	case "PRIVATE KEY":
-		k, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
-		if err != nil {
-			return fmt.Errorf("failed to parse PKCS8 private key: %w", err)
-		}
-		signer, ok := k.(crypto.Signer)
-		if !ok {
-			return fmt.Errorf("PKCS8 private key does not implement crypto.Signer")
-		}
-		caKey = signer
-	default:
-		// Try PKCS1, then PKCS8, regardless of header for compatibility.
-		if k1, err1 := x509.ParsePKCS1PrivateKey(keyBlock.Bytes); err1 == nil {
-			caKey = k1
-		} else if k8, err8 := x509.ParsePKCS8PrivateKey(keyBlock.Bytes); err8 == nil {
-			signer, ok := k8.(crypto.Signer)
-			if !ok {
-				return fmt.Errorf("PKCS8 private key does not implement crypto.Signer")
-			}
-			caKey = signer
-		} else {
-			return fmt.Errorf("failed to parse CA private key (PKCS1: %v; PKCS8: %v)", err1, err8)
-		}
+	caKey, err := parsePrivateKeyDER(keyBlock.Type, keyBlock.Bytes)
+	if err != nil {
+		return fmt.Errorf("failed to parse CA private key: %w", err)
 	}
 
 	// --- Verify key matches cert (algorithm-agnostic) ---
@@ -173,7 +138,7 @@ func ImportCA(store *storage.StorageService, certBundlePEM, keyPEM, crlPEM []byt
 
 	// --- Initialise inventory if absent ---
 	if _, err := os.Stat(store.InventoryPath()); os.IsNotExist(err) {
-		f, err := os.OpenFile(store.InventoryPath(), os.O_CREATE|os.O_RDONLY, storage.FilePermPublic)
+		f, err := os.OpenFile(store.InventoryPath(), os.O_CREATE|os.O_RDONLY, storage.FilePermPrivate)
 		if err != nil {
 			return fmt.Errorf("failed to create inventory: %w", err)
 		}

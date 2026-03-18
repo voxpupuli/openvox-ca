@@ -21,6 +21,7 @@ import (
 	"os"
 	"strconv"
 
+	"github.com/tvaughan/puppet-ca/internal/config"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -34,6 +35,7 @@ type ctlConfig struct {
 	ClientCert string `yaml:"client_cert"`
 	ClientKey  string `yaml:"client_key"`
 	Verbose    bool   `yaml:"verbose"`
+	Insecure   bool   `yaml:"insecure"`
 }
 
 // loadCtlConfig applies built-in defaults, optionally loads a YAML config
@@ -77,19 +79,12 @@ func applyCtlEnv(cfg *ctlConfig) {
 			cfg.Verbose = b
 		}
 	}
+	if v := os.Getenv("PUPPET_CA_CTL_INSECURE"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.Insecure = b
+		}
+	}
 }
 
-// resolveConfigFile returns the config file path to use:
-// cliFlag → envVar → defaultPath (if it exists) → "".
-func resolveConfigFile(cliFlag, envVar, defaultPath string) string {
-	if cliFlag != "" {
-		return cliFlag
-	}
-	if v := os.Getenv(envVar); v != "" {
-		return v
-	}
-	if _, err := os.Stat(defaultPath); err == nil {
-		return defaultPath
-	}
-	return ""
-}
+// resolveConfigFile delegates to the shared config.ResolveConfigFile.
+var resolveConfigFile = config.ResolveConfigFile

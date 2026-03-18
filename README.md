@@ -64,7 +64,7 @@ mage build:fips   # → bin/puppet-ca + bin/puppet-ca-ctl  (GOEXPERIMENT=boringc
 | `--cadir` | `""` | CA storage directory (keys, certs, CSRs, CRL) — required via flag, env, or config |
 | `--host` | `0.0.0.0` | Listen address |
 | `--port` | `8140` | Listen port |
-| `--hostname` | `puppet` | CN suffix for a bootstrapped CA (`Puppet CA: <hostname>`) |
+| `--hostname` | `""` | CN suffix for a bootstrapped CA (`Puppet CA: <hostname>`); defaults to `puppet` when empty |
 | `--autosign-config` | `""` | Autosign mode: `true`, `false`, or path to a file/executable |
 | `--tls-cert` | `""` | Server TLS certificate PEM (enables HTTPS when set with `--tls-key`) |
 | `--tls-key` | `""` | Server TLS private key PEM |
@@ -77,6 +77,8 @@ mage build:fips   # → bin/puppet-ca + bin/puppet-ca-ctl  (GOEXPERIMENT=boringc
 | `--crl-url` | `""` | CRL distribution point URL to embed in issued certificates |
 | `--encrypt-ca-key` | `false` | Encrypt the CA private key at rest (AES-256-GCM + Argon2id) |
 | `--ca-key-passphrase-file` | `""` | Path to file containing the CA key passphrase (first line used) |
+| `--csr-rate-limit` | `60` | Max CSR submissions per IP per minute on the public `PUT /certificate_request` endpoint (0 disables) |
+| `--single-process` | `false` | Disable CA key isolation (run signer and frontend in a single process) |
 | `--daemon` | `false` | Fork to background (not recommended in containers) |
 | `--logfile` | `""` | Write JSON logs to this file instead of stderr |
 | `--verbosity` / `-v` | `0` | Verbosity: `0`=Info, `1`=Debug, `2`=Trace |
@@ -130,6 +132,7 @@ ca_path_length: -1    # -1 = unconstrained, 0 = leaf certs only, N = N levels of
 ca_validity_days: 0   # 0 = built-in default (~5 years); positive integer overrides
 leaf_validity_days: 0 # 0 = built-in default (~5 years); positive integer overrides
 crl_validity_days: 0  # 0 = built-in default (30 days); positive integer overrides
+csr_rate_limit: 60    # max CSR submissions per IP per minute; 0 = disable rate limiting
 # CA key encryption at rest.
 encrypt_ca_key: false           # encrypt the CA private key (AES-256-GCM + Argon2id)
 ca_key_passphrase_file: ""      # path to passphrase file; auto-generated if omitted
@@ -155,6 +158,7 @@ ca_key_passphrase_file: ""      # path to passphrase file; auto-generated if omi
 | `--allow-public-status` | `PUPPET_CA_ALLOW_PUBLIC_STATUS` |
 | `--ocsp-url` | `PUPPET_CA_OCSP_URL` |
 | `--crl-url` | `PUPPET_CA_CRL_URL` |
+| `--csr-rate-limit` | `PUPPET_CA_CSR_RATE_LIMIT` |
 | `--encrypt-ca-key` | `PUPPET_CA_ENCRYPT_CA_KEY` |
 | `--ca-key-passphrase-file` | `PUPPET_CA_KEY_PASSPHRASE_FILE` |
 

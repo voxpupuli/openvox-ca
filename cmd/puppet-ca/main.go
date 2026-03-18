@@ -17,8 +17,10 @@
 package main
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"log/slog"
@@ -28,13 +30,91 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/tvaughan/puppet-ca/internal/api"
 	"github.com/tvaughan/puppet-ca/internal/ca"
+	"github.com/tvaughan/puppet-ca/internal/signer"
 	"github.com/tvaughan/puppet-ca/internal/storage"
 )
+
+// setupLogger creates and sets the default slog logger based on config.
+// Returns an error if a log file cannot be opened.
+func setupLogger(cfg *serverConfig) error {
+	var logLevel slog.Level
+	switch cfg.Verbosity {
+	case 0:
+		logLevel = slog.LevelInfo
+	case 1:
+		logLevel = slog.LevelDebug
+	default:
+		logLevel = slog.Level(-8) // Trace
+	}
+
+	opts := &slog.HandlerOptions{Level: logLevel}
+	var logHandler slog.Handler
+
+	if cfg.LogFile != "" {
+		f, err := os.OpenFile(cfg.LogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+		if err != nil {
+			return fmt.Errorf("failed to open log file %s: %w", cfg.LogFile, err)
+		}
+		logHandler = slog.NewJSONHandler(f, opts)
+	} else {
+		logHandler = slog.NewTextHandler(os.Stderr, opts)
+	}
+
+	slog.SetDefault(slog.New(logHandler))
+	return nil
+}
+
+// applyCAConfig applies the common CA configuration fields from serverConfig
+// to a CA instance. Used by both frontend and signer modes.
+func applyCAConfig(myCA *ca.CA, cfg *serverConfig) error {
+	if cfg.OCSPUrl != "" {
+		myCA.OCSPURLs = []string{cfg.OCSPUrl}
+	}
+	if cfg.CRLUrl != "" {
+		myCA.CRLURLs = []string{cfg.CRLUrl}
+	}
+	myCA.CRLValidityDays = cfg.CRLValidityDays
+
+	if cfg.CAKeyAlgo != "" || cfg.CAKeySize != 0 {
+		myCA.CAKeyConfig = ca.KeyConfig{
+			Algo: ca.KeyAlgo(cfg.CAKeyAlgo),
+			Size: cfg.CAKeySize,
+		}
+		if err := ca.ValidateKeyConfig(myCA.CAKeyConfig); err != nil {
+			return fmt.Errorf("invalid ca_key_algo / ca_key_size: %w", err)
+		}
+	}
+	if cfg.LeafKeyAlgo != "" || cfg.LeafKeySize != 0 {
+		myCA.LeafKeyConfig = ca.KeyConfig{
+			Algo: ca.KeyAlgo(cfg.LeafKeyAlgo),
+			Size: cfg.LeafKeySize,
+		}
+		if err := ca.ValidateKeyConfig(myCA.LeafKeyConfig); err != nil {
+			return fmt.Errorf("invalid leaf_key_algo / leaf_key_size: %w", err)
+		}
+	}
+	myCA.CASubject = ca.CASubjectConfig{
+		Org:      cfg.CASubjectOrg,
+		OrgUnit:  cfg.CASubjectOU,
+		Country:  cfg.CASubjectCountry,
+		Locality: cfg.CASubjectLocality,
+		Province: cfg.CASubjectProvince,
+	}
+	myCA.CAPathLength = cfg.CAPathLength
+	myCA.CAValidityDays = cfg.CAValidityDays
+	myCA.LeafValidityDays = cfg.LeafValidityDays
+	myCA.EncryptCAKey = cfg.EncryptCAKey
+	myCA.KeyPassphrase = ca.KeyPassphraseConfig{
+		PassphraseFile: cfg.CAKeyPassphraseFile,
+	}
+	return nil
+}
 
 // isLoopback reports whether host is a loopback address (127.x.x.x, ::1, or
 // "localhost"). Plain HTTP is only safe when the server cannot be reached from
@@ -69,6 +149,7 @@ func main() {
 		configFile          string
 		encryptCAKey        bool
 		caKeyPassphraseFile string
+		singleProcess       bool
 	)
 
 	cmd := &cobra.Command{
@@ -160,7 +241,10 @@ func main() {
 					return fmt.Errorf("failed to determine executable: %w", err)
 				}
 				c := exec.Command(exe, os.Args[1:]...)
-				c.Env = append(os.Environ(), "PUPPET_CA_DAEMON=1")
+				// Strip internal role/PSK vars to prevent stale values from a
+				// previous run from confusing the daemon child.
+				daemonEnv := filterEnv(os.Environ(), "PUPPET_CA_ROLE", "PUPPET_CA_DAEMON", "PUPPET_CA_SIGNER_PSK")
+				c.Env = append(daemonEnv, "PUPPET_CA_DAEMON=1")
 				c.Stdin = nil
 				c.Stdout = nil
 				c.Stderr = nil
@@ -171,32 +255,59 @@ func main() {
 				return nil
 			}
 
-			// --- Logging setup ---
-			var logLevel slog.Level
-			switch cfg.Verbosity {
-			case 0:
-				logLevel = slog.LevelInfo
-			case 1:
-				logLevel = slog.LevelDebug
-			default:
-				logLevel = slog.Level(-8) // Trace
+			// --- Role dispatch (key isolation) ---
+			role := os.Getenv("PUPPET_CA_ROLE")
+
+			// Signer mode: load key, serve signing requests on socketpair, exit.
+			if role == "signer" {
+				return runSignerMode(cfg, absCADir)
 			}
 
-			opts := &slog.HandlerOptions{Level: logLevel}
-			var logHandler slog.Handler
+			// Launcher mode (default): spawn isolated signer + frontend children.
+			if role == "" && !singleProcess {
+				return runLauncher()
+			}
 
-			if cfg.LogFile != "" {
-				f, err := os.OpenFile(cfg.LogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0640)
+			// Frontend mode (role=frontend) or single-process mode: run HTTP server.
+			// In frontend mode, connect to the signer process via socketpair.
+			var remoteSigner *signer.RemoteSigner
+			if role == "frontend" {
+				// Connect to the signer first. The PSK handshake blocks until
+				// the signer is ready (i.e. it has finished Init/bootstrap and
+				// written the CA cert to disk).
+				conn, err := signer.DialConn()
 				if err != nil {
-					return fmt.Errorf("failed to open log file %s: %w", cfg.LogFile, err)
+					return fmt.Errorf("connecting to signer process: %w", err)
 				}
-				logHandler = slog.NewJSONHandler(f, opts)
-			} else {
-				logHandler = slog.NewTextHandler(os.Stderr, opts)
+
+				// Now read the CA certificate — guaranteed to exist because the
+				// signer completed Init before accepting the handshake.
+				certPEM, err := os.ReadFile(filepath.Join(absCADir, "ca_crt.pem"))
+				if err != nil {
+					conn.Close()
+					return fmt.Errorf("reading CA cert for remote signer: %w", err)
+				}
+				block, _ := pem.Decode(certPEM)
+				if block == nil {
+					conn.Close()
+					return fmt.Errorf("failed to decode CA cert PEM")
+				}
+				caCert, err := x509.ParseCertificate(block.Bytes)
+				if err != nil {
+					conn.Close()
+					return fmt.Errorf("parsing CA cert: %w", err)
+				}
+
+				rs := signer.NewRemoteSigner(conn, caCert.PublicKey)
+				defer rs.Close()
+				remoteSigner = rs
+				slog.Info("Connected to isolated signer process")
 			}
 
-			logger := slog.New(logHandler)
-			slog.SetDefault(logger)
+			// --- Logging setup ---
+			if err := setupLogger(cfg); err != nil {
+				return err
+			}
 
 			slog.Info("Starting Puppet CA",
 				"cadir", absCADir,
@@ -269,50 +380,30 @@ func main() {
 					asCfg.FileOrPath = cfg.AutosignConfig
 				}
 			}
+			// SECURITY: Validate autosign executable integrity at startup.
+			// Refuses to start if the executable is world-writable or not owned
+			// by root/current user. Logs SHA-256 hash for change detection.
+			// NIST 800-53: CM-5 (Access Restrictions for Change), SI-7 (Software, Firmware, and Information Integrity)
+			if asCfg.Mode == "executable" {
+				if err := validateAutosignExecutable(asCfg.FileOrPath); err != nil {
+					slog.Error("Autosign executable validation failed", "path", asCfg.FileOrPath, "error", err)
+					os.Exit(1)
+				}
+			}
+
 			slog.Debug("Autosign config", "mode", asCfg.Mode, "path", asCfg.FileOrPath)
 
 			// --- CA Initialisation ---
 			myCA := ca.New(store, asCfg, cfg.Hostname)
-			if cfg.OCSPUrl != "" {
-				myCA.OCSPURLs = []string{cfg.OCSPUrl}
+			if err := applyCAConfig(myCA, cfg); err != nil {
+				return err
 			}
-			if cfg.CRLUrl != "" {
-				myCA.CRLURLs = []string{cfg.CRLUrl}
-			}
-			myCA.CRLValidityDays = cfg.CRLValidityDays
 
-			// Apply key and subject config (validated before use in bootstrapCA/Generate).
-			if cfg.CAKeyAlgo != "" || cfg.CAKeySize != 0 {
-				myCA.CAKeyConfig = ca.KeyConfig{
-					Algo: ca.KeyAlgo(cfg.CAKeyAlgo),
-					Size: cfg.CAKeySize,
-				}
-				if err := ca.ValidateKeyConfig(myCA.CAKeyConfig); err != nil {
-					return fmt.Errorf("invalid ca_key_algo / ca_key_size: %w", err)
-				}
-			}
-			if cfg.LeafKeyAlgo != "" || cfg.LeafKeySize != 0 {
-				myCA.LeafKeyConfig = ca.KeyConfig{
-					Algo: ca.KeyAlgo(cfg.LeafKeyAlgo),
-					Size: cfg.LeafKeySize,
-				}
-				if err := ca.ValidateKeyConfig(myCA.LeafKeyConfig); err != nil {
-					return fmt.Errorf("invalid leaf_key_algo / leaf_key_size: %w", err)
-				}
-			}
-			myCA.CASubject = ca.CASubjectConfig{
-				Org:      cfg.CASubjectOrg,
-				OrgUnit:  cfg.CASubjectOU,
-				Country:  cfg.CASubjectCountry,
-				Locality: cfg.CASubjectLocality,
-				Province: cfg.CASubjectProvince,
-			}
-			myCA.CAPathLength = cfg.CAPathLength
-			myCA.CAValidityDays = cfg.CAValidityDays
-			myCA.LeafValidityDays = cfg.LeafValidityDays
-			myCA.EncryptCAKey = cfg.EncryptCAKey
-			myCA.KeyPassphrase = ca.KeyPassphraseConfig{
-				PassphraseFile: cfg.CAKeyPassphraseFile,
+			// SECURITY: In frontend mode, use the remote signer — the CA private
+			// key is never loaded into this process's address space.
+			// NIST 800-53: SC-3 (Security Function Isolation)
+			if remoteSigner != nil {
+				myCA.ExternalSigner = remoteSigner
 			}
 
 			if err := myCA.Init(); err != nil {
@@ -462,8 +553,95 @@ func main() {
 	f.IntVar(&csrRateLimit, "csr-rate-limit", 60, "Max CSR submissions per IP per minute on the public PUT /certificate_request endpoint (0 disables)")
 	f.BoolVar(&encryptCAKey, "encrypt-ca-key", false, "Encrypt the CA private key at rest (AES-256-GCM + Argon2id); a passphrase is auto-generated if not provided")
 	f.StringVar(&caKeyPassphraseFile, "ca-key-passphrase-file", "", "Path to file containing the CA key passphrase (first line used)")
+	f.BoolVar(&singleProcess, "single-process", false, "Disable CA key isolation (run signer and frontend in a single process)")
 
 	if err := cmd.Execute(); err != nil {
 		os.Exit(1)
 	}
+}
+
+// runSignerMode runs the isolated CA key signer process. It initializes the CA
+// (bootstrapping on first run), then serves signing requests over the inherited
+// socketpair fd. The signer has no network exposure — it only communicates with
+// the frontend via the pre-connected Unix socketpair.
+//
+// IMPORTANT: The signer calls Init() which handles bootstrapping. The PSK
+// handshake in signer.Serve() happens AFTER Init completes, so the frontend
+// can safely read the CA cert from disk once the handshake succeeds.
+func runSignerMode(cfg *serverConfig, absCADir string) error {
+	if err := setupLogger(cfg); err != nil {
+		// Signer: fall back to stderr if log file fails.
+		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
+		slog.Warn("Failed to open log file, using stderr", "error", err)
+	}
+
+	slog.Info("Starting CA signer process",
+		"cadir", absCADir,
+		"pid", os.Getpid(),
+	)
+
+	store := storage.New(absCADir)
+
+	// Full CA initialization: handles bootstrap on first run, loads existing
+	// CA on subsequent runs. This writes ca_crt.pem, CRL, inventory, etc.
+	myCA := ca.New(store, ca.AutosignConfig{}, cfg.Hostname)
+	if err := applyCAConfig(myCA, cfg); err != nil {
+		return err
+	}
+
+	if err := myCA.Init(); err != nil {
+		return fmt.Errorf("CA initialization failed: %w", err)
+	}
+
+	slog.Info("CA initialized, serving signing requests")
+	return signer.Serve(myCA.CAKey)
+}
+
+// validateAutosignExecutable checks the integrity of an autosign executable:
+//  1. Resolves symlinks to the real path
+//  2. Verifies the file is not world-writable (mode & 0002)
+//  3. Verifies the file is owned by root (uid 0) or the current process user
+//  4. Logs the SHA-256 hash for change detection
+func validateAutosignExecutable(path string) error {
+	realPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return fmt.Errorf("resolving symlinks for %s: %w", path, err)
+	}
+	if realPath != path {
+		slog.Info("Autosign executable symlink resolved", "path", path, "realpath", realPath)
+	}
+
+	info, err := os.Stat(realPath)
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", realPath, err)
+	}
+
+	// Check world-writable bit.
+	if info.Mode().Perm()&0002 != 0 {
+		return fmt.Errorf("autosign executable %s is world-writable (mode %s); "+
+			"refusing to start — fix with: chmod o-w %s", realPath, info.Mode().Perm(), realPath)
+	}
+
+	// Check file ownership: must be owned by root or the current user.
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if ok {
+		currentUID := uint32(os.Getuid())
+		if stat.Uid != 0 && stat.Uid != currentUID {
+			return fmt.Errorf("autosign executable %s is owned by uid %d (expected root or current user uid %d); "+
+				"refusing to start", realPath, stat.Uid, currentUID)
+		}
+	}
+
+	// Compute and log SHA-256 hash.
+	data, err := os.ReadFile(realPath)
+	if err != nil {
+		return fmt.Errorf("reading %s for hash: %w", realPath, err)
+	}
+	hash := sha256.Sum256(data)
+	slog.Info("Autosign executable configured",
+		"path", realPath,
+		"sha256", hex.EncodeToString(hash[:]),
+		"mode", info.Mode().Perm().String(),
+	)
+	return nil
 }

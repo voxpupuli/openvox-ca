@@ -17,6 +17,11 @@
 package storage
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,6 +40,7 @@ type StorageService struct {
 	inventoryMu sync.RWMutex
 	crlMu       sync.RWMutex
 	fileMu      sync.RWMutex // General file system lock for certs/csrs
+	hmacKey     []byte       // HMAC-SHA256 key for inventory integrity; nil disables
 }
 
 func New(baseDir string) *StorageService {
@@ -64,11 +70,22 @@ func (s *StorageService) WriteSerial(val string) error {
 	return os.WriteFile(filepath.Join(s.baseDir, "serial"), []byte(val), FilePermPublic)
 }
 
+// InitHMAC loads or generates the inventory HMAC key and verifies the
+// existing inventory. Call this once during CA initialization.
+func (s *StorageService) InitHMAC() error {
+	key, err := s.EnsureHMACKey()
+	if err != nil {
+		return err
+	}
+	s.hmacKey = key
+	return s.VerifyInventoryHMAC(key)
+}
+
 func (s *StorageService) AppendInventory(entry string) error {
 	s.inventoryMu.Lock()
 	defer s.inventoryMu.Unlock()
 
-	f, err := os.OpenFile(filepath.Join(s.baseDir, "inventory.txt"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, FilePermPublic)
+	f, err := os.OpenFile(filepath.Join(s.baseDir, "inventory.txt"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, FilePermPrivate)
 	if err != nil {
 		return err
 	}
@@ -77,12 +94,26 @@ func (s *StorageService) AppendInventory(entry string) error {
 	if _, err := f.WriteString(entry + "\n"); err != nil {
 		return err
 	}
+
+	// Update HMAC after successful write.
+	if s.hmacKey != nil {
+		if err := s.UpdateInventoryHMAC(s.hmacKey); err != nil {
+			slog.Warn("Failed to update inventory HMAC", "error", err)
+		}
+	}
 	return nil
 }
 
 func (s *StorageService) ReadInventory() ([]byte, error) {
 	s.inventoryMu.RLock()
 	defer s.inventoryMu.RUnlock()
+
+	// Verify HMAC integrity before returning inventory contents.
+	if s.hmacKey != nil {
+		if err := s.VerifyInventoryHMAC(s.hmacKey); err != nil {
+			return nil, err
+		}
+	}
 	return os.ReadFile(s.InventoryPath())
 }
 
@@ -303,3 +334,89 @@ func listSubjectsInDir(dir string) ([]string, error) {
 	}
 	return subjects, nil
 }
+
+// --- Inventory HMAC integrity ---
+
+const hmacKeyLen = 32
+
+// HMACKeyPath returns the path to the inventory HMAC key file.
+func (s *StorageService) HMACKeyPath() string {
+	return filepath.Join(s.baseDir, "private", ".inventory_hmac_key")
+}
+
+// inventoryHMACPath returns the path to the inventory HMAC file.
+func (s *StorageService) inventoryHMACPath() string {
+	return filepath.Join(s.baseDir, ".inventory.hmac")
+}
+
+// EnsureHMACKey loads or generates the HMAC key used for inventory integrity.
+// Returns the key bytes. The key is stored in private/.inventory_hmac_key with 0600.
+func (s *StorageService) EnsureHMACKey() ([]byte, error) {
+	keyPath := s.HMACKeyPath()
+	if data, err := os.ReadFile(keyPath); err == nil && len(data) == hmacKeyLen {
+		return data, nil
+	}
+
+	key := make([]byte, hmacKeyLen)
+	if _, err := rand.Read(key); err != nil {
+		return nil, fmt.Errorf("generating HMAC key: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(keyPath), DirPerm); err != nil {
+		return nil, fmt.Errorf("creating HMAC key directory: %w", err)
+	}
+	if err := os.WriteFile(keyPath, key, FilePermPrivate); err != nil {
+		return nil, fmt.Errorf("writing HMAC key: %w", err)
+	}
+	return key, nil
+}
+
+// computeInventoryHMAC computes HMAC-SHA256 of the inventory file contents.
+func (s *StorageService) computeInventoryHMAC(hmacKey []byte) ([]byte, error) {
+	data, err := os.ReadFile(s.InventoryPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			data = []byte{}
+		} else {
+			return nil, err
+		}
+	}
+	mac := hmac.New(sha256.New, hmacKey)
+	mac.Write(data)
+	return mac.Sum(nil), nil
+}
+
+// UpdateInventoryHMAC recomputes and writes the HMAC for the current inventory.
+func (s *StorageService) UpdateInventoryHMAC(hmacKey []byte) error {
+	sum, err := s.computeInventoryHMAC(hmacKey)
+	if err != nil {
+		return fmt.Errorf("computing inventory HMAC: %w", err)
+	}
+	return os.WriteFile(s.inventoryHMACPath(), sum, FilePermPrivate)
+}
+
+// VerifyInventoryHMAC checks the inventory file against its stored HMAC.
+// Returns nil if valid, ErrInventoryTampered if tampered, or another error.
+func (s *StorageService) VerifyInventoryHMAC(hmacKey []byte) error {
+	storedMAC, err := os.ReadFile(s.inventoryHMACPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			// No HMAC file yet — first run or migration. Compute and store it.
+			slog.Info("No inventory HMAC found; initializing integrity baseline")
+			return s.UpdateInventoryHMAC(hmacKey)
+		}
+		return fmt.Errorf("reading inventory HMAC: %w", err)
+	}
+
+	computedMAC, err := s.computeInventoryHMAC(hmacKey)
+	if err != nil {
+		return fmt.Errorf("computing inventory HMAC for verification: %w", err)
+	}
+
+	if !hmac.Equal(storedMAC, computedMAC) {
+		return ErrInventoryTampered
+	}
+	return nil
+}
+
+// ErrInventoryTampered is returned when the inventory HMAC verification fails.
+var ErrInventoryTampered = fmt.Errorf("inventory file integrity check failed: HMAC mismatch (possible tampering)")

@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/tvaughan/puppet-ca/internal/config"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -258,17 +259,5 @@ func loadPuppetServerFile(path string) ([]string, error) {
 	return cns, nil
 }
 
-// resolveConfigFile returns the config file path to use:
-// cliFlag → envVar → defaultPath (if it exists) → "".
-func resolveConfigFile(cliFlag, envVar, defaultPath string) string {
-	if cliFlag != "" {
-		return cliFlag
-	}
-	if v := os.Getenv(envVar); v != "" {
-		return v
-	}
-	if _, err := os.Stat(defaultPath); err == nil {
-		return defaultPath
-	}
-	return ""
-}
+// resolveConfigFile delegates to the shared config.ResolveConfigFile.
+var resolveConfigFile = config.ResolveConfigFile

@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -223,7 +224,7 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetCert(w http.ResponseWriter, r *http.Request) {
 	subject := r.PathValue("subject")
-	slog.Debug("GET certificate", "subject", subject)
+	slog.Info("GET certificate", "subject", subject, "client", clientCN(r))
 
 	// Special case: "ca" returns the CA cert.
 	if subject == "ca" {
@@ -254,7 +255,7 @@ func (s *Server) handleGetCert(w http.ResponseWriter, r *http.Request) {
 // --- CRL ---
 
 func (s *Server) handleGetCRL(w http.ResponseWriter, r *http.Request) {
-	slog.Debug("GET certificate_revocation_list/ca")
+	slog.Info("GET certificate_revocation_list/ca", "client", clientCN(r))
 
 	crlPath := s.CA.Storage.CRLPath()
 
@@ -287,7 +288,7 @@ func (s *Server) handleGetRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
-	slog.Debug("GET certificate_request", "subject", subject)
+	slog.Info("GET certificate_request", "subject", subject, "client", clientCN(r))
 
 	csrPEM, err := s.CA.Storage.GetCSR(subject)
 	if err != nil {
@@ -312,7 +313,7 @@ func (s *Server) handlePutRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
-	slog.Debug("PUT certificate_request", "subject", subject)
+	slog.Info("PUT certificate_request", "subject", subject, "client", clientCN(r))
 
 	// SECURITY: Limit CSR body to 1 MiB to prevent memory exhaustion.
 	// NIST 800-53: SC-5 (Denial-of-Service Protection)
@@ -435,28 +436,28 @@ func (s *Server) signInBatches(subjects []string) ca.SignResult {
 
 // --- Helpers ---
 
-func parseCert(pemData []byte) *x509.Certificate {
+func parseCert(pemData []byte) (*x509.Certificate, error) {
 	block, _ := pem.Decode(pemData)
 	if block == nil {
-		return &x509.Certificate{}
+		return nil, fmt.Errorf("failed to decode certificate PEM")
 	}
-	c, _ := x509.ParseCertificate(block.Bytes)
-	if c == nil {
-		return &x509.Certificate{}
+	c, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse certificate: %w", err)
 	}
-	return c
+	return c, nil
 }
 
-func parseCSR(pemData []byte) *x509.CertificateRequest {
+func parseCSR(pemData []byte) (*x509.CertificateRequest, error) {
 	block, _ := pem.Decode(pemData)
 	if block == nil {
-		return &x509.CertificateRequest{}
+		return nil, fmt.Errorf("failed to decode CSR PEM")
 	}
-	c, _ := x509.ParseCertificateRequest(block.Bytes)
-	if c == nil {
-		return &x509.CertificateRequest{}
+	c, err := x509.ParseCertificateRequest(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse CSR: %w", err)
 	}
-	return c
+	return c, nil
 }
 
 // authExtensions extracts Puppet authorization extensions (OID arc 1.3.6.1.4.1.34380.1.3)
@@ -507,7 +508,20 @@ func noNilSlice(s []string) []string {
 
 // certStatusFromCert builds a CertStatusResponse from a signed or revoked certificate.
 func certStatusFromCert(subject string, certPEM []byte, state string) CertStatusResponse {
-	cert := parseCert(certPEM)
+	cert, err := parseCert(certPEM)
+	if err != nil {
+		slog.Warn("Failed to parse cert for status response", "subject", subject, "error", err)
+		fp := fingerprint(certPEM)
+		return CertStatusResponse{
+			Name:                    subject,
+			State:                   state,
+			Fingerprint:             fp,
+			Fingerprints:            map[string]string{"SHA256": fp, "default": fp},
+			DNSAltNames:             []string{},
+			SubjectAltNames:         []string{},
+			AuthorizationExtensions: map[string]string{},
+		}
+	}
 	fp := fingerprint(certPEM)
 	serial := cert.SerialNumber.Text(10) // decimal string; preserves full 128-bit value
 	nb := cert.NotBefore.UTC().Format(time.RFC3339)
@@ -529,8 +543,20 @@ func certStatusFromCert(subject string, certPEM []byte, state string) CertStatus
 
 // certStatusFromCSR builds a CertStatusResponse for a pending (requested) CSR.
 func certStatusFromCSR(subject string, csrPEM []byte) CertStatusResponse {
-	csr := parseCSR(csrPEM)
 	fp := fingerprint(csrPEM)
+	csr, err := parseCSR(csrPEM)
+	if err != nil {
+		slog.Warn("Failed to parse CSR for status response", "subject", subject, "error", err)
+		return CertStatusResponse{
+			Name:                    subject,
+			State:                   "requested",
+			Fingerprint:             fp,
+			Fingerprints:            map[string]string{"SHA256": fp, "default": fp},
+			DNSAltNames:             []string{},
+			SubjectAltNames:         []string{},
+			AuthorizationExtensions: map[string]string{},
+		}
+	}
 	dnsNames := noNilSlice(csr.DNSNames)
 	return CertStatusResponse{
 		Name:                    subject,
@@ -572,7 +598,7 @@ func (s *Server) handleDeleteStatus(w http.ResponseWriter, r *http.Request) {
 // --- Certificate statuses (list all) ---
 
 func (s *Server) handleGetStatuses(w http.ResponseWriter, r *http.Request) {
-	slog.Debug("GET certificate_statuses")
+	slog.Info("GET certificate_statuses", "client", clientCN(r))
 
 	stateFilter := r.URL.Query().Get("state") // "requested", "signed", "revoked", or ""
 
@@ -639,7 +665,7 @@ type CertExpiration struct {
 }
 
 func (s *Server) handleGetExpirations(w http.ResponseWriter, r *http.Request) {
-	slog.Debug("GET expirations")
+	slog.Info("GET expirations", "client", clientCN(r))
 
 	certExp := s.CA.CACert.NotAfter.UTC().Format(time.RFC3339)
 

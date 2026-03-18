@@ -95,6 +95,13 @@ type CA struct {
 	// EncryptCAKey controls whether the CA key is encrypted at rest.
 	// When true, the key is encrypted using the resolved passphrase.
 	EncryptCAKey bool
+
+	// ExternalSigner, when non-nil, is used instead of loading the CA private
+	// key from disk. This enables key isolation: the private key lives in a
+	// separate process and signing requests are proxied over IPC.
+	// Set before calling Init(). When set, Init() skips key file loading and
+	// the key-cert match verification (the signer process verifies this).
+	ExternalSigner crypto.Signer
 	serialIndex map[string]string         // uppercase hex serial (no leading zeros) → subject; protected by mu
 	ocspCache   map[string]ocspCacheEntry // same key; protected by mu
 	cachedCRL   *x509.RevocationList      // in-memory CRL for auth checks; protected by mu
@@ -117,4 +124,15 @@ func (c *CA) IsReady() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.CACert != nil && c.CAKey != nil
+}
+
+// LoadKey loads the CA private key and certificate from disk without full
+// initialization (no HMAC, serial index, or CRL cache).
+func (c *CA) LoadKey() (crypto.Signer, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.loadCA(); err != nil {
+		return nil, err
+	}
+	return c.CAKey, nil
 }

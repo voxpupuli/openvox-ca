@@ -29,6 +29,7 @@ var ctlEnvVars = []string{
 	"PUPPET_CA_CTL_CLIENT_CERT",
 	"PUPPET_CA_CTL_CLIENT_KEY",
 	"PUPPET_CA_CTL_VERBOSE",
+	"PUPPET_CA_CTL_INSECURE",
 }
 
 // clearCtlEnv unsets all PUPPET_CA_CTL_* vars and restores them after the test.
@@ -123,6 +124,9 @@ func TestLoadCtlConfigDefaults(t *testing.T) {
 	if cfg.Verbose {
 		t.Error("Verbose = true; want false")
 	}
+	if cfg.Insecure {
+		t.Error("Insecure = true; want false")
+	}
 }
 
 // --- loadCtlConfig: YAML file ---
@@ -175,6 +179,24 @@ func TestLoadCtlConfigYAMLPartial(t *testing.T) {
 	}
 	if cfg.Verbose {
 		t.Error("Verbose = true; want default false")
+	}
+}
+
+// TestLoadCtlConfigYAMLInsecure verifies that insecure: true is loaded from YAML.
+func TestLoadCtlConfigYAMLInsecure(t *testing.T) {
+	clearCtlEnv(t)
+
+	cfgFile := writeTempCtlConfig(t, "insecure: true\n")
+	cfg, err := loadCtlConfig(cfgFile)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.Insecure {
+		t.Error("Insecure = false; want true from YAML")
+	}
+	// Ensure default server_url is preserved when only insecure is set.
+	if cfg.ServerURL != "https://localhost:8140" {
+		t.Errorf("ServerURL = %q; want default https://localhost:8140", cfg.ServerURL)
 	}
 }
 
@@ -252,6 +274,16 @@ func TestApplyCtlEnvEachVar(t *testing.T) {
 			check: func(c *ctlConfig) bool { return c.Verbose },
 			desc:  "Verbose=1",
 		},
+		{
+			name: "INSECURE_true", envKey: "PUPPET_CA_CTL_INSECURE", envVal: "true",
+			check: func(c *ctlConfig) bool { return c.Insecure },
+			desc:  "Insecure=true",
+		},
+		{
+			name: "INSECURE_1", envKey: "PUPPET_CA_CTL_INSECURE", envVal: "1",
+			check: func(c *ctlConfig) bool { return c.Insecure },
+			desc:  "Insecure=1",
+		},
 	}
 
 	for _, tc := range tests {
@@ -277,6 +309,32 @@ func TestApplyCtlEnvInvalidValues(t *testing.T) {
 
 	if cfg.Verbose {
 		t.Error("Verbose changed on bad input: want false")
+	}
+}
+
+// TestApplyCtlEnvInsecureFalse verifies that PUPPET_CA_CTL_INSECURE=false does not set Insecure.
+func TestApplyCtlEnvInsecureFalse(t *testing.T) {
+	clearCtlEnv(t)
+	t.Setenv("PUPPET_CA_CTL_INSECURE", "false")
+
+	cfg := &ctlConfig{}
+	applyCtlEnv(cfg)
+
+	if cfg.Insecure {
+		t.Error("Insecure = true; want false when env is 'false'")
+	}
+}
+
+// TestApplyCtlEnvInsecureInvalid verifies that a malformed INSECURE value is silently ignored.
+func TestApplyCtlEnvInsecureInvalid(t *testing.T) {
+	clearCtlEnv(t)
+	t.Setenv("PUPPET_CA_CTL_INSECURE", "maybe")
+
+	cfg := &ctlConfig{}
+	applyCtlEnv(cfg)
+
+	if cfg.Insecure {
+		t.Error("Insecure changed on bad input: want false")
 	}
 }
 

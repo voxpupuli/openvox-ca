@@ -49,6 +49,7 @@ var (
 	globalClientCert string
 	globalClientKey  string
 	globalVerbose    bool
+	globalInsecure   bool
 	globalConfigFile string
 )
 
@@ -79,13 +80,20 @@ func newClient() (*Client, error) {
 			pool.AddCert(cert)
 		}
 		tlsCfg.RootCAs = pool
-	} else {
-		// SECURITY: No CA cert provided — TLS server identity is not verified.
-		// This makes the connection vulnerable to man-in-the-middle attacks.
-		// Operators should provide --ca-cert for production use.
+	} else if globalInsecure {
+		// SECURITY: Operator explicitly opted in to skip TLS verification.
 		// NIST 800-53: SC-8 (Transmission Confidentiality and Integrity)
-		fmt.Fprintln(os.Stderr, "WARNING: --ca-cert not provided; TLS server certificate will NOT be verified (vulnerable to MITM)")
+		fmt.Fprintln(os.Stderr, "WARNING: --insecure specified; TLS server certificate will NOT be verified (vulnerable to MITM)")
+		slog.Warn("TLS server verification disabled", "server", globalServerURL)
 		tlsCfg.InsecureSkipVerify = true //nolint:gosec
+	} else {
+		// SECURITY: Neither --ca-cert nor --insecure provided. Use the system
+		// trust store (tlsCfg.RootCAs = nil). If the CA uses a self-signed cert
+		// not in the system store, the connection will fail with a clear error,
+		// which is the safe default.
+		// NIST 800-53: SC-8 (Transmission Confidentiality and Integrity)
+		fmt.Fprintln(os.Stderr, "NOTE: --ca-cert not provided; using system trust store for TLS verification. "+
+			"If the server uses a self-signed CA certificate, provide --ca-cert or use --insecure.")
 	}
 
 	// SECURITY: Enforce TLS 1.3 minimum to prevent protocol downgrade attacks.
@@ -501,6 +509,9 @@ Global flags must be specified before the subcommand.`,
 			if pf.Changed("verbose") {
 				cfg.Verbose = globalVerbose
 			}
+			if pf.Changed("insecure") {
+				cfg.Insecure = globalInsecure
+			}
 
 			// Assign resolved values back to globals used by subcommands.
 			globalServerURL = cfg.ServerURL
@@ -508,6 +519,7 @@ Global flags must be specified before the subcommand.`,
 			globalClientCert = cfg.ClientCert
 			globalClientKey = cfg.ClientKey
 			globalVerbose = cfg.Verbose
+			globalInsecure = cfg.Insecure
 
 			if globalVerbose {
 				slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
@@ -523,6 +535,7 @@ Global flags must be specified before the subcommand.`,
 	pf.StringVar(&globalClientCert, "client-cert", "", "Path to client certificate PEM for mTLS")
 	pf.StringVar(&globalClientKey, "client-key", "", "Path to client private key PEM for mTLS")
 	pf.BoolVar(&globalVerbose, "verbose", false, "Enable verbose logging")
+	pf.BoolVar(&globalInsecure, "insecure", false, "Skip TLS server certificate verification (vulnerable to MITM; use only for testing)")
 
 	rootCmd.AddCommand(
 		newListCmd(),

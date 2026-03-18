@@ -271,7 +271,12 @@ func (c *CA) signWithDuration(subject string, ttl time.Duration) ([]byte, error)
 		slog.Warn("Could not delete CSR after signing", "subject", subject, "error", err)
 	}
 
-	slog.Info("Certificate signed", "subject", subject, "serial", serialStr)
+	slog.Info("Certificate signed",
+		"subject", subject,
+		"serial", serialStr,
+		"not_before", template.NotBefore.Format(time.RFC3339),
+		"not_after", template.NotAfter.Format(time.RFC3339),
+	)
 	return certPEM, nil
 }
 
@@ -369,6 +374,15 @@ func (c *CA) SaveRequest(subject string, csrPEM []byte) (bool, error) {
 	csr, err := x509.ParseCertificateRequest(block.Bytes)
 	if err != nil {
 		return false, fmt.Errorf("failed to parse CSR for %s: %w", subject, err)
+	}
+
+	// SECURITY: Verify the CSR's proof-of-possession signature before storing.
+	// Without this check an attacker can submit a CSR with someone else's
+	// public key (identity theft). The signature proves the submitter holds
+	// the private key corresponding to the CSR's public key.
+	// NIST 800-53: IA-5(2) (PKI-Based Authentication)
+	if err := csr.CheckSignature(); err != nil {
+		return false, fmt.Errorf("invalid CSR signature for %s: %w", subject, err)
 	}
 
 	// SECURITY: CN in the CSR must match the URL subject. Without this check

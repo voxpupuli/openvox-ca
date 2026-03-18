@@ -5,12 +5,12 @@ RUN dnf install -y golang git && dnf clean all
 
 WORKDIR /src
 COPY go.mod go.sum ./
-# Download dependencies with GOTOOLCHAIN=local to use the installed Go version
-# (go.mod may reference a Red Hat-specific version string)
-RUN GOTOOLCHAIN=local go mod download
+# GOTOOLCHAIN=auto lets Go download the exact version required by go.mod
+# (the distro-packaged Go bootstraps the download).
+RUN GOTOOLCHAIN=auto go mod download
 
 COPY . .
-RUN GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux \
+RUN GOTOOLCHAIN=auto CGO_ENABLED=0 GOOS=linux \
     go build -ldflags="-s -w" -o /puppet-ca     ./cmd/puppet-ca/ && \
     go build -ldflags="-s -w" -o /puppet-ca-ctl ./cmd/puppet-ca-ctl/
 

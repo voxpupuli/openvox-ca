@@ -327,6 +327,138 @@ var _ = Describe("StorageService", func() {
 		})
 	})
 
+	// --- HMAC inventory integrity ---
+
+	Describe("HMAC inventory integrity", func() {
+		BeforeEach(func() {
+			Expect(store.EnsureDirs()).To(Succeed())
+		})
+
+		Describe("EnsureHMACKey", func() {
+			It("generates a key on first call and returns the same key on second call", func() {
+				key1, err := store.EnsureHMACKey()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(key1).To(HaveLen(32))
+
+				key2, err := store.EnsureHMACKey()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(key2).To(Equal(key1))
+			})
+
+			It("stores the key file with 0600 permissions", func() {
+				_, err := store.EnsureHMACKey()
+				Expect(err).NotTo(HaveOccurred())
+
+				info, err := os.Stat(store.HMACKeyPath())
+				Expect(err).NotTo(HaveOccurred())
+				Expect(info.Mode().Perm()).To(Equal(os.FileMode(0600)))
+			})
+		})
+
+		Describe("InitHMAC", func() {
+			It("succeeds on a fresh directory and creates the HMAC file", func() {
+				Expect(store.InitHMAC()).To(Succeed())
+
+				hmacPath := filepath.Join(tmpDir, ".inventory.hmac")
+				_, err := os.Stat(hmacPath)
+				Expect(err).NotTo(HaveOccurred(), "HMAC file should exist after InitHMAC")
+			})
+
+			It("succeeds when inventory already has content", func() {
+				// Pre-populate inventory before HMAC initialization.
+				Expect(os.WriteFile(store.InventoryPath(), []byte("0001 2024-01-01 2029-01-01 /node1\n"), storage.FilePermPrivate)).To(Succeed())
+				Expect(store.InitHMAC()).To(Succeed())
+			})
+		})
+
+		Describe("VerifyInventoryHMAC", func() {
+			It("passes with a valid inventory", func() {
+				key, err := store.EnsureHMACKey()
+				Expect(err).NotTo(HaveOccurred())
+
+				// Write inventory and compute initial HMAC.
+				Expect(os.WriteFile(store.InventoryPath(), []byte("0001 2024-01-01 2029-01-01 /node1\n"), storage.FilePermPrivate)).To(Succeed())
+				Expect(store.UpdateInventoryHMAC(key)).To(Succeed())
+
+				Expect(store.VerifyInventoryHMAC(key)).To(Succeed())
+			})
+
+			It("fails after the inventory has been tampered with", func() {
+				key, err := store.EnsureHMACKey()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(os.WriteFile(store.InventoryPath(), []byte("0001 2024-01-01 2029-01-01 /node1\n"), storage.FilePermPrivate)).To(Succeed())
+				Expect(store.UpdateInventoryHMAC(key)).To(Succeed())
+
+				// Tamper with the inventory.
+				Expect(os.WriteFile(store.InventoryPath(), []byte("0001 2024-01-01 2029-01-01 /evil-node\n"), storage.FilePermPrivate)).To(Succeed())
+
+				err = store.VerifyInventoryHMAC(key)
+				Expect(err).To(MatchError(storage.ErrInventoryTampered))
+			})
+
+			It("initializes HMAC baseline when no HMAC file exists yet", func() {
+				key, err := store.EnsureHMACKey()
+				Expect(err).NotTo(HaveOccurred())
+
+				// VerifyInventoryHMAC on first call should create the HMAC file (migration).
+				Expect(store.VerifyInventoryHMAC(key)).To(Succeed())
+
+				hmacPath := filepath.Join(tmpDir, ".inventory.hmac")
+				_, err = os.Stat(hmacPath)
+				Expect(err).NotTo(HaveOccurred(), "HMAC file should be created on first verify")
+			})
+		})
+
+		Describe("AppendInventory + ReadInventory round-trip with HMAC", func() {
+			It("works normally when HMAC is initialized", func() {
+				Expect(store.InitHMAC()).To(Succeed())
+
+				Expect(store.AppendInventory("0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1")).To(Succeed())
+				Expect(store.AppendInventory("0002 2024-01-02T00:00:00UTC 2029-01-02T00:00:00UTC /node2")).To(Succeed())
+
+				data, err := store.ReadInventory()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(string(data)).To(ContainSubstring("/node1"))
+				Expect(string(data)).To(ContainSubstring("/node2"))
+			})
+		})
+
+		Describe("Tamper detection end-to-end", func() {
+			It("ReadInventory returns ErrInventoryTampered when inventory is modified after InitHMAC", func() {
+				Expect(store.InitHMAC()).To(Succeed())
+
+				Expect(store.AppendInventory("0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /legit-node")).To(Succeed())
+
+				// Tamper with the inventory file directly on disk.
+				invPath := store.InventoryPath()
+				Expect(os.WriteFile(invPath, []byte("0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /attacker-node\n"), storage.FilePermPrivate)).To(Succeed())
+
+				_, err := store.ReadInventory()
+				Expect(err).To(MatchError(storage.ErrInventoryTampered))
+			})
+		})
+	})
+
+	// --- Inventory file permissions ---
+
+	Describe("Inventory file permissions", func() {
+		BeforeEach(func() {
+			Expect(store.EnsureDirs()).To(Succeed())
+		})
+
+		It("AppendInventory creates inventory with 0600 permissions", func() {
+			// Ensure no pre-existing inventory file.
+			os.Remove(store.InventoryPath())
+
+			Expect(store.AppendInventory("0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1")).To(Succeed())
+
+			info, err := os.Stat(store.InventoryPath())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(info.Mode().Perm()).To(Equal(os.FileMode(0600)))
+		})
+	})
+
 	// --- ListCerts ---
 
 	Describe("ListCerts", func() {

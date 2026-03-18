@@ -23,7 +23,34 @@ import (
 	"encoding/pem"
 	"fmt"
 	"log/slog"
+	"regexp"
 )
+
+// maxDNSAltNames is the maximum number of DNS alt names allowed per certificate.
+const maxDNSAltNames = 100
+
+// maxDNSNameLen is the maximum length of a single DNS alt name (RFC 1035 limit).
+const maxDNSNameLen = 253
+
+// dnsNameRegex matches valid DNS hostnames (RFC 952 / RFC 1123).
+var dnsNameRegex = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
+
+// validateDNSAltNames checks that DNS alt names are well-formed hostnames
+// within reasonable bounds.
+func validateDNSAltNames(names []string) error {
+	if len(names) > maxDNSAltNames {
+		return fmt.Errorf("too many DNS alt names (%d > %d)", len(names), maxDNSAltNames)
+	}
+	for _, name := range names {
+		if len(name) > maxDNSNameLen {
+			return fmt.Errorf("DNS alt name %q exceeds maximum length (%d > %d)", name, len(name), maxDNSNameLen)
+		}
+		if !dnsNameRegex.MatchString(name) {
+			return fmt.Errorf("invalid DNS alt name %q: must be a valid hostname", name)
+		}
+	}
+	return nil
+}
 
 // GenerateResult holds the PEM-encoded private key and signed certificate
 // produced by a server-side Generate call.
@@ -43,6 +70,11 @@ type GenerateResult struct {
 // exists for subject.
 func (c *CA) Generate(subject string, dnsAltNames []string) (*GenerateResult, error) {
 	if err := ValidateSubject(subject); err != nil {
+		return nil, err
+	}
+
+	// Validate DNS alt names: must be valid hostnames, bounded count and length.
+	if err := validateDNSAltNames(dnsAltNames); err != nil {
 		return nil, err
 	}
 
