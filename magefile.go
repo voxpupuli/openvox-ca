@@ -47,13 +47,13 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 )
 
-// ── Namespaces ────────────────────────────────────────────────────────────────
+// -- Namespaces ----------------------------------------------------------------
 
 type Build mg.Namespace // build:all  build:fips  build:dist
 type Test mg.Namespace  // test:unit  test:integcompose  test:integcomposefips  test:loadcompose  test:bench  test:puppet  test:puppetfips  test:migration
 type Dev mg.Namespace   // dev:check  dev:tidy    dev:clean  dev:container
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// -- Helpers ------------------------------------------------------------------─
 
 func ensureBinDir() (string, error) {
 	dir, err := os.Getwd()
@@ -104,7 +104,7 @@ func systemInfo() map[string]string {
 	return info
 }
 
-// ── build:* ───────────────────────────────────────────────────────────────────
+// -- build:* ------------------------------------------------------------------─
 
 // All compiles both binaries (puppet-ca and puppet-ca-ctl) to bin/.
 func (Build) All() error {
@@ -246,7 +246,7 @@ func (Build) Dist() error {
 	)
 }
 
-// ── test:* ────────────────────────────────────────────────────────────────────
+// -- test:* --------------------------------------------------------------------
 
 // Unit runs the unit test suite with coverage, piping output through tparse
 // for a colorful per-package summary table.
@@ -435,7 +435,7 @@ func (Test) PuppetFIPS() error {
 	return sh.RunV("bash", "test/puppet/puppet-stack.sh", "--up")
 }
 
-// ── dev:* ─────────────────────────────────────────────────────────────────────
+// -- dev:* --------------------------------------------------------------------─
 
 // Check verifies formatting, runs go vet, and checks go mod tidy.
 // Unlike `go fmt`, gofmt -l prints unformatted files and exits 0 without
@@ -519,7 +519,7 @@ func (Dev) Container() error {
 	return nil
 }
 
-// ── types and helpers ─────────────────────────────────────────────────────────
+// -- types and helpers --------------------------------------------------------─
 
 type ContainerConfig struct {
 	Image  string `env:"IMAGE_NAME" envDefault:"puppet-ca-go:latest"`

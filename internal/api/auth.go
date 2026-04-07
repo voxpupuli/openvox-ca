@@ -109,8 +109,8 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 		clientCN := clientCert.Subject.CommonName
 
 		// SECURITY: CRL-based revocation check on the presented certificate's
-		// serial number. Checks the actual presented cert — not the cert on
-		// disk for the same CN — so old revoked credentials are rejected even
+		// serial number. Checks the actual presented cert, not the cert on
+		// disk for the same CN, so old revoked credentials are rejected even
 		// after re-issuance. Fail-closed: a CRL read error is also treated
 		// as a denial.
 		// NIST 800-53: IA-5(2) (PKI-Based Authentication), SC-17 (PKI Certificates)
@@ -155,11 +155,11 @@ func lookupTier(method, path string, cfg *AuthConfig) authTier {
 	p := strings.TrimPrefix(path, "/puppet-ca/v1")
 
 	switch {
-	// Health check probes — always public; orchestrators poll without client certs.
+	// Health check probes: always public; orchestrators poll without client certs.
 	case method == "GET" && strings.HasPrefix(p, "/healthz/"):
 		return tierPublic
 
-	// Public — no cert needed.
+	// Public: no cert needed.
 	// Signed certs contain no secrets; bootstrapping nodes fetch their cert
 	// before they have a client cert, matching Puppet Server 8 behaviour.
 	case method == "GET" && strings.HasPrefix(p, "/certificate/"):
@@ -191,7 +191,7 @@ func lookupTier(method, path string, cfg *AuthConfig) authTier {
 	case method == "GET" && strings.HasPrefix(p, "/certificate_request/"):
 		return tierSelfOrAdmin
 
-	// Admin only — all other operations.
+	// Admin only: all other operations.
 	default:
 		return tierAdminOnly
 	}

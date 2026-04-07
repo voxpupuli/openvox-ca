@@ -177,7 +177,7 @@ func (s *StorageService) CAPubKeyPath() string {
 	return filepath.Join(s.baseDir, "ca_pub.pem")
 }
 
-// Helpers for paths — subject is pre-validated as ^[a-z0-9._-]+$ by the CA layer.
+// Helpers for paths. Subject is pre-validated as ^[a-z0-9._-]+$ by the CA layer.
 func (s *StorageService) reqPath(subject string) string {
 	return filepath.Join(s.baseDir, "requests", subject+".pem")
 }
@@ -400,7 +400,7 @@ func (s *StorageService) VerifyInventoryHMAC(hmacKey []byte) error {
 	storedMAC, err := os.ReadFile(s.inventoryHMACPath())
 	if err != nil {
 		if os.IsNotExist(err) {
-			// No HMAC file yet — first run or migration. Compute and store it.
+			// No HMAC file yet (first run or migration). Compute and store it.
 			slog.Info("No inventory HMAC found; initializing integrity baseline")
 			return s.UpdateInventoryHMAC(hmacKey)
 		}

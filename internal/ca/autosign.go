@@ -93,7 +93,7 @@ func checkAutosignExecutable(cfg AutosignConfig, commonName string, csrPEM []byt
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, cfg.FileOrPath, commonName)
-	// SECURITY: Environment sanitization — only allowlisted variables are
+	// SECURITY: Environment sanitization: only allowlisted variables are
 	// passed to the autosign subprocess. Prevents leaking secrets (API keys,
 	// cloud tokens, DB credentials) from the CA process environment to
 	// user-supplied scripts.

@@ -2,9 +2,9 @@
 #
 # Services
 # --------
-#   puppet-ca  — CA server with autosign=true so the workflow scenario
-#                (generate → status → cert → clean) is fully self-contained.
-#   k6         — Grafana k6 load runner executing test/load.js.
+#   puppet-ca  - CA server with autosign=true so the workflow scenario
+#                (generate -> status -> cert -> clean) is fully self-contained.
+#   k6         - Grafana k6 load runner executing test/load.js.
 #
 # Usage (from project root):
 #   mage bench                        # build images, run k6, tear down
@@ -14,7 +14,7 @@ name: puppet-ca-bench
 
 services:
 
-  # ── CA server ─────────────────────────────────────────────────────────────
+  # -- CA server ------------------------------------------------------------─
   puppet-ca:
     build:
       context: .
@@ -39,7 +39,7 @@ services:
       retries: 20
       start_period: 8s
 
-  # ── k6 load runner ────────────────────────────────────────────────────────
+  # -- k6 load runner --------------------------------------------------------
   k6:
     image: grafana/k6:latest
     tty: true       # allocate a PTY so k6 uses its live updating progress display

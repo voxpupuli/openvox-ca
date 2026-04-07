@@ -64,7 +64,7 @@ var _ = Describe("CheckAutosign", func() {
 
 	AfterEach(func() { os.RemoveAll(tmpDir) })
 
-	// ── mode = off ────────────────────────────────────────────────────────────
+	// --- mode = off ---
 	Describe("mode=off (default)", func() {
 		It("never signs", func() {
 			ok, err := ca.CheckAutosign(ca.AutosignConfig{}, csr, csrPEM)
@@ -79,7 +79,7 @@ var _ = Describe("CheckAutosign", func() {
 		})
 	})
 
-	// ── mode = true ───────────────────────────────────────────────────────────
+	// --- mode = true ---
 	Describe("mode=true", func() {
 		It("always signs", func() {
 			ok, err := ca.CheckAutosign(ca.AutosignConfig{Mode: "true"}, csr, csrPEM)
@@ -88,7 +88,7 @@ var _ = Describe("CheckAutosign", func() {
 		})
 	})
 
-	// ── mode = file ───────────────────────────────────────────────────────────
+	// --- mode = file ---
 	Describe("mode=file", func() {
 		writeConf := func(content string) string {
 			path := filepath.Join(tmpDir, "autosign.conf")
@@ -145,7 +145,7 @@ var _ = Describe("CheckAutosign", func() {
 		})
 	})
 
-	// ── mode = executable ─────────────────────────────────────────────────────
+	// --- mode = executable ---
 	Describe("mode=executable", func() {
 		writeScript := func(content string) string {
 			path := filepath.Join(tmpDir, "autosign.sh")
@@ -199,14 +199,14 @@ case "$1" in
   *)             exit 1 ;;
 esac
 `)
-			// Matching CN — should sign.
+			// Matching CN: should sign.
 			ok, err := ca.CheckAutosign(
 				ca.AutosignConfig{Mode: "executable", FileOrPath: script},
 				csr, csrPEM)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(ok).To(BeTrue())
 
-			// Non-matching CN — should deny.
+			// Non-matching CN: should deny.
 			csrPEM2, csr2 := buildCSR("other.org")
 			ok, err = ca.CheckAutosign(
 				ca.AutosignConfig{Mode: "executable", FileOrPath: script},

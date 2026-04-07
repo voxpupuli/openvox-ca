@@ -84,7 +84,7 @@ func TestValidateAutosignExecutable_SymlinkToValidFile(t *testing.T) {
 func TestValidateAutosignExecutable_GroupWritableNotWorldWritable(t *testing.T) {
 	tmp := t.TempDir()
 	exe := filepath.Join(tmp, "autosign.sh")
-	// Mode 0770 — group-writable but not world-writable.
+	// Mode 0770: group-writable but not world-writable.
 	if err := os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0770); err != nil {
 		t.Fatalf("setup: %v", err)
 	}

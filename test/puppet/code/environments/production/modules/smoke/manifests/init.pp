@@ -8,7 +8,7 @@ class smoke {
     content => "Managed by Puppet\nCertname: ${trusted['certname']}\n",
   }
 
-  # Exported resource — each node exports its identity; all nodes collect.
+  # Exported resource: each node exports its identity; all nodes collect.
   # Requires PuppetDB (storeconfigs) to resolve <<| |>> queries.
   @@file { "/tmp/exported_from_${trusted['certname']}":
     ensure  => file,

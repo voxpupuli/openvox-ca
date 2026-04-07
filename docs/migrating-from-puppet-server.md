@@ -2,7 +2,7 @@
 
 This guide walks through replacing Puppet Server's built-in CA with `puppet-ca`.
 The Go CA uses the same HTTP API and a compatible flat-file layout, so existing
-agents continue to work without reconfiguration — provided the CA hostname and
+agents continue to work without reconfiguration, provided the CA hostname and
 port stay the same.
 
 ## Prerequisites
@@ -10,7 +10,7 @@ port stay the same.
 - `puppet-ca` and `puppet-ca-ctl` binaries built and installed
 - Access to the existing Puppet Server CA directory
   (typically `/etc/puppetlabs/puppet/ssl` or `/etc/puppetlabs/puppetserver/ca`)
-- Maintenance window — agents cannot sign new certs during migration
+- Maintenance window: agents cannot sign new certs during migration
 
 ## Quick overview
 
@@ -46,7 +46,7 @@ Puppet Server stores CA material in one of two locations depending on version:
 Find your CA cert and key:
 
 ```bash
-# Typical locations — adjust for your installation
+# Typical locations -- adjust for your installation
 CA_CERT="$PUPPET_SSL/ca/ca_crt.pem"
 CA_KEY="$PUPPET_SSL/ca/ca_key.pem"
 CA_CRL="$PUPPET_SSL/ca/ca_crl.pem"
@@ -72,7 +72,7 @@ echo "CA imported into $NEW_CADIR"
 ```
 
 This creates the directory structure, writes the CA cert/key/CRL, and
-initialises `inventory.txt` and `serial` (the serial file is written for compatibility but is not used at runtime — puppet-ca generates random serial numbers).
+initialises `inventory.txt` and `serial` (the serial file is written for compatibility but is not used at runtime; puppet-ca generates random serial numbers).
 
 ## Step 4: Copy signed certificates
 
@@ -281,7 +281,7 @@ without needing the `pp_cli_auth` extension at all.
 
 puppet-ca does not accept `puppet cert` command syntax directly. Use
 `puppet-ca-ctl` instead (see the CLI command mapping table above). The HTTP
-API is fully compatible — only the CLI tool name and flag syntax differ.
+API is fully compatible; only the CLI tool name and flag syntax differ.
 
 ### Agent configuration
 

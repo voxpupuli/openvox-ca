@@ -37,12 +37,12 @@ import (
 // Process tree:
 //
 //	puppet-ca (launcher/supervisor)
-//	├── puppet-ca [signer]   — holds CA key, no network, socketpair only
-//	└── puppet-ca [frontend]  — HTTP server, connects to signer via socketpair
+//	├-- puppet-ca [signer]    holds CA key, no network, socketpair only
+//	└-- puppet-ca [frontend]  HTTP server, connects to signer via socketpair
 //
 // SECURITY: The socketpair is created before either child is spawned and
 // passed via inherited file descriptors (fd 3). There is no filesystem path
-// for the socket — only the two child processes hold endpoints.
+// for the socket; only the two child processes hold endpoints.
 // NIST 800-53: SC-3 (Security Function Isolation), SC-4 (Information in Shared System Resources)
 func runLauncher() error {
 	// Create the socketpair for signer ↔ frontend communication.
@@ -55,7 +55,7 @@ func runLauncher() error {
 
 	// Generate a PSK for authenticating the socketpair endpoints.
 	// Both children receive this via environment variable and verify it
-	// on first RPC call — prevents a rogue process from injecting a fake
+	// on first RPC call, preventing a rogue process from injecting a fake
 	// signer if the fd is somehow leaked.
 	psk := make([]byte, 32)
 	if _, err := rand.Read(psk); err != nil {
@@ -89,7 +89,7 @@ func runLauncher() error {
 	if err := signerCmd.Start(); err != nil {
 		return fmt.Errorf("starting signer process: %w", err)
 	}
-	// Close our copy of the signer's socket end — only the child should hold it.
+	// Close our copy of the signer's socket end; only the child should hold it.
 	signerSock.Close()
 
 	// Spawn frontend child.

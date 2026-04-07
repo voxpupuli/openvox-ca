@@ -31,7 +31,7 @@ CA_CERTFILE="${CERTDIR}/ca.pem"
 
 # If cert already exists, nothing to do.
 if [ -s "${CERTFILE}" ]; then
-    echo "($0) Cert already exists at ${CERTFILE} — skipping bootstrap."
+    echo "($0) Cert already exists at ${CERTFILE} -- skipping bootstrap."
     exit 0
 fi
 
@@ -45,7 +45,7 @@ until curl -sfk "${CA_URL}/puppet-ca/v1/certificate/ca" > /dev/null 2>&1; do
     sleep 2
 done
 
-# Download CA cert (first fetch — skip TLS verify).
+# Download CA cert (first fetch, skip TLS verify).
 curl -sfk "${CA_URL}/puppet-ca/v1/certificate/ca" -o "${CA_CERTFILE}"
 echo "($0) CA cert downloaded."
 

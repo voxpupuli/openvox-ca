@@ -42,10 +42,10 @@ import (
 // Plaintext: PKCS#8 DER encoding of the private key.
 
 const (
-	keyEncVersion   = 0x01
-	keyEncSaltLen   = 32
-	keyEncNonceLen  = 12
-	keyEncMinLen    = 1 + keyEncSaltLen + keyEncNonceLen + aes.BlockSize // version + salt + nonce + min ciphertext
+	keyEncVersion  = 0x01
+	keyEncSaltLen  = 32
+	keyEncNonceLen = 12
+	keyEncMinLen   = 1 + keyEncSaltLen + keyEncNonceLen + aes.BlockSize // version + salt + nonce + min ciphertext
 
 	argon2Time    = 3
 	argon2Memory  = 64 * 1024 // 64 MiB

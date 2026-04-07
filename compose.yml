@@ -2,8 +2,8 @@
 #
 # Services
 # --------
-#   puppet-ca   — CA server (no autosign; operators must sign manually)
-#   test-runner — Separate container acting as both puppet-agent and operator.
+#   puppet-ca   - CA server (no autosign; operators must sign manually)
+#   test-runner - Separate container acting as both puppet-agent and operator.
 #                 Communicates with puppet-ca over the internal network,
 #                 validating true cross-host behaviour.
 #
@@ -18,7 +18,7 @@ name: puppet-ca-integ
 
 services:
 
-  # ── CA server ─────────────────────────────────────────────────────────────
+  # -- CA server ------------------------------------------------------------─
   puppet-ca:
     build:
       context: .
@@ -27,7 +27,7 @@ services:
     # autosign=false so the test-runner must explicitly sign via puppet-ca-ctl,
     # exercising the full operator workflow.
     # WARNING: --no-tls-required is for integration testing ONLY.
-    # Never use this flag in production — it disables all authentication.
+    # Never use this flag in production: it disables all authentication.
     command:
       - --cadir=/data
       - --autosign-config=false
@@ -45,7 +45,7 @@ services:
       retries: 20
       start_period: 8s
 
-  # ── Test runner ───────────────────────────────────────────────────────────
+  # -- Test runner ----------------------------------------------------------─
   # Simulates a separate host (puppet-agent + operator) talking to puppet-ca
   # over the compose network using the DNS name "puppet-ca".
   test-runner:

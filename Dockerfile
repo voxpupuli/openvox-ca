@@ -34,7 +34,7 @@ EXPOSE 8140
 # --verbosity         : debug logging
 #
 # NOTE: autosign is OFF by default. Set --autosign-config=true only in
-# dev/test environments — autosign lets any CSR submitter obtain a signed
+# dev/test environments. Autosign lets any CSR submitter obtain a signed
 # certificate without operator review.
 ENTRYPOINT ["/usr/local/bin/puppet-ca"]
 CMD ["--cadir=/etc/puppetlabs/puppet/ssl/ca", \

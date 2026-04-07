@@ -211,7 +211,7 @@ var _ = Describe("CA encrypted key integration", func() {
 		_, err = os.Stat(autoPassphrasePath(tmpDir))
 		Expect(err).NotTo(HaveOccurred())
 
-		// Reload the CA from disk — should succeed using the auto-generated passphrase.
+		// Reload the CA from disk; should succeed using the auto-generated passphrase.
 		store2 := storage.New(tmpDir)
 		myCA2 := New(store2, AutosignConfig{Mode: "off"}, "puppet-enc-test")
 		myCA2.EncryptCAKey = true
@@ -247,7 +247,7 @@ var _ = Describe("CA encrypted key integration", func() {
 		Expect(block).NotTo(BeNil())
 		Expect(block.Type).NotTo(Equal(encryptedPEMType))
 
-		// Reload — should work without encryption config.
+		// Reload: should work without encryption config.
 		store2 := storage.New(tmpDir)
 		myCA2 := New(store2, AutosignConfig{Mode: "off"}, "puppet-compat")
 		Expect(myCA2.Init()).To(Succeed())

@@ -78,16 +78,14 @@ func (c *CA) Generate(subject string, dnsAltNames []string) (*GenerateResult, er
 		return nil, err
 	}
 
-	if err := c.evictRevoked(subject); err != nil {
-		return nil, err
-	}
-
 	// Resolve leaf key config; fall back to default if not set.
 	leafCfg := c.LeafKeyConfig
 	if leafCfg.Algo == "" {
 		leafCfg = DefaultLeafKeyConfig
 	}
 
+	// Key generation and CSR creation are CPU-bound and do not touch shared
+	// state, so they run outside the lock.
 	key, err := generateKey(leafCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate key for %s: %w", subject, err)
@@ -104,13 +102,18 @@ func (c *CA) Generate(subject string, dnsAltNames []string) (*GenerateResult, er
 	}
 	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
 
+	// Acquire lock for the entire evict + save + sign sequence to prevent
+	// TOCTOU races.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if err := c.evictRevokedLocked(subject); err != nil {
+		return nil, err
+	}
+
 	if err := c.Storage.SaveCSR(subject, csrPEM); err != nil {
 		return nil, fmt.Errorf("failed to save internal CSR for %s: %w", subject, err)
 	}
-
-	// Sign using the internal (unlocked) path — acquire mu first.
-	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	certPEM, err := c.sign(subject)
 	if err != nil {
@@ -124,6 +127,12 @@ func (c *CA) Generate(subject string, dnsAltNames []string) (*GenerateResult, er
 		return nil, fmt.Errorf("failed to marshal private key for %s: %w", subject, err)
 	}
 	if err := c.Storage.SavePrivateKey(subject, keyPEM); err != nil {
+		// Clean up the just-issued certificate to avoid inconsistent state
+		// where a cert exists on disk but the corresponding private key doesn't.
+		if delErr := c.Storage.DeleteCert(subject); delErr != nil {
+			slog.Warn("Failed to clean up cert after private key save failure",
+				"subject", subject, "error", delErr)
+		}
 		return nil, fmt.Errorf("failed to save private key for %s: %w", subject, err)
 	}
 
@@ -131,7 +140,7 @@ func (c *CA) Generate(subject string, dnsAltNames []string) (*GenerateResult, er
 	// Generated keys remain on disk indefinitely; operators should implement
 	// external lifecycle controls (rotation, cleanup) for these keys.
 	// NIST 800-53: SC-12 (Cryptographic Key Establishment and Management)
-	slog.Info("Generated private key persisted to server filesystem",
+	slog.Debug("Generated private key persisted to server filesystem",
 		"subject", subject, "path", c.Storage.PrivateKeyPath(subject))
 	slog.Debug("Certificate generated", "subject", subject, "algo", string(leafCfg.Algo))
 	return &GenerateResult{

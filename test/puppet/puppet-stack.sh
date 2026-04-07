@@ -17,7 +17,7 @@
 
 set -uo pipefail
 
-# ── Container engine / compose detection ──────────────────────────────────
+# -- Container engine / compose detection ----------------------------------
 if [[ -n "${CONTAINER_ENGINE:-}" ]]; then
     _ENGINE="$CONTAINER_ENGINE"
 elif command -v podman &>/dev/null; then
@@ -44,15 +44,15 @@ else
     exit 1
 fi
 
-# ── Configuration ─────────────────────────────────────────────────────────
-# Host-side URLs (CA on 8141, master on 8140 — as mapped in compose-puppet.yml).
+# -- Configuration --------------------------------------------------------─
+# Host-side URLs (CA on 8141, master on 8140, as mapped in compose-puppet.yml).
 CA_HOST_URL="https://localhost:8141"
 MASTER_URL="https://puppet-master:8140"   # used from inside master container
 
 WORK_DIR=$(mktemp -d /tmp/puppet-stack-integ.XXXXXX)
 RUN_ID=$(date +%s)
 
-# ── Argument parsing ──────────────────────────────────────────────────────
+# -- Argument parsing ------------------------------------------------------
 DO_UP=false
 DO_KEEP=false
 
@@ -64,7 +64,7 @@ for arg in "$@"; do
     esac
 done
 
-# ── Container exec wrappers ───────────────────────────────────────────────
+# -- Container exec wrappers ----------------------------------------------─
 # Use compose exec so container name resolution works regardless of whether
 # the tool uses underscore (podman-compose/v1) or dash (docker compose v2)
 # naming conventions.  -T disables TTY allocation so these work in CI.
@@ -77,7 +77,7 @@ copy_from_client() {   # src-path dest-path
     exec_client cat "$1" > "$2" 2>/dev/null
 }
 
-# ── Helper: query OpenVoxDB via master's mTLS cert ────────────────────────
+# -- Helper: query OpenVoxDB via master's mTLS cert ------------------------
 pdb_query() {
     local path="$1"
     exec_master curl -sf \
@@ -87,7 +87,7 @@ pdb_query() {
         "https://openvoxdb:8081${path}" 2>/dev/null
 }
 
-# ── Helper: CA admin operation via master's mTLS cert ────────────────────
+# -- Helper: CA admin operation via master's mTLS cert --------------------
 # The CA's --puppet-server-file allows the master cert as admin.
 ca_admin_put() {   # subject json-body
     local subject="$1" body="$2"
@@ -101,7 +101,7 @@ ca_admin_put() {   # subject json-body
         2>/dev/null || true
 }
 
-# ── Helper: refresh master's CRL from Go CA ───────────────────────────────
+# -- Helper: refresh master's CRL from Go CA ------------------------------─
 refresh_master_crl() {
     local _crl
     _crl=$(exec_master curl -sf \
@@ -112,7 +112,7 @@ refresh_master_crl() {
         sh -c 'cat > /etc/puppetlabs/puppet/ssl/ca/ca_crl.pem'
 }
 
-# ── Helper: revoke + clean the client cert, wipe local SSL dir ─────────────
+# -- Helper: revoke + clean the client cert, wipe local SSL dir ------------─
 clean_client_cert() {
     local _state
     _state=$(exec_master curl -s \
@@ -132,7 +132,7 @@ clean_client_cert() {
     refresh_master_crl || true
 }
 
-# ── Helper: run puppet agent on client container ──────────────────────────
+# -- Helper: run puppet agent on client container --------------------------
 # Explicit --confdir / --vardir / --logdir / --rundir override the non-root
 # defaults (~/.puppetlabs/...) so puppet uses the pre-created directories
 # that are writable by the puppet-agent user (see Dockerfile.client).
@@ -153,7 +153,7 @@ run_agent() {
         "$@" 2>&1
 }
 
-# ── Helper: run puppet agent on master container (self-apply) ────────────
+# -- Helper: run puppet agent on master container (self-apply) ------------
 # Explicit --confdir is required because puppetserver sets HOME to
 # /opt/puppetlabs/server/data/puppetserver, causing puppet agent to derive
 # confdir as $HOME/.puppetlabs/etc/puppet instead of /etc/puppetlabs/puppet.
@@ -168,7 +168,7 @@ run_master_agent() {
         "$@" 2>&1
 }
 
-# ── Stack lifecycle ───────────────────────────────────────────────────────
+# -- Stack lifecycle ------------------------------------------------------─
 
 cleanup() {
     rm -rf "$WORK_DIR"
@@ -218,7 +218,7 @@ if $DO_UP; then
     printf ' OK\n'
 fi
 
-# ── TAP helpers ──────────────────────────────────────────────────────────
+# -- TAP helpers ----------------------------------------------------------
 T=0
 FAILURES=0
 
@@ -252,7 +252,7 @@ assert_contains() {
         || fail "$desc" "pattern not found: $pat"
 }
 
-# ── Pre-flight: download CA cert ──────────────────────────────────────────
+# -- Pre-flight: download CA cert ------------------------------------------
 printf '\n# Downloading CA cert from %s...\n' "$CA_HOST_URL"
 if ! curl -sfk "${CA_HOST_URL}/puppet-ca/v1/certificate/ca" \
           -o "$WORK_DIR/ca.pem" 2>/dev/null; then
@@ -262,10 +262,10 @@ fi
 printf '# CA cert downloaded to %s/ca.pem\n\n' "$WORK_DIR"
 
 # ═════════════════════════════════════════════════════════════════════════
-# Group 1 — Go CA HTTPS (port 8141 on host)
+# Group 1 -- Go CA HTTPS (port 8141 on host)
 # Tests that the CA serves valid TLS and all public endpoints respond.
 # ═════════════════════════════════════════════════════════════════════════
-printf '# Group 1 — Go CA HTTPS (port 8141 from host)\n'
+printf '# Group 1 -- Go CA HTTPS (port 8141 from host)\n'
 
 # After the initial insecure fetch above, all CA requests use --cacert.
 _CA=(--cacert "$WORK_DIR/ca.pem")
@@ -349,7 +349,7 @@ grep -qF '"state":"signed"' <<< "$_status_body" \
 assert_http 404 "Nonexistent cert status returns 404 (mTLS)" \
     "${_INTEG_MTLS[@]}" "${CA_HOST_URL}/puppet-ca/v1/certificate_status/nonexistent"
 
-# Revoke the integ cert (admin — requires master cert; run from master container).
+# Revoke the integ cert (admin, requires master cert; run from master container).
 _revoke_st=$(exec_master curl -s -o /dev/null -w '%{http_code}' \
     --cacert /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem \
     --cert   /etc/puppetlabs/puppet/ssl/certs/puppet-master.pem \
@@ -363,11 +363,11 @@ _revoke_st=$(exec_master curl -s -o /dev/null -w '%{http_code}' \
     || fail "Cert revocation returns 2xx" "got HTTP $_revoke_st"
 
 # ═════════════════════════════════════════════════════════════════════════
-# Group 1b — puppet-server-file admin auth
+# Group 1b -- puppet-server-file admin auth
 # Verifies that the file-based CN allow list grants the puppet-master cert
 # CA admin access, and that a cert whose CN is absent from the file is denied.
 # ═════════════════════════════════════════════════════════════════════════
-printf '\n# Group 1b — puppet-server-file admin auth\n'
+printf '\n# Group 1b -- puppet-server-file admin auth\n'
 
 _srv_file=$(exec_ca cat /etc/puppet-ca/servers.txt 2>/dev/null) || true
 
@@ -440,9 +440,9 @@ else
 fi
 
 # ═════════════════════════════════════════════════════════════════════════
-# Group 2 — Puppet master reachability (port 8140 from host)
+# Group 2 -- Puppet master reachability (port 8140 from host)
 # ═════════════════════════════════════════════════════════════════════════
-printf '\n# Group 2 — Puppet master reachability\n'
+printf '\n# Group 2 -- Puppet master reachability\n'
 
 # Use the master's real hostname so TLS hostname verification passes.
 # --resolve routes puppet-master:8140 to 127.0.0.1 (host port mapping).
@@ -462,9 +462,9 @@ assert_http 403 "Master catalog endpoint requires auth (returns 403 without cert
     "https://puppet-master:8140/puppet/v3/catalog/test?environment=production"
 
 # ═════════════════════════════════════════════════════════════════════════
-# Group 3 — Full puppet agent end-to-end
+# Group 3 -- Full puppet agent end-to-end
 # ═════════════════════════════════════════════════════════════════════════
-printf '\n# Group 3 — Full puppet agent end-to-end\n'
+printf '\n# Group 3 -- Full puppet agent end-to-end\n'
 
 clean_client_cert
 
@@ -500,9 +500,9 @@ grep -qF "client.puppet.localdomain" <<< "$_client_managed" \
     || fail "/tmp/puppet_managed contains client certname"
 
 # ═════════════════════════════════════════════════════════════════════════
-# Group 4 — Server self-apply
+# Group 4 -- Server self-apply
 # ═════════════════════════════════════════════════════════════════════════
-printf '\n# Group 4 — Server self-apply\n'
+printf '\n# Group 4 -- Server self-apply\n'
 
 MASTER_AGENT_EXIT=0
 MASTER_AGENT_OUT=$(run_master_agent) || MASTER_AGENT_EXIT=$?
@@ -525,9 +525,9 @@ _master_managed=$(exec_master cat /tmp/puppet_managed 2>/dev/null) || true
     || fail "/tmp/puppet_managed exists on master"
 
 # ═════════════════════════════════════════════════════════════════════════
-# Group 5 — Individual master mTLS endpoints
+# Group 5 -- Individual master mTLS endpoints
 # ═════════════════════════════════════════════════════════════════════════
-printf '\n# Group 5 — Individual master mTLS endpoints\n'
+printf '\n# Group 5 -- Individual master mTLS endpoints\n'
 
 copy_from_client \
     /etc/puppetlabs/puppet/ssl/certs/client.puppet.localdomain.pem \
@@ -574,9 +574,9 @@ else
 fi
 
 # ═════════════════════════════════════════════════════════════════════════
-# Group 6 — Certificate revocation
+# Group 6 -- Certificate revocation
 # ═════════════════════════════════════════════════════════════════════════
-printf '\n# Group 6 — Certificate revocation\n'
+printf '\n# Group 6 -- Certificate revocation\n'
 
 # Revoke client cert via master's mTLS.
 _revoke_client=$(ca_admin_put "client.puppet.localdomain" '{"desired_state":"revoked"}') || true
@@ -607,9 +607,9 @@ else
 fi
 
 # ═════════════════════════════════════════════════════════════════════════
-# Group 7 — OpenVoxDB validation
+# Group 7 -- OpenVoxDB validation
 # ═════════════════════════════════════════════════════════════════════════
-printf '\n# Group 7 — OpenVoxDB validation\n'
+printf '\n# Group 7 -- OpenVoxDB validation\n'
 
 _pdb_nodes=$(pdb_query /pdb/query/v4/nodes 2>/dev/null) || true
 grep -qF "client.puppet.localdomain" <<< "$_pdb_nodes" \
@@ -631,9 +631,9 @@ _pdb_reports=$(pdb_query /pdb/query/v4/reports 2>/dev/null) || true
     || fail "OpenVoxDB has at least one report"
 
 # ═════════════════════════════════════════════════════════════════════════
-# Group 8 — Exported resources (re-bootstrap client and collect exports)
+# Group 8 -- Exported resources (re-bootstrap client and collect exports)
 # ═════════════════════════════════════════════════════════════════════════
-printf '\n# Group 8 — Exported resources\n'
+printf '\n# Group 8 -- Exported resources\n'
 
 clean_client_cert
 

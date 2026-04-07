@@ -59,17 +59,43 @@ func serialHexStr(n *big.Int) string {
 // already exists for the requested subject.
 var ErrCertExists = errors.New("certificate already exists")
 
-// evictRevoked checks whether a certificate already exists for subject.
+// evictRevokedLocked checks whether a certificate already exists for subject.
 //   - No cert on disk → returns nil (proceed with issuance).
 //   - Cert exists and is NOT revoked → returns ErrCertExists (block issuance).
 //   - Cert exists and IS revoked → deletes it and returns nil (allow re-issuance).
 //
-// Must NOT be called while holding c.mu.
-func (c *CA) evictRevoked(subject string) error {
+// c.mu must be held by the caller. This method checks revocation via the
+// in-memory CRL cache directly to avoid re-acquiring the lock.
+func (c *CA) evictRevokedLocked(subject string) error {
 	if !c.Storage.HasCert(subject) {
 		return nil
 	}
-	if !c.IsRevoked(subject) {
+
+	// Check revocation against cachedCRL directly (no lock acquisition).
+	certPEM, err := c.Storage.GetCert(subject)
+	if err != nil {
+		return fmt.Errorf("certificate already exists for %s: %w", subject, ErrCertExists)
+	}
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		return fmt.Errorf("certificate already exists for %s: %w", subject, ErrCertExists)
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return fmt.Errorf("certificate already exists for %s: %w", subject, ErrCertExists)
+	}
+
+	revoked := false
+	if c.cachedCRL != nil {
+		for _, entry := range c.cachedCRL.RevokedCertificateEntries {
+			if entry.SerialNumber.Cmp(cert.SerialNumber) == 0 {
+				revoked = true
+				break
+			}
+		}
+	}
+
+	if !revoked {
 		return fmt.Errorf("certificate already exists for %s: %w", subject, ErrCertExists)
 	}
 	slog.Debug("Removing revoked certificate", "subject", subject)
@@ -124,7 +150,7 @@ func (c *CA) signWithDuration(subject string, ttl time.Duration) ([]byte, error)
 		return nil, err
 	}
 
-	slog.Info("Signing certificate", "subject", subject)
+	slog.Debug("Signing certificate", "subject", subject)
 
 	csrPEM, err := c.Storage.GetCSR(subject)
 	if err != nil {
@@ -213,13 +239,13 @@ func (c *CA) signWithDuration(subject string, ttl time.Duration) ([]byte, error)
 		DNSNames: csr.DNSNames,
 	}
 
-	// CRL Distribution Points — embed CRL URL(s) when configured so that
+	// CRL Distribution Points: embed CRL URL(s) when configured so that
 	// verifiers can automatically fetch the CRL (RFC 5280 §4.2.1.13).
 	if len(c.CRLURLs) > 0 {
 		template.CRLDistributionPoints = c.CRLURLs
 	}
 
-	// Authority Information Access — embed OCSP URL when configured.
+	// Authority Information Access: embed OCSP URL when configured.
 	if len(c.OCSPURLs) > 0 {
 		aiaValue, err := buildAIAExtension(c.OCSPURLs)
 		if err != nil {
@@ -234,7 +260,7 @@ func (c *CA) signWithDuration(subject string, ttl time.Duration) ([]byte, error)
 	// SECURITY: Copy Puppet OID extensions from the CSR, excluding
 	// authorization-arc OIDs (1.3.6.1.4.1.34380.1.3.*). Allowing CSRs to
 	// inject auth OIDs like pp_cli_auth would let any agent request admin
-	// privileges — a direct privilege escalation.
+	// privileges, which is a direct privilege escalation.
 	// NIST 800-53: AC-6 (Least Privilege), CM-7 (Least Functionality)
 	for _, ext := range csr.Extensions {
 		if IsPuppetOID(ext.Id) && !IsAuthOID(ext.Id) {
@@ -271,7 +297,7 @@ func (c *CA) signWithDuration(subject string, ttl time.Duration) ([]byte, error)
 		slog.Warn("Could not delete CSR after signing", "subject", subject, "error", err)
 	}
 
-	slog.Info("Certificate signed",
+	slog.Debug("Certificate signed",
 		"subject", subject,
 		"serial", serialStr,
 		"not_before", template.NotBefore.Format(time.RFC3339),
@@ -316,7 +342,7 @@ func (c *CA) Clean(subject string) error {
 		}
 	}
 
-	slog.Info("Certificate cleaned", "subject", subject)
+	slog.Debug("Certificate cleaned", "subject", subject)
 	return nil
 }
 
@@ -394,7 +420,7 @@ func (c *CA) SaveRequest(subject string, csrPEM []byte) (bool, error) {
 			csr.Subject.CommonName, subject)
 	}
 
-	// SECURITY: Warn if the CSR carries authorization-arc OIDs — these will be
+	// SECURITY: Warn if the CSR carries authorization-arc OIDs. These will be
 	// stripped during signing but the submission itself is suspicious and may
 	// indicate a privilege escalation attempt.
 	// NIST 800-53: AU-6 (Audit Record Review, Analysis, and Reporting)
@@ -407,9 +433,15 @@ func (c *CA) SaveRequest(subject string, csrPEM []byte) (bool, error) {
 
 	slog.Debug("Received CSR", "subject", subject)
 
+	// Acquire lock for the entire evict + save + autosign sequence to prevent
+	// TOCTOU races where two concurrent SaveRequest calls for the same subject
+	// could both pass eviction and produce duplicate certificates.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	// Reject if a cert already exists and is not revoked; clear it if revoked
 	// so the node can re-register with a fresh key.
-	if err := c.evictRevoked(subject); err != nil {
+	if err := c.evictRevokedLocked(subject); err != nil {
 		return false, err
 	}
 
@@ -424,14 +456,12 @@ func (c *CA) SaveRequest(subject string, csrPEM []byte) (bool, error) {
 
 	if shouldSign {
 		slog.Debug("Autosigning CSR", "subject", subject)
-		c.mu.Lock()
-		defer c.mu.Unlock()
 		if _, err := c.sign(subject); err != nil {
 			return false, err
 		}
 		return true, nil
 	}
 
-	slog.Info("CSR saved, awaiting manual signing", "subject", subject)
+	slog.Debug("CSR saved, awaiting manual signing", "subject", subject)
 	return false, nil
 }

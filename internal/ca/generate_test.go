@@ -133,6 +133,24 @@ var _ = Describe("CA Generate", func() {
 		Expect(key.PublicKey.E).To(Equal(certPub.E))
 	})
 
+	It("cleans up cert when private key save fails", func() {
+		// Make the private key directory read-only to force SavePrivateKey failure.
+		privDir := filepath.Join(tmpDir, "private")
+		Expect(os.Chmod(privDir, 0555)).To(Succeed())
+		defer os.Chmod(privDir, 0755) // restore for cleanup
+
+		_, err := myCA.Generate("gen-key-fail", nil)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("failed to save private key"))
+
+		// The signed cert should NOT remain on disk.
+		Expect(store.HasCert("gen-key-fail")).To(BeFalse(),
+			"cert should be cleaned up when private key save fails")
+
+		// No pending CSR should remain either.
+		Expect(store.HasCSR("gen-key-fail")).To(BeFalse())
+	})
+
 	It("private key file exists on disk at expected path", func() {
 		_, err := myCA.Generate("gen-disk-key", nil)
 		Expect(err).NotTo(HaveOccurred())

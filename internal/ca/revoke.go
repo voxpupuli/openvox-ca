@@ -37,7 +37,7 @@ func (c *CA) Revoke(subject string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	slog.Info("Revoking certificate", "subject", subject)
+	slog.Debug("Revoking certificate", "subject", subject)
 
 	// 1. Find Serial
 	serialStr, err := c.findSerialForSubject(subject)
@@ -64,11 +64,11 @@ func (c *CA) Revoke(subject string) error {
 		return fmt.Errorf("failed to parse CRL: %w", err)
 	}
 
-	// 3. Check for duplicate revocation — a serial that's already in the CRL
+	// 3. Check for duplicate revocation: a serial that's already in the CRL
 	// should not be appended again (prevents unbounded CRL growth on retries).
 	for _, entry := range crl.RevokedCertificateEntries {
 		if entry.SerialNumber.Cmp(serialInt) == 0 {
-			slog.Info("Certificate already revoked", "subject", subject, "serial", serialStr)
+			slog.Debug("Certificate already revoked", "subject", subject, "serial", serialStr)
 			return nil
 		}
 	}
@@ -118,7 +118,7 @@ func (c *CA) Revoke(subject string) error {
 	// Use the same normalised key as the OCSP index (uppercase hex, no padding).
 	delete(c.ocspCache, serialHexStr(serialInt))
 
-	slog.Info("Certificate revoked", "subject", subject, "serial", serialStr)
+	slog.Debug("Certificate revoked", "subject", subject, "serial", serialStr)
 	return nil
 }
 
@@ -198,7 +198,7 @@ func (c *CA) IsRevokedSerial(serial *big.Int) (bool, error) {
 
 // IsRevoked checks whether the certificate for subject appears in the CRL.
 // It looks up the cert currently on disk for subject and checks that cert's
-// serial — it is suitable for display purposes (e.g. certificate status
+// serial; it is suitable for display purposes (e.g. certificate status
 // responses) but NOT for authentication decisions.  For auth, use
 // IsRevokedSerial with the serial of the presented certificate instead.
 // Returns false (not an error) if the subject has no signed cert.

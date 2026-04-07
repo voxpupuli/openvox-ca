@@ -59,7 +59,7 @@ func (c *CA) Init() error {
 	}
 
 	// When using an external signer (key isolation mode), the frontend must
-	// never bootstrap a new CA — that's the signer's responsibility. If the
+	// never bootstrap a new CA (that's the signer's responsibility). If the
 	// cert/CRL aren't on disk yet, the signer hasn't finished bootstrapping.
 	if c.ExternalSigner != nil {
 		return fmt.Errorf("failed to load CA in frontend mode (signer should have bootstrapped): %w", loadErr)
@@ -80,7 +80,7 @@ func (c *CA) Init() error {
 // It accepts RSA keys (PKCS1 and PKCS8) and ECDSA keys (SEC1 and PKCS8),
 // and verifies that the private key matches the certificate's public key.
 //
-// When ExternalSigner is set, key loading from disk is skipped entirely —
+// When ExternalSigner is set, key loading from disk is skipped entirely:
 // the private key lives in a separate signer process and is never loaded
 // into the frontend's address space.
 func (c *CA) loadCA() error {
@@ -110,7 +110,7 @@ func (c *CA) loadCA() error {
 	}
 
 	// Verify that the loaded key matches the certificate's public key.
-	// Skip when using an external signer — the signer process verifies this,
+	// Skip when using an external signer; the signer process verifies this,
 	// and the RemoteSigner's Public() is derived from the cert anyway.
 	if c.ExternalSigner == nil {
 		certPubDER, err := x509.MarshalPKIXPublicKey(cert.PublicKey)

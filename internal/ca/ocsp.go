@@ -49,12 +49,18 @@ type ocspCacheEntry struct {
 // oidNonce is the OCSP nonce extension OID (RFC 8954 §2).
 var oidNonce = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 48, 1, 2}
 
+// maxNonceLen is the maximum allowed OCSP nonce extension Value size in bytes.
+// RFC 8954 §2.1 recommends 1-32 bytes for the nonce value. We allow up to 34
+// bytes in the DER-encoded Value field to account for the OCTET STRING header
+// (tag + length bytes wrapping the actual nonce).
+const maxNonceLen = 34
+
 // ocspTBSReqWithExts mirrors the TBSRequest ASN.1 structure including the
 // optional requestExtensions field (tag 2) not exposed by x/crypto/ocsp.
 type ocspTBSReqWithExts struct {
 	Version       int              `asn1:"explicit,tag:0,default:0,optional"`
 	RequestorName asn1.RawValue    `asn1:"explicit,tag:1,optional"`
-	RequestList   asn1.RawValue    // SEQUENCE OF Request — opaque
+	RequestList   asn1.RawValue    // SEQUENCE OF Request (opaque)
 	Extensions    []pkix.Extension `asn1:"explicit,tag:2,optional"`
 }
 
@@ -113,6 +119,15 @@ func (c *CA) buildSerialIndex() error {
 func (c *CA) OCSPResponse(reqDER []byte) ([]byte, error) {
 	// Extract nonce before acquiring any lock (pure DER parse, no shared state).
 	nonce, hasNonce := extractNonce(reqDER)
+
+	// Validate nonce length: RFC 8954 §2.1 limits the nonce to 32 bytes
+	// (plus DER header). Reject oversized nonces to prevent signing DoS
+	// where an attacker forces the CA to sign arbitrarily large responses.
+	if hasNonce && len(nonce.Value) > maxNonceLen {
+		slog.Warn("OCSP request nonce exceeds maximum length, ignoring",
+			"len", len(nonce.Value), "max", maxNonceLen)
+		hasNonce = false
+	}
 
 	req, err := ocsp.ParseRequest(reqDER)
 	if err != nil {

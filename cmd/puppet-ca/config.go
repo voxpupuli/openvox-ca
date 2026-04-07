@@ -32,22 +32,22 @@ import (
 //
 //	built-in defaults → config file → env vars → CLI flags
 type serverConfig struct {
-	CADir            string `yaml:"cadir"`
-	AutosignConfig   string `yaml:"autosign_config"`
-	Host             string `yaml:"host"`
-	Port             int    `yaml:"port"`
-	Hostname         string `yaml:"hostname"`
-	Verbosity        int    `yaml:"verbosity"`
-	LogFile          string `yaml:"logfile"`
-	TLSCert          string `yaml:"tls_cert"`
-	TLSKey           string `yaml:"tls_key"`
-	PuppetServer     string `yaml:"puppet_server"`
-	PuppetServerFile string `yaml:"puppet_server_file"`
-	NoPpCliAuth      bool   `yaml:"no_pp_cli_auth"`
-	NoTLSRequired    bool   `yaml:"no_tls_required"`
-	AllowPublicStatus bool  `yaml:"allow_public_status"`
-	OCSPUrl          string `yaml:"ocsp_url"`
-	CRLUrl           string `yaml:"crl_url"`
+	CADir             string `yaml:"cadir"`
+	AutosignConfig    string `yaml:"autosign_config"`
+	Host              string `yaml:"host"`
+	Port              int    `yaml:"port"`
+	Hostname          string `yaml:"hostname"`
+	Verbosity         int    `yaml:"verbosity"`
+	LogFile           string `yaml:"logfile"`
+	TLSCert           string `yaml:"tls_cert"`
+	TLSKey            string `yaml:"tls_key"`
+	PuppetServer      string `yaml:"puppet_server"`
+	PuppetServerFile  string `yaml:"puppet_server_file"`
+	NoPpCliAuth       bool   `yaml:"no_pp_cli_auth"`
+	NoTLSRequired     bool   `yaml:"no_tls_required"`
+	AllowPublicStatus bool   `yaml:"allow_public_status"`
+	OCSPUrl           string `yaml:"ocsp_url"`
+	CRLUrl            string `yaml:"crl_url"`
 
 	// Key generation options (apply only when bootstrapping a new CA).
 	CAKeyAlgo   string `yaml:"ca_key_algo"`
@@ -72,7 +72,7 @@ type serverConfig struct {
 	CSRRateLimit     int `yaml:"csr_rate_limit"`     // max CSR submissions per IP per minute; 0 = use built-in default (60)
 
 	// CA key encryption at rest.
-	EncryptCAKey       bool   `yaml:"encrypt_ca_key"`        // encrypt the CA private key at rest (AES-256-GCM + Argon2id)
+	EncryptCAKey        bool   `yaml:"encrypt_ca_key"`         // encrypt the CA private key at rest (AES-256-GCM + Argon2id)
 	CAKeyPassphraseFile string `yaml:"ca_key_passphrase_file"` // path to file containing the CA key passphrase
 }
 

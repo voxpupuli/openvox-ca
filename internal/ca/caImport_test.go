@@ -89,13 +89,13 @@ var _ = Describe("ImportCA", func() {
 	})
 
 	It("rejects a cert/key mismatch", func() {
-		// Generate a second CA — the cert from it will not match cachedKeyPEM.
+		// Generate a second CA; the cert from it will not match cachedKeyPEM.
 		altKeyPEM, altCertPEM, _, err := testutil.GenerateTestCA()
 		Expect(err).NotTo(HaveOccurred())
 		_ = altKeyPEM
 
 		store := storage.New(tmpDir)
-		// Pass the alt CA cert but the original key — they don't match.
+		// Pass the alt CA cert but the original key; they don't match.
 		err = ca.ImportCA(store, altCertPEM, cachedKeyPEM, nil)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("does not match"))

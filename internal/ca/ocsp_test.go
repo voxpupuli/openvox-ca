@@ -227,7 +227,7 @@ var _ = Describe("OCSP Responder", func() {
 		certPEM, err := myCA.Sign("ocsp-index-node")
 		Expect(err).NotTo(HaveOccurred())
 
-		// Re-open the same CA directory — Init() calls buildSerialIndex.
+		// Re-open the same CA directory; Init() calls buildSerialIndex.
 		store2 := storage.New(tmpDir)
 		myCA2 := ca.New(store2, ca.AutosignConfig{Mode: "off"}, "puppet.test")
 		Expect(myCA2.Init()).To(Succeed())
@@ -356,6 +356,78 @@ var _ = Describe("OCSP Responder", func() {
 
 		cert := decodeCert(certPEM)
 		Expect(cert.OCSPServer).To(ConsistOf("http://ocsp.example.com/ocsp"))
+	})
+
+	// --- Nonce length validation ---
+
+	It("ignores nonce exceeding RFC 8954 maximum length (32 bytes)", func() {
+		csrPEM, err := testutil.GenerateCSR("ocsp-big-nonce-node")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = myCA.SaveRequest("ocsp-big-nonce-node", csrPEM)
+		Expect(err).NotTo(HaveOccurred())
+		certPEM, err := myCA.Sign("ocsp-big-nonce-node")
+		Expect(err).NotTo(HaveOccurred())
+
+		cert := decodeCert(certPEM)
+
+		// Build an OCSP request with a 64-byte nonce (exceeds RFC 8954 limit).
+		bigNonce := make([]byte, 64)
+		for i := range bigNonce {
+			bigNonce[i] = 0xAA
+		}
+		reqDER, err := testutil.BuildOCSPRequestWithNonce(cert, myCA.CACert, bigNonce)
+		Expect(err).NotTo(HaveOccurred())
+
+		respDER, err := myCA.OCSPResponse(reqDER)
+		Expect(err).NotTo(HaveOccurred())
+
+		resp, err := xocsp.ParseResponse(respDER, myCA.CACert)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.Status).To(Equal(xocsp.Good))
+
+		// The oversized nonce must NOT be echoed in the response.
+		oidNonce := asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 48, 1, 2}
+		for _, ext := range resp.Extensions {
+			Expect(ext.Id.Equal(oidNonce)).To(BeFalse(),
+				"oversized nonce should not be echoed in OCSP response")
+		}
+	})
+
+	It("echoes a nonce within the RFC 8954 limit", func() {
+		csrPEM, err := testutil.GenerateCSR("ocsp-ok-nonce-node")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = myCA.SaveRequest("ocsp-ok-nonce-node", csrPEM)
+		Expect(err).NotTo(HaveOccurred())
+		certPEM, err := myCA.Sign("ocsp-ok-nonce-node")
+		Expect(err).NotTo(HaveOccurred())
+
+		cert := decodeCert(certPEM)
+
+		// 32-byte nonce: maximum allowed by RFC 8954.
+		okNonce := make([]byte, 32)
+		for i := range okNonce {
+			okNonce[i] = 0xBB
+		}
+		reqDER, err := testutil.BuildOCSPRequestWithNonce(cert, myCA.CACert, okNonce)
+		Expect(err).NotTo(HaveOccurred())
+
+		respDER, err := myCA.OCSPResponse(reqDER)
+		Expect(err).NotTo(HaveOccurred())
+
+		resp, err := xocsp.ParseResponse(respDER, myCA.CACert)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.Status).To(Equal(xocsp.Good))
+
+		// The 32-byte nonce should be echoed.
+		oidNonce := asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 48, 1, 2}
+		found := false
+		for _, ext := range resp.Extensions {
+			if ext.Id.Equal(oidNonce) {
+				found = true
+				break
+			}
+		}
+		Expect(found).To(BeTrue(), "valid nonce should be echoed in OCSP response")
 	})
 
 	// --- Error handling ---

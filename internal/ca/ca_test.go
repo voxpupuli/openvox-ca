@@ -29,6 +29,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -600,7 +601,7 @@ var _ = Describe("CA Autosign", func() {
 
 		for _, ext := range cert.Extensions {
 			Expect(ext.Id.Equal(oidPpCliAuth)).To(BeFalse(),
-				"autosigned cert must NOT carry pp_cli_auth — this would grant CA admin access")
+				"autosigned cert must NOT carry pp_cli_auth, as this would grant CA admin access")
 		}
 	})
 
@@ -930,7 +931,7 @@ var _ = Describe("Issued certificate properties (issue #8)", func() {
 	})
 })
 
-// ── loadCA key format support ──────────────────────────────────────────────────
+// --- loadCA key format support ---
 
 var _ = Describe("loadCA key format support", func() {
 	var (
@@ -1028,7 +1029,7 @@ var _ = Describe("loadCA key format support", func() {
 	})
 })
 
-// ── Expired CA cert guard ─────────────────────────────────────────────────────
+// --- Expired CA cert guard ---
 // signWithDuration must refuse to sign when the CA cert has expired.
 
 var _ = Describe("CA expired cert guard", func() {
@@ -1064,7 +1065,7 @@ var _ = Describe("CA expired cert guard", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		// Synthesise an expired CA cert using the real CA key so the key-cert
-		// check inside loadCA would pass — here we bypass loadCA and set the
+		// check inside loadCA would pass; here we bypass loadCA and set the
 		// field directly to simulate the CA running past its cert expiry.
 		expiredTmpl := &x509.Certificate{
 			SerialNumber:          big.NewInt(999),
@@ -1088,7 +1089,7 @@ var _ = Describe("CA expired cert guard", func() {
 	})
 })
 
-// ── CA Clean ─────────────────────────────────────────────────────────────────
+// --- CA Clean ---
 
 var _ = Describe("CA Clean", func() {
 	var (
@@ -1131,7 +1132,7 @@ var _ = Describe("CA Clean", func() {
 
 		// Cert file must be gone.
 		Expect(store.HasCert("clean-cert-node")).To(BeFalse())
-		// Serial must appear in the CRL — revoke happened before delete.
+		// Serial must appear in the CRL (revoke happened before delete).
 		revoked, err := myCA.IsRevokedSerial(cert.SerialNumber)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(revoked).To(BeTrue())
@@ -1155,7 +1156,7 @@ var _ = Describe("CA Clean", func() {
 	})
 })
 
-// ── CA bulk signing ───────────────────────────────────────────────────────────
+// --- CA bulk signing ---
 
 var _ = Describe("CA bulk signing (SignMultiple and SignAll)", func() {
 	var (
@@ -1244,7 +1245,7 @@ var _ = Describe("CA bulk signing (SignMultiple and SignAll)", func() {
 	})
 })
 
-// ── CA ImportCA ───────────────────────────────────────────────────────────────
+// --- CA ImportCA ---
 
 // generateNonCAKeyAndCert creates a self-signed leaf certificate (IsCA=false)
 // for use in ImportCA rejection tests.
@@ -1370,5 +1371,72 @@ var _ = Describe("CA ImportCA", func() {
 		Expect(err).NotTo(HaveOccurred())
 		_, err = os.Stat(store.CAKeyPath())
 		Expect(err).NotTo(HaveOccurred())
+	})
+})
+
+var _ = Describe("Concurrent SaveRequest", func() {
+	var (
+		tmpDir string
+		myCA   *ca.CA
+		store  *storage.StorageService
+	)
+
+	BeforeEach(func() {
+		var err error
+		tmpDir, err = os.MkdirTemp("", "puppet-ca-concurrent-test")
+		Expect(err).NotTo(HaveOccurred())
+
+		store = storage.New(tmpDir)
+		myCA = ca.New(store, ca.AutosignConfig{Mode: "true"}, "puppet.test")
+
+		Expect(store.EnsureDirs()).To(Succeed())
+		Expect(os.WriteFile(store.CAKeyPath(), cachedKeyPEM, 0640)).To(Succeed())
+		Expect(os.WriteFile(store.CACertPath(), cachedCrtPEM, 0644)).To(Succeed())
+		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial("0001")).To(Succeed())
+		Expect(os.WriteFile(store.InventoryPath(), []byte{}, 0644)).To(Succeed())
+		Expect(myCA.Init()).To(Succeed())
+	})
+
+	AfterEach(func() {
+		os.RemoveAll(tmpDir)
+	})
+
+	It("allows exactly one autosign when concurrent requests race for the same subject", func() {
+		const goroutines = 10
+		subject := "race-node"
+
+		var wg sync.WaitGroup
+		signedCount := 0
+		errCount := 0
+		var mu sync.Mutex
+
+		for i := 0; i < goroutines; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				csrPEM, err := testutil.GenerateCSR(subject)
+				Expect(err).NotTo(HaveOccurred())
+
+				signed, err := myCA.SaveRequest(subject, csrPEM)
+				mu.Lock()
+				defer mu.Unlock()
+				if err != nil {
+					errCount++
+				} else if signed {
+					signedCount++
+				}
+			}()
+		}
+		wg.Wait()
+
+		// Exactly one goroutine should have successfully autosigned.
+		Expect(signedCount).To(Equal(1), "expected exactly one autosign success")
+
+		// Exactly one signed cert should exist on disk.
+		Expect(store.HasCert(subject)).To(BeTrue())
+
+		// No pending CSR should remain (autosign deletes it after signing).
+		Expect(store.HasCSR(subject)).To(BeFalse())
 	})
 })

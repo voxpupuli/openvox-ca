@@ -144,7 +144,7 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
-	slog.Info("GET certificate_status", "subject", subject, "client", clientCN(r))
+	slog.Debug("GET certificate_status", "subject", subject, "client", clientCN(r))
 
 	// Check signed dir first.
 	certPEM, err := s.CA.Storage.GetCert(subject)
@@ -180,7 +180,7 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
-	slog.Info("PUT certificate_status", "subject", subject, "client", clientCN(r))
+	slog.Debug("PUT certificate_status", "subject", subject, "client", clientCN(r))
 
 	var body PutStatusBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -198,7 +198,11 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		if err != nil {
 			slog.Warn("Sign failed", "subject", subject, "error", err)
-			http.Error(w, err.Error(), http.StatusConflict)
+			if strings.Contains(err.Error(), "CSR not found") {
+				http.Error(w, err.Error(), http.StatusNotFound)
+			} else {
+				http.Error(w, err.Error(), http.StatusConflict)
+			}
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -209,9 +213,9 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
-		if s.destructiveOps != nil && s.destructiveOps.Record(clientCN(r)) {
+		if cn := clientCN(r); cn != "" && s.destructiveOps != nil && s.destructiveOps.Record(cn) {
 			slog.Warn("High rate of destructive operations detected",
-				"client", clientCN(r), "operation", "revoke")
+				"client", cn, "operation", "revoke")
 		}
 		w.WriteHeader(http.StatusNoContent)
 
@@ -224,7 +228,7 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetCert(w http.ResponseWriter, r *http.Request) {
 	subject := r.PathValue("subject")
-	slog.Info("GET certificate", "subject", subject, "client", clientCN(r))
+	slog.Debug("GET certificate", "subject", subject, "client", clientCN(r))
 
 	// Special case: "ca" returns the CA cert.
 	if subject == "ca" {
@@ -255,7 +259,7 @@ func (s *Server) handleGetCert(w http.ResponseWriter, r *http.Request) {
 // --- CRL ---
 
 func (s *Server) handleGetCRL(w http.ResponseWriter, r *http.Request) {
-	slog.Info("GET certificate_revocation_list/ca", "client", clientCN(r))
+	slog.Debug("GET certificate_revocation_list/ca", "client", clientCN(r))
 
 	crlPath := s.CA.Storage.CRLPath()
 
@@ -288,7 +292,7 @@ func (s *Server) handleGetRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
-	slog.Info("GET certificate_request", "subject", subject, "client", clientCN(r))
+	slog.Debug("GET certificate_request", "subject", subject, "client", clientCN(r))
 
 	csrPEM, err := s.CA.Storage.GetCSR(subject)
 	if err != nil {
@@ -313,7 +317,7 @@ func (s *Server) handlePutRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
-	slog.Info("PUT certificate_request", "subject", subject, "client", clientCN(r))
+	slog.Debug("PUT certificate_request", "subject", subject, "client", clientCN(r))
 
 	// SECURITY: Limit CSR body to 1 MiB to prevent memory exhaustion.
 	// NIST 800-53: SC-5 (Denial-of-Service Protection)
@@ -346,7 +350,7 @@ func (s *Server) handleDeleteRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
-	slog.Info("DELETE certificate_request", "subject", subject, "client", clientCN(r))
+	slog.Debug("DELETE certificate_request", "subject", subject, "client", clientCN(r))
 
 	if err := s.CA.Storage.DeleteCSR(subject); err != nil {
 		http.Error(w, "CSR not found", http.StatusNotFound)
@@ -363,7 +367,7 @@ type generateResponse struct {
 }
 
 func (s *Server) handlePostGenerate(w http.ResponseWriter, r *http.Request) {
-	// SECURITY: Refuse to serve private keys over plain HTTP — the response
+	// SECURITY: Refuse to serve private keys over plain HTTP: the response
 	// body contains the generated private key in cleartext. Without TLS, any
 	// on-path observer can capture the key.
 	// NIST 800-53: SC-8 (Transmission Confidentiality and Integrity), SC-12 (Cryptographic Key Establishment and Management)
@@ -377,7 +381,7 @@ func (s *Server) handlePostGenerate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	slog.Info("POST generate", "subject", subject, "client", clientCN(r))
+	slog.Debug("POST generate", "subject", subject, "client", clientCN(r))
 
 	// Optional DNS alt names from query params (?dns=a&dns=b).
 	dnsAltNames := r.URL.Query()["dns"]
@@ -577,7 +581,7 @@ func (s *Server) handleDeleteStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
-	slog.Info("DELETE certificate_status", "subject", subject, "client", clientCN(r))
+	slog.Debug("DELETE certificate_status", "subject", subject, "client", clientCN(r))
 
 	if err := s.CA.Clean(subject); err != nil {
 		slog.Warn("Clean failed", "subject", subject, "error", err)
@@ -588,9 +592,9 @@ func (s *Server) handleDeleteStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if s.destructiveOps != nil && s.destructiveOps.Record(clientCN(r)) {
+	if cn := clientCN(r); cn != "" && s.destructiveOps != nil && s.destructiveOps.Record(cn) {
 		slog.Warn("High rate of destructive operations detected",
-			"client", clientCN(r), "operation", "clean")
+			"client", cn, "operation", "clean")
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -598,7 +602,7 @@ func (s *Server) handleDeleteStatus(w http.ResponseWriter, r *http.Request) {
 // --- Certificate statuses (list all) ---
 
 func (s *Server) handleGetStatuses(w http.ResponseWriter, r *http.Request) {
-	slog.Info("GET certificate_statuses", "client", clientCN(r))
+	slog.Debug("GET certificate_statuses", "client", clientCN(r))
 
 	stateFilter := r.URL.Query().Get("state") // "requested", "signed", "revoked", or ""
 
@@ -665,7 +669,7 @@ type CertExpiration struct {
 }
 
 func (s *Server) handleGetExpirations(w http.ResponseWriter, r *http.Request) {
-	slog.Info("GET expirations", "client", clientCN(r))
+	slog.Debug("GET expirations", "client", clientCN(r))
 
 	certExp := s.CA.CACert.NotAfter.UTC().Format(time.RFC3339)
 
@@ -694,7 +698,7 @@ type SignRequestBody struct {
 
 func (s *Server) handlePostSign(w http.ResponseWriter, r *http.Request) {
 	cn := clientCN(r)
-	slog.Info("POST sign", "client", cn)
+	slog.Debug("POST sign", "client", cn)
 
 	var body SignRequestBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -706,7 +710,7 @@ func (s *Server) handlePostSign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("Signing certificates", "count", len(body.Certnames), "subjects", body.Certnames, "client", cn)
+	slog.Debug("Signing certificates", "count", len(body.Certnames), "subjects", body.Certnames, "client", cn)
 	result := s.signInBatches(body.Certnames)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
@@ -714,7 +718,7 @@ func (s *Server) handlePostSign(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePostSignAll(w http.ResponseWriter, r *http.Request) {
 	cn := clientCN(r)
-	slog.Info("POST sign/all", "client", cn)
+	slog.Debug("POST sign/all", "client", cn)
 
 	pending, err := s.CA.Storage.ListCSRs()
 	if err != nil {
@@ -723,7 +727,7 @@ func (s *Server) handlePostSignAll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result := s.signInBatches(pending)
-	slog.Info("Signed all pending CSRs", "signed", len(result.Signed), "errors", len(result.SigningErrors), "client", cn)
+	slog.Debug("Signed all pending CSRs", "signed", len(result.Signed), "errors", len(result.SigningErrors), "client", cn)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
 }

@@ -17,20 +17,20 @@ A drop-in replacement for Puppet Server's built-in CA, written in Go. It impleme
 
 ## Features
 
-- **Full Puppet CA API compatibility** — all 13 endpoints used by agents and puppet-server
-- **Flat-file storage** — reads/writes the same directory layout as Puppet Server
-- **Autosigning** — `true`, glob-pattern file, or executable plugin modes
-- **mTLS support** — optional HTTPS with per-endpoint tier-based client certificate authorization
-- **CA import** — replace a bootstrapped CA with an external cert/key pair offline
-- **Server-side key generation** — issue cert+key pairs without a node-submitted CSR; configurable RSA (2048/3072/4096) or ECDSA (P-256/P-384/P-521)
-- **Configurable key algorithms** — CA and leaf certificates can use RSA or ECDSA; ECDSA support for both bootstrapped CAs and generated leaf certs
-- **Random serial numbers** — every issued leaf certificate gets a cryptographically random 128-bit serial (CA/Browser Forum guidance)
-- **CRL Distribution Points** — optionally embed a CRL URL in every issued certificate (`--crl-url`) so verifiers can automatically fetch the CRL
-- **Configurable CRL validity** — control how long each published CRL is valid (`crl_validity_days`)
-- **OCSP responder** — built-in RFC 6960 OCSP responder; AIA extension embedded in issued certs when `--ocsp-url` is set; in-memory cache with nonce bypass
-- **Health probes** — `/healthz/live`, `/healthz/ready`, and `/healthz/startup` endpoints for Kubernetes-style liveness/readiness checks
-- **FIPS-compatible** — standard library only (`crypto/x509`, `net/http`); no CGO by default; FIPS build available via `GOEXPERIMENT=boringcrypto`
-- **`puppet-ca-ctl`** — operator CLI matching `tvaughan-server-ca` subcommands
+- **Full Puppet CA API compatibility:** all 13 endpoints used by agents and puppet-server
+- **Flat-file storage:** reads/writes the same directory layout as Puppet Server
+- **Autosigning:** `true`, glob-pattern file, or executable plugin modes
+- **mTLS support:** optional HTTPS with per-endpoint tier-based client certificate authorization
+- **CA import:** replace a bootstrapped CA with an external cert/key pair offline
+- **Server-side key generation:** issue cert+key pairs without a node-submitted CSR; configurable RSA (2048/3072/4096) or ECDSA (P-256/P-384/P-521)
+- **Configurable key algorithms:** CA and leaf certificates can use RSA or ECDSA; ECDSA support for both bootstrapped CAs and generated leaf certs
+- **Random serial numbers:** every issued leaf certificate gets a cryptographically random 128-bit serial (CA/Browser Forum guidance)
+- **CRL Distribution Points:** optionally embed a CRL URL in every issued certificate (`--crl-url`) so verifiers can automatically fetch the CRL
+- **Configurable CRL validity:** control how long each published CRL is valid (`crl_validity_days`)
+- **OCSP responder:** built-in RFC 6960 OCSP responder; AIA extension embedded in issued certs when `--ocsp-url` is set; in-memory cache with nonce bypass
+- **Health probes:** `/healthz/live`, `/healthz/ready`, and `/healthz/startup` endpoints for Kubernetes-style liveness/readiness checks
+- **FIPS-compatible:** standard library only (`crypto/x509`, `net/http`); no CGO by default; FIPS build available via `GOEXPERIMENT=boringcrypto`
+- **`puppet-ca-ctl`:** operator CLI matching `tvaughan-server-ca` subcommands
 
 ## Building
 
@@ -54,14 +54,14 @@ go build -o bin/puppet-ca-ctl ./cmd/puppet-ca-ctl
 mage build:fips   # → bin/puppet-ca + bin/puppet-ca-ctl  (GOEXPERIMENT=boringcrypto, CGO_ENABLED=1)
 ```
 
-## puppet-ca — the server
+## puppet-ca -- the server
 
 ### Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--config` | `""` | Path to YAML config file (auto-detected at `/etc/puppet-ca/config.yaml`) |
-| `--cadir` | `""` | CA storage directory (keys, certs, CSRs, CRL) — required via flag, env, or config |
+| `--cadir` | `""` | CA storage directory (keys, certs, CSRs, CRL); required via flag, env, or config |
 | `--host` | `0.0.0.0` | Listen address |
 | `--port` | `8140` | Listen port |
 | `--hostname` | `""` | CN suffix for a bootstrapped CA (`Puppet CA: <hostname>`); defaults to `puppet` when empty |
@@ -88,7 +88,7 @@ mage build:fips   # → bin/puppet-ca + bin/puppet-ca-ctl  (GOEXPERIMENT=boringc
 All flags can be set via a YAML config file or environment variables. Precedence
 (highest → lowest): **CLI flag** → **environment variable** → **config file** → **built-in default**.
 
-Key generation and CA subject options are intentionally **not** exposed as CLI flags — they are one-time bootstrap decisions that belong in a config file or environment variable. Use the config file or `PUPPET_CA_CA_KEY_ALGO` / `PUPPET_CA_CA_SUBJECT_*` env vars to set them.
+Key generation and CA subject options are intentionally **not** exposed as CLI flags. They are one-time bootstrap decisions that belong in a config file or environment variable. Use the config file or `PUPPET_CA_CA_KEY_ALGO` / `PUPPET_CA_CA_SUBJECT_*` env vars to set them.
 
 The config file is located by checking, in order:
 1. `--config /path/to/config.yaml` (explicit flag)
@@ -164,7 +164,7 @@ ca_key_passphrase_file: ""      # path to passphrase file; auto-generated if omi
 
 The CA key passphrase can also be provided via `PUPPET_CA_KEY_PASSPHRASE` (env var only, no CLI flag to avoid `/proc/cmdline` exposure).
 
-**Environment variables (config file / env var only — no CLI flag):**
+**Environment variables (config file / env var only, no CLI flag):**
 
 | Config key | Environment variable |
 |------------|---------------------|
@@ -365,9 +365,9 @@ These endpoints are served at bare paths only (no `/puppet-ca/v1` prefix) and re
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/healthz/live` | Liveness probe — always `200` while the process is running |
-| `GET` | `/healthz/ready` | Readiness probe — `200` once the CA is initialised, `503` before |
-| `GET` | `/healthz/startup` | Startup probe — delegates to the readiness check |
+| `GET` | `/healthz/live` | Liveness probe: always `200` while the process is running |
+| `GET` | `/healthz/ready` | Readiness probe: `200` once the CA is initialised, `503` before |
+| `GET` | `/healthz/startup` | Startup probe: delegates to the readiness check |
 
 Response body: `{"status":"ok"}` (200) or `{"status":"not_ready"}` (503).
 
@@ -390,8 +390,8 @@ In plain HTTP mode (no TLS), all endpoints are accessible without authentication
 
 A client certificate is considered an admin credential if **either** condition is met:
 
-1. **CN allow list** — the certificate's Common Name appears in the `--puppet-server` comma-separated list or in the file pointed to by `--puppet-server-file` (one CN per line; `#` comments and blank lines ignored). Both sources can be used simultaneously; their CNs are merged.
-2. **`pp_cli_auth` extension** — the certificate carries the Puppet authorization extension OID `1.3.6.1.4.1.34380.1.3.39` with the UTF8String value `"true"`. OpenVox Server embeds this extension in its own certificate by default, so the `puppetserver ca` CLI can authenticate without being listed by CN.
+1. **CN allow list:** the certificate's Common Name appears in the `--puppet-server` comma-separated list or in the file pointed to by `--puppet-server-file` (one CN per line; `#` comments and blank lines ignored). Both sources can be used simultaneously; their CNs are merged.
+2. **`pp_cli_auth` extension:** the certificate carries the Puppet authorization extension OID `1.3.6.1.4.1.34380.1.3.39` with the UTF8String value `"true"`. OpenVox Server embeds this extension in its own certificate by default, so the `puppetserver ca` CLI can authenticate without being listed by CN.
 
 The `pp_cli_auth` check is enabled by default. Disable it with `--no-pp-cli-auth` (or `no_pp_cli_auth: true` in the config file) if you prefer strict CN-only authorization.
 
@@ -411,9 +411,9 @@ Enable `--encrypt-ca-key` to encrypt the key at rest using AES-256-GCM with an A
 
 ### Passphrase resolution order
 
-1. **`--ca-key-passphrase-file`** — reads the first line of the specified file.
-2. **`PUPPET_CA_KEY_PASSPHRASE`** environment variable — avoids CLI `/proc/cmdline` exposure.
-3. **Auto-generated** — if no passphrase source is configured, a cryptographically random
+1. **`--ca-key-passphrase-file`:** reads the first line of the specified file.
+2. **`PUPPET_CA_KEY_PASSPHRASE`** environment variable: avoids CLI `/proc/cmdline` exposure.
+3. **Auto-generated:** if no passphrase source is configured, a cryptographically random
    passphrase is generated and saved to `<cadir>/private/.ca_key_passphrase` (mode `0600`).
    The path is logged at startup so operators know where it is.
 
@@ -445,19 +445,19 @@ unencrypted PEM files.
 
 ### Security considerations
 
-Encrypting the CA key at rest protects against **offline exfiltration** — if an attacker
+Encrypting the CA key at rest protects against **offline exfiltration**. If an attacker
 obtains the key file from a backup, disk image, or volume snapshot, the key is unusable
 without the passphrase. It does **not** protect against a live host compromise where the
 attacker can read the passphrase source or dump the process memory.
 
-For stronger protection, consider hardware security modules (HSM) via PKCS#11 — see
+For stronger protection, consider hardware security modules (HSM) via PKCS#11; see
 [Planned: PKCS#11 / HSM support](#planned-pkcs11--hsm-support) below.
 
 ### Planned: PKCS#11 / HSM support
 
 A future enhancement will add PKCS#11 support so the CA private key can be held in a
 hardware security module (HSM), TPM, or software token (e.g. SoftHSM2). The key would
-never leave the token — only signing operations would be delegated via the PKCS#11 API.
+never leave the token. Only signing operations would be delegated via the PKCS#11 API.
 
 The implementation path is straightforward because the CA already stores its key as a
 `crypto.Signer` interface (`internal/ca/ca.go`). A PKCS#11-backed signer would implement
@@ -484,13 +484,13 @@ operations per minute**, a warning is emitted to the structured log:
 level=WARN msg="High rate of destructive operations detected" client=admin.example.com operation=revoke
 ```
 
-This is a **detective control** — it does not block the operation, but alerts
+This is a detective control, not a preventive one. It does not block the operation, but alerts
 operators to potentially anomalous administrative activity. Operators should:
 
 - Forward `puppet-ca` logs to a centralized log aggregator (e.g. Loki,
   Elasticsearch, Splunk)
 - Create alerts on `"High rate of destructive operations"` log messages
-- Investigate any alerts promptly — a burst of revocations may indicate a
+- Investigate any alerts promptly. A burst of revocations may indicate a
   compromised admin certificate or an operational error
 - Consider whether the `--allow-list` should be tightened if unexpected clients
   appear in these warnings
@@ -498,7 +498,7 @@ operators to potentially anomalous administrative activity. Operators should:
 The threshold (5 ops/minute) is a sensible default for environments where
 bulk revocation is uncommon. Future versions may make this configurable.
 
-## puppet-ca-ctl — the operator CLI
+## puppet-ca-ctl -- the operator CLI
 
 `puppet-ca-ctl` mirrors the `tvaughan-server-ca` / `puppetserver ca` subcommands and communicates with a running `puppet-ca` server over HTTP(S).
 
@@ -581,7 +581,7 @@ puppet-ca-ctl import \
   --crl-chain   ca_crl.pem     # optional; a new CRL is generated if omitted
 ```
 
-`setup` and `import` operate **directly on the filesystem** — no running server is needed.
+`setup` and `import` operate directly on the filesystem. No running server is needed.
 
 ## Container / Compose
 
@@ -601,7 +601,7 @@ mage test:bench
 mage test:puppet
 ```
 
-`test:integCompose` and `test:loadCompose` use `compose.yml` — the canonical integration test suite. It runs two containers on an isolated network (puppet-ca + test-runner) and exercises the full API in TAP format across 19 test groups:
+`test:integCompose` and `test:loadCompose` use `compose.yml`, the canonical integration test suite. It runs two containers on an isolated network (puppet-ca + test-runner) and exercises the full API in TAP format across 19 test groups:
 
 | Group | Coverage |
 |-------|----------|
@@ -626,12 +626,12 @@ mage test:puppet
 | 19 | Migration from Puppet Server CA: import CA cert/key/CRL via `puppet-ca-ctl import`, copy pre-existing signed certs, verify fetch/sign/revoke/list all work on the migrated CA |
 
 `test:bench` uses `compose-bench.yml` (autosign=true, k6 load runner).
-`test:puppet` uses `compose-puppet.yml` — a five-service stack that validates end-to-end catalog compilation, PuppetDB reporting, exported resources, and CRL revocation using a real OpenVox 8 agent and WEBrick puppet master. The CA runs with genuine TLS (a cert with CN=puppet-ca signed by the CA itself); all inter-service traffic verifies it.
-`test:migration` uses `compose-migration.yml` — starts a real VoxPupuli Puppet Server (`voxpupuli/puppetserver:latest`) to create a genuine Puppet CA, then imports its CA material into puppet-ca using `puppet-ca-ctl import` and verifies the full migration path: old certs are fetchable, new certs can be signed, migrated certs can be revoked and cleaned.
+`test:puppet` uses `compose-puppet.yml`, a five-service stack that validates end-to-end catalog compilation, PuppetDB reporting, exported resources, and CRL revocation using a real OpenVox 8 agent and WEBrick puppet master. The CA runs with genuine TLS (a cert with CN=puppet-ca signed by the CA itself); all inter-service traffic verifies it.
+`test:migration` uses `compose-migration.yml`, which starts a real VoxPupuli Puppet Server (`voxpupuli/puppetserver:latest`) to create a genuine Puppet CA, then imports its CA material into puppet-ca using `puppet-ca-ctl import` and verifies the full migration path: old certs are fetchable, new certs can be signed, migrated certs can be revoked and cleaned.
 
 The k6 script (`test/load.js`) runs two concurrent scenarios:
-- **reads** — hammers GET /certificate/ca, CRL, and expirations; ramps to 200 VUs
-- **workflow** — POST /generate → GET status → GET cert → DELETE; ramps to 50 VUs (CPU-bound on RSA key generation)
+- **reads** -- hammers GET /certificate/ca, CRL, and expirations; ramps to 200 VUs
+- **workflow** -- POST /generate → GET status → GET cert → DELETE; ramps to 50 VUs (CPU-bound on RSA key generation)
 
 Thresholds that fail the run: error rate ≥ 1%, read p95 ≥ 500 ms, workflow p95 ≥ 5 s.
 

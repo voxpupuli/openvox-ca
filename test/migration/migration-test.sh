@@ -13,7 +13,7 @@
 
 set -uo pipefail
 
-# ── Configuration ────────────────────────────────────────────────────────────
+# -- Configuration ------------------------------------------------------------
 OLD_CA_URL="https://old-puppet:8140"
 OLD_CA_DIR="/old-ca"
 NEW_CA_DIR=$(mktemp -d /tmp/puppet-ca-migration.XXXXXX)
@@ -21,7 +21,7 @@ NEW_CA_PORT=8140
 WORK_DIR=$(mktemp -d /tmp/migration-work.XXXXXX)
 RUN_ID=$(date +%s%N | tail -c 8)
 
-# ── TAP helpers ──────────────────────────────────────────────────────────────
+# -- TAP helpers --------------------------------------------------------------
 T=0
 FAILURES=0
 
@@ -45,9 +45,9 @@ cleanup() {
 trap cleanup EXIT
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Phase 1 — Verify the old Puppet Server CA is genuine
+# Phase 1 -- Verify the old Puppet Server CA is genuine
 # ═════════════════════════════════════════════════════════════════════════════
-printf '\n# Phase 1 — Verify old Puppet Server CA\n'
+printf '\n# Phase 1 -- Verify old Puppet Server CA\n'
 
 # 1a: Verify the old CA directory contains expected files.
 [ -s "$OLD_CA_DIR/ca_crt.pem" ] \
@@ -73,7 +73,7 @@ _old_ca_is_ca=$(openssl x509 -noout -text -in "$OLD_CA_DIR/ca_crt.pem" 2>/dev/nu
     && pass "Old CA: certificate has CA:TRUE" \
     || fail "Old CA: certificate has CA:TRUE"
 
-# 1c: The old server signed its own cert — verify it's in signed/.
+# 1c: The old server signed its own cert; verify it's in signed/.
 _old_signed_count=$(find "$OLD_CA_DIR/signed" -name '*.pem' -type f 2>/dev/null | wc -l) || true
 [ "${_old_signed_count:-0}" -gt 0 ] \
     && pass "Old CA: has at least one signed cert (count=$_old_signed_count)" \
@@ -86,9 +86,9 @@ echo "$_old_api_cert" | grep -qF "BEGIN CERTIFICATE" \
     || fail "Old CA: API serves CA cert"
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Phase 2 — Create test certificates on the old CA
+# Phase 2 -- Create test certificates on the old CA
 # ═════════════════════════════════════════════════════════════════════════════
-printf '\n# Phase 2 — Create test certs on old CA\n'
+printf '\n# Phase 2 -- Create test certs on old CA\n'
 
 # 2a: Submit a CSR to the old CA and get it autosigned.
 _OLD_AGENT="mig-agent-${RUN_ID}"
@@ -127,9 +127,9 @@ _old_ca_fp=$(openssl x509 -noout -fingerprint -sha256 \
     -in "$OLD_CA_DIR/ca_crt.pem" 2>/dev/null) || true
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Phase 3 — Import old CA into puppet-ca
+# Phase 3 -- Import old CA into puppet-ca
 # ═════════════════════════════════════════════════════════════════════════════
-printf '\n# Phase 3 — Import old CA into puppet-ca\n'
+printf '\n# Phase 3 -- Import old CA into puppet-ca\n'
 
 # 3a: Import using puppet-ca-ctl.
 _import_out=$(puppet-ca-ctl import \
@@ -187,9 +187,9 @@ _inv_lines=$(wc -l < "$NEW_CA_DIR/inventory.txt" 2>/dev/null) || _inv_lines=0
     || fail "Import: inventory rebuilt" "lines=$_inv_lines"
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Phase 4 — Start puppet-ca with imported material
+# Phase 4 -- Start puppet-ca with imported material
 # ═════════════════════════════════════════════════════════════════════════════
-printf '\n# Phase 4 — Start puppet-ca with imported CA\n'
+printf '\n# Phase 4 -- Start puppet-ca with imported CA\n'
 
 puppet-ca --cadir "$NEW_CA_DIR" \
     --host 127.0.0.1 --port "$NEW_CA_PORT" \
@@ -217,9 +217,9 @@ fi
 pass "puppet-ca starts with imported CA"
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Phase 5 — Verify the migrated CA works
+# Phase 5 -- Verify the migrated CA works
 # ═════════════════════════════════════════════════════════════════════════════
-printf '\n# Phase 5 — Verify migrated CA\n'
+printf '\n# Phase 5 -- Verify migrated CA\n'
 
 # 5a: CA cert is fetchable from the new server.
 _new_api_cert=$(curl -sf "${_new_url}/puppet-ca/v1/certificate/ca" 2>/dev/null) || true
@@ -276,9 +276,9 @@ echo "$_new_list" | grep -qF "${_OLD_AGENT}" \
     || fail "New CA: puppet-ca-ctl list shows migrated agent cert" "output: $_new_list"
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Phase 6 — Sign new certs, revoke migrated certs
+# Phase 6 -- Sign new certs, revoke migrated certs
 # ═════════════════════════════════════════════════════════════════════════════
-printf '\n# Phase 6 — New signing and revocation on migrated CA\n'
+printf '\n# Phase 6 -- New signing and revocation on migrated CA\n'
 
 # 6a: Submit and autosign a brand-new CSR on the migrated CA.
 _NEW_AGENT="mig-newagent-${RUN_ID}"

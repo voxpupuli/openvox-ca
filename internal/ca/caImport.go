@@ -38,7 +38,7 @@ import (
 //
 // crlPEM may be nil; when nil a fresh empty CRL is generated and written.
 //
-// This is an offline operation — no CA daemon is required.
+// This is an offline operation; no CA daemon is required.
 func ImportCA(store *storage.StorageService, certBundlePEM, keyPEM, crlPEM []byte) error {
 	// --- Parse and validate cert ---
 	block, _ := pem.Decode(certBundlePEM)

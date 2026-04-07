@@ -949,12 +949,12 @@ var _ = Describe("API Workflow", func() {
 	})
 
 	Context("PUT /certificate_status sign when no CSR exists", func() {
-		It("should return 409 when trying to sign a subject with no pending CSR", func() {
+		It("should return 404 when trying to sign a subject with no pending CSR", func() {
 			body, _ := json.Marshal(api.PutStatusBody{DesiredState: "signed"})
 			req := httptest.NewRequest("PUT", "/certificate_status/ghost-node", bytes.NewReader(body))
 			rr := httptest.NewRecorder()
 			mux.ServeHTTP(rr, req)
-			Expect(rr.Code).To(Equal(http.StatusConflict))
+			Expect(rr.Code).To(Equal(http.StatusNotFound))
 		})
 	})
 
@@ -984,7 +984,7 @@ var _ = Describe("API Workflow", func() {
 			limitedServer.CSRRateLimit = 2
 			limitedMux := limitedServer.Routes()
 
-			// First two requests succeed (200 or 409 — both mean the limiter allowed them through).
+			// First two requests succeed (200 or 409, both mean the limiter allowed them through).
 			for i := 0; i < 2; i++ {
 				csrPEM, err := testutil.GenerateCSR("rl-node")
 				Expect(err).NotTo(HaveOccurred())

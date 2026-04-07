@@ -188,7 +188,7 @@ func TestPSKHandshakeWrongKey(t *testing.T) {
 		errCh <- serverHandshake(serverConn, serverPSK)
 	}()
 
-	// Client uses a different PSK — handshake should complete on client side
+	// Client uses a different PSK; handshake should complete on client side
 	// but server should reject.
 	_ = clientHandshake(clientConn, clientPSK)
 

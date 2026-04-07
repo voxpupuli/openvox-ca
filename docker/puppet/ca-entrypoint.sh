@@ -29,7 +29,7 @@ EOF
 # Phase 2 passthrough: if the TLS cert was already generated (e.g. container
 # restart), skip directly to the real CA startup.
 if [ -s "${TLS_CERT}" ] && [ -s "${TLS_KEY}" ]; then
-    echo "TLS cert already exists — starting CA with TLS."
+    echo "TLS cert already exists -- starting CA with TLS."
     exec /usr/local/bin/puppet-ca \
         --cadir="${CA_DIR}" \
         --hostname=puppet-ca \
@@ -40,7 +40,7 @@ if [ -s "${TLS_CERT}" ] && [ -s "${TLS_KEY}" ]; then
         "$@"
 fi
 
-# ── Phase 1: bootstrap CA on loopback ──────────────────────────────────────
+# -- Phase 1: bootstrap CA on loopback --------------------------------------
 echo "Phase 1: bootstrapping CA on loopback to generate TLS cert..."
 /usr/local/bin/puppet-ca \
     --cadir="${CA_DIR}" \
@@ -90,7 +90,7 @@ echo "TLS cert generated at ${TLS_CERT}"
 kill "${PHASE1_PID}" 2>/dev/null || true
 wait "${PHASE1_PID}" 2>/dev/null || true
 
-# ── Phase 2: start CA with TLS on all interfaces ────────────────────────────
+# -- Phase 2: start CA with TLS on all interfaces ----------------------------
 echo "Phase 2: starting CA with TLS on all interfaces..."
 exec /usr/local/bin/puppet-ca \
     --cadir="${CA_DIR}" \

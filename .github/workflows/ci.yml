@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
 
-  # ── Format / vet / tidy ──────────────────────────────────────────────────────
+  # -- Format / vet / tidy ------------------------------------------------------
   check:
     name: Format / vet / tidy
     runs-on: ubuntu-latest
@@ -31,7 +31,7 @@ jobs:
       - name: Check formatting, vet, and module tidy
         run: mage dev:check
 
-  # ── Unit tests ───────────────────────────────────────────────────────────────
+  # -- Unit tests --------------------------------------------------------------─
   unit:
     name: Unit tests
     runs-on: ubuntu-latest
@@ -57,7 +57,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # ── Puppet stack integration tests ──────────────────────────────────────────
+  # -- Puppet stack integration tests ------------------------------------------
   # Runs the full OpenVox 8 stack: Go CA (TLS) → OpenVox Server (WEBrick) →
   # OpenVoxDB.  Requires docker compose and network access to pull base images
   # on first run.  Same standard/FIPS matrix as the compose job.
@@ -88,7 +88,7 @@ jobs:
           MAGE_TARGET: ${{ matrix.mage_target }}
         run: mage "$MAGE_TARGET"
 
-  # ── Migration integration tests ────────────────────────────────────────────
+  # -- Migration integration tests --------------------------------------------
   # Boots a real VoxPupuli Puppet Server, creates a genuine CA, then imports
   # it into puppet-ca and verifies the full migration path.
   migration:
@@ -105,7 +105,7 @@ jobs:
       - name: Run migration integration tests
         run: mage test:migration
 
-  # ── Compose integration tests (docker compose) ───────────────────────────────
+  # -- Compose integration tests (docker compose) ------------------------------─
   # podman-compose is not pre-installed on GitHub runners; composeCmd() in
   # magefile.go falls back to `docker compose` (v2 plugin, always available).
   # Same standard/FIPS matrix as the unit test job above.

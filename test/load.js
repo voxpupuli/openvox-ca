@@ -2,20 +2,20 @@
  * puppet-ca k6 load test
  *
  * Three goals, one script:
- *   1. Correctness  – check assertions fail the run if responses are wrong
- *   2. Performance  – measure throughput and latency percentiles at steady load
- *   3. Saturation   – ramp VUs until error rate or latency thresholds are breached
+ *   1. Correctness  -- check assertions fail the run if responses are wrong
+ *   2. Performance  -- measure throughput and latency percentiles at steady load
+ *   3. Saturation   -- ramp VUs until error rate or latency thresholds are breached
  *
  * Two concurrent scenarios:
- *   reads    – read-only endpoints; ramps to 200 VUs
- *   workflow – full lifecycle (generate → status → cert → clean); ramps to 50 VUs
+ *   reads    -- read-only endpoints; ramps to 200 VUs
+ *   workflow -- full lifecycle (generate -> status -> cert -> clean); ramps to 50 VUs
  *              (lower ceiling because server-side RSA key generation is CPU-bound)
  *
  * Phases per scenario:
- *   0:00  smoke      –   5 / 2 VUs for 30 s  (correctness)
- *   0:30  load       –  50 /10 VUs for 2 m   (benchmark)
- *   2:30  stress     – 200 /50 VUs for 2 m   (saturation)
- *   4:30  cool-down  –   0 / 0 VUs for 30 s
+ *   0:00  smoke      --   5 / 2 VUs for 30 s  (correctness)
+ *   0:30  load       --  50 /10 VUs for 2 m   (benchmark)
+ *   2:30  stress     -- 200 /50 VUs for 2 m   (saturation)
+ *   4:30  cool-down  --   0 / 0 VUs for 30 s
  *
  * Environment variables:
  *   CA_URL   Base URL of the puppet-ca server (default: http://puppet-ca:8140)
@@ -30,7 +30,7 @@ const BASE = (__ENV.CA_URL || 'http://puppet-ca:8140') + '/puppet-ca/v1';
 // Custom error-rate metric so thresholds can reference it by name.
 const errors = new Rate('errors');
 
-// ── Options ──────────────────────────────────────────────────────────────────
+// -- Options ------------------------------------------------------------------
 
 export const options = {
   scenarios: {
@@ -67,11 +67,11 @@ export const options = {
   },
 };
 
-// ── Scenario: reads ───────────────────────────────────────────────────────────
+// -- Scenario: reads ----------------------------------------------------------─
 // Exercises the three most-hit read-only endpoints:
-//   GET /certificate/ca                    – Puppet agents fetch this on every run
-//   GET /certificate_revocation_list/ca    – Puppet servers poll this regularly
-//   GET /expirations                       – Operator health-check endpoint
+//   GET /certificate/ca                    -- Puppet agents fetch this on every run
+//   GET /certificate_revocation_list/ca    -- Puppet servers poll this regularly
+//   GET /expirations                       -- Operator health-check endpoint
 
 export function readScenario() {
   let ok = true;
@@ -94,18 +94,18 @@ export function readScenario() {
   errors.add(!ok);
 }
 
-// ── Scenario: workflow ────────────────────────────────────────────────────────
+// -- Scenario: workflow --------------------------------------------------------
 // Exercises the full server-side certificate lifecycle:
-//   POST /generate/{subject}                 – generate RSA key + sign cert
-//   GET  /certificate_status/{subject}       – verify state == "signed"
-//   GET  /certificate/{subject}              – download the signed cert
-//   DELETE /certificate_status/{subject}     – revoke + delete (cleanup)
+//   POST /generate/{subject}                 -- generate RSA key + sign cert
+//   GET  /certificate_status/{subject}       -- verify state == "signed"
+//   GET  /certificate/{subject}              -- download the signed cert
+//   DELETE /certificate_status/{subject}     -- revoke + delete (cleanup)
 //
 // Subject names are unique per VU × iteration so parallel VUs never conflict.
 // The DELETE at the end ensures the next iteration of the same VU can recycle
 // the slot without hitting 409.
 
-// ── End-of-run summary ────────────────────────────────────────────────────────
+// -- End-of-run summary --------------------------------------------------------
 // Produces a focused report with system context, threshold verdicts, and key
 // latency percentiles per scenario.
 

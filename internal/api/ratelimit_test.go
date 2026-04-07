@@ -42,8 +42,8 @@ var _ = Describe("destructiveOpTracker", func() {
 		t := newDestructiveOpTracker(1, time.Minute)
 		Expect(t.Record("alice")).To(BeFalse()) // alice count=1
 		Expect(t.Record("bob")).To(BeFalse())   // bob count=1
-		Expect(t.Record("alice")).To(BeTrue())   // alice count=2 > threshold
-		Expect(t.Record("bob")).To(BeTrue())     // bob count=2 > threshold
+		Expect(t.Record("alice")).To(BeTrue())  // alice count=2 > threshold
+		Expect(t.Record("bob")).To(BeTrue())    // bob count=2 > threshold
 	})
 
 	It("resets after the window expires", func() {

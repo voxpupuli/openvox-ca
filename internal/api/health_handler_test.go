@@ -82,7 +82,7 @@ var _ = Describe("Health Endpoints", func() {
 		return srv.Routes()
 	}
 
-	// ── Liveness ──────────────────────────────────────────────────────────────
+	// --- Liveness ---
 
 	Describe("GET /healthz/live", func() {
 		It("returns 200 and status ok", func() {
@@ -113,7 +113,7 @@ var _ = Describe("Health Endpoints", func() {
 
 		It("is accessible without a client cert (public tier)", func() {
 			req := httptest.NewRequest("GET", "/healthz/live", nil)
-			// r.TLS is nil — auth middleware must not block public tier.
+			// r.TLS is nil; auth middleware must not block public tier.
 			rr := httptest.NewRecorder()
 			newAuthedMux().ServeHTTP(rr, req)
 			Expect(rr.Code).To(Equal(http.StatusOK))
@@ -133,7 +133,7 @@ var _ = Describe("Health Endpoints", func() {
 		)
 	})
 
-	// ── Readiness ─────────────────────────────────────────────────────────────
+	// --- Readiness ---
 
 	Describe("GET /healthz/ready", func() {
 		It("returns 200 when CA is initialized", func() {
@@ -195,7 +195,7 @@ var _ = Describe("Health Endpoints", func() {
 		)
 	})
 
-	// ── Startup ───────────────────────────────────────────────────────────────
+	// --- Startup ---
 
 	Describe("GET /healthz/startup", func() {
 		It("returns 200 when CA is initialized", func() {

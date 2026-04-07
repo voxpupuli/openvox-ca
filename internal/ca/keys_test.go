@@ -32,7 +32,7 @@ import (
 	"github.com/tvaughan/puppet-ca/internal/testutil"
 )
 
-// ─── ValidateKeyConfig ────────────────────────────────────────────────────────
+// --- ValidateKeyConfig ---
 
 var _ = DescribeTable("ValidateKeyConfig valid configs",
 	func(cfg ca.KeyConfig) { Expect(ca.ValidateKeyConfig(cfg)).To(Succeed()) },
@@ -67,7 +67,7 @@ var _ = Describe("Default key config constants", func() {
 	})
 })
 
-// ─── Bootstrap with different key algorithms ─────────────────────────────────
+// --- Bootstrap with different key algorithms ---
 
 var _ = Describe("CA Bootstrap key algorithms", func() {
 	var (
@@ -163,7 +163,7 @@ var _ = Describe("CA Bootstrap key algorithms", func() {
 	})
 })
 
-// ─── CA certificate subject fields ───────────────────────────────────────────
+// --- CA certificate subject fields ---
 
 var _ = Describe("CA Bootstrap subject fields", func() {
 	var (
@@ -225,7 +225,7 @@ var _ = Describe("CA Bootstrap subject fields", func() {
 	})
 })
 
-// ─── LeafKeyConfig via Generate ───────────────────────────────────────────────
+// --- LeafKeyConfig via Generate ---
 
 var _ = Describe("Generate with LeafKeyConfig", func() {
 	var (
@@ -292,7 +292,7 @@ var _ = Describe("Generate with LeafKeyConfig", func() {
 	})
 })
 
-// ─── CA path length constraint ────────────────────────────────────────────────
+// --- CA path length constraint ---
 
 var _ = Describe("CA Bootstrap path length constraint", func() {
 	var (
@@ -345,7 +345,7 @@ var _ = Describe("CA Bootstrap path length constraint", func() {
 	})
 })
 
-// ─── CA certificate validity period ──────────────────────────────────────────
+// --- CA certificate validity period ---
 
 var _ = Describe("CA certificate validity period", func() {
 	var (
@@ -389,7 +389,7 @@ var _ = Describe("CA certificate validity period", func() {
 	})
 })
 
-// ─── Leaf certificate validity period ────────────────────────────────────────
+// --- Leaf certificate validity period ---
 
 var _ = Describe("Leaf certificate validity period", func() {
 	var (
@@ -466,7 +466,7 @@ var _ = Describe("Leaf certificate validity period", func() {
 	})
 })
 
-// ─── loadCA key/cert mismatch detection ──────────────────────────────────────
+// --- loadCA key/cert mismatch detection ---
 
 var _ = Describe("loadCA key/cert mismatch", func() {
 	It("Init fails when the CA private key does not match the CA certificate", func() {
@@ -494,7 +494,7 @@ var _ = Describe("loadCA key/cert mismatch", func() {
 	})
 })
 
-// ─── ImportCA with ECDSA ──────────────────────────────────────────────────────
+// --- ImportCA with ECDSA ---
 
 var _ = Describe("ImportCA ECDSA", func() {
 	It("imports an ECDSA CA cert/key pair", func() {
@@ -537,7 +537,7 @@ var _ = Describe("ImportCA ECDSA", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		store := storage.New(tmpDir)
-		// Pass ecCertPEM with altEcKeyPEM — these don't match.
+		// Pass ecCertPEM with altEcKeyPEM; these don't match.
 		err = ca.ImportCA(store, ecCertPEM, altEcKeyPEM, ecCrlPEM)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("does not match"))

@@ -12,7 +12,7 @@ set -euo pipefail
 
 export PATH=/opt/puppetlabs/server/bin:/opt/puppetlabs/puppet/bin:$PATH
 
-# ── Configuration ─────────────────────────────────────────────────────────
+# -- Configuration --------------------------------------------------------─
 CA_HOST="${PUPPET_CA_HOST:-puppet-ca}"
 CA_PORT="${PUPPET_CA_PORT:-8140}"
 CA_URL="https://${CA_HOST}:${CA_PORT}"
@@ -27,7 +27,7 @@ echo "=== OpenVox Server Bootstrap ==="
 echo "  FQDN   : ${FQDN}"
 echo "  CA URL : ${CA_URL}"
 
-# ── SSL directory structure ───────────────────────────────────────────────
+# -- SSL directory structure ----------------------------------------------─
 mkdir -p \
     "${PUPPET_SSL}/ca" \
     "${PUPPET_SSL}/certs" \
@@ -35,14 +35,14 @@ mkdir -p \
     "${PUPPET_SSL}/certificate_requests" \
     "${PUPPET_SSL}/public_keys"
 
-# ── Wait for Go CA (HTTPS) ────────────────────────────────────────────────
+# -- Wait for Go CA (HTTPS) ------------------------------------------------
 echo "Waiting for Go CA at ${CA_URL}..."
 until curl -sfk "${CA_URL}/puppet-ca/v1/certificate/ca" > /dev/null 2>&1; do
     sleep 2
 done
 echo "Go CA is ready."
 
-# ── Download CA cert (first fetch — skip TLS verify) ─────────────────────
+# --- Download CA cert (first fetch, skip TLS verify) ---------------------
 # We do not yet have the CA cert to verify against; skip-verify is safe here
 # because we're fetching the CA cert itself (any tampering would be caught
 # later when puppet verifies server certs against this CA cert).
@@ -50,13 +50,13 @@ curl -sfk "${CA_URL}/puppet-ca/v1/certificate/ca" \
      -o "${PUPPET_SSL}/ca/ca_crt.pem"
 echo "CA cert downloaded."
 
-# ── Download CRL (verified against CA cert) ───────────────────────────────
+# -- Download CRL (verified against CA cert) ------------------------------─
 curl -sf "${CA_URL}/puppet-ca/v1/certificate_revocation_list/ca" \
      --cacert "${PUPPET_SSL}/ca/ca_crt.pem" \
      -o "${PUPPET_SSL}/ca/ca_crl.pem"
 echo "CRL downloaded."
 
-# ── Generate server key + signed cert (idempotent) ────────────────────────
+# -- Generate server key + signed cert (idempotent) ------------------------
 if [ ! -s "${PUPPET_SSL}/certs/${FQDN}.pem" ]; then
     echo "Generating RSA key for ${FQDN}..."
     openssl genrsa -out "${PUPPET_SSL}/private_keys/${FQDN}.pem" 4096 2>/dev/null
@@ -94,18 +94,18 @@ if [ ! -s "${PUPPET_SSL}/certs/${FQDN}.pem" ]; then
         exit 1
     fi
 else
-    echo "Server cert already exists — skipping key generation."
+    echo "Server cert already exists -- skipping key generation."
 fi
 
-# ── File permissions ──────────────────────────────────────────────────────
+# -- File permissions ------------------------------------------------------
 chmod 640 "${PUPPET_SSL}/private_keys/${FQDN}.pem"
 
-# ── Symlinks required by puppet agent and PuppetDB terminus ───────────────
+# -- Symlinks required by puppet agent and PuppetDB terminus --------------─
 # puppet agent reads certs/ca.pem; PuppetDB terminus reads crl.pem directly.
 ln -sf "${PUPPET_SSL}/ca/ca_crt.pem" "${PUPPET_SSL}/certs/ca.pem"
 ln -sf "${PUPPET_SSL}/ca/ca_crl.pem" "${PUPPET_SSL}/crl.pem"
 
-# ── Write puppet.conf ─────────────────────────────────────────────────────
+# -- Write puppet.conf ----------------------------------------------------─
 cat > /etc/puppetlabs/puppet/puppet.conf <<EOF
 [main]
 certname    = ${FQDN}
@@ -120,7 +120,7 @@ ca = false
 EOF
 echo "puppet.conf written."
 
-# ── Configure webserver.conf (TLS) ────────────────────────────────────────
+# -- Configure webserver.conf (TLS) ----------------------------------------
 # Tell puppetserver which cert/key to use for TLS and how to validate client
 # certificates.  ssl-client-auth: want requests a cert but does not require
 # it, allowing unauthenticated requests to be handled by auth rules.
@@ -137,7 +137,7 @@ webserver: {
 EOF
 echo "webserver.conf written."
 
-# ── Disable built-in Puppet CA ────────────────────────────────────────────
+# -- Disable built-in Puppet CA --------------------------------------------
 # Replace certificate-authority-service with the disabled stub so puppetserver
 # defers all CA operations to the external Go puppet-ca.
 # In Puppet Server 7+, the CA service entry is in services.d/ca.cfg.
@@ -149,7 +149,7 @@ sed -i \
     "$_CA_CFG"
 echo "Built-in CA disabled in ${_CA_CFG}."
 
-# ── PuppetDB configuration (conditional on OPENVOXDB_HOST) ───────────────
+# -- PuppetDB configuration (conditional on OPENVOXDB_HOST) --------------─
 if [ -n "${OPENVOXDB_HOST:-}" ]; then
     _DB_PORT="${OPENVOXDB_PORT:-8081}"
 
@@ -177,7 +177,7 @@ EOF
     echo "PuppetDB configured: https://${OPENVOXDB_HOST}:${_DB_PORT}"
 fi
 
-# ── Background CRL refresh daemon ────────────────────────────────────────
+# -- Background CRL refresh daemon ----------------------------------------
 # Refreshes the CRL every 30 minutes.  Puppet Server re-reads the CRL file
 # on each SSL handshake so no server restart is needed.
 (
@@ -193,6 +193,6 @@ fi
     done
 ) &
 
-# ── Start OpenVox Server ──────────────────────────────────────────────────
+# -- Start OpenVox Server --------------------------------------------------
 echo "Starting puppetserver foreground..."
 exec puppetserver foreground

@@ -41,8 +41,9 @@ import (
 )
 
 // setupLogger creates and sets the default slog logger based on config.
-// Returns an error if a log file cannot be opened.
-func setupLogger(cfg *serverConfig) error {
+// Returns the log file (if any) so the caller can close it on shutdown,
+// ensuring final log entries are flushed. Returns nil when logging to stderr.
+func setupLogger(cfg *serverConfig) (*os.File, error) {
 	var logLevel slog.Level
 	switch cfg.Verbosity {
 	case 0:
@@ -54,20 +55,18 @@ func setupLogger(cfg *serverConfig) error {
 	}
 
 	opts := &slog.HandlerOptions{Level: logLevel}
-	var logHandler slog.Handler
 
 	if cfg.LogFile != "" {
 		f, err := os.OpenFile(cfg.LogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 		if err != nil {
-			return fmt.Errorf("failed to open log file %s: %w", cfg.LogFile, err)
+			return nil, fmt.Errorf("failed to open log file %s: %w", cfg.LogFile, err)
 		}
-		logHandler = slog.NewJSONHandler(f, opts)
-	} else {
-		logHandler = slog.NewTextHandler(os.Stderr, opts)
+		slog.SetDefault(slog.New(slog.NewJSONHandler(f, opts)))
+		return f, nil
 	}
 
-	slog.SetDefault(slog.New(logHandler))
-	return nil
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, opts)))
+	return nil, nil
 }
 
 // applyCAConfig applies the common CA configuration fields from serverConfig
@@ -128,19 +127,19 @@ func isLoopback(host string) bool {
 
 func main() {
 	var (
-		caDir            string
-		autosignVal      string
-		host             string
-		port             int
-		hostname         string
-		daemon           bool
-		verbosity        int
-		logFile          string
-		tlsCert          string
-		tlsKey           string
-		puppetServers    string
-		puppetServerFile string
-		noPpCliAuth       bool
+		caDir               string
+		autosignVal         string
+		host                string
+		port                int
+		hostname            string
+		daemon              bool
+		verbosity           int
+		logFile             string
+		tlsCert             string
+		tlsKey              string
+		puppetServers       string
+		puppetServerFile    string
+		noPpCliAuth         bool
 		noTLSRequired       bool
 		allowPublicStatus   bool
 		ocspURL             string
@@ -280,7 +279,7 @@ func main() {
 					return fmt.Errorf("connecting to signer process: %w", err)
 				}
 
-				// Now read the CA certificate — guaranteed to exist because the
+				// Now read the CA certificate, guaranteed to exist because the
 				// signer completed Init before accepting the handshake.
 				certPEM, err := os.ReadFile(filepath.Join(absCADir, "ca_crt.pem"))
 				if err != nil {
@@ -305,8 +304,12 @@ func main() {
 			}
 
 			// --- Logging setup ---
-			if err := setupLogger(cfg); err != nil {
+			logFile, err := setupLogger(cfg)
+			if err != nil {
 				return err
+			}
+			if logFile != nil {
+				defer logFile.Close()
 			}
 
 			slog.Info("Starting Puppet CA",
@@ -316,7 +319,7 @@ func main() {
 				"verbosity", cfg.Verbosity,
 			)
 
-			// SECURITY: TLS enforcement — plain HTTP over a non-loopback
+			// SECURITY: TLS enforcement: plain HTTP over a non-loopback
 			// interface lets any on-path host inject forged certificates.
 			// Refuse to start unless:
 			//   (a) TLS is configured (--tls-cert + --tls-key), or
@@ -363,7 +366,7 @@ func main() {
 				// without any verification. This should only be used in isolated
 				// test environments.
 				// NIST 800-53: IA-5 (Authenticator Management)
-				slog.Warn("SECURITY: autosign is set to 'true' — ALL certificate signing requests will be automatically signed without validation. " +
+				slog.Warn("SECURITY: autosign is set to 'true' -- ALL certificate signing requests will be automatically signed without validation. " +
 					"This is dangerous in production. Use an autosign script or file-based allowlist instead.")
 			default:
 				info, err := os.Stat(cfg.AutosignConfig)
@@ -399,7 +402,7 @@ func main() {
 				return err
 			}
 
-			// SECURITY: In frontend mode, use the remote signer — the CA private
+			// SECURITY: In frontend mode, use the remote signer: the CA private
 			// key is never loaded into this process's address space.
 			// NIST 800-53: SC-3 (Security Function Isolation)
 			if remoteSigner != nil {
@@ -412,7 +415,7 @@ func main() {
 			}
 
 			// SECURITY: Warn if any private key files have overly permissive modes.
-			// The server does not modify existing file permissions — operators should
+			// The server does not modify existing file permissions; operators should
 			// fix these manually (e.g. chmod 0640 or stricter).
 			// NIST 800-53: SC-12 (Cryptographic Key Establishment and Management)
 			if warnings := store.CheckKeyPermissions(); len(warnings) > 0 {
@@ -562,17 +565,21 @@ func main() {
 
 // runSignerMode runs the isolated CA key signer process. It initializes the CA
 // (bootstrapping on first run), then serves signing requests over the inherited
-// socketpair fd. The signer has no network exposure — it only communicates with
+// socketpair fd. The signer has no network exposure; it only communicates with
 // the frontend via the pre-connected Unix socketpair.
 //
 // IMPORTANT: The signer calls Init() which handles bootstrapping. The PSK
 // handshake in signer.Serve() happens AFTER Init completes, so the frontend
 // can safely read the CA cert from disk once the handshake succeeds.
 func runSignerMode(cfg *serverConfig, absCADir string) error {
-	if err := setupLogger(cfg); err != nil {
+	logFile, err := setupLogger(cfg)
+	if err != nil {
 		// Signer: fall back to stderr if log file fails.
 		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
 		slog.Warn("Failed to open log file, using stderr", "error", err)
+	}
+	if logFile != nil {
+		defer logFile.Close()
 	}
 
 	slog.Info("Starting CA signer process",
@@ -619,7 +626,7 @@ func validateAutosignExecutable(path string) error {
 	// Check world-writable bit.
 	if info.Mode().Perm()&0002 != 0 {
 		return fmt.Errorf("autosign executable %s is world-writable (mode %s); "+
-			"refusing to start — fix with: chmod o-w %s", realPath, info.Mode().Perm(), realPath)
+			"refusing to start -- fix with: chmod o-w %s", realPath, info.Mode().Perm(), realPath)
 	}
 
 	// Check file ownership: must be owned by root or the current user.

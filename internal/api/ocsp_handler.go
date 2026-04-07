@@ -31,8 +31,8 @@ import (
 
 // handleOCSP serves RFC 6960 OCSP requests on both the POST and GET endpoints:
 //
-//	POST /ocsp                 — DER-encoded OCSPRequest in the body
-//	GET  /ocsp/{request}       — base64-encoded (standard or URL-safe) DER in path
+//	POST /ocsp                 DER-encoded OCSPRequest in the body
+//	GET  /ocsp/{request}       base64-encoded (standard or URL-safe) DER in path
 //
 // Both paths are also registered under the /puppet-ca/v1 prefix via Routes().
 func (s *Server) handleOCSP(w http.ResponseWriter, r *http.Request) {

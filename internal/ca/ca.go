@@ -102,10 +102,10 @@ type CA struct {
 	// Set before calling Init(). When set, Init() skips key file loading and
 	// the key-cert match verification (the signer process verifies this).
 	ExternalSigner crypto.Signer
-	serialIndex map[string]string         // uppercase hex serial (no leading zeros) → subject; protected by mu
-	ocspCache   map[string]ocspCacheEntry // same key; protected by mu
-	cachedCRL   *x509.RevocationList      // in-memory CRL for auth checks; protected by mu
-	mu          sync.RWMutex
+	serialIndex    map[string]string         // uppercase hex serial (no leading zeros) → subject; protected by mu
+	ocspCache      map[string]ocspCacheEntry // same key; protected by mu
+	cachedCRL      *x509.RevocationList      // in-memory CRL for auth checks; protected by mu
+	mu             sync.RWMutex
 }
 
 func New(s *storage.StorageService, autosignCfg AutosignConfig, hostname string) *CA {

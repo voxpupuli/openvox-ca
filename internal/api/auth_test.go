@@ -140,7 +140,7 @@ var _ = Describe("Auth Middleware", func() {
 
 	AfterEach(func() { os.RemoveAll(tmpDir) })
 
-	// ── Public endpoints bypass all cert checks ────────────────────────────────
+	// --- Public endpoints bypass all cert checks ---
 
 	Context("public endpoints pass through without any client cert", func() {
 		It("allows GET /certificate/ca with no TLS connection state", func() {
@@ -168,7 +168,7 @@ var _ = Describe("Auth Middleware", func() {
 		})
 	})
 
-	// ── No client cert on protected endpoints ──────────────────────────────────
+	// --- No client cert on protected endpoints ---
 
 	Context("no client cert presented to a protected endpoint", func() {
 		It("returns 403 for GET /certificate_request/{subject} (self-or-admin tier)", func() {
@@ -188,7 +188,7 @@ var _ = Describe("Auth Middleware", func() {
 		})
 	})
 
-	// ── Client cert from an unrecognised CA ────────────────────────────────────
+	// --- Client cert from an unrecognised CA ---
 
 	Context("client cert signed by a different CA", func() {
 		It("returns 403 even if the CN is in the allow list", func() {
@@ -212,7 +212,7 @@ var _ = Describe("Auth Middleware", func() {
 		})
 	})
 
-	// ── Certificate validity period enforcement ────────────────────────────────
+	// --- Certificate validity period enforcement ---
 
 	Context("certificate validity period enforcement", func() {
 		It("returns 403 when client presents an expired certificate", func() {
@@ -262,7 +262,7 @@ var _ = Describe("Auth Middleware", func() {
 		})
 	})
 
-	// ── Revoked client cert ────────────────────────────────────────────────────
+	// --- Revoked client cert ---
 
 	Context("revoked client cert", func() {
 		It("returns 403 when the presented cert's serial is in the CRL", func() {
@@ -279,7 +279,7 @@ var _ = Describe("Auth Middleware", func() {
 			issuedCert, err := x509.ParseCertificate(block.Bytes)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Revoke the cert — its serial is now in the CRL.
+			// Revoke the cert; its serial is now in the CRL.
 			Expect(myCA.Revoke("revoked-client")).To(Succeed())
 
 			// Present the revoked cert; the middleware checks its serial
@@ -308,13 +308,13 @@ var _ = Describe("Auth Middleware", func() {
 			req = withClientCert(req, freshCert)
 			rr := httptest.NewRecorder()
 			mux.ServeHTTP(rr, req)
-			// The cert is not revoked — access is denied only if it also
+			// The cert is not revoked; access is denied only if it also
 			// fails the tier check (self-or-admin: CN matches path subject).
 			Expect(rr.Code).NotTo(Equal(http.StatusForbidden))
 		})
 	})
 
-	// ── Revocation bypass prevention (re-issuance regression) ─────────────────
+	// --- Revocation bypass prevention (re-issuance regression) ---
 	// Before the fix, IsRevoked looked up the cert *on disk* for the CN and
 	// checked that cert's serial.  After a revocation + re-issuance the disk
 	// cert had a new (clean) serial, so the old revoked cert would pass.
@@ -333,7 +333,7 @@ var _ = Describe("Auth Middleware", func() {
 			oldCert, err := x509.ParseCertificate(block1.Bytes)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Step 2: revoke it — serial1 is now in the CRL.
+			// Step 2: revoke it; serial1 is now in the CRL.
 			Expect(myCA.Revoke("puppet-server")).To(Succeed())
 
 			// Step 3: re-register and sign a new cert for the same CN.
@@ -347,7 +347,7 @@ var _ = Describe("Auth Middleware", func() {
 			newCert, err := x509.ParseCertificate(block2.Bytes)
 			Expect(err).NotTo(HaveOccurred())
 
-			// OLD cert (revoked serial) must be denied — regression test.
+			// OLD cert (revoked serial) must be denied (regression test).
 			req := httptest.NewRequest("POST", "/sign/all", nil)
 			req = withClientCert(req, oldCert)
 			rr := httptest.NewRecorder()
@@ -363,7 +363,7 @@ var _ = Describe("Auth Middleware", func() {
 		})
 	})
 
-	// ── CRL unavailable → fail-closed ─────────────────────────────────────────
+	// --- CRL unavailable -> fail-closed ---
 
 	Context("CRL unavailable on disk", func() {
 		It("still allows auth when CRL file is deleted (in-memory cache)", func() {
@@ -382,7 +382,7 @@ var _ = Describe("Auth Middleware", func() {
 			Expect(os.Remove(store.CRLPath())).To(Succeed())
 
 			// The in-memory CRL cache allows auth to continue even when
-			// the file is missing — no longer a total DoS. The request
+			// the file is missing, so this is no longer a total DoS. The request
 			// reaches the handler (not blocked by auth); the CSR was
 			// consumed during signing so the handler returns 404.
 			req := httptest.NewRequest("GET", "/certificate_request/crl-test-node", nil)
@@ -393,7 +393,7 @@ var _ = Describe("Auth Middleware", func() {
 		})
 	})
 
-	// ── Non-admin on admin-only endpoints ──────────────────────────────────────
+	// --- Non-admin on admin-only endpoints ---
 
 	Context("non-admin client accessing admin-only endpoints", func() {
 		It("returns 403 for POST /sign/all", func() {
@@ -462,7 +462,7 @@ var _ = Describe("Auth Middleware", func() {
 		})
 	})
 
-	// ── Non-self client on self-or-admin endpoints ─────────────────────────────
+	// --- Non-self client on self-or-admin endpoints ---
 
 	Context("non-self client accessing another node's self-or-admin endpoint", func() {
 		It("returns 403 for GET /certificate_request/{other-node}", func() {
@@ -484,7 +484,7 @@ var _ = Describe("Auth Middleware", func() {
 		})
 	})
 
-	// ── GET /certificate/{subject} is public ───────────────────────────────────
+	// --- GET /certificate/{subject} is public ---
 	// Signed certificates contain no secrets; Puppet Server 8 allows
 	// unauthenticated access so that bootstrapping nodes can fetch their own
 	// cert before they have a client cert to present.
@@ -516,7 +516,7 @@ var _ = Describe("Auth Middleware", func() {
 		})
 	})
 
-	// ── Positive: CRL is public, accessible with or without a cert ───────────
+	// --- Positive: CRL is public, accessible with or without a cert ---
 
 	Context("CRL endpoint is public", func() {
 		It("returns CRL without presenting any cert", func() {
@@ -546,7 +546,7 @@ var _ = Describe("Auth Middleware", func() {
 		})
 
 		It("returns CRL even when a revoked cert is presented", func() {
-			// Revoked nodes must still be able to fetch the CRL — it is the
+			// Revoked nodes must still be able to fetch the CRL; it is the
 			// mechanism by which they (and others) learn they are revoked.
 			// The public tier check must fire before the revocation check.
 			csrPEM, err := testutil.GenerateCSR("revoked-crl-fetcher")
@@ -585,7 +585,7 @@ var _ = Describe("Auth Middleware", func() {
 		})
 	})
 
-	// ── Non-GET methods on the CRL path are NOT public ─────────────────────────
+	// --- Non-GET methods on the CRL path are NOT public ---
 
 	Context("non-GET methods on /certificate_revocation_list/ca require auth", func() {
 		It("returns 403 for POST /certificate_revocation_list/ca with no cert", func() {
@@ -614,7 +614,7 @@ var _ = Describe("Auth Middleware", func() {
 		})
 	})
 
-	// ── Prefixed paths honour the same tier rules ──────────────────────────────
+	// --- Prefixed paths honour the same tier rules ---
 
 	Context("prefixed paths (/puppet-ca/v1/) respect auth tiers", func() {
 		It("returns 403 for non-admin on PUT /puppet-ca/v1/certificate_status/{subject}", func() {
@@ -644,7 +644,7 @@ var _ = Describe("Auth Middleware", func() {
 		})
 	})
 
-	// ── Positive: admin and self-cert pass ─────────────────────────────────────
+	// --- Positive: admin and self-cert pass ---
 
 	Context("admin cert passes admin-only endpoints", func() {
 		It("POST /sign/all is not rejected (returns 200, not 403)", func() {
@@ -679,7 +679,7 @@ var _ = Describe("Auth Middleware", func() {
 		})
 	})
 
-	// ── AllowPublicStatus opt-in ──────────────────────────────────────────────
+	// --- AllowPublicStatus opt-in ---
 
 	Context("GET /certificate_status default (AllowPublicStatus=false)", func() {
 		It("returns 403 when no client cert is presented", func() {
@@ -746,7 +746,7 @@ var _ = Describe("Auth Middleware", func() {
 		})
 	})
 
-	// ── pp_cli_auth extension ──────────────────────────────────────────────────
+	// --- pp_cli_auth extension ---
 
 	Context("pp_cli_auth extension grants admin access (no CN in allow list)", func() {
 		var muxNoCNList http.Handler
@@ -788,7 +788,7 @@ var _ = Describe("Auth Middleware", func() {
 		})
 	})
 
-	// ── pp_cli_auth escalation via CSR is blocked ────────────────────────────
+	// --- pp_cli_auth escalation via CSR is blocked ---
 	// Full attack path from PUPPET-CA-20260305-001: submit CSR with pp_cli_auth
 	// → autosign → retrieve cert → attempt admin access → must be DENIED.
 
@@ -822,7 +822,7 @@ var _ = Describe("Auth Middleware", func() {
 			Expect(err).NotTo(HaveOccurred())
 			csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrBytes})
 
-			// Step 2: Submit CSR — autosign signs it immediately.
+			// Step 2: Submit CSR; autosign signs it immediately.
 			srv := api.New(autosignCA)
 			srv.AuthConfig = &api.AuthConfig{
 				CACert:    caCert,
@@ -853,7 +853,7 @@ var _ = Describe("Auth Middleware", func() {
 					"signed cert must not contain pp_cli_auth extension")
 			}
 
-			// Step 4: Use the cert for admin access — must be DENIED.
+			// Step 4: Use the cert for admin access; must be DENIED.
 			req := httptest.NewRequest("POST", "/puppet-ca/v1/sign/all", nil)
 			req = withClientCert(req, evilCert)
 			adminRR := httptest.NewRecorder()
@@ -863,7 +863,7 @@ var _ = Describe("Auth Middleware", func() {
 		})
 	})
 
-	// ── NoPpCliAuth=true disables the extension check ─────────────────────────
+	// --- NoPpCliAuth=true disables the extension check ---
 
 	Context("NoPpCliAuth=true disables pp_cli_auth as an admin credential", func() {
 		var muxNoPpCli http.Handler
