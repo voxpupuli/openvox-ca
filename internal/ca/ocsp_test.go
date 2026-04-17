@@ -38,11 +38,11 @@ func setupOCSPCA(dir string) *ca.CA {
 	store := storage.New(dir)
 	myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
 	Expect(store.EnsureDirs()).To(Succeed())
-	Expect(os.WriteFile(store.CAKeyPath(), cachedKeyPEM, 0640)).To(Succeed())
-	Expect(os.WriteFile(store.CACertPath(), cachedCrtPEM, 0644)).To(Succeed())
+	Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
+	Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
 	Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
 	Expect(store.WriteSerial("0001")).To(Succeed())
-	Expect(os.WriteFile(store.InventoryPath(), []byte{}, 0644)).To(Succeed())
+	Expect(store.TouchInventory()).To(Succeed())
 	Expect(myCA.Init()).To(Succeed())
 	return myCA
 }
@@ -340,11 +340,11 @@ var _ = Describe("OCSP Responder", func() {
 		myCA2 := ca.New(store2, ca.AutosignConfig{Mode: "off"}, "puppet.test")
 		myCA2.OCSPURLs = []string{"http://ocsp.example.com/ocsp"}
 		Expect(store2.EnsureDirs()).To(Succeed())
-		Expect(os.WriteFile(store2.CAKeyPath(), cachedKeyPEM, 0640)).To(Succeed())
-		Expect(os.WriteFile(store2.CACertPath(), cachedCrtPEM, 0644)).To(Succeed())
+		Expect(store2.SaveCAKey(cachedKeyPEM)).To(Succeed())
+		Expect(store2.SaveCACert(cachedCrtPEM)).To(Succeed())
 		Expect(store2.UpdateCRL(cachedCrlPEM)).To(Succeed())
 		Expect(store2.WriteSerial("0001")).To(Succeed())
-		Expect(os.WriteFile(store2.InventoryPath(), []byte{}, 0644)).To(Succeed())
+		Expect(store2.TouchInventory()).To(Succeed())
 		Expect(myCA2.Init()).To(Succeed())
 
 		csrPEM, err := testutil.GenerateCSR("ocsp-aia-node")

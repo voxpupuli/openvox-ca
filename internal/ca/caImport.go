@@ -23,7 +23,6 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
-	"os"
 	"time"
 
 	"github.com/tvaughan/puppet-ca/internal/storage"
@@ -82,13 +81,13 @@ func ImportCA(store *storage.StorageService, certBundlePEM, keyPEM, crlPEM []byt
 		return fmt.Errorf("failed to create CA directories: %w", err)
 	}
 
-	// --- Write CA key (mode 0600) ---
-	if err := os.WriteFile(store.CAKeyPath(), keyPEM, storage.FilePermPrivate); err != nil {
+	// --- Write CA key ---
+	if err := store.SaveCAKey(keyPEM); err != nil {
 		return fmt.Errorf("failed to write CA key: %w", err)
 	}
 
-	// --- Write CA cert (mode 0644) ---
-	if err := os.WriteFile(store.CACertPath(), certBundlePEM, storage.FilePermPublic); err != nil {
+	// --- Write CA cert ---
+	if err := store.SaveCACert(certBundlePEM); err != nil {
 		return fmt.Errorf("failed to write CA cert: %w", err)
 	}
 
@@ -96,7 +95,7 @@ func ImportCA(store *storage.StorageService, certBundlePEM, keyPEM, crlPEM []byt
 	pubKeyBytes, err := x509.MarshalPKIXPublicKey(caKey.Public())
 	if err == nil {
 		pubKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubKeyBytes})
-		_ = os.WriteFile(store.CAPubKeyPath(), pubKeyPEM, storage.FilePermPublic)
+		_ = store.SaveCAPubKey(pubKeyPEM)
 	}
 
 	// --- Handle CRL ---
@@ -130,19 +129,19 @@ func ImportCA(store *storage.StorageService, certBundlePEM, keyPEM, crlPEM []byt
 	}
 
 	// --- Initialise serial if absent ---
-	if _, err := os.Stat(store.SerialPath()); os.IsNotExist(err) {
+	hasSerial, err := store.HasSerial()
+	if err != nil {
+		return fmt.Errorf("checking serial: %w", err)
+	}
+	if !hasSerial {
 		if err := store.WriteSerial("0001"); err != nil {
 			return fmt.Errorf("failed to write serial: %w", err)
 		}
 	}
 
 	// --- Initialise inventory if absent ---
-	if _, err := os.Stat(store.InventoryPath()); os.IsNotExist(err) {
-		f, err := os.OpenFile(store.InventoryPath(), os.O_CREATE|os.O_RDONLY, storage.FilePermPrivate)
-		if err != nil {
-			return fmt.Errorf("failed to create inventory: %w", err)
-		}
-		f.Close()
+	if err := store.TouchInventory(); err != nil {
+		return fmt.Errorf("failed to create inventory: %w", err)
 	}
 
 	return nil

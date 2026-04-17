@@ -69,18 +69,13 @@ var _ = Describe("API Workflow", func() {
 		// Pre-seed CA
 		err = store.EnsureDirs()
 		Expect(err).NotTo(HaveOccurred())
-		err = os.WriteFile(store.CAKeyPath(), cachedKeyPEM, 0640)
-		Expect(err).NotTo(HaveOccurred())
-		err = os.WriteFile(store.CACertPath(), cachedCrtPEM, 0644)
-		Expect(err).NotTo(HaveOccurred())
-		err = store.UpdateCRL(cachedCrlPEM)
-		Expect(err).NotTo(HaveOccurred())
+		Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
 
 		// Also pre-seed Serial and Inventory which are normally created by bootstrapCA
-		err = store.WriteSerial("0001")
-		Expect(err).NotTo(HaveOccurred())
-		err = os.WriteFile(store.InventoryPath(), []byte{}, 0644)
-		Expect(err).NotTo(HaveOccurred())
+		Expect(store.WriteSerial("0001")).To(Succeed())
+		Expect(store.TouchInventory()).To(Succeed())
 
 		err = myCA.Init()
 		Expect(err).NotTo(HaveOccurred())

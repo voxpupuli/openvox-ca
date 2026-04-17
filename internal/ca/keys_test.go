@@ -94,7 +94,7 @@ var _ = Describe("CA Bootstrap key algorithms", func() {
 		Expect(ok).To(BeTrue(), "expected *rsa.PrivateKey")
 		Expect(rsaKey.N.BitLen()).To(Equal(2048))
 
-		keyData, err := os.ReadFile(store.CAKeyPath())
+		keyData, err := store.GetCAKey()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(string(keyData)).To(ContainSubstring("RSA PRIVATE KEY"))
 	})
@@ -107,7 +107,7 @@ var _ = Describe("CA Bootstrap key algorithms", func() {
 		Expect(ok).To(BeTrue(), "expected *ecdsa.PrivateKey")
 		Expect(ecKey.Curve).To(Equal(elliptic.P256()))
 
-		keyData, err := os.ReadFile(store.CAKeyPath())
+		keyData, err := store.GetCAKey()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(string(keyData)).To(ContainSubstring("EC PRIVATE KEY"))
 
@@ -243,11 +243,11 @@ var _ = Describe("Generate with LeafKeyConfig", func() {
 		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "leaf.test")
 
 		Expect(store.EnsureDirs()).To(Succeed())
-		Expect(os.WriteFile(store.CAKeyPath(), cachedKeyPEM, 0640)).To(Succeed())
-		Expect(os.WriteFile(store.CACertPath(), cachedCrtPEM, 0644)).To(Succeed())
+		Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
 		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
 		Expect(store.WriteSerial("0001")).To(Succeed())
-		Expect(os.WriteFile(store.InventoryPath(), []byte{}, 0644)).To(Succeed())
+		Expect(store.TouchInventory()).To(Succeed())
 		Expect(myCA.Init()).To(Succeed())
 	})
 
@@ -481,11 +481,11 @@ var _ = Describe("loadCA key/cert mismatch", func() {
 		altKeyPEM, _, _, err := testutil.GenerateTestCA()
 		Expect(err).NotTo(HaveOccurred())
 
-		Expect(os.WriteFile(store.CACertPath(), cachedCrtPEM, 0644)).To(Succeed())
-		Expect(os.WriteFile(store.CAKeyPath(), altKeyPEM, 0640)).To(Succeed())
+		Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
+		Expect(store.SaveCAKey(altKeyPEM)).To(Succeed())
 		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
 		Expect(store.WriteSerial("0001")).To(Succeed())
-		Expect(os.WriteFile(store.InventoryPath(), []byte{}, 0644)).To(Succeed())
+		Expect(store.TouchInventory()).To(Succeed())
 
 		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "mismatch.test")
 		err = myCA.Init()
@@ -508,14 +508,16 @@ var _ = Describe("ImportCA ECDSA", func() {
 		store := storage.New(tmpDir)
 		Expect(ca.ImportCA(store, ecCertPEM, ecKeyPEM, ecCrlPEM)).To(Succeed())
 
-		// Files must exist.
-		for _, path := range []string{store.CACertPath(), store.CAKeyPath(), store.CRLPath()} {
-			_, err := os.Stat(path)
-			Expect(err).NotTo(HaveOccurred(), "expected file to exist: %s", path)
-		}
+		// Blobs must exist.
+		Expect(store.HasCACert()).To(BeTrue())
+		Expect(store.HasCAKey()).To(BeTrue())
+		crlBytes, err := store.GetCRL()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(crlBytes).NotTo(BeEmpty())
 
-		// Key file must be an EC key.
-		keyData, _ := os.ReadFile(store.CAKeyPath())
+		// Key blob must be an EC key.
+		keyData, err := store.GetCAKey()
+		Expect(err).NotTo(HaveOccurred())
 		Expect(string(keyData)).To(ContainSubstring("EC PRIVATE KEY"))
 
 		// Loaded CA must work.

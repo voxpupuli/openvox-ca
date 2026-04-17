@@ -26,10 +26,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
-	"os"
 	"time"
-
-	"github.com/tvaughan/puppet-ca/internal/storage"
 )
 
 func (c *CA) Init() error {
@@ -65,10 +62,16 @@ func (c *CA) Init() error {
 		return fmt.Errorf("failed to load CA in frontend mode (signer should have bootstrapped): %w", loadErr)
 	}
 
-	_, errCert := os.Stat(c.Storage.CACertPath())
-	_, errKey := os.Stat(c.Storage.CAKeyPath())
+	hasCert, errCert := c.Storage.HasCACert()
+	if errCert != nil {
+		return fmt.Errorf("checking CA cert: %w", errCert)
+	}
+	hasKey, errKey := c.Storage.HasCAKey()
+	if errKey != nil {
+		return fmt.Errorf("checking CA key: %w", errKey)
+	}
 
-	if os.IsNotExist(errCert) || os.IsNotExist(errKey) {
+	if !hasCert || !hasKey {
 		slog.Info("No existing CA found, bootstrapping new CA")
 		return c.bootstrapCA()
 	}
@@ -96,7 +99,7 @@ func (c *CA) loadCA() error {
 	}
 
 	// Always load the certificate (it's public).
-	certPEM, err := os.ReadFile(c.Storage.CACertPath())
+	certPEM, err := c.Storage.GetCACert()
 	if err != nil {
 		return err
 	}
@@ -133,7 +136,7 @@ func (c *CA) loadCA() error {
 // loadCAKeyFromDisk reads and parses the CA private key from disk.
 // Supports RSA (PKCS1, PKCS8), ECDSA (SEC1, PKCS8), and encrypted PEM.
 func (c *CA) loadCAKeyFromDisk() error {
-	keyPEM, err := os.ReadFile(c.Storage.CAKeyPath())
+	keyPEM, err := c.Storage.GetCAKey()
 	if err != nil {
 		return err
 	}
@@ -282,13 +285,13 @@ func (c *CA) bootstrapCA() error {
 			return fmt.Errorf("failed to marshal CA key: %w", err)
 		}
 	}
-	if err := os.WriteFile(c.Storage.CAKeyPath(), keyPEM, storage.FilePermPrivate); err != nil {
+	if err := c.Storage.SaveCAKey(keyPEM); err != nil {
 		return fmt.Errorf("failed to write CA key: %w", err)
 	}
 
-	// Save CA cert (mode 0644).
+	// Save CA cert.
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certBytes})
-	if err := os.WriteFile(c.Storage.CACertPath(), certPEM, storage.FilePermPublic); err != nil {
+	if err := c.Storage.SaveCACert(certPEM); err != nil {
 		return fmt.Errorf("failed to write CA cert: %w", err)
 	}
 
@@ -296,7 +299,7 @@ func (c *CA) bootstrapCA() error {
 	pubKeyBytes, err := x509.MarshalPKIXPublicKey(key.Public())
 	if err == nil {
 		pubKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubKeyBytes})
-		_ = os.WriteFile(c.Storage.CAPubKeyPath(), pubKeyPEM, storage.FilePermPublic)
+		_ = c.Storage.SaveCAPubKey(pubKeyPEM)
 	}
 
 	// Generate empty CRL.
@@ -322,11 +325,9 @@ func (c *CA) bootstrapCA() error {
 	c.cachedCRL = parsedCRL
 
 	// Touch inventory.
-	f, err := os.OpenFile(c.Storage.InventoryPath(), os.O_CREATE|os.O_RDONLY, storage.FilePermPrivate)
-	if err != nil {
+	if err := c.Storage.TouchInventory(); err != nil {
 		return fmt.Errorf("failed to create inventory: %w", err)
 	}
-	f.Close()
 
 	slog.Info("CA bootstrapped",
 		"cn", template.Subject.CommonName,

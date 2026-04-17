@@ -201,7 +201,7 @@ var _ = Describe("CA encrypted key integration", func() {
 		Expect(myCA.CAKey).NotTo(BeNil())
 
 		// Verify the key file on disk is encrypted PEM.
-		keyPEM, err := os.ReadFile(store.CAKeyPath())
+		keyPEM, err := store.GetCAKey()
 		Expect(err).NotTo(HaveOccurred())
 		block, _ := pem.Decode(keyPEM)
 		Expect(block).NotTo(BeNil())
@@ -241,7 +241,7 @@ var _ = Describe("CA encrypted key integration", func() {
 		Expect(myCA.Init()).To(Succeed())
 
 		// Verify key is unencrypted.
-		keyPEM, err := os.ReadFile(store.CAKeyPath())
+		keyPEM, err := store.GetCAKey()
 		Expect(err).NotTo(HaveOccurred())
 		block, _ := pem.Decode(keyPEM)
 		Expect(block).NotTo(BeNil())

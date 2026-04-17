@@ -492,7 +492,7 @@ func main() {
 					os.Exit(1)
 				}
 
-				caCertPEM, err := os.ReadFile(myCA.Storage.CACertPath())
+				caCertPEM, err := myCA.Storage.GetCACert()
 				if err != nil {
 					slog.Error("Failed to read CA cert for TLS", "error", err)
 					os.Exit(1)

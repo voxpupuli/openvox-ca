@@ -29,7 +29,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -232,7 +231,7 @@ func (s *Server) handleGetCert(w http.ResponseWriter, r *http.Request) {
 
 	// Special case: "ca" returns the CA cert.
 	if subject == "ca" {
-		certPEM, err := os.ReadFile(s.CA.Storage.CACertPath())
+		certPEM, err := s.CA.Storage.GetCACert()
 		if err != nil {
 			http.Error(w, "CA cert not found", http.StatusNotFound)
 			return
@@ -261,13 +260,11 @@ func (s *Server) handleGetCert(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetCRL(w http.ResponseWriter, r *http.Request) {
 	slog.Debug("GET certificate_revocation_list/ca", "client", clientCN(r))
 
-	crlPath := s.CA.Storage.CRLPath()
-
 	// Honor If-Modified-Since.
 	if ims := r.Header.Get("If-Modified-Since"); ims != "" {
 		if t, err := http.ParseTime(ims); err == nil {
-			if info, err := os.Stat(crlPath); err == nil {
-				if !info.ModTime().After(t) {
+			if mt, err := s.CA.Storage.CRLModTime(); err == nil && !mt.IsZero() {
+				if !mt.After(t) {
 					w.WriteHeader(http.StatusNotModified)
 					return
 				}

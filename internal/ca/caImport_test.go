@@ -45,22 +45,21 @@ var _ = Describe("ImportCA", func() {
 		store := storage.New(tmpDir)
 		Expect(ca.ImportCA(store, cachedCrtPEM, cachedKeyPEM, cachedCrlPEM)).To(Succeed())
 
-		// All expected files must exist.
-		for _, path := range []string{
-			store.CACertPath(),
-			store.CAKeyPath(),
-			store.CRLPath(),
-			store.InventoryPath(),
-			store.SerialPath(),
-		} {
-			_, err := os.Stat(path)
-			Expect(err).NotTo(HaveOccurred(), "expected file to exist: %s", path)
-		}
+		// All expected blobs must exist.
+		Expect(store.HasCACert()).To(BeTrue())
+		Expect(store.HasCAKey()).To(BeTrue())
+		crl, err := store.GetCRL()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(crl).NotTo(BeEmpty())
+		Expect(store.HasInventory()).To(BeTrue())
+		Expect(store.HasSerial()).To(BeTrue())
 
-		// File contents must round-trip correctly.
-		certData, _ := os.ReadFile(store.CACertPath())
+		// Contents must round-trip correctly.
+		certData, err := store.GetCACert()
+		Expect(err).NotTo(HaveOccurred())
 		Expect(certData).To(Equal(cachedCrtPEM))
-		keyData, _ := os.ReadFile(store.CAKeyPath())
+		keyData, err := store.GetCAKey()
+		Expect(err).NotTo(HaveOccurred())
 		Expect(keyData).To(Equal(cachedKeyPEM))
 	})
 
@@ -83,7 +82,7 @@ var _ = Describe("ImportCA", func() {
 
 		Expect(ca.ImportCA(store, cachedCrtPEM, cachedKeyPEM, nil)).To(Succeed())
 
-		serialData, err := os.ReadFile(store.SerialPath())
+		serialData, err := store.GetSerial()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(string(serialData)).To(Equal("00FF"))
 	})

@@ -114,11 +114,11 @@ var _ = Describe("Auth Middleware", func() {
 		store = storage.New(tmpDir)
 		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
 		Expect(store.EnsureDirs()).To(Succeed())
-		Expect(os.WriteFile(store.CAKeyPath(), cachedKeyPEM, 0640)).To(Succeed())
-		Expect(os.WriteFile(store.CACertPath(), cachedCrtPEM, 0644)).To(Succeed())
+		Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
 		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
 		Expect(store.WriteSerial("0001")).To(Succeed())
-		Expect(os.WriteFile(store.InventoryPath(), []byte{}, 0644)).To(Succeed())
+		Expect(store.TouchInventory()).To(Succeed())
 		Expect(myCA.Init()).To(Succeed())
 
 		// Parse CA cert and key so we can issue test client certs.
@@ -379,7 +379,7 @@ var _ = Describe("Auth Middleware", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			// Remove the CRL file to simulate a disk fault.
-			Expect(os.Remove(store.CRLPath())).To(Succeed())
+			Expect(store.Backend().Delete(storage.KeyCRL)).To(Succeed())
 
 			// The in-memory CRL cache allows auth to continue even when
 			// the file is missing, so this is no longer a total DoS. The request
@@ -801,10 +801,10 @@ var _ = Describe("Auth Middleware", func() {
 			autosignStore := storage.New(escalationDir)
 			autosignCA := ca.New(autosignStore, ca.AutosignConfig{Mode: "true"}, "puppet.test")
 			Expect(autosignStore.EnsureDirs()).To(Succeed())
-			Expect(os.WriteFile(autosignStore.CAKeyPath(), cachedKeyPEM, 0640)).To(Succeed())
-			Expect(os.WriteFile(autosignStore.CACertPath(), cachedCrtPEM, 0644)).To(Succeed())
+			Expect(autosignStore.SaveCAKey(cachedKeyPEM)).To(Succeed())
+			Expect(autosignStore.SaveCACert(cachedCrtPEM)).To(Succeed())
 			Expect(autosignStore.UpdateCRL(cachedCrlPEM)).To(Succeed())
-			Expect(os.WriteFile(autosignStore.InventoryPath(), []byte{}, 0644)).To(Succeed())
+			Expect(autosignStore.TouchInventory()).To(Succeed())
 			Expect(autosignCA.Init()).To(Succeed())
 
 			// Step 1: Craft a CSR with pp_cli_auth = "true".

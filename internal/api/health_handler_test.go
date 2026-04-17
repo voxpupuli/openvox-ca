@@ -41,11 +41,11 @@ var _ = Describe("Health Endpoints", func() {
 
 		if initialized {
 			Expect(store.EnsureDirs()).To(Succeed())
-			Expect(os.WriteFile(store.CAKeyPath(), cachedKeyPEM, 0640)).To(Succeed())
-			Expect(os.WriteFile(store.CACertPath(), cachedCrtPEM, 0644)).To(Succeed())
+			Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
+			Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
 			Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
 			Expect(store.WriteSerial("0001")).To(Succeed())
-			Expect(os.WriteFile(store.InventoryPath(), []byte{}, 0644)).To(Succeed())
+			Expect(store.TouchInventory()).To(Succeed())
 			Expect(myCA.Init()).To(Succeed())
 		}
 
@@ -68,11 +68,11 @@ var _ = Describe("Health Endpoints", func() {
 		store := storage.New(tmpDir)
 		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
 		Expect(store.EnsureDirs()).To(Succeed())
-		Expect(os.WriteFile(store.CAKeyPath(), cachedKeyPEM, 0640)).To(Succeed())
-		Expect(os.WriteFile(store.CACertPath(), cachedCrtPEM, 0644)).To(Succeed())
+		Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
 		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
 		Expect(store.WriteSerial("0001")).To(Succeed())
-		Expect(os.WriteFile(store.InventoryPath(), []byte{}, 0644)).To(Succeed())
+		Expect(store.TouchInventory()).To(Succeed())
 		Expect(myCA.Init()).To(Succeed())
 		srv := api.New(myCA)
 		srv.AuthConfig = &api.AuthConfig{
