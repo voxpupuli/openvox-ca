@@ -25,7 +25,9 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"math/big"
 	"time"
@@ -105,16 +107,79 @@ func (c *CA) Init() error {
 }
 
 // finishLoadExisting runs the post-load bookkeeping (serial index, CRL
-// cache). c.mu must be held by the caller.
+// cache). c.mu must be held by the caller. When the CRL is absent from the
+// backend but the cert+key loaded successfully — the common case when an
+// existing CA cert/key is mounted via an overlay against a fresh remote
+// backend — seed the CRL, inventory, and serial counter under the bootstrap
+// lock so startup can complete.
 func (c *CA) finishLoadExisting() error {
 	slog.Info("Loaded existing CA", "cert", c.Storage.CACertPath())
 	if err := c.buildSerialIndex(); err != nil {
 		slog.Warn("Failed to build OCSP serial index", "error", err)
 	}
-	if err := c.loadCRLCache(); err != nil {
+	err := c.loadCRLCache()
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("failed to load CRL into memory: %w", err)
 	}
-	return nil
+	// In frontend-only mode the signer process owns bootstrapping; a missing
+	// CRL here means the signer hasn't finished yet and retrying is its job.
+	if c.ExternalSigner != nil {
+		return fmt.Errorf("failed to load CRL into memory: %w", err)
+	}
+	if err := c.seedSupportingState(); err != nil {
+		return fmt.Errorf("seeding CA supporting state: %w", err)
+	}
+	return c.loadCRLCache()
+}
+
+// seedSupportingState writes the CRL, inventory, and serial counter that
+// bootstrapCA would normally create, for the case where the cert+key already
+// exist (e.g. mounted via an overlay against an empty backend). Runs under
+// the bootstrap lock so concurrent replicas don't race to seed.
+func (c *CA) seedSupportingState() error {
+	ctx, cancel := context.WithTimeout(context.Background(), lockTimeout)
+	defer cancel()
+	return c.Storage.WithLock(ctx, lockNameBootstrap, func() error {
+		// Another replica may have seeded between our initial check and the
+		// lock acquisition.
+		if _, err := c.Storage.GetCRL(); err == nil {
+			return nil
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("re-checking CRL: %w", err)
+		}
+		now := time.Now().UTC()
+		crlTemplate := &x509.RevocationList{
+			Number:     big.NewInt(1),
+			ThisUpdate: now,
+			NextUpdate: now.Add(c.crlValidity()),
+		}
+		crlBytes, err := x509.CreateRevocationList(rand.Reader, crlTemplate, c.CACert, c.CAKey)
+		if err != nil {
+			return fmt.Errorf("creating initial CRL: %w", err)
+		}
+		crlPEM := pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlBytes})
+		if err := c.Storage.UpdateCRL(crlPEM); err != nil {
+			return fmt.Errorf("writing initial CRL: %w", err)
+		}
+		if err := c.Storage.TouchInventory(); err != nil {
+			return fmt.Errorf("creating inventory: %w", err)
+		}
+		hasSerial, err := c.Storage.HasSerial()
+		if err != nil {
+			return fmt.Errorf("checking serial: %w", err)
+		}
+		if !hasSerial {
+			if err := c.Storage.WriteSerial("0001"); err != nil {
+				return fmt.Errorf("writing serial: %w", err)
+			}
+		}
+		slog.Info("Seeded CA supporting state for existing cert+key",
+			"cert", c.Storage.CACertPath())
+		return nil
+	})
 }
 
 // loadCA reads and validates the CA key and certificate from disk.

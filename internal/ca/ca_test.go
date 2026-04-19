@@ -98,6 +98,67 @@ var _ = Describe("CA Lifecycle", func() {
 		})
 	})
 
+	// Simulates "existing cert+key mounted via overlay against an empty
+	// backend": cert/key present, CRL/inventory/serial absent. Init should
+	// seed the supporting state rather than failing.
+	Context("Initialization with missing supporting state", func() {
+		var (
+			seedDir   string
+			seedStore *storage.StorageService
+			seedCA    *ca.CA
+		)
+
+		BeforeEach(func() {
+			var err error
+			seedDir, err = os.MkdirTemp("", "puppet-ca-seed-test")
+			Expect(err).NotTo(HaveOccurred())
+			seedStore = storage.New(seedDir)
+			Expect(seedStore.EnsureDirs()).To(Succeed())
+			// Only cert + key — no CRL, no inventory, no serial.
+			Expect(seedStore.SaveCAKey(cachedKeyPEM)).To(Succeed())
+			Expect(seedStore.SaveCACert(cachedCrtPEM)).To(Succeed())
+			seedCA = ca.New(seedStore, asCfg, "puppet.test")
+		})
+
+		AfterEach(func() {
+			os.RemoveAll(seedDir)
+		})
+
+		It("seeds CRL, inventory, and serial for an existing cert+key", func() {
+			Expect(seedCA.Init()).To(Succeed())
+
+			crlPEM, err := seedStore.GetCRL()
+			Expect(err).NotTo(HaveOccurred())
+			crlBlock, _ := pem.Decode(crlPEM)
+			Expect(crlBlock).NotTo(BeNil())
+			crl, err := x509.ParseRevocationList(crlBlock.Bytes)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(crl.RevokedCertificateEntries).To(BeEmpty())
+
+			hasInv, err := seedStore.HasInventory()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(hasInv).To(BeTrue())
+
+			hasSerial, err := seedStore.HasSerial()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(hasSerial).To(BeTrue())
+		})
+
+		It("is idempotent across repeated Init calls", func() {
+			Expect(seedCA.Init()).To(Succeed())
+			crlBefore, err := seedStore.GetCRL()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Second Init against the same storage should load the CRL the
+			// first Init seeded without rewriting it.
+			seedCA2 := ca.New(seedStore, asCfg, "puppet.test")
+			Expect(seedCA2.Init()).To(Succeed())
+			crlAfter, err := seedStore.GetCRL()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(crlAfter).To(Equal(crlBefore))
+		})
+	})
+
 	Context("CSR Handling", func() {
 		var csrPEM []byte
 
