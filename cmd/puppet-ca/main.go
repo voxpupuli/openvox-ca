@@ -331,40 +331,10 @@ func main() {
 			}
 
 			// Frontend mode (role=frontend) or single-process mode: run HTTP server.
-			// In frontend mode, connect to the signer process via socketpair.
+			// In frontend mode, connect to the signer process via socketpair
+			// (deferred to after storage setup so the CA cert can be read via
+			// the overlay-aware storage service).
 			var remoteSigner *signer.RemoteSigner
-			if role == "frontend" {
-				// Connect to the signer first. The PSK handshake blocks until
-				// the signer is ready (i.e. it has finished Init/bootstrap and
-				// written the CA cert to disk).
-				conn, err := signer.DialConn()
-				if err != nil {
-					return fmt.Errorf("connecting to signer process: %w", err)
-				}
-
-				// Now read the CA certificate, guaranteed to exist because the
-				// signer completed Init before accepting the handshake.
-				certPEM, err := os.ReadFile(filepath.Join(absCADir, "ca_crt.pem"))
-				if err != nil {
-					conn.Close()
-					return fmt.Errorf("reading CA cert for remote signer: %w", err)
-				}
-				block, _ := pem.Decode(certPEM)
-				if block == nil {
-					conn.Close()
-					return fmt.Errorf("failed to decode CA cert PEM")
-				}
-				caCert, err := x509.ParseCertificate(block.Bytes)
-				if err != nil {
-					conn.Close()
-					return fmt.Errorf("parsing CA cert: %w", err)
-				}
-
-				rs := signer.NewRemoteSigner(conn, caCert.PublicKey)
-				defer rs.Close()
-				remoteSigner = rs
-				slog.Info("Connected to isolated signer process")
-			}
 
 			// --- Logging setup ---
 			logFile, err := setupLogger(cfg)
@@ -425,6 +395,37 @@ func main() {
 			if err := store.EnsureDirs(); err != nil {
 				slog.Error("Failed to create CA directories", "error", err)
 				os.Exit(1)
+			}
+
+			// Frontend-mode signer handshake: connect to the signer, then read
+			// the CA cert through the storage service so an overlay-mounted
+			// cert (e.g. a Kubernetes secret volume) is honoured. The PSK
+			// handshake blocks until the signer finishes Init/bootstrap, so
+			// store.GetCACert is guaranteed to succeed after it returns.
+			if role == "frontend" {
+				conn, err := signer.DialConn()
+				if err != nil {
+					return fmt.Errorf("connecting to signer process: %w", err)
+				}
+				certPEM, err := store.GetCACert()
+				if err != nil {
+					conn.Close()
+					return fmt.Errorf("reading CA cert for remote signer: %w", err)
+				}
+				block, _ := pem.Decode(certPEM)
+				if block == nil {
+					conn.Close()
+					return fmt.Errorf("failed to decode CA cert PEM")
+				}
+				caCert, err := x509.ParseCertificate(block.Bytes)
+				if err != nil {
+					conn.Close()
+					return fmt.Errorf("parsing CA cert: %w", err)
+				}
+				rs := signer.NewRemoteSigner(conn, caCert.PublicKey)
+				defer rs.Close()
+				remoteSigner = rs
+				slog.Info("Connected to isolated signer process")
 			}
 
 			// --- Autosign ---
