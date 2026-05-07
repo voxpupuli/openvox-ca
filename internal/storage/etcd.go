@@ -27,6 +27,7 @@ import (
 	"time"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/client/v3/concurrency"
 )
 
 // EtcdConfig configures the etcd-backed storage backend.
@@ -67,14 +68,35 @@ func (c *EtcdConfig) applyDefaults() {
 // Blob contents are wrapped with an 8-byte big-endian nanosecond mtime prefix
 // so ModTime can be answered without a second key. Appends use an etcd Txn
 // with a ModRevision guard to remain atomic across concurrent writers,
-// including those in different processes.
+// including those in different processes. Distributed locks are provided
+// via AcquireLock using etcd's concurrency.Mutex on a lazily-created
+// lease session.
 type EtcdBackend struct {
 	client   *clientv3.Client
 	owned    bool // true when Close should close the client
 	prefix   string
 	timeout  time.Duration
 	appendMu sync.Mutex // serialises AppendLine within this process
+
+	// session is the lease-backed concurrency session used for distributed
+	// mutexes. It is created lazily on the first AcquireLock call and
+	// re-created when its lease has expired. Protected by sessionMu.
+	sessionMu sync.Mutex
+	session   *concurrency.Session
+
+	// localLocks holds a *sync.Mutex per lock name. etcd's concurrency.Mutex
+	// is *not* safe for re-entry by multiple goroutines sharing a single
+	// session (they all inherit the same lease ID and the server treats them
+	// as the same holder). We take this per-name local mutex before the
+	// distributed one so intra-process contention is resolved locally first.
+	localLocks sync.Map
 }
+
+// etcdLockTTLSeconds is the lease TTL (in seconds) for the distributed
+// lock session. If the holder's puppet-ca process dies without calling
+// Unlock, the lock is released automatically after this TTL expires so
+// the cluster does not wedge.
+const etcdLockTTLSeconds = 30
 
 // etcdLayout maps logical keys to their physical etcd sub-paths. CSR and
 // signed-cert keys are handled directly in physicalKey.
@@ -343,8 +365,90 @@ func (b *EtcdBackend) ModTime(key string) (time.Time, error) {
 	return mtime, nil
 }
 
-// Close releases the underlying etcd client when owned by this backend.
+// AcquireLock obtains a distributed mutex under <prefix>/locks/<name> using
+// etcd's concurrency.Mutex. Local goroutines racing on the same name are
+// serialised by a per-name process-local mutex first (concurrency.Mutex is
+// not safe for re-entry on the same session), then the distributed mutex
+// is taken so only one process in the cluster holds the lock at a time.
+func (b *EtcdBackend) AcquireLock(ctx context.Context, name string) (Unlocker, error) {
+	local := b.localLockFor(name)
+	local.Lock()
+
+	sess, err := b.ensureSession(ctx)
+	if err != nil {
+		local.Unlock()
+		return nil, err
+	}
+	mu := concurrency.NewMutex(sess, b.prefix+"/locks/"+name)
+	if err := mu.Lock(ctx); err != nil {
+		local.Unlock()
+		return nil, fmt.Errorf("locking %q: %w", name, err)
+	}
+	return &etcdUnlocker{mu: mu, local: local, timeout: b.timeout}, nil
+}
+
+// localLockFor returns the process-local mutex for lock name, creating it
+// on first use. Mutexes are never removed; the namespace is small and bounded.
+func (b *EtcdBackend) localLockFor(name string) *sync.Mutex {
+	if v, ok := b.localLocks.Load(name); ok {
+		return v.(*sync.Mutex)
+	}
+	v, _ := b.localLocks.LoadOrStore(name, &sync.Mutex{})
+	return v.(*sync.Mutex)
+}
+
+// ensureSession returns the current concurrency session, creating or
+// replacing it as needed. Safe for concurrent callers.
+func (b *EtcdBackend) ensureSession(ctx context.Context) (*concurrency.Session, error) {
+	b.sessionMu.Lock()
+	defer b.sessionMu.Unlock()
+	if b.session != nil {
+		select {
+		case <-b.session.Done():
+			// Lease expired; fall through and create a fresh session.
+			b.session = nil
+		default:
+			return b.session, nil
+		}
+	}
+	sess, err := concurrency.NewSession(b.client,
+		concurrency.WithTTL(etcdLockTTLSeconds),
+		concurrency.WithContext(ctx),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating etcd lock session: %w", err)
+	}
+	b.session = sess
+	return sess, nil
+}
+
+// etcdUnlocker wraps concurrency.Mutex (the distributed lock) plus the
+// process-local mutex acquired in AcquireLock. The local mutex is always
+// released, even if the distributed unlock fails, so a transient etcd
+// error cannot wedge subsequent in-process callers.
+type etcdUnlocker struct {
+	mu      *concurrency.Mutex
+	local   *sync.Mutex
+	timeout time.Duration
+}
+
+func (u *etcdUnlocker) Unlock() error {
+	ctx, cancel := context.WithTimeout(context.Background(), u.timeout)
+	defer cancel()
+	err := u.mu.Unlock(ctx)
+	u.local.Unlock()
+	return err
+}
+
+// Close releases the underlying etcd client when owned by this backend,
+// and always closes the lock session if one was created.
 func (b *EtcdBackend) Close() error {
+	b.sessionMu.Lock()
+	if b.session != nil {
+		_ = b.session.Close()
+		b.session = nil
+	}
+	b.sessionMu.Unlock()
 	if !b.owned || b.client == nil {
 		return nil
 	}

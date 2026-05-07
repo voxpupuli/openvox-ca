@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Trevor Vaughan
+// Copyright (C) 2026 Chris Boot
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -19,6 +20,7 @@ package ca
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
@@ -29,14 +31,26 @@ import (
 	"time"
 )
 
+// Revoke serialises on the cluster-wide "crl" lock so concurrent revocations
+// (and any future CRL rotation) on different replicas cannot both read the
+// same CRL, each append their own entry, and clobber one another's write.
 func (c *CA) Revoke(subject string) error {
 	if err := ValidateSubject(subject); err != nil {
 		return err
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), lockTimeout)
+	defer cancel()
+	return c.Storage.WithLock(ctx, lockNameCRL, func() error {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.revokeLocked(subject)
+	})
+}
 
+// revokeLocked performs the actual CRL read-modify-write. The cluster CRL
+// lock and c.mu must both be held by the caller.
+func (c *CA) revokeLocked(subject string) error {
 	slog.Debug("Revoking certificate", "subject", subject)
 
 	// 1. Find Serial

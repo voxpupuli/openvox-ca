@@ -18,6 +18,7 @@
 package storage
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -49,6 +50,55 @@ type StorageService struct {
 	// backend: they are client material that operators don't want exposed
 	// through a shared remote store.
 	localPrivateKeyDir string
+
+	// localLocks is the process-local fallback for WithLock when the
+	// underlying backend does not implement Locker. One sync.Mutex per
+	// lock name, lazily created.
+	localLocks sync.Map
+}
+
+// WithLock runs fn while holding the named lock. When the underlying
+// backend implements Locker, the lock is coordinated across nodes;
+// otherwise it falls back to a process-local named mutex, sufficient for
+// single-node backends. The lock is always released when fn returns,
+// including on panic.
+//
+// Names should be stable and descriptive (e.g. "bootstrap", "crl",
+// "subject:<name>") since all callers using the same name contend on the
+// same lock.
+func (s *StorageService) WithLock(ctx context.Context, name string, fn func() error) error {
+	if lk, ok := s.backend.(Locker); ok {
+		ul, err := lk.AcquireLock(ctx, name)
+		if err == nil {
+			defer func() {
+				if err := ul.Unlock(); err != nil {
+					slog.Warn("Failed to release distributed lock", "name", name, "error", err)
+				}
+			}()
+			return fn()
+		}
+		if !errors.Is(err, ErrDistributedLockingUnsupported) {
+			return fmt.Errorf("acquiring distributed lock %q: %w", name, err)
+		}
+		// Backend advertises Locker but cannot actually provide one (e.g.
+		// OverlayBackend wrapping a filesystem base); fall through to the
+		// process-local mutex, which is correct for single-node backends.
+	}
+	m := s.localNamedLock(name)
+	m.Lock()
+	defer m.Unlock()
+	return fn()
+}
+
+// localNamedLock returns the process-local mutex for name, creating it
+// on first use. Mutexes are never removed from the map; the namespace
+// is small and bounded.
+func (s *StorageService) localNamedLock(name string) *sync.Mutex {
+	if v, ok := s.localLocks.Load(name); ok {
+		return v.(*sync.Mutex)
+	}
+	v, _ := s.localLocks.LoadOrStore(name, &sync.Mutex{})
+	return v.(*sync.Mutex)
 }
 
 // New constructs a StorageService backed by a filesystem rooted at baseDir.

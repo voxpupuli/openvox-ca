@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Trevor Vaughan
+// Copyright (C) 2026 Chris Boot
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -17,6 +18,7 @@
 package ca
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha1"
 	"crypto/x509"
@@ -120,20 +122,50 @@ func ValidateSubject(subject string) error {
 }
 
 // Sign creates and persists a certificate for the pending CSR of subject.
-// The caller must NOT hold c.mu.
+// The caller must NOT hold c.mu. Serialises on the cluster-wide per-subject
+// lock so concurrent sign attempts from different replicas cannot produce
+// two certificates for the same subject.
 func (c *CA) Sign(subject string) ([]byte, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.sign(subject)
+	if err := ValidateSubject(subject); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), lockTimeout)
+	defer cancel()
+	var out []byte
+	err := c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		pem, err := c.signWithDuration(subject, 0)
+		if err != nil {
+			return err
+		}
+		out = pem
+		return nil
+	})
+	return out, err
 }
 
 // SignWithTTL signs subject's pending CSR with a custom validity duration.
 // ttl=0 falls back to the default certValidity.
-// The caller must NOT hold c.mu.
+// The caller must NOT hold c.mu. Same cross-node guarantees as Sign.
 func (c *CA) SignWithTTL(subject string, ttl time.Duration) ([]byte, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.signWithDuration(subject, ttl)
+	if err := ValidateSubject(subject); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), lockTimeout)
+	defer cancel()
+	var out []byte
+	err := c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		pem, err := c.signWithDuration(subject, ttl)
+		if err != nil {
+			return err
+		}
+		out = pem
+		return nil
+	})
+	return out, err
 }
 
 // sign is the internal (unlocked) signing implementation using the default TTL.
@@ -433,35 +465,46 @@ func (c *CA) SaveRequest(subject string, csrPEM []byte) (bool, error) {
 
 	slog.Debug("Received CSR", "subject", subject)
 
-	// Acquire lock for the entire evict + save + autosign sequence to prevent
-	// TOCTOU races where two concurrent SaveRequest calls for the same subject
-	// could both pass eviction and produce duplicate certificates.
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	// Acquire the cluster-wide per-subject lock for the entire evict + save +
+	// autosign sequence. This prevents TOCTOU races where two concurrent
+	// SaveRequest calls (same or different replicas) both pass eviction and
+	// produce duplicate certificates.
+	ctx, cancel := context.WithTimeout(context.Background(), lockTimeout)
+	defer cancel()
+	var autosigned bool
+	lockErr := c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
+		c.mu.Lock()
+		defer c.mu.Unlock()
 
-	// Reject if a cert already exists and is not revoked; clear it if revoked
-	// so the node can re-register with a fresh key.
-	if err := c.evictRevokedLocked(subject); err != nil {
-		return false, err
-	}
-
-	if err := c.Storage.SaveCSR(subject, csrPEM); err != nil {
-		return false, fmt.Errorf("failed to save CSR for %s: %w", subject, err)
-	}
-
-	shouldSign, err := CheckAutosign(c.AutosignConfig, csr, csrPEM)
-	if err != nil {
-		return false, fmt.Errorf("autosign check failed for %s: %w", subject, err)
-	}
-
-	if shouldSign {
-		slog.Debug("Autosigning CSR", "subject", subject)
-		if _, err := c.sign(subject); err != nil {
-			return false, err
+		// Reject if a cert already exists and is not revoked; clear it if
+		// revoked so the node can re-register with a fresh key.
+		if err := c.evictRevokedLocked(subject); err != nil {
+			return err
 		}
-		return true, nil
-	}
 
-	slog.Debug("CSR saved, awaiting manual signing", "subject", subject)
-	return false, nil
+		if err := c.Storage.SaveCSR(subject, csrPEM); err != nil {
+			return fmt.Errorf("failed to save CSR for %s: %w", subject, err)
+		}
+
+		shouldSign, err := CheckAutosign(c.AutosignConfig, csr, csrPEM)
+		if err != nil {
+			return fmt.Errorf("autosign check failed for %s: %w", subject, err)
+		}
+
+		if shouldSign {
+			slog.Debug("Autosigning CSR", "subject", subject)
+			if _, err := c.sign(subject); err != nil {
+				return err
+			}
+			autosigned = true
+			return nil
+		}
+
+		slog.Debug("CSR saved, awaiting manual signing", "subject", subject)
+		return nil
+	})
+	if lockErr != nil {
+		return false, lockErr
+	}
+	return autosigned, nil
 }

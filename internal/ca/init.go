@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Trevor Vaughan
+// Copyright (C) 2026 Chris Boot
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -18,16 +19,38 @@ package ca
 
 import (
 	"bytes"
+	"context"
 	"crypto"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"math/big"
 	"time"
 )
+
+// Named lock identifiers used with StorageService.WithLock. These names
+// are stable across releases since every replica must agree on them for
+// the cross-node coordination to work.
+const (
+	lockNameBootstrap = "bootstrap"
+	lockNameCRL       = "crl"
+	lockSubjectPrefix = "subject:"
+)
+
+// lockTimeout bounds how long Init/Sign/Revoke will wait to acquire a
+// distributed lock before giving up. Long enough to ride out a brief
+// leader election, short enough that a stuck lease on a crashed replica
+// does not hang startup past the lease TTL on the etcd backend.
+const lockTimeout = 60 * time.Second
+
+// subjectLockName returns the distributed-lock name used to serialise
+// operations on a single subject (CSR submission, signing, cleaning).
+func subjectLockName(subject string) string { return lockSubjectPrefix + subject }
 
 func (c *CA) Init() error {
 	c.mu.Lock()
@@ -42,17 +65,11 @@ func (c *CA) Init() error {
 		return fmt.Errorf("inventory integrity check failed: %w", err)
 	}
 
-	// Try loading existing CA first.
+	// Fast path: load an already-bootstrapped CA without taking a
+	// distributed lock. Once a CA exists, all replicas can read it.
 	loadErr := c.loadCA()
 	if loadErr == nil {
-		slog.Info("Loaded existing CA", "cert", c.Storage.CACertPath())
-		if err := c.buildSerialIndex(); err != nil {
-			slog.Warn("Failed to build OCSP serial index", "error", err)
-		}
-		if err := c.loadCRLCache(); err != nil {
-			return fmt.Errorf("failed to load CRL into memory: %w", err)
-		}
-		return nil
+		return c.finishLoadExisting()
 	}
 
 	// When using an external signer (key isolation mode), the frontend must
@@ -62,21 +79,107 @@ func (c *CA) Init() error {
 		return fmt.Errorf("failed to load CA in frontend mode (signer should have bootstrapped): %w", loadErr)
 	}
 
-	hasCert, errCert := c.Storage.HasCACert()
-	if errCert != nil {
-		return fmt.Errorf("checking CA cert: %w", errCert)
-	}
-	hasKey, errKey := c.Storage.HasCAKey()
-	if errKey != nil {
-		return fmt.Errorf("checking CA key: %w", errKey)
-	}
+	// Slow path: another replica may be bootstrapping right now. Acquire the
+	// bootstrap lock before deciding whether to generate a fresh CA, and
+	// re-check the keyspace after winning the lock so we don't race two
+	// replicas into writing different CAs.
+	ctx, cancel := context.WithTimeout(context.Background(), lockTimeout)
+	defer cancel()
+	return c.Storage.WithLock(ctx, lockNameBootstrap, func() error {
+		if err := c.loadCA(); err == nil {
+			slog.Info("Loaded CA bootstrapped by another replica", "cert", c.Storage.CACertPath())
+			return c.finishLoadExisting()
+		}
+		hasCert, errCert := c.Storage.HasCACert()
+		if errCert != nil {
+			return fmt.Errorf("checking CA cert: %w", errCert)
+		}
+		hasKey, errKey := c.Storage.HasCAKey()
+		if errKey != nil {
+			return fmt.Errorf("checking CA key: %w", errKey)
+		}
+		if !hasCert || !hasKey {
+			slog.Info("No existing CA found, bootstrapping new CA")
+			return c.bootstrapCA()
+		}
+		return fmt.Errorf("failed to load existing CA: %w", loadErr)
+	})
+}
 
-	if !hasCert || !hasKey {
-		slog.Info("No existing CA found, bootstrapping new CA")
-		return c.bootstrapCA()
+// finishLoadExisting runs the post-load bookkeeping (serial index, CRL
+// cache). c.mu must be held by the caller. When the CRL is absent from the
+// backend but the cert+key loaded successfully — the common case when an
+// existing CA cert/key is mounted via an overlay against a fresh remote
+// backend — seed the CRL, inventory, and serial counter under the bootstrap
+// lock so startup can complete.
+func (c *CA) finishLoadExisting() error {
+	slog.Info("Loaded existing CA", "cert", c.Storage.CACertPath())
+	if err := c.buildSerialIndex(); err != nil {
+		slog.Warn("Failed to build OCSP serial index", "error", err)
 	}
+	err := c.loadCRLCache()
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("failed to load CRL into memory: %w", err)
+	}
+	// In frontend-only mode the signer process owns bootstrapping; a missing
+	// CRL here means the signer hasn't finished yet and retrying is its job.
+	if c.ExternalSigner != nil {
+		return fmt.Errorf("failed to load CRL into memory: %w", err)
+	}
+	if err := c.seedSupportingState(); err != nil {
+		return fmt.Errorf("seeding CA supporting state: %w", err)
+	}
+	return c.loadCRLCache()
+}
 
-	return fmt.Errorf("failed to load existing CA: %w", loadErr)
+// seedSupportingState writes the CRL, inventory, and serial counter that
+// bootstrapCA would normally create, for the case where the cert+key already
+// exist (e.g. mounted via an overlay against an empty backend). Runs under
+// the bootstrap lock so concurrent replicas don't race to seed.
+func (c *CA) seedSupportingState() error {
+	ctx, cancel := context.WithTimeout(context.Background(), lockTimeout)
+	defer cancel()
+	return c.Storage.WithLock(ctx, lockNameBootstrap, func() error {
+		// Another replica may have seeded between our initial check and the
+		// lock acquisition.
+		if _, err := c.Storage.GetCRL(); err == nil {
+			return nil
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("re-checking CRL: %w", err)
+		}
+		now := time.Now().UTC()
+		crlTemplate := &x509.RevocationList{
+			Number:     big.NewInt(1),
+			ThisUpdate: now,
+			NextUpdate: now.Add(c.crlValidity()),
+		}
+		crlBytes, err := x509.CreateRevocationList(rand.Reader, crlTemplate, c.CACert, c.CAKey)
+		if err != nil {
+			return fmt.Errorf("creating initial CRL: %w", err)
+		}
+		crlPEM := pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlBytes})
+		if err := c.Storage.UpdateCRL(crlPEM); err != nil {
+			return fmt.Errorf("writing initial CRL: %w", err)
+		}
+		if err := c.Storage.TouchInventory(); err != nil {
+			return fmt.Errorf("creating inventory: %w", err)
+		}
+		hasSerial, err := c.Storage.HasSerial()
+		if err != nil {
+			return fmt.Errorf("checking serial: %w", err)
+		}
+		if !hasSerial {
+			if err := c.Storage.WriteSerial("0001"); err != nil {
+				return fmt.Errorf("writing serial: %w", err)
+			}
+		}
+		slog.Info("Seeded CA supporting state for existing cert+key",
+			"cert", c.Storage.CACertPath())
+		return nil
+	})
 }
 
 // loadCA reads and validates the CA key and certificate from disk.

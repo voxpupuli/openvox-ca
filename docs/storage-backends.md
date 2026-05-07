@@ -112,6 +112,26 @@ Stored values carry an 8-byte big-endian `time.UnixNano` mtime prefix so
 Inventory appends use an etcd transaction guarded on the key's `ModRevision`
 with bounded retry, so concurrent appends across replicas don't lose lines.
 
+### Cross-node coordination
+
+Operations that perform a read-modify-write against shared state — CA
+bootstrap, CRL rotation during revocation, CSR-then-autosign sequencing — are
+serialised across replicas by distributed locks implemented on top of etcd's
+`concurrency.Mutex`. The backend keeps a lease-backed session (30s TTL) and
+grabs per-name mutexes under `<prefix>/locks/<name>`:
+
+| Lock name           | Held during                                       |
+|---------------------|---------------------------------------------------|
+| `bootstrap`         | First-run CA generation (winner writes, loser loads) |
+| `crl`               | `Revoke` (read CRL, append entry, write CRL)      |
+| `subject:<subject>` | `SaveRequest` and `Sign` for that one subject     |
+
+If a replica holding a lock crashes without calling Unlock, the etcd lease
+expires after 30s and the lock is released automatically.
+
+For the filesystem backend (single-node), the same call path falls back to a
+process-local `sync.Mutex` per lock name.
+
 ### Configuration
 
 ```yaml

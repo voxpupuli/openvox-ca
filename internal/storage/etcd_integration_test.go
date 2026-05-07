@@ -20,6 +20,7 @@ package storage
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -28,6 +29,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -317,5 +319,183 @@ func TestEtcdBackendEndToEndViaStorageService(t *testing.T) {
 	}
 	if len(certs) != 1 || certs[0] != "node1" {
 		t.Errorf("ListCerts = %v, want [node1]", certs)
+	}
+}
+
+// TestEtcdBackendAcquireLockMutualExclusion asserts that two replicas holding
+// the same lock name cannot both enter the critical section at once. Replica
+// A holds the lock for ~200ms; replica B must wait.
+func TestEtcdBackendAcquireLockMutualExclusion(t *testing.T) {
+	cli, stop := startEmbeddedEtcd(t)
+	defer stop()
+	a := newBackend(t, cli, "/test-lock-mutex")
+	b := newBackend(t, cli, "/test-lock-mutex")
+	defer a.Close()
+	defer b.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	ulA, err := a.AcquireLock(ctx, "crl")
+	if err != nil {
+		t.Fatalf("A AcquireLock: %v", err)
+	}
+
+	type result struct {
+		got time.Time
+		err error
+	}
+	ch := make(chan result, 1)
+	startB := time.Now()
+	go func() {
+		ul, err := b.AcquireLock(ctx, "crl")
+		res := result{got: time.Now(), err: err}
+		if err == nil {
+			_ = ul.Unlock()
+		}
+		ch <- res
+	}()
+
+	// Give B time to attempt acquisition and block.
+	time.Sleep(200 * time.Millisecond)
+	if err := ulA.Unlock(); err != nil {
+		t.Fatalf("A Unlock: %v", err)
+	}
+
+	select {
+	case res := <-ch:
+		if res.err != nil {
+			t.Fatalf("B AcquireLock: %v", res.err)
+		}
+		waited := res.got.Sub(startB)
+		if waited < 150*time.Millisecond {
+			t.Errorf("B acquired after %v; expected to wait ~200ms while A held the lock", waited)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("B never acquired the lock")
+	}
+}
+
+// TestEtcdBackendAcquireLockDistinctNames asserts that different lock names
+// do NOT contend: locks are per-name, not global.
+func TestEtcdBackendAcquireLockDistinctNames(t *testing.T) {
+	cli, stop := startEmbeddedEtcd(t)
+	defer stop()
+	b := newBackend(t, cli, "/test-lock-distinct")
+	defer b.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ul1, err := b.AcquireLock(ctx, "subject:alpha")
+	if err != nil {
+		t.Fatalf("AcquireLock alpha: %v", err)
+	}
+	ul2, err := b.AcquireLock(ctx, "subject:beta")
+	if err != nil {
+		t.Fatalf("AcquireLock beta: %v", err)
+	}
+	if err := ul1.Unlock(); err != nil {
+		t.Errorf("Unlock alpha: %v", err)
+	}
+	if err := ul2.Unlock(); err != nil {
+		t.Errorf("Unlock beta: %v", err)
+	}
+}
+
+// TestEtcdBackendAcquireLockSerialisesConcurrentCallers fires many goroutines
+// through the same lock and asserts that they entered the critical section
+// strictly one-at-a-time.
+func TestEtcdBackendAcquireLockSerialisesConcurrentCallers(t *testing.T) {
+	cli, stop := startEmbeddedEtcd(t)
+	defer stop()
+	// Two backends to force cross-session (cross-replica) contention.
+	a := newBackend(t, cli, "/test-lock-serial")
+	b := newBackend(t, cli, "/test-lock-serial")
+	defer a.Close()
+	defer b.Close()
+
+	const workers = 6
+	var inCritical atomic.Int32
+	var maxConcurrent atomic.Int32
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		backend := a
+		if i%2 == 1 {
+			backend = b
+		}
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			ul, err := backend.AcquireLock(ctx, "crl")
+			if err != nil {
+				t.Errorf("AcquireLock: %v", err)
+				return
+			}
+			cur := inCritical.Add(1)
+			for {
+				m := maxConcurrent.Load()
+				if cur <= m || maxConcurrent.CompareAndSwap(m, cur) {
+					break
+				}
+			}
+			time.Sleep(50 * time.Millisecond)
+			inCritical.Add(-1)
+			if err := ul.Unlock(); err != nil {
+				t.Errorf("Unlock: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if maxConcurrent.Load() != 1 {
+		t.Errorf("maxConcurrent = %d, want 1 (lock did not serialise writers)", maxConcurrent.Load())
+	}
+}
+
+// TestEtcdBackendWithLockCrossBackend asserts StorageService.WithLock
+// coordinates across two StorageService instances sharing an etcd cluster.
+func TestEtcdBackendWithLockCrossBackend(t *testing.T) {
+	cli, stop := startEmbeddedEtcd(t)
+	defer stop()
+	a := newBackend(t, cli, "/test-withlock")
+	b := newBackend(t, cli, "/test-withlock")
+	svcA := NewWithBackend(a, filepath.Join(t.TempDir(), "a"))
+	svcB := NewWithBackend(b, filepath.Join(t.TempDir(), "b"))
+
+	var counter atomic.Int32
+	var maxSeen atomic.Int32
+	var wg sync.WaitGroup
+	wg.Add(4)
+	for i := 0; i < 4; i++ {
+		svc := svcA
+		if i%2 == 1 {
+			svc = svcB
+		}
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			err := svc.WithLock(ctx, "crl", func() error {
+				cur := counter.Add(1)
+				for {
+					m := maxSeen.Load()
+					if cur <= m || maxSeen.CompareAndSwap(m, cur) {
+						break
+					}
+				}
+				time.Sleep(50 * time.Millisecond)
+				counter.Add(-1)
+				return nil
+			})
+			if err != nil {
+				t.Errorf("WithLock: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if maxSeen.Load() != 1 {
+		t.Errorf("maxSeen = %d, want 1", maxSeen.Load())
 	}
 }
