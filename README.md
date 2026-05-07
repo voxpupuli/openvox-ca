@@ -18,7 +18,7 @@ A drop-in replacement for Puppet Server's built-in CA, written in Go. It impleme
 ## Features
 
 - **Full Puppet CA API compatibility:** all 13 endpoints used by agents and puppet-server
-- **Flat-file storage:** reads/writes the same directory layout as Puppet Server
+- **Pluggable storage:** filesystem (default, Puppet Server compatible) or etcd for HA clusters; CA cert/key can be pinned to local files independently. See the [storage backends guide](docs/storage-backends.md)
 - **Autosigning:** `true`, glob-pattern file, or executable plugin modes
 - **mTLS support:** optional HTTPS with per-endpoint tier-based client certificate authorization
 - **CA import:** replace a bootstrapped CA with an external cert/key pair offline
@@ -79,6 +79,11 @@ mage build:fips   # → bin/puppet-ca + bin/puppet-ca-ctl  (GOEXPERIMENT=boringc
 | `--ca-key-passphrase-file` | `""` | Path to file containing the CA key passphrase (first line used) |
 | `--csr-rate-limit` | `60` | Max CSR submissions per IP per minute on the public `PUT /certificate_request` endpoint (0 disables) |
 | `--single-process` | `false` | Disable CA key isolation (run signer and frontend in a single process) |
+| `--storage-backend` | `filesystem` | Storage backend for CA state: `filesystem` or `etcd`. See [storage backends](docs/storage-backends.md) |
+| `--etcd-endpoints` | `""` | Comma-separated etcd endpoints (used when `--storage-backend etcd`) |
+| `--etcd-key-prefix` | `/puppet-ca` | etcd key namespace for this CA |
+| `--ca-cert-file` | `""` | Keep the CA certificate at this local path regardless of backend |
+| `--ca-key-file` | `""` | Keep the CA private key at this local path regardless of backend |
 | `--daemon` | `false` | Fork to background (not recommended in containers) |
 | `--logfile` | `""` | Write JSON logs to this file instead of stderr |
 | `--verbosity` / `-v` | `0` | Verbosity: `0`=Info, `1`=Debug, `2`=Trace |
@@ -161,6 +166,11 @@ ca_key_passphrase_file: ""      # path to passphrase file; auto-generated if omi
 | `--csr-rate-limit` | `PUPPET_CA_CSR_RATE_LIMIT` |
 | `--encrypt-ca-key` | `PUPPET_CA_ENCRYPT_CA_KEY` |
 | `--ca-key-passphrase-file` | `PUPPET_CA_KEY_PASSPHRASE_FILE` |
+| `--storage-backend` | `PUPPET_CA_STORAGE_BACKEND` |
+| `--etcd-endpoints` | `PUPPET_CA_ETCD_ENDPOINTS` |
+| `--etcd-key-prefix` | `PUPPET_CA_ETCD_KEY_PREFIX` |
+| `--ca-cert-file` | `PUPPET_CA_CA_CERT_FILE` |
+| `--ca-key-file` | `PUPPET_CA_CA_KEY_FILE` |
 
 The CA key passphrase can also be provided via `PUPPET_CA_KEY_PASSPHRASE` (env var only, no CLI flag to avoid `/proc/cmdline` exposure).
 
@@ -181,6 +191,13 @@ The CA key passphrase can also be provided via `PUPPET_CA_KEY_PASSPHRASE` (env v
 | `ca_validity_days` | `PUPPET_CA_CA_VALIDITY_DAYS` |
 | `leaf_validity_days` | `PUPPET_CA_LEAF_VALIDITY_DAYS` |
 | `crl_validity_days` | `PUPPET_CA_CRL_VALIDITY_DAYS` |
+| `etcd_username` | `PUPPET_CA_ETCD_USERNAME` |
+| `etcd_password` | `PUPPET_CA_ETCD_PASSWORD` |
+| `etcd_dial_timeout_sec` | `PUPPET_CA_ETCD_DIAL_TIMEOUT_SEC` |
+| `etcd_request_timeout_sec` | `PUPPET_CA_ETCD_REQUEST_TIMEOUT_SEC` |
+| `etcd_tls_ca_file` | `PUPPET_CA_ETCD_TLS_CA_FILE` |
+| `etcd_tls_cert_file` | `PUPPET_CA_ETCD_TLS_CERT_FILE` |
+| `etcd_tls_key_file` | `PUPPET_CA_ETCD_TLS_KEY_FILE` |
 
 > **Note:** `--daemon` is intentionally excluded from config file and environment
 > variable support because `PUPPET_CA_DAEMON` is used internally as the daemon fork

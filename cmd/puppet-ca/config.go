@@ -74,6 +74,28 @@ type serverConfig struct {
 	// CA key encryption at rest.
 	EncryptCAKey        bool   `yaml:"encrypt_ca_key"`         // encrypt the CA private key at rest (AES-256-GCM + Argon2id)
 	CAKeyPassphraseFile string `yaml:"ca_key_passphrase_file"` // path to file containing the CA key passphrase
+
+	// Storage backend selection. "filesystem" (default) stores all CA data
+	// under CADir; "etcd" keeps CA cert, key, CRL, inventory, serial, CSRs
+	// and signed certs in an etcd cluster (per-subject generated private
+	// keys always remain on local disk under CADir).
+	StorageBackend       string   `yaml:"storage_backend"`
+	EtcdEndpoints        []string `yaml:"etcd_endpoints"`
+	EtcdKeyPrefix        string   `yaml:"etcd_key_prefix"`
+	EtcdUsername         string   `yaml:"etcd_username"`
+	EtcdPassword         string   `yaml:"etcd_password"`
+	EtcdDialTimeoutSec   int      `yaml:"etcd_dial_timeout_sec"`
+	EtcdRequestTimeoutSec int     `yaml:"etcd_request_timeout_sec"`
+	EtcdTLSCAFile        string   `yaml:"etcd_tls_ca_file"`
+	EtcdTLSCertFile      string   `yaml:"etcd_tls_cert_file"`
+	EtcdTLSKeyFile       string   `yaml:"etcd_tls_key_file"`
+
+	// Local-file overrides. When set, the named asset is read/written via
+	// this filesystem path regardless of the selected backend. Typical use:
+	// keep the CA cert and/or key on local disk (or a mounted secret volume)
+	// while storing CSRs, signed certs, CRL and inventory in etcd.
+	CACertFile string `yaml:"ca_cert_file"`
+	CAKeyFile  string `yaml:"ca_key_file"`
 }
 
 // loadServerConfig applies built-in defaults, optionally loads a YAML config
@@ -224,6 +246,59 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("PUPPET_CA_KEY_PASSPHRASE_FILE"); v != "" {
 		cfg.CAKeyPassphraseFile = v
 	}
+	if v := os.Getenv("PUPPET_CA_STORAGE_BACKEND"); v != "" {
+		cfg.StorageBackend = v
+	}
+	if v := os.Getenv("PUPPET_CA_ETCD_ENDPOINTS"); v != "" {
+		cfg.EtcdEndpoints = splitAndTrim(v, ",")
+	}
+	if v := os.Getenv("PUPPET_CA_ETCD_KEY_PREFIX"); v != "" {
+		cfg.EtcdKeyPrefix = v
+	}
+	if v := os.Getenv("PUPPET_CA_ETCD_USERNAME"); v != "" {
+		cfg.EtcdUsername = v
+	}
+	if v := os.Getenv("PUPPET_CA_ETCD_PASSWORD"); v != "" {
+		cfg.EtcdPassword = v
+	}
+	if v := os.Getenv("PUPPET_CA_ETCD_DIAL_TIMEOUT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.EtcdDialTimeoutSec = n
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_ETCD_REQUEST_TIMEOUT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.EtcdRequestTimeoutSec = n
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_ETCD_TLS_CA_FILE"); v != "" {
+		cfg.EtcdTLSCAFile = v
+	}
+	if v := os.Getenv("PUPPET_CA_ETCD_TLS_CERT_FILE"); v != "" {
+		cfg.EtcdTLSCertFile = v
+	}
+	if v := os.Getenv("PUPPET_CA_ETCD_TLS_KEY_FILE"); v != "" {
+		cfg.EtcdTLSKeyFile = v
+	}
+	if v := os.Getenv("PUPPET_CA_CA_CERT_FILE"); v != "" {
+		cfg.CACertFile = v
+	}
+	if v := os.Getenv("PUPPET_CA_CA_KEY_FILE"); v != "" {
+		cfg.CAKeyFile = v
+	}
+}
+
+// splitAndTrim splits s on sep, trims whitespace around each element, and
+// drops empty entries. Used for comma-separated list env vars.
+func splitAndTrim(s, sep string) []string {
+	parts := strings.Split(s, sep)
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 // loadPuppetServerFile reads a file containing puppet-server CNs, one per

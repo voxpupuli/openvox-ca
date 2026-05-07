@@ -69,6 +69,49 @@ func setupLogger(cfg *serverConfig) (*os.File, error) {
 	return nil, nil
 }
 
+// buildBackendSpec derives a storage.BackendSpec from the server config. The
+// spec is used to construct the StorageService in every mode (frontend,
+// signer, single-process), ensuring backend selection happens in one place.
+func buildBackendSpec(cfg *serverConfig, absCADir string) (storage.BackendSpec, error) {
+	kind, err := storage.ParseBackendKind(cfg.StorageBackend)
+	if err != nil {
+		return storage.BackendSpec{}, err
+	}
+	spec := storage.BackendSpec{
+		Kind:       kind,
+		LocalDir:   absCADir,
+		CACertFile: absIfSet(cfg.CACertFile),
+		CAKeyFile:  absIfSet(cfg.CAKeyFile),
+	}
+	if kind == storage.BackendEtcd {
+		spec.Etcd = storage.EtcdSpec{
+			Endpoints:         cfg.EtcdEndpoints,
+			KeyPrefix:         cfg.EtcdKeyPrefix,
+			Username:          cfg.EtcdUsername,
+			Password:          cfg.EtcdPassword,
+			DialTimeoutSec:    cfg.EtcdDialTimeoutSec,
+			RequestTimeoutSec: cfg.EtcdRequestTimeoutSec,
+			TLSCAFile:         cfg.EtcdTLSCAFile,
+			TLSCertFile:       cfg.EtcdTLSCertFile,
+			TLSKeyFile:        cfg.EtcdTLSKeyFile,
+		}
+	}
+	return spec, nil
+}
+
+// absIfSet returns filepath.Abs(p) when p is non-empty, otherwise "".
+// Resolving at config time lets error messages and logs show canonical paths.
+func absIfSet(p string) string {
+	if p == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return p
+	}
+	return abs
+}
+
 // applyCAConfig applies the common CA configuration fields from serverConfig
 // to a CA instance. Used by both frontend and signer modes.
 func applyCAConfig(myCA *ca.CA, cfg *serverConfig) error {
@@ -149,6 +192,11 @@ func main() {
 		encryptCAKey        bool
 		caKeyPassphraseFile string
 		singleProcess       bool
+		storageBackend      string
+		etcdEndpoints       []string
+		etcdKeyPrefix       string
+		caCertFile          string
+		caKeyFile           string
 	)
 
 	cmd := &cobra.Command{
@@ -221,6 +269,21 @@ func main() {
 			if cmd.Flags().Changed("ca-key-passphrase-file") {
 				cfg.CAKeyPassphraseFile = caKeyPassphraseFile
 			}
+			if cmd.Flags().Changed("storage-backend") {
+				cfg.StorageBackend = storageBackend
+			}
+			if cmd.Flags().Changed("etcd-endpoints") {
+				cfg.EtcdEndpoints = etcdEndpoints
+			}
+			if cmd.Flags().Changed("etcd-key-prefix") {
+				cfg.EtcdKeyPrefix = etcdKeyPrefix
+			}
+			if cmd.Flags().Changed("ca-cert-file") {
+				cfg.CACertFile = caCertFile
+			}
+			if cmd.Flags().Changed("ca-key-file") {
+				cfg.CAKeyFile = caKeyFile
+			}
 			// --- Validation ---
 			if cfg.CADir == "" {
 				return fmt.Errorf("--cadir is required (or set PUPPET_CA_CADIR / cadir in config file)")
@@ -268,40 +331,10 @@ func main() {
 			}
 
 			// Frontend mode (role=frontend) or single-process mode: run HTTP server.
-			// In frontend mode, connect to the signer process via socketpair.
+			// In frontend mode, connect to the signer process via socketpair
+			// (deferred to after storage setup so the CA cert can be read via
+			// the overlay-aware storage service).
 			var remoteSigner *signer.RemoteSigner
-			if role == "frontend" {
-				// Connect to the signer first. The PSK handshake blocks until
-				// the signer is ready (i.e. it has finished Init/bootstrap and
-				// written the CA cert to disk).
-				conn, err := signer.DialConn()
-				if err != nil {
-					return fmt.Errorf("connecting to signer process: %w", err)
-				}
-
-				// Now read the CA certificate, guaranteed to exist because the
-				// signer completed Init before accepting the handshake.
-				certPEM, err := os.ReadFile(filepath.Join(absCADir, "ca_crt.pem"))
-				if err != nil {
-					conn.Close()
-					return fmt.Errorf("reading CA cert for remote signer: %w", err)
-				}
-				block, _ := pem.Decode(certPEM)
-				if block == nil {
-					conn.Close()
-					return fmt.Errorf("failed to decode CA cert PEM")
-				}
-				caCert, err := x509.ParseCertificate(block.Bytes)
-				if err != nil {
-					conn.Close()
-					return fmt.Errorf("parsing CA cert: %w", err)
-				}
-
-				rs := signer.NewRemoteSigner(conn, caCert.PublicKey)
-				defer rs.Close()
-				remoteSigner = rs
-				slog.Info("Connected to isolated signer process")
-			}
 
 			// --- Logging setup ---
 			logFile, err := setupLogger(cfg)
@@ -348,10 +381,51 @@ func main() {
 			}
 
 			// --- Storage & Directories ---
-			store := storage.New(absCADir)
+			backendSpec, err := buildBackendSpec(cfg, absCADir)
+			if err != nil {
+				slog.Error("Invalid storage backend config", "error", err)
+				os.Exit(1)
+			}
+			store, err := storage.NewServiceFromSpec(backendSpec)
+			if err != nil {
+				slog.Error("Failed to initialise storage backend", "error", err)
+				os.Exit(1)
+			}
+			defer func() { _ = store.Backend().Close() }()
 			if err := store.EnsureDirs(); err != nil {
 				slog.Error("Failed to create CA directories", "error", err)
 				os.Exit(1)
+			}
+
+			// Frontend-mode signer handshake: connect to the signer, then read
+			// the CA cert through the storage service so an overlay-mounted
+			// cert (e.g. a Kubernetes secret volume) is honoured. The PSK
+			// handshake blocks until the signer finishes Init/bootstrap, so
+			// store.GetCACert is guaranteed to succeed after it returns.
+			if role == "frontend" {
+				conn, err := signer.DialConn()
+				if err != nil {
+					return fmt.Errorf("connecting to signer process: %w", err)
+				}
+				certPEM, err := store.GetCACert()
+				if err != nil {
+					conn.Close()
+					return fmt.Errorf("reading CA cert for remote signer: %w", err)
+				}
+				block, _ := pem.Decode(certPEM)
+				if block == nil {
+					conn.Close()
+					return fmt.Errorf("failed to decode CA cert PEM")
+				}
+				caCert, err := x509.ParseCertificate(block.Bytes)
+				if err != nil {
+					conn.Close()
+					return fmt.Errorf("parsing CA cert: %w", err)
+				}
+				rs := signer.NewRemoteSigner(conn, caCert.PublicKey)
+				defer rs.Close()
+				remoteSigner = rs
+				slog.Info("Connected to isolated signer process")
 			}
 
 			// --- Autosign ---
@@ -557,6 +631,11 @@ func main() {
 	f.BoolVar(&encryptCAKey, "encrypt-ca-key", false, "Encrypt the CA private key at rest (AES-256-GCM + Argon2id); a passphrase is auto-generated if not provided")
 	f.StringVar(&caKeyPassphraseFile, "ca-key-passphrase-file", "", "Path to file containing the CA key passphrase (first line used)")
 	f.BoolVar(&singleProcess, "single-process", false, "Disable CA key isolation (run signer and frontend in a single process)")
+	f.StringVar(&storageBackend, "storage-backend", "", "Storage backend: 'filesystem' (default) or 'etcd'")
+	f.StringSliceVar(&etcdEndpoints, "etcd-endpoints", nil, "Comma-separated etcd cluster endpoints (e.g. https://etcd1:2379,https://etcd2:2379)")
+	f.StringVar(&etcdKeyPrefix, "etcd-key-prefix", "", "etcd key namespace for this CA (default: /puppet-ca)")
+	f.StringVar(&caCertFile, "ca-cert-file", "", "Keep the CA certificate at this local path regardless of storage backend")
+	f.StringVar(&caKeyFile, "ca-key-file", "", "Keep the CA private key at this local path regardless of storage backend")
 
 	if err := cmd.Execute(); err != nil {
 		os.Exit(1)
@@ -587,7 +666,15 @@ func runSignerMode(cfg *serverConfig, absCADir string) error {
 		"pid", os.Getpid(),
 	)
 
-	store := storage.New(absCADir)
+	backendSpec, err := buildBackendSpec(cfg, absCADir)
+	if err != nil {
+		return fmt.Errorf("invalid storage backend config: %w", err)
+	}
+	store, err := storage.NewServiceFromSpec(backendSpec)
+	if err != nil {
+		return fmt.Errorf("initialising storage backend: %w", err)
+	}
+	defer func() { _ = store.Backend().Close() }()
 
 	// Full CA initialization: handles bootstrap on first run, loads existing
 	// CA on subsequent runs. This writes ca_crt.pem, CRL, inventory, etc.
