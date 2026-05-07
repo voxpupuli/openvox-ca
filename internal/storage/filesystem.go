@@ -18,6 +18,7 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -95,7 +96,20 @@ func (b *FilesystemBackend) pathFor(key string) (string, error) {
 	return "", fmt.Errorf("unknown key %q", key)
 }
 
-func (b *FilesystemBackend) EnsureReady() error {
+// The filesystem backend's syscalls cannot be interrupted mid-flight, so
+// ctx is honoured only at the start of each operation. ctxErr returns the
+// caller's cancellation error if ctx is already done; otherwise nil.
+func ctxErr(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (b *FilesystemBackend) EnsureReady(ctx context.Context) error {
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
 	for _, d := range []string{
 		b.baseDir,
 		filepath.Join(b.baseDir, "signed"),
@@ -109,7 +123,10 @@ func (b *FilesystemBackend) EnsureReady() error {
 	return nil
 }
 
-func (b *FilesystemBackend) Get(key string) ([]byte, error) {
+func (b *FilesystemBackend) Get(ctx context.Context, key string) ([]byte, error) {
+	if err := ctxErr(ctx); err != nil {
+		return nil, err
+	}
 	p, err := b.pathFor(key)
 	if err != nil {
 		return nil, err
@@ -117,7 +134,10 @@ func (b *FilesystemBackend) Get(key string) ([]byte, error) {
 	return os.ReadFile(p)
 }
 
-func (b *FilesystemBackend) Put(key string, data []byte, kind BlobKind) error {
+func (b *FilesystemBackend) Put(ctx context.Context, key string, data []byte, kind BlobKind) error {
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
 	p, err := b.pathFor(key)
 	if err != nil {
 		return err
@@ -128,7 +148,10 @@ func (b *FilesystemBackend) Put(key string, data []byte, kind BlobKind) error {
 	return atomicWriteFile(p, data, permFor(kind))
 }
 
-func (b *FilesystemBackend) Delete(key string) error {
+func (b *FilesystemBackend) Delete(ctx context.Context, key string) error {
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
 	p, err := b.pathFor(key)
 	if err != nil {
 		return err
@@ -136,7 +159,10 @@ func (b *FilesystemBackend) Delete(key string) error {
 	return os.Remove(p)
 }
 
-func (b *FilesystemBackend) Exists(key string) (bool, error) {
+func (b *FilesystemBackend) Exists(ctx context.Context, key string) (bool, error) {
+	if err := ctxErr(ctx); err != nil {
+		return false, err
+	}
 	p, err := b.pathFor(key)
 	if err != nil {
 		return false, err
@@ -151,7 +177,10 @@ func (b *FilesystemBackend) Exists(key string) (bool, error) {
 	return false, err
 }
 
-func (b *FilesystemBackend) List(prefix string) ([]string, error) {
+func (b *FilesystemBackend) List(ctx context.Context, prefix string) ([]string, error) {
+	if err := ctxErr(ctx); err != nil {
+		return nil, err
+	}
 	var dir, outPrefix string
 	switch prefix {
 	case csrPrefix:
@@ -180,7 +209,10 @@ func (b *FilesystemBackend) List(prefix string) ([]string, error) {
 	return out, nil
 }
 
-func (b *FilesystemBackend) AppendLine(key string, data []byte, kind BlobKind) error {
+func (b *FilesystemBackend) AppendLine(ctx context.Context, key string, data []byte, kind BlobKind) error {
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
 	b.appendMu.Lock()
 	defer b.appendMu.Unlock()
 	p, err := b.pathFor(key)
@@ -201,7 +233,10 @@ func (b *FilesystemBackend) AppendLine(key string, data []byte, kind BlobKind) e
 	return f.Close()
 }
 
-func (b *FilesystemBackend) ModTime(key string) (time.Time, error) {
+func (b *FilesystemBackend) ModTime(ctx context.Context, key string) (time.Time, error) {
+	if err := ctxErr(ctx); err != nil {
+		return time.Time{}, err
+	}
 	p, err := b.pathFor(key)
 	if err != nil {
 		return time.Time{}, err

@@ -52,24 +52,24 @@ const lockTimeout = 60 * time.Second
 // operations on a single subject (CSR submission, signing, cleaning).
 func subjectLockName(subject string) string { return lockSubjectPrefix + subject }
 
-func (c *CA) Init() error {
+func (c *CA) Init(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if err := c.Storage.EnsureDirs(); err != nil {
+	if err := c.Storage.EnsureDirs(ctx); err != nil {
 		return err
 	}
 
 	// Initialize inventory HMAC integrity checking.
-	if err := c.Storage.InitHMAC(); err != nil {
+	if err := c.Storage.InitHMAC(ctx); err != nil {
 		return fmt.Errorf("inventory integrity check failed: %w", err)
 	}
 
 	// Fast path: load an already-bootstrapped CA without taking a
 	// distributed lock. Once a CA exists, all replicas can read it.
-	loadErr := c.loadCA()
+	loadErr := c.loadCA(ctx)
 	if loadErr == nil {
-		return c.finishLoadExisting()
+		return c.finishLoadExisting(ctx)
 	}
 
 	// When using an external signer (key isolation mode), the frontend must
@@ -83,24 +83,24 @@ func (c *CA) Init() error {
 	// bootstrap lock before deciding whether to generate a fresh CA, and
 	// re-check the keyspace after winning the lock so we don't race two
 	// replicas into writing different CAs.
-	ctx, cancel := context.WithTimeout(context.Background(), lockTimeout)
+	ctx, cancel := context.WithTimeout(ctx, lockTimeout)
 	defer cancel()
 	return c.Storage.WithLock(ctx, lockNameBootstrap, func() error {
-		if err := c.loadCA(); err == nil {
+		if err := c.loadCA(ctx); err == nil {
 			slog.Info("Loaded CA bootstrapped by another replica", "cert", c.Storage.CACertPath())
-			return c.finishLoadExisting()
+			return c.finishLoadExisting(ctx)
 		}
-		hasCert, errCert := c.Storage.HasCACert()
+		hasCert, errCert := c.Storage.HasCACert(ctx)
 		if errCert != nil {
 			return fmt.Errorf("checking CA cert: %w", errCert)
 		}
-		hasKey, errKey := c.Storage.HasCAKey()
+		hasKey, errKey := c.Storage.HasCAKey(ctx)
 		if errKey != nil {
 			return fmt.Errorf("checking CA key: %w", errKey)
 		}
 		if !hasCert || !hasKey {
 			slog.Info("No existing CA found, bootstrapping new CA")
-			return c.bootstrapCA()
+			return c.bootstrapCA(ctx)
 		}
 		return fmt.Errorf("failed to load existing CA: %w", loadErr)
 	})
@@ -112,12 +112,12 @@ func (c *CA) Init() error {
 // existing CA cert/key is mounted via an overlay against a fresh remote
 // backend — seed the CRL, inventory, and serial counter under the bootstrap
 // lock so startup can complete.
-func (c *CA) finishLoadExisting() error {
+func (c *CA) finishLoadExisting(ctx context.Context) error {
 	slog.Info("Loaded existing CA", "cert", c.Storage.CACertPath())
-	if err := c.buildSerialIndex(); err != nil {
+	if err := c.buildSerialIndex(ctx); err != nil {
 		slog.Warn("Failed to build OCSP serial index", "error", err)
 	}
-	err := c.loadCRLCache()
+	err := c.loadCRLCache(ctx)
 	if err == nil {
 		return nil
 	}
@@ -129,23 +129,23 @@ func (c *CA) finishLoadExisting() error {
 	if c.ExternalSigner != nil {
 		return fmt.Errorf("failed to load CRL into memory: %w", err)
 	}
-	if err := c.seedSupportingState(); err != nil {
+	if err := c.seedSupportingState(ctx); err != nil {
 		return fmt.Errorf("seeding CA supporting state: %w", err)
 	}
-	return c.loadCRLCache()
+	return c.loadCRLCache(ctx)
 }
 
 // seedSupportingState writes the CRL, inventory, and serial counter that
 // bootstrapCA would normally create, for the case where the cert+key already
 // exist (e.g. mounted via an overlay against an empty backend). Runs under
 // the bootstrap lock so concurrent replicas don't race to seed.
-func (c *CA) seedSupportingState() error {
-	ctx, cancel := context.WithTimeout(context.Background(), lockTimeout)
+func (c *CA) seedSupportingState(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, lockTimeout)
 	defer cancel()
 	return c.Storage.WithLock(ctx, lockNameBootstrap, func() error {
 		// Another replica may have seeded between our initial check and the
 		// lock acquisition.
-		if _, err := c.Storage.GetCRL(); err == nil {
+		if _, err := c.Storage.GetCRL(ctx); err == nil {
 			return nil
 		} else if !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("re-checking CRL: %w", err)
@@ -161,18 +161,18 @@ func (c *CA) seedSupportingState() error {
 			return fmt.Errorf("creating initial CRL: %w", err)
 		}
 		crlPEM := pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlBytes})
-		if err := c.Storage.UpdateCRL(crlPEM); err != nil {
+		if err := c.Storage.UpdateCRL(ctx, crlPEM); err != nil {
 			return fmt.Errorf("writing initial CRL: %w", err)
 		}
-		if err := c.Storage.TouchInventory(); err != nil {
+		if err := c.Storage.TouchInventory(ctx); err != nil {
 			return fmt.Errorf("creating inventory: %w", err)
 		}
-		hasSerial, err := c.Storage.HasSerial()
+		hasSerial, err := c.Storage.HasSerial(ctx)
 		if err != nil {
 			return fmt.Errorf("checking serial: %w", err)
 		}
 		if !hasSerial {
-			if err := c.Storage.WriteSerial("0001"); err != nil {
+			if err := c.Storage.WriteSerial(ctx, "0001"); err != nil {
 				return fmt.Errorf("writing serial: %w", err)
 			}
 		}
@@ -189,20 +189,20 @@ func (c *CA) seedSupportingState() error {
 // When ExternalSigner is set, key loading from disk is skipped entirely:
 // the private key lives in a separate signer process and is never loaded
 // into the frontend's address space.
-func (c *CA) loadCA() error {
+func (c *CA) loadCA(ctx context.Context) error {
 	if c.ExternalSigner != nil {
 		// Key isolation mode: use the remote signer instead of loading the
 		// private key from disk. The signer process verified key/cert match
 		// when it loaded the key.
 		c.CAKey = c.ExternalSigner
 	} else {
-		if err := c.loadCAKeyFromDisk(); err != nil {
+		if err := c.loadCAKeyFromDisk(ctx); err != nil {
 			return err
 		}
 	}
 
 	// Always load the certificate (it's public).
-	certPEM, err := c.Storage.GetCACert()
+	certPEM, err := c.Storage.GetCACert(ctx)
 	if err != nil {
 		return err
 	}
@@ -238,8 +238,8 @@ func (c *CA) loadCA() error {
 
 // loadCAKeyFromDisk reads and parses the CA private key from disk.
 // Supports RSA (PKCS1, PKCS8), ECDSA (SEC1, PKCS8), and encrypted PEM.
-func (c *CA) loadCAKeyFromDisk() error {
-	keyPEM, err := c.Storage.GetCAKey()
+func (c *CA) loadCAKeyFromDisk(ctx context.Context) error {
+	keyPEM, err := c.Storage.GetCAKey(ctx)
 	if err != nil {
 		return err
 	}
@@ -278,7 +278,7 @@ func (c *CA) loadCAKeyFromDisk() error {
 	return nil
 }
 
-func (c *CA) bootstrapCA() error {
+func (c *CA) bootstrapCA(ctx context.Context) error {
 	hostname := c.Hostname
 	if hostname == "" {
 		hostname = "puppet"
@@ -388,13 +388,13 @@ func (c *CA) bootstrapCA() error {
 			return fmt.Errorf("failed to marshal CA key: %w", err)
 		}
 	}
-	if err := c.Storage.SaveCAKey(keyPEM); err != nil {
+	if err := c.Storage.SaveCAKey(ctx, keyPEM); err != nil {
 		return fmt.Errorf("failed to write CA key: %w", err)
 	}
 
 	// Save CA cert.
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certBytes})
-	if err := c.Storage.SaveCACert(certPEM); err != nil {
+	if err := c.Storage.SaveCACert(ctx, certPEM); err != nil {
 		return fmt.Errorf("failed to write CA cert: %w", err)
 	}
 
@@ -402,7 +402,7 @@ func (c *CA) bootstrapCA() error {
 	pubKeyBytes, err := x509.MarshalPKIXPublicKey(key.Public())
 	if err == nil {
 		pubKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubKeyBytes})
-		_ = c.Storage.SaveCAPubKey(pubKeyPEM)
+		_ = c.Storage.SaveCAPubKey(ctx, pubKeyPEM)
 	}
 
 	// Generate empty CRL.
@@ -416,7 +416,7 @@ func (c *CA) bootstrapCA() error {
 		return fmt.Errorf("failed to create initial CRL: %w", err)
 	}
 	crlPEM := pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlBytes})
-	if err := c.Storage.UpdateCRL(crlPEM); err != nil {
+	if err := c.Storage.UpdateCRL(ctx, crlPEM); err != nil {
 		return fmt.Errorf("failed to write initial CRL: %w", err)
 	}
 
@@ -428,7 +428,7 @@ func (c *CA) bootstrapCA() error {
 	c.cachedCRL = parsedCRL
 
 	// Touch inventory.
-	if err := c.Storage.TouchInventory(); err != nil {
+	if err := c.Storage.TouchInventory(ctx); err != nil {
 		return fmt.Errorf("failed to create inventory: %w", err)
 	}
 
@@ -443,8 +443,8 @@ func (c *CA) bootstrapCA() error {
 
 // loadCRLCache reads the CRL from disk and caches it in memory.
 // Must be called with c.mu held.
-func (c *CA) loadCRLCache() error {
-	crlPEM, err := c.Storage.GetCRL()
+func (c *CA) loadCRLCache(ctx context.Context) error {
+	crlPEM, err := c.Storage.GetCRL(ctx)
 	if err != nil {
 		return fmt.Errorf("reading CRL: %w", err)
 	}

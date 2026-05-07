@@ -17,6 +17,7 @@
 package ca_test
 
 import (
+	"context"
 	"crypto/x509"
 	"encoding/pem"
 	"os"
@@ -43,31 +44,31 @@ var _ = Describe("ImportCA", func() {
 
 	It("writes cert, key, and CRL files and initialises serial and inventory", func() {
 		store := storage.New(tmpDir)
-		Expect(ca.ImportCA(store, cachedCrtPEM, cachedKeyPEM, cachedCrlPEM)).To(Succeed())
+		Expect(ca.ImportCA(context.Background(), store, cachedCrtPEM, cachedKeyPEM, cachedCrlPEM)).To(Succeed())
 
 		// All expected blobs must exist.
-		Expect(store.HasCACert()).To(BeTrue())
-		Expect(store.HasCAKey()).To(BeTrue())
-		crl, err := store.GetCRL()
+		Expect(store.HasCACert(context.Background())).To(BeTrue())
+		Expect(store.HasCAKey(context.Background())).To(BeTrue())
+		crl, err := store.GetCRL(context.Background())
 		Expect(err).NotTo(HaveOccurred())
 		Expect(crl).NotTo(BeEmpty())
-		Expect(store.HasInventory()).To(BeTrue())
-		Expect(store.HasSerial()).To(BeTrue())
+		Expect(store.HasInventory(context.Background())).To(BeTrue())
+		Expect(store.HasSerial(context.Background())).To(BeTrue())
 
 		// Contents must round-trip correctly.
-		certData, err := store.GetCACert()
+		certData, err := store.GetCACert(context.Background())
 		Expect(err).NotTo(HaveOccurred())
 		Expect(certData).To(Equal(cachedCrtPEM))
-		keyData, err := store.GetCAKey()
+		keyData, err := store.GetCAKey(context.Background())
 		Expect(err).NotTo(HaveOccurred())
 		Expect(keyData).To(Equal(cachedKeyPEM))
 	})
 
 	It("generates a fresh CRL when crlPEM is nil", func() {
 		store := storage.New(tmpDir)
-		Expect(ca.ImportCA(store, cachedCrtPEM, cachedKeyPEM, nil)).To(Succeed())
+		Expect(ca.ImportCA(context.Background(), store, cachedCrtPEM, cachedKeyPEM, nil)).To(Succeed())
 
-		crlData, err := store.GetCRL()
+		crlData, err := store.GetCRL(context.Background())
 		Expect(err).NotTo(HaveOccurred())
 		block, _ := pem.Decode(crlData)
 		Expect(block).NotTo(BeNil())
@@ -77,12 +78,12 @@ var _ = Describe("ImportCA", func() {
 
 	It("does not overwrite an existing serial file", func() {
 		store := storage.New(tmpDir)
-		Expect(store.EnsureDirs()).To(Succeed())
-		Expect(store.WriteSerial("00FF")).To(Succeed())
+		Expect(store.EnsureDirs(context.Background())).To(Succeed())
+		Expect(store.WriteSerial(context.Background(), "00FF")).To(Succeed())
 
-		Expect(ca.ImportCA(store, cachedCrtPEM, cachedKeyPEM, nil)).To(Succeed())
+		Expect(ca.ImportCA(context.Background(), store, cachedCrtPEM, cachedKeyPEM, nil)).To(Succeed())
 
-		serialData, err := store.GetSerial()
+		serialData, err := store.GetSerial(context.Background())
 		Expect(err).NotTo(HaveOccurred())
 		Expect(string(serialData)).To(Equal("00FF"))
 	})
@@ -95,7 +96,7 @@ var _ = Describe("ImportCA", func() {
 
 		store := storage.New(tmpDir)
 		// Pass the alt CA cert but the original key; they don't match.
-		err = ca.ImportCA(store, altCertPEM, cachedKeyPEM, nil)
+		err = ca.ImportCA(context.Background(), store, altCertPEM, cachedKeyPEM, nil)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("does not match"))
 	})
@@ -103,17 +104,17 @@ var _ = Describe("ImportCA", func() {
 	It("rejects a non-CA certificate", func() {
 		// Import the cached CA first so we can generate a leaf cert from it.
 		store := storage.New(tmpDir)
-		Expect(ca.ImportCA(store, cachedCrtPEM, cachedKeyPEM, nil)).To(Succeed())
+		Expect(ca.ImportCA(context.Background(), store, cachedCrtPEM, cachedKeyPEM, nil)).To(Succeed())
 
 		// Bootstrap a CA from the imported files and generate a leaf cert.
 		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
-		Expect(myCA.Init()).To(Succeed())
-		leafResult, err := myCA.Generate("leaf-for-import-test", nil)
+		Expect(myCA.Init(context.Background())).To(Succeed())
+		leafResult, err := myCA.Generate(context.Background(), "leaf-for-import-test", nil)
 		Expect(err).NotTo(HaveOccurred())
 
 		// Now try to import the leaf cert as a CA cert.
 		store2 := storage.New(tmpDir + "-v2")
-		err = ca.ImportCA(store2, leafResult.CertificatePEM, leafResult.PrivateKeyPEM, nil)
+		err = ca.ImportCA(context.Background(), store2, leafResult.CertificatePEM, leafResult.PrivateKeyPEM, nil)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("IsCA"))
 	})

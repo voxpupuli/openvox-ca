@@ -124,8 +124,8 @@ func NewWithBackend(backend Backend, localPrivateKeyDir string) *StorageService 
 func (s *StorageService) Backend() Backend { return s.backend }
 
 // EnsureDirs prepares the backend and the local private-key directory for use.
-func (s *StorageService) EnsureDirs() error {
-	if err := s.backend.EnsureReady(); err != nil {
+func (s *StorageService) EnsureDirs(ctx context.Context) error {
+	if err := s.backend.EnsureReady(ctx); err != nil {
 		return err
 	}
 	if s.localPrivateKeyDir != "" {
@@ -138,91 +138,91 @@ func (s *StorageService) EnsureDirs() error {
 
 // --- Serial ---
 
-func (s *StorageService) WriteSerial(val string) error {
+func (s *StorageService) WriteSerial(ctx context.Context, val string) error {
 	s.serialMu.Lock()
 	defer s.serialMu.Unlock()
-	return s.backend.Put(KeySerial, []byte(val), BlobPublic)
+	return s.backend.Put(ctx, KeySerial, []byte(val), BlobPublic)
 }
 
-func (s *StorageService) GetSerial() ([]byte, error) {
+func (s *StorageService) GetSerial(ctx context.Context) ([]byte, error) {
 	s.serialMu.Lock()
 	defer s.serialMu.Unlock()
-	return s.backend.Get(KeySerial)
+	return s.backend.Get(ctx, KeySerial)
 }
 
-func (s *StorageService) HasSerial() (bool, error) {
+func (s *StorageService) HasSerial(ctx context.Context) (bool, error) {
 	s.serialMu.Lock()
 	defer s.serialMu.Unlock()
-	return s.backend.Exists(KeySerial)
+	return s.backend.Exists(ctx, KeySerial)
 }
 
 // --- Inventory ---
 
 // InitHMAC loads or generates the inventory HMAC key and verifies the
 // existing inventory. Call this once during CA initialisation.
-func (s *StorageService) InitHMAC() error {
-	key, err := s.EnsureHMACKey()
+func (s *StorageService) InitHMAC(ctx context.Context) error {
+	key, err := s.EnsureHMACKey(ctx)
 	if err != nil {
 		return err
 	}
 	s.hmacKey = key
-	return s.VerifyInventoryHMAC(key)
+	return s.VerifyInventoryHMAC(ctx, key)
 }
 
-func (s *StorageService) AppendInventory(entry string) error {
+func (s *StorageService) AppendInventory(ctx context.Context, entry string) error {
 	s.inventoryMu.Lock()
 	defer s.inventoryMu.Unlock()
 
-	if err := s.backend.AppendLine(KeyInventory, []byte(entry+"\n"), BlobPrivate); err != nil {
+	if err := s.backend.AppendLine(ctx, KeyInventory, []byte(entry+"\n"), BlobPrivate); err != nil {
 		return err
 	}
 
 	if s.hmacKey != nil {
-		if err := s.updateInventoryHMACLocked(s.hmacKey); err != nil {
+		if err := s.updateInventoryHMACLocked(ctx, s.hmacKey); err != nil {
 			slog.Warn("Failed to update inventory HMAC", "error", err)
 		}
 	}
 	return nil
 }
 
-func (s *StorageService) ReadInventory() ([]byte, error) {
+func (s *StorageService) ReadInventory(ctx context.Context) ([]byte, error) {
 	s.inventoryMu.RLock()
 	defer s.inventoryMu.RUnlock()
 
 	if s.hmacKey != nil {
-		if err := s.verifyInventoryHMACLocked(s.hmacKey); err != nil {
+		if err := s.verifyInventoryHMACLocked(ctx, s.hmacKey); err != nil {
 			return nil, err
 		}
 	}
-	return s.backend.Get(KeyInventory)
+	return s.backend.Get(ctx, KeyInventory)
 }
 
 // TouchInventory creates an empty inventory blob if one does not already
 // exist. Called during CA bootstrap and import to seed the inventory.
-func (s *StorageService) TouchInventory() error {
+func (s *StorageService) TouchInventory(ctx context.Context) error {
 	s.inventoryMu.Lock()
 	defer s.inventoryMu.Unlock()
-	ok, err := s.backend.Exists(KeyInventory)
+	ok, err := s.backend.Exists(ctx, KeyInventory)
 	if err != nil {
 		return err
 	}
 	if ok {
 		return nil
 	}
-	return s.backend.Put(KeyInventory, []byte{}, BlobPrivate)
+	return s.backend.Put(ctx, KeyInventory, []byte{}, BlobPrivate)
 }
 
-func (s *StorageService) HasInventory() (bool, error) {
+func (s *StorageService) HasInventory(ctx context.Context) (bool, error) {
 	s.inventoryMu.RLock()
 	defer s.inventoryMu.RUnlock()
-	return s.backend.Exists(KeyInventory)
+	return s.backend.Exists(ctx, KeyInventory)
 }
 
 // readInventoryForHMAC returns the inventory bytes, treating an absent blob
 // as empty so that a missing inventory hashes the same as an empty one.
 // Caller must hold inventoryMu (read or write).
-func (s *StorageService) readInventoryForHMAC() ([]byte, error) {
-	data, err := s.backend.Get(KeyInventory)
+func (s *StorageService) readInventoryForHMAC(ctx context.Context) ([]byte, error) {
+	data, err := s.backend.Get(ctx, KeyInventory)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return []byte{}, nil
@@ -234,129 +234,129 @@ func (s *StorageService) readInventoryForHMAC() ([]byte, error) {
 
 // --- CRL ---
 
-func (s *StorageService) UpdateCRL(pemData []byte) error {
+func (s *StorageService) UpdateCRL(ctx context.Context, pemData []byte) error {
 	s.crlMu.Lock()
 	defer s.crlMu.Unlock()
-	return s.backend.Put(KeyCRL, pemData, BlobPrivate)
+	return s.backend.Put(ctx, KeyCRL, pemData, BlobPrivate)
 }
 
-func (s *StorageService) GetCRL() ([]byte, error) {
+func (s *StorageService) GetCRL(ctx context.Context) ([]byte, error) {
 	s.crlMu.RLock()
 	defer s.crlMu.RUnlock()
-	return s.backend.Get(KeyCRL)
+	return s.backend.Get(ctx, KeyCRL)
 }
 
 // CRLModTime returns the last-modified time of the CRL blob, for
 // If-Modified-Since handling. Backends that don't track mtime return zero.
-func (s *StorageService) CRLModTime() (time.Time, error) {
+func (s *StorageService) CRLModTime(ctx context.Context) (time.Time, error) {
 	s.crlMu.RLock()
 	defer s.crlMu.RUnlock()
-	return s.backend.ModTime(KeyCRL)
+	return s.backend.ModTime(ctx, KeyCRL)
 }
 
 // --- CA material ---
 
-func (s *StorageService) GetCACert() ([]byte, error) {
+func (s *StorageService) GetCACert(ctx context.Context) ([]byte, error) {
 	s.fileMu.RLock()
 	defer s.fileMu.RUnlock()
-	return s.backend.Get(KeyCACert)
+	return s.backend.Get(ctx, KeyCACert)
 }
 
-func (s *StorageService) SaveCACert(data []byte) error {
+func (s *StorageService) SaveCACert(ctx context.Context, data []byte) error {
 	s.fileMu.Lock()
 	defer s.fileMu.Unlock()
-	return s.backend.Put(KeyCACert, data, BlobPublic)
+	return s.backend.Put(ctx, KeyCACert, data, BlobPublic)
 }
 
-func (s *StorageService) HasCACert() (bool, error) {
+func (s *StorageService) HasCACert(ctx context.Context) (bool, error) {
 	s.fileMu.RLock()
 	defer s.fileMu.RUnlock()
-	return s.backend.Exists(KeyCACert)
+	return s.backend.Exists(ctx, KeyCACert)
 }
 
-func (s *StorageService) GetCAKey() ([]byte, error) {
+func (s *StorageService) GetCAKey(ctx context.Context) ([]byte, error) {
 	s.fileMu.RLock()
 	defer s.fileMu.RUnlock()
-	return s.backend.Get(KeyCAKey)
+	return s.backend.Get(ctx, KeyCAKey)
 }
 
-func (s *StorageService) SaveCAKey(data []byte) error {
+func (s *StorageService) SaveCAKey(ctx context.Context, data []byte) error {
 	s.fileMu.Lock()
 	defer s.fileMu.Unlock()
-	return s.backend.Put(KeyCAKey, data, BlobPrivate)
+	return s.backend.Put(ctx, KeyCAKey, data, BlobPrivate)
 }
 
-func (s *StorageService) HasCAKey() (bool, error) {
+func (s *StorageService) HasCAKey(ctx context.Context) (bool, error) {
 	s.fileMu.RLock()
 	defer s.fileMu.RUnlock()
-	return s.backend.Exists(KeyCAKey)
+	return s.backend.Exists(ctx, KeyCAKey)
 }
 
-func (s *StorageService) SaveCAPubKey(data []byte) error {
+func (s *StorageService) SaveCAPubKey(ctx context.Context, data []byte) error {
 	s.fileMu.Lock()
 	defer s.fileMu.Unlock()
-	return s.backend.Put(KeyCAPubKey, data, BlobPublic)
+	return s.backend.Put(ctx, KeyCAPubKey, data, BlobPublic)
 }
 
 // --- CSR / Cert per subject ---
 
-func (s *StorageService) SaveCSR(subject string, pemData []byte) error {
+func (s *StorageService) SaveCSR(ctx context.Context, subject string, pemData []byte) error {
 	s.fileMu.Lock()
 	defer s.fileMu.Unlock()
-	return s.backend.Put(CSRKey(subject), pemData, BlobPublic)
+	return s.backend.Put(ctx, CSRKey(subject), pemData, BlobPublic)
 }
 
-func (s *StorageService) GetCSR(subject string) ([]byte, error) {
+func (s *StorageService) GetCSR(ctx context.Context, subject string) ([]byte, error) {
 	s.fileMu.RLock()
 	defer s.fileMu.RUnlock()
-	return s.backend.Get(CSRKey(subject))
+	return s.backend.Get(ctx, CSRKey(subject))
 }
 
-func (s *StorageService) SaveCert(subject string, pemData []byte) error {
+func (s *StorageService) SaveCert(ctx context.Context, subject string, pemData []byte) error {
 	s.fileMu.Lock()
 	defer s.fileMu.Unlock()
-	return s.backend.Put(CertKey(subject), pemData, BlobPublic)
+	return s.backend.Put(ctx, CertKey(subject), pemData, BlobPublic)
 }
 
-func (s *StorageService) GetCert(subject string) ([]byte, error) {
+func (s *StorageService) GetCert(ctx context.Context, subject string) ([]byte, error) {
 	s.fileMu.RLock()
 	defer s.fileMu.RUnlock()
-	return s.backend.Get(CertKey(subject))
+	return s.backend.Get(ctx, CertKey(subject))
 }
 
-func (s *StorageService) DeleteCSR(subject string) error {
+func (s *StorageService) DeleteCSR(ctx context.Context, subject string) error {
 	s.fileMu.Lock()
 	defer s.fileMu.Unlock()
-	return s.backend.Delete(CSRKey(subject))
+	return s.backend.Delete(ctx, CSRKey(subject))
 }
 
-func (s *StorageService) DeleteCert(subject string) error {
+func (s *StorageService) DeleteCert(ctx context.Context, subject string) error {
 	s.fileMu.Lock()
 	defer s.fileMu.Unlock()
-	return s.backend.Delete(CertKey(subject))
+	return s.backend.Delete(ctx, CertKey(subject))
 }
 
 // HasCert reports whether a signed certificate exists for subject.
-func (s *StorageService) HasCert(subject string) bool {
+func (s *StorageService) HasCert(ctx context.Context, subject string) bool {
 	s.fileMu.RLock()
 	defer s.fileMu.RUnlock()
-	ok, _ := s.backend.Exists(CertKey(subject))
+	ok, _ := s.backend.Exists(ctx, CertKey(subject))
 	return ok
 }
 
 // HasCSR reports whether a pending CSR exists for subject.
-func (s *StorageService) HasCSR(subject string) bool {
+func (s *StorageService) HasCSR(ctx context.Context, subject string) bool {
 	s.fileMu.RLock()
 	defer s.fileMu.RUnlock()
-	ok, _ := s.backend.Exists(CSRKey(subject))
+	ok, _ := s.backend.Exists(ctx, CSRKey(subject))
 	return ok
 }
 
 // ListCSRs returns the subject names of all pending certificate requests.
-func (s *StorageService) ListCSRs() ([]string, error) {
+func (s *StorageService) ListCSRs(ctx context.Context) ([]string, error) {
 	s.fileMu.RLock()
 	defer s.fileMu.RUnlock()
-	keys, err := s.backend.List(csrPrefix)
+	keys, err := s.backend.List(ctx, csrPrefix)
 	if err != nil {
 		return nil, err
 	}
@@ -368,10 +368,10 @@ func (s *StorageService) ListCSRs() ([]string, error) {
 }
 
 // ListCerts returns the subject names of all signed certificates.
-func (s *StorageService) ListCerts() ([]string, error) {
+func (s *StorageService) ListCerts(ctx context.Context) ([]string, error) {
 	s.fileMu.RLock()
 	defer s.fileMu.RUnlock()
-	keys, err := s.backend.List(certPrefix)
+	keys, err := s.backend.List(ctx, certPrefix)
 	if err != nil {
 		return nil, err
 	}
@@ -392,7 +392,7 @@ func (s *StorageService) PrivateKeyPath(subject string) string {
 
 // SavePrivateKey persists a server-generated private key for subject. The
 // key is always written to the local filesystem, never the configured backend.
-func (s *StorageService) SavePrivateKey(subject string, pemData []byte) error {
+func (s *StorageService) SavePrivateKey(ctx context.Context, subject string, pemData []byte) error {
 	s.fileMu.Lock()
 	defer s.fileMu.Unlock()
 	if err := os.MkdirAll(s.localPrivateKeyDir, DirPerm); err != nil {
@@ -483,15 +483,31 @@ const hmacKeyLen = 32
 
 // EnsureHMACKey loads or generates the HMAC key used for inventory integrity.
 // The key is stored via the backend under KeyHMACKey.
-func (s *StorageService) EnsureHMACKey() ([]byte, error) {
-	if data, err := s.backend.Get(KeyHMACKey); err == nil && len(data) == hmacKeyLen {
-		return data, nil
+//
+// A transient backend error (network blip, deadline exceeded, ...) is
+// distinguished from a genuine "not present" via fs.ErrNotExist; otherwise a
+// momentary failure on Get would silently regenerate the key and invalidate
+// every existing inventory MAC.
+func (s *StorageService) EnsureHMACKey(ctx context.Context) ([]byte, error) {
+	data, err := s.backend.Get(ctx, KeyHMACKey)
+	switch {
+	case err == nil:
+		if len(data) == hmacKeyLen {
+			return data, nil
+		}
+		// Stored blob is the wrong length (truncated / corrupted): fall
+		// through to regeneration. Operators see the new key on next read.
+	case errors.Is(err, fs.ErrNotExist):
+		// First boot: fall through to generate and persist a fresh key.
+	default:
+		return nil, fmt.Errorf("reading HMAC key: %w", err)
 	}
+
 	key := make([]byte, hmacKeyLen)
 	if _, err := rand.Read(key); err != nil {
 		return nil, fmt.Errorf("generating HMAC key: %w", err)
 	}
-	if err := s.backend.Put(KeyHMACKey, key, BlobPrivate); err != nil {
+	if err := s.backend.Put(ctx, KeyHMACKey, key, BlobPrivate); err != nil {
 		return nil, fmt.Errorf("writing HMAC key: %w", err)
 	}
 	return key, nil
@@ -499,8 +515,8 @@ func (s *StorageService) EnsureHMACKey() ([]byte, error) {
 
 // computeInventoryHMAC computes HMAC-SHA256 of the inventory contents.
 // Caller must hold inventoryMu.
-func (s *StorageService) computeInventoryHMAC(hmacKey []byte) ([]byte, error) {
-	data, err := s.readInventoryForHMAC()
+func (s *StorageService) computeInventoryHMAC(ctx context.Context, hmacKey []byte) ([]byte, error) {
+	data, err := s.readInventoryForHMAC(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -511,39 +527,39 @@ func (s *StorageService) computeInventoryHMAC(hmacKey []byte) ([]byte, error) {
 
 // UpdateInventoryHMAC recomputes and writes the HMAC for the current inventory.
 // It is safe to call externally (e.g. after migrating an existing inventory).
-func (s *StorageService) UpdateInventoryHMAC(hmacKey []byte) error {
+func (s *StorageService) UpdateInventoryHMAC(ctx context.Context, hmacKey []byte) error {
 	s.inventoryMu.Lock()
 	defer s.inventoryMu.Unlock()
-	return s.updateInventoryHMACLocked(hmacKey)
+	return s.updateInventoryHMACLocked(ctx, hmacKey)
 }
 
-func (s *StorageService) updateInventoryHMACLocked(hmacKey []byte) error {
-	sum, err := s.computeInventoryHMAC(hmacKey)
+func (s *StorageService) updateInventoryHMACLocked(ctx context.Context, hmacKey []byte) error {
+	sum, err := s.computeInventoryHMAC(ctx, hmacKey)
 	if err != nil {
 		return fmt.Errorf("computing inventory HMAC: %w", err)
 	}
-	return s.backend.Put(KeyInventoryHMAC, sum, BlobPrivate)
+	return s.backend.Put(ctx, KeyInventoryHMAC, sum, BlobPrivate)
 }
 
 // VerifyInventoryHMAC checks the inventory against its stored HMAC. Returns
 // ErrInventoryTampered on mismatch, or initialises a baseline HMAC on first run.
-func (s *StorageService) VerifyInventoryHMAC(hmacKey []byte) error {
+func (s *StorageService) VerifyInventoryHMAC(ctx context.Context, hmacKey []byte) error {
 	s.inventoryMu.Lock()
 	defer s.inventoryMu.Unlock()
-	return s.verifyInventoryHMACLocked(hmacKey)
+	return s.verifyInventoryHMACLocked(ctx, hmacKey)
 }
 
-func (s *StorageService) verifyInventoryHMACLocked(hmacKey []byte) error {
-	storedMAC, err := s.backend.Get(KeyInventoryHMAC)
+func (s *StorageService) verifyInventoryHMACLocked(ctx context.Context, hmacKey []byte) error {
+	storedMAC, err := s.backend.Get(ctx, KeyInventoryHMAC)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			slog.Info("No inventory HMAC found; initializing integrity baseline")
-			return s.updateInventoryHMACLocked(hmacKey)
+			return s.updateInventoryHMACLocked(ctx, hmacKey)
 		}
 		return fmt.Errorf("reading inventory HMAC: %w", err)
 	}
 
-	computedMAC, err := s.computeInventoryHMAC(hmacKey)
+	computedMAC, err := s.computeInventoryHMAC(ctx, hmacKey)
 	if err != nil {
 		return fmt.Errorf("computing inventory HMAC for verification: %w", err)
 	}

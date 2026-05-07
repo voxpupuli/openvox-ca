@@ -61,6 +61,14 @@ func serialHexStr(n *big.Int) string {
 // already exists for the requested subject.
 var ErrCertExists = errors.New("certificate already exists")
 
+// ErrNotInitialized is returned by signing helpers when the CA's certificate
+// or private key has not been loaded — typically because Init has not been
+// called or it failed. Exposed as a sentinel so HTTP handlers can detect the
+// init-order case via errors.Is and answer with a controlled status (e.g.
+// 503 Service Unavailable) rather than treating it as a generic signing
+// failure.
+var ErrNotInitialized = errors.New("CA not initialized")
+
 // evictRevokedLocked checks whether a certificate already exists for subject.
 //   - No cert on disk → returns nil (proceed with issuance).
 //   - Cert exists and is NOT revoked → returns ErrCertExists (block issuance).
@@ -68,13 +76,13 @@ var ErrCertExists = errors.New("certificate already exists")
 //
 // c.mu must be held by the caller. This method checks revocation via the
 // in-memory CRL cache directly to avoid re-acquiring the lock.
-func (c *CA) evictRevokedLocked(subject string) error {
-	if !c.Storage.HasCert(subject) {
+func (c *CA) evictRevokedLocked(ctx context.Context, subject string) error {
+	if !c.Storage.HasCert(ctx, subject) {
 		return nil
 	}
 
 	// Check revocation against cachedCRL directly (no lock acquisition).
-	certPEM, err := c.Storage.GetCert(subject)
+	certPEM, err := c.Storage.GetCert(ctx, subject)
 	if err != nil {
 		return fmt.Errorf("certificate already exists for %s: %w", subject, ErrCertExists)
 	}
@@ -101,7 +109,7 @@ func (c *CA) evictRevokedLocked(subject string) error {
 		return fmt.Errorf("certificate already exists for %s: %w", subject, ErrCertExists)
 	}
 	slog.Debug("Removing revoked certificate", "subject", subject)
-	if err := c.Storage.DeleteCert(subject); err != nil {
+	if err := c.Storage.DeleteCert(ctx, subject); err != nil {
 		slog.Warn("Could not remove revoked certificate", "subject", subject, "error", err)
 	}
 	return nil
@@ -125,17 +133,17 @@ func ValidateSubject(subject string) error {
 // The caller must NOT hold c.mu. Serialises on the cluster-wide per-subject
 // lock so concurrent sign attempts from different replicas cannot produce
 // two certificates for the same subject.
-func (c *CA) Sign(subject string) ([]byte, error) {
+func (c *CA) Sign(ctx context.Context, subject string) ([]byte, error) {
 	if err := ValidateSubject(subject); err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), lockTimeout)
+	ctx, cancel := context.WithTimeout(ctx, lockTimeout)
 	defer cancel()
 	var out []byte
 	err := c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		pem, err := c.signWithDuration(subject, 0)
+		pem, err := c.signWithDuration(ctx, subject, 0)
 		if err != nil {
 			return err
 		}
@@ -148,17 +156,17 @@ func (c *CA) Sign(subject string) ([]byte, error) {
 // SignWithTTL signs subject's pending CSR with a custom validity duration.
 // ttl=0 falls back to the default certValidity.
 // The caller must NOT hold c.mu. Same cross-node guarantees as Sign.
-func (c *CA) SignWithTTL(subject string, ttl time.Duration) ([]byte, error) {
+func (c *CA) SignWithTTL(ctx context.Context, subject string, ttl time.Duration) ([]byte, error) {
 	if err := ValidateSubject(subject); err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), lockTimeout)
+	ctx, cancel := context.WithTimeout(ctx, lockTimeout)
 	defer cancel()
 	var out []byte
 	err := c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		pem, err := c.signWithDuration(subject, ttl)
+		pem, err := c.signWithDuration(ctx, subject, ttl)
 		if err != nil {
 			return err
 		}
@@ -170,21 +178,27 @@ func (c *CA) SignWithTTL(subject string, ttl time.Duration) ([]byte, error) {
 
 // sign is the internal (unlocked) signing implementation using the default TTL.
 // c.mu must be held by the caller.
-func (c *CA) sign(subject string) ([]byte, error) {
-	return c.signWithDuration(subject, 0)
+func (c *CA) sign(ctx context.Context, subject string) ([]byte, error) {
+	return c.signWithDuration(ctx, subject, 0)
 }
 
 // signWithDuration is the actual internal signing implementation.
 // ttl=0 means use the default certValidity.
 // c.mu must be held by the caller.
-func (c *CA) signWithDuration(subject string, ttl time.Duration) ([]byte, error) {
+func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Duration) ([]byte, error) {
+	// Defensive: a nil CACert here means the caller skipped Init() (or it
+	// failed). Without this guard the c.CACert.NotAfter dereference below
+	// would panic the entire frontend.
+	if c.CACert == nil || c.CAKey == nil {
+		return nil, ErrNotInitialized
+	}
 	if err := ValidateSubject(subject); err != nil {
 		return nil, err
 	}
 
 	slog.Debug("Signing certificate", "subject", subject)
 
-	csrPEM, err := c.Storage.GetCSR(subject)
+	csrPEM, err := c.Storage.GetCSR(ctx, subject)
 	if err != nil {
 		return nil, fmt.Errorf("CSR not found for %s: %w", subject, err)
 	}
@@ -307,7 +321,7 @@ func (c *CA) signWithDuration(subject string, ttl time.Duration) ([]byte, error)
 
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certBytes})
 
-	if err := c.Storage.SaveCert(subject, certPEM); err != nil {
+	if err := c.Storage.SaveCert(ctx, subject, certPEM); err != nil {
 		return nil, fmt.Errorf("failed to save cert for %s: %w", subject, err)
 	}
 
@@ -317,7 +331,7 @@ func (c *CA) signWithDuration(subject string, ttl time.Duration) ([]byte, error)
 		template.NotAfter.Format("2006-01-02T15:04:05UTC"),
 		subject,
 	)
-	if err := c.Storage.AppendInventory(inventoryEntry); err != nil {
+	if err := c.Storage.AppendInventory(ctx, inventoryEntry); err != nil {
 		return nil, fmt.Errorf("failed to update inventory for %s: %w", subject, err)
 	}
 
@@ -325,7 +339,7 @@ func (c *CA) signWithDuration(subject string, ttl time.Duration) ([]byte, error)
 	c.serialIndex[serialStr] = subject
 
 	// Remove the pending CSR now that we have a signed cert.
-	if err := c.Storage.DeleteCSR(subject); err != nil {
+	if err := c.Storage.DeleteCSR(ctx, subject); err != nil {
 		slog.Warn("Could not delete CSR after signing", "subject", subject, "error", err)
 	}
 
@@ -346,13 +360,13 @@ func (c *CA) signWithDuration(subject string, ttl time.Duration) ([]byte, error)
 // but do not prevent the others from running.
 var ErrNotFound = fmt.Errorf("certificate or CSR not found")
 
-func (c *CA) Clean(subject string) error {
+func (c *CA) Clean(ctx context.Context, subject string) error {
 	if err := ValidateSubject(subject); err != nil {
 		return err
 	}
 
-	hasCert := c.Storage.HasCert(subject)
-	hasCSR := c.Storage.HasCSR(subject)
+	hasCert := c.Storage.HasCert(ctx, subject)
+	hasCSR := c.Storage.HasCSR(ctx, subject)
 
 	if !hasCert && !hasCSR {
 		return ErrNotFound
@@ -360,16 +374,16 @@ func (c *CA) Clean(subject string) error {
 
 	if hasCert {
 		// Revoke first so the CRL is updated before the file is removed.
-		if err := c.Revoke(subject); err != nil {
+		if err := c.Revoke(ctx, subject); err != nil {
 			slog.Warn("Clean: revoke failed (proceeding with delete)", "subject", subject, "error", err)
 		}
-		if err := c.Storage.DeleteCert(subject); err != nil {
+		if err := c.Storage.DeleteCert(ctx, subject); err != nil {
 			slog.Warn("Clean: delete cert failed", "subject", subject, "error", err)
 		}
 	}
 
 	if hasCSR {
-		if err := c.Storage.DeleteCSR(subject); err != nil {
+		if err := c.Storage.DeleteCSR(ctx, subject); err != nil {
 			slog.Warn("Clean: delete CSR failed", "subject", subject, "error", err)
 		}
 	}
@@ -388,18 +402,18 @@ type SignResult struct {
 // SignMultiple signs the CSRs for the given subjects.
 // Subjects with no pending CSR are collected in NoCSR; those that fail signing
 // are collected in SigningErrors.
-func (c *CA) SignMultiple(subjects []string) SignResult {
+func (c *CA) SignMultiple(ctx context.Context, subjects []string) SignResult {
 	result := SignResult{
 		Signed:        []string{},
 		NoCSR:         []string{},
 		SigningErrors: []string{},
 	}
 	for _, subject := range subjects {
-		if !c.Storage.HasCSR(subject) {
+		if !c.Storage.HasCSR(ctx, subject) {
 			result.NoCSR = append(result.NoCSR, subject)
 			continue
 		}
-		if _, err := c.Sign(subject); err != nil {
+		if _, err := c.Sign(ctx, subject); err != nil {
 			slog.Warn("Bulk sign failed", "subject", subject, "error", err)
 			result.SigningErrors = append(result.SigningErrors, subject)
 		} else {
@@ -410,16 +424,16 @@ func (c *CA) SignMultiple(subjects []string) SignResult {
 }
 
 // SignAll signs every pending CSR currently on disk.
-func (c *CA) SignAll() (SignResult, error) {
-	subjects, err := c.Storage.ListCSRs()
+func (c *CA) SignAll(ctx context.Context) (SignResult, error) {
+	subjects, err := c.Storage.ListCSRs(ctx)
 	if err != nil {
 		return SignResult{}, fmt.Errorf("listing CSRs: %w", err)
 	}
-	return c.SignMultiple(subjects), nil
+	return c.SignMultiple(ctx, subjects), nil
 }
 
 // SaveRequest validates, persists the CSR, and triggers autosigning if configured.
-func (c *CA) SaveRequest(subject string, csrPEM []byte) (bool, error) {
+func (c *CA) SaveRequest(ctx context.Context, subject string, csrPEM []byte) (bool, error) {
 	if err := ValidateSubject(subject); err != nil {
 		return false, err
 	}
@@ -469,7 +483,7 @@ func (c *CA) SaveRequest(subject string, csrPEM []byte) (bool, error) {
 	// autosign sequence. This prevents TOCTOU races where two concurrent
 	// SaveRequest calls (same or different replicas) both pass eviction and
 	// produce duplicate certificates.
-	ctx, cancel := context.WithTimeout(context.Background(), lockTimeout)
+	ctx, cancel := context.WithTimeout(ctx, lockTimeout)
 	defer cancel()
 	var autosigned bool
 	lockErr := c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
@@ -478,11 +492,11 @@ func (c *CA) SaveRequest(subject string, csrPEM []byte) (bool, error) {
 
 		// Reject if a cert already exists and is not revoked; clear it if
 		// revoked so the node can re-register with a fresh key.
-		if err := c.evictRevokedLocked(subject); err != nil {
+		if err := c.evictRevokedLocked(ctx, subject); err != nil {
 			return err
 		}
 
-		if err := c.Storage.SaveCSR(subject, csrPEM); err != nil {
+		if err := c.Storage.SaveCSR(ctx, subject, csrPEM); err != nil {
 			return fmt.Errorf("failed to save CSR for %s: %w", subject, err)
 		}
 
@@ -493,7 +507,7 @@ func (c *CA) SaveRequest(subject string, csrPEM []byte) (bool, error) {
 
 		if shouldSign {
 			slog.Debug("Autosigning CSR", "subject", subject)
-			if _, err := c.sign(subject); err != nil {
+			if _, err := c.sign(ctx, subject); err != nil {
 				return err
 			}
 			autosigned = true

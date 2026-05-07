@@ -17,6 +17,7 @@
 package ca
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -68,7 +69,7 @@ type GenerateResult struct {
 //
 // Returns ErrCertExists (wrapped) if a valid (non-revoked) certificate already
 // exists for subject.
-func (c *CA) Generate(subject string, dnsAltNames []string) (*GenerateResult, error) {
+func (c *CA) Generate(ctx context.Context, subject string, dnsAltNames []string) (*GenerateResult, error) {
 	if err := ValidateSubject(subject); err != nil {
 		return nil, err
 	}
@@ -107,17 +108,17 @@ func (c *CA) Generate(subject string, dnsAltNames []string) (*GenerateResult, er
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if err := c.evictRevokedLocked(subject); err != nil {
+	if err := c.evictRevokedLocked(ctx, subject); err != nil {
 		return nil, err
 	}
 
-	if err := c.Storage.SaveCSR(subject, csrPEM); err != nil {
+	if err := c.Storage.SaveCSR(ctx, subject, csrPEM); err != nil {
 		return nil, fmt.Errorf("failed to save internal CSR for %s: %w", subject, err)
 	}
 
-	certPEM, err := c.sign(subject)
+	certPEM, err := c.sign(ctx, subject)
 	if err != nil {
-		_ = c.Storage.DeleteCSR(subject)
+		_ = c.Storage.DeleteCSR(ctx, subject)
 		return nil, fmt.Errorf("failed to sign generated cert for %s: %w", subject, err)
 	}
 
@@ -126,10 +127,10 @@ func (c *CA) Generate(subject string, dnsAltNames []string) (*GenerateResult, er
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal private key for %s: %w", subject, err)
 	}
-	if err := c.Storage.SavePrivateKey(subject, keyPEM); err != nil {
+	if err := c.Storage.SavePrivateKey(ctx, subject, keyPEM); err != nil {
 		// Clean up the just-issued certificate to avoid inconsistent state
 		// where a cert exists on disk but the corresponding private key doesn't.
-		if delErr := c.Storage.DeleteCert(subject); delErr != nil {
+		if delErr := c.Storage.DeleteCert(ctx, subject); delErr != nil {
 			slog.Warn("Failed to clean up cert after private key save failure",
 				"subject", subject, "error", delErr)
 		}

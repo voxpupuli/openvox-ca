@@ -1,0 +1,234 @@
+# Full Puppet stack integration test topology, but with puppet-ca configured
+# to use the Redis (Valkey-compatible) storage backend.
+#
+# Mirrors compose-puppet.yml so the two suites can run in parallel without
+# stomping on each other (distinct project name, distinct host port mappings,
+# distinct named volumes). The puppet-ca, puppet-master, openvoxdb, postgres
+# and puppet-client services are functionally identical to compose-puppet.yml
+# -- only puppet-ca's storage configuration changes, and a new "redis" service
+# is added.
+#
+# Services
+# --------
+#   redis          - Vanilla Redis 7 instance used as the CA's storage backend.
+#   puppet-ca      - Primary Go CA. storage-backend=redis. Used by the master
+#                    and client as the CA endpoint (so the existing puppet-stack
+#                    TAP suite runs unchanged against this replica).
+#   puppet-ca-2    - Second CA replica sharing the same Redis prefix. Exists to
+#                    exercise the distributed bootstrap lock, the cross-replica
+#                    AppendLine concurrency path, and to prove the storage
+#                    layer is the actual single source of truth (a CSR signed
+#                    by replica 1 must be retrievable from replica 2 byte for
+#                    byte).
+#   puppet-master  - OpenVox 8 WEBrick master with PuppetDB integration.
+#   postgres       - PostgreSQL 17 backend for OpenVoxDB.
+#   openvoxdb      - OpenVoxDB (PuppetDB fork); bootstraps certs from the CA.
+#   puppet-client  - OpenVox 8 agent; kept alive for `$engine exec` commands.
+#
+# Usage (from project root):
+#   mage test:backendsRedis                          # build, run suite, tear down
+#   podman-compose -f compose-backends-redis.yml up --build  # interactive
+#
+# The test suite is in test/backends/redis-stack.sh.
+
+name: puppet-ca-backends-redis
+
+services:
+
+  # -- Redis (CA storage backend) -----------------------------------------─
+  redis:
+    image: docker.io/redis:7-alpine
+    hostname: redis
+    # Redis 7 default config is fine: standalone, no auth, in-memory only.
+    # The integration test does not require persistence -- if the redis
+    # container restarts mid-run the CA will lose state and fail loudly,
+    # which is the behaviour we want from a smoke test.
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  # -- Go CA replica 1 (TLS enabled, storage = redis) ---------------------─
+  # This is the CA the master/client/openvoxdb talk to. Its TLS service cert
+  # has CN=puppet-ca so the existing puppet-stack TAP assertions work without
+  # modification.
+  puppet-ca:
+    build:
+      context: .
+      dockerfile: Dockerfile.run
+    image: puppet-ca-integ:latest
+    hostname: puppet-ca
+    # Redis-aware bootstrap entrypoint. Differs from the filesystem variant
+    # in that it captures the TLS cert from puppet-ca-ctl stdout instead of
+    # reading <cadir>/signed/puppet-ca.pem (which only exists for the
+    # filesystem backend).
+    entrypoint: ["/bin/bash", "/etc/puppet-ca/entrypoint.sh"]
+    environment:
+      # Storage backend selection (consumed by cmd/puppet-ca/config.go).
+      - PUPPET_CA_STORAGE_BACKEND=redis
+      - PUPPET_CA_REDIS_ADDRS=redis:6379
+      # Both CA replicas share this prefix -- that's the whole point of the
+      # multi-replica test: prove they see the same state.
+      - PUPPET_CA_REDIS_KEY_PREFIX=puppet-ca-integ
+      # Used by ca-entrypoint-redis.sh.
+      - PUPPET_CA_REDIS_HOST=redis
+      - PUPPET_CA_REDIS_PORT=6379
+      - PUPPET_CA_HOSTNAME=puppet-ca
+      - PUPPET_CA_DNS_ALT_NAMES=puppet-ca,localhost
+      # Authorise replica 2's service cert as a peer admin so cross-replica
+      # admin calls work in tests.
+      - PUPPET_CA_PEER_HOSTNAMES=puppet-ca-2
+    volumes:
+      - ./docker/puppet/ca-entrypoint-redis.sh:/etc/puppet-ca/entrypoint.sh:ro,z
+      - ca-data-redis:/data
+    expose:
+      - "8140"
+    # Distinct host port from compose-puppet.yml so both stacks can coexist.
+    ports:
+      - "8241:8140"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sfk", "https://localhost:8140/puppet-ca/v1/certificate/ca"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  # -- Go CA replica 2 (same Redis prefix) -------------------------------─
+  # Started simultaneously with puppet-ca to exercise the distributed
+  # bootstrap lock. Once running, redis-stack.sh's Phase 2 talks to it
+  # directly to confirm it serves the same blobs as replica 1.
+  puppet-ca-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.run
+    image: puppet-ca-integ:latest
+    hostname: puppet-ca-2
+    entrypoint: ["/bin/bash", "/etc/puppet-ca/entrypoint.sh"]
+    environment:
+      - PUPPET_CA_STORAGE_BACKEND=redis
+      - PUPPET_CA_REDIS_ADDRS=redis:6379
+      - PUPPET_CA_REDIS_KEY_PREFIX=puppet-ca-integ
+      - PUPPET_CA_REDIS_HOST=redis
+      - PUPPET_CA_REDIS_PORT=6379
+      - PUPPET_CA_HOSTNAME=puppet-ca-2
+      - PUPPET_CA_DNS_ALT_NAMES=puppet-ca-2,localhost
+      - PUPPET_CA_PEER_HOSTNAMES=puppet-ca
+    volumes:
+      - ./docker/puppet/ca-entrypoint-redis.sh:/etc/puppet-ca/entrypoint.sh:ro,z
+      # Distinct named volume: per-subject leaf private keys are local on each
+      # replica even though public blobs are shared via Redis (see spec.go's
+      # localPrivKeyDir handling).
+      - ca-data-redis-2:/data
+    expose:
+      - "8140"
+    ports:
+      - "8242:8140"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sfk", "https://localhost:8140/puppet-ca/v1/certificate/ca"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  # -- Puppet master (OpenVox Server / JVM) -------------------------------─
+  puppet-master:
+    build:
+      context: ./docker/puppet
+      dockerfile: Dockerfile
+    hostname: puppet-master
+    environment:
+      - PUPPET_FQDN=puppet-master
+      - PUPPET_CA_HOST=puppet-ca
+      - PUPPET_CA_PORT=8140
+      - OPENVOXDB_HOST=openvoxdb
+      - OPENVOXDB_PORT=8081
+    volumes:
+      - ./test/puppet/code/environments/production:/etc/puppetlabs/code/environments/production:ro,z
+    expose:
+      - "8140"
+    # Distinct host port from compose-puppet.yml.
+    ports:
+      - "8240:8140"
+    depends_on:
+      puppet-ca:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL",
+             "curl -sfk https://localhost:8140/status/v1/simple | grep -q running"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+
+  # -- PostgreSQL backend for OpenVoxDB -----------------------------------
+  postgres:
+    image: docker.io/postgres:17-alpine
+    hostname: postgres
+    environment:
+      POSTGRES_DB: openvoxdb
+      POSTGRES_USER: openvoxdb
+      POSTGRES_PASSWORD: openvoxdb
+    volumes:
+      - ./docker/puppet/postgres:/docker-entrypoint-initdb.d:ro,z
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openvoxdb -d openvoxdb"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  # -- OpenVoxDB (PuppetDB) -----------------------------------------------
+  openvoxdb:
+    image: ghcr.io/openvoxproject/openvoxdb:latest
+    hostname: openvoxdb
+    environment:
+      USE_OPENVOXSERVER: "true"
+      OPENVOXSERVER_HOSTNAME: puppet-master
+      OPENVOXSERVER_PORT: "8140"
+      CERTNAME: openvoxdb
+      PUPPET_CA_HOST: puppet-ca
+      PUPPET_CA_PORT: "8140"
+      OPENVOXDB_POSTGRES_HOSTNAME: postgres
+      OPENVOXDB_POSTGRES_PORT: "5432"
+      OPENVOXDB_POSTGRES_USER: openvoxdb
+      OPENVOXDB_POSTGRES_PASSWORD: openvoxdb
+      OPENVOXDB_POSTGRES_DATABASE: openvoxdb
+    volumes:
+      - ./docker/puppet/openvoxdb/bootstrap-certs.sh:/container-entrypoint.d/15-bootstrap-certs.sh:ro,z
+    depends_on:
+      puppet-master:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL",
+             "curl -ksS https://openvoxdb:8081/status/v1/simple | grep -q running"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  # -- Puppet agent (client) ----------------------------------------------─
+  puppet-client:
+    build:
+      context: ./docker/puppet
+      dockerfile: Dockerfile.client
+    hostname: client.puppet.localdomain
+    depends_on:
+      puppet-master:
+        condition: service_started
+      openvoxdb:
+        condition: service_started
+
+volumes:
+  ca-data-redis:
+  ca-data-redis-2:

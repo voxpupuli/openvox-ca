@@ -17,6 +17,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
@@ -227,6 +228,8 @@ func main() {
 		Short:        "Puppet-compatible certificate authority server",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+
 			// --- Config loading (file → env → CLI flags) ---
 			resolved := resolveConfigFile(configFile, "PUPPET_CA_CONFIG", "/etc/puppet-ca/config.yaml")
 			cfg, err := loadServerConfig(resolved)
@@ -357,7 +360,7 @@ func main() {
 
 			// Signer mode: load key, serve signing requests on socketpair, exit.
 			if role == "signer" {
-				return runSignerMode(cfg, absCADir)
+				return runSignerMode(ctx, cfg, absCADir)
 			}
 
 			// Launcher mode (default): spawn isolated signer + frontend children.
@@ -427,7 +430,7 @@ func main() {
 				os.Exit(1)
 			}
 			defer func() { _ = store.Backend().Close() }()
-			if err := store.EnsureDirs(); err != nil {
+			if err := store.EnsureDirs(ctx); err != nil {
 				slog.Error("Failed to create CA directories", "error", err)
 				os.Exit(1)
 			}
@@ -442,7 +445,7 @@ func main() {
 				if err != nil {
 					return fmt.Errorf("connecting to signer process: %w", err)
 				}
-				certPEM, err := store.GetCACert()
+				certPEM, err := store.GetCACert(ctx)
 				if err != nil {
 					conn.Close()
 					return fmt.Errorf("reading CA cert for remote signer: %w", err)
@@ -518,7 +521,7 @@ func main() {
 				myCA.ExternalSigner = remoteSigner
 			}
 
-			if err := myCA.Init(); err != nil {
+			if err := myCA.Init(ctx); err != nil {
 				slog.Error("Failed to initialise CA", "error", err)
 				os.Exit(1)
 			}
@@ -601,7 +604,7 @@ func main() {
 					os.Exit(1)
 				}
 
-				caCertPEM, err := myCA.Storage.GetCACert()
+				caCertPEM, err := myCA.Storage.GetCACert(ctx)
 				if err != nil {
 					slog.Error("Failed to read CA cert for TLS", "error", err)
 					os.Exit(1)
@@ -689,7 +692,7 @@ func main() {
 // IMPORTANT: The signer calls Init() which handles bootstrapping. The PSK
 // handshake in signer.Serve() happens AFTER Init completes, so the frontend
 // can safely read the CA cert from disk once the handshake succeeds.
-func runSignerMode(cfg *serverConfig, absCADir string) error {
+func runSignerMode(ctx context.Context, cfg *serverConfig, absCADir string) error {
 	logFile, err := setupLogger(cfg)
 	if err != nil {
 		// Signer: fall back to stderr if log file fails.
@@ -722,7 +725,7 @@ func runSignerMode(cfg *serverConfig, absCADir string) error {
 		return err
 	}
 
-	if err := myCA.Init(); err != nil {
+	if err := myCA.Init(ctx); err != nil {
 		return fmt.Errorf("CA initialization failed: %w", err)
 	}
 

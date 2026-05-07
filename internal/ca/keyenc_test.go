@@ -1,6 +1,7 @@
 package ca
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -196,12 +197,12 @@ var _ = Describe("CA encrypted key integration", func() {
 		myCA := New(store, AutosignConfig{Mode: "off"}, "puppet-enc-test")
 		myCA.EncryptCAKey = true
 		// Let it auto-generate the passphrase.
-		Expect(myCA.Init()).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 		Expect(myCA.CACert).NotTo(BeNil())
 		Expect(myCA.CAKey).NotTo(BeNil())
 
 		// Verify the key file on disk is encrypted PEM.
-		keyPEM, err := store.GetCAKey()
+		keyPEM, err := store.GetCAKey(context.Background())
 		Expect(err).NotTo(HaveOccurred())
 		block, _ := pem.Decode(keyPEM)
 		Expect(block).NotTo(BeNil())
@@ -215,16 +216,16 @@ var _ = Describe("CA encrypted key integration", func() {
 		store2 := storage.New(tmpDir)
 		myCA2 := New(store2, AutosignConfig{Mode: "off"}, "puppet-enc-test")
 		myCA2.EncryptCAKey = true
-		Expect(myCA2.Init()).To(Succeed())
+		Expect(myCA2.Init(context.Background())).To(Succeed())
 		Expect(myCA2.CACert).NotTo(BeNil())
 		Expect(myCA2.CAKey).NotTo(BeNil())
 
 		// Sign a cert to verify the loaded key is functional.
 		csrPEM, err := generateTestCSR("enc-test-node")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA2.SaveRequest("enc-test-node", csrPEM)
+		_, err = myCA2.SaveRequest(context.Background(), "enc-test-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
-		certPEM, err := myCA2.Sign("enc-test-node")
+		certPEM, err := myCA2.Sign(context.Background(), "enc-test-node")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(certPEM).NotTo(BeEmpty())
 	})
@@ -238,10 +239,10 @@ var _ = Describe("CA encrypted key integration", func() {
 		store := storage.New(tmpDir)
 		myCA := New(store, AutosignConfig{Mode: "off"}, "puppet-compat")
 		myCA.EncryptCAKey = false
-		Expect(myCA.Init()).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 
 		// Verify key is unencrypted.
-		keyPEM, err := store.GetCAKey()
+		keyPEM, err := store.GetCAKey(context.Background())
 		Expect(err).NotTo(HaveOccurred())
 		block, _ := pem.Decode(keyPEM)
 		Expect(block).NotTo(BeNil())
@@ -250,7 +251,7 @@ var _ = Describe("CA encrypted key integration", func() {
 		// Reload: should work without encryption config.
 		store2 := storage.New(tmpDir)
 		myCA2 := New(store2, AutosignConfig{Mode: "off"}, "puppet-compat")
-		Expect(myCA2.Init()).To(Succeed())
+		Expect(myCA2.Init(context.Background())).To(Succeed())
 		Expect(myCA2.CACert).NotTo(BeNil())
 	})
 
@@ -263,7 +264,7 @@ var _ = Describe("CA encrypted key integration", func() {
 		store := storage.New(tmpDir)
 		myCA := New(store, AutosignConfig{Mode: "off"}, "puppet-wrong")
 		myCA.EncryptCAKey = true
-		Expect(myCA.Init()).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 
 		// Overwrite the auto-generated passphrase file with wrong value.
 		Expect(os.WriteFile(autoPassphrasePath(tmpDir), []byte("wrong-passphrase"), 0600)).To(Succeed())
@@ -271,7 +272,7 @@ var _ = Describe("CA encrypted key integration", func() {
 		// Reload should fail.
 		store2 := storage.New(tmpDir)
 		myCA2 := New(store2, AutosignConfig{Mode: "off"}, "puppet-wrong")
-		err = myCA2.Init()
+		err = myCA2.Init(context.Background())
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("wrong passphrase"))
 	})

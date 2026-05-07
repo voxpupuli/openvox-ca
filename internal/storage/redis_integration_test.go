@@ -61,7 +61,7 @@ func newIntegrationBackend(t *testing.T, prefixSuffix string) *RedisBackend {
 	if err != nil {
 		t.Fatalf("NewRedisBackend: %v", err)
 	}
-	if err := b.EnsureReady(); err != nil {
+	if err := b.EnsureReady(context.Background()); err != nil {
 		t.Fatalf("EnsureReady: %v", err)
 	}
 	t.Cleanup(func() {
@@ -85,38 +85,40 @@ func newIntegrationBackend(t *testing.T, prefixSuffix string) *RedisBackend {
 
 func TestRedisIntegrationPutGetDelete(t *testing.T) {
 	b := newIntegrationBackend(t, "putgetdelete")
+	ctx := context.Background()
 
-	if _, err := b.Get(KeyCACert); !errors.Is(err, fs.ErrNotExist) {
+	if _, err := b.Get(ctx, KeyCACert); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("Get on missing key: err = %v, want fs.ErrNotExist", err)
 	}
 	payload := []byte("pem-data")
-	if err := b.Put(KeyCACert, payload, BlobPublic); err != nil {
+	if err := b.Put(ctx, KeyCACert, payload, BlobPublic); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	got, err := b.Get(KeyCACert)
+	got, err := b.Get(ctx, KeyCACert)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	if !bytes.Equal(got, payload) {
 		t.Fatalf("Get returned %q, want %q", got, payload)
 	}
-	if err := b.Delete(KeyCACert); err != nil {
+	if err := b.Delete(ctx, KeyCACert); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	if err := b.Delete(KeyCACert); !errors.Is(err, fs.ErrNotExist) {
+	if err := b.Delete(ctx, KeyCACert); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("Delete on missing: err = %v, want fs.ErrNotExist", err)
 	}
 }
 
 func TestRedisIntegrationListCSR(t *testing.T) {
 	b := newIntegrationBackend(t, "list")
+	ctx := context.Background()
 	subjects := []string{"a.example", "b.example", "c.example"}
 	for _, s := range subjects {
-		if err := b.Put(CSRKey(s), []byte("csr"), BlobPublic); err != nil {
+		if err := b.Put(ctx, CSRKey(s), []byte("csr"), BlobPublic); err != nil {
 			t.Fatalf("Put: %v", err)
 		}
 	}
-	csrs, err := b.List(csrPrefix)
+	csrs, err := b.List(ctx, csrPrefix)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -148,7 +150,7 @@ func TestRedisIntegrationAppendLineConcurrent(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < perWriter; i++ {
 				line := fmt.Sprintf("w%d-i%d\n", w, i)
-				if err := backend.AppendLine(KeyInventory, []byte(line), BlobPrivate); err != nil {
+				if err := backend.AppendLine(context.Background(), KeyInventory, []byte(line), BlobPrivate); err != nil {
 					t.Errorf("AppendLine: %v", err)
 					return
 				}
@@ -157,7 +159,7 @@ func TestRedisIntegrationAppendLineConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 
-	data, err := a.Get(KeyInventory)
+	data, err := a.Get(context.Background(), KeyInventory)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}

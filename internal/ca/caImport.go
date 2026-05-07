@@ -18,6 +18,7 @@ package ca
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
@@ -38,7 +39,7 @@ import (
 // crlPEM may be nil; when nil a fresh empty CRL is generated and written.
 //
 // This is an offline operation; no CA daemon is required.
-func ImportCA(store *storage.StorageService, certBundlePEM, keyPEM, crlPEM []byte) error {
+func ImportCA(ctx context.Context, store *storage.StorageService, certBundlePEM, keyPEM, crlPEM []byte) error {
 	// --- Parse and validate cert ---
 	block, _ := pem.Decode(certBundlePEM)
 	if block == nil {
@@ -77,17 +78,17 @@ func ImportCA(store *storage.StorageService, certBundlePEM, keyPEM, crlPEM []byt
 	}
 
 	// --- Ensure directories exist ---
-	if err := store.EnsureDirs(); err != nil {
+	if err := store.EnsureDirs(ctx); err != nil {
 		return fmt.Errorf("failed to create CA directories: %w", err)
 	}
 
 	// --- Write CA key ---
-	if err := store.SaveCAKey(keyPEM); err != nil {
+	if err := store.SaveCAKey(ctx, keyPEM); err != nil {
 		return fmt.Errorf("failed to write CA key: %w", err)
 	}
 
 	// --- Write CA cert ---
-	if err := store.SaveCACert(certBundlePEM); err != nil {
+	if err := store.SaveCACert(ctx, certBundlePEM); err != nil {
 		return fmt.Errorf("failed to write CA cert: %w", err)
 	}
 
@@ -95,7 +96,7 @@ func ImportCA(store *storage.StorageService, certBundlePEM, keyPEM, crlPEM []byt
 	pubKeyBytes, err := x509.MarshalPKIXPublicKey(caKey.Public())
 	if err == nil {
 		pubKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubKeyBytes})
-		_ = store.SaveCAPubKey(pubKeyPEM)
+		_ = store.SaveCAPubKey(ctx, pubKeyPEM)
 	}
 
 	// --- Handle CRL ---
@@ -107,7 +108,7 @@ func ImportCA(store *storage.StorageService, certBundlePEM, keyPEM, crlPEM []byt
 		if _, err := x509.ParseRevocationList(crlBlock.Bytes); err != nil {
 			return fmt.Errorf("failed to parse CRL: %w", err)
 		}
-		if err := store.UpdateCRL(crlPEM); err != nil {
+		if err := store.UpdateCRL(ctx, crlPEM); err != nil {
 			return fmt.Errorf("failed to write CRL: %w", err)
 		}
 	} else {
@@ -123,24 +124,24 @@ func ImportCA(store *storage.StorageService, certBundlePEM, keyPEM, crlPEM []byt
 			return fmt.Errorf("failed to create initial CRL: %w", err)
 		}
 		generatedCRL := pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlBytes})
-		if err := store.UpdateCRL(generatedCRL); err != nil {
+		if err := store.UpdateCRL(ctx, generatedCRL); err != nil {
 			return fmt.Errorf("failed to write CRL: %w", err)
 		}
 	}
 
 	// --- Initialise serial if absent ---
-	hasSerial, err := store.HasSerial()
+	hasSerial, err := store.HasSerial(ctx)
 	if err != nil {
 		return fmt.Errorf("checking serial: %w", err)
 	}
 	if !hasSerial {
-		if err := store.WriteSerial("0001"); err != nil {
+		if err := store.WriteSerial(ctx, "0001"); err != nil {
 			return fmt.Errorf("failed to write serial: %w", err)
 		}
 	}
 
 	// --- Initialise inventory if absent ---
-	if err := store.TouchInventory(); err != nil {
+	if err := store.TouchInventory(ctx); err != nil {
 		return fmt.Errorf("failed to create inventory: %w", err)
 	}
 

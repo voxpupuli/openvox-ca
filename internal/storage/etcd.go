@@ -17,6 +17,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/binary"
@@ -167,17 +168,20 @@ func (b *EtcdBackend) physicalKey(logical string) (string, error) {
 	return "", fmt.Errorf("unknown key %q", logical)
 }
 
-func (b *EtcdBackend) ctx() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), b.timeout)
+// callCtx layers the backend's per-call timeout on top of the caller's
+// context. Caller cancellation always wins; if the caller has no deadline
+// b.timeout becomes the effective bound.
+func (b *EtcdBackend) callCtx(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, b.timeout)
 }
 
 // EnsureReady verifies connectivity by listing the cluster status. Etcd has
 // no directory concept so there is nothing else to prepare.
-func (b *EtcdBackend) EnsureReady() error {
+func (b *EtcdBackend) EnsureReady(ctx context.Context) error {
 	if len(b.client.Endpoints()) == 0 {
 		return fmt.Errorf("etcd backend has no endpoints configured")
 	}
-	ctx, cancel := b.ctx()
+	ctx, cancel := b.callCtx(ctx)
 	defer cancel()
 	_, err := b.client.Status(ctx, b.client.Endpoints()[0])
 	if err != nil {
@@ -187,12 +191,12 @@ func (b *EtcdBackend) EnsureReady() error {
 }
 
 // Get returns the (unwrapped) blob at key, wrapping fs.ErrNotExist when absent.
-func (b *EtcdBackend) Get(key string) ([]byte, error) {
+func (b *EtcdBackend) Get(ctx context.Context, key string) ([]byte, error) {
 	phys, err := b.physicalKey(key)
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := b.ctx()
+	ctx, cancel := b.callCtx(ctx)
 	defer cancel()
 	resp, err := b.client.Get(ctx, phys)
 	if err != nil {
@@ -210,24 +214,24 @@ func (b *EtcdBackend) Get(key string) ([]byte, error) {
 
 // Put writes the blob at key. The BlobKind hint is recorded but has no
 // effect on the stored form: etcd access control is managed by the cluster.
-func (b *EtcdBackend) Put(key string, data []byte, _ BlobKind) error {
+func (b *EtcdBackend) Put(ctx context.Context, key string, data []byte, _ BlobKind) error {
 	phys, err := b.physicalKey(key)
 	if err != nil {
 		return err
 	}
-	ctx, cancel := b.ctx()
+	ctx, cancel := b.callCtx(ctx)
 	defer cancel()
 	_, err = b.client.Put(ctx, phys, string(encodeBlob(time.Now(), data)))
 	return err
 }
 
 // Delete removes key, wrapping fs.ErrNotExist when the key is absent.
-func (b *EtcdBackend) Delete(key string) error {
+func (b *EtcdBackend) Delete(ctx context.Context, key string) error {
 	phys, err := b.physicalKey(key)
 	if err != nil {
 		return err
 	}
-	ctx, cancel := b.ctx()
+	ctx, cancel := b.callCtx(ctx)
 	defer cancel()
 	resp, err := b.client.Delete(ctx, phys)
 	if err != nil {
@@ -240,12 +244,12 @@ func (b *EtcdBackend) Delete(key string) error {
 }
 
 // Exists reports whether key is present.
-func (b *EtcdBackend) Exists(key string) (bool, error) {
+func (b *EtcdBackend) Exists(ctx context.Context, key string) (bool, error) {
 	phys, err := b.physicalKey(key)
 	if err != nil {
 		return false, err
 	}
-	ctx, cancel := b.ctx()
+	ctx, cancel := b.callCtx(ctx)
 	defer cancel()
 	resp, err := b.client.Get(ctx, phys, clientv3.WithCountOnly())
 	if err != nil {
@@ -256,7 +260,7 @@ func (b *EtcdBackend) Exists(key string) (bool, error) {
 
 // List returns the logical keys sharing prefix. Only csrPrefix and certPrefix
 // are supported; other prefixes yield an error.
-func (b *EtcdBackend) List(prefix string) ([]string, error) {
+func (b *EtcdBackend) List(ctx context.Context, prefix string) ([]string, error) {
 	var subDir, outPrefix string
 	switch prefix {
 	case csrPrefix:
@@ -269,7 +273,7 @@ func (b *EtcdBackend) List(prefix string) ([]string, error) {
 		return nil, fmt.Errorf("unsupported list prefix %q", prefix)
 	}
 	physPrefix := b.prefix + "/" + subDir
-	ctx, cancel := b.ctx()
+	ctx, cancel := b.callCtx(ctx)
 	defer cancel()
 	resp, err := b.client.Get(ctx, physPrefix, clientv3.WithPrefix(), clientv3.WithKeysOnly())
 	if err != nil {
@@ -291,7 +295,7 @@ func (b *EtcdBackend) List(prefix string) ([]string, error) {
 // process are serialised on appendMu; concurrent appends from other processes
 // are resolved by an etcd Txn guarded on the key's ModRevision with bounded
 // retry on conflict.
-func (b *EtcdBackend) AppendLine(key string, data []byte, _ BlobKind) error {
+func (b *EtcdBackend) AppendLine(ctx context.Context, key string, data []byte, _ BlobKind) error {
 	b.appendMu.Lock()
 	defer b.appendMu.Unlock()
 
@@ -301,9 +305,9 @@ func (b *EtcdBackend) AppendLine(key string, data []byte, _ BlobKind) error {
 	}
 
 	const maxRetries = 8
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		ctx, cancel := b.ctx()
-		resp, err := b.client.Get(ctx, phys)
+	for attempt := range maxRetries {
+		getCtx, cancel := b.callCtx(ctx)
+		resp, err := b.client.Get(getCtx, phys)
 		cancel()
 		if err != nil {
 			return err
@@ -324,8 +328,8 @@ func (b *EtcdBackend) AppendLine(key string, data []byte, _ BlobKind) error {
 		merged = append(merged, data...)
 		wrapped := string(encodeBlob(time.Now(), merged))
 
-		ctx2, cancel2 := b.ctx()
-		txn := b.client.Txn(ctx2).
+		txnCtx, cancel2 := b.callCtx(ctx)
+		txn := b.client.Txn(txnCtx).
 			If(clientv3.Compare(clientv3.ModRevision(phys), "=", modRev)).
 			Then(clientv3.OpPut(phys, wrapped))
 		txnResp, err := txn.Commit()
@@ -336,20 +340,25 @@ func (b *EtcdBackend) AppendLine(key string, data []byte, _ BlobKind) error {
 		if txnResp.Succeeded {
 			return nil
 		}
-		// Another writer won the race; back off briefly and retry.
-		time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
+		// Another writer won the race; back off briefly and retry —
+		// honour the caller's cancellation rather than spinning past it.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(attempt+1) * 10 * time.Millisecond):
+		}
 	}
 	return fmt.Errorf("append to %q failed: too many concurrent writers", key)
 }
 
 // ModTime returns the wall-clock timestamp recorded when the blob was last
 // written. Returns fs.ErrNotExist-wrapped when the key is absent.
-func (b *EtcdBackend) ModTime(key string) (time.Time, error) {
+func (b *EtcdBackend) ModTime(ctx context.Context, key string) (time.Time, error) {
 	phys, err := b.physicalKey(key)
 	if err != nil {
 		return time.Time{}, err
 	}
-	ctx, cancel := b.ctx()
+	ctx, cancel := b.callCtx(ctx)
 	defer cancel()
 	resp, err := b.client.Get(ctx, phys)
 	if err != nil {
@@ -465,10 +474,16 @@ func encodeBlob(mtime time.Time, data []byte) []byte {
 }
 
 // decodeBlob reverses encodeBlob. Values shorter than 8 bytes are rejected.
+//
+// The returned data slice is an independent copy of the payload bytes: it
+// must not alias raw because backend Get paths return this slice straight
+// through to callers, and callers may freely mutate, append, or hand the
+// slice to a buffer pool. Aliasing would let those callers corrupt the
+// underlying client response buffer.
 func decodeBlob(raw []byte) (time.Time, []byte, error) {
 	if len(raw) < 8 {
 		return time.Time{}, nil, fmt.Errorf("blob too short: %d bytes", len(raw))
 	}
 	ns := int64(binary.BigEndian.Uint64(raw[:8]))
-	return time.Unix(0, ns), raw[8:], nil
+	return time.Unix(0, ns), bytes.Clone(raw[8:]), nil
 }

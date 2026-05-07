@@ -17,6 +17,7 @@
 package ca_test
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/asn1"
@@ -37,13 +38,13 @@ import (
 func setupOCSPCA(dir string) *ca.CA {
 	store := storage.New(dir)
 	myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
-	Expect(store.EnsureDirs()).To(Succeed())
-	Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
-	Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
-	Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
-	Expect(store.WriteSerial("0001")).To(Succeed())
-	Expect(store.TouchInventory()).To(Succeed())
-	Expect(myCA.Init()).To(Succeed())
+	Expect(store.EnsureDirs(context.Background())).To(Succeed())
+	Expect(store.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+	Expect(store.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+	Expect(store.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
+	Expect(store.WriteSerial(context.Background(), "0001")).To(Succeed())
+	Expect(store.TouchInventory(context.Background())).To(Succeed())
+	Expect(myCA.Init(context.Background())).To(Succeed())
 	return myCA
 }
 
@@ -78,16 +79,16 @@ var _ = Describe("OCSP Responder", func() {
 	It("returns Good for a known, non-revoked cert", func() {
 		csrPEM, err := testutil.GenerateCSR("ocsp-good-node")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest("ocsp-good-node", csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), "ocsp-good-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
-		certPEM, err := myCA.Sign("ocsp-good-node")
+		certPEM, err := myCA.Sign(context.Background(), "ocsp-good-node")
 		Expect(err).NotTo(HaveOccurred())
 
 		cert := decodeCert(certPEM)
 		reqDER, err := testutil.BuildOCSPRequest(cert, myCA.CACert)
 		Expect(err).NotTo(HaveOccurred())
 
-		respDER, err := myCA.OCSPResponse(reqDER)
+		respDER, err := myCA.OCSPResponse(context.Background(), reqDER)
 		Expect(err).NotTo(HaveOccurred())
 
 		resp, err := xocsp.ParseResponse(respDER, myCA.CACert)
@@ -99,18 +100,18 @@ var _ = Describe("OCSP Responder", func() {
 	It("returns Revoked (with correct RevokedAt) after Revoke()", func() {
 		csrPEM, err := testutil.GenerateCSR("ocsp-revoke-node")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest("ocsp-revoke-node", csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), "ocsp-revoke-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
-		certPEM, err := myCA.Sign("ocsp-revoke-node")
+		certPEM, err := myCA.Sign(context.Background(), "ocsp-revoke-node")
 		Expect(err).NotTo(HaveOccurred())
 
-		Expect(myCA.Revoke("ocsp-revoke-node")).To(Succeed())
+		Expect(myCA.Revoke(context.Background(), "ocsp-revoke-node")).To(Succeed())
 
 		cert := decodeCert(certPEM)
 		reqDER, err := testutil.BuildOCSPRequest(cert, myCA.CACert)
 		Expect(err).NotTo(HaveOccurred())
 
-		respDER, err := myCA.OCSPResponse(reqDER)
+		respDER, err := myCA.OCSPResponse(context.Background(), reqDER)
 		Expect(err).NotTo(HaveOccurred())
 
 		resp, err := xocsp.ParseResponse(respDER, myCA.CACert)
@@ -128,7 +129,7 @@ var _ = Describe("OCSP Responder", func() {
 		reqDER, err := testutil.BuildOCSPRequest(ephCert, myCA.CACert)
 		Expect(err).NotTo(HaveOccurred())
 
-		respDER, err := myCA.OCSPResponse(reqDER)
+		respDER, err := myCA.OCSPResponse(context.Background(), reqDER)
 		Expect(err).NotTo(HaveOccurred())
 
 		resp, err := xocsp.ParseResponse(respDER, myCA.CACert)
@@ -141,29 +142,57 @@ var _ = Describe("OCSP Responder", func() {
 	It("serves the cached response on a second call (same serial, no nonce)", func() {
 		csrPEM, err := testutil.GenerateCSR("ocsp-cache-node")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest("ocsp-cache-node", csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), "ocsp-cache-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
-		certPEM, err := myCA.Sign("ocsp-cache-node")
+		certPEM, err := myCA.Sign(context.Background(), "ocsp-cache-node")
 		Expect(err).NotTo(HaveOccurred())
 
 		cert := decodeCert(certPEM)
 		reqDER, err := testutil.BuildOCSPRequest(cert, myCA.CACert)
 		Expect(err).NotTo(HaveOccurred())
 
-		resp1, err := myCA.OCSPResponse(reqDER)
+		resp1, err := myCA.OCSPResponse(context.Background(), reqDER)
 		Expect(err).NotTo(HaveOccurred())
-		resp2, err := myCA.OCSPResponse(reqDER)
+		resp2, err := myCA.OCSPResponse(context.Background(), reqDER)
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(resp2).To(Equal(resp1), "second call should return the identical cached DER")
 	})
 
+	It("returns independent buffers from the cache so callers cannot corrupt cached state", func() {
+		csrPEM, err := testutil.GenerateCSR("ocsp-cache-isolation-node")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = myCA.SaveRequest(context.Background(), "ocsp-cache-isolation-node", csrPEM)
+		Expect(err).NotTo(HaveOccurred())
+		certPEM, err := myCA.Sign(context.Background(), "ocsp-cache-isolation-node")
+		Expect(err).NotTo(HaveOccurred())
+
+		cert := decodeCert(certPEM)
+		reqDER, err := testutil.BuildOCSPRequest(cert, myCA.CACert)
+		Expect(err).NotTo(HaveOccurred())
+
+		// Prime the cache and snapshot the original bytes.
+		first, err := myCA.OCSPResponse(context.Background(), reqDER)
+		Expect(err).NotTo(HaveOccurred())
+		original := append([]byte(nil), first...)
+
+		// Mutate the returned slice. If it aliases the cache, the next
+		// cached read will surface the corrupted bytes.
+		for i := range first {
+			first[i] ^= 0xFF
+		}
+
+		third, err := myCA.OCSPResponse(context.Background(), reqDER)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(third).To(Equal(original), "cached OCSP DER must not be aliased with caller's slice")
+	})
+
 	It("generates a fresh response (bypasses cache) when a nonce is present", func() {
 		csrPEM, err := testutil.GenerateCSR("ocsp-nonce-cache-node")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest("ocsp-nonce-cache-node", csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), "ocsp-nonce-cache-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
-		certPEM, err := myCA.Sign("ocsp-nonce-cache-node")
+		certPEM, err := myCA.Sign(context.Background(), "ocsp-nonce-cache-node")
 		Expect(err).NotTo(HaveOccurred())
 
 		cert := decodeCert(certPEM)
@@ -180,9 +209,9 @@ var _ = Describe("OCSP Responder", func() {
 		req2, err := testutil.BuildOCSPRequestWithNonce(cert, myCA.CACert, nonce2)
 		Expect(err).NotTo(HaveOccurred())
 
-		resp1, err := myCA.OCSPResponse(req1)
+		resp1, err := myCA.OCSPResponse(context.Background(), req1)
 		Expect(err).NotTo(HaveOccurred())
-		resp2, err := myCA.OCSPResponse(req2)
+		resp2, err := myCA.OCSPResponse(context.Background(), req2)
 		Expect(err).NotTo(HaveOccurred())
 
 		// Different nonces produce different response bytes.
@@ -192,9 +221,9 @@ var _ = Describe("OCSP Responder", func() {
 	It("deletes the cache entry on Revoke(); subsequent call returns Revoked", func() {
 		csrPEM, err := testutil.GenerateCSR("ocsp-revoke-cache-node")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest("ocsp-revoke-cache-node", csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), "ocsp-revoke-cache-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
-		certPEM, err := myCA.Sign("ocsp-revoke-cache-node")
+		certPEM, err := myCA.Sign(context.Background(), "ocsp-revoke-cache-node")
 		Expect(err).NotTo(HaveOccurred())
 
 		cert := decodeCert(certPEM)
@@ -202,14 +231,14 @@ var _ = Describe("OCSP Responder", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		// Prime the cache.
-		respDER1, err := myCA.OCSPResponse(reqDER)
+		respDER1, err := myCA.OCSPResponse(context.Background(), reqDER)
 		Expect(err).NotTo(HaveOccurred())
 		resp1, _ := xocsp.ParseResponse(respDER1, myCA.CACert)
 		Expect(resp1.Status).To(Equal(xocsp.Good))
 
-		Expect(myCA.Revoke("ocsp-revoke-cache-node")).To(Succeed())
+		Expect(myCA.Revoke(context.Background(), "ocsp-revoke-cache-node")).To(Succeed())
 
-		respDER2, err := myCA.OCSPResponse(reqDER)
+		respDER2, err := myCA.OCSPResponse(context.Background(), reqDER)
 		Expect(err).NotTo(HaveOccurred())
 		resp2, err := xocsp.ParseResponse(respDER2, myCA.CACert)
 		Expect(err).NotTo(HaveOccurred())
@@ -222,21 +251,21 @@ var _ = Describe("OCSP Responder", func() {
 		// Sign a cert, then init a second CA instance backed by the same dir.
 		csrPEM, err := testutil.GenerateCSR("ocsp-index-node")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest("ocsp-index-node", csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), "ocsp-index-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
-		certPEM, err := myCA.Sign("ocsp-index-node")
+		certPEM, err := myCA.Sign(context.Background(), "ocsp-index-node")
 		Expect(err).NotTo(HaveOccurred())
 
 		// Re-open the same CA directory; Init() calls buildSerialIndex.
 		store2 := storage.New(tmpDir)
 		myCA2 := ca.New(store2, ca.AutosignConfig{Mode: "off"}, "puppet.test")
-		Expect(myCA2.Init()).To(Succeed())
+		Expect(myCA2.Init(context.Background())).To(Succeed())
 
 		cert := decodeCert(certPEM)
 		reqDER, err := testutil.BuildOCSPRequest(cert, myCA2.CACert)
 		Expect(err).NotTo(HaveOccurred())
 
-		respDER, err := myCA2.OCSPResponse(reqDER)
+		respDER, err := myCA2.OCSPResponse(context.Background(), reqDER)
 		Expect(err).NotTo(HaveOccurred())
 		resp, err := xocsp.ParseResponse(respDER, myCA2.CACert)
 		Expect(err).NotTo(HaveOccurred())
@@ -248,16 +277,16 @@ var _ = Describe("OCSP Responder", func() {
 		// signWithDuration writes to c.serialIndex directly.
 		csrPEM, err := testutil.GenerateCSR("ocsp-incr-node")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest("ocsp-incr-node", csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), "ocsp-incr-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
-		certPEM, err := myCA.Sign("ocsp-incr-node")
+		certPEM, err := myCA.Sign(context.Background(), "ocsp-incr-node")
 		Expect(err).NotTo(HaveOccurred())
 
 		cert := decodeCert(certPEM)
 		reqDER, err := testutil.BuildOCSPRequest(cert, myCA.CACert)
 		Expect(err).NotTo(HaveOccurred())
 
-		respDER, err := myCA.OCSPResponse(reqDER)
+		respDER, err := myCA.OCSPResponse(context.Background(), reqDER)
 		Expect(err).NotTo(HaveOccurred())
 		resp, err := xocsp.ParseResponse(respDER, myCA.CACert)
 		Expect(err).NotTo(HaveOccurred())
@@ -269,16 +298,16 @@ var _ = Describe("OCSP Responder", func() {
 	It("produces a response verifiable by ocsp.ParseResponse with the CA cert", func() {
 		csrPEM, err := testutil.GenerateCSR("ocsp-sig-node")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest("ocsp-sig-node", csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), "ocsp-sig-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
-		certPEM, err := myCA.Sign("ocsp-sig-node")
+		certPEM, err := myCA.Sign(context.Background(), "ocsp-sig-node")
 		Expect(err).NotTo(HaveOccurred())
 
 		cert := decodeCert(certPEM)
 		reqDER, err := testutil.BuildOCSPRequest(cert, myCA.CACert)
 		Expect(err).NotTo(HaveOccurred())
 
-		respDER, err := myCA.OCSPResponse(reqDER)
+		respDER, err := myCA.OCSPResponse(context.Background(), reqDER)
 		Expect(err).NotTo(HaveOccurred())
 
 		_, err = xocsp.ParseResponse(respDER, myCA.CACert)
@@ -288,9 +317,9 @@ var _ = Describe("OCSP Responder", func() {
 	It("echoes the nonce extension from the request into the response", func() {
 		csrPEM, err := testutil.GenerateCSR("ocsp-nonce-echo-node")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest("ocsp-nonce-echo-node", csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), "ocsp-nonce-echo-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
-		certPEM, err := myCA.Sign("ocsp-nonce-echo-node")
+		certPEM, err := myCA.Sign(context.Background(), "ocsp-nonce-echo-node")
 		Expect(err).NotTo(HaveOccurred())
 
 		cert := decodeCert(certPEM)
@@ -298,7 +327,7 @@ var _ = Describe("OCSP Responder", func() {
 		reqDER, err := testutil.BuildOCSPRequestWithNonce(cert, myCA.CACert, nonce)
 		Expect(err).NotTo(HaveOccurred())
 
-		respDER, err := myCA.OCSPResponse(reqDER)
+		respDER, err := myCA.OCSPResponse(context.Background(), reqDER)
 		Expect(err).NotTo(HaveOccurred())
 
 		resp, err := xocsp.ParseResponse(respDER, myCA.CACert)
@@ -321,9 +350,9 @@ var _ = Describe("OCSP Responder", func() {
 	It("omits the AIA extension when OCSPURLs is nil", func() {
 		csrPEM, err := testutil.GenerateCSR("ocsp-no-aia-node")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest("ocsp-no-aia-node", csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), "ocsp-no-aia-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
-		certPEM, err := myCA.Sign("ocsp-no-aia-node")
+		certPEM, err := myCA.Sign(context.Background(), "ocsp-no-aia-node")
 		Expect(err).NotTo(HaveOccurred())
 
 		cert := decodeCert(certPEM)
@@ -339,19 +368,19 @@ var _ = Describe("OCSP Responder", func() {
 		store2 := storage.New(aiaDir)
 		myCA2 := ca.New(store2, ca.AutosignConfig{Mode: "off"}, "puppet.test")
 		myCA2.OCSPURLs = []string{"http://ocsp.example.com/ocsp"}
-		Expect(store2.EnsureDirs()).To(Succeed())
-		Expect(store2.SaveCAKey(cachedKeyPEM)).To(Succeed())
-		Expect(store2.SaveCACert(cachedCrtPEM)).To(Succeed())
-		Expect(store2.UpdateCRL(cachedCrlPEM)).To(Succeed())
-		Expect(store2.WriteSerial("0001")).To(Succeed())
-		Expect(store2.TouchInventory()).To(Succeed())
-		Expect(myCA2.Init()).To(Succeed())
+		Expect(store2.EnsureDirs(context.Background())).To(Succeed())
+		Expect(store2.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+		Expect(store2.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+		Expect(store2.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
+		Expect(store2.WriteSerial(context.Background(), "0001")).To(Succeed())
+		Expect(store2.TouchInventory(context.Background())).To(Succeed())
+		Expect(myCA2.Init(context.Background())).To(Succeed())
 
 		csrPEM, err := testutil.GenerateCSR("ocsp-aia-node")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA2.SaveRequest("ocsp-aia-node", csrPEM)
+		_, err = myCA2.SaveRequest(context.Background(), "ocsp-aia-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
-		certPEM, err := myCA2.Sign("ocsp-aia-node")
+		certPEM, err := myCA2.Sign(context.Background(), "ocsp-aia-node")
 		Expect(err).NotTo(HaveOccurred())
 
 		cert := decodeCert(certPEM)
@@ -363,9 +392,9 @@ var _ = Describe("OCSP Responder", func() {
 	It("ignores nonce exceeding RFC 8954 maximum length (32 bytes)", func() {
 		csrPEM, err := testutil.GenerateCSR("ocsp-big-nonce-node")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest("ocsp-big-nonce-node", csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), "ocsp-big-nonce-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
-		certPEM, err := myCA.Sign("ocsp-big-nonce-node")
+		certPEM, err := myCA.Sign(context.Background(), "ocsp-big-nonce-node")
 		Expect(err).NotTo(HaveOccurred())
 
 		cert := decodeCert(certPEM)
@@ -378,7 +407,7 @@ var _ = Describe("OCSP Responder", func() {
 		reqDER, err := testutil.BuildOCSPRequestWithNonce(cert, myCA.CACert, bigNonce)
 		Expect(err).NotTo(HaveOccurred())
 
-		respDER, err := myCA.OCSPResponse(reqDER)
+		respDER, err := myCA.OCSPResponse(context.Background(), reqDER)
 		Expect(err).NotTo(HaveOccurred())
 
 		resp, err := xocsp.ParseResponse(respDER, myCA.CACert)
@@ -396,9 +425,9 @@ var _ = Describe("OCSP Responder", func() {
 	It("echoes a nonce within the RFC 8954 limit", func() {
 		csrPEM, err := testutil.GenerateCSR("ocsp-ok-nonce-node")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest("ocsp-ok-nonce-node", csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), "ocsp-ok-nonce-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
-		certPEM, err := myCA.Sign("ocsp-ok-nonce-node")
+		certPEM, err := myCA.Sign(context.Background(), "ocsp-ok-nonce-node")
 		Expect(err).NotTo(HaveOccurred())
 
 		cert := decodeCert(certPEM)
@@ -411,7 +440,7 @@ var _ = Describe("OCSP Responder", func() {
 		reqDER, err := testutil.BuildOCSPRequestWithNonce(cert, myCA.CACert, okNonce)
 		Expect(err).NotTo(HaveOccurred())
 
-		respDER, err := myCA.OCSPResponse(reqDER)
+		respDER, err := myCA.OCSPResponse(context.Background(), reqDER)
 		Expect(err).NotTo(HaveOccurred())
 
 		resp, err := xocsp.ParseResponse(respDER, myCA.CACert)
@@ -433,7 +462,7 @@ var _ = Describe("OCSP Responder", func() {
 	// --- Error handling ---
 
 	It("returns an error for an unparseable OCSP request", func() {
-		_, err := myCA.OCSPResponse([]byte("not valid DER"))
+		_, err := myCA.OCSPResponse(context.Background(), []byte("not valid DER"))
 		Expect(err).To(HaveOccurred())
 	})
 })

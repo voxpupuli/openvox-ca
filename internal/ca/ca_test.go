@@ -17,6 +17,7 @@
 package ca_test
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -70,16 +71,16 @@ var _ = Describe("CA Lifecycle", func() {
 
 		// Optimization: Pre-seed the CA with keys generated in BeforeSuite
 		// This avoids generating 4096-bit keys for every test case.
-		err = store.EnsureDirs()
+		err = store.EnsureDirs(context.Background())
 		Expect(err).NotTo(HaveOccurred())
 
-		Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
-		Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
-		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
+		Expect(store.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
 
 		// Also pre-seed Serial and Inventory which are normally created by bootstrapCA
-		Expect(store.WriteSerial("0001")).To(Succeed())
-		Expect(store.TouchInventory()).To(Succeed())
+		Expect(store.WriteSerial(context.Background(), "0001")).To(Succeed())
+		Expect(store.TouchInventory(context.Background())).To(Succeed())
 	})
 
 	AfterEach(func() {
@@ -88,13 +89,62 @@ var _ = Describe("CA Lifecycle", func() {
 
 	Context("Initialization", func() {
 		It("should load existing CA successfully", func() {
-			err := myCA.Init()
+			err := myCA.Init(context.Background())
 			Expect(err).NotTo(HaveOccurred())
 
 			// Verify they are the same
-			loadedCert, err := store.GetCACert()
+			loadedCert, err := store.GetCACert(context.Background())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(loadedCert).To(Equal(cachedCrtPEM))
+		})
+	})
+
+	// Defensive: a CA constructed by New() but never Init()-ed has a nil
+	// CACert and CAKey. Internal signing helpers must surface a controlled
+	// error rather than panicking the frontend with a nil dereference.
+	Context("Signing on an uninitialised CA", func() {
+		var (
+			rawDir   string
+			rawStore *storage.StorageService
+			rawCA    *ca.CA
+		)
+
+		BeforeEach(func() {
+			var err error
+			rawDir, err = os.MkdirTemp("", "puppet-ca-uninit-test")
+			Expect(err).NotTo(HaveOccurred())
+			rawStore = storage.New(rawDir)
+			Expect(rawStore.EnsureDirs(context.Background())).To(Succeed())
+			// Note: deliberately do NOT load CA cert/key, do NOT call Init.
+			rawCA = ca.New(rawStore, asCfg, "puppet.test")
+		})
+
+		AfterEach(func() {
+			os.RemoveAll(rawDir)
+		})
+
+		It("returns ErrNotInitialized rather than panicking when Sign() is called", func() {
+			var (
+				out []byte
+				err error
+			)
+			Expect(func() { out, err = rawCA.Sign(context.Background(), "uninit-node") }).NotTo(Panic())
+			Expect(err).To(MatchError(ca.ErrNotInitialized))
+			Expect(out).To(BeEmpty())
+		})
+
+		It("returns ErrNotInitialized rather than panicking when SignWithTTL() is called", func() {
+			var (
+				out []byte
+				err error
+			)
+			Expect(func() { out, err = rawCA.SignWithTTL(context.Background(), "uninit-ttl-node", 24*time.Hour) }).NotTo(Panic())
+			Expect(err).To(MatchError(ca.ErrNotInitialized))
+			Expect(out).To(BeEmpty())
+		})
+
+		It("reports IsReady=false until Init has succeeded", func() {
+			Expect(rawCA.IsReady()).To(BeFalse())
 		})
 	})
 
@@ -113,10 +163,10 @@ var _ = Describe("CA Lifecycle", func() {
 			seedDir, err = os.MkdirTemp("", "puppet-ca-seed-test")
 			Expect(err).NotTo(HaveOccurred())
 			seedStore = storage.New(seedDir)
-			Expect(seedStore.EnsureDirs()).To(Succeed())
+			Expect(seedStore.EnsureDirs(context.Background())).To(Succeed())
 			// Only cert + key — no CRL, no inventory, no serial.
-			Expect(seedStore.SaveCAKey(cachedKeyPEM)).To(Succeed())
-			Expect(seedStore.SaveCACert(cachedCrtPEM)).To(Succeed())
+			Expect(seedStore.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+			Expect(seedStore.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
 			seedCA = ca.New(seedStore, asCfg, "puppet.test")
 		})
 
@@ -125,9 +175,9 @@ var _ = Describe("CA Lifecycle", func() {
 		})
 
 		It("seeds CRL, inventory, and serial for an existing cert+key", func() {
-			Expect(seedCA.Init()).To(Succeed())
+			Expect(seedCA.Init(context.Background())).To(Succeed())
 
-			crlPEM, err := seedStore.GetCRL()
+			crlPEM, err := seedStore.GetCRL(context.Background())
 			Expect(err).NotTo(HaveOccurred())
 			crlBlock, _ := pem.Decode(crlPEM)
 			Expect(crlBlock).NotTo(BeNil())
@@ -135,25 +185,25 @@ var _ = Describe("CA Lifecycle", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(crl.RevokedCertificateEntries).To(BeEmpty())
 
-			hasInv, err := seedStore.HasInventory()
+			hasInv, err := seedStore.HasInventory(context.Background())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(hasInv).To(BeTrue())
 
-			hasSerial, err := seedStore.HasSerial()
+			hasSerial, err := seedStore.HasSerial(context.Background())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(hasSerial).To(BeTrue())
 		})
 
 		It("is idempotent across repeated Init calls", func() {
-			Expect(seedCA.Init()).To(Succeed())
-			crlBefore, err := seedStore.GetCRL()
+			Expect(seedCA.Init(context.Background())).To(Succeed())
+			crlBefore, err := seedStore.GetCRL(context.Background())
 			Expect(err).NotTo(HaveOccurred())
 
 			// Second Init against the same storage should load the CRL the
 			// first Init seeded without rewriting it.
 			seedCA2 := ca.New(seedStore, asCfg, "puppet.test")
-			Expect(seedCA2.Init()).To(Succeed())
-			crlAfter, err := seedStore.GetCRL()
+			Expect(seedCA2.Init(context.Background())).To(Succeed())
+			crlAfter, err := seedStore.GetCRL(context.Background())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(crlAfter).To(Equal(crlBefore))
 		})
@@ -164,14 +214,14 @@ var _ = Describe("CA Lifecycle", func() {
 
 		BeforeEach(func() {
 			var err error
-			err = myCA.Init()
+			err = myCA.Init(context.Background())
 			Expect(err).NotTo(HaveOccurred())
 			csrPEM, err = testutil.GenerateCSR("test-node")
 			Expect(err).NotTo(HaveOccurred())
 		})
 
 		It("should save a valid CSR but not sign it when autosign is off", func() {
-			saved, err := myCA.SaveRequest("test-node", csrPEM)
+			saved, err := myCA.SaveRequest(context.Background(), "test-node", csrPEM)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(saved).To(BeFalse(), "Expected saved=false (autosign off)")
 
@@ -180,10 +230,10 @@ var _ = Describe("CA Lifecycle", func() {
 		})
 
 		It("should sign a valid CSR", func() {
-			_, err := myCA.SaveRequest("test-node", csrPEM)
+			_, err := myCA.SaveRequest(context.Background(), "test-node", csrPEM)
 			Expect(err).NotTo(HaveOccurred())
 
-			certPEM, err := myCA.Sign("test-node")
+			certPEM, err := myCA.Sign(context.Background(), "test-node")
 			Expect(err).NotTo(HaveOccurred())
 
 			// Verify Cert on disk
@@ -212,38 +262,38 @@ var _ = Describe("CA Lifecycle", func() {
 
 	Context("Negative Tests", func() {
 		BeforeEach(func() {
-			err := myCA.Init()
+			err := myCA.Init(context.Background())
 			Expect(err).NotTo(HaveOccurred())
 		})
 
 		It("should fail to sign non-existent CSR", func() {
-			_, err := myCA.Sign("ghost-node")
+			_, err := myCA.Sign(context.Background(), "ghost-node")
 			Expect(err).To(HaveOccurred())
 		})
 
 		It("should fail to sign invalid subject name", func() {
-			_, err := myCA.Sign("bad/name")
+			_, err := myCA.Sign(context.Background(), "bad/name")
 			Expect(err).To(HaveOccurred())
 		})
 
 		It("should fail to save invalid subject name", func() {
 			csrPEM, _ := testutil.GenerateCSR("bad/name")
-			_, err := myCA.SaveRequest("bad/name", csrPEM)
+			_, err := myCA.SaveRequest(context.Background(), "bad/name", csrPEM)
 			Expect(err).To(HaveOccurred())
 		})
 
 		It("should fail to sign garbage CSR data", func() {
 			// Save garbage manually
-			err := store.SaveCSR("garbage-node", []byte("GARBAGE"))
+			err := store.SaveCSR(context.Background(), "garbage-node", []byte("GARBAGE"))
 			Expect(err).NotTo(HaveOccurred())
-			_, err = myCA.Sign("garbage-node")
+			_, err = myCA.Sign(context.Background(), "garbage-node")
 			Expect(err).To(HaveOccurred())
 		})
 
 		It("should reject a subject containing ..", func() {
-			_, err := myCA.Sign("a..b")
+			_, err := myCA.Sign(context.Background(), "a..b")
 			Expect(err).To(HaveOccurred())
-			_, err = myCA.SaveRequest("a..b", []byte("fake"))
+			_, err = myCA.SaveRequest(context.Background(), "a..b", []byte("fake"))
 			Expect(err).To(HaveOccurred())
 		})
 	})
@@ -266,13 +316,13 @@ var _ = Describe("CA TTL capping", func() {
 		store = storage.New(tmpDir)
 		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
 
-		Expect(store.EnsureDirs()).To(Succeed())
-		Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
-		Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
-		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
-		Expect(store.WriteSerial("0001")).To(Succeed())
-		Expect(store.TouchInventory()).To(Succeed())
-		Expect(myCA.Init()).To(Succeed())
+		Expect(store.EnsureDirs(context.Background())).To(Succeed())
+		Expect(store.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial(context.Background(), "0001")).To(Succeed())
+		Expect(store.TouchInventory(context.Background())).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 	})
 
 	AfterEach(func() { os.RemoveAll(tmpDir) })
@@ -280,12 +330,12 @@ var _ = Describe("CA TTL capping", func() {
 	It("caps signed cert NotAfter to the CA cert NotAfter when TTL would exceed it", func() {
 		csrPEM, err := testutil.GenerateCSR("ttl-cap-node")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest("ttl-cap-node", csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), "ttl-cap-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
 
 		// The test CA cert expires in ~1 hour (see testutil.GenerateTestCA).
 		// Request a TTL far beyond that window.
-		certPEM, err := myCA.SignWithTTL("ttl-cap-node", 100*365*24*time.Hour)
+		certPEM, err := myCA.SignWithTTL(context.Background(), "ttl-cap-node", 100*365*24*time.Hour)
 		Expect(err).NotTo(HaveOccurred())
 
 		block, _ := pem.Decode(certPEM)
@@ -300,11 +350,11 @@ var _ = Describe("CA TTL capping", func() {
 	It("uses the requested TTL when it is shorter than the CA cert remaining lifetime", func() {
 		csrPEM, err := testutil.GenerateCSR("short-ttl-node")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest("short-ttl-node", csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), "short-ttl-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
 
 		shortTTL := 10 * time.Minute
-		certPEM, err := myCA.SignWithTTL("short-ttl-node", shortTTL)
+		certPEM, err := myCA.SignWithTTL(context.Background(), "short-ttl-node", shortTTL)
 		Expect(err).NotTo(HaveOccurred())
 
 		block, _ := pem.Decode(certPEM)
@@ -334,13 +384,13 @@ var _ = Describe("CA tampered CSR rejection", func() {
 		store = storage.New(tmpDir)
 		myCA = ca.New(store, ca.AutosignConfig{Mode: "true"}, "puppet.test")
 
-		Expect(store.EnsureDirs()).To(Succeed())
-		Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
-		Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
-		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
-		Expect(store.WriteSerial("0001")).To(Succeed())
-		Expect(store.TouchInventory()).To(Succeed())
-		Expect(myCA.Init()).To(Succeed())
+		Expect(store.EnsureDirs(context.Background())).To(Succeed())
+		Expect(store.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial(context.Background(), "0001")).To(Succeed())
+		Expect(store.TouchInventory(context.Background())).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 	})
 
 	AfterEach(func() { os.RemoveAll(tmpDir) })
@@ -363,7 +413,7 @@ var _ = Describe("CA tampered CSR rejection", func() {
 
 		// With autosign=true, SaveRequest triggers Sign() immediately.
 		// Sign() calls csr.CheckSignature() and must return an error.
-		_, err = myCA.SaveRequest("tampered-node", tamperedPEM)
+		_, err = myCA.SaveRequest(context.Background(), "tampered-node", tamperedPEM)
 		Expect(err).To(HaveOccurred(), "expected signing to fail for a tampered CSR")
 	})
 })
@@ -378,7 +428,7 @@ var _ = Describe("CA Bootstrap", func() {
 
 		store := storage.New(tmpDir)
 		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.bootstrap.test")
-		Expect(myCA.Init()).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 
 		Expect(myCA.CACert).NotTo(BeNil())
 		Expect(myCA.CAKey).NotTo(BeNil())
@@ -400,7 +450,7 @@ var _ = Describe("CA Bootstrap", func() {
 		store := storage.New(tmpDir)
 		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.ecdsa.test")
 		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
-		Expect(myCA.Init()).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 
 		Expect(myCA.CACert).NotTo(BeNil())
 		_, ok := myCA.CACert.PublicKey.(*ecdsa.PublicKey)
@@ -408,7 +458,7 @@ var _ = Describe("CA Bootstrap", func() {
 
 		// The on-disk key must be loadable as ECDSA on a second Init call.
 		myCA2 := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.ecdsa.test")
-		Expect(myCA2.Init()).To(Succeed())
+		Expect(myCA2.Init(context.Background())).To(Succeed())
 		_, ok = myCA2.CACert.PublicKey.(*ecdsa.PublicKey)
 		Expect(ok).To(BeTrue(), "reloaded CA should still have an ECDSA public key")
 	})
@@ -431,13 +481,13 @@ var _ = Describe("CA Revocation", func() {
 		store = storage.New(tmpDir)
 		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
 
-		Expect(store.EnsureDirs()).To(Succeed())
-		Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
-		Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
-		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
-		Expect(store.WriteSerial("0001")).To(Succeed())
-		Expect(store.TouchInventory()).To(Succeed())
-		Expect(myCA.Init()).To(Succeed())
+		Expect(store.EnsureDirs(context.Background())).To(Succeed())
+		Expect(store.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial(context.Background(), "0001")).To(Succeed())
+		Expect(store.TouchInventory(context.Background())).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 	})
 
 	AfterEach(func() {
@@ -448,31 +498,31 @@ var _ = Describe("CA Revocation", func() {
 		csrPEM, err := testutil.GenerateCSR("revoke-node")
 		Expect(err).NotTo(HaveOccurred())
 
-		_, err = myCA.SaveRequest("revoke-node", csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), "revoke-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.Sign("revoke-node")
+		_, err = myCA.Sign(context.Background(), "revoke-node")
 		Expect(err).NotTo(HaveOccurred())
 
-		Expect(myCA.IsRevoked("revoke-node")).To(BeFalse())
+		Expect(myCA.IsRevoked(context.Background(), "revoke-node")).To(BeFalse())
 
-		Expect(myCA.Revoke("revoke-node")).To(Succeed())
-		Expect(myCA.IsRevoked("revoke-node")).To(BeTrue())
+		Expect(myCA.Revoke(context.Background(), "revoke-node")).To(Succeed())
+		Expect(myCA.IsRevoked(context.Background(), "revoke-node")).To(BeTrue())
 	})
 
 	It("IsRevoked returns false for a node that was never signed", func() {
-		Expect(myCA.IsRevoked("ghost-node")).To(BeFalse())
+		Expect(myCA.IsRevoked(context.Background(), "ghost-node")).To(BeFalse())
 	})
 
 	It("returns an error when revoking a subject with no inventory entry", func() {
-		Expect(myCA.Revoke("never-signed")).To(HaveOccurred())
+		Expect(myCA.Revoke(context.Background(), "never-signed")).To(HaveOccurred())
 	})
 
 	It("IsRevokedSerial returns true for a revoked certificate's serial", func() {
 		csrPEM, err := testutil.GenerateCSR("serial-revoke-node")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest("serial-revoke-node", csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), "serial-revoke-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
-		certPEM, err := myCA.Sign("serial-revoke-node")
+		certPEM, err := myCA.Sign(context.Background(), "serial-revoke-node")
 		Expect(err).NotTo(HaveOccurred())
 
 		block, _ := pem.Decode(certPEM)
@@ -480,27 +530,27 @@ var _ = Describe("CA Revocation", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		// Before revocation: serial is not in CRL.
-		revoked, err := myCA.IsRevokedSerial(cert.SerialNumber)
+		revoked, err := myCA.IsRevokedSerial(context.Background(), cert.SerialNumber)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(revoked).To(BeFalse())
 
 		// After revocation: serial appears in CRL.
-		Expect(myCA.Revoke("serial-revoke-node")).To(Succeed())
-		revoked, err = myCA.IsRevokedSerial(cert.SerialNumber)
+		Expect(myCA.Revoke(context.Background(), "serial-revoke-node")).To(Succeed())
+		revoked, err = myCA.IsRevokedSerial(context.Background(), cert.SerialNumber)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(revoked).To(BeTrue())
 	})
 
 	It("IsRevokedSerial returns false for an unknown serial", func() {
 		unknownSerial := new(big.Int).SetInt64(999999)
-		revoked, err := myCA.IsRevokedSerial(unknownSerial)
+		revoked, err := myCA.IsRevokedSerial(context.Background(), unknownSerial)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(revoked).To(BeFalse())
 	})
 
 	It("IsRevokedSerial still works when the CRL file is deleted (in-memory cache)", func() {
-		Expect(store.Backend().Delete(storage.KeyCRL)).To(Succeed())
-		revoked, err := myCA.IsRevokedSerial(new(big.Int).SetInt64(1))
+		Expect(store.Backend().Delete(context.Background(), storage.KeyCRL)).To(Succeed())
+		revoked, err := myCA.IsRevokedSerial(context.Background(), new(big.Int).SetInt64(1))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(revoked).To(BeFalse())
 	})
@@ -523,13 +573,13 @@ var _ = Describe("CA SaveRequest edge cases", func() {
 		store = storage.New(tmpDir)
 		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
 
-		Expect(store.EnsureDirs()).To(Succeed())
-		Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
-		Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
-		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
-		Expect(store.WriteSerial("0001")).To(Succeed())
-		Expect(store.TouchInventory()).To(Succeed())
-		Expect(myCA.Init()).To(Succeed())
+		Expect(store.EnsureDirs(context.Background())).To(Succeed())
+		Expect(store.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial(context.Background(), "0001")).To(Succeed())
+		Expect(store.TouchInventory(context.Background())).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 	})
 
 	AfterEach(func() {
@@ -539,47 +589,47 @@ var _ = Describe("CA SaveRequest edge cases", func() {
 	It("returns ErrCertExists when a valid cert already exists for the subject", func() {
 		csrPEM, err := testutil.GenerateCSR("dup-node")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest("dup-node", csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), "dup-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.Sign("dup-node")
+		_, err = myCA.Sign(context.Background(), "dup-node")
 		Expect(err).NotTo(HaveOccurred())
 
 		// Second SaveRequest should fail with ErrCertExists.
 		csrPEM2, err := testutil.GenerateCSR("dup-node")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest("dup-node", csrPEM2)
+		_, err = myCA.SaveRequest(context.Background(), "dup-node", csrPEM2)
 		Expect(err).To(HaveOccurred())
 		Expect(errors.Is(err, ca.ErrCertExists)).To(BeTrue())
 
 		// Malformed CSR must not be written to disk.
-		Expect(store.HasCSR("dup-node")).To(BeFalse())
+		Expect(store.HasCSR(context.Background(), "dup-node")).To(BeFalse())
 	})
 
 	It("allows re-registration after a certificate is revoked", func() {
 		csrPEM, err := testutil.GenerateCSR("rereg-node")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest("rereg-node", csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), "rereg-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.Sign("rereg-node")
+		_, err = myCA.Sign(context.Background(), "rereg-node")
 		Expect(err).NotTo(HaveOccurred())
 
-		Expect(myCA.Revoke("rereg-node")).To(Succeed())
+		Expect(myCA.Revoke(context.Background(), "rereg-node")).To(Succeed())
 
 		csrPEM2, err := testutil.GenerateCSR("rereg-node")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest("rereg-node", csrPEM2)
+		_, err = myCA.SaveRequest(context.Background(), "rereg-node", csrPEM2)
 		Expect(err).NotTo(HaveOccurred())
 
 		// Old cert must be gone.
-		Expect(store.HasCert("rereg-node")).To(BeFalse())
+		Expect(store.HasCert(context.Background(), "rereg-node")).To(BeFalse())
 		// New CSR must be on disk.
-		Expect(store.HasCSR("rereg-node")).To(BeTrue())
+		Expect(store.HasCSR(context.Background(), "rereg-node")).To(BeTrue())
 	})
 
 	It("rejects a malformed CSR without writing anything to disk", func() {
-		_, err := myCA.SaveRequest("bad-csr-node", []byte("NOT PEM"))
+		_, err := myCA.SaveRequest(context.Background(), "bad-csr-node", []byte("NOT PEM"))
 		Expect(err).To(HaveOccurred())
-		Expect(store.HasCSR("bad-csr-node")).To(BeFalse())
+		Expect(store.HasCSR(context.Background(), "bad-csr-node")).To(BeFalse())
 	})
 })
 
@@ -593,12 +643,12 @@ var _ = Describe("CA Autosign", func() {
 
 	newCA := func(cfg ca.AutosignConfig) *ca.CA {
 		myCA := ca.New(store, cfg, "puppet.test")
-		Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
-		Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
-		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
-		Expect(store.WriteSerial("0001")).To(Succeed())
-		Expect(store.TouchInventory()).To(Succeed())
-		Expect(myCA.Init()).To(Succeed())
+		Expect(store.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial(context.Background(), "0001")).To(Succeed())
+		Expect(store.TouchInventory(context.Background())).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 		return myCA
 	}
 
@@ -607,7 +657,7 @@ var _ = Describe("CA Autosign", func() {
 		tmpDir, err = os.MkdirTemp("", "puppet-ca-autosign-test")
 		Expect(err).NotTo(HaveOccurred())
 		store = storage.New(tmpDir)
-		Expect(store.EnsureDirs()).To(Succeed())
+		Expect(store.EnsureDirs(context.Background())).To(Succeed())
 	})
 
 	AfterEach(func() {
@@ -619,11 +669,11 @@ var _ = Describe("CA Autosign", func() {
 		csrPEM, err := testutil.GenerateCSR("auto-node")
 		Expect(err).NotTo(HaveOccurred())
 
-		signed, err := myCA.SaveRequest("auto-node", csrPEM)
+		signed, err := myCA.SaveRequest(context.Background(), "auto-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(signed).To(BeTrue())
-		Expect(store.HasCert("auto-node")).To(BeTrue())
-		Expect(store.HasCSR("auto-node")).To(BeFalse(), "CSR should be deleted after signing")
+		Expect(store.HasCert(context.Background(), "auto-node")).To(BeTrue())
+		Expect(store.HasCSR(context.Background(), "auto-node")).To(BeFalse(), "CSR should be deleted after signing")
 	})
 
 	It("autosign=true strips authorization OIDs from the autosigned certificate", func() {
@@ -643,12 +693,12 @@ var _ = Describe("CA Autosign", func() {
 		Expect(err).NotTo(HaveOccurred())
 		csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrBytes})
 
-		signed, err := myCA.SaveRequest("evil-autosign", csrPEM)
+		signed, err := myCA.SaveRequest(context.Background(), "evil-autosign", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(signed).To(BeTrue(), "autosign=true should sign immediately")
 
 		// Parse the signed cert and verify pp_cli_auth is NOT present.
-		certPEM, err := store.GetCert("evil-autosign")
+		certPEM, err := store.GetCert(context.Background(), "evil-autosign")
 		Expect(err).NotTo(HaveOccurred())
 		block, _ := pem.Decode(certPEM)
 		Expect(block).NotTo(BeNil())
@@ -672,7 +722,7 @@ var _ = Describe("CA Autosign", func() {
 
 		matchingCSR, err := testutil.GenerateCSR("host.example.com")
 		Expect(err).NotTo(HaveOccurred())
-		signed, err := myCA.SaveRequest("host.example.com", matchingCSR)
+		signed, err := myCA.SaveRequest(context.Background(), "host.example.com", matchingCSR)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(signed).To(BeTrue())
 	})
@@ -688,10 +738,10 @@ var _ = Describe("CA Autosign", func() {
 
 		noMatchCSR, err := testutil.GenerateCSR("other.org")
 		Expect(err).NotTo(HaveOccurred())
-		signed, err := myCA.SaveRequest("other.org", noMatchCSR)
+		signed, err := myCA.SaveRequest(context.Background(), "other.org", noMatchCSR)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(signed).To(BeFalse())
-		Expect(store.HasCSR("other.org")).To(BeTrue())
+		Expect(store.HasCSR(context.Background(), "other.org")).To(BeTrue())
 	})
 })
 
@@ -732,13 +782,13 @@ var _ = Describe("CA sign rejects CA:TRUE extension", func() {
 		store := storage.New(tmpDir)
 		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
 
-		Expect(store.EnsureDirs()).To(Succeed())
-		Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
-		Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
-		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
-		Expect(store.WriteSerial("0001")).To(Succeed())
-		Expect(store.TouchInventory()).To(Succeed())
-		Expect(myCA.Init()).To(Succeed())
+		Expect(store.EnsureDirs(context.Background())).To(Succeed())
+		Expect(store.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial(context.Background(), "0001")).To(Succeed())
+		Expect(store.TouchInventory(context.Background())).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 	})
 
 	AfterEach(func() { os.RemoveAll(tmpDir) })
@@ -766,11 +816,11 @@ var _ = Describe("CA sign rejects CA:TRUE extension", func() {
 		csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrBytes})
 
 		// Submit the CSR (valid for storage purposes).
-		_, err = myCA.SaveRequest("evil-ca", csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), "evil-ca", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
 
 		// Signing must fail with a message that matches Puppet CA's response.
-		_, err = myCA.Sign("evil-ca")
+		_, err = myCA.Sign(context.Background(), "evil-ca")
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("Found extensions"))
 		Expect(err.Error()).To(ContainSubstring("2.5.29.19"))
@@ -784,19 +834,19 @@ var _ = Describe("CA sign rejects CA:TRUE extension", func() {
 func newIssuedCert(dir, subject string) (*x509.Certificate, *ca.CA) {
 	store := storage.New(dir)
 	myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
-	Expect(store.EnsureDirs()).To(Succeed())
-	Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
-	Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
-	Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
-	Expect(store.WriteSerial("0001")).To(Succeed())
-	Expect(store.TouchInventory()).To(Succeed())
-	Expect(myCA.Init()).To(Succeed())
+	Expect(store.EnsureDirs(context.Background())).To(Succeed())
+	Expect(store.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+	Expect(store.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+	Expect(store.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
+	Expect(store.WriteSerial(context.Background(), "0001")).To(Succeed())
+	Expect(store.TouchInventory(context.Background())).To(Succeed())
+	Expect(myCA.Init(context.Background())).To(Succeed())
 
 	csrPEM, err := testutil.GenerateCSR(subject)
 	Expect(err).NotTo(HaveOccurred())
-	_, err = myCA.SaveRequest(subject, csrPEM)
+	_, err = myCA.SaveRequest(context.Background(), subject, csrPEM)
 	Expect(err).NotTo(HaveOccurred())
-	certPEM, err := myCA.Sign(subject)
+	certPEM, err := myCA.Sign(context.Background(), subject)
 	Expect(err).NotTo(HaveOccurred())
 
 	block, _ := pem.Decode(certPEM)
@@ -822,13 +872,13 @@ var _ = Describe("Issued certificate properties (issue #8)", func() {
 	It("strips authorization-arc OIDs (like pp_cli_auth) from signed certificates", func() {
 		store := storage.New(tmpDir)
 		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
-		Expect(store.EnsureDirs()).To(Succeed())
-		Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
-		Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
-		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
-		Expect(store.WriteSerial("0001")).To(Succeed())
-		Expect(store.TouchInventory()).To(Succeed())
-		Expect(myCA.Init()).To(Succeed())
+		Expect(store.EnsureDirs(context.Background())).To(Succeed())
+		Expect(store.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial(context.Background(), "0001")).To(Succeed())
+		Expect(store.TouchInventory(context.Background())).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 
 		// Build a CSR carrying pp_cli_auth = "true" and a non-auth Puppet OID.
 		key, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -852,10 +902,10 @@ var _ = Describe("Issued certificate properties (issue #8)", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrBytes})
-		_, err = myCA.SaveRequest("auth-strip-node", csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), "auth-strip-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
 
-		certPEM, err := myCA.Sign("auth-strip-node")
+		certPEM, err := myCA.Sign(context.Background(), "auth-strip-node")
 		Expect(err).NotTo(HaveOccurred())
 
 		block, _ := pem.Decode(certPEM)
@@ -923,19 +973,19 @@ var _ = Describe("Issued certificate properties (issue #8)", func() {
 		store := storage.New(tmpDir)
 		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
 		myCA.CRLURLs = []string{crlURL}
-		Expect(store.EnsureDirs()).To(Succeed())
-		Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
-		Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
-		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
-		Expect(store.WriteSerial("0001")).To(Succeed())
-		Expect(store.TouchInventory()).To(Succeed())
-		Expect(myCA.Init()).To(Succeed())
+		Expect(store.EnsureDirs(context.Background())).To(Succeed())
+		Expect(store.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial(context.Background(), "0001")).To(Succeed())
+		Expect(store.TouchInventory(context.Background())).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 
 		csrPEM, err := testutil.GenerateCSR("cdp-node")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest("cdp-node", csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), "cdp-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
-		certPEM, err := myCA.Sign("cdp-node")
+		certPEM, err := myCA.Sign(context.Background(), "cdp-node")
 		Expect(err).NotTo(HaveOccurred())
 
 		block, _ := pem.Decode(certPEM)
@@ -957,23 +1007,23 @@ var _ = Describe("Issued certificate properties (issue #8)", func() {
 		store := storage.New(tmpDir)
 		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
 		myCA.CRLValidityDays = 90
-		Expect(store.EnsureDirs()).To(Succeed())
-		Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
-		Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
-		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
-		Expect(store.WriteSerial("0001")).To(Succeed())
-		Expect(store.TouchInventory()).To(Succeed())
-		Expect(myCA.Init()).To(Succeed())
+		Expect(store.EnsureDirs(context.Background())).To(Succeed())
+		Expect(store.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial(context.Background(), "0001")).To(Succeed())
+		Expect(store.TouchInventory(context.Background())).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 
 		csrPEM, err := testutil.GenerateCSR("crl-validity-node")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest("crl-validity-node", csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), "crl-validity-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.Sign("crl-validity-node")
+		_, err = myCA.Sign(context.Background(), "crl-validity-node")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(myCA.Revoke("crl-validity-node")).To(Succeed())
+		Expect(myCA.Revoke(context.Background(), "crl-validity-node")).To(Succeed())
 
-		crlPEM, err := store.GetCRL()
+		crlPEM, err := store.GetCRL(context.Background())
 		Expect(err).NotTo(HaveOccurred())
 		block, _ := pem.Decode(crlPEM)
 		Expect(block).NotTo(BeNil())
@@ -1000,9 +1050,9 @@ var _ = Describe("loadCA key format support", func() {
 		tmpDir, err = os.MkdirTemp("", "puppet-ca-loadca-test")
 		Expect(err).NotTo(HaveOccurred())
 		store = storage.New(tmpDir)
-		Expect(store.EnsureDirs()).To(Succeed())
-		Expect(store.WriteSerial("0001")).To(Succeed())
-		Expect(store.TouchInventory()).To(Succeed())
+		Expect(store.EnsureDirs(context.Background())).To(Succeed())
+		Expect(store.WriteSerial(context.Background(), "0001")).To(Succeed())
+		Expect(store.TouchInventory(context.Background())).To(Succeed())
 	})
 
 	AfterEach(func() { os.RemoveAll(tmpDir) })
@@ -1010,12 +1060,12 @@ var _ = Describe("loadCA key format support", func() {
 	It("loads an ECDSA CA (EC PRIVATE KEY PEM)", func() {
 		keyPEM, certPEM, crlPEM, err := testutil.GenerateTestCAECDSA()
 		Expect(err).NotTo(HaveOccurred())
-		Expect(store.SaveCAKey(keyPEM)).To(Succeed())
-		Expect(store.SaveCACert(certPEM)).To(Succeed())
-		Expect(store.UpdateCRL(crlPEM)).To(Succeed())
+		Expect(store.SaveCAKey(context.Background(), keyPEM)).To(Succeed())
+		Expect(store.SaveCACert(context.Background(), certPEM)).To(Succeed())
+		Expect(store.UpdateCRL(context.Background(), crlPEM)).To(Succeed())
 
 		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
-		Expect(myCA.Init()).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 		Expect(myCA.CACert).NotTo(BeNil())
 	})
 
@@ -1050,12 +1100,12 @@ var _ = Describe("loadCA key format support", func() {
 		Expect(err).NotTo(HaveOccurred())
 		crlPEM := pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlDER})
 
-		Expect(store.SaveCAKey(keyPEM)).To(Succeed())
-		Expect(store.SaveCACert(certPEM)).To(Succeed())
-		Expect(store.UpdateCRL(crlPEM)).To(Succeed())
+		Expect(store.SaveCAKey(context.Background(), keyPEM)).To(Succeed())
+		Expect(store.SaveCACert(context.Background(), certPEM)).To(Succeed())
+		Expect(store.UpdateCRL(context.Background(), crlPEM)).To(Succeed())
 
 		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
-		Expect(myCA.Init()).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 		Expect(myCA.CACert).NotTo(BeNil())
 	})
 
@@ -1066,22 +1116,22 @@ var _ = Describe("loadCA key format support", func() {
 		mismatchKeyPEM, _, _, err := testutil.GenerateTestCA()
 		Expect(err).NotTo(HaveOccurred())
 
-		Expect(store.SaveCAKey(mismatchKeyPEM)).To(Succeed())
-		Expect(store.SaveCACert(certPEM)).To(Succeed())
-		Expect(store.UpdateCRL(crlPEM)).To(Succeed())
+		Expect(store.SaveCAKey(context.Background(), mismatchKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(context.Background(), certPEM)).To(Succeed())
+		Expect(store.UpdateCRL(context.Background(), crlPEM)).To(Succeed())
 
 		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
 		// Both files exist but don't match: Init must return an error.
-		Expect(myCA.Init()).To(HaveOccurred())
+		Expect(myCA.Init(context.Background())).To(HaveOccurred())
 	})
 
 	It("returns an error when the CA certificate PEM is malformed", func() {
-		Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
-		Expect(store.SaveCACert([]byte("NOT VALID PEM"))).To(Succeed())
-		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
+		Expect(store.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(context.Background(), []byte("NOT VALID PEM"))).To(Succeed())
+		Expect(store.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
 
 		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
-		Expect(myCA.Init()).To(HaveOccurred())
+		Expect(myCA.Init(context.Background())).To(HaveOccurred())
 	})
 })
 
@@ -1102,13 +1152,13 @@ var _ = Describe("CA expired cert guard", func() {
 
 		store = storage.New(tmpDir)
 		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
-		Expect(store.EnsureDirs()).To(Succeed())
-		Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
-		Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
-		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
-		Expect(store.WriteSerial("0001")).To(Succeed())
-		Expect(store.TouchInventory()).To(Succeed())
-		Expect(myCA.Init()).To(Succeed())
+		Expect(store.EnsureDirs(context.Background())).To(Succeed())
+		Expect(store.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial(context.Background(), "0001")).To(Succeed())
+		Expect(store.TouchInventory(context.Background())).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 	})
 
 	AfterEach(func() { os.RemoveAll(tmpDir) })
@@ -1117,7 +1167,7 @@ var _ = Describe("CA expired cert guard", func() {
 		// Save the CSR while the CA is still valid.
 		csrPEM, err := testutil.GenerateCSR("expired-ca-node")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest("expired-ca-node", csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), "expired-ca-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
 
 		// Synthesise an expired CA cert using the real CA key so the key-cert
@@ -1139,7 +1189,7 @@ var _ = Describe("CA expired cert guard", func() {
 
 		myCA.CACert = expiredCert
 
-		_, err = myCA.Sign("expired-ca-node")
+		_, err = myCA.Sign(context.Background(), "expired-ca-node")
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("expired"))
 	})
@@ -1161,13 +1211,13 @@ var _ = Describe("CA Clean", func() {
 
 		store = storage.New(tmpDir)
 		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
-		Expect(store.EnsureDirs()).To(Succeed())
-		Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
-		Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
-		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
-		Expect(store.WriteSerial("0001")).To(Succeed())
-		Expect(store.TouchInventory()).To(Succeed())
-		Expect(myCA.Init()).To(Succeed())
+		Expect(store.EnsureDirs(context.Background())).To(Succeed())
+		Expect(store.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial(context.Background(), "0001")).To(Succeed())
+		Expect(store.TouchInventory(context.Background())).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 	})
 
 	AfterEach(func() { os.RemoveAll(tmpDir) })
@@ -1175,21 +1225,21 @@ var _ = Describe("CA Clean", func() {
 	It("revokes the cert and removes it from disk", func() {
 		csrPEM, err := testutil.GenerateCSR("clean-cert-node")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest("clean-cert-node", csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), "clean-cert-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
-		certPEM, err := myCA.Sign("clean-cert-node")
+		certPEM, err := myCA.Sign(context.Background(), "clean-cert-node")
 		Expect(err).NotTo(HaveOccurred())
 
 		block, _ := pem.Decode(certPEM)
 		cert, err := x509.ParseCertificate(block.Bytes)
 		Expect(err).NotTo(HaveOccurred())
 
-		Expect(myCA.Clean("clean-cert-node")).To(Succeed())
+		Expect(myCA.Clean(context.Background(), "clean-cert-node")).To(Succeed())
 
 		// Cert file must be gone.
-		Expect(store.HasCert("clean-cert-node")).To(BeFalse())
+		Expect(store.HasCert(context.Background(), "clean-cert-node")).To(BeFalse())
 		// Serial must appear in the CRL (revoke happened before delete).
-		revoked, err := myCA.IsRevokedSerial(cert.SerialNumber)
+		revoked, err := myCA.IsRevokedSerial(context.Background(), cert.SerialNumber)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(revoked).To(BeTrue())
 	})
@@ -1197,17 +1247,17 @@ var _ = Describe("CA Clean", func() {
 	It("deletes a pending CSR when no cert exists", func() {
 		csrPEM, err := testutil.GenerateCSR("clean-csr-node")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest("clean-csr-node", csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), "clean-csr-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(store.HasCSR("clean-csr-node")).To(BeTrue())
+		Expect(store.HasCSR(context.Background(), "clean-csr-node")).To(BeTrue())
 
-		Expect(myCA.Clean("clean-csr-node")).To(Succeed())
+		Expect(myCA.Clean(context.Background(), "clean-csr-node")).To(Succeed())
 
-		Expect(store.HasCSR("clean-csr-node")).To(BeFalse())
+		Expect(store.HasCSR(context.Background(), "clean-csr-node")).To(BeFalse())
 	})
 
 	It("returns ErrNotFound when the subject has neither a cert nor a CSR", func() {
-		err := myCA.Clean("ghost-node")
+		err := myCA.Clean(context.Background(), "ghost-node")
 		Expect(errors.Is(err, ca.ErrNotFound)).To(BeTrue())
 	})
 })
@@ -1228,13 +1278,13 @@ var _ = Describe("CA bulk signing (SignMultiple and SignAll)", func() {
 
 		store = storage.New(tmpDir)
 		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
-		Expect(store.EnsureDirs()).To(Succeed())
-		Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
-		Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
-		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
-		Expect(store.WriteSerial("0001")).To(Succeed())
-		Expect(store.TouchInventory()).To(Succeed())
-		Expect(myCA.Init()).To(Succeed())
+		Expect(store.EnsureDirs(context.Background())).To(Succeed())
+		Expect(store.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial(context.Background(), "0001")).To(Succeed())
+		Expect(store.TouchInventory(context.Background())).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 	})
 
 	AfterEach(func() { os.RemoveAll(tmpDir) })
@@ -1243,11 +1293,11 @@ var _ = Describe("CA bulk signing (SignMultiple and SignAll)", func() {
 		for _, sub := range []string{"bulk-1", "bulk-2"} {
 			csrPEM, err := testutil.GenerateCSR(sub)
 			Expect(err).NotTo(HaveOccurred())
-			_, err = myCA.SaveRequest(sub, csrPEM)
+			_, err = myCA.SaveRequest(context.Background(), sub, csrPEM)
 			Expect(err).NotTo(HaveOccurred())
 		}
 
-		result := myCA.SignMultiple([]string{"bulk-1", "bulk-2"})
+		result := myCA.SignMultiple(context.Background(), []string{"bulk-1", "bulk-2"})
 		Expect(result.Signed).To(ConsistOf("bulk-1", "bulk-2"))
 		Expect(result.NoCSR).To(BeEmpty())
 		Expect(result.SigningErrors).To(BeEmpty())
@@ -1256,10 +1306,10 @@ var _ = Describe("CA bulk signing (SignMultiple and SignAll)", func() {
 	It("SignMultiple reports subjects with no pending CSR in NoCSR", func() {
 		csrPEM, err := testutil.GenerateCSR("present-node")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest("present-node", csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), "present-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
 
-		result := myCA.SignMultiple([]string{"present-node", "absent-node"})
+		result := myCA.SignMultiple(context.Background(), []string{"present-node", "absent-node"})
 		Expect(result.Signed).To(ConsistOf("present-node"))
 		Expect(result.NoCSR).To(ConsistOf("absent-node"))
 		Expect(result.SigningErrors).To(BeEmpty())
@@ -1267,13 +1317,13 @@ var _ = Describe("CA bulk signing (SignMultiple and SignAll)", func() {
 
 	It("SignMultiple collects signing errors without stopping other subjects", func() {
 		// Save an unparseable CSR directly so HasCSR returns true but Sign fails.
-		Expect(store.SaveCSR("bad-csr-node", []byte("GARBAGE"))).To(Succeed())
+		Expect(store.SaveCSR(context.Background(), "bad-csr-node", []byte("GARBAGE"))).To(Succeed())
 		csrPEM, err := testutil.GenerateCSR("good-node")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest("good-node", csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), "good-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
 
-		result := myCA.SignMultiple([]string{"bad-csr-node", "good-node"})
+		result := myCA.SignMultiple(context.Background(), []string{"bad-csr-node", "good-node"})
 		Expect(result.Signed).To(ConsistOf("good-node"))
 		Expect(result.SigningErrors).To(ConsistOf("bad-csr-node"))
 		Expect(result.NoCSR).To(BeEmpty())
@@ -1283,11 +1333,11 @@ var _ = Describe("CA bulk signing (SignMultiple and SignAll)", func() {
 		for _, sub := range []string{"all-1", "all-2", "all-3"} {
 			csrPEM, err := testutil.GenerateCSR(sub)
 			Expect(err).NotTo(HaveOccurred())
-			_, err = myCA.SaveRequest(sub, csrPEM)
+			_, err = myCA.SaveRequest(context.Background(), sub, csrPEM)
 			Expect(err).NotTo(HaveOccurred())
 		}
 
-		result, err := myCA.SignAll()
+		result, err := myCA.SignAll(context.Background())
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.Signed).To(ConsistOf("all-1", "all-2", "all-3"))
 		Expect(result.NoCSR).To(BeEmpty())
@@ -1295,7 +1345,7 @@ var _ = Describe("CA bulk signing (SignMultiple and SignAll)", func() {
 	})
 
 	It("SignAll returns an empty result when no CSRs are pending", func() {
-		result, err := myCA.SignAll()
+		result, err := myCA.SignAll(context.Background())
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.Signed).To(BeEmpty())
 	})
@@ -1338,10 +1388,10 @@ var _ = Describe("CA ImportCA", func() {
 	It("imports a valid RSA CA with a provided CRL", func() {
 		keyPEM, certPEM, crlPEM, err := testutil.GenerateTestCA()
 		Expect(err).NotTo(HaveOccurred())
-		Expect(ca.ImportCA(store, certPEM, keyPEM, crlPEM)).To(Succeed())
-		Expect(store.HasCACert()).To(BeTrue())
-		Expect(store.HasCAKey()).To(BeTrue())
-		crl, err := store.GetCRL()
+		Expect(ca.ImportCA(context.Background(), store, certPEM, keyPEM, crlPEM)).To(Succeed())
+		Expect(store.HasCACert(context.Background())).To(BeTrue())
+		Expect(store.HasCAKey(context.Background())).To(BeTrue())
+		crl, err := store.GetCRL(context.Background())
 		Expect(err).NotTo(HaveOccurred())
 		Expect(crl).NotTo(BeEmpty())
 	})
@@ -1349,15 +1399,15 @@ var _ = Describe("CA ImportCA", func() {
 	It("imports a valid ECDSA CA and generates a fresh CRL when none is provided", func() {
 		keyPEM, certPEM, _, err := testutil.GenerateTestCAECDSA()
 		Expect(err).NotTo(HaveOccurred())
-		Expect(ca.ImportCA(store, certPEM, keyPEM, nil)).To(Succeed())
-		crlPEM, err := store.GetCRL()
+		Expect(ca.ImportCA(context.Background(), store, certPEM, keyPEM, nil)).To(Succeed())
+		crlPEM, err := store.GetCRL(context.Background())
 		Expect(err).NotTo(HaveOccurred())
 		Expect(crlPEM).NotTo(BeEmpty())
 	})
 
 	It("returns an error when the certificate is not a CA certificate", func() {
 		keyPEM, certPEM := generateNonCAKeyAndCert()
-		err := ca.ImportCA(store, certPEM, keyPEM, nil)
+		err := ca.ImportCA(context.Background(), store, certPEM, keyPEM, nil)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("IsCA=false"))
 	})
@@ -1367,7 +1417,7 @@ var _ = Describe("CA ImportCA", func() {
 		Expect(err).NotTo(HaveOccurred())
 		mismatchKeyPEM, _, _, err := testutil.GenerateTestCA()
 		Expect(err).NotTo(HaveOccurred())
-		err = ca.ImportCA(store, certPEM, mismatchKeyPEM, nil)
+		err = ca.ImportCA(context.Background(), store, certPEM, mismatchKeyPEM, nil)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("does not match"))
 	})
@@ -1375,23 +1425,23 @@ var _ = Describe("CA ImportCA", func() {
 	It("returns an error when the provided CRL is invalid PEM", func() {
 		keyPEM, certPEM, _, err := testutil.GenerateTestCA()
 		Expect(err).NotTo(HaveOccurred())
-		err = ca.ImportCA(store, certPEM, keyPEM, []byte("not valid PEM"))
+		err = ca.ImportCA(context.Background(), store, certPEM, keyPEM, []byte("not valid PEM"))
 		Expect(err).To(HaveOccurred())
 	})
 
 	It("does not overwrite existing serial and inventory files", func() {
 		keyPEM, certPEM, crlPEM, err := testutil.GenerateTestCA()
 		Expect(err).NotTo(HaveOccurred())
-		Expect(store.EnsureDirs()).To(Succeed())
-		Expect(store.WriteSerial("DEADBEEF")).To(Succeed())
-		Expect(store.Backend().Put(storage.KeyInventory, []byte("existing line\n"), storage.BlobPrivate)).To(Succeed())
+		Expect(store.EnsureDirs(context.Background())).To(Succeed())
+		Expect(store.WriteSerial(context.Background(), "DEADBEEF")).To(Succeed())
+		Expect(store.Backend().Put(context.Background(), storage.KeyInventory, []byte("existing line\n"), storage.BlobPrivate)).To(Succeed())
 
-		Expect(ca.ImportCA(store, certPEM, keyPEM, crlPEM)).To(Succeed())
+		Expect(ca.ImportCA(context.Background(), store, certPEM, keyPEM, crlPEM)).To(Succeed())
 
-		serialData, err := store.GetSerial()
+		serialData, err := store.GetSerial(context.Background())
 		Expect(err).NotTo(HaveOccurred())
 		Expect(string(serialData)).To(Equal("DEADBEEF"))
-		invData, err := store.ReadInventory()
+		invData, err := store.ReadInventory(context.Background())
 		Expect(err).NotTo(HaveOccurred())
 		Expect(string(invData)).To(Equal("existing line\n"))
 	})
@@ -1421,9 +1471,9 @@ var _ = Describe("CA ImportCA", func() {
 		Expect(err).NotTo(HaveOccurred())
 		pkcs8PEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8DER})
 
-		Expect(ca.ImportCA(store, certPEM, pkcs8PEM, nil)).To(Succeed())
-		Expect(store.HasCACert()).To(BeTrue())
-		Expect(store.HasCAKey()).To(BeTrue())
+		Expect(ca.ImportCA(context.Background(), store, certPEM, pkcs8PEM, nil)).To(Succeed())
+		Expect(store.HasCACert(context.Background())).To(BeTrue())
+		Expect(store.HasCAKey(context.Background())).To(BeTrue())
 	})
 })
 
@@ -1442,13 +1492,13 @@ var _ = Describe("Concurrent SaveRequest", func() {
 		store = storage.New(tmpDir)
 		myCA = ca.New(store, ca.AutosignConfig{Mode: "true"}, "puppet.test")
 
-		Expect(store.EnsureDirs()).To(Succeed())
-		Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
-		Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
-		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
-		Expect(store.WriteSerial("0001")).To(Succeed())
-		Expect(store.TouchInventory()).To(Succeed())
-		Expect(myCA.Init()).To(Succeed())
+		Expect(store.EnsureDirs(context.Background())).To(Succeed())
+		Expect(store.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial(context.Background(), "0001")).To(Succeed())
+		Expect(store.TouchInventory(context.Background())).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 	})
 
 	AfterEach(func() {
@@ -1464,14 +1514,14 @@ var _ = Describe("Concurrent SaveRequest", func() {
 		errCount := 0
 		var mu sync.Mutex
 
-		for i := 0; i < goroutines; i++ {
+		for range goroutines {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				csrPEM, err := testutil.GenerateCSR(subject)
 				Expect(err).NotTo(HaveOccurred())
 
-				signed, err := myCA.SaveRequest(subject, csrPEM)
+				signed, err := myCA.SaveRequest(context.Background(), subject, csrPEM)
 				mu.Lock()
 				defer mu.Unlock()
 				if err != nil {
@@ -1487,9 +1537,9 @@ var _ = Describe("Concurrent SaveRequest", func() {
 		Expect(signedCount).To(Equal(1), "expected exactly one autosign success")
 
 		// Exactly one signed cert should exist on disk.
-		Expect(store.HasCert(subject)).To(BeTrue())
+		Expect(store.HasCert(context.Background(), subject)).To(BeTrue())
 
 		// No pending CSR should remain (autosign deletes it after signing).
-		Expect(store.HasCSR(subject)).To(BeFalse())
+		Expect(store.HasCSR(context.Background(), subject)).To(BeFalse())
 	})
 })

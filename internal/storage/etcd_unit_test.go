@@ -61,6 +61,30 @@ func TestDecodeBlobRejectsShortInput(t *testing.T) {
 	}
 }
 
+// TestDecodeBlobReturnsIndependentBuffer verifies that the returned data slice
+// does not alias the input buffer. The etcd and redis Get paths return this
+// slice straight to callers; if it shared the client's response buffer, a
+// caller modifying the slice would corrupt the client's internal state, and
+// a future read of the same buffer would observe stale or torn bytes.
+func TestDecodeBlobReturnsIndependentBuffer(t *testing.T) {
+	when := time.Unix(0, time.Now().UnixNano())
+	original := []byte("payload-bytes")
+	enc := encodeBlob(when, original)
+
+	_, decoded, err := decodeBlob(enc)
+	if err != nil {
+		t.Fatalf("decodeBlob: %v", err)
+	}
+
+	// Mutate the source buffer; the decoded slice must not see the change.
+	for i := 8; i < len(enc); i++ {
+		enc[i] = 0xFF
+	}
+	if !bytes.Equal(decoded, original) {
+		t.Fatalf("decoded data aliases input buffer: got %q, want %q", decoded, original)
+	}
+}
+
 func TestEtcdPhysicalKey(t *testing.T) {
 	b := &EtcdBackend{prefix: "/puppet-ca"}
 	tests := []struct {

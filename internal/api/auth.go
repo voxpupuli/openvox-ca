@@ -114,7 +114,7 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 		// after re-issuance. Fail-closed: a CRL read error is also treated
 		// as a denial.
 		// NIST 800-53: IA-5(2) (PKI-Based Authentication), SC-17 (PKI Certificates)
-		if revoked, err := myCA.IsRevokedSerial(clientCert.SerialNumber); err != nil || revoked {
+		if revoked, err := myCA.IsRevokedSerial(r.Context(), clientCert.SerialNumber); err != nil || revoked {
 			if err != nil {
 				slog.Warn("Auth: CRL check failed (denying)", "cn", clientCN, "error", err)
 			} else {

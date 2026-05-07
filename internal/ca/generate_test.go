@@ -17,6 +17,7 @@
 package ca_test
 
 import (
+	"context"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
@@ -45,13 +46,13 @@ var _ = Describe("CA Generate", func() {
 		store = storage.New(tmpDir)
 		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
 
-		Expect(store.EnsureDirs()).To(Succeed())
-		Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
-		Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
-		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
-		Expect(store.WriteSerial("0001")).To(Succeed())
-		Expect(store.TouchInventory()).To(Succeed())
-		Expect(myCA.Init()).To(Succeed())
+		Expect(store.EnsureDirs(context.Background())).To(Succeed())
+		Expect(store.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial(context.Background(), "0001")).To(Succeed())
+		Expect(store.TouchInventory(context.Background())).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 	})
 
 	AfterEach(func() {
@@ -59,7 +60,7 @@ var _ = Describe("CA Generate", func() {
 	})
 
 	It("creates a valid cert and key for a new subject", func() {
-		result, err := myCA.Generate("gen-node", nil)
+		result, err := myCA.Generate(context.Background(), "gen-node", nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result).NotTo(BeNil())
 
@@ -86,13 +87,13 @@ var _ = Describe("CA Generate", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		// Cert must be in the signed dir.
-		Expect(store.HasCert("gen-node")).To(BeTrue())
+		Expect(store.HasCert(context.Background(), "gen-node")).To(BeTrue())
 		// No pending CSR should remain after signing.
-		Expect(store.HasCSR("gen-node")).To(BeFalse())
+		Expect(store.HasCSR(context.Background(), "gen-node")).To(BeFalse())
 	})
 
 	It("includes DNS alt names when requested", func() {
-		result, err := myCA.Generate("gen-san-node", []string{"alt1.example.com", "alt2.example.com"})
+		result, err := myCA.Generate(context.Background(), "gen-san-node", []string{"alt1.example.com", "alt2.example.com"})
 		Expect(err).NotTo(HaveOccurred())
 
 		certBlock, _ := pem.Decode(result.CertificatePEM)
@@ -102,21 +103,21 @@ var _ = Describe("CA Generate", func() {
 	})
 
 	It("returns ErrCertExists when cert already exists for subject", func() {
-		_, err := myCA.Generate("gen-dup", nil)
+		_, err := myCA.Generate(context.Background(), "gen-dup", nil)
 		Expect(err).NotTo(HaveOccurred())
 
-		_, err = myCA.Generate("gen-dup", nil)
+		_, err = myCA.Generate(context.Background(), "gen-dup", nil)
 		Expect(err).To(HaveOccurred())
 		Expect(errors.Is(err, ca.ErrCertExists)).To(BeTrue())
 	})
 
 	It("returns error for invalid subject name", func() {
-		_, err := myCA.Generate("INVALID/Name", nil)
+		_, err := myCA.Generate(context.Background(), "INVALID/Name", nil)
 		Expect(err).To(HaveOccurred())
 	})
 
 	It("generated private key matches the certificate's public key", func() {
-		result, err := myCA.Generate("gen-key-match", nil)
+		result, err := myCA.Generate(context.Background(), "gen-key-match", nil)
 		Expect(err).NotTo(HaveOccurred())
 
 		keyBlock, _ := pem.Decode(result.PrivateKeyPEM)
@@ -139,20 +140,20 @@ var _ = Describe("CA Generate", func() {
 		Expect(os.Chmod(privDir, 0555)).To(Succeed())
 		defer os.Chmod(privDir, 0755) // restore for cleanup
 
-		_, err := myCA.Generate("gen-key-fail", nil)
+		_, err := myCA.Generate(context.Background(), "gen-key-fail", nil)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("failed to save private key"))
 
 		// The signed cert should NOT remain on disk.
-		Expect(store.HasCert("gen-key-fail")).To(BeFalse(),
+		Expect(store.HasCert(context.Background(), "gen-key-fail")).To(BeFalse(),
 			"cert should be cleaned up when private key save fails")
 
 		// No pending CSR should remain either.
-		Expect(store.HasCSR("gen-key-fail")).To(BeFalse())
+		Expect(store.HasCSR(context.Background(), "gen-key-fail")).To(BeFalse())
 	})
 
 	It("private key file exists on disk at expected path", func() {
-		_, err := myCA.Generate("gen-disk-key", nil)
+		_, err := myCA.Generate(context.Background(), "gen-disk-key", nil)
 		Expect(err).NotTo(HaveOccurred())
 
 		keyPath := filepath.Join(tmpDir, "private", "gen-disk-key_key.pem")

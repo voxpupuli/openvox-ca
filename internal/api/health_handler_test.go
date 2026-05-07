@@ -17,6 +17,7 @@
 package api_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -40,13 +41,13 @@ var _ = Describe("Health Endpoints", func() {
 		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
 
 		if initialized {
-			Expect(store.EnsureDirs()).To(Succeed())
-			Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
-			Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
-			Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
-			Expect(store.WriteSerial("0001")).To(Succeed())
-			Expect(store.TouchInventory()).To(Succeed())
-			Expect(myCA.Init()).To(Succeed())
+			Expect(store.EnsureDirs(context.Background())).To(Succeed())
+			Expect(store.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+			Expect(store.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+			Expect(store.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
+			Expect(store.WriteSerial(context.Background(), "0001")).To(Succeed())
+			Expect(store.TouchInventory(context.Background())).To(Succeed())
+			Expect(myCA.Init(context.Background())).To(Succeed())
 		}
 
 		srv := api.New(myCA)
@@ -67,13 +68,13 @@ var _ = Describe("Health Endpoints", func() {
 	newAuthedMux := func() http.Handler {
 		store := storage.New(tmpDir)
 		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
-		Expect(store.EnsureDirs()).To(Succeed())
-		Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
-		Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
-		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
-		Expect(store.WriteSerial("0001")).To(Succeed())
-		Expect(store.TouchInventory()).To(Succeed())
-		Expect(myCA.Init()).To(Succeed())
+		Expect(store.EnsureDirs(context.Background())).To(Succeed())
+		Expect(store.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial(context.Background(), "0001")).To(Succeed())
+		Expect(store.TouchInventory(context.Background())).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 		srv := api.New(myCA)
 		srv.AuthConfig = &api.AuthConfig{
 			CACert:    myCA.CACert,

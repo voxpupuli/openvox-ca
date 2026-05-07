@@ -17,6 +17,7 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -146,10 +147,10 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 	slog.Debug("GET certificate_status", "subject", subject, "client", clientCN(r))
 
 	// Check signed dir first.
-	certPEM, err := s.CA.Storage.GetCert(subject)
+	certPEM, err := s.CA.Storage.GetCert(r.Context(), subject)
 	if err == nil {
 		state := "signed"
-		if s.CA.IsRevoked(subject) {
+		if s.CA.IsRevoked(r.Context(), subject) {
 			state = "revoked"
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -158,7 +159,7 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check CSR (requested).
-	csrPEM, err := s.CA.Storage.GetCSR(subject)
+	csrPEM, err := s.CA.Storage.GetCSR(r.Context(), subject)
 	if err == nil {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(certStatusFromCSR(subject, csrPEM))
@@ -191,9 +192,9 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 	case "signed":
 		var err error
 		if body.CertTTL != nil && *body.CertTTL > 0 {
-			_, err = s.CA.SignWithTTL(subject, time.Duration(*body.CertTTL)*time.Second)
+			_, err = s.CA.SignWithTTL(r.Context(), subject, time.Duration(*body.CertTTL)*time.Second)
 		} else {
-			_, err = s.CA.Sign(subject)
+			_, err = s.CA.Sign(r.Context(), subject)
 		}
 		if err != nil {
 			slog.Warn("Sign failed", "subject", subject, "error", err)
@@ -207,7 +208,7 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 
 	case "revoked":
-		if err := s.CA.Revoke(subject); err != nil {
+		if err := s.CA.Revoke(r.Context(), subject); err != nil {
 			slog.Warn("Revoke failed", "subject", subject, "error", err)
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
@@ -231,7 +232,7 @@ func (s *Server) handleGetCert(w http.ResponseWriter, r *http.Request) {
 
 	// Special case: "ca" returns the CA cert.
 	if subject == "ca" {
-		certPEM, err := s.CA.Storage.GetCACert()
+		certPEM, err := s.CA.Storage.GetCACert(r.Context(), )
 		if err != nil {
 			http.Error(w, "CA cert not found", http.StatusNotFound)
 			return
@@ -246,7 +247,7 @@ func (s *Server) handleGetCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	certPEM, err := s.CA.Storage.GetCert(subject)
+	certPEM, err := s.CA.Storage.GetCert(r.Context(), subject)
 	if err != nil {
 		http.Error(w, "certificate not found", http.StatusNotFound)
 		return
@@ -263,7 +264,7 @@ func (s *Server) handleGetCRL(w http.ResponseWriter, r *http.Request) {
 	// Honor If-Modified-Since.
 	if ims := r.Header.Get("If-Modified-Since"); ims != "" {
 		if t, err := http.ParseTime(ims); err == nil {
-			if mt, err := s.CA.Storage.CRLModTime(); err == nil && !mt.IsZero() {
+			if mt, err := s.CA.Storage.CRLModTime(r.Context(), ); err == nil && !mt.IsZero() {
 				if !mt.After(t) {
 					w.WriteHeader(http.StatusNotModified)
 					return
@@ -272,7 +273,7 @@ func (s *Server) handleGetCRL(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	crlPEM, err := s.CA.Storage.GetCRL()
+	crlPEM, err := s.CA.Storage.GetCRL(r.Context(), )
 	if err != nil {
 		http.Error(w, "CRL not found", http.StatusNotFound)
 		return
@@ -291,7 +292,7 @@ func (s *Server) handleGetRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Debug("GET certificate_request", "subject", subject, "client", clientCN(r))
 
-	csrPEM, err := s.CA.Storage.GetCSR(subject)
+	csrPEM, err := s.CA.Storage.GetCSR(r.Context(), subject)
 	if err != nil {
 		http.Error(w, "CSR not found", http.StatusNotFound)
 		return
@@ -324,7 +325,7 @@ func (s *Server) handlePutRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	signed, err := s.CA.SaveRequest(subject, csrPEM)
+	signed, err := s.CA.SaveRequest(r.Context(), subject, csrPEM)
 	if err != nil {
 		slog.Warn("SaveRequest failed", "subject", subject, "error", err)
 		if errors.Is(err, ca.ErrCertExists) {
@@ -349,7 +350,7 @@ func (s *Server) handleDeleteRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Debug("DELETE certificate_request", "subject", subject, "client", clientCN(r))
 
-	if err := s.CA.Storage.DeleteCSR(subject); err != nil {
+	if err := s.CA.Storage.DeleteCSR(r.Context(), subject); err != nil {
 		http.Error(w, "CSR not found", http.StatusNotFound)
 		return
 	}
@@ -383,7 +384,7 @@ func (s *Server) handlePostGenerate(w http.ResponseWriter, r *http.Request) {
 	// Optional DNS alt names from query params (?dns=a&dns=b).
 	dnsAltNames := r.URL.Query()["dns"]
 
-	result, err := s.CA.Generate(subject, dnsAltNames)
+	result, err := s.CA.Generate(r.Context(), subject, dnsAltNames)
 	if err != nil {
 		if errors.Is(err, ca.ErrCertExists) {
 			http.Error(w, err.Error(), http.StatusConflict)
@@ -412,9 +413,9 @@ func clientCN(r *http.Request) string {
 // signInBatches signs subjects in chunks of SignBatchLimit (if set) and merges
 // the results. This prevents unbounded bulk signing while still completing the
 // full request rather than rejecting it.
-func (s *Server) signInBatches(subjects []string) ca.SignResult {
+func (s *Server) signInBatches(ctx context.Context, subjects []string) ca.SignResult {
 	if s.SignBatchLimit <= 0 || len(subjects) <= s.SignBatchLimit {
-		return s.CA.SignMultiple(subjects)
+		return s.CA.SignMultiple(ctx, subjects)
 	}
 
 	merged := ca.SignResult{
@@ -427,7 +428,7 @@ func (s *Server) signInBatches(subjects []string) ca.SignResult {
 		if end > len(subjects) {
 			end = len(subjects)
 		}
-		batch := s.CA.SignMultiple(subjects[i:end])
+		batch := s.CA.SignMultiple(ctx, subjects[i:end])
 		merged.Signed = append(merged.Signed, batch.Signed...)
 		merged.NoCSR = append(merged.NoCSR, batch.NoCSR...)
 		merged.SigningErrors = append(merged.SigningErrors, batch.SigningErrors...)
@@ -580,7 +581,7 @@ func (s *Server) handleDeleteStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Debug("DELETE certificate_status", "subject", subject, "client", clientCN(r))
 
-	if err := s.CA.Clean(subject); err != nil {
+	if err := s.CA.Clean(r.Context(), subject); err != nil {
 		slog.Warn("Clean failed", "subject", subject, "error", err)
 		if errors.Is(err, ca.ErrNotFound) {
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -603,12 +604,12 @@ func (s *Server) handleGetStatuses(w http.ResponseWriter, r *http.Request) {
 
 	stateFilter := r.URL.Query().Get("state") // "requested", "signed", "revoked", or ""
 
-	certs, err := s.CA.Storage.ListCerts()
+	certs, err := s.CA.Storage.ListCerts(r.Context(), )
 	if err != nil {
 		http.Error(w, "failed to list certs: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	csrs, err := s.CA.Storage.ListCSRs()
+	csrs, err := s.CA.Storage.ListCSRs(r.Context(), )
 	if err != nil {
 		http.Error(w, "failed to list CSRs: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -619,12 +620,12 @@ func (s *Server) handleGetStatuses(w http.ResponseWriter, r *http.Request) {
 	seen := make(map[string]bool)
 	for _, subject := range certs {
 		seen[subject] = true
-		certPEM, err := s.CA.Storage.GetCert(subject)
+		certPEM, err := s.CA.Storage.GetCert(r.Context(), subject)
 		if err != nil {
 			continue
 		}
 		state := "signed"
-		if s.CA.IsRevoked(subject) {
+		if s.CA.IsRevoked(r.Context(), subject) {
 			state = "revoked"
 		}
 		if stateFilter != "" && state != stateFilter {
@@ -639,7 +640,7 @@ func (s *Server) handleGetStatuses(w http.ResponseWriter, r *http.Request) {
 		if stateFilter != "" && stateFilter != "requested" {
 			continue
 		}
-		csrPEM, err := s.CA.Storage.GetCSR(subject)
+		csrPEM, err := s.CA.Storage.GetCSR(r.Context(), subject)
 		if err != nil {
 			continue
 		}
@@ -668,10 +669,16 @@ type CertExpiration struct {
 func (s *Server) handleGetExpirations(w http.ResponseWriter, r *http.Request) {
 	slog.Debug("GET expirations", "client", clientCN(r))
 
+	// Without this guard a request that reaches the handler before Init()
+	// finishes would dereference a nil CACert below and panic the server.
+	if !s.CA.IsReady() {
+		http.Error(w, "CA not ready", http.StatusServiceUnavailable)
+		return
+	}
 	certExp := s.CA.CACert.NotAfter.UTC().Format(time.RFC3339)
 
 	crlNextUpdate := ""
-	if crlPEM, err := s.CA.Storage.GetCRL(); err == nil {
+	if crlPEM, err := s.CA.Storage.GetCRL(r.Context(), ); err == nil {
 		if block, _ := pem.Decode(crlPEM); block != nil {
 			if crl, err := x509.ParseRevocationList(block.Bytes); err == nil {
 				crlNextUpdate = crl.NextUpdate.UTC().Format(time.RFC3339)
@@ -708,7 +715,7 @@ func (s *Server) handlePostSign(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Debug("Signing certificates", "count", len(body.Certnames), "subjects", body.Certnames, "client", cn)
-	result := s.signInBatches(body.Certnames)
+	result := s.signInBatches(r.Context(), body.Certnames)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
 }
@@ -717,13 +724,13 @@ func (s *Server) handlePostSignAll(w http.ResponseWriter, r *http.Request) {
 	cn := clientCN(r)
 	slog.Debug("POST sign/all", "client", cn)
 
-	pending, err := s.CA.Storage.ListCSRs()
+	pending, err := s.CA.Storage.ListCSRs(r.Context(), )
 	if err != nil {
 		http.Error(w, "failed to list pending CSRs: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	result := s.signInBatches(pending)
+	result := s.signInBatches(r.Context(), pending)
 	slog.Debug("Signed all pending CSRs", "signed", len(result.Signed), "errors", len(result.SigningErrors), "client", cn)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)

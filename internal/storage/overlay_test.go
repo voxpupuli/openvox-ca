@@ -18,6 +18,7 @@ package storage
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io/fs"
 	"os"
@@ -35,7 +36,7 @@ func overlayTestSetup(t *testing.T) (*OverlayBackend, string, string, string) {
 	keyPath := filepath.Join(overlayDir, "ca_key.pem")
 
 	base := NewFilesystemBackend(baseDir)
-	if err := base.EnsureReady(); err != nil {
+	if err := base.EnsureReady(context.Background()); err != nil {
 		t.Fatalf("base EnsureReady: %v", err)
 	}
 	ov, err := NewOverlayBackend(base, map[string]string{
@@ -45,7 +46,7 @@ func overlayTestSetup(t *testing.T) (*OverlayBackend, string, string, string) {
 	if err != nil {
 		t.Fatalf("NewOverlayBackend: %v", err)
 	}
-	if err := ov.EnsureReady(); err != nil {
+	if err := ov.EnsureReady(context.Background()); err != nil {
 		t.Fatalf("overlay EnsureReady: %v", err)
 	}
 	return ov, baseDir, certPath, keyPath
@@ -55,17 +56,17 @@ func TestOverlayBackendPutGetDelete(t *testing.T) {
 	ov, baseDir, certPath, keyPath := overlayTestSetup(t)
 
 	// Override keys: file doesn't exist yet.
-	if _, err := ov.Get(KeyCACert); !errors.Is(err, fs.ErrNotExist) {
+	if _, err := ov.Get(context.Background(), KeyCACert); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("Get missing override: err = %v, want fs.ErrNotExist", err)
 	}
-	ok, err := ov.Exists(KeyCACert)
+	ok, err := ov.Exists(context.Background(), KeyCACert)
 	if err != nil || ok {
 		t.Fatalf("Exists missing override: ok=%v err=%v", ok, err)
 	}
 
 	// Put a cert via the override: lands on the explicit path, not baseDir.
 	certData := []byte("cert-pem-data")
-	if err := ov.Put(KeyCACert, certData, BlobPublic); err != nil {
+	if err := ov.Put(context.Background(), KeyCACert, certData, BlobPublic); err != nil {
 		t.Fatalf("Put cert: %v", err)
 	}
 	onDisk, err := os.ReadFile(certPath)
@@ -82,7 +83,7 @@ func TestOverlayBackendPutGetDelete(t *testing.T) {
 
 	// Put a key via the override: private permissions.
 	keyData := []byte("key-pem-data")
-	if err := ov.Put(KeyCAKey, keyData, BlobPrivate); err != nil {
+	if err := ov.Put(context.Background(), KeyCAKey, keyData, BlobPrivate); err != nil {
 		t.Fatalf("Put key: %v", err)
 	}
 	info, err := os.Stat(keyPath)
@@ -94,7 +95,7 @@ func TestOverlayBackendPutGetDelete(t *testing.T) {
 	}
 
 	// Non-overridden keys are delegated to the base filesystem backend.
-	if err := ov.Put(KeySerial, []byte("0001"), BlobPublic); err != nil {
+	if err := ov.Put(context.Background(), KeySerial, []byte("0001"), BlobPublic); err != nil {
 		t.Fatalf("Put serial: %v", err)
 	}
 	baseSerial, err := os.ReadFile(filepath.Join(baseDir, "serial"))
@@ -106,10 +107,10 @@ func TestOverlayBackendPutGetDelete(t *testing.T) {
 	}
 
 	// Delete via override.
-	if err := ov.Delete(KeyCACert); err != nil {
+	if err := ov.Delete(context.Background(), KeyCACert); err != nil {
 		t.Fatalf("Delete override: %v", err)
 	}
-	if err := ov.Delete(KeyCACert); !errors.Is(err, fs.ErrNotExist) {
+	if err := ov.Delete(context.Background(), KeyCACert); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("Delete missing: err = %v, want fs.ErrNotExist", err)
 	}
 }
@@ -131,14 +132,14 @@ func TestOverlayBackendReadsPreexistingFile(t *testing.T) {
 		t.Fatalf("NewOverlayBackend: %v", err)
 	}
 
-	got, err := ov.Get(KeyCACert)
+	got, err := ov.Get(context.Background(), KeyCACert)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	if !bytes.Equal(got, supplied) {
 		t.Errorf("Get = %q, want %q", got, supplied)
 	}
-	ok, err := ov.Exists(KeyCACert)
+	ok, err := ov.Exists(context.Background(), KeyCACert)
 	if err != nil || !ok {
 		t.Errorf("Exists = %v, %v; want true, nil", ok, err)
 	}
@@ -147,12 +148,12 @@ func TestOverlayBackendReadsPreexistingFile(t *testing.T) {
 func TestOverlayBackendAppendLineRejectsOverride(t *testing.T) {
 	ov, _, _, _ := overlayTestSetup(t)
 	// KeyInventory is not overridden, so append should work and land in base.
-	if err := ov.AppendLine(KeyInventory, []byte("line\n"), BlobPrivate); err != nil {
+	if err := ov.AppendLine(context.Background(), KeyInventory, []byte("line\n"), BlobPrivate); err != nil {
 		t.Fatalf("AppendLine to non-overridden key: %v", err)
 	}
 	// Force an override on KeyInventory and confirm AppendLine refuses.
 	ov.overrides[KeyInventory] = "/tmp/should-not-append"
-	if err := ov.AppendLine(KeyInventory, []byte("line\n"), BlobPrivate); err == nil {
+	if err := ov.AppendLine(context.Background(), KeyInventory, []byte("line\n"), BlobPrivate); err == nil {
 		t.Errorf("AppendLine on overridden key should error")
 	}
 }

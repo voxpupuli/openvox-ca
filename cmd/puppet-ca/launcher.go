@@ -114,8 +114,11 @@ func runLauncher() error {
 		"frontend_pid", frontendCmd.Process.Pid,
 	)
 
-	// Forward termination signals to children.
-	sigCh := make(chan os.Signal, 1)
+	// Forward termination signals to children. The buffer matches the
+	// number of registered signals so a coincident SIGTERM+SIGINT (e.g.
+	// terminal Ctrl-C racing with a supervisor SIGTERM) cannot drop a
+	// notification and leave the launcher hung.
+	sigCh := make(chan os.Signal, 2)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
 	// Wait for either child to exit.

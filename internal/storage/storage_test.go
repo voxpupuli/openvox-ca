@@ -17,6 +17,7 @@
 package storage_test
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -65,7 +66,7 @@ var _ = Describe("StorageService", func() {
 
 	Describe("EnsureDirs", func() {
 		It("creates all required subdirectories", func() {
-			Expect(store.EnsureDirs()).To(Succeed())
+			Expect(store.EnsureDirs(context.Background())).To(Succeed())
 			for _, sub := range []string{"signed", "requests", "private"} {
 				info, err := os.Stat(filepath.Join(tmpDir, sub))
 				Expect(err).NotTo(HaveOccurred(), "missing subdirectory: %s", sub)
@@ -74,8 +75,8 @@ var _ = Describe("StorageService", func() {
 		})
 
 		It("is idempotent", func() {
-			Expect(store.EnsureDirs()).To(Succeed())
-			Expect(store.EnsureDirs()).To(Succeed())
+			Expect(store.EnsureDirs(context.Background())).To(Succeed())
+			Expect(store.EnsureDirs(context.Background())).To(Succeed())
 		})
 	})
 
@@ -83,12 +84,12 @@ var _ = Describe("StorageService", func() {
 
 	Describe("Serial", func() {
 		BeforeEach(func() {
-			Expect(store.EnsureDirs()).To(Succeed())
+			Expect(store.EnsureDirs(context.Background())).To(Succeed())
 		})
 
 		It("WriteSerial persists the value and GetSerial reads it back", func() {
-			Expect(store.WriteSerial("DEADBEEF")).To(Succeed())
-			data, err := store.GetSerial()
+			Expect(store.WriteSerial(context.Background(), "DEADBEEF")).To(Succeed())
+			data, err := store.GetSerial(context.Background())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(string(data)).To(Equal("DEADBEEF"))
 		})
@@ -98,15 +99,15 @@ var _ = Describe("StorageService", func() {
 
 	Describe("Inventory", func() {
 		BeforeEach(func() {
-			Expect(store.EnsureDirs()).To(Succeed())
-			Expect(store.TouchInventory()).To(Succeed())
+			Expect(store.EnsureDirs(context.Background())).To(Succeed())
+			Expect(store.TouchInventory(context.Background())).To(Succeed())
 		})
 
 		It("AppendInventory and ReadInventory roundtrip", func() {
-			Expect(store.AppendInventory("0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1")).To(Succeed())
-			Expect(store.AppendInventory("0002 2024-01-02T00:00:00UTC 2029-01-02T00:00:00UTC /node2")).To(Succeed())
+			Expect(store.AppendInventory(context.Background(), "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1")).To(Succeed())
+			Expect(store.AppendInventory(context.Background(), "0002 2024-01-02T00:00:00UTC 2029-01-02T00:00:00UTC /node2")).To(Succeed())
 
-			data, err := store.ReadInventory()
+			data, err := store.ReadInventory(context.Background())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(string(data)).To(ContainSubstring("/node1"))
 			Expect(string(data)).To(ContainSubstring("/node2"))
@@ -114,7 +115,7 @@ var _ = Describe("StorageService", func() {
 
 		It("ReadInventory returns an error when inventory file is missing", func() {
 			Expect(os.Remove(store.InventoryPath())).To(Succeed())
-			_, err := store.ReadInventory()
+			_, err := store.ReadInventory(context.Background())
 			Expect(err).To(HaveOccurred())
 		})
 
@@ -126,12 +127,12 @@ var _ = Describe("StorageService", func() {
 				go func(idx int) {
 					defer wg.Done()
 					entry := fmt.Sprintf("%04X 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node-%d", idx, idx)
-					Expect(store.AppendInventory(entry)).To(Succeed())
+					Expect(store.AppendInventory(context.Background(), entry)).To(Succeed())
 				}(i)
 			}
 			wg.Wait()
 
-			data, err := store.ReadInventory()
+			data, err := store.ReadInventory(context.Background())
 			Expect(err).NotTo(HaveOccurred())
 			lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
 			Expect(lines).To(HaveLen(n))
@@ -142,20 +143,20 @@ var _ = Describe("StorageService", func() {
 
 	Describe("CRL", func() {
 		BeforeEach(func() {
-			Expect(store.EnsureDirs()).To(Succeed())
+			Expect(store.EnsureDirs(context.Background())).To(Succeed())
 		})
 
 		It("UpdateCRL and GetCRL roundtrip", func() {
 			data := []byte("-----BEGIN X509 CRL-----\nfakedata\n-----END X509 CRL-----\n")
-			Expect(store.UpdateCRL(data)).To(Succeed())
+			Expect(store.UpdateCRL(context.Background(), data)).To(Succeed())
 
-			got, err := store.GetCRL()
+			got, err := store.GetCRL(context.Background())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got).To(Equal(data))
 		})
 
 		It("GetCRL returns an error when no CRL file exists", func() {
-			_, err := store.GetCRL()
+			_, err := store.GetCRL(context.Background())
 			Expect(err).To(HaveOccurred())
 		})
 	})
@@ -167,31 +168,31 @@ var _ = Describe("StorageService", func() {
 		csrData := []byte("-----BEGIN CERTIFICATE REQUEST-----\nfake\n-----END CERTIFICATE REQUEST-----\n")
 
 		BeforeEach(func() {
-			Expect(store.EnsureDirs()).To(Succeed())
+			Expect(store.EnsureDirs(context.Background())).To(Succeed())
 		})
 
 		It("SaveCSR / GetCSR roundtrip", func() {
-			Expect(store.SaveCSR(subject, csrData)).To(Succeed())
-			got, err := store.GetCSR(subject)
+			Expect(store.SaveCSR(context.Background(), subject, csrData)).To(Succeed())
+			got, err := store.GetCSR(context.Background(), subject)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got).To(Equal(csrData))
 		})
 
 		It("HasCSR reflects presence on disk", func() {
-			Expect(store.HasCSR(subject)).To(BeFalse())
-			Expect(store.SaveCSR(subject, csrData)).To(Succeed())
-			Expect(store.HasCSR(subject)).To(BeTrue())
-			Expect(store.DeleteCSR(subject)).To(Succeed())
-			Expect(store.HasCSR(subject)).To(BeFalse())
+			Expect(store.HasCSR(context.Background(), subject)).To(BeFalse())
+			Expect(store.SaveCSR(context.Background(), subject, csrData)).To(Succeed())
+			Expect(store.HasCSR(context.Background(), subject)).To(BeTrue())
+			Expect(store.DeleteCSR(context.Background(), subject)).To(Succeed())
+			Expect(store.HasCSR(context.Background(), subject)).To(BeFalse())
 		})
 
 		It("GetCSR returns an error for a missing subject", func() {
-			_, err := store.GetCSR(subject)
+			_, err := store.GetCSR(context.Background(), subject)
 			Expect(err).To(HaveOccurred())
 		})
 
 		It("DeleteCSR returns an error for a missing subject", func() {
-			err := store.DeleteCSR(subject)
+			err := store.DeleteCSR(context.Background(), subject)
 			Expect(err).To(HaveOccurred())
 		})
 	})
@@ -203,31 +204,31 @@ var _ = Describe("StorageService", func() {
 		certData := []byte("-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n")
 
 		BeforeEach(func() {
-			Expect(store.EnsureDirs()).To(Succeed())
+			Expect(store.EnsureDirs(context.Background())).To(Succeed())
 		})
 
 		It("SaveCert / GetCert roundtrip", func() {
-			Expect(store.SaveCert(subject, certData)).To(Succeed())
-			got, err := store.GetCert(subject)
+			Expect(store.SaveCert(context.Background(), subject, certData)).To(Succeed())
+			got, err := store.GetCert(context.Background(), subject)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got).To(Equal(certData))
 		})
 
 		It("HasCert reflects presence on disk", func() {
-			Expect(store.HasCert(subject)).To(BeFalse())
-			Expect(store.SaveCert(subject, certData)).To(Succeed())
-			Expect(store.HasCert(subject)).To(BeTrue())
-			Expect(store.DeleteCert(subject)).To(Succeed())
-			Expect(store.HasCert(subject)).To(BeFalse())
+			Expect(store.HasCert(context.Background(), subject)).To(BeFalse())
+			Expect(store.SaveCert(context.Background(), subject, certData)).To(Succeed())
+			Expect(store.HasCert(context.Background(), subject)).To(BeTrue())
+			Expect(store.DeleteCert(context.Background(), subject)).To(Succeed())
+			Expect(store.HasCert(context.Background(), subject)).To(BeFalse())
 		})
 
 		It("GetCert returns an error for a missing subject", func() {
-			_, err := store.GetCert(subject)
+			_, err := store.GetCert(context.Background(), subject)
 			Expect(err).To(HaveOccurred())
 		})
 
 		It("DeleteCert returns an error for a missing subject", func() {
-			err := store.DeleteCert(subject)
+			err := store.DeleteCert(context.Background(), subject)
 			Expect(err).To(HaveOccurred())
 		})
 	})
@@ -236,29 +237,29 @@ var _ = Describe("StorageService", func() {
 
 	Describe("ListCSRs", func() {
 		BeforeEach(func() {
-			Expect(store.EnsureDirs()).To(Succeed())
+			Expect(store.EnsureDirs(context.Background())).To(Succeed())
 		})
 
 		It("returns an empty slice when no CSRs are present", func() {
-			subjects, err := store.ListCSRs()
+			subjects, err := store.ListCSRs(context.Background())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(subjects).To(BeEmpty())
 		})
 
 		It("returns subjects for all .pem files in the requests directory", func() {
 			for _, sub := range []string{"alpha", "beta", "gamma"} {
-				Expect(store.SaveCSR(sub, []byte("fake"))).To(Succeed())
+				Expect(store.SaveCSR(context.Background(), sub, []byte("fake"))).To(Succeed())
 			}
-			subjects, err := store.ListCSRs()
+			subjects, err := store.ListCSRs(context.Background())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(subjects).To(ConsistOf("alpha", "beta", "gamma"))
 		})
 
 		It("ignores non-.pem files in the requests directory", func() {
-			Expect(store.SaveCSR("real-node", []byte("fake"))).To(Succeed())
+			Expect(store.SaveCSR(context.Background(), "real-node", []byte("fake"))).To(Succeed())
 			// Write a stray non-PEM file directly into the directory.
 			Expect(os.WriteFile(filepath.Join(store.CSRDir(), "ignore.txt"), []byte("x"), 0644)).To(Succeed())
-			subjects, err := store.ListCSRs()
+			subjects, err := store.ListCSRs(context.Background())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(subjects).To(ConsistOf("real-node"))
 		})
@@ -268,7 +269,7 @@ var _ = Describe("StorageService", func() {
 
 	Describe("CheckKeyPermissions", func() {
 		BeforeEach(func() {
-			Expect(store.EnsureDirs()).To(Succeed())
+			Expect(store.EnsureDirs(context.Background())).To(Succeed())
 		})
 
 		It("returns nil when no key files exist", func() {
@@ -329,22 +330,22 @@ var _ = Describe("StorageService", func() {
 
 	Describe("HMAC inventory integrity", func() {
 		BeforeEach(func() {
-			Expect(store.EnsureDirs()).To(Succeed())
+			Expect(store.EnsureDirs(context.Background())).To(Succeed())
 		})
 
 		Describe("EnsureHMACKey", func() {
 			It("generates a key on first call and returns the same key on second call", func() {
-				key1, err := store.EnsureHMACKey()
+				key1, err := store.EnsureHMACKey(context.Background())
 				Expect(err).NotTo(HaveOccurred())
 				Expect(key1).To(HaveLen(32))
 
-				key2, err := store.EnsureHMACKey()
+				key2, err := store.EnsureHMACKey(context.Background())
 				Expect(err).NotTo(HaveOccurred())
 				Expect(key2).To(Equal(key1))
 			})
 
 			It("stores the key file with 0600 permissions", func() {
-				_, err := store.EnsureHMACKey()
+				_, err := store.EnsureHMACKey(context.Background())
 				Expect(err).NotTo(HaveOccurred())
 
 				info, err := os.Stat(store.HMACKeyPath())
@@ -355,7 +356,7 @@ var _ = Describe("StorageService", func() {
 
 		Describe("InitHMAC", func() {
 			It("succeeds on a fresh directory and creates the HMAC file", func() {
-				Expect(store.InitHMAC()).To(Succeed())
+				Expect(store.InitHMAC(context.Background())).To(Succeed())
 
 				hmacPath := filepath.Join(tmpDir, ".inventory.hmac")
 				_, err := os.Stat(hmacPath)
@@ -365,42 +366,42 @@ var _ = Describe("StorageService", func() {
 			It("succeeds when inventory already has content", func() {
 				// Pre-populate inventory before HMAC initialization.
 				Expect(os.WriteFile(store.InventoryPath(), []byte("0001 2024-01-01 2029-01-01 /node1\n"), storage.FilePermPrivate)).To(Succeed())
-				Expect(store.InitHMAC()).To(Succeed())
+				Expect(store.InitHMAC(context.Background())).To(Succeed())
 			})
 		})
 
 		Describe("VerifyInventoryHMAC", func() {
 			It("passes with a valid inventory", func() {
-				key, err := store.EnsureHMACKey()
+				key, err := store.EnsureHMACKey(context.Background())
 				Expect(err).NotTo(HaveOccurred())
 
 				// Write inventory and compute initial HMAC.
 				Expect(os.WriteFile(store.InventoryPath(), []byte("0001 2024-01-01 2029-01-01 /node1\n"), storage.FilePermPrivate)).To(Succeed())
-				Expect(store.UpdateInventoryHMAC(key)).To(Succeed())
+				Expect(store.UpdateInventoryHMAC(context.Background(), key)).To(Succeed())
 
-				Expect(store.VerifyInventoryHMAC(key)).To(Succeed())
+				Expect(store.VerifyInventoryHMAC(context.Background(), key)).To(Succeed())
 			})
 
 			It("fails after the inventory has been tampered with", func() {
-				key, err := store.EnsureHMACKey()
+				key, err := store.EnsureHMACKey(context.Background())
 				Expect(err).NotTo(HaveOccurred())
 
 				Expect(os.WriteFile(store.InventoryPath(), []byte("0001 2024-01-01 2029-01-01 /node1\n"), storage.FilePermPrivate)).To(Succeed())
-				Expect(store.UpdateInventoryHMAC(key)).To(Succeed())
+				Expect(store.UpdateInventoryHMAC(context.Background(), key)).To(Succeed())
 
 				// Tamper with the inventory.
 				Expect(os.WriteFile(store.InventoryPath(), []byte("0001 2024-01-01 2029-01-01 /evil-node\n"), storage.FilePermPrivate)).To(Succeed())
 
-				err = store.VerifyInventoryHMAC(key)
+				err = store.VerifyInventoryHMAC(context.Background(), key)
 				Expect(err).To(MatchError(storage.ErrInventoryTampered))
 			})
 
 			It("initializes HMAC baseline when no HMAC file exists yet", func() {
-				key, err := store.EnsureHMACKey()
+				key, err := store.EnsureHMACKey(context.Background())
 				Expect(err).NotTo(HaveOccurred())
 
 				// VerifyInventoryHMAC on first call should create the HMAC file (migration).
-				Expect(store.VerifyInventoryHMAC(key)).To(Succeed())
+				Expect(store.VerifyInventoryHMAC(context.Background(), key)).To(Succeed())
 
 				hmacPath := filepath.Join(tmpDir, ".inventory.hmac")
 				_, err = os.Stat(hmacPath)
@@ -410,12 +411,12 @@ var _ = Describe("StorageService", func() {
 
 		Describe("AppendInventory + ReadInventory round-trip with HMAC", func() {
 			It("works normally when HMAC is initialized", func() {
-				Expect(store.InitHMAC()).To(Succeed())
+				Expect(store.InitHMAC(context.Background())).To(Succeed())
 
-				Expect(store.AppendInventory("0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1")).To(Succeed())
-				Expect(store.AppendInventory("0002 2024-01-02T00:00:00UTC 2029-01-02T00:00:00UTC /node2")).To(Succeed())
+				Expect(store.AppendInventory(context.Background(), "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1")).To(Succeed())
+				Expect(store.AppendInventory(context.Background(), "0002 2024-01-02T00:00:00UTC 2029-01-02T00:00:00UTC /node2")).To(Succeed())
 
-				data, err := store.ReadInventory()
+				data, err := store.ReadInventory(context.Background())
 				Expect(err).NotTo(HaveOccurred())
 				Expect(string(data)).To(ContainSubstring("/node1"))
 				Expect(string(data)).To(ContainSubstring("/node2"))
@@ -424,15 +425,15 @@ var _ = Describe("StorageService", func() {
 
 		Describe("Tamper detection end-to-end", func() {
 			It("ReadInventory returns ErrInventoryTampered when inventory is modified after InitHMAC", func() {
-				Expect(store.InitHMAC()).To(Succeed())
+				Expect(store.InitHMAC(context.Background())).To(Succeed())
 
-				Expect(store.AppendInventory("0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /legit-node")).To(Succeed())
+				Expect(store.AppendInventory(context.Background(), "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /legit-node")).To(Succeed())
 
 				// Tamper with the inventory file directly on disk.
 				invPath := store.InventoryPath()
 				Expect(os.WriteFile(invPath, []byte("0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /attacker-node\n"), storage.FilePermPrivate)).To(Succeed())
 
-				_, err := store.ReadInventory()
+				_, err := store.ReadInventory(context.Background())
 				Expect(err).To(MatchError(storage.ErrInventoryTampered))
 			})
 		})
@@ -442,14 +443,14 @@ var _ = Describe("StorageService", func() {
 
 	Describe("Inventory file permissions", func() {
 		BeforeEach(func() {
-			Expect(store.EnsureDirs()).To(Succeed())
+			Expect(store.EnsureDirs(context.Background())).To(Succeed())
 		})
 
 		It("AppendInventory creates inventory with 0600 permissions", func() {
 			// Ensure no pre-existing inventory file.
 			os.Remove(store.InventoryPath())
 
-			Expect(store.AppendInventory("0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1")).To(Succeed())
+			Expect(store.AppendInventory(context.Background(), "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1")).To(Succeed())
 
 			info, err := os.Stat(store.InventoryPath())
 			Expect(err).NotTo(HaveOccurred())
@@ -461,28 +462,28 @@ var _ = Describe("StorageService", func() {
 
 	Describe("ListCerts", func() {
 		BeforeEach(func() {
-			Expect(store.EnsureDirs()).To(Succeed())
+			Expect(store.EnsureDirs(context.Background())).To(Succeed())
 		})
 
 		It("returns an empty slice when no certs are present", func() {
-			subjects, err := store.ListCerts()
+			subjects, err := store.ListCerts(context.Background())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(subjects).To(BeEmpty())
 		})
 
 		It("returns subjects for all .pem files in the signed directory", func() {
 			for _, sub := range []string{"node-1", "node-2", "node-3"} {
-				Expect(store.SaveCert(sub, []byte("fake"))).To(Succeed())
+				Expect(store.SaveCert(context.Background(), sub, []byte("fake"))).To(Succeed())
 			}
-			subjects, err := store.ListCerts()
+			subjects, err := store.ListCerts(context.Background())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(subjects).To(ConsistOf("node-1", "node-2", "node-3"))
 		})
 
 		It("ignores non-.pem files in the signed directory", func() {
-			Expect(store.SaveCert("real-cert", []byte("fake"))).To(Succeed())
+			Expect(store.SaveCert(context.Background(), "real-cert", []byte("fake"))).To(Succeed())
 			Expect(os.WriteFile(filepath.Join(store.SignedDir(), "stray.log"), []byte("x"), 0644)).To(Succeed())
-			subjects, err := store.ListCerts()
+			subjects, err := store.ListCerts(context.Background())
 			Expect(err).NotTo(HaveOccurred())
 			Expect(subjects).To(ConsistOf("real-cert"))
 		})

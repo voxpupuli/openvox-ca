@@ -100,7 +100,7 @@ func startEmbeddedEtcd(t *testing.T) (*clientv3.Client, func()) {
 func newBackend(t *testing.T, cli *clientv3.Client, prefix string) *EtcdBackend {
 	t.Helper()
 	b := NewEtcdBackendFromClient(cli, prefix, 5*time.Second)
-	if err := b.EnsureReady(); err != nil {
+	if err := b.EnsureReady(context.Background()); err != nil {
 		t.Fatalf("EnsureReady: %v", err)
 	}
 	return b
@@ -112,36 +112,36 @@ func TestEtcdBackendPutGetDelete(t *testing.T) {
 	b := newBackend(t, cli, "/test1")
 
 	// Missing key → wrapped fs.ErrNotExist.
-	if _, err := b.Get(KeyCACert); !errors.Is(err, fs.ErrNotExist) {
+	if _, err := b.Get(context.Background(), KeyCACert); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("Get on missing key: err = %v, want fs.ErrNotExist", err)
 	}
-	ok, err := b.Exists(KeyCACert)
+	ok, err := b.Exists(context.Background(), KeyCACert)
 	if err != nil || ok {
 		t.Fatalf("Exists on missing key: ok=%v err=%v", ok, err)
 	}
 
 	// Put then Get.
 	payload := []byte("-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n")
-	if err := b.Put(KeyCACert, payload, BlobPublic); err != nil {
+	if err := b.Put(context.Background(), KeyCACert, payload, BlobPublic); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	got, err := b.Get(KeyCACert)
+	got, err := b.Get(context.Background(), KeyCACert)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	if !bytes.Equal(got, payload) {
 		t.Fatalf("Get returned %q, want %q", got, payload)
 	}
-	ok, err = b.Exists(KeyCACert)
+	ok, err = b.Exists(context.Background(), KeyCACert)
 	if err != nil || !ok {
 		t.Fatalf("Exists after Put: ok=%v err=%v", ok, err)
 	}
 
 	// Delete and re-check.
-	if err := b.Delete(KeyCACert); err != nil {
+	if err := b.Delete(context.Background(), KeyCACert); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	if err := b.Delete(KeyCACert); !errors.Is(err, fs.ErrNotExist) {
+	if err := b.Delete(context.Background(), KeyCACert); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("Delete on missing: err = %v, want fs.ErrNotExist", err)
 	}
 }
@@ -151,15 +151,15 @@ func TestEtcdBackendModTime(t *testing.T) {
 	defer stop()
 	b := newBackend(t, cli, "/test-modtime")
 
-	if _, err := b.ModTime(KeyCRL); !errors.Is(err, fs.ErrNotExist) {
+	if _, err := b.ModTime(context.Background(), KeyCRL); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("ModTime on missing: err = %v, want fs.ErrNotExist", err)
 	}
 
 	before := time.Now().Add(-time.Second)
-	if err := b.Put(KeyCRL, []byte("crl-data"), BlobPublic); err != nil {
+	if err := b.Put(context.Background(), KeyCRL, []byte("crl-data"), BlobPublic); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	mt, err := b.ModTime(KeyCRL)
+	mt, err := b.ModTime(context.Background(), KeyCRL)
 	if err != nil {
 		t.Fatalf("ModTime: %v", err)
 	}
@@ -175,16 +175,16 @@ func TestEtcdBackendList(t *testing.T) {
 
 	subjects := []string{"alpha.example.com", "beta.example.com", "gamma.example.com"}
 	for _, s := range subjects {
-		if err := b.Put(CSRKey(s), []byte("csr:"+s), BlobPublic); err != nil {
+		if err := b.Put(context.Background(), CSRKey(s), []byte("csr:"+s), BlobPublic); err != nil {
 			t.Fatalf("Put csr %s: %v", s, err)
 		}
 	}
 	// Drop one and add a cert to ensure prefixes don't cross-contaminate.
-	if err := b.Put(CertKey("alpha.example.com"), []byte("cert"), BlobPublic); err != nil {
+	if err := b.Put(context.Background(), CertKey("alpha.example.com"), []byte("cert"), BlobPublic); err != nil {
 		t.Fatalf("Put cert: %v", err)
 	}
 
-	csrs, err := b.List(csrPrefix)
+	csrs, err := b.List(context.Background(), csrPrefix)
 	if err != nil {
 		t.Fatalf("List csr: %v", err)
 	}
@@ -198,7 +198,7 @@ func TestEtcdBackendList(t *testing.T) {
 		t.Errorf("List csr = %v, want %v", csrs, want)
 	}
 
-	certs, err := b.List(certPrefix)
+	certs, err := b.List(context.Background(), certPrefix)
 	if err != nil {
 		t.Fatalf("List cert: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestEtcdBackendList(t *testing.T) {
 		t.Errorf("List cert = %v, want [%s]", certs, CertKey("alpha.example.com"))
 	}
 
-	if _, err := b.List("bogus/"); err == nil {
+	if _, err := b.List(context.Background(), "bogus/"); err == nil {
 		t.Errorf("List with unknown prefix should error")
 	}
 }
@@ -232,7 +232,7 @@ func TestEtcdBackendAppendLineConcurrent(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < perWriter; i++ {
 				line := fmt.Sprintf("w%d-i%d\n", w, i)
-				if err := backend.AppendLine(KeyInventory, []byte(line), BlobPrivate); err != nil {
+				if err := backend.AppendLine(context.Background(), KeyInventory, []byte(line), BlobPrivate); err != nil {
 					t.Errorf("AppendLine: %v", err)
 					return
 				}
@@ -241,7 +241,7 @@ func TestEtcdBackendAppendLineConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 
-	data, err := a.Get(KeyInventory)
+	data, err := a.Get(context.Background(), KeyInventory)
 	if err != nil {
 		t.Fatalf("Get after appends: %v", err)
 	}
@@ -260,21 +260,21 @@ func TestEtcdBackendEndToEndViaStorageService(t *testing.T) {
 	tmp := t.TempDir()
 	svc := NewWithBackend(backend, filepath.Join(tmp, "private"))
 
-	if err := svc.EnsureDirs(); err != nil {
+	if err := svc.EnsureDirs(context.Background()); err != nil {
 		t.Fatalf("EnsureDirs: %v", err)
 	}
 
-	if err := svc.SaveCACert([]byte("ca-cert-pem")); err != nil {
+	if err := svc.SaveCACert(context.Background(), []byte("ca-cert-pem")); err != nil {
 		t.Fatalf("SaveCACert: %v", err)
 	}
-	if ok, _ := svc.HasCACert(); !ok {
+	if ok, _ := svc.HasCACert(context.Background()); !ok {
 		t.Errorf("HasCACert = false after SaveCACert")
 	}
 
-	if err := svc.WriteSerial("0001"); err != nil {
+	if err := svc.WriteSerial(context.Background(), "0001"); err != nil {
 		t.Fatalf("WriteSerial: %v", err)
 	}
-	got, err := svc.GetSerial()
+	got, err := svc.GetSerial(context.Background())
 	if err != nil {
 		t.Fatalf("GetSerial: %v", err)
 	}
@@ -282,17 +282,17 @@ func TestEtcdBackendEndToEndViaStorageService(t *testing.T) {
 		t.Errorf("GetSerial = %q, want 0001", got)
 	}
 
-	if err := svc.InitHMAC(); err != nil {
+	if err := svc.InitHMAC(context.Background()); err != nil {
 		t.Fatalf("InitHMAC: %v", err)
 	}
-	if err := svc.AppendInventory("line 1"); err != nil {
+	if err := svc.AppendInventory(context.Background(), "line 1"); err != nil {
 		t.Fatalf("AppendInventory: %v", err)
 	}
-	if err := svc.AppendInventory("line 2"); err != nil {
+	if err := svc.AppendInventory(context.Background(), "line 2"); err != nil {
 		t.Fatalf("AppendInventory: %v", err)
 	}
 
-	inv, err := svc.ReadInventory()
+	inv, err := svc.ReadInventory(context.Background())
 	if err != nil {
 		t.Fatalf("ReadInventory: %v", err)
 	}
@@ -300,20 +300,20 @@ func TestEtcdBackendEndToEndViaStorageService(t *testing.T) {
 		t.Errorf("ReadInventory = %q, want 'line 1\\nline 2\\n'", inv)
 	}
 
-	if err := svc.SaveCSR("node1", []byte("csr-pem")); err != nil {
+	if err := svc.SaveCSR(context.Background(), "node1", []byte("csr-pem")); err != nil {
 		t.Fatalf("SaveCSR: %v", err)
 	}
-	if err := svc.SaveCert("node1", []byte("cert-pem")); err != nil {
+	if err := svc.SaveCert(context.Background(), "node1", []byte("cert-pem")); err != nil {
 		t.Fatalf("SaveCert: %v", err)
 	}
-	csrs, err := svc.ListCSRs()
+	csrs, err := svc.ListCSRs(context.Background())
 	if err != nil {
 		t.Fatalf("ListCSRs: %v", err)
 	}
 	if len(csrs) != 1 || csrs[0] != "node1" {
 		t.Errorf("ListCSRs = %v, want [node1]", csrs)
 	}
-	certs, err := svc.ListCerts()
+	certs, err := svc.ListCerts(context.Background())
 	if err != nil {
 		t.Fatalf("ListCerts: %v", err)
 	}

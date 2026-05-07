@@ -70,8 +70,8 @@ func NewOverlayBackend(base Backend, overrides map[string]string) (*OverlayBacke
 // directory exists. Operators supplying a pre-existing file still need to
 // ensure the directory mode is acceptable; EnsureReady only creates the
 // directory when missing.
-func (o *OverlayBackend) EnsureReady() error {
-	if err := o.base.EnsureReady(); err != nil {
+func (o *OverlayBackend) EnsureReady(ctx context.Context) error {
+	if err := o.base.EnsureReady(ctx); err != nil {
 		return err
 	}
 	for _, p := range o.overrides {
@@ -84,7 +84,7 @@ func (o *OverlayBackend) EnsureReady() error {
 
 // Get reads an overridden key from its local file (returning fs.ErrNotExist
 // when absent) or delegates to the base backend.
-func (o *OverlayBackend) Get(key string) ([]byte, error) {
+func (o *OverlayBackend) Get(ctx context.Context, key string) ([]byte, error) {
 	if p, ok := o.overrides[key]; ok {
 		data, err := os.ReadFile(p)
 		if err != nil {
@@ -95,24 +95,24 @@ func (o *OverlayBackend) Get(key string) ([]byte, error) {
 		}
 		return data, nil
 	}
-	return o.base.Get(key)
+	return o.base.Get(ctx, key)
 }
 
 // Put writes to the overridden file atomically (temp + rename) honouring
 // kind for permissions, or delegates to the base backend.
-func (o *OverlayBackend) Put(key string, data []byte, kind BlobKind) error {
+func (o *OverlayBackend) Put(ctx context.Context, key string, data []byte, kind BlobKind) error {
 	if p, ok := o.overrides[key]; ok {
 		if err := os.MkdirAll(filepath.Dir(p), DirPerm); err != nil {
 			return err
 		}
 		return atomicWriteFile(p, data, permFor(kind))
 	}
-	return o.base.Put(key, data, kind)
+	return o.base.Put(ctx, key, data, kind)
 }
 
 // Delete removes the local file for an overridden key, wrapping
 // fs.ErrNotExist when absent; otherwise delegates.
-func (o *OverlayBackend) Delete(key string) error {
+func (o *OverlayBackend) Delete(ctx context.Context, key string) error {
 	if p, ok := o.overrides[key]; ok {
 		if err := os.Remove(p); err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
@@ -122,11 +122,11 @@ func (o *OverlayBackend) Delete(key string) error {
 		}
 		return nil
 	}
-	return o.base.Delete(key)
+	return o.base.Delete(ctx, key)
 }
 
 // Exists reports whether the overridden file exists, or delegates.
-func (o *OverlayBackend) Exists(key string) (bool, error) {
+func (o *OverlayBackend) Exists(ctx context.Context, key string) (bool, error) {
 	if p, ok := o.overrides[key]; ok {
 		_, err := os.Stat(p)
 		if err == nil {
@@ -137,25 +137,25 @@ func (o *OverlayBackend) Exists(key string) (bool, error) {
 		}
 		return false, err
 	}
-	return o.base.Exists(key)
+	return o.base.Exists(ctx, key)
 }
 
 // List always delegates: override keys are single-blob, not list-style.
-func (o *OverlayBackend) List(prefix string) ([]string, error) {
-	return o.base.List(prefix)
+func (o *OverlayBackend) List(ctx context.Context, prefix string) ([]string, error) {
+	return o.base.List(ctx, prefix)
 }
 
 // AppendLine rejects overridden keys — the override targets single blobs —
 // and otherwise delegates.
-func (o *OverlayBackend) AppendLine(key string, data []byte, kind BlobKind) error {
+func (o *OverlayBackend) AppendLine(ctx context.Context, key string, data []byte, kind BlobKind) error {
 	if _, ok := o.overrides[key]; ok {
 		return fmt.Errorf("AppendLine is not supported on overridden key %q", key)
 	}
-	return o.base.AppendLine(key, data, kind)
+	return o.base.AppendLine(ctx, key, data, kind)
 }
 
 // ModTime reports the local file mtime for overridden keys, or delegates.
-func (o *OverlayBackend) ModTime(key string) (time.Time, error) {
+func (o *OverlayBackend) ModTime(ctx context.Context, key string) (time.Time, error) {
 	if p, ok := o.overrides[key]; ok {
 		info, err := os.Stat(p)
 		if err != nil {
@@ -166,7 +166,7 @@ func (o *OverlayBackend) ModTime(key string) (time.Time, error) {
 		}
 		return info.ModTime(), nil
 	}
-	return o.base.ModTime(key)
+	return o.base.ModTime(ctx, key)
 }
 
 // Close closes the base backend.

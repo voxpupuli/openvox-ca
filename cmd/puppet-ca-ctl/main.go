@@ -414,7 +414,7 @@ func newSetupCmd() *cobra.Command {
 			myCA.KeyPassphrase = ca.KeyPassphraseConfig{
 				PassphraseFile: passphraseFile,
 			}
-			if err := myCA.Init(); err != nil {
+			if err := myCA.Init(cmd.Context()); err != nil {
 				return err
 			}
 			fmt.Printf("CA initialized in %s (CN: Puppet CA: %s)\n", absDir, hostname)
@@ -458,7 +458,7 @@ func newImportCmd() *cobra.Command {
 			}
 
 			store := storage.New(absDir)
-			if err := ca.ImportCA(store, certPEM, keyPEM, crlPEM); err != nil {
+			if err := ca.ImportCA(cmd.Context(), store, certPEM, keyPEM, crlPEM); err != nil {
 				return err
 			}
 			fmt.Printf("CA imported into %s\n", absDir)

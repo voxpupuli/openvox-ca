@@ -17,6 +17,7 @@
 package ca
 
 import (
+	"context"
 	"bufio"
 	"bytes"
 	"crypto/x509/pkix"
@@ -89,8 +90,8 @@ func extractNonce(reqDER []byte) (pkix.Extension, bool) {
 // inventory was written by this version (random serials) or an older version
 // (zero-padded sequential serials).
 // It must be called while c.mu is already held by the caller.
-func (c *CA) buildSerialIndex() error {
-	data, err := c.Storage.ReadInventory()
+func (c *CA) buildSerialIndex(ctx context.Context) error {
+	data, err := c.Storage.ReadInventory(ctx)
 	if err != nil {
 		return err
 	}
@@ -116,7 +117,7 @@ func (c *CA) buildSerialIndex() error {
 //
 // Responses are cached by serial for OCSPValidity; the cache is bypassed when
 // a nonce is present in the request (RFC 8954). The caller must NOT hold c.mu.
-func (c *CA) OCSPResponse(reqDER []byte) ([]byte, error) {
+func (c *CA) OCSPResponse(ctx context.Context, reqDER []byte) ([]byte, error) {
 	// Extract nonce before acquiring any lock (pure DER parse, no shared state).
 	nonce, hasNonce := extractNonce(reqDER)
 
@@ -139,12 +140,15 @@ func (c *CA) OCSPResponse(reqDER []byte) ([]byte, error) {
 	serialHex := serialHexStr(req.SerialNumber)
 
 	// Fast path: check cache with a read lock (only when no nonce).
+	// Cache returns must be defensive copies: the cached slice is shared
+	// across concurrent readers, and the HTTP layer should never observe
+	// a buffer that another goroutine could mutate.
 	if !hasNonce {
 		c.mu.RLock()
 		entry, ok := c.ocspCache[serialHex]
 		c.mu.RUnlock()
 		if ok && time.Now().Before(entry.expiresAt) {
-			return entry.der, nil
+			return bytes.Clone(entry.der), nil
 		}
 	}
 
@@ -155,7 +159,7 @@ func (c *CA) OCSPResponse(reqDER []byte) ([]byte, error) {
 	// Double-check after acquiring the write lock.
 	if !hasNonce {
 		if entry, ok := c.ocspCache[serialHex]; ok && time.Now().Before(entry.expiresAt) {
-			return entry.der, nil
+			return bytes.Clone(entry.der), nil
 		}
 	}
 
@@ -169,7 +173,7 @@ func (c *CA) OCSPResponse(reqDER []byte) ([]byte, error) {
 	if _, known := c.serialIndex[serialHex]; !known {
 		template.Status = ocsp.Unknown
 	} else {
-		revoked, revokedAt, err := c.isRevokedSerial(req.SerialNumber)
+		revoked, revokedAt, err := c.isRevokedSerial(ctx, req.SerialNumber)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrInternal, err)
 		}
@@ -192,9 +196,12 @@ func (c *CA) OCSPResponse(reqDER []byte) ([]byte, error) {
 	}
 
 	// Cache the response only when there is no nonce (RFC 8954 §3).
+	// The cache stores its own copy so the slice we return to the caller
+	// stays exclusively theirs even if the cache later evicts or rewrites
+	// the entry.
 	if !hasNonce {
 		c.ocspCache[serialHex] = ocspCacheEntry{
-			der:       respDER,
+			der:       bytes.Clone(respDER),
 			expiresAt: now.Add(OCSPValidity),
 		}
 	}
@@ -206,7 +213,7 @@ func (c *CA) OCSPResponse(reqDER []byte) ([]byte, error) {
 // Returns (true, revocationTime, nil) if found, (false, zero, nil) if not,
 // or (false, zero, error) if the CRL is not loaded.
 // Must be called while c.mu is already held by the caller.
-func (c *CA) isRevokedSerial(serial *big.Int) (bool, time.Time, error) {
+func (c *CA) isRevokedSerial(ctx context.Context, serial *big.Int) (bool, time.Time, error) {
 	if c.cachedCRL == nil {
 		return false, time.Time{}, fmt.Errorf("CRL not loaded")
 	}

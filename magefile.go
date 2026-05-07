@@ -50,7 +50,7 @@ import (
 // -- Namespaces ----------------------------------------------------------------
 
 type Build mg.Namespace // build:all  build:fips  build:dist
-type Test mg.Namespace  // test:unit  test:integcompose  test:integcomposefips  test:loadcompose  test:bench  test:puppet  test:puppetfips  test:migration
+type Test mg.Namespace  // test:unit  test:integcompose  test:integcomposefips  test:loadcompose  test:bench  test:puppet  test:puppetfips  test:migration  test:backendsRedis
 type Dev mg.Namespace   // dev:check  dev:tidy    dev:clean  dev:container
 
 // -- Helpers ------------------------------------------------------------------─
@@ -420,6 +420,27 @@ func (Test) Migration() error {
 	_ = runCompose(nil, "-f", "compose-migration.yml", "down", "--volumes")
 
 	return err
+}
+
+// BackendsRedis builds the puppet-ca image and runs the full Puppet stack
+// integration suite against a Redis-backed CA topology with two replicas
+// sharing a single Redis prefix. Validates: catalog application end-to-end
+// over Redis-backed storage; cert blobs offloaded to Redis (not local disk);
+// distributed bootstrap lock when two CAs race; cross-replica state
+// visibility; concurrent CSR submissions split across replicas with
+// AppendLine atomicity on the inventory blob.
+//
+// Requires podman-compose (or docker compose) and network access to pull
+// docker.io/redis:7-alpine plus the same images as Test:Puppet.
+func (Test) BackendsRedis() error {
+	mg.Deps(Build{}.All)
+	fmt.Println("Building compose images for Redis-backend stack...")
+	if err := runCompose(nil, "-f", "compose-backends-redis.yml", "build"); err != nil {
+		return err
+	}
+
+	fmt.Println("Running Redis-backend integration tests...")
+	return sh.RunV("bash", "test/backends/redis-stack.sh", "--up")
 }
 
 // PuppetFIPS is like Puppet but compiles with GOEXPERIMENT=boringcrypto so the

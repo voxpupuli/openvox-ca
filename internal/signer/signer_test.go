@@ -27,7 +27,10 @@ import (
 	"net"
 	"net/rpc"
 	"os"
+	"sync"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // TestSignRoundTrip verifies that a signing request can be sent over an RPC
@@ -276,6 +279,82 @@ func TestLoadPSKWrongLength(t *testing.T) {
 	_, err := loadPSK()
 	if err == nil {
 		t.Error("expected error for wrong-length PSK")
+	}
+}
+
+// trackingCloser is a minimal io.Closer used by the awaitShutdown tests
+// to observe whether the helper closed the underlying connection.
+type trackingCloser struct {
+	mu     sync.Mutex
+	closed bool
+}
+
+func (c *trackingCloser) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closed = true
+	return nil
+}
+
+func (c *trackingCloser) Closed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+
+// TestAwaitShutdownReturnsOnDone is the positive path: when done is
+// closed (i.e. ServeConn returned and the caller signalled shutdown),
+// the helper must exit without touching the underlying connection.
+// Without this property the goroutine would block on sigCh forever and
+// leak on every clean signer exit.
+func TestAwaitShutdownReturnsOnDone(t *testing.T) {
+	closer := &trackingCloser{}
+	sigCh := make(chan os.Signal, 1)
+	done := make(chan struct{})
+
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		awaitShutdown(closer, sigCh, done)
+	}()
+
+	close(done)
+
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("awaitShutdown did not return when done was closed")
+	}
+
+	if closer.Closed() {
+		t.Error("connection was closed even though shutdown was via done; should only close on signal")
+	}
+}
+
+// TestAwaitShutdownClosesConnOnSignal is the negative path: when a
+// signal arrives on sigCh, the helper must close the connection so the
+// blocked ServeConn returns and Serve can clean up.
+func TestAwaitShutdownClosesConnOnSignal(t *testing.T) {
+	closer := &trackingCloser{}
+	sigCh := make(chan os.Signal, 1)
+	done := make(chan struct{})
+
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		awaitShutdown(closer, sigCh, done)
+	}()
+
+	sigCh <- syscall.SIGTERM
+
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("awaitShutdown did not return after signal")
+	}
+
+	if !closer.Closed() {
+		t.Error("connection was not closed after signal; ServeConn would block forever")
 	}
 }
 

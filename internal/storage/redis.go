@@ -271,14 +271,17 @@ func (b *RedisBackend) physicalKey(logical string) (string, error) {
 	return "", fmt.Errorf("unknown key %q", logical)
 }
 
-func (b *RedisBackend) ctx() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), b.timeout)
+// callCtx layers the backend's per-call timeout on top of the caller's
+// context. Caller cancellation always wins; if the caller has no deadline
+// b.timeout becomes the effective bound.
+func (b *RedisBackend) callCtx(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, b.timeout)
 }
 
 // EnsureReady verifies connectivity with a PING. Redis has no directory
 // concept so there is nothing else to prepare.
-func (b *RedisBackend) EnsureReady() error {
-	ctx, cancel := b.ctx()
+func (b *RedisBackend) EnsureReady(ctx context.Context) error {
+	ctx, cancel := b.callCtx(ctx)
 	defer cancel()
 	if err := b.client.Ping(ctx).Err(); err != nil {
 		return fmt.Errorf("redis not reachable: %w", err)
@@ -287,12 +290,12 @@ func (b *RedisBackend) EnsureReady() error {
 }
 
 // Get returns the (unwrapped) blob at key, wrapping fs.ErrNotExist when absent.
-func (b *RedisBackend) Get(key string) ([]byte, error) {
+func (b *RedisBackend) Get(ctx context.Context, key string) ([]byte, error) {
 	phys, err := b.physicalKey(key)
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := b.ctx()
+	ctx, cancel := b.callCtx(ctx)
 	defer cancel()
 	raw, err := b.client.Get(ctx, phys).Bytes()
 	if err != nil {
@@ -310,23 +313,23 @@ func (b *RedisBackend) Get(key string) ([]byte, error) {
 
 // Put writes the blob at key. The BlobKind hint is recorded but has no
 // effect on the stored form: Redis access control is managed server-side.
-func (b *RedisBackend) Put(key string, data []byte, _ BlobKind) error {
+func (b *RedisBackend) Put(ctx context.Context, key string, data []byte, _ BlobKind) error {
 	phys, err := b.physicalKey(key)
 	if err != nil {
 		return err
 	}
-	ctx, cancel := b.ctx()
+	ctx, cancel := b.callCtx(ctx)
 	defer cancel()
 	return b.client.Set(ctx, phys, encodeBlob(time.Now(), data), 0).Err()
 }
 
 // Delete removes key, wrapping fs.ErrNotExist when the key is absent.
-func (b *RedisBackend) Delete(key string) error {
+func (b *RedisBackend) Delete(ctx context.Context, key string) error {
 	phys, err := b.physicalKey(key)
 	if err != nil {
 		return err
 	}
-	ctx, cancel := b.ctx()
+	ctx, cancel := b.callCtx(ctx)
 	defer cancel()
 	n, err := b.client.Del(ctx, phys).Result()
 	if err != nil {
@@ -339,12 +342,12 @@ func (b *RedisBackend) Delete(key string) error {
 }
 
 // Exists reports whether key is present.
-func (b *RedisBackend) Exists(key string) (bool, error) {
+func (b *RedisBackend) Exists(ctx context.Context, key string) (bool, error) {
 	phys, err := b.physicalKey(key)
 	if err != nil {
 		return false, err
 	}
-	ctx, cancel := b.ctx()
+	ctx, cancel := b.callCtx(ctx)
 	defer cancel()
 	n, err := b.client.Exists(ctx, phys).Result()
 	if err != nil {
@@ -355,7 +358,7 @@ func (b *RedisBackend) Exists(key string) (bool, error) {
 
 // List returns the logical keys sharing prefix. Only csrPrefix and certPrefix
 // are supported. Uses SCAN under the hood to avoid blocking the server.
-func (b *RedisBackend) List(prefix string) ([]string, error) {
+func (b *RedisBackend) List(ctx context.Context, prefix string) ([]string, error) {
 	var subDir, outPrefix string
 	switch prefix {
 	case csrPrefix:
@@ -370,15 +373,20 @@ func (b *RedisBackend) List(prefix string) ([]string, error) {
 	physPrefix := b.prefix + ":" + subDir
 	match := physPrefix + "*"
 
-	ctx, cancel := b.ctx()
-	defer cancel()
-
 	var (
 		out    []string
 		cursor uint64
 	)
+	// Each SCAN page gets its own deadline. With a single ctx spanning
+	// the whole loop, a large keyspace on a slow link could expire the
+	// shared deadline mid-walk and silently truncate the listing; the
+	// per-page form bounds each network round-trip independently.
 	for {
-		keys, next, err := b.client.Scan(ctx, cursor, match, 100).Result()
+		keys, next, err := func() ([]string, uint64, error) {
+			pageCtx, cancel := b.callCtx(ctx)
+			defer cancel()
+			return b.client.Scan(pageCtx, cursor, match, 100).Result()
+		}()
 		if err != nil {
 			return nil, err
 		}
@@ -402,7 +410,7 @@ func (b *RedisBackend) List(prefix string) ([]string, error) {
 // process are serialised on appendMu; concurrent appends from other
 // processes are resolved by a server-side Lua script that reads the current
 // blob, appends, and writes back in a single atomic step.
-func (b *RedisBackend) AppendLine(key string, data []byte, _ BlobKind) error {
+func (b *RedisBackend) AppendLine(ctx context.Context, key string, data []byte, _ BlobKind) error {
 	b.appendMu.Lock()
 	defer b.appendMu.Unlock()
 
@@ -411,7 +419,7 @@ func (b *RedisBackend) AppendLine(key string, data []byte, _ BlobKind) error {
 		return err
 	}
 
-	ctx, cancel := b.ctx()
+	ctx, cancel := b.callCtx(ctx)
 	defer cancel()
 
 	mtime := encodeMtime(time.Now())
@@ -421,23 +429,23 @@ func (b *RedisBackend) AppendLine(key string, data []byte, _ BlobKind) error {
 
 // ModTime returns the wall-clock timestamp recorded when the blob was last
 // written. Returns fs.ErrNotExist-wrapped when the key is absent.
-func (b *RedisBackend) ModTime(key string) (time.Time, error) {
+func (b *RedisBackend) ModTime(ctx context.Context, key string) (time.Time, error) {
 	phys, err := b.physicalKey(key)
 	if err != nil {
 		return time.Time{}, err
 	}
-	ctx, cancel := b.ctx()
+	rangeCtx, cancel := b.callCtx(ctx)
 	defer cancel()
 	// Only the first 8 bytes encode the mtime; GETRANGE avoids pulling the
 	// whole blob.
-	raw, err := b.client.GetRange(ctx, phys, 0, 7).Bytes()
+	raw, err := b.client.GetRange(rangeCtx, phys, 0, 7).Bytes()
 	if err != nil {
 		return time.Time{}, err
 	}
 	if len(raw) == 0 {
 		// GETRANGE on a missing key returns an empty string — same as a
 		// present-but-empty key. Distinguish with a cheap Exists.
-		ok, existsErr := b.Exists(key)
+		ok, existsErr := b.Exists(ctx, key)
 		if existsErr != nil {
 			return time.Time{}, existsErr
 		}
@@ -477,9 +485,15 @@ func (b *RedisBackend) AcquireLock(ctx context.Context, name string) (Unlocker, 
 	}
 
 	// Block until we can acquire or ctx expires. SET NX returns false when
-	// the key already exists, so we retry with a short backoff.
+	// the key already exists, so we retry with a short backoff. A single
+	// Timer is reused across iterations rather than allocating a fresh
+	// time.After channel each retry: under sustained contention the
+	// per-iteration form put pressure on the runtime timer heap (and
+	// pre-Go-1.23, kept the timer alive until it fired).
 	backoff := 50 * time.Millisecond
 	const maxBackoff = 500 * time.Millisecond
+	timer := time.NewTimer(backoff)
+	defer timer.Stop()
 	for {
 		ok, setErr := b.client.SetNX(ctx, lockKey, token, b.lockTTL).Result()
 		if setErr != nil {
@@ -493,7 +507,7 @@ func (b *RedisBackend) AcquireLock(ctx context.Context, name string) (Unlocker, 
 		case <-ctx.Done():
 			local.Unlock()
 			return nil, fmt.Errorf("acquiring redis lock %q: %w", name, ctx.Err())
-		case <-time.After(backoff):
+		case <-timer.C:
 		}
 		if backoff < maxBackoff {
 			backoff *= 2
@@ -501,6 +515,7 @@ func (b *RedisBackend) AcquireLock(ctx context.Context, name string) (Unlocker, 
 				backoff = maxBackoff
 			}
 		}
+		timer.Reset(backoff)
 	}
 
 	ul := &redisUnlocker{

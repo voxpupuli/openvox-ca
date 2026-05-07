@@ -82,39 +82,48 @@ type KeyPermWarning struct {
 //
 // Get and Delete must return an error that wraps os.ErrNotExist (fs.ErrNotExist)
 // when the key does not exist so callers can distinguish absence from failure.
+//
+// All operations except Close take a context for caller cancellation and
+// deadline propagation. Implementations may further bound a single network
+// round-trip with their own per-call timeout (context.WithTimeout on top of
+// the caller's ctx); cancellation of the caller's ctx must always propagate.
+// The filesystem backend honours ctx only at the start of each call —
+// individual syscalls cannot be interrupted mid-flight.
 type Backend interface {
 	// EnsureReady prepares the backend for use (creates directories,
 	// verifies connectivity, etc). Safe to call multiple times.
-	EnsureReady() error
+	EnsureReady(ctx context.Context) error
 
 	// Get returns the blob at key. Wraps os.ErrNotExist when absent.
-	Get(key string) ([]byte, error)
+	Get(ctx context.Context, key string) ([]byte, error)
 
 	// Put stores data at key atomically with respect to concurrent readers.
 	// kind hints at visibility for backends that care.
-	Put(key string, data []byte, kind BlobKind) error
+	Put(ctx context.Context, key string, data []byte, kind BlobKind) error
 
 	// Delete removes key. Wraps os.ErrNotExist when absent.
-	Delete(key string) error
+	Delete(ctx context.Context, key string) error
 
 	// Exists reports whether key is present.
-	Exists(key string) (bool, error)
+	Exists(ctx context.Context, key string) (bool, error)
 
 	// List returns all keys with the given prefix. Only the csrPrefix and
 	// certPrefix namespaces are listable.
-	List(prefix string) ([]string, error)
+	List(ctx context.Context, prefix string) ([]string, error)
 
 	// AppendLine appends data to key, creating it if absent. The append is
 	// atomic with respect to concurrent AppendLine calls on the same key
 	// within a single process. Callers include any trailing newline in data.
-	AppendLine(key string, data []byte, kind BlobKind) error
+	AppendLine(ctx context.Context, key string, data []byte, kind BlobKind) error
 
 	// ModTime returns the last-modified time of key. Backends that do not
 	// track modification time may return the zero time with a nil error.
 	// Wraps os.ErrNotExist when absent.
-	ModTime(key string) (time.Time, error)
+	ModTime(ctx context.Context, key string) (time.Time, error)
 
-	// Close releases any resources held by the backend.
+	// Close releases any resources held by the backend. Close is intended
+	// for shutdown and intentionally does not take a context: cleanup must
+	// always run.
 	Close() error
 }
 

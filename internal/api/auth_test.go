@@ -18,6 +18,7 @@ package api_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -113,13 +114,13 @@ var _ = Describe("Auth Middleware", func() {
 
 		store = storage.New(tmpDir)
 		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
-		Expect(store.EnsureDirs()).To(Succeed())
-		Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
-		Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
-		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
-		Expect(store.WriteSerial("0001")).To(Succeed())
-		Expect(store.TouchInventory()).To(Succeed())
-		Expect(myCA.Init()).To(Succeed())
+		Expect(store.EnsureDirs(context.Background())).To(Succeed())
+		Expect(store.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial(context.Background(), "0001")).To(Succeed())
+		Expect(store.TouchInventory(context.Background())).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 
 		// Parse CA cert and key so we can issue test client certs.
 		block, _ := pem.Decode(cachedCrtPEM)
@@ -269,9 +270,9 @@ var _ = Describe("Auth Middleware", func() {
 			// Sign a cert through the CA so its serial is tracked.
 			csrPEM, err := testutil.GenerateCSR("revoked-client")
 			Expect(err).NotTo(HaveOccurred())
-			_, err = myCA.SaveRequest("revoked-client", csrPEM)
+			_, err = myCA.SaveRequest(context.Background(), "revoked-client", csrPEM)
 			Expect(err).NotTo(HaveOccurred())
-			certPEM, err := myCA.Sign("revoked-client")
+			certPEM, err := myCA.Sign(context.Background(), "revoked-client")
 			Expect(err).NotTo(HaveOccurred())
 
 			// Parse the issued cert so we can present it in the TLS request.
@@ -280,7 +281,7 @@ var _ = Describe("Auth Middleware", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			// Revoke the cert; its serial is now in the CRL.
-			Expect(myCA.Revoke("revoked-client")).To(Succeed())
+			Expect(myCA.Revoke(context.Background(), "revoked-client")).To(Succeed())
 
 			// Present the revoked cert; the middleware checks its serial
 			// directly against the CRL and must deny access.
@@ -295,11 +296,11 @@ var _ = Describe("Auth Middleware", func() {
 			// Sign and revoke "revoked-client".
 			csrPEM, err := testutil.GenerateCSR("revoked-client")
 			Expect(err).NotTo(HaveOccurred())
-			_, err = myCA.SaveRequest("revoked-client", csrPEM)
+			_, err = myCA.SaveRequest(context.Background(), "revoked-client", csrPEM)
 			Expect(err).NotTo(HaveOccurred())
-			_, err = myCA.Sign("revoked-client")
+			_, err = myCA.Sign(context.Background(), "revoked-client")
 			Expect(err).NotTo(HaveOccurred())
-			Expect(myCA.Revoke("revoked-client")).To(Succeed())
+			Expect(myCA.Revoke(context.Background(), "revoked-client")).To(Succeed())
 
 			// A separately-issued cert with the same CN but a different serial
 			// (not in the CRL) must pass the revocation check.
@@ -325,23 +326,23 @@ var _ = Describe("Auth Middleware", func() {
 			// Step 1: issue the first cert for "puppet-server" (admin CN).
 			csrPEM1, err := testutil.GenerateCSR("puppet-server")
 			Expect(err).NotTo(HaveOccurred())
-			_, err = myCA.SaveRequest("puppet-server", csrPEM1)
+			_, err = myCA.SaveRequest(context.Background(), "puppet-server", csrPEM1)
 			Expect(err).NotTo(HaveOccurred())
-			certPEM1, err := myCA.Sign("puppet-server")
+			certPEM1, err := myCA.Sign(context.Background(), "puppet-server")
 			Expect(err).NotTo(HaveOccurred())
 			block1, _ := pem.Decode(certPEM1)
 			oldCert, err := x509.ParseCertificate(block1.Bytes)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Step 2: revoke it; serial1 is now in the CRL.
-			Expect(myCA.Revoke("puppet-server")).To(Succeed())
+			Expect(myCA.Revoke(context.Background(), "puppet-server")).To(Succeed())
 
 			// Step 3: re-register and sign a new cert for the same CN.
 			csrPEM2, err := testutil.GenerateCSR("puppet-server")
 			Expect(err).NotTo(HaveOccurred())
-			_, err = myCA.SaveRequest("puppet-server", csrPEM2) // evicts the revoked cert
+			_, err = myCA.SaveRequest(context.Background(), "puppet-server", csrPEM2) // evicts the revoked cert
 			Expect(err).NotTo(HaveOccurred())
-			certPEM2, err := myCA.Sign("puppet-server")
+			certPEM2, err := myCA.Sign(context.Background(), "puppet-server")
 			Expect(err).NotTo(HaveOccurred())
 			block2, _ := pem.Decode(certPEM2)
 			newCert, err := x509.ParseCertificate(block2.Bytes)
@@ -370,16 +371,16 @@ var _ = Describe("Auth Middleware", func() {
 			// Sign a cert through the CA so it is a valid client cert.
 			csrPEM, err := testutil.GenerateCSR("crl-test-node")
 			Expect(err).NotTo(HaveOccurred())
-			_, err = myCA.SaveRequest("crl-test-node", csrPEM)
+			_, err = myCA.SaveRequest(context.Background(), "crl-test-node", csrPEM)
 			Expect(err).NotTo(HaveOccurred())
-			certPEM, err := myCA.Sign("crl-test-node")
+			certPEM, err := myCA.Sign(context.Background(), "crl-test-node")
 			Expect(err).NotTo(HaveOccurred())
 			block, _ := pem.Decode(certPEM)
 			issuedCert, err := x509.ParseCertificate(block.Bytes)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Remove the CRL file to simulate a disk fault.
-			Expect(store.Backend().Delete(storage.KeyCRL)).To(Succeed())
+			Expect(store.Backend().Delete(context.Background(), storage.KeyCRL)).To(Succeed())
 
 			// The in-memory CRL cache allows auth to continue even when
 			// the file is missing, so this is no longer a total DoS. The request
@@ -551,11 +552,11 @@ var _ = Describe("Auth Middleware", func() {
 			// The public tier check must fire before the revocation check.
 			csrPEM, err := testutil.GenerateCSR("revoked-crl-fetcher")
 			Expect(err).NotTo(HaveOccurred())
-			_, err = myCA.SaveRequest("revoked-crl-fetcher", csrPEM)
+			_, err = myCA.SaveRequest(context.Background(), "revoked-crl-fetcher", csrPEM)
 			Expect(err).NotTo(HaveOccurred())
-			_, err = myCA.Sign("revoked-crl-fetcher")
+			_, err = myCA.Sign(context.Background(), "revoked-crl-fetcher")
 			Expect(err).NotTo(HaveOccurred())
-			Expect(myCA.Revoke("revoked-crl-fetcher")).To(Succeed())
+			Expect(myCA.Revoke(context.Background(), "revoked-crl-fetcher")).To(Succeed())
 
 			clientCert := issueClientCert("revoked-crl-fetcher", caCert, caKey)
 			req := httptest.NewRequest("GET", "/certificate_revocation_list/ca", nil)
@@ -800,12 +801,12 @@ var _ = Describe("Auth Middleware", func() {
 			defer os.RemoveAll(escalationDir)
 			autosignStore := storage.New(escalationDir)
 			autosignCA := ca.New(autosignStore, ca.AutosignConfig{Mode: "true"}, "puppet.test")
-			Expect(autosignStore.EnsureDirs()).To(Succeed())
-			Expect(autosignStore.SaveCAKey(cachedKeyPEM)).To(Succeed())
-			Expect(autosignStore.SaveCACert(cachedCrtPEM)).To(Succeed())
-			Expect(autosignStore.UpdateCRL(cachedCrlPEM)).To(Succeed())
-			Expect(autosignStore.TouchInventory()).To(Succeed())
-			Expect(autosignCA.Init()).To(Succeed())
+			Expect(autosignStore.EnsureDirs(context.Background())).To(Succeed())
+			Expect(autosignStore.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+			Expect(autosignStore.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+			Expect(autosignStore.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
+			Expect(autosignStore.TouchInventory(context.Background())).To(Succeed())
+			Expect(autosignCA.Init(context.Background())).To(Succeed())
 
 			// Step 1: Craft a CSR with pp_cli_auth = "true".
 			key, err := rsa.GenerateKey(rand.Reader, 2048)

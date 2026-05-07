@@ -17,15 +17,18 @@
 package api_test
 
 import (
+	"context"
 	"bytes"
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -42,13 +45,13 @@ import (
 func setupOCSPServer(dir string) (*ca.CA, http.Handler) {
 	store := storage.New(dir)
 	myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
-	Expect(store.EnsureDirs()).To(Succeed())
-	Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
-	Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
-	Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
-	Expect(store.WriteSerial("0001")).To(Succeed())
-	Expect(store.TouchInventory()).To(Succeed())
-	Expect(myCA.Init()).To(Succeed())
+	Expect(store.EnsureDirs(context.Background())).To(Succeed())
+	Expect(store.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+	Expect(store.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+	Expect(store.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
+	Expect(store.WriteSerial(context.Background(), "0001")).To(Succeed())
+	Expect(store.TouchInventory(context.Background())).To(Succeed())
+	Expect(myCA.Init(context.Background())).To(Succeed())
 	srv := api.New(myCA)
 	return myCA, srv.Routes()
 }
@@ -57,9 +60,9 @@ func setupOCSPServer(dir string) (*ca.CA, http.Handler) {
 func signCert(myCA *ca.CA, subject string) *x509.Certificate {
 	csrPEM, err := testutil.GenerateCSR(subject)
 	Expect(err).NotTo(HaveOccurred())
-	_, err = myCA.SaveRequest(subject, csrPEM)
+	_, err = myCA.SaveRequest(context.Background(), subject, csrPEM)
 	Expect(err).NotTo(HaveOccurred())
-	certPEM, err := myCA.Sign(subject)
+	certPEM, err := myCA.Sign(context.Background(), subject)
 	Expect(err).NotTo(HaveOccurred())
 	block, _ := pem.Decode(certPEM)
 	Expect(block).NotTo(BeNil())
@@ -173,7 +176,7 @@ var _ = Describe("OCSP HTTP Handler", func() {
 
 	It("returns Revoked after the cert is revoked", func() {
 		cert := signCert(myCA, "revoke-ocsp-node")
-		Expect(myCA.Revoke("revoke-ocsp-node")).To(Succeed())
+		Expect(myCA.Revoke(context.Background(), "revoke-ocsp-node")).To(Succeed())
 
 		reqDER := ocspReqDER(cert, myCA.CACert)
 		req := httptest.NewRequest(http.MethodPost, "/ocsp", bytes.NewReader(reqDER))
@@ -252,8 +255,25 @@ var _ = Describe("OCSP HTTP Handler", func() {
 
 		Expect(rr.Code).To(Equal(http.StatusOK))
 		cc := rr.Header().Get("Cache-Control")
-		Expect(cc).To(ContainSubstring("max-age="))
 		Expect(cc).To(ContainSubstring("public"))
+
+		// Parse out the numeric max-age and assert it matches OCSPValidity
+		// exactly. Doubles as a negative guard against the prior bare
+		// int(float) cast that could yield a negative or wrapped value.
+		// Format is "max-age=N, public".
+		const prefix = "max-age="
+		idx := strings.Index(cc, prefix)
+		Expect(idx).To(BeNumerically(">=", 0), "Cache-Control missing max-age=")
+		rest := cc[idx+len(prefix):]
+		end := strings.IndexAny(rest, ", ")
+		if end < 0 {
+			end = len(rest)
+		}
+		maxAge, err := strconv.ParseInt(rest[:end], 10, 64)
+		Expect(err).NotTo(HaveOccurred(), "max-age value %q must be a base-10 integer", rest[:end])
+		Expect(maxAge).To(BeNumerically(">=", 0), "max-age must never be negative")
+		Expect(maxAge).To(BeNumerically("<=", int64(math.MaxInt32)), "max-age must fit in int32 per RFC 7234 ceiling")
+		Expect(maxAge).To(Equal(int64(ca.OCSPValidity.Seconds())))
 	})
 
 	It("POST response does NOT carry a Cache-Control header", func() {

@@ -17,6 +17,7 @@
 package api_test
 
 import (
+	"context"
 	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
@@ -67,17 +68,17 @@ var _ = Describe("API Workflow", func() {
 		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
 
 		// Pre-seed CA
-		err = store.EnsureDirs()
+		err = store.EnsureDirs(context.Background())
 		Expect(err).NotTo(HaveOccurred())
-		Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
-		Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
-		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
+		Expect(store.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
 
 		// Also pre-seed Serial and Inventory which are normally created by bootstrapCA
-		Expect(store.WriteSerial("0001")).To(Succeed())
-		Expect(store.TouchInventory()).To(Succeed())
+		Expect(store.WriteSerial(context.Background(), "0001")).To(Succeed())
+		Expect(store.TouchInventory(context.Background())).To(Succeed())
 
-		err = myCA.Init()
+		err = myCA.Init(context.Background())
 		Expect(err).NotTo(HaveOccurred())
 
 		server = api.New(myCA)
@@ -571,6 +572,26 @@ var _ = Describe("API Workflow", func() {
 			Expect(resp.CACertificate.Expiration).NotTo(BeEmpty())
 			Expect(resp.CACrl.NextUpdate).NotTo(BeEmpty())
 		})
+
+		It("should return 503 when the CA is not yet initialised", func() {
+			// Construct a fresh server whose CA has no cert loaded. Without
+			// the readiness guard, the handler would dereference a nil
+			// CACert and panic the entire process.
+			emptyDir, err := os.MkdirTemp("", "puppet-ca-not-ready-test")
+			Expect(err).NotTo(HaveOccurred())
+			defer os.RemoveAll(emptyDir)
+
+			emptyStore := storage.New(emptyDir)
+			Expect(emptyStore.EnsureDirs(context.Background())).To(Succeed())
+			emptyCA := ca.New(emptyStore, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+			emptyServer := api.New(emptyCA)
+			emptyMux := emptyServer.Routes()
+
+			req := httptest.NewRequest("GET", "/expirations", nil)
+			rr := httptest.NewRecorder()
+			Expect(func() { emptyMux.ServeHTTP(rr, req) }).NotTo(Panic())
+			Expect(rr.Code).To(Equal(http.StatusServiceUnavailable))
+		})
 	})
 
 	Context("POST /sign", func() {
@@ -980,7 +1001,7 @@ var _ = Describe("API Workflow", func() {
 			limitedMux := limitedServer.Routes()
 
 			// First two requests succeed (200 or 409, both mean the limiter allowed them through).
-			for i := 0; i < 2; i++ {
+			for range 2 {
 				csrPEM, err := testutil.GenerateCSR("rl-node")
 				Expect(err).NotTo(HaveOccurred())
 				req := httptest.NewRequest("PUT", "/certificate_request/rl-node", bytes.NewReader(csrPEM))
@@ -1000,7 +1021,7 @@ var _ = Describe("API Workflow", func() {
 
 		It("should not rate-limit when CSRRateLimit is zero (default)", func() {
 			// The shared server has no rate limit set; submit many requests.
-			for i := 0; i < 5; i++ {
+			for range 5 {
 				csrPEM, err := testutil.GenerateCSR("nolimit-node")
 				Expect(err).NotTo(HaveOccurred())
 				req := httptest.NewRequest("PUT", "/certificate_request/nolimit-node", bytes.NewReader(csrPEM))

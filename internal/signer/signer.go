@@ -108,18 +108,43 @@ func Serve(key crypto.Signer) error {
 
 	slog.Info("Signer process ready", "pid", os.Getpid())
 
-	// Shut down cleanly on signal by closing the connection.
-	sigCh := make(chan os.Signal, 1)
+	// Shut down cleanly on signal by closing the connection. The buffer
+	// matches the number of registered signals so a coincident
+	// SIGTERM+SIGINT cannot drop a notification, and the goroutine is
+	// wired to a done channel so it exits when ServeConn returns on its
+	// own (e.g. the frontend closed the socketpair) instead of leaking
+	// with signal.Notify still registered.
+	sigCh := make(chan os.Signal, 2)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
-	go func() {
-		<-sigCh
-		slog.Info("Signer process shutting down")
-		conn.Close()
-	}()
+	defer signal.Stop(sigCh)
+
+	done := make(chan struct{})
+	defer close(done)
+
+	go awaitShutdown(conn, sigCh, done)
 
 	// ServeConn blocks, handling multiplexed RPC calls on the single connection.
 	server.ServeConn(conn)
 	return nil
+}
+
+// awaitShutdown is the goroutine body Serve runs to translate signals
+// into a connection close. It blocks until either:
+//   - a value arrives on sigCh (typically SIGTERM/SIGINT routed via
+//     signal.Notify), in which case it closes conn so ServeConn unblocks;
+//   - done is closed (ServeConn already returned and Serve is winding
+//     down), in which case it returns without touching conn.
+//
+// Extracted into its own function so the done-vs-signal selection can
+// be exercised in tests without spawning a real signer process or
+// raising real OS signals.
+func awaitShutdown(conn io.Closer, sigCh <-chan os.Signal, done <-chan struct{}) {
+	select {
+	case <-sigCh:
+		slog.Info("Signer process shutting down")
+		_ = conn.Close()
+	case <-done:
+	}
 }
 
 // connFromFD wraps a raw file descriptor as a net.Conn.

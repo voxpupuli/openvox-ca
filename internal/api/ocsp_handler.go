@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 
 	xocsp "golang.org/x/crypto/ocsp"
@@ -67,7 +68,7 @@ func (s *Server) handleOCSP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respDER, err := s.CA.OCSPResponse(reqDER)
+	respDER, err := s.CA.OCSPResponse(r.Context(), reqDER)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/ocsp-response")
 		if errors.Is(err, ca.ErrInternal) {
@@ -84,8 +85,14 @@ func (s *Server) handleOCSP(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/ocsp-response")
 	if r.Method == http.MethodGet {
-		maxAge := int(ca.OCSPValidity.Seconds())
-		w.Header().Set("Cache-Control", fmt.Sprintf("max-age=%d, public", maxAge))
+		// Clamp the validity window to a non-negative value bounded by
+		// int32: HTTP cache directives are practically restricted to
+		// ~68 years (RFC 7234 §1.2.1), and bare int(float) is both
+		// platform-dependent on 32-bit targets and silently wraps for
+		// negative inputs.
+		secs := ca.OCSPValidity.Seconds()
+		secs = math.Max(0, math.Min(math.MaxInt32, secs))
+		w.Header().Set("Cache-Control", fmt.Sprintf("max-age=%d, public", int64(secs)))
 	}
 	w.Write(respDER) //nolint:errcheck
 }

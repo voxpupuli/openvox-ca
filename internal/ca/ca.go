@@ -17,6 +17,7 @@
 package ca
 
 import (
+	"context"
 	"crypto"
 	"crypto/x509"
 	"sync"
@@ -128,10 +129,10 @@ func (c *CA) IsReady() bool {
 
 // LoadKey loads the CA private key and certificate from disk without full
 // initialization (no HMAC, serial index, or CRL cache).
-func (c *CA) LoadKey() (crypto.Signer, error) {
+func (c *CA) LoadKey(ctx context.Context) (crypto.Signer, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if err := c.loadCA(); err != nil {
+	if err := c.loadCA(ctx); err != nil {
 		return nil, err
 	}
 	return c.CAKey, nil

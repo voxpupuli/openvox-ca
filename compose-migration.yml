@@ -1,15 +1,18 @@
-# Migration integration test: VoxPupuli Puppet Server CA -> puppet-ca.
+# Migration integration test: OpenVox Server CA -> puppet-ca.
 #
 # Topology
 # --------
-#   old-puppet   - VoxPupuli puppetserver (JVM) with its own built-in CA.
-#                  Bootstraps a genuine Puppet CA, autosigns agent CSRs.
+#   old-puppet   - OpenVox Server (JVM, drop-in puppetserver) with its own
+#                  built-in CA.  Bootstraps a genuine Puppet-compatible CA
+#                  and autosigns agent CSRs.
 #   test-runner  - puppet-ca + puppet-ca-ctl image.  Waits for old-puppet to
 #                  become healthy, submits CSRs, then imports the CA material
 #                  into puppet-ca and verifies everything still works.
 #
 # The test exercises the real migration path documented in
-# docs/migrating-from-puppet-server.md.
+# docs/migrating-from-puppet-server.md.  OpenVox Server is wire-compatible
+# with upstream Puppet Server (same /puppet-ca/v1 API, same CA-dir layout)
+# so the same migration code path is exercised.
 #
 # Usage (from project root):
 #   mage test:migration
@@ -20,17 +23,27 @@ name: puppet-ca-migration
 
 services:
 
-  # -- Old Puppet Server (VoxPupuli, JVM) ------------------------------------
+  # -- Old Puppet Server (OpenVox Server, JVM) -------------------------------
   old-puppet:
-    image: docker.io/voxpupuli/puppetserver:latest
+    image: ghcr.io/openvoxproject/openvoxserver:latest
     hostname: old-puppet
     environment:
-      PUPPETSERVER_HOSTNAME: old-puppet
+      OPENVOXSERVER_HOSTNAME: old-puppet
       AUTOSIGN: "true"
-      PUPPETSERVER_JAVA_ARGS: "-Xms512m -Xmx512m"
+      OPENVOXSERVER_JAVA_ARGS: "-Xms512m -Xmx512m"
+      # No PuppetDB integration in the migration scenario; disable storeconfigs
+      # so /container-entrypoint.d/85-setup-storeconfigs.sh becomes a no-op.
+      OPENVOX_STORECONFIGS: "false"
+      USE_OPENVOXDB: "false"
     volumes:
-      # Expose the Puppet Server's CA directory to the test-runner.
-      - old-cadir:/etc/puppetlabs/puppetserver/ca
+      # Pre-default entrypoint hook that fixes ownership of the mount-point
+      # before the bundled /container-entrypoint.d/* scripts run.  See the
+      # script header for the rationale.
+      - ./docker/migration/fix-cadir-ownership.sh:/container-custom-entrypoint.d/pre-default/00-fix-cadir-ownership.sh:ro,z
+      # Expose the Puppet Server's CA directory to the test-runner.  The :U
+      # flag tells podman to chown the volume contents to the container
+      # user-namespace mapping on first mount.
+      - old-cadir:/etc/puppetlabs/puppetserver/ca:U
     expose:
       - "8140"
     healthcheck:

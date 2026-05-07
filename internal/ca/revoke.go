@@ -34,27 +34,27 @@ import (
 // Revoke serialises on the cluster-wide "crl" lock so concurrent revocations
 // (and any future CRL rotation) on different replicas cannot both read the
 // same CRL, each append their own entry, and clobber one another's write.
-func (c *CA) Revoke(subject string) error {
+func (c *CA) Revoke(ctx context.Context, subject string) error {
 	if err := ValidateSubject(subject); err != nil {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), lockTimeout)
+	ctx, cancel := context.WithTimeout(ctx, lockTimeout)
 	defer cancel()
 	return c.Storage.WithLock(ctx, lockNameCRL, func() error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		return c.revokeLocked(subject)
+		return c.revokeLocked(ctx, subject)
 	})
 }
 
 // revokeLocked performs the actual CRL read-modify-write. The cluster CRL
 // lock and c.mu must both be held by the caller.
-func (c *CA) revokeLocked(subject string) error {
+func (c *CA) revokeLocked(ctx context.Context, subject string) error {
 	slog.Debug("Revoking certificate", "subject", subject)
 
 	// 1. Find Serial
-	serialStr, err := c.findSerialForSubject(subject)
+	serialStr, err := c.findSerialForSubject(ctx, subject)
 	if err != nil {
 		return fmt.Errorf("could not find certificate for subject %s: %w", subject, err)
 	}
@@ -65,7 +65,7 @@ func (c *CA) revokeLocked(subject string) error {
 	}
 
 	// 2. Load CRL
-	crlPEM, err := c.Storage.GetCRL()
+	crlPEM, err := c.Storage.GetCRL(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to load CRL: %w", err)
 	}
@@ -115,7 +115,7 @@ func (c *CA) revokeLocked(subject string) error {
 	}
 
 	newCRLPEM := pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlBytes})
-	if err := c.Storage.UpdateCRL(newCRLPEM); err != nil {
+	if err := c.Storage.UpdateCRL(ctx, newCRLPEM); err != nil {
 		return fmt.Errorf("failed to write CRL: %w", err)
 	}
 
@@ -150,8 +150,8 @@ func parseInventoryLine(line string) (serial, subject string, ok bool) {
 
 // findSerialForSubject returns the most-recently issued serial for subject.
 // It reads through storage to honour the inventory mutex.
-func (c *CA) findSerialForSubject(subject string) (string, error) {
-	data, err := c.Storage.ReadInventory()
+func (c *CA) findSerialForSubject(ctx context.Context, subject string) (string, error) {
+	data, err := c.Storage.ReadInventory(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -196,7 +196,7 @@ func (c *CA) findSerialForSubject(subject string) (string, error) {
 // Returns (false, err) when the CRL cannot be read or parsed; callers that use
 // this result for an authentication decision should treat an error as a denial
 // (fail-closed).
-func (c *CA) IsRevokedSerial(serial *big.Int) (bool, error) {
+func (c *CA) IsRevokedSerial(ctx context.Context, serial *big.Int) (bool, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if c.cachedCRL == nil {
@@ -216,8 +216,8 @@ func (c *CA) IsRevokedSerial(serial *big.Int) (bool, error) {
 // responses) but NOT for authentication decisions.  For auth, use
 // IsRevokedSerial with the serial of the presented certificate instead.
 // Returns false (not an error) if the subject has no signed cert.
-func (c *CA) IsRevoked(subject string) bool {
-	certPEM, err := c.Storage.GetCert(subject)
+func (c *CA) IsRevoked(ctx context.Context, subject string) bool {
+	certPEM, err := c.Storage.GetCert(ctx, subject)
 	if err != nil {
 		return false
 	}

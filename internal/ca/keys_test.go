@@ -17,6 +17,7 @@
 package ca_test
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rsa"
@@ -88,26 +89,26 @@ var _ = Describe("CA Bootstrap key algorithms", func() {
 
 	It("bootstraps RSA 2048", func() {
 		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoRSA, Size: 2048}
-		Expect(myCA.Init()).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 
 		rsaKey, ok := myCA.CAKey.(*rsa.PrivateKey)
 		Expect(ok).To(BeTrue(), "expected *rsa.PrivateKey")
 		Expect(rsaKey.N.BitLen()).To(Equal(2048))
 
-		keyData, err := store.GetCAKey()
+		keyData, err := store.GetCAKey(context.Background())
 		Expect(err).NotTo(HaveOccurred())
 		Expect(string(keyData)).To(ContainSubstring("RSA PRIVATE KEY"))
 	})
 
 	It("bootstraps ECDSA P-256", func() {
 		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
-		Expect(myCA.Init()).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 
 		ecKey, ok := myCA.CAKey.(*ecdsa.PrivateKey)
 		Expect(ok).To(BeTrue(), "expected *ecdsa.PrivateKey")
 		Expect(ecKey.Curve).To(Equal(elliptic.P256()))
 
-		keyData, err := store.GetCAKey()
+		keyData, err := store.GetCAKey(context.Background())
 		Expect(err).NotTo(HaveOccurred())
 		Expect(string(keyData)).To(ContainSubstring("EC PRIVATE KEY"))
 
@@ -116,7 +117,7 @@ var _ = Describe("CA Bootstrap key algorithms", func() {
 
 	It("bootstraps ECDSA P-384", func() {
 		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 384}
-		Expect(myCA.Init()).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 		ecKey, ok := myCA.CAKey.(*ecdsa.PrivateKey)
 		Expect(ok).To(BeTrue())
 		Expect(ecKey.Curve).To(Equal(elliptic.P384()))
@@ -124,7 +125,7 @@ var _ = Describe("CA Bootstrap key algorithms", func() {
 
 	It("bootstraps ECDSA P-521", func() {
 		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 521}
-		Expect(myCA.Init()).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 		ecKey, ok := myCA.CAKey.(*ecdsa.PrivateKey)
 		Expect(ok).To(BeTrue())
 		Expect(ecKey.Curve).To(Equal(elliptic.P521()))
@@ -132,11 +133,11 @@ var _ = Describe("CA Bootstrap key algorithms", func() {
 
 	It("reloads an ECDSA CA from disk", func() {
 		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
-		Expect(myCA.Init()).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 		origSerial := myCA.CACert.SerialNumber
 
 		myCA2 := ca.New(store, ca.AutosignConfig{Mode: "off"}, "keys.test")
-		Expect(myCA2.Init()).To(Succeed())
+		Expect(myCA2.Init(context.Background())).To(Succeed())
 
 		Expect(myCA2.CACert.SerialNumber.Cmp(origSerial)).To(Equal(0))
 		_, ok := myCA2.CAKey.(*ecdsa.PrivateKey)
@@ -146,13 +147,13 @@ var _ = Describe("CA Bootstrap key algorithms", func() {
 	It("signs CSRs with an ECDSA CA", func() {
 		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
 		// bootstrapCA creates the serial and inventory; no manual seeding needed.
-		Expect(myCA.Init()).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 
 		csrPEM, err := testutil.GenerateCSR("ecdsa-leaf")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest("ecdsa-leaf", csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), "ecdsa-leaf", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
-		certPEM, err := myCA.Sign("ecdsa-leaf")
+		certPEM, err := myCA.Sign(context.Background(), "ecdsa-leaf")
 		Expect(err).NotTo(HaveOccurred())
 
 		block, _ := pem.Decode(certPEM)
@@ -185,7 +186,7 @@ var _ = Describe("CA Bootstrap subject fields", func() {
 
 	It("sets Organization in the CA cert subject", func() {
 		myCA.CASubject = ca.CASubjectConfig{Org: "Example Corp"}
-		Expect(myCA.Init()).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 		Expect(myCA.CACert.Subject.Organization).To(ConsistOf("Example Corp"))
 	})
 
@@ -197,7 +198,7 @@ var _ = Describe("CA Bootstrap subject fields", func() {
 			Locality: "San Francisco",
 			Province: "California",
 		}
-		Expect(myCA.Init()).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 
 		subj := myCA.CACert.Subject
 		Expect(subj.Organization).To(ConsistOf("Acme Inc"))
@@ -208,17 +209,17 @@ var _ = Describe("CA Bootstrap subject fields", func() {
 	})
 
 	It("preserves default CN when no subject is set", func() {
-		Expect(myCA.Init()).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 		Expect(myCA.CACert.Subject.CommonName).To(HavePrefix("Puppet CA: "))
 	})
 
 	It("ignores subject config when reloading an existing CA", func() {
 		myCA.CASubject = ca.CASubjectConfig{Org: "First Corp"}
-		Expect(myCA.Init()).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 
 		myCA2 := ca.New(store, ca.AutosignConfig{Mode: "off"}, "subject.test")
 		myCA2.CASubject = ca.CASubjectConfig{Org: "Second Corp"}
-		Expect(myCA2.Init()).To(Succeed())
+		Expect(myCA2.Init(context.Background())).To(Succeed())
 
 		// The cert on disk has "First Corp"; the in-memory subject config is ignored.
 		Expect(myCA2.CACert.Subject.Organization).To(ConsistOf("First Corp"))
@@ -242,19 +243,19 @@ var _ = Describe("Generate with LeafKeyConfig", func() {
 		store = storage.New(tmpDir)
 		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "leaf.test")
 
-		Expect(store.EnsureDirs()).To(Succeed())
-		Expect(store.SaveCAKey(cachedKeyPEM)).To(Succeed())
-		Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
-		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
-		Expect(store.WriteSerial("0001")).To(Succeed())
-		Expect(store.TouchInventory()).To(Succeed())
-		Expect(myCA.Init()).To(Succeed())
+		Expect(store.EnsureDirs(context.Background())).To(Succeed())
+		Expect(store.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial(context.Background(), "0001")).To(Succeed())
+		Expect(store.TouchInventory(context.Background())).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 	})
 
 	AfterEach(func() { os.RemoveAll(tmpDir) })
 
 	It("generates RSA 2048 by default", func() {
-		result, err := myCA.Generate("leaf-rsa-default", nil)
+		result, err := myCA.Generate(context.Background(), "leaf-rsa-default", nil)
 		Expect(err).NotTo(HaveOccurred())
 
 		keyBlock, _ := pem.Decode(result.PrivateKeyPEM)
@@ -268,7 +269,7 @@ var _ = Describe("Generate with LeafKeyConfig", func() {
 	It("generates ECDSA P-256 when LeafKeyConfig={ECDSA,256}", func() {
 		myCA.LeafKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
 
-		result, err := myCA.Generate("leaf-ecdsa-256", nil)
+		result, err := myCA.Generate(context.Background(), "leaf-ecdsa-256", nil)
 		Expect(err).NotTo(HaveOccurred())
 
 		keyBlock, _ := pem.Decode(result.PrivateKeyPEM)
@@ -313,7 +314,7 @@ var _ = Describe("CA Bootstrap path length constraint", func() {
 	AfterEach(func() { os.RemoveAll(tmpDir) })
 
 	It("is unconstrained by default (no pathLenConstraint)", func() {
-		Expect(myCA.Init()).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 		// MaxPathLen == -1 after parsing means no pathLenConstraint was set.
 		Expect(myCA.CACert.MaxPathLen).To(Equal(-1))
 		Expect(myCA.CACert.MaxPathLenZero).To(BeFalse())
@@ -321,26 +322,26 @@ var _ = Describe("CA Bootstrap path length constraint", func() {
 
 	It("sets pathLenConstraint to 0 (leaf certs only) when CAPathLength is 0", func() {
 		myCA.CAPathLength = 0
-		Expect(myCA.Init()).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 		Expect(myCA.CACert.MaxPathLen).To(Equal(0))
 		Expect(myCA.CACert.MaxPathLenZero).To(BeTrue())
 	})
 
 	It("sets pathLenConstraint to 1 (one level of intermediates) when CAPathLength is 1", func() {
 		myCA.CAPathLength = 1
-		Expect(myCA.Init()).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 		Expect(myCA.CACert.MaxPathLen).To(Equal(1))
 		Expect(myCA.CACert.MaxPathLenZero).To(BeFalse())
 	})
 
 	It("ignores path length config when reloading an existing CA", func() {
 		// Bootstrap unconstrained.
-		Expect(myCA.Init()).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 
 		// A second CA with a different CAPathLength must load from disk unchanged.
 		myCA2 := ca.New(store, ca.AutosignConfig{Mode: "off"}, "pathlen.test")
 		myCA2.CAPathLength = 0
-		Expect(myCA2.Init()).To(Succeed())
+		Expect(myCA2.Init(context.Background())).To(Succeed())
 		Expect(myCA2.CACert.MaxPathLen).To(Equal(-1), "reload must not apply new path length config")
 	})
 })
@@ -366,25 +367,25 @@ var _ = Describe("CA certificate validity period", func() {
 	AfterEach(func() { os.RemoveAll(tmpDir) })
 
 	It("uses the built-in ~5-year default when CAValidityDays is zero", func() {
-		Expect(myCA.Init()).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 		expected := time.Now().Add(5 * 365 * 24 * time.Hour)
 		Expect(myCA.CACert.NotAfter).To(BeTemporally("~", expected, 5*time.Minute))
 	})
 
 	It("overrides CA validity with CAValidityDays", func() {
 		myCA.CAValidityDays = 3650 // 10 years
-		Expect(myCA.Init()).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 		expected := time.Now().Add(3650 * 24 * time.Hour)
 		Expect(myCA.CACert.NotAfter).To(BeTemporally("~", expected, 5*time.Minute))
 	})
 
 	It("ignores CAValidityDays when reloading an existing CA", func() {
-		Expect(myCA.Init()).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 		originalNotAfter := myCA.CACert.NotAfter
 
 		myCA2 := ca.New(store, ca.AutosignConfig{Mode: "off"}, "cavalid.test")
 		myCA2.CAValidityDays = 100
-		Expect(myCA2.Init()).To(Succeed())
+		Expect(myCA2.Init(context.Background())).To(Succeed())
 		Expect(myCA2.CACert.NotAfter).To(BeTemporally("==", originalNotAfter))
 	})
 })
@@ -407,7 +408,7 @@ var _ = Describe("Leaf certificate validity period", func() {
 		// Bootstrap a long-lived ECDSA CA so leaf validity is not artificially capped.
 		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
 		myCA.CAValidityDays = 7300 // 20 years
-		Expect(myCA.Init()).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 	})
 
 	AfterEach(func() { os.RemoveAll(tmpDir) })
@@ -416,9 +417,9 @@ var _ = Describe("Leaf certificate validity period", func() {
 		GinkgoHelper()
 		csrPEM, err := testutil.GenerateCSR(subject)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest(subject, csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), subject, csrPEM)
 		Expect(err).NotTo(HaveOccurred())
-		certPEM, err := myCA.Sign(subject)
+		certPEM, err := myCA.Sign(context.Background(), subject)
 		Expect(err).NotTo(HaveOccurred())
 		block, _ := pem.Decode(certPEM)
 		cert, err := x509.ParseCertificate(block.Bytes)
@@ -444,10 +445,10 @@ var _ = Describe("Leaf certificate validity period", func() {
 		subject := "leaf-ttl-override"
 		csrPEM, err := testutil.GenerateCSR(subject)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest(subject, csrPEM)
+		_, err = myCA.SaveRequest(context.Background(), subject, csrPEM)
 		Expect(err).NotTo(HaveOccurred())
 
-		certPEM, err := myCA.SignWithTTL(subject, 7*24*time.Hour)
+		certPEM, err := myCA.SignWithTTL(context.Background(), subject, 7*24*time.Hour)
 		Expect(err).NotTo(HaveOccurred())
 		block, _ := pem.Decode(certPEM)
 		cert, _ := x509.ParseCertificate(block.Bytes)
@@ -457,7 +458,7 @@ var _ = Describe("Leaf certificate validity period", func() {
 
 	It("LeafValidityDays also applies to Generate", func() {
 		myCA.LeafValidityDays = 45
-		result, err := myCA.Generate("leaf-gen-validity", nil)
+		result, err := myCA.Generate(context.Background(), "leaf-gen-validity", nil)
 		Expect(err).NotTo(HaveOccurred())
 		block, _ := pem.Decode(result.CertificatePEM)
 		cert, _ := x509.ParseCertificate(block.Bytes)
@@ -475,20 +476,20 @@ var _ = Describe("loadCA key/cert mismatch", func() {
 		defer os.RemoveAll(tmpDir)
 
 		store := storage.New(tmpDir)
-		Expect(store.EnsureDirs()).To(Succeed())
+		Expect(store.EnsureDirs(context.Background())).To(Succeed())
 
 		// Use a cert from one CA and a key from a different CA.
 		altKeyPEM, _, _, err := testutil.GenerateTestCA()
 		Expect(err).NotTo(HaveOccurred())
 
-		Expect(store.SaveCACert(cachedCrtPEM)).To(Succeed())
-		Expect(store.SaveCAKey(altKeyPEM)).To(Succeed())
-		Expect(store.UpdateCRL(cachedCrlPEM)).To(Succeed())
-		Expect(store.WriteSerial("0001")).To(Succeed())
-		Expect(store.TouchInventory()).To(Succeed())
+		Expect(store.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+		Expect(store.SaveCAKey(context.Background(), altKeyPEM)).To(Succeed())
+		Expect(store.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial(context.Background(), "0001")).To(Succeed())
+		Expect(store.TouchInventory(context.Background())).To(Succeed())
 
 		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "mismatch.test")
-		err = myCA.Init()
+		err = myCA.Init(context.Background())
 		// loadCA fails → Init falls into the "files exist but could not be parsed" path.
 		Expect(err).To(HaveOccurred(), "Init must fail when key does not match cert")
 	})
@@ -506,24 +507,24 @@ var _ = Describe("ImportCA ECDSA", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		store := storage.New(tmpDir)
-		Expect(ca.ImportCA(store, ecCertPEM, ecKeyPEM, ecCrlPEM)).To(Succeed())
+		Expect(ca.ImportCA(context.Background(), store, ecCertPEM, ecKeyPEM, ecCrlPEM)).To(Succeed())
 
 		// Blobs must exist.
-		Expect(store.HasCACert()).To(BeTrue())
-		Expect(store.HasCAKey()).To(BeTrue())
-		crlBytes, err := store.GetCRL()
+		Expect(store.HasCACert(context.Background())).To(BeTrue())
+		Expect(store.HasCAKey(context.Background())).To(BeTrue())
+		crlBytes, err := store.GetCRL(context.Background())
 		Expect(err).NotTo(HaveOccurred())
 		Expect(crlBytes).NotTo(BeEmpty())
 
 		// Key blob must be an EC key.
-		keyData, err := store.GetCAKey()
+		keyData, err := store.GetCAKey(context.Background())
 		Expect(err).NotTo(HaveOccurred())
 		Expect(string(keyData)).To(ContainSubstring("EC PRIVATE KEY"))
 
 		// Loaded CA must work.
 		store2 := storage.New(tmpDir)
 		myCA := ca.New(store2, ca.AutosignConfig{Mode: "off"}, "ecdsa.test")
-		Expect(myCA.Init()).To(Succeed())
+		Expect(myCA.Init(context.Background())).To(Succeed())
 		_, ok := myCA.CAKey.(*ecdsa.PrivateKey)
 		Expect(ok).To(BeTrue(), "loaded key should be ECDSA")
 	})
@@ -540,7 +541,7 @@ var _ = Describe("ImportCA ECDSA", func() {
 
 		store := storage.New(tmpDir)
 		// Pass ecCertPEM with altEcKeyPEM; these don't match.
-		err = ca.ImportCA(store, ecCertPEM, altEcKeyPEM, ecCrlPEM)
+		err = ca.ImportCA(context.Background(), store, ecCertPEM, altEcKeyPEM, ecCrlPEM)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("does not match"))
 	})
