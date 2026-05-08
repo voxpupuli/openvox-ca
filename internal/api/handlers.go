@@ -500,7 +500,7 @@ func fingerprint(data []byte) string {
 	for i := 0; i < len(raw); i += 2 {
 		parts = append(parts, raw[i:i+2])
 	}
-	return "SHA256:" + strings.Join(parts, ":")
+	return strings.Join(parts, ":")
 }
 
 // noNilSlice returns s unchanged when non-nil, or an empty non-nil slice.
