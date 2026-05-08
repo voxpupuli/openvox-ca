@@ -327,10 +327,14 @@ func (s *Server) handlePutRequest(w http.ResponseWriter, r *http.Request) {
 
 	signed, err := s.CA.SaveRequest(r.Context(), subject, csrPEM)
 	if err != nil {
-		slog.Warn("SaveRequest failed", "subject", subject, "error", err)
 		if errors.Is(err, ca.ErrCertExists) {
-			http.Error(w, err.Error(), http.StatusConflict)
+			// A signed certificate already exists for this subject. Return 200 so
+			// the node continues its poll loop and retrieves its cert via GET.
+			// Returning 409 here causes the node (e.g. openvox-agent) to treat the
+			// submission as fatal and abort the run entirely.
+			w.WriteHeader(http.StatusOK)
 		} else {
+			slog.Warn("SaveRequest failed", "subject", subject, "error", err)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 		}
 		return

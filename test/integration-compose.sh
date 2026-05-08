@@ -573,11 +573,11 @@ assert_http 400 "PUT /certificate_status with malformed JSON → 400" \
     -d 'not-json' \
     "${CA_URL}/puppet-ca/v1/certificate_status/valid-node"
 
-# 409: second CSR for active cert
+# 200: second CSR for active cert (node continues polling, fetches cert via GET)
 _CONF="conflict-${RUN_ID}.example.com"
 submit_csr "$_CONF"
 $CTL sign --certname "$_CONF" >/dev/null 2>&1 || true
-assert_http 409 "Duplicate CSR for active cert → 409" \
+assert_http 200 "Duplicate CSR for active cert → 200" \
     -X PUT -H "Content-Type: text/plain" \
     --data-binary @"$WORK_DIR/${_CONF}.csr" \
     "${CA_URL}/puppet-ca/v1/certificate_request/${_CONF}"

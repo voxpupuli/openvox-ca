@@ -295,7 +295,7 @@ var _ = Describe("API Workflow", func() {
 			Expect(resp.State).To(Equal("revoked"))
 		})
 
-		It("should return 409 when submitting a CSR for a subject with an active certificate", func() {
+		It("should return 200 when submitting a CSR for a subject with an active certificate", func() {
 			subject := "conflict-node"
 			csrPEM, err := testutil.GenerateCSR(subject)
 			Expect(err).NotTo(HaveOccurred())
@@ -309,7 +309,9 @@ var _ = Describe("API Workflow", func() {
 			req := httptest.NewRequest("PUT", "/certificate_request/"+subject, bytes.NewReader(csrPEM2))
 			rr := httptest.NewRecorder()
 			mux.ServeHTTP(rr, req)
-			Expect(rr.Code).To(Equal(http.StatusConflict))
+			// 200 so the node continues to poll and retrieves its cert via GET
+			// rather than treating the re-submission as a fatal conflict.
+			Expect(rr.Code).To(Equal(http.StatusOK))
 		})
 	})
 
