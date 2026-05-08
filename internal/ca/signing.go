@@ -332,6 +332,12 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 		subject,
 	)
 	if err := c.Storage.AppendInventory(ctx, inventoryEntry); err != nil {
+		// Roll back the cert so storage and inventory stay in sync. Log but don't
+		// propagate the cleanup error; the caller already has an error to handle.
+		if delErr := c.Storage.DeleteCert(ctx, subject); delErr != nil {
+			slog.Warn("Failed to roll back cert after inventory write failure",
+				"subject", subject, "error", delErr)
+		}
 		return nil, fmt.Errorf("failed to update inventory for %s: %w", subject, err)
 	}
 
@@ -365,27 +371,50 @@ func (c *CA) Clean(ctx context.Context, subject string) error {
 		return err
 	}
 
-	hasCert := c.Storage.HasCert(ctx, subject)
-	hasCSR := c.Storage.HasCSR(ctx, subject)
+	ctx, cancel := context.WithTimeout(ctx, lockTimeout)
+	defer cancel()
 
-	if !hasCert && !hasCSR {
-		return ErrNotFound
-	}
+	// Hold the per-subject lock for the entire check+revoke+delete sequence to
+	// prevent TOCTOU races with concurrent Sign() or SaveRequest() calls. Without
+	// the lock, a Sign() completing between HasCert() and DeleteCert() would leave
+	// an unrevoked certificate in storage after Clean() returns.
+	//
+	// Lock ordering: subject-lock (distributed) → CRL-lock (distributed) → c.mu.
+	// No existing code path acquires CRL-lock then subject-lock, so no deadlock.
+	lockErr := c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
+		hasCert := c.Storage.HasCert(ctx, subject)
+		hasCSR := c.Storage.HasCSR(ctx, subject)
 
-	if hasCert {
-		// Revoke first so the CRL is updated before the file is removed.
-		if err := c.Revoke(ctx, subject); err != nil {
-			slog.Warn("Clean: revoke failed (proceeding with delete)", "subject", subject, "error", err)
+		if !hasCert && !hasCSR {
+			return ErrNotFound
 		}
-		if err := c.Storage.DeleteCert(ctx, subject); err != nil {
-			slog.Warn("Clean: delete cert failed", "subject", subject, "error", err)
-		}
-	}
 
-	if hasCSR {
-		if err := c.Storage.DeleteCSR(ctx, subject); err != nil {
-			slog.Warn("Clean: delete CSR failed", "subject", subject, "error", err)
+		if hasCert {
+			// Revoke first so the CRL is updated before the file is removed.
+			// Acquire the CRL lock directly here (inside the subject lock) and
+			// call revokeLocked to avoid double-locking via the public Revoke().
+			if err := c.Storage.WithLock(ctx, lockNameCRL, func() error {
+				c.mu.Lock()
+				defer c.mu.Unlock()
+				return c.revokeLocked(ctx, subject)
+			}); err != nil {
+				slog.Warn("Clean: revoke failed (proceeding with delete)", "subject", subject, "error", err)
+			}
+			if err := c.Storage.DeleteCert(ctx, subject); err != nil {
+				slog.Warn("Clean: delete cert failed", "subject", subject, "error", err)
+			}
 		}
+
+		if hasCSR {
+			if err := c.Storage.DeleteCSR(ctx, subject); err != nil {
+				slog.Warn("Clean: delete CSR failed", "subject", subject, "error", err)
+			}
+		}
+
+		return nil
+	})
+	if lockErr != nil {
+		return lockErr
 	}
 
 	slog.Debug("Certificate cleaned", "subject", subject)
