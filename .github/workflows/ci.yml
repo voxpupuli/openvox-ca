@@ -105,6 +105,25 @@ jobs:
       - name: Run migration integration tests
         run: mage test:migration
 
+  # -- Storage backend integration tests --------------------------------------
+  # Runs the full Puppet stack against a Redis-backed CA topology with two
+  # CA replicas sharing a single Redis prefix.  Validates blob offload,
+  # distributed bootstrap locking, cross-replica state visibility, and
+  # concurrent CSR submissions split across replicas.
+  backends-redis:
+    name: Storage backend tests (Redis)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install Mage
+        run: go install github.com/magefile/mage@v1.15.0
+      - name: Run Redis-backend integration tests
+        run: mage test:backendsRedis
+
   # -- Compose integration tests (docker compose) ------------------------------─
   # podman-compose is not pre-installed on GitHub runners; composeCmd() in
   # magefile.go falls back to `docker compose` (v2 plugin, always available).
