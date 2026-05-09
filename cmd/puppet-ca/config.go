@@ -77,6 +77,9 @@ type serverConfig struct {
 
 	// PromoteCNToSAN adds the CN as a DNS SAN when the CSR has no SANs (default: true).
 	PromoteCNToSAN bool `yaml:"promote_cn_to_san"`
+	// PuppetDateTimeFormat formats JSON date/time fields using the original Puppet CA
+	// style ("2006-01-02T15:04:05MST") instead of RFC 3339 (default: false).
+	PuppetDateTimeFormat bool `yaml:"puppet_datetime_format"`
 
 	// Storage backend selection. "filesystem" (default) stores all CA data
 	// under CADir; "etcd" keeps CA cert, key, CRL, inventory, serial, CSRs
@@ -271,6 +274,11 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("PUPPET_CA_PROMOTE_CN_TO_SAN"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.PromoteCNToSAN = b
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_PUPPET_DATETIME_FORMAT"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.PuppetDateTimeFormat = b
 		}
 	}
 	if v := os.Getenv("PUPPET_CA_KEY_PASSPHRASE_FILE"); v != "" {

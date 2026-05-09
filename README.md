@@ -142,6 +142,8 @@ csr_rate_limit: 60    # max CSR submissions per IP per minute; 0 = disable rate 
 # CA key encryption at rest.
 encrypt_ca_key: false           # encrypt the CA private key (AES-256-GCM + Argon2id)
 ca_key_passphrase_file: ""      # path to passphrase file; auto-generated if omitted
+# Date/time format in JSON responses.
+puppet_datetime_format: false   # use Puppet CA style "2006-01-02T15:04:05MST" instead of RFC 3339
 ```
 
 **Environment variables (mirrors CLI flags):**
@@ -199,6 +201,7 @@ The CA key passphrase can also be provided via `PUPPET_CA_KEY_PASSPHRASE` (env v
 | `etcd_tls_ca_file` | `PUPPET_CA_ETCD_TLS_CA_FILE` |
 | `etcd_tls_cert_file` | `PUPPET_CA_ETCD_TLS_CERT_FILE` |
 | `etcd_tls_key_file` | `PUPPET_CA_ETCD_TLS_KEY_FILE` |
+| `puppet_datetime_format` | `PUPPET_CA_PUPPET_DATETIME_FORMAT` |
 
 > **Note:** `--daemon` is intentionally excluded from config file and environment
 > variable support because `PUPPET_CA_DAEMON` is used internally as the daemon fork

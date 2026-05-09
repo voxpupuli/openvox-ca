@@ -553,6 +553,7 @@ func main() {
 			srv.CSRRateLimit = csrRL
 			srv.SignBatchLimit = 50 // Default max batch size for sign operations
 			srv.PlainHTTP = !tlsConfigured && !isLoopback(cfg.Host) && !cfg.NoTLSRequired
+			srv.PuppetDateTimeFormat = cfg.PuppetDateTimeFormat
 
 			// Wire mTLS auth middleware when TLS is configured.
 			if cfg.TLSCert != "" && cfg.TLSKey != "" {

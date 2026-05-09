@@ -59,6 +59,10 @@ type Server struct {
 	// SignBatchLimit is the maximum number of certificates that can be signed
 	// in a single POST /sign or POST /sign/all request. Zero disables the limit.
 	SignBatchLimit int
+	// PuppetDateTimeFormat when true formats date/time fields using the original
+	// Puppet CA style ("2006-01-02T15:04:05MST") instead of RFC 3339. Useful
+	// when integrating with tooling that expects exact Puppet Server output.
+	PuppetDateTimeFormat bool
 
 	csrLimiter     *ipRateLimiter
 	destructiveOps *destructiveOpTracker
@@ -157,7 +161,7 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 			state = "revoked"
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(certStatusFromCert(subject, certPEM, state))
+		json.NewEncoder(w).Encode(certStatusFromCert(subject, certPEM, state, s.timeFormat()))
 		return
 	}
 
@@ -515,8 +519,16 @@ func noNilSlice(s []string) []string {
 	return s
 }
 
+// timeFormat returns the time layout string to use for JSON date/time fields.
+func (s *Server) timeFormat() string {
+	if s.PuppetDateTimeFormat {
+		return "2006-01-02T15:04:05MST"
+	}
+	return time.RFC3339
+}
+
 // certStatusFromCert builds a CertStatusResponse from a signed or revoked certificate.
-func certStatusFromCert(subject string, certPEM []byte, state string) CertStatusResponse {
+func certStatusFromCert(subject string, certPEM []byte, state string, timeFmt string) CertStatusResponse {
 	cert, err := parseCert(certPEM)
 	if err != nil {
 		slog.Warn("Failed to parse cert for status response", "subject", subject, "error", err)
@@ -533,8 +545,8 @@ func certStatusFromCert(subject string, certPEM []byte, state string) CertStatus
 	}
 	fp := fingerprint(certPEM)
 	serial := cert.SerialNumber.Text(10) // decimal string; preserves full 128-bit value
-	nb := cert.NotBefore.UTC().Format(time.RFC3339)
-	na := cert.NotAfter.UTC().Format(time.RFC3339)
+	nb := cert.NotBefore.UTC().Format(timeFmt)
+	na := cert.NotAfter.UTC().Format(timeFmt)
 	dnsNames := noNilSlice(cert.DNSNames)
 	return CertStatusResponse{
 		Name:                    subject,
@@ -638,7 +650,7 @@ func (s *Server) handleGetStatuses(w http.ResponseWriter, r *http.Request) {
 		if stateFilter != "" && state != stateFilter {
 			continue
 		}
-		statuses = append(statuses, certStatusFromCert(subject, certPEM, state))
+		statuses = append(statuses, certStatusFromCert(subject, certPEM, state, s.timeFormat()))
 	}
 	for _, subject := range csrs {
 		if seen[subject] {
@@ -682,13 +694,13 @@ func (s *Server) handleGetExpirations(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "CA not ready", http.StatusServiceUnavailable)
 		return
 	}
-	certExp := s.CA.CACert.NotAfter.UTC().Format(time.RFC3339)
+	certExp := s.CA.CACert.NotAfter.UTC().Format(s.timeFormat())
 
 	crlNextUpdate := ""
 	if crlPEM, err := s.CA.Storage.GetCRL(r.Context(), ); err == nil {
 		if block, _ := pem.Decode(crlPEM); block != nil {
 			if crl, err := x509.ParseRevocationList(block.Bytes); err == nil {
-				crlNextUpdate = crl.NextUpdate.UTC().Format(time.RFC3339)
+				crlNextUpdate = crl.NextUpdate.UTC().Format(s.timeFormat())
 			}
 		}
 	}

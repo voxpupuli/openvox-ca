@@ -1229,4 +1229,68 @@ var _ = Describe("API Workflow", func() {
 		})
 	})
 
+	Context("PuppetDateTimeFormat", func() {
+		const puppetFmt = "2006-01-02T15:04:05MST"
+
+		signSubject := func(subject string) {
+			csrPEM, err := testutil.GenerateCSR(subject)
+			Expect(err).NotTo(HaveOccurred())
+			mux.ServeHTTP(httptest.NewRecorder(),
+				httptest.NewRequest("PUT", "/certificate_request/"+subject, bytes.NewReader(csrPEM)))
+			body, _ := json.Marshal(api.PutStatusBody{DesiredState: "signed"})
+			mux.ServeHTTP(httptest.NewRecorder(),
+				httptest.NewRequest("PUT", "/certificate_status/"+subject, bytes.NewReader(body)))
+		}
+
+		It("defaults to RFC 3339 format for not_before / not_after", func() {
+			signSubject("fmt-default-node")
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, httptest.NewRequest("GET", "/certificate_status/fmt-default-node", nil))
+			Expect(rr.Code).To(Equal(http.StatusOK))
+
+			var resp api.CertStatusResponse
+			Expect(json.Unmarshal(rr.Body.Bytes(), &resp)).To(Succeed())
+			Expect(resp.NotBefore).NotTo(BeNil())
+			// RFC 3339 uses a numeric offset or Z, not a timezone abbreviation.
+			_, err := time.Parse(time.RFC3339, *resp.NotBefore)
+			Expect(err).NotTo(HaveOccurred(), "not_before should parse as RFC 3339")
+		})
+
+		It("uses Puppet CA format for not_before / not_after when enabled", func() {
+			server.PuppetDateTimeFormat = true
+			mux = server.Routes()
+
+			signSubject("fmt-puppet-node")
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, httptest.NewRequest("GET", "/certificate_status/fmt-puppet-node", nil))
+			Expect(rr.Code).To(Equal(http.StatusOK))
+
+			var resp api.CertStatusResponse
+			Expect(json.Unmarshal(rr.Body.Bytes(), &resp)).To(Succeed())
+			Expect(resp.NotBefore).NotTo(BeNil())
+			_, err := time.Parse(puppetFmt, *resp.NotBefore)
+			Expect(err).NotTo(HaveOccurred(), "not_before should parse as Puppet CA format")
+			_, err = time.Parse(time.RFC3339, *resp.NotBefore)
+			Expect(err).To(HaveOccurred(), "not_before should not be valid RFC 3339 in Puppet mode")
+		})
+
+		It("uses Puppet CA format for expirations when enabled", func() {
+			server.PuppetDateTimeFormat = true
+			mux = server.Routes()
+
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, httptest.NewRequest("GET", "/expirations", nil))
+			Expect(rr.Code).To(Equal(http.StatusOK))
+
+			var resp struct {
+				CACertificate struct {
+					Expiration string `json:"expiration"`
+				} `json:"ca_certificate"`
+			}
+			Expect(json.Unmarshal(rr.Body.Bytes(), &resp)).To(Succeed())
+			_, err := time.Parse(puppetFmt, resp.CACertificate.Expiration)
+			Expect(err).NotTo(HaveOccurred(), "expiration should parse as Puppet CA format")
+		})
+	})
+
 })
