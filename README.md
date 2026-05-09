@@ -343,6 +343,18 @@ All endpoints are served under both the bare path and `/puppet-ca/v1/<path>`, so
 | `POST` | `/sign` | Sign one or more CSRs; body: `{"certnames":["a","b"]}` |
 | `POST` | `/sign/all` | Sign every pending CSR |
 
+### Bulk clean
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `PUT` | `/clean` | Revoke + delete multiple certificates in bulk; body: `{"certnames":["a","b"]}` |
+
+Response:
+
+```json
+{ "cleaned": ["a.example.com"], "not-found": ["missing.example.com"], "clean-errors": [] }
+```
+
 ### CRL
 
 | Method | Path | Description |
@@ -397,7 +409,7 @@ When mTLS is enabled (both `--tls-cert` and `--tls-key` set), each endpoint requ
 | **Public** | None | `GET /healthz/*`, `GET /certificate/{subject}`, `GET /certificate_revocation_list/ca`, `PUT /certificate_request/{subject}`, `GET /expirations`, `POST /ocsp`, `GET /ocsp/{request}` |
 | **Any client** | Any CA-signed cert | `GET /certificate_status/{subject}` (public with `--allow-public-status`) |
 | **Self or admin** | Cert CN matches path subject, OR cert is admin | `GET /certificate_request/{subject}` |
-| **Admin** | Cert is admin (see below) | `PUT /certificate_status/{subject}`, `DELETE /certificate_status/{subject}`, `DELETE /certificate_request/{subject}`, `GET /certificate_statuses/*`, `POST /sign`, `POST /sign/all`, `POST /generate/{subject}` |
+| **Admin** | Cert is admin (see below) | `PUT /certificate_status/{subject}`, `DELETE /certificate_status/{subject}`, `DELETE /certificate_request/{subject}`, `GET /certificate_statuses/*`, `POST /sign`, `POST /sign/all`, `POST /generate/{subject}`, `PUT /clean` |
 
 In plain HTTP mode (no TLS), all endpoints are accessible without authentication.
 
@@ -618,7 +630,7 @@ mage test:bench
 mage test:puppet
 ```
 
-`test:integCompose` and `test:loadCompose` use `compose.yml`, the canonical integration test suite. It runs two containers on an isolated network (puppet-ca + test-runner) and exercises the full API in TAP format across 19 test groups:
+`test:integCompose` and `test:loadCompose` use `compose.yml`, the canonical integration test suite. It runs two containers on an isolated network (puppet-ca + test-runner) and exercises the full API in TAP format across 20 test groups:
 
 | Group | Coverage |
 |-------|----------|
@@ -631,16 +643,17 @@ mage test:puppet
 | 7 | `subject_alt_names` field in status responses |
 | 8 | CSR CN mismatch rejection (400) |
 | 9 | Error cases: invalid subjects, bad JSON, conflict (409), `BasicConstraints CA:TRUE` rejection |
-| 10 | Protocol features: bare paths, `/puppet-ca/v1/` prefixed paths |
-| 11 | `puppet-ca-ctl` operator workflow over the compose network |
-| 12 | OCSP: good/revoked status, nonce handling, cache invalidation on revoke, malformed request (400) |
-| 13 | Concurrency / load tests (opt-in via `DO_LOAD=true` / `mage test:loadCompose`) |
-| 14 | OCSP with CRL validation |
-| 15 | Autosign modes: `true`, glob-pattern file, executable plugin |
-| 16 | Config drivers: env vars, config file |
-| 17 | `pp_cli_auth` mTLS: Phase 1 bootstraps certs (loopback HTTP); Phase 2 asserts pp_cli_auth cert reaches admin endpoints while plain cert is denied |
-| 18 | `puppet-ca-ctl` error paths: revoke/clean/sign/generate against non-existent or duplicate subjects; arg validation; `--dns` SAN delivery; full mTLS via `--ca-cert`/`--client-cert`/`--client-key`; unreachable server |
-| 19 | Migration from Puppet Server CA: import CA cert/key/CRL via `puppet-ca-ctl import`, copy pre-existing signed certs, verify fetch/sign/revoke/list all work on the migrated CA |
+| 10 | `PUT /clean` bulk revoke+delete: success, not-found, and error buckets |
+| 11 | Protocol features: bare paths, `/puppet-ca/v1/` prefixed paths |
+| 12 | `puppet-ca-ctl` offline subcommands: `setup` (bootstrap new CA) and `import` (external CA cert/key/CRL) |
+| 13 | `POST /sign` and `POST /sign/all` bulk HTTP signing API |
+| 14 | Concurrency / load tests (opt-in via `DO_LOAD=true` / `mage test:loadCompose`) |
+| 15 | OCSP: good/revoked status, nonce handling, cache invalidation on revoke, malformed request (400) |
+| 16 | Autosign modes: `true`, glob-pattern file, executable plugin |
+| 17 | Config drivers: env vars, config file |
+| 18 | `pp_cli_auth` mTLS: Phase 1 bootstraps certs (loopback HTTP); Phase 2 asserts pp_cli_auth cert reaches admin endpoints while plain cert is denied |
+| 19 | `puppet-ca-ctl` error paths: revoke/clean/sign/generate against non-existent or duplicate subjects; arg validation; `--dns` SAN delivery; full mTLS via `--ca-cert`/`--client-cert`/`--client-key`; unreachable server |
+| 20 | Migration from Puppet Server CA: import CA cert/key/CRL via `puppet-ca-ctl import`, copy pre-existing signed certs, verify fetch/sign/revoke/list all work on the migrated CA |
 
 `test:bench` uses `compose-bench.yml` (autosign=true, k6 load runner).
 `test:puppet` uses `compose-puppet.yml`, a five-service stack that validates end-to-end catalog compilation, PuppetDB reporting, exported resources, and CRL revocation using a real OpenVox 8 agent and WEBrick puppet master. The CA runs with genuine TLS (a cert with CN=puppet-ca signed by the CA itself); all inter-service traffic verifies it.

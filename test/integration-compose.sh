@@ -648,9 +648,47 @@ assert_http 404 "DELETE /certificate_status (nonexistent) returns 404" \
     -X DELETE "${CA_URL}/puppet-ca/v1/certificate_status/no-such-node"
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Group 10 -- Protocol features (path prefixes, bare paths)
+# Group 10 -- PUT /clean (bulk revoke + delete)
 # ═════════════════════════════════════════════════════════════════════════════
-printf '\n# Group 10 -- Protocol features (bare and prefixed paths)\n'
+printf '\n# Group 10 -- PUT /clean bulk endpoint\n'
+
+_BULK_A="bulk-clean-a-${RUN_ID}.example.com"
+_BULK_B="bulk-clean-b-${RUN_ID}.example.com"
+_BULK_CSR="bulk-clean-csr-${RUN_ID}.example.com"
+submit_csr "$_BULK_A"
+submit_csr "$_BULK_B"
+submit_csr "$_BULK_CSR"
+$CTL sign --certname "$_BULK_A" >/dev/null 2>&1 || true
+$CTL sign --certname "$_BULK_B" >/dev/null 2>&1 || true
+# $_BULK_CSR intentionally left unsigned (CSR-only subject)
+
+_clean_body=$(curl -s -X PUT -H "Content-Type: application/json" \
+    -d "{\"certnames\":[\"${_BULK_A}\",\"${_BULK_B}\",\"${_BULK_CSR}\",\"no-such-node\"]}" \
+    "${CA_URL}/puppet-ca/v1/clean") || true
+
+assert_json_field "$_clean_body" '"cleaned"' \
+    "PUT /clean response includes cleaned field"
+assert_json_field "$_clean_body" '"not-found"' \
+    "PUT /clean response includes not-found field"
+assert_json_field "$_clean_body" '"clean-errors"' \
+    "PUT /clean response includes clean-errors field"
+grep -qF "\"${_BULK_A}\"" <<< "$_clean_body" \
+    && pass "PUT /clean: signed cert subject appears in cleaned" \
+    || fail "PUT /clean: signed cert subject appears in cleaned" "body: $_clean_body"
+grep -qF '"no-such-node"' <<< "$_clean_body" \
+    && pass "PUT /clean: unknown subject appears in not-found" \
+    || fail "PUT /clean: unknown subject appears in not-found" "body: $_clean_body"
+assert_http 404 "GET /certificate_status after bulk clean returns 404" \
+    "${CA_URL}/puppet-ca/v1/certificate_status/${_BULK_A}"
+assert_http 400 "PUT /clean with empty certnames returns 400" \
+    -X PUT -H "Content-Type: application/json" \
+    -d '{"certnames":[]}' \
+    "${CA_URL}/puppet-ca/v1/clean"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Group 11 -- Protocol features (path prefixes, bare paths)
+# ═════════════════════════════════════════════════════════════════════════════
+printf '\n# Group 11 -- Protocol features (bare and prefixed paths)\n'
 
 assert_http 200 "GET /certificate/ca (bare path) returns 200" \
     "${CA_URL}/certificate/ca"
@@ -667,11 +705,11 @@ assert_http 200 "GET /puppet-ca/v1/certificate_request/{pending} returns 200" \
     "${CA_URL}/puppet-ca/v1/certificate_request/${_PFX}"
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Group 11 -- puppet-ca-ctl offline subcommands (run inside test-runner)
+# Group 12 -- puppet-ca-ctl offline subcommands (run inside test-runner)
 # ═════════════════════════════════════════════════════════════════════════════
-printf '\n# Group 11 -- puppet-ca-ctl offline: setup and import\n'
+printf '\n# Group 12 -- puppet-ca-ctl offline: setup and import\n'
 
-# --- 11a: setup ---
+# --- 12a: setup ---
 _SETUP_DIR=$(mktemp -d)
 puppet-ca-ctl setup --cadir "$_SETUP_DIR" --hostname "setup-test-${RUN_ID}.example.com" \
     >/dev/null 2>&1 \
@@ -707,7 +745,7 @@ openssl verify -CAfile "$_SETUP_DIR/ca_crt.pem" "$_SETUP_DIR/ca_crt.pem" >/dev/n
 
 rm -rf "$_SETUP_DIR"
 
-# --- 11b: import ---
+# --- 12b: import ---
 # Generate a CA cert+key with openssl to import
 _IMP_DIR=$(mktemp -d)
 _IMP_DEST=$(mktemp -d)
@@ -780,9 +818,9 @@ puppet-ca-ctl import \
 rm -rf "$_IMP_DIR" "$_IMP_DEST" "$_BAD_DIR"
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Group 12 -- POST /sign and POST /sign/all (bulk HTTP API)
+# Group 13 -- POST /sign and POST /sign/all (bulk HTTP API)
 # ═════════════════════════════════════════════════════════════════════════════
-printf '\n# Group 12 -- POST /sign and POST /sign/all\n'
+printf '\n# Group 13 -- POST /sign and POST /sign/all\n'
 
 _S1="sign-api-a-${RUN_ID}.example.com"
 _S2="sign-api-b-${RUN_ID}.example.com"
@@ -815,10 +853,10 @@ grep -qF "$_SA1" <<< "$_signall_body" \
     || fail "POST /sign/all signed SA1" "body: $_signall_body"
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Group 13 -- Concurrency / load  (opt-in via DO_LOAD=true)
+# Group 14 -- Concurrency / load  (opt-in via DO_LOAD=true)
 # ═════════════════════════════════════════════════════════════════════════════
 if [ "$DO_LOAD" = "true" ]; then
-    printf '\n# Group 13 -- Concurrency / load tests\n'
+    printf '\n# Group 14 -- Concurrency / load tests\n'
 
     _LOAD_N=20
     printf '# Pre-generating %d CSRs...\n' "$_LOAD_N"
@@ -874,9 +912,9 @@ if [ "$DO_LOAD" = "true" ]; then
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Group 14 -- OCSP endpoint
+# Group 15 -- OCSP endpoint
 # ═════════════════════════════════════════════════════════════════════════════
-printf '\n# Group 14 -- OCSP endpoint\n'
+printf '\n# Group 15 -- OCSP endpoint\n'
 
 # Sign a fresh cert dedicated to OCSP testing.  The shared CA runs with
 # autosign=false, so we submit a CSR then sign it via puppet-ca-ctl.
@@ -937,12 +975,12 @@ _ocsp_bad=$(curl -s -o /dev/null -w '%{http_code}' \
     || fail "OCSP: malformed POST body returns 400" "got HTTP $_ocsp_bad"
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Group 15 -- Autosign modes (true, file glob, executable plugin)
+# Group 16 -- Autosign modes (true, file glob, executable plugin)
 #   Starts short-lived local puppet-ca instances on port 8141 inside this
 #   container.  The shared puppet-ca service (port 8140) is untouched.
 #   Each sub-test boots a fresh CA, exercises one autosign config, then stops.
 # ═════════════════════════════════════════════════════════════════════════════
-printf '\n# Group 15 -- Autosign modes (true, file, executable)\n'
+printf '\n# Group 16 -- Autosign modes (true, file, executable)\n'
 
 _LOCAL_CA="http://127.0.0.1:8141"
 _LOCAL_PORT=8141
@@ -1122,11 +1160,11 @@ wait "$_as_pid_c" 2>/dev/null || true
 rm -rf "$_AS_DIR_C"
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Group 16 -- Config-driver loop
+# Group 17 -- Config-driver loop
 #
 #   The same smoke-test function is run twice, once per config driver
 #   (env vars, config file), against a freshly started local CA instance on
-#   port 8141.  Mirrors the group 15 pattern: start → test → stop.
+#   port 8141.  Mirrors the group 16 pattern: start → test → stop.
 #
 #   CLI-flag configuration is already proven by Groups 1-13, which all run
 #   against the shared CA started with explicit CLI flags.
@@ -1134,15 +1172,15 @@ rm -rf "$_AS_DIR_C"
 #   Also tests the puppet-ca-ctl env-var and config-file drivers against the
 #   already-running shared CA service.
 # ═════════════════════════════════════════════════════════════════════════════
-printf '\n# Group 16 -- Config-driver loop (env vars, config file)\n'
+printf '\n# Group 17 -- Config-driver loop (env vars, config file)\n'
 
-# _LOCAL_CA and _LOCAL_PORT are defined in group 15 above.
+# _LOCAL_CA and _LOCAL_PORT are defined in group 16 above.
 
 # _driver_smoke URL LABEL
 #   Runs a representative set of API smoke tests against a freshly started CA.
 #   Checks: health, CRL reachability, CSR submit → autosign → status, cert
 #   download + verify.  autosign=true is assumed for all driver setups.
-#   OCSP correctness is tested separately in Group 14 (not driver-specific).
+#   OCSP correctness is tested separately in Group 15 (not driver-specific).
 _driver_smoke() {
     local url="$1" label="$2"
 
@@ -1236,7 +1274,7 @@ puppet-ca-ctl --config="$_CTL_CFG" list >/dev/null 2>&1 \
     || fail "puppet-ca-ctl config-file driver: --config flag accepted"
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Group 17 -- pp_cli_auth mTLS authorization
+# Group 18 -- pp_cli_auth mTLS authorization
 #
 #   Starts short-lived local puppet-ca instances on port 8142 inside this
 #   container.  The shared puppet-ca service (port 8140) is untouched.
@@ -1249,7 +1287,7 @@ puppet-ca-ctl --config="$_CTL_CFG" list >/dev/null 2>&1 \
 #
 # OID source: https://github.com/puppetlabs/puppet/blob/main/lib/puppet/ssl/oids.rb
 # ═════════════════════════════════════════════════════════════════════════════
-printf '\n# Group 17 -- pp_cli_auth mTLS authorization\n'
+printf '\n# Group 18 -- pp_cli_auth mTLS authorization\n'
 
 _AUTH_PORT=8142
 _AUTH_CA_URL="http://127.0.0.1:${_AUTH_PORT}"
@@ -1385,14 +1423,14 @@ kill "$_AUTH_PID" 2>/dev/null; wait "$_AUTH_PID" 2>/dev/null || true
 rm -rf "$_AUTH_DIR"
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Group 18 -- puppet-ca-ctl error paths and edge cases
+# Group 19 -- puppet-ca-ctl error paths and edge cases
 #
 #   Validates that the CLI propagates server errors correctly, exits non-zero
 #   on failures, and handles argument validation.
 # ═════════════════════════════════════════════════════════════════════════════
-printf '\n# Group 18 -- puppet-ca-ctl error paths and edge cases\n'
+printf '\n# Group 19 -- puppet-ca-ctl error paths and edge cases\n'
 
-# --- 18a: revoke non-existent cert must fail with non-zero exit ---
+# --- 19a: revoke non-existent cert must fail with non-zero exit ---
 _rv_out=$($CTL revoke --certname "ghost-revoke-${RUN_ID}" 2>&1) && _rv_rc=$? || _rv_rc=$?
 [ "$_rv_rc" -ne 0 ] \
     && pass "puppet-ca-ctl revoke non-existent cert exits non-zero" \
@@ -1401,7 +1439,7 @@ echo "$_rv_out" | grep -qiE 'error|fail|not found|HTTP [45]' \
     && pass "puppet-ca-ctl revoke non-existent cert reports error message" \
     || fail "puppet-ca-ctl revoke non-existent cert reports error message" "output: $_rv_out"
 
-# --- 18b: clean non-existent subject must fail with non-zero exit ---
+# --- 19b: clean non-existent subject must fail with non-zero exit ---
 _cl_out=$($CTL clean --certname "ghost-clean-${RUN_ID}" 2>&1) && _cl_rc=$? || _cl_rc=$?
 [ "$_cl_rc" -ne 0 ] \
     && pass "puppet-ca-ctl clean non-existent subject exits non-zero" \
@@ -1410,7 +1448,7 @@ echo "$_cl_out" | grep -qiE 'error|fail|not found|HTTP [45]' \
     && pass "puppet-ca-ctl clean non-existent subject reports error message" \
     || fail "puppet-ca-ctl clean non-existent subject reports error message" "output: $_cl_out"
 
-# --- 18c: sign --certname without a pending CSR must fail ---
+# --- 19c: sign --certname without a pending CSR must fail ---
 _sn_out=$($CTL sign --certname "ghost-sign-${RUN_ID}" 2>&1) && _sn_rc=$? || _sn_rc=$?
 [ "$_sn_rc" -ne 0 ] \
     && pass "puppet-ca-ctl sign without pending CSR exits non-zero" \
@@ -1419,7 +1457,7 @@ echo "$_sn_out" | grep -qiE 'error|fail|not found|HTTP [45]' \
     && pass "puppet-ca-ctl sign without pending CSR reports error message" \
     || fail "puppet-ca-ctl sign without pending CSR reports error message" "output: $_sn_out"
 
-# --- 18d: sign with neither --certname nor --all must fail ---
+# --- 19d: sign with neither --certname nor --all must fail ---
 _sna_out=$($CTL sign 2>&1) && _sna_rc=$? || _sna_rc=$?
 [ "$_sna_rc" -ne 0 ] \
     && pass "puppet-ca-ctl sign with no args exits non-zero" \
@@ -1428,7 +1466,7 @@ echo "$_sna_out" | grep -qiE 'certname.*required|--all' \
     && pass "puppet-ca-ctl sign with no args mentions --certname or --all" \
     || fail "puppet-ca-ctl sign with no args mentions --certname or --all" "output: $_sna_out"
 
-# --- 18e: generate --certname when cert already exists must fail ---
+# --- 19e: generate --certname when cert already exists must fail ---
 # Use _GEN_CTL which was generated in Group 4.
 _ge_out=$($CTL generate --certname "$_GEN_CTL" --out-dir "$WORK_DIR" 2>&1) && _ge_rc=$? || _ge_rc=$?
 [ "$_ge_rc" -ne 0 ] \
@@ -1438,7 +1476,7 @@ echo "$_ge_out" | grep -qiE 'error|fail|exists|conflict|HTTP [45]' \
     && pass "puppet-ca-ctl generate duplicate cert reports error message" \
     || fail "puppet-ca-ctl generate duplicate cert reports error message" "output: $_ge_out"
 
-# --- 18f: generate --dns delivers SANs in the resulting certificate ---
+# --- 19f: generate --dns delivers SANs in the resulting certificate ---
 _GEN_DNS="gen-dns-${RUN_ID}.example.com"
 _GEN_DNS_DIR="$WORK_DIR/genout-dns"
 mkdir -p "$_GEN_DNS_DIR"
@@ -1461,8 +1499,8 @@ echo "$_san_text" | grep -qF "alt2-${RUN_ID}.example.com" \
     || fail "puppet-ca-ctl generate --dns: second SAN present in cert" \
            "SAN not found in cert extensions"
 
-# --- 18g: puppet-ca-ctl over mTLS (--ca-cert, --client-cert, --client-key) ---
-# Reuses the Phase 1/Phase 2 pattern from Group 17 but drives the TLS
+# --- 19g: puppet-ca-ctl over mTLS (--ca-cert, --client-cert, --client-key) ---
+# Reuses the Phase 1/Phase 2 pattern from Group 18 but drives the TLS
 # connection through puppet-ca-ctl itself rather than raw curl.
 _MTLS_PORT=8143
 _MTLS_DIR=$(mktemp -d)
@@ -1602,7 +1640,7 @@ fi
 kill "$_MTLS_PID" 2>/dev/null; wait "$_MTLS_PID" 2>/dev/null || true
 rm -rf "$_MTLS_DIR"
 
-# --- 18h: puppet-ca-ctl against unreachable server ---
+# --- 19h: puppet-ca-ctl against unreachable server ---
 _dead_out=$(puppet-ca-ctl --server-url "http://127.0.0.1:19999" list 2>&1) \
     && _dead_rc=$? || _dead_rc=$?
 [ "$_dead_rc" -ne 0 ] \
@@ -1612,7 +1650,7 @@ echo "$_dead_out" | grep -qiE 'error|refused|connect|fail|dial' \
     && pass "puppet-ca-ctl reports connection error when server is unreachable" \
     || fail "puppet-ca-ctl reports connection error when server is unreachable" "output: $_dead_out"
 
-# --- 18i: required flag validation (Cobra MarkFlagRequired) ---
+# --- 19i: required flag validation (Cobra MarkFlagRequired) ---
 # Each subcommand that requires --certname (or other flags) must fail clearly.
 _rf_out=$(puppet-ca-ctl revoke 2>&1) && _rf_rc=$? || _rf_rc=$?
 [ "$_rf_rc" -ne 0 ] \
@@ -1637,7 +1675,7 @@ _if_out=$(puppet-ca-ctl import --cadir /tmp 2>&1) && _if_rc=$? || _if_rc=$?
     && pass "puppet-ca-ctl import without --cert-bundle/--private-key exits non-zero" \
     || fail "puppet-ca-ctl import without --cert-bundle/--private-key exits non-zero" "exit=$_if_rc"
 
-# --- 18j: import with non-existent file paths ---
+# --- 19j: import with non-existent file paths ---
 _inx_out=$(puppet-ca-ctl import \
     --cadir /tmp \
     --cert-bundle /no/such/cert.pem \
@@ -1650,7 +1688,7 @@ echo "$_inx_out" | grep -qiE 'no such file|not found|reading' \
     && pass "puppet-ca-ctl import with non-existent files reports file error" \
     || fail "puppet-ca-ctl import with non-existent files reports file error" "output: $_inx_out"
 
-# --- 18k: import with garbage (non-PEM) content ---
+# --- 19k: import with garbage (non-PEM) content ---
 _IMP_GARBAGE_DIR=$(mktemp -d)
 echo "NOT A CERTIFICATE" > "$WORK_DIR/garbage-cert.pem"
 echo "NOT A PRIVATE KEY" > "$WORK_DIR/garbage-key.pem"
@@ -1667,7 +1705,7 @@ echo "$_ig_out" | grep -qiE 'decode|parse|invalid|failed|PEM' \
     || fail "puppet-ca-ctl import with garbage PEM reports parse error" "output: $_ig_out"
 rm -rf "$_IMP_GARBAGE_DIR"
 
-# --- 18l: generate --out-dir to non-existent directory ---
+# --- 19l: generate --out-dir to non-existent directory ---
 _go_out=$($CTL generate --certname "gen-baddir-${RUN_ID}" \
     --out-dir "/no/such/directory" 2>&1) && _go_rc=$? || _go_rc=$?
 [ "$_go_rc" -ne 0 ] \
@@ -1677,7 +1715,7 @@ echo "$_go_out" | grep -qiE 'no such file|not found|failed|directory' \
     && pass "puppet-ca-ctl generate with non-existent --out-dir reports file error" \
     || fail "puppet-ca-ctl generate with non-existent --out-dir reports file error" "output: $_go_out"
 
-# --- 18m: setup on a read-only path ---
+# --- 19m: setup on a read-only path ---
 _ro_out=$(puppet-ca-ctl setup --cadir /proc/fakedir 2>&1) && _ro_rc=$? || _ro_rc=$?
 [ "$_ro_rc" -ne 0 ] \
     && pass "puppet-ca-ctl setup on unwritable path exits non-zero" \
@@ -1687,7 +1725,7 @@ echo "$_ro_out" | grep -qiE 'permission|denied|read.only|mkdir|failed' \
     || fail "puppet-ca-ctl setup on unwritable path reports error" "output: $_ro_out"
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Group 19 -- Migration from Puppet Server CA (lightweight / synthetic)
+# Group 20 -- Migration from Puppet Server CA (lightweight / synthetic)
 #
 # Simulates migrating an existing Puppet-style CA directory into puppet-ca
 # using `puppet-ca-ctl import`, then verifies the migrated CA can sign new
@@ -1697,7 +1735,7 @@ echo "$_ro_out" | grep -qiE 'permission|denied|read.only|mkdir|failed' \
 # full migration test against a real VoxPupuli Puppet Server, see
 # `mage test:migration` (compose-migration.yml).
 # ═════════════════════════════════════════════════════════════════════════════
-printf '\n# Group 19 -- Migration from Puppet Server CA\n'
+printf '\n# Group 20 -- Migration from Puppet Server CA\n'
 
 _MIG_DIR=$(mktemp -d)
 _MIG_OLD=$(mktemp -d)   # simulates old Puppet Server CA directory

@@ -98,6 +98,7 @@ func (s *Server) Routes() http.Handler {
 		{"GET", "/expirations", s.handleGetExpirations},
 		{"POST", "/sign", s.handlePostSign},
 		{"POST", "/sign/all", s.handlePostSignAll},
+		{"PUT", "/clean", s.handlePutClean},
 		{"POST", "/generate/{subject}", s.handlePostGenerate},
 	}
 
@@ -732,6 +733,31 @@ func (s *Server) handlePostSignAll(w http.ResponseWriter, r *http.Request) {
 
 	result := s.signInBatches(r.Context(), pending)
 	slog.Debug("Signed all pending CSRs", "signed", len(result.Signed), "errors", len(result.SigningErrors), "client", cn)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+// --- Bulk clean ---
+
+func (s *Server) handlePutClean(w http.ResponseWriter, r *http.Request) {
+	cn := clientCN(r)
+	slog.Debug("PUT clean", "client", cn)
+
+	var body SignRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(body.Certnames) == 0 {
+		http.Error(w, "certnames must not be empty", http.StatusBadRequest)
+		return
+	}
+
+	slog.Debug("Cleaning certificates", "count", len(body.Certnames), "subjects", body.Certnames, "client", cn)
+	result := s.CA.CleanMultiple(r.Context(), body.Certnames)
+	if cn != "" && s.destructiveOps != nil && s.destructiveOps.Record(cn) {
+		slog.Warn("High rate of destructive operations detected", "client", cn, "operation", "bulk-clean")
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
 }
