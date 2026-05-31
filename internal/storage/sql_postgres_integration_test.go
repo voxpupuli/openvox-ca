@@ -44,9 +44,9 @@ func postgresDSNFromEnv(t *testing.T) string {
 }
 
 // newPostgresBackend connects to a real PostgreSQL, migrates the schema, and
-// truncates the blobs table so each test starts clean. Tests in a package run
-// sequentially, so a shared table with a per-test truncate is sufficient
-// isolation. Registers a cleanup that closes the backend.
+// truncates the blobs and inventory tables so each test starts clean. Tests in
+// a package run sequentially, so shared tables with a per-test truncate are
+// sufficient isolation. Registers a cleanup that closes the backend.
 func newPostgresBackend(t *testing.T) *SQLBackend {
 	t.Helper()
 	b, err := NewSQLBackend(SQLConfig{Dialect: SQLPostgres, DSN: postgresDSNFromEnv(t)})
@@ -56,8 +56,10 @@ func newPostgresBackend(t *testing.T) *SQLBackend {
 	if err := b.EnsureReady(context.Background()); err != nil {
 		t.Fatalf("EnsureReady: %v", err)
 	}
-	if _, err := b.db.ExecContext(context.Background(), "DELETE FROM puppet_ca_blobs"); err != nil {
-		t.Fatalf("truncate: %v", err)
+	for _, table := range []string{"puppet_ca_blobs", "puppet_ca_inventory"} {
+		if _, err := b.db.ExecContext(context.Background(), "DELETE FROM "+table); err != nil {
+			t.Fatalf("truncate %s: %v", table, err)
+		}
 	}
 	t.Cleanup(func() { _ = b.Close() })
 	return b
@@ -137,8 +139,9 @@ func TestPostgresModTime(t *testing.T) {
 }
 
 func TestPostgresAppendLineConcurrent(t *testing.T) {
-	// Two backends over the same database simulate two replicas; the row-locking
-	// (SELECT ... FOR UPDATE) transaction must not drop any line.
+	// Two backends over the same database simulate two replicas appending
+	// inventory entries; each AppendLine inserts a row and none may be dropped.
+	// Inventory is structured, so lines must be valid entries.
 	dsn := postgresDSNFromEnv(t)
 	a := newPostgresBackend(t)
 	b, err := NewSQLBackend(SQLConfig{Dialect: SQLPostgres, DSN: dsn})
@@ -160,7 +163,7 @@ func TestPostgresAppendLineConcurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < perWriter; i++ {
-				line := fmt.Sprintf("w%d-i%d\n", w, i)
+				line := fmt.Sprintf("%04d 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /w%d-i%d\n", w*perWriter+i, w, i)
 				if err := backend.AppendLine(context.Background(), KeyInventory, []byte(line), BlobPrivate); err != nil {
 					t.Errorf("AppendLine: %v", err)
 					return

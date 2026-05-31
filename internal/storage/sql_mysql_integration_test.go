@@ -45,9 +45,9 @@ func mysqlDSNFromEnv(t *testing.T) string {
 }
 
 // newMySQLBackend connects to a real MySQL/MariaDB, migrates the schema, and
-// truncates the blobs table so each test starts clean. Tests in a package run
-// sequentially, so a shared table with a per-test truncate is sufficient
-// isolation.
+// truncates the blobs and inventory tables so each test starts clean. Tests in
+// a package run sequentially, so shared tables with a per-test truncate are
+// sufficient isolation.
 func newMySQLBackend(t *testing.T) *SQLBackend {
 	t.Helper()
 	b, err := NewSQLBackend(SQLConfig{Dialect: SQLMySQL, DSN: mysqlDSNFromEnv(t)})
@@ -57,8 +57,10 @@ func newMySQLBackend(t *testing.T) *SQLBackend {
 	if err := b.EnsureReady(context.Background()); err != nil {
 		t.Fatalf("EnsureReady: %v", err)
 	}
-	if _, err := b.db.ExecContext(context.Background(), "DELETE FROM puppet_ca_blobs"); err != nil {
-		t.Fatalf("truncate: %v", err)
+	for _, table := range []string{"puppet_ca_blobs", "puppet_ca_inventory"} {
+		if _, err := b.db.ExecContext(context.Background(), "DELETE FROM "+table); err != nil {
+			t.Fatalf("truncate %s: %v", table, err)
+		}
 	}
 	t.Cleanup(func() { _ = b.Close() })
 	return b
@@ -97,15 +99,17 @@ func TestMySQLPutGetDelete(t *testing.T) {
 }
 
 func TestMySQLLargeBlob(t *testing.T) {
-	// Exceed MySQL's 64 KiB BLOB cap to prove the data column was widened to
-	// LONGBLOB by the migration.
+	// Exceed MySQL's 64 KiB BLOB cap to prove the puppet_ca_blobs.data column was
+	// widened to LONGBLOB by the migration. Use KeyCRL: it is a realistic large
+	// blob, whereas KeyInventory is now backed by the structured inventory table
+	// (which parses writes as inventory.txt lines, not opaque bytes).
 	b := newMySQLBackend(t)
 	ctx := context.Background()
 	big := bytes.Repeat([]byte("x"), 200*1024)
-	if err := b.Put(ctx, KeyInventory, big, BlobPrivate); err != nil {
+	if err := b.Put(ctx, KeyCRL, big, BlobPrivate); err != nil {
 		t.Fatalf("Put large blob: %v", err)
 	}
-	got, err := b.Get(ctx, KeyInventory)
+	got, err := b.Get(ctx, KeyCRL)
 	if err != nil {
 		t.Fatalf("Get large blob: %v", err)
 	}
@@ -156,6 +160,9 @@ func TestMySQLModTime(t *testing.T) {
 }
 
 func TestMySQLAppendLineConcurrent(t *testing.T) {
+	// Two backends over the same database simulate two replicas appending
+	// inventory entries; each AppendLine inserts a row and none may be dropped.
+	// Inventory is structured, so lines must be valid entries.
 	dsn := mysqlDSNFromEnv(t)
 	a := newMySQLBackend(t)
 	b, err := NewSQLBackend(SQLConfig{Dialect: SQLMySQL, DSN: dsn})
@@ -177,7 +184,7 @@ func TestMySQLAppendLineConcurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < perWriter; i++ {
-				line := fmt.Sprintf("w%d-i%d\n", w, i)
+				line := fmt.Sprintf("%04d 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /w%d-i%d\n", w*perWriter+i, w, i)
 				if err := backend.AppendLine(context.Background(), KeyInventory, []byte(line), BlobPrivate); err != nil {
 					t.Errorf("AppendLine: %v", err)
 					return
