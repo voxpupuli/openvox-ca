@@ -124,6 +124,25 @@ jobs:
       - name: Run Redis-backend integration tests
         run: mage test:backendsRedis
 
+  # Brings up a throwaway PostgreSQL and runs the SQL-backend Go integration
+  # suite (build tag postgres_integration) against it. Validates the PostgreSQL
+  # dialect: upsert, FOR UPDATE AppendLine atomicity across two backends, and
+  # pg_advisory_lock mutual exclusion. (SQLite needs no dedicated job: its tests
+  # run unconditionally in the unit job above.)
+  backends-postgres:
+    name: Storage backend tests (PostgreSQL)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install Mage
+        run: go install github.com/magefile/mage@v1.15.0
+      - name: Run PostgreSQL-backend integration tests
+        run: mage test:backendsPostgres
+
   # -- Compose integration tests (docker compose) ------------------------------─
   # podman-compose is not pre-installed on GitHub runners; composeCmd() in
   # magefile.go falls back to `docker compose` (v2 plugin, always available).
