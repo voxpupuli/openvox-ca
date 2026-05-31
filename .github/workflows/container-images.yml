@@ -1,0 +1,240 @@
+name: Container images
+
+# Builds the CentOS Stream and Alpine runtime images for linux/amd64 and
+# linux/arm64 and publishes multi-arch manifests to the GitHub Container
+# Registry (GHCR).
+#
+# Triggers:
+#   * Release tags (v*)        -> build + push versioned + latest tags.
+#   * Manual (workflow_dispatch) -> build, push only if the "push" input is set.
+#   * Pull requests, on demand -> apply the "build-images" label to a PR to
+#     build both variants on both architectures as a validation check. Same-repo
+#     PRs additionally push a throwaway pr-<n> tag; fork PRs build only (their
+#     GITHUB_TOKEN is read-only and cannot write packages).
+#
+# See docs/container-images.md for the one-time repository setup the owner must
+# perform (enabling GHCR, the build-images label, and package visibility).
+
+on:
+  push:
+    tags:
+      - "v*"
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+    inputs:
+      push:
+        description: "Push images to GHCR (otherwise build only)"
+        type: boolean
+        default: false
+
+# GITHUB_TOKEN needs packages:write to push to GHCR. On pull requests from
+# forks GitHub automatically downgrades this to read-only; the build job
+# detects that and skips pushing.
+permissions:
+  contents: read
+  packages: write
+
+# Cancel superseded PR runs, but never cancel a release/tag build mid-flight.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # -- Decide whether this run pushes, and compute the image name -------------─
+  setup:
+    name: Configure
+    # PR runs only proceed when explicitly opted in via the build-images label.
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'build-images')
+    runs-on: ubuntu-latest
+    outputs:
+      push: ${{ steps.cfg.outputs.push }}
+      image: ${{ steps.cfg.outputs.image }}
+    steps:
+      - name: Determine push policy and image name
+        id: cfg
+        env:
+          EVENT: ${{ github.event_name }}
+          DISPATCH_PUSH: ${{ github.event.inputs.push }}
+          # Empty for same-repo PRs is impossible; for forks this differs from
+          # the base repository, which is how we detect a fork PR.
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+        run: |
+          case "$EVENT" in
+            push)             push=true ;;                 # tag build (release)
+            workflow_dispatch) push="$DISPATCH_PUSH" ;;     # honour the input
+            pull_request)
+              # Push only for same-repo PRs; fork PRs lack a write token.
+              if [ "$PR_HEAD_REPO" = "$BASE_REPO" ]; then push=true; else push=false; fi
+              ;;
+            *)                push=false ;;
+          esac
+          # GHCR requires a lowercase image path.
+          image="ghcr.io/$(echo "$BASE_REPO" | tr '[:upper:]' '[:lower:]')"
+          {
+            echo "push=$push"
+            echo "image=$image"
+          } >> "$GITHUB_OUTPUT"
+          echo "push=$push image=$image"
+
+  # -- Build one (variant x architecture) on a native runner ------------------─
+  # Each image is pushed by digest (no tag); the merge job assembles the
+  # per-variant multi-arch manifest from the collected digests.
+  build:
+    name: Build ${{ matrix.variant }} (${{ matrix.arch }})
+    needs: setup
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [centos, alpine]
+        platform: [linux/amd64, linux/arm64]
+        include:
+          - variant: centos
+            dockerfile: Dockerfile
+          - variant: alpine
+            dockerfile: Dockerfile.alpine
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: needs.setup.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ needs.setup.outputs.image }}
+
+      # Push path: build and push by digest for later manifest assembly.
+      - name: Build and push by digest
+        if: needs.setup.outputs.push == 'true'
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Provenance attestations create extra manifests that confuse
+          # push-by-digest + imagetools merge, so disable them here.
+          provenance: false
+          outputs: type=image,name=${{ needs.setup.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+
+      # Validation path (fork PRs / dispatch without push): build for the
+      # runner's native arch, load it, and smoke-test the entrypoint.
+      - name: Build and load for smoke test
+        if: needs.setup.outputs.push != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          load: true
+          tags: puppet-ca:smoke-${{ matrix.variant }}-${{ matrix.arch }}
+      - name: Smoke test entrypoint
+        if: needs.setup.outputs.push != 'true'
+        run: docker run --rm puppet-ca:smoke-${{ matrix.variant }}-${{ matrix.arch }} --help
+
+      - name: Export digest
+        if: needs.setup.outputs.push == 'true'
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.push.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        if: needs.setup.outputs.push == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.variant }}-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # -- Merge per-architecture digests into one multi-arch manifest ------------─
+  merge:
+    name: Publish ${{ matrix.variant }} manifest
+    needs: [setup, build]
+    if: needs.setup.outputs.push == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # CentOS Stream is the default image: unsuffixed tags + latest.
+          - variant: centos
+            flavor: |
+              latest=auto
+          # Alpine images carry an -alpine suffix, including latest-alpine.
+          - variant: alpine
+            flavor: |
+              latest=auto
+              suffix=-alpine,onlatest=true
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-${{ matrix.variant }}-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ needs.setup.outputs.image }}
+          flavor: ${{ matrix.flavor }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}},enable=${{ !startsWith(github.ref_name, 'v0.') }}
+            type=ref,event=branch
+            type=ref,event=pr
+
+      - name: Create multi-arch manifest
+        working-directory: /tmp/digests
+        env:
+          IMAGE: ${{ needs.setup.outputs.image }}
+        run: |
+          # Word splitting is intentional: expand the -t flags and the
+          # per-digest image references into separate arguments.
+          # shellcheck disable=SC2046
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "${IMAGE}@sha256:%s " *)
+
+      - name: Inspect published image
+        env:
+          IMAGE: ${{ needs.setup.outputs.image }}
+        run: |
+          tag="$(jq -r '.tags[0]' <<< "$DOCKER_METADATA_OUTPUT_JSON")"
+          docker buildx imagetools inspect "$tag"
