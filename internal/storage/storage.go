@@ -648,6 +648,28 @@ func (s *StorageService) UpdateInventoryHMAC(ctx context.Context, hmacKey []byte
 	return s.updateInventoryHMACLocked(ctx, hmacKey)
 }
 
+// RebuildInventoryHMAC recomputes the inventory integrity head from the current
+// inventory contents using the stored HMAC key, and writes it. It is meant to
+// run after a migration: the destination's integrity scheme (whole-blob HMAC
+// vs. the structured backends' hash chain) may differ from the source's, so the
+// copied inventory_hmac value is not meaningful for the destination and must be
+// recomputed. It is a no-op when no HMAC key is present (a CA that never
+// initialised integrity), leaving the destination untouched.
+func (s *StorageService) RebuildInventoryHMAC(ctx context.Context) error {
+	hasKey, err := s.backend.Exists(ctx, KeyHMACKey)
+	if err != nil {
+		return fmt.Errorf("checking inventory HMAC key: %w", err)
+	}
+	if !hasKey {
+		return nil
+	}
+	key, err := s.EnsureHMACKey(ctx)
+	if err != nil {
+		return err
+	}
+	return s.UpdateInventoryHMAC(ctx, key)
+}
+
 func (s *StorageService) updateInventoryHMACLocked(ctx context.Context, hmacKey []byte) error {
 	sum, err := s.computeInventoryHMAC(ctx, hmacKey)
 	if err != nil {

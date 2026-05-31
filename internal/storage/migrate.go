@@ -101,7 +101,14 @@ func MigrateService(ctx context.Context, src, dst *StorageService, opts MigrateO
 		return dst.WithLock(ctx, migrateLockName, func() error {
 			r, e := Migrate(ctx, src.Backend(), dst.Backend(), opts)
 			report = r
-			return e
+			if e != nil {
+				return e
+			}
+			// The destination's integrity scheme may differ from the source's
+			// (a structured backend uses a hash chain, a blob backend hashes the
+			// whole inventory), so the copied inventory_hmac is not meaningful
+			// for the destination. Recompute it from the copied inventory.
+			return dst.RebuildInventoryHMAC(ctx)
 		})
 	})
 	return report, err
