@@ -109,6 +109,19 @@ for _i in $(seq 1 90); do
 done
 printf ' OK\n'
 
+# OpenVoxDB (PuppetDB) must be ready before the puppet agent test runs or the
+# fact submission (replace_facts) returns 500 and the catalog run fails.
+# puppet-stack.sh waits for this only inside its --up block, which is skipped
+# when we call it with --keep; so we wait here instead.  Allow 600 s.
+printf '# Waiting for OpenVoxDB on openvoxdb:8081'
+for _i in $(seq 1 120); do
+    _health=$("${_COMPOSE[@]}" exec -T puppet-master \
+        curl -ksS "https://openvoxdb:8081/status/v1/simple" 2>/dev/null) || true
+    [[ "${_health:-}" == "running" ]] && break
+    printf '.'; sleep 5
+done
+printf ' OK\n'
+
 PHASE1_RC=0
 bash test/backends/run-puppet-stack-on-redis.sh --keep \
     || PHASE1_RC=$?
