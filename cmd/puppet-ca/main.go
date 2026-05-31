@@ -140,6 +140,17 @@ func isLoopback(host string) bool {
 }
 
 func main() {
+	cmd := newRootCmd()
+	if err := cmd.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+}
+
+// newRootCmd builds and returns the fully-configured root command, including
+// all flag wiring. Extracted from main() so the command can be exercised in
+// unit tests (e.g. argument validation) without invoking os.Exit.
+func newRootCmd() *cobra.Command {
 	var (
 		caDir                   string
 		autosignVal             string
@@ -176,11 +187,14 @@ func main() {
 	)
 
 	cmd := &cobra.Command{
-		Use:          "puppet-ca",
-		Short:        "Puppet-compatible certificate authority server",
-		SilenceUsage: true,
+		Use:           "puppet-ca",
+		Short:         "Puppet-compatible certificate authority server",
+		Args:          cobra.NoArgs,
+		SilenceUsage:  true,
+		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
+			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, syscall.SIGINT)
+			defer stop()
 
 			// --- Config loading (file → env → CLI flags) ---
 			resolved := resolveConfigFile(configFile, "PUPPET_CA_CONFIG", "/etc/puppet-ca/config.yaml")
@@ -355,12 +369,7 @@ func main() {
 			tlsConfigured := cfg.TLSCert != "" && cfg.TLSKey != ""
 			if !tlsConfigured {
 				if !isLoopback(cfg.Host) && !cfg.NoTLSRequired {
-					slog.Error("Refusing to start: plain HTTP on a non-loopback address is " +
-						"vulnerable to certificate injection attacks. " +
-						"Enable TLS (--tls-cert / --tls-key), " +
-						"restrict to loopback (--host 127.0.0.1), " +
-						"or explicitly opt out with --no-tls-required.")
-					os.Exit(1)
+					return errors.New("refusing to start: plain HTTP on a non-loopback address is vulnerable to certificate injection; enable TLS (--tls-cert/--tls-key), restrict to loopback (--host 127.0.0.1), or set --no-tls-required")
 				}
 				if cfg.NoTLSRequired && !isLoopback(cfg.Host) {
 					slog.Warn("TLS is not configured on a non-loopback address; " +
@@ -376,18 +385,15 @@ func main() {
 			// --- Storage & Directories ---
 			backendSpec, err := buildBackendSpec(cfg, absCADir)
 			if err != nil {
-				slog.Error("Invalid storage backend config", "error", err)
-				os.Exit(1)
+				return fmt.Errorf("invalid storage backend config: %w", err)
 			}
 			store, err := storage.NewServiceFromSpec(backendSpec)
 			if err != nil {
-				slog.Error("Failed to initialise storage backend", "error", err)
-				os.Exit(1)
+				return fmt.Errorf("failed to initialise storage backend: %w", err)
 			}
 			defer func() { _ = store.Backend().Close() }()
 			if err := store.EnsureDirs(ctx); err != nil {
-				slog.Error("Failed to create CA directories", "error", err)
-				os.Exit(1)
+				return fmt.Errorf("failed to create CA directories: %w", err)
 			}
 
 			// Frontend-mode signer handshake: connect to the signer, then read
@@ -438,8 +444,7 @@ func main() {
 			default:
 				info, err := os.Stat(cfg.AutosignConfig)
 				if err != nil {
-					slog.Error("Autosign config invalid", "path", cfg.AutosignConfig, "error", err)
-					os.Exit(1)
+					return fmt.Errorf("autosign config invalid (path %s): %w", cfg.AutosignConfig, err)
 				}
 				if info.Mode().IsRegular() {
 					if info.Mode().Perm()&0111 != 0 {
@@ -456,8 +461,7 @@ func main() {
 			// NIST 800-53: CM-5 (Access Restrictions for Change), SI-7 (Software, Firmware, and Information Integrity)
 			if asCfg.Mode == "executable" {
 				if err := validateAutosignExecutable(asCfg.FileOrPath); err != nil {
-					slog.Error("Autosign executable validation failed", "path", asCfg.FileOrPath, "error", err)
-					os.Exit(1)
+					return fmt.Errorf("autosign executable validation failed (path %s): %w", asCfg.FileOrPath, err)
 				}
 			}
 
@@ -477,8 +481,7 @@ func main() {
 			}
 
 			if err := myCA.Init(ctx); err != nil {
-				slog.Error("Failed to initialise CA", "error", err)
-				os.Exit(1)
+				return fmt.Errorf("failed to initialise CA: %w", err)
 			}
 
 			// SECURITY: Warn if any private key files have overly permissive modes.
@@ -556,14 +559,12 @@ func main() {
 			if cfg.TLSCert != "" && cfg.TLSKey != "" {
 				serverCert, err := tls.LoadX509KeyPair(cfg.TLSCert, cfg.TLSKey)
 				if err != nil {
-					slog.Error("Failed to load TLS cert/key", "cert", cfg.TLSCert, "key", cfg.TLSKey, "error", err)
-					os.Exit(1)
+					return fmt.Errorf("failed to load TLS cert/key (cert %s, key %s): %w", cfg.TLSCert, cfg.TLSKey, err)
 				}
 
 				caCertPEM, err := myCA.Storage.GetCACert(ctx)
 				if err != nil {
-					slog.Error("Failed to read CA cert for TLS", "error", err)
-					os.Exit(1)
+					return fmt.Errorf("failed to read CA cert for TLS: %w", err)
 				}
 				caPool := x509.NewCertPool()
 				block, _ := pem.Decode(caCertPEM)
@@ -591,9 +592,7 @@ func main() {
 
 			shutdownDone := make(chan struct{})
 			go func() {
-				sigCh := make(chan os.Signal, 1)
-				signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
-				<-sigCh
+				<-ctx.Done()
 				slog.Info("Shutting down")
 				shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
@@ -610,8 +609,7 @@ func main() {
 				serveErr = server.ListenAndServe()
 			}
 			if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
-				slog.Error("Server failed", "error", serveErr)
-				os.Exit(1)
+				return fmt.Errorf("server failed: %w", serveErr)
 			}
 			<-shutdownDone
 			return nil
@@ -652,9 +650,7 @@ func main() {
 	f.StringVar(&caCertFile, "ca-cert-file", "", "Keep the CA certificate at this local path regardless of storage backend")
 	f.StringVar(&caKeyFile, "ca-key-file", "", "Keep the CA private key at this local path regardless of storage backend")
 
-	if err := cmd.Execute(); err != nil {
-		os.Exit(1)
-	}
+	return cmd
 }
 
 // runSignerMode runs the isolated CA key signer process. It initializes the CA
