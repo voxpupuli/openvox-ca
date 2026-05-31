@@ -31,6 +31,20 @@ import (
 	"github.com/tvaughan/puppet-ca/internal/signer"
 )
 
+const (
+	// gracefulShutdownTimeout bounds how long the launcher waits for both
+	// children to drain after forwarding SIGTERM before hard-killing them. It
+	// matches the frontend's own http.Server.Shutdown budget so the documented
+	// ~30s drain (and Kubernetes' default pod grace period) is honoured
+	// end-to-end in the default isolated-process deployment, not silently
+	// truncated by the supervisor.
+	gracefulShutdownTimeout = 30 * time.Second
+	// crashShutdownTimeout bounds teardown of the surviving child when the
+	// other has already exited unexpectedly. This is a failure path, not a
+	// graceful drain, so it uses a shorter budget.
+	crashShutdownTimeout = 5 * time.Second
+)
+
 // runLauncher is the supervisor process that spawns the isolated signer and
 // frontend children, monitors them, and propagates signals for clean shutdown.
 //
@@ -133,7 +147,7 @@ func runLauncher() error {
 	shutdown := func() {
 		frontendCmd.Process.Signal(syscall.SIGTERM)
 		signerCmd.Process.Signal(syscall.SIGTERM)
-		timer := time.AfterFunc(10*time.Second, func() {
+		timer := time.AfterFunc(gracefulShutdownTimeout, func() {
 			frontendCmd.Process.Kill()
 			signerCmd.Process.Kill()
 		})
@@ -153,7 +167,7 @@ func runLauncher() error {
 		// Shut down the surviving child.
 		frontendCmd.Process.Signal(syscall.SIGTERM)
 		signerCmd.Process.Signal(syscall.SIGTERM)
-		timer := time.AfterFunc(5*time.Second, func() {
+		timer := time.AfterFunc(crashShutdownTimeout, func() {
 			frontendCmd.Process.Kill()
 			signerCmd.Process.Kill()
 		})

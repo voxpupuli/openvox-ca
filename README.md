@@ -235,7 +235,9 @@ When `--tls-cert` and `--tls-key` are both set, the server:
 
 ### Signal handling
 
-On `SIGTERM` or `SIGINT`, the server calls `http.Server.Shutdown()` with a 30-second context so in-flight requests (signing, CRL, OCSP) drain cleanly before the process exits. The main goroutine waits for shutdown to complete before returning, ensuring deferred storage and signer cleanup runs after all connections are done.
+On `SIGTERM` or `SIGINT`, the frontend HTTP server calls `http.Server.Shutdown()` with a 30-second context (wired via `signal.NotifyContext`) so in-flight requests (signing, CRL, OCSP) drain cleanly before the process exits. The request context is cancelled on signal, and the command returns normally rather than calling `os.Exit` on its error paths, so deferred storage and signer cleanup always runs after all connections are done.
+
+In the default isolated-process deployment, the launcher supervisor forwards the signal to both the signer and frontend children and waits up to 30 seconds — matching the frontend's own drain budget — before hard-killing any child that has not exited, so the drain window is honoured end-to-end rather than truncated by the supervisor.
 
 This is particularly important for **Kubernetes rolling updates**: pods receive `SIGTERM` with a configurable grace period (typically 30 seconds). The server will drain in-flight requests within that window and exit cleanly, preventing connection resets during rollouts.
 
