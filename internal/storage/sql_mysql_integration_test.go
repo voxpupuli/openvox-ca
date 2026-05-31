@@ -296,14 +296,19 @@ func TestMySQLEndToEndViaStorageService(t *testing.T) {
 	if err := svc.InitHMAC(ctx); err != nil {
 		t.Fatalf("InitHMAC: %v", err)
 	}
-	if err := svc.AppendInventory(ctx, "line 1"); err != nil {
+	line1 := "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1"
+	line2 := "0002 2024-01-02T00:00:00UTC 2029-01-02T00:00:00UTC /node2"
+	if err := svc.AppendInventory(ctx, line1); err != nil {
 		t.Fatalf("AppendInventory: %v", err)
 	}
-	if err := svc.AppendInventory(ctx, "line 2"); err != nil {
+	if err := svc.AppendInventory(ctx, line2); err != nil {
 		t.Fatalf("AppendInventory: %v", err)
 	}
-	if inv, _ := svc.ReadInventory(ctx); string(inv) != "line 1\nline 2\n" {
-		t.Errorf("ReadInventory = %q, want 'line 1\\nline 2\\n'", inv)
+	if inv, _ := svc.ReadInventory(ctx); string(inv) != line1+"\n"+line2+"\n" {
+		t.Errorf("ReadInventory = %q, want %q", inv, line1+"\n"+line2+"\n")
+	}
+	if serial, err := svc.LatestSerialForSubject(ctx, "node2"); err != nil || serial != "0002" {
+		t.Errorf("LatestSerialForSubject(node2) = %q, %v; want 0002, nil", serial, err)
 	}
 	if err := svc.SaveCSR(ctx, "node1", []byte("csr-pem")); err != nil {
 		t.Fatalf("SaveCSR: %v", err)

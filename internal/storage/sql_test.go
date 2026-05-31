@@ -159,7 +159,8 @@ func TestSQLiteModTime(t *testing.T) {
 
 func TestSQLiteAppendLineConcurrent(t *testing.T) {
 	// Two backends over the same database file simulate two replicas appending
-	// concurrently; the row-locking transaction must not drop any line.
+	// inventory entries concurrently; each AppendLine inserts a row and no entry
+	// may be dropped. Inventory is structured, so lines must be valid entries.
 	dsn := "file:" + filepath.Join(t.TempDir(), "ca.db")
 	a, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: dsn})
 	if err != nil {
@@ -188,7 +189,7 @@ func TestSQLiteAppendLineConcurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < perWriter; i++ {
-				line := fmt.Sprintf("w%d-i%d\n", w, i)
+				line := fmt.Sprintf("%04d 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /w%d-i%d\n", w*perWriter+i, w, i)
 				if err := backend.AppendLine(context.Background(), KeyInventory, []byte(line), BlobPrivate); err != nil {
 					t.Errorf("AppendLine: %v", err)
 					return
@@ -278,18 +279,23 @@ func TestSQLiteEndToEndViaStorageService(t *testing.T) {
 	if err := svc.InitHMAC(ctx); err != nil {
 		t.Fatalf("InitHMAC: %v", err)
 	}
-	if err := svc.AppendInventory(ctx, "line 1"); err != nil {
+	line1 := "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1"
+	line2 := "0002 2024-01-02T00:00:00UTC 2029-01-02T00:00:00UTC /node2"
+	if err := svc.AppendInventory(ctx, line1); err != nil {
 		t.Fatalf("AppendInventory: %v", err)
 	}
-	if err := svc.AppendInventory(ctx, "line 2"); err != nil {
+	if err := svc.AppendInventory(ctx, line2); err != nil {
 		t.Fatalf("AppendInventory: %v", err)
 	}
 	inv, err := svc.ReadInventory(ctx)
 	if err != nil {
 		t.Fatalf("ReadInventory: %v", err)
 	}
-	if string(inv) != "line 1\nline 2\n" {
-		t.Errorf("ReadInventory = %q, want 'line 1\\nline 2\\n'", inv)
+	if string(inv) != line1+"\n"+line2+"\n" {
+		t.Errorf("ReadInventory = %q, want %q", inv, line1+"\n"+line2+"\n")
+	}
+	if serial, err := svc.LatestSerialForSubject(ctx, "node2"); err != nil || serial != "0002" {
+		t.Errorf("LatestSerialForSubject(node2) = %q, %v; want 0002, nil", serial, err)
 	}
 
 	if err := svc.SaveCSR(ctx, "node1", []byte("csr-pem")); err != nil {

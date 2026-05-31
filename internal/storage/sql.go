@@ -292,10 +292,15 @@ func (b *SQLBackend) EnsureReady(ctx context.Context) error {
 	return nil
 }
 
-// Get returns the blob at key, wrapping fs.ErrNotExist when absent.
+// Get returns the blob at key, wrapping fs.ErrNotExist when absent. The
+// KeyInventory key is served from the structured inventory table (rendered to
+// inventory.txt text) rather than the blob table.
 func (b *SQLBackend) Get(ctx context.Context, key string) ([]byte, error) {
 	if err := validateKey(key); err != nil {
 		return nil, err
+	}
+	if key == KeyInventory {
+		return b.getInventory(ctx)
 	}
 	ctx, cancel := b.callCtx(ctx)
 	defer cancel()
@@ -322,6 +327,9 @@ func (b *SQLBackend) Get(ctx context.Context, key string) ([]byte, error) {
 func (b *SQLBackend) Put(ctx context.Context, key string, data []byte, kind BlobKind) error {
 	if err := validateKey(key); err != nil {
 		return err
+	}
+	if key == KeyInventory {
+		return b.putInventory(ctx, data)
 	}
 	ctx, cancel := b.callCtx(ctx)
 	defer cancel()
@@ -359,6 +367,9 @@ func (b *SQLBackend) Delete(ctx context.Context, key string) error {
 	if err := validateKey(key); err != nil {
 		return err
 	}
+	if key == KeyInventory {
+		return b.deleteInventory(ctx)
+	}
 	ctx, cancel := b.callCtx(ctx)
 	defer cancel()
 	res, err := b.db.NewDelete().Model((*sqlBlob)(nil)).Where("blob_key = ?", key).Exec(ctx)
@@ -382,6 +393,9 @@ func (b *SQLBackend) Exists(ctx context.Context, key string) (bool, error) {
 	}
 	ctx, cancel := b.callCtx(ctx)
 	defer cancel()
+	// KeyInventory existence is the presence marker in puppet_ca_blobs, set by
+	// TouchInventory/putInventory; this reports true for a touched-but-empty
+	// inventory (no rows yet), matching the filesystem backend.
 	return b.db.NewSelect().Model((*sqlBlob)(nil)).Where("blob_key = ?", key).Exists(ctx)
 }
 
@@ -421,6 +435,12 @@ func (b *SQLBackend) List(ctx context.Context, prefix string) ([]string, error) 
 func (b *SQLBackend) AppendLine(ctx context.Context, key string, data []byte, kind BlobKind) error {
 	if err := validateKey(key); err != nil {
 		return err
+	}
+	if key == KeyInventory {
+		// Inventory is structured: append parsed rows. StorageService routes
+		// inventory appends through AppendEntry, so this only runs if a caller
+		// uses Backend.AppendLine(KeyInventory, ...) directly.
+		return b.appendInventoryLines(ctx, data)
 	}
 	b.appendMu.Lock()
 	defer b.appendMu.Unlock()
