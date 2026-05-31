@@ -402,7 +402,7 @@ func (s *Server) handlePostGenerate(w http.ResponseWriter, r *http.Request) {
 
 	subject := r.PathValue("subject")
 	if err := ca.ValidateSubject(subject); err != nil {
-		http.Error(w, "invalid subject: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
 	slog.Debug("POST generate", "subject", subject, "client", clientCN(r))
