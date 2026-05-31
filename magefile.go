@@ -472,6 +472,34 @@ func (Test) BackendsPostgres() error {
 	)
 }
 
+// BackendsMySQL brings up a throwaway MySQL via compose-backends-mysql.yml and
+// runs the SQL-backend Go integration suite (internal/storage, build tag
+// `mysql_integration`) against it, then tears the database down. Validates the
+// MySQL/MariaDB dialect: LONGBLOB widening, ON DUPLICATE KEY upsert, FOR UPDATE
+// AppendLine atomicity (with InnoDB deadlock retry) across two backends, and
+// GET_LOCK mutual exclusion.
+//
+// Requires podman-compose (or docker compose) and network access to pull
+// docker.io/mysql:8.
+func (Test) BackendsMySQL() error {
+	const dsn = "puppetca:puppetca@tcp(127.0.0.1:53306)/puppetca"
+
+	fmt.Println("Starting MySQL backend service...")
+	if err := runCompose(nil, "-f", "compose-backends-mysql.yml", "up", "-d", "--wait"); err != nil {
+		return err
+	}
+	defer func() {
+		fmt.Println("Tearing down MySQL backend service...")
+		_ = runCompose(nil, "-f", "compose-backends-mysql.yml", "down", "--volumes")
+	}()
+
+	fmt.Println("Running MySQL-backend integration tests...")
+	return sh.RunWithV(
+		map[string]string{"PUPPET_CA_TEST_MYSQL_DSN": dsn},
+		"go", "test", "-tags", "mysql_integration", "-count=1", "./internal/storage/...",
+	)
+}
+
 // PuppetFIPS is like Puppet but compiles with GOEXPERIMENT=boringcrypto so the
 // full Puppet stack integration suite runs against the FIPS-compliant binary.
 func (Test) PuppetFIPS() error {

@@ -99,6 +99,27 @@ func TestBuildBackendSpecPostgres(t *testing.T) {
 	}
 }
 
+func TestBuildBackendSpecMySQL(t *testing.T) {
+	for _, alias := range []string{"mysql", "mariadb"} {
+		t.Run(alias, func(t *testing.T) {
+			cfg := &serverConfig{
+				StorageBackend: alias,
+				SQLDSN:         "puppetca:secret@tcp(db:3306)/puppetca",
+			}
+			spec, err := buildBackendSpec(cfg, "/abs/cadir")
+			if err != nil {
+				t.Fatalf("buildBackendSpec: %v", err)
+			}
+			if spec.Kind != storage.BackendMySQL {
+				t.Errorf("Kind = %q, want %q", spec.Kind, storage.BackendMySQL)
+			}
+			if spec.SQL.DSN != cfg.SQLDSN {
+				t.Errorf("SQL.DSN = %q", spec.SQL.DSN)
+			}
+		})
+	}
+}
+
 func TestNewServiceFromSpecSQLiteRequiresDSN(t *testing.T) {
 	_, err := storage.NewServiceFromSpec(storage.BackendSpec{
 		Kind:     storage.BackendSQLite,

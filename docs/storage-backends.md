@@ -10,9 +10,10 @@ interface. The following backends ship today:
 | `redis` (incl. Valkey) | stable  | clusters that already run Redis/Valkey (direct or Sentinel-managed)        |
 | `sqlite`               | stable  | single-node installs that prefer a single database file over a cadir tree  |
 | `postgres`             | stable  | HA clusters that already run PostgreSQL; shared CA across replicas         |
+| `mysql` (incl. MariaDB)| stable  | HA clusters that already run MySQL/MariaDB; shared CA across replicas      |
 
-A shared SQL backend underpins `sqlite` and `postgres`; a MySQL/MariaDB dialect
-builds on the same code and is introduced in a follow-up release.
+A single shared SQL backend underpins `sqlite`, `postgres`, and `mysql`: they
+differ only in driver, a few SQL clauses, and the cross-node lock mechanism.
 
 Regardless of backend, **server-generated per-subject private keys always
 live on local disk**. They are issued once, handed back to the requester, and
@@ -581,6 +582,81 @@ Or let mage manage a throwaway database end to end:
 mage test:backendsPostgres
 ```
 
+### MySQL / MariaDB backend
+
+Stores the entire CA in a MySQL or MariaDB database. Multiple `puppet-ca`
+replicas can share one database. `mysql` and `mariadb` are accepted as aliases.
+`cadir` is still required for per-subject generated private keys and ancillary
+local state.
+
+#### Configuration
+
+```yaml
+# /etc/puppet-ca/config.yaml
+storage_backend: mysql                   # or "mariadb"
+cadir: /var/lib/puppet-ca                # still needed for per-subject keys
+sql_dsn: "puppetca:secret@tcp(db.example.com:3306)/puppetca"
+
+sql_request_timeout_sec: 10              # per-operation timeout (default 10)
+
+# Optional TLS to the server (registered with the driver and referenced
+# automatically; no need to add tls= to the DSN).
+sql_tls_ca_file:   /etc/puppet-ca/mysql-ca.pem
+sql_tls_cert_file: /etc/puppet-ca/mysql-client.pem
+sql_tls_key_file:  /etc/puppet-ca/mysql-client-key.pem
+```
+
+The DSN is the [go-sql-driver/mysql](https://github.com/go-sql-driver/mysql)
+form (`user:pass@tcp(host:3306)/dbname`). `parseTime` is forced on internally
+so timestamp columns scan correctly; you do not need to set it in the DSN.
+
+#### CLI flags
+
+```
+--storage-backend mysql
+--sql-dsn         puppetca:secret@tcp(db.example.com:3306)/puppetca
+```
+
+#### Cross-node coordination
+
+Cross-replica locks use named locks via `GET_LOCK` / `RELEASE_LOCK` on a
+dedicated connection (these are session-scoped, so lock and release share one
+connection). The lock name is hashed to a short, stable identifier within
+MySQL's 64-character `GET_LOCK` limit. Acquisition polls `GET_LOCK` with a
+one-second server-side wait so caller-context cancellation is honoured between
+attempts; a process-local mutex serialises in-process callers first. A crashed
+replica's session ends and its named locks release automatically.
+
+#### Operational notes
+
+- **Schema.** On first run the migration widens the `data` column to
+  `LONGBLOB` (MySQL's default `BLOB` caps at 64 KiB, too small for the
+  append-only inventory). Concurrent inventory appends use a `FOR UPDATE`
+  transaction; an InnoDB deadlock (the expected outcome when two replicas race
+  to create the same row) is retried transparently.
+- **CA cert and key.** As with the other shared backends, the CA private key
+  lives in the database by default. Enable `encrypt_ca_key`, or pin the key to
+  a local file via `ca_key_file` (see below).
+- **Puppet-ca-ctl.** `puppet-ca-ctl setup` / `import` operate on the local
+  filesystem only; bootstrap/import against a scratch directory, then point a
+  MySQL-backed `puppet-ca` at a fresh database to take over.
+
+#### Tests
+
+The MySQL integration suite is behind a build tag and opt-in via
+`PUPPET_CA_TEST_MYSQL_DSN` (it passes against both MySQL 8 and MariaDB 11):
+
+```bash
+PUPPET_CA_TEST_MYSQL_DSN="user:pass@tcp(127.0.0.1:3306)/db" \
+    go test -tags=mysql_integration ./internal/storage/...
+```
+
+Or let mage manage a throwaway database end to end:
+
+```bash
+mage test:backendsMySQL
+```
+
 ---
 
 ## CA cert/key as local files
@@ -644,22 +720,22 @@ key out of the cadir tree and onto a separately-mounted volume.
 
 ## Choosing a backend
 
-|                              | `filesystem`       | `sqlite`                          | `postgres`                        | `etcd`                            | `redis` / `valkey`                |
+|                              | `filesystem`       | `sqlite`                          | `postgres` / `mysql`              | `etcd`                            | `redis` / `valkey`                |
 |------------------------------|--------------------|-----------------------------------|-----------------------------------|-----------------------------------|-----------------------------------|
 | Replicas                     | one active         | one active                        | many (A/A)                        | many (A/A)                        | many (A/A)                        |
-| Operational dependencies     | none               | none (single file)                | PostgreSQL server                 | healthy etcd cluster              | Redis/Valkey primary (+ Sentinel) |
+| Operational dependencies     | none               | none (single file)                | SQL server                        | healthy etcd cluster              | Redis/Valkey primary (+ Sentinel) |
 | Bootstrap                    | writes `<cadir>/`  | writes the database file          | writes the database               | writes etcd keyspace              | writes Redis keyspace             |
 | CA key exposure              | local file         | in DB unless `ca_key_file` set    | in DB unless `ca_key_file` set    | in etcd unless `ca_key_file` set  | in Redis unless `ca_key_file` set |
-| Backup/restore               | tar `<cadir>/`     | copy `.db` (+ WAL) + local dirs   | pg_dump + local dirs              | etcd snapshot + local dirs        | RDB/AOF + local dirs              |
-| Cross-node lock guarantees   | n/a (single node)  | n/a (single node)                 | session `pg_advisory_lock`        | lease-backed `concurrency.Mutex`  | `SET NX PX` + token + heartbeat   |
+| Backup/restore               | tar `<cadir>/`     | copy `.db` (+ WAL) + local dirs   | DB dump + local dirs              | etcd snapshot + local dirs        | RDB/AOF + local dirs              |
+| Cross-node lock guarantees   | n/a (single node)  | n/a (single node)                 | advisory lock / `GET_LOCK`        | lease-backed `concurrency.Mutex`  | `SET NX PX` + token + heartbeat   |
 | Drop-in for Puppet Server CA | yes                | no (key paths change)             | no (key paths change)             | no (key paths change)             | no (key paths change)             |
 
 Use `filesystem` for single-node or migration-from-Puppet-Server installs.
 Use `sqlite` for a single-node install that prefers one database file over a
-cadir tree (e.g. simpler backups). Use `postgres` when you want multiple
-`puppet-ca` replicas backed by a database you already operate. Use `etcd` when
-you need multiple replicas and want the strongest cross-node lock guarantees.
-Use `redis`/`valkey` when you already run Redis/Valkey (direct or
+cadir tree (e.g. simpler backups). Use `postgres` or `mysql` when you want
+multiple `puppet-ca` replicas backed by a database you already operate. Use
+`etcd` when you need multiple replicas and want the strongest cross-node lock
+guarantees. Use `redis`/`valkey` when you already run Redis/Valkey (direct or
 Sentinel-managed) and are willing to accept the narrower failover window in
 exchange for reusing existing infrastructure.
 

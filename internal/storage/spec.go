@@ -35,6 +35,7 @@ const (
 	BackendRedis      BackendKind = "redis"
 	BackendSQLite     BackendKind = "sqlite"
 	BackendPostgres   BackendKind = "postgres"
+	BackendMySQL      BackendKind = "mysql"
 )
 
 // BackendSpec describes how to construct a StorageService from configuration.
@@ -137,6 +138,8 @@ func sqlDialectForKind(kind BackendKind) (SQLDialect, bool) {
 		return SQLitePure, true
 	case BackendPostgres:
 		return SQLPostgres, true
+	case BackendMySQL:
+		return SQLMySQL, true
 	default:
 		return "", false
 	}
@@ -237,7 +240,7 @@ func NewServiceFromSpec(spec BackendSpec) (*StorageService, error) {
 		backend = rb
 		localPrivKeyDir = filepath.Join(spec.LocalDir, "private")
 
-	case BackendSQLite, BackendPostgres:
+	case BackendSQLite, BackendPostgres, BackendMySQL:
 		if spec.LocalDir == "" {
 			return nil, fmt.Errorf("sql backend still needs LocalDir for local private keys")
 		}
@@ -360,7 +363,9 @@ func ParseBackendKind(s string) (BackendKind, error) {
 		return BackendSQLite, nil
 	case "postgres", "postgresql", "pg":
 		return BackendPostgres, nil
+	case "mysql", "mariadb":
+		return BackendMySQL, nil
 	default:
-		return "", fmt.Errorf("unknown storage backend %q (supported: filesystem, etcd, redis, sqlite, postgres)", s)
+		return "", fmt.Errorf("unknown storage backend %q (supported: filesystem, etcd, redis, sqlite, postgres, mysql)", s)
 	}
 }

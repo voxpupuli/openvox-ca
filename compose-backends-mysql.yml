@@ -1,0 +1,33 @@
+# MySQL service for the SQL-backend Go integration suite
+# (internal/storage, build tag `mysql_integration`).
+#
+# Like compose-backends-postgres.yml, this only provides the database the
+# integration tests need (not a full Puppet stack). Bring it up, point
+# PUPPET_CA_TEST_MYSQL_DSN at it, and run:
+#
+#   go test -tags mysql_integration ./internal/storage/...
+#
+# The `mage test:backendsMySQL` target automates the up / test / down cycle.
+# MariaDB is wire-compatible; swap the image for docker.io/mariadb:11 to test it.
+
+name: puppet-ca-backends-mysql
+
+services:
+  mysql:
+    image: docker.io/mysql:8
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: puppetca
+      MYSQL_USER: puppetca
+      MYSQL_PASSWORD: puppetca
+    ports:
+      # Host 53306 -> container 3306, matching the DSN used by the mage target.
+      - "53306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+    tmpfs:
+      # Ephemeral storage: the test database never needs to survive a restart.
+      - /var/lib/mysql

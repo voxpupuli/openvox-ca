@@ -20,6 +20,7 @@ import (
 	"context"
 
 	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/dialect"
 )
 
 // Migration 20260101000000 (init): create the single key-value table backing
@@ -29,11 +30,22 @@ import (
 // appropriate column types.
 func init() {
 	sqlMigrations.MustRegister(func(ctx context.Context, db *bun.DB) error {
-		_, err := db.NewCreateTable().
+		if _, err := db.NewCreateTable().
 			Model((*sqlBlob)(nil)).
 			IfNotExists().
-			Exec(ctx)
-		return err
+			Exec(ctx); err != nil {
+			return err
+		}
+		// bun maps []byte to BLOB, which on MySQL/MariaDB caps at 64 KiB — too
+		// small for the append-only inventory. Widen it to LONGBLOB. SQLite and
+		// PostgreSQL store blobs without a practical size limit, so they need no
+		// adjustment.
+		if db.Dialect().Name() == dialect.MySQL {
+			if _, err := db.ExecContext(ctx, "ALTER TABLE puppet_ca_blobs MODIFY data LONGBLOB"); err != nil {
+				return err
+			}
+		}
+		return nil
 	}, func(ctx context.Context, db *bun.DB) error {
 		_, err := db.NewDropTable().
 			Model((*sqlBlob)(nil)).

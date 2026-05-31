@@ -26,10 +26,13 @@ import (
 	"io/fs"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect"
+	"github.com/uptrace/bun/dialect/mysqldialect"
 	"github.com/uptrace/bun/dialect/pgdialect"
 	"github.com/uptrace/bun/dialect/sqlitedialect"
 	"github.com/uptrace/bun/driver/pgdriver"
@@ -132,6 +135,11 @@ type SQLBackend struct {
 	localLocks sync.Map
 }
 
+// sqlTLSConfigSeq names the per-backend TLS configs the MySQL driver requires
+// to be registered globally. A monotonic counter keeps each registration name
+// unique across backends in the process.
+var sqlTLSConfigSeq atomic.Int64
+
 // NewSQLBackend opens a database connection according to cfg and returns a
 // ready backend. The caller must call Close to release the connection pool.
 func NewSQLBackend(cfg SQLConfig) (*SQLBackend, error) {
@@ -193,7 +201,25 @@ func openSQLDB(cfg SQLConfig) (*sql.DB, schema.Dialect, error) {
 		sqldb := sql.OpenDB(pgdriver.NewConnector(opts...))
 		return sqldb, pgdialect.New(), nil
 	case SQLMySQL:
-		return nil, nil, fmt.Errorf("mysql SQL backend not yet available in this build")
+		mycfg, err := mysqldriver.ParseDSN(cfg.DSN)
+		if err != nil {
+			return nil, nil, fmt.Errorf("parsing mysql dsn: %w", err)
+		}
+		// ParseTime is required so DATETIME columns scan into time.Time
+		// (otherwise the driver returns raw bytes and ModTime scanning fails).
+		mycfg.ParseTime = true
+		if cfg.TLS != nil {
+			name := fmt.Sprintf("puppet-ca-%d", sqlTLSConfigSeq.Add(1))
+			if err := mysqldriver.RegisterTLSConfig(name, cfg.TLS); err != nil {
+				return nil, nil, fmt.Errorf("registering mysql tls config: %w", err)
+			}
+			mycfg.TLSConfig = name
+		}
+		connector, err := mysqldriver.NewConnector(mycfg)
+		if err != nil {
+			return nil, nil, fmt.Errorf("creating mysql connector: %w", err)
+		}
+		return sql.OpenDB(connector), mysqldialect.New(), nil
 	default:
 		return nil, nil, fmt.Errorf("unknown SQL dialect %q", cfg.Dialect)
 	}
@@ -387,6 +413,11 @@ func (b *SQLBackend) List(ctx context.Context, prefix string) ([]string, error) 
 // from this process are serialised on appendMu; cross-replica concurrency is
 // resolved by a row-locking transaction that reads, appends, and writes back
 // the blob in one atomic step.
+//
+// On MySQL/MariaDB the FOR UPDATE-then-insert pattern can raise an InnoDB
+// deadlock (1213) when two connections race to create the same not-yet-existing
+// row; InnoDB rolls one back as the victim. That is the expected, transient
+// outcome, so the transaction is retried a bounded number of times.
 func (b *SQLBackend) AppendLine(ctx context.Context, key string, data []byte, kind BlobKind) error {
 	if err := validateKey(key); err != nil {
 		return err
@@ -397,6 +428,26 @@ func (b *SQLBackend) AppendLine(ctx context.Context, key string, data []byte, ki
 	ctx, cancel := b.callCtx(ctx)
 	defer cancel()
 
+	const maxAttempts = 10
+	for attempt := 0; ; attempt++ {
+		err := b.appendLineOnce(ctx, key, data, kind)
+		if err == nil {
+			return nil
+		}
+		if attempt+1 >= maxAttempts || !isRetryableSQLError(err) {
+			return err
+		}
+		// Brief, growing backoff so a deadlock victim does not immediately
+		// re-collide with the winner. Honour caller cancellation while waiting.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(attempt+1) * 5 * time.Millisecond):
+		}
+	}
+}
+
+func (b *SQLBackend) appendLineOnce(ctx context.Context, key string, data []byte, kind BlobKind) error {
 	return b.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		row := new(sqlBlob)
 		q := tx.NewSelect().Model(row).Column("data").Where("blob_key = ?", key)
@@ -429,6 +480,17 @@ func (b *SQLBackend) AppendLine(ctx context.Context, key string, data []byte, ki
 	})
 }
 
+// isRetryableSQLError reports whether err is a transient MySQL/MariaDB locking
+// error that warrants retrying the transaction: 1213 (deadlock) or 1205 (lock
+// wait timeout). Other dialects do not surface these, so they fall through.
+func isRetryableSQLError(err error) bool {
+	var myErr *mysqldriver.MySQLError
+	if errors.As(err, &myErr) {
+		return myErr.Number == 1213 || myErr.Number == 1205
+	}
+	return false
+}
+
 // ModTime returns the timestamp recorded when the blob was last written,
 // wrapping fs.ErrNotExist when the key is absent.
 func (b *SQLBackend) ModTime(ctx context.Context, key string) (time.Time, error) {
@@ -457,9 +519,10 @@ func (b *SQLBackend) AcquireLock(ctx context.Context, name string) (Unlocker, er
 	switch b.db.Dialect().Name() {
 	case dialect.PG:
 		return b.acquirePostgresLock(ctx, name)
+	case dialect.MySQL:
+		return b.acquireMySQLLock(ctx, name)
 	default:
-		// SQLite is single-node (process-local fallback); MySQL is added in a
-		// later change.
+		// SQLite is single-node: fall back to the process-local mutex.
 		return nil, ErrDistributedLockingUnsupported
 	}
 }
@@ -525,6 +588,76 @@ func (u *pgUnlocker) Unlock() error {
 	ctx, cancel := context.WithTimeout(context.Background(), u.timeout)
 	defer cancel()
 	_, err := u.conn.ExecContext(ctx, "SELECT pg_advisory_unlock(?)", u.key)
+	_ = u.conn.Close()
+	u.local.Unlock()
+	return err
+}
+
+// acquireMySQLLock takes a named MySQL/MariaDB lock via GET_LOCK on a dedicated
+// connection (GET_LOCK is session-scoped, so lock and release must share one
+// connection). The lock name is hashed to a short, stable string to stay within
+// MySQL's 64-character GET_LOCK name limit. GET_LOCK is polled with a 1-second
+// server-side wait so caller-context cancellation is honoured between attempts;
+// a process-local mutex serialises in-process callers first.
+func (b *SQLBackend) acquireMySQLLock(ctx context.Context, name string) (Unlocker, error) {
+	local := b.localLockFor(name)
+	local.Lock()
+
+	conn, err := b.db.Conn(ctx)
+	if err != nil {
+		local.Unlock()
+		return nil, fmt.Errorf("acquiring connection for lock %q: %w", name, err)
+	}
+
+	lockName := mysqlLockName(name)
+	for {
+		var got sql.NullInt64
+		if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, 1)", lockName).Scan(&got); err != nil {
+			_ = conn.Close()
+			local.Unlock()
+			return nil, fmt.Errorf("acquiring mysql lock %q: %w", name, err)
+		}
+		if got.Valid && got.Int64 == 1 {
+			return &mysqlUnlocker{conn: conn, lockName: lockName, local: local, timeout: b.timeout}, nil
+		}
+		if !got.Valid {
+			// NULL means an error occurred (e.g. the session was killed).
+			_ = conn.Close()
+			local.Unlock()
+			return nil, fmt.Errorf("acquiring mysql lock %q: GET_LOCK returned NULL", name)
+		}
+		// got == 0: the 1-second wait elapsed without the lock. Honour caller
+		// cancellation, then retry.
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+			local.Unlock()
+			return nil, fmt.Errorf("acquiring mysql lock %q: %w", name, ctx.Err())
+		default:
+		}
+	}
+}
+
+// mysqlLockName maps a lock name to a stable, short identifier within MySQL's
+// 64-character GET_LOCK name limit.
+func mysqlLockName(name string) string {
+	return fmt.Sprintf("puppet-ca:%016x", uint64(advisoryLockKey(name)))
+}
+
+// mysqlUnlocker releases a GET_LOCK on the same connection that acquired it,
+// then returns the connection to the pool and releases the process-local mutex.
+// The local mutex is always released even if RELEASE_LOCK fails.
+type mysqlUnlocker struct {
+	conn     bun.Conn
+	lockName string
+	local    *sync.Mutex
+	timeout  time.Duration
+}
+
+func (u *mysqlUnlocker) Unlock() error {
+	ctx, cancel := context.WithTimeout(context.Background(), u.timeout)
+	defer cancel()
+	_, err := u.conn.ExecContext(ctx, "SELECT RELEASE_LOCK(?)", u.lockName)
 	_ = u.conn.Close()
 	u.local.Unlock()
 	return err

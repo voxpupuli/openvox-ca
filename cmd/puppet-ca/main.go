@@ -119,7 +119,7 @@ func buildBackendSpec(cfg *serverConfig, absCADir string) (storage.BackendSpec, 
 			TLSKeyFile:         cfg.RedisTLSKeyFile,
 		}
 	}
-	if kind == storage.BackendSQLite || kind == storage.BackendPostgres {
+	if kind == storage.BackendSQLite || kind == storage.BackendPostgres || kind == storage.BackendMySQL {
 		spec.SQL = storage.SQLSpec{
 			DSN:               cfg.SQLDSN,
 			RequestTimeoutSec: cfg.SQLRequestTimeoutSec,
@@ -704,14 +704,14 @@ func main() {
 	f.BoolVar(&encryptCAKey, "encrypt-ca-key", false, "Encrypt the CA private key at rest (AES-256-GCM + Argon2id); a passphrase is auto-generated if not provided")
 	f.StringVar(&caKeyPassphraseFile, "ca-key-passphrase-file", "", "Path to file containing the CA key passphrase (first line used)")
 	f.BoolVar(&singleProcess, "single-process", false, "Disable CA key isolation (run signer and frontend in a single process)")
-	f.StringVar(&storageBackend, "storage-backend", "", "Storage backend: 'filesystem' (default), 'etcd', 'redis' (alias 'valkey'), 'sqlite', or 'postgres'")
+	f.StringVar(&storageBackend, "storage-backend", "", "Storage backend: 'filesystem' (default), 'etcd', 'redis' (alias 'valkey'), 'sqlite', 'postgres', or 'mysql' (alias 'mariadb')")
 	f.StringSliceVar(&etcdEndpoints, "etcd-endpoints", nil, "Comma-separated etcd cluster endpoints (e.g. https://etcd1:2379,https://etcd2:2379)")
 	f.StringVar(&etcdKeyPrefix, "etcd-key-prefix", "", "etcd key namespace for this CA (default: /puppet-ca)")
 	f.StringSliceVar(&redisAddrs, "redis-addrs", nil, "Comma-separated Redis/Valkey addresses for direct connections (e.g. redis-0:6379)")
 	f.StringVar(&redisSentinelMasterName, "redis-sentinel-master-name", "", "Redis Sentinel primary name; set to enable Sentinel-managed failover")
 	f.StringSliceVar(&redisSentinelAddrs, "redis-sentinel-addrs", nil, "Comma-separated Redis Sentinel addresses (e.g. sentinel-0:26379,sentinel-1:26379)")
 	f.StringVar(&redisKeyPrefix, "redis-key-prefix", "", "Redis key namespace for this CA (default: puppet-ca)")
-	f.StringVar(&sqlDSN, "sql-dsn", "", "SQL data source name (SQLite file path 'file:/var/lib/puppet-ca/ca.db', or 'postgres://user:pass@host:5432/db?sslmode=require')")
+	f.StringVar(&sqlDSN, "sql-dsn", "", "SQL data source name (SQLite 'file:/var/lib/puppet-ca/ca.db', PostgreSQL 'postgres://user:pass@host:5432/db?sslmode=require', or MySQL 'user:pass@tcp(host:3306)/db')")
 	f.StringVar(&caCertFile, "ca-cert-file", "", "Keep the CA certificate at this local path regardless of storage backend")
 	f.StringVar(&caKeyFile, "ca-key-file", "", "Keep the CA private key at this local path regardless of storage backend")
 

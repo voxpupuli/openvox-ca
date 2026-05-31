@@ -18,7 +18,7 @@ A drop-in replacement for Puppet Server's built-in CA, written in Go. It impleme
 ## Features
 
 - **Full Puppet CA API compatibility:** all 13 endpoints used by agents and puppet-server
-- **Pluggable storage:** filesystem (default, Puppet Server compatible), SQLite (single database file), or PostgreSQL / etcd / Redis (Valkey) for HA clusters; CA cert/key can be pinned to local files independently. See the [storage backends guide](docs/storage-backends.md)
+- **Pluggable storage:** filesystem (default, Puppet Server compatible), SQLite (single database file), or PostgreSQL / MySQL (MariaDB) / etcd / Redis (Valkey) for HA clusters; CA cert/key can be pinned to local files independently. See the [storage backends guide](docs/storage-backends.md)
 - **Autosigning:** `true`, glob-pattern file, or executable plugin modes
 - **mTLS support:** optional HTTPS with per-endpoint tier-based client certificate authorization
 - **CA import:** replace a bootstrapped CA with an external cert/key pair offline
