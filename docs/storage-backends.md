@@ -1,13 +1,17 @@
 # Storage backends
 
 `puppet-ca` abstracts its persistent state behind a pluggable **Backend**
-interface. Three backends ship today:
+interface. The following backends ship today:
 
 | Kind                   | Status  | Best for                                                                   |
 |------------------------|---------|----------------------------------------------------------------------------|
 | `filesystem`           | default | single-node installs; drop-in compatibility with Puppet Server's CA layout |
 | `etcd`                 | stable  | HA clusters where multiple `puppet-ca` replicas share a single CA          |
 | `redis` (incl. Valkey) | stable  | clusters that already run Redis/Valkey (direct or Sentinel-managed)        |
+| `sqlite`               | stable  | single-node installs that prefer a single database file over a cadir tree  |
+
+A shared SQL backend underpins `sqlite`; PostgreSQL and MySQL/MariaDB dialects
+build on the same code and are introduced in follow-up releases.
 
 Regardless of backend, **server-generated per-subject private keys always
 live on local disk**. They are issued once, handed back to the requester, and
@@ -16,7 +20,7 @@ remote store.
 
 The CA certificate and/or the CA private key can optionally be pinned to a
 local file (e.g. a mounted secret volume) independent of the chosen backend
-(filesystem, etcd, or redis/valkey) — see
+(filesystem, etcd, redis/valkey, or a SQL backend) — see
 [CA cert/key as local files](#ca-certkey-as-local-files).
 
 ---
@@ -388,6 +392,117 @@ PUPPET_CA_TEST_REDIS_ADDR=127.0.0.1:6379 \
 
 ---
 
+## SQL backends
+
+A single shared backend stores every logical key (except the local
+private-key directory) as one row in a key-value table inside a SQL database.
+The same implementation drives every dialect; only the driver, a few SQL
+clauses, and the cross-node lock mechanism differ. The first dialect to ship
+is **SQLite**; PostgreSQL and MySQL/MariaDB build on the same code.
+
+All drivers are pure Go, so the default `CGO_ENABLED=0` and
+`GOEXPERIMENT=boringcrypto` (FIPS) builds are unaffected. SQLite uses
+[`modernc.org/sqlite`](https://pkg.go.dev/modernc.org/sqlite) (a pure-Go
+translation of SQLite, no CGO).
+
+### Schema and migrations
+
+The schema is a single table, `puppet_ca_blobs`:
+
+| Column        | Purpose                                                       |
+|---------------|---------------------------------------------------------------|
+| `blob_key`    | logical key (primary key) — e.g. `ca_cert`, `cert/<subject>`  |
+| `data`        | blob payload                                                  |
+| `kind`        | visibility hint (public/private); recorded, not enforced      |
+| `modified_at` | last-write timestamp, used to answer `ModTime`                |
+
+Migrations are managed by [bun](https://bun.uptrace.dev/)'s migrator. On every
+start the backend runs any pending migrations and records applied versions in
+its own `bun_migrations` table; a `bun_migration_locks` table serialises
+concurrent runners so multiple replicas can start against the same database
+safely. Migrations are defined as Go functions, so one definition emits
+dialect-correct DDL across SQLite, PostgreSQL, and MySQL/MariaDB.
+
+### SQLite backend
+
+Stores the entire CA in one SQLite database file. `sqlite` and `sqlite3` are
+accepted as aliases. SQLite is single-node: it is a convenient, dependency-free
+alternative to the filesystem backend (one file to back up instead of a
+directory tree), not a clustering option.
+
+`cadir` is still required for per-subject generated private keys and ancillary
+local state.
+
+#### Configuration
+
+```yaml
+# /etc/puppet-ca/config.yaml
+storage_backend: sqlite
+cadir: /var/lib/puppet-ca                # still needed for per-subject keys
+sql_dsn: "file:/var/lib/puppet-ca/ca.db" # SQLite database file path / URI
+
+sql_request_timeout_sec: 10              # per-operation timeout (default 10)
+```
+
+The backend appends sensible defaults to the SQLite DSN unless you have
+already set them: `_txlock=immediate` (so read-then-write transactions take
+the write lock up front and cannot deadlock), `busy_timeout` (writers wait
+rather than failing with `SQLITE_BUSY`), and `journal_mode=WAL` (readers do
+not block the writer). The connection pool is pinned to a single open
+connection, matching SQLite's single-writer model.
+
+#### CLI flags
+
+```
+--storage-backend sqlite
+--sql-dsn         file:/var/lib/puppet-ca/ca.db
+```
+
+#### Environment variables
+
+| Config key                 | Env var                              |
+|----------------------------|--------------------------------------|
+| `storage_backend`          | `PUPPET_CA_STORAGE_BACKEND`          |
+| `sql_dsn`                  | `PUPPET_CA_SQL_DSN`                  |
+| `sql_request_timeout_sec`  | `PUPPET_CA_SQL_REQUEST_TIMEOUT_SEC`  |
+| `sql_max_open_conns`       | `PUPPET_CA_SQL_MAX_OPEN_CONNS`       |
+| `sql_max_idle_conns`       | `PUPPET_CA_SQL_MAX_IDLE_CONNS`       |
+| `sql_tls_ca_file`          | `PUPPET_CA_SQL_TLS_CA_FILE`          |
+| `sql_tls_cert_file`        | `PUPPET_CA_SQL_TLS_CERT_FILE`        |
+| `sql_tls_key_file`         | `PUPPET_CA_SQL_TLS_KEY_FILE`         |
+
+The pool-tuning and TLS settings apply only to the networked SQL dialects;
+SQLite ignores them.
+
+#### Cross-node coordination
+
+SQLite is single-node, so it does not provide a distributed lock: the
+`WithLock` call path falls back to a process-local `sync.Mutex` per lock name,
+exactly as the filesystem backend does.
+
+#### Operational notes
+
+- **Persistence.** The database file *is* the CA. Back it up (and the WAL
+  sidecar) the way you would back up a cadir tree.
+- **CA cert and key.** As with the etcd/redis backends, the CA private key
+  lives in the database by default. Enable `encrypt_ca_key` so the key is
+  AES-256-GCM wrapped before it leaves the process, or pin the key to a local
+  file via `ca_key_file` (see below).
+- **Puppet-ca-ctl.** `puppet-ca-ctl setup` and `puppet-ca-ctl import` operate
+  on the local filesystem only; bootstrap/import against a scratch directory,
+  then point a SQLite-backed `puppet-ca` at a fresh database to take over.
+
+#### Tests
+
+The SQLite backend tests run in a normal `go test` against a temporary
+database file — no external service and no CGO:
+
+```bash
+go test ./internal/storage/
+```
+
+---
+
 ## CA cert/key as local files
 
 Sometimes you want the benefits of a shared backend (agents, CSRs, signed
@@ -449,21 +564,23 @@ key out of the cadir tree and onto a separately-mounted volume.
 
 ## Choosing a backend
 
-|                              | `filesystem`       | `etcd`                            | `redis` / `valkey`                |
-|------------------------------|--------------------|-----------------------------------|-----------------------------------|
-| Replicas                     | one active         | many (A/A)                        | many (A/A)                        |
-| Operational dependencies     | none               | healthy etcd cluster              | Redis/Valkey primary (+ Sentinel) |
-| Bootstrap                    | writes `<cadir>/`  | writes etcd keyspace              | writes Redis keyspace             |
-| CA key exposure              | local file         | in etcd unless `ca_key_file` set  | in Redis unless `ca_key_file` set |
-| Backup/restore               | tar `<cadir>/`     | etcd snapshot + local dirs        | RDB/AOF + local dirs              |
-| Cross-node lock guarantees   | n/a (single node)  | lease-backed `concurrency.Mutex`  | `SET NX PX` + token + heartbeat   |
-| Drop-in for Puppet Server CA | yes                | no (key paths change)             | no (key paths change)             |
+|                              | `filesystem`       | `sqlite`                          | `etcd`                            | `redis` / `valkey`                |
+|------------------------------|--------------------|-----------------------------------|-----------------------------------|-----------------------------------|
+| Replicas                     | one active         | one active                        | many (A/A)                        | many (A/A)                        |
+| Operational dependencies     | none               | none (single file)                | healthy etcd cluster              | Redis/Valkey primary (+ Sentinel) |
+| Bootstrap                    | writes `<cadir>/`  | writes the database file          | writes etcd keyspace              | writes Redis keyspace             |
+| CA key exposure              | local file         | in DB unless `ca_key_file` set    | in etcd unless `ca_key_file` set  | in Redis unless `ca_key_file` set |
+| Backup/restore               | tar `<cadir>/`     | copy `.db` (+ WAL) + local dirs   | etcd snapshot + local dirs        | RDB/AOF + local dirs              |
+| Cross-node lock guarantees   | n/a (single node)  | n/a (single node)                 | lease-backed `concurrency.Mutex`  | `SET NX PX` + token + heartbeat   |
+| Drop-in for Puppet Server CA | yes                | no (key paths change)             | no (key paths change)             | no (key paths change)             |
 
 Use `filesystem` for single-node or migration-from-Puppet-Server installs.
-Use `etcd` when you need multiple `puppet-ca` replicas and want the
-strongest cross-node lock guarantees. Use `redis`/`valkey` when you already
-run Redis/Valkey (direct or Sentinel-managed) and are willing to accept the
-narrower failover window in exchange for reusing existing infrastructure.
+Use `sqlite` for a single-node install that prefers one database file over a
+cadir tree (e.g. simpler backups). Use `etcd` when you need multiple
+`puppet-ca` replicas and want the strongest cross-node lock guarantees. Use
+`redis`/`valkey` when you already run Redis/Valkey (direct or
+Sentinel-managed) and are willing to accept the narrower failover window in
+exchange for reusing existing infrastructure.
 
 ---
 

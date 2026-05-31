@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Trevor Vaughan
+// Copyright (C) 2026 Chris Boot
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -87,16 +88,16 @@ type serverConfig struct {
 	// the same state in a Redis/Valkey instance or Sentinel-managed primary
 	// (per-subject generated private keys always remain on local disk under
 	// CADir, regardless of backend).
-	StorageBackend       string   `yaml:"storage_backend"`
-	EtcdEndpoints        []string `yaml:"etcd_endpoints"`
-	EtcdKeyPrefix        string   `yaml:"etcd_key_prefix"`
-	EtcdUsername         string   `yaml:"etcd_username"`
-	EtcdPassword         string   `yaml:"etcd_password"`
-	EtcdDialTimeoutSec   int      `yaml:"etcd_dial_timeout_sec"`
-	EtcdRequestTimeoutSec int     `yaml:"etcd_request_timeout_sec"`
-	EtcdTLSCAFile        string   `yaml:"etcd_tls_ca_file"`
-	EtcdTLSCertFile      string   `yaml:"etcd_tls_cert_file"`
-	EtcdTLSKeyFile       string   `yaml:"etcd_tls_key_file"`
+	StorageBackend        string   `yaml:"storage_backend"`
+	EtcdEndpoints         []string `yaml:"etcd_endpoints"`
+	EtcdKeyPrefix         string   `yaml:"etcd_key_prefix"`
+	EtcdUsername          string   `yaml:"etcd_username"`
+	EtcdPassword          string   `yaml:"etcd_password"`
+	EtcdDialTimeoutSec    int      `yaml:"etcd_dial_timeout_sec"`
+	EtcdRequestTimeoutSec int      `yaml:"etcd_request_timeout_sec"`
+	EtcdTLSCAFile         string   `yaml:"etcd_tls_ca_file"`
+	EtcdTLSCertFile       string   `yaml:"etcd_tls_cert_file"`
+	EtcdTLSKeyFile        string   `yaml:"etcd_tls_key_file"`
 
 	// Redis/Valkey backend. RedisAddrs is used in direct mode; when
 	// RedisSentinelMasterName is set, the client resolves the primary via
@@ -116,6 +117,18 @@ type serverConfig struct {
 	RedisTLSCAFile          string   `yaml:"redis_tls_ca_file"`
 	RedisTLSCertFile        string   `yaml:"redis_tls_cert_file"`
 	RedisTLSKeyFile         string   `yaml:"redis_tls_key_file"`
+
+	// SQL backend (sqlite; postgres and mysql/mariadb added in later releases).
+	// SQLDSN is the driver-specific data source name: a file path/URI for
+	// SQLite ("file:/var/lib/puppet-ca/ca.db"), or a connection string for the
+	// networked engines. SQLTLS* apply only to the networked dialects.
+	SQLDSN               string `yaml:"sql_dsn"`
+	SQLRequestTimeoutSec int    `yaml:"sql_request_timeout_sec"`
+	SQLMaxOpenConns      int    `yaml:"sql_max_open_conns"`
+	SQLMaxIdleConns      int    `yaml:"sql_max_idle_conns"`
+	SQLTLSCAFile         string `yaml:"sql_tls_ca_file"`
+	SQLTLSCertFile       string `yaml:"sql_tls_cert_file"`
+	SQLTLSKeyFile        string `yaml:"sql_tls_key_file"`
 
 	// Local-file overrides. When set, the named asset is read/written via
 	// this filesystem path regardless of the selected backend. Typical use:
@@ -370,6 +383,33 @@ func applyServerEnv(cfg *serverConfig) {
 	}
 	if v := os.Getenv("PUPPET_CA_REDIS_TLS_KEY_FILE"); v != "" {
 		cfg.RedisTLSKeyFile = v
+	}
+	if v := os.Getenv("PUPPET_CA_SQL_DSN"); v != "" {
+		cfg.SQLDSN = v
+	}
+	if v := os.Getenv("PUPPET_CA_SQL_REQUEST_TIMEOUT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.SQLRequestTimeoutSec = n
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_SQL_MAX_OPEN_CONNS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.SQLMaxOpenConns = n
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_SQL_MAX_IDLE_CONNS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.SQLMaxIdleConns = n
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_SQL_TLS_CA_FILE"); v != "" {
+		cfg.SQLTLSCAFile = v
+	}
+	if v := os.Getenv("PUPPET_CA_SQL_TLS_CERT_FILE"); v != "" {
+		cfg.SQLTLSCertFile = v
+	}
+	if v := os.Getenv("PUPPET_CA_SQL_TLS_KEY_FILE"); v != "" {
+		cfg.SQLTLSKeyFile = v
 	}
 	if v := os.Getenv("PUPPET_CA_CA_CERT_FILE"); v != "" {
 		cfg.CACertFile = v

@@ -33,6 +33,7 @@ const (
 	BackendFilesystem BackendKind = "filesystem"
 	BackendEtcd       BackendKind = "etcd"
 	BackendRedis      BackendKind = "redis"
+	BackendSQLite     BackendKind = "sqlite"
 )
 
 // BackendSpec describes how to construct a StorageService from configuration.
@@ -54,6 +55,10 @@ type BackendSpec struct {
 	// Kind == BackendRedis.
 	Redis RedisSpec
 
+	// SQL configures a SQL backend (SQLite, and in later changes PostgreSQL and
+	// MySQL/MariaDB). Only consulted when Kind is one of the SQL backends.
+	SQL SQLSpec
+
 	// CACertFile, when non-empty, keeps the CA certificate on local disk at
 	// this path regardless of the selected backend. Useful when operators
 	// want to supply the cert as a file or mount it from a secret volume.
@@ -68,15 +73,15 @@ type BackendSpec struct {
 // EtcdSpec is the config-friendly form of EtcdConfig with TLS expressed as
 // file paths rather than a preloaded tls.Config.
 type EtcdSpec struct {
-	Endpoints      []string
-	KeyPrefix      string
-	Username       string
-	Password       string
-	DialTimeoutSec int
+	Endpoints         []string
+	KeyPrefix         string
+	Username          string
+	Password          string
+	DialTimeoutSec    int
 	RequestTimeoutSec int
-	TLSCAFile      string
-	TLSCertFile    string
-	TLSKeyFile     string
+	TLSCAFile         string
+	TLSCertFile       string
+	TLSKeyFile        string
 }
 
 // RedisSpec is the config-friendly form of RedisConfig with TLS expressed
@@ -104,6 +109,36 @@ type RedisSpec struct {
 	TLSKeyFile  string
 }
 
+// SQLSpec is the config-friendly form of SQLConfig with TLS expressed as file
+// paths rather than a preloaded tls.Config. The same spec serves every SQL
+// dialect; the dialect is chosen by BackendSpec.Kind.
+type SQLSpec struct {
+	// DSN is the driver-specific data source name (a file path/URI for SQLite,
+	// a connection string for PostgreSQL/MySQL).
+	DSN string
+
+	RequestTimeoutSec int
+	MaxOpenConns      int
+	MaxIdleConns      int
+
+	// TLS file paths apply to the networked dialects (PostgreSQL, MySQL); they
+	// are ignored by SQLite.
+	TLSCAFile   string
+	TLSCertFile string
+	TLSKeyFile  string
+}
+
+// sqlDialectForKind maps a BackendKind to the SQLBackend dialect, reporting
+// whether the kind is a SQL backend at all.
+func sqlDialectForKind(kind BackendKind) (SQLDialect, bool) {
+	switch kind {
+	case BackendSQLite:
+		return SQLitePure, true
+	default:
+		return "", false
+	}
+}
+
 // NewServiceFromSpec constructs a StorageService according to spec. Returns
 // an error when the backend cannot be initialised (e.g. etcd unreachable).
 // The caller is responsible for calling s.Backend().Close() at shutdown.
@@ -114,8 +149,8 @@ func NewServiceFromSpec(spec BackendSpec) (*StorageService, error) {
 	}
 
 	var (
-		backend          Backend
-		localPrivKeyDir  string
+		backend         Backend
+		localPrivKeyDir string
 	)
 
 	switch kind {
@@ -199,6 +234,33 @@ func NewServiceFromSpec(spec BackendSpec) (*StorageService, error) {
 		backend = rb
 		localPrivKeyDir = filepath.Join(spec.LocalDir, "private")
 
+	case BackendSQLite:
+		if spec.LocalDir == "" {
+			return nil, fmt.Errorf("sql backend still needs LocalDir for local private keys")
+		}
+		if spec.SQL.DSN == "" {
+			return nil, fmt.Errorf("sql backend requires sql_dsn")
+		}
+		dialect, ok := sqlDialectForKind(kind)
+		if !ok {
+			return nil, fmt.Errorf("backend kind %q is not a SQL dialect", kind)
+		}
+		cfg := SQLConfig{
+			Dialect:      dialect,
+			DSN:          spec.SQL.DSN,
+			MaxOpenConns: spec.SQL.MaxOpenConns,
+			MaxIdleConns: spec.SQL.MaxIdleConns,
+		}
+		if spec.SQL.RequestTimeoutSec > 0 {
+			cfg.RequestTimeout = time.Duration(spec.SQL.RequestTimeoutSec) * time.Second
+		}
+		sb, err := NewSQLBackend(cfg)
+		if err != nil {
+			return nil, err
+		}
+		backend = sb
+		localPrivKeyDir = filepath.Join(spec.LocalDir, "private")
+
 	default:
 		return nil, fmt.Errorf("unknown storage backend kind %q", spec.Kind)
 	}
@@ -278,7 +340,9 @@ func ParseBackendKind(s string) (BackendKind, error) {
 		return BackendEtcd, nil
 	case "redis", "valkey":
 		return BackendRedis, nil
+	case "sqlite", "sqlite3":
+		return BackendSQLite, nil
 	default:
-		return "", fmt.Errorf("unknown storage backend %q (supported: filesystem, etcd, redis)", s)
+		return "", fmt.Errorf("unknown storage backend %q (supported: filesystem, etcd, redis, sqlite)", s)
 	}
 }
