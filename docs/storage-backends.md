@@ -39,7 +39,7 @@ Every backend serves the following logical keys:
 | `crl`               | Current Certificate Revocation List (PEM)                 | bootstrap, revoke, rotate |
 | `serial`            | Next leaf certificate serial counter                      | sign                      |
 | `inventory`         | Append-only log of issued/revoked certificates            | sign / revoke             |
-| `inventory_hmac`    | HMAC-SHA256 of inventory, for tamper detection            | sign / revoke             |
+| `inventory_hmac`    | Inventory integrity head (blob HMAC or hash chain on SQL) | sign / revoke             |
 | `hmac_key`          | Integrity key for `inventory_hmac`                        | first run                 |
 | `csr/<subject>`     | Pending certificate signing request (PEM), per subject    | CSR submission            |
 | `cert/<subject>`    | Issued certificate (PEM), per subject                     | sign                      |
@@ -397,10 +397,13 @@ PUPPET_CA_TEST_REDIS_ADDR=127.0.0.1:6379 \
 ## SQL backends
 
 A single shared backend stores every logical key (except the local
-private-key directory) as one row in a key-value table inside a SQL database.
-The same implementation drives every dialect; only the driver, a few SQL
-clauses, and the cross-node lock mechanism differ. The first dialect to ship
-is **SQLite**; PostgreSQL and MySQL/MariaDB build on the same code.
+private-key directory) as one row in a key-value table inside a SQL database,
+with the certificate inventory broken out into its own structured table (see
+[Structured inventory](#structured-inventory) and
+[inventory-store.md](inventory-store.md)). The same implementation drives every
+dialect; only the driver, a few SQL clauses, and the cross-node lock mechanism
+differ. The first dialect to ship is **SQLite**; PostgreSQL and MySQL/MariaDB
+build on the same code.
 
 All drivers are pure Go, so the default `CGO_ENABLED=0` and
 `GOEXPERIMENT=boringcrypto` (FIPS) builds are unaffected. SQLite uses
@@ -409,7 +412,7 @@ translation of SQLite, no CGO).
 
 ### Schema and migrations
 
-The schema is a single table, `puppet_ca_blobs`:
+Most logical keys live in a key-value table, `puppet_ca_blobs`:
 
 | Column        | Purpose                                                       |
 |---------------|---------------------------------------------------------------|
@@ -424,6 +427,31 @@ its own `bun_migrations` table; a `bun_migration_locks` table serialises
 concurrent runners so multiple replicas can start against the same database
 safely. Migrations are defined as Go functions, so one definition emits
 dialect-correct DDL across SQLite, PostgreSQL, and MySQL/MariaDB.
+
+### Structured inventory
+
+The SQL backends do not store the inventory as one growing `inventory` blob.
+Each issued certificate is a row in a dedicated `puppet_ca_inventory` table,
+indexed by subject:
+
+| Column                    | Purpose                                              |
+|---------------------------|------------------------------------------------------|
+| `id`                      | autoincrement key; also defines issuance order       |
+| `serial`                  | certificate serial                                   |
+| `subject`                 | certificate subject (indexed)                        |
+| `not_before` / `not_after`| validity window, stored as the inventory.txt strings |
+
+This turns appends and revocation lookups (`LatestSerialForSubject`) into
+single-row operations instead of scanning the whole inventory. Integrity uses a
+**hash chain** rather than a whole-blob HMAC: each append folds the new line
+into the previous head, which is kept in the `inventory_hmac` row and verified
+by replaying the chain at startup. The `inventory` row in `puppet_ca_blobs` is
+retained only as an empty marker recording that the inventory has been
+initialised, and the `inventory` logical key is still served (rows rendered to
+`inventory.txt` text, and parsed back) so migrations remain backend-agnostic.
+A migration into or out of a SQL backend recomputes the integrity head for the
+destination's scheme. See [inventory-store.md](inventory-store.md) for the full
+design.
 
 ### SQLite backend
 
@@ -558,7 +586,8 @@ and releases the advisory lock automatically.
 - **CA cert and key.** As with the etcd/redis backends, the CA private key
   lives in the database by default. Enable `encrypt_ca_key`, or pin the key to
   a local file via `ca_key_file` (see below).
-- **Schema.** The backend owns the `puppet_ca_blobs` table plus bun's
+- **Schema.** The backend owns the `puppet_ca_blobs` and `puppet_ca_inventory`
+  tables plus bun's
   `bun_migrations` / `bun_migration_locks` bookkeeping tables. Grant the
   configured role rights to create tables on first run (or pre-create the
   schema and grant DML).
@@ -630,10 +659,11 @@ replica's session ends and its named locks release automatically.
 #### Operational notes
 
 - **Schema.** On first run the migration widens the `data` column to
-  `LONGBLOB` (MySQL's default `BLOB` caps at 64 KiB, too small for the
-  append-only inventory). Concurrent inventory appends use a `FOR UPDATE`
-  transaction; an InnoDB deadlock (the expected outcome when two replicas race
-  to create the same row) is retried transparently.
+  `LONGBLOB` (MySQL's default `BLOB` caps at 64 KiB, too small for large blobs
+  such as the CRL). Concurrent inventory appends serialise on a `FOR UPDATE`
+  transaction (locking the inventory marker row before advancing the integrity
+  chain); an InnoDB deadlock — the expected outcome when two replicas race to
+  create the same not-yet-existing row — is retried transparently.
 - **CA cert and key.** As with the other shared backends, the CA private key
   lives in the database by default. Enable `encrypt_ca_key`, or pin the key to
   a local file via `ca_key_file` (see below).
