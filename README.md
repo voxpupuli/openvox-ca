@@ -29,6 +29,7 @@ A drop-in replacement for Puppet Server's built-in CA, written in Go. It impleme
 - **Configurable CRL validity:** control how long each published CRL is valid (`crl_validity_days`)
 - **OCSP responder:** built-in RFC 6960 OCSP responder; AIA extension embedded in issued certs when `--ocsp-url` is set; in-memory cache with nonce bypass
 - **Health probes:** `/healthz/live`, `/healthz/ready`, and `/healthz/startup` endpoints for Kubernetes-style liveness/readiness checks
+- **Graceful shutdown:** `SIGTERM`/`SIGINT` drains in-flight requests with a 30-second window before exiting; deferred storage and signer cleanup always runs
 - **FIPS-compatible:** standard library only (`crypto/x509`, `net/http`); no CGO by default; FIPS build available via `GOEXPERIMENT=boringcrypto`
 - **`puppet-ca-ctl`:** operator CLI matching `tvaughan-server-ca` subcommands
 
@@ -228,6 +229,12 @@ When `--tls-cert` and `--tls-key` are both set, the server:
 1. Presents those certs to connecting clients
 2. Requests (but does not require) a client certificate from every connection
 3. Enforces endpoint-level authorization (see [Authorization tiers](#authorization-tiers) below)
+
+### Signal handling
+
+On `SIGTERM` or `SIGINT`, the server calls `http.Server.Shutdown()` with a 30-second context so in-flight requests (signing, CRL, OCSP) drain cleanly before the process exits. The main goroutine waits for shutdown to complete before returning, ensuring deferred storage and signer cleanup runs after all connections are done.
+
+This is particularly important for **Kubernetes rolling updates**: pods receive `SIGTERM` with a configurable grace period (typically 30 seconds). The server will drain in-flight requests within that window and exit cleanly, preventing connection resets during rollouts.
 
 ## Autosigning
 

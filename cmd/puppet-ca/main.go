@@ -23,12 +23,14 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -632,17 +634,33 @@ func main() {
 				}
 
 				slog.Info("TLS enabled", "cert", cfg.TLSCert)
-				if err := server.ListenAndServeTLS("", ""); err != nil {
-					slog.Error("Server failed", "error", err)
-					os.Exit(1)
-				}
-			} else {
-				if err := server.ListenAndServe(); err != nil {
-					slog.Error("Server failed", "error", err)
-					os.Exit(1)
-				}
 			}
 
+			shutdownDone := make(chan struct{})
+			go func() {
+				sigCh := make(chan os.Signal, 1)
+				signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+				<-sigCh
+				slog.Info("Shutting down")
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if err := server.Shutdown(shutdownCtx); err != nil {
+					slog.Warn("HTTP server shutdown error", "error", err)
+				}
+				close(shutdownDone)
+			}()
+
+			var serveErr error
+			if cfg.TLSCert != "" && cfg.TLSKey != "" {
+				serveErr = server.ListenAndServeTLS("", "")
+			} else {
+				serveErr = server.ListenAndServe()
+			}
+			if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+				slog.Error("Server failed", "error", serveErr)
+				os.Exit(1)
+			}
+			<-shutdownDone
 			return nil
 		},
 	}
