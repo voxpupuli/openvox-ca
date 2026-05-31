@@ -29,6 +29,7 @@ import (
 	"github.com/tvaughan/puppet-ca/internal/api"
 	"github.com/tvaughan/puppet-ca/internal/ca"
 	"github.com/tvaughan/puppet-ca/internal/storage"
+	"github.com/tvaughan/puppet-ca/internal/testutil"
 )
 
 var _ = Describe("API security hardening", func() {
@@ -59,6 +60,35 @@ var _ = Describe("API security hardening", func() {
 			Expect(rr.Body.String()).NotTo(ContainSubstring(tmpDir))
 			Expect(rr.Body.String()).NotTo(ContainSubstring("not a directory"))
 			Expect(rr.Body.String()).To(ContainSubstring("internal server error"))
+		})
+
+		It("returns a generic body on PUT /certificate_request when saving the CSR fails, without leaking the on-disk path", func() {
+			// Unauthenticated endpoint. Force SaveCSR to fail with a path-bearing
+			// error: make the "requests" directory a regular file so the atomic
+			// write inside it returns a *PathError carrying the temp directory.
+			tmpDir, err := os.MkdirTemp("", "puppet-ca-csr-leak-test")
+			Expect(err).NotTo(HaveOccurred())
+			defer os.RemoveAll(tmpDir)
+
+			Expect(os.MkdirAll(filepath.Join(tmpDir, "signed"), 0o755)).To(Succeed())
+			Expect(os.WriteFile(filepath.Join(tmpDir, "requests"), []byte("not a directory"), 0o644)).To(Succeed())
+
+			store := storage.New(tmpDir)
+			leakCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+			leakMux := api.New(leakCA).Routes()
+
+			const subject = "leaknode.test"
+			csrPEM, err := testutil.GenerateCSR(subject)
+			Expect(err).NotTo(HaveOccurred())
+
+			req := httptest.NewRequest("PUT", "/certificate_request/"+subject, bytes.NewReader(csrPEM))
+			rr := httptest.NewRecorder()
+			leakMux.ServeHTTP(rr, req)
+
+			// The storage path must never reach this unauthenticated client.
+			Expect(rr.Body.String()).NotTo(ContainSubstring(tmpDir))
+			Expect(rr.Body.String()).NotTo(ContainSubstring("requests"))
+			Expect(rr.Body.String()).NotTo(ContainSubstring("not a directory"))
 		})
 	})
 

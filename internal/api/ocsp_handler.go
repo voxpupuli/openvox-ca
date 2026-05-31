@@ -59,7 +59,8 @@ func (s *Server) handleOCSP(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		reqDER, err = io.ReadAll(io.LimitReader(r.Body, 1<<16))
 		if err != nil {
-			http.Error(w, "failed to read OCSP request body: "+err.Error(), http.StatusInternalServerError)
+			slog.Warn("read OCSP request body failed", "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
 

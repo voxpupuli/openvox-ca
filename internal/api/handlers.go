@@ -355,9 +355,18 @@ func (s *Server) handlePutRequest(w http.ResponseWriter, r *http.Request) {
 			// Returning 409 here causes the node (e.g. openvox-agent) to treat the
 			// submission as fatal and abort the run entirely.
 			w.WriteHeader(http.StatusOK)
-		} else {
-			slog.Warn("SaveRequest failed", "subject", subject, "error", err)
+		} else if csrValidationError(err) {
+			// Client-actionable validation failure (malformed or mis-signed CSR,
+			// or CN/subject mismatch). The message is path-free and useful to the
+			// agent, so surface it as a 400.
+			slog.Warn("SaveRequest rejected", "subject", subject, "error", err)
 			http.Error(w, err.Error(), http.StatusBadRequest)
+		} else {
+			// Internal storage/autosign fault whose message embeds absolute
+			// filesystem paths. On this unauthenticated endpoint we must not leak
+			// it: log the detail and return a generic 500.
+			slog.Error("SaveRequest internal failure", "subject", subject, "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
 		}
 		return
 	}
@@ -447,6 +456,22 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 		return false
 	}
 	return true
+}
+
+// csrValidationError reports whether err from CA.SaveRequest is a
+// client-actionable CSR validation failure whose message is safe to return
+// verbatim. These messages contain only the (already-validated) subject name
+// and crypto/ASN.1 detail — no filesystem paths. SaveRequest's other failures
+// (storage writes, autosign execution) wrap absolute paths, so the handler
+// treats anything NOT matched here as internal and returns a generic message.
+// Matching is fail-safe: an unrecognised error is treated as internal (no leak),
+// at worst returning a less specific message.
+func csrValidationError(err error) bool {
+	s := err.Error()
+	return strings.Contains(s, "does not match requested key") ||
+		strings.Contains(s, "failed to decode CSR PEM") ||
+		strings.Contains(s, "failed to parse CSR") ||
+		strings.Contains(s, "invalid CSR signature")
 }
 
 // clientCN extracts the Common Name from the TLS client certificate, if any.

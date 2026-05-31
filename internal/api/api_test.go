@@ -178,18 +178,23 @@ var _ = Describe("API Workflow", func() {
 		})
 
 		// Literal "../" never reaches the handler: net/http.ServeMux path-cleans
-		// "/certificate_status/.." to "/" and answers with a redirect (307) BEFORE
+		// "/certificate_status/.." to "/" and answers with a redirect BEFORE
 		// dispatching to the handler, so the traversal segment is collapsed by the
 		// standard library and never reaches ValidateSubject or storage. The
 		// security guarantee is that it is neither served as a status (200) nor
-		// triggers a server error (500) — the traversal is neutralised, not honoured.
+		// triggers a server error (500) — the traversal is neutralised and
+		// redirected to the cleaned root path. The exact redirect status is a
+		// ServeMux implementation detail that changed across Go versions (301
+		// Moved Permanently through Go 1.25, 307 Temporary Redirect from Go 1.26),
+		// so we assert the 3xx class and the safe Location rather than a fixed code.
 		It("neutralises a literal '..' traversal certname on GET status (no 200/500)", func() {
 			req := httptest.NewRequest("GET", "/certificate_status/..", nil)
 			rr := httptest.NewRecorder()
 			mux.ServeHTTP(rr, req)
 			Expect(rr.Code).NotTo(Equal(http.StatusOK))
 			Expect(rr.Code).NotTo(Equal(http.StatusInternalServerError))
-			Expect(rr.Code).To(Equal(http.StatusTemporaryRedirect))
+			Expect(rr.Code).To(BeNumerically(">=", http.StatusMultipleChoices)) // 300
+			Expect(rr.Code).To(BeNumerically("<", http.StatusBadRequest))       // 400
 			Expect(rr.Header().Get("Location")).To(Equal("/"))
 		})
 

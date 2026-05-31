@@ -617,9 +617,9 @@ _catrue_st=$(curl -s -o "$WORK_DIR/catrue_body.txt" -w '%{http_code}' \
     && pass "CSR with CA:TRUE rejected with 409" \
     || fail "CSR with CA:TRUE rejected with 409" "got HTTP $_catrue_st"
 
-grep -qF "Found extensions" "$WORK_DIR/catrue_body.txt" 2>/dev/null \
-    && pass "CA:TRUE rejection body contains 'Found extensions'" \
-    || fail "CA:TRUE rejection body contains 'Found extensions'" \
+grep -qiF "found extensions" "$WORK_DIR/catrue_body.txt" 2>/dev/null \
+    && pass "CA:TRUE rejection body contains 'found extensions'" \
+    || fail "CA:TRUE rejection body contains 'found extensions'" \
            "body: $(cat "$WORK_DIR/catrue_body.txt" 2>/dev/null)"
 
 grep -qF "2.5.29.19" "$WORK_DIR/catrue_body.txt" 2>/dev/null \
