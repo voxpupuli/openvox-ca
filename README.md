@@ -626,9 +626,18 @@ puppet-ca-ctl import \
   --cert-bundle ca_cert.pem \
   --private-key ca_key.pem \
   --crl-chain   ca_crl.pem     # optional; a new CRL is generated if omitted
+
+# Migrate an entire CA between storage backends offline (any pair of backends:
+# filesystem, sqlite, postgres, mysql, etcd, redis/valkey). Each backend is
+# described by a normal puppet-ca config file. Refuses a non-empty destination
+# unless --force.
+puppet-ca-ctl migrate \
+  --source-config /etc/puppet-ca/filesystem.yaml \
+  --dest-config   /etc/puppet-ca/postgres.yaml
 ```
 
-`setup` and `import` operate directly on the filesystem. No running server is needed.
+`setup`, `import` and `migrate` operate directly on storage. No running server is needed.
+See [docs/storage-backends.md](docs/storage-backends.md#migrating-between-backends) for migration details.
 
 ## Container / Compose
 

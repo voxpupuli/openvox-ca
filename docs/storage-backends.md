@@ -718,6 +718,69 @@ key out of the cadir tree and onto a separately-mounted volume.
 
 ---
 
+## Migrating between backends
+
+`puppet-ca-ctl migrate` copies an entire CA from one backend to another. Because
+every backend implements the same `Backend` contract, any pair can be combined:
+
+- import an existing filesystem CA into a database (`filesystem` → `postgres`),
+- move between databases or stores (`redis`/`valkey` → `postgres`, `etcd` →
+  `sqlite`, …),
+- export a database back to a plain directory of files (`postgres` →
+  `filesystem`), e.g. for an offline backup or to revert to a single-node setup.
+
+Both ends are described by ordinary `puppet-ca` config files — the same YAML the
+server reads — so each backend's parameters are expressed exactly as they are in
+production. `--source-config` is read from; `--dest-config` is written to.
+
+```bash
+# Import a filesystem CA into PostgreSQL.
+puppet-ca-ctl migrate \
+  --source-config /etc/puppet-ca/filesystem.yaml \
+  --dest-config   /etc/puppet-ca/postgres.yaml
+
+# Export it back out to a directory of files.
+puppet-ca-ctl migrate \
+  --source-config /etc/puppet-ca/postgres.yaml \
+  --dest-config   /etc/puppet-ca/filesystem.yaml
+```
+
+Each config file needs only the storage fields (plus `cadir`); for example a
+minimal SQLite target:
+
+```yaml
+# sqlite.yaml
+storage_backend: sqlite
+cadir: /var/lib/puppet-ca
+sql_dsn: file:/var/lib/puppet-ca/ca.db
+```
+
+What is copied: the CA certificate, public key and private key, the CRL, the
+serial, the inventory **and its integrity HMAC** (so tamper-detection keeps
+working after the move), every pending CSR and every signed certificate. Each
+blob is written with its normal visibility, so a `filesystem` destination ends
+up with the usual `0600`/`0644` permissions. Blobs absent in the source (for
+example the `serial` file of a CA that has not signed anything yet) are simply
+skipped.
+
+What is **not** copied: per-subject generated private keys. These always live on
+the local filesystem under `cadir`, never in a backend (see
+[Backend contract](#backend-contract)); when running a remote backend they stay
+put across a migration. The local-file overrides `ca_cert_file` / `ca_key_file`
+are honoured on both ends, so they participate transparently.
+
+Notes:
+
+- **Stop the server first.** Run `migrate` while no `puppet-ca` is serving
+  either backend, so the copy sees a consistent snapshot.
+- **Overwrite protection.** `migrate` refuses to write into a destination that
+  already holds a CA certificate. Pass `--force` to overwrite it.
+- **Re-runnable.** The copy is idempotent per key; an interrupted run can be
+  repeated (with `--force` if a partial CA already landed).
+- Use `--verbose` to log each blob as it is copied.
+
+---
+
 ## Choosing a backend
 
 |                              | `filesystem`       | `sqlite`                          | `postgres` / `mysql`              | `etcd`                            | `redis` / `valkey`                |
@@ -748,5 +811,9 @@ The `Backend` interface is defined in
 backend, implement the interface, register it in
 [internal/storage/spec.go](../internal/storage/spec.go)'s
 `NewServiceFromSpec`, and add any backend-specific config fields to
-[cmd/puppet-ca/config.go](../cmd/puppet-ca/config.go). The `OverlayBackend`
-wrapper (overlay.go) shows how to compose a backend with local-file overrides.
+[internal/config/storage.go](../internal/config/storage.go)'s `StorageConfig`
+(shared by the server and `puppet-ca-ctl migrate`, and mapped to a
+`BackendSpec` by `ToBackendSpec`). The `OverlayBackend` wrapper (overlay.go)
+shows how to compose a backend with local-file overrides. A new backend is
+automatically migratable — `puppet-ca-ctl migrate` works against any
+`Backend` implementation with no extra code.

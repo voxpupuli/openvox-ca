@@ -19,6 +19,7 @@ package main
 import (
 	"testing"
 
+	"github.com/tvaughan/puppet-ca/internal/config"
 	"github.com/tvaughan/puppet-ca/internal/storage"
 )
 
@@ -50,9 +51,11 @@ func TestBuildBackendSpecSQLite(t *testing.T) {
 	for _, alias := range []string{"sqlite", "sqlite3"} {
 		t.Run(alias, func(t *testing.T) {
 			cfg := &serverConfig{
-				StorageBackend:       alias,
-				SQLDSN:               "file:/tmp/ca.db",
-				SQLRequestTimeoutSec: 12,
+				StorageConfig: config.StorageConfig{
+					StorageBackend:       alias,
+					SQLDSN:               "file:/tmp/ca.db",
+					SQLRequestTimeoutSec: 12,
+				},
 			}
 			spec, err := buildBackendSpec(cfg, "/abs/cadir")
 			if err != nil {
@@ -78,9 +81,11 @@ func TestBuildBackendSpecPostgres(t *testing.T) {
 	for _, alias := range []string{"postgres", "postgresql", "pg"} {
 		t.Run(alias, func(t *testing.T) {
 			cfg := &serverConfig{
-				StorageBackend: alias,
-				SQLDSN:         "postgres://u:p@host:5432/db?sslmode=require",
-				SQLTLSCAFile:   "/etc/pg-ca.pem",
+				StorageConfig: config.StorageConfig{
+					StorageBackend: alias,
+					SQLDSN:         "postgres://u:p@host:5432/db?sslmode=require",
+					SQLTLSCAFile:   "/etc/pg-ca.pem",
+				},
 			}
 			spec, err := buildBackendSpec(cfg, "/abs/cadir")
 			if err != nil {
@@ -103,8 +108,10 @@ func TestBuildBackendSpecMySQL(t *testing.T) {
 	for _, alias := range []string{"mysql", "mariadb"} {
 		t.Run(alias, func(t *testing.T) {
 			cfg := &serverConfig{
-				StorageBackend: alias,
-				SQLDSN:         "puppetca:secret@tcp(db:3306)/puppetca",
+				StorageConfig: config.StorageConfig{
+					StorageBackend: alias,
+					SQLDSN:         "puppetca:secret@tcp(db:3306)/puppetca",
+				},
 			}
 			spec, err := buildBackendSpec(cfg, "/abs/cadir")
 			if err != nil {

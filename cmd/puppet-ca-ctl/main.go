@@ -545,6 +545,7 @@ Global flags must be specified before the subcommand.`,
 		newGenerateCmd(),
 		newSetupCmd(),
 		newImportCmd(),
+		newMigrateCmd(),
 	)
 
 	if err := rootCmd.Execute(); err != nil {

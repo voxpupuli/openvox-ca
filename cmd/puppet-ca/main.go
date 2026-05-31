@@ -76,74 +76,10 @@ func setupLogger(cfg *serverConfig) (*os.File, error) {
 // buildBackendSpec derives a storage.BackendSpec from the server config. The
 // spec is used to construct the StorageService in every mode (frontend,
 // signer, single-process), ensuring backend selection happens in one place.
+// The backend-selection logic is shared with the operator CLI's migrate
+// command via config.StorageConfig.ToBackendSpec.
 func buildBackendSpec(cfg *serverConfig, absCADir string) (storage.BackendSpec, error) {
-	kind, err := storage.ParseBackendKind(cfg.StorageBackend)
-	if err != nil {
-		return storage.BackendSpec{}, err
-	}
-	spec := storage.BackendSpec{
-		Kind:       kind,
-		LocalDir:   absCADir,
-		CACertFile: absIfSet(cfg.CACertFile),
-		CAKeyFile:  absIfSet(cfg.CAKeyFile),
-	}
-	if kind == storage.BackendEtcd {
-		spec.Etcd = storage.EtcdSpec{
-			Endpoints:         cfg.EtcdEndpoints,
-			KeyPrefix:         cfg.EtcdKeyPrefix,
-			Username:          cfg.EtcdUsername,
-			Password:          cfg.EtcdPassword,
-			DialTimeoutSec:    cfg.EtcdDialTimeoutSec,
-			RequestTimeoutSec: cfg.EtcdRequestTimeoutSec,
-			TLSCAFile:         cfg.EtcdTLSCAFile,
-			TLSCertFile:       cfg.EtcdTLSCertFile,
-			TLSKeyFile:        cfg.EtcdTLSKeyFile,
-		}
-	}
-	if kind == storage.BackendRedis {
-		spec.Redis = storage.RedisSpec{
-			Addrs:              cfg.RedisAddrs,
-			SentinelMasterName: cfg.RedisSentinelMasterName,
-			SentinelAddrs:      cfg.RedisSentinelAddrs,
-			SentinelUsername:   cfg.RedisSentinelUsername,
-			SentinelPassword:   cfg.RedisSentinelPassword,
-			DB:                 cfg.RedisDB,
-			Username:           cfg.RedisUsername,
-			Password:           cfg.RedisPassword,
-			KeyPrefix:          cfg.RedisKeyPrefix,
-			DialTimeoutSec:     cfg.RedisDialTimeoutSec,
-			RequestTimeoutSec:  cfg.RedisRequestTimeoutSec,
-			LockTTLSec:         cfg.RedisLockTTLSec,
-			TLSCAFile:          cfg.RedisTLSCAFile,
-			TLSCertFile:        cfg.RedisTLSCertFile,
-			TLSKeyFile:         cfg.RedisTLSKeyFile,
-		}
-	}
-	if kind == storage.BackendSQLite || kind == storage.BackendPostgres || kind == storage.BackendMySQL {
-		spec.SQL = storage.SQLSpec{
-			DSN:               cfg.SQLDSN,
-			RequestTimeoutSec: cfg.SQLRequestTimeoutSec,
-			MaxOpenConns:      cfg.SQLMaxOpenConns,
-			MaxIdleConns:      cfg.SQLMaxIdleConns,
-			TLSCAFile:         cfg.SQLTLSCAFile,
-			TLSCertFile:       cfg.SQLTLSCertFile,
-			TLSKeyFile:        cfg.SQLTLSKeyFile,
-		}
-	}
-	return spec, nil
-}
-
-// absIfSet returns filepath.Abs(p) when p is non-empty, otherwise "".
-// Resolving at config time lets error messages and logs show canonical paths.
-func absIfSet(p string) string {
-	if p == "" {
-		return ""
-	}
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		return p
-	}
-	return abs
+	return cfg.StorageConfig.ToBackendSpec(absCADir)
 }
 
 // applyCAConfig applies the common CA configuration fields from serverConfig
