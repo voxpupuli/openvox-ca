@@ -468,6 +468,36 @@ func (c *CA) SignAll(ctx context.Context) (SignResult, error) {
 	return c.SignMultiple(ctx, subjects), nil
 }
 
+// CleanResult holds the outcome of a bulk clean operation.
+type CleanResult struct {
+	Cleaned     []string `json:"cleaned"`
+	NotFound    []string `json:"not-found"`
+	CleanErrors []string `json:"clean-errors"`
+}
+
+// CleanMultiple revokes and removes the cert and CSR for each subject.
+// Subjects not found are collected in NotFound; other errors in CleanErrors.
+func (c *CA) CleanMultiple(ctx context.Context, subjects []string) CleanResult {
+	result := CleanResult{
+		Cleaned:     []string{},
+		NotFound:    []string{},
+		CleanErrors: []string{},
+	}
+	for _, subject := range subjects {
+		if err := c.Clean(ctx, subject); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				result.NotFound = append(result.NotFound, subject)
+			} else {
+				slog.Warn("Bulk clean failed", "subject", subject, "error", err)
+				result.CleanErrors = append(result.CleanErrors, subject)
+			}
+		} else {
+			result.Cleaned = append(result.Cleaned, subject)
+		}
+	}
+	return result
+}
+
 // SaveRequest validates, persists the CSR, and triggers autosigning if configured.
 func (c *CA) SaveRequest(ctx context.Context, subject string, csrPEM []byte) (bool, error) {
 	if err := ValidateSubject(subject); err != nil {

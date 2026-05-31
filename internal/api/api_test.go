@@ -1072,4 +1072,83 @@ var _ = Describe("API Workflow", func() {
 		})
 	})
 
+	Context("PUT /clean", func() {
+		sign := func(subject string) {
+			csrPEM, err := testutil.GenerateCSR(subject)
+			Expect(err).NotTo(HaveOccurred())
+			mux.ServeHTTP(httptest.NewRecorder(),
+				httptest.NewRequest("PUT", "/certificate_request/"+subject, bytes.NewReader(csrPEM)))
+			body, _ := json.Marshal(api.PutStatusBody{DesiredState: "signed"})
+			mux.ServeHTTP(httptest.NewRecorder(),
+				httptest.NewRequest("PUT", "/certificate_status/"+subject, bytes.NewReader(body)))
+		}
+
+		It("cleans listed subjects and returns a CleanResult", func() {
+			sign("clean-node-a")
+			sign("clean-node-b")
+
+			body, _ := json.Marshal(map[string][]string{"certnames": {"clean-node-a", "clean-node-b", "ghost-node"}})
+			req := httptest.NewRequest("PUT", "/clean", bytes.NewReader(body))
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusOK))
+
+			var result struct {
+				Cleaned     []string `json:"cleaned"`
+				NotFound    []string `json:"not-found"`
+				CleanErrors []string `json:"clean-errors"`
+			}
+			Expect(json.Unmarshal(rr.Body.Bytes(), &result)).To(Succeed())
+			Expect(result.Cleaned).To(ConsistOf("clean-node-a", "clean-node-b"))
+			Expect(result.NotFound).To(ConsistOf("ghost-node"))
+			Expect(result.CleanErrors).To(BeEmpty())
+		})
+
+		It("reports subjects as cleaned when only a CSR is pending", func() {
+			csrPEM, err := testutil.GenerateCSR("clean-csr-only")
+			Expect(err).NotTo(HaveOccurred())
+			mux.ServeHTTP(httptest.NewRecorder(),
+				httptest.NewRequest("PUT", "/certificate_request/clean-csr-only", bytes.NewReader(csrPEM)))
+
+			body, _ := json.Marshal(map[string][]string{"certnames": {"clean-csr-only"}})
+			req := httptest.NewRequest("PUT", "/clean", bytes.NewReader(body))
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusOK))
+
+			var result struct {
+				Cleaned  []string `json:"cleaned"`
+				NotFound []string `json:"not-found"`
+			}
+			Expect(json.Unmarshal(rr.Body.Bytes(), &result)).To(Succeed())
+			Expect(result.Cleaned).To(ConsistOf("clean-csr-only"))
+			Expect(result.NotFound).To(BeEmpty())
+		})
+
+		It("also responds on the /puppet-ca/v1/clean path", func() {
+			sign("clean-prefix-node")
+
+			body, _ := json.Marshal(map[string][]string{"certnames": {"clean-prefix-node"}})
+			req := httptest.NewRequest("PUT", "/puppet-ca/v1/clean", bytes.NewReader(body))
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusOK))
+		})
+
+		It("returns 400 for an empty certnames list", func() {
+			body, _ := json.Marshal(map[string][]string{"certnames": {}})
+			req := httptest.NewRequest("PUT", "/clean", bytes.NewReader(body))
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusBadRequest))
+		})
+
+		It("returns 400 for malformed JSON", func() {
+			req := httptest.NewRequest("PUT", "/clean", bytes.NewReader([]byte("{bad")))
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusBadRequest))
+		})
+	})
+
 })
