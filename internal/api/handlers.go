@@ -37,6 +37,12 @@ import (
 	"github.com/tvaughan/puppet-ca/internal/ca"
 )
 
+// maxJSONBody caps the size of JSON request bodies accepted by the POST/PUT
+// handlers, matching the 1 MiB limit already applied to CSR submissions. It
+// prevents an authenticated client from streaming an unbounded body (e.g. a
+// huge certnames array) and exhausting server memory.
+const maxJSONBody = 1 << 20 // 1 MiB
+
 // AuthConfig is the mTLS authorization configuration wired into the server.
 // Nil means no mTLS enforcement (plain HTTP / dev mode).
 type AuthConfig struct {
@@ -161,7 +167,9 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 			state = "revoked"
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(certStatusFromCert(subject, certPEM, state, s.timeFormat()))
+		if err := json.NewEncoder(w).Encode(certStatusFromCert(subject, certPEM, state, s.timeFormat())); err != nil {
+			slog.Warn("encode response failed", "error", err)
+		}
 		return
 	}
 
@@ -169,7 +177,9 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 	csrPEM, err := s.CA.Storage.GetCSR(r.Context(), subject)
 	if err == nil {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(certStatusFromCSR(subject, csrPEM))
+		if err := json.NewEncoder(w).Encode(certStatusFromCSR(subject, csrPEM)); err != nil {
+			slog.Warn("encode response failed", "error", err)
+		}
 		return
 	}
 
@@ -190,8 +200,7 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 	slog.Debug("PUT certificate_status", "subject", subject, "client", clientCN(r))
 
 	var body PutStatusBody
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+	if !decodeJSONBody(w, r, &body) {
 		return
 	}
 
@@ -206,9 +215,14 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			slog.Warn("Sign failed", "subject", subject, "error", err)
 			if strings.Contains(err.Error(), "CSR not found") {
-				http.Error(w, err.Error(), http.StatusNotFound)
-			} else {
+				http.Error(w, "CSR not found", http.StatusNotFound)
+			} else if strings.Contains(err.Error(), "found extensions that disallow signing") {
+				// Signing-policy rejection: the message lists only disallowed
+				// OIDs (no filesystem paths), so it is safe to surface and is a
+				// useful operator signal.
 				http.Error(w, err.Error(), http.StatusConflict)
+			} else {
+				http.Error(w, "conflict", http.StatusConflict)
 			}
 			return
 		}
@@ -217,7 +231,7 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 	case "revoked":
 		if err := s.CA.Revoke(r.Context(), subject); err != nil {
 			slog.Warn("Revoke failed", "subject", subject, "error", err)
-			http.Error(w, err.Error(), http.StatusConflict)
+			http.Error(w, "conflict", http.StatusConflict)
 			return
 		}
 		if cn := clientCN(r); cn != "" && s.destructiveOps != nil && s.destructiveOps.Record(cn) {
@@ -245,7 +259,7 @@ func (s *Server) handleGetCert(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/plain")
-		w.Write(certPEM)
+		w.Write(certPEM) //nolint:errcheck
 		return
 	}
 
@@ -260,7 +274,7 @@ func (s *Server) handleGetCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain")
-	w.Write(certPEM)
+	w.Write(certPEM) //nolint:errcheck
 }
 
 // --- CRL ---
@@ -286,7 +300,7 @@ func (s *Server) handleGetCRL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain")
-	w.Write(crlPEM)
+	w.Write(crlPEM) //nolint:errcheck
 }
 
 // --- CSR ---
@@ -305,7 +319,7 @@ func (s *Server) handleGetRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain")
-	w.Write(csrPEM)
+	w.Write(csrPEM) //nolint:errcheck
 }
 
 func (s *Server) handlePutRequest(w http.ResponseWriter, r *http.Request) {
@@ -328,7 +342,8 @@ func (s *Server) handlePutRequest(w http.ResponseWriter, r *http.Request) {
 	// NIST 800-53: SC-5 (Denial-of-Service Protection)
 	csrPEM, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
-		http.Error(w, "failed to read body: "+err.Error(), http.StatusInternalServerError)
+		slog.Error("read CSR body failed", "subject", subject, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
@@ -398,18 +413,40 @@ func (s *Server) handlePostGenerate(w http.ResponseWriter, r *http.Request) {
 	result, err := s.CA.Generate(r.Context(), subject, dnsAltNames)
 	if err != nil {
 		if errors.Is(err, ca.ErrCertExists) {
-			http.Error(w, err.Error(), http.StatusConflict)
+			slog.Warn("Generate conflict", "subject", subject, "error", err)
+			http.Error(w, "certificate already exists", http.StatusConflict)
 		} else {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			slog.Error("Generate failed", "subject", subject, "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
 		}
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(generateResponse{
+	if err := json.NewEncoder(w).Encode(generateResponse{
 		PrivateKey:  string(result.PrivateKeyPEM),
 		Certificate: string(result.CertificatePEM),
-	})
+	}); err != nil {
+		slog.Warn("encode response failed", "error", err)
+	}
+}
+
+// decodeJSONBody caps the request body at maxJSONBody and decodes it into dst.
+// On success it returns true. On failure it writes an appropriate error
+// response (413 when the size cap is exceeded, otherwise 400 with a safe static
+// message) and returns false; the caller must stop processing the request.
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return false
+		}
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return false
+	}
+	return true
 }
 
 // clientCN extracts the Common Name from the TLS client certificate, if any.
@@ -600,9 +637,9 @@ func (s *Server) handleDeleteStatus(w http.ResponseWriter, r *http.Request) {
 	if err := s.CA.Clean(r.Context(), subject); err != nil {
 		slog.Warn("Clean failed", "subject", subject, "error", err)
 		if errors.Is(err, ca.ErrNotFound) {
-			http.Error(w, err.Error(), http.StatusNotFound)
+			http.Error(w, "not found", http.StatusNotFound)
 		} else {
-			http.Error(w, err.Error(), http.StatusConflict)
+			http.Error(w, "conflict", http.StatusConflict)
 		}
 		return
 	}
@@ -622,12 +659,14 @@ func (s *Server) handleGetStatuses(w http.ResponseWriter, r *http.Request) {
 
 	certs, err := s.CA.Storage.ListCerts(r.Context())
 	if err != nil {
-		http.Error(w, "failed to list certs: "+err.Error(), http.StatusInternalServerError)
+		slog.Error("list certs failed", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 	csrs, err := s.CA.Storage.ListCSRs(r.Context())
 	if err != nil {
-		http.Error(w, "failed to list CSRs: "+err.Error(), http.StatusInternalServerError)
+		slog.Error("list CSRs failed", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
@@ -664,7 +703,9 @@ func (s *Server) handleGetStatuses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(statuses)
+	if err := json.NewEncoder(w).Encode(statuses); err != nil {
+		slog.Warn("encode response failed", "error", err)
+	}
 }
 
 // --- Expirations ---
@@ -707,7 +748,9 @@ func (s *Server) handleGetExpirations(w http.ResponseWriter, r *http.Request) {
 		CACertificate: CertExpiration{Expiration: certExp},
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		slog.Warn("encode response failed", "error", err)
+	}
 }
 
 // --- Bulk sign ---
@@ -721,8 +764,7 @@ func (s *Server) handlePostSign(w http.ResponseWriter, r *http.Request) {
 	slog.Debug("POST sign", "client", cn)
 
 	var body SignRequestBody
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+	if !decodeJSONBody(w, r, &body) {
 		return
 	}
 	if len(body.Certnames) == 0 {
@@ -733,7 +775,9 @@ func (s *Server) handlePostSign(w http.ResponseWriter, r *http.Request) {
 	slog.Debug("Signing certificates", "count", len(body.Certnames), "subjects", body.Certnames, "client", cn)
 	result := s.signInBatches(r.Context(), body.Certnames)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	if err := json.NewEncoder(w).Encode(result); err != nil {
+		slog.Warn("encode response failed", "error", err)
+	}
 }
 
 // --- Certificate renewal ---
@@ -788,14 +832,17 @@ func (s *Server) handlePostSignAll(w http.ResponseWriter, r *http.Request) {
 
 	pending, err := s.CA.Storage.ListCSRs(r.Context())
 	if err != nil {
-		http.Error(w, "failed to list pending CSRs: "+err.Error(), http.StatusInternalServerError)
+		slog.Error("list pending CSRs failed", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
 	result := s.signInBatches(r.Context(), pending)
 	slog.Debug("Signed all pending CSRs", "signed", len(result.Signed), "errors", len(result.SigningErrors), "client", cn)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	if err := json.NewEncoder(w).Encode(result); err != nil {
+		slog.Warn("encode response failed", "error", err)
+	}
 }
 
 // --- Bulk clean ---
@@ -805,8 +852,7 @@ func (s *Server) handlePutClean(w http.ResponseWriter, r *http.Request) {
 	slog.Debug("PUT clean", "client", cn)
 
 	var body SignRequestBody
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+	if !decodeJSONBody(w, r, &body) {
 		return
 	}
 	if len(body.Certnames) == 0 {
@@ -820,5 +866,7 @@ func (s *Server) handlePutClean(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("High rate of destructive operations detected", "client", cn, "operation", "bulk-clean")
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	if err := json.NewEncoder(w).Encode(result); err != nil {
+		slog.Warn("encode response failed", "error", err)
+	}
 }
