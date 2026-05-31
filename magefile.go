@@ -260,6 +260,7 @@ func (Test) Unit() error {
 		"./cmd/puppet-ca-ctl/...",
 		"./internal/api/...",
 		"./internal/ca/...",
+		"./internal/signer/...",
 		"./internal/storage/...",
 	}
 
