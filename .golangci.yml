@@ -68,6 +68,15 @@ linters:
         linters:
           - errcheck
           - gosec
+      # QF1008 is an opinionated staticcheck "quick-fix" that flags spelling out
+      # an embedded field in a selector (e.g. cfg.StorageConfig.ToBackendSpec).
+      # The explicit form is a deliberate, documented style choice in the
+      # storage-config code (it makes the embedded source obvious), so we do not
+      # enforce the terser form. Scoped to QF1008 only via text match so the
+      # rest of staticcheck's checks stay active.
+      - linters:
+          - staticcheck
+        text: "QF1008"
 
 formatters:
   enable:
