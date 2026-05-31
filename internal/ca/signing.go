@@ -124,7 +124,7 @@ var subjectRegex = regexp.MustCompile(`^[a-z0-9._-]+$`)
 // NIST 800-53: SI-10 (Information Input Validation)
 func ValidateSubject(subject string) error {
 	if !subjectRegex.MatchString(subject) || strings.Contains(subject, "..") {
-		return fmt.Errorf("invalid subject name %q: must match ^[a-z0-9._-]+$ and must not contain ..", subject)
+		return fmt.Errorf("invalid subject name %q: must match ^[a-z0-9._-]+$ and must not contain path traversal", subject)
 	}
 	return nil
 }
@@ -226,7 +226,7 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 				IsCA bool `asn1:"optional"`
 			}
 			if _, err := asn1.Unmarshal(ext.Value, &bc); err == nil && bc.IsCA {
-				return nil, fmt.Errorf("Found extensions that disallow signing: [2.5.29.19]")
+				return nil, fmt.Errorf("found extensions that disallow signing: [2.5.29.19]")
 			}
 		}
 	}
@@ -254,11 +254,9 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 	// would appear valid after the CA cert expired, breaking chain verification.
 	caRemaining := time.Until(c.CACert.NotAfter)
 	if caRemaining <= 0 {
-		return nil, fmt.Errorf("CA certificate has expired")
+		return nil, fmt.Errorf("ca certificate has expired")
 	}
-	if validity > caRemaining {
-		validity = caRemaining
-	}
+	validity = min(validity, caRemaining)
 
 	// SubjectKeyIdentifier: SHA1 of the SubjectPublicKeyInfo DER (RFC 5280 §4.2.1.2).
 	pubKeyDER, err := x509.MarshalPKIXPublicKey(csr.PublicKey)
@@ -528,7 +526,7 @@ func (c *CA) SaveRequest(ctx context.Context, subject string, csrPEM []byte) (bo
 	// for "node1.example.com", obtaining a certificate for a different identity.
 	// NIST 800-53: IA-5(2) (PKI-Based Authentication), SI-10 (Information Input Validation)
 	if csr.Subject.CommonName != subject {
-		return false, fmt.Errorf("Instance name %s does not match requested key %s",
+		return false, fmt.Errorf("instance name %s does not match requested key %s",
 			csr.Subject.CommonName, subject)
 	}
 

@@ -17,8 +17,8 @@
 package api_test
 
 import (
-	"context"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -794,7 +794,7 @@ var _ = Describe("API Workflow", func() {
 			rr := httptest.NewRecorder()
 			mux.ServeHTTP(rr, req)
 			Expect(rr.Code).To(Equal(http.StatusConflict))
-			Expect(rr.Body.String()).To(ContainSubstring("Found extensions"))
+			Expect(rr.Body.String()).To(ContainSubstring("found extensions"))
 			Expect(rr.Body.String()).To(ContainSubstring("2.5.29.19"))
 		})
 	})

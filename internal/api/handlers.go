@@ -239,7 +239,7 @@ func (s *Server) handleGetCert(w http.ResponseWriter, r *http.Request) {
 
 	// Special case: "ca" returns the CA cert.
 	if subject == "ca" {
-		certPEM, err := s.CA.Storage.GetCACert(r.Context(), )
+		certPEM, err := s.CA.Storage.GetCACert(r.Context())
 		if err != nil {
 			http.Error(w, "CA cert not found", http.StatusNotFound)
 			return
@@ -271,7 +271,7 @@ func (s *Server) handleGetCRL(w http.ResponseWriter, r *http.Request) {
 	// Honor If-Modified-Since.
 	if ims := r.Header.Get("If-Modified-Since"); ims != "" {
 		if t, err := http.ParseTime(ims); err == nil {
-			if mt, err := s.CA.Storage.CRLModTime(r.Context(), ); err == nil && !mt.IsZero() {
+			if mt, err := s.CA.Storage.CRLModTime(r.Context()); err == nil && !mt.IsZero() {
 				if !mt.After(t) {
 					w.WriteHeader(http.StatusNotModified)
 					return
@@ -280,7 +280,7 @@ func (s *Server) handleGetCRL(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	crlPEM, err := s.CA.Storage.GetCRL(r.Context(), )
+	crlPEM, err := s.CA.Storage.GetCRL(r.Context())
 	if err != nil {
 		http.Error(w, "CRL not found", http.StatusNotFound)
 		return
@@ -435,10 +435,7 @@ func (s *Server) signInBatches(ctx context.Context, subjects []string) ca.SignRe
 		SigningErrors: []string{},
 	}
 	for i := 0; i < len(subjects); i += s.SignBatchLimit {
-		end := i + s.SignBatchLimit
-		if end > len(subjects) {
-			end = len(subjects)
-		}
+		end := min(i+s.SignBatchLimit, len(subjects))
 		batch := s.CA.SignMultiple(ctx, subjects[i:end])
 		merged.Signed = append(merged.Signed, batch.Signed...)
 		merged.NoCSR = append(merged.NoCSR, batch.NoCSR...)
@@ -623,12 +620,12 @@ func (s *Server) handleGetStatuses(w http.ResponseWriter, r *http.Request) {
 
 	stateFilter := r.URL.Query().Get("state") // "requested", "signed", "revoked", or ""
 
-	certs, err := s.CA.Storage.ListCerts(r.Context(), )
+	certs, err := s.CA.Storage.ListCerts(r.Context())
 	if err != nil {
 		http.Error(w, "failed to list certs: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	csrs, err := s.CA.Storage.ListCSRs(r.Context(), )
+	csrs, err := s.CA.Storage.ListCSRs(r.Context())
 	if err != nil {
 		http.Error(w, "failed to list CSRs: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -697,7 +694,7 @@ func (s *Server) handleGetExpirations(w http.ResponseWriter, r *http.Request) {
 	certExp := s.CA.CACert.NotAfter.UTC().Format(s.timeFormat())
 
 	crlNextUpdate := ""
-	if crlPEM, err := s.CA.Storage.GetCRL(r.Context(), ); err == nil {
+	if crlPEM, err := s.CA.Storage.GetCRL(r.Context()); err == nil {
 		if block, _ := pem.Decode(crlPEM); block != nil {
 			if crl, err := x509.ParseRevocationList(block.Bytes); err == nil {
 				crlNextUpdate = crl.NextUpdate.UTC().Format(s.timeFormat())
@@ -789,7 +786,7 @@ func (s *Server) handlePostSignAll(w http.ResponseWriter, r *http.Request) {
 	cn := clientCN(r)
 	slog.Debug("POST sign/all", "client", cn)
 
-	pending, err := s.CA.Storage.ListCSRs(r.Context(), )
+	pending, err := s.CA.Storage.ListCSRs(r.Context())
 	if err != nil {
 		http.Error(w, "failed to list pending CSRs: "+err.Error(), http.StatusInternalServerError)
 		return

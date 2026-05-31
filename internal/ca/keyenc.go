@@ -152,7 +152,7 @@ func isEncryptedPEM(block *pem.Block) bool {
 
 // encryptAndMarshalKey encrypts a crypto.Signer private key with the given
 // passphrase and returns PEM-encoded encrypted data.
-func encryptAndMarshalKey(key interface{}, passphrase []byte) ([]byte, error) {
+func encryptAndMarshalKey(key any, passphrase []byte) ([]byte, error) {
 	pkcs8DER, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
 		return nil, fmt.Errorf("marshalling key to PKCS#8: %w", err)

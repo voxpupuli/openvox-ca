@@ -874,7 +874,7 @@ var _ = Describe("CA sign rejects CA:TRUE extension", func() {
 		// Signing must fail with a message that matches Puppet CA's response.
 		_, err = myCA.Sign(context.Background(), "evil-ca")
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("Found extensions"))
+		Expect(err.Error()).To(ContainSubstring("found extensions"))
 		Expect(err.Error()).To(ContainSubstring("2.5.29.19"))
 	})
 })

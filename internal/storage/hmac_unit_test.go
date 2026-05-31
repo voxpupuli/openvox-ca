@@ -45,14 +45,16 @@ func (b *hmacStubBackend) Put(_ context.Context, key string, _ []byte, _ BlobKin
 	}
 	return nil
 }
-func (b *hmacStubBackend) Delete(context.Context, string) error                   { return nil }
-func (b *hmacStubBackend) Exists(context.Context, string) (bool, error)           { return false, nil }
-func (b *hmacStubBackend) List(context.Context, string) ([]string, error)         { return nil, nil }
+func (b *hmacStubBackend) Delete(context.Context, string) error           { return nil }
+func (b *hmacStubBackend) Exists(context.Context, string) (bool, error)   { return false, nil }
+func (b *hmacStubBackend) List(context.Context, string) ([]string, error) { return nil, nil }
 func (b *hmacStubBackend) AppendLine(context.Context, string, []byte, BlobKind) error {
 	return nil
 }
-func (b *hmacStubBackend) ModTime(context.Context, string) (time.Time, error) { return time.Time{}, nil }
-func (b *hmacStubBackend) Close() error                                       { return nil }
+func (b *hmacStubBackend) ModTime(context.Context, string) (time.Time, error) {
+	return time.Time{}, nil
+}
+func (b *hmacStubBackend) Close() error { return nil }
 
 // TestEnsureHMACKeyDoesNotOverwriteOnTransientError guards against the most
 // dangerous failure mode: a transient backend error (network blip, deadline,

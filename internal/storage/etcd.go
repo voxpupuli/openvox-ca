@@ -153,7 +153,7 @@ func NewEtcdBackendFromClient(cli *clientv3.Client, keyPrefix string, requestTim
 // for unknown logical keys or obviously unsafe components (e.g. "..").
 func (b *EtcdBackend) physicalKey(logical string) (string, error) {
 	if strings.Contains(logical, "..") {
-		return "", fmt.Errorf("invalid key %q: must not contain ..", logical)
+		return "", fmt.Errorf("invalid key %q: contains '..'", logical)
 	}
 	if sub, ok := etcdLayout[logical]; ok {
 		return b.prefix + "/" + sub, nil

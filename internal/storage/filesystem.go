@@ -80,7 +80,7 @@ func (b *FilesystemBackend) Path(key string) string {
 
 func (b *FilesystemBackend) pathFor(key string) (string, error) {
 	if strings.Contains(key, "..") {
-		return "", fmt.Errorf("invalid key %q: must not contain ..", key)
+		return "", fmt.Errorf("invalid key %q: contains '..'", key)
 	}
 	if rel, ok := fsLayout[key]; ok {
 		return filepath.Join(b.baseDir, rel), nil

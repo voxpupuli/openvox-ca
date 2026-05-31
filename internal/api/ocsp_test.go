@@ -17,8 +17,8 @@
 package api_test
 
 import (
-	"context"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/base64"
