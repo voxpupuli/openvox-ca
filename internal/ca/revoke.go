@@ -18,8 +18,6 @@
 package ca
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/x509"
@@ -149,42 +147,10 @@ func parseInventoryLine(line string) (serial, subject string, ok bool) {
 }
 
 // findSerialForSubject returns the most-recently issued serial for subject.
-// It reads through storage to honour the inventory mutex.
+// It delegates to storage, which uses an indexed lookup on structured backends
+// and a verified blob scan otherwise.
 func (c *CA) findSerialForSubject(ctx context.Context, subject string) (string, error) {
-	data, err := c.Storage.ReadInventory(ctx)
-	if err != nil {
-		return "", err
-	}
-
-	scanner := bufio.NewScanner(bytes.NewReader(data))
-	last := ""
-	lineNum := 0
-	badLines := 0
-	for scanner.Scan() {
-		lineNum++
-		line := scanner.Text()
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		serial, subj, ok := parseInventoryLine(line)
-		if !ok {
-			badLines++
-			continue
-		}
-		if subj == subject {
-			last = serial
-		}
-	}
-	if badLines > 0 {
-		slog.Warn("Inventory file contains unparseable lines", "count", badLines)
-	}
-	if err := scanner.Err(); err != nil {
-		return "", err
-	}
-	if last == "" {
-		return "", fmt.Errorf("subject %s not found in inventory", subject)
-	}
-	return last, nil
+	return c.Storage.LatestSerialForSubject(ctx, subject)
 }
 
 // IsRevokedSerial reports whether the given serial number appears in the

@@ -169,9 +169,27 @@ func (s *StorageService) InitHMAC(ctx context.Context) error {
 	return s.VerifyInventoryHMAC(ctx, key)
 }
 
+// AppendInventory adds entry (a single inventory.txt line, without a trailing
+// newline) to the inventory. On backends that implement InventoryStore the
+// entry is stored as a structured record and the integrity head is advanced by
+// a hash chain in O(1); otherwise the line is appended to the KeyInventory blob
+// and the whole-blob HMAC is recomputed.
 func (s *StorageService) AppendInventory(ctx context.Context, entry string) error {
 	s.inventoryMu.Lock()
 	defer s.inventoryMu.Unlock()
+
+	if store, ok := s.backend.(InventoryStore); ok {
+		parsed, ok := parseInventoryEntry(entry)
+		if !ok {
+			return fmt.Errorf("malformed inventory entry %q", entry)
+		}
+		var newHead func(prev []byte) []byte
+		if s.hmacKey != nil {
+			key := s.hmacKey
+			newHead = func(prev []byte) []byte { return chainInventoryMAC(key, prev, entry) }
+		}
+		return store.AppendEntry(ctx, parsed, newHead)
+	}
 
 	if err := s.backend.AppendLine(ctx, KeyInventory, []byte(entry+"\n"), BlobPrivate); err != nil {
 		return err
@@ -183,6 +201,24 @@ func (s *StorageService) AppendInventory(ctx context.Context, entry string) erro
 		}
 	}
 	return nil
+}
+
+// LatestSerialForSubject returns the most recently issued serial for subject.
+// On InventoryStore backends this is an indexed lookup; otherwise it scans the
+// inventory blob (verifying its HMAC first, via ReadInventory). Wraps
+// os.ErrNotExist when the subject has no entry.
+func (s *StorageService) LatestSerialForSubject(ctx context.Context, subject string) (string, error) {
+	if store, ok := s.backend.(InventoryStore); ok {
+		s.inventoryMu.RLock()
+		defer s.inventoryMu.RUnlock()
+		return store.LatestSerialForSubject(ctx, subject)
+	}
+
+	data, err := s.ReadInventory(ctx)
+	if err != nil {
+		return "", err
+	}
+	return latestSerialFromBlob(data, subject)
 }
 
 func (s *StorageService) ReadInventory(ctx context.Context) ([]byte, error) {
@@ -513,9 +549,25 @@ func (s *StorageService) EnsureHMACKey(ctx context.Context) ([]byte, error) {
 	return key, nil
 }
 
-// computeInventoryHMAC computes HMAC-SHA256 of the inventory contents.
+// computeInventoryHMAC computes the integrity value for the current inventory.
+// On InventoryStore backends it folds a hash chain over the entries in issuance
+// order (the head MAC); otherwise it is HMAC-SHA256 of the whole blob. An empty
+// inventory yields an empty head in the structured case, mirroring how a
+// missing blob hashes the same as an empty one.
 // Caller must hold inventoryMu.
 func (s *StorageService) computeInventoryHMAC(ctx context.Context, hmacKey []byte) ([]byte, error) {
+	if store, ok := s.backend.(InventoryStore); ok {
+		entries, err := store.Entries(ctx)
+		if err != nil {
+			return nil, err
+		}
+		var head []byte
+		for _, e := range entries {
+			head = chainInventoryMAC(hmacKey, head, canonicalInventoryLine(e))
+		}
+		return head, nil
+	}
+
 	data, err := s.readInventoryForHMAC(ctx)
 	if err != nil {
 		return nil, err
@@ -523,6 +575,69 @@ func (s *StorageService) computeInventoryHMAC(ctx context.Context, hmacKey []byt
 	mac := hmac.New(sha256.New, hmacKey)
 	mac.Write(data)
 	return mac.Sum(nil), nil
+}
+
+// chainInventoryMAC advances the inventory hash chain by one entry:
+//
+//	mac_i = HMAC-SHA256(key, mac_{i-1} ‖ line_i)
+//
+// where line_i is the canonical inventory.txt line (no trailing newline) and
+// prev is the previous head (nil/empty for the first entry).
+func chainInventoryMAC(key, prev []byte, line string) []byte {
+	mac := hmac.New(sha256.New, key)
+	mac.Write(prev)
+	mac.Write([]byte(line))
+	return mac.Sum(nil)
+}
+
+// canonicalInventoryLine renders e to its inventory.txt line (without the
+// trailing newline). It is the single source of truth for the on-disk blob
+// format and the input to the integrity hash chain, so the two cannot drift.
+func canonicalInventoryLine(e InventoryEntry) string {
+	return fmt.Sprintf("%s %s %s /%s", e.Serial, e.NotBefore, e.NotAfter, e.Subject)
+}
+
+// parseInventoryEntry parses a single inventory.txt line into an InventoryEntry.
+// The format is "SERIAL NOT_BEFORE NOT_AFTER /SUBJECT"; the leading "/" on the
+// subject is stripped. Returns ok=false for blank or malformed lines.
+func parseInventoryEntry(line string) (InventoryEntry, bool) {
+	fields := strings.Fields(line)
+	if len(fields) < 4 {
+		return InventoryEntry{}, false
+	}
+	return InventoryEntry{
+		Serial:    fields[0],
+		NotBefore: fields[1],
+		NotAfter:  fields[2],
+		Subject:   strings.TrimPrefix(fields[3], "/"),
+	}, true
+}
+
+// latestSerialFromBlob scans a rendered inventory blob and returns the serial
+// of the last entry matching subject. Wraps os.ErrNotExist when none match.
+func latestSerialFromBlob(data []byte, subject string) (string, error) {
+	last := ""
+	badLines := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		e, ok := parseInventoryEntry(line)
+		if !ok {
+			badLines++
+			continue
+		}
+		if e.Subject == subject {
+			last = e.Serial
+		}
+	}
+	if badLines > 0 {
+		slog.Warn("Inventory contains unparseable lines", "count", badLines)
+	}
+	if last == "" {
+		return "", fmt.Errorf("subject %s not found in inventory: %w", subject, fs.ErrNotExist)
+	}
+	return last, nil
 }
 
 // UpdateInventoryHMAC recomputes and writes the HMAC for the current inventory.

@@ -138,6 +138,50 @@ type PathProvider interface {
 	BaseDir() string
 }
 
+// InventoryEntry is one issued-certificate record in the inventory. NotBefore
+// and NotAfter are stored verbatim as the formatted strings the signing path
+// produces, so that rendering entries back to the inventory.txt line is
+// byte-identical to the legacy append-only blob.
+type InventoryEntry struct {
+	Serial    string
+	NotBefore string
+	NotAfter  string
+	Subject   string
+}
+
+// InventoryStore is an optional Backend capability for storing the certificate
+// inventory as structured records (e.g. a SQL table) rather than the single
+// append-only KeyInventory blob. Backends that implement it let StorageService
+// skip the render → scan → reparse round-trip for appends and subject lookups,
+// and verify integrity with a hash chain instead of re-hashing the whole blob.
+//
+// Backends that do not implement it keep using the KeyInventory blob via
+// AppendLine/Get; StorageService selects the path with a type assertion, the
+// same way it probes Locker.
+//
+// A backend that implements InventoryStore must still serve the KeyInventory
+// logical key through Get/Put/Exists (rendering rows to inventory.txt text and
+// parsing text back to rows) so that Migrate and the OCSP index build remain
+// backend-agnostic.
+type InventoryStore interface {
+	// AppendEntry inserts e and advances the integrity head atomically. newHead
+	// computes the chained head MAC from the previous head (nil when the
+	// inventory is empty); the backend MUST invoke it inside the same
+	// transaction or lock that serialises appends so the chain cannot fork
+	// under concurrent appenders. A nil newHead means integrity is disabled
+	// (no HMAC key configured): the backend appends the entry and leaves the
+	// stored head untouched.
+	AppendEntry(ctx context.Context, e InventoryEntry, newHead func(prev []byte) []byte) error
+
+	// Entries returns every entry in issuance order, for the OCSP index build
+	// and for chain verification.
+	Entries(ctx context.Context) ([]InventoryEntry, error)
+
+	// LatestSerialForSubject returns the most recently issued serial for
+	// subject. Wraps os.ErrNotExist when the subject has no entry.
+	LatestSerialForSubject(ctx context.Context, subject string) (string, error)
+}
+
 // Locker is an optional Backend capability that provides a cross-node
 // distributed mutex. Backends implement it when they have a natural way
 // to coordinate a lock across replicas (etcd's concurrency.Mutex, Redis
