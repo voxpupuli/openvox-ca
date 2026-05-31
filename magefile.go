@@ -51,7 +51,7 @@ import (
 // -- Namespaces ----------------------------------------------------------------
 
 type Build mg.Namespace // build:all  build:fips  build:dist
-type Test mg.Namespace  // test:unit  test:integcompose  test:integcomposefips  test:loadcompose  test:bench  test:puppet  test:puppetfips  test:migration  test:backendsRedis
+type Test mg.Namespace  // test:unit  test:integcompose  test:integcomposefips  test:loadcompose  test:bench  test:puppet  test:puppetfips  test:migration  test:backendsRedis  test:backendsEtcd
 type Dev mg.Namespace   // dev:check  dev:tidy    dev:clean  dev:container
 
 // -- Helpers ------------------------------------------------------------------─
@@ -498,6 +498,14 @@ func (Test) BackendsMySQL() error {
 		map[string]string{"PUPPET_CA_TEST_MYSQL_DSN": dsn},
 		"go", "test", "-tags", "mysql_integration", "-count=1", "./internal/storage/...",
 	)
+}
+
+// BackendsEtcd runs the etcd-backend Go integration suite (build tag
+// etcd_integration). The suite boots an in-process embedded etcd, so unlike the
+// Redis suite it needs no external service, compose stack, or network pulls.
+func (Test) BackendsEtcd() error {
+	fmt.Println("Running etcd-backend integration tests...")
+	return sh.RunV("go", "test", "-tags", "etcd_integration", "-count=1", "./internal/storage/...")
 }
 
 // PuppetFIPS is like Puppet but compiles with GOEXPERIMENT=boringcrypto so the

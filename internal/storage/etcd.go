@@ -23,6 +23,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io/fs"
+	"math/rand/v2"
 	"strings"
 	"sync"
 	"time"
@@ -304,7 +305,7 @@ func (b *EtcdBackend) AppendLine(ctx context.Context, key string, data []byte, _
 		return err
 	}
 
-	const maxRetries = 8
+	const maxRetries = 16
 	for attempt := range maxRetries {
 		getCtx, cancel := b.callCtx(ctx)
 		resp, err := b.client.Get(getCtx, phys)
@@ -340,12 +341,18 @@ func (b *EtcdBackend) AppendLine(ctx context.Context, key string, data []byte, _
 		if txnResp.Succeeded {
 			return nil
 		}
-		// Another writer won the race; back off briefly and retry —
-		// honour the caller's cancellation rather than spinning past it.
+		// Another writer won the race; back off and retry. The sleep is a
+		// growing window with full jitter: jitter decorrelates two writers
+		// that would otherwise retry in lock-step on the same schedule and
+		// keep colliding (the cause of spurious "too many concurrent writers"
+		// under load). Honour the caller's cancellation rather than spinning
+		// past it.
+		window := time.Duration(attempt+1) * 10 * time.Millisecond
+		backoff := time.Duration(rand.Int64N(int64(window))) //nolint:gosec // jitter, not security-sensitive
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(time.Duration(attempt+1) * 10 * time.Millisecond):
+		case <-time.After(backoff):
 		}
 	}
 	return fmt.Errorf("append to %q failed: too many concurrent writers", key)
