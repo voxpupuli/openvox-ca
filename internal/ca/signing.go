@@ -588,3 +588,54 @@ func (c *CA) SaveRequest(ctx context.Context, subject string, csrPEM []byte) (bo
 	}
 	return autosigned, nil
 }
+
+// Renew issues a replacement certificate for subject from the provided CSR,
+// bypassing the pending-CSR queue and autosign check. The existing certificate
+// (if any) is replaced atomically under the per-subject distributed lock.
+//
+// The caller is responsible for verifying that the CSR CN matches the
+// authenticated client's CN before calling Renew; this method enforces that
+// invariant a second time as defence-in-depth.
+func (c *CA) Renew(ctx context.Context, subject string, csrPEM []byte) ([]byte, error) {
+	if err := ValidateSubject(subject); err != nil {
+		return nil, err
+	}
+
+	// Validate and parse the CSR before acquiring any lock.
+	block, _ := pem.Decode(csrPEM)
+	if block == nil {
+		return nil, fmt.Errorf("failed to decode CSR PEM for %s", subject)
+	}
+	csr, err := x509.ParseCertificateRequest(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse CSR for %s: %w", subject, err)
+	}
+	// SECURITY: Verify the CSR's proof-of-possession signature.
+	// NIST 800-53: IA-5(2) (PKI-Based Authentication)
+	if err := csr.CheckSignature(); err != nil {
+		return nil, fmt.Errorf("invalid CSR signature for %s: %w", subject, err)
+	}
+	// SECURITY: CN must match subject — defence-in-depth; handler also checks.
+	// NIST 800-53: IA-5(2) (PKI-Based Authentication), SI-10 (Information Input Validation)
+	if csr.Subject.CommonName != subject {
+		return nil, fmt.Errorf("CSR CN %q does not match subject %q", csr.Subject.CommonName, subject)
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, lockTimeout)
+	defer cancel()
+	var out []byte
+	err = c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if err := c.Storage.SaveCSR(ctx, subject, csrPEM); err != nil {
+			return fmt.Errorf("saving renewal CSR: %w", err)
+		}
+		certPEM, err := c.signWithDuration(ctx, subject, 0)
+		if err != nil {
+			return err
+		}
+		out = certPEM
+		return nil
+	})
+	return out, err
+}

@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Trevor Vaughan
+// Copyright (C) 2026 Chris Boot
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -190,6 +191,12 @@ func lookupTier(method, path string, cfg *AuthConfig) authTier {
 	// Self or admin reads.
 	case method == "GET" && strings.HasPrefix(p, "/certificate_request/"):
 		return tierSelfOrAdmin
+
+	// Certificate renewal: any CA-signed client cert may renew itself.
+	// The handler enforces that the CSR CN matches the authenticated client CN,
+	// so an agent can only renew its own certificate.
+	case method == "POST" && p == "/certificate_renewal":
+		return tierAnyClient
 
 	// Admin only: all other operations.
 	default:

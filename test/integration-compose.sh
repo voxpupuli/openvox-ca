@@ -1962,6 +1962,148 @@ kill "$_MIG_PID" 2>/dev/null; wait "$_MIG_PID" 2>/dev/null || true
 rm -rf "$_MIG_DIR" "$_MIG_OLD"
 
 # ═════════════════════════════════════════════════════════════════════════════
+# Group 21 -- POST /certificate_renewal (mTLS)
+#
+#   Starts a short-lived local puppet-ca on port 8145.
+#   Phase 1 (loopback HTTP, autosign=true): bootstrap CA, generate a TLS
+#   server cert, a node client cert, and a second node cert for CN-mismatch
+#   testing.
+#   Phase 2 (TLS): verify the renewal endpoint.
+# ═════════════════════════════════════════════════════════════════════════════
+printf '\n# Group 21 -- POST /certificate_renewal (mTLS)\n'
+
+_REN_PORT=8145
+_REN_DIR=$(mktemp -d)
+_REN_PID=""
+_REN_CA_URL="http://127.0.0.1:${_REN_PORT}"
+_REN_NODE="ren-node-${RUN_ID}"
+_REN_OTHER="ren-other-${RUN_ID}"
+
+_wait_ren_ca() {
+    local url="$1" n=60
+    while [ "$n" -gt 0 ]; do
+        curl -sfk "${url}/healthz/ready" -o /dev/null 2>/dev/null && return 0
+        sleep 0.3
+        n=$(( n - 1 ))
+    done
+    return 1
+}
+
+# --- Phase 1: loopback HTTP, autosign=true, generate all certs ---------------
+
+puppet-ca-ctl setup --cadir "$_REN_DIR" --hostname renewal-test-ca 2>/dev/null
+
+puppet-ca --cadir "$_REN_DIR" \
+    --host 127.0.0.1 --port "$_REN_PORT" \
+    --no-tls-required \
+    --autosign-config=true \
+    >/dev/null 2>&1 &
+_REN_PID=$!
+
+if _wait_ren_ca "$_REN_CA_URL"; then
+    pass "renewal: Phase 1 CA started (loopback HTTP, autosign=true)"
+
+    # TLS server cert (key saved to $_REN_DIR/renewal-test-ca_key.pem)
+    puppet-ca-ctl --server-url "$_REN_CA_URL" \
+        generate --certname renewal-test-ca --out-dir "$_REN_DIR" \
+        > "$_REN_DIR/tls-server.crt" 2>/dev/null
+
+    # Node client cert: key at $WORK_DIR/${_REN_NODE}_key.pem, cert to stdout
+    puppet-ca-ctl --server-url "$_REN_CA_URL" \
+        generate --certname "$_REN_NODE" --out-dir "$WORK_DIR" \
+        > "$WORK_DIR/ren-node.crt" 2>/dev/null
+
+    # Second node cert for CN-mismatch testing
+    puppet-ca-ctl --server-url "$_REN_CA_URL" \
+        generate --certname "$_REN_OTHER" --out-dir "$WORK_DIR" \
+        > "$WORK_DIR/ren-other.crt" 2>/dev/null
+else
+    fail "renewal: Phase 1 CA started (loopback HTTP, autosign=true)" \
+        "timed out waiting for health"
+fi
+
+kill "$_REN_PID" 2>/dev/null; wait "$_REN_PID" 2>/dev/null || true
+_REN_PID=""
+
+# --- Phase 2: TLS, exercise the renewal endpoint -----------------------------
+
+puppet-ca --cadir "$_REN_DIR" \
+    --host 127.0.0.1 --port "$_REN_PORT" \
+    --tls-cert "$_REN_DIR/tls-server.crt" \
+    --tls-key  "$_REN_DIR/renewal-test-ca_key.pem" \
+    >/dev/null 2>&1 &
+_REN_PID=$!
+
+if _wait_ren_ca "https://127.0.0.1:${_REN_PORT}"; then
+    pass "renewal: Phase 2 CA started (TLS)"
+
+    # Build a renewal CSR for $_REN_NODE (different key from the original — the
+    # renewal sends a new public key; make_csr reuses $WORK_DIR/test.key).
+    make_csr "$_REN_NODE" "$WORK_DIR/ren-renewal.csr"
+
+    # Happy path: node cert + matching CSR CN → 200 with PEM certificate body
+    _ren_body=$(curl -sk \
+        --cert "$WORK_DIR/ren-node.crt" \
+        --key  "$WORK_DIR/${_REN_NODE}_key.pem" \
+        -X POST -H "Content-Type: text/plain" \
+        --data-binary @"$WORK_DIR/ren-renewal.csr" \
+        "https://127.0.0.1:${_REN_PORT}/puppet-ca/v1/certificate_renewal") || true
+    echo "$_ren_body" | grep -qF "BEGIN CERTIFICATE" \
+        && pass "renewal: POST /certificate_renewal returns PEM certificate" \
+        || fail "renewal: POST /certificate_renewal returns PEM certificate" \
+               "body: $(echo "$_ren_body" | head -3)"
+
+    # CN mismatch: ren-other authenticates but CSR is for ren-node → 403
+    assert_http 403 "renewal: CN mismatch returns 403" \
+        -sk \
+        --cert "$WORK_DIR/ren-other.crt" \
+        --key  "$WORK_DIR/${_REN_OTHER}_key.pem" \
+        -X POST -H "Content-Type: text/plain" \
+        --data-binary @"$WORK_DIR/ren-renewal.csr" \
+        "https://127.0.0.1:${_REN_PORT}/puppet-ca/v1/certificate_renewal"
+
+    # No client cert → 403 (RequestClientCert allows no cert, handler enforces)
+    assert_http 403 "renewal: no client cert returns 403" \
+        -sk \
+        -X POST -H "Content-Type: text/plain" \
+        --data-binary @"$WORK_DIR/ren-renewal.csr" \
+        "https://127.0.0.1:${_REN_PORT}/puppet-ca/v1/certificate_renewal"
+
+    # Invalid CSR body → 400
+    assert_http 400 "renewal: invalid CSR body returns 400" \
+        -sk \
+        --cert "$WORK_DIR/ren-node.crt" \
+        --key  "$WORK_DIR/${_REN_NODE}_key.pem" \
+        -X POST -H "Content-Type: text/plain" \
+        -d "this is not a csr" \
+        "https://127.0.0.1:${_REN_PORT}/puppet-ca/v1/certificate_renewal"
+
+    # Bare-path alias /certificate_renewal (without /puppet-ca/v1) also works
+    make_csr "$_REN_NODE" "$WORK_DIR/ren-renewal2.csr"
+    assert_http 200 "renewal: bare-path /certificate_renewal returns 200" \
+        -sk \
+        --cert "$WORK_DIR/ren-node.crt" \
+        --key  "$WORK_DIR/${_REN_NODE}_key.pem" \
+        -X POST -H "Content-Type: text/plain" \
+        --data-binary @"$WORK_DIR/ren-renewal2.csr" \
+        "https://127.0.0.1:${_REN_PORT}/certificate_renewal"
+else
+    fail "renewal: Phase 2 CA started (TLS)" "timed out waiting for health"
+    for _skip in \
+        "renewal: POST /certificate_renewal returns PEM certificate" \
+        "renewal: CN mismatch returns 403" \
+        "renewal: no client cert returns 403" \
+        "renewal: invalid CSR body returns 400" \
+        "renewal: bare-path /certificate_renewal returns 200"
+    do
+        fail "$_skip" "SKIP: CA did not start"
+    done
+fi
+
+kill "$_REN_PID" 2>/dev/null; wait "$_REN_PID" 2>/dev/null || true
+rm -rf "$_REN_DIR"
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Results
 # ═════════════════════════════════════════════════════════════════════════════
 printf '\n1..%d\n' "$T"

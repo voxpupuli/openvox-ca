@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
@@ -1145,6 +1146,83 @@ var _ = Describe("API Workflow", func() {
 
 		It("returns 400 for malformed JSON", func() {
 			req := httptest.NewRequest("PUT", "/clean", bytes.NewReader([]byte("{bad")))
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusBadRequest))
+		})
+	})
+
+	Context("POST /certificate_renewal", func() {
+		var (
+			subject    string
+			clientCert *x509.Certificate
+		)
+
+		BeforeEach(func() {
+			subject = "renew-node"
+
+			// Submit and sign a certificate for the subject.
+			csrPEM, err := testutil.GenerateCSR(subject)
+			Expect(err).NotTo(HaveOccurred())
+			mux.ServeHTTP(httptest.NewRecorder(),
+				httptest.NewRequest("PUT", "/certificate_request/"+subject, bytes.NewReader(csrPEM)))
+			body, _ := json.Marshal(api.PutStatusBody{DesiredState: "signed"})
+			mux.ServeHTTP(httptest.NewRecorder(),
+				httptest.NewRequest("PUT", "/certificate_status/"+subject, bytes.NewReader(body)))
+
+			// Retrieve the signed cert so we can simulate mTLS with it.
+			certPEM, err := myCA.Storage.GetCert(context.Background(), subject)
+			Expect(err).NotTo(HaveOccurred())
+			block, _ := pem.Decode(certPEM)
+			Expect(block).NotTo(BeNil())
+			clientCert, err = x509.ParseCertificate(block.Bytes)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should renew the certificate and return PEM", func() {
+			renewCSR, err := testutil.GenerateCSR(subject)
+			Expect(err).NotTo(HaveOccurred())
+			req := httptest.NewRequest("POST", "/certificate_renewal", bytes.NewReader(renewCSR))
+			req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{clientCert}}
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusOK))
+			Expect(rr.Body.String()).To(ContainSubstring("CERTIFICATE"))
+		})
+
+		It("should also work via the /puppet-ca/v1/certificate_renewal path", func() {
+			renewCSR, err := testutil.GenerateCSR(subject)
+			Expect(err).NotTo(HaveOccurred())
+			req := httptest.NewRequest("POST", "/puppet-ca/v1/certificate_renewal", bytes.NewReader(renewCSR))
+			req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{clientCert}}
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusOK))
+		})
+
+		It("should return 403 when no client certificate is presented", func() {
+			renewCSR, err := testutil.GenerateCSR(subject)
+			Expect(err).NotTo(HaveOccurred())
+			req := httptest.NewRequest("POST", "/certificate_renewal", bytes.NewReader(renewCSR))
+			// No r.TLS — simulates plain HTTP or missing client cert.
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusForbidden))
+		})
+
+		It("should return 403 when the CSR CN does not match the client CN", func() {
+			mismatchCSR, err := testutil.GenerateCSR("other-node")
+			Expect(err).NotTo(HaveOccurred())
+			req := httptest.NewRequest("POST", "/certificate_renewal", bytes.NewReader(mismatchCSR))
+			req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{clientCert}}
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusForbidden))
+		})
+
+		It("should return 400 for an invalid CSR body", func() {
+			req := httptest.NewRequest("POST", "/certificate_renewal", bytes.NewReader([]byte("not a csr")))
+			req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{clientCert}}
 			rr := httptest.NewRecorder()
 			mux.ServeHTTP(rr, req)
 			Expect(rr.Code).To(Equal(http.StatusBadRequest))

@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Trevor Vaughan
+// Copyright (C) 2026 Chris Boot
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -100,6 +101,7 @@ func (s *Server) Routes() http.Handler {
 		{"POST", "/sign/all", s.handlePostSignAll},
 		{"PUT", "/clean", s.handlePutClean},
 		{"POST", "/generate/{subject}", s.handlePostGenerate},
+		{"POST", "/certificate_renewal", s.handlePostCertificateRenewal},
 	}
 
 	prefixes := []string{"", "/puppet-ca/v1"}
@@ -723,6 +725,52 @@ func (s *Server) handlePostSign(w http.ResponseWriter, r *http.Request) {
 	result := s.signInBatches(r.Context(), body.Certnames)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
+}
+
+// --- Certificate renewal ---
+
+func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Request) {
+	// Renewal requires an authenticated client cert to establish identity.
+	cn := clientCN(r)
+	if cn == "" {
+		http.Error(w, "client certificate required for renewal", http.StatusForbidden)
+		return
+	}
+	slog.Debug("POST certificate_renewal", "client", cn)
+
+	// SECURITY: Limit body to 1 MiB to prevent memory exhaustion.
+	// NIST 800-53: SC-5 (Denial-of-Service Protection)
+	csrPEM, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, "failed to read body: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	csr, err := parseCSR(csrPEM)
+	if err != nil {
+		http.Error(w, "invalid CSR: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// SECURITY: CSR CN must match the authenticated client CN. Without this
+	// check an agent could renew another agent's certificate by sending a CSR
+	// with a different CN while authenticating as itself.
+	// NIST 800-53: IA-5(2) (PKI-Based Authentication)
+	if csr.Subject.CommonName != cn {
+		slog.Warn("Renewal rejected: CN mismatch", "client_cn", cn, "csr_cn", csr.Subject.CommonName)
+		http.Error(w, "CSR CN does not match authenticated client CN", http.StatusForbidden)
+		return
+	}
+
+	certPEM, err := s.CA.Renew(r.Context(), cn, csrPEM)
+	if err != nil {
+		slog.Warn("Renewal failed", "subject", cn, "error", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain")
+	w.Write(certPEM)
 }
 
 func (s *Server) handlePostSignAll(w http.ResponseWriter, r *http.Request) {
