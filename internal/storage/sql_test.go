@@ -185,7 +185,6 @@ func TestSQLiteAppendLineConcurrent(t *testing.T) {
 		if w%2 == 1 {
 			backend = b
 		}
-		w := w
 		go func() {
 			defer wg.Done()
 			for i := 0; i < perWriter; i++ {

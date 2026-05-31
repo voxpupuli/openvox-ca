@@ -795,7 +795,8 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 	// NIST 800-53: SC-5 (Denial-of-Service Protection)
 	csrPEM, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
-		http.Error(w, "failed to read body: "+err.Error(), http.StatusInternalServerError)
+		slog.Error("read renewal CSR body failed", "client", cn, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
@@ -818,7 +819,7 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 	certPEM, err := s.CA.Renew(r.Context(), cn, csrPEM)
 	if err != nil {
 		slog.Warn("Renewal failed", "subject", cn, "error", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
