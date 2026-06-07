@@ -316,6 +316,32 @@ func newRevokeCmd() *cobra.Command {
 	return cmd
 }
 
+func newReissueCRLCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:          "reissue-crl",
+		Short:        "Re-sign the CRL with a fresh validity window (preserves all revocations)",
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := newClient()
+			if err != nil {
+				return err
+			}
+
+			path := "/puppet-ca/v1/certificate_revocation_list/ca"
+			code, respBody, err := c.put(path, nil)
+			if err != nil {
+				return err
+			}
+			if err := checkHTTP(code, respBody, "PUT", path); err != nil {
+				return err
+			}
+			fmt.Println("Reissued CRL")
+			return nil
+		},
+	}
+	return cmd
+}
+
 func newCleanCmd() *cobra.Command {
 	var certname string
 	cmd := &cobra.Command{
@@ -541,6 +567,7 @@ Global flags must be specified before the subcommand.`,
 		newListCmd(),
 		newSignCmd(),
 		newRevokeCmd(),
+		newReissueCRLCmd(),
 		newCleanCmd(),
 		newGenerateCmd(),
 		newSetupCmd(),

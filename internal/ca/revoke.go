@@ -19,7 +19,6 @@ package ca
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
@@ -94,36 +93,9 @@ func (c *CA) revokeLocked(ctx context.Context, subject string) error {
 	revokedCerts := crl.RevokedCertificateEntries
 	revokedCerts = append(revokedCerts, newRevoked)
 
-	// Increment CRL Number
-	nextNum := big.NewInt(1)
-	if crl.Number != nil {
-		nextNum.Add(crl.Number, big.NewInt(1))
+	if err := c.signCRLLocked(ctx, crl.Number, revokedCerts); err != nil {
+		return err
 	}
-
-	template := &x509.RevocationList{
-		Number:                    nextNum,
-		RevokedCertificateEntries: revokedCerts,
-		ThisUpdate:                time.Now(),
-		NextUpdate:                time.Now().Add(c.crlValidity()),
-	}
-
-	crlBytes, err := x509.CreateRevocationList(rand.Reader, template, c.CACert, c.CAKey)
-	if err != nil {
-		return fmt.Errorf("failed to sign CRL: %w", err)
-	}
-
-	newCRLPEM := pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlBytes})
-	if err := c.Storage.UpdateCRL(ctx, newCRLPEM); err != nil {
-		return fmt.Errorf("failed to write CRL: %w", err)
-	}
-
-	// Update the in-memory CRL cache so auth checks use the new CRL
-	// immediately without reading from disk.
-	parsedCRL, err := x509.ParseRevocationList(crlBytes)
-	if err != nil {
-		return fmt.Errorf("failed to parse new CRL for cache: %w", err)
-	}
-	c.cachedCRL = parsedCRL
 
 	// Invalidate the cached OCSP response for this serial so the next query
 	// returns the correct Revoked status instead of a stale Good response.

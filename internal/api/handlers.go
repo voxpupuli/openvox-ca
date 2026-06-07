@@ -104,6 +104,7 @@ func (s *Server) Routes() http.Handler {
 		{"DELETE", "/certificate_request/{subject}", s.handleDeleteRequest},
 		{"GET", "/certificate/{subject}", s.handleGetCert},
 		{"GET", "/certificate_revocation_list/ca", s.handleGetCRL},
+		{"PUT", "/certificate_revocation_list/ca", s.handleReissueCRL},
 		{"POST", "/ocsp", s.handleOCSP},
 		{"GET", "/ocsp/{request}", s.handleOCSP},
 		{"GET", "/expirations", s.handleGetExpirations},
@@ -292,6 +293,29 @@ func (s *Server) handleGetCRL(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+	}
+
+	crlPEM, err := s.CA.Storage.GetCRL(r.Context())
+	if err != nil {
+		http.Error(w, "CRL not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain")
+	w.Write(crlPEM)
+}
+
+// handleReissueCRL re-signs the CRL with a fresh validity window, preserving
+// all existing revocation entries. Admin-only (enforced by the auth middleware,
+// which defaults non-GET methods on this path to tierAdminOnly). This lets an
+// operator refresh a CRL whose NextUpdate has lapsed (or is about to) without
+// having to revoke a certificate.
+func (s *Server) handleReissueCRL(w http.ResponseWriter, r *http.Request) {
+	slog.Debug("PUT certificate_revocation_list/ca", "client", clientCN(r))
+
+	if err := s.CA.ReissueCRL(r.Context()); err != nil {
+		slog.Warn("CRL reissue failed", "error", err)
+		http.Error(w, "failed to reissue CRL", http.StatusInternalServerError)
+		return
 	}
 
 	crlPEM, err := s.CA.Storage.GetCRL(r.Context())

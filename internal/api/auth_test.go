@@ -613,6 +613,23 @@ var _ = Describe("Auth Middleware", func() {
 			mux.ServeHTTP(rr, req)
 			Expect(rr.Code).To(Equal(http.StatusForbidden))
 		})
+
+		It("returns 403 for PUT /certificate_revocation_list/ca (reissue) with no cert", func() {
+			req := httptest.NewRequest("PUT", "/certificate_revocation_list/ca", nil)
+			req.TLS = &tls.ConnectionState{}
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusForbidden))
+		})
+
+		It("returns 403 for PUT /certificate_revocation_list/ca (reissue) with a valid non-admin cert", func() {
+			clientCert := issueClientCert("regular-node", caCert, caKey)
+			req := httptest.NewRequest("PUT", "/certificate_revocation_list/ca", nil)
+			req = withClientCert(req, clientCert)
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusForbidden))
+		})
 	})
 
 	// --- Prefixed paths honour the same tier rules ---
@@ -1027,6 +1044,7 @@ var _ = Describe("lookupTier classification", func() {
 		Entry("public certificate fetch (prefixed)", "GET", "/puppet-ca/v1/certificate/node1", "node1", "public"),
 		Entry("public CSR submission", "PUT", "/certificate_request/node1", "node1", "public"),
 		Entry("public CRL fetch", "GET", "/certificate_revocation_list/ca", "", "public"),
+		Entry("CRL reissue is admin-only", "PUT", "/certificate_revocation_list/ca", "", "adminOnly"),
 		// certificate_status defaults to any-CA-signed-client when not public.
 		Entry("status read requires any client", "GET", "/certificate_status/node1", "node1", "anyClient"),
 		// Self-or-admin read of a pending CSR.

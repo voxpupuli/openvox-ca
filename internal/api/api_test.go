@@ -90,6 +90,33 @@ var _ = Describe("API Workflow", func() {
 		os.RemoveAll(tmpDir)
 	})
 
+	Context("CRL reissue endpoint", func() {
+		parseCRL := func(pemBytes []byte) *x509.RevocationList {
+			block, _ := pem.Decode(pemBytes)
+			Expect(block).NotTo(BeNil())
+			crl, err := x509.ParseRevocationList(block.Bytes)
+			Expect(err).NotTo(HaveOccurred())
+			return crl
+		}
+
+		It("re-signs the CRL on PUT and returns the fresh CRL", func() {
+			getReq := httptest.NewRequest("GET", "/certificate_revocation_list/ca", nil)
+			getRR := httptest.NewRecorder()
+			mux.ServeHTTP(getRR, getReq)
+			Expect(getRR.Code).To(Equal(http.StatusOK))
+			before := parseCRL(getRR.Body.Bytes())
+
+			putReq := httptest.NewRequest("PUT", "/certificate_revocation_list/ca", nil)
+			putRR := httptest.NewRecorder()
+			mux.ServeHTTP(putRR, putReq)
+			Expect(putRR.Code).To(Equal(http.StatusOK))
+
+			after := parseCRL(putRR.Body.Bytes())
+			Expect(after.Number.Cmp(before.Number)).To(Equal(1))
+			Expect(after.NextUpdate).To(BeTemporally(">", time.Now()))
+		})
+	})
+
 	Context("Certificate Request", func() {
 		var (
 			subject string

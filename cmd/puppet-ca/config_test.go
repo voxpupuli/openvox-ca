@@ -52,6 +52,9 @@ var serverEnvVars = []string{
 	"PUPPET_CA_CA_VALIDITY_DAYS",
 	"PUPPET_CA_LEAF_VALIDITY_DAYS",
 	"PUPPET_CA_SHUTDOWN_TIMEOUT_SEC",
+	"PUPPET_CA_DISABLE_CRL_REFRESH",
+	"PUPPET_CA_CRL_REFRESH_INTERVAL_SEC",
+	"PUPPET_CA_CRL_REFRESH_BEFORE_SEC",
 }
 
 // clearServerEnv unsets all PUPPET_CA_* vars and restores them after the test.
@@ -191,6 +194,45 @@ func TestShutdownDrainRejectsNonPositive(t *testing.T) {
 	}
 	if got := cfg.shutdownDrain(); got != defaultShutdownDrain {
 		t.Errorf("shutdownDrain() with 0 = %v; want default %v", got, defaultShutdownDrain)
+	}
+}
+
+// --- crlRefreshInterval ---
+
+func TestCRLRefreshIntervalDefault(t *testing.T) {
+	clearServerEnv(t)
+	cfg, err := loadServerConfig("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cfg.crlRefreshInterval(); got != defaultCRLRefreshInterval {
+		t.Errorf("crlRefreshInterval() = %v; want default %v", got, defaultCRLRefreshInterval)
+	}
+}
+
+func TestCRLRefreshIntervalEnvOverride(t *testing.T) {
+	clearServerEnv(t)
+	t.Setenv("PUPPET_CA_CRL_REFRESH_INTERVAL_SEC", "900")
+
+	cfg, err := loadServerConfig("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got, want := cfg.crlRefreshInterval(), 900*time.Second; got != want {
+		t.Errorf("crlRefreshInterval() = %v; want %v", got, want)
+	}
+}
+
+func TestCRLRefreshIntervalRejectsNonPositive(t *testing.T) {
+	clearServerEnv(t)
+	t.Setenv("PUPPET_CA_CRL_REFRESH_INTERVAL_SEC", "0")
+
+	cfg, err := loadServerConfig("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cfg.crlRefreshInterval(); got != defaultCRLRefreshInterval {
+		t.Errorf("crlRefreshInterval() with 0 = %v; want default %v", got, defaultCRLRefreshInterval)
 	}
 }
 
@@ -489,6 +531,21 @@ func TestApplyServerEnvEachVar(t *testing.T) {
 			name: "LEAF_VALIDITY_DAYS", envKey: "PUPPET_CA_LEAF_VALIDITY_DAYS", envVal: "1825",
 			check: func(c *serverConfig) bool { return c.LeafValidityDays == 1825 },
 			desc:  "LeafValidityDays",
+		},
+		{
+			name: "DISABLE_CRL_REFRESH", envKey: "PUPPET_CA_DISABLE_CRL_REFRESH", envVal: "true",
+			check: func(c *serverConfig) bool { return c.DisableCRLRefresh },
+			desc:  "DisableCRLRefresh",
+		},
+		{
+			name: "CRL_REFRESH_INTERVAL_SEC", envKey: "PUPPET_CA_CRL_REFRESH_INTERVAL_SEC", envVal: "900",
+			check: func(c *serverConfig) bool { return c.CRLRefreshIntervalSec == 900 },
+			desc:  "CRLRefreshIntervalSec",
+		},
+		{
+			name: "CRL_REFRESH_BEFORE_SEC", envKey: "PUPPET_CA_CRL_REFRESH_BEFORE_SEC", envVal: "86400",
+			check: func(c *serverConfig) bool { return c.CRLRefreshBeforeSec == 86400 },
+			desc:  "CRLRefreshBeforeSec",
 		},
 	}
 

@@ -27,6 +27,7 @@ A drop-in replacement for Puppet Server's built-in CA, written in Go. It impleme
 - **Random serial numbers:** every issued leaf certificate gets a cryptographically random 128-bit serial (CA/Browser Forum guidance)
 - **CRL Distribution Points:** optionally embed a CRL URL in every issued certificate (`--crl-url`) so verifiers can automatically fetch the CRL
 - **Configurable CRL validity:** control how long each published CRL is valid (`crl_validity_days`)
+- **Automatic CRL refresh:** a background job re-signs the CRL before its validity lapses, so a low-churn CA never serves an expired CRL; safe across replicas (serialised on the shared CRL lock) and tunable or disablable. Operators can also force a refresh on demand via `puppet-ca-ctl reissue-crl`
 - **OCSP responder:** built-in RFC 6960 OCSP responder; AIA extension embedded in issued certs when `--ocsp-url` is set; in-memory cache with nonce bypass
 - **Health probes:** `/healthz/live`, `/healthz/ready`, and `/healthz/startup` endpoints for Kubernetes-style liveness/readiness checks
 - **Graceful shutdown:** `SIGTERM`/`SIGINT` drains in-flight requests with a configurable window (25s default) before exiting; deferred storage and signer cleanup always runs
@@ -140,6 +141,11 @@ ca_validity_days: 0   # 0 = built-in default (~5 years); positive integer overri
 leaf_validity_days: 0 # 0 = built-in default (~5 years); positive integer overrides
 crl_validity_days: 0  # 0 = built-in default (30 days); positive integer overrides
 csr_rate_limit: 60    # max CSR submissions per IP per minute; 0 = disable rate limiting
+# Background CRL refresh keeps the CRL's NextUpdate from lapsing on a low-churn CA.
+# Safe to run on every replica (serialised on the shared CRL lock).
+disable_crl_refresh: false     # true = never auto-refresh the CRL
+crl_refresh_interval_sec: 0    # how often to check; 0 = built-in default (1h)
+crl_refresh_before_sec: 0      # re-sign when remaining validity < this; 0 = crl_validity/3
 # CA key encryption at rest.
 encrypt_ca_key: false           # encrypt the CA private key (AES-256-GCM + Argon2id)
 ca_key_passphrase_file: ""      # path to passphrase file; auto-generated if omitted
@@ -195,6 +201,9 @@ The CA key passphrase can also be provided via `PUPPET_CA_KEY_PASSPHRASE` (env v
 | `ca_validity_days` | `PUPPET_CA_CA_VALIDITY_DAYS` |
 | `leaf_validity_days` | `PUPPET_CA_LEAF_VALIDITY_DAYS` |
 | `crl_validity_days` | `PUPPET_CA_CRL_VALIDITY_DAYS` |
+| `disable_crl_refresh` | `PUPPET_CA_DISABLE_CRL_REFRESH` |
+| `crl_refresh_interval_sec` | `PUPPET_CA_CRL_REFRESH_INTERVAL_SEC` |
+| `crl_refresh_before_sec` | `PUPPET_CA_CRL_REFRESH_BEFORE_SEC` |
 | `shutdown_timeout_sec` | `PUPPET_CA_SHUTDOWN_TIMEOUT_SEC` |
 | `etcd_username` | `PUPPET_CA_ETCD_USERNAME` |
 | `etcd_password` | `PUPPET_CA_ETCD_PASSWORD` |
@@ -384,6 +393,7 @@ Response:
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/certificate_revocation_list/ca` | Download the current CRL PEM |
+| `PUT` | `/certificate_revocation_list/ca` | Re-sign the CRL with a fresh validity window (preserves all revocations); admin-only. Returns the new CRL PEM |
 
 ### Expirations
 
@@ -433,7 +443,7 @@ When mTLS is enabled (both `--tls-cert` and `--tls-key` set), each endpoint requ
 | **Public** | None | `GET /healthz/*`, `GET /certificate/{subject}`, `GET /certificate_revocation_list/ca`, `PUT /certificate_request/{subject}`, `GET /expirations`, `POST /ocsp`, `GET /ocsp/{request}` |
 | **Any client** | Any CA-signed cert | `GET /certificate_status/{subject}` (public with `--allow-public-status`), `POST /certificate_renewal` |
 | **Self or admin** | Cert CN matches path subject, OR cert is admin | `GET /certificate_request/{subject}` |
-| **Admin** | Cert is admin (see below) | `PUT /certificate_status/{subject}`, `DELETE /certificate_status/{subject}`, `DELETE /certificate_request/{subject}`, `GET /certificate_statuses/*`, `POST /sign`, `POST /sign/all`, `POST /generate/{subject}`, `PUT /clean` |
+| **Admin** | Cert is admin (see below) | `PUT /certificate_status/{subject}`, `DELETE /certificate_status/{subject}`, `DELETE /certificate_request/{subject}`, `GET /certificate_statuses/*`, `POST /sign`, `POST /sign/all`, `POST /generate/{subject}`, `PUT /clean`, `PUT /certificate_revocation_list/ca` |
 
 In plain HTTP mode (no TLS), all endpoints are accessible without authentication.
 
@@ -618,6 +628,9 @@ puppet-ca-ctl revoke --certname agent.example.com
 
 # Revoke + delete cert and CSR
 puppet-ca-ctl clean --certname agent.example.com
+
+# Re-sign the CRL with a fresh validity window (preserves all revocations)
+puppet-ca-ctl reissue-crl
 
 # Generate a server-side key+cert pair (key saved to ./agent.example.com_key.pem)
 puppet-ca-ctl generate --certname agent.example.com

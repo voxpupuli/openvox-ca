@@ -590,6 +590,19 @@ func newRootCmd() *cobra.Command {
 				slog.Info("TLS enabled", "cert", cfg.TLSCert)
 			}
 
+			// Background CRL refresh: keeps the CRL's NextUpdate from lapsing on a
+			// low-churn CA. Safe on every replica (serialised on the shared CRL
+			// lock). Bound to ctx so it stops on shutdown.
+			if !cfg.DisableCRLRefresh {
+				refreshBefore := myCA.DefaultCRLRefreshBefore()
+				if cfg.CRLRefreshBeforeSec > 0 {
+					refreshBefore = time.Duration(cfg.CRLRefreshBeforeSec) * time.Second
+				}
+				go runCRLRefresher(ctx, myCA, cfg.crlRefreshInterval(), refreshBefore)
+			} else {
+				slog.Info("CRL auto-refresh disabled by configuration")
+			}
+
 			shutdownDone := make(chan struct{})
 			go func() {
 				<-ctx.Done()

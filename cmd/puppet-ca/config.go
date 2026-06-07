@@ -83,6 +83,13 @@ type serverConfig struct {
 	CRLValidityDays  int `yaml:"crl_validity_days"`  // 0 = built-in default (30 days)
 	CSRRateLimit     int `yaml:"csr_rate_limit"`     // max CSR submissions per IP per minute; 0 = use built-in default (60)
 
+	// Background CRL refresh keeps the CRL's NextUpdate from lapsing when no
+	// certificates are being revoked. Safe to run on every replica: the work is
+	// serialised on the shared CRL lock, so only one replica re-signs per cycle.
+	DisableCRLRefresh     bool `yaml:"disable_crl_refresh"`      // true = never auto-refresh the CRL
+	CRLRefreshIntervalSec int  `yaml:"crl_refresh_interval_sec"` // how often to check; 0 = built-in default (1h)
+	CRLRefreshBeforeSec   int  `yaml:"crl_refresh_before_sec"`   // re-sign when remaining validity < this; 0 = crl_validity/3
+
 	// CA key encryption at rest.
 	EncryptCAKey        bool   `yaml:"encrypt_ca_key"`         // encrypt the CA private key at rest (AES-256-GCM + Argon2id)
 	CAKeyPassphraseFile string `yaml:"ca_key_passphrase_file"` // path to file containing the CA key passphrase
@@ -133,6 +140,23 @@ func (c *serverConfig) shutdownDrain() time.Duration {
 		return time.Duration(c.ShutdownTimeoutSec) * time.Second
 	}
 	return defaultShutdownDrain
+}
+
+// defaultCRLRefreshInterval is how often the background job checks whether the
+// CRL needs re-signing when the operator has not configured an interval. One
+// hour is frequent enough to act well within the default refresh window (a
+// third of the 30-day CRL validity) while imposing negligible load.
+const defaultCRLRefreshInterval = time.Hour
+
+// crlRefreshInterval resolves how often the background job checks the CRL,
+// falling back to defaultCRLRefreshInterval when unset. The refresh window
+// itself (how close to expiry triggers a re-sign) is resolved by the CA from
+// CRLRefreshBeforeSec, defaulting to a third of the CRL validity.
+func (c *serverConfig) crlRefreshInterval() time.Duration {
+	if c.CRLRefreshIntervalSec > 0 {
+		return time.Duration(c.CRLRefreshIntervalSec) * time.Second
+	}
+	return defaultCRLRefreshInterval
 }
 
 // applyServerEnv overlays PUPPET_CA_* environment variables onto cfg.
@@ -249,6 +273,21 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("PUPPET_CA_CRL_VALIDITY_DAYS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.CRLValidityDays = n
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_DISABLE_CRL_REFRESH"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.DisableCRLRefresh = b
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_CRL_REFRESH_INTERVAL_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.CRLRefreshIntervalSec = n
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_CRL_REFRESH_BEFORE_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.CRLRefreshBeforeSec = n
 		}
 	}
 	if v := os.Getenv("PUPPET_CA_CSR_RATE_LIMIT"); v != "" {
