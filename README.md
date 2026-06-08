@@ -30,6 +30,7 @@ A drop-in replacement for Puppet Server's built-in CA, written in Go. It impleme
 - **Automatic CRL refresh:** a background job re-signs the CRL before its validity lapses, so a low-churn CA never serves an expired CRL; safe across replicas (serialised on the shared CRL lock) and tunable or disablable. Operators can also force a refresh on demand via `puppet-ca-ctl reissue-crl`
 - **OCSP responder:** built-in RFC 6960 OCSP responder; AIA extension embedded in issued certs when `--ocsp-url` is set; in-memory cache with nonce bypass
 - **Health probes:** `/healthz/live`, `/healthz/ready`, and `/healthz/startup` endpoints for Kubernetes-style liveness/readiness checks
+- **Prometheus exporter:** optional `/metrics` listener (`--metrics-listen`) exposing Go runtime/process and HTTP metrics plus CA certificate, CRL, and per–leaf-certificate expiry and issuance-status series; ships with a [Jsonnet alerting mixin](mixin/). See [metrics & monitoring](docs/metrics.md)
 - **Graceful shutdown:** `SIGTERM`/`SIGINT` drains in-flight requests with a configurable window (25s default) before exiting; deferred storage and signer cleanup always runs
 - **FIPS-compatible:** standard library only (`crypto/x509`, `net/http`); no CGO by default; FIPS build available via `GOEXPERIMENT=boringcrypto`
 - **`puppet-ca-ctl`:** operator CLI matching `tvaughan-server-ca` subcommands
@@ -77,6 +78,7 @@ mage build:fips   # → bin/puppet-ca + bin/puppet-ca-ctl  (GOEXPERIMENT=boringc
 | `--allow-public-status` | `false` | Allow unauthenticated `GET /certificate_status`; by default this endpoint requires a CA-signed client cert |
 | `--ocsp-url` | `""` | OCSP responder URL to embed in issued certificates |
 | `--crl-url` | `""` | CRL distribution point URL to embed in issued certificates |
+| `--metrics-listen` | `""` | Address for the Prometheus exporter (e.g. `127.0.0.1:9140`); empty disables it. See [metrics & monitoring](docs/metrics.md) |
 | `--encrypt-ca-key` | `false` | Encrypt the CA private key at rest (AES-256-GCM + Argon2id) |
 | `--ca-key-passphrase-file` | `""` | Path to file containing the CA key passphrase (first line used) |
 | `--csr-rate-limit` | `60` | Max CSR submissions per IP per minute on the public `PUT /certificate_request` endpoint (0 disables) |
@@ -173,6 +175,7 @@ puppet_datetime_format: false   # use Puppet CA style "2006-01-02T15:04:05MST" i
 | `--allow-public-status` | `PUPPET_CA_ALLOW_PUBLIC_STATUS` |
 | `--ocsp-url` | `PUPPET_CA_OCSP_URL` |
 | `--crl-url` | `PUPPET_CA_CRL_URL` |
+| `--metrics-listen` | `PUPPET_CA_METRICS_LISTEN` |
 | `--csr-rate-limit` | `PUPPET_CA_CSR_RATE_LIMIT` |
 | `--encrypt-ca-key` | `PUPPET_CA_ENCRYPT_CA_KEY` |
 | `--ca-key-passphrase-file` | `PUPPET_CA_KEY_PASSPHRASE_FILE` |

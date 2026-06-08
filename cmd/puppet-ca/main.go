@@ -40,6 +40,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/tvaughan/puppet-ca/internal/api"
 	"github.com/tvaughan/puppet-ca/internal/ca"
+	"github.com/tvaughan/puppet-ca/internal/metrics"
 	"github.com/tvaughan/puppet-ca/internal/signer"
 	"github.com/tvaughan/puppet-ca/internal/storage"
 )
@@ -169,6 +170,7 @@ func newRootCmd() *cobra.Command {
 		allowPublicStatus       bool
 		ocspURL                 string
 		crlURL                  string
+		metricsListen           string
 		csrRateLimit            int
 		configFile              string
 		encryptCAKey            bool
@@ -251,6 +253,9 @@ func newRootCmd() *cobra.Command {
 			}
 			if cmd.Flags().Changed("crl-url") {
 				cfg.CRLUrl = crlURL
+			}
+			if cmd.Flags().Changed("metrics-listen") {
+				cfg.MetricsListen = metricsListen
 			}
 			if cmd.Flags().Changed("csr-rate-limit") {
 				cfg.CSRRateLimit = csrRateLimit
@@ -546,14 +551,42 @@ func newRootCmd() *cobra.Command {
 			addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 			slog.Info("Listening", "address", addr)
 
+			// --- Prometheus exporter ---
+			// The exporter owns a private registry holding the Go/process
+			// collectors, the CA/CRL/leaf certificate collector, and the HTTP
+			// request metrics. When enabled, the API handler is instrumented so
+			// puppetca_http_* counts requests to the Puppet API, while /metrics is
+			// served on a separate listener (see metricsServer below).
+			handler := srv.Routes()
+			var exporter *metrics.Exporter
+			if cfg.MetricsListen != "" {
+				exporter = metrics.NewExporter(myCA)
+				handler = exporter.InstrumentHandler(handler)
+			}
+
 			server := &http.Server{
 				Addr:              addr,
-				Handler:           srv.Routes(),
+				Handler:           handler,
 				ReadHeaderTimeout: 10 * time.Second,
 				ReadTimeout:       30 * time.Second,
 				WriteTimeout:      60 * time.Second,
 				IdleTimeout:       120 * time.Second,
 				MaxHeaderBytes:    1 << 20,
+			}
+
+			// Start the metrics exporter on its own listener. It runs over plain
+			// HTTP regardless of the API's TLS configuration; operators should
+			// bind it to loopback or a trusted management network. A bind failure
+			// is logged but does not stop the CA from serving its primary API.
+			var metricsServer *http.Server
+			if exporter != nil {
+				metricsServer = exporter.NewServer(cfg.MetricsListen)
+				slog.Info("Prometheus metrics exporter enabled", "address", cfg.MetricsListen, "path", "/metrics")
+				go func() {
+					if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+						slog.Error("Metrics exporter failed", "error", err)
+					}
+				}()
 			}
 
 			if cfg.TLSCert != "" && cfg.TLSKey != "" {
@@ -609,6 +642,11 @@ func newRootCmd() *cobra.Command {
 				slog.Info("Shutting down")
 				shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.shutdownDrain())
 				defer cancel()
+				if metricsServer != nil {
+					if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+						slog.Warn("Metrics exporter shutdown error", "error", err)
+					}
+				}
 				if err := server.Shutdown(shutdownCtx); err != nil {
 					slog.Warn("HTTP server shutdown error", "error", err)
 				}
@@ -648,6 +686,7 @@ func newRootCmd() *cobra.Command {
 	f.BoolVar(&allowPublicStatus, "allow-public-status", false, "Allow unauthenticated GET /certificate_status (by default, requires a CA-signed client cert)")
 	f.StringVar(&ocspURL, "ocsp-url", "", "OCSP responder URL to embed in issued certificates (e.g. http://puppet-ca:8140/ocsp)")
 	f.StringVar(&crlURL, "crl-url", "", "CRL distribution point URL to embed in issued certificates (e.g. http://puppet-ca:8140/puppet-ca/v1/certificate_revocation_list/ca)")
+	f.StringVar(&metricsListen, "metrics-listen", "", "Address for the Prometheus metrics exporter (e.g. 127.0.0.1:9140 or :9140); empty disables it. Serves /metrics over plain HTTP on a separate listener; restrict to a trusted network as it reveals node hostnames")
 	f.IntVar(&csrRateLimit, "csr-rate-limit", 60, "Max CSR submissions per IP per minute on the public PUT /certificate_request endpoint (0 disables)")
 	f.BoolVar(&encryptCAKey, "encrypt-ca-key", false, "Encrypt the CA private key at rest (AES-256-GCM + Argon2id); a passphrase is auto-generated if not provided")
 	f.StringVar(&caKeyPassphraseFile, "ca-key-passphrase-file", "", "Path to file containing the CA key passphrase (first line used)")

@@ -1,0 +1,89 @@
+# Puppet CA monitoring mixin
+
+A [monitoring mixin](https://monitoring.mixins.dev/) providing Prometheus
+alerting rules for the Puppet CA exporter. It alerts on:
+
+- the exporter being down or unable to read CA state, and the CA not being ready;
+- the **CA certificate** nearing expiry (warning) or expiring imminently (critical);
+- the **CRL** approaching its `NextUpdate` (warning) or having lapsed (critical);
+- **leaf certificates** nearing/at expiry — excluding revoked ones — and
+  certificate **requests that stay pending** too long.
+
+All thresholds and the target selector live in [`config.libsonnet`](config.libsonnet)
+and can be overridden without editing the rules.
+
+## Enabling the exporter
+
+The alerts assume the puppet-ca Prometheus exporter is enabled and scraped. Start
+the server with `--metrics-listen` (or `PUPPET_CA_METRICS_LISTEN` /
+`metrics_listen:` in the config file):
+
+```sh
+puppet-ca --cadir /var/lib/puppet-ca --metrics-listen 127.0.0.1:9140
+```
+
+The exporter serves `/metrics` over plain HTTP on its own listener. It exposes
+node hostnames as label values, so bind it to loopback or a trusted management
+network and scrape it from there. A matching Prometheus scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: puppet-ca
+    static_configs:
+      - targets: ['puppet-ca.internal:9140']
+```
+
+The `job_name` must match `puppetCASelector` in the mixin config (default
+`job="puppet-ca"`).
+
+## Rendering the alerts standalone
+
+With [`jsonnet`](https://github.com/google/go-jsonnet) installed:
+
+```sh
+jsonnet -S -e "std.manifestYamlDoc((import 'mixin.libsonnet').prometheusAlerts)" \
+  > puppet_ca_alerts.yaml
+promtool check rules puppet_ca_alerts.yaml
+```
+
+## Importing into another repo
+
+Vendor the mixin with [jsonnet-bundler](https://github.com/jsonnet-bundler/jsonnet-bundler):
+
+```sh
+jb install https://github.com/tvaughan/puppet-ca/mixin@main
+```
+
+Then combine it with your overrides:
+
+```jsonnet
+// mixin.jsonnet
+local puppetca = (import 'vendor/puppet-ca/mixin.libsonnet') + {
+  _config+:: {
+    puppetCASelector: 'job="pki/puppet-ca"',
+    caExpiryWarningSeconds: 45 * 24 * 3600,
+  },
+};
+
+{
+  'puppet_ca_alerts.yaml': std.manifestYamlDoc(puppetca.prometheusAlerts),
+}
+```
+
+```sh
+jsonnet -J vendor -m . mixin.jsonnet
+```
+
+## Configurable thresholds
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `puppetCASelector` | `job="puppet-ca"` | Label selector matching the exporter targets. |
+| `alertLabels` | `{}` | Extra labels merged onto every alert (e.g. routing labels). |
+| `caExpiryWarningSeconds` | 30 days | CA certificate expiry warning threshold. |
+| `caExpiryCriticalSeconds` | 7 days | CA certificate expiry critical threshold. |
+| `crlExpiryWarningSeconds` | 3 days | CRL `NextUpdate` warning threshold. |
+| `leafExpiryWarningSeconds` | 7 days | Leaf certificate expiry warning threshold. |
+| `leafExpiryCriticalSeconds` | 1 day | Leaf certificate expiry critical threshold. |
+| `pendingFor` | `1h` | How long a request may stay pending before alerting. |
+| `expiryFor` / `scrapeFor` / `readyFor` / `downFor` | `1h` / `15m` / `10m` / `5m` | `for:` debounce durations. |
