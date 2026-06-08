@@ -1,0 +1,58 @@
+name: CodeQL
+
+# Static analysis (code scanning) for the Go sources. Results are uploaded to
+# the repository's Security -> Code scanning tab and satisfy the "Main" ruleset's
+# code_scanning rule, which otherwise blocks every PR from merging.
+#
+# Triggers:
+#   * Push to main      -> establish the baseline analysis on the default branch.
+#   * Pull requests      -> analyse the proposed changes so the merge gate has
+#     fresh results to evaluate.
+#   * Weekly schedule    -> re-scan with updated CodeQL queries even when the
+#     code is quiet, so newly published advisories are still caught.
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  schedule:
+    - cron: "27 4 * * 1"
+
+# Don't pile up redundant analyses for the same branch/PR.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (Go)
+    runs-on: ubuntu-latest
+    permissions:
+      # Required to upload code-scanning results.
+      security-events: write
+      # Needed by the CodeQL action to read the workflow run on private repos.
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: go
+          # "security-and-quality" widens coverage beyond the default security
+          # queries; the ruleset only gates on error-level alerts.
+          queries: security-and-quality
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v4
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:go"
