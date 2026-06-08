@@ -55,6 +55,9 @@ var serverEnvVars = []string{
 	"PUPPET_CA_DISABLE_CRL_REFRESH",
 	"PUPPET_CA_CRL_REFRESH_INTERVAL_SEC",
 	"PUPPET_CA_CRL_REFRESH_BEFORE_SEC",
+	"PUPPET_CA_ENABLE_EXPIRED_CERT_CLEANUP",
+	"PUPPET_CA_EXPIRED_CERT_RETENTION_SEC",
+	"PUPPET_CA_EXPIRED_CERT_CLEANUP_INTERVAL_SEC",
 }
 
 // clearServerEnv unsets all PUPPET_CA_* vars and restores them after the test.
@@ -233,6 +236,64 @@ func TestCRLRefreshIntervalRejectsNonPositive(t *testing.T) {
 	}
 	if got := cfg.crlRefreshInterval(); got != defaultCRLRefreshInterval {
 		t.Errorf("crlRefreshInterval() with 0 = %v; want default %v", got, defaultCRLRefreshInterval)
+	}
+}
+
+// --- expired-cert cleanup resolvers ---
+
+func TestExpiredCertCleanupDefaults(t *testing.T) {
+	clearServerEnv(t)
+
+	cfg, err := loadServerConfig("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.EnableExpiredCertCleanup {
+		t.Error("EnableExpiredCertCleanup should default to false (opt-in)")
+	}
+	if got := cfg.expiredCertRetention(); got != defaultExpiredCertRetention {
+		t.Errorf("expiredCertRetention() = %v; want default %v", got, defaultExpiredCertRetention)
+	}
+	if got := cfg.expiredCertCleanupInterval(); got != defaultExpiredCertCleanupInterval {
+		t.Errorf("expiredCertCleanupInterval() = %v; want default %v", got, defaultExpiredCertCleanupInterval)
+	}
+}
+
+func TestExpiredCertCleanupEnvOverride(t *testing.T) {
+	clearServerEnv(t)
+	t.Setenv("PUPPET_CA_ENABLE_EXPIRED_CERT_CLEANUP", "true")
+	t.Setenv("PUPPET_CA_EXPIRED_CERT_RETENTION_SEC", "3600")
+	t.Setenv("PUPPET_CA_EXPIRED_CERT_CLEANUP_INTERVAL_SEC", "900")
+
+	cfg, err := loadServerConfig("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.EnableExpiredCertCleanup {
+		t.Error("EnableExpiredCertCleanup = false; want true")
+	}
+	if got, want := cfg.expiredCertRetention(), time.Hour; got != want {
+		t.Errorf("expiredCertRetention() = %v; want %v", got, want)
+	}
+	if got, want := cfg.expiredCertCleanupInterval(), 900*time.Second; got != want {
+		t.Errorf("expiredCertCleanupInterval() = %v; want %v", got, want)
+	}
+}
+
+func TestExpiredCertCleanupRejectsNonPositive(t *testing.T) {
+	clearServerEnv(t)
+	t.Setenv("PUPPET_CA_EXPIRED_CERT_RETENTION_SEC", "0")
+	t.Setenv("PUPPET_CA_EXPIRED_CERT_CLEANUP_INTERVAL_SEC", "-5")
+
+	cfg, err := loadServerConfig("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cfg.expiredCertRetention(); got != defaultExpiredCertRetention {
+		t.Errorf("expiredCertRetention() with 0 = %v; want default %v", got, defaultExpiredCertRetention)
+	}
+	if got := cfg.expiredCertCleanupInterval(); got != defaultExpiredCertCleanupInterval {
+		t.Errorf("expiredCertCleanupInterval() with -5 = %v; want default %v", got, defaultExpiredCertCleanupInterval)
 	}
 }
 

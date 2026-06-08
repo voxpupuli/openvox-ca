@@ -90,6 +90,15 @@ type serverConfig struct {
 	CRLRefreshIntervalSec int  `yaml:"crl_refresh_interval_sec"` // how often to check; 0 = built-in default (1h)
 	CRLRefreshBeforeSec   int  `yaml:"crl_refresh_before_sec"`   // re-sign when remaining validity < this; 0 = crl_validity/3
 
+	// Background expired-certificate cleanup. Disabled by default: when enabled,
+	// a job periodically removes certificates that expired more than the
+	// retention grace period ago from the inventory and the CRL (and deletes
+	// their stored signed certificate). Safe to run on every replica: the work is
+	// serialised on the shared CRL lock, so only one replica prunes per cycle.
+	EnableExpiredCertCleanup      bool `yaml:"enable_expired_cert_cleanup"`       // true = run the cleanup job
+	ExpiredCertRetentionSec       int  `yaml:"expired_cert_retention_sec"`        // grace period after NotAfter before removal; 0 = built-in default (30d)
+	ExpiredCertCleanupIntervalSec int  `yaml:"expired_cert_cleanup_interval_sec"` // how often to run; 0 = built-in default (24h)
+
 	// CA key encryption at rest.
 	EncryptCAKey        bool   `yaml:"encrypt_ca_key"`         // encrypt the CA private key at rest (AES-256-GCM + Argon2id)
 	CAKeyPassphraseFile string `yaml:"ca_key_passphrase_file"` // path to file containing the CA key passphrase
@@ -157,6 +166,38 @@ func (c *serverConfig) crlRefreshInterval() time.Duration {
 		return time.Duration(c.CRLRefreshIntervalSec) * time.Second
 	}
 	return defaultCRLRefreshInterval
+}
+
+const (
+	// defaultExpiredCertRetention is how long past a certificate's NotAfter the
+	// expired-cert cleanup job waits before removing it when the operator has not
+	// configured a retention. 30 days gives operators a comfortable window to
+	// notice a node before its record disappears from the inventory and CRL.
+	defaultExpiredCertRetention = 30 * 24 * time.Hour
+	// defaultExpiredCertCleanupInterval is how often the cleanup job runs when no
+	// interval is configured. Daily is ample: expiry is a slow, day-scale event.
+	defaultExpiredCertCleanupInterval = 24 * time.Hour
+)
+
+// expiredCertRetention resolves the grace period the cleanup job applies after a
+// certificate's NotAfter before removing it, falling back to
+// defaultExpiredCertRetention when unset. A zero value selects the default; set
+// a negative ExpiredCertRetentionSec is not representable, so operators wanting
+// "remove as soon as expired" should set a small positive value.
+func (c *serverConfig) expiredCertRetention() time.Duration {
+	if c.ExpiredCertRetentionSec > 0 {
+		return time.Duration(c.ExpiredCertRetentionSec) * time.Second
+	}
+	return defaultExpiredCertRetention
+}
+
+// expiredCertCleanupInterval resolves how often the cleanup job runs, falling
+// back to defaultExpiredCertCleanupInterval when unset.
+func (c *serverConfig) expiredCertCleanupInterval() time.Duration {
+	if c.ExpiredCertCleanupIntervalSec > 0 {
+		return time.Duration(c.ExpiredCertCleanupIntervalSec) * time.Second
+	}
+	return defaultExpiredCertCleanupInterval
 }
 
 // applyServerEnv overlays PUPPET_CA_* environment variables onto cfg.
@@ -288,6 +329,21 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("PUPPET_CA_CRL_REFRESH_BEFORE_SEC"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.CRLRefreshBeforeSec = n
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_ENABLE_EXPIRED_CERT_CLEANUP"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.EnableExpiredCertCleanup = b
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_EXPIRED_CERT_RETENTION_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.ExpiredCertRetentionSec = n
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_EXPIRED_CERT_CLEANUP_INTERVAL_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.ExpiredCertCleanupIntervalSec = n
 		}
 	}
 	if v := os.Getenv("PUPPET_CA_CSR_RATE_LIMIT"); v != "" {

@@ -181,6 +181,86 @@ func (b *SQLBackend) LatestSerialForSubject(ctx context.Context, subject string)
 	return row.Serial, nil
 }
 
+// PruneEntries removes the rows for which keep returns false and rewrites the
+// integrity head over the survivors in a single transaction, so a concurrent
+// reader on another replica never observes the rows and the chained head out of
+// sync. Survivors keep their original ids (and thus issuance order); only the
+// dropped rows are deleted. The presence-marker row is locked first so this
+// serialises with AppendEntry across replicas, exactly as appends do.
+func (b *SQLBackend) PruneEntries(ctx context.Context, keep func(InventoryEntry) bool, recomputeHead func(survivors []InventoryEntry) []byte) ([]InventoryEntry, error) {
+	b.appendMu.Lock()
+	defer b.appendMu.Unlock()
+
+	ctx, cancel := b.callCtx(ctx)
+	defer cancel()
+
+	const maxAttempts = 10
+	for attempt := 0; ; attempt++ {
+		removed, err := b.pruneEntriesOnce(ctx, keep, recomputeHead)
+		if err == nil {
+			return removed, nil
+		}
+		if attempt+1 >= maxAttempts || !isRetryableSQLError(err) {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(time.Duration(attempt+1) * 5 * time.Millisecond):
+		}
+	}
+}
+
+func (b *SQLBackend) pruneEntriesOnce(ctx context.Context, keep func(InventoryEntry) bool, recomputeHead func(survivors []InventoryEntry) []byte) ([]InventoryEntry, error) {
+	var removed []InventoryEntry
+	err := b.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		removed = nil // reset so a retried transaction does not double-count
+
+		// Lock the presence marker to serialise with appends before reading rows.
+		if _, err := b.blobDataTx(ctx, tx, KeyInventory, true); err != nil {
+			return err
+		}
+
+		var rows []sqlInventoryRow
+		if err := tx.NewSelect().Model(&rows).Order("id ASC").Scan(ctx); err != nil {
+			return err
+		}
+
+		survivors := make([]InventoryEntry, 0, len(rows))
+		var removeIDs []int64
+		for _, r := range rows {
+			e := r.entry()
+			if keep(e) {
+				survivors = append(survivors, e)
+			} else {
+				removed = append(removed, e)
+				removeIDs = append(removeIDs, r.ID)
+			}
+		}
+		if len(removeIDs) == 0 {
+			return nil
+		}
+
+		if _, err := tx.NewDelete().Model((*sqlInventoryRow)(nil)).Where("id IN (?)", bun.List(removeIDs)).Exec(ctx); err != nil {
+			return err
+		}
+
+		if recomputeHead != nil {
+			return b.upsert(ctx, tx, &sqlBlob{
+				Key:        KeyInventoryHMAC,
+				Data:       recomputeHead(survivors),
+				Kind:       int(BlobPrivate),
+				ModifiedAt: time.Now(),
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return removed, nil
+}
+
 // --- KeyInventory blob shim ---
 //
 // A structured backend must still serve the KeyInventory logical key through

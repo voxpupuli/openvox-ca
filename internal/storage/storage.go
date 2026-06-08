@@ -248,6 +248,115 @@ func (s *StorageService) ReadInventory(ctx context.Context) ([]byte, error) {
 	return s.backend.Get(ctx, KeyInventory)
 }
 
+// inventoryEntriesLocked returns every inventory entry in issuance order. On
+// InventoryStore backends it reads the structured rows; otherwise it parses the
+// rendered blob. Caller must hold inventoryMu (read or write).
+func (s *StorageService) inventoryEntriesLocked(ctx context.Context) ([]InventoryEntry, error) {
+	if store, ok := s.backend.(InventoryStore); ok {
+		return store.Entries(ctx)
+	}
+	data, err := s.readInventoryForHMAC(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var entries []InventoryEntry
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if e, ok := parseInventoryEntry(line); ok {
+			entries = append(entries, e)
+		}
+	}
+	return entries, nil
+}
+
+// PruneInventory removes every inventory entry for which keep returns false,
+// rewriting the inventory and its integrity head together under the inventory
+// write lock. It returns the removed entries (in issuance order) so the caller
+// can act on them — drop their CRL revocations, invalidate caches, delete the
+// stored cert. When nothing is removed the inventory and head are left
+// untouched and (nil, nil) is returned.
+//
+// The current inventory integrity is verified before pruning, so a tampered
+// inventory surfaces ErrInventoryTampered rather than being silently rewritten.
+//
+// Concurrency: appends (AppendInventory) and reads (ReadInventory) take the same
+// inventoryMu, so within a process a prune never interleaves with them. The
+// rewrite is a single Backend.Put on KeyInventory, which structured backends
+// service as an atomic table replacement and blob backends as an atomic file
+// swap; callers needing cross-replica serialisation against revocation should
+// hold the cluster CRL lock around this (see ca.CA.CleanupExpiredCerts).
+func (s *StorageService) PruneInventory(ctx context.Context, keep func(InventoryEntry) bool) ([]InventoryEntry, error) {
+	s.inventoryMu.Lock()
+	defer s.inventoryMu.Unlock()
+
+	if s.hmacKey != nil {
+		if err := s.verifyInventoryHMACLocked(ctx, s.hmacKey); err != nil {
+			return nil, err
+		}
+	}
+
+	// Structured backends prune rows and rewrite the chained integrity head in a
+	// single transaction, so the two can never be observed out of sync across
+	// replicas (mirroring the atomic AppendEntry path).
+	if store, ok := s.backend.(InventoryStore); ok {
+		var recomputeHead func(survivors []InventoryEntry) []byte
+		if s.hmacKey != nil {
+			key := s.hmacKey
+			recomputeHead = func(survivors []InventoryEntry) []byte {
+				var head []byte
+				for _, e := range survivors {
+					head = chainInventoryMAC(key, head, canonicalInventoryLine(e))
+				}
+				return head
+			}
+		}
+		return store.PruneEntries(ctx, keep, recomputeHead)
+	}
+
+	// Blob backends: read, filter, and rewrite the whole inventory, then
+	// recompute the whole-blob HMAC. This matches their (non-atomic) append path
+	// and is correct for the single-node filesystem backend, the only blob
+	// backend without distributed appends.
+	entries, err := s.inventoryEntriesLocked(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	kept := make([]InventoryEntry, 0, len(entries))
+	var removed []InventoryEntry
+	for _, e := range entries {
+		if keep(e) {
+			kept = append(kept, e)
+		} else {
+			removed = append(removed, e)
+		}
+	}
+	if len(removed) == 0 {
+		return nil, nil
+	}
+
+	var buf strings.Builder
+	for _, e := range kept {
+		buf.WriteString(canonicalInventoryLine(e))
+		buf.WriteByte('\n')
+	}
+	if err := s.backend.Put(ctx, KeyInventory, []byte(buf.String()), BlobPrivate); err != nil {
+		return nil, fmt.Errorf("rewriting inventory: %w", err)
+	}
+
+	if s.hmacKey != nil {
+		if err := s.updateInventoryHMACLocked(ctx, s.hmacKey); err != nil {
+			// The inventory is already rewritten but the stored head now lags it;
+			// surface the failure so the operator/job can react rather than leave
+			// a mismatch that the next verify would flag as tampering.
+			return nil, fmt.Errorf("updating inventory HMAC after prune: %w", err)
+		}
+	}
+	return removed, nil
+}
+
 // TouchInventory creates an empty inventory blob if one does not already
 // exist. Called during CA bootstrap and import to seed the inventory.
 func (s *StorageService) TouchInventory(ctx context.Context) error {
