@@ -6,6 +6,7 @@ name: Container images
 #
 # Triggers:
 #   * Push to main            -> build + push the rolling "edge" (and "main") tags.
+#   * Push to integration     -> build + push the rolling "integration" tag.
 #   * Release tags (v*)        -> build + push versioned + latest tags.
 #   * Manual (workflow_dispatch) -> build, push only if the "push" input is set.
 #   * Pull requests, on demand -> apply the "build-images" label to a PR to
@@ -20,6 +21,7 @@ on:
   push:
     branches:
       - main
+      - integration
     tags:
       - "v*"
   pull_request:
@@ -217,7 +219,7 @@ jobs:
           images: ${{ needs.setup.outputs.image }}
           flavor: ${{ matrix.flavor }}
           tags: |
-            type=edge
+            type=edge,branch=main
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}},enable=${{ !startsWith(github.ref_name, 'v0.') }}
