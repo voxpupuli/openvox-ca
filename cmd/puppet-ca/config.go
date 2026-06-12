@@ -51,6 +51,13 @@ type serverConfig struct {
 	OCSPUrl           string `yaml:"ocsp_url"`
 	CRLUrl            string `yaml:"crl_url"`
 
+	// MetricsListen, when non-empty, enables the Prometheus exporter on the
+	// given address (e.g. "127.0.0.1:9140" or ":9140"). The exporter serves
+	// /metrics over plain HTTP on a separate listener from the Puppet API and is
+	// disabled by default because it reveals certificate subjects (node
+	// hostnames); restrict it to a trusted network or loopback.
+	MetricsListen string `yaml:"metrics_listen"`
+
 	// ShutdownTimeoutSec bounds the frontend's graceful HTTP-drain budget on
 	// SIGTERM: the time in-flight requests are given to complete before the
 	// listener is torn down. 0 selects the built-in default (defaultShutdownDrain).
@@ -218,6 +225,9 @@ func applyServerEnv(cfg *serverConfig) {
 	}
 	if v := os.Getenv("PUPPET_CA_CRL_URL"); v != "" {
 		cfg.CRLUrl = v
+	}
+	if v := os.Getenv("PUPPET_CA_METRICS_LISTEN"); v != "" {
+		cfg.MetricsListen = v
 	}
 	if v := os.Getenv("PUPPET_CA_SHUTDOWN_TIMEOUT_SEC"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
