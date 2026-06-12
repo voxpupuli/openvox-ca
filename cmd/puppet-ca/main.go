@@ -636,6 +636,14 @@ func newRootCmd() *cobra.Command {
 				slog.Info("CRL auto-refresh disabled by configuration")
 			}
 
+			// Background expired-certificate cleanup (opt-in): prunes certs that
+			// expired more than the retention grace period ago from the inventory
+			// and CRL. Safe on every replica (serialised on the shared CRL lock).
+			// Bound to ctx so it stops on shutdown.
+			if cfg.EnableExpiredCertCleanup {
+				go runCertCleaner(ctx, myCA, cfg.expiredCertCleanupInterval(), cfg.expiredCertRetention())
+			}
+
 			shutdownDone := make(chan struct{})
 			go func() {
 				<-ctx.Done()

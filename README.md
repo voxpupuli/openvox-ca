@@ -28,6 +28,7 @@ A drop-in replacement for Puppet Server's built-in CA, written in Go. It impleme
 - **CRL Distribution Points:** optionally embed a CRL URL in every issued certificate (`--crl-url`) so verifiers can automatically fetch the CRL
 - **Configurable CRL validity:** control how long each published CRL is valid (`crl_validity_days`)
 - **Automatic CRL refresh:** a background job re-signs the CRL before its validity lapses, so a low-churn CA never serves an expired CRL; safe across replicas (serialised on the shared CRL lock) and tunable or disablable. Operators can also force a refresh on demand via `puppet-ca-ctl reissue-crl`
+- **Expired-certificate cleanup (opt-in):** a background job removes certificates that expired more than a configurable grace period ago from the inventory and the CRL (and deletes their stored signed certificate), keeping both from growing without bound as nodes are decommissioned; safe across replicas (serialised on the shared CRL lock)
 - **OCSP responder:** built-in RFC 6960 OCSP responder; AIA extension embedded in issued certs when `--ocsp-url` is set; in-memory cache with nonce bypass
 - **Health probes:** `/healthz/live`, `/healthz/ready`, and `/healthz/startup` endpoints for Kubernetes-style liveness/readiness checks
 - **Prometheus exporter:** optional `/metrics` listener (`--metrics-listen`) exposing Go runtime/process and HTTP metrics plus CA certificate, CRL, and per–leaf-certificate expiry and issuance-status series; ships with a [Jsonnet alerting mixin](mixin/). See [metrics & monitoring](docs/metrics.md)
@@ -148,6 +149,13 @@ csr_rate_limit: 60    # max CSR submissions per IP per minute; 0 = disable rate 
 disable_crl_refresh: false     # true = never auto-refresh the CRL
 crl_refresh_interval_sec: 0    # how often to check; 0 = built-in default (1h)
 crl_refresh_before_sec: 0      # re-sign when remaining validity < this; 0 = crl_validity/3
+# Background expired-certificate cleanup (opt-in). When enabled, a job removes
+# certificates that expired more than the retention grace period ago from the
+# inventory and the CRL, and deletes their stored signed certificate. Safe to run
+# on every replica (serialised on the shared CRL lock).
+enable_expired_cert_cleanup: false       # true = run the cleanup job
+expired_cert_retention_sec: 0            # grace period after a cert's NotAfter before removal; 0 = built-in default (30d)
+expired_cert_cleanup_interval_sec: 0     # how often to run; 0 = built-in default (24h)
 # CA key encryption at rest.
 encrypt_ca_key: false           # encrypt the CA private key (AES-256-GCM + Argon2id)
 ca_key_passphrase_file: ""      # path to passphrase file; auto-generated if omitted
@@ -207,6 +215,9 @@ The CA key passphrase can also be provided via `PUPPET_CA_KEY_PASSPHRASE` (env v
 | `disable_crl_refresh` | `PUPPET_CA_DISABLE_CRL_REFRESH` |
 | `crl_refresh_interval_sec` | `PUPPET_CA_CRL_REFRESH_INTERVAL_SEC` |
 | `crl_refresh_before_sec` | `PUPPET_CA_CRL_REFRESH_BEFORE_SEC` |
+| `enable_expired_cert_cleanup` | `PUPPET_CA_ENABLE_EXPIRED_CERT_CLEANUP` |
+| `expired_cert_retention_sec` | `PUPPET_CA_EXPIRED_CERT_RETENTION_SEC` |
+| `expired_cert_cleanup_interval_sec` | `PUPPET_CA_EXPIRED_CERT_CLEANUP_INTERVAL_SEC` |
 | `shutdown_timeout_sec` | `PUPPET_CA_SHUTDOWN_TIMEOUT_SEC` |
 | `etcd_username` | `PUPPET_CA_ETCD_USERNAME` |
 | `etcd_password` | `PUPPET_CA_ETCD_PASSWORD` |

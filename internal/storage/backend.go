@@ -199,6 +199,15 @@ type InventoryStore interface {
 	// LatestSerialForSubject returns the most recently issued serial for
 	// subject. Wraps os.ErrNotExist when the subject has no entry.
 	LatestSerialForSubject(ctx context.Context, subject string) (string, error)
+
+	// PruneEntries removes every entry for which keep returns false and
+	// recomputes the integrity head over the survivors, atomically in one
+	// transaction so the rows and the chained head can never be observed out of
+	// sync by another replica. recomputeHead folds the hash chain over the
+	// surviving entries in issuance order; a nil recomputeHead means integrity is
+	// disabled and the stored head is left untouched. It returns the removed
+	// entries in issuance order, or an empty slice when nothing matched.
+	PruneEntries(ctx context.Context, keep func(InventoryEntry) bool, recomputeHead func(survivors []InventoryEntry) []byte) ([]InventoryEntry, error)
 }
 
 // Locker is an optional Backend capability that provides a cross-node
