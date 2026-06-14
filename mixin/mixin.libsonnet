@@ -7,8 +7,8 @@
 // Override anything in _config (see config.libsonnet) to tune selectors and
 // thresholds, e.g.:
 //
-//   (import 'puppet-ca-mixin/mixin.libsonnet') + {
-//     _config+:: { puppetCASelector: 'job="pki/puppet-ca"' },
+//   (import 'openvox-ca-mixin/mixin.libsonnet') + {
+//     _config+:: { puppetCASelector: 'job="pki/openvox-ca"' },
 //   }
 (import 'config.libsonnet') +
 (import 'alerts.libsonnet')

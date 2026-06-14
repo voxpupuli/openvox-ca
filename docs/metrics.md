@@ -1,6 +1,6 @@
 # Metrics & monitoring
 
-The puppet-ca server ships with an optional [Prometheus](https://prometheus.io/)
+The openvox-ca server ships with an optional [Prometheus](https://prometheus.io/)
 exporter. When enabled it serves the standard Go runtime/process metrics and
 HTTP request metrics expected of a Go web service, plus CA-specific series
 describing the **CA certificate**, its **CRL**, and every known (non-deleted)
@@ -19,7 +19,7 @@ The exporter is **disabled by default**. Enable it by setting a listen address:
 | `--metrics-listen 127.0.0.1:9140` | `PUPPET_CA_METRICS_LISTEN=127.0.0.1:9140` | `metrics_listen: 127.0.0.1:9140` |
 
 ```sh
-puppet-ca --cadir /var/lib/puppet-ca --metrics-listen 127.0.0.1:9140
+openvox-ca --cadir /var/lib/puppet-ca --metrics-listen 127.0.0.1:9140
 ```
 
 The exporter runs on a **separate listener** from the Puppet API and always
@@ -37,13 +37,13 @@ signer process has no network exposure).
 
 ```yaml
 scrape_configs:
-  - job_name: puppet-ca
+  - job_name: openvox-ca
     static_configs:
-      - targets: ['puppet-ca.internal:9140']
+      - targets: ['openvox-ca.internal:9140']
 ```
 
 The `job_name` is referenced by the alerting mixin's selector (default
-`job="puppet-ca"`).
+`job="openvox-ca"`).
 
 ## Metric reference
 

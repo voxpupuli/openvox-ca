@@ -1,0 +1,29 @@
+# Redis (Valkey-compatible) service for the Redis-backend Go integration suite
+# (internal/storage, build tag `redis_integration`).
+#
+# Unlike compose-backends-redis.yml — which stands up a full Puppet stack and
+# runs the bash TAP suite in test/backends/redis-stack.sh — this file only
+# provides the Redis the Go integration tests need. It mirrors
+# compose-backends-postgres.yml. Bring it up, point PUPPET_CA_TEST_REDIS_ADDR
+# at it, and run:
+#
+#   go test -tags redis_integration ./internal/storage/...
+#
+# The `mage test:backendsRedisGo` target automates the up / test / down cycle.
+
+name: openvox-ca-backends-redis-go
+
+services:
+  redis:
+    image: docker.io/redis:7-alpine
+    ports:
+      # Host 56379 -> container 6379, matching PUPPET_CA_TEST_REDIS_ADDR used by
+      # the mage target. Distinct from any other compose stack's mappings.
+      - "56379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    # In-memory only: the integration suite never needs Redis state to survive a
+    # restart (Redis is already memory-resident; no volume needed).

@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Chris Boot
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -24,7 +25,7 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/tvaughan/puppet-ca/internal/storage"
+	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
 
 // inventoryTimeFormat is the layout the signing path writes NotBefore/NotAfter

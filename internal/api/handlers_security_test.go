@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Trevor Vaughan
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -26,10 +27,10 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/tvaughan/puppet-ca/internal/api"
-	"github.com/tvaughan/puppet-ca/internal/ca"
-	"github.com/tvaughan/puppet-ca/internal/storage"
-	"github.com/tvaughan/puppet-ca/internal/testutil"
+	"github.com/voxpupuli/openvox-ca/internal/api"
+	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/storage"
+	"github.com/voxpupuli/openvox-ca/internal/testutil"
 )
 
 var _ = Describe("API security hardening", func() {
@@ -38,7 +39,7 @@ var _ = Describe("API security hardening", func() {
 			// Build a CA whose signed-cert listing is guaranteed to fail with a
 			// path-bearing error: the "signed" entry is a regular file, so
 			// os.ReadDir returns a *PathError containing the temp directory path.
-			tmpDir, err := os.MkdirTemp("", "puppet-ca-leak-test")
+			tmpDir, err := os.MkdirTemp("", "openvox-ca-leak-test")
 			Expect(err).NotTo(HaveOccurred())
 			defer os.RemoveAll(tmpDir)
 
@@ -66,7 +67,7 @@ var _ = Describe("API security hardening", func() {
 			// Unauthenticated endpoint. Force SaveCSR to fail with a path-bearing
 			// error: make the "requests" directory a regular file so the atomic
 			// write inside it returns a *PathError carrying the temp directory.
-			tmpDir, err := os.MkdirTemp("", "puppet-ca-csr-leak-test")
+			tmpDir, err := os.MkdirTemp("", "openvox-ca-csr-leak-test")
 			Expect(err).NotTo(HaveOccurred())
 			defer os.RemoveAll(tmpDir)
 
@@ -96,7 +97,7 @@ var _ = Describe("API security hardening", func() {
 		var leakMux http.Handler
 
 		BeforeEach(func() {
-			tmpDir, err := os.MkdirTemp("", "puppet-ca-bodycap-test")
+			tmpDir, err := os.MkdirTemp("", "openvox-ca-bodycap-test")
 			Expect(err).NotTo(HaveOccurred())
 			DeferCleanup(func() { os.RemoveAll(tmpDir) })
 

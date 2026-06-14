@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Trevor Vaughan
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -27,7 +28,7 @@ import (
 
 	xocsp "golang.org/x/crypto/ocsp"
 
-	"github.com/tvaughan/puppet-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/ca"
 )
 
 // handleOCSP serves RFC 6960 OCSP requests on both the POST and GET endpoints:

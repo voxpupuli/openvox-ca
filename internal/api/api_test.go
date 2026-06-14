@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Trevor Vaughan
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -34,10 +35,10 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/tvaughan/puppet-ca/internal/api"
-	"github.com/tvaughan/puppet-ca/internal/ca"
-	"github.com/tvaughan/puppet-ca/internal/storage"
-	"github.com/tvaughan/puppet-ca/internal/testutil"
+	"github.com/voxpupuli/openvox-ca/internal/api"
+	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/storage"
+	"github.com/voxpupuli/openvox-ca/internal/testutil"
 )
 
 var (
@@ -62,7 +63,7 @@ var _ = Describe("API Workflow", func() {
 
 	BeforeEach(func() {
 		var err error
-		tmpDir, err = os.MkdirTemp("", "puppet-ca-api-test")
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-api-test")
 		Expect(err).NotTo(HaveOccurred())
 
 		store := storage.New(tmpDir)
@@ -640,7 +641,7 @@ var _ = Describe("API Workflow", func() {
 			// Construct a fresh server whose CA has no cert loaded. Without
 			// the readiness guard, the handler would dereference a nil
 			// CACert and panic the entire process.
-			emptyDir, err := os.MkdirTemp("", "puppet-ca-not-ready-test")
+			emptyDir, err := os.MkdirTemp("", "openvox-ca-not-ready-test")
 			Expect(err).NotTo(HaveOccurred())
 			defer os.RemoveAll(emptyDir)
 

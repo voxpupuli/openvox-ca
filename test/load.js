@@ -1,5 +1,5 @@
 /**
- * puppet-ca k6 load test
+ * openvox-ca k6 load test
  *
  * Three goals, one script:
  *   1. Correctness  -- check assertions fail the run if responses are wrong
@@ -18,14 +18,14 @@
  *   4:30  cool-down  --   0 / 0 VUs for 30 s
  *
  * Environment variables:
- *   CA_URL   Base URL of the puppet-ca server (default: http://puppet-ca:8140)
+ *   CA_URL   Base URL of the openvox-ca server (default: http://openvox-ca:8140)
  */
 
 import http from 'k6/http';
 import { check } from 'k6';
 import { Rate } from 'k6/metrics';
 
-const BASE = (__ENV.CA_URL || 'http://puppet-ca:8140') + '/puppet-ca/v1';
+const BASE = (__ENV.CA_URL || 'http://openvox-ca:8140') + '/puppet-ca/v1';
 
 // Custom error-rate metric so thresholds can reference it by name.
 const errors = new Rate('errors');
@@ -149,7 +149,7 @@ export function handleSummary(data) {
       `    cpus:    ${__ENV.REPORT_CPUS   || '(unknown)'}`,
       `    memory:  ${mem}`,
       `    kernel:  ${__ENV.REPORT_KERNEL || '(unknown)'}`,
-      `    ca url:  ${__ENV.CA_URL        || 'http://puppet-ca:8140'}`,
+      `    ca url:  ${__ENV.CA_URL        || 'http://openvox-ca:8140'}`,
     ].join('\n');
   }
 
@@ -160,7 +160,7 @@ export function handleSummary(data) {
   const report = [
     '',
     '╔══════════════════════════════════════════════════════════╗',
-    '║           puppet-ca benchmark test results               ║',
+    '║           openvox-ca benchmark test results               ║',
     '╚══════════════════════════════════════════════════════════╝',
     `  duration: ${min}m ${sec}s`,
     '',
@@ -181,7 +181,7 @@ export function handleSummary(data) {
 }
 
 export function workflowScenario() {
-  // Subject must match ^[a-z0-9._-]+$ (puppet-ca validation rule).
+  // Subject must match ^[a-z0-9._-]+$ (openvox-ca validation rule).
   const subject = `bench-vu${__VU}-i${__ITER}.puppet.test`;
   let ok = true;
 

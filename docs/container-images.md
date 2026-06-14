@@ -11,11 +11,11 @@ Container Registry (GHCR).
 
 Both variants are built for `linux/amd64` and `linux/arm64` and published as a
 single multi-arch manifest per variant. The image name follows the repository:
-`ghcr.io/<owner>/golang-puppet-ca`.
+`ghcr.io/<owner>/openvox-ca`.
 
 ```console
-$ docker pull ghcr.io/<owner>/golang-puppet-ca:latest          # CentOS Stream
-$ docker pull ghcr.io/<owner>/golang-puppet-ca:latest-alpine   # Alpine
+$ docker pull ghcr.io/<owner>/openvox-ca:latest          # CentOS Stream
+$ docker pull ghcr.io/<owner>/openvox-ca:latest-alpine   # Alpine
 ```
 
 ## When images are built
@@ -47,7 +47,7 @@ validation builds will still work (they don't push).
 2. **Publish a release to create the package, then set its visibility.**
    The GHCR package is created on the first successful push and is **private**
    by default. To make the images publicly pullable: your profile/org →
-   *Packages* → `golang-puppet-ca` → *Package settings* → *Change visibility* →
+   *Packages* → `openvox-ca` → *Package settings* → *Change visibility* →
    **Public**. The package is automatically linked to this repository via the
    `org.opencontainers.image.source` label.
 

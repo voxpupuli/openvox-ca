@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Trevor Vaughan
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -14,22 +15,16 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-package main
+package signer
 
 import (
-	"io"
 	"testing"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
-// TestRootRejectsPositionalArgs verifies the root command rejects stray
-// positional arguments instead of silently ignoring them. The bug fix sets
-// Args: cobra.NoArgs on the root command.
-func TestRootRejectsPositionalArgs(t *testing.T) {
-	cmd := newRootCmd()
-	cmd.SetArgs([]string{"stray-arg", "--cadir", t.TempDir()})
-	cmd.SetOut(io.Discard)
-	cmd.SetErr(io.Discard)
-	if err := cmd.Execute(); err == nil {
-		t.Fatal("expected error for unexpected positional arg, got nil")
-	}
+func TestSigner(t *testing.T) {
+	RegisterFailHandler(Fail)
+	RunSpecs(t, "Signer Suite")
 }

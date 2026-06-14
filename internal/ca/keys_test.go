@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Trevor Vaughan
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -28,9 +29,9 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/tvaughan/puppet-ca/internal/ca"
-	"github.com/tvaughan/puppet-ca/internal/storage"
-	"github.com/tvaughan/puppet-ca/internal/testutil"
+	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/storage"
+	"github.com/voxpupuli/openvox-ca/internal/testutil"
 )
 
 // --- ValidateKeyConfig ---
@@ -79,7 +80,7 @@ var _ = Describe("CA Bootstrap key algorithms", func() {
 
 	BeforeEach(func() {
 		var err error
-		tmpDir, err = os.MkdirTemp("", "puppet-ca-keyalgo-test")
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-keyalgo-test")
 		Expect(err).NotTo(HaveOccurred())
 		store = storage.New(tmpDir)
 		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "keys.test")
@@ -175,7 +176,7 @@ var _ = Describe("CA Bootstrap subject fields", func() {
 
 	BeforeEach(func() {
 		var err error
-		tmpDir, err = os.MkdirTemp("", "puppet-ca-subject-test")
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-subject-test")
 		Expect(err).NotTo(HaveOccurred())
 		store = storage.New(tmpDir)
 		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "subject.test")
@@ -237,7 +238,7 @@ var _ = Describe("Generate with LeafKeyConfig", func() {
 
 	BeforeEach(func() {
 		var err error
-		tmpDir, err = os.MkdirTemp("", "puppet-ca-leafkey-test")
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-leafkey-test")
 		Expect(err).NotTo(HaveOccurred())
 
 		store = storage.New(tmpDir)
@@ -304,7 +305,7 @@ var _ = Describe("CA Bootstrap path length constraint", func() {
 
 	BeforeEach(func() {
 		var err error
-		tmpDir, err = os.MkdirTemp("", "puppet-ca-pathlen-test")
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-pathlen-test")
 		Expect(err).NotTo(HaveOccurred())
 		store = storage.New(tmpDir)
 		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "pathlen.test")
@@ -357,7 +358,7 @@ var _ = Describe("CA certificate validity period", func() {
 
 	BeforeEach(func() {
 		var err error
-		tmpDir, err = os.MkdirTemp("", "puppet-ca-cavalid-test")
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-cavalid-test")
 		Expect(err).NotTo(HaveOccurred())
 		store = storage.New(tmpDir)
 		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "cavalid.test")
@@ -401,7 +402,7 @@ var _ = Describe("Leaf certificate validity period", func() {
 
 	BeforeEach(func() {
 		var err error
-		tmpDir, err = os.MkdirTemp("", "puppet-ca-leafvalid-test")
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-leafvalid-test")
 		Expect(err).NotTo(HaveOccurred())
 		store = storage.New(tmpDir)
 		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "leafvalid.test")
@@ -471,7 +472,7 @@ var _ = Describe("Leaf certificate validity period", func() {
 
 var _ = Describe("loadCA key/cert mismatch", func() {
 	It("Init fails when the CA private key does not match the CA certificate", func() {
-		tmpDir, err := os.MkdirTemp("", "puppet-ca-mismatch-test")
+		tmpDir, err := os.MkdirTemp("", "openvox-ca-mismatch-test")
 		Expect(err).NotTo(HaveOccurred())
 		defer os.RemoveAll(tmpDir)
 
@@ -499,7 +500,7 @@ var _ = Describe("loadCA key/cert mismatch", func() {
 
 var _ = Describe("ImportCA ECDSA", func() {
 	It("imports an ECDSA CA cert/key pair", func() {
-		tmpDir, err := os.MkdirTemp("", "puppet-ca-import-ecdsa-test")
+		tmpDir, err := os.MkdirTemp("", "openvox-ca-import-ecdsa-test")
 		Expect(err).NotTo(HaveOccurred())
 		defer os.RemoveAll(tmpDir)
 
@@ -530,7 +531,7 @@ var _ = Describe("ImportCA ECDSA", func() {
 	})
 
 	It("rejects an ECDSA cert paired with a mismatched key", func() {
-		tmpDir, err := os.MkdirTemp("", "puppet-ca-import-ecdsa-mismatch-test")
+		tmpDir, err := os.MkdirTemp("", "openvox-ca-import-ecdsa-mismatch-test")
 		Expect(err).NotTo(HaveOccurred())
 		defer os.RemoveAll(tmpDir)
 

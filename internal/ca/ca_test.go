@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Trevor Vaughan
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -35,9 +36,9 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/tvaughan/puppet-ca/internal/ca"
-	"github.com/tvaughan/puppet-ca/internal/storage"
-	"github.com/tvaughan/puppet-ca/internal/testutil"
+	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/storage"
+	"github.com/voxpupuli/openvox-ca/internal/testutil"
 )
 
 var (
@@ -62,7 +63,7 @@ var _ = Describe("CA Lifecycle", func() {
 
 	BeforeEach(func() {
 		var err error
-		tmpDir, err = os.MkdirTemp("", "puppet-ca-test")
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-test")
 		Expect(err).NotTo(HaveOccurred())
 
 		store = storage.New(tmpDir)
@@ -111,7 +112,7 @@ var _ = Describe("CA Lifecycle", func() {
 
 		BeforeEach(func() {
 			var err error
-			rawDir, err = os.MkdirTemp("", "puppet-ca-uninit-test")
+			rawDir, err = os.MkdirTemp("", "openvox-ca-uninit-test")
 			Expect(err).NotTo(HaveOccurred())
 			rawStore = storage.New(rawDir)
 			Expect(rawStore.EnsureDirs(context.Background())).To(Succeed())
@@ -160,7 +161,7 @@ var _ = Describe("CA Lifecycle", func() {
 
 		BeforeEach(func() {
 			var err error
-			seedDir, err = os.MkdirTemp("", "puppet-ca-seed-test")
+			seedDir, err = os.MkdirTemp("", "openvox-ca-seed-test")
 			Expect(err).NotTo(HaveOccurred())
 			seedStore = storage.New(seedDir)
 			Expect(seedStore.EnsureDirs(context.Background())).To(Succeed())
@@ -362,7 +363,7 @@ var _ = Describe("CA TTL capping", func() {
 
 	BeforeEach(func() {
 		var err error
-		tmpDir, err = os.MkdirTemp("", "puppet-ca-ttl-test")
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-ttl-test")
 		Expect(err).NotTo(HaveOccurred())
 
 		store = storage.New(tmpDir)
@@ -430,7 +431,7 @@ var _ = Describe("CA tampered CSR rejection", func() {
 
 	BeforeEach(func() {
 		var err error
-		tmpDir, err = os.MkdirTemp("", "puppet-ca-tamper-test")
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-tamper-test")
 		Expect(err).NotTo(HaveOccurred())
 
 		store = storage.New(tmpDir)
@@ -474,7 +475,7 @@ var _ = Describe("CA tampered CSR rejection", func() {
 
 var _ = Describe("CA Bootstrap", func() {
 	It("bootstraps a new CA when no files exist", func() {
-		tmpDir, err := os.MkdirTemp("", "puppet-ca-bootstrap-test")
+		tmpDir, err := os.MkdirTemp("", "openvox-ca-bootstrap-test")
 		Expect(err).NotTo(HaveOccurred())
 		defer os.RemoveAll(tmpDir)
 
@@ -495,7 +496,7 @@ var _ = Describe("CA Bootstrap", func() {
 	})
 
 	It("bootstraps a new ECDSA CA when configured with KeyAlgoECDSA", func() {
-		tmpDir, err := os.MkdirTemp("", "puppet-ca-bootstrap-ecdsa-test")
+		tmpDir, err := os.MkdirTemp("", "openvox-ca-bootstrap-ecdsa-test")
 		Expect(err).NotTo(HaveOccurred())
 		defer os.RemoveAll(tmpDir)
 
@@ -527,7 +528,7 @@ var _ = Describe("CA Revocation", func() {
 
 	BeforeEach(func() {
 		var err error
-		tmpDir, err = os.MkdirTemp("", "puppet-ca-revoke-test")
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-revoke-test")
 		Expect(err).NotTo(HaveOccurred())
 
 		store = storage.New(tmpDir)
@@ -619,7 +620,7 @@ var _ = Describe("CA SaveRequest edge cases", func() {
 
 	BeforeEach(func() {
 		var err error
-		tmpDir, err = os.MkdirTemp("", "puppet-ca-savereq-test")
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-savereq-test")
 		Expect(err).NotTo(HaveOccurred())
 
 		store = storage.New(tmpDir)
@@ -706,7 +707,7 @@ var _ = Describe("CA Autosign", func() {
 
 	BeforeEach(func() {
 		var err error
-		tmpDir, err = os.MkdirTemp("", "puppet-ca-autosign-test")
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-autosign-test")
 		Expect(err).NotTo(HaveOccurred())
 		store = storage.New(tmpDir)
 		Expect(store.EnsureDirs(context.Background())).To(Succeed())
@@ -839,7 +840,7 @@ var _ = Describe("CA sign rejects CA:TRUE extension", func() {
 
 	BeforeEach(func() {
 		var err error
-		tmpDir, err = os.MkdirTemp("", "puppet-ca-catrue-test")
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-catrue-test")
 		Expect(err).NotTo(HaveOccurred())
 
 		store := storage.New(tmpDir)
@@ -924,7 +925,7 @@ var _ = Describe("Issued certificate properties (issue #8)", func() {
 
 	BeforeEach(func() {
 		var err error
-		tmpDir, err = os.MkdirTemp("", "puppet-ca-issue8-test")
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-issue8-test")
 		Expect(err).NotTo(HaveOccurred())
 	})
 
@@ -1009,7 +1010,7 @@ var _ = Describe("Issued certificate properties (issue #8)", func() {
 		// Sign two certs and verify the serials are different.
 		cert1, _ := newIssuedCert(tmpDir, "serial-node-1")
 
-		tmpDir2, err := os.MkdirTemp("", "puppet-ca-issue8-serial-test2")
+		tmpDir2, err := os.MkdirTemp("", "openvox-ca-issue8-serial-test2")
 		Expect(err).NotTo(HaveOccurred())
 		defer os.RemoveAll(tmpDir2)
 		cert2, _ := newIssuedCert(tmpDir2, "serial-node-2")
@@ -1026,12 +1027,17 @@ var _ = Describe("Issued certificate properties (issue #8)", func() {
 			"serial number must be positive")
 		Expect(cert.SerialNumber.BitLen()).To(BeNumerically("<=", 128),
 			"serial number must fit within 128 bits")
+		// Guard against a regression that shrinks the serial to a handful of
+		// bits: a 128-bit random serial is >= 2^120 with overwhelming
+		// probability, so >= 64 is a safe, non-flaky lower bound on entropy.
+		Expect(cert.SerialNumber.BitLen()).To(BeNumerically(">=", 64),
+			"serial number must carry real entropy, not a tiny value")
 	})
 
 	// --- CRL Distribution Points ---
 
 	It("embeds CRL Distribution Points when CRLURLs is configured", func() {
-		crlURL := "http://puppet-ca:8140/puppet-ca/v1/certificate_revocation_list/ca"
+		crlURL := "http://openvox-ca:8140/puppet-ca/v1/certificate_revocation_list/ca"
 
 		store := storage.New(tmpDir)
 		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
@@ -1110,7 +1116,7 @@ var _ = Describe("loadCA key format support", func() {
 
 	BeforeEach(func() {
 		var err error
-		tmpDir, err = os.MkdirTemp("", "puppet-ca-loadca-test")
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-loadca-test")
 		Expect(err).NotTo(HaveOccurred())
 		store = storage.New(tmpDir)
 		Expect(store.EnsureDirs(context.Background())).To(Succeed())
@@ -1210,7 +1216,7 @@ var _ = Describe("CA expired cert guard", func() {
 
 	BeforeEach(func() {
 		var err error
-		tmpDir, err = os.MkdirTemp("", "puppet-ca-expired-test")
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-expired-test")
 		Expect(err).NotTo(HaveOccurred())
 
 		store = storage.New(tmpDir)
@@ -1269,7 +1275,7 @@ var _ = Describe("CA Clean", func() {
 
 	BeforeEach(func() {
 		var err error
-		tmpDir, err = os.MkdirTemp("", "puppet-ca-clean-test")
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-clean-test")
 		Expect(err).NotTo(HaveOccurred())
 
 		store = storage.New(tmpDir)
@@ -1336,7 +1342,7 @@ var _ = Describe("CA bulk signing (SignMultiple and SignAll)", func() {
 
 	BeforeEach(func() {
 		var err error
-		tmpDir, err = os.MkdirTemp("", "puppet-ca-bulk-test")
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-bulk-test")
 		Expect(err).NotTo(HaveOccurred())
 
 		store = storage.New(tmpDir)
@@ -1441,7 +1447,7 @@ var _ = Describe("CA ImportCA", func() {
 
 	BeforeEach(func() {
 		var err error
-		tmpDir, err = os.MkdirTemp("", "puppet-ca-import-test")
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-import-test")
 		Expect(err).NotTo(HaveOccurred())
 		store = storage.New(tmpDir)
 	})
@@ -1549,7 +1555,7 @@ var _ = Describe("Concurrent SaveRequest", func() {
 
 	BeforeEach(func() {
 		var err error
-		tmpDir, err = os.MkdirTemp("", "puppet-ca-concurrent-test")
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-concurrent-test")
 		Expect(err).NotTo(HaveOccurred())
 
 		store = storage.New(tmpDir)

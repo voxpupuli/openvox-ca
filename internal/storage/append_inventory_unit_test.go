@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Trevor Vaughan
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -19,8 +20,9 @@ package storage
 import (
 	"context"
 	"errors"
-	"os"
-	"testing"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
 // hmacPutFailBackend wraps a real FilesystemBackend but can be armed to fail
@@ -39,36 +41,30 @@ func (b *hmacPutFailBackend) Put(ctx context.Context, key string, data []byte, k
 	return b.FilesystemBackend.Put(ctx, key, data, kind)
 }
 
-// TestAppendInventorySurfacesHMACUpdateFailure proves that when the inventory
-// line is durably appended but the subsequent HMAC update fails, AppendInventory
-// returns a non-nil error instead of silently downgrading it to a warning.
-// Swallowing the error leaves the inventory and its stored HMAC inconsistent,
-// so the next ReadInventory would falsely report tampering.
-func TestAppendInventorySurfacesHMACUpdateFailure(t *testing.T) {
-	dir, err := os.MkdirTemp("", "puppet-ca-append-hmac-fail")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
+var _ = Describe("AppendInventory HMAC update failure", func() {
+	// Proves that when the inventory line is durably appended but the
+	// subsequent HMAC update fails, AppendInventory returns a non-nil error
+	// instead of silently downgrading it to a warning. Swallowing the error
+	// leaves the inventory and its stored HMAC inconsistent, so the next
+	// ReadInventory would falsely report tampering.
+	It("surfaces the HMAC update failure", func() {
+		dir := GinkgoT().TempDir()
 
-	be := &hmacPutFailBackend{FilesystemBackend: NewFilesystemBackend(dir)}
-	svc := NewWithBackend(be, "")
+		be := &hmacPutFailBackend{FilesystemBackend: NewFilesystemBackend(dir)}
+		svc := NewWithBackend(be, "")
 
-	ctx := context.Background()
-	if err := svc.EnsureDirs(ctx); err != nil {
-		t.Fatalf("EnsureDirs: %v", err)
-	}
-	if err := svc.TouchInventory(ctx); err != nil {
-		t.Fatalf("TouchInventory: %v", err)
-	}
-	if err := svc.InitHMAC(ctx); err != nil {
-		t.Fatalf("InitHMAC: %v", err)
-	}
+		ctx := context.Background()
+		err := svc.EnsureDirs(ctx)
+		Expect(err).NotTo(HaveOccurred(), "EnsureDirs: %v", err)
+		err = svc.TouchInventory(ctx)
+		Expect(err).NotTo(HaveOccurred(), "TouchInventory: %v", err)
+		err = svc.InitHMAC(ctx)
+		Expect(err).NotTo(HaveOccurred(), "InitHMAC: %v", err)
 
-	// Arm the failure only now, so init succeeded and hmacKey is set.
-	be.failHMACPut = true
+		// Arm the failure only now, so init succeeded and hmacKey is set.
+		be.failHMACPut = true
 
-	if err := svc.AppendInventory(ctx, "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1"); err == nil {
-		t.Fatal("AppendInventory returned nil; want a non-nil error when the HMAC update fails")
-	}
-}
+		err = svc.AppendInventory(ctx, "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1")
+		Expect(err).To(HaveOccurred(), "AppendInventory returned nil; want a non-nil error when the HMAC update fails")
+	})
+})

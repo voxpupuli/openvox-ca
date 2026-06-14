@@ -1,5 +1,6 @@
 // Copyright (C) 2026 Trevor Vaughan
 // Copyright (C) 2026 Chris Boot
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -34,7 +35,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tvaughan/puppet-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/ca"
 )
 
 // maxJSONBody caps the size of JSON request bodies accepted by the POST/PUT

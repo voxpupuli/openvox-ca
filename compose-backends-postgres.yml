@@ -9,7 +9,7 @@
 #
 # The `mage test:backendsPostgres` target automates the up / test / down cycle.
 
-name: puppet-ca-backends-postgres
+name: openvox-ca-backends-postgres
 
 services:
   postgres:

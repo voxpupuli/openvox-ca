@@ -5,7 +5,7 @@
 #   # or: go build -o bin/ ./cmd/...
 #
 # Then build this image:
-#   podman build -f Dockerfile.run -t puppet-ca:latest .
+#   podman build -f Dockerfile.run -t openvox-ca:latest .
 #
 # Integration test targets (mage test:integCompose, etc.) handle
 # both steps automatically.
@@ -19,8 +19,8 @@ RUN dnf install -y curl openssl && dnf clean all && \
     mkdir -p /etc/puppetlabs/puppet/ssl/ca /etc/puppet-ca /data && \
     chown -R puppet:puppet /etc/puppetlabs/puppet /etc/puppet-ca /data
 
-COPY bin/puppet-ca     /usr/local/bin/puppet-ca
-COPY bin/puppet-ca-ctl /usr/local/bin/puppet-ca-ctl
+COPY bin/openvox-ca     /usr/local/bin/openvox-ca
+COPY bin/openvox-ca-ctl /usr/local/bin/openvox-ca-ctl
 
 USER puppet
 EXPOSE 8140
@@ -28,6 +28,6 @@ EXPOSE 8140
 # NOTE: autosign is OFF by default. Set --autosign-config=true only in
 # dev/test environments. Autosign lets any CSR submitter obtain a signed
 # certificate without operator review.
-ENTRYPOINT ["/usr/local/bin/puppet-ca"]
+ENTRYPOINT ["/usr/local/bin/openvox-ca"]
 CMD ["--cadir=/etc/puppetlabs/puppet/ssl/ca", \
      "--verbosity=1"]

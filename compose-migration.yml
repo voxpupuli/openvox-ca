@@ -1,13 +1,13 @@
-# Migration integration test: OpenVox Server CA -> puppet-ca.
+# Migration integration test: OpenVox Server CA -> openvox-ca.
 #
 # Topology
 # --------
 #   old-puppet   - OpenVox Server (JVM, drop-in puppetserver) with its own
 #                  built-in CA.  Bootstraps a genuine Puppet-compatible CA
 #                  and autosigns agent CSRs.
-#   test-runner  - puppet-ca + puppet-ca-ctl image.  Waits for old-puppet to
+#   test-runner  - openvox-ca + openvox-ca-ctl image.  Waits for old-puppet to
 #                  become healthy, submits CSRs, then imports the CA material
-#                  into puppet-ca and verifies everything still works.
+#                  into openvox-ca and verifies everything still works.
 #
 # The test exercises the real migration path documented in
 # docs/migrating-from-puppet-server.md.  OpenVox Server is wire-compatible
@@ -19,7 +19,7 @@
 #   podman-compose -f compose-migration.yml up --build \
 #       --exit-code-from test-runner --abort-on-container-exit
 
-name: puppet-ca-migration
+name: openvox-ca-migration
 
 services:
 
@@ -54,7 +54,7 @@ services:
       retries: 30
       start_period: 120s
 
-  # -- Test runner (puppet-ca image, runs migration test script) ------------─
+  # -- Test runner (openvox-ca image, runs migration test script) ------------─
   # Runs as root so it can read the old CA files (VoxPupuli creates them
   # 0600 root:root).  The test script copies them to a writable temp dir
   # before use, same as a real migration where an admin would scp/rsync.
@@ -62,7 +62,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.run
-    image: puppet-ca-integ:latest
+    image: openvox-ca-integ:latest
     user: "0:0"
     depends_on:
       old-puppet:

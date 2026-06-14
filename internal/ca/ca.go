@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Trevor Vaughan
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -22,7 +23,7 @@ import (
 	"crypto/x509"
 	"sync"
 
-	"github.com/tvaughan/puppet-ca/internal/storage"
+	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
 
 // CASubjectConfig holds optional X.509 subject fields for a bootstrapped CA

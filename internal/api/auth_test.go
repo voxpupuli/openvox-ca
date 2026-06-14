@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Trevor Vaughan
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -35,10 +36,10 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/tvaughan/puppet-ca/internal/api"
-	"github.com/tvaughan/puppet-ca/internal/ca"
-	"github.com/tvaughan/puppet-ca/internal/storage"
-	"github.com/tvaughan/puppet-ca/internal/testutil"
+	"github.com/voxpupuli/openvox-ca/internal/api"
+	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/storage"
+	"github.com/voxpupuli/openvox-ca/internal/testutil"
 )
 
 // issueClientCert creates a leaf cert with the given CN, signed by caCert/caKey,
@@ -109,7 +110,7 @@ var _ = Describe("Auth Middleware", func() {
 
 	BeforeEach(func() {
 		var err error
-		tmpDir, err = os.MkdirTemp("", "puppet-ca-auth-test")
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-auth-test")
 		Expect(err).NotTo(HaveOccurred())
 
 		store = storage.New(tmpDir)
@@ -813,7 +814,7 @@ var _ = Describe("Auth Middleware", func() {
 	Context("CSR-injected pp_cli_auth does not grant admin after autosign (attack path blocked)", func() {
 		It("denies admin access for a cert autosigned from a CSR containing pp_cli_auth", func() {
 			// Stand up a CA with autosign=true to simulate the attack path.
-			escalationDir, err := os.MkdirTemp("", "puppet-ca-escalation-test")
+			escalationDir, err := os.MkdirTemp("", "openvox-ca-escalation-test")
 			Expect(err).NotTo(HaveOccurred())
 			defer os.RemoveAll(escalationDir)
 			autosignStore := storage.New(escalationDir)
@@ -955,7 +956,7 @@ var _ = Describe("lookupTier classification", func() {
 
 	BeforeEach(func() {
 		var err error
-		tmpDir, err = os.MkdirTemp("", "puppet-ca-tier-test")
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-tier-test")
 		Expect(err).NotTo(HaveOccurred())
 
 		store = storage.New(tmpDir)

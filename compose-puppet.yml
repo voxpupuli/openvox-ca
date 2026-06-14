@@ -1,8 +1,8 @@
-# Full Puppet stack integration test topology for puppet-ca.
+# Full Puppet stack integration test topology for openvox-ca.
 #
 # Services
 # --------
-#   puppet-ca      - Go CA with TLS enabled (two-phase bootstrap; see
+#   openvox-ca      - Go CA with TLS enabled (two-phase bootstrap; see
 #                    docker/puppet/ca-entrypoint.sh).
 #   puppet-master  - OpenVox 8 WEBrick master with PuppetDB integration.
 #   postgres       - PostgreSQL 17 backend for OpenVoxDB.
@@ -17,23 +17,23 @@
 #
 # TLS notes
 # ---------
-# The CA runs with a proper TLS cert (CN=puppet-ca, signed by the CA itself).
+# The CA runs with a proper TLS cert (CN=openvox-ca, signed by the CA itself).
 # All services verify the CA's TLS cert against ca_crt.pem after the initial
 # insecure bootstrap fetch.  No service uses --no-tls-required.
 
-name: puppet-ca-puppet
+name: openvox-ca-puppet
 
 services:
 
   # -- Go CA (TLS enabled) ------------------------------------------------─
-  puppet-ca:
+  openvox-ca:
     build:
       context: .
       dockerfile: Dockerfile.run
-    image: puppet-ca-integ:latest
-    hostname: puppet-ca
+    image: openvox-ca-integ:latest
+    hostname: openvox-ca
     # Override the default ENTRYPOINT with a two-phase bootstrap script that
-    # first generates a TLS cert for the "puppet-ca" hostname, then restarts
+    # first generates a TLS cert for the "openvox-ca" hostname, then restarts
     # the CA with TLS on all interfaces.
     entrypoint: ["/bin/bash", "/etc/puppet-ca/entrypoint.sh"]
     volumes:
@@ -63,7 +63,7 @@ services:
     environment:
       # entrypoint.sh uses PUPPET_FQDN as the cert CN so it is predictable.
       - PUPPET_FQDN=puppet-master
-      - PUPPET_CA_HOST=puppet-ca
+      - PUPPET_CA_HOST=openvox-ca
       - PUPPET_CA_PORT=8140
       - OPENVOXDB_HOST=openvoxdb
       - OPENVOXDB_PORT=8081
@@ -75,7 +75,7 @@ services:
     ports:
       - "8140:8140"
     depends_on:
-      puppet-ca:
+      openvox-ca:
         # service_started (not service_healthy) so that `compose up -d` returns
         # immediately; the entrypoint.sh bootstraps its own wait loop for the CA.
         condition: service_started
@@ -115,7 +115,7 @@ services:
       OPENVOXSERVER_PORT: "8140"
       CERTNAME: openvoxdb
       # Go CA HTTPS endpoint for cert bootstrap.
-      PUPPET_CA_HOST: puppet-ca
+      PUPPET_CA_HOST: openvox-ca
       PUPPET_CA_PORT: "8140"
       OPENVOXDB_POSTGRES_HOSTNAME: postgres
       OPENVOXDB_POSTGRES_PORT: "5432"

@@ -1,4 +1,4 @@
-module github.com/tvaughan/puppet-ca
+module github.com/voxpupuli/openvox-ca
 
 go 1.25.8
 

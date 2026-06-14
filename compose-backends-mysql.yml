@@ -10,7 +10,7 @@
 # The `mage test:backendsMySQL` target automates the up / test / down cycle.
 # MariaDB is wire-compatible; swap the image for docker.io/mariadb:11 to test it.
 
-name: puppet-ca-backends-mysql
+name: openvox-ca-backends-mysql
 
 services:
   mysql:

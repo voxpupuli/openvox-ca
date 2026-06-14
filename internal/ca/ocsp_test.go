@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Trevor Vaughan
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -28,9 +29,9 @@ import (
 	. "github.com/onsi/gomega"
 	xocsp "golang.org/x/crypto/ocsp"
 
-	"github.com/tvaughan/puppet-ca/internal/ca"
-	"github.com/tvaughan/puppet-ca/internal/storage"
-	"github.com/tvaughan/puppet-ca/internal/testutil"
+	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/storage"
+	"github.com/voxpupuli/openvox-ca/internal/testutil"
 )
 
 // setupOCSPCA creates and initialises a CA backed by dir, pre-seeded with the
@@ -65,7 +66,7 @@ var _ = Describe("OCSP Responder", func() {
 
 	BeforeEach(func() {
 		var err error
-		tmpDir, err = os.MkdirTemp("", "puppet-ca-ocsp-test")
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-ocsp-test")
 		Expect(err).NotTo(HaveOccurred())
 		myCA = setupOCSPCA(tmpDir)
 	})
@@ -361,7 +362,7 @@ var _ = Describe("OCSP Responder", func() {
 
 	It("embeds the OCSP URL in the AIA extension when OCSPURLs is set", func() {
 		// Create a second CA instance in a fresh temp dir with OCSPURLs set.
-		aiaDir, err := os.MkdirTemp("", "puppet-ca-aia-test")
+		aiaDir, err := os.MkdirTemp("", "openvox-ca-aia-test")
 		Expect(err).NotTo(HaveOccurred())
 		defer os.RemoveAll(aiaDir)
 

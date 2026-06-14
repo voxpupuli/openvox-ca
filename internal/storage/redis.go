@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Chris Boot
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -470,7 +471,7 @@ func (b *RedisBackend) ModTime(ctx context.Context, key string) (time.Time, erro
 //
 // NB: Redis replication under Sentinel is asynchronous, so an in-flight
 // failover can theoretically release a lock we still believe we hold.
-// For `puppet-ca`'s workloads (CRL rotation, bootstrap, per-subject CSR
+// For `openvox-ca`'s workloads (CRL rotation, bootstrap, per-subject CSR
 // serialisation) this narrow window is acceptable; operators needing
 // stricter guarantees should prefer the etcd backend.
 func (b *RedisBackend) AcquireLock(ctx context.Context, name string) (Unlocker, error) {

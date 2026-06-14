@@ -1,20 +1,20 @@
-# Full Puppet stack integration test topology, but with puppet-ca configured
+# Full Puppet stack integration test topology, but with openvox-ca configured
 # to use the Redis (Valkey-compatible) storage backend.
 #
 # Mirrors compose-puppet.yml so the two suites can run in parallel without
 # stomping on each other (distinct project name, distinct host port mappings,
-# distinct named volumes). The puppet-ca, puppet-master, openvoxdb, postgres
+# distinct named volumes). The openvox-ca, puppet-master, openvoxdb, postgres
 # and puppet-client services are functionally identical to compose-puppet.yml
-# -- only puppet-ca's storage configuration changes, and a new "redis" service
+# -- only openvox-ca's storage configuration changes, and a new "redis" service
 # is added.
 #
 # Services
 # --------
 #   redis          - Vanilla Redis 7 instance used as the CA's storage backend.
-#   puppet-ca      - Primary Go CA. storage-backend=redis. Used by the master
+#   openvox-ca      - Primary Go CA. storage-backend=redis. Used by the master
 #                    and client as the CA endpoint (so the existing puppet-stack
 #                    TAP suite runs unchanged against this replica).
-#   puppet-ca-2    - Second CA replica sharing the same Redis prefix. Exists to
+#   openvox-ca-2    - Second CA replica sharing the same Redis prefix. Exists to
 #                    exercise the distributed bootstrap lock, the cross-replica
 #                    AppendLine concurrency path, and to prove the storage
 #                    layer is the actual single source of truth (a CSR signed
@@ -31,7 +31,7 @@
 #
 # The test suite is in test/backends/redis-stack.sh.
 
-name: puppet-ca-backends-redis
+name: openvox-ca-backends-redis
 
 services:
 
@@ -54,34 +54,34 @@ services:
 
   # -- Go CA replica 1 (TLS enabled, storage = redis) ---------------------─
   # This is the CA the master/client/openvoxdb talk to. Its TLS service cert
-  # has CN=puppet-ca so the existing puppet-stack TAP assertions work without
+  # has CN=openvox-ca so the existing puppet-stack TAP assertions work without
   # modification.
-  puppet-ca:
+  openvox-ca:
     build:
       context: .
       dockerfile: Dockerfile.run
-    image: puppet-ca-integ:latest
-    hostname: puppet-ca
+    image: openvox-ca-integ:latest
+    hostname: openvox-ca
     # Redis-aware bootstrap entrypoint. Differs from the filesystem variant
-    # in that it captures the TLS cert from puppet-ca-ctl stdout instead of
-    # reading <cadir>/signed/puppet-ca.pem (which only exists for the
+    # in that it captures the TLS cert from openvox-ca-ctl stdout instead of
+    # reading <cadir>/signed/openvox-ca.pem (which only exists for the
     # filesystem backend).
     entrypoint: ["/bin/bash", "/etc/puppet-ca/entrypoint.sh"]
     environment:
-      # Storage backend selection (consumed by cmd/puppet-ca/config.go).
+      # Storage backend selection (consumed by cmd/openvox-ca/config.go).
       - PUPPET_CA_STORAGE_BACKEND=redis
       - PUPPET_CA_REDIS_ADDRS=redis:6379
       # Both CA replicas share this prefix -- that's the whole point of the
       # multi-replica test: prove they see the same state.
-      - PUPPET_CA_REDIS_KEY_PREFIX=puppet-ca-integ
+      - PUPPET_CA_REDIS_KEY_PREFIX=openvox-ca-integ
       # Used by ca-entrypoint-redis.sh.
       - PUPPET_CA_REDIS_HOST=redis
       - PUPPET_CA_REDIS_PORT=6379
-      - PUPPET_CA_HOSTNAME=puppet-ca
-      - PUPPET_CA_DNS_ALT_NAMES=puppet-ca,localhost
+      - PUPPET_CA_HOSTNAME=openvox-ca
+      - PUPPET_CA_DNS_ALT_NAMES=openvox-ca,localhost
       # Authorise replica 2's service cert as a peer admin so cross-replica
       # admin calls work in tests.
-      - PUPPET_CA_PEER_HOSTNAMES=puppet-ca-2
+      - PUPPET_CA_PEER_HOSTNAMES=openvox-ca-2
     volumes:
       - ./docker/puppet/ca-entrypoint-redis.sh:/etc/puppet-ca/entrypoint.sh:ro,z
       - ca-data-redis:/data
@@ -101,25 +101,25 @@ services:
       start_period: 30s
 
   # -- Go CA replica 2 (same Redis prefix) -------------------------------─
-  # Started simultaneously with puppet-ca to exercise the distributed
+  # Started simultaneously with openvox-ca to exercise the distributed
   # bootstrap lock. Once running, redis-stack.sh's Phase 2 talks to it
   # directly to confirm it serves the same blobs as replica 1.
-  puppet-ca-2:
+  openvox-ca-2:
     build:
       context: .
       dockerfile: Dockerfile.run
-    image: puppet-ca-integ:latest
-    hostname: puppet-ca-2
+    image: openvox-ca-integ:latest
+    hostname: openvox-ca-2
     entrypoint: ["/bin/bash", "/etc/puppet-ca/entrypoint.sh"]
     environment:
       - PUPPET_CA_STORAGE_BACKEND=redis
       - PUPPET_CA_REDIS_ADDRS=redis:6379
-      - PUPPET_CA_REDIS_KEY_PREFIX=puppet-ca-integ
+      - PUPPET_CA_REDIS_KEY_PREFIX=openvox-ca-integ
       - PUPPET_CA_REDIS_HOST=redis
       - PUPPET_CA_REDIS_PORT=6379
-      - PUPPET_CA_HOSTNAME=puppet-ca-2
-      - PUPPET_CA_DNS_ALT_NAMES=puppet-ca-2,localhost
-      - PUPPET_CA_PEER_HOSTNAMES=puppet-ca
+      - PUPPET_CA_HOSTNAME=openvox-ca-2
+      - PUPPET_CA_DNS_ALT_NAMES=openvox-ca-2,localhost
+      - PUPPET_CA_PEER_HOSTNAMES=openvox-ca
     volumes:
       - ./docker/puppet/ca-entrypoint-redis.sh:/etc/puppet-ca/entrypoint.sh:ro,z
       # Distinct named volume: per-subject leaf private keys are local on each
@@ -148,7 +148,7 @@ services:
     hostname: puppet-master
     environment:
       - PUPPET_FQDN=puppet-master
-      - PUPPET_CA_HOST=puppet-ca
+      - PUPPET_CA_HOST=openvox-ca
       - PUPPET_CA_PORT=8140
       - OPENVOXDB_HOST=openvoxdb
       - OPENVOXDB_PORT=8081
@@ -160,7 +160,7 @@ services:
     ports:
       - "8240:8140"
     depends_on:
-      puppet-ca:
+      openvox-ca:
         condition: service_started
     healthcheck:
       test: ["CMD-SHELL",
@@ -195,7 +195,7 @@ services:
       OPENVOXSERVER_HOSTNAME: puppet-master
       OPENVOXSERVER_PORT: "8140"
       CERTNAME: openvoxdb
-      PUPPET_CA_HOST: puppet-ca
+      PUPPET_CA_HOST: openvox-ca
       PUPPET_CA_PORT: "8140"
       OPENVOXDB_POSTGRES_HOSTNAME: postgres
       OPENVOXDB_POSTGRES_PORT: "5432"

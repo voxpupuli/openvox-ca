@@ -2,7 +2,7 @@
   prometheusAlerts+:: {
     groups+: [
       {
-        name: 'puppet-ca-availability',
+        name: 'openvox-ca-availability',
         rules: [
           {
             alert: 'PuppetCAExporterDown',
@@ -45,7 +45,7 @@
         ],
       },
       {
-        name: 'puppet-ca-certificate-expiry',
+        name: 'openvox-ca-certificate-expiry',
         rules: [
           {
             alert: 'PuppetCACertificateExpiringSoon',
@@ -81,7 +81,7 @@
         ],
       },
       {
-        name: 'puppet-ca-crl-expiry',
+        name: 'openvox-ca-crl-expiry',
         rules: [
           {
             alert: 'PuppetCACRLExpiringSoon',
@@ -113,7 +113,7 @@
         ],
       },
       {
-        name: 'puppet-ca-leaf-certificates',
+        name: 'openvox-ca-leaf-certificates',
         rules: [
           {
             alert: 'PuppetCALeafCertificateExpiringSoon',

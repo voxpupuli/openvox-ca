@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Trevor Vaughan
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -21,11 +22,11 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/tvaughan/puppet-ca/internal/config"
+	"github.com/voxpupuli/openvox-ca/internal/config"
 	"go.yaml.in/yaml/v3"
 )
 
-// ctlConfig holds all configuration for puppet-ca-ctl.
+// ctlConfig holds all configuration for openvox-ca-ctl.
 // Fields are populated from (lowest → highest priority):
 //
 //	built-in defaults → config file → env vars → CLI flags

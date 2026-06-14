@@ -12,12 +12,11 @@ import (
 	"encoding/pem"
 	"os"
 	"path/filepath"
-	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/tvaughan/puppet-ca/internal/storage"
+	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
 
 // gcmTagLen is the AES-GCM authentication tag length appended to every
@@ -158,8 +157,15 @@ var _ = Describe("Key encryption", func() {
 		})
 
 		It("reads passphrase from environment variable", func() {
+			prev, had := os.LookupEnv("PUPPET_CA_KEY_PASSPHRASE")
+			DeferCleanup(func() {
+				if had {
+					os.Setenv("PUPPET_CA_KEY_PASSPHRASE", prev)
+				} else {
+					os.Unsetenv("PUPPET_CA_KEY_PASSPHRASE")
+				}
+			})
 			os.Setenv("PUPPET_CA_KEY_PASSPHRASE", "env-secret")
-			defer os.Unsetenv("PUPPET_CA_KEY_PASSPHRASE")
 
 			pp, auto, err := resolvePassphrase(KeyPassphraseConfig{}, tmpDir)
 			Expect(err).NotTo(HaveOccurred())
@@ -226,7 +232,7 @@ var _ = Describe("Key encryption", func() {
 
 var _ = Describe("CA encrypted key integration", func() {
 	It("bootstraps with encrypted key and reloads successfully", func() {
-		tmpDir, err := os.MkdirTemp("", "puppet-ca-keyenc-*")
+		tmpDir, err := os.MkdirTemp("", "openvox-ca-keyenc-*")
 		Expect(err).NotTo(HaveOccurred())
 		defer os.RemoveAll(tmpDir)
 
@@ -268,7 +274,7 @@ var _ = Describe("CA encrypted key integration", func() {
 	})
 
 	It("loads unencrypted key transparently (backward compat)", func() {
-		tmpDir, err := os.MkdirTemp("", "puppet-ca-keyenc-compat-*")
+		tmpDir, err := os.MkdirTemp("", "openvox-ca-keyenc-compat-*")
 		Expect(err).NotTo(HaveOccurred())
 		defer os.RemoveAll(tmpDir)
 
@@ -293,7 +299,7 @@ var _ = Describe("CA encrypted key integration", func() {
 	})
 
 	It("fails to load encrypted key with wrong passphrase", func() {
-		tmpDir, err := os.MkdirTemp("", "puppet-ca-keyenc-wrong-*")
+		tmpDir, err := os.MkdirTemp("", "openvox-ca-keyenc-wrong-*")
 		Expect(err).NotTo(HaveOccurred())
 		defer os.RemoveAll(tmpDir)
 
@@ -329,9 +335,4 @@ func generateTestCSR(cn string) ([]byte, error) {
 		return nil, err
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER}), nil
-}
-
-func TestKeyEnc(t *testing.T) {
-	// This test file uses the existing Ginkgo test runner from ca_test.go.
-	// It's included via the package-level test runner.
 }

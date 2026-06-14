@@ -1,5 +1,6 @@
 // Copyright (C) 2026 Trevor Vaughan
 // Copyright (C) 2026 Chris Boot
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -38,11 +39,11 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/tvaughan/puppet-ca/internal/api"
-	"github.com/tvaughan/puppet-ca/internal/ca"
-	"github.com/tvaughan/puppet-ca/internal/metrics"
-	"github.com/tvaughan/puppet-ca/internal/signer"
-	"github.com/tvaughan/puppet-ca/internal/storage"
+	"github.com/voxpupuli/openvox-ca/internal/api"
+	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/metrics"
+	"github.com/voxpupuli/openvox-ca/internal/signer"
+	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
 
 // setupLogger creates and sets the default slog logger based on config.
@@ -140,6 +141,23 @@ func isLoopback(host string) bool {
 	return host == "localhost"
 }
 
+// defaultCSRRateLimit is the built-in CSR submission cap (per IP per minute)
+// applied when no rate limit is configured on any layer.
+const defaultCSRRateLimit = 60
+
+// resolveCSRRateLimit maps a configured CSR rate limit to the value handed to
+// the server. The config field is sentinelled to -1 ("unset") so an explicit 0
+// (disable) is never confused with "not configured": only the sentinel falls
+// back to defaultCSRRateLimit, while 0 and positive values pass through. This
+// keeps the "0 disables, unset uses the default" contract consistent across the
+// flag, environment, and file layers.
+func resolveCSRRateLimit(configured int) int {
+	if configured < 0 {
+		return defaultCSRRateLimit
+	}
+	return configured
+}
+
 func main() {
 	cmd := newRootCmd()
 	if err := cmd.Execute(); err != nil {
@@ -189,7 +207,7 @@ func newRootCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:           "puppet-ca",
+		Use:           "openvox-ca",
 		Short:         "Puppet-compatible certificate authority server",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
@@ -503,14 +521,9 @@ func newRootCmd() *cobra.Command {
 			// --- HTTP(S) Server ---
 			srv := api.New(myCA)
 
-			// CSR rate limiting: default 60/min/IP unless explicitly set to 0.
-			csrRL := cfg.CSRRateLimit
-			if csrRL == 0 && !cmd.Flags().Changed("csr-rate-limit") {
-				if os.Getenv("PUPPET_CA_CSR_RATE_LIMIT") == "" {
-					csrRL = 60
-				}
-			}
-			srv.CSRRateLimit = csrRL
+			// CSR rate limiting: an explicit 0 from any layer (flag/env/file)
+			// disables it; the unset sentinel (-1) falls back to the default.
+			srv.CSRRateLimit = resolveCSRRateLimit(cfg.CSRRateLimit)
 			srv.SignBatchLimit = 50 // Default max batch size for sign operations
 			srv.PlainHTTP = !tlsConfigured && !isLoopback(cfg.Host) && !cfg.NoTLSRequired
 			srv.PuppetDateTimeFormat = cfg.PuppetDateTimeFormat
@@ -692,10 +705,10 @@ func newRootCmd() *cobra.Command {
 	f.BoolVar(&noPpCliAuth, "no-pp-cli-auth", false, "Disable pp_cli_auth extension as an admin credential; require CN allow list only")
 	f.BoolVar(&noTLSRequired, "no-tls-required", false, "Allow plain HTTP on non-loopback addresses (use only behind a trusted TLS proxy or in test environments)")
 	f.BoolVar(&allowPublicStatus, "allow-public-status", false, "Allow unauthenticated GET /certificate_status (by default, requires a CA-signed client cert)")
-	f.StringVar(&ocspURL, "ocsp-url", "", "OCSP responder URL to embed in issued certificates (e.g. http://puppet-ca:8140/ocsp)")
-	f.StringVar(&crlURL, "crl-url", "", "CRL distribution point URL to embed in issued certificates (e.g. http://puppet-ca:8140/puppet-ca/v1/certificate_revocation_list/ca)")
+	f.StringVar(&ocspURL, "ocsp-url", "", "OCSP responder URL to embed in issued certificates (e.g. http://openvox-ca:8140/ocsp)")
+	f.StringVar(&crlURL, "crl-url", "", "CRL distribution point URL to embed in issued certificates (e.g. http://openvox-ca:8140/puppet-ca/v1/certificate_revocation_list/ca)")
 	f.StringVar(&metricsListen, "metrics-listen", "", "Address for the Prometheus metrics exporter (e.g. 127.0.0.1:9140 or :9140); empty disables it. Serves /metrics over plain HTTP on a separate listener; restrict to a trusted network as it reveals node hostnames")
-	f.IntVar(&csrRateLimit, "csr-rate-limit", 60, "Max CSR submissions per IP per minute on the public PUT /certificate_request endpoint (0 disables)")
+	f.IntVar(&csrRateLimit, "csr-rate-limit", -1, "Max CSR submissions per IP per minute on the public PUT /certificate_request endpoint (0 disables; unset uses the default of 60)")
 	f.BoolVar(&encryptCAKey, "encrypt-ca-key", false, "Encrypt the CA private key at rest (AES-256-GCM + Argon2id); a passphrase is auto-generated if not provided")
 	f.StringVar(&caKeyPassphraseFile, "ca-key-passphrase-file", "", "Path to file containing the CA key passphrase (first line used)")
 	f.BoolVar(&singleProcess, "single-process", false, "Disable CA key isolation (run signer and frontend in a single process)")

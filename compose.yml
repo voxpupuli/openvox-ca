@@ -1,10 +1,10 @@
-# Multi-host integration test topology for puppet-ca.
+# Multi-host integration test topology for openvox-ca.
 #
 # Services
 # --------
-#   puppet-ca   - CA server (no autosign; operators must sign manually)
+#   openvox-ca   - CA server (no autosign; operators must sign manually)
 #   test-runner - Separate container acting as both puppet-agent and operator.
-#                 Communicates with puppet-ca over the internal network,
+#                 Communicates with openvox-ca over the internal network,
 #                 validating true cross-host behaviour.
 #
 # Usage (from project root):
@@ -14,17 +14,17 @@
 # Environment variables honoured by test-runner:
 #   DO_LOAD=true    Enable concurrency / load tests (default: false)
 
-name: puppet-ca-integ
+name: openvox-ca-integ
 
 services:
 
   # -- CA server ------------------------------------------------------------─
-  puppet-ca:
+  openvox-ca:
     build:
       context: .
       dockerfile: Dockerfile.run
-    image: puppet-ca-integ:latest
-    # autosign=false so the test-runner must explicitly sign via puppet-ca-ctl,
+    image: openvox-ca-integ:latest
+    # autosign=false so the test-runner must explicitly sign via openvox-ca-ctl,
     # exercising the full operator workflow.
     # WARNING: --no-tls-required is for integration testing ONLY.
     # Never use this flag in production: it disables all authentication.
@@ -32,7 +32,7 @@ services:
       - --cadir=/data
       - --autosign-config=false
       - --no-tls-required
-      - --crl-url=http://puppet-ca:8140/puppet-ca/v1/certificate_revocation_list/ca
+      - --crl-url=http://openvox-ca:8140/puppet-ca/v1/certificate_revocation_list/ca
       - -v=1
     expose:
       - "8140"
@@ -46,15 +46,15 @@ services:
       start_period: 8s
 
   # -- Test runner ----------------------------------------------------------─
-  # Simulates a separate host (puppet-agent + operator) talking to puppet-ca
-  # over the compose network using the DNS name "puppet-ca".
+  # Simulates a separate host (puppet-agent + operator) talking to openvox-ca
+  # over the compose network using the DNS name "openvox-ca".
   test-runner:
-    image: puppet-ca-integ:latest
+    image: openvox-ca-integ:latest
     depends_on:
-      puppet-ca:
+      openvox-ca:
         condition: service_healthy
     environment:
-      - CA_URL=http://puppet-ca:8140
+      - CA_URL=http://openvox-ca:8140
       - DO_LOAD=${DO_LOAD:-false}
     volumes:
       # Mount the test script read-only; :z relabels for SELinux (required on RHEL/CentOS).

@@ -1,36 +1,36 @@
 #!/bin/bash
-# Multi-host integration tests for puppet-ca.
+# Multi-host integration tests for openvox-ca.
 #
 # Designed to run inside the test-runner container launched by compose.yml.
-# The puppet-ca server is reachable at $CA_URL (default: http://puppet-ca:8140).
+# The openvox-ca server is reachable at $CA_URL (default: http://openvox-ca:8140).
 # The test-runner is a *separate container*, demonstrating true cross-host
 # communication over the compose network.
 #
-# Both the direct HTTP API (curl + openssl) and the puppet-ca-ctl management
+# Both the direct HTTP API (curl + openssl) and the openvox-ca-ctl management
 # CLI are exercised.
 #
 # Usage (normally invoked by `mage integCompose`):
 #   podman-compose up --exit-code-from test-runner
 #
 # Environment variables:
-#   CA_URL    Base URL of the CA  (default: http://puppet-ca:8140)
+#   CA_URL    Base URL of the CA  (default: http://openvox-ca:8140)
 #   DO_LOAD   Run concurrency/load tests (default: false)
 #
 # Output: TAP format.  Exit 0 when all pass, exit 1 if any fail.
 #
-# Prerequisites inside the container: curl, openssl, puppet-ca-ctl
+# Prerequisites inside the container: curl, openssl, openvox-ca-ctl
 
 set -uo pipefail
 
 # -- Configuration ------------------------------------------------------------
-CA_URL="${CA_URL:-http://puppet-ca:8140}"
+CA_URL="${CA_URL:-http://openvox-ca:8140}"
 DO_LOAD="${DO_LOAD:-false}"
 
-WORK_DIR=$(mktemp -d /tmp/puppet-ca-compose-integ.XXXXXX)
+WORK_DIR=$(mktemp -d /tmp/openvox-ca-compose-integ.XXXXXX)
 RUN_ID=$(date +%s%N | tail -c 8)   # 8-char unique suffix
 
-# puppet-ca-ctl shorthand: all HTTP subcommands get the server URL
-CTL="puppet-ca-ctl --server-url ${CA_URL}"
+# openvox-ca-ctl shorthand: all HTTP subcommands get the server URL
+CTL="openvox-ca-ctl --server-url ${CA_URL}"
 
 # -- TAP helpers --------------------------------------------------------------
 T=0
@@ -112,7 +112,7 @@ trap cleanup EXIT
 # ═════════════════════════════════════════════════════════════════════════════
 # Preflight -- CA reachable from this (separate) container
 # ═════════════════════════════════════════════════════════════════════════════
-printf '# puppet-ca integration tests (multi-host via compose)\n'
+printf '# openvox-ca integration tests (multi-host via compose)\n'
 printf '# CA URL: %s   (resolved across compose network)\n' "$CA_URL"
 printf '# Test-runner container: %s\n' "$(hostname)"
 printf '\n'
@@ -127,7 +127,7 @@ _keygen
 # ═════════════════════════════════════════════════════════════════════════════
 # Group 1 -- Endpoint smoke tests (cross-host)
 # ═════════════════════════════════════════════════════════════════════════════
-printf '\n# Group 1 -- Endpoint smoke tests (test-runner -> puppet-ca network)\n'
+printf '\n# Group 1 -- Endpoint smoke tests (test-runner -> openvox-ca network)\n'
 
 assert_http 200 "GET /healthz/live returns 200" \
     "${CA_URL}/healthz/live"
@@ -184,7 +184,7 @@ assert_json_field "$_exp_body" '"ca_crl"' \
 # Group 2 -- Full lifecycle: agent submits CSR, operator signs via ctl
 #   (autosign=false proves the multi-host operator workflow)
 # ═════════════════════════════════════════════════════════════════════════════
-printf '\n# Group 2 -- Full lifecycle with manual signing via puppet-ca-ctl\n'
+printf '\n# Group 2 -- Full lifecycle with manual signing via openvox-ca-ctl\n'
 
 _AGENT="agent-${RUN_ID}.example.com"
 make_csr "$_AGENT" "$WORK_DIR/agent.csr"
@@ -202,16 +202,16 @@ _pre_body=$(curl -s "${CA_URL}/puppet-ca/v1/certificate_status/${_AGENT}" 2>/dev
 assert_json_field "$_pre_body" '"state":"requested"' \
     "Agent cert status is 'requested' before signing"
 
-# puppet-ca-ctl list shows the pending CSR
+# openvox-ca-ctl list shows the pending CSR
 _list_out=$($CTL list 2>/dev/null) || true
 grep -qF "$_AGENT" <<< "$_list_out" \
-    && pass "puppet-ca-ctl list shows pending CSR" \
-    || fail "puppet-ca-ctl list shows pending CSR" "output: $_list_out"
+    && pass "openvox-ca-ctl list shows pending CSR" \
+    || fail "openvox-ca-ctl list shows pending CSR" "output: $_list_out"
 
 # Operator signs it
 $CTL sign --certname "$_AGENT" >/dev/null 2>&1 \
-    && pass "puppet-ca-ctl sign --certname succeeds" \
-    || fail "puppet-ca-ctl sign --certname succeeds"
+    && pass "openvox-ca-ctl sign --certname succeeds" \
+    || fail "openvox-ca-ctl sign --certname succeeds"
 
 # Status is now 'signed'
 _post_body=$(curl -s "${CA_URL}/puppet-ca/v1/certificate_status/${_AGENT}" 2>/dev/null) || true
@@ -285,8 +285,8 @@ assert_http 200 "CRL If-Modified-Since past → 200" \
 
 # Operator revokes
 $CTL revoke --certname "$_AGENT" >/dev/null 2>&1 \
-    && pass "puppet-ca-ctl revoke --certname succeeds" \
-    || fail "puppet-ca-ctl revoke --certname succeeds"
+    && pass "openvox-ca-ctl revoke --certname succeeds" \
+    || fail "openvox-ca-ctl revoke --certname succeeds"
 
 _rev_body=$(curl -s "${CA_URL}/puppet-ca/v1/certificate_status/${_AGENT}" 2>/dev/null) || true
 assert_json_field "$_rev_body" '"state":"revoked"' \
@@ -315,15 +315,15 @@ _CLEAN="clean-${RUN_ID}.example.com"
 submit_csr "$_CLEAN"
 $CTL sign --certname "$_CLEAN" >/dev/null 2>&1 || true
 $CTL clean --certname "$_CLEAN" >/dev/null 2>&1 \
-    && pass "puppet-ca-ctl clean --certname succeeds" \
-    || fail "puppet-ca-ctl clean --certname succeeds"
+    && pass "openvox-ca-ctl clean --certname succeeds" \
+    || fail "openvox-ca-ctl clean --certname succeeds"
 assert_http 404 "After ctl clean cert status returns 404" \
     "${CA_URL}/puppet-ca/v1/certificate_status/${_CLEAN}"
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Group 3 -- puppet-ca-ctl sign --all (bulk signing)
+# Group 3 -- openvox-ca-ctl sign --all (bulk signing)
 # ═════════════════════════════════════════════════════════════════════════════
-printf '\n# Group 3 -- puppet-ca-ctl sign --all\n'
+printf '\n# Group 3 -- openvox-ca-ctl sign --all\n'
 
 _BULK_A="bulk-a-${RUN_ID}.example.com"
 _BULK_B="bulk-b-${RUN_ID}.example.com"
@@ -332,8 +332,8 @@ submit_csr "$_BULK_B"
 
 _signall_out=$($CTL sign --all 2>/dev/null) || true
 grep -qiE "signed|Signed" <<< "$_signall_out" \
-    && pass "puppet-ca-ctl sign --all reports signed certs" \
-    || fail "puppet-ca-ctl sign --all reports signed certs" "output: $_signall_out"
+    && pass "openvox-ca-ctl sign --all reports signed certs" \
+    || fail "openvox-ca-ctl sign --all reports signed certs" "output: $_signall_out"
 
 for _bulk_cn in "$_BULK_A" "$_BULK_B"; do
     _bs=$(curl -s "${CA_URL}/puppet-ca/v1/certificate_status/${_bulk_cn}" 2>/dev/null) || true
@@ -386,24 +386,24 @@ assert_http 409 "POST /generate/{existing-subject} returns 409" \
 assert_http 400 "POST /generate/{invalid-subject} returns 400" \
     -X POST "${CA_URL}/puppet-ca/v1/generate/INVALID..NODE"
 
-# puppet-ca-ctl generate subcommand
+# openvox-ca-ctl generate subcommand
 _GEN_CTL="gen-ctl-${RUN_ID}.example.com"
 _GEN_DIR="$WORK_DIR/genout"
 mkdir -p "$_GEN_DIR"
 _ctl_cert=$($CTL generate --certname "$_GEN_CTL" --out-dir "$_GEN_DIR" 2>/dev/null) || true
 [ -n "$_ctl_cert" ] \
-    && pass "puppet-ca-ctl generate outputs certificate to stdout" \
-    || fail "puppet-ca-ctl generate outputs certificate to stdout" "output was empty"
+    && pass "openvox-ca-ctl generate outputs certificate to stdout" \
+    || fail "openvox-ca-ctl generate outputs certificate to stdout" "output was empty"
 
 [ -f "$_GEN_DIR/${_GEN_CTL}_key.pem" ] \
-    && pass "puppet-ca-ctl generate saves private key to --out-dir" \
-    || fail "puppet-ca-ctl generate saves private key to --out-dir" \
+    && pass "openvox-ca-ctl generate saves private key to --out-dir" \
+    || fail "openvox-ca-ctl generate saves private key to --out-dir" \
            "key file missing: $_GEN_DIR/${_GEN_CTL}_key.pem"
 
 echo "$_ctl_cert" > "$WORK_DIR/ctl_gen.crt"
 openssl verify -CAfile "$WORK_DIR/ca.pem" "$WORK_DIR/ctl_gen.crt" >/dev/null 2>&1 \
-    && pass "puppet-ca-ctl generated cert verifies against CA" \
-    || fail "puppet-ca-ctl generated cert verifies against CA"
+    && pass "openvox-ca-ctl generated cert verifies against CA" \
+    || fail "openvox-ca-ctl generated cert verifies against CA"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Group 5 -- ?state= filter on GET /certificate_statuses
@@ -444,20 +444,20 @@ grep -qF "$_SIGNED" <<< "$_all_body" \
     && pass "No ?state= param includes signed" \
     || fail "No ?state= param includes signed" "body: $_all_body"
 
-# puppet-ca-ctl list (default: only requested)
+# openvox-ca-ctl list (default: only requested)
 _ctl_list_out=$($CTL list 2>/dev/null) || true
 grep -qF "$_PEND" <<< "$_ctl_list_out" \
-    && pass "puppet-ca-ctl list shows pending cert" \
-    || fail "puppet-ca-ctl list shows pending cert" "output: $_ctl_list_out"
+    && pass "openvox-ca-ctl list shows pending cert" \
+    || fail "openvox-ca-ctl list shows pending cert" "output: $_ctl_list_out"
 ! grep -qF "$_SIGNED" <<< "$_ctl_list_out" \
-    && pass "puppet-ca-ctl list (default) excludes signed cert" \
-    || fail "puppet-ca-ctl list (default) excludes signed cert" "output: $_ctl_list_out"
+    && pass "openvox-ca-ctl list (default) excludes signed cert" \
+    || fail "openvox-ca-ctl list (default) excludes signed cert" "output: $_ctl_list_out"
 
-# puppet-ca-ctl list --all: shows both
+# openvox-ca-ctl list --all: shows both
 _ctl_all_out=$($CTL list --all 2>/dev/null) || true
 grep -qF "$_SIGNED" <<< "$_ctl_all_out" \
-    && pass "puppet-ca-ctl list --all shows signed cert" \
-    || fail "puppet-ca-ctl list --all shows signed cert" "output: $_ctl_all_out"
+    && pass "openvox-ca-ctl list --all shows signed cert" \
+    || fail "openvox-ca-ctl list --all shows signed cert" "output: $_ctl_all_out"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Group 6 -- cert_ttl in PUT /certificate_status
@@ -708,43 +708,43 @@ assert_http 200 "GET /puppet-ca/v1/certificate_request/{pending} returns 200" \
     "${CA_URL}/puppet-ca/v1/certificate_request/${_PFX}"
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Group 12 -- puppet-ca-ctl offline subcommands (run inside test-runner)
+# Group 12 -- openvox-ca-ctl offline subcommands (run inside test-runner)
 # ═════════════════════════════════════════════════════════════════════════════
-printf '\n# Group 12 -- puppet-ca-ctl offline: setup and import\n'
+printf '\n# Group 12 -- openvox-ca-ctl offline: setup and import\n'
 
 # --- 12a: setup ---
 _SETUP_DIR=$(mktemp -d)
-puppet-ca-ctl setup --cadir "$_SETUP_DIR" --hostname "setup-test-${RUN_ID}.example.com" \
+openvox-ca-ctl setup --cadir "$_SETUP_DIR" --hostname "setup-test-${RUN_ID}.example.com" \
     >/dev/null 2>&1 \
-    && pass "puppet-ca-ctl setup succeeds" \
-    || fail "puppet-ca-ctl setup succeeds"
+    && pass "openvox-ca-ctl setup succeeds" \
+    || fail "openvox-ca-ctl setup succeeds"
 
 [ -f "$_SETUP_DIR/ca_crt.pem" ] \
-    && pass "puppet-ca-ctl setup creates ca_crt.pem" \
-    || fail "puppet-ca-ctl setup creates ca_crt.pem"
+    && pass "openvox-ca-ctl setup creates ca_crt.pem" \
+    || fail "openvox-ca-ctl setup creates ca_crt.pem"
 
 [ -f "$_SETUP_DIR/private/ca_key.pem" ] \
-    && pass "puppet-ca-ctl setup creates private/ca_key.pem" \
-    || fail "puppet-ca-ctl setup creates private/ca_key.pem"
+    && pass "openvox-ca-ctl setup creates private/ca_key.pem" \
+    || fail "openvox-ca-ctl setup creates private/ca_key.pem"
 
 [ -f "$_SETUP_DIR/ca_crl.pem" ] \
-    && pass "puppet-ca-ctl setup creates ca_crl.pem" \
-    || fail "puppet-ca-ctl setup creates ca_crl.pem"
+    && pass "openvox-ca-ctl setup creates ca_crl.pem" \
+    || fail "openvox-ca-ctl setup creates ca_crl.pem"
 
 [ -f "$_SETUP_DIR/inventory.txt" ] \
-    && pass "puppet-ca-ctl setup creates inventory.txt" \
-    || fail "puppet-ca-ctl setup creates inventory.txt"
+    && pass "openvox-ca-ctl setup creates inventory.txt" \
+    || fail "openvox-ca-ctl setup creates inventory.txt"
 
 # CA cert CN must match hostname
 openssl x509 -noout -subject -in "$_SETUP_DIR/ca_crt.pem" 2>/dev/null \
     | grep -qF "setup-test-${RUN_ID}.example.com" \
-    && pass "puppet-ca-ctl setup CA cert CN matches --hostname" \
-    || fail "puppet-ca-ctl setup CA cert CN matches --hostname"
+    && pass "openvox-ca-ctl setup CA cert CN matches --hostname" \
+    || fail "openvox-ca-ctl setup CA cert CN matches --hostname"
 
 # CA cert must be self-signed
 openssl verify -CAfile "$_SETUP_DIR/ca_crt.pem" "$_SETUP_DIR/ca_crt.pem" >/dev/null 2>&1 \
-    && pass "puppet-ca-ctl setup CA cert is self-signed" \
-    || fail "puppet-ca-ctl setup CA cert is self-signed"
+    && pass "openvox-ca-ctl setup CA cert is self-signed" \
+    || fail "openvox-ca-ctl setup CA cert is self-signed"
 
 rm -rf "$_SETUP_DIR"
 
@@ -774,29 +774,29 @@ openssl req -x509 -newkey rsa:2048 -days 3650 -nodes \
     && pass "openssl generated import CA cert+key" \
     || fail "openssl generated import CA cert+key"
 
-puppet-ca-ctl import \
+openvox-ca-ctl import \
     --cadir "$_IMP_DEST" \
     --cert-bundle "$_IMP_DIR/ca.crt" \
     --private-key "$_IMP_DIR/ca.key" \
     >/dev/null 2>&1 \
-    && pass "puppet-ca-ctl import succeeds" \
-    || fail "puppet-ca-ctl import succeeds"
+    && pass "openvox-ca-ctl import succeeds" \
+    || fail "openvox-ca-ctl import succeeds"
 
 [ -f "$_IMP_DEST/ca_crt.pem" ] \
-    && pass "puppet-ca-ctl import creates ca_crt.pem" \
-    || fail "puppet-ca-ctl import creates ca_crt.pem"
+    && pass "openvox-ca-ctl import creates ca_crt.pem" \
+    || fail "openvox-ca-ctl import creates ca_crt.pem"
 
 [ -f "$_IMP_DEST/private/ca_key.pem" ] \
-    && pass "puppet-ca-ctl import creates private/ca_key.pem" \
-    || fail "puppet-ca-ctl import creates private/ca_key.pem"
+    && pass "openvox-ca-ctl import creates private/ca_key.pem" \
+    || fail "openvox-ca-ctl import creates private/ca_key.pem"
 
 # Verify the imported cert is identical to what we passed in
 diff -q "$_IMP_DIR/ca.crt" "$_IMP_DEST/ca_crt.pem" >/dev/null 2>&1 \
-    && pass "puppet-ca-ctl import cert file matches source" \
-    || fail "puppet-ca-ctl import cert file matches source"
+    && pass "openvox-ca-ctl import cert file matches source" \
+    || fail "openvox-ca-ctl import cert file matches source"
 
 # A CA can be started from the imported directory
-puppet-ca-ctl setup --cadir "$_IMP_DEST" --hostname "existing" >/dev/null 2>&1
+openvox-ca-ctl setup --cadir "$_IMP_DEST" --hostname "existing" >/dev/null 2>&1
 # (setup on an existing dir loads successfully; the CA key/cert is already there)
 [ -f "$_IMP_DEST/ca_crt.pem" ] \
     && pass "CA directory usable after import (cert file still present)" \
@@ -810,13 +810,13 @@ openssl req -x509 -newkey rsa:2048 -days 3650 -nodes \
     -config "$_IMP_DIR/ca.cnf" \
     2>/dev/null || true
 
-puppet-ca-ctl import \
+openvox-ca-ctl import \
     --cadir "$_BAD_DIR" \
     --cert-bundle "$_IMP_DIR/ca.crt" \
     --private-key "$_IMP_DIR/other.key" \
     >/dev/null 2>&1 \
-    && fail "puppet-ca-ctl import with mismatched key must fail" \
-    || pass "puppet-ca-ctl import with mismatched key correctly fails"
+    && fail "openvox-ca-ctl import with mismatched key must fail" \
+    || pass "openvox-ca-ctl import with mismatched key correctly fails"
 
 rm -rf "$_IMP_DIR" "$_IMP_DEST" "$_BAD_DIR"
 
@@ -920,7 +920,7 @@ fi
 printf '\n# Group 15 -- OCSP endpoint\n'
 
 # Sign a fresh cert dedicated to OCSP testing.  The shared CA runs with
-# autosign=false, so we submit a CSR then sign it via puppet-ca-ctl.
+# autosign=false, so we submit a CSR then sign it via openvox-ca-ctl.
 _OCSP_HOST="ocsp-${RUN_ID}.example.com"
 make_csr "$_OCSP_HOST" "$WORK_DIR/ocsp.csr"
 
@@ -979,8 +979,8 @@ _ocsp_bad=$(curl -s -o /dev/null -w '%{http_code}' \
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Group 16 -- Autosign modes (true, file glob, executable plugin)
-#   Starts short-lived local puppet-ca instances on port 8141 inside this
-#   container.  The shared puppet-ca service (port 8140) is untouched.
+#   Starts short-lived local openvox-ca instances on port 8141 inside this
+#   container.  The shared openvox-ca service (port 8140) is untouched.
 #   Each sub-test boots a fresh CA, exercises one autosign config, then stops.
 # ═════════════════════════════════════════════════════════════════════════════
 printf '\n# Group 16 -- Autosign modes (true, file, executable)\n'
@@ -1001,7 +1001,7 @@ _wait_local_ca() {
 
 # -- 15a: autosign=true --------------------------------------------------------
 _AS_DIR_A=$(mktemp -d)
-puppet-ca --cadir="$_AS_DIR_A" \
+openvox-ca --cadir="$_AS_DIR_A" \
     --autosign-config=true \
     --host=127.0.0.1 --port="$_LOCAL_PORT" \
     >/dev/null 2>&1 &
@@ -1042,7 +1042,7 @@ _AS_DIR_B=$(mktemp -d)
 _AS_CONF_B="$WORK_DIR/autosign.conf"
 printf '# autosign pattern file\n*.allowed.example.com\n' > "$_AS_CONF_B"
 
-puppet-ca --cadir="$_AS_DIR_B" \
+openvox-ca --cadir="$_AS_DIR_B" \
     --autosign-config="$_AS_CONF_B" \
     --host=127.0.0.1 --port="$_LOCAL_PORT" \
     >/dev/null 2>&1 &
@@ -1111,7 +1111,7 @@ esac
 PLUGIN_EOF
 chmod 755 "$_AS_EXEC"
 
-puppet-ca --cadir="$_AS_DIR_C" \
+openvox-ca --cadir="$_AS_DIR_C" \
     --autosign-config="$_AS_EXEC" \
     --host=127.0.0.1 --port="$_LOCAL_PORT" \
     >/dev/null 2>&1 &
@@ -1172,7 +1172,7 @@ rm -rf "$_AS_DIR_C"
 #   CLI-flag configuration is already proven by Groups 1-13, which all run
 #   against the shared CA started with explicit CLI flags.
 #
-#   Also tests the puppet-ca-ctl env-var and config-file drivers against the
+#   Also tests the openvox-ca-ctl env-var and config-file drivers against the
 #   already-running shared CA service.
 # ═════════════════════════════════════════════════════════════════════════════
 printf '\n# Group 17 -- Config-driver loop (env vars, config file)\n'
@@ -1228,7 +1228,7 @@ PUPPET_CA_HOST=127.0.0.1 \
 PUPPET_CA_PORT="$_LOCAL_PORT" \
 PUPPET_CA_AUTOSIGN_CONFIG=true \
 PUPPET_CA_NO_TLS_REQUIRED=1 \
-    puppet-ca >/dev/null 2>&1 &
+    openvox-ca >/dev/null 2>&1 &
 _drv_pid_2=$!
 
 if _wait_local_ca; then
@@ -1252,7 +1252,7 @@ autosign_config: "true"
 no_tls_required: true
 CFGEOF
 
-puppet-ca --config="$_DRV_CFG" >/dev/null 2>&1 &
+openvox-ca --config="$_DRV_CFG" >/dev/null 2>&1 &
 _drv_pid_3=$!
 
 if _wait_local_ca; then
@@ -1265,22 +1265,22 @@ kill "$_drv_pid_3" 2>/dev/null || true
 wait "$_drv_pid_3" 2>/dev/null || true
 rm -rf "$_DRV_DIR_3"
 
-# -- puppet-ca-ctl drivers (shared CA service at $CA_URL) ----------------------
-PUPPET_CA_CTL_SERVER_URL="${CA_URL}" puppet-ca-ctl list >/dev/null 2>&1 \
-    && pass "puppet-ca-ctl env-var driver: PUPPET_CA_CTL_SERVER_URL accepted" \
-    || fail "puppet-ca-ctl env-var driver: PUPPET_CA_CTL_SERVER_URL accepted"
+# -- openvox-ca-ctl drivers (shared CA service at $CA_URL) ----------------------
+PUPPET_CA_CTL_SERVER_URL="${CA_URL}" openvox-ca-ctl list >/dev/null 2>&1 \
+    && pass "openvox-ca-ctl env-var driver: PUPPET_CA_CTL_SERVER_URL accepted" \
+    || fail "openvox-ca-ctl env-var driver: PUPPET_CA_CTL_SERVER_URL accepted"
 
 _CTL_CFG="$WORK_DIR/ctl.yaml"
 printf 'server_url: "%s"\n' "${CA_URL}" > "$_CTL_CFG"
-puppet-ca-ctl --config="$_CTL_CFG" list >/dev/null 2>&1 \
-    && pass "puppet-ca-ctl config-file driver: --config flag accepted" \
-    || fail "puppet-ca-ctl config-file driver: --config flag accepted"
+openvox-ca-ctl --config="$_CTL_CFG" list >/dev/null 2>&1 \
+    && pass "openvox-ca-ctl config-file driver: --config flag accepted" \
+    || fail "openvox-ca-ctl config-file driver: --config flag accepted"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Group 18 -- pp_cli_auth mTLS authorization
 #
-#   Starts short-lived local puppet-ca instances on port 8142 inside this
-#   container.  The shared puppet-ca service (port 8140) is untouched.
+#   Starts short-lived local openvox-ca instances on port 8142 inside this
+#   container.  The shared openvox-ca service (port 8140) is untouched.
 #
 #   Phase 1 (loopback HTTP, autosign=true): bootstrap CA, generate a TLS
 #   server cert, a plain client cert, and an admin client cert carrying the
@@ -1309,10 +1309,10 @@ _wait_auth_ca() {
 
 # --- Phase 1: loopback HTTP, autosign=true, generate all certs ---------------
 
-puppet-ca-ctl setup --cadir "$_AUTH_DIR" --hostname auth-test-ca \
+openvox-ca-ctl setup --cadir "$_AUTH_DIR" --hostname auth-test-ca \
     2>/dev/null
 
-puppet-ca --cadir "$_AUTH_DIR" \
+openvox-ca --cadir "$_AUTH_DIR" \
     --host 127.0.0.1 --port "$_AUTH_PORT" \
     --no-tls-required \
     --autosign-config=true \
@@ -1323,12 +1323,12 @@ if _wait_auth_ca "$_AUTH_CA_URL"; then
     pass "pp_cli_auth: Phase 1 CA started (loopback HTTP, autosign=true)"
 
     # TLS server cert (key saved to _AUTH_DIR/auth-test-ca_key.pem)
-    puppet-ca-ctl --server-url "$_AUTH_CA_URL" \
+    openvox-ca-ctl --server-url "$_AUTH_CA_URL" \
         generate --certname auth-test-ca --out-dir "$_AUTH_DIR" \
         > "$_AUTH_DIR/tls-server.crt" 2>/dev/null
 
     # Plain client cert (no special extensions)
-    puppet-ca-ctl --server-url "$_AUTH_CA_URL" \
+    openvox-ca-ctl --server-url "$_AUTH_CA_URL" \
         generate --certname regular-client --out-dir "$WORK_DIR" \
         > "$WORK_DIR/regular-client.crt" 2>/dev/null
 
@@ -1389,7 +1389,7 @@ _AUTH_PID=""
 
 # -- Phase 2: TLS, AllowPpCliAuth=true (default), no CN allow list ------------
 
-puppet-ca --cadir "$_AUTH_DIR" \
+openvox-ca --cadir "$_AUTH_DIR" \
     --host 127.0.0.1 --port "$_AUTH_PORT" \
     --tls-cert "$_AUTH_DIR/tls-server.crt" \
     --tls-key  "$_AUTH_DIR/auth-test-ca_key.pem" \
@@ -1426,58 +1426,58 @@ kill "$_AUTH_PID" 2>/dev/null; wait "$_AUTH_PID" 2>/dev/null || true
 rm -rf "$_AUTH_DIR"
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Group 19 -- puppet-ca-ctl error paths and edge cases
+# Group 19 -- openvox-ca-ctl error paths and edge cases
 #
 #   Validates that the CLI propagates server errors correctly, exits non-zero
 #   on failures, and handles argument validation.
 # ═════════════════════════════════════════════════════════════════════════════
-printf '\n# Group 19 -- puppet-ca-ctl error paths and edge cases\n'
+printf '\n# Group 19 -- openvox-ca-ctl error paths and edge cases\n'
 
 # --- 19a: revoke non-existent cert must fail with non-zero exit ---
 _rv_out=$($CTL revoke --certname "ghost-revoke-${RUN_ID}" 2>&1) && _rv_rc=$? || _rv_rc=$?
 [ "$_rv_rc" -ne 0 ] \
-    && pass "puppet-ca-ctl revoke non-existent cert exits non-zero" \
-    || fail "puppet-ca-ctl revoke non-existent cert exits non-zero" "exit=$_rv_rc"
+    && pass "openvox-ca-ctl revoke non-existent cert exits non-zero" \
+    || fail "openvox-ca-ctl revoke non-existent cert exits non-zero" "exit=$_rv_rc"
 echo "$_rv_out" | grep -qiE 'error|fail|not found|HTTP [45]' \
-    && pass "puppet-ca-ctl revoke non-existent cert reports error message" \
-    || fail "puppet-ca-ctl revoke non-existent cert reports error message" "output: $_rv_out"
+    && pass "openvox-ca-ctl revoke non-existent cert reports error message" \
+    || fail "openvox-ca-ctl revoke non-existent cert reports error message" "output: $_rv_out"
 
 # --- 19b: clean non-existent subject must fail with non-zero exit ---
 _cl_out=$($CTL clean --certname "ghost-clean-${RUN_ID}" 2>&1) && _cl_rc=$? || _cl_rc=$?
 [ "$_cl_rc" -ne 0 ] \
-    && pass "puppet-ca-ctl clean non-existent subject exits non-zero" \
-    || fail "puppet-ca-ctl clean non-existent subject exits non-zero" "exit=$_cl_rc"
+    && pass "openvox-ca-ctl clean non-existent subject exits non-zero" \
+    || fail "openvox-ca-ctl clean non-existent subject exits non-zero" "exit=$_cl_rc"
 echo "$_cl_out" | grep -qiE 'error|fail|not found|HTTP [45]' \
-    && pass "puppet-ca-ctl clean non-existent subject reports error message" \
-    || fail "puppet-ca-ctl clean non-existent subject reports error message" "output: $_cl_out"
+    && pass "openvox-ca-ctl clean non-existent subject reports error message" \
+    || fail "openvox-ca-ctl clean non-existent subject reports error message" "output: $_cl_out"
 
 # --- 19c: sign --certname without a pending CSR must fail ---
 _sn_out=$($CTL sign --certname "ghost-sign-${RUN_ID}" 2>&1) && _sn_rc=$? || _sn_rc=$?
 [ "$_sn_rc" -ne 0 ] \
-    && pass "puppet-ca-ctl sign without pending CSR exits non-zero" \
-    || fail "puppet-ca-ctl sign without pending CSR exits non-zero" "exit=$_sn_rc"
+    && pass "openvox-ca-ctl sign without pending CSR exits non-zero" \
+    || fail "openvox-ca-ctl sign without pending CSR exits non-zero" "exit=$_sn_rc"
 echo "$_sn_out" | grep -qiE 'error|fail|not found|HTTP [45]' \
-    && pass "puppet-ca-ctl sign without pending CSR reports error message" \
-    || fail "puppet-ca-ctl sign without pending CSR reports error message" "output: $_sn_out"
+    && pass "openvox-ca-ctl sign without pending CSR reports error message" \
+    || fail "openvox-ca-ctl sign without pending CSR reports error message" "output: $_sn_out"
 
 # --- 19d: sign with neither --certname nor --all must fail ---
 _sna_out=$($CTL sign 2>&1) && _sna_rc=$? || _sna_rc=$?
 [ "$_sna_rc" -ne 0 ] \
-    && pass "puppet-ca-ctl sign with no args exits non-zero" \
-    || fail "puppet-ca-ctl sign with no args exits non-zero" "exit=$_sna_rc"
+    && pass "openvox-ca-ctl sign with no args exits non-zero" \
+    || fail "openvox-ca-ctl sign with no args exits non-zero" "exit=$_sna_rc"
 echo "$_sna_out" | grep -qiE 'certname.*required|--all' \
-    && pass "puppet-ca-ctl sign with no args mentions --certname or --all" \
-    || fail "puppet-ca-ctl sign with no args mentions --certname or --all" "output: $_sna_out"
+    && pass "openvox-ca-ctl sign with no args mentions --certname or --all" \
+    || fail "openvox-ca-ctl sign with no args mentions --certname or --all" "output: $_sna_out"
 
 # --- 19e: generate --certname when cert already exists must fail ---
 # Use _GEN_CTL which was generated in Group 4.
 _ge_out=$($CTL generate --certname "$_GEN_CTL" --out-dir "$WORK_DIR" 2>&1) && _ge_rc=$? || _ge_rc=$?
 [ "$_ge_rc" -ne 0 ] \
-    && pass "puppet-ca-ctl generate duplicate cert exits non-zero" \
-    || fail "puppet-ca-ctl generate duplicate cert exits non-zero" "exit=$_ge_rc"
+    && pass "openvox-ca-ctl generate duplicate cert exits non-zero" \
+    || fail "openvox-ca-ctl generate duplicate cert exits non-zero" "exit=$_ge_rc"
 echo "$_ge_out" | grep -qiE 'error|fail|exists|conflict|HTTP [45]' \
-    && pass "puppet-ca-ctl generate duplicate cert reports error message" \
-    || fail "puppet-ca-ctl generate duplicate cert reports error message" "output: $_ge_out"
+    && pass "openvox-ca-ctl generate duplicate cert reports error message" \
+    || fail "openvox-ca-ctl generate duplicate cert reports error message" "output: $_ge_out"
 
 # --- 19f: generate --dns delivers SANs in the resulting certificate ---
 _GEN_DNS="gen-dns-${RUN_ID}.example.com"
@@ -1488,32 +1488,32 @@ _dns_cert=$($CTL generate --certname "$_GEN_DNS" \
     --out-dir "$_GEN_DNS_DIR" 2>/dev/null) || true
 
 [ -n "$_dns_cert" ] \
-    && pass "puppet-ca-ctl generate --dns outputs certificate" \
-    || fail "puppet-ca-ctl generate --dns outputs certificate" "output was empty"
+    && pass "openvox-ca-ctl generate --dns outputs certificate" \
+    || fail "openvox-ca-ctl generate --dns outputs certificate" "output was empty"
 
 echo "$_dns_cert" > "$WORK_DIR/dns_gen.crt"
 _san_text=$(openssl x509 -noout -text -in "$WORK_DIR/dns_gen.crt" 2>/dev/null) || true
 echo "$_san_text" | grep -qF "alt1-${RUN_ID}.example.com" \
-    && pass "puppet-ca-ctl generate --dns: first SAN present in cert" \
-    || fail "puppet-ca-ctl generate --dns: first SAN present in cert" \
+    && pass "openvox-ca-ctl generate --dns: first SAN present in cert" \
+    || fail "openvox-ca-ctl generate --dns: first SAN present in cert" \
            "SAN not found in cert extensions"
 echo "$_san_text" | grep -qF "alt2-${RUN_ID}.example.com" \
-    && pass "puppet-ca-ctl generate --dns: second SAN present in cert" \
-    || fail "puppet-ca-ctl generate --dns: second SAN present in cert" \
+    && pass "openvox-ca-ctl generate --dns: second SAN present in cert" \
+    || fail "openvox-ca-ctl generate --dns: second SAN present in cert" \
            "SAN not found in cert extensions"
 
-# --- 19g: puppet-ca-ctl over mTLS (--ca-cert, --client-cert, --client-key) ---
+# --- 19g: openvox-ca-ctl over mTLS (--ca-cert, --client-cert, --client-key) ---
 # Reuses the Phase 1/Phase 2 pattern from Group 18 but drives the TLS
-# connection through puppet-ca-ctl itself rather than raw curl.
+# connection through openvox-ca-ctl itself rather than raw curl.
 _MTLS_PORT=8143
 _MTLS_DIR=$(mktemp -d)
 _MTLS_PID=""
 
-puppet-ca-ctl setup --cadir "$_MTLS_DIR" --hostname mtls-ctl-test \
+openvox-ca-ctl setup --cadir "$_MTLS_DIR" --hostname mtls-ctl-test \
     2>/dev/null
 
 # Phase 1: HTTP + autosign to bootstrap certs
-puppet-ca --cadir "$_MTLS_DIR" \
+openvox-ca --cadir "$_MTLS_DIR" \
     --host 127.0.0.1 --port "$_MTLS_PORT" \
     --no-tls-required \
     --autosign-config=true \
@@ -1533,17 +1533,17 @@ if [ "$_mtls_ready" = "true" ]; then
     pass "mTLS CLI: Phase 1 CA started"
 
     # Generate a TLS server cert
-    puppet-ca-ctl --server-url "$_mtls_http_url" \
+    openvox-ca-ctl --server-url "$_mtls_http_url" \
         generate --certname mtls-ctl-test --out-dir "$_MTLS_DIR" \
         > "$_MTLS_DIR/tls-server.crt" 2>/dev/null
 
-    # Generate an admin client cert via puppet-ca-ctl
-    puppet-ca-ctl --server-url "$_mtls_http_url" \
+    # Generate an admin client cert via openvox-ca-ctl
+    openvox-ca-ctl --server-url "$_mtls_http_url" \
         generate --certname mtls-client --out-dir "$WORK_DIR" \
         > "$WORK_DIR/mtls-client.crt" 2>/dev/null
 
     # Generate a non-admin client cert (CN not in --puppet-server list)
-    puppet-ca-ctl --server-url "$_mtls_http_url" \
+    openvox-ca-ctl --server-url "$_mtls_http_url" \
         generate --certname mtls-nonadmin --out-dir "$WORK_DIR" \
         > "$WORK_DIR/mtls-nonadmin.crt" 2>/dev/null
 
@@ -1556,8 +1556,8 @@ if [ "$_mtls_ready" = "true" ]; then
     kill "$_MTLS_PID" 2>/dev/null; wait "$_MTLS_PID" 2>/dev/null || true
     _MTLS_PID=""
 
-    # Phase 2: TLS with client certs, use puppet-ca-ctl with --ca-cert etc.
-    puppet-ca --cadir "$_MTLS_DIR" \
+    # Phase 2: TLS with client certs, use openvox-ca-ctl with --ca-cert etc.
+    openvox-ca --cadir "$_MTLS_DIR" \
         --host 127.0.0.1 --port "$_MTLS_PORT" \
         --tls-cert "$_MTLS_DIR/tls-server.crt" \
         --tls-key  "$_MTLS_DIR/mtls-ctl-test_key.pem" \
@@ -1583,56 +1583,56 @@ if [ "$_mtls_ready" = "true" ]; then
             --data-binary @"$WORK_DIR/mtls-sign.csr" \
             "${_mtls_tls_url}/puppet-ca/v1/certificate_request/${_MTLS_SIGN}" 2>/dev/null || true
 
-        # puppet-ca-ctl list --all over mTLS
+        # openvox-ca-ctl list --all over mTLS
         # --insecure skips server cert hostname verification (the server cert
         # CN=mtls-ctl-test doesn't match 127.0.0.1). This test focuses on
         # *client* cert presentation, not server cert verification.
-        _mtls_list=$(puppet-ca-ctl \
+        _mtls_list=$(openvox-ca-ctl \
             --server-url "$_mtls_tls_url" \
             --insecure \
             --client-cert "$WORK_DIR/mtls-client.crt" \
             --client-key  "$WORK_DIR/mtls-client_key.pem" \
             list --all 2>/dev/null) && _mtls_list_rc=$? || _mtls_list_rc=$?
         [ "$_mtls_list_rc" -eq 0 ] \
-            && pass "puppet-ca-ctl list --all over mTLS succeeds" \
-            || fail "puppet-ca-ctl list --all over mTLS succeeds" "exit=$_mtls_list_rc"
+            && pass "openvox-ca-ctl list --all over mTLS succeeds" \
+            || fail "openvox-ca-ctl list --all over mTLS succeeds" "exit=$_mtls_list_rc"
 
-        # puppet-ca-ctl sign over mTLS
-        _mtls_sign_out=$(puppet-ca-ctl \
+        # openvox-ca-ctl sign over mTLS
+        _mtls_sign_out=$(openvox-ca-ctl \
             --server-url "$_mtls_tls_url" \
             --insecure \
             --client-cert "$WORK_DIR/mtls-client.crt" \
             --client-key  "$WORK_DIR/mtls-client_key.pem" \
             sign --certname "$_MTLS_SIGN" 2>/dev/null) && _mtls_sign_rc=$? || _mtls_sign_rc=$?
         [ "$_mtls_sign_rc" -eq 0 ] \
-            && pass "puppet-ca-ctl sign over mTLS succeeds" \
-            || fail "puppet-ca-ctl sign over mTLS succeeds" "exit=$_mtls_sign_rc output=$_mtls_sign_out"
+            && pass "openvox-ca-ctl sign over mTLS succeeds" \
+            || fail "openvox-ca-ctl sign over mTLS succeeds" "exit=$_mtls_sign_rc output=$_mtls_sign_out"
 
-        # puppet-ca-ctl revoke over mTLS
-        _mtls_rev_out=$(puppet-ca-ctl \
+        # openvox-ca-ctl revoke over mTLS
+        _mtls_rev_out=$(openvox-ca-ctl \
             --server-url "$_mtls_tls_url" \
             --insecure \
             --client-cert "$WORK_DIR/mtls-client.crt" \
             --client-key  "$WORK_DIR/mtls-client_key.pem" \
             revoke --certname "$_MTLS_SIGN" 2>/dev/null) && _mtls_rev_rc=$? || _mtls_rev_rc=$?
         [ "$_mtls_rev_rc" -eq 0 ] \
-            && pass "puppet-ca-ctl revoke over mTLS succeeds" \
-            || fail "puppet-ca-ctl revoke over mTLS succeeds" "exit=$_mtls_rev_rc output=$_mtls_rev_out"
+            && pass "openvox-ca-ctl revoke over mTLS succeeds" \
+            || fail "openvox-ca-ctl revoke over mTLS succeeds" "exit=$_mtls_rev_rc output=$_mtls_rev_out"
 
         # Non-admin cert must be denied on admin-only endpoint
-        _mtls_deny_out=$(puppet-ca-ctl \
+        _mtls_deny_out=$(openvox-ca-ctl \
             --server-url "$_mtls_tls_url" \
             --insecure \
             --client-cert "$WORK_DIR/mtls-nonadmin.crt" \
             --client-key  "$WORK_DIR/mtls-nonadmin_key.pem" \
             list --all 2>&1) && _mtls_deny_rc=$? || _mtls_deny_rc=$?
         [ "$_mtls_deny_rc" -ne 0 ] \
-            && pass "puppet-ca-ctl non-admin cert denied on admin endpoint (non-zero exit)" \
-            || fail "puppet-ca-ctl non-admin cert denied on admin endpoint (non-zero exit)" \
+            && pass "openvox-ca-ctl non-admin cert denied on admin endpoint (non-zero exit)" \
+            || fail "openvox-ca-ctl non-admin cert denied on admin endpoint (non-zero exit)" \
                    "exit=$_mtls_deny_rc"
         echo "$_mtls_deny_out" | grep -qiE '403|forbidden|denied|HTTP [45]' \
-            && pass "puppet-ca-ctl non-admin cert reports 403/forbidden" \
-            || fail "puppet-ca-ctl non-admin cert reports 403/forbidden" "output: $_mtls_deny_out"
+            && pass "openvox-ca-ctl non-admin cert reports 403/forbidden" \
+            || fail "openvox-ca-ctl non-admin cert reports 403/forbidden" "output: $_mtls_deny_out"
     else
         fail "mTLS CLI: Phase 2 CA started (TLS)" "timed out waiting for health"
     fi
@@ -1643,95 +1643,95 @@ fi
 kill "$_MTLS_PID" 2>/dev/null; wait "$_MTLS_PID" 2>/dev/null || true
 rm -rf "$_MTLS_DIR"
 
-# --- 19h: puppet-ca-ctl against unreachable server ---
-_dead_out=$(puppet-ca-ctl --server-url "http://127.0.0.1:19999" list 2>&1) \
+# --- 19h: openvox-ca-ctl against unreachable server ---
+_dead_out=$(openvox-ca-ctl --server-url "http://127.0.0.1:19999" list 2>&1) \
     && _dead_rc=$? || _dead_rc=$?
 [ "$_dead_rc" -ne 0 ] \
-    && pass "puppet-ca-ctl exits non-zero when server is unreachable" \
-    || fail "puppet-ca-ctl exits non-zero when server is unreachable" "exit=$_dead_rc"
+    && pass "openvox-ca-ctl exits non-zero when server is unreachable" \
+    || fail "openvox-ca-ctl exits non-zero when server is unreachable" "exit=$_dead_rc"
 echo "$_dead_out" | grep -qiE 'error|refused|connect|fail|dial' \
-    && pass "puppet-ca-ctl reports connection error when server is unreachable" \
-    || fail "puppet-ca-ctl reports connection error when server is unreachable" "output: $_dead_out"
+    && pass "openvox-ca-ctl reports connection error when server is unreachable" \
+    || fail "openvox-ca-ctl reports connection error when server is unreachable" "output: $_dead_out"
 
 # --- 19i: required flag validation (Cobra MarkFlagRequired) ---
 # Each subcommand that requires --certname (or other flags) must fail clearly.
-_rf_out=$(puppet-ca-ctl revoke 2>&1) && _rf_rc=$? || _rf_rc=$?
+_rf_out=$(openvox-ca-ctl revoke 2>&1) && _rf_rc=$? || _rf_rc=$?
 [ "$_rf_rc" -ne 0 ] \
-    && pass "puppet-ca-ctl revoke without --certname exits non-zero" \
-    || fail "puppet-ca-ctl revoke without --certname exits non-zero" "exit=$_rf_rc"
+    && pass "openvox-ca-ctl revoke without --certname exits non-zero" \
+    || fail "openvox-ca-ctl revoke without --certname exits non-zero" "exit=$_rf_rc"
 echo "$_rf_out" | grep -qiE 'required|certname' \
-    && pass "puppet-ca-ctl revoke without --certname mentions required flag" \
-    || fail "puppet-ca-ctl revoke without --certname mentions required flag" "output: $_rf_out"
+    && pass "openvox-ca-ctl revoke without --certname mentions required flag" \
+    || fail "openvox-ca-ctl revoke without --certname mentions required flag" "output: $_rf_out"
 
-_cf_out=$(puppet-ca-ctl clean 2>&1) && _cf_rc=$? || _cf_rc=$?
+_cf_out=$(openvox-ca-ctl clean 2>&1) && _cf_rc=$? || _cf_rc=$?
 [ "$_cf_rc" -ne 0 ] \
-    && pass "puppet-ca-ctl clean without --certname exits non-zero" \
-    || fail "puppet-ca-ctl clean without --certname exits non-zero" "exit=$_cf_rc"
+    && pass "openvox-ca-ctl clean without --certname exits non-zero" \
+    || fail "openvox-ca-ctl clean without --certname exits non-zero" "exit=$_cf_rc"
 
-_gf_out=$(puppet-ca-ctl generate 2>&1) && _gf_rc=$? || _gf_rc=$?
+_gf_out=$(openvox-ca-ctl generate 2>&1) && _gf_rc=$? || _gf_rc=$?
 [ "$_gf_rc" -ne 0 ] \
-    && pass "puppet-ca-ctl generate without --certname exits non-zero" \
-    || fail "puppet-ca-ctl generate without --certname exits non-zero" "exit=$_gf_rc"
+    && pass "openvox-ca-ctl generate without --certname exits non-zero" \
+    || fail "openvox-ca-ctl generate without --certname exits non-zero" "exit=$_gf_rc"
 
-_if_out=$(puppet-ca-ctl import --cadir /tmp 2>&1) && _if_rc=$? || _if_rc=$?
+_if_out=$(openvox-ca-ctl import --cadir /tmp 2>&1) && _if_rc=$? || _if_rc=$?
 [ "$_if_rc" -ne 0 ] \
-    && pass "puppet-ca-ctl import without --cert-bundle/--private-key exits non-zero" \
-    || fail "puppet-ca-ctl import without --cert-bundle/--private-key exits non-zero" "exit=$_if_rc"
+    && pass "openvox-ca-ctl import without --cert-bundle/--private-key exits non-zero" \
+    || fail "openvox-ca-ctl import without --cert-bundle/--private-key exits non-zero" "exit=$_if_rc"
 
 # --- 19j: import with non-existent file paths ---
-_inx_out=$(puppet-ca-ctl import \
+_inx_out=$(openvox-ca-ctl import \
     --cadir /tmp \
     --cert-bundle /no/such/cert.pem \
     --private-key /no/such/key.pem \
     2>&1) && _inx_rc=$? || _inx_rc=$?
 [ "$_inx_rc" -ne 0 ] \
-    && pass "puppet-ca-ctl import with non-existent files exits non-zero" \
-    || fail "puppet-ca-ctl import with non-existent files exits non-zero" "exit=$_inx_rc"
+    && pass "openvox-ca-ctl import with non-existent files exits non-zero" \
+    || fail "openvox-ca-ctl import with non-existent files exits non-zero" "exit=$_inx_rc"
 echo "$_inx_out" | grep -qiE 'no such file|not found|reading' \
-    && pass "puppet-ca-ctl import with non-existent files reports file error" \
-    || fail "puppet-ca-ctl import with non-existent files reports file error" "output: $_inx_out"
+    && pass "openvox-ca-ctl import with non-existent files reports file error" \
+    || fail "openvox-ca-ctl import with non-existent files reports file error" "output: $_inx_out"
 
 # --- 19k: import with garbage (non-PEM) content ---
 _IMP_GARBAGE_DIR=$(mktemp -d)
 echo "NOT A CERTIFICATE" > "$WORK_DIR/garbage-cert.pem"
 echo "NOT A PRIVATE KEY" > "$WORK_DIR/garbage-key.pem"
-_ig_out=$(puppet-ca-ctl import \
+_ig_out=$(openvox-ca-ctl import \
     --cadir "$_IMP_GARBAGE_DIR" \
     --cert-bundle "$WORK_DIR/garbage-cert.pem" \
     --private-key "$WORK_DIR/garbage-key.pem" \
     2>&1) && _ig_rc=$? || _ig_rc=$?
 [ "$_ig_rc" -ne 0 ] \
-    && pass "puppet-ca-ctl import with garbage PEM exits non-zero" \
-    || fail "puppet-ca-ctl import with garbage PEM exits non-zero" "exit=$_ig_rc"
+    && pass "openvox-ca-ctl import with garbage PEM exits non-zero" \
+    || fail "openvox-ca-ctl import with garbage PEM exits non-zero" "exit=$_ig_rc"
 echo "$_ig_out" | grep -qiE 'decode|parse|invalid|failed|PEM' \
-    && pass "puppet-ca-ctl import with garbage PEM reports parse error" \
-    || fail "puppet-ca-ctl import with garbage PEM reports parse error" "output: $_ig_out"
+    && pass "openvox-ca-ctl import with garbage PEM reports parse error" \
+    || fail "openvox-ca-ctl import with garbage PEM reports parse error" "output: $_ig_out"
 rm -rf "$_IMP_GARBAGE_DIR"
 
 # --- 19l: generate --out-dir to non-existent directory ---
 _go_out=$($CTL generate --certname "gen-baddir-${RUN_ID}" \
     --out-dir "/no/such/directory" 2>&1) && _go_rc=$? || _go_rc=$?
 [ "$_go_rc" -ne 0 ] \
-    && pass "puppet-ca-ctl generate with non-existent --out-dir exits non-zero" \
-    || fail "puppet-ca-ctl generate with non-existent --out-dir exits non-zero" "exit=$_go_rc"
+    && pass "openvox-ca-ctl generate with non-existent --out-dir exits non-zero" \
+    || fail "openvox-ca-ctl generate with non-existent --out-dir exits non-zero" "exit=$_go_rc"
 echo "$_go_out" | grep -qiE 'no such file|not found|failed|directory' \
-    && pass "puppet-ca-ctl generate with non-existent --out-dir reports file error" \
-    || fail "puppet-ca-ctl generate with non-existent --out-dir reports file error" "output: $_go_out"
+    && pass "openvox-ca-ctl generate with non-existent --out-dir reports file error" \
+    || fail "openvox-ca-ctl generate with non-existent --out-dir reports file error" "output: $_go_out"
 
 # --- 19m: setup on a read-only path ---
-_ro_out=$(puppet-ca-ctl setup --cadir /proc/fakedir 2>&1) && _ro_rc=$? || _ro_rc=$?
+_ro_out=$(openvox-ca-ctl setup --cadir /proc/fakedir 2>&1) && _ro_rc=$? || _ro_rc=$?
 [ "$_ro_rc" -ne 0 ] \
-    && pass "puppet-ca-ctl setup on unwritable path exits non-zero" \
-    || fail "puppet-ca-ctl setup on unwritable path exits non-zero" "exit=$_ro_rc"
+    && pass "openvox-ca-ctl setup on unwritable path exits non-zero" \
+    || fail "openvox-ca-ctl setup on unwritable path exits non-zero" "exit=$_ro_rc"
 echo "$_ro_out" | grep -qiE 'permission|denied|read.only|mkdir|failed' \
-    && pass "puppet-ca-ctl setup on unwritable path reports error" \
-    || fail "puppet-ca-ctl setup on unwritable path reports error" "output: $_ro_out"
+    && pass "openvox-ca-ctl setup on unwritable path reports error" \
+    || fail "openvox-ca-ctl setup on unwritable path reports error" "output: $_ro_out"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Group 20 -- Migration from Puppet Server CA (lightweight / synthetic)
 #
-# Simulates migrating an existing Puppet-style CA directory into puppet-ca
-# using `puppet-ca-ctl import`, then verifies the migrated CA can sign new
+# Simulates migrating an existing Puppet-style CA directory into openvox-ca
+# using `openvox-ca-ctl import`, then verifies the migrated CA can sign new
 # certs, serve existing ones, and revoke certificates.
 #
 # This is a lightweight smoke test using openssl-generated certs.  For a
@@ -1805,16 +1805,16 @@ openssl x509 -req \
     && pass "Migration: pre-existing node cert created with openssl" \
     || fail "Migration: pre-existing node cert created with openssl"
 
-# --- 19b: Import the old CA into a new puppet-ca directory ---
-_mig_import_args=(puppet-ca-ctl import
+# --- 19b: Import the old CA into a new openvox-ca directory ---
+_mig_import_args=(openvox-ca-ctl import
     --cadir       "$_MIG_DIR"
     --cert-bundle "$_MIG_OLD/ca_crt.pem"
     --private-key "$_MIG_OLD/ca_key.pem")
 [ -s "$_MIG_OLD/ca_crl.pem" ] && _mig_import_args+=(--crl-chain "$_MIG_OLD/ca_crl.pem")
 _mig_import_out=$("${_mig_import_args[@]}" 2>&1) && _mig_import_rc=$? || _mig_import_rc=$?
 [ "$_mig_import_rc" -eq 0 ] \
-    && pass "Migration: puppet-ca-ctl import succeeds" \
-    || fail "Migration: puppet-ca-ctl import succeeds" "exit=$_mig_import_rc output=$_mig_import_out"
+    && pass "Migration: openvox-ca-ctl import succeeds" \
+    || fail "Migration: openvox-ca-ctl import succeeds" "exit=$_mig_import_rc output=$_mig_import_out"
 
 # Verify the imported files exist
 [ -f "$_MIG_DIR/ca_crt.pem" ] \
@@ -1833,7 +1833,7 @@ mkdir -p "$_MIG_DIR/signed"
 cp "$_MIG_OLD/${_MIG_EXISTING}.pem" "$_MIG_DIR/signed/${_MIG_EXISTING}.pem"
 
 # Rebuild inventory from the copied cert (simulates Step 5 of migration guide).
-# puppet-ca inventory format: SERIAL NOT_BEFORE NOT_AFTER /SUBJECT
+# openvox-ca inventory format: SERIAL NOT_BEFORE NOT_AFTER /SUBJECT
 # Dates must be in Go's 2006-01-02T15:04:05UTC format (no spaces).
 _mig_serial=$(openssl x509 -noout -serial -in "$_MIG_DIR/signed/${_MIG_EXISTING}.pem" \
     | cut -d= -f2)
@@ -1847,8 +1847,8 @@ echo "$_mig_serial $_mig_nb $_mig_na /${_MIG_EXISTING}" >> "$_MIG_DIR/inventory.
     && pass "Migration: pre-existing cert copied to signed/" \
     || fail "Migration: pre-existing cert copied to signed/"
 
-# --- 19d: Start puppet-ca with the migrated directory ---
-puppet-ca --cadir "$_MIG_DIR" \
+# --- 19d: Start openvox-ca with the migrated directory ---
+openvox-ca --cadir "$_MIG_DIR" \
     --host 127.0.0.1 --port "$_MIG_PORT" \
     --no-tls-required \
     --autosign-config=true \
@@ -1865,7 +1865,7 @@ for _i in $(seq 1 60); do
 done
 
 if [ "$_mig_ready" = "true" ]; then
-    pass "Migration: puppet-ca starts successfully with imported CA"
+    pass "Migration: openvox-ca starts successfully with imported CA"
 
     # --- 19e: Fetch the CA cert from the migrated server ---
     _mig_ca_pem=$(curl -sf "${_mig_url}/puppet-ca/v1/certificate/ca" 2>/dev/null) || true
@@ -1930,17 +1930,17 @@ if [ "$_mig_ready" = "true" ]; then
         && pass "Migration: revoked cert status shows 'revoked'" \
         || fail "Migration: revoked cert status shows 'revoked'" "status: $_mig_status"
 
-    # --- 19j: puppet-ca-ctl list against migrated CA shows both certs ---
-    _mig_list=$(puppet-ca-ctl --server-url "$_mig_url" list --all 2>/dev/null) || true
+    # --- 19j: openvox-ca-ctl list against migrated CA shows both certs ---
+    _mig_list=$(openvox-ca-ctl --server-url "$_mig_url" list --all 2>/dev/null) || true
     echo "$_mig_list" | grep -qF "${_MIG_EXISTING}" \
-        && pass "Migration: puppet-ca-ctl list shows pre-existing cert" \
-        || fail "Migration: puppet-ca-ctl list shows pre-existing cert" "output: $_mig_list"
+        && pass "Migration: openvox-ca-ctl list shows pre-existing cert" \
+        || fail "Migration: openvox-ca-ctl list shows pre-existing cert" "output: $_mig_list"
     echo "$_mig_list" | grep -qF "${_MIG_NEW}" \
-        && pass "Migration: puppet-ca-ctl list shows newly signed cert" \
-        || fail "Migration: puppet-ca-ctl list shows newly signed cert" "output: $_mig_list"
+        && pass "Migration: openvox-ca-ctl list shows newly signed cert" \
+        || fail "Migration: openvox-ca-ctl list shows newly signed cert" "output: $_mig_list"
 
 else
-    fail "Migration: puppet-ca starts successfully with imported CA" \
+    fail "Migration: openvox-ca starts successfully with imported CA" \
         "timed out waiting for health"
     for _skip in \
         "Migration: CA cert fetchable from migrated server" \
@@ -1951,8 +1951,8 @@ else
         "Migration: revoke pre-existing cert returns 2xx" \
         "Migration: CRL contains revoked certificates after revocation" \
         "Migration: revoked cert status shows 'revoked'" \
-        "Migration: puppet-ca-ctl list shows pre-existing cert" \
-        "Migration: puppet-ca-ctl list shows newly signed cert"
+        "Migration: openvox-ca-ctl list shows pre-existing cert" \
+        "Migration: openvox-ca-ctl list shows newly signed cert"
     do
         fail "$_skip" "SKIP: CA did not start"
     done
@@ -1964,7 +1964,7 @@ rm -rf "$_MIG_DIR" "$_MIG_OLD"
 # ═════════════════════════════════════════════════════════════════════════════
 # Group 21 -- POST /certificate_renewal (mTLS)
 #
-#   Starts a short-lived local puppet-ca on port 8145.
+#   Starts a short-lived local openvox-ca on port 8145.
 #   Phase 1 (loopback HTTP, autosign=true): bootstrap CA, generate a TLS
 #   server cert, a node client cert, and a second node cert for CN-mismatch
 #   testing.
@@ -1991,9 +1991,9 @@ _wait_ren_ca() {
 
 # --- Phase 1: loopback HTTP, autosign=true, generate all certs ---------------
 
-puppet-ca-ctl setup --cadir "$_REN_DIR" --hostname renewal-test-ca 2>/dev/null
+openvox-ca-ctl setup --cadir "$_REN_DIR" --hostname renewal-test-ca 2>/dev/null
 
-puppet-ca --cadir "$_REN_DIR" \
+openvox-ca --cadir "$_REN_DIR" \
     --host 127.0.0.1 --port "$_REN_PORT" \
     --no-tls-required \
     --autosign-config=true \
@@ -2004,17 +2004,17 @@ if _wait_ren_ca "$_REN_CA_URL"; then
     pass "renewal: Phase 1 CA started (loopback HTTP, autosign=true)"
 
     # TLS server cert (key saved to $_REN_DIR/renewal-test-ca_key.pem)
-    puppet-ca-ctl --server-url "$_REN_CA_URL" \
+    openvox-ca-ctl --server-url "$_REN_CA_URL" \
         generate --certname renewal-test-ca --out-dir "$_REN_DIR" \
         > "$_REN_DIR/tls-server.crt" 2>/dev/null
 
     # Node client cert: key at $WORK_DIR/${_REN_NODE}_key.pem, cert to stdout
-    puppet-ca-ctl --server-url "$_REN_CA_URL" \
+    openvox-ca-ctl --server-url "$_REN_CA_URL" \
         generate --certname "$_REN_NODE" --out-dir "$WORK_DIR" \
         > "$WORK_DIR/ren-node.crt" 2>/dev/null
 
     # Second node cert for CN-mismatch testing
-    puppet-ca-ctl --server-url "$_REN_CA_URL" \
+    openvox-ca-ctl --server-url "$_REN_CA_URL" \
         generate --certname "$_REN_OTHER" --out-dir "$WORK_DIR" \
         > "$WORK_DIR/ren-other.crt" 2>/dev/null
 else
@@ -2027,7 +2027,7 @@ _REN_PID=""
 
 # --- Phase 2: TLS, exercise the renewal endpoint -----------------------------
 
-puppet-ca --cadir "$_REN_DIR" \
+openvox-ca --cadir "$_REN_DIR" \
     --host 127.0.0.1 --port "$_REN_PORT" \
     --tls-cert "$_REN_DIR/tls-server.crt" \
     --tls-key  "$_REN_DIR/renewal-test-ca_key.pem" \

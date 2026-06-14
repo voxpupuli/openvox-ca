@@ -1,13 +1,13 @@
 #!/bin/bash
-# Migration integration test: VoxPupuli Puppet Server CA → puppet-ca.
+# Migration integration test: VoxPupuli Puppet Server CA → openvox-ca.
 #
-# Runs inside the test-runner container (puppet-ca image) with the old
+# Runs inside the test-runner container (openvox-ca image) with the old
 # Puppet Server's CA directory mounted at /old-ca (read-only).
 #
 # Prerequisites (handled by compose-migration.yml):
 #   - old-puppet service is healthy (JVM Puppet Server with built-in CA)
 #   - /old-ca contains the real Puppet Server CA directory
-#   - puppet-ca and puppet-ca-ctl are on PATH
+#   - openvox-ca and openvox-ca-ctl are on PATH
 #
 # Output: TAP format.  Exit 0 when all pass, exit 1 if any fail.
 
@@ -16,7 +16,7 @@ set -uo pipefail
 # -- Configuration ------------------------------------------------------------
 OLD_CA_URL="https://old-puppet:8140"
 OLD_CA_DIR="/old-ca"
-NEW_CA_DIR=$(mktemp -d /tmp/puppet-ca-migration.XXXXXX)
+NEW_CA_DIR=$(mktemp -d /tmp/openvox-ca-migration.XXXXXX)
 NEW_CA_PORT=8140
 WORK_DIR=$(mktemp -d /tmp/migration-work.XXXXXX)
 RUN_ID=$(date +%s%N | tail -c 8)
@@ -127,20 +127,20 @@ _old_ca_fp=$(openssl x509 -noout -fingerprint -sha256 \
     -in "$OLD_CA_DIR/ca_crt.pem" 2>/dev/null) || true
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Phase 3 -- Import old CA into puppet-ca
+# Phase 3 -- Import old CA into openvox-ca
 # ═════════════════════════════════════════════════════════════════════════════
-printf '\n# Phase 3 -- Import old CA into puppet-ca\n'
+printf '\n# Phase 3 -- Import old CA into openvox-ca\n'
 
-# 3a: Import using puppet-ca-ctl.
-_import_out=$(puppet-ca-ctl import \
+# 3a: Import using openvox-ca-ctl.
+_import_out=$(openvox-ca-ctl import \
     --cadir       "$NEW_CA_DIR" \
     --cert-bundle "$OLD_CA_DIR/ca_crt.pem" \
     --private-key "$OLD_CA_DIR/ca_key.pem" \
     --crl-chain   "$OLD_CA_DIR/ca_crl.pem" \
     2>&1) && _import_rc=$? || _import_rc=$?
 [ "$_import_rc" -eq 0 ] \
-    && pass "Import: puppet-ca-ctl import succeeds" \
-    || fail "Import: puppet-ca-ctl import succeeds" "exit=$_import_rc output=$_import_out"
+    && pass "Import: openvox-ca-ctl import succeeds" \
+    || fail "Import: openvox-ca-ctl import succeeds" "exit=$_import_rc output=$_import_out"
 
 # 3b: Verify imported files.
 [ -f "$NEW_CA_DIR/ca_crt.pem" ] \
@@ -169,7 +169,7 @@ _new_signed_count=$(ls "$NEW_CA_DIR/signed/"*.pem 2>/dev/null | wc -l) || true
     || fail "Import: copied signed certs" "count=$_new_signed_count"
 
 # 3e: Rebuild inventory from copied certs.
-# puppet-ca's inventory format: SERIAL NOT_BEFORE NOT_AFTER /SUBJECT
+# openvox-ca's inventory format: SERIAL NOT_BEFORE NOT_AFTER /SUBJECT
 # Dates must be in Go's 2006-01-02T15:04:05UTC format (no spaces).
 for _cert in "$NEW_CA_DIR/signed/"*.pem; do
     [ -f "$_cert" ] || continue
@@ -187,11 +187,11 @@ _inv_lines=$(wc -l < "$NEW_CA_DIR/inventory.txt" 2>/dev/null) || _inv_lines=0
     || fail "Import: inventory rebuilt" "lines=$_inv_lines"
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Phase 4 -- Start puppet-ca with imported material
+# Phase 4 -- Start openvox-ca with imported material
 # ═════════════════════════════════════════════════════════════════════════════
-printf '\n# Phase 4 -- Start puppet-ca with imported CA\n'
+printf '\n# Phase 4 -- Start openvox-ca with imported CA\n'
 
-puppet-ca --cadir "$NEW_CA_DIR" \
+openvox-ca --cadir "$NEW_CA_DIR" \
     --host 127.0.0.1 --port "$NEW_CA_PORT" \
     --no-tls-required \
     --autosign-config=true \
@@ -208,13 +208,13 @@ for _i in $(seq 1 60); do
 done
 
 if [ "$_new_ready" != "true" ]; then
-    fail "puppet-ca starts with imported CA" "timed out waiting for health"
+    fail "openvox-ca starts with imported CA" "timed out waiting for health"
     printf '\n1..%d\n' "$T"
     printf '# Results: %d passed, %d failed out of %d\n' \
         $(( T - FAILURES )) "$FAILURES" "$T"
     exit 1
 fi
-pass "puppet-ca starts with imported CA"
+pass "openvox-ca starts with imported CA"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Phase 5 -- Verify the migrated CA works
@@ -269,11 +269,11 @@ else
     pass "New CA: no pre-existing old certs to check (only agent cert)"
 fi
 
-# 5g: puppet-ca-ctl list shows the migrated certs.
-_new_list=$(puppet-ca-ctl --server-url "$_new_url" list --all 2>/dev/null) || true
+# 5g: openvox-ca-ctl list shows the migrated certs.
+_new_list=$(openvox-ca-ctl --server-url "$_new_url" list --all 2>/dev/null) || true
 echo "$_new_list" | grep -qF "${_OLD_AGENT}" \
-    && pass "New CA: puppet-ca-ctl list shows migrated agent cert" \
-    || fail "New CA: puppet-ca-ctl list shows migrated agent cert" "output: $_new_list"
+    && pass "New CA: openvox-ca-ctl list shows migrated agent cert" \
+    || fail "New CA: openvox-ca-ctl list shows migrated agent cert" "output: $_new_list"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Phase 6 -- Sign new certs, revoke migrated certs

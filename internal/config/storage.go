@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Chris Boot
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -19,11 +20,11 @@ package config
 import (
 	"path/filepath"
 
-	"github.com/tvaughan/puppet-ca/internal/storage"
+	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
 
-// StorageConfig is the storage-backend portion of a puppet-ca configuration,
-// shared by the server (cmd/puppet-ca) and the operator CLI (cmd/puppet-ca-ctl)
+// StorageConfig is the storage-backend portion of a openvox-ca configuration,
+// shared by the server (cmd/openvox-ca) and the operator CLI (cmd/openvox-ca-ctl)
 // so that both interpret the same YAML keys identically. The server embeds it
 // inline into its larger config; the migrate command parses two of them, one
 // per backend.

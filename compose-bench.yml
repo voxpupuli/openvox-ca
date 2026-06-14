@@ -1,8 +1,8 @@
-# Load / performance test topology for puppet-ca.
+# Load / performance test topology for openvox-ca.
 #
 # Services
 # --------
-#   puppet-ca  - CA server with autosign=true so the workflow scenario
+#   openvox-ca  - CA server with autosign=true so the workflow scenario
 #                (generate -> status -> cert -> clean) is fully self-contained.
 #   k6         - Grafana k6 load runner executing test/load.js.
 #
@@ -10,16 +10,16 @@
 #   mage bench                        # build images, run k6, tear down
 #   podman-compose -f compose-bench.yml up --build   # interactive
 
-name: puppet-ca-bench
+name: openvox-ca-bench
 
 services:
 
   # -- CA server ------------------------------------------------------------─
-  puppet-ca:
+  openvox-ca:
     build:
       context: .
       dockerfile: Dockerfile.run
-    image: puppet-ca-integ:latest   # reuse the image built by mage build / integCompose
+    image: openvox-ca-integ:latest   # reuse the image built by mage build / integCompose
     # WARNING: --no-tls-required and --autosign-config=true are for load
     # testing ONLY. Never use these flags in production.
     command:
@@ -46,7 +46,7 @@ services:
     command:
       - run
       - --env
-      - CA_URL=http://puppet-ca:8140
+      - CA_URL=http://openvox-ca:8140
       - /test/load.js
     environment:
       # Passed in by `mage test:bench` via systemInfo(); used in the final report.
@@ -58,7 +58,7 @@ services:
       # Mount the test directory read-only; :z relabels for SELinux (RHEL/CentOS).
       - ./test:/test:ro,z
     depends_on:
-      puppet-ca:
+      openvox-ca:
         condition: service_healthy
 
 volumes:

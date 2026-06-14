@@ -13,7 +13,7 @@ set -euo pipefail
 export PATH=/opt/puppetlabs/server/bin:/opt/puppetlabs/puppet/bin:$PATH
 
 # -- Configuration --------------------------------------------------------─
-CA_HOST="${PUPPET_CA_HOST:-puppet-ca}"
+CA_HOST="${PUPPET_CA_HOST:-openvox-ca}"
 CA_PORT="${PUPPET_CA_PORT:-8140}"
 CA_URL="https://${CA_HOST}:${CA_PORT}"
 
@@ -139,7 +139,7 @@ echo "webserver.conf written."
 
 # -- Disable built-in Puppet CA --------------------------------------------
 # Replace certificate-authority-service with the disabled stub so puppetserver
-# defers all CA operations to the external Go puppet-ca.
+# defers all CA operations to the external Go openvox-ca.
 # In Puppet Server 7+, the CA service entry is in services.d/ca.cfg.
 # Older versions used bootstrap.cfg.
 _CA_CFG=/etc/puppetlabs/puppetserver/services.d/ca.cfg

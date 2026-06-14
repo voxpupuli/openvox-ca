@@ -1,5 +1,6 @@
 // Copyright (C) 2026 Trevor Vaughan
 // Copyright (C) 2026 Chris Boot
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -232,6 +233,15 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 	}
 	if err := csr.CheckSignature(); err != nil {
 		return nil, fmt.Errorf("invalid CSR signature for %s: %w", subject, err)
+	}
+
+	// SECURITY: Enforce the CA's key-strength policy on the client-submitted
+	// key (RSA >= 2048, ECDSA on an approved NIST curve), mirroring the policy
+	// ValidateKeyConfig applies to server-side key generation. Placed at the
+	// issuance chokepoint so no signing path can ever produce a certificate
+	// over a weak key. NIST 800-53: SC-12, SC-13 (Cryptographic Protection)
+	if err := validatePublicKey(csr.PublicKey); err != nil {
+		return nil, fmt.Errorf("rejecting CSR for %s: %w", subject, err)
 	}
 
 	// SECURITY: Reject CSRs that request CA capabilities (BasicConstraints:
