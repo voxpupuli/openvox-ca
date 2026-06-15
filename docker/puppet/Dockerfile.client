@@ -1,4 +1,4 @@
-# Puppet agent (client) image for the puppet-ca integration test stack.
+# Puppet agent (client) image for the openvox-ca integration test stack.
 #
 # Provides a minimal CentOS Stream 10 container with the OpenVox 8 agent,
 # curl, and openssl.  The entrypoint keeps the container alive so the host-side

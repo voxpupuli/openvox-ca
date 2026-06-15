@@ -1,4 +1,4 @@
-# lefthook (https://lefthook.dev/) git-hook configuration for github.com/tvaughan/puppet-ca.
+# lefthook (https://lefthook.dev/) git-hook configuration for github.com/voxpupuli/openvox-ca.
 #
 # This file is the source of truth; the actual .git/hooks/* shims are NOT
 # committed (git never tracks .git/hooks). Run `lefthook install` once (with

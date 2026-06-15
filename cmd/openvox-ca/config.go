@@ -1,5 +1,6 @@
 // Copyright (C) 2026 Trevor Vaughan
 // Copyright (C) 2026 Chris Boot
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -25,11 +26,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tvaughan/puppet-ca/internal/config"
+	"github.com/voxpupuli/openvox-ca/internal/config"
 	"go.yaml.in/yaml/v3"
 )
 
-// serverConfig holds all configuration for the puppet-ca server.
+// serverConfig holds all configuration for the openvox-ca server.
 // Fields are populated from (lowest → highest priority):
 //
 //	built-in defaults → config file → env vars → CLI flags
@@ -88,7 +89,7 @@ type serverConfig struct {
 	CAValidityDays   int `yaml:"ca_validity_days"`   // 0 = built-in default (~5 years)
 	LeafValidityDays int `yaml:"leaf_validity_days"` // 0 = built-in default (~5 years)
 	CRLValidityDays  int `yaml:"crl_validity_days"`  // 0 = built-in default (30 days)
-	CSRRateLimit     int `yaml:"csr_rate_limit"`     // max CSR submissions per IP per minute; 0 = use built-in default (60)
+	CSRRateLimit     int `yaml:"csr_rate_limit"`     // max CSR submissions per IP per minute; 0 disables, -1/unset = built-in default (60)
 
 	// Background CRL refresh keeps the CRL's NextUpdate from lapsing when no
 	// certificates are being revoked. Safe to run on every replica: the work is
@@ -131,6 +132,7 @@ func loadServerConfig(configFile string) (*serverConfig, error) {
 		Host:           "0.0.0.0",
 		Port:           8140,
 		CAPathLength:   -1,   // unconstrained; 0 = leaf-only, N = N levels of intermediates
+		CSRRateLimit:   -1,   // unset sentinel; 0 disables, -1 falls back to defaultCSRRateLimit
 		PromoteCNToSAN: true, // RFC 2818: add CN as SAN when CSR has no SANs
 	}
 

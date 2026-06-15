@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Trevor Vaughan
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -84,6 +85,34 @@ func ValidateKeyConfig(cfg KeyConfig) error {
 		return fmt.Errorf("unsupported key algorithm %q (must be %q or %q)", cfg.Algo, KeyAlgoRSA, KeyAlgoECDSA)
 	}
 	return nil
+}
+
+// validatePublicKey enforces the CA's key-strength policy on a client-submitted
+// public key, mirroring ValidateKeyConfig (which governs server-side key
+// generation): RSA keys must be at least 2048 bits, and ECDSA keys must use an
+// approved NIST curve (P-256, P-384, or P-521). Any other key type or weaker
+// parameter is rejected so the CA never issues a certificate over a weak key.
+func validatePublicKey(pub crypto.PublicKey) error {
+	switch k := pub.(type) {
+	case *rsa.PublicKey:
+		if bits := k.N.BitLen(); bits < 2048 {
+			return fmt.Errorf("RSA public key size %d is below the minimum of 2048 bits", bits)
+		}
+		return nil
+	case *ecdsa.PublicKey:
+		switch k.Curve {
+		case elliptic.P256(), elliptic.P384(), elliptic.P521():
+			return nil
+		default:
+			name := "unknown"
+			if k.Curve != nil {
+				name = k.Curve.Params().Name
+			}
+			return fmt.Errorf("unsupported ECDSA curve %q (must be P-256, P-384, or P-521)", name)
+		}
+	default:
+		return fmt.Errorf("unsupported public key type %T (must be RSA >= 2048 bits or ECDSA P-256/P-384/P-521)", pub)
+	}
 }
 
 // generateKey creates a fresh private key according to cfg.

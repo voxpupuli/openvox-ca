@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Chris Boot
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -19,173 +20,140 @@ package storage
 import (
 	"bytes"
 	"context"
-	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"testing"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
 // overlayTestSetup returns an OverlayBackend wrapping a filesystem base, with
 // KeyCACert and KeyCAKey overridden to explicit local files outside baseDir.
-func overlayTestSetup(t *testing.T) (*OverlayBackend, string, string, string) {
-	t.Helper()
-	baseDir := t.TempDir()
-	overlayDir := t.TempDir()
+func overlayTestSetup() (*OverlayBackend, string, string, string) {
+	baseDir := GinkgoT().TempDir()
+	overlayDir := GinkgoT().TempDir()
 	certPath := filepath.Join(overlayDir, "ca_crt.pem")
 	keyPath := filepath.Join(overlayDir, "ca_key.pem")
 
 	base := NewFilesystemBackend(baseDir)
-	if err := base.EnsureReady(context.Background()); err != nil {
-		t.Fatalf("base EnsureReady: %v", err)
-	}
+	err := base.EnsureReady(context.Background())
+	Expect(err).NotTo(HaveOccurred(), "base EnsureReady: %v", err)
 	ov, err := NewOverlayBackend(base, map[string]string{
 		KeyCACert: certPath,
 		KeyCAKey:  keyPath,
 	})
-	if err != nil {
-		t.Fatalf("NewOverlayBackend: %v", err)
-	}
-	if err := ov.EnsureReady(context.Background()); err != nil {
-		t.Fatalf("overlay EnsureReady: %v", err)
-	}
+	Expect(err).NotTo(HaveOccurred(), "NewOverlayBackend: %v", err)
+	err = ov.EnsureReady(context.Background())
+	Expect(err).NotTo(HaveOccurred(), "overlay EnsureReady: %v", err)
 	return ov, baseDir, certPath, keyPath
 }
 
-func TestOverlayBackendPutGetDelete(t *testing.T) {
-	ov, baseDir, certPath, keyPath := overlayTestSetup(t)
+var _ = Describe("OverlayBackendPutGetDelete", func() {
+	It("routes overridden keys to explicit paths and delegates the rest", func() {
+		ov, baseDir, certPath, keyPath := overlayTestSetup()
 
-	// Override keys: file doesn't exist yet.
-	if _, err := ov.Get(context.Background(), KeyCACert); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("Get missing override: err = %v, want fs.ErrNotExist", err)
-	}
-	ok, err := ov.Exists(context.Background(), KeyCACert)
-	if err != nil || ok {
-		t.Fatalf("Exists missing override: ok=%v err=%v", ok, err)
-	}
+		// Override keys: file doesn't exist yet.
+		_, err := ov.Get(context.Background(), KeyCACert)
+		Expect(err).To(MatchError(fs.ErrNotExist), "Get missing override: err = %v, want fs.ErrNotExist", err)
+		ok, err := ov.Exists(context.Background(), KeyCACert)
+		Expect(err == nil && !ok).To(BeTrue(), "Exists missing override: ok=%v err=%v", ok, err)
 
-	// Put a cert via the override: lands on the explicit path, not baseDir.
-	certData := []byte("cert-pem-data")
-	if err := ov.Put(context.Background(), KeyCACert, certData, BlobPublic); err != nil {
-		t.Fatalf("Put cert: %v", err)
-	}
-	onDisk, err := os.ReadFile(certPath)
-	if err != nil {
-		t.Fatalf("reading override path: %v", err)
-	}
-	if !bytes.Equal(onDisk, certData) {
-		t.Errorf("override file = %q, want %q", onDisk, certData)
-	}
-	// Base dir should NOT contain ca_crt.pem since the cert is overridden.
-	if _, err := os.Stat(filepath.Join(baseDir, "ca_crt.pem")); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("base dir unexpectedly contains ca_crt.pem: err=%v", err)
-	}
+		// Put a cert via the override: lands on the explicit path, not baseDir.
+		certData := []byte("cert-pem-data")
+		err = ov.Put(context.Background(), KeyCACert, certData, BlobPublic)
+		Expect(err).NotTo(HaveOccurred(), "Put cert: %v", err)
+		onDisk, err := os.ReadFile(certPath)
+		Expect(err).NotTo(HaveOccurred(), "reading override path: %v", err)
+		Expect(bytes.Equal(onDisk, certData)).To(BeTrue(), "override file = %q, want %q", onDisk, certData)
+		// Base dir should NOT contain ca_crt.pem since the cert is overridden.
+		_, err = os.Stat(filepath.Join(baseDir, "ca_crt.pem"))
+		Expect(err).To(MatchError(fs.ErrNotExist), "base dir unexpectedly contains ca_crt.pem: err=%v", err)
 
-	// Put a key via the override: private permissions.
-	keyData := []byte("key-pem-data")
-	if err := ov.Put(context.Background(), KeyCAKey, keyData, BlobPrivate); err != nil {
-		t.Fatalf("Put key: %v", err)
-	}
-	info, err := os.Stat(keyPath)
-	if err != nil {
-		t.Fatalf("stat override key path: %v", err)
-	}
-	if info.Mode().Perm() != FilePermPrivate {
-		t.Errorf("override key perm = %v, want %v", info.Mode().Perm(), os.FileMode(FilePermPrivate))
-	}
+		// Put a key via the override: private permissions.
+		keyData := []byte("key-pem-data")
+		err = ov.Put(context.Background(), KeyCAKey, keyData, BlobPrivate)
+		Expect(err).NotTo(HaveOccurred(), "Put key: %v", err)
+		info, err := os.Stat(keyPath)
+		Expect(err).NotTo(HaveOccurred(), "stat override key path: %v", err)
+		Expect(info.Mode().Perm()).To(Equal(os.FileMode(FilePermPrivate)), "override key perm = %v, want %v", info.Mode().Perm(), os.FileMode(FilePermPrivate))
 
-	// Non-overridden keys are delegated to the base filesystem backend.
-	if err := ov.Put(context.Background(), KeySerial, []byte("0001"), BlobPublic); err != nil {
-		t.Fatalf("Put serial: %v", err)
-	}
-	baseSerial, err := os.ReadFile(filepath.Join(baseDir, "serial"))
-	if err != nil {
-		t.Fatalf("reading base serial: %v", err)
-	}
-	if string(baseSerial) != "0001" {
-		t.Errorf("base serial = %q, want 0001", baseSerial)
-	}
+		// Non-overridden keys are delegated to the base filesystem backend.
+		err = ov.Put(context.Background(), KeySerial, []byte("0001"), BlobPublic)
+		Expect(err).NotTo(HaveOccurred(), "Put serial: %v", err)
+		baseSerial, err := os.ReadFile(filepath.Join(baseDir, "serial"))
+		Expect(err).NotTo(HaveOccurred(), "reading base serial: %v", err)
+		Expect(string(baseSerial)).To(Equal("0001"), "base serial = %q, want 0001", baseSerial)
 
-	// Delete via override.
-	if err := ov.Delete(context.Background(), KeyCACert); err != nil {
-		t.Fatalf("Delete override: %v", err)
-	}
-	if err := ov.Delete(context.Background(), KeyCACert); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("Delete missing: err = %v, want fs.ErrNotExist", err)
-	}
-}
+		// Delete via override.
+		err = ov.Delete(context.Background(), KeyCACert)
+		Expect(err).NotTo(HaveOccurred(), "Delete override: %v", err)
+		err = ov.Delete(context.Background(), KeyCACert)
+		Expect(err).To(MatchError(fs.ErrNotExist), "Delete missing: err = %v, want fs.ErrNotExist", err)
+	})
+})
 
-func TestOverlayBackendReadsPreexistingFile(t *testing.T) {
-	// Simulate an operator who supplies a CA cert file. The server must read
-	// it via Get without ever writing to it.
-	baseDir := t.TempDir()
-	overlayDir := t.TempDir()
-	certPath := filepath.Join(overlayDir, "preexisting.pem")
-	supplied := []byte("operator-supplied-cert")
-	if err := os.WriteFile(certPath, supplied, 0o644); err != nil {
-		t.Fatal(err)
-	}
+var _ = Describe("OverlayBackendReadsPreexistingFile", func() {
+	It("reads an operator-supplied file via Get without writing to it", func() {
+		// Simulate an operator who supplies a CA cert file. The server must read
+		// it via Get without ever writing to it.
+		baseDir := GinkgoT().TempDir()
+		overlayDir := GinkgoT().TempDir()
+		certPath := filepath.Join(overlayDir, "preexisting.pem")
+		supplied := []byte("operator-supplied-cert")
+		err := os.WriteFile(certPath, supplied, 0o644)
+		Expect(err).NotTo(HaveOccurred())
 
-	base := NewFilesystemBackend(baseDir)
-	ov, err := NewOverlayBackend(base, map[string]string{KeyCACert: certPath})
-	if err != nil {
-		t.Fatalf("NewOverlayBackend: %v", err)
-	}
+		base := NewFilesystemBackend(baseDir)
+		ov, err := NewOverlayBackend(base, map[string]string{KeyCACert: certPath})
+		Expect(err).NotTo(HaveOccurred(), "NewOverlayBackend: %v", err)
 
-	got, err := ov.Get(context.Background(), KeyCACert)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if !bytes.Equal(got, supplied) {
-		t.Errorf("Get = %q, want %q", got, supplied)
-	}
-	ok, err := ov.Exists(context.Background(), KeyCACert)
-	if err != nil || !ok {
-		t.Errorf("Exists = %v, %v; want true, nil", ok, err)
-	}
-}
+		got, err := ov.Get(context.Background(), KeyCACert)
+		Expect(err).NotTo(HaveOccurred(), "Get: %v", err)
+		Expect(bytes.Equal(got, supplied)).To(BeTrue(), "Get = %q, want %q", got, supplied)
+		ok, err := ov.Exists(context.Background(), KeyCACert)
+		Expect(err == nil && ok).To(BeTrue(), "Exists = %v, %v; want true, nil", ok, err)
+	})
+})
 
-func TestOverlayBackendAppendLineRejectsOverride(t *testing.T) {
-	ov, _, _, _ := overlayTestSetup(t)
-	// KeyInventory is not overridden, so append should work and land in base.
-	if err := ov.AppendLine(context.Background(), KeyInventory, []byte("line\n"), BlobPrivate); err != nil {
-		t.Fatalf("AppendLine to non-overridden key: %v", err)
-	}
-	// Force an override on KeyInventory and confirm AppendLine refuses.
-	ov.overrides[KeyInventory] = "/tmp/should-not-append"
-	if err := ov.AppendLine(context.Background(), KeyInventory, []byte("line\n"), BlobPrivate); err == nil {
-		t.Errorf("AppendLine on overridden key should error")
-	}
-}
+var _ = Describe("OverlayBackendAppendLineRejectsOverride", func() {
+	It("appends to non-overridden keys but refuses overridden ones", func() {
+		ov, _, _, _ := overlayTestSetup()
+		// KeyInventory is not overridden, so append should work and land in base.
+		err := ov.AppendLine(context.Background(), KeyInventory, []byte("line\n"), BlobPrivate)
+		Expect(err).NotTo(HaveOccurred(), "AppendLine to non-overridden key: %v", err)
+		// Force an override on KeyInventory and confirm AppendLine refuses.
+		ov.overrides[KeyInventory] = "/tmp/should-not-append"
+		err = ov.AppendLine(context.Background(), KeyInventory, []byte("line\n"), BlobPrivate)
+		Expect(err).To(HaveOccurred(), "AppendLine on overridden key should error")
+	})
+})
 
-func TestOverlayBackendPathProvider(t *testing.T) {
-	ov, baseDir, certPath, _ := overlayTestSetup(t)
-	if got := ov.Path(KeyCACert); got != certPath {
-		t.Errorf("Path(CACert) = %q, want %q", got, certPath)
-	}
-	// Non-overridden key falls through to base filesystem mapping.
-	if got := ov.Path(KeySerial); got != filepath.Join(baseDir, "serial") {
-		t.Errorf("Path(Serial) = %q, want %q", got, filepath.Join(baseDir, "serial"))
-	}
-	if got := ov.BaseDir(); got != baseDir {
-		t.Errorf("BaseDir = %q, want %q", got, baseDir)
-	}
-}
+var _ = Describe("OverlayBackendPathProvider", func() {
+	It("maps overridden and non-overridden keys to paths", func() {
+		ov, baseDir, certPath, _ := overlayTestSetup()
+		Expect(ov.Path(KeyCACert)).To(Equal(certPath), "Path(CACert) = %q, want %q", ov.Path(KeyCACert), certPath)
+		// Non-overridden key falls through to base filesystem mapping.
+		Expect(ov.Path(KeySerial)).To(Equal(filepath.Join(baseDir, "serial")), "Path(Serial) = %q, want %q", ov.Path(KeySerial), filepath.Join(baseDir, "serial"))
+		Expect(ov.BaseDir()).To(Equal(baseDir), "BaseDir = %q, want %q", ov.BaseDir(), baseDir)
+	})
+})
 
-func TestOverlayBackendRequiresNonEmptyOverride(t *testing.T) {
-	base := NewFilesystemBackend(t.TempDir())
-	if _, err := NewOverlayBackend(base, nil); err == nil {
-		t.Errorf("nil overrides should error")
-	}
-	if _, err := NewOverlayBackend(base, map[string]string{KeyCACert: ""}); err == nil {
-		t.Errorf("all-empty overrides should error")
-	}
-	if _, err := NewOverlayBackend(nil, map[string]string{KeyCACert: "/tmp/x"}); err == nil {
-		t.Errorf("nil base should error")
-	}
-}
+var _ = Describe("OverlayBackendRequiresNonEmptyOverride", func() {
+	It("rejects nil, all-empty, and nil-base configurations", func() {
+		base := NewFilesystemBackend(GinkgoT().TempDir())
+		_, err := NewOverlayBackend(base, nil)
+		Expect(err).To(HaveOccurred(), "nil overrides should error")
+		_, err = NewOverlayBackend(base, map[string]string{KeyCACert: ""})
+		Expect(err).To(HaveOccurred(), "all-empty overrides should error")
+		_, err = NewOverlayBackend(nil, map[string]string{KeyCACert: "/tmp/x"})
+		Expect(err).To(HaveOccurred(), "nil base should error")
+	})
+})
 
-func TestOverlayBackendImplementsBackend(t *testing.T) {
-	var _ Backend = (*OverlayBackend)(nil)
-	var _ PathProvider = (*OverlayBackend)(nil)
-}
+var _ = Describe("OverlayBackendImplementsBackend", func() {
+	It("implements Backend", func() {
+		var _ Backend = (*OverlayBackend)(nil)
+		var _ PathProvider = (*OverlayBackend)(nil)
+	})
+})

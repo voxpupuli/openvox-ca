@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Trevor Vaughan
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -28,7 +29,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/tvaughan/puppet-ca/internal/signer"
+	"github.com/voxpupuli/openvox-ca/internal/signer"
 )
 
 const (
@@ -56,9 +57,9 @@ const (
 //
 // Process tree:
 //
-//	puppet-ca (launcher/supervisor)
-//	├-- puppet-ca [signer]    holds CA key, no network, socketpair only
-//	└-- puppet-ca [frontend]  HTTP server, connects to signer via socketpair
+//	openvox-ca (launcher/supervisor)
+//	├-- openvox-ca [signer]    holds CA key, no network, socketpair only
+//	└-- openvox-ca [frontend]  HTTP server, connects to signer via socketpair
 //
 // SECURITY: The socketpair is created before either child is spawned and
 // passed via inherited file descriptors (fd 3). There is no filesystem path

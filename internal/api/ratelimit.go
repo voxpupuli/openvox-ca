@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Trevor Vaughan
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -108,6 +109,9 @@ type destructiveOpTracker struct {
 	window    time.Duration
 	threshold int
 	entries   map[string]*rlEntry
+	// now returns the current time. It defaults to time.Now and is overridden
+	// in tests to drive window expiry deterministically without sleeping.
+	now func() time.Time
 }
 
 func newDestructiveOpTracker(threshold int, window time.Duration) *destructiveOpTracker {
@@ -115,13 +119,14 @@ func newDestructiveOpTracker(threshold int, window time.Duration) *destructiveOp
 		window:    window,
 		threshold: threshold,
 		entries:   make(map[string]*rlEntry),
+		now:       time.Now,
 	}
 }
 
 // Record increments the counter for the given identity (typically a client CN)
 // and returns true if the threshold has been exceeded.
 func (t *destructiveOpTracker) Record(identity string) bool {
-	now := time.Now()
+	now := t.now()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 

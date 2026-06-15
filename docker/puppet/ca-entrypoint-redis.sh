@@ -1,16 +1,16 @@
 #!/bin/bash
-# Two-phase entrypoint for puppet-ca when its storage backend is Redis/Valkey.
+# Two-phase entrypoint for openvox-ca when its storage backend is Redis/Valkey.
 #
 # Differs from ca-entrypoint.sh in two ways:
 #   1. Waits for the Redis service before starting the CA, so Phase 1 does
 #      not race the redis container's healthcheck.
-#   2. Captures the TLS service certificate from `puppet-ca-ctl generate`
+#   2. Captures the TLS service certificate from `openvox-ca-ctl generate`
 #      stdout (filesystem backend stores it under <cadir>/signed/<name>.pem
 #      where the original entrypoint reads it; with the Redis backend that
 #      blob lives in Redis, not on disk).
 #
 # Phase 1: Start CA on loopback (plain HTTP) to bootstrap a TLS cert for the
-#           "puppet-ca" service hostname. Storage backend = Redis.
+#           "openvox-ca" service hostname. Storage backend = Redis.
 # Phase 2: Restart CA on all interfaces with TLS using the generated cert.
 
 set -euo pipefail
@@ -19,8 +19,8 @@ CA_DIR=/data
 # Each replica gets its own service-cert subject so they can be addressed
 # individually for direct-replica tests, while sharing the same CA identity
 # (CA cert/key) via the shared Redis backend. PUPPET_CA_HOSTNAME defaults to
-# "puppet-ca" for the single-replica case.
-HOSTNAME_FOR_TLS="${PUPPET_CA_HOSTNAME:-puppet-ca}"
+# "openvox-ca" for the single-replica case.
+HOSTNAME_FOR_TLS="${PUPPET_CA_HOSTNAME:-openvox-ca}"
 DNS_ALT_NAMES="${PUPPET_CA_DNS_ALT_NAMES:-${HOSTNAME_FOR_TLS},localhost}"
 TLS_CERT="${CA_DIR}/signed/${HOSTNAME_FOR_TLS}.pem"
 TLS_KEY="${CA_DIR}/private/${HOSTNAME_FOR_TLS}_key.pem"
@@ -73,7 +73,7 @@ exec 3>&- 2>/dev/null || true
 # The CA blobs in Redis survive across restarts independently.
 if [ -s "${TLS_CERT}" ] && [ -s "${TLS_KEY}" ]; then
     echo "TLS cert already exists -- starting CA with TLS."
-    exec /usr/local/bin/puppet-ca \
+    exec /usr/local/bin/openvox-ca \
         --cadir="${CA_DIR}" \
         --hostname="${HOSTNAME_FOR_TLS}" \
         --autosign-config=true \
@@ -85,7 +85,7 @@ fi
 
 # -- Phase 1: bootstrap CA on loopback --------------------------------------
 echo "Phase 1: bootstrapping CA on loopback to generate TLS cert..."
-/usr/local/bin/puppet-ca \
+/usr/local/bin/openvox-ca \
     --cadir="${CA_DIR}" \
     --hostname="${HOSTNAME_FOR_TLS}" \
     --host=127.0.0.1 \
@@ -108,13 +108,13 @@ if ! curl -sf http://127.0.0.1:8140/puppet-ca/v1/certificate/ca > /dev/null 2>&1
 fi
 echo "Loopback CA is ready."
 
-# Generate an RSA key + certificate for the "puppet-ca" service hostname.
+# Generate an RSA key + certificate for the "openvox-ca" service hostname.
 # Unlike the filesystem-backend entrypoint, we capture the certificate from
-# puppet-ca-ctl's stdout: with the Redis backend the cert is stored in Redis,
+# openvox-ca-ctl's stdout: with the Redis backend the cert is stored in Redis,
 # not under <cadir>/signed/. The private key is still written locally to
 # --out-dir because per-subject private keys remain on the local disk.
 echo "Generating TLS cert for ${HOSTNAME_FOR_TLS} service hostname..."
-/usr/local/bin/puppet-ca-ctl \
+/usr/local/bin/openvox-ca-ctl \
     --server-url http://127.0.0.1:8140 \
     generate \
     --certname "${HOSTNAME_FOR_TLS}" \
@@ -138,7 +138,7 @@ wait "${PHASE1_PID}" 2>/dev/null || true
 
 # -- Phase 2: start CA with TLS on all interfaces ----------------------------
 echo "Phase 2: starting CA with TLS on all interfaces (storage backend = redis)..."
-exec /usr/local/bin/puppet-ca \
+exec /usr/local/bin/openvox-ca \
     --cadir="${CA_DIR}" \
     --hostname="${HOSTNAME_FOR_TLS}" \
     --autosign-config=true \

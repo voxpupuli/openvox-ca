@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Chris Boot
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -209,7 +210,7 @@ func openSQLDB(cfg SQLConfig) (*sql.DB, schema.Dialect, error) {
 		// (otherwise the driver returns raw bytes and ModTime scanning fails).
 		mycfg.ParseTime = true
 		if cfg.TLS != nil {
-			name := fmt.Sprintf("puppet-ca-%d", sqlTLSConfigSeq.Add(1))
+			name := fmt.Sprintf("openvox-ca-%d", sqlTLSConfigSeq.Add(1))
 			if err := mysqldriver.RegisterTLSConfig(name, cfg.TLS); err != nil {
 				return nil, nil, fmt.Errorf("registering mysql tls config: %w", err)
 			}
@@ -649,7 +650,7 @@ func (b *SQLBackend) acquireMySQLLock(ctx context.Context, name string) (Unlocke
 // mysqlLockName maps a lock name to a stable, short identifier within MySQL's
 // 64-character GET_LOCK name limit.
 func mysqlLockName(name string) string {
-	return fmt.Sprintf("puppet-ca:%016x", uint64(advisoryLockKey(name))) //nolint:gosec // G115: re-reads the same advisory-lock bit pattern as an unsigned value for hex formatting; no magnitude semantics
+	return fmt.Sprintf("openvox-ca:%016x", uint64(advisoryLockKey(name))) //nolint:gosec // G115: re-reads the same advisory-lock bit pattern as an unsigned value for hex formatting; no magnitude semantics
 }
 
 // mysqlUnlocker releases a GET_LOCK on the same connection that acquired it,

@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Trevor Vaughan
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -30,7 +31,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/tvaughan/puppet-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/ca"
 )
 
 // buildCSR returns a PEM-encoded CSR and parsed *x509.CertificateRequest for
@@ -59,7 +60,7 @@ var _ = Describe("CheckAutosign", func() {
 
 	BeforeEach(func() {
 		var err error
-		tmpDir, err = os.MkdirTemp("", "puppet-ca-autosign-check-test")
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-autosign-check-test")
 		Expect(err).NotTo(HaveOccurred())
 		csrPEM, csr = buildCSR("test-node.example.com")
 	})
@@ -255,8 +256,15 @@ esac
 
 		It("does not pass parent process secrets to the executable", func() {
 			// Set a secret in the test process environment.
+			prev, had := os.LookupEnv("SECRET_KEY")
+			DeferCleanup(func() {
+				if had {
+					os.Setenv("SECRET_KEY", prev)
+				} else {
+					os.Unsetenv("SECRET_KEY")
+				}
+			})
 			os.Setenv("SECRET_KEY", "test-secret-value")
-			defer os.Unsetenv("SECRET_KEY")
 
 			// Script exits 0 only if SECRET_KEY is NOT in its environment.
 			script := writeScript("#!/bin/sh\n[ -z \"$SECRET_KEY\" ] && exit 0 || exit 1\n")

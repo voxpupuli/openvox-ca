@@ -1,5 +1,5 @@
 #!/bin/bash
-# Integration tests for the puppet-ca Puppet stack.
+# Integration tests for the openvox-ca Puppet stack.
 #
 # Validates the full OpenVox 8 stack: Go CA (TLS) → OpenVox Server →
 # OpenVoxDB, testing catalog application, PuppetDB reporting, and exported
@@ -68,7 +68,7 @@ done
 # Use compose exec so container name resolution works regardless of whether
 # the tool uses underscore (podman-compose/v1) or dash (docker compose v2)
 # naming conventions.  -T disables TTY allocation so these work in CI.
-exec_ca()       { "${_COMPOSE[@]}" exec -T puppet-ca     "$@"; }
+exec_ca()       { "${_COMPOSE[@]}" exec -T openvox-ca     "$@"; }
 exec_master()   { "${_COMPOSE[@]}" exec -T puppet-master "$@"; }
 exec_master_i() { "${_COMPOSE[@]}" exec -T puppet-master "$@"; }
 exec_client()   { "${_COMPOSE[@]}" exec -T puppet-client "$@"; }
@@ -97,7 +97,7 @@ ca_admin_put() {   # subject json-body
         --key    /etc/puppetlabs/puppet/ssl/private_keys/puppet-master.pem \
         -X PUT -H "Content-Type: application/json" \
         -d "$body" \
-        "https://puppet-ca:8140/puppet-ca/v1/certificate_status/${subject}" \
+        "https://openvox-ca:8140/puppet-ca/v1/certificate_status/${subject}" \
         2>/dev/null || true
 }
 
@@ -106,7 +106,7 @@ refresh_master_crl() {
     local _crl
     _crl=$(exec_master curl -sf \
         --cacert /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem \
-        "https://puppet-ca:8140/puppet-ca/v1/certificate_revocation_list/ca" \
+        "https://openvox-ca:8140/puppet-ca/v1/certificate_revocation_list/ca" \
         2>/dev/null) || return 1
     printf '%s\n' "$_crl" | exec_master_i \
         sh -c 'cat > /etc/puppetlabs/puppet/ssl/ca/ca_crl.pem'
@@ -119,7 +119,7 @@ clean_client_cert() {
         --cacert /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem \
         --cert   /etc/puppetlabs/puppet/ssl/certs/puppet-master.pem \
         --key    /etc/puppetlabs/puppet/ssl/private_keys/puppet-master.pem \
-        "https://puppet-ca:8140/puppet-ca/v1/certificate_status/client.puppet.localdomain" \
+        "https://openvox-ca:8140/puppet-ca/v1/certificate_status/client.puppet.localdomain" \
         2>/dev/null | \
         python3 -c "import sys,json; print(json.load(sys.stdin).get('state',''))" \
         2>/dev/null || true)
@@ -148,7 +148,7 @@ run_agent() {
         puppet agent --test \
         "${_PUPPET_DIRS[@]}" \
         --server    puppet-master \
-        --ca_server puppet-ca \
+        --ca_server openvox-ca \
         --ca_port   8140 \
         "$@" 2>&1
 }
@@ -162,7 +162,7 @@ run_master_agent() {
         puppet agent --test \
         --confdir   /etc/puppetlabs/puppet \
         --server    puppet-master \
-        --ca_server puppet-ca \
+        --ca_server openvox-ca \
         --ca_port   8140 \
         --certname  puppet-master \
         "$@" 2>&1
@@ -356,7 +356,7 @@ _revoke_st=$(exec_master curl -s -o /dev/null -w '%{http_code}' \
     --key    /etc/puppetlabs/puppet/ssl/private_keys/puppet-master.pem \
     -X PUT -H "Content-Type: application/json" \
     -d '{"desired_state":"revoked"}' \
-    "https://puppet-ca:8140/puppet-ca/v1/certificate_status/${_INTEG_HOST}" \
+    "https://openvox-ca:8140/puppet-ca/v1/certificate_status/${_INTEG_HOST}" \
     2>/dev/null) || true
 [[ "$_revoke_st" =~ ^2 ]] \
     && pass "Cert revocation returns 2xx" \
@@ -385,7 +385,7 @@ _srv_file_admin_st=$(exec_master curl -s -o /dev/null -w '%{http_code}' \
     --cacert /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem \
     --cert   /etc/puppetlabs/puppet/ssl/certs/puppet-master.pem \
     --key    /etc/puppetlabs/puppet/ssl/private_keys/puppet-master.pem \
-    "https://puppet-ca:8140/puppet-ca/v1/certificate_statuses/any" \
+    "https://openvox-ca:8140/puppet-ca/v1/certificate_statuses/any" \
     2>/dev/null) || true
 [[ "$_srv_file_admin_st" =~ ^2 ]] \
     && pass "Admin endpoint accessible via puppet-server-file CN" \
@@ -403,7 +403,7 @@ exec_master bash -c "
         --cert   /etc/puppetlabs/puppet/ssl/certs/puppet-master.pem \
         --key    /etc/puppetlabs/puppet/ssl/private_keys/puppet-master.pem \
         -X POST \
-        'https://puppet-ca:8140/puppet-ca/v1/generate/${_probe_cn}')
+        'https://openvox-ca:8140/puppet-ca/v1/generate/${_probe_cn}')
     printf '%s' \"\$_json\" | python3 -c '
 import sys, json
 d = json.load(sys.stdin)
@@ -418,7 +418,7 @@ if [ "$_probe_gen_ok" -eq 0 ]; then
         --cacert /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem \
         --cert   /tmp/probe.crt \
         --key    /tmp/probe.key \
-        "https://puppet-ca:8140/puppet-ca/v1/certificate_statuses/any" \
+        "https://openvox-ca:8140/puppet-ca/v1/certificate_statuses/any" \
         2>/dev/null) || true
     [ "$_probe_st" = "403" ] \
         && pass "Non-listed CN rejected for admin endpoint (403)" \
@@ -431,7 +431,7 @@ if [ "$_probe_gen_ok" -eq 0 ]; then
         --key    /etc/puppetlabs/puppet/ssl/private_keys/puppet-master.pem \
         -X PUT -H "Content-Type: application/json" \
         -d '{"desired_state":"revoked"}' \
-        "https://puppet-ca:8140/puppet-ca/v1/certificate_status/${_probe_cn}" \
+        "https://openvox-ca:8140/puppet-ca/v1/certificate_status/${_probe_cn}" \
         2>/dev/null || true
     exec_master rm -f /tmp/probe.key /tmp/probe.crt 2>/dev/null || true
 else
@@ -587,7 +587,7 @@ _revoke_client=$(ca_admin_put "client.puppet.localdomain" '{"desired_state":"rev
 # Verify the CRL now contains the revoked cert.
 _crl_text=$(exec_master curl -sf \
     --cacert /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem \
-    "https://puppet-ca:8140/puppet-ca/v1/certificate_revocation_list/ca" \
+    "https://openvox-ca:8140/puppet-ca/v1/certificate_revocation_list/ca" \
     2>/dev/null | openssl crl -text -noout 2>/dev/null) || true
 grep -qi "Revoked Certificates" <<< "$_crl_text" \
     && pass "CRL contains 'Revoked Certificates' section after client revocation" \
@@ -663,7 +663,7 @@ for _td_host in "${_INTEG_HOST:-}"; do
         --cacert /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem \
         --cert   /etc/puppetlabs/puppet/ssl/certs/puppet-master.pem \
         --key    /etc/puppetlabs/puppet/ssl/private_keys/puppet-master.pem \
-        "https://puppet-ca:8140/puppet-ca/v1/certificate_status/${_td_host}" \
+        "https://openvox-ca:8140/puppet-ca/v1/certificate_status/${_td_host}" \
         2>/dev/null | \
         python3 -c "import sys,json; print(json.load(sys.stdin).get('state',''))" \
         2>/dev/null || true)

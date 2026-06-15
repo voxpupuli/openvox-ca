@@ -22,7 +22,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 1
 
 COMPOSE_FILE="compose-backends-redis.yml"
-REDIS_PREFIX="puppet-ca-integ"
+REDIS_PREFIX="openvox-ca-integ"
 
 # -- Container engine / compose detection ----------------------------------
 if [[ -n "${CONTAINER_ENGINE:-}" ]]; then
@@ -203,7 +203,7 @@ inventory_contains_all() {  # cn1 cn2 ...
 # having to extract the master cert to the host. Returns the HTTP status
 # code on stdout.
 revoke_via_master() {  # subject  ca-host[:port]
-    local _subj="$1" _host="${2:-puppet-ca:8140}"
+    local _subj="$1" _host="${2:-openvox-ca:8140}"
     "${_COMPOSE[@]}" exec -T puppet-master curl -s -o /dev/null -w '%{http_code}' \
         --cacert /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem \
         --cert   /etc/puppetlabs/puppet/ssl/certs/puppet-master.pem \
@@ -219,7 +219,7 @@ revoke_via_master() {  # subject  ca-host[:port]
 # master's CA bundle). Returns the count of "Serial Number:" lines in
 # `openssl crl -text -noout`.
 count_crl_entries_via() {  # ca-host[:port]
-    local _host="${1:-puppet-ca:8140}"
+    local _host="${1:-openvox-ca:8140}"
     "${_COMPOSE[@]}" exec -T puppet-master sh -c "
         curl -sf --cacert /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem \
             'https://${_host}/puppet-ca/v1/certificate_revocation_list/ca' \
@@ -317,8 +317,8 @@ else
     fail "Signed certs present in Redis (>=2 expected)" "count=${_signed_count:-0}"
 fi
 
-# Specifically: puppet-master and the puppet-ca service cert itself must exist.
-for _cn in puppet-master puppet-ca; do
+# Specifically: puppet-master and the openvox-ca service cert itself must exist.
+for _cn in puppet-master openvox-ca; do
     _signed_key="${REDIS_PREFIX}:signed:${_cn}"
     _signed_exists=$(redis_cli EXISTS "$_signed_key" 2>/dev/null | tr -d '\r' | tr -d '[:space:]')
     if [ "$_signed_exists" = "1" ]; then
@@ -343,7 +343,7 @@ fi
 PROBE_CN="redis-probe-$(date +%s)"
 
 # Download CA cert from the host-mapped CA port (compose-backends-redis.yml
-# maps puppet-ca:8140 to host:8241).
+# maps openvox-ca:8140 to host:8241).
 if curl -sfk "https://localhost:8241/puppet-ca/v1/certificate/ca" \
         -o "$WORK_DIR/ca.pem" 2>/dev/null; then
     pass "Downloaded CA cert from host-mapped CA port"
@@ -449,18 +449,18 @@ fi
 # We tolerate /data/signed/<replica-hostname>.pem and the matching key
 # because the bootstrap entrypoint legitimately writes the TLS service cert
 # there for Phase 2 startup; nothing else may exist under /data/signed/.
-_unexpected_signed=$("${_COMPOSE[@]}" exec -T puppet-ca \
-    sh -c "ls /data/signed 2>/dev/null | grep -v '^puppet-ca\.pem\$' || true" \
+_unexpected_signed=$("${_COMPOSE[@]}" exec -T openvox-ca \
+    sh -c "ls /data/signed 2>/dev/null | grep -v '^openvox-ca\.pem\$' || true" \
     2>/dev/null | tr -d '\r')
 if [ -z "$_unexpected_signed" ]; then
-    pass "puppet-ca /data/signed contains only its own TLS service cert"
+    pass "openvox-ca /data/signed contains only its own TLS service cert"
 else
-    fail "puppet-ca /data/signed contains only its own TLS service cert" \
+    fail "openvox-ca /data/signed contains only its own TLS service cert" \
          "unexpected files: $(printf '%s' "$_unexpected_signed" | tr '\n' ' ')"
 fi
 
 # Probe-cert specifically must NOT be on disk on either replica.
-for _svc in puppet-ca puppet-ca-2; do
+for _svc in openvox-ca openvox-ca-2; do
     _on_disk=$("${_COMPOSE[@]}" exec -T "$_svc" \
         sh -c "test -e /data/signed/${PROBE_CN}.pem && echo yes || echo no" \
         2>/dev/null | tr -d '\r' | tr -d '[:space:]')
@@ -473,24 +473,24 @@ for _svc in puppet-ca puppet-ca-2; do
 done
 
 # Same check for the CRL: with redis backend it must NOT be at /data/ca_crl.pem.
-_crl_on_disk=$("${_COMPOSE[@]}" exec -T puppet-ca \
+_crl_on_disk=$("${_COMPOSE[@]}" exec -T openvox-ca \
     sh -c "test -e /data/ca_crl.pem && echo yes || echo no" \
     2>/dev/null | tr -d '\r' | tr -d '[:space:]')
 if [ "$_crl_on_disk" = "no" ]; then
-    pass "CRL is NOT on local disk of puppet-ca (Redis-only)"
+    pass "CRL is NOT on local disk of openvox-ca (Redis-only)"
 else
-    fail "CRL is NOT on local disk of puppet-ca (Redis-only)"
+    fail "CRL is NOT on local disk of openvox-ca (Redis-only)"
 fi
 
 # CA cert and CA key must also be Redis-only (no overlay configured).
 for _name in ca_crt.pem ca_key.pem; do
-    _f_on_disk=$("${_COMPOSE[@]}" exec -T puppet-ca \
+    _f_on_disk=$("${_COMPOSE[@]}" exec -T openvox-ca \
         sh -c "test -e /data/${_name} && echo yes || echo no" \
         2>/dev/null | tr -d '\r' | tr -d '[:space:]')
     if [ "$_f_on_disk" = "no" ]; then
-        pass "CA blob ${_name} is NOT on local disk of puppet-ca (Redis-only)"
+        pass "CA blob ${_name} is NOT on local disk of openvox-ca (Redis-only)"
     else
-        fail "CA blob ${_name} is NOT on local disk of puppet-ca (Redis-only)"
+        fail "CA blob ${_name} is NOT on local disk of openvox-ca (Redis-only)"
     fi
 done
 
@@ -528,7 +528,7 @@ fi
 
 # ═════════════════════════════════════════════════════════════════════════
 # Phase 4 -- Multi-replica state visibility & concurrent writers
-# Two CA replicas (puppet-ca + puppet-ca-2) share the same Redis prefix.
+# Two CA replicas (openvox-ca + openvox-ca-2) share the same Redis prefix.
 # This phase verifies they observe the same state, and that concurrent
 # writes from both replicas produce a consistent result.
 # ═════════════════════════════════════════════════════════════════════════
@@ -536,7 +536,7 @@ printf '\n# Phase 4 -- Multi-replica visibility & concurrency\n'
 
 # Wait for replica 2 to be healthy before probing it (its Phase 1 bootstrap
 # may still be running when Phase 1's puppet-stack tests finish).
-printf '# Waiting for puppet-ca-2 on host port 8242'
+printf '# Waiting for openvox-ca-2 on host port 8242'
 for _i in $(seq 1 60); do
     curl -sfk "https://localhost:8242/puppet-ca/v1/certificate/ca" > /dev/null 2>&1 && break
     printf '.'; sleep 3
@@ -550,10 +550,10 @@ printf ' OK\n'
 # detect that purely from key existence -- but we CAN check that the cert
 # and key cross-validate as a pair (they would not if two replicas had each
 # written a different freshly-generated CA).
-"${_COMPOSE[@]}" exec -T puppet-ca \
+"${_COMPOSE[@]}" exec -T openvox-ca \
     sh -c 'curl -sfk https://localhost:8140/puppet-ca/v1/certificate/ca' \
     > "$WORK_DIR/ca-from-r1.pem" 2>/dev/null || true
-"${_COMPOSE[@]}" exec -T puppet-ca-2 \
+"${_COMPOSE[@]}" exec -T openvox-ca-2 \
     sh -c 'curl -sfk https://localhost:8140/puppet-ca/v1/certificate/ca' \
     > "$WORK_DIR/ca-from-r2.pem" 2>/dev/null || true
 
@@ -594,7 +594,7 @@ curl -sf --cacert "$WORK_DIR/ca.pem" \
 
 # Replica 2 was not asked to sign anything for ${XREP_CN}. If it serves an
 # identical cert, it can only have come from shared Redis state.
-# replica 2 uses its own self-signed TLS hostname (puppet-ca-2), so we use
+# replica 2 uses its own self-signed TLS hostname (openvox-ca-2), so we use
 # -k for the cert-fetch since we're only validating the *body*, not chain.
 curl -sfk \
     "https://localhost:8242/puppet-ca/v1/certificate/${XREP_CN}" \
@@ -802,13 +802,13 @@ fi
 # After settling, every CN must appear in the CRL (via either replica).
 
 # Snapshot the CRL count BEFORE the storm.
-_crl_before=$(count_crl_entries_via "puppet-ca:8140")
+_crl_before=$(count_crl_entries_via "openvox-ca:8140")
 
 # Fire revocations in parallel.
 for _i in "${!CONC_NAMES[@]}"; do
     _cn="${CONC_NAMES[$_i]}"
-    _host="puppet-ca:8140"
-    [ $(( _i % 2 )) -eq 1 ] && _host="puppet-ca-2:8140"
+    _host="openvox-ca:8140"
+    [ $(( _i % 2 )) -eq 1 ] && _host="openvox-ca-2:8140"
     revoke_via_master "$_cn" "$_host" > /dev/null 2>&1 &
 done
 wait
@@ -818,12 +818,12 @@ wait
 # released the "crl" distributed lock and re-emitted the CRL.
 _expected_growth=${#CONC_NAMES[@]}
 _target=$(( _crl_before + _expected_growth ))
-poll_until 60 crl_count_at_least "puppet-ca:8140" "$_target" || true
-poll_until 60 crl_count_at_least "puppet-ca-2:8140" "$_target" || true
+poll_until 60 crl_count_at_least "openvox-ca:8140" "$_target" || true
+poll_until 60 crl_count_at_least "openvox-ca-2:8140" "$_target" || true
 
 # CRL count must have grown by exactly the storm size on BOTH replicas.
-_crl_after_r1=$(count_crl_entries_via "puppet-ca:8140")
-_crl_after_r2=$(count_crl_entries_via "puppet-ca-2:8140")
+_crl_after_r1=$(count_crl_entries_via "openvox-ca:8140")
+_crl_after_r2=$(count_crl_entries_via "openvox-ca-2:8140")
 
 # Each replica's CRL count grew by the expected amount.
 if [ "${_crl_after_r1:-0}" -ge $(( _crl_before + _expected_growth )) ]; then
@@ -866,11 +866,11 @@ curl -sf --cacert "$WORK_DIR/ca.pem" \
 # Wait for autosign before revoking so the revoke handler has a cert to act on.
 poll_until 10 redis_exists "${REDIS_PREFIX}:signed:${VIS_CN}" || true
 
-_vis_before=$(count_crl_entries_via "puppet-ca-2:8140")
-revoke_via_master "$VIS_CN" "puppet-ca:8140" > /dev/null 2>&1
+_vis_before=$(count_crl_entries_via "openvox-ca-2:8140")
+revoke_via_master "$VIS_CN" "openvox-ca:8140" > /dev/null 2>&1
 # No sleep here -- the entire point is that the revocation should be
 # visible on replica 2 immediately, since both replicas share Redis.
-_vis_after=$(count_crl_entries_via "puppet-ca-2:8140")
+_vis_after=$(count_crl_entries_via "openvox-ca-2:8140")
 
 if [ -n "$_vis_after" ] && [ "${_vis_after:-0}" -gt "${_vis_before:-0}" ]; then
     pass "Revocation on replica 1 immediately visible on replica 2 (CRL: ${_vis_before} -> ${_vis_after})"
@@ -945,8 +945,8 @@ _lock_results_file="$WORK_DIR/lock-results.txt"
 : > "$_lock_results_file"
 _t0=$(date +%s)
 for _i in $(seq 1 "$LOCK_PARALLEL"); do
-    _host="puppet-ca:8140"
-    [ $(( _i % 2 )) -eq 0 ] && _host="puppet-ca-2:8140"
+    _host="openvox-ca:8140"
+    [ $(( _i % 2 )) -eq 0 ] && _host="openvox-ca-2:8140"
     (
         _rc=$(revoke_via_master "$VIS_CN" "$_host" 2>/dev/null)
         printf '%s\n' "$_rc" >> "$_lock_results_file"
@@ -987,7 +987,7 @@ fi
 #     context.WithTimeout(ctx, lockTimeout) where lockTimeout = 60s
 #     (internal/ca/init.go:49). The caller's ctx (HTTP request ctx) is
 #     honored AND capped at 60s -- whichever fires first wins.
-#   - cmd/puppet-ca/main.go:595 sets WriteTimeout=60s on the HTTP server.
+#   - cmd/openvox-ca/main.go:595 sets WriteTimeout=60s on the HTTP server.
 #     curl in revoke_via_master uses no -m, so the client side does not
 #     impose a tighter deadline.
 #   - 5s wait + ~20ms of revoke work leaves ~55s of headroom on both
@@ -1024,7 +1024,7 @@ if [ "$_planted" = "$TTL_FAKE_TOKEN" ]; then
 
     # Issue revocation; must wait for our planted lock to expire, then succeed.
     _t0=$(date +%s)
-    _ttl_rev_rc=$(revoke_via_master "$TTL_CN" "puppet-ca:8140" 2>/dev/null)
+    _ttl_rev_rc=$(revoke_via_master "$TTL_CN" "openvox-ca:8140" 2>/dev/null)
     _t1=$(date +%s)
     _elapsed=$(( _t1 - _t0 ))
 
@@ -1057,7 +1057,7 @@ if [ "$_planted" = "$TTL_FAKE_TOKEN" ]; then
 
     # And the cert is actually revoked now -- no point in unblocking the
     # lock if the body of the critical section silently failed.
-    _ttl_after_count=$(count_crl_entries_via "puppet-ca:8140")
+    _ttl_after_count=$(count_crl_entries_via "openvox-ca:8140")
     if [ "${_ttl_after_count:-0}" -gt "${_crl_after_r1:-0}" ]; then
         pass "TTL-recovered revocation reflected in CRL (count: ${_crl_after_r1} -> ${_ttl_after_count})"
     else

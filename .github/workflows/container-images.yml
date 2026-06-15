@@ -152,10 +152,10 @@ jobs:
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           load: true
-          tags: puppet-ca:smoke-${{ matrix.variant }}-${{ matrix.arch }}
+          tags: openvox-ca:smoke-${{ matrix.variant }}-${{ matrix.arch }}
       - name: Smoke test entrypoint
         if: needs.setup.outputs.push != 'true'
-        run: docker run --rm puppet-ca:smoke-${{ matrix.variant }}-${{ matrix.arch }} --help
+        run: docker run --rm openvox-ca:smoke-${{ matrix.variant }}-${{ matrix.arch }} --help
 
       - name: Export digest
         if: needs.setup.outputs.push == 'true'

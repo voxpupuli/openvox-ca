@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Chris Boot
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -95,7 +96,7 @@ type EtcdBackend struct {
 }
 
 // etcdLockTTLSeconds is the lease TTL (in seconds) for the distributed
-// lock session. If the holder's puppet-ca process dies without calling
+// lock session. If the holder's openvox-ca process dies without calling
 // Unlock, the lock is released automatically after this TTL expires so
 // the cluster does not wedge.
 const etcdLockTTLSeconds = 30

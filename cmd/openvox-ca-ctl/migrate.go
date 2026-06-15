@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Chris Boot
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -22,12 +23,12 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
-	"github.com/tvaughan/puppet-ca/internal/config"
-	"github.com/tvaughan/puppet-ca/internal/storage"
+	"github.com/voxpupuli/openvox-ca/internal/config"
+	"github.com/voxpupuli/openvox-ca/internal/storage"
 	"go.yaml.in/yaml/v3"
 )
 
-// migrateFileConfig is the subset of a puppet-ca server config file needed to
+// migrateFileConfig is the subset of a openvox-ca server config file needed to
 // open a storage backend for migration: the backend selection and its
 // parameters (via the shared config.StorageConfig), plus cadir. cadir is the
 // backend root for the filesystem backend and, for remote backends, the local
@@ -75,7 +76,7 @@ func newMigrateCmd() *cobra.Command {
 backend: the CA certificate and key, public key, CRL, serial, inventory (with
 its integrity HMAC), all pending CSRs and all signed certificates.
 
-Both backends are described by ordinary puppet-ca config files (the same YAML
+Both backends are described by ordinary openvox-ca config files (the same YAML
 format the server reads): --source-config selects the backend to read from and
 --dest-config the backend to write to. Any pair of backends may be combined, so
 this can import a filesystem CA into a database, move data between databases
@@ -137,8 +138,8 @@ local filesystem under cadir, never in a storage backend.`,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&sourceConfig, "source-config", "", "Path to puppet-ca config file describing the SOURCE backend")
-	cmd.Flags().StringVar(&destConfig, "dest-config", "", "Path to puppet-ca config file describing the DESTINATION backend")
+	cmd.Flags().StringVar(&sourceConfig, "source-config", "", "Path to openvox-ca config file describing the SOURCE backend")
+	cmd.Flags().StringVar(&destConfig, "dest-config", "", "Path to openvox-ca config file describing the DESTINATION backend")
 	cmd.Flags().BoolVar(&force, "force", false, "Overwrite an existing CA in the destination backend")
 	_ = cmd.MarkFlagRequired("source-config")
 	_ = cmd.MarkFlagRequired("dest-config")

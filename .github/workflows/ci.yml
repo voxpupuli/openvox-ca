@@ -116,7 +116,7 @@ jobs:
 
   # -- Migration integration tests --------------------------------------------
   # Boots a real VoxPupuli Puppet Server, creates a genuine CA, then imports
-  # it into puppet-ca and verifies the full migration path.
+  # it into openvox-ca and verifies the full migration path.
   migration:
     name: Migration tests
     runs-on: ubuntu-latest
@@ -149,6 +149,26 @@ jobs:
         run: go install github.com/magefile/mage@v1.15.0
       - name: Run Redis-backend integration tests
         run: mage test:backendsRedis
+
+  # Brings up a throwaway Redis and runs the Redis-backend Go integration suite
+  # (build tag redis_integration) against it. Distinct from backends-redis
+  # above, which runs the full-stack bash TAP suite; this job exercises the Go
+  # suite directly (Put/Get/Delete, List, concurrent AppendLine set-equality,
+  # cross-replica lock serialisation) so the build-tagged Go suite is not left
+  # unrun.
+  backends-redis-go:
+    name: Storage backend tests (Redis, Go suite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install Mage
+        run: go install github.com/magefile/mage@v1.15.0
+      - name: Run Redis-backend Go integration tests
+        run: mage test:backendsRedisGo
 
   # Brings up a throwaway PostgreSQL and runs the SQL-backend Go integration
   # suite (build tag postgres_integration) against it. Validates the PostgreSQL

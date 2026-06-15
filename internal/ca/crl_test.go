@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Chris Boot
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -25,9 +26,9 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/tvaughan/puppet-ca/internal/ca"
-	"github.com/tvaughan/puppet-ca/internal/storage"
-	"github.com/tvaughan/puppet-ca/internal/testutil"
+	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/storage"
+	"github.com/voxpupuli/openvox-ca/internal/testutil"
 )
 
 // parseStoredCRL is a test helper that loads and parses the CRL currently in
@@ -51,7 +52,7 @@ var _ = Describe("CA CRL reissuance", func() {
 
 	BeforeEach(func() {
 		var err error
-		tmpDir, err = os.MkdirTemp("", "puppet-ca-crl-test")
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-crl-test")
 		Expect(err).NotTo(HaveOccurred())
 
 		store = storage.New(tmpDir)
@@ -192,7 +193,7 @@ var _ = Describe("CA CRL reissuance", func() {
 // rather than a panic.
 var _ = Describe("CA CRL reissuance without stored CRL", func() {
 	It("returns an error when no CRL is present", func() {
-		tmpDir, err := os.MkdirTemp("", "puppet-ca-crl-missing-test")
+		tmpDir, err := os.MkdirTemp("", "openvox-ca-crl-missing-test")
 		Expect(err).NotTo(HaveOccurred())
 		defer os.RemoveAll(tmpDir)
 

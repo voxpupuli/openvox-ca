@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Trevor Vaughan
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -47,10 +48,16 @@ var _ = Describe("destructiveOpTracker", func() {
 	})
 
 	It("resets after the window expires", func() {
+		// Drive the window with an injected clock so the reset is
+		// deterministic, avoiding a scheduler-sensitive real sleep.
+		clock := time.Now()
 		t := newDestructiveOpTracker(1, 10*time.Millisecond)
+		t.now = func() time.Time { return clock }
+
 		Expect(t.Record("admin")).To(BeFalse())
 		Expect(t.Record("admin")).To(BeTrue())
-		time.Sleep(15 * time.Millisecond)
-		Expect(t.Record("admin")).To(BeFalse()) // window reset
+
+		clock = clock.Add(15 * time.Millisecond) // advance past the window
+		Expect(t.Record("admin")).To(BeFalse())  // window reset
 	})
 })

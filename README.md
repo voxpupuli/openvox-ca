@@ -1,4 +1,4 @@
-# puppet-ca
+# openvox-ca
 
 ---
 
@@ -27,38 +27,38 @@ A drop-in replacement for Puppet Server's built-in CA, written in Go. It impleme
 - **Random serial numbers:** every issued leaf certificate gets a cryptographically random 128-bit serial (CA/Browser Forum guidance)
 - **CRL Distribution Points:** optionally embed a CRL URL in every issued certificate (`--crl-url`) so verifiers can automatically fetch the CRL
 - **Configurable CRL validity:** control how long each published CRL is valid (`crl_validity_days`)
-- **Automatic CRL refresh:** a background job re-signs the CRL before its validity lapses, so a low-churn CA never serves an expired CRL; safe across replicas (serialised on the shared CRL lock) and tunable or disablable. Operators can also force a refresh on demand via `puppet-ca-ctl reissue-crl`
+- **Automatic CRL refresh:** a background job re-signs the CRL before its validity lapses, so a low-churn CA never serves an expired CRL; safe across replicas (serialised on the shared CRL lock) and tunable or disablable. Operators can also force a refresh on demand via `openvox-ca-ctl reissue-crl`
 - **Expired-certificate cleanup (opt-in):** a background job removes certificates that expired more than a configurable grace period ago from the inventory and the CRL (and deletes their stored signed certificate), keeping both from growing without bound as nodes are decommissioned; safe across replicas (serialised on the shared CRL lock)
 - **OCSP responder:** built-in RFC 6960 OCSP responder; AIA extension embedded in issued certs when `--ocsp-url` is set; in-memory cache with nonce bypass
 - **Health probes:** `/healthz/live`, `/healthz/ready`, and `/healthz/startup` endpoints for Kubernetes-style liveness/readiness checks
 - **Prometheus exporter:** optional `/metrics` listener (`--metrics-listen`) exposing Go runtime/process and HTTP metrics plus CA certificate, CRL, and per–leaf-certificate expiry and issuance-status series; ships with a [Jsonnet alerting mixin](mixin/). See [metrics & monitoring](docs/metrics.md)
 - **Graceful shutdown:** `SIGTERM`/`SIGINT` drains in-flight requests with a configurable window (25s default) before exiting; deferred storage and signer cleanup always runs
 - **FIPS-compatible:** standard library only (`crypto/x509`, `net/http`); no CGO by default; FIPS build available via `GOEXPERIMENT=boringcrypto`
-- **`puppet-ca-ctl`:** operator CLI matching `tvaughan-server-ca` subcommands
+- **`openvox-ca-ctl`:** operator CLI matching `puppetserver ca` subcommands
 
 ## Building
 
 Requirements: Go 1.25+, [Mage](https://magefile.org/)
 
 ```bash
-git clone https://github.com/tvaughan/puppet-ca.git
-cd puppet-ca
+git clone https://github.com/voxpupuli/openvox-ca.git
+cd openvox-ca
 
 # Build both binaries to bin/
 mage build:all
 
 # Or with plain Go
-go build -o bin/puppet-ca     ./cmd/puppet-ca
-go build -o bin/puppet-ca-ctl ./cmd/puppet-ca-ctl
+go build -o bin/openvox-ca     ./cmd/openvox-ca
+go build -o bin/openvox-ca-ctl ./cmd/openvox-ca-ctl
 ```
 
 ### FIPS build (Linux/amd64)
 
 ```bash
-mage build:fips   # → bin/puppet-ca + bin/puppet-ca-ctl  (GOEXPERIMENT=boringcrypto, CGO_ENABLED=1)
+mage build:fips   # → bin/openvox-ca + bin/openvox-ca-ctl  (GOEXPERIMENT=boringcrypto, CGO_ENABLED=1)
 ```
 
-## puppet-ca -- the server
+## openvox-ca -- the server
 
 ### Flags
 
@@ -238,7 +238,7 @@ Boolean env vars accept any value accepted by `strconv.ParseBool`: `1`, `t`, `tr
 ### Quick start (plain HTTP, auto-bootstrap CA)
 
 ```bash
-./bin/puppet-ca --cadir /etc/puppetlabs/puppet/ssl --hostname puppet.example.com
+./bin/openvox-ca --cadir /etc/puppetlabs/puppet/ssl --hostname puppet.example.com
 ```
 
 On first run the server bootstraps a new CA under `--cadir` and begins serving on port 8140.
@@ -246,7 +246,7 @@ On first run the server bootstraps a new CA under `--cadir` and begins serving o
 ### HTTPS with mTLS
 
 ```bash
-./bin/puppet-ca \
+./bin/openvox-ca \
   --cadir /etc/puppetlabs/puppet/ssl \
   --tls-cert /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem \
   --tls-key  /etc/puppetlabs/puppet/ssl/ca/ca_key.pem \
@@ -498,20 +498,20 @@ Enable `--encrypt-ca-key` to encrypt the key at rest using AES-256-GCM with an A
 
 ```bash
 # Bootstrap with encryption (auto-generated passphrase):
-puppet-ca --cadir /var/lib/puppet-ca --encrypt-ca-key
+openvox-ca --cadir /var/lib/puppet-ca --encrypt-ca-key
 
 # Bootstrap with an explicit passphrase file:
 echo "my-secret-passphrase" > /etc/puppet-ca/key-passphrase
 chmod 600 /etc/puppet-ca/key-passphrase
-puppet-ca --cadir /var/lib/puppet-ca --encrypt-ca-key \
+openvox-ca --cadir /var/lib/puppet-ca --encrypt-ca-key \
   --ca-key-passphrase-file /etc/puppet-ca/key-passphrase
 
 # Or via environment variable:
 export PUPPET_CA_KEY_PASSPHRASE="my-secret-passphrase"
-puppet-ca --cadir /var/lib/puppet-ca --encrypt-ca-key
+openvox-ca --cadir /var/lib/puppet-ca --encrypt-ca-key
 
-# puppet-ca-ctl setup also supports encryption:
-puppet-ca-ctl setup --cadir /var/lib/puppet-ca --encrypt-ca-key
+# openvox-ca-ctl setup also supports encryption:
+openvox-ca-ctl setup --cadir /var/lib/puppet-ca --encrypt-ca-key
 ```
 
 ### Backward compatibility
@@ -564,7 +564,7 @@ level=WARN msg="High rate of destructive operations detected" client=admin.examp
 This is a detective control, not a preventive one. It does not block the operation, but alerts
 operators to potentially anomalous administrative activity. Operators should:
 
-- Forward `puppet-ca` logs to a centralized log aggregator (e.g. Loki,
+- Forward `openvox-ca` logs to a centralized log aggregator (e.g. Loki,
   Elasticsearch, Splunk)
 - Create alerts on `"High rate of destructive operations"` log messages
 - Investigate any alerts promptly. A burst of revocations may indicate a
@@ -575,15 +575,15 @@ operators to potentially anomalous administrative activity. Operators should:
 The threshold (5 ops/minute) is a sensible default for environments where
 bulk revocation is uncommon. Future versions may make this configurable.
 
-## puppet-ca-ctl -- the operator CLI
+## openvox-ca-ctl -- the operator CLI
 
-`puppet-ca-ctl` mirrors the `tvaughan-server-ca` / `puppetserver ca` subcommands and communicates with a running `puppet-ca` server over HTTP(S).
+`openvox-ca-ctl` mirrors the `puppet cert` / `puppetserver ca` subcommands and communicates with a running `openvox-ca` server over HTTP(S).
 
 ### Global flags
 
 ```
 --config       ""                       Path to YAML config file (auto-detected at /etc/puppet-ca/ctl.yaml)
---server-url   https://localhost:8140   puppet-ca server URL
+--server-url   https://localhost:8140   openvox-ca server URL
 --ca-cert      ""                       CA cert PEM for TLS verification (omit to skip verify)
 --client-cert  ""                       Client certificate PEM for mTLS
 --client-key   ""                       Client private key PEM for mTLS
@@ -605,7 +605,7 @@ The config file is located by checking, in order:
 **Example `/etc/puppet-ca/ctl.yaml`:**
 
 ```yaml
-server_url:  https://puppet-ca.example.com:8140
+server_url:  https://openvox-ca.example.com:8140
 ca_cert:     /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem
 client_cert: /etc/puppetlabs/puppet/ssl/certs/puppet-master.pem
 client_key:  /etc/puppetlabs/puppet/ssl/private_keys/puppet-master.pem
@@ -626,35 +626,35 @@ verbose:     false
 
 ```bash
 # List pending CSRs
-puppet-ca-ctl list
+openvox-ca-ctl list
 
 # List all certificates (signed, revoked, requested)
-puppet-ca-ctl list --all
+openvox-ca-ctl list --all
 
 # Sign a pending CSR
-puppet-ca-ctl sign --certname agent.example.com
+openvox-ca-ctl sign --certname agent.example.com
 
 # Sign all pending CSRs
-puppet-ca-ctl sign --all
+openvox-ca-ctl sign --all
 
 # Revoke a certificate
-puppet-ca-ctl revoke --certname agent.example.com
+openvox-ca-ctl revoke --certname agent.example.com
 
 # Revoke + delete cert and CSR
-puppet-ca-ctl clean --certname agent.example.com
+openvox-ca-ctl clean --certname agent.example.com
 
 # Re-sign the CRL with a fresh validity window (preserves all revocations)
-puppet-ca-ctl reissue-crl
+openvox-ca-ctl reissue-crl
 
 # Generate a server-side key+cert pair (key saved to ./agent.example.com_key.pem)
-puppet-ca-ctl generate --certname agent.example.com
-puppet-ca-ctl generate --certname agent.example.com --dns alt.example.com --out-dir /etc/ssl
+openvox-ca-ctl generate --certname agent.example.com
+openvox-ca-ctl generate --certname agent.example.com --dns alt.example.com --out-dir /etc/ssl
 
 # Bootstrap a new CA offline (no server required)
-puppet-ca-ctl setup --cadir /etc/puppetlabs/puppet/ssl --hostname puppet.example.com
+openvox-ca-ctl setup --cadir /etc/puppetlabs/puppet/ssl --hostname puppet.example.com
 
 # Import an external CA cert/key offline
-puppet-ca-ctl import \
+openvox-ca-ctl import \
   --cadir      /etc/puppetlabs/puppet/ssl \
   --cert-bundle ca_cert.pem \
   --private-key ca_key.pem \
@@ -662,9 +662,9 @@ puppet-ca-ctl import \
 
 # Migrate an entire CA between storage backends offline (any pair of backends:
 # filesystem, sqlite, postgres, mysql, etcd, redis/valkey). Each backend is
-# described by a normal puppet-ca config file. Refuses a non-empty destination
+# described by a normal openvox-ca config file. Refuses a non-empty destination
 # unless --force.
-puppet-ca-ctl migrate \
+openvox-ca-ctl migrate \
   --source-config /etc/puppet-ca/filesystem.yaml \
   --dest-config   /etc/puppet-ca/postgres.yaml
 ```
@@ -690,35 +690,35 @@ mage test:bench
 mage test:puppet
 ```
 
-`test:integCompose` and `test:loadCompose` use `compose.yml`, the canonical integration test suite. It runs two containers on an isolated network (puppet-ca + test-runner) and exercises the full API in TAP format across 21 test groups:
+`test:integCompose` and `test:loadCompose` use `compose.yml`, the canonical integration test suite. It runs two containers on an isolated network (openvox-ca + test-runner) and exercises the full API in TAP format across 21 test groups:
 
 | Group | Coverage |
 |-------|----------|
 | 1 | Endpoint smoke tests (health probes, CA cert, CRL, 404s, expirations) |
 | 2 | Full CSR lifecycle: submit → sign → verify → revoke → re-register; issue #8 assertions (no Netscape Comment OID, random serial ≥16 hex digits, CRL Distribution Point present, `authorization_extensions` field, CSR deleted after signing) |
-| 3 | `puppet-ca-ctl sign --all` (bulk signing) |
+| 3 | `openvox-ca-ctl sign --all` (bulk signing) |
 | 4 | `POST /generate` (server-side key+cert generation) |
-| 5 | `GET /certificate_statuses?state=` filter; `puppet-ca-ctl list / list --all` |
+| 5 | `GET /certificate_statuses?state=` filter; `openvox-ca-ctl list / list --all` |
 | 6 | `cert_ttl` custom validity via `PUT /certificate_status` |
 | 7 | `subject_alt_names` field in status responses |
 | 8 | CSR CN mismatch rejection (400) |
 | 9 | Error cases: invalid subjects, bad JSON, conflict (409), `BasicConstraints CA:TRUE` rejection |
 | 10 | `PUT /clean` bulk revoke+delete: success, not-found, and error buckets |
 | 11 | Protocol features: bare paths, `/puppet-ca/v1/` prefixed paths |
-| 12 | `puppet-ca-ctl` offline subcommands: `setup` (bootstrap new CA) and `import` (external CA cert/key/CRL) |
+| 12 | `openvox-ca-ctl` offline subcommands: `setup` (bootstrap new CA) and `import` (external CA cert/key/CRL) |
 | 13 | `POST /sign` and `POST /sign/all` bulk HTTP signing API |
 | 14 | Concurrency / load tests (opt-in via `DO_LOAD=true` / `mage test:loadCompose`) |
 | 15 | OCSP: good/revoked status, nonce handling, cache invalidation on revoke, malformed request (400) |
 | 16 | Autosign modes: `true`, glob-pattern file, executable plugin |
 | 17 | Config drivers: env vars, config file |
 | 18 | `pp_cli_auth` mTLS: Phase 1 bootstraps certs (loopback HTTP); Phase 2 asserts pp_cli_auth cert reaches admin endpoints while plain cert is denied |
-| 19 | `puppet-ca-ctl` error paths: revoke/clean/sign/generate against non-existent or duplicate subjects; arg validation; `--dns` SAN delivery; full mTLS via `--ca-cert`/`--client-cert`/`--client-key`; unreachable server |
-| 20 | Migration from Puppet Server CA: import CA cert/key/CRL via `puppet-ca-ctl import`, copy pre-existing signed certs, verify fetch/sign/revoke/list all work on the migrated CA |
+| 19 | `openvox-ca-ctl` error paths: revoke/clean/sign/generate against non-existent or duplicate subjects; arg validation; `--dns` SAN delivery; full mTLS via `--ca-cert`/`--client-cert`/`--client-key`; unreachable server |
+| 20 | Migration from Puppet Server CA: import CA cert/key/CRL via `openvox-ca-ctl import`, copy pre-existing signed certs, verify fetch/sign/revoke/list all work on the migrated CA |
 | 21 | `POST /certificate_renewal` over mTLS: agent renews its own certificate; CN-mismatch renewal rejected |
 
 `test:bench` uses `compose-bench.yml` (autosign=true, k6 load runner).
-`test:puppet` uses `compose-puppet.yml`, a five-service stack that validates end-to-end catalog compilation, PuppetDB reporting, exported resources, and CRL revocation using a real OpenVox 8 agent and WEBrick puppet master. The CA runs with genuine TLS (a cert with CN=puppet-ca signed by the CA itself); all inter-service traffic verifies it.
-`test:migration` uses `compose-migration.yml`, which starts a real VoxPupuli Puppet Server (`voxpupuli/puppetserver:latest`) to create a genuine Puppet CA, then imports its CA material into puppet-ca using `puppet-ca-ctl import` and verifies the full migration path: old certs are fetchable, new certs can be signed, migrated certs can be revoked and cleaned.
+`test:puppet` uses `compose-puppet.yml`, a five-service stack that validates end-to-end catalog compilation, PuppetDB reporting, exported resources, and CRL revocation using a real OpenVox 8 agent and WEBrick puppet master. The CA runs with genuine TLS (a cert with CN=openvox-ca signed by the CA itself); all inter-service traffic verifies it.
+`test:migration` uses `compose-migration.yml`, which starts a real VoxPupuli Puppet Server (`voxpupuli/puppetserver:latest`) to create a genuine Puppet CA, then imports its CA material into openvox-ca using `openvox-ca-ctl import` and verifies the full migration path: old certs are fetchable, new certs can be signed, migrated certs can be revoked and cleaned.
 
 The k6 script (`test/load.js`) runs two concurrent scenarios:
 - **reads** -- hammers GET /certificate/ca, CRL, and expirations; ramps to 200 VUs
@@ -754,4 +754,4 @@ mage test:bench
 | CRL file | `0600` |
 | Public data (certs, CSRs, inventory) | `0644` |
 
-The user running `puppet-ca` must own (or have write access to) `--cadir`.
+The user running `openvox-ca` must own (or have write access to) `--cadir`.

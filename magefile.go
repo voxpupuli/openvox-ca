@@ -2,6 +2,7 @@
 
 // Copyright (C) 2026 Trevor Vaughan
 // Copyright (C) 2026 Chris Boot
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -107,7 +108,7 @@ func systemInfo() map[string]string {
 
 // -- build:* ------------------------------------------------------------------─
 
-// All compiles both binaries (puppet-ca and puppet-ca-ctl) to bin/.
+// All compiles both binaries (openvox-ca and openvox-ca-ctl) to bin/.
 func (Build) All() error {
 	env := map[string]string{"CGO_ENABLED": "0"}
 
@@ -123,18 +124,18 @@ func (Build) All() error {
 	}
 
 	if err := sh.RunWithV(env, "go", "build",
-		"-o", filepath.Join(binDir, "puppet-ca"+ext),
-		"./cmd/puppet-ca"); err != nil {
+		"-o", filepath.Join(binDir, "openvox-ca"+ext),
+		"./cmd/openvox-ca"); err != nil {
 		return err
 	}
 
 	return sh.RunWithV(env, "go", "build",
-		"-o", filepath.Join(binDir, "puppet-ca-ctl"+ext),
-		"./cmd/puppet-ca-ctl")
+		"-o", filepath.Join(binDir, "openvox-ca-ctl"+ext),
+		"./cmd/openvox-ca-ctl")
 }
 
-// FIPS compiles puppet-ca with GOEXPERIMENT=boringcrypto for FIPS compliance
-// (Linux/amd64 only). Output: bin/puppet-ca-fips.
+// FIPS compiles openvox-ca with GOEXPERIMENT=boringcrypto for FIPS compliance
+// (Linux/amd64 only). Output: bin/openvox-ca-fips.
 func (Build) FIPS() error {
 	fmt.Println("Building FIPS compliant binary...")
 
@@ -144,7 +145,7 @@ func (Build) FIPS() error {
 		fmt.Println("  The build will continue, but it will create a LINUX binary (GOOS=linux).")
 	} else if targetOS == "" && runtime.GOOS == "windows" {
 		fmt.Println("WARNING: You are building on Windows, but FIPS mode requires Linux.")
-		fmt.Println("  Cross-compiling a LINUX binary (bin/puppet-ca-fips). This will not run on Windows.")
+		fmt.Println("  Cross-compiling a LINUX binary (bin/openvox-ca-fips). This will not run on Windows.")
 	}
 
 	binDir, err := ensureBinDir()
@@ -160,25 +161,25 @@ func (Build) FIPS() error {
 	}
 
 	if err := sh.RunWith(env, "go", "build",
-		"-o", filepath.Join(binDir, "puppet-ca"),
-		"./cmd/puppet-ca"); err != nil {
+		"-o", filepath.Join(binDir, "openvox-ca"),
+		"./cmd/openvox-ca"); err != nil {
 		return err
 	}
 
 	return sh.RunWith(env, "go", "build",
-		"-o", filepath.Join(binDir, "puppet-ca-ctl"),
-		"./cmd/puppet-ca-ctl")
+		"-o", filepath.Join(binDir, "openvox-ca-ctl"),
+		"./cmd/openvox-ca-ctl")
 }
 
 // Dist cross-compiles release artifacts for all supported platforms and writes
-// them to dist/. Each artifact is a .tar.gz containing puppet-ca and
-// puppet-ca-ctl. A SHA-256 checksums.txt is also written to dist/.
+// them to dist/. Each artifact is a .tar.gz containing openvox-ca and
+// openvox-ca-ctl. A SHA-256 checksums.txt is also written to dist/.
 //
 // Artifacts produced:
 //
-//	puppet-ca_linux_amd64.tar.gz       (standard; CGO_ENABLED=0)
-//	puppet-ca_linux_arm64.tar.gz       (standard; CGO_ENABLED=0)
-//	puppet-ca_linux_amd64_fips.tar.gz  (FIPS; GOEXPERIMENT=boringcrypto)
+//	openvox-ca_linux_amd64.tar.gz       (standard; CGO_ENABLED=0)
+//	openvox-ca_linux_arm64.tar.gz       (standard; CGO_ENABLED=0)
+//	openvox-ca_linux_amd64_fips.tar.gz  (FIPS; GOEXPERIMENT=boringcrypto)
 func (Build) Dist() error {
 	distDir := "dist"
 	if err := os.RemoveAll(distDir); err != nil {
@@ -194,20 +195,20 @@ func (Build) Dist() error {
 	}
 	variants := []variant{
 		{
-			name: "puppet-ca_linux_amd64",
+			name: "openvox-ca_linux_amd64",
 			env:  map[string]string{"CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "amd64"},
 		},
 		{
-			name: "puppet-ca_linux_arm64",
+			name: "openvox-ca_linux_arm64",
 			env:  map[string]string{"CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "arm64"},
 		},
 		{
-			name: "puppet-ca_linux_amd64_fips",
+			name: "openvox-ca_linux_amd64_fips",
 			env:  map[string]string{"CGO_ENABLED": "1", "GOOS": "linux", "GOARCH": "amd64", "GOEXPERIMENT": "boringcrypto"},
 		},
 	}
 
-	bins := []string{"puppet-ca", "puppet-ca-ctl"}
+	bins := []string{"openvox-ca", "openvox-ca-ctl"}
 
 	var checksums []string
 	for _, v := range variants {
@@ -215,7 +216,7 @@ func (Build) Dist() error {
 
 		archive := filepath.Join(distDir, v.name+".tar.gz")
 		sum, err := func() (string, error) {
-			tmpDir, err := os.MkdirTemp("", "puppet-ca-dist-*")
+			tmpDir, err := os.MkdirTemp("", "openvox-ca-dist-*")
 			if err != nil {
 				return "", err
 			}
@@ -255,7 +256,7 @@ func (Build) Dist() error {
 //	internal/testutil — test helpers only, exercised transitively by the
 //	                     packages that import them.
 var unitTestExcludes = map[string]bool{
-	"github.com/tvaughan/puppet-ca/internal/testutil": true,
+	"github.com/voxpupuli/openvox-ca/internal/testutil": true,
 }
 
 // unitTestPackages discovers the packages to unit-test via `go list ./...`
@@ -432,8 +433,8 @@ func (Test) Puppet() error {
 	return sh.RunV("bash", "test/puppet/puppet-stack.sh", "--up")
 }
 
-// Migration builds the puppet-ca image and runs the migration integration test
-// suite: imports a genuine VoxPupuli Puppet Server CA into puppet-ca, then
+// Migration builds the openvox-ca image and runs the migration integration test
+// suite: imports a genuine VoxPupuli Puppet Server CA into openvox-ca, then
 // verifies that the migrated CA can serve old certs, sign new ones, revoke,
 // and clean.
 //
@@ -457,7 +458,7 @@ func (Test) Migration() error {
 	return err
 }
 
-// BackendsRedis builds the puppet-ca image and runs the full Puppet stack
+// BackendsRedis builds the openvox-ca image and runs the full Puppet stack
 // integration suite against a Redis-backed CA topology with two replicas
 // sharing a single Redis prefix. Validates: catalog application end-to-end
 // over Redis-backed storage; cert blobs offloaded to Redis (not local disk);
@@ -476,6 +477,34 @@ func (Test) BackendsRedis() error {
 
 	fmt.Println("Running Redis-backend integration tests...")
 	return sh.RunV("bash", "test/backends/redis-stack.sh", "--up")
+}
+
+// BackendsRedisGo brings up a throwaway Redis via compose-backends-redis-go.yml
+// and runs the Redis-backend Go integration suite (internal/storage, build tag
+// `redis_integration`) against it, then tears Redis down. This mirrors the
+// postgres/mysql/etcd Go-suite targets; it is distinct from BackendsRedis,
+// which runs the full-stack bash TAP suite against a Puppet topology. Both are
+// wired into CI so neither the bash suite nor the Go suite is left unrun.
+//
+// Requires podman-compose (or docker compose) and network access to pull
+// docker.io/redis:7-alpine.
+func (Test) BackendsRedisGo() error {
+	const addr = "127.0.0.1:56379"
+
+	fmt.Println("Starting Redis backend service...")
+	if err := runCompose(nil, "-f", "compose-backends-redis-go.yml", "up", "-d", "--wait"); err != nil {
+		return err
+	}
+	defer func() {
+		fmt.Println("Tearing down Redis backend service...")
+		_ = runCompose(nil, "-f", "compose-backends-redis-go.yml", "down", "--volumes")
+	}()
+
+	fmt.Println("Running Redis-backend Go integration tests...")
+	return sh.RunWithV(
+		map[string]string{"PUPPET_CA_TEST_REDIS_ADDR": addr},
+		"go", "test", "-tags", "redis_integration", "-count=1", "./internal/storage/...",
+	)
 }
 
 // BackendsPostgres brings up a throwaway PostgreSQL via
@@ -557,19 +586,36 @@ func (Test) PuppetFIPS() error {
 
 // -- dev:* --------------------------------------------------------------------─
 
-// Check verifies formatting, runs go vet, checks go mod tidy, and runs the
-// golangci-lint gate.
-// Unlike `go fmt`, gofmt -l prints unformatted files and exits 0 without
-// rewriting them; we treat any output as a failure so CI catches drift.
+// Check verifies formatting, module tidiness, go vet, and the golangci-lint
+// gate. Unlike `mage dev:tidy`, it is a non-mutating verifier: it reports drift
+// as a failure instead of silently fixing it, so CI catches untidy code and
+// modules. gofmt -l prints unformatted files without rewriting them, and the
+// tidiness step runs `go mod tidy` then restores go.mod/go.sum, treating any
+// change as a failure.
 func (Dev) Check() error {
-	mg.Deps(Dev{}.Tidy)
 	fmt.Println("Running verify...")
 	out, err := sh.Output("gofmt", "-l", ".")
 	if err != nil {
 		return err
 	}
 	if strings.TrimSpace(out) != "" {
-		return fmt.Errorf("these files need formatting (run 'go fmt ./...'):\n%s", out)
+		return fmt.Errorf("these files need formatting (run 'mage dev:tidy'):\n%s", out)
+	}
+	fmt.Println("Checking go mod tidy...")
+	if err := sh.Run("go", "mod", "tidy"); err != nil {
+		return err
+	}
+	changed, err := sh.Output("git", "diff", "--name-only", "--", "go.mod", "go.sum")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(changed) != "" {
+		// Restore so Check leaves no side effects; the developer fixes via dev:tidy.
+		if rerr := sh.Run("git", "checkout", "--", "go.mod", "go.sum"); rerr != nil {
+			return fmt.Errorf("go.mod/go.sum are not tidy (%s); run 'mage dev:tidy' and commit. "+
+				"Additionally failed to restore them: %w", strings.TrimSpace(changed), rerr)
+		}
+		return fmt.Errorf("go.mod/go.sum are not tidy (%s); run 'mage dev:tidy' and commit", strings.TrimSpace(changed))
 	}
 	if err := sh.Run("go", "vet", "./..."); err != nil {
 		return err
@@ -622,13 +668,13 @@ func (Dev) Clean() error {
 	return sh.Rm("bin")
 }
 
-// Container creates a minimal scratch OCI image from the puppet-ca binary and
+// Container creates a minimal scratch OCI image from the openvox-ca binary and
 // loads it into the local Docker / Podman daemon.
 //
 // Configuration (via environment variables):
 //
-//	IMAGE_NAME   Target tag       (default: puppet-ca-go:latest)
-//	BINARY_PATH  Source binary    (default: ./bin/puppet-ca)
+//	IMAGE_NAME   Target tag       (default: openvox-ca-go:latest)
+//	BINARY_PATH  Source binary    (default: ./bin/openvox-ca)
 func (Dev) Container() error {
 	cfg := ContainerConfig{}
 	if err := env.Parse(&cfg); err != nil {
@@ -675,8 +721,8 @@ func (Dev) Container() error {
 // -- types and helpers --------------------------------------------------------─
 
 type ContainerConfig struct {
-	Image  string `env:"IMAGE_NAME" envDefault:"puppet-ca-go:latest"`
-	Binary string `env:"BINARY_PATH" envDefault:"./bin/puppet-ca"`
+	Image  string `env:"IMAGE_NAME" envDefault:"openvox-ca-go:latest"`
+	Binary string `env:"BINARY_PATH" envDefault:"./bin/openvox-ca"`
 }
 
 // composeCmd returns the compose command prefix, probing in order:

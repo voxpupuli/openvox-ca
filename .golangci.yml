@@ -1,4 +1,4 @@
-# golangci-lint v2 configuration for github.com/tvaughan/puppet-ca.
+# golangci-lint v2 configuration for github.com/voxpupuli/openvox-ca.
 #
 # Curated, high-signal linter set. The goal is a working quality gate that
 # passes clean on the current tree, not a zero-finding utopia. Style-only
@@ -34,7 +34,7 @@ linters:
         - (io.Closer).Close
         - (*os.File).Close
         - (net.Conn).Close
-        - (*github.com/tvaughan/puppet-ca/internal/signer.RemoteSigner).Close
+        - (*github.com/voxpupuli/openvox-ca/internal/signer.RemoteSigner).Close
         # Best-effort encode/write directly onto the http.ResponseWriter; once
         # the handler has started writing the body a Write/Encode error is
         # unrecoverable and there is nothing useful to do with it.

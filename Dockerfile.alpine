@@ -7,21 +7,21 @@ RUN go mod download
 
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux \
-    go build -ldflags="-s -w" -o /puppet-ca     ./cmd/puppet-ca/ && \
-    go build -ldflags="-s -w" -o /puppet-ca-ctl ./cmd/puppet-ca-ctl/
+    go build -ldflags="-s -w" -o /openvox-ca     ./cmd/openvox-ca/ && \
+    go build -ldflags="-s -w" -o /openvox-ca-ctl ./cmd/openvox-ca-ctl/
 
 # ---- Runtime Stage ----
 FROM alpine:3.23.4
 
-# ca-certificates: system trust store for puppet-ca-ctl's HTTPS client
+# ca-certificates: system trust store for openvox-ca-ctl's HTTPS client
 # when invoked without --ca-cert against a publicly-trusted server.
 RUN apk add --no-cache ca-certificates && \
     adduser -D -h /home/puppet puppet && \
     mkdir -p /etc/puppetlabs/puppet/ssl/ca /data && \
     chown -R puppet:puppet /etc/puppetlabs/puppet /data
 
-COPY --from=builder /puppet-ca     /usr/local/bin/puppet-ca
-COPY --from=builder /puppet-ca-ctl /usr/local/bin/puppet-ca-ctl
+COPY --from=builder /openvox-ca     /usr/local/bin/openvox-ca
+COPY --from=builder /openvox-ca-ctl /usr/local/bin/openvox-ca-ctl
 
 USER puppet
 EXPOSE 8140
@@ -29,6 +29,6 @@ EXPOSE 8140
 # NOTE: autosign is OFF by default. Set --autosign-config=true only in
 # dev/test environments. Autosign lets any CSR submitter obtain a signed
 # certificate without operator review.
-ENTRYPOINT ["/usr/local/bin/puppet-ca"]
+ENTRYPOINT ["/usr/local/bin/openvox-ca"]
 CMD ["--cadir=/etc/puppetlabs/puppet/ssl/ca", \
      "--verbosity=1"]

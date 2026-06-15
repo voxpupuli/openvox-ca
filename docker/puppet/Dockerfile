@@ -1,7 +1,7 @@
-# OpenVox Server (JVM-based) image for the puppet-ca integration test stack.
+# OpenVox Server (JVM-based) image for the openvox-ca integration test stack.
 #
 # Installs OpenVox Server 8 + PuppetDB terminus from the official Vox Pupuli
-# repository.  The built-in Puppet CA is disabled; the Go puppet-ca service
+# repository.  The built-in Puppet CA is disabled; the Go openvox-ca service
 # handles all certificate operations.
 #
 # The entrypoint.sh bootstraps TLS certificates from the Go CA, configures

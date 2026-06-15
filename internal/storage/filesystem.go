@@ -1,5 +1,6 @@
 // Copyright (C) 2026 Chris Boot
 // Copyright (C) 2026 Trevor Vaughan
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -55,7 +56,7 @@ var fsLayout = map[string]string{
 
 // FilesystemBackend stores blobs as files under a single base directory.
 // It is the default Backend implementation and preserves the exact on-disk
-// layout used by earlier versions of puppet-ca.
+// layout used by earlier versions of openvox-ca.
 type FilesystemBackend struct {
 	baseDir  string
 	appendMu sync.Mutex // serialises AppendLine across the backend

@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Chris Boot
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -17,22 +18,20 @@
 package storage
 
 import (
-	"bytes"
 	"context"
-	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
-	"testing"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
 // seedCA populates a backend with a representative set of CA blobs: every
 // singleton plus a couple of per-subject CSRs and signed certs.
-func seedCA(t *testing.T, b Backend) map[string][]byte {
-	t.Helper()
+func seedCA(b Backend) map[string][]byte {
 	ctx := context.Background()
-	if err := b.EnsureReady(ctx); err != nil {
-		t.Fatalf("EnsureReady: %v", err)
-	}
+	Expect(b.EnsureReady(ctx)).NotTo(HaveOccurred(), "EnsureReady")
 	want := map[string][]byte{
 		KeyCACert:        []byte("ca-cert-pem"),
 		KeyCAPubKey:      []byte("ca-pub-pem"),
@@ -47,158 +46,132 @@ func seedCA(t *testing.T, b Backend) map[string][]byte {
 		CertKey("web01"): []byte("cert-web01"),
 	}
 	for k, v := range want {
-		if err := b.Put(ctx, k, v, BlobPublic); err != nil {
-			t.Fatalf("seed Put %q: %v", k, err)
-		}
+		Expect(b.Put(ctx, k, v, BlobPublic)).NotTo(HaveOccurred(), fmt.Sprintf("seed Put %q", k))
 	}
 	return want
 }
 
-func TestMigrateCopiesEverything(t *testing.T) {
-	ctx := context.Background()
-	src := NewFilesystemBackend(t.TempDir())
-	want := seedCA(t, src)
+var _ = Describe("MigrateCopiesEverything", func() {
+	It("copies every singleton, CSR, and cert to the destination", func() {
+		ctx := context.Background()
+		src := NewFilesystemBackend(GinkgoT().TempDir())
+		want := seedCA(src)
 
-	dst := NewFilesystemBackend(t.TempDir())
+		dst := NewFilesystemBackend(GinkgoT().TempDir())
 
-	report, err := Migrate(ctx, src, dst, MigrateOptions{})
-	if err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	if report.Singletons != 8 || report.CSRs != 2 || report.Certs != 1 {
-		t.Errorf("report = %+v, want 8 singletons, 2 CSRs, 1 cert", report)
-	}
-	if report.Total() != len(want) {
-		t.Errorf("Total = %d, want %d", report.Total(), len(want))
-	}
+		report, err := Migrate(ctx, src, dst, MigrateOptions{})
+		Expect(err).NotTo(HaveOccurred(), "Migrate")
+		Expect(report.Singletons).To(Equal(8), "want 8 singletons, 2 CSRs, 1 cert")
+		Expect(report.CSRs).To(Equal(2), "want 8 singletons, 2 CSRs, 1 cert")
+		Expect(report.Certs).To(Equal(1), "want 8 singletons, 2 CSRs, 1 cert")
+		Expect(report.Total()).To(Equal(len(want)))
 
-	for k, v := range want {
-		got, err := dst.Get(ctx, k)
-		if err != nil {
-			t.Errorf("dst.Get %q: %v", k, err)
-			continue
+		for k, v := range want {
+			got, err := dst.Get(ctx, k)
+			if err != nil {
+				Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("dst.Get %q", k))
+				continue
+			}
+			Expect(got).To(Equal(v), fmt.Sprintf("dst[%q]", k))
 		}
-		if !bytes.Equal(got, v) {
-			t.Errorf("dst[%q] = %q, want %q", k, got, v)
-		}
-	}
-}
-
-// TestMigratePreservesVisibility verifies that private singletons land with
-// 0600 and public ones with 0644 on a filesystem destination.
-func TestMigratePreservesVisibility(t *testing.T) {
-	ctx := context.Background()
-	src := NewFilesystemBackend(t.TempDir())
-	seedCA(t, src)
-
-	dstDir := t.TempDir()
-	dst := NewFilesystemBackend(dstDir)
-	if _, err := Migrate(ctx, src, dst, MigrateOptions{}); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-
-	cases := []struct {
-		key  string
-		perm os.FileMode
-	}{
-		{KeyCACert, FilePermPublic},
-		{KeySerial, FilePermPublic},
-		{KeyCAKey, FilePermPrivate},
-		{KeyInventory, FilePermPrivate},
-		{KeyHMACKey, FilePermPrivate},
-	}
-	for _, c := range cases {
-		p := dst.Path(c.key)
-		info, err := os.Stat(p)
-		if err != nil {
-			t.Fatalf("stat %q: %v", p, err)
-		}
-		if got := info.Mode().Perm(); got != c.perm {
-			t.Errorf("%s perm = %o, want %o", c.key, got, c.perm)
-		}
-	}
-}
-
-func TestMigrateRefusesNonEmptyDestination(t *testing.T) {
-	ctx := context.Background()
-	src := NewFilesystemBackend(t.TempDir())
-	seedCA(t, src)
-
-	dst := NewFilesystemBackend(t.TempDir())
-	if err := dst.EnsureReady(ctx); err != nil {
-		t.Fatalf("EnsureReady: %v", err)
-	}
-	// Pre-populate the destination with a CA cert.
-	if err := dst.Put(ctx, KeyCACert, []byte("existing"), BlobPublic); err != nil {
-		t.Fatalf("seed dst: %v", err)
-	}
-
-	_, err := Migrate(ctx, src, dst, MigrateOptions{})
-	if !errors.Is(err, ErrDestinationNotEmpty) {
-		t.Fatalf("err = %v, want ErrDestinationNotEmpty", err)
-	}
-
-	// The existing cert must be untouched (no partial copy occurred).
-	got, err := dst.Get(ctx, KeyCACert)
-	if err != nil || !bytes.Equal(got, []byte("existing")) {
-		t.Fatalf("dst CA cert = %q (err %v), want untouched", got, err)
-	}
-
-	// --force overwrites it.
-	if _, err := Migrate(ctx, src, dst, MigrateOptions{Force: true}); err != nil {
-		t.Fatalf("Migrate --force: %v", err)
-	}
-	got, _ = dst.Get(ctx, KeyCACert)
-	if !bytes.Equal(got, []byte("ca-cert-pem")) {
-		t.Errorf("after force, dst CA cert = %q, want ca-cert-pem", got)
-	}
-}
-
-func TestMigrateSkipsAbsentSingletons(t *testing.T) {
-	ctx := context.Background()
-	src := NewFilesystemBackend(t.TempDir())
-	if err := src.EnsureReady(ctx); err != nil {
-		t.Fatalf("EnsureReady: %v", err)
-	}
-	// Only a CA cert and one CSR exist; everything else is absent.
-	if err := src.Put(ctx, KeyCACert, []byte("c"), BlobPublic); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	if err := src.Put(ctx, CSRKey("only"), []byte("r"), BlobPublic); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-
-	dst := NewFilesystemBackend(t.TempDir())
-	report, err := Migrate(ctx, src, dst, MigrateOptions{})
-	if err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	if report.Singletons != 1 || report.CSRs != 1 || report.Certs != 0 {
-		t.Errorf("report = %+v, want 1 singleton, 1 CSR, 0 certs", report)
-	}
-	// An absent singleton must not be created at the destination.
-	if _, err := os.Stat(dst.Path(KeySerial)); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("serial unexpectedly present at destination: %v", err)
-	}
-}
-
-func TestMigrateLogfReceivesEachCopiedBlob(t *testing.T) {
-	ctx := context.Background()
-	src := NewFilesystemBackend(t.TempDir())
-	want := seedCA(t, src)
-	dst := NewFilesystemBackend(t.TempDir())
-
-	var lines int
-	_, err := Migrate(ctx, src, dst, MigrateOptions{
-		Logf: func(string, ...any) { lines++ },
 	})
-	if err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	if lines != len(want) {
-		t.Errorf("Logf called %d times, want %d", lines, len(want))
-	}
-}
+})
+
+// MigratePreservesVisibility verifies that private singletons land with
+// 0600 and public ones with 0644 on a filesystem destination.
+var _ = Describe("MigratePreservesVisibility", func() {
+	It("lands private singletons 0600 and public ones 0644", func() {
+		ctx := context.Background()
+		src := NewFilesystemBackend(GinkgoT().TempDir())
+		seedCA(src)
+
+		dstDir := GinkgoT().TempDir()
+		dst := NewFilesystemBackend(dstDir)
+		_, err := Migrate(ctx, src, dst, MigrateOptions{})
+		Expect(err).NotTo(HaveOccurred(), "Migrate")
+
+		cases := []struct {
+			key  string
+			perm os.FileMode
+		}{
+			{KeyCACert, FilePermPublic},
+			{KeySerial, FilePermPublic},
+			{KeyCAKey, FilePermPrivate},
+			{KeyInventory, FilePermPrivate},
+			{KeyHMACKey, FilePermPrivate},
+		}
+		for _, c := range cases {
+			p := dst.Path(c.key)
+			info, err := os.Stat(p)
+			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("stat %q", p))
+			Expect(info.Mode().Perm()).To(Equal(c.perm), fmt.Sprintf("%s perm", c.key))
+		}
+	})
+})
+
+var _ = Describe("MigrateRefusesNonEmptyDestination", func() {
+	It("refuses a non-empty destination unless forced", func() {
+		ctx := context.Background()
+		src := NewFilesystemBackend(GinkgoT().TempDir())
+		seedCA(src)
+
+		dst := NewFilesystemBackend(GinkgoT().TempDir())
+		Expect(dst.EnsureReady(ctx)).NotTo(HaveOccurred(), "EnsureReady")
+		// Pre-populate the destination with a CA cert.
+		Expect(dst.Put(ctx, KeyCACert, []byte("existing"), BlobPublic)).NotTo(HaveOccurred(), "seed dst")
+
+		_, err := Migrate(ctx, src, dst, MigrateOptions{})
+		Expect(err).To(MatchError(ErrDestinationNotEmpty))
+
+		// The existing cert must be untouched (no partial copy occurred).
+		got, err := dst.Get(ctx, KeyCACert)
+		Expect(err).NotTo(HaveOccurred(), "dst CA cert, want untouched")
+		Expect(got).To(Equal([]byte("existing")), "dst CA cert, want untouched")
+
+		// --force overwrites it.
+		_, err = Migrate(ctx, src, dst, MigrateOptions{Force: true})
+		Expect(err).NotTo(HaveOccurred(), "Migrate --force")
+		got, _ = dst.Get(ctx, KeyCACert)
+		Expect(got).To(Equal([]byte("ca-cert-pem")), "after force, dst CA cert")
+	})
+})
+
+var _ = Describe("MigrateSkipsAbsentSingletons", func() {
+	It("does not create absent singletons at the destination", func() {
+		ctx := context.Background()
+		src := NewFilesystemBackend(GinkgoT().TempDir())
+		Expect(src.EnsureReady(ctx)).NotTo(HaveOccurred(), "EnsureReady")
+		// Only a CA cert and one CSR exist; everything else is absent.
+		Expect(src.Put(ctx, KeyCACert, []byte("c"), BlobPublic)).NotTo(HaveOccurred(), "seed")
+		Expect(src.Put(ctx, CSRKey("only"), []byte("r"), BlobPublic)).NotTo(HaveOccurred(), "seed")
+
+		dst := NewFilesystemBackend(GinkgoT().TempDir())
+		report, err := Migrate(ctx, src, dst, MigrateOptions{})
+		Expect(err).NotTo(HaveOccurred(), "Migrate")
+		Expect(report.Singletons).To(Equal(1), "want 1 singleton, 1 CSR, 0 certs")
+		Expect(report.CSRs).To(Equal(1), "want 1 singleton, 1 CSR, 0 certs")
+		Expect(report.Certs).To(Equal(0), "want 1 singleton, 1 CSR, 0 certs")
+		// An absent singleton must not be created at the destination.
+		_, err = os.Stat(dst.Path(KeySerial))
+		Expect(err).To(MatchError(os.ErrNotExist), "serial unexpectedly present at destination")
+	})
+})
+
+var _ = Describe("MigrateLogfReceivesEachCopiedBlob", func() {
+	It("calls Logf once per copied blob", func() {
+		ctx := context.Background()
+		src := NewFilesystemBackend(GinkgoT().TempDir())
+		want := seedCA(src)
+		dst := NewFilesystemBackend(GinkgoT().TempDir())
+
+		var lines int
+		_, err := Migrate(ctx, src, dst, MigrateOptions{
+			Logf: func(string, ...any) { lines++ },
+		})
+		Expect(err).NotTo(HaveOccurred(), "Migrate")
+		Expect(lines).To(Equal(len(want)), "Logf call count")
+	})
+})
 
 // unlockFunc adapts a func to the Unlocker interface.
 type unlockFunc func() error
@@ -219,78 +192,70 @@ func (b *lockingBackend) AcquireLock(_ context.Context, name string) (Unlocker, 
 	return unlockFunc(func() error { b.released++; return nil }), nil
 }
 
-func TestMigrateServiceLocksBothBackends(t *testing.T) {
-	ctx := context.Background()
-	srcB := &lockingBackend{FilesystemBackend: NewFilesystemBackend(t.TempDir())}
-	want := seedCA(t, srcB)
-	dstB := &lockingBackend{FilesystemBackend: NewFilesystemBackend(t.TempDir())}
+var _ = Describe("MigrateServiceLocksBothBackends", func() {
+	It("acquires and releases the migrate lock on both backends", func() {
+		ctx := context.Background()
+		srcB := &lockingBackend{FilesystemBackend: NewFilesystemBackend(GinkgoT().TempDir())}
+		want := seedCA(srcB)
+		dstB := &lockingBackend{FilesystemBackend: NewFilesystemBackend(GinkgoT().TempDir())}
 
-	src := NewWithBackend(srcB, t.TempDir())
-	dst := NewWithBackend(dstB, t.TempDir())
+		src := NewWithBackend(srcB, GinkgoT().TempDir())
+		dst := NewWithBackend(dstB, GinkgoT().TempDir())
 
-	report, err := MigrateService(ctx, src, dst, MigrateOptions{})
-	if err != nil {
-		t.Fatalf("MigrateService: %v", err)
-	}
-	if report.Total() != len(want) {
-		t.Errorf("Total = %d, want %d", report.Total(), len(want))
-	}
+		report, err := MigrateService(ctx, src, dst, MigrateOptions{})
+		Expect(err).NotTo(HaveOccurred(), "MigrateService")
+		Expect(report.Total()).To(Equal(len(want)), "Total")
 
-	for label, b := range map[string]*lockingBackend{"source": srcB, "destination": dstB} {
-		if len(b.acquired) != 1 || b.acquired[0] != migrateLockName {
-			t.Errorf("%s locks acquired = %v, want [%q]", label, b.acquired, migrateLockName)
+		for label, b := range map[string]*lockingBackend{"source": srcB, "destination": dstB} {
+			Expect(b.acquired).To(HaveLen(1), fmt.Sprintf("%s locks acquired = %v, want [%q]", label, b.acquired, migrateLockName))
+			Expect(b.acquired[0]).To(Equal(migrateLockName), fmt.Sprintf("%s locks acquired = %v, want [%q]", label, b.acquired, migrateLockName))
+			Expect(b.released).To(Equal(1), fmt.Sprintf("%s locks released", label))
 		}
-		if b.released != 1 {
-			t.Errorf("%s locks released = %d, want 1", label, b.released)
-		}
-	}
 
-	// The data was actually copied under the lock.
-	got, err := dstB.Get(ctx, KeyCACert)
-	if err != nil || !bytes.Equal(got, want[KeyCACert]) {
-		t.Fatalf("dst CA cert = %q (err %v), want copied", got, err)
-	}
-}
+		// The data was actually copied under the lock.
+		got, err := dstB.Get(ctx, KeyCACert)
+		Expect(err).NotTo(HaveOccurred(), "dst CA cert, want copied")
+		Expect(got).To(Equal(want[KeyCACert]), "dst CA cert, want copied")
+	})
+})
 
-// TestMigrateServiceWithoutLocker confirms MigrateService still works against
+// MigrateServiceWithoutLocker confirms MigrateService still works against
 // backends that do not implement Locker (it falls back to a process-local
 // mutex via WithLock).
-func TestMigrateServiceWithoutLocker(t *testing.T) {
-	ctx := context.Background()
-	srcB := NewFilesystemBackend(t.TempDir())
-	want := seedCA(t, srcB)
-	dstB := NewFilesystemBackend(t.TempDir())
+var _ = Describe("MigrateServiceWithoutLocker", func() {
+	It("falls back to a process-local mutex when backends lack a Locker", func() {
+		ctx := context.Background()
+		srcB := NewFilesystemBackend(GinkgoT().TempDir())
+		want := seedCA(srcB)
+		dstB := NewFilesystemBackend(GinkgoT().TempDir())
 
-	src := NewWithBackend(srcB, t.TempDir())
-	dst := NewWithBackend(dstB, t.TempDir())
+		src := NewWithBackend(srcB, GinkgoT().TempDir())
+		dst := NewWithBackend(dstB, GinkgoT().TempDir())
 
-	report, err := MigrateService(ctx, src, dst, MigrateOptions{})
-	if err != nil {
-		t.Fatalf("MigrateService: %v", err)
-	}
-	if report.Total() != len(want) {
-		t.Errorf("Total = %d, want %d", report.Total(), len(want))
-	}
-}
+		report, err := MigrateService(ctx, src, dst, MigrateOptions{})
+		Expect(err).NotTo(HaveOccurred(), "MigrateService")
+		Expect(report.Total()).To(Equal(len(want)), "Total")
+	})
+})
 
-// TestMigrateRoundTripsLocalFileLayout sanity-checks that a migrated
+// MigrateRoundTripsLocalFileLayout sanity-checks that a migrated
 // filesystem destination is readable as a normal on-disk CA (paths exist where
 // the filesystem backend expects them).
-func TestMigrateRoundTripsLocalFileLayout(t *testing.T) {
-	ctx := context.Background()
-	src := NewFilesystemBackend(t.TempDir())
-	seedCA(t, src)
+var _ = Describe("MigrateRoundTripsLocalFileLayout", func() {
+	It("lays out well-known on-disk paths at the destination", func() {
+		ctx := context.Background()
+		src := NewFilesystemBackend(GinkgoT().TempDir())
+		seedCA(src)
 
-	dstDir := t.TempDir()
-	dst := NewFilesystemBackend(dstDir)
-	if _, err := Migrate(ctx, src, dst, MigrateOptions{}); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+		dstDir := GinkgoT().TempDir()
+		dst := NewFilesystemBackend(dstDir)
+		_, err := Migrate(ctx, src, dst, MigrateOptions{})
+		Expect(err).NotTo(HaveOccurred(), "Migrate")
 
-	// Spot-check a couple of well-known on-disk paths.
-	for _, rel := range []string{"ca_crt.pem", filepath.Join("private", "ca_key.pem"), filepath.Join("requests", "web01.pem")} {
-		if _, err := os.Stat(filepath.Join(dstDir, rel)); err != nil {
-			t.Errorf("expected %s on disk: %v", rel, err)
+		// Spot-check a couple of well-known on-disk paths.
+		for _, rel := range []string{"ca_crt.pem", filepath.Join("private", "ca_key.pem"), filepath.Join("requests", "web01.pem")} {
+			_, err := os.Stat(filepath.Join(dstDir, rel))
+			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("expected %s on disk", rel))
 		}
-	}
-}
+	})
+})

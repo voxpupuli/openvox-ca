@@ -14,12 +14,12 @@ and can be overridden without editing the rules.
 
 ## Enabling the exporter
 
-The alerts assume the puppet-ca Prometheus exporter is enabled and scraped. Start
+The alerts assume the openvox-ca Prometheus exporter is enabled and scraped. Start
 the server with `--metrics-listen` (or `PUPPET_CA_METRICS_LISTEN` /
 `metrics_listen:` in the config file):
 
 ```sh
-puppet-ca --cadir /var/lib/puppet-ca --metrics-listen 127.0.0.1:9140
+openvox-ca --cadir /var/lib/puppet-ca --metrics-listen 127.0.0.1:9140
 ```
 
 The exporter serves `/metrics` over plain HTTP on its own listener. It exposes
@@ -28,13 +28,13 @@ network and scrape it from there. A matching Prometheus scrape config:
 
 ```yaml
 scrape_configs:
-  - job_name: puppet-ca
+  - job_name: openvox-ca
     static_configs:
-      - targets: ['puppet-ca.internal:9140']
+      - targets: ['openvox-ca.internal:9140']
 ```
 
 The `job_name` must match `puppetCASelector` in the mixin config (default
-`job="puppet-ca"`).
+`job="openvox-ca"`).
 
 ## Rendering the alerts standalone
 
@@ -51,16 +51,16 @@ promtool check rules puppet_ca_alerts.yaml
 Vendor the mixin with [jsonnet-bundler](https://github.com/jsonnet-bundler/jsonnet-bundler):
 
 ```sh
-jb install https://github.com/tvaughan/puppet-ca/mixin@main
+jb install https://github.com/voxpupuli/openvox-ca/mixin@main
 ```
 
 Then combine it with your overrides:
 
 ```jsonnet
 // mixin.jsonnet
-local puppetca = (import 'vendor/puppet-ca/mixin.libsonnet') + {
+local puppetca = (import 'vendor/openvox-ca/mixin.libsonnet') + {
   _config+:: {
-    puppetCASelector: 'job="pki/puppet-ca"',
+    puppetCASelector: 'job="pki/openvox-ca"',
     caExpiryWarningSeconds: 45 * 24 * 3600,
   },
 };
@@ -78,7 +78,7 @@ jsonnet -J vendor -m . mixin.jsonnet
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `puppetCASelector` | `job="puppet-ca"` | Label selector matching the exporter targets. |
+| `puppetCASelector` | `job="openvox-ca"` | Label selector matching the exporter targets. |
 | `alertLabels` | `{}` | Extra labels merged onto every alert (e.g. routing labels). |
 | `caExpiryWarningSeconds` | 30 days | CA certificate expiry warning threshold. |
 | `caExpiryCriticalSeconds` | 7 days | CA certificate expiry critical threshold. |

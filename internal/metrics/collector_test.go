@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Chris Boot
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -25,10 +26,10 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/tvaughan/puppet-ca/internal/ca"
-	"github.com/tvaughan/puppet-ca/internal/metrics"
-	"github.com/tvaughan/puppet-ca/internal/storage"
-	"github.com/tvaughan/puppet-ca/internal/testutil"
+	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/metrics"
+	"github.com/voxpupuli/openvox-ca/internal/storage"
+	"github.com/voxpupuli/openvox-ca/internal/testutil"
 )
 
 // gathered indexes a Prometheus gather result by metric family name.

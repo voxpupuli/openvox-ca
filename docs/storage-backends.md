@@ -1,12 +1,12 @@
 # Storage backends
 
-`puppet-ca` abstracts its persistent state behind a pluggable **Backend**
+`openvox-ca` abstracts its persistent state behind a pluggable **Backend**
 interface. The following backends ship today:
 
 | Kind                   | Status  | Best for                                                                   |
 |------------------------|---------|----------------------------------------------------------------------------|
 | `filesystem`           | default | single-node installs; drop-in compatibility with Puppet Server's CA layout |
-| `etcd`                 | stable  | HA clusters where multiple `puppet-ca` replicas share a single CA          |
+| `etcd`                 | stable  | HA clusters where multiple `openvox-ca` replicas share a single CA          |
 | `redis` (incl. Valkey) | stable  | clusters that already run Redis/Valkey (direct or Sentinel-managed)        |
 | `sqlite`               | stable  | single-node installs that prefer a single database file over a cadir tree  |
 | `postgres`             | stable  | HA clusters that already run PostgreSQL; shared CA across replicas         |
@@ -52,7 +52,7 @@ keys are whole-blob read/write/delete.
 ## Filesystem backend (default)
 
 All CA state lives under `--cadir`. The on-disk layout matches Puppet Server's
-CA so operators can swap in `puppet-ca` without reorganising their SSL tree:
+CA so operators can swap in `openvox-ca` without reorganising their SSL tree:
 
 ```
 <cadir>/
@@ -73,7 +73,7 @@ CA so operators can swap in `puppet-ca` without reorganising their SSL tree:
 ```
 
 File permissions are fixed: `0600` for anything under `private/` and for the
-inventory and its HMAC; `0644` for everything else. `puppet-ca` warns at
+inventory and its HMAC; `0644` for everything else. `openvox-ca` warns at
 startup about any `*_key.pem` files in `private/` whose permissions are looser
 than `0600` and leaves them for the operator to fix.
 
@@ -92,7 +92,7 @@ cadir: /etc/puppetlabs/puppet/ssl/ca
 ## etcd backend
 
 Stores every logical key except the local private-key directory in an etcd v3
-cluster. Multiple `puppet-ca` replicas can point at the same cluster (and the
+cluster. Multiple `openvox-ca` replicas can point at the same cluster (and the
 same `etcd_key_prefix`) to share CA state: any replica can sign, revoke, or
 refresh the CRL, and the other replicas see the update immediately.
 
@@ -152,13 +152,13 @@ etcd_endpoints:
   - https://etcd-0.example.com:2379
   - https://etcd-1.example.com:2379
   - https://etcd-2.example.com:2379
-etcd_key_prefix: /puppet-ca              # default shown; override to
+etcd_key_prefix: /openvox-ca              # default shown; override to
                                          # share a cluster between CAs
 etcd_dial_timeout_sec: 5
 etcd_request_timeout_sec: 5
 
 # Optional authentication.
-etcd_username: puppet-ca
+etcd_username: openvox-ca
 etcd_password: "..."                     # prefer PUPPET_CA_ETCD_PASSWORD
 
 # Optional mTLS to the etcd cluster.
@@ -172,7 +172,7 @@ etcd_tls_key_file:  /etc/puppet-ca/etcd-client-key.pem
 ```
 --storage-backend etcd
 --etcd-endpoints  https://etcd-0:2379,https://etcd-1:2379,https://etcd-2:2379
---etcd-key-prefix /puppet-ca
+--etcd-key-prefix /openvox-ca
 ```
 
 ### Environment variables
@@ -196,7 +196,7 @@ etcd_tls_key_file:  /etc/puppet-ca/etcd-client-key.pem
   private key in etcd too. That's a deliberate choice — it lets new replicas
   join the cluster without needing the key copied out of band — but it means
   the etcd cluster is now a blast-radius for the CA key. Consider:
-  - Restricting etcd ACLs on `/puppet-ca/ca/key` to the `puppet-ca` identity.
+  - Restricting etcd ACLs on `/puppet-ca/ca/key` to the `openvox-ca` identity.
   - Enabling CA key encryption at rest (`encrypt_ca_key: true`) so the key
     stored in etcd is AES-256-GCM wrapped with an Argon2id-derived key.
   - Or pinning the key to a local file via `ca_key_file` (see below).
@@ -206,10 +206,10 @@ etcd_tls_key_file:  /etc/puppet-ca/etcd-client-key.pem
   compare-and-swap semantics prevent double-writes of `ca/cert` and
   `ca/key`; the losing replica fails its bootstrap, observes the winner's
   cert, and continues.
-- **Puppet-ca-ctl.** `puppet-ca-ctl setup` and `puppet-ca-ctl import` operate
+- **Puppet-ca-ctl.** `openvox-ca-ctl setup` and `openvox-ca-ctl import` operate
   on the local filesystem only. To import a CA into an etcd-backed cluster,
   run these commands first against a scratch directory, then point
-  `puppet-ca` at a cadir containing the output.
+  `openvox-ca` at a cadir containing the output.
 
 ### Integration tests
 
@@ -226,28 +226,28 @@ go test -tags=etcd_integration ./internal/storage/...
 
 Stores every logical key except the local private-key directory in a Redis
 instance, a Valkey instance (wire-compatible fork of Redis), or a
-Sentinel-managed primary. Multiple `puppet-ca` replicas can point at the
+Sentinel-managed primary. Multiple `openvox-ca` replicas can point at the
 same Redis/Valkey (and the same `redis_key_prefix`) to share CA state.
 
 `redis` and `valkey` are accepted as aliases for this backend.
 
 ### Key layout
 
-With the default prefix `puppet-ca` (Redis convention uses `:` as a
+With the default prefix `openvox-ca` (Redis convention uses `:` as a
 separator):
 
 | Logical key         | Redis key                          |
 |---------------------|------------------------------------|
-| `ca_cert`           | `puppet-ca:ca:cert`                |
-| `ca_pubkey`         | `puppet-ca:ca:pubkey`              |
-| `ca_key`            | `puppet-ca:ca:key`                 |
-| `crl`               | `puppet-ca:ca:crl`                 |
-| `serial`            | `puppet-ca:serial`                 |
-| `inventory`         | `puppet-ca:inventory:data`         |
-| `inventory_hmac`    | `puppet-ca:inventory:hmac`         |
-| `hmac_key`          | `puppet-ca:private:hmac_key`       |
-| `csr/<subject>`     | `puppet-ca:requests:<subject>`     |
-| `cert/<subject>`    | `puppet-ca:signed:<subject>`       |
+| `ca_cert`           | `openvox-ca:ca:cert`                |
+| `ca_pubkey`         | `openvox-ca:ca:pubkey`              |
+| `ca_key`            | `openvox-ca:ca:key`                 |
+| `crl`               | `openvox-ca:ca:crl`                 |
+| `serial`            | `openvox-ca:serial`                 |
+| `inventory`         | `openvox-ca:inventory:data`         |
+| `inventory_hmac`    | `openvox-ca:inventory:hmac`         |
+| `hmac_key`          | `openvox-ca:private:hmac_key`       |
+| `csr/<subject>`     | `openvox-ca:requests:<subject>`     |
+| `cert/<subject>`    | `openvox-ca:signed:<subject>`       |
 
 Stored values carry an 8-byte big-endian `time.UnixNano` mtime prefix so
 `ModTime` is answered from the same round-trip as the value. Inventory
@@ -265,7 +265,7 @@ lock crashes, the lock releases automatically when the TTL elapses.
 
 Redis replication under Sentinel is asynchronous, which means an in-flight
 failover could in theory hand a lock to a new holder while the old primary
-briefly keeps the prior entry. For `puppet-ca`'s workloads the resulting
+briefly keeps the prior entry. For `openvox-ca`'s workloads the resulting
 window is narrow and bounded by the lock TTL; operators who need strict
 cross-node linearizability should prefer the etcd backend.
 
@@ -283,7 +283,7 @@ cadir: /var/lib/puppet-ca                # still needed for per-subject keys
 redis_addrs:
   - redis-0.example.com:6379             # first address is used in direct mode
 
-redis_key_prefix: puppet-ca              # default shown; override to share
+redis_key_prefix: openvox-ca              # default shown; override to share
                                          # an instance between CAs
 redis_db: 0                              # logical database (default 0)
 
@@ -292,7 +292,7 @@ redis_request_timeout_sec: 5
 redis_lock_ttl_sec: 30                   # heartbeat runs every ttl/3
 
 # Optional auth (ACL user + password; use PUPPET_CA_REDIS_PASSWORD for secrets).
-redis_username: puppet-ca
+redis_username: openvox-ca
 redis_password: "..."
 
 # Optional TLS to the Redis primary.
@@ -318,11 +318,11 @@ redis_sentinel_addrs:
   - sentinel-2.example.com:26379
 
 # Optional auth against the Sentinels themselves (distinct from Redis auth).
-redis_sentinel_username: puppet-ca
+redis_sentinel_username: openvox-ca
 redis_sentinel_password: "..."
 
 # Auth / TLS against the primary — same fields as direct mode.
-redis_username: puppet-ca
+redis_username: openvox-ca
 redis_password: "..."
 redis_tls_ca_file:   /etc/puppet-ca/redis-ca.pem
 redis_tls_cert_file: /etc/puppet-ca/redis-client.pem
@@ -336,7 +336,7 @@ redis_tls_key_file:  /etc/puppet-ca/redis-client-key.pem
 --redis-addrs               redis-0:6379,redis-1:6379
 --redis-sentinel-master-name mymaster
 --redis-sentinel-addrs      sentinel-0:26379,sentinel-1:26379
---redis-key-prefix          puppet-ca
+--redis-key-prefix          openvox-ca
 ```
 
 ### Environment variables
@@ -366,15 +366,15 @@ redis_tls_key_file:  /etc/puppet-ca/redis-client-key.pem
   sure the deployment is durable enough for the CA state you're storing. A
   pure in-memory instance with no persistence will lose the CA on restart.
 - **CA cert and key.** As with the etcd backend, the CA private key lives
-  in Redis by default. Restrict ACLs on `puppet-ca:ca:key`, enable
+  in Redis by default. Restrict ACLs on `openvox-ca:ca:key`, enable
   `encrypt_ca_key` so the key is AES-256-GCM wrapped before it leaves the
   process, or pin the key to a local file via `ca_key_file` (see below).
 - **Inventory HMAC.** The integrity key lives under
-  `puppet-ca:private:hmac_key`. Back it up alongside the CA key.
-- **Puppet-ca-ctl.** `puppet-ca-ctl setup` and `puppet-ca-ctl import` operate
+  `openvox-ca:private:hmac_key`. Back it up alongside the CA key.
+- **Puppet-ca-ctl.** `openvox-ca-ctl setup` and `openvox-ca-ctl import` operate
   on the local filesystem only. To import a CA into a Redis-backed cluster,
   run these commands first against a scratch directory, then point
-  `puppet-ca` at a cadir containing the output.
+  `openvox-ca` at a cadir containing the output.
 
 ### Unit / integration tests
 
@@ -518,9 +518,9 @@ exactly as the filesystem backend does.
   lives in the database by default. Enable `encrypt_ca_key` so the key is
   AES-256-GCM wrapped before it leaves the process, or pin the key to a local
   file via `ca_key_file` (see below).
-- **Puppet-ca-ctl.** `puppet-ca-ctl setup` and `puppet-ca-ctl import` operate
+- **Puppet-ca-ctl.** `openvox-ca-ctl setup` and `openvox-ca-ctl import` operate
   on the local filesystem only; bootstrap/import against a scratch directory,
-  then point a SQLite-backed `puppet-ca` at a fresh database to take over.
+  then point a SQLite-backed `openvox-ca` at a fresh database to take over.
 
 #### Tests
 
@@ -533,7 +533,7 @@ go test ./internal/storage/
 
 ### PostgreSQL backend
 
-Stores the entire CA in a PostgreSQL database. Multiple `puppet-ca` replicas
+Stores the entire CA in a PostgreSQL database. Multiple `openvox-ca` replicas
 can point at the same database to share CA state. `postgres`, `postgresql`,
 and `pg` are accepted as aliases. `cadir` is still required for per-subject
 generated private keys and ancillary local state.
@@ -591,9 +591,9 @@ and releases the advisory lock automatically.
   `bun_migrations` / `bun_migration_locks` bookkeeping tables. Grant the
   configured role rights to create tables on first run (or pre-create the
   schema and grant DML).
-- **Puppet-ca-ctl.** `puppet-ca-ctl setup` / `import` operate on the local
+- **Puppet-ca-ctl.** `openvox-ca-ctl setup` / `import` operate on the local
   filesystem only; bootstrap/import against a scratch directory, then point a
-  PostgreSQL-backed `puppet-ca` at a fresh database to take over.
+  PostgreSQL-backed `openvox-ca` at a fresh database to take over.
 
 #### Tests
 
@@ -613,7 +613,7 @@ mage test:backendsPostgres
 
 ### MySQL / MariaDB backend
 
-Stores the entire CA in a MySQL or MariaDB database. Multiple `puppet-ca`
+Stores the entire CA in a MySQL or MariaDB database. Multiple `openvox-ca`
 replicas can share one database. `mysql` and `mariadb` are accepted as aliases.
 `cadir` is still required for per-subject generated private keys and ancillary
 local state.
@@ -667,9 +667,9 @@ replica's session ends and its named locks release automatically.
 - **CA cert and key.** As with the other shared backends, the CA private key
   lives in the database by default. Enable `encrypt_ca_key`, or pin the key to
   a local file via `ca_key_file` (see below).
-- **Puppet-ca-ctl.** `puppet-ca-ctl setup` / `import` operate on the local
+- **Puppet-ca-ctl.** `openvox-ca-ctl setup` / `import` operate on the local
   filesystem only; bootstrap/import against a scratch directory, then point a
-  MySQL-backed `puppet-ca` at a fresh database to take over.
+  MySQL-backed `openvox-ca` at a fresh database to take over.
 
 #### Tests
 
@@ -733,10 +733,10 @@ ca_key_file:  /etc/puppet-ca/secrets/ca_key.pem
 
 ### Behaviour
 
-- On **first start** with no existing CA, `puppet-ca` bootstraps a new CA
+- On **first start** with no existing CA, `openvox-ca` bootstraps a new CA
   and writes the cert/key to the configured local paths (not the backend).
 - On subsequent starts, the cert and key are loaded from the local paths.
-- `puppet-ca` writes the cert at mode `0644` and the key at mode `0600`
+- `openvox-ca` writes the cert at mode `0644` and the key at mode `0600`
   atomically (temp-file + rename). If operators supply pre-existing files,
   they are read as-is and never overwritten unless the server rotates the CA.
 - Existing supervision-level protections still apply:
@@ -750,7 +750,7 @@ key out of the cadir tree and onto a separately-mounted volume.
 
 ## Migrating between backends
 
-`puppet-ca-ctl migrate` copies an entire CA from one backend to another. Because
+`openvox-ca-ctl migrate` copies an entire CA from one backend to another. Because
 every backend implements the same `Backend` contract, any pair can be combined:
 
 - import an existing filesystem CA into a database (`filesystem` → `postgres`),
@@ -759,18 +759,18 @@ every backend implements the same `Backend` contract, any pair can be combined:
 - export a database back to a plain directory of files (`postgres` →
   `filesystem`), e.g. for an offline backup or to revert to a single-node setup.
 
-Both ends are described by ordinary `puppet-ca` config files — the same YAML the
+Both ends are described by ordinary `openvox-ca` config files — the same YAML the
 server reads — so each backend's parameters are expressed exactly as they are in
 production. `--source-config` is read from; `--dest-config` is written to.
 
 ```bash
 # Import a filesystem CA into PostgreSQL.
-puppet-ca-ctl migrate \
+openvox-ca-ctl migrate \
   --source-config /etc/puppet-ca/filesystem.yaml \
   --dest-config   /etc/puppet-ca/postgres.yaml
 
 # Export it back out to a directory of files.
-puppet-ca-ctl migrate \
+openvox-ca-ctl migrate \
   --source-config /etc/puppet-ca/postgres.yaml \
   --dest-config   /etc/puppet-ca/filesystem.yaml
 ```
@@ -801,7 +801,7 @@ are honoured on both ends, so they participate transparently.
 
 Notes:
 
-- **Stop the server first.** Run `migrate` while no `puppet-ca` is serving
+- **Stop the server first.** Run `migrate` while no `openvox-ca` is serving
   either backend, so the copy sees a consistent snapshot.
 - **Overwrite protection.** `migrate` refuses to write into a destination that
   already holds a CA certificate. Pass `--force` to overwrite it.
@@ -826,7 +826,7 @@ Notes:
 Use `filesystem` for single-node or migration-from-Puppet-Server installs.
 Use `sqlite` for a single-node install that prefers one database file over a
 cadir tree (e.g. simpler backups). Use `postgres` or `mysql` when you want
-multiple `puppet-ca` replicas backed by a database you already operate. Use
+multiple `openvox-ca` replicas backed by a database you already operate. Use
 `etcd` when you need multiple replicas and want the strongest cross-node lock
 guarantees. Use `redis`/`valkey` when you already run Redis/Valkey (direct or
 Sentinel-managed) and are willing to accept the narrower failover window in
@@ -842,8 +842,8 @@ backend, implement the interface, register it in
 [internal/storage/spec.go](../internal/storage/spec.go)'s
 `NewServiceFromSpec`, and add any backend-specific config fields to
 [internal/config/storage.go](../internal/config/storage.go)'s `StorageConfig`
-(shared by the server and `puppet-ca-ctl migrate`, and mapped to a
+(shared by the server and `openvox-ca-ctl migrate`, and mapped to a
 `BackendSpec` by `ToBackendSpec`). The `OverlayBackend` wrapper (overlay.go)
 shows how to compose a backend with local-file overrides. A new backend is
-automatically migratable — `puppet-ca-ctl migrate` works against any
+automatically migratable — `openvox-ca-ctl migrate` works against any
 `Backend` implementation with no extra code.

@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Chris Boot
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -30,9 +31,9 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/tvaughan/puppet-ca/internal/ca"
-	"github.com/tvaughan/puppet-ca/internal/storage"
-	"github.com/tvaughan/puppet-ca/internal/testutil"
+	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/storage"
+	"github.com/voxpupuli/openvox-ca/internal/testutil"
 )
 
 // cleanupInventoryFormat matches the layout the signing path writes and
@@ -102,7 +103,7 @@ var _ = Describe("CA CleanupExpiredCerts", func() {
 
 	BeforeEach(func() {
 		var err error
-		tmpDir, err = os.MkdirTemp("", "puppet-ca-cleanup-test")
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-cleanup-test")
 		Expect(err).NotTo(HaveOccurred())
 
 		store = storage.New(tmpDir)
@@ -211,5 +212,87 @@ var _ = Describe("CA CleanupExpiredCerts", func() {
 		inv := inventoryString()
 		Expect(inv).To(ContainSubstring("/renewed-node"))
 		Expect(strings.Count(inv, "/renewed-node")).To(Equal(1))
+	})
+})
+
+var _ = Describe("CA CleanMultiple", func() {
+	var (
+		ctx    = context.Background()
+		tmpDir string
+		myCA   *ca.CA
+		store  *storage.StorageService
+	)
+
+	// issue saves and signs a fresh CSR for subject, mirroring how Clean is
+	// exercised elsewhere in the suite.
+	issue := func(subject string) {
+		csrPEM, err := testutil.GenerateCSR(subject)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = myCA.SaveRequest(ctx, subject, csrPEM)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = myCA.Sign(ctx, subject)
+		Expect(err).NotTo(HaveOccurred())
+	}
+
+	BeforeEach(func() {
+		var err error
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-cleanmultiple-test")
+		Expect(err).NotTo(HaveOccurred())
+
+		store = storage.New(tmpDir)
+		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+
+		Expect(store.EnsureDirs(ctx)).To(Succeed())
+		Expect(store.SaveCAKey(ctx, cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(ctx, cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(ctx, cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial(ctx, "0001")).To(Succeed())
+		Expect(store.TouchInventory(ctx)).To(Succeed())
+		Expect(myCA.Init(ctx)).To(Succeed())
+	})
+
+	AfterEach(func() {
+		os.RemoveAll(tmpDir)
+	})
+
+	It("marks every existing subject as cleaned and removes its cert", func() {
+		issue("node-a")
+		issue("node-b")
+		issue("node-c")
+
+		result := myCA.CleanMultiple(ctx, []string{"node-a", "node-b", "node-c"})
+
+		Expect(result.Cleaned).To(ConsistOf("node-a", "node-b", "node-c"))
+		Expect(result.NotFound).To(BeEmpty())
+		Expect(result.CleanErrors).To(BeEmpty())
+
+		// Each cleaned subject's certificate must be gone from storage.
+		Expect(store.HasCert(ctx, "node-a")).To(BeFalse())
+		Expect(store.HasCert(ctx, "node-b")).To(BeFalse())
+		Expect(store.HasCert(ctx, "node-c")).To(BeFalse())
+	})
+
+	It("reports per-subject success and not-found for a mixed batch", func() {
+		issue("present-1")
+		issue("present-2")
+
+		result := myCA.CleanMultiple(ctx, []string{
+			"present-1", "ghost-1", "present-2", "ghost-2",
+		})
+
+		Expect(result.Cleaned).To(ConsistOf("present-1", "present-2"))
+		Expect(result.NotFound).To(ConsistOf("ghost-1", "ghost-2"))
+		Expect(result.CleanErrors).To(BeEmpty())
+
+		Expect(store.HasCert(ctx, "present-1")).To(BeFalse())
+		Expect(store.HasCert(ctx, "present-2")).To(BeFalse())
+	})
+
+	It("returns empty result slices for an empty subject list", func() {
+		result := myCA.CleanMultiple(ctx, []string{})
+
+		Expect(result.Cleaned).To(BeEmpty())
+		Expect(result.NotFound).To(BeEmpty())
+		Expect(result.CleanErrors).To(BeEmpty())
 	})
 })

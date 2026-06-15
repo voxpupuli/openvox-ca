@@ -1,9 +1,9 @@
 {
   _config+:: {
     // puppetCASelector matches the Prometheus targets that scrape the
-    // puppet-ca exporter. Override it to pin the alerts to a specific job,
-    // namespace, or instance — e.g. 'job="puppet-ca",namespace="pki"'.
-    puppetCASelector: 'job="puppet-ca"',
+    // openvox-ca exporter. Override it to pin the alerts to a specific job,
+    // namespace, or instance — e.g. 'job="openvox-ca",namespace="pki"'.
+    puppetCASelector: 'job="openvox-ca"',
 
     // alertLabels are merged onto every alert (e.g. a team or severity routing
     // label). 'severity' is set per-alert below and should not be put here.

@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Trevor Vaughan
+// Copyright (C) 2026 Vox Pupuli and contributors
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -14,11 +15,11 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-// puppet-ca-ctl is an operator management CLI for the puppet-ca server.
+// openvox-ca-ctl is an operator management CLI for the openvox-ca server.
 //
 // Usage:
 //
-//	puppet-ca-ctl [global-flags] <subcommand> [subcommand-flags]
+//	openvox-ca-ctl [global-flags] <subcommand> [subcommand-flags]
 package main
 
 import (
@@ -37,8 +38,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/tvaughan/puppet-ca/internal/ca"
-	"github.com/tvaughan/puppet-ca/internal/storage"
+	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
 
 // ---------- global state (set by persistent flags / config) ----------
@@ -505,9 +506,9 @@ func newImportCmd() *cobra.Command {
 
 func main() {
 	rootCmd := &cobra.Command{
-		Use:   "puppet-ca-ctl",
-		Short: "Operator management CLI for puppet-ca",
-		Long: `puppet-ca-ctl manages certificates on a running puppet-ca server.
+		Use:   "openvox-ca-ctl",
+		Short: "Operator management CLI for openvox-ca",
+		Long: `openvox-ca-ctl manages certificates on a running openvox-ca server.
 
 Global flags must be specified before the subcommand.`,
 		SilenceUsage: true,
@@ -556,7 +557,7 @@ Global flags must be specified before the subcommand.`,
 
 	pf := rootCmd.PersistentFlags()
 	pf.StringVar(&globalConfigFile, "config", "", "Path to YAML config file (default: /etc/puppet-ca/ctl.yaml if it exists)")
-	pf.StringVar(&globalServerURL, "server-url", "https://localhost:8140", "puppet-ca server URL")
+	pf.StringVar(&globalServerURL, "server-url", "https://localhost:8140", "openvox-ca server URL")
 	pf.StringVar(&globalCACert, "ca-cert", "", "Path to CA cert PEM for TLS verification (omit to use system trust store)")
 	pf.StringVar(&globalClientCert, "client-cert", "", "Path to client certificate PEM for mTLS")
 	pf.StringVar(&globalClientKey, "client-key", "", "Path to client private key PEM for mTLS")
