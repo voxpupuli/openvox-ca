@@ -67,7 +67,7 @@ var _ = Describe("Key encryption", func() {
 
 			ecKey, ok := parsed.(*ecdsa.PrivateKey)
 			Expect(ok).To(BeTrue())
-			Expect(ecKey.D.Cmp(key.D)).To(Equal(0))
+			Expect(ecKey.Equal(key)).To(BeTrue())
 		})
 
 		It("fails decryption with wrong passphrase", func() {
