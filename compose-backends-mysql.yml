@@ -14,7 +14,7 @@ name: openvox-ca-backends-mysql
 
 services:
   mysql:
-    image: docker.io/mysql:8
+    image: docker.io/mysql:8.4.10
     environment:
       MYSQL_ROOT_PASSWORD: root
       MYSQL_DATABASE: puppetca

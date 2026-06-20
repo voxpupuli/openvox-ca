@@ -41,7 +41,7 @@ services:
 
   # -- k6 load runner --------------------------------------------------------
   k6:
-    image: grafana/k6:latest
+    image: grafana/k6:2.0.0
     tty: true       # allocate a PTY so k6 uses its live updating progress display
     command:
       - run

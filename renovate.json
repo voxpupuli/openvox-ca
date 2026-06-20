@@ -9,5 +9,15 @@
 
   "postUpdateOptions": [
     "gomodTidy"
+  ],
+
+  "packageRules": [
+    {
+      "description": "openvox-ca-integ is built locally by mage and not published to any registry",
+      "matchPackageNames": [
+        "openvox-ca-integ"
+      ],
+      "enabled": false
+    }
   ]
 }
