@@ -5,5 +5,9 @@
     "config:best-practices"
   ],
 
-  "rangeStrategy": "pin"
+  "rangeStrategy": "pin",
+
+  "postUpdateOptions": [
+    "gomodTidy"
+  ]
 }
