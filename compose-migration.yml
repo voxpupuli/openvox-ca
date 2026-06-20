@@ -25,7 +25,7 @@ services:
 
   # -- Old Puppet Server (OpenVox Server, JVM) -------------------------------
   old-puppet:
-    image: ghcr.io/openvoxproject/openvoxserver:latest
+    image: ghcr.io/openvoxproject/openvoxserver:8.13.0-main@sha256:c49843bd94e4caae5e23fcf790afb28a44629ac55f99db489df77cab7fa0b77c
     hostname: old-puppet
     environment:
       OPENVOXSERVER_HOSTNAME: old-puppet
