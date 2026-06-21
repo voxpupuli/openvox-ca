@@ -10,7 +10,7 @@
 # Integration test targets (mage test:integCompose, etc.) handle
 # both steps automatically.
 
-FROM quay.io/centos/centos:stream10
+FROM quay.io/centos/centos:stream10@sha256:7a900af2eda5734d920204da916648821ca6525fd3f06db0606f63cd87017b12
 
 # curl: health checks and agent CSR submission
 # openssl: CSR generation and cert verification in integration tests

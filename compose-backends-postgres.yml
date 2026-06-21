@@ -13,7 +13,7 @@ name: openvox-ca-backends-postgres
 
 services:
   postgres:
-    image: docker.io/postgres:16.14-alpine
+    image: docker.io/postgres:16.14-alpine@sha256:e013e867e712fec275706a6c51c966f0bb0c93cfa8f51000f85a15f9865a28cb
     environment:
       POSTGRES_USER: puppetca
       POSTGRES_PASSWORD: puppetca
