@@ -28,4 +28,7 @@ services:
       retries: 30
     tmpfs:
       # Ephemeral storage: the test database never needs to survive a restart.
-      - /var/lib/postgresql/data
+      # Mount the whole /var/lib/postgresql tree: postgres 18+ stores data in a
+      # major-version-specific subdirectory and refuses to start if it finds an
+      # "unused" mount at the old /var/lib/postgresql/data path.
+      - /var/lib/postgresql
