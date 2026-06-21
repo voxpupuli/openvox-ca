@@ -172,7 +172,7 @@ services:
 
   # -- PostgreSQL backend for OpenVoxDB -----------------------------------
   postgres:
-    image: docker.io/postgres:17.10-alpine@sha256:dc17045ccfd343b49600570ea734b9c4991cf1c3f3302e67df51e3b402dd55c4
+    image: docker.io/postgres:18.4-alpine@sha256:1b1689b20d16a014a3d195653381cf2caa75a41a92d93b255a9d6ea29fd353aa
     hostname: postgres
     environment:
       POSTGRES_DB: openvoxdb
