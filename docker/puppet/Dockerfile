@@ -7,7 +7,7 @@
 # The entrypoint.sh bootstraps TLS certificates from the Go CA, configures
 # webserver.conf and puppet.conf, then starts `puppetserver foreground`.
 
-FROM quay.io/centos/centos:stream10@sha256:7a900af2eda5734d920204da916648821ca6525fd3f06db0606f63cd87017b12
+FROM quay.io/centos/centos:stream10@sha256:43d9ff49ab90f401e427c50e14dd43443a6158f2f676bac0d176cc95f6891931
 
 # Install OpenVox Server + PuppetDB terminus + runtime tools.
 RUN dnf -y install https://yum.voxpupuli.org/openvox8-release-el-10.noarch.rpm && \
