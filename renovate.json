@@ -19,6 +19,13 @@
         "openvox-ca-integ"
       ],
       "enabled": false
+    },
+    {
+      "description": "Don't pin CentOS Stream, old digests aren't retained after updates",
+      "matchPackageNames": [
+        "quay.io/centos/centos"
+      ],
+      "rangeStrategy": "auto"
     }
   ]
 }
