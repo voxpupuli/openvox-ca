@@ -1,5 +1,5 @@
 # ---- Build Stage ----
-FROM quay.io/centos/centos:stream10 AS builder
+FROM quay.io/centos/centos:stream10@sha256:43d9ff49ab90f401e427c50e14dd43443a6158f2f676bac0d176cc95f6891931 AS builder
 
 RUN dnf install -y golang git && dnf clean all
 
@@ -15,7 +15,7 @@ RUN GOTOOLCHAIN=auto CGO_ENABLED=0 GOOS=linux \
     go build -ldflags="-s -w" -o /openvox-ca-ctl ./cmd/openvox-ca-ctl/
 
 # ---- Runtime Stage ----
-FROM quay.io/centos/centos:stream10
+FROM quay.io/centos/centos:stream10@sha256:43d9ff49ab90f401e427c50e14dd43443a6158f2f676bac0d176cc95f6891931
 
 # curl: health checks and agent CSR submission
 # openssl: CSR generation and cert verification in integration tests
