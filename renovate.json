@@ -25,7 +25,7 @@
       "matchPackageNames": [
         "quay.io/centos/centos"
       ],
-      "rangeStrategy": "auto"
+      "pinDigests": false
     }
   ]
 }
