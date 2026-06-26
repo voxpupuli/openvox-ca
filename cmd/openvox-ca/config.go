@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/voxpupuli/openvox-ca/internal/config"
+	"github.com/voxpupuli/openvox-ca/internal/k8sexport"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -116,6 +117,13 @@ type serverConfig struct {
 	// PuppetDateTimeFormat formats JSON date/time fields using the original Puppet CA
 	// style ("2006-01-02T15:04:05MST") instead of RFC 3339 (default: false).
 	PuppetDateTimeFormat bool `yaml:"puppet_datetime_format"`
+
+	// KubernetesExport optionally publishes the CA certificate and/or CRL into
+	// one or more Kubernetes Secrets and ConfigMaps. Disabled when no targets are
+	// configured. File-only (the nested target list, labels, and annotations are
+	// impractical to express as flags/env), mirroring how StorageConfig is
+	// handled. Validated at startup.
+	KubernetesExport k8sexport.Config `yaml:"kubernetes_export"`
 
 	// Storage backend selection and parameters. Embedded inline so the YAML
 	// keys (storage_backend, etcd_*, redis_*, sql_*, ca_cert_file, ca_key_file)
