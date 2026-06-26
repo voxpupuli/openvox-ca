@@ -366,6 +366,51 @@ leaf_validity_days: 1825
 		Expect(cfg.Port).To(Equal(8140), "Port = %d; want default 8140", cfg.Port)
 		Expect(cfg.CADir).To(Equal("/tmp/partial"), "CADir = %q; want /tmp/partial", cfg.CADir)
 	})
+
+	It("parses a kubernetes_export block", func() {
+		clearServerEnv()
+
+		content := `
+cadir: /tmp/myca
+kubernetes_export:
+  field_manager: my-ca
+  targets:
+    - kind: secret
+      name: openvox-ca-trust
+      namespace: puppet
+      type: Opaque
+      cert: true
+      crl: true
+      cert_key: ca.crt
+      crl_key: ca.crl
+      labels:
+        app: openvox-ca
+      annotations:
+        owner: platform
+    - kind: configmap
+      name: openvox-ca-crl
+      crl: true
+`
+		cfgFile := writeTempConfig(content)
+		cfg, err := loadServerConfig(cfgFile)
+		Expect(err).NotTo(HaveOccurred(), "unexpected error")
+
+		Expect(cfg.KubernetesExport.Enabled()).To(BeTrue())
+		Expect(cfg.KubernetesExport.FieldManager).To(Equal("my-ca"))
+		Expect(cfg.KubernetesExport.Targets).To(HaveLen(2))
+
+		first := cfg.KubernetesExport.Targets[0]
+		Expect(first.Kind).To(Equal("secret"))
+		Expect(first.Name).To(Equal("openvox-ca-trust"))
+		Expect(first.Namespace).To(Equal("puppet"))
+		Expect(first.Cert).To(BeTrue())
+		Expect(first.CRL).To(BeTrue())
+		Expect(first.Labels).To(HaveKeyWithValue("app", "openvox-ca"))
+		Expect(first.Annotations).To(HaveKeyWithValue("owner", "platform"))
+
+		Expect(cfg.KubernetesExport.Targets[1].Kind).To(Equal("configmap"))
+		Expect(cfg.KubernetesExport.Validate()).To(Succeed())
+	})
 })
 
 // --- loadServerConfig: env vars override YAML ---
