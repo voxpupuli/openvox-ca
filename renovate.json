@@ -7,6 +7,7 @@
   ],
 
   "rangeStrategy": "pin",
+  "minimumReleaseAge": "2 days",
 
   "postUpdateOptions": [
     "gomodTidy"
