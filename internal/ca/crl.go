@@ -62,6 +62,16 @@ func (c *CA) signCRLLocked(ctx context.Context, prevNumber *big.Int, revoked []x
 		return fmt.Errorf("failed to parse new CRL for cache: %w", err)
 	}
 	c.cachedCRL = parsedCRL
+
+	// Signal consumers (e.g. the Kubernetes exporter) that the CRL changed.
+	// Non-blocking: a full buffer means a notification is already pending, and a
+	// nil channel (CA built without New) is never ready — both fall through to
+	// default so signing is never blocked. Holding c.mu here is fine; the send
+	// does not contend on it.
+	select {
+	case c.crlNotify <- struct{}{}:
+	default:
+	}
 	return nil
 }
 
