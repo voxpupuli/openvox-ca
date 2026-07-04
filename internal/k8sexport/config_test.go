@@ -32,30 +32,47 @@ var _ = Describe("Config", func() {
 		})
 
 		It("is true once a target is configured", func() {
-			cfg := &k8sexport.Config{Targets: []k8sexport.Target{{Kind: "secret", Name: "x", CRL: true}}}
+			cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+				Kind: "Secret", Metadata: k8sexport.Metadata{Name: "x"}, CRL: true,
+			}}}
 			Expect(cfg.Enabled()).To(BeTrue())
 		})
 	})
 
 	Describe("Validate", func() {
 		Context("with valid targets", func() {
-			It("applies defaults for a secret target", func() {
+			It("applies defaults for a Secret target", func() {
 				cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
-					Kind: "Secret", Name: "trust", Cert: true, CRL: true,
+					Kind: "Secret", Metadata: k8sexport.Metadata{Name: "trust"}, Cert: true, CRL: true,
 				}}}
 				Expect(cfg.Validate()).To(Succeed())
 
 				Expect(cfg.FieldManager).To(Equal("openvox-ca"))
 				t := cfg.Targets[0]
-				Expect(t.Kind).To(Equal("secret")) // lower-cased
+				Expect(t.Kind).To(Equal("Secret"))
 				Expect(t.Type).To(Equal("Opaque"))
 				Expect(t.CertKey).To(Equal("ca.crt"))
 				Expect(t.CRLKey).To(Equal("ca.crl"))
 			})
 
-			It("does not default a type for configmap targets", func() {
+			DescribeTable("normalises kind case-insensitively",
+				func(kind, want string) {
+					cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+						Kind: kind, Metadata: k8sexport.Metadata{Name: "trust"}, CRL: true,
+					}}}
+					Expect(cfg.Validate()).To(Succeed())
+					Expect(cfg.Targets[0].Kind).To(Equal(want))
+				},
+				Entry("lowercase secret", "secret", "Secret"),
+				Entry("canonical Secret", "Secret", "Secret"),
+				Entry("lowercase configmap", "configmap", "ConfigMap"),
+				Entry("canonical ConfigMap", "ConfigMap", "ConfigMap"),
+				Entry("mixed-case CONFIGMAP", "CONFIGMAP", "ConfigMap"),
+			)
+
+			It("does not default a type for ConfigMap targets", func() {
 				cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
-					Kind: "configmap", Name: "trust", CRL: true,
+					Kind: "ConfigMap", Metadata: k8sexport.Metadata{Name: "trust"}, CRL: true,
 				}}}
 				Expect(cfg.Validate()).To(Succeed())
 				Expect(cfg.Targets[0].Type).To(BeEmpty())
@@ -66,7 +83,7 @@ var _ = Describe("Config", func() {
 				cfg := &k8sexport.Config{
 					FieldManager: "my-mgr",
 					Targets: []k8sexport.Target{{
-						Kind: "secret", Name: "trust", Cert: true,
+						Kind: "Secret", Metadata: k8sexport.Metadata{Name: "trust"}, Cert: true,
 						CertKey: "tls.crt", Type: "kubernetes.io/tls",
 					}},
 				}
@@ -85,19 +102,19 @@ var _ = Describe("Config", func() {
 					Expect(err).To(HaveOccurred())
 					Expect(err.Error()).To(ContainSubstring(msg))
 				},
-				Entry("missing kind", k8sexport.Target{Name: "x", CRL: true}, "kind is required"),
-				Entry("invalid kind", k8sexport.Target{Kind: "deployment", Name: "x", CRL: true}, "invalid kind"),
-				Entry("missing name", k8sexport.Target{Kind: "secret", CRL: true}, "name is required"),
-				Entry("neither cert nor crl", k8sexport.Target{Kind: "secret", Name: "x"}, "at least one of cert or crl"),
-				Entry("type on configmap", k8sexport.Target{Kind: "configmap", Name: "x", CRL: true, Type: "Opaque"}, "type is only valid for secret"),
-				Entry("colliding keys", k8sexport.Target{Kind: "secret", Name: "x", Cert: true, CRL: true, CertKey: "ca.pem", CRLKey: "ca.pem"}, "must differ"),
+				Entry("missing kind", k8sexport.Target{Metadata: k8sexport.Metadata{Name: "x"}, CRL: true}, "kind is required"),
+				Entry("invalid kind", k8sexport.Target{Kind: "Deployment", Metadata: k8sexport.Metadata{Name: "x"}, CRL: true}, "invalid kind"),
+				Entry("missing name", k8sexport.Target{Kind: "Secret", CRL: true}, "metadata.name is required"),
+				Entry("neither cert nor crl", k8sexport.Target{Kind: "Secret", Metadata: k8sexport.Metadata{Name: "x"}}, "at least one of cert or crl"),
+				Entry("type on ConfigMap", k8sexport.Target{Kind: "ConfigMap", Metadata: k8sexport.Metadata{Name: "x"}, CRL: true, Type: "Opaque"}, "type is only valid for Secret"),
+				Entry("colliding keys", k8sexport.Target{Kind: "Secret", Metadata: k8sexport.Metadata{Name: "x"}, Cert: true, CRL: true, CertKey: "ca.pem", CRLKey: "ca.pem"}, "must differ"),
 			)
 		})
 
 		It("reports the offending target index", func() {
 			cfg := &k8sexport.Config{Targets: []k8sexport.Target{
-				{Kind: "secret", Name: "ok", CRL: true},
-				{Kind: "bogus", Name: "bad", CRL: true},
+				{Kind: "Secret", Metadata: k8sexport.Metadata{Name: "ok"}, CRL: true},
+				{Kind: "bogus", Metadata: k8sexport.Metadata{Name: "bad"}, CRL: true},
 			}}
 			err := cfg.Validate()
 			Expect(err).To(MatchError(ContainSubstring("target 1")))

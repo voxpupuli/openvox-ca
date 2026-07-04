@@ -51,23 +51,25 @@ kubernetes_export:
 
   targets:
     # A Secret holding both the CA cert and the CRL.
-    - kind: secret              # "secret" or "configmap" (required)
-      name: openvox-ca-trust    # required
-      namespace: puppet         # optional; defaults to the pod's own namespace
-      type: Opaque              # secret only; default "Opaque"
+    - kind: Secret              # "Secret" or "ConfigMap" (required; case-insensitive)
+      metadata:
+        name: openvox-ca-trust  # required
+        namespace: puppet       # optional; defaults to the pod's own namespace
+        labels:
+          app.kubernetes.io/part-of: puppet
+        annotations:
+          example.com/owner: platform-team
+      type: Opaque              # Secret only; default "Opaque"
       cert: true                # include the CA certificate (default false)
       crl: true                 # include the CRL (default false)
       cert_key: ca.crt          # data key for the cert; default "ca.crt"
       crl_key: ca.crl           # data key for the CRL; default "ca.crl"
-      labels:
-        app.kubernetes.io/part-of: puppet
-      annotations:
-        example.com/owner: platform-team
 
     # A ConfigMap holding only the CRL, in a namespace of its own.
-    - kind: configmap
-      name: openvox-ca-crl
-      namespace: monitoring
+    - kind: ConfigMap
+      metadata:
+        name: openvox-ca-crl
+        namespace: monitoring
       crl: true
       crl_key: ca_crl.pem
 ```
@@ -75,17 +77,17 @@ kubernetes_export:
 ### Target fields
 
 | Field | Applies to | Default | Notes |
-|-------|-----------|---------|-------|
-| `kind` | both | — | `secret` or `configmap` (required) |
-| `name` | both | — | Object name (required) |
-| `namespace` | both | pod's namespace | Resolved from the ServiceAccount mount when empty |
+| ----- | ---------- | ------- | ----- |
+| `kind` | both | — | `Secret` or `ConfigMap` (required; matched case-insensitively) |
+| `metadata.name` | both | — | Object name (required) |
+| `metadata.namespace` | both | pod's namespace | Resolved from the ServiceAccount mount when empty |
+| `metadata.labels` | both | — | Merged with the mandatory `managed-by` label |
+| `metadata.annotations` | both | — | Applied verbatim |
 | `cert` | both | `false` | Include the CA certificate |
 | `crl` | both | `false` | Include the CRL (at least one of `cert`/`crl` must be true) |
 | `cert_key` | both | `ca.crt` | Data key for the cert |
 | `crl_key` | both | `ca.crl` | Data key for the CRL (must differ from `cert_key`) |
-| `type` | secret | `Opaque` | Secret `type` field; rejected on ConfigMaps |
-| `labels` | both | — | Merged with the mandatory `managed-by` label |
-| `annotations` | both | — | Applied verbatim |
+| `type` | Secret | `Opaque` | Secret `type` field; rejected on ConfigMaps |
 
 Secret data is written via `stringData` (PEM is text); the API server stores it
 base64-encoded under `data`. ConfigMap data is written as plain text under

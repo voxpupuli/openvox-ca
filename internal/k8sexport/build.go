@@ -34,8 +34,8 @@ const (
 // managed-by label. The managed-by label always wins so ownership cannot be
 // accidentally masked by configuration.
 func (t *Target) labelsFor() map[string]string {
-	labels := make(map[string]string, len(t.Labels)+1)
-	for k, v := range t.Labels {
+	labels := make(map[string]string, len(t.Metadata.Labels)+1)
+	for k, v := range t.Metadata.Labels {
 		labels[k] = v
 	}
 	labels[managedByLabelKey] = managedByLabelValue
@@ -60,12 +60,12 @@ func (t *Target) dataFor(certPEM, crlPEM []byte) map[string]string {
 // buildSecretApply constructs the server-side apply configuration for a Secret
 // target. The namespace must already be resolved (non-empty).
 func (t *Target) buildSecretApply(namespace string, certPEM, crlPEM []byte) *accorev1.SecretApplyConfiguration {
-	ac := accorev1.Secret(t.Name, namespace).
+	ac := accorev1.Secret(t.Metadata.Name, namespace).
 		WithType(corev1.SecretType(t.Type)).
 		WithLabels(t.labelsFor()).
 		WithStringData(t.dataFor(certPEM, crlPEM))
-	if len(t.Annotations) > 0 {
-		ac = ac.WithAnnotations(t.Annotations)
+	if len(t.Metadata.Annotations) > 0 {
+		ac = ac.WithAnnotations(t.Metadata.Annotations)
 	}
 	return ac
 }
@@ -73,11 +73,11 @@ func (t *Target) buildSecretApply(namespace string, certPEM, crlPEM []byte) *acc
 // buildConfigMapApply constructs the server-side apply configuration for a
 // ConfigMap target. The namespace must already be resolved (non-empty).
 func (t *Target) buildConfigMapApply(namespace string, certPEM, crlPEM []byte) *accorev1.ConfigMapApplyConfiguration {
-	ac := accorev1.ConfigMap(t.Name, namespace).
+	ac := accorev1.ConfigMap(t.Metadata.Name, namespace).
 		WithLabels(t.labelsFor()).
 		WithData(t.dataFor(certPEM, crlPEM))
-	if len(t.Annotations) > 0 {
-		ac = ac.WithAnnotations(t.Annotations)
+	if len(t.Metadata.Annotations) > 0 {
+		ac = ac.WithAnnotations(t.Metadata.Annotations)
 	}
 	return ac
 }

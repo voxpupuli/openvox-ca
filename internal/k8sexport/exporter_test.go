@@ -59,9 +59,12 @@ var _ = Describe("Exporter", func() {
 
 	It("applies a Secret with both materials, keys, type and managed-by label", func() {
 		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
-			Kind: "secret", Name: "trust", Namespace: "ns1",
+			Kind: "Secret",
+			Metadata: k8sexport.Metadata{
+				Name: "trust", Namespace: "ns1",
+				Labels: map[string]string{"app": "demo"},
+			},
 			Cert: true, CRL: true,
-			Labels: map[string]string{"app": "demo"},
 		}}}
 		mustValidate(cfg)
 
@@ -79,8 +82,9 @@ var _ = Describe("Exporter", func() {
 
 	It("applies a ConfigMap with only the CRL under a custom key", func() {
 		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
-			Kind: "configmap", Name: "crl-cm", Namespace: "ns1",
-			CRL: true, CRLKey: "openvox.crl",
+			Kind:     "ConfigMap",
+			Metadata: k8sexport.Metadata{Name: "crl-cm", Namespace: "ns1"},
+			CRL:      true, CRLKey: "openvox.crl",
 		}}}
 		mustValidate(cfg)
 
@@ -96,7 +100,7 @@ var _ = Describe("Exporter", func() {
 
 	It("uses the default namespace for targets without one", func() {
 		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
-			Kind: "secret", Name: "trust", Cert: true,
+			Kind: "Secret", Metadata: k8sexport.Metadata{Name: "trust"}, Cert: true,
 		}}}
 		mustValidate(cfg)
 
@@ -109,7 +113,7 @@ var _ = Describe("Exporter", func() {
 
 	It("re-exports an updated CRL on a subsequent call", func() {
 		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
-			Kind: "secret", Name: "trust", Namespace: "ns1", CRL: true,
+			Kind: "Secret", Metadata: k8sexport.Metadata{Name: "trust", Namespace: "ns1"}, CRL: true,
 		}}}
 		mustValidate(cfg)
 
@@ -129,7 +133,7 @@ var _ = Describe("Exporter", func() {
 
 	It("returns an error and applies nothing when the CRL cannot be read", func() {
 		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
-			Kind: "secret", Name: "trust", Namespace: "ns1", CRL: true,
+			Kind: "Secret", Metadata: k8sexport.Metadata{Name: "trust", Namespace: "ns1"}, CRL: true,
 		}}}
 		mustValidate(cfg)
 
@@ -143,7 +147,7 @@ var _ = Describe("Exporter", func() {
 
 	It("does not read the cert when no target requests it", func() {
 		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
-			Kind: "secret", Name: "trust", Namespace: "ns1", CRL: true,
+			Kind: "Secret", Metadata: k8sexport.Metadata{Name: "trust", Namespace: "ns1"}, CRL: true,
 		}}}
 		mustValidate(cfg)
 
