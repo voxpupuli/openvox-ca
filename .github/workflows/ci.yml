@@ -27,7 +27,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Install Mage
-        run: go install github.com/magefile/mage@v1.15.0
+        run: go install github.com/magefile/mage@v1.17.2
       - name: Install golangci-lint
         run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
       - name: Check formatting, vet, module tidy, and lint
@@ -68,7 +68,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Install Mage
-        run: go install github.com/magefile/mage@v1.15.0
+        run: go install github.com/magefile/mage@v1.17.2
       - name: Run unit tests
         run: mage test:unit
       - name: Coverage summary
@@ -105,7 +105,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Install Mage
-        run: go install github.com/magefile/mage@v1.15.0
+        run: go install github.com/magefile/mage@v1.17.2
       - name: Start rngd (replenish entropy pool for FIPS crypto)
         if: matrix.build == 'fips'
         run: sudo apt-get install -y --no-install-recommends rng-tools && sudo rngd -r /dev/urandom
@@ -127,7 +127,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Install Mage
-        run: go install github.com/magefile/mage@v1.15.0
+        run: go install github.com/magefile/mage@v1.17.2
       - name: Run migration integration tests
         run: mage test:migration
 
@@ -146,7 +146,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Install Mage
-        run: go install github.com/magefile/mage@v1.15.0
+        run: go install github.com/magefile/mage@v1.17.2
       - name: Run Redis-backend integration tests
         run: mage test:backendsRedis
 
@@ -166,7 +166,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Install Mage
-        run: go install github.com/magefile/mage@v1.15.0
+        run: go install github.com/magefile/mage@v1.17.2
       - name: Run Redis-backend Go integration tests
         run: mage test:backendsRedisGo
 
@@ -185,7 +185,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Install Mage
-        run: go install github.com/magefile/mage@v1.15.0
+        run: go install github.com/magefile/mage@v1.17.2
       - name: Run PostgreSQL-backend integration tests
         run: mage test:backendsPostgres
 
@@ -204,7 +204,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Install Mage
-        run: go install github.com/magefile/mage@v1.15.0
+        run: go install github.com/magefile/mage@v1.17.2
       - name: Run MySQL-backend integration tests
         run: mage test:backendsMySQL
 
@@ -221,7 +221,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Install Mage
-        run: go install github.com/magefile/mage@v1.15.0
+        run: go install github.com/magefile/mage@v1.17.2
       - name: Run etcd-backend integration tests
         run: mage test:backendsEtcd
 
@@ -247,7 +247,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Install Mage
-        run: go install github.com/magefile/mage@v1.15.0
+        run: go install github.com/magefile/mage@v1.17.2
       - name: Start rngd (replenish entropy pool for FIPS crypto)
         if: matrix.build == 'fips'
         run: sudo apt-get install -y --no-install-recommends rng-tools && sudo rngd -r /dev/urandom

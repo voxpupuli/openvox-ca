@@ -19,7 +19,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Install Mage
-        run: go install github.com/magefile/mage@v1.15.0
+        run: go install github.com/magefile/mage@v1.17.2
       - name: Build release artifacts
         run: mage build:dist
       - name: Publish GitHub release
