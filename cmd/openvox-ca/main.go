@@ -697,11 +697,17 @@ func newRootCmd() *cobra.Command {
 				if err := cfg.KubernetesExport.Validate(); err != nil {
 					return fmt.Errorf("invalid kubernetes_export config: %w", err)
 				}
-				exporter, err := k8sexport.NewInCluster(cfg.KubernetesExport, store)
+				// Instrument the export only when the Prometheus exporter is
+				// enabled; a nil Metrics disables recording.
+				var k8sMetrics *k8sexport.Metrics
+				if exporter != nil {
+					k8sMetrics = k8sexport.NewMetrics(exporter.Registry())
+				}
+				k8sExporter, err := k8sexport.NewInCluster(cfg.KubernetesExport, store, k8sMetrics)
 				if err != nil {
 					slog.Error("Kubernetes export disabled: failed to initialise client", "error", err)
 				} else {
-					go runK8sExporter(ctx, myCA, exporter)
+					go runK8sExporter(ctx, myCA, k8sExporter)
 				}
 			}
 

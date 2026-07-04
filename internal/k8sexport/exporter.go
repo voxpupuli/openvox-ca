@@ -41,20 +41,22 @@ type Exporter struct {
 	client    kubernetes.Interface
 	cfg       Config
 	src       MaterialSource
-	defaultNS string // resolved pod namespace; used for targets without one
+	defaultNS string   // resolved pod namespace; used for targets without one
+	metrics   *Metrics // may be nil (metrics disabled)
 }
 
 // New constructs an Exporter from an existing clientset. cfg must already have
 // been validated (Config.Validate). defaultNS is the namespace used for targets
 // that do not set their own; it may be empty if every target sets a namespace.
-func New(client kubernetes.Interface, cfg Config, src MaterialSource, defaultNS string) *Exporter {
-	return &Exporter{client: client, cfg: cfg, src: src, defaultNS: defaultNS}
+// m may be nil to disable instrumentation.
+func New(client kubernetes.Interface, cfg Config, src MaterialSource, defaultNS string, m *Metrics) *Exporter {
+	return &Exporter{client: client, cfg: cfg, src: src, defaultNS: defaultNS, metrics: m}
 }
 
 // NewInCluster builds an Exporter using in-cluster ServiceAccount credentials,
 // resolving the default namespace from the pod's ServiceAccount mount. cfg must
-// already have been validated.
-func NewInCluster(cfg Config, src MaterialSource) (*Exporter, error) {
+// already have been validated. m may be nil to disable instrumentation.
+func NewInCluster(cfg Config, src MaterialSource, m *Metrics) (*Exporter, error) {
 	client, err := newInClusterClientset()
 	if err != nil {
 		return nil, err
@@ -69,7 +71,7 @@ func NewInCluster(cfg Config, src MaterialSource) (*Exporter, error) {
 		}
 		defaultNS = ns
 	}
-	return New(client, cfg, src, defaultNS), nil
+	return New(client, cfg, src, defaultNS, m), nil
 }
 
 // needsDefaultNamespace reports whether any target omits its namespace and so
@@ -96,7 +98,9 @@ func (e *Exporter) ExportAll(ctx context.Context) error {
 	var errs []error
 	for i := range e.cfg.Targets {
 		t := &e.cfg.Targets[i]
-		if err := e.applyTarget(ctx, t, certPEM, crlPEM); err != nil {
+		err := e.applyTarget(ctx, t, certPEM, crlPEM)
+		e.metrics.recordApply(t, e.namespaceFor(t), err)
+		if err != nil {
 			slog.Warn("Kubernetes export failed for target",
 				"kind", t.Kind, "name", t.Metadata.Name, "namespace", e.namespaceFor(t), "error", err)
 			errs = append(errs, fmt.Errorf("%s/%s: %w", t.Kind, t.Metadata.Name, err))

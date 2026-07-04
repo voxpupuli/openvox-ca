@@ -141,6 +141,16 @@ resources to the minimum above.
   (bad `kind`, a `type` on a ConfigMap, neither `cert` nor `crl`, colliding
   keys, …) stops the server with a clear error.
 
+## Metrics
+
+When the [Prometheus exporter](metrics.md) is enabled, each apply attempt is
+counted in `puppetca_k8s_export_applies_total{kind,namespace,name,result}`, and
+per-target `last_success` / `last_error` timestamp gauges record the most
+recent outcomes. Because export failures are only logged, alerting on these
+series is the recommended way to catch a target that persistently fails; the
+[monitoring mixin](../mixin/) ships a `PuppetCAKubernetesExportFailing` alert
+that fires while a target's most recent apply attempt failed.
+
 ## Limitations
 
 - In-cluster ServiceAccount authentication only (no external kubeconfig).
