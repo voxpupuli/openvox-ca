@@ -13,6 +13,33 @@
     "gomodTidy"
   ],
 
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Update mage version pinned via 'go install' in GitHub Actions workflows",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/.*\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "go install github\\.com/magefile/mage@(?<currentValue>v\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "github.com/magefile/mage",
+      "datasourceTemplate": "go"
+    },
+    {
+      "customType": "regex",
+      "description": "Update golangci-lint version pinned via 'go install' in GitHub Actions workflows",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/.*\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "go install github\\.com/golangci/golangci-lint/v2/cmd/golangci-lint@(?<currentValue>v\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "github.com/golangci/golangci-lint/v2",
+      "datasourceTemplate": "go"
+    }
+  ],
+
   "packageRules": [
     {
       "description": "openvox-ca-integ is built locally by mage and not published to any registry",
