@@ -18,12 +18,14 @@
 package signer
 
 import (
+	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"net/rpc"
@@ -35,6 +37,21 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
+
+// fakeVerifiableKey wraps a crypto.Signer with a controllable KeyVerifier
+// implementation, so tests can drive both the "key doesn't support
+// verification" and "key does, and reports success/failure" paths without
+// needing a real OpenBao-backed key.
+type fakeVerifiableKey struct {
+	crypto.Signer
+	verifyErr   error
+	verifyCalls int
+}
+
+func (k *fakeVerifiableKey) VerifyCurrentKey(_ context.Context) error {
+	k.verifyCalls++
+	return k.verifyErr
+}
 
 // setPSKEnv sets the PSK environment variable for the duration of the current
 // spec, restoring its prior value (set or unset) via DeferCleanup. It replaces
@@ -129,6 +146,75 @@ var _ = Describe("RemoteSigner over RPC", func() {
 		}
 	})
 })
+
+var _ = Describe("RemoteSigner.VerifyCurrentKey over RPC", func() {
+	// verifies that a key with no KeyVerifier capability (the common case:
+	// a local PEM-file key, or any crypto.Signer that doesn't implement it)
+	// reports success trivially -- there's nothing to re-check.
+	It("succeeds when the underlying key has no verification capability", func() {
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		Expect(err).NotTo(HaveOccurred(), "generating test key")
+
+		serverConn, clientConn := net.Pipe()
+		svc := &Service{key: key}
+		server := rpc.NewServer()
+		Expect(server.RegisterName("Signer", svc)).To(Succeed(), "registering service")
+		go server.ServeConn(serverConn)
+
+		rs := &RemoteSigner{client: rpc.NewClient(clientConn), pub: key.Public()}
+		DeferCleanup(rs.Close)
+
+		Expect(rs.VerifyCurrentKey(context.Background())).To(Succeed())
+	})
+
+	// verifies a successful live verification (the key matches its source of
+	// truth) is forwarded across the RPC boundary as success.
+	It("forwards a successful verification", func() {
+		fake := &fakeVerifiableKey{Signer: mustGenerateKey()}
+		serverConn, clientConn := net.Pipe()
+		svc := &Service{key: fake}
+		server := rpc.NewServer()
+		Expect(server.RegisterName("Signer", svc)).To(Succeed(), "registering service")
+		go server.ServeConn(serverConn)
+
+		rs := &RemoteSigner{client: rpc.NewClient(clientConn), pub: fake.Public()}
+		DeferCleanup(rs.Close)
+
+		Expect(rs.VerifyCurrentKey(context.Background())).To(Succeed())
+		Expect(fake.verifyCalls).To(Equal(1))
+	})
+
+	// verifies a failed live verification (e.g. the key was rotated at its
+	// provider) is forwarded across the RPC boundary as an error, not
+	// silently swallowed -- this is the whole point of the check.
+	It("forwards a failed verification", func() {
+		fake := &fakeVerifiableKey{Signer: mustGenerateKey(), verifyErr: errors.New("key rotated at provider")}
+		serverConn, clientConn := net.Pipe()
+		svc := &Service{key: fake}
+		server := rpc.NewServer()
+		Expect(server.RegisterName("Signer", svc)).To(Succeed(), "registering service")
+		go server.ServeConn(serverConn)
+
+		rs := &RemoteSigner{client: rpc.NewClient(clientConn), pub: fake.Public()}
+		DeferCleanup(rs.Close)
+
+		err := rs.VerifyCurrentKey(context.Background())
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("key rotated at provider"))
+		Expect(fake.verifyCalls).To(Equal(1))
+	})
+})
+
+// mustGenerateKey is a small helper for tests that only need a valid
+// crypto.Signer to embed in a fakeVerifiableKey and don't care about its
+// specific value.
+func mustGenerateKey() crypto.Signer {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	return key
+}
 
 var _ = Describe("Socketpair", func() {
 	// verifies that Socketpair creates a connected pair of sockets.

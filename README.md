@@ -19,6 +19,7 @@ A drop-in replacement for Puppet Server's built-in CA, written in Go. It impleme
 
 - **Full Puppet CA API compatibility:** all 13 endpoints used by agents and puppet-server
 - **Pluggable storage:** filesystem (default, Puppet Server compatible), SQLite (single database file), or PostgreSQL / MySQL (MariaDB) / etcd / Redis (Valkey) for HA clusters; CA cert/key can be pinned to local files independently. See the [storage backends guide](docs/storage-backends.md)
+- **Pluggable CA key custody:** keep the CA private key as a local file (default) or delegate it entirely to an OpenBao Transit secrets engine key, which never leaves OpenBao — works identically on a VM (AppRole/token) or in Kubernetes (native ServiceAccount auth, no sidecar). See [OpenBao Transit-engine CA key](docs/openbao-transit.md)
 - **Autosigning:** `true`, glob-pattern file, or executable plugin modes
 - **mTLS support:** optional HTTPS with per-endpoint tier-based client certificate authorization
 - **CA import:** replace a bootstrapped CA with an external cert/key pair offline
@@ -90,6 +91,7 @@ mage build:fips   # → bin/openvox-ca + bin/openvox-ca-ctl  (GOEXPERIMENT=borin
 | `--etcd-key-prefix` | `/puppet-ca` | etcd key namespace for this CA |
 | `--ca-cert-file` | `""` | Keep the CA certificate at this local path regardless of backend |
 | `--ca-key-file` | `""` | Keep the CA private key at this local path regardless of backend |
+| `--ca-key-provider` | `file` | CA private key custody: `file` (default) or `openbao` (OpenBao Transit key). See [OpenBao Transit-engine CA key](docs/openbao-transit.md) for the full `--openbao-*` flag reference |
 | `--daemon` | `false` | Fork to background (not recommended in containers) |
 | `--logfile` | `""` | Write JSON logs to this file instead of stderr |
 | `--verbosity` / `-v` | `0` | Verbosity: `0`=Info, `1`=Debug, `2`=Trace |
@@ -193,6 +195,14 @@ puppet_datetime_format: false   # use Puppet CA style "2006-01-02T15:04:05MST" i
 | `--etcd-key-prefix` | `PUPPET_CA_ETCD_KEY_PREFIX` |
 | `--ca-cert-file` | `PUPPET_CA_CA_CERT_FILE` |
 | `--ca-key-file` | `PUPPET_CA_CA_KEY_FILE` |
+| `--ca-key-provider` | `PUPPET_CA_CA_KEY_PROVIDER` |
+| `--openbao-addr` | `PUPPET_CA_OPENBAO_ADDR` |
+| `--openbao-transit-mount` | `PUPPET_CA_OPENBAO_TRANSIT_MOUNT` |
+| `--openbao-key-name` | `PUPPET_CA_OPENBAO_KEY_NAME` |
+| `--openbao-auth-method` | `PUPPET_CA_OPENBAO_AUTH_METHOD` |
+
+The full `--openbao-*` flag/environment-variable reference (TLS, AppRole, token-file, and
+Kubernetes auth settings) is in [OpenBao Transit-engine CA key](docs/openbao-transit.md#configuration).
 
 The CA key passphrase can also be provided via `PUPPET_CA_KEY_PASSPHRASE` (env var only, no CLI flag to avoid `/proc/cmdline` exposure).
 
@@ -528,8 +538,32 @@ obtains the key file from a backup, disk image, or volume snapshot, the key is u
 without the passphrase. It does **not** protect against a live host compromise where the
 attacker can read the passphrase source or dump the process memory.
 
-For stronger protection, consider hardware security modules (HSM) via PKCS#11; see
-[Planned: PKCS#11 / HSM support](#planned-pkcs11--hsm-support) below.
+For stronger protection, either delegate key custody to OpenBao entirely (available
+today; see [OpenBao Transit-engine key custody](#openbao-transit-engine-key-custody)
+below) or consider a hardware security module (HSM) via PKCS#11 (planned; see
+[Planned: PKCS#11 / HSM support](#planned-pkcs11--hsm-support) below).
+
+### OpenBao Transit-engine key custody
+
+`--ca-key-provider openbao` delegates the CA private key entirely to an
+[OpenBao](https://openbao.org/) Transit secrets engine key: the key never exists inside
+any `openvox-ca` process at all, on disk or in memory — only a digest crosses the wire
+to be signed. This works identically whether `openvox-ca` runs as a plain systemd
+service (AppRole or a static token file) or as a Kubernetes pod authenticating via its
+own ServiceAccount (Kubernetes auth) — with no Vault/OpenBao Agent sidecar required:
+`openvox-ca` maintains its own OpenBao token lifecycle, proactively renewing it and
+re-authenticating from source credentials whenever renewal fails.
+
+Every existing storage backend keeps working unmodified in this mode — OpenBao only
+ever supplants key custody, never CSR/certificate/CRL/inventory storage. See
+[OpenBao Transit-engine CA key](docs/openbao-transit.md) for full configuration
+reference and setup instructions.
+
+This integration is built and tested against OpenBao specifically, against current
+OpenBao releases. It should also work against HashiCorp Vault, since Vault's Transit
+engine, AppRole/Kubernetes auth methods, and Go client API are what OpenBao forked from
+and remains wire-compatible with — but Vault is not part of the test matrix, so this is
+currently unverified. Compatibility bug reports (and fixes) for Vault are welcome.
 
 ### Planned: PKCS#11 / HSM support
 
@@ -538,12 +572,14 @@ hardware security module (HSM), TPM, or software token (e.g. SoftHSM2). The key 
 never leave the token. Only signing operations would be delegated via the PKCS#11 API.
 
 The implementation path is straightforward because the CA already stores its key as a
-`crypto.Signer` interface (`internal/ca/ca.go`). A PKCS#11-backed signer would implement
-the same interface, requiring no changes to the signing, revocation, or OCSP code paths.
+`crypto.Signer` interface (`internal/ca/ca.go`), and the `--ca-key-provider` flag
+already exists (`file` default, `openbao` shipped — see above). A PKCS#11-backed signer
+would be a third value of the same flag, implementing the same `ca.KeyProvider`
+interface the OpenBao integration uses, requiring no changes to the signing,
+revocation, or OCSP code paths.
 
 **Planned design:**
-- A `--ca-key-provider` flag: `file` (default, current behaviour) or `pkcs11`
-- For `pkcs11`: a PKCS#11 module URI or library path, slot/token label, and PIN
+- `--ca-key-provider pkcs11`: a PKCS#11 module URI or library path, slot/token label, and PIN
   (via file or env var, same pattern as `--ca-key-passphrase-file`)
 - Integration with **p11-kit** for module discovery, allowing operators to configure the
   PKCS#11 backend (SoftHSM2, TPM2 PKCS#11, cloud KMS bridges, Nitrokey, YubiHSM, etc.)

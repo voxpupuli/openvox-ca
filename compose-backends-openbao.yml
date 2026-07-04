@@ -1,0 +1,38 @@
+# OpenBao service for the Transit-signer Go integration suite
+# (internal/signer/openbao, build tag `openbao_integration`).
+#
+# Like compose-backends-postgres.yml, this only provides the OpenBao dev
+# server the integration tests need (not a full Puppet stack). The
+# `mage test:backendsOpenBao` target brings it up, configures the transit
+# engine and an AppRole scoped to a test key (see magefile.go), then runs:
+#
+#   go test -tags openbao_integration ./internal/signer/openbao/...
+#
+# Dev mode is fine here: the suite always starts from a throwaway instance and
+# configures it itself, and dev mode's single-unseal-key/root-token model
+# needs no extra setup to reach a ready, authenticated server.
+
+name: openvox-ca-backends-openbao
+
+services:
+  openbao:
+    image: docker.io/openbao/openbao:2.5.5@sha256:6150c4a6b62067db6141c8da7a6a6b5763f4f47c315343d0c848b40fecdfd452
+    command: ["server", "-dev", "-dev-listen-address=0.0.0.0:8200"]
+    environment:
+      BAO_DEV_ROOT_TOKEN_ID: root
+    cap_add:
+      # Dev mode wants to mlock memory; without this it only warns, but
+      # granting it avoids the warning entirely.
+      - IPC_LOCK
+    ports:
+      # Host 58200 -> container 8200, matching PUPPET_CA_TEST_OPENBAO_ADDR used
+      # by the mage target (OpenBao's standard port, "5"-prefixed per the
+      # other compose-backends-*.yml files' convention).
+      - "58200:8200"
+    healthcheck:
+      test: ["CMD", "bao", "status", "-address=http://127.0.0.1:8200"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    # In-memory only: dev mode never persists to disk, and the integration
+    # suite never needs OpenBao state to survive a restart.
