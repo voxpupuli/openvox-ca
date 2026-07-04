@@ -116,6 +116,12 @@ type CA struct {
 	ocspCache      map[string]ocspCacheEntry // same key; protected by mu
 	cachedCRL      *x509.RevocationList      // in-memory CRL for auth checks; protected by mu
 	mu             sync.RWMutex
+
+	// crlNotify carries a coalesced signal each time the CRL is re-signed (see
+	// signCRLLocked). It is buffered to depth 1 and written non-blockingly, so a
+	// burst of revocations collapses to a single pending notification and an
+	// absent consumer never blocks signing. Consume it via CRLUpdated().
+	crlNotify chan struct{}
 }
 
 func New(s *storage.StorageService, autosignCfg AutosignConfig, hostname string) *CA {
@@ -127,7 +133,18 @@ func New(s *storage.StorageService, autosignCfg AutosignConfig, hostname string)
 		PromoteCNToSAN: true, // on by default; RFC 2818 deprecates CN-only certs
 		serialIndex:    make(map[string]string),
 		ocspCache:      make(map[string]ocspCacheEntry),
+		crlNotify:      make(chan struct{}, 1),
 	}
+}
+
+// CRLUpdated returns a channel that receives a value each time the CRL is
+// re-signed (revoke, reissue, background refresh, or expired-cert cleanup).
+// Notifications are coalesced: the channel is buffered to depth 1 and written
+// non-blockingly, so when several CRL updates happen before the consumer reads,
+// only a single pending signal is observed. Intended for a single consumer
+// (e.g. the Kubernetes exporter) that re-reads the current CRL on each wake-up.
+func (c *CA) CRLUpdated() <-chan struct{} {
+	return c.crlNotify
 }
 
 // IsReady reports whether the CA has been fully initialized and can serve requests.

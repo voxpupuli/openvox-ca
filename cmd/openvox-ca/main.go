@@ -41,6 +41,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/voxpupuli/openvox-ca/internal/api"
 	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/k8sexport"
 	"github.com/voxpupuli/openvox-ca/internal/metrics"
 	"github.com/voxpupuli/openvox-ca/internal/signer"
 	"github.com/voxpupuli/openvox-ca/internal/storage"
@@ -655,6 +656,29 @@ func newRootCmd() *cobra.Command {
 			// Bound to ctx so it stops on shutdown.
 			if cfg.EnableExpiredCertCleanup {
 				go runCertCleaner(ctx, myCA, cfg.expiredCertCleanupInterval(), cfg.expiredCertRetention())
+			}
+
+			// Optional Kubernetes export: publish the CA cert/CRL into the
+			// configured Secrets/ConfigMaps. Auxiliary — a setup failure is logged
+			// but never stops the CA from serving. Bound to ctx so it stops on
+			// shutdown. Each replica runs its own exporter; server-side apply makes
+			// concurrent writes from multiple replicas idempotent.
+			if cfg.KubernetesExport.Enabled() {
+				if err := cfg.KubernetesExport.Validate(); err != nil {
+					return fmt.Errorf("invalid kubernetes_export config: %w", err)
+				}
+				// Instrument the export only when the Prometheus exporter is
+				// enabled; a nil Metrics disables recording.
+				var k8sMetrics *k8sexport.Metrics
+				if exporter != nil {
+					k8sMetrics = k8sexport.NewMetrics(exporter.Registry())
+				}
+				k8sExporter, err := k8sexport.NewInCluster(cfg.KubernetesExport, store, k8sMetrics)
+				if err != nil {
+					slog.Error("Kubernetes export disabled: failed to initialise client", "error", err)
+				} else {
+					go runK8sExporter(ctx, myCA, k8sExporter)
+				}
 			}
 
 			shutdownDone := make(chan struct{})
