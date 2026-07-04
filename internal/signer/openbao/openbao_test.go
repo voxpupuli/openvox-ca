@@ -42,11 +42,11 @@ import (
 	"github.com/voxpupuli/openvox-ca/internal/signer/openbao"
 )
 
-// fakeBao is a minimal in-memory stand-in for the handful of OpenBao HTTP
+// fakeOpenBao is a minimal in-memory stand-in for the handful of OpenBao HTTP
 // endpoints this package calls: AppRole/Kubernetes login, token lookup-self and
 // renew-self, and Transit read/create/sign. It signs with a real key so
 // tests can verify the returned signature actually validates.
-type fakeBao struct {
+type fakeOpenBao struct {
 	t   *testing.T
 	mu  sync.Mutex
 	key crypto.Signer
@@ -66,20 +66,20 @@ type fakeBao struct {
 	approveK8sJWT          func(jwt string) bool
 }
 
-func newFakeBao(t *testing.T) *fakeBao {
+func newFakeOpenBao(t *testing.T) *fakeOpenBao {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatalf("generating fake transit key: %v", err)
 	}
-	return &fakeBao{
+	return &fakeOpenBao{
 		t:           t,
 		key:         key,
 		validTokens: map[string]bool{},
 	}
 }
 
-func (f *fakeBao) issueToken() string {
+func (f *fakeOpenBao) issueToken() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.nextToken++
@@ -88,16 +88,32 @@ func (f *fakeBao) issueToken() string {
 	return tok
 }
 
-func (f *fakeBao) revoke(tok string) {
+func (f *fakeOpenBao) revoke(tok string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.validTokens, tok)
 }
 
-func (f *fakeBao) isValid(tok string) bool {
+func (f *fakeOpenBao) isValid(tok string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.validTokens[tok]
+}
+
+// rotateKey swaps the fake server's underlying Transit key, simulating an
+// operator running `bao write -f transit/keys/<name>/rotate` directly
+// against OpenBao. Subsequent GET (public key) and sign requests reflect
+// the new key immediately.
+func (f *fakeOpenBao) rotateKey(key crypto.Signer) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.key = key
+}
+
+func (f *fakeOpenBao) currentKey() crypto.Signer {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.key
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
@@ -110,7 +126,7 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]interface{}{"errors": []string{msg}})
 }
 
-func (f *fakeBao) authSecret(token string) map[string]interface{} {
+func (f *fakeOpenBao) authSecret(token string) map[string]interface{} {
 	return map[string]interface{}{
 		"auth": map[string]interface{}{
 			"client_token":   token,
@@ -120,7 +136,7 @@ func (f *fakeBao) authSecret(token string) map[string]interface{} {
 	}
 }
 
-func (f *fakeBao) server() *httptest.Server {
+func (f *fakeOpenBao) server() *httptest.Server {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/v1/auth/approle/login", func(w http.ResponseWriter, r *http.Request) {
@@ -189,7 +205,7 @@ func (f *fakeBao) server() *httptest.Server {
 		case http.MethodPost, http.MethodPut:
 			w.WriteHeader(http.StatusNoContent)
 		case http.MethodGet:
-			der, err := x509.MarshalPKIXPublicKey(f.key.Public())
+			der, err := x509.MarshalPKIXPublicKey(f.currentKey().Public())
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())
 				return
@@ -233,7 +249,7 @@ func (f *fakeBao) server() *httptest.Server {
 			writeError(w, http.StatusBadRequest, "bad input encoding")
 			return
 		}
-		rsaKey := f.key.(*rsa.PrivateKey)
+		rsaKey := f.currentKey().(*rsa.PrivateKey)
 		sig, err := rsa.SignPKCS1v15(rand.Reader, rsaKey, crypto.SHA256, digest)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -259,7 +275,7 @@ func writeTempFile(t *testing.T, content string) string {
 }
 
 func TestSignAndVerify_AppRole(t *testing.T) {
-	fake := newFakeBao(t)
+	fake := newFakeOpenBao(t)
 	srv := fake.server()
 	defer srv.Close()
 
@@ -301,8 +317,76 @@ func TestSignAndVerify_AppRole(t *testing.T) {
 	}
 }
 
+// TestVerifyCurrentKey_DetectsRotation proves the live counterpart to the
+// startup cert/key match check: a Signer re-fetches the Transit key's
+// current public component on demand, so a key rotated directly at OpenBao
+// after the Signer was constructed is caught rather than masked by a cached
+// Public() value.
+func TestVerifyCurrentKey_DetectsRotation(t *testing.T) {
+	fake := newFakeOpenBao(t)
+	srv := fake.server()
+	defer srv.Close()
+
+	secretIDFile := writeTempFile(t, "my-secret-id")
+	cfg := openbao.Config{
+		Addr:                srv.URL,
+		KeyName:             "mykey",
+		AuthMethod:          openbao.AuthAppRole,
+		AppRoleRoleID:       "my-role-id",
+		AppRoleSecretIDFile: secretIDFile,
+	}
+
+	ctx := context.Background()
+	tm, err := openbao.NewTokenManager(ctx, cfg)
+	if err != nil {
+		t.Fatalf("NewTokenManager: %v", err)
+	}
+	defer tm.Close()
+
+	provider := openbao.NewKeyProvider(tm, cfg.EffectiveTransitMount(), cfg.KeyName)
+	signer, err := provider.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	verifier, ok := signer.(interface {
+		VerifyCurrentKey(context.Context) error
+	})
+	if !ok {
+		t.Fatalf("Signer does not implement VerifyCurrentKey")
+	}
+
+	if err := verifier.VerifyCurrentKey(ctx); err != nil {
+		t.Fatalf("VerifyCurrentKey before rotation: %v", err)
+	}
+
+	// Simulate an operator rotating the Transit key directly at OpenBao,
+	// independently of openvox-ca (e.g. `bao write -f
+	// transit/keys/mykey/rotate`).
+	newKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generating rotated key: %v", err)
+	}
+	fake.rotateKey(newKey)
+
+	err = verifier.VerifyCurrentKey(ctx)
+	if err == nil {
+		t.Fatalf("VerifyCurrentKey did not detect the rotated key")
+	}
+	if !strings.Contains(err.Error(), "rotated") {
+		t.Fatalf("VerifyCurrentKey error = %q, want a message mentioning rotation", err.Error())
+	}
+
+	// The signer's cached Public() is untouched -- it does not silently pick
+	// up the new key, which is exactly why VerifyCurrentKey has to actively
+	// re-fetch rather than trust it.
+	if signer.Public() == newKey.Public() {
+		t.Fatalf("Public() should remain the original key until the Signer is reconstructed")
+	}
+}
+
 func TestKubernetesAuth_RereadsJWTOnEveryLogin(t *testing.T) {
-	fake := newFakeBao(t)
+	fake := newFakeOpenBao(t)
 	srv := fake.server()
 	defer srv.Close()
 
@@ -350,7 +434,7 @@ func TestKubernetesAuth_RereadsJWTOnEveryLogin(t *testing.T) {
 }
 
 func TestSign_ReactiveReauthOn403(t *testing.T) {
-	fake := newFakeBao(t)
+	fake := newFakeOpenBao(t)
 	srv := fake.server()
 	defer srv.Close()
 
@@ -409,7 +493,7 @@ func TestSign_ReactiveReauthOn403(t *testing.T) {
 func TestKeyProvider_GenerateThenLoad_ECDSA(t *testing.T) {
 	// This test uses a dedicated fake server whose transit key starts out
 	// absent (Load must report ErrKeyProviderKeyNotFound) and is created on
-	// Generate. The shared fakeBao always answers GET with a key present,
+	// Generate. The shared fakeOpenBao always answers GET with a key present,
 	// so we build a tiny purpose-specific server here instead.
 	var mu sync.Mutex
 	var priv *ecdsa.PrivateKey

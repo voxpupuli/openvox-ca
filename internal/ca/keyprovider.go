@@ -52,6 +52,24 @@ type KeyProvider interface {
 	Generate(ctx context.Context, cfg KeyConfig) (crypto.Signer, error)
 }
 
+// KeyVerifier is an optional capability a CA.CAKey may implement: a fresh,
+// live check that the signer's current key still matches its source of
+// truth, re-querying rather than relying on a cached value. Implemented by
+// internal/signer/openbao's Signer (which re-fetches the Transit key's
+// public component from OpenBao and compares it against what was cached at
+// load time) and, via RPC forwarding, by internal/signer's RemoteSigner —
+// so the check works whether or not key isolation is in use. Called before
+// every certificate issuance (see signWithDuration) to catch the key having
+// been rotated at its provider independently of openvox-ca, while this
+// process was already running.
+//
+// A key that cannot change independently of the process (a local PEM file)
+// has nothing to gain from implementing it, and the type assertion at the
+// call site simply finds it absent and skips the check.
+type KeyVerifier interface {
+	VerifyCurrentKey(ctx context.Context) error
+}
+
 // hasCAKey reports whether the CA's private key already exists, using
 // KeyProvider when one is configured (so an OpenBao/PKCS#11-backed key is checked
 // at its actual source) or falling back to the Storage-backed blob check
