@@ -76,7 +76,7 @@ func NewInCluster(cfg Config, src MaterialSource) (*Exporter, error) {
 // depends on the pod's own namespace being resolvable.
 func (c *Config) needsDefaultNamespace() bool {
 	for i := range c.Targets {
-		if c.Targets[i].Namespace == "" {
+		if c.Targets[i].Metadata.Namespace == "" {
 			return true
 		}
 	}
@@ -98,12 +98,12 @@ func (e *Exporter) ExportAll(ctx context.Context) error {
 		t := &e.cfg.Targets[i]
 		if err := e.applyTarget(ctx, t, certPEM, crlPEM); err != nil {
 			slog.Warn("Kubernetes export failed for target",
-				"kind", t.Kind, "name", t.Name, "namespace", e.namespaceFor(t), "error", err)
-			errs = append(errs, fmt.Errorf("%s/%s: %w", t.Kind, t.Name, err))
+				"kind", t.Kind, "name", t.Metadata.Name, "namespace", e.namespaceFor(t), "error", err)
+			errs = append(errs, fmt.Errorf("%s/%s: %w", t.Kind, t.Metadata.Name, err))
 			continue
 		}
 		slog.Debug("Kubernetes export applied",
-			"kind", t.Kind, "name", t.Name, "namespace", e.namespaceFor(t))
+			"kind", t.Kind, "name", t.Metadata.Name, "namespace", e.namespaceFor(t))
 	}
 	return errors.Join(errs...)
 }
@@ -134,8 +134,8 @@ func (e *Exporter) fetchMaterials(ctx context.Context) (certPEM, crlPEM []byte, 
 // namespaceFor returns the namespace a target should be applied to: its own, or
 // the resolved default.
 func (e *Exporter) namespaceFor(t *Target) string {
-	if t.Namespace != "" {
-		return t.Namespace
+	if t.Metadata.Namespace != "" {
+		return t.Metadata.Namespace
 	}
 	return e.defaultNS
 }

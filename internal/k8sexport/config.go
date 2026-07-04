@@ -26,10 +26,12 @@ import (
 	"strings"
 )
 
-// Kind enumerates the Kubernetes object kinds an export target may be.
+// Kind enumerates the Kubernetes object kinds an export target may be. The
+// canonical spellings match Kubernetes; configuration accepts any case and is
+// normalised to these values.
 const (
-	KindSecret    = "secret"
-	KindConfigMap = "configmap"
+	KindSecret    = "Secret"
+	KindConfigMap = "ConfigMap"
 )
 
 const (
@@ -55,10 +57,9 @@ type Config struct {
 	Targets []Target `yaml:"targets"`
 }
 
-// Target describes a single Secret or ConfigMap to maintain.
-type Target struct {
-	// Kind is "secret" or "configmap" (case-insensitive).
-	Kind string `yaml:"kind"`
+// Metadata mirrors the shape of a Kubernetes object's metadata block, so a
+// target reads like the manifest it produces.
+type Metadata struct {
 	// Name is the object's metadata.name (required).
 	Name string `yaml:"name"`
 	// Namespace is the object's namespace. Empty resolves at runtime to the
@@ -67,6 +68,15 @@ type Target struct {
 	// Labels and Annotations are applied to the object's metadata.
 	Labels      map[string]string `yaml:"labels"`
 	Annotations map[string]string `yaml:"annotations"`
+}
+
+// Target describes a single Secret or ConfigMap to maintain.
+type Target struct {
+	// Kind is "Secret" or "ConfigMap" (case-insensitive; normalised by
+	// Validate to the canonical Kubernetes spelling).
+	Kind string `yaml:"kind"`
+	// Metadata carries the object's name, namespace, labels and annotations.
+	Metadata Metadata `yaml:"metadata"`
 	// Type sets a Secret's type field (e.g. "Opaque"). Only valid for Secrets;
 	// empty selects defaultSecretType.
 	Type string `yaml:"type"`
@@ -84,7 +94,7 @@ func (c *Config) Enabled() bool {
 	return c != nil && len(c.Targets) > 0
 }
 
-// Validate normalises the config in place (lower-casing kinds, applying
+// Validate normalises the config in place (canonicalising kinds, applying
 // defaults) and returns an error describing the first invalid target. It is
 // safe to call once at startup before constructing an Exporter.
 func (c *Config) Validate() error {
@@ -100,23 +110,26 @@ func (c *Config) Validate() error {
 }
 
 func (t *Target) validate() error {
-	t.Kind = strings.ToLower(strings.TrimSpace(t.Kind))
-	switch t.Kind {
-	case KindSecret, KindConfigMap:
-	case "":
+	t.Kind = strings.TrimSpace(t.Kind)
+	switch {
+	case strings.EqualFold(t.Kind, KindSecret):
+		t.Kind = KindSecret
+	case strings.EqualFold(t.Kind, KindConfigMap):
+		t.Kind = KindConfigMap
+	case t.Kind == "":
 		return fmt.Errorf("kind is required (%q or %q)", KindSecret, KindConfigMap)
 	default:
 		return fmt.Errorf("invalid kind %q (must be %q or %q)", t.Kind, KindSecret, KindConfigMap)
 	}
 
-	if strings.TrimSpace(t.Name) == "" {
-		return fmt.Errorf("name is required")
+	if strings.TrimSpace(t.Metadata.Name) == "" {
+		return fmt.Errorf("metadata.name is required")
 	}
 	if !t.Cert && !t.CRL {
 		return fmt.Errorf("at least one of cert or crl must be true")
 	}
 	if t.Type != "" && t.Kind != KindSecret {
-		return fmt.Errorf("type is only valid for secret targets")
+		return fmt.Errorf("type is only valid for Secret targets")
 	}
 
 	if t.Kind == KindSecret && t.Type == "" {

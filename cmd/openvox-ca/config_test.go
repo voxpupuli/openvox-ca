@@ -375,20 +375,22 @@ cadir: /tmp/myca
 kubernetes_export:
   field_manager: my-ca
   targets:
-    - kind: secret
-      name: openvox-ca-trust
-      namespace: puppet
+    - kind: Secret
+      metadata:
+        name: openvox-ca-trust
+        namespace: puppet
+        labels:
+          app: openvox-ca
+        annotations:
+          owner: platform
       type: Opaque
       cert: true
       crl: true
       cert_key: ca.crt
       crl_key: ca.crl
-      labels:
-        app: openvox-ca
-      annotations:
-        owner: platform
     - kind: configmap
-      name: openvox-ca-crl
+      metadata:
+        name: openvox-ca-crl
       crl: true
 `
 		cfgFile := writeTempConfig(content)
@@ -400,16 +402,17 @@ kubernetes_export:
 		Expect(cfg.KubernetesExport.Targets).To(HaveLen(2))
 
 		first := cfg.KubernetesExport.Targets[0]
-		Expect(first.Kind).To(Equal("secret"))
-		Expect(first.Name).To(Equal("openvox-ca-trust"))
-		Expect(first.Namespace).To(Equal("puppet"))
+		Expect(first.Kind).To(Equal("Secret"))
+		Expect(first.Metadata.Name).To(Equal("openvox-ca-trust"))
+		Expect(first.Metadata.Namespace).To(Equal("puppet"))
 		Expect(first.Cert).To(BeTrue())
 		Expect(first.CRL).To(BeTrue())
-		Expect(first.Labels).To(HaveKeyWithValue("app", "openvox-ca"))
-		Expect(first.Annotations).To(HaveKeyWithValue("owner", "platform"))
+		Expect(first.Metadata.Labels).To(HaveKeyWithValue("app", "openvox-ca"))
+		Expect(first.Metadata.Annotations).To(HaveKeyWithValue("owner", "platform"))
 
-		Expect(cfg.KubernetesExport.Targets[1].Kind).To(Equal("configmap"))
 		Expect(cfg.KubernetesExport.Validate()).To(Succeed())
+		// The lowercase kind is accepted and normalised to the canonical form.
+		Expect(cfg.KubernetesExport.Targets[1].Kind).To(Equal("ConfigMap"))
 	})
 })
 
