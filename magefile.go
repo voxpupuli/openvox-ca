@@ -41,6 +41,8 @@ import (
 	"github.com/magefile/mage/sh"
 
 	"github.com/caarlos0/env/v11"
+	openbao "github.com/openbao/openbao/api/v2"
+
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	daemon "github.com/google/go-containerregistry/pkg/v1/daemon"
@@ -561,6 +563,133 @@ func (Test) BackendsMySQL() error {
 		map[string]string{"PUPPET_CA_TEST_MYSQL_DSN": dsn},
 		"go", "test", "-tags", "mysql_integration", "-count=1", "./internal/storage/...",
 	)
+}
+
+// BackendsOpenBao brings up a throwaway OpenBao dev server via
+// compose-backends-openbao.yml, configures its transit engine and a
+// least-privilege-scoped AppRole (mirroring what a production deployment's
+// policy should look like — see docs/openbao-transit.md), runs the
+// OpenBao-backend Go integration suite (internal/signer/openbao, build tag
+// openbao_integration) against it, then tears the server down.
+//
+// Unlike the Postgres/MySQL/Redis-Go targets, the service needs configuring
+// (transit engine, key, AppRole, policy) between "container is up" and
+// "run go test" — done here via the same Go SDK internal/signer/openbao itself
+// depends on, rather than shelling out to the openbao CLI inside the container.
+//
+// Requires podman-compose (or docker compose) and network access to pull
+// docker.io/openbao/openbao:2.5.5.
+func (Test) BackendsOpenBao() error {
+	const (
+		addr       = "http://127.0.0.1:58200"
+		rootToken  = "root"
+		roleName   = "test-role"
+		policyName = "test-policy"
+		keyName    = "test-key"
+	)
+
+	fmt.Println("Starting OpenBao backend service...")
+	if err := runCompose(nil, "-f", "compose-backends-openbao.yml", "up", "-d", "--wait"); err != nil {
+		return err
+	}
+	defer func() {
+		fmt.Println("Tearing down OpenBao backend service...")
+		_ = runCompose(nil, "-f", "compose-backends-openbao.yml", "down", "--volumes")
+	}()
+
+	fmt.Println("Configuring OpenBao transit engine and AppRole...")
+	roleID, secretID, err := configureOpenBaoForTests(addr, rootToken, roleName, policyName, keyName)
+	if err != nil {
+		return fmt.Errorf("configuring OpenBao: %w", err)
+	}
+
+	secretIDFile := filepath.Join(os.TempDir(), "openvox-ca-openbao-test-secret-id")
+	if err := os.WriteFile(secretIDFile, []byte(secretID), 0o600); err != nil {
+		return fmt.Errorf("writing secret_id file: %w", err)
+	}
+	defer os.Remove(secretIDFile)
+
+	fmt.Println("Running OpenBao-backend integration tests...")
+	return sh.RunWithV(
+		map[string]string{
+			"PUPPET_CA_TEST_OPENBAO_ADDR":           addr,
+			"PUPPET_CA_TEST_OPENBAO_ROLE_ID":        roleID,
+			"PUPPET_CA_TEST_OPENBAO_SECRET_ID_FILE": secretIDFile,
+			"PUPPET_CA_TEST_OPENBAO_KEY_NAME":       keyName,
+		},
+		"go", "test", "-tags", "openbao_integration", "-count=1", "./internal/signer/openbao/...",
+	)
+}
+
+// configureOpenBaoForTests sets up a freshly started OpenBao dev server for the
+// integration suite: mounts the transit engine, creates keyName, enables
+// AppRole auth, and attaches a policy scoped to "transit/keys/test-*" and
+// "transit/sign/test-*" — broad enough to cover both the pre-created key and
+// the fresh one TestLiveGenerateThenLoad creates, appropriate for a
+// throwaway per-run instance. A production policy should instead name its
+// one key exactly; see docs/openbao-transit.md. Returns the AppRole
+// role_id and a freshly generated secret_id.
+func configureOpenBaoForTests(addr, rootToken, roleName, policyName, keyName string) (roleID, secretID string, err error) {
+	cfg := openbao.DefaultConfig()
+	if cfg.Error != nil {
+		return "", "", cfg.Error
+	}
+	cfg.Address = addr
+	client, err := openbao.NewClient(cfg)
+	if err != nil {
+		return "", "", err
+	}
+	client.SetToken(rootToken)
+
+	if err := client.Sys().Mount("transit", &openbao.MountInput{Type: "transit"}); err != nil {
+		return "", "", fmt.Errorf("mounting transit engine: %w", err)
+	}
+
+	if _, err := client.Logical().Write("transit/keys/"+keyName, map[string]interface{}{
+		"type": "rsa-2048",
+	}); err != nil {
+		return "", "", fmt.Errorf("creating transit key %q: %w", keyName, err)
+	}
+
+	if err := client.Sys().EnableAuthWithOptions("approle", &openbao.EnableAuthOptions{Type: "approle"}); err != nil {
+		return "", "", fmt.Errorf("enabling approle auth: %w", err)
+	}
+
+	const policyHCL = `
+path "transit/keys/test-*" { capabilities = ["read", "create", "update"] }
+path "transit/sign/test-*" { capabilities = ["update"] }
+`
+	if err := client.Sys().PutPolicy(policyName, policyHCL); err != nil {
+		return "", "", fmt.Errorf("writing policy %q: %w", policyName, err)
+	}
+
+	if _, err := client.Logical().Write("auth/approle/role/"+roleName, map[string]interface{}{
+		"token_policies": policyName,
+		"token_ttl":      "5m",
+		"token_max_ttl":  "15m",
+	}); err != nil {
+		return "", "", fmt.Errorf("creating approle role %q: %w", roleName, err)
+	}
+
+	roleIDSecret, err := client.Logical().Read("auth/approle/role/" + roleName + "/role-id")
+	if err != nil {
+		return "", "", fmt.Errorf("reading role_id: %w", err)
+	}
+	roleID, ok := roleIDSecret.Data["role_id"].(string)
+	if !ok {
+		return "", "", fmt.Errorf("role-id response missing role_id")
+	}
+
+	secretIDSecret, err := client.Logical().Write("auth/approle/role/"+roleName+"/secret-id", nil)
+	if err != nil {
+		return "", "", fmt.Errorf("generating secret_id: %w", err)
+	}
+	secretID, ok = secretIDSecret.Data["secret_id"].(string)
+	if !ok {
+		return "", "", fmt.Errorf("secret-id response missing secret_id")
+	}
+
+	return roleID, secretID, nil
 }
 
 // BackendsEtcd runs the etcd-backend Go integration suite (build tag
