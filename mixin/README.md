@@ -11,6 +11,8 @@ alerting rules for the Puppet CA exporter. It alerts on:
 - **CRL update failures** — the CA failing to amend its CRL (a revocation it
   could not record, or a CRL it could not re-sign or write), which can leave
   revoked or superseded certificates still valid.
+- **Kubernetes export** targets whose applies keep failing (only when the
+  [Kubernetes export](../docs/kubernetes-export.md) feature is in use).
 
 All thresholds and the target selector live in [`config.libsonnet`](config.libsonnet)
 and can be overridden without editing the rules.

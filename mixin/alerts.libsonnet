@@ -198,6 +198,35 @@
           },
         ],
       },
+      {
+        name: 'openvox-ca-kubernetes-export',
+        rules: [
+          {
+            alert: 'PuppetCAKubernetesExportFailing',
+            // The most recent apply attempt for a target failed. Exports are
+            // event-driven (startup and CRL updates) and can be days apart on
+            // a quiet CA, so this compares last-error/last-success timestamps
+            // — a state that persists until a retry succeeds — rather than a
+            // rate window, which would silently resolve between attempts. The
+            // 'unless' arm catches a target that has never succeeded at all.
+            expr: |||
+              puppetca_k8s_export_last_error_timestamp_seconds{%(selector)s}
+                > puppetca_k8s_export_last_success_timestamp_seconds{%(selector)s}
+              or
+              puppetca_k8s_export_last_error_timestamp_seconds{%(selector)s}
+                unless puppetca_k8s_export_last_success_timestamp_seconds{%(selector)s}
+            ||| % {
+              selector: $._config.puppetCASelector,
+            },
+            'for': $._config.k8sExportFailingFor,
+            labels: { severity: 'warning' } + $._config.alertLabels,
+            annotations: {
+              summary: 'A Kubernetes export target is failing to apply.',
+              description: 'The most recent apply of {{ $labels.kind }}/{{ $labels.name }} in namespace {{ $labels.namespace }} from {{ $labels.instance }} failed; the exported object may hold a stale CA certificate or CRL until the next successful export. Check the CA logs, RBAC, and API server connectivity.',
+            },
+          },
+        ],
+      },
     ],
   },
 }

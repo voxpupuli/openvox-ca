@@ -41,6 +41,13 @@
     crlUpdateWindow: '1h',
     crlUpdateFor: '15m',
 
+    // --- Kubernetes export ---
+    // A target alerts while its most recent apply attempt failed (last-error
+    // newer than last-success). Exports are event-driven and can be days apart
+    // on a quiet CA, so the alert is stateful and stays firing until a retry
+    // succeeds; 'for' only debounces a failure that is corrected moments later.
+    k8sExportFailingFor: '15m',
+
     // 'for' durations applied to the expiry alerts to debounce flapping at the
     // threshold boundary.
     expiryFor: '1h',
