@@ -255,3 +255,29 @@ jobs:
         env:
           MAGE_TARGET: ${{ matrix.mage_target }}
         run: mage "$MAGE_TARGET"
+
+  # -- Aggregate result ---------------------------------------------------------
+  # Single fan-in job so branch protection only has to name one required check,
+  # instead of every matrix leg above (which would also have to be updated by
+  # hand each time a leg is added/renamed/removed).
+  ci:
+    name: CI success
+    if: always()
+    needs:
+      - check
+      - hadolint
+      - unit
+      - puppet
+      - migration
+      - backends-redis
+      - backends-redis-go
+      - backends-postgres
+      - backends-mysql
+      - backends-etcd
+      - compose
+    runs-on: ubuntu-latest
+    steps:
+      - name: Decide whether the needed jobs succeeded or failed
+        uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # v1.2.2
+        with:
+          jobs: ${{ toJSON(needs) }}
