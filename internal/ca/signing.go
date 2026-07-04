@@ -218,6 +218,18 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 		return nil, err
 	}
 
+	// SECURITY: if the CA key supports live verification (see KeyVerifier —
+	// e.g. an OpenBao Transit key), re-check it against its source of truth
+	// before issuing. This catches the key having been rotated at its
+	// provider while this process was already running, which the cached
+	// Public() value used elsewhere would never reveal on its own.
+	// NIST 800-53: SC-12 (Cryptographic Key Establishment and Management)
+	if kv, ok := c.CAKey.(KeyVerifier); ok {
+		if err := kv.VerifyCurrentKey(ctx); err != nil {
+			return nil, fmt.Errorf("CA key verification failed before issuing certificate for %s: %w", subject, err)
+		}
+	}
+
 	slog.Debug("Signing certificate", "subject", subject)
 
 	csrPEM, err := c.Storage.GetCSR(ctx, subject)

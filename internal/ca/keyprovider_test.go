@@ -209,4 +209,45 @@ var _ = Describe("KeyProvider integration", func() {
 		Expect(ok).To(BeTrue(), "expected an ECDSA public key, got %T", myCA.CAKey.Public())
 		Expect(pub.Curve).To(Equal(elliptic.P384()))
 	})
+
+	It("detects a key-provider key that no longer matches the stored CA certificate (RSA)", func() {
+		provider := &fakeKeyProvider{}
+		firstCA := ca.New(store, asCfg, "puppet.test")
+		firstCA.KeyProvider = provider
+		Expect(firstCA.Init(context.Background())).To(Succeed())
+
+		// Simulate the provider's key having been rotated out-of-band (e.g.
+		// `bao write -f transit/keys/<name>/rotate` run directly against
+		// OpenBao): a fresh key is now what Load returns, but the CA
+		// certificate on record was issued against the old one.
+		rotatedKey, err := rsa.GenerateKey(rand.Reader, 2048)
+		Expect(err).NotTo(HaveOccurred())
+		rotatedProvider := &fakeKeyProvider{key: rotatedKey}
+
+		secondCA := ca.New(store, asCfg, "puppet.test")
+		secondCA.KeyProvider = rotatedProvider
+
+		err = secondCA.Init(context.Background())
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("does not match"))
+	})
+
+	It("detects a key-provider key that no longer matches the stored CA certificate (ECDSA)", func() {
+		provider := &fakeKeyProvider{}
+		firstCA := ca.New(store, asCfg, "puppet.test")
+		firstCA.KeyProvider = provider
+		firstCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(firstCA.Init(context.Background())).To(Succeed())
+
+		rotatedKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		Expect(err).NotTo(HaveOccurred())
+		rotatedProvider := &fakeKeyProvider{key: rotatedKey}
+
+		secondCA := ca.New(store, asCfg, "puppet.test")
+		secondCA.KeyProvider = rotatedProvider
+
+		err = secondCA.Init(context.Background())
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("does not match"))
+	})
 })
