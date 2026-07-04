@@ -7,7 +7,9 @@ alerting rules for the Puppet CA exporter. It alerts on:
 - the **CA certificate** nearing expiry (warning) or expiring imminently (critical);
 - the **CRL** approaching its `NextUpdate` (warning) or having lapsed (critical);
 - **leaf certificates** nearing/at expiry — excluding revoked ones — and
-  certificate **requests that stay pending** too long.
+  certificate **requests that stay pending** too long;
+- **Kubernetes export** targets whose applies keep failing (only when the
+  [Kubernetes export](../docs/kubernetes-export.md) feature is in use).
 
 All thresholds and the target selector live in [`config.libsonnet`](config.libsonnet)
 and can be overridden without editing the rules.
