@@ -10,8 +10,8 @@ COPY go.mod go.sum ./
 RUN GOTOOLCHAIN=auto go mod download
 
 COPY . .
-RUN GOTOOLCHAIN=auto CGO_ENABLED=0 GOOS=linux \
-    go build -ldflags="-s -w" -o /openvox-ca     ./cmd/openvox-ca/ && \
+ENV GOTOOLCHAIN=auto CGO_ENABLED=0 GOOS=linux
+RUN go build -ldflags="-s -w" -o /openvox-ca     ./cmd/openvox-ca/ && \
     go build -ldflags="-s -w" -o /openvox-ca-ctl ./cmd/openvox-ca-ctl/
 
 # ---- Runtime Stage ----
