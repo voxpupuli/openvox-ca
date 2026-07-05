@@ -54,6 +54,19 @@
         "quay.io/centos/centos"
       ],
       "pinDigests": false
+    },
+    {
+      "description": "Allow Renovate to bump the 'go' directive in go.mod",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchDepNames": [
+        "go"
+      ],
+      "matchDepTypes": [
+        "golang"
+      ],
+      "rangeStrategy": "bump"
     }
   ]
 }
