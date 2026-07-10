@@ -8,13 +8,13 @@ name: Container images
 #   * Push to main            -> build + push the rolling "edge" (and "main") tags.
 #   * Release tags (v*)        -> build + push versioned + latest tags.
 #   * Manual (workflow_dispatch) -> build, push only if the "push" input is set.
-#   * Pull requests, on demand -> apply the "build-images" label to a PR to
-#     build both variants on both architectures as a validation check. Same-repo
-#     PRs additionally push a throwaway pr-<n> tag; fork PRs build only (their
-#     GITHUB_TOKEN is read-only and cannot write packages).
+#   * Pull requests, always    -> build both variants on both architectures as a
+#     validation check. Same-repo PRs additionally push a throwaway pr-<n> tag;
+#     fork PRs build only and discard the result (their GITHUB_TOKEN is
+#     read-only and cannot write packages).
 #
 # See docs/container-images.md for the one-time repository setup the owner must
-# perform (enabling GHCR, the build-images label, and package visibility).
+# perform (enabling GHCR and package visibility).
 
 on:
   push:
@@ -23,7 +23,7 @@ on:
     tags:
       - "v*"
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
     inputs:
       push:
@@ -47,10 +47,6 @@ jobs:
   # -- Decide whether this run pushes, and compute the image name -------------─
   setup:
     name: Configure
-    # PR runs only proceed when explicitly opted in via the build-images label.
-    if: >-
-      github.event_name != 'pull_request' ||
-      contains(github.event.pull_request.labels.*.name, 'build-images')
     runs-on: ubuntu-latest
     outputs:
       push: ${{ steps.cfg.outputs.push }}
