@@ -106,7 +106,7 @@ services:
 
   # -- OpenVoxDB (PuppetDB) ------------------------------------------------
   openvoxdb:
-    image: ghcr.io/openvoxproject/openvoxdb:8.14.1@sha256:0dc0acde6151e76d10d683fd7ee5890988099cd80f11894267f11befb2256865
+    image: ghcr.io/openvoxproject/openvoxdb:8.14.1@sha256:16778c630c547cdc8277e70ece2c881eb163b4d215f51aa60c3ac2803ed819ed
     hostname: openvoxdb
     environment:
       USE_OPENVOXSERVER: "true"
