@@ -25,7 +25,7 @@ services:
 
   # -- Old Puppet Server (OpenVox Server, JVM) -------------------------------
   old-puppet:
-    image: ghcr.io/openvoxproject/openvoxserver:8.13.0-main@sha256:c49843bd94e4caae5e23fcf790afb28a44629ac55f99db489df77cab7fa0b77c
+    image: ghcr.io/openvoxproject/openvoxserver:8.14.1-main@sha256:5b60d8dd8498504a2cde7a07441e24a39af2b3c6d70965d73009afde3a90d8bb
     hostname: old-puppet
     environment:
       OPENVOXSERVER_HOSTNAME: old-puppet
@@ -36,13 +36,12 @@ services:
       OPENVOX_STORECONFIGS: "false"
       USE_OPENVOXDB: "false"
     volumes:
-      # Pre-default entrypoint hook that fixes ownership of the mount-point
-      # before the bundled /container-entrypoint.d/* scripts run.  See the
-      # script header for the rationale.
-      - ./docker/migration/fix-cadir-ownership.sh:/container-custom-entrypoint.d/pre-default/00-fix-cadir-ownership.sh:ro,z
-      # Expose the Puppet Server's CA directory to the test-runner.  The :U
-      # flag tells podman to chown the volume contents to the container
-      # user-namespace mapping on first mount.
+      # Expose the Puppet Server's CA directory to the test-runner.  The
+      # image (>=8.14) runs unprivileged as puppet:root and pre-creates this
+      # directory with mode 2770, so a fresh named volume inherits the right
+      # ownership from the image on first mount and needs no further fixup.
+      # The :U flag tells podman to chown the volume contents to the
+      # container user-namespace mapping on first mount.
       - old-cadir:/etc/puppetlabs/puppetserver/ca:U
     expose:
       - "8140"
