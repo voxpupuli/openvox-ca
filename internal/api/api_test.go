@@ -1288,6 +1288,25 @@ var _ = Describe("API Workflow", func() {
 			mux.ServeHTTP(rr, req)
 			Expect(rr.Code).To(Equal(http.StatusBadRequest))
 		})
+
+		// Real Puppet/OpenVox agents POST an empty body by default
+		// (hostcert_renewal_interval), relying solely on the mTLS-presented
+		// client cert. This must reissue the SAME key, not require a CSR.
+		It("should auto-renew the presented certificate's own key when the body is empty", func() {
+			req := httptest.NewRequest("POST", "/certificate_renewal", bytes.NewReader(nil))
+			req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{clientCert}}
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusOK))
+
+			block, _ := pem.Decode(rr.Body.Bytes())
+			Expect(block).NotTo(BeNil())
+			renewed, err := x509.ParseCertificate(block.Bytes)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(renewed.PublicKey).To(Equal(clientCert.PublicKey),
+				"auto-renewal via empty body must not rotate the key")
+			Expect(renewed.SerialNumber.Cmp(clientCert.SerialNumber)).NotTo(Equal(0))
+		})
 	})
 
 	Context("PuppetDateTimeFormat", func() {

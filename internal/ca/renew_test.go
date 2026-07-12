@@ -24,7 +24,10 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
+	"math/big"
 	"os"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -156,5 +159,147 @@ var _ = Describe("CA Renew", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(parseCertPEM(storedPEM).SerialNumber.Sign()).To(Equal(1),
 			"stored renewed cert must carry a positive serial")
+	})
+})
+
+// CA AutoRenew covers the wire-compatible "no CSR" renewal flow real
+// Puppet/OpenVox agents use by default (hostcert_renewal_interval): the
+// client presents its existing cert over mTLS and gets back a certificate
+// for the SAME public key, with a fresh serial and validity. This matches
+// OpenVox Server's own Clojure CA (renew-certificate!), which does not
+// revoke the certificate being replaced.
+var _ = Describe("CA AutoRenew", func() {
+	var (
+		ctx    = context.Background()
+		tmpDir string
+		myCA   *ca.CA
+		store  *storage.StorageService
+		caKey  *rsa.PrivateKey
+		caCert *x509.Certificate
+	)
+
+	parseCertPEM := func(certPEM []byte) *x509.Certificate {
+		block, _ := pem.Decode(certPEM)
+		Expect(block).NotTo(BeNil(), "renewed cert PEM must decode")
+		cert, err := x509.ParseCertificate(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		return cert
+	}
+
+	issue := func(subject string) *x509.Certificate {
+		csrPEM, _ := buildCSR(subject)
+		_, err := myCA.SaveRequest(ctx, subject, csrPEM)
+		Expect(err).NotTo(HaveOccurred())
+		certPEM, err := myCA.Sign(ctx, subject)
+		Expect(err).NotTo(HaveOccurred())
+		return parseCertPEM(certPEM)
+	}
+
+	// seedCertWithoutCSR mints a leaf certificate directly with the cached
+	// test CA's key and stores it as subject's cert, without ever writing a
+	// CSR to storage — simulating a certificate imported from a migration
+	// (see the storage migrate command) or any other cert whose CSR has
+	// since been cleaned up. AutoRenew must work from the certificate alone.
+	seedCertWithoutCSR := func(subject string) *x509.Certificate {
+		key, err := rsa.GenerateKey(rand.Reader, 2048)
+		Expect(err).NotTo(HaveOccurred())
+		serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+		Expect(err).NotTo(HaveOccurred())
+		now := time.Now().UTC()
+		template := &x509.Certificate{
+			SerialNumber: serial,
+			Subject:      pkix.Name{CommonName: subject},
+			NotBefore:    now.Add(-24 * time.Hour),
+			NotAfter:     now.Add(365 * 24 * time.Hour),
+			DNSNames:     []string{subject},
+		}
+		der, err := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)
+		Expect(err).NotTo(HaveOccurred())
+		certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+		Expect(store.SaveCert(ctx, subject, certPEM)).To(Succeed())
+
+		entry := fmt.Sprintf("%s %s %s /%s",
+			serial.Text(16),
+			template.NotBefore.Format("2006-01-02T15:04:05UTC"),
+			template.NotAfter.Format("2006-01-02T15:04:05UTC"),
+			subject)
+		Expect(store.AppendInventory(ctx, entry)).To(Succeed())
+
+		return parseCertPEM(certPEM)
+	}
+
+	BeforeEach(func() {
+		var err error
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-autorenew-test")
+		Expect(err).NotTo(HaveOccurred())
+
+		store = storage.New(tmpDir)
+		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+
+		Expect(store.EnsureDirs(ctx)).To(Succeed())
+		Expect(store.SaveCAKey(ctx, cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(ctx, cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(ctx, cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial(ctx, "0001")).To(Succeed())
+		Expect(store.TouchInventory(ctx)).To(Succeed())
+		Expect(myCA.Init(ctx)).To(Succeed())
+
+		keyBlock, _ := pem.Decode(cachedKeyPEM)
+		caKey, err = x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		certBlock, _ := pem.Decode(cachedCrtPEM)
+		caCert, err = x509.ParseCertificate(certBlock.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	AfterEach(func() {
+		os.RemoveAll(tmpDir)
+	})
+
+	It("reissues the same public key with a fresh serial, matching Clojure CA semantics", func() {
+		original := issue("autorenew-node")
+
+		renewedPEM, err := myCA.AutoRenew(ctx, original)
+		Expect(err).NotTo(HaveOccurred())
+		renewed := parseCertPEM(renewedPEM)
+
+		Expect(renewed.Subject.CommonName).To(Equal("autorenew-node"))
+		Expect(renewed.PublicKey).To(Equal(original.PublicKey),
+			"auto-renewal must not rotate the key, only the serial/validity")
+		Expect(renewed.SerialNumber.Cmp(original.SerialNumber)).NotTo(Equal(0),
+			"auto-renewed cert must carry a different serial than the original")
+
+		storedPEM, err := store.GetCert(ctx, "autorenew-node")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(parseCertPEM(storedPEM).SerialNumber.Cmp(renewed.SerialNumber)).To(Equal(0),
+			"stored cert must match the auto-renewed serial")
+	})
+
+	It("carries the original certificate's SANs forward unchanged", func() {
+		csrPEM, _ := buildCSR("autorenew-sans-node")
+		_, err := myCA.SaveRequest(ctx, "autorenew-sans-node", csrPEM)
+		Expect(err).NotTo(HaveOccurred())
+		certPEM, err := myCA.Sign(ctx, "autorenew-sans-node")
+		Expect(err).NotTo(HaveOccurred())
+		original := parseCertPEM(certPEM)
+
+		renewedPEM, err := myCA.AutoRenew(ctx, original)
+		Expect(err).NotTo(HaveOccurred())
+		renewed := parseCertPEM(renewedPEM)
+
+		Expect(renewed.DNSNames).To(Equal(original.DNSNames))
+	})
+
+	It("auto-renews a certificate that has no CSR in storage, e.g. after migration import", func() {
+		original := seedCertWithoutCSR("migrated-node")
+		Expect(store.HasCSR(ctx, "migrated-node")).To(BeFalse(),
+			"this test only proves anything if there really is no CSR to fall back on")
+
+		renewedPEM, err := myCA.AutoRenew(ctx, original)
+		Expect(err).NotTo(HaveOccurred())
+		renewed := parseCertPEM(renewedPEM)
+
+		Expect(renewed.PublicKey).To(Equal(original.PublicKey))
+		Expect(renewed.SerialNumber.Cmp(original.SerialNumber)).NotTo(Equal(0))
 	})
 })

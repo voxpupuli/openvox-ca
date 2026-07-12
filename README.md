@@ -389,9 +389,12 @@ All endpoints are served under both the bare path and `/puppet-ca/v1/<path>`, so
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/certificate_renewal` | Renew an existing certificate; body: raw CSR PEM; returns new certificate PEM |
+| `POST` | `/certificate_renewal` | Renew an existing certificate; body: raw CSR PEM, or empty; returns new certificate PEM |
 
-Requires a valid CA-signed client certificate. The CSR Common Name must match the authenticated client CN — an agent can only renew its own certificate, not another's. The new certificate is issued immediately without entering the pending-CSR queue or autosign evaluation.
+Requires a valid CA-signed client certificate. The new certificate is issued immediately without entering the pending-CSR queue or autosign evaluation.
+
+- **CSR body (re-key):** the CSR Common Name must match the authenticated client CN — an agent can only renew its own certificate, not another's. Issues a certificate for the new key in the CSR.
+- **Empty body (wire-compatible auto-renewal):** matches the request real Puppet/OpenVox agents send by default (`hostcert_renewal_interval`, and the `puppet ssl renew_cert` CLI action). Identity and key possession come solely from the mTLS-presented client certificate; the same public key is reissued with a fresh serial and validity, carrying forward the original certificate's SANs and Puppet OID extensions unchanged. This mirrors the behaviour of OpenVox Server's own (Clojure) CA: the certificate being replaced is not revoked, so it remains valid for the same key until it naturally expires.
 
 ### Bulk signing
 
