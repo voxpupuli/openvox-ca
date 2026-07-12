@@ -104,6 +104,7 @@ func (s *Server) Routes() http.Handler {
 		{"PUT", "/certificate_request/{subject}", s.handlePutRequest},
 		{"DELETE", "/certificate_request/{subject}", s.handleDeleteRequest},
 		{"GET", "/certificate/{subject}", s.handleGetCert},
+		{"PUT", "/certificate/{subject}", s.handlePutCert},
 		{"GET", "/certificate_revocation_list/ca", s.handleGetCRL},
 		{"PUT", "/certificate_revocation_list/ca", s.handleReissueCRL},
 		{"POST", "/ocsp", s.handleOCSP},
@@ -277,6 +278,69 @@ func (s *Server) handleGetCert(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain")
 	w.Write(certPEM)
+}
+
+// ImportResponse is returned by PUT /certificate/{subject} on success.
+type ImportResponse struct {
+	Subject   string `json:"subject"`
+	Serial    string `json:"serial"`
+	NotBefore string `json:"not_before"`
+	NotAfter  string `json:"not_after"`
+	Imported  bool   `json:"imported"` // false if this was a no-op (already tracked)
+}
+
+// handlePutCert imports a certificate that was issued OUTSIDE this CA's
+// normal signing flow (e.g. migrated from a legacy CA sharing this CA's
+// key) into the inventory under subject, so it appears in listings, has its
+// lifetime tracked, and can be revoked via the normal PUT
+// certificate_status desired_state=revoked mechanism. This is the only way
+// to directly set a subject's certificate outside the CSR-based signing
+// flow, hence sharing this path with GET certificate/{subject}. Admin-only
+// (enforced by the auth middleware, which defaults non-GET methods on this
+// path to tierAdminOnly).
+func (s *Server) handlePutCert(w http.ResponseWriter, r *http.Request) {
+	subject := r.PathValue("subject")
+	if err := ca.ValidateSubject(subject); err != nil {
+		http.Error(w, "invalid subject", http.StatusBadRequest)
+		return
+	}
+	slog.Debug("PUT certificate (import)", "subject", subject, "client", clientCN(r))
+
+	certPEM, err := io.ReadAll(io.LimitReader(r.Body, maxJSONBody))
+	if err != nil {
+		slog.Error("read import cert body failed", "subject", subject, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	result, err := s.CA.ImportCertificate(r.Context(), subject, certPEM)
+	if err != nil {
+		switch {
+		case errors.Is(err, ca.ErrNotInitialized):
+			http.Error(w, "CA not ready", http.StatusServiceUnavailable)
+		case errors.Is(err, ca.ErrImportInvalid):
+			slog.Warn("Import rejected", "subject", subject, "error", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		case errors.Is(err, ca.ErrSerialExists), errors.Is(err, ca.ErrCertExists):
+			slog.Warn("Import conflict", "subject", subject, "error", err)
+			http.Error(w, err.Error(), http.StatusConflict)
+		default:
+			slog.Error("Import failed", "subject", subject, "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(ImportResponse{
+		Subject:   result.Subject,
+		Serial:    result.Serial,
+		NotBefore: result.NotBefore.UTC().Format(s.timeFormat()),
+		NotAfter:  result.NotAfter.UTC().Format(s.timeFormat()),
+		Imported:  result.Imported,
+	}); err != nil {
+		slog.Warn("encode response failed", "error", err)
+	}
 }
 
 // --- CRL ---

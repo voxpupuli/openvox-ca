@@ -170,26 +170,60 @@ func (s *StorageService) InitHMAC(ctx context.Context) error {
 	return s.VerifyInventoryHMAC(ctx, key)
 }
 
+// ErrDuplicateSerial is returned by AppendInventory when the entry's serial
+// number already exists in the inventory. SQL backends detect this via their
+// unique index (translated from the dialect-specific driver error); blob
+// backends via an explicit scan performed under the same inventoryMu that
+// already serialises every append within a process.
+//
+// This is NOT a cross-replica guarantee on non-SQL backends: nothing today
+// wraps the whole AppendInventory call in a distributed lock for
+// filesystem/etcd/redis backends (see the blob-fallback HMAC-update comment
+// below, which already documents a similar limitation for that path).
+// Structured (SQL) backends remain the only ones with a true cluster-wide
+// guarantee, via the database's own unique index.
+var ErrDuplicateSerial = errors.New("serial number already exists in inventory")
+
 // AppendInventory adds entry (a single inventory.txt line, without a trailing
 // newline) to the inventory. On backends that implement InventoryStore the
 // entry is stored as a structured record and the integrity head is advanced by
 // a hash chain in O(1); otherwise the line is appended to the KeyInventory blob
-// and the whole-blob HMAC is recomputed.
+// and the whole-blob HMAC is recomputed. Returns ErrDuplicateSerial (wrapped)
+// if the entry's serial is already present anywhere in the inventory.
 func (s *StorageService) AppendInventory(ctx context.Context, entry string) error {
 	s.inventoryMu.Lock()
 	defer s.inventoryMu.Unlock()
 
+	parsed, ok := parseInventoryEntry(entry)
+	if !ok {
+		return fmt.Errorf("malformed inventory entry %q", entry)
+	}
+
 	if store, ok := s.backend.(InventoryStore); ok {
-		parsed, ok := parseInventoryEntry(entry)
-		if !ok {
-			return fmt.Errorf("malformed inventory entry %q", entry)
-		}
 		var newHead func(prev []byte) []byte
 		if s.hmacKey != nil {
 			key := s.hmacKey
 			newHead = func(prev []byte) []byte { return chainInventoryMAC(key, prev, entry) }
 		}
-		return store.AppendEntry(ctx, parsed, newHead)
+		if err := store.AppendEntry(ctx, parsed, newHead); err != nil {
+			if isUniqueSerialViolation(err) {
+				return fmt.Errorf("%w: %s", ErrDuplicateSerial, parsed.Serial)
+			}
+			return err
+		}
+		return nil
+	}
+
+	// Blob backends have no native uniqueness constraint on serial, so check
+	// explicitly under inventoryMu (already held) before appending.
+	existing, err := s.inventoryEntriesLocked(ctx)
+	if err != nil {
+		return err
+	}
+	for _, e := range existing {
+		if e.Serial == parsed.Serial {
+			return fmt.Errorf("%w: %s", ErrDuplicateSerial, parsed.Serial)
+		}
 	}
 
 	if err := s.backend.AppendLine(ctx, KeyInventory, []byte(entry+"\n"), BlobPrivate); err != nil {
@@ -217,6 +251,27 @@ func (s *StorageService) AppendInventory(ctx context.Context, entry string) erro
 		}
 	}
 	return nil
+}
+
+// SerialExists reports whether any inventory entry — for any subject, current
+// or historical — already carries the given serial number. This is a
+// best-effort, non-authoritative check: callers needing a real guarantee
+// must rely on AppendInventory's own atomic duplicate check
+// (ErrDuplicateSerial), not this method, since SerialExists does not hold
+// inventoryMu across its caller's subsequent write.
+func (s *StorageService) SerialExists(ctx context.Context, serial string) (bool, error) {
+	s.inventoryMu.RLock()
+	defer s.inventoryMu.RUnlock()
+	entries, err := s.inventoryEntriesLocked(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, e := range entries {
+		if e.Serial == serial {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // LatestSerialForSubject returns the most recently issued serial for subject.

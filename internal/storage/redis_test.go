@@ -336,11 +336,13 @@ var _ = Describe("RedisBackend", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(string(got)).To(Equal("0001"))
 		Expect(svc.InitHMAC(context.Background())).NotTo(HaveOccurred())
-		Expect(svc.AppendInventory(context.Background(), "line 1")).NotTo(HaveOccurred())
-		Expect(svc.AppendInventory(context.Background(), "line 2")).NotTo(HaveOccurred())
+		const line1 = "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1"
+		const line2 = "0002 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node2"
+		Expect(svc.AppendInventory(context.Background(), line1)).NotTo(HaveOccurred())
+		Expect(svc.AppendInventory(context.Background(), line2)).NotTo(HaveOccurred())
 		inv, err := svc.ReadInventory(context.Background())
 		Expect(err).NotTo(HaveOccurred())
-		Expect(string(inv)).To(Equal("line 1\nline 2\n"))
+		Expect(string(inv)).To(Equal(line1 + "\n" + line2 + "\n"))
 		Expect(svc.SaveCSR(context.Background(), "node1", []byte("csr-pem"))).NotTo(HaveOccurred())
 		Expect(svc.SaveCert(context.Background(), "node1", []byte("cert-pem"))).NotTo(HaveOccurred())
 		csrs, err := svc.ListCSRs(context.Background())

@@ -462,6 +462,15 @@ var _ = Describe("Auth Middleware", func() {
 			mux.ServeHTTP(rr, req)
 			Expect(rr.Code).To(Equal(http.StatusForbidden))
 		})
+
+		It("returns 403 for PUT /certificate/{subject} (admin-only tier, import)", func() {
+			clientCert := issueClientCert("regular-node", caCert, caKey)
+			req := httptest.NewRequest("PUT", "/certificate/some-node", bytes.NewReader([]byte("not a real cert")))
+			req = withClientCert(req, clientCert)
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusForbidden))
+		})
 	})
 
 	// --- Non-self client on self-or-admin endpoints ---
@@ -1056,6 +1065,10 @@ var _ = Describe("lookupTier classification", func() {
 		Entry("status delete is admin-only", "DELETE", "/certificate_status/node1", "node1", "adminOnly"),
 		Entry("unknown path falls through to admin-only", "GET", "/totally/unknown/path", "", "adminOnly"),
 		Entry("unknown method on public path is admin-only", "POST", "/certificate/node1", "node1", "adminOnly"),
+		// PUT certificate/{subject} (certificate import) shares its path with the
+		// public GET above, but is admin-only — proving the two methods on this
+		// path really do have different tiers.
+		Entry("PUT certificate is admin-only (import)", "PUT", "/certificate/node1", "node1", "adminOnly"),
 	)
 
 	DescribeTable("with AllowPublicStatus=true",
