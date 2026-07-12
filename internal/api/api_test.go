@@ -1307,6 +1307,13 @@ var _ = Describe("API Workflow", func() {
 			Expect(renewed.PublicKey).To(Equal(clientCert.PublicKey),
 				"auto-renewal via empty body must not rotate the key")
 			Expect(renewed.SerialNumber.Cmp(clientCert.SerialNumber)).NotTo(Equal(0))
+
+			// Default RevokeOnAutoRenew=true: the pre-renewal serial must no
+			// longer be usable once the renewed cert is safely stored.
+			revoked, err := myCA.IsRevokedSerial(context.Background(), clientCert.SerialNumber)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(revoked).To(BeTrue(),
+				"the pre-renewal serial must be revoked by default after auto-renewal")
 		})
 
 		// The routing decision uses strings.TrimSpace, so a whitespace-only body

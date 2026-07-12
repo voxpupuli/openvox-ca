@@ -106,6 +106,16 @@ type CA struct {
 	// handle the SAN extension.
 	PromoteCNToSAN bool
 
+	// RevokeOnAutoRenew, when true (the default), revokes the certificate
+	// being replaced by AutoRenew (the empty-body /certificate_renewal path)
+	// once its successor is safely signed and stored, so only the newest
+	// serial for a subject is ever valid. OpenVox Server's own Clojure CA
+	// does not do this — both the old and new certs (same key) stay valid
+	// until the old one naturally expires. Set to false to match that
+	// behaviour exactly. This does not affect the CSR-based Renew path
+	// (a genuine re-key), which always revokes the certificate it replaces.
+	RevokeOnAutoRenew bool
+
 	// ExternalSigner, when non-nil, is used instead of loading the CA private
 	// key from disk. This enables key isolation: the private key lives in a
 	// separate process and signing requests are proxied over IPC.
@@ -130,13 +140,14 @@ type CA struct {
 
 func New(s *storage.StorageService, autosignCfg AutosignConfig, hostname string) *CA {
 	return &CA{
-		Storage:        s,
-		AutosignConfig: autosignCfg,
-		Hostname:       hostname,
-		CAPathLength:   -1,   // unconstrained by default
-		PromoteCNToSAN: true, // on by default; RFC 2818 deprecates CN-only certs
-		serialIndex:    make(map[string]string),
-		ocspCache:      make(map[string]ocspCacheEntry),
+		Storage:           s,
+		AutosignConfig:    autosignCfg,
+		Hostname:          hostname,
+		CAPathLength:      -1,   // unconstrained by default
+		PromoteCNToSAN:    true, // on by default; RFC 2818 deprecates CN-only certs
+		RevokeOnAutoRenew: true, // on by default; only the newest serial should be valid
+		serialIndex:       make(map[string]string),
+		ocspCache:         make(map[string]ocspCacheEntry),
 	}
 }
 

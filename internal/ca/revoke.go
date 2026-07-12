@@ -51,18 +51,34 @@ func (c *CA) Revoke(ctx context.Context, subject string) error {
 func (c *CA) revokeLocked(ctx context.Context, subject string) error {
 	slog.Debug("Revoking certificate", "subject", subject)
 
-	// 1. Find Serial
 	serialStr, err := c.findSerialForSubject(ctx, subject)
 	if err != nil {
 		return fmt.Errorf("could not find certificate for subject %s: %w", subject, err)
 	}
 
-	serialInt := new(big.Int)
-	if _, ok := serialInt.SetString(serialStr, 16); !ok {
-		return fmt.Errorf("malformed serial %q for subject %s in inventory", serialStr, subject)
+	if err := c.revokeSerialLocked(ctx, serialStr); err != nil {
+		return err
 	}
 
-	// 2. Load CRL
+	slog.Debug("Certificate revoked", "subject", subject, "serial", serialStr)
+	return nil
+}
+
+// revokeSerialLocked adds serialStr to the CRL, unless it is already present.
+// The cluster CRL lock and c.mu must both be held by the caller.
+//
+// This is split out from revokeLocked so Renew and AutoRenew can revoke the
+// exact serial of the certificate they are replacing. By the time either
+// wants to revoke, issueLeafLocked has already appended the new cert's row
+// to the inventory, so findSerialForSubject (latest-issued-for-subject) would
+// resolve to the new serial rather than the one being retired.
+func (c *CA) revokeSerialLocked(ctx context.Context, serialStr string) error {
+	serialInt := new(big.Int)
+	if _, ok := serialInt.SetString(serialStr, 16); !ok {
+		return fmt.Errorf("malformed serial %q", serialStr)
+	}
+
+	// 1. Load CRL
 	crlPEM, err := c.Storage.GetCRL(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to load CRL: %w", err)
@@ -76,16 +92,16 @@ func (c *CA) revokeLocked(ctx context.Context, subject string) error {
 		return fmt.Errorf("failed to parse CRL: %w", err)
 	}
 
-	// 3. Check for duplicate revocation: a serial that's already in the CRL
+	// 2. Check for duplicate revocation: a serial that's already in the CRL
 	// should not be appended again (prevents unbounded CRL growth on retries).
 	for _, entry := range crl.RevokedCertificateEntries {
 		if entry.SerialNumber.Cmp(serialInt) == 0 {
-			slog.Debug("Certificate already revoked", "subject", subject, "serial", serialStr)
+			slog.Debug("Certificate already revoked", "serial", serialStr)
 			return nil
 		}
 	}
 
-	// 4. Prepare New CRL
+	// 3. Prepare New CRL
 	newRevoked := x509.RevocationListEntry{
 		SerialNumber:   serialInt,
 		RevocationTime: time.Now(),
@@ -103,7 +119,6 @@ func (c *CA) revokeLocked(ctx context.Context, subject string) error {
 	// Use the same normalised key as the OCSP index (uppercase hex, no padding).
 	delete(c.ocspCache, serialHexStr(serialInt))
 
-	slog.Debug("Certificate revoked", "subject", subject, "serial", serialStr)
 	return nil
 }
 

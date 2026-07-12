@@ -149,6 +149,19 @@ var _ = Describe("CA Renew", func() {
 			"renewal must fail when the CSR signature is invalid")
 	})
 
+	It("revokes the replaced certificate's serial so only the renewed one is active", func() {
+		original := issue("renew-node")
+
+		csrPEM, _ := buildCSR("renew-node")
+		_, err := myCA.Renew(ctx, "renew-node", csrPEM)
+		Expect(err).NotTo(HaveOccurred())
+
+		revoked, err := myCA.IsRevokedSerial(ctx, original.SerialNumber)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(revoked).To(BeTrue(),
+			"the pre-renewal serial must be revoked so it can no longer authenticate or pass OCSP/CRL checks")
+	})
+
 	It("renews a subject that has no prior certificate", func() {
 		// Renew bypasses the pending-CSR queue, so it can issue even when no
 		// certificate exists yet. Guards that the happy path does not depend on
@@ -439,5 +452,34 @@ var _ = Describe("CA AutoRenew", func() {
 		roleExt, ok := findExt(renewed, ppRole)
 		Expect(ok).To(BeTrue(), "auto-renewal must carry the pp_role OID forward")
 		Expect(roleExt.Value).To(Equal(roleVal))
+	})
+
+	It("revokes the replaced certificate by default, so only the newest serial is active", func() {
+		Expect(myCA.RevokeOnAutoRenew).To(BeTrue(),
+			"revoke-on-auto-renew must default to true (secure by default)")
+
+		original := issue("autorenew-revoke-node")
+
+		_, err := myCA.AutoRenew(ctx, original)
+		Expect(err).NotTo(HaveOccurred())
+
+		revoked, err := myCA.IsRevokedSerial(ctx, original.SerialNumber)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(revoked).To(BeTrue(),
+			"the pre-renewal serial must be revoked so it can no longer authenticate or pass OCSP/CRL checks")
+	})
+
+	It("leaves the replaced certificate valid when RevokeOnAutoRenew is disabled, matching Clojure CA", func() {
+		myCA.RevokeOnAutoRenew = false
+
+		original := issue("autorenew-no-revoke-node")
+
+		_, err := myCA.AutoRenew(ctx, original)
+		Expect(err).NotTo(HaveOccurred())
+
+		revoked, err := myCA.IsRevokedSerial(ctx, original.SerialNumber)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(revoked).To(BeFalse(),
+			"with RevokeOnAutoRenew disabled, the pre-renewal certificate must remain valid for its key, as OpenVox Server's Clojure CA does")
 	})
 })
