@@ -33,6 +33,15 @@ import (
 // without busy-looping requests at OpenBao.
 const reauthRetryInterval = 5 * time.Second
 
+// minReauthInterval is the minimum spacing between successive background
+// watcher (re)starts. It bounds the pathological case where a token's
+// LifetimeWatcher ends the instant it starts — e.g. a non-renewable token
+// with no expiry (TTL 0), which has nothing to wait for — so run()
+// re-authenticates on a steady cadence instead of busy-looping requests at
+// OpenBao. A healthy token renews for far longer than this, so the throttle
+// only ever engages when a watcher keeps ending immediately.
+const minReauthInterval = 30 * time.Second
+
 // TokenManager owns an OpenBao client's token lifecycle: it logs in once at
 // construction, then runs a background goroutine that proactively renews the
 // token via the SDK's LifetimeWatcher and, when renewal ends (expiry,
@@ -119,11 +128,33 @@ func newLoginFunc(client *api.Client, cfg Config) (func(ctx context.Context) (*a
 				return nil, fmt.Errorf("reading openbao.token_file: %w", err)
 			}
 			client.SetToken(tok)
-			secret, err := client.Auth().Token().LookupSelfWithContext(ctx)
+			info, err := client.Auth().Token().LookupSelfWithContext(ctx)
 			if err != nil {
 				return nil, fmt.Errorf("looking up OpenBao token: %w", err)
 			}
-			return secret, nil
+			// LookupSelf reports the token's lifetime in its Data map, not in
+			// the auth/lease envelope NewLifetimeWatcher renews on: a raw
+			// LookupSelf secret has no Auth block and an empty LeaseID, so the
+			// watcher treats it as un-renewable, fires DoneCh immediately, and
+			// run() busy-loops re-reading the file. Re-shape it into an auth
+			// secret carrying the real TTL and renewable flag so the watcher
+			// actually renews a renewable token and, for a non-renewable one,
+			// waits until near expiry before we re-read the file.
+			ttl, err := info.TokenTTL()
+			if err != nil {
+				return nil, fmt.Errorf("reading OpenBao token TTL: %w", err)
+			}
+			renewable, err := info.TokenIsRenewable()
+			if err != nil {
+				return nil, fmt.Errorf("reading OpenBao token renewability: %w", err)
+			}
+			return &api.Secret{
+				Auth: &api.SecretAuth{
+					ClientToken:   tok,
+					LeaseDuration: int(ttl.Seconds()),
+					Renewable:     renewable,
+				},
+			}, nil
 		}, nil
 	case AuthAppRole, AuthKubernetes:
 		factory, err := newAuthMethodFactory(cfg)
@@ -153,7 +184,20 @@ func newLoginFunc(client *api.Client, cfg Config) (func(ctx context.Context) (*a
 // watcher around the new secret. Exits when Close cancels tm.ctx.
 func (tm *TokenManager) run() {
 	defer close(tm.doneCh)
+	var lastWatch time.Time
 	for {
+		// Never (re)start a watcher more often than minReauthInterval, so a
+		// watcher that ends immediately (see minReauthInterval) throttles into
+		// a steady re-auth cadence rather than a busy loop.
+		if !lastWatch.IsZero() {
+			if wait := minReauthInterval - time.Since(lastWatch); wait > 0 {
+				if !sleepOrDone(tm.ctx, wait) {
+					return
+				}
+			}
+		}
+		lastWatch = time.Now()
+
 		tm.mu.Lock()
 		watcher := tm.watcher
 		tm.mu.Unlock()

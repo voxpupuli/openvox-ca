@@ -36,7 +36,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/signer/openbao"
@@ -487,6 +489,63 @@ func TestSign_ReactiveReauthOn403(t *testing.T) {
 	pub := signer.Public().(*rsa.PublicKey)
 	if err := rsa.VerifyPKCS1v15(pub, crypto.SHA256, digest[:], sig); err != nil {
 		t.Fatalf("signature did not verify: %v", err)
+	}
+}
+
+// TestTokenAuth_WatcherRenews proves the token-auth login re-shapes lookup-self
+// into a renewable auth secret so the LifetimeWatcher actually renews the
+// token. A raw lookup-self secret carries no auth/lease envelope, so the
+// watcher would treat it as un-renewable, end immediately, and never call
+// renew-self -- driving run() into a re-auth busy loop.
+func TestTokenAuth_WatcherRenews(t *testing.T) {
+	var lookups, renews int32
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/auth/token/lookup-self", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&lookups, 1)
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			// A short TTL so the watcher's renewal threshold is crossed
+			// quickly and the test doesn't have to wait long.
+			"data": map[string]interface{}{"id": "tok", "ttl": 1, "renewable": true},
+		})
+	})
+	mux.HandleFunc("/v1/auth/token/renew-self", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&renews, 1)
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"auth": map[string]interface{}{"client_token": "tok", "lease_duration": 1, "renewable": true},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cfg := openbao.Config{
+		Addr:       srv.URL,
+		KeyName:    "mykey",
+		AuthMethod: openbao.AuthToken,
+		TokenFile:  writeTempFile(t, "tok"),
+	}
+	ctx := context.Background()
+	tm, err := openbao.NewTokenManager(ctx, cfg)
+	if err != nil {
+		t.Fatalf("NewTokenManager: %v", err)
+	}
+	defer tm.Close()
+
+	// Within a few renewal cycles the watcher should have called renew-self at
+	// least once. If the login handed the watcher a bare lookup-self secret,
+	// it would instead re-login over and over -- lookups would climb and
+	// renews would stay at zero.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if atomic.LoadInt32(&renews) > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := atomic.LoadInt32(&renews); got == 0 {
+		t.Fatalf("watcher never renewed the token (renew-self calls = 0, lookup-self calls = %d); "+
+			"the token login is not producing a renewable secret",
+			atomic.LoadInt32(&lookups))
 	}
 }
 
