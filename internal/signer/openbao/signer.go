@@ -18,7 +18,6 @@
 package openbao
 
 import (
-	"bytes"
 	"context"
 	"crypto"
 	"crypto/rsa"
@@ -64,37 +63,6 @@ func (s *Signer) Public() crypto.PublicKey {
 	return s.pub
 }
 
-// VerifyCurrentKey re-fetches the Transit key's current public component
-// from OpenBao and reports an error if it no longer matches the public key
-// this Signer was constructed with (and which the CA certificate was in
-// turn issued against). This is the live counterpart to the match check
-// CA.Init already performs once at startup: it catches the key having been
-// rotated directly at OpenBao (e.g. `bao write -f transit/keys/<name>/rotate`)
-// while this process was already running, which a cached Public() value
-// would never reveal since it is never refreshed after construction.
-//
-// Satisfies the KeyVerifier interface duck-typed in internal/ca and
-// internal/signer, so callers there can invoke this without importing this
-// package.
-func (s *Signer) VerifyCurrentKey(ctx context.Context) error {
-	current, err := fetchPublicKey(ctx, s.tm, s.mount, s.key)
-	if err != nil {
-		return fmt.Errorf("re-checking transit key %q: %w", s.key, err)
-	}
-	currentDER, err := x509.MarshalPKIXPublicKey(current)
-	if err != nil {
-		return fmt.Errorf("marshaling current transit key %q: %w", s.key, err)
-	}
-	cachedDER, err := x509.MarshalPKIXPublicKey(s.pub)
-	if err != nil {
-		return fmt.Errorf("marshaling cached transit key %q: %w", s.key, err)
-	}
-	if !bytes.Equal(currentDER, cachedDER) {
-		return fmt.Errorf("transit key %q's public key has changed since it was loaded — it may have been rotated at OpenBao", s.key)
-	}
-	return nil
-}
-
 // Sign proxies the signing operation to OpenBao Transit. rand is ignored;
 // randomness is provided by OpenBao. On a 403 (token revoked out-of-band,
 // clock skew, etc.) it forces a re-authentication via the TokenManager and
@@ -102,17 +70,30 @@ func (s *Signer) VerifyCurrentKey(ctx context.Context) error {
 // retried request rather than waiting for the background renewal loop.
 func (s *Signer) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
 	ctx := context.Background()
-	sig, err := s.sign(ctx, digest, opts)
-	if err == nil {
-		return sig, nil
-	}
-	if !isPermissionDenied(err) {
-		return nil, err
+	var sig []byte
+	err := s.withReauth(ctx, func() error {
+		var e error
+		sig, e = s.sign(ctx, digest, opts)
+		return e
+	})
+	return sig, err
+}
+
+// withReauth runs op; if it fails with a 403 (token revoked out-of-band,
+// clock skew causing early expiry, etc.) it forces an immediate
+// re-authentication via the TokenManager and retries op once, so the CA
+// recovers within a single request rather than waiting for the background
+// renewal loop to notice. Non-403 errors, and the outcome of the retry, are
+// returned unchanged.
+func (s *Signer) withReauth(ctx context.Context, op func() error) error {
+	err := op()
+	if err == nil || !isPermissionDenied(err) {
+		return err
 	}
 	if reauthErr := s.tm.Reauth(ctx); reauthErr != nil {
-		return nil, fmt.Errorf("sign failed (%w) and re-authentication failed: %w", err, reauthErr)
+		return fmt.Errorf("request failed (%w) and re-authentication failed: %w", err, reauthErr)
 	}
-	return s.sign(ctx, digest, opts)
+	return op()
 }
 
 func (s *Signer) sign(ctx context.Context, digest []byte, opts crypto.SignerOpts) ([]byte, error) {

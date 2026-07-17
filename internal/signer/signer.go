@@ -24,7 +24,6 @@
 package signer
 
 import (
-	"context"
 	"crypto"
 	"crypto/hmac"
 	"crypto/rand"
@@ -61,27 +60,6 @@ type SignResponse struct {
 	Signature []byte
 }
 
-// VerifyKeyRequest is sent from the frontend to the signer process to ask it
-// to re-check its key against its source of truth. It carries no fields;
-// net/rpc still requires a concrete (pointer-to-struct) type for it.
-type VerifyKeyRequest struct{}
-
-// VerifyKeyResponse is returned from the signer to the frontend. It carries
-// no fields: a failed verification is reported as the RPC call's error, same
-// as Sign's failure mode.
-type VerifyKeyResponse struct{}
-
-// KeyVerifier is an optional capability a Serve'd key may implement: a fresh
-// check that the key at its source of truth (e.g. an OpenBao Transit key)
-// still matches what was loaded, instead of relying on a cached value. A key
-// that cannot change independently of this process (a local PEM file) has
-// nothing to gain from implementing it. Duck-typed against
-// internal/signer/openbao.Signer.VerifyCurrentKey and internal/ca's matching
-// interface so neither package needs to import the other.
-type KeyVerifier interface {
-	VerifyCurrentKey(ctx context.Context) error
-}
-
 // ---------- Server (signer process) ----------
 
 // Service holds the CA private key and serves signing requests over RPC.
@@ -97,18 +75,6 @@ func (s *Service) Sign(req *SignRequest, resp *SignResponse) error {
 	}
 	resp.Signature = sig
 	return nil
-}
-
-// VerifyCurrentKey re-checks the isolated key against its source of truth,
-// if it supports that (see KeyVerifier). Keys that don't (e.g. a local PEM
-// file, which cannot change independently of this process) report success
-// trivially — there is nothing to re-check.
-func (s *Service) VerifyCurrentKey(_ *VerifyKeyRequest, _ *VerifyKeyResponse) error {
-	kv, ok := s.key.(KeyVerifier)
-	if !ok {
-		return nil
-	}
-	return kv.VerifyCurrentKey(context.Background())
 }
 
 // Serve runs the signer RPC server on the inherited socketpair fd.
@@ -264,20 +230,6 @@ func (r *RemoteSigner) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) 
 		return nil, fmt.Errorf("remote sign: %w", err)
 	}
 	return resp.Signature, nil
-}
-
-// VerifyCurrentKey asks the isolated signer process to re-check its key
-// against its source of truth (see KeyVerifier), forwarding the request over
-// RPC. ctx is not threaded into the underlying RPC call itself — like Sign,
-// this connection has no per-call cancellation plumbing — but is accepted
-// for parity with the KeyVerifier interface callers use.
-func (r *RemoteSigner) VerifyCurrentKey(_ context.Context) error {
-	var req VerifyKeyRequest
-	var resp VerifyKeyResponse
-	if err := r.client.Call("Signer.VerifyCurrentKey", &req, &resp); err != nil {
-		return fmt.Errorf("remote key verification: %w", err)
-	}
-	return nil
 }
 
 // Close shuts down the RPC connection to the signer.

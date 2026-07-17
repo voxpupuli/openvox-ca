@@ -20,7 +20,9 @@ package ca_test
 import (
 	"context"
 	"crypto"
-	"errors"
+	"crypto/rand"
+	"crypto/rsa"
+	"io"
 	"os"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -31,23 +33,27 @@ import (
 	"github.com/voxpupuli/openvox-ca/internal/testutil"
 )
 
-// fakeVerifiableKey wraps a real crypto.Signer with a controllable
-// KeyVerifier implementation (see internal/ca/keyprovider.go), so tests can
-// drive the "CA key no longer matches its source of truth" path without a
-// real OpenBao server. Signing still delegates to the embedded real key, so
-// a successful issuance produces a genuinely valid certificate.
-type fakeVerifiableKey struct {
-	crypto.Signer
-	verifyErr   error
-	verifyCalls int
+// rotatedKey simulates a CA key that has been rotated at its provider (e.g.
+// an OpenBao Transit key changed with `bao write -f transit/keys/<name>/rotate`)
+// out from under a running CA: it still advertises the original public key —
+// so it passes CA load's cert/key match check and x509.CreateCertificate's
+// key-matches-parent check exactly as the real key would — but every signature
+// is produced by a *different* private key. x509.CreateCertificate re-verifies
+// the signature it gets back against the advertised public key, so the
+// mismatch is caught and issuance is refused rather than emitting a
+// certificate no verifier could validate.
+type rotatedKey struct {
+	pub      crypto.PublicKey // the original CA public key (matches the CA cert)
+	signWith crypto.Signer    // a different key that actually produces signatures
 }
 
-func (k *fakeVerifiableKey) VerifyCurrentKey(_ context.Context) error {
-	k.verifyCalls++
-	return k.verifyErr
+func (k *rotatedKey) Public() crypto.PublicKey { return k.pub }
+
+func (k *rotatedKey) Sign(r io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
+	return k.signWith.Sign(r, digest, opts)
 }
 
-var _ = Describe("KeyVerifier", func() {
+var _ = Describe("issuance rejects a provider-side key rotation", func() {
 	var (
 		tmpDir string
 		myCA   *ca.CA
@@ -56,7 +62,7 @@ var _ = Describe("KeyVerifier", func() {
 
 	BeforeEach(func() {
 		var err error
-		tmpDir, err = os.MkdirTemp("", "openvox-ca-keyverifier-test")
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-keyrotation-test")
 		Expect(err).NotTo(HaveOccurred())
 
 		store = storage.New(tmpDir)
@@ -76,9 +82,15 @@ var _ = Describe("KeyVerifier", func() {
 		os.RemoveAll(tmpDir)
 	})
 
-	It("refuses to issue a certificate when the CA key reports it no longer matches its source", func() {
-		fake := &fakeVerifiableKey{Signer: myCA.CAKey, verifyErr: errors.New("transit key rotated at provider")}
-		myCA.CAKey = fake
+	// The rotation scenario: the CA key still advertises the public key the CA
+	// certificate was issued against (so nothing upstream notices), but it now
+	// signs with a different private key. Issuance must be refused and nothing
+	// persisted, so the CA never hands out a certificate that fails to verify
+	// against its own certificate.
+	It("refuses to issue and persists nothing", func() {
+		other, err := rsa.GenerateKey(rand.Reader, 2048)
+		Expect(err).NotTo(HaveOccurred())
+		myCA.CAKey = &rotatedKey{pub: myCA.CAKey.Public(), signWith: other}
 
 		ctx := context.Background()
 		csrPEM, err := testutil.GenerateCSR("rotated.example.com")
@@ -88,17 +100,10 @@ var _ = Describe("KeyVerifier", func() {
 
 		_, err = myCA.Sign(ctx, "rotated.example.com")
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("transit key rotated at provider"))
-		Expect(fake.verifyCalls).To(BeNumerically(">=", 1))
-
-		// Nothing should have been issued.
 		Expect(store.HasCert(ctx, "rotated.example.com")).To(BeFalse())
 	})
 
-	It("issues normally when the CA key's live verification succeeds", func() {
-		fake := &fakeVerifiableKey{Signer: myCA.CAKey}
-		myCA.CAKey = fake
-
+	It("issues normally when the signing key still matches the CA certificate", func() {
 		ctx := context.Background()
 		csrPEM, err := testutil.GenerateCSR("healthy.example.com")
 		Expect(err).NotTo(HaveOccurred())
@@ -107,6 +112,6 @@ var _ = Describe("KeyVerifier", func() {
 
 		_, err = myCA.Sign(ctx, "healthy.example.com")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(fake.verifyCalls).To(BeNumerically(">=", 1))
+		Expect(store.HasCert(ctx, "healthy.example.com")).To(BeTrue())
 	})
 })

@@ -218,18 +218,6 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 		return nil, err
 	}
 
-	// SECURITY: if the CA key supports live verification (see KeyVerifier —
-	// e.g. an OpenBao Transit key), re-check it against its source of truth
-	// before issuing. This catches the key having been rotated at its
-	// provider while this process was already running, which the cached
-	// Public() value used elsewhere would never reveal on its own.
-	// NIST 800-53: SC-12 (Cryptographic Key Establishment and Management)
-	if kv, ok := c.CAKey.(KeyVerifier); ok {
-		if err := kv.VerifyCurrentKey(ctx); err != nil {
-			return nil, fmt.Errorf("CA key verification failed before issuing certificate for %s: %w", subject, err)
-		}
-	}
-
 	slog.Debug("Signing certificate", "subject", subject)
 
 	csrPEM, err := c.Storage.GetCSR(ctx, subject)
@@ -362,6 +350,19 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 		}
 	}
 
+	// SECURITY: x509.CreateCertificate itself is the rotation guard for an
+	// external signing key (e.g. an OpenBao Transit key). It refuses if the
+	// signer's public key doesn't equal the parent CA certificate's, and it
+	// re-verifies the signature the signer returned against that public key
+	// before handing it back — both unconditionally. loadCA has already pinned
+	// c.CAKey.Public() to c.CACert, so if the key was rotated at its provider
+	// out from under this running CA (the cached Public() still matches the CA
+	// cert, but the provider now signs with the new key) the returned signature
+	// fails that re-verification and this call errors, rather than emitting a
+	// certificate no verifier could validate. This is a purely in-process
+	// check: no provider round trip, and under key isolation no RPC beyond the
+	// one Sign this call already makes.
+	// NIST 800-53: SC-12 (Cryptographic Key Establishment and Management)
 	certBytes, err := x509.CreateCertificate(rand.Reader, template, c.CACert, csr.PublicKey, c.CAKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign certificate for %s: %w", subject, err)

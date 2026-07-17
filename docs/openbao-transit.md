@@ -228,17 +228,20 @@ this in two places:
   loaded: if they don't match, `openvox-ca` refuses to start rather than
   silently signing with a key that doesn't correspond to the trusted CA
   certificate.
-- **On every certificate issuance**, `openvox-ca` re-fetches the Transit
-  key's current public component from OpenBao and compares it against what
-  was loaded at startup. If someone rotates the key directly at OpenBao
-  (`bao write -f transit/keys/<name>/rotate`) while `openvox-ca` is already
-  running, this is caught at the next issuance rather than producing a
-  certificate that silently fails verification later. The request fails
-  with an error instead of returning a certificate.
+- **On every certificate issuance**, signing re-verifies the signature the
+  Transit key returned against the CA certificate's public key before the
+  certificate is persisted or returned. If someone rotates the key directly
+  at OpenBao (`bao write -f transit/keys/<name>/rotate`) while `openvox-ca`
+  is already running, the next issuance signs with the new key, that
+  signature no longer verifies against the trusted CA certificate, and the
+  request fails with an error instead of returning a certificate that would
+  silently fail verification later. This is an in-process check with no extra
+  OpenBao round trip — the signing request that already goes to OpenBao is
+  the only one.
 
 This works the same way whether or not key isolation (the isolated
 `openvox-ca [signer]` process) is in use — the check happens wherever the
-Transit key actually lives, not in the frontend.
+certificate is assembled from the Transit signature.
 
 If you do intend to rotate the Transit key, reissue the CA certificate to
 match afterwards (the same offline `openvox-ca-ctl import` process used for

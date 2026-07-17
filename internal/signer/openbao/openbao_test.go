@@ -102,16 +102,6 @@ func (f *fakeOpenBao) isValid(tok string) bool {
 	return f.validTokens[tok]
 }
 
-// rotateKey swaps the fake server's underlying Transit key, simulating an
-// operator running `bao write -f transit/keys/<name>/rotate` directly
-// against OpenBao. Subsequent GET (public key) and sign requests reflect
-// the new key immediately.
-func (f *fakeOpenBao) rotateKey(key crypto.Signer) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.key = key
-}
-
 func (f *fakeOpenBao) currentKey() crypto.Signer {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -316,74 +306,6 @@ func TestSignAndVerify_AppRole(t *testing.T) {
 	}
 	if err := rsa.VerifyPKCS1v15(pub, crypto.SHA256, digest[:], sig); err != nil {
 		t.Fatalf("signature did not verify: %v", err)
-	}
-}
-
-// TestVerifyCurrentKey_DetectsRotation proves the live counterpart to the
-// startup cert/key match check: a Signer re-fetches the Transit key's
-// current public component on demand, so a key rotated directly at OpenBao
-// after the Signer was constructed is caught rather than masked by a cached
-// Public() value.
-func TestVerifyCurrentKey_DetectsRotation(t *testing.T) {
-	fake := newFakeOpenBao(t)
-	srv := fake.server()
-	defer srv.Close()
-
-	secretIDFile := writeTempFile(t, "my-secret-id")
-	cfg := openbao.Config{
-		Addr:                srv.URL,
-		KeyName:             "mykey",
-		AuthMethod:          openbao.AuthAppRole,
-		AppRoleRoleID:       "my-role-id",
-		AppRoleSecretIDFile: secretIDFile,
-	}
-
-	ctx := context.Background()
-	tm, err := openbao.NewTokenManager(ctx, cfg)
-	if err != nil {
-		t.Fatalf("NewTokenManager: %v", err)
-	}
-	defer tm.Close()
-
-	provider := openbao.NewKeyProvider(tm, cfg.EffectiveTransitMount(), cfg.KeyName)
-	signer, err := provider.Load(ctx)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-
-	verifier, ok := signer.(interface {
-		VerifyCurrentKey(context.Context) error
-	})
-	if !ok {
-		t.Fatalf("Signer does not implement VerifyCurrentKey")
-	}
-
-	if err := verifier.VerifyCurrentKey(ctx); err != nil {
-		t.Fatalf("VerifyCurrentKey before rotation: %v", err)
-	}
-
-	// Simulate an operator rotating the Transit key directly at OpenBao,
-	// independently of openvox-ca (e.g. `bao write -f
-	// transit/keys/mykey/rotate`).
-	newKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("generating rotated key: %v", err)
-	}
-	fake.rotateKey(newKey)
-
-	err = verifier.VerifyCurrentKey(ctx)
-	if err == nil {
-		t.Fatalf("VerifyCurrentKey did not detect the rotated key")
-	}
-	if !strings.Contains(err.Error(), "rotated") {
-		t.Fatalf("VerifyCurrentKey error = %q, want a message mentioning rotation", err.Error())
-	}
-
-	// The signer's cached Public() is untouched -- it does not silently pick
-	// up the new key, which is exactly why VerifyCurrentKey has to actively
-	// re-fetch rather than trust it.
-	if signer.Public() == newKey.Public() {
-		t.Fatalf("Public() should remain the original key until the Signer is reconstructed")
 	}
 }
 
