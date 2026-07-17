@@ -42,11 +42,27 @@ func (t *Target) labelsFor() map[string]string {
 	return labels
 }
 
-// dataFor returns the data entries for a target given the current cert and CRL
-// PEM. Only the materials the target requested are included, so a cert-only
-// target never carries the CRL and vice versa. Values are kept as strings:
-// PEM is text, and Secret StringData / ConfigMap Data both take string values.
-func (t *Target) dataFor(certPEM, crlPEM []byte) map[string]string {
+// secretDataFor returns the Secret data entries for a target given the current
+// cert and CRL PEM. Only the materials the target requested are included, so a
+// cert-only target never carries the CRL and vice versa. Secret data is applied
+// as raw bytes under the object's data field (the client base64-encodes it in
+// the request); using data rather than the write-only stringData keeps
+// server-side apply idempotent — a re-apply of unchanged material is a genuine
+// no-op instead of rewriting the object each time.
+func (t *Target) secretDataFor(certPEM, crlPEM []byte) map[string][]byte {
+	data := make(map[string][]byte, 2)
+	if t.Cert {
+		data[t.CertKey] = certPEM
+	}
+	if t.CRL {
+		data[t.CRLKey] = crlPEM
+	}
+	return data
+}
+
+// configMapDataFor returns the ConfigMap data entries for a target. ConfigMap
+// data is plain text, and PEM is text, so the values are kept as strings.
+func (t *Target) configMapDataFor(certPEM, crlPEM []byte) map[string]string {
 	data := make(map[string]string, 2)
 	if t.Cert {
 		data[t.CertKey] = string(certPEM)
@@ -63,7 +79,7 @@ func (t *Target) buildSecretApply(namespace string, certPEM, crlPEM []byte) *acc
 	ac := accorev1.Secret(t.Metadata.Name, namespace).
 		WithType(corev1.SecretType(t.Type)).
 		WithLabels(t.labelsFor()).
-		WithStringData(t.dataFor(certPEM, crlPEM))
+		WithData(t.secretDataFor(certPEM, crlPEM))
 	if len(t.Metadata.Annotations) > 0 {
 		ac = ac.WithAnnotations(t.Metadata.Annotations)
 	}
@@ -75,7 +91,7 @@ func (t *Target) buildSecretApply(namespace string, certPEM, crlPEM []byte) *acc
 func (t *Target) buildConfigMapApply(namespace string, certPEM, crlPEM []byte) *accorev1.ConfigMapApplyConfiguration {
 	ac := accorev1.ConfigMap(t.Metadata.Name, namespace).
 		WithLabels(t.labelsFor()).
-		WithData(t.dataFor(certPEM, crlPEM))
+		WithData(t.configMapDataFor(certPEM, crlPEM))
 	if len(t.Metadata.Annotations) > 0 {
 		ac = ac.WithAnnotations(t.Metadata.Annotations)
 	}

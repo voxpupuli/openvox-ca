@@ -89,9 +89,10 @@ kubernetes_export:
 | `crl_key` | both | `ca.crl` | Data key for the CRL (must differ from `cert_key`) |
 | `type` | Secret | `Opaque` | Secret `type` field; rejected on ConfigMaps |
 
-Secret data is written via `stringData` (PEM is text); the API server stores it
-base64-encoded under `data`. ConfigMap data is written as plain text under
-`data`.
+Secret data is written under `data` (base64-encoded by the client), and
+ConfigMap data as plain text under `data`. Using `data` rather than the
+write-only `stringData` keeps each server-side apply idempotent, so re-exporting
+unchanged material is a genuine no-op.
 
 ## RBAC
 

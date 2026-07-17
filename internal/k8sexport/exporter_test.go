@@ -111,8 +111,8 @@ var _ = Describe("Exporter", func() {
 
 		sec, err := client.CoreV1().Secrets("ns1").Get(ctx, "trust", metav1.GetOptions{})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(sec.StringData).To(HaveKeyWithValue("ca.crt", "CERT-PEM"))
-		Expect(sec.StringData).To(HaveKeyWithValue("ca.crl", "CRL-PEM"))
+		Expect(sec.Data).To(HaveKeyWithValue("ca.crt", []byte("CERT-PEM")))
+		Expect(sec.Data).To(HaveKeyWithValue("ca.crl", []byte("CRL-PEM")))
 		Expect(string(sec.Type)).To(Equal("Opaque"))
 		Expect(sec.Labels).To(HaveKeyWithValue("app", "demo"))
 		Expect(sec.Labels).To(HaveKeyWithValue("app.kubernetes.io/managed-by", "openvox-ca"))
@@ -166,7 +166,7 @@ var _ = Describe("Exporter", func() {
 
 		sec, err := client.CoreV1().Secrets("ns1").Get(ctx, "trust", metav1.GetOptions{})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(sec.StringData).To(HaveKeyWithValue("ca.crl", "CRL-V2"))
+		Expect(sec.Data).To(HaveKeyWithValue("ca.crl", []byte("CRL-V2")))
 	})
 
 	It("returns an error and applies nothing when the CRL cannot be read", func() {
