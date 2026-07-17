@@ -382,6 +382,9 @@ func newRootCmd() *cobra.Command {
 			if cfg.CADir == "" {
 				return fmt.Errorf("--cadir is required (or set PUPPET_CA_CADIR / cadir in config file)")
 			}
+			if err := cfg.CAKeyProviderConfig.Validate(); err != nil {
+				return err
+			}
 
 			absCADir, err := filepath.Abs(cfg.CADir)
 			if err != nil {

@@ -74,6 +74,21 @@ func (c CAKeyProviderConfig) UsesOpenBao() bool {
 	return c.CAKeyProvider == "openbao"
 }
 
+// Validate rejects an unrecognised ca_key_provider before any storage or
+// backend I/O is attempted. An unknown value (e.g. a typo like "openba", or
+// the anticipated-but-unimplemented "pkcs11") must be a hard error rather than
+// silently falling through to local-file key custody: that would write the CA
+// private key to disk when the operator explicitly asked for it to live
+// elsewhere. Empty is accepted as the "file" default.
+func (c CAKeyProviderConfig) Validate() error {
+	switch c.CAKeyProvider {
+	case "", "file", "openbao":
+		return nil
+	default:
+		return fmt.Errorf("unknown ca_key_provider %q (must be %q or %q)", c.CAKeyProvider, "file", "openbao")
+	}
+}
+
 // ToOpenBaoConfig derives an openbao.Config from the configured fields. Only
 // meaningful when UsesOpenBao() is true.
 func (c CAKeyProviderConfig) ToOpenBaoConfig() (openbao.Config, error) {
