@@ -59,7 +59,7 @@ kubernetes_export:
           app.kubernetes.io/part-of: puppet
         annotations:
           example.com/owner: platform-team
-      type: Opaque              # Secret only; default "Opaque"
+      type: Opaque              # Secret only; optional (see "Secret type" below)
       cert: true                # include the CA certificate (default false)
       crl: true                 # include the CRL (default false)
       cert_key: ca.crt          # data key for the cert; default "ca.crt"
@@ -87,7 +87,20 @@ kubernetes_export:
 | `crl` | both | `false` | Include the CRL (at least one of `cert`/`crl` must be true) |
 | `cert_key` | both | `ca.crt` | Data key for the cert |
 | `crl_key` | both | `ca.crl` | Data key for the CRL (must differ from `cert_key`) |
-| `type` | Secret | `Opaque` | Secret `type` field; rejected on ConfigMaps |
+| `type` | Secret | unmanaged | Secret `type` field; unset means the exporter does not own it (see below); rejected on ConfigMaps |
+
+### Secret type
+
+When `type` is set, the exporter owns the Secret's `type` field. When it is
+**omitted**, the exporter does not manage `type` at all: the API server defaults
+a newly-created Secret to `Opaque`, and the type of an existing Secret is left
+untouched. This lets openvox-ca **co-maintain** a Secret owned by another tool —
+for example a `kubernetes.io/tls` Secret whose `tls.crt`/`tls.key` are pushed by
+Flux — by applying only the CRL (or cert) into a data key of its own and leaving
+the type, and the other manager's keys, alone. Do not set `type:
+kubernetes.io/tls` on a target that only carries the CA cert/CRL: such a Secret
+must also contain `tls.crt` and `tls.key`, so the API server would reject the
+apply.
 
 Secret data is written under `data` (base64-encoded by the client), and
 ConfigMap data as plain text under `data`. Using `data` rather than the

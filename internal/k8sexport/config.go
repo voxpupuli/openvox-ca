@@ -43,8 +43,6 @@ const (
 	// not override them. They follow common Kubernetes trust-bundle conventions.
 	defaultCertKey = "ca.crt"
 	defaultCRLKey  = "ca.crl"
-	// defaultSecretType is applied to Secret targets without an explicit type.
-	defaultSecretType = "Opaque"
 )
 
 // Config is the top-level kubernetes_export configuration block. The feature is
@@ -77,8 +75,11 @@ type Target struct {
 	Kind string `yaml:"kind"`
 	// Metadata carries the object's name, namespace, labels and annotations.
 	Metadata Metadata `yaml:"metadata"`
-	// Type sets a Secret's type field (e.g. "Opaque"). Only valid for Secrets;
-	// empty selects defaultSecretType.
+	// Type sets a Secret's type field (e.g. "Opaque"). Only valid for Secrets.
+	// When empty the exporter does not manage the type field at all, so it can
+	// co-maintain a Secret whose type is owned by another manager (e.g. a
+	// kubernetes.io/tls Secret created by Flux): the API server defaults a new
+	// Secret to Opaque, and an existing Secret's type is left untouched.
 	Type string `yaml:"type"`
 	// Cert and CRL select which materials to include. At least one must be true.
 	Cert bool `yaml:"cert"`
@@ -132,9 +133,6 @@ func (t *Target) validate() error {
 		return fmt.Errorf("type is only valid for Secret targets")
 	}
 
-	if t.Kind == KindSecret && t.Type == "" {
-		t.Type = defaultSecretType
-	}
 	if t.Cert && t.CertKey == "" {
 		t.CertKey = defaultCertKey
 	}

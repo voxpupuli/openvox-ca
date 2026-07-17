@@ -50,7 +50,8 @@ var _ = Describe("Config", func() {
 				Expect(cfg.FieldManager).To(Equal("openvox-ca"))
 				t := cfg.Targets[0]
 				Expect(t.Kind).To(Equal("Secret"))
-				Expect(t.Type).To(Equal("Opaque"))
+				// type is left empty so the exporter does not own the field.
+				Expect(t.Type).To(BeEmpty())
 				Expect(t.CertKey).To(Equal("ca.crt"))
 				Expect(t.CRLKey).To(Equal("ca.crl"))
 			})

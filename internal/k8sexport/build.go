@@ -77,9 +77,15 @@ func (t *Target) configMapDataFor(certPEM, crlPEM []byte) map[string]string {
 // target. The namespace must already be resolved (non-empty).
 func (t *Target) buildSecretApply(namespace string, certPEM, crlPEM []byte) *accorev1.SecretApplyConfiguration {
 	ac := accorev1.Secret(t.Metadata.Name, namespace).
-		WithType(corev1.SecretType(t.Type)).
 		WithLabels(t.labelsFor()).
 		WithData(t.secretDataFor(certPEM, crlPEM))
+	// Only own the type field when one is configured, so openvox-ca can
+	// co-maintain a Secret whose type (e.g. kubernetes.io/tls) is owned by
+	// another manager. An unset type leaves it to the API server default on
+	// creation and untouched on an existing object.
+	if t.Type != "" {
+		ac = ac.WithType(corev1.SecretType(t.Type))
+	}
 	if len(t.Metadata.Annotations) > 0 {
 		ac = ac.WithAnnotations(t.Metadata.Annotations)
 	}

@@ -102,6 +102,7 @@ var _ = Describe("Exporter", func() {
 				Name: "trust", Namespace: "ns1",
 				Labels: map[string]string{"app": "demo"},
 			},
+			Type: "Opaque",
 			Cert: true, CRL: true,
 		}}}
 		mustValidate(cfg)
@@ -116,6 +117,24 @@ var _ = Describe("Exporter", func() {
 		Expect(string(sec.Type)).To(Equal("Opaque"))
 		Expect(sec.Labels).To(HaveKeyWithValue("app", "demo"))
 		Expect(sec.Labels).To(HaveKeyWithValue("app.kubernetes.io/managed-by", "openvox-ca"))
+	})
+
+	It("does not set the type when none is configured, so it is not owned", func() {
+		// A CRL-only target with no type: openvox-ca co-maintains the CRL inside
+		// a Secret whose type (e.g. kubernetes.io/tls) is owned by another
+		// manager, without claiming the type field itself.
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind: "Secret", Metadata: k8sexport.Metadata{Name: "trust", Namespace: "ns1"}, CRL: true,
+		}}}
+		mustValidate(cfg)
+
+		exp := k8sexport.New(client, *cfg, src, "", nil)
+		Expect(exp.ExportAll(ctx)).To(Succeed())
+
+		sec, err := client.CoreV1().Secrets("ns1").Get(ctx, "trust", metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sec.Data).To(HaveKeyWithValue("ca.crl", []byte("CRL-PEM")))
+		Expect(sec.Type).To(BeEmpty()) // exporter left the type field unset
 	})
 
 	It("applies a ConfigMap with only the CRL under a custom key", func() {
