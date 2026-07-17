@@ -151,6 +151,16 @@ func (e *Exporter) applyTarget(ctx context.Context, t *Target, certPEM, crlPEM [
 	if ns == "" {
 		return fmt.Errorf("no namespace resolved")
 	}
+	// Never publish an empty material: applying an empty value would clobber a
+	// previously-good cert/CRL in the target object. A requested-but-empty
+	// material means the CA is in an unexpected state, so fail this target (it is
+	// counted and logged) and leave the existing object untouched.
+	if t.Cert && len(certPEM) == 0 {
+		return fmt.Errorf("refusing to export an empty CA certificate")
+	}
+	if t.CRL && len(crlPEM) == 0 {
+		return fmt.Errorf("refusing to export an empty CRL")
+	}
 	opts := metav1.ApplyOptions{FieldManager: e.cfg.FieldManager, Force: true}
 
 	switch t.Kind {

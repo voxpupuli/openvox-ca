@@ -202,6 +202,22 @@ var _ = Describe("Exporter", func() {
 		Expect(err).To(HaveOccurred()) // never created
 	})
 
+	It("refuses to publish an empty material, leaving any existing object untouched", func() {
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind: "Secret", Metadata: k8sexport.Metadata{Name: "trust", Namespace: "ns1"}, CRL: true,
+		}}}
+		mustValidate(cfg)
+
+		// The source returns no error but an empty CRL (e.g. an unexpected CA
+		// state): the target must fail rather than clobber the object.
+		src.crl = nil
+		exp := k8sexport.New(client, *cfg, src, "", nil)
+		Expect(exp.ExportAll(ctx)).To(MatchError(ContainSubstring("empty CRL")))
+
+		_, err := client.CoreV1().Secrets("ns1").Get(ctx, "trust", metav1.GetOptions{})
+		Expect(err).To(HaveOccurred()) // never created
+	})
+
 	It("records apply metrics per target and result", func() {
 		cfg := &k8sexport.Config{Targets: []k8sexport.Target{
 			{Kind: "Secret", Metadata: k8sexport.Metadata{Name: "good", Namespace: "ns1"}, CRL: true},
