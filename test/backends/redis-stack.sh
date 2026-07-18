@@ -59,6 +59,20 @@ for arg in "$@"; do
     esac
 done
 
+# -- Helper: abort a readiness wait loudly, dumping the culprit's logs ------
+# The wait loops below used to print " OK" whether or not the endpoint ever
+# answered, so a replica that never came up surfaced only as a downstream
+# cascade of HTTP-000 test failures. Calling this on timeout instead turns
+# that into a single actionable failure plus the container logs that explain
+# why (e.g. a Phase 1 bootstrap abort on the losing replica).
+abort_not_ready() {  # human-description  service-name
+    printf ' TIMEOUT\n'
+    printf 'FATAL: %s did not become ready in time\n' "$1" >&2
+    printf '# ---- last 80 log lines from %s ----\n' "$2" >&2
+    "${_COMPOSE[@]}" logs --tail 80 "$2" >&2 2>/dev/null || true
+    exit 1
+}
+
 # -- Stack lifecycle + temp dir cleanup ------------------------------------
 WORK_DIR=$(mktemp -d /tmp/redis-stack-integ.XXXXXX)
 
@@ -94,33 +108,48 @@ printf '\n# Running puppet-stack TAP suite against Redis-backed CA\n'
 # puppet-stack.sh expects the stack already healthy when invoked without --up.
 # Wait for the CA + master ports the wrapper will use before delegating.
 printf '# Waiting for Go CA on host port 8241'
+_ca_ready=false
 for _i in $(seq 1 60); do
-    curl -sfk "https://localhost:8241/puppet-ca/v1/certificate/ca" > /dev/null 2>&1 && break
+    if curl -sfk "https://localhost:8241/puppet-ca/v1/certificate/ca" > /dev/null 2>&1; then
+        _ca_ready=true; break
+    fi
     printf '.'; sleep 3
 done
-printf ' OK\n'
+if $_ca_ready; then printf ' OK\n'; else
+    abort_not_ready "Go CA (openvox-ca) on host port 8241" openvox-ca
+fi
 
 # OpenVox Server can take 5-7 minutes on first start.
 printf '# Waiting for puppet master on host port 8240'
+_master_ready=false
 for _i in $(seq 1 90); do
-    curl -sfk "https://localhost:8240/status/v1/simple" 2>/dev/null \
-        | grep -q running && break
+    if curl -sfk "https://localhost:8240/status/v1/simple" 2>/dev/null \
+        | grep -q running; then
+        _master_ready=true; break
+    fi
     printf '.'; sleep 5
 done
-printf ' OK\n'
+if $_master_ready; then printf ' OK\n'; else
+    abort_not_ready "puppet master on host port 8240" puppet-master
+fi
 
 # OpenVoxDB (PuppetDB) must be ready before the puppet agent test runs or the
 # fact submission (replace_facts) returns 500 and the catalog run fails.
 # puppet-stack.sh waits for this only inside its --up block, which is skipped
 # when we call it with --keep; so we wait here instead.  Allow 600 s.
 printf '# Waiting for OpenVoxDB on openvoxdb:8081'
+_pdb_ready=false
 for _i in $(seq 1 120); do
     _health=$("${_COMPOSE[@]}" exec -T puppet-master \
         curl -ksS "https://openvoxdb:8081/status/v1/simple" 2>/dev/null) || true
-    [[ "${_health:-}" == "running" ]] && break
+    if [[ "${_health:-}" == "running" ]]; then
+        _pdb_ready=true; break
+    fi
     printf '.'; sleep 5
 done
-printf ' OK\n'
+if $_pdb_ready; then printf ' OK\n'; else
+    abort_not_ready "OpenVoxDB on openvoxdb:8081" openvoxdb
+fi
 
 PHASE1_RC=0
 bash test/backends/run-puppet-stack-on-redis.sh --keep \
@@ -537,11 +566,16 @@ printf '\n# Phase 4 -- Multi-replica visibility & concurrency\n'
 # Wait for replica 2 to be healthy before probing it (its Phase 1 bootstrap
 # may still be running when Phase 1's puppet-stack tests finish).
 printf '# Waiting for openvox-ca-2 on host port 8242'
+_ca2_ready=false
 for _i in $(seq 1 60); do
-    curl -sfk "https://localhost:8242/puppet-ca/v1/certificate/ca" > /dev/null 2>&1 && break
+    if curl -sfk "https://localhost:8242/puppet-ca/v1/certificate/ca" > /dev/null 2>&1; then
+        _ca2_ready=true; break
+    fi
     printf '.'; sleep 3
 done
-printf ' OK\n'
+if $_ca2_ready; then printf ' OK\n'; else
+    abort_not_ready "openvox-ca-2 (replica 2) on host port 8242" openvox-ca-2
+fi
 
 # -- Bootstrap lock: only one CA cert/key should exist in Redis -----------
 # Both replicas raced to bootstrap; the distributed lock must have ensured

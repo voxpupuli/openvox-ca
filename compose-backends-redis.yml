@@ -90,6 +90,15 @@ services:
     # Distinct host port from compose-puppet.yml so both stacks can coexist.
     ports:
       - "8241:8140"
+    # Both replicas race to bootstrap the shared CA on first start. If this one
+    # loses that race and its Phase 1 entrypoint aborts (or the loopback CA is
+    # slow to answer under CI load), restart it: on the next attempt the CA
+    # cert/key already exist in the shared Redis backend, so bootstrap short-
+    # circuits, the replica generates its own TLS service cert, and it comes up.
+    # Without this a transiently-failed replica stays dead for the whole run and
+    # cascades into dozens of downstream failures. Mirrors how a real CA replica
+    # in a cluster would be supervised.
+    restart: on-failure
     depends_on:
       redis:
         condition: service_healthy
@@ -130,6 +139,10 @@ services:
       - "8140"
     ports:
       - "8242:8140"
+    # See the restart rationale on the openvox-ca service above: a replica that
+    # loses the bootstrap race must be able to restart and recover from shared
+    # Redis state rather than staying dead for the whole run.
+    restart: on-failure
     depends_on:
       redis:
         condition: service_healthy
