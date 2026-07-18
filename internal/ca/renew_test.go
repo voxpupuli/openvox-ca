@@ -340,4 +340,29 @@ var _ = Describe("CA AutoRenew", func() {
 		Expect(renewed.PublicKey).To(Equal(original.PublicKey))
 		Expect(renewed.SerialNumber.Cmp(original.SerialNumber)).NotTo(Equal(0))
 	})
+
+	It("rejects a sub-policy key with ErrKeyPolicy rather than a generic failure", func() {
+		// A legacy-CA cert may carry an RSA-1024 key that predates this CA's
+		// policy. Auto-renewal must refuse to perpetuate it, and the error
+		// must be classifiable so the HTTP layer answers 4xx, not 5xx.
+		key, err := rsa.GenerateKey(rand.Reader, 1024)
+		Expect(err).NotTo(HaveOccurred())
+		serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+		Expect(err).NotTo(HaveOccurred())
+		now := time.Now().UTC()
+		template := &x509.Certificate{
+			SerialNumber: serial,
+			Subject:      pkix.Name{CommonName: "weak-key-node"},
+			NotBefore:    now.Add(-24 * time.Hour),
+			NotAfter:     now.Add(365 * 24 * time.Hour),
+			DNSNames:     []string{"weak-key-node"},
+		}
+		der, err := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)
+		Expect(err).NotTo(HaveOccurred())
+		original, err := x509.ParseCertificate(der)
+		Expect(err).NotTo(HaveOccurred())
+
+		_, err = myCA.AutoRenew(ctx, original)
+		Expect(err).To(MatchError(ca.ErrKeyPolicy))
+	})
 })
