@@ -920,8 +920,10 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 		// (hostcert_renewal_interval) they POST an empty body here, relying
 		// solely on the mTLS-presented client cert to prove identity and key
 		// possession, and expect the SAME key reissued with a fresh serial
-		// and validity. clientCN(r) already established that r.TLS carries a
-		// verified, non-revoked peer certificate.
+		// and validity. Reissuing without a fresh proof-of-possession is safe
+		// because newAuthMiddleware (the tierAnyClient path guarding this
+		// route) has already verified r.TLS.PeerCertificates[0] chains to our
+		// CA and is not revoked; clientCN(r) only reads its CN.
 		certPEM, err = s.CA.AutoRenew(r.Context(), r.TLS.PeerCertificates[0])
 		if err != nil {
 			// A key-strength rejection is client-actionable: the presented
