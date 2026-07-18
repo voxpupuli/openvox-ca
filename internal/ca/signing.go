@@ -30,6 +30,8 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"net"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -282,7 +284,7 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 		}
 	}
 
-	certPEM, err := c.issueLeafLocked(ctx, subject, csr.Subject, csr.PublicKey, dnsNames, extraExtensions, ttl)
+	certPEM, err := c.issueLeafLocked(ctx, subject, csr.Subject, csr.PublicKey, subjectAltNames{DNSNames: dnsNames}, extraExtensions, ttl)
 	if err != nil {
 		return nil, err
 	}
@@ -295,6 +297,17 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 	return certPEM, nil
 }
 
+// subjectAltNames carries the full set of Subject Alternative Name entries
+// copied onto an issued leaf certificate. Bundling them keeps issueLeafLocked's
+// signature manageable and ensures every SAN type is threaded through together,
+// rather than DNS names alone.
+type subjectAltNames struct {
+	DNSNames       []string
+	IPAddresses    []net.IP
+	EmailAddresses []string
+	URIs           []*url.URL
+}
+
 // issueLeafLocked builds, signs, and persists a leaf certificate for subject
 // from the given public key, SANs, and extra (Puppet OID) extensions, then
 // appends the inventory entry and updates the in-memory serial index.
@@ -303,7 +316,7 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 // This is the tail shared by signWithDuration (inputs come from a submitted
 // CSR, after CSR-specific validation) and AutoRenew (inputs come from an
 // already-issued certificate's public key, with no CSR involved at all).
-func (c *CA) issueLeafLocked(ctx context.Context, subject string, subjectName pkix.Name, pubKey any, dnsNames []string, extraExtensions []pkix.Extension, ttl time.Duration) ([]byte, error) {
+func (c *CA) issueLeafLocked(ctx context.Context, subject string, subjectName pkix.Name, pubKey any, sans subjectAltNames, extraExtensions []pkix.Extension, ttl time.Duration) ([]byte, error) {
 	// Defensive: a nil CACert here means the caller skipped Init() (or it
 	// failed). Without this guard the c.CACert.NotAfter dereference below
 	// would panic the entire frontend.
@@ -360,7 +373,10 @@ func (c *CA) issueLeafLocked(ctx context.Context, subject string, subjectName pk
 		SubjectKeyId:   subjectKeyID[:],
 		AuthorityKeyId: c.CACert.SubjectKeyId,
 
-		DNSNames: dnsNames,
+		DNSNames:       sans.DNSNames,
+		IPAddresses:    sans.IPAddresses,
+		EmailAddresses: sans.EmailAddresses,
+		URIs:           sans.URIs,
 	}
 
 	// CRL Distribution Points: embed CRL URL(s) when configured so that
@@ -760,7 +776,17 @@ func (c *CA) AutoRenew(ctx context.Context, presentedCert *x509.Certificate) ([]
 	err := c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		certPEM, err := c.issueLeafLocked(ctx, subject, presentedCert.Subject, presentedCert.PublicKey, presentedCert.DNSNames, extraExtensions, 0)
+		// Carry forward every SAN type from the certificate being renewed,
+		// not just DNS names: a leaf imported from a legacy CA may carry IP,
+		// email, or URI SANs that services still depend on, and auto-renewal
+		// must not silently drop them.
+		sans := subjectAltNames{
+			DNSNames:       presentedCert.DNSNames,
+			IPAddresses:    presentedCert.IPAddresses,
+			EmailAddresses: presentedCert.EmailAddresses,
+			URIs:           presentedCert.URIs,
+		}
+		certPEM, err := c.issueLeafLocked(ctx, subject, presentedCert.Subject, presentedCert.PublicKey, sans, extraExtensions, 0)
 		if err != nil {
 			return err
 		}

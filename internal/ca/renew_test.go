@@ -26,6 +26,8 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"net"
+	"net/url"
 	"os"
 	"time"
 
@@ -288,6 +290,42 @@ var _ = Describe("CA AutoRenew", func() {
 		renewed := parseCertPEM(renewedPEM)
 
 		Expect(renewed.DNSNames).To(Equal(original.DNSNames))
+	})
+
+	It("carries non-DNS SANs (IP, email, URI) forward, e.g. from a legacy-CA cert", func() {
+		// openvox-ca only ever issues DNS SANs itself, but a leaf imported
+		// from a legacy CA can carry IP/email/URI SANs that services depend
+		// on. Mint such a cert directly and prove auto-renewal preserves them.
+		key, err := rsa.GenerateKey(rand.Reader, 2048)
+		Expect(err).NotTo(HaveOccurred())
+		serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+		Expect(err).NotTo(HaveOccurred())
+		now := time.Now().UTC()
+		uri, err := url.Parse("spiffe://puppet.test/node/legacy-sans-node")
+		Expect(err).NotTo(HaveOccurred())
+		template := &x509.Certificate{
+			SerialNumber:   serial,
+			Subject:        pkix.Name{CommonName: "legacy-sans-node"},
+			NotBefore:      now.Add(-24 * time.Hour),
+			NotAfter:       now.Add(365 * 24 * time.Hour),
+			DNSNames:       []string{"legacy-sans-node", "legacy-sans-node.puppet.test"},
+			IPAddresses:    []net.IP{net.ParseIP("10.0.0.1"), net.ParseIP("fd00::1")},
+			EmailAddresses: []string{"node@puppet.test"},
+			URIs:           []*url.URL{uri},
+		}
+		der, err := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)
+		Expect(err).NotTo(HaveOccurred())
+		original, err := x509.ParseCertificate(der)
+		Expect(err).NotTo(HaveOccurred())
+
+		renewedPEM, err := myCA.AutoRenew(ctx, original)
+		Expect(err).NotTo(HaveOccurred())
+		renewed := parseCertPEM(renewedPEM)
+
+		Expect(renewed.DNSNames).To(Equal(original.DNSNames))
+		Expect(renewed.IPAddresses).To(Equal(original.IPAddresses))
+		Expect(renewed.EmailAddresses).To(Equal(original.EmailAddresses))
+		Expect(renewed.URIs).To(Equal(original.URIs))
 	})
 
 	It("auto-renews a certificate that has no CSR in storage, e.g. after migration import", func() {
