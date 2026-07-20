@@ -29,12 +29,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -74,6 +74,14 @@ func newFakeOpenBao(t *testing.T) *fakeOpenBao {
 	if err != nil {
 		t.Fatalf("generating fake transit key: %v", err)
 	}
+	return newFakeOpenBaoWithKey(t, key)
+}
+
+// newFakeOpenBaoWithKey builds a fake whose Transit key is the caller-supplied
+// signer, so a test can drive the ECDSA signing path (the shared RSA fake
+// cannot) or any other key type.
+func newFakeOpenBaoWithKey(t *testing.T, key crypto.Signer) *fakeOpenBao {
+	t.Helper()
 	return &fakeOpenBao{
 		t:           t,
 		key:         key,
@@ -106,6 +114,27 @@ func (f *fakeOpenBao) currentKey() crypto.Signer {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.key
+}
+
+// signDigest mimics OpenBao Transit's sign endpoint over the fake's key,
+// honouring the signature_algorithm the client sends: "pss" -> RSA-PSS,
+// otherwise PKCS#1 v1.5 for RSA; ECDSA always produces an ASN.1-DER signature.
+// It returns exactly the raw bytes Transit base64-encodes after the
+// "vault:v<N>:" prefix, so the client's decodeTransitSignature and the caller's
+// crypto verification exercise the real wire shapes.
+func (f *fakeOpenBao) signDigest(digest []byte, sigAlgo string) ([]byte, error) {
+	switch key := f.currentKey().(type) {
+	case *rsa.PrivateKey:
+		if sigAlgo == "pss" {
+			return rsa.SignPSS(rand.Reader, key, crypto.SHA256, digest,
+				&rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash, Hash: crypto.SHA256})
+		}
+		return rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest)
+	case *ecdsa.PrivateKey:
+		return ecdsa.SignASN1(rand.Reader, key, digest)
+	default:
+		return nil, fmt.Errorf("fake transit key type %T not supported", key)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
@@ -227,6 +256,7 @@ func (f *fakeOpenBao) server() *httptest.Server {
 			Input     string `json:"input"`
 			Prehashed bool   `json:"prehashed"`
 			HashAlgo  string `json:"hash_algorithm"`
+			SigAlgo   string `json:"signature_algorithm"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -241,8 +271,7 @@ func (f *fakeOpenBao) server() *httptest.Server {
 			writeError(w, http.StatusBadRequest, "bad input encoding")
 			return
 		}
-		rsaKey := f.currentKey().(*rsa.PrivateKey)
-		sig, err := rsa.SignPKCS1v15(rand.Reader, rsaKey, crypto.SHA256, digest)
+		sig, err := f.signDigest(digest, body.SigAlgo)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -306,6 +335,96 @@ func TestSignAndVerify_AppRole(t *testing.T) {
 	}
 	if err := rsa.VerifyPKCS1v15(pub, crypto.SHA256, digest[:], sig); err != nil {
 		t.Fatalf("signature did not verify: %v", err)
+	}
+}
+
+func TestSignAndVerify_ECDSA(t *testing.T) {
+	// The shared fake signs with RSA; drive the ECDSA branch of Signer.sign
+	// (signature_algorithm omitted) and decodeTransitSignature's DER path with
+	// an ECDSA-keyed fake, then verify the returned ASN.1 signature.
+	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generating ECDSA key: %v", err)
+	}
+	fake := newFakeOpenBaoWithKey(t, ecKey)
+	srv := fake.server()
+	defer srv.Close()
+
+	cfg := openbao.Config{
+		Addr:                srv.URL,
+		KeyName:             "mykey",
+		AuthMethod:          openbao.AuthAppRole,
+		AppRoleRoleID:       "my-role-id",
+		AppRoleSecretIDFile: writeTempFile(t, "my-secret-id"),
+	}
+
+	ctx := context.Background()
+	tm, err := openbao.NewTokenManager(ctx, cfg)
+	if err != nil {
+		t.Fatalf("NewTokenManager: %v", err)
+	}
+	defer tm.Close()
+
+	provider := openbao.NewKeyProvider(tm, cfg.EffectiveTransitMount(), cfg.KeyName)
+	signer, err := provider.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	pub, ok := signer.Public().(*ecdsa.PublicKey)
+	if !ok {
+		t.Fatalf("Public() returned %T, want *ecdsa.PublicKey", signer.Public())
+	}
+
+	digest := sha256.Sum256([]byte("ecdsa over transit"))
+	sig, err := signer.Sign(nil, digest[:], crypto.SHA256)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	if !ecdsa.VerifyASN1(pub, digest[:], sig) {
+		t.Fatalf("ECDSA signature did not verify")
+	}
+}
+
+func TestSignAndVerify_RSAPSS(t *testing.T) {
+	// Drive the RSA-PSS branch of Signer.sign (signature_algorithm=pss),
+	// selected by passing *rsa.PSSOptions, and verify the returned signature
+	// as PSS rather than PKCS#1 v1.5.
+	fake := newFakeOpenBao(t)
+	srv := fake.server()
+	defer srv.Close()
+
+	cfg := openbao.Config{
+		Addr:                srv.URL,
+		KeyName:             "mykey",
+		AuthMethod:          openbao.AuthAppRole,
+		AppRoleRoleID:       "my-role-id",
+		AppRoleSecretIDFile: writeTempFile(t, "my-secret-id"),
+	}
+
+	ctx := context.Background()
+	tm, err := openbao.NewTokenManager(ctx, cfg)
+	if err != nil {
+		t.Fatalf("NewTokenManager: %v", err)
+	}
+	defer tm.Close()
+
+	provider := openbao.NewKeyProvider(tm, cfg.EffectiveTransitMount(), cfg.KeyName)
+	signer, err := provider.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	digest := sha256.Sum256([]byte("pss over transit"))
+	pssOpts := &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash, Hash: crypto.SHA256}
+	sig, err := signer.Sign(nil, digest[:], pssOpts)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	pub := signer.Public().(*rsa.PublicKey)
+	if err := rsa.VerifyPSS(pub, crypto.SHA256, digest[:], sig, pssOpts); err != nil {
+		t.Fatalf("PSS signature did not verify: %v", err)
 	}
 }
 
@@ -553,8 +672,12 @@ func TestKeyProvider_GenerateThenLoad_ECDSA(t *testing.T) {
 
 	provider := openbao.NewKeyProvider(tm, cfg.EffectiveTransitMount(), cfg.KeyName)
 
-	if _, err := provider.Load(ctx); err == nil || !strings.Contains(err.Error(), "not found") {
-		t.Fatalf("Load before Generate: got err %v, want a not-found error", err)
+	// Assert the exact sentinel CA.Init branches on (errors.Is), not just a
+	// message containing "not found": a refactor that stopped wrapping the
+	// sentinel but kept the words would still let the CA mistake a real
+	// failure for "no key yet, safe to bootstrap".
+	if _, err := provider.Load(ctx); !errors.Is(err, ca.ErrKeyProviderKeyNotFound) {
+		t.Fatalf("Load before Generate: got err %v, want one wrapping ca.ErrKeyProviderKeyNotFound", err)
 	}
 
 	if _, err := provider.Generate(ctx, ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}); err != nil {

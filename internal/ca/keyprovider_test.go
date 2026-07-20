@@ -182,6 +182,42 @@ var _ = Describe("KeyProvider integration", func() {
 		Expect(certPubDER).To(Equal(keyPubDER))
 	})
 
+	// DR scenario: the CA certificate (and the rest of the storage backend) is
+	// lost and restored empty, but the Transit key persists in OpenBao. Init
+	// then finds no cert but a keyed provider, reaches bootstrapCA, and calls
+	// Generate on an already-keyed provider. This pins that a provider which
+	// refuses Generate-on-existing-key surfaces a controlled error rather than
+	// the CA silently rotating/overwriting the live CA key.
+	It("does not silently rotate the provider key when the cert is absent but the key exists", func() {
+		provider := &fakeKeyProvider{}
+
+		firstCA := ca.New(store, asCfg, "puppet.test")
+		firstCA.KeyProvider = provider
+		Expect(firstCA.Init(context.Background())).To(Succeed())
+		Expect(provider.generateCalls).To(Equal(1))
+		originalKey := provider.key
+		Expect(originalKey).NotTo(BeNil())
+
+		// A fresh, empty store (storage wiped/restored) against the same,
+		// still-keyed provider.
+		wipedDir, err := os.MkdirTemp("", "openvox-ca-keyprovider-wiped")
+		Expect(err).NotTo(HaveOccurred())
+		defer os.RemoveAll(wipedDir)
+		wipedStore := storage.New(wipedDir)
+		Expect(wipedStore.EnsureDirs(context.Background())).To(Succeed())
+
+		secondCA := ca.New(wipedStore, asCfg, "puppet.test")
+		secondCA.KeyProvider = provider
+
+		err = secondCA.Init(context.Background())
+		Expect(err).To(HaveOccurred(), "Init must not silently overwrite an existing provider key")
+		Expect(provider.key).To(BeIdenticalTo(originalKey), "the provider key must not have been rotated")
+
+		hasCert, hcErr := wipedStore.HasCACert(context.Background())
+		Expect(hcErr).NotTo(HaveOccurred())
+		Expect(hasCert).To(BeFalse(), "no CA certificate should have been bootstrapped over the existing key")
+	})
+
 	It("surfaces a real key-provider error rather than silently re-bootstrapping", func() {
 		provider := &fakeKeyProvider{loadErr: errors.New("openbao: connection refused")}
 		myCA := ca.New(store, asCfg, "puppet.test")

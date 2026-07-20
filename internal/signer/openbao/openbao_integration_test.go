@@ -33,6 +33,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/rsa"
 	"crypto/sha256"
+	"errors"
 	"os"
 	"testing"
 
@@ -108,8 +109,12 @@ func TestLiveGenerateThenLoad(t *testing.T) {
 
 	provider := openbao.NewKeyProvider(tm, cfg.EffectiveTransitMount(), cfg.KeyName)
 
-	if _, err := provider.Load(ctx); err == nil {
-		t.Fatalf("Load succeeded before Generate -- is %q left over from a previous run?", cfg.KeyName)
+	// Load must report the exact sentinel CA.Init branches on, not merely some
+	// error: this is the live counterpart to the unit assertion, proving a real
+	// OpenBao "missing key" response still maps to ca.ErrKeyProviderKeyNotFound.
+	if _, err := provider.Load(ctx); !errors.Is(err, ca.ErrKeyProviderKeyNotFound) {
+		t.Fatalf("Load before Generate: got err %v, want one wrapping ca.ErrKeyProviderKeyNotFound "+
+			"(is %q left over from a previous run?)", err, cfg.KeyName)
 	}
 
 	if _, err := provider.Generate(ctx, ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}); err != nil {

@@ -20,6 +20,8 @@ package ca_test
 import (
 	"context"
 	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"io"
@@ -113,5 +115,70 @@ var _ = Describe("issuance rejects a provider-side key rotation", func() {
 		_, err = myCA.Sign(ctx, "healthy.example.com")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(store.HasCert(ctx, "healthy.example.com")).To(BeTrue())
+	})
+})
+
+// The rotation guard is x509.CreateCertificate re-verifying the returned
+// signature against c.CAKey.Public(), which dispatches on signature algorithm
+// — so an ECDSA CA is a genuinely different code path from the RSA case above,
+// not a redundant copy. This exercises the "Public() matches the CA cert but a
+// different ECDSA key signs" case the load-time public-key check cannot catch.
+var _ = Describe("issuance rejects a provider-side key rotation (ECDSA CA)", func() {
+	var (
+		tmpDir string
+		myCA   *ca.CA
+		store  *storage.StorageService
+	)
+
+	BeforeEach(func() {
+		keyPEM, crtPEM, crlPEM, err := testutil.GenerateTestCAECDSA()
+		Expect(err).NotTo(HaveOccurred())
+
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-keyrotation-ecdsa-test")
+		Expect(err).NotTo(HaveOccurred())
+
+		store = storage.New(tmpDir)
+		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+
+		Expect(store.EnsureDirs(context.Background())).To(Succeed())
+		Expect(store.SaveCAKey(context.Background(), keyPEM)).To(Succeed())
+		Expect(store.SaveCACert(context.Background(), crtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(context.Background(), crlPEM)).To(Succeed())
+		Expect(store.WriteSerial(context.Background(), "0001")).To(Succeed())
+		Expect(store.TouchInventory(context.Background())).To(Succeed())
+
+		Expect(myCA.Init(context.Background())).To(Succeed())
+	})
+
+	AfterEach(func() {
+		os.RemoveAll(tmpDir)
+	})
+
+	It("refuses to issue and persists nothing", func() {
+		other, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		Expect(err).NotTo(HaveOccurred())
+		myCA.CAKey = &rotatedKey{pub: myCA.CAKey.Public(), signWith: other}
+
+		ctx := context.Background()
+		csrPEM, err := testutil.GenerateCSR("rotated-ecdsa.example.com")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = myCA.SaveRequest(ctx, "rotated-ecdsa.example.com", csrPEM)
+		Expect(err).NotTo(HaveOccurred())
+
+		_, err = myCA.Sign(ctx, "rotated-ecdsa.example.com")
+		Expect(err).To(HaveOccurred())
+		Expect(store.HasCert(ctx, "rotated-ecdsa.example.com")).To(BeFalse())
+	})
+
+	It("issues normally when the ECDSA signing key still matches the CA certificate", func() {
+		ctx := context.Background()
+		csrPEM, err := testutil.GenerateCSR("healthy-ecdsa.example.com")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = myCA.SaveRequest(ctx, "healthy-ecdsa.example.com", csrPEM)
+		Expect(err).NotTo(HaveOccurred())
+
+		_, err = myCA.Sign(ctx, "healthy-ecdsa.example.com")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(store.HasCert(ctx, "healthy-ecdsa.example.com")).To(BeTrue())
 	})
 })
