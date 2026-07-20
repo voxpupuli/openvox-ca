@@ -19,6 +19,11 @@ services:
     image: docker.io/openbao/openbao:2.5.5@sha256:6150c4a6b62067db6141c8da7a6a6b5763f4f47c315343d0c848b40fecdfd452
     command: ["server", "-dev", "-dev-listen-address=0.0.0.0:8200"]
     environment:
+      # Dev-mode only: this is an ephemeral, in-memory OpenBao brought up solely
+      # for the integration suite and torn down after it. The fixed root token
+      # lets the mage target provision the transit engine and a scoped AppRole;
+      # it is never used by openvox-ca itself (which authenticates via that
+      # AppRole) and must never appear in a non-dev deployment.
       BAO_DEV_ROOT_TOKEN_ID: root
     cap_add:
       # Dev mode wants to mlock memory; without this it only warns, but

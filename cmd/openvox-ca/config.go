@@ -125,11 +125,12 @@ type serverConfig struct {
 
 	// CA key provider selection (ca_key_provider) and, when it selects
 	// "openbao", the nested "openbao" settings block. Embedded inline so
-	// ca_key_provider stays at the top level like StorageConfig's keys above;
-	// shared with the operator CLI via config.CAKeyProviderConfig. "file"
-	// (default, unset) preserves today's local-key behaviour; "openbao"
-	// delegates key custody and signing to an OpenBao Transit key
-	// (internal/signer/openbao).
+	// ca_key_provider stays at the top level like StorageConfig's keys above.
+	// The type lives in the shared config package (config.CAKeyProviderConfig)
+	// so a future operator-CLI command can reuse it; today only the server
+	// consumes it. "file" (default, unset) preserves today's local-key
+	// behaviour; "openbao" delegates key custody and signing to an OpenBao
+	// Transit key (internal/signer/openbao).
 	config.CAKeyProviderConfig `yaml:",inline"`
 }
 

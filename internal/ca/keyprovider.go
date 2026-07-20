@@ -42,6 +42,15 @@ var ErrKeyProviderKeyNotFound = errors.New("key provider: key not found")
 // the key (the isolated signer child, or the single-process role);
 // ExternalSigner is used by the frontend, which never loads or generates a
 // key itself and instead proxies Sign calls to that process over IPC.
+//
+// Verification contract: a returned crypto.Signer must sign under exactly the
+// key its Public() reports. The CA relies on this to catch a key rotated at
+// its provider out from under a running process — loadCA pins Public() to the
+// CA certificate at startup, and x509.CreateCertificate re-verifies every
+// issued signature against that same public key (see signing.go), so a signer
+// that starts signing with a different key is rejected rather than emitting an
+// unverifiable certificate. Implementations must not silently rotate the key
+// backing an already-loaded Signer.
 type KeyProvider interface {
 	// Load returns a Signer for the provider's existing key. Returns an
 	// error wrapping ErrKeyProviderKeyNotFound if none exists yet.

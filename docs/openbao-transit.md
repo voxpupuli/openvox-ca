@@ -55,6 +55,19 @@ To bring existing CA key material into OpenBao instead of generating a fresh
 key, see `bao write transit/keys/<name>/import` (BYOK) in OpenBao's own
 documentation — that's an OpenBao-side operation, not an openvox-ca one.
 
+> **Disaster recovery — read before you rely on this in production.** With
+> `exportable=false` and `allow_plaintext_backup=false` (recommended above), a
+> freshly generated key exists **only** inside OpenBao and cannot be exported
+> or plaintext-backed-up by design. That means OpenBao's own snapshot/HA
+> becomes the sole recovery path for your CA private key: if OpenBao's storage
+> is lost and not restored from an OpenBao snapshot, the CA key is
+> **permanently unrecoverable** and every agent must be re-bootstrapped against
+> a new CA. Treat OpenBao's own backups and high availability as a hard
+> requirement here, not an optional extra. If you would rather retain an independent
+> recovery copy of the CA key, generate it outside OpenBao and bring it in via
+> BYOK/import (above) instead of letting OpenBao generate it — accepting that
+> the key then existed outside OpenBao at import time.
+
 ### Create a policy scoped to that key
 
 ```bash
@@ -108,6 +121,21 @@ bao read auth/approle/role/openvox-ca/role-id
 bao write -f auth/approle/role/openvox-ca/secret-id
 ```
 
+Write the `secret_id` value from that last command into the file
+`openbao.approle_secret_id_file` points at (and the `role_id` into
+`openbao.approle_role_id_file`, if you use the file form rather than the
+inline `openbao.approle_role_id`), owned by the user `openvox-ca` runs as and
+mode `0600`:
+
+```bash
+install -o openvox-ca -g openvox-ca -m 0600 /dev/null /etc/puppet-ca/openbao-secret-id
+bao write -f -field=secret_id auth/approle/role/openvox-ca/secret-id \
+  > /etc/puppet-ca/openbao-secret-id
+```
+
+`openvox-ca` re-reads this file on every login, so rotating the `secret_id`
+is just a matter of rewriting the file — no restart needed.
+
 Set `secret_id_ttl` and `secret_id_num_uses` on the role to match your own
 secret_id rotation practice; there's no single default that's right for
 every environment, so they're left unset (unlimited) above rather than
@@ -136,7 +164,7 @@ prefix instead, since there's no flat-file nesting for those).
 | Config key | Environment variable | CLI flag | Description |
 |---|---|---|---|
 | `ca_key_provider` | `PUPPET_CA_CA_KEY_PROVIDER` | `--ca-key-provider` | `file` (default) or `openbao` |
-| `openbao.addr` | `PUPPET_CA_OPENBAO_ADDR` | `--openbao-addr` | OpenBao server address as a full URI, including scheme and port, e.g. `https://openbao.example.com:8200`. `http://` is also accepted (e.g. for a plain-HTTP listener in development) |
+| `openbao.addr` | `PUPPET_CA_OPENBAO_ADDR` | `--openbao-addr` | OpenBao server address as a full URI, including scheme and port, e.g. `https://openbao.example.com:8200`. `http://` is also accepted for a plain-HTTP listener in development only — never against a non-loopback or production OpenBao, because the client token and all signing traffic then cross the network in cleartext |
 | `openbao.transit_mount` | `PUPPET_CA_OPENBAO_TRANSIT_MOUNT` | `--openbao-transit-mount` | Transit engine mount path (default `transit`) |
 | `openbao.key_name` | `PUPPET_CA_OPENBAO_KEY_NAME` | `--openbao-key-name` | Name of the Transit key backing the CA's private key |
 | `openbao.tls_ca_file` | `PUPPET_CA_OPENBAO_TLS_CA_FILE` | `--openbao-tls-ca-file` | PEM CA bundle to verify OpenBao's server certificate |
@@ -168,6 +196,10 @@ openbao:
 | Config key | Environment variable | CLI flag | Description |
 |---|---|---|---|
 | `openbao.token_file` | `PUPPET_CA_OPENBAO_TOKEN_FILE` | `--openbao-token-file` | Path to a file containing a pre-issued OpenBao token |
+
+This file holds a bearer credential that can sign arbitrary certificates as
+the CA, so — like the AppRole `secret_id` file and the encryption passphrase
+file — it must be owned by the user `openvox-ca` runs as and mode `0600`.
 
 Simplest to set up, at the cost of needing something else to keep that
 token's underlying credential rotated/renewed at the source (a periodic
@@ -217,6 +249,63 @@ ServiceAccount tokens are short-lived (default 1 hour) and kubelet rewrites
 the token file in place before it expires, so each re-authentication picks
 up the current token.
 
+## Performance and outage behaviour
+
+Choosing `ca_key_provider: openbao` moves every CA signing operation from a
+local in-memory key to a network round trip to OpenBao, and puts OpenBao's
+availability directly on the CA's critical path. This changes the CA's
+failure and throughput profile; plan for it:
+
+- **OpenBao must be reachable at startup.** If OpenBao is down when
+  `openvox-ca` boots, the initial login fails and the process exits rather
+  than starting a CA it cannot sign with. In the isolated-signer deployment
+  this is the signer child failing to come up.
+- **Signing fails while OpenBao is unreachable.** An in-flight issuance whose
+  Transit `sign` call cannot reach OpenBao returns an error to the requesting
+  agent; the background loop keeps trying to re-authenticate on roughly a
+  5-second cadence, so the CA recovers on its own once OpenBao comes back,
+  without a restart. Nothing is queued or retried on the agent's behalf.
+- **Throughput serialises at roughly one OpenBao round trip per certificate.**
+  Issuance holds the CA's process-wide lock across the signing call, so under
+  a large Puppet check-in burst certificates are signed one OpenBao round trip
+  at a time rather than in parallel. For most fleets this is fine; if you
+  issue at very high rates, keep OpenBao close (network-wise) and sized for the
+  request rate.
+- **A stalled backend cannot pin the CA indefinitely.** Each signing round
+  trip is bounded by `openbao` login/renew timeout (`LoginTimeout`, default
+  10s), so a hung Transit backend fails that request and releases the lock
+  rather than wedging all issuance forever. Raising that timeout for a slow or
+  distant OpenBao correspondingly raises the worst-case time the lock can be
+  held.
+
+In short, `ca_key_provider: openbao` makes OpenBao's availability and HA a
+hard dependency of CA availability. This is the intended trade-off — the key
+never touching the CA host — but it is a real operational change from
+local-key custody, where the CA can sign with no external dependency at all.
+
+## Troubleshooting and monitoring
+
+- **CA won't start, logs "initial OpenBao login failed".** OpenBao is
+  unreachable, the credential is wrong/expired, or the auth role/policy
+  doesn't grant `read` on `transit/keys/<key_name>`. Check connectivity to
+  `openbao.addr`, that the `secret_id`/token/JWT file is present and current,
+  and that the bound role maps to the scoped policy above.
+- **Startup fails with "does not match" / key-rotation errors.** The Transit
+  key's public component no longer matches the stored CA certificate — see
+  [Key rotation detection](#key-rotation-detection). Reissue the CA
+  certificate to match, or point at the correct `key_name`.
+- **Issuance intermittently fails with `403`.** The token was revoked or hit
+  its `max_ttl`; `openvox-ca` re-authenticates and retries automatically, so
+  transient `403`s that recover are expected. Persistent `403`s point at a
+  policy/role problem or a `secret_id`/token that can no longer be renewed at
+  the source.
+- **What to monitor.** Because OpenBao availability is now on the CA's
+  critical path, alert on OpenBao reachability/health from the CA hosts and on
+  certificate-issuance error rates, and watch for repeated
+  "re-authentication failed" warnings in the `openvox-ca` logs — a steady
+  stream of those means the source credential can no longer authenticate and
+  needs operator attention before the current token lease runs out.
+
 ## Key rotation detection
 
 The CA certificate's public key and the Transit key's public key have to
@@ -251,7 +340,8 @@ running CA.
 ## Process isolation
 
 The isolated-signer deployment (the default; see the main README's
-[key isolation](../README.md) discussion) keeps working unchanged in OpenBao
+[OpenBao Transit-engine key custody](../README.md#openbao-transit-engine-key-custody)
+discussion) keeps working unchanged in OpenBao
 mode: the OpenBao client and its token live inside the isolated
 `openvox-ca [signer]` child process, exactly where a local private key lives
 today. An OpenBao token scoped to `sign`+`read` on one Transit key is still a

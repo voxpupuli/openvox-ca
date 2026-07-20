@@ -41,8 +41,9 @@ const (
 
 // Config describes how to connect and authenticate to OpenBao, and which
 // Transit key to use as the CA's private key. It is the config-file-friendly
-// form consumed by NewSigner/NewKeyProvider; field names mirror the
-// storage-backend Spec types (EtcdSpec, RedisSpec) in internal/storage/spec.go.
+// form consumed by NewTokenManager (and, transitively, NewKeyProvider); field
+// names mirror the storage-backend Spec types (EtcdSpec, RedisSpec) in
+// internal/storage/spec.go.
 // The server's own configuration (cmd/openvox-ca, internal/config) nests the
 // fields below under a top-level "openbao" YAML key / --openbao-* flags; see
 // docs/openbao-transit.md.
