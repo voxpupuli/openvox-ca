@@ -689,10 +689,12 @@ func newRootCmd() *cobra.Command {
 			}
 
 			// Optional Kubernetes export: publish the CA cert/CRL into the
-			// configured Secrets/ConfigMaps. Auxiliary — a setup failure is logged
-			// but never stops the CA from serving. Bound to ctx so it stops on
-			// shutdown. Each replica runs its own exporter; server-side apply makes
-			// concurrent writes from multiple replicas idempotent.
+			// configured Secrets/ConfigMaps. An invalid config block is rejected at
+			// startup (fail-fast, as for StorageConfig); once past validation the
+			// export is auxiliary — a client-init failure or a per-cycle export
+			// error is logged but never stops the CA from serving. Bound to ctx so
+			// it stops on shutdown. Each replica runs its own exporter; server-side
+			// apply makes concurrent writes from multiple replicas idempotent.
 			if cfg.KubernetesExport.Enabled() {
 				if err := cfg.KubernetesExport.Validate(); err != nil {
 					return fmt.Errorf("invalid kubernetes_export config: %w", err)

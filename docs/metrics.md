@@ -7,8 +7,8 @@ describing the **CA certificate**, its **CRL**, and every known (non-deleted)
 **leaf certificate** — including issue/expiry timestamps and issuance status.
 
 A ready-to-import [Jsonnet alerting mixin](../mixin/) is included for alerting on
-impending CA, CRL, and leaf-certificate expiry, and on pending certificate
-requests.
+impending CA, CRL, and leaf-certificate expiry, on pending certificate requests,
+and on Kubernetes export failures.
 
 ## Enabling the exporter
 
@@ -157,5 +157,6 @@ puppetca_k8s_export_last_error_timestamp_seconds
 
 See the [`mixin/`](../mixin/) directory for the Jsonnet monitoring mixin and
 instructions for rendering or importing it. It alerts on exporter availability,
-CA/CRL/leaf expiry, pending requests, and CRL update failures
-(`puppetca_crl_update_failures_total`), with all thresholds configurable.
+CA/CRL/leaf expiry, pending requests, CRL update failures
+(`puppetca_crl_update_failures_total`), and Kubernetes export failures, with all
+thresholds configurable.

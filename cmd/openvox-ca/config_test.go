@@ -500,6 +500,31 @@ kubernetes_export:
 		Expect(cfg.KubernetesExport.Validate()).To(Succeed())
 		// The lowercase kind is accepted and normalised to the canonical form.
 		Expect(cfg.KubernetesExport.Targets[1].Kind).To(Equal("ConfigMap"))
+		// Validate preserves explicitly-set values and applies defaults.
+		Expect(cfg.KubernetesExport.Targets[0].Type).To(Equal("Opaque"))
+		Expect(cfg.KubernetesExport.Targets[0].CertKey).To(Equal("ca.crt"))
+		Expect(cfg.KubernetesExport.Targets[1].CRLKey).To(Equal("ca.crl")) // defaulted
+	})
+
+	It("rejects an invalid kubernetes_export block", func() {
+		clearServerEnv()
+
+		// A target with neither cert nor crl is invalid.
+		content := `
+cadir: /tmp/myca
+kubernetes_export:
+  targets:
+    - kind: Secret
+      metadata:
+        name: openvox-ca-trust
+        namespace: puppet
+`
+		cfgFile := writeTempConfig(content)
+		cfg, err := loadServerConfig(cfgFile)
+		Expect(err).NotTo(HaveOccurred(), "unexpected error")
+
+		Expect(cfg.KubernetesExport.Enabled()).To(BeTrue())
+		Expect(cfg.KubernetesExport.Validate()).To(MatchError(ContainSubstring("at least one of cert or crl")))
 	})
 })
 

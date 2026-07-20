@@ -31,6 +31,11 @@ import (
 // CRL number past prevNumber and stamping fresh ThisUpdate/NextUpdate. It
 // writes the result to storage and refreshes the in-memory cache. The cluster
 // CRL lock (lockNameCRL) and c.mu must both be held by the caller.
+//
+// This is the single point through which CRL re-signs are signalled to
+// consumers via crlNotify/CRLUpdated(): the sole crlNotify send lives here. Any
+// new CRL-signing path must route through this function (or deliberately handle
+// notification itself), or consumer wake-ups will be silently dropped.
 func (c *CA) signCRLLocked(ctx context.Context, prevNumber *big.Int, revoked []x509.RevocationListEntry) error {
 	nextNum := big.NewInt(1)
 	if prevNumber != nil {

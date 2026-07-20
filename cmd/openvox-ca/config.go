@@ -126,9 +126,8 @@ type serverConfig struct {
 
 	// KubernetesExport optionally publishes the CA certificate and/or CRL into
 	// one or more Kubernetes Secrets and ConfigMaps. Disabled when no targets are
-	// configured. File-only (the nested target list, labels, and annotations are
-	// impractical to express as flags/env), mirroring how StorageConfig is
-	// handled. Validated at startup.
+	// configured. File-only: the nested target list, labels, and annotations are
+	// impractical to express as flags/env. Validated at startup.
 	KubernetesExport k8sexport.Config `yaml:"kubernetes_export"`
 
 	// Storage backend selection and parameters. Embedded inline so the YAML

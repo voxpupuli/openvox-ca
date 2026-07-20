@@ -279,4 +279,103 @@ var _ = Describe("Exporter", func() {
 		exp := k8sexport.New(client, *cfg, src, "", nil)
 		Expect(exp.ExportAll(ctx)).To(Succeed())
 	})
+
+	It("keeps the managed-by label even when a target tries to override it", func() {
+		// The managed-by label always wins so ownership cannot be masked by
+		// configuration: an operator setting it to another value is overridden.
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind: "Secret",
+			Metadata: k8sexport.Metadata{
+				Name: "trust", Namespace: "ns1",
+				Labels: map[string]string{"app.kubernetes.io/managed-by": "intruder"},
+			},
+			Cert: true,
+		}}}
+		mustValidate(cfg)
+
+		exp := k8sexport.New(client, *cfg, src, "", nil)
+		Expect(exp.ExportAll(ctx)).To(Succeed())
+
+		sec, err := client.CoreV1().Secrets("ns1").Get(ctx, "trust", metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sec.Labels).To(HaveKeyWithValue("app.kubernetes.io/managed-by", "openvox-ca"))
+	})
+
+	It("propagates configured annotations onto applied objects", func() {
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{
+			{
+				Kind: "Secret",
+				Metadata: k8sexport.Metadata{
+					Name: "trust-sec", Namespace: "ns1",
+					Annotations: map[string]string{"owner": "platform"},
+				},
+				Cert: true,
+			},
+			{
+				Kind: "ConfigMap",
+				Metadata: k8sexport.Metadata{
+					Name: "trust-cm", Namespace: "ns1",
+					Annotations: map[string]string{"owner": "platform"},
+				},
+				CRL: true,
+			},
+		}}
+		mustValidate(cfg)
+
+		exp := k8sexport.New(client, *cfg, src, "", nil)
+		Expect(exp.ExportAll(ctx)).To(Succeed())
+
+		sec, err := client.CoreV1().Secrets("ns1").Get(ctx, "trust-sec", metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sec.Annotations).To(HaveKeyWithValue("owner", "platform"))
+
+		cm, err := client.CoreV1().ConfigMaps("ns1").Get(ctx, "trust-cm", metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cm.Annotations).To(HaveKeyWithValue("owner", "platform"))
+	})
+
+	It("returns an error and applies nothing when the cert cannot be read", func() {
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind: "Secret", Metadata: k8sexport.Metadata{Name: "trust", Namespace: "ns1"}, Cert: true,
+		}}}
+		mustValidate(cfg)
+
+		src.certErr = context.DeadlineExceeded
+		exp := k8sexport.New(client, *cfg, src, "", nil)
+		Expect(exp.ExportAll(ctx)).To(MatchError(ContainSubstring("reading CA certificate")))
+
+		_, err := client.CoreV1().Secrets("ns1").Get(ctx, "trust", metav1.GetOptions{})
+		Expect(err).To(HaveOccurred()) // never created
+	})
+
+	It("refuses to publish an empty cert, leaving any existing object untouched", func() {
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind: "Secret", Metadata: k8sexport.Metadata{Name: "trust", Namespace: "ns1"}, Cert: true,
+		}}}
+		mustValidate(cfg)
+
+		// The source returns no error but an empty cert: the target must fail
+		// rather than clobber the object.
+		src.cert = nil
+		exp := k8sexport.New(client, *cfg, src, "", nil)
+		Expect(exp.ExportAll(ctx)).To(MatchError(ContainSubstring("empty CA certificate")))
+
+		_, err := client.CoreV1().Secrets("ns1").Get(ctx, "trust", metav1.GetOptions{})
+		Expect(err).To(HaveOccurred()) // never created
+	})
+
+	It("errors when a target has no namespace and no default is resolved", func() {
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind: "Secret", Metadata: k8sexport.Metadata{Name: "trust"}, Cert: true,
+		}}}
+		mustValidate(cfg)
+
+		// No per-target namespace and an empty default: apply must fail rather
+		// than write into the empty-string namespace.
+		exp := k8sexport.New(client, *cfg, src, "", nil)
+		Expect(exp.ExportAll(ctx)).To(MatchError(ContainSubstring("no namespace resolved")))
+
+		_, err := client.CoreV1().Secrets("").Get(ctx, "trust", metav1.GetOptions{})
+		Expect(err).To(HaveOccurred()) // never created
+	})
 })

@@ -110,8 +110,9 @@ unchanged material is a genuine no-op.
 ## RBAC
 
 The pod's ServiceAccount needs permission to create and server-side-apply the
-target objects in each target namespace. Server-side apply is a `patch`, so
-`patch` is required in addition to `get` and `create`:
+target objects in each target namespace. The exporter only ever creates or
+applies objects — it never reads them — so `create` and `patch` are the only
+verbs required (server-side apply is a `patch`):
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -122,7 +123,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["secrets", "configmaps"]
-    verbs: ["get", "create", "patch"]
+    verbs: ["create", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

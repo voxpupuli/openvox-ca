@@ -22,10 +22,20 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
+
+// applyTimeout bounds a single server-side apply. The exporter runs on the
+// process-lifetime context, and the in-cluster clientset carries no request
+// timeout, so without this a black-holed API-server connection could block the
+// single exporter goroutine (and thus re-export of every target) for as long as
+// the OS transport takes to give up. A per-apply deadline surfaces a stuck call
+// as a counted, logged error and lets the loop proceed to the next wake-up; the
+// next CRL update or a restart re-reconciles.
+const applyTimeout = 30 * time.Second
 
 // MaterialSource provides the current CA certificate and CRL in PEM form. It is
 // satisfied by *storage.StorageService, but kept as a narrow interface so this
@@ -162,6 +172,9 @@ func (e *Exporter) applyTarget(ctx context.Context, t *Target, certPEM, crlPEM [
 		return fmt.Errorf("refusing to export an empty CRL")
 	}
 	opts := metav1.ApplyOptions{FieldManager: e.cfg.FieldManager, Force: true}
+
+	ctx, cancel := context.WithTimeout(ctx, applyTimeout)
+	defer cancel()
 
 	switch t.Kind {
 	case KindSecret:

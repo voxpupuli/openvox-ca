@@ -22,9 +22,9 @@ import (
 	accorev1 "k8s.io/client-go/applyconfigurations/core/v1"
 )
 
-// managedByLabel marks every object this exporter maintains so operators can
-// identify and select resources owned by openvox-ca. It is always present and
-// takes precedence over any operator-supplied value for the same key.
+// The managed-by label marks every object this exporter maintains so operators
+// can identify and select resources owned by openvox-ca. It is always present
+// and takes precedence over any operator-supplied value for the same key.
 const (
 	managedByLabelKey   = "app.kubernetes.io/managed-by"
 	managedByLabelValue = "openvox-ca"
