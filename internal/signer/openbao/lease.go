@@ -57,6 +57,13 @@ type TokenManager struct {
 	client *api.Client
 	login  func(ctx context.Context) (*api.Secret, error)
 
+	// loginTimeout bounds a single login/renew round trip (and, via
+	// Signer.Sign, a single Transit sign round trip). Captured from
+	// cfg.loginTimeout() at construction so every code path — the initial
+	// login, background re-authentication, and reactive Reauth — honours the
+	// operator's configured value rather than the built-in default.
+	loginTimeout time.Duration
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -86,14 +93,15 @@ func NewTokenManager(ctx context.Context, cfg Config) (*TokenManager, error) {
 
 	tmCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	tm := &TokenManager{
-		client: client,
-		login:  loginFn,
-		ctx:    tmCtx,
-		cancel: cancel,
-		doneCh: make(chan struct{}),
+		client:       client,
+		login:        loginFn,
+		loginTimeout: cfg.loginTimeout(),
+		ctx:          tmCtx,
+		cancel:       cancel,
+		doneCh:       make(chan struct{}),
 	}
 
-	loginCtx, loginCancel := context.WithTimeout(tmCtx, cfg.loginTimeout())
+	loginCtx, loginCancel := context.WithTimeout(tmCtx, tm.loginTimeout)
 	defer loginCancel()
 	secret, err := tm.login(loginCtx)
 	if err != nil {
@@ -268,7 +276,7 @@ func (tm *TokenManager) reauthAndRewatch(ctx context.Context) error {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
-	loginCtx, cancel := context.WithTimeout(ctx, defaultLoginTimeout)
+	loginCtx, cancel := context.WithTimeout(ctx, tm.loginTimeout)
 	defer cancel()
 
 	secret, err := tm.login(loginCtx)

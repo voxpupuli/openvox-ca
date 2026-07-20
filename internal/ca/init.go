@@ -57,6 +57,15 @@ func (c *CA) Init(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// ExternalSigner (frontend proxying to an isolated signer) and KeyProvider
+	// (this process reaching the key itself) are mutually exclusive by design:
+	// a frontend never loads or generates a key, and loadCA would silently
+	// prefer ExternalSigner and ignore the KeyProvider if both were set.
+	// Reject the misconfiguration explicitly rather than let it pass quietly.
+	if c.ExternalSigner != nil && c.KeyProvider != nil {
+		return fmt.Errorf("CA misconfigured: ExternalSigner and KeyProvider are mutually exclusive")
+	}
+
 	if err := c.Storage.EnsureDirs(ctx); err != nil {
 		return err
 	}

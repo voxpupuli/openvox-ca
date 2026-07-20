@@ -603,11 +603,19 @@ func (Test) BackendsOpenBao() error {
 		return fmt.Errorf("configuring OpenBao: %w", err)
 	}
 
-	secretIDFile := filepath.Join(os.TempDir(), "openvox-ca-openbao-test-secret-id")
+	// Write the secret_id into a freshly created private temp dir (0700, random
+	// name) rather than a fixed, predictable path in a shared /tmp: on a shared
+	// or self-hosted runner a pre-planted symlink at a known path could
+	// otherwise redirect this write.
+	secretIDDir, err := os.MkdirTemp("", "openvox-ca-openbao-test")
+	if err != nil {
+		return fmt.Errorf("creating secret_id temp dir: %w", err)
+	}
+	defer os.RemoveAll(secretIDDir)
+	secretIDFile := filepath.Join(secretIDDir, "secret-id")
 	if err := os.WriteFile(secretIDFile, []byte(secretID), 0o600); err != nil {
 		return fmt.Errorf("writing secret_id file: %w", err)
 	}
-	defer os.Remove(secretIDFile)
 
 	fmt.Println("Running OpenBao-backend integration tests...")
 	return sh.RunWithV(

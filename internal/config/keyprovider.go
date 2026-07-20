@@ -24,9 +24,10 @@ import (
 )
 
 // CAKeyProviderConfig is the CA-key-custody portion of a openvox-ca
-// configuration, shared by the server (cmd/openvox-ca) and the operator CLI
-// (cmd/openvox-ca-ctl) so both interpret the same YAML keys/flags
-// identically — mirrors StorageConfig's role for the storage backend.
+// configuration. It lives in the shared config package (alongside
+// StorageConfig) so a future operator-CLI command can embed it and interpret
+// the same YAML keys/flags as the server; today it is consumed only by the
+// server (cmd/openvox-ca).
 //
 // CAKeyProvider selects where the CA's own private key lives: "file"
 // (default) keeps today's behaviour (a local PEM blob, via the configured
@@ -90,16 +91,12 @@ func (c CAKeyProviderConfig) Validate() error {
 }
 
 // ToOpenBaoConfig derives an openbao.Config from the configured fields. Only
-// meaningful when UsesOpenBao() is true.
+// meaningful when UsesOpenBao() is true. cfg.Validate() is the sole authority
+// on auth-method validity (including the empty and unknown cases), so this
+// method maps the fields verbatim and lets Validate reject a bad auth_method
+// with its more specific messages.
 func (c CAKeyProviderConfig) ToOpenBaoConfig() (openbao.Config, error) {
 	b := c.OpenBao
-	authMethod := openbao.AuthMethodKind(b.AuthMethod)
-	switch authMethod {
-	case openbao.AuthAppRole, openbao.AuthToken, openbao.AuthKubernetes:
-	default:
-		return openbao.Config{}, fmt.Errorf("unknown openbao.auth_method %q (must be %q, %q, or %q)",
-			b.AuthMethod, openbao.AuthAppRole, openbao.AuthToken, openbao.AuthKubernetes)
-	}
 	cfg := openbao.Config{
 		Addr:         b.Addr,
 		TransitMount: b.TransitMount,
@@ -107,7 +104,7 @@ func (c CAKeyProviderConfig) ToOpenBaoConfig() (openbao.Config, error) {
 		TLSCAFile:    b.TLSCAFile,
 		TLSCertFile:  b.TLSCertFile,
 		TLSKeyFile:   b.TLSKeyFile,
-		AuthMethod:   authMethod,
+		AuthMethod:   openbao.AuthMethodKind(b.AuthMethod),
 
 		AppRoleMount:        b.AppRoleMount,
 		AppRoleRoleID:       b.AppRoleRoleID,

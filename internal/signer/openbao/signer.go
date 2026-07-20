@@ -46,8 +46,8 @@ type Signer struct {
 }
 
 // newSigner fetches the Transit key's current public component and wraps it
-// as a Signer. Returns an error wrapping ErrKeyNotFound if the key does not
-// exist.
+// as a Signer. Returns an error wrapping ca.ErrKeyProviderKeyNotFound if the
+// key does not exist.
 func newSigner(ctx context.Context, tm *TokenManager, mount, key string) (*Signer, error) {
 	pub, err := fetchPublicKey(ctx, tm, mount, key)
 	if err != nil {
@@ -68,8 +68,18 @@ func (s *Signer) Public() crypto.PublicKey {
 // clock skew, etc.) it forces a re-authentication via the TokenManager and
 // retries once before surfacing the error — the CA recovers within a single
 // retried request rather than waiting for the background renewal loop.
+//
+// crypto.Signer.Sign carries no context, so the whole call — the Transit sign
+// round trip plus any reactive re-authentication and single retry, which all
+// share this deadline — is bounded by the configured login timeout (see
+// TokenManager.loginTimeout). This matters because the CA holds its
+// process-wide mutex across x509.CreateCertificate — and therefore across this
+// network call — so an unbounded Sign against a stalled Transit backend would
+// pin that mutex and stall all issuance; the deadline caps how long that can
+// last. See docs/openbao-transit.md ("Performance and outage behaviour").
 func (s *Signer) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), s.tm.loginTimeout)
+	defer cancel()
 	var sig []byte
 	err := s.withReauth(ctx, func() error {
 		var e error
@@ -272,7 +282,7 @@ func NewKeyProvider(tm *TokenManager, mount, key string) *KeyProvider {
 }
 
 // Load returns a Signer for the existing Transit key, or an error wrapping
-// ErrKeyNotFound if it has not been created yet.
+// ca.ErrKeyProviderKeyNotFound if it has not been created yet.
 func (p *KeyProvider) Load(ctx context.Context) (crypto.Signer, error) {
 	return newSigner(ctx, p.tm, p.mount, p.key)
 }
