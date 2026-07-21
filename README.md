@@ -445,6 +445,8 @@ Conflict handling, in priority order:
 2. Otherwise, if the certificate's serial number is already tracked anywhere in the inventory (under this subject or another), the request is rejected with `409 Conflict`.
 3. Otherwise, if the subject already has an active (non-revoked) certificate, the request is rejected with `409 Conflict`. If the subject's existing certificate is revoked, it is evicted and the import proceeds.
 
+Invalid certificates — malformed or multi-block PEM, a signature that does not chain to this CA, a CA certificate (`IsCA: true`), a subject that matches neither the CN nor any DNS SAN, a non-positive serial, or a bad validity window — are rejected with `400 Bad Request`. If the CA has not finished initialising, the request returns `503 Service Unavailable` (retry once it is ready).
+
 Response:
 
 ```json

@@ -519,7 +519,18 @@ func isUniqueSerialViolation(err error) bool {
 	}
 	var liteErr *sqlite.Error
 	if errors.As(err, &liteErr) {
-		return liteErr.Code() == 2067 || liteErr.Code() == 19 // SQLITE_CONSTRAINT_UNIQUE / SQLITE_CONSTRAINT
+		// 2067 (SQLITE_CONSTRAINT_UNIQUE) is the exact analogue of the MySQL
+		// and PostgreSQL codes above. We also accept 19 (the generic primary
+		// SQLITE_CONSTRAINT) as a deliberate driver-compatibility fallback:
+		// modernc.org/sqlite has historically surfaced the primary code rather
+		// than the extended one on some builds. This is broader than the
+		// "specific code only" intent documented above, but the breadth is
+		// harmless on puppet_ca_inventory — its only insert has an
+		// autoincrement PK and all-NOT-NULL columns populated by
+		// parseInventoryEntry, so the serial UNIQUE index is the only
+		// constraint that can realistically fire, and the violating row has
+		// already been rolled back regardless.
+		return liteErr.Code() == 2067 || liteErr.Code() == 19
 	}
 	return false
 }

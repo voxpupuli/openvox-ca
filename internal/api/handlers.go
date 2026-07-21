@@ -284,9 +284,9 @@ func (s *Server) handleGetCert(w http.ResponseWriter, r *http.Request) {
 type ImportResponse struct {
 	Subject   string `json:"subject"`
 	Serial    string `json:"serial"`
-	NotBefore string `json:"not_before"`
-	NotAfter  string `json:"not_after"`
-	Imported  bool   `json:"imported"` // false if this was a no-op (already tracked)
+	NotBefore string `json:"not_before"` // UTC timestamp, rendered with the server's configured time format (timeFormat())
+	NotAfter  string `json:"not_after"`  // UTC timestamp, rendered with the server's configured time format (timeFormat())
+	Imported  bool   `json:"imported"`   // false if this was a no-op (already tracked)
 }
 
 // handlePutCert imports a certificate that was issued OUTSIDE this CA's
