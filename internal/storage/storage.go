@@ -214,14 +214,20 @@ func (s *StorageService) AppendInventory(ctx context.Context, entry string) erro
 		return nil
 	}
 
-	// Blob backends have no native uniqueness constraint on serial, so check
-	// explicitly under inventoryMu (already held) before appending.
-	existing, err := s.inventoryEntriesLocked(ctx)
+	// Blob backends have no native uniqueness constraint on serial, so scan the
+	// current inventory under inventoryMu (already held) before appending. Read
+	// the whole blob once here and reuse those bytes for both the duplicate scan
+	// and the HMAC recompute below, so the append path does a single whole-blob
+	// read rather than reading it again inside updateInventoryHMACLocked.
+	data, err := s.readInventoryForHMAC(ctx)
 	if err != nil {
 		return err
 	}
-	for _, e := range existing {
-		if e.Serial == parsed.Serial {
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if e, ok := parseInventoryEntry(line); ok && e.Serial == parsed.Serial {
 			return fmt.Errorf("%w: %s", ErrDuplicateSerial, parsed.Serial)
 		}
 	}
@@ -231,22 +237,30 @@ func (s *StorageService) AppendInventory(ctx context.Context, entry string) erro
 	}
 
 	if s.hmacKey != nil {
-		if err := s.updateInventoryHMACLocked(ctx, s.hmacKey); err != nil {
+		// AppendLine is a literal byte-append, so the stored blob is now exactly
+		// data + entry + "\n". Hash that reconstruction directly instead of
+		// re-reading the blob (which computeInventoryHMAC would do), keeping the
+		// value byte-identical to a fresh whole-blob recompute.
+		newBlob := make([]byte, 0, len(data)+len(entry)+1)
+		newBlob = append(newBlob, data...)
+		newBlob = append(newBlob, entry...)
+		newBlob = append(newBlob, '\n')
+		if err := s.backend.Put(ctx, KeyInventoryHMAC, wholeBlobInventoryMAC(s.hmacKey, newBlob), BlobPrivate); err != nil {
 			// The line is already durably appended, but the stored HMAC now
 			// lags the inventory: the next verify would falsely report
 			// tampering. Surface the failure so the caller can react (e.g.
 			// roll back the just-written cert) rather than hiding it.
 			//
 			// We deliberately do not try to make the line-append and the
-			// HMAC-recompute a single atomic unit here (e.g. stage both in
-			// temp files and rename-swap). A rename only narrows, not closes,
-			// the window — a crash between the two renames still leaves the
-			// pair inconsistent — and the structured InventoryStore backends
-			// (see the AppendEntry path above) already advance the integrity
-			// head atomically via an O(1) hash chain, which is the durable
-			// path operators should prefer. For the whole-blob fallback the
-			// honest contract is: report the failure so the caller decides,
-			// not silently leave a mismatch behind.
+			// HMAC-write a single atomic unit here (e.g. stage both in temp
+			// files and rename-swap). A rename only narrows, not closes, the
+			// window — a crash between the two renames still leaves the pair
+			// inconsistent — and the structured InventoryStore backends (see
+			// the AppendEntry path above) already advance the integrity head
+			// atomically via an O(1) hash chain, which is the durable path
+			// operators should prefer. For the whole-blob fallback the honest
+			// contract is: report the failure so the caller decides, not
+			// silently leave a mismatch behind.
 			return fmt.Errorf("updating inventory HMAC after append: %w", err)
 		}
 	}
@@ -752,9 +766,17 @@ func (s *StorageService) computeInventoryHMAC(ctx context.Context, hmacKey []byt
 	if err != nil {
 		return nil, err
 	}
-	mac := hmac.New(sha256.New, hmacKey)
-	mac.Write(data)
-	return mac.Sum(nil), nil
+	return wholeBlobInventoryMAC(hmacKey, data), nil
+}
+
+// wholeBlobInventoryMAC is the whole-blob inventory integrity value:
+// HMAC-SHA256(key, blob). It is the single definition of the blob-backend HMAC
+// so the recompute-from-storage path (computeInventoryHMAC) and the
+// append-in-place path (AppendInventory) cannot diverge.
+func wholeBlobInventoryMAC(key, blob []byte) []byte {
+	mac := hmac.New(sha256.New, key)
+	mac.Write(blob)
+	return mac.Sum(nil)
 }
 
 // chainInventoryMAC advances the inventory hash chain by one entry:
