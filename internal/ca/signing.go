@@ -210,9 +210,11 @@ func (c *CA) sign(ctx context.Context, subject string) ([]byte, error) {
 // ttl=0 means use the default certValidity.
 // c.mu must be held by the caller.
 func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Duration) ([]byte, error) {
-	// Defensive: a nil CACert here means the caller skipped Init() (or it
-	// failed). Without this guard the c.CACert.NotAfter dereference below
-	// would panic the entire frontend.
+	// Fail fast on an uninitialised CA (caller skipped Init(), or it failed)
+	// before we bother reading a CSR from storage, so Sign() returns a clear
+	// ErrNotInitialized rather than a misleading "CSR not found". The actual
+	// c.CACert dereference happens later in issueLeafLocked, which carries the
+	// same guard for callers (e.g. AutoRenew) that reach it by other paths.
 	if c.CACert == nil || c.CAKey == nil {
 		return nil, ErrNotInitialized
 	}

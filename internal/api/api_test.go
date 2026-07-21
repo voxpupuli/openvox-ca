@@ -28,6 +28,7 @@ import (
 	"encoding/asn1"
 	"encoding/json"
 	"encoding/pem"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1306,6 +1307,51 @@ var _ = Describe("API Workflow", func() {
 			Expect(renewed.PublicKey).To(Equal(clientCert.PublicKey),
 				"auto-renewal via empty body must not rotate the key")
 			Expect(renewed.SerialNumber.Cmp(clientCert.SerialNumber)).NotTo(Equal(0))
+		})
+
+		// A legacy-imported node may present a cert whose key predates this CA's
+		// key-strength policy. The empty-body auto-renewal path must surface that
+		// as a client-actionable 422 (re-key via CSR), not mask it behind a 500.
+		// This guards the errors.Is(err, ca.ErrKeyPolicy) mapping at the HTTP
+		// layer, which the CA-layer AutoRenew test cannot exercise.
+		It("should return 422 when the presented certificate's key is below policy (empty body)", func() {
+			weakKey, err := rsa.GenerateKey(rand.Reader, 1024)
+			Expect(err).NotTo(HaveOccurred())
+			template := &x509.Certificate{
+				SerialNumber: big.NewInt(1),
+				Subject:      pkix.Name{CommonName: subject},
+				NotBefore:    time.Now().Add(-time.Hour),
+				NotAfter:     time.Now().Add(time.Hour),
+				DNSNames:     []string{subject},
+			}
+			der, err := x509.CreateCertificate(rand.Reader, template, template, &weakKey.PublicKey, weakKey)
+			Expect(err).NotTo(HaveOccurred())
+			weakCert, err := x509.ParseCertificate(der)
+			Expect(err).NotTo(HaveOccurred())
+
+			req := httptest.NewRequest("POST", "/certificate_renewal", bytes.NewReader(nil))
+			req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{weakCert}}
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusUnprocessableEntity))
+		})
+
+		// The same key-strength policy applies to a re-key CSR: a CSR carrying a
+		// sub-policy key must yield 422, not the generic 400 (invalid CSR) or a
+		// 500. Guards the second errors.Is(err, ca.ErrKeyPolicy) branch.
+		It("should return 422 when the renewal CSR key is below policy", func() {
+			weakKey, err := rsa.GenerateKey(rand.Reader, 1024)
+			Expect(err).NotTo(HaveOccurred())
+			csrDER, err := x509.CreateCertificateRequest(rand.Reader,
+				&x509.CertificateRequest{Subject: pkix.Name{CommonName: subject}}, weakKey)
+			Expect(err).NotTo(HaveOccurred())
+			weakCSR := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
+
+			req := httptest.NewRequest("POST", "/certificate_renewal", bytes.NewReader(weakCSR))
+			req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{clientCert}}
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusUnprocessableEntity))
 		})
 	})
 

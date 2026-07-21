@@ -23,6 +23,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/pem"
 	"fmt"
 	"math/big"
@@ -364,5 +365,67 @@ var _ = Describe("CA AutoRenew", func() {
 
 		_, err = myCA.AutoRenew(ctx, original)
 		Expect(err).To(MatchError(ca.ErrKeyPolicy))
+	})
+
+	It("carries Puppet OID extensions forward, including auth OIDs the CSR path would strip", func() {
+		// Unlike the CSR signing path (which strips authorization-arc OIDs such
+		// as pp_cli_auth as an anti-escalation control), AutoRenew preserves
+		// every Puppet-arc OID because they were already vetted when the
+		// presented cert was issued. A cert legitimately carrying pp_cli_auth
+		// (e.g. OpenVox Server's own cert) must keep it across auto-renewal, or
+		// the puppetserver CA CLI stops authenticating. This locks in that
+		// deliberate asymmetry with the CSR path.
+		key, err := rsa.GenerateKey(rand.Reader, 2048)
+		Expect(err).NotTo(HaveOccurred())
+		serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+		Expect(err).NotTo(HaveOccurred())
+
+		authVal, err := asn1.Marshal("true")
+		Expect(err).NotTo(HaveOccurred())
+		roleVal, err := asn1.Marshal("web")
+		Expect(err).NotTo(HaveOccurred())
+		// pp_role lives in the node-attribute arc (…34380.1.1.*), not the auth
+		// arc, so both the CSR path and AutoRenew carry it; pp_cli_auth lives in
+		// the auth arc (…34380.1.3.*) that only AutoRenew preserves.
+		ppRole := asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 1, 13}
+
+		now := time.Now().UTC()
+		template := &x509.Certificate{
+			SerialNumber: serial,
+			Subject:      pkix.Name{CommonName: "autorenew-oid-node"},
+			NotBefore:    now.Add(-24 * time.Hour),
+			NotAfter:     now.Add(365 * 24 * time.Hour),
+			DNSNames:     []string{"autorenew-oid-node"},
+			ExtraExtensions: []pkix.Extension{
+				{Id: ca.OIDPpCliAuth, Value: authVal}, // auth-arc: CSR path would strip this
+				{Id: ppRole, Value: roleVal},          // node-attr arc: always carried
+			},
+		}
+		der, err := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)
+		Expect(err).NotTo(HaveOccurred())
+		original, err := x509.ParseCertificate(der)
+		Expect(err).NotTo(HaveOccurred())
+
+		renewedPEM, err := myCA.AutoRenew(ctx, original)
+		Expect(err).NotTo(HaveOccurred())
+		renewed := parseCertPEM(renewedPEM)
+
+		findExt := func(cert *x509.Certificate, oid asn1.ObjectIdentifier) (pkix.Extension, bool) {
+			for _, ext := range cert.Extensions {
+				if ext.Id.Equal(oid) {
+					return ext, true
+				}
+			}
+			return pkix.Extension{}, false
+		}
+
+		authExt, ok := findExt(renewed, ca.OIDPpCliAuth)
+		Expect(ok).To(BeTrue(),
+			"auto-renewal must carry the pp_cli_auth auth OID forward, unlike the CSR path")
+		Expect(authExt.Value).To(Equal(authVal))
+
+		roleExt, ok := findExt(renewed, ppRole)
+		Expect(ok).To(BeTrue(), "auto-renewal must carry the pp_role OID forward")
+		Expect(roleExt.Value).To(Equal(roleVal))
 	})
 })
