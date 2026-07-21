@@ -258,6 +258,15 @@ var _ = Describe("EtcdBackendEndToEndViaStorageService", func() {
 		Expect(err).NotTo(HaveOccurred(), "ReadInventory")
 		Expect(string(inv)).To(Equal(line1+"\n"+line2+"\n"), "ReadInventory = %q, want %q", inv, line1+"\n"+line2+"\n")
 
+		// Re-appending line1's serial (0001) under a different subject must be
+		// rejected by the blob-path duplicate scan, and must not mutate the
+		// inventory.
+		dup := "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node3"
+		Expect(svc.AppendInventory(context.Background(), dup)).To(MatchError(ErrDuplicateSerial), "duplicate serial must be rejected")
+		inv, err = svc.ReadInventory(context.Background())
+		Expect(err).NotTo(HaveOccurred(), "ReadInventory after duplicate")
+		Expect(string(inv)).To(Equal(line1+"\n"+line2+"\n"), "inventory must be unchanged after a rejected duplicate")
+
 		Expect(svc.SaveCSR(context.Background(), "node1", []byte("csr-pem"))).To(Succeed(), "SaveCSR")
 		Expect(svc.SaveCert(context.Background(), "node1", []byte("cert-pem"))).To(Succeed(), "SaveCert")
 		csrs, err := svc.ListCSRs(context.Background())

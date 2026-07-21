@@ -293,6 +293,7 @@ var _ = Describe("ImportCertificate", func() {
 		_, err := myCA.ImportCertificate(ctx, "unrelated-subject", certPEM)
 		Expect(err).To(HaveOccurred())
 		Expect(err).To(MatchError(ca.ErrImportInvalid))
+		Expect(err.Error()).To(ContainSubstring("matches neither"))
 	})
 
 	It("accepts a subject that matches a DNS SAN but not the CN", func() {
@@ -308,6 +309,15 @@ var _ = Describe("ImportCertificate", func() {
 		_, err := myCA.ImportCertificate(ctx, "malformed-node", []byte("not a pem file"))
 		Expect(err).To(HaveOccurred())
 		Expect(err).To(MatchError(ca.ErrImportInvalid))
+	})
+
+	It("rejects a well-formed CERTIFICATE PEM block whose DER does not parse", func() {
+		garbagePEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("not-der")})
+
+		_, err := myCA.ImportCertificate(ctx, "garbage-der-node", garbagePEM)
+		Expect(err).To(HaveOccurred())
+		Expect(err).To(MatchError(ca.ErrImportInvalid))
+		Expect(store.HasCert(ctx, "garbage-der-node")).To(BeFalse())
 	})
 
 	It("rejects input containing more than one PEM block", func() {
@@ -331,6 +341,7 @@ var _ = Describe("ImportCertificate", func() {
 		_, err := myCA.ImportCertificate(ctx, "backwards-node", certPEM)
 		Expect(err).To(HaveOccurred())
 		Expect(err).To(MatchError(ca.ErrImportInvalid))
+		Expect(err.Error()).To(ContainSubstring("NotAfter"))
 	})
 
 	It("rejects a certificate with a non-positive serial number", func() {
@@ -339,6 +350,7 @@ var _ = Describe("ImportCertificate", func() {
 		_, err := myCA.ImportCertificate(ctx, "zero-serial-node", certPEM)
 		Expect(err).To(HaveOccurred())
 		Expect(err).To(MatchError(ca.ErrImportInvalid))
+		Expect(err.Error()).To(ContainSubstring("non-positive serial number"))
 	})
 
 	It("returns ErrNotInitialized rather than panicking on an un-Init'd CA", func() {

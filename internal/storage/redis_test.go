@@ -343,6 +343,16 @@ var _ = Describe("RedisBackend", func() {
 		inv, err := svc.ReadInventory(context.Background())
 		Expect(err).NotTo(HaveOccurred())
 		Expect(string(inv)).To(Equal(line1 + "\n" + line2 + "\n"))
+
+		// Re-appending line1's serial (0001) under a different subject must be
+		// rejected by the blob-path duplicate scan, and must leave the inventory
+		// untouched.
+		dup := "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node3"
+		Expect(svc.AppendInventory(context.Background(), dup)).To(MatchError(ErrDuplicateSerial))
+		inv, err = svc.ReadInventory(context.Background())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(inv)).To(Equal(line1 + "\n" + line2 + "\n"))
+
 		Expect(svc.SaveCSR(context.Background(), "node1", []byte("csr-pem"))).NotTo(HaveOccurred())
 		Expect(svc.SaveCert(context.Background(), "node1", []byte("cert-pem"))).NotTo(HaveOccurred())
 		csrs, err := svc.ListCSRs(context.Background())

@@ -129,6 +129,12 @@ var _ = Describe("PUT /certificate/{subject} (import)", func() {
 		Expect(result.Subject).To(Equal("import-node"))
 		Expect(result.Imported).To(BeTrue())
 		Expect(result.Serial).NotTo(BeEmpty())
+		Expect(result.NotBefore).NotTo(BeEmpty())
+		Expect(result.NotAfter).NotTo(BeEmpty())
+		_, err := time.Parse(time.RFC3339, result.NotBefore)
+		Expect(err).NotTo(HaveOccurred(), "not_before must parse as RFC3339")
+		_, err = time.Parse(time.RFC3339, result.NotAfter)
+		Expect(err).NotTo(HaveOccurred(), "not_after must parse as RFC3339")
 
 		// Resubmitting the identical certificate must be a no-op, not an error.
 		req2 := httptest.NewRequest("PUT", "/certificate/import-node", bytes.NewReader(certPEM))
@@ -233,5 +239,23 @@ var _ = Describe("PUT /certificate/{subject} (import)", func() {
 		var status2 api.CertStatusResponse
 		Expect(json.Unmarshal(statusRR2.Body.Bytes(), &status2)).To(Succeed())
 		Expect(status2.State).To(Equal("revoked"))
+	})
+
+	It("returns 503 when the CA has not been initialised", func() {
+		rawDir, err := os.MkdirTemp("", "openvox-ca-import-uninit-api-test")
+		Expect(err).NotTo(HaveOccurred())
+		defer os.RemoveAll(rawDir)
+		rawStore := storage.New(rawDir)
+		Expect(rawStore.EnsureDirs(context.Background())).To(Succeed())
+		// Deliberately no myCA.Init(): CACert/CAKey stay nil, so ImportCertificate
+		// returns ca.ErrNotInitialized, which the handler maps to 503.
+		rawCA := ca.New(rawStore, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		rawMux := api.New(rawCA).Routes()
+
+		certPEM := signLeaf(caKey, caCert, "uninit-node", []string{"uninit-node"}, nil, false)
+		req := httptest.NewRequest("PUT", "/certificate/uninit-node", bytes.NewReader(certPEM))
+		rr := httptest.NewRecorder()
+		rawMux.ServeHTTP(rr, req)
+		Expect(rr.Code).To(Equal(http.StatusServiceUnavailable))
 	})
 })
