@@ -421,6 +421,65 @@ func newGenerateCmd() *cobra.Command {
 	return cmd
 }
 
+// newImportCertCmd registers openvox-ca-ctl's "import-cert" subcommand,
+// which imports a certificate issued OUTSIDE this CA's normal signing flow
+// (e.g. migrated from a legacy CA sharing this CA's key) into the running
+// server's inventory via PUT /certificate/{subject}. This is distinct from
+// the "import" subcommand below, which imports a whole CA cert/key/CRL
+// bundle offline, directly into storage.
+func newImportCertCmd() *cobra.Command {
+	var certname, certFile string
+	cmd := &cobra.Command{
+		Use:          "import-cert",
+		Short:        "Import an externally-issued certificate into the inventory",
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			certPEM, err := os.ReadFile(certFile)
+			if err != nil {
+				return fmt.Errorf("reading --cert-file: %w", err)
+			}
+
+			c, err := newClient()
+			if err != nil {
+				return err
+			}
+
+			path := "/puppet-ca/v1/certificate/" + certname
+			code, body, err := c.put(path, certPEM)
+			if err != nil {
+				return err
+			}
+			if err := checkHTTP(code, body, "PUT", path); err != nil {
+				return err
+			}
+
+			var result struct {
+				Subject   string `json:"subject"`
+				Serial    string `json:"serial"`
+				NotBefore string `json:"not_before"`
+				NotAfter  string `json:"not_after"`
+				Imported  bool   `json:"imported"`
+			}
+			if err := json.Unmarshal(body, &result); err != nil {
+				return fmt.Errorf("could not parse response: %w", err)
+			}
+			if result.Imported {
+				fmt.Printf("Imported %s (serial %s, valid %s to %s)\n",
+					result.Subject, result.Serial, result.NotBefore, result.NotAfter)
+			} else {
+				fmt.Printf("%s already tracked (serial %s), no changes made\n",
+					result.Subject, result.Serial)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&certname, "certname", "", "Subject name for the imported certificate")
+	cmd.Flags().StringVar(&certFile, "cert-file", "", "Path to the certificate PEM to import")
+	_ = cmd.MarkFlagRequired("certname")
+	_ = cmd.MarkFlagRequired("cert-file")
+	return cmd
+}
+
 func newSetupCmd() *cobra.Command {
 	var caDir, hostname string
 	var encryptKey bool
@@ -571,6 +630,7 @@ Global flags must be specified before the subcommand.`,
 		newReissueCRLCmd(),
 		newCleanCmd(),
 		newGenerateCmd(),
+		newImportCertCmd(),
 		newSetupCmd(),
 		newImportCmd(),
 		newMigrateCmd(),

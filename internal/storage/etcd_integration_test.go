@@ -249,12 +249,23 @@ var _ = Describe("EtcdBackendEndToEndViaStorageService", func() {
 		Expect(string(got)).To(Equal("0001"), "GetSerial = %q, want 0001", got)
 
 		Expect(svc.InitHMAC(context.Background())).To(Succeed(), "InitHMAC")
-		Expect(svc.AppendInventory(context.Background(), "line 1")).To(Succeed(), "AppendInventory")
-		Expect(svc.AppendInventory(context.Background(), "line 2")).To(Succeed(), "AppendInventory")
+		const line1 = "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1"
+		const line2 = "0002 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node2"
+		Expect(svc.AppendInventory(context.Background(), line1)).To(Succeed(), "AppendInventory")
+		Expect(svc.AppendInventory(context.Background(), line2)).To(Succeed(), "AppendInventory")
 
 		inv, err := svc.ReadInventory(context.Background())
 		Expect(err).NotTo(HaveOccurred(), "ReadInventory")
-		Expect(string(inv)).To(Equal("line 1\nline 2\n"), "ReadInventory = %q, want 'line 1\\nline 2\\n'", inv)
+		Expect(string(inv)).To(Equal(line1+"\n"+line2+"\n"), "ReadInventory = %q, want %q", inv, line1+"\n"+line2+"\n")
+
+		// Re-appending line1's serial (0001) under a different subject must be
+		// rejected by the blob-path duplicate scan, and must not mutate the
+		// inventory.
+		dup := "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node3"
+		Expect(svc.AppendInventory(context.Background(), dup)).To(MatchError(ErrDuplicateSerial), "duplicate serial must be rejected")
+		inv, err = svc.ReadInventory(context.Background())
+		Expect(err).NotTo(HaveOccurred(), "ReadInventory after duplicate")
+		Expect(string(inv)).To(Equal(line1+"\n"+line2+"\n"), "inventory must be unchanged after a rejected duplicate")
 
 		Expect(svc.SaveCSR(context.Background(), "node1", []byte("csr-pem"))).To(Succeed(), "SaveCSR")
 		Expect(svc.SaveCert(context.Background(), "node1", []byte("cert-pem"))).To(Succeed(), "SaveCert")

@@ -427,6 +427,34 @@ Response:
 { "private_key": "-----BEGIN RSA PRIVATE KEY-----\n...", "certificate": "-----BEGIN CERTIFICATE-----\n..." }
 ```
 
+### Certificate import
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `PUT` | `/certificate/{subject}` | Import a certificate issued outside this CA's normal signing flow into the inventory; admin-only |
+
+Shares its path with `GET /certificate/{subject}` (certificate retrieval, above) but is a distinct, admin-only operation. Request body: raw certificate PEM. `{subject}` must match the certificate's CN or one of its DNS Subject Alternative Names — this lets an operator import under a specific identity even when the certificate's SANs list several names.
+
+This is for certificates that were signed by this CA's key but never went through `Sign`/`Generate` — most commonly certificates migrated from a legacy CA installation that shared this CA's key material. The certificate's signature must verify against this CA's certificate (a pure cryptographic check, so an already-expired certificate is still accepted for record-keeping); CA certificates (`IsCA: true`) are rejected — use `openvox-ca-ctl import` for CA bundle import instead.
+
+Once imported, the certificate is tracked exactly like a normally-issued one: it appears in listings and status lookups, is cleaned up by the normal expiry sweep, and can be revoked via the usual `PUT /certificate_status/{subject}` (`desired_state: "revoked"`) mechanism.
+
+Conflict handling, in priority order:
+
+1. If the exact same certificate (same serial, byte-identical) is already the tracked certificate for the subject, the request succeeds as a no-op (`"imported": false` in the response).
+2. Otherwise, if the certificate's serial number is already tracked anywhere in the inventory (under this subject or another), the request is rejected with `409 Conflict`.
+3. Otherwise, if the subject already has an active (non-revoked) certificate, the request is rejected with `409 Conflict`. If the subject's existing certificate is revoked, it is evicted and the import proceeds.
+
+Invalid certificates — malformed or multi-block PEM, a signature that does not chain to this CA, a CA certificate (`IsCA: true`), a subject that matches neither the CN nor any DNS SAN, a non-positive serial, or a bad validity window — are rejected with `400 Bad Request`. If the CA has not finished initialising, the request returns `503 Service Unavailable` (retry once it is ready).
+
+Response:
+
+```json
+{ "subject": "legacy-node.example.com", "serial": "1A2B3C4D5E6F", "not_before": "2020-01-01T00:00:00Z", "not_after": "2025-01-01T00:00:00Z", "imported": true }
+```
+
+`serial` is uppercase hex (matching the inventory/CRL/OCSP convention), unlike the decimal `serial_number` field in certificate status responses (which is decimal only to preserve the full 128-bit value without int64 truncation — a constraint that doesn't apply to this string field).
+
 ### OCSP
 
 | Method | Path | Description |
@@ -457,7 +485,7 @@ When mTLS is enabled (both `--tls-cert` and `--tls-key` set), each endpoint requ
 | **Public** | None | `GET /healthz/*`, `GET /certificate/{subject}`, `GET /certificate_revocation_list/ca`, `PUT /certificate_request/{subject}`, `GET /expirations`, `POST /ocsp`, `GET /ocsp/{request}` |
 | **Any client** | Any CA-signed cert | `GET /certificate_status/{subject}` (public with `--allow-public-status`), `POST /certificate_renewal` |
 | **Self or admin** | Cert CN matches path subject, OR cert is admin | `GET /certificate_request/{subject}` |
-| **Admin** | Cert is admin (see below) | `PUT /certificate_status/{subject}`, `DELETE /certificate_status/{subject}`, `DELETE /certificate_request/{subject}`, `GET /certificate_statuses/*`, `POST /sign`, `POST /sign/all`, `POST /generate/{subject}`, `PUT /clean`, `PUT /certificate_revocation_list/ca` |
+| **Admin** | Cert is admin (see below) | `PUT /certificate_status/{subject}`, `DELETE /certificate_status/{subject}`, `DELETE /certificate_request/{subject}`, `GET /certificate_statuses/*`, `POST /sign`, `POST /sign/all`, `POST /generate/{subject}`, `PUT /clean`, `PUT /certificate_revocation_list/ca`, `PUT /certificate/{subject}` |
 
 In plain HTTP mode (no TLS), all endpoints are accessible without authentication.
 
@@ -649,6 +677,10 @@ openvox-ca-ctl reissue-crl
 # Generate a server-side key+cert pair (key saved to ./agent.example.com_key.pem)
 openvox-ca-ctl generate --certname agent.example.com
 openvox-ca-ctl generate --certname agent.example.com --dns alt.example.com --out-dir /etc/ssl
+
+# Import a certificate issued outside this CA's normal flow (e.g. migrated
+# from a legacy CA sharing this CA's key)
+openvox-ca-ctl import-cert --certname legacy-node.example.com --cert-file legacy-node_cert.pem
 
 # Bootstrap a new CA offline (no server required)
 openvox-ca-ctl setup --cadir /etc/puppetlabs/puppet/ssl --hostname puppet.example.com

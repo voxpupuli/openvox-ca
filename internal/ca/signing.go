@@ -33,6 +33,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
 
 const (
@@ -359,12 +361,7 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 		return nil, fmt.Errorf("failed to save cert for %s: %w", subject, err)
 	}
 
-	inventoryEntry := fmt.Sprintf("%s %s %s /%s",
-		serialStr,
-		template.NotBefore.Format("2006-01-02T15:04:05UTC"),
-		template.NotAfter.Format("2006-01-02T15:04:05UTC"),
-		subject,
-	)
+	inventoryEntry := storage.FormatInventoryLine(serialStr, template.NotBefore, template.NotAfter, subject)
 	if err := c.Storage.AppendInventory(ctx, inventoryEntry); err != nil {
 		// Roll back the cert so storage and inventory stay in sync. Log but don't
 		// propagate the cleanup error; the caller already has an error to handle.

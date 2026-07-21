@@ -40,6 +40,7 @@ import (
 	"github.com/uptrace/bun/driver/sqliteshim"
 	"github.com/uptrace/bun/migrate"
 	"github.com/uptrace/bun/schema"
+	"modernc.org/sqlite"
 )
 
 // SQLDialect selects which SQL engine an SQLBackend talks to. The same backend
@@ -496,6 +497,40 @@ func isRetryableSQLError(err error) bool {
 	var myErr *mysqldriver.MySQLError
 	if errors.As(err, &myErr) {
 		return myErr.Number == 1213 || myErr.Number == 1205
+	}
+	return false
+}
+
+// isUniqueSerialViolation reports whether err is a unique-constraint
+// violation on the inventory's serial index, across every dialect this
+// project supports. Deliberately checks the specific unique-violation
+// SQLSTATE/error code for each dialect rather than a broader "integrity
+// violation" classifier, so a future schema change adding an unrelated
+// constraint (e.g. a check or foreign key) is not silently misreported as a
+// duplicate serial.
+func isUniqueSerialViolation(err error) bool {
+	var myErr *mysqldriver.MySQLError
+	if errors.As(err, &myErr) {
+		return myErr.Number == 1062 // ER_DUP_ENTRY
+	}
+	var pgErr pgdriver.Error
+	if errors.As(err, &pgErr) {
+		return pgErr.Field('C') == "23505" // SQLSTATE unique_violation
+	}
+	var liteErr *sqlite.Error
+	if errors.As(err, &liteErr) {
+		// 2067 (SQLITE_CONSTRAINT_UNIQUE) is the exact analogue of the MySQL
+		// and PostgreSQL codes above. We also accept 19 (the generic primary
+		// SQLITE_CONSTRAINT) as a deliberate driver-compatibility fallback:
+		// modernc.org/sqlite has historically surfaced the primary code rather
+		// than the extended one on some builds. This is broader than the
+		// "specific code only" intent documented above, but the breadth is
+		// harmless on puppet_ca_inventory — its only insert has an
+		// autoincrement PK and all-NOT-NULL columns populated by
+		// parseInventoryEntry, so the serial UNIQUE index is the only
+		// constraint that can realistically fire, and the violating row has
+		// already been rolled back regardless.
+		return liteErr.Code() == 2067 || liteErr.Code() == 19
 	}
 	return false
 }

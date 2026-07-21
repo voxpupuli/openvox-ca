@@ -28,12 +28,6 @@ import (
 	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
 
-// inventoryTimeFormat is the layout the signing path writes NotBefore/NotAfter
-// with (see signCSR). It is parsed back here to decide which inventory entries
-// have expired. The trailing "UTC" is a literal in the layout (Go's zone token
-// is "MST"), so parsing yields a UTC time with the recorded wall-clock digits.
-const inventoryTimeFormat = "2006-01-02T15:04:05UTC"
-
 // CleanupExpiredCerts removes certificates whose NotAfter is older than retain
 // ago from the inventory, drops their entries from the CRL, deletes their stored
 // signed certificate (when the on-disk cert still has the expired serial, so a
@@ -66,7 +60,7 @@ func (c *CA) CleanupExpiredCerts(ctx context.Context, retain time.Duration) (int
 		// Prune the inventory first; the returned entries tell us exactly which
 		// serials to drop from the CRL and which caches/blobs to clean up.
 		dropped, err := c.Storage.PruneInventory(ctx, func(e storage.InventoryEntry) bool {
-			notAfter, perr := time.Parse(inventoryTimeFormat, e.NotAfter)
+			notAfter, perr := time.Parse(storage.InventoryTimeFormat, e.NotAfter)
 			if perr != nil {
 				slog.Warn("Cleanup: keeping inventory entry with unparseable NotAfter",
 					"serial", e.Serial, "subject", e.Subject, "not_after", e.NotAfter, "error", perr)

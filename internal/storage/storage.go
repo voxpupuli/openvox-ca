@@ -170,26 +170,66 @@ func (s *StorageService) InitHMAC(ctx context.Context) error {
 	return s.VerifyInventoryHMAC(ctx, key)
 }
 
+// ErrDuplicateSerial is returned by AppendInventory when the entry's serial
+// number already exists in the inventory. SQL backends detect this via their
+// unique index (translated from the dialect-specific driver error); blob
+// backends via an explicit scan performed under the same inventoryMu that
+// already serialises every append within a process.
+//
+// This is NOT a cross-replica guarantee on non-SQL backends: nothing today
+// wraps the whole AppendInventory call in a distributed lock for
+// filesystem/etcd/redis backends (see the blob-fallback HMAC-update comment
+// below, which already documents a similar limitation for that path).
+// Structured (SQL) backends remain the only ones with a true cluster-wide
+// guarantee, via the database's own unique index.
+var ErrDuplicateSerial = errors.New("serial number already exists in inventory")
+
 // AppendInventory adds entry (a single inventory.txt line, without a trailing
 // newline) to the inventory. On backends that implement InventoryStore the
 // entry is stored as a structured record and the integrity head is advanced by
 // a hash chain in O(1); otherwise the line is appended to the KeyInventory blob
-// and the whole-blob HMAC is recomputed.
+// and the whole-blob HMAC is recomputed. Returns ErrDuplicateSerial (wrapped)
+// if the entry's serial is already present anywhere in the inventory.
 func (s *StorageService) AppendInventory(ctx context.Context, entry string) error {
 	s.inventoryMu.Lock()
 	defer s.inventoryMu.Unlock()
 
+	parsed, ok := parseInventoryEntry(entry)
+	if !ok {
+		return fmt.Errorf("malformed inventory entry %q", entry)
+	}
+
 	if store, ok := s.backend.(InventoryStore); ok {
-		parsed, ok := parseInventoryEntry(entry)
-		if !ok {
-			return fmt.Errorf("malformed inventory entry %q", entry)
-		}
 		var newHead func(prev []byte) []byte
 		if s.hmacKey != nil {
 			key := s.hmacKey
 			newHead = func(prev []byte) []byte { return chainInventoryMAC(key, prev, entry) }
 		}
-		return store.AppendEntry(ctx, parsed, newHead)
+		if err := store.AppendEntry(ctx, parsed, newHead); err != nil {
+			if isUniqueSerialViolation(err) {
+				return fmt.Errorf("%w: %s", ErrDuplicateSerial, parsed.Serial)
+			}
+			return err
+		}
+		return nil
+	}
+
+	// Blob backends have no native uniqueness constraint on serial, so scan the
+	// current inventory under inventoryMu (already held) before appending. Read
+	// the whole blob once here and reuse those bytes for both the duplicate scan
+	// and the HMAC recompute below, so the append path does a single whole-blob
+	// read rather than reading it again inside updateInventoryHMACLocked.
+	data, err := s.readInventoryForHMAC(ctx)
+	if err != nil {
+		return err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if e, ok := parseInventoryEntry(line); ok && e.Serial == parsed.Serial {
+			return fmt.Errorf("%w: %s", ErrDuplicateSerial, parsed.Serial)
+		}
 	}
 
 	if err := s.backend.AppendLine(ctx, KeyInventory, []byte(entry+"\n"), BlobPrivate); err != nil {
@@ -197,26 +237,55 @@ func (s *StorageService) AppendInventory(ctx context.Context, entry string) erro
 	}
 
 	if s.hmacKey != nil {
-		if err := s.updateInventoryHMACLocked(ctx, s.hmacKey); err != nil {
+		// AppendLine is a literal byte-append, so the stored blob is now exactly
+		// data + entry + "\n". Hash that reconstruction directly instead of
+		// re-reading the blob (which computeInventoryHMAC would do), keeping the
+		// value byte-identical to a fresh whole-blob recompute.
+		newBlob := make([]byte, 0, len(data)+len(entry)+1)
+		newBlob = append(newBlob, data...)
+		newBlob = append(newBlob, entry...)
+		newBlob = append(newBlob, '\n')
+		if err := s.backend.Put(ctx, KeyInventoryHMAC, wholeBlobInventoryMAC(s.hmacKey, newBlob), BlobPrivate); err != nil {
 			// The line is already durably appended, but the stored HMAC now
 			// lags the inventory: the next verify would falsely report
 			// tampering. Surface the failure so the caller can react (e.g.
 			// roll back the just-written cert) rather than hiding it.
 			//
 			// We deliberately do not try to make the line-append and the
-			// HMAC-recompute a single atomic unit here (e.g. stage both in
-			// temp files and rename-swap). A rename only narrows, not closes,
-			// the window — a crash between the two renames still leaves the
-			// pair inconsistent — and the structured InventoryStore backends
-			// (see the AppendEntry path above) already advance the integrity
-			// head atomically via an O(1) hash chain, which is the durable
-			// path operators should prefer. For the whole-blob fallback the
-			// honest contract is: report the failure so the caller decides,
-			// not silently leave a mismatch behind.
+			// HMAC-write a single atomic unit here (e.g. stage both in temp
+			// files and rename-swap). A rename only narrows, not closes, the
+			// window — a crash between the two renames still leaves the pair
+			// inconsistent — and the structured InventoryStore backends (see
+			// the AppendEntry path above) already advance the integrity head
+			// atomically via an O(1) hash chain, which is the durable path
+			// operators should prefer. For the whole-blob fallback the honest
+			// contract is: report the failure so the caller decides, not
+			// silently leave a mismatch behind.
 			return fmt.Errorf("updating inventory HMAC after append: %w", err)
 		}
 	}
 	return nil
+}
+
+// SerialExists reports whether any inventory entry — for any subject, current
+// or historical — already carries the given serial number. This is a
+// best-effort, non-authoritative check: callers needing a real guarantee
+// must rely on AppendInventory's own atomic duplicate check
+// (ErrDuplicateSerial), not this method, since SerialExists does not hold
+// inventoryMu across its caller's subsequent write.
+func (s *StorageService) SerialExists(ctx context.Context, serial string) (bool, error) {
+	s.inventoryMu.RLock()
+	defer s.inventoryMu.RUnlock()
+	entries, err := s.inventoryEntriesLocked(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, e := range entries {
+		if e.Serial == serial {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // LatestSerialForSubject returns the most recently issued serial for subject.
@@ -697,9 +766,17 @@ func (s *StorageService) computeInventoryHMAC(ctx context.Context, hmacKey []byt
 	if err != nil {
 		return nil, err
 	}
-	mac := hmac.New(sha256.New, hmacKey)
-	mac.Write(data)
-	return mac.Sum(nil), nil
+	return wholeBlobInventoryMAC(hmacKey, data), nil
+}
+
+// wholeBlobInventoryMAC is the whole-blob inventory integrity value:
+// HMAC-SHA256(key, blob). It is the single definition of the blob-backend HMAC
+// so the recompute-from-storage path (computeInventoryHMAC) and the
+// append-in-place path (AppendInventory) cannot diverge.
+func wholeBlobInventoryMAC(key, blob []byte) []byte {
+	mac := hmac.New(sha256.New, key)
+	mac.Write(blob)
+	return mac.Sum(nil)
 }
 
 // chainInventoryMAC advances the inventory hash chain by one entry:
@@ -715,11 +792,31 @@ func chainInventoryMAC(key, prev []byte, line string) []byte {
 	return mac.Sum(nil)
 }
 
+// InventoryTimeFormat is the layout for the NotBefore/NotAfter timestamps in
+// an inventory.txt line. It is part of the on-disk wire format. The trailing
+// "UTC" is a literal in the layout (Go's zone token is "MST"), so formatting a
+// UTC time records its wall-clock digits and parsing yields them back as UTC.
+const InventoryTimeFormat = "2006-01-02T15:04:05UTC"
+
 // canonicalInventoryLine renders e to its inventory.txt line (without the
 // trailing newline). It is the single source of truth for the on-disk blob
 // format and the input to the integrity hash chain, so the two cannot drift.
 func canonicalInventoryLine(e InventoryEntry) string {
 	return fmt.Sprintf("%s %s %s /%s", e.Serial, e.NotBefore, e.NotAfter, e.Subject)
+}
+
+// FormatInventoryLine builds the canonical inventory.txt line (without the
+// trailing newline) from the semantic fields, formatting the timestamps in UTC
+// via InventoryTimeFormat. Issuance paths (signing, import) must construct
+// inventory lines through this single constructor so they cannot drift from the
+// reader/writer/HMAC format owned by canonicalInventoryLine.
+func FormatInventoryLine(serial string, notBefore, notAfter time.Time, subject string) string {
+	return canonicalInventoryLine(InventoryEntry{
+		Serial:    serial,
+		NotBefore: notBefore.UTC().Format(InventoryTimeFormat),
+		NotAfter:  notAfter.UTC().Format(InventoryTimeFormat),
+		Subject:   subject,
+	})
 }
 
 // parseInventoryEntry parses a single inventory.txt line into an InventoryEntry.
