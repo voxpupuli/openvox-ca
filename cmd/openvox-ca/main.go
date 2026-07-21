@@ -372,7 +372,13 @@ func newRootCmd() *cobra.Command {
 				return err
 			}
 			if logFile != nil {
-				defer logFile.Close()
+				defer func() {
+					// Report on stderr, not slog: the default logger writes to
+					// this very file, which is being closed here.
+					if cerr := logFile.Close(); cerr != nil {
+						fmt.Fprintf(os.Stderr, "failed to close log file: %v\n", cerr)
+					}
+				}()
 			}
 
 			slog.Info("Starting Puppet CA",
@@ -742,7 +748,13 @@ func runSignerMode(ctx context.Context, cfg *serverConfig, absCADir string) erro
 		slog.Warn("Failed to open log file, using stderr", "error", err)
 	}
 	if logFile != nil {
-		defer logFile.Close()
+		defer func() {
+			// Report on stderr, not slog: the default logger writes to this
+			// very file, which is being closed here.
+			if cerr := logFile.Close(); cerr != nil {
+				fmt.Fprintf(os.Stderr, "failed to close log file: %v\n", cerr)
+			}
+		}()
 	}
 
 	slog.Info("Starting CA signer process",
