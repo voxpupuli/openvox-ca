@@ -199,7 +199,7 @@ func (s *StorageService) AppendInventory(ctx context.Context, entry string) erro
 		return fmt.Errorf("malformed inventory entry %q", entry)
 	}
 
-	if store, ok := s.backend.(InventoryStore); ok {
+	if store, ok := asInventoryStore(s.backend); ok {
 		var newHead func(prev []byte) []byte
 		if s.hmacKey != nil {
 			key := s.hmacKey
@@ -293,7 +293,7 @@ func (s *StorageService) SerialExists(ctx context.Context, serial string) (bool,
 // inventory blob (verifying its HMAC first, via ReadInventory). Wraps
 // os.ErrNotExist when the subject has no entry.
 func (s *StorageService) LatestSerialForSubject(ctx context.Context, subject string) (string, error) {
-	if store, ok := s.backend.(InventoryStore); ok {
+	if store, ok := asInventoryStore(s.backend); ok {
 		s.inventoryMu.RLock()
 		defer s.inventoryMu.RUnlock()
 		return store.LatestSerialForSubject(ctx, subject)
@@ -322,7 +322,7 @@ func (s *StorageService) ReadInventory(ctx context.Context) ([]byte, error) {
 // InventoryStore backends it reads the structured rows; otherwise it parses the
 // rendered blob. Caller must hold inventoryMu (read or write).
 func (s *StorageService) inventoryEntriesLocked(ctx context.Context) ([]InventoryEntry, error) {
-	if store, ok := s.backend.(InventoryStore); ok {
+	if store, ok := asInventoryStore(s.backend); ok {
 		return store.Entries(ctx)
 	}
 	data, err := s.readInventoryForHMAC(ctx)
@@ -370,7 +370,7 @@ func (s *StorageService) PruneInventory(ctx context.Context, keep func(Inventory
 	// Structured backends prune rows and rewrite the chained integrity head in a
 	// single transaction, so the two can never be observed out of sync across
 	// replicas (mirroring the atomic AppendEntry path).
-	if store, ok := s.backend.(InventoryStore); ok {
+	if store, ok := asInventoryStore(s.backend); ok {
 		var recomputeHead func(survivors []InventoryEntry) []byte
 		if s.hmacKey != nil {
 			key := s.hmacKey
@@ -750,7 +750,7 @@ func (s *StorageService) EnsureHMACKey(ctx context.Context) ([]byte, error) {
 // missing blob hashes the same as an empty one.
 // Caller must hold inventoryMu.
 func (s *StorageService) computeInventoryHMAC(ctx context.Context, hmacKey []byte) ([]byte, error) {
-	if store, ok := s.backend.(InventoryStore); ok {
+	if store, ok := asInventoryStore(s.backend); ok {
 		entries, err := store.Entries(ctx)
 		if err != nil {
 			return nil, err
