@@ -1,0 +1,45 @@
+# OpenBao service for the Transit-signer Go integration suite
+# (internal/signer/openbao, build tag `openbao_integration`).
+#
+# Like compose-backends-postgres.yml, this only provides the OpenBao dev
+# server the integration tests need (not a full Puppet stack). The
+# `mage test:backendsOpenBao` target brings it up, configures the transit
+# engine and an AppRole scoped to a test key (see magefile.go), then runs:
+#
+#   go test -tags openbao_integration ./internal/signer/openbao/...
+#
+# Dev mode is fine here: the suite always starts from a throwaway instance and
+# configures it itself, and dev mode's single-unseal-key/root-token model
+# needs no extra setup to reach a ready, authenticated server.
+
+name: openvox-ca-backends-openbao
+
+services:
+  openbao:
+    # Kept in step with the openbao/openbao/api SDK version in go.mod (v2.6.0)
+    # so the integration suite exercises a matching server, not an older one.
+    image: docker.io/openbao/openbao:2.6.0@sha256:900bb64d0671cd1d82b693c56206f7263b582445f3a3bb6ba6e5213f524a6653
+    command: ["server", "-dev", "-dev-listen-address=0.0.0.0:8200"]
+    environment:
+      # Dev-mode only: this is an ephemeral, in-memory OpenBao brought up solely
+      # for the integration suite and torn down after it. The fixed root token
+      # lets the mage target provision the transit engine and a scoped AppRole;
+      # it is never used by openvox-ca itself (which authenticates via that
+      # AppRole) and must never appear in a non-dev deployment.
+      BAO_DEV_ROOT_TOKEN_ID: root
+    cap_add:
+      # Dev mode wants to mlock memory; without this it only warns, but
+      # granting it avoids the warning entirely.
+      - IPC_LOCK
+    ports:
+      # Host 58200 -> container 8200, matching PUPPET_CA_TEST_OPENBAO_ADDR used
+      # by the mage target (OpenBao's standard port, "5"-prefixed per the
+      # other compose-backends-*.yml files' convention).
+      - "58200:8200"
+    healthcheck:
+      test: ["CMD", "bao", "status", "-address=http://127.0.0.1:8200"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    # In-memory only: dev mode never persists to disk, and the integration
+    # suite never needs OpenBao state to survive a restart.

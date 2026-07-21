@@ -112,10 +112,20 @@ type CA struct {
 	// Set before calling Init(). When set, Init() skips key file loading and
 	// the key-cert match verification (the signer process verifies this).
 	ExternalSigner crypto.Signer
-	serialIndex    map[string]string         // uppercase hex serial (no leading zeros) → subject; protected by mu
-	ocspCache      map[string]ocspCacheEntry // same key; protected by mu
-	cachedCRL      *x509.RevocationList      // in-memory CRL for auth checks; protected by mu
-	mu             sync.RWMutex
+
+	// KeyProvider, when non-nil, is consulted instead of the local PEM-file
+	// logic (loadCAKeyFromDisk/generateKey/SaveCAKey) for loading or
+	// bootstrapping the CA's private key — e.g. internal/signer/openbao's
+	// OpenBao Transit-backed provider. Set before calling Init(), only in
+	// the process that actually holds/reaches the key (the isolated signer
+	// child, or the single-process role); mutually exclusive with
+	// ExternalSigner, which is used by the frontend instead. See
+	// keyprovider.go.
+	KeyProvider KeyProvider
+	serialIndex map[string]string         // uppercase hex serial (no leading zeros) → subject; protected by mu
+	ocspCache   map[string]ocspCacheEntry // same key; protected by mu
+	cachedCRL   *x509.RevocationList      // in-memory CRL for auth checks; protected by mu
+	mu          sync.RWMutex
 }
 
 func New(s *storage.StorageService, autosignCfg AutosignConfig, hostname string) *CA {

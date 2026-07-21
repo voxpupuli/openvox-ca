@@ -21,6 +21,7 @@ Task. Invoke targets with `go run mage.go <Target>` or the `mage` binary:
 | `mage test:backendsEtcd` | etcd backend integration suite (embedded etcd) |
 | `mage test:backendsRedis` | Redis backend full-stack bash TAP suite (Puppet topology) |
 | `mage test:backendsRedisGo` | Redis backend Go integration suite (build tag `redis_integration`) |
+| `mage test:backendsOpenBao` | OpenBao Transit signer integration suite (build tag `openbao_integration`, `compose-backends-openbao.yml`) |
 
 `golangci-lint` is pinned in CI (`.github/workflows/ci.yml`). Build it with the
 repository's Go toolchain (`go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@<pinned>`);
@@ -134,7 +135,7 @@ var _ = Describe("etcd backend", func() { /* … */ })
 ```
 
 The build tags in use are `etcd_integration`, `redis_integration`,
-`postgres_integration`, and `mysql_integration`. Each backend integration suite
+`postgres_integration`, `mysql_integration`, and `openbao_integration`. Each backend integration suite
 must be reachable from a `magefile.go` `Test.Backends*` target so it runs in CI;
 a build-tagged suite wired to no target is dead code.
 

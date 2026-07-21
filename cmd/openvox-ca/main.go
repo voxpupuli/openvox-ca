@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/voxpupuli/openvox-ca/internal/api"
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/metrics"
@@ -204,6 +205,13 @@ func newRootCmd() *cobra.Command {
 		sqlDSN                  string
 		caCertFile              string
 		caKeyFile               string
+
+		// CA key provider (--ca-key-provider) and --openbao-* flags. Grouped
+		// into a struct with register/apply helpers so the flag→config mapping
+		// is unit-testable (see flags_openbao_test.go); the mapping includes
+		// security-relevant fields (TLS cert/key, role_id/secret_id) where a
+		// silent transposition would be a credential/trust bug.
+		obFlags openBaoFlagValues
 	)
 
 	cmd := &cobra.Command{
@@ -314,9 +322,13 @@ func newRootCmd() *cobra.Command {
 			if cmd.Flags().Changed("ca-key-file") {
 				cfg.CAKeyFile = caKeyFile
 			}
+			applyOpenBaoFlagOverrides(cmd, cfg, &obFlags)
 			// --- Validation ---
 			if cfg.CADir == "" {
 				return fmt.Errorf("--cadir is required (or set PUPPET_CA_CADIR / cadir in config file)")
+			}
+			if err := cfg.CAKeyProviderConfig.Validate(); err != nil {
+				return err
 			}
 
 			absCADir, err := filepath.Abs(cfg.CADir)
@@ -507,6 +519,17 @@ func newRootCmd() *cobra.Command {
 			// NIST 800-53: SC-3 (Security Function Isolation)
 			if remoteSigner != nil {
 				myCA.ExternalSigner = remoteSigner
+			} else if cfg.UsesOpenBao() {
+				// Single-process mode (--single-process) with an OpenBao key
+				// provider: this is the one role, other than the isolated
+				// signer child, that ever reaches the CA key -- and here that
+				// "key" is a Transit key that never leaves OpenBao.
+				tm, provider, err := newOpenBaoKeyProvider(ctx, cfg)
+				if err != nil {
+					return fmt.Errorf("initialising OpenBao key provider: %w", err)
+				}
+				defer func() { _ = tm.Close() }()
+				myCA.KeyProvider = provider
 			}
 
 			if err := myCA.Init(ctx); err != nil {
@@ -728,8 +751,81 @@ func newRootCmd() *cobra.Command {
 	f.StringVar(&sqlDSN, "sql-dsn", "", "SQL data source name (SQLite 'file:/var/lib/puppet-ca/ca.db', PostgreSQL 'postgres://user:pass@host:5432/db?sslmode=require', or MySQL 'user:pass@tcp(host:3306)/db')")
 	f.StringVar(&caCertFile, "ca-cert-file", "", "Keep the CA certificate at this local path regardless of storage backend")
 	f.StringVar(&caKeyFile, "ca-key-file", "", "Keep the CA private key at this local path regardless of storage backend")
+	registerOpenBaoFlags(f, &obFlags)
 
 	return cmd
+}
+
+// openBaoFlagValues holds the string targets for the --ca-key-provider and
+// --openbao-* flags. Grouped so registerOpenBaoFlags and
+// applyOpenBaoFlagOverrides can be exercised by a unit test independently of
+// the full server startup in newRootCmd's RunE.
+type openBaoFlagValues struct {
+	caKeyProvider       string
+	addr                string
+	transitMount        string
+	keyName             string
+	tlsCAFile           string
+	tlsCertFile         string
+	tlsKeyFile          string
+	authMethod          string
+	appRoleMount        string
+	appRoleRoleID       string
+	appRoleRoleIDFile   string
+	appRoleSecretIDFile string
+	tokenFile           string
+	k8sMount            string
+	k8sRole             string
+	k8sJWTFile          string
+}
+
+// registerOpenBaoFlags registers the --ca-key-provider and --openbao-* flags
+// on f, binding them to v.
+func registerOpenBaoFlags(f *pflag.FlagSet, v *openBaoFlagValues) {
+	f.StringVar(&v.caKeyProvider, "ca-key-provider", "", "CA private key custody: 'file' (default) or 'openbao' (delegate key custody and signing to an OpenBao Transit key)")
+	f.StringVar(&v.addr, "openbao-addr", "", "OpenBao server address as a full URI including scheme and port, e.g. https://openbao.example.com:8200 (http:// also accepted); used when --ca-key-provider openbao")
+	f.StringVar(&v.transitMount, "openbao-transit-mount", "", "OpenBao Transit secrets engine mount path (default 'transit')")
+	f.StringVar(&v.keyName, "openbao-key-name", "", "Name of the OpenBao Transit key backing the CA's private key")
+	f.StringVar(&v.tlsCAFile, "openbao-tls-ca-file", "", "PEM CA bundle to verify the OpenBao server's certificate")
+	f.StringVar(&v.tlsCertFile, "openbao-tls-cert-file", "", "Client certificate PEM for mTLS to OpenBao")
+	f.StringVar(&v.tlsKeyFile, "openbao-tls-key-file", "", "Client private key PEM for mTLS to OpenBao")
+	f.StringVar(&v.authMethod, "openbao-auth-method", "", "OpenBao auth method: 'approle', 'token', or 'kubernetes' (required when --ca-key-provider openbao; no default)")
+	f.StringVar(&v.appRoleMount, "openbao-approle-mount", "", "AppRole auth method mount path (default 'approle')")
+	f.StringVar(&v.appRoleRoleID, "openbao-approle-role-id", "", "AppRole role_id (or use --openbao-approle-role-id-file)")
+	f.StringVar(&v.appRoleRoleIDFile, "openbao-approle-role-id-file", "", "Path to a file containing the AppRole role_id, read fresh on every login")
+	f.StringVar(&v.appRoleSecretIDFile, "openbao-approle-secret-id-file", "", "Path to a file containing the AppRole secret_id, read fresh on every login")
+	f.StringVar(&v.tokenFile, "openbao-token-file", "", "Path to a file containing a pre-issued OpenBao token (auth method 'token')")
+	f.StringVar(&v.k8sMount, "openbao-kubernetes-mount", "", "Kubernetes auth method mount path (default 'kubernetes')")
+	f.StringVar(&v.k8sRole, "openbao-kubernetes-role", "", "OpenBao Kubernetes auth role name")
+	f.StringVar(&v.k8sJWTFile, "openbao-kubernetes-jwt-file", "", "Path to the projected ServiceAccount token (default: the standard in-cluster path), read fresh on every login")
+}
+
+// applyOpenBaoFlagOverrides overlays each explicitly-set (Changed) flag in v
+// onto the matching cfg field. Only flags the operator actually passed take
+// effect, preserving any value already resolved from the config file or the
+// environment.
+func applyOpenBaoFlagOverrides(cmd *cobra.Command, cfg *serverConfig, v *openBaoFlagValues) {
+	set := func(flag string, apply func()) {
+		if cmd.Flags().Changed(flag) {
+			apply()
+		}
+	}
+	set("ca-key-provider", func() { cfg.CAKeyProvider = v.caKeyProvider })
+	set("openbao-addr", func() { cfg.OpenBao.Addr = v.addr })
+	set("openbao-transit-mount", func() { cfg.OpenBao.TransitMount = v.transitMount })
+	set("openbao-key-name", func() { cfg.OpenBao.KeyName = v.keyName })
+	set("openbao-tls-ca-file", func() { cfg.OpenBao.TLSCAFile = v.tlsCAFile })
+	set("openbao-tls-cert-file", func() { cfg.OpenBao.TLSCertFile = v.tlsCertFile })
+	set("openbao-tls-key-file", func() { cfg.OpenBao.TLSKeyFile = v.tlsKeyFile })
+	set("openbao-auth-method", func() { cfg.OpenBao.AuthMethod = v.authMethod })
+	set("openbao-approle-mount", func() { cfg.OpenBao.AppRoleMount = v.appRoleMount })
+	set("openbao-approle-role-id", func() { cfg.OpenBao.AppRoleRoleID = v.appRoleRoleID })
+	set("openbao-approle-role-id-file", func() { cfg.OpenBao.AppRoleRoleIDFile = v.appRoleRoleIDFile })
+	set("openbao-approle-secret-id-file", func() { cfg.OpenBao.AppRoleSecretIDFile = v.appRoleSecretIDFile })
+	set("openbao-token-file", func() { cfg.OpenBao.TokenFile = v.tokenFile })
+	set("openbao-kubernetes-mount", func() { cfg.OpenBao.KubernetesMount = v.k8sMount })
+	set("openbao-kubernetes-role", func() { cfg.OpenBao.KubernetesRole = v.k8sRole })
+	set("openbao-kubernetes-jwt-file", func() { cfg.OpenBao.KubernetesJWTFile = v.k8sJWTFile })
 }
 
 // runSignerMode runs the isolated CA key signer process. It initializes the CA
@@ -777,6 +873,21 @@ func runSignerMode(ctx context.Context, cfg *serverConfig, absCADir string) erro
 	myCA := ca.New(store, ca.AutosignConfig{}, cfg.Hostname)
 	if err := applyCAConfig(myCA, cfg); err != nil {
 		return err
+	}
+
+	// SECURITY: when configured, the CA's own private key is never loaded
+	// here at all -- it lives in OpenBao's Transit engine, and only a digest
+	// ever crosses the wire to sign it. This is the same security posture
+	// class as the local-key case (key confined to this isolated process),
+	// extended one step further: the key doesn't exist in this process
+	// either.
+	if cfg.UsesOpenBao() {
+		tm, provider, err := newOpenBaoKeyProvider(ctx, cfg)
+		if err != nil {
+			return fmt.Errorf("initialising OpenBao key provider: %w", err)
+		}
+		defer func() { _ = tm.Close() }()
+		myCA.KeyProvider = provider
 	}
 
 	if err := myCA.Init(ctx); err != nil {

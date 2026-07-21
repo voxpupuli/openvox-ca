@@ -61,6 +61,22 @@ var serverEnvVars = []string{
 	"PUPPET_CA_ENABLE_EXPIRED_CERT_CLEANUP",
 	"PUPPET_CA_EXPIRED_CERT_RETENTION_SEC",
 	"PUPPET_CA_EXPIRED_CERT_CLEANUP_INTERVAL_SEC",
+	"PUPPET_CA_CA_KEY_PROVIDER",
+	"PUPPET_CA_OPENBAO_ADDR",
+	"PUPPET_CA_OPENBAO_TRANSIT_MOUNT",
+	"PUPPET_CA_OPENBAO_KEY_NAME",
+	"PUPPET_CA_OPENBAO_TLS_CA_FILE",
+	"PUPPET_CA_OPENBAO_TLS_CERT_FILE",
+	"PUPPET_CA_OPENBAO_TLS_KEY_FILE",
+	"PUPPET_CA_OPENBAO_AUTH_METHOD",
+	"PUPPET_CA_OPENBAO_APPROLE_MOUNT",
+	"PUPPET_CA_OPENBAO_APPROLE_ROLE_ID",
+	"PUPPET_CA_OPENBAO_APPROLE_ROLE_ID_FILE",
+	"PUPPET_CA_OPENBAO_APPROLE_SECRET_ID_FILE",
+	"PUPPET_CA_OPENBAO_TOKEN_FILE",
+	"PUPPET_CA_OPENBAO_KUBERNETES_MOUNT",
+	"PUPPET_CA_OPENBAO_KUBERNETES_ROLE",
+	"PUPPET_CA_OPENBAO_KUBERNETES_JWT_FILE",
 }
 
 // setEnv sets an environment variable for the duration of the current spec,
@@ -355,6 +371,72 @@ leaf_validity_days: 1825
 		}
 	})
 
+	It("parses the ca_key_provider and nested openbao block", func() {
+		clearServerEnv()
+
+		content := `
+ca_key_provider: openbao
+openbao:
+  addr: https://bao.example.com:8200
+  transit_mount: transit-x
+  key_name: my-ca-key
+  tls_ca_file: /tls/ca.pem
+  tls_cert_file: /tls/cert.pem
+  tls_key_file: /tls/key.pem
+  auth_method: approle
+  approle_mount: approle-x
+  approle_role_id: role-id-val
+  approle_role_id_file: /creds/role-id
+  approle_secret_id_file: /creds/secret-id
+  token_file: /creds/token
+  kubernetes_mount: k8s-x
+  kubernetes_role: k8s-role
+  kubernetes_jwt_file: /creds/sa.jwt
+`
+		cfgFile := writeTempConfig(content)
+
+		cfg, err := loadServerConfig(cfgFile)
+		Expect(err).NotTo(HaveOccurred(), "unexpected error")
+		checks := []struct {
+			field string
+			got   interface{}
+			want  interface{}
+		}{
+			{"CAKeyProvider", cfg.CAKeyProvider, "openbao"},
+			{"OpenBao.Addr", cfg.OpenBao.Addr, "https://bao.example.com:8200"},
+			{"OpenBao.TransitMount", cfg.OpenBao.TransitMount, "transit-x"},
+			{"OpenBao.KeyName", cfg.OpenBao.KeyName, "my-ca-key"},
+			{"OpenBao.TLSCAFile", cfg.OpenBao.TLSCAFile, "/tls/ca.pem"},
+			{"OpenBao.TLSCertFile", cfg.OpenBao.TLSCertFile, "/tls/cert.pem"},
+			{"OpenBao.TLSKeyFile", cfg.OpenBao.TLSKeyFile, "/tls/key.pem"},
+			{"OpenBao.AuthMethod", cfg.OpenBao.AuthMethod, "approle"},
+			{"OpenBao.AppRoleMount", cfg.OpenBao.AppRoleMount, "approle-x"},
+			{"OpenBao.AppRoleRoleID", cfg.OpenBao.AppRoleRoleID, "role-id-val"},
+			{"OpenBao.AppRoleRoleIDFile", cfg.OpenBao.AppRoleRoleIDFile, "/creds/role-id"},
+			{"OpenBao.AppRoleSecretIDFile", cfg.OpenBao.AppRoleSecretIDFile, "/creds/secret-id"},
+			{"OpenBao.TokenFile", cfg.OpenBao.TokenFile, "/creds/token"},
+			{"OpenBao.KubernetesMount", cfg.OpenBao.KubernetesMount, "k8s-x"},
+			{"OpenBao.KubernetesRole", cfg.OpenBao.KubernetesRole, "k8s-role"},
+			{"OpenBao.KubernetesJWTFile", cfg.OpenBao.KubernetesJWTFile, "/creds/sa.jwt"},
+		}
+		for _, c := range checks {
+			Expect(c.got).To(Equal(c.want), "%s = %v; want %v", c.field, c.got, c.want)
+		}
+	})
+
+	// A config with no ca_key_provider key parses to the empty default, which
+	// UsesOpenBao()/Validate() treat as local-file custody. This pins that an
+	// omitted key does not accidentally select openbao (or fail to parse).
+	It("defaults ca_key_provider to empty (file custody) when the key is absent", func() {
+		clearServerEnv()
+
+		cfgFile := writeTempConfig("cadir: /tmp/partial\n")
+		cfg, err := loadServerConfig(cfgFile)
+		Expect(err).NotTo(HaveOccurred(), "unexpected error")
+		Expect(cfg.CAKeyProvider).To(BeEmpty(), "CAKeyProvider = %q; want empty", cfg.CAKeyProvider)
+		Expect(cfg.UsesOpenBao()).To(BeFalse(), "UsesOpenBao() = true; want false for an absent key")
+	})
+
 	// Unset YAML keys keep built-in defaults.
 	It("keeps built-in defaults for unset keys", func() {
 		clearServerEnv()
@@ -382,6 +464,18 @@ var _ = Describe("loadServerConfig env overrides YAML", func() {
 		Expect(err).NotTo(HaveOccurred(), "unexpected error")
 		Expect(cfg.Host).To(Equal("192.168.1.1"), "Host = %q; want env value 192.168.1.1", cfg.Host)
 		Expect(cfg.Port).To(Equal(7777), "Port = %d; want env value 7777", cfg.Port)
+	})
+
+	It("prefers the ca_key_provider env value over YAML", func() {
+		clearServerEnv()
+
+		cfgFile := writeTempConfig("ca_key_provider: file\n")
+		setEnv("PUPPET_CA_CA_KEY_PROVIDER", "openbao")
+
+		cfg, err := loadServerConfig(cfgFile)
+		Expect(err).NotTo(HaveOccurred(), "unexpected error")
+		Expect(cfg.CAKeyProvider).To(Equal("openbao"),
+			"CAKeyProvider = %q; want env value openbao", cfg.CAKeyProvider)
 	})
 })
 
@@ -477,6 +571,42 @@ var _ = Describe("applyServerEnv each variable", func() {
 			func(c *serverConfig) bool { return c.CRLRefreshIntervalSec == 900 }, "CRLRefreshIntervalSec"),
 		Entry("CRL_REFRESH_BEFORE_SEC", "PUPPET_CA_CRL_REFRESH_BEFORE_SEC", "86400",
 			func(c *serverConfig) bool { return c.CRLRefreshBeforeSec == 86400 }, "CRLRefreshBeforeSec"),
+		// CA key provider selection and OpenBao settings. Each entry uses a
+		// distinct value and asserts the specific destination field, so a
+		// wrong target (e.g. role-id <-> secret-id, or tls_cert <-> tls_key —
+		// both security-relevant) fails rather than passing silently.
+		Entry("CA_KEY_PROVIDER", "PUPPET_CA_CA_KEY_PROVIDER", "openbao",
+			func(c *serverConfig) bool { return c.CAKeyProvider == "openbao" }, "CAKeyProvider"),
+		Entry("OPENBAO_ADDR", "PUPPET_CA_OPENBAO_ADDR", "https://bao:8200",
+			func(c *serverConfig) bool { return c.OpenBao.Addr == "https://bao:8200" }, "OpenBao.Addr"),
+		Entry("OPENBAO_TRANSIT_MOUNT", "PUPPET_CA_OPENBAO_TRANSIT_MOUNT", "transit-x",
+			func(c *serverConfig) bool { return c.OpenBao.TransitMount == "transit-x" }, "OpenBao.TransitMount"),
+		Entry("OPENBAO_KEY_NAME", "PUPPET_CA_OPENBAO_KEY_NAME", "ca-key",
+			func(c *serverConfig) bool { return c.OpenBao.KeyName == "ca-key" }, "OpenBao.KeyName"),
+		Entry("OPENBAO_TLS_CA_FILE", "PUPPET_CA_OPENBAO_TLS_CA_FILE", "/tls/ca.pem",
+			func(c *serverConfig) bool { return c.OpenBao.TLSCAFile == "/tls/ca.pem" }, "OpenBao.TLSCAFile"),
+		Entry("OPENBAO_TLS_CERT_FILE", "PUPPET_CA_OPENBAO_TLS_CERT_FILE", "/tls/cert.pem",
+			func(c *serverConfig) bool { return c.OpenBao.TLSCertFile == "/tls/cert.pem" }, "OpenBao.TLSCertFile"),
+		Entry("OPENBAO_TLS_KEY_FILE", "PUPPET_CA_OPENBAO_TLS_KEY_FILE", "/tls/key.pem",
+			func(c *serverConfig) bool { return c.OpenBao.TLSKeyFile == "/tls/key.pem" }, "OpenBao.TLSKeyFile"),
+		Entry("OPENBAO_AUTH_METHOD", "PUPPET_CA_OPENBAO_AUTH_METHOD", "kubernetes",
+			func(c *serverConfig) bool { return c.OpenBao.AuthMethod == "kubernetes" }, "OpenBao.AuthMethod"),
+		Entry("OPENBAO_APPROLE_MOUNT", "PUPPET_CA_OPENBAO_APPROLE_MOUNT", "approle-x",
+			func(c *serverConfig) bool { return c.OpenBao.AppRoleMount == "approle-x" }, "OpenBao.AppRoleMount"),
+		Entry("OPENBAO_APPROLE_ROLE_ID", "PUPPET_CA_OPENBAO_APPROLE_ROLE_ID", "role-id-val",
+			func(c *serverConfig) bool { return c.OpenBao.AppRoleRoleID == "role-id-val" }, "OpenBao.AppRoleRoleID"),
+		Entry("OPENBAO_APPROLE_ROLE_ID_FILE", "PUPPET_CA_OPENBAO_APPROLE_ROLE_ID_FILE", "/creds/role-id",
+			func(c *serverConfig) bool { return c.OpenBao.AppRoleRoleIDFile == "/creds/role-id" }, "OpenBao.AppRoleRoleIDFile"),
+		Entry("OPENBAO_APPROLE_SECRET_ID_FILE", "PUPPET_CA_OPENBAO_APPROLE_SECRET_ID_FILE", "/creds/secret-id",
+			func(c *serverConfig) bool { return c.OpenBao.AppRoleSecretIDFile == "/creds/secret-id" }, "OpenBao.AppRoleSecretIDFile"),
+		Entry("OPENBAO_TOKEN_FILE", "PUPPET_CA_OPENBAO_TOKEN_FILE", "/creds/token",
+			func(c *serverConfig) bool { return c.OpenBao.TokenFile == "/creds/token" }, "OpenBao.TokenFile"),
+		Entry("OPENBAO_KUBERNETES_MOUNT", "PUPPET_CA_OPENBAO_KUBERNETES_MOUNT", "k8s-x",
+			func(c *serverConfig) bool { return c.OpenBao.KubernetesMount == "k8s-x" }, "OpenBao.KubernetesMount"),
+		Entry("OPENBAO_KUBERNETES_ROLE", "PUPPET_CA_OPENBAO_KUBERNETES_ROLE", "k8s-role",
+			func(c *serverConfig) bool { return c.OpenBao.KubernetesRole == "k8s-role" }, "OpenBao.KubernetesRole"),
+		Entry("OPENBAO_KUBERNETES_JWT_FILE", "PUPPET_CA_OPENBAO_KUBERNETES_JWT_FILE", "/creds/sa.jwt",
+			func(c *serverConfig) bool { return c.OpenBao.KubernetesJWTFile == "/creds/sa.jwt" }, "OpenBao.KubernetesJWTFile"),
 	)
 
 	// Malformed values are silently ignored.

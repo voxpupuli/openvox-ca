@@ -350,6 +350,26 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 		}
 	}
 
+	// SECURITY: two complementary controls guard against signing under a key
+	// that doesn't match the CA certificate (e.g. an OpenBao Transit key
+	// rotated out from under a running CA):
+	//   1. loadCA pins c.CAKey.Public() to c.CACert at startup (init.go), so a
+	//      key that already doesn't match the CA cert is caught before serving.
+	//   2. x509.CreateCertificate re-verifies the signature the signer returned
+	//      against c.CAKey.Public() before handing the certificate back. So if
+	//      the provider's key is rotated while running — the cached Public()
+	//      still matches the CA cert, but the provider now signs with the new
+	//      key — the returned signature fails that re-verification and this
+	//      call errors rather than emitting a certificate no verifier could
+	//      validate. (CreateCertificate does not itself compare priv.Public()
+	//      against the parent cert; control 1 is what ties the key to the cert.)
+	// For the OpenBao provider the signer additionally self-verifies the
+	// returned signature against its published public key (see
+	// verifyTransitSignature), so the same drift surfaces as a clear error at
+	// the signer too. This is a purely in-process check: no extra provider
+	// round trip, and under key isolation no RPC beyond the one Sign this call
+	// already makes.
+	// NIST 800-53: SC-12 (Cryptographic Key Establishment and Management)
 	certBytes, err := x509.CreateCertificate(rand.Reader, template, c.CACert, csr.PublicKey, c.CAKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign certificate for %s: %w", subject, err)

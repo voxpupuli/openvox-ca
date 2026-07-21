@@ -122,6 +122,16 @@ type serverConfig struct {
 	// remain at the top level. Shared with the operator CLI's migrate command
 	// via config.StorageConfig.
 	config.StorageConfig `yaml:",inline"`
+
+	// CA key provider selection (ca_key_provider) and, when it selects
+	// "openbao", the nested "openbao" settings block. Embedded inline so
+	// ca_key_provider stays at the top level like StorageConfig's keys above.
+	// The type lives in the shared config package (config.CAKeyProviderConfig)
+	// so a future operator-CLI command can reuse it; today only the server
+	// consumes it. "file" (default, unset) preserves today's local-key
+	// behaviour; "openbao" delegates key custody and signing to an OpenBao
+	// Transit key (internal/signer/openbao).
+	config.CAKeyProviderConfig `yaml:",inline"`
 }
 
 // loadServerConfig applies built-in defaults, optionally loads a YAML config
@@ -500,6 +510,54 @@ func applyServerEnv(cfg *serverConfig) {
 	}
 	if v := os.Getenv("PUPPET_CA_CA_KEY_FILE"); v != "" {
 		cfg.CAKeyFile = v
+	}
+	if v := os.Getenv("PUPPET_CA_CA_KEY_PROVIDER"); v != "" {
+		cfg.CAKeyProvider = v
+	}
+	if v := os.Getenv("PUPPET_CA_OPENBAO_ADDR"); v != "" {
+		cfg.OpenBao.Addr = v
+	}
+	if v := os.Getenv("PUPPET_CA_OPENBAO_TRANSIT_MOUNT"); v != "" {
+		cfg.OpenBao.TransitMount = v
+	}
+	if v := os.Getenv("PUPPET_CA_OPENBAO_KEY_NAME"); v != "" {
+		cfg.OpenBao.KeyName = v
+	}
+	if v := os.Getenv("PUPPET_CA_OPENBAO_TLS_CA_FILE"); v != "" {
+		cfg.OpenBao.TLSCAFile = v
+	}
+	if v := os.Getenv("PUPPET_CA_OPENBAO_TLS_CERT_FILE"); v != "" {
+		cfg.OpenBao.TLSCertFile = v
+	}
+	if v := os.Getenv("PUPPET_CA_OPENBAO_TLS_KEY_FILE"); v != "" {
+		cfg.OpenBao.TLSKeyFile = v
+	}
+	if v := os.Getenv("PUPPET_CA_OPENBAO_AUTH_METHOD"); v != "" {
+		cfg.OpenBao.AuthMethod = v
+	}
+	if v := os.Getenv("PUPPET_CA_OPENBAO_APPROLE_MOUNT"); v != "" {
+		cfg.OpenBao.AppRoleMount = v
+	}
+	if v := os.Getenv("PUPPET_CA_OPENBAO_APPROLE_ROLE_ID"); v != "" {
+		cfg.OpenBao.AppRoleRoleID = v
+	}
+	if v := os.Getenv("PUPPET_CA_OPENBAO_APPROLE_ROLE_ID_FILE"); v != "" {
+		cfg.OpenBao.AppRoleRoleIDFile = v
+	}
+	if v := os.Getenv("PUPPET_CA_OPENBAO_APPROLE_SECRET_ID_FILE"); v != "" {
+		cfg.OpenBao.AppRoleSecretIDFile = v
+	}
+	if v := os.Getenv("PUPPET_CA_OPENBAO_TOKEN_FILE"); v != "" {
+		cfg.OpenBao.TokenFile = v
+	}
+	if v := os.Getenv("PUPPET_CA_OPENBAO_KUBERNETES_MOUNT"); v != "" {
+		cfg.OpenBao.KubernetesMount = v
+	}
+	if v := os.Getenv("PUPPET_CA_OPENBAO_KUBERNETES_ROLE"); v != "" {
+		cfg.OpenBao.KubernetesRole = v
+	}
+	if v := os.Getenv("PUPPET_CA_OPENBAO_KUBERNETES_JWT_FILE"); v != "" {
+		cfg.OpenBao.KubernetesJWTFile = v
 	}
 }
 
