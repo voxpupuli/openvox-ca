@@ -240,5 +240,20 @@ var _ = Describe("InventoryMigrationRoundTripOverlayDestination", func() {
 		// (internal/ca/init.go Init -> InitHMAC -> VerifyInventoryHMAC). It
 		// must succeed, not report ErrInventoryTampered.
 		Expect(server.InitHMAC(ctx)).NotTo(HaveOccurred(), "InitHMAC on ca_key_file server after migrate")
+
+		// Reading back through the same overlay-wrapped server exercises two
+		// further asInventoryStore unwrap sites (inventoryEntriesLocked via
+		// ReadInventory, and LatestSerialForSubject) and confirms the inventory
+		// is served correctly through the wrapper, not merely that InitHMAC did
+		// not error.
+		srcText, err := src.ReadInventory(ctx)
+		Expect(err).NotTo(HaveOccurred(), "ReadInventory(src)")
+		got, err := server.ReadInventory(ctx)
+		Expect(err).NotTo(HaveOccurred(), "ReadInventory through overlay")
+		Expect(got).To(Equal(srcText), "inventory read back through overlay")
+
+		serial, err := server.LatestSerialForSubject(ctx, "node1")
+		Expect(err).NotTo(HaveOccurred(), "LatestSerialForSubject(node1) through overlay")
+		Expect(serial).To(Equal("0003"), "latest serial for node1 through overlay")
 	})
 })

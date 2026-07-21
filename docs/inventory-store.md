@@ -146,6 +146,13 @@ recomputes the destination's integrity head from its entries
 - **Filesystem, etcd, redis/valkey keep the blob.** They do not implement the
   interface; the type assertion fails and they behave exactly as before. Adding
   the capability to etcd/redis later is possible but not currently motivated.
+- **Wrapper backends unwrap to their base.** The probe is `asInventoryStore`,
+  not a bare `s.backend.(InventoryStore)`: it sees through wrappers such as
+  `OverlayBackend` (the `ca_cert_file`/`ca_key_file` local-override wrapper) via
+  their `Unwrap()` method, so a SQL backend underneath keeps its hash-chain
+  scheme rather than being downgraded to the whole-blob HMAC. Overriding only
+  the cert/key blobs never touches the inventory, so consulting the base is
+  always correct.
 - **OCSP is untouched**: the in-memory serial index is still built at startup
   and updated on signing.
 
