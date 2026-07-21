@@ -19,6 +19,11 @@ package ca_test
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
+	"fmt"
+	"math/big"
 	"os"
 	"time"
 
@@ -96,22 +101,46 @@ var _ = Describe("CA CRL update notifications", func() {
 	It("signals on expired-cert cleanup", func() {
 		ctx := context.Background()
 
-		// Sign then revoke a cert so its serial is present in the CRL.
+		// Seed a revoked cert whose inventory NotAfter is already in the past, so
+		// cleanup prunes it and drops its serial from the CRL (a re-sign through
+		// signCRLLocked). The normal signing path can't backdate NotAfter, and
+		// appending a second inventory line for an already-issued serial is now
+		// rejected as a duplicate, so build the leaf directly against the cached
+		// test CA and give it a fresh serial.
+		keyBlock, _ := pem.Decode(cachedKeyPEM)
+		caKey, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		certBlock, _ := pem.Decode(cachedCrtPEM)
+		caCert, err := x509.ParseCertificate(certBlock.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+
 		csrPEM, err := testutil.GenerateCSR("cleanup-node")
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.SaveRequest(ctx, "cleanup-node", csrPEM)
+		csrBlock, _ := pem.Decode(csrPEM)
+		csr, err := x509.ParseCertificateRequest(csrBlock.Bytes)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.Sign(ctx, "cleanup-node")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(myCA.Revoke(ctx, "cleanup-node")).To(Succeed())
 
-		// Make the revoked cert look expired: append an inventory entry carrying
-		// its serial with a past NotAfter, so cleanup prunes it and drops it from
-		// the CRL (a re-sign through signCRLLocked).
-		serial, err := store.LatestSerialForSubject(ctx, "cleanup-node")
+		notAfter := time.Now().Add(-2 * 365 * 24 * time.Hour)
+		template := &x509.Certificate{
+			SerialNumber: big.NewInt(0xC1EA),
+			Subject:      csr.Subject,
+			NotBefore:    notAfter.Add(-365 * 24 * time.Hour),
+			NotAfter:     notAfter,
+		}
+		der, err := x509.CreateCertificate(rand.Reader, template, caCert, csr.PublicKey, caKey)
 		Expect(err).NotTo(HaveOccurred())
-		past := time.Now().Add(-2 * 365 * 24 * time.Hour).Format("2006-01-02T15:04:05UTC")
-		Expect(store.AppendInventory(ctx, serial+" "+past+" "+past+" /cleanup-node")).To(Succeed())
+		certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+		Expect(store.SaveCert(ctx, "cleanup-node", certPEM)).To(Succeed())
+
+		entry := fmt.Sprintf("%s %s %s /cleanup-node",
+			template.SerialNumber.Text(16),
+			template.NotBefore.Format("2006-01-02T15:04:05UTC"),
+			template.NotAfter.Format("2006-01-02T15:04:05UTC"))
+		Expect(store.AppendInventory(ctx, entry)).To(Succeed())
+
+		// Revoke so the serial is present in the CRL (Revoke resolves it from the
+		// inventory entry just appended).
+		Expect(myCA.Revoke(ctx, "cleanup-node")).To(Succeed())
 
 		// Drain the signal from the revoke so we observe the one from cleanup.
 		select {
