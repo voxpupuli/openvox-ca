@@ -1309,6 +1309,26 @@ var _ = Describe("API Workflow", func() {
 			Expect(renewed.SerialNumber.Cmp(clientCert.SerialNumber)).NotTo(Equal(0))
 		})
 
+		// The routing decision uses strings.TrimSpace, so a whitespace-only body
+		// (some clients send a trailing newline) must take the same auto-renewal
+		// path as a truly-empty one — not be treated as a malformed CSR. Guards
+		// against the check regressing to a bare len(body)==0.
+		It("should auto-renew when the body is whitespace only", func() {
+			req := httptest.NewRequest("POST", "/certificate_renewal", bytes.NewReader([]byte("  \n\t")))
+			req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{clientCert}}
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusOK))
+
+			block, _ := pem.Decode(rr.Body.Bytes())
+			Expect(block).NotTo(BeNil())
+			renewed, err := x509.ParseCertificate(block.Bytes)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(renewed.PublicKey).To(Equal(clientCert.PublicKey),
+				"whitespace-only body must route to auto-renewal and reissue the same key")
+			Expect(renewed.SerialNumber.Cmp(clientCert.SerialNumber)).NotTo(Equal(0))
+		})
+
 		// A legacy-imported node may present a cert whose key predates this CA's
 		// key-strength policy. The empty-body auto-renewal path must surface that
 		// as a client-actionable 422 (re-key via CSR), not mask it behind a 500.

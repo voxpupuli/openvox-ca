@@ -198,37 +198,50 @@ var _ = Describe("CA AutoRenew", func() {
 		return parseCertPEM(certPEM)
 	}
 
-	// seedCertWithoutCSR mints a leaf certificate directly with the cached
-	// test CA's key and stores it as subject's cert, without ever writing a
-	// CSR to storage — simulating a certificate imported from a migration
-	// (see the storage migrate command) or any other cert whose CSR has
-	// since been cleaned up. AutoRenew must work from the certificate alone.
-	seedCertWithoutCSR := func(subject string) *x509.Certificate {
-		key, err := rsa.GenerateKey(rand.Reader, 2048)
+	// mintLeaf signs a leaf certificate directly with the cached test CA key
+	// from template — generating an RSA key of keyBits and a random 128-bit
+	// serial when the template has none — and returns the parsed certificate.
+	// It does not touch storage; callers that need the cert on disk store it
+	// themselves. This collapses the key-gen / serial / CreateCertificate
+	// scaffolding shared by the direct-mint specs below (which simulate certs
+	// imported from a legacy CA, where AutoRenew works from the cert alone).
+	mintLeaf := func(keyBits int, template *x509.Certificate) *x509.Certificate {
+		key, err := rsa.GenerateKey(rand.Reader, keyBits)
 		Expect(err).NotTo(HaveOccurred())
-		serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-		Expect(err).NotTo(HaveOccurred())
-		now := time.Now().UTC()
-		template := &x509.Certificate{
-			SerialNumber: serial,
-			Subject:      pkix.Name{CommonName: subject},
-			NotBefore:    now.Add(-24 * time.Hour),
-			NotAfter:     now.Add(365 * 24 * time.Hour),
-			DNSNames:     []string{subject},
+		if template.SerialNumber == nil {
+			serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+			Expect(err).NotTo(HaveOccurred())
+			template.SerialNumber = serial
 		}
 		der, err := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)
 		Expect(err).NotTo(HaveOccurred())
-		certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+		return parseCertPEM(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	}
+
+	// seedCertWithoutCSR mints a leaf certificate (via mintLeaf) and stores it
+	// as subject's cert, without ever writing a CSR to storage — simulating a
+	// certificate imported from a migration (see the storage migrate command)
+	// or any other cert whose CSR has since been cleaned up. AutoRenew must
+	// work from the certificate alone.
+	seedCertWithoutCSR := func(subject string) *x509.Certificate {
+		now := time.Now().UTC()
+		cert := mintLeaf(2048, &x509.Certificate{
+			Subject:   pkix.Name{CommonName: subject},
+			NotBefore: now.Add(-24 * time.Hour),
+			NotAfter:  now.Add(365 * 24 * time.Hour),
+			DNSNames:  []string{subject},
+		})
+		certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
 		Expect(store.SaveCert(ctx, subject, certPEM)).To(Succeed())
 
 		entry := fmt.Sprintf("%s %s %s /%s",
-			serial.Text(16),
-			template.NotBefore.Format("2006-01-02T15:04:05UTC"),
-			template.NotAfter.Format("2006-01-02T15:04:05UTC"),
+			cert.SerialNumber.Text(16),
+			cert.NotBefore.Format("2006-01-02T15:04:05UTC"),
+			cert.NotAfter.Format("2006-01-02T15:04:05UTC"),
 			subject)
 		Expect(store.AppendInventory(ctx, entry)).To(Succeed())
 
-		return parseCertPEM(certPEM)
+		return cert
 	}
 
 	BeforeEach(func() {
@@ -278,7 +291,34 @@ var _ = Describe("CA AutoRenew", func() {
 			"stored cert must match the auto-renewed serial")
 	})
 
-	It("carries the original certificate's SANs forward unchanged", func() {
+	It("extends the validity window, not just the serial", func() {
+		// The whole point of a renewal is a later expiry. Seed a nearly-expired
+		// cert (a few minutes of life left) so the reissue's fresh window — even
+		// after being capped to the test CA cert's own remaining lifetime — is
+		// unambiguously later. This can't rely on the happy-path spec, where the
+		// original and renewed windows differ only by the sub-second gap between
+		// two signings and both round to the same second. Guards a regression
+		// that reissued with the same or a shorter validity, leaving the agent's
+		// cert to expire on its original schedule despite a "successful" renewal.
+		now := time.Now().UTC()
+		original := mintLeaf(2048, &x509.Certificate{
+			Subject:   pkix.Name{CommonName: "autorenew-expiry-node"},
+			NotBefore: now.Add(-1 * time.Hour),
+			NotAfter:  now.Add(5 * time.Minute),
+			DNSNames:  []string{"autorenew-expiry-node"},
+		})
+
+		renewedPEM, err := myCA.AutoRenew(ctx, original)
+		Expect(err).NotTo(HaveOccurred())
+		renewed := parseCertPEM(renewedPEM)
+
+		Expect(renewed.NotAfter).To(BeTemporally(">", original.NotAfter),
+			"auto-renewal must extend validity, not just mint a new serial")
+	})
+
+	It("carries the original certificate's DNS SANs forward unchanged", func() {
+		// A CSR-issued openvox-ca cert carries only DNS SANs, so this asserts
+		// DNSNames; the IP/email/URI SAN types are covered by the next spec.
 		csrPEM, _ := buildCSR("autorenew-sans-node")
 		_, err := myCA.SaveRequest(ctx, "autorenew-sans-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
@@ -297,15 +337,10 @@ var _ = Describe("CA AutoRenew", func() {
 		// openvox-ca only ever issues DNS SANs itself, but a leaf imported
 		// from a legacy CA can carry IP/email/URI SANs that services depend
 		// on. Mint such a cert directly and prove auto-renewal preserves them.
-		key, err := rsa.GenerateKey(rand.Reader, 2048)
-		Expect(err).NotTo(HaveOccurred())
-		serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-		Expect(err).NotTo(HaveOccurred())
 		now := time.Now().UTC()
 		uri, err := url.Parse("spiffe://puppet.test/node/legacy-sans-node")
 		Expect(err).NotTo(HaveOccurred())
-		template := &x509.Certificate{
-			SerialNumber:   serial,
+		original := mintLeaf(2048, &x509.Certificate{
 			Subject:        pkix.Name{CommonName: "legacy-sans-node"},
 			NotBefore:      now.Add(-24 * time.Hour),
 			NotAfter:       now.Add(365 * 24 * time.Hour),
@@ -313,11 +348,7 @@ var _ = Describe("CA AutoRenew", func() {
 			IPAddresses:    []net.IP{net.ParseIP("10.0.0.1"), net.ParseIP("fd00::1")},
 			EmailAddresses: []string{"node@puppet.test"},
 			URIs:           []*url.URL{uri},
-		}
-		der, err := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)
-		Expect(err).NotTo(HaveOccurred())
-		original, err := x509.ParseCertificate(der)
-		Expect(err).NotTo(HaveOccurred())
+		})
 
 		renewedPEM, err := myCA.AutoRenew(ctx, original)
 		Expect(err).NotTo(HaveOccurred())
@@ -346,24 +377,15 @@ var _ = Describe("CA AutoRenew", func() {
 		// A legacy-CA cert may carry an RSA-1024 key that predates this CA's
 		// policy. Auto-renewal must refuse to perpetuate it, and the error
 		// must be classifiable so the HTTP layer answers 4xx, not 5xx.
-		key, err := rsa.GenerateKey(rand.Reader, 1024)
-		Expect(err).NotTo(HaveOccurred())
-		serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-		Expect(err).NotTo(HaveOccurred())
 		now := time.Now().UTC()
-		template := &x509.Certificate{
-			SerialNumber: serial,
-			Subject:      pkix.Name{CommonName: "weak-key-node"},
-			NotBefore:    now.Add(-24 * time.Hour),
-			NotAfter:     now.Add(365 * 24 * time.Hour),
-			DNSNames:     []string{"weak-key-node"},
-		}
-		der, err := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)
-		Expect(err).NotTo(HaveOccurred())
-		original, err := x509.ParseCertificate(der)
-		Expect(err).NotTo(HaveOccurred())
+		original := mintLeaf(1024, &x509.Certificate{
+			Subject:   pkix.Name{CommonName: "weak-key-node"},
+			NotBefore: now.Add(-24 * time.Hour),
+			NotAfter:  now.Add(365 * 24 * time.Hour),
+			DNSNames:  []string{"weak-key-node"},
+		})
 
-		_, err = myCA.AutoRenew(ctx, original)
+		_, err := myCA.AutoRenew(ctx, original)
 		Expect(err).To(MatchError(ca.ErrKeyPolicy))
 	})
 
@@ -375,11 +397,6 @@ var _ = Describe("CA AutoRenew", func() {
 		// (e.g. OpenVox Server's own cert) must keep it across auto-renewal, or
 		// the puppetserver CA CLI stops authenticating. This locks in that
 		// deliberate asymmetry with the CSR path.
-		key, err := rsa.GenerateKey(rand.Reader, 2048)
-		Expect(err).NotTo(HaveOccurred())
-		serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-		Expect(err).NotTo(HaveOccurred())
-
 		authVal, err := asn1.Marshal("true")
 		Expect(err).NotTo(HaveOccurred())
 		roleVal, err := asn1.Marshal("web")
@@ -390,21 +407,16 @@ var _ = Describe("CA AutoRenew", func() {
 		ppRole := asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 1, 13}
 
 		now := time.Now().UTC()
-		template := &x509.Certificate{
-			SerialNumber: serial,
-			Subject:      pkix.Name{CommonName: "autorenew-oid-node"},
-			NotBefore:    now.Add(-24 * time.Hour),
-			NotAfter:     now.Add(365 * 24 * time.Hour),
-			DNSNames:     []string{"autorenew-oid-node"},
+		original := mintLeaf(2048, &x509.Certificate{
+			Subject:   pkix.Name{CommonName: "autorenew-oid-node"},
+			NotBefore: now.Add(-24 * time.Hour),
+			NotAfter:  now.Add(365 * 24 * time.Hour),
+			DNSNames:  []string{"autorenew-oid-node"},
 			ExtraExtensions: []pkix.Extension{
 				{Id: ca.OIDPpCliAuth, Value: authVal}, // auth-arc: CSR path would strip this
 				{Id: ppRole, Value: roleVal},          // node-attr arc: always carried
 			},
-		}
-		der, err := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)
-		Expect(err).NotTo(HaveOccurred())
-		original, err := x509.ParseCertificate(der)
-		Expect(err).NotTo(HaveOccurred())
+		})
 
 		renewedPEM, err := myCA.AutoRenew(ctx, original)
 		Expect(err).NotTo(HaveOccurred())

@@ -769,6 +769,14 @@ func (c *CA) AutoRenew(ctx context.Context, presentedCert *x509.Certificate) ([]
 
 	var extraExtensions []pkix.Extension
 	for _, ext := range presentedCert.Extensions {
+		// Carry EVERY Puppet OID forward, including authorization-arc OIDs
+		// (pp_cli_auth et al.). Unlike signWithDuration's CSR path — which adds
+		// `&& !IsAuthOID(ext.Id)` here to strip auth OIDs as an anti-escalation
+		// control — these were already vetted when presentedCert was issued, so
+		// preserving them is required for wire-compat (e.g. OpenVox Server's own
+		// cert keeps pp_cli_auth across renewal, or the CA CLI stops
+		// authenticating). Do NOT add an IsAuthOID filter here; see this
+		// method's godoc. NIST 800-53: AC-6, CM-7.
 		if IsPuppetOID(ext.Id) {
 			extraExtensions = append(extraExtensions, ext)
 		}

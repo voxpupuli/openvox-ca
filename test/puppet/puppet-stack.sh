@@ -544,15 +544,29 @@ _pubkey_after=$(exec_client openssl x509 -in "$_client_cert_path" -noout -pubkey
 
 [[ -n "$_pubkey_after" && "$_pubkey_after" == "$_pubkey_before" ]] \
     && pass "renewed cert keeps the same public key (no CSR, no re-key)" \
-    || fail "renewed cert keeps the same public key (no CSR, no re-key)" "public key changed across renewal"
+    || fail "renewed cert keeps the same public key (no CSR, no re-key)" \
+        "$([[ -z "$_pubkey_after" ]] && echo "post-renewal public key could not be extracted" || echo "public key changed across renewal")"
 
 # The renewed cert must still work for a normal agent run (still trusted,
-# same private key on disk as before the renewal).
+# same private key on disk as before the renewal). Match Group 3's depth:
+# check the catalog actually applied and no revoked-cert/TLS error surfaced,
+# not just the exit code — a revoked or untrusted cert would exit 1, but the
+# output is the direct evidence the renewed cert is still accepted.
 AGENT_RENEW_EXIT=0
 AGENT_RENEW_OUT=$(run_agent) || AGENT_RENEW_EXIT=$?
 [[ "$AGENT_RENEW_EXIT" =~ ^(0|2)$ ]] \
     && pass "Agent run with auto-renewed cert exits 0 or 2" \
     || fail "Agent run with auto-renewed cert exits 0 or 2" "exit code: $AGENT_RENEW_EXIT; output: $(tail -5 <<< "$AGENT_RENEW_OUT" | tr '\n' '|')"
+
+grep -qi "Applied catalog" <<< "$AGENT_RENEW_OUT" \
+    && pass "auto-renewed agent run applied the catalog" \
+    || fail "auto-renewed agent run applied the catalog" "last 5 lines: $(tail -5 <<< "$AGENT_RENEW_OUT" | tr '\n' '|')"
+
+if grep -qiE "certificate revoked|certificate verify failed|SSL_connect" <<< "$AGENT_RENEW_OUT"; then
+    fail "auto-renewed agent run shows no revoked-cert/TLS error" "output: $(tail -5 <<< "$AGENT_RENEW_OUT" | tr '\n' '|')"
+else
+    pass "auto-renewed agent run shows no revoked-cert/TLS error"
+fi
 
 # ═════════════════════════════════════════════════════════════════════════
 # Group 4 -- Server self-apply
