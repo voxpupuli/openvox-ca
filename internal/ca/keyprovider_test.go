@@ -211,11 +211,34 @@ var _ = Describe("KeyProvider integration", func() {
 
 		err = secondCA.Init(context.Background())
 		Expect(err).To(HaveOccurred(), "Init must not silently overwrite an existing provider key")
+		Expect(err.Error()).To(ContainSubstring("refusing to bootstrap"),
+			"Init should fail closed with guidance, not attempt to regenerate")
+		// The CA core must fail closed at the call site: Generate is never
+		// reached (generateCalls stays at its post-bootstrap value of 1), so the
+		// safety no longer rests solely on the provider refusing.
+		Expect(provider.generateCalls).To(Equal(1), "Generate must not be called on the already-keyed provider")
 		Expect(provider.key).To(BeIdenticalTo(originalKey), "the provider key must not have been rotated")
 
 		hasCert, hcErr := wipedStore.HasCACert(context.Background())
 		Expect(hcErr).NotTo(HaveOccurred())
 		Expect(hasCert).To(BeFalse(), "no CA certificate should have been bootstrapped over the existing key")
+	})
+
+	It("rejects a CA configured with both ExternalSigner and KeyProvider", func() {
+		externalKey, err := rsa.GenerateKey(rand.Reader, 2048)
+		Expect(err).NotTo(HaveOccurred())
+
+		myCA := ca.New(store, asCfg, "puppet.test")
+		myCA.KeyProvider = &fakeKeyProvider{}
+		myCA.ExternalSigner = externalKey
+
+		err = myCA.Init(context.Background())
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("mutually exclusive"))
+
+		hasCert, hcErr := store.HasCACert(context.Background())
+		Expect(hcErr).NotTo(HaveOccurred())
+		Expect(hasCert).To(BeFalse(), "nothing should have been bootstrapped for a misconfigured CA")
 	})
 
 	It("surfaces a real key-provider error rather than silently re-bootstrapping", func() {

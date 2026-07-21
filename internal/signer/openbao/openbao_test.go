@@ -35,6 +35,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -56,9 +57,10 @@ type fakeOpenBao struct {
 	validTokens map[string]bool
 	nextToken   int
 
-	// lastAppRoleSecretID / lastK8sJWT record what the most recent login
-	// request actually presented, so tests can assert credentials were
-	// re-read from source rather than cached.
+	// lastAppRoleRoleID / lastAppRoleSecretID / lastK8sJWT record what the most
+	// recent login request actually presented, so tests can assert credentials
+	// were re-read from source rather than cached.
+	lastAppRoleRoleID   string
 	lastAppRoleSecretID string
 	lastK8sJWT          string
 
@@ -167,6 +169,7 @@ func (f *fakeOpenBao) server() *httptest.Server {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.mu.Lock()
+		f.lastAppRoleRoleID = body.RoleID
 		f.lastAppRoleSecretID = body.SecretID
 		f.mu.Unlock()
 		if f.approveAppRoleSecretID != nil && !f.approveAppRoleSecretID(body.SecretID) {
@@ -690,5 +693,229 @@ func TestKeyProvider_GenerateThenLoad_ECDSA(t *testing.T) {
 	}
 	if _, ok := loaded.Public().(*ecdsa.PublicKey); !ok {
 		t.Fatalf("loaded key Public() = %T, want *ecdsa.PublicKey", loaded.Public())
+	}
+}
+
+func TestNewTokenManager_AppRoleLoginRejected(t *testing.T) {
+	// A rejected AppRole login (bad/expired secret_id → 403) must fail cleanly
+	// at construction, exercising lease.go's initial-login-failure path and its
+	// cancel() cleanup. Also proves the secret_id was read from the file rather
+	// than assumed, mirroring the JWT re-read test.
+	fake := newFakeOpenBao(t)
+	fake.approveAppRoleSecretID = func(secretID string) bool { return secretID != "bad-secret-id" }
+	srv := fake.server()
+	defer srv.Close()
+
+	cfg := openbao.Config{
+		Addr:                srv.URL,
+		KeyName:             "mykey",
+		AuthMethod:          openbao.AuthAppRole,
+		AppRoleRoleID:       "my-role-id",
+		AppRoleSecretIDFile: writeTempFile(t, "bad-secret-id"),
+	}
+
+	tm, err := openbao.NewTokenManager(context.Background(), cfg)
+	if err == nil {
+		tm.Close()
+		t.Fatalf("NewTokenManager succeeded with a rejected secret_id; want an error")
+	}
+	if !strings.Contains(err.Error(), "initial OpenBao login failed") {
+		t.Fatalf("error = %v; want it to wrap the initial-login failure", err)
+	}
+	fake.mu.Lock()
+	got := fake.lastAppRoleSecretID
+	fake.mu.Unlock()
+	if got != "bad-secret-id" {
+		t.Fatalf("server saw secret_id %q; want the file's contents %q (not read from source?)", got, "bad-secret-id")
+	}
+}
+
+func TestAppRoleLogin_ReadsRoleIDFromFile(t *testing.T) {
+	// Exercise the AppRoleRoleIDFile branch of appRoleAuthFactory: the role_id
+	// is read from the file rather than the inline field.
+	fake := newFakeOpenBao(t)
+	srv := fake.server()
+	defer srv.Close()
+
+	cfg := openbao.Config{
+		Addr:                srv.URL,
+		KeyName:             "mykey",
+		AuthMethod:          openbao.AuthAppRole,
+		AppRoleRoleIDFile:   writeTempFile(t, "role-id-from-file"),
+		AppRoleSecretIDFile: writeTempFile(t, "my-secret-id"),
+	}
+
+	tm, err := openbao.NewTokenManager(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("NewTokenManager: %v", err)
+	}
+	defer tm.Close()
+
+	fake.mu.Lock()
+	got := fake.lastAppRoleRoleID
+	fake.mu.Unlock()
+	if got != "role-id-from-file" {
+		t.Fatalf("server saw role_id %q; want the file's contents %q", got, "role-id-from-file")
+	}
+}
+
+func TestNewTokenManager_TLSConfigError(t *testing.T) {
+	// A bad TLS CA file must surface as a clear client-construction error,
+	// exercising newClient's ConfigureTLS branch (otherwise only ever driven
+	// on the no-TLS httptest path).
+	cfg := openbao.Config{
+		Addr:                "https://openbao.invalid:8200",
+		KeyName:             "mykey",
+		AuthMethod:          openbao.AuthAppRole,
+		AppRoleRoleID:       "role",
+		AppRoleSecretIDFile: writeTempFile(t, "secret"),
+		TLSCAFile:           filepath.Join(t.TempDir(), "nonexistent-ca.pem"),
+	}
+
+	_, err := openbao.NewTokenManager(context.Background(), cfg)
+	if err == nil {
+		t.Fatalf("NewTokenManager succeeded with a nonexistent TLS CA file; want an error")
+	}
+	if !strings.Contains(err.Error(), "configuring OpenBao client TLS") {
+		t.Fatalf("error = %v; want it to wrap the TLS configuration failure", err)
+	}
+}
+
+func TestKeyProvider_Generate_RefusesExistingKey(t *testing.T) {
+	// The shared fake always answers GET with a key present, so Generate must
+	// refuse rather than clobber/rotate it (the ca.KeyProvider contract).
+	fake := newFakeOpenBao(t)
+	srv := fake.server()
+	defer srv.Close()
+
+	cfg := openbao.Config{
+		Addr:                srv.URL,
+		KeyName:             "mykey",
+		AuthMethod:          openbao.AuthAppRole,
+		AppRoleRoleID:       "role",
+		AppRoleSecretIDFile: writeTempFile(t, "secret"),
+	}
+	ctx := context.Background()
+	tm, err := openbao.NewTokenManager(ctx, cfg)
+	if err != nil {
+		t.Fatalf("NewTokenManager: %v", err)
+	}
+	defer tm.Close()
+
+	provider := openbao.NewKeyProvider(tm, cfg.EffectiveTransitMount(), cfg.KeyName)
+	if _, err := provider.Generate(ctx, ca.KeyConfig{Algo: ca.KeyAlgoRSA, Size: 2048}); err == nil {
+		t.Fatalf("Generate succeeded on an existing key; want a refusal")
+	} else if !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("Generate error = %v; want it to report the key already exists", err)
+	}
+}
+
+// signTestServer builds a minimal server whose AppRole login and transit key
+// read always succeed, but whose transit sign handler is supplied by the
+// caller — used to drive Signer error branches.
+func signTestServer(t *testing.T, signHandler http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generating key: %v", err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/auth/approle/login", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"auth": map[string]interface{}{"client_token": "tok", "lease_duration": 3600, "renewable": true},
+		})
+	})
+	mux.HandleFunc("/v1/transit/keys/mykey", func(w http.ResponseWriter, r *http.Request) {
+		der, _ := x509.MarshalPKIXPublicKey(key.Public())
+		pubPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"data": map[string]interface{}{
+				"name":           "mykey",
+				"latest_version": float64(1),
+				"keys":           map[string]interface{}{"1": map[string]interface{}{"public_key": string(pubPEM)}},
+			},
+		})
+	})
+	mux.HandleFunc("/v1/transit/sign/mykey", signHandler)
+	return httptest.NewServer(mux)
+}
+
+func signTestSigner(t *testing.T, srv *httptest.Server) crypto.Signer {
+	t.Helper()
+	cfg := openbao.Config{
+		Addr:                srv.URL,
+		KeyName:             "mykey",
+		AuthMethod:          openbao.AuthAppRole,
+		AppRoleRoleID:       "role",
+		AppRoleSecretIDFile: writeTempFile(t, "secret"),
+	}
+	tm, err := openbao.NewTokenManager(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("NewTokenManager: %v", err)
+	}
+	t.Cleanup(func() { tm.Close() })
+	signer, err := openbao.NewKeyProvider(tm, cfg.EffectiveTransitMount(), cfg.KeyName).Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	return signer
+}
+
+func TestSign_EmptyResponseSurfacesError(t *testing.T) {
+	// A 200 with no signature field must surface an error, not a nil signature.
+	srv := signTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"data": map[string]interface{}{}})
+	})
+	defer srv.Close()
+
+	signer := signTestSigner(t, srv)
+	digest := sha256.Sum256([]byte("x"))
+	if _, err := signer.Sign(nil, digest[:], crypto.SHA256); err == nil {
+		t.Fatalf("Sign returned no error for a signatureless response")
+	} else if !strings.Contains(err.Error(), "no signature field") {
+		t.Fatalf("Sign error = %v; want it to report the missing signature field", err)
+	}
+}
+
+func TestSign_ReauthFailureSurfacesError(t *testing.T) {
+	// Sign 403s, and the forced re-authentication also fails, so withReauth's
+	// reauth-failure branch must surface a combined error rather than looping
+	// or returning a nil signature.
+	var loginCount int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/auth/approle/login", func(w http.ResponseWriter, r *http.Request) {
+		// First login (at construction) succeeds; the reactive re-login fails.
+		if atomic.AddInt32(&loginCount, 1) == 1 {
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"auth": map[string]interface{}{"client_token": "tok", "lease_duration": 3600, "renewable": true},
+			})
+			return
+		}
+		writeError(w, http.StatusForbidden, "permission denied")
+	})
+	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	mux.HandleFunc("/v1/transit/keys/mykey", func(w http.ResponseWriter, r *http.Request) {
+		der, _ := x509.MarshalPKIXPublicKey(key.Public())
+		pubPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"data": map[string]interface{}{
+				"name":           "mykey",
+				"latest_version": float64(1),
+				"keys":           map[string]interface{}{"1": map[string]interface{}{"public_key": string(pubPEM)}},
+			},
+		})
+	})
+	mux.HandleFunc("/v1/transit/sign/mykey", func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, http.StatusForbidden, "permission denied")
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	signer := signTestSigner(t, srv)
+	digest := sha256.Sum256([]byte("x"))
+	if _, err := signer.Sign(nil, digest[:], crypto.SHA256); err == nil {
+		t.Fatalf("Sign returned no error when both sign and re-auth failed")
+	} else if !strings.Contains(err.Error(), "re-authentication failed") {
+		t.Fatalf("Sign error = %v; want it to report the re-authentication failure", err)
 	}
 }

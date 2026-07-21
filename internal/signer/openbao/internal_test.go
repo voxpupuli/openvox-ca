@@ -27,11 +27,52 @@ import (
 	"crypto"
 	"encoding/base64"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 )
+
+func TestReadFirstLine(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatalf("writing %s: %v", name, err)
+		}
+		return p
+	}
+
+	t.Run("returns the trimmed first line", func(t *testing.T) {
+		got, err := readFirstLine(write("ok", "  the-secret  \nsecond line\n"))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "the-secret" {
+			t.Fatalf("readFirstLine = %q; want %q", got, "the-secret")
+		}
+	})
+
+	t.Run("errors on a nonexistent file", func(t *testing.T) {
+		if _, err := readFirstLine(filepath.Join(dir, "does-not-exist")); err == nil {
+			t.Fatalf("expected an error for a missing file")
+		}
+	})
+
+	t.Run("errors on an empty file", func(t *testing.T) {
+		if _, err := readFirstLine(write("empty", "")); err == nil {
+			t.Fatalf("expected an error for an empty file")
+		}
+	})
+
+	t.Run("errors on a blank first line", func(t *testing.T) {
+		if _, err := readFirstLine(write("blank", "   \n")); err == nil {
+			t.Fatalf("expected an error for a whitespace-only first line")
+		}
+	})
+}
 
 func TestTransitKeyType(t *testing.T) {
 	cases := []struct {
