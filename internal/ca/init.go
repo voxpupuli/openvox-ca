@@ -108,6 +108,19 @@ func (c *CA) Init(ctx context.Context) error {
 		if errKey != nil {
 			return fmt.Errorf("checking CA key: %w", errKey)
 		}
+		// Fail closed when a KeyProvider already holds a key but the CA
+		// certificate is missing (the DR case: storage/cert wiped while the
+		// provider's key persists). bootstrapCA would call KeyProvider.Generate
+		// on that populated slot, and a provider implementing Generate as
+		// create-or-rotate would silently rotate the live CA key — destroying
+		// the ability to verify every previously issued certificate. Refuse
+		// with guidance rather than regenerate. (Only for KeyProvider mode:
+		// the local-file bootstrap path keeps its long-standing behaviour.)
+		if c.KeyProvider != nil && !hasCert && hasKey {
+			return fmt.Errorf("CA key provider already holds a key but the CA certificate is missing from storage: "+
+				"refusing to bootstrap, as that would rotate the existing CA key and invalidate all previously issued "+
+				"certificates. Restore the CA certificate, or remove the orphaned provider key before bootstrapping: %w", loadErr)
+		}
 		if !hasCert || !hasKey {
 			slog.Info("No existing CA found, bootstrapping new CA")
 			return c.bootstrapCA(ctx)

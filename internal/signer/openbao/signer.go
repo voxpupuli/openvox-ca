@@ -20,6 +20,7 @@ package openbao
 import (
 	"context"
 	"crypto"
+	"crypto/ecdsa"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
@@ -69,14 +70,18 @@ func (s *Signer) Public() crypto.PublicKey {
 // retries once before surfacing the error — the CA recovers within a single
 // retried request rather than waiting for the background renewal loop.
 //
-// crypto.Signer.Sign carries no context, so the whole call — the Transit sign
-// round trip plus any reactive re-authentication and single retry, which all
-// share this deadline — is bounded by the configured login timeout (see
+// crypto.Signer.Sign carries no context, so each network op — the Transit
+// sign round trip plus any reactive re-authentication and single retry, which
+// all share this deadline — is bounded by the configured login timeout (see
 // TokenManager.loginTimeout). This matters because the CA holds its
 // process-wide mutex across x509.CreateCertificate — and therefore across this
 // network call — so an unbounded Sign against a stalled Transit backend would
 // pin that mutex and stall all issuance; the deadline caps how long that can
-// last. See docs/openbao-transit.md ("Performance and outage behaviour").
+// last. The worst case is roughly 2×loginTimeout, not 1×: the 403 path's
+// Reauth takes tm.mu, and if the background renewal loop is mid-login it can
+// hold that mutex (sync.Mutex.Lock does not honour ctx) for up to one more
+// loginTimeout before Reauth proceeds. It stays bounded either way. See
+// docs/openbao-transit.md ("Performance and outage behaviour").
 func (s *Signer) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), s.tm.loginTimeout)
 	defer cancel()
@@ -137,7 +142,49 @@ func (s *Signer) sign(ctx context.Context, digest []byte, opts crypto.SignerOpts
 	if sigStr == "" {
 		return nil, fmt.Errorf("transit sign: response has no signature field")
 	}
-	return decodeTransitSignature(sigStr)
+	sig, err := decodeTransitSignature(sigStr)
+	if err != nil {
+		return nil, err
+	}
+
+	// Defence in depth: verify the signature OpenBao returned actually
+	// verifies against the public key this Signer published (s.pub) before it
+	// is handed back to x509.CreateCertificate. s.pub is pinned to the CA
+	// certificate at load (see internal/ca/loadCA), so this turns two failure
+	// modes into a clear, immediate error rather than a generic downstream
+	// signature failure: (1) a key rotated at OpenBao out from under a running
+	// CA — the latest key version no longer matches our published public key;
+	// and (2) a corrupt or compromised backend returning a bogus signature.
+	if err := verifyTransitSignature(s.pub, digest, opts, sig); err != nil {
+		return nil, err
+	}
+	return sig, nil
+}
+
+// verifyTransitSignature checks that sig verifies against pub for digest under
+// the algorithm implied by pub and opts (RSA PKCS#1 v1.5 or PSS, or ECDSA
+// ASN.1) — the same shapes decodeTransitSignature returns.
+func verifyTransitSignature(pub crypto.PublicKey, digest []byte, opts crypto.SignerOpts, sig []byte) error {
+	switch key := pub.(type) {
+	case *rsa.PublicKey:
+		if pssOpts, isPSS := opts.(*rsa.PSSOptions); isPSS {
+			if err := rsa.VerifyPSS(key, opts.HashFunc(), digest, sig, pssOpts); err != nil {
+				return fmt.Errorf("transit sign: returned signature does not verify against the CA public key (RSA-PSS): %w", err)
+			}
+			return nil
+		}
+		if err := rsa.VerifyPKCS1v15(key, opts.HashFunc(), digest, sig); err != nil {
+			return fmt.Errorf("transit sign: returned signature does not verify against the CA public key (RSA PKCS#1 v1.5): %w", err)
+		}
+		return nil
+	case *ecdsa.PublicKey:
+		if !ecdsa.VerifyASN1(key, digest, sig) {
+			return fmt.Errorf("transit sign: returned ECDSA signature does not verify against the CA public key")
+		}
+		return nil
+	default:
+		return fmt.Errorf("transit sign: unsupported public key type %T for signature verification", pub)
+	}
 }
 
 // decodeTransitSignature strips Transit's "vault:v<N>:" key-version prefix
@@ -288,11 +335,24 @@ func (p *KeyProvider) Load(ctx context.Context) (crypto.Signer, error) {
 }
 
 // Generate creates a new Transit key of the type described by cfg, then
-// returns a Signer for it. Fails if a key with this name already exists.
+// returns a Signer for it. It refuses (rather than rotating or returning a
+// Signer for the existing key) if a key with this name already exists, as the
+// ca.KeyProvider contract requires: OpenBao Transit's create-key endpoint is
+// idempotent — writing an existing name is a silent no-op success — so the
+// guarantee is enforced here with an explicit existence pre-check rather than
+// relying on the backend to reject it.
 func (p *KeyProvider) Generate(ctx context.Context, cfg ca.KeyConfig) (crypto.Signer, error) {
 	transitType, err := transitKeyType(cfg)
 	if err != nil {
 		return nil, err
+	}
+	// Refuse to clobber/rotate an existing key. Load reports
+	// ca.ErrKeyProviderKeyNotFound when the key is absent (the only case in
+	// which we may proceed); any other error is a real failure to surface.
+	if _, err := newSigner(ctx, p.tm, p.mount, p.key); err == nil {
+		return nil, fmt.Errorf("refusing to generate transit key %q: a key with this name already exists", p.key)
+	} else if !errors.Is(err, ca.ErrKeyProviderKeyNotFound) {
+		return nil, fmt.Errorf("checking whether transit key %q already exists: %w", p.key, err)
 	}
 	path := fmt.Sprintf("%s/keys/%s", p.mount, p.key)
 	if _, err := p.tm.Client().Logical().WriteWithContext(ctx, path, map[string]interface{}{

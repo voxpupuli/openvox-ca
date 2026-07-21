@@ -56,8 +56,15 @@ type KeyProvider interface {
 	// error wrapping ErrKeyProviderKeyNotFound if none exists yet.
 	Load(ctx context.Context) (crypto.Signer, error)
 
-	// Generate creates a new key per cfg and returns a Signer for it. Called
-	// only during CA bootstrap, when Load has reported no key exists.
+	// Generate creates a new key per cfg and returns a Signer for it. It is
+	// normally reached only during CA bootstrap, after Load has reported no key
+	// exists — but implementations MUST NOT assume that: Generate MUST fail
+	// (not rotate or overwrite) if a key already exists. The CA can reach this
+	// method with a key already present in a disaster-recovery edge (cert lost,
+	// provider key persists), and for a provider whose "create" is really
+	// create-or-rotate that would silently rotate the live CA key. The CA also
+	// guards this at the call site (see Init), so the two checks are
+	// defence-in-depth; a provider must still fail closed on its own.
 	Generate(ctx context.Context, cfg KeyConfig) (crypto.Signer, error)
 }
 
