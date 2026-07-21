@@ -162,6 +162,28 @@ var _ = Describe("CA Renew", func() {
 			"the pre-renewal serial must be revoked so it can no longer authenticate or pass OCSP/CRL checks")
 	})
 
+	It("still returns the renewed certificate when revoking the replaced one fails", func() {
+		// Revoking the superseded serial is deliberately best-effort: a failure
+		// there must NOT undo the renewal the caller is waiting on. Corrupt the
+		// stored CRL so revocation fails, then assert Renew still succeeds with a
+		// fresh serial and records the failure via the metrics counter. Without
+		// this, a refactor turning the best-effort log into `return err` would
+		// pass every other spec while breaking renewal whenever the CRL is
+		// unreadable.
+		original := issue("renew-revoke-fail-node")
+		Expect(store.UpdateCRL(ctx, []byte("not a valid CRL"))).To(Succeed())
+
+		csrPEM, _ := buildCSR("renew-revoke-fail-node")
+		renewedPEM, err := myCA.Renew(ctx, "renew-revoke-fail-node", csrPEM)
+		Expect(err).NotTo(HaveOccurred(),
+			"a failed revocation of the replaced cert must not fail the renewal")
+		renewed := parseCertPEM(renewedPEM)
+		Expect(renewed.SerialNumber.Cmp(original.SerialNumber)).NotTo(Equal(0),
+			"the renewal must still issue a fresh serial")
+		Expect(myCA.CRLUpdateFailures()).To(BeNumerically("==", 1),
+			"the best-effort revoke failure must be counted for alerting")
+	})
+
 	It("renews a subject that has no prior certificate", func() {
 		// Renew bypasses the pending-CSR queue, so it can issue even when no
 		// certificate exists yet. Guards that the happy path does not depend on
@@ -474,12 +496,37 @@ var _ = Describe("CA AutoRenew", func() {
 
 		original := issue("autorenew-no-revoke-node")
 
-		_, err := myCA.AutoRenew(ctx, original)
+		renewedPEM, err := myCA.AutoRenew(ctx, original)
 		Expect(err).NotTo(HaveOccurred())
+
+		// Assert an actual reissue happened, not an early no-op: a fresh serial
+		// for the same subject proves the disabled flag skipped only the
+		// revocation, not the renewal itself.
+		renewed := parseCertPEM(renewedPEM)
+		Expect(renewed.SerialNumber.Cmp(original.SerialNumber)).NotTo(Equal(0),
+			"AutoRenew must still reissue with a fresh serial even when revocation is disabled")
 
 		revoked, err := myCA.IsRevokedSerial(ctx, original.SerialNumber)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(revoked).To(BeFalse(),
 			"with RevokeOnAutoRenew disabled, the pre-renewal certificate must remain valid for its key, as OpenVox Server's Clojure CA does")
+	})
+
+	It("still returns the renewed certificate when revoking the replaced one fails", func() {
+		// The auto-renewal revoke is best-effort, exactly like Renew's rekey
+		// path: a failed revocation must not undo the renewal the agent is
+		// waiting on. Corrupt the CRL so revocation fails, then assert AutoRenew
+		// still reissues and the failure is counted for alerting.
+		original := issue("autorenew-revoke-fail-node")
+		Expect(store.UpdateCRL(ctx, []byte("not a valid CRL"))).To(Succeed())
+
+		renewedPEM, err := myCA.AutoRenew(ctx, original)
+		Expect(err).NotTo(HaveOccurred(),
+			"a failed revocation of the replaced cert must not fail the auto-renewal")
+		renewed := parseCertPEM(renewedPEM)
+		Expect(renewed.SerialNumber.Cmp(original.SerialNumber)).NotTo(Equal(0),
+			"the auto-renewal must still issue a fresh serial")
+		Expect(myCA.CRLUpdateFailures()).To(BeNumerically("==", 1),
+			"the best-effort revoke failure must be counted for alerting")
 	})
 })

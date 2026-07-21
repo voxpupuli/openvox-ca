@@ -7,7 +7,10 @@ alerting rules for the Puppet CA exporter. It alerts on:
 - the **CA certificate** nearing expiry (warning) or expiring imminently (critical);
 - the **CRL** approaching its `NextUpdate` (warning) or having lapsed (critical);
 - **leaf certificates** nearing/at expiry — excluding revoked ones — and
-  certificate **requests that stay pending** too long.
+  certificate **requests that stay pending** too long;
+- **CRL update failures** — the CA failing to amend its CRL (a revocation it
+  could not record, or a CRL it could not re-sign or write), which can leave
+  revoked or superseded certificates still valid.
 
 All thresholds and the target selector live in [`config.libsonnet`](config.libsonnet)
 and can be overridden without editing the rules.
@@ -86,4 +89,6 @@ jsonnet -J vendor -m . mixin.jsonnet
 | `leafExpiryWarningSeconds` | 7 days | Leaf certificate expiry warning threshold. |
 | `leafExpiryCriticalSeconds` | 1 day | Leaf certificate expiry critical threshold. |
 | `pendingFor` | `1h` | How long a request may stay pending before alerting. |
+| `crlUpdateWindow` | `1h` | Window over which CRL-update failures are counted (the metric is a restart-resetting counter). |
+| `crlUpdateFor` | `15m` | `for:` debounce for the CRL-update-failure alert. |
 | `expiryFor` / `scrapeFor` / `readyFor` / `downFor` | `1h` / `15m` / `10m` / `5m` | `for:` debounce durations. |

@@ -81,6 +81,8 @@ func (g gathered) findByLabels(name string, want map[string]string) *dto.Metric 
 
 func gaugeValue(m *dto.Metric) float64 { return m.GetGauge().GetValue() }
 
+func counterValue(m *dto.Metric) float64 { return m.GetCounter().GetValue() }
+
 var _ = Describe("Collector", func() {
 	var (
 		ctx   context.Context
@@ -130,6 +132,12 @@ var _ = Describe("Collector", func() {
 		// A freshly bootstrapped CA has published an (empty) CRL.
 		Expect(g.findByLabels("puppetca_crl_next_update_timestamp_seconds", nil)).NotTo(BeNil())
 		Expect(gaugeValue(g.findByLabels("puppetca_crl_revoked_certificates", nil))).To(Equal(0.0))
+
+		// The CRL-update failure counter is always exported, starting at zero
+		// on a CA that has performed no failed CRL amendments.
+		crlUpdateFailures := g.findByLabels("puppetca_crl_update_failures_total", nil)
+		Expect(crlUpdateFailures).NotTo(BeNil())
+		Expect(counterValue(crlUpdateFailures)).To(Equal(0.0))
 	})
 
 	It("reports per-leaf metrics with issuance state", func() {

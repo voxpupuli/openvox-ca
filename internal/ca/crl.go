@@ -47,11 +47,13 @@ func (c *CA) signCRLLocked(ctx context.Context, prevNumber *big.Int, revoked []x
 
 	crlBytes, err := x509.CreateRevocationList(rand.Reader, template, c.CACert, c.CAKey)
 	if err != nil {
+		c.crlUpdateFailures.Add(1)
 		return fmt.Errorf("failed to sign CRL: %w", err)
 	}
 
 	newCRLPEM := pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlBytes})
 	if err := c.Storage.UpdateCRL(ctx, newCRLPEM); err != nil {
+		c.crlUpdateFailures.Add(1)
 		return fmt.Errorf("failed to write CRL: %w", err)
 	}
 

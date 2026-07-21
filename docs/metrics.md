@@ -88,6 +88,7 @@ the Unix epoch, the Prometheus convention for `*_timestamp_seconds` gauges.
 | `puppetca_crl_this_update_timestamp_seconds` | CRL `ThisUpdate` time. |
 | `puppetca_crl_next_update_timestamp_seconds` | CRL `NextUpdate` (expiry) time. |
 | `puppetca_crl_revoked_certificates` | Number of certificates currently listed in the CRL. |
+| `puppetca_crl_update_failures_total` | Counter of failures to amend the CRL — a revocation that could not be recorded, or a CRL that could not be re-signed or written (across the revoke, cleanup, reissue and refresh paths). A rising value means the CRL is not being maintained; for revocations it means a superseded certificate may still be a valid credential. Resets to `0` on process restart. |
 
 ### Leaf certificates
 
@@ -128,4 +129,5 @@ sum(rate(puppetca_http_requests_total{code=~"5.."}[5m]))
 
 See the [`mixin/`](../mixin/) directory for the Jsonnet monitoring mixin and
 instructions for rendering or importing it. It alerts on exporter availability,
-CA/CRL/leaf expiry, and pending requests, with all thresholds configurable.
+CA/CRL/leaf expiry, pending requests, and CRL update failures
+(`puppetca_crl_update_failures_total`), with all thresholds configurable.

@@ -731,13 +731,18 @@ func (c *CA) Renew(ctx context.Context, subject string, csrPEM []byte) ([]byte, 
 			return fmt.Errorf("looking up existing certificate for %s: %w", subject, err)
 		}
 
-		c.mu.Lock()
-		if err := c.Storage.SaveCSR(ctx, subject, csrPEM); err != nil {
-			c.mu.Unlock()
-			return fmt.Errorf("saving renewal CSR: %w", err)
-		}
-		certPEM, err := c.signWithDuration(ctx, subject, 0)
-		c.mu.Unlock()
+		// Save the renewal CSR and sign the replacement while holding c.mu,
+		// releasing it via defer before the revoke step below re-acquires it
+		// (c.mu is non-reentrant). The closure keeps the unlock panic-safe: a
+		// panic mid-sign still frees the lock rather than wedging the CA.
+		certPEM, err := func() ([]byte, error) {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			if err := c.Storage.SaveCSR(ctx, subject, csrPEM); err != nil {
+				return nil, fmt.Errorf("saving renewal CSR: %w", err)
+			}
+			return c.signWithDuration(ctx, subject, 0)
+		}()
 		if err != nil {
 			return err
 		}
@@ -756,6 +761,8 @@ func (c *CA) Renew(ctx context.Context, subject string, csrPEM []byte) ([]byte, 
 			defer c.mu.Unlock()
 			return c.revokeSerialLocked(ctx, oldSerial)
 		}); err != nil {
+			// revokeSerialLocked/signCRLLocked already count this into
+			// crlUpdateFailures; here we only note it and let the renewal stand.
 			slog.Warn("Renew: failed to revoke replaced certificate", "subject", subject, "serial", oldSerial, "error", err)
 		}
 		return nil
@@ -820,19 +827,25 @@ func (c *CA) AutoRenew(ctx context.Context, presentedCert *x509.Certificate) ([]
 
 	var out []byte
 	err := c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
-		c.mu.Lock()
-		// Carry forward every SAN type from the certificate being renewed,
-		// not just DNS names: a leaf imported from a legacy CA may carry IP,
-		// email, or URI SANs that services still depend on, and auto-renewal
-		// must not silently drop them.
-		sans := subjectAltNames{
-			DNSNames:       presentedCert.DNSNames,
-			IPAddresses:    presentedCert.IPAddresses,
-			EmailAddresses: presentedCert.EmailAddresses,
-			URIs:           presentedCert.URIs,
-		}
-		certPEM, err := c.issueLeafLocked(ctx, subject, presentedCert.Subject, presentedCert.PublicKey, sans, extraExtensions, 0)
-		c.mu.Unlock()
+		// Issue the replacement while holding c.mu, releasing it via defer
+		// before the revoke step below re-acquires it (c.mu is non-reentrant).
+		// The closure keeps the unlock panic-safe: a panic mid-issue still
+		// frees the lock rather than wedging the CA.
+		certPEM, err := func() ([]byte, error) {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			// Carry forward every SAN type from the certificate being renewed,
+			// not just DNS names: a leaf imported from a legacy CA may carry IP,
+			// email, or URI SANs that services still depend on, and auto-renewal
+			// must not silently drop them.
+			sans := subjectAltNames{
+				DNSNames:       presentedCert.DNSNames,
+				IPAddresses:    presentedCert.IPAddresses,
+				EmailAddresses: presentedCert.EmailAddresses,
+				URIs:           presentedCert.URIs,
+			}
+			return c.issueLeafLocked(ctx, subject, presentedCert.Subject, presentedCert.PublicKey, sans, extraExtensions, 0)
+		}()
 		if err != nil {
 			return err
 		}
@@ -851,6 +864,8 @@ func (c *CA) AutoRenew(ctx context.Context, presentedCert *x509.Certificate) ([]
 			defer c.mu.Unlock()
 			return c.revokeSerialLocked(ctx, oldSerial)
 		}); err != nil {
+			// revokeSerialLocked/signCRLLocked already count this into
+			// crlUpdateFailures; here we only note it and let the renewal stand.
 			slog.Warn("AutoRenew: failed to revoke replaced certificate", "subject", subject, "serial", oldSerial, "error", err)
 		}
 		return nil

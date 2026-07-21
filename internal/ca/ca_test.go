@@ -570,6 +570,26 @@ var _ = Describe("CA Revocation", func() {
 		Expect(myCA.Revoke(context.Background(), "never-signed")).To(HaveOccurred())
 	})
 
+	It("counts a CRL-update failure when a revocation cannot amend the CRL", func() {
+		// The crlUpdateFailures counter is general, not renewal-specific: it must
+		// move for any failed CRL amendment. Sign a cert, corrupt the stored CRL,
+		// then revoke — revocation cannot parse the CRL, so it fails and the
+		// failure is counted for alerting even though it is surfaced to the caller.
+		csrPEM, err := testutil.GenerateCSR("revoke-count-node")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = myCA.SaveRequest(context.Background(), "revoke-count-node", csrPEM)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = myCA.Sign(context.Background(), "revoke-count-node")
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(myCA.CRLUpdateFailures()).To(BeNumerically("==", 0))
+		Expect(store.UpdateCRL(context.Background(), []byte("not a valid CRL"))).To(Succeed())
+
+		Expect(myCA.Revoke(context.Background(), "revoke-count-node")).To(HaveOccurred())
+		Expect(myCA.CRLUpdateFailures()).To(BeNumerically("==", 1),
+			"a failed CRL amendment must be counted regardless of the caller")
+	})
+
 	It("IsRevokedSerial returns true for a revoked certificate's serial", func() {
 		csrPEM, err := testutil.GenerateCSR("serial-revoke-node")
 		Expect(err).NotTo(HaveOccurred())

@@ -75,21 +75,15 @@ func (c *CA) revokeLocked(ctx context.Context, subject string) error {
 func (c *CA) revokeSerialLocked(ctx context.Context, serialStr string) error {
 	serialInt := new(big.Int)
 	if _, ok := serialInt.SetString(serialStr, 16); !ok {
+		c.crlUpdateFailures.Add(1)
 		return fmt.Errorf("malformed serial %q", serialStr)
 	}
 
 	// 1. Load CRL
-	crlPEM, err := c.Storage.GetCRL(ctx)
+	crl, err := c.readStoredCRL(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to load CRL: %w", err)
-	}
-	block, _ := pem.Decode(crlPEM)
-	if block == nil {
-		return fmt.Errorf("failed to decode CRL PEM")
-	}
-	crl, err := x509.ParseRevocationList(block.Bytes)
-	if err != nil {
-		return fmt.Errorf("failed to parse CRL: %w", err)
+		c.crlUpdateFailures.Add(1)
+		return err
 	}
 
 	// 2. Check for duplicate revocation: a serial that's already in the CRL
@@ -101,7 +95,9 @@ func (c *CA) revokeSerialLocked(ctx context.Context, serialStr string) error {
 		}
 	}
 
-	// 3. Prepare New CRL
+	// 3. Append the new entry and re-sign. signCRLLocked counts its own
+	// sign/write failures into crlUpdateFailures, so this path does not
+	// double-count them.
 	newRevoked := x509.RevocationListEntry{
 		SerialNumber:   serialInt,
 		RevocationTime: time.Now(),
