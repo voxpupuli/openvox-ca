@@ -182,6 +182,10 @@ var _ = Describe("loadServerConfig built-in defaults", func() {
 		Expect(cfg.NoTLSRequired).To(BeFalse(), "NoTLSRequired = true; want false")
 		Expect(cfg.Verbosity).To(Equal(0), "Verbosity = %d; want 0", cfg.Verbosity)
 		Expect(cfg.CAPathLength).To(Equal(-1), "CAPathLength = %d; want -1 (unconstrained)", cfg.CAPathLength)
+		// Security-relevant default: superseded certificates are revoked on
+		// auto-renewal unless explicitly disabled. Guard the literal so a
+		// regression flipping it to false cannot pass silently.
+		Expect(cfg.RevokeOnAutoRenew).To(BeTrue(), "RevokeOnAutoRenew = false; want true (secure default)")
 	})
 })
 

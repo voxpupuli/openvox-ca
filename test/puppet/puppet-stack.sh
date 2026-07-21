@@ -553,9 +553,13 @@ _old_serial_hex=${_serial_before#serial=}
 _crl_after_renew=$(curl -sfk "${_CA[@]}" \
     "${CA_HOST_URL}/puppet-ca/v1/certificate_revocation_list/ca" 2>/dev/null \
     | openssl crl -text -noout 2>/dev/null) || true
-grep -qF "$_old_serial_hex" <<< "$_crl_after_renew" \
+# Guard on a non-empty serial first: _serial_before is captured with `|| true`,
+# so if the pre-renewal serial could not be extracted, _old_serial_hex is empty
+# and `grep -qF ""` would match any CRL unconditionally — passing the assertion
+# without ever testing revocation. Refuse to pass on an empty serial.
+[[ -n "$_old_serial_hex" ]] && grep -qF "$_old_serial_hex" <<< "$_crl_after_renew" \
     && pass "pre-renewal serial is revoked by default after auto-renewal" \
-    || fail "pre-renewal serial is revoked by default after auto-renewal" "serial $_old_serial_hex not found in CRL"
+    || fail "pre-renewal serial is revoked by default after auto-renewal" "serial '$_old_serial_hex' not found in CRL"
 
 # The renewed cert must still work for a normal agent run (still trusted,
 # same private key on disk as before the renewal). Match Group 3's depth:
