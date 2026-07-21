@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/voxpupuli/openvox-ca/internal/api"
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/metrics"
@@ -171,55 +172,46 @@ func main() {
 // unit tests (e.g. argument validation) without invoking os.Exit.
 func newRootCmd() *cobra.Command {
 	var (
-		caDir                      string
-		autosignVal                string
-		host                       string
-		port                       int
-		hostname                   string
-		daemon                     bool
-		verbosity                  int
-		logFile                    string
-		tlsCert                    string
-		tlsKey                     string
-		puppetServers              string
-		puppetServerFile           string
-		noPpCliAuth                bool
-		noTLSRequired              bool
-		allowPublicStatus          bool
-		ocspURL                    string
-		crlURL                     string
-		metricsListen              string
-		csrRateLimit               int
-		configFile                 string
-		encryptCAKey               bool
-		caKeyPassphraseFile        string
-		singleProcess              bool
-		storageBackend             string
-		etcdEndpoints              []string
-		etcdKeyPrefix              string
-		redisAddrs                 []string
-		redisSentinelMasterName    string
-		redisSentinelAddrs         []string
-		redisKeyPrefix             string
-		sqlDSN                     string
-		caCertFile                 string
-		caKeyFile                  string
-		caKeyProvider              string
-		openBaoAddr                string
-		openBaoTransitMount        string
-		openBaoKeyName             string
-		openBaoTLSCAFile           string
-		openBaoTLSCertFile         string
-		openBaoTLSKeyFile          string
-		openBaoAuthMethod          string
-		openBaoAppRoleMount        string
-		openBaoAppRoleRoleID       string
-		openBaoAppRoleRoleIDFile   string
-		openBaoAppRoleSecretIDFile string
-		openBaoTokenFile           string
-		openBaoK8sMount            string
-		openBaoK8sRole             string
-		openBaoK8sJWTFile          string
+		caDir                   string
+		autosignVal             string
+		host                    string
+		port                    int
+		hostname                string
+		daemon                  bool
+		verbosity               int
+		logFile                 string
+		tlsCert                 string
+		tlsKey                  string
+		puppetServers           string
+		puppetServerFile        string
+		noPpCliAuth             bool
+		noTLSRequired           bool
+		allowPublicStatus       bool
+		ocspURL                 string
+		crlURL                  string
+		metricsListen           string
+		csrRateLimit            int
+		configFile              string
+		encryptCAKey            bool
+		caKeyPassphraseFile     string
+		singleProcess           bool
+		storageBackend          string
+		etcdEndpoints           []string
+		etcdKeyPrefix           string
+		redisAddrs              []string
+		redisSentinelMasterName string
+		redisSentinelAddrs      []string
+		redisKeyPrefix          string
+		sqlDSN                  string
+		caCertFile              string
+		caKeyFile               string
+
+		// CA key provider (--ca-key-provider) and --openbao-* flags. Grouped
+		// into a struct with register/apply helpers so the flag→config mapping
+		// is unit-testable (see flags_openbao_test.go); the mapping includes
+		// security-relevant fields (TLS cert/key, role_id/secret_id) where a
+		// silent transposition would be a credential/trust bug.
+		obFlags openBaoFlagValues
 	)
 
 	cmd := &cobra.Command{
@@ -330,54 +322,7 @@ func newRootCmd() *cobra.Command {
 			if cmd.Flags().Changed("ca-key-file") {
 				cfg.CAKeyFile = caKeyFile
 			}
-			if cmd.Flags().Changed("ca-key-provider") {
-				cfg.CAKeyProvider = caKeyProvider
-			}
-			if cmd.Flags().Changed("openbao-addr") {
-				cfg.OpenBao.Addr = openBaoAddr
-			}
-			if cmd.Flags().Changed("openbao-transit-mount") {
-				cfg.OpenBao.TransitMount = openBaoTransitMount
-			}
-			if cmd.Flags().Changed("openbao-key-name") {
-				cfg.OpenBao.KeyName = openBaoKeyName
-			}
-			if cmd.Flags().Changed("openbao-tls-ca-file") {
-				cfg.OpenBao.TLSCAFile = openBaoTLSCAFile
-			}
-			if cmd.Flags().Changed("openbao-tls-cert-file") {
-				cfg.OpenBao.TLSCertFile = openBaoTLSCertFile
-			}
-			if cmd.Flags().Changed("openbao-tls-key-file") {
-				cfg.OpenBao.TLSKeyFile = openBaoTLSKeyFile
-			}
-			if cmd.Flags().Changed("openbao-auth-method") {
-				cfg.OpenBao.AuthMethod = openBaoAuthMethod
-			}
-			if cmd.Flags().Changed("openbao-approle-mount") {
-				cfg.OpenBao.AppRoleMount = openBaoAppRoleMount
-			}
-			if cmd.Flags().Changed("openbao-approle-role-id") {
-				cfg.OpenBao.AppRoleRoleID = openBaoAppRoleRoleID
-			}
-			if cmd.Flags().Changed("openbao-approle-role-id-file") {
-				cfg.OpenBao.AppRoleRoleIDFile = openBaoAppRoleRoleIDFile
-			}
-			if cmd.Flags().Changed("openbao-approle-secret-id-file") {
-				cfg.OpenBao.AppRoleSecretIDFile = openBaoAppRoleSecretIDFile
-			}
-			if cmd.Flags().Changed("openbao-token-file") {
-				cfg.OpenBao.TokenFile = openBaoTokenFile
-			}
-			if cmd.Flags().Changed("openbao-kubernetes-mount") {
-				cfg.OpenBao.KubernetesMount = openBaoK8sMount
-			}
-			if cmd.Flags().Changed("openbao-kubernetes-role") {
-				cfg.OpenBao.KubernetesRole = openBaoK8sRole
-			}
-			if cmd.Flags().Changed("openbao-kubernetes-jwt-file") {
-				cfg.OpenBao.KubernetesJWTFile = openBaoK8sJWTFile
-			}
+			applyOpenBaoFlagOverrides(cmd, cfg, &obFlags)
 			// --- Validation ---
 			if cfg.CADir == "" {
 				return fmt.Errorf("--cadir is required (or set PUPPET_CA_CADIR / cadir in config file)")
@@ -806,24 +751,81 @@ func newRootCmd() *cobra.Command {
 	f.StringVar(&sqlDSN, "sql-dsn", "", "SQL data source name (SQLite 'file:/var/lib/puppet-ca/ca.db', PostgreSQL 'postgres://user:pass@host:5432/db?sslmode=require', or MySQL 'user:pass@tcp(host:3306)/db')")
 	f.StringVar(&caCertFile, "ca-cert-file", "", "Keep the CA certificate at this local path regardless of storage backend")
 	f.StringVar(&caKeyFile, "ca-key-file", "", "Keep the CA private key at this local path regardless of storage backend")
-	f.StringVar(&caKeyProvider, "ca-key-provider", "", "CA private key custody: 'file' (default) or 'openbao' (delegate key custody and signing to an OpenBao Transit key)")
-	f.StringVar(&openBaoAddr, "openbao-addr", "", "OpenBao server address as a full URI including scheme and port, e.g. https://openbao.example.com:8200 (http:// also accepted); used when --ca-key-provider openbao")
-	f.StringVar(&openBaoTransitMount, "openbao-transit-mount", "", "OpenBao Transit secrets engine mount path (default 'transit')")
-	f.StringVar(&openBaoKeyName, "openbao-key-name", "", "Name of the OpenBao Transit key backing the CA's private key")
-	f.StringVar(&openBaoTLSCAFile, "openbao-tls-ca-file", "", "PEM CA bundle to verify the OpenBao server's certificate")
-	f.StringVar(&openBaoTLSCertFile, "openbao-tls-cert-file", "", "Client certificate PEM for mTLS to OpenBao")
-	f.StringVar(&openBaoTLSKeyFile, "openbao-tls-key-file", "", "Client private key PEM for mTLS to OpenBao")
-	f.StringVar(&openBaoAuthMethod, "openbao-auth-method", "", "OpenBao auth method: 'approle', 'token', or 'kubernetes'")
-	f.StringVar(&openBaoAppRoleMount, "openbao-approle-mount", "", "AppRole auth method mount path (default 'approle')")
-	f.StringVar(&openBaoAppRoleRoleID, "openbao-approle-role-id", "", "AppRole role_id (or use --openbao-approle-role-id-file)")
-	f.StringVar(&openBaoAppRoleRoleIDFile, "openbao-approle-role-id-file", "", "Path to a file containing the AppRole role_id, read fresh on every login")
-	f.StringVar(&openBaoAppRoleSecretIDFile, "openbao-approle-secret-id-file", "", "Path to a file containing the AppRole secret_id, read fresh on every login")
-	f.StringVar(&openBaoTokenFile, "openbao-token-file", "", "Path to a file containing a pre-issued OpenBao token (auth method 'token')")
-	f.StringVar(&openBaoK8sMount, "openbao-kubernetes-mount", "", "Kubernetes auth method mount path (default 'kubernetes')")
-	f.StringVar(&openBaoK8sRole, "openbao-kubernetes-role", "", "OpenBao Kubernetes auth role name")
-	f.StringVar(&openBaoK8sJWTFile, "openbao-kubernetes-jwt-file", "", "Path to the projected ServiceAccount token (default: the standard in-cluster path), read fresh on every login")
+	registerOpenBaoFlags(f, &obFlags)
 
 	return cmd
+}
+
+// openBaoFlagValues holds the string targets for the --ca-key-provider and
+// --openbao-* flags. Grouped so registerOpenBaoFlags and
+// applyOpenBaoFlagOverrides can be exercised by a unit test independently of
+// the full server startup in newRootCmd's RunE.
+type openBaoFlagValues struct {
+	caKeyProvider       string
+	addr                string
+	transitMount        string
+	keyName             string
+	tlsCAFile           string
+	tlsCertFile         string
+	tlsKeyFile          string
+	authMethod          string
+	appRoleMount        string
+	appRoleRoleID       string
+	appRoleRoleIDFile   string
+	appRoleSecretIDFile string
+	tokenFile           string
+	k8sMount            string
+	k8sRole             string
+	k8sJWTFile          string
+}
+
+// registerOpenBaoFlags registers the --ca-key-provider and --openbao-* flags
+// on f, binding them to v.
+func registerOpenBaoFlags(f *pflag.FlagSet, v *openBaoFlagValues) {
+	f.StringVar(&v.caKeyProvider, "ca-key-provider", "", "CA private key custody: 'file' (default) or 'openbao' (delegate key custody and signing to an OpenBao Transit key)")
+	f.StringVar(&v.addr, "openbao-addr", "", "OpenBao server address as a full URI including scheme and port, e.g. https://openbao.example.com:8200 (http:// also accepted); used when --ca-key-provider openbao")
+	f.StringVar(&v.transitMount, "openbao-transit-mount", "", "OpenBao Transit secrets engine mount path (default 'transit')")
+	f.StringVar(&v.keyName, "openbao-key-name", "", "Name of the OpenBao Transit key backing the CA's private key")
+	f.StringVar(&v.tlsCAFile, "openbao-tls-ca-file", "", "PEM CA bundle to verify the OpenBao server's certificate")
+	f.StringVar(&v.tlsCertFile, "openbao-tls-cert-file", "", "Client certificate PEM for mTLS to OpenBao")
+	f.StringVar(&v.tlsKeyFile, "openbao-tls-key-file", "", "Client private key PEM for mTLS to OpenBao")
+	f.StringVar(&v.authMethod, "openbao-auth-method", "", "OpenBao auth method: 'approle', 'token', or 'kubernetes' (required when --ca-key-provider openbao; no default)")
+	f.StringVar(&v.appRoleMount, "openbao-approle-mount", "", "AppRole auth method mount path (default 'approle')")
+	f.StringVar(&v.appRoleRoleID, "openbao-approle-role-id", "", "AppRole role_id (or use --openbao-approle-role-id-file)")
+	f.StringVar(&v.appRoleRoleIDFile, "openbao-approle-role-id-file", "", "Path to a file containing the AppRole role_id, read fresh on every login")
+	f.StringVar(&v.appRoleSecretIDFile, "openbao-approle-secret-id-file", "", "Path to a file containing the AppRole secret_id, read fresh on every login")
+	f.StringVar(&v.tokenFile, "openbao-token-file", "", "Path to a file containing a pre-issued OpenBao token (auth method 'token')")
+	f.StringVar(&v.k8sMount, "openbao-kubernetes-mount", "", "Kubernetes auth method mount path (default 'kubernetes')")
+	f.StringVar(&v.k8sRole, "openbao-kubernetes-role", "", "OpenBao Kubernetes auth role name")
+	f.StringVar(&v.k8sJWTFile, "openbao-kubernetes-jwt-file", "", "Path to the projected ServiceAccount token (default: the standard in-cluster path), read fresh on every login")
+}
+
+// applyOpenBaoFlagOverrides overlays each explicitly-set (Changed) flag in v
+// onto the matching cfg field. Only flags the operator actually passed take
+// effect, preserving any value already resolved from the config file or the
+// environment.
+func applyOpenBaoFlagOverrides(cmd *cobra.Command, cfg *serverConfig, v *openBaoFlagValues) {
+	set := func(flag string, apply func()) {
+		if cmd.Flags().Changed(flag) {
+			apply()
+		}
+	}
+	set("ca-key-provider", func() { cfg.CAKeyProvider = v.caKeyProvider })
+	set("openbao-addr", func() { cfg.OpenBao.Addr = v.addr })
+	set("openbao-transit-mount", func() { cfg.OpenBao.TransitMount = v.transitMount })
+	set("openbao-key-name", func() { cfg.OpenBao.KeyName = v.keyName })
+	set("openbao-tls-ca-file", func() { cfg.OpenBao.TLSCAFile = v.tlsCAFile })
+	set("openbao-tls-cert-file", func() { cfg.OpenBao.TLSCertFile = v.tlsCertFile })
+	set("openbao-tls-key-file", func() { cfg.OpenBao.TLSKeyFile = v.tlsKeyFile })
+	set("openbao-auth-method", func() { cfg.OpenBao.AuthMethod = v.authMethod })
+	set("openbao-approle-mount", func() { cfg.OpenBao.AppRoleMount = v.appRoleMount })
+	set("openbao-approle-role-id", func() { cfg.OpenBao.AppRoleRoleID = v.appRoleRoleID })
+	set("openbao-approle-role-id-file", func() { cfg.OpenBao.AppRoleRoleIDFile = v.appRoleRoleIDFile })
+	set("openbao-approle-secret-id-file", func() { cfg.OpenBao.AppRoleSecretIDFile = v.appRoleSecretIDFile })
+	set("openbao-token-file", func() { cfg.OpenBao.TokenFile = v.tokenFile })
+	set("openbao-kubernetes-mount", func() { cfg.OpenBao.KubernetesMount = v.k8sMount })
+	set("openbao-kubernetes-role", func() { cfg.OpenBao.KubernetesRole = v.k8sRole })
+	set("openbao-kubernetes-jwt-file", func() { cfg.OpenBao.KubernetesJWTFile = v.k8sJWTFile })
 }
 
 // runSignerMode runs the isolated CA key signer process. It initializes the CA

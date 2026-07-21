@@ -216,16 +216,30 @@ func (tm *TokenManager) run() {
 			return
 		}
 
+		attempts := 0
 		for {
 			err := tm.reauthAndRewatch(tm.ctx)
 			if err == nil {
+				if attempts > 0 {
+					slog.Info("OpenBao re-authentication recovered", "attempts", attempts+1)
+				}
 				break
 			}
 			if tm.ctx.Err() != nil {
 				return
 			}
-			slog.Error("OpenBao re-authentication failed, retrying",
-				"error", err, "retry_in", reauthRetryInterval)
+			attempts++
+			// Log the first failure at Error so an outage is visible, then drop
+			// to Debug for the sustained-retry stream: a prolonged outage
+			// otherwise floods the log at Error every reauthRetryInterval. The
+			// recovery is logged at Info above.
+			if attempts == 1 {
+				slog.Error("OpenBao re-authentication failed, retrying",
+					"error", err, "retry_in", reauthRetryInterval)
+			} else {
+				slog.Debug("OpenBao re-authentication still failing, retrying",
+					"error", err, "attempt", attempts, "retry_in", reauthRetryInterval)
+			}
 			if !sleepOrDone(tm.ctx, reauthRetryInterval) {
 				return
 			}

@@ -566,9 +566,11 @@ func (Test) BackendsMySQL() error {
 }
 
 // BackendsOpenBao brings up a throwaway OpenBao dev server via
-// compose-backends-openbao.yml, configures its transit engine and a
-// least-privilege-scoped AppRole (mirroring what a production deployment's
-// policy should look like — see docs/openbao-transit.md), runs the
+// compose-backends-openbao.yml, configures its transit engine and an AppRole
+// scoped to a "test-*" key prefix (deliberately broader than a production
+// policy — it grants "create" and covers the key TestLiveGenerateThenLoad
+// makes; see configureOpenBaoForTests and docs/openbao-transit.md for the
+// tighter single-key policy a real deployment should use), runs the
 // OpenBao-backend Go integration suite (internal/signer/openbao, build tag
 // openbao_integration) against it, then tears the server down.
 //
