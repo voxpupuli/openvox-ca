@@ -46,7 +46,7 @@ var ErrSerialExists = errors.New("serial number already tracked in inventory")
 // ImportResult describes the outcome of a successful ImportCertificate call.
 type ImportResult struct {
 	Subject   string
-	Serial    string // serialHexStr(cert.SerialNumber) — matches inventory/CRL/OCSP form
+	Serial    string // uppercase hex, no leading zeros — the form used in the inventory, CRL, and OCSP responses
 	NotBefore time.Time
 	NotAfter  time.Time
 	Imported  bool // false when this call was a no-op (cert already tracked identically)
@@ -80,6 +80,12 @@ func certMatchesSubject(cert *x509.Certificate, subject string) bool {
 //
 // The caller must NOT hold c.mu. Serialises on the same cluster-wide
 // per-subject lock as Sign/SignWithTTL/Renew.
+//
+// Returns, for errors.Is branching:
+//   - ErrNotInitialized — the CA certificate or key has not been loaded.
+//   - ErrImportInvalid — any client-supplied input problem (see its doc).
+//   - ErrSerialExists — the certificate's serial is already tracked.
+//   - ErrCertExists — a live certificate already exists for subject.
 func (c *CA) ImportCertificate(ctx context.Context, subject string, certPEM []byte) (*ImportResult, error) {
 	if c.CACert == nil || c.CAKey == nil {
 		return nil, ErrNotInitialized
@@ -193,12 +199,7 @@ func (c *CA) importCertificateLocked(ctx context.Context, subject, serialStr str
 		return nil, fmt.Errorf("failed to save imported cert for %s: %w", subject, err)
 	}
 
-	inventoryEntry := fmt.Sprintf("%s %s %s /%s",
-		serialStr,
-		cert.NotBefore.UTC().Format("2006-01-02T15:04:05UTC"),
-		cert.NotAfter.UTC().Format("2006-01-02T15:04:05UTC"),
-		subject,
-	)
+	inventoryEntry := storage.FormatInventoryLine(serialStr, cert.NotBefore, cert.NotAfter, subject)
 	if err := c.Storage.AppendInventory(ctx, inventoryEntry); err != nil {
 		// Roll back the cert so storage and inventory stay in sync, same as
 		// signWithDuration's rollback-on-failure.

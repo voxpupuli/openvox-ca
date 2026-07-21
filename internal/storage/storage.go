@@ -770,11 +770,31 @@ func chainInventoryMAC(key, prev []byte, line string) []byte {
 	return mac.Sum(nil)
 }
 
+// InventoryTimeFormat is the layout for the NotBefore/NotAfter timestamps in
+// an inventory.txt line. It is part of the on-disk wire format. The trailing
+// "UTC" is a literal in the layout (Go's zone token is "MST"), so formatting a
+// UTC time records its wall-clock digits and parsing yields them back as UTC.
+const InventoryTimeFormat = "2006-01-02T15:04:05UTC"
+
 // canonicalInventoryLine renders e to its inventory.txt line (without the
 // trailing newline). It is the single source of truth for the on-disk blob
 // format and the input to the integrity hash chain, so the two cannot drift.
 func canonicalInventoryLine(e InventoryEntry) string {
 	return fmt.Sprintf("%s %s %s /%s", e.Serial, e.NotBefore, e.NotAfter, e.Subject)
+}
+
+// FormatInventoryLine builds the canonical inventory.txt line (without the
+// trailing newline) from the semantic fields, formatting the timestamps in UTC
+// via InventoryTimeFormat. Issuance paths (signing, import) must construct
+// inventory lines through this single constructor so they cannot drift from the
+// reader/writer/HMAC format owned by canonicalInventoryLine.
+func FormatInventoryLine(serial string, notBefore, notAfter time.Time, subject string) string {
+	return canonicalInventoryLine(InventoryEntry{
+		Serial:    serial,
+		NotBefore: notBefore.UTC().Format(InventoryTimeFormat),
+		NotAfter:  notAfter.UTC().Format(InventoryTimeFormat),
+		Subject:   subject,
+	})
 }
 
 // parseInventoryEntry parses a single inventory.txt line into an InventoryEntry.
