@@ -19,6 +19,9 @@
 // Secrets and ConfigMaps. It is an optional feature: when no targets are
 // configured nothing in this package runs. Objects are reconciled with
 // server-side apply so each export is an idempotent create-or-update.
+//
+// The exporter authenticates with the pod's in-cluster ServiceAccount, so it is
+// only available when openvox-ca itself runs inside a Kubernetes cluster.
 package k8sexport
 
 import (

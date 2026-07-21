@@ -34,8 +34,11 @@ import (
 //
 // This is the single point through which CRL re-signs are signalled to
 // consumers via crlNotify/CRLUpdated(): the sole crlNotify send lives here. Any
-// new CRL-signing path must route through this function (or deliberately handle
-// notification itself), or consumer wake-ups will be silently dropped.
+// CRL write reachable while the server is serving must route through this
+// function, or consumer wake-ups will be silently dropped. The direct
+// Storage.UpdateCRL writes in init.go and caImport.go deliberately bypass it:
+// they run at bootstrap/import before any consumer exists, and the exporter's
+// startup reconcile covers that initial state.
 func (c *CA) signCRLLocked(ctx context.Context, prevNumber *big.Int, revoked []x509.RevocationListEntry) error {
 	nextNum := big.NewInt(1)
 	if prevNumber != nil {

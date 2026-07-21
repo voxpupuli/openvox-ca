@@ -109,6 +109,8 @@ func ImportCA(ctx context.Context, store *storage.StorageService, certBundlePEM,
 		if _, err := x509.ParseRevocationList(crlBlock.Bytes); err != nil {
 			return fmt.Errorf("failed to parse CRL: %w", err)
 		}
+		// Import-time write: runs before any CRL consumer exists, so it
+		// deliberately skips the crlNotify signal (see signCRLLocked).
 		if err := store.UpdateCRL(ctx, crlPEM); err != nil {
 			return fmt.Errorf("failed to write CRL: %w", err)
 		}
@@ -125,6 +127,8 @@ func ImportCA(ctx context.Context, store *storage.StorageService, certBundlePEM,
 			return fmt.Errorf("failed to create initial CRL: %w", err)
 		}
 		generatedCRL := pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlBytes})
+		// Import-time write: runs before any CRL consumer exists, so it
+		// deliberately skips the crlNotify signal (see signCRLLocked).
 		if err := store.UpdateCRL(ctx, generatedCRL); err != nil {
 			return fmt.Errorf("failed to write CRL: %w", err)
 		}

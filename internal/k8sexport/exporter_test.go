@@ -268,6 +268,31 @@ var _ = Describe("Exporter", func() {
 		Expect(found).To(BeFalse())
 	})
 
+	It("still applies later targets when an earlier target fails", func() {
+		// Failure isolation: a failing target must not stop the ones after it.
+		// The failing target is first so a regress-to-early-return (return
+		// instead of continue) would leave the second target uncreated.
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{
+			{Kind: "Secret", Metadata: k8sexport.Metadata{Name: "bad", Namespace: "ns1"}, CRL: true},
+			{Kind: "ConfigMap", Metadata: k8sexport.Metadata{Name: "good", Namespace: "ns1"}, CRL: true},
+		}}
+		mustValidate(cfg)
+
+		// Fail every Secret apply so the first (earlier) target errors.
+		client.PrependReactor("patch", "secrets",
+			func(ktesting.Action) (bool, runtime.Object, error) {
+				return true, nil, errors.New("boom")
+			})
+
+		exp := k8sexport.New(client, *cfg, src, "", nil)
+		Expect(exp.ExportAll(ctx)).To(MatchError(ContainSubstring("Secret/bad")))
+
+		// The later ConfigMap must still have been applied.
+		cm, err := client.CoreV1().ConfigMaps("ns1").Get(ctx, "good", metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cm.Data).To(HaveKeyWithValue("ca.crl", "CRL-PEM"))
+	})
+
 	It("does not read the cert when no target requests it", func() {
 		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
 			Kind: "Secret", Metadata: k8sexport.Metadata{Name: "trust", Namespace: "ns1"}, CRL: true,
