@@ -190,7 +190,14 @@ abort_not_ready() {  # human-description  service-name
     printf ' TIMEOUT\n'
     printf 'FATAL: %s did not become ready in time\n' "$1" >&2
     printf '# ---- last 80 log lines from %s ----\n' "$2" >&2
-    "${_COMPOSE[@]}" logs --tail 80 "$2" >&2 2>/dev/null || true
+    # Send both the container's stdout and stderr to our stderr. Do NOT add
+    # `2>/dev/null`: with `>&2` alone, fd1 is redirected to the current stderr
+    # and fd2 already points there, so both streams reach the operator. A
+    # `2>/dev/null` would instead route the command's stderr to the bit-bucket
+    # -- and under `podman logs` a container's stderr (where Go services write
+    # their startup/abort diagnostics) is replayed to *our* stderr, so the very
+    # lines that explain the failed bootstrap would be discarded.
+    "${_COMPOSE[@]}" logs --tail 80 "$2" >&2 || true
     exit 1
 }
 

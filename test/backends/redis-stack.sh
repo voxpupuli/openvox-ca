@@ -69,7 +69,14 @@ abort_not_ready() {  # human-description  service-name
     printf ' TIMEOUT\n'
     printf 'FATAL: %s did not become ready in time\n' "$1" >&2
     printf '# ---- last 80 log lines from %s ----\n' "$2" >&2
-    "${_COMPOSE[@]}" logs --tail 80 "$2" >&2 2>/dev/null || true
+    # Send both the container's stdout and stderr to our stderr. Do NOT add
+    # `2>/dev/null`: with `>&2` alone, fd1 is redirected to the current stderr
+    # and fd2 already points there, so both streams reach the operator. A
+    # `2>/dev/null` would instead route the command's stderr to the bit-bucket
+    # -- and under `podman logs` a container's stderr (where Go services write
+    # their startup/abort diagnostics) is replayed to *our* stderr, so the very
+    # lines that explain the failed bootstrap would be discarded.
+    "${_COMPOSE[@]}" logs --tail 80 "$2" >&2 || true
     exit 1
 }
 
@@ -576,6 +583,39 @@ done
 if $_ca2_ready; then printf ' OK\n'; else
     abort_not_ready "openvox-ca-2 (replica 2) on host port 8242" openvox-ca-2
 fi
+
+# -- Diagnostic: did either CA replica have to restart to become ready? ----
+# `restart: on-failure` (compose-backends-redis.yml) deliberately lets a
+# replica that loses the bootstrap race recover from shared Redis state
+# instead of staying dead and cascading -- that transient is *tolerated*.
+# But a restart is also the signature of a genuine crash-on-lost-race
+# regression, and both look identical from the outside, so we cannot hard-fail
+# on a non-zero count without re-arming the very flake the restart policy
+# exists to absorb. Instead we surface the count as a visible, non-fatal
+# signal: a clean run shows 0, and any restart gets a loud NOTE on stderr that
+# a human should glance at (persistent restarts here warrant a look at the
+# replica logs for a real bootstrap-abort defect).
+restart_count() {  # service-name -> integer, or "unknown" if not inspectable
+    local _id
+    _id=$("${_COMPOSE[@]}" ps -q "$1" 2>/dev/null | head -n1 | tr -d '\r')
+    [ -n "$_id" ] || { printf 'unknown'; return; }
+    "$_ENGINE" inspect --format '{{.RestartCount}}' "$_id" 2>/dev/null \
+        | tr -d '\r' | tr -d '[:space:]'
+}
+
+for _svc in openvox-ca openvox-ca-2; do
+    _rc=$(restart_count "$_svc")
+    case "$_rc" in
+        0)       printf '# %s restart count: 0 (bootstrapped cleanly)\n' "$_svc" ;;
+        unknown) printf '# %s restart count: unknown (engine inspect unavailable)\n' "$_svc" ;;
+        ''|*[!0-9]*)
+                 printf '# %s restart count: unparseable (%s)\n' "$_svc" "$_rc" ;;
+        *)       printf '# NOTE: %s restarted %s time(s) before becoming ready.\n' "$_svc" "$_rc" >&2
+                 printf '#       Tolerated by restart:on-failure (a bootstrap-race loser\n' >&2
+                 printf '#       recovering from shared Redis). If this recurs, inspect the\n' >&2
+                 printf '#       replica logs for a crash-on-lost-race regression.\n' >&2 ;;
+    esac
+done
 
 # -- Bootstrap lock: only one CA cert/key should exist in Redis -----------
 # Both replicas raced to bootstrap; the distributed lock must have ensured
