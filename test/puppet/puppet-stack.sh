@@ -500,6 +500,75 @@ grep -qF "client.puppet.localdomain" <<< "$_client_managed" \
     || fail "/tmp/puppet_managed contains client certname"
 
 # ═════════════════════════════════════════════════════════════════════════
+# Group 3b -- Certificate auto-renewal (real agent, no CSR)
+#
+# Real Puppet/OpenVox agents auto-renew their client cert by default
+# (hostcert_renewal_interval, default 30d): they POST an empty body to
+# /certificate_renewal, relying solely on the mTLS-presented cert to prove
+# identity and key possession, and expect the SAME key reissued with a fresh
+# serial and validity. `puppet ssl renew_cert` drives exactly that code path
+# deterministically (see lib/puppet/application/ssl.rb in the openvox repo),
+# so this exercises the real agent binary against openvox-ca's AutoRenew
+# (internal/ca/signing.go), not just a Go-mocked TLS certificate.
+# ═════════════════════════════════════════════════════════════════════════
+printf '\n# Group 3b -- Certificate auto-renewal (real agent, no CSR)\n'
+
+_client_cert_path=/etc/puppetlabs/puppet/ssl/certs/client.puppet.localdomain.pem
+
+_serial_before=$(exec_client openssl x509 -in "$_client_cert_path" -noout -serial 2>/dev/null) || true
+_pubkey_before=$(exec_client openssl x509 -in "$_client_cert_path" -noout -pubkey 2>/dev/null) || true
+
+RENEW_EXIT=0
+RENEW_OUT=$(exec_client \
+    puppet ssl renew_cert \
+    "${_PUPPET_DIRS[@]}" \
+    --ca_server openvox-ca \
+    --ca_port   8140 \
+    --certname  client.puppet.localdomain \
+    2>&1) || RENEW_EXIT=$?
+
+[ "$RENEW_EXIT" -eq 0 ] \
+    && pass "puppet ssl renew_cert exits 0" \
+    || fail "puppet ssl renew_cert exits 0" "exit code: $RENEW_EXIT; output: $(tail -5 <<< "$RENEW_OUT" | tr '\n' '|')"
+
+grep -qi "Downloaded certificate" <<< "$RENEW_OUT" \
+    && pass "renew_cert output confirms a new certificate was downloaded" \
+    || fail "renew_cert output confirms a new certificate was downloaded" "output: $(tail -5 <<< "$RENEW_OUT" | tr '\n' '|')"
+
+_serial_after=$(exec_client openssl x509 -in "$_client_cert_path" -noout -serial 2>/dev/null) || true
+_pubkey_after=$(exec_client openssl x509 -in "$_client_cert_path" -noout -pubkey 2>/dev/null) || true
+
+[[ -n "$_serial_after" && "$_serial_after" != "$_serial_before" ]] \
+    && pass "renewed cert carries a new serial" \
+    || fail "renewed cert carries a new serial" "before=$_serial_before after=$_serial_after"
+
+[[ -n "$_pubkey_after" && "$_pubkey_after" == "$_pubkey_before" ]] \
+    && pass "renewed cert keeps the same public key (no CSR, no re-key)" \
+    || fail "renewed cert keeps the same public key (no CSR, no re-key)" \
+        "$([[ -z "$_pubkey_after" ]] && echo "post-renewal public key could not be extracted" || echo "public key changed across renewal")"
+
+# The renewed cert must still work for a normal agent run (still trusted,
+# same private key on disk as before the renewal). Match Group 3's depth:
+# check the catalog actually applied and no revoked-cert/TLS error surfaced,
+# not just the exit code — a revoked or untrusted cert would exit 1, but the
+# output is the direct evidence the renewed cert is still accepted.
+AGENT_RENEW_EXIT=0
+AGENT_RENEW_OUT=$(run_agent) || AGENT_RENEW_EXIT=$?
+[[ "$AGENT_RENEW_EXIT" =~ ^(0|2)$ ]] \
+    && pass "Agent run with auto-renewed cert exits 0 or 2" \
+    || fail "Agent run with auto-renewed cert exits 0 or 2" "exit code: $AGENT_RENEW_EXIT; output: $(tail -5 <<< "$AGENT_RENEW_OUT" | tr '\n' '|')"
+
+grep -qi "Applied catalog" <<< "$AGENT_RENEW_OUT" \
+    && pass "auto-renewed agent run applied the catalog" \
+    || fail "auto-renewed agent run applied the catalog" "last 5 lines: $(tail -5 <<< "$AGENT_RENEW_OUT" | tr '\n' '|')"
+
+if grep -qiE "certificate revoked|certificate verify failed|SSL_connect" <<< "$AGENT_RENEW_OUT"; then
+    fail "auto-renewed agent run shows no revoked-cert/TLS error" "output: $(tail -5 <<< "$AGENT_RENEW_OUT" | tr '\n' '|')"
+else
+    pass "auto-renewed agent run shows no revoked-cert/TLS error"
+fi
+
+# ═════════════════════════════════════════════════════════════════════════
 # Group 4 -- Server self-apply
 # ═════════════════════════════════════════════════════════════════════════
 printf '\n# Group 4 -- Server self-apply\n'

@@ -26,8 +26,15 @@ import (
 	"crypto/sha1"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 )
+
+// ErrKeyPolicy is wrapped by validatePublicKey when a presented or submitted
+// public key fails the CA's key-strength policy. It lets callers distinguish a
+// client-actionable rejection (re-key with a stronger key) from an internal
+// fault, so the HTTP layer can answer 4xx rather than 5xx.
+var ErrKeyPolicy = errors.New("public key does not meet the CA key-strength policy")
 
 // KeyAlgo identifies the asymmetric key algorithm to use when generating a key.
 type KeyAlgo string
@@ -96,7 +103,7 @@ func validatePublicKey(pub crypto.PublicKey) error {
 	switch k := pub.(type) {
 	case *rsa.PublicKey:
 		if bits := k.N.BitLen(); bits < 2048 {
-			return fmt.Errorf("RSA public key size %d is below the minimum of 2048 bits", bits)
+			return fmt.Errorf("%w: RSA public key size %d is below the minimum of 2048 bits", ErrKeyPolicy, bits)
 		}
 		return nil
 	case *ecdsa.PublicKey:
@@ -108,10 +115,10 @@ func validatePublicKey(pub crypto.PublicKey) error {
 			if k.Curve != nil {
 				name = k.Curve.Params().Name
 			}
-			return fmt.Errorf("unsupported ECDSA curve %q (must be P-256, P-384, or P-521)", name)
+			return fmt.Errorf("%w: unsupported ECDSA curve %q (must be P-256, P-384, or P-521)", ErrKeyPolicy, name)
 		}
 	default:
-		return fmt.Errorf("unsupported public key type %T (must be RSA >= 2048 bits or ECDSA P-256/P-384/P-521)", pub)
+		return fmt.Errorf("%w: unsupported public key type %T (must be RSA >= 2048 bits or ECDSA P-256/P-384/P-521)", ErrKeyPolicy, pub)
 	}
 }
 

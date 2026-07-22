@@ -30,6 +30,8 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"net"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -208,9 +210,11 @@ func (c *CA) sign(ctx context.Context, subject string) ([]byte, error) {
 // ttl=0 means use the default certValidity.
 // c.mu must be held by the caller.
 func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Duration) ([]byte, error) {
-	// Defensive: a nil CACert here means the caller skipped Init() (or it
-	// failed). Without this guard the c.CACert.NotAfter dereference below
-	// would panic the entire frontend.
+	// Fail fast on an uninitialised CA (caller skipped Init(), or it failed)
+	// before we bother reading a CSR from storage, so Sign() returns a clear
+	// ErrNotInitialized rather than a misleading "CSR not found". The actual
+	// c.CACert dereference happens later in issueLeafLocked, which carries the
+	// same guard for callers (e.g. AutoRenew) that reach it by other paths.
 	if c.CACert == nil || c.CAKey == nil {
 		return nil, ErrNotInitialized
 	}
@@ -262,6 +266,66 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 		}
 	}
 
+	dnsNames := csr.DNSNames
+	// RFC 2818 §3.1: TLS clients match the server name against SANs, not the
+	// CN. When the CSR carries no SANs and promotion is enabled, add the CN as
+	// a DNS SAN so that the issued certificate works with modern TLS stacks.
+	if c.PromoteCNToSAN && len(dnsNames) == 0 && csr.Subject.CommonName != "" {
+		dnsNames = []string{csr.Subject.CommonName}
+	}
+
+	// SECURITY: Copy Puppet OID extensions from the CSR, excluding
+	// authorization-arc OIDs (1.3.6.1.4.1.34380.1.3.*). Allowing CSRs to
+	// inject auth OIDs like pp_cli_auth would let any agent request admin
+	// privileges, which is a direct privilege escalation.
+	// NIST 800-53: AC-6 (Least Privilege), CM-7 (Least Functionality)
+	var extraExtensions []pkix.Extension
+	for _, ext := range csr.Extensions {
+		if IsPuppetOID(ext.Id) && !IsAuthOID(ext.Id) {
+			extraExtensions = append(extraExtensions, ext)
+		}
+	}
+
+	certPEM, err := c.issueLeafLocked(ctx, subject, csr.Subject, csr.PublicKey, subjectAltNames{DNSNames: dnsNames}, extraExtensions, ttl)
+	if err != nil {
+		return nil, err
+	}
+
+	// Remove the pending CSR now that we have a signed cert.
+	if err := c.Storage.DeleteCSR(ctx, subject); err != nil {
+		slog.Warn("Could not delete CSR after signing", "subject", subject, "error", err)
+	}
+
+	return certPEM, nil
+}
+
+// subjectAltNames carries the full set of Subject Alternative Name entries
+// copied onto an issued leaf certificate. Bundling them keeps issueLeafLocked's
+// signature manageable and ensures every SAN type is threaded through together,
+// rather than DNS names alone.
+type subjectAltNames struct {
+	DNSNames       []string
+	IPAddresses    []net.IP
+	EmailAddresses []string
+	URIs           []*url.URL
+}
+
+// issueLeafLocked builds, signs, and persists a leaf certificate for subject
+// from the given public key, SANs, and extra (Puppet OID) extensions, then
+// appends the inventory entry and updates the in-memory serial index.
+// ttl=0 means use the default certValidity. c.mu must be held by the caller.
+//
+// This is the tail shared by signWithDuration (inputs come from a submitted
+// CSR, after CSR-specific validation) and AutoRenew (inputs come from an
+// already-issued certificate's public key, with no CSR involved at all).
+func (c *CA) issueLeafLocked(ctx context.Context, subject string, subjectName pkix.Name, pubKey any, sans subjectAltNames, extraExtensions []pkix.Extension, ttl time.Duration) ([]byte, error) {
+	// Defensive: a nil CACert here means the caller skipped Init() (or it
+	// failed). Without this guard the c.CACert.NotAfter dereference below
+	// would panic the entire frontend.
+	if c.CACert == nil || c.CAKey == nil {
+		return nil, ErrNotInitialized
+	}
+
 	// SECURITY: Generate a random 128-bit serial number (CA/Browser Forum guidance).
 	// NIST 800-53: SC-12 (Cryptographic Key Establishment and Management)
 	serialLimit := new(big.Int).Lsh(big.NewInt(1), 128)
@@ -290,7 +354,7 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 	validity = min(validity, caRemaining)
 
 	// SubjectKeyIdentifier: SHA1 of the SubjectPublicKeyInfo DER (RFC 5280 §4.2.1.2).
-	pubKeyDER, err := x509.MarshalPKIXPublicKey(csr.PublicKey)
+	pubKeyDER, err := x509.MarshalPKIXPublicKey(pubKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal public key for %s: %w", subject, err)
 	}
@@ -298,7 +362,7 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 
 	template := &x509.Certificate{
 		SerialNumber: serialInt,
-		Subject:      csr.Subject,
+		Subject:      subjectName,
 		NotBefore:    now.Add(-24 * time.Hour),
 		NotAfter:     now.Add(validity),
 
@@ -311,14 +375,10 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 		SubjectKeyId:   subjectKeyID[:],
 		AuthorityKeyId: c.CACert.SubjectKeyId,
 
-		DNSNames: csr.DNSNames,
-	}
-
-	// RFC 2818 §3.1: TLS clients match the server name against SANs, not the
-	// CN. When the CSR carries no SANs and promotion is enabled, add the CN as
-	// a DNS SAN so that the issued certificate works with modern TLS stacks.
-	if c.PromoteCNToSAN && len(template.DNSNames) == 0 && csr.Subject.CommonName != "" {
-		template.DNSNames = []string{csr.Subject.CommonName}
+		DNSNames:       sans.DNSNames,
+		IPAddresses:    sans.IPAddresses,
+		EmailAddresses: sans.EmailAddresses,
+		URIs:           sans.URIs,
 	}
 
 	// CRL Distribution Points: embed CRL URL(s) when configured so that
@@ -339,16 +399,7 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 		})
 	}
 
-	// SECURITY: Copy Puppet OID extensions from the CSR, excluding
-	// authorization-arc OIDs (1.3.6.1.4.1.34380.1.3.*). Allowing CSRs to
-	// inject auth OIDs like pp_cli_auth would let any agent request admin
-	// privileges, which is a direct privilege escalation.
-	// NIST 800-53: AC-6 (Least Privilege), CM-7 (Least Functionality)
-	for _, ext := range csr.Extensions {
-		if IsPuppetOID(ext.Id) && !IsAuthOID(ext.Id) {
-			template.ExtraExtensions = append(template.ExtraExtensions, ext)
-		}
-	}
+	template.ExtraExtensions = append(template.ExtraExtensions, extraExtensions...)
 
 	// SECURITY: two complementary controls guard against signing under a key
 	// that doesn't match the CA certificate (e.g. an OpenBao Transit key
@@ -370,7 +421,7 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 	// round trip, and under key isolation no RPC beyond the one Sign this call
 	// already makes.
 	// NIST 800-53: SC-12 (Cryptographic Key Establishment and Management)
-	certBytes, err := x509.CreateCertificate(rand.Reader, template, c.CACert, csr.PublicKey, c.CAKey)
+	certBytes, err := x509.CreateCertificate(rand.Reader, template, c.CACert, pubKey, c.CAKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign certificate for %s: %w", subject, err)
 	}
@@ -394,11 +445,6 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 
 	// Update in-memory serial index for O(1) OCSP lookups.
 	c.serialIndex[serialStr] = subject
-
-	// Remove the pending CSR now that we have a signed cert.
-	if err := c.Storage.DeleteCSR(ctx, subject); err != nil {
-		slog.Warn("Could not delete CSR after signing", "subject", subject, "error", err)
-	}
 
 	slog.Debug("Certificate signed",
 		"subject", subject,
@@ -675,6 +721,82 @@ func (c *CA) Renew(ctx context.Context, subject string, csrPEM []byte) ([]byte, 
 			return fmt.Errorf("saving renewal CSR: %w", err)
 		}
 		certPEM, err := c.signWithDuration(ctx, subject, 0)
+		if err != nil {
+			return err
+		}
+		out = certPEM
+		return nil
+	})
+	return out, err
+}
+
+// AutoRenew reissues a certificate for the same public key as presentedCert —
+// the certificate that authenticated this request over mTLS — instead of
+// requiring a fresh CSR. This is the wire-compatible counterpart to the "no
+// CSR" renewal flow real Puppet/OpenVox agents use by default (see
+// Puppet's `hostcert_renewal_interval`, default 30 days): the mTLS handshake
+// already proved possession of the private key, so a second
+// proof-of-possession isn't required. presentedCert's SANs and Puppet OID
+// extensions — including any auth OIDs such as pp_cli_auth — are carried
+// forward verbatim, since they were already vetted when presentedCert itself
+// was issued; only the serial, validity window, and key identifiers are
+// refreshed.
+//
+// This matches the behaviour of OpenVox Server's own Clojure CA
+// (renew-certificate! in certificate_authority.clj): the certificate being
+// replaced is not revoked, so both the old and new certificates remain valid
+// (for the same key) until the old one naturally expires.
+//
+// The caller must NOT hold c.mu. Same cross-node guarantees as Sign.
+func (c *CA) AutoRenew(ctx context.Context, presentedCert *x509.Certificate) ([]byte, error) {
+	subject := presentedCert.Subject.CommonName
+	if err := ValidateSubject(subject); err != nil {
+		return nil, err
+	}
+
+	// SECURITY: Re-check the key-strength policy before perpetuating a key
+	// via auto-renewal. A cert imported from a legacy CA (see the migrate
+	// command) may predate this CA's key policy; auto-renewal must not be a
+	// backdoor to indefinitely extend a substandard key — the operator/agent
+	// should re-key via the CSR-based Renew path instead.
+	// NIST 800-53: SC-12, SC-13 (Cryptographic Protection)
+	if err := validatePublicKey(presentedCert.PublicKey); err != nil {
+		return nil, fmt.Errorf("rejecting auto-renewal for %s: %w", subject, err)
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, lockTimeout)
+	defer cancel()
+
+	var extraExtensions []pkix.Extension
+	for _, ext := range presentedCert.Extensions {
+		// Carry EVERY Puppet OID forward, including authorization-arc OIDs
+		// (pp_cli_auth et al.). Unlike signWithDuration's CSR path — which adds
+		// `&& !IsAuthOID(ext.Id)` here to strip auth OIDs as an anti-escalation
+		// control — these were already vetted when presentedCert was issued, so
+		// preserving them is required for wire-compat (e.g. OpenVox Server's own
+		// cert keeps pp_cli_auth across renewal, or the CA CLI stops
+		// authenticating). Do NOT add an IsAuthOID filter here; see this
+		// method's godoc. NIST 800-53: AC-6, CM-7.
+		if IsPuppetOID(ext.Id) {
+			extraExtensions = append(extraExtensions, ext)
+		}
+	}
+
+	var out []byte
+	err := c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		// Carry forward every SAN type from the certificate being renewed,
+		// not just DNS names: a leaf imported from a legacy CA may carry IP,
+		// email, or URI SANs that services still depend on, and auto-renewal
+		// must not silently drop them.
+		sans := subjectAltNames{
+			DNSNames:       presentedCert.DNSNames,
+			IPAddresses:    presentedCert.IPAddresses,
+			EmailAddresses: presentedCert.EmailAddresses,
+			URIs:           presentedCert.URIs,
+		}
+		certPEM, err := c.issueLeafLocked(ctx, subject, presentedCert.Subject, presentedCert.PublicKey, sans, extraExtensions, 0)
 		if err != nil {
 			return err
 		}

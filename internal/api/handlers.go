@@ -907,34 +907,68 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 
 	// SECURITY: Limit body to 1 MiB to prevent memory exhaustion.
 	// NIST 800-53: SC-5 (Denial-of-Service Protection)
-	csrPEM, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
-		slog.Error("read renewal CSR body failed", "client", cn, "error", err)
+		slog.Error("read renewal body failed", "client", cn, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	csr, err := parseCSR(csrPEM)
-	if err != nil {
-		http.Error(w, "invalid CSR: "+err.Error(), http.StatusBadRequest)
-		return
-	}
+	var certPEM []byte
+	if strings.TrimSpace(string(body)) == "" {
+		// Wire-compatible with real Puppet/OpenVox agents: by default
+		// (hostcert_renewal_interval) they POST an empty body here, relying
+		// solely on the mTLS-presented client cert to prove identity and key
+		// possession, and expect the SAME key reissued with a fresh serial
+		// and validity. Reissuing without a fresh proof-of-possession is safe
+		// because newAuthMiddleware (the tierAnyClient path guarding this
+		// route) has already verified r.TLS.PeerCertificates[0] chains to our
+		// CA and is not revoked; clientCN(r) only reads its CN.
+		certPEM, err = s.CA.AutoRenew(r.Context(), r.TLS.PeerCertificates[0])
+		if err != nil {
+			// A key-strength rejection is client-actionable: the presented
+			// cert (e.g. imported from a legacy CA) carries a key below policy
+			// and the agent must re-key via the CSR-based renewal path. Report
+			// it as such rather than masking it behind a 500.
+			if errors.Is(err, ca.ErrKeyPolicy) {
+				slog.Warn("Auto-renewal rejected: key policy", "subject", cn, "error", err)
+				http.Error(w, "certificate key does not meet policy; renew with a new CSR", http.StatusUnprocessableEntity)
+				return
+			}
+			slog.Warn("Auto-renewal failed", "subject", cn, "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+	} else {
+		csr, err := parseCSR(body)
+		if err != nil {
+			http.Error(w, "invalid CSR: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 
-	// SECURITY: CSR CN must match the authenticated client CN. Without this
-	// check an agent could renew another agent's certificate by sending a CSR
-	// with a different CN while authenticating as itself.
-	// NIST 800-53: IA-5(2) (PKI-Based Authentication)
-	if csr.Subject.CommonName != cn {
-		slog.Warn("Renewal rejected: CN mismatch", "client_cn", cn, "csr_cn", csr.Subject.CommonName)
-		http.Error(w, "CSR CN does not match authenticated client CN", http.StatusForbidden)
-		return
-	}
+		// SECURITY: CSR CN must match the authenticated client CN. Without this
+		// check an agent could renew another agent's certificate by sending a CSR
+		// with a different CN while authenticating as itself.
+		// NIST 800-53: IA-5(2) (PKI-Based Authentication)
+		if csr.Subject.CommonName != cn {
+			slog.Warn("Renewal rejected: CN mismatch", "client_cn", cn, "csr_cn", csr.Subject.CommonName)
+			http.Error(w, "CSR CN does not match authenticated client CN", http.StatusForbidden)
+			return
+		}
 
-	certPEM, err := s.CA.Renew(r.Context(), cn, csrPEM)
-	if err != nil {
-		slog.Warn("Renewal failed", "subject", cn, "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
+		certPEM, err = s.CA.Renew(r.Context(), cn, body)
+		if err != nil {
+			// Same key-strength policy applies to the re-key CSR: surface it as
+			// a client error instead of a 500.
+			if errors.Is(err, ca.ErrKeyPolicy) {
+				slog.Warn("Renewal rejected: key policy", "subject", cn, "error", err)
+				http.Error(w, "CSR key does not meet policy", http.StatusUnprocessableEntity)
+				return
+			}
+			slog.Warn("Renewal failed", "subject", cn, "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	w.Header().Set("Content-Type", "text/plain")
