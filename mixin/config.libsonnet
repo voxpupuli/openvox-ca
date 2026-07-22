@@ -31,6 +31,16 @@
     // larger value (or silence the alert) on CAs that sign manually by policy.
     pendingFor: '1h',
 
+    // --- CRL update failures ---
+    // The CA may fail to amend its CRL (a revocation it cannot record, or a CRL
+    // it cannot re-sign or write). Some of these are best-effort and swallowed
+    // — e.g. revoking the certificate a renewal supersedes — leaving the old
+    // certificate valid for its key. The counter resets on restart, so the
+    // alert looks at increase() over crlUpdateWindow and debounces with
+    // crlUpdateFor.
+    crlUpdateWindow: '1h',
+    crlUpdateFor: '15m',
+
     // 'for' durations applied to the expiry alerts to debounce flapping at the
     // threshold boundary.
     expiryFor: '1h',

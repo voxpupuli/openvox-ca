@@ -116,6 +116,12 @@ type serverConfig struct {
 	// PuppetDateTimeFormat formats JSON date/time fields using the original Puppet CA
 	// style ("2006-01-02T15:04:05MST") instead of RFC 3339 (default: false).
 	PuppetDateTimeFormat bool `yaml:"puppet_datetime_format"`
+	// RevokeOnAutoRenew revokes the certificate replaced by the empty-body
+	// (no-CSR) /certificate_renewal auto-renewal path once its successor is
+	// signed and stored, so only the newest serial per subject stays valid
+	// (default: true). Set to false to match OpenVox Server's own Clojure CA,
+	// which leaves the replaced certificate valid until it naturally expires.
+	RevokeOnAutoRenew bool `yaml:"revoke_on_auto_renew"`
 
 	// Storage backend selection and parameters. Embedded inline so the YAML
 	// keys (storage_backend, etcd_*, redis_*, sql_*, ca_cert_file, ca_key_file)
@@ -139,11 +145,12 @@ type serverConfig struct {
 // loading.
 func loadServerConfig(configFile string) (*serverConfig, error) {
 	cfg := &serverConfig{
-		Host:           "0.0.0.0",
-		Port:           8140,
-		CAPathLength:   -1,   // unconstrained; 0 = leaf-only, N = N levels of intermediates
-		CSRRateLimit:   -1,   // unset sentinel; 0 disables, -1 falls back to defaultCSRRateLimit
-		PromoteCNToSAN: true, // RFC 2818: add CN as SAN when CSR has no SANs
+		Host:              "0.0.0.0",
+		Port:              8140,
+		CAPathLength:      -1,   // unconstrained; 0 = leaf-only, N = N levels of intermediates
+		CSRRateLimit:      -1,   // unset sentinel; 0 disables, -1 falls back to defaultCSRRateLimit
+		PromoteCNToSAN:    true, // RFC 2818: add CN as SAN when CSR has no SANs
+		RevokeOnAutoRenew: true, // only the newest serial per subject should be valid
 	}
 
 	if configFile != "" {
@@ -386,6 +393,11 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("PUPPET_CA_PUPPET_DATETIME_FORMAT"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.PuppetDateTimeFormat = b
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_REVOKE_ON_AUTO_RENEW"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.RevokeOnAutoRenew = b
 		}
 	}
 	if v := os.Getenv("PUPPET_CA_KEY_PASSPHRASE_FILE"); v != "" {

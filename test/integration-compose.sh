@@ -1978,6 +1978,7 @@ _REN_PID=""
 _REN_CA_URL="http://127.0.0.1:${_REN_PORT}"
 _REN_NODE="ren-node-${RUN_ID}"
 _REN_OTHER="ren-other-${RUN_ID}"
+_REN_BARE="ren-bare-${RUN_ID}"
 
 _wait_ren_ca() {
     local url="$1" n=60
@@ -2017,6 +2018,13 @@ if _wait_ren_ca "$_REN_CA_URL"; then
     openvox-ca-ctl --server-url "$_REN_CA_URL" \
         generate --certname "$_REN_OTHER" --out-dir "$WORK_DIR" \
         > "$WORK_DIR/ren-other.crt" 2>/dev/null
+
+    # Dedicated node cert for the bare-path renewal test. A successful CSR
+    # renewal now revokes the cert it replaces, so the bare-path test can't
+    # reuse ren-node (already renewed and thus revoked by the happy-path test).
+    openvox-ca-ctl --server-url "$_REN_CA_URL" \
+        generate --certname "$_REN_BARE" --out-dir "$WORK_DIR" \
+        > "$WORK_DIR/ren-bare.crt" 2>/dev/null
 else
     fail "renewal: Phase 1 CA started (loopback HTTP, autosign=true)" \
         "timed out waiting for health"
@@ -2069,21 +2077,25 @@ if _wait_ren_ca "https://127.0.0.1:${_REN_PORT}"; then
         --data-binary @"$WORK_DIR/ren-renewal.csr" \
         "https://127.0.0.1:${_REN_PORT}/puppet-ca/v1/certificate_renewal"
 
-    # Invalid CSR body → 400
+    # Invalid CSR body → 400. Authenticate with ren-other: the request is
+    # rejected during CSR parsing, before any CN check, so any still-valid
+    # client cert works — and ren-node has been revoked by its renewal above.
     assert_http 400 "renewal: invalid CSR body returns 400" \
         -sk \
-        --cert "$WORK_DIR/ren-node.crt" \
-        --key  "$WORK_DIR/${_REN_NODE}_key.pem" \
+        --cert "$WORK_DIR/ren-other.crt" \
+        --key  "$WORK_DIR/${_REN_OTHER}_key.pem" \
         -X POST -H "Content-Type: text/plain" \
         -d "this is not a csr" \
         "https://127.0.0.1:${_REN_PORT}/puppet-ca/v1/certificate_renewal"
 
-    # Bare-path alias /certificate_renewal (without /puppet-ca/v1) also works
-    make_csr "$_REN_NODE" "$WORK_DIR/ren-renewal2.csr"
+    # Bare-path alias /certificate_renewal (without /puppet-ca/v1) also works.
+    # Uses the dedicated ren-bare cert: this is a successful renewal that
+    # revokes its own presented cert, so it must not reuse ren-node.
+    make_csr "$_REN_BARE" "$WORK_DIR/ren-renewal2.csr"
     assert_http 200 "renewal: bare-path /certificate_renewal returns 200" \
         -sk \
-        --cert "$WORK_DIR/ren-node.crt" \
-        --key  "$WORK_DIR/${_REN_NODE}_key.pem" \
+        --cert "$WORK_DIR/ren-bare.crt" \
+        --key  "$WORK_DIR/${_REN_BARE}_key.pem" \
         -X POST -H "Content-Type: text/plain" \
         --data-binary @"$WORK_DIR/ren-renewal2.csr" \
         "https://127.0.0.1:${_REN_PORT}/certificate_renewal"

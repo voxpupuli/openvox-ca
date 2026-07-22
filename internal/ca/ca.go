@@ -22,6 +22,7 @@ import (
 	"crypto"
 	"crypto/x509"
 	"sync"
+	"sync/atomic"
 
 	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
@@ -106,6 +107,16 @@ type CA struct {
 	// handle the SAN extension.
 	PromoteCNToSAN bool
 
+	// RevokeOnAutoRenew, when true (the default), revokes the certificate
+	// being replaced by AutoRenew (the empty-body /certificate_renewal path)
+	// once its successor is safely signed and stored, so only the newest
+	// serial for a subject is ever valid. OpenVox Server's own Clojure CA
+	// does not do this — both the old and new certs (same key) stay valid
+	// until the old one naturally expires. Set to false to match that
+	// behaviour exactly. This does not affect the CSR-based Renew path
+	// (a genuine re-key), which always revokes the certificate it replaces.
+	RevokeOnAutoRenew bool
+
 	// ExternalSigner, when non-nil, is used instead of loading the CA private
 	// key from disk. This enables key isolation: the private key lives in a
 	// separate process and signing requests are proxied over IPC.
@@ -126,18 +137,39 @@ type CA struct {
 	ocspCache   map[string]ocspCacheEntry // same key; protected by mu
 	cachedCRL   *x509.RevocationList      // in-memory CRL for auth checks; protected by mu
 	mu          sync.RWMutex
+
+	// crlUpdateFailures counts failures to amend the CRL: a revocation that
+	// could not be recorded (bad serial, unreadable CRL) or a CRL that could
+	// not be re-signed or written (during revoke, cleanup, reissue or refresh).
+	// Some callers treat these as fatal and return the error; others — notably
+	// the best-effort revoke of a superseded certificate on renewal — swallow
+	// it so the primary operation still succeeds. Either way a rising count
+	// means the CRL is not being maintained and, for revocations, that a
+	// superseded certificate may still be a valid credential. Exposed via the
+	// metrics exporter (puppetca_crl_update_failures_total) for alerting.
+	crlUpdateFailures atomic.Uint64
 }
 
 func New(s *storage.StorageService, autosignCfg AutosignConfig, hostname string) *CA {
 	return &CA{
-		Storage:        s,
-		AutosignConfig: autosignCfg,
-		Hostname:       hostname,
-		CAPathLength:   -1,   // unconstrained by default
-		PromoteCNToSAN: true, // on by default; RFC 2818 deprecates CN-only certs
-		serialIndex:    make(map[string]string),
-		ocspCache:      make(map[string]ocspCacheEntry),
+		Storage:           s,
+		AutosignConfig:    autosignCfg,
+		Hostname:          hostname,
+		CAPathLength:      -1,   // unconstrained by default
+		PromoteCNToSAN:    true, // on by default; RFC 2818 deprecates CN-only certs
+		RevokeOnAutoRenew: true, // on by default; only the newest serial should be valid
+		serialIndex:       make(map[string]string),
+		ocspCache:         make(map[string]ocspCacheEntry),
 	}
+}
+
+// CRLUpdateFailures returns the number of times the CA failed to amend the
+// CRL — a revocation it could not record, or a CRL it could not re-sign or
+// write (across the revoke, cleanup, reissue and refresh paths). A rising
+// value means the CRL is not being maintained; the metrics exporter surfaces
+// it as puppetca_crl_update_failures_total.
+func (c *CA) CRLUpdateFailures() uint64 {
+	return c.crlUpdateFailures.Load()
 }
 
 // IsReady reports whether the CA has been fully initialized and can serve requests.

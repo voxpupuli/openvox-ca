@@ -174,6 +174,30 @@
           },
         ],
       },
+      {
+        name: 'openvox-ca-crl-maintenance',
+        rules: [
+          {
+            alert: 'PuppetCACRLUpdateFailing',
+            // The CA failed to amend the CRL — a revocation it could not record,
+            // or a CRL it could not re-sign or write (revoke, cleanup, reissue or
+            // refresh). Some callers swallow this (e.g. the best-effort revoke of
+            // a superseded cert on renewal), so a revoked/superseded certificate
+            // may remain valid. The counter resets on restart, so alert on
+            // increase() over a window rather than a raw value.
+            expr: 'increase(puppetca_crl_update_failures_total{%(selector)s}[%(window)s]) > 0' % {
+              selector: $._config.puppetCASelector,
+              window: $._config.crlUpdateWindow,
+            },
+            'for': $._config.crlUpdateFor,
+            labels: { severity: 'warning' } + $._config.alertLabels,
+            annotations: {
+              summary: 'Puppet CA is failing to update its CRL.',
+              description: 'The Puppet CA on {{ $labels.instance }} could not amend its CRL (puppetca_crl_update_failures_total is rising). Revocations may not have taken effect and superseded certificates may still be valid; check CRL storage and the CA logs.',
+            },
+          },
+        ],
+      },
     ],
   },
 }

@@ -547,6 +547,20 @@ _pubkey_after=$(exec_client openssl x509 -in "$_client_cert_path" -noout -pubkey
     || fail "renewed cert keeps the same public key (no CSR, no re-key)" \
         "$([[ -z "$_pubkey_after" ]] && echo "post-renewal public key could not be extracted" || echo "public key changed across renewal")"
 
+# revoke_on_auto_renew defaults to true: the pre-renewal serial must now be
+# in the CRL, so only the newest serial for this subject stays valid.
+_old_serial_hex=${_serial_before#serial=}
+_crl_after_renew=$(curl -sfk "${_CA[@]}" \
+    "${CA_HOST_URL}/puppet-ca/v1/certificate_revocation_list/ca" 2>/dev/null \
+    | openssl crl -text -noout 2>/dev/null) || true
+# Guard on a non-empty serial first: _serial_before is captured with `|| true`,
+# so if the pre-renewal serial could not be extracted, _old_serial_hex is empty
+# and `grep -qF ""` would match any CRL unconditionally — passing the assertion
+# without ever testing revocation. Refuse to pass on an empty serial.
+[[ -n "$_old_serial_hex" ]] && grep -qF "$_old_serial_hex" <<< "$_crl_after_renew" \
+    && pass "pre-renewal serial is revoked by default after auto-renewal" \
+    || fail "pre-renewal serial is revoked by default after auto-renewal" "serial '$_old_serial_hex' not found in CRL"
+
 # The renewed cert must still work for a normal agent run (still trusted,
 # same private key on disk as before the renewal). Match Group 3's depth:
 # check the catalog actually applied and no revoked-cert/TLS error surfaced,

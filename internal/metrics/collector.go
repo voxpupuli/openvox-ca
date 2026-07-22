@@ -69,6 +69,8 @@ type Collector struct {
 	scrapeDuration *prometheus.Desc
 	caReady        *prometheus.Desc
 
+	crlUpdateFailures *prometheus.Desc
+
 	caInfo      *prometheus.Desc
 	caNotBefore *prometheus.Desc
 	caNotAfter  *prometheus.Desc
@@ -102,6 +104,13 @@ func NewCollector(c *ca.CA) *Collector {
 		caReady: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "", "ca_ready"),
 			"1 when the CA has finished initialising and can serve requests, 0 otherwise.",
+			nil, nil),
+		crlUpdateFailures: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "crl", "update_failures_total"),
+			"Total failures to amend the CRL — a revocation that could not be recorded, or a CRL "+
+				"that could not be re-signed or written (across revoke, cleanup, reissue and refresh). "+
+				"A rising value means the CRL is not being maintained; for revocations it means a "+
+				"superseded certificate may still be a valid credential.",
 			nil, nil),
 		caInfo: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "ca_certificate", "info"),
@@ -161,6 +170,7 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.scrapeSuccess
 	ch <- c.scrapeDuration
 	ch <- c.caReady
+	ch <- c.crlUpdateFailures
 	ch <- c.caInfo
 	ch <- c.caNotBefore
 	ch <- c.caNotAfter
@@ -188,6 +198,13 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	duration := time.Since(start)
 
 	ch <- prometheus.MustNewConstMetric(c.scrapeDuration, prometheus.GaugeValue, duration.Seconds())
+
+	// This counter is an in-process event tally, independent of the storage
+	// gather, so emit it even when the gather below fails — an unreadable
+	// backend must not blind operators to CRL-maintenance failures.
+	ch <- prometheus.MustNewConstMetric(c.crlUpdateFailures, prometheus.CounterValue,
+		float64(c.ca.CRLUpdateFailures()))
+
 	if err != nil {
 		slog.Warn("Prometheus CA metrics scrape failed", "error", err)
 		ch <- prometheus.MustNewConstMetric(c.scrapeSuccess, prometheus.GaugeValue, 0)

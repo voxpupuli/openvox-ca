@@ -28,6 +28,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"math/big"
 	"net"
@@ -681,7 +682,10 @@ func (c *CA) SaveRequest(ctx context.Context, subject string, csrPEM []byte) (bo
 
 // Renew issues a replacement certificate for subject from the provided CSR,
 // bypassing the pending-CSR queue and autosign check. The existing certificate
-// (if any) is replaced atomically under the per-subject distributed lock.
+// (if any) is replaced atomically under the per-subject distributed lock, and
+// revoked once its successor is safely signed and stored: a CSR-based renewal
+// is a genuine re-key, so the old key/cert must not remain a valid credential
+// once the new one takes over.
 //
 // The caller is responsible for verifying that the CSR CN matches the
 // authenticated client's CN before calling Renew; this method enforces that
@@ -715,16 +719,52 @@ func (c *CA) Renew(ctx context.Context, subject string, csrPEM []byte) ([]byte, 
 	defer cancel()
 	var out []byte
 	err = c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		if err := c.Storage.SaveCSR(ctx, subject, csrPEM); err != nil {
-			return fmt.Errorf("saving renewal CSR: %w", err)
+		// Capture the serial of the certificate being replaced, if any, before
+		// signing overwrites the cert blob and appends a new inventory row —
+		// afterwards LatestSerialForSubject would resolve to the *new* serial,
+		// not the one being retired.
+		oldSerial, hadOldCert := "", false
+		switch s, err := c.Storage.LatestSerialForSubject(ctx, subject); {
+		case err == nil:
+			oldSerial, hadOldCert = s, true
+		case !errors.Is(err, fs.ErrNotExist):
+			return fmt.Errorf("looking up existing certificate for %s: %w", subject, err)
 		}
-		certPEM, err := c.signWithDuration(ctx, subject, 0)
+
+		// Save the renewal CSR and sign the replacement while holding c.mu,
+		// releasing it via defer before the revoke step below re-acquires it
+		// (c.mu is non-reentrant). The closure keeps the unlock panic-safe: a
+		// panic mid-sign still frees the lock rather than wedging the CA.
+		certPEM, err := func() ([]byte, error) {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			if err := c.Storage.SaveCSR(ctx, subject, csrPEM); err != nil {
+				return nil, fmt.Errorf("saving renewal CSR: %w", err)
+			}
+			return c.signWithDuration(ctx, subject, 0)
+		}()
 		if err != nil {
 			return err
 		}
 		out = certPEM
+
+		if !hadOldCert {
+			return nil
+		}
+		// Revoke the certificate just replaced so its serial can no longer
+		// pass CRL/OCSP checks now that it is no longer the cert served for
+		// this subject. Best-effort like Clean's revoke-then-delete: a
+		// failure here shouldn't undo the renewal the caller is waiting on.
+		// Lock ordering: subject-lock (held) -> CRL-lock -> c.mu, matching Clean.
+		if err := c.Storage.WithLock(ctx, lockNameCRL, func() error {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			return c.revokeSerialLocked(ctx, oldSerial)
+		}); err != nil {
+			// revokeSerialLocked/signCRLLocked already count this into
+			// crlUpdateFailures; here we only note it and let the renewal stand.
+			slog.Warn("Renew: failed to revoke replaced certificate", "subject", subject, "serial", oldSerial, "error", err)
+		}
 		return nil
 	})
 	return out, err
@@ -742,10 +782,12 @@ func (c *CA) Renew(ctx context.Context, subject string, csrPEM []byte) ([]byte, 
 // was issued; only the serial, validity window, and key identifiers are
 // refreshed.
 //
-// This matches the behaviour of OpenVox Server's own Clojure CA
-// (renew-certificate! in certificate_authority.clj): the certificate being
-// replaced is not revoked, so both the old and new certificates remain valid
-// (for the same key) until the old one naturally expires.
+// By default the certificate being replaced is revoked once its successor is
+// safely signed and stored, so only the newest serial for a subject is ever
+// valid (see c.RevokeOnAutoRenew). OpenVox Server's own Clojure CA
+// (renew-certificate! in certificate_authority.clj) does not do this — both
+// the old and new certificates (same key) remain valid until the old one
+// naturally expires; set RevokeOnAutoRenew to false to match that exactly.
 //
 // The caller must NOT hold c.mu. Same cross-node guarantees as Sign.
 func (c *CA) AutoRenew(ctx context.Context, presentedCert *x509.Certificate) ([]byte, error) {
@@ -781,26 +823,51 @@ func (c *CA) AutoRenew(ctx context.Context, presentedCert *x509.Certificate) ([]
 			extraExtensions = append(extraExtensions, ext)
 		}
 	}
+	oldSerial := serialHexStr(presentedCert.SerialNumber)
 
 	var out []byte
 	err := c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		// Carry forward every SAN type from the certificate being renewed,
-		// not just DNS names: a leaf imported from a legacy CA may carry IP,
-		// email, or URI SANs that services still depend on, and auto-renewal
-		// must not silently drop them.
-		sans := subjectAltNames{
-			DNSNames:       presentedCert.DNSNames,
-			IPAddresses:    presentedCert.IPAddresses,
-			EmailAddresses: presentedCert.EmailAddresses,
-			URIs:           presentedCert.URIs,
-		}
-		certPEM, err := c.issueLeafLocked(ctx, subject, presentedCert.Subject, presentedCert.PublicKey, sans, extraExtensions, 0)
+		// Issue the replacement while holding c.mu, releasing it via defer
+		// before the revoke step below re-acquires it (c.mu is non-reentrant).
+		// The closure keeps the unlock panic-safe: a panic mid-issue still
+		// frees the lock rather than wedging the CA.
+		certPEM, err := func() ([]byte, error) {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			// Carry forward every SAN type from the certificate being renewed,
+			// not just DNS names: a leaf imported from a legacy CA may carry IP,
+			// email, or URI SANs that services still depend on, and auto-renewal
+			// must not silently drop them.
+			sans := subjectAltNames{
+				DNSNames:       presentedCert.DNSNames,
+				IPAddresses:    presentedCert.IPAddresses,
+				EmailAddresses: presentedCert.EmailAddresses,
+				URIs:           presentedCert.URIs,
+			}
+			return c.issueLeafLocked(ctx, subject, presentedCert.Subject, presentedCert.PublicKey, sans, extraExtensions, 0)
+		}()
 		if err != nil {
 			return err
 		}
 		out = certPEM
+
+		if !c.RevokeOnAutoRenew {
+			return nil
+		}
+		// Revoke the certificate just replaced, same as Renew's rekey path:
+		// only the newest serial should ever be valid for a subject. Best
+		// effort: a failure here shouldn't undo the renewal the agent is
+		// waiting on.
+		// Lock ordering: subject-lock (held) -> CRL-lock -> c.mu, matching Clean.
+		if err := c.Storage.WithLock(ctx, lockNameCRL, func() error {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			return c.revokeSerialLocked(ctx, oldSerial)
+		}); err != nil {
+			// revokeSerialLocked/signCRLLocked already count this into
+			// crlUpdateFailures; here we only note it and let the renewal stand.
+			slog.Warn("AutoRenew: failed to revoke replaced certificate", "subject", subject, "serial", oldSerial, "error", err)
+		}
 		return nil
 	})
 	return out, err

@@ -163,6 +163,8 @@ encrypt_ca_key: false           # encrypt the CA private key (AES-256-GCM + Argo
 ca_key_passphrase_file: ""      # path to passphrase file; auto-generated if omitted
 # Date/time format in JSON responses.
 puppet_datetime_format: false   # use Puppet CA style "2006-01-02T15:04:05MST" instead of RFC 3339
+# Certificate auto-renewal (empty-body POST /certificate_renewal).
+revoke_on_auto_renew: true      # false matches OpenVox Server's Clojure CA (no revocation on auto-renewal)
 ```
 
 **Environment variables (mirrors CLI flags):**
@@ -237,6 +239,7 @@ The CA key passphrase can also be provided via `PUPPET_CA_KEY_PASSPHRASE` (env v
 | `etcd_tls_cert_file` | `PUPPET_CA_ETCD_TLS_CERT_FILE` |
 | `etcd_tls_key_file` | `PUPPET_CA_ETCD_TLS_KEY_FILE` |
 | `puppet_datetime_format` | `PUPPET_CA_PUPPET_DATETIME_FORMAT` |
+| `revoke_on_auto_renew` | `PUPPET_CA_REVOKE_ON_AUTO_RENEW` |
 
 > **Note:** `--daemon` is intentionally excluded from config file and environment
 > variable support because `PUPPET_CA_DAEMON` is used internally as the daemon fork
@@ -391,12 +394,16 @@ All endpoints are served under both the bare path and `/puppet-ca/v1/<path>`, so
 |--------|------|-------------|
 | `POST` | `/certificate_renewal` | Renew an existing certificate; body: raw CSR PEM, or empty; returns new certificate PEM |
 
-Requires a valid CA-signed client certificate. The new certificate is issued immediately without entering the pending-CSR queue or autosign evaluation.
+Requires a valid CA-signed client certificate. The new certificate is issued immediately without entering the pending-CSR queue or autosign evaluation, and the certificate it replaces is revoked once the new one is safely stored (see `revoke_on_auto_renew` below for the auto-renewal case).
 
 - **CSR body (re-key):** the CSR Common Name must match the authenticated client CN — an agent can only renew its own certificate, not another's. Issues a certificate for the new key in the CSR. Puppet OID extensions are copied from the CSR **except** authorization-arc OIDs (`1.3.6.1.4.1.34380.1.3.*`, such as `pp_cli_auth`), which are stripped so a submitted CSR cannot request elevated privileges.
-- **Empty body (wire-compatible auto-renewal):** matches the request real Puppet/OpenVox agents send by default (`hostcert_renewal_interval`, and the `puppet ssl renew_cert` CLI action). Identity and key possession come solely from the mTLS-presented client certificate; the same public key is reissued with a fresh serial and validity, carrying forward the original certificate's SANs and Puppet OID extensions unchanged. Unlike the CSR path, this **preserves authorization-arc OIDs** (e.g. `pp_cli_auth`): they were already vetted when the presented certificate was issued, so a cert that legitimately holds them keeps them across renewal. This mirrors the behaviour of OpenVox Server's own (Clojure) CA: the certificate being replaced is not revoked, so it remains valid for the same key until it naturally expires.
+- **Empty body (wire-compatible auto-renewal):** matches the request real Puppet/OpenVox agents send by default (`hostcert_renewal_interval`, and the `puppet ssl renew_cert` CLI action). Identity and key possession come solely from the mTLS-presented client certificate; the same public key is reissued with a fresh serial and validity, carrying forward the original certificate's SANs and Puppet OID extensions unchanged. Unlike the CSR path, this **preserves authorization-arc OIDs** (e.g. `pp_cli_auth`): they were already vetted when the presented certificate was issued, so a cert that legitimately holds them keeps them across renewal.
 
 If the presented certificate's (or CSR's) key falls below the CA key-strength policy — for example an RSA-1024 key imported from a legacy CA — the request is rejected with `422 Unprocessable Entity` rather than renewed; the agent must re-key via the CSR path with a compliant key.
+
+`revoke_on_auto_renew` (env `PUPPET_CA_REVOKE_ON_AUTO_RENEW`, default `true`) controls whether the certificate replaced by an auto-renewal (empty body) is revoked. The default keeps only the newest serial per subject valid. Set to `false` to match OpenVox Server's own (Clojure) CA exactly, which leaves the replaced certificate valid — for the same key — until it naturally expires. This setting has no effect on the CSR-body (re-key) path, which always revokes the certificate it replaces.
+
+> **CRL growth:** with the default `true`, every auto-renewal appends the retired serial to the CRL, and the entry stays there until the certificate expires. Entries are only pruned by the expired-certificate cleanup job, which is off by default — enable `enable_expired_cert_cleanup` to bound CRL size on busy CAs, and watch `puppetca_crl_revoked_certificates` to keep an eye on it. Revocation is best-effort (a failure never fails the renewal); the `puppetca_crl_update_failures_total` metric counts any failure to amend the CRL, including a superseded certificate that could not be revoked.
 
 ### Bulk signing
 

@@ -126,6 +126,7 @@ func applyCAConfig(myCA *ca.CA, cfg *serverConfig) error {
 	myCA.LeafValidityDays = cfg.LeafValidityDays
 	myCA.EncryptCAKey = cfg.EncryptCAKey
 	myCA.PromoteCNToSAN = cfg.PromoteCNToSAN
+	myCA.RevokeOnAutoRenew = cfg.RevokeOnAutoRenew
 	myCA.KeyPassphrase = ca.KeyPassphraseConfig{
 		PassphraseFile: cfg.CAKeyPassphraseFile,
 	}

@@ -58,6 +58,7 @@ var serverEnvVars = []string{
 	"PUPPET_CA_DISABLE_CRL_REFRESH",
 	"PUPPET_CA_CRL_REFRESH_INTERVAL_SEC",
 	"PUPPET_CA_CRL_REFRESH_BEFORE_SEC",
+	"PUPPET_CA_REVOKE_ON_AUTO_RENEW",
 	"PUPPET_CA_ENABLE_EXPIRED_CERT_CLEANUP",
 	"PUPPET_CA_EXPIRED_CERT_RETENTION_SEC",
 	"PUPPET_CA_EXPIRED_CERT_CLEANUP_INTERVAL_SEC",
@@ -181,6 +182,10 @@ var _ = Describe("loadServerConfig built-in defaults", func() {
 		Expect(cfg.NoTLSRequired).To(BeFalse(), "NoTLSRequired = true; want false")
 		Expect(cfg.Verbosity).To(Equal(0), "Verbosity = %d; want 0", cfg.Verbosity)
 		Expect(cfg.CAPathLength).To(Equal(-1), "CAPathLength = %d; want -1 (unconstrained)", cfg.CAPathLength)
+		// Security-relevant default: superseded certificates are revoked on
+		// auto-renewal unless explicitly disabled. Guard the literal so a
+		// regression flipping it to false cannot pass silently.
+		Expect(cfg.RevokeOnAutoRenew).To(BeTrue(), "RevokeOnAutoRenew = false; want true (secure default)")
 	})
 })
 
@@ -571,6 +576,12 @@ var _ = Describe("applyServerEnv each variable", func() {
 			func(c *serverConfig) bool { return c.CRLRefreshIntervalSec == 900 }, "CRLRefreshIntervalSec"),
 		Entry("CRL_REFRESH_BEFORE_SEC", "PUPPET_CA_CRL_REFRESH_BEFORE_SEC", "86400",
 			func(c *serverConfig) bool { return c.CRLRefreshBeforeSec == 86400 }, "CRLRefreshBeforeSec"),
+		// The zero value of RevokeOnAutoRenew is already false, so assert the
+		// env var flips it to true — a value distinct from the zero value —
+		// which proves the env key is parsed and wired to the right field. A
+		// typo in the env key would then leave it false and fail this entry.
+		Entry("REVOKE_ON_AUTO_RENEW", "PUPPET_CA_REVOKE_ON_AUTO_RENEW", "true",
+			func(c *serverConfig) bool { return c.RevokeOnAutoRenew }, "RevokeOnAutoRenew"),
 		// CA key provider selection and OpenBao settings. Each entry uses a
 		// distinct value and asserts the specific destination field, so a
 		// wrong target (e.g. role-id <-> secret-id, or tls_cert <-> tls_key —
