@@ -188,7 +188,7 @@ var _ = Describe("InventoryMigrationRoundTrip", func() {
 })
 
 // InventoryMigrationRoundTripOverlayDestination reproduces a real-world
-// "puppet-ca-ctl migrate" report: `migrate --dest-config` pointed at a plain
+// "openvox-ca-ctl migrate" report: `migrate --dest-config` pointed at a plain
 // PostgreSQL config (no local overrides), but the actual server config kept
 // the CA key on local disk via ca_key_file — a common hardening choice, and
 // one the migrate config has no reason to mirror since migrate never touches
@@ -241,11 +241,11 @@ var _ = Describe("InventoryMigrationRoundTripOverlayDestination", func() {
 		// must succeed, not report ErrInventoryTampered.
 		Expect(server.InitHMAC(ctx)).NotTo(HaveOccurred(), "InitHMAC on ca_key_file server after migrate")
 
-		// Reading back through the same overlay-wrapped server exercises two
-		// further asInventoryStore unwrap sites (inventoryEntriesLocked via
-		// ReadInventory, and LatestSerialForSubject) and confirms the inventory
-		// is served correctly through the wrapper, not merely that InitHMAC did
-		// not error.
+		// Reading back through the same overlay-wrapped server re-exercises the
+		// asInventoryStore unwrap: ReadInventory re-runs computeInventoryHMAC (via
+		// verifyInventoryHMACLocked), and LatestSerialForSubject takes its own
+		// indexed-lookup unwrap site. Together they confirm the inventory is served
+		// correctly through the wrapper, not merely that InitHMAC did not error.
 		srcText, err := src.ReadInventory(ctx)
 		Expect(err).NotTo(HaveOccurred(), "ReadInventory(src)")
 		got, err := server.ReadInventory(ctx)
