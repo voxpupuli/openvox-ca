@@ -184,6 +184,8 @@ func (c *CA) seedSupportingState(ctx context.Context) error {
 			return fmt.Errorf("creating initial CRL: %w", err)
 		}
 		crlPEM := pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlBytes})
+		// Bootstrap-only write: runs before any CRL consumer exists, so it
+		// deliberately skips the crlNotify signal (see signCRLLocked).
 		if err := c.Storage.UpdateCRL(ctx, crlPEM); err != nil {
 			return fmt.Errorf("writing initial CRL: %w", err)
 		}
@@ -458,6 +460,8 @@ func (c *CA) bootstrapCA(ctx context.Context) error {
 		return fmt.Errorf("failed to create initial CRL: %w", err)
 	}
 	crlPEM := pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlBytes})
+	// Bootstrap-only write: runs before any CRL consumer exists, so it
+	// deliberately skips the crlNotify signal (see signCRLLocked).
 	if err := c.Storage.UpdateCRL(ctx, crlPEM); err != nil {
 		return fmt.Errorf("failed to write initial CRL: %w", err)
 	}

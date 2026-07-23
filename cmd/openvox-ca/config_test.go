@@ -453,6 +453,79 @@ openbao:
 		Expect(cfg.Port).To(Equal(8140), "Port = %d; want default 8140", cfg.Port)
 		Expect(cfg.CADir).To(Equal("/tmp/partial"), "CADir = %q; want /tmp/partial", cfg.CADir)
 	})
+
+	It("parses a kubernetes_export block", func() {
+		clearServerEnv()
+
+		content := `
+cadir: /tmp/myca
+kubernetes_export:
+  field_manager: my-ca
+  targets:
+    - kind: Secret
+      metadata:
+        name: openvox-ca-trust
+        namespace: puppet
+        labels:
+          app: openvox-ca
+        annotations:
+          owner: platform
+      type: Opaque
+      cert: true
+      crl: true
+      cert_key: ca.crt
+      crl_key: ca.crl
+    - kind: configmap
+      metadata:
+        name: openvox-ca-crl
+      crl: true
+`
+		cfgFile := writeTempConfig(content)
+		cfg, err := loadServerConfig(cfgFile)
+		Expect(err).NotTo(HaveOccurred(), "unexpected error")
+
+		Expect(cfg.KubernetesExport.Enabled()).To(BeTrue())
+		Expect(cfg.KubernetesExport.FieldManager).To(Equal("my-ca"))
+		Expect(cfg.KubernetesExport.Targets).To(HaveLen(2))
+
+		first := cfg.KubernetesExport.Targets[0]
+		Expect(first.Kind).To(Equal("Secret"))
+		Expect(first.Metadata.Name).To(Equal("openvox-ca-trust"))
+		Expect(first.Metadata.Namespace).To(Equal("puppet"))
+		Expect(first.Cert).To(BeTrue())
+		Expect(first.CRL).To(BeTrue())
+		Expect(first.Metadata.Labels).To(HaveKeyWithValue("app", "openvox-ca"))
+		Expect(first.Metadata.Annotations).To(HaveKeyWithValue("owner", "platform"))
+
+		Expect(cfg.KubernetesExport.Validate()).To(Succeed())
+		// The lowercase kind is accepted and normalised to the canonical form.
+		Expect(cfg.KubernetesExport.Targets[1].Kind).To(Equal("ConfigMap"))
+		// Validate preserves explicitly-set values and applies defaults.
+		Expect(cfg.KubernetesExport.Targets[0].Type).To(Equal("Opaque"))
+		Expect(cfg.KubernetesExport.Targets[0].CertKey).To(Equal("ca.crt"))
+		Expect(cfg.KubernetesExport.Targets[1].CRLKey).To(Equal("ca.crl")) // defaulted
+	})
+
+	It("rejects an invalid kubernetes_export block", func() {
+		clearServerEnv()
+
+		// A target with neither cert nor crl is invalid.
+		content := `
+cadir: /tmp/myca
+kubernetes_export:
+  targets:
+    - kind: Secret
+      metadata:
+        name: openvox-ca-trust
+        namespace: puppet
+`
+		cfgFile := writeTempConfig(content)
+		cfg, err := loadServerConfig(cfgFile)
+		Expect(err).NotTo(HaveOccurred(), "unexpected error")
+
+		Expect(cfg.KubernetesExport.Enabled()).To(BeTrue())
+		Expect(cfg.KubernetesExport.Validate()).To(MatchError(ContainSubstring("at least one of cert or crl")))
+	})
 })
 
 // --- loadServerConfig: env vars override YAML ---

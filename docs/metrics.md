@@ -7,8 +7,8 @@ describing the **CA certificate**, its **CRL**, and every known (non-deleted)
 **leaf certificate** — including issue/expiry timestamps and issuance status.
 
 A ready-to-import [Jsonnet alerting mixin](../mixin/) is included for alerting on
-impending CA, CRL, and leaf-certificate expiry, and on pending certificate
-requests.
+impending CA, CRL, and leaf-certificate expiry, on pending certificate requests,
+and on Kubernetes export failures.
 
 ## Enabling the exporter
 
@@ -109,6 +109,27 @@ with no issued certificate), `signed`, or `revoked`.
 > To alert on expiry while ignoring revoked certs, filter on `state!="revoked"`,
 > as the mixin does.
 
+### Kubernetes export
+
+Only present when [Kubernetes export](kubernetes-export.md) targets are
+configured. Export failures are logged but never stop the CA, so these series
+are the way to alert on a target that persistently fails. One series per
+configured target (cardinality is bounded by the configuration).
+
+| Metric | Labels | Description |
+| ------ | ------ | ----------- |
+| `puppetca_k8s_export_applies_total` | `kind`, `namespace`, `name`, `result` | Apply attempts per target; `result` is `success` or `error`. |
+| `puppetca_k8s_export_last_success_timestamp_seconds` | `kind`, `namespace`, `name` | Time of the last successful apply for each target. |
+| `puppetca_k8s_export_last_error_timestamp_seconds` | `kind`, `namespace`, `name` | Time of the last failed apply for each target. |
+
+> Exports are event-driven (startup and CRL updates) and can be days apart on a
+> quiet CA, so alert by comparing `last_error` against `last_success` (the
+> mixin's `PuppetCAKubernetesExportFailing` does this) rather than with rate
+> windows or staleness thresholds, which misbehave between sparse attempts. A
+> cycle that fails before any target is applied — the cert/CRL cannot be read
+> from storage — touches none of these series, but storage failures already
+> trip `PuppetCAScrapeFailing` via `puppetca_collector_scrape_success`.
+
 ## Example queries
 
 ```promql
@@ -123,11 +144,19 @@ puppetca_leaf_certificate_info{state="requested"} == 1
 
 # CA API error rate
 sum(rate(puppetca_http_requests_total{code=~"5.."}[5m]))
+
+# Kubernetes export targets whose most recent apply failed
+puppetca_k8s_export_last_error_timestamp_seconds
+  > puppetca_k8s_export_last_success_timestamp_seconds
+or
+puppetca_k8s_export_last_error_timestamp_seconds
+  unless puppetca_k8s_export_last_success_timestamp_seconds
 ```
 
 ## Alerting
 
 See the [`mixin/`](../mixin/) directory for the Jsonnet monitoring mixin and
 instructions for rendering or importing it. It alerts on exporter availability,
-CA/CRL/leaf expiry, pending requests, and CRL update failures
-(`puppetca_crl_update_failures_total`), with all thresholds configurable.
+CA/CRL/leaf expiry, pending requests, CRL update failures
+(`puppetca_crl_update_failures_total`), and Kubernetes export failures, with all
+thresholds configurable.

@@ -31,6 +31,14 @@ import (
 // CRL number past prevNumber and stamping fresh ThisUpdate/NextUpdate. It
 // writes the result to storage and refreshes the in-memory cache. The cluster
 // CRL lock (lockNameCRL) and c.mu must both be held by the caller.
+//
+// This is the single point through which CRL re-signs are signalled to
+// consumers via crlNotify/CRLUpdated(): the sole crlNotify send lives here. Any
+// CRL write reachable while the server is serving must route through this
+// function, or consumer wake-ups will be silently dropped. The direct
+// Storage.UpdateCRL writes in init.go and caImport.go deliberately bypass it:
+// they run at bootstrap/import before any consumer exists, and the exporter's
+// startup reconcile covers that initial state.
 func (c *CA) signCRLLocked(ctx context.Context, prevNumber *big.Int, revoked []x509.RevocationListEntry) error {
 	nextNum := big.NewInt(1)
 	if prevNumber != nil {
@@ -64,6 +72,16 @@ func (c *CA) signCRLLocked(ctx context.Context, prevNumber *big.Int, revoked []x
 		return fmt.Errorf("failed to parse new CRL for cache: %w", err)
 	}
 	c.cachedCRL = parsedCRL
+
+	// Signal consumers (e.g. the Kubernetes exporter) that the CRL changed.
+	// Non-blocking: a full buffer means a notification is already pending, and a
+	// nil channel (CA built without New) is never ready — both fall through to
+	// default so signing is never blocked. Holding c.mu here is fine; the send
+	// does not contend on it.
+	select {
+	case c.crlNotify <- struct{}{}:
+	default:
+	}
 	return nil
 }
 
