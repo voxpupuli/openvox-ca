@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"path/filepath"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -183,5 +184,76 @@ var _ = Describe("InventoryMigrationRoundTrip", func() {
 		Expect(dst.InitHMAC(ctx)).NotTo(HaveOccurred(), "fs integrity after round-trip")
 		got, _ = dst.ReadInventory(ctx)
 		Expect(got).To(Equal(srcText), "round-tripped inventory")
+	})
+})
+
+// InventoryMigrationRoundTripOverlayDestination reproduces a real-world
+// "openvox-ca-ctl migrate" report: `migrate --dest-config` pointed at a plain
+// PostgreSQL config (no local overrides), but the actual server config kept
+// the CA key on local disk via ca_key_file — a common hardening choice, and
+// one the migrate config has no reason to mirror since migrate never touches
+// per-subject keys either. Both configs describe the very same database.
+//
+// After migrating, starting the server against ca_key_file failed with
+// ErrInventoryTampered on the very first boot. OverlayBackend (which
+// ca_key_file wraps the backend in) does not implement InventoryStore itself,
+// so the type assertion StorageService uses to pick the integrity scheme
+// failed on the wrapper even though the wrapped SQL backend supports the hash
+// chain. The server fell back to a whole-blob HMAC, which did not match the
+// hash-chain value RebuildInventoryHMAC had written into the same database
+// right after the copy (via the non-overlay migrate config).
+var _ = Describe("InventoryMigrationRoundTripOverlayDestination", func() {
+	It("lets a ca_key_file server start after migrate used a config without local overrides", func() {
+		ctx := context.Background()
+
+		src := New(GinkgoT().TempDir())
+		Expect(src.EnsureDirs(ctx)).NotTo(HaveOccurred(), "EnsureDirs")
+		Expect(src.SaveCACert(ctx, []byte("ca-cert-pem"))).NotTo(HaveOccurred(), "SaveCACert")
+		Expect(src.TouchInventory(ctx)).NotTo(HaveOccurred(), "TouchInventory")
+		Expect(src.InitHMAC(ctx)).NotTo(HaveOccurred(), "InitHMAC")
+		for _, line := range sampleInventoryLines {
+			Expect(src.AppendInventory(ctx, line)).NotTo(HaveOccurred(), "AppendInventory")
+		}
+
+		// migrate --dest-config: a bare SQL backend, no local overrides.
+		dsn := "file:" + filepath.Join(GinkgoT().TempDir(), "ca.db")
+		migrateBackend, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: dsn})
+		Expect(err).NotTo(HaveOccurred(), "NewSQLBackend (migrate)")
+		migrateDst := NewWithBackend(migrateBackend, "")
+		_, err = MigrateService(ctx, src, migrateDst, MigrateOptions{})
+		Expect(err).NotTo(HaveOccurred(), "MigrateService fs->sqlite")
+		Expect(migrateBackend.Close()).To(Succeed())
+
+		// The real server's config: the same database, but wrapped in
+		// OverlayBackend because ca_key_file is set. A brand-new connection,
+		// exactly like the separate signer process the launcher spawns.
+		serverBackend, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: dsn})
+		Expect(err).NotTo(HaveOccurred(), "NewSQLBackend (server)")
+		defer serverBackend.Close()
+		overlay, err := NewOverlayBackend(serverBackend, map[string]string{
+			KeyCAKey: filepath.Join(GinkgoT().TempDir(), "ca_key.pem"),
+		})
+		Expect(err).NotTo(HaveOccurred(), "NewOverlayBackend")
+		server := NewWithBackend(overlay, GinkgoT().TempDir())
+
+		// This is the exact call the CA signer process makes on every start
+		// (internal/ca/init.go Init -> InitHMAC -> VerifyInventoryHMAC). It
+		// must succeed, not report ErrInventoryTampered.
+		Expect(server.InitHMAC(ctx)).NotTo(HaveOccurred(), "InitHMAC on ca_key_file server after migrate")
+
+		// Reading back through the same overlay-wrapped server re-exercises the
+		// asInventoryStore unwrap: ReadInventory re-runs computeInventoryHMAC (via
+		// verifyInventoryHMACLocked), and LatestSerialForSubject takes its own
+		// indexed-lookup unwrap site. Together they confirm the inventory is served
+		// correctly through the wrapper, not merely that InitHMAC did not error.
+		srcText, err := src.ReadInventory(ctx)
+		Expect(err).NotTo(HaveOccurred(), "ReadInventory(src)")
+		got, err := server.ReadInventory(ctx)
+		Expect(err).NotTo(HaveOccurred(), "ReadInventory through overlay")
+		Expect(got).To(Equal(srcText), "inventory read back through overlay")
+
+		serial, err := server.LatestSerialForSubject(ctx, "node1")
+		Expect(err).NotTo(HaveOccurred(), "LatestSerialForSubject(node1) through overlay")
+		Expect(serial).To(Equal("0003"), "latest serial for node1 through overlay")
 	})
 })

@@ -746,6 +746,19 @@ ca_key_file:  /etc/puppet-ca/secrets/ca_key.pem
 This override also works with the filesystem backend, e.g. to pull the CA
 key out of the cadir tree and onto a separately-mounted volume.
 
+> **Upgrading a pre-fix `ca_key_file` / `ca_cert_file` + database deployment.**
+> Builds from before the InventoryStore-unwrap fix computed the inventory
+> integrity value under the whole-blob HMAC scheme when a local cert/key
+> override wrapped a SQL backend, instead of that backend's hash chain. The
+> first start after upgrading such a deployment reports `ErrInventoryTampered`
+> even though nothing was tampered with — only the *scheme* changed, not the
+> data. The inventory rows are intact, so recompute the integrity head by
+> running `openvox-ca-ctl migrate` from the affected backend into a fresh
+> destination (the migration rewrites the head under the correct scheme; a
+> store cannot be migrated onto itself) and then serve from that destination.
+> This affects pre-release builds only; deployments created after the fix are
+> unaffected.
+
 ---
 
 ## Migrating between backends

@@ -195,6 +195,15 @@ func (o *OverlayBackend) BaseDir() string {
 	return ""
 }
 
+// Unwrap returns the wrapped base backend, letting capability checks that
+// don't have their own OverlayBackend forwarding method (e.g. InventoryStore)
+// see through the wrapper to the concrete backend beneath it. Overriding only
+// KeyCACert/KeyCAKey never touches the inventory, so it is always correct for
+// such a check to consult base directly.
+func (o *OverlayBackend) Unwrap() Backend {
+	return o.base
+}
+
 // AcquireLock delegates to the base backend's Locker implementation when
 // present. Locks must span the whole cluster (e.g. "bootstrap" must serialise
 // across replicas even when the CA key sits on a local file), so it is the

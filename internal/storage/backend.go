@@ -211,6 +211,27 @@ type InventoryStore interface {
 	PruneEntries(ctx context.Context, keep func(InventoryEntry) bool, recomputeHead func(survivors []InventoryEntry) []byte) ([]InventoryEntry, error)
 }
 
+// asInventoryStore probes b for the InventoryStore capability, unwrapping
+// wrapper backends (e.g. OverlayBackend) that don't implement InventoryStore
+// themselves but delegate KeyInventory to a base backend that does. Without
+// this, wrapping a SQL backend in OverlayBackend (e.g. via ca_cert_file/
+// ca_key_file) would silently downgrade its integrity scheme from the O(1)
+// hash chain to a whole-blob HMAC: StorageService picks the scheme via this
+// same type assertion in several places, and computing it one way while a
+// previously stored value used the other reads back as tampering.
+func asInventoryStore(b Backend) (InventoryStore, bool) {
+	for {
+		if store, ok := b.(InventoryStore); ok {
+			return store, true
+		}
+		unwrapper, ok := b.(interface{ Unwrap() Backend })
+		if !ok {
+			return nil, false
+		}
+		b = unwrapper.Unwrap()
+	}
+}
+
 // Locker is an optional Backend capability that provides a cross-node
 // distributed mutex. Backends implement it when they have a natural way
 // to coordinate a lock across replicas (etcd's concurrency.Mutex, Redis
