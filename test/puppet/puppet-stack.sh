@@ -181,6 +181,26 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# -- Helper: abort a readiness wait loudly, dumping the culprit's logs ------
+# Without this the wait loops below printed " OK" whether or not the endpoint
+# ever answered, so a service that never came up surfaced only as a confusing
+# cascade of downstream test failures. Aborting here instead yields one clear
+# message plus the container logs that explain why.
+abort_not_ready() {  # human-description  service-name
+    printf ' TIMEOUT\n'
+    printf 'FATAL: %s did not become ready in time\n' "$1" >&2
+    printf '# ---- last 80 log lines from %s ----\n' "$2" >&2
+    # Send both the container's stdout and stderr to our stderr. Do NOT add
+    # `2>/dev/null`: with `>&2` alone, fd1 is redirected to the current stderr
+    # and fd2 already points there, so both streams reach the operator. A
+    # `2>/dev/null` would instead route the command's stderr to the bit-bucket
+    # -- and under `podman logs` a container's stderr (where Go services write
+    # their startup/abort diagnostics) is replayed to *our* stderr, so the very
+    # lines that explain the failed bootstrap would be discarded.
+    "${_COMPOSE[@]}" logs --tail 80 "$2" >&2 || true
+    exit 1
+}
+
 if $DO_UP; then
     printf '# Removing any leftover containers from previous runs...\n'
     "${_COMPOSE[@]}" down --volumes --remove-orphans --timeout 10 2>/dev/null || true
@@ -192,30 +212,45 @@ if $DO_UP; then
     "${_COMPOSE[@]}" up -d
 
     printf '# Waiting for Go CA (port 8141)'
+    _ca_ready=false
     for _i in $(seq 1 60); do
-        curl -sfk "${CA_HOST_URL}/puppet-ca/v1/certificate/ca" > /dev/null 2>&1 && break
+        if curl -sfk "${CA_HOST_URL}/puppet-ca/v1/certificate/ca" > /dev/null 2>&1; then
+            _ca_ready=true; break
+        fi
         printf '.'; sleep 3
     done
-    printf ' OK\n'
+    if $_ca_ready; then printf ' OK\n'; else
+        abort_not_ready "Go CA (openvox-ca)" openvox-ca
+    fi
 
     # OpenVox Server (JVM + JRuby) can take 5-7 minutes on first start.
     # Allow up to 450 s (matches healthcheck start_period + retries budget).
     printf '# Waiting for puppet master (port 8140)'
+    _master_ready=false
     for _i in $(seq 1 90); do
-        curl -sfk "https://localhost:8140/status/v1/simple" 2>/dev/null \
-            | grep -q running && break
+        if curl -sfk "https://localhost:8140/status/v1/simple" 2>/dev/null \
+            | grep -q running; then
+            _master_ready=true; break
+        fi
         printf '.'; sleep 5
     done
-    printf ' OK\n'
+    if $_master_ready; then printf ' OK\n'; else
+        abort_not_ready "puppet master" puppet-master
+    fi
 
     # OpenVoxDB must wait for puppet-master to fully start first.  Allow 600 s.
     printf '# Waiting for OpenVoxDB'
+    _pdb_ready=false
     for _i in $(seq 1 120); do
         _health=$(pdb_query /status/v1/simple 2>/dev/null) || true
-        [[ "$_health" == "running" ]] && break
+        if [[ "$_health" == "running" ]]; then
+            _pdb_ready=true; break
+        fi
         printf '.'; sleep 5
     done
-    printf ' OK\n'
+    if $_pdb_ready; then printf ' OK\n'; else
+        abort_not_ready "OpenVoxDB" openvoxdb
+    fi
 fi
 
 # -- TAP helpers ----------------------------------------------------------
