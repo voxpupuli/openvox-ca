@@ -172,9 +172,17 @@ type InventoryEntry struct {
 // Certificate index states recorded in CertRecord.State. Pending CSRs are not
 // issued certificates and never appear in the index; the API layer derives the
 // "requested" state from the csr/ namespace instead.
+//
+// CertStateUnknown is reported (never stored as a target state) by a backend
+// that cannot maintain per-serial state for a record — today only the etcd
+// backend for serials that appeared more than once in a converted legacy
+// blob, which its one-to-one by-serial index cannot address. Readers must
+// derive such a record's real state from the signed CRL (the authoritative
+// artefact) rather than trust the index.
 const (
 	CertStateSigned  = "signed"
 	CertStateRevoked = "revoked"
+	CertStateUnknown = "unknown"
 )
 
 // CertProjection carries the display fields denormalised from a signed
@@ -200,7 +208,10 @@ type CertProjection struct {
 // canonical inventory fields, the denormalised display projection, and the one
 // mutable fact — revocation. State/RevokedAt are a projection of the signed
 // CRL (the source of truth), written alongside CRL updates and rebuildable
-// from it, exactly as the projection fields relate to the PEM.
+// from it, exactly as the projection fields relate to the PEM. The
+// rebuildability guarantee is conditional on the backend being able to
+// address the record's serial one-to-one; when it cannot, State is reported
+// as CertStateUnknown and the reader consults the CRL directly.
 //
 // Note the integrity hash chain covers only the canonical InventoryEntry
 // fields (via canonicalInventoryLine); the projection columns are not chained.
@@ -244,6 +255,13 @@ type CertIndex interface {
 	// original revocation time. A serial with no matching row is a no-op, not
 	// an error (the CRL may legitimately reference certs the index no longer
 	// tracks).
+	//
+	// SetRevoked, ClearRevoked, and SetProjection may also decline a write —
+	// as a logged no-op, not an error — when the implementation cannot
+	// unambiguously identify the bearing rows (the etcd backend's one-to-one
+	// by-serial index cannot address a serial duplicated in a converted
+	// legacy blob). Statuses reports such records with CertStateUnknown so
+	// callers know to derive their state from the CRL instead.
 	SetRevoked(ctx context.Context, serial string, at time.Time) error
 
 	// ClearRevoked returns every index row bearing serial to the signed

@@ -58,9 +58,23 @@ func (b *EtcdBackend) Statuses(ctx context.Context, stateFilter string) ([]CertR
 		return nil, err
 	}
 	// Ascending issuance order: a later record for the same subject wins.
+	// Serials borne by more than one record (imported legacy duplicates)
+	// cannot have index-maintained state — mutateRecordBySerial refuses
+	// writes for them — so report those records as CertStateUnknown, which
+	// tells the reader to derive state from the signed CRL instead of
+	// trusting a value that revocation writes were never able to update.
+	serialCount := make(map[string]int, len(recs))
+	for _, r := range recs {
+		serialCount[r.rec.Serial]++
+	}
 	latest := make(map[string]CertRecord, len(recs))
 	for _, r := range recs {
-		latest[r.rec.Subject] = r.rec
+		rec := r.rec
+		if serialCount[rec.Serial] > 1 {
+			rec.State = CertStateUnknown
+			rec.RevokedAt = nil
+		}
+		latest[rec.Subject] = rec
 	}
 
 	subjects := make([]string, 0, len(latest))

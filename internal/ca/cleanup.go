@@ -46,8 +46,10 @@ import (
 // observable point, but on backends that prune in batches (etcd) it may
 // partially complete on error; the entries PruneInventory returns are always
 // exactly the ones removed, so the CRL/blob cleanup below runs even when the
-// prune itself reports an error. An entry that cannot be time-parsed is
-// conservatively kept, never dropped.
+// prune itself reports an error — on its own small context, so in the worst
+// case (a prune that exhausted its deadline) the CRL lock is held for up to
+// lockTimeout plus that cleanup budget. An entry that cannot be time-parsed
+// is conservatively kept, never dropped.
 func (c *CA) CleanupExpiredCerts(ctx context.Context, retain time.Duration) (int, error) {
 	if retain < 0 {
 		retain = 0
@@ -91,8 +93,12 @@ func (c *CA) CleanupExpiredCerts(ctx context.Context, retain time.Duration) (int
 		// ctx's budget, and the deadline case is exactly when a partial prune
 		// is most likely. The cleanup below must still run for the durably
 		// removed entries, so give it its own bounded context that survives
-		// the prune's. The CRL lock is still held throughout.
-		cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), lockTimeout)
+		// the prune's. The CRL lock (and c.mu) is still held throughout, so
+		// keep the extra budget modest — one CRL re-sign plus at most a
+		// bounded batch of blob deletions — rather than granting a second
+		// full lockTimeout: a concurrent Revoke waits on the same lock with a
+		// lockTimeout budget of its own.
+		cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), lockTimeout/2)
 		defer cancelCleanup()
 
 		// Collect the removed serials (normalised) and refresh in-memory caches.
@@ -110,9 +116,10 @@ func (c *CA) CleanupExpiredCerts(ctx context.Context, retain time.Duration) (int
 			delete(c.ocspCache, key)
 		}
 
-		if err := c.dropCRLEntriesLocked(cleanupCtx, removedSerials); err != nil {
-			return errors.Join(pruneErr, err)
-		}
+		// A CRL failure must not abort the rest: the "clean up NOW" rule above
+		// applies to the cert blobs just as much, and the deletion loop
+		// already logs-and-swallows its own per-subject failures.
+		crlErr := c.dropCRLEntriesLocked(cleanupCtx, removedSerials)
 
 		// Delete the stored signed cert for each removed subject, but only when
 		// the cert still on file carries the expired serial (otherwise the
@@ -121,7 +128,7 @@ func (c *CA) CleanupExpiredCerts(ctx context.Context, retain time.Duration) (int
 			c.deleteStoredCertIfSerialMatches(cleanupCtx, e.Subject, e.Serial)
 		}
 
-		return pruneErr
+		return errors.Join(pruneErr, crlErr)
 	})
 	return removed, err
 }

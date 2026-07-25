@@ -819,6 +819,18 @@ func (s *Server) handleGetStatuses(w http.ResponseWriter, r *http.Request) {
 	if indexed {
 		for _, rec := range records {
 			seen[rec.Subject] = true
+			if rec.State == storage.CertStateUnknown {
+				// The backend cannot maintain this record's state (duplicated
+				// legacy serial on etcd); derive it from the signed CRL, the
+				// authoritative artefact, exactly as the non-indexed path
+				// does. The revocation timestamp is unknowable here, matching
+				// that path.
+				rec.State = storage.CertStateSigned
+				rec.RevokedAt = nil
+				if s.CA.IsRevoked(r.Context(), rec.Subject) {
+					rec.State = storage.CertStateRevoked
+				}
+			}
 			if stateFilter != "" && rec.State != stateFilter {
 				continue
 			}

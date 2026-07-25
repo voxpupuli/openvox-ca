@@ -468,7 +468,15 @@ func (b *EtcdBackend) pruneEntriesOnce(ctx context.Context, keep func(InventoryE
 	// calls. Never silently: the caller's log should explain a short count.
 	if len(starts) > etcdPruneMaxBatchesPerCall {
 		starts = starts[len(starts)-etcdPruneMaxBatchesPerCall:]
-		slog.Info("Bounding inventory prune to keep it inside the caller's time budget; later runs will remove the rest",
+		logFn := slog.Info
+		if starts[0] > etcdPruneMaxBatchesPerCall*etcdPruneBatch {
+			// More is deferred than a whole run can remove: at the current
+			// cleanup interval the backlog is growing, not draining. Make
+			// that visible rather than inferable — the operator's lever is
+			// shortening the cleanup interval.
+			logFn = slog.Warn
+		}
+		logFn("Bounding inventory prune to keep it inside the caller's time budget; later runs will remove the rest",
 			"removing", len(removed)-starts[0], "deferred", starts[0])
 	}
 
