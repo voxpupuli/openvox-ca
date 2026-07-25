@@ -703,7 +703,11 @@ var _ = Describe("EtcdInventoryPrune", func() {
 	It("prunes more entries than one transaction batch holds, staying consistent throughout", func() {
 		cli, stop := startEmbeddedEtcd()
 		defer stop()
-		svc, _ := newEtcdInventoryService(cli, "/test-inv-prune-big")
+		svc, b := newEtcdInventoryService(cli, "/test-inv-prune-big")
+		// A second replica observing the store between batches: every
+		// committed intermediate state must verify, not just the final one —
+		// this is the design's central invariant, so make it an assertion.
+		observer, _ := newEtcdInventoryService(cli, "/test-inv-prune-big")
 		ctx := context.Background()
 
 		const total = 80
@@ -711,6 +715,18 @@ var _ = Describe("EtcdInventoryPrune", func() {
 			line := fmt.Sprintf("%04d 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node%d", i, i%8)
 			Expect(svc.AppendInventory(ctx, line)).To(Succeed())
 		}
+
+		batchesSeen := 0
+		lastCount := total + 1
+		b.pruneBatchHook = func() {
+			batchesSeen++
+			inv, err := observer.ReadInventory(ctx)
+			Expect(err).NotTo(HaveOccurred(), "intermediate state after batch %d must verify (entries and head out of sync?)", batchesSeen)
+			count := len(bytes.Split(bytes.TrimRight(inv, "\n"), []byte{'\n'}))
+			Expect(count).To(BeNumerically("<", lastCount), "each batch must shrink the inventory")
+			lastCount = count
+		}
+		defer func() { b.pruneBatchHook = nil }()
 
 		// Remove the first 65 serials plus all of node3's later issuances
 		// (0067, 0075): spans three etcdPruneBatch (30) transactions, so the
@@ -720,6 +736,7 @@ var _ = Describe("EtcdInventoryPrune", func() {
 		removed, err := svc.PruneInventory(ctx, keep)
 		Expect(err).NotTo(HaveOccurred(), "PruneInventory")
 		Expect(removed).To(HaveLen(67))
+		Expect(batchesSeen).To(Equal(3), "67 removals must span three batches")
 
 		inv, err := svc.ReadInventory(ctx)
 		Expect(err).NotTo(HaveOccurred(), "ReadInventory after batched prune (head inconsistent?)")
@@ -784,6 +801,52 @@ var _ = Describe("EtcdInventoryPrune", func() {
 		inv, err := svc.ReadInventory(ctx)
 		Expect(err).NotTo(HaveOccurred(), "chain must verify after the conflicted prune")
 		Expect(bytes.Split(bytes.TrimRight(inv, "\n"), []byte{'\n'})).To(HaveLen(total - 65))
+	})
+
+	It("returns the durably removed entries alongside the error when retries are exhausted", func() {
+		// The contract's hardest case: every attempt commits one batch and
+		// then conflicts, until the retry budget runs out. The error must
+		// arrive WITH the accumulated removals — without them the caller
+		// could never clean up after what was already durably deleted.
+		cli, stop := startEmbeddedEtcd()
+		defer stop()
+		svc, b := newEtcdInventoryService(cli, "/test-inv-prune-exhaust")
+		ctx := context.Background()
+
+		const total = 520
+		for i := 1; i <= total; i++ {
+			line := fmt.Sprintf("%04d 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node%d", i, i%8)
+			Expect(svc.AppendInventory(ctx, line)).To(Succeed())
+		}
+
+		// Bump the fence after EVERY committed batch: each attempt commits
+		// exactly one batch (30 entries) and then conflicts, so the 16-try
+		// budget is exhausted with 480 entries durably removed.
+		b.pruneBatchHook = func() {
+			_, err := cli.Put(ctx, "/test-inv-prune-exhaust/inventory/seq", fmt.Sprintf("%d", total))
+			Expect(err).NotTo(HaveOccurred(), "hook: bump fence")
+		}
+
+		removed, err := svc.PruneInventory(ctx, func(e InventoryEntry) bool { return e.Serial > "0510" })
+		b.pruneBatchHook = nil
+		Expect(err).To(HaveOccurred(), "exhausted retries must surface an error")
+		Expect(err.Error()).To(ContainSubstring("too many concurrent writers"))
+		Expect(removed).To(HaveLen(480), "every durably removed entry must be returned with the error")
+
+		// The returned entries really are gone, everything else remains, and
+		// each committed state left the chain verifiable.
+		inv, err := svc.ReadInventory(ctx)
+		Expect(err).NotTo(HaveOccurred(), "chain must verify after the exhausted prune")
+		lines := bytes.Split(bytes.TrimRight(inv, "\n"), []byte{'\n'})
+		Expect(lines).To(HaveLen(total - 480))
+		gone := make(map[string]bool, len(removed))
+		for _, e := range removed {
+			gone[e.Serial] = true
+		}
+		Expect(gone).To(HaveLen(480), "no removed entry may be reported twice")
+		for _, l := range lines {
+			Expect(gone[string(bytes.Fields(l)[0])]).To(BeFalse(), "a returned entry is still in the inventory")
+		}
 	})
 })
 
@@ -1028,7 +1091,7 @@ var _ = Describe("EtcdLegacyInventoryDecompose", func() {
 		Expect(string(payload)).To(Equal(blob), "the blob must be untouched for the operator to repair")
 	})
 
-	It("tolerates duplicate serials in the legacy blob, pointing by-serial at the newest", func() {
+	It("tolerates duplicate serials in the legacy blob, refusing index writes for them", func() {
 		cli, stop := startEmbeddedEtcd()
 		defer stop()
 		ctx := context.Background()
@@ -1049,51 +1112,212 @@ var _ = Describe("EtcdLegacyInventoryDecompose", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(string(inv)).To(Equal(blob), "both lines must be imported verbatim")
 
-		// The duplicate-serial guard works off the (deduplicated) by-serial
-		// index: the serial stays taken.
+		// The duplicate-serial guard works off the (sentinel) by-serial
+		// index entry: the serial stays taken.
 		err = svc.AppendInventory(ctx, "0001 2024-01-03T00:00:00UTC 2029-01-03T00:00:00UTC /node3")
 		Expect(err).To(MatchError(ErrDuplicateSerial))
+
+		// A one-to-one index cannot say which bearer an index write is meant
+		// for, so writes for a duplicated serial must be refused outright —
+		// applying them to the newest bearer would hand one subject the other
+		// subject's fingerprint or revocation state.
+		for _, subject := range []string{"node1", "node2"} {
+			Expect(b.Put(ctx, CertKey(subject), []byte("pem-"+subject), BlobPublic)).To(Succeed())
+		}
+		Expect(svc.SetCertProjection(ctx, "0001", CertProjection{Fingerprint: "aa:bb:cc"})).To(Succeed())
+		Expect(svc.MarkCertRevoked(ctx, "0001", time.Now())).To(Succeed())
+		recs, _, err := svc.CertStatuses(ctx, "")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(recs).To(HaveLen(2))
+		for _, rec := range recs {
+			Expect(rec.Fingerprint).To(BeEmpty(), "no bearer may receive the projection for an ambiguous serial")
+			Expect(rec.State).To(Equal(CertStateSigned), "no bearer may receive the revocation for an ambiguous serial")
+		}
+	})
+
+	It("removes the stale whole-blob head when upgrading a CA whose inventory is empty", func() {
+		// A pre-decomposition CA always stores a whole-blob HMAC — bootstrap
+		// writes one over the empty inventory before any cert is issued — but
+		// with no blob content there is no import to drop it as part of.
+		// Left in place it would fail the first chain verification with a
+		// spurious tampering error.
+		cli, stop := startEmbeddedEtcd()
+		defer stop()
+		ctx := context.Background()
+		const prefix = "/test-inv-legacy-empty"
+
+		seedLegacyInventory(cli, prefix, "")
+
+		b := newBackend(cli, prefix)
+		defer b.Close()
+
+		headResp, err := cli.Get(ctx, prefix+"/inventory/hmac")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(headResp.Kvs).To(BeEmpty(), "the verified empty-inventory head must be removed")
+
+		svc := NewWithBackend(b, filepath.Join(GinkgoT().TempDir(), "private"))
+		Expect(svc.InitHMAC(ctx)).To(Succeed(), "the upgraded empty CA must start cleanly")
+		inv, err := svc.ReadInventory(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(inv).To(BeEmpty())
+		Expect(svc.AppendInventory(ctx, "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1")).To(Succeed())
+	})
+
+	It("leaves an unverifiable head over an empty inventory for verification to fail closed", func() {
+		// A non-empty head over zero entries that is NOT the whole-blob MAC
+		// of an empty inventory may be the residue of entries tampered away;
+		// deleting it would silently accept that.
+		cli, stop := startEmbeddedEtcd()
+		defer stop()
+		ctx := context.Background()
+		const prefix = "/test-inv-legacy-empty-bad"
+
+		seedLegacyInventory(cli, prefix, "")
+		_, err := cli.Put(ctx, prefix+"/inventory/hmac", string(encodeBlob(time.Now(), bytes.Repeat([]byte{0x7f}, 32))))
+		Expect(err).NotTo(HaveOccurred())
+
+		b := newBackend(cli, prefix)
+		defer b.Close()
+
+		headResp, err := cli.Get(ctx, prefix+"/inventory/hmac")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(headResp.Kvs).To(HaveLen(1), "an unverifiable head must be left in place")
+
+		svc := NewWithBackend(b, filepath.Join(GinkgoT().TempDir(), "private"))
+		Expect(svc.InitHMAC(ctx)).To(MatchError(ErrInventoryTampered), "verification must stay fail-closed")
+	})
+
+	It("fails startup when the stored head cannot be verified because the HMAC key is missing", func() {
+		cli, stop := startEmbeddedEtcd()
+		defer stop()
+		ctx := context.Background()
+		const prefix = "/test-inv-legacy-nokey"
+
+		blob := "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1\n"
+		seedLegacyInventory(cli, prefix, blob)
+		_, err := cli.Delete(ctx, prefix+"/private/hmac_key")
+		Expect(err).NotTo(HaveOccurred())
+
+		b := NewEtcdBackendFromClient(cli, prefix, 5*time.Second)
+		defer b.Close()
+		err = b.EnsureReady(ctx)
+		Expect(err).To(MatchError(ErrInventoryTampered), "an unverifiable blob must not become the trusted baseline")
+		Expect(err.Error()).To(ContainSubstring("inventory/hmac"), "the error must tell the operator how to acknowledge the lost baseline")
+
+		resp, err := cli.Get(ctx, prefix+"/inventory/entries/", clientv3.WithPrefix(), clientv3.WithCountOnly())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.Count).To(BeZero(), "nothing may be imported")
+	})
+
+	It("fails startup when the HMAC key is malformed rather than importing unverified", func() {
+		cli, stop := startEmbeddedEtcd()
+		defer stop()
+		ctx := context.Background()
+		const prefix = "/test-inv-legacy-badkey"
+
+		seedLegacyInventory(cli, prefix, "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1\n")
+		_, err := cli.Put(ctx, prefix+"/private/hmac_key", string(encodeBlob(time.Now(), []byte("short"))))
+		Expect(err).NotTo(HaveOccurred())
+
+		b := NewEtcdBackendFromClient(cli, prefix, 5*time.Second)
+		defer b.Close()
+		Expect(b.EnsureReady(ctx)).To(MatchError(ErrInventoryTampered))
+	})
+
+	It("restarts the import when a legacy writer touches the blob mid-import", func() {
+		// The marker-revision guard is the mechanism the docs cite for the
+		// mixed-version window: an old-version replica appending to the blob
+		// between import batches must invalidate the import, which then redoes
+		// itself from the updated blob.
+		cli, stop := startEmbeddedEtcd()
+		defer stop()
+		ctx := context.Background()
+		const prefix = "/test-inv-legacy-race"
+
+		blob := ""
+		const total = 40 // more than one etcdImportBatch, so batches interleave
+		for i := 1; i <= total; i++ {
+			blob += fmt.Sprintf("%04d 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node%d\n", i, i%4)
+		}
+		seedLegacyInventory(cli, prefix, blob)
+
+		extra := "9999 2024-06-01T00:00:00UTC 2029-06-01T00:00:00UTC /straggler\n"
+		b := NewEtcdBackendFromClient(cli, prefix, 5*time.Second)
+		defer b.Close()
+		fired := false
+		b.importBatchHook = func() {
+			if fired {
+				return
+			}
+			fired = true
+			// An old-version append: rewrite the whole blob and its
+			// whole-blob HMAC, exactly as the legacy AppendInventory did.
+			_, err := cli.Put(ctx, prefix+"/inventory/data", string(encodeBlob(time.Now(), []byte(blob+extra))))
+			Expect(err).NotTo(HaveOccurred(), "hook: legacy append")
+			_, err = cli.Put(ctx, prefix+"/inventory/hmac", string(encodeBlob(time.Now(), wholeBlobInventoryMAC(legacyHMACKey, []byte(blob+extra)))))
+			Expect(err).NotTo(HaveOccurred(), "hook: legacy HMAC update")
+		}
+		Expect(b.EnsureReady(ctx)).To(Succeed(), "EnsureReady")
+		b.importBatchHook = nil
+		Expect(fired).To(BeTrue(), "the conflicting write must actually have been injected")
+
+		got, err := b.Get(ctx, KeyInventory)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(got)).To(Equal(blob+extra), "the redone import must include the straggler's line")
 	})
 })
 
 // --- CertIndex ---
 
+// seedEtcdCertIndex seeds a service on prefix with the canonical index
+// fixture: node1 issued twice (latest carries certIndexProj), node2 once
+// without a projection, node3 in the inventory but with no stored cert blob,
+// and stored certs for node1/node2 only.
+var certIndexProj = CertProjection{
+	Fingerprint:    "aa:bb:cc",
+	DNSAltNames:    []string{"node1", "node1.example.com"},
+	AuthExtensions: map[string]string{"pp_auth_role": "webserver"},
+}
+
+func seedEtcdCertIndex(cli *clientv3.Client, prefix string) (*StorageService, *EtcdBackend) {
+	ctx := context.Background()
+	svc, b := newEtcdInventoryService(cli, prefix)
+	Expect(svc.AppendInventory(ctx, "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1")).To(Succeed())
+	Expect(svc.AppendInventoryRecord(ctx, "0003 2024-01-03T00:00:00UTC 2029-01-03T00:00:00UTC /node1", &certIndexProj)).To(Succeed())
+	Expect(svc.AppendInventory(ctx, "0002 2024-01-02T00:00:00UTC 2029-01-02T00:00:00UTC /node2")).To(Succeed())
+	Expect(svc.AppendInventory(ctx, "0004 2024-01-04T00:00:00UTC 2029-01-04T00:00:00UTC /node3")).To(Succeed())
+	for _, subject := range []string{"node1", "node2"} {
+		Expect(b.Put(ctx, CertKey(subject), []byte("pem-"+subject), BlobPublic)).To(Succeed())
+	}
+	return svc, b
+}
+
 var _ = Describe("EtcdCertIndex", func() {
-	It("round-trips the certificate index end to end", func() {
+	It("serves the projected latest issuance per subject, gated on stored certs", func() {
 		cli, stop := startEmbeddedEtcd()
 		defer stop()
-		svc, b := newEtcdInventoryService(cli, "/test-certindex")
+		svc, _ := seedEtcdCertIndex(cli, "/test-certindex-statuses")
 		ctx := context.Background()
-
-		proj := CertProjection{
-			Fingerprint:    "aa:bb:cc",
-			DNSAltNames:    []string{"node1", "node1.example.com"},
-			AuthExtensions: map[string]string{"pp_auth_role": "webserver"},
-		}
-		Expect(svc.AppendInventory(ctx, "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1")).To(Succeed())
-		Expect(svc.AppendInventoryRecord(ctx, "0003 2024-01-03T00:00:00UTC 2029-01-03T00:00:00UTC /node1", &proj)).To(Succeed())
-		Expect(svc.AppendInventory(ctx, "0002 2024-01-02T00:00:00UTC 2029-01-02T00:00:00UTC /node2")).To(Succeed())
-		// node1 and node2 hold stored certs; node3 has an inventory entry but
-		// no blob and must stay invisible.
-		Expect(svc.AppendInventory(ctx, "0004 2024-01-04T00:00:00UTC 2029-01-04T00:00:00UTC /node3")).To(Succeed())
-		for _, subject := range []string{"node1", "node2"} {
-			Expect(b.Put(ctx, CertKey(subject), []byte("pem-"+subject), BlobPublic)).To(Succeed())
-		}
 
 		recs, ok, err := svc.CertStatuses(ctx, "")
 		Expect(err).NotTo(HaveOccurred(), "CertStatuses")
 		Expect(ok).To(BeTrue(), "etcd backend must advertise the CertIndex capability")
-		Expect(recs).To(HaveLen(2), "one record per subject with a stored cert, latest issuance only")
+		Expect(recs).To(HaveLen(2), "one record per subject with a stored cert; node3 has no blob and stays invisible")
 		Expect(recs[0].Subject).To(Equal("node1"))
 		Expect(recs[0].Serial).To(Equal("0003"), "node1's latest issuance wins")
-		Expect(recs[0].Fingerprint).To(Equal(proj.Fingerprint))
-		Expect(recs[0].DNSAltNames).To(Equal(proj.DNSAltNames))
-		Expect(recs[0].AuthExtensions).To(Equal(proj.AuthExtensions))
+		Expect(recs[0].Fingerprint).To(Equal(certIndexProj.Fingerprint))
+		Expect(recs[0].DNSAltNames).To(Equal(certIndexProj.DNSAltNames))
+		Expect(recs[0].AuthExtensions).To(Equal(certIndexProj.AuthExtensions))
 		Expect(recs[1].Subject).To(Equal("node2"))
 		Expect(recs[1].Fingerprint).To(BeEmpty(), "appended without a projection")
+	})
 
-		// Revocation round-trip: idempotent marking keeps the first time, the
-		// state filter partitions, and clearing restores the signed state.
+	It("projects revocation idempotently, partitions by state, and clears again", func() {
+		cli, stop := startEmbeddedEtcd()
+		defer stop()
+		svc, _ := seedEtcdCertIndex(cli, "/test-certindex-revoke")
+		ctx := context.Background()
+
 		revokedAt := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
 		Expect(svc.MarkCertRevoked(ctx, "0003", revokedAt)).To(Succeed())
 		Expect(svc.MarkCertRevoked(ctx, "0003", revokedAt.Add(24*time.Hour))).To(Succeed(), "re-marking must not error")
@@ -1109,19 +1333,39 @@ var _ = Describe("EtcdCertIndex", func() {
 		Expect(signed[0].Subject).To(Equal("node2"))
 
 		Expect(svc.ClearCertRevoked(ctx, "0003")).To(Succeed())
-
-		// Projection backfill for the projection-less record.
-		Expect(svc.SetCertProjection(ctx, "0002", CertProjection{Fingerprint: "dd:ee:ff"})).To(Succeed())
-		recs, _, err = svc.CertStatuses(ctx, "")
+		recs, _, err := svc.CertStatuses(ctx, "")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(recs).To(HaveLen(2))
 		Expect(recs[0].State).To(Equal(CertStateSigned), "ClearCertRevoked restored node1")
 		Expect(recs[0].RevokedAt).To(BeNil())
-		Expect(recs[1].Fingerprint).To(Equal("dd:ee:ff"))
+	})
 
-		// The chain covers only canonical fields, so none of the index writes
-		// above may have disturbed it.
-		_, err = svc.ReadInventory(ctx)
+	It("backfills the projection for a projection-less record", func() {
+		cli, stop := startEmbeddedEtcd()
+		defer stop()
+		svc, _ := seedEtcdCertIndex(cli, "/test-certindex-backfill")
+		ctx := context.Background()
+
+		Expect(svc.SetCertProjection(ctx, "0002", CertProjection{Fingerprint: "dd:ee:ff"})).To(Succeed())
+		recs, _, err := svc.CertStatuses(ctx, "")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(recs).To(HaveLen(2))
+		Expect(recs[1].Subject).To(Equal("node2"))
+		Expect(recs[1].Fingerprint).To(Equal("dd:ee:ff"))
+	})
+
+	It("keeps the integrity chain untouched by index writes", func() {
+		cli, stop := startEmbeddedEtcd()
+		defer stop()
+		svc, _ := seedEtcdCertIndex(cli, "/test-certindex-chain")
+		ctx := context.Background()
+
+		Expect(svc.MarkCertRevoked(ctx, "0003", time.Now())).To(Succeed())
+		Expect(svc.SetCertProjection(ctx, "0002", CertProjection{Fingerprint: "dd:ee:ff"})).To(Succeed())
+		Expect(svc.ClearCertRevoked(ctx, "0003")).To(Succeed())
+
+		// The chain covers only canonical fields, so none of the writes above
+		// may have disturbed it.
+		_, err := svc.ReadInventory(ctx)
 		Expect(err).NotTo(HaveOccurred(), "index writes must not touch the integrity chain")
 	})
 
