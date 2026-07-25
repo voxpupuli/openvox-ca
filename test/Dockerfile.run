@@ -5,7 +5,7 @@
 #   # or: go build -o bin/ ./cmd/...
 #
 # Then build this image:
-#   podman build -f Dockerfile.run -t openvox-ca:latest .
+#   podman build -f test/Dockerfile.run -t openvox-ca:latest .
 #
 # Integration test targets (mage test:integCompose, etc.) handle
 # both steps automatically.

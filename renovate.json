@@ -49,6 +49,13 @@
       "enabled": false
     },
     {
+      "description": "The root compose.yml is a deployment example; keep its image reference floating rather than digest-pinned",
+      "matchPackageNames": [
+        "ghcr.io/voxpupuli/openvox-ca"
+      ],
+      "pinDigests": false
+    },
+    {
       "description": "Don't pin CentOS Stream, old digests aren't retained after updates",
       "matchPackageNames": [
         "quay.io/centos/centos"

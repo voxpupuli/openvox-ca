@@ -26,7 +26,7 @@ mage test:bench
 
 ## Container / Compose topologies
 
-A `Dockerfile` and `compose.yml` are provided for development and integration testing.
+A test runtime image (`test/Dockerfile.run`) and `test/compose.yml` are provided for development and integration testing.
 
 ```bash
 # Build images and run the full integration test suite
@@ -42,7 +42,7 @@ mage test:bench
 mage test:puppet
 ```
 
-`test:integCompose` and `test:loadCompose` use `compose.yml`, the canonical integration test suite. It runs two containers on an isolated network (openvox-ca + test-runner) and exercises the full API in TAP format across 21 test groups:
+`test:integCompose` and `test:loadCompose` use `test/compose.yml`, the canonical integration test suite. It runs two containers on an isolated network (openvox-ca + test-runner) and exercises the full API in TAP format across 21 test groups:
 
 | Group | Coverage |
 | --- | --- |
@@ -68,11 +68,11 @@ mage test:puppet
 | 20 | Migration from an OpenVox/Puppet Server CA: import CA cert/key/CRL via `openvox-ca-ctl import`, copy pre-existing signed certs, verify fetch/sign/revoke/list all work on the migrated CA |
 | 21 | `POST /certificate_renewal` over mTLS: agent renews its own certificate; CN-mismatch renewal rejected |
 
-`test:bench` uses `compose-bench.yml` (autosign=true, k6 load runner).
+`test:bench` uses `test/compose-bench.yml` (autosign=true, k6 load runner).
 
-`test:puppet` uses `compose-puppet.yml`, a five-service stack that validates end-to-end catalog compilation, PuppetDB reporting, exported resources, and CRL revocation using a real OpenVox 8 agent and WEBrick puppet master. The CA runs with genuine TLS (a cert with CN=openvox-ca signed by the CA itself); all inter-service traffic verifies it.
+`test:puppet` uses `test/compose-puppet.yml`, a five-service stack that validates end-to-end catalog compilation, PuppetDB reporting, exported resources, and CRL revocation using a real OpenVox 8 agent and WEBrick puppet master. The CA runs with genuine TLS (a cert with CN=openvox-ca signed by the CA itself); all inter-service traffic verifies it.
 
-`test:migration` uses `compose-migration.yml`, which starts a real OpenVox Server (`voxpupuli/puppetserver:latest`) to create a genuine Puppet CA, then imports its CA material into openvox-ca using `openvox-ca-ctl import` and verifies the full migration path: old certs are fetchable, new certs can be signed, migrated certs can be revoked and cleaned.
+`test:migration` uses `test/compose-migration.yml`, which starts a real OpenVox Server (`voxpupuli/puppetserver:latest`) to create a genuine Puppet CA, then imports its CA material into openvox-ca using `openvox-ca-ctl import` and verifies the full migration path: old certs are fetchable, new certs can be signed, migrated certs can be revoked and cleaned.
 
 The k6 script (`test/load.js`) runs two concurrent scenarios:
 

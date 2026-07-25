@@ -21,7 +21,7 @@ Task. Invoke targets with `go run mage.go <Target>` or the `mage` binary:
 | `mage test:backendsEtcd` | etcd backend integration suite (embedded etcd) |
 | `mage test:backendsRedis` | Redis backend full-stack bash TAP suite (Puppet topology) |
 | `mage test:backendsRedisGo` | Redis backend Go integration suite (build tag `redis_integration`) |
-| `mage test:backendsOpenBao` | OpenBao Transit signer integration suite (build tag `openbao_integration`, `compose-backends-openbao.yml`) |
+| `mage test:backendsOpenBao` | OpenBao Transit signer integration suite (build tag `openbao_integration`, `test/compose-backends-openbao.yml`) |
 
 `golangci-lint` is pinned in CI (`.github/workflows/ci.yml`). Build it with the
 repository's Go toolchain (`go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@<pinned>`);

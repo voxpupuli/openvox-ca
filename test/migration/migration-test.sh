@@ -4,7 +4,7 @@
 # Runs inside the test-runner container (openvox-ca image) with the old
 # Puppet Server's CA directory mounted at /old-ca (read-only).
 #
-# Prerequisites (handled by compose-migration.yml):
+# Prerequisites (handled by test/compose-migration.yml):
 #   - old-puppet service is healthy (JVM Puppet Server with built-in CA)
 #   - /old-ca contains the real Puppet Server CA directory
 #   - openvox-ca and openvox-ca-ctl are on PATH

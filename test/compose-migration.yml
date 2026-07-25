@@ -16,7 +16,7 @@
 #
 # Usage (from project root):
 #   mage test:migration
-#   podman-compose -f compose-migration.yml up --build \
+#   podman-compose -f test/compose-migration.yml up --build \
 #       --exit-code-from test-runner --abort-on-container-exit
 
 name: openvox-ca-migration
@@ -59,8 +59,8 @@ services:
   # before use, same as a real migration where an admin would scp/rsync.
   test-runner:
     build:
-      context: .
-      dockerfile: Dockerfile.run
+      context: ..
+      dockerfile: test/Dockerfile.run
     image: openvox-ca-integ:latest
     user: "0:0"
     depends_on:
@@ -68,7 +68,7 @@ services:
         condition: service_healthy
     volumes:
       - old-cadir:/old-ca:ro
-      - ./test:/test:ro,z
+      - .:/test:ro,z
     entrypoint: ["bash", "/test/migration/migration-test.sh"]
 
 volumes:

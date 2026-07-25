@@ -8,7 +8,7 @@
 #
 # Usage (from project root):
 #   mage bench                        # build images, run k6, tear down
-#   podman-compose -f compose-bench.yml up --build   # interactive
+#   podman-compose -f test/compose-bench.yml up --build   # interactive
 
 name: openvox-ca-bench
 
@@ -17,8 +17,8 @@ services:
   # -- CA server ------------------------------------------------------------─
   openvox-ca:
     build:
-      context: .
-      dockerfile: Dockerfile.run
+      context: ..
+      dockerfile: test/Dockerfile.run
     image: openvox-ca-integ:latest   # reuse the image built by mage build / integCompose
     # WARNING: --no-tls-required and --autosign-config=true are for load
     # testing ONLY. Never use these flags in production.
@@ -56,7 +56,7 @@ services:
       - REPORT_KERNEL
     volumes:
       # Mount the test directory read-only; :z relabels for SELinux (RHEL/CentOS).
-      - ./test:/test:ro,z
+      - .:/test:ro,z
     depends_on:
       openvox-ca:
         condition: service_healthy

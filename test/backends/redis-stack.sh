@@ -3,7 +3,7 @@
 # the full Puppet stack.
 #
 # Two-phase test:
-#   1. Run the standard puppet-stack TAP suite against compose-backends-redis.yml
+#   1. Run the standard puppet-stack TAP suite against test/compose-backends-redis.yml
 #      -- proves catalog application, certificate revocation, and OpenVoxDB
 #      reporting all work end-to-end with Redis as the CA's blob store.
 #   2. Probe the Redis container directly to confirm that the CA actually
@@ -21,7 +21,7 @@ set -uo pipefail
 
 cd "$(dirname "$0")/../.." || exit 1
 
-COMPOSE_FILE="compose-backends-redis.yml"
+COMPOSE_FILE="test/compose-backends-redis.yml"
 REDIS_PREFIX="openvox-ca-integ"
 
 # -- Container engine / compose detection ----------------------------------
@@ -378,7 +378,7 @@ fi
 # storage backend entirely (e.g. caching writes only in memory).
 PROBE_CN="redis-probe-$(date +%s)"
 
-# Download CA cert from the host-mapped CA port (compose-backends-redis.yml
+# Download CA cert from the host-mapped CA port (test/compose-backends-redis.yml
 # maps openvox-ca:8140 to host:8241).
 if curl -sfk "https://localhost:8241/puppet-ca/v1/certificate/ca" \
         -o "$WORK_DIR/ca.pem" 2>/dev/null; then
@@ -585,7 +585,7 @@ if $_ca2_ready; then printf ' OK\n'; else
 fi
 
 # -- Diagnostic: did either CA replica have to restart to become ready? ----
-# `restart: on-failure` (compose-backends-redis.yml) deliberately lets a
+# `restart: on-failure` (test/compose-backends-redis.yml) deliberately lets a
 # replica that loses the bootstrap race recover from shared Redis state
 # instead of staying dead and cascading -- that transient is *tolerated*.
 # But a restart is also the signature of a genuine crash-on-lost-race

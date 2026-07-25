@@ -1,0 +1,65 @@
+# Multi-host integration test topology for openvox-ca.
+#
+# Services
+# --------
+#   openvox-ca   - CA server (no autosign; operators must sign manually)
+#   test-runner - Separate container acting as both puppet-agent and operator.
+#                 Communicates with openvox-ca over the internal network,
+#                 validating true cross-host behaviour.
+#
+# Usage (from project root):
+#   mage test:integCompose     # build, run, tear down (exit 0 on all pass)
+#   podman-compose -f test/compose.yml up --build   # interactive; ctrl-c to stop
+#
+# Environment variables honoured by test-runner:
+#   DO_LOAD=true    Enable concurrency / load tests (default: false)
+
+name: openvox-ca-integ
+
+services:
+
+  # -- CA server ------------------------------------------------------------─
+  openvox-ca:
+    build:
+      context: ..
+      dockerfile: test/Dockerfile.run
+    image: openvox-ca-integ:latest
+    # autosign=false so the test-runner must explicitly sign via openvox-ca-ctl,
+    # exercising the full operator workflow.
+    # WARNING: --no-tls-required is for integration testing ONLY.
+    # Never use this flag in production: it disables all authentication.
+    command:
+      - --cadir=/data
+      - --autosign-config=false
+      - --no-tls-required
+      - --crl-url=http://openvox-ca:8140/puppet-ca/v1/certificate_revocation_list/ca
+      - -v=1
+    expose:
+      - "8140"
+    volumes:
+      - ca-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8140/puppet-ca/v1/certificate/ca"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 8s
+
+  # -- Test runner ----------------------------------------------------------─
+  # Simulates a separate host (puppet-agent + operator) talking to openvox-ca
+  # over the compose network using the DNS name "openvox-ca".
+  test-runner:
+    image: openvox-ca-integ:latest
+    depends_on:
+      openvox-ca:
+        condition: service_healthy
+    environment:
+      - CA_URL=http://openvox-ca:8140
+      - DO_LOAD=${DO_LOAD:-false}
+    volumes:
+      # Mount the test script read-only; :z relabels for SELinux (required on RHEL/CentOS).
+      - .:/test:ro,z
+    entrypoint: ["bash", "/test/integration-compose.sh"]
+
+volumes:
+  ca-data:

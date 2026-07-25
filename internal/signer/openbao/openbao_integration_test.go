@@ -18,7 +18,7 @@
 //go:build openbao_integration
 
 // This suite runs against a real OpenBao server (see
-// compose-backends-openbao.yml and `mage test:backendsOpenBao`, which brings
+// test/compose-backends-openbao.yml and `mage test:backendsOpenBao`, which brings
 // the server up, configures the transit engine and a scoped AppRole, and
 // tears it down again). Unlike
 // openbao_test.go's httptest fakes, this exists to catch places where a

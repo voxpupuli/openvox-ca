@@ -60,7 +60,7 @@ host: 0.0.0.0
 port: 8140
 hostname: puppet.example.com
 tls_cert: /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem
-tls_key:  /etc/puppetlabs/puppet/ssl/ca/ca_key.pem
+tls_key:  /etc/puppetlabs/puppet/ssl/ca/private/ca_key.pem
 puppet_server: puppet.example.com
 puppet_server_file: ""
 no_pp_cli_auth: false

@@ -11,7 +11,7 @@
 #
 # Usage (from project root):
 #   mage test:puppet                   # build, run test suite, tear down
-#   podman-compose -f compose-puppet.yml up --build   # interactive
+#   podman-compose -f test/compose-puppet.yml up --build   # interactive
 #
 # The test suite is in test/puppet/puppet-stack.sh.
 #
@@ -28,8 +28,8 @@ services:
   # -- Go CA (TLS enabled) ------------------------------------------------─
   openvox-ca:
     build:
-      context: .
-      dockerfile: Dockerfile.run
+      context: ..
+      dockerfile: test/Dockerfile.run
     image: openvox-ca-integ:latest
     hostname: openvox-ca
     # Override the default ENTRYPOINT with a two-phase bootstrap script that
@@ -37,7 +37,7 @@ services:
     # the CA with TLS on all interfaces.
     entrypoint: ["/bin/bash", "/etc/puppet-ca/entrypoint.sh"]
     volumes:
-      - ./docker/puppet/ca-entrypoint.sh:/etc/puppet-ca/entrypoint.sh:ro,z
+      - ../docker/puppet/ca-entrypoint.sh:/etc/puppet-ca/entrypoint.sh:ro,z
       - ca-data:/data
     expose:
       - "8140"
@@ -57,7 +57,7 @@ services:
   # -- Puppet master (OpenVox Server / JVM) ------------------------------─
   puppet-master:
     build:
-      context: ./docker/puppet
+      context: ../docker/puppet
       dockerfile: Dockerfile
     hostname: puppet-master
     environment:
@@ -68,7 +68,7 @@ services:
       - OPENVOXDB_HOST=openvoxdb
       - OPENVOXDB_PORT=8081
     volumes:
-      - ./test/puppet/code/environments/production:/etc/puppetlabs/code/environments/production:ro,z
+      - ./puppet/code/environments/production:/etc/puppetlabs/code/environments/production:ro,z
     expose:
       - "8140"
     # Port 8140 on the host allows the test script to reach the master.
@@ -97,7 +97,7 @@ services:
       POSTGRES_USER: openvoxdb
       POSTGRES_PASSWORD: openvoxdb
     volumes:
-      - ./docker/puppet/postgres:/docker-entrypoint-initdb.d:ro,z
+      - ../docker/puppet/postgres:/docker-entrypoint-initdb.d:ro,z
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U openvoxdb -d openvoxdb"]
       interval: 10s
@@ -125,7 +125,7 @@ services:
     volumes:
       # Runs before ssl.sh (20-configure-ssl.sh) so that ssl.sh sees certs
       # already present and exits immediately.
-      - ./docker/puppet/openvoxdb/bootstrap-certs.sh:/container-entrypoint.d/15-bootstrap-certs.sh:ro,z
+      - ../docker/puppet/openvoxdb/bootstrap-certs.sh:/container-entrypoint.d/15-bootstrap-certs.sh:ro,z
     depends_on:
       puppet-master:
         # service_started so `compose up -d` returns without waiting for the
@@ -145,7 +145,7 @@ services:
   # -- Puppet agent (client) ----------------------------------------------─
   puppet-client:
     build:
-      context: ./docker/puppet
+      context: ../docker/puppet
       dockerfile: Dockerfile.client
     hostname: client.puppet.localdomain
     depends_on:

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Wrapper that runs the unmodified test/puppet/puppet-stack.sh TAP suite
-# against the Redis-backed CA topology (compose-backends-redis.yml), which
-# differs from compose-puppet.yml in the compose file name plus the host
+# against the Redis-backed CA topology (test/compose-backends-redis.yml), which
+# differs from test/compose-puppet.yml in the compose file name plus the host
 # port mappings (CA on 8241, master on 8240, vs. 8141/8140 for puppet).
 #
 # Approach: sed-rewrite a temporary copy of puppet-stack.sh with the literal
@@ -22,14 +22,14 @@ WORK=$(mktemp -d /tmp/puppet-stack-redis.XXXXXX)
 trap 'rm -rf "$WORK"' EXIT
 
 # Substitutions (literal-string replacements only):
-#  1. Compose file               -> compose-backends-redis.yml
+#  1. Compose file               -> test/compose-backends-redis.yml
 #  2. Host CA URL                -> https://localhost:8241
 #  3. Host master health URL     -> https://localhost:8240/...
 #  4. --resolve / --connect-to   -> add --connect-to redirecting host:8240
 #     This pair lets curl keep doing TLS hostname verification against
 #     "puppet-master" while the actual TCP connect lands on host port 8240.
 sed \
-    -e 's|compose-puppet\.yml|compose-backends-redis.yml|g' \
+    -e 's|test/compose-puppet\.yml|test/compose-backends-redis.yml|g' \
     -e 's|https://localhost:8141|https://localhost:8241|g' \
     -e 's|https://localhost:8140/status/v1/simple|https://localhost:8240/status/v1/simple|g' \
     -e 's|--resolve "puppet-master:8140:127\.0\.0\.1"|--resolve "puppet-master:8140:127.0.0.1" --connect-to "puppet-master:8140:127.0.0.1:8240"|g' \

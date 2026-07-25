@@ -335,17 +335,17 @@ func (Test) Unit() error {
 func (Test) IntegCompose() error {
 	mg.Deps(Build{}.All)
 	fmt.Println("Building compose images...")
-	if err := runCompose(nil, "-f", "compose.yml", "build"); err != nil {
+	if err := runCompose(nil, "-f", "test/compose.yml", "build"); err != nil {
 		return err
 	}
 
 	fmt.Println("Running compose integration tests...")
-	err := runCompose(nil, "-f", "compose.yml", "up",
+	err := runCompose(nil, "-f", "test/compose.yml", "up",
 		"--exit-code-from", "test-runner",
 		"--abort-on-container-exit")
 
 	fmt.Println("Tearing down compose stack...")
-	_ = runCompose(nil, "-f", "compose.yml", "down", "--volumes")
+	_ = runCompose(nil, "-f", "test/compose.yml", "down", "--volumes")
 
 	return err
 }
@@ -356,17 +356,17 @@ func (Test) IntegCompose() error {
 func (Test) IntegComposeFIPS() error {
 	mg.Deps(Build{}.FIPS)
 	fmt.Println("Building compose images (FIPS build)...")
-	if err := runCompose(nil, "-f", "compose.yml", "build"); err != nil {
+	if err := runCompose(nil, "-f", "test/compose.yml", "build"); err != nil {
 		return err
 	}
 
 	fmt.Println("Running compose integration tests (FIPS build)...")
-	err := runCompose(nil, "-f", "compose.yml", "up",
+	err := runCompose(nil, "-f", "test/compose.yml", "up",
 		"--exit-code-from", "test-runner",
 		"--abort-on-container-exit")
 
 	fmt.Println("Tearing down compose stack...")
-	_ = runCompose(nil, "-f", "compose.yml", "down", "--volumes")
+	_ = runCompose(nil, "-f", "test/compose.yml", "down", "--volumes")
 
 	return err
 }
@@ -378,41 +378,41 @@ func (Test) LoadCompose() error {
 	extra := map[string]string{"DO_LOAD": "true"}
 
 	fmt.Println("Building compose images...")
-	if err := runCompose(extra, "-f", "compose.yml", "build"); err != nil {
+	if err := runCompose(extra, "-f", "test/compose.yml", "build"); err != nil {
 		return err
 	}
 
 	fmt.Println("Running compose integration + load tests...")
-	err := runCompose(extra, "-f", "compose.yml", "up",
+	err := runCompose(extra, "-f", "test/compose.yml", "up",
 		"--exit-code-from", "test-runner",
 		"--abort-on-container-exit")
 
 	fmt.Println("Tearing down compose stack...")
-	_ = runCompose(extra, "-f", "compose.yml", "down", "--volumes")
+	_ = runCompose(extra, "-f", "test/compose.yml", "down", "--volumes")
 
 	return err
 }
 
 // Bench builds the binaries locally then runs the k6 load test suite
 // (correctness, throughput, saturation ramp) against a dedicated compose stack
-// (compose-bench.yml). Requires podman-compose and network access to pull
+// (test/compose-bench.yml). Requires podman-compose and network access to pull
 // grafana/k6:latest on first run.
 func (Test) Bench() error {
 	mg.Deps(Build{}.All)
 	sysEnv := systemInfo()
 
 	fmt.Println("Building compose images for benchmark...")
-	if err := runCompose(sysEnv, "-f", "compose-bench.yml", "build"); err != nil {
+	if err := runCompose(sysEnv, "-f", "test/compose-bench.yml", "build"); err != nil {
 		return err
 	}
 
 	fmt.Println("Running k6 load tests...")
-	err := runCompose(sysEnv, "-f", "compose-bench.yml", "up",
+	err := runCompose(sysEnv, "-f", "test/compose-bench.yml", "up",
 		"--exit-code-from", "k6",
 		"--abort-on-container-exit")
 
 	fmt.Println("Tearing down bench stack...")
-	_ = runCompose(sysEnv, "-f", "compose-bench.yml", "down", "--volumes")
+	_ = runCompose(sysEnv, "-f", "test/compose-bench.yml", "down", "--volumes")
 
 	return err
 }
@@ -427,7 +427,7 @@ func (Test) Bench() error {
 func (Test) Puppet() error {
 	mg.Deps(Build{}.All)
 	fmt.Println("Building compose images for puppet stack...")
-	if err := runCompose(nil, "-f", "compose-puppet.yml", "build"); err != nil {
+	if err := runCompose(nil, "-f", "test/compose-puppet.yml", "build"); err != nil {
 		return err
 	}
 
@@ -445,17 +445,17 @@ func (Test) Puppet() error {
 func (Test) Migration() error {
 	mg.Deps(Build{}.All)
 	fmt.Println("Building compose images for migration test...")
-	if err := runCompose(nil, "-f", "compose-migration.yml", "build"); err != nil {
+	if err := runCompose(nil, "-f", "test/compose-migration.yml", "build"); err != nil {
 		return err
 	}
 
 	fmt.Println("Running migration integration tests...")
-	err := runCompose(nil, "-f", "compose-migration.yml", "up",
+	err := runCompose(nil, "-f", "test/compose-migration.yml", "up",
 		"--exit-code-from", "test-runner",
 		"--abort-on-container-exit")
 
 	fmt.Println("Tearing down migration stack...")
-	_ = runCompose(nil, "-f", "compose-migration.yml", "down", "--volumes")
+	_ = runCompose(nil, "-f", "test/compose-migration.yml", "down", "--volumes")
 
 	return err
 }
@@ -473,7 +473,7 @@ func (Test) Migration() error {
 func (Test) BackendsRedis() error {
 	mg.Deps(Build{}.All)
 	fmt.Println("Building compose images for Redis-backend stack...")
-	if err := runCompose(nil, "-f", "compose-backends-redis.yml", "build"); err != nil {
+	if err := runCompose(nil, "-f", "test/compose-backends-redis.yml", "build"); err != nil {
 		return err
 	}
 
@@ -481,7 +481,7 @@ func (Test) BackendsRedis() error {
 	return sh.RunV("bash", "test/backends/redis-stack.sh", "--up")
 }
 
-// BackendsRedisGo brings up a throwaway Redis via compose-backends-redis-go.yml
+// BackendsRedisGo brings up a throwaway Redis via test/compose-backends-redis-go.yml
 // and runs the Redis-backend Go integration suite (internal/storage, build tag
 // `redis_integration`) against it, then tears Redis down. This mirrors the
 // postgres/mysql/etcd Go-suite targets; it is distinct from BackendsRedis,
@@ -494,12 +494,12 @@ func (Test) BackendsRedisGo() error {
 	const addr = "127.0.0.1:56379"
 
 	fmt.Println("Starting Redis backend service...")
-	if err := runCompose(nil, "-f", "compose-backends-redis-go.yml", "up", "-d", "--wait"); err != nil {
+	if err := runCompose(nil, "-f", "test/compose-backends-redis-go.yml", "up", "-d", "--wait"); err != nil {
 		return err
 	}
 	defer func() {
 		fmt.Println("Tearing down Redis backend service...")
-		_ = runCompose(nil, "-f", "compose-backends-redis-go.yml", "down", "--volumes")
+		_ = runCompose(nil, "-f", "test/compose-backends-redis-go.yml", "down", "--volumes")
 	}()
 
 	fmt.Println("Running Redis-backend Go integration tests...")
@@ -510,7 +510,7 @@ func (Test) BackendsRedisGo() error {
 }
 
 // BackendsPostgres brings up a throwaway PostgreSQL via
-// compose-backends-postgres.yml and runs the SQL-backend Go integration suite
+// test/compose-backends-postgres.yml and runs the SQL-backend Go integration suite
 // (internal/storage, build tag `postgres_integration`) against it, then tears
 // the database down. Validates the PostgreSQL dialect: upsert, FOR UPDATE
 // AppendLine atomicity across two backends, and pg_advisory_lock mutual
@@ -522,12 +522,12 @@ func (Test) BackendsPostgres() error {
 	const dsn = "postgres://puppetca:puppetca@127.0.0.1:55432/puppetca?sslmode=disable"
 
 	fmt.Println("Starting PostgreSQL backend service...")
-	if err := runCompose(nil, "-f", "compose-backends-postgres.yml", "up", "-d", "--wait"); err != nil {
+	if err := runCompose(nil, "-f", "test/compose-backends-postgres.yml", "up", "-d", "--wait"); err != nil {
 		return err
 	}
 	defer func() {
 		fmt.Println("Tearing down PostgreSQL backend service...")
-		_ = runCompose(nil, "-f", "compose-backends-postgres.yml", "down", "--volumes")
+		_ = runCompose(nil, "-f", "test/compose-backends-postgres.yml", "down", "--volumes")
 	}()
 
 	fmt.Println("Running PostgreSQL-backend integration tests...")
@@ -537,7 +537,7 @@ func (Test) BackendsPostgres() error {
 	)
 }
 
-// BackendsMySQL brings up a throwaway MySQL via compose-backends-mysql.yml and
+// BackendsMySQL brings up a throwaway MySQL via test/compose-backends-mysql.yml and
 // runs the SQL-backend Go integration suite (internal/storage, build tag
 // `mysql_integration`) against it, then tears the database down. Validates the
 // MySQL/MariaDB dialect: LONGBLOB widening, ON DUPLICATE KEY upsert, FOR UPDATE
@@ -550,12 +550,12 @@ func (Test) BackendsMySQL() error {
 	const dsn = "puppetca:puppetca@tcp(127.0.0.1:53306)/puppetca"
 
 	fmt.Println("Starting MySQL backend service...")
-	if err := runCompose(nil, "-f", "compose-backends-mysql.yml", "up", "-d", "--wait"); err != nil {
+	if err := runCompose(nil, "-f", "test/compose-backends-mysql.yml", "up", "-d", "--wait"); err != nil {
 		return err
 	}
 	defer func() {
 		fmt.Println("Tearing down MySQL backend service...")
-		_ = runCompose(nil, "-f", "compose-backends-mysql.yml", "down", "--volumes")
+		_ = runCompose(nil, "-f", "test/compose-backends-mysql.yml", "down", "--volumes")
 	}()
 
 	fmt.Println("Running MySQL-backend integration tests...")
@@ -566,7 +566,7 @@ func (Test) BackendsMySQL() error {
 }
 
 // BackendsOpenBao brings up a throwaway OpenBao dev server via
-// compose-backends-openbao.yml, configures its transit engine and an AppRole
+// test/compose-backends-openbao.yml, configures its transit engine and an AppRole
 // scoped to a "test-*" key prefix (deliberately broader than a production
 // policy — it grants "create" and covers the key TestLiveGenerateThenLoad
 // makes; see configureOpenBaoForTests and docs/openbao-transit.md for the
@@ -591,12 +591,12 @@ func (Test) BackendsOpenBao() error {
 	)
 
 	fmt.Println("Starting OpenBao backend service...")
-	if err := runCompose(nil, "-f", "compose-backends-openbao.yml", "up", "-d", "--wait"); err != nil {
+	if err := runCompose(nil, "-f", "test/compose-backends-openbao.yml", "up", "-d", "--wait"); err != nil {
 		return err
 	}
 	defer func() {
 		fmt.Println("Tearing down OpenBao backend service...")
-		_ = runCompose(nil, "-f", "compose-backends-openbao.yml", "down", "--volumes")
+		_ = runCompose(nil, "-f", "test/compose-backends-openbao.yml", "down", "--volumes")
 	}()
 
 	fmt.Println("Configuring OpenBao transit engine and AppRole...")
@@ -715,7 +715,7 @@ func (Test) BackendsEtcd() error {
 func (Test) PuppetFIPS() error {
 	mg.Deps(Build{}.FIPS)
 	fmt.Println("Building compose images for puppet stack (FIPS build)...")
-	if err := runCompose(nil, "-f", "compose-puppet.yml", "build"); err != nil {
+	if err := runCompose(nil, "-f", "test/compose-puppet.yml", "build"); err != nil {
 		return err
 	}
 

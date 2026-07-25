@@ -47,7 +47,7 @@ jobs:
         dockerfile:
           - Dockerfile
           - Dockerfile.alpine
-          - Dockerfile.run
+          - test/Dockerfile.run
           - docker/puppet/Dockerfile
           - docker/puppet/Dockerfile.client
     steps:

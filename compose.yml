@@ -1,65 +1,56 @@
-# Multi-host integration test topology for openvox-ca.
+# Compose deployment for openvox-ca using the published container images.
 #
-# Services
-# --------
-#   openvox-ca   - CA server (no autosign; operators must sign manually)
-#   test-runner - Separate container acting as both puppet-agent and operator.
-#                 Communicates with openvox-ca over the internal network,
-#                 validating true cross-host behaviour.
+# Quick start:
+#   1. Change `--hostname` below to the DNS name agents will use to reach
+#      the CA.
+#   2. docker compose up -d        (or: podman-compose up -d)
 #
-# Usage (from project root):
-#   mage test:integCompose     # build, run, tear down (exit 0 on all pass)
-#   podman-compose up --build  # interactive; ctrl-c to stop
+# CA state lives in the named volume `ca-data`, so it survives container
+# restarts and image upgrades. On first run a new CA is bootstrapped under
+# /data and served over HTTPS on port 8140, using the CA's own certificate
+# as the TLS server certificate (the server refuses plain HTTP on
+# non-loopback addresses). For production, issue a dedicated TLS server
+# certificate with `openvox-ca-ctl generate` and point
+# --tls-cert/--tls-key at it: that keeps the CA's long-lived signing key
+# out of the network-facing listener and presents a certificate that
+# matches the server's DNS name.
 #
-# Environment variables honoured by test-runner:
-#   DO_LOAD=true    Enable concurrency / load tests (default: false)
+# See docs/container-images.md for the available image tags, and
+# docs/configuration.md for the full configuration reference (mTLS,
+# storage backends, autosigning, ...).
+#
+# The compose topologies used by the integration test suites live under
+# test/ (test/compose*.yml); they are not deployment examples.
 
-name: openvox-ca-integ
+name: openvox-ca
 
 services:
-
-  # -- CA server ------------------------------------------------------------─
   openvox-ca:
-    build:
-      context: .
-      dockerfile: Dockerfile.run
-    image: openvox-ca-integ:latest
-    # autosign=false so the test-runner must explicitly sign via openvox-ca-ctl,
-    # exercising the full operator workflow.
-    # WARNING: --no-tls-required is for integration testing ONLY.
-    # Never use this flag in production: it disables all authentication.
+    # Pin to a specific release tag (e.g. :1.2.3) for reproducible
+    # deployments; a `-alpine` variant of every tag is also published.
+    # NOTE: the healthcheck below uses curl, which the Alpine variant does
+    # not ship.
+    image: ghcr.io/voxpupuli/openvox-ca:latest
     command:
       - --cadir=/data
-      - --autosign-config=false
-      - --no-tls-required
-      - --crl-url=http://openvox-ca:8140/puppet-ca/v1/certificate_revocation_list/ca
-      - -v=1
-    expose:
-      - "8140"
+      - --hostname=puppet.example.com
+      - --tls-cert=/data/ca_crt.pem
+      - --tls-key=/data/private/ca_key.pem
+    # NOTE: autosign is off by default. Only add --autosign-config=true in
+    # dev/test environments: it lets any CSR submitter obtain a signed
+    # certificate without operator review.
+    ports:
+      - "8140:8140"
     volumes:
       - ca-data:/data
+    restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8140/puppet-ca/v1/certificate/ca"]
-      interval: 3s
+      # -k because the CA's own cert does not carry localhost as a SAN.
+      test: ["CMD", "curl", "-skf", "https://localhost:8140/healthz/ready"]
+      interval: 30s
       timeout: 5s
-      retries: 20
-      start_period: 8s
-
-  # -- Test runner ----------------------------------------------------------─
-  # Simulates a separate host (puppet-agent + operator) talking to openvox-ca
-  # over the compose network using the DNS name "openvox-ca".
-  test-runner:
-    image: openvox-ca-integ:latest
-    depends_on:
-      openvox-ca:
-        condition: service_healthy
-    environment:
-      - CA_URL=http://openvox-ca:8140
-      - DO_LOAD=${DO_LOAD:-false}
-    volumes:
-      # Mount the test script read-only; :z relabels for SELinux (required on RHEL/CentOS).
-      - ./test:/test:ro,z
-    entrypoint: ["bash", "/test/integration-compose.sh"]
+      retries: 3
+      start_period: 30s
 
 volumes:
   ca-data:

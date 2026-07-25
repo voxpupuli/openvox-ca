@@ -34,18 +34,18 @@ fi
 # back to docker compose / docker-compose (matches composeCmd() in magefile.go
 # and works on GitHub runners where podman is present but podman-compose is not).
 if [[ "$_ENGINE" == podman ]] && command -v podman-compose &>/dev/null; then
-    _COMPOSE=(podman-compose -f compose-puppet.yml)
+    _COMPOSE=(podman-compose -f test/compose-puppet.yml)
 elif docker compose version &>/dev/null 2>&1; then
-    _COMPOSE=(docker compose -f compose-puppet.yml)
+    _COMPOSE=(docker compose -f test/compose-puppet.yml)
 elif command -v docker-compose &>/dev/null; then
-    _COMPOSE=(docker-compose -f compose-puppet.yml)
+    _COMPOSE=(docker-compose -f test/compose-puppet.yml)
 else
     printf 'Error: no compose tool found; install podman-compose or docker compose\n' >&2
     exit 1
 fi
 
 # -- Configuration --------------------------------------------------------─
-# Host-side URLs (CA on 8141, master on 8140, as mapped in compose-puppet.yml).
+# Host-side URLs (CA on 8141, master on 8140, as mapped in test/compose-puppet.yml).
 CA_HOST_URL="https://localhost:8141"
 MASTER_URL="https://puppet-master:8140"   # used from inside master container
 

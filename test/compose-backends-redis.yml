@@ -27,7 +27,7 @@
 #
 # Usage (from project root):
 #   mage test:backendsRedis                          # build, run suite, tear down
-#   podman-compose -f compose-backends-redis.yml up --build  # interactive
+#   podman-compose -f test/compose-backends-redis.yml up --build  # interactive
 #
 # The test suite is in test/backends/redis-stack.sh.
 
@@ -58,8 +58,8 @@ services:
   # modification.
   openvox-ca:
     build:
-      context: .
-      dockerfile: Dockerfile.run
+      context: ..
+      dockerfile: test/Dockerfile.run
     image: openvox-ca-integ:latest
     hostname: openvox-ca
     # Redis-aware bootstrap entrypoint. Differs from the filesystem variant
@@ -83,7 +83,7 @@ services:
       # admin calls work in tests.
       - PUPPET_CA_PEER_HOSTNAMES=openvox-ca-2
     volumes:
-      - ./docker/puppet/ca-entrypoint-redis.sh:/etc/puppet-ca/entrypoint.sh:ro,z
+      - ../docker/puppet/ca-entrypoint-redis.sh:/etc/puppet-ca/entrypoint.sh:ro,z
       - ca-data-redis:/data
     expose:
       - "8140"
@@ -115,8 +115,8 @@ services:
   # directly to confirm it serves the same blobs as replica 1.
   openvox-ca-2:
     build:
-      context: .
-      dockerfile: Dockerfile.run
+      context: ..
+      dockerfile: test/Dockerfile.run
     image: openvox-ca-integ:latest
     hostname: openvox-ca-2
     entrypoint: ["/bin/bash", "/etc/puppet-ca/entrypoint.sh"]
@@ -130,7 +130,7 @@ services:
       - PUPPET_CA_DNS_ALT_NAMES=openvox-ca-2,localhost
       - PUPPET_CA_PEER_HOSTNAMES=openvox-ca
     volumes:
-      - ./docker/puppet/ca-entrypoint-redis.sh:/etc/puppet-ca/entrypoint.sh:ro,z
+      - ../docker/puppet/ca-entrypoint-redis.sh:/etc/puppet-ca/entrypoint.sh:ro,z
       # Distinct named volume: per-subject leaf private keys are local on each
       # replica even though public blobs are shared via Redis (see spec.go's
       # localPrivKeyDir handling).
@@ -156,7 +156,7 @@ services:
   # -- Puppet master (OpenVox Server / JVM) -------------------------------─
   puppet-master:
     build:
-      context: ./docker/puppet
+      context: ../docker/puppet
       dockerfile: Dockerfile
     hostname: puppet-master
     environment:
@@ -166,7 +166,7 @@ services:
       - OPENVOXDB_HOST=openvoxdb
       - OPENVOXDB_PORT=8081
     volumes:
-      - ./test/puppet/code/environments/production:/etc/puppetlabs/code/environments/production:ro,z
+      - ./puppet/code/environments/production:/etc/puppetlabs/code/environments/production:ro,z
     expose:
       - "8140"
     # Distinct host port from compose-puppet.yml.
@@ -192,7 +192,7 @@ services:
       POSTGRES_USER: openvoxdb
       POSTGRES_PASSWORD: openvoxdb
     volumes:
-      - ./docker/puppet/postgres:/docker-entrypoint-initdb.d:ro,z
+      - ../docker/puppet/postgres:/docker-entrypoint-initdb.d:ro,z
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U openvoxdb -d openvoxdb"]
       interval: 10s
@@ -216,7 +216,7 @@ services:
       OPENVOXDB_POSTGRES_PASSWORD: openvoxdb
       OPENVOXDB_POSTGRES_DATABASE: openvoxdb
     volumes:
-      - ./docker/puppet/openvoxdb/bootstrap-certs.sh:/container-entrypoint.d/15-bootstrap-certs.sh:ro,z
+      - ../docker/puppet/openvoxdb/bootstrap-certs.sh:/container-entrypoint.d/15-bootstrap-certs.sh:ro,z
     depends_on:
       puppet-master:
         condition: service_started
@@ -233,7 +233,7 @@ services:
   # -- Puppet agent (client) ----------------------------------------------─
   puppet-client:
     build:
-      context: ./docker/puppet
+      context: ../docker/puppet
       dockerfile: Dockerfile.client
     hostname: client.puppet.localdomain
     depends_on:

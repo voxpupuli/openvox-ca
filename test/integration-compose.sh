@@ -1,7 +1,7 @@
 #!/bin/bash
 # Multi-host integration tests for openvox-ca.
 #
-# Designed to run inside the test-runner container launched by compose.yml.
+# Designed to run inside the test-runner container launched by test/compose.yml.
 # The openvox-ca server is reachable at $CA_URL (default: http://openvox-ca:8140).
 # The test-runner is a *separate container*, demonstrating true cross-host
 # communication over the compose network.
@@ -10,7 +10,7 @@
 # CLI are exercised.
 #
 # Usage (normally invoked by `mage integCompose`):
-#   podman-compose up --exit-code-from test-runner
+#   podman-compose -f test/compose.yml up --exit-code-from test-runner
 #
 # Environment variables:
 #   CA_URL    Base URL of the CA  (default: http://openvox-ca:8140)
@@ -1736,7 +1736,7 @@ echo "$_ro_out" | grep -qiE 'permission|denied|read.only|mkdir|failed' \
 #
 # This is a lightweight smoke test using openssl-generated certs.  For a
 # full migration test against a real VoxPupuli Puppet Server, see
-# `mage test:migration` (compose-migration.yml).
+# `mage test:migration` (test/compose-migration.yml).
 # ═════════════════════════════════════════════════════════════════════════════
 printf '\n# Group 20 -- Migration from Puppet Server CA\n'
 
