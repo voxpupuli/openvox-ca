@@ -172,16 +172,15 @@ func (s *StorageService) InitHMAC(ctx context.Context) error {
 
 // ErrDuplicateSerial is returned by AppendInventory when the entry's serial
 // number already exists in the inventory. SQL backends detect this via their
-// unique index (translated from the dialect-specific driver error); blob
-// backends via an explicit scan performed under the same inventoryMu that
-// already serialises every append within a process.
-//
-// This is NOT a cross-replica guarantee on non-SQL backends: nothing today
-// wraps the whole AppendInventory call in a distributed lock for
-// filesystem/etcd/redis backends (see the blob-fallback HMAC-update comment
-// below, which already documents a similar limitation for that path).
-// Structured (SQL) backends remain the only ones with a true cluster-wide
-// guarantee, via the database's own unique index.
+// unique index (translated from the dialect-specific driver error); the etcd
+// backend via a by-serial marker key whose absence is a condition of the
+// append transaction. Both are true cluster-wide guarantees. The remaining
+// blob backends (filesystem, redis) detect it via an explicit scan performed
+// under the same inventoryMu that already serialises every append within a
+// process — NOT a cross-replica guarantee: nothing wraps the whole
+// AppendInventory call in a distributed lock for them (see the blob-fallback
+// HMAC-update comment below, which documents a similar limitation for that
+// path).
 var ErrDuplicateSerial = errors.New("serial number already exists in inventory")
 
 // AppendInventory adds entry (a single inventory.txt line, without a trailing
@@ -220,7 +219,10 @@ func (s *StorageService) AppendInventoryRecord(ctx context.Context, entry string
 			newHead = func(prev []byte) []byte { return chainInventoryMAC(key, prev, entry) }
 		}
 		if err := store.AppendEntry(ctx, rec, newHead); err != nil {
-			if isUniqueSerialViolation(err) {
+			// The etcd backend already wraps ErrDuplicateSerial itself; SQL
+			// backends surface the dialect's unique-index violation instead
+			// and are translated here.
+			if !errors.Is(err, ErrDuplicateSerial) && isUniqueSerialViolation(err) {
 				return fmt.Errorf("%w: %s", ErrDuplicateSerial, parsed.Serial)
 			}
 			return err

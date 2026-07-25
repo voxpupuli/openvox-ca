@@ -69,17 +69,19 @@ func (c *EtcdConfig) applyDefaults() {
 // EtcdBackend is a Backend implementation backed by an etcd v3 cluster.
 //
 // Blob contents are wrapped with an 8-byte big-endian nanosecond mtime prefix
-// so ModTime can be answered without a second key. Appends use an etcd Txn
-// with a ModRevision guard to remain atomic across concurrent writers,
-// including those in different processes. Distributed locks are provided
-// via AcquireLock using etcd's concurrency.Mutex on a lazily-created
-// lease session.
+// so ModTime can be answered without a second key. The certificate inventory
+// is not stored as a blob: it is decomposed into per-entry keys (see
+// etcd_inventory.go), and the backend implements InventoryStore and
+// CertIndex. Mutations use etcd Txns with ModRevision guards to remain atomic
+// across concurrent writers, including those in different processes.
+// Distributed locks are provided via AcquireLock using etcd's
+// concurrency.Mutex on a lazily-created lease session.
 type EtcdBackend struct {
 	client   *clientv3.Client
 	owned    bool // true when Close should close the client
 	prefix   string
 	timeout  time.Duration
-	appendMu sync.Mutex // serialises AppendLine within this process
+	appendMu sync.Mutex // serialises inventory mutations within this process
 
 	// session is the lease-backed concurrency session used for distributed
 	// mutexes. It is created lazily on the first AcquireLock call and
@@ -102,15 +104,17 @@ type EtcdBackend struct {
 const etcdLockTTLSeconds = 30
 
 // etcdLayout maps logical keys to their physical etcd sub-paths. CSR and
-// signed-cert keys are handled directly in physicalKey.
+// signed-cert keys are handled directly in physicalKey. KeyInventory's
+// physical key holds only a presence marker: the inventory itself is
+// decomposed into per-entry keys (see etcd_inventory.go).
 var etcdLayout = map[string]string{
 	KeyCACert:        "ca/cert",
 	KeyCAPubKey:      "ca/pubkey",
 	KeyCAKey:         "ca/key",
 	KeyCRL:           "ca/crl",
 	KeySerial:        "serial",
-	KeyInventory:     "inventory/data",
-	KeyInventoryHMAC: "inventory/hmac",
+	KeyInventory:     etcdInvDataSub,
+	KeyInventoryHMAC: etcdInvHMACSub,
 	KeyHMACKey:       "private/hmac_key",
 }
 
@@ -177,26 +181,33 @@ func (b *EtcdBackend) callCtx(parent context.Context) (context.Context, context.
 	return context.WithTimeout(parent, b.timeout)
 }
 
-// EnsureReady verifies connectivity by listing the cluster status. Etcd has
-// no directory concept so there is nothing else to prepare.
+// EnsureReady verifies connectivity by listing the cluster status (etcd has
+// no directory concept so there is nothing to create), then decomposes a
+// legacy inventory blob left by a pre-decomposition version of this backend
+// into the per-entry structure. Decomposition must run before the inventory
+// is used: the structured paths assume the blob key is only a presence marker.
 func (b *EtcdBackend) EnsureReady(ctx context.Context) error {
 	if len(b.client.Endpoints()) == 0 {
 		return fmt.Errorf("etcd backend has no endpoints configured")
 	}
-	ctx, cancel := b.callCtx(ctx)
+	statusCtx, cancel := b.callCtx(ctx)
 	defer cancel()
-	_, err := b.client.Status(ctx, b.client.Endpoints()[0])
-	if err != nil {
+	if _, err := b.client.Status(statusCtx, b.client.Endpoints()[0]); err != nil {
 		return fmt.Errorf("etcd not reachable: %w", err)
 	}
-	return nil
+	return b.decomposeLegacyInventory(ctx)
 }
 
-// Get returns the (unwrapped) blob at key, wrapping fs.ErrNotExist when absent.
+// Get returns the (unwrapped) blob at key, wrapping fs.ErrNotExist when
+// absent. The KeyInventory key is served from the decomposed entry keys
+// (rendered to inventory.txt text) rather than a stored blob.
 func (b *EtcdBackend) Get(ctx context.Context, key string) ([]byte, error) {
 	phys, err := b.physicalKey(key)
 	if err != nil {
 		return nil, err
+	}
+	if key == KeyInventory {
+		return b.getInventory(ctx)
 	}
 	ctx, cancel := b.callCtx(ctx)
 	defer cancel()
@@ -216,10 +227,14 @@ func (b *EtcdBackend) Get(ctx context.Context, key string) ([]byte, error) {
 
 // Put writes the blob at key. The BlobKind hint is recorded but has no
 // effect on the stored form: etcd access control is managed by the cluster.
+// Putting KeyInventory parses the text and replaces the decomposed entries.
 func (b *EtcdBackend) Put(ctx context.Context, key string, data []byte, _ BlobKind) error {
 	phys, err := b.physicalKey(key)
 	if err != nil {
 		return err
+	}
+	if key == KeyInventory {
+		return b.putInventory(ctx, data)
 	}
 	ctx, cancel := b.callCtx(ctx)
 	defer cancel()
@@ -228,10 +243,14 @@ func (b *EtcdBackend) Put(ctx context.Context, key string, data []byte, _ BlobKi
 }
 
 // Delete removes key, wrapping fs.ErrNotExist when the key is absent.
+// Deleting KeyInventory removes the marker and the decomposed structure.
 func (b *EtcdBackend) Delete(ctx context.Context, key string) error {
 	phys, err := b.physicalKey(key)
 	if err != nil {
 		return err
+	}
+	if key == KeyInventory {
+		return b.deleteInventory(ctx)
 	}
 	ctx, cancel := b.callCtx(ctx)
 	defer cancel()
@@ -298,16 +317,22 @@ func (b *EtcdBackend) List(ctx context.Context, prefix string) ([]string, error)
 // are resolved by an etcd Txn guarded on the key's ModRevision with bounded
 // retry on conflict.
 func (b *EtcdBackend) AppendLine(ctx context.Context, key string, data []byte, _ BlobKind) error {
-	b.appendMu.Lock()
-	defer b.appendMu.Unlock()
-
 	phys, err := b.physicalKey(key)
 	if err != nil {
 		return err
 	}
+	if key == KeyInventory {
+		// Inventory is decomposed: parse the lines and append them as entry
+		// keys. StorageService routes inventory appends through AppendEntry,
+		// so this only runs if a caller uses AppendLine(KeyInventory, ...)
+		// directly.
+		return b.appendInventoryLines(ctx, data)
+	}
 
-	const maxRetries = 16
-	for attempt := range maxRetries {
+	b.appendMu.Lock()
+	defer b.appendMu.Unlock()
+
+	for attempt := range etcdMaxTxnRetries {
 		getCtx, cancel := b.callCtx(ctx)
 		resp, err := b.client.Get(getCtx, phys)
 		cancel()
@@ -342,21 +367,28 @@ func (b *EtcdBackend) AppendLine(ctx context.Context, key string, data []byte, _
 		if txnResp.Succeeded {
 			return nil
 		}
-		// Another writer won the race; back off and retry. The sleep is a
-		// growing window with full jitter: jitter decorrelates two writers
-		// that would otherwise retry in lock-step on the same schedule and
-		// keep colliding (the cause of spurious "too many concurrent writers"
-		// under load). Honour the caller's cancellation rather than spinning
-		// past it.
-		window := time.Duration(attempt+1) * 10 * time.Millisecond
-		backoff := time.Duration(rand.Int64N(int64(window))) //nolint:gosec // jitter, not security-sensitive
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(backoff):
+		// Another writer won the race; back off and retry.
+		if err := b.txnBackoff(ctx, attempt); err != nil {
+			return err
 		}
 	}
 	return fmt.Errorf("append to %q failed: too many concurrent writers", key)
+}
+
+// txnBackoff sleeps between optimistic-transaction retries. The sleep is a
+// growing window with full jitter: jitter decorrelates two writers that would
+// otherwise retry in lock-step on the same schedule and keep colliding (the
+// cause of spurious "too many concurrent writers" under load). Honours the
+// caller's cancellation rather than spinning past it.
+func (b *EtcdBackend) txnBackoff(ctx context.Context, attempt int) error {
+	window := time.Duration(attempt+1) * 10 * time.Millisecond
+	backoff := time.Duration(rand.Int64N(int64(window))) //nolint:gosec // jitter, not security-sensitive
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(backoff):
+		return nil
+	}
 }
 
 // ModTime returns the wall-clock timestamp recorded when the blob was last
