@@ -81,6 +81,19 @@ func (c *CA) CleanupExpiredCerts(ctx context.Context, retain time.Duration) (int
 		if len(dropped) == 0 {
 			return pruneErr
 		}
+		// The entries below are durably gone whatever else happens, so report
+		// them even if a later cleanup step (or the prune itself) failed —
+		// otherwise a partial run logs "failed" with no hint that state
+		// changed permanently.
+		removed = len(dropped)
+
+		// The prune may have consumed most (or, on a deadline error, all) of
+		// ctx's budget, and the deadline case is exactly when a partial prune
+		// is most likely. The cleanup below must still run for the durably
+		// removed entries, so give it its own bounded context that survives
+		// the prune's. The CRL lock is still held throughout.
+		cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), lockTimeout)
+		defer cancelCleanup()
 
 		// Collect the removed serials (normalised) and refresh in-memory caches.
 		removedSerials := make(map[string]*big.Int, len(dropped))
@@ -97,7 +110,7 @@ func (c *CA) CleanupExpiredCerts(ctx context.Context, retain time.Duration) (int
 			delete(c.ocspCache, key)
 		}
 
-		if err := c.dropCRLEntriesLocked(ctx, removedSerials); err != nil {
+		if err := c.dropCRLEntriesLocked(cleanupCtx, removedSerials); err != nil {
 			return errors.Join(pruneErr, err)
 		}
 
@@ -105,10 +118,9 @@ func (c *CA) CleanupExpiredCerts(ctx context.Context, retain time.Duration) (int
 		// the cert still on file carries the expired serial (otherwise the
 		// subject has been renewed and the current cert must be preserved).
 		for _, e := range dropped {
-			c.deleteStoredCertIfSerialMatches(ctx, e.Subject, e.Serial)
+			c.deleteStoredCertIfSerialMatches(cleanupCtx, e.Subject, e.Serial)
 		}
 
-		removed = len(dropped)
 		return pruneErr
 	})
 	return removed, err

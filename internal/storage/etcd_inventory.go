@@ -84,6 +84,24 @@ const (
 	etcdPruneBatch  = 30
 )
 
+// etcdPruneMaxBatchesPerCall bounds one PruneEntries call to this many
+// committed batches (currently 900 entries). Each batch writes an
+// intermediate head folded over the entries that remain, so a prune's total
+// hashing cost grows with batches × survivors; an unbounded call over a large
+// backlog could not finish inside the caller's lock budget. Deferred entries
+// stay present and consistent and are removed by subsequent calls (the
+// cleanup job runs periodically), which the PruneEntries contract permits.
+const etcdPruneMaxBatchesPerCall = 30
+
+// etcdSerialAmbiguous is the by-serial index value recorded for a serial that
+// appears on more than one imported record (possible only in a legacy blob:
+// blob backends never had a cluster-wide uniqueness guarantee, and every
+// other write path rejects duplicates). The one-to-one index cannot name all
+// bearers, so instead of silently aliasing certificate-index writes onto an
+// arbitrary record, the sentinel makes them explicit no-ops while still
+// keeping the serial reserved against reissue.
+const etcdSerialAmbiguous = "ambiguous"
+
 // etcdInventoryRecord is the stored JSON form of a CertRecord. The field set
 // is spelled out (rather than marshalling CertRecord directly) so the wire
 // format is explicit and stable against refactors of the in-memory structs.
@@ -361,7 +379,10 @@ func (b *EtcdBackend) LatestSerialForSubject(ctx context.Context, subject string
 // Per the interface contract, the returned slice contains every entry that
 // was durably removed — accumulated across batches and retries, and returned
 // even alongside a non-nil error — so the caller's CRL/blob cleanup never
-// misses an entry that a partially-completed prune already deleted.
+// misses an entry that a partially-completed prune already deleted. One call
+// removes at most etcdPruneMaxBatchesPerCall batches' worth of entries;
+// matches beyond that stay in the inventory for later calls (the interface
+// contract permits bounding, and the periodic cleanup job converges).
 func (b *EtcdBackend) PruneEntries(ctx context.Context, keep func(InventoryEntry) bool, advanceHead func(prev []byte, e InventoryEntry) []byte) ([]InventoryEntry, error) {
 	b.appendMu.Lock()
 	defer b.appendMu.Unlock()
@@ -440,6 +461,15 @@ func (b *EtcdBackend) pruneEntriesOnce(ctx context.Context, keep func(InventoryE
 	var starts []int
 	for s := 0; s < len(removed); s += etcdPruneBatch {
 		starts = append(starts, s)
+	}
+	// Bound one call's work (see etcdPruneMaxBatchesPerCall). Batches run
+	// tail-first, so keeping the last starts removes the newest matches and
+	// defers the older ones — which stay present and consistent — to later
+	// calls. Never silently: the caller's log should explain a short count.
+	if len(starts) > etcdPruneMaxBatchesPerCall {
+		starts = starts[len(starts)-etcdPruneMaxBatchesPerCall:]
+		slog.Info("Bounding inventory prune to keep it inside the caller's time budget; later runs will remove the rest",
+			"removing", len(removed)-starts[0], "deferred", starts[0])
 	}
 
 	// One forward fold over the full record set, checkpointing the chain
@@ -538,7 +568,9 @@ func (b *EtcdBackend) pruneEntriesOnce(ctx context.Context, keep func(InventoryE
 			b.pruneBatchHook()
 		}
 	}
-	return removed, false, nil
+	// All selected batches committed; entries before starts[0] (if any) were
+	// deferred by the per-call bound and remain in the inventory.
+	return removed[starts[0]:], false, nil
 }
 
 // --- KeyInventory blob shim ---
@@ -697,7 +729,18 @@ func (b *EtcdBackend) replaceInventoryOnce(ctx context.Context, recs []CertRecor
 		if !resp.Succeeded {
 			return 0, true, nil
 		}
+		if b.importBatchHook != nil {
+			b.importBatchHook()
+		}
 		return resp.Header.Revision, false, nil
+	}
+
+	// Serials appearing on more than one record cannot be pointed at through
+	// the one-to-one by-serial index without picking a wrong record for the
+	// others; mark them ambiguous so index writes refuse instead of aliasing.
+	dupSerials := make(map[string]bool)
+	for _, serial := range duplicateSerials(recs) {
+		dupSerials[serial] = true
 	}
 
 	// Clear the existing structure and reset the fence.
@@ -717,10 +760,10 @@ func (b *EtcdBackend) replaceInventoryOnce(ctx context.Context, recs []CertRecor
 		// One put per index key per transaction (etcd rejects duplicate keys
 		// within a txn); later occurrences — in the same batch via these maps,
 		// across batches via plain overwrite — win, leaving each subject
-		// pointing at its newest serial and, for a legacy blob that carries
-		// duplicate serials, each serial at its newest bearer.
+		// pointing at its newest serial. A serial borne by several records
+		// gets the ambiguity sentinel instead of a sequence number.
 		subjectLatest := make(map[string]string, len(batch))
-		serialLatest := make(map[string]uint64, len(batch))
+		serialValue := make(map[string]string, len(batch))
 		for i, rec := range batch {
 			val, err := encodeInventoryRecord(rec)
 			if err != nil {
@@ -728,11 +771,15 @@ func (b *EtcdBackend) replaceInventoryOnce(ctx context.Context, recs []CertRecor
 			}
 			n := uint64(start+i) + 1
 			ops = append(ops, clientv3.OpPut(b.entryPhys(n), string(val)))
-			serialLatest[rec.Serial] = n
+			if dupSerials[rec.Serial] {
+				serialValue[rec.Serial] = etcdSerialAmbiguous
+			} else {
+				serialValue[rec.Serial] = strconv.FormatUint(n, 10)
+			}
 			subjectLatest[rec.Subject] = rec.Serial
 		}
-		for serial, n := range serialLatest {
-			ops = append(ops, clientv3.OpPut(b.invPhys(etcdInvSerialSub+serial), strconv.FormatUint(n, 10)))
+		for serial, value := range serialValue {
+			ops = append(ops, clientv3.OpPut(b.invPhys(etcdInvSerialSub+serial), value))
 		}
 		for subject, serial := range subjectLatest {
 			ops = append(ops, clientv3.OpPut(b.invPhys(etcdInvSubjectSub+subject), serial))
@@ -891,12 +938,17 @@ func (b *EtcdBackend) deleteInventory(ctx context.Context) error {
 // (such an append is detected via the marker guard and the import restarts,
 // but the window only closes once the old writers are gone).
 func (b *EtcdBackend) decomposeLegacyInventory(ctx context.Context) error {
-	state, err := b.legacyInventoryState(ctx)
+	// Cheap probe first: on every start after the one-time conversion this
+	// path must not transfer the whole inventory keyspace, so read only the
+	// marker to decide whether the expensive state read is needed at all.
+	payload, err := b.legacyMarkerPayload(ctx)
 	if err != nil {
 		return err
 	}
-	if len(state.blob) == 0 {
-		return nil
+	if len(payload) == 0 {
+		// Nothing to import — but an upgraded CA whose inventory was empty
+		// still carries a whole-blob head that no import will ever drop.
+		return b.convertLegacyEmptyHead(ctx)
 	}
 
 	// Serialise the import across replicas starting up together.
@@ -939,9 +991,11 @@ func (b *EtcdBackend) decomposeLegacyInventory(ctx context.Context) error {
 			// Blob backends never had a cluster-wide duplicate-serial
 			// guarantee, so a legacy inventory can legitimately carry
 			// repeats. Refusing would brick startup; instead every line is
-			// imported verbatim (preserving the rendered text) and the
-			// by-serial index points at each serial's newest bearer.
-			slog.Warn("Legacy etcd inventory contains duplicate serials; by-serial index will point at the newest entry for each",
+			// imported verbatim (preserving the rendered text), the serials
+			// stay reserved against reissue, and certificate-index writes
+			// for them are refused (see etcdSerialAmbiguous) so revocation
+			// state and projections cannot land on the wrong record.
+			slog.Warn("Legacy etcd inventory contains duplicate serials; certificate-index state for them will be unavailable until the duplicates are resolved",
 				"serials", dups)
 		}
 		conflict, err := b.replaceInventoryOnce(ctx, recs, state.markerRev, true)
@@ -999,6 +1053,103 @@ func (b *EtcdBackend) legacyInventoryState(ctx context.Context) (etcdLegacyState
 	return etcdLegacyState{blob: payload, markerRev: markerKVs[0].ModRevision, entries: entries}, nil
 }
 
+// legacyMarkerPayload returns the marker/blob payload at inventory/data, or
+// nil when the marker is absent. This is the cheap every-start probe: it
+// reads a single key, unlike legacyInventoryState which also transfers the
+// whole entry range.
+func (b *EtcdBackend) legacyMarkerPayload(ctx context.Context) ([]byte, error) {
+	ctx, cancel := b.callCtx(ctx)
+	defer cancel()
+	resp, err := b.client.Get(ctx, b.invPhys(etcdInvDataSub))
+	if err != nil {
+		return nil, err
+	}
+	if len(resp.Kvs) == 0 {
+		return nil, nil
+	}
+	_, payload, err := decodeBlob(resp.Kvs[0].Value)
+	if err != nil {
+		return nil, fmt.Errorf("decoding legacy inventory blob: %w", err)
+	}
+	return payload, nil
+}
+
+// convertLegacyEmptyHead completes the upgrade for a pre-decomposition CA
+// whose inventory was empty. Such a CA always stores a whole-blob HMAC (CA
+// bootstrap writes one over the empty inventory before the first cert is ever
+// issued), but with no blob content there is no import to drop it as part of,
+// so it would survive the upgrade and fail the first chain verification with
+// a spurious tampering error that nothing re-baselines away.
+//
+// The head is deleted only when it verifies as the whole-blob MAC of an empty
+// inventory under the stored key — the exact value the legacy code wrote — so
+// the next verification re-establishes the chained baseline. Any other
+// non-empty head over zero entries is deliberately left in place for
+// verification to flag: it is indistinguishable from the residue of a
+// decomposed inventory whose entries were tampered away, and deleting it
+// would silently accept that.
+func (b *EtcdBackend) convertLegacyEmptyHead(ctx context.Context) error {
+	keyPhys, err := b.physicalKey(KeyHMACKey)
+	if err != nil {
+		return err
+	}
+	for attempt := range etcdMaxTxnRetries {
+		readCtx, cancel := b.callCtx(ctx)
+		resp, err := b.client.Txn(readCtx).Then(
+			clientv3.OpGet(b.invPhys(etcdInvHMACSub)),
+			clientv3.OpGet(keyPhys),
+			clientv3.OpGet(b.invPhys(etcdInvEntriesSub), clientv3.WithPrefix(), clientv3.WithCountOnly()),
+		).Commit()
+		cancel()
+		if err != nil {
+			return err
+		}
+		if resp.Responses[2].GetResponseRange().Count > 0 {
+			return nil // decomposed entries exist; the head is theirs
+		}
+		headKVs := resp.Responses[0].GetResponseRange().Kvs
+		if len(headKVs) == 0 {
+			return nil
+		}
+		_, stored, err := decodeBlob(headKVs[0].Value)
+		if err != nil {
+			return fmt.Errorf("decoding legacy inventory HMAC: %w", err)
+		}
+		if len(stored) == 0 {
+			return nil // already the chained baseline of an empty inventory
+		}
+		keyKVs := resp.Responses[1].GetResponseRange().Kvs
+		if len(keyKVs) == 0 {
+			return nil // cannot verify; leave it for verification to fail closed
+		}
+		_, key, err := decodeBlob(keyKVs[0].Value)
+		if err != nil || len(key) != hmacKeyLen {
+			return nil //nolint:nilerr // same: unverifiable, so leave the head alone
+		}
+		if !hmac.Equal(wholeBlobInventoryMAC(key, nil), stored) {
+			return nil
+		}
+
+		txnCtx, cancel2 := b.callCtx(ctx)
+		txnResp, err := b.client.Txn(txnCtx).
+			If(clientv3.Compare(clientv3.ModRevision(b.invPhys(etcdInvHMACSub)), "=", headKVs[0].ModRevision)).
+			Then(clientv3.OpDelete(b.invPhys(etcdInvHMACSub))).
+			Commit()
+		cancel2()
+		if err != nil {
+			return err
+		}
+		if txnResp.Succeeded {
+			slog.Info("Removed legacy whole-blob inventory HMAC for an empty inventory; the integrity baseline will be re-established on first verification")
+			return nil
+		}
+		if err := b.txnBackoff(ctx, attempt); err != nil {
+			return err
+		}
+	}
+	return fmt.Errorf("removing legacy inventory HMAC: too many concurrent writers")
+}
+
 // recordsArePrefixOf reports whether the stored entries are exactly the
 // import-written prefix of recs: sequence numbers 1..len(entries) carrying the
 // same canonical fields. That is the state an interrupted import leaves
@@ -1019,10 +1170,13 @@ func recordsArePrefixOf(entries []etcdIndexedRecord, recs []CertRecord) bool {
 // verifyLegacyInventoryMAC checks the legacy blob against its stored
 // whole-blob HMAC before the blob is trusted as the import source. Absent
 // head: nothing to check (the baseline is established after the import).
-// Absent or malformed key with a head present: verification is impossible;
-// log loudly and proceed, since the alternative is bricking startup on a
-// state the operator can no longer influence. Mismatch: fail startup with
-// ErrInventoryTampered, exactly as the pre-decomposition verify would have.
+// Mismatch: fail startup with ErrInventoryTampered, exactly as the
+// pre-decomposition verify would have. A head that cannot be verified —
+// because the HMAC key is missing or malformed — also fails startup: the
+// pre-decomposition code was fail-closed in that state too (it regenerated
+// the key and then flagged the surviving head as tampering), and proceeding
+// would silently promote an unverifiable blob to the new trusted baseline.
+// The operator acknowledges a lost baseline by deleting the stored head.
 func (b *EtcdBackend) verifyLegacyInventoryMAC(ctx context.Context, blob []byte) error {
 	keyPhys, err := b.physicalKey(KeyHMACKey)
 	if err != nil {
@@ -1047,13 +1201,15 @@ func (b *EtcdBackend) verifyLegacyInventoryMAC(ctx context.Context, blob []byte)
 	}
 	keyKVs := resp.Responses[1].GetResponseRange().Kvs
 	if len(keyKVs) == 0 {
-		slog.Warn("Legacy etcd inventory has a stored HMAC but no HMAC key; skipping verification before decomposition")
-		return nil
+		return fmt.Errorf("legacy etcd inventory has a stored integrity value but no HMAC key to verify it with; "+
+			"delete the %s key under the etcd prefix to acknowledge the lost baseline and retry: %w",
+			etcdInvHMACSub, ErrInventoryTampered)
 	}
 	_, key, err := decodeBlob(keyKVs[0].Value)
 	if err != nil || len(key) != hmacKeyLen {
-		slog.Warn("Legacy etcd inventory HMAC key is unreadable or malformed; skipping verification before decomposition", "error", err)
-		return nil
+		return fmt.Errorf("legacy etcd inventory HMAC key is unreadable or malformed, so the stored integrity value cannot be verified; "+
+			"delete the %s key under the etcd prefix to acknowledge the lost baseline and retry: %w",
+			etcdInvHMACSub, ErrInventoryTampered)
 	}
 	if !hmac.Equal(wholeBlobInventoryMAC(key, blob), stored) {
 		return fmt.Errorf("legacy etcd inventory failed integrity verification before decomposition: %w", ErrInventoryTampered)

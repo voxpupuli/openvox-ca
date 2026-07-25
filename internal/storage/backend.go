@@ -317,10 +317,13 @@ type InventoryStore interface {
 	// perform the whole prune in one transaction — the etcd backend commits
 	// it in batches, each of which writes a head covering exactly the entries
 	// that remain after it — so a prune may partially complete on conflict or
-	// error. Whatever happens, the returned slice must contain every entry
-	// actually removed (in issuance order), including alongside a non-nil
-	// error: callers drive CRL entry removal and blob cleanup from it, and an
-	// entry that was durably removed but not returned can never be
+	// error, and an implementation may deliberately bound how much one call
+	// removes (etcd caps a call's batches so a huge backlog cannot blow the
+	// caller's time budget; deferred matches stay present and consistent for
+	// later calls). Whatever happens, the returned slice must contain every
+	// entry actually removed (in issuance order), including alongside a
+	// non-nil error: callers drive CRL entry removal and blob cleanup from
+	// it, and an entry that was durably removed but not returned can never be
 	// rediscovered. An empty slice with a nil error means nothing matched.
 	PruneEntries(ctx context.Context, keep func(InventoryEntry) bool, advanceHead func(prev []byte, e InventoryEntry) []byte) ([]InventoryEntry, error)
 }

@@ -20,6 +20,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -138,6 +139,15 @@ func (b *EtcdBackend) mutateRecordBySerial(ctx context.Context, serial string, m
 			return err
 		}
 		if len(resp.Kvs) == 0 {
+			return nil
+		}
+		if string(resp.Kvs[0].Value) == etcdSerialAmbiguous {
+			// The serial appears on several imported legacy records; applying
+			// the write through the one-to-one index would land it on an
+			// arbitrary bearer (e.g. another subject's record receiving this
+			// certificate's fingerprint). Refuse rather than alias.
+			slog.Warn("Certificate-index write skipped: serial is duplicated in the imported legacy inventory",
+				"serial", serial)
 			return nil
 		}
 		seq, err := strconv.ParseUint(string(resp.Kvs[0].Value), 10, 64)

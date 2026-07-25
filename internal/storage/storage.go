@@ -362,20 +362,23 @@ func (s *StorageService) inventoryEntriesLocked(ctx context.Context) ([]Inventor
 // write lock. It returns the removed entries (in issuance order) so the caller
 // can act on them — drop their CRL revocations, invalidate caches, delete the
 // stored cert. The returned slice is authoritative even when err is non-nil:
-// structured backends that prune in batches (etcd) may fail mid-way with some
-// entries already durably removed, and those are still returned so the caller
-// can finish cleaning up after them. When nothing is removed the inventory and
-// head are left untouched and (nil, nil) is returned.
+// any path that has durably removed entries before failing still returns
+// them, so the caller can finish cleaning up after them. A backend may bound
+// how much one call removes (see the PruneEntries contract); deferred matches
+// stay in the inventory for later calls. When nothing is removed the
+// inventory and head are left untouched and (nil, nil) is returned.
 //
 // The current inventory integrity is verified before pruning, so a tampered
 // inventory surfaces ErrInventoryTampered rather than being silently rewritten.
 //
-// Concurrency: appends (AppendInventory) and reads (ReadInventory) take the same
-// inventoryMu, so within a process a prune never interleaves with them. The
-// rewrite is a single Backend.Put on KeyInventory, which structured backends
-// service as an atomic table replacement and blob backends as an atomic file
-// swap; callers needing cross-replica serialisation against revocation should
-// hold the cluster CRL lock around this (see ca.CA.CleanupExpiredCerts).
+// Concurrency: appends (AppendInventory) and reads (ReadInventory) take the
+// same inventoryMu, so within a process a prune never interleaves with them.
+// Structured backends prune through PruneEntries (see the contract in
+// backend.go: SQL in one transaction, etcd in individually-consistent
+// batches); the blob fallback below rewrites the whole inventory with a
+// single Backend.Put, which blob backends service as an atomic file swap.
+// Callers needing cross-replica serialisation against revocation should hold
+// the cluster CRL lock around this (see ca.CA.CleanupExpiredCerts).
 func (s *StorageService) PruneInventory(ctx context.Context, keep func(InventoryEntry) bool) ([]InventoryEntry, error) {
 	s.inventoryMu.Lock()
 	defer s.inventoryMu.Unlock()
@@ -434,10 +437,13 @@ func (s *StorageService) PruneInventory(ctx context.Context, keep func(Inventory
 
 	if s.hmacKey != nil {
 		if err := s.updateInventoryHMACLocked(ctx, s.hmacKey); err != nil {
-			// The inventory is already rewritten but the stored head now lags it;
-			// surface the failure so the operator/job can react rather than leave
-			// a mismatch that the next verify would flag as tampering.
-			return nil, fmt.Errorf("updating inventory HMAC after prune: %w", err)
+			// The inventory is already rewritten but the stored head now lags
+			// it; surface the failure so the operator/job can react rather
+			// than leave a mismatch the next verify would flag as tampering.
+			// The entries are durably removed, so return them alongside the
+			// error per this method's contract — the caller's CRL/blob
+			// cleanup must still run for them.
+			return removed, fmt.Errorf("updating inventory HMAC after prune: %w", err)
 		}
 	}
 	return removed, nil
