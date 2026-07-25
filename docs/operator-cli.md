@@ -7,9 +7,10 @@
 ```text
 --config       ""                       Path to YAML config file (auto-detected at /etc/puppet-ca/ctl.yaml)
 --server-url   https://localhost:8140   openvox-ca server URL
---ca-cert      ""                       CA cert PEM for TLS verification (omit to skip verify)
+--ca-cert      ""                       CA cert PEM for TLS verification (omit to use system trust store)
 --client-cert  ""                       Client certificate PEM for mTLS
 --client-key   ""                       Client private key PEM for mTLS
+--insecure                              Skip TLS server certificate verification (vulnerable to MITM; use only for testing)
 --verbose, -v                           Enable debug logging
 ```
 
@@ -37,6 +38,7 @@ server_url:  https://openvox-ca.example.com:8140
 ca_cert:     /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem
 client_cert: /etc/puppetlabs/puppet/ssl/certs/puppet-master.pem
 client_key:  /etc/puppetlabs/puppet/ssl/private_keys/puppet-master.pem
+insecure:    false
 verbose:     false
 ```
 
@@ -48,6 +50,7 @@ verbose:     false
 | `--ca-cert` | `PUPPET_CA_CTL_CA_CERT` |
 | `--client-cert` | `PUPPET_CA_CTL_CLIENT_CERT` |
 | `--client-key` | `PUPPET_CA_CTL_CLIENT_KEY` |
+| `--insecure` | `PUPPET_CA_CTL_INSECURE` |
 | `--verbose` | `PUPPET_CA_CTL_VERBOSE` |
 
 ## Subcommands
