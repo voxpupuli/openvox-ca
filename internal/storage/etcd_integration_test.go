@@ -539,9 +539,52 @@ var _ = Describe("EtcdInventoryStore", func() {
 		Expect(b.AppendLine(ctx, KeyInventory, []byte("0001 nb na /node3\n"), BlobPrivate)).
 			To(MatchError(ErrDuplicateSerial), "stored serials must be rejected")
 
+		// This path appends in one transaction, so it is explicitly bounded
+		// rather than left to trip the server's --max-txn-ops opaquely.
+		big := ""
+		for i := 100; i < 100+etcdImportBatch+1; i++ {
+			big += fmt.Sprintf("%04d nb na /bulk%d\n", i, i)
+		}
+		err = b.AppendLine(ctx, KeyInventory, []byte(big), BlobPrivate)
+		Expect(err).To(HaveOccurred(), "oversized direct appends must be refused")
+		Expect(err.Error()).To(ContainSubstring("max-txn-ops"), "the error must name the limit")
+
 		entries, err = b.Entries(ctx)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(entries).To(HaveLen(2), "rejected appends must not add entries")
+	})
+
+	It("serves a not-yet-decomposed legacy blob verbatim before EnsureReady has run", func() {
+		cli, stop := startEmbeddedEtcd()
+		defer stop()
+		ctx := context.Background()
+		const prefix = "/test-inv-pre-ensure"
+
+		blob := "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1\n"
+		_, err := cli.Put(ctx, prefix+"/inventory/data", string(encodeBlob(time.Now(), []byte(blob))))
+		Expect(err).NotTo(HaveOccurred())
+
+		// Deliberately no EnsureReady: reads must stay correct regardless.
+		b := NewEtcdBackendFromClient(cli, prefix, 5*time.Second)
+		defer b.Close()
+		got, err := b.Get(ctx, KeyInventory)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(got)).To(Equal(blob), "the legacy blob must be passed through verbatim")
+	})
+
+	It("reads a touched-but-empty inventory as present and empty, not absent", func() {
+		cli, stop := startEmbeddedEtcd()
+		defer stop()
+		b := newBackend(cli, "/test-inv-empty")
+		ctx := context.Background()
+
+		svc := NewWithBackend(b, "")
+		Expect(svc.TouchInventory(ctx)).To(Succeed(), "TouchInventory")
+
+		got, err := b.Get(ctx, KeyInventory)
+		Expect(err).NotTo(HaveOccurred(), "Get after TouchInventory")
+		Expect(got).NotTo(BeNil(), "present-but-empty must be a non-nil slice, matching the other backends")
+		Expect(got).To(BeEmpty())
 	})
 
 	It("replaces and serves the inventory through the Put/Get shim", func() {
@@ -628,6 +671,35 @@ var _ = Describe("EtcdInventoryPrune", func() {
 		Expect(removed).To(BeEmpty())
 	})
 
+	It("drops the by-subject key when a subject's every entry is pruned", func() {
+		// The mainline cleanup case: a decommissioned node whose issuances
+		// have all expired. etcd is the only backend where the subject index
+		// is hand-maintained, so the delete arm needs its own spec.
+		cli, stop := startEmbeddedEtcd()
+		defer stop()
+		svc, _ := newEtcdInventoryService(cli, "/test-inv-prune-subject")
+		ctx := context.Background()
+
+		for _, line := range sampleInventoryLines {
+			Expect(svc.AppendInventory(ctx, line)).To(Succeed())
+		}
+
+		// node2's only issuance is 0002; pruning it must remove the subject
+		// from the index entirely, not leave a dangling pointer.
+		removed, err := svc.PruneInventory(ctx, keepNotSerial("0002"))
+		Expect(err).NotTo(HaveOccurred(), "PruneInventory")
+		Expect(removed).To(HaveLen(1))
+
+		_, err = svc.LatestSerialForSubject(ctx, "node2")
+		Expect(err).To(MatchError(fs.ErrNotExist), "fully-pruned subject must vanish from the index")
+		serial, err := svc.LatestSerialForSubject(ctx, "node1")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(serial).To(Equal("0003"), "unaffected subjects keep their pointer")
+
+		_, err = svc.ReadInventory(ctx)
+		Expect(err).NotTo(HaveOccurred(), "chain must verify after the prune")
+	})
+
 	It("prunes more entries than one transaction batch holds, staying consistent throughout", func() {
 		cli, stop := startEmbeddedEtcd()
 		defer stop()
@@ -640,31 +712,160 @@ var _ = Describe("EtcdInventoryPrune", func() {
 			Expect(svc.AppendInventory(ctx, line)).To(Succeed())
 		}
 
-		// Remove the first 65 serials: spans three etcdPruneBatch (30)
-		// transactions, so the batched path with intermediate heads runs.
-		keep := func(e InventoryEntry) bool { return e.Serial > "0065" }
+		// Remove the first 65 serials plus all of node3's later issuances
+		// (0067, 0075): spans three etcdPruneBatch (30) transactions, so the
+		// batched path with intermediate heads runs, and node3 loses every
+		// entry so the multi-batch subject-index delete arm runs too.
+		keep := func(e InventoryEntry) bool { return e.Serial > "0065" && e.Subject != "node3" }
 		removed, err := svc.PruneInventory(ctx, keep)
 		Expect(err).NotTo(HaveOccurred(), "PruneInventory")
-		Expect(removed).To(HaveLen(65))
+		Expect(removed).To(HaveLen(67))
 
 		inv, err := svc.ReadInventory(ctx)
 		Expect(err).NotTo(HaveOccurred(), "ReadInventory after batched prune (head inconsistent?)")
 		lines := bytes.Split(bytes.TrimRight(inv, "\n"), []byte{'\n'})
-		Expect(lines).To(HaveLen(total - 65))
+		Expect(lines).To(HaveLen(total - 67))
 		Expect(string(bytes.Fields(lines[0])[0])).To(Equal("0066"), "survivors keep issuance order")
 
-		// node7's newest surviving serial is 0079 (79 mod 8 == 7).
+		// node7's newest surviving serial is 0079 (79 mod 8 == 7); node3 has
+		// no survivors at all.
 		serial, err := svc.LatestSerialForSubject(ctx, "node7")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(serial).To(Equal("0079"))
+		_, err = svc.LatestSerialForSubject(ctx, "node3")
+		Expect(err).To(MatchError(fs.ErrNotExist), "node3 lost every entry across batches")
 
 		Expect(svc.AppendInventory(ctx, "9999 2024-06-01T00:00:00UTC 2029-06-01T00:00:00UTC /fresh")).To(Succeed(), "append after batched prune")
 		_, err = svc.ReadInventory(ctx)
 		Expect(err).NotTo(HaveOccurred())
 	})
+
+	It("returns every removed entry even when a fence conflict interrupts the batches", func() {
+		// A concurrent writer between batches conflicts the fence; the prune
+		// restarts from a fresh read. Entries deleted by the already-committed
+		// batches no longer appear in that re-read, so they must be carried
+		// over into the final result — CleanupExpiredCerts drives CRL entry
+		// removal and cert-blob deletion from exactly this list.
+		cli, stop := startEmbeddedEtcd()
+		defer stop()
+		svc, b := newEtcdInventoryService(cli, "/test-inv-prune-conflict")
+		ctx := context.Background()
+
+		const total = 80
+		for i := 1; i <= total; i++ {
+			line := fmt.Sprintf("%04d 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node%d", i, i%8)
+			Expect(svc.AppendInventory(ctx, line)).To(Succeed())
+		}
+
+		// After the first committed batch, bump the fence exactly once, as a
+		// concurrent append from another replica would.
+		fired := false
+		b.pruneBatchHook = func() {
+			if fired {
+				return
+			}
+			fired = true
+			_, err := cli.Put(ctx, "/test-inv-prune-conflict/inventory/seq", fmt.Sprintf("%d", total))
+			Expect(err).NotTo(HaveOccurred(), "hook: bump fence")
+		}
+		defer func() { b.pruneBatchHook = nil }()
+
+		removed, err := svc.PruneInventory(ctx, func(e InventoryEntry) bool { return e.Serial > "0065" })
+		Expect(err).NotTo(HaveOccurred(), "PruneInventory")
+		Expect(fired).To(BeTrue(), "the conflict must actually have been injected")
+		Expect(removed).To(HaveLen(65), "removals committed before the conflict must be included")
+		serials := make(map[string]bool, len(removed))
+		for i, e := range removed {
+			serials[e.Serial] = true
+			Expect(e.Serial).To(Equal(fmt.Sprintf("%04d", i+1)), "issuance order restored across attempts")
+		}
+		Expect(serials).To(HaveLen(65), "no entry reported twice")
+
+		inv, err := svc.ReadInventory(ctx)
+		Expect(err).NotTo(HaveOccurred(), "chain must verify after the conflicted prune")
+		Expect(bytes.Split(bytes.TrimRight(inv, "\n"), []byte{'\n'})).To(HaveLen(total - 65))
+	})
+})
+
+// EtcdInventoryChainTamperDetection mirrors the SQL backend's tamper specs:
+// the chain head is etcd's only inventory tamper signal, and per-entry keys
+// are individually writable by anything with etcd access, so each mutation
+// class needs an explicit negative control proving verification can fail.
+var _ = Describe("EtcdInventoryChainTamperDetection", func() {
+	seed := func(cli *clientv3.Client, prefix string) *StorageService {
+		svc, _ := newEtcdInventoryService(cli, prefix)
+		for _, line := range sampleInventoryLines {
+			Expect(svc.AppendInventory(context.Background(), line)).To(Succeed())
+		}
+		return svc
+	}
+
+	It("detects a modified entry", func() {
+		cli, stop := startEmbeddedEtcd()
+		defer stop()
+		ctx := context.Background()
+		svc := seed(cli, "/test-tamper-modify")
+
+		forged, err := encodeInventoryRecord(CertRecord{InventoryEntry: InventoryEntry{
+			Serial: "BEEF", NotBefore: "2024-01-01T00:00:00UTC", NotAfter: "2029-01-01T00:00:00UTC", Subject: "node1",
+		}})
+		Expect(err).NotTo(HaveOccurred())
+		_, err = cli.Put(ctx, fmt.Sprintf("/test-tamper-modify/inventory/entries/%020d", 1), string(forged))
+		Expect(err).NotTo(HaveOccurred())
+
+		_, err = svc.ReadInventory(ctx)
+		Expect(err).To(MatchError(ErrInventoryTampered), "a rewritten entry must fail verification")
+	})
+
+	It("detects an inserted entry", func() {
+		cli, stop := startEmbeddedEtcd()
+		defer stop()
+		ctx := context.Background()
+		svc := seed(cli, "/test-tamper-insert")
+
+		forged, err := encodeInventoryRecord(CertRecord{InventoryEntry: InventoryEntry{
+			Serial: "BEEF", NotBefore: "2024-01-01T00:00:00UTC", NotAfter: "2029-01-01T00:00:00UTC", Subject: "intruder",
+		}})
+		Expect(err).NotTo(HaveOccurred())
+		_, err = cli.Put(ctx, fmt.Sprintf("/test-tamper-insert/inventory/entries/%020d", 99), string(forged))
+		Expect(err).NotTo(HaveOccurred())
+
+		_, err = svc.ReadInventory(ctx)
+		Expect(err).To(MatchError(ErrInventoryTampered), "an out-of-band entry must fail verification")
+	})
+
+	It("detects a deleted entry", func() {
+		cli, stop := startEmbeddedEtcd()
+		defer stop()
+		ctx := context.Background()
+		svc := seed(cli, "/test-tamper-delete")
+
+		_, err := cli.Delete(ctx, fmt.Sprintf("/test-tamper-delete/inventory/entries/%020d", 2))
+		Expect(err).NotTo(HaveOccurred())
+
+		_, err = svc.ReadInventory(ctx)
+		Expect(err).To(MatchError(ErrInventoryTampered), "a removed entry must fail verification")
+	})
 })
 
 // --- Legacy blob decomposition ---
+
+// legacyHMACKey is the fixture HMAC key used to seed pre-decomposition state.
+var legacyHMACKey = bytes.Repeat([]byte{0x42}, 32)
+
+// seedLegacyInventory writes the exact state a pre-decomposition version
+// leaves behind: the inventory text at inventory/data, its whole-blob HMAC at
+// inventory/hmac, and the HMAC key.
+func seedLegacyInventory(cli *clientv3.Client, prefix, blob string) {
+	ctx := context.Background()
+	now := time.Now()
+	_, err := cli.Put(ctx, prefix+"/private/hmac_key", string(encodeBlob(now, legacyHMACKey)))
+	Expect(err).NotTo(HaveOccurred())
+	_, err = cli.Put(ctx, prefix+"/inventory/data", string(encodeBlob(now, []byte(blob))))
+	Expect(err).NotTo(HaveOccurred())
+	_, err = cli.Put(ctx, prefix+"/inventory/hmac", string(encodeBlob(now, wholeBlobInventoryMAC(legacyHMACKey, []byte(blob)))))
+	Expect(err).NotTo(HaveOccurred())
+}
 
 var _ = Describe("EtcdLegacyInventoryDecompose", func() {
 	It("imports a pre-decomposition blob on EnsureReady and re-baselines integrity", func() {
@@ -673,21 +874,14 @@ var _ = Describe("EtcdLegacyInventoryDecompose", func() {
 		ctx := context.Background()
 		const prefix = "/test-inv-legacy"
 
-		// Seed the exact state a pre-decomposition version leaves behind: the
-		// inventory text at inventory/data, a whole-blob HMAC under
-		// inventory/hmac, and the HMAC key.
-		key := bytes.Repeat([]byte{0x42}, 32)
+		// A blob larger than etcdImportBatch (32), so the import spans
+		// several transactions — the shape every real CA's upgrade takes.
+		const total = 80
 		blob := ""
-		for _, line := range sampleInventoryLines {
-			blob += line + "\n"
+		for i := 1; i <= total; i++ {
+			blob += fmt.Sprintf("%04d 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node%d\n", i, i%8)
 		}
-		now := time.Now()
-		_, err := cli.Put(ctx, prefix+"/private/hmac_key", string(encodeBlob(now, key)))
-		Expect(err).NotTo(HaveOccurred())
-		_, err = cli.Put(ctx, prefix+"/inventory/data", string(encodeBlob(now, []byte(blob))))
-		Expect(err).NotTo(HaveOccurred())
-		_, err = cli.Put(ctx, prefix+"/inventory/hmac", string(encodeBlob(now, wholeBlobInventoryMAC(key, []byte(blob)))))
-		Expect(err).NotTo(HaveOccurred())
+		seedLegacyInventory(cli, prefix, blob)
 
 		// newBackend runs EnsureReady, which performs the decomposition.
 		b := newBackend(cli, prefix)
@@ -695,10 +889,10 @@ var _ = Describe("EtcdLegacyInventoryDecompose", func() {
 
 		resp, err := cli.Get(ctx, prefix+"/inventory/entries/", clientv3.WithPrefix(), clientv3.WithCountOnly())
 		Expect(err).NotTo(HaveOccurred())
-		Expect(resp.Count).To(Equal(int64(len(sampleInventoryLines))), "blob lines must become entry keys")
+		Expect(resp.Count).To(Equal(int64(total)), "blob lines must become entry keys")
 		headResp, err := cli.Get(ctx, prefix+"/inventory/hmac")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(headResp.Kvs).To(BeEmpty(), "the whole-blob HMAC must be dropped: it is not a chain head")
+		Expect(headResp.Kvs).To(BeEmpty(), "the verified whole-blob HMAC must be dropped: it is not a chain head")
 
 		// InitHMAC re-baselines from the imported entries and verifies clean.
 		svc := NewWithBackend(b, filepath.Join(GinkgoT().TempDir(), "private"))
@@ -706,20 +900,159 @@ var _ = Describe("EtcdLegacyInventoryDecompose", func() {
 		inv, err := svc.ReadInventory(ctx)
 		Expect(err).NotTo(HaveOccurred(), "ReadInventory")
 		Expect(string(inv)).To(Equal(blob), "decomposed inventory must render the original text")
-		serial, err := svc.LatestSerialForSubject(ctx, "node1")
+		serial, err := svc.LatestSerialForSubject(ctx, "node7")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(serial).To(Equal("0003"), "the subject index must be built from the blob")
+		Expect(serial).To(Equal("0079"), "the subject index must be built from the blob")
 
 		// Running EnsureReady again must be a no-op.
 		Expect(b.EnsureReady(ctx)).To(Succeed(), "EnsureReady (again)")
 		resp, err = cli.Get(ctx, prefix+"/inventory/entries/", clientv3.WithPrefix(), clientv3.WithCountOnly())
 		Expect(err).NotTo(HaveOccurred())
-		Expect(resp.Count).To(Equal(int64(len(sampleInventoryLines))), "a second EnsureReady must not re-import")
+		Expect(resp.Count).To(Equal(int64(total)), "a second EnsureReady must not re-import")
 
 		// Appends extend the decomposed inventory and the fresh chain.
-		Expect(svc.AppendInventory(ctx, "0004 2024-01-04T00:00:00UTC 2029-01-04T00:00:00UTC /node3")).To(Succeed())
+		Expect(svc.AppendInventory(ctx, "9999 2024-01-04T00:00:00UTC 2029-01-04T00:00:00UTC /fresh")).To(Succeed())
 		_, err = svc.ReadInventory(ctx)
 		Expect(err).NotTo(HaveOccurred())
+	})
+
+	It("resumes an interrupted import from the intact blob", func() {
+		cli, stop := startEmbeddedEtcd()
+		defer stop()
+		ctx := context.Background()
+		const prefix = "/test-inv-legacy-resume"
+
+		blob := ""
+		for _, line := range sampleInventoryLines {
+			blob += line + "\n"
+		}
+		seedLegacyInventory(cli, prefix, blob)
+
+		// Simulate a crash after the first import batch: the wipe ran and one
+		// entry was written, but the marker (and blob) were never emptied.
+		recs, err := parseInventoryRecords([]byte(blob))
+		Expect(err).NotTo(HaveOccurred())
+		val, err := encodeInventoryRecord(recs[0])
+		Expect(err).NotTo(HaveOccurred())
+		_, err = cli.Put(ctx, fmt.Sprintf("%s/inventory/entries/%020d", prefix, 1), string(val))
+		Expect(err).NotTo(HaveOccurred())
+		_, err = cli.Put(ctx, prefix+"/inventory/seq", "1")
+		Expect(err).NotTo(HaveOccurred())
+
+		b := newBackend(cli, prefix)
+		defer b.Close()
+
+		resp, err := cli.Get(ctx, prefix+"/inventory/entries/", clientv3.WithPrefix(), clientv3.WithCountOnly())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.Count).To(Equal(int64(len(sampleInventoryLines))), "the interrupted import must be redone in full")
+
+		svc := NewWithBackend(b, filepath.Join(GinkgoT().TempDir(), "private"))
+		Expect(svc.InitHMAC(ctx)).To(Succeed())
+		inv, err := svc.ReadInventory(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(inv)).To(Equal(blob), "nothing from the blob may be lost to the interruption")
+	})
+
+	It("refuses to decompose when the blob and existing entries contradict each other", func() {
+		cli, stop := startEmbeddedEtcd()
+		defer stop()
+		ctx := context.Background()
+		const prefix = "/test-inv-legacy-mixed"
+
+		seedLegacyInventory(cli, prefix, "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1\n")
+
+		// An entry that is not the import-written prefix of the blob — the
+		// state a mixed-version cluster produces.
+		val, err := encodeInventoryRecord(CertRecord{InventoryEntry: InventoryEntry{
+			Serial: "0009", NotBefore: "2024-01-01T00:00:00UTC", NotAfter: "2029-01-01T00:00:00UTC", Subject: "other",
+		}})
+		Expect(err).NotTo(HaveOccurred())
+		_, err = cli.Put(ctx, fmt.Sprintf("%s/inventory/entries/%020d", prefix, 1), string(val))
+		Expect(err).NotTo(HaveOccurred())
+
+		b := NewEtcdBackendFromClient(cli, prefix, 5*time.Second)
+		defer b.Close()
+		err = b.EnsureReady(ctx)
+		Expect(err).To(HaveOccurred(), "conflicting states must not be silently resolved")
+		Expect(err.Error()).To(ContainSubstring("do not match"), "the error must explain the conflict")
+
+		// Neither side may have been destroyed by the refusal.
+		blobResp, err := cli.Get(ctx, prefix+"/inventory/data")
+		Expect(err).NotTo(HaveOccurred())
+		_, payload, err := decodeBlob(blobResp.Kvs[0].Value)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(payload).NotTo(BeEmpty(), "the legacy blob must survive the refusal")
+	})
+
+	It("fails startup when the legacy blob does not match its stored HMAC", func() {
+		cli, stop := startEmbeddedEtcd()
+		defer stop()
+		ctx := context.Background()
+		const prefix = "/test-inv-legacy-tampered"
+
+		seedLegacyInventory(cli, prefix, "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1\n")
+		// Tamper with the blob after the MAC was computed.
+		tampered := "0002 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /evil\n"
+		_, err := cli.Put(ctx, prefix+"/inventory/data", string(encodeBlob(time.Now(), []byte(tampered))))
+		Expect(err).NotTo(HaveOccurred())
+
+		b := NewEtcdBackendFromClient(cli, prefix, 5*time.Second)
+		defer b.Close()
+		Expect(b.EnsureReady(ctx)).To(MatchError(ErrInventoryTampered),
+			"a blob failing its own MAC must not become the new trusted baseline")
+
+		resp, err := cli.Get(ctx, prefix+"/inventory/entries/", clientv3.WithPrefix(), clientv3.WithCountOnly())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.Count).To(BeZero(), "nothing may be imported from an unverified blob")
+	})
+
+	It("fails startup on a malformed legacy line, leaving the blob intact", func() {
+		cli, stop := startEmbeddedEtcd()
+		defer stop()
+		ctx := context.Background()
+		const prefix = "/test-inv-legacy-malformed"
+
+		blob := "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1\ntruncated line\n"
+		seedLegacyInventory(cli, prefix, blob)
+
+		b := NewEtcdBackendFromClient(cli, prefix, 5*time.Second)
+		defer b.Close()
+		err := b.EnsureReady(ctx)
+		Expect(err).To(HaveOccurred(), "a corrupt blob must fail loudly, not import partially")
+		Expect(err.Error()).To(ContainSubstring("truncated line"), "the error must name the offending line")
+
+		blobResp, err := cli.Get(ctx, prefix+"/inventory/data")
+		Expect(err).NotTo(HaveOccurred())
+		_, payload, err := decodeBlob(blobResp.Kvs[0].Value)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(payload)).To(Equal(blob), "the blob must be untouched for the operator to repair")
+	})
+
+	It("tolerates duplicate serials in the legacy blob, pointing by-serial at the newest", func() {
+		cli, stop := startEmbeddedEtcd()
+		defer stop()
+		ctx := context.Background()
+		const prefix = "/test-inv-legacy-dup"
+
+		// Blob backends never guaranteed cluster-wide serial uniqueness, so a
+		// legacy inventory can carry repeats; refusing would brick startup.
+		blob := "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1\n" +
+			"0001 2024-01-02T00:00:00UTC 2029-01-02T00:00:00UTC /node2\n"
+		seedLegacyInventory(cli, prefix, blob)
+
+		b := newBackend(cli, prefix)
+		defer b.Close()
+
+		svc := NewWithBackend(b, filepath.Join(GinkgoT().TempDir(), "private"))
+		Expect(svc.InitHMAC(ctx)).To(Succeed())
+		inv, err := svc.ReadInventory(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(inv)).To(Equal(blob), "both lines must be imported verbatim")
+
+		// The duplicate-serial guard works off the (deduplicated) by-serial
+		// index: the serial stays taken.
+		err = svc.AppendInventory(ctx, "0001 2024-01-03T00:00:00UTC 2029-01-03T00:00:00UTC /node3")
+		Expect(err).To(MatchError(ErrDuplicateSerial))
 	})
 })
 
@@ -795,12 +1128,44 @@ var _ = Describe("EtcdCertIndex", func() {
 	It("treats unknown serials as no-ops for revocation and projection writes", func() {
 		cli, stop := startEmbeddedEtcd()
 		defer stop()
-		svc, _ := newEtcdInventoryService(cli, "/test-certindex-noop")
+		svc, b := newEtcdInventoryService(cli, "/test-certindex-noop")
 		ctx := context.Background()
 
 		Expect(svc.MarkCertRevoked(ctx, "FFFF", time.Now())).To(Succeed())
 		Expect(svc.ClearCertRevoked(ctx, "FFFF")).To(Succeed())
 		Expect(svc.SetCertProjection(ctx, "FFFF", CertProjection{Fingerprint: "aa"})).To(Succeed())
+
+		// "No-op" means no observable state, not merely no error: nothing may
+		// have been created anywhere under the inventory namespace.
+		entries, err := b.Entries(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(entries).To(BeEmpty(), "no entry may be conjured for an unknown serial")
+		resp, err := cli.Get(ctx, "/test-certindex-noop/inventory/entries/", clientv3.WithPrefix(), clientv3.WithCountOnly())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.Count).To(BeZero())
+		resp, err = cli.Get(ctx, "/test-certindex-noop/inventory/by-serial/", clientv3.WithPrefix(), clientv3.WithCountOnly())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.Count).To(BeZero(), "no by-serial key may be conjured either")
+	})
+
+	It("treats a dangling by-serial pointer as a no-op instead of recreating the entry", func() {
+		// A prune deletes the entry and its by-serial key in one transaction,
+		// but mutateRecordBySerial reads the two keys separately, so it can
+		// observe a by-serial key whose entry a concurrent prune just removed.
+		cli, stop := startEmbeddedEtcd()
+		defer stop()
+		svc, _ := newEtcdInventoryService(cli, "/test-certindex-dangling")
+		ctx := context.Background()
+
+		Expect(svc.AppendInventory(ctx, "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1")).To(Succeed())
+		// Delete just the entry key, leaving by-serial behind.
+		_, err := cli.Delete(ctx, fmt.Sprintf("/test-certindex-dangling/inventory/entries/%020d", 1))
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(svc.MarkCertRevoked(ctx, "0001", time.Now())).To(Succeed(), "dangling pointer must be a no-op")
+		resp, err := cli.Get(ctx, "/test-certindex-dangling/inventory/entries/", clientv3.WithPrefix(), clientv3.WithCountOnly())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.Count).To(BeZero(), "the pruned entry must not be recreated")
 	})
 })
 
