@@ -361,8 +361,11 @@ func (s *StorageService) inventoryEntriesLocked(ctx context.Context) ([]Inventor
 // rewriting the inventory and its integrity head together under the inventory
 // write lock. It returns the removed entries (in issuance order) so the caller
 // can act on them — drop their CRL revocations, invalidate caches, delete the
-// stored cert. When nothing is removed the inventory and head are left
-// untouched and (nil, nil) is returned.
+// stored cert. The returned slice is authoritative even when err is non-nil:
+// structured backends that prune in batches (etcd) may fail mid-way with some
+// entries already durably removed, and those are still returned so the caller
+// can finish cleaning up after them. When nothing is removed the inventory and
+// head are left untouched and (nil, nil) is returned.
 //
 // The current inventory integrity is verified before pruning, so a tampered
 // inventory surfaces ErrInventoryTampered rather than being silently rewritten.
@@ -383,22 +386,19 @@ func (s *StorageService) PruneInventory(ctx context.Context, keep func(Inventory
 		}
 	}
 
-	// Structured backends prune rows and rewrite the chained integrity head in a
-	// single transaction, so the two can never be observed out of sync across
-	// replicas (mirroring the atomic AppendEntry path).
+	// Structured backends prune rows and rewrite the chained integrity head
+	// so the two are never observed out of sync across replicas: SQL in a
+	// single transaction, etcd in batches whose every commit is internally
+	// consistent (see the PruneEntries contract in backend.go).
 	if store, ok := asInventoryStore(s.backend); ok {
-		var recomputeHead func(survivors []InventoryEntry) []byte
+		var advanceHead func(prev []byte, e InventoryEntry) []byte
 		if s.hmacKey != nil {
 			key := s.hmacKey
-			recomputeHead = func(survivors []InventoryEntry) []byte {
-				var head []byte
-				for _, e := range survivors {
-					head = chainInventoryMAC(key, head, canonicalInventoryLine(e))
-				}
-				return head
+			advanceHead = func(prev []byte, e InventoryEntry) []byte {
+				return chainInventoryMAC(key, prev, canonicalInventoryLine(e))
 			}
 		}
-		return store.PruneEntries(ctx, keep, recomputeHead)
+		return store.PruneEntries(ctx, keep, advanceHead)
 	}
 
 	// Blob backends: read, filter, and rewrite the whole inventory, then

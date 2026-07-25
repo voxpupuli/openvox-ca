@@ -83,6 +83,11 @@ type EtcdBackend struct {
 	timeout  time.Duration
 	appendMu sync.Mutex // serialises inventory mutations within this process
 
+	// pruneBatchHook, when non-nil, runs after each committed prune batch.
+	// Test seam only: it lets the suite interleave a conflicting write
+	// between batches to exercise the partial-prune paths deterministically.
+	pruneBatchHook func()
+
 	// session is the lease-backed concurrency session used for distributed
 	// mutexes. It is created lazily on the first AcquireLock call and
 	// re-created when its lease has expired. Protected by sessionMu.

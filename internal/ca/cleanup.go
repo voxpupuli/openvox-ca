@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"log/slog"
 	"math/big"
 	"time"
@@ -40,9 +41,13 @@ import (
 // as soon as expired); negative values are treated as zero.
 //
 // Replica safety: the whole operation runs under the cluster-wide CRL lock, so
-// it serialises with Revoke and the CRL refresher across replicas. The inventory
-// rewrite itself is atomic per backend (see StorageService.PruneInventory). An
-// entry that cannot be time-parsed is conservatively kept, never dropped.
+// it serialises with Revoke and the CRL refresher across replicas. The
+// inventory rewrite keeps entries and integrity head consistent at every
+// observable point, but on backends that prune in batches (etcd) it may
+// partially complete on error; the entries PruneInventory returns are always
+// exactly the ones removed, so the CRL/blob cleanup below runs even when the
+// prune itself reports an error. An entry that cannot be time-parsed is
+// conservatively kept, never dropped.
 func (c *CA) CleanupExpiredCerts(ctx context.Context, retain time.Duration) (int, error) {
 	if retain < 0 {
 		retain = 0
@@ -58,8 +63,13 @@ func (c *CA) CleanupExpiredCerts(ctx context.Context, retain time.Duration) (int
 		defer c.mu.Unlock()
 
 		// Prune the inventory first; the returned entries tell us exactly which
-		// serials to drop from the CRL and which caches/blobs to clean up.
-		dropped, err := c.Storage.PruneInventory(ctx, func(e storage.InventoryEntry) bool {
+		// serials to drop from the CRL and which caches/blobs to clean up. A
+		// batched backend (etcd) may error mid-prune with some entries already
+		// durably removed — those are still returned, and they must be cleaned
+		// up NOW: the inventory no longer names them, so a later run could
+		// never rediscover them and their CRL entries and cert blobs would be
+		// orphaned forever. Hold the prune error and surface it at the end.
+		dropped, pruneErr := c.Storage.PruneInventory(ctx, func(e storage.InventoryEntry) bool {
 			notAfter, perr := time.Parse(storage.InventoryTimeFormat, e.NotAfter)
 			if perr != nil {
 				slog.Warn("Cleanup: keeping inventory entry with unparseable NotAfter",
@@ -68,11 +78,8 @@ func (c *CA) CleanupExpiredCerts(ctx context.Context, retain time.Duration) (int
 			}
 			return !notAfter.Before(cutoff)
 		})
-		if err != nil {
-			return err
-		}
 		if len(dropped) == 0 {
-			return nil
+			return pruneErr
 		}
 
 		// Collect the removed serials (normalised) and refresh in-memory caches.
@@ -91,7 +98,7 @@ func (c *CA) CleanupExpiredCerts(ctx context.Context, retain time.Duration) (int
 		}
 
 		if err := c.dropCRLEntriesLocked(ctx, removedSerials); err != nil {
-			return err
+			return errors.Join(pruneErr, err)
 		}
 
 		// Delete the stored signed cert for each removed subject, but only when
@@ -102,7 +109,7 @@ func (c *CA) CleanupExpiredCerts(ctx context.Context, retain time.Duration) (int
 		}
 
 		removed = len(dropped)
-		return nil
+		return pruneErr
 	})
 	return removed, err
 }

@@ -20,10 +20,12 @@ package storage
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"encoding/json"
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -180,12 +182,10 @@ func (b *EtcdBackend) seqGuard(seq etcdSeqState) clientv3.Cmp {
 	return clientv3.Compare(clientv3.ModRevision(b.invPhys(etcdInvSeqSub)), "=", seq.rev)
 }
 
-// etcdIndexedRecord pairs a decoded record with its sequence number and the
-// entry key's ModRevision (for guarded in-place updates).
+// etcdIndexedRecord pairs a decoded record with its sequence number.
 type etcdIndexedRecord struct {
-	seq    uint64
-	modRev int64
-	rec    CertRecord
+	seq uint64
+	rec CertRecord
 }
 
 func decodeIndexedRecords(prefix string, kvs []*mvccpb.KeyValue) ([]etcdIndexedRecord, error) {
@@ -199,7 +199,7 @@ func decodeIndexedRecords(prefix string, kvs []*mvccpb.KeyValue) ([]etcdIndexedR
 		if err != nil {
 			return nil, fmt.Errorf("entry %q: %w", kv.Key, err)
 		}
-		out = append(out, etcdIndexedRecord{seq: seq, modRev: kv.ModRevision, rec: rec})
+		out = append(out, etcdIndexedRecord{seq: seq, rec: rec})
 	}
 	return out, nil
 }
@@ -357,34 +357,71 @@ func (b *EtcdBackend) LatestSerialForSubject(ctx context.Context, subject string
 // and a crash mid-prune leaves a valid, partially-pruned inventory that the
 // caller's next prune completes). Interleaved appends invalidate the fence
 // and restart the prune from a fresh read.
-func (b *EtcdBackend) PruneEntries(ctx context.Context, keep func(InventoryEntry) bool, recomputeHead func(survivors []InventoryEntry) []byte) ([]InventoryEntry, error) {
+//
+// Per the interface contract, the returned slice contains every entry that
+// was durably removed — accumulated across batches and retries, and returned
+// even alongside a non-nil error — so the caller's CRL/blob cleanup never
+// misses an entry that a partially-completed prune already deleted.
+func (b *EtcdBackend) PruneEntries(ctx context.Context, keep func(InventoryEntry) bool, advanceHead func(prev []byte, e InventoryEntry) []byte) ([]InventoryEntry, error) {
 	b.appendMu.Lock()
 	defer b.appendMu.Unlock()
 
+	// Committed removals accumulate across attempts: a retry re-reads the
+	// inventory, so entries deleted by an earlier attempt's batches no longer
+	// appear in its view and would otherwise vanish from the result.
+	var all []etcdIndexedRecord
+	finish := func() []InventoryEntry {
+		if len(all) == 0 {
+			return nil
+		}
+		// A conflicting append may add (and a later attempt remove) entries
+		// newer than an earlier attempt's, so restore issuance order globally.
+		sort.Slice(all, func(i, j int) bool { return all[i].seq < all[j].seq })
+		return entriesOf(all)
+	}
+
 	for attempt := range etcdMaxTxnRetries {
-		removed, conflict, err := b.pruneEntriesOnce(ctx, keep, recomputeHead)
+		committed, conflict, err := b.pruneEntriesOnce(ctx, keep, advanceHead)
+		all = append(all, committed...)
 		if err != nil {
-			return nil, err
+			return finish(), err
 		}
 		if !conflict {
-			return removed, nil
+			return finish(), nil
 		}
 		if err := b.txnBackoff(ctx, attempt); err != nil {
-			return nil, err
+			return finish(), err
 		}
 	}
-	return nil, fmt.Errorf("inventory prune failed: too many concurrent writers")
+	return finish(), fmt.Errorf("inventory prune failed: too many concurrent writers")
 }
 
-func (b *EtcdBackend) pruneEntriesOnce(ctx context.Context, keep func(InventoryEntry) bool, recomputeHead func(survivors []InventoryEntry) []byte) ([]InventoryEntry, bool, error) {
+// pruneEntriesOnce performs one prune attempt. It returns the records whose
+// delete transactions committed (possibly a subset when a later batch hits a
+// fence conflict or an error), plus whether the caller should re-read and
+// retry.
+//
+// Batches are taken from the tail of the removal list, newest first. That
+// ordering makes intermediate heads cheap: after committing the batches from
+// removal index s onward, every entry older than removed[s] is still intact
+// (earlier removals are in not-yet-processed batches), and everything from
+// removed[s] onward is survivors only. Each intermediate head is therefore a
+// cached prefix fold over the original entries resumed across the survivor
+// tail — one O(n) checkpoint pass plus the survivor tails, instead of a full
+// O(n) refold per batch (quadratic when a large expiry cleanup prunes most of
+// a large inventory).
+func (b *EtcdBackend) pruneEntriesOnce(ctx context.Context, keep func(InventoryEntry) bool, advanceHead func(prev []byte, e InventoryEntry) []byte) ([]etcdIndexedRecord, bool, error) {
 	recs, seq, err := b.readIndexedRecords(ctx)
 	if err != nil {
 		return nil, false, err
 	}
 
 	var removed []etcdIndexedRecord
+	survivors := make([]etcdIndexedRecord, 0, len(recs))
 	for _, r := range recs {
-		if !keep(r.rec.InventoryEntry) {
+		if keep(r.rec.InventoryEntry) {
+			survivors = append(survivors, r)
+		} else {
 			removed = append(removed, r)
 		}
 	}
@@ -395,27 +432,51 @@ func (b *EtcdBackend) pruneEntriesOnce(ctx context.Context, keep func(InventoryE
 	// Fence value: unchanged when present; derived from the highest allocated
 	// seq otherwise (possible only for indices built before appends ran).
 	seqVal := strconv.FormatUint(seq.last, 10)
-	if !seq.present && len(recs) > 0 {
+	if !seq.present {
 		seqVal = strconv.FormatUint(recs[len(recs)-1].seq, 10)
 	}
 
-	seqRev := seq.rev
-	for start := 0; start < len(removed); start += etcdPruneBatch {
-		batch := removed[start:min(start+etcdPruneBatch, len(removed))]
-		// The state this transaction commits is the full record set minus
-		// every entry removed up to and including this batch. Later batches'
-		// removals are still present, so each committed revision is
-		// internally consistent (its head covers exactly its entries).
-		afterSet := make([]etcdIndexedRecord, 0, len(recs))
-		removedSoFar := make(map[uint64]bool, start+len(batch))
-		for _, r := range removed[:start+len(batch)] {
-			removedSoFar[r.seq] = true
-		}
+	// Batch start offsets into removed, ascending; batches run tail-first.
+	var starts []int
+	for s := 0; s < len(removed); s += etcdPruneBatch {
+		starts = append(starts, s)
+	}
+
+	// One forward fold over the full record set, checkpointing the chain
+	// value just before each batch's oldest removed entry. For the state
+	// committed by the batch starting at removed[s], that checkpoint covers
+	// exactly the entries older than removed[s] (all still present).
+	var prefixAt map[int][]byte
+	if advanceHead != nil {
+		prefixAt = make(map[int][]byte, len(starts))
+		var head []byte
+		si := 0
 		for _, r := range recs {
-			if !removedSoFar[r.seq] {
-				afterSet = append(afterSet, r)
+			if si < len(starts) && removed[starts[si]].seq == r.seq {
+				prefixAt[starts[si]] = head
+				si++
 			}
+			head = advanceHead(head, r.rec.InventoryEntry)
 		}
+	}
+
+	// Per-subject indices for repointing by-subject keys without rescanning
+	// the whole record set per batch.
+	subjAll := make(map[string][]etcdIndexedRecord)
+	for _, r := range recs {
+		subjAll[r.rec.Subject] = append(subjAll[r.rec.Subject], r)
+	}
+	subjSurvLast := make(map[string]etcdIndexedRecord, len(survivors))
+	for _, r := range survivors {
+		subjSurvLast[r.rec.Subject] = r
+	}
+
+	seqRev := seq.rev
+	committedFrom := len(removed) // removal index from which deletes have committed
+	for si := len(starts) - 1; si >= 0; si-- {
+		s := starts[si]
+		batch := removed[s:min(s+etcdPruneBatch, len(removed))]
+		cutSeq := removed[s].seq
 
 		ops := make([]clientv3.Op, 0, 3*len(batch)+3)
 		subjects := make(map[string]bool, len(batch))
@@ -426,14 +487,20 @@ func (b *EtcdBackend) pruneEntriesOnce(ctx context.Context, keep func(InventoryE
 			)
 			subjects[r.rec.Subject] = true
 		}
-		// Repoint each affected subject's by-subject key at its newest
-		// surviving serial, or drop the key when none survives.
+		// Repoint each affected subject at its newest entry still present in
+		// the committed state: entries older than the cut are all present, and
+		// from the cut onward only survivors are.
 		for subject := range subjects {
-			latest := ""
-			for _, r := range afterSet {
-				if r.rec.Subject == subject {
-					latest = r.rec.Serial
-				}
+			var latest string
+			var latestSeq uint64
+			entries := subjAll[subject]
+			i := sort.Search(len(entries), func(i int) bool { return entries[i].seq >= cutSeq })
+			if i > 0 {
+				latest = entries[i-1].rec.Serial
+				latestSeq = entries[i-1].seq
+			}
+			if lv, ok := subjSurvLast[subject]; ok && lv.seq > cutSeq && lv.seq > latestSeq {
+				latest = lv.rec.Serial
 			}
 			key := b.invPhys(etcdInvSubjectSub + subject)
 			if latest == "" {
@@ -442,8 +509,12 @@ func (b *EtcdBackend) pruneEntriesOnce(ctx context.Context, keep func(InventoryE
 				ops = append(ops, clientv3.OpPut(key, latest))
 			}
 		}
-		if recomputeHead != nil {
-			head := recomputeHead(entriesOf(afterSet))
+		if advanceHead != nil {
+			head := prefixAt[s]
+			j := sort.Search(len(survivors), func(i int) bool { return survivors[i].seq > cutSeq })
+			for _, r := range survivors[j:] {
+				head = advanceHead(head, r.rec.InventoryEntry)
+			}
 			ops = append(ops, clientv3.OpPut(b.invPhys(etcdInvHMACSub), string(encodeBlob(time.Now(), head))))
 		}
 		ops = append(ops, clientv3.OpPut(b.invPhys(etcdInvSeqSub), seqVal))
@@ -454,21 +525,20 @@ func (b *EtcdBackend) pruneEntriesOnce(ctx context.Context, keep func(InventoryE
 		).Then(ops...).Commit()
 		cancel()
 		if err != nil {
-			return nil, false, err
+			return removed[committedFrom:], false, err
 		}
 		if !resp.Succeeded {
-			return nil, true, nil
+			return removed[committedFrom:], true, nil
 		}
 		// Our own put moved the fence; subsequent batches guard on the new
 		// revision, which every op in this transaction committed at.
 		seqRev = resp.Header.Revision
+		committedFrom = s
+		if b.pruneBatchHook != nil {
+			b.pruneBatchHook()
+		}
 	}
-
-	out := make([]InventoryEntry, len(removed))
-	for i, r := range removed {
-		out[i] = r.rec.InventoryEntry
-	}
-	return out, false, nil
+	return removed, false, nil
 }
 
 // --- KeyInventory blob shim ---
@@ -644,21 +714,25 @@ func (b *EtcdBackend) replaceInventoryOnce(ctx context.Context, recs []CertRecor
 	for start := 0; start < len(recs); start += etcdImportBatch {
 		batch := recs[start:min(start+etcdImportBatch, len(recs))]
 		ops := make([]clientv3.Op, 0, 3*len(batch)+1)
-		// One by-subject put per subject per transaction (etcd rejects
-		// duplicate keys within a txn); later batches overwrite earlier ones,
-		// leaving each subject pointing at its newest serial.
+		// One put per index key per transaction (etcd rejects duplicate keys
+		// within a txn); later occurrences — in the same batch via these maps,
+		// across batches via plain overwrite — win, leaving each subject
+		// pointing at its newest serial and, for a legacy blob that carries
+		// duplicate serials, each serial at its newest bearer.
 		subjectLatest := make(map[string]string, len(batch))
+		serialLatest := make(map[string]uint64, len(batch))
 		for i, rec := range batch {
 			val, err := encodeInventoryRecord(rec)
 			if err != nil {
 				return false, err
 			}
 			n := uint64(start+i) + 1
-			ops = append(ops,
-				clientv3.OpPut(b.entryPhys(n), string(val)),
-				clientv3.OpPut(b.invPhys(etcdInvSerialSub+rec.Serial), strconv.FormatUint(n, 10)),
-			)
+			ops = append(ops, clientv3.OpPut(b.entryPhys(n), string(val)))
+			serialLatest[rec.Serial] = n
 			subjectLatest[rec.Subject] = rec.Serial
+		}
+		for serial, n := range serialLatest {
+			ops = append(ops, clientv3.OpPut(b.invPhys(etcdInvSerialSub+serial), strconv.FormatUint(n, 10)))
 		}
 		for subject, serial := range subjectLatest {
 			ops = append(ops, clientv3.OpPut(b.invPhys(etcdInvSubjectSub+subject), serial))
@@ -691,6 +765,12 @@ func (b *EtcdBackend) appendInventoryLines(ctx context.Context, data []byte) err
 	}
 	if err := rejectDuplicateSerials(recs); err != nil {
 		return err
+	}
+	// This path appends all lines in one transaction (unlike imports and
+	// prunes, which batch), so bound it explicitly rather than let the etcd
+	// server reject an oversized transaction with an opaque error.
+	if len(recs) > etcdImportBatch {
+		return fmt.Errorf("appending %d inventory lines in one call exceeds the etcd transaction budget of %d (bounded by the server's --max-txn-ops, default 128); append in smaller chunks", len(recs), etcdImportBatch)
 	}
 
 	b.appendMu.Lock()
@@ -791,20 +871,32 @@ func (b *EtcdBackend) deleteInventory(ctx context.Context) error {
 // per-entry structure. It runs from EnsureReady on every start; when there is
 // no legacy blob (fresh cluster, or already decomposed) it is a cheap no-op.
 //
-// The stored integrity head is deleted as part of the import: it was computed
-// under the whole-blob HMAC scheme, which does not match the hash chain the
-// decomposed inventory verifies under, and the backend does not hold the HMAC
-// key needed to translate it. The next VerifyInventoryHMAC re-establishes the
-// baseline from the imported entries — meaning tamper detection does not cover
-// the decomposition window itself. That trade is documented in
-// docs/development/inventory-store.md; run all replicas on the same version so
-// no old replica keeps appending to the blob mid-upgrade (such an append is
-// detected via the marker guard and the import restarts, but the window only
-// closes once the old writers are gone).
+// The blob stays authoritative until the import completes: the marker is only
+// emptied by the import's final transaction, so an interrupted import (crash,
+// etcd error, Ctrl-C) leaves the blob intact and the next start detects the
+// partial entry set as a resumable state and redoes the import from the blob.
+// Entry keys that are NOT a prefix of the blob mean something else wrote to
+// the decomposed structure while the blob still had content — a mixed-version
+// cluster — and that is refused with an explicit error rather than guessing
+// which side to keep.
+//
+// Integrity: when both the HMAC key and a stored head are present, the blob's
+// whole-blob HMAC is verified before it is trusted, and a mismatch fails
+// startup with ErrInventoryTampered exactly as the pre-decomposition code
+// would have. The (verified) head is then deleted as part of the import — it
+// is not a hash-chain head, so it cannot carry over — and the next
+// VerifyInventoryHMAC re-establishes the baseline from the imported entries.
+// Only the import window itself is therefore uncovered; run all replicas on
+// the same version so no old replica keeps appending to the blob mid-upgrade
+// (such an append is detected via the marker guard and the import restarts,
+// but the window only closes once the old writers are gone).
 func (b *EtcdBackend) decomposeLegacyInventory(ctx context.Context) error {
-	legacy, _, err := b.legacyInventoryBlob(ctx)
-	if err != nil || legacy == nil {
+	state, err := b.legacyInventoryState(ctx)
+	if err != nil {
 		return err
+	}
+	if len(state.blob) == 0 {
+		return nil
 	}
 
 	// Serialise the import across replicas starting up together.
@@ -821,18 +913,38 @@ func (b *EtcdBackend) decomposeLegacyInventory(ctx context.Context) error {
 	for attempt := range etcdMaxTxnRetries {
 		// (Re-)read under the lock: another replica may have completed the
 		// import while we waited, or an old-version replica may have appended.
-		legacy, markerRev, err := b.legacyInventoryBlob(ctx)
+		state, err := b.legacyInventoryState(ctx)
 		if err != nil {
 			return err
 		}
-		if legacy == nil {
+		if len(state.blob) == 0 {
 			return nil
 		}
-		recs, err := parseInventoryRecords(legacy)
+		recs, err := parseInventoryRecords(state.blob)
 		if err != nil {
 			return fmt.Errorf("decomposing legacy etcd inventory: %w", err)
 		}
-		conflict, err := b.replaceInventoryOnce(ctx, recs, markerRev, true)
+		if len(state.entries) > 0 {
+			if !recordsArePrefixOf(state.entries, recs) {
+				return fmt.Errorf("etcd inventory holds both a non-empty legacy blob and decomposed entries that do not match it; " +
+					"this usually means a pre-decomposition replica wrote to the blob after another replica upgraded. " +
+					"Refusing to guess: inspect inventory/data and inventory/entries/ under the key prefix and remove whichever is stale")
+			}
+			slog.Info("Resuming interrupted etcd inventory decomposition", "imported", len(state.entries), "total", len(recs))
+		}
+		if err := b.verifyLegacyInventoryMAC(ctx, state.blob); err != nil {
+			return err
+		}
+		if dups := duplicateSerials(recs); len(dups) > 0 {
+			// Blob backends never had a cluster-wide duplicate-serial
+			// guarantee, so a legacy inventory can legitimately carry
+			// repeats. Refusing would brick startup; instead every line is
+			// imported verbatim (preserving the rendered text) and the
+			// by-serial index points at each serial's newest bearer.
+			slog.Warn("Legacy etcd inventory contains duplicate serials; by-serial index will point at the newest entry for each",
+				"serials", dups)
+		}
+		conflict, err := b.replaceInventoryOnce(ctx, recs, state.markerRev, true)
 		if err != nil {
 			return fmt.Errorf("decomposing legacy etcd inventory: %w", err)
 		}
@@ -847,36 +959,122 @@ func (b *EtcdBackend) decomposeLegacyInventory(ctx context.Context) error {
 	return fmt.Errorf("decomposing legacy etcd inventory: too many concurrent writers")
 }
 
-// legacyInventoryBlob returns the not-yet-decomposed inventory blob and the
-// marker's ModRevision, or nil when there is nothing to decompose (no marker,
-// an empty marker, or per-entry keys already present).
-func (b *EtcdBackend) legacyInventoryBlob(ctx context.Context) ([]byte, int64, error) {
+// etcdLegacyState is a snapshot of the inventory keys a decomposition cares
+// about: the marker/blob payload (empty when there is nothing to decompose)
+// with its ModRevision, and any decomposed entry keys already present.
+type etcdLegacyState struct {
+	blob      []byte
+	markerRev int64
+	entries   []etcdIndexedRecord
+}
+
+// legacyInventoryState returns the not-yet-decomposed inventory blob together
+// with any existing entry keys, read atomically. A zero-length blob means
+// there is nothing to decompose (no marker, or an already-emptied one).
+func (b *EtcdBackend) legacyInventoryState(ctx context.Context) (etcdLegacyState, error) {
 	ctx, cancel := b.callCtx(ctx)
 	defer cancel()
 	resp, err := b.client.Txn(ctx).Then(
 		clientv3.OpGet(b.invPhys(etcdInvDataSub)),
-		clientv3.OpGet(b.invPhys(etcdInvEntriesSub), clientv3.WithPrefix(), clientv3.WithCountOnly()),
+		clientv3.OpGet(b.invPhys(etcdInvEntriesSub), clientv3.WithPrefix()),
 	).Commit()
 	if err != nil {
-		return nil, 0, err
+		return etcdLegacyState{}, err
 	}
 	markerKVs := resp.Responses[0].GetResponseRange().Kvs
 	if len(markerKVs) == 0 {
-		return nil, 0, nil
+		return etcdLegacyState{}, nil
 	}
 	_, payload, err := decodeBlob(markerKVs[0].Value)
 	if err != nil {
-		return nil, 0, fmt.Errorf("decoding legacy inventory blob: %w", err)
+		return etcdLegacyState{}, fmt.Errorf("decoding legacy inventory blob: %w", err)
 	}
 	if len(payload) == 0 {
-		return nil, 0, nil
+		return etcdLegacyState{}, nil
 	}
-	if resp.Responses[1].GetResponseRange().Count > 0 {
-		// Should not happen: decomposition empties the marker in the same
-		// transaction that finishes the import. Prefer the decomposed entries
-		// (they may hold appends newer than the stale blob) but say so.
-		slog.Warn("etcd inventory has both a legacy blob and decomposed entries; ignoring the blob")
-		return nil, 0, nil
+	entries, err := decodeIndexedRecords(b.invPhys(etcdInvEntriesSub), resp.Responses[1].GetResponseRange().Kvs)
+	if err != nil {
+		return etcdLegacyState{}, err
 	}
-	return payload, markerKVs[0].ModRevision, nil
+	return etcdLegacyState{blob: payload, markerRev: markerKVs[0].ModRevision, entries: entries}, nil
+}
+
+// recordsArePrefixOf reports whether the stored entries are exactly the
+// import-written prefix of recs: sequence numbers 1..len(entries) carrying the
+// same canonical fields. That is the state an interrupted import leaves
+// behind (the wipe ran, then some batches committed), and the only state a
+// re-run may safely overwrite.
+func recordsArePrefixOf(entries []etcdIndexedRecord, recs []CertRecord) bool {
+	if len(entries) > len(recs) {
+		return false
+	}
+	for i, e := range entries {
+		if e.seq != uint64(i)+1 || e.rec.InventoryEntry != recs[i].InventoryEntry {
+			return false
+		}
+	}
+	return true
+}
+
+// verifyLegacyInventoryMAC checks the legacy blob against its stored
+// whole-blob HMAC before the blob is trusted as the import source. Absent
+// head: nothing to check (the baseline is established after the import).
+// Absent or malformed key with a head present: verification is impossible;
+// log loudly and proceed, since the alternative is bricking startup on a
+// state the operator can no longer influence. Mismatch: fail startup with
+// ErrInventoryTampered, exactly as the pre-decomposition verify would have.
+func (b *EtcdBackend) verifyLegacyInventoryMAC(ctx context.Context, blob []byte) error {
+	keyPhys, err := b.physicalKey(KeyHMACKey)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := b.callCtx(ctx)
+	defer cancel()
+	resp, err := b.client.Txn(ctx).Then(
+		clientv3.OpGet(b.invPhys(etcdInvHMACSub)),
+		clientv3.OpGet(keyPhys),
+	).Commit()
+	if err != nil {
+		return err
+	}
+	headKVs := resp.Responses[0].GetResponseRange().Kvs
+	if len(headKVs) == 0 {
+		return nil
+	}
+	_, stored, err := decodeBlob(headKVs[0].Value)
+	if err != nil {
+		return fmt.Errorf("decoding legacy inventory HMAC: %w", err)
+	}
+	keyKVs := resp.Responses[1].GetResponseRange().Kvs
+	if len(keyKVs) == 0 {
+		slog.Warn("Legacy etcd inventory has a stored HMAC but no HMAC key; skipping verification before decomposition")
+		return nil
+	}
+	_, key, err := decodeBlob(keyKVs[0].Value)
+	if err != nil || len(key) != hmacKeyLen {
+		slog.Warn("Legacy etcd inventory HMAC key is unreadable or malformed; skipping verification before decomposition", "error", err)
+		return nil
+	}
+	if !hmac.Equal(wholeBlobInventoryMAC(key, blob), stored) {
+		return fmt.Errorf("legacy etcd inventory failed integrity verification before decomposition: %w", ErrInventoryTampered)
+	}
+	return nil
+}
+
+// duplicateSerials returns each serial that appears on more than one record,
+// once, in first-seen order.
+func duplicateSerials(recs []CertRecord) []string {
+	counts := make(map[string]int, len(recs))
+	for _, r := range recs {
+		counts[r.Serial]++
+	}
+	var dups []string
+	seen := make(map[string]bool)
+	for _, r := range recs {
+		if counts[r.Serial] > 1 && !seen[r.Serial] {
+			dups = append(dups, r.Serial)
+			seen[r.Serial] = true
+		}
+	}
+	return dups
 }

@@ -307,13 +307,22 @@ type InventoryStore interface {
 	LatestSerialForSubject(ctx context.Context, subject string) (string, error)
 
 	// PruneEntries removes every entry for which keep returns false and
-	// recomputes the integrity head over the survivors, atomically in one
-	// transaction so the rows and the chained head can never be observed out of
-	// sync by another replica. recomputeHead folds the hash chain over the
-	// surviving entries in issuance order; a nil recomputeHead means integrity is
-	// disabled and the stored head is left untouched. It returns the removed
-	// entries in issuance order, or an empty slice when nothing matched.
-	PruneEntries(ctx context.Context, keep func(InventoryEntry) bool, recomputeHead func(survivors []InventoryEntry) []byte) ([]InventoryEntry, error)
+	// rewrites the integrity head over the survivors. advanceHead advances the
+	// hash chain by one entry from the previous head (nil for the first
+	// entry); a nil advanceHead means integrity is disabled and the stored
+	// head is left untouched.
+	//
+	// Consistency contract: the stored entries and the stored head must never
+	// be observable out of sync by another replica. Implementations need not
+	// perform the whole prune in one transaction — the etcd backend commits
+	// it in batches, each of which writes a head covering exactly the entries
+	// that remain after it — so a prune may partially complete on conflict or
+	// error. Whatever happens, the returned slice must contain every entry
+	// actually removed (in issuance order), including alongside a non-nil
+	// error: callers drive CRL entry removal and blob cleanup from it, and an
+	// entry that was durably removed but not returned can never be
+	// rediscovered. An empty slice with a nil error means nothing matched.
+	PruneEntries(ctx context.Context, keep func(InventoryEntry) bool, advanceHead func(prev []byte, e InventoryEntry) []byte) ([]InventoryEntry, error)
 }
 
 // asInventoryStore probes b for the InventoryStore capability, unwrapping
