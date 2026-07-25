@@ -18,7 +18,7 @@ interface. Every backend serves the following logical keys:
 | `crl` | Current Certificate Revocation List (PEM) | bootstrap, revoke, rotate |
 | `serial` | Next leaf certificate serial counter | sign |
 | `inventory` | Append-only log of issued/revoked certificates | sign / revoke |
-| `inventory_hmac` | Inventory integrity head (blob HMAC or hash chain on SQL) | sign / revoke |
+| `inventory_hmac` | Inventory integrity head (blob HMAC, or hash chain on the structured backends: SQL, etcd) | sign / revoke |
 | `hmac_key` | Integrity key for `inventory_hmac` | first run |
 | `csr/<subject>` | Pending certificate signing request (PEM), per subject | CSR submission |
 | `cert/<subject>` | Issued certificate (PEM), per subject | sign |

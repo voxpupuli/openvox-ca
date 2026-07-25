@@ -158,11 +158,18 @@ etcd_tls_key_file:  /etc/puppet-ca/etcd-client-key.pem
   decomposed inventory entries instead of reading and parsing every stored
   certificate, with the same rebuildable-projection semantics as the SQL
   backends — after migrating from another backend the display fields are
-  backfilled automatically on the next server start.
+  backfilled automatically on the next server start. Note the first start
+  after an upgrade or migration therefore performs both the inventory
+  conversion and a per-certificate projection backfill before serving; on a
+  large fleet expect it to take a while (progress is logged).
 - **Bulk inventory rewrites are batched.** Imports and prunes larger than one
-  etcd transaction are split into multiple transactions, each of which leaves
-  the inventory and its integrity head consistent; batch sizes stay well under
-  etcd's default `--max-txn-ops` (128), so no cluster tuning is needed.
+  etcd transaction are split into multiple transactions; batch sizes stay
+  well under etcd's default `--max-txn-ops` (128), so no cluster tuning is
+  needed. Every *prune* transaction leaves the inventory and its integrity
+  head consistent, and a single cleanup pass bounds how many entries it
+  removes so a large backlog drains over several runs rather than stalling
+  signing; an in-progress *conversion* is instead covered by the
+  blob-stays-authoritative resume behaviour described above.
 
 ---
 

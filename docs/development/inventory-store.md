@@ -215,39 +215,56 @@ Rules that keep the decomposed structure coherent:
 - **Appends are O(1)** — six puts guarded on the fence plus
   `CreateRevision(by-serial/<serial>) == 0`, which makes duplicate-serial
   rejection atomic cluster-wide (previously a SQL-only guarantee).
-- **Bulk rewrites are batched but every commit is consistent.** Prunes and
-  imports larger than one transaction (bounded well under etcd's default
-  `--max-txn-ops` of 128) are split into batches, and each batch writes a head
-  covering exactly the entries that remain after it. A concurrent verifier
-  never sees entries and head out of sync, and a crash mid-prune leaves a
-  valid, partially-pruned inventory rather than a spurious tamper alarm.
-  Because a batched prune can partially complete, `PruneEntries` returns every
-  entry actually removed — accumulated across batches and retries, even
-  alongside an error — so `CleanupExpiredCerts` can always finish the CRL and
-  blob cleanup for what was deleted (see the contract in `backend.go`). Prune
-  batches run newest-first, which keeps the intermediate heads cheap: each is
-  a cached prefix fold over the untouched older entries resumed across the
-  survivor tail, rather than a full refold per batch.
+- **Bulk rewrites are batched; prune commits are individually consistent.**
+  Prunes and imports larger than one transaction (bounded well under etcd's
+  default `--max-txn-ops` of 128) are split into batches. Each *prune* batch
+  writes a head covering exactly the entries that remain after it, so a
+  concurrent verifier never sees entries and head out of sync and a crash
+  mid-prune leaves a valid, partially-pruned inventory rather than a spurious
+  tamper alarm. *Import* batches carry no head at all — the head is left for
+  `RebuildInventoryHMAC` (migration) or dropped in the final commit (legacy
+  conversion) — which is exactly why the legacy blob stays authoritative
+  until the import's final commit and why the marker-guard/resume machinery
+  exists. Because a batched prune can partially complete, `PruneEntries`
+  returns every entry actually removed — accumulated across batches and
+  retries, even alongside an error — so `CleanupExpiredCerts` can always
+  finish the CRL and blob cleanup for what was deleted (see the contract in
+  `backend.go`). Prune batches run newest-first, which keeps the intermediate
+  heads cheap (each is a cached prefix fold over the untouched older entries
+  resumed across the survivor tail), and one call removes at most a bounded
+  number of batches so a huge backlog cannot blow the caller's lock budget —
+  deferred matches stay present and consistent for later runs.
 - **Legacy blobs are decomposed in place.** `EnsureReady` detects a non-empty
   pre-decomposition `inventory/data` blob, takes a distributed lock
   (`inventory-decompose`), verifies the blob against its stored whole-blob
-  HMAC (the key is a backend blob, so it is available; a mismatch fails
-  startup with `ErrInventoryTampered` exactly as the old code would have),
-  imports the lines into entry keys, and empties the marker only in the final
-  commit. The verified HMAC is deleted in the same import — it is not a chain
-  head, so it cannot carry over — and the next verification re-baselines from
-  the imported entries; only the import window itself is uncovered. Because
-  the blob stays authoritative until that final commit, an interrupted import
-  is detected on the next start (the partial entries are the import-written
-  prefix of the blob) and redone from the intact blob; entries that are *not*
-  such a prefix mean a mixed-version cluster wrote both forms, which is
-  refused with an explicit error rather than guessed at. Duplicate serials in
-  the legacy blob — possible, since blob backends never had a cluster-wide
-  uniqueness guarantee — are imported verbatim with a warning, with the
-  by-serial index pointing at each serial's newest bearer. All replicas must
-  still upgrade together: an old-version writer appending to the blob
-  mid-import is detected via the marker guard and the import restarts, but
-  the race only closes once the old writers are gone.
+  HMAC (the key is a backend blob, so it is available), imports the lines
+  into entry keys, and empties the marker only in the final commit.
+  Verification is fail-closed: a mismatch — or a stored HMAC that cannot be
+  verified because the key is missing or malformed — fails startup with
+  `ErrInventoryTampered`, exactly as the pre-decomposition code would have;
+  the operator acknowledges a lost baseline by deleting the stored
+  `inventory/hmac` key. The verified HMAC is deleted in the same import — it
+  is not a chain head, so it cannot carry over — and the next verification
+  re-baselines from the imported entries; only the import window itself is
+  uncovered. A CA upgraded while its inventory is *empty* has no import to
+  drop the head as part of, so `EnsureReady` handles that case separately:
+  when zero entries exist and the stored head verifies as the whole-blob MAC
+  of an empty inventory, it is deleted so the first verification re-baselines
+  cleanly (any other head over zero entries is left for verification to
+  flag). Because the blob stays authoritative until the import's final
+  commit, an interrupted import is detected on the next start (the partial
+  entries are the import-written prefix of the blob) and redone from the
+  intact blob; entries that are *not* such a prefix mean a mixed-version
+  cluster wrote both forms, which is refused with an explicit error rather
+  than guessed at. Duplicate serials in the legacy blob — possible, since
+  blob backends never had a cluster-wide uniqueness guarantee — are imported
+  verbatim with a warning; their by-serial keys carry an ambiguity sentinel
+  that keeps the serial reserved against reissue but makes certificate-index
+  writes for it explicit no-ops, since a one-to-one index cannot say which
+  bearer such a write is meant for. All replicas must still upgrade together:
+  an old-version writer appending to the blob mid-import is detected via the
+  marker guard and the import restarts, but the race only closes once the old
+  writers are gone.
 - **Certificate-index writes stay off the chain.** `SetRevoked` /
   `ClearRevoked` / `SetProjection` rewrite a single entry key guarded on its
   own ModRevision (the mutable fields are not chain input), so index repair
