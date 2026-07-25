@@ -39,6 +39,27 @@ import (
 	"github.com/voxpupuli/openvox-ca/internal/testutil"
 )
 
+// unknownStateBackend wraps a real structured backend, rewriting one
+// subject's Statuses record to CertStateUnknown — the value the etcd backend
+// reports for serials its one-to-one by-serial index cannot address
+// (duplicates imported from a legacy blob). Everything else delegates
+// unchanged.
+type unknownStateBackend struct {
+	*storage.SQLBackend
+	subject string
+}
+
+func (b *unknownStateBackend) Statuses(ctx context.Context, stateFilter string) ([]storage.CertRecord, error) {
+	recs, err := b.SQLBackend.Statuses(ctx, stateFilter)
+	for i := range recs {
+		if recs[i].Subject == b.subject {
+			recs[i].State = storage.CertStateUnknown
+			recs[i].RevokedAt = nil
+		}
+	}
+	return recs, err
+}
+
 // generateCSRWithSANs builds a CSR carrying explicit DNS subject alternative
 // names, which the signing path copies onto the issued certificate and the
 // certificate index projects into dns_alt_names.
@@ -254,6 +275,54 @@ var _ = Describe("Certificate statuses via the certificate index", func() {
 		requested := getStatuses("?state=requested")
 		Expect(requested).To(HaveLen(1))
 		Expect(requested[0].Name).To(Equal("idx-pending"))
+	})
+
+	It("derives an unknown-state record's state from the CRL", func() {
+		// The etcd backend reports CertStateUnknown for serials it cannot
+		// address one-to-one (duplicated legacy serials): index writes for
+		// them are refused, so the record's stored state is meaningless and
+		// the handler must consult the signed CRL instead. Simulate that with
+		// a backend whose Statuses rewrites one subject's state to unknown.
+		dir := GinkgoT().TempDir()
+		inner, err := storage.NewSQLBackend(storage.SQLConfig{
+			Dialect: storage.SQLitePure,
+			DSN:     "file:" + filepath.Join(dir, "unknown.db"),
+		})
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _ = inner.Close() })
+		store = storage.NewWithBackend(&unknownStateBackend{SQLBackend: inner, subject: "idx-ambig"}, dir)
+		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		Expect(store.EnsureDirs(ctx)).To(Succeed())
+		Expect(store.SaveCAKey(ctx, cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(ctx, cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(ctx, cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial(ctx, "0001")).To(Succeed())
+		Expect(store.TouchInventory(ctx)).To(Succeed())
+		Expect(myCA.Init(ctx)).To(Succeed())
+		mux = api.New(myCA).Routes()
+
+		submitAndSign("idx-ambig", generateCSRWithSANs("idx-ambig", []string{"idx-ambig"}))
+		submitAndSign("idx-plainly-signed", generateCSRWithSANs("idx-plainly-signed", []string{"idx-plainly-signed"}))
+		Expect(myCA.Revoke(ctx, "idx-ambig")).To(Succeed())
+
+		// The record for idx-ambig reads as unknown from the index, but the
+		// CRL says revoked — and the CRL must win.
+		all := getStatuses("")
+		states := map[string]string{}
+		for _, s := range all {
+			states[s.Name] = s.State
+		}
+		Expect(states).To(Equal(map[string]string{
+			"idx-ambig":          "revoked",
+			"idx-plainly-signed": "signed",
+		}), "unknown must resolve against the CRL, never leak through as a state")
+
+		revoked := getStatuses("?state=revoked")
+		Expect(revoked).To(HaveLen(1))
+		Expect(revoked[0].Name).To(Equal("idx-ambig"))
+		signed := getStatuses("?state=signed")
+		Expect(signed).To(HaveLen(1))
+		Expect(signed[0].Name).To(Equal("idx-plainly-signed"))
 	})
 
 	It("serialises an empty index as [] and projects a promoted CN SAN", func() {
