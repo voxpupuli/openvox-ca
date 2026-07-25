@@ -166,10 +166,23 @@ etcd_tls_key_file:  /etc/puppet-ca/etcd-client-key.pem
   etcd transaction are split into multiple transactions; batch sizes stay
   well under etcd's default `--max-txn-ops` (128), so no cluster tuning is
   needed. Every *prune* transaction leaves the inventory and its integrity
-  head consistent, and a single cleanup pass bounds how many entries it
-  removes so a large backlog drains over several runs rather than stalling
-  signing; an in-progress *conversion* is instead covered by the
-  blob-stays-authoritative resume behaviour described above.
+  head consistent, and a single expired-certificate cleanup pass removes at
+  most 900 entries so a large backlog drains over several runs rather than
+  stalling signing. At the default daily cleanup interval that is 900
+  entries/day: enabling cleanup for the first time on a large backlog, or
+  running a fleet whose expiry churn exceeds it, calls for a shorter
+  `expired_cert_cleanup_interval_sec` — the server logs a warning when a
+  single pass cannot keep up. An in-progress *conversion* is instead covered
+  by the blob-stays-authoritative resume behaviour described above.
+- **Legacy inventories with duplicate serial numbers** (possible, because the
+  pre-conversion blob had no cluster-wide uniqueness guarantee) are imported
+  verbatim with a startup warning naming the serials. The certificate index
+  cannot track per-serial state for them, so their status in
+  `certificate_statuses` output is derived from the signed CRL on each
+  request (always correct, slightly slower) and their display fields come
+  from the stored certificate. This resolves itself once the affected
+  certificates expire and are cleaned up, or when they are revoked and
+  reissued under fresh serials.
 
 ---
 

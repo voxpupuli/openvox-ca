@@ -261,7 +261,10 @@ Rules that keep the decomposed structure coherent:
   verbatim with a warning; their by-serial keys carry an ambiguity sentinel
   that keeps the serial reserved against reissue but makes certificate-index
   writes for it explicit no-ops, since a one-to-one index cannot say which
-  bearer such a write is meant for. All replicas must still upgrade together:
+  bearer such a write is meant for. `Statuses` reports those records with
+  `CertStateUnknown`, the statuses handler derives their real state from the
+  signed CRL, and the startup repair pass skips them (they can never
+  converge). All replicas must still upgrade together:
   an old-version writer appending to the blob mid-import is detected via the
   marker guard and the import restarts, but the race only closes once the old
   writers are gone.
