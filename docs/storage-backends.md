@@ -138,6 +138,19 @@ etcd_tls_key_file:  /etc/puppet-ca/etcd-client-key.pem
 - **`openvox-ca-ctl setup` / `import` work on the local filesystem only.** To
   import a CA into an etcd-backed cluster, run them against a scratch directory
   first, then point `openvox-ca` at a cadir containing the output.
+- **The certificate inventory is stored as one etcd key per issued
+  certificate**, not as a single ever-growing text blob, so signing cost does
+  not grow with the size of the inventory and duplicate serial numbers are
+  rejected atomically across all replicas (see
+  [the inventory internals](development/inventory-store.md)). On first start
+  after upgrading from a version that stored the inventory as a blob, the
+  backend converts it in place automatically. **Upgrade all replicas
+  together**: a not-yet-upgraded replica writing the old blob format while an
+  upgraded one serves the converted inventory is not supported.
+- **Bulk inventory rewrites are batched.** Imports and prunes larger than one
+  etcd transaction are split into multiple transactions, each of which leaves
+  the inventory and its integrity head consistent; batch sizes stay well under
+  etcd's default `--max-txn-ops` (128), so no cluster tuning is needed.
 
 ---
 
