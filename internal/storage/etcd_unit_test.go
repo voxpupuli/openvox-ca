@@ -133,3 +133,84 @@ var _ = Describe("EtcdBackendImplementsBackend", func() {
 		var _ Backend = (*EtcdBackend)(nil)
 	})
 })
+
+var _ = Describe("EtcdInventoryRecordCodec", func() {
+	It("round-trips a fully-populated record", func() {
+		revokedAt := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
+		rec := CertRecord{
+			InventoryEntry: InventoryEntry{
+				Serial:    "0001",
+				NotBefore: "2024-01-01T00:00:00UTC",
+				NotAfter:  "2029-01-01T00:00:00UTC",
+				Subject:   "node1.example.com",
+			},
+			CertProjection: CertProjection{
+				Fingerprint:    "aa:bb:cc",
+				DNSAltNames:    []string{"node1", "node1.example.com"},
+				AuthExtensions: map[string]string{"pp_auth_role": "webserver"},
+			},
+			State:     CertStateRevoked,
+			RevokedAt: &revokedAt,
+		}
+		data, err := encodeInventoryRecord(rec)
+		Expect(err).NotTo(HaveOccurred(), "encodeInventoryRecord")
+		got, err := decodeInventoryRecord(data)
+		Expect(err).NotTo(HaveOccurred(), "decodeInventoryRecord")
+		Expect(got).To(Equal(rec))
+	})
+
+	It("normalises a missing state to signed on both encode and decode", func() {
+		rec := CertRecord{InventoryEntry: InventoryEntry{
+			Serial: "0001", NotBefore: "nb", NotAfter: "na", Subject: "node1",
+		}}
+		data, err := encodeInventoryRecord(rec)
+		Expect(err).NotTo(HaveOccurred())
+		got, err := decodeInventoryRecord(data)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got.State).To(Equal(CertStateSigned), "encoded state defaults to signed")
+
+		// A record written without a state field (e.g. by hand) decodes as
+		// signed too, mirroring the SQL row decoder.
+		got, err = decodeInventoryRecord([]byte(`{"serial":"0002","subject":"node2"}`))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got.State).To(Equal(CertStateSigned))
+	})
+
+	It("rejects an undecodable record outright", func() {
+		_, err := decodeInventoryRecord([]byte("{not-json"))
+		Expect(err).To(HaveOccurred(), "corrupt records must fail loudly: the whole record is one JSON value, so there are no canonical columns to salvage")
+	})
+})
+
+var _ = Describe("EtcdInventoryEntryKeys", func() {
+	It("zero-pads sequence numbers so lexical order equals issuance order", func() {
+		b := &EtcdBackend{prefix: "/puppet-ca"}
+		Expect(b.entryPhys(1)).To(Equal("/puppet-ca/inventory/entries/00000000000000000001"))
+		Expect(b.entryPhys(9) < b.entryPhys(10)).To(BeTrue(), "9 must sort before 10")
+		Expect(b.entryPhys(99) < b.entryPhys(100)).To(BeTrue(), "99 must sort before 100")
+	})
+})
+
+var _ = Describe("ParseInventoryRecords", func() {
+	It("parses lines, skipping blanks, and preserves order", func() {
+		recs, err := parseInventoryRecords([]byte(
+			"0001 nb1 na1 /node1\n\n0002 nb2 na2 /node2\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(recs).To(HaveLen(2))
+		Expect(recs[0].Serial).To(Equal("0001"))
+		Expect(recs[1].Subject).To(Equal("node2"))
+		Expect(recs[0].State).To(Equal(CertStateSigned))
+	})
+
+	It("rejects malformed lines instead of dropping them", func() {
+		_, err := parseInventoryRecords([]byte("too few fields\n"))
+		Expect(err).To(HaveOccurred())
+	})
+
+	It("flags duplicate serials via rejectDuplicateSerials", func() {
+		recs, err := parseInventoryRecords([]byte(
+			"0001 nb1 na1 /node1\n0001 nb2 na2 /node2\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(rejectDuplicateSerials(recs)).To(MatchError(ErrDuplicateSerial))
+	})
+})
