@@ -221,15 +221,33 @@ Rules that keep the decomposed structure coherent:
   covering exactly the entries that remain after it. A concurrent verifier
   never sees entries and head out of sync, and a crash mid-prune leaves a
   valid, partially-pruned inventory rather than a spurious tamper alarm.
+  Because a batched prune can partially complete, `PruneEntries` returns every
+  entry actually removed — accumulated across batches and retries, even
+  alongside an error — so `CleanupExpiredCerts` can always finish the CRL and
+  blob cleanup for what was deleted (see the contract in `backend.go`). Prune
+  batches run newest-first, which keeps the intermediate heads cheap: each is
+  a cached prefix fold over the untouched older entries resumed across the
+  survivor tail, rather than a full refold per batch.
 - **Legacy blobs are decomposed in place.** `EnsureReady` detects a non-empty
-  pre-decomposition `inventory/data` blob, takes a distributed lock, imports
-  the lines into entry keys, and empties the marker. The stored whole-blob
-  HMAC is deleted in the same import: it is not a chain head and the backend
-  does not hold the key to translate it, so the next verification re-baselines
-  from the imported entries. Tamper detection therefore does not cover the
-  decomposition window itself — and all replicas must upgrade together, since
-  an old-version writer appending to the blob mid-import is detected and
-  retried, but the race only closes once the old writers are gone.
+  pre-decomposition `inventory/data` blob, takes a distributed lock
+  (`inventory-decompose`), verifies the blob against its stored whole-blob
+  HMAC (the key is a backend blob, so it is available; a mismatch fails
+  startup with `ErrInventoryTampered` exactly as the old code would have),
+  imports the lines into entry keys, and empties the marker only in the final
+  commit. The verified HMAC is deleted in the same import — it is not a chain
+  head, so it cannot carry over — and the next verification re-baselines from
+  the imported entries; only the import window itself is uncovered. Because
+  the blob stays authoritative until that final commit, an interrupted import
+  is detected on the next start (the partial entries are the import-written
+  prefix of the blob) and redone from the intact blob; entries that are *not*
+  such a prefix mean a mixed-version cluster wrote both forms, which is
+  refused with an explicit error rather than guessed at. Duplicate serials in
+  the legacy blob — possible, since blob backends never had a cluster-wide
+  uniqueness guarantee — are imported verbatim with a warning, with the
+  by-serial index pointing at each serial's newest bearer. All replicas must
+  still upgrade together: an old-version writer appending to the blob
+  mid-import is detected via the marker guard and the import restarts, but
+  the race only closes once the old writers are gone.
 - **Certificate-index writes stay off the chain.** `SetRevoked` /
   `ClearRevoked` / `SetProjection` rewrite a single entry key guarded on its
   own ModRevision (the mutable fields are not chain input), so index repair
@@ -274,3 +292,9 @@ Each phase is a separate commit.
    backends: latest-wins lookups, chain tamper detection (modify / insert /
    delete), byte-identical render, and a filesystem ⇄ sqlite migration
    round-trip that verifies integrity on both sides.
+5. **Certificate index** (issue #137, a later extension). Extend the SQL
+   inventory table with the projection/state columns, define `CertIndex`,
+   serve `certificate_statuses` from it, and add the startup repair pass.
+6. **etcd decomposition** (issue #138, a later extension). Implement
+   `InventoryStore` and `CertIndex` on the etcd backend with per-entry keys,
+   including the in-place legacy blob conversion described above.

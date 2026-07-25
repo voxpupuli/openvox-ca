@@ -144,9 +144,21 @@ etcd_tls_key_file:  /etc/puppet-ca/etcd-client-key.pem
   rejected atomically across all replicas (see
   [the inventory internals](development/inventory-store.md)). On first start
   after upgrading from a version that stored the inventory as a blob, the
-  backend converts it in place automatically. **Upgrade all replicas
-  together**: a not-yet-upgraded replica writing the old blob format while an
-  upgraded one serves the converted inventory is not supported.
+  backend converts it in place automatically: the blob is first verified
+  against its stored HMAC (a mismatch fails startup, exactly as it would have
+  before the upgrade), and after the conversion the integrity value is
+  re-established over the converted entries — the conversion window itself is
+  the one moment tamper detection does not cover. An interrupted conversion
+  resumes safely on the next start. **Upgrade all replicas together**: a
+  not-yet-upgraded replica writing the old blob format while an upgraded one
+  serves the converted inventory is not supported and is refused with an
+  explicit error when detected.
+- **The etcd backend also maintains the certificate index**: `GET
+  /certificate_statuses` (`puppetserver ca list`) is answered from the
+  decomposed inventory entries instead of reading and parsing every stored
+  certificate, with the same rebuildable-projection semantics as the SQL
+  backends — after migrating from another backend the display fields are
+  backfilled automatically on the next server start.
 - **Bulk inventory rewrites are batched.** Imports and prunes larger than one
   etcd transaction are split into multiple transactions, each of which leaves
   the inventory and its integrity head consistent; batch sizes stay well under
@@ -276,12 +288,12 @@ backend creates and upgrades its own tables automatically on startup, so
 multiple replicas can start against the same database safely. `cadir` is still
 required for per-subject keys and ancillary local state.
 
-SQL backends additionally maintain a certificate index: `GET
-/certificate_statuses` (`puppetserver ca list`) is answered from indexed
-columns instead of reading and parsing every stored certificate, which matters
-for large fleets. The index is a rebuildable projection of the stored
-certificates and the CRL — after migrating from another backend it is
-backfilled automatically on the next server start.
+SQL backends additionally maintain a certificate index (as does
+[etcd](#etcd-backend)): `GET /certificate_statuses` (`puppetserver ca list`)
+is answered from indexed columns instead of reading and parsing every stored
+certificate, which matters for large fleets. The index is a rebuildable
+projection of the stored certificates and the CRL — after migrating from
+another backend it is backfilled automatically on the next server start.
 
 ### SQLite backend
 
