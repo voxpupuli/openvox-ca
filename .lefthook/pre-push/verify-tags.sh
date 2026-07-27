@@ -1,7 +1,8 @@
 #!/bin/sh
-# Local mirror of the verify-release-tag gate's version check: refuse to push
+# Local mirror of the verify-release-tag gate's version checks: refuse to push
 # a v* tag whose name does not equal "v" + the internal/version constant at
-# the tagged commit. The server-side gate would refuse it anyway, but only
+# the tagged commit, or whose Helm chart version/appVersion disagree with it.
+# The server-side gate would refuse it anyway, but only
 # after the tag is on the remote (delete/fix/re-tag); this catches it before
 # the push. The CI-green half of the gate stays server-side only — it needs
 # the network, which a push hook should not.
@@ -20,6 +21,15 @@ while read -r local_ref local_sha remote_ref remote_sha; do
 		sed -n 's/^const Version = "\(.*\)"$/\1/p')
 	if [ "$have" != "$want" ]; then
 		echo "Refusing to push tag $tag: internal/version at the tagged commit says \"$have\", not \"$want\"."
+		echo "Land the version bump first (mage release:prepare $want) and tag the merged commit."
+		status=1
+	fi
+	chart=$(git show "$commit:charts/openvox-ca/Chart.yaml" 2>/dev/null)
+	chart_version=$(printf '%s\n' "$chart" | sed -n 's/^version: \(.*\)$/\1/p')
+	chart_app_version=$(printf '%s\n' "$chart" | sed -n 's/^appVersion: "\(.*\)"$/\1/p')
+	if [ "$chart_version" != "$want" ] || [ "$chart_app_version" != "$want" ]; then
+		echo "Refusing to push tag $tag: the Helm chart at the tagged commit says" \
+			"version=\"$chart_version\" appVersion=\"$chart_app_version\", not \"$want\"."
 		echo "Land the version bump first (mage release:prepare $want) and tag the merged commit."
 		status=1
 	fi

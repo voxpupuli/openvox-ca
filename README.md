@@ -46,6 +46,7 @@ wire-compatible with your existing Puppet/OpenVox fleet.
 - **Health probes:** `/healthz/live`, `/healthz/ready`, and `/healthz/startup` endpoints for Kubernetes-style liveness/readiness checks
 - **Prometheus exporter:** optional `/metrics` listener (`--metrics-listen`) exposing Go runtime/process and HTTP metrics plus CA certificate, CRL, and per–leaf-certificate expiry and issuance-status series; ships with a [Jsonnet alerting mixin](mixin/). See [metrics & monitoring](docs/metrics.md)
 - **Kubernetes export (opt-in):** publish the CA certificate and/or CRL into any number of Kubernetes Secrets and ConfigMaps via in-cluster server-side apply, with configurable names, namespaces, data keys, labels, annotations, and Secret `type`; CRL-bearing objects are refreshed whenever the CRL changes. See [Kubernetes export](docs/kubernetes-export.md)
+- **Helm chart:** an OCI-published chart, versioned in lockstep with the server, covering dual-stack Services, TLS-passthrough Ingress and Gateway API routes, an opt-in ServiceMonitor and network policies; the server's own settings pass straight through to its config file, so the whole configuration reference is reachable. See [deploying with Helm](docs/helm-chart.md)
 - **Graceful shutdown:** `SIGTERM`/`SIGINT` drains in-flight requests with a configurable window (25s default) before exiting; deferred storage and signer cleanup always runs
 - **FIPS-compatible:** the core CA uses the standard library only (`crypto/x509`, `net/http`); no CGO by default; FIPS build available via `GOEXPERIMENT=boringcrypto` (the optional Kubernetes export adds the `client-go` dependency)
 - **`openvox-ca-ctl`:** operator CLI matching `puppetserver ca` subcommands. See the [operator CLI reference](docs/operator-cli.md)
@@ -63,6 +64,21 @@ $ docker pull ghcr.io/voxpupuli/openvox-ca:latest
 
 See [container images](docs/container-images.md) for the available tags and a
 `docker run` example.
+
+### Kubernetes (Helm)
+
+A chart is published as an OCI artefact for every release, versioned in lockstep
+with the server:
+
+```console
+$ helm install openvox-ca \
+    oci://ghcr.io/voxpupuli/openvox-ca-charts/openvox-ca \
+    --version 0.9.0 \
+    --namespace puppet --create-namespace
+```
+
+See [deploying with Helm](docs/helm-chart.md) for the guide and the
+[chart README](charts/openvox-ca/README.md) for the values reference.
 
 ### Building from source
 
@@ -116,6 +132,7 @@ The complete flag, environment-variable, and config-file reference is in
 | [Storage backends](docs/storage-backends.md) | filesystem, SQLite, PostgreSQL, MySQL, etcd, Redis/Valkey; migrating between them |
 | [CA key security](docs/ca-key-security.md) | Key encryption at rest, key-custody options, PKCS#11 plans, destructive-op monitoring |
 | [OpenBao Transit-engine CA key](docs/openbao-transit.md) | Delegating CA key custody to OpenBao |
+| [Deploying with Helm](docs/helm-chart.md) | The `openvox-ca` chart: installation, TLS passthrough, ingress and Gateway API, monitoring |
 | [Kubernetes export](docs/kubernetes-export.md) | Publishing the CA cert/CRL into Secrets and ConfigMaps |
 | [Metrics & monitoring](docs/metrics.md) | The Prometheus exporter and the alerting [mixin](mixin/) |
 | [Container images](docs/container-images.md) | Pulling and running the published images |

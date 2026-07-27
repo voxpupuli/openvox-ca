@@ -1,9 +1,10 @@
 name: Verify release tag
 description: >
-  Gate for v* tag builds, shared by the Release and Container images
-  workflows. Verifies that the tag equals "v" + the internal/version Version
-  constant (so a release can only be published once the version-bump change
-  has landed on the tagged commit), and that the tagged commit has a passing
+  Gate for v* tag builds, shared by the Release, Container images and Helm
+  chart workflows. Verifies that the tag equals "v" + the internal/version
+  Version constant (so a release can only be published once the version-bump
+  change has landed on the tagged commit), that the Helm chart's version and
+  appVersion match it, and that the tagged commit has a passing
   "CI success" check run and is reachable from the default branch (so a
   commit that never went green on main cannot be released). Requires the
   repository to be checked out and the calling workflow to grant
@@ -28,6 +29,30 @@ runs:
           exit 1
         fi
         echo "Tag $TAG matches internal/version"
+
+    - name: Verify the Helm chart version matches
+      shell: bash
+      env:
+        TAG: ${{ github.ref_name }}
+      run: |
+        # The chart is released in lockstep with the binaries: its version is
+        # the release version, and its appVersion selects the image tag
+        # published for that same release. A chart left at the previous number
+        # would either overwrite a published chart or ship pointing at an image
+        # that does not exist.
+        want="${TAG#v}"
+        chart=charts/openvox-ca/Chart.yaml
+        version="$(sed -n 's/^version: \(.*\)$/\1/p' "$chart")"
+        app_version="$(sed -n 's/^appVersion: "\(.*\)"$/\1/p' "$chart")"
+        if [ -z "$version" ] || [ -z "$app_version" ]; then
+          echo "::error::Could not parse version and appVersion from $chart (appVersion must be double-quoted). Parsed: version=\"$version\" appVersion=\"$app_version\""
+          exit 1
+        fi
+        if [ "$version" != "$want" ] || [ "$app_version" != "$want" ]; then
+          echo "::error::$chart does not match tag $TAG (version=\"$version\" appVersion=\"$app_version\"). Land a version-bump change (mage release:prepare $want), then re-tag."
+          exit 1
+        fi
+        echo "Chart version and appVersion match $TAG"
 
     - name: Verify tagged commit passed CI on the default branch
       shell: bash

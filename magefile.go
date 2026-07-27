@@ -34,6 +34,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -59,6 +60,7 @@ type Build mg.Namespace   // build:all  build:fips  build:dist  build:distVarian
 type Test mg.Namespace    // test:unit  test:integcompose  test:integcomposefips  test:loadcompose  test:bench  test:puppet  test:puppetfips  test:migration  test:backendsRedis  test:backendsEtcd
 type Dev mg.Namespace     // dev:check  dev:tidy    dev:clean  dev:container
 type Release mg.Namespace // release:prepare
+type Chart mg.Namespace   // chart:version  chart:lint  chart:validate  chart:package
 
 // -- Helpers ------------------------------------------------------------------─
 
@@ -401,7 +403,8 @@ func repoSlug(remote string) (string, error) {
 
 // Prepare opens the version-bump pull request that must land before a release
 // can be tagged: it creates a release/vVERSION branch off the remote's main,
-// sets the internal/version constant, pushes the branch, and opens the PR
+// sets the internal/version constant and the Helm chart's version and
+// appVersion to match, pushes the branch, and opens the PR
 // with `gh` — including a preview of the auto-generated release notes for
 // release versions (skipped for -dev bumps, which are the post-release step
 // returning main to a development version).
@@ -449,6 +452,25 @@ func (Release) Prepare(ver string) error {
 		return err
 	}
 
+	// The Helm chart releases in lockstep, so its version and appVersion move
+	// with the constant. chart:version (and the tag gates) refuse a mismatch.
+	chartFile := filepath.Join(chartDir, "Chart.yaml")
+	chartSrc, err := os.ReadFile(chartFile)
+	if err != nil {
+		return err
+	}
+	if !chartVersionRe.Match(chartSrc) {
+		return fmt.Errorf("could not find the version field in %s", chartFile)
+	}
+	if !chartAppVersionRe.Match(chartSrc) {
+		return fmt.Errorf("could not find the appVersion field in %s", chartFile)
+	}
+	chartSrc = chartVersionRe.ReplaceAll(chartSrc, fmt.Appendf(nil, "version: %s", ver))
+	chartSrc = chartAppVersionRe.ReplaceAll(chartSrc, fmt.Appendf(nil, "appVersion: %q", ver))
+	if err := os.WriteFile(chartFile, chartSrc, 0644); err != nil {
+		return err
+	}
+
 	isDev := strings.HasSuffix(ver, "-dev")
 	title := "Release v" + ver
 	body := fmt.Sprintf(`Sets the release version to %s. Once this merges, cut the release by pushing the tag (see docs/development/releasing.md):
@@ -462,7 +484,7 @@ func (Release) Prepare(ver string) error {
 		body = fmt.Sprintf("Post-release bump so builds from main identify as %s rather than as the release.\n", ver)
 	}
 
-	if err := sh.RunV("git", "add", verFile); err != nil {
+	if err := sh.RunV("git", "add", verFile, chartFile); err != nil {
 		return err
 	}
 	if err := sh.RunV("git", "commit", "-m", title); err != nil {
@@ -487,6 +509,719 @@ func (Release) Prepare(ver string) error {
 
 	return sh.RunV("gh", "pr", "create", "--repo", slug, "--base", "main",
 		"--head", branch, "--title", title, "--body", body)
+}
+
+// -- chart:* -------------------------------------------------------------------
+
+// chartDir is the Helm chart's source directory. The chart ships in lockstep
+// with the binaries: both its version and its appVersion track the
+// internal/version constant, and chart:version is the gate that says so.
+const chartDir = "charts/openvox-ca"
+
+// kubeconformVersion is the Kubernetes API version the rendered manifests are
+// validated against. Bumping it is how the chart picks up newly-GA fields.
+const kubeconformVersion = "1.31.0"
+
+// kubeconformFloorVersion is the chart's declared kubeVersion floor
+// (charts/openvox-ca/Chart.yaml). The minimal fixture — the chart's defaults —
+// is validated against it as well, so the floor is a checked promise rather
+// than a claim. Fixtures that opt into newer fields
+// (unhealthyPodEvictionPolicy is 1.27+, trafficDistribution 1.31+) are only
+// checked at kubeconformVersion; both values carry that note, as does the
+// chart README's requirements section.
+const kubeconformFloorVersion = "1.26.0"
+
+// chartFloorFixture is the fixture that stands in for the chart's defaults and
+// is therefore the one held to the floor. Named here rather than inline so
+// that renaming it fails loudly instead of quietly skipping the check.
+const chartFloorFixture = "minimal-values"
+
+// crdSchemaLocation points kubeconform at community-maintained JSON schemas
+// for the CRDs the chart can emit (ServiceMonitor, HTTPRoute, TLSRoute), which
+// are absent from the core Kubernetes schema set.
+//
+// Pinned to a commit rather than a branch: this feeds a required check, and
+// tracking someone else's main means an upstream reorganisation can turn CI
+// red with no change of ours. It is a commit and not a tag because the
+// catalogue's newest tag (v0.0.12) predates its Gateway API schemas, so a
+// tagged pin cannot validate the routes the chart emits. Refresh it by hand
+// when a CRD the chart uses gains a new version; Renovate has no datasource
+// for a raw.githubusercontent path.
+const crdSchemaCommit = "dcaa31aa03082906c0325a7a0ee7d5191e9cbe24"
+
+const crdSchemaLocation = "https://raw.githubusercontent.com/datreeio/CRDs-catalog/" +
+	crdSchemaCommit + "/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json"
+
+var (
+	chartVersionRe    = regexp.MustCompile(`(?m)^version: (.+)$`)
+	chartAppVersionRe = regexp.MustCompile(`(?m)^appVersion: "(.+)"$`)
+)
+
+// chartVersions parses the version and appVersion fields out of Chart.yaml.
+// Parsed textually, like releaseVersion, so that the check does not depend on
+// a YAML library or on the chart being renderable.
+func chartVersions() (version, appVersion string, err error) {
+	path := filepath.Join(chartDir, "Chart.yaml")
+	src, err := os.ReadFile(path)
+	if err != nil {
+		return "", "", err
+	}
+	v := chartVersionRe.FindSubmatch(src)
+	if v == nil {
+		return "", "", fmt.Errorf("could not find the version field in %s", path)
+	}
+	a := chartAppVersionRe.FindSubmatch(src)
+	if a == nil {
+		return "", "", fmt.Errorf("could not find the appVersion field in %s", path)
+	}
+	return strings.TrimSpace(string(v[1])), strings.TrimSpace(string(a[1])), nil
+}
+
+// chartValuesFiles returns the fixture values files under the chart's ci/
+// directory. Each is a distinct rendering of the chart that chart:lint and
+// chart:validate exercise in full. Finding none is an error rather than a
+// no-op: an empty fixture set would silently turn both targets into
+// rubber stamps.
+//
+// Both YAML extensions are collected: globbing only *.yaml would skip a *.yml
+// fixture in silence, which is that same rubber stamp one file at a time.
+func chartValuesFiles() ([]string, error) {
+	var files []string
+	for _, ext := range []string{"*.yaml", "*.yml"} {
+		matched, err := filepath.Glob(filepath.Join(chartDir, "ci", ext))
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, matched...)
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("no fixture values files found under %s", filepath.Join(chartDir, "ci"))
+	}
+	sort.Strings(files)
+	return files, nil
+}
+
+// requireChartTool resolves a tool the chart targets need, turning a missing
+// binary into an actionable error rather than an exec failure deep in a
+// pipeline.
+func requireChartTool(name, install string) error {
+	if _, err := exec.LookPath(name); err != nil {
+		return fmt.Errorf("%s not found on PATH; install it with:\n    %s", name, install)
+	}
+	return nil
+}
+
+// Version verifies that the chart's version and appVersion both equal the
+// internal/version constant, so the chart published for a release always
+// carries that release's number and defaults to that release's image.
+//
+// The same check runs in CI, in the shared verify-release-tag gate, and in the
+// pre-push hook.
+func (Chart) Version() error {
+	want, err := releaseVersion()
+	if err != nil {
+		return err
+	}
+	version, appVersion, err := chartVersions()
+	if err != nil {
+		return err
+	}
+	if version != want || appVersion != want {
+		return fmt.Errorf("%s/Chart.yaml is out of step with internal/version (%s): version=%s appVersion=%s\n"+
+			"Run 'mage release:prepare %s', or set both fields to %s by hand",
+			chartDir, want, version, appVersion, want, want)
+	}
+	fmt.Printf("Chart version and appVersion match internal/version (%s)\n", want)
+	return nil
+}
+
+// chartFixtureName is the label a fixture's rendering is filed under.
+func chartFixtureName(path string) string {
+	base := filepath.Base(path)
+	return strings.TrimSuffix(strings.TrimSuffix(base, ".yaml"), ".yml")
+}
+
+// Lint runs `helm lint` over the chart once per fixture, so a fixture that
+// trips the values schema or a precondition fails here rather than at install
+// time.
+//
+// There is deliberately no bare-defaults run: the chart's preconditions reject
+// an install with no TLS configuration, because the server would refuse to
+// start. ci/minimal-values.yaml is the defaults plus that one required
+// setting, and stands in for it.
+func (Chart) Lint() error {
+	if err := requireChartTool("helm", "https://helm.sh/docs/intro/install/"); err != nil {
+		return err
+	}
+	values, err := chartValuesFiles()
+	if err != nil {
+		return err
+	}
+
+	for _, f := range values {
+		fmt.Printf("Linting the chart with %s...\n", f)
+		if err := sh.RunV("helm", "lint", "--strict", chartDir, "-f", f); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Validate renders the chart with every fixture and checks the resulting
+// manifests against the published Kubernetes and CRD JSON schemas. This is
+// what catches a template emitting a field that does not exist, or emitting it
+// at the wrong nesting level — neither of which `helm lint` sees, because to
+// Helm the output is just YAML.
+//
+// Rendered manifests are kept in .test-output/chart/ for inspection.
+func (Chart) Validate() error {
+	mg.Deps(Chart.Lint)
+
+	if err := requireChartTool("kubeconform",
+		"go install github.com/yannh/kubeconform/cmd/kubeconform@v0.7.0"); err != nil {
+		return err
+	}
+	values, err := chartValuesFiles()
+	if err != nil {
+		return err
+	}
+
+	outDir := filepath.Join(".test-output", "chart")
+	if err := os.MkdirAll(outDir, 0755); err != nil {
+		return err
+	}
+
+	floorChecked := false
+	for _, f := range values {
+		name := chartFixtureName(f)
+
+		fmt.Printf("Rendering the chart with %s values...\n", name)
+		manifest, err := sh.Output("helm", "template", "openvox-ca", chartDir, "-f", f)
+		if err != nil {
+			return err
+		}
+		path := filepath.Join(outDir, name+".yaml")
+		if err := os.WriteFile(path, []byte(manifest+"\n"), 0644); err != nil {
+			return err
+		}
+
+		// The minimal fixture is the chart's defaults, so it must also hold at
+		// the kubeVersion floor Chart.yaml advertises. The others opt into
+		// fields newer than that on purpose.
+		targets := []string{kubeconformVersion}
+		if name == chartFloorFixture {
+			targets = append(targets, kubeconformFloorVersion)
+			floorChecked = true
+		}
+		for _, kubeVersion := range targets {
+			fmt.Printf("Validating %s against Kubernetes %s schemas...\n", path, kubeVersion)
+			if err := sh.RunV("kubeconform",
+				"-strict",
+				"-summary",
+				"-kubernetes-version", kubeVersion,
+				"-schema-location", "default",
+				"-schema-location", crdSchemaLocation,
+				path,
+			); err != nil {
+				return err
+			}
+		}
+	}
+	if !floorChecked {
+		return fmt.Errorf("no %s.yaml fixture found, so nothing was validated against the "+
+			"kubeVersion floor (%s) that %s/Chart.yaml advertises; renaming that fixture "+
+			"silently drops the check",
+			chartFloorFixture, kubeconformFloorVersion, chartDir)
+	}
+	return nil
+}
+
+// chartConfigChecksum renders the chart and returns the checksum/config value
+// it produced, so a case can assert that a *different* input yields a
+// different checksum rather than that the annotation merely exists.
+func chartConfigChecksum(sets ...string) string {
+	out, err := helmTemplate(sets)
+	if err != nil {
+		return "<render failed>"
+	}
+	m := regexp.MustCompile(`checksum/config: ([0-9a-f]{64})`).FindStringSubmatch(out)
+	if m == nil {
+		return "<no checksum rendered>"
+	}
+	return m[1]
+}
+
+// chartRenderCase is one assertion over a rendering of the chart: render with
+// these --set overrides, then require each `wants` string to appear in the
+// output and each `notWants` string to be absent.
+type chartRenderCase struct {
+	name string
+	sets []string
+	// notes renders the post-install notes as well as the manifests. `helm
+	// template` never evaluates NOTES.txt, and `helm install --dry-run`
+	// reaches for a cluster on Helm 3, so this renders the openvox-ca.notes
+	// template through a probe manifest instead — offline, on both majors.
+	notes    bool
+	wants    []string
+	notWants []string
+}
+
+// chartRejectCase is one assertion that the chart refuses a configuration:
+// render with these overrides and require the failure to mention `wantErr`.
+type chartRejectCase struct {
+	name string
+	sets []string
+	// valuesYAML supplies values a --set cannot express; helm's --set parser
+	// swallows backslash escapes, so a value containing a real newline has to
+	// come from a file.
+	valuesYAML string
+	wantErr    string
+}
+
+// renderWithAppVersion renders a throwaway copy of the chart whose appVersion
+// has been rewritten, so the -dev-to-edge rule can be asserted on both of its
+// branches whichever side of a release this tree happens to be on. Helm offers
+// no way to override .Chart.AppVersion from the command line, and asserting
+// only the current version's branch is what left a release-time landmine here
+// the first time round.
+func renderWithAppVersion(appVersion string, sets []string) (string, error) {
+	tmp, err := os.MkdirTemp("", "openvox-ca-chart")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(tmp)
+
+	dst := filepath.Join(tmp, "openvox-ca")
+	if err := sh.Run("cp", "-R", chartDir, dst); err != nil {
+		return "", err
+	}
+	chartFile := filepath.Join(dst, "Chart.yaml")
+	src, err := os.ReadFile(chartFile)
+	if err != nil {
+		return "", err
+	}
+	patched := chartAppVersionRe.ReplaceAll(src, fmt.Appendf(nil, "appVersion: %q", appVersion))
+	if err := os.WriteFile(chartFile, patched, 0644); err != nil {
+		return "", err
+	}
+
+	args := []string{"template", "openvox-ca", dst}
+	for _, s := range sets {
+		args = append(args, "--set", s)
+	}
+	var out bytes.Buffer
+	_, err = sh.Exec(nil, &out, &out, "helm", args...)
+	return out.String(), err
+}
+
+// helmTemplate renders the chart with --set overrides, returning stdout and
+// stderr combined. Both are needed: the rendered manifests arrive on stdout,
+// but a `fail` from a precondition — the thing the reject cases assert on —
+// only ever appears on stderr.
+func helmTemplate(sets []string) (string, error) {
+	return helmRender(false, sets, "")
+}
+
+// notesProbeTemplate renders the openvox-ca.notes template into a manifest, so
+// that `helm template` — which ignores NOTES.txt — surfaces it.
+const notesProbeTemplate = `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: notes-probe
+data:
+  notes: |
+{{ include "openvox-ca.notes" . | indent 4 }}
+`
+
+// helmRender renders the chart, optionally including the post-install notes,
+// and optionally with an extra values file.
+func helmRender(notes bool, sets []string, valuesYAML string) (string, error) {
+	dir := chartDir
+	if notes {
+		tmp, err := os.MkdirTemp("", "openvox-ca-notes")
+		if err != nil {
+			return "", err
+		}
+		defer os.RemoveAll(tmp)
+		dir = filepath.Join(tmp, "openvox-ca")
+		if err := sh.Run("cp", "-R", chartDir, dir); err != nil {
+			return "", err
+		}
+		probe := filepath.Join(dir, "templates", "zz-notes-probe.yaml")
+		if err := os.WriteFile(probe, []byte(notesProbeTemplate), 0644); err != nil {
+			return "", err
+		}
+	}
+
+	args := []string{"template", "openvox-ca", dir}
+	for _, s := range sets {
+		args = append(args, "--set", s)
+	}
+	if valuesYAML != "" {
+		f, err := os.CreateTemp("", "openvox-ca-values-*.yaml")
+		if err != nil {
+			return "", err
+		}
+		defer os.Remove(f.Name())
+		if _, err := f.WriteString(valuesYAML); err != nil {
+			f.Close()
+			return "", err
+		}
+		if err := f.Close(); err != nil {
+			return "", err
+		}
+		args = append(args, "-f", f.Name())
+	}
+	var out bytes.Buffer
+	_, err := sh.Exec(nil, &out, &out, "helm", args...)
+	return out.String(), err
+}
+
+// Test asserts what the chart actually renders, which neither `helm lint` nor
+// kubeconform can: both are satisfied by valid YAML carrying the wrong values.
+// These cases cover the logic a reader has to trust — image-tag resolution,
+// config merge precedence, probe scheme selection, which kind rbac.scope
+// picks — and the preconditions, which are only worth having if they really
+// fire.
+func (Chart) Test() error {
+	if err := requireChartTool("helm", "https://helm.sh/docs/intro/install/"); err != nil {
+		return err
+	}
+
+	// Every case starts from a renderable baseline: without TLS the chart
+	// refuses outright, which is itself asserted in the reject cases below.
+	tls := "tls.existingSecret=openvox-ca-tls"
+
+	// Derive the expected default tag from the chart's own appVersion rather
+	// than hard-coding today's. A literal here would assert the constant
+	// instead of the rule, and would fail on the very commit release:prepare
+	// produces — taking CI red and blocking the tag it was preparing.
+	_, appVersion, err := chartVersions()
+	if err != nil {
+		return err
+	}
+	defaultTag := appVersion
+	if strings.HasSuffix(appVersion, "-dev") {
+		defaultTag = "edge"
+	}
+	defaultTag += "-alpine"
+
+	renders := []chartRenderCase{
+		{
+			name:  "an unset tag resolves to the Alpine variant of the appVersion",
+			sets:  []string{tls, "image.tag=", "image.digest="},
+			wants: []string{"image: ghcr.io/voxpupuli/openvox-ca:" + defaultTag},
+		},
+		{
+			name: "an explicit tag is used verbatim, selecting the CentOS variant",
+			sets: []string{tls, "image.tag=0.9.0"},
+			// The whole point of the rule: no suffix is appended.
+			wants:    []string{"image: ghcr.io/voxpupuli/openvox-ca:0.9.0"},
+			notWants: []string{"0.9.0-alpine"},
+		},
+		{
+			name:     "a digest wins over a tag",
+			sets:     []string{tls, "image.tag=0.9.0", "image.digest=sha256:" + strings.Repeat("a", 64)},
+			wants:    []string{"image: ghcr.io/voxpupuli/openvox-ca@sha256:" + strings.Repeat("a", 64)},
+			notWants: []string{":0.9.0"},
+		},
+		{
+			name:  "config overrides what the tls block computes",
+			sets:  []string{tls, "config.tls_cert=/custom/cert.pem", "config.tls_key=/custom/key.pem"},
+			wants: []string{"tls_cert: /custom/cert.pem", "tls_key: /custom/key.pem"},
+			// The secret is still mounted; only the paths move.
+			notWants: []string{"tls_cert: /run/secrets/openvox-ca-tls/tls.crt"},
+		},
+		{
+			name:     "config.verbosity beats the verbosity value, and no flag outranks either",
+			sets:     []string{tls, "verbosity=1", "config.verbosity=2"},
+			wants:    []string{"verbosity: 2"},
+			notWants: []string{"--verbosity"},
+		},
+		{
+			name:  "probes follow the server: HTTPS when a certificate is configured",
+			sets:  []string{tls},
+			wants: []string{"scheme: HTTPS"},
+		},
+		{
+			name:     "probes follow the server: HTTP behind a terminating proxy",
+			sets:     []string{"config.no_tls_required=true"},
+			wants:    []string{"scheme: HTTP\n"},
+			notWants: []string{"scheme: HTTPS"},
+		},
+		{
+			name:     "rbac.scope selects the namespaced kinds by default",
+			sets:     []string{tls, "kubernetesExport.enabled=true", "kubernetesExport.targets[0].kind=Secret", "kubernetesExport.targets[0].metadata.name=t", "kubernetesExport.targets[0].cert=true"},
+			wants:    []string{"kind: Role\n", "kind: RoleBinding\n", "automountServiceAccountToken: true"},
+			notWants: []string{"kind: ClusterRole"},
+		},
+		{
+			name:     "rbac.scope: ClusterRole selects the cluster-scoped kinds",
+			sets:     []string{tls, "kubernetesExport.enabled=true", "kubernetesExport.rbac.scope=ClusterRole", "kubernetesExport.targets[0].kind=Secret", "kubernetesExport.targets[0].metadata.name=t", "kubernetesExport.targets[0].cert=true"},
+			wants:    []string{"kind: ClusterRole\n", "kind: ClusterRoleBinding\n"},
+			notWants: []string{"kind: Role\n", "kind: RoleBinding\n"},
+		},
+		{
+			name:     "the ServiceAccount token stays unmounted when nothing needs the API",
+			sets:     []string{tls},
+			wants:    []string{"automountServiceAccountToken: false"},
+			notWants: []string{"automountServiceAccountToken: true"},
+		},
+		{
+			name:  "OpenBao Kubernetes auth mounts the token too",
+			sets:  []string{tls, "config.ca_key_provider=openbao", "config.openbao.auth_method=kubernetes"},
+			wants: []string{"automountServiceAccountToken: true"},
+		},
+		{
+			name: "a config change rolls the pods",
+			// Asserting the annotation exists would pass on a constant, which
+			// would roll nothing. Assert instead that a different config does
+			// not produce the checksum this one does.
+			sets:     []string{tls},
+			wants:    []string{"checksum/config: "},
+			notWants: []string{chartConfigChecksum(tls, "config.crl_validity_days=7")},
+		},
+		{
+			name:     "an externally managed ConfigMap cannot be checksummed",
+			sets:     []string{tls, "existingConfigMap=mine"},
+			wants:    []string{"name: mine"},
+			notWants: []string{"checksum/config:"},
+		},
+		{
+			name:  "maxUnavailable: 0 survives the falsy-zero trap",
+			sets:  []string{tls, "podDisruptionBudget.enabled=true", "podDisruptionBudget.maxUnavailable=0"},
+			wants: []string{"maxUnavailable: 0"},
+			// minAvailable is the fallback that a plain `if` would have taken.
+			notWants: []string{"minAvailable:"},
+		},
+		{
+			name:     "clearing both emptyDir fields still yields a valid volume source",
+			sets:     []string{tls, "persistence.enabled=false", "emptyDir.medium=", "emptyDir.sizeLimit="},
+			wants:    []string{"emptyDir: {}"},
+			notWants: []string{"emptyDir:\n        - name"},
+		},
+		{
+			name:  "a deny-all network policy renders an empty list, not a null",
+			sets:  []string{tls, "networkPolicy.enabled=true", "networkPolicy.apiAccess=none"},
+			wants: []string{"ingress: []"},
+		},
+		{
+			name:  "export patch is held to the configured target names",
+			sets:  []string{tls, "kubernetesExport.enabled=true", "kubernetesExport.targets[0].kind=Secret", "kubernetesExport.targets[0].metadata.name=trust-bundle", "kubernetesExport.targets[0].cert=true"},
+			wants: []string{"resourceNames:\n      - trust-bundle"},
+		},
+		{
+			name: "export with no targets grants no patch at all",
+			// An empty resourceNames list is not a restriction — RBAC reads an
+			// absent list as every resource — so the rule has to be omitted.
+			sets:     []string{tls, "kubernetesExport.enabled=true"},
+			wants:    []string{`verbs: ["create"]`},
+			notWants: []string{`verbs: ["patch"]`},
+		},
+		{
+			name: "export config the chart cannot read grants patch unrestricted",
+			sets: []string{"existingConfigMap=mine", "kubernetesExport.enabled=true"},
+			// Unrestricted, because the chart cannot know the target names —
+			// but emitted as its own rule rather than an empty resourceNames
+			// list, which RBAC would read as "every resource" anyway.
+			wants:    []string{`verbs: ["patch"]`},
+			notWants: []string{"resourceNames:\n"},
+		},
+		{
+			name: "a falsy config value still overrides what the chart computed",
+			// mergeOverwrite consults isEmptyValue on the destination only, so
+			// false does win — asserted rather than assumed.
+			sets:     []string{tls, "caKeyPassphrase.existingSecret=pw", "config.encrypt_ca_key=false"},
+			wants:    []string{"encrypt_ca_key: false"},
+			notWants: []string{"encrypt_ca_key: true"},
+		},
+		{
+			name:     "retain: false drops the resource policy without leaving an empty annotations key",
+			sets:     []string{tls, "persistence.enabled=true", "persistence.retain=false"},
+			wants:    []string{"kind: PersistentVolumeClaim"},
+			notWants: []string{"helm.sh/resource-policy", "annotations:\nspec:"},
+		},
+		{
+			name:  "NOTES warns when nothing is granted admin access",
+			notes: true,
+			sets:  []string{tls},
+			wants: []string{"no puppetServers are listed"},
+		},
+		{
+			name:  "NOTES warns about a shared filesystem CA under autoscaling",
+			notes: true,
+			// The replica warning has to read the autoscaling floor, not just
+			// replicaCount.
+			sets:  []string{tls, "autoscaling.enabled=true", "autoscaling.minReplicas=3"},
+			wants: []string{"autoscaling starts at 3 replicas", "not safe to share between replicas"},
+		},
+		{
+			name:     "NOTES does not warn about autosign when patterns override the mode",
+			notes:    true,
+			sets:     []string{tls, "autosign.mode=true", "autosign.patterns[0]=*.example.com"},
+			notWants: []string{"signed without review"},
+		},
+		{
+			name:  "topology constraints default to this release's own pods",
+			sets:  []string{tls},
+			wants: []string{"app.kubernetes.io/name: openvox-ca\n          maxSkew: 1"},
+		},
+	}
+
+	rejects := []chartRejectCase{
+		{
+			name:    "no TLS on a non-loopback address, which the server refuses to serve",
+			sets:    []string{},
+			wantErr: "refuse to start",
+		},
+		{
+			name:    "a ServiceMonitor for an exporter that is switched off",
+			sets:    []string{tls, "metrics.serviceMonitor.enabled=true"},
+			wantErr: "nothing to scrape",
+		},
+		{
+			name:    "an ingress routed to a metrics port that was never created",
+			sets:    []string{tls, "ingress.enabled=true", "ingress.backendPort=metrics"},
+			wantErr: "no metrics port",
+		},
+		{
+			name:    "a TLSRoute routed to a metrics port that was never created",
+			sets:    []string{tls, "gateway.tlsRoute.enabled=true", "gateway.tlsRoute.backendPort=metrics"},
+			wantErr: "no metrics port",
+		},
+		{
+			name:    "an HTTPRoute routed to a metrics port that was never created",
+			sets:    []string{tls, "gateway.httpRoute.enabled=true", "gateway.httpRoute.backendPort=metrics"},
+			wantErr: "no metrics port",
+		},
+		{
+			name:       "an allow-list entry carrying a newline, which would inject a ConfigMap key",
+			sets:       []string{tls},
+			valuesYAML: "puppetServers:\n  - \"ca.example.com\\ninjected: value\"\n",
+			wantErr:    "single non-empty line",
+		},
+		{
+			name:       "an autosign pattern carrying a newline",
+			sets:       []string{tls},
+			valuesYAML: "autosign:\n  patterns:\n    - \"*.a.example.com\\n*.b.example.com\"\n",
+			wantErr:    "single non-empty line",
+		},
+		{
+			name:    "an autoscaler with no metric to act on",
+			sets:    []string{tls, "autoscaling.enabled=true", "autoscaling.targetCPUUtilizationPercentage="},
+			wantErr: "no metric is configured",
+		},
+		{
+			name:    "export RBAC bound to the namespace's default ServiceAccount",
+			sets:    []string{tls, "kubernetesExport.enabled=true", "serviceAccount.create=false"},
+			wantErr: "default ServiceAccount",
+		},
+		{
+			name:    "a mistyped value the schema should catch",
+			sets:    []string{tls, "metric.enabled=true"},
+			wantErr: "additional properties",
+		},
+	}
+
+	failures := 0
+
+	// The -dev-to-edge rule, on both of its branches. Rendered from a copy of
+	// the chart with a substituted appVersion, so this asserts the rule rather
+	// than whichever side of a release this tree currently sits on.
+	for _, tc := range []struct{ appVersion, wantTag string }{
+		{"9.9.9-dev", "edge-alpine"},
+		{"9.9.9", "9.9.9-alpine"},
+		{"9.9.9-rc1", "9.9.9-rc1-alpine"},
+	} {
+		name := fmt.Sprintf("appVersion %s resolves to %s", tc.appVersion, tc.wantTag)
+		out, err := renderWithAppVersion(tc.appVersion, []string{tls})
+		want := "image: ghcr.io/voxpupuli/openvox-ca:" + tc.wantTag
+		switch {
+		case err != nil:
+			fmt.Printf("FAIL  %s\n      render failed: %v\n", name, err)
+			failures++
+		case !strings.Contains(out, want):
+			fmt.Printf("FAIL  %s\n      expected to find: %q\n", name, want)
+			failures++
+		default:
+			fmt.Printf("ok    %s\n", name)
+		}
+	}
+
+	for _, tc := range renders {
+		out, err := helmRender(tc.notes, tc.sets, "")
+		if err != nil {
+			fmt.Printf("FAIL  %s\n      render failed: %v\n", tc.name, err)
+			failures++
+			continue
+		}
+		ok := true
+		for _, want := range tc.wants {
+			if !strings.Contains(out, want) {
+				fmt.Printf("FAIL  %s\n      expected to find: %q\n", tc.name, want)
+				ok = false
+			}
+		}
+		for _, notWant := range tc.notWants {
+			if strings.Contains(out, notWant) {
+				fmt.Printf("FAIL  %s\n      expected NOT to find: %q\n", tc.name, notWant)
+				ok = false
+			}
+		}
+		if ok {
+			fmt.Printf("ok    %s\n", tc.name)
+		} else {
+			failures++
+		}
+	}
+
+	for _, tc := range rejects {
+		out, err := helmRender(false, tc.sets, tc.valuesYAML)
+		switch {
+		case err == nil:
+			fmt.Printf("FAIL  rejects %s\n      rendered successfully instead of failing\n", tc.name)
+			failures++
+		case !strings.Contains(err.Error()+out, tc.wantErr):
+			fmt.Printf("FAIL  rejects %s\n      failed, but not with %q: %v\n", tc.name, tc.wantErr, err)
+			failures++
+		default:
+			fmt.Printf("ok    rejects %s\n", tc.name)
+		}
+	}
+
+	if failures > 0 {
+		return fmt.Errorf("%d chart assertion(s) failed", failures)
+	}
+	fmt.Printf("\nAll %d chart assertions passed\n", len(renders)+len(rejects)+3)
+	return nil
+}
+
+// Package writes the packaged chart tarball to dist/, named for the
+// internal/version constant. The publish workflow packages the chart the same
+// way before pushing it to the OCI registry, so this is the local dry run.
+func (Chart) Package() error {
+	mg.Deps(Chart.Version)
+
+	if err := requireChartTool("helm", "https://helm.sh/docs/intro/install/"); err != nil {
+		return err
+	}
+	if err := os.MkdirAll("dist", 0755); err != nil {
+		return err
+	}
+	if err := sh.RunV("helm", "package", chartDir, "--destination", "dist"); err != nil {
+		return err
+	}
+
+	ver, err := releaseVersion()
+	if err != nil {
+		return err
+	}
+	tarball := filepath.Join("dist", fmt.Sprintf("openvox-ca-%s.tgz", ver))
+	if _, err := os.Stat(tarball); err != nil {
+		return fmt.Errorf("expected chart package %s was not produced: %w", tarball, err)
+	}
+	fmt.Println("Wrote", tarball)
+	return nil
 }
 
 // -- test:* --------------------------------------------------------------------

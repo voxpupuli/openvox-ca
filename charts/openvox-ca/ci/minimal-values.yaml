@@ -1,0 +1,10 @@
+# The chart's defaults plus the one setting it requires: a server certificate.
+#
+# This stands in for a bare-defaults render, which the chart deliberately
+# refuses — openvox-ca will not serve plain HTTP on a non-loopback address, so
+# an install with no TLS configuration would only crash-loop. It is also the
+# fixture validated against the kubeVersion floor in Chart.yaml, so keep it
+# free of fields newer than that floor.
+
+tls:
+  existingSecret: openvox-ca-server-tls

@@ -1,0 +1,66 @@
+# The branches no other fixture reaches. Not a coherent deployment — its job is
+# to make sure that every documented value has at least one rendering behind it,
+# which is the rule AGENTS.md states and which several of these branches were
+# quietly failing before.
+
+fullnameOverride: ca-edge
+
+# A terminating proxy in front: plain HTTP, so the probes must follow suit.
+config:
+  no_tls_required: true
+
+# Node-backed disk rather than tmpfs: both emptyDir fields cleared.
+persistence:
+  enabled: false
+  retain: false
+emptyDir:
+  medium: ""
+  sizeLimit: ""
+
+# The raw autosign setting rather than the rendered allowlist.
+autosign:
+  mode: "false"
+
+# Forced on despite nothing needing the API.
+automountServiceAccountToken: true
+
+extraArgs:
+  - --csr-rate-limit=120
+
+imagePullSecrets:
+  - name: ghcr-pull
+
+service:
+  type: NodePort
+  nodePort: 30140
+  publishNotReadyAddresses: true
+
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 0
+
+networkPolicy:
+  enabled: true
+  apiAccess: none
+  extraIngress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: puppet
+      ports:
+        - port: https
+          protocol: TCP
+
+autoscaling:
+  enabled: true
+  minReplicas: 1
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: ""
+  metrics:
+    - type: Pods
+      pods:
+        metric:
+          name: puppetca_http_requests_in_flight
+        target:
+          type: AverageValue
+          averageValue: "10"

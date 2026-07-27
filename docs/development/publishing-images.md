@@ -50,13 +50,22 @@ validation builds will still work (they don't push).
    **Public**. The package is automatically linked to this repository via the
    `org.opencontainers.image.source` label.
 
-3. **arm64 runners.**
+3. **Set the Helm chart package's visibility too.**
+   The chart is published by [`helm-chart.yml`](../../.github/workflows/helm-chart.yml)
+   into a *second*, separate GHCR package —
+   `openvox-ca-charts/openvox-ca` — because one package cannot hold both
+   container images and a chart. It is created private on its first push and
+   needs the same *Change visibility* → **Public** treatment. Unlike the image
+   package it carries no `image.source` label, so link it to this repository by
+   hand from its package settings page.
+
+4. **arm64 runners.**
    The `ubuntu-24.04-arm` runner used for arm64 is free for **public**
    repositories. For a private repository you must provision arm64 runners
    (GitHub-hosted larger runners or self-hosted) or the arm64 build jobs will
    queue indefinitely.
 
-4. **Fork pull-request approval (the build "gate").**
+5. **Fork pull-request approval (the build "gate").**
    GitHub holds workflow runs on PRs from first-time contributors until a
    maintainer approves them (Settings → Actions → General → *Fork pull request
    workflows from outside collaborators*). Fork PRs still build once approved,

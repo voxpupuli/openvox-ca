@@ -1,0 +1,243 @@
+name: Helm chart
+
+# Packages charts/openvox-ca and pushes it to the GitHub Container Registry as
+# an OCI artefact. There is no HTTP chart repository and no index.yaml: OCI is
+# the only distribution channel.
+#
+# The chart lands in a package of its own, separate from the container images,
+# because a single GHCR package cannot hold both:
+#
+#   images: ghcr.io/<owner>/<repo>            e.g. ghcr.io/voxpupuli/openvox-ca
+#   chart:  ghcr.io/<owner>/<repo>-charts/openvox-ca
+#
+# `helm push` appends the chart name to the push target, which is why the
+# target below is the -charts repository rather than the full path.
+#
+# Triggers:
+#   * Push to main               -> publish the rolling development chart. Its
+#     version is the internal/version constant (e.g. 0.9.0-dev), so the tag is
+#     mutable and carries no commit SHA — each push overwrites it. That chart's
+#     appVersion is a -dev version, which the chart resolves to the rolling
+#     "edge-alpine" image, so the pair stay consistent.
+#
+#     Only -dev versions publish from main. Merging a release-prep PR — for
+#     0.9.0, but equally for 0.9.0-rc1 or a rehearsal's 0.9.0-test1 — puts a
+#     to-be-tagged version on main *before* the tag is pushed; publishing it
+#     there would bypass the verify gate entirely and ship a chart whose
+#     appVersion names an image the tag build has not created yet. Such a push
+#     is skipped and says so.
+#   * Release tags (v*)          -> publish the released chart, after the same
+#     verify gate the Release and Container images workflows use.
+#   * Manual (workflow_dispatch) -> package always; push only if asked.
+#
+# Validation (lint, schema, rendered-manifest conformance) lives in ci.yml's
+# chart job, not here. This workflow only packages and publishes.
+#
+# One-time setup by the repository owner: after the first successful push the
+# new package is private. Make it public from its package settings page, and
+# link it to this repository, exactly as for the container images (see
+# docs/development/publishing-images.md).
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      push:
+        description: "Push the chart to GHCR (otherwise package only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  checks: read  # verify-release-tag reads the tagged commit's check runs
+
+# Never cancel a release build mid-flight; superseding a main push is fine.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # -- Gate release-tag publishes like the Release workflow -------------------─
+  # On v* tags only: the tag must match internal/version *and* the chart's own
+  # version/appVersion, and the tagged commit must have gone green in CI. On
+  # any other event the steps skip and the job passes in seconds, existing only
+  # so `publish` can depend on it unconditionally.
+  verify-tag:
+    name: Verify release tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: startsWith(github.ref, 'refs/tags/v')
+      - uses: ./.github/actions/verify-release-tag
+        if: startsWith(github.ref, 'refs/tags/v')
+
+  publish:
+    name: Publish chart
+    needs: verify-tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write  # push the chart artefact to GHCR
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          # Packaging version. Keep it inside the matrix ci.yml lints against
+          # (.github/workflows/ci.yml, the chart job) — packaging with a Helm
+          # nobody validated the chart on is how a chart ships broken.
+          version: v3.21.3
+
+      - name: Determine push policy and destination
+        id: cfg
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          DISPATCH_PUSH: ${{ github.event.inputs.push }}
+          REPO: ${{ github.repository }}
+        run: |
+          version="$(sed -n 's/^version: \(.*\)$/\1/p' charts/openvox-ca/Chart.yaml)"
+          if [ -z "$version" ]; then
+            echo "::error::Could not parse the version field from charts/openvox-ca/Chart.yaml"
+            exit 1
+          fi
+
+          case "$EVENT" in
+            push)              push=true ;;                 # main or a v* tag
+            workflow_dispatch) push="$DISPATCH_PUSH" ;;
+            *)                 push=false ;;
+          esac
+
+          # Only the rolling development version publishes from main. Every
+          # other version — 0.9.0, but equally 0.9.0-rc1 or a rehearsal's
+          # 0.9.0-test1 — is a version somebody intends to tag, and publishes
+          # from that tag, where the verify gate runs and where the matching
+          # image gets built. Merging any release-prep PR is a push to main, so
+          # without this the chart would ship from there with both skipped.
+          #
+          # The test is "-dev", not "has a hyphen": -dev is exactly what the
+          # chart's image helper maps to the rolling "edge" tag, so it is
+          # exactly the set whose appVersion resolves to an image main has
+          # actually published.
+          case "$REF" in
+            refs/tags/v*) ;;
+            *)
+              case "$version" in
+                *-dev) ;;   # the rolling development chart
+                *)
+                  if [ "$push" = "true" ]; then
+                    echo "::notice::Chart version $version is not a development version; it publishes from its v$version tag, not from $REF. Skipping the push."
+                    push=false
+                  fi
+                  ;;
+              esac
+              ;;
+          esac
+
+          # GHCR requires a lowercase path. The chart name is appended by
+          # `helm push`, so this is the repository the chart lands *in*.
+          target="ghcr.io/$(echo "$REPO" | tr '[:upper:]' '[:lower:]')-charts"
+          {
+            echo "push=$push"
+            echo "target=$target"
+          } >> "$GITHUB_OUTPUT"
+          echo "push=$push target=$target version=$version"
+
+      - name: Package the chart
+        id: package
+        run: |
+          mkdir -p dist
+          helm package charts/openvox-ca --destination dist
+          # helm names the archive <name>-<version>.tgz; recover the version
+          # from Chart.yaml rather than guessing at the filename.
+          version="$(sed -n 's/^version: \(.*\)$/\1/p' charts/openvox-ca/Chart.yaml)"
+          chart="dist/openvox-ca-${version}.tgz"
+          if [ ! -f "$chart" ]; then
+            echo "::error::Expected chart package $chart was not produced"
+            exit 1
+          fi
+          {
+            echo "chart=$chart"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+          helm show chart "$chart"
+
+      # Two logins, because they use different credential stores: helm's own
+      # for `helm push`, and ~/.docker/config.json for the imagetools lookup
+      # below (the image package is private until the owner publishes it).
+      - name: Log in to GHCR (helm)
+        if: steps.cfg.outputs.push == 'true'
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" |
+            helm registry login ghcr.io --username "$GHCR_USER" --password-stdin
+
+      - name: Log in to GHCR (docker)
+        if: steps.cfg.outputs.push == 'true' && startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # A published chart is immutable in practice, so it must never name an
+      # image that does not exist. The Container images workflow fires off the
+      # same tag but independently, and if its build fails the chart would
+      # otherwise point at nothing permanently. Wait for the image rather than
+      # race it.
+      - name: Wait for the release image
+        if: steps.cfg.outputs.push == 'true' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          # The tag the chart's own default resolves to for this appVersion.
+          ref="$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]'):${VERSION}-alpine"
+          echo "Waiting for $ref"
+          for attempt in $(seq 1 60); do
+            # Keep the last attempt's output: a 401, a missing binary and a
+            # genuinely absent image are three different problems, and after
+            # half an hour of silence they are indistinguishable without it.
+            if err="$(docker buildx imagetools inspect "$ref" 2>&1 >/dev/null)"; then
+              echo "Found $ref after $attempt attempt(s)"
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "Last error from 'docker buildx imagetools inspect $ref':"
+          echo "$err"
+          echo "::error::$ref did not appear within 30 minutes (see the error above for why the lookup failed). If the image is genuinely missing, check the Container images workflow for this tag — publishing the chart now would ship one that installs a nonexistent image."
+          exit 1
+
+      - name: Push the chart
+        if: steps.cfg.outputs.push == 'true'
+        env:
+          CHART: ${{ steps.package.outputs.chart }}
+          TARGET: ${{ steps.cfg.outputs.target }}
+        run: helm push "$CHART" "oci://$TARGET"
+
+      - name: Verify the published chart
+        if: steps.cfg.outputs.push == 'true'
+        env:
+          TARGET: ${{ steps.cfg.outputs.target }}
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          # Pull it back: proves the artefact is retrievable at the reference
+          # users will actually type, not merely that the push exited zero.
+          mkdir -p /tmp/verify
+          helm pull "oci://$TARGET/openvox-ca" --version "$VERSION" --destination /tmp/verify
+          helm show chart /tmp/verify/"openvox-ca-${VERSION}.tgz"
+          {
+            echo "## Helm chart published"
+            echo
+            echo '```console'
+            echo "\$ helm install openvox-ca oci://$TARGET/openvox-ca --version $VERSION"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

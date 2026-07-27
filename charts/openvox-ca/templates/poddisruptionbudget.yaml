@@ -1,0 +1,29 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "openvox-ca.fullname" . }}
+  namespace: {{ include "openvox-ca.namespace" . }}
+  labels:
+    {{- include "openvox-ca.labels" . | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "openvox-ca.selectorLabels" . | nindent 6 }}
+  {{- /*
+    Test against "" rather than truthiness: maxUnavailable: 0 is a meaningful
+    setting (block every voluntary eviction) that a plain `if` would discard.
+  */}}
+  {{- if ne (.Values.podDisruptionBudget.maxUnavailable | toString) "" }}
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  {{- else }}
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  {{- end }}
+  {{- with .Values.podDisruptionBudget.unhealthyPodEvictionPolicy }}
+  unhealthyPodEvictionPolicy: {{ . }}
+  {{- end }}
+{{- end }}

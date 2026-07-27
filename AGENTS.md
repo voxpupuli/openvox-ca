@@ -22,6 +22,9 @@ Task. Invoke targets with `go run mage.go <Target>` or the `mage` binary:
 | `mage test:backendsRedis` | Redis backend full-stack bash TAP suite (Puppet topology) |
 | `mage test:backendsRedisGo` | Redis backend Go integration suite (build tag `redis_integration`) |
 | `mage test:backendsOpenBao` | OpenBao Transit signer integration suite (build tag `openbao_integration`, `compose-backends-openbao.yml`) |
+| `mage chart:validate` | Lint the Helm chart and check every rendered fixture against the Kubernetes schemas (needs `helm` and `kubeconform`) |
+| `mage chart:test` | Assert what the chart renders, and that each precondition refuses what it claims to |
+| `mage chart:version` | Assert `charts/openvox-ca/Chart.yaml` still tracks `internal/version` |
 
 `golangci-lint` is pinned in CI (`.github/workflows/ci.yml`). Build it with the
 repository's Go toolchain (`go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@<pinned>`);
@@ -149,6 +152,36 @@ not** be rebranded:
 - Environment-variable prefix `PUPPET_CA_` (and `PUPPET_CA_CTL_` for the CLI)
 - Prometheus metric namespace `puppetca_`
 - Storage key prefixes / default paths (`puppet-ca`, `/etc/puppet-ca`, `/var/lib/puppet-ca`)
+
+## Helm chart
+
+The chart in `charts/openvox-ca/` releases in lockstep with the binaries: its
+`version` and `appVersion` are both the `internal/version` constant. Four
+places parse those two lines (`mage chart:version`, the shared
+`verify-release-tag` action, the pre-push hook, and the publish workflow, which
+keys its main-vs-tag decision on the version) and `mage release:prepare`
+rewrites them together — so never hand-edit one of the version lines on its
+own, and never assume a chart version is `-dev` just because it has a hyphen.
+
+The chart deliberately does **not** enumerate the server's settings as values.
+`config` is written verbatim to `/etc/puppet-ca/config.yaml`, and the
+convenience blocks (`tls`, `ca`, `metrics`, `kubernetesExport`, …) do the
+Kubernetes wiring *and* set the config keys pointing at it, deep-merged with
+`config` winning. Adding a server setting to `docs/configuration.md` therefore
+needs no chart change; adding a value that duplicates one is a regression.
+
+Every fixture under `charts/openvox-ca/ci/` is linted and schema-checked in CI.
+A new template branch needs a fixture that exercises it, or it is untested —
+and schema validity is not correctness, so anything a reader has to *trust*
+(tag resolution, merge precedence, which kind a value selects) needs a case in
+`chart:test` as well.
+
+Preconditions live in one place, the `openvox-ca.validate` helper, and are
+checked from `deployment.yaml`. When a value combination would render something
+a cluster silently mishandles — a route to a port that does not exist, a
+binding to the `default` ServiceAccount — `fail` at install time with the
+remedy in the message, rather than rendering it. Each one needs a matching
+reject case in `chart:test`.
 
 ## Commits
 

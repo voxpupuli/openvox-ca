@@ -1,0 +1,46 @@
+# The single-replica, filesystem-backend deployment the chart defaults to,
+# with the pieces a real install adds: a cert-manager server certificate, an
+# autosign allowlist, and a TLS-passthrough Gateway API route.
+
+persistence:
+  enabled: true
+  storageClass: fast-ssd
+  size: 2Gi
+  accessModes:
+    - ReadWriteOnce
+  annotations:
+    example.com/backup: daily
+  labels:
+    example.com/tier: pki
+  selector:
+    matchLabels:
+      example.com/volume: openvox-ca
+
+tls:
+  existingSecret: openvox-ca-server-tls
+
+puppetServers:
+  - openvoxserver.example.com
+
+autosign:
+  patterns:
+    - "*.agent.example.com"
+
+config:
+  hostname: ca.example.com
+  ca_key_algo: ecdsa
+  ca_key_size: 384
+  ca_subject_org: Example Ltd
+  ca_validity_days: 3650
+  crl_url: https://ca.example.com/puppet-ca/v1/certificate_revocation_list/ca
+  ocsp_url: https://ca.example.com/puppet-ca/v1/ocsp
+
+gateway:
+  tlsRoute:
+    enabled: true
+    parentRefs:
+      - name: external
+        namespace: gateway-system
+        sectionName: tls-passthrough
+    hostnames:
+      - ca.example.com

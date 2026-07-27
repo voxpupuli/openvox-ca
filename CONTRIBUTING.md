@@ -16,6 +16,10 @@ guide is the human-friendly entry point; where the two overlap, AGENTS.md wins.
   `go install github.com/magefile/mage@latest` (or run targets with
   `go run mage.go <Target>`)
 - Docker or Podman with the Compose plugin, for the integration and stack tests
+- Only if you are changing the Helm chart under [`charts/`](charts/):
+  [Helm](https://helm.sh/docs/intro/install/) and
+  [kubeconform](https://github.com/yannh/kubeconform)
+  (`go install github.com/yannh/kubeconform/cmd/kubeconform@v0.7.0`)
 
 ## Building
 
@@ -82,5 +86,9 @@ See [`AGENTS.md`](AGENTS.md) for the details. The essentials:
   explains *why*. Stage files by name and review `git diff --staged` before
   committing.
 - Make sure `mage dev:check`, `mage test:unit`, and `markdownlint-cli2` pass.
+- Changed the Helm chart? `mage chart:validate` and `mage chart:test` are
+  required checks too. A new template branch needs a fixture under
+  `charts/openvox-ca/ci/`, and anything a reader has to trust needs a case in
+  `chart:test`.
 - Internal design notes live under [docs/development/](docs/development/); update
   them when you change the behaviour they describe.

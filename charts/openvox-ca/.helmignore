@@ -1,0 +1,22 @@
+# Patterns excluded from the packaged chart.
+
+# The fixture values files exist to be linted and rendered in CI; shipping them
+# inside the released chart would only invite someone to install one.
+ci/
+
+.DS_Store
+.git/
+.gitignore
+.bzr/
+.hg/
+.hgignore
+.svn/
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+.project
+.idea/
+*.tmproj
+.vscode/

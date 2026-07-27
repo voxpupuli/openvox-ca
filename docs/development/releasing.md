@@ -11,10 +11,10 @@ there is no release branch and no manual artefact upload.
 The `Version` constant in
 [`internal/version`](../../internal/version/version.go) is the single source
 of truth: artefact names embed it, both binaries report it via `--version`,
-and the Release workflow refuses to publish a tag that does not equal
-`"v" + Version`. Between releases the constant carries a `-dev` suffix, so a
-stray tag on an unprepared commit fails the gate instead of shipping
-mislabelled artefacts.
+the Helm chart's `version` and `appVersion` track it, and the Release workflow
+refuses to publish a tag that does not equal `"v" + Version`. Between releases
+the constant carries a `-dev` suffix, so a stray tag on an unprepared commit
+fails the gate instead of shipping mislabelled artefacts.
 
 ## What a release produces
 
@@ -28,6 +28,7 @@ mislabelled artefacts.
 | GitHub release + auto-generated notes | `gh release create --generate-notes` | Releases page |
 | `ghcr.io/voxpupuli/openvox-ca:{X.Y.Z,X.Y,latest}` | *Container images* workflow | GHCR |
 | `…:{X.Y.Z,X.Y,latest}-alpine` | *Container images* workflow | GHCR |
+| `ghcr.io/voxpupuli/openvox-ca-charts/openvox-ca:X.Y.Z` | *Helm chart* workflow | GHCR (OCI, separate package) |
 
 Each tarball contains both binaries, `openvox-ca` and `openvox-ca-ctl`. Only
 Linux is built: there are no macOS or Windows release artefacts. To build the
@@ -38,23 +39,28 @@ version is `v0.*`, because a `0.x` major carries no compatibility promise.
 
 ## The machinery
 
-Two workflows fire independently off the same tag push; neither waits for the
-other. Neither re-runs the CI suite — instead each starts with the shared
-verify gate described below, which checks that CI already passed.
+Three workflows fire off the same tag push. None re-runs the CI suite — each
+starts with the shared verify gate described below, which checks that CI
+already passed. Release and Container images then run independently; the Helm
+chart build waits for the alpine image before publishing, so that a published
+chart can never name an image that does not exist.
 
 | Workflow | File | What it does on a `v*` tag |
 | --- | --- | --- |
 | **Release** | [`release.yml`](../../.github/workflows/release.yml) | Verifies the tag equals `"v" +` the `internal/version` constant, builds each variant on a runner native to its architecture (`mage build:distVariant`, no cross toolchain), then aggregates the tarballs, generates `checksums.txt`, and runs `gh release create` |
 | **Container images** | [`container-images.yml`](../../.github/workflows/container-images.yml) | After the same verify gate, builds both image variants on native amd64 and arm64 runners and publishes multi-arch manifests. See [publishing container images](publishing-images.md) |
+| **Helm chart** | [`helm-chart.yml`](../../.github/workflows/helm-chart.yml) | After the same verify gate, packages `charts/openvox-ca`, waits for the tag's alpine image to appear, pushes the chart to `ghcr.io/voxpupuli/openvox-ca-charts` as an OCI artefact, then pulls it back to prove the reference resolves |
 
-> **CI's full suite does not re-run on tags.** Instead, both tag-triggered
-> workflows start with the shared
+> **CI's full suite does not re-run on tags.** Instead, all three
+> tag-triggered workflows start with the shared
 > [`verify-release-tag`](../../.github/actions/verify-release-tag/action.yml)
-> gate: the tag must equal `"v" +` the `internal/version` constant, and the
-> tagged commit must already have a passing *CI success* check run — i.e. it
-> went green on `main`. Tagging an unprepared, unmerged, or red commit fails
-> the gate instead of publishing. (The artefact builds themselves are also
-> exercised on every PR by CI's per-variant *Release artefact build* jobs.)
+> gate: the tag must equal `"v" +` the `internal/version` constant, the Helm
+> chart's `version` and `appVersion` must equal it too, and the tagged commit
+> must already have a passing *CI success* check run — i.e. it went green on
+> `main`. Tagging an unprepared, unmerged, or red commit fails the gate instead
+> of publishing. (The artefact builds themselves are also exercised on every PR
+> by CI's per-variant *Release artefact build* jobs, and the chart by its
+> *Helm chart* job.)
 
 ## Before you tag
 
@@ -66,12 +72,20 @@ verify gate described below, which checks that CI already passed.
 
    It creates a `release/v0.9.0` branch off `origin/main`, sets the `Version`
    constant in
-   [`internal/version/version.go`](../../internal/version/version.go), pushes
-   the branch, and opens the release PR with a preview of the auto-generated
-   release notes in its body. Merge that PR. The verify gate refuses a tag
-   whose version does not match the constant at the tagged commit, so this
-   must land first. (The manual equivalent: edit the constant to the release
-   version without the `v` prefix and open a PR yourself.)
+   [`internal/version/version.go`](../../internal/version/version.go) and the
+   `version`/`appVersion` fields in
+   [`charts/openvox-ca/Chart.yaml`](../../charts/openvox-ca/Chart.yaml) to
+   match, pushes the branch, and opens the release PR with a preview of the
+   auto-generated release notes in its body. Merge that PR. The verify gate
+   refuses a tag whose version does not match the constant — or the chart — at
+   the tagged commit, so this must land first.
+
+   Merging it also triggers the *Helm chart* workflow, which will deliberately
+   publish nothing and say so: only `-dev` versions publish from `main`, since
+   any other version is one somebody means to tag, and the chart for it belongs
+   to that tag's gated build. (The manual equivalent: edit all
+   three to the release version without the `v` prefix and open a PR yourself;
+   `mage chart:version` checks they agree.)
 
 2. **Confirm the target commit is green on `main`.**
 
@@ -167,8 +181,10 @@ $ gh run list --limit 5
 $ gh run watch <run-id>
 ```
 
-The release build takes a few minutes; the container build is the slower of
-the two (four image builds plus two manifest merges).
+The release build takes a few minutes; the container build is the slowest of
+the three (four image builds plus two manifest merges). The chart build waits
+for the alpine image before publishing, so it finishes shortly after the
+container build does.
 
 After the release is out, return `main` to a development version so builds
 from `main` stop identifying as the release:
@@ -260,7 +276,7 @@ your fork. Both are throwaway.
 1. Confirm the fork is **public** — the free `ubuntu-24.04-arm` runners used
    for the arm64 image builds are only free on public repositories. On a
    private fork the arm64 jobs queue indefinitely.
-2. Confirm Actions are enabled and the four workflows are active:
+2. Confirm Actions are enabled and the five workflows are active:
 
    ```console
    $ gh api repos/<you>/<fork>/actions/workflows --jq '.workflows[] | {name, state}'
@@ -325,6 +341,21 @@ Worth checking specifically:
   $ docker buildx imagetools inspect ghcr.io/<you>/<fork>:0.9.0-test1
   ```
 
+- The chart published, and installs the image the release actually produced:
+
+  ```console
+  $ helm show chart oci://ghcr.io/<you>/<fork>-charts/openvox-ca --version 0.9.0-test1
+  $ helm template openvox-ca oci://ghcr.io/<you>/<fork>-charts/openvox-ca \
+      --version 0.9.0-test1 | grep 'image:'
+  ```
+
+  The chart's `version` and `appVersion` should both be `0.9.0-test1`, and the
+  rendered image reference `ghcr.io/voxpupuli/openvox-ca:0.9.0-test1-alpine`.
+  Note that the chart's default `image.repository` is the upstream one — a fork
+  rehearsal publishes the chart to the fork but the chart still points at the
+  upstream image, which is correct: the chart's image default is not derived
+  from the repository it was built in.
+
 ### Cleaning up
 
 ```console
@@ -341,6 +372,13 @@ The GHCR package versions have to be deleted separately, from the package's
 $ gh api --method DELETE /user/packages/container/<fork-name>/versions/<version-id>
 ```
 
+The chart lives in a package of its own, `<fork-name>-charts/openvox-ca`, which
+has to be cleaned up separately:
+
+```console
+$ gh api --method DELETE /user/packages/container/<fork-name>-charts%2Fopenvox-ca/versions/<version-id>
+```
+
 Deleting the rehearsal tags is not strictly necessary, but leaving them behind
 means a later `git fetch --tags` from the fork pollutes your local tag list.
 
@@ -351,5 +389,5 @@ can work around at release time. They are worth fixing before 1.0.
 
 | Gap | Impact |
 | --- | --- |
-| **No signing or attestation of release artefacts.** | `checksums.txt` establishes integrity against tampering in transit, but nothing establishes provenance. Image provenance attestations are also explicitly disabled, because they break the push-by-digest manifest merge. |
+| **No signing or attestation of release artefacts.** | `checksums.txt` establishes integrity against tampering in transit, but nothing establishes provenance. Image provenance attestations are also explicitly disabled, because they break the push-by-digest manifest merge, and the Helm chart is pushed without a provenance file (`helm push --sign`), so `helm verify` has nothing to check. |
 | **Release builds restore Go caches saved by CI runs on `main`.** | A deliberate trade-off for fast tag builds: the published binaries link against `~/.cache/go-build` contents that are not checksum-verified (unlike the module cache, which `go.sum` covers), so code already running in `main`'s CI could in principle poison a cache that a later release build consumes. Signing/attestation (above) would be the durable fix. |

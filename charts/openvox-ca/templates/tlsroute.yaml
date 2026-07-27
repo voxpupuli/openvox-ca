@@ -1,0 +1,46 @@
+{{- if .Values.gateway.tlsRoute.enabled }}
+{{- $backend := ternary "metrics" "https" (eq .Values.gateway.tlsRoute.backendPort "metrics") }}
+{{- $port := ternary .Values.metrics.port (.Values.service.port | int) (eq $backend "metrics") }}
+{{/*
+TLSRoute forwards the TLS connection to the backend without terminating it, so
+agents' client certificates reach openvox-ca intact. It is in the Gateway API
+experimental channel (v1alpha2) and needs a Gateway listener with
+tls.mode: Passthrough.
+*/}}
+apiVersion: {{ .Values.gateway.tlsRoute.apiVersion }}
+kind: TLSRoute
+metadata:
+  name: {{ include "openvox-ca.fullname" . }}
+  namespace: {{ include "openvox-ca.namespace" . }}
+  labels:
+    {{- include "openvox-ca.labels" . | nindent 4 }}
+    {{- with .Values.gateway.tlsRoute.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- if or .Values.commonAnnotations .Values.gateway.tlsRoute.annotations }}
+  annotations:
+    {{- with .Values.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.gateway.tlsRoute.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+spec:
+  {{- with .Values.gateway.tlsRoute.parentRefs }}
+  parentRefs:
+    {{- tpl (toYaml .) $ | nindent 4 }}
+  {{- end }}
+  {{- with .Values.gateway.tlsRoute.hostnames }}
+  hostnames:
+    {{- tpl (toYaml .) $ | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- if .Values.gateway.tlsRoute.rules }}
+    {{- tpl (toYaml .Values.gateway.tlsRoute.rules) $ | nindent 4 }}
+    {{- else }}
+    - backendRefs:
+        - name: {{ include "openvox-ca.fullname" . }}
+          port: {{ $port }}
+    {{- end }}
+{{- end }}

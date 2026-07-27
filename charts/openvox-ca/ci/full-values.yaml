@@ -1,0 +1,294 @@
+# Turns on every optional resource the chart can emit, so a template change
+# that breaks one of the rarely-used paths fails in CI rather than in someone's
+# cluster. Not a sensible deployment: TLSRoute and HTTPRoute would not normally
+# both be present.
+
+replicaCount: 3
+
+image:
+  tag: "0.9.0"       # the CentOS Stream variant: an explicit, unsuffixed tag
+
+nameOverride: ca
+namespaceOverride: pki
+
+commonLabels:
+  example.com/team: platform
+commonAnnotations:
+  example.com/owner: platform-team
+deploymentAnnotations:
+  ignore-check.kube-linter.io/no-anti-affinity: We use topologySpreadConstraints
+
+persistence:
+  enabled: false
+
+listen:
+  host: "[::]"
+  port: 8141
+
+verbosity: 1
+
+config:
+  storage_backend: etcd
+  etcd_endpoints: https://etcd-0:2379,https://etcd-1:2379
+  etcd_tls_ca_file: /run/secrets/etcd/ca.crt
+  ca_key_provider: openbao
+  openbao:
+    addr: https://openbao.pki.svc:8200
+    transit_mount: transit
+    key_name: openvox-ca
+    auth_method: kubernetes
+    kubernetes_role: openvox-ca
+  leaf_validity_days: 365
+  puppet_datetime_format: true
+
+extraConfigFiles:
+  trusted-facts.yaml: |
+    # arbitrary companion file mounted alongside config.yaml
+    example: true
+
+puppetServers:
+  - openvoxserver.example.com
+
+autosign:
+  patterns:
+    - "*.agent.example.com"
+    - "compile-*.internal"
+
+tls:
+  existingSecret: ca-tls
+ca:
+  existingSecret: ca-material
+caKeyPassphrase:
+  existingSecret: ca-passphrase
+
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    namespace: monitoring
+    labels:
+      release: kube-prometheus-stack
+    scrapeTimeout: 10s
+    honorLabels: true
+    metricRelabelings:
+      - sourceLabels: [__name__]
+        regex: go_gc_.*
+        action: drop
+
+kubernetesExport:
+  enabled: true
+  fieldManager: openvox-ca
+  targets:
+    - kind: Secret
+      metadata:
+        name: openvox-ca-trust
+        labels:
+          app.kubernetes.io/part-of: puppet
+      cert: true
+      crl: true
+    - kind: ConfigMap
+      metadata:
+        name: openvox-ca-crl
+        namespace: monitoring
+      crl: true
+      crl_key: ca_crl.pem
+  rbac:
+    create: true
+    scope: Role
+    namespaces:
+      - monitoring
+
+env:
+  PUPPET_CA_HOSTNAME: ca.example.com
+extraEnv:
+  - name: PUPPET_CA_ETCD_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: etcd-auth
+        key: password
+envFrom:
+  - configMapRef:
+      name: openvox-ca-extra
+    prefix: PUPPET_CA_
+
+extraVolumes:
+  - name: etcd-tls
+    secret:
+      secretName: etcd-client-tls
+extraVolumeMounts:
+  - name: etcd-tls
+    mountPath: /run/secrets/etcd
+    readOnly: true
+
+initContainers:
+  - name: wait-for-etcd
+    image: busybox:1.37
+    command: ["sh", "-c", "until nc -z etcd-0 2379; do sleep 1; done"]
+extraContainers:
+  - name: sidecar
+    image: busybox:1.37
+    command: ["sleep", "infinity"]
+
+lifecycle:
+  preStop:
+    exec:
+      command: ["sleep", "5"]
+
+terminationGracePeriodSeconds: 60
+
+nodeSelector:
+  kubernetes.io/os: linux
+tolerations:
+  - key: pki
+    operator: Exists
+    effect: NoSchedule
+affinity:
+  nodeAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 1
+        preference:
+          matchExpressions:
+            - key: topology.kubernetes.io/zone
+              operator: In
+              values: [eu-west-1a]
+
+priorityClassName: system-cluster-critical
+runtimeClassName: gvisor
+schedulerName: default-scheduler
+dnsPolicy: ClusterFirst
+dnsConfig:
+  options:
+    - name: ndots
+      value: "2"
+hostAliases:
+  - ip: 10.0.0.1
+    hostnames: [legacy-ca.example.com]
+
+serviceAccount:
+  annotations:
+    example.com/audited: "true"
+  labels:
+    example.com/tier: pki
+
+service:
+  type: LoadBalancer
+  port: 8140
+  ipFamilyPolicy: PreferDualStack
+  ipFamilies: [IPv6, IPv4]
+  externalTrafficPolicy: Local
+  internalTrafficPolicy: Cluster
+  trafficDistribution: PreferClose
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800
+  loadBalancerClass: io.cilium/bgp-control-plane
+  loadBalancerSourceRanges:
+    - 10.0.0.0/8
+  allocateLoadBalancerNodePorts: false
+  appProtocol: https
+  annotations:
+    io.cilium/lb-ipam-ips: 192.0.2.10
+  extraPorts:
+    - name: debug
+      port: 6060
+      targetPort: 6060
+      protocol: TCP
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-passthrough: "true"
+  labels:
+    example.com/edge: "true"
+  hosts:
+    - host: ca.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+    - host: "ca.{{ .Release.Namespace }}.example.com"
+      paths:
+        - path: /puppet-ca
+          pathType: Prefix
+  tls:
+    - secretName: ca-ingress-tls
+      hosts:
+        - ca.example.com
+
+gateway:
+  tlsRoute:
+    enabled: true
+    parentRefs:
+      - name: external
+        namespace: gateway-system
+        sectionName: tls-passthrough
+    hostnames:
+      - ca.example.com
+    annotations:
+      example.com/route: tls
+  httpRoute:
+    enabled: true
+    parentRefs:
+      - name: internal
+        namespace: gateway-system
+    hostnames:
+      - crl.example.com
+    rules:
+      - matches:
+          - path:
+              type: PathPrefix
+              value: /puppet-ca/v1/certificate_revocation_list
+        backendRefs:
+          - name: '{{ include "openvox-ca.fullname" . }}'
+            port: 8140
+
+networkPolicy:
+  enabled: true
+  apiAccess: namespace
+  metricsNamespaces:
+    - monitoring
+    - observability
+  egress:
+    enabled: true
+    rules:
+      - to:
+          - podSelector:
+              matchLabels:
+                app.kubernetes.io/name: etcd
+        ports:
+          - port: 2379
+            protocol: TCP
+  extraIngress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: puppet
+      ports:
+        - port: https
+          protocol: TCP
+
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 9
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+
+extraObjects:
+  - apiVersion: v1
+    kind: Secret
+    metadata:
+      name: '{{ include "openvox-ca.fullname" . }}-extra'
+      namespace: '{{ include "openvox-ca.namespace" . }}'
+    type: Opaque
+    stringData:
+      note: rendered through tpl

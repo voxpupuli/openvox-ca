@@ -1,0 +1,51 @@
+{{- if .Values.gateway.httpRoute.enabled }}
+{{- $backend := ternary "metrics" "https" (eq .Values.gateway.httpRoute.backendPort "metrics") }}
+{{- $port := ternary .Values.metrics.port (.Values.service.port | int) (eq $backend "metrics") }}
+{{/*
+An HTTPRoute makes the Gateway terminate TLS, so openvox-ca never sees the
+agent's client certificate and every mTLS-authenticated endpoint stops
+authenticating. Use it only for the anonymous endpoints (CRL, OCSP, health), or
+with config.no_tls_required set behind a trusted proxy. For a general-purpose
+Puppet CA route, use gateway.tlsRoute instead.
+*/}}
+apiVersion: {{ .Values.gateway.httpRoute.apiVersion }}
+kind: HTTPRoute
+metadata:
+  name: {{ include "openvox-ca.fullname" . }}
+  namespace: {{ include "openvox-ca.namespace" . }}
+  labels:
+    {{- include "openvox-ca.labels" . | nindent 4 }}
+    {{- with .Values.gateway.httpRoute.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- if or .Values.commonAnnotations .Values.gateway.httpRoute.annotations }}
+  annotations:
+    {{- with .Values.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.gateway.httpRoute.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+spec:
+  {{- with .Values.gateway.httpRoute.parentRefs }}
+  parentRefs:
+    {{- tpl (toYaml .) $ | nindent 4 }}
+  {{- end }}
+  {{- with .Values.gateway.httpRoute.hostnames }}
+  hostnames:
+    {{- tpl (toYaml .) $ | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- if .Values.gateway.httpRoute.rules }}
+    {{- tpl (toYaml .Values.gateway.httpRoute.rules) $ | nindent 4 }}
+    {{- else }}
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: {{ include "openvox-ca.fullname" . }}
+          port: {{ $port }}
+    {{- end }}
+{{- end }}

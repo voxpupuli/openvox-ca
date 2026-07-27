@@ -1,0 +1,46 @@
+# The bring-your-own-everything path: a ConfigMap, PersistentVolumeClaim and
+# ServiceAccount managed outside the chart, an explicit argument list, and
+# cluster-scoped export RBAC.
+
+existingConfigMap: openvox-ca-config
+
+command:
+  - /usr/local/bin/openvox-ca
+args:
+  - --config=/etc/puppet-ca/config.yaml
+  - --verbosity=2
+  - --single-process
+
+serviceAccount:
+  create: false
+  name: openvox-ca-external
+
+persistence:
+  enabled: true
+  existingClaim: openvox-ca-data
+
+kubernetesExport:
+  enabled: true
+  targets:
+    - kind: Secret
+      metadata:
+        name: openvox-ca-trust
+      cert: true
+  rbac:
+    create: true
+    scope: ClusterRole
+
+configChecksumAnnotation: false
+
+livenessProbe:
+  enabled: false
+startupProbe:
+  enabled: false
+readinessProbe:
+  enabled: true
+  initialDelaySeconds: 10
+  periodSeconds: 15
+  httpGet:
+    path: /healthz/ready
+    port: https
+    scheme: HTTPS

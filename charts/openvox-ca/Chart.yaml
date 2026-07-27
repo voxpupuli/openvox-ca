@@ -1,0 +1,42 @@
+apiVersion: v2
+name: openvox-ca
+description: Puppet-compatible X.509 certificate authority, a drop-in replacement for the OpenVox/Puppet Server CA
+type: application
+
+# NOTE: version and appVersion are both the internal/version Version constant,
+# and are rewritten by `mage release:prepare` alongside internal/version.go.
+# Four places parse these two lines' exact textual shape (appVersion's quotes
+# included) and refuse a mismatch, so do not edit either by hand and do not
+# reformat them without updating all four together:
+#   .github/actions/verify-release-tag/action.yml   the shared tag gate
+#   .github/workflows/helm-chart.yml                the publish version
+#   .lefthook/pre-push/verify-tags.sh               the local tag gate
+#   magefile.go                                     chartVersions, release:prepare
+version: 0.9.0-dev
+appVersion: "0.9.0-dev"
+
+kubeVersion: ">=1.26.0-0"
+
+home: https://github.com/voxpupuli/openvox-ca
+sources:
+  - https://github.com/voxpupuli/openvox-ca
+icon: https://voxpupuli.org/assets/img/logo.png
+
+keywords:
+  - puppet
+  - openvox
+  - certificate-authority
+  - pki
+  - x509
+
+maintainers:
+  - name: Vox Pupuli
+    url: https://voxpupuli.org/
+
+annotations:
+  artifacthub.io/license: GPL-2.0-or-later
+  artifacthub.io/links: |
+    - name: Documentation
+      url: https://github.com/voxpupuli/openvox-ca/blob/main/docs/helm-chart.md
+    - name: Source
+      url: https://github.com/voxpupuli/openvox-ca

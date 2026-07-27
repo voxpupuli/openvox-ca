@@ -37,6 +37,10 @@ import (
 // (.lefthook/pre-push/verify-tags.sh), and the magefile (releaseVersion;
 // release:prepare also rewrites this line) all depend on this line's exact
 // textual shape, so any reformatting must update all five places together.
+//
+// The Helm chart's version and appVersion (charts/openvox-ca/Chart.yaml)
+// track this constant. release:prepare rewrites them alongside it, and
+// chart:version — plus the tag gates above — refuse a mismatch.
 const Version = "0.9.0-dev"
 
 // Full returns Version augmented with the VCS metadata the Go toolchain

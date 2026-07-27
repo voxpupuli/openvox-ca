@@ -1,0 +1,103 @@
+# A replicated, externally-backed CA behind a TLS-passthrough ingress: the
+# shape of a real production deployment, and the fixture that keeps the chart
+# able to express one.
+
+replicaCount: 2
+
+image:
+  digest: sha256:78f5a0976317ad607b0cf1e51a38a480ae2b5e5a4b1ca5f2c6d749d15cb3faa7
+
+# The CA state lives in PostgreSQL, so cadir holds nothing durable.
+persistence:
+  enabled: false
+emptyDir:
+  medium: Memory
+
+# Every replica can roll independently once state is external.
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1
+
+verbosity: 2
+
+listen:
+  host: "[::]"
+
+config:
+  storage_backend: postgres
+  no_pp_cli_auth: true
+  crl_url: https://ca.example.com/puppet-ca/v1/certificate_revocation_list/ca
+  leaf_key_algo: ecdsa
+  leaf_key_size: 256
+  crl_validity_days: 90
+  enable_expired_cert_cleanup: true
+
+puppetServers:
+  - openvoxserver.example.com
+  - compile-1.example.com
+
+tls:
+  existingSecret: openvox-ca-tls
+ca:
+  existingSecret: openvox-ca-ca
+
+extraEnv:
+  - name: POSTGRES_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: openvox-ca-cnpg-user
+        key: password
+  - name: PUPPET_CA_SQL_DSN
+    value: postgres://openvox-ca:$(POSTGRES_PASSWORD)@openvox-ca-cnpg-rw:5432/openvox-ca?sslmode=require
+
+podAnnotations:
+  reloader.stakater.com/auto: "true"
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+
+metrics:
+  enabled: true
+  host: "[::]"
+  serviceMonitor:
+    enabled: true
+    interval: 60s
+
+service:
+  ipFamilyPolicy: RequireDualStack
+
+ingress:
+  enabled: true
+  className: haproxy
+  annotations:
+    ingress.kubernetes.io/ssl-passthrough: "true"
+  hosts:
+    - host: ca.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+
+networkPolicy:
+  enabled: true
+  apiAccess: any
+  metricsNamespaces:
+    - monitoring
+  egress:
+    enabled: true
+    rules:
+      - to:
+          - podSelector:
+              matchLabels:
+                cnpg.io/cluster: openvox-ca-cnpg
+        ports:
+          - port: 5432
+            protocol: TCP
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
