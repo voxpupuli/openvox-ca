@@ -59,7 +59,8 @@ identically whether the key is a local PEM file or lives in OpenBao Transit.`,
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := loadServerConfig(resolveConfigFile(configFile, "PUPPET_CA_CONFIG", "/etc/puppet-ca/config.yaml"))
+			resolvedCfgFile := resolveConfigFile(configFile, "PUPPET_CA_CONFIG", "/etc/puppet-ca/config.yaml")
+			cfg, err := loadServerConfig(resolvedCfgFile)
 			if err != nil {
 				return err
 			}
@@ -69,6 +70,8 @@ identically whether the key is a local PEM file or lives in OpenBao Transit.`,
 			if cmd.Flags().Changed("hostname") {
 				cfg.Hostname = hostname
 			}
+
+			reportResolvedConfig(cmd.ErrOrStderr(), resolvedCfgFile, cfg)
 
 			rt, err := resolveRuntime(cmd.Context(), cfg, true)
 			if err != nil {
@@ -82,6 +85,16 @@ identically whether the key is a local PEM file or lives in OpenBao Transit.`,
 			}
 			myCA.KeyProvider = rt.KeyProvider
 
+			// Checked before BuildCSR, which may create the key: with no
+			// certificate the server refuses to start until import-ca-cert
+			// installs the signed chain, and creating the key is what opens
+			// that window. An operator who is not told walks into a
+			// crash-looping Deployment with no idea which step caused it.
+			hadCert, err := rt.Store.HasCACert(cmd.Context())
+			if err != nil {
+				return fmt.Errorf("checking for an existing CA certificate: %w", err)
+			}
+
 			csrPEM, err := myCA.BuildCSR(cmd.Context(), cfg.Hostname, createKey)
 			if err != nil {
 				if errors.Is(err, ca.ErrKeyProviderKeyNotFound) {
@@ -89,6 +102,12 @@ identically whether the key is a local PEM file or lives in OpenBao Transit.`,
 						"or provision it out of band first: %w", err)
 				}
 				return err
+			}
+
+			if !hadCert {
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+					"This CA has a key but no certificate, so the server will refuse to start until "+
+						"'openvox-ca import-ca-cert' installs the chain the parent signs.\n")
 			}
 
 			if outFile == "" {

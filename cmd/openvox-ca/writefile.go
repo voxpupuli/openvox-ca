@@ -56,6 +56,15 @@ func writePublicFile(path string, data []byte) error {
 		_ = tmp.Close()
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
+	// Flush to stable storage before the rename. Without this the rename can be
+	// reordered ahead of the data on a crash, leaving a zero-length or stale
+	// file where the documented procedure expects a validated bundle it is about
+	// to load into a Secret served to every agent. It also surfaces ENOSPC on
+	// filesystems that defer the error past close(2).
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("flushing %s: %w", path, err)
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
@@ -64,6 +73,13 @@ func writePublicFile(path string, data []byte) error {
 	}
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	// Best-effort: makes the rename itself durable. A failure here means the
+	// file is written and visible but the directory entry may not survive a
+	// crash, which is not worth failing an otherwise complete operation over.
+	if dirFile, err := os.Open(dir); err == nil {
+		_ = dirFile.Sync()
+		_ = dirFile.Close()
 	}
 	return nil
 }

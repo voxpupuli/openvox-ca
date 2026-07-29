@@ -151,6 +151,20 @@ than bootstrap over the key your parent CA is in the middle of signing. This
 holds for every `ca_key_provider`, including the default. Run the two steps
 together, or stop the service while you do.
 
+> **These subcommands read the config file and `PUPPET_CA_*` environment only.**
+> The server's storage and key-provider flags (`--storage-backend`, `--sql-dsn`,
+> `--ca-key-provider`, `--openbao-*`, `--encrypt-ca-key`, …) belong to the server
+> command itself and are not available here, so a server configured entirely by
+> flags — including the container image's own `CMD` — is invisible to them. That
+> matters: with no config file, `csr --create-key` would resolve
+> `ca_key_provider: file`, mint a **local** CA key, and emit a request bound to a
+> key a Transit-backed server will never use, so the parent would sign the wrong
+> key. Both commands therefore print the config file, storage backend and key
+> provider they resolved before doing anything — check those lines match the
+> server. If your server is configured by flags, mirror the storage and
+> key-provider settings into the config file or `PUPPET_CA_*` environment for
+> these commands.
+
 `import-ca-cert` requires a **complete chain, nearest first**: this CA's own
 certificate, each issuer after it, ending with a self-signed root. Supply only
 certificates; a bundle carrying a private key is rejected, because this file is

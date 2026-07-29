@@ -82,7 +82,8 @@ for deployments where the CA certificate is mounted read-only from outside
 				return fmt.Errorf("reading --cert-bundle: %w", err)
 			}
 
-			cfg, err := loadServerConfig(resolveConfigFile(configFile, "PUPPET_CA_CONFIG", "/etc/puppet-ca/config.yaml"))
+			resolvedCfgFile := resolveConfigFile(configFile, "PUPPET_CA_CONFIG", "/etc/puppet-ca/config.yaml")
+			cfg, err := loadServerConfig(resolvedCfgFile)
 			if err != nil {
 				return err
 			}
@@ -95,6 +96,8 @@ for deployments where the CA certificate is mounted read-only from outside
 				return err
 			}
 			defer func() { _ = rt.Close() }()
+
+			reportResolvedConfig(cmd.ErrOrStderr(), resolvedCfgFile, cfg)
 
 			myCA := ca.New(rt.Store, ca.AutosignConfig{Mode: "off"}, cfg.Hostname)
 			if err := applyCAConfig(myCA, cfg); err != nil {

@@ -18,6 +18,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -103,4 +104,35 @@ var _ = Describe("roleMayReachCAKey", func() {
 		Entry("the empty role is single-process, which signs for itself", "", true),
 		Entry("an unrecognised role is not the frontend, so it is not the special case", "worker", true),
 	)
+})
+
+var _ = Describe("reportResolvedConfig", func() {
+	// The whole point is that an operator can see a mismatch before the parent
+	// signs anything, so the line has to name what was resolved -- including
+	// when nothing was found, which is the case that bites.
+	It("names the resolved file, backend and provider", func() {
+		cfg := &serverConfig{CADir: "/var/lib/ca"}
+		cfg.StorageBackend = "postgres"
+		cfg.CAKeyProvider = "openbao"
+
+		var out bytes.Buffer
+		reportResolvedConfig(&out, "/etc/puppet-ca/config.yaml", cfg)
+		Expect(out.String()).To(ContainSubstring("/etc/puppet-ca/config.yaml"))
+		Expect(out.String()).To(ContainSubstring("postgres"))
+		Expect(out.String()).To(ContainSubstring("openbao"))
+		Expect(out.String()).To(ContainSubstring("/var/lib/ca"))
+	})
+
+	It("says so when no config file was found, and names the defaults it fell back to", func() {
+		// The dangerous case: a server configured entirely by flags leaves these
+		// commands on defaults, and "file" instead of "openbao" here is the
+		// signal that the request would be bound to the wrong key.
+		cfg := &serverConfig{CADir: "/var/lib/ca"}
+
+		var out bytes.Buffer
+		reportResolvedConfig(&out, "", cfg)
+		Expect(out.String()).To(ContainSubstring("none found"))
+		Expect(out.String()).To(ContainSubstring("filesystem"))
+		Expect(out.String()).To(ContainSubstring("CA key provider: file"))
+	})
 })

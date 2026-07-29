@@ -20,6 +20,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"path/filepath"
 
 	"github.com/voxpupuli/openvox-ca/internal/ca"
@@ -125,4 +126,34 @@ func resolveRuntime(ctx context.Context, cfg *serverConfig, withKeyProvider bool
 // comparison at the call site would silently hand the frontend the key.
 func roleMayReachCAKey(role string) bool {
 	return role != "frontend"
+}
+
+// reportResolvedConfig prints the configuration the offline subcommands actually
+// resolved, before they act on it.
+//
+// These subcommands read the config file and PUPPET_CA_* environment, and
+// nothing else: the server's storage and key-provider flags are local to the
+// root command, so a server configured entirely by flags — as the shipped
+// container image's own CMD is, and as the systemd examples are — is invisible
+// here. The failure is silent and expensive rather than loud: `csr --create-key`
+// would resolve ca_key_provider: file, mint a *local* CA key, and emit a request
+// bound to a key the Transit-backed server will never use, so the parent signs
+// the wrong key. Naming what was resolved is what makes that visible while it is
+// still cheap to fix.
+func reportResolvedConfig(w io.Writer, resolvedFile string, cfg *serverConfig) {
+	from := resolvedFile
+	if from == "" {
+		from = "none found (defaults, plus any PUPPET_CA_* environment)"
+	}
+	provider := cfg.CAKeyProvider
+	if provider == "" {
+		provider = "file"
+	}
+	backend := cfg.StorageBackend
+	if backend == "" {
+		backend = "filesystem"
+	}
+	_, _ = fmt.Fprintf(w, "Using config file: %s\n", from)
+	_, _ = fmt.Fprintf(w, "Storage backend: %s; CA key provider: %s; cadir: %s\n",
+		backend, provider, cfg.CADir)
 }

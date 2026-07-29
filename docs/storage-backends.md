@@ -490,9 +490,14 @@ for abandoning a half-finished sub-CA, and only the first two are cheap:
 1. **Finish the round trip.** Have the parent sign the outstanding request and
    install it with `openvox-ca import-ca-cert`. This is the intended path and
    costs nothing.
-2. **Issue a certificate for the existing key.** Any certificate that binds the
-   Transit key satisfies the startup check, including a self-signed one produced
-   out of band and installed with `import-ca-cert`.
+2. **Have any CA you control sign the outstanding request.** `openvox-ca csr`
+   emits a PKCS#10 request bound to the Transit key; a throwaway root made with
+   `openssl` or `bao pki` can sign it, and `import-ca-cert` accepts the result
+   (a lone self-signed CA is a valid bundle). This satisfies the startup check
+   without touching the key. Note that *self*-signing a certificate for a
+   non-exportable Transit key is not one of the options: it would mean signing a
+   TBSCertificate with the Transit key and assembling the DER by hand, and
+   neither `openvox-ca` nor `openvox-ca-ctl` will do that.
 3. **Delete the Transit key**, which requires `deletion_allowed` on it, and let
    the CA bootstrap afresh. Irreversible, and it retires the CA as above.
 
