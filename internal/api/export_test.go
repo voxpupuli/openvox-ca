@@ -43,3 +43,6 @@ func AttributeForTest(domains []TrustDomain, cert *x509.Certificate, presented [
 func CheckChainRevocationForTest(chain []*x509.Certificate, set *ClientCRLSet, policy string, now time.Time) error {
 	return checkChainRevocation(chain, set, policy, now)
 }
+
+// SanitiseForLogForTest exposes the log-field sanitiser.
+var SanitiseForLogForTest = sanitiseForLog

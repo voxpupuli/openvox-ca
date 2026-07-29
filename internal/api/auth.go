@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 )
@@ -203,13 +204,43 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 // The HTTP metrics carry no path label, so a 403 is otherwise invisible beyond a
 // counter: an operator whose tooling broke against a tier change has nothing to
 // correlate against. Logged at Warn because a denial on these routes is either a
-// misconfiguration or an attempt, and both are worth seeing. The client CN is
-// included; it comes from a certificate that has already been verified against
-// the trust anchor, so it is not attacker-controlled free text.
+// misconfiguration or an attempt, and both are worth seeing.
+//
+// Both the path and the CN are sanitised first. The path is straightforwardly
+// attacker-controlled — net/http decodes %0A into a real newline, so a request
+// for /certificate_status/a%0A... puts one in the log record. The CN is less
+// obvious: it comes from a certificate verified against a trust anchor, which
+// used to mean our own CA and no longer does. A client_ca entry trusts an issuer
+// the operator does not necessarily control, and nothing stops that issuer
+// putting a newline in a common name.
+//
+// slog's own handlers happen to quote both, so nothing is forged today. That is
+// a property of the handler, not of this call site, and a log that is later
+// piped through anything less careful should not become a way to write arbitrary
+// lines into it.
 func denyWithLog(w http.ResponseWriter, r *http.Request, clientCN, reason string) {
 	slog.Warn("Request denied by authorisation middleware",
-		"method", r.Method, "path", r.URL.Path, "client_cn", clientCN, "reason", reason)
+		"method", r.Method, "path", sanitiseForLog(r.URL.Path),
+		"client_cn", sanitiseForLog(clientCN), "reason", reason)
 	http.Error(w, "access denied", http.StatusForbidden)
+}
+
+// maxLoggedValue bounds a sanitised log field. Long enough for any real path or
+// common name, short enough that a large request cannot pad the log.
+const maxLoggedValue = 256
+
+// sanitiseForLog makes an untrusted string safe to put in a log record:
+// control characters become U+FFFD and the result is truncated.
+func sanitiseForLog(s string) string {
+	if len(s) > maxLoggedValue {
+		s = s[:maxLoggedValue] + "…"
+	}
+	return strings.Map(func(r rune) rune {
+		if r == '\uFFFD' || unicode.IsControl(r) {
+			return '\uFFFD'
+		}
+		return r
+	}, s)
 }
 
 // lookupTier classifies a request into an authorization tier based on method and path.

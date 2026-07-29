@@ -255,3 +255,30 @@ var _ = Describe("Authorisation across trust domains", func() {
 			To(Equal(http.StatusForbidden))
 	})
 })
+
+var _ = Describe("denial logging", func() {
+	// The middleware logs the request path and the client CN on every denial.
+	// Both are attacker-influenced: net/http decodes %0A into a real newline, and
+	// under client_ca the CN comes from an issuer the operator may not control.
+	It("strips control characters from the logged path and CN", func() {
+		Expect(api.SanitiseForLogForTest("/certificate_status/a\nFAKE line")).
+			To(Equal("/certificate_status/a�FAKE line"))
+		Expect(api.SanitiseForLogForTest("ops\r\nadmin")).To(Equal("ops��admin"))
+	})
+
+	It("passes an ordinary path through unchanged", func() {
+		Expect(api.SanitiseForLogForTest("/certificate_status/agent1.example.com")).
+			To(Equal("/certificate_status/agent1.example.com"))
+	})
+
+	It("bounds the length, so a large request cannot pad the log", func() {
+		got := api.SanitiseForLogForTest(strings.Repeat("a", 500))
+		Expect(len([]rune(got))).To(Equal(257), "256 runes plus the ellipsis")
+	})
+
+	It("does not let a replacement character be mistaken for one it stripped", func() {
+		// A caller cannot smuggle in U+FFFD to make sanitised output look
+		// identical to unsanitised: it is escaped the same way.
+		Expect(api.SanitiseForLogForTest("a�b")).To(Equal("a�b"))
+	})
+})
