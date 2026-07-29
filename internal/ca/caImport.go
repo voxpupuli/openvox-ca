@@ -91,15 +91,16 @@ func ImportCA(ctx context.Context, store *storage.StorageService, certBundlePEM,
 		return fmt.Errorf("failed to create CA directories: %w", err)
 	}
 
-	// --- Decide the CRL before writing anything ---
+	// --- Check the CRL is acceptable before writing anything ---
 	//
-	// The CRL step can now refuse — it did not before this branch — and the
-	// cert and key writes below are not undoable, so deciding afterwards would
-	// let a refusal leave a replaced certificate beside an untouched old CRL.
-	// This resolves the decision without persisting it: nothing is written
-	// until the CRL is known to be acceptable.
-	crlToWrite, err := planCRLImport(ctx, store, crlPEM, caCert, caKey)
-	if err != nil {
+	// The CRL step can refuse — it could not before this branch — and the cert
+	// and key writes below are not undoable, so discovering the refusal
+	// afterwards would leave a replaced certificate beside an untouched old CRL.
+	// This is a validation pass only: its result is deliberately discarded, and
+	// the authoritative decision is taken again under the CRL lock below, so
+	// that the read it depends on and the write that follows are atomic with
+	// respect to a concurrent revocation.
+	if _, err := planCRLImport(ctx, store, crlPEM, caCert, caKey); err != nil {
 		return err
 	}
 
@@ -120,28 +121,41 @@ func ImportCA(ctx context.Context, store *storage.StorageService, certBundlePEM,
 		_ = store.SaveCAPubKey(ctx, pubKeyPEM)
 	}
 
-	// --- Write the CRL decided above ---
+	// --- Decide and write the CRL, both under the lock ---
 	//
-	// nil means "no --crl-chain was supplied and storage already holds a usable
-	// chain", so there is nothing to write.
+	// The whole read-modify-write is inside the lock: a revocation landing
+	// between the read and the write would otherwise be silently discarded and
+	// the CRL number would regress, which metrics.md documents as monotonic.
+	// Re-import is the documented way to refresh ancestor CRLs on a CA that has
+	// been issuing for months, so that window is not hypothetical.
 	//
-	// Under the CRL lock, because this is a read-modify-write rather than the
-	// unconditional overwrite it used to be, and because re-import is the
-	// documented way to refresh ancestor CRLs on a CA that has been issuing for
-	// months. Without it a revocation landing between the read and the write is
-	// silently discarded and the CRL number regresses, which metrics.md
-	// documents as monotonic. The lock is only genuinely cross-process on
-	// backends that implement one; on filesystem and sqlite it degrades to a
-	// process-local mutex, so a live import there still races the server and the
-	// documentation says to stop it first.
-	if crlToWrite != nil {
-		lockCtx, cancel := context.WithTimeout(ctx, lockTimeout)
-		defer cancel()
-		if err := store.WithLock(lockCtx, lockNameCRL, func() error {
-			return writeCRLChain(ctx, store, crlToWrite)
-		}); err != nil {
+	// The lock is only genuinely cross-process on backends that implement one;
+	// on filesystem and sqlite it degrades to a process-local mutex, so a live
+	// import there still races the server and the documentation says to stop it
+	// first.
+	//
+	// A nil plan means the stored chain is already exactly what should be there,
+	// so nothing is written — re-taking the lock to rewrite identical bytes
+	// would still bump the stored modification time, and every agent would
+	// re-download a CRL that had not changed.
+	lockCtx, cancel := context.WithTimeout(ctx, lockTimeout)
+	defer cancel()
+	if err := store.WithLock(lockCtx, lockNameCRL, func() error {
+		plan, err := planCRLImport(ctx, store, crlPEM, caCert, caKey)
+		if err != nil {
 			return err
 		}
+		if plan == nil {
+			return nil
+		}
+		// Warned here rather than inside orderCRLChain, so the checks run on
+		// every import shape including the ancestors-only one.
+		if len(plan) > 1 {
+			warnAboutAncestors(plan[1:])
+		}
+		return writeCRLChain(ctx, store, plan)
+	}); err != nil {
+		return err
 	}
 
 	// --- Initialise serial if absent ---
@@ -192,6 +206,11 @@ func planCRLImport(ctx context.Context, store *storage.StorageService, crlPEM []
 					"being imported, and no --crl-chain was supplied to replace it: pass --crl-chain "+
 					"with this CA's own CRL, or remove the stored CRL to have a fresh empty one generated "+
 					"(%d block(s) currently stored)", len(stored))
+			}
+			if sameCRLOrder(stored, ordered) {
+				// Already exactly right: writing identical bytes would bump the
+				// stored modification time and make every agent re-download.
+				return nil, nil
 			}
 			return ordered, nil
 		}
@@ -278,6 +297,20 @@ func storedCRLChain(ctx context.Context, store *storage.StorageService) ([]*x509
 		return nil, fmt.Errorf("decoding the stored CRL before replacing it: %w", err)
 	}
 	return stored, nil
+}
+
+// sameCRLOrder reports whether two chains hold the same blocks in the same
+// order. Pointer identity is enough: both slices come from one decode.
+func sameCRLOrder(a, b []*x509.RevocationList) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // ownCRLIn returns the CRL in chain that cert signed, or nil when there is none.

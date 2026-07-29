@@ -767,13 +767,9 @@ func (s *Server) handleDeleteStatus(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.CA.Clean(r.Context(), subject); err != nil {
 		slog.Warn("Clean failed", "subject", subject, "error", err)
-		switch {
-		case errors.Is(err, ca.ErrNotFound):
+		if errors.Is(err, ca.ErrNotFound) {
 			http.Error(w, "not found", http.StatusNotFound)
-		case errors.Is(err, ca.ErrForeignStoredCRL):
-			// Same reasoning as the revoke path above.
-			http.Error(w, err.Error(), http.StatusConflict)
-		default:
+		} else {
 			http.Error(w, "conflict", http.StatusConflict)
 		}
 		return

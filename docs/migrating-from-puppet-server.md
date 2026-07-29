@@ -94,7 +94,7 @@ at the front, and only if there is none is an empty CRL generated. That makes
 re-running the import with a newer ancestor bundle the way to refresh ancestor
 CRLs today, without exporting and concatenating your own first.
 
-Four limits worth knowing before you rely on re-import as a refresh mechanism.
+Some limits worth knowing before you rely on re-import as a refresh mechanism.
 
 **The bundle replaces the stored ancestor set wholesale.** Only *this CA's own*
 CRL is recovered from storage; ancestors are taken solely from what you supply.
@@ -124,10 +124,24 @@ certificate. **Back up the destination first** — `migrate` is not
 transactional, and the write-back covers the cert, key, inventory, inventory
 HMAC and every signed certificate in order to refresh one PEM blob:
 
+`scratch.yaml` must describe a **filesystem** backend whose `cadir` is the same
+directory the middle step passes to `--cadir`. `migrate` resolves its destination
+from that file; `import` resolves its own from the flag. If the two disagree,
+all three commands exit 0 and print success while the middle step writes
+somewhere the third never reads — the same silent no-op described above,
+reintroduced inside the workaround for it. The scratch directory must also start
+empty, or the first leg needs `--force` as well.
+
 ```bash
+# scratch.yaml: storage_backend: filesystem, cadir: /tmp/scratch
 openvox-ca-ctl migrate --source-config live.yaml --dest-config scratch.yaml
-openvox-ca-ctl import --cadir /tmp/scratch --cert-bundle ca.pem \
-  --private-key ca-key.pem --crl-chain refreshed-chain.pem
+
+# --cert-bundle and --private-key are the copies the first leg just wrote there.
+openvox-ca-ctl import --cadir /tmp/scratch \
+  --cert-bundle /tmp/scratch/ca_crt.pem \
+  --private-key /tmp/scratch/private/ca_key.pem \
+  --crl-chain refreshed-chain.pem
+
 openvox-ca-ctl migrate --source-config scratch.yaml --dest-config live.yaml --force
 ```
 

@@ -197,7 +197,6 @@ func orderCRLChain(crls []*x509.RevocationList, cert *x509.Certificate) ([]*x509
 		slog.Warn("Discarding superseded copies of this CA's own CRL from the imported chain",
 			"discarded", superseded, "kept_crl_number", ours.Number)
 	}
-	warnAboutAncestors(others)
 	return append([]*x509.RevocationList{ours}, others...), true
 }
 
@@ -211,6 +210,12 @@ func orderCRLChain(crls []*x509.RevocationList, cert *x509.Certificate) ([]*x509
 // importing a chain they know is stale is a legitimate intermediate step, but
 // import is the only place either is detectable: no series and no alert covers
 // ancestor expiry.
+//
+// Called once on the final chain about to be written, rather than from
+// orderCRLChain. It used to live there, after the early return taken when the
+// supplied bundle carries no CRL of ours — which is exactly the ancestors-only
+// shape the migration guide recommends, so the only detector of an undetectable
+// condition was skipped on the one path that needs it.
 func warnAboutAncestors(others []*x509.RevocationList) {
 	now := time.Now()
 	seen := make(map[string]int, len(others))

@@ -172,6 +172,49 @@ var _ = Describe("API Workflow", func() {
 			Expect(err).NotTo(HaveOccurred())
 		})
 
+		It("gives revoke the same actionable 409 as reissue-crl, and shows what clean does instead", func() {
+			// The revoke branch changes only the response body — the status is
+			// 409 either way — so a status-code assertion cannot see a revert,
+			// and revoke is the boundary an operator reaches far more often
+			// than reissue-crl. In this state the CA cannot record revocations
+			// at all.
+			//
+			// Clean is different, and this spec exists partly to record why: it
+			// deliberately swallows the revoke failure and proceeds with the
+			// delete, so it answers 204 rather than 409. That means the
+			// certificate is removed while still unrevoked. A branch keying on
+			// the sentinel in handleDeleteStatus would be dead code.
+			ctx := context.Background()
+
+			// Sign a certificate so revoke/clean get past their lookups.
+			req := httptest.NewRequest("PUT", "/certificate_request/"+subject, bytes.NewReader(csrPEM))
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusOK))
+			signBody, _ := json.Marshal(api.PutStatusBody{DesiredState: "signed"})
+			req = httptest.NewRequest("PUT", "/certificate_status/"+subject, bytes.NewReader(signBody))
+			rr = httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusNoContent))
+
+			// Replace the stored CRL with one this CA did not sign.
+			Expect(myCA.Storage.UpdateCRL(ctx, foreignCRL())).To(Succeed())
+
+			revokeBody, _ := json.Marshal(api.PutStatusBody{DesiredState: "revoked"})
+			req = httptest.NewRequest("PUT", "/certificate_status/"+subject, bytes.NewReader(revokeBody))
+			rr = httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusConflict))
+			Expect(rr.Body.String()).To(ContainSubstring("needs a restart"),
+				"revoke must carry the diagnosis, not a bare conflict")
+
+			req = httptest.NewRequest("DELETE", "/certificate_status/"+subject, nil)
+			rr = httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusNoContent),
+				"clean proceeds with the delete despite the failed revoke")
+		})
+
 		It("should handle the full certificate lifecycle", func() {
 			// 1. PUT /certificate_request/{subject}
 			req := httptest.NewRequest("PUT", "/certificate_request/"+subject, bytes.NewReader(csrPEM))
@@ -1544,3 +1587,31 @@ var _ = Describe("API Workflow", func() {
 	})
 
 })
+
+// foreignCRL returns a PEM CRL signed by a CA unrelated to the one under test,
+// which is what readStoredCRL refuses.
+func foreignCRL() []byte {
+	GinkgoHelper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	Expect(err).NotTo(HaveOccurred())
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(4242),
+		Subject:               pkix.Name{CommonName: "Unrelated CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	Expect(err).NotTo(HaveOccurred())
+	cert, err := x509.ParseCertificate(der)
+	Expect(err).NotTo(HaveOccurred())
+	crlDER, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+		Number:     big.NewInt(6),
+		ThisUpdate: time.Now().UTC(),
+		NextUpdate: time.Now().UTC().Add(24 * time.Hour),
+	}, cert, key)
+	Expect(err).NotTo(HaveOccurred())
+	return pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlDER})
+}

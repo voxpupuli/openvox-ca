@@ -485,6 +485,29 @@ var _ = Describe("CRL chain ordering at import", func() {
 		Expect(mustGetCRL(ctx, store)).To(Equal(upsCRL), "nothing may be overwritten")
 	})
 
+	It("writes neither certificate nor key when the CRL step refuses", func() {
+		// The refusal runs before the cert and key writes, which are not
+		// undoable. Deciding afterwards would leave a replaced certificate
+		// beside an untouched old CRL, with no rollback — and the specs above
+		// cannot see it, because their stores hold no prior CA to overwrite.
+		otherKey, otherCert, otherCRL, err := testutil.GenerateTestCAECDSA()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(ca.ImportCA(ctx, store, otherCert, otherKey, otherCRL)).To(Succeed())
+
+		// Now make the stored chain hold nothing of the *incoming* CA's.
+		Expect(store.UpdateCRL(ctx, upsCRL)).To(Succeed())
+
+		err = ca.ImportCA(ctx, store, certPEM, keyPEM, nil)
+		Expect(err).To(MatchError(ContainSubstring("no CRL signed by the CA certificate")))
+
+		storedCert, err := store.GetCACert(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(storedCert).To(Equal(otherCert), "the certificate must not have been replaced")
+		storedKey, err := store.GetCAKey(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(storedKey).To(Equal(otherKey), "the key must not have been replaced")
+	})
+
 	It("fails the import rather than fabricating a CRL when the stored blob cannot be read", func() {
 		// The read used to be swallowed into "there is nothing stored", which
 		// licensed generating an empty CRL over live revocations. Every reader
@@ -513,6 +536,36 @@ var _ = Describe("CRL chain ordering at import", func() {
 		chain := crlBlocks(mustGetCRL(ctx, store))
 		Expect(chain).To(HaveLen(2))
 		Expect(chain[1].AuthorityKeyId).To(Equal(upstream.SubjectKeyId))
+	})
+
+	It("warns about an expired ancestor on the ancestors-only refresh path", func() {
+		// The path the migration guide recommends, because our own CRL is
+		// already stored. The warning used to live behind orderCRLChain's
+		// early return for exactly this shape, so the only detector of a
+		// condition no metric covers was skipped where it was most needed.
+		expired, _ := expiringUpstreamCA("Stale Root CA", -time.Hour)
+
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		defer slog.SetDefault(orig)
+
+		Expect(ca.ImportCA(ctx, store, certPEM, keyPEM, expired)).To(Succeed())
+		Expect(buf.String()).To(ContainSubstring("has already expired"))
+		Expect(buf.String()).To(ContainSubstring("Stale Root CA"))
+	})
+
+	It("warns when the chain carries two CRLs for the same ancestor", func() {
+		_, first := upstreamCA("Shared Root CA")
+		second := append(append([]byte{}, upsCRL...), first...)
+
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		defer slog.SetDefault(orig)
+
+		Expect(ca.ImportCA(ctx, store, certPEM, keyPEM, append(second, first...))).To(Succeed())
+		Expect(buf.String()).To(ContainSubstring("more than one CRL for the same ancestor"))
 	})
 
 	It("keeps the highest-numbered copy when the bundle carries two of ours", func() {
@@ -844,4 +897,37 @@ func crlAtNumber(cert *x509.Certificate, key crypto.Signer, number int64) []byte
 	}, cert, key)
 	Expect(err).NotTo(HaveOccurred())
 	return pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: der})
+}
+
+// expiringUpstreamCA builds an ancestor whose CRL nextUpdate sits at now+offset,
+// so a negative offset yields one that has already lapsed.
+func expiringUpstreamCA(cn string, offset time.Duration) ([]byte, *x509.Certificate) {
+	GinkgoHelper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	Expect(err).NotTo(HaveOccurred())
+
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	Expect(err).NotTo(HaveOccurred())
+	tmpl := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: cn},
+		NotBefore:             time.Now().Add(-48 * time.Hour),
+		NotAfter:              time.Now().Add(48 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	Expect(err).NotTo(HaveOccurred())
+	cert, err := x509.ParseCertificate(der)
+	Expect(err).NotTo(HaveOccurred())
+
+	now := time.Now().UTC()
+	crlDER, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+		Number:     big.NewInt(4),
+		ThisUpdate: now.Add(-72 * time.Hour),
+		NextUpdate: now.Add(offset),
+	}, cert, key)
+	Expect(err).NotTo(HaveOccurred())
+	return pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlDER}), cert
 }
