@@ -448,17 +448,19 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 			baseline:    "262bb3133fe936c2",
 		},
 		{
-			// Any certificate that chains to our trust anchor is admitted, with
-			// no check that the subject matches the caller. Scoped to our own CA
-			// only because ours is the only issuer configured today.
-			name: "any-client: read a certificate status", method: "GET", path: "/certificate_status/somenode",
+			// Admin-only, matching Puppet Server's shipped auth.conf. An
+			// ordinary agent certificate no longer reads statuses; the routes
+			// back are the CN allowlist and pp_cli_auth, exactly as upstream.
+			name: "admin: read a certificate status", method: "GET", path: "/certificate_status/somenode",
 			denied: map[string]bool{
-				"none": true, "own-ca-plain": false, "own-ca-allowlisted": false,
-				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": false,
+				"none": true, "own-ca-plain": true, "own-ca-allowlisted": false,
+				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": true,
 				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
-				"own-ca-pp-cli-auth-false": false, "foreign-ca": true,
+				"own-ca-pp-cli-auth-false": true, "foreign-ca": true,
 			},
-			fingerprint: "50f0635abf97ff03",
+			changedBy: "certificate_status moved from any-client to admin-only for upstream parity; " +
+				"own-ca-plain, own-ca-issued and own-ca-pp-cli-auth-false were previously allowed",
+			fingerprint: "95290d13546028eb",
 			baseline:    "ceb90b2e2a7b4481",
 		},
 		{
@@ -1042,7 +1044,7 @@ var expectedRoutes = []string{
 	"public: submit a CSR",
 	"public: read expiry metadata",
 	"public: query OCSP",
-	"any-client: read a certificate status",
+	"admin: read a certificate status",
 	"any-client: renew own certificate",
 	"self-or-admin: read own CSR",
 	"self-or-admin: read another node's CSR",

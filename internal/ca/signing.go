@@ -154,6 +154,47 @@ func ValidateSubject(subject string) error {
 	return nil
 }
 
+// ErrForeignCertificate is returned when an operation that is only meaningful
+// for a certificate this CA issued is attempted with one it did not issue, or
+// with one that has since been revoked.
+var ErrForeignCertificate = errors.New("certificate was not issued by this CA")
+
+// assertOwnValidCertificate proves that cert was issued by this CA and still
+// stands, and is the gate on both renewal paths.
+//
+// Renewal reissues under this CA's authority using the presented certificate's
+// own subject and extensions. That is safe only while this CA is the only thing
+// that could have produced it: the subject was drawn from a namespace we
+// control, and the extensions were vetted by us at issuance. Neither holds for
+// a certificate some other CA issued, so renewing one would let its issuer
+// choose names and attributes inside our namespace.
+//
+// Two questions, both required. CheckSignatureFrom answers "did we issue this"
+// with a signature check rather than an issuer-name comparison, because a
+// distinguished name is not a credential — under a shared root a sibling CA can
+// hold the same one. It deliberately says nothing about validity, which is why
+// importcert.go can use it to archive expired certificates, so revocation is
+// checked separately: a revoked certificate this CA issued would otherwise
+// still satisfy it and remain a self-renewal credential for whoever holds it.
+//
+// The caller must NOT hold c.mu.
+func (c *CA) assertOwnValidCertificate(ctx context.Context, cert *x509.Certificate) error {
+	if c.CACert == nil {
+		return ErrNotInitialized
+	}
+	if err := cert.CheckSignatureFrom(c.CACert); err != nil {
+		return fmt.Errorf("%w: %v", ErrForeignCertificate, err)
+	}
+	revoked, err := c.IsRevokedSerial(ctx, cert.SerialNumber)
+	if err != nil {
+		return fmt.Errorf("checking whether the presented certificate is revoked: %w", err)
+	}
+	if revoked {
+		return fmt.Errorf("%w: it has been revoked", ErrForeignCertificate)
+	}
+	return nil
+}
+
 // Sign creates and persists a certificate for the pending CSR of subject.
 // The caller must NOT hold c.mu. Serialises on the cluster-wide per-subject
 // lock so concurrent sign attempts from different replicas cannot produce
@@ -690,8 +731,21 @@ func (c *CA) SaveRequest(ctx context.Context, subject string, csrPEM []byte) (bo
 // The caller is responsible for verifying that the CSR CN matches the
 // authenticated client's CN before calling Renew; this method enforces that
 // invariant a second time as defence-in-depth.
-func (c *CA) Renew(ctx context.Context, subject string, csrPEM []byte) ([]byte, error) {
+func (c *CA) Renew(ctx context.Context, subject string, csrPEM []byte, presentedCert *x509.Certificate) ([]byte, error) {
 	if err := ValidateSubject(subject); err != nil {
+		return nil, err
+	}
+
+	// SECURITY: only a certificate this CA issued may be renewed. Without this
+	// the CN check below constrains the caller to a name some *other* CA gave
+	// them, while the certificate produced is issued by us — so a foreign
+	// issuer's namespace would become ours, and any name it hands out could be
+	// claimed here, including one already held by an agent.
+	// NIST 800-53: AC-6 (Least Privilege), IA-5(2) (PKI-Based Authentication)
+	if presentedCert == nil {
+		return nil, fmt.Errorf("%w: no client certificate was presented", ErrForeignCertificate)
+	}
+	if err := c.assertOwnValidCertificate(ctx, presentedCert); err != nil {
 		return nil, err
 	}
 
@@ -782,6 +836,12 @@ func (c *CA) Renew(ctx context.Context, subject string, csrPEM []byte) ([]byte, 
 // was issued; only the serial, validity window, and key identifiers are
 // refreshed.
 //
+// That vetting argument holds only because assertOwnValidCertificate has
+// already established that this CA issued presentedCert. The two are a pair:
+// removing the issuer gate while keeping the unfiltered carry-forward would let
+// any CA trusted for client authentication mint a pp_cli_auth certificate and
+// launder it into an admin credential here.
+//
 // By default the certificate being replaced is revoked once its successor is
 // safely signed and stored, so only the newest serial for a subject is ever
 // valid (see c.RevokeOnAutoRenew). OpenVox Server's own Clojure CA
@@ -793,6 +853,14 @@ func (c *CA) Renew(ctx context.Context, subject string, csrPEM []byte) ([]byte, 
 func (c *CA) AutoRenew(ctx context.Context, presentedCert *x509.Certificate) ([]byte, error) {
 	subject := presentedCert.Subject.CommonName
 	if err := ValidateSubject(subject); err != nil {
+		return nil, err
+	}
+
+	// SECURITY: only a certificate this CA issued may be renewed. The
+	// carry-forward of authorisation OIDs below depends on it; see
+	// assertOwnValidCertificate.
+	// NIST 800-53: AC-6 (Least Privilege), IA-5(2) (PKI-Based Authentication)
+	if err := c.assertOwnValidCertificate(ctx, presentedCert); err != nil {
 		return nil, err
 	}
 
@@ -818,7 +886,11 @@ func (c *CA) AutoRenew(ctx context.Context, presentedCert *x509.Certificate) ([]
 		// preserving them is required for wire-compat (e.g. OpenVox Server's own
 		// cert keeps pp_cli_auth across renewal, or the CA CLI stops
 		// authenticating). Do NOT add an IsAuthOID filter here; see this
-		// method's godoc. NIST 800-53: AC-6, CM-7.
+		// method's godoc.
+		//
+		// This is safe only because assertOwnValidCertificate above established
+		// that we issued presentedCert. Do not remove that check while leaving
+		// this carry-forward in place. NIST 800-53: AC-6, CM-7.
 		if IsPuppetOID(ext.Id) {
 			extraExtensions = append(extraExtensions, ext)
 		}

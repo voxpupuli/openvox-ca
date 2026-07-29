@@ -217,6 +217,24 @@ puppet agent --test --noop
 | `ssl/certs/ca.pem` | (not needed) | Symlink; agents fetch CA cert via API |
 | `ssl/crl.pem` | (not needed) | Symlink; agents fetch CRL via API |
 
+## Authorisation parity
+
+`GET /certificate_status/{certname}` is **admin-only**, matching Puppet Server's
+shipped `auth.conf`, which grants `certificate_status` and
+`certificate_statuses` to holders of the `pp_cli_auth` extension and to nothing
+else. An existing `auth.conf` expectation therefore carries over unchanged: the
+CA CLI's certificate keeps working, and an ordinary agent certificate does not
+read statuses.
+
+Set `allow_public_status: true` if you need the endpoint unauthenticated for
+agents that poll it before they hold a client certificate.
+
+`POST /certificate_renewal` additionally requires that the presented
+certificate is one this CA issued and has not revoked. Renewal reissues under
+this CA's authority using the presented certificate's own subject and
+extensions, so it is only meaningful for certificates this CA vetted when it
+issued them.
+
 ## CLI command mapping
 
 | Puppet / puppetserver ca | openvox-ca-ctl | Notes |

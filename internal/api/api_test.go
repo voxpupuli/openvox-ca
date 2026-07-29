@@ -1351,7 +1351,12 @@ var _ = Describe("API Workflow", func() {
 				NotAfter:     time.Now().Add(time.Hour),
 				DNSNames:     []string{subject},
 			}
-			der, err := x509.CreateCertificate(rand.Reader, template, template, &weakKey.PublicKey, weakKey)
+			// Signed by this CA, not self-signed. The scenario is a node whose
+			// certificate we issued before the key-strength policy existed, so
+			// the renewal gate must pass and the policy check must be what
+			// rejects it. A self-signed fixture here only ever reached the
+			// policy check because nothing verified the issuer.
+			der, err := x509.CreateCertificate(rand.Reader, template, myCA.CACert, &weakKey.PublicKey, myCA.CAKey)
 			Expect(err).NotTo(HaveOccurred())
 			weakCert, err := x509.ParseCertificate(der)
 			Expect(err).NotTo(HaveOccurred())

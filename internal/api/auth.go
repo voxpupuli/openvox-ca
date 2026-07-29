@@ -176,16 +176,18 @@ func lookupTier(method, path string, cfg *AuthConfig) authTier {
 		return tierPublic
 
 	// certificate_status exposes cert metadata (serial numbers, authorization
-	// extensions) that could aid infrastructure enumeration. By default,
-	// require a CA-signed client cert. Operators can opt in to public access
-	// with --allow-public-status for backward compatibility with bootstrapping
-	// agents that poll status before obtaining a client certificate.
+	// extensions) that could aid infrastructure enumeration, so it is admin-only,
+	// matching Puppet Server's shipped auth.conf — which grants both
+	// certificate_status and certificate_statuses to pp_cli_auth holders and to
+	// nothing else. Operators can still opt in to public access with
+	// --allow-public-status for bootstrapping agents that poll status before
+	// obtaining a client certificate.
 	// NIST 800-53: AC-3 (Access Enforcement)
 	case method == "GET" && strings.HasPrefix(p, "/certificate_status/"):
 		if cfg != nil && cfg.AllowPublicStatus {
 			return tierPublic
 		}
-		return tierAnyClient
+		return tierAdminOnly
 	case method == "GET" && p == "/expirations":
 		return tierPublic
 

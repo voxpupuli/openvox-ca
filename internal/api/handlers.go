@@ -935,6 +935,11 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 				http.Error(w, "certificate key does not meet policy; renew with a new CSR", http.StatusUnprocessableEntity)
 				return
 			}
+			if errors.Is(err, ca.ErrForeignCertificate) {
+				slog.Warn("Auto-renewal rejected: certificate not issued by this CA", "subject", cn, "error", err)
+				http.Error(w, "access denied", http.StatusForbidden)
+				return
+			}
 			slog.Warn("Auto-renewal failed", "subject", cn, "error", err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
@@ -956,13 +961,18 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 			return
 		}
 
-		certPEM, err = s.CA.Renew(r.Context(), cn, body)
+		certPEM, err = s.CA.Renew(r.Context(), cn, body, r.TLS.PeerCertificates[0])
 		if err != nil {
 			// Same key-strength policy applies to the re-key CSR: surface it as
 			// a client error instead of a 500.
 			if errors.Is(err, ca.ErrKeyPolicy) {
 				slog.Warn("Renewal rejected: key policy", "subject", cn, "error", err)
 				http.Error(w, "CSR key does not meet policy", http.StatusUnprocessableEntity)
+				return
+			}
+			if errors.Is(err, ca.ErrForeignCertificate) {
+				slog.Warn("Renewal rejected: certificate not issued by this CA", "subject", cn, "error", err)
+				http.Error(w, "access denied", http.StatusForbidden)
 				return
 			}
 			slog.Warn("Renewal failed", "subject", cn, "error", err)
