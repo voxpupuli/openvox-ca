@@ -18,6 +18,7 @@
 package ca_test
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/ecdsa"
@@ -492,5 +493,79 @@ var _ = Describe("crl_chain_file: what makes a CRL acceptable", func() {
 
 		Expect(myCA.Revoke(ctx, "node1.test")).NotTo(Succeed(),
 			"a corrupt chain file must not be published, and must not pass silently")
+	})
+})
+
+var _ = Describe("crl_chain_file: size and duplicates", func() {
+	var (
+		ctx      context.Context
+		store    *storage.StorageService
+		myCA     *ca.CA
+		upstream *x509.Certificate
+		upsKey   crypto.Signer
+		upsCRL   []byte
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		store = storage.New(GinkgoT().TempDir())
+		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(myCA.Init(ctx)).To(Succeed())
+		upstream, upsKey, upsCRL = upstreamCAWithKey("Upstream Root CA")
+	})
+
+	trustUpstream := func() {
+		GinkgoHelper()
+		ours, err := store.GetCACert(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		upstreamPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: upstream.Raw})
+		Expect(store.SaveCACert(ctx, append(append([]byte{}, ours...), upstreamPEM...))).To(Succeed())
+	}
+
+	It("publishes one CRL per issuer, keeping the highest CRL number", func() {
+		// The refresh mechanisms this feature is built around are file
+		// concatenation, so a CronJob that appends rather than replaces grows
+		// the file by one stale copy per run. Publishing both is how a
+		// revocation gets un-revoked for a client that stops at the first
+		// match.
+		trustUpstream()
+		newer := emptyCRLNumbered(upstream, upsKey, 9) // upsCRL is number 7
+		myCA.CRLChainFile = writeChainFile(upsCRL, newer)
+
+		_, err := myCA.RefreshCRLChainFile(ctx)
+		Expect(err).NotTo(HaveOccurred())
+
+		chain := crlBlocks(mustGetCRL(store, ctx))
+		Expect(chain).To(HaveLen(2), "ours plus one upstream, not two upstream")
+		Expect(chain[1].Number.Int64()).To(Equal(int64(9)))
+	})
+
+	It("keeps the highest number whichever order the copies appear in", func() {
+		trustUpstream()
+		newer := emptyCRLNumbered(upstream, upsKey, 9)
+		myCA.CRLChainFile = writeChainFile(newer, upsCRL)
+
+		_, err := myCA.RefreshCRLChainFile(ctx)
+		Expect(err).NotTo(HaveOccurred())
+
+		chain := crlBlocks(mustGetCRL(store, ctx))
+		Expect(chain).To(HaveLen(2))
+		Expect(chain[1].Number.Int64()).To(Equal(int64(9)))
+	})
+
+	It("refuses an oversized file rather than reading a truncated chain", func() {
+		// Silent truncation would drop upstream CRLs with no error, which is
+		// the failure the absent-file handling exists to prevent. This is read
+		// under both the CRL lock and c.mu, on the path every revocation takes.
+		trustUpstream()
+		path := filepath.Join(GinkgoT().TempDir(), "huge.pem")
+		padding := bytes.Repeat([]byte("# padding\n"), (4<<20)/10+1)
+		Expect(os.WriteFile(path, append(append([]byte{}, upsCRL...), padding...), 0o644)).To(Succeed())
+		myCA.CRLChainFile = path
+
+		_, err := myCA.RefreshCRLChainFile(ctx)
+		Expect(err).To(MatchError(ContainSubstring("larger than")))
+		Expect(crlBlocks(mustGetCRL(store, ctx))).To(HaveLen(1), "nothing published from a file we would not read whole")
 	})
 })

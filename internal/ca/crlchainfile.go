@@ -24,6 +24,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -52,7 +53,7 @@ func (c *CA) upstreamCRLs(ctx context.Context) (crls []*x509.RevocationList, sta
 
 	// The path is the operator's own crl_chain_file setting. The content is
 	// verified below regardless of where it came from.
-	data, err := os.ReadFile(c.CRLChainFile)
+	data, err := readCRLChainFile(c.CRLChainFile)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			// Absent is "no statement", not "publish nothing", and the
@@ -106,7 +107,69 @@ func (c *CA) upstreamCRLs(ctx context.Context) (crls []*x509.RevocationList, sta
 		}
 		verified = append(verified, crl)
 	}
-	return verified, true, nil
+	return dedupeCRLs(verified, c.CRLChainFile), true, nil
+}
+
+// maxCRLChainFileBytes bounds the read. Every CRL that survives verification is
+// appended to what agents fetch and to what the Kubernetes exporter writes into
+// a Secret, and it is all held in memory while both the CRL lock and c.mu are
+// held — so an oversized file is not merely a large allocation, it is a large
+// allocation blocking every issuance and revocation in the fleet. A real chain
+// is a handful of CRLs; 4 MiB is generous for that and still small enough that
+// a truncated or wrongly-mounted file fails loudly instead of stalling.
+const maxCRLChainFileBytes = 4 << 20
+
+// readCRLChainFile reads at most maxCRLChainFileBytes, and refuses a file that
+// exceeds it rather than silently truncating: a half-read PEM blob would drop
+// upstream CRLs with no error, which is precisely the failure mode the absent
+// file case exists to prevent.
+func readCRLChainFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	data, err := io.ReadAll(io.LimitReader(f, maxCRLChainFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxCRLChainFileBytes {
+		return nil, fmt.Errorf("crl_chain_file is larger than %d bytes", maxCRLChainFileBytes)
+	}
+	return data, nil
+}
+
+// dedupeCRLs keeps one CRL per issuer: the one with the highest CRL number.
+//
+// Publishing two lists for the same issuer is at best redundant and at worst
+// misleading — a client that stops at the first match could be handed the older
+// one, which is how a revocation gets un-revoked in the eyes of an agent. The
+// case is not hypothetical: the refresh mechanisms this feature is designed
+// around are file concatenation, and a CronJob that appends rather than replaces
+// grows the chain by one stale copy per run.
+//
+// First-appearance order is preserved so that unchanged input keeps producing
+// an unchanged chain, which is what sameCRLSet compares.
+func dedupeCRLs(crls []*x509.RevocationList, path string) []*x509.RevocationList {
+	out := make([]*x509.RevocationList, 0, len(crls))
+	at := make(map[string]int, len(crls))
+	for _, crl := range crls {
+		issuer := string(crl.RawIssuer)
+		i, seen := at[issuer]
+		if !seen {
+			at[issuer] = len(out)
+			out = append(out, crl)
+			continue
+		}
+		kept := out[i]
+		if crl.Number != nil && kept.Number != nil && crl.Number.Cmp(kept.Number) > 0 {
+			kept, out[i] = crl, crl
+		}
+		slog.Warn("Ignoring a duplicate CRL in crl_chain_file; keeping the one with the highest CRL number",
+			"path", path, "issuer", crl.Issuer.String(), "kept", kept.Number)
+	}
+	return out
 }
 
 // signedByAny reports whether any candidate's key signed crl.
