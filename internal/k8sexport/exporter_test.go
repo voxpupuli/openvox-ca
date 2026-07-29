@@ -404,3 +404,94 @@ var _ = Describe("Exporter", func() {
 		Expect(err).To(HaveOccurred()) // never created
 	})
 })
+
+var _ = Describe("Export scopes", func() {
+	// Two-block chains: leaf/intermediate first, root last, matching the order
+	// import-ca-cert enforces and the CA stores.
+	const (
+		certChain = "-----BEGIN CERTIFICATE-----\nSU5URVJNRURJQVRF\n-----END CERTIFICATE-----\n" +
+			"-----BEGIN CERTIFICATE-----\nUk9PVA==\n-----END CERTIFICATE-----\n"
+		crlChain = "-----BEGIN X509 CRL-----\nT1VSUw==\n-----END X509 CRL-----\n" +
+			"-----BEGIN X509 CRL-----\nVVBTVFJFQU0=\n-----END X509 CRL-----\n"
+	)
+
+	var (
+		ctx    context.Context
+		client *fake.Clientset
+		src    stubSource
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		client = fake.NewClientset()
+		src = stubSource{cert: []byte(certChain), crl: []byte(crlChain)}
+	})
+
+	exportWith := func(certScope, crlScope string) map[string][]byte {
+		GinkgoHelper()
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind:      "Secret",
+			Metadata:  k8sexport.Metadata{Name: "trust", Namespace: "ns1"},
+			Cert:      true,
+			CRL:       true,
+			CertScope: certScope,
+			CRLScope:  crlScope,
+		}}}
+		Expect(cfg.Validate()).To(Succeed())
+		Expect(k8sexport.New(client, *cfg, src, "", nil).ExportAll(ctx)).To(Succeed())
+		sec, err := client.CoreV1().Secrets("ns1").Get(ctx, "trust", metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		return sec.Data
+	}
+
+	It("defaults to self, publishing only this CA's own blocks", func() {
+		// The narrow default: an export target usually feeds one consumer's
+		// trust bundle, where a whole chain is rarely what is wanted.
+		data := exportWith("", "")
+		Expect(string(data["ca.crt"])).To(ContainSubstring("SU5URVJNRURJQVRF"))
+		Expect(string(data["ca.crt"])).NotTo(ContainSubstring("Uk9PVA=="))
+		Expect(string(data["ca.crl"])).To(ContainSubstring("T1VSUw=="))
+		Expect(string(data["ca.crl"])).NotTo(ContainSubstring("VVBTVFJFQU0="))
+	})
+
+	It("publishes the whole chain under chain", func() {
+		data := exportWith("chain", "chain")
+		Expect(string(data["ca.crt"])).To(Equal(certChain))
+		Expect(string(data["ca.crl"])).To(Equal(crlChain))
+	})
+
+	It("publishes the trust anchor under root", func() {
+		// import-ca-cert guarantees the last certificate is a self-signed root,
+		// so this needs no validation of its own.
+		data := exportWith("root", "")
+		Expect(string(data["ca.crt"])).To(ContainSubstring("Uk9PVA=="))
+		Expect(string(data["ca.crt"])).NotTo(ContainSubstring("SU5URVJNRURJQVRF"))
+	})
+
+	It("is unchanged for a single-block chain, whichever scope is asked for", func() {
+		// What makes the field back-compatible: today's self-signed CAs have
+		// identical self, chain and root output.
+		single := "-----BEGIN CERTIFICATE-----\nT05MWQ==\n-----END CERTIFICATE-----\n"
+		src = stubSource{cert: []byte(single), crl: []byte(crlChain)}
+		for _, scope := range []string{"", "chain", "root"} {
+			data := exportWith(scope, "chain")
+			Expect(string(data["ca.crt"])).To(Equal(single), "scope %q", scope)
+		}
+	})
+
+	It("rejects an unknown cert scope", func() {
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind: "Secret", Metadata: k8sexport.Metadata{Name: "x"}, Cert: true, CertScope: "everything",
+		}}}
+		Expect(cfg.Validate()).To(MatchError(ContainSubstring("invalid cert_scope")))
+	})
+
+	It("rejects root as a CRL scope", func() {
+		// A CRL chain has no single anchor: the root's own CRL is just one of
+		// its members.
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind: "Secret", Metadata: k8sexport.Metadata{Name: "x"}, CRL: true, CRLScope: "root",
+		}}}
+		Expect(cfg.Validate()).To(MatchError(ContainSubstring("invalid crl_scope")))
+	})
+})

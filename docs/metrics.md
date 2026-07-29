@@ -93,16 +93,13 @@ the Unix epoch, the Prometheus convention for `*_timestamp_seconds` gauges.
 The four CRL gauges above describe **this CA's own CRL**, the first block of the
 stored blob. When a CRL chain has been imported, the ancestor CRLs that follow it
 are not covered: this CA cannot re-sign them, so their expiry is not something a
-refresh can fix and not something these series track.
-
-> **The shipped CRL expiry alerts do not cover ancestor CRLs.**
-> `PuppetCACRLExpiringSoon` and `PuppetCACRLExpired` read
-> `puppetca_crl_next_update_timestamp_seconds`, which is block 0 — and the
-> background refresher keeps block 0 perpetually fresh. So an ancestor CRL can
-> lapse, breaking full-chain revocation checking for every agent running Puppet's
-> default `certificate_revocation = chain`, while both alerts stay green. Until
-> a chain-aware series exists, track ancestor `nextUpdate` deadlines out of band
-> and re-import before they lapse.
+refresh can fix and not something these series track. Re-import the chain before
+an ancestor's own `nextUpdate` lapses —
+`puppetca_crl_chain_next_update_timestamp_seconds` below reports each ancestor's
+deadline, and the shipped mixin alerts on it, so this no longer has to be
+tracked out of band.
+| `puppetca_crl_update_failures_total` | Counter of failures to amend the CRL — a revocation that could not be recorded, or a CRL that could not be re-signed or written (across the revoke, cleanup, reissue and refresh paths). A rising value means the CRL is not being maintained; for revocations it means a superseded certificate may still be a valid credential. Resets to `0` on process restart. |
+| `puppetca_crl_chain_next_update_timestamp_seconds` | NextUpdate of each **upstream** CRL published alongside this CA's own, labelled by `issuer`. Only present when `crl_chain_file` is configured. Deliberately a separate series from the unlabelled CRL metric above: an expiring upstream CRL is fixed at the parent CA, not here, so it has its own alert and runbook. |
 
 ### Self-provisioned serving certificate
 
