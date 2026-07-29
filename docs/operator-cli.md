@@ -88,8 +88,14 @@ openvox-ca-ctl import \
   --private-key ca_key.pem \
   --crl-chain   ca_crl.pem     # optional; a new CRL is generated if omitted
 # The bundle must be a complete chain, nearest first, ending at a self-signed
-# root. If the CA's key is held by a provider rather than a file, there is no
-# --private-key to pass: use `openvox-ca import-ca-cert` instead (below).
+# root, and every certificate in it must be within its validity window. If the
+# CA's key is held by a provider rather than a file, there is no --private-key
+# to pass: use `openvox-ca import-ca-cert` instead (below).
+#
+# --crl-chain must contain only X509 CRL blocks. Every one is parsed, and only
+# the parsed CRLs are stored -- so a file with a certificate or a key
+# concatenated into it is refused, for the same reason the certificate bundle
+# rejects keys: the result is world-readable and served to every agent.
 
 # Migrate an entire CA between storage backends offline (any pair of backends:
 # filesystem, sqlite, postgres, mysql, etcd, redis/valkey). Each backend is
@@ -150,6 +156,22 @@ certificate, each issuer after it, ending with a self-signed root. Supply only
 certificates; a bundle carrying a private key is rejected, because this file is
 stored world-readable and served to every agent.
 
+Two further rules, both checked before anything is written, and both worth
+knowing before you ask the parent to sign rather than after:
+
+- **The leading certificate must carry a CA profile.** If a KeyUsage extension
+  is present it must include `keyCertSign` and `cRLSign`; without them the
+  certificate installs cleanly and then cannot issue certificates or publish a
+  CRL. A parent signing through a narrowed role — an OpenBao PKI role with a
+  restricted `key_usage`, say — is the usual cause. An absent KeyUsage extension
+  is unconstrained by RFC 5280 and is accepted. `pathlen:0` is correct for this
+  CA, not a fault: it permits end-entity certificates and forbids further CAs,
+  which is exactly what openvox-ca issues.
+- **Every certificate in the chain must be within its validity window.** Not
+  just the leading one: an expired root or issuer further up is refused here
+  rather than discovered as chain-verification failures across the fleet, after
+  the bundle has been written and served.
+
 The command never needs the private key *material*: it proves the certificate
 binds the key the configured `ca_key_provider` holds, which is what makes
 importing without a key file safe. With the default `file` provider that means
@@ -167,4 +189,6 @@ the key-binding proof — and writes it to a file instead of to storage, for
 loading into the Secret out of band.
 
 See [running under an external root CA](openbao-transit.md#running-under-an-external-root-ca)
+— written against OpenBao Transit, but the procedure is identical for every
+`ca_key_provider`, including the default file provider —
 for the end-to-end procedure.

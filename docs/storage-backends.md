@@ -436,7 +436,9 @@ ca_key_file:  /etc/puppet-ca/secrets/ca_key.pem
   request is bound to. The startup error names the three ways out: install the
   signed chain with `openvox-ca import-ca-cert`, restore the certificate, or
   remove the orphaned key. See
-  [offline subcommands on the server binary](operator-cli.md#offline-subcommands-on-the-server-binary).
+  [offline subcommands on the server binary](operator-cli.md#offline-subcommands-on-the-server-binary),
+  and [removing an orphaned CA key](#removing-an-orphaned-ca-key) below for how
+  to do the last of those on each backend.
 - On subsequent starts, the cert and key are loaded from the local paths.
 - `openvox-ca` writes the cert at mode `0644` and the key at mode `0600`
   atomically (temp-file + rename). If you supply pre-existing files, they are
@@ -449,6 +451,35 @@ This override also works with the filesystem backend, e.g. to pull the CA
 key out of the cadir tree and onto a separately-mounted volume.
 
 ---
+
+### Removing an orphaned CA key
+
+A CA key with no CA certificate makes the server refuse to start, deliberately —
+see [Behaviour](#behaviour) above. If the key really is orphaned (no signing
+request is outstanding and no certificate is coming), removing it lets the CA
+bootstrap afresh. **This retires the CA:** every certificate already issued
+stops verifying, and every agent must be re-enrolled. There is no
+`openvox-ca-ctl` command for it precisely because it is not an operation to
+perform casually.
+
+Where the key lives depends on the backend:
+
+| Backend | Where the key is | How to remove it |
+| --- | --- | --- |
+| `filesystem` (default) | `private/ca_key.pem` under the cadir | `rm` the file |
+| `ca_key_file` overlay | the configured path | `rm` the file |
+| `sqlite`, `postgres`, `mysql` | the blob table, key `ca_key` | `DELETE FROM <table> WHERE key = 'ca_key';` — see [Internals](#internals) for the table name |
+| `etcd` | `<prefix>/ca_key` | `etcdctl del <prefix>/ca_key` |
+| `redis` / `valkey` | `<prefix>:ca_key` | `redis-cli DEL <prefix>:ca_key` |
+| `openbao` (key provider) | the Transit key named by `key_name` | Delete the key in OpenBao — it must have `deletion_allowed` set. Removing the CA certificate instead is usually the better move; see below. |
+
+With `ca_key_provider: openbao` the key is not in a storage backend at all, and
+deleting a Transit key is irreversible. If the intent is to abandon a
+half-finished sub-CA and start over, prefer keeping the key and removing the CA
+certificate — the CA then bootstraps a fresh self-signed certificate over the
+existing Transit key, which is a smaller and reversible change.
+
+Take a backup before any of these. Stop the CA first.
 
 ## Migrating between backends
 

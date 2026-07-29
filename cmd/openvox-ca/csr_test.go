@@ -22,10 +22,15 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/pem"
+	"math/big"
 	"os"
 	"path/filepath"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -180,7 +185,20 @@ var _ = Describe("openvox-ca csr", func() {
 		// Re-encoding via pkix.Name would drop any attribute it does not model
 		// and reorder the rest. Agents match the issuer against what they
 		// already trust, so a reconstructed DN is a different name.
-		bootstrapCAInDir(caDir, "original.example.com")
+		//
+		// The DN has to be one pkix.Name cannot round-trip, or the spec proves
+		// nothing: for a CN-only subject, x509's fallback path
+		// (asn1.Marshal(Subject.ToRDNSequence())) produces byte-identical DER,
+		// so dropping RawSubject from the request template would still pass.
+		// domainComponent is such an attribute — modelled only as ExtraNames on
+		// the way out, and never reconstructed on the way back in.
+		bootstrapCAWithSubject(caDir, pkix.Name{
+			CommonName: "Puppet CA: original.example.com",
+			ExtraNames: []pkix.AttributeTypeAndValue{
+				{Type: asn1.ObjectIdentifier{0, 9, 2342, 19200300, 100, 1, 25}, Value: "example"},
+				{Type: asn1.ObjectIdentifier{0, 9, 2342, 19200300, 100, 1, 25}, Value: "test"},
+			},
+		})
 
 		store := storage.New(caDir)
 		stored, err := store.GetCACert(context.Background())
@@ -194,6 +212,13 @@ var _ = Describe("openvox-ca csr", func() {
 		csr, err := x509.ParseCertificateRequest(block.Bytes)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(csr.RawSubject).To(Equal(certs[0].RawSubject))
+
+		// Belt and braces: prove the fixture really is one a reconstruction
+		// would mangle, so this spec cannot quietly decay into the CN-only case.
+		rebuilt, err := asn1.Marshal(csr.Subject.ToRDNSequence())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(rebuilt).NotTo(Equal(certs[0].RawSubject),
+			"fixture DN must be one pkix.Name cannot reconstruct, or this spec proves nothing")
 	})
 
 	It("refuses rather than re-subjecting itself when the stored certificate is unreadable", func() {
@@ -216,9 +241,11 @@ var _ = Describe("openvox-ca csr", func() {
 	It("creates no key when the subject cannot be resolved", func() {
 		// A run that cannot determine a subject must not leave a CA key behind:
 		// at a provider it may not be removable with openvox-ca at all, and it
-		// is the state Init now refuses to start over.
+		// is the state Init now refuses to start over. The specific error
+		// matters because the ordering is the claim: any other failure arriving
+		// first would satisfy "no key was left behind" vacuously.
 		_, err := runCSR("--cadir", caDir, "--create-key")
-		Expect(err).To(HaveOccurred())
+		Expect(err).To(MatchError(ContainSubstring("hostname is required")))
 
 		has, err := storage.New(caDir).HasCAKey(context.Background())
 		Expect(err).NotTo(HaveOccurred())
@@ -230,7 +257,8 @@ var _ = Describe("openvox-ca csr", func() {
 		// pins the two together, and the failure mode is silent — a CA key
 		// written in plaintext despite encrypt_ca_key.
 		cfgPath := filepath.Join(GinkgoT().TempDir(), "enc.yaml")
-		Expect(os.WriteFile(cfgPath, []byte("encrypt_ca_key: true\n"), 0o600)).To(Succeed())
+		Expect(os.WriteFile(cfgPath,
+			[]byte("ca_key_algo: ecdsa\nca_key_size: 256\nencrypt_ca_key: true\n"), 0o600)).To(Succeed())
 		GinkgoT().Setenv("PUPPET_CA_CONFIG", cfgPath)
 
 		_, err := runCSR("--cadir", caDir, "--hostname", "puppet.example.com", "--create-key")
@@ -281,6 +309,37 @@ func mustRead(path string) []byte {
 
 // bootstrapCAInDir creates a fully bootstrapped CA in dir, so tests can
 // exercise the paths that require an established certificate.
+// bootstrapCAWithSubject writes a self-signed CA whose DN is exactly subject,
+// including attributes pkix.Name models only as ExtraNames. Built directly
+// rather than through Init, which composes the DN from a hostname.
+func bootstrapCAWithSubject(dir string, subject pkix.Name) {
+	GinkgoHelper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	Expect(err).NotTo(HaveOccurred())
+
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	Expect(err).NotTo(HaveOccurred())
+	tmpl := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               subject,
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
+	Expect(err).NotTo(HaveOccurred())
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	Expect(err).NotTo(HaveOccurred())
+
+	store := storage.New(dir)
+	ctx := context.Background()
+	Expect(store.EnsureDirs(ctx)).To(Succeed())
+	Expect(store.SaveCACert(ctx, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))).To(Succeed())
+	Expect(store.SaveCAKey(ctx, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))).To(Succeed())
+}
+
 func bootstrapCAInDir(dir, hostname string) {
 	GinkgoHelper()
 	store := storage.New(dir)

@@ -133,7 +133,24 @@ func (c *CA) Init(ctx context.Context) error {
 				"bootstrap, as that would replace the key and invalidate every certificate issued under it. "+
 				"If a certificate signing request is outstanding, install the signed chain with "+
 				"'openvox-ca import-ca-cert'; otherwise restore the CA certificate, or remove the orphaned "+
-				"key to bootstrap afresh: %w", where, loadErr)
+				"key (see the storage backends guide for how, per backend) to bootstrap afresh: %w",
+				where, loadErr)
+		}
+		// The mirror case, and the argument for refusing is the same one. A
+		// certificate with no key cannot sign anything, so bootstrapping does
+		// not recover the CA — it discards the certificate every already-issued
+		// certificate is verified against, and replaces it with one for a key
+		// nobody has seen. Losing the key is the disaster; overwriting the only
+		// record of what the CA was is not the remedy for it.
+		if hasCert && !hasKey {
+			where := "in storage"
+			if c.KeyProvider != nil {
+				where = "at the configured key provider"
+			}
+			return fmt.Errorf("a CA certificate exists but its key is missing %s: refusing to bootstrap, "+
+				"as that would discard the certificate every certificate issued so far is verified against. "+
+				"Restore the key, or remove the CA certificate to bootstrap afresh — which retires this CA "+
+				"and requires every agent to be re-enrolled: %w", where, loadErr)
 		}
 		if !hasCert || !hasKey {
 			slog.Info("No existing CA found, bootstrapping new CA")

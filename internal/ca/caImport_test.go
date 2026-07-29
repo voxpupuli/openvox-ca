@@ -25,6 +25,7 @@ import (
 	"encoding/pem"
 	"math/big"
 	"os"
+	"path/filepath"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -265,3 +266,59 @@ func countPEMBlocks(blob []byte, blockType string) int {
 		}
 	}
 }
+
+var _ = Describe("ImportCAMaterial: failures after the certificate is written", func() {
+	// Both annotations were previously asserted only against errors the tests
+	// built themselves, which proves the annotator's predicate but not that any
+	// real failure ever carries the sentinel. If the production path stopped
+	// wrapping, the read-only-Secret guidance and the inconsistent-storage
+	// warning would silently never appear.
+	var (
+		ctx   context.Context
+		dir   string
+		store *storage.StorageService
+		chain *testutil.TestChain
+		key   crypto.Signer
+	)
+
+	BeforeEach(func() {
+		var err error
+		ctx = context.Background()
+		dir = GinkgoT().TempDir()
+		store = storage.New(dir)
+		chain, err = testutil.GenerateTestChain("node.example.com")
+		Expect(err).NotTo(HaveOccurred())
+
+		keyBlock, _ := pem.Decode(chain.InterKeyPEM)
+		Expect(keyBlock).NotTo(BeNil())
+		parsed, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		var ok bool
+		key, ok = parsed.(crypto.Signer)
+		Expect(ok).To(BeTrue())
+	})
+
+	It("wraps a real CA certificate write failure with ErrCACertWrite", func() {
+		// A directory where the certificate blob belongs: the write fails for a
+		// reason the storage layer surfaces, without any stubbing.
+		Expect(store.EnsureDirs(ctx)).To(Succeed())
+		Expect(os.RemoveAll(filepath.Join(dir, "ca_crt.pem"))).To(Succeed())
+		Expect(os.MkdirAll(filepath.Join(dir, "ca_crt.pem"), 0o755)).To(Succeed())
+
+		err := ca.ImportCAMaterial(ctx, store, chain.Bundle, chain.InterKeyPEM, nil, key, ca.CRLValidity)
+		Expect(err).To(MatchError(ca.ErrCACertWrite),
+			"the sentinel is what annotateOverlayWriteError discriminates on")
+	})
+
+	It("tells the operator storage is inconsistent when a write after the certificate fails", func() {
+		Expect(store.EnsureDirs(ctx)).To(Succeed())
+		Expect(os.RemoveAll(filepath.Join(dir, "ca_pub.pem"))).To(Succeed())
+		Expect(os.MkdirAll(filepath.Join(dir, "ca_pub.pem"), 0o755)).To(Succeed())
+
+		err := ca.ImportCAMaterial(ctx, store, chain.Bundle, chain.InterKeyPEM, nil, key, ca.CRLValidity)
+		Expect(err).To(MatchError(ContainSubstring("storage is now inconsistent")))
+		// ImportCA's caller has no --force, so it must not be told to use one.
+		Expect(err).To(MatchError(ContainSubstring("re-run this command to finish the import")))
+		Expect(err).NotTo(MatchError(ContainSubstring("--force")))
+	})
+})

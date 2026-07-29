@@ -19,7 +19,6 @@ package main
 
 import (
 	"context"
-	"os"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -75,7 +74,7 @@ var _ = Describe("resolveRuntime", func() {
 		Expect(rt.KeyProvider).To(BeNil())
 	})
 
-	It("rejects an invalid key provider configuration before opening anything", func() {
+	It("rejects an invalid key provider configuration", func() {
 		dir := GinkgoT().TempDir()
 		cfg := &serverConfig{CADir: dir}
 		cfg.CAKeyProvider = "nonsense"
@@ -83,11 +82,25 @@ var _ = Describe("resolveRuntime", func() {
 		Expect(err).To(MatchError(ContainSubstring("nonsense")),
 			"the error must name the provider that was rejected")
 
-		// "before opening anything" is half the claim, and the half a later
-		// refactor is most likely to break by moving Validate() below the
-		// storage construction. Nothing may have been created in the cadir.
-		entries, readErr := os.ReadDir(dir)
-		Expect(readErr).NotTo(HaveOccurred())
-		Expect(entries).To(BeEmpty(), "validation must run before any backend is opened")
+		// Deliberately no assertion that "nothing was opened". There is no
+		// observable side effect to hang one on: the filesystem backend only
+		// constructs a struct, and even sqlite does not touch its DSN until
+		// first use, so any such assertion passes whether validation runs
+		// before or after storage construction. Claiming to pin the ordering
+		// while proving nothing is worse than not claiming it.
 	})
+})
+
+var _ = Describe("roleMayReachCAKey", func() {
+	// The gate itself is asserted against resolveRuntime elsewhere; this pins
+	// the mapping feeding it, which is the half a typo or an inversion breaks.
+	DescribeTable("decides which roles may construct a key provider",
+		func(role string, want bool) {
+			Expect(roleMayReachCAKey(role)).To(Equal(want))
+		},
+		Entry("the frontend proxies signatures and must never hold the key", "frontend", false),
+		Entry("the signer is the process the key exists for", "signer", true),
+		Entry("the empty role is single-process, which signs for itself", "", true),
+		Entry("an unrecognised role is not the frontend, so it is not the special case", "worker", true),
+	)
 })

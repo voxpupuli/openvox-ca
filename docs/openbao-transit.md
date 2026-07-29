@@ -317,9 +317,16 @@ This applies to every `ca_key_provider`, not only Transit — with the default
 removes the very thing the commands authenticate with: under
 `auth_method: kubernetes` the credential is the pod's own projected
 ServiceAccount token, and the configuration comes from the pod's mounts. Run
-them from a one-shot Job carrying the same ServiceAccount, image and config
-mount as the Deployment — the `csr` step writing its request where you can
-retrieve it, the `import-ca-cert` step reading the signed chain back in:
+them from a one-shot Job carrying the same ServiceAccount, image and mounts as
+the Deployment.
+
+Three details are easy to get wrong. The config must land where the command
+looks for it — `/etc/puppet-ca/config.yaml`, unless you pass `--config` or set
+`PUPPET_CA_CONFIG`. Setting `args:` replaces the image's `CMD`, so any `--cadir`
+it supplied is gone and the config file (or a flag) has to provide it. And the
+request has to outlive the pod, so write it somewhere that survives: a
+PersistentVolumeClaim, or stdout, which `kubectl logs` can retrieve after the
+Job completes.
 
 ```yaml
 apiVersion: batch/v1
@@ -330,18 +337,27 @@ spec:
   template:
     spec:
       restartPolicy: Never
-      serviceAccountName: openvox-ca      # the same one the Deployment uses
+      serviceAccountName: openvox-ca        # the same one the Deployment uses
       containers:
         - name: csr
-          image: ghcr.io/voxpupuli/openvox-ca:latest
-          args: ["csr", "--out", "/out/ca-request.pem"]
+          image: ghcr.io/voxpupuli/openvox-ca:1.0.0   # pin to the Deployment's tag
+          # No --out: the request goes to stdout, so `kubectl logs job/openvox-ca-csr`
+          # retrieves it after the pod has exited.
+          args: ["csr"]
           volumeMounts:
-            - { name: config, mountPath: /etc/openvox-ca }
-            - { name: out, mountPath: /out }
+            - { name: config, mountPath: /etc/puppet-ca }
+            # Only needed on the filesystem backend, where --create-key writes
+            # the CA key to the cadir. It must be the same volume the Deployment
+            # uses, or the key is created in the pod's ephemeral layer and lost.
+            - { name: cadir, mountPath: /etc/puppetlabs/puppet/ssl/ca }
       volumes:
-        - { name: config, configMap: { name: openvox-ca-config } }
-        - { name: out, emptyDir: {} }
+        - { name: config, configMap: { name: openvox-ca-config } }   # key: config.yaml
+        - { name: cadir, persistentVolumeClaim: { claimName: openvox-ca } }
 ```
+
+The second step is the same Job with the signed chain mounted in and
+`args: ["import-ca-cert", "--cert-bundle", "/in/signed-chain.pem"]`, the chain
+supplied as a Secret or ConfigMap mounted read-only at `/in`.
 
 Anywhere with equivalent OpenBao credentials and the same configuration works
 just as well; the Job is only the most direct way to get them.

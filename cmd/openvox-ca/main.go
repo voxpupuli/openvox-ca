@@ -430,7 +430,7 @@ func newRootCmd() *cobra.Command {
 			// process and must never construct a provider of its own: doing so
 			// would open a second authenticated session to the key backend for a
 			// key this process is specifically not allowed to use.
-			rt, err := resolveRuntime(ctx, cfg, role != "frontend")
+			rt, err := resolveRuntime(ctx, cfg, roleMayReachCAKey(role))
 			if err != nil {
 				return err
 			}

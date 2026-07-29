@@ -26,7 +26,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/voxpupuli/openvox-ca/internal/ca"
-	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
 
 // newImportCACertCmd builds the "import-ca-cert" subcommand, which installs a
@@ -145,8 +144,15 @@ for deployments where the CA certificate is mounted read-only from outside
 				// replica keeps serving under the certificate it replaced.
 				msg += "The previous CA certificate was replaced: restart every replica before it issues again.\n"
 			}
-			_, err = fmt.Fprint(cmd.ErrOrStderr(), msg)
-			return err
+			// Best-effort, and deliberately not returned: the import has
+			// committed, and under --force the previous certificate is already
+			// gone. An EPIPE from a closed pipe in a wrapper script would
+			// otherwise make tooling read an irreversible, successful
+			// replacement as a failure — and the natural response to that is a
+			// retry or a rollback, neither of which is what storage now needs.
+			// The exit code reports the state of storage, not of stderr.
+			_, _ = fmt.Fprint(cmd.ErrOrStderr(), msg)
+			return nil
 		},
 	}
 
@@ -167,15 +173,8 @@ for deployments where the CA certificate is mounted read-only from outside
 // what lands in the Secret is exactly what was validated — same DER, no PEM
 // commentary and nothing that was skipped on the way in.
 func writeValidatedBundle(cmd *cobra.Command, path string, certs []*x509.Certificate) error {
-	// G703: path is the operator's own --out argument on an offline command they
-	// are running deliberately, and the content is a certificate chain that has
-	// already been fully validated. There is no privilege boundary to cross:
-	// constraining where an operator may write their own file would add nothing.
-	if err := os.WriteFile(path, ca.EncodeCABundle(certs), storage.FilePermPublic); err != nil { //nolint:gosec // G703: operator-supplied --out path on an offline command
-		return fmt.Errorf("writing %s: %w", path, err)
-	}
-	if err := os.Chmod(path, storage.FilePermPublic); err != nil {
-		return fmt.Errorf("setting permissions on %s: %w", path, err)
+	if err := writePublicFile(path, ca.EncodeCABundle(certs)); err != nil {
+		return err
 	}
 	_, err := fmt.Fprintf(cmd.ErrOrStderr(),
 		"Validated CA certificate %q written to %s (not installed; load it into the configured ca_cert_file)\n",

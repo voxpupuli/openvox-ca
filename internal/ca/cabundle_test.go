@@ -41,6 +41,17 @@ import (
 // of zero omits the extension entirely.
 func caCertWithKeyUsage(ku x509.KeyUsage) []*x509.Certificate {
 	GinkgoHelper()
+	return caCertWithProfile(ku, false)
+}
+
+// caCertWithProfile is caCertWithKeyUsage, optionally encoding pathlen:0 into
+// the basicConstraints extension. Set on the template, not on the parsed
+// result: assigning MaxPathLenZero after ParseCertificate leaves the DER
+// without any pathLenConstraint, so a check reading the extension rather than
+// the parsed convenience field would see a different certificate than the
+// spec claims to be testing.
+func caCertWithProfile(ku x509.KeyUsage, pathLenZero bool) []*x509.Certificate {
+	GinkgoHelper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	Expect(err).NotTo(HaveOccurred())
 
@@ -52,6 +63,8 @@ func caCertWithKeyUsage(ku x509.KeyUsage) []*x509.Certificate {
 		BasicConstraintsValid: true,
 		IsCA:                  true,
 		KeyUsage:              ku,
+		MaxPathLen:            0,
+		MaxPathLenZero:        pathLenZero,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	Expect(err).NotTo(HaveOccurred())
@@ -173,9 +186,9 @@ var _ = Describe("CA bundle parsing and ordering", func() {
 			// pathlen:0 permits issuing end-entity certificates and forbids
 			// issuing further CAs. openvox-ca issues only end-entity
 			// certificates, so this is a well-formed sub-CA, not a fault.
-			certs := caCertWithKeyUsage(x509.KeyUsageCertSign | x509.KeyUsageCRLSign)
-			certs[0].MaxPathLen = 0
-			certs[0].MaxPathLenZero = true
+			certs := caCertWithProfile(x509.KeyUsageCertSign|x509.KeyUsageCRLSign, true)
+			Expect(certs[0].MaxPathLenZero).To(BeTrue(),
+				"the fixture must genuinely encode pathlen:0, not merely claim it")
 			Expect(ca.ValidateCABundleOrder(certs)).To(Succeed())
 		})
 

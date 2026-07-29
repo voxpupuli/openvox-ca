@@ -152,6 +152,31 @@ func ValidateCABundleOrder(certs []*x509.Certificate) error {
 	// refusal. pathlen:0 is deliberately not checked — it permits issuing
 	// end-entity certificates and forbids issuing further CAs, which is exactly
 	// what openvox-ca does, so it is the correct profile rather than a fault.
+	// Validity is checked for the same reason the profile is, and the argument
+	// is if anything stronger: a certificate outside its window installs
+	// cleanly and is then rejected by every agent verifying the chain. Only
+	// certs[0] is ever checked again afterwards (at issuance, by
+	// signing.go), so an expired issuer or root further up the bundle would
+	// never be noticed here at all — it would surface as chain-verification
+	// failures across the fleet, after the bundle had been written and served.
+	// Realistic causes are mundane: a stale root.pem copy, an offline root past
+	// its window, a parent that silently truncated the requested ttl.
+	now := time.Now()
+	for i, cert := range certs {
+		which := fmt.Sprintf("certificate %d in bundle (%q)", i+1, cert.Subject.CommonName)
+		if i == 0 {
+			which = fmt.Sprintf("first certificate in bundle (%q)", cert.Subject.CommonName)
+		}
+		if now.Before(cert.NotBefore) {
+			return fmt.Errorf("%s is not valid until %s; check the clock on this host and the "+
+				"validity the parent CA issued", which, cert.NotBefore.UTC().Format(time.RFC3339))
+		}
+		if now.After(cert.NotAfter) {
+			return fmt.Errorf("%s expired at %s; every agent would reject the chain, so it is "+
+				"refused here rather than fleet-wide", which, cert.NotAfter.UTC().Format(time.RFC3339))
+		}
+	}
+
 	if ku := certs[0].KeyUsage; ku != 0 {
 		if ku&x509.KeyUsageCertSign == 0 {
 			return fmt.Errorf("first certificate in bundle (%q) has a KeyUsage extension without keyCertSign, "+
