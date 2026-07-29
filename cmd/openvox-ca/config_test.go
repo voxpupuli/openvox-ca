@@ -603,6 +603,8 @@ var _ = Describe("applyServerEnv each variable", func() {
 		},
 		Entry("CADIR", "PUPPET_CA_CADIR", "/some/dir",
 			func(c *serverConfig) bool { return c.CADir == "/some/dir" }, "CADir"),
+		Entry("CLIENT_REVOCATION_POLICY", "PUPPET_CA_CLIENT_REVOCATION_POLICY", "check",
+			func(c *serverConfig) bool { return c.ClientRevocationPolicy == "check" }, "ClientRevocationPolicy"),
 		Entry("AUTOSIGN_CONFIG", "PUPPET_CA_AUTOSIGN_CONFIG", "true",
 			func(c *serverConfig) bool { return c.AutosignConfig == "true" }, "AutosignConfig"),
 		Entry("HOST", "PUPPET_CA_HOST", "1.2.3.4",
