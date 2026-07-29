@@ -135,6 +135,7 @@ func applyCAConfig(myCA *ca.CA, cfg *serverConfig) error {
 		myCA.CRLURLs = []string{cfg.CRLUrl}
 	}
 	myCA.CRLValidityDays = cfg.CRLValidityDays
+	myCA.CRLChainFile = cfg.CRLChainFile
 
 	if cfg.CAKeyAlgo != "" || cfg.CAKeySize != 0 {
 		myCA.CAKeyConfig = ca.KeyConfig{
@@ -743,6 +744,12 @@ func newRootCmd() *cobra.Command {
 				go runCRLRefresher(ctx, myCA, cfg.crlRefreshInterval(), refreshBefore)
 			} else {
 				slog.Info("CRL auto-refresh disabled by configuration")
+			}
+
+			// Independently gated: an operator publishing an upstream CRL
+			// chain need not also be self-provisioning a certificate.
+			if cfg.CRLChainFile != "" {
+				maintenanceTasks = append(maintenanceTasks, crlChainFileTask(myCA, cfg))
 			}
 
 			// Shared maintenance loop. Bound to ctx so it stops on shutdown.
