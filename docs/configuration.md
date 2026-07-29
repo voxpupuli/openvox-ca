@@ -106,6 +106,12 @@ crl_refresh_before_sec: 0      # re-sign when remaining validity < this; 0 = crl
 # effect here. Read-only, runs on every replica, and is not covered by
 # disable_crl_refresh. See "Revocation across replicas" below.
 crl_sync_interval_sec: 0       # how often to reload; 0 = built-in default (60s)
+
+# A PEM bundle of upstream CRLs published alongside this CA's own, for agents
+# doing full-chain revocation checking. Verified against the stored CA bundle,
+# and re-read by the crl-chain-refresh background job.
+crl_chain_file: ""
+crl_chain_refresh_interval_sec: 0  # how often to re-read it; 0 = built-in default (1h)
 # Background expired-certificate cleanup (opt-in). When enabled, a job removes
 # certificates that expired more than the retention grace period ago from the
 # inventory and the CRL, and deletes their stored signed certificate. Safe to run
@@ -170,6 +176,8 @@ The CA key passphrase can also be provided via `PUPPET_CA_KEY_PASSPHRASE` (env v
 
 | Config key | Environment variable |
 | --- | --- |
+| `crl_chain_file` | `PUPPET_CA_CRL_CHAIN_FILE` |
+| `crl_chain_refresh_interval_sec` | `PUPPET_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC` |
 | `ca_key_algo` | `PUPPET_CA_CA_KEY_ALGO` |
 | `ca_key_size` | `PUPPET_CA_CA_KEY_SIZE` |
 | `leaf_key_algo` | `PUPPET_CA_LEAF_KEY_ALGO` |
@@ -272,6 +280,54 @@ raises `puppetca_crl_sync_failures_total`; startup warns about the same
 condition and the re-sign paths refuse it outright. See
 [storage backends](storage-backends.md) for how that state is reached and
 repaired.
+
+## Publishing an upstream CRL chain
+
+When openvox-ca runs as an intermediate, agents doing full-chain revocation
+checking — Puppet's default `certificate_revocation = chain` — need the
+ancestors' CRLs as well as this CA's own. `crl_chain_file` is how they get
+there:
+
+```yaml
+crl_chain_file: /etc/puppet-ca/upstream-crls.pem
+```
+
+It is a PEM bundle of upstream CRLs, re-read on every maintenance cycle and
+published alongside this CA's own CRL at
+`GET /puppet-ca/v1/certificate_revocation_list/ca`. The file is **declarative**:
+whatever it contains is what gets published, so a CRL removed from it disappears
+from the served chain. Refresh it by whatever mechanism you already have — a
+mounted Secret, a sidecar, a CronJob — and openvox-ca picks the change up.
+
+**Every CRL in the file is signature-verified** against a certificate in the
+stored CA bundle before it is served, and discarded with a warning otherwise.
+This content goes to every agent, so an unverified file would be a way to inject
+arbitrary bytes into every agent's CRL store. The check is always satisfiable:
+`import-ca-cert` requires a complete chain, so the bundle contains the root and
+the root's CRL always has a verifier.
+
+A CRL this CA issued is ignored if found in the file — its own is always rebuilt
+from the inventory, and a stale copy must not be able to supersede live
+revocations.
+
+Refreshing the chain re-signs this CA's own CRL, so its number advances even
+when no certificate was revoked. That is harmless (the number need only
+increase) and is the price of having one write path rather than a second,
+subtler one.
+
+Per-issuer freshness is reported as
+`puppetca_crl_chain_next_update_timestamp_seconds{issuer}`, deliberately
+separate from `puppetca_crl_next_update_timestamp_seconds`, which continues to
+mean *this CA's own* CRL. An expiring upstream CRL is fixed at the parent CA,
+not here, so it gets its own alert with its own runbook — see the
+[mixin](../mixin/).
+
+> **Rolling upgrades.** A replica running a build from before chain preservation
+> re-signs the CRL as a single block and silently drops the chain, so one old
+> replica handling one revocation undoes it for everyone. Make sure every
+> replica is running a build with chain preservation *before* configuring
+> `crl_chain_file`. Preservation is a no-op on a single-CRL deployment, so that
+> ordering costs nothing.
 
 ## Autosigning
 

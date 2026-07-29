@@ -48,6 +48,20 @@ const (
 	defaultCRLKey  = "ca.crl"
 )
 
+// Export scopes select how much of a chain a target publishes.
+const (
+	// ScopeSelf publishes only this CA's own certificate or CRL — block 0 of
+	// the stored bundle. The default, and identical to ScopeChain on a CA that
+	// issues its own root.
+	ScopeSelf = "self"
+	// ScopeChain publishes the stored bundle or CRL chain verbatim.
+	ScopeChain = "chain"
+	// ScopeRoot publishes the last certificate in the bundle: the trust anchor
+	// rather than the issuing CA. Certificates only — a CRL chain has no
+	// equivalent, since the root's CRL is simply one of its members.
+	ScopeRoot = "root"
+)
+
 // Config is the top-level kubernetes_export configuration block. The feature is
 // considered enabled when Targets is non-empty.
 type Config struct {
@@ -91,6 +105,18 @@ type Target struct {
 	// selects defaultCertKey / defaultCRLKey.
 	CertKey string `yaml:"cert_key"`
 	CRLKey  string `yaml:"crl_key"`
+
+	// CertScope and CRLScope select how much of each chain to publish. Empty
+	// selects ScopeSelf, which is what makes the fields back-compatible: on
+	// today's single-certificate CAs self and chain are byte-identical, so no
+	// existing deployment changes.
+	//
+	// Note the deliberate asymmetry with the HTTP endpoints. GET /certificate/ca
+	// and the CRL endpoint always serve the full chain, because Puppet agents
+	// need it; export targets default to self, because they typically feed one
+	// consumer's trust bundle where a whole chain is rarely what is wanted.
+	CertScope string `yaml:"cert_scope"`
+	CRLScope  string `yaml:"crl_scope"`
 }
 
 // Enabled reports whether any export target is configured.
@@ -141,6 +167,27 @@ func (t *Target) validate() error {
 	}
 	if t.CRL && t.CRLKey == "" {
 		t.CRLKey = defaultCRLKey
+	}
+
+	if t.CertScope == "" {
+		t.CertScope = ScopeSelf
+	}
+	if t.CRLScope == "" {
+		t.CRLScope = ScopeSelf
+	}
+	switch t.CertScope {
+	case ScopeSelf, ScopeChain, ScopeRoot:
+	default:
+		return fmt.Errorf("invalid cert_scope %q (must be %q, %q or %q)",
+			t.CertScope, ScopeSelf, ScopeChain, ScopeRoot)
+	}
+	switch t.CRLScope {
+	case ScopeSelf, ScopeChain:
+	default:
+		// No "root" for CRLs: a chain has no single anchor CRL, and the root's
+		// own CRL is just one of its members.
+		return fmt.Errorf("invalid crl_scope %q (must be %q or %q)",
+			t.CRLScope, ScopeSelf, ScopeChain)
 	}
 
 	// A single object cannot store both materials under the same key.

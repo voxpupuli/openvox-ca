@@ -88,6 +88,7 @@ the Unix epoch, the Prometheus convention for `*_timestamp_seconds` gauges.
 | `puppetca_crl_next_update_timestamp_seconds` | CRL `NextUpdate` (expiry) time. |
 | `puppetca_crl_revoked_certificates` | Number of certificates currently listed in the CRL. |
 | `puppetca_crl_update_failures_total` | Counter of failures to amend the CRL. A lower bound — see the note below. Resets to `0` on process restart. |
+| `puppetca_crl_chain_next_update_timestamp_seconds` | NextUpdate of each **upstream** CRL published alongside this CA's own, labelled by `issuer`. Only present when `crl_chain_file` is configured. Deliberately a separate series from the unlabelled CRL metrics above: an expiring upstream CRL is fixed at the parent CA, not here, so it has its own alert and runbook. |
 | `puppetca_crl_cached_number` | CRL number of the copy **this replica** is answering revocation checks from. `number`, `this_update`, `next_update` and `revoked_certificates` above are read from storage and so are identical on every replica; this one and both `*_failures_total` counters are per-process and have to be checked on each. |
 | `puppetca_crl_sync_failures_total` | Counter of failures to reload the stored CRL into that in-memory copy — an unreadable or unparseable CRL, or one this CA did not sign. While it rises the replica keeps enforcing whichever CRL it already held. Resets to `0` on process restart. |
 
@@ -150,17 +151,12 @@ in the chain (see [storage internals](development/storage-internals.md)) while
 these series still describe block 0. Startup warns loudly in that state, and every
 write path refuses it, so it is a condition to fix rather than to monitor. When a CRL chain has been imported, the ancestor CRLs that follow it
 are not covered: this CA cannot re-sign them, so their expiry is not something a
-refresh can fix and not something these series track.
+refresh can fix and not something these series track. Re-import the chain before
+an ancestor's own `nextUpdate` lapses —
+`puppetca_crl_chain_next_update_timestamp_seconds` below reports each ancestor's
+deadline, and the shipped mixin alerts on it, so this no longer has to be
+tracked out of band.
 
-> **The shipped CRL expiry alerts do not cover ancestor CRLs.**
-> `PuppetCACRLExpiringSoon` and `PuppetCACRLExpired` read
-> `puppetca_crl_next_update_timestamp_seconds`, which is block 0 — and the
-> background refresher keeps block 0 perpetually fresh. So an ancestor CRL can
-> lapse, breaking full-chain revocation checking for every agent running Puppet's
-> default `certificate_revocation = chain`, while both alerts stay green. Until
-> a chain-aware series exists, track ancestor `nextUpdate` deadlines out of band
-> and re-import before they lapse.
->
 > **No series tracks the chain's length either, so watch the log during a rolling
 > upgrade.** A replica running a build from before chain preservation re-signs the
 > CRL by writing one block, dropping every ancestor — and nothing detects it,

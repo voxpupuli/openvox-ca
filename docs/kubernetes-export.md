@@ -86,8 +86,36 @@ kubernetes_export:
 | `cert` | both | `false` | Include the CA certificate |
 | `crl` | both | `false` | Include the CRL (at least one of `cert`/`crl` must be true) |
 | `cert_key` | both | `ca.crt` | Data key for the cert |
-| `crl_key` | both | `ca.crl` | Data key for the CRL. Carries the whole stored chain — this CA's own CRL first, then every ancestor's — when a chain has been imported, matching what `GET /certificate_revocation_list/ca` serves. Consumers expecting exactly one CRL need to handle a multi-block PEM (must differ from `cert_key`) |
+| `crl_key` | both | `ca.crl` | Data key for the CRL (must differ from `cert_key`) |
+| `cert_scope` | both | `self` | `self`, `chain` or `root` — see below |
+| `crl_scope` | both | `self` | `self` or `chain` |
 | `type` | Secret | unmanaged | Secret `type` field; unset means the exporter does not own it (see below); rejected on ConfigMaps |
+
+### Scopes
+
+Once the CA certificate and the CRL can both be chains, a target has to say how
+much of one it wants:
+
+| Scope | Publishes |
+| --- | --- |
+| `self` (default) | Only this CA's own certificate or CRL |
+| `chain` | The stored bundle or CRL chain verbatim |
+| `root` | The last certificate in the bundle — the trust anchor. Certificates only |
+
+`root` needs no validation of its own: `import-ca-cert` guarantees the last
+certificate in the bundle is a self-signed root. There is no `root` for CRLs,
+because a chain has no single anchor CRL — the root's own is simply one of its
+members.
+
+The default is back-compatible by construction: on a CA that issues its own
+root, `self`, `chain` and `root` produce identical output, so no existing
+deployment changes.
+
+**A deliberate asymmetry, worth flagging as intentional rather than
+inconsistent.** The HTTP endpoints `/certificate/ca` and
+`/certificate_revocation_list/ca` always serve the full chain, because Puppet
+agents need it. Export targets default to `self`, because they typically feed
+one specific consumer's trust bundle, where a whole chain is rarely wanted.
 
 ### Secret type
 
