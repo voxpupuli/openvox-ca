@@ -310,8 +310,7 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 
 		server := api.New(myCA)
 		server.AuthConfig = &api.AuthConfig{
-			CACert:    caCert,
-			AllowList: adminAllowList,
+			Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, adminAllowList, true)},
 		}
 		mux = server.Routes()
 

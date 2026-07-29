@@ -47,10 +47,26 @@ const maxJSONBody = 1 << 20 // 1 MiB
 // AuthConfig is the mTLS authorization configuration wired into the server.
 // Nil means no mTLS enforcement (plain HTTP / dev mode).
 type AuthConfig struct {
-	CACert            *x509.Certificate
-	AllowList         map[string]bool // admin CNs (puppet-server hostnames)
-	NoPpCliAuth       bool            // when true, pp_cli_auth extension does not grant admin access
-	AllowPublicStatus bool            // when true, GET /certificate_status is public (no client cert required)
+	// Domains are the trust domains a client certificate may be attributed to,
+	// in the order they are tried. Domain zero is always this CA's own; see
+	// TrustDomain and attribute for why the order is part of the contract.
+	//
+	// This replaced a single CACert field. The rename is deliberate: the
+	// meaning genuinely changed from "the certificate every client must chain
+	// to" to "one of several issuers, each with its own authority", and a
+	// silent semantic change on a field named CACert is exactly the kind of
+	// thing that survives review.
+	Domains []TrustDomain
+
+	AllowPublicStatus bool // when true, GET /certificate_status is public (no client cert required)
+}
+
+// OwnDomain returns domain zero, this CA's own issuer.
+func (c *AuthConfig) OwnDomain() *TrustDomain {
+	if len(c.Domains) == 0 {
+		return nil
+	}
+	return &c.Domains[0]
 }
 
 type Server struct {
@@ -940,15 +956,18 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 		// and validity.
 		//
 		// Reissuing without a fresh proof-of-possession is safe because the
-		// certificate is checked twice over. newAuthMiddleware verifies it
-		// chains to the configured trust anchor and is not revoked; AutoRenew
-		// then verifies it was issued by *this* CA specifically and is still
-		// unrevoked at the moment of renewal, rejecting with
-		// ErrForeignCertificate otherwise. The second check is not redundant:
-		// the anchor the middleware trusts and this CA's own certificate are
-		// the same today, but the point of the intermediate-CA work is that
-		// they need not stay so — and renewal is the operation that mints new
-		// credentials from old ones. clientCN(r) only reads the CN.
+		// certificate is checked twice over. newAuthMiddleware attributes it to
+		// a trust domain, and the tierOwnClient path guarding this route admits
+		// only domain zero — our own CA — having also confirmed it is not
+		// revoked. AutoRenew then verifies independently that this CA issued it
+		// and has not revoked it, rejecting with ErrForeignCertificate
+		// otherwise.
+		//
+		// The second check is not redundant with the first. They are enforced in
+		// different packages against different state, and renewal is the
+		// operation that mints a new credential from an old one — the place
+		// where a foreign certificate crossing into our namespace would be
+		// hardest to notice afterwards. clientCN(r) only reads the CN.
 		certPEM, err = s.CA.AutoRenew(r.Context(), r.TLS.PeerCertificates[0])
 		if err != nil {
 			// A key-strength rejection is client-actionable: the presented

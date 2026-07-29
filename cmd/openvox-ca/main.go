@@ -117,10 +117,16 @@ func buildAuthConfig(cfg *serverConfig, myCA *ca.CA) (*api.AuthConfig, error) {
 			"Use --no-pp-cli-auth to disable this and require explicit CN allow list.")
 	}
 
+	// Domain zero is this CA, always, and is not configurable: an operator
+	// cannot remove it, rename it, or drop their own CA out of the trust set.
+	// With no other domain the list has length one and authorisation is
+	// exactly what it was.
+	domains := []api.TrustDomain{
+		api.OwnTrustDomain(myCA.CACert, allowList, !cfg.NoPpCliAuth),
+	}
+
 	return &api.AuthConfig{
-		CACert:            myCA.CACert,
-		AllowList:         allowList,
-		NoPpCliAuth:       cfg.NoPpCliAuth,
+		Domains:           domains,
 		AllowPublicStatus: cfg.AllowPublicStatus,
 	}, nil
 }

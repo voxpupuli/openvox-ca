@@ -43,19 +43,29 @@ func hasPpCliAuth(cert *x509.Certificate) bool {
 	return false
 }
 
-// isAdmin reports whether the client is authorized for admin-only operations.
-// A client is an admin if its CN is in the allow list, or (unless NoPpCliAuth
-// is set) if the certificate carries the pp_cli_auth extension
-// (ca.OIDPpCliAuth) with value "true".
-func isAdmin(cfg *AuthConfig, clientCert *x509.Certificate, clientCN string) bool {
-	return cfg.AllowList[clientCN] || (!cfg.NoPpCliAuth && hasPpCliAuth(clientCert))
+// isAdmin reports whether the client is authorized for admin-only operations,
+// **within the domain that verified it**.
+//
+// A CN-based identity claim is only meaningful inside the namespace of the
+// issuer that made it: every CA has its own namespace of names it has signed,
+// and a name means nothing outside the one it was issued in. So the allow list
+// consulted is the matched domain's, never a global one — which is what makes
+// "an administrator of the Server CA" expressible without also trusting that
+// name from anywhere else.
+//
+// pp_cli_auth is honoured per domain for the same reason. For our own CA it is
+// on unless no_pp_cli_auth says otherwise, exactly as before; for a foreign
+// issuer it is off unless that entry opts in, because honouring it delegates
+// admin admission to that CA entirely.
+func isAdmin(domain *TrustDomain, clientCert *x509.Certificate, clientCN string) bool {
+	return domain.AdminCNs[clientCN] || (domain.PpCliAuth && hasPpCliAuth(clientCert))
 }
 
 type authTier int
 
 const (
 	tierPublic      authTier = iota // no client cert required
-	tierAnyClient                   // any cert signed by this CA
+	tierOwnClient                   // a client certificate THIS CA issued
 	tierSelfOrAdmin                 // own cert or an admin CN
 	tierAdminOnly                   // admin CN only
 )
@@ -67,9 +77,15 @@ const (
 // SECURITY: This is the primary access control enforcement point.
 // All non-public requests are validated through a four-tier model:
 //   - tierPublic: no client cert required (bootstrap endpoints)
-//   - tierAnyClient: any CA-signed client cert
+//   - tierOwnClient: a client certificate this CA itself issued
 //   - tierSelfOrAdmin: own cert or admin CN
 //   - tierAdminOnly: admin CN only (signing, revocation, generation)
+//
+// tierOwnClient was tierAnyClient ("any certificate that chains to our trust
+// anchor"). The two only ever coincided because there was a single issuer; once
+// a client can be issued by a foreign CA they are different questions, and the
+// endpoints in this tier act on *our* namespace. Renaming rather than
+// redefining forces every call site to be re-read.
 //
 // NIST 800-53: AC-3 (Access Enforcement), IA-3 (Device Identification and Authentication)
 func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Handler {
@@ -94,19 +110,19 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 
 		clientCert := r.TLS.PeerCertificates[0]
 
-		// SECURITY: Verify the client cert was signed by our CA.
+		// SECURITY: attribute the certificate to exactly one trust domain, by
+		// verifying against each domain's anchors alone. The domain that
+		// verifies establishes both trust and identity namespace; everything
+		// below — admin, revocation, CN scoping — is decided by it.
 		// NIST 800-53: IA-5(2) (PKI-Based Authentication)
-		pool := x509.NewCertPool()
-		pool.AddCert(cfg.CACert)
-		if _, err := clientCert.Verify(x509.VerifyOptions{
-			Roots:     pool,
-			KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-		}); err != nil {
+		verified, err := attribute(cfg.Domains, clientCert, r.TLS.PeerCertificates[1:])
+		if err != nil {
 			slog.Warn("Auth: client cert verification failed",
 				"cn", clientCert.Subject.CommonName, "error", err)
 			http.Error(w, "access denied", http.StatusForbidden)
 			return
 		}
+		domain := verified.Domain
 
 		clientCN := clientCert.Subject.CommonName
 
@@ -127,19 +143,34 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 		}
 
 		switch tier {
-		case tierAnyClient:
-			next.ServeHTTP(w, r)
+		case tierOwnClient:
+			// Operations on our own namespace: renewing a certificate we
+			// issued. A foreign certificate is authenticated but has no
+			// standing here, whatever name it carries.
+			if domain.IsOwn() {
+				next.ServeHTTP(w, r)
+			} else {
+				slog.Warn("Auth: rejecting a foreign client certificate for an own-CA operation",
+					"cn", clientCN, "domain", domain.Describe())
+				http.Error(w, "access denied", http.StatusForbidden)
+			}
 
 		case tierSelfOrAdmin:
+			// The self-match is scoped to our own domain for the same reason:
+			// without it, a foreign certificate named agent1.example.com could
+			// read *our* agent1.example.com's pending CSR. Only an information
+			// leak — a public key and requested extensions — but the same
+			// defect class, and the rule closes it for free.
 			subject := extractPathSubject(r.URL.Path)
-			if isAdmin(cfg, clientCert, clientCN) || (subject != "" && clientCN == subject) {
+			selfMatch := domain.IsOwn() && subject != "" && clientCN == subject
+			if isAdmin(domain, clientCert, clientCN) || selfMatch {
 				next.ServeHTTP(w, r)
 			} else {
 				denyWithLog(w, r, clientCN, "not an admin and not the subject of the request")
 			}
 
 		case tierAdminOnly:
-			if isAdmin(cfg, clientCert, clientCN) {
+			if isAdmin(domain, clientCert, clientCN) {
 				next.ServeHTTP(w, r)
 			} else {
 				denyWithLog(w, r, clientCN, "route requires admin access")
@@ -209,11 +240,13 @@ func lookupTier(method, path string, cfg *AuthConfig) authTier {
 	case method == "GET" && strings.HasPrefix(p, "/certificate_request/"):
 		return tierSelfOrAdmin
 
-	// Certificate renewal: any CA-signed client cert may renew itself.
-	// The handler enforces that the CSR CN matches the authenticated client CN,
-	// so an agent can only renew its own certificate.
+	// Certificate renewal: a client certificate THIS CA issued may renew
+	// itself. The handler enforces that the CSR CN matches the authenticated
+	// client CN, so an agent can only renew its own certificate — and the tier
+	// enforces that the name was ours to begin with, since a CN asserted by a
+	// foreign issuer says nothing about our namespace.
 	case method == "POST" && p == "/certificate_renewal":
-		return tierAnyClient
+		return tierOwnClient
 
 	// Admin only: all other operations.
 	default:

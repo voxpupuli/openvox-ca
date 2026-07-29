@@ -78,8 +78,7 @@ var _ = Describe("Health Endpoints", func() {
 		Expect(myCA.Init(context.Background())).To(Succeed())
 		srv := api.New(myCA)
 		srv.AuthConfig = &api.AuthConfig{
-			CACert:    myCA.CACert,
-			AllowList: map[string]bool{"puppet-server": true},
+			Domains: []api.TrustDomain{api.OwnTrustDomain(myCA.CACert, map[string]bool{"puppet-server": true}, true)},
 		}
 		return srv.Routes()
 	}

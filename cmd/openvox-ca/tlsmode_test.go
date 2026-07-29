@@ -119,15 +119,17 @@ var _ = Describe("buildAuthConfig", func() {
 	It("pins the CA certificate the middleware verifies against", func() {
 		authCfg, err := buildAuthConfig(cfg, myCA)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(authCfg.CACert).To(BeIdenticalTo(myCA.CACert))
+		// Domain zero is ours, and it is what a client must chain to.
+		Expect(authCfg.Domains).To(HaveLen(1))
+		Expect(authCfg.Domains[0].IsOwn()).To(BeTrue())
 	})
 
 	It("builds the allow list from puppet_server, trimming whitespace", func() {
 		cfg.PuppetServer = "one.example.com, two.example.com ,,three.example.com"
 		authCfg, err := buildAuthConfig(cfg, myCA)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(authCfg.AllowList).To(HaveLen(3))
-		Expect(authCfg.AllowList).To(HaveKey("two.example.com"))
+		Expect(authCfg.Domains[0].AdminCNs).To(HaveLen(3))
+		Expect(authCfg.Domains[0].AdminCNs).To(HaveKey("two.example.com"))
 	})
 
 	It("merges puppet_server_file entries with puppet_server", func() {
@@ -138,8 +140,8 @@ var _ = Describe("buildAuthConfig", func() {
 
 		authCfg, err := buildAuthConfig(cfg, myCA)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(authCfg.AllowList).To(HaveKey("inline.example.com"))
-		Expect(authCfg.AllowList).To(HaveKey("fromfile.example.com"))
+		Expect(authCfg.Domains[0].AdminCNs).To(HaveKey("inline.example.com"))
+		Expect(authCfg.Domains[0].AdminCNs).To(HaveKey("fromfile.example.com"))
 	})
 
 	It("propagates an unreadable puppet_server_file rather than authorising nobody", func() {
@@ -156,7 +158,7 @@ var _ = Describe("buildAuthConfig", func() {
 		cfg.AllowPublicStatus = true
 		authCfg, err := buildAuthConfig(cfg, myCA)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(authCfg.NoPpCliAuth).To(BeTrue())
+		Expect(authCfg.Domains[0].PpCliAuth).To(BeFalse())
 		Expect(authCfg.AllowPublicStatus).To(BeTrue())
 	})
 })
