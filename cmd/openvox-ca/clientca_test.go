@@ -18,6 +18,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -26,6 +27,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"encoding/pem"
+	"log/slog"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -34,6 +36,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/voxpupuli/openvox-ca/internal/config"
 )
 
@@ -419,3 +422,287 @@ func crlWithoutAKI(cert *x509.Certificate, key *ecdsa.PrivateKey) *x509.Revocati
 	Expect(crl.AuthorityKeyId).To(BeEmpty())
 	return crl
 }
+
+var _ = Describe("refreshClientCRLs", func() {
+	var (
+		root      *x509.Certificate
+		rootKey   *ecdsa.PrivateKey
+		serverCA  *x509.Certificate
+		serverKey *ecdsa.PrivateKey
+		agentCA   *x509.Certificate
+		agentKey  *ecdsa.PrivateKey
+		ownCA     *x509.Certificate
+		reg       *prometheus.Registry
+		metrics   *clientCRLMetrics
+	)
+
+	BeforeEach(func() {
+		ownCA, _ = mintCA("Own CA", nil, nil)
+		root, rootKey = mintCA("Shared Root", nil, nil)
+		serverCA, serverKey = mintCA("Server CA", root, rootKey)
+		agentCA, agentKey = mintCA("Agent CA", root, rootKey)
+		reg = prometheus.NewRegistry()
+		metrics = newClientCRLMetrics(reg)
+	})
+
+	// gauge reads puppetca_client_crl_usable for one client_ca label.
+	gauge := func(name string) float64 {
+		GinkgoHelper()
+		families, err := reg.Gather()
+		Expect(err).NotTo(HaveOccurred())
+		for _, f := range families {
+			if f.GetName() != "puppetca_client_crl_usable" {
+				continue
+			}
+			for _, m := range f.GetMetric() {
+				for _, l := range m.GetLabel() {
+					if l.GetName() == "client_ca" && l.GetValue() == name {
+						return m.GetGauge().GetValue()
+					}
+				}
+			}
+		}
+		Fail("no puppetca_client_crl_usable series for client_ca " + name)
+		return 0
+	}
+
+	It("maps each entry to its own domain, not to a neighbour's", func() {
+		// Domain zero is ours, so entry i is domain i+1. Get that offset wrong
+		// by one and each entry's CRLs are installed on the wrong issuer —
+		// which fails open or closed depending on the pairing, and looks
+		// entirely healthy either way.
+		cfg := &serverConfig{}
+		cfg.ClientCA = []config.ClientCA{
+			{Name: "server", File: writeCertFile(serverCA), CRLFile: writeCRLFile(mintCRL(serverCA, serverKey))},
+			{Name: "agent", File: writeCertFile(agentCA), CRLFile: writeCRLFile(mintCRL(agentCA, agentKey))},
+		}
+		domains, err := buildTrustDomains(cfg, ownCA, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(domains).To(HaveLen(3))
+
+		refreshClientCRLs(cfg, domains, metrics)
+
+		// Each domain must hold the CRL signed by its own anchor. A swapped
+		// pairing leaves both sets non-empty, so the assertion is per-issuer.
+		Expect(domains[1].RevocationSet().Usable(time.Now())).To(BeTrue())
+		Expect(domains[2].RevocationSet().Usable(time.Now())).To(BeTrue())
+		Expect(gauge("server")).To(Equal(1.0))
+		Expect(gauge("agent")).To(Equal(1.0))
+
+		// The offset is what pairs an entry's CRLs with its anchors, and the
+		// pairing is self-checking: each entry's CRL verifies only against its
+		// own anchor, so a swapped offset discards both and leaves both domains
+		// unusable rather than merely mismatched.
+		Expect(gauge("server")).To(Equal(1.0))
+		Expect(gauge("agent")).To(Equal(1.0))
+	})
+
+	It("keeps the previous set and reports unusable when a reload fails", func() {
+		// The failure the review found five ways: skipping the metric left the
+		// series uncreated, so an `== 0` alert could not fire on a domain whose
+		// very first load failed.
+		crlPath := writeCRLFile(mintCRL(serverCA, serverKey))
+		cfg := &serverConfig{}
+		cfg.ClientCA = []config.ClientCA{
+			{Name: "server", File: writeCertFile(serverCA), CRLFile: crlPath},
+		}
+		domains, err := buildTrustDomains(cfg, ownCA, nil)
+		Expect(err).NotTo(HaveOccurred())
+		refreshClientCRLs(cfg, domains, metrics)
+		Expect(gauge("server")).To(Equal(1.0))
+
+		// Now make the file unreadable mid-flight.
+		cfg.ClientCA[0].CRLFile = filepath.Join(GinkgoT().TempDir(), "vanished.pem")
+		refreshClientCRLs(cfg, domains, metrics)
+
+		Expect(domains[1].RevocationSet().Usable(time.Now())).To(BeTrue(),
+			"a transient read error must not discard a working set")
+		Expect(gauge("server")).To(Equal(1.0))
+	})
+
+	It("keeps the previous set when the file yields no usable CRLs", func() {
+		// Readable, populated, and every CRL in it discarded as unverifiable.
+		// Installing that empty set would reject every client of the domain on
+		// a file the operator can see is not empty.
+		cfg := &serverConfig{}
+		cfg.ClientCA = []config.ClientCA{
+			{Name: "server", File: writeCertFile(serverCA), CRLFile: writeCRLFile(mintCRL(serverCA, serverKey))},
+		}
+		domains, err := buildTrustDomains(cfg, ownCA, nil)
+		Expect(err).NotTo(HaveOccurred())
+		refreshClientCRLs(cfg, domains, metrics)
+		Expect(gauge("server")).To(Equal(1.0))
+
+		unrelated, unrelatedKey := mintCA("Unrelated CA", nil, nil)
+		cfg.ClientCA[0].CRLFile = writeCRLFile(mintCRL(unrelated, unrelatedKey))
+		refreshClientCRLs(cfg, domains, metrics)
+
+		Expect(domains[1].RevocationSet().Usable(time.Now())).To(BeTrue())
+		Expect(gauge("server")).To(Equal(1.0))
+	})
+
+	It("publishes the gauge as unusable when every CRL has expired", func() {
+		cfg := &serverConfig{}
+		cfg.ClientCA = []config.ClientCA{
+			{Name: "server", File: writeCertFile(serverCA), CRLFile: writeCRLFile(expiredCRL(serverCA, serverKey))},
+		}
+		domains, err := buildTrustDomains(cfg, ownCA, nil)
+		Expect(err).NotTo(HaveOccurred())
+
+		refreshClientCRLs(cfg, domains, metrics)
+		Expect(gauge("server")).To(Equal(0.0), "the alert fires on this")
+	})
+})
+
+// expiredCRL issues a CRL from cert whose NextUpdate has already passed.
+func expiredCRL(cert *x509.Certificate, key *ecdsa.PrivateKey) *x509.RevocationList {
+	GinkgoHelper()
+	der, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+		Number:     big.NewInt(1),
+		ThisUpdate: time.Now().Add(-48 * time.Hour),
+		NextUpdate: time.Now().Add(-24 * time.Hour),
+	}, cert, key)
+	Expect(err).NotTo(HaveOccurred())
+	crl, err := x509.ParseRevocationList(der)
+	Expect(err).NotTo(HaveOccurred())
+	return crl
+}
+
+// captureWarnings runs fn with the default logger redirected, and returns what
+// it wrote. The two warnings below are the only signal an operator gets for
+// configurations that authenticate nobody, so they are asserted rather than
+// assumed.
+func captureWarnings(fn func()) string {
+	GinkgoHelper()
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(orig)
+	fn()
+	return buf.String()
+}
+
+var _ = Describe("client_ca startup warnings", func() {
+	var (
+		ownCA     *x509.Certificate
+		root      *x509.Certificate
+		rootKey   *ecdsa.PrivateKey
+		serverCA  *x509.Certificate
+		serverKey *ecdsa.PrivateKey
+	)
+
+	BeforeEach(func() {
+		ownCA, _ = mintCA("Own CA", nil, nil)
+		root, rootKey = mintCA("Shared Root", nil, nil)
+		serverCA, serverKey = mintCA("Server CA", root, rootKey)
+	})
+
+	build := func(entry config.ClientCA, policy string) string {
+		GinkgoHelper()
+		cfg := &serverConfig{}
+		cfg.ClientCA = []config.ClientCA{entry}
+		cfg.ClientRevocationPolicy = policy
+		return captureWarnings(func() {
+			_, err := buildTrustDomains(cfg, ownCA, nil)
+			Expect(err).NotTo(HaveOccurred())
+		})
+	}
+
+	It("warns that a self-signed anchor widens the entry's authority", func() {
+		// The natural mistake — "the CA bundle" usually means the whole chain —
+		// and its consequence is invisible: the entry's admin_cns silently apply
+		// to every intermediate beneath that root, including ones that do not
+		// exist yet.
+		out := build(config.ClientCA{
+			Name: "shared", File: writeCertFile(root),
+			CRLFile: writeCRLFile(mintCRL(root, rootKey)),
+		}, config.RevocationRequire)
+
+		Expect(out).To(ContainSubstring("self-signed root"))
+		Expect(out).To(ContainSubstring("admin_cns apply to all of them"))
+	})
+
+	It("warns that honouring pp_cli_auth delegates admin admission", func() {
+		// Every certificate that issuer chooses to stamp becomes an
+		// administrator of this CA.
+		out := build(config.ClientCA{
+			Name: "server", File: writeCertFile(serverCA),
+			CRLFile: writeCRLFile(mintCRL(serverCA, serverKey)), AllowPpCliAuth: true,
+		}, config.RevocationRequire)
+
+		Expect(out).To(ContainSubstring("honours pp_cli_auth"))
+		Expect(out).To(ContainSubstring("administrator of this CA"))
+	})
+
+	It("warns when a root anchor leaves no usable CRLs under require", func() {
+		// The lockout: the Server CA's own CRL is signed by the Server CA, not
+		// by the root anchor, so it is discarded and every client is rejected.
+		// The warning must name the consequence of the obvious workaround.
+		out := build(config.ClientCA{
+			Name: "shared", File: writeCertFile(root),
+			CRLFile: writeCRLFile(mintCRL(serverCA, serverKey)),
+		}, config.RevocationRequire)
+
+		Expect(out).To(ContainSubstring("no usable CRLs"))
+		Expect(out).To(ContainSubstring("anchor on the issuing CA instead"))
+		Expect(out).To(ContainSubstring("disabling leaf revocation checking"))
+	})
+
+	It("says nothing about CRLs when the policy does not require them", func() {
+		out := build(config.ClientCA{
+			Name: "server", File: writeCertFile(serverCA),
+		}, config.RevocationCheck)
+
+		Expect(out).NotTo(ContainSubstring("no usable CRLs"))
+	})
+})
+
+var _ = Describe("client_ca from a config file", func() {
+	It("loads the whole block, including per-entry grants", func() {
+		// Nothing else parses this YAML. The block is a list of structs with
+		// per-entry grants, which is exactly the shape a typo in a struct tag
+		// silently drops — and the failure mode is a trust domain that exists
+		// with none of the authority the operator configured, or an admin_cns
+		// list that never took effect.
+		clearServerEnv()
+		path := writeTempConfig(`
+client_revocation_policy: check
+client_ca:
+  - name: server-ca
+    file: /etc/openvox-ca/server-ca.pem
+    crl_file: /etc/openvox-ca/server-ca-crls.pem
+    admin_cns:
+      - ops-admin
+      - deploy
+    allow_pp_cli_auth: true
+  - name: partner-ca
+    file: /etc/openvox-ca/partner.pem
+`)
+		cfg, err := loadServerConfig(path)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(cfg.ClientRevocationPolicy).To(Equal("check"))
+		Expect(cfg.ClientCA).To(HaveLen(2))
+
+		Expect(cfg.ClientCA[0].Name).To(Equal("server-ca"))
+		Expect(cfg.ClientCA[0].File).To(Equal("/etc/openvox-ca/server-ca.pem"))
+		Expect(cfg.ClientCA[0].CRLFile).To(Equal("/etc/openvox-ca/server-ca-crls.pem"))
+		Expect(cfg.ClientCA[0].AdminCNs).To(Equal([]string{"ops-admin", "deploy"}))
+		Expect(cfg.ClientCA[0].AllowPpCliAuth).To(BeTrue())
+
+		// Order is the middleware's contract, so it is asserted rather than
+		// assumed, and the defaults on a minimal entry are pinned too.
+		Expect(cfg.ClientCA[1].Name).To(Equal("partner-ca"))
+		Expect(cfg.ClientCA[1].AdminCNs).To(BeEmpty())
+		Expect(cfg.ClientCA[1].AllowPpCliAuth).To(BeFalse())
+		Expect(cfg.ClientCA[1].CRLFile).To(BeEmpty())
+	})
+
+	It("defaults to no client_ca at all", func() {
+		clearServerEnv()
+		cfg, err := loadServerConfig(writeTempConfig("cadir: /tmp/ca\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.ClientCA).To(BeEmpty())
+		Expect(cfg.ClientRevocationPolicy).To(BeEmpty(), "unset resolves to require at use, not here")
+	})
+})

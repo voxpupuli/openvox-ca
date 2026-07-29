@@ -100,6 +100,13 @@ func (d *TrustDomain) SetRevocationSet(s *ClientCRLSet) {
 }
 
 // IsOwn reports whether this is domain zero — this CA's own issuer.
+//
+// The empty name is the marker, and it holds because the only constructor that
+// leaves Name empty is OwnTrustDomain: every client_ca entry goes through
+// NewForeignTrustDomain, and configuration validation rejects an entry without
+// a name (internal/config.ClientCAConfig.Validate), so a foreign domain can
+// never present as our own. That check is two packages away, which is why it is
+// written down here as well.
 func (d *TrustDomain) IsOwn() bool { return d.Name == "" }
 
 // Describe names the domain for a log line.
