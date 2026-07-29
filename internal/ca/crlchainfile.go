@@ -94,8 +94,12 @@ func (c *CA) upstreamCRLs(ctx context.Context) (crls []*x509.RevocationList, sta
 				"its own CRL is always rebuilt from the inventory", "path", c.CRLChainFile)
 			continue
 		}
-		issuer := issuerFor(issuers, crl)
-		if issuer == nil {
+		if !signedByAny(issuers, crl) {
+			// The chain shrinks silently here — the file is authoritative, so a
+			// CRL this CA will not accept simply stops being published. Counted
+			// as well as logged, because one warning per cycle is not something
+			// an operator monitors.
+			c.crlChainDiscarded.Add(1)
 			slog.Warn("Discarding a CRL in crl_chain_file that no certificate in the CA bundle signed",
 				"path", c.CRLChainFile, "issuer", crl.Issuer.String())
 			continue
@@ -105,14 +109,19 @@ func (c *CA) upstreamCRLs(ctx context.Context) (crls []*x509.RevocationList, sta
 	return verified, true, nil
 }
 
-// issuerFor returns the certificate whose key signed crl, or nil.
-func issuerFor(candidates []*x509.Certificate, crl *x509.RevocationList) *x509.Certificate {
+// signedByAny reports whether any candidate's key signed crl.
+//
+// A predicate rather than a lookup: the only question here is whether the
+// bundle vouches for this CRL at all, and returning the certificate invited a
+// caller to do something with an identity that the signature check has already
+// finished establishing.
+func signedByAny(candidates []*x509.Certificate, crl *x509.RevocationList) bool {
 	for _, cert := range candidates {
 		if crlSignedBy(cert, crl) {
-			return cert
+			return true
 		}
 	}
-	return nil
+	return false
 }
 
 // bundleCertificates parses the stored CA certificate bundle.
@@ -165,49 +174,67 @@ func (c *CA) RefreshCRLChainFile(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 
-	wanted, stated, err := c.upstreamCRLs(ctx)
-	if err != nil {
-		return false, err
-	}
-	if !stated {
-		// Nothing to reconcile against: an unreadable file is not a statement
-		// that the published chain should be empty.
-		return false, nil
-	}
-
-	current, err := c.Storage.GetCRL(ctx)
-	if err != nil {
-		return false, fmt.Errorf("reading the stored CRL: %w", err)
-	}
-	stored, err := decodeCRLChain(current)
-	if err != nil {
-		return false, fmt.Errorf("decoding the stored CRL chain: %w", err)
-	}
-
-	var storedUpstream []*x509.RevocationList
-	for _, crl := range stored {
-		if !c.ownsCRL(crl) {
-			storedUpstream = append(storedUpstream, crl)
-		}
-	}
-	if sameCRLSet(storedUpstream, wanted) {
-		return false, nil
-	}
-
-	slog.Info("Upstream CRLs changed; rewriting the published chain",
-		"path", c.CRLChainFile, "stored", len(storedUpstream), "configured", len(wanted))
-
 	ctx, cancel := context.WithTimeout(ctx, lockTimeout)
 	defer cancel()
-	err = c.Storage.WithLock(ctx, lockNameCRL, func() error {
+
+	// The comparison runs *inside* the CRL lock, not before it. Deciding
+	// outside meant every replica that noticed the same change re-signed: each
+	// compared against the pre-change chain, each took the lock in turn, and
+	// each wrote — one refresh producing as many CRL numbers, exporter
+	// wake-ups and inventory-free re-signs as there are replicas. Inside the
+	// lock, the first writer's result is what the rest compare against, so they
+	// see their work already done and stop.
+	rewritten := false
+	err := c.Storage.WithLock(ctx, lockNameCRL, func() error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
+
+		wanted, stated, err := c.upstreamCRLs(ctx)
+		if err != nil {
+			return err
+		}
+		if !stated {
+			// Nothing to reconcile against: an unreadable file is not a
+			// statement that the published chain should be empty.
+			return nil
+		}
+
+		current, err := c.Storage.GetCRL(ctx)
+		if err != nil {
+			return fmt.Errorf("reading the stored CRL: %w", err)
+		}
+		stored, err := decodeCRLChain(current)
+		if err != nil {
+			return fmt.Errorf("decoding the stored CRL chain: %w", err)
+		}
+
+		var storedUpstream []*x509.RevocationList
+		for _, crl := range stored {
+			if !c.ownsCRL(crl) {
+				storedUpstream = append(storedUpstream, crl)
+			}
+		}
+		if sameCRLSet(storedUpstream, wanted) {
+			return nil
+		}
+
+		slog.Info("Upstream CRLs changed; rewriting the published chain",
+			"path", c.CRLChainFile, "stored", len(storedUpstream), "configured", len(wanted))
+		rewritten = true
+
+		// reissueCRLLocked reaches crlChainLocked, which reads the file again.
+		// That second read is the one published, and it is the right one: it is
+		// the freshest view, taken under the same lock. The decision above can
+		// therefore be made on marginally older content than what lands, which
+		// only ever means the rewrite carries a newer file than the one that
+		// justified it.
 		return c.reissueCRLLocked(ctx)
 	})
 	if err != nil {
+		c.crlChainFailures.Add(1)
 		return false, err
 	}
-	return true, nil
+	return rewritten, nil
 }
 
 // sameCRLSet reports whether two CRL lists are byte-identical in order.
@@ -231,8 +258,8 @@ type UpstreamCRLStatus struct {
 	NextUpdate time.Time
 }
 
-// UpstreamCRLStatuses reports the non-self CRLs currently published, for the
-// per-issuer freshness metric.
+// UpstreamCRLStatuses reports the non-self CRLs in blob, for the per-issuer
+// freshness metric.
 //
 // Deliberately separate from the existing unlabelled
 // puppetca_crl_next_update_timestamp_seconds, which keeps meaning exactly what
@@ -240,11 +267,12 @@ type UpstreamCRLStatus struct {
 // would multiply it and make the two shipped expiry alerts fire for upstream
 // CRLs this CA cannot reissue — a real page with a wrong runbook, since the
 // remedy is at the parent.
-func (c *CA) UpstreamCRLStatuses(ctx context.Context) ([]UpstreamCRLStatus, error) {
-	blob, err := c.Storage.GetCRL(ctx)
-	if err != nil {
-		return nil, err
-	}
+// blob is the stored CRL the caller has already read. Taking it as a parameter
+// rather than re-reading keeps the collector's "parse the CRL once" rule true:
+// it holds the bytes and has already decoded block 0, so a second read and a
+// second decode of the same blob would be doing the work twice per scrape and
+// could disagree with the numbers reported beside it.
+func (c *CA) UpstreamCRLStatuses(blob []byte) ([]UpstreamCRLStatus, error) {
 	crls, err := decodeCRLChain(blob)
 	if err != nil {
 		return nil, err

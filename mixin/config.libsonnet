@@ -20,6 +20,16 @@
     // the refresher is wedged. Warn a few days out; page once it has lapsed.
     crlExpiryWarningSeconds: 3 * 24 * 3600,  // 3 days
 
+    // --- Upstream CRL expiry ---
+    // Deliberately not crlExpiryWarningSeconds. That threshold is short because
+    // the CA refreshes its own CRL, so the alert only fires when something is
+    // already wedged and three days is ample. An *upstream* CRL is the exact
+    // opposite: openvox-ca cannot re-sign an ancestor's list, so clearing this
+    // means a human fetching a new CRL from the parent CA — often a different
+    // team — and updating crl_chain_file. Two weeks is notice for that, not
+    // slack for a self-healing loop.
+    upstreamCRLExpiryWarningSeconds: 14 * 24 * 3600,  // 14 days
+
     // --- Leaf certificate expiry ---
     // Agents normally auto-renew; a leaf nearing expiry indicates a node that
     // has stopped checking in. Revoked certs are excluded by the alert exprs.
