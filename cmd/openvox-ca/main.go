@@ -119,10 +119,14 @@ func buildAuthConfig(cfg *serverConfig, myCA *ca.CA) (*api.AuthConfig, error) {
 
 	// Domain zero is this CA, always, and is not configurable: an operator
 	// cannot remove it, rename it, or drop their own CA out of the trust set.
-	// With no other domain the list has length one and authorisation is
-	// exactly what it was.
-	domains := []api.TrustDomain{
-		api.OwnTrustDomain(myCA.CACert, allowList, !cfg.NoPpCliAuth),
+	// With no client_ca configured the list has length one and authorisation
+	// is exactly what it was.
+	if err := cfg.ClientCAConfig.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid client_ca config: %w", err)
+	}
+	domains, err := buildTrustDomains(cfg, myCA.CACert, allowList)
+	if err != nil {
+		return nil, err
 	}
 
 	return &api.AuthConfig{
@@ -710,6 +714,21 @@ func newRootCmd() *cobra.Command {
 				if block != nil {
 					if caCert, err := x509.ParseCertificate(block.Bytes); err == nil {
 						caPool.AddCert(caCert)
+					}
+				}
+				// Every anchor from every trust domain, so a client holding a
+				// certificate from any trusted issuer actually offers it. This
+				// is a handshake hint only — it populates the
+				// certificate_authorities list — and deliberately broader than
+				// any single domain's authority: it does not merge trust, which
+				// the middleware decides per domain.
+				for i := range cfg.ClientCA {
+					anchors, err := parseAnchorBundle(cfg.ClientCA[i].File)
+					if err != nil {
+						return fmt.Errorf("client_ca %q: %w", cfg.ClientCA[i].Name, err)
+					}
+					for _, anchor := range anchors {
+						caPool.AddCert(anchor)
 					}
 				}
 
