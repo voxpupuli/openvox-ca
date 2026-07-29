@@ -278,25 +278,25 @@ var _ = Describe("Configuration reloading", func() {
 	})
 
 	It("grants admin access to a newly listed compile server", func() {
-		Expect(auth.IsAdminCN("compile-2.example.com")).To(BeFalse())
+		Expect(auth.IsOwnAdminCN("compile-2.example.com")).To(BeFalse())
 
 		Expect(os.WriteFile(cnFile, []byte("compile-1.example.com\ncompile-2.example.com\n"), 0600)).To(Succeed())
 		Expect(reloader.reload()).To(Succeed())
 
-		Expect(auth.IsAdminCN("compile-2.example.com")).To(BeTrue())
-		Expect(auth.IsAdminCN("compile-1.example.com")).To(BeTrue())
-		Expect(auth.IsAdminCN("puppet.example.com")).To(BeTrue(), "the configured CNs survive a reload")
+		Expect(auth.IsOwnAdminCN("compile-2.example.com")).To(BeTrue())
+		Expect(auth.IsOwnAdminCN("compile-1.example.com")).To(BeTrue())
+		Expect(auth.IsOwnAdminCN("puppet.example.com")).To(BeTrue(), "the configured CNs survive a reload")
 	})
 
 	It("withdraws admin access from a removed compile server", func() {
 		// The security-relevant direction: a decommissioned compile server
 		// must stop being an admin without waiting for a restart.
-		Expect(auth.IsAdminCN("compile-1.example.com")).To(BeTrue())
+		Expect(auth.IsOwnAdminCN("compile-1.example.com")).To(BeTrue())
 
 		Expect(os.WriteFile(cnFile, []byte("# decommissioned\n"), 0600)).To(Succeed())
 		Expect(reloader.reload()).To(Succeed())
 
-		Expect(auth.IsAdminCN("compile-1.example.com")).To(BeFalse())
+		Expect(auth.IsOwnAdminCN("compile-1.example.com")).To(BeFalse())
 	})
 
 	It("rotates the TLS certificate", func() {
@@ -313,7 +313,7 @@ var _ = Describe("Configuration reloading", func() {
 
 		err := reloader.reload()
 		Expect(err).To(HaveOccurred())
-		Expect(auth.IsAdminCN("compile-9.example.com")).To(BeTrue())
+		Expect(auth.IsOwnAdminCN("compile-9.example.com")).To(BeTrue())
 	})
 
 	It("reports every failure together", func() {
@@ -421,8 +421,8 @@ var _ = Describe("Reload watcher", func() {
 
 		Eventually(rec.msgs).Should(Receive(HavePrefix("RELOADING=1")))
 		Eventually(rec.msgs).Should(Receive(Equal("READY=1\nSTATUS=serving\n")))
-		Expect(auth.IsAdminCN("compile-2.example.com")).To(BeTrue())
-		Expect(auth.IsAdminCN("compile-1.example.com")).To(BeFalse())
+		Expect(auth.IsOwnAdminCN("compile-2.example.com")).To(BeTrue())
+		Expect(auth.IsOwnAdminCN("compile-1.example.com")).To(BeFalse())
 	})
 
 	It("keeps serving and says so when the reload fails", func() {
@@ -435,7 +435,7 @@ var _ = Describe("Reload watcher", func() {
 		// hang `systemctl reload` -- but the status says the reload failed.
 		Eventually(rec.msgs).Should(Receive(HavePrefix("RELOADING=1")))
 		Eventually(rec.msgs).Should(Receive(Equal("READY=1\nSTATUS=serving | last reload FAILED, see the logs\n")))
-		Expect(auth.IsAdminCN("compile-1.example.com")).To(BeTrue(), "the previous allow list is still in force")
+		Expect(auth.IsOwnAdminCN("compile-1.example.com")).To(BeTrue(), "the previous allow list is still in force")
 	})
 
 	It("applies a reload that arrived before the watcher started", func() {
@@ -449,7 +449,7 @@ var _ = Describe("Reload watcher", func() {
 
 		startWatcher()
 
-		Eventually(func() bool { return auth.IsAdminCN("early.example.com") }).Should(BeTrue())
+		Eventually(func() bool { return auth.IsOwnAdminCN("early.example.com") }).Should(BeTrue())
 		Eventually(rec.msgs).Should(Receive(HavePrefix("RELOADING=1")))
 	})
 
@@ -459,7 +459,7 @@ var _ = Describe("Reload watcher", func() {
 		for _, cn := range []string{"a.example.com", "b.example.com"} {
 			Expect(os.WriteFile(cnFile, []byte(cn+"\n"), 0600)).To(Succeed())
 			Expect(syscall.Kill(os.Getpid(), syscall.SIGHUP)).To(Succeed())
-			Eventually(func() bool { return auth.IsAdminCN(cn) }).Should(BeTrue())
+			Eventually(func() bool { return auth.IsOwnAdminCN(cn) }).Should(BeTrue())
 		}
 	})
 })

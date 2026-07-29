@@ -31,7 +31,6 @@ import (
 	"math/big"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/voxpupuli/openvox-ca/internal/ca"
@@ -50,66 +49,68 @@ const maxJSONBody = 1 << 20 // 1 MiB
 // AuthConfig must be used through a pointer: it carries a lock and is read
 // concurrently by every request.
 type AuthConfig struct {
-	CACert            *x509.Certificate
-	NoPpCliAuth       bool // when true, pp_cli_auth extension does not grant admin access
+	// Domains are the trust domains a client certificate may be attributed to,
+	// in the order they are tried. Domain zero is always this CA's own; see
+	// TrustDomain and attribute for why the order is part of the contract.
+	//
+	// This replaced a single CACert field. The rename is deliberate: the
+	// meaning genuinely changed from "the certificate every client must chain
+	// to" to "one of several issuers, each with its own authority", and a
+	// silent semantic change on a field named CACert is exactly the kind of
+	// thing that survives review.
+	Domains []TrustDomain
+
 	AllowPublicStatus bool // when true, GET /certificate_status is public (no client cert required)
-
-	// allowList holds the admin CNs (puppet-server hostnames). It is
-	// unexported so the compiler, not a comment, enforces that IsAdminCN and
-	// SetAllowList are the only ways in: a direct read would race the swap a
-	// configuration reload performs to withdraw a compile server's admin
-	// rights. Populate it with SetAllowList.
-	allowList map[string]bool
-
-	// mu guards allowList, which SetAllowList replaces while requests are in
-	// flight (the operator adding or removing a compile server, without a
-	// restart). The other fields are set once before the server starts
-	// serving and never change.
-	mu sync.RWMutex
 }
 
-// NewAuthConfig returns an AuthConfig with the admin allow list installed.
-// Because the map is unexported, this (or SetAllowList) is the only way to
-// populate it — which is the point: the lock discipline is enforced by the
-// compiler rather than by a comment. NoPpCliAuth and AllowPublicStatus stay
-// plain fields; they are set once before the server starts serving.
+// NewAuthConfig returns an AuthConfig that trusts exactly this CA, with allowList
+// as domain zero's administrators and pp_cli_auth honoured.
+//
+// The single-issuer shape, which is every deployment that has not configured a
+// client_ca: it exists so that "trust this CA" stays one call rather than a
+// domain list an author has to assemble correctly, and so the default trust set
+// cannot be got wrong by omission.
 func NewAuthConfig(caCert *x509.Certificate, allowList map[string]bool) *AuthConfig {
-	c := &AuthConfig{CACert: caCert}
-	c.SetAllowList(allowList)
-	return c
+	return &AuthConfig{
+		Domains: []TrustDomain{OwnTrustDomain(caCert, allowList, true)},
+	}
 }
 
-// IsAdminCN reports whether cn is on the admin allow list.
-//
-// SECURITY: this is the read side of the allow list. The map is unexported so
-// this is the only place it can be consulted from: a direct read would race
-// SetAllowList and — because that swap is what a configuration reload uses to
-// withdraw a compile server's admin rights — could serve a stale authorization
-// decision.
-// NIST 800-53: AC-3 (Access Enforcement)
-func (c *AuthConfig) IsAdminCN(cn string) bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.allowList[cn]
+// IsOwnAdminCN reports whether cn is an administrator in domain zero. It is the
+// read half of SetOwnAdminCNs, and takes the same lock: a reload may be
+// replacing the set as this runs.
+func (c *AuthConfig) IsOwnAdminCN(cn string) bool {
+	for i := range c.Domains {
+		if c.Domains[i].IsOwn() {
+			return c.Domains[i].IsAdminCN(cn)
+		}
+	}
+	return false
 }
 
-// SetAllowList replaces the admin allow list and returns the list it replaced,
-// so the caller can log exactly which CNs gained or lost admin authority. The
-// caller must not retain or mutate the map it passes in; ownership passes to
-// the AuthConfig. The returned map is no longer consulted and is the caller's.
+// SetOwnAdminCNs replaces domain zero's admin CNs and returns the previous set.
+// It is what `systemctl reload` calls to add or withdraw a compile server's
+// admin rights without dropping connections.
 //
-// The replacement is atomic with respect to in-flight requests: each request
-// takes the read lock once, so it sees either the whole old list or the whole
-// new one — never a half-applied update in which a revoked CN is still an
-// admin and a newly added one is not yet. Returning the previous list from
-// under the same write lock keeps the audit record consistent with the swap;
-// reading it separately beforehand would race a concurrent reload.
-func (c *AuthConfig) SetAllowList(allowList map[string]bool) map[string]bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	previous := c.allowList
-	c.allowList = allowList
-	return previous
+// Domain zero only. A client_ca entry's admin_cns are read once at startup:
+// changing them means changing a file this process does not re-read, and
+// re-reading it would mean re-parsing that issuer's anchors too, which is a
+// larger promise than reload makes today. docs/configuration.md says so.
+func (c *AuthConfig) SetOwnAdminCNs(cns map[string]bool) map[string]bool {
+	for i := range c.Domains {
+		if c.Domains[i].IsOwn() {
+			return c.Domains[i].SetAdminCNs(cns)
+		}
+	}
+	return nil
+}
+
+// OwnDomain returns domain zero, this CA's own issuer.
+func (c *AuthConfig) OwnDomain() *TrustDomain {
+	if len(c.Domains) == 0 {
+		return nil
+	}
+	return &c.Domains[0]
 }
 
 type Server struct {
@@ -1302,18 +1303,18 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 		// and validity.
 		//
 		// Reissuing without a fresh proof-of-possession is safe because the
-		// certificate is checked twice over. newAuthMiddleware verifies it
-		// chains to the configured trust anchor and is not revoked; AutoRenew
-		// then verifies it was issued by *this* CA specifically, rejecting with
-		// ErrForeignCertificate otherwise, and re-checks revocation against
-		// storage rather than the middleware's cache, which can lag a
-		// revocation performed on another replica — see the SECURITY note on
-		// ca.refuseIfRevoked, which both renewal paths go through. The issuer
-		// check is not redundant: the anchor the middleware trusts and this
-		// CA's own certificate are the same today, but the point of the
-		// intermediate-CA work is that they need not stay so — and renewal is
-		// the operation that mints new credentials from old ones. clientCN(r)
-		// only reads the CN.
+		// certificate is checked twice over. newAuthMiddleware attributes it to
+		// a trust domain, and the tierOwnClient path guarding this route admits
+		// only domain zero — our own CA — having also confirmed it is not
+		// revoked. AutoRenew then verifies independently that this CA issued it
+		// and has not revoked it, rejecting with ErrForeignCertificate
+		// otherwise.
+		//
+		// The second check is not redundant with the first. They are enforced in
+		// different packages against different state, and renewal is the
+		// operation that mints a new credential from an old one — the place
+		// where a foreign certificate crossing into our namespace would be
+		// hardest to notice afterwards. clientCN(r) only reads the CN.
 		certPEM, err = s.CA.AutoRenew(r.Context(), r.TLS.PeerCertificates[0])
 		if err != nil {
 			// A revoked certificate must not be renewed into a fresh one. This

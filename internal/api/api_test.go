@@ -1430,7 +1430,12 @@ var _ = Describe("API Workflow", func() {
 				Expect(err).NotTo(HaveOccurred())
 
 				splitServer := api.New(myCA)
-				splitServer.AuthConfig = &api.AuthConfig{CACert: foreignCA}
+				// A CA that trusts an issuer other than itself: domain zero is
+				// the foreign certificate, so a client this CA issued does not
+				// verify and the renewal refusal below is reachable.
+				splitServer.AuthConfig = &api.AuthConfig{
+					Domains: []api.TrustDomain{api.OwnTrustDomain(foreignCA, nil, true)},
+				}
 				splitMux = splitServer.Routes()
 
 				// The eligibility refusals are logged, and the migration guide

@@ -311,7 +311,9 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		server := api.New(myCA)
-		server.AuthConfig = api.NewAuthConfig(caCert, adminAllowList)
+		server.AuthConfig = &api.AuthConfig{
+			Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, adminAllowList, true)},
+		}
 		mux = server.Routes()
 
 		// Fresh certificates per route, not one shared set.
@@ -1459,8 +1461,12 @@ var _ = Describe("Authorisation baseline: configuration axes", func() {
 			// The one input that narrows admin authority. Every cell in the main
 			// table is computed with this false, so without this pair a change
 			// that dropped the flag would move nothing the oracle watches.
-			cfg := api.NewAuthConfig(caCert, adminAllowList)
-			cfg.NoPpCliAuth = true
+			// no_pp_cli_auth is a property of the domain now, not of the config:
+			// honouring the extension is what a domain grants, and domain zero
+			// is the only one this spec has.
+			cfg := &api.AuthConfig{
+				Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, adminAllowList, false)},
+			}
 			handler := muxWith(cfg)
 			byExtension := issueClientCertWithPpCliAuth("cli-user", caCert, caKey)
 			Expect(probe(handler, "PUT", "/certificate_revocation_list/ca", byExtension)).To(BeTrue())

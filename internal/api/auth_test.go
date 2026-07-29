@@ -136,7 +136,9 @@ var _ = Describe("Auth Middleware", func() {
 
 		// "puppet-server" is the sole admin CN in the allow list.
 		server := api.New(myCA)
-		server.AuthConfig = api.NewAuthConfig(caCert, map[string]bool{"puppet-server": true})
+		server.AuthConfig = &api.AuthConfig{
+			Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{"puppet-server": true}, true)},
+		}
 		mux = server.Routes()
 	})
 
@@ -895,8 +897,10 @@ var _ = Describe("Auth Middleware", func() {
 
 		BeforeEach(func() {
 			srv := api.New(myCA)
-			srv.AuthConfig = api.NewAuthConfig(caCert, map[string]bool{"puppet-server": true})
-			srv.AuthConfig.AllowPublicStatus = true
+			srv.AuthConfig = &api.AuthConfig{
+				Domains:           []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{"puppet-server": true}, true)},
+				AllowPublicStatus: true,
+			}
 			publicStatusMux = srv.Routes()
 		})
 
@@ -940,7 +944,9 @@ var _ = Describe("Auth Middleware", func() {
 
 		BeforeEach(func() {
 			srv := api.New(myCA)
-			srv.AuthConfig = api.NewAuthConfig(caCert, map[string]bool{})
+			srv.AuthConfig = &api.AuthConfig{
+				Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{}, true)},
+			}
 			muxNoCNList = srv.Routes()
 		})
 
@@ -1008,7 +1014,9 @@ var _ = Describe("Auth Middleware", func() {
 
 			// Step 2: Submit CSR; autosign signs it immediately.
 			srv := api.New(autosignCA)
-			srv.AuthConfig = api.NewAuthConfig(caCert, map[string]bool{})
+			srv.AuthConfig = &api.AuthConfig{
+				Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{}, true)},
+			}
 			attackMux := srv.Routes()
 
 			rr := httptest.NewRecorder()
@@ -1051,8 +1059,9 @@ var _ = Describe("Auth Middleware", func() {
 
 		BeforeEach(func() {
 			srv := api.New(myCA)
-			srv.AuthConfig = api.NewAuthConfig(caCert, map[string]bool{})
-			srv.AuthConfig.NoPpCliAuth = true
+			srv.AuthConfig = &api.AuthConfig{
+				Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{}, false)},
+			}
 			muxNoPpCli = srv.Routes()
 		})
 
@@ -1067,8 +1076,9 @@ var _ = Describe("Auth Middleware", func() {
 
 		It("still allows POST /sign/all for a CN in the allow list", func() {
 			srv := api.New(myCA)
-			srv.AuthConfig = api.NewAuthConfig(caCert, map[string]bool{"puppet-server": true})
-			srv.AuthConfig.NoPpCliAuth = true
+			srv.AuthConfig = &api.AuthConfig{
+				Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{"puppet-server": true}, false)},
+			}
 			muxWithCN := srv.Routes()
 
 			clientCert := issueClientCert("puppet-server", caCert, caKey)
@@ -1140,12 +1150,16 @@ var _ = Describe("lookupTier classification", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		srv := api.New(myCA)
-		srv.AuthConfig = api.NewAuthConfig(caCert, map[string]bool{"puppet-server": true})
+		srv.AuthConfig = &api.AuthConfig{
+			Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{"puppet-server": true}, true)},
+		}
 		muxDefault = srv.Routes()
 
 		srvPub := api.New(myCA)
-		srvPub.AuthConfig = api.NewAuthConfig(caCert, map[string]bool{"puppet-server": true})
-		srvPub.AuthConfig.AllowPublicStatus = true
+		srvPub.AuthConfig = &api.AuthConfig{
+			Domains:           []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{"puppet-server": true}, true)},
+			AllowPublicStatus: true,
+		}
 		muxPublicState = srvPub.Routes()
 	})
 
@@ -1239,12 +1253,12 @@ var _ = Describe("AuthConfig allow-list swapping", func() {
 	It("returns the list it replaced", func() {
 		cfg := api.NewAuthConfig(nil, map[string]bool{"first.example.com": true})
 
-		previous := cfg.SetAllowList(map[string]bool{"second.example.com": true})
+		previous := cfg.SetOwnAdminCNs(map[string]bool{"second.example.com": true})
 
 		Expect(previous).To(Equal(map[string]bool{"first.example.com": true}),
 			"the audit log's added/removed diff is built from this")
-		Expect(cfg.IsAdminCN("second.example.com")).To(BeTrue())
-		Expect(cfg.IsAdminCN("first.example.com")).To(BeFalse())
+		Expect(cfg.IsOwnAdminCN("second.example.com")).To(BeTrue())
+		Expect(cfg.IsOwnAdminCN("first.example.com")).To(BeFalse())
 	})
 
 	It("serves reads while the list is being replaced", func() {
@@ -1272,8 +1286,8 @@ var _ = Describe("AuthConfig allow-list swapping", func() {
 						return
 					default:
 					}
-					cfg.IsAdminCN("old.example.com")
-					cfg.IsAdminCN("new.example.com")
+					cfg.IsOwnAdminCN("old.example.com")
+					cfg.IsOwnAdminCN("new.example.com")
 					reads.Add(1)
 				}
 			}()
@@ -1283,8 +1297,8 @@ var _ = Describe("AuthConfig allow-list swapping", func() {
 		before := reads.Load()
 
 		for i := 0; i < 200; i++ {
-			cfg.SetAllowList(fresh)
-			cfg.SetAllowList(old)
+			cfg.SetOwnAdminCNs(fresh)
+			cfg.SetOwnAdminCNs(old)
 		}
 
 		// Those 200 swaps can complete before the scheduler has run a single
@@ -1296,18 +1310,18 @@ var _ = Describe("AuthConfig allow-list swapping", func() {
 		// waiting for the readers first and then swapping (which would only
 		// prove the reads preceded the swaps).
 		Eventually(func() int64 {
-			cfg.SetAllowList(fresh)
-			cfg.SetAllowList(old)
+			cfg.SetOwnAdminCNs(fresh)
+			cfg.SetOwnAdminCNs(old)
 			return reads.Load() - before
 		}).WithTimeout(30*time.Second).Should(BeNumerically(">", 0),
 			"no read landed while the allow list was being replaced")
 
-		cfg.SetAllowList(fresh)
+		cfg.SetOwnAdminCNs(fresh)
 		close(stop)
 		wg.Wait()
 
 		Expect(reads.Load()).To(BeNumerically(">", 0), "the readers must have raced the writer")
-		Expect(cfg.IsAdminCN("new.example.com")).To(BeTrue(), "the last write must be in force")
-		Expect(cfg.IsAdminCN("old.example.com")).To(BeFalse())
+		Expect(cfg.IsOwnAdminCN("new.example.com")).To(BeTrue(), "the last write must be in force")
+		Expect(cfg.IsOwnAdminCN("old.example.com")).To(BeFalse())
 	})
 })

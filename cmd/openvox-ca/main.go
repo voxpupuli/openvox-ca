@@ -93,6 +93,52 @@ func buildBackendSpec(cfg *serverConfig, absCADir string) (storage.BackendSpec, 
 	return cfg.StorageConfig.ToBackendSpec(absCADir)
 }
 
+// buildAuthConfig assembles the API's authorisation configuration: the admin CN
+// allow list drawn from puppet_server and puppet_server_file, and the flags
+// governing pp_cli_auth and public status.
+//
+// Extracted from the startup path so that what the middleware is configured
+// with is separable from when it is installed. Those are different decisions —
+// the caller decides whether to authorise at all, this decides how — and having
+// them in one inline block is what made it easy to add a TLS mode that silently
+// skipped the first.
+func buildAuthConfig(cfg *serverConfig, myCA *ca.CA) (*api.AuthConfig, error) {
+	allowList := map[string]bool{}
+	for _, cn := range splitAndTrim(cfg.PuppetServer, ",") {
+		allowList[cn] = true
+	}
+	fileCNs, err := loadPuppetServerFile(cfg.PuppetServerFile)
+	if err != nil {
+		return nil, err
+	}
+	for _, cn := range fileCNs {
+		allowList[cn] = true
+	}
+
+	if !cfg.NoPpCliAuth {
+		// SECURITY: Inform the operator that pp_cli_auth OID grants admin access.
+		// Any certificate carrying this extension with value "true" will be treated
+		// as an admin. Use --no-pp-cli-auth to restrict admin access to the CN allow list only.
+		// NIST 800-53: AC-6 (Least Privilege)
+		slog.Info("pp_cli_auth extension is enabled as an admin credential (default). " +
+			"Any certificate carrying pp_cli_auth=true will have admin access. " +
+			"Use --no-pp-cli-auth to disable this and require explicit CN allow list.")
+	}
+
+	// Domain zero is this CA, always, and is not configurable: an operator
+	// cannot remove it, rename it, or drop their own CA out of the trust set.
+	// With no other domain the list has length one and authorisation is
+	// exactly what it was.
+	domains := []api.TrustDomain{
+		api.OwnTrustDomain(myCA.CACert, allowList, !cfg.NoPpCliAuth),
+	}
+
+	return &api.AuthConfig{
+		Domains:           domains,
+		AllowPublicStatus: cfg.AllowPublicStatus,
+	}, nil
+}
+
 // applyCAConfig applies the common CA configuration fields from serverConfig
 // to a CA instance. Used by both frontend and signer modes.
 func applyCAConfig(myCA *ca.CA, cfg *serverConfig) error {
@@ -628,9 +674,16 @@ func newRootCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				srv.AuthConfig = api.NewAuthConfig(myCA.CACert, allowList)
-				srv.AuthConfig.NoPpCliAuth = cfg.NoPpCliAuth
-				srv.AuthConfig.AllowPublicStatus = cfg.AllowPublicStatus
+				// Domain zero is this CA, always, and is not configurable: an
+				// operator cannot remove it, rename it, or drop their own CA out
+				// of the trust set. With no other domain the list has length one
+				// and authorisation is exactly what it was.
+				srv.AuthConfig = &api.AuthConfig{
+					Domains: []api.TrustDomain{
+						api.OwnTrustDomain(myCA.CACert, allowList, !cfg.NoPpCliAuth),
+					},
+					AllowPublicStatus: cfg.AllowPublicStatus,
+				}
 				if !cfg.NoPpCliAuth {
 					// SECURITY: Inform the operator that pp_cli_auth OID grants admin access.
 					// Any certificate carrying this extension with value "true" will be treated
