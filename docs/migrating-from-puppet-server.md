@@ -88,8 +88,10 @@ refresh. Which CRL is "ours" is decided by verifying the signature against this
 CA's certificate, not by comparing issuer names or key identifiers: a CRL from
 `openssl ca -gencrl` carries no Authority Key Identifier under the stock
 `openssl.cnf`, and a shared root can issue two sub-CAs with the same name. If
-the bundle contains no CRL signed by this CA, an empty one is generated and
-placed first.
+the bundle contains no CRL signed by this CA, the one already in storage is kept
+at the front, and only if there is none is an empty CRL generated. That makes
+re-running the import with a newer ancestor bundle the way to refresh ancestor
+CRLs today, without exporting and concatenating your own first.
 
 Two limits worth knowing. Ancestor CRLs are stored as imported and never
 refreshed — this CA cannot re-sign another CA's list — so they age in place and

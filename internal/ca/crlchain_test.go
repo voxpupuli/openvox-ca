@@ -461,6 +461,34 @@ var _ = Describe("CRL chain ordering at import", func() {
 		Expect(chain[0].Raw).To(Equal(crlBlocks(bare)[0].Raw))
 	})
 
+	It("keeps our existing revocations when only ancestors are re-imported", func() {
+		// How an operator refreshes ancestor CRLs with the tools available
+		// today: re-run import with a newer ancestor bundle. Generating an empty
+		// CRL for ourselves there would un-revoke the whole fleet, and it would
+		// look healthy — block 0 would be ours, just empty.
+		Expect(ca.ImportCA(ctx, store, certPEM, keyPEM, ourCRL)).To(Succeed())
+
+		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		Expect(myCA.Init(ctx)).To(Succeed())
+		_, err := myCA.Generate(ctx, "node1.test", nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(myCA.Revoke(ctx, "node1.test")).To(Succeed())
+
+		revoked := crlBlocks(mustGetCRL(store, ctx))[0]
+		Expect(revoked.RevokedCertificateEntries).To(HaveLen(1))
+
+		// Refresh the ancestors only, exactly as an operator would.
+		Expect(ca.ImportCA(ctx, store, certPEM, keyPEM, upsCRL)).To(Succeed())
+
+		chain := crlBlocks(mustGetCRL(store, ctx))
+		Expect(chain).To(HaveLen(2))
+		Expect(chain[0].RevokedCertificateEntries).To(HaveLen(1),
+			"our revocations must survive an ancestors-only import")
+		Expect(chain[0].RevokedCertificateEntries[0].SerialNumber).
+			To(Equal(revoked.RevokedCertificateEntries[0].SerialNumber))
+		Expect(chain[1].AuthorityKeyId).To(Equal(upstream.SubjectKeyId))
+	})
+
 	It("rejects a chain whose ancestor block is corrupt", func() {
 		// The blob is served verbatim to every agent, and Puppet's default
 		// certificate_revocation = chain makes an agent parse all of it, so a

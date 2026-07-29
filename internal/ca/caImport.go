@@ -122,11 +122,20 @@ func ImportCA(ctx context.Context, store *storage.StorageService, certBundlePEM,
 		ordered, foundOurs := orderCRLChain(incoming, caCert)
 		if !foundOurs {
 			// A chain of purely upstream CRLs is legitimate — an operator may
-			// supply ancestors and expect this CA to issue its own. Generate
-			// ours and lead with it.
-			ourCRL, err := generateEmptyCRL(caCert, caKey)
-			if err != nil {
-				return err
+			// supply ancestors and expect this CA to issue its own. It is also
+			// how someone refreshes ancestor CRLs with the tools available
+			// today, on a CA that has been issuing for months.
+			//
+			// So prefer a CRL of ours already in storage over a fresh empty
+			// one. Leading with an empty CRL would leave every reader taking
+			// block 0 and concluding nothing is revoked, which looks entirely
+			// healthy and silently un-revokes the fleet.
+			ourCRL := storedOwnCRL(ctx, store, caCert)
+			if ourCRL == nil {
+				ourCRL, err = generateEmptyCRL(caCert, caKey)
+				if err != nil {
+					return err
+				}
 			}
 			ordered = append([]*x509.RevocationList{ourCRL}, ordered...)
 		}
@@ -168,6 +177,26 @@ func ImportCA(ctx context.Context, store *storage.StorageService, certBundlePEM,
 		return fmt.Errorf("failed to create inventory: %w", err)
 	}
 
+	return nil
+}
+
+// storedOwnCRL returns the CRL in storage that cert signed, or nil when there
+// is none — including when storage cannot be read or holds nothing usable,
+// since every caller's fallback is to generate a fresh one.
+func storedOwnCRL(ctx context.Context, store *storage.StorageService, cert *x509.Certificate) *x509.RevocationList {
+	existing, err := store.GetCRL(ctx)
+	if err != nil {
+		return nil
+	}
+	stored, err := decodeCRLChain(existing)
+	if err != nil {
+		return nil
+	}
+	for _, crl := range stored {
+		if crlSignedBy(cert, crl) {
+			return crl
+		}
+	}
 	return nil
 }
 
