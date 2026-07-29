@@ -71,6 +71,12 @@ type TrustDomain struct {
 
 	// CRLs holds this domain's revocation material, swapped atomically on
 	// reload. Nil for domain zero, which uses the CA's own CRL instead.
+	//
+	// Allocate it when the domain is built, never lazily on first write: the
+	// reload task runs on the maintenance goroutine while requests read through
+	// RevocationSet, so a lazy allocation is an unsynchronised write to a field
+	// concurrent readers are dereferencing. Only reachable when the first load
+	// failed — the one path where a foreign domain is under active repair.
 	CRLs *clientCRLs
 }
 
@@ -83,9 +89,12 @@ func (d *TrustDomain) RevocationSet() *ClientCRLSet {
 }
 
 // SetRevocationSet installs a reloaded CRL set for this domain.
+//
+// The holder must already exist; see the note on CRLs. Allocating it here would
+// race with concurrent readers.
 func (d *TrustDomain) SetRevocationSet(s *ClientCRLSet) {
 	if d.CRLs == nil {
-		d.CRLs = &clientCRLs{}
+		return
 	}
 	d.CRLs.Set(s)
 }

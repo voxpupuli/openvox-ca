@@ -70,7 +70,11 @@ puppet_server_file: ""
 no_pp_cli_auth: false
 no_tls_required: false
 allow_public_status: false  # set true to allow unauthenticated GET /certificate_status
-                            # (otherwise admin-only: puppet_server CN or pp_cli_auth)
+                            # (otherwise admin-only: an admin CN of the matched
+                            # trust domain, or pp_cli_auth where that domain
+                            # honours it)
+client_ca: []               # additional client issuers; see "Client trust domains"
+client_revocation_policy: require   # require | check | skip (client_ca entries only)
 autosign_config: ""
 logfile: ""
 verbosity: 0
@@ -575,13 +579,36 @@ always checked against our own CRL.
 | `skip` | No revocation checking for foreign issuers. **Unsafe** |
 
 Checking covers the **whole verified chain**, not just the leaf: a sibling CA
-revoked by the shared root must not go on authenticating its leaves. An expired
-CRL counts as absent, so `require` does not quietly decay into `skip`.
+revoked by the shared root must not go on authenticating its leaves.
+
+Under the default `require` policy, **`crl_file` is mandatory** for every entry:
+configuration validation rejects a block without one, and the server refuses to
+start if the file cannot be read or holds a CRL that does not parse. That is
+deliberate — the anchor bundle beside it already fails closed, and a server that
+starts here would reject every client of the domain while its readiness probe
+reported healthy.
 
 Every CRL in `crl_file` is signature-verified against an anchor in the same
 entry before it is used, and one carrying no Authority Key Identifier is
 discarded. Without verification, a writable `crl_file` would be a way to
 *clear* revocations, not merely add them.
+
+> **Anchoring on a shared root and using `require` locks everyone out.** The
+> walk needs a CRL for every issuer in the chain except the anchor, and an
+> intermediate's own CRL is signed by that intermediate — not by the root — so
+> it fails the verification above and is discarded. Every client of the entry is
+> then rejected. The server warns about this at startup.
+>
+> The fix is to anchor on the issuing CA, which is what scopes the entry anyway.
+> **Do not reach for `client_revocation_policy: check`**: it restores service by
+> disabling leaf revocation checking for that domain entirely, and nothing
+> afterwards says so.
+
+An expired CRL is treated differently by the two policies, and deliberately.
+Under `require` it counts as absent, so the policy does not quietly decay into
+`skip`. Under `check` it is still consulted — it is loaded, and the serials it
+names are still revoked — because `check` means "tolerate an issuer with no
+CRLs", not "stop reading the ones you were given".
 
 > **`crl_file` does not cover the CA named in the same block.** The trust anchor
 > is never revocation-checked — it is trusted by configuration, not by anything

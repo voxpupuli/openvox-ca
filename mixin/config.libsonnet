@@ -104,6 +104,14 @@
     // 'for' durations applied to the expiry alerts to debounce flapping at the
     // threshold boundary.
     expiryFor: '1h',
+
+    // --- Client trust domains ---
+    // A domain with no usable CRL rejects every one of its clients under the
+    // require policy, so this is an authentication outage rather than a
+    // degradation. Debounced separately from the expiry alerts: those tolerate
+    // an hour because expiry is gradual, while this one wants to fire promptly
+    // and only needs to ride out a reload.
+    clientCRLUnusableFor: '10m',
     scrapeFor: '15m',
     readyFor: '10m',
     downFor: '5m',

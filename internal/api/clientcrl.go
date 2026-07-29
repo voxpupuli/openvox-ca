@@ -62,22 +62,30 @@ func NewClientCRLSet(crls []*x509.RevocationList) *ClientCRLSet {
 	return set
 }
 
-// forIssuer returns the currently valid CRLs issued by cert.
+// forIssuer returns every CRL issued by cert, and whether any of them is
+// currently valid.
 //
-// A CRL whose NextUpdate has passed counts as absent. Without that, `require`
-// silently degrades to `skip` over time: an expired CRL would go on satisfying
-// the "has a CRL" test while saying nothing about revocations since.
-func (s *ClientCRLSet) forIssuer(cert *x509.Certificate, now time.Time) []*x509.RevocationList {
+// The two answers are separate because the policies want different things. For
+// `require`, an expired CRL counts as absent: without that the policy silently
+// degrades to `skip` over time, an expired CRL going on satisfying the "has a
+// CRL" test while saying nothing about revocations since.
+//
+// For `check` — "verify against whatever CRLs are loaded" — an expired CRL is
+// still loaded and still names serials that were revoked. Discarding it would
+// turn a stale CRL into no revocation checking at all, which is the outcome
+// `check` exists to avoid; the operator asked to tolerate an issuer without
+// CRLs, not to stop reading the ones they supplied.
+func (s *ClientCRLSet) forIssuer(cert *x509.Certificate, now time.Time) (crls []*x509.RevocationList, anyValid bool) {
 	if s == nil || len(cert.SubjectKeyId) == 0 {
-		return nil
+		return nil, false
 	}
-	var valid []*x509.RevocationList
 	for _, crl := range s.byIssuerKeyID[string(cert.SubjectKeyId)] {
+		crls = append(crls, crl)
 		if crl.NextUpdate.IsZero() || crl.NextUpdate.After(now) {
-			valid = append(valid, crl)
+			anyValid = true
 		}
 	}
-	return valid
+	return crls, anyValid
 }
 
 // Usable reports whether at least one issuer has a currently valid CRL. Drives
@@ -145,11 +153,11 @@ func checkChainRevocation(chain []*x509.Certificate, set *ClientCRLSet, policy s
 
 	for i := 0; i < len(chain)-1; i++ {
 		subject, issuer := chain[i], chain[i+1]
-		crls := set.forIssuer(issuer, now)
+		crls, anyValid := set.forIssuer(issuer, now)
+		if policy == RevocationRequire && !anyValid {
+			return fmt.Errorf("no currently valid CRL for issuer %q", issuer.Subject.CommonName)
+		}
 		if len(crls) == 0 {
-			if policy == RevocationRequire {
-				return fmt.Errorf("no currently valid CRL for issuer %q", issuer.Subject.CommonName)
-			}
 			continue
 		}
 		for _, crl := range crls {

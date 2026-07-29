@@ -1429,6 +1429,11 @@ var _ = Describe("API Workflow", func() {
 				foreignCert, err = x509.ParseCertificate(leafDER)
 				Expect(err).NotTo(HaveOccurred())
 
+				// Domain zero's anchor is the *foreign* issuer, so the
+				// middleware attributes the certificate to our own domain and
+				// tierOwnClient admits it — while the CA still knows it did not
+				// issue it. That divergence is what makes the handler's
+				// ErrForeignCertificate branch reachable at all.
 				splitServer := api.New(myCA)
 				// A CA that trusts an issuer other than itself: domain zero is
 				// the foreign certificate, so a client this CA issued does not

@@ -246,6 +246,7 @@ func newRootCmd() *cobra.Command {
 		puppetServers           string
 		puppetServerFile        string
 		noPpCliAuth             bool
+		clientRevocationPolicy  string
 		noTLSRequired           bool
 		allowPublicStatus       bool
 		ocspURL                 string
@@ -348,6 +349,9 @@ func newRootCmd() *cobra.Command {
 			}
 			if cmd.Flags().Changed("no-pp-cli-auth") {
 				cfg.NoPpCliAuth = noPpCliAuth
+				if cmd.Flags().Changed("client-revocation-policy") {
+					cfg.ClientRevocationPolicy = clientRevocationPolicy
+				}
 			}
 			if cmd.Flags().Changed("no-tls-required") {
 				cfg.NoTLSRequired = noTLSRequired
@@ -768,13 +772,18 @@ func newRootCmd() *cobra.Command {
 				// certificate_authorities list — and deliberately broader than
 				// any single domain's authority: it does not merge trust, which
 				// the middleware decides per domain.
-				for i := range cfg.ClientCA {
-					anchors, err := parseAnchorBundle(cfg.ClientCA[i].File)
-					if err != nil {
-						return fmt.Errorf("client_ca %q: %w", cfg.ClientCA[i].Name, err)
-					}
-					for _, anchor := range anchors {
-						caPool.AddCert(anchor)
+				//
+				// Taken from the domains already built rather than re-read from
+				// disk. Re-parsing would let the pool and the authorisation
+				// decision diverge if a bundle changed between the two reads,
+				// and it is the pool that tells a client which certificate to
+				// offer — so the mismatch would present as a client silently
+				// offering nothing.
+				if srv.AuthConfig != nil {
+					for i := range srv.AuthConfig.Domains {
+						for _, anchor := range srv.AuthConfig.Domains[i].Anchors {
+							caPool.AddCert(anchor)
+						}
 					}
 				}
 
@@ -928,6 +937,7 @@ func newRootCmd() *cobra.Command {
 	f.StringVar(&puppetServers, "puppet-server", "", "Comma-separated list of puppet-server CNs allowed admin access")
 	f.StringVar(&puppetServerFile, "puppet-server-file", "", "Path to a file of puppet-server CNs allowed admin access (one per line; # comments and blank lines ignored)")
 	f.BoolVar(&noPpCliAuth, "no-pp-cli-auth", false, "Disable pp_cli_auth extension as an admin credential; require CN allow list only")
+	f.StringVar(&clientRevocationPolicy, "client-revocation-policy", "", "Revocation checking for client_ca domains: require (default), check, or skip. Our own CA always checks its own CRL")
 	f.BoolVar(&noTLSRequired, "no-tls-required", false, "Allow plain HTTP on non-loopback addresses (use only behind a trusted TLS proxy or in test environments)")
 	f.BoolVar(&allowPublicStatus, "allow-public-status", false, "Allow unauthenticated GET /certificate_status (by default this route is admin-only)")
 	f.StringVar(&ocspURL, "ocsp-url", "", "OCSP responder URL to embed in issued certificates (e.g. http://openvox-ca:8140/ocsp)")

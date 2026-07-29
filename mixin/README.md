@@ -48,6 +48,8 @@ alerting rules for the openvox-ca exporter. It alerts on:
   forever, so it is indistinguishable from a healthy file on every series. It
   surfaces as `PuppetCAUpstreamCRLExpiringSoon` on a CA that has
   `crl_chain_file` set.
+- **Client trust domains** with no usable CRL — every CRL expired, or every one
+  [`client_ca`](../docs/configuration.md#client-trust-domains) is in use). The
 - **Kubernetes export** targets whose applies keep failing (only when the
   [Kubernetes export](../docs/kubernetes-export.md) feature is in use).
 
