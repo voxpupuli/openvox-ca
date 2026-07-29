@@ -111,13 +111,40 @@ before its own `nextUpdate` lapses. Nothing alerts on this — see
 
 **`import` writes to a local filesystem directory only.** It takes `--cadir` and
 constructs filesystem storage directly; unlike `migrate` it has no
-`--source-config`/`--dest-config`. If your CA runs on postgres, mysql, etcd or
-redis, re-importing writes to a directory the server never reads, prints
-`CA imported into <dir>`, and changes nothing — the live chain expires anyway.
-On those backends the refresh is a `migrate` out, `import`, `migrate` back round
-trip with the CA stopped. Stop the CA for a filesystem or sqlite refresh too:
-`import` takes the CRL lock, but that lock is only cross-process on backends
-that implement one.
+`--source-config`/`--dest-config`. If your CA runs on **sqlite, postgres, mysql,
+etcd or redis**, re-importing writes to a directory the server never reads,
+prints `CA imported into <dir>`, and changes nothing — the live chain expires
+anyway. (SQLite is in that list: it keeps the CRL in its database file, so a
+cadir-based import misses it exactly as a networked backend does. See
+[storage backends](storage-backends.md).)
+
+On those backends the refresh is a round trip with the CA stopped, and the
+return leg needs `--force` because the destination still holds a CA
+certificate. **Back up the destination first** — `migrate` is not
+transactional, and the write-back covers the cert, key, inventory, inventory
+HMAC and every signed certificate in order to refresh one PEM blob:
+
+```bash
+openvox-ca-ctl migrate --source-config live.yaml --dest-config scratch.yaml
+openvox-ca-ctl import --cadir /tmp/scratch --cert-bundle ca.pem \
+  --private-key ca-key.pem --crl-chain refreshed-chain.pem
+openvox-ca-ctl migrate --source-config scratch.yaml --dest-config live.yaml --force
+```
+
+On the **filesystem** backend `import` does write where the server reads, but
+stop the CA anyway: `import` takes the CRL lock, and that lock is only
+cross-process on backends that implement one — filesystem and sqlite both fall
+back to a mutex inside each process.
+
+**Re-import rewrites the CA key, so two custody modes cannot use it.** `import`
+writes whatever `--private-key` holds, and offers no encryption flags. Under
+`encrypt_ca_key` the stored key is an `ENCRYPTED PRIVATE KEY` block that
+`import` cannot parse, so feeding it back fails — and feeding the original
+plaintext key instead succeeds while silently replacing the encrypted at-rest
+key with a plaintext one, because key loading accepts both forms and nothing
+warns. Under `ca_key_provider: openbao` there is no exportable key at all, so
+re-import is unavailable outright. Neither mode has another ancestor-refresh
+mechanism today.
 
 **An older replica still flattens the chain.** A build from before this change
 rewrites the stored blob as a single block, so one un-upgraded replica handling

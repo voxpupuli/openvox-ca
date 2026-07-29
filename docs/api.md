@@ -105,7 +105,7 @@ Response:
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/expirations` | CA cert and CRL expiry dates |
+| `GET` | `/expirations` | CA cert and CRL expiry dates. The CRL date is **this CA's own CRL (block 0) only** — imported ancestor CRLs are not reflected, so an ancestor can be past its `nextUpdate` while this reports a comfortable date. See [metrics](metrics.md#crl) |
 
 ## Server-side key generation
 

@@ -544,6 +544,44 @@ var _ = Describe("CRL chain ordering at import", func() {
 		Expect(chain[0].Number.Int64()).To(Equal(int64(9)))
 	})
 
+	It("falls back to ThisUpdate when a duplicate of ours carries no CRL number", func() {
+		// RFC 5280 requires cRLNumber, but a hand-rolled CRL may omit it and the
+		// comparison still has to terminate and pick correctly. reNumberedCRL
+		// always sets a number, so nothing else reaches this branch — and if it
+		// inverted, the effect is the stale-block-0 bug the tie-break fixes.
+		certBlock, _ := pem.Decode(certPEM)
+		ourCert, err := x509.ParseCertificate(certBlock.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		keyBlock, _ := pem.Decode(keyPEM)
+		ourKey, err := x509.ParseECPrivateKey(keyBlock.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+
+		numberless := handRolledCRL(ourCert, ourKey)
+		numbered := reNumberedCRL(certPEM, keyPEM, 9)
+
+		Expect(ca.ImportCA(ctx, store, certPEM, keyPEM, append(numberless, numbered...))).To(Succeed())
+
+		chain := crlBlocks(mustGetCRL(ctx, store))
+		Expect(chain).To(HaveLen(1))
+		Expect(chain[0].Number).NotTo(BeNil(),
+			"the numbered copy is the later one, so it must win over the numberless one")
+		Expect(chain[0].Number.Int64()).To(Equal(int64(9)))
+	})
+
+	It("fails the import rather than fabricating a CRL when the stored blob will not decode", func() {
+		// The other half of the swallowed-error fix. A valid PEM envelope round
+		// corrupt DER is what a truncated paste or a hand-assembled file
+		// produces, and treating it as "nothing stored" would generate an empty
+		// CRL over live revocations.
+		corrupt := []byte("-----BEGIN X509 CRL-----\nZm9v\n-----END X509 CRL-----\n")
+		Expect(store.UpdateCRL(ctx, append(append([]byte{}, ourCRL...), corrupt...))).To(Succeed())
+		before := mustGetCRL(ctx, store)
+
+		err := ca.ImportCA(ctx, store, certPEM, keyPEM, nil)
+		Expect(err).To(MatchError(ContainSubstring("decoding the stored CRL before replacing it")))
+		Expect(mustGetCRL(ctx, store)).To(Equal(before), "nothing may be overwritten")
+	})
+
 	It("generates our CRL and leads with it when the chain is upstream-only", func() {
 		// Supplying only ancestors is legitimate: this CA has issued nothing
 		// yet, so it has no revocations of its own to import.

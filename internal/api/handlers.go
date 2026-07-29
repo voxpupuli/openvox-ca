@@ -234,6 +234,15 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 	case "revoked":
 		if err := s.CA.Revoke(r.Context(), subject); err != nil {
 			slog.Warn("Revoke failed", "subject", subject, "error", err)
+			// This is the boundary an operator reaches first and most often, so
+			// it needs the diagnosis more than reissue-crl does. In this state
+			// the CA cannot record revocations at all, and a bare "conflict"
+			// leaves the cause in the logs of whichever replica served the
+			// request.
+			if errors.Is(err, ca.ErrForeignStoredCRL) {
+				http.Error(w, err.Error(), http.StatusConflict)
+				return
+			}
 			http.Error(w, "conflict", http.StatusConflict)
 			return
 		}
@@ -758,9 +767,13 @@ func (s *Server) handleDeleteStatus(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.CA.Clean(r.Context(), subject); err != nil {
 		slog.Warn("Clean failed", "subject", subject, "error", err)
-		if errors.Is(err, ca.ErrNotFound) {
+		switch {
+		case errors.Is(err, ca.ErrNotFound):
 			http.Error(w, "not found", http.StatusNotFound)
-		} else {
+		case errors.Is(err, ca.ErrForeignStoredCRL):
+			// Same reasoning as the revoke path above.
+			http.Error(w, err.Error(), http.StatusConflict)
+		default:
 			http.Error(w, "conflict", http.StatusConflict)
 		}
 		return

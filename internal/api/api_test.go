@@ -103,6 +103,44 @@ var _ = Describe("API Workflow", func() {
 			return crl
 		}
 
+		It("returns 409 with the actionable message when the stored CRL is not ours", func() {
+			// The 409 translation is a documented contract in docs/api.md, and
+			// nothing exercised it: deleting the errors.Is branch restores the
+			// bare 500 that the review identified as the defect, with the CA-layer
+			// specs still green — they only prove ReissueCRL returns the sentinel.
+			// The message content is the whole point, so assert it, not just the code.
+			ctx := context.Background()
+			foreignKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			Expect(err).NotTo(HaveOccurred())
+			tmpl := &x509.Certificate{
+				SerialNumber:          big.NewInt(77),
+				Subject:               pkix.Name{CommonName: "Unrelated CA"},
+				NotBefore:             time.Now().Add(-time.Hour),
+				NotAfter:              time.Now().Add(24 * time.Hour),
+				KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+				BasicConstraintsValid: true,
+				IsCA:                  true,
+			}
+			der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &foreignKey.PublicKey, foreignKey)
+			Expect(err).NotTo(HaveOccurred())
+			foreignCert, err := x509.ParseCertificate(der)
+			Expect(err).NotTo(HaveOccurred())
+			crlDER, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+				Number:     big.NewInt(5),
+				ThisUpdate: time.Now().UTC(),
+				NextUpdate: time.Now().UTC().Add(24 * time.Hour),
+			}, foreignCert, foreignKey)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(myCA.Storage.UpdateCRL(ctx,
+				pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlDER}))).To(Succeed())
+
+			req := httptest.NewRequest("PUT", "/certificate_revocation_list/ca", nil)
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusConflict))
+			Expect(rr.Body.String()).To(ContainSubstring("needs a restart"))
+		})
+
 		It("re-signs the CRL on PUT and returns the fresh CRL", func() {
 			getReq := httptest.NewRequest("GET", "/certificate_revocation_list/ca", nil)
 			getRR := httptest.NewRecorder()

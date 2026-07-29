@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"time"
 )
 
 // crlSignedBy reports whether crl was issued by cert — that is, whether cert's
@@ -196,7 +197,39 @@ func orderCRLChain(crls []*x509.RevocationList, cert *x509.Certificate) ([]*x509
 		slog.Warn("Discarding superseded copies of this CA's own CRL from the imported chain",
 			"discarded", superseded, "kept_crl_number", ours.Number)
 	}
+	warnAboutAncestors(others)
 	return append([]*x509.RevocationList{ours}, others...), true
+}
+
+// warnAboutAncestors reports ancestor blocks that will make agents reject the
+// published chain.
+//
+// The reason every block must parse — the blob is served verbatim and Puppet's
+// default certificate_revocation = chain makes an agent parse all of it —
+// applies just as well to a block whose nextUpdate has already lapsed, or to
+// two copies of one ancestor's CRL. Neither is refused, because an operator
+// importing a chain they know is stale is a legitimate intermediate step, but
+// import is the only place either is detectable: no series and no alert covers
+// ancestor expiry.
+func warnAboutAncestors(others []*x509.RevocationList) {
+	now := time.Now()
+	seen := make(map[string]int, len(others))
+	for _, crl := range others {
+		if !crl.NextUpdate.IsZero() && now.After(crl.NextUpdate) {
+			slog.Warn("Imported ancestor CRL has already expired; agents doing full-chain "+
+				"revocation checking will reject the published chain",
+				"issuer", crl.Issuer.String(), "next_update", crl.NextUpdate.UTC().Format(time.RFC3339))
+		}
+		seen[string(crl.RawIssuer)]++
+	}
+	for _, crl := range others {
+		if n := seen[string(crl.RawIssuer)]; n > 1 {
+			slog.Warn("Imported chain carries more than one CRL for the same ancestor; "+
+				"all of them are published as supplied",
+				"issuer", crl.Issuer.String(), "copies", n)
+			seen[string(crl.RawIssuer)] = 0
+		}
+	}
 }
 
 // newerCRL reports whether a supersedes b, by CRL number where both carry one

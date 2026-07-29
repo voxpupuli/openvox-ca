@@ -86,7 +86,9 @@ openvox-ca-ctl import \
   --cadir      /etc/puppetlabs/puppet/ssl \
   --cert-bundle ca_cert.pem \
   --private-key ca_key.pem \
-  --crl-chain   ca_crl.pem     # optional; a new CRL is generated if omitted
+  --crl-chain   ca_crl.pem     # optional; omitting it leaves the stored CRL
+                               # chain alone (one is generated only if none
+                               # is stored)
 # --crl-chain may hold several concatenated CRLs in any order. This CA's own is
 # identified by signature and moved to the front; the rest are kept and served
 # so agents can do full-chain revocation checking. Every X509 CRL block must parse; other PEM block types are ignored and not stored.

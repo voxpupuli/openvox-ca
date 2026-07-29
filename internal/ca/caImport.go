@@ -40,7 +40,12 @@ import (
 // Supported key formats: RSA PKCS1 ("RSA PRIVATE KEY"), EC SEC1
 // ("EC PRIVATE KEY"), and PKCS8 ("PRIVATE KEY") for both RSA and ECDSA.
 //
-// crlPEM may be nil; when nil a fresh empty CRL is generated and written.
+// crlPEM may be nil, meaning no --crl-chain was supplied. That leaves the stored
+// CRL chain as it is, reordered so this CA's own block leads; a fresh empty CRL
+// is generated only when storage holds none, and the import is refused when
+// storage holds a chain with no CRL of ours to lead it. It used to overwrite
+// with a generated CRL unconditionally, which destroyed both the ancestor blocks
+// and every recorded revocation.
 //
 // This is an offline operation; no CA daemon is required.
 func ImportCA(ctx context.Context, store *storage.StorageService, certBundlePEM, keyPEM, crlPEM []byte) error {
@@ -86,6 +91,18 @@ func ImportCA(ctx context.Context, store *storage.StorageService, certBundlePEM,
 		return fmt.Errorf("failed to create CA directories: %w", err)
 	}
 
+	// --- Decide the CRL before writing anything ---
+	//
+	// The CRL step can now refuse — it did not before this branch — and the
+	// cert and key writes below are not undoable, so deciding afterwards would
+	// let a refusal leave a replaced certificate beside an untouched old CRL.
+	// This resolves the decision without persisting it: nothing is written
+	// until the CRL is known to be acceptable.
+	crlToWrite, err := planCRLImport(ctx, store, crlPEM, caCert, caKey)
+	if err != nil {
+		return err
+	}
+
 	// --- Write CA key ---
 	if err := store.SaveCAKey(ctx, keyPEM); err != nil {
 		return fmt.Errorf("failed to write CA key: %w", err)
@@ -103,23 +120,28 @@ func ImportCA(ctx context.Context, store *storage.StorageService, certBundlePEM,
 		_ = store.SaveCAPubKey(ctx, pubKeyPEM)
 	}
 
-	// --- Handle CRL ---
+	// --- Write the CRL decided above ---
 	//
-	// Under the CRL lock, because this is now a read-modify-write rather than
-	// the unconditional overwrite it used to be, and because re-import is the
+	// nil means "no --crl-chain was supplied and storage already holds a usable
+	// chain", so there is nothing to write.
+	//
+	// Under the CRL lock, because this is a read-modify-write rather than the
+	// unconditional overwrite it used to be, and because re-import is the
 	// documented way to refresh ancestor CRLs on a CA that has been issuing for
 	// months. Without it a revocation landing between the read and the write is
 	// silently discarded and the CRL number regresses, which metrics.md
-	// documents as monotonic. Note the lock is only genuinely cross-process on
+	// documents as monotonic. The lock is only genuinely cross-process on
 	// backends that implement one; on filesystem and sqlite it degrades to a
 	// process-local mutex, so a live import there still races the server and the
 	// documentation says to stop it first.
-	lockCtx, cancel := context.WithTimeout(ctx, lockTimeout)
-	defer cancel()
-	if err := store.WithLock(lockCtx, lockNameCRL, func() error {
-		return importCRL(ctx, store, crlPEM, caCert, caKey)
-	}); err != nil {
-		return err
+	if crlToWrite != nil {
+		lockCtx, cancel := context.WithTimeout(ctx, lockTimeout)
+		defer cancel()
+		if err := store.WithLock(lockCtx, lockNameCRL, func() error {
+			return writeCRLChain(ctx, store, crlToWrite)
+		}); err != nil {
+			return err
+		}
 	}
 
 	// --- Initialise serial if absent ---
@@ -141,8 +163,9 @@ func ImportCA(ctx context.Context, store *storage.StorageService, certBundlePEM,
 	return nil
 }
 
-// importCRL installs the CRL side of an import. c.mu is not involved; the
-// caller holds the CRL lock.
+// planCRLImport decides what the stored CRL chain should become, without
+// writing anything, so a refusal cannot leave the cert and key already replaced.
+// A nil result means the stored chain is already correct and must be left alone.
 //
 // crlPEM may be nil, meaning the operator supplied no --crl-chain. That is not
 // an instruction to discard the stored CRL: it used to generate a fresh empty
@@ -150,12 +173,12 @@ func ImportCA(ctx context.Context, store *storage.StorageService, certBundlePEM,
 // every ancestor block this branch exists to preserve *and* every revocation
 // recorded so far — silently, and looking entirely healthy afterwards, because
 // block 0 was legitimately ours. Nothing supplied means nothing to change.
-func importCRL(ctx context.Context, store *storage.StorageService, crlPEM []byte,
+func planCRLImport(ctx context.Context, store *storage.StorageService, crlPEM []byte,
 	caCert *x509.Certificate, caKey crypto.Signer,
-) error {
+) ([]*x509.RevocationList, error) {
 	stored, err := storedCRLChain(ctx, store)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if crlPEM == nil {
@@ -165,18 +188,18 @@ func importCRL(ctx context.Context, store *storage.StorageService, crlPEM []byte
 			// from the wrong list.
 			ordered, foundOurs := orderCRLChain(stored, caCert)
 			if !foundOurs {
-				return fmt.Errorf("the stored CRL chain contains no CRL signed by the CA certificate "+
+				return nil, fmt.Errorf("the stored CRL chain contains no CRL signed by the CA certificate "+
 					"being imported, and no --crl-chain was supplied to replace it: pass --crl-chain "+
 					"with this CA's own CRL, or remove the stored CRL to have a fresh empty one generated "+
 					"(%d block(s) currently stored)", len(stored))
 			}
-			return writeCRLChain(ctx, store, ordered)
+			return ordered, nil
 		}
 		generated, err := generateEmptyCRL(caCert, caKey)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		return writeCRLChain(ctx, store, []*x509.RevocationList{generated})
+		return []*x509.RevocationList{generated}, nil
 	}
 
 	// Every CRL block must parse. The blob is served verbatim to every agent,
@@ -185,10 +208,10 @@ func importCRL(ctx context.Context, store *storage.StorageService, crlPEM []byte
 	// CRL across the fleet rather than as an import error here.
 	incoming, err := decodeCRLChain(crlPEM)
 	if err != nil {
-		return fmt.Errorf("crl-chain: %w", err)
+		return nil, fmt.Errorf("crl-chain: %w", err)
 	}
 	if len(incoming) == 0 {
-		return fmt.Errorf("crl-chain does not contain a valid X509 CRL PEM block")
+		return nil, fmt.Errorf("crl-chain does not contain a valid X509 CRL PEM block")
 	}
 
 	// Every reader takes block 0 as this CA's own CRL, so put it there. An
@@ -210,12 +233,12 @@ func importCRL(ctx context.Context, store *storage.StorageService, crlPEM []byte
 		if ourCRL == nil {
 			ourCRL, err = generateEmptyCRL(caCert, caKey)
 			if err != nil {
-				return err
+				return nil, err
 			}
 		}
 		ordered = append([]*x509.RevocationList{ourCRL}, ordered...)
 	}
-	return writeCRLChain(ctx, store, ordered)
+	return ordered, nil
 }
 
 // writeCRLChain persists a chain, re-encoded from the parsed blocks rather than
