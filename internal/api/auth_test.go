@@ -952,6 +952,12 @@ var _ = Describe("Auth Middleware", func() {
 // /puppet-ca/v1 prefix stripping and the default-deny tierAdminOnly fallthrough
 // for unrecognised paths. A case classifying LESS restrictively than expected
 // would surface here as a probe mismatch.
+// This is the sibling of the oracle in authbaseline_test.go, and the two are
+// deliberately different instruments. This one infers the *tier* each route
+// sits in by probing three certificates and reading the shape of the answers;
+// that one records the observable HTTP outcome for eight named client classes
+// and asserts each cell. A tier change should move a row in both, and a change
+// that moves only one is worth understanding before it is accepted.
 var _ = Describe("lookupTier classification", func() {
 	var (
 		tmpDir         string
