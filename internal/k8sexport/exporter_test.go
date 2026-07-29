@@ -406,8 +406,8 @@ var _ = Describe("Exporter", func() {
 })
 
 var _ = Describe("Export scopes", func() {
-	// Two-block chains: leaf/intermediate first, root last, matching the order
-	// import-ca-cert enforces and the CA stores.
+	// Chains run leaf/intermediate first, root last — the order the CA stores
+	// and every consumer expects.
 	const (
 		// Three blocks, not two: with two, "the last certificate" and "the
 		// second certificate" are the same block, so a root scope that returned
@@ -465,8 +465,10 @@ var _ = Describe("Export scopes", func() {
 	})
 
 	It("publishes the trust anchor under root", func() {
-		// import-ca-cert guarantees the last certificate is a self-signed root,
-		// so this needs no validation of its own.
+		// root is positional: the last block, whatever it is. It is a trust
+		// anchor only if the imported bundle was a complete chain, which
+		// nothing currently enforces — see the scopes section of
+		// docs/kubernetes-export.md.
 		data := exportWith("root", "")
 		Expect(string(data["ca.crt"])).To(ContainSubstring("Uk9PVA=="))
 		Expect(string(data["ca.crt"])).NotTo(ContainSubstring("SU5URVJNRURJQVRF"))
@@ -497,8 +499,10 @@ var _ = Describe("Export scopes", func() {
 	})
 
 	It("is unchanged for a single-block chain, whichever scope is asked for", func() {
-		// What makes the field back-compatible: today's self-signed CAs have
-		// identical self, chain and root output.
+		// The half of back-compatibility that does hold: a CA that issued its
+		// own root stores one block, so all three scopes agree. A CA that
+		// imported a chain is the case where the self default narrows what was
+		// being published.
 		single := "-----BEGIN CERTIFICATE-----\nT05MWQ==\n-----END CERTIFICATE-----\n"
 		src = stubSource{cert: []byte(single), crl: []byte(crlChain)}
 		for _, scope := range []string{"", "chain", "root"} {

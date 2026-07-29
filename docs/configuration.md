@@ -299,12 +299,38 @@ whatever it contains is what gets published, so a CRL removed from it disappears
 from the served chain. Refresh it by whatever mechanism you already have — a
 mounted Secret, a sidecar, a CronJob — and openvox-ca picks the change up.
 
+### What each failure to read the file does
+
+Being declarative cuts both ways, so these distinctions matter more than they
+look:
+
+| The file is | What gets published | Why |
+| --- | --- | --- |
+| **absent** | the chain already published, unchanged | An absent file is *no statement*, not a statement that the chain should be empty. It has to be: this path runs on every CRL amendment, so a single revocation on a replica whose Secret has not mounted yet would otherwise truncate the chain for the whole fleet — permanently, because this CA cannot re-sign another CA's list. |
+| **empty (zero bytes)** | this CA's own CRL only | An empty file *is* a statement. This is how you say "publish nothing extra". |
+| **unparseable** | the chain already published, unchanged | The refresh fails and is counted. Note this also blocks **revocation** until the file is fixed: refusing to publish half a chain is deliberate, but it does couple CRL amendment to a file refreshed outside openvox-ca. |
+| **larger than 4 MiB** | the chain already published, unchanged | Refused rather than truncated: a half-read PEM blob would silently drop CRLs. A real chain is a handful of CRLs. |
+
+Write the file atomically (write to a temporary path, then rename) if your
+refresh mechanism allows it. A read that catches a `cat >` mid-write sees an
+unparseable file — safe, but it fails revocations until the next write lands.
+
+If one issuer appears more than once — which is what a CronJob that appends
+rather than replaces produces — only the CRL with the highest CRL number is
+published. Publishing both would let a client that stops at the first match be
+handed the older list, un-revoking a certificate.
+
 **Every CRL in the file is signature-verified** against a certificate in the
 stored CA bundle before it is served, and discarded with a warning otherwise.
 This content goes to every agent, so an unverified file would be a way to inject
-arbitrary bytes into every agent's CRL store. The check is always satisfiable:
-`import-ca-cert` requires a complete chain, so the bundle contains the root and
-the root's CRL always has a verifier.
+arbitrary bytes into every agent's CRL store. Whether the check can succeed for
+a given CRL depends on the stored bundle holding that issuer's certificate:
+importing the *complete* chain, up to and including the root, is what makes the
+root's own CRL publishable. `openvox-ca-ctl import` does not currently enforce
+completeness — a partial chain is accepted, and the CRLs whose issuers are
+missing from it are then discarded on every refresh. That is visible rather than
+silent: `puppetca_crl_chain_discarded_total` counts it and the shipped mixin
+alerts on it as `PuppetCAUpstreamCRLDiscarded`.
 
 A CRL this CA issued is ignored if found in the file — its own is always rebuilt
 from the inventory, and a stale copy must not be able to supersede live
@@ -320,7 +346,11 @@ Per-issuer freshness is reported as
 separate from `puppetca_crl_next_update_timestamp_seconds`, which continues to
 mean *this CA's own* CRL. An expiring upstream CRL is fixed at the parent CA,
 not here, so it gets its own alert with its own runbook — see the
-[mixin](../mixin/).
+[mixin](../mixin/). Two counters cover the failures that would otherwise be one
+warning per cycle in the log: `puppetca_crl_chain_refresh_failures_total` for a
+file that could not be read or parsed, and `puppetca_crl_chain_discarded_total`
+for a CRL dropped because nothing in the bundle signed it — the one case where
+the published chain silently *shrinks*.
 
 > **Rolling upgrades.** A replica running a build from before chain preservation
 > re-signs the CRL as a single block and silently drops the chain, so one old
