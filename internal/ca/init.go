@@ -506,14 +506,14 @@ func (c *CA) loadCRLCache(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("reading CRL: %w", err)
 	}
-	block, _ := pem.Decode(crlPEM)
-	if block == nil {
-		return fmt.Errorf("CRL is empty or not PEM-encoded")
-	}
-	crl, err := x509.ParseRevocationList(block.Bytes)
+	chain, err := decodeCRLChain(crlPEM)
 	if err != nil {
 		return fmt.Errorf("parsing CRL: %w", err)
 	}
+	if len(chain) == 0 {
+		return fmt.Errorf("CRL is empty or not PEM-encoded")
+	}
+	crl := chain[0]
 
 	// The cache answers "did we revoke this serial", so it must hold our own
 	// CRL. Block 0 is ours by construction — signCRLLocked writes it first and
@@ -535,8 +535,29 @@ func (c *CA) loadCRLCache(ctx context.Context) error {
 			"Re-import the CRL chain with this CA's own CRL first",
 			"crl_authority_key_id", fmt.Sprintf("%x", crl.AuthorityKeyId),
 			"ca_subject_key_id", fmt.Sprintf("%x", c.CACert.SubjectKeyId))
+
+		// Warned, but do not then go on to use it. The whole blob is already in
+		// hand, so searching the rest of the chain for the block this CA
+		// actually signed costs nothing and is strictly better than answering
+		// revocation questions from an ancestor's list — which contains none of
+		// our serials, so every certificate we revoked would authenticate.
+		if ours := ownCRLIn(chain, c.CACert); ours != nil {
+			slog.Warn("Using this CA's own CRL found later in the stored chain",
+				"position", indexOfCRL(chain, ours))
+			crl = ours
+		}
 	}
 
 	c.cachedCRL = crl
 	return nil
+}
+
+// indexOfCRL returns the position of crl in chain, for diagnostics.
+func indexOfCRL(chain []*x509.RevocationList, crl *x509.RevocationList) int {
+	for i, candidate := range chain {
+		if candidate == crl {
+			return i
+		}
+	}
+	return -1
 }

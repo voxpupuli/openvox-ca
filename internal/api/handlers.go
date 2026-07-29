@@ -379,6 +379,14 @@ func (s *Server) handleReissueCRL(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.CA.ReissueCRL(r.Context()); err != nil {
 		slog.Warn("CRL reissue failed", "error", err)
+		if errors.Is(err, ca.ErrForeignStoredCRL) {
+			// Operator-fixable, and the CA's own message names the cause and the
+			// remedy. Surfacing it is the difference between "reissue-crl
+			// returned 500" and knowing the replica needs a restart; a 500 would
+			// leave that in the logs of whichever replica served the request.
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
 		http.Error(w, "failed to reissue CRL", http.StatusInternalServerError)
 		return
 	}

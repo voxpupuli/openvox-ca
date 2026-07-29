@@ -20,6 +20,8 @@ package api_test
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -318,6 +320,63 @@ var _ = Describe("API Workflow", func() {
 			mux.ServeHTTP(rr, req)
 			Expect(rr.Code).To(Equal(http.StatusOK))
 			Expect(rr.Body.String()).To(ContainSubstring("X509 CRL"))
+		})
+
+		It("serves the whole stored chain, not just this CA's own block", func() {
+			// The point of chain preservation is that the chain reaches an
+			// agent: Puppet's default certificate_revocation = chain makes the
+			// agent parse all of it. Every other spec verifies storage state;
+			// this is the one that would catch a future change normalising the
+			// response to a single block, which would break full-chain
+			// revocation checking fleet-wide.
+			ctx := context.Background()
+			stored, err := myCA.Storage.GetCRL(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Append a second, unrelated CRL as an ancestor would appear.
+			ancestorKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			Expect(err).NotTo(HaveOccurred())
+			tmpl := &x509.Certificate{
+				SerialNumber:          big.NewInt(99),
+				Subject:               pkix.Name{CommonName: "Ancestor CA"},
+				NotBefore:             time.Now().Add(-time.Hour),
+				NotAfter:              time.Now().Add(24 * time.Hour),
+				KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+				BasicConstraintsValid: true,
+				IsCA:                  true,
+			}
+			der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &ancestorKey.PublicKey, ancestorKey)
+			Expect(err).NotTo(HaveOccurred())
+			ancestorCert, err := x509.ParseCertificate(der)
+			Expect(err).NotTo(HaveOccurred())
+			crlDER, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+				Number:     big.NewInt(3),
+				ThisUpdate: time.Now().UTC(),
+				NextUpdate: time.Now().UTC().Add(24 * time.Hour),
+			}, ancestorCert, ancestorKey)
+			Expect(err).NotTo(HaveOccurred())
+			ancestorCRL := pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlDER})
+
+			Expect(myCA.Storage.UpdateCRL(ctx, append(append([]byte{}, stored...), ancestorCRL...))).To(Succeed())
+
+			req := httptest.NewRequest("GET", "/certificate_revocation_list/ca", nil)
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusOK))
+
+			blocks := 0
+			rest := rr.Body.Bytes()
+			for {
+				var block *pem.Block
+				block, rest = pem.Decode(rest)
+				if block == nil {
+					break
+				}
+				if block.Type == "X509 CRL" {
+					blocks++
+				}
+			}
+			Expect(blocks).To(Equal(2), "the response must carry every stored CRL block")
 		})
 
 		It("should return 304 Not Modified when CRL has not changed since If-Modified-Since", func() {

@@ -123,8 +123,11 @@ func (c *CA) crlChainLocked(ctx context.Context, ourCRL *x509.RevocationList) ([
 			// counts the failure and the next attempt finds the chain intact.
 			return nil, fmt.Errorf("reading the stored CRL to preserve its upstream blocks: %w", err)
 		}
-		// Genuinely absent, which bootstrap and import both are: nothing
-		// upstream exists yet and our CRL stands alone.
+		// Genuinely absent. Defensive rather than routine: every caller of
+		// signCRLLocked has already read the CRL successfully through
+		// readStoredCRL, so reaching here means the blob was deleted between
+		// the two reads. Bootstrap and import do not come through here at all —
+		// both call Storage.UpdateCRL directly.
 		return encodeCRLChain(chain), nil
 	}
 
@@ -160,12 +163,28 @@ func (c *CA) crlChainLocked(ctx context.Context, ourCRL *x509.RevocationList) ([
 // reader takes block 0 as this CA's own. Reordering at import is cheaper than
 // making each reader search, and it means a mis-ordered bundle is corrected
 // once rather than misinterpreted repeatedly.
+// When more than one block is ours — which a bundle assembled from a backup
+// directory easily produces — the one with the highest CRL number wins and the
+// rest are dropped rather than kept as though they were ancestors. Taking the
+// first encountered made the outcome depend on the operator's concatenation
+// order: a stale copy leading would become block 0, loadCRLCache would cache
+// it, and the next re-sign would advance from its number and discard the newer
+// block. Chain length and CRL number both look healthy while revocations
+// recorded after the stale copy silently stop being seen.
 func orderCRLChain(crls []*x509.RevocationList, cert *x509.Certificate) ([]*x509.RevocationList, bool) {
 	var ours *x509.RevocationList
+	superseded := 0
 	others := make([]*x509.RevocationList, 0, len(crls))
 	for _, crl := range crls {
-		if ours == nil && crlSignedBy(cert, crl) {
-			ours = crl
+		if crlSignedBy(cert, crl) {
+			if ours == nil {
+				ours = crl
+				continue
+			}
+			superseded++
+			if newerCRL(crl, ours) {
+				ours = crl
+			}
 			continue
 		}
 		others = append(others, crl)
@@ -173,5 +192,19 @@ func orderCRLChain(crls []*x509.RevocationList, cert *x509.Certificate) ([]*x509
 	if ours == nil {
 		return crls, false
 	}
+	if superseded > 0 {
+		slog.Warn("Discarding superseded copies of this CA's own CRL from the imported chain",
+			"discarded", superseded, "kept_crl_number", ours.Number)
+	}
 	return append([]*x509.RevocationList{ours}, others...), true
+}
+
+// newerCRL reports whether a supersedes b, by CRL number where both carry one
+// and by ThisUpdate otherwise. RFC 5280 requires cRLNumber on a conforming CRL,
+// but a hand-rolled one may omit it and the comparison still has to terminate.
+func newerCRL(a, b *x509.RevocationList) bool {
+	if a.Number != nil && b.Number != nil {
+		return a.Number.Cmp(b.Number) > 0
+	}
+	return a.ThisUpdate.After(b.ThisUpdate)
 }

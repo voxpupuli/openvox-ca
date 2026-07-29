@@ -22,6 +22,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"time"
@@ -136,7 +137,7 @@ func (c *CA) reissueCRLLocked(ctx context.Context) error {
 // previously returned the error uncounted, so a replica that tripped this
 // without revoking anything logged every tick while the counter stayed flat.
 func (c *CA) readStoredCRL(ctx context.Context) (*x509.RevocationList, error) {
-	crl, err := c.readStoredCRLUncounted(ctx)
+	crl, err := c.parseStoredCRL(ctx)
 	if err != nil {
 		c.crlUpdateFailures.Add(1)
 		return nil, err
@@ -144,7 +145,20 @@ func (c *CA) readStoredCRL(ctx context.Context) (*x509.RevocationList, error) {
 	return crl, nil
 }
 
-func (c *CA) readStoredCRLUncounted(ctx context.Context) (*x509.RevocationList, error) {
+// ErrForeignStoredCRL reports that the stored CRL was not signed by the CA
+// certificate this process loaded, so re-signing it would destroy a list this
+// CA cannot reproduce.
+//
+// A sentinel because the condition is operator-fixable and the fix is not
+// obvious from a status code: the HTTP layer turns it into a 409 carrying this
+// message, rather than a bare 500 that leaves the diagnosis in the logs of
+// whichever replica happened to serve the request.
+var ErrForeignStoredCRL = errors.New("the stored CRL was not signed by the CA certificate this process is using")
+
+// parseStoredCRL reads and parses block 0 of the stored CRL, and refuses when it
+// is not one this CA signed. Split out only so readStoredCRL has a single error
+// path to count; it has no other caller.
+func (c *CA) parseStoredCRL(ctx context.Context) (*x509.RevocationList, error) {
 	crlPEM, err := c.Storage.GetCRL(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load CRL: %w", err)
@@ -170,10 +184,9 @@ func (c *CA) readStoredCRLUncounted(ctx context.Context) (*x509.RevocationList, 
 	// the CRL rather than at the deployment. The key identifiers are reported as
 	// a diagnostic aid, not as the test — see crlSignedBy.
 	if !c.ownsCRL(crl) {
-		return nil, fmt.Errorf("the stored CRL was not signed by the CA certificate this process is using "+
-			"(CRL authority key id %x, our subject key id %x): refusing to re-sign it. If the CA certificate "+
-			"was replaced, this replica needs a restart to pick it up",
-			crl.AuthorityKeyId, c.CACert.SubjectKeyId)
+		return nil, fmt.Errorf("%w (CRL authority key id %x, our subject key id %x): refusing to re-sign it. "+
+			"If the CA certificate was replaced, this replica needs a restart to pick it up",
+			ErrForeignStoredCRL, crl.AuthorityKeyId, c.CACert.SubjectKeyId)
 	}
 	return crl, nil
 }

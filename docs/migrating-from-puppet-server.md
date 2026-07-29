@@ -76,8 +76,9 @@ openvox-ca-ctl import \
 echo "CA imported into $NEW_CADIR"
 ```
 
-`--crl-chain` accepts a multi-CRL bundle in any order. Every block must be a
-parseable CRL; the whole import is refused otherwise, because the blob is served
+`--crl-chain` accepts a multi-CRL bundle in any order. Every `X509 CRL` block must
+parse, or the whole import is refused; PEM blocks of other types are ignored and
+are not stored, because the blob is served
 to every agent and Puppet's default `certificate_revocation = chain` makes an
 agent parse all of it.
 
@@ -93,14 +94,42 @@ at the front, and only if there is none is an empty CRL generated. That makes
 re-running the import with a newer ancestor bundle the way to refresh ancestor
 CRLs today, without exporting and concatenating your own first.
 
-Two limits worth knowing. Ancestor CRLs are stored as imported and never
-refreshed — this CA cannot re-sign another CA's list — so they age in place and
-must be re-imported before their own `nextUpdate` lapses. And a replica running
-a build older than this one will rewrite the stored blob as a single block,
-dropping the ancestors; during a rolling upgrade, complete the rollout before
+Four limits worth knowing before you rely on re-import as a refresh mechanism.
+
+**The bundle replaces the stored ancestor set wholesale.** Only *this CA's own*
+CRL is recovered from storage; ancestors are taken solely from what you supply.
+So a refresh bundle must contain **every** ancestor CRL, not just the one that
+changed — supplying a new root CRL alone drops the intermediate's, which is
+exactly the loss this preservation exists to prevent. (Re-*signing* preserves
+ancestors; importing replaces them. The two paths differ deliberately: the file
+you hand to `import` is authoritative.)
+
+**Ancestor CRLs age in place.** This CA cannot re-sign another CA's list, so
+whatever was imported stays until something replaces it, and it must be replaced
+before its own `nextUpdate` lapses. Nothing alerts on this — see
+[the metrics reference](metrics.md#crl) — so track those deadlines out of band.
+
+**`import` writes to a local filesystem directory only.** It takes `--cadir` and
+constructs filesystem storage directly; unlike `migrate` it has no
+`--source-config`/`--dest-config`. If your CA runs on postgres, mysql, etcd or
+redis, re-importing writes to a directory the server never reads, prints
+`CA imported into <dir>`, and changes nothing — the live chain expires anyway.
+On those backends the refresh is a `migrate` out, `import`, `migrate` back round
+trip with the CA stopped. Stop the CA for a filesystem or sqlite refresh too:
+`import` takes the CRL lock, but that lock is only cross-process on backends
+that implement one.
+
+**An older replica still flattens the chain.** A build from before this change
+rewrites the stored blob as a single block, so one un-upgraded replica handling
+one revocation drops the ancestors for everyone. Complete the rollout before
 importing a chain.
 
-This creates the directory structure, writes the CA cert/key/CRL, and
+Re-import is also not signalled to consumers: the Kubernetes exporter republishes
+on CRL notifications, which the import path deliberately does not send. After a
+live ancestor refresh, run `openvox-ca-ctl reissue-crl` or restart to republish
+the exported copies.
+
+The `import` command creates the directory structure, writes the CA cert/key/CRL, and
 initialises `inventory.txt` and `serial` (the serial file is written for compatibility but is not used at runtime; openvox-ca generates random serial numbers).
 
 ## Step 4: Copy signed certificates
