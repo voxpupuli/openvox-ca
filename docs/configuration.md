@@ -21,7 +21,7 @@ operator CLI, see [operator CLI (`openvox-ca-ctl`)](operator-cli.md).
 | `--puppet-server-file` | `""` | Path to a file of CNs granted admin API access (one per line; `#` comments and blank lines ignored) |
 | `--no-pp-cli-auth` | `false` | Disable `pp_cli_auth` extension as an admin credential; require CN allow list only |
 | `--no-tls-required` | `false` | Allow plain HTTP on non-loopback addresses; use only behind a trusted TLS proxy or in test environments |
-| `--allow-public-status` | `false` | Allow unauthenticated `GET /certificate_status`; by default this endpoint is admin-only, matching Puppet Server's shipped `auth.conf`. "Admin" means an admin CN of the trust domain that verified the client, or `pp_cli_auth` where that domain honours it — see [client trust domains](#client-trust-domains) |
+| `--allow-public-status` | `false` | Allow unauthenticated `GET /certificate_status`; by default this endpoint is admin-only, matching Puppet Server's shipped `auth.conf`. "Admin" means an admin CN of the trust domain that verified the client, or `pp_cli_auth` where that domain honours it — see [trusting client certificates from another CA](#trusting-client-certificates-from-another-ca) |
 | `--ocsp-url` | `""` | OCSP responder URL to embed in issued certificates |
 | `--crl-url` | `""` | CRL distribution point URL to embed in issued certificates |
 | `--metrics-listen` | `""` | Address for the Prometheus exporter (e.g. `127.0.0.1:9140`); empty disables it. See [metrics & monitoring](metrics.md) |
@@ -680,11 +680,11 @@ entry before it is used, and one carrying no Authority Key Identifier is
 discarded. Without verification, a writable `crl_file` would be a way to
 *clear* revocations, not merely add them.
 
-> **A client certificate that is itself one of your anchors is rejected under
-> `require`.** The chain is one element long, so there is nothing above it to
-> attest to its revocation status — and a trust anchor is trusted by
-> configuration, not by anything it presents. If you meant that certificate to
-> authenticate as a client, issue it a leaf from the anchor instead.
+A client certificate that is *itself* one of your anchors is rejected under
+`require`: the chain is one element long, so there is nothing above it to attest
+to its revocation status, and a trust anchor is trusted by configuration rather
+than by anything it presents. If you meant that certificate to authenticate as a
+client, issue it a leaf from the anchor instead.
 
 > **Anchoring on a shared root and using `require` locks everyone out.** The
 > walk needs a CRL for every issuer in the chain except the anchor, and an
