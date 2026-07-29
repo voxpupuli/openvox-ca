@@ -59,6 +59,20 @@ type AuthConfig struct {
 	Domains []TrustDomain
 
 	AllowPublicStatus bool // when true, GET /certificate_status is public (no client cert required)
+
+	// ClientRevocationPolicy governs revocation checking for foreign domains.
+	// Empty means require. Our own domain always checks its own CRL and is
+	// unaffected by this setting.
+	ClientRevocationPolicy string
+}
+
+// revocationPolicy resolves the foreign-domain revocation policy, defaulting
+// to require so an unset value never defaults into a hole.
+func (c *AuthConfig) revocationPolicy() string {
+	if c.ClientRevocationPolicy == "" {
+		return RevocationRequire
+	}
+	return c.ClientRevocationPolicy
 }
 
 // OwnDomain returns domain zero, this CA's own issuer.

@@ -130,8 +130,9 @@ func buildAuthConfig(cfg *serverConfig, myCA *ca.CA) (*api.AuthConfig, error) {
 	}
 
 	return &api.AuthConfig{
-		Domains:           domains,
-		AllowPublicStatus: cfg.AllowPublicStatus,
+		Domains:                domains,
+		AllowPublicStatus:      cfg.AllowPublicStatus,
+		ClientRevocationPolicy: cfg.Policy(),
 	}, nil
 }
 
@@ -772,6 +773,21 @@ func newRootCmd() *cobra.Command {
 			}
 
 			maintenanceTasks = append(maintenanceTasks, crlChainMaintenanceTasks(myCA, cfg)...)
+
+			// Foreign client CRLs reload on the same loop, gated on client_ca
+			// alone. Anchors deliberately do not reload — see refreshClientCRLs.
+			if cfg.ClientCAConfig.Enabled() && srv.AuthConfig != nil {
+				var crlMetrics *clientCRLMetrics
+				if exporter != nil {
+					crlMetrics = newClientCRLMetrics(exporter.Registry())
+				}
+				// Load once before serving, so the first request is not
+				// evaluated against an empty set — which under require would
+				// reject every foreign client until the first tick.
+				refreshClientCRLs(cfg, srv.AuthConfig.Domains, crlMetrics)
+				maintenanceTasks = append(maintenanceTasks,
+					clientCRLTask(cfg, srv.AuthConfig.Domains, crlMetrics))
+			}
 
 			// Shared maintenance loop. Bound to ctx so it stops on shutdown.
 			if len(maintenanceTasks) > 0 {

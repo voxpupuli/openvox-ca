@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 )
@@ -126,18 +127,33 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 
 		clientCN := clientCert.Subject.CommonName
 
-		// SECURITY: CRL-based revocation check on the presented certificate's
-		// serial number. Checks the actual presented cert, not the cert on
-		// disk for the same CN, so old revoked credentials are rejected even
-		// after re-issuance. Fail-closed: a CRL read error is also treated
-		// as a denial.
+		// SECURITY: revocation. For our own domain this is the check it has
+		// always been: the presented certificate's serial against our own CRL,
+		// not the certificate on disk for the same CN, so an old revoked
+		// credential is rejected even after re-issuance. Fail-closed — a CRL
+		// read error is a denial.
+		//
+		// For a foreign domain our CRL says nothing, and serial numbers are
+		// unique only per issuer, so consulting it could even reject a valid
+		// client on a collision. Those go to that domain's own CRLs, and the
+		// walk covers the whole verified chain rather than just the leaf: a
+		// sibling CA revoked by the shared root must not go on authenticating
+		// its leaves.
 		// NIST 800-53: IA-5(2) (PKI-Based Authentication), SC-17 (PKI Certificates)
-		if revoked, err := myCA.IsRevokedSerial(r.Context(), clientCert.SerialNumber); err != nil || revoked {
-			if err != nil {
-				slog.Warn("Auth: CRL check failed (denying)", "cn", clientCN, "error", err)
-			} else {
-				slog.Warn("Auth: client cert is revoked", "cn", clientCN)
+		if domain.IsOwn() {
+			if revoked, err := myCA.IsRevokedSerial(r.Context(), clientCert.SerialNumber); err != nil || revoked {
+				if err != nil {
+					slog.Warn("Auth: CRL check failed (denying)", "cn", clientCN, "error", err)
+				} else {
+					slog.Warn("Auth: client cert is revoked", "cn", clientCN)
+				}
+				http.Error(w, "access denied", http.StatusForbidden)
+				return
 			}
+		} else if err := checkChainRevocation(verified.Chain, domain.RevocationSet(),
+			cfg.revocationPolicy(), time.Now()); err != nil {
+			slog.Warn("Auth: foreign client cert failed revocation checking",
+				"cn", clientCN, "domain", domain.Describe(), "error", err)
 			http.Error(w, "access denied", http.StatusForbidden)
 			return
 		}
