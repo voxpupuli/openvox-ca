@@ -229,3 +229,115 @@ var _ = Describe("crl_chain_file", func() {
 		})
 	})
 })
+
+var _ = Describe("crl_chain_file: absent versus empty", func() {
+	// The file is authoritative, so what it means when it cannot be read
+	// decides whether ancestor CRLs survive. Absent is "no statement" and must
+	// preserve; empty is a declaration and must be honoured. Getting these the
+	// same way round is unrecoverable: this CA cannot re-sign another CA's list.
+	var (
+		ctx      context.Context
+		store    *storage.StorageService
+		myCA     *ca.CA
+		upstream *x509.Certificate
+		upsCRL   []byte
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		store = storage.New(GinkgoT().TempDir())
+		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		myCA.LeafKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(myCA.Init(ctx)).To(Succeed())
+
+		upstream, upsCRL = upstreamCA("Upstream Root CA")
+
+		// A published two-block chain, as an import leaves it.
+		ours := mustGetCRL(ctx, store)
+		Expect(store.UpdateCRL(ctx, append(append([]byte{}, ours...), upsCRL...))).To(Succeed())
+		Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(2))
+	})
+
+	It("keeps the published chain when a revocation runs with the file absent", func() {
+		// The trigger that matters. crlChainLocked is reached from
+		// signCRLLocked — the single write path for every CRL amendment — so
+		// this is not a maintenance-tick edge case: one revocation on a replica
+		// whose Secret has not mounted would truncate the chain fleet-wide.
+		myCA.CRLChainFile = filepath.Join(GinkgoT().TempDir(), "never-mounted.pem")
+
+		res, err := myCA.Generate(ctx, "node1.test", nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res).NotTo(BeNil())
+		Expect(myCA.Revoke(ctx, "node1.test")).To(Succeed())
+
+		chain := crlBlocks(mustGetCRL(ctx, store))
+		Expect(chain).To(HaveLen(2), "a revocation truncated the published chain")
+		Expect(chain[0].RevokedCertificateEntries).To(HaveLen(1))
+		Expect(chain[1].Issuer.CommonName).To(Equal("Upstream Root CA"))
+	})
+
+	It("keeps the published chain when a reissue runs with the file absent", func() {
+		myCA.CRLChainFile = filepath.Join(GinkgoT().TempDir(), "never-mounted.pem")
+		Expect(myCA.ReissueCRL(ctx)).To(Succeed())
+		Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(2))
+	})
+
+	It("does not rewrite from a refresh pass with the file absent", func() {
+		myCA.CRLChainFile = filepath.Join(GinkgoT().TempDir(), "never-mounted.pem")
+		rewritten, err := myCA.RefreshCRLChainFile(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(rewritten).To(BeFalse())
+		Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(2))
+	})
+
+	It("honours an empty file as a declaration to publish nothing extra", func() {
+		// The other side of the distinction: a zero-byte file is how an
+		// operator says the chain should carry only our own CRL.
+		myCA.CRLChainFile = writeChainFile()
+
+		rewritten, err := myCA.RefreshCRLChainFile(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(rewritten).To(BeTrue())
+		Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(1))
+	})
+
+	It("honours an empty file on the revocation path too", func() {
+		myCA.CRLChainFile = writeChainFile()
+
+		res, err := myCA.Generate(ctx, "node1.test", nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res).NotTo(BeNil())
+		Expect(myCA.Revoke(ctx, "node1.test")).To(Succeed())
+
+		Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(1))
+	})
+
+	It("keeps the published chain when the file is unreadable rather than absent", func() {
+		// A permission error is not a statement either. Distinct from absent
+		// because it takes the error branch, and distinct from corrupt because
+		// nothing was parsed.
+		path := filepath.Join(GinkgoT().TempDir(), "unreadable.pem")
+		Expect(os.WriteFile(path, upsCRL, 0o000)).To(Succeed())
+		myCA.CRLChainFile = path
+
+		// The read fails, so the re-sign fails rather than truncating.
+		err := myCA.ReissueCRL(ctx)
+		Expect(err).To(HaveOccurred())
+		Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(2))
+	})
+
+	It("still publishes what a readable file names", func() {
+		// The guard must not have disabled the feature.
+		ours, err := store.GetCACert(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		upstreamPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: upstream.Raw})
+		Expect(store.SaveCACert(ctx, append(append([]byte{}, ours...), upstreamPEM...))).To(Succeed())
+		myCA.CRLChainFile = writeChainFile(upsCRL)
+
+		Expect(myCA.ReissueCRL(ctx)).To(Succeed())
+		chain := crlBlocks(mustGetCRL(ctx, store))
+		Expect(chain).To(HaveLen(2))
+		Expect(chain[1].Issuer.CommonName).To(Equal("Upstream Root CA"))
+	})
+})

@@ -19,6 +19,14 @@ package metrics_test
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
+	"time"
 
 	dto "github.com/prometheus/client_model/go"
 
@@ -79,6 +87,59 @@ func (g gathered) findByLabels(name string, want map[string]string) *dto.Metric 
 	return nil
 }
 
+// findUnlabelled returns the single metric in family name, and fails unless it
+// carries no labels at all.
+//
+// findByLabels(name, nil) cannot express this: an empty want map means the
+// match loop never runs, so it returns the first series whatever its labels.
+// That reads as coverage while asserting only the family name — and the one
+// property this file most needs to hold is that
+// puppetca_crl_next_update_timestamp_seconds stays a single unlabelled series,
+// because adding an {issuer} label to it would multiply the two shipped expiry
+// alerts across CRLs this CA cannot reissue.
+func (g gathered) findUnlabelled(name string) *dto.Metric {
+	GinkgoHelper()
+	mf := g[name]
+	Expect(mf).NotTo(BeNil(), "no metric family %q", name)
+	Expect(mf.GetMetric()).To(HaveLen(1), "%q must be a single series", name)
+	m := mf.GetMetric()[0]
+	Expect(m.GetLabel()).To(BeEmpty(), "%q must carry no labels", name)
+	return m
+}
+
+// upstreamCRLFixture builds a self-signed CA and an empty CRL from it, standing
+// in for an ancestor whose CRL an intermediate republishes.
+func upstreamCRLFixture(cn string) (*x509.Certificate, []byte) {
+	GinkgoHelper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	Expect(err).NotTo(HaveOccurred())
+
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	Expect(err).NotTo(HaveOccurred())
+	tmpl := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: cn},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	Expect(err).NotTo(HaveOccurred())
+	cert, err := x509.ParseCertificate(der)
+	Expect(err).NotTo(HaveOccurred())
+
+	now := time.Now().UTC()
+	crlDER, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+		Number:     big.NewInt(7),
+		ThisUpdate: now,
+		NextUpdate: now.Add(30 * 24 * time.Hour),
+	}, cert, key)
+	Expect(err).NotTo(HaveOccurred())
+	return cert, pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlDER})
+}
+
 func gaugeValue(m *dto.Metric) float64 { return m.GetGauge().GetValue() }
 
 func counterValue(m *dto.Metric) float64 { return m.GetCounter().GetValue() }
@@ -130,7 +191,11 @@ var _ = Describe("Collector", func() {
 			g.findByLabels("puppetca_ca_certificate_not_before_timestamp_seconds", nil))))
 
 		// A freshly bootstrapped CA has published an (empty) CRL.
-		Expect(g.findByLabels("puppetca_crl_next_update_timestamp_seconds", nil)).NotTo(BeNil())
+		//
+		// Asserted as unlabelled deliberately: this series means *this CA's
+		// own* CRL, and the upstream entries get their own labelled series so
+		// the shipped expiry alerts keep their meaning and cardinality.
+		Expect(g.findUnlabelled("puppetca_crl_next_update_timestamp_seconds")).NotTo(BeNil())
 		Expect(gaugeValue(g.findByLabels("puppetca_crl_revoked_certificates", nil))).To(Equal(0.0))
 
 		// The CRL-update failure counter is always exported, starting at zero
@@ -176,6 +241,36 @@ var _ = Describe("Collector", func() {
 			To(Equal(2.0))
 		Expect(counterValue(g.findByLabels("puppetca_serving_cert_revocation_failures_total", nil))).
 			To(Equal(3.0))
+	})
+
+	It("reports no upstream CRL series on a CA with no chain", func() {
+		// The common case, and the reason the series is separate: a
+		// self-signed root has no upstream, so nothing labelled appears and
+		// the shipped expiry alerts see exactly the one series they always saw.
+		g := gather(metrics.NewCollector(myCA))
+		Expect(g["puppetca_crl_chain_next_update_timestamp_seconds"]).To(BeNil())
+	})
+
+	It("reports one labelled upstream CRL series per ancestor in the published chain", func() {
+		// The new series had no coverage at all: not its name, not its label,
+		// not its value. A rename would have stopped the mixin's
+		// PuppetCAUpstreamCRLExpired firing with the suite green.
+		upstream, upsCRL := upstreamCRLFixture("Upstream Root CA")
+		Expect(upstream).NotTo(BeNil())
+		ours, err := store.GetCRL(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(store.UpdateCRL(ctx, append(append([]byte{}, ours...), upsCRL...))).To(Succeed())
+
+		g := gather(metrics.NewCollector(myCA))
+
+		chain := g.findByLabels("puppetca_crl_chain_next_update_timestamp_seconds",
+			map[string]string{"issuer": "CN=Upstream Root CA"})
+		Expect(chain).NotTo(BeNil(), "no series for the upstream issuer")
+		Expect(gaugeValue(chain)).To(BeNumerically(">", 0))
+
+		// And our own series stays unlabelled and single, which is the whole
+		// point of not relabelling it.
+		Expect(g.findUnlabelled("puppetca_crl_next_update_timestamp_seconds")).NotTo(BeNil())
 	})
 
 	It("reports per-leaf metrics with issuance state", func() {

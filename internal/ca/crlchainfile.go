@@ -45,9 +45,9 @@ import (
 // check is always satisfiable because import-ca-cert requires a complete chain:
 // the stored bundle necessarily contains the root, so the root's CRL — the one
 // an agent most needs for chain checking — always has a verifier available.
-func (c *CA) upstreamCRLs(ctx context.Context) ([]*x509.RevocationList, error) {
+func (c *CA) upstreamCRLs(ctx context.Context) (crls []*x509.RevocationList, stated bool, err error) {
 	if c.CRLChainFile == "" {
-		return nil, nil
+		return nil, false, nil
 	}
 
 	// The path is the operator's own crl_chain_file setting. The content is
@@ -55,28 +55,38 @@ func (c *CA) upstreamCRLs(ctx context.Context) ([]*x509.RevocationList, error) {
 	data, err := os.ReadFile(c.CRLChainFile)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			// A configured-but-absent file is not fatal: a Secret may not be
-			// mounted yet, and refusing to serve would turn a slow rollout into
-			// an outage. The chain simply carries nothing extra this pass.
-			slog.Warn("crl_chain_file does not exist yet; no upstream CRLs merged",
+			// Absent is "no statement", not "publish nothing", and the
+			// difference is everything: the file is authoritative, so treating
+			// an absent one as an empty declaration writes a single block over
+			// ancestor CRLs that are still there — permanently, because this CA
+			// cannot re-sign another CA's list.
+			//
+			// It is reached far more often than a maintenance tick. This runs
+			// under signCRLLocked, the single write path for every CRL
+			// amendment, so one revocation on a replica whose Secret has not
+			// mounted yet would truncate the chain for the whole fleet.
+			//
+			// A zero-byte file is a different thing entirely and is honoured:
+			// that is how an operator says "publish nothing extra".
+			slog.Warn("crl_chain_file does not exist; keeping the upstream CRLs already published",
 				"path", c.CRLChainFile)
-			return nil, nil
+			return nil, false, nil
 		}
-		return nil, fmt.Errorf("reading crl_chain_file %s: %w", c.CRLChainFile, err)
+		return nil, false, fmt.Errorf("reading crl_chain_file %s: %w", c.CRLChainFile, err)
 	}
 
-	crls, err := decodeCRLChain(data)
+	parsed, err := decodeCRLChain(data)
 	if err != nil {
-		return nil, fmt.Errorf("crl_chain_file %s: %w", c.CRLChainFile, err)
+		return nil, false, fmt.Errorf("crl_chain_file %s: %w", c.CRLChainFile, err)
 	}
 
 	issuers, err := c.bundleCertificates(ctx)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
-	verified := make([]*x509.RevocationList, 0, len(crls))
-	for _, crl := range crls {
+	verified := make([]*x509.RevocationList, 0, len(parsed))
+	for _, crl := range parsed {
 		if c.ownsCRL(crl) {
 			// Ours is assembled from the inventory on every re-sign; taking it
 			// from a file would let a stale copy supersede live revocations.
@@ -92,7 +102,7 @@ func (c *CA) upstreamCRLs(ctx context.Context) ([]*x509.RevocationList, error) {
 		}
 		verified = append(verified, crl)
 	}
-	return verified, nil
+	return verified, true, nil
 }
 
 // issuerFor returns the certificate whose key signed crl, or nil.
@@ -155,9 +165,14 @@ func (c *CA) RefreshCRLChainFile(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 
-	wanted, err := c.upstreamCRLs(ctx)
+	wanted, stated, err := c.upstreamCRLs(ctx)
 	if err != nil {
 		return false, err
+	}
+	if !stated {
+		// Nothing to reconcile against: an unreadable file is not a statement
+		// that the published chain should be empty.
+		return false, nil
 	}
 
 	current, err := c.Storage.GetCRL(ctx)
