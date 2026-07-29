@@ -138,8 +138,9 @@ func buildAuthConfig(cfg *serverConfig, myCA *ca.CA) (*api.AuthConfig, error) {
 	}
 
 	return &api.AuthConfig{
-		Domains:           domains,
-		AllowPublicStatus: cfg.AllowPublicStatus,
+		Domains:                domains,
+		AllowPublicStatus:      cfg.AllowPublicStatus,
+		ClientRevocationPolicy: cfg.Policy(),
 	}, nil
 }
 
@@ -793,6 +794,25 @@ func newRootCmd() *cobra.Command {
 				}
 
 				slog.Info("TLS enabled", "cert", cfg.TLSCert)
+			}
+
+			// Foreign client CRLs reload on their own timer, gated on client_ca
+			// alone: an operator trusting a foreign issuer need not be running
+			// anything else. Anchors deliberately do not reload — see
+			// refreshClientCRLs. Started here rather than in backgroundJobs
+			// because it needs the trust domains the auth config holds, the
+			// same reason the Kubernetes exporter is started here.
+			if cfg.ClientCAConfig.Enabled() && srv.AuthConfig != nil {
+				var crlMetrics *clientCRLMetrics
+				if exporter != nil {
+					crlMetrics = newClientCRLMetrics(exporter.Registry())
+				}
+				// Load once before serving, so the first request is not
+				// evaluated against an empty set — which under require would
+				// reject every foreign client until the first tick.
+				refreshClientCRLs(cfg, srv.AuthConfig.Domains, crlMetrics)
+				go runClientCRLReloader(ctx, cfg, srv.AuthConfig.Domains, crlMetrics,
+					cfg.ClientCRLRefreshInterval())
 			}
 
 			// Periodic upkeep. Which jobs a configuration runs is decided by

@@ -20,6 +20,7 @@ package config
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Client revocation policies for foreign trust domains.
@@ -88,6 +89,23 @@ type ClientCAConfig struct {
 	// ClientRevocationPolicy governs revocation checking for foreign issuers
 	// only; our own CA's clients are always checked against our own CRL.
 	ClientRevocationPolicy string `yaml:"client_revocation_policy"`
+
+	// ClientCRLRefreshIntervalSec is how often the foreign CRL bundles named by
+	// each entry's crl_file are re-read. 0 selects the built-in default (1h).
+	//
+	// The CRLs reload; the anchors deliberately do not. See refreshClientCRLs.
+	ClientCRLRefreshIntervalSec int `yaml:"client_crl_refresh_interval_sec"`
+}
+
+// ClientCRLRefreshInterval resolves how often foreign CRL bundles are re-read,
+// falling back to an hour when unset or non-positive -- the same bound
+// crl_chain_file uses, and for the same reason: the file is refreshed by
+// whatever already delivers it, and this only notices.
+func (c *ClientCAConfig) ClientCRLRefreshInterval() time.Duration {
+	if c.ClientCRLRefreshIntervalSec > 0 {
+		return time.Duration(c.ClientCRLRefreshIntervalSec) * time.Second
+	}
+	return time.Hour
 }
 
 // Enabled reports whether any foreign trust domain is configured.

@@ -63,6 +63,31 @@ type TrustDomain struct {
 	// domain. Enabling it for a foreign issuer delegates admin admission to
 	// that CA: every certificate it chooses to stamp becomes an admin here.
 	PpCliAuth bool
+
+	// Anchors are the same certificates as Roots, retained in slice form so
+	// CRLs loaded for this entry can be verified against them. A CertPool
+	// cannot be enumerated.
+	Anchors []*x509.Certificate
+
+	// CRLs holds this domain's revocation material, swapped atomically on
+	// reload. Nil for domain zero, which uses the CA's own CRL instead.
+	CRLs *clientCRLs
+}
+
+// RevocationSet returns the domain's currently loaded CRLs, or nil.
+func (d *TrustDomain) RevocationSet() *ClientCRLSet {
+	if d.CRLs == nil {
+		return nil
+	}
+	return d.CRLs.Get()
+}
+
+// SetRevocationSet installs a reloaded CRL set for this domain.
+func (d *TrustDomain) SetRevocationSet(s *ClientCRLSet) {
+	if d.CRLs == nil {
+		d.CRLs = &clientCRLs{}
+	}
+	d.CRLs.Set(s)
 }
 
 // IsOwn reports whether this is domain zero — this CA's own issuer.
@@ -98,18 +123,19 @@ func OwnTrustDomain(caCert *x509.Certificate, adminCNs map[string]bool, ppCliAut
 	}
 }
 
-// NewTrustDomain builds a named domain for a foreign client issuer: certificates
+// NewForeignTrustDomain builds a named domain for a foreign client issuer: certificates
 // verifying against roots are attributed here, with adminCNs as this domain's
 // administrators and ppCliAuth deciding whether its issuer may stamp admins.
 //
 // A constructor rather than a struct literal because the admin set is guarded;
 // see TrustDomain.admins.
-func NewTrustDomain(name string, roots *x509.CertPool, anchors []*x509.Certificate, adminCNs map[string]bool, ppCliAuth bool) TrustDomain {
+func NewForeignTrustDomain(name string, roots *x509.CertPool, anchors []*x509.Certificate, adminCNs map[string]bool, ppCliAuth bool) TrustDomain {
 	return TrustDomain{
 		Name:      name,
 		Roots:     roots,
 		Anchors:   anchors,
 		admins:    newAdminSet(adminCNs),
+		CRLs:      &clientCRLs{},
 		PpCliAuth: ppCliAuth,
 	}
 }

@@ -17,7 +17,10 @@
 
 package api
 
-import "crypto/x509"
+import (
+	"crypto/x509"
+	"time"
+)
 
 // AttributeForTest exposes attribute to the external api_test package.
 //
@@ -33,4 +36,10 @@ func AttributeForTest(domains []TrustDomain, cert *x509.Certificate, presented [
 		return nil
 	}
 	return got.Domain
+}
+
+// CheckChainRevocationForTest exposes checkChainRevocation to the external
+// api_test package. Test-only, as above.
+func CheckChainRevocationForTest(chain []*x509.Certificate, set *ClientCRLSet, policy string, now time.Time) error {
+	return checkChainRevocation(chain, set, policy, now)
 }

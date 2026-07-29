@@ -358,6 +358,11 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("PUPPET_CA_CLIENT_REVOCATION_POLICY"); v != "" {
 		cfg.ClientRevocationPolicy = v
 	}
+	if v := os.Getenv("PUPPET_CA_CLIENT_CRL_REFRESH_INTERVAL_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.ClientCRLRefreshIntervalSec = n
+		}
+	}
 	if v := os.Getenv("PUPPET_CA_ALLOW_PUBLIC_STATUS"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.AllowPublicStatus = b

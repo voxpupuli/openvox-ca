@@ -152,7 +152,7 @@ var _ = Describe("client_ca configuration", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(domains).To(HaveLen(2))
 			Expect(domains[0].IsOwn()).To(BeTrue())
-			Expect(domains[0].AdminCNs).To(HaveKey("admin"))
+			Expect(domains[0].IsAdminCN("admin")).To(BeTrue())
 			Expect(domains[1].Name).To(Equal("server"))
 		})
 
@@ -176,7 +176,8 @@ var _ = Describe("client_ca configuration", func() {
 
 			domains, err := buildTrustDomains(cfg, ownCA, nil)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(domains[1].AdminCNs).To(BeEmpty())
+			Expect(domains[1].IsAdminCN("openvox-server.example.com")).To(BeFalse(),
+				"an entry with no admin_cns grants admin to nobody")
 			Expect(domains[1].PpCliAuth).To(BeFalse())
 		})
 
@@ -188,7 +189,7 @@ var _ = Describe("client_ca configuration", func() {
 			}}
 			domains, err := buildTrustDomains(cfg, ownCA, nil)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(domains[1].AdminCNs).To(HaveKey("openvox-server.example.com"))
+			Expect(domains[1].IsAdminCN("openvox-server.example.com")).To(BeTrue())
 			Expect(domains[1].PpCliAuth).To(BeTrue())
 		})
 
