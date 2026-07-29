@@ -22,66 +22,69 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
+	"fmt"
+	"io/fs"
 	"log/slog"
 )
 
-// crlOwnership classifies a stored CRL relative to this CA.
-type crlOwnership int
-
-const (
-	// crlOwnershipUnknown means the comparison cannot be made — this CA's
-	// certificate carries no Subject Key Identifier, or the CRL carries no
-	// Authority Key Identifier. Treated conservatively everywhere.
-	crlOwnershipUnknown crlOwnership = iota
-	// crlOwnershipOurs means the CRL was issued by this CA.
-	crlOwnershipOurs
-	// crlOwnershipForeign means the CRL was issued by some other CA — in a
-	// sub-CA deployment, an ancestor.
-	crlOwnershipForeign
-)
-
-// classifyCRL decides whether crl was issued by this CA.
+// crlSignedBy reports whether crl was issued by cert — that is, whether cert's
+// key signed it.
 //
-// The comparison is Authority Key Identifier against Subject Key Identifier,
-// not issuer distinguished name. A DN comparison would be wrong in exactly the
-// deployment this code exists for: a shared root can issue two sub-CAs with the
-// same DN, and rewriting the wrong block would silently destroy an upstream
-// CRL while appearing to work. Puppet Server keys its own CRL handling on the
-// same extension and rejects CRLs that lack it.
+// The test is the signature itself, not a comparison of key identifiers and not
+// a comparison of issuer distinguished names. Both alternatives are wrong here,
+// for different reasons:
 //
-// Both operands must be present. When either is missing the answer is Unknown
-// rather than a guess, and every caller treats Unknown as "do what this code
-// did before chains existed".
-func (c *CA) classifyCRL(crl *x509.RevocationList) crlOwnership {
-	if c.CACert == nil || len(c.CACert.SubjectKeyId) == 0 || len(crl.AuthorityKeyId) == 0 {
-		return crlOwnershipUnknown
+//   - Issuer DN is forgeable in exactly the deployment this code exists for. A
+//     shared root can issue two sub-CAs with the same DN, and rewriting the
+//     wrong block would destroy an upstream CRL while appearing to work.
+//   - Authority Key Identifier is an optional extension. `openssl ca -gencrl`
+//     omits it unless crl_extensions is configured, which the stock openssl.cnf
+//     leaves commented out. Keying on it means a legitimate ancestor CRL — or
+//     worse, the operator's own — is unrecognisable, and the code then either
+//     discards it or supersedes it with an empty list.
+//
+// A signature check has neither failure mode: it cannot be forged, it needs no
+// optional extension, and it answers the question every caller actually asks.
+// The cost does not signify — a handful of verifications per re-sign, against a
+// chain two or three blocks long.
+func crlSignedBy(cert *x509.Certificate, crl *x509.RevocationList) bool {
+	if cert == nil || crl == nil {
+		return false
 	}
-	if bytes.Equal(crl.AuthorityKeyId, c.CACert.SubjectKeyId) {
-		return crlOwnershipOurs
-	}
-	return crlOwnershipForeign
+	return crl.CheckSignatureFrom(cert) == nil
+}
+
+// ownsCRL reports whether crl was issued by this CA.
+func (c *CA) ownsCRL(crl *x509.RevocationList) bool {
+	return crlSignedBy(c.CACert, crl)
 }
 
 // decodeCRLChain splits a stored CRL blob into its constituent revocation
-// lists, preserving order. Blocks that are not X509 CRLs, or that fail to
-// parse, are skipped: the blob is served verbatim to every agent, so carrying
-// something unparseable forward would push the failure out to the fleet.
-func decodeCRLChain(blob []byte) []*x509.RevocationList {
+// lists, preserving order.
+//
+// Every X509 CRL block must parse. The blob is served verbatim to every agent,
+// and Puppet's default certificate_revocation = chain makes an agent parse all
+// of it, so carrying an unparseable block forward turns one bad import into a
+// fleet-wide verification failure. Blocks of other types are skipped: an
+// operator pasting a bundle exported by another tool may legitimately carry
+// commentary, and none of it reaches storage, because callers re-encode from
+// the parsed list rather than passing the original bytes through.
+func decodeCRLChain(blob []byte) ([]*x509.RevocationList, error) {
 	var out []*x509.RevocationList
 	rest := blob
 	for {
 		var block *pem.Block
 		block, rest = pem.Decode(rest)
 		if block == nil {
-			return out
+			return out, nil
 		}
 		if block.Type != "X509 CRL" {
 			continue
 		}
 		crl, err := x509.ParseRevocationList(block.Bytes)
 		if err != nil {
-			slog.Warn("Skipping unparseable CRL block in stored CRL", "error", err)
-			continue
+			return nil, fmt.Errorf("parsing CRL %d in chain: %w", len(out)+1, err)
 		}
 		out = append(out, crl)
 	}
@@ -101,56 +104,74 @@ func encodeCRLChain(crls []*x509.RevocationList) []byte {
 // order.
 //
 // Our CRL leads because readStoredCRL and loadCRLCache both take block 0, and
-// because it mirrors the certificate bundle's nearest-first convention. Only
-// CRLs classified Foreign are carried across — an Unknown block is dropped,
-// which on a CA whose certificate has no Subject Key Identifier means every
-// block is dropped and the result is exactly the single-CRL behaviour this
-// function replaces.
+// because it mirrors the certificate bundle's nearest-first convention. Every
+// block that is not ours is carried across, because an ancestor's CRL cannot be
+// regenerated here: dropping one is unrecoverable, while keeping one costs a
+// wasted block at worst.
 //
 // c.mu must be held by the caller.
-func (c *CA) crlChainLocked(ctx context.Context, ourCRL *x509.RevocationList) []byte {
+func (c *CA) crlChainLocked(ctx context.Context, ourCRL *x509.RevocationList) ([]byte, error) {
 	chain := []*x509.RevocationList{ourCRL}
 
 	existing, err := c.Storage.GetCRL(ctx)
 	if err != nil {
-		// No stored CRL yet, or it cannot be read. Either way there is nothing
-		// upstream to preserve; the caller's own CRL stands alone.
-		return encodeCRLChain(chain)
+		if !errors.Is(err, fs.ErrNotExist) {
+			// Not "nothing to preserve" — this is a read that failed. Treating
+			// it as an empty chain writes a single block over upstream CRLs
+			// that are still there, permanently, because this CA cannot
+			// re-sign an ancestor's list. Fail the re-sign instead: the caller
+			// counts the failure and the next attempt finds the chain intact.
+			return nil, fmt.Errorf("reading the stored CRL to preserve its upstream blocks: %w", err)
+		}
+		// Genuinely absent, which bootstrap and import both are: nothing
+		// upstream exists yet and our CRL stands alone.
+		return encodeCRLChain(chain), nil
 	}
 
-	for _, crl := range decodeCRLChain(existing) {
-		if c.classifyCRL(crl) == crlOwnershipForeign {
+	stored, err := decodeCRLChain(existing)
+	if err != nil {
+		return nil, fmt.Errorf("decoding the stored CRL chain: %w", err)
+	}
+	for _, crl := range stored {
+		if !c.ownsCRL(crl) {
 			chain = append(chain, crl)
 		}
 	}
-	return encodeCRLChain(chain)
+
+	// Every block that is not ours is kept, so the length can only change by
+	// collapsing duplicates of our own CRL — worth a line, because it is also
+	// the only signal available here. Loss caused by a replica running an older
+	// build during a rolling upgrade is invisible from inside this function:
+	// that replica writes a single block and the next re-sign simply finds
+	// nothing upstream. Every CRL metric derives from block 0, so such a chain
+	// going 2 -> 1 moves crl_number upward and looks healthy. Detection is the
+	// operator's, via the log below and the chain length they expect.
+	if before, after := len(stored), len(chain); after != before {
+		slog.Info("Stored CRL chain length changed while re-signing",
+			"blocks_read", before, "blocks_written", after)
+	}
+	return encodeCRLChain(chain), nil
 }
 
-// orderCRLChain arranges an incoming CRL bundle so the CRL issued by cert leads,
-// returning the reordered blob and whether such a CRL was found.
+// orderCRLChain arranges an incoming chain so the CRL issued by cert leads,
+// returning the reordered list and whether such a CRL was found.
 //
 // Import accepts a chain in whatever order an operator assembled it, but every
 // reader takes block 0 as this CA's own. Reordering at import is cheaper than
-// making each reader search, and it means a mis-ordered bundle is corrected once
-// rather than misinterpreted repeatedly.
-func orderCRLChain(blob []byte, cert *x509.Certificate) ([]byte, bool) {
-	crls := decodeCRLChain(blob)
-	if len(crls) == 0 {
-		return blob, false
-	}
-
+// making each reader search, and it means a mis-ordered bundle is corrected
+// once rather than misinterpreted repeatedly.
+func orderCRLChain(crls []*x509.RevocationList, cert *x509.Certificate) ([]*x509.RevocationList, bool) {
 	var ours *x509.RevocationList
-	var others []*x509.RevocationList
+	others := make([]*x509.RevocationList, 0, len(crls))
 	for _, crl := range crls {
-		if ours == nil && len(cert.SubjectKeyId) > 0 && len(crl.AuthorityKeyId) > 0 &&
-			bytes.Equal(crl.AuthorityKeyId, cert.SubjectKeyId) {
+		if ours == nil && crlSignedBy(cert, crl) {
 			ours = crl
 			continue
 		}
 		others = append(others, crl)
 	}
 	if ours == nil {
-		return blob, false
+		return crls, false
 	}
-	return encodeCRLChain(append([]*x509.RevocationList{ours}, others...)), true
+	return append([]*x509.RevocationList{ours}, others...), true
 }

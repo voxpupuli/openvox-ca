@@ -79,10 +79,10 @@ func (c *CA) revokeSerialLocked(ctx context.Context, serialStr string) error {
 		return fmt.Errorf("malformed serial %q", serialStr)
 	}
 
-	// 1. Load CRL
+	// 1. Load CRL. readStoredCRL counts its own failures now, so this path must
+	// not add a second increment for the same event.
 	crl, err := c.readStoredCRL(ctx)
 	if err != nil {
-		c.crlUpdateFailures.Add(1)
 		return err
 	}
 

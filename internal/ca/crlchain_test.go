@@ -24,10 +24,15 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha1"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/pem"
+	"errors"
 	"math/big"
+	"path/filepath"
+	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -204,10 +209,176 @@ var _ = Describe("CRL chain preservation", func() {
 		Expect(store.UpdateCRL(ctx, upsCRL)).To(Succeed())
 
 		err := myCA.ReissueCRL(ctx)
-		Expect(err).To(MatchError(ContainSubstring("issued by a different CA")))
+		Expect(err).To(MatchError(ContainSubstring("not signed by the CA certificate")))
 		Expect(err).To(MatchError(ContainSubstring("needs a restart")))
 	})
+
+	It("keeps an upstream CRL that carries no Authority Key Identifier", func() {
+		// The extension is optional and `openssl ca -gencrl` omits it under the
+		// stock openssl.cnf, so an ancestor CRL routinely lacks one. Ownership
+		// is decided by signature precisely so such a CRL is still recognisably
+		// not ours and survives, instead of being silently dropped.
+		bare := upstreamCRLWithoutAKI()
+		ours, err := store.GetCRL(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(store.UpdateCRL(ctx, append(append([]byte{}, ours...), bare...))).To(Succeed())
+
+		Expect(myCA.ReissueCRL(ctx)).To(Succeed())
+
+		chain := crlBlocks(mustGetCRL(store, ctx))
+		Expect(chain).To(HaveLen(2))
+		Expect(chain[0].AuthorityKeyId).To(Equal(myCA.CACert.SubjectKeyId))
+		Expect(chain[1].AuthorityKeyId).To(BeEmpty())
+	})
+
+	It("preserves two ancestors in order, not merely as a set", func() {
+		// The target topology is root -> intermediate -> this CA, so a real
+		// chain carries two upstream blocks. With only one, "preserves order"
+		// and "preserves the set" are indistinguishable.
+		mid, midCRL := upstreamCA("Upstream Intermediate CA")
+		ours, err := store.GetCRL(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		blob := append(append([]byte{}, ours...), midCRL...)
+		blob = append(blob, upsCRL...)
+		Expect(store.UpdateCRL(ctx, blob)).To(Succeed())
+
+		Expect(myCA.ReissueCRL(ctx)).To(Succeed())
+
+		chain := crlBlocks(mustGetCRL(store, ctx))
+		Expect(chain).To(HaveLen(3))
+		Expect(chain[0].AuthorityKeyId).To(Equal(myCA.CACert.SubjectKeyId))
+		Expect(chain[1].AuthorityKeyId).To(Equal(mid.SubjectKeyId))
+		Expect(chain[2].AuthorityKeyId).To(Equal(upstream.SubjectKeyId))
+	})
+
+	It("keeps our revocations at block 0 across a chained re-sign", func() {
+		// The block-0 contract exists so readStoredCRL and revoke read our own
+		// entries back. If our CRL were ever emitted second, reissue would
+		// re-sign from the ancestor's empty entry list and every revocation
+		// would vanish — while every other chain spec still passed.
+		storeChain()
+
+		res, err := myCA.Generate(ctx, "node1.test", nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res).NotTo(BeNil())
+		Expect(myCA.Revoke(ctx, "node1.test")).To(Succeed())
+
+		before := crlBlocks(mustGetCRL(store, ctx))
+		Expect(before[0].RevokedCertificateEntries).To(HaveLen(1))
+
+		Expect(myCA.ReissueCRL(ctx)).To(Succeed())
+
+		after := crlBlocks(mustGetCRL(store, ctx))
+		Expect(after).To(HaveLen(2))
+		Expect(after[0].RevokedCertificateEntries).To(HaveLen(1))
+		Expect(after[0].RevokedCertificateEntries[0].SerialNumber).
+			To(Equal(before[0].RevokedCertificateEntries[0].SerialNumber))
+		Expect(after[1].Raw).To(Equal(before[1].Raw))
+	})
 })
+
+var _ = Describe("CRL chain read failures", func() {
+	It("fails the re-sign rather than flattening the chain", func() {
+		// The chain-preserving read is the second read of the blob, so the only
+		// reachable trigger is a transient backend failure. Treating it as
+		// "nothing upstream to preserve" would write a single block over
+		// ancestors that are still there — permanently, since this CA cannot
+		// re-sign an ancestor's list.
+		ctx := context.Background()
+		dir := GinkgoT().TempDir()
+		backend := &flakyCRLBackend{Backend: storage.NewFilesystemBackend(dir)}
+		store := storage.NewWithBackend(backend, filepath.Join(dir, "private"))
+
+		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(myCA.Init(ctx)).To(Succeed())
+
+		_, upsCRL := upstreamCA("Upstream Root CA")
+		ours, err := store.GetCRL(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(store.UpdateCRL(ctx, append(append([]byte{}, ours...), upsCRL...))).To(Succeed())
+		before := mustGetCRL(store, ctx)
+
+		// readStoredCRL reads first and succeeds; crlChainLocked's read fails.
+		backend.failGetCRLAfter(1)
+		Expect(myCA.ReissueCRL(ctx)).To(MatchError(ContainSubstring("preserve its upstream blocks")))
+
+		backend.stopFailing()
+		Expect(mustGetCRL(store, ctx)).To(Equal(before), "the stored chain must be untouched")
+		Expect(myCA.CRLUpdateFailures()).To(BeNumerically(">", 0))
+	})
+})
+
+// flakyCRLBackend fails Get on the CRL key after a set number of successful
+// reads, standing in for a transient fault on a network backend.
+type flakyCRLBackend struct {
+	storage.Backend
+	mu        sync.Mutex
+	remaining int
+	failing   bool
+}
+
+func (b *flakyCRLBackend) failGetCRLAfter(n int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.remaining, b.failing = n, true
+}
+
+func (b *flakyCRLBackend) stopFailing() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.failing = false
+}
+
+func (b *flakyCRLBackend) Get(ctx context.Context, key string) ([]byte, error) {
+	if key == storage.KeyCRL {
+		b.mu.Lock()
+		if b.failing {
+			if b.remaining <= 0 {
+				b.mu.Unlock()
+				return nil, errors.New("backend unavailable")
+			}
+			b.remaining--
+		}
+		b.mu.Unlock()
+	}
+	return b.Backend.Get(ctx, key)
+}
+
+// upstreamCRLWithoutAKI builds an ancestor CRL carrying no Authority Key
+// Identifier — the shape `openssl ca -gencrl` produces, because the stock
+// openssl.cnf leaves crl_extensions commented out.
+//
+// Note the issuing certificate does have a Subject Key Identifier: that is the
+// realistic combination, and it is precisely why keying ownership on the AKI
+// fails. The information needed to match is present on the certificate and
+// simply absent from the CRL.
+func upstreamCRLWithoutAKI() []byte {
+	GinkgoHelper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	Expect(err).NotTo(HaveOccurred())
+
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	Expect(err).NotTo(HaveOccurred())
+
+	tmpl := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: "Upstream CA With Bare CRL"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	Expect(err).NotTo(HaveOccurred())
+	cert, err := x509.ParseCertificate(der)
+	Expect(err).NotTo(HaveOccurred())
+
+	// x509.CreateRevocationList always stamps an AKI, which is exactly why our
+	// own CRLs always carry one — so build this one by hand.
+	return handRolledCRL(cert, key)
+}
 
 func mustGetCRL(store *storage.StorageService, ctx context.Context) []byte {
 	GinkgoHelper()
@@ -269,4 +440,121 @@ var _ = Describe("CRL chain ordering at import", func() {
 		err := ca.ImportCA(ctx, store, certPEM, keyPEM, []byte("not a crl\n"))
 		Expect(err).To(MatchError(ContainSubstring("does not contain a valid X509 CRL")))
 	})
+
+	It("keeps an imported CRL of ours that carries no Authority Key Identifier", func() {
+		// The regression this guards: matching ownership by AKI meant a CRL
+		// without one was taken for an ancestor's, a fresh empty CRL was
+		// generated and prepended, and every revocation the operator imported
+		// stopped being seen — silently, because every reader takes block 0.
+		block, _ := pem.Decode(certPEM)
+		ourCert, err := x509.ParseCertificate(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		keyBlock, _ := pem.Decode(keyPEM)
+		parsedKey, err := x509.ParseECPrivateKey(keyBlock.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+
+		bare := handRolledCRL(ourCert, parsedKey)
+		Expect(ca.ImportCA(ctx, store, certPEM, keyPEM, bare)).To(Succeed())
+
+		chain := crlBlocks(mustGetCRL(store, ctx))
+		Expect(chain).To(HaveLen(1), "no empty CRL should have been generated over it")
+		Expect(chain[0].Raw).To(Equal(crlBlocks(bare)[0].Raw))
+	})
+
+	It("rejects a chain whose ancestor block is corrupt", func() {
+		// The blob is served verbatim to every agent, and Puppet's default
+		// certificate_revocation = chain makes an agent parse all of it, so a
+		// bad block must fail here rather than fleet-wide.
+		corrupt := []byte("-----BEGIN X509 CRL-----\nZm9v\n-----END X509 CRL-----\n")
+		err := ca.ImportCA(ctx, store, certPEM, keyPEM, append(append([]byte{}, ourCRL...), corrupt...))
+		Expect(err).To(MatchError(ContainSubstring("parsing CRL 2 in chain")))
+	})
+
+	It("ignores non-CRL blocks without storing them", func() {
+		// Commentary and stray PEM are tolerated on the way in, but the stored
+		// blob is re-encoded from what was parsed, so none of it is served.
+		noise := []byte("-----BEGIN CERTIFICATE-----\nZm9v\n-----END CERTIFICATE-----\n")
+		withNoise := append(append([]byte{}, noise...), ourCRL...)
+		Expect(ca.ImportCA(ctx, store, certPEM, keyPEM, append(withNoise, upsCRL...))).To(Succeed())
+
+		stored := mustGetCRL(store, ctx)
+		Expect(crlBlocks(stored)).To(HaveLen(2))
+		Expect(stored).NotTo(ContainSubstring("BEGIN CERTIFICATE"))
+	})
 })
+
+var _ = Describe("CRL cache loading", func() {
+	It("starts with a warning rather than failing when block 0 is not ours", func() {
+		// A deliberate availability trade-off: the read path warns and carries
+		// on, where the write path fails closed. Refusing to start would leave
+		// the CA entirely unavailable over a condition an operator can fix
+		// while it serves.
+		ctx := context.Background()
+		caDir := GinkgoT().TempDir()
+		store := storage.New(caDir)
+
+		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(myCA.Init(ctx)).To(Succeed())
+
+		_, upsCRL := upstreamCA("Upstream Root CA")
+		Expect(store.UpdateCRL(ctx, upsCRL)).To(Succeed())
+
+		restarted := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		restarted.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(restarted.Init(ctx)).To(Succeed(), "a foreign block 0 must not stop the CA starting")
+	})
+})
+
+// tbsCertList is the signed portion of an X.509 CRL, deliberately without the
+// crlExtensions field so the result carries no Authority Key Identifier.
+type tbsCertList struct {
+	Version    int
+	Signature  pkix.AlgorithmIdentifier
+	Issuer     asn1.RawValue
+	ThisUpdate time.Time
+	NextUpdate time.Time `asn1:"optional"`
+}
+
+type certificateList struct {
+	TBS       asn1.RawValue
+	Signature pkix.AlgorithmIdentifier
+	Sig       asn1.BitString
+}
+
+// handRolledCRL signs a minimal, extension-free CRL for cert. Everything the
+// standard library emits carries an AKI, so producing the shape this test needs
+// means assembling the DER directly.
+func handRolledCRL(cert *x509.Certificate, key *ecdsa.PrivateKey) []byte {
+	GinkgoHelper()
+	// ecdsa-with-SHA256
+	algo := pkix.AlgorithmIdentifier{Algorithm: asn1.ObjectIdentifier{1, 2, 840, 10045, 4, 3, 2}}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	tbs := tbsCertList{
+		Version:    1, // v2
+		Signature:  algo,
+		Issuer:     asn1.RawValue{FullBytes: cert.RawSubject},
+		ThisUpdate: now.Add(-time.Hour),
+		NextUpdate: now.Add(30 * 24 * time.Hour),
+	}
+	tbsDER, err := asn1.Marshal(tbs)
+	Expect(err).NotTo(HaveOccurred())
+
+	digest := sha256.Sum256(tbsDER)
+	sig, err := ecdsa.SignASN1(rand.Reader, key, digest[:])
+	Expect(err).NotTo(HaveOccurred())
+
+	der, err := asn1.Marshal(certificateList{
+		TBS:       asn1.RawValue{FullBytes: tbsDER},
+		Signature: algo,
+		Sig:       asn1.BitString{Bytes: sig, BitLength: len(sig) * 8},
+	})
+	Expect(err).NotTo(HaveOccurred())
+
+	parsed, err := x509.ParseRevocationList(der)
+	Expect(err).NotTo(HaveOccurred(), "the hand-rolled CRL must be parseable")
+	Expect(parsed.AuthorityKeyId).To(BeEmpty())
+
+	return pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: der})
+}

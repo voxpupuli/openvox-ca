@@ -76,12 +76,27 @@ openvox-ca-ctl import \
 echo "CA imported into $NEW_CADIR"
 ```
 
-`--crl-chain` accepts a multi-CRL bundle in any order. This CA's own CRL is
-moved to the front, since every reader takes the first block as ours, and
-ancestor CRLs are preserved through every subsequent re-signing — so
-`certificate_revocation = chain`, Puppet's default, keeps working after a
-revocation or a CRL refresh. If the bundle contains only ancestor CRLs, an empty
-one for this CA is generated and placed first.
+`--crl-chain` accepts a multi-CRL bundle in any order. Every block must be a
+parseable CRL; the whole import is refused otherwise, because the blob is served
+to every agent and Puppet's default `certificate_revocation = chain` makes an
+agent parse all of it.
+
+This CA's own CRL is moved to the front, since every reader takes the first
+block as ours, and every other CRL is preserved through subsequent re-signing —
+so `certificate_revocation = chain` keeps working after a revocation or a CRL
+refresh. Which CRL is "ours" is decided by verifying the signature against this
+CA's certificate, not by comparing issuer names or key identifiers: a CRL from
+`openssl ca -gencrl` carries no Authority Key Identifier under the stock
+`openssl.cnf`, and a shared root can issue two sub-CAs with the same name. If
+the bundle contains no CRL signed by this CA, an empty one is generated and
+placed first.
+
+Two limits worth knowing. Ancestor CRLs are stored as imported and never
+refreshed — this CA cannot re-sign another CA's list — so they age in place and
+must be re-imported before their own `nextUpdate` lapses. And a replica running
+a build older than this one will rewrite the stored blob as a single block,
+dropping the ancestors; during a rolling upgrade, complete the rollout before
+importing a chain.
 
 This creates the directory structure, writes the CA cert/key/CRL, and
 initialises `inventory.txt` and `serial` (the serial file is written for compatibility but is not used at runtime; openvox-ca generates random serial numbers).

@@ -103,10 +103,14 @@ func ImportCA(ctx context.Context, store *storage.StorageService, certBundlePEM,
 
 	// --- Handle CRL ---
 	if crlPEM != nil {
-		// Validate every block, not just the first. The blob is served verbatim
-		// to every agent, so an unparseable block further down would surface as
-		// a broken CRL across the fleet rather than as an import error here.
-		incoming := decodeCRLChain(crlPEM)
+		// Every block must parse. The blob is served verbatim to every agent,
+		// and Puppet's default certificate_revocation = chain makes an agent
+		// parse all of it, so an unparseable block further down would surface
+		// as a broken CRL across the fleet rather than as an import error here.
+		incoming, err := decodeCRLChain(crlPEM)
+		if err != nil {
+			return fmt.Errorf("crl-chain: %w", err)
+		}
 		if len(incoming) == 0 {
 			return fmt.Errorf("crl-chain does not contain a valid X509 CRL PEM block")
 		}
@@ -115,7 +119,7 @@ func ImportCA(ctx context.Context, store *storage.StorageService, certBundlePEM,
 		// An operator assembling a chain by hand has no reason to know that,
 		// and correcting it once at import is better than misreading it on
 		// every subsequent load.
-		ordered, foundOurs := orderCRLChain(crlPEM, caCert)
+		ordered, foundOurs := orderCRLChain(incoming, caCert)
 		if !foundOurs {
 			// A chain of purely upstream CRLs is legitimate — an operator may
 			// supply ancestors and expect this CA to issue its own. Generate
@@ -124,12 +128,16 @@ func ImportCA(ctx context.Context, store *storage.StorageService, certBundlePEM,
 			if err != nil {
 				return err
 			}
-			ordered = append(ourCRL, ordered...)
+			ordered = append([]*x509.RevocationList{ourCRL}, ordered...)
 		}
 
+		// Re-encoded from the parsed chain rather than passed through, so what
+		// is stored and served is exactly what was validated — on both branches,
+		// not just the reordered one.
+		//
 		// Import-time write: runs before any CRL consumer exists, so it
 		// deliberately skips the crlNotify signal (see signCRLLocked).
-		if err := store.UpdateCRL(ctx, ordered); err != nil {
+		if err := store.UpdateCRL(ctx, encodeCRLChain(ordered)); err != nil {
 			return fmt.Errorf("failed to write CRL: %w", err)
 		}
 	} else {
@@ -139,7 +147,7 @@ func ImportCA(ctx context.Context, store *storage.StorageService, certBundlePEM,
 		}
 		// Import-time write: runs before any CRL consumer exists, so it
 		// deliberately skips the crlNotify signal (see signCRLLocked).
-		if err := store.UpdateCRL(ctx, generatedCRL); err != nil {
+		if err := store.UpdateCRL(ctx, encodeCRLChain([]*x509.RevocationList{generatedCRL})); err != nil {
 			return fmt.Errorf("failed to write CRL: %w", err)
 		}
 	}
@@ -164,7 +172,11 @@ func ImportCA(ctx context.Context, store *storage.StorageService, certBundlePEM,
 }
 
 // generateEmptyCRL signs a fresh, empty CRL for cert.
-func generateEmptyCRL(cert *x509.Certificate, key crypto.Signer) ([]byte, error) {
+//
+// Number 1 is correct here and only here: this runs when the imported chain
+// carries no CRL of ours, so there is no previous number of ours to advance
+// from. Re-signing an existing CRL goes through signCRLLocked, which bumps.
+func generateEmptyCRL(cert *x509.Certificate, key crypto.Signer) (*x509.RevocationList, error) {
 	now := time.Now().UTC()
 	template := &x509.RevocationList{
 		Number:     big.NewInt(1),
@@ -175,5 +187,9 @@ func generateEmptyCRL(cert *x509.Certificate, key crypto.Signer) ([]byte, error)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create initial CRL: %w", err)
 	}
-	return pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: der}), nil
+	crl, err := x509.ParseRevocationList(der)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse the generated CRL: %w", err)
+	}
+	return crl, nil
 }

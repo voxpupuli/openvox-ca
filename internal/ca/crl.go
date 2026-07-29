@@ -70,7 +70,11 @@ func (c *CA) signCRLLocked(ctx context.Context, prevNumber *big.Int, revoked []x
 	// CRLs an intermediate CA must publish for agents to do full-chain
 	// revocation checking (Puppet's default). On a CA that issues its own root
 	// there is nothing upstream and this is byte-for-byte what it was.
-	newCRLPEM := c.crlChainLocked(ctx, parsedCRL)
+	newCRLPEM, err := c.crlChainLocked(ctx, parsedCRL)
+	if err != nil {
+		c.crlUpdateFailures.Add(1)
+		return err
+	}
 	if err := c.Storage.UpdateCRL(ctx, newCRLPEM); err != nil {
 		c.crlUpdateFailures.Add(1)
 		return fmt.Errorf("failed to write CRL: %w", err)
@@ -124,7 +128,23 @@ func (c *CA) reissueCRLLocked(ctx context.Context) error {
 }
 
 // readStoredCRL loads and parses the CRL currently in storage.
+//
+// Every caller goes on to re-sign and write, so a failure here is a failure to
+// update the CRL and is counted as one. Counting it centrally rather than at
+// each call site is what makes crl_update_failures cover all four paths, as
+// docs/metrics.md promises and the mixin's alert assumes — three of them
+// previously returned the error uncounted, so a replica that tripped this
+// without revoking anything logged every tick while the counter stayed flat.
 func (c *CA) readStoredCRL(ctx context.Context) (*x509.RevocationList, error) {
+	crl, err := c.readStoredCRLUncounted(ctx)
+	if err != nil {
+		c.crlUpdateFailures.Add(1)
+		return nil, err
+	}
+	return crl, nil
+}
+
+func (c *CA) readStoredCRLUncounted(ctx context.Context) (*x509.RevocationList, error) {
 	crlPEM, err := c.Storage.GetCRL(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load CRL: %w", err)
@@ -141,15 +161,16 @@ func (c *CA) readStoredCRL(ctx context.Context) (*x509.RevocationList, error) {
 	// SECURITY: refuse to re-sign over a CRL this CA did not issue. Every caller
 	// of this function goes on to bump the CRL number and re-sign, so treating
 	// an ancestor's CRL as our own would overwrite it and publish a chain
-	// missing the entry agents need.
+	// missing the entries agents need.
 	//
 	// The reachable cause is a CA certificate that was replaced while this
 	// process was running: c.CACert is read once at startup and never reloaded,
-	// so an unrestarted replica compares against the previous certificate. The
+	// so an unrestarted replica verifies against the previous certificate. The
 	// error says so, because "CRL issuer mismatch" alone sends people looking at
-	// the CRL rather than at the deployment.
-	if c.classifyCRL(crl) == crlOwnershipForeign {
-		return nil, fmt.Errorf("the stored CRL was issued by a different CA than this process is using "+
+	// the CRL rather than at the deployment. The key identifiers are reported as
+	// a diagnostic aid, not as the test — see crlSignedBy.
+	if !c.ownsCRL(crl) {
+		return nil, fmt.Errorf("the stored CRL was not signed by the CA certificate this process is using "+
 			"(CRL authority key id %x, our subject key id %x): refusing to re-sign it. If the CA certificate "+
 			"was replaced, this replica needs a restart to pick it up",
 			crl.AuthorityKeyId, c.CACert.SubjectKeyId)

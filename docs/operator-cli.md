@@ -87,6 +87,9 @@ openvox-ca-ctl import \
   --cert-bundle ca_cert.pem \
   --private-key ca_key.pem \
   --crl-chain   ca_crl.pem     # optional; a new CRL is generated if omitted
+# --crl-chain may hold several concatenated CRLs in any order. This CA's own is
+# identified by signature and moved to the front; the rest are kept and served
+# so agents can do full-chain revocation checking. Every block must parse.
 
 # Migrate an entire CA between storage backends offline (any pair of backends:
 # filesystem, sqlite, postgres, mysql, etcd, redis/valkey). Each backend is

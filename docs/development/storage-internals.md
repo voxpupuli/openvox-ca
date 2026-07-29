@@ -15,7 +15,7 @@ interface. Every backend serves the following logical keys:
 | `ca_cert` | CA certificate (PEM) | bootstrap / import |
 | `ca_pubkey` | CA public key (PEM, companion to `ca_cert`) | bootstrap |
 | `ca_key` | CA private key (PEM, optionally AES-256-GCM encrypted) | bootstrap / import |
-| `crl` | Current Certificate Revocation List (PEM) | bootstrap, revoke, rotate |
+| `crl` | Certificate Revocation List (PEM). May hold several concatenated CRLs when a chain has been imported: this CA's own first, ancestors after it. Readers that answer "did we revoke this" — `readStoredCRL`, `loadCRLCache`, the metrics collector, `/expirations` — take block 0 only; `GET /certificate_revocation_list/ca` serves the whole blob | bootstrap, revoke, rotate, import |
 | `serial` | Next leaf certificate serial counter | sign |
 | `inventory` | Append-only log of issued/revoked certificates | sign / revoke |
 | `inventory_hmac` | Inventory integrity head (blob HMAC or hash chain on SQL) | sign / revoke |

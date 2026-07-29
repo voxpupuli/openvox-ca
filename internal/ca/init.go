@@ -525,9 +525,14 @@ func (c *CA) loadCRLCache(ctx context.Context) error {
 	// entirely unavailable, where continuing gives a running CA with a loud,
 	// actionable message. The write path (readStoredCRL) does fail closed,
 	// because re-signing over an ancestor's CRL destroys it.
-	if c.classifyCRL(crl) == crlOwnershipForeign {
+	//
+	// The remedy offered is a re-import. 'openvox-ca-ctl reissue-crl' is
+	// deliberately not suggested: it reaches readStoredCRL and fails closed on
+	// this very condition, so it would send the operator to a command that
+	// returns 500 without surfacing why.
+	if !c.ownsCRL(crl) {
 		slog.Warn("Stored CRL does not lead with this CA's own CRL; revocation checks may be using the wrong list. "+
-			"Re-import the CRL chain, or reissue with 'openvox-ca-ctl reissue-crl'",
+			"Re-import the CRL chain with this CA's own CRL first",
 			"crl_authority_key_id", fmt.Sprintf("%x", crl.AuthorityKeyId),
 			"ca_subject_key_id", fmt.Sprintf("%x", c.CACert.SubjectKeyId))
 	}
