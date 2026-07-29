@@ -19,6 +19,7 @@ package main
 
 import (
 	"context"
+	"os"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -75,9 +76,18 @@ var _ = Describe("resolveRuntime", func() {
 	})
 
 	It("rejects an invalid key provider configuration before opening anything", func() {
-		cfg := &serverConfig{CADir: GinkgoT().TempDir()}
+		dir := GinkgoT().TempDir()
+		cfg := &serverConfig{CADir: dir}
 		cfg.CAKeyProvider = "nonsense"
 		_, err := resolveRuntime(ctx, cfg, true)
-		Expect(err).To(HaveOccurred())
+		Expect(err).To(MatchError(ContainSubstring("nonsense")),
+			"the error must name the provider that was rejected")
+
+		// "before opening anything" is half the claim, and the half a later
+		// refactor is most likely to break by moving Validate() below the
+		// storage construction. Nothing may have been created in the cadir.
+		entries, readErr := os.ReadDir(dir)
+		Expect(readErr).NotTo(HaveOccurred())
+		Expect(entries).To(BeEmpty(), "validation must run before any backend is opened")
 	})
 })

@@ -428,6 +428,15 @@ ca_key_file:  /etc/puppet-ca/secrets/ca_key.pem
 
 - On **first start** with no existing CA, `openvox-ca` bootstraps a new CA
   and writes the cert/key to the configured local paths (not the backend).
+- A populated `ca_key_file` with **no** CA certificate is refused rather than
+  bootstrapped over. That state is what `openvox-ca csr --create-key` leaves
+  behind while a parent signs the request, and also what a partial restore or an
+  interrupted bootstrap looks like; overwriting the key would orphan every
+  certificate issued under it, and would destroy the key an outstanding signing
+  request is bound to. The startup error names the three ways out: install the
+  signed chain with `openvox-ca import-ca-cert`, restore the certificate, or
+  remove the orphaned key. See
+  [offline subcommands on the server binary](operator-cli.md#offline-subcommands-on-the-server-binary).
 - On subsequent starts, the cert and key are loaded from the local paths.
 - `openvox-ca` writes the cert at mode `0644` and the key at mode `0600`
   atomically (temp-file + rename). If you supply pre-existing files, they are

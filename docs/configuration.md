@@ -1,7 +1,10 @@
 # Configuring the server
 
 This is the full configuration reference for the `openvox-ca` server. For the
-operator CLI, see [operator CLI (`openvox-ca-ctl`)](operator-cli.md).
+operator CLI, see [operator CLI (`openvox-ca-ctl`)](operator-cli.md), which also
+covers the offline subcommands that run on the `openvox-ca` binary itself
+against this configuration — `csr` and `import-ca-cert`, for running under an
+external root CA with any `ca_key_provider`.
 
 ## Flags
 

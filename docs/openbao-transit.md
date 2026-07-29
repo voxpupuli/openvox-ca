@@ -313,6 +313,39 @@ Deployment to zero while you do.
 This applies to every `ca_key_provider`, not only Transit — with the default
 `file` provider the message names storage instead.
 
+**Running the two commands in Kubernetes.** Scaling the Deployment to zero
+removes the very thing the commands authenticate with: under
+`auth_method: kubernetes` the credential is the pod's own projected
+ServiceAccount token, and the configuration comes from the pod's mounts. Run
+them from a one-shot Job carrying the same ServiceAccount, image and config
+mount as the Deployment — the `csr` step writing its request where you can
+retrieve it, the `import-ca-cert` step reading the signed chain back in:
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: openvox-ca-csr
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: openvox-ca      # the same one the Deployment uses
+      containers:
+        - name: csr
+          image: ghcr.io/voxpupuli/openvox-ca:latest
+          args: ["csr", "--out", "/out/ca-request.pem"]
+          volumeMounts:
+            - { name: config, mountPath: /etc/openvox-ca }
+            - { name: out, mountPath: /out }
+      volumes:
+        - { name: config, configMap: { name: openvox-ca-config } }
+        - { name: out, emptyDir: {} }
+```
+
+Anywhere with equivalent OpenBao credentials and the same configuration works
+just as well; the Job is only the most direct way to get them.
+
 ### Re-issuing the CA certificate later
 
 The procedure below re-issues the CA certificate: a new certificate, under a new
@@ -323,11 +356,27 @@ slot. Rotating the CA key means provisioning a new key out of band and treating
 the result as a new CA, with every issued certificate reissued under it.
 
 Re-issuance needs an ordered procedure, because `--force` re-signs the stored
-CRL and every replica caches the CA certificate for its process lifetime:
+CRL and every replica caches the CA certificate for its process lifetime.
 
-1. `openvox-ca csr --out ca-request.pem`, and have the parent sign it.
-2. `openvox-ca import-ca-cert --cert-bundle signed-chain.pem --force`.
-3. Restart every replica. The CA certificate is read once at startup, so an
+> **Stop the CA first on the filesystem backend.** `--force` is a
+> read-modify-write spanning the certificate and the CRL, and it takes the
+> bootstrap lock to keep a concurrent revocation from being lost. That lock is
+> only genuinely cross-process on the backends that implement one — PostgreSQL,
+> MySQL, etcd and Redis. On the default `filesystem` backend it degrades to a
+> mutex inside each process, so the CLI and a running server do not serialise
+> against each other at all, and a revocation landing mid-import is silently
+> discarded. Shared backends can take the import against a live CA; on
+> `filesystem`, stop it.
+
+1. Keep a copy of the bundle you are about to replace:
+   `curl -sk https://<ca>/puppet-ca/v1/certificate/ca > ca-bundle.backup.pem`.
+   `--force` overwrites it in storage and openvox-ca retains no copy, so this is
+   the only rollback you will have. A bundle that passes every check can still
+   be the wrong one — wrong parent, wrong validity — and rolling back is then
+   `import-ca-cert --cert-bundle ca-bundle.backup.pem --force` plus a restart.
+2. `openvox-ca csr --out ca-request.pem`, and have the parent sign it.
+3. `openvox-ca import-ca-cert --cert-bundle signed-chain.pem --force`.
+4. Restart every replica. The CA certificate is read once at startup, so an
    unrestarted replica will keep using the old one.
 
 When `ca_cert_file` mounts the certificate read-only — a Kubernetes Secret, for
@@ -398,8 +447,9 @@ local-key custody, where the CA can sign with no external dependency at all.
   and that the bound role maps to the scoped policy above.
 - **Startup fails with "does not match" / key-rotation errors.** The Transit
   key's public component no longer matches the stored CA certificate — see
-  [Key rotation detection](#key-rotation-detection). Reissue the CA
-  certificate to match, or point at the correct `key_name`.
+  [Key rotation detection](#key-rotation-detection). Point at the correct
+  `key_name`, or reissue the CA certificate to match by following
+  [Re-issuing the CA certificate later](#re-issuing-the-ca-certificate-later).
 - **Issuance intermittently fails with `403`.** The token was revoked or hit
   its `max_ttl`; `openvox-ca` re-authenticates and retries automatically, so
   transient `403`s that recover are expected. Persistent `403`s point at a
@@ -437,10 +487,12 @@ This works the same way whether or not key isolation (the isolated
 `openvox-ca [signer]` process) is in use — the check happens wherever the
 certificate is assembled from the Transit signature.
 
-If you do intend to rotate the Transit key, reissue the CA certificate to
-match afterwards (the same offline `openvox-ca-ctl import` process used for
-any other CA key change) rather than rotating it in place underneath a
-running CA.
+If you do intend to rotate the Transit key, reissue the CA certificate to match
+afterwards — see [Re-issuing the CA certificate
+later](#re-issuing-the-ca-certificate-later) — rather than rotating it in place
+underneath a running CA. Note that `openvox-ca-ctl import` cannot do this job
+under Transit: it requires a `--private-key` a Transit-held key can never yield,
+and refuses with a message naming `openvox-ca import-ca-cert` instead.
 
 ## Process isolation
 

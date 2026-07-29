@@ -18,6 +18,7 @@
 package ca
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/rand"
@@ -67,6 +68,22 @@ var ErrCACertExists = errors.New("a CA certificate already exists")
 // can tell it apart from the validation and CRL failures that surround it.
 // Guidance about read-only mounts is only ever right for this one.
 var ErrCACertWrite = errors.New("writing the CA certificate")
+
+// incompleteImportError annotates a failure that happened after the CA
+// certificate was already written.
+//
+// Storage is then holding the new certificate beside a CRL — and possibly a
+// public key — belonging to the one it replaced, and nothing detects that
+// afterwards: loadCA compares the key to the certificate, and loadCRLCache
+// parses the CRL without checking who issued it. So a replica restarted in this
+// state comes up cleanly and serves a CRL no agent can verify against the CA
+// certificate it just fetched. The operator has to know to act, which means the
+// error has to say so.
+func incompleteImportError(err error) error {
+	return fmt.Errorf("%w. The CA certificate has already been replaced, so storage is "+
+		"now inconsistent: re-run this command with --force to finish the import, or run "+
+		"'openvox-ca-ctl reissue-crl' to re-sign the CRL under the new certificate", err)
+}
 
 // ImportCACertificate installs a CA certificate chain signed by an external
 // parent, for a CA whose private key is held elsewhere — a Transit key, a
@@ -172,6 +189,13 @@ func ImportCAMaterial(ctx context.Context, store *storage.StorageService, certBu
 	// --- Write CA cert (the whole bundle, root last) ---
 	// Re-encoded from the parsed chain rather than passed through, so what is
 	// stored and served is exactly what was validated. The DER is unchanged.
+	//
+	// This is the point of no return. Everything after it can still fail, and a
+	// failure then leaves storage holding the new certificate beside material
+	// signed under the old one — a state nothing detects on the next start,
+	// because loadCA only checks key-against-certificate and loadCRLCache does
+	// not verify the CRL's issuer at all. So every later error is annotated
+	// with what already landed and what fixes it; see incompleteImportError.
 	if err := store.SaveCACert(ctx, EncodeCABundle(certs)); err != nil {
 		return fmt.Errorf("%w: %w", ErrCACertWrite, err)
 	}
@@ -183,7 +207,7 @@ func ImportCAMaterial(ctx context.Context, store *storage.StorageService, certBu
 	}
 	pubKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubKeyBytes})
 	if err := store.SaveCAPubKey(ctx, pubKeyPEM); err != nil {
-		return fmt.Errorf("failed to write CA public key: %w", err)
+		return incompleteImportError(fmt.Errorf("failed to write CA public key: %w", err))
 	}
 
 	// --- Handle CRL ---
@@ -191,6 +215,17 @@ func ImportCAMaterial(ctx context.Context, store *storage.StorageService, certBu
 		// Validate every block, not just the first: a CRL chain supplied here is
 		// served verbatim to agents, so an unparseable block further down would
 		// surface as a broken CRL on every node rather than an import error.
+		//
+		// SECURITY: a block that is not a CRL is refused rather than skipped,
+		// and what gets stored is re-encoded from what parsed rather than the
+		// operator's file. Both for the reason ParseCABundle gives for the
+		// certificate bundle: this blob is world-readable and is served to
+		// every agent unauthenticated, on a route that requires no client
+		// certificate. Skipping unknown blocks and storing the file verbatim
+		// would publish anything concatenated alongside the CRLs — including,
+		// for a file assembled by the obvious `cat key.pem crl.pem` mistake,
+		// the CA private key.
+		var validated bytes.Buffer
 		rest := crlPEM
 		blocks := 0
 		for {
@@ -200,10 +235,15 @@ func ImportCAMaterial(ctx context.Context, store *storage.StorageService, certBu
 				break
 			}
 			if crlBlock.Type != "X509 CRL" {
-				continue
+				return fmt.Errorf("crl-chain contains a %q block: supply only CRLs, "+
+					"as this file is stored world-readable and served to every agent",
+					crlBlock.Type)
 			}
 			if _, err := x509.ParseRevocationList(crlBlock.Bytes); err != nil {
 				return fmt.Errorf("failed to parse CRL %d in crl-chain: %w", blocks+1, err)
+			}
+			if err := pem.Encode(&validated, &pem.Block{Type: "X509 CRL", Bytes: crlBlock.Bytes}); err != nil {
+				return fmt.Errorf("re-encoding CRL %d in crl-chain: %w", blocks+1, err)
 			}
 			blocks++
 		}
@@ -212,8 +252,8 @@ func ImportCAMaterial(ctx context.Context, store *storage.StorageService, certBu
 		}
 		// Import-time write: runs before any CRL consumer exists, so it
 		// deliberately skips the crlNotify signal (see signCRLLocked).
-		if err := store.UpdateCRL(ctx, crlPEM); err != nil {
-			return fmt.Errorf("failed to write CRL: %w", err)
+		if err := store.UpdateCRL(ctx, validated.Bytes()); err != nil {
+			return incompleteImportError(fmt.Errorf("failed to write CRL: %w", err))
 		}
 	} else {
 		// Generate a fresh empty CRL.
@@ -225,13 +265,13 @@ func ImportCAMaterial(ctx context.Context, store *storage.StorageService, certBu
 		}
 		crlBytes, err := x509.CreateRevocationList(rand.Reader, crlTemplate, caCert, signer)
 		if err != nil {
-			return fmt.Errorf("failed to create initial CRL: %w", err)
+			return incompleteImportError(fmt.Errorf("failed to create initial CRL: %w", err))
 		}
 		generatedCRL := pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlBytes})
 		// Import-time write: runs before any CRL consumer exists, so it
 		// deliberately skips the crlNotify signal (see signCRLLocked).
 		if err := store.UpdateCRL(ctx, generatedCRL); err != nil {
-			return fmt.Errorf("failed to write CRL: %w", err)
+			return incompleteImportError(fmt.Errorf("failed to write CRL: %w", err))
 		}
 	}
 

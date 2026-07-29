@@ -53,10 +53,12 @@ func newImportCACertCmd() *cobra.Command {
 process started by "openvox-ca csr".
 
 The bundle must be a complete chain, ordered nearest-first: this CA's own
-certificate, each issuer after it, ending with a self-signed root. The CA's
-private key is not required and is never read — it stays wherever
-ca_key_provider puts it — but the command proves the certificate binds that key
-before writing anything.
+certificate, each issuer after it, ending with a self-signed root. No key
+material need be supplied: the command proves the certificate binds whatever key
+ca_key_provider holds, before writing anything. With the default file provider
+that means reading the stored key (and decrypting it, if encrypt_ca_key is set);
+with OpenBao Transit the key never leaves the vault and only its public
+component is compared.
 
 With --out the bundle is validated and written to a file instead of storage,
 for deployments where the CA certificate is mounted read-only from outside

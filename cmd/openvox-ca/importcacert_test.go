@@ -25,6 +25,8 @@ import (
 	"crypto/sha1"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -93,8 +95,14 @@ var _ = Describe("openvox-ca import-ca-cert", func() {
 
 	BeforeEach(func() {
 		caDir = GinkgoT().TempDir()
-		emptyCf = filepath.Join(GinkgoT().TempDir(), "empty.yaml")
-		Expect(os.WriteFile(emptyCf, []byte("{}\n"), 0o644)).To(Succeed())
+		// ECDSA P-256, not the RSA-4096 default: these specs create a CA key
+		// on nearly every It, and RSA generation at that size dominates the
+		// suite's runtime for no assertion value. It also pins the
+		// ca_key_algo/ca_key_size wiring from the config file through
+		// applyCAConfig into LoadOrCreateCAKey, which nothing else asserts.
+		pinnedCfg := "ca_key_algo: ecdsa\nca_key_size: 256\n"
+		emptyCf = filepath.Join(GinkgoT().TempDir(), "pinned.yaml")
+		Expect(os.WriteFile(emptyCf, []byte(pinnedCfg), 0o644)).To(Succeed())
 		GinkgoT().Setenv("PUPPET_CA_CONFIG", emptyCf)
 
 		clearServerEnv()
@@ -171,7 +179,8 @@ var _ = Describe("openvox-ca import-ca-cert", func() {
 		Expect(os.WriteFile(bundle, signed, 0o644)).To(Succeed())
 
 		_, err = runImport("--cadir", caDir, "--cert-bundle", bundle)
-		Expect(err).To(MatchError(ContainSubstring("already exists")))
+		Expect(err).To(MatchError(ca.ErrCACertExists),
+			"the sentinel is what callers discriminate on; a substring is not")
 	})
 
 	It("re-signs the CRL when --force replaces a certificate, keeping revocations", func() {
@@ -261,6 +270,14 @@ var _ = Describe("openvox-ca import-ca-cert", func() {
 		Expect(msg).To(ContainSubstring("not installed"))
 		Expect(mustRead(validated)).To(Equal(signed))
 
+		// The written bundle is destined for a Kubernetes Secret and is served
+		// to every agent, so the explicit chmod that makes the mode
+		// umask-independent matters. The csr sibling asserts this; dropping the
+		// chmod here would otherwise go unnoticed.
+		info, err := os.Stat(validated)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(info.Mode().Perm()).To(Equal(os.FileMode(0644)))
+
 		// Storage is untouched: no certificate was installed.
 		store := storage.New(caDir)
 		has, err := store.HasCACert(context.Background())
@@ -273,4 +290,41 @@ var _ = Describe("openvox-ca import-ca-cert", func() {
 		_, err := runImport("--cadir", caDir, "--cert-bundle", bundle)
 		Expect(err).To(MatchError(ContainSubstring("no CA key exists")))
 	})
+})
+
+var _ = Describe("annotateOverlayWriteError", func() {
+	// The whole value of this helper is what it declines to annotate. The
+	// remedy it names — re-run with --out and load the result out of band — is
+	// right only for a certificate blob that could not be written, and is
+	// actively misleading for a key mismatch or a bad CRL. A later change that
+	// keyed on any import failure would still look plausible.
+	const overlay = "/etc/openvox-ca/ca_crt.pem"
+
+	DescribeTable("appends the read-only overlay guidance only where it applies",
+		func(err error, cacertFile string, wantGuidance bool) {
+			cfg := &serverConfig{}
+			cfg.CACertFile = cacertFile
+			got := annotateOverlayWriteError(err, cfg)
+			if err == nil {
+				Expect(got).To(BeNil())
+				return
+			}
+			if wantGuidance {
+				Expect(got).To(MatchError(ContainSubstring("re-run with --out")))
+				Expect(got).To(MatchError(ContainSubstring(overlay)))
+				Expect(got).To(MatchError(err), "the original error must stay wrapped")
+			} else {
+				Expect(got).NotTo(MatchError(ContainSubstring("re-run with --out")))
+			}
+		},
+		Entry("a certificate write failure onto an overlay",
+			fmt.Errorf("%w: read-only file system", ca.ErrCACertWrite), overlay, true),
+		Entry("a certificate write failure with no overlay configured",
+			fmt.Errorf("%w: read-only file system", ca.ErrCACertWrite), "", false),
+		Entry("an unrelated failure onto an overlay",
+			errors.New("failed to write CRL: disk full"), overlay, false),
+		Entry("the key-mismatch failure the guidance would mislead on",
+			errors.New("certificate does not match the CA key"), overlay, false),
+		Entry("no failure at all", nil, overlay, false),
+	)
 })

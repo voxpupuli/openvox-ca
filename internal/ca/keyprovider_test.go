@@ -25,11 +25,14 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
 	"sync"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -343,5 +346,224 @@ var _ = Describe("KeyProvider integration", func() {
 		err = secondCA.Init(context.Background())
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("does not match"))
+	})
+})
+
+// The provider-backed path is what this whole feature exists for: docs
+// document the sub-CA round trip under an OpenBao Transit key, and every other
+// spec in the suite runs with KeyProvider nil, so none of it was exercised.
+var _ = Describe("BuildCSR and LoadOrCreateCAKey against a key provider", func() {
+	var (
+		ctx      context.Context
+		store    *storage.StorageService
+		asCfg    ca.AutosignConfig
+		provider *fakeKeyProvider
+		subject  *ca.CA
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		store = storage.New(GinkgoT().TempDir())
+		asCfg = ca.AutosignConfig{Mode: "off"}
+		provider = &fakeKeyProvider{}
+		subject = ca.New(store, asCfg, "puppet.test")
+		subject.KeyProvider = provider
+		subject.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+	})
+
+	// noLocalKey asserts the provider path never writes a key blob to storage.
+	// That is the property the whole custody model rests on: if the CSR path
+	// spilled a local copy, the key would exist in two places and "the key
+	// never leaves the vault" would be false.
+	noLocalKey := func() {
+		GinkgoHelper()
+		hasKey, err := store.HasCAKey(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(hasKey).To(BeFalse(), "a provider-held key must never be written to storage")
+	}
+
+	It("refuses to invent a key when the provider slot is empty and --create-key was not passed", func() {
+		_, err := subject.BuildCSR(ctx, "puppet.test", false)
+		Expect(err).To(MatchError(ca.ErrKeyProviderKeyNotFound))
+		Expect(provider.generateCalls).To(Equal(0), "no key may be created without --create-key")
+		noLocalKey()
+	})
+
+	It("creates the key at the provider when --create-key is passed", func() {
+		csrPEM, err := subject.BuildCSR(ctx, "puppet.test", true)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(provider.generateCalls).To(Equal(1))
+
+		block, _ := pem.Decode(csrPEM)
+		Expect(block).NotTo(BeNil())
+		Expect(block.Type).To(Equal("CERTIFICATE REQUEST"))
+		csr, err := x509.ParseCertificateRequest(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(csr.CheckSignature()).To(Succeed())
+
+		// The request must be bound to the provider's key, not to some other
+		// key generated alongside it — otherwise the parent signs a
+		// certificate this CA cannot use.
+		wantDER, err := x509.MarshalPKIXPublicKey(provider.key.Public())
+		Expect(err).NotTo(HaveOccurred())
+		gotDER, err := x509.MarshalPKIXPublicKey(csr.PublicKey)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(gotDER).To(Equal(wantDER))
+		noLocalKey()
+	})
+
+	It("does not rotate a key the provider already holds, even with --create-key", func() {
+		existing, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		Expect(err).NotTo(HaveOccurred())
+		provider.key = existing
+
+		csrPEM, err := subject.BuildCSR(ctx, "puppet.test", true)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(provider.generateCalls).To(Equal(0), "an established CA key must never be replaced")
+
+		block, _ := pem.Decode(csrPEM)
+		csr, err := x509.ParseCertificateRequest(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		wantDER, err := x509.MarshalPKIXPublicKey(existing.Public())
+		Expect(err).NotTo(HaveOccurred())
+		gotDER, err := x509.MarshalPKIXPublicKey(csr.PublicKey)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(gotDER).To(Equal(wantDER))
+	})
+
+	// The distinction that matters most: "the vault says there is no key" and
+	// "the vault could not be reached" must not be conflated. Treating the
+	// second as the first would mint a brand new CA key on a network blip,
+	// while the real one sits in the vault with certificates issued under it.
+	It("propagates a provider failure instead of treating it as an empty slot", func() {
+		provider.loadErr = errors.New("openbao: connection refused")
+
+		_, err := subject.BuildCSR(ctx, "puppet.test", true)
+		Expect(err).To(MatchError(ContainSubstring("connection refused")))
+		Expect(err).NotTo(MatchError(ca.ErrKeyProviderKeyNotFound))
+		Expect(provider.generateCalls).To(Equal(0),
+			"an unreachable provider must never cause a second CA key to be created")
+		noLocalKey()
+	})
+
+	It("proves an imported chain binds the provider-held key", func() {
+		// The round trip import-ca-cert performs: build the request, have a
+		// parent sign it, import the chain. AssertSignerMatchesCert is reached
+		// through LoadOrCreateCAKey(ctx, false), so this is the provider path.
+		csrPEM, err := subject.BuildCSR(ctx, "puppet.test", true)
+		Expect(err).NotTo(HaveOccurred())
+		block, _ := pem.Decode(csrPEM)
+		csr, err := x509.ParseCertificateRequest(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+
+		chain := signAsSubCA(csr)
+		key, err := subject.LoadOrCreateCAKey(ctx, false)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(provider.generateCalls).To(Equal(1), "loading must not generate a second key")
+
+		Expect(ca.ImportCAMaterial(ctx, store, chain, nil, nil, key, ca.CRLValidity)).To(Succeed())
+		noLocalKey()
+
+		stored, err := store.GetCACert(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(stored).NotTo(BeEmpty())
+	})
+})
+
+// signAsSubCA has a self-signed root sign csr as an intermediate, returning the
+// bundle in the order openvox-ca stores it: this CA first, root last.
+func signAsSubCA(csr *x509.CertificateRequest) []byte {
+	GinkgoHelper()
+	rootKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	Expect(err).NotTo(HaveOccurred())
+
+	serial := func() *big.Int {
+		n, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+		Expect(err).NotTo(HaveOccurred())
+		return n
+	}
+	rootTmpl := &x509.Certificate{
+		SerialNumber:          serial(),
+		Subject:               pkix.Name{CommonName: "Test Root CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	rootDER, err := x509.CreateCertificate(rand.Reader, rootTmpl, rootTmpl, rootKey.Public(), rootKey)
+	Expect(err).NotTo(HaveOccurred())
+	root, err := x509.ParseCertificate(rootDER)
+	Expect(err).NotTo(HaveOccurred())
+
+	interTmpl := &x509.Certificate{
+		SerialNumber:          serial(),
+		Subject:               csr.Subject,
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	interDER, err := x509.CreateCertificate(rand.Reader, interTmpl, root, csr.PublicKey, rootKey)
+	Expect(err).NotTo(HaveOccurred())
+
+	return append(
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: interDER}),
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rootDER})...,
+	)
+}
+
+var _ = Describe("LoadOrCreateCAKey under concurrent creation", func() {
+	// The lock and the in-lock re-check exist for a failure the code calls
+	// unrecoverable: two `csr --create-key` runs against a shared backend, where
+	// the loser would overwrite a key the winner has already sent to a parent
+	// for signing. The signed chain that came back could then never be imported.
+	// Sequential specs take the fast path and never reach the branch that runs
+	// when the race is lost.
+	It("creates exactly one key however many callers race", func() {
+		ctx := context.Background()
+		store := storage.New(GinkgoT().TempDir())
+		asCfg := ca.AutosignConfig{Mode: "off"}
+
+		const racers = 8
+		keys := make([][]byte, racers)
+		errs := make([]error, racers)
+		var wg sync.WaitGroup
+		for i := range racers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				// Separate CA values sharing one backend, which is what two
+				// processes against a shared storage backend look like.
+				subject := ca.New(store, asCfg, "puppet.test")
+				subject.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+				key, err := subject.LoadOrCreateCAKey(ctx, true)
+				if err != nil {
+					errs[i] = err
+					return
+				}
+				der, err := x509.MarshalPKIXPublicKey(key.Public())
+				if err != nil {
+					errs[i] = err
+					return
+				}
+				keys[i] = der
+			}()
+		}
+		wg.Wait()
+
+		for i, err := range errs {
+			Expect(err).NotTo(HaveOccurred(), "racer %d", i)
+		}
+		for i := 1; i < racers; i++ {
+			Expect(keys[i]).To(Equal(keys[0]),
+				"every caller must end up with the same key, not its own")
+		}
+
+		stored, err := store.GetCAKey(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(countPEMBlocks(stored, "EC PRIVATE KEY")+countPEMBlocks(stored, "PRIVATE KEY")).
+			To(Equal(1), "storage must hold exactly one key blob")
 	})
 })

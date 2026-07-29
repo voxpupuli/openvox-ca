@@ -20,6 +20,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/x509"
 	"encoding/pem"
 	"os"
@@ -50,8 +52,14 @@ var _ = Describe("openvox-ca csr", func() {
 		caDir = GinkgoT().TempDir()
 		// Pin to an empty config file so the host's /etc/puppet-ca/config.yaml,
 		// if it exists, cannot influence the result.
-		emptyCfg := filepath.Join(GinkgoT().TempDir(), "empty.yaml")
-		Expect(os.WriteFile(emptyCfg, []byte("{}\n"), 0o644)).To(Succeed())
+		// ECDSA P-256, not the RSA-4096 default: these specs create a CA key
+		// on nearly every It, and RSA generation at that size dominates the
+		// suite's runtime for no assertion value. It also pins the
+		// ca_key_algo/ca_key_size wiring from the config file through
+		// applyCAConfig into LoadOrCreateCAKey, which nothing else asserts.
+		pinnedCfg := "ca_key_algo: ecdsa\nca_key_size: 256\n"
+		emptyCfg := filepath.Join(GinkgoT().TempDir(), "pinned.yaml")
+		Expect(os.WriteFile(emptyCfg, []byte(pinnedCfg), 0o644)).To(Succeed())
 		GinkgoT().Setenv("PUPPET_CA_CONFIG", emptyCfg)
 		clearServerEnv()
 	})
@@ -86,6 +94,22 @@ var _ = Describe("openvox-ca csr", func() {
 		for _, ext := range csr.Extensions {
 			Expect(ext.Id.String()).NotTo(Equal("2.5.29.19"))
 		}
+	})
+
+	It("creates the key algorithm the configuration asks for", func() {
+		// Pins ca_key_algo/ca_key_size from the config file through
+		// applyCAConfig into LoadOrCreateCAKey. Nothing else asserts that
+		// wiring, so csr --create-key ignoring the configured algorithm and
+		// falling back to the RSA default would go unnoticed.
+		out, err := runCSR("--cadir", caDir, "--hostname", "puppet.example.com", "--create-key")
+		Expect(err).NotTo(HaveOccurred())
+
+		block, _ := pem.Decode([]byte(out))
+		csr, err := x509.ParseCertificateRequest(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		pub, ok := csr.PublicKey.(*ecdsa.PublicKey)
+		Expect(ok).To(BeTrue(), "expected an ECDSA key, got %T", csr.PublicKey)
+		Expect(pub.Curve).To(Equal(elliptic.P256()))
 	})
 
 	It("persists the created key so a second run reuses it", func() {
@@ -172,6 +196,23 @@ var _ = Describe("openvox-ca csr", func() {
 		Expect(csr.RawSubject).To(Equal(certs[0].RawSubject))
 	})
 
+	It("refuses rather than re-subjecting itself when the stored certificate is unreadable", func() {
+		// Fail-closed, and the reason is specific: conflating "cannot read the
+		// certificate" with "there is no certificate yet" would let a transient
+		// backend fault make an established CA emit a request under a different
+		// DN. A parent would sign it and import-ca-cert would accept it —
+		// nothing downstream compares subjects.
+		bootstrapCAInDir(caDir, "original.example.com")
+		certPath := filepath.Join(caDir, "ca_crt.pem")
+		Expect(os.WriteFile(certPath, []byte("not a certificate\n"), 0o644)).To(Succeed())
+
+		out, err := runCSR("--cadir", caDir, "--hostname", "attacker.example.com")
+		Expect(err).To(HaveOccurred())
+		Expect(err).To(MatchError(ContainSubstring("reuse its subject")))
+		Expect(out).NotTo(ContainSubstring("CERTIFICATE REQUEST"),
+			"no request may be emitted under a subject we could not confirm")
+	})
+
 	It("creates no key when the subject cannot be resolved", func() {
 		// A run that cannot determine a subject must not leave a CA key behind:
 		// at a provider it may not be removable with openvox-ca at all, and it
@@ -200,6 +241,22 @@ var _ = Describe("openvox-ca csr", func() {
 		block, _ := pem.Decode(keyPEM)
 		Expect(block).NotTo(BeNil())
 		Expect(block.Type).To(Equal("ENCRYPTED PRIVATE KEY"))
+	})
+
+	It("leaves the created key unencrypted when encrypt_ca_key is not set", func() {
+		// The counterpart the spec above needs in order to mean anything.
+		// Without it, an ambient PUPPET_CA_ENCRYPT_CA_KEY=true makes that
+		// assertion one that cannot fail: the key comes out encrypted either
+		// way, and the config file it exists to prove has no bearing on the
+		// result. This one fails in that environment, which is the point.
+		_, err := runCSR("--cadir", caDir, "--hostname", "puppet.example.com", "--create-key")
+		Expect(err).NotTo(HaveOccurred())
+
+		keyPEM, err := storage.New(caDir).GetCAKey(context.Background())
+		Expect(err).NotTo(HaveOccurred())
+		block, _ := pem.Decode(keyPEM)
+		Expect(block).NotTo(BeNil())
+		Expect(block.Type).NotTo(Equal("ENCRYPTED PRIVATE KEY"))
 	})
 })
 
