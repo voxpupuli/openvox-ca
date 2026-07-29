@@ -16,6 +16,13 @@ alerting rules for the openvox-ca exporter. It alerts on:
 - **CRL update failures** — the CA failing to amend its CRL (a revocation it
   could not record, or a CRL it could not re-sign or write), which can leave
   revoked or superseded certificates still valid.
+- **Upstream CRLs** in a published chain nearing or past their `NextUpdate`, and
+  the two ways that chain goes wrong: a
+  [`crl_chain_file`](../docs/configuration.md#publishing-an-upstream-crl-chain)
+  that cannot be refreshed, and a CRL discarded from it because no certificate
+  in the CA bundle signed it. Only a CA publishing a chain has these series at
+  all. None of it is fixable here — this CA cannot re-sign another CA's list —
+  so every remedy points at the parent CA or at the file.
 - **Serving-certificate failures** — three rules. Two are meaningful only when
   [`tls_self_provision`](../docs/configuration.md#self-provisioned-serving-certificate)
   is in use; *Revocation failing* is live wherever `hostname` is set, because the
@@ -107,6 +114,7 @@ jsonnet -J vendor -m . mixin.jsonnet
 | `caExpiryWarningSeconds` | 30 days | CA certificate expiry warning threshold. |
 | `caExpiryCriticalSeconds` | 7 days | CA certificate expiry critical threshold. |
 | `crlExpiryWarningSeconds` | 3 days | CRL `NextUpdate` warning threshold. |
+| `upstreamCRLExpiryWarningSeconds` | 14 days | Warning threshold for an upstream CRL in a published chain. Longer than `crlExpiryWarningSeconds` because the remedy is at another CA. |
 | `leafExpiryWarningSeconds` | 7 days | Leaf certificate expiry warning threshold. |
 | `leafExpiryCriticalSeconds` | 1 day | Leaf certificate expiry critical threshold. |
 | `pendingFor` | `1h` | How long a request may stay pending before alerting. |

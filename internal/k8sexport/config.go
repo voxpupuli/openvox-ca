@@ -107,9 +107,14 @@ type Target struct {
 	CRLKey  string `yaml:"crl_key"`
 
 	// CertScope and CRLScope select how much of each chain to publish. Empty
-	// selects ScopeSelf, which is what makes the fields back-compatible: on
-	// today's single-certificate CAs self and chain are byte-identical, so no
-	// existing deployment changes.
+	// selects ScopeSelf. On a CA storing a single certificate — every CA that
+	// issued its own root — self, chain and root are byte-identical, so the
+	// default changes nothing there.
+	//
+	// It is not a no-op everywhere. A deployment that has already imported a
+	// multi-certificate bundle got byte-for-byte pass-through before these
+	// fields existed and now gets block 0 alone; cert_scope: chain restores
+	// what those targets were publishing.
 	//
 	// Note the deliberate asymmetry with the HTTP endpoints. GET /certificate/ca
 	// and the CRL endpoint always serve the full chain, because Puppet agents

@@ -536,7 +536,7 @@ var _ = Describe("crl_chain_file: size and duplicates", func() {
 		_, err := myCA.RefreshCRLChainFile(ctx)
 		Expect(err).NotTo(HaveOccurred())
 
-		chain := crlBlocks(mustGetCRL(store, ctx))
+		chain := crlBlocks(mustGetCRL(ctx, store))
 		Expect(chain).To(HaveLen(2), "ours plus one upstream, not two upstream")
 		Expect(chain[1].Number.Int64()).To(Equal(int64(9)))
 	})
@@ -549,7 +549,7 @@ var _ = Describe("crl_chain_file: size and duplicates", func() {
 		_, err := myCA.RefreshCRLChainFile(ctx)
 		Expect(err).NotTo(HaveOccurred())
 
-		chain := crlBlocks(mustGetCRL(store, ctx))
+		chain := crlBlocks(mustGetCRL(ctx, store))
 		Expect(chain).To(HaveLen(2))
 		Expect(chain[1].Number.Int64()).To(Equal(int64(9)))
 	})
@@ -566,6 +566,6 @@ var _ = Describe("crl_chain_file: size and duplicates", func() {
 
 		_, err := myCA.RefreshCRLChainFile(ctx)
 		Expect(err).To(MatchError(ContainSubstring("larger than")))
-		Expect(crlBlocks(mustGetCRL(store, ctx))).To(HaveLen(1), "nothing published from a file we would not read whole")
+		Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(1), "nothing published from a file we would not read whole")
 	})
 })

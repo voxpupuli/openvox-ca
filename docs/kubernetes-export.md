@@ -102,14 +102,22 @@ much of one it wants:
 | `chain` | The stored bundle or CRL chain verbatim |
 | `root` | The last certificate in the bundle — the trust anchor. Certificates only |
 
-`root` needs no validation of its own: `import-ca-cert` guarantees the last
-certificate in the bundle is a self-signed root. There is no `root` for CRLs,
-because a chain has no single anchor CRL — the root's own is simply one of its
-members.
+`root` publishes the last certificate in the stored bundle without inspecting
+it, so it is only a *trust anchor* if the bundle you imported was a complete
+chain ending at a self-signed root. Nothing enforces that today —
+`openvox-ca-ctl import` accepts a partial bundle — so `root` on a bundle that
+stops at an intermediate publishes that intermediate. It fails closed rather
+than open (an intermediate grants strictly less trust than the real root, and
+consumers trusting it simply fail to verify), but it fails, so import the whole
+chain. There is no `root` for CRLs, because a chain has no single anchor CRL —
+the root's own is simply one of its members.
 
-The default is back-compatible by construction: on a CA that issues its own
-root, `self`, `chain` and `root` produce identical output, so no existing
-deployment changes.
+The default changes nothing on a CA that issues its own root: with one
+certificate in the bundle, `self`, `chain` and `root` produce identical output.
+It is **not** a no-op on a CA that has already imported a multi-certificate
+bundle. Before these fields existed, every target published the stored bundle
+verbatim; the `self` default now publishes the first block alone. Set
+`cert_scope: chain` on those targets to keep what they were publishing.
 
 **A deliberate asymmetry, worth flagging as intentional rather than
 inconsistent.** The HTTP endpoints `/certificate/ca` and

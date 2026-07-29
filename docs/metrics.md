@@ -84,7 +84,7 @@ the Unix epoch, the Prometheus convention for `*_timestamp_seconds` gauges.
 
 | Metric | Description |
 | --- | --- |
-| `puppetca_crl_number` | Monotonic CRL sequence number (`cRLNumber`). |
+| `puppetca_crl_number` | Monotonic CRL sequence number (`cRLNumber`). Expect it to advance without any revocation having happened: a re-sign bumps it, and with [`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain) configured, so does a change to the upstream chain. The number need only increase, so this is harmless — but do not treat a rise as evidence that something was revoked. |
 | `puppetca_crl_this_update_timestamp_seconds` | CRL `ThisUpdate` time. |
 | `puppetca_crl_next_update_timestamp_seconds` | CRL `NextUpdate` (expiry) time. |
 | `puppetca_crl_revoked_certificates` | Number of certificates currently listed in the CRL. |
@@ -93,13 +93,27 @@ the Unix epoch, the Prometheus convention for `*_timestamp_seconds` gauges.
 The four CRL gauges above describe **this CA's own CRL**, the first block of the
 stored blob. When a CRL chain has been imported, the ancestor CRLs that follow it
 are not covered: this CA cannot re-sign them, so their expiry is not something a
-refresh can fix and not something these series track. Re-import the chain before
-an ancestor's own `nextUpdate` lapses —
-`puppetca_crl_chain_next_update_timestamp_seconds` below reports each ancestor's
-deadline, and the shipped mixin alerts on it, so this no longer has to be
-tracked out of band.
-| `puppetca_crl_update_failures_total` | Counter of failures to amend the CRL — a revocation that could not be recorded, or a CRL that could not be re-signed or written (across the revoke, cleanup, reissue and refresh paths). A rising value means the CRL is not being maintained; for revocations it means a superseded certificate may still be a valid credential. Resets to `0` on process restart. |
-| `puppetca_crl_chain_next_update_timestamp_seconds` | NextUpdate of each **upstream** CRL published alongside this CA's own, labelled by `issuer`. Only present when `crl_chain_file` is configured. Deliberately a separate series from the unlabelled CRL metric above: an expiring upstream CRL is fixed at the parent CA, not here, so it has its own alert and runbook. |
+re-sign can fix and not something these series track. The series below cover
+those instead.
+
+### Upstream CRL chain
+
+| Metric | Description |
+| --- | --- |
+| `puppetca_crl_chain_next_update_timestamp_seconds` | NextUpdate of each **upstream** CRL in the stored blob — every block this CA did not issue — labelled by `issuer`. Deliberately a separate series from the unlabelled CRL metrics above: an expiring upstream CRL is fixed at the parent CA, not here, so it has its own alert and runbook. |
+| `puppetca_crl_chain_refresh_failures_total` | Counter of failed `crl_chain_file` refreshes — unreadable, unparseable, or too large. The chain already published is left in place, so the visible symptom is upstream CRLs ageing with nothing renewing them. Zero and static without `crl_chain_file`. Resets to `0` on process restart. |
+| `puppetca_crl_chain_discarded_total` | Counter of CRLs dropped from `crl_chain_file` because no certificate in the stored CA bundle signed them. **Alert on this** — the shipped mixin does. It is the only signal that the published chain is *smaller* than the file says: a discarded CRL has no series of its own to go missing from. Zero and static without `crl_chain_file`. Resets to `0` on process restart. |
+
+The gauge appears whenever the stored blob holds a CRL this CA did not issue —
+which includes a chain brought in by `openvox-ca-ctl import --crl-chain` on a
+deployment that has never set `crl_chain_file`. That is deliberate: an ancestor
+CRL ages the same way whether or not anything is refreshing it, and it is
+precisely the import-only deployment where nothing is. The remedy differs,
+though, and the alert text names `crl_chain_file` because that is the standing
+fix. On an import-only deployment, read
+`PuppetCAUpstreamCRLExpiringSoon`/`Expired` as "re-import the chain with a
+current one, or configure [`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain)
+so it stays current by itself".
 
 ### Self-provisioned serving certificate
 

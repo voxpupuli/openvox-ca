@@ -42,10 +42,14 @@ import (
 // SECURITY: every CRL is signature-verified against a certificate in the stored
 // CA bundle before it is accepted, and discarded with a warning otherwise.
 // openvox-ca serves this content verbatim to every agent, so an unverified file
-// would be a way to inject arbitrary bytes into every agent's CRL store. The
-// check is always satisfiable because import-ca-cert requires a complete chain:
-// the stored bundle necessarily contains the root, so the root's CRL — the one
-// an agent most needs for chain checking — always has a verifier available.
+// would be a way to inject arbitrary bytes into every agent's CRL store.
+//
+// Whether the check can succeed for a given CRL depends on the stored bundle
+// holding that issuer's certificate, so publishing the root's CRL — the one an
+// agent most needs for chain checking — requires the imported bundle to run all
+// the way up to the root. Nothing enforces that yet, so a partial import shows
+// up as CRLs discarded on every refresh, which crlChainDiscarded counts and the
+// mixin alerts on.
 func (c *CA) upstreamCRLs(ctx context.Context) (crls []*x509.RevocationList, stated bool, err error) {
 	if c.CRLChainFile == "" {
 		return nil, false, nil
