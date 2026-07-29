@@ -409,7 +409,11 @@ var _ = Describe("Export scopes", func() {
 	// Two-block chains: leaf/intermediate first, root last, matching the order
 	// import-ca-cert enforces and the CA stores.
 	const (
+		// Three blocks, not two: with two, "the last certificate" and "the
+		// second certificate" are the same block, so a root scope that returned
+		// blocks[1] would pass. The middle block is what tells them apart.
 		certChain = "-----BEGIN CERTIFICATE-----\nSU5URVJNRURJQVRF\n-----END CERTIFICATE-----\n" +
+			"-----BEGIN CERTIFICATE-----\nTUlERExF\n-----END CERTIFICATE-----\n" +
 			"-----BEGIN CERTIFICATE-----\nUk9PVA==\n-----END CERTIFICATE-----\n"
 		crlChain = "-----BEGIN X509 CRL-----\nT1VSUw==\n-----END X509 CRL-----\n" +
 			"-----BEGIN X509 CRL-----\nVVBTVFJFQU0=\n-----END X509 CRL-----\n"
@@ -466,6 +470,30 @@ var _ = Describe("Export scopes", func() {
 		data := exportWith("root", "")
 		Expect(string(data["ca.crt"])).To(ContainSubstring("Uk9PVA=="))
 		Expect(string(data["ca.crt"])).NotTo(ContainSubstring("SU5URVJNRURJQVRF"))
+		Expect(string(data["ca.crt"])).NotTo(ContainSubstring("TUlERExF"),
+			"root must be the last block, not merely a later one")
+	})
+
+	It("applies the same scoping to a ConfigMap target", func() {
+		// Secret and ConfigMap build their data through different methods.
+		// Asserting only the Secret leaves the ConfigMap free to regress to
+		// whole-chain output with the suite green.
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind:      "ConfigMap",
+			Metadata:  k8sexport.Metadata{Name: "trust", Namespace: "ns1"},
+			Cert:      true,
+			CRL:       true,
+			CertScope: "root",
+			CRLScope:  "chain",
+		}}}
+		Expect(cfg.Validate()).To(Succeed())
+		Expect(k8sexport.New(client, *cfg, src, "", nil).ExportAll(ctx)).To(Succeed())
+
+		cm, err := client.CoreV1().ConfigMaps("ns1").Get(ctx, "trust", metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cm.Data["ca.crt"]).To(ContainSubstring("Uk9PVA=="))
+		Expect(cm.Data["ca.crt"]).NotTo(ContainSubstring("SU5URVJNRURJQVRF"))
+		Expect(cm.Data["ca.crl"]).To(Equal(crlChain))
 	})
 
 	It("is unchanged for a single-block chain, whichever scope is asked for", func() {
