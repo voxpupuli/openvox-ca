@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -39,6 +40,31 @@ import (
 // cleanupInventoryFormat matches the layout the signing path writes and
 // CleanupExpiredCerts parses.
 const cleanupInventoryFormat = "2006-01-02T15:04:05UTC"
+
+// partialPruneBackend wraps a real structured backend, delegating everything
+// and injecting an error after a successful prune — modelling a batched
+// backend (etcd) that durably removed entries and then failed. Per the
+// PruneEntries contract the removed entries are still returned with the
+// error. With blockUntilDeadline set it instead parks until the caller's
+// context expires and returns its error, modelling a prune that consumed the
+// whole time budget — the case the post-prune cleanup context exists for.
+type partialPruneBackend struct {
+	*storage.SQLBackend
+	pruneErr           error
+	blockUntilDeadline bool
+}
+
+func (b *partialPruneBackend) PruneEntries(ctx context.Context, keep func(storage.InventoryEntry) bool, advanceHead func(prev []byte, e storage.InventoryEntry) []byte) ([]storage.InventoryEntry, error) {
+	removed, err := b.SQLBackend.PruneEntries(ctx, keep, advanceHead)
+	if err != nil || len(removed) == 0 {
+		return removed, err
+	}
+	if b.blockUntilDeadline {
+		<-ctx.Done()
+		return removed, ctx.Err()
+	}
+	return removed, b.pruneErr
+}
 
 var _ = Describe("CA CleanupExpiredCerts", func() {
 	var (
@@ -180,6 +206,86 @@ var _ = Describe("CA CleanupExpiredCerts", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(removed).To(Equal(0))
 		Expect(inventoryString()).To(ContainSubstring("/weird-node"))
+	})
+
+	It("cleans up returned entries and reports the count even when the prune errors", func() {
+		// Batched backends (etcd) can durably remove entries and then fail;
+		// PruneInventory returns those entries alongside the error, and the
+		// cleanup must still drop their CRL entries and stored certs — the
+		// inventory no longer names them, so no later run could. Model that
+		// with a backend whose prune succeeds and then reports an error.
+		injected := fmt.Errorf("simulated mid-prune failure")
+		inner, err := storage.NewSQLBackend(storage.SQLConfig{
+			Dialect: storage.SQLitePure,
+			DSN:     "file:" + filepath.Join(tmpDir, "partial-prune.db"),
+		})
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _ = inner.Close() })
+		Expect(inner.EnsureReady(ctx)).To(Succeed())
+		store = storage.NewWithBackend(&partialPruneBackend{SQLBackend: inner, pruneErr: injected},
+			filepath.Join(tmpDir, "partial-private"))
+		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		Expect(store.EnsureDirs(ctx)).To(Succeed())
+		Expect(store.SaveCAKey(ctx, cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(ctx, cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(ctx, cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial(ctx, "0001")).To(Succeed())
+		Expect(store.TouchInventory(ctx)).To(Succeed())
+		Expect(myCA.Init(ctx)).To(Succeed())
+
+		seedCert("expired-node", big.NewInt(0xEE01), time.Now().Add(-3*365*24*time.Hour))
+		Expect(parseStoredCRL(store).RevokedCertificateEntries).To(HaveLen(1))
+
+		removed, err := myCA.CleanupExpiredCerts(ctx, time.Hour)
+		Expect(err).To(MatchError(injected), "the prune error must surface to the caller")
+		Expect(removed).To(Equal(1), "the durably removed entry must still be counted")
+
+		// The cleanup for the returned entry ran despite the error: nothing
+		// is orphaned.
+		Expect(inventoryString()).NotTo(ContainSubstring("/expired-node"))
+		Expect(parseStoredCRL(store).RevokedCertificateEntries).To(BeEmpty(),
+			"the CRL entry must be dropped despite the prune error")
+		Expect(store.HasCert(ctx, "expired-node")).To(BeFalse(),
+			"the stored cert must be deleted despite the prune error")
+	})
+
+	It("still cleans up when the prune exhausts the context deadline", func() {
+		// The deadline case is when a partial prune is most likely, and it is
+		// exactly when the cleanup would be skipped if it shared the prune's
+		// context: this spec fails if the post-prune steps run on the original
+		// (expired) ctx instead of their own surviving one.
+		inner, err := storage.NewSQLBackend(storage.SQLConfig{
+			Dialect: storage.SQLitePure,
+			DSN:     "file:" + filepath.Join(tmpDir, "deadline-prune.db"),
+		})
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _ = inner.Close() })
+		Expect(inner.EnsureReady(ctx)).To(Succeed())
+		store = storage.NewWithBackend(&partialPruneBackend{SQLBackend: inner, blockUntilDeadline: true},
+			filepath.Join(tmpDir, "deadline-private"))
+		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		Expect(store.EnsureDirs(ctx)).To(Succeed())
+		Expect(store.SaveCAKey(ctx, cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(ctx, cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(ctx, cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial(ctx, "0001")).To(Succeed())
+		Expect(store.TouchInventory(ctx)).To(Succeed())
+		Expect(myCA.Init(ctx)).To(Succeed())
+
+		seedCert("expired-node", big.NewInt(0xEE02), time.Now().Add(-3*365*24*time.Hour))
+		Expect(parseStoredCRL(store).RevokedCertificateEntries).To(HaveLen(1))
+
+		shortCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		defer cancel()
+		removed, err := myCA.CleanupExpiredCerts(shortCtx, time.Hour)
+		Expect(err).To(MatchError(context.DeadlineExceeded), "the prune's deadline error must surface")
+		Expect(removed).To(Equal(1))
+
+		Expect(inventoryString()).NotTo(ContainSubstring("/expired-node"))
+		Expect(parseStoredCRL(store).RevokedCertificateEntries).To(BeEmpty(),
+			"the CRL entry must be dropped even though the prune consumed the deadline")
+		Expect(store.HasCert(ctx, "expired-node")).To(BeFalse(),
+			"the stored cert must be deleted even though the prune consumed the deadline")
 	})
 
 	It("preserves a renewed cert under the same subject when an old serial expires", func() {

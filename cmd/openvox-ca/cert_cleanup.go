@@ -65,7 +65,10 @@ func cleanupExpiredOnce(ctx context.Context, c *ca.CA, retain time.Duration) {
 	removed, err := c.CleanupExpiredCerts(ctx, retain)
 	switch {
 	case err != nil:
-		slog.Warn("Expired-certificate cleanup failed", "error", err)
+		// removed can be non-zero here: a batched backend (etcd) may have
+		// durably pruned entries before failing, and the operator needs to
+		// know state changed permanently despite the error.
+		slog.Warn("Expired-certificate cleanup failed", "removed", removed, "error", err)
 	case removed > 0:
 		slog.Info("Expired certificates cleaned up", "removed", removed)
 	default:

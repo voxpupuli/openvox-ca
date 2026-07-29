@@ -172,16 +172,15 @@ func (s *StorageService) InitHMAC(ctx context.Context) error {
 
 // ErrDuplicateSerial is returned by AppendInventory when the entry's serial
 // number already exists in the inventory. SQL backends detect this via their
-// unique index (translated from the dialect-specific driver error); blob
-// backends via an explicit scan performed under the same inventoryMu that
-// already serialises every append within a process.
-//
-// This is NOT a cross-replica guarantee on non-SQL backends: nothing today
-// wraps the whole AppendInventory call in a distributed lock for
-// filesystem/etcd/redis backends (see the blob-fallback HMAC-update comment
-// below, which already documents a similar limitation for that path).
-// Structured (SQL) backends remain the only ones with a true cluster-wide
-// guarantee, via the database's own unique index.
+// unique index (translated from the dialect-specific driver error); the etcd
+// backend via a by-serial marker key whose absence is a condition of the
+// append transaction. Both are true cluster-wide guarantees. The remaining
+// blob backends (filesystem, redis) detect it via an explicit scan performed
+// under the same inventoryMu that already serialises every append within a
+// process — NOT a cross-replica guarantee: nothing wraps the whole
+// AppendInventory call in a distributed lock for them (see the blob-fallback
+// HMAC-update comment below, which documents a similar limitation for that
+// path).
 var ErrDuplicateSerial = errors.New("serial number already exists in inventory")
 
 // AppendInventory adds entry (a single inventory.txt line, without a trailing
@@ -220,7 +219,10 @@ func (s *StorageService) AppendInventoryRecord(ctx context.Context, entry string
 			newHead = func(prev []byte) []byte { return chainInventoryMAC(key, prev, entry) }
 		}
 		if err := store.AppendEntry(ctx, rec, newHead); err != nil {
-			if isUniqueSerialViolation(err) {
+			// The etcd backend already wraps ErrDuplicateSerial itself; SQL
+			// backends surface the dialect's unique-index violation instead
+			// and are translated here.
+			if !errors.Is(err, ErrDuplicateSerial) && isUniqueSerialViolation(err) {
 				return fmt.Errorf("%w: %s", ErrDuplicateSerial, parsed.Serial)
 			}
 			return err
@@ -359,18 +361,24 @@ func (s *StorageService) inventoryEntriesLocked(ctx context.Context) ([]Inventor
 // rewriting the inventory and its integrity head together under the inventory
 // write lock. It returns the removed entries (in issuance order) so the caller
 // can act on them — drop their CRL revocations, invalidate caches, delete the
-// stored cert. When nothing is removed the inventory and head are left
-// untouched and (nil, nil) is returned.
+// stored cert. The returned slice is authoritative even when err is non-nil:
+// any path that has durably removed entries before failing still returns
+// them, so the caller can finish cleaning up after them. A backend may bound
+// how much one call removes (see the PruneEntries contract); deferred matches
+// stay in the inventory for later calls. When nothing is removed the
+// inventory and head are left untouched and (nil, nil) is returned.
 //
 // The current inventory integrity is verified before pruning, so a tampered
 // inventory surfaces ErrInventoryTampered rather than being silently rewritten.
 //
-// Concurrency: appends (AppendInventory) and reads (ReadInventory) take the same
-// inventoryMu, so within a process a prune never interleaves with them. The
-// rewrite is a single Backend.Put on KeyInventory, which structured backends
-// service as an atomic table replacement and blob backends as an atomic file
-// swap; callers needing cross-replica serialisation against revocation should
-// hold the cluster CRL lock around this (see ca.CA.CleanupExpiredCerts).
+// Concurrency: appends (AppendInventory) and reads (ReadInventory) take the
+// same inventoryMu, so within a process a prune never interleaves with them.
+// Structured backends prune through PruneEntries (see the contract in
+// backend.go: SQL in one transaction, etcd in individually-consistent
+// batches); the blob fallback below rewrites the whole inventory with a
+// single Backend.Put, which blob backends service as an atomic file swap.
+// Callers needing cross-replica serialisation against revocation should hold
+// the cluster CRL lock around this (see ca.CA.CleanupExpiredCerts).
 func (s *StorageService) PruneInventory(ctx context.Context, keep func(InventoryEntry) bool) ([]InventoryEntry, error) {
 	s.inventoryMu.Lock()
 	defer s.inventoryMu.Unlock()
@@ -381,22 +389,19 @@ func (s *StorageService) PruneInventory(ctx context.Context, keep func(Inventory
 		}
 	}
 
-	// Structured backends prune rows and rewrite the chained integrity head in a
-	// single transaction, so the two can never be observed out of sync across
-	// replicas (mirroring the atomic AppendEntry path).
+	// Structured backends prune rows and rewrite the chained integrity head
+	// so the two are never observed out of sync across replicas: SQL in a
+	// single transaction, etcd in batches whose every commit is internally
+	// consistent (see the PruneEntries contract in backend.go).
 	if store, ok := asInventoryStore(s.backend); ok {
-		var recomputeHead func(survivors []InventoryEntry) []byte
+		var advanceHead func(prev []byte, e InventoryEntry) []byte
 		if s.hmacKey != nil {
 			key := s.hmacKey
-			recomputeHead = func(survivors []InventoryEntry) []byte {
-				var head []byte
-				for _, e := range survivors {
-					head = chainInventoryMAC(key, head, canonicalInventoryLine(e))
-				}
-				return head
+			advanceHead = func(prev []byte, e InventoryEntry) []byte {
+				return chainInventoryMAC(key, prev, canonicalInventoryLine(e))
 			}
 		}
-		return store.PruneEntries(ctx, keep, recomputeHead)
+		return store.PruneEntries(ctx, keep, advanceHead)
 	}
 
 	// Blob backends: read, filter, and rewrite the whole inventory, then
@@ -432,10 +437,13 @@ func (s *StorageService) PruneInventory(ctx context.Context, keep func(Inventory
 
 	if s.hmacKey != nil {
 		if err := s.updateInventoryHMACLocked(ctx, s.hmacKey); err != nil {
-			// The inventory is already rewritten but the stored head now lags it;
-			// surface the failure so the operator/job can react rather than leave
-			// a mismatch that the next verify would flag as tampering.
-			return nil, fmt.Errorf("updating inventory HMAC after prune: %w", err)
+			// The inventory is already rewritten but the stored head now lags
+			// it; surface the failure so the operator/job can react rather
+			// than leave a mismatch the next verify would flag as tampering.
+			// The entries are durably removed, so return them alongside the
+			// error per this method's contract — the caller's CRL/blob
+			// cleanup must still run for them.
+			return removed, fmt.Errorf("updating inventory HMAC after prune: %w", err)
 		}
 	}
 	return removed, nil

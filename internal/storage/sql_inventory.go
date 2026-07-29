@@ -272,10 +272,11 @@ func (b *SQLBackend) LatestSerialForSubject(ctx context.Context, subject string)
 // PruneEntries removes the rows for which keep returns false and rewrites the
 // integrity head over the survivors in a single transaction, so a concurrent
 // reader on another replica never observes the rows and the chained head out of
-// sync. Survivors keep their original ids (and thus issuance order); only the
-// dropped rows are deleted. The presence-marker row is locked first so this
-// serialises with AppendEntry across replicas, exactly as appends do.
-func (b *SQLBackend) PruneEntries(ctx context.Context, keep func(InventoryEntry) bool, recomputeHead func(survivors []InventoryEntry) []byte) ([]InventoryEntry, error) {
+// sync, and a returned error always means nothing was removed. Survivors keep
+// their original ids (and thus issuance order); only the dropped rows are
+// deleted. The presence-marker row is locked first so this serialises with
+// AppendEntry across replicas, exactly as appends do.
+func (b *SQLBackend) PruneEntries(ctx context.Context, keep func(InventoryEntry) bool, advanceHead func(prev []byte, e InventoryEntry) []byte) ([]InventoryEntry, error) {
 	b.appendMu.Lock()
 	defer b.appendMu.Unlock()
 
@@ -284,7 +285,7 @@ func (b *SQLBackend) PruneEntries(ctx context.Context, keep func(InventoryEntry)
 
 	const maxAttempts = 10
 	for attempt := 0; ; attempt++ {
-		removed, err := b.pruneEntriesOnce(ctx, keep, recomputeHead)
+		removed, err := b.pruneEntriesOnce(ctx, keep, advanceHead)
 		if err == nil {
 			return removed, nil
 		}
@@ -299,7 +300,7 @@ func (b *SQLBackend) PruneEntries(ctx context.Context, keep func(InventoryEntry)
 	}
 }
 
-func (b *SQLBackend) pruneEntriesOnce(ctx context.Context, keep func(InventoryEntry) bool, recomputeHead func(survivors []InventoryEntry) []byte) ([]InventoryEntry, error) {
+func (b *SQLBackend) pruneEntriesOnce(ctx context.Context, keep func(InventoryEntry) bool, advanceHead func(prev []byte, e InventoryEntry) []byte) ([]InventoryEntry, error) {
 	var removed []InventoryEntry
 	err := b.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		removed = nil // reset so a retried transaction does not double-count
@@ -336,10 +337,14 @@ func (b *SQLBackend) pruneEntriesOnce(ctx context.Context, keep func(InventoryEn
 			return err
 		}
 
-		if recomputeHead != nil {
+		if advanceHead != nil {
+			var head []byte
+			for _, e := range survivors {
+				head = advanceHead(head, e)
+			}
 			return b.upsert(ctx, tx, &sqlBlob{
 				Key:        KeyInventoryHMAC,
-				Data:       recomputeHead(survivors),
+				Data:       head,
 				Kind:       int(BlobPrivate),
 				ModifiedAt: time.Now(),
 			})

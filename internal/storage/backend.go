@@ -172,9 +172,17 @@ type InventoryEntry struct {
 // Certificate index states recorded in CertRecord.State. Pending CSRs are not
 // issued certificates and never appear in the index; the API layer derives the
 // "requested" state from the csr/ namespace instead.
+//
+// CertStateUnknown is reported (never stored as a target state) by a backend
+// that cannot maintain per-serial state for a record — today only the etcd
+// backend for serials that appeared more than once in a converted legacy
+// blob, which its one-to-one by-serial index cannot address. Readers must
+// derive such a record's real state from the signed CRL (the authoritative
+// artefact) rather than trust the index.
 const (
 	CertStateSigned  = "signed"
 	CertStateRevoked = "revoked"
+	CertStateUnknown = "unknown"
 )
 
 // CertProjection carries the display fields denormalised from a signed
@@ -200,7 +208,10 @@ type CertProjection struct {
 // canonical inventory fields, the denormalised display projection, and the one
 // mutable fact — revocation. State/RevokedAt are a projection of the signed
 // CRL (the source of truth), written alongside CRL updates and rebuildable
-// from it, exactly as the projection fields relate to the PEM.
+// from it, exactly as the projection fields relate to the PEM. The
+// rebuildability guarantee is conditional on the backend being able to
+// address the record's serial one-to-one; when it cannot, State is reported
+// as CertStateUnknown and the reader consults the CRL directly.
 //
 // Note the integrity hash chain covers only the canonical InventoryEntry
 // fields (via canonicalInventoryLine); the projection columns are not chained.
@@ -244,6 +255,13 @@ type CertIndex interface {
 	// original revocation time. A serial with no matching row is a no-op, not
 	// an error (the CRL may legitimately reference certs the index no longer
 	// tracks).
+	//
+	// SetRevoked, ClearRevoked, and SetProjection may also decline a write —
+	// as a logged no-op, not an error — when the implementation cannot
+	// unambiguously identify the bearing rows (the etcd backend's one-to-one
+	// by-serial index cannot address a serial duplicated in a converted
+	// legacy blob). Statuses reports such records with CertStateUnknown so
+	// callers know to derive their state from the CRL instead.
 	SetRevoked(ctx context.Context, serial string, at time.Time) error
 
 	// ClearRevoked returns every index row bearing serial to the signed
@@ -307,13 +325,25 @@ type InventoryStore interface {
 	LatestSerialForSubject(ctx context.Context, subject string) (string, error)
 
 	// PruneEntries removes every entry for which keep returns false and
-	// recomputes the integrity head over the survivors, atomically in one
-	// transaction so the rows and the chained head can never be observed out of
-	// sync by another replica. recomputeHead folds the hash chain over the
-	// surviving entries in issuance order; a nil recomputeHead means integrity is
-	// disabled and the stored head is left untouched. It returns the removed
-	// entries in issuance order, or an empty slice when nothing matched.
-	PruneEntries(ctx context.Context, keep func(InventoryEntry) bool, recomputeHead func(survivors []InventoryEntry) []byte) ([]InventoryEntry, error)
+	// rewrites the integrity head over the survivors. advanceHead advances the
+	// hash chain by one entry from the previous head (nil for the first
+	// entry); a nil advanceHead means integrity is disabled and the stored
+	// head is left untouched.
+	//
+	// Consistency contract: the stored entries and the stored head must never
+	// be observable out of sync by another replica. Implementations need not
+	// perform the whole prune in one transaction — the etcd backend commits
+	// it in batches, each of which writes a head covering exactly the entries
+	// that remain after it — so a prune may partially complete on conflict or
+	// error, and an implementation may deliberately bound how much one call
+	// removes (etcd caps a call's batches so a huge backlog cannot blow the
+	// caller's time budget; deferred matches stay present and consistent for
+	// later calls). Whatever happens, the returned slice must contain every
+	// entry actually removed (in issuance order), including alongside a
+	// non-nil error: callers drive CRL entry removal and blob cleanup from
+	// it, and an entry that was durably removed but not returned can never be
+	// rediscovered. An empty slice with a nil error means nothing matched.
+	PruneEntries(ctx context.Context, keep func(InventoryEntry) bool, advanceHead func(prev []byte, e InventoryEntry) []byte) ([]InventoryEntry, error)
 }
 
 // asInventoryStore probes b for the InventoryStore capability, unwrapping

@@ -35,8 +35,9 @@ an internal and on-disk-compatibility concern only.
 ## Goal
 
 Let backends that can do better store the inventory as **structured records**
-(e.g. a SQL table) while preserving exact behaviour for backends that keep the
-blob (filesystem, etcd, redis/valkey). This is opt-in per backend.
+(e.g. a SQL table, or one etcd key per entry) while preserving exact behaviour
+for backends that keep the blob (filesystem, redis/valkey). This is opt-in per
+backend.
 
 ## Design
 
@@ -183,15 +184,107 @@ Design rules that keep the index honest:
   `cert/<subject>` blob still exists, and only their latest issuance —
   matching what the scan path would have listed.
 
+### The etcd decomposition
+
+The etcd backend implements both capabilities too (issue #138), with a key
+layout that plays to etcd's strengths — a sorted keyspace and multi-key
+compare-then-op transactions:
+
+```text
+<prefix>/inventory/entries/<seq>       one JSON CertRecord per issuance;
+                                       <seq> is zero-padded so a range scan
+                                       returns issuance order
+<prefix>/inventory/seq                 last allocated sequence number; doubles
+                                       as the mutation fence (below)
+<prefix>/inventory/by-serial/<serial>  serial → seq; existence is the atomic
+                                       duplicate-serial guard
+<prefix>/inventory/by-subject/<subj>   subject → latest serial (O(1) lookup)
+<prefix>/inventory/data                presence marker for the KeyInventory
+                                       logical key (empty payload)
+<prefix>/inventory/hmac                chain head, unchanged logical key
+```
+
+Rules that keep the decomposed structure coherent:
+
+- **One fence, guarded everywhere.** etcd transactions cannot read-compute-
+  write, so `chainInventoryMAC` runs in Go between a read and a guarded
+  commit. Every mutating transaction — append, prune batch, import batch —
+  both *guards on* and *re-puts* `inventory/seq`, so any interleaved writer
+  (same or another replica) invalidates the guard and forces a re-read. This
+  is the same optimistic ModRevision-retry shape the blob append already used.
+- **Appends are O(1)** — six puts guarded on the fence plus
+  `CreateRevision(by-serial/<serial>) == 0`, which makes duplicate-serial
+  rejection atomic cluster-wide (previously a SQL-only guarantee).
+- **Bulk rewrites are batched; prune commits are individually consistent.**
+  Prunes and imports larger than one transaction (bounded well under etcd's
+  default `--max-txn-ops` of 128) are split into batches. Each *prune* batch
+  writes a head covering exactly the entries that remain after it, so a
+  concurrent verifier never sees entries and head out of sync and a crash
+  mid-prune leaves a valid, partially-pruned inventory rather than a spurious
+  tamper alarm. *Import* batches carry no head at all — the head is left for
+  `RebuildInventoryHMAC` (migration) or dropped in the final commit (legacy
+  conversion) — which is exactly why the legacy blob stays authoritative
+  until the import's final commit and why the marker-guard/resume machinery
+  exists. Because a batched prune can partially complete, `PruneEntries`
+  returns every entry actually removed — accumulated across batches and
+  retries, even alongside an error — so `CleanupExpiredCerts` can always
+  finish the CRL and blob cleanup for what was deleted (see the contract in
+  `backend.go`). Prune batches run newest-first, which keeps the intermediate
+  heads cheap (each is a cached prefix fold over the untouched older entries
+  resumed across the survivor tail), and one call removes at most a bounded
+  number of batches so a huge backlog cannot blow the caller's lock budget —
+  deferred matches stay present and consistent for later runs.
+- **Legacy blobs are decomposed in place.** `EnsureReady` detects a non-empty
+  pre-decomposition `inventory/data` blob, takes a distributed lock
+  (`inventory-decompose`), verifies the blob against its stored whole-blob
+  HMAC (the key is a backend blob, so it is available), imports the lines
+  into entry keys, and empties the marker only in the final commit.
+  Verification is fail-closed: a mismatch — or a stored HMAC that cannot be
+  verified because the key is missing or malformed — fails startup with
+  `ErrInventoryTampered`, exactly as the pre-decomposition code would have;
+  the operator acknowledges a lost baseline by deleting the stored
+  `inventory/hmac` key. The verified HMAC is deleted in the same import — it
+  is not a chain head, so it cannot carry over — and the next verification
+  re-baselines from the imported entries; only the import window itself is
+  uncovered. A CA upgraded while its inventory is *empty* has no import to
+  drop the head as part of, so `EnsureReady` handles that case separately:
+  when zero entries exist and the stored head verifies as the whole-blob MAC
+  of an empty inventory, it is deleted so the first verification re-baselines
+  cleanly (any other head over zero entries is left for verification to
+  flag). Because the blob stays authoritative until the import's final
+  commit, an interrupted import is detected on the next start (the partial
+  entries are the import-written prefix of the blob) and redone from the
+  intact blob; entries that are *not* such a prefix mean a mixed-version
+  cluster wrote both forms, which is refused with an explicit error rather
+  than guessed at. Duplicate serials in the legacy blob — possible, since
+  blob backends never had a cluster-wide uniqueness guarantee — are imported
+  verbatim with a warning; their by-serial keys carry an ambiguity sentinel
+  that keeps the serial reserved against reissue but makes certificate-index
+  writes for it explicit no-ops, since a one-to-one index cannot say which
+  bearer such a write is meant for. `Statuses` reports those records with
+  `CertStateUnknown`, the statuses handler derives their real state from the
+  signed CRL, and the startup repair pass skips them (they can never
+  converge). All replicas must still upgrade together:
+  an old-version writer appending to the blob mid-import is detected via the
+  marker guard and the import restarts, but the race only closes once the old
+  writers are gone.
+- **Certificate-index writes stay off the chain.** `SetRevoked` /
+  `ClearRevoked` / `SetProjection` rewrite a single entry key guarded on its
+  own ModRevision (the mutable fields are not chain input), so index repair
+  cannot fork the integrity head.
+
 ## Scope
 
 - **SQL backend** (sqlite/postgres/mysql) implements `InventoryStore` with a
   dedicated `puppet_ca_inventory` table indexed on `subject` (and a unique index
   on `serial`, since serials never repeat), plus the render/parse shim. This is
   where decomposition pays off.
-- **Filesystem, etcd, redis/valkey keep the blob.** They do not implement the
+- **etcd** implements `InventoryStore` and `CertIndex` with per-entry keys —
+  see [The etcd decomposition](#the-etcd-decomposition) above.
+- **Filesystem and redis/valkey keep the blob.** They do not implement the
   interface; the type assertion fails and they behave exactly as before. Adding
-  the capability to etcd/redis later is possible but not currently motivated.
+  the capability to redis later is possible (issue #139) but not currently
+  motivated.
 - **Wrapper backends unwrap to their base.** The probe is `asInventoryStore`,
   not a bare `s.backend.(InventoryStore)`: it sees through wrappers such as
   `OverlayBackend` (the `ca_cert_file`/`ca_key_file` local-override wrapper) via
@@ -219,3 +312,9 @@ Each phase is a separate commit.
    backends: latest-wins lookups, chain tamper detection (modify / insert /
    delete), byte-identical render, and a filesystem ⇄ sqlite migration
    round-trip that verifies integrity on both sides.
+5. **Certificate index** (issue #137, a later extension). Extend the SQL
+   inventory table with the projection/state columns, define `CertIndex`,
+   serve `certificate_statuses` from it, and add the startup repair pass.
+6. **etcd decomposition** (issue #138, a later extension). Implement
+   `InventoryStore` and `CertIndex` on the etcd backend with per-entry keys,
+   including the in-place legacy blob conversion described above.
