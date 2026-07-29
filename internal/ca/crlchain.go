@@ -128,11 +128,17 @@ func (c *CA) crlChainLocked(ctx context.Context, ourCRL *x509.RevocationList, st
 	// from it is meant to disappear and the stored blob's own upstream blocks
 	// are not carried across.
 	if c.CRLChainFile != "" {
-		upstream, err := c.upstreamCRLs(ctx)
+		upstream, stated, err := c.upstreamCRLs(ctx)
 		if err != nil {
 			return nil, err
 		}
-		return encodeCRLChain(append(chain, upstream...)), nil
+		// Only a file this process could actually read is authoritative. An
+		// absent one makes no statement, so fall through and preserve whatever
+		// is already published — see upstreamCRLs for why the distinction
+		// matters on this path in particular.
+		if stated {
+			return encodeCRLChain(append(chain, upstream...)), nil
+		}
 	}
 
 	stored, err := decodeCRLChain(storedBlob)
