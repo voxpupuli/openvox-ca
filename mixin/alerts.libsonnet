@@ -130,7 +130,7 @@
               puppetca_crl_chain_next_update_timestamp_seconds{%(selector)s} - time() > 0
             ||| % {
               selector: $._config.puppetCASelector,
-              warn: $._config.crlExpiryWarningSeconds,
+              warn: $._config.upstreamCRLExpiryWarningSeconds,
             },
             'for': $._config.expiryFor,
             labels: { severity: 'warning' } + $._config.alertLabels,
@@ -147,6 +147,30 @@
             annotations: {
               summary: 'An upstream CRL published by the Puppet CA has expired.',
               description: 'The CRL issued by {{ $labels.issuer }} and republished by {{ $labels.instance }} is past its NextUpdate. Agents using the default certificate_revocation = chain will fail verification against the whole chain. Refresh crl_chain_file from the issuing CA.',
+            },
+          },
+          {
+            alert: 'PuppetCAUpstreamCRLDiscarded',
+            // The chain shrinking is not visible in the expiry series above:
+            // a discarded CRL simply has no series at all. This is the only
+            // signal that the published chain is smaller than crl_chain_file
+            // says it should be.
+            expr: 'increase(puppetca_crl_chain_discarded_total{%(selector)s}[1h]) > 0' % { selector: $._config.puppetCASelector },
+            'for': '15m',
+            labels: { severity: 'warning' } + $._config.alertLabels,
+            annotations: {
+              summary: 'The Puppet CA is discarding CRLs from crl_chain_file.',
+              description: '{{ $labels.instance }} dropped a CRL from crl_chain_file because no certificate in its CA bundle signed it, so the published chain is smaller than the file says. Check that the file holds CRLs from this CA\'s own ancestors and that the bundle is complete.',
+            },
+          },
+          {
+            alert: 'PuppetCAUpstreamCRLRefreshFailing',
+            expr: 'increase(puppetca_crl_chain_refresh_failures_total{%(selector)s}[1h]) > 0' % { selector: $._config.puppetCASelector },
+            'for': '15m',
+            labels: { severity: 'warning' } + $._config.alertLabels,
+            annotations: {
+              summary: 'The Puppet CA cannot refresh its upstream CRL chain.',
+              description: 'Refreshing crl_chain_file on {{ $labels.instance }} is failing, so the published ancestor CRLs are ageing with nothing renewing them. The existing chain is left in place; check the file is readable and parseable.',
             },
           },
         ],

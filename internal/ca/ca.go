@@ -197,6 +197,20 @@ type CA struct {
 	// via the metrics exporter (puppetca_crl_sync_failures_total) for alerting.
 	crlSyncFailures atomic.Uint64
 
+	// crlChainFailures counts refresh passes that could not publish the
+	// upstream chain, and crlChainDiscarded counts CRLs dropped from
+	// crl_chain_file because nothing in the CA bundle signed them.
+	//
+	// Two counters because they are two different questions. A failure leaves
+	// the published chain alone and retries. A discard is the case where the
+	// chain quietly *shrinks*: the file is authoritative, so a CRL the
+	// operator put there and this CA would not accept simply stops being
+	// published — and until now that was one warning per cycle and nothing
+	// else. Surfaced as puppetca_crl_chain_refresh_failures_total and
+	// puppetca_crl_chain_discarded_total.
+	crlChainFailures  atomic.Uint64
+	crlChainDiscarded atomic.Uint64
+
 	// CRLChainFile is a PEM bundle of upstream CRLs merged into the published
 	// chain. Empty disables the feature, which is the whole of it for a CA that
 	// issues its own root. Every CRL in the file is signature-verified against
@@ -242,6 +256,16 @@ func (c *CA) CRLUpdateFailures() uint64 {
 func (c *CA) CRLSyncFailures() uint64 {
 	return c.crlSyncFailures.Load()
 }
+
+// CRLChainFailures returns how many upstream-chain refresh passes failed.
+// Surfaced as puppetca_crl_chain_refresh_failures_total.
+func (c *CA) CRLChainFailures() uint64 { return c.crlChainFailures.Load() }
+
+// CRLChainDiscarded returns how many CRLs have been dropped from
+// crl_chain_file because no certificate in the CA bundle signed them. Surfaced
+// as puppetca_crl_chain_discarded_total; a rising value means the published
+// chain is smaller than the operator's file says it should be.
+func (c *CA) CRLChainDiscarded() uint64 { return c.crlChainDiscarded.Load() }
 
 // CRLUpdated returns a channel that receives a value each time the CRL is
 // re-signed (revoke, reissue, background refresh, or expired-cert cleanup).

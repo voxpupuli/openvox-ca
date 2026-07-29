@@ -215,7 +215,7 @@ var _ = Describe("crl_chain_file", func() {
 			myCA.CRLChainFile = writeChainFile(upsCRL)
 			Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
 
-			statuses, err := myCA.UpstreamCRLStatuses(ctx)
+			statuses, err := myCA.UpstreamCRLStatuses(mustGetCRL(store, ctx))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(statuses).To(HaveLen(1))
 			Expect(statuses[0].Issuer).To(ContainSubstring("Upstream Root CA"))
@@ -223,7 +223,7 @@ var _ = Describe("crl_chain_file", func() {
 		})
 
 		It("is empty on a CA with no upstream", func() {
-			statuses, err := myCA.UpstreamCRLStatuses(ctx)
+			statuses, err := myCA.UpstreamCRLStatuses(mustGetCRL(store, ctx))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(statuses).To(BeEmpty())
 		})

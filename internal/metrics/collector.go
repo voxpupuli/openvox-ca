@@ -81,8 +81,10 @@ type Collector struct {
 	crlThisUpdate *prometheus.Desc
 	crlNextUpdate *prometheus.Desc
 
-	crlChainNextUpdate *prometheus.Desc
-	crlRevoked         *prometheus.Desc
+	crlChainNextUpdate      *prometheus.Desc
+	crlChainRefreshFailures *prometheus.Desc
+	crlChainDiscarded       *prometheus.Desc
+	crlRevoked              *prometheus.Desc
 
 	leafInfo       *prometheus.Desc
 	leafNotBefore  *prometheus.Desc
@@ -164,6 +166,18 @@ func NewCollector(c *ca.CA) *Collector {
 				"from puppetca_crl_next_update_timestamp_seconds: an expiring upstream CRL is fixed at "+
 				"the parent CA, not here, so it needs its own alert and its own runbook.",
 			[]string{"issuer"}, nil),
+		crlChainRefreshFailures: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "crl_chain", "refresh_failures_total"),
+			"Total crl_chain_file refresh passes that failed. The published chain is left alone and "+
+				"the next cycle retries, so alert on a persistent rise: the ancestor CRLs agents "+
+				"need for full-chain revocation checking are then ageing with nothing renewing them.",
+			nil, nil),
+		crlChainDiscarded: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "crl_chain", "discarded_total"),
+			"Total CRLs dropped from crl_chain_file because no certificate in the CA bundle signed "+
+				"them. The file is authoritative, so a discard means the published chain is smaller "+
+				"than the operator's file says it should be — the one case where it shrinks silently.",
+			nil, nil),
 		crlRevoked: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "crl", "revoked_certificates"),
 			"Number of certificates currently listed in the CRL.",
@@ -208,6 +222,8 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.crlThisUpdate
 	ch <- c.crlNextUpdate
 	ch <- c.crlChainNextUpdate
+	ch <- c.crlChainRefreshFailures
+	ch <- c.crlChainDiscarded
 	ch <- c.crlRevoked
 	ch <- c.leafInfo
 	ch <- c.leafNotBefore
@@ -244,6 +260,10 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		num, _ := new(big.Float).SetInt(cached).Float64()
 		ch <- prometheus.MustNewConstMetric(c.crlCachedNumber, prometheus.GaugeValue, num)
 	}
+	ch <- prometheus.MustNewConstMetric(c.crlChainRefreshFailures, prometheus.CounterValue,
+		float64(c.ca.CRLChainFailures()))
+	ch <- prometheus.MustNewConstMetric(c.crlChainDiscarded, prometheus.CounterValue,
+		float64(c.ca.CRLChainDiscarded()))
 
 	if err != nil {
 		slog.Warn("Prometheus CA metrics scrape failed", "error", err)
@@ -363,7 +383,9 @@ func (c *Collector) gather(ctx context.Context) (snapshot, error) {
 			for _, entry := range crl.RevokedCertificateEntries {
 				revoked[serialHex(entry.SerialNumber)] = true
 			}
-			if upstream, uerr := c.ca.UpstreamCRLStatuses(ctx); uerr == nil {
+			// From the blob already in hand, not a second read: see the
+			// "parse the CRL once" note above.
+			if upstream, uerr := c.ca.UpstreamCRLStatuses(crlPEM); uerr == nil {
 				snap.upstreamCRLs = upstream
 			} else {
 				slog.Warn("Prometheus exporter: failed to read the upstream CRL chain", "error", uerr)
