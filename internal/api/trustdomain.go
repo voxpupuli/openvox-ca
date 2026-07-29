@@ -98,6 +98,22 @@ func OwnTrustDomain(caCert *x509.Certificate, adminCNs map[string]bool, ppCliAut
 	}
 }
 
+// NewTrustDomain builds a named domain for a foreign client issuer: certificates
+// verifying against roots are attributed here, with adminCNs as this domain's
+// administrators and ppCliAuth deciding whether its issuer may stamp admins.
+//
+// A constructor rather than a struct literal because the admin set is guarded;
+// see TrustDomain.admins.
+func NewTrustDomain(name string, roots *x509.CertPool, anchors []*x509.Certificate, adminCNs map[string]bool, ppCliAuth bool) TrustDomain {
+	return TrustDomain{
+		Name:      name,
+		Roots:     roots,
+		Anchors:   anchors,
+		admins:    newAdminSet(adminCNs),
+		PpCliAuth: ppCliAuth,
+	}
+}
+
 // adminSet is a domain's admin CNs, guarded so a reload can replace them while
 // the middleware is reading them.
 type adminSet struct {
