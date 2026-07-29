@@ -19,6 +19,7 @@ package ca
 
 import (
 	"bytes"
+	"context"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
@@ -98,14 +99,18 @@ func encodeCRLChain(crls []*x509.RevocationList) []byte {
 }
 
 // crlChainLocked assembles the blob to store: this CA's freshly signed CRL
-// first, followed by every upstream CRL already present, in their original
-// order.
+// first, followed by the upstream CRLs.
 //
-// Our CRL leads because readStoredCRL takes block 0, and
-// because it mirrors the certificate bundle's nearest-first convention. Every
-// block that is not ours is carried across, because an ancestor's CRL cannot be
-// regenerated here: dropping one is unrecoverable, while keeping one costs a
-// wasted block at worst.
+// Our CRL leads because readStoredCRL and loadCRLCache both take block 0, and
+// because it mirrors the certificate bundle's nearest-first convention.
+//
+// Where the upstream blocks come from depends on configuration. With
+// crl_chain_file set, that file is authoritative: it is the operator's
+// declarative statement of which ancestor CRLs to publish, refreshed by
+// whatever mechanism they already have, so a CRL dropped from the file is meant
+// to disappear. Without it, every stored block that is not ours is carried
+// across — an ancestor's CRL cannot be regenerated here, so dropping one is
+// unrecoverable while keeping one costs a wasted block at worst.
 //
 // storedBlob is the blob readStoredCRL already read, not a fresh fetch. It used
 // to fetch its own copy, which cost a second backend round trip inside the
@@ -115,8 +120,20 @@ func encodeCRLChain(crls []*x509.RevocationList) []byte {
 // does today — bootstrap and import write through Storage.UpdateCRL directly.
 //
 // c.mu must be held by the caller.
-func (c *CA) crlChainLocked(ourCRL *x509.RevocationList, storedBlob []byte) ([]byte, error) {
+func (c *CA) crlChainLocked(ctx context.Context, ourCRL *x509.RevocationList, storedBlob []byte) ([]byte, error) {
 	chain := []*x509.RevocationList{ourCRL}
+
+	// With crl_chain_file set, the file is authoritative: it is the operator's
+	// declarative statement of which ancestor CRLs to publish, so a CRL dropped
+	// from it is meant to disappear and the stored blob's own upstream blocks
+	// are not carried across.
+	if c.CRLChainFile != "" {
+		upstream, err := c.upstreamCRLs(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return encodeCRLChain(append(chain, upstream...)), nil
+	}
 
 	stored, err := decodeCRLChain(storedBlob)
 	if err != nil {

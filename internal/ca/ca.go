@@ -197,6 +197,12 @@ type CA struct {
 	// via the metrics exporter (puppetca_crl_sync_failures_total) for alerting.
 	crlSyncFailures atomic.Uint64
 
+	// CRLChainFile is a PEM bundle of upstream CRLs merged into the published
+	// chain. Empty disables the feature, which is the whole of it for a CA that
+	// issues its own root. Every CRL in the file is signature-verified against
+	// the stored CA bundle before it is published — see upstreamCRLs.
+	CRLChainFile string
+
 	// crlNotify carries a coalesced signal each time the CRL is re-signed (see
 	// signCRLLocked). It is buffered to depth 1 and written non-blockingly, so a
 	// burst of revocations collapses to a single pending notification and an

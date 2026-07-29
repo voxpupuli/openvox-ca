@@ -88,7 +88,7 @@ func (c *CA) signCRLLocked(ctx context.Context, prev *storedCRL, revoked []x509.
 	// CRLs an intermediate CA must publish for agents to do full-chain
 	// revocation checking (Puppet's default). On a CA that issues its own root
 	// there is nothing upstream and this is byte-for-byte what it was.
-	newCRLPEM, err := c.crlChainLocked(parsedCRL, prevBlob)
+	newCRLPEM, err := c.crlChainLocked(ctx, parsedCRL, prevBlob)
 	if err != nil {
 		c.crlUpdateFailures.Add(1)
 		return err
