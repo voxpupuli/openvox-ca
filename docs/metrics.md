@@ -118,6 +118,16 @@ fix. On an import-only deployment, read
 current one, or configure [`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain)
 so it stays current by itself".
 
+### Client trust domains
+
+| Metric | Description |
+| --- | --- |
+| `puppetca_client_crl_usable` | 1 when a `client_ca` trust domain has at least one currently valid CRL, 0 otherwise, labelled by `client_ca`. Only present when `client_ca` is configured. **Alert on 0**: under `client_revocation_policy=require` it rejects every client of that issuer, and the first symptom is otherwise an agent-side 403 whose cause is three layers away. |
+
+Emitted only when [`client_ca`](configuration.md#trusting-client-certificates-from-another-ca) is
+configured. A foreign issuer's CRLs are not the chain above: they come from that
+issuer's own `crl_file`, and this CA neither issues nor republishes them.
+
 ### Self-provisioned serving certificate
 
 Always exported, so a dashboard or alert can select them whether or not

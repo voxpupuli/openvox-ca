@@ -242,6 +242,26 @@
         ],
       },
       {
+        // client_revocation_policy=require turns "no usable CRL" into a
+        // rejection of every client of that domain, and the operator's first
+        // symptom is otherwise an agent-side 403 whose cause is three layers
+        // away. Critical rather than warning for that reason: it is an
+        // authentication outage scoped to one issuer, not a degradation.
+        name: 'openvox-ca-client-crl',
+        rules: [
+          {
+            alert: 'PuppetCAClientCRLUnusable',
+            expr: 'puppetca_client_crl_usable{%(selector)s} == 0' % { selector: $._config.puppetCASelector },
+            'for': $._config.expiryFor,
+            labels: { severity: 'critical' } + $._config.alertLabels,
+            annotations: {
+              summary: 'A Puppet CA client trust domain has no usable CRL.',
+              description: 'client_ca {{ $labels.client_ca }} on {{ $labels.instance }} has no currently valid CRL — every CRL expired, or every CRL was discarded as unverifiable. Under client_revocation_policy=require every client of that issuer is now rejected. Refresh its crl_file from the issuing CA.',
+            },
+          },
+        ],
+      },
+      {
         name: 'openvox-ca-leaf-certificates',
         rules: [
           {

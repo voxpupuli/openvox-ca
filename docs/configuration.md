@@ -177,6 +177,7 @@ The CA key passphrase can also be provided via `PUPPET_CA_KEY_PASSPHRASE` (env v
 | Config key | Environment variable |
 | --- | --- |
 | `crl_chain_file` | `PUPPET_CA_CRL_CHAIN_FILE` |
+| `client_revocation_policy` | `PUPPET_CA_CLIENT_REVOCATION_POLICY` |
 | `tls_self_provision_renew_before_sec` | `PUPPET_CA_TLS_SELF_PROVISION_RENEW_BEFORE_SEC` |
 | `tls_self_provision_encrypt_key` | `PUPPET_CA_TLS_SELF_PROVISION_ENCRYPT_KEY` |
 | `tls_self_provision_revoke_after_sec` | `PUPPET_CA_TLS_SELF_PROVISION_REVOKE_AFTER_SEC` |
@@ -583,6 +584,111 @@ configured but has never been opened.
 > replica is running a build with chain preservation *before* configuring
 > `crl_chain_file`. Preservation is a no-op on a single-CRL deployment, so that
 > ordering costs nothing.
+
+## Trusting client certificates from another CA
+
+By default openvox-ca authenticates exactly one set of clients: the ones it
+issued. `client_ca` adds others.
+
+This is for the topology where the servers and operators administering this CA
+hold certificates from a *different* CA — typically a sibling intermediate under
+a shared root, one issuing agent certificates and one issuing server
+certificates. Without it, those administrators cannot authenticate at all.
+
+**Nothing below applies unless `client_ca` is set.** With it absent there is one
+trust domain, it is ours, and admin is `puppet_server` plus `pp_cli_auth`
+exactly as it has always been.
+
+```yaml
+client_ca:
+  - name: server-ca
+    file: /etc/openvox-ca/server-ca.pem          # anchors for THIS entry only
+    crl_file: /etc/openvox-ca/server-ca-crls.pem # CRLs for THIS entry only
+    admin_cns:
+      - openvox-server.example.com
+    allow_pp_cli_auth: false
+client_revocation_policy: require                # require | check | skip
+```
+
+### Anchor on the issuing CA, not the root
+
+`file` should contain the **issuing** CA, not the root above it.
+
+A trust anchor need not be self-signed. Anchoring on an intermediate accepts
+what that intermediate issued and nothing else — so two sibling CAs under a
+shared root stay separate, even when a client presents the shared root and the
+sibling CA in its own chain. Putting the root there instead silently extends
+this entry's authority, **including its `admin_cns`**, to every intermediate
+that root has issued or ever will.
+
+openvox-ca warns at startup when an entry's anchor is self-signed, naming the
+entry and the certificate. It warns rather than refuses, because anchoring on a
+root is legitimate when the root really is the intended boundary — but it is the
+natural mistake, since "the CA bundle" usually means the whole chain.
+
+### A name means something only within its issuer's namespace
+
+Every CA has its own namespace of names it has signed, and a name means nothing
+outside the one it was issued in. So:
+
+| Grant | Our own CA | A `client_ca` entry |
+| --- | --- | --- |
+| Admin CNs | `puppet_server` / `puppet_server_file` — unchanged | that entry's `admin_cns` |
+| `pp_cli_auth` | honoured unless `no_pp_cli_auth` — unchanged | honoured only if that entry sets `allow_pp_cli_auth: true` |
+
+Both foreign grants default to off, so adding an entry authenticates an issuer
+without granting it anything.
+
+`allow_pp_cli_auth` **delegates admin admission to that CA**: every certificate
+it chooses to stamp with the extension is an administrator here. For a Server CA
+under the same operator's control that is correct, and is how the Puppet CA CLI
+authenticates upstream. For a CA you do not control it is a full delegation.
+Enabling it emits a startup warning naming the issuer.
+
+Two operations remain **own-CA only** regardless of any entry, because they act
+on this CA's own namespace: renewing a certificate (`POST /certificate_renewal`)
+and the self-match on `GET /certificate_request/{subject}`. A foreign
+certificate named `agent1.example.com` is not our `agent1.example.com`.
+
+### Revocation
+
+`client_revocation_policy` governs foreign issuers only; our own clients are
+always checked against our own CRL.
+
+| Policy | Behaviour |
+| --- | --- |
+| `require` (default) | A client whose issuer has no currently valid CRL is rejected |
+| `check` | Verify against whatever CRLs are loaded; allow where an issuer has none |
+| `skip` | No revocation checking for foreign issuers. **Unsafe** |
+
+Checking covers the **whole verified chain**, not just the leaf: a sibling CA
+revoked by the shared root must not go on authenticating its leaves. An expired
+CRL counts as absent, so `require` does not quietly decay into `skip`.
+
+Every CRL in `crl_file` is signature-verified against an anchor in the same
+entry before it is used, and one carrying no Authority Key Identifier is
+discarded. Without verification, a writable `crl_file` would be a way to
+*clear* revocations, not merely add them.
+
+> **`crl_file` does not cover the CA named in the same block.** The trust anchor
+> is never revocation-checked — it is trusted by configuration, not by anything
+> it presents. Revoking a trusted domain is an operator action: remove or
+> replace the `client_ca` entry. `crl_file` covers what that CA *issued*.
+
+`crl_file` is re-read on every maintenance cycle. **`file` is not**: anchors are
+read once at startup, because a half-applied anchor reload locks out every
+client of a domain, where a half-applied CRL reload costs at most a stale
+revocation. To rotate an anchor, add the new one as a second `client_ca` entry,
+roll the fleet, then remove the old entry and roll again.
+
+`puppetca_client_crl_usable{client_ca}` reports whether a domain has usable
+revocation material. **Alert on it**: under `require` a `0` rejects every client
+of that issuer, and the first symptom is otherwise an agent-side 403.
+
+> Not to be confused with [`crl_chain_file`](#publishing-an-upstream-crl-chain),
+> which points the other way: that carries this CA's own *ancestors'* CRLs and is
+> published to agents. `client_ca[].crl_file` is inbound, used only by the
+> authorisation middleware, and never served.
 
 ## Autosigning
 
