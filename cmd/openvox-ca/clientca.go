@@ -111,13 +111,23 @@ func buildTrustDomains(cfg *serverConfig, ownCert *x509.Certificate, adminCNs ma
 				"client_ca", entry.Name)
 		}
 
-		domains = append(domains, api.TrustDomain{
-			Name:      entry.Name,
-			Roots:     pool,
-			Anchors:   anchors,
-			AdminCNs:  admins,
-			PpCliAuth: entry.AllowPpCliAuth,
-		})
+		domain := api.NewForeignTrustDomain(entry.Name, pool, anchors, admins, entry.AllowPpCliAuth)
+
+		// Load once here, so a crl_file that cannot be read or parsed refuses
+		// startup rather than starting a server that rejects every client of
+		// this domain under require. The anchor bundle beside it already fails
+		// closed; there is no reason for the file that decides revocation to be
+		// more forgiving than the one that decides trust. Later reloads are
+		// best-effort by design — see refreshClientCRLs — because by then a
+		// working set exists and keeping it beats discarding it.
+		crls, err := loadDomainCRLs(entry, anchors)
+		if err != nil {
+			return nil, fmt.Errorf("client_ca %q: %w", entry.Name, err)
+		}
+		domain.SetRevocationSet(api.NewClientCRLSet(crls))
+		warnIfNoUsableCRLs(entry, cfg.Policy(), crls)
+
+		domains = append(domains, domain)
 	}
 	return domains, nil
 }
@@ -140,6 +150,38 @@ func warnIfSelfSigned(entry *config.ClientCA, anchor *x509.Certificate) {
 		"issued anywhere beneath it, including by intermediates that do not exist yet, and its "+
 		"admin_cns apply to all of them. Anchor on the issuing CA instead if you meant to scope it.",
 		"client_ca", entry.Name, "anchor", anchor.Subject.CommonName)
+}
+
+// warnIfNoUsableCRLs reports an entry that will reject every one of its clients.
+//
+// Two ways to arrive here, and the second is the one that catches people. A
+// crl_file left unset under the default require policy is the obvious case. The
+// other is an entry anchored on a shared root: the walk needs a CRL for every
+// issuer in the chain except the anchor, and an intermediate's own CRL is
+// signed by that intermediate — not by the anchor — so loadDomainCRLs discards
+// it as unverifiable and every client of the domain is rejected.
+//
+// Worth a warning rather than a refusal because a root anchor is legitimate
+// when the root really is the intended boundary. Worth *this* warning because
+// the obvious fix is to switch to check, and that silently stops checking leaf
+// revocation for the domain entirely — an availability problem converted into a
+// security one along the path of least resistance.
+func warnIfNoUsableCRLs(entry *config.ClientCA, policy string, crls []*x509.RevocationList) {
+	if policy != config.RevocationRequire || len(crls) > 0 {
+		return
+	}
+	if entry.CRLFile == "" {
+		slog.Warn("client_ca entry has no crl_file under the require policy: every client of this "+
+			"entry will be rejected. Set crl_file, or set client_revocation_policy explicitly",
+			"client_ca", entry.Name)
+		return
+	}
+	slog.Warn("client_ca entry loaded no usable CRLs under the require policy: every client of this "+
+		"entry will be rejected. If this entry is anchored on a shared root, the issuing CA's own CRL "+
+		"is signed by that CA and not by the anchor, so it cannot be verified here — anchor on the "+
+		"issuing CA instead. Switching to client_revocation_policy: check would restore service by "+
+		"disabling leaf revocation checking for this entry, which is rarely what is wanted",
+		"client_ca", entry.Name, "path", entry.CRLFile)
 }
 
 // loadDomainCRLs reads and verifies the CRLs for one client_ca entry.
@@ -211,15 +253,30 @@ func refreshClientCRLs(cfg *serverConfig, domains []api.TrustDomain, m *clientCR
 		domain := &domains[i+1]
 
 		crls, err := loadDomainCRLs(entry, domain.Anchors)
-		if err != nil {
+		switch {
+		case err != nil:
 			// Keep whatever is loaded; the next pass retries. Replacing a good
 			// set with nothing would reject every client of this domain under
 			// require, which a transient read error must not do.
 			slog.Error("Could not reload client CRLs; keeping the current set",
 				"client_ca", entry.Name, "error", err)
-			continue
+		case entry.CRLFile != "" && len(crls) == 0:
+			// The file was readable and yielded nothing usable: every CRL in it
+			// was discarded as unverifiable, or it holds no CRL blocks at all.
+			// Installing that empty set would reject every client of this domain
+			// under require, on a file the operator can see is populated — so
+			// keep the previous set and say why.
+			slog.Error("crl_file yielded no usable CRLs; keeping the current set",
+				"client_ca", entry.Name, "path", entry.CRLFile)
+		default:
+			domain.SetRevocationSet(api.NewClientCRLSet(crls))
 		}
-		domain.SetRevocationSet(api.NewClientCRLSet(crls))
+
+		// Published on every branch, not only the successful one. The gauge is
+		// what an operator alerts on, and a domain whose very first load failed
+		// is exactly when they need it: skipping the set here means the series
+		// is never created, and `== 0` cannot fire on a series that does not
+		// exist. The mixin ORs in absent() for the same reason on `up`.
 		if m != nil {
 			m.set(entry.Name, domain.RevocationSet().Usable(time.Now()))
 		}

@@ -140,6 +140,19 @@ var _ = Describe("Client CRL checking", func() {
 			Expect(err).To(MatchError(ContainSubstring("no currently valid CRL")))
 		})
 
+		It("still consults an expired CRL under check", func() {
+			// "check" means verify against whatever CRLs are loaded and allow an
+			// issuer that has none. An expired CRL is loaded, and the serials it
+			// names are still revoked — discarding it would turn a stale CRL
+			// into no revocation checking at all, which is the outcome check
+			// exists to avoid.
+			set := api.NewClientCRLSet([]*x509.RevocationList{
+				crlFrom(serverCA, caKey, past, leaf.SerialNumber),
+			})
+			err := api.CheckChainRevocationForTest(chain(), set, api.RevocationCheck, time.Now())
+			Expect(err).To(MatchError(ContainSubstring("is revoked")))
+		})
+
 		It("rejects a certificate that is itself the anchor", func() {
 			// A client_ca entry makes this reachable. Nothing can attest to its
 			// revocation status, so require must not pass it silently.

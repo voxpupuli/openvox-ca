@@ -51,6 +51,11 @@ alerting rules for the openvox-ca exporter. It alerts on:
   since there is no by-serial revoke it cannot be retired — see
   [the metric's notes](../docs/metrics.md#self-provisioned-serving-certificate). *Churning*: replicas reissuing over each other, which grows
   the inventory and the CRL for no reason.
+- **Client trust domains** with no usable CRL — every CRL expired, or every one
+  discarded as unverifiable (only when
+  [`client_ca`](../docs/configuration.md#client-trust-domains) is in use). The
+  mixin's only critical-severity authentication alert: under the default
+  `require` policy this rejects every client of that issuer.
 - **Kubernetes export** targets whose applies keep failing (only when the
   [Kubernetes export](../docs/kubernetes-export.md) feature is in use).
 

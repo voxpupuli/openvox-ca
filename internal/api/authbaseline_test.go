@@ -1407,7 +1407,9 @@ var _ = Describe("Authorisation baseline: configuration axes", Ordered, Continue
 
 	Describe("allow_public_status", func() {
 		It("denies a client with no certificate when unset", func() {
-			handler := muxWith(&api.AuthConfig{CACert: caCert, AllowList: adminAllowList})
+			handler := muxWith(&api.AuthConfig{
+				Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, adminAllowList, true)},
+			})
 			Expect(probe(handler, "GET", "/certificate_status/somenode", nil)).To(BeTrue())
 		})
 
@@ -1418,8 +1420,7 @@ var _ = Describe("Authorisation baseline: configuration axes", Ordered, Continue
 			// set should still get public status afterwards, or be told plainly
 			// that the flag no longer does anything.
 			handler := muxWith(&api.AuthConfig{
-				CACert:            caCert,
-				AllowList:         adminAllowList,
+				Domains:           []api.TrustDomain{api.OwnTrustDomain(caCert, adminAllowList, true)},
 				AllowPublicStatus: true,
 			})
 			Expect(probe(handler, "GET", "/certificate_status/somenode", nil)).To(BeFalse())
@@ -1428,7 +1429,9 @@ var _ = Describe("Authorisation baseline: configuration axes", Ordered, Continue
 
 	Describe("no_pp_cli_auth", func() {
 		It("grants admin on the pp_cli_auth extension when unset", func() {
-			handler := muxWith(&api.AuthConfig{CACert: caCert, AllowList: adminAllowList})
+			handler := muxWith(&api.AuthConfig{
+				Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, adminAllowList, true)},
+			})
 			cert := issueClientCertWithPpCliAuth("cli-user", caCert, caKey)
 			Expect(probe(handler, "PUT", "/certificate_revocation_list/ca", cert)).To(BeFalse())
 		})
@@ -1438,9 +1441,9 @@ var _ = Describe("Authorisation baseline: configuration axes", Ordered, Continue
 			// table is computed with this false, so without this pair a change
 			// that dropped the flag would move nothing the oracle watches.
 			handler := muxWith(&api.AuthConfig{
-				CACert:      caCert,
-				AllowList:   adminAllowList,
-				NoPpCliAuth: true,
+				// no_pp_cli_auth is now a property of the domain, so it is
+				// expressed as OwnTrustDomain's ppCliAuth argument.
+				Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, adminAllowList, false)},
 			})
 			byExtension := issueClientCertWithPpCliAuth("cli-user", caCert, caKey)
 			Expect(probe(handler, "PUT", "/certificate_revocation_list/ca", byExtension)).To(BeTrue())

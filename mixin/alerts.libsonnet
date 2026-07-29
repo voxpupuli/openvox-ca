@@ -251,8 +251,14 @@
         rules: [
           {
             alert: 'PuppetCAClientCRLUnusable',
+            // A plain == 0 is sufficient because the gauge is published on
+            // every reload branch, including a failed one — see
+            // refreshClientCRLs. It used to be skipped when the load failed,
+            // which meant the series was never created for a domain whose very
+            // first load failed, and `== 0` cannot fire on a series that does
+            // not exist.
             expr: 'puppetca_client_crl_usable{%(selector)s} == 0' % { selector: $._config.puppetCASelector },
-            'for': $._config.expiryFor,
+            'for': $._config.clientCRLUnusableFor,
             labels: { severity: 'critical' } + $._config.alertLabels,
             annotations: {
               summary: 'A Puppet CA client trust domain has no usable CRL.',
