@@ -41,13 +41,25 @@ import (
 
 // runCSR executes the csr subcommand with args, returning its stdout.
 func runCSR(args ...string) (string, error) {
+	GinkgoHelper()
+	stdout, _, err := runCSRStreams(args...)
+	return stdout, err
+}
+
+// runCSRStreams is runCSR, also returning stderr. Everything csr reports to an
+// operator goes there — the resolved-configuration diagnostic and the warning
+// that a key now exists with no certificate — so a harness that discards it
+// cannot pin either. Both exist to close review findings, and the diagnostic in
+// particular is the accepted substitute for teaching these subcommands the
+// server's storage flags.
+func runCSRStreams(args ...string) (stdout, stderr string, err error) {
 	root := newRootCmd()
 	var out, errOut bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&errOut)
 	root.SetArgs(append([]string{"csr"}, args...))
-	err := root.Execute()
-	return out.String(), err
+	err = root.Execute()
+	return out.String(), errOut.String(), err
 }
 
 var _ = Describe("openvox-ca csr", func() {
@@ -65,7 +77,7 @@ var _ = Describe("openvox-ca csr", func() {
 		pinnedCfg := "ca_key_algo: ecdsa\nca_key_size: 256\n"
 		emptyCfg := filepath.Join(GinkgoT().TempDir(), "pinned.yaml")
 		Expect(os.WriteFile(emptyCfg, []byte(pinnedCfg), 0o644)).To(Succeed())
-		GinkgoT().Setenv("PUPPET_CA_CONFIG", emptyCfg)
+		setEnv("PUPPET_CA_CONFIG", emptyCfg)
 		clearServerEnv()
 	})
 
@@ -99,6 +111,35 @@ var _ = Describe("openvox-ca csr", func() {
 		for _, ext := range csr.Extensions {
 			Expect(ext.Id.String()).NotTo(Equal("2.5.29.19"))
 		}
+	})
+
+	It("reports the configuration it resolved before doing anything", func() {
+		// The only thing standing between a flag-configured server and a parent
+		// signing a request bound to a locally minted key. Nothing else proves
+		// the subcommand calls it: reportResolvedConfig is unit-tested, but
+		// deleting the call site would leave the suite green.
+		_, stderr, err := runCSRStreams("--cadir", caDir, "--hostname", "puppet.example.com", "--create-key")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(stderr).To(ContainSubstring("Using config file:"))
+		Expect(stderr).To(ContainSubstring("CA key provider: file"))
+		Expect(stderr).To(ContainSubstring(caDir))
+	})
+
+	It("warns that a created key leaves the server unable to start", func() {
+		_, stderr, err := runCSRStreams("--cadir", caDir, "--hostname", "puppet.example.com", "--create-key")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(stderr).To(ContainSubstring("refuse to start"))
+		Expect(stderr).To(ContainSubstring("import-ca-cert"))
+	})
+
+	It("does not warn about startup when a certificate already exists", func() {
+		// The ordering claim: the probe runs before BuildCSR creates anything,
+		// and an established CA is not in the refuse-to-start window.
+		bootstrapCAInDir(caDir, "original.example.com")
+
+		_, stderr, err := runCSRStreams("--cadir", caDir)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(stderr).NotTo(ContainSubstring("refuse to start"))
 	})
 
 	It("creates the key algorithm the configuration asks for", func() {
@@ -274,7 +315,7 @@ var _ = Describe("openvox-ca csr", func() {
 		cfgPath := filepath.Join(GinkgoT().TempDir(), "enc.yaml")
 		Expect(os.WriteFile(cfgPath,
 			[]byte("ca_key_algo: ecdsa\nca_key_size: 256\nencrypt_ca_key: true\n"), 0o600)).To(Succeed())
-		GinkgoT().Setenv("PUPPET_CA_CONFIG", cfgPath)
+		setEnv("PUPPET_CA_CONFIG", cfgPath)
 
 		_, err := runCSR("--cadir", caDir, "--hostname", "puppet.example.com", "--create-key")
 		Expect(err).NotTo(HaveOccurred())

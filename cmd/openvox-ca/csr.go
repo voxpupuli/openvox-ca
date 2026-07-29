@@ -101,6 +101,22 @@ identically whether the key is a local PEM file or lives in OpenBao Transit.`,
 					return fmt.Errorf("no CA key exists yet: pass --create-key to create one, "+
 						"or provision it out of band first: %w", err)
 				}
+				// BuildCSR creates the key and then signs with it, so a failure
+				// here may already have committed a key. Under Transit those are
+				// two different grants — transit/keys for the create,
+				// transit/sign for the request — so a policy scoped one endpoint
+				// short lands exactly here, with a key in the vault and no
+				// certificate. Say so: it is the same obligation the import side
+				// discharges with incompleteImportError, and the state is the
+				// one Init refuses to start from.
+				if createKey && !hadCert {
+					if nowHasKey, keyErr := myCA.HasCAKey(cmd.Context()); keyErr == nil && nowHasKey {
+						return fmt.Errorf("%w\n\nA CA key now exists with no certificate, so the server "+
+							"will refuse to start. Fix the cause and re-run 'openvox-ca csr' (without "+
+							"--create-key, which is no longer needed), then install the signed chain "+
+							"with 'openvox-ca import-ca-cert'", err)
+					}
+				}
 				return err
 			}
 

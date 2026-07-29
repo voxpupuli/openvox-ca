@@ -91,13 +91,18 @@ for deployments where the CA certificate is mounted read-only from outside
 				cfg.CADir = caDir
 			}
 
+			// Before resolveRuntime, not after: every failure in there —
+			// "cadir is required", an invalid provider, a backend that will not
+			// open — is a symptom of the misresolved configuration this line
+			// exists to expose, and none of those messages names the file that
+			// was read. csr reports in the same order for the same reason.
+			reportResolvedConfig(cmd.ErrOrStderr(), resolvedCfgFile, cfg)
+
 			rt, err := resolveRuntime(cmd.Context(), cfg, true)
 			if err != nil {
 				return err
 			}
 			defer func() { _ = rt.Close() }()
-
-			reportResolvedConfig(cmd.ErrOrStderr(), resolvedCfgFile, cfg)
 
 			myCA := ca.New(rt.Store, ca.AutosignConfig{Mode: "off"}, cfg.Hostname)
 			if err := applyCAConfig(myCA, cfg); err != nil {

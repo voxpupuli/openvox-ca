@@ -247,6 +247,10 @@ exactly as the running server does.
 
 ```console
 $ openvox-ca csr --hostname puppet.example.com --create-key --out ca-request.pem
+Using config file: /etc/puppet-ca/config.yaml
+Storage backend: postgres; CA key provider: openbao; cadir: /etc/puppetlabs/puppet/ssl/ca
+This CA has a key but no certificate, so the server will refuse to start until
+'openvox-ca import-ca-cert' installs the chain the parent signs.
 Certificate signing request written to ca-request.pem
 ```
 
@@ -340,13 +344,15 @@ spec:
       serviceAccountName: openvox-ca        # the same one the Deployment uses
       containers:
         - name: csr
-          image: ghcr.io/voxpupuli/openvox-ca:1.0.0   # pin to the Deployment's tag
+          image: ghcr.io/voxpupuli/openvox-ca:1.2.3   # pin to the Deployment's tag
           # No --out: the request goes to stdout, so it survives the pod. Logs
           # go to stderr and kubectl merges the two streams, so extract the
           # block rather than redirecting wholesale:
           #   kubectl logs job/openvox-ca-csr \
           #     | sed -n '/BEGIN CERTIFICATE REQUEST/,/END CERTIFICATE REQUEST/p'
-          # Setting logfile in the ConfigMap keeps logs out of the stream entirely.
+          # logfile does not apply here: these subcommands write their progress
+          # messages to stderr unconditionally, so extract the block rather than
+          # relying on a quiet stream.
           args: ["csr"]
           volumeMounts:
             - { name: config, mountPath: /etc/puppet-ca }
@@ -378,15 +384,14 @@ the result as a new CA, with every issued certificate reissued under it.
 Re-issuance needs an ordered procedure, because `--force` re-signs the stored
 CRL and every replica caches the CA certificate for its process lifetime.
 
-> **Stop the CA first on the filesystem backend.** `--force` is a
+> **Stop the CA first on `filesystem` and `sqlite`.** `--force` is a
 > read-modify-write spanning the certificate and the CRL, and it takes the
 > bootstrap lock to keep a concurrent revocation from being lost. That lock is
 > only genuinely cross-process on the backends that implement one — PostgreSQL,
 > MySQL, etcd and Redis. On `filesystem` and `sqlite` it degrades to a mutex
 > inside each process, so the CLI and a running server do not serialise against
 > each other at all, and a revocation landing mid-import is silently discarded.
-> On any backend without a cross-process lock — `filesystem` and `sqlite` — stop
-> the CA before importing. The shared backends can take it against a live CA.
+> The shared backends can take the import against a live CA.
 
 1. Keep a copy of the bundle you are about to replace:
    `curl -sk https://<ca>/puppet-ca/v1/certificate/ca > ca-bundle.backup.pem`.

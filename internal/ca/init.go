@@ -103,7 +103,7 @@ func (c *CA) Init(ctx context.Context) error {
 		if errCert != nil {
 			return fmt.Errorf("checking CA cert: %w", errCert)
 		}
-		hasKey, errKey := c.hasCAKey(ctx)
+		hasKey, errKey := c.HasCAKey(ctx)
 		if errKey != nil {
 			return fmt.Errorf("checking CA key: %w", errKey)
 		}

@@ -199,6 +199,18 @@ var _ = Describe("CA bundle parsing and ordering", func() {
 			Expect(ca.ValidateCABundleOrder(certs)).To(Succeed())
 		})
 
+		It("rejects a leaf sitting in an issuer position", func() {
+			// The shape `cat ca_crt.pem host.pem` produces. The bundle is
+			// refused either way, since CheckSignatureFrom fails next, but the
+			// specific message is what tells the operator which file is wrong.
+			certs, err := ca.ParseCABundle(append(append([]byte{}, chain.InterPEM...), chain.LeafPEM...))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(certs).To(HaveLen(2))
+
+			err = ca.ValidateCABundleOrder(certs)
+			Expect(err).To(MatchError(ContainSubstring("used as an issuer")))
+		})
+
 		It("rejects an expired leading certificate", func() {
 			// The same argument the KeyUsage refusals make, and stronger: a
 			// certificate outside its window installs cleanly and is then

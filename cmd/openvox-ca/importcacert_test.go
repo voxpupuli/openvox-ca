@@ -103,7 +103,7 @@ var _ = Describe("openvox-ca import-ca-cert", func() {
 		pinnedCfg := "ca_key_algo: ecdsa\nca_key_size: 256\n"
 		emptyCf = filepath.Join(GinkgoT().TempDir(), "pinned.yaml")
 		Expect(os.WriteFile(emptyCf, []byte(pinnedCfg), 0o644)).To(Succeed())
-		GinkgoT().Setenv("PUPPET_CA_CONFIG", emptyCf)
+		setEnv("PUPPET_CA_CONFIG", emptyCf)
 
 		clearServerEnv()
 
@@ -289,6 +289,34 @@ var _ = Describe("openvox-ca import-ca-cert", func() {
 		Expect(os.WriteFile(bundle, chain.Bundle, 0o644)).To(Succeed())
 		_, err := runImport("--cadir", caDir, "--cert-bundle", bundle)
 		Expect(err).To(MatchError(ContainSubstring("no CA key exists")))
+	})
+})
+
+var _ = Describe("openvox-ca import-ca-cert: resolved configuration", func() {
+	It("reports the configuration it resolved, before it opens anything", func() {
+		// Same reasoning as the csr side, and the same call site that would
+		// otherwise be deletable without a spec noticing. A real bundle is
+		// needed to get past the --cert-bundle read, which happens first and
+		// deliberately: that failure is about the operator's argument, not
+		// about which configuration was resolved.
+		caDir := GinkgoT().TempDir()
+		cfgPath := filepath.Join(GinkgoT().TempDir(), "pinned.yaml")
+		Expect(os.WriteFile(cfgPath, []byte("ca_key_algo: ecdsa\nca_key_size: 256\n"), 0o644)).To(Succeed())
+		setEnv("PUPPET_CA_CONFIG", cfgPath)
+		clearServerEnv()
+
+		chain, err := testutil.GenerateTestChain("unused.example.com")
+		Expect(err).NotTo(HaveOccurred())
+		bundlePath := filepath.Join(caDir, "chain.pem")
+		Expect(os.WriteFile(bundlePath, chain.Bundle, 0o644)).To(Succeed())
+
+		// The import fails at the key-binding proof (this cadir holds no key),
+		// which is well after the diagnostic.
+		stderr, err := runImport("--cadir", caDir, "--cert-bundle", bundlePath)
+		Expect(err).To(HaveOccurred())
+		Expect(stderr).To(ContainSubstring("Using config file:"))
+		Expect(stderr).To(ContainSubstring("CA key provider: file"))
+		Expect(stderr).To(ContainSubstring(caDir))
 	})
 })
 

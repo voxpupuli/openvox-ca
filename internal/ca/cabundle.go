@@ -216,8 +216,11 @@ func ValidateCABundleOrder(certs []*x509.Certificate) error {
 // preserving every revocation entry and bumping the CRL number.
 //
 // Replacing a CA certificate invalidates the stored CRL: it was signed by the
-// key being replaced and names the subject being replaced, so after the import
-// nothing can verify it and readStoredCRL's issuer check would reject it. The
+// key being replaced and names the subject being replaced, so no agent can
+// verify it against the certificate it now fetches. Nothing inside openvox-ca
+// detects that — readStoredCRL and loadCRLCache parse the CRL without checking
+// who issued it — which is exactly why the re-sign happens here, at the import,
+// rather than being left to a check further down that does not exist. The
 // revocations it records are still meaningful, though — they name serials this
 // CA issued — so they are carried across rather than discarded.
 //

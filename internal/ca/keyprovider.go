@@ -75,7 +75,7 @@ type KeyProvider interface {
 	Generate(ctx context.Context, cfg KeyConfig) (crypto.Signer, error)
 }
 
-// hasCAKey reports whether the CA's private key already exists, using
+// HasCAKey reports whether the CA's private key already exists, using
 // KeyProvider when one is configured (so an OpenBao/PKCS#11-backed key is checked
 // at its actual source) or falling back to the Storage-backed blob check
 // otherwise. Checking Storage.HasCAKey when a KeyProvider is set would always
@@ -83,7 +83,7 @@ type KeyProvider interface {
 // wrongly look like "no key yet" any time loadCA fails for an unrelated
 // reason (e.g. a transient provider outage), causing Init to bootstrap a
 // second key on top of an already-bootstrapped CA.
-func (c *CA) hasCAKey(ctx context.Context) (bool, error) {
+func (c *CA) HasCAKey(ctx context.Context) (bool, error) {
 	if c.KeyProvider != nil {
 		_, err := c.KeyProvider.Load(ctx)
 		if err == nil {
