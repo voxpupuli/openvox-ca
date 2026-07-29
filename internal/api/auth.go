@@ -144,9 +144,9 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 		if domain.IsOwn() {
 			if revoked, err := myCA.IsRevokedSerial(r.Context(), clientCert.SerialNumber); err != nil || revoked {
 				if err != nil {
-					slog.Warn("Auth: CRL check failed (denying)", "cn", clientCN, "error", err)
+					slog.Warn("Auth: CRL check failed (denying)", "cn", sanitiseForLog(clientCN), "error", err)
 				} else {
-					slog.Warn("Auth: client cert is revoked", "cn", clientCN)
+					slog.Warn("Auth: client cert is revoked", "cn", sanitiseForLog(clientCN))
 				}
 				http.Error(w, "access denied", http.StatusForbidden)
 				return
@@ -154,7 +154,7 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 		} else if err := checkChainRevocation(verified.Chain, domain.RevocationSet(),
 			cfg.revocationPolicy(), time.Now()); err != nil {
 			slog.Warn("Auth: foreign client cert failed revocation checking",
-				"cn", clientCN, "domain", domain.Describe(), "error", err)
+				"cn", sanitiseForLog(clientCN), "domain", domain.Describe(), "error", err)
 			http.Error(w, "access denied", http.StatusForbidden)
 			return
 		}
@@ -168,7 +168,7 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 				next.ServeHTTP(w, r)
 			} else {
 				slog.Warn("Auth: rejecting a foreign client certificate for an own-CA operation",
-					"cn", clientCN, "domain", domain.Describe())
+					"cn", sanitiseForLog(clientCN), "domain", domain.Describe())
 				http.Error(w, "access denied", http.StatusForbidden)
 			}
 
@@ -231,10 +231,21 @@ const maxLoggedValue = 256
 
 // sanitiseForLog makes an untrusted string safe to put in a log record:
 // control characters become U+FFFD and the result is truncated.
+//
+// The two ReplaceAll calls look redundant beside the Map that follows, and
+// functionally they are — the Map already covers CR and LF along with every
+// other control character. They are here because CodeQL's log-injection query
+// recognises replacement of those two specifically as a sanitiser and does not
+// model strings.Map, so without them the taint is reported as flowing straight
+// through this function. Writing the check twice is a smaller price than either
+// suppressing a real query or leaving a security alert open on the assumption
+// that a reviewer will re-derive this argument.
 func sanitiseForLog(s string) string {
 	if len(s) > maxLoggedValue {
 		s = s[:maxLoggedValue] + "…"
 	}
+	s = strings.ReplaceAll(s, "\n", "\uFFFD")
+	s = strings.ReplaceAll(s, "\r", "\uFFFD")
 	return strings.Map(func(r rune) rune {
 		if r == '\uFFFD' || unicode.IsControl(r) {
 			return '\uFFFD'
