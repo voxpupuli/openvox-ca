@@ -104,7 +104,7 @@ func encodeCRLChain(crls []*x509.RevocationList) []byte {
 // first, followed by every upstream CRL already present, in their original
 // order.
 //
-// Our CRL leads because readStoredCRL and loadCRLCache both take block 0, and
+// Our CRL leads because readStoredCRL takes block 0, and
 // because it mirrors the certificate bundle's nearest-first convention. Every
 // block that is not ours is carried across, because an ancestor's CRL cannot be
 // regenerated here: dropping one is unrecoverable, while keeping one costs a

@@ -110,29 +110,7 @@ var _ = Describe("API Workflow", func() {
 			// specs still green — they only prove ReissueCRL returns the sentinel.
 			// The message content is the whole point, so assert it, not just the code.
 			ctx := context.Background()
-			foreignKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-			Expect(err).NotTo(HaveOccurred())
-			tmpl := &x509.Certificate{
-				SerialNumber:          big.NewInt(77),
-				Subject:               pkix.Name{CommonName: "Unrelated CA"},
-				NotBefore:             time.Now().Add(-time.Hour),
-				NotAfter:              time.Now().Add(24 * time.Hour),
-				KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-				BasicConstraintsValid: true,
-				IsCA:                  true,
-			}
-			der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &foreignKey.PublicKey, foreignKey)
-			Expect(err).NotTo(HaveOccurred())
-			foreignCert, err := x509.ParseCertificate(der)
-			Expect(err).NotTo(HaveOccurred())
-			crlDER, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
-				Number:     big.NewInt(5),
-				ThisUpdate: time.Now().UTC(),
-				NextUpdate: time.Now().UTC().Add(24 * time.Hour),
-			}, foreignCert, foreignKey)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(myCA.Storage.UpdateCRL(ctx,
-				pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlDER}))).To(Succeed())
+			Expect(myCA.Storage.UpdateCRL(ctx, foreignCRL())).To(Succeed())
 
 			req := httptest.NewRequest("PUT", "/certificate_revocation_list/ca", nil)
 			rr := httptest.NewRecorder()

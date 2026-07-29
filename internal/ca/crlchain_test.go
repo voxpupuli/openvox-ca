@@ -387,6 +387,72 @@ func (b *flakyCRLBackend) Get(ctx context.Context, key string) ([]byte, error) {
 	return b.Backend.Get(ctx, key)
 }
 
+// countingCRLBackend records CRL writes, and can append a revocation between
+// two CRL reads so a re-read under the lock is distinguishable from a plan
+// computed before it.
+type countingCRLBackend struct {
+	storage.Backend
+	mu          sync.Mutex
+	puts        int
+	gets        int
+	mutateOnGet int
+	mutateWith  []byte
+}
+
+func (b *countingCRLBackend) crlPuts() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.puts
+}
+
+// mutateBeforeGet arranges for blob to be written just before the nth CRL read
+// counted from now, simulating a revocation landing between the plan and the
+// write. The read counter is reset, since it accumulates across calls.
+func (b *countingCRLBackend) mutateBeforeGet(n int, blob []byte) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.gets = 0
+	b.mutateOnGet, b.mutateWith = n, blob
+}
+
+// disarm cancels a pending mutation. Call it before asserting: otherwise the
+// assertion's own read can trigger the mutation and satisfy the expectation
+// without the code under test having done anything — which is how the first
+// version of this spec passed while pinning nothing.
+func (b *countingCRLBackend) disarm() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.mutateOnGet = 0
+}
+
+func (b *countingCRLBackend) Put(ctx context.Context, key string, data []byte, kind storage.BlobKind) error {
+	if key == storage.KeyCRL {
+		b.mu.Lock()
+		b.puts++
+		b.mu.Unlock()
+	}
+	return b.Backend.Put(ctx, key, data, kind)
+}
+
+func (b *countingCRLBackend) Get(ctx context.Context, key string) ([]byte, error) {
+	if key == storage.KeyCRL {
+		b.mu.Lock()
+		b.gets++
+		fire := b.mutateOnGet != 0 && b.gets == b.mutateOnGet
+		blob := b.mutateWith
+		if fire {
+			b.mutateOnGet = 0
+		}
+		b.mu.Unlock()
+		if fire {
+			if err := b.Backend.Put(ctx, storage.KeyCRL, blob, storage.BlobPublic); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return b.Backend.Get(ctx, key)
+}
+
 // upstreamCRLWithoutAKI builds an ancestor CRL carrying no Authority Key
 // Identifier — the shape `openssl ca -gencrl` produces, because the stock
 // openssl.cnf leaves crl_extensions commented out.
@@ -466,6 +532,48 @@ var _ = Describe("CRL chain ordering at import", func() {
 		Expect(mustGetCRL(ctx, store)).To(Equal(before), "the stored chain must be untouched")
 	})
 
+	It("performs no CRL write at all when there is nothing to change", func() {
+		// The point of the nil plan is the absence of a write, not the content:
+		// re-encoding the same blocks yields identical bytes, so a byte-equality
+		// assertion passes whether the short-circuit is there or not. What an
+		// operator would notice is the stored modification time moving, which
+		// makes every agent re-download an unchanged CRL.
+		dir := GinkgoT().TempDir()
+		backend := &countingCRLBackend{Backend: storage.NewFilesystemBackend(dir)}
+		counted := storage.NewWithBackend(backend, filepath.Join(dir, "private"))
+
+		Expect(ca.ImportCA(ctx, counted, certPEM, keyPEM,
+			append(append([]byte{}, ourCRL...), upsCRL...))).To(Succeed())
+		after := backend.crlPuts()
+		Expect(after).To(BeNumerically(">", 0), "the first import must write")
+
+		Expect(ca.ImportCA(ctx, counted, certPEM, keyPEM, nil)).To(Succeed())
+		Expect(backend.crlPuts()).To(Equal(after),
+			"a cert/key-only re-import must not rewrite an already-correct chain")
+	})
+
+	It("decides under the lock, so a revocation landing mid-import is not discarded", func() {
+		// The plan is computed twice: once to fail fast before the cert and key
+		// writes, then again inside the CRL lock. Folding those into one -- an
+		// obvious "we plan twice" cleanup -- would silently drop a revocation
+		// that arrived in between and regress the CRL number.
+		dir := GinkgoT().TempDir()
+		backend := &countingCRLBackend{Backend: storage.NewFilesystemBackend(dir)}
+		counted := storage.NewWithBackend(backend, filepath.Join(dir, "private"))
+		Expect(ca.ImportCA(ctx, counted, certPEM, keyPEM, ourCRL)).To(Succeed())
+
+		// A newer own CRL appears just before the second read.
+		newer := reNumberedCRL(certPEM, keyPEM, 42)
+		backend.mutateBeforeGet(2, newer)
+
+		Expect(ca.ImportCA(ctx, counted, certPEM, keyPEM, upsCRL)).To(Succeed())
+		backend.disarm()
+
+		chain := crlBlocks(mustGetCRL(ctx, counted))
+		Expect(chain[0].Number.Int64()).To(Equal(int64(42)),
+			"the chain written must be built from the read taken under the lock")
+	})
+
 	It("still generates a CRL when no chain is supplied and storage holds none", func() {
 		// The legitimate first-import case the old behaviour was written for.
 		Expect(ca.ImportCA(ctx, store, certPEM, keyPEM, nil)).To(Succeed())
@@ -543,7 +651,7 @@ var _ = Describe("CRL chain ordering at import", func() {
 		// already stored. The warning used to live behind orderCRLChain's
 		// early return for exactly this shape, so the only detector of a
 		// condition no metric covers was skipped where it was most needed.
-		expired, _ := expiringUpstreamCA("Stale Root CA", -time.Hour)
+		expired := expiringUpstreamCA("Stale Root CA", -time.Hour)
 
 		var buf bytes.Buffer
 		orig := slog.Default()
@@ -553,6 +661,34 @@ var _ = Describe("CRL chain ordering at import", func() {
 		Expect(ca.ImportCA(ctx, store, certPEM, keyPEM, expired)).To(Succeed())
 		Expect(buf.String()).To(ContainSubstring("has already expired"))
 		Expect(buf.String()).To(ContainSubstring("Stale Root CA"))
+	})
+
+	It("warns about an expired ancestor when our own CRL leads the bundle too", func() {
+		// Both shapes, deliberately: the round-3 defect was the warning firing
+		// on one and not the other, and pinning only the shape that was broken
+		// would let the mirror regression through — including on the ordinary
+		// first-import shape most operators take.
+		expired := expiringUpstreamCA("Stale Root CA", -time.Hour)
+
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		defer slog.SetDefault(orig)
+
+		Expect(ca.ImportCA(ctx, store, certPEM, keyPEM, append(append([]byte{}, ourCRL...), expired...))).To(Succeed())
+		Expect(buf.String()).To(ContainSubstring("has already expired"))
+	})
+
+	It("emits no expiry warning for a healthy ancestor", func() {
+		// The companion the two assertions above need: a check that fired
+		// unconditionally would satisfy them just as well.
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		defer slog.SetDefault(orig)
+
+		Expect(ca.ImportCA(ctx, store, certPEM, keyPEM, append(append([]byte{}, ourCRL...), upsCRL...))).To(Succeed())
+		Expect(buf.String()).NotTo(ContainSubstring("has already expired"))
 	})
 
 	It("warns when the chain carries two CRLs for the same ancestor", func() {
@@ -901,7 +1037,7 @@ func crlAtNumber(cert *x509.Certificate, key crypto.Signer, number int64) []byte
 
 // expiringUpstreamCA builds an ancestor whose CRL nextUpdate sits at now+offset,
 // so a negative offset yields one that has already lapsed.
-func expiringUpstreamCA(cn string, offset time.Duration) ([]byte, *x509.Certificate) {
+func expiringUpstreamCA(cn string, offset time.Duration) []byte {
 	GinkgoHelper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	Expect(err).NotTo(HaveOccurred())
@@ -929,5 +1065,41 @@ func expiringUpstreamCA(cn string, offset time.Duration) ([]byte, *x509.Certific
 		NextUpdate: now.Add(offset),
 	}, cert, key)
 	Expect(err).NotTo(HaveOccurred())
-	return pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlDER}), cert
+	return pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlDER})
 }
+
+var _ = Describe("CRL cache loading: a corrupt ancestor block", func() {
+	// The previous build's import stored a multi-block --crl-chain byte for
+	// byte while validating only block 0, so an existing deployment can
+	// legitimately hold a blob whose trailing block does not parse. Refusing to
+	// start on data the previous build wrote would be an upgrade break, and it
+	// would be harsher than this function's policy for a strictly worse
+	// condition — a foreign block 0, which only warns.
+	It("starts, serving block 0, rather than refusing", func() {
+		ctx := context.Background()
+		store := storage.New(GinkgoT().TempDir())
+
+		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		myCA.LeafKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(myCA.Init(ctx)).To(Succeed())
+		_, err := myCA.Generate(ctx, "doomed.example.com", nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(myCA.Revoke(ctx, "doomed.example.com")).To(Succeed())
+
+		ours := mustGetCRL(ctx, store)
+		serial := crlBlocks(ours)[0].RevokedCertificateEntries[0].SerialNumber
+
+		corrupt := []byte("-----BEGIN X509 CRL-----\nZm9v\n-----END X509 CRL-----\n")
+		Expect(store.UpdateCRL(ctx, append(append([]byte{}, ours...), corrupt...))).To(Succeed())
+
+		restarted := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		restarted.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(restarted.Init(ctx)).To(Succeed(),
+			"a corrupt trailing block must not take the CA offline")
+
+		wasRevoked, err := restarted.IsRevokedSerial(ctx, serial)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(wasRevoked).To(BeTrue(), "block 0 still answers revocation questions")
+	})
+})

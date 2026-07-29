@@ -554,7 +554,7 @@ func newImportCmd() *cobra.Command {
 	cmd.Flags().StringVar(&caDir, "cadir", "", "CA storage directory")
 	cmd.Flags().StringVar(&certBundle, "cert-bundle", "", "Path to CA certificate PEM")
 	cmd.Flags().StringVar(&privateKey, "private-key", "", "Path to CA private key PEM")
-	cmd.Flags().StringVar(&crlChain, "crl-chain", "", "Path to a CRL PEM, or several concatenated in any order (optional; when omitted the stored CRL chain is left as it is, and one is generated only if none is stored)")
+	cmd.Flags().StringVar(&crlChain, "crl-chain", "", "Path to a CRL PEM, or several concatenated in any order (optional; when omitted the stored CRL chain is left as it is, one is generated if none is stored, and the import is refused if nothing stored was signed by the certificate being imported)")
 	_ = cmd.MarkFlagRequired("cadir")
 	_ = cmd.MarkFlagRequired("cert-bundle")
 	_ = cmd.MarkFlagRequired("private-key")

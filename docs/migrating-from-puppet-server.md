@@ -129,8 +129,12 @@ directory the middle step passes to `--cadir`. `migrate` resolves its destinatio
 from that file; `import` resolves its own from the flag. If the two disagree,
 all three commands exit 0 and print success while the middle step writes
 somewhere the third never reads — the same silent no-op described above,
-reintroduced inside the workaround for it. The scratch directory must also start
-empty, or the first leg needs `--force` as well.
+reintroduced inside the workaround for it. Use a **fresh, empty** scratch directory
+every time — `mktemp -d` — because `migrate` copies and never deletes: anything
+left from a previous run is pushed back into the live backend on the return leg,
+including signed certificates that have since been cleaned, which reappear with
+no inventory row and are then invisible to the expiry cleanup. Remove the
+directory afterwards; it holds a plaintext copy of the CA key.
 
 ```bash
 # scratch.yaml: storage_backend: filesystem, cadir: /tmp/scratch
