@@ -514,6 +514,24 @@ func (c *CA) loadCRLCache(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("parsing CRL: %w", err)
 	}
+
+	// The cache answers "did we revoke this serial", so it must hold our own
+	// CRL. Block 0 is ours by construction — signCRLLocked writes it first and
+	// import reorders to match — but a hand-assembled blob could put an
+	// ancestor's CRL there, and checking revocation against an ancestor's list
+	// would let a certificate this CA revoked go on authenticating.
+	//
+	// A warning rather than a hard failure: refusing to start leaves the CA
+	// entirely unavailable, where continuing gives a running CA with a loud,
+	// actionable message. The write path (readStoredCRL) does fail closed,
+	// because re-signing over an ancestor's CRL destroys it.
+	if c.classifyCRL(crl) == crlOwnershipForeign {
+		slog.Warn("Stored CRL does not lead with this CA's own CRL; revocation checks may be using the wrong list. "+
+			"Re-import the CRL chain, or reissue with 'openvox-ca-ctl reissue-crl'",
+			"crl_authority_key_id", fmt.Sprintf("%x", crl.AuthorityKeyId),
+			"ca_subject_key_id", fmt.Sprintf("%x", c.CACert.SubjectKeyId))
+	}
+
 	c.cachedCRL = crl
 	return nil
 }

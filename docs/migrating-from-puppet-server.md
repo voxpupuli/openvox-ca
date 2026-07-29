@@ -76,6 +76,13 @@ openvox-ca-ctl import \
 echo "CA imported into $NEW_CADIR"
 ```
 
+`--crl-chain` accepts a multi-CRL bundle in any order. This CA's own CRL is
+moved to the front, since every reader takes the first block as ours, and
+ancestor CRLs are preserved through every subsequent re-signing — so
+`certificate_revocation = chain`, Puppet's default, keeps working after a
+revocation or a CRL refresh. If the bundle contains only ancestor CRLs, an empty
+one for this CA is generated and placed first.
+
 This creates the directory structure, writes the CA cert/key/CRL, and
 initialises `inventory.txt` and `serial` (the serial file is written for compatibility but is not used at runtime; openvox-ca generates random serial numbers).
 

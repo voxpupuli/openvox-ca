@@ -59,18 +59,27 @@ func (c *CA) signCRLLocked(ctx context.Context, prevNumber *big.Int, revoked []x
 		return fmt.Errorf("failed to sign CRL: %w", err)
 	}
 
-	newCRLPEM := pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlBytes})
+	parsedCRL, err := x509.ParseRevocationList(crlBytes)
+	if err != nil {
+		c.crlUpdateFailures.Add(1)
+		return fmt.Errorf("failed to parse new CRL: %w", err)
+	}
+
+	// Preserve any upstream CRLs already stored. Re-signing used to replace the
+	// whole blob with a single block, which silently discarded the ancestor
+	// CRLs an intermediate CA must publish for agents to do full-chain
+	// revocation checking (Puppet's default). On a CA that issues its own root
+	// there is nothing upstream and this is byte-for-byte what it was.
+	newCRLPEM := c.crlChainLocked(ctx, parsedCRL)
 	if err := c.Storage.UpdateCRL(ctx, newCRLPEM); err != nil {
 		c.crlUpdateFailures.Add(1)
 		return fmt.Errorf("failed to write CRL: %w", err)
 	}
 
 	// Update the in-memory CRL cache so auth checks use the new CRL
-	// immediately without reading from storage.
-	parsedCRL, err := x509.ParseRevocationList(crlBytes)
-	if err != nil {
-		return fmt.Errorf("failed to parse new CRL for cache: %w", err)
-	}
+	// immediately without reading from storage. The cache holds only this CA's
+	// own CRL: it answers "did we revoke this serial", which an ancestor's CRL
+	// can never speak to.
 	c.cachedCRL = parsedCRL
 
 	// Signal consumers (e.g. the Kubernetes exporter) that the CRL changed.
@@ -127,6 +136,23 @@ func (c *CA) readStoredCRL(ctx context.Context) (*x509.RevocationList, error) {
 	crl, err := x509.ParseRevocationList(block.Bytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse CRL: %w", err)
+	}
+
+	// SECURITY: refuse to re-sign over a CRL this CA did not issue. Every caller
+	// of this function goes on to bump the CRL number and re-sign, so treating
+	// an ancestor's CRL as our own would overwrite it and publish a chain
+	// missing the entry agents need.
+	//
+	// The reachable cause is a CA certificate that was replaced while this
+	// process was running: c.CACert is read once at startup and never reloaded,
+	// so an unrestarted replica compares against the previous certificate. The
+	// error says so, because "CRL issuer mismatch" alone sends people looking at
+	// the CRL rather than at the deployment.
+	if c.classifyCRL(crl) == crlOwnershipForeign {
+		return nil, fmt.Errorf("the stored CRL was issued by a different CA than this process is using "+
+			"(CRL authority key id %x, our subject key id %x): refusing to re-sign it. If the CA certificate "+
+			"was replaced, this replica needs a restart to pick it up",
+			crl.AuthorityKeyId, c.CACert.SubjectKeyId)
 	}
 	return crl, nil
 }

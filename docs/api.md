@@ -98,7 +98,7 @@ Response:
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/certificate_revocation_list/ca` | Download the current CRL PEM |
+| `GET` | `/certificate_revocation_list/ca` | Download the current CRL PEM. When this CA is an intermediate the response is a **chain**: this CA's CRL first, then each ancestor's, so agents can perform full-chain revocation checking (Puppet's default `certificate_revocation = chain`) |
 | `PUT` | `/certificate_revocation_list/ca` | Re-sign the CRL with a fresh validity window (preserves all revocations); admin-only. Returns the new CRL PEM |
 
 ## Expirations

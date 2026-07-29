@@ -20,6 +20,7 @@ package ca
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
@@ -102,31 +103,40 @@ func ImportCA(ctx context.Context, store *storage.StorageService, certBundlePEM,
 
 	// --- Handle CRL ---
 	if crlPEM != nil {
-		crlBlock, _ := pem.Decode(crlPEM)
-		if crlBlock == nil {
-			return fmt.Errorf("crl-chain does not contain a valid PEM block")
+		// Validate every block, not just the first. The blob is served verbatim
+		// to every agent, so an unparseable block further down would surface as
+		// a broken CRL across the fleet rather than as an import error here.
+		incoming := decodeCRLChain(crlPEM)
+		if len(incoming) == 0 {
+			return fmt.Errorf("crl-chain does not contain a valid X509 CRL PEM block")
 		}
-		if _, err := x509.ParseRevocationList(crlBlock.Bytes); err != nil {
-			return fmt.Errorf("failed to parse CRL: %w", err)
+
+		// Every reader takes block 0 as this CA's own CRL, so put it there.
+		// An operator assembling a chain by hand has no reason to know that,
+		// and correcting it once at import is better than misreading it on
+		// every subsequent load.
+		ordered, foundOurs := orderCRLChain(crlPEM, caCert)
+		if !foundOurs {
+			// A chain of purely upstream CRLs is legitimate — an operator may
+			// supply ancestors and expect this CA to issue its own. Generate
+			// ours and lead with it.
+			ourCRL, err := generateEmptyCRL(caCert, caKey)
+			if err != nil {
+				return err
+			}
+			ordered = append(ourCRL, ordered...)
 		}
+
 		// Import-time write: runs before any CRL consumer exists, so it
 		// deliberately skips the crlNotify signal (see signCRLLocked).
-		if err := store.UpdateCRL(ctx, crlPEM); err != nil {
+		if err := store.UpdateCRL(ctx, ordered); err != nil {
 			return fmt.Errorf("failed to write CRL: %w", err)
 		}
 	} else {
-		// Generate a fresh empty CRL.
-		now := time.Now().UTC()
-		crlTemplate := &x509.RevocationList{
-			Number:     big.NewInt(1),
-			ThisUpdate: now,
-			NextUpdate: now.Add(CRLValidity),
-		}
-		crlBytes, err := x509.CreateRevocationList(rand.Reader, crlTemplate, caCert, caKey)
+		generatedCRL, err := generateEmptyCRL(caCert, caKey)
 		if err != nil {
-			return fmt.Errorf("failed to create initial CRL: %w", err)
+			return err
 		}
-		generatedCRL := pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlBytes})
 		// Import-time write: runs before any CRL consumer exists, so it
 		// deliberately skips the crlNotify signal (see signCRLLocked).
 		if err := store.UpdateCRL(ctx, generatedCRL); err != nil {
@@ -151,4 +161,19 @@ func ImportCA(ctx context.Context, store *storage.StorageService, certBundlePEM,
 	}
 
 	return nil
+}
+
+// generateEmptyCRL signs a fresh, empty CRL for cert.
+func generateEmptyCRL(cert *x509.Certificate, key crypto.Signer) ([]byte, error) {
+	now := time.Now().UTC()
+	template := &x509.RevocationList{
+		Number:     big.NewInt(1),
+		ThisUpdate: now,
+		NextUpdate: now.Add(CRLValidity),
+	}
+	der, err := x509.CreateRevocationList(rand.Reader, template, cert, key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create initial CRL: %w", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: der}), nil
 }
