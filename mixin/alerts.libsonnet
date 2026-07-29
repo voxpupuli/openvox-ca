@@ -113,6 +113,45 @@
         ],
       },
       {
+        // Upstream CRLs are published by this CA but issued by an ancestor, so
+        // they are a separate alert group with a separate runbook: openvox-ca
+        // cannot reissue them, and the remedy is always at the parent CA. That
+        // is also why they are a separate series rather than an issuer label on
+        // puppetca_crl_next_update_timestamp_seconds — relabelling would have
+        // made the two alerts above fire for CRLs their descriptions do not
+        // describe and their remedies do not fix.
+        name: 'openvox-ca-crl-chain-expiry',
+        rules: [
+          {
+            alert: 'PuppetCAUpstreamCRLExpiringSoon',
+            expr: |||
+              puppetca_crl_chain_next_update_timestamp_seconds{%(selector)s} - time() < %(warn)d
+              and
+              puppetca_crl_chain_next_update_timestamp_seconds{%(selector)s} - time() > 0
+            ||| % {
+              selector: $._config.puppetCASelector,
+              warn: $._config.crlExpiryWarningSeconds,
+            },
+            'for': $._config.expiryFor,
+            labels: { severity: 'warning' } + $._config.alertLabels,
+            annotations: {
+              summary: 'An upstream CRL published by the Puppet CA is approaching its NextUpdate.',
+              description: 'The CRL issued by {{ $labels.issuer }} and republished by {{ $labels.instance }} reaches NextUpdate in {{ $value | humanizeDuration }}. openvox-ca cannot reissue it: refresh crl_chain_file from the issuing CA.',
+            },
+          },
+          {
+            alert: 'PuppetCAUpstreamCRLExpired',
+            expr: 'puppetca_crl_chain_next_update_timestamp_seconds{%(selector)s} - time() <= 0' % { selector: $._config.puppetCASelector },
+            'for': $._config.expiryFor,
+            labels: { severity: 'critical' } + $._config.alertLabels,
+            annotations: {
+              summary: 'An upstream CRL published by the Puppet CA has expired.',
+              description: 'The CRL issued by {{ $labels.issuer }} and republished by {{ $labels.instance }} is past its NextUpdate. Agents using the default certificate_revocation = chain will fail verification against the whole chain. Refresh crl_chain_file from the issuing CA.',
+            },
+          },
+        ],
+      },
+      {
         name: 'openvox-ca-leaf-certificates',
         rules: [
           {

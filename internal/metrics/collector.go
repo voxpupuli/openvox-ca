@@ -80,7 +80,9 @@ type Collector struct {
 	crlNumber     *prometheus.Desc
 	crlThisUpdate *prometheus.Desc
 	crlNextUpdate *prometheus.Desc
-	crlRevoked    *prometheus.Desc
+
+	crlChainNextUpdate *prometheus.Desc
+	crlRevoked         *prometheus.Desc
 
 	leafInfo       *prometheus.Desc
 	leafNotBefore  *prometheus.Desc
@@ -155,6 +157,13 @@ func NewCollector(c *ca.CA) *Collector {
 			prometheus.BuildFQName(namespace, "crl", "next_update_timestamp_seconds"),
 			"NextUpdate (expiry) time of the current CRL, in seconds since the Unix epoch.",
 			nil, nil),
+		crlChainNextUpdate: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "crl_chain", "next_update_timestamp_seconds"),
+			"NextUpdate (expiry) time of each upstream CRL published alongside this CA's own, "+
+				"labelled by issuer, in seconds since the Unix epoch. Deliberately a separate series "+
+				"from puppetca_crl_next_update_timestamp_seconds: an expiring upstream CRL is fixed at "+
+				"the parent CA, not here, so it needs its own alert and its own runbook.",
+			[]string{"issuer"}, nil),
 		crlRevoked: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "crl", "revoked_certificates"),
 			"Number of certificates currently listed in the CRL.",
@@ -198,6 +207,7 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.crlNumber
 	ch <- c.crlThisUpdate
 	ch <- c.crlNextUpdate
+	ch <- c.crlChainNextUpdate
 	ch <- c.crlRevoked
 	ch <- c.leafInfo
 	ch <- c.leafNotBefore
@@ -258,6 +268,11 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.crlRevoked, prometheus.GaugeValue, float64(snap.crlRevokedCount))
 	}
 
+	for _, up := range snap.upstreamCRLs {
+		ch <- prometheus.MustNewConstMetric(c.crlChainNextUpdate, prometheus.GaugeValue,
+			timestamp(up.NextUpdate), up.Issuer)
+	}
+
 	stateCounts := map[string]int{stateRequested: 0, stateSigned: 0, stateRevoked: 0}
 	for _, leaf := range snap.leaves {
 		stateCounts[leaf.state]++
@@ -302,6 +317,10 @@ type snapshot struct {
 	crlNextUpdate   time.Time
 	crlRevokedCount int
 
+	// upstreamCRLs are the non-self blocks of the published chain, one series
+	// each. Empty on a CA that issues its own root, which is the common case.
+	upstreamCRLs []ca.UpstreamCRLStatus
+
 	leaves []leafCert
 }
 
@@ -343,6 +362,11 @@ func (c *Collector) gather(ctx context.Context) (snapshot, error) {
 			snap.crlRevokedCount = len(crl.RevokedCertificateEntries)
 			for _, entry := range crl.RevokedCertificateEntries {
 				revoked[serialHex(entry.SerialNumber)] = true
+			}
+			if upstream, uerr := c.ca.UpstreamCRLStatuses(ctx); uerr == nil {
+				snap.upstreamCRLs = upstream
+			} else {
+				slog.Warn("Prometheus exporter: failed to read the upstream CRL chain", "error", uerr)
 			}
 		} else {
 			slog.Warn("Prometheus exporter: failed to parse CRL", "error", perr)
