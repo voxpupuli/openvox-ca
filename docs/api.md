@@ -175,9 +175,9 @@ When mTLS is enabled (both `--tls-cert` and `--tls-key` set), each endpoint requ
 | Tier | Required client cert | Endpoints |
 | --- | --- | --- |
 | **Public** | None | `GET /healthz/*`, `GET /certificate/{subject}`, `GET /certificate_revocation_list/ca`, `PUT /certificate_request/{subject}`, `GET /expirations`, `POST /ocsp`, `GET /ocsp/{request}` |
-| **Any client** | Any CA-signed cert with `clientAuth` EKU | `GET /certificate_status/{subject}` (public with `--allow-public-status`), `POST /certificate_renewal` |
+| **Any client** | Any CA-signed cert with `clientAuth` EKU | `POST /certificate_renewal` — and the presented certificate must be one this CA issued and has not revoked; renewal reissues under our authority using the certificate's own subject and extensions, which is only safe for certificates we vetted at issuance |
 | **Self or admin** | Cert CN matches path subject, OR cert is admin | `GET /certificate_request/{subject}` |
-| **Admin** | Cert is admin (see below) | `PUT /certificate_status/{subject}`, `DELETE /certificate_status/{subject}`, `DELETE /certificate_request/{subject}`, `GET /certificate_statuses/*`, `POST /sign`, `POST /sign/all`, `POST /generate/{subject}`, `PUT /clean`, `PUT /certificate_revocation_list/ca`, `PUT /certificate/{subject}` |
+| **Admin** | Cert is admin (see below) | `GET /certificate_status/{subject}` (public with `--allow-public-status`), `PUT /certificate_status/{subject}`, `DELETE /certificate_status/{subject}`, `DELETE /certificate_request/{subject}`, `GET /certificate_statuses/*`, `POST /sign`, `POST /sign/all`, `POST /generate/{subject}`, `PUT /clean`, `PUT /certificate_revocation_list/ca`, `PUT /certificate/{subject}` |
 
 Above the public tier, a presented certificate must also be **currently valid,
 not revoked, and carry the `clientAuth` extended key usage**: an expired

@@ -93,7 +93,7 @@ var _ = Describe("CA Renew", func() {
 
 		// Renew with a brand-new valid CSR for the same CN.
 		csrPEM, _ := buildCSR("renew-node")
-		renewedPEM, err := myCA.Renew(ctx, "renew-node", csrPEM)
+		renewedPEM, err := myCA.Renew(ctx, "renew-node", csrPEM, original)
 		Expect(err).NotTo(HaveOccurred())
 
 		renewed := parseCertPEM(renewedPEM)
@@ -115,12 +115,12 @@ var _ = Describe("CA Renew", func() {
 	})
 
 	It("rejects a renewal whose CSR CN does not match the subject", func() {
-		issue("renew-node")
+		presented := issue("renew-node")
 
 		// CSR carries a different CN than the renewal subject. Renew enforces
 		// CN == subject as defence-in-depth (signing.go:647) and must reject.
 		mismatchPEM, _ := buildCSR("attacker-node")
-		_, err := myCA.Renew(ctx, "renew-node", mismatchPEM)
+		_, err := myCA.Renew(ctx, "renew-node", mismatchPEM, presented)
 		Expect(err).To(HaveOccurred(),
 			"renewal must fail when the CSR CN does not match the subject")
 
@@ -131,7 +131,7 @@ var _ = Describe("CA Renew", func() {
 	})
 
 	It("rejects a renewal with a tampered CSR signature", func() {
-		issue("renew-node")
+		presented := issue("renew-node")
 
 		key, err := rsa.GenerateKey(rand.Reader, 2048)
 		Expect(err).NotTo(HaveOccurred())
@@ -144,7 +144,7 @@ var _ = Describe("CA Renew", func() {
 
 		// Renew verifies the CSR proof-of-possession signature (signing.go:642)
 		// before acquiring any lock, so a tampered CSR must be rejected.
-		_, err = myCA.Renew(ctx, "renew-node", tamperedPEM)
+		_, err = myCA.Renew(ctx, "renew-node", tamperedPEM, presented)
 		Expect(err).To(HaveOccurred(),
 			"renewal must fail when the CSR signature is invalid")
 	})
@@ -153,7 +153,7 @@ var _ = Describe("CA Renew", func() {
 		original := issue("renew-node")
 
 		csrPEM, _ := buildCSR("renew-node")
-		_, err := myCA.Renew(ctx, "renew-node", csrPEM)
+		_, err := myCA.Renew(ctx, "renew-node", csrPEM, original)
 		Expect(err).NotTo(HaveOccurred())
 
 		revoked, err := myCA.IsRevokedSerial(ctx, original.SerialNumber)
@@ -174,7 +174,7 @@ var _ = Describe("CA Renew", func() {
 		Expect(store.UpdateCRL(ctx, []byte("not a valid CRL"))).To(Succeed())
 
 		csrPEM, _ := buildCSR("renew-revoke-fail-node")
-		renewedPEM, err := myCA.Renew(ctx, "renew-revoke-fail-node", csrPEM)
+		renewedPEM, err := myCA.Renew(ctx, "renew-revoke-fail-node", csrPEM, original)
 		Expect(err).NotTo(HaveOccurred(),
 			"a failed revocation of the replaced cert must not fail the renewal")
 		renewed := parseCertPEM(renewedPEM)
@@ -184,12 +184,22 @@ var _ = Describe("CA Renew", func() {
 			"the best-effort revoke failure must be counted for alerting")
 	})
 
-	It("renews a subject that has no prior certificate", func() {
-		// Renew bypasses the pending-CSR queue, so it can issue even when no
-		// certificate exists yet. Guards that the happy path does not depend on
-		// a pre-existing cert.
+	It("renews a subject whose stored certificate has been removed", func() {
+		// Renew bypasses the pending-CSR queue, so it can issue even when
+		// storage holds no certificate for the subject. Guards that the happy
+		// path does not depend on a pre-existing stored cert.
+		//
+		// The caller must still present a certificate this CA issued — that is
+		// the renewal gate — so this models an agent that holds a valid
+		// certificate after its stored copy was cleaned, rather than a subject
+		// nobody has ever been issued for. The latter is unreachable through the
+		// API in any case: the handler requires the CSR's CN to equal the
+		// presented certificate's.
+		presented := issue("fresh-node")
+		Expect(store.DeleteCert(ctx, "fresh-node")).To(Succeed())
+
 		csrPEM, _ := buildCSR("fresh-node")
-		renewedPEM, err := myCA.Renew(ctx, "fresh-node", csrPEM)
+		renewedPEM, err := myCA.Renew(ctx, "fresh-node", csrPEM, presented)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(parseCertPEM(renewedPEM).Subject.CommonName).To(Equal("fresh-node"))
 
