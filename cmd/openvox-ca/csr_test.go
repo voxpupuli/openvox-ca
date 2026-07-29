@@ -151,6 +151,21 @@ var _ = Describe("openvox-ca csr", func() {
 		block, _ := pem.Decode(mustRead(outPath))
 		Expect(block).NotTo(BeNil())
 		Expect(block.Type).To(Equal("CERTIFICATE REQUEST"))
+
+		// The write goes through a temp file and a rename, so a failure part-way
+		// cannot leave a partial request at the destination. Nothing else would
+		// notice that being swapped back for a truncating os.WriteFile; the
+		// leftovers assertion is what makes the temp file's cleanup load-bearing.
+		leftovers, err := filepath.Glob(filepath.Join(caDir, "*.tmp*"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(leftovers).To(BeEmpty(), "the temporary file must be renamed or removed, never left behind")
+	})
+
+	It("writes nothing and names the failure when --out is unwritable", func() {
+		outPath := filepath.Join(caDir, "no-such-dir", "request.pem")
+		_, err := runCSR("--cadir", caDir, "--hostname", "puppet.example.com", "--create-key", "--out", outPath)
+		Expect(err).To(MatchError(ContainSubstring("creating a temporary file beside")))
+		Expect(outPath).NotTo(BeAnExistingFile())
 	})
 
 	It("does not clobber an established key when --create-key is passed again", func() {
@@ -307,8 +322,6 @@ func mustRead(path string) []byte {
 	return data
 }
 
-// bootstrapCAInDir creates a fully bootstrapped CA in dir, so tests can
-// exercise the paths that require an established certificate.
 // bootstrapCAWithSubject writes a self-signed CA whose DN is exactly subject,
 // including attributes pkix.Name models only as ExtraNames. Built directly
 // rather than through Init, which composes the DN from a hostname.
@@ -340,6 +353,8 @@ func bootstrapCAWithSubject(dir string, subject pkix.Name) {
 	Expect(store.SaveCAKey(ctx, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))).To(Succeed())
 }
 
+// bootstrapCAInDir creates a fully bootstrapped CA in dir, so tests can
+// exercise the paths that require an established certificate.
 func bootstrapCAInDir(dir, hostname string) {
 	GinkgoHelper()
 	store := storage.New(dir)

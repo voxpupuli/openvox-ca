@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -565,5 +566,64 @@ var _ = Describe("LoadOrCreateCAKey under concurrent creation", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(countPEMBlocks(stored, "EC PRIVATE KEY")+countPEMBlocks(stored, "PRIVATE KEY")).
 			To(Equal(1), "storage must hold exactly one key blob")
+	})
+})
+
+var _ = Describe("Init when CA material is half present", func() {
+	// The mirror of the key-without-certificate refusal. Both directions are
+	// fail-closed for the same reason, and both need an anchor: with both
+	// branches in place the surviving `!hasCert || !hasKey` fall-through is
+	// reachable only when neither exists, so reverting one leaves no
+	// compile-time trace.
+	var (
+		ctx   context.Context
+		dir   string
+		store *storage.StorageService
+		asCfg ca.AutosignConfig
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		dir = GinkgoT().TempDir()
+		store = storage.New(dir)
+		asCfg = ca.AutosignConfig{Mode: "off"}
+	})
+
+	It("refuses to bootstrap over a CA certificate whose key has gone missing", func() {
+		established := ca.New(store, asCfg, "puppet.test")
+		established.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(established.Init(ctx)).To(Succeed())
+
+		before, err := store.GetCACert(ctx)
+		Expect(err).NotTo(HaveOccurred())
+
+		// The key is lost: an unmounted volume, a failed restore, a deleted file.
+		Expect(os.Remove(filepath.Join(dir, "private", "ca_key.pem"))).To(Succeed())
+
+		restarted := ca.New(store, asCfg, "puppet.test")
+		restarted.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		err = restarted.Init(ctx)
+		Expect(err).To(HaveOccurred(), "Init must not bootstrap over an established certificate")
+		Expect(err).To(MatchError(ContainSubstring("its key is missing")))
+		Expect(err).To(MatchError(ContainSubstring("re-enrolled")),
+			"the error must say what removing the certificate costs")
+
+		after, err := store.GetCACert(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(after).To(Equal(before),
+			"the certificate every issued certificate is verified against must be untouched")
+	})
+
+	It("bootstraps normally when neither the certificate nor the key exists", func() {
+		// The fall-through both refusals narrow. Without this, a guard widened
+		// by accident to refuse the empty case would stop every first start,
+		// and no spec would say so.
+		fresh := ca.New(store, asCfg, "puppet.test")
+		fresh.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(fresh.Init(ctx)).To(Succeed())
+
+		hasCert, err := store.HasCACert(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(hasCert).To(BeTrue())
 	})
 })

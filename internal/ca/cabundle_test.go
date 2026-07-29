@@ -52,14 +52,21 @@ func caCertWithKeyUsage(ku x509.KeyUsage) []*x509.Certificate {
 // spec claims to be testing.
 func caCertWithProfile(ku x509.KeyUsage, pathLenZero bool) []*x509.Certificate {
 	GinkgoHelper()
+	return caCertWithWindow(ku, pathLenZero, time.Now().Add(-time.Hour), time.Now().Add(24*time.Hour))
+}
+
+// caCertWithWindow is caCertWithProfile with an explicit validity window, so the
+// expiry refusals can be exercised.
+func caCertWithWindow(ku x509.KeyUsage, pathLenZero bool, notBefore, notAfter time.Time) []*x509.Certificate {
+	GinkgoHelper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	Expect(err).NotTo(HaveOccurred())
 
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
 		Subject:               pkix.Name{CommonName: "Profile Test CA"},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(24 * time.Hour),
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
 		BasicConstraintsValid: true,
 		IsCA:                  true,
 		KeyUsage:              ku,
@@ -190,6 +197,43 @@ var _ = Describe("CA bundle parsing and ordering", func() {
 			Expect(certs[0].MaxPathLenZero).To(BeTrue(),
 				"the fixture must genuinely encode pathlen:0, not merely claim it")
 			Expect(ca.ValidateCABundleOrder(certs)).To(Succeed())
+		})
+
+		It("rejects an expired leading certificate", func() {
+			// The same argument the KeyUsage refusals make, and stronger: a
+			// certificate outside its window installs cleanly and is then
+			// rejected by every agent verifying the chain.
+			certs := caCertWithWindow(x509.KeyUsageCertSign|x509.KeyUsageCRLSign, false,
+				time.Now().Add(-48*time.Hour), time.Now().Add(-time.Hour))
+			err := ca.ValidateCABundleOrder(certs)
+			Expect(err).To(MatchError(ContainSubstring("expired at")))
+			Expect(err).To(MatchError(ContainSubstring("first certificate in bundle")))
+		})
+
+		It("rejects a certificate that is not valid yet", func() {
+			// Distinct wording, because the cause is usually a clock rather
+			// than a stale file, and the remedy differs accordingly.
+			certs := caCertWithWindow(x509.KeyUsageCertSign|x509.KeyUsageCRLSign, false,
+				time.Now().Add(time.Hour), time.Now().Add(48*time.Hour))
+			err := ca.ValidateCABundleOrder(certs)
+			Expect(err).To(MatchError(ContainSubstring("is not valid until")))
+			Expect(err).To(MatchError(ContainSubstring("check the clock")))
+		})
+
+		It("rejects a chain whose root has expired, not only its leading certificate", func() {
+			// The whole-chain claim, which docs/operator-cli.md states as a
+			// contract. Narrowing the check to certs[0] must fail this: only
+			// the root is outside its window here, and nothing downstream ever
+			// looks at it again.
+			certs := chainWithExpiredRoot()
+			Expect(certs).To(HaveLen(2))
+			Expect(time.Now()).To(BeTemporally("<", certs[0].NotAfter),
+				"only the root may be outside its window, or the spec proves nothing")
+
+			err := ca.ValidateCABundleOrder(certs)
+			Expect(err).To(MatchError(ContainSubstring("expired at")))
+			Expect(err).To(MatchError(ContainSubstring("certificate 2 in bundle")),
+				"the refusal must name the offending certificate, not the leading one")
 		})
 
 		It("rejects a chain whose links do not verify", func() {
@@ -356,3 +400,46 @@ var _ = Describe("CA bundle parsing and ordering", func() {
 		})
 	})
 })
+
+// chainWithExpiredRoot builds an in-window intermediate signed by a root whose
+// validity has lapsed. Only the root is expired, so a check narrowed to
+// certs[0] passes while the chain is still one every agent would reject.
+func chainWithExpiredRoot() []*x509.Certificate {
+	GinkgoHelper()
+	rootKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	Expect(err).NotTo(HaveOccurred())
+	interKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	Expect(err).NotTo(HaveOccurred())
+
+	rootTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(10),
+		Subject:               pkix.Name{CommonName: "Expired Root CA"},
+		NotBefore:             time.Now().Add(-96 * time.Hour),
+		NotAfter:              time.Now().Add(-time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	rootDER, err := x509.CreateCertificate(rand.Reader, rootTmpl, rootTmpl, &rootKey.PublicKey, rootKey)
+	Expect(err).NotTo(HaveOccurred())
+	root, err := x509.ParseCertificate(rootDER)
+	Expect(err).NotTo(HaveOccurred())
+
+	// Issued inside the root's window so the signature chain still verifies;
+	// it is only the root that has since lapsed.
+	interTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(11),
+		Subject:               pkix.Name{CommonName: "Intermediate Under Expired Root"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	interDER, err := x509.CreateCertificate(rand.Reader, interTmpl, root, &interKey.PublicKey, rootKey)
+	Expect(err).NotTo(HaveOccurred())
+	inter, err := x509.ParseCertificate(interDER)
+	Expect(err).NotTo(HaveOccurred())
+
+	return []*x509.Certificate{inter, root}
+}

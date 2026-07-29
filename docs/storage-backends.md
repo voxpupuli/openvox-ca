@@ -460,26 +460,46 @@ request is outstanding and no certificate is coming), removing it lets the CA
 bootstrap afresh. **This retires the CA:** every certificate already issued
 stops verifying, and every agent must be re-enrolled. There is no
 `openvox-ca-ctl` command for it precisely because it is not an operation to
-perform casually.
+perform casually. Take a backup and stop the CA first.
 
-Where the key lives depends on the backend:
+Where the key lives depends on the backend. Note the physical names differ from
+the logical key `ca_key`:
 
 | Backend | Where the key is | How to remove it |
 | --- | --- | --- |
 | `filesystem` (default) | `private/ca_key.pem` under the cadir | `rm` the file |
 | `ca_key_file` overlay | the configured path | `rm` the file |
-| `sqlite`, `postgres`, `mysql` | the blob table, key `ca_key` | `DELETE FROM <table> WHERE key = 'ca_key';` — see [Internals](#internals) for the table name |
-| `etcd` | `<prefix>/ca_key` | `etcdctl del <prefix>/ca_key` |
-| `redis` / `valkey` | `<prefix>:ca_key` | `redis-cli DEL <prefix>:ca_key` |
-| `openbao` (key provider) | the Transit key named by `key_name` | Delete the key in OpenBao — it must have `deletion_allowed` set. Removing the CA certificate instead is usually the better move; see below. |
+| `sqlite`, `postgres`, `mysql` | table `puppet_ca_blobs`, column `blob_key`, value `ca_key` | `DELETE FROM puppet_ca_blobs WHERE blob_key = 'ca_key';` |
+| `etcd` | `<prefix>/ca/key` | `etcdctl del <prefix>/ca/key` |
+| `redis` / `valkey` | `<prefix>:ca:key` | `redis-cli DEL <prefix>:ca:key` |
 
-With `ca_key_provider: openbao` the key is not in a storage backend at all, and
-deleting a Transit key is irreversible. If the intent is to abandon a
-half-finished sub-CA and start over, prefer keeping the key and removing the CA
-certificate — the CA then bootstraps a fresh self-signed certificate over the
-existing Transit key, which is a smaller and reversible change.
+The column is `blob_key` rather than `key` because `KEY` is reserved in
+MySQL/MariaDB. The etcd and Redis paths are `ca/key` and `ca:key`, not `ca_key` —
+and both `etcdctl del` and `redis-cli DEL` exit successfully having deleted
+nothing when the name is wrong, so check the reported count. A zero means you
+have the wrong name, not that the problem is solved. Do not reach for
+`del --prefix` to compensate: that removes the whole CA.
 
-Take a backup before any of these. Stop the CA first.
+#### With the CA key at a provider
+
+`ca_key_provider: openbao` puts the key in a Transit engine rather than a
+storage backend, and `hasCAKey` asks the provider directly — so a populated
+Transit slot counts as present however empty the backend is. Three routes exist
+for abandoning a half-finished sub-CA, and only the first two are cheap:
+
+1. **Finish the round trip.** Have the parent sign the outstanding request and
+   install it with `openvox-ca import-ca-cert`. This is the intended path and
+   costs nothing.
+2. **Issue a certificate for the existing key.** Any certificate that binds the
+   Transit key satisfies the startup check, including a self-signed one produced
+   out of band and installed with `import-ca-cert`.
+3. **Delete the Transit key**, which requires `deletion_allowed` on it, and let
+   the CA bootstrap afresh. Irreversible, and it retires the CA as above.
+
+Deleting the *CA certificate* and keeping the key is **not** a route: that is
+exactly the state the startup refusal exists for, so the server will not
+bootstrap over it. It leaves you with less to recover from and no closer to a
+working CA.
 
 ## Migrating between backends
 

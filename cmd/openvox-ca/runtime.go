@@ -110,3 +110,19 @@ func resolveRuntime(ctx context.Context, cfg *serverConfig, withKeyProvider bool
 
 	return rt, nil
 }
+
+// roleMayReachCAKey reports whether a process running as role is permitted to
+// construct a CA key provider of its own.
+//
+// Only the frontend is not. It proxies every signature to the isolated signer
+// process, so opening its own authenticated session to the key backend would
+// give it reach over a key it is specifically not allowed to use. Every other
+// role — the signer, and the empty single-process role — needs the key.
+//
+// A named function rather than an inline `role != "frontend"` so the predicate
+// can be tested directly. The half that can regress is the mapping, not
+// resolveRuntime's handling of the boolean, and an inverted or mistyped
+// comparison at the call site would silently hand the frontend the key.
+func roleMayReachCAKey(role string) bool {
+	return role != "frontend"
+}

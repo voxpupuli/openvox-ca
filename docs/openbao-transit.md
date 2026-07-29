@@ -341,8 +341,12 @@ spec:
       containers:
         - name: csr
           image: ghcr.io/voxpupuli/openvox-ca:1.0.0   # pin to the Deployment's tag
-          # No --out: the request goes to stdout, so `kubectl logs job/openvox-ca-csr`
-          # retrieves it after the pod has exited.
+          # No --out: the request goes to stdout, so it survives the pod. Logs
+          # go to stderr and kubectl merges the two streams, so extract the
+          # block rather than redirecting wholesale:
+          #   kubectl logs job/openvox-ca-csr \
+          #     | sed -n '/BEGIN CERTIFICATE REQUEST/,/END CERTIFICATE REQUEST/p'
+          # Setting logfile in the ConfigMap keeps logs out of the stream entirely.
           args: ["csr"]
           volumeMounts:
             - { name: config, mountPath: /etc/puppet-ca }
@@ -378,11 +382,11 @@ CRL and every replica caches the CA certificate for its process lifetime.
 > read-modify-write spanning the certificate and the CRL, and it takes the
 > bootstrap lock to keep a concurrent revocation from being lost. That lock is
 > only genuinely cross-process on the backends that implement one — PostgreSQL,
-> MySQL, etcd and Redis. On the default `filesystem` backend it degrades to a
-> mutex inside each process, so the CLI and a running server do not serialise
-> against each other at all, and a revocation landing mid-import is silently
-> discarded. Shared backends can take the import against a live CA; on
-> `filesystem`, stop it.
+> MySQL, etcd and Redis. On `filesystem` and `sqlite` it degrades to a mutex
+> inside each process, so the CLI and a running server do not serialise against
+> each other at all, and a revocation landing mid-import is silently discarded.
+> On any backend without a cross-process lock — `filesystem` and `sqlite` — stop
+> the CA before importing. The shared backends can take it against a live CA.
 
 1. Keep a copy of the bundle you are about to replace:
    `curl -sk https://<ca>/puppet-ca/v1/certificate/ca > ca-bundle.backup.pem`.

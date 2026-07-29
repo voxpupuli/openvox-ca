@@ -322,3 +322,32 @@ var _ = Describe("ImportCAMaterial: failures after the certificate is written", 
 		Expect(err).NotTo(MatchError(ContainSubstring("--force")))
 	})
 })
+
+var _ = Describe("ImportCACertificate: the --force retry hint", func() {
+	// The two hints must be mutually distinguishing. Asserting only the plain
+	// one leaves the split pointless: passing retryPlain at the --force call
+	// site would keep every spec green while telling that operator to "re-run
+	// this command", which ImportCACertificate's own ErrCACertExists check then
+	// refuses, because the certificate has already been written.
+	It("tells an import-ca-cert operator to use --force, not a bare re-run", func() {
+		ctx := context.Background()
+		dir := GinkgoT().TempDir()
+		store := storage.New(dir)
+		chain, err := testutil.GenerateTestChain("node.example.com")
+		Expect(err).NotTo(HaveOccurred())
+
+		keyBlock, _ := pem.Decode(chain.InterKeyPEM)
+		parsed, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		signer, ok := parsed.(crypto.Signer)
+		Expect(ok).To(BeTrue())
+
+		Expect(store.EnsureDirs(ctx)).To(Succeed())
+		Expect(os.RemoveAll(filepath.Join(dir, "ca_pub.pem"))).To(Succeed())
+		Expect(os.MkdirAll(filepath.Join(dir, "ca_pub.pem"), 0o755)).To(Succeed())
+
+		_, err = ca.ImportCACertificate(ctx, store, chain.Bundle, signer, ca.CRLValidity, false)
+		Expect(err).To(MatchError(ContainSubstring("storage is now inconsistent")))
+		Expect(err).To(MatchError(ContainSubstring("with --force to finish the import")))
+	})
+})
