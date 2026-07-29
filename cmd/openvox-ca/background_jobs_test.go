@@ -59,4 +59,25 @@ var _ = Describe("backgroundJobs", func() {
 		Expect(jobNames(&serverConfig{DisableCRLRefresh: true, EnableExpiredCertCleanup: false})).
 			To(ConsistOf(jobCRLSync))
 	})
+
+	// crl_chain_file gates the chain refresh on its own, and nothing else gates
+	// it. The failure this pins is not "the job is missing" but "the job is
+	// there and never runs": the ancestor CRLs would be read once at startup
+	// and never again, and under Puppet's default certificate_revocation =
+	// chain an ancestor CRL that lapses afterwards is a fleet-wide verification
+	// failure that clears only on restart. Gating it on any other feature --
+	// re-signing, cleanup, a serving certificate -- puts that outcome behind a
+	// switch that has nothing to do with it.
+	It("runs the chain refresh when crl_chain_file is set, and only then", func() {
+		Expect(jobNames(&serverConfig{})).NotTo(ContainElement(jobCRLChainRefresh))
+		Expect(jobNames(&serverConfig{CRLChainFile: "/etc/openvox-ca/upstream-crls.pem"})).
+			To(ContainElement(jobCRLChainRefresh))
+
+		// Every other switch off, chain file set: it still runs.
+		Expect(jobNames(&serverConfig{
+			DisableCRLRefresh:        true,
+			EnableExpiredCertCleanup: false,
+			CRLChainFile:             "/etc/openvox-ca/upstream-crls.pem",
+		})).To(ConsistOf(jobCRLSync, jobCRLChainRefresh))
+	})
 })

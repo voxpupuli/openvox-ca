@@ -19,10 +19,18 @@ package ca_test
 
 import (
 	"context"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha1"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
+	"math/big"
 	"os"
 	"path/filepath"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -41,6 +49,64 @@ func writeChainFile(blobs ...[]byte) string {
 	}
 	Expect(os.WriteFile(path, joined, 0o644)).To(Succeed())
 	return path
+}
+
+// upstreamCAWithKey is upstreamCA, also returning the key so a spec can issue a
+// second CRL from the same issuer.
+func upstreamCAWithKey(cn string) (*x509.Certificate, crypto.Signer, []byte) {
+	GinkgoHelper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	Expect(err).NotTo(HaveOccurred())
+	cert := selfSignedCA(cn, key)
+	return cert, key, emptyCRLNumbered(cert, key, 7)
+}
+
+// crlFromImpostorNamed issues a CRL whose issuer DN matches cn but whose
+// signature comes from an unrelated key.
+func crlFromImpostorNamed(cn string) []byte {
+	GinkgoHelper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	Expect(err).NotTo(HaveOccurred())
+	return emptyCRLNumbered(selfSignedCA(cn, key), key, 11)
+}
+
+// selfSignedCA mints a self-signed CA certificate for cn under key.
+func selfSignedCA(cn string, key *ecdsa.PrivateKey) *x509.Certificate {
+	GinkgoHelper()
+	pubDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	Expect(err).NotTo(HaveOccurred())
+	skid := sha1.Sum(pubDER)
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	Expect(err).NotTo(HaveOccurred())
+
+	tmpl := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: cn},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		SubjectKeyId:          skid[:],
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	Expect(err).NotTo(HaveOccurred())
+	cert, err := x509.ParseCertificate(der)
+	Expect(err).NotTo(HaveOccurred())
+	return cert
+}
+
+// emptyCRLNumbered issues an empty CRL from cert with the given CRL number.
+func emptyCRLNumbered(cert *x509.Certificate, key crypto.Signer, number int64) []byte {
+	GinkgoHelper()
+	now := time.Now().UTC()
+	der, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+		Number:     big.NewInt(number),
+		ThisUpdate: now,
+		NextUpdate: now.Add(30 * 24 * time.Hour),
+	}, cert, key)
+	Expect(err).NotTo(HaveOccurred())
+	return pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: der})
 }
 
 var _ = Describe("crl_chain_file", func() {
@@ -97,8 +163,7 @@ var _ = Describe("crl_chain_file", func() {
 		// SECURITY: this content is served verbatim to every agent. Without
 		// the check the file would be a way to inject arbitrary bytes into
 		// every agent's CRL store.
-		stranger, strangerCRL := upstreamCA("Unrelated CA")
-		Expect(stranger).NotTo(BeNil())
+		_, strangerCRL := upstreamCA("Unrelated CA")
 		trustUpstream()
 		myCA.CRLChainFile = writeChainFile(strangerCRL)
 
@@ -187,7 +252,9 @@ var _ = Describe("crl_chain_file", func() {
 		myCA.CRLChainFile = path
 
 		_, err := myCA.RefreshCRLChainFile(ctx)
-		Expect(err).To(HaveOccurred())
+		Expect(err).To(MatchError(ContainSubstring("crl_chain_file")),
+			"the error must name the file, not just fail")
+		Expect(err).To(MatchError(ContainSubstring("parsing CRL 1")))
 		Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(1), "the published chain is untouched")
 	})
 
@@ -215,7 +282,7 @@ var _ = Describe("crl_chain_file", func() {
 			myCA.CRLChainFile = writeChainFile(upsCRL)
 			Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
 
-			statuses, err := myCA.UpstreamCRLStatuses(mustGetCRL(store, ctx))
+			statuses, err := myCA.UpstreamCRLStatuses(mustGetCRL(ctx, store))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(statuses).To(HaveLen(1))
 			Expect(statuses[0].Issuer).To(ContainSubstring("Upstream Root CA"))
@@ -223,7 +290,7 @@ var _ = Describe("crl_chain_file", func() {
 		})
 
 		It("is empty on a CA with no upstream", func() {
-			statuses, err := myCA.UpstreamCRLStatuses(mustGetCRL(store, ctx))
+			statuses, err := myCA.UpstreamCRLStatuses(mustGetCRL(ctx, store))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(statuses).To(BeEmpty())
 		})
@@ -339,5 +406,91 @@ var _ = Describe("crl_chain_file: absent versus empty", func() {
 		chain := crlBlocks(mustGetCRL(ctx, store))
 		Expect(chain).To(HaveLen(2))
 		Expect(chain[1].Issuer.CommonName).To(Equal("Upstream Root CA"))
+	})
+})
+
+var _ = Describe("crl_chain_file: what makes a CRL acceptable", func() {
+	var (
+		ctx      context.Context
+		store    *storage.StorageService
+		myCA     *ca.CA
+		upstream *x509.Certificate
+		upsKey   crypto.Signer
+		upsCRL   []byte
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		store = storage.New(GinkgoT().TempDir())
+		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		myCA.LeafKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(myCA.Init(ctx)).To(Succeed())
+		upstream, upsKey, upsCRL = upstreamCAWithKey("Upstream Root CA")
+	})
+
+	trustUpstream := func() {
+		GinkgoHelper()
+		ours, err := store.GetCACert(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		upstreamPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: upstream.Raw})
+		Expect(store.SaveCACert(ctx, append(append([]byte{}, ours...), upstreamPEM...))).To(Succeed())
+	}
+
+	It("rejects a CRL matching the bundle's issuer name but signed by another key", func() {
+		// The check is a signature, not a name comparison. Nothing else in the
+		// suite distinguishes the two, so relaxing it to issuer-DN matching —
+		// which a parent rotating its CRL-signing key would motivate — would
+		// land green. Under a shared root two siblings can hold the same DN,
+		// so a name match would accept a CRL from the wrong CA entirely.
+		trustUpstream()
+		impostorCRL := crlFromImpostorNamed("Upstream Root CA")
+		myCA.CRLChainFile = writeChainFile(impostorCRL)
+
+		rewritten, err := myCA.RefreshCRLChainFile(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(rewritten).To(BeFalse(), "a same-named CRL from a different key was published")
+		Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(1))
+		Expect(myCA.CRLChainDiscarded()).To(BeNumerically(">", 0))
+	})
+
+	It("republishes a newer CRL from the same issuer", func() {
+		// The transition the feature exists to serve: the parent reissues its
+		// CRL and the operator refreshes the file. Nothing covered it — every
+		// other spec adds or removes an issuer rather than replacing one.
+		trustUpstream()
+		myCA.CRLChainFile = writeChainFile(upsCRL)
+		Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
+
+		first := crlBlocks(mustGetCRL(ctx, store))
+		Expect(first).To(HaveLen(2))
+
+		newer := emptyCRLNumbered(upstream, upsKey, 99)
+		myCA.CRLChainFile = writeChainFile(newer)
+
+		rewritten, err := myCA.RefreshCRLChainFile(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(rewritten).To(BeTrue(), "a newer CRL from the same issuer was not picked up")
+
+		after := crlBlocks(mustGetCRL(ctx, store))
+		Expect(after).To(HaveLen(2))
+		Expect(after[1].Number.Int64()).To(Equal(int64(99)))
+	})
+
+	It("fails a revocation rather than publishing a corrupt file", func() {
+		// Fail-closed is the right choice — the alternative is truncating the
+		// chain — but it newly couples revocation to an externally refreshed
+		// file, so it is worth pinning rather than leaving implicit.
+		trustUpstream()
+		path := filepath.Join(GinkgoT().TempDir(), "corrupt.pem")
+		Expect(os.WriteFile(path, []byte("-----BEGIN X509 CRL-----\nZm9v\n-----END X509 CRL-----\n"), 0o644)).To(Succeed())
+		myCA.CRLChainFile = path
+
+		res, err := myCA.Generate(ctx, "node1.test", nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res).NotTo(BeNil())
+
+		Expect(myCA.Revoke(ctx, "node1.test")).NotTo(Succeed(),
+			"a corrupt chain file must not be published, and must not pass silently")
 	})
 })

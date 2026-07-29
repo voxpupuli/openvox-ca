@@ -25,6 +25,9 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
 
 // setEnv sets an environment variable for the duration of the current spec,
@@ -821,5 +824,45 @@ compile-02.example.com
 		cns, err := loadPuppetServerFile(path)
 		Expect(err).NotTo(HaveOccurred(), "unexpected error")
 		Expect(cns).To(BeEmpty(), "expected empty slice for comment-only file, got %v", cns)
+	})
+})
+
+// --- crl_chain_file wiring ---
+
+var _ = Describe("crl_chain_file wiring", func() {
+	// The setting is file-and-environment only, and its failure mode is total
+	// silence: a value that never reaches ca.CRLChainFile leaves the feature
+	// off with no error, no warning and no metric — the published chain simply
+	// never gains the ancestor CRLs the operator configured.
+	BeforeEach(func() { clearServerEnv() })
+
+	It("is empty by default", func() {
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.CRLChainFile).To(BeEmpty())
+	})
+
+	It("is read from the config file", func() {
+		path := writeTempConfig("crl_chain_file: /etc/puppet-ca/upstream-crls.pem\n")
+		cfg, err := loadServerConfig(path)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.CRLChainFile).To(Equal("/etc/puppet-ca/upstream-crls.pem"))
+	})
+
+	It("is read from the environment, which outranks the file", func() {
+		path := writeTempConfig("crl_chain_file: /from/file.pem\n")
+		setEnv("PUPPET_CA_CRL_CHAIN_FILE", "/from/env.pem")
+		cfg, err := loadServerConfig(path)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.CRLChainFile).To(Equal("/from/env.pem"))
+	})
+
+	It("reaches the CA, which is the step whose absence is silent", func() {
+		cfg, err := loadServerConfig(writeTempConfig("crl_chain_file: /etc/puppet-ca/upstream-crls.pem\n"))
+		Expect(err).NotTo(HaveOccurred())
+
+		myCA := ca.New(storage.New(GinkgoT().TempDir()), ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		Expect(applyCAConfig(myCA, cfg)).To(Succeed())
+		Expect(myCA.CRLChainFile).To(Equal("/etc/puppet-ca/upstream-crls.pem"))
 	})
 })
