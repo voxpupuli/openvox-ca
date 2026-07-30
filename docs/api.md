@@ -182,8 +182,18 @@ When mTLS is enabled (both `--tls-cert` and `--tls-key` set), each endpoint requ
 Above the public tier, a presented certificate must also be **currently valid and
 not revoked**: an expired certificate, or one listed in the CRL, is refused at
 every tier — including `POST /certificate_renewal`, so revoking an agent's
-certificate immediately cuts off its access to the CA API rather than only
-preventing the next renewal.
+certificate cuts off its access to the CA API, not merely its next renewal.
+
+> **Revocation is not enforced cluster-wide straight away.** The check reads an
+> in-memory copy of the CRL that each process loads at startup and thereafter
+> refreshes only when *that* process re-signs the CRL — on revocation, reissue,
+> or the periodic refresh once the CRL is near expiry. On the HA backends, a
+> revocation performed against one replica reaches shared storage immediately,
+> and `GET /certificate_revocation_list/ca` serves it from there, but a peer
+> replica keeps admitting the revoked certificate until it re-signs or restarts.
+> With default settings that can be weeks. Restart the fleet, or force a
+> re-sign on each replica, when locking out a compromised agent promptly
+> matters.
 
 In plain HTTP mode (no TLS), all endpoints are accessible without authentication:
 the authorisation middleware is only installed when `tls_cert` and `tls_key` are
