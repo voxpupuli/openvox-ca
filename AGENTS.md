@@ -123,10 +123,14 @@ Conventions:
 - `internal/api/authbaseline_test.go` is the recorded authorisation baseline:
   every client class against every covered route, as the middleware behaves
   today. A change that deliberately alters who may reach an endpoint updates the
-  affected row, sets `changedBy`, and refreshes that row's `fingerprint`, all in
-  the same commit — the suite fails otherwise, which is the point. Update
-  `docs/api.md#authorization-tiers` in step, since it publishes the same matrix
-  to operators.
+  affected row, records the responsible change in `changedBy`, and refreshes
+  that row's `fingerprint` — all in the same commit. Leaving `changedBy` empty
+  fails permanently, because each row also carries a `baseline` digest of its
+  originally committed outcomes that is never updated. Do not edit `baseline`.
+  The suite cannot judge whether the attribution is *accurate*; reviewers
+  should.
+  Update `docs/api.md#authorization-tiers` in step, since it publishes the same
+  matrix to operators.
 
 ### Integration suites (build-tagged)
 

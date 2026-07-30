@@ -191,9 +191,11 @@ certificate cuts off its access to the CA API, not merely its next renewal.
 > revocation performed against one replica reaches shared storage immediately,
 > and `GET /certificate_revocation_list/ca` serves it from there, but a peer
 > replica keeps admitting the revoked certificate until it re-signs or restarts.
-> With default settings that can be weeks. Restart the fleet, or force a
-> re-sign on each replica, when locking out a compromised agent promptly
-> matters.
+> The periodic refresh does not bound this: it re-signs on only whichever
+> replica wins the shared CRL lock, and the peers then observe a fresh CRL and
+> do nothing, so a peer can stay stale well past the refresh interval. Restart
+> the fleet, or force a re-sign on each replica, when locking out a compromised
+> agent promptly matters.
 
 In plain HTTP mode (no TLS), all endpoints are accessible without authentication:
 the authorisation middleware is only installed when `tls_cert` and `tls_key` are
