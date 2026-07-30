@@ -956,9 +956,9 @@ var _ = Describe("Auth Middleware", func() {
 // deliberately different instruments. This one infers the *tier* each route
 // sits in by probing three certificates and reading the shape of the answers;
 // that one records the observable HTTP outcome for every client class in its
-// expectedClientClasses list
-// and asserts each cell. A tier change should move a row in both, and a change
-// that moves only one is worth understanding before it is accepted.
+// expectedClientClasses list and asserts each cell. For the routes both cover,
+// a tier change should move a row in both, and a change that moves only one is
+// worth understanding before it is accepted.
 var _ = Describe("lookupTier classification", func() {
 	var (
 		tmpDir         string
