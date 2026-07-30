@@ -67,9 +67,10 @@ All endpoints are served under both the bare path and `/puppet-ca/v1/<path>`, so
 Requires a valid CA-signed client certificate. The new certificate is issued immediately without entering the pending-CSR queue or autosign evaluation, and the certificate it replaces is revoked once the new one is safely stored (see `revoke_on_auto_renew` below for the auto-renewal case).
 
 - **CSR body (re-key):** the CSR Common Name must match the authenticated client CN — an agent can only renew its own certificate, not another's. Issues a certificate for the new key in the CSR. Puppet OID extensions are copied from the CSR **except** authorization-arc OIDs (`1.3.6.1.4.1.34380.1.3.*`, such as `pp_cli_auth`), which are stripped so a submitted CSR cannot request elevated privileges.
-If the CA has not finished initialising, the request returns `503 Service Unavailable` (retry once it is ready), on both the CSR and empty-body paths.
 
 - **Empty body (wire-compatible auto-renewal):** matches the request real OpenVox/Puppet agents send by default (`hostcert_renewal_interval`, and the `puppet ssl renew_cert` CLI action). Identity and key possession come solely from the mTLS-presented client certificate; the same public key is reissued with a fresh serial and validity, carrying forward the original certificate's SANs and Puppet OID extensions unchanged. Unlike the CSR path, this **preserves authorization-arc OIDs** (e.g. `pp_cli_auth`): they were already vetted when the presented certificate was issued, so a cert that legitimately holds them keeps them across renewal.
+
+If the CA has not finished initialising, the request returns `503 Service Unavailable` (retry once it is ready).
 
 If the presented certificate's (or CSR's) key falls below the CA key-strength policy — for example an RSA-1024 key imported from a legacy CA — the request is rejected with `422 Unprocessable Entity` rather than renewed; the agent must re-key via the CSR path with a compliant key.
 
@@ -177,7 +178,7 @@ When mTLS is enabled (both `--tls-cert` and `--tls-key` set), each endpoint requ
 | Tier | Required client cert | Endpoints |
 | --- | --- | --- |
 | **Public** | None | `GET /healthz/*`, `GET /certificate/{subject}`, `GET /certificate_revocation_list/ca`, `PUT /certificate_request/{subject}`, `GET /expirations`, `POST /ocsp`, `GET /ocsp/{request}` |
-| **Any client** | Any CA-signed cert with `clientAuth` EKU | `POST /certificate_renewal` — and the presented certificate must be one this CA issued, has not revoked, and is for the subject being renewed; renewal reissues under our authority using that certificate's own subject, which is only safe for names we assigned. The empty-body path also carries its extensions forward unchanged; the CSR path takes extensions from the CSR and strips authorization-arc OIDs (see [Certificate renewal](#certificate-renewal)) |
+| **Any client** | Any CA-signed cert with `clientAuth` EKU | `POST /certificate_renewal` — and the presented certificate must be one this CA issued, has not revoked, and is for the subject being renewed; renewal reissues under our authority using that certificate's own subject, which is only safe for names we assigned. The empty-body path also carries that certificate's SANs and Puppet OID extensions forward unchanged; the CSR path takes Puppet OID extensions from the CSR and strips authorization-arc OIDs (see [Certificate renewal](#certificate-renewal)) |
 | **Self or admin** | Cert CN matches path subject, OR cert is admin | `GET /certificate_request/{subject}` |
 | **Admin** | Cert is admin (see below) | `GET /certificate_status/{subject}` (public with `--allow-public-status`), `PUT /certificate_status/{subject}`, `DELETE /certificate_status/{subject}`, `DELETE /certificate_request/{subject}`, `GET /certificate_statuses/*`, `POST /sign`, `POST /sign/all`, `POST /generate/{subject}`, `PUT /clean`, `PUT /certificate_revocation_list/ca`, `PUT /certificate/{subject}` |
 
