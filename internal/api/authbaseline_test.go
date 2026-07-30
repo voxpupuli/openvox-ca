@@ -171,8 +171,22 @@ const (
 //
 // Every other outcome (404 for an absent subject, 400 for a malformed body)
 // means the request got past authorisation, which is what this table measures.
+//
+// One dimension remains open, deliberately and stated here rather than
+// discovered later: a middleware denial that used some *other* status is still
+// bucketed as admitted. 401 and 407 are treated as denials below because they
+// are unambiguous and this package emits neither today. A narrowing that hid a
+// resource behind 404 — the standard anti-enumeration response, and a plausible
+// shape for the certificate_status change, given lookupTier's own comment cites
+// enumeration as the reason that route is gated — would be invisible here,
+// because 404 is also what the handlers return for an absent subject. A change
+// of that shape needs its own anchor.
 func classify(rec *httptest.ResponseRecorder) denialKind {
-	if rec.Code != http.StatusForbidden {
+	switch rec.Code {
+	case http.StatusUnauthorized, http.StatusProxyAuthRequired:
+		return deniedByMiddleware
+	case http.StatusForbidden:
+	default:
 		return admitted
 	}
 	body := strings.TrimSpace(rec.Body.String())
@@ -204,10 +218,11 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 
 		store = storage.New(tmpDir)
 		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
-		// No LeafKeyConfig here: this block mints its certificates directly with
-		// issueClientCert and never issues through the CA, so the setting had no
-		// consumer and its rationale described a fixture path this Describe does
-		// not have.
+		// caIssuedClientCert and revokedClientCert both issue through the CA, so
+		// leaf generation is on the fixture path here and runs twice per class
+		// set. Without this the CA falls back to DefaultLeafKeyConfig, which is
+		// RSA-2048, and the matrix pays for ~46 of them.
+		myCA.LeafKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
 		Expect(store.EnsureDirs(ctx)).To(Succeed())
 		Expect(store.SaveCAKey(ctx, cachedKeyPEM)).To(Succeed())
 		Expect(store.SaveCACert(ctx, cachedCrtPEM)).To(Succeed())
@@ -244,9 +259,10 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 		// is the certificate — its serial is what the CRL names — and RSA key
 		// generation is the whole cost of minting one. Re-minting per route with
 		// cached keys keeps the independence and takes the matrix from ~250
-		// RSA-2048 generations to four. The revoked, CA-issued and foreign
-		// fixtures still generate a P-256 key each per call, which is cheap
-		// enough not to be worth pooling.
+		// RSA-2048 generations to four. The CA-issued and revoked fixtures go
+		// through myCA.Generate, so they are ECDSA P-256 by virtue of the
+		// LeafKeyConfig set above; the foreign fixture generates its own CA and
+		// leaf, also P-256. None is worth pooling at that cost.
 		keyPool := newRSAKeyPool(4)
 
 		newClasses = func() []clientClass {
@@ -323,12 +339,13 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 			fingerprint: "20efd5d41098722c",
 		},
 		{
-			// Its own branch in the classifier, and the only genuinely
-			// uncovered route among those omitted. It returns certificate
-			// expiry metadata to any caller with no client certificate, and it
-			// is the obvious sibling question when certificate_status narrows
-			// to admin-only — so a change that tightens, loosens or reorders
-			// this case relative to the one above it should move a cell here.
+			// Has its own branch in the classifier rather than sharing one with
+			// a covered route, which is why it earns a row of its own. It
+			// returns certificate expiry metadata to any caller with no client
+			// certificate, and it is the obvious sibling question when
+			// certificate_status narrows to admin-only — so a change that
+			// tightens, loosens or reorders this case relative to the one above
+			// it moves a cell here.
 			name: "public: read expiry metadata", method: "GET", path: "/expirations",
 			denied: map[string]bool{
 				"none": false, "own-ca-plain": false, "own-ca-allowlisted": false,
@@ -556,16 +573,61 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 	// tier-classified and refused before routing ever happens. Dropping
 	// "/puppet-ca/v1" from the prefix list would therefore leave every recorded
 	// cell satisfied. This pins existence separately.
+	//
+	// It presents the allow-listed admin certificate, because with no
+	// certificate only the four public rows reach the mux at all — the other
+	// seven are refused at auth.go before routing, so a 404 could never be
+	// observed for them and those iterations would assert nothing. That was the
+	// first version of this spec, and dropping the prefix still failed it, which
+	// is how the gap survived: the failure came from the public rows alone.
+	//
+	// Its own server and store, because admission has side effects: POST
+	// /sign/all signs pending CSRs, PUT /certificate_revocation_list/ca
+	// reissues, and POST /certificate_renewal reaches AutoRenew.
 	It("actually registers the prefixed routes", func() {
+		store := storage.New(GinkgoT().TempDir())
+		scratchCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		scratchCA.LeafKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(store.EnsureDirs(ctx)).To(Succeed())
+		Expect(store.SaveCAKey(ctx, cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(ctx, cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(ctx, cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial(ctx, "0001")).To(Succeed())
+		Expect(store.TouchInventory(ctx)).To(Succeed())
+		Expect(scratchCA.Init(ctx)).To(Succeed())
+
+		scratch := api.New(scratchCA)
+		scratch.AuthConfig = &api.AuthConfig{
+			CACert:    caCert,
+			AllowList: map[string]bool{"puppet-server": true},
+		}
+		scratchMux := scratch.Routes()
+		// A fresh admin certificate per route, for the reason the class fixtures
+		// give: POST /certificate_renewal succeeds here and, with
+		// RevokeOnAutoRenew defaulting to true, revokes the certificate it was
+		// shown. Reusing one across the loop revoked it midway and every later
+		// route came back "access denied" from the CRL check — which looked
+		// exactly like an authorisation failure.
+		adminKey := newRSAKeyPool(1)[0]
+
 		var missing []string
 		for _, route := range routes {
 			req := httptest.NewRequest(route.method, "/puppet-ca/v1"+route.path, strings.NewReader(""))
-			req.TLS = &tls.ConnectionState{}
+			req = withClientCert(req, clientCertFromKey(adminKey, "puppet-server", caCert, caKey, false, false))
 			rec := httptest.NewRecorder()
-			mux.ServeHTTP(rec, req)
-			if rec.Code == http.StatusNotFound {
+			scratchMux.ServeHTTP(rec, req)
+			// A bare 404 is ambiguous: the handlers return one for an absent
+			// subject, which several of these routes legitimately do against a
+			// scratch store. Go's ServeMux writes its own body for a path it has
+			// no pattern for, and that is the one that means "unregistered".
+			if rec.Code == http.StatusNotFound &&
+				strings.Contains(rec.Body.String(), "404 page not found") {
 				missing = append(missing, "  "+route.method+" /puppet-ca/v1"+route.path)
 			}
+			Expect(classify(rec)).NotTo(Equal(deniedByMiddleware),
+				"%s %s: the admin certificate should reach the mux, so a denial here means this "+
+					"spec has stopped testing registration (code=%d body=%q)",
+				route.method, route.path, rec.Code, strings.TrimSpace(rec.Body.String()))
 		}
 		Expect(missing).To(BeEmpty(),
 			"these prefixed paths returned 404, so the prefix is no longer registered "+
