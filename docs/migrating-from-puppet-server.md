@@ -380,16 +380,26 @@ escape hatch, not the way to restore agent access.
 
 `POST /certificate_renewal` additionally requires that the presented
 certificate is one this CA issued, has not revoked, and is for the subject being
-renewed. Today you will not see a
-distinct error for it: the authorisation middleware trusts exactly this CA's
-certificate, so a foreign or revoked certificate is refused earlier, on every
-mTLS route, with `403 access denied`. The CA's own
-`403 certificate not eligible for renewal` becomes reachable once a second
-issuer can be trusted for client authentication. Renewal reissues under
+renewed. Today you will not see a distinct error for the first two: the
+authorisation middleware trusts exactly this CA's certificate, so a foreign or
+revoked certificate is refused earlier, on every mTLS route, with
+`403 access denied`. The CA's own `403 certificate not eligible for renewal`
+becomes reachable once a second issuer can be trusted for client
+authentication.
+
+The third is a defence-in-depth invariant on the internal API rather than
+something a request can trip: the HTTP handler derives the subject from the
+presented certificate, so the two always agree. It guards against a future
+caller that passes them separately, and a second trust anchor does not make it
+reachable.
+
+Renewal reissues under
 this CA's authority using the presented certificate's own subject, so it is
-only meaningful for names this CA assigned. (Extensions differ by path: the
-empty-body form carries the presented certificate's forward unchanged, while
-the CSR form takes them from the CSR and strips authorization-arc OIDs.)
+only meaningful for names this CA assigned. (Extensions differ by path, and on both
+paths only Puppet OID extensions are carried at all: the empty-body form
+carries the presented certificate's SANs and Puppet OIDs forward unchanged,
+while the CSR form takes Puppet OIDs from the CSR and strips authorization-arc
+ones.)
 
 In the default topology every certificate an agent holds was issued by this CA,
 so nothing changes. A certificate issued by a *previous* CA whose material was

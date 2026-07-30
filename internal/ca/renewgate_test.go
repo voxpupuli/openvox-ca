@@ -228,6 +228,17 @@ var _ = Describe("Renewal issuer gate", func() {
 			Expect(err).To(MatchError(ca.ErrForeignCertificate))
 		})
 
+		It("answers provenance before subject grammar", func() {
+			// Renew keeps its own copy of the gate, so pinning the ordering on
+			// the AutoRenew path does not pin it here. A second issuer's leaf
+			// need not be certname-shaped; if ValidateSubject ran first this
+			// would return its unsentinelled error, which the handler can only
+			// render as a 500 instead of the gate's 403.
+			_, err := myCA.Renew(ctx, "Monitoring Host",
+				csrFor("Monitoring Host"), foreignCert("Monitoring Host"))
+			Expect(err).To(MatchError(ca.ErrForeignCertificate))
+		})
+
 		It("refuses to renew a subject the presented certificate is not for", func() {
 			// Provenance is not identity. Every other spec here passes a
 			// certificate whose CN equals the subject, so without this one a
@@ -245,9 +256,10 @@ var _ = Describe("Renewal issuer gate", func() {
 			_, err = myCA.Renew(ctx, "node1.test", csrFor("node1.test"), otherCrt)
 			Expect(err).To(MatchError(ca.ErrRenewalSubjectMismatch))
 
-			// And it must have had no effect: the check sits ahead of the lock
+			// And it must have had no effect. The check sits ahead of the lock
 			// and every storage write, which is what makes the error safe to
-			// return. A refactor that moved it would still return the error.
+			// return — a refactor that moved it below them would still return
+			// the same error, so the error alone is not enough to assert.
 			stored, err := store.GetCert(ctx, "node1.test")
 			Expect(err).NotTo(HaveOccurred())
 			block, _ = pem.Decode(stored)

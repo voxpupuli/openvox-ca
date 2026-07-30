@@ -150,7 +150,8 @@ var _ = Describe("CA Renew", func() {
 		presented := issue("renew-node")
 
 		// CSR carries a different CN than the renewal subject. Renew enforces
-		// CN == subject as defence-in-depth (signing.go:647) and must reject.
+		// CN == subject as defence-in-depth (the csr.Subject.CommonName
+		// check in Renew) and must reject.
 		mismatchPEM, _ := buildCSR("attacker-node")
 		_, err := myCA.Renew(ctx, "renew-node", mismatchPEM, presented)
 		Expect(err).To(HaveOccurred(),
@@ -174,7 +175,8 @@ var _ = Describe("CA Renew", func() {
 		csrDER[len(csrDER)-1] ^= 0x01 // flip one bit in the signature
 		tamperedPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
 
-		// Renew verifies the CSR proof-of-possession signature (signing.go:642)
+		// Renew verifies the CSR proof-of-possession signature (the
+		// csr.CheckSignature call)
 		// before acquiring any lock, so a tampered CSR must be rejected.
 		_, err = myCA.Renew(ctx, "renew-node", tamperedPEM, presented)
 		Expect(err).To(HaveOccurred(),

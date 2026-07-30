@@ -192,9 +192,8 @@ type routeCase struct {
 // topology, and the change that makes it reachable — trusting a second issuer
 // for client authentication — is exactly the change that must not slip past
 // this file. Left out, it lands in unrecognised403, which the route table
-// fails on,
-// forcing a decision then. Listed, it would bucket as "admitted" and the
-// topology change would move no cell.
+// fails on, forcing a decision then. Listed, it would bucket as "admitted"
+// and the topology change would move no cell.
 //
 // Note "client certificate required" is a strict prefix of the renewal
 // handler's "client certificate required for renewal", so these must be

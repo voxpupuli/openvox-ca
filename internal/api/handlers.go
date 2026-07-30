@@ -1010,6 +1010,13 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 				// — but logged apart, because this one is an authenticated
 				// caller reaching for another node's identity rather than a
 				// topology problem.
+				//
+				// Unreachable from this handler by construction: it passes cn
+				// and the certificate cn came from, so the two always agree.
+				// Unlike the foreign-certificate branch below, no topology
+				// change makes it reachable — only a future caller that passes
+				// subject and certificate separately. It is here so that such a
+				// caller gets a 403 rather than a 500.
 				slog.Warn("Renewal rejected: presented certificate is for another subject",
 					"subject", cn, "error", err)
 				http.Error(w, "certificate not eligible for renewal", http.StatusForbidden)
