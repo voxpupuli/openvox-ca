@@ -65,9 +65,9 @@ import (
 // changedBy is documentation, not an exemption. An earlier draft carried a
 // boolean that skipped assertion for flagged rows, which would have left
 // exactly the rows under active change as the only unasserted ones — and on
-// `GET /certificate_status/{subject}`, where one cell of seven moves, it would
-// have silently retired the foreign-issuer, expired and revoked cells on the
-// very route being restructured.
+// `GET /certificate_status/{subject}`, where three cells of eleven move, it
+// would have silently retired the foreign-issuer, expired and revoked cells on
+// the very route being restructured.
 //
 // Scope, stated plainly so nobody mistakes this for total coverage:
 //
@@ -82,7 +82,9 @@ import (
 //   - Only denials emitted by the *middleware*. A handler that refuses with its
 //     own 403 is recorded as "got past authorisation", because that is what it
 //     is. Of the three changes named above, that makes certificate_status
-//     unconditionally observable here; renewal gating only if it lands in the
+//     observable here if it lands as a tier change — but not if it lands as a
+//     404, for which see the status-code dimension left open at classify;
+//     renewal gating only if it lands in the
 //     middleware rather than in handlePostCertificateRenewal, where the route's
 //     existing refusals live; and issuer-scoping not at all through the
 //     foreign-CA row, since this fixture's CA stays unconfigured as a second
@@ -113,17 +115,38 @@ type routeCase struct {
 	path   string
 	// denied maps clientClass.name to whether the middleware rejects it.
 	denied map[string]bool
-	// fingerprint is a digest of the denied map as first recorded. It is what
-	// makes changedBy enforceable rather than advisory: editing a cell changes
-	// the digest, and the spec then requires changedBy to be set in the same
-	// commit. Without it nothing distinguished a deliberate change from a
-	// silent one, because no copy of the original values was retained
-	// anywhere — the header claimed that distinction was "the whole point"
-	// while nothing implemented it.
+	// fingerprint is a digest of the denied map and changedBy as last recorded.
+	// It is the retained copy that lets the suite tell a deliberate change from
+	// a silent one; without it nothing distinguished them, because no record of
+	// the previous values existed anywhere.
+	//
+	// Be precise about what the pair does, because two earlier versions of this
+	// comment claimed more than the code delivered.
+	//
+	// Enforced, permanently: a row whose outcomes have ever moved from the
+	// originally committed ones must name a responsible change. baseline is
+	// never refreshed, so there is no literal to edit that discharges this —
+	// unlike the first attempt, where refreshing the digest silenced it.
+	//
+	// Enforced, per commit: no cell moves without a second, deliberate edit to
+	// the fingerprint line, which is visible in the diff. Provenance is inside
+	// that digest, so re-attributing a later change to an earlier one trips it
+	// too, rather than going inert once a row has changed once.
+	//
+	// Not enforced: whether the changedBy text is *accurate*. Nothing can tell
+	// that a row now names the wrong change. That is a review obligation, and
+	// the point of these two is to put it in front of a reviewer.
 	fingerprint string
 	// changedBy names the change that last altered this row's outcomes, empty
 	// for rows still at their originally recorded values.
 	changedBy string
+	// baseline digests the endpoint and outcomes as first committed, without
+	// provenance. It is never refreshed — that is the point. Any row whose
+	// outcomes have ever moved therefore differs from it permanently, so the
+	// requirement to name a responsible change cannot be discharged by editing a
+	// literal. fingerprint answers "was this edit deliberate"; baseline answers
+	// "has this row ever moved", and only the second can be asked forever.
+	baseline string
 }
 
 // handler403Bodies are the 403s the *handlers* emit, as opposed to the
@@ -258,8 +281,9 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 		// The *keys*, though, are generated once and reused. What must be fresh
 		// is the certificate — its serial is what the CRL names — and RSA key
 		// generation is the whole cost of minting one. Re-minting per route with
-		// cached keys keeps the independence and takes the matrix from ~250
-		// RSA-2048 generations to four. The CA-issued and revoked fixtures go
+		// cached keys keeps the independence and takes the matrix from ~160
+		// RSA-2048 generations to four (seven of the eleven classes draw from
+		// the pool; the other four are keyless or ECDSA). The CA-issued and revoked fixtures go
 		// through myCA.Generate, so they are ECDSA P-256 by virtue of the
 		// LeafKeyConfig set above; the foreign fixture generates its own CA and
 		// leaf, also P-256. None is worth pooling at that cost.
@@ -316,7 +340,8 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"own-ca-expired": false, "own-ca-revoked": false, "own-ca-server-eku": false,
 				"own-ca-pp-cli-auth-false": false, "foreign-ca": false,
 			},
-			fingerprint: "3bcba69ca8f399d0",
+			fingerprint: "23628229767a2378",
+			baseline:    "8afc7a5fa37545dc",
 		},
 		{
 			name: "public: fetch the CRL", method: "GET", path: "/certificate_revocation_list/ca",
@@ -326,7 +351,8 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"own-ca-expired": false, "own-ca-revoked": false, "own-ca-server-eku": false,
 				"own-ca-pp-cli-auth-false": false, "foreign-ca": false,
 			},
-			fingerprint: "3bcba69ca8f399d0",
+			fingerprint: "312c3e08f991cd3c",
+			baseline:    "0764b50dcaf3e3a4",
 		},
 		{
 			name: "public: submit a CSR", method: "PUT", path: "/certificate_request/newnode",
@@ -336,7 +362,8 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"own-ca-expired": false, "own-ca-revoked": false, "own-ca-server-eku": false,
 				"own-ca-pp-cli-auth-false": false, "foreign-ca": false,
 			},
-			fingerprint: "3bcba69ca8f399d0",
+			fingerprint: "d02baba4850135c7",
+			baseline:    "9f56b7fa5cfd0a0b",
 		},
 		{
 			// Has its own branch in the classifier rather than sharing one with
@@ -353,7 +380,8 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"own-ca-expired": false, "own-ca-revoked": false, "own-ca-server-eku": false,
 				"own-ca-pp-cli-auth-false": false, "foreign-ca": false,
 			},
-			fingerprint: "3bcba69ca8f399d0",
+			fingerprint: "0383bfa6921981a9",
+			baseline:    "b77de287975a13ee",
 		},
 		{
 			// Any certificate that chains to our trust anchor is admitted, with
@@ -366,7 +394,8 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
 				"own-ca-pp-cli-auth-false": false, "foreign-ca": true,
 			},
-			fingerprint: "7b88a295696eaeb4",
+			fingerprint: "50f0635abf97ff03",
+			baseline:    "ceb90b2e2a7b4481",
 		},
 		{
 			name: "any-client: renew own certificate", method: "POST", path: "/certificate_renewal",
@@ -376,7 +405,8 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
 				"own-ca-pp-cli-auth-false": false, "foreign-ca": true,
 			},
-			fingerprint: "7b88a295696eaeb4",
+			fingerprint: "f8ccf600945d4713",
+			baseline:    "fb886df81021f5dc",
 		},
 		{
 			// Self-match: the CN must equal the path subject, or the caller must
@@ -388,7 +418,8 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
 				"own-ca-pp-cli-auth-false": true, "foreign-ca": true,
 			},
-			fingerprint: "b4ffeb18bcb22e6c",
+			fingerprint: "9ed2a7448b79fd43",
+			baseline:    "1e5309144d9f7eb5",
 		},
 		{
 			name: "self-or-admin: read another node's CSR", method: "GET", path: "/certificate_request/othernode",
@@ -398,7 +429,8 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
 				"own-ca-pp-cli-auth-false": true, "foreign-ca": true,
 			},
-			fingerprint: "6c242f7acc06b28c",
+			fingerprint: "b0ab430df60f9374",
+			baseline:    "b00be875b450b375",
 		},
 		{
 			name: "admin: list all statuses", method: "GET", path: "/certificate_statuses/all",
@@ -408,7 +440,8 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
 				"own-ca-pp-cli-auth-false": true, "foreign-ca": true,
 			},
-			fingerprint: "6c242f7acc06b28c",
+			fingerprint: "86782f93aa9620d3",
+			baseline:    "3c6c2b41a06a003d",
 		},
 		{
 			name: "admin: sign all pending", method: "POST", path: "/sign/all",
@@ -418,7 +451,8 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
 				"own-ca-pp-cli-auth-false": true, "foreign-ca": true,
 			},
-			fingerprint: "6c242f7acc06b28c",
+			fingerprint: "aa15b530c895d58e",
+			baseline:    "dafb6d11e0b2bd1b",
 		},
 		{
 			name: "admin: reissue the CRL", method: "PUT", path: "/certificate_revocation_list/ca",
@@ -428,7 +462,8 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
 				"own-ca-pp-cli-auth-false": true, "foreign-ca": true,
 			},
-			fingerprint: "6c242f7acc06b28c",
+			fingerprint: "eab32b2174903242",
+			baseline:    "2429990f643028ba",
 		},
 	}
 
@@ -540,25 +575,51 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 	// row then records one more outcome. That is intended — each row genuinely
 	// carries new information — so such a commit updates all of them, and one
 	// changedBy naming the class is the right entry.
-	It("requires a changed row to say what changed it", func() {
+
+	It("will not let a moved row go unattributed", func() {
+		// baseline is never refreshed, so this holds for the life of the row: if
+		// its outcomes have ever moved from what was first committed, it must
+		// name the change responsible. Unlike the fingerprint below, there is no
+		// literal to update that would discharge it.
+		var unattributed []string
+		for _, route := range routes {
+			if rowDigest(route, false) != route.baseline && route.changedBy == "" {
+				unattributed = append(unattributed, fmt.Sprintf(
+					"  %q: its recorded outcomes differ from the originally committed ones, "+
+						"but changedBy is empty.", route.name))
+			}
+		}
+		Expect(unattributed).To(BeEmpty(),
+			"a row moved without saying what moved it:\n%s\n\n"+
+				"Set changedBy to the change responsible. Do not update baseline — it is the "+
+				"record of where the row started.", strings.Join(unattributed, "\n"))
+	})
+
+	It("catches any edit to a recorded outcome or its attribution", func() {
+		// The tripwire: no cell moves without a second, deliberate edit to the
+		// fingerprint line in the same commit, visible in the diff. Provenance is
+		// inside this digest so re-attributing a later change to an earlier one
+		// also trips it.
 		var drifted []string
 		for _, route := range routes {
-			got := fingerprintRow(route)
+			got := rowDigest(route, true)
 			if got == route.fingerprint {
 				continue
 			}
-			what := "its recorded outcomes have been edited"
 			if route.changedBy == "" {
-				what += " and changedBy is empty"
+				// Withholding the digest deliberately: printing the value
+				// computed from an empty changedBy would be describing how to
+				// bypass the spec above.
+				drifted = append(drifted, fmt.Sprintf(
+					"  %q: edited, and changedBy is empty. Set changedBy first.", route.name))
+				continue
 			}
 			drifted = append(drifted, fmt.Sprintf(
-				"  %q: %s.\n    Set changedBy to the change responsible; with the changedBy you have "+
-					"now, fingerprint should be %q.", route.name, what, got))
+				"  %q: edited. With the changedBy now on the row, set fingerprint to %q.",
+				route.name, got))
 		}
 		Expect(drifted).To(BeEmpty(),
-			"the recorded baseline drifted from its provenance:\n%s\n\n"+
-				"That distinction — deliberate versus accidental — is what this table is for.",
-			strings.Join(drifted, "\n"))
+			"the recorded baseline drifted from its provenance:\n%s", strings.Join(drifted, "\n"))
 	})
 
 	// The table above cannot tell "denied by the middleware" from "this path is
@@ -701,30 +762,32 @@ var expectedRoutes = []string{
 	"admin: reissue the CRL",
 }
 
-// fingerprintDenied digests a row's recorded outcomes. Sorted so it does not
-// depend on map iteration order, and truncated because it only has to detect a
-// change, not resist an adversary.
-func fingerprintRow(r routeCase) string {
-	return fingerprintDenied(r.denied, r.changedBy)
-}
-
-func fingerprintDenied(denied map[string]bool, changedBy string) string {
-	names := make([]string, 0, len(denied))
-	for name := range denied {
+// rowDigest hashes what a row records. Sorted so it does not depend on map
+// iteration order, and truncated because it only has to detect a change, not
+// resist an adversary. withProvenance selects the two uses:
+// fingerprint covers changedBy so provenance and outcomes cannot drift apart,
+// while baseline omits it so it stays fixed at the originally recorded values
+// however many times the row is later attributed.
+//
+// The endpoint is included because it is part of what the row records. Without
+// it, repointing a row at a different endpoint in the same tier left every cell
+// and the digest valid — so a route could leave the matrix silently while its
+// pinned name stayed put.
+func rowDigest(r routeCase, withProvenance bool) string {
+	names := make([]string, 0, len(r.denied))
+	for name := range r.denied {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 
 	h := sha256.New()
+	fmt.Fprintf(h, "%s %s;", r.method, r.path)
 	for _, name := range names {
-		fmt.Fprintf(h, "%s=%v;", name, denied[name])
+		fmt.Fprintf(h, "%s=%v;", name, r.denied[name])
 	}
-	// changedBy is part of the digest, not checked separately against "". If it
-	// were separate, the gate would only ever catch a row's *first* undocumented
-	// edit: once any provenance was recorded, a later change could edit outcomes,
-	// leave the stale attribution in place, refresh the digest as the failure
-	// message instructs, and go green — crediting the new change to the old one.
-	fmt.Fprintf(h, "by=%s", changedBy)
+	if withProvenance {
+		fmt.Fprintf(h, "by=%s", r.changedBy)
+	}
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
