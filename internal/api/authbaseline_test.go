@@ -580,8 +580,12 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 
 	DescribeTable("records the outcome of every client class",
 		func(route routeCase) {
+			classes := newClasses()
+			Expect(classNames(classes)).To(Equal(expectedClientClasses),
+				"the client-class fixtures no longer match the pinned list")
+
 			var mismatches []string
-			for _, class := range newClasses() {
+			for _, class := range classes {
 				want, ok := route.denied[class.name]
 				Expect(ok).To(BeTrue(),
 					"route %q has no recorded outcome for client class %q; every combination must be stated",
@@ -988,9 +992,9 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 		// The class list is pinned by name, not merely counted. Counting alone
 		// lets an adversarial fixture be swapped out — delete "foreign-ca", add
 		// a second benign class, and the length still matches while the row that
-		// mattered is gone.
-		Expect(classNames(newClasses())).To(Equal(expectedClientClasses))
-
+		// mattered is gone. The names are checked inside the route table, where
+		// the classes are minted anyway, so this spec reads no certificates at
+		// all.
 		for _, route := range routes {
 			Expect(route.denied).To(HaveLen(len(expectedClientClasses)),
 				"route %q records %d outcomes but there are %d client classes",

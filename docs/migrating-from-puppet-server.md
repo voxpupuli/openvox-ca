@@ -226,14 +226,35 @@ else. An existing `auth.conf` expectation therefore carries over unchanged: the
 CA CLI's certificate keeps working, and an ordinary agent certificate does not
 read statuses.
 
-Set `allow_public_status: true` if you need the endpoint unauthenticated for
-agents that poll it before they hold a client certificate.
+**The symptom, if tooling of yours read statuses with an agent certificate:** the
+request now returns `403 access denied` where it previously returned the status
+JSON. The server logs the refusal with the client CN, the path and the reason, so
+`reason="route requires admin access"` in the CA log identifies who is affected.
+
+Three ways to restore it, in order of preference:
+
+1. **Add the caller's CN to the admin allow list** — `--puppet-server`, or
+   `--puppet-server-file` for one CN per line. Authentication is preserved and
+   the grant is explicit.
+2. **Give the caller a certificate carrying `pp_cli_auth`**, which is how
+   OpenVox Server's own CLI authenticates. Preserves authentication and needs no
+   CA-side configuration.
+3. **`allow_public_status: true`** if agents must poll status before they hold a
+   client certificate. Note this makes the route fully unauthenticated rather
+   than relaxing it to any client — it is the bootstrapping escape hatch, not
+   the way to restore agent access.
 
 `POST /certificate_renewal` additionally requires that the presented
-certificate is one this CA issued and has not revoked. Renewal reissues under
+certificate is one this CA issued and has not revoked; it is refused with
+`403 certificate not eligible for renewal` otherwise. Renewal reissues under
 this CA's authority using the presented certificate's own subject and
 extensions, so it is only meaningful for certificates this CA vetted when it
 issued them.
+
+In the default topology every certificate an agent holds was issued by this CA,
+so nothing changes. The case that does change: a certificate issued by a
+*previous* CA whose material was replaced without re-issuing agent certificates
+can no longer be renewed, and those agents must re-enrol.
 
 ## CLI command mapping
 

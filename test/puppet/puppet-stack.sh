@@ -369,20 +369,41 @@ _INTEG_MTLS=(
     --key    "$WORK_DIR/integ.key"
 )
 
-# certificate_status requires a CA-signed client cert (tierAnyClient).
-# Unauthenticated requests must be rejected; authenticated ones must succeed.
+# certificate_status is admin-only, matching Puppet Server's shipped auth.conf,
+# which grants certificate_status to pp_cli_auth only. Three cases: no client
+# certificate, an ordinary agent certificate, and an admin one. Only the last
+# gets through.
+#
+# The agent-certificate case is the end-to-end regression test for that change.
+# It used to return the status body; an ordinary agent certificate reaching this
+# route again means the tier has silently widened.
 assert_http 403 "certificate_status without client cert returns 403" \
     "${_CA[@]}" "${CA_HOST_URL}/puppet-ca/v1/certificate_status/${_INTEG_HOST}"
 
-_status_body=$(curl -s "${_INTEG_MTLS[@]}" \
-    "${CA_HOST_URL}/puppet-ca/v1/certificate_status/${_INTEG_HOST}" \
+assert_http 403 "certificate_status with an ordinary agent cert returns 403 (admin-only)" \
+    "${_INTEG_MTLS[@]}" "${CA_HOST_URL}/puppet-ca/v1/certificate_status/${_INTEG_HOST}"
+
+# The admin path: puppet-master is the CN in the CA's allow list (written by
+# docker/puppet/ca-entrypoint.sh), so its certificate is what reads statuses now.
+_status_body=$(exec_master curl -s \
+    --cacert /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem \
+    --cert   /etc/puppetlabs/puppet/ssl/certs/puppet-master.pem \
+    --key    /etc/puppetlabs/puppet/ssl/private_keys/puppet-master.pem \
+    "https://openvox-ca:8140/puppet-ca/v1/certificate_status/${_INTEG_HOST}" \
     2>/dev/null) || true
 grep -qF '"state":"signed"' <<< "$_status_body" \
-    && pass "Autosigned cert status is 'signed' (mTLS)" \
-    || fail "Autosigned cert status is 'signed' (mTLS)" "body: $_status_body"
+    && pass "Autosigned cert status is 'signed' (admin mTLS)" \
+    || fail "Autosigned cert status is 'signed' (admin mTLS)" "body: $_status_body"
 
-assert_http 404 "Nonexistent cert status returns 404 (mTLS)" \
-    "${_INTEG_MTLS[@]}" "${CA_HOST_URL}/puppet-ca/v1/certificate_status/nonexistent"
+_missing_st=$(exec_master curl -s -o /dev/null -w '%{http_code}' \
+    --cacert /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem \
+    --cert   /etc/puppetlabs/puppet/ssl/certs/puppet-master.pem \
+    --key    /etc/puppetlabs/puppet/ssl/private_keys/puppet-master.pem \
+    "https://openvox-ca:8140/puppet-ca/v1/certificate_status/nonexistent" \
+    2>/dev/null) || true
+[ "$_missing_st" = "404" ] \
+    && pass "Nonexistent cert status returns 404 (admin mTLS)" \
+    || fail "Nonexistent cert status returns 404 (admin mTLS)" "got: $_missing_st"
 
 # Revoke the integ cert (admin, requires master cert; run from master container).
 _revoke_st=$(exec_master curl -s -o /dev/null -w '%{http_code}' \
