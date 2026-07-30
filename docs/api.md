@@ -179,7 +179,15 @@ When mTLS is enabled (both `--tls-cert` and `--tls-key` set), each endpoint requ
 | **Self or admin** | Cert CN matches path subject, OR cert is admin | `GET /certificate_request/{subject}` |
 | **Admin** | Cert is admin (see below) | `PUT /certificate_status/{subject}`, `DELETE /certificate_status/{subject}`, `DELETE /certificate_request/{subject}`, `GET /certificate_statuses/*`, `POST /sign`, `POST /sign/all`, `POST /generate/{subject}`, `PUT /clean`, `PUT /certificate_revocation_list/ca`, `PUT /certificate/{subject}` |
 
-In plain HTTP mode (no TLS), all endpoints are accessible without authentication.
+Above the public tier, a presented certificate must also be **currently valid and
+not revoked**: an expired certificate, or one listed in the CRL, is refused at
+every tier — including `POST /certificate_renewal`, so revoking an agent's
+certificate immediately cuts off its access to the CA API rather than only
+preventing the next renewal.
+
+In plain HTTP mode (no TLS), all endpoints are accessible without authentication:
+the authorisation middleware is only installed when `tls_cert` and `tls_key` are
+both set.
 
 > **Note:** `GET /certificate_status/{subject}` requires a CA-signed client certificate by default. Use `--allow-public-status` to make it public for environments where bootstrapping agents need to poll status before obtaining a client certificate. The response exposes state, fingerprint, serial number, and authorization extensions.
 
