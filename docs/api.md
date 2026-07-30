@@ -62,7 +62,7 @@ All endpoints are served under both the bare path and `/puppet-ca/v1/<path>`, so
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | `/certificate_renewal` | Renew an existing certificate; body: raw CSR PEM, or empty; returns new certificate PEM. The presented client certificate must be one **this CA** issued and has not revoked — a certificate from another issuer, or a revoked one, is refused with `403 certificate not eligible for renewal` |
+| `POST` | `/certificate_renewal` | Renew an existing certificate; body: raw CSR PEM, or empty; returns new certificate PEM. The presented client certificate must be one **this CA** issued and has not revoked. Today the authorisation middleware refuses both cases first, with `403 access denied`, because it trusts exactly this CA's certificate; the CA's own `403 certificate not eligible for renewal` becomes reachable once a second issuer can be trusted for client authentication |
 
 Requires a valid CA-signed client certificate. The new certificate is issued immediately without entering the pending-CSR queue or autosign evaluation, and the certificate it replaces is revoked once the new one is safely stored (see `revoke_on_auto_renew` below for the auto-renewal case).
 
@@ -241,7 +241,7 @@ In plain HTTP mode (no TLS), all endpoints are accessible without authentication
 the authorisation middleware is only installed when `--tls-cert`/`--tls-key`
 (`tls_cert`/`tls_key` in the config file) are both set.
 
-> **Note:** `GET /certificate_status/{subject}` is **admin-only**, matching Puppet Server's shipped `auth.conf`, which grants `certificate_status` and `certificate_statuses` to `pp_cli_auth` only. An ordinary agent certificate is refused with 403. Use `--allow-public-status` to make it public instead, for environments where bootstrapping agents need to poll status before obtaining a client certificate — note that this removes authentication from the route entirely rather than relaxing it to any client. The response exposes state, fingerprint, serial number, and authorization extensions.
+> **Note:** `GET /certificate_status/{subject}` is **admin-only**, matching Puppet Server's shipped `auth.conf`, which grants `certificate_status` and `certificate_statuses` to `pp_cli_auth` only. An ordinary agent certificate is refused with 403. Use `--allow-public-status` to make it public instead, for environments where bootstrapping agents need to poll status before obtaining a client certificate — note that this removes authentication from the route entirely rather than relaxing it to any client. The response exposes state, fingerprint, serial number, and authorization extensions. If tooling of yours read statuses with an agent certificate, see [Authorisation parity](migrating-from-puppet-server.md#authorisation-parity) for the ways to restore it and what each one grants.
 
 ### Admin credential resolution
 

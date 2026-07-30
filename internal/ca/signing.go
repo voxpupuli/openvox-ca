@@ -788,6 +788,19 @@ func (c *CA) Renew(ctx context.Context, subject string, csrPEM []byte, presented
 	if err := c.assertOwnValidCertificate(ctx, presentedCert); err != nil {
 		return nil, err
 	}
+	// SECURITY: and it must be *this* subject's certificate. Provenance alone
+	// says the caller holds something we issued, not that they hold the thing
+	// they are renewing — without this, any live certificate we issued could
+	// re-key any other subject and revoke the incumbent's. The handler checks
+	// the equivalent invariant against the authenticated CN, but it does so by
+	// passing subject=clientCN, so that check is only load-bearing for the one
+	// caller that happens to. This makes the method self-sufficient, which is
+	// what the doc comment above already claims of it.
+	// NIST 800-53: AC-3 (Access Enforcement), IA-5(2) (PKI-Based Authentication)
+	if presentedCert.Subject.CommonName != subject {
+		return nil, fmt.Errorf("%w: presented certificate is for %q, not %q",
+			ErrForeignCertificate, presentedCert.Subject.CommonName, subject)
+	}
 
 	// Validate and parse the CSR before acquiring any lock.
 	block, _ := pem.Decode(csrPEM)
@@ -902,8 +915,15 @@ func (c *CA) Renew(ctx context.Context, subject string, csrPEM []byte, presented
 // That vetting argument holds only because assertOwnValidCertificate has
 // already established that this CA issued presentedCert. The two are a pair:
 // removing the issuer gate while keeping the unfiltered carry-forward would let
-// any CA trusted for client authentication mint a pp_cli_auth certificate and
-// launder it into an admin credential here.
+// any CA trusted for client authentication have a pp_cli_auth certificate
+// reissued under *our* authority here, so that it survives as ours.
+//
+// Note what this does not close. isAdmin reads pp_cli_auth straight off
+// whatever certificate the middleware admitted, without regard to issuer, so
+// once a second anchor is trusted for client authentication a foreign leaf
+// carrying pp_cli_auth is already an admin — no reissue needed. Binding
+// isAdmin to certificates this CA issued is a separate control the
+// multi-anchor work still has to add; this gate does not substitute for it.
 //
 // By default the certificate being replaced is revoked once its successor is
 // safely signed and stored, so only the newest serial for a subject is ever

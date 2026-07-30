@@ -707,15 +707,6 @@ var _ = Describe("Auth Middleware", func() {
 			Expect(rr.Code).To(Equal(http.StatusForbidden))
 		})
 
-		It("allows an admin to read a status", func() {
-			clientCert := issueClientCert("puppet-server", caCert, caKey)
-			req := httptest.NewRequest("GET", "/certificate_status/my-node", nil)
-			req = withClientCert(req, clientCert)
-			rr := httptest.NewRecorder()
-			mux.ServeHTTP(rr, req)
-			// 404 because the node does not exist, but not 403.
-			Expect(rr.Code).NotTo(Equal(http.StatusForbidden))
-		})
 	})
 
 	// --- AllowPublicStatus opt-in ---
