@@ -124,13 +124,24 @@ Conventions:
   every client class against every covered route, as the middleware behaves
   today. A change that deliberately alters who may reach an endpoint updates the
   affected row, records the responsible change in `changedBy`, and refreshes
-  that row's `fingerprint` — all in the same commit. Leaving `changedBy` empty
-  fails permanently, because each row also carries a `baseline` digest of its
-  originally committed outcomes that is never updated. Do not edit `baseline`.
-  The suite cannot judge whether the attribution is *accurate*; reviewers
-  should.
-  Update `docs/api.md#authorization-tiers` in step, since it publishes the same
-  matrix to operators.
+  that row's `fingerprint` — all in the same commit, in that order (the suite
+  withholds the digest you need while `changedBy` is empty).
+
+  Each row also carries a `baseline` digest of its originally committed
+  outcomes. Do not edit it: no legitimate change to an existing row touches a
+  `baseline:` line, which is what makes one in a diff worth stopping on.
+
+  Two cases the above does not cover. A *new* row needs a `baseline` of its own
+  first outcomes, written once with `changedBy` left empty — "do not edit
+  `baseline`" applies from its second commit onwards. Adding or removing a
+  *client class* re-digests every row, so that commit sets `changedBy` on all of
+  them naming the class, even though no authorisation behaviour changed.
+
+  The suite cannot judge whether an attribution is *accurate*, nor whether a
+  fixture still means what its class name says; reviewers should.
+  `docs/api.md#authorization-tiers` publishes the tier assignment to operators,
+  so update it when a change moves a route between tiers — it is a tier table,
+  not this matrix, and most cells here have no counterpart there.
 
 ### Integration suites (build-tagged)
 

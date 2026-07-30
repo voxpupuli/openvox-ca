@@ -175,14 +175,32 @@ When mTLS is enabled (both `--tls-cert` and `--tls-key` set), each endpoint requ
 | Tier | Required client cert | Endpoints |
 | --- | --- | --- |
 | **Public** | None | `GET /healthz/*`, `GET /certificate/{subject}`, `GET /certificate_revocation_list/ca`, `PUT /certificate_request/{subject}`, `GET /expirations`, `POST /ocsp`, `GET /ocsp/{request}` |
-| **Any client** | Any CA-signed cert | `GET /certificate_status/{subject}` (public with `--allow-public-status`), `POST /certificate_renewal` |
+| **Any client** | Any CA-signed cert with `clientAuth` EKU | `GET /certificate_status/{subject}` (public with `--allow-public-status`), `POST /certificate_renewal` |
 | **Self or admin** | Cert CN matches path subject, OR cert is admin | `GET /certificate_request/{subject}` |
 | **Admin** | Cert is admin (see below) | `PUT /certificate_status/{subject}`, `DELETE /certificate_status/{subject}`, `DELETE /certificate_request/{subject}`, `GET /certificate_statuses/*`, `POST /sign`, `POST /sign/all`, `POST /generate/{subject}`, `PUT /clean`, `PUT /certificate_revocation_list/ca`, `PUT /certificate/{subject}` |
 
-Above the public tier, a presented certificate must also be **currently valid and
-not revoked**: an expired certificate, or one listed in the CRL, is refused at
-every tier — including `POST /certificate_renewal`, so revoking an agent's
-certificate cuts off its access to the CA API, not merely its next renewal.
+Above the public tier, a presented certificate must also be **currently valid,
+not revoked, and carry the `clientAuth` extended key usage**: an expired
+certificate, one listed in the CRL, or one issued for `serverAuth` only is
+refused at every tier above public — including `POST /certificate_renewal`, so
+revoking an agent's certificate cuts off its access to every *authenticated*
+endpoint, not merely its next renewal.
+
+The public tier is unaffected, because it examines no client certificate at
+all. A revoked agent can still fetch the CA certificate and the CRL, read
+`/expirations`, query OCSP, and submit a CSR to
+`PUT /certificate_request/{subject}`. Whether that lets it back in depends on
+which revocation you used:
+
+- `PUT /certificate_status/{subject}` with `{"desired_state":"revoked"}` revokes
+  but leaves the certificate in storage, so a fresh CSR for the same subject is
+  refused and the agent cannot re-enrol under that name.
+- `DELETE /certificate_status/{subject}` revokes *and* deletes, freeing the
+  subject name. With autosign enabled, the agent can immediately submit a new
+  CSR and be issued a fresh, unrevoked certificate.
+
+When containing a compromised agent, prefer revoke-without-clean, or disable
+autosign for that subject before cleaning, and block it at the network layer.
 
 > **Revocation is not enforced cluster-wide straight away.** The check reads an
 > in-memory copy of the CRL that each process loads at startup and thereafter

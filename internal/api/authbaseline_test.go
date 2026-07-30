@@ -71,12 +71,13 @@ import (
 //
 // Scope, stated plainly so nobody mistakes this for total coverage:
 //
-//   - 11 rows over 10 of the 19 protocol routes registered by Routes().
+//   - 12 rows over 11 of the 19 protocol routes registered by Routes().
 //     GET /certificate_request/{subject} gets two rows because the self-match is
 //     the only signal separating tierSelfOrAdmin from tierAdminOnly. The three
 //     /healthz/ probes are registered separately and are not among the 19. The
-//     omitted protocol routes are the two OCSP entries and duplicates of a tier
-//     already represented by another row.
+//     eight omitted are GET /ocsp/{request}, which shares its classifier arm
+//     with the POST form covered here, and seven duplicates of tierAdminOnly,
+//     a tier three rows already pin.
 //   - Both the bare and the /puppet-ca/v1-prefixed forms of each path, which
 //     the mux registers separately — see the prefix spec below.
 //   - Only denials emitted by the *middleware*. A handler that refuses with its
@@ -90,16 +91,23 @@ import (
 //     foreign-CA row, since this fixture's CA stays unconfigured as a second
 //     trust anchor (see foreignClientCert). Anything landing in a handler needs
 //     its own anchor in that handler's tests.
-//   - The default AuthConfig, an absent one, plus the two flags that move a tier
-//     (AllowPublicStatus, NoPpCliAuth), covered in their own Describe rather
-//     than by multiplying every row.
+//   - The default AuthConfig, an absent one, plus the two flags that change who
+//     reaches a route — AllowPublicStatus by moving a tier, NoPpCliAuth by
+//     narrowing admin authority — covered in their own Describe rather than by
+//     multiplying every row.
 //
 // A second, overlapping oracle lives in auth_test.go ("lookupTier classification"),
-// which drives lookupTier directly rather than through the mux. The same matrix
-// is published for operators at docs/api.md#authorization-tiers; a row that
-// moves here moves there too. That one pins
+// which drives lookupTier directly rather than through the mux. That one pins
 // tier assignment; this one pins the observable HTTP outcome. Keep them in
-// step: a tier change should move a row in both.
+// step: a tier change should move a row in both, for the routes both cover —
+// /expirations, /certificate_renewal and /certificate_statuses have a row here
+// and no entry there.
+//
+// docs/api.md#authorization-tiers publishes the *tier assignment* to operators.
+// It is a four-row tier table, not this matrix: a change that moves a route
+// between tiers must update it, but most of what moves here — an EKU or
+// pp_cli_auth predicate, an expiry or revocation check — has no counterpart
+// there and needs prose instead.
 
 // clientClass is one kind of client certificate the middleware might see.
 type clientClass struct {
@@ -123,29 +131,40 @@ type routeCase struct {
 	// Be precise about what the pair does, because two earlier versions of this
 	// comment claimed more than the code delivered.
 	//
-	// Enforced, permanently: a row whose outcomes have ever moved from the
-	// originally committed ones must name a responsible change. baseline is
-	// never refreshed, so there is no literal to edit that discharges this —
-	// unlike the first attempt, where refreshing the digest silenced it.
+	// Enforced: no cell moves without a second, deliberate edit to the
+	// fingerprint line, which is visible in the diff. Provenance is inside that
+	// digest, so re-attributing a later change to an earlier one trips it too,
+	// rather than going inert once a row has changed once. And because the
+	// failure withholds the computed digest while changedBy is empty, the value
+	// you need cannot be read out of the failure you are trying to silence.
 	//
-	// Enforced, per commit: no cell moves without a second, deliberate edit to
-	// the fingerprint line, which is visible in the diff. Provenance is inside
-	// that digest, so re-attributing a later change to an earlier one trips it
-	// too, rather than going inert once a row has changed once.
+	// Enforced against a determined editor: getting a green suite with an empty
+	// changedBy takes recomputing *both* digests offline and pasting two opaque
+	// hex literals. No legitimate change does that.
 	//
-	// Not enforced: whether the changedBy text is *accurate*. Nothing can tell
-	// that a row now names the wrong change. That is a review obligation, and
-	// the point of these two is to put it in front of a reviewer.
+	// Not a mechanism, though an earlier version of this comment called it one:
+	// baseline is "never refreshed" by convention. It is a string literal like
+	// any other, and no in-repo literal can be tamper-proof — editing it to the
+	// new rowDigest(route, false) discharges the unattributed spec exactly as
+	// refreshing fingerprint once discharged the round-one gate. What it buys is
+	// that no honest change ever touches a baseline: line, so one in a diff is
+	// worth stopping on.
+	//
+	// Not enforced at all: whether the changedBy text is *accurate*, and whether
+	// each fixture still means what its class name says (see the fixture-property
+	// spec, which pins the latter at one further remove). Those are review
+	// obligations, and the point of all of this is to put them in front of a
+	// reviewer.
 	fingerprint string
 	// changedBy names the change that last altered this row's outcomes, empty
 	// for rows still at their originally recorded values.
 	changedBy string
 	// baseline digests the endpoint and outcomes as first committed, without
-	// provenance. It is never refreshed — that is the point. Any row whose
-	// outcomes have ever moved therefore differs from it permanently, so the
-	// requirement to name a responsible change cannot be discharged by editing a
-	// literal. fingerprint answers "was this edit deliberate"; baseline answers
-	// "has this row ever moved", and only the second can be asked forever.
+	// provenance, and is never refreshed. fingerprint answers "was this edit
+	// deliberate"; baseline answers "has this row ever moved", and only the
+	// second can still be asked once a row has been attributed. Editing it does
+	// silence that question — it is an ordinary literal — but no legitimate
+	// change has any reason to, which is what makes the edit conspicuous.
 	baseline string
 }
 
@@ -223,6 +242,13 @@ func classify(rec *httptest.ResponseRecorder) denialKind {
 	}
 }
 
+// Ordered/BeforeAll is the only such container in the repo, against the
+// BeforeEach convention in AGENTS.md, and is deliberate on both counts: the
+// shared CA and RSA key pool are built once in BeforeAll because rebuilding
+// them per spec costs minutes, and ContinueOnFailure (which requires Ordered)
+// is what makes a change that moves several cells report all of them rather
+// than the first. Specs stay independent regardless — every certificate is
+// re-minted per route, for the reason set out above the key pool.
 var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 	var (
 		ctx        context.Context
@@ -244,7 +270,7 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 		// caIssuedClientCert and revokedClientCert both issue through the CA, so
 		// leaf generation is on the fixture path here and runs twice per class
 		// set. Without this the CA falls back to DefaultLeafKeyConfig, which is
-		// RSA-2048, and the matrix pays for ~46 of them.
+		// RSA-2048, and the matrix pays for ~52 of them.
 		myCA.LeafKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
 		Expect(store.EnsureDirs(ctx)).To(Succeed())
 		Expect(store.SaveCAKey(ctx, cachedKeyPEM)).To(Succeed())
@@ -281,10 +307,11 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 		// The *keys*, though, are generated once and reused. What must be fresh
 		// is the certificate — its serial is what the CRL names — and RSA key
 		// generation is the whole cost of minting one. Re-minting per route with
-		// cached keys keeps the independence and takes the matrix from ~160
+		// cached keys keeps the independence and takes the matrix from ~180
 		// RSA-2048 generations to four (seven of the eleven classes draw from
-		// the pool; the other four are keyless or ECDSA). The CA-issued and revoked fixtures go
-		// through myCA.Generate, so they are ECDSA P-256 by virtue of the
+		// the pool; the other four are keyless or ECDSA). The CA-issued and
+		// revoked fixtures go through myCA.Generate, so they are ECDSA P-256 by
+		// virtue of the
 		// LeafKeyConfig set above; the foreign fixture generates its own CA and
 		// leaf, also P-256. None is worth pooling at that cost.
 		keyPool := newRSAKeyPool(4)
@@ -295,10 +322,12 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				{name: "own-ca-plain", cert: clientCertFromKey(keyPool[0], selfName, caCert, caKey, false, false)},
 				{name: "own-ca-allowlisted", cert: clientCertFromKey(keyPool[1], "puppet-server", caCert, caKey, false, false)},
 				{name: "own-ca-pp-cli-auth", cert: clientCertFromKey(keyPool[2], "cli-user", caCert, caKey, true, false)},
-				// Admin by both routes at once, which is the shipped topology-A
-				// arrangement: the Puppet Server's own CN is allow-listed and it
-				// also presents pp_cli_auth. It exists to catch a change that
-				// makes the two grants exclusive rather than additive.
+				// Admin by both routes at once, which is the arrangement OpenVox
+				// Server ships with: its own CN is allow-listed and its
+				// certificate also carries pp_cli_auth (see
+				// docs/api.md#admin-credential-resolution). It exists to catch a
+				// change that makes the two grants exclusive rather than
+				// additive.
 				{name: "own-ca-admin-both", cert: clientCertFromKey(keyPool[3], "puppet-server", caCert, caKey, true, false)},
 				{name: "own-ca-expired", cert: clientCertFromKey(keyPool[0], "stale", caCert, caKey, false, true)},
 				// Chain-valid *and* recorded in the CA's inventory, unlike every
@@ -382,6 +411,30 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 			},
 			fingerprint: "0383bfa6921981a9",
 			baseline:    "b77de287975a13ee",
+		},
+		{
+			// OCSP is the one lookupTier arm with no coverage anywhere else, and
+			// the only one that grants a tier without looking at the method, so
+			// the reason the other omissions are safe does not apply: those all
+			// fall through to tierAdminOnly, a tier three rows already pin, and
+			// so cannot move undetected. Drop or reorder this case and both OCSP
+			// entries land in the default arm, locking out every OCSP client —
+			// with, before this row, an entirely green repository. The same
+			// reasoning already earns /expirations a row above.
+			//
+			// An empty body is deliberate: this pins who may reach the handler,
+			// not what it answers, and a malformed request gets there just as a
+			// well-formed one does. ocsp_test.go covers the responses, with no
+			// AuthConfig and so no middleware at all.
+			name: "public: query OCSP", method: "POST", path: "/ocsp",
+			denied: map[string]bool{
+				"none": false, "own-ca-plain": false, "own-ca-allowlisted": false,
+				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": false,
+				"own-ca-expired": false, "own-ca-revoked": false, "own-ca-server-eku": false,
+				"own-ca-pp-cli-auth-false": false, "foreign-ca": false,
+			},
+			fingerprint: "b8f39578c7d8c805",
+			baseline:    "262bb3133fe936c2",
 		},
 		{
 			// Any certificate that chains to our trust anchor is admitted, with
@@ -577,10 +630,10 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 	// changedBy naming the class is the right entry.
 
 	It("will not let a moved row go unattributed", func() {
-		// baseline is never refreshed, so this holds for the life of the row: if
+		// baseline is not refreshed, so this holds for the life of the row: if
 		// its outcomes have ever moved from what was first committed, it must
-		// name the change responsible. Unlike the fingerprint below, there is no
-		// literal to update that would discharge it.
+		// name the change responsible. Unlike the fingerprint below, no ordinary
+		// edit updates it, so a diff that does is the signal.
 		var unattributed []string
 		for _, route := range routes {
 			if rowDigest(route, false) != route.baseline && route.changedBy == "" {
@@ -629,7 +682,7 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 	// cell satisfied. This pins existence separately.
 	//
 	// It presents the allow-listed admin certificate, because with no
-	// certificate only the four public rows reach the mux at all — the other
+	// certificate only the five public rows reach the mux at all — the other
 	// seven are refused at auth.go before routing, so a 404 could never be
 	// observed for them and those iterations would assert nothing. That was the
 	// first version of this spec, and dropping the prefix still failed it, which
@@ -687,7 +740,12 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				strings.Contains(rec.Body.String(), "404 page not found"):
 				missing = append(missing, "  "+route.method+" /puppet-ca/v1"+route.path+" (path not registered)")
 			}
-			Expect(classify(rec)).NotTo(Equal(deniedByMiddleware),
+			// Positively admitted, not merely "not a middleware denial": the
+			// latter is also satisfied by unrecognised403, so a change that
+			// added a new middleware denial message would leave every request
+			// here refused and this spec green, testing nothing about
+			// registration — which is the very rot its message claims to catch.
+			Expect(classify(rec)).To(Equal(admitted),
 				"%s %s: the admin certificate should reach the mux, so a denial here means this "+
 					"spec has stopped testing registration (code=%d body=%q)",
 				route.method, route.path, rec.Code, strings.TrimSpace(rec.Body.String()))
@@ -695,6 +753,176 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 		Expect(missing).To(BeEmpty(),
 			"these prefixed paths returned 404, so the prefix is no longer registered "+
 				"for them:\n%s", strings.Join(missing, "\n"))
+	})
+
+	It("pins what each client class is, not merely what it is called", func() {
+		// The digests bind what a row *records*. Nothing in them binds the
+		// certificate that produced the recording, and that gap is wide: the
+		// eleven classes collapse into only four distinct outcome columns, so
+		// ten of them are indistinguishable from a sibling by recorded outcome
+		// alone. own-ca-pp-cli-auth-false's column is identical to
+		// own-ca-issued's; own-ca-server-eku's is identical to own-ca-expired's.
+		//
+		// So a one-line argument swap — handing own-ca-pp-cli-auth-false an
+		// ordinary CA-issued certificate — reproduces its column exactly on
+		// every row, leaving every digest, every pinned list and every changedBy
+		// byte-identical. Relaxing isAdmin to a presence test could then land
+		// green, and the two classes that exist solely as tripwires for a silent
+		// relaxation are the repo's only coverage of what they guard. Worse, the
+		// dishonest edit is *cheaper* than the honest one (five cells, five
+		// fingerprints, five attributions), which puts the incentive gradient
+		// the wrong way round.
+		//
+		// This spec closes that by asserting what each fixture is, against the
+		// parsed certificate. It is not itself digest-protected — no assertion
+		// in a repository can be — but neutralising a class now means editing an
+		// explicit, self-describing claim about it, rather than swapping one
+		// argument and leaving the file's own account of itself intact.
+		// Mint first, then snapshot: newClasses issues own-ca-issued and
+		// own-ca-revoked through the CA, so an inventory read taken before the
+		// call cannot contain them.
+		classes := newClasses()
+		inventory, err := store.ReadInventory(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		// By serial, not by subject: the renewal probes issue genuine
+		// certificates for these CNs as they run, so a name says nothing about
+		// where *this* certificate came from. A template-minted serial is never
+		// recorded, however often its subject is later issued.
+		inventoryHas := func(c *x509.Certificate) bool {
+			return strings.Contains(string(inventory), fmt.Sprintf("%X", c.SerialNumber))
+		}
+
+		ours := func(c *x509.Certificate) {
+			Expect(c.Issuer.String()).To(Equal(caCert.Subject.String()), "should chain to our CA")
+			Expect(c.CheckSignatureFrom(caCert)).To(Succeed(), "should be signed by our CA")
+		}
+		unexpired := func(c *x509.Certificate) {
+			Expect(c.NotAfter).To(BeTemporally(">", time.Now()), "should still be within its validity window")
+		}
+		clientAuth := func(c *x509.Certificate) {
+			Expect(c.ExtKeyUsage).To(ContainElement(x509.ExtKeyUsageClientAuth))
+		}
+		noPpCliAuth := func(c *x509.Certificate) {
+			_, present := ppCliAuthValue(c)
+			Expect(present).To(BeFalse(), "should carry no pp_cli_auth extension at all")
+		}
+
+		props := map[string]func(c *x509.Certificate){
+			// The absence of a certificate is the whole property.
+			"none": nil,
+			"own-ca-plain": func(c *x509.Certificate) {
+				ours(c)
+				unexpired(c)
+				clientAuth(c)
+				noPpCliAuth(c)
+				Expect(c.Subject.CommonName).To(Equal(selfName), "the self-match row turns on this")
+				Expect(c.Subject.CommonName).NotTo(Equal("puppet-server"), "must not be allow-listed")
+				Expect(inventoryHas(c)).To(BeFalse(),
+					"minted from a template, so its serial must be unknown to the CA — "+
+						"that is what separates it from own-ca-issued")
+			},
+			"own-ca-allowlisted": func(c *x509.Certificate) {
+				ours(c)
+				unexpired(c)
+				clientAuth(c)
+				noPpCliAuth(c)
+				Expect(c.Subject.CommonName).To(Equal("puppet-server"),
+					"admin by allow-list alone, so the CN must be the allow-listed one")
+			},
+			"own-ca-pp-cli-auth": func(c *x509.Certificate) {
+				ours(c)
+				unexpired(c)
+				clientAuth(c)
+				value, present := ppCliAuthValue(c)
+				Expect(present).To(BeTrue())
+				Expect(value).To(Equal("true"))
+				Expect(c.Subject.CommonName).NotTo(Equal("puppet-server"),
+					"admin by extension alone, so the CN must not also be allow-listed")
+			},
+			"own-ca-admin-both": func(c *x509.Certificate) {
+				ours(c)
+				unexpired(c)
+				clientAuth(c)
+				value, present := ppCliAuthValue(c)
+				Expect(present).To(BeTrue())
+				Expect(value).To(Equal("true"))
+				Expect(c.Subject.CommonName).To(Equal("puppet-server"),
+					"admin by both routes at once is the point of this class")
+			},
+			"own-ca-expired": func(c *x509.Certificate) {
+				ours(c)
+				clientAuth(c)
+				Expect(c.NotAfter).To(BeTemporally("<", time.Now()),
+					"expiry must be the reason it is denied")
+			},
+			"own-ca-issued": func(c *x509.Certificate) {
+				ours(c)
+				unexpired(c)
+				clientAuth(c)
+				noPpCliAuth(c)
+				Expect(inventoryHas(c)).To(BeTrue(),
+					"its serial must be recorded in the CA inventory — being genuinely issued is the property")
+				revoked, err := myCA.IsRevokedSerial(ctx, c.SerialNumber)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(revoked).To(BeFalse())
+			},
+			"own-ca-revoked": func(c *x509.Certificate) {
+				ours(c)
+				clientAuth(c)
+				// Unexpired on purpose: if it were also expired, the row could
+				// not tell revocation checking from expiry checking.
+				unexpired(c)
+				revoked, err := myCA.IsRevokedSerial(ctx, c.SerialNumber)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(revoked).To(BeTrue(), "revocation must be the only reason it is denied")
+			},
+			"own-ca-server-eku": func(c *x509.Certificate) {
+				ours(c)
+				unexpired(c)
+				Expect(c.ExtKeyUsage).To(ContainElement(x509.ExtKeyUsageServerAuth))
+				Expect(c.ExtKeyUsage).NotTo(ContainElement(x509.ExtKeyUsageClientAuth),
+					"the missing clientAuth EKU must be the only reason it is denied")
+			},
+			"own-ca-pp-cli-auth-false": func(c *x509.Certificate) {
+				ours(c)
+				unexpired(c)
+				clientAuth(c)
+				value, present := ppCliAuthValue(c)
+				Expect(present).To(BeTrue(),
+					"the extension must be present — an absent one would make this a duplicate of own-ca-plain")
+				Expect(value).NotTo(Equal("true"),
+					"present-but-not-true is what distinguishes an equality check from a presence check")
+				Expect(c.Subject.CommonName).NotTo(Equal("puppet-server"),
+					"must not be admin by the allow-list route either")
+			},
+			"foreign-ca": func(c *x509.Certificate) {
+				unexpired(c)
+				clientAuth(c)
+				Expect(c.Issuer.String()).NotTo(Equal(caCert.Subject.String()),
+					"a different issuer is the property")
+				Expect(c.CheckSignatureFrom(caCert)).NotTo(Succeed())
+				Expect(c.Subject.CommonName).To(Equal(selfName),
+					"the CN collision with our own namespace is deliberate groundwork")
+			},
+		}
+
+		// Every class needs a claim, and every claim needs a class: adding a
+		// fixture without saying what it is, or leaving a claim behind after
+		// removing one, both fail here.
+		Expect(mapKeys(props)).To(ConsistOf(expectedClientClasses))
+
+		for _, class := range classes {
+			assert, ok := props[class.name]
+			Expect(ok).To(BeTrue(), "no recorded property for client class %q", class.name)
+			By(class.name, func() {
+				if assert == nil {
+					Expect(class.cert).To(BeNil(), "%q must present no certificate", class.name)
+					return
+				}
+				Expect(class.cert).NotTo(BeNil(), "%q must present a certificate", class.name)
+				assert(class.cert)
+			})
+		}
 	})
 
 	It("states an outcome for every route and client class", func() {
@@ -753,6 +981,7 @@ var expectedRoutes = []string{
 	"public: fetch the CRL",
 	"public: submit a CSR",
 	"public: read expiry metadata",
+	"public: query OCSP",
 	"any-client: read a certificate status",
 	"any-client: renew own certificate",
 	"self-or-admin: read own CSR",
@@ -789,6 +1018,35 @@ func rowDigest(r routeCase, withProvenance bool) string {
 		fmt.Fprintf(h, "by=%s", r.changedBy)
 	}
 	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// ppCliAuthValue returns the decoded pp_cli_auth extension value and whether
+// the extension is present at all.
+//
+// The middleware's own helper answers only "is it exactly true", which cannot
+// tell absent from present-and-false — precisely the distinction own-ca-plain
+// and own-ca-pp-cli-auth-false exist to draw, and the one a presence-test
+// regression would erase.
+func ppCliAuthValue(cert *x509.Certificate) (string, bool) {
+	for _, ext := range cert.Extensions {
+		if !ext.Id.Equal(ca.OIDPpCliAuth) {
+			continue
+		}
+		var value string
+		if rest, err := asn1.Unmarshal(ext.Value, &value); err == nil && len(rest) == 0 {
+			return value, true
+		}
+		return "", true
+	}
+	return "", false
+}
+
+func mapKeys(m map[string]func(c *x509.Certificate)) []string {
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	return names
 }
 
 func classNames(classes []clientClass) []string {
@@ -979,8 +1237,10 @@ func foreignClientCert(cn string) *x509.Certificate {
 	return leaf
 }
 
-// The two AuthConfig flags that move a route between tiers get their own
-// Describe rather than a third dimension on the main table. Multiplying every
+// The two AuthConfig flags that change who reaches a route get their own
+// Describe rather than a third dimension on the main table. Only
+// AllowPublicStatus moves a tier; NoPpCliAuth is read by isAdmin, not by
+// lookupTier, and narrows who counts as an admin without moving any route. Multiplying every
 // row by every flag would triple the fixtures to record four cells that
 // actually differ, and would bury them.
 //
