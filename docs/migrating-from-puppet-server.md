@@ -378,6 +378,8 @@ because it does not restore *authenticated* access: it makes the route fully
 unauthenticated rather than relaxing it to any client. It is the bootstrapping
 escape hatch, not the way to restore agent access.
 
+### Renewal eligibility
+
 `POST /certificate_renewal` additionally requires that the presented
 certificate is one this CA issued, has not revoked, and is for the subject being
 renewed. Today you will not see a distinct error for the first two: the

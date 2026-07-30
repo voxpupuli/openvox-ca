@@ -1392,7 +1392,7 @@ var _ = Describe("Authorisation baseline: configuration axes", Ordered, Continue
 				"with no AuthConfig the middleware is not installed at all")
 		})
 
-		It("admits an any-client route with no certificate", func() {
+		It("admits a route that would otherwise need admin, with no certificate", func() {
 			handler := muxWith(nil)
 			Expect(probe(handler, "GET", "/certificate_status/somenode", nil)).To(BeFalse())
 		})
