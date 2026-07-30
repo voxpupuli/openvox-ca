@@ -105,8 +105,11 @@ import (
 //
 // Keep them in step: a tier change should move a row in both, for the routes
 // both cover. /expirations, /certificate_renewal, /certificate_statuses and
-// POST /ocsp have a row here and no entry there, so for those four this file is
-// the only anchor.
+// POST /ocsp have a row here and no entry in that table. /certificate_statuses
+// is still anchored elsewhere in the same file, by an admin-tier 403 spec; for
+// the other three this file is the only authorisation anchor in the repo. The
+// functional suites that exercise those paths (api_test.go, ocsp_test.go)
+// install no AuthConfig, so no middleware runs in them.
 //
 // docs/api.md#authorization-tiers publishes the *tier assignment* to operators.
 // It is a four-row tier table, not this matrix: a change that moves a route
