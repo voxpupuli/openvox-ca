@@ -179,12 +179,21 @@ type routeCase struct {
 }
 
 // handler403Bodies are the 403s the *handlers* emit, as opposed to the
-// middleware. The set is exactly three:
+// middleware. The handlers emit four distinct bodies today:
 //
-//   - handlePostCertificateRenewal, twice (handlers.go, "client certificate
-//     required for renewal" and "CSR CN does not match authenticated client CN")
-//   - handlePostGenerate, once ("private key delivery requires TLS"), on
+//   - handlePostCertificateRenewal: "client certificate required for renewal",
+//     "CSR CN does not match authenticated client CN", and — added with the
+//     renewal issuer gate — "certificate not eligible for renewal"
+//   - handlePostGenerate: "private key delivery requires TLS", on
 //     POST /generate/{subject}, which this table does not cover
+//
+// Only three are listed below. "certificate not eligible for renewal" is
+// deliberately excluded: it is unreachable under the shipped single-anchor
+// topology, and the change that makes it reachable — trusting a second issuer
+// for client authentication — is exactly the change that must not slip past
+// this file. Left out, it lands in unrecognised403 and classify calls Fail,
+// forcing a decision then. Listed, it would bucket as "admitted" and the
+// topology change would move no cell.
 //
 // Note "client certificate required" is a strict prefix of the renewal
 // handler's "client certificate required for renewal", so these must be

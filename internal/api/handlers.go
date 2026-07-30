@@ -952,6 +952,12 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 				http.Error(w, "certificate not eligible for renewal", http.StatusForbidden)
 				return
 			}
+			if errors.Is(err, ca.ErrNotInitialized) {
+				// Same answer as the import path: not ready is a retryable
+				// condition, not a server fault.
+				http.Error(w, "CA not ready", http.StatusServiceUnavailable)
+				return
+			}
 			slog.Warn("Auto-renewal failed", "subject", cn, "error", err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
@@ -987,6 +993,11 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 				// the middleware's "access denied".
 				slog.Warn("Renewal rejected: certificate not eligible", "subject", cn, "error", err)
 				http.Error(w, "certificate not eligible for renewal", http.StatusForbidden)
+				return
+			}
+			if errors.Is(err, ca.ErrNotInitialized) {
+				// See the auto-renewal branch.
+				http.Error(w, "CA not ready", http.StatusServiceUnavailable)
 				return
 			}
 			slog.Warn("Renewal failed", "subject", cn, "error", err)

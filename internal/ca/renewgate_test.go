@@ -35,12 +35,18 @@ import (
 	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
 
-// These exercise the renewal gate directly, because nothing else can reach it
-// yet: the auth middleware rejects a foreign certificate before any handler
-// runs, so an HTTP-level test would pass whether or not the gate existed. Once
-// a second issuer can be trusted for client authentication, the middleware stops
-// being that backstop and this becomes the only thing standing between a foreign
-// certificate and reissue under our authority.
+// These exercise the renewal gate at the CA boundary, where its two callers —
+// Renew and AutoRenew — have independent code paths and each rejection reason
+// (nil, foreign, foreign-bearing-our-name, revoked, wrong subject) can be
+// stated once per path.
+//
+// It is reachable over HTTP too, and api_test.go reaches it: that fixture
+// points the middleware at a different anchor than the CA's own certificate,
+// which is the topology the multi-trust-anchor work introduces. Under the
+// shipped single-anchor topology the middleware's accept set is a strict subset
+// of the gate's, so nothing gets past one to be refused by the other — which is
+// why the gate looks unreachable today and why it must not be removed on that
+// basis.
 var _ = Describe("Renewal issuer gate", func() {
 	var (
 		ctx    context.Context
@@ -54,6 +60,10 @@ var _ = Describe("Renewal issuer gate", func() {
 		store = storage.New(GinkgoT().TempDir())
 		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
 		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		// The gate is issuer-based, so the leaf algorithm is immaterial to what
+		// these specs test — but without this every spec pays for an RSA-2048
+		// generation in the BeforeEach's Generate.
+		myCA.LeafKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
 		Expect(myCA.Init(ctx)).To(Succeed())
 
 		res, err := myCA.Generate(ctx, "node1.test", nil)
@@ -124,6 +134,31 @@ var _ = Describe("Renewal issuer gate", func() {
 			_, err := myCA.AutoRenew(ctx, ownCrt)
 			Expect(err).To(MatchError(ca.ErrForeignCertificate))
 		})
+
+		It("refuses when no certificate is presented", func() {
+			// The twin of Renew's spec below. Removing the guard does not give a
+			// wrong answer, it dereferences nil on the next line — a panic in an
+			// HTTP handler rather than an authorisation decision.
+			_, err := myCA.AutoRenew(ctx, nil)
+			Expect(err).To(MatchError(ca.ErrForeignCertificate))
+		})
+	})
+
+	Describe("an uninitialised CA", func() {
+		// The repo's established shape for this branch — ca_test.go pins it for
+		// Sign, SignWithTTL and ImportCertificate. The gate adds two more entry
+		// points that dereference c.CACert.
+		It("returns ErrNotInitialized rather than panicking on AutoRenew", func() {
+			bare := ca.New(storage.New(GinkgoT().TempDir()), ca.AutosignConfig{Mode: "off"}, "puppet.test")
+			_, err := bare.AutoRenew(ctx, ownCrt)
+			Expect(err).To(MatchError(ca.ErrNotInitialized))
+		})
+
+		It("returns ErrNotInitialized rather than panicking on Renew", func() {
+			bare := ca.New(storage.New(GinkgoT().TempDir()), ca.AutosignConfig{Mode: "off"}, "puppet.test")
+			_, err := bare.Renew(ctx, "node1.test", nil, ownCrt)
+			Expect(err).To(MatchError(ca.ErrNotInitialized))
+		})
 	})
 
 	Describe("Renew", func() {
@@ -154,6 +189,24 @@ var _ = Describe("Renewal issuer gate", func() {
 
 		It("refuses when no certificate is presented", func() {
 			_, err := myCA.Renew(ctx, "node1.test", csrFor("node1.test"), nil)
+			Expect(err).To(MatchError(ca.ErrForeignCertificate))
+		})
+
+		It("refuses to renew a subject the presented certificate is not for", func() {
+			// Provenance is not identity. Every other spec here passes a
+			// certificate whose CN equals the subject, so without this one a
+			// holder of any live certificate we issued could re-key another
+			// node — and revoke the incumbent's — with the whole gate green.
+			// The handler blocks it today only because it passes
+			// subject=clientCN; that is the handler's invariant, not this
+			// method's.
+			other, err := myCA.Generate(ctx, "node2.test", nil)
+			Expect(err).NotTo(HaveOccurred())
+			block, _ := pem.Decode(other.CertificatePEM)
+			otherCrt, err := x509.ParseCertificate(block.Bytes)
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = myCA.Renew(ctx, "node1.test", csrFor("node1.test"), otherCrt)
 			Expect(err).To(MatchError(ca.ErrForeignCertificate))
 		})
 

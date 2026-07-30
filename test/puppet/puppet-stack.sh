@@ -326,8 +326,8 @@ assert_http 200 "Expirations endpoint returns 200" \
     "${_CA[@]}" "${CA_HOST_URL}/puppet-ca/v1/expirations"
 
 # Generate a test cert via the CSR lifecycle (autosign=true → signs immediately).
-# This cert is reused below as an mTLS client credential for endpoints that
-# require a CA-signed certificate (e.g. certificate_status).
+# This is an *ordinary agent* credential. Since certificate_status became
+# admin-only it is kept to prove that tier refuses it, not to reach it.
 _INTEG_HOST="integ-${RUN_ID}.localdomain"
 openssl genrsa -out "$WORK_DIR/integ.key" 2048 2>/dev/null || true
 [ -f "$WORK_DIR/integ.key" ] && chmod 600 "$WORK_DIR/integ.key"
@@ -362,7 +362,8 @@ else
     fail "Signed cert verifies against CA"
 fi
 
-# mTLS credentials for endpoints that require a CA-signed client cert.
+# mTLS credentials for an ordinary agent: a CA-signed client cert carrying
+# neither an allow-listed CN nor pp_cli_auth.
 _INTEG_MTLS=(
     --cacert "$WORK_DIR/ca.pem"
     --cert   "$WORK_DIR/integ.crt"
