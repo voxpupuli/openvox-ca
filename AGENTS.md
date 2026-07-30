@@ -130,11 +130,16 @@ Conventions:
   outcomes. Do not edit it: no legitimate change to an existing row touches a
   `baseline:` line, which is what makes one in a diff worth stopping on.
 
-  Two cases the above does not cover. A *new* row needs a `baseline` of its own
-  first outcomes, written once with `changedBy` left empty — "do not edit
-  `baseline`" applies from its second commit onwards. Adding or removing a
-  *client class* re-digests every row, so that commit sets `changedBy` on all of
-  them naming the class, even though no authorisation behaviour changed.
+  Two cases the above does not cover. A *new* row needs **both** digests, not
+  just one: write `baseline: ""` and run the suite, which prints a paste-ready
+  `fingerprint`/`baseline` pair. Leave `changedBy` empty — a new row has not
+  moved, and attributing it from birth permanently retires its baseline check.
+  "Do not edit `baseline`" applies from its second commit onwards.
+
+  Adding or removing a *client class* re-digests every row, so that commit sets
+  `changedBy` on all of them naming the class, even though no authorisation
+  behaviour changed. Note what that costs: an attributed row's `baseline` is
+  never compared again, so a class change retires the baseline layer repo-wide.
 
   The suite cannot judge whether an attribution is *accurate*, nor whether a
   fixture still means what its class name says; reviewers should.

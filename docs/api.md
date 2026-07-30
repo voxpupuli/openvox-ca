@@ -189,18 +189,29 @@ endpoint, not merely its next renewal.
 The public tier is unaffected, because it examines no client certificate at
 all. A revoked agent can still fetch the CA certificate and the CRL, read
 `/expirations`, query OCSP, and submit a CSR to
-`PUT /certificate_request/{subject}`. Whether that lets it back in depends on
-which revocation you used:
+`PUT /certificate_request/{subject}`.
 
-- `PUT /certificate_status/{subject}` with `{"desired_state":"revoked"}` revokes
-  but leaves the certificate in storage, so a fresh CSR for the same subject is
-  refused and the agent cannot re-enrol under that name.
-- `DELETE /certificate_status/{subject}` revokes *and* deletes, freeing the
-  subject name. With autosign enabled, the agent can immediately submit a new
-  CSR and be issued a fresh, unrevoked certificate.
+**Neither form of revocation prevents re-enrolment under the same subject.**
+Submitting a CSR evicts a revoked certificate for that subject (see
+[Certificate import](#certificate-import) for the same rule on the import
+path), so the difference between the two verbs is only *when* the stored
+certificate goes away:
 
-When containing a compromised agent, prefer revoke-without-clean, or disable
-autosign for that subject before cleaning, and block it at the network layer.
+- `PUT /certificate_status/{subject}` with `{"desired_state":"revoked"}` adds
+  the serial to the CRL and leaves the certificate in storage until the next
+  CSR for that subject displaces it.
+- `DELETE /certificate_status/{subject}` revokes *and* deletes it immediately.
+
+Either way the next CSR is accepted: with autosign enabled it is signed at once
+and the agent is back with a fresh, unrevoked certificate; with autosign off it
+queues for manual signing. The CRL entry for the old serial persists in both
+cases, so the old certificate stays refused — but that is not the same as
+locking the *agent* out.
+
+When containing a compromised agent, the levers that actually hold are:
+disabling autosign, or using an autosign policy that excludes the subject;
+blocking the agent at the network layer; and forcing a CRL re-sign on every
+replica so no peer keeps admitting the old certificate from a stale cache.
 
 > **Revocation is not enforced cluster-wide straight away.** The check reads an
 > in-memory copy of the CRL that each process loads at startup and thereafter
@@ -216,8 +227,8 @@ autosign for that subject before cleaning, and block it at the network layer.
 > agent promptly matters.
 
 In plain HTTP mode (no TLS), all endpoints are accessible without authentication:
-the authorisation middleware is only installed when `tls_cert` and `tls_key` are
-both set.
+the authorisation middleware is only installed when `--tls-cert`/`--tls-key`
+(`tls_cert`/`tls_key` in the config file) are both set.
 
 > **Note:** `GET /certificate_status/{subject}` requires a CA-signed client certificate by default. Use `--allow-public-status` to make it public for environments where bootstrapping agents need to poll status before obtaining a client certificate. The response exposes state, fingerprint, serial number, and authorization extensions.
 

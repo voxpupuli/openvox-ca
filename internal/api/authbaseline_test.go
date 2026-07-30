@@ -96,12 +96,17 @@ import (
 //     narrowing admin authority — covered in their own Describe rather than by
 //     multiplying every row.
 //
-// A second, overlapping oracle lives in auth_test.go ("lookupTier classification"),
-// which drives lookupTier directly rather than through the mux. That one pins
-// tier assignment; this one pins the observable HTTP outcome. Keep them in
-// step: a tier change should move a row in both, for the routes both cover —
-// /expirations, /certificate_renewal and /certificate_statuses have a row here
-// and no entry there.
+// A second, overlapping oracle lives in auth_test.go ("lookupTier classification").
+// Both probe the mux — lookupTier is unexported, so neither can call it — but
+// that one infers a route's *tier* from the shape of three probe responses,
+// while this one asserts one recorded cell per client class. Their independence
+// is therefore partial: a change to how the middleware signals refusal blinds
+// both at once, which is what classify's status-code caveat below is about.
+//
+// Keep them in step: a tier change should move a row in both, for the routes
+// both cover. /expirations, /certificate_renewal, /certificate_statuses and
+// POST /ocsp have a row here and no entry there, so for those four this file is
+// the only anchor.
 //
 // docs/api.md#authorization-tiers publishes the *tier assignment* to operators.
 // It is a four-row tier table, not this matrix: a change that moves a route
@@ -138,9 +143,11 @@ type routeCase struct {
 	// failure withholds the computed digest while changedBy is empty, the value
 	// you need cannot be read out of the failure you are trying to silence.
 	//
-	// Enforced against a determined editor: getting a green suite with an empty
-	// changedBy takes recomputing *both* digests offline and pasting two opaque
-	// hex literals. No legitimate change does that.
+	// Enforced against a determined editor: moving a cell and keeping changedBy
+	// empty means replacing *both* hex literals on that row. The only legitimate
+	// reason to write both at once is a brand-new row, which is a visibly
+	// different diff — a row appearing, not a row's outcomes changing, and the
+	// unattributed spec prints both values for exactly that case.
 	//
 	// Not a mechanism, though an earlier version of this comment called it one:
 	// baseline is "never refreshed" by convention. It is a string literal like
@@ -242,8 +249,9 @@ func classify(rec *httptest.ResponseRecorder) denialKind {
 	}
 }
 
-// Ordered/BeforeAll is the only such container in the repo, against the
-// BeforeEach convention in AGENTS.md, and is deliberate on both counts: the
+// The repo's only two Ordered/BeforeAll containers are both in this file (the
+// other is the configuration-axes Describe below), against the
+// BeforeEach convention in AGENTS.md, and are deliberate on both counts: the
 // shared CA and RSA key pool are built once in BeforeAll because rebuilding
 // them per spec costs minutes, and ContinueOnFailure (which requires Ordered)
 // is what makes a change that moves several cells report all of them rather
@@ -291,7 +299,7 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 		server := api.New(myCA)
 		server.AuthConfig = &api.AuthConfig{
 			CACert:    caCert,
-			AllowList: map[string]bool{"puppet-server": true},
+			AllowList: adminAllowList,
 		}
 		mux = server.Routes()
 
@@ -634,14 +642,36 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 		// its outcomes have ever moved from what was first committed, it must
 		// name the change responsible. Unlike the fingerprint below, no ordinary
 		// edit updates it, so a diff that does is the signal.
-		var unattributed []string
+		var unattributed, unrecorded []string
 		for _, route := range routes {
-			if rowDigest(route, false) != route.baseline && route.changedBy == "" {
+			switch {
+			case route.baseline == "":
+				// A brand-new row, not a moved one. Without this branch the only
+				// way to learn a new row's digests was to set changedBy and read
+				// the fingerprint out of the other spec's failure — which
+				// attributes the row from birth and so retires its baseline layer
+				// permanently, the one thing this pair exists to prevent.
+				// Printing both here makes leaving changedBy empty the easy path
+				// as well as the correct one.
+				//
+				// It does also hand an editor a shortcut: blank a baseline, read
+				// both values back, paste them. That is acceptable for the same
+				// reason the rest of this rests on — a blanked baseline: line is
+				// exactly as loud in a diff as a replaced one, and no honest
+				// change to an existing row produces either.
+				unrecorded = append(unrecorded, fmt.Sprintf(
+					"  %q:\n\t\t\tfingerprint: %q,\n\t\t\tbaseline:    %q,",
+					route.name, rowDigest(route, true), rowDigest(route, false)))
+			case rowDigest(route, false) != route.baseline && route.changedBy == "":
 				unattributed = append(unattributed, fmt.Sprintf(
 					"  %q: its recorded outcomes differ from the originally committed ones, "+
 						"but changedBy is empty.", route.name))
 			}
 		}
+		Expect(unrecorded).To(BeEmpty(),
+			"a new row records no baseline. Paste both literals below and leave changedBy "+
+				"empty — the row has not moved, it has only just been written:\n%s",
+			strings.Join(unrecorded, "\n"))
 		Expect(unattributed).To(BeEmpty(),
 			"a row moved without saying what moved it:\n%s\n\n"+
 				"Set changedBy to the change responsible. Do not update baseline — it is the "+
@@ -706,7 +736,7 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 		scratch := api.New(scratchCA)
 		scratch.AuthConfig = &api.AuthConfig{
 			CACert:    caCert,
-			AllowList: map[string]bool{"puppet-server": true},
+			AllowList: adminAllowList,
 		}
 		scratchMux := scratch.Routes()
 		// A fresh admin certificate per route, for the reason the class fixtures
@@ -816,7 +846,7 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				clientAuth(c)
 				noPpCliAuth(c)
 				Expect(c.Subject.CommonName).To(Equal(selfName), "the self-match row turns on this")
-				Expect(c.Subject.CommonName).NotTo(Equal("puppet-server"), "must not be allow-listed")
+				Expect(adminAllowList).NotTo(HaveKey(c.Subject.CommonName), "must not be allow-listed")
 				Expect(inventoryHas(c)).To(BeFalse(),
 					"minted from a template, so its serial must be unknown to the CA — "+
 						"that is what separates it from own-ca-issued")
@@ -826,8 +856,8 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				unexpired(c)
 				clientAuth(c)
 				noPpCliAuth(c)
-				Expect(c.Subject.CommonName).To(Equal("puppet-server"),
-					"admin by allow-list alone, so the CN must be the allow-listed one")
+				Expect(adminAllowList).To(HaveKey(c.Subject.CommonName),
+					"admin by allow-list alone, so the CN must be in the allow list")
 			},
 			"own-ca-pp-cli-auth": func(c *x509.Certificate) {
 				ours(c)
@@ -836,7 +866,7 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				value, present := ppCliAuthValue(c)
 				Expect(present).To(BeTrue())
 				Expect(value).To(Equal("true"))
-				Expect(c.Subject.CommonName).NotTo(Equal("puppet-server"),
+				Expect(adminAllowList).NotTo(HaveKey(c.Subject.CommonName),
 					"admin by extension alone, so the CN must not also be allow-listed")
 			},
 			"own-ca-admin-both": func(c *x509.Certificate) {
@@ -846,14 +876,20 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				value, present := ppCliAuthValue(c)
 				Expect(present).To(BeTrue())
 				Expect(value).To(Equal("true"))
-				Expect(c.Subject.CommonName).To(Equal("puppet-server"),
+				Expect(adminAllowList).To(HaveKey(c.Subject.CommonName),
 					"admin by both routes at once is the point of this class")
 			},
 			"own-ca-expired": func(c *x509.Certificate) {
 				ours(c)
 				clientAuth(c)
-				Expect(c.NotAfter).To(BeTemporally("<", time.Now()),
-					"expiry must be the reason it is denied")
+				Expect(c.NotAfter).To(BeTemporally("<", time.Now()))
+				// The mirror of own-ca-revoked's unexpired() below, and for the
+				// same reason: with two denial reasons at once, relaxing either
+				// check would move no cell. Template-minted serials are unknown
+				// to the CRL today, but that is what this keeps true.
+				revoked, err := myCA.IsRevokedSerial(ctx, c.SerialNumber)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(revoked).To(BeFalse(), "expiry must be the only reason it is denied")
 			},
 			"own-ca-issued": func(c *x509.Certificate) {
 				ours(c)
@@ -892,7 +928,7 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 					"the extension must be present — an absent one would make this a duplicate of own-ca-plain")
 				Expect(value).NotTo(Equal("true"),
 					"present-but-not-true is what distinguishes an equality check from a presence check")
-				Expect(c.Subject.CommonName).NotTo(Equal("puppet-server"),
+				Expect(adminAllowList).NotTo(HaveKey(c.Subject.CommonName),
 					"must not be admin by the allow-list route either")
 			},
 			"foreign-ca": func(c *x509.Certificate) {
@@ -962,6 +998,13 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 // expectedClientClasses and expectedRoutes pin the shape of the matrix. They
 // exist so that removing a fixture is a deliberate edit to a named list rather
 // than an invisible reduction in what the oracle covers.
+// adminAllowList is the allow list every server in this file is configured
+// with. Shared so the fixture-property spec can assert membership of the same
+// map the middleware consults, rather than of a repeated literal — the two
+// drifting apart is exactly how a class stops meaning what it is called.
+// Read-only; nothing here mutates it.
+var adminAllowList = map[string]bool{"puppet-server": true}
+
 var expectedClientClasses = []string{
 	"none",
 	"own-ca-plain",
@@ -1333,7 +1376,7 @@ var _ = Describe("Authorisation baseline: configuration axes", Ordered, Continue
 
 	Describe("allow_public_status", func() {
 		It("denies a client with no certificate when unset", func() {
-			handler := muxWith(&api.AuthConfig{CACert: caCert, AllowList: map[string]bool{"puppet-server": true}})
+			handler := muxWith(&api.AuthConfig{CACert: caCert, AllowList: adminAllowList})
 			Expect(probe(handler, "GET", "/certificate_status/somenode", nil)).To(BeTrue())
 		})
 
@@ -1345,7 +1388,7 @@ var _ = Describe("Authorisation baseline: configuration axes", Ordered, Continue
 			// that the flag no longer does anything.
 			handler := muxWith(&api.AuthConfig{
 				CACert:            caCert,
-				AllowList:         map[string]bool{"puppet-server": true},
+				AllowList:         adminAllowList,
 				AllowPublicStatus: true,
 			})
 			Expect(probe(handler, "GET", "/certificate_status/somenode", nil)).To(BeFalse())
@@ -1354,7 +1397,7 @@ var _ = Describe("Authorisation baseline: configuration axes", Ordered, Continue
 
 	Describe("no_pp_cli_auth", func() {
 		It("grants admin on the pp_cli_auth extension when unset", func() {
-			handler := muxWith(&api.AuthConfig{CACert: caCert, AllowList: map[string]bool{"puppet-server": true}})
+			handler := muxWith(&api.AuthConfig{CACert: caCert, AllowList: adminAllowList})
 			cert := issueClientCertWithPpCliAuth("cli-user", caCert, caKey)
 			Expect(probe(handler, "PUT", "/certificate_revocation_list/ca", cert)).To(BeFalse())
 		})
@@ -1365,7 +1408,7 @@ var _ = Describe("Authorisation baseline: configuration axes", Ordered, Continue
 			// that dropped the flag would move nothing the oracle watches.
 			handler := muxWith(&api.AuthConfig{
 				CACert:      caCert,
-				AllowList:   map[string]bool{"puppet-server": true},
+				AllowList:   adminAllowList,
 				NoPpCliAuth: true,
 			})
 			byExtension := issueClientCertWithPpCliAuth("cli-user", caCert, caKey)
