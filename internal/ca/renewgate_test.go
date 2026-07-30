@@ -156,5 +156,15 @@ var _ = Describe("Renewal issuer gate", func() {
 			_, err := myCA.Renew(ctx, "node1.test", csrFor("node1.test"), nil)
 			Expect(err).To(MatchError(ca.ErrForeignCertificate))
 		})
+
+		It("refuses a certificate we issued but have revoked", func() {
+			// The mirror of the AutoRenew spec above, and not redundant with it:
+			// the two paths call the gate separately, so replacing this one with
+			// a bare CheckSignatureFrom would leave a revoked certificate usable
+			// as a re-key credential while every other Renew spec still passed.
+			Expect(myCA.Revoke(ctx, "node1.test")).To(Succeed())
+			_, err := myCA.Renew(ctx, "node1.test", csrFor("node1.test"), ownCrt)
+			Expect(err).To(MatchError(ca.ErrForeignCertificate))
+		})
 	})
 })

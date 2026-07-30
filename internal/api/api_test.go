@@ -1359,6 +1359,82 @@ var _ = Describe("API Workflow", func() {
 			Expect(err).NotTo(HaveOccurred())
 		})
 
+		// The two handler branches that map ErrForeignCertificate to 403 are
+		// unreachable while the middleware's trust anchor and this CA's own
+		// certificate are the same object: the middleware rejects a foreign
+		// certificate before any handler runs. They become reachable exactly
+		// when those two diverge, which is the topology the intermediate-CA
+		// work introduces — so the fixture makes them diverge deliberately,
+		// trusting a second issuer for authentication while the CA still
+		// refuses to renew its certificates.
+		Context("when the middleware trusts an issuer the CA did not", func() {
+			var (
+				splitMux    http.Handler
+				foreignCert *x509.Certificate
+			)
+
+			BeforeEach(func() {
+				foreignCAKey, err := rsa.GenerateKey(rand.Reader, 2048)
+				Expect(err).NotTo(HaveOccurred())
+				foreignCATmpl := &x509.Certificate{
+					SerialNumber:          big.NewInt(99),
+					Subject:               pkix.Name{CommonName: "Second Issuer"},
+					NotBefore:             time.Now().Add(-time.Hour),
+					NotAfter:              time.Now().Add(24 * time.Hour),
+					KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+					BasicConstraintsValid: true,
+					IsCA:                  true,
+				}
+				foreignCADER, err := x509.CreateCertificate(rand.Reader, foreignCATmpl, foreignCATmpl,
+					&foreignCAKey.PublicKey, foreignCAKey)
+				Expect(err).NotTo(HaveOccurred())
+				foreignCA, err := x509.ParseCertificate(foreignCADER)
+				Expect(err).NotTo(HaveOccurred())
+
+				leafKey, err := rsa.GenerateKey(rand.Reader, 2048)
+				Expect(err).NotTo(HaveOccurred())
+				leafDER, err := x509.CreateCertificate(rand.Reader, &x509.Certificate{
+					SerialNumber: big.NewInt(100),
+					Subject:      pkix.Name{CommonName: subject},
+					NotBefore:    time.Now().Add(-time.Hour),
+					NotAfter:     time.Now().Add(time.Hour),
+					ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+				}, foreignCA, &leafKey.PublicKey, foreignCAKey)
+				Expect(err).NotTo(HaveOccurred())
+				foreignCert, err = x509.ParseCertificate(leafDER)
+				Expect(err).NotTo(HaveOccurred())
+
+				splitServer := api.New(myCA)
+				splitServer.AuthConfig = &api.AuthConfig{CACert: foreignCA}
+				splitMux = splitServer.Routes()
+			})
+
+			It("refuses an empty-body renewal with 403 from the handler", func() {
+				req := httptest.NewRequest("POST", "/certificate_renewal", bytes.NewReader(nil))
+				req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{foreignCert}}
+				rr := httptest.NewRecorder()
+				splitMux.ServeHTTP(rr, req)
+
+				Expect(rr.Code).To(Equal(http.StatusForbidden))
+				// Not the middleware's wording: this rejection came from the
+				// handler, and the authorisation oracle relies on telling them
+				// apart.
+				Expect(rr.Body.String()).To(ContainSubstring("not eligible for renewal"))
+			})
+
+			It("refuses a CSR-based renewal with 403 from the handler", func() {
+				renewCSR, err := testutil.GenerateCSR(subject)
+				Expect(err).NotTo(HaveOccurred())
+				req := httptest.NewRequest("POST", "/certificate_renewal", bytes.NewReader(renewCSR))
+				req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{foreignCert}}
+				rr := httptest.NewRecorder()
+				splitMux.ServeHTTP(rr, req)
+
+				Expect(rr.Code).To(Equal(http.StatusForbidden))
+				Expect(rr.Body.String()).To(ContainSubstring("not eligible for renewal"))
+			})
+		})
+
 		It("should renew the certificate and return PEM", func() {
 			renewCSR, err := testutil.GenerateCSR(subject)
 			Expect(err).NotTo(HaveOccurred())

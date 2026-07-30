@@ -135,20 +135,34 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 			if isAdmin(cfg, clientCert, clientCN) || (subject != "" && clientCN == subject) {
 				next.ServeHTTP(w, r)
 			} else {
-				http.Error(w, "access denied", http.StatusForbidden)
+				denyWithLog(w, r, clientCN, "not an admin and not the subject of the request")
 			}
 
 		case tierAdminOnly:
 			if isAdmin(cfg, clientCert, clientCN) {
 				next.ServeHTTP(w, r)
 			} else {
-				http.Error(w, "access denied", http.StatusForbidden)
+				denyWithLog(w, r, clientCN, "route requires admin access")
 			}
 
 		default:
-			http.Error(w, "access denied", http.StatusForbidden)
+			denyWithLog(w, r, clientCN, "unclassified route")
 		}
 	})
+}
+
+// denyWithLog rejects a request and records who was refused what, and why.
+//
+// The HTTP metrics carry no path label, so a 403 is otherwise invisible beyond a
+// counter: an operator whose tooling broke against a tier change has nothing to
+// correlate against. Logged at Warn because a denial on these routes is either a
+// misconfiguration or an attempt, and both are worth seeing. The client CN is
+// included; it comes from a certificate that has already been verified against
+// the trust anchor, so it is not attacker-controlled free text.
+func denyWithLog(w http.ResponseWriter, r *http.Request, clientCN, reason string) {
+	slog.Warn("Request denied by authorisation middleware",
+		"method", r.Method, "path", r.URL.Path, "client_cn", clientCN, "reason", reason)
+	http.Error(w, "access denied", http.StatusForbidden)
 }
 
 // lookupTier classifies a request into an authorization tier based on method and path.

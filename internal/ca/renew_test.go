@@ -26,6 +26,7 @@ import (
 	"encoding/asn1"
 	"encoding/pem"
 	"fmt"
+	"io/fs"
 	"math/big"
 	"net"
 	"net/url"
@@ -52,6 +53,37 @@ var _ = Describe("CA Renew", func() {
 		block, _ := pem.Decode(certPEM)
 		Expect(block).NotTo(BeNil(), "renewed cert PEM must decode")
 		cert, err := x509.ParseCertificate(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		return cert
+	}
+
+	// mintWithCAKey signs a leaf directly with the cached test CA key, leaving
+	// storage and the inventory untouched. Certificates issued through the
+	// normal flow always leave an inventory row, so this is the only way to
+	// reach Renew's "no previous certificate" branch.
+	mintWithCAKey := func(subject string) *x509.Certificate {
+		GinkgoHelper()
+		key, err := rsa.GenerateKey(rand.Reader, 2048)
+		Expect(err).NotTo(HaveOccurred())
+		serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+		Expect(err).NotTo(HaveOccurred())
+
+		block, _ := pem.Decode(cachedCrtPEM)
+		caCert, err := x509.ParseCertificate(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		keyBlock, _ := pem.Decode(cachedKeyPEM)
+		caKey, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+
+		der, err := x509.CreateCertificate(rand.Reader, &x509.Certificate{
+			SerialNumber: serial,
+			Subject:      pkix.Name{CommonName: subject},
+			NotBefore:    time.Now().Add(-time.Hour),
+			NotAfter:     time.Now().Add(time.Hour),
+			ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		}, caCert, &key.PublicKey, caKey)
+		Expect(err).NotTo(HaveOccurred())
+		cert, err := x509.ParseCertificate(der)
 		Expect(err).NotTo(HaveOccurred())
 		return cert
 	}
@@ -184,19 +216,24 @@ var _ = Describe("CA Renew", func() {
 			"the best-effort revoke failure must be counted for alerting")
 	})
 
-	It("renews a subject whose stored certificate has been removed", func() {
+	It("renews a subject with no prior certificate in storage or inventory", func() {
 		// Renew bypasses the pending-CSR queue, so it can issue even when
-		// storage holds no certificate for the subject. Guards that the happy
-		// path does not depend on a pre-existing stored cert.
+		// storage holds nothing for the subject. This pins the hadOldCert=false
+		// branch: no inventory row means no serial to retire, so the
+		// revoke-the-predecessor step must be skipped rather than attempted.
+		//
+		// The certificate is minted directly with the CA key rather than issued
+		// through Generate, precisely so no inventory row exists. Deleting the
+		// stored cert afterwards would not do: DeleteCert removes only the cert
+		// blob, LatestSerialForSubject reads the inventory, and the branch would
+		// silently stop being exercised.
 		//
 		// The caller must still present a certificate this CA issued — that is
-		// the renewal gate — so this models an agent that holds a valid
-		// certificate after its stored copy was cleaned, rather than a subject
-		// nobody has ever been issued for. The latter is unreachable through the
-		// API in any case: the handler requires the CSR's CN to equal the
-		// presented certificate's.
-		presented := issue("fresh-node")
-		Expect(store.DeleteCert(ctx, "fresh-node")).To(Succeed())
+		// the renewal gate — so this models an agent holding a valid certificate
+		// whose CA-side records were lost, not a subject nobody was issued for.
+		presented := mintWithCAKey("fresh-node")
+		_, err := store.LatestSerialForSubject(ctx, "fresh-node")
+		Expect(err).To(MatchError(fs.ErrNotExist), "the inventory must be empty for this branch to run")
 
 		csrPEM, _ := buildCSR("fresh-node")
 		renewedPEM, err := myCA.Renew(ctx, "fresh-node", csrPEM, presented)
