@@ -191,7 +191,8 @@ type routeCase struct {
 // deliberately excluded: it is unreachable under the shipped single-anchor
 // topology, and the change that makes it reachable — trusting a second issuer
 // for client authentication — is exactly the change that must not slip past
-// this file. Left out, it lands in unrecognised403 and classify calls Fail,
+// this file. Left out, it lands in unrecognised403, which the route table
+// fails on,
 // forcing a decision then. Listed, it would bucket as "admitted" and the
 // topology change would move no cell.
 //
