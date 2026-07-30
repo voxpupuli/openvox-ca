@@ -62,9 +62,12 @@ All endpoints are served under both the bare path and `/puppet-ca/v1/<path>`, so
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | `/certificate_renewal` | Renew an existing certificate; body: raw CSR PEM, or empty; returns new certificate PEM. The presented client certificate must be one **this CA** issued and has not revoked. Today the authorisation middleware refuses both cases first, with `403 access denied`, because it trusts exactly this CA's certificate; the CA's own `403 certificate not eligible for renewal` becomes reachable once a second issuer can be trusted for client authentication |
+| `POST` | `/certificate_renewal` | Renew an existing certificate; body: raw CSR PEM, or empty; returns new certificate PEM. Restricted to certificates this CA issued — see [renewal eligibility](#renewal-eligibility) |
 
 Requires a valid CA-signed client certificate. The new certificate is issued immediately without entering the pending-CSR queue or autosign evaluation, and the certificate it replaces is revoked once the new one is safely stored (see `revoke_on_auto_renew` below for the auto-renewal case).
+
+<a id="renewal-eligibility"></a>
+**Renewal eligibility.** The presented client certificate must be one **this CA** issued, must not be revoked, and must be the certificate for the subject being renewed. Today none of the three produces a distinct error: the authorisation middleware trusts exactly this CA's certificate, so it refuses a foreign or revoked certificate first with `403 access denied`, and the subject condition cannot be reached at all because the handler derives the subject from the presented certificate. The CA's own `403 certificate not eligible for renewal` becomes reachable for the first two once a second issuer can be trusted for client authentication; the third guards future callers of the internal API rather than any request path.
 
 - **CSR body (re-key):** the CSR Common Name must match the authenticated client CN — an agent can only renew its own certificate, not another's. Issues a certificate for the new key in the CSR. Puppet OID extensions are copied from the CSR **except** authorization-arc OIDs (`1.3.6.1.4.1.34380.1.3.*`, such as `pp_cli_auth`), which are stripped so a submitted CSR cannot request elevated privileges.
 
@@ -178,7 +181,7 @@ When mTLS is enabled (both `--tls-cert` and `--tls-key` set), each endpoint requ
 | Tier | Required client cert | Endpoints |
 | --- | --- | --- |
 | **Public** | None | `GET /healthz/*`, `GET /certificate/{subject}`, `GET /certificate_revocation_list/ca`, `PUT /certificate_request/{subject}`, `GET /expirations`, `POST /ocsp`, `GET /ocsp/{request}` |
-| **Any client** | Any CA-signed cert with `clientAuth` EKU | `POST /certificate_renewal` — and the presented certificate must be one this CA issued, has not revoked, and is for the subject being renewed; renewal reissues under our authority using that certificate's own subject, which is only safe for names we assigned. The empty-body path also carries that certificate's SANs and Puppet OID extensions forward unchanged; the CSR path takes Puppet OID extensions from the CSR and strips authorization-arc OIDs (see [Certificate renewal](#certificate-renewal)) |
+| **Any client** | Any CA-signed cert with `clientAuth` EKU | `POST /certificate_renewal` — restricted to certificates this CA issued (see [renewal eligibility](#renewal-eligibility)); renewal reissues under our authority using that certificate's own subject, which is only safe for names we assigned. The empty-body path also carries that certificate's SANs and Puppet OID extensions forward unchanged; the CSR path takes Puppet OID extensions from the CSR and strips authorization-arc OIDs (see [Certificate renewal](#certificate-renewal)) |
 | **Self or admin** | Cert CN matches path subject, OR cert is admin | `GET /certificate_request/{subject}` |
 | **Admin** | Cert is admin (see below) | `GET /certificate_status/{subject}` (public with `--allow-public-status`), `PUT /certificate_status/{subject}`, `DELETE /certificate_status/{subject}`, `DELETE /certificate_request/{subject}`, `GET /certificate_statuses/*`, `POST /sign`, `POST /sign/all`, `POST /generate/{subject}`, `PUT /clean`, `PUT /certificate_revocation_list/ca`, `PUT /certificate/{subject}` |
 

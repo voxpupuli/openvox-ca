@@ -158,8 +158,15 @@ var _ = Describe("Renewal issuer gate", func() {
 
 		It("refuses rather than assuming the certificate is unrevoked", func() {
 			_, err := blind.AutoRenew(ctx, ownCrt)
-			Expect(err).To(HaveOccurred())
+			// The gate's own wrap, not merely "some error": blind has no CA
+			// key, so a fail-open gate would run on to issueLeafLocked and
+			// return ErrNotInitialized — which satisfies both HaveOccurred and
+			// "not ErrForeignCertificate", and left this spec green under
+			// exactly the refactor it claims to catch.
+			Expect(err).To(MatchError(ContainSubstring(
+				"checking whether the presented certificate is revoked")))
 			Expect(err).NotTo(MatchError(ca.ErrForeignCertificate))
+			Expect(err).NotTo(MatchError(ca.ErrNotInitialized))
 		})
 	})
 
