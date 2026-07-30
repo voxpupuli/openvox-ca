@@ -920,10 +920,18 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 		// (hostcert_renewal_interval) they POST an empty body here, relying
 		// solely on the mTLS-presented client cert to prove identity and key
 		// possession, and expect the SAME key reissued with a fresh serial
-		// and validity. Reissuing without a fresh proof-of-possession is safe
-		// because newAuthMiddleware (the tierAnyClient path guarding this
-		// route) has already verified r.TLS.PeerCertificates[0] chains to our
-		// CA and is not revoked; clientCN(r) only reads its CN.
+		// and validity.
+		//
+		// Reissuing without a fresh proof-of-possession is safe because the
+		// certificate is checked twice over. newAuthMiddleware verifies it
+		// chains to the configured trust anchor and is not revoked; AutoRenew
+		// then verifies it was issued by *this* CA specifically and is still
+		// unrevoked at the moment of renewal, rejecting with
+		// ErrForeignCertificate otherwise. The second check is not redundant:
+		// the anchor the middleware trusts and this CA's own certificate are
+		// the same today, but the point of the intermediate-CA work is that
+		// they need not stay so — and renewal is the operation that mints new
+		// credentials from old ones. clientCN(r) only reads the CN.
 		certPEM, err = s.CA.AutoRenew(r.Context(), r.TLS.PeerCertificates[0])
 		if err != nil {
 			// A key-strength rejection is client-actionable: the presented
@@ -933,6 +941,21 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 			if errors.Is(err, ca.ErrKeyPolicy) {
 				slog.Warn("Auto-renewal rejected: key policy", "subject", cn, "error", err)
 				http.Error(w, "certificate key does not meet policy; renew with a new CSR", http.StatusUnprocessableEntity)
+				return
+			}
+			if errors.Is(err, ca.ErrForeignCertificate) {
+				// Deliberately not "access denied": that is the middleware's
+				// wording, and the authorisation oracle keys on it to tell a
+				// middleware rejection from a handler one. Sharing the string
+				// would make the oracle blind to the middleware's own checks.
+				slog.Warn("Auto-renewal rejected: certificate not eligible", "subject", cn, "error", err)
+				http.Error(w, "certificate not eligible for renewal", http.StatusForbidden)
+				return
+			}
+			if errors.Is(err, ca.ErrNotInitialized) {
+				// Same answer as the import path: not ready is a retryable
+				// condition, not a server fault.
+				http.Error(w, "CA not ready", http.StatusServiceUnavailable)
 				return
 			}
 			slog.Warn("Auto-renewal failed", "subject", cn, "error", err)
@@ -956,13 +979,42 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 			return
 		}
 
-		certPEM, err = s.CA.Renew(r.Context(), cn, body)
+		certPEM, err = s.CA.Renew(r.Context(), cn, body, r.TLS.PeerCertificates[0])
 		if err != nil {
 			// Same key-strength policy applies to the re-key CSR: surface it as
 			// a client error instead of a 500.
 			if errors.Is(err, ca.ErrKeyPolicy) {
 				slog.Warn("Renewal rejected: key policy", "subject", cn, "error", err)
 				http.Error(w, "CSR key does not meet policy", http.StatusUnprocessableEntity)
+				return
+			}
+			if errors.Is(err, ca.ErrRenewalSubjectMismatch) {
+				// Same 403 body as below — the client learns no more either way
+				// — but logged apart, because this one is an authenticated
+				// caller reaching for another node's identity rather than a
+				// topology problem.
+				//
+				// Unreachable from this handler by construction: it passes cn
+				// and the certificate cn came from, so the two always agree.
+				// Unlike the foreign-certificate branch below, no topology
+				// change makes it reachable — only a future caller that passes
+				// subject and certificate separately. It is here so that such a
+				// caller gets a 403 rather than a 500.
+				slog.Warn("Renewal rejected: presented certificate is for another subject",
+					"subject", cn, "error", err)
+				http.Error(w, "certificate not eligible for renewal", http.StatusForbidden)
+				return
+			}
+			if errors.Is(err, ca.ErrForeignCertificate) {
+				// See the auto-renewal branch: the body must not collide with
+				// the middleware's "access denied".
+				slog.Warn("Renewal rejected: certificate not eligible", "subject", cn, "error", err)
+				http.Error(w, "certificate not eligible for renewal", http.StatusForbidden)
+				return
+			}
+			if errors.Is(err, ca.ErrNotInitialized) {
+				// See the auto-renewal branch.
+				http.Error(w, "CA not ready", http.StatusServiceUnavailable)
 				return
 			}
 			slog.Warn("Renewal failed", "subject", cn, "error", err)

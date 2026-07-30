@@ -135,20 +135,34 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 			if isAdmin(cfg, clientCert, clientCN) || (subject != "" && clientCN == subject) {
 				next.ServeHTTP(w, r)
 			} else {
-				http.Error(w, "access denied", http.StatusForbidden)
+				denyWithLog(w, r, clientCN, "not an admin and not the subject of the request")
 			}
 
 		case tierAdminOnly:
 			if isAdmin(cfg, clientCert, clientCN) {
 				next.ServeHTTP(w, r)
 			} else {
-				http.Error(w, "access denied", http.StatusForbidden)
+				denyWithLog(w, r, clientCN, "route requires admin access")
 			}
 
 		default:
-			http.Error(w, "access denied", http.StatusForbidden)
+			denyWithLog(w, r, clientCN, "unclassified route")
 		}
 	})
+}
+
+// denyWithLog rejects a request and records who was refused what, and why.
+//
+// The HTTP metrics carry no path label, so a 403 is otherwise invisible beyond a
+// counter: an operator whose tooling broke against a tier change has nothing to
+// correlate against. Logged at Warn because a denial on these routes is either a
+// misconfiguration or an attempt, and both are worth seeing. The client CN is
+// included; it comes from a certificate that has already been verified against
+// the trust anchor, so it is not attacker-controlled free text.
+func denyWithLog(w http.ResponseWriter, r *http.Request, clientCN, reason string) {
+	slog.Warn("Request denied by authorisation middleware",
+		"method", r.Method, "path", r.URL.Path, "client_cn", clientCN, "reason", reason)
+	http.Error(w, "access denied", http.StatusForbidden)
 }
 
 // lookupTier classifies a request into an authorization tier based on method and path.
@@ -176,16 +190,18 @@ func lookupTier(method, path string, cfg *AuthConfig) authTier {
 		return tierPublic
 
 	// certificate_status exposes cert metadata (serial numbers, authorization
-	// extensions) that could aid infrastructure enumeration. By default,
-	// require a CA-signed client cert. Operators can opt in to public access
-	// with --allow-public-status for backward compatibility with bootstrapping
-	// agents that poll status before obtaining a client certificate.
+	// extensions) that could aid infrastructure enumeration, so it is admin-only,
+	// matching Puppet Server's shipped auth.conf — which grants both
+	// certificate_status and certificate_statuses to pp_cli_auth holders and to
+	// nothing else. Operators can still opt in to public access with
+	// --allow-public-status for bootstrapping agents that poll status before
+	// obtaining a client certificate.
 	// NIST 800-53: AC-3 (Access Enforcement)
 	case method == "GET" && strings.HasPrefix(p, "/certificate_status/"):
 		if cfg != nil && cfg.AllowPublicStatus {
 			return tierPublic
 		}
-		return tierAnyClient
+		return tierAdminOnly
 	case method == "GET" && p == "/expirations":
 		return tierPublic
 

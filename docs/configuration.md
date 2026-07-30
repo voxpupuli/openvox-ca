@@ -19,7 +19,7 @@ operator CLI, see [operator CLI (`openvox-ca-ctl`)](operator-cli.md).
 | `--puppet-server-file` | `""` | Path to a file of CNs granted admin API access (one per line; `#` comments and blank lines ignored) |
 | `--no-pp-cli-auth` | `false` | Disable `pp_cli_auth` extension as an admin credential; require CN allow list only |
 | `--no-tls-required` | `false` | Allow plain HTTP on non-loopback addresses; use only behind a trusted TLS proxy or in test environments |
-| `--allow-public-status` | `false` | Allow unauthenticated `GET /certificate_status`; by default this endpoint requires a CA-signed client cert |
+| `--allow-public-status` | `false` | Allow unauthenticated `GET /certificate_status`; by default this endpoint is admin-only, matching Puppet Server's shipped `auth.conf` |
 | `--ocsp-url` | `""` | OCSP responder URL to embed in issued certificates |
 | `--crl-url` | `""` | CRL distribution point URL to embed in issued certificates |
 | `--metrics-listen` | `""` | Address for the Prometheus exporter (e.g. `127.0.0.1:9140`); empty disables it. See [metrics & monitoring](metrics.md) |
@@ -66,6 +66,7 @@ puppet_server_file: ""
 no_pp_cli_auth: false
 no_tls_required: false
 allow_public_status: false  # set true to allow unauthenticated GET /certificate_status
+                            # (otherwise admin-only: puppet_server CN or pp_cli_auth)
 autosign_config: ""
 logfile: ""
 verbosity: 0

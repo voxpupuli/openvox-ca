@@ -760,7 +760,7 @@ func newRootCmd() *cobra.Command {
 	f.StringVar(&puppetServerFile, "puppet-server-file", "", "Path to a file of puppet-server CNs allowed admin access (one per line; # comments and blank lines ignored)")
 	f.BoolVar(&noPpCliAuth, "no-pp-cli-auth", false, "Disable pp_cli_auth extension as an admin credential; require CN allow list only")
 	f.BoolVar(&noTLSRequired, "no-tls-required", false, "Allow plain HTTP on non-loopback addresses (use only behind a trusted TLS proxy or in test environments)")
-	f.BoolVar(&allowPublicStatus, "allow-public-status", false, "Allow unauthenticated GET /certificate_status (by default, requires a CA-signed client cert)")
+	f.BoolVar(&allowPublicStatus, "allow-public-status", false, "Allow unauthenticated GET /certificate_status (by default this route is admin-only)")
 	f.StringVar(&ocspURL, "ocsp-url", "", "OCSP responder URL to embed in issued certificates (e.g. http://openvox-ca:8140/ocsp)")
 	f.StringVar(&crlURL, "crl-url", "", "CRL distribution point URL to embed in issued certificates (e.g. http://openvox-ca:8140/puppet-ca/v1/certificate_revocation_list/ca)")
 	f.StringVar(&metricsListen, "metrics-listen", "", "Address for the Prometheus metrics exporter (e.g. 127.0.0.1:9140 or :9140); empty disables it. Serves /metrics over plain HTTP on a separate listener; restrict to a trusted network as it reveals node hostnames")

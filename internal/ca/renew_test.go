@@ -26,6 +26,7 @@ import (
 	"encoding/asn1"
 	"encoding/pem"
 	"fmt"
+	"io/fs"
 	"math/big"
 	"net"
 	"net/url"
@@ -52,6 +53,37 @@ var _ = Describe("CA Renew", func() {
 		block, _ := pem.Decode(certPEM)
 		Expect(block).NotTo(BeNil(), "renewed cert PEM must decode")
 		cert, err := x509.ParseCertificate(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		return cert
+	}
+
+	// mintWithCAKey signs a leaf directly with the cached test CA key, leaving
+	// storage and the inventory untouched. Certificates issued through the
+	// normal flow always leave an inventory row, so this is the only way to
+	// reach Renew's "no previous certificate" branch.
+	mintWithCAKey := func(subject string) *x509.Certificate {
+		GinkgoHelper()
+		key, err := rsa.GenerateKey(rand.Reader, 2048)
+		Expect(err).NotTo(HaveOccurred())
+		serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+		Expect(err).NotTo(HaveOccurred())
+
+		block, _ := pem.Decode(cachedCrtPEM)
+		caCert, err := x509.ParseCertificate(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		keyBlock, _ := pem.Decode(cachedKeyPEM)
+		caKey, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+
+		der, err := x509.CreateCertificate(rand.Reader, &x509.Certificate{
+			SerialNumber: serial,
+			Subject:      pkix.Name{CommonName: subject},
+			NotBefore:    time.Now().Add(-time.Hour),
+			NotAfter:     time.Now().Add(time.Hour),
+			ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		}, caCert, &key.PublicKey, caKey)
+		Expect(err).NotTo(HaveOccurred())
+		cert, err := x509.ParseCertificate(der)
 		Expect(err).NotTo(HaveOccurred())
 		return cert
 	}
@@ -93,7 +125,7 @@ var _ = Describe("CA Renew", func() {
 
 		// Renew with a brand-new valid CSR for the same CN.
 		csrPEM, _ := buildCSR("renew-node")
-		renewedPEM, err := myCA.Renew(ctx, "renew-node", csrPEM)
+		renewedPEM, err := myCA.Renew(ctx, "renew-node", csrPEM, original)
 		Expect(err).NotTo(HaveOccurred())
 
 		renewed := parseCertPEM(renewedPEM)
@@ -115,12 +147,13 @@ var _ = Describe("CA Renew", func() {
 	})
 
 	It("rejects a renewal whose CSR CN does not match the subject", func() {
-		issue("renew-node")
+		presented := issue("renew-node")
 
 		// CSR carries a different CN than the renewal subject. Renew enforces
-		// CN == subject as defence-in-depth (signing.go:647) and must reject.
+		// CN == subject as defence-in-depth (the csr.Subject.CommonName
+		// check in Renew) and must reject.
 		mismatchPEM, _ := buildCSR("attacker-node")
-		_, err := myCA.Renew(ctx, "renew-node", mismatchPEM)
+		_, err := myCA.Renew(ctx, "renew-node", mismatchPEM, presented)
 		Expect(err).To(HaveOccurred(),
 			"renewal must fail when the CSR CN does not match the subject")
 
@@ -131,7 +164,7 @@ var _ = Describe("CA Renew", func() {
 	})
 
 	It("rejects a renewal with a tampered CSR signature", func() {
-		issue("renew-node")
+		presented := issue("renew-node")
 
 		key, err := rsa.GenerateKey(rand.Reader, 2048)
 		Expect(err).NotTo(HaveOccurred())
@@ -142,9 +175,10 @@ var _ = Describe("CA Renew", func() {
 		csrDER[len(csrDER)-1] ^= 0x01 // flip one bit in the signature
 		tamperedPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
 
-		// Renew verifies the CSR proof-of-possession signature (signing.go:642)
+		// Renew verifies the CSR proof-of-possession signature (the
+		// csr.CheckSignature call)
 		// before acquiring any lock, so a tampered CSR must be rejected.
-		_, err = myCA.Renew(ctx, "renew-node", tamperedPEM)
+		_, err = myCA.Renew(ctx, "renew-node", tamperedPEM, presented)
 		Expect(err).To(HaveOccurred(),
 			"renewal must fail when the CSR signature is invalid")
 	})
@@ -153,7 +187,7 @@ var _ = Describe("CA Renew", func() {
 		original := issue("renew-node")
 
 		csrPEM, _ := buildCSR("renew-node")
-		_, err := myCA.Renew(ctx, "renew-node", csrPEM)
+		_, err := myCA.Renew(ctx, "renew-node", csrPEM, original)
 		Expect(err).NotTo(HaveOccurred())
 
 		revoked, err := myCA.IsRevokedSerial(ctx, original.SerialNumber)
@@ -174,7 +208,7 @@ var _ = Describe("CA Renew", func() {
 		Expect(store.UpdateCRL(ctx, []byte("not a valid CRL"))).To(Succeed())
 
 		csrPEM, _ := buildCSR("renew-revoke-fail-node")
-		renewedPEM, err := myCA.Renew(ctx, "renew-revoke-fail-node", csrPEM)
+		renewedPEM, err := myCA.Renew(ctx, "renew-revoke-fail-node", csrPEM, original)
 		Expect(err).NotTo(HaveOccurred(),
 			"a failed revocation of the replaced cert must not fail the renewal")
 		renewed := parseCertPEM(renewedPEM)
@@ -184,12 +218,27 @@ var _ = Describe("CA Renew", func() {
 			"the best-effort revoke failure must be counted for alerting")
 	})
 
-	It("renews a subject that has no prior certificate", func() {
-		// Renew bypasses the pending-CSR queue, so it can issue even when no
-		// certificate exists yet. Guards that the happy path does not depend on
-		// a pre-existing cert.
+	It("renews a subject with no prior certificate in storage or inventory", func() {
+		// Renew bypasses the pending-CSR queue, so it can issue even when
+		// storage holds nothing for the subject. This pins the hadOldCert=false
+		// branch: no inventory row means no serial to retire, so the
+		// revoke-the-predecessor step must be skipped rather than attempted.
+		//
+		// The certificate is minted directly with the CA key rather than issued
+		// through Generate, precisely so no inventory row exists. Deleting the
+		// stored cert afterwards would not do: DeleteCert removes only the cert
+		// blob, LatestSerialForSubject reads the inventory, and the branch would
+		// silently stop being exercised.
+		//
+		// The caller must still present a certificate this CA issued — that is
+		// the renewal gate — so this models an agent holding a valid certificate
+		// whose CA-side records were lost, not a subject nobody was issued for.
+		presented := mintWithCAKey("fresh-node")
+		_, err := store.LatestSerialForSubject(ctx, "fresh-node")
+		Expect(err).To(MatchError(fs.ErrNotExist), "the inventory must be empty for this branch to run")
+
 		csrPEM, _ := buildCSR("fresh-node")
-		renewedPEM, err := myCA.Renew(ctx, "fresh-node", csrPEM)
+		renewedPEM, err := myCA.Renew(ctx, "fresh-node", csrPEM, presented)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(parseCertPEM(renewedPEM).Subject.CommonName).To(Equal("fresh-node"))
 

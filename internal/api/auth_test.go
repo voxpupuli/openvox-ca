@@ -695,16 +695,18 @@ var _ = Describe("Auth Middleware", func() {
 		})
 	})
 
-	Context("public endpoint is reachable regardless of client cert", func() {
-		It("GET /certificate_status/{own-node} is not rejected with a valid client cert (anyClient tier)", func() {
+	Context("certificate_status is admin-only", func() {
+		// Matches Puppet Server's shipped auth.conf, which grants
+		// certificate_status to pp_cli_auth holders and to nothing else.
+		It("rejects an ordinary CA-signed client cert reading its own status", func() {
 			clientCert := issueClientCert("my-node", caCert, caKey)
 			req := httptest.NewRequest("GET", "/certificate_status/my-node", nil)
 			req = withClientCert(req, clientCert)
 			rr := httptest.NewRecorder()
 			mux.ServeHTTP(rr, req)
-			// 404 because the node does not exist, but not 403.
-			Expect(rr.Code).NotTo(Equal(http.StatusForbidden))
+			Expect(rr.Code).To(Equal(http.StatusForbidden))
 		})
+
 	})
 
 	// --- AllowPublicStatus opt-in ---
@@ -1062,8 +1064,9 @@ var _ = Describe("lookupTier classification", func() {
 		Entry("public CSR submission", "PUT", "/certificate_request/node1", "node1", "public"),
 		Entry("public CRL fetch", "GET", "/certificate_revocation_list/ca", "", "public"),
 		Entry("CRL reissue is admin-only", "PUT", "/certificate_revocation_list/ca", "", "adminOnly"),
-		// certificate_status defaults to any-CA-signed-client when not public.
-		Entry("status read requires any client", "GET", "/certificate_status/node1", "node1", "anyClient"),
+		// certificate_status is admin-only unless explicitly made public,
+		// matching Puppet Server's shipped auth.conf.
+		Entry("status read is admin-only", "GET", "/certificate_status/node1", "node1", "adminOnly"),
 		// Self-or-admin read of a pending CSR.
 		Entry("CSR read is self-or-admin", "GET", "/certificate_request/node1", "node1", "selfOrAdmin"),
 		// Default-deny: signing, mutation, and unknown paths are admin-only.

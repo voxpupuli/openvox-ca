@@ -179,12 +179,21 @@ type routeCase struct {
 }
 
 // handler403Bodies are the 403s the *handlers* emit, as opposed to the
-// middleware. The set is exactly three:
+// middleware. The handlers emit four distinct bodies today:
 //
-//   - handlePostCertificateRenewal, twice (handlers.go, "client certificate
-//     required for renewal" and "CSR CN does not match authenticated client CN")
-//   - handlePostGenerate, once ("private key delivery requires TLS"), on
+//   - handlePostCertificateRenewal: "client certificate required for renewal",
+//     "CSR CN does not match authenticated client CN", and — added with the
+//     renewal issuer gate — "certificate not eligible for renewal"
+//   - handlePostGenerate: "private key delivery requires TLS", on
 //     POST /generate/{subject}, which this table does not cover
+//
+// Only three are listed below. "certificate not eligible for renewal" is
+// deliberately excluded: it is unreachable under the shipped single-anchor
+// topology, and the change that makes it reachable — trusting a second issuer
+// for client authentication — is exactly the change that must not slip past
+// this file. Left out, it lands in unrecognised403, which the route table
+// fails on, forcing a decision then. Listed, it would bucket as "admitted"
+// and the topology change would move no cell.
 //
 // Note "client certificate required" is a strict prefix of the renewal
 // handler's "client certificate required for renewal", so these must be
@@ -448,17 +457,19 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 			baseline:    "262bb3133fe936c2",
 		},
 		{
-			// Any certificate that chains to our trust anchor is admitted, with
-			// no check that the subject matches the caller. Scoped to our own CA
-			// only because ours is the only issuer configured today.
-			name: "any-client: read a certificate status", method: "GET", path: "/certificate_status/somenode",
+			// Admin-only, matching Puppet Server's shipped auth.conf. An
+			// ordinary agent certificate no longer reads statuses; the routes
+			// back are the CN allowlist and pp_cli_auth, exactly as upstream.
+			name: "admin: read a certificate status", method: "GET", path: "/certificate_status/somenode",
 			denied: map[string]bool{
-				"none": true, "own-ca-plain": false, "own-ca-allowlisted": false,
-				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": false,
+				"none": true, "own-ca-plain": true, "own-ca-allowlisted": false,
+				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": true,
 				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
-				"own-ca-pp-cli-auth-false": false, "foreign-ca": true,
+				"own-ca-pp-cli-auth-false": true, "foreign-ca": true,
 			},
-			fingerprint: "50f0635abf97ff03",
+			changedBy: "certificate_status moved from any-client to admin-only for upstream parity; " +
+				"own-ca-plain, own-ca-issued and own-ca-pp-cli-auth-false were previously allowed",
+			fingerprint: "95290d13546028eb",
 			baseline:    "ceb90b2e2a7b4481",
 		},
 		{
@@ -578,8 +589,12 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 
 	DescribeTable("records the outcome of every client class",
 		func(route routeCase) {
+			classes := newClasses()
+			Expect(classNames(classes)).To(Equal(expectedClientClasses),
+				"the client-class fixtures no longer match the pinned list")
+
 			var mismatches []string
-			for _, class := range newClasses() {
+			for _, class := range classes {
 				want, ok := route.denied[class.name]
 				Expect(ok).To(BeTrue(),
 					"route %q has no recorded outcome for client class %q; every combination must be stated",
@@ -986,9 +1001,9 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 		// The class list is pinned by name, not merely counted. Counting alone
 		// lets an adversarial fixture be swapped out — delete "foreign-ca", add
 		// a second benign class, and the length still matches while the row that
-		// mattered is gone.
-		Expect(classNames(newClasses())).To(Equal(expectedClientClasses))
-
+		// mattered is gone. The names are checked inside the route table, where
+		// the classes are minted anyway, so this spec reads no certificates at
+		// all.
 		for _, route := range routes {
 			Expect(route.denied).To(HaveLen(len(expectedClientClasses)),
 				"route %q records %d outcomes but there are %d client classes",
@@ -1042,7 +1057,7 @@ var expectedRoutes = []string{
 	"public: submit a CSR",
 	"public: read expiry metadata",
 	"public: query OCSP",
-	"any-client: read a certificate status",
+	"admin: read a certificate status",
 	"any-client: renew own certificate",
 	"self-or-admin: read own CSR",
 	"self-or-admin: read another node's CSR",
@@ -1377,7 +1392,7 @@ var _ = Describe("Authorisation baseline: configuration axes", Ordered, Continue
 				"with no AuthConfig the middleware is not installed at all")
 		})
 
-		It("admits an any-client route with no certificate", func() {
+		It("admits a route that would otherwise need admin, with no certificate", func() {
 			handler := muxWith(nil)
 			Expect(probe(handler, "GET", "/certificate_status/somenode", nil)).To(BeFalse())
 		})
