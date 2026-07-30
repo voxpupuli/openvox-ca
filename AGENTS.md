@@ -141,6 +141,9 @@ Conventions:
   `changedBy` on all of them naming the class, even though no authorisation
   behaviour changed. Note what that costs: an attributed row's `baseline` is
   never compared again, so a class change retires the baseline layer repo-wide.
+  Such a commit also updates `expectedClientClasses`, gives the class a property
+  function in the fixture-property spec, and records its outcome on every row —
+  the suite enforces all three, but only after the digests stop it first.
 
   The suite cannot judge whether an attribution is *accurate*, nor whether a
   fixture still means what its class name says; reviewers should.
