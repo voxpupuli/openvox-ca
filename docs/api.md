@@ -198,20 +198,31 @@ path), so the difference between the two verbs is only *when* the stored
 certificate goes away:
 
 - `PUT /certificate_status/{subject}` with `{"desired_state":"revoked"}` adds
-  the serial to the CRL and leaves the certificate in storage until the next
-  CSR for that subject displaces it.
-- `DELETE /certificate_status/{subject}` revokes *and* deletes it immediately.
+  the serial to the CRL and leaves the certificate in storage until a later CSR
+  displaces it. Eviction reads the same per-process CRL cache as the admission
+  check described below, so on the HA backends a peer that has not yet seen the
+  revocation instead answers `200 OK` and silently discards the CSR.
+- `DELETE /certificate_status/{subject}` revokes *and* deletes it immediately,
+  on shared storage, so it does not depend on any replica's cache.
 
-Either way the next CSR is accepted: with autosign enabled it is signed at once
+Otherwise the next CSR is accepted: with autosign enabled it is signed at once
 and the agent is back with a fresh, unrevoked certificate; with autosign off it
 queues for manual signing. The CRL entry for the old serial persists in both
 cases, so the old certificate stays refused — but that is not the same as
 locking the *agent* out.
 
-When containing a compromised agent, the levers that actually hold are:
-disabling autosign, or using an autosign policy that excludes the subject;
-blocking the agent at the network layer; and forcing a CRL re-sign on every
-replica so no peer keeps admitting the old certificate from a stale cache.
+When containing a compromised agent, apply the levers that hold, in this order:
+
+1. Close off issuance: disable autosign, or use an autosign policy that
+   excludes the subject, and block the agent at the network layer.
+2. Revoke the certificate.
+3. Force a CRL re-sign on every replica, so no peer keeps admitting the old
+   certificate from a stale cache.
+
+The order matters. Step 3 is also what makes a stale replica willing to evict
+the revoked certificate and issue a replacement, so running it while autosign
+is still open hands whoever holds the compromised key a fresh, valid
+certificate.
 
 > **Revocation is not enforced cluster-wide straight away.** The check reads an
 > in-memory copy of the CRL that each process loads at startup and thereafter

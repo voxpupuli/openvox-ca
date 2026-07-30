@@ -659,9 +659,15 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				// reason the rest of this rests on — a blanked baseline: line is
 				// exactly as loud in a diff as a replaced one, and no honest
 				// change to an existing row produces either.
+				// Computed with changedBy cleared, because that is the state the
+				// message tells the author to arrive at. Printing a fingerprint
+				// that folds in a changedBy they are about to remove would hand
+				// them a value that stops matching the moment they comply.
+				fresh := route
+				fresh.changedBy = ""
 				unrecorded = append(unrecorded, fmt.Sprintf(
 					"  %q:\n\t\t\tfingerprint: %q,\n\t\t\tbaseline:    %q,",
-					route.name, rowDigest(route, true), rowDigest(route, false)))
+					route.name, rowDigest(fresh, true), rowDigest(fresh, false)))
 			case rowDigest(route, false) != route.baseline && route.changedBy == "":
 				unattributed = append(unattributed, fmt.Sprintf(
 					"  %q: its recorded outcomes differ from the originally committed ones, "+
@@ -685,6 +691,13 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 		// also trips it.
 		var drifted []string
 		for _, route := range routes {
+			if route.baseline == "" {
+				// A brand-new row. The spec above owns that case and prints both
+				// literals; without this arm the two specs disagree, and this
+				// one's "set changedBy first" is precisely what the other exists
+				// to talk an author out of.
+				continue
+			}
 			got := rowDigest(route, true)
 			if got == route.fingerprint {
 				continue
@@ -856,8 +869,9 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				unexpired(c)
 				clientAuth(c)
 				noPpCliAuth(c)
-				Expect(adminAllowList).To(HaveKey(c.Subject.CommonName),
-					"admin by allow-list alone, so the CN must be in the allow list")
+				Expect(adminAllowList).To(HaveKeyWithValue(c.Subject.CommonName, true),
+					"admin by allow-list alone, so the CN must be allow-listed with a true value — "+
+						"isAdmin reads the value, not just the key")
 			},
 			"own-ca-pp-cli-auth": func(c *x509.Certificate) {
 				ours(c)
@@ -876,7 +890,7 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				value, present := ppCliAuthValue(c)
 				Expect(present).To(BeTrue())
 				Expect(value).To(Equal("true"))
-				Expect(adminAllowList).To(HaveKey(c.Subject.CommonName),
+				Expect(adminAllowList).To(HaveKeyWithValue(c.Subject.CommonName, true),
 					"admin by both routes at once is the point of this class")
 			},
 			"own-ca-expired": func(c *x509.Certificate) {
@@ -995,9 +1009,6 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 	})
 })
 
-// expectedClientClasses and expectedRoutes pin the shape of the matrix. They
-// exist so that removing a fixture is a deliberate edit to a named list rather
-// than an invisible reduction in what the oracle covers.
 // adminAllowList is the allow list every server in this file is configured
 // with. Shared so the fixture-property spec can assert membership of the same
 // map the middleware consults, rather than of a repeated literal — the two
@@ -1005,6 +1016,9 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 // Read-only; nothing here mutates it.
 var adminAllowList = map[string]bool{"puppet-server": true}
 
+// expectedClientClasses and expectedRoutes pin the shape of the matrix. They
+// exist so that removing a fixture is a deliberate edit to a named list rather
+// than an invisible reduction in what the oracle covers.
 var expectedClientClasses = []string{
 	"none",
 	"own-ca-plain",
