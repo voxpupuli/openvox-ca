@@ -1005,6 +1005,16 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 				http.Error(w, "CSR key does not meet policy", http.StatusUnprocessableEntity)
 				return
 			}
+			if errors.Is(err, ca.ErrRenewalSubjectMismatch) {
+				// Same 403 body as below — the client learns no more either way
+				// — but logged apart, because this one is an authenticated
+				// caller reaching for another node's identity rather than a
+				// topology problem.
+				slog.Warn("Renewal rejected: presented certificate is for another subject",
+					"subject", cn, "error", err)
+				http.Error(w, "certificate not eligible for renewal", http.StatusForbidden)
+				return
+			}
 			if errors.Is(err, ca.ErrForeignCertificate) {
 				// See the auto-renewal branch: the body must not collide with
 				// the middleware's "access denied".

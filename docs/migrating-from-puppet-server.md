@@ -356,36 +356,40 @@ to fix a status poll can also sign and revoke certificates.
 If the caller only needs to observe state, `GET /certificate/{subject}` and the
 CRL are both public and need no grant at all.
 
-Three ways to restore it, in order of preference:
+Two ways to restore authenticated access, in order of preference:
 
 1. **Add the caller's CN to the admin allow list** — `--puppet-server`, or
    `--puppet-server-file` for one CN per line. Authentication is preserved and
    the grant is explicit. Both are read once at startup, so the CA must be
    restarted before the change takes effect. Grants full admin, as above.
 2. **Give the caller a certificate carrying `pp_cli_auth`**, which is how
-   OpenVox Server's own CLI authenticates. This is the *most* invasive option,
-   not the least: authorisation-arc OIDs are stripped from submitted CSRs (see
+   OpenVox Server's own CLI authenticates. It is the *more* invasive of the
+   two, not the less: authorisation-arc OIDs are stripped from submitted CSRs (see
    [Auth-arc OID stripping](#auth-arc-oid-stripping)), so such a certificate
    cannot be obtained through the API at all and must be signed offline with the
    CA private key. That is strictly more privilege than editing the allow-list
    file, and it is unavailable when `ca_key_provider: openbao` holds the key,
    since the key never leaves the vault. It also has no effect if
    `--no-pp-cli-auth` / `no_pp_cli_auth: true` is set. Grants full admin.
-3. **`allow_public_status: true`** if agents must poll status before they hold a
-   client certificate. Note this makes the route fully unauthenticated rather
-   than relaxing it to any client — it is the bootstrapping escape hatch, not
-   the way to restore agent access.
+
+Separately, **`allow_public_status: true`** exists if agents must poll status
+before they hold a client certificate. It is listed apart from the two above
+because it does not restore *authenticated* access: it makes the route fully
+unauthenticated rather than relaxing it to any client. It is the bootstrapping
+escape hatch, not the way to restore agent access.
 
 `POST /certificate_renewal` additionally requires that the presented
-certificate is one this CA issued and has not revoked. Today you will not see a
+certificate is one this CA issued, has not revoked, and is for the subject being
+renewed. Today you will not see a
 distinct error for it: the authorisation middleware trusts exactly this CA's
 certificate, so a foreign or revoked certificate is refused earlier, on every
 mTLS route, with `403 access denied`. The CA's own
 `403 certificate not eligible for renewal` becomes reachable once a second
 issuer can be trusted for client authentication. Renewal reissues under
-this CA's authority using the presented certificate's own subject and
-extensions, so it is only meaningful for certificates this CA vetted when it
-issued them.
+this CA's authority using the presented certificate's own subject, so it is
+only meaningful for names this CA assigned. (Extensions differ by path: the
+empty-body form carries the presented certificate's forward unchanged, while
+the CSR form takes them from the CSR and strips authorization-arc OIDs.)
 
 In the default topology every certificate an agent holds was issued by this CA,
 so nothing changes. A certificate issued by a *previous* CA whose material was

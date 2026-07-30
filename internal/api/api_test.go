@@ -1369,8 +1369,10 @@ var _ = Describe("API Workflow", func() {
 		// refuses to renew its certificates.
 		Context("when the middleware trusts an issuer the CA did not", func() {
 			var (
-				splitMux    http.Handler
-				foreignCert *x509.Certificate
+				splitMux      http.Handler
+				foreignCert   *x509.Certificate
+				foreignCACert *x509.Certificate
+				foreignCAPriv *rsa.PrivateKey
 			)
 
 			BeforeEach(func() {
@@ -1390,6 +1392,7 @@ var _ = Describe("API Workflow", func() {
 				Expect(err).NotTo(HaveOccurred())
 				foreignCA, err := x509.ParseCertificate(foreignCADER)
 				Expect(err).NotTo(HaveOccurred())
+				foreignCACert, foreignCAPriv = foreignCA, foreignCAKey
 
 				leafKey, err := rsa.GenerateKey(rand.Reader, 2048)
 				Expect(err).NotTo(HaveOccurred())
@@ -1432,6 +1435,65 @@ var _ = Describe("API Workflow", func() {
 
 				Expect(rr.Code).To(Equal(http.StatusForbidden))
 				Expect(rr.Body.String()).To(ContainSubstring("not eligible for renewal"))
+			})
+
+			It("refuses a foreign certificate whose CN is not certname-shaped with 403, not 500", func() {
+				// A second issuer's leaf need not respect this CA's lowercase
+				// certname grammar. ValidateSubject would reject "Monitoring
+				// Host" with an unsentinelled error the handler can only render
+				// as a 500 — so the gate has to answer provenance first for the
+				// documented 403 to be what an operator actually sees.
+				leafKey, err := rsa.GenerateKey(rand.Reader, 2048)
+				Expect(err).NotTo(HaveOccurred())
+				leafDER, err := x509.CreateCertificate(rand.Reader, &x509.Certificate{
+					SerialNumber: big.NewInt(101),
+					Subject:      pkix.Name{CommonName: "Monitoring Host"},
+					NotBefore:    time.Now().Add(-time.Hour),
+					NotAfter:     time.Now().Add(time.Hour),
+					ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+				}, foreignCACert, &leafKey.PublicKey, foreignCAPriv)
+				Expect(err).NotTo(HaveOccurred())
+				oddName, err := x509.ParseCertificate(leafDER)
+				Expect(err).NotTo(HaveOccurred())
+
+				req := httptest.NewRequest("POST", "/certificate_renewal", bytes.NewReader(nil))
+				req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{oddName}}
+				rr := httptest.NewRecorder()
+				splitMux.ServeHTTP(rr, req)
+
+				Expect(rr.Code).To(Equal(http.StatusForbidden))
+				Expect(rr.Body.String()).To(ContainSubstring("not eligible for renewal"))
+			})
+		})
+
+		Context("when the CA has not finished initialising", func() {
+			// The 503 mapping added alongside the gate's 403s. Its sibling is
+			// covered at this layer and so is the import path it copies, but
+			// this was pinned only at the CA boundary — delete either handler
+			// block and nothing failed.
+			var bareMux http.Handler
+
+			BeforeEach(func() {
+				bare := api.New(ca.New(storage.New(GinkgoT().TempDir()), ca.AutosignConfig{Mode: "off"}, "puppet.test"))
+				bareMux = bare.Routes()
+			})
+
+			It("answers 503 rather than 500 for an empty-body renewal", func() {
+				req := httptest.NewRequest("POST", "/certificate_renewal", bytes.NewReader(nil))
+				req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{clientCert}}
+				rr := httptest.NewRecorder()
+				bareMux.ServeHTTP(rr, req)
+				Expect(rr.Code).To(Equal(http.StatusServiceUnavailable))
+			})
+
+			It("answers 503 rather than 500 for a CSR-based renewal", func() {
+				renewCSR, err := testutil.GenerateCSR(subject)
+				Expect(err).NotTo(HaveOccurred())
+				req := httptest.NewRequest("POST", "/certificate_renewal", bytes.NewReader(renewCSR))
+				req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{clientCert}}
+				rr := httptest.NewRecorder()
+				bareMux.ServeHTTP(rr, req)
+				Expect(rr.Code).To(Equal(http.StatusServiceUnavailable))
 			})
 		})
 

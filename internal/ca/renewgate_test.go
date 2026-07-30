@@ -117,12 +117,12 @@ var _ = Describe("Renewal issuer gate", func() {
 		})
 
 		It("refuses a certificate issued by another CA", func() {
+			// One spec, not two: AutoRenew derives the subject from the
+			// certificate itself and compares the CN to nothing, so a foreign
+			// certificate bearing a name we issued traverses identical code.
+			// The name collision matters on the Renew side, where it does meet
+			// a check — see the foreign spec there.
 			_, err := myCA.AutoRenew(ctx, foreignCert("node2.test"))
-			Expect(err).To(MatchError(ca.ErrForeignCertificate))
-		})
-
-		It("refuses a foreign certificate bearing a name we issued", func() {
-			_, err := myCA.AutoRenew(ctx, foreignCert("node1.test"))
 			Expect(err).To(MatchError(ca.ErrForeignCertificate))
 		})
 
@@ -144,10 +144,29 @@ var _ = Describe("Renewal issuer gate", func() {
 		})
 	})
 
+	Describe("a CA whose CRL cache is unavailable", func() {
+		// IsRevokedSerial errors when cachedCRL is nil, and the gate returns
+		// that error rather than treating the certificate as unrevoked. A
+		// refactor to `revoked, _ := ...` would fail open on exactly the
+		// question the gate exists to ask, with every other spec here green.
+		var blind *ca.CA
+
+		BeforeEach(func() {
+			blind = ca.New(storage.New(GinkgoT().TempDir()), ca.AutosignConfig{Mode: "off"}, "puppet.test")
+			blind.CACert = myCA.CACert // past the ErrNotInitialized guard, no CRL loaded
+		})
+
+		It("refuses rather than assuming the certificate is unrevoked", func() {
+			_, err := blind.AutoRenew(ctx, ownCrt)
+			Expect(err).To(HaveOccurred())
+			Expect(err).NotTo(MatchError(ca.ErrForeignCertificate))
+		})
+	})
+
 	Describe("an uninitialised CA", func() {
 		// The repo's established shape for this branch — ca_test.go pins it for
-		// Sign, SignWithTTL and ImportCertificate. The gate adds two more entry
-		// points that dereference c.CACert.
+		// Sign and SignWithTTL, importcert_test.go for ImportCertificate. The
+		// gate adds two more entry points that dereference c.CACert.
 		It("returns ErrNotInitialized rather than panicking on AutoRenew", func() {
 			bare := ca.New(storage.New(GinkgoT().TempDir()), ca.AutosignConfig{Mode: "off"}, "puppet.test")
 			_, err := bare.AutoRenew(ctx, ownCrt)
@@ -162,20 +181,37 @@ var _ = Describe("Renewal issuer gate", func() {
 	})
 
 	Describe("Renew", func() {
-		csrFor := func(cn string) []byte {
+		csrKeyed := func(cn string) ([]byte, *ecdsa.PrivateKey) {
 			GinkgoHelper()
 			key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 			Expect(err).NotTo(HaveOccurred())
 			der, err := x509.CreateCertificateRequest(rand.Reader,
 				&x509.CertificateRequest{Subject: pkix.Name{CommonName: cn}}, key)
 			Expect(err).NotTo(HaveOccurred())
-			return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der})
+			return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}), key
+		}
+		csrFor := func(cn string) []byte {
+			GinkgoHelper()
+			pemBytes, _ := csrKeyed(cn)
+			return pemBytes
 		}
 
 		It("re-keys a certificate this CA issued", func() {
-			out, err := myCA.Renew(ctx, "node1.test", csrFor("node1.test"), ownCrt)
+			// Asserts the *key*, not just that bytes came back. Renew takes its
+			// key from the CSR while AutoRenew reissues the presented
+			// certificate's; nothing else pins that asymmetry, and taking
+			// presentedCert as a parameter is what made confusing the two
+			// expressible in the first place.
+			csrPEM, csrKey := csrKeyed("node1.test")
+			out, err := myCA.Renew(ctx, "node1.test", csrPEM, ownCrt)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(out).NotTo(BeEmpty())
+
+			block, _ := pem.Decode(out)
+			Expect(block).NotTo(BeNil())
+			issued, err := x509.ParseCertificate(block.Bytes)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(issued.PublicKey).To(Equal(csrKey.Public()))
+			Expect(issued.PublicKey).NotTo(Equal(ownCrt.PublicKey))
 		})
 
 		It("refuses when the presented certificate is foreign", func() {
@@ -207,7 +243,21 @@ var _ = Describe("Renewal issuer gate", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			_, err = myCA.Renew(ctx, "node1.test", csrFor("node1.test"), otherCrt)
-			Expect(err).To(MatchError(ca.ErrForeignCertificate))
+			Expect(err).To(MatchError(ca.ErrRenewalSubjectMismatch))
+
+			// And it must have had no effect: the check sits ahead of the lock
+			// and every storage write, which is what makes the error safe to
+			// return. A refactor that moved it would still return the error.
+			stored, err := store.GetCert(ctx, "node1.test")
+			Expect(err).NotTo(HaveOccurred())
+			block, _ = pem.Decode(stored)
+			Expect(block).NotTo(BeNil())
+			still, err := x509.ParseCertificate(block.Bytes)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(still.SerialNumber).To(Equal(ownCrt.SerialNumber))
+			revoked, err := myCA.IsRevokedSerial(ctx, ownCrt.SerialNumber)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(revoked).To(BeFalse())
 		})
 
 		It("refuses a certificate we issued but have revoked", func() {
