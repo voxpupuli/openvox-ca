@@ -316,7 +316,7 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"own-ca-expired": false, "own-ca-revoked": false, "own-ca-server-eku": false,
 				"own-ca-pp-cli-auth-false": false, "foreign-ca": false,
 			},
-			fingerprint: "20efd5d41098722c",
+			fingerprint: "3bcba69ca8f399d0",
 		},
 		{
 			name: "public: fetch the CRL", method: "GET", path: "/certificate_revocation_list/ca",
@@ -326,7 +326,7 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"own-ca-expired": false, "own-ca-revoked": false, "own-ca-server-eku": false,
 				"own-ca-pp-cli-auth-false": false, "foreign-ca": false,
 			},
-			fingerprint: "20efd5d41098722c",
+			fingerprint: "3bcba69ca8f399d0",
 		},
 		{
 			name: "public: submit a CSR", method: "PUT", path: "/certificate_request/newnode",
@@ -336,7 +336,7 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"own-ca-expired": false, "own-ca-revoked": false, "own-ca-server-eku": false,
 				"own-ca-pp-cli-auth-false": false, "foreign-ca": false,
 			},
-			fingerprint: "20efd5d41098722c",
+			fingerprint: "3bcba69ca8f399d0",
 		},
 		{
 			// Has its own branch in the classifier rather than sharing one with
@@ -353,7 +353,7 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"own-ca-expired": false, "own-ca-revoked": false, "own-ca-server-eku": false,
 				"own-ca-pp-cli-auth-false": false, "foreign-ca": false,
 			},
-			fingerprint: "20efd5d41098722c",
+			fingerprint: "3bcba69ca8f399d0",
 		},
 		{
 			// Any certificate that chains to our trust anchor is admitted, with
@@ -366,7 +366,7 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
 				"own-ca-pp-cli-auth-false": false, "foreign-ca": true,
 			},
-			fingerprint: "bca6da2164bcceeb",
+			fingerprint: "7b88a295696eaeb4",
 		},
 		{
 			name: "any-client: renew own certificate", method: "POST", path: "/certificate_renewal",
@@ -376,7 +376,7 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
 				"own-ca-pp-cli-auth-false": false, "foreign-ca": true,
 			},
-			fingerprint: "bca6da2164bcceeb",
+			fingerprint: "7b88a295696eaeb4",
 		},
 		{
 			// Self-match: the CN must equal the path subject, or the caller must
@@ -388,7 +388,7 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
 				"own-ca-pp-cli-auth-false": true, "foreign-ca": true,
 			},
-			fingerprint: "97f9f0c0deb8b53d",
+			fingerprint: "b4ffeb18bcb22e6c",
 		},
 		{
 			name: "self-or-admin: read another node's CSR", method: "GET", path: "/certificate_request/othernode",
@@ -398,7 +398,7 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
 				"own-ca-pp-cli-auth-false": true, "foreign-ca": true,
 			},
-			fingerprint: "a5e45fefd4a8d0ef",
+			fingerprint: "6c242f7acc06b28c",
 		},
 		{
 			name: "admin: list all statuses", method: "GET", path: "/certificate_statuses/all",
@@ -408,7 +408,7 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
 				"own-ca-pp-cli-auth-false": true, "foreign-ca": true,
 			},
-			fingerprint: "a5e45fefd4a8d0ef",
+			fingerprint: "6c242f7acc06b28c",
 		},
 		{
 			name: "admin: sign all pending", method: "POST", path: "/sign/all",
@@ -418,7 +418,7 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
 				"own-ca-pp-cli-auth-false": true, "foreign-ca": true,
 			},
-			fingerprint: "a5e45fefd4a8d0ef",
+			fingerprint: "6c242f7acc06b28c",
 		},
 		{
 			name: "admin: reissue the CRL", method: "PUT", path: "/certificate_revocation_list/ca",
@@ -428,7 +428,7 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
 				"own-ca-pp-cli-auth-false": true, "foreign-ca": true,
 			},
-			fingerprint: "a5e45fefd4a8d0ef",
+			fingerprint: "6c242f7acc06b28c",
 		},
 	}
 
@@ -533,39 +533,32 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 	// Without this, editing a recorded cell and leaving changedBy empty was a
 	// green suite: nothing retained the original values, so no assertion could
 	// tell a deliberate change from a silent one. The digest is that retained
-	// copy, in one line per row.
+	// copy, in one line per row, and it covers changedBy as well as the outcomes
+	// so that re-attributing a later change to an earlier one also fails.
+	//
+	// Note that adding a client class changes every row's digest, because every
+	// row then records one more outcome. That is intended — each row genuinely
+	// carries new information — so such a commit updates all of them, and one
+	// changedBy naming the class is the right entry.
 	It("requires a changed row to say what changed it", func() {
-		var undocumented []string
+		var drifted []string
 		for _, route := range routes {
-			got := fingerprintDenied(route.denied)
+			got := fingerprintRow(route)
 			if got == route.fingerprint {
 				continue
 			}
+			what := "its recorded outcomes have been edited"
 			if route.changedBy == "" {
-				undocumented = append(undocumented, fmt.Sprintf(
-					"  %q: recorded outcomes have been edited but changedBy is empty.\n"+
-						"    Set changedBy to the change that did it, and update fingerprint to %q.",
-					route.name, got))
+				what += " and changedBy is empty"
 			}
+			drifted = append(drifted, fmt.Sprintf(
+				"  %q: %s.\n    Set changedBy to the change responsible; with the changedBy you have "+
+					"now, fingerprint should be %q.", route.name, what, got))
 		}
-		Expect(undocumented).To(BeEmpty(),
-			"the recorded baseline was edited without saying why:\n%s\n\n"+
+		Expect(drifted).To(BeEmpty(),
+			"the recorded baseline drifted from its provenance:\n%s\n\n"+
 				"That distinction — deliberate versus accidental — is what this table is for.",
-			strings.Join(undocumented, "\n"))
-	})
-
-	It("keeps every fingerprint in step with the row it digests", func() {
-		// The other half: a row whose fingerprint is stale (updated outcomes,
-		// updated changedBy, forgotten digest) would silently stop enforcing.
-		var stale []string
-		for _, route := range routes {
-			if got := fingerprintDenied(route.denied); got != route.fingerprint && route.changedBy != "" {
-				stale = append(stale, fmt.Sprintf("  %q: set fingerprint to %q", route.name, got))
-			}
-		}
-		Expect(stale).To(BeEmpty(),
-			"these rows changed and were documented, but their fingerprints were not "+
-				"updated, so the next edit would go unnoticed:\n%s", strings.Join(stale, "\n"))
+			strings.Join(drifted, "\n"))
 	})
 
 	// The table above cannot tell "denied by the middleware" from "this path is
@@ -616,13 +609,22 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 			req = withClientCert(req, clientCertFromKey(adminKey, "puppet-server", caCert, caKey, false, false))
 			rec := httptest.NewRecorder()
 			scratchMux.ServeHTTP(rec, req)
-			// A bare 404 is ambiguous: the handlers return one for an absent
-			// subject, which several of these routes legitimately do against a
-			// scratch store. Go's ServeMux writes its own body for a path it has
-			// no pattern for, and that is the one that means "unregistered".
-			if rec.Code == http.StatusNotFound &&
-				strings.Contains(rec.Body.String(), "404 page not found") {
-				missing = append(missing, "  "+route.method+" /puppet-ca/v1"+route.path)
+			// Two ways the mux reports "no such registration", and both matter.
+			// A bare 404 is ambiguous, because the handlers return one for an
+			// absent subject, which several of these routes legitimately do
+			// against a scratch store — so only Go's own mux body counts. And
+			// since Go 1.22 a path that matches some pattern but not for this
+			// method yields 405, not 404. Seven of these rows share a path with
+			// another method, so without the 405 clause dropping one of them
+			// from Routes() would be invisible: non-admins are denied before
+			// routing and admins get a non-403 that classify reads as admitted.
+			switch {
+			case rec.Code == http.StatusMethodNotAllowed:
+				missing = append(missing,
+					"  "+route.method+" /puppet-ca/v1"+route.path+" (path registered, method is not)")
+			case rec.Code == http.StatusNotFound &&
+				strings.Contains(rec.Body.String(), "404 page not found"):
+				missing = append(missing, "  "+route.method+" /puppet-ca/v1"+route.path+" (path not registered)")
 			}
 			Expect(classify(rec)).NotTo(Equal(deniedByMiddleware),
 				"%s %s: the admin certificate should reach the mux, so a denial here means this "+
@@ -702,7 +704,11 @@ var expectedRoutes = []string{
 // fingerprintDenied digests a row's recorded outcomes. Sorted so it does not
 // depend on map iteration order, and truncated because it only has to detect a
 // change, not resist an adversary.
-func fingerprintDenied(denied map[string]bool) string {
+func fingerprintRow(r routeCase) string {
+	return fingerprintDenied(r.denied, r.changedBy)
+}
+
+func fingerprintDenied(denied map[string]bool, changedBy string) string {
 	names := make([]string, 0, len(denied))
 	for name := range denied {
 		names = append(names, name)
@@ -713,6 +719,12 @@ func fingerprintDenied(denied map[string]bool) string {
 	for _, name := range names {
 		fmt.Fprintf(h, "%s=%v;", name, denied[name])
 	}
+	// changedBy is part of the digest, not checked separately against "". If it
+	// were separate, the gate would only ever catch a row's *first* undocumented
+	// edit: once any provenance was recorded, a later change could edit outcomes,
+	// leave the stale attribution in place, refresh the digest as the failure
+	// message instructs, and go green — crediting the new change to the old one.
+	fmt.Fprintf(h, "by=%s", changedBy)
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
