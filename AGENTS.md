@@ -119,6 +119,13 @@ Conventions:
   conditions; sleeps make the suite flaky on loaded CI runners.
 - Keep negative and edge cases first-class: every security-relevant branch
   (rejection paths, tamper detection, auth denial) needs an explicit `It`.
+- `internal/api/authbaseline_test.go` is the recorded authorisation baseline:
+  every client class against every covered route, as the middleware behaves
+  today. A change that deliberately alters who may reach an endpoint updates the
+  affected row, sets `changedBy`, and refreshes that row's `fingerprint`, all in
+  the same commit — the suite fails otherwise, which is the point. Update
+  `docs/api.md#authorization-tiers` in step, since it publishes the same matrix
+  to operators.
 
 ### Integration suites (build-tagged)
 

@@ -23,14 +23,18 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"time"
 
@@ -67,17 +71,31 @@ import (
 //
 // Scope, stated plainly so nobody mistakes this for total coverage:
 //
-//   - 10 of the 19 routes registered by Routes(). The omitted ones are OCSP and
-//     the health probes (public and uninteresting here), and duplicates of a
-//     tier already represented by another row.
+//   - 11 rows over 10 of the 19 protocol routes registered by Routes().
+//     GET /certificate_request/{subject} gets two rows because the self-match is
+//     the only signal separating tierSelfOrAdmin from tierAdminOnly. The three
+//     /healthz/ probes are registered separately and are not among the 19. The
+//     omitted protocol routes are the two OCSP entries and duplicates of a tier
+//     already represented by another row.
 //   - Both the bare and the /puppet-ca/v1-prefixed forms of each path, which
 //     the mux registers separately — see the prefix spec below.
-//   - The default AuthConfig, plus the two flags that move a tier
+//   - Only denials emitted by the *middleware*. A handler that refuses with its
+//     own 403 is recorded as "got past authorisation", because that is what it
+//     is. Of the three changes named above, that makes certificate_status
+//     unconditionally observable here; renewal gating only if it lands in the
+//     middleware rather than in handlePostCertificateRenewal, where the route's
+//     existing refusals live; and issuer-scoping not at all through the
+//     foreign-CA row, since this fixture's CA stays unconfigured as a second
+//     trust anchor (see foreignClientCert). Anything landing in a handler needs
+//     its own anchor in that handler's tests.
+//   - The default AuthConfig, an absent one, plus the two flags that move a tier
 //     (AllowPublicStatus, NoPpCliAuth), covered in their own Describe rather
 //     than by multiplying every row.
 //
-// A second, overlapping oracle lives in auth_test.go ("authorisation matrix"),
-// which drives lookupTier directly rather than through the mux. That one pins
+// A second, overlapping oracle lives in auth_test.go ("lookupTier classification"),
+// which drives lookupTier directly rather than through the mux. The same matrix
+// is published for operators at docs/api.md#authorization-tiers; a row that
+// moves here moves there too. That one pins
 // tier assignment; this one pins the observable HTTP outcome. Keep them in
 // step: a tier change should move a row in both.
 
@@ -95,33 +113,76 @@ type routeCase struct {
 	path   string
 	// denied maps clientClass.name to whether the middleware rejects it.
 	denied map[string]bool
+	// fingerprint is a digest of the denied map as first recorded. It is what
+	// makes changedBy enforceable rather than advisory: editing a cell changes
+	// the digest, and the spec then requires changedBy to be set in the same
+	// commit. Without it nothing distinguished a deliberate change from a
+	// silent one, because no copy of the original values was retained
+	// anywhere — the header claimed that distinction was "the whole point"
+	// while nothing implemented it.
+	fingerprint string
 	// changedBy names the change that last altered this row's outcomes, empty
-	// for rows still at their original recorded values. Always asserted either
-	// way; this only says why a value differs from the first recording.
+	// for rows still at their originally recorded values.
 	changedBy string
 }
 
-// middlewareDenied reports whether the response is the *middleware's* rejection.
+// handler403Bodies are the 403s the *handlers* emit, as opposed to the
+// middleware. The set is exactly three:
 //
-// Status alone is not enough. Handlers on these routes return 403 of their own —
-// handlePostCertificateRenewal does so twice (handlers.go:903, :955), and
-// handleGetCert once — so a bare code check would record a handler outcome as an
-// authorisation outcome and the table would drift without failing. The
-// middleware's two messages are matched exactly instead. Note "client
-// certificate required" is a strict prefix of the renewal handler's "client
-// certificate required for renewal", so this must not become a prefix match.
+//   - handlePostCertificateRenewal, twice (handlers.go, "client certificate
+//     required for renewal" and "CSR CN does not match authenticated client CN")
+//   - handlePostGenerate, once ("private key delivery requires TLS"), on
+//     POST /generate/{subject}, which this table does not cover
+//
+// Note "client certificate required" is a strict prefix of the renewal
+// handler's "client certificate required for renewal", so these must be
+// compared for equality and never by prefix.
+var handler403Bodies = map[string]bool{
+	"client certificate required for renewal":       true,
+	"CSR CN does not match authenticated client CN": true,
+	"private key delivery requires TLS":             true,
+}
+
+// denialKind classifies a response as an authorisation denial, an admission, or
+// something this file does not recognise.
+type denialKind int
+
+const (
+	admitted denialKind = iota
+	deniedByMiddleware
+	unrecognised403
+)
+
+// classify reports whether the response is the *middleware's* rejection.
+//
+// Status alone is not enough: the handlers emit 403s of their own, so a bare
+// code check would record a handler outcome as an authorisation outcome. But the
+// inverse — recognising only the middleware messages we know today — is worse,
+// and was the original shape of this function. Every change this table exists to
+// precede is a *narrowing*, which adds denials; a narrowing that rejects with a
+// new message would have fallen into "not one of our two strings" and been
+// recorded as admitted, leaving every row unmoved and the oracle silent on
+// exactly the change it was committed ahead of.
+//
+// So the test is inverted. Any 403 is the middleware's unless its body is one of
+// the enumerated handler messages, and a 403 body in neither set is
+// unrecognised — which callers must fail on rather than quietly bucket. That way
+// introducing a new denial reason forces a deliberate edit here.
 //
 // Every other outcome (404 for an absent subject, 400 for a malformed body)
 // means the request got past authorisation, which is what this table measures.
-func middlewareDenied(rec *httptest.ResponseRecorder) bool {
+func classify(rec *httptest.ResponseRecorder) denialKind {
 	if rec.Code != http.StatusForbidden {
-		return false
+		return admitted
 	}
-	switch strings.TrimSpace(rec.Body.String()) {
-	case "client certificate required", "access denied":
-		return true
+	body := strings.TrimSpace(rec.Body.String())
+	switch {
+	case body == "client certificate required", body == "access denied":
+		return deniedByMiddleware
+	case handler403Bodies[body]:
+		return admitted
 	default:
-		return false
+		return unrecognised403
 	}
 }
 
@@ -143,10 +204,10 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 
 		store = storage.New(tmpDir)
 		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
-		// The revoked fixture is issued through the CA, so leaf generation is on
-		// the fixture path. Nothing here depends on the leaf algorithm and ECDSA
-		// is an order of magnitude cheaper to generate than RSA.
-		myCA.LeafKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		// No LeafKeyConfig here: this block mints its certificates directly with
+		// issueClientCert and never issues through the CA, so the setting had no
+		// consumer and its rationale described a fixture path this Describe does
+		// not have.
 		Expect(store.EnsureDirs(ctx)).To(Succeed())
 		Expect(store.SaveCAKey(ctx, cachedKeyPEM)).To(Succeed())
 		Expect(store.SaveCACert(ctx, cachedCrtPEM)).To(Succeed())
@@ -182,8 +243,10 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 		// The *keys*, though, are generated once and reused. What must be fresh
 		// is the certificate — its serial is what the CRL names — and RSA key
 		// generation is the whole cost of minting one. Re-minting per route with
-		// cached keys keeps the independence and takes the matrix from ~130 key
-		// generations to eight.
+		// cached keys keeps the independence and takes the matrix from ~250
+		// RSA-2048 generations to four. The revoked, CA-issued and foreign
+		// fixtures still generate a P-256 key each per call, which is cheap
+		// enough not to be worth pooling.
 		keyPool := newRSAKeyPool(4)
 
 		newClasses = func() []clientClass {
@@ -198,7 +261,29 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				// makes the two grants exclusive rather than additive.
 				{name: "own-ca-admin-both", cert: clientCertFromKey(keyPool[3], "puppet-server", caCert, caKey, true, false)},
 				{name: "own-ca-expired", cert: clientCertFromKey(keyPool[0], "stale", caCert, caKey, false, true)},
+				// Chain-valid *and* recorded in the CA's inventory, unlike every
+				// other admitted class here — those are minted by signing a
+				// template directly, with serials the CA has never seen. Today
+				// nothing distinguishes them: AutoRenew reissues purely from the
+				// presented certificate. A gate on "certificates this CA issued"
+				// must consult something recorded at issuance, so without this
+				// class the renewal row could only record "renewal now denies
+				// every ordinary agent" — a fiction, since a genuinely-issued
+				// agent would still be admitted.
+				{name: "own-ca-issued", cert: caIssuedClientCert(ctx, myCA)},
 				{name: "own-ca-revoked", cert: revokedClientCert(ctx, myCA)},
+				// Chain-valid but carrying only serverAuth EKU. The middleware
+				// requires ExtKeyUsageClientAuth in its Verify call, and no
+				// other class distinguishes that: every one of them carries
+				// clientAuth, so relaxing the requirement to ExtKeyUsageAny
+				// would move no cell. That predicate sits inside the block the
+				// multi-trust-anchor work has to rewrite.
+				{name: "own-ca-server-eku", cert: serverEKUClientCert(keyPool[1], "server-only", caCert, caKey)},
+				// pp_cli_auth present but not "true". isAdmin compares the
+				// extension value for equality; reducing it to a presence test
+				// would grant admin to this certificate and, again, move no
+				// existing cell.
+				{name: "own-ca-pp-cli-auth-false", cert: ppCliAuthValueCert(keyPool[2], "cli-false", caCert, caKey, "false")},
 				{name: "foreign-ca", cert: foreignClientCert(selfName)},
 			}
 		}
@@ -211,25 +296,47 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 			name: "public: fetch the CA certificate", method: "GET", path: "/certificate/ca",
 			denied: map[string]bool{
 				"none": false, "own-ca-plain": false, "own-ca-allowlisted": false,
-				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-expired": false,
-				"own-ca-revoked": false, "foreign-ca": false,
+				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": false,
+				"own-ca-expired": false, "own-ca-revoked": false, "own-ca-server-eku": false,
+				"own-ca-pp-cli-auth-false": false, "foreign-ca": false,
 			},
+			fingerprint: "20efd5d41098722c",
 		},
 		{
 			name: "public: fetch the CRL", method: "GET", path: "/certificate_revocation_list/ca",
 			denied: map[string]bool{
 				"none": false, "own-ca-plain": false, "own-ca-allowlisted": false,
-				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-expired": false,
-				"own-ca-revoked": false, "foreign-ca": false,
+				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": false,
+				"own-ca-expired": false, "own-ca-revoked": false, "own-ca-server-eku": false,
+				"own-ca-pp-cli-auth-false": false, "foreign-ca": false,
 			},
+			fingerprint: "20efd5d41098722c",
 		},
 		{
 			name: "public: submit a CSR", method: "PUT", path: "/certificate_request/newnode",
 			denied: map[string]bool{
 				"none": false, "own-ca-plain": false, "own-ca-allowlisted": false,
-				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-expired": false,
-				"own-ca-revoked": false, "foreign-ca": false,
+				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": false,
+				"own-ca-expired": false, "own-ca-revoked": false, "own-ca-server-eku": false,
+				"own-ca-pp-cli-auth-false": false, "foreign-ca": false,
 			},
+			fingerprint: "20efd5d41098722c",
+		},
+		{
+			// Its own branch in the classifier, and the only genuinely
+			// uncovered route among those omitted. It returns certificate
+			// expiry metadata to any caller with no client certificate, and it
+			// is the obvious sibling question when certificate_status narrows
+			// to admin-only — so a change that tightens, loosens or reorders
+			// this case relative to the one above it should move a cell here.
+			name: "public: read expiry metadata", method: "GET", path: "/expirations",
+			denied: map[string]bool{
+				"none": false, "own-ca-plain": false, "own-ca-allowlisted": false,
+				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": false,
+				"own-ca-expired": false, "own-ca-revoked": false, "own-ca-server-eku": false,
+				"own-ca-pp-cli-auth-false": false, "foreign-ca": false,
+			},
+			fingerprint: "20efd5d41098722c",
 		},
 		{
 			// Any certificate that chains to our trust anchor is admitted, with
@@ -238,17 +345,21 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 			name: "any-client: read a certificate status", method: "GET", path: "/certificate_status/somenode",
 			denied: map[string]bool{
 				"none": true, "own-ca-plain": false, "own-ca-allowlisted": false,
-				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-expired": true,
-				"own-ca-revoked": true, "foreign-ca": true,
+				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": false,
+				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
+				"own-ca-pp-cli-auth-false": false, "foreign-ca": true,
 			},
+			fingerprint: "bca6da2164bcceeb",
 		},
 		{
 			name: "any-client: renew own certificate", method: "POST", path: "/certificate_renewal",
 			denied: map[string]bool{
 				"none": true, "own-ca-plain": false, "own-ca-allowlisted": false,
-				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-expired": true,
-				"own-ca-revoked": true, "foreign-ca": true,
+				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": false,
+				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
+				"own-ca-pp-cli-auth-false": false, "foreign-ca": true,
 			},
+			fingerprint: "bca6da2164bcceeb",
 		},
 		{
 			// Self-match: the CN must equal the path subject, or the caller must
@@ -256,41 +367,51 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 			name: "self-or-admin: read own CSR", method: "GET", path: "/certificate_request/" + selfName,
 			denied: map[string]bool{
 				"none": true, "own-ca-plain": false, "own-ca-allowlisted": false,
-				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-expired": true,
-				"own-ca-revoked": true, "foreign-ca": true,
+				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": true,
+				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
+				"own-ca-pp-cli-auth-false": true, "foreign-ca": true,
 			},
+			fingerprint: "97f9f0c0deb8b53d",
 		},
 		{
 			name: "self-or-admin: read another node's CSR", method: "GET", path: "/certificate_request/othernode",
 			denied: map[string]bool{
 				"none": true, "own-ca-plain": true, "own-ca-allowlisted": false,
-				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-expired": true,
-				"own-ca-revoked": true, "foreign-ca": true,
+				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": true,
+				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
+				"own-ca-pp-cli-auth-false": true, "foreign-ca": true,
 			},
+			fingerprint: "a5e45fefd4a8d0ef",
 		},
 		{
 			name: "admin: list all statuses", method: "GET", path: "/certificate_statuses/all",
 			denied: map[string]bool{
 				"none": true, "own-ca-plain": true, "own-ca-allowlisted": false,
-				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-expired": true,
-				"own-ca-revoked": true, "foreign-ca": true,
+				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": true,
+				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
+				"own-ca-pp-cli-auth-false": true, "foreign-ca": true,
 			},
+			fingerprint: "a5e45fefd4a8d0ef",
 		},
 		{
 			name: "admin: sign all pending", method: "POST", path: "/sign/all",
 			denied: map[string]bool{
 				"none": true, "own-ca-plain": true, "own-ca-allowlisted": false,
-				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-expired": true,
-				"own-ca-revoked": true, "foreign-ca": true,
+				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": true,
+				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
+				"own-ca-pp-cli-auth-false": true, "foreign-ca": true,
 			},
+			fingerprint: "a5e45fefd4a8d0ef",
 		},
 		{
 			name: "admin: reissue the CRL", method: "PUT", path: "/certificate_revocation_list/ca",
 			denied: map[string]bool{
 				"none": true, "own-ca-plain": true, "own-ca-allowlisted": false,
-				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-expired": true,
-				"own-ca-revoked": true, "foreign-ca": true,
+				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": true,
+				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
+				"own-ca-pp-cli-auth-false": true, "foreign-ca": true,
 			},
+			fingerprint: "a5e45fefd4a8d0ef",
 		},
 	}
 
@@ -300,10 +421,31 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 		req := httptest.NewRequest(route.method, pathPrefix+route.path, strings.NewReader(""))
 		if class.cert != nil {
 			req = withClientCert(req, class.cert)
+		} else {
+			// A TLS connection that presented no client certificate, which is
+			// what a real mTLS listener produces. Leaving r.TLS nil instead
+			// would reach the middleware's other disjunct — the one the
+			// production code itself calls "shouldn't happen" — so the whole
+			// "none" column would have recorded the defensive branch rather
+			// than the case operators actually hit. The sibling oracle in
+			// auth_test.go models it this way for the same reason.
+			req.TLS = &tls.ConnectionState{}
 		}
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, req)
-		return middlewareDenied(rec)
+		switch classify(rec) {
+		case deniedByMiddleware:
+			return true
+		case unrecognised403:
+			Fail(fmt.Sprintf("route %q, client %q: 403 with body %q is neither a known middleware "+
+				"denial nor a known handler refusal. Classify it in classify()/handler403Bodies "+
+				"before trusting this table: an unrecognised denial recorded as an admission is "+
+				"how this oracle goes quiet on the change it exists to watch.",
+				route.name, class.name, strings.TrimSpace(rec.Body.String())))
+			return false
+		default:
+			return false
+		}
 	}
 
 	// One Entry per route rather than a doubly-nested loop inside a single It.
@@ -346,23 +488,88 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 		routeEntries,
 	)
 
-	It("applies the same authorisation at the /puppet-ca/v1 prefix", func() {
-		// Routes() registers every path twice, bare and prefixed, against the
-		// same handler. That is half the registered mux, and nothing else here
-		// touches it: a prefix-sensitive change to lookupTier — which matches on
-		// path prefixes — would move the prefixed surface alone and go unnoticed.
-		//
-		// Compared against the same recorded table rather than a second copy of
-		// it, so the two cannot drift.
-		for _, route := range routes {
+	// One Entry per route, matching the bare-path table, for the same two
+	// reasons: a single It aborts at the first moved cell, and this surface is
+	// half the registered mux — a prefix-sensitive change to lookupTier, which
+	// matches on path prefixes, would move it alone.
+	//
+	// Compared against the same recorded table rather than a second copy, so the
+	// two cannot drift.
+	DescribeTable("applies the same authorisation at the /puppet-ca/v1 prefix",
+		func(route routeCase) {
+			var mismatches []string
 			for _, class := range newClasses() {
 				want := route.denied[class.name]
-				Expect(probe(route, class, "/puppet-ca/v1")).To(Equal(want),
-					"route %q at the /puppet-ca/v1 prefix, client %q: recorded denied=%v but the prefixed "+
-						"path disagrees. Both forms must authorise identically.",
-					route.name, class.name, want)
+				if got := probe(route, class, "/puppet-ca/v1"); got != want {
+					mismatches = append(mismatches,
+						fmt.Sprintf("  client %q: recorded denied=%v, got denied=%v", class.name, want, got))
+				}
+			}
+			Expect(mismatches).To(BeEmpty(),
+				"route %q disagrees between its bare and /puppet-ca/v1 forms:\n%s\n\n"+
+					"Both must authorise identically.",
+				route.name, strings.Join(mismatches, "\n"))
+		},
+		routeEntries,
+	)
+
+	// Without this, editing a recorded cell and leaving changedBy empty was a
+	// green suite: nothing retained the original values, so no assertion could
+	// tell a deliberate change from a silent one. The digest is that retained
+	// copy, in one line per row.
+	It("requires a changed row to say what changed it", func() {
+		var undocumented []string
+		for _, route := range routes {
+			got := fingerprintDenied(route.denied)
+			if got == route.fingerprint {
+				continue
+			}
+			if route.changedBy == "" {
+				undocumented = append(undocumented, fmt.Sprintf(
+					"  %q: recorded outcomes have been edited but changedBy is empty.\n"+
+						"    Set changedBy to the change that did it, and update fingerprint to %q.",
+					route.name, got))
 			}
 		}
+		Expect(undocumented).To(BeEmpty(),
+			"the recorded baseline was edited without saying why:\n%s\n\n"+
+				"That distinction — deliberate versus accidental — is what this table is for.",
+			strings.Join(undocumented, "\n"))
+	})
+
+	It("keeps every fingerprint in step with the row it digests", func() {
+		// The other half: a row whose fingerprint is stale (updated outcomes,
+		// updated changedBy, forgotten digest) would silently stop enforcing.
+		var stale []string
+		for _, route := range routes {
+			if got := fingerprintDenied(route.denied); got != route.fingerprint && route.changedBy != "" {
+				stale = append(stale, fmt.Sprintf("  %q: set fingerprint to %q", route.name, got))
+			}
+		}
+		Expect(stale).To(BeEmpty(),
+			"these rows changed and were documented, but their fingerprints were not "+
+				"updated, so the next edit would go unnoticed:\n%s", strings.Join(stale, "\n"))
+	})
+
+	// The table above cannot tell "denied by the middleware" from "this path is
+	// not registered at all": Routes() wraps the mux, so an unknown path is
+	// tier-classified and refused before routing ever happens. Dropping
+	// "/puppet-ca/v1" from the prefix list would therefore leave every recorded
+	// cell satisfied. This pins existence separately.
+	It("actually registers the prefixed routes", func() {
+		var missing []string
+		for _, route := range routes {
+			req := httptest.NewRequest(route.method, "/puppet-ca/v1"+route.path, strings.NewReader(""))
+			req.TLS = &tls.ConnectionState{}
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code == http.StatusNotFound {
+				missing = append(missing, "  "+route.method+" /puppet-ca/v1"+route.path)
+			}
+		}
+		Expect(missing).To(BeEmpty(),
+			"these prefixed paths returned 404, so the prefix is no longer registered "+
+				"for them:\n%s", strings.Join(missing, "\n"))
 	})
 
 	It("states an outcome for every route and client class", func() {
@@ -409,7 +616,10 @@ var expectedClientClasses = []string{
 	"own-ca-pp-cli-auth",
 	"own-ca-admin-both",
 	"own-ca-expired",
+	"own-ca-issued",
 	"own-ca-revoked",
+	"own-ca-server-eku",
+	"own-ca-pp-cli-auth-false",
 	"foreign-ca",
 }
 
@@ -417,6 +627,7 @@ var expectedRoutes = []string{
 	"public: fetch the CA certificate",
 	"public: fetch the CRL",
 	"public: submit a CSR",
+	"public: read expiry metadata",
 	"any-client: read a certificate status",
 	"any-client: renew own certificate",
 	"self-or-admin: read own CSR",
@@ -424,6 +635,23 @@ var expectedRoutes = []string{
 	"admin: list all statuses",
 	"admin: sign all pending",
 	"admin: reissue the CRL",
+}
+
+// fingerprintDenied digests a row's recorded outcomes. Sorted so it does not
+// depend on map iteration order, and truncated because it only has to detect a
+// change, not resist an adversary.
+func fingerprintDenied(denied map[string]bool) string {
+	names := make([]string, 0, len(denied))
+	for name := range denied {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	h := sha256.New()
+	for _, name := range names {
+		fmt.Fprintf(h, "%s=%v;", name, denied[name])
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
 func classNames(classes []clientClass) []string {
@@ -482,6 +710,70 @@ func clientCertFromKey(key *rsa.PrivateKey, cn string, caCert *x509.Certificate,
 	der, err := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)
 	Expect(err).NotTo(HaveOccurred())
 	cert, err := x509.ParseCertificate(der)
+	Expect(err).NotTo(HaveOccurred())
+	return cert
+}
+
+// serverEKUClientCert mints a chain-valid certificate carrying serverAuth EKU
+// only, so it fails the middleware's ExtKeyUsageClientAuth requirement rather
+// than its chain check. Nothing else in the matrix distinguishes those two.
+func serverEKUClientCert(key *rsa.PrivateKey, cn string, caCert *x509.Certificate,
+	caKey *rsa.PrivateKey,
+) *x509.Certificate {
+	GinkgoHelper()
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: cn},
+		NotBefore:    time.Now().Add(-1 * time.Hour),
+		NotAfter:     time.Now().Add(1 * time.Hour),
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)
+	Expect(err).NotTo(HaveOccurred())
+	cert, err := x509.ParseCertificate(der)
+	Expect(err).NotTo(HaveOccurred())
+	return cert
+}
+
+// ppCliAuthValueCert mints a certificate carrying pp_cli_auth with an arbitrary
+// value, so a change from equality against "true" to a bare presence test is
+// visible. clientCertFromKey can only encode "true".
+func ppCliAuthValueCert(key *rsa.PrivateKey, cn string, caCert *x509.Certificate,
+	caKey *rsa.PrivateKey, value string,
+) *x509.Certificate {
+	GinkgoHelper()
+	extValue, err := asn1.Marshal(value)
+	Expect(err).NotTo(HaveOccurred())
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: cn},
+		NotBefore:    time.Now().Add(-1 * time.Hour),
+		NotAfter:     time.Now().Add(1 * time.Hour),
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		ExtraExtensions: []pkix.Extension{{
+			Id:    asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 3, 39},
+			Value: extValue,
+		}},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)
+	Expect(err).NotTo(HaveOccurred())
+	cert, err := x509.ParseCertificate(der)
+	Expect(err).NotTo(HaveOccurred())
+	return cert
+}
+
+// caIssuedClientCert issues a certificate through the CA's real issuance path,
+// so it exists in the inventory and serial records. A fresh subject each time,
+// since Generate refuses to reissue for a subject that already holds a valid
+// certificate.
+func caIssuedClientCert(ctx context.Context, myCA *ca.CA) *x509.Certificate {
+	GinkgoHelper()
+	cn := fmt.Sprintf("issued%d", time.Now().UnixNano())
+	res, err := myCA.Generate(ctx, cn, nil)
+	Expect(err).NotTo(HaveOccurred())
+	block, _ := pem.Decode(res.CertificatePEM)
+	Expect(block).NotTo(BeNil())
+	cert, err := x509.ParseCertificate(block.Bytes)
 	Expect(err).NotTo(HaveOccurred())
 	return cert
 }
@@ -571,10 +863,10 @@ var _ = Describe("Authorisation baseline: configuration axes", Ordered, Continue
 		ctx = context.Background()
 		store := storage.New(GinkgoT().TempDir())
 		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
-		// The revoked fixture is issued through the CA, so leaf generation is on
-		// the fixture path. Nothing here depends on the leaf algorithm and ECDSA
-		// is an order of magnitude cheaper to generate than RSA.
-		myCA.LeafKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		// No LeafKeyConfig here: this block mints its certificates directly with
+		// issueClientCert and never issues through the CA, so the setting had no
+		// consumer and its rationale described a fixture path this Describe does
+		// not have.
 		Expect(store.EnsureDirs(ctx)).To(Succeed())
 		Expect(store.SaveCAKey(ctx, cachedKeyPEM)).To(Succeed())
 		Expect(store.SaveCACert(ctx, cachedCrtPEM)).To(Succeed())
@@ -603,11 +895,44 @@ var _ = Describe("Authorisation baseline: configuration axes", Ordered, Continue
 		req := httptest.NewRequest(method, path, strings.NewReader(""))
 		if cert != nil {
 			req = withClientCert(req, cert)
+		} else {
+			req.TLS = &tls.ConnectionState{}
 		}
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
-		return middlewareDenied(rec)
+		kind := classify(rec)
+		Expect(kind).NotTo(Equal(unrecognised403),
+			"%s %s: unrecognised 403 body %q; classify it before trusting this result",
+			method, path, strings.TrimSpace(rec.Body.String()))
+		return kind == deniedByMiddleware
 	}
+
+	// The widest branch in auth.go, and the one asserted nowhere in the
+	// repository before this. It matters most on this stack: sub-CA support
+	// restructures AuthConfig for per-issuer trust anchors, and a restructure
+	// that changes what an unpopulated config means — or introduces a path where
+	// cfg is nil where it was not — would move no row in the table above and
+	// fail no spec anywhere.
+	Describe("an absent AuthConfig", func() {
+		It("disables authorisation entirely, admitting an admin route with no certificate", func() {
+			handler := muxWith(nil)
+			Expect(probe(handler, "POST", "/sign/all", nil)).To(BeFalse(),
+				"with no AuthConfig the middleware is not installed at all")
+		})
+
+		It("admits an any-client route with no certificate", func() {
+			handler := muxWith(nil)
+			Expect(probe(handler, "GET", "/certificate_status/somenode", nil)).To(BeFalse())
+		})
+
+		It("admits a self-or-admin route for a foreign certificate", func() {
+			// Not merely "no certificate is enough": a certificate from an
+			// unrelated CA is equally unexamined, because nothing examines it.
+			handler := muxWith(nil)
+			Expect(probe(handler, "GET", "/certificate_request/othernode",
+				foreignClientCert("intruder"))).To(BeFalse())
+		})
+	})
 
 	Describe("allow_public_status", func() {
 		It("denies a client with no certificate when unset", func() {
