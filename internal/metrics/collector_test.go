@@ -109,8 +109,8 @@ func (g gathered) findUnlabelled(name string) *dto.Metric {
 	return m
 }
 
-// upstreamCRLFixture builds a self-signed CA and an empty CRL from it, standing
-// in for an ancestor whose CRL an intermediate republishes.
+// upstreamCAWithKeyFixture builds a self-signed CA and returns it with its key,
+// so a spec can issue more than one CRL from the same ancestor.
 func upstreamCAWithKeyFixture(cn string) (*x509.Certificate, *ecdsa.PrivateKey) {
 	GinkgoHelper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

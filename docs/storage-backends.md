@@ -551,9 +551,11 @@ Notes:
 > `filesystem` — and on any backend under `encrypt_ca_key` or
 > `ca_key_provider: openbao` —
 > [`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain) is not
-> merely the better way to keep ancestor CRLs current, it is the only one. See
+> merely the better way to keep ancestor CRLs current, it is the only one that
+> does not require stopping the CA. There is a `migrate` round trip if you cannot
+> deliver a file to the pod — see
 > [re-importing a chain](migrating-from-puppet-server.md#step-3-import-the-ca)
-> for the limits.
+> for it, and for the limits.
 
 Use `filesystem` for single-node installs or migrating from an OpenVox/Puppet
 Server CA. Use `sqlite` for a single-node install that prefers one database file

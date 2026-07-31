@@ -33,6 +33,7 @@ import (
 	"errors"
 	"log/slog"
 	"math/big"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -312,6 +313,50 @@ var _ = Describe("CRL chain read failures", func() {
 		// second increment would mean the counting moved back to the call sites
 		// this change centralised it away from.
 		Expect(myCA.CRLUpdateFailures()).To(BeNumerically("==", 1))
+	})
+
+	It("fails the re-sign rather than publishing a rollback when the chain read fails", func() {
+		// With crl_chain_file set, crlChainLocked returns before its own read,
+		// so the second CRL read on the re-sign path is publishedUpstream's --
+		// and that read is now the sole enforcement point of the monotonicity
+		// guarantee. Treating a failed read as "nothing published" would disable
+		// the comparison exactly when storage is unhealthy, which is when a
+		// stale file is most likely to be in play: the rolled-back CRL would
+		// then be published by the very next revocation, un-revoking fleet-wide
+		// everything the ancestor revoked in between.
+		ctx := context.Background()
+		dir := GinkgoT().TempDir()
+		backend := &flakyCRLBackend{Backend: storage.NewFilesystemBackend(dir)}
+		store := storage.NewWithBackend(backend, filepath.Join(dir, "private"))
+
+		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(myCA.Init(ctx)).To(Succeed())
+
+		anc, ancKey, _ := upstreamCAWithKey("Flaky Ancestor CA")
+		ours, err := store.GetCACert(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(store.SaveCACert(ctx, append(append([]byte{}, ours...),
+			pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: anc.Raw})...))).To(Succeed())
+
+		storedCRL, err := store.GetCRL(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(store.UpdateCRL(ctx, append(append([]byte{}, storedCRL...),
+			emptyCRLNumbered(anc, ancKey, 99)...))).To(Succeed())
+		before := mustGetCRL(ctx, store)
+
+		// The file carries the rollback the guard exists to refuse.
+		path := filepath.Join(GinkgoT().TempDir(), "rollback.pem")
+		Expect(os.WriteFile(path, emptyCRLNumbered(anc, ancKey, 7), 0o644)).To(Succeed())
+		myCA.CRLChainFile = path
+
+		// readStoredCRL reads first and succeeds; publishedUpstream's read fails.
+		backend.failGetCRLAfter(1)
+		Expect(myCA.ReissueCRL(ctx)).To(MatchError(ContainSubstring("check for regressions")))
+
+		backend.stopFailing()
+		Expect(mustGetCRL(ctx, store)).To(Equal(before),
+			"the published chain must be untouched, still carrying 99")
 	})
 
 	// Counting was moved into readStoredCRL precisely because reissue, refresh
@@ -969,16 +1014,24 @@ type certificateList struct {
 // means assembling the DER directly.
 func handRolledCRL(cert *x509.Certificate, key *ecdsa.PrivateKey) []byte {
 	GinkgoHelper()
+	return handRolledCRLAt(cert, key, time.Now().UTC().Truncate(time.Second).Add(-time.Hour))
+}
+
+// handRolledCRLAt is handRolledCRL with an explicit ThisUpdate, so two
+// number-less CRLs from one issuer can be ordered. That is the only thing
+// newerCRL has to go on when cRLNumber is absent -- which `openssl ca -gencrl`
+// leaves out unless crl_extensions is configured.
+func handRolledCRLAt(cert *x509.Certificate, key *ecdsa.PrivateKey, thisUpdate time.Time) []byte {
+	GinkgoHelper()
 	// ecdsa-with-SHA256
 	algo := pkix.AlgorithmIdentifier{Algorithm: asn1.ObjectIdentifier{1, 2, 840, 10045, 4, 3, 2}}
 
-	now := time.Now().UTC().Truncate(time.Second)
 	tbs := tbsCertList{
 		Version:    1, // v2
 		Signature:  algo,
 		Issuer:     asn1.RawValue{FullBytes: cert.RawSubject},
-		ThisUpdate: now.Add(-time.Hour),
-		NextUpdate: now.Add(30 * 24 * time.Hour),
+		ThisUpdate: thisUpdate,
+		NextUpdate: thisUpdate.Add(30 * 24 * time.Hour),
 	}
 	tbsDER, err := asn1.Marshal(tbs)
 	Expect(err).NotTo(HaveOccurred())

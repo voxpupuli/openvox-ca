@@ -88,6 +88,7 @@ type Collector struct {
 	crlChainRefreshFailures *prometheus.Desc
 	crlChainDiscarded       *prometheus.Desc
 	crlChainRegressed       *prometheus.Desc
+	crlChainRemoved         *prometheus.Desc
 	crlRevoked              *prometheus.Desc
 
 	leafInfo       *prometheus.Desc
@@ -198,6 +199,16 @@ func NewCollector(c *ca.CA) *Collector {
 				"counted separately, by puppetca_crl_chain_regressed_total, because that one is "+
 				"fixed at whatever writes the file instead.",
 			nil, nil),
+		crlChainRemoved: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "crl_chain", "removed_total"),
+			"Total ancestors that crl_chain_file has stopped listing while their CRL was "+
+				"published. The file is authoritative, so the removal is honoured -- but it "+
+				"cannot be undone here, because this CA cannot re-sign another CA's list. A "+
+				"deliberate removal increments this once; a `cat` glob that matched one file "+
+				"fewer increments it the same way, which is why it is worth an alert. Distinct "+
+				"from puppetca_crl_chain_discarded_total, which counts CRLs the file does carry "+
+				"but nothing in the bundle signed.",
+			nil, nil),
 		crlChainRegressed: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "crl_chain", "regressed_total"),
 			"Total CRLs in crl_chain_file passed over because the published chain already carried "+
@@ -254,6 +265,7 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.crlChainRefreshFailures
 	ch <- c.crlChainDiscarded
 	ch <- c.crlChainRegressed
+	ch <- c.crlChainRemoved
 	ch <- c.crlRevoked
 	ch <- c.leafInfo
 	ch <- c.leafNotBefore
@@ -304,6 +316,8 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		float64(c.ca.CRLChainDiscarded()))
 	ch <- prometheus.MustNewConstMetric(c.crlChainRegressed, prometheus.CounterValue,
 		float64(c.ca.CRLChainRegressed()))
+	ch <- prometheus.MustNewConstMetric(c.crlChainRemoved, prometheus.CounterValue,
+		float64(c.ca.CRLChainRemoved()))
 	ch <- prometheus.MustNewConstMetric(c.servingCertIssued, prometheus.CounterValue,
 		float64(c.ca.ServingCertIssued()))
 	ch <- prometheus.MustNewConstMetric(c.servingRenewalFailures, prometheus.CounterValue,

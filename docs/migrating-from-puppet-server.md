@@ -112,13 +112,19 @@ constructs filesystem storage directly; unlike `migrate` it has no
 `--source-config`/`--dest-config`. If your CA runs on **sqlite, postgres, mysql,
 etcd or redis**, re-importing writes to a directory the server never reads,
 prints `CA imported into <dir>`, and changes nothing — the live chain expires
-anyway. For those deployments `crl_chain_file` is not the alternative — it is
-the only mechanism.
+anyway. (SQLite is in that list: it keeps the CRL in its database file, so a
+cadir-based import misses it exactly as a networked backend does. See
+[storage backends](storage-backends.md).) For those deployments `crl_chain_file`
+is the only mechanism that does not require stopping the CA and round-tripping
+the whole backend.
 
 There is a round trip through `migrate` if you must do it on a non-filesystem
-backend, but weigh it first: it rewrites the CA key, the inventory HMAC and every
-signed certificate in order to refresh one PEM blob. **Back up the destination
-first** — `migrate` is not transactional.
+backend, and it has to be done **with the CA stopped** — `migrate` copies and
+never deletes, so anything the CA records between the two legs is overwritten by
+the return leg. Weigh it first: it rewrites the CA key, the inventory HMAC and
+every signed certificate in order to refresh one PEM blob. **Back up the
+destination first** — `migrate` is not transactional. See
+[migrating between backends](storage-backends.md#migrating-between-backends).
 
 `scratch.yaml` must describe a **filesystem** backend whose `cadir` is the same
 directory the middle step passes to `--cadir`. `migrate` resolves its destination

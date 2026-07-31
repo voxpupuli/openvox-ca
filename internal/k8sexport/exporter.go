@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -53,6 +54,11 @@ type Exporter struct {
 	src       MaterialSource
 	defaultNS string   // resolved pod namespace; used for targets without one
 	metrics   *Metrics // may be nil (metrics disabled)
+
+	// scopeWarning keeps warnOnNarrowedScopes to one pass per process rather
+	// than one per reconcile cycle. It lives here rather than on Target so that
+	// Target stays a plain, copyable configuration value.
+	scopeWarning sync.Once
 }
 
 // New constructs an Exporter from an existing clientset. cfg must already have
@@ -104,6 +110,7 @@ func (e *Exporter) ExportAll(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	e.warnOnNarrowedScopes(certPEM, crlPEM)
 
 	var errs []error
 	for i := range e.cfg.Targets {
@@ -124,6 +131,50 @@ func (e *Exporter) ExportAll(ctx context.Context) error {
 
 // fetchMaterials reads the cert and CRL PEM, fetching each only if some target
 // requires it.
+// warnOnNarrowedScopes reports, once per process, every target whose scope
+// nobody set and which is therefore about to publish less than it used to.
+//
+// Both scopes default to "self", and before they existed every target published
+// the stored blob verbatim. So an upgrade with no configuration change silently
+// narrows what an existing multi-block target publishes: a trust bundle loses
+// its intermediates, and a CRL blob loses every ancestor block -- which is the
+// material crl_chain_file exists to distribute. Nothing errors, and the
+// empty-material guard cannot catch it, because a scoped-down value is not
+// empty. Without this the only notice was prose in a document an upgrading
+// operator has no reason to re-read.
+//
+// Deliberately a warning rather than an error, and deliberately not a default of
+// "chain": the asymmetry between the HTTP endpoints and export targets is
+// intended. It just has to be audible.
+func (e *Exporter) warnOnNarrowedScopes(certPEM, crlPEM []byte) {
+	e.scopeWarning.Do(func() {
+		for i := range e.cfg.Targets {
+			t := &e.cfg.Targets[i]
+			for _, m := range []struct {
+				material, blockType, scope string
+				defaulted                  bool
+				want                       bool
+				chain                      []byte
+			}{
+				{"CA bundle", "CERTIFICATE", t.CertScope, t.certScopeDefaulted, t.Cert, certPEM},
+				{"CRL chain", "X509 CRL", t.CRLScope, t.crlScopeDefaulted, t.CRL, crlPEM},
+			} {
+				if !m.want || !m.defaulted || m.scope == ScopeChain {
+					continue
+				}
+				if n := len(pemBlocks(m.chain, m.blockType)); n > 1 {
+					slog.Warn("Exporting only the first block of a multi-block "+m.material+
+						" because no scope was configured for this target; before cert_scope "+
+						"and crl_scope existed it published the whole thing. Set the scope "+
+						"explicitly to silence this",
+						"kind", t.Kind, "name", t.Metadata.Name,
+						"namespace", e.namespaceFor(t), "blocks", n, "publishing", m.scope)
+				}
+			}
+		}
+	})
+}
+
 func (e *Exporter) fetchMaterials(ctx context.Context) (certPEM, crlPEM []byte, err error) {
 	var wantCert, wantCRL bool
 	for i := range e.cfg.Targets {
