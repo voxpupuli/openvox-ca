@@ -472,7 +472,7 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 			baseline:    "ceb90b2e2a7b4481",
 		},
 		{
-			name: "any-client: renew own certificate", method: "POST", path: "/certificate_renewal",
+			name: "own-client: renew own certificate", method: "POST", path: "/certificate_renewal",
 			denied: map[string]bool{
 				"none": true, "own-ca-plain": false, "own-ca-allowlisted": false,
 				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": false,
@@ -1056,7 +1056,7 @@ var expectedRoutes = []string{
 	"public: read expiry metadata",
 	"public: query OCSP",
 	"admin: read a certificate status",
-	"any-client: renew own certificate",
+	"own-client: renew own certificate",
 	"self-or-admin: read own CSR",
 	"self-or-admin: read another node's CSR",
 	"admin: list all statuses",

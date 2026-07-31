@@ -91,12 +91,18 @@ var _ = Describe("Client CRL checking", func() {
 	// chain is what Verify returns when anchored on the root: leaf, CA, root.
 	chain := func() []*x509.Certificate { return []*x509.Certificate{leaf, serverCA, root} }
 
+	// anchorSet is what the entry trusts. NewClientCRLSet takes it because a
+	// CRL is filed under the certificate that signed it, never under what its
+	// Authority Key Identifier claims -- so a set cannot be built without
+	// saying which keys are allowed to speak.
+	anchorSet := func() []*x509.Certificate { return []*x509.Certificate{serverCA, root} }
+
 	Describe("under require", func() {
 		It("accepts a chain whose every issuer has a valid CRL", func() {
 			set := api.NewClientCRLSet([]*x509.RevocationList{
 				crlFrom(serverCA, caKey, future),
 				crlFrom(root, rootKey, future),
-			})
+			}, anchorSet())
 			Expect(api.CheckChainRevocationForTest(chain(), set, api.RevocationRequire, time.Now())).To(Succeed())
 		})
 
@@ -104,7 +110,7 @@ var _ = Describe("Client CRL checking", func() {
 			set := api.NewClientCRLSet([]*x509.RevocationList{
 				crlFrom(serverCA, caKey, future, leaf.SerialNumber),
 				crlFrom(root, rootKey, future),
-			})
+			}, anchorSet())
 			err := api.CheckChainRevocationForTest(chain(), set, api.RevocationRequire, time.Now())
 			Expect(err).To(MatchError(ContainSubstring("agent.example.com")))
 		})
@@ -117,13 +123,13 @@ var _ = Describe("Client CRL checking", func() {
 			set := api.NewClientCRLSet([]*x509.RevocationList{
 				crlFrom(serverCA, caKey, future),
 				crlFrom(root, rootKey, future, serverCA.SerialNumber),
-			})
+			}, anchorSet())
 			err := api.CheckChainRevocationForTest(chain(), set, api.RevocationRequire, time.Now())
 			Expect(err).To(MatchError(ContainSubstring("Server CA")))
 		})
 
 		It("rejects when an issuer has no CRL at all", func() {
-			set := api.NewClientCRLSet([]*x509.RevocationList{crlFrom(serverCA, caKey, future)})
+			set := api.NewClientCRLSet([]*x509.RevocationList{crlFrom(serverCA, caKey, future)}, anchorSet())
 			err := api.CheckChainRevocationForTest(chain(), set, api.RevocationRequire, time.Now())
 			Expect(err).To(MatchError(ContainSubstring("no currently valid CRL")))
 		})
@@ -135,7 +141,7 @@ var _ = Describe("Client CRL checking", func() {
 			set := api.NewClientCRLSet([]*x509.RevocationList{
 				crlFrom(serverCA, caKey, past),
 				crlFrom(root, rootKey, future),
-			})
+			}, anchorSet())
 			err := api.CheckChainRevocationForTest(chain(), set, api.RevocationRequire, time.Now())
 			Expect(err).To(MatchError(ContainSubstring("no currently valid CRL")))
 		})
@@ -148,7 +154,7 @@ var _ = Describe("Client CRL checking", func() {
 			// exists to avoid.
 			set := api.NewClientCRLSet([]*x509.RevocationList{
 				crlFrom(serverCA, caKey, past, leaf.SerialNumber),
-			})
+			}, anchorSet())
 			err := api.CheckChainRevocationForTest(chain(), set, api.RevocationCheck, time.Now())
 			Expect(err).To(MatchError(ContainSubstring("is revoked")))
 		})
@@ -156,7 +162,7 @@ var _ = Describe("Client CRL checking", func() {
 		It("rejects a certificate that is itself the anchor", func() {
 			// A client_ca entry makes this reachable. Nothing can attest to its
 			// revocation status, so require must not pass it silently.
-			err := api.CheckChainRevocationForTest([]*x509.Certificate{serverCA}, api.NewClientCRLSet(nil),
+			err := api.CheckChainRevocationForTest([]*x509.Certificate{serverCA}, api.NewClientCRLSet(nil, anchorSet()),
 				api.RevocationRequire, time.Now())
 			Expect(err).To(MatchError(ContainSubstring("itself a trust anchor")))
 		})
@@ -173,26 +179,26 @@ var _ = Describe("Client CRL checking", func() {
 			set := api.NewClientCRLSet([]*x509.RevocationList{
 				crlFrom(serverCA, caKey, future),
 				crlFrom(root, rootKey, future, serverCA.SerialNumber),
-			})
+			}, anchorSet())
 			Expect(api.CheckChainRevocationForTest(shortChain, set, api.RevocationRequire, time.Now())).To(Succeed())
 		})
 	})
 
 	Describe("under check", func() {
 		It("allows an issuer with no CRL", func() {
-			set := api.NewClientCRLSet([]*x509.RevocationList{crlFrom(serverCA, caKey, future)})
+			set := api.NewClientCRLSet([]*x509.RevocationList{crlFrom(serverCA, caKey, future)}, anchorSet())
 			Expect(api.CheckChainRevocationForTest(chain(), set, api.RevocationCheck, time.Now())).To(Succeed())
 		})
 
 		It("still rejects a revocation it can see", func() {
 			set := api.NewClientCRLSet([]*x509.RevocationList{
 				crlFrom(serverCA, caKey, future, leaf.SerialNumber),
-			})
+			}, anchorSet())
 			Expect(api.CheckChainRevocationForTest(chain(), set, api.RevocationCheck, time.Now())).To(HaveOccurred())
 		})
 
 		It("allows a self-anchored certificate", func() {
-			err := api.CheckChainRevocationForTest([]*x509.Certificate{serverCA}, api.NewClientCRLSet(nil),
+			err := api.CheckChainRevocationForTest([]*x509.Certificate{serverCA}, api.NewClientCRLSet(nil, anchorSet()),
 				api.RevocationCheck, time.Now())
 			Expect(err).To(Succeed())
 		})
@@ -203,22 +209,69 @@ var _ = Describe("Client CRL checking", func() {
 			// Documented as unsafe; asserted so the setting means what it says.
 			set := api.NewClientCRLSet([]*x509.RevocationList{
 				crlFrom(serverCA, caKey, future, leaf.SerialNumber),
-			})
+			}, anchorSet())
 			Expect(api.CheckChainRevocationForTest(chain(), set, api.RevocationSkip, time.Now())).To(Succeed())
 		})
 	})
 
 	Describe("CRL matching", func() {
-		It("ignores a CRL with no Authority Key Identifier", func() {
-			// Matching is by AKI against the issuer's SKI. A DN fallback would
-			// consult the wrong CA's revocations under a shared root, where two
-			// siblings can hold the same DN.
+		It("honours a CRL with no Authority Key Identifier, because matching is by signature", func() {
+			// Matching used to be by the CRL's own AKI against the issuer's SKI,
+			// which meant an issuer that omits the extension -- RFC 5280 makes it
+			// optional and real ones do -- had its revocations silently ignored.
+			// Filing under the certificate that actually signed the CRL removes
+			// the dependence on anything the CRL asserts about itself, so this
+			// revocation is seen.
 			crl := crlFrom(serverCA, caKey, future, leaf.SerialNumber)
 			crl.AuthorityKeyId = nil
-			set := api.NewClientCRLSet([]*x509.RevocationList{crl})
+			set := api.NewClientCRLSet([]*x509.RevocationList{crl, crlFrom(root, rootKey, future)},
+				anchorSet())
 
-			// The revocation is invisible, so under check the leaf passes.
-			Expect(api.CheckChainRevocationForTest(chain(), set, api.RevocationCheck, time.Now())).To(Succeed())
+			err := api.CheckChainRevocationForTest(chain(), set, api.RevocationRequire, time.Now())
+			Expect(err).To(MatchError(ContainSubstring("agent.example.com")))
+		})
+
+		It("will not let one anchor supply the CRL consulted for another", func() {
+			// SECURITY: the Authority Key Identifier lives inside the signed TBS,
+			// so the CA that signs a CRL chooses what it claims -- and a
+			// client_ca entry may name a CA the operator does not control. When
+			// the set filed by that claim, a co-anchor could mint an empty CRL
+			// asserting a sibling's key identifier and satisfy `require` for the
+			// sibling while saying nothing about the sibling's revocations: a
+			// client the sibling had revoked was then admitted.
+			//
+			// root signs this one, but it claims to speak for serverCA.
+			impostor := crlFrom(root, rootKey, future)
+			impostor.AuthorityKeyId = serverCA.SubjectKeyId
+			set := api.NewClientCRLSet([]*x509.RevocationList{
+				impostor,
+				crlFrom(root, rootKey, future),
+			}, anchorSet())
+
+			// serverCA still has no CRL of its own, so require must refuse.
+			err := api.CheckChainRevocationForTest(chain(), set, api.RevocationRequire, time.Now())
+			Expect(err).To(MatchError(ContainSubstring("no currently valid CRL")))
+			Expect(err).To(MatchError(ContainSubstring("Server CA")))
+		})
+
+		It("treats a CRL with no nextUpdate as not currently valid", func() {
+			// RFC 5280 makes nextUpdate optional, and ParseRevocationList leaves
+			// it zero when absent. Reading absent as "never expires" handed
+			// require a snapshot that satisfies it forever, so the policy decayed
+			// to skip with no moment at which it decayed and no alert, which is
+			// the decay the expiry rule exists to prevent.
+			noExpiry := crlFrom(serverCA, caKey, future)
+			noExpiry.NextUpdate = time.Time{}
+			set := api.NewClientCRLSet([]*x509.RevocationList{
+				noExpiry,
+				crlFrom(root, rootKey, future),
+			}, anchorSet())
+
+			err := api.CheckChainRevocationForTest(chain(), set, api.RevocationRequire, time.Now())
+			Expect(err).To(MatchError(ContainSubstring("no currently valid CRL")))
+			Expect(set.Usable(time.Now(), anchorSet())).To(BeFalse(),
+				"one anchor without a current CRL makes the entry unusable, which is "+
+					"what enforcement already did")
 		})
 	})
 
@@ -238,18 +291,41 @@ var _ = Describe("Client CRL checking", func() {
 	})
 
 	Describe("Usable", func() {
-		It("is true while any CRL is still valid", func() {
-			set := api.NewClientCRLSet([]*x509.RevocationList{crlFrom(serverCA, caKey, future)})
-			Expect(set.Usable(time.Now())).To(BeTrue())
+		It("is true when every anchor has a currently valid CRL", func() {
+			set := api.NewClientCRLSet([]*x509.RevocationList{
+				crlFrom(serverCA, caKey, future),
+				crlFrom(root, rootKey, future),
+			}, anchorSet())
+			Expect(set.Usable(time.Now(), anchorSet())).To(BeTrue())
 		})
 
 		It("is false once every CRL has expired", func() {
-			set := api.NewClientCRLSet([]*x509.RevocationList{crlFrom(serverCA, caKey, past)})
-			Expect(set.Usable(time.Now())).To(BeFalse())
+			set := api.NewClientCRLSet([]*x509.RevocationList{crlFrom(serverCA, caKey, past)}, anchorSet())
+			Expect(set.Usable(time.Now(), anchorSet())).To(BeFalse())
+		})
+
+		It("is false when one anchor of several has no valid CRL", func() {
+			// The gauge used to be "any anchor has a valid CRL" while enforcement
+			// is "every issuer in the chain must". A two-anchor entry whose second
+			// anchor's CRL had expired published 1 while every client of that
+			// anchor was already being refused, so the alert this metric exists
+			// for could not see a partial outage.
+			set := api.NewClientCRLSet([]*x509.RevocationList{
+				crlFrom(serverCA, caKey, future),
+				crlFrom(root, rootKey, past),
+			}, anchorSet())
+			Expect(set.Usable(time.Now(), anchorSet())).To(BeFalse())
+
+			both := api.NewClientCRLSet([]*x509.RevocationList{
+				crlFrom(serverCA, caKey, future),
+				crlFrom(root, rootKey, future),
+			}, anchorSet())
+			Expect(both.Usable(time.Now(), anchorSet())).To(BeTrue())
 		})
 
 		It("is false for an empty set, which is the discarded-everything case", func() {
-			Expect(api.NewClientCRLSet(nil).Usable(time.Now())).To(BeFalse())
+			empty := api.NewClientCRLSet(nil, anchorSet())
+			Expect(empty.Usable(time.Now(), anchorSet())).To(BeFalse())
 		})
 	})
 })

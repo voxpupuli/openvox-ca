@@ -141,6 +141,13 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 		// sibling CA revoked by the shared root must not go on authenticating
 		// its leaves.
 		// NIST 800-53: IA-5(2) (PKI-Based Authentication), SC-17 (PKI Certificates)
+		// The own arm checks the leaf's serial alone, where the foreign arm walks
+		// every issuer in the chain. That is sound only because this CA issues no
+		// CA certificates -- signing.go sets IsCA false on everything it signs,
+		// refuses a CSR asserting CA:TRUE, and import refuses a CA certificate --
+		// so our chains are never longer than leaf plus us, and there is no
+		// intermediate whose own revocation could be missed. If that ever
+		// changes, this arm has to walk too.
 		if domain.IsOwn() {
 			if revoked, err := myCA.IsRevokedSerial(r.Context(), clientCert.SerialNumber); err != nil || revoked {
 				if err != nil {
@@ -183,18 +190,18 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 			if isAdmin(domain, clientCert, clientCN) || selfMatch {
 				next.ServeHTTP(w, r)
 			} else {
-				denyWithLog(w, r, clientCN, "not an admin and not the subject of the request")
+				denyWithLog(w, r, domain, clientCN, "not an admin and not the subject of the request")
 			}
 
 		case tierAdminOnly:
 			if isAdmin(domain, clientCert, clientCN) {
 				next.ServeHTTP(w, r)
 			} else {
-				denyWithLog(w, r, clientCN, "route requires admin access")
+				denyWithLog(w, r, domain, clientCN, "route requires admin access")
 			}
 
 		default:
-			denyWithLog(w, r, clientCN, "unclassified route")
+			denyWithLog(w, r, domain, clientCN, "unclassified route")
 		}
 	})
 }
@@ -218,10 +225,18 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 // a property of the handler, not of this call site, and a log that is later
 // piped through anything less careful should not become a way to write arbitrary
 // lines into it.
-func denyWithLog(w http.ResponseWriter, r *http.Request, clientCN, reason string) {
+func denyWithLog(w http.ResponseWriter, r *http.Request, domain *TrustDomain, clientCN, reason string) {
+	// The domain, not just the CN. Once client_ca is configured a common name
+	// is no longer an identity: ops-admin from our CA and ops-admin from a
+	// partner CA are different principals, and a denial record naming only the
+	// CN cannot tell an investigator which one was refused.
+	where := "unattributed"
+	if domain != nil {
+		where = domain.Describe()
+	}
 	slog.Warn("Request denied by authorisation middleware",
 		"method", r.Method, "path", sanitiseForLog(r.URL.Path),
-		"client_cn", sanitiseForLog(clientCN), "reason", reason)
+		"client_cn", sanitiseForLog(clientCN), "domain", where, "reason", reason)
 	http.Error(w, "access denied", http.StatusForbidden)
 }
 

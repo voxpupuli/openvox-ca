@@ -136,6 +136,7 @@ jsonnet -J vendor -m . mixin.jsonnet
 | `upstreamCRLExpiryWarningSeconds` | 14 days | Warning threshold for an upstream CRL in a published chain. Longer than `crlExpiryWarningSeconds` because the remedy is at another CA. |
 | `crlChainWindow` | `1h` | Window over which chain-refresh failures, discards, regressions and removals are counted. Equals the CA's default `maintenance_interval_sec` with no margin: raise it alongside any increase to that setting, or a single unchanging fault will fire, resolve and re-fire forever. |
 | `crlChainFor` | `15m` | `for:` debounce for the five upstream-chain alerts. |
+| `clientCRLUnusableFor` | `10m` | `for:` debounce for *ClientCRLUnusable*. Note the detection latency is `maintenance_interval_sec` **plus** this: the gauge is only recomputed on the maintenance pass, so at the 1h default a domain whose last CRL expires just after a pass is refusing every client for up to 70 minutes before this fires. Raising `maintenance_interval_sec` lengthens time-to-page on the mixin's only critical authentication alert. |
 | `leafExpiryWarningSeconds` | 7 days | Leaf certificate expiry warning threshold. |
 | `leafExpiryCriticalSeconds` | 1 day | Leaf certificate expiry critical threshold. |
 | `pendingFor` | `1h` | How long a request may stay pending before alerting. |

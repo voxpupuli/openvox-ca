@@ -109,6 +109,53 @@ var _ = Describe("Authorisation across trust domains", func() {
 		return crl
 	}
 
+	// foreignCRLRevoking is a currently valid CRL from the foreign issuer that
+	// lists the given serials.
+	foreignCRLRevoking := func(serials ...*big.Int) *x509.RevocationList {
+		GinkgoHelper()
+		now := time.Now()
+		var entries []x509.RevocationListEntry
+		for _, sn := range serials {
+			entries = append(entries, x509.RevocationListEntry{
+				SerialNumber:   sn,
+				RevocationTime: now.Add(-time.Minute),
+			})
+		}
+		der, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+			Number:                    big.NewInt(2),
+			ThisUpdate:                now.Add(-time.Hour),
+			NextUpdate:                now.Add(24 * time.Hour),
+			RevokedCertificateEntries: entries,
+		}, foreignCA, foreignKey)
+		Expect(err).NotTo(HaveOccurred())
+		crl, err := x509.ParseRevocationList(der)
+		Expect(err).NotTo(HaveOccurred())
+		return crl
+	}
+
+	// buildWithRevocation wires the same two-domain mux but lets the spec decide
+	// the foreign domain's CRLs and the policy, which is what the middleware's
+	// revocation arm is actually parameterised by.
+	buildWithRevocation := func(crls []*x509.RevocationList, policy string) http.Handler {
+		GinkgoHelper()
+		// The domain grants admin to ops-admin, because a foreign client with no
+		// grant is denied above the public tier anyway -- so only an admitted
+		// client can show that revocation is what took the access away.
+		domain := api.NewForeignTrustDomain("server-ca", poolOf(foreignCA),
+			[]*x509.Certificate{foreignCA}, map[string]bool{"ops-admin": true}, false)
+		domain.SetRevocationSet(api.NewClientCRLSet(crls, []*x509.Certificate{foreignCA}))
+
+		server := api.New(myCA)
+		server.AuthConfig = &api.AuthConfig{
+			ClientRevocationPolicy: policy,
+			Domains: []api.TrustDomain{
+				api.OwnTrustDomain(caCert, map[string]bool{"puppet-server": true}, true),
+				domain,
+			},
+		}
+		return server.Routes()
+	}
+
 	// build wires a mux whose second trust domain is the foreign issuer, with
 	// the grants under test.
 	//
@@ -121,7 +168,8 @@ var _ = Describe("Authorisation across trust domains", func() {
 		GinkgoHelper()
 		domain := api.NewForeignTrustDomain("server-ca", poolOf(foreignCA),
 			[]*x509.Certificate{foreignCA}, foreignAdmins, foreignPpCliAuth)
-		domain.SetRevocationSet(api.NewClientCRLSet([]*x509.RevocationList{foreignCRL()}))
+		domain.SetRevocationSet(api.NewClientCRLSet(
+			[]*x509.RevocationList{foreignCRL()}, []*x509.Certificate{foreignCA}))
 
 		server := api.New(myCA)
 		server.AuthConfig = &api.AuthConfig{
@@ -254,6 +302,53 @@ var _ = Describe("Authorisation across trust domains", func() {
 		Expect(probe(mux, "GET", "/certificate_status/whatever", stranger)).
 			To(Equal(http.StatusForbidden))
 	})
+
+	Describe("revocation, through the middleware", func() {
+		// The branch's headline guarantee is that a foreign client is checked
+		// against its own issuer's CRLs. Everything that pinned it called
+		// checkChainRevocation directly through the test shim, and the only
+		// multi-domain fixture always installed a valid, empty CRL -- so the
+		// entire revocation arm of the middleware could be deleted, or its
+		// policy forced to skip, with the suite green.
+		//
+		// These drive the real mux, which is where the guarantee has to hold.
+		It("takes admin away from a foreign administrator its issuer revoked", func() {
+			admin := foreignLeaf("ops-admin", false)
+
+			live := buildWithRevocation([]*x509.RevocationList{foreignCRL()}, "")
+			Expect(probe(live, "POST", "/sign/all", admin)).NotTo(Equal(http.StatusForbidden),
+				"the control: this administrator is admitted while its CRL says nothing")
+
+			revoked := buildWithRevocation(
+				[]*x509.RevocationList{foreignCRLRevoking(admin.SerialNumber)}, "")
+			Expect(probe(revoked, "POST", "/sign/all", admin)).To(Equal(http.StatusForbidden))
+		})
+
+		It("refuses a foreign client when its issuer has no usable CRL, by default", func() {
+			// The fail-closed default asserted where it is resolved rather than
+			// where it is configured: this AuthConfig leaves the policy empty.
+			admin := foreignLeaf("ops-admin", false)
+			handler := buildWithRevocation(nil, "")
+			Expect(probe(handler, "POST", "/sign/all", admin)).To(Equal(http.StatusForbidden))
+		})
+
+		It("admits a revoked foreign client only when the operator asked for skip", func() {
+			admin := foreignLeaf("ops-admin", false)
+			handler := buildWithRevocation(
+				[]*x509.RevocationList{foreignCRLRevoking(admin.SerialNumber)}, api.RevocationSkip)
+			Expect(probe(handler, "POST", "/sign/all", admin)).NotTo(Equal(http.StatusForbidden))
+		})
+
+		It("treats an unrecognised policy as require, not as the most permissive arm", func() {
+			// Validation rejects a bad policy string, but it lives two packages
+			// away and runs on one construction path, so the enforcement point
+			// must not read an unknown value as "check".
+			admin := foreignLeaf("ops-admin", false)
+			handler := buildWithRevocation(nil, "not-a-policy")
+			Expect(probe(handler, "POST", "/sign/all", admin)).To(Equal(http.StatusForbidden))
+		})
+	})
+
 })
 
 var _ = Describe("denial logging", func() {
@@ -281,4 +376,5 @@ var _ = Describe("denial logging", func() {
 		// identical to unsanitised: it is escaped the same way.
 		Expect(api.SanitiseForLogForTest("a�b")).To(Equal("a�b"))
 	})
+
 })

@@ -50,6 +50,10 @@ type TrustDomain struct {
 	// A name from another issuer is a different name.
 	AdminCNs map[string]bool
 
+	// own marks domain zero. Unexported so that only OwnTrustDomain can set it;
+	// see IsOwn.
+	own bool
+
 	// PpCliAuth honours the pp_cli_auth extension on certificates from this
 	// domain. Enabling it for a foreign issuer delegates admin admission to
 	// that CA: every certificate it chooses to stamp becomes an admin here.
@@ -92,13 +96,24 @@ func (d *TrustDomain) SetRevocationSet(s *ClientCRLSet) {
 
 // IsOwn reports whether this is domain zero — this CA's own issuer.
 //
-// The empty name is the marker, and it holds because the only constructor that
-// leaves Name empty is OwnTrustDomain: every client_ca entry goes through
-// NewForeignTrustDomain, and configuration validation rejects an entry without
-// a name (internal/config.ClientCAConfig.Validate), so a foreign domain can
-// never present as our own. That check is two packages away, which is why it is
-// written down here as well.
-func (d *TrustDomain) IsOwn() bool { return d.Name == "" }
+// SECURITY: marked by an unexported field that only OwnTrustDomain sets, not by
+// the name being empty.
+//
+// The empty name was the marker, and it was sound only because configuration
+// validation rejects a client_ca entry without one -- a check two packages away
+// in internal/config, reached on a single construction path, and asserted here
+// by a comment. A comment is not a guard: an entry whose name key was missing
+// would have built a foreign domain with an empty name, and every decision
+// below reads this predicate. That domain's certificates would have been checked
+// against *our* CRL instead of their issuer's, admitted to tierOwnClient so they
+// could drive certificate renewal, and handed the cross-namespace CSR read this
+// whole feature exists to close.
+//
+// Production builds a TrustDomain only through the two constructors below. A
+// spec may still write a literal, and one does -- but the zero value of own is
+// false, so a literal can only ever fail towards "foreign", never towards
+// "ours", and no configuration input reaches this field at all.
+func (d *TrustDomain) IsOwn() bool { return d.own }
 
 // Describe names the domain for a log line.
 func (d *TrustDomain) Describe() string {
@@ -127,6 +142,7 @@ func OwnTrustDomain(caCert *x509.Certificate, adminCNs map[string]bool, ppCliAut
 		Roots:     roots,
 		AdminCNs:  adminCNs,
 		PpCliAuth: ppCliAuth,
+		own:       true,
 	}
 }
 

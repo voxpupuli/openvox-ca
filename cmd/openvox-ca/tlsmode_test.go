@@ -20,6 +20,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"os"
 	"path/filepath"
 	"time"
@@ -122,6 +123,31 @@ var _ = Describe("buildAuthConfig", func() {
 		// Domain zero is ours, and it is what a client must chain to.
 		Expect(authCfg.Domains).To(HaveLen(1))
 		Expect(authCfg.Domains[0].IsOwn()).To(BeTrue())
+
+		// And it is *this CA's* certificate, which is the part that decides who
+		// counts as us. Asserting only IsOwn left that unpinned: passing nil, or
+		// a different certificate, produced a domain that is still "ours" and
+		// still the only one, so the anchor could be widened with nothing red.
+		Expect(authCfg.Domains[0].Roots.Subjects()).To(HaveLen(1)) //nolint:staticcheck // comparing the pinned anchor
+		pool := x509.NewCertPool()
+		pool.AddCert(myCA.CACert)
+		Expect(authCfg.Domains[0].Roots.Equal(pool)).To(BeTrue(),
+			"domain zero must anchor on this CA's certificate and nothing else")
+	})
+
+	It("carries the resolved revocation policy into the middleware", func() {
+		// config.Policy() and AuthConfig.revocationPolicy() each apply the same
+		// default, so the plumbing between them was assertable only here --
+		// deleting it left every foreign client evaluated under a policy the
+		// operator did not choose, with the suite green.
+		authCfg, err := buildAuthConfig(cfg, myCA)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(authCfg.ClientRevocationPolicy).To(Equal("require"))
+
+		cfg.ClientRevocationPolicy = "check"
+		authCfg, err = buildAuthConfig(cfg, myCA)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(authCfg.ClientRevocationPolicy).To(Equal("check"))
 	})
 
 	It("builds the allow list from puppet_server, trimming whitespace", func() {
