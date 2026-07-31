@@ -201,7 +201,7 @@
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
               summary: 'The Puppet CA has dropped an ancestor CRL from its published chain.',
-              description: 'crl_chain_file on {{ $labels.instance }} stopped listing an ancestor whose CRL was published, so it has been dropped. The file is authoritative, so this is honoured -- and it cannot be undone here, because this CA cannot re-sign another CA\'s list. If you did not mean to remove it, check whatever writes the file: a glob that matched one file fewer produces exactly this. Agents on the default certificate_revocation = chain will stop seeing anything that ancestor revoked.',
+              description: 'crl_chain_file on {{ $labels.instance }} stopped listing an ancestor whose CRL was published, so it has been dropped. The file is authoritative, so this is honoured -- and it cannot be undone here, because this CA cannot re-sign another CA\'s list. If you did not mean to remove it, check whatever writes the file: a glob that matched one file fewer produces exactly this. Agents on the default certificate_revocation = chain will stop seeing anything that ancestor revoked. Act on this when you see it rather than waiting: the removal is a single event, so this alert clears after the window closes even though the ancestor stays dropped, a restart zeroes the counter, and that ancestor\'s own expiry series has simply vanished. Nothing afterwards distinguishes the shrunken chain from a correct one.',
             },
           },
           {

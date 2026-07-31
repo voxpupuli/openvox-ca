@@ -145,6 +145,35 @@ func newEmptyCRL(cert *x509.Certificate, key crypto.Signer, validity time.Durati
 	return crl, nil
 }
 
+// withCRLLockCounted runs fn under the cluster CRL lock, counting a failure to
+// take the lock at all.
+//
+// The lock arm was the one nobody counted. Every writer's own failures are
+// counted beneath it -- readStoredCRL and signCRLLocked both increment
+// crlUpdateFailures -- but if the lock cannot be taken, fn never runs, so
+// nothing beneath it counts anything and the caller returns an error that only
+// ever reached a log line. On etcd a lost session or an expired mu.Lock
+// deadline produces exactly that, and on the SQL backends a failed advisory
+// lock does; the CA's own CRL then runs to NextUpdate and is rejected
+// fleet-wide with every series flat.
+//
+// crlUpdateFailures is the right counter by its own definition -- "a CRL that
+// could not be re-signed or written (during revoke, cleanup, reissue or
+// refresh)" -- and docs/metrics.md says so. Detecting the arm by whether fn ran,
+// rather than by matching on the error, keeps this independent of how the
+// storage layer words its wrapping.
+func (c *CA) withCRLLockCounted(ctx context.Context, fn func() error) error {
+	ran := false
+	err := c.Storage.WithLock(ctx, lockNameCRL, func() error {
+		ran = true
+		return fn()
+	})
+	if err != nil && !ran {
+		c.crlUpdateFailures.Add(1)
+	}
+	return err
+}
+
 // ReissueCRL re-signs the current CRL with a fresh validity window, preserving
 // every existing revocation entry. It exists so the CRL can be kept current
 // even when no certificates are being revoked: without periodic reissuance the
@@ -156,7 +185,7 @@ func newEmptyCRL(cert *x509.Certificate, key crypto.Signer, validity time.Durati
 func (c *CA) ReissueCRL(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, LockTimeout)
 	defer cancel()
-	return c.Storage.WithLock(ctx, lockNameCRL, func() error {
+	return c.withCRLLockCounted(ctx, func() error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		return c.reissueCRLLocked(ctx)
@@ -283,7 +312,7 @@ func (c *CA) RefreshCRLIfDue(ctx context.Context, refreshBefore time.Duration) (
 	ctx, cancel := context.WithTimeout(ctx, LockTimeout)
 	defer cancel()
 	var reissued bool
-	err := c.Storage.WithLock(ctx, lockNameCRL, func() error {
+	err := c.withCRLLockCounted(ctx, func() error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 

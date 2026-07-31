@@ -522,6 +522,69 @@ var _ = Describe("CRL chain read failures", func() {
 		Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(2))
 	})
 
+	It("counts a CRL lock it could not take, on every writer that takes it", func() {
+		// The arm nobody counted. Every writer's own failures are counted beneath
+		// the lock -- readStoredCRL and signCRLLocked both do it -- but when the
+		// lock cannot be taken the closure never runs, so nothing beneath it
+		// counts anything and the error only ever reached a log line.
+		//
+		// It bites hardest where crl_chain_file is *not* configured, which is the
+		// common deployment: the background refresher fails every tick, this
+		// CA's own CRL runs to NextUpdate, and every series reads healthy.
+		ctx := context.Background()
+		dir := GinkgoT().TempDir()
+		base := storage.NewFilesystemBackend(dir)
+		store := storage.NewWithBackend(base, filepath.Join(dir, "private"))
+
+		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(myCA.Init(ctx)).To(Succeed())
+
+		res, err := myCA.Generate(ctx, "node1.test", nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res).NotTo(BeNil())
+
+		// Swap in a backend that will not hand out the lock.
+		wedged := storage.NewWithBackend(&unlockableBackend{Backend: base},
+			filepath.Join(dir, "private"))
+		myCA.Storage = wedged
+
+		before := myCA.CRLUpdateFailures()
+		Expect(myCA.ReissueCRL(ctx)).NotTo(Succeed())
+		Expect(myCA.CRLUpdateFailures()).To(Equal(before+1), "ReissueCRL")
+
+		_, err = myCA.RefreshCRLIfDue(ctx, 24*time.Hour)
+		Expect(err).To(HaveOccurred())
+		Expect(myCA.CRLUpdateFailures()).To(Equal(before+2), "RefreshCRLIfDue")
+
+		Expect(myCA.Revoke(ctx, "node1.test")).NotTo(Succeed())
+		Expect(myCA.CRLUpdateFailures()).To(Equal(before+3), "Revoke")
+	})
+
+	It("blames the file, not storage, when the refresh pass fails on the file itself", func() {
+		// The other half of the attribution rule. Rounds 3 and 4 spent two
+		// commits separating these two counters; without this assertion the
+		// sentinel check can be deleted and the split collapses back to counting
+		// a file fault twice, firing PuppetCACRLUpdateFailing alongside and
+		// sending the responder to check storage that is perfectly healthy.
+		ctx := context.Background()
+		store := storage.New(GinkgoT().TempDir())
+		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(myCA.Init(ctx)).To(Succeed())
+
+		path := filepath.Join(GinkgoT().TempDir(), "corrupt.pem")
+		Expect(os.WriteFile(path, []byte("<html>502 Bad Gateway</html>\n"), 0o644)).To(Succeed())
+		myCA.CRLChainFile = path
+
+		_, err := myCA.RefreshCRLChainFile(ctx)
+		Expect(err).To(HaveOccurred())
+
+		Expect(myCA.CRLChainFailures()).To(BeNumerically("==", 1))
+		Expect(myCA.CRLUpdateFailures()).To(BeZero(),
+			"the file is what failed; the storage counter must not move too")
+	})
+
 	It("blames storage, not the file, when the refresh pass fails beneath a healthy file", func() {
 		// Moving crlChainFailures to the chokepoint stopped it absorbing this
 		// pass's lock and storage faults -- but nothing then picked them up, so
@@ -555,8 +618,9 @@ var _ = Describe("CRL chain read failures", func() {
 
 		Expect(myCA.CRLChainFailures()).To(BeZero(),
 			"a storage fault must not page anyone to go and inspect a healthy file")
-		Expect(myCA.CRLUpdateFailures()).NotTo(BeZero(),
-			"but it must not vanish either -- the chain was not republished")
+		Expect(myCA.CRLUpdateFailures()).To(BeNumerically("==", 1),
+			"but it must not vanish either -- the chain was not republished. Exactly "+
+				"one: two would mean the arm was counted both here and by the CRL layer")
 	})
 
 	It("fails the re-sign rather than publishing a rollback when the chain read fails", func() {
@@ -652,6 +716,18 @@ var _ = Describe("CRL chain read failures", func() {
 
 // flakyCRLBackend fails Get on the CRL key after a set number of successful
 // reads, standing in for a transient fault on a network backend.
+// unlockableBackend advertises Locker and always refuses. Deliberately not
+// ErrDistributedLockingUnsupported, which WithLock falls through on by design;
+// this models the arm that matters -- etcd with a lost session, or a SQL
+// advisory lock that could not be taken.
+type unlockableBackend struct {
+	storage.Backend
+}
+
+func (b *unlockableBackend) AcquireLock(context.Context, string) (storage.Unlocker, error) {
+	return nil, errors.New("lock unavailable")
+}
+
 type flakyCRLBackend struct {
 	storage.Backend
 	mu        sync.Mutex

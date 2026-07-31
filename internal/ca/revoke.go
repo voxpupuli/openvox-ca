@@ -96,8 +96,13 @@ func (c *CA) Revoke(ctx context.Context, subject string) error {
 
 	ctx, cancel := context.WithTimeout(ctx, LockTimeout)
 	defer cancel()
+	// Both properties, from two branches that changed this call independently:
+	// the subject lock outside the CRL lock, so a revoke cannot interleave with
+	// a sign or a clean for the same name; and the CRL acquisition counted, so
+	// a revocation an operator asked for that never took the lock moves
+	// crl_update_failures rather than failing silently.
 	return c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
-		return c.Storage.WithLock(ctx, lockNameCRL, func() error {
+		return c.withCRLLockCounted(ctx, func() error {
 			c.mu.Lock()
 			defer c.mu.Unlock()
 			return c.revokeLocked(ctx, subject)
