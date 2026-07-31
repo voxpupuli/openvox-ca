@@ -28,6 +28,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -80,7 +81,12 @@ func (c *CA) upstreamCRLs(ctx context.Context) (crls []*x509.RevocationList, sta
 		return nil, false, fmt.Errorf("reading crl_chain_file %s: %w", c.CRLChainFile, err)
 	}
 
-	parsed, err := decodeCRLChain(data)
+	// Stamped before verification: the question this answers is "did we read the
+	// operator's file", not "did we like what was in it". A file full of CRLs we
+	// discard is still a file we read, and the discard counter covers that.
+	c.crlChainLastRead.Store(time.Now().Unix())
+
+	parsed, err := decodeCRLChainStrict(data)
 	if err != nil {
 		return nil, false, fmt.Errorf("crl_chain_file %s: %w", c.CRLChainFile, err)
 	}
@@ -284,6 +290,24 @@ func (c *CA) RefreshCRLChainFile(ctx context.Context) (bool, error) {
 		if sameCRLSet(storedUpstream, wanted) {
 			return nil
 		}
+		// Refuse to go backwards. Everything reaching here is signature-valid,
+		// so an older CRL from the right issuer is accepted by every check
+		// above -- and publishing it un-revokes, fleet-wide, every certificate
+		// the parent revoked in between. An ancestor's CRL number moving
+		// backwards has no legitimate cause: it is a stale copy, a rolled-back
+		// mirror, or a replay. dedupeCRLs makes this comparison already, but
+		// only among the CRLs in one file; this is the same rule against what
+		// is already published.
+		if regressed := regressedCRLs(storedUpstream, wanted); len(regressed) > 0 {
+			for _, issuer := range regressed {
+				c.crlChainDiscarded.Add(1)
+				slog.Error("Refusing an upstream CRL older than the one already published; "+
+					"keeping the published chain", "path", c.CRLChainFile, "issuer", issuer)
+			}
+			return fmt.Errorf("crl_chain_file %s carries an upstream CRL older than the one "+
+				"already published (%s); refusing to republish it", c.CRLChainFile,
+				strings.Join(regressed, ", "))
+		}
 
 		slog.Info("Upstream CRLs changed; rewriting the published chain",
 			"path", c.CRLChainFile, "stored", len(storedUpstream), "configured", len(wanted))
@@ -355,4 +379,29 @@ func (c *CA) UpstreamCRLStatuses(blob []byte) ([]UpstreamCRLStatus, error) {
 		})
 	}
 	return out, nil
+}
+
+// regressedCRLs names the issuers whose incoming CRL is older than the one
+// already published.
+//
+// Compared per issuer rather than as a set: an issuer absent from the incoming
+// list is a deliberate removal, which the file is entitled to state, while an
+// issuer present with an older CRL is not.
+func regressedCRLs(published, incoming []*x509.RevocationList) []string {
+	current := make(map[string]*x509.RevocationList, len(published))
+	for _, crl := range published {
+		current[string(crl.RawIssuer)] = crl
+	}
+	var out []string
+	for _, crl := range incoming {
+		prev, ok := current[string(crl.RawIssuer)]
+		if !ok {
+			continue
+		}
+		// Equal is fine -- that is the steady state between refreshes.
+		if newerCRL(prev, crl) {
+			out = append(out, crl.Issuer.String())
+		}
+	}
+	return out
 }

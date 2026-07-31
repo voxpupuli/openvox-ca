@@ -24,6 +24,7 @@ import (
 	"crypto/x509/pkix"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
@@ -211,6 +212,18 @@ type CA struct {
 	crlChainFailures  atomic.Uint64
 	crlChainDiscarded atomic.Uint64
 
+	// crlChainLastRead is the Unix time of the last successful read of
+	// crl_chain_file, or zero if it has never been read.
+	//
+	// The counters above only move when something goes wrong in a way the CA
+	// recognises. An absent file is deliberately not a failure -- it makes no
+	// statement -- and a path mounted with subPath is read successfully forever
+	// while never changing. Both leave every series flat and healthy while the
+	// ancestors age out, and the shipped expiry alert then tells the responder
+	// to refresh a file the CA may never have opened. This is the series that
+	// distinguishes them.
+	crlChainLastRead atomic.Int64
+
 	// CRLChainFile is a PEM bundle of upstream CRLs merged into the published
 	// chain. Empty disables the feature, which is the whole of it for a CA that
 	// issues its own root. Every CRL in the file is signature-verified against
@@ -266,6 +279,17 @@ func (c *CA) CRLChainFailures() uint64 { return c.crlChainFailures.Load() }
 // as puppetca_crl_chain_discarded_total; a rising value means the published
 // chain is smaller than the operator's file says it should be.
 func (c *CA) CRLChainDiscarded() uint64 { return c.crlChainDiscarded.Load() }
+
+// CRLChainLastRead returns when crl_chain_file was last read successfully, or
+// the zero time if it never has been. See the field comment for why a feature
+// whose whole value is "the file is re-read" needs to say whether it is.
+func (c *CA) CRLChainLastRead() time.Time {
+	sec := c.crlChainLastRead.Load()
+	if sec == 0 {
+		return time.Time{}
+	}
+	return time.Unix(sec, 0)
+}
 
 // CRLUpdated returns a channel that receives a value each time the CRL is
 // re-signed (revoke, reissue, background refresh, or expired-cert cleanup).

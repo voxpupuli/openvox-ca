@@ -70,20 +70,58 @@ func (c *CA) ownsCRL(crl *x509.RevocationList) bool {
 // commentary, and none of it reaches storage, because callers re-encode from
 // the parsed list rather than passing the original bytes through.
 func decodeCRLChain(blob []byte) ([]*x509.RevocationList, error) {
+	out, _, err := decodeCRLChainRest(blob)
+	return out, err
+}
+
+// decodeCRLChainStrict is decodeCRLChain for content whose *absence of CRLs is
+// meaningful* -- currently crl_chain_file, which is authoritative, so "no CRLs"
+// deletes every ancestor.
+//
+// pem.Decode cannot tell a truncated block from trailing rubbish: it returns nil
+// for a block with no END line, for DER, for a certificate bundle and for an
+// HTML error page. The lenient decoder reports all of those as an empty chain
+// with no error, so a `cat >` caught mid-write -- the refresh mechanism the
+// documentation recommends -- published a chain with the ancestors silently
+// removed, permanently, because this CA cannot re-sign another CA's list.
+//
+// So: an empty file is the empty declaration. Anything else that decodes to no
+// CRL, or that leaves bytes the decoder could not consume, is a failure. The
+// caller keeps what is already published rather than acting on it.
+func decodeCRLChainStrict(blob []byte) ([]*x509.RevocationList, error) {
+	out, rest, err := decodeCRLChainRest(blob)
+	if err != nil {
+		return nil, err
+	}
+	if len(bytes.TrimSpace(rest)) > 0 {
+		return nil, fmt.Errorf("trailing bytes that are not a complete PEM block: "+
+			"the file is truncated or is not a CRL bundle (%d byte(s) left undecoded)",
+			len(bytes.TrimSpace(rest)))
+	}
+	if len(out) == 0 && len(bytes.TrimSpace(blob)) > 0 {
+		return nil, fmt.Errorf("no X509 CRL blocks, but the file is not empty: " +
+			"an empty file means publish no upstream CRLs; this does not")
+	}
+	return out, nil
+}
+
+// decodeCRLChainRest also reports what it could not decode, so a caller that
+// needs to tell "nothing there" from "could not read it" can.
+func decodeCRLChainRest(blob []byte) ([]*x509.RevocationList, []byte, error) {
 	var out []*x509.RevocationList
 	rest := blob
 	for {
 		var block *pem.Block
 		block, rest = pem.Decode(rest)
 		if block == nil {
-			return out, nil
+			return out, rest, nil
 		}
 		if block.Type != "X509 CRL" {
 			continue
 		}
 		crl, err := x509.ParseRevocationList(block.Bytes)
 		if err != nil {
-			return nil, fmt.Errorf("parsing CRL %d in chain: %w", len(out)+1, err)
+			return nil, nil, fmt.Errorf("parsing CRL %d in chain: %w", len(out)+1, err)
 		}
 		out = append(out, crl)
 	}
