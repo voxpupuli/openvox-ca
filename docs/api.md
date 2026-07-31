@@ -301,6 +301,15 @@ refused at every tier above public — including `POST /certificate_renewal`, so
 revoking an agent's certificate cuts off its access to every *authenticated*
 endpoint, not merely its next renewal.
 
+That is unconditional for certificates **this CA issued**. For a client from a
+configured [`client_ca`](configuration.md#client-trust-domains) domain, the
+revocation half is governed by `client_revocation_policy`: the default
+`require` refuses a client whose issuer has no currently valid CRL, `check`
+consults whatever CRLs are loaded and admits the client when there are none, and
+`skip` does not check at all. Under `skip` — and under `check` for an issuer
+publishing no CRL — a foreign certificate its own issuer has revoked **is**
+admitted above the public tier, including where its CN grants it admin.
+
 The public tier is unaffected, because it examines no client certificate at
 all. A revoked agent can still fetch the CA certificate and the CRL, read
 `/expirations`, query OCSP, and submit a CSR to

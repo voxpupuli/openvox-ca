@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -89,6 +90,7 @@ func buildTrustDomains(cfg *serverConfig, ownCert *x509.Certificate, adminCNs ma
 			pool.AddCert(anchor)
 			warnIfSelfSigned(entry, anchor)
 		}
+		warnIfGrantsSpanAnchors(entry, anchors)
 
 		admins := make(map[string]bool, len(entry.AdminCNs))
 		for _, cn := range entry.AdminCNs {
@@ -124,8 +126,8 @@ func buildTrustDomains(cfg *serverConfig, ownCert *x509.Certificate, adminCNs ma
 		if err != nil {
 			return nil, fmt.Errorf("client_ca %q: %w", entry.Name, err)
 		}
-		domain.SetRevocationSet(api.NewClientCRLSet(crls))
-		warnIfNoUsableCRLs(entry, cfg.Policy(), crls)
+		domain.SetRevocationSet(api.NewClientCRLSet(crls, anchors))
+		warnIfNoUsableCRLs(entry, cfg.Policy(), crls, anchors)
 
 		domains = append(domains, domain)
 	}
@@ -152,12 +154,40 @@ func warnIfSelfSigned(entry *config.ClientCA, anchor *x509.Certificate) {
 		"client_ca", entry.Name, "anchor", anchor.Subject.CommonName)
 }
 
+// warnIfGrantsSpanAnchors reports an entry whose grants reach further than the
+// operator is likely to think.
+//
+// admin_cns and allow_pp_cli_auth are properties of the *entry*, and an entry's
+// file may hold any number of anchors. So two issuers in one bundle share one
+// admin list: a name the operator meant for one of them is honoured from either.
+// The documentation says the opposite in as many words -- "a name means
+// something only within its issuer's namespace" -- and that is the sentence an
+// operator acts on.
+//
+// The same widening as the self-signed-root case beside this, which is already
+// warned about unconditionally, so this is warned about the same way. Splitting
+// the entry per issuer is the fix, and it costs nothing: entries are cheap.
+func warnIfGrantsSpanAnchors(entry *config.ClientCA, anchors []*x509.Certificate) {
+	if len(anchors) < 2 || (len(entry.AdminCNs) == 0 && !entry.AllowPpCliAuth) {
+		return
+	}
+	names := make([]string, 0, len(anchors))
+	for _, a := range anchors {
+		names = append(names, a.Subject.CommonName)
+	}
+	slog.Warn("client_ca entry grants admin authority across more than one anchor: its admin_cns "+
+		"and allow_pp_cli_auth apply to certificates from every anchor in its file, so a name "+
+		"granted for one issuer is honoured from the others too. Split the entry, one per issuer, "+
+		"if you meant to scope the grant.",
+		"client_ca", entry.Name, "anchors", strings.Join(names, ", "))
+}
+
 // warnIfNoUsableCRLs reports an entry that will reject every one of its clients.
 //
 // Two ways to arrive here, and the second is the one that catches people. A
 // crl_file left unset under the default require policy is the obvious case. The
 // other is an entry anchored on a shared root: the walk needs a CRL for every
-// issuer in the chain except the anchor, and an intermediate's own CRL is
+// issuer in the chain, the anchor included, and an intermediate's own CRL is
 // signed by that intermediate — not by the anchor — so loadDomainCRLs discards
 // it as unverifiable and every client of the domain is rejected.
 //
@@ -166,14 +196,15 @@ func warnIfSelfSigned(entry *config.ClientCA, anchor *x509.Certificate) {
 // the obvious fix is to switch to check, and that silently stops checking leaf
 // revocation for the domain entirely — an availability problem converted into a
 // security one along the path of least resistance.
-func warnIfNoUsableCRLs(entry *config.ClientCA, policy string, crls []*x509.RevocationList) {
-	if policy != config.RevocationRequire || len(crls) > 0 {
-		return
-	}
-	if entry.CRLFile == "" {
-		slog.Warn("client_ca entry has no crl_file under the require policy: every client of this "+
-			"entry will be rejected. Set crl_file, or set client_revocation_policy explicitly",
-			"client_ca", entry.Name)
+func warnIfNoUsableCRLs(entry *config.ClientCA, policy string, crls []*x509.RevocationList,
+	anchors []*x509.Certificate,
+) {
+	// Anchor coverage, not merely "did anything load". A bundle can load one
+	// anchor's CRL and none of another's, which rejects every client of the
+	// second while len(crls) is happily non-zero -- so gating on that reported
+	// health for an entry that was already refusing half its clients.
+	if policy != config.RevocationRequire ||
+		api.NewClientCRLSet(crls, anchors).Usable(time.Now(), anchors) {
 		return
 	}
 	slog.Warn("client_ca entry loaded no usable CRLs under the require policy: every client of this "+
@@ -219,14 +250,6 @@ func loadDomainCRLs(entry *config.ClientCA, anchors []*x509.Certificate) ([]*x50
 		if err != nil {
 			return nil, fmt.Errorf("parsing CRL %d in %s: %w", len(out)+1, entry.CRLFile, err)
 		}
-		if len(crl.AuthorityKeyId) == 0 {
-			// Matched to issuers by AKI; a DN fallback would consult the wrong
-			// CA's revocations under a shared root, where two siblings can hold
-			// the same DN.
-			slog.Warn("Discarding a CRL with no Authority Key Identifier",
-				"client_ca", entry.Name, "path", entry.CRLFile, "issuer", crl.Issuer.String())
-			continue
-		}
 		if !api.VerifyCRLAgainst(crl, anchors) {
 			slog.Warn("Discarding a CRL that no anchor in this client_ca entry signed",
 				"client_ca", entry.Name, "path", entry.CRLFile, "issuer", crl.Issuer.String())
@@ -269,7 +292,7 @@ func refreshClientCRLs(cfg *serverConfig, domains []api.TrustDomain, m *clientCR
 			slog.Error("crl_file yielded no usable CRLs; keeping the current set",
 				"client_ca", entry.Name, "path", entry.CRLFile)
 		default:
-			domain.SetRevocationSet(api.NewClientCRLSet(crls))
+			domain.SetRevocationSet(api.NewClientCRLSet(crls, domain.Anchors))
 		}
 
 		// Published on every branch, not only the successful one. The gauge is
@@ -278,7 +301,7 @@ func refreshClientCRLs(cfg *serverConfig, domains []api.TrustDomain, m *clientCR
 		// is never created, and `== 0` cannot fire on a series that does not
 		// exist. The mixin ORs in absent() for the same reason on `up`.
 		if m != nil {
-			m.set(entry.Name, domain.RevocationSet().Usable(time.Now()))
+			m.set(entry.Name, domain.RevocationSet().Usable(time.Now(), domain.Anchors))
 		}
 	}
 }

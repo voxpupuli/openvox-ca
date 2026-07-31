@@ -582,8 +582,10 @@ Checking covers the **whole verified chain**, not just the leaf: a sibling CA
 revoked by the shared root must not go on authenticating its leaves.
 
 Under the default `require` policy, **`crl_file` is mandatory** for every entry:
-configuration validation rejects a block without one, and the server refuses to
-start if the file cannot be read or holds a CRL that does not parse. That is
+configuration validation rejects a block without one. Separately, and under
+*every* policy, the server refuses to start if a `crl_file` that is set cannot
+be read or holds a CRL that does not parse — so a stale path left behind on
+`skip` stops the server rather than being ignored. That is
 deliberate — the anchor bundle beside it already fails closed, and a server that
 starts here would reject every client of the domain while its readiness probe
 reported healthy.
@@ -600,10 +602,21 @@ than by anything it presents. If you meant that certificate to authenticate as a
 client, issue it a leaf from the anchor instead.
 
 > **Anchoring on a shared root and using `require` locks everyone out.** The
-> walk needs a CRL for every issuer in the chain except the anchor, and an
-> intermediate's own CRL is signed by that intermediate — not by the root — so
-> it fails the verification above and is discarded. Every client of the entry is
-> then rejected. The server warns about this at startup.
+> walk needs a CRL for every issuer in the chain, **the anchor included** — what
+> is never checked is the anchor as a *subject*, which is a different question.
+> An intermediate's own CRL is signed by that intermediate — not by the root — so
+> it fails the verification above and is discarded, leaving the
+> `(leaf, intermediate)` pair with no CRL. Every client of the entry is then
+> rejected.
+>
+> The server warns at startup when an entry loads no usable CRL at all, but it
+> **cannot** warn about this case: the root's own CRL does verify and is kept, so
+> the entry looks covered from the outside. Nor can
+> `puppetca_client_crl_usable` see it — that gauge reports on the entry's
+> anchors, and the anchor is fine; it is the intermediate below it that has
+> nothing. The only symptom is a 403 for every client. Anchor on the issuing CA
+> and the problem does not arise: the chain is then `[leaf, anchor]` and the only
+> CRL `crl_file` needs is the one the anchor itself issued.
 >
 > The fix is to anchor on the issuing CA, which is what scopes the entry anyway.
 > **Do not reach for `client_revocation_policy: check`**: it restores service by

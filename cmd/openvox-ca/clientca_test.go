@@ -484,17 +484,11 @@ var _ = Describe("refreshClientCRLs", func() {
 
 		// Each domain must hold the CRL signed by its own anchor. A swapped
 		// pairing leaves both sets non-empty, so the assertion is per-issuer.
-		Expect(domains[1].RevocationSet().Usable(time.Now())).To(BeTrue())
-		Expect(domains[2].RevocationSet().Usable(time.Now())).To(BeTrue())
+		Expect(domains[1].RevocationSet().Usable(time.Now(), domains[1].Anchors)).To(BeTrue())
+		Expect(domains[2].RevocationSet().Usable(time.Now(), domains[2].Anchors)).To(BeTrue())
 		Expect(gauge("server")).To(Equal(1.0))
 		Expect(gauge("agent")).To(Equal(1.0))
 
-		// The offset is what pairs an entry's CRLs with its anchors, and the
-		// pairing is self-checking: each entry's CRL verifies only against its
-		// own anchor, so a swapped offset discards both and leaves both domains
-		// unusable rather than merely mismatched.
-		Expect(gauge("server")).To(Equal(1.0))
-		Expect(gauge("agent")).To(Equal(1.0))
 	})
 
 	It("keeps the previous set and reports unusable when a reload fails", func() {
@@ -515,7 +509,7 @@ var _ = Describe("refreshClientCRLs", func() {
 		cfg.ClientCA[0].CRLFile = filepath.Join(GinkgoT().TempDir(), "vanished.pem")
 		refreshClientCRLs(cfg, domains, metrics)
 
-		Expect(domains[1].RevocationSet().Usable(time.Now())).To(BeTrue(),
+		Expect(domains[1].RevocationSet().Usable(time.Now(), domains[1].Anchors)).To(BeTrue(),
 			"a transient read error must not discard a working set")
 		Expect(gauge("server")).To(Equal(1.0))
 	})
@@ -537,7 +531,7 @@ var _ = Describe("refreshClientCRLs", func() {
 		cfg.ClientCA[0].CRLFile = writeCRLFile(mintCRL(unrelated, unrelatedKey))
 		refreshClientCRLs(cfg, domains, metrics)
 
-		Expect(domains[1].RevocationSet().Usable(time.Now())).To(BeTrue())
+		Expect(domains[1].RevocationSet().Usable(time.Now(), domains[1].Anchors)).To(BeTrue())
 		Expect(gauge("server")).To(Equal(1.0))
 	})
 

@@ -70,6 +70,13 @@ type AuthConfig struct {
 
 // revocationPolicy resolves the foreign-domain revocation policy, defaulting
 // to require so an unset value never defaults into a hole.
+// revocationPolicy resolves the policy for foreign domains.
+//
+// config.ClientCAConfig.Policy() applies the same default, and main.go passes
+// its result in, so in production this arm is not reached. It stays because
+// AuthConfig is constructible without going through that path -- every spec in
+// this package does exactly that -- and the fail-closed default has to be a
+// property of the thing making the decision, not of one of its callers.
 func (c *AuthConfig) revocationPolicy() string {
 	if c.ClientRevocationPolicy == "" {
 		return RevocationRequire

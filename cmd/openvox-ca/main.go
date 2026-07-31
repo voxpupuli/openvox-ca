@@ -349,9 +349,9 @@ func newRootCmd() *cobra.Command {
 			}
 			if cmd.Flags().Changed("no-pp-cli-auth") {
 				cfg.NoPpCliAuth = noPpCliAuth
-				if cmd.Flags().Changed("client-revocation-policy") {
-					cfg.ClientRevocationPolicy = clientRevocationPolicy
-				}
+			}
+			if cmd.Flags().Changed("client-revocation-policy") {
+				cfg.ClientRevocationPolicy = clientRevocationPolicy
 			}
 			if cmd.Flags().Changed("no-tls-required") {
 				cfg.NoTLSRequired = noTLSRequired
@@ -816,9 +816,12 @@ func newRootCmd() *cobra.Command {
 				if exporter != nil {
 					crlMetrics = newClientCRLMetrics(exporter.Registry())
 				}
-				// Load once before serving, so the first request is not
-				// evaluated against an empty set — which under require would
-				// reject every foreign client until the first tick.
+				// Publish puppetca_client_crl_usable before serving. The sets
+				// themselves are already installed by buildTrustDomains, so this
+				// is not about the first request -- it is that `== 0` cannot fire
+				// on a series that does not exist, so a domain whose CRLs are
+				// unusable from the very first load would otherwise go unalerted
+				// until the first maintenance tick.
 				refreshClientCRLs(cfg, srv.AuthConfig.Domains, crlMetrics)
 				go runClientCRLReloader(ctx, cfg, srv.AuthConfig.Domains, crlMetrics,
 					cfg.ClientCRLRefreshInterval())

@@ -171,6 +171,28 @@ var _ = Describe("Trust domains", func() {
 		})
 	})
 
+	Describe("IsOwn", func() {
+		It("is not something a foreign domain can become", func() {
+			// SECURITY: this predicate decides whose CRL a client is checked
+			// against, whether it may renew, and whether it may read another
+			// subject's CSR. It used to be Name == "", which held only because
+			// configuration validation rejects a client_ca entry with no name --
+			// a check two packages away, on one construction path, asserted here
+			// by a comment. An entry missing its name key would have become
+			// domain zero.
+			//
+			// The marker is now a field only OwnTrustDomain sets, so no name, and
+			// no configuration input, can reach it.
+			nameless := api.NewForeignTrustDomain("", nil, nil, map[string]bool{"admin": true}, true)
+			Expect(nameless.IsOwn()).To(BeFalse())
+
+			ours := api.OwnTrustDomain(pki.serverCA, nil, false)
+			Expect(ours.IsOwn()).To(BeTrue())
+			zero := api.TrustDomain{}
+			Expect(zero.IsOwn()).To(BeFalse(), "the zero value must fail towards foreign")
+		})
+	})
+
 	Describe("Describe", func() {
 		It("names our own domain without a client_ca label", func() {
 			own := api.OwnTrustDomain(pki.serverCA, nil, false)
