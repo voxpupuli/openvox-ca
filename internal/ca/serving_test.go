@@ -642,13 +642,33 @@ var _ = Describe("Renewing a node that has taken the CA's hostname", func() {
 		return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der})
 	}
 
+	// nodeCertFor issues cn a certificate from this CA and returns it parsed.
+	//
+	// Renew refuses to act on a name unless the caller presents the certificate
+	// it is renewing and this CA issued it, so the node in these specs has to
+	// hold one. That is what the scenario says it is: an ordinary agent that
+	// took the CA's hostname, not the listener's own serving certificate.
+	nodeCertFor := func(cn string) *x509.Certificate {
+		GinkgoHelper()
+		res, err := myCA.Generate(ctx, cn, nil)
+		Expect(err).NotTo(HaveOccurred())
+		block, _ := pem.Decode(res.CertificatePEM)
+		Expect(block).NotTo(BeNil())
+		crt, err := x509.ParseCertificate(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		return crt
+	}
+
 	It("does not revoke the live serving certificate", func() {
+		// The node held the name first; the serving certificate is issued after
+		// it, which is why LatestSerialForSubject resolves to the serving one.
+		node := nodeCertFor(hostname)
 		serving, err := myCA.EnsureServingCert(ctx, ca.ServingConfig{Subject: hostname})
 		Expect(err).NotTo(HaveOccurred())
 
-		// A node renews under the CA's own name. LatestSerialForSubject
-		// resolves to the serving certificate, because it was issued last.
-		_, err = myCA.Renew(ctx, hostname, csrFor(hostname))
+		// A node renews under the CA's own name, presenting the certificate it
+		// holds -- which Renew now requires, and which is not the serving one.
+		renewedPEM, err := myCA.Renew(ctx, hostname, csrFor(hostname), node)
 		Expect(err).NotTo(HaveOccurred())
 
 		revoked, err := myCA.IsRevokedSerial(ctx, serving.Leaf.SerialNumber)
@@ -662,7 +682,11 @@ var _ = Describe("Renewing a node that has taken the CA's hostname", func() {
 		// serving certificate exists" would leave it valid indefinitely.
 		latest, err := myCA.Storage.LatestSerialForSubject(ctx, hostname)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.Renew(ctx, hostname, csrFor(hostname))
+		renewedBlock, _ := pem.Decode(renewedPEM)
+		Expect(renewedBlock).NotTo(BeNil())
+		renewedCrt, err := x509.ParseCertificate(renewedBlock.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = myCA.Renew(ctx, hostname, csrFor(hostname), renewedCrt)
 		Expect(err).NotTo(HaveOccurred())
 
 		want := new(big.Int)
@@ -695,11 +719,18 @@ var _ = Describe("Renewing a node that has taken the CA's hostname", func() {
 		func(blindOver func(dir string) *ca.CA) {
 			dir := GinkgoT().TempDir()
 			seed := caOver(storage.New(dir))
+			seeded, err := seed.Generate(ctx, hostname, nil)
+			Expect(err).NotTo(HaveOccurred())
+			nodeBlock, _ := pem.Decode(seeded.CertificatePEM)
+			Expect(nodeBlock).NotTo(BeNil())
+			node, err := x509.ParseCertificate(nodeBlock.Bytes)
+			Expect(err).NotTo(HaveOccurred())
+
 			serving, err := seed.EnsureServingCert(ctx, ca.ServingConfig{Subject: hostname})
 			Expect(err).NotTo(HaveOccurred())
 
 			blind := blindOver(dir)
-			_, err = blind.Renew(ctx, hostname, csrFor(hostname))
+			_, err = blind.Renew(ctx, hostname, csrFor(hostname), node)
 			Expect(err).NotTo(HaveOccurred())
 
 			// The serial Renew resolves is the serving certificate's -- it was
@@ -747,7 +778,7 @@ var _ = Describe("Renewing a node that has taken the CA's hostname", func() {
 		firstCrt, err := x509.ParseCertificate(block.Bytes)
 		Expect(err).NotTo(HaveOccurred())
 
-		_, err = myCA.Renew(ctx, hostname, csrFor(hostname))
+		_, err = myCA.Renew(ctx, hostname, csrFor(hostname), firstCrt)
 		Expect(err).NotTo(HaveOccurred())
 
 		revoked, err := myCA.IsRevokedSerial(ctx, firstCrt.SerialNumber)

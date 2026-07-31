@@ -765,8 +765,7 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 
 		scratch := api.New(scratchCA)
 		scratch.AuthConfig = &api.AuthConfig{
-			CACert:    caCert,
-			AllowList: adminAllowList,
+			Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, adminAllowList, true)},
 		}
 		scratchMux := scratch.Routes()
 		// A fresh admin certificate per route, for the reason the class fixtures
