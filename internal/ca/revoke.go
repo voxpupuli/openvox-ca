@@ -39,7 +39,7 @@ func (c *CA) Revoke(ctx context.Context, subject string) error {
 
 	ctx, cancel := context.WithTimeout(ctx, lockTimeout)
 	defer cancel()
-	return c.Storage.WithLock(ctx, lockNameCRL, func() error {
+	return c.withCRLLockCounted(ctx, func() error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		return c.revokeLocked(ctx, subject)

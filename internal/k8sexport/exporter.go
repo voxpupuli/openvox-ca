@@ -173,9 +173,12 @@ func (e *Exporter) warnOnNarrowedScopes(certPEM, crlPEM []byte) {
 			if !m.want || !m.defaulted || m.scope == ScopeChain {
 				continue
 			}
-			n := len(pemBlocks(m.chain, m.blockType))
 			key := fmt.Sprintf("%d/%s", i, m.blockType)
-			if n < 2 || e.scopeWarned[key] {
+			if e.scopeWarned[key] {
+				continue
+			}
+			n := len(pemBlocks(m.chain, m.blockType))
+			if n < 2 {
 				continue
 			}
 			e.scopeWarned[key] = true

@@ -174,18 +174,26 @@ type CA struct {
 	// puppetca_serving_cert_revocation_failures_total.
 	servingRevocationFailures atomic.Uint64
 
-	// Four counters, because they answer four different questions, and their
-	// remedies differ: one points at the file's contents, one at the CA bundle,
-	// one at whatever writes the file, and one at the file's mount.
+	// Four counters, because their remedies differ: crlChainFailures points at
+	// the file itself, crlChainDiscarded at the CA bundle, and crlChainRegressed
+	// and crlChainRemoved at whatever writes the file -- one for a stale copy,
+	// one for a dropped ancestor. (The file's *mount* is the fourth question, and
+	// it is crlChainLastRead below, a gauge rather than a counter, because
+	// "never opened" is a state and not an event.)
 	//
-	// They do not share a cadence, which matters when sizing an alert window.
-	// crlChainFailures increments once per maintenance *pass*. The other three
-	// increment once per CRL per *evaluation*, and crl_chain_file is evaluated
-	// on every CRL amendment as well as on the maintenance pass, so those three
-	// track revocation rate rather than the number of bad CRLs in the file --
-	// strictly more often than the failure counter, which is the direction a
-	// window sized against the slowest of them stays safe in. See
-	// mixin/config.libsonnet, which is calibrated on exactly this.
+	// All four are per *evaluation*, not per pass: crl_chain_file is evaluated on
+	// every CRL amendment as well as on the maintenance pass, so on a busy CA
+	// they track revocation rate rather than the number of bad CRLs in the file.
+	// crlChainFailures counts the whole file once per evaluation; the other three
+	// count once per CRL per evaluation.
+	//
+	// Do not assume an ordering between them. An unreadable or unparseable file
+	// increments crlChainFailures alone, because upstreamCRLs returns before the
+	// per-CRL loops are reached.
+	//
+	// What an alert window can be sized against is the floor they share: a quiet
+	// CA evaluates the file once per maintenance_interval_sec. See
+	// mixin/config.libsonnet, which says the same thing.
 	//
 	// crlChainFailures counts refresh passes that could not publish the upstream
 	// chain at all -- unreadable, unparseable, truncated or oversized. The

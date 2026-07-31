@@ -341,6 +341,39 @@ var _ = Describe("Collector", func() {
 				"an empty file is still a file we read")
 	})
 
+	It("exports the removal counter by name, and at its value", func() {
+		// The only one of the four chain counters never gathered in a spec, and
+		// the worst to leave uncovered: PuppetCAUpstreamCRLRemoved routes on this
+		// name, and the condition behind it is invisible from every other angle
+		// -- the ancestor's own expiry series simply stops being produced, and a
+		// vanished series fires nothing.
+		upstream, upsKey := upstreamCAWithKeyFixture("Departing Ancestor CA")
+		ours, err := store.GetCACert(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(store.SaveCACert(ctx, append(append([]byte{}, ours...),
+			pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: upstream.Raw})...))).
+			To(Succeed())
+
+		path := filepath.Join(GinkgoT().TempDir(), "chain.pem")
+		Expect(os.WriteFile(path, numberedCRLFixture(upstream, upsKey, 5), 0o644)).To(Succeed())
+		myCA.CRLChainFile = path
+		Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
+
+		g := gather(metrics.NewCollector(myCA))
+		Expect(counterValue(g.findByLabels("puppetca_crl_chain_removed_total", nil))).
+			To(Equal(0.0))
+
+		// The file stops listing it. Honoured, unrecoverable, and counted.
+		Expect(os.WriteFile(path, nil, 0o644)).To(Succeed())
+		Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
+
+		g = gather(metrics.NewCollector(myCA))
+		Expect(counterValue(g.findByLabels("puppetca_crl_chain_removed_total", nil))).
+			To(BeNumerically(">", 0))
+		Expect(counterValue(g.findByLabels("puppetca_crl_chain_discarded_total", nil))).
+			To(Equal(0.0), "an ancestor the file omits is not a CRL the bundle refused")
+	})
+
 	It("counts a stale upstream CRL separately from an unvouched-for one", func() {
 		// The two share nothing but the word "dropped": a discard means the CA
 		// bundle is incomplete, a regression means the file is stale. They had

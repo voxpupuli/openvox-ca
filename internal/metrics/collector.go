@@ -186,9 +186,13 @@ func NewCollector(c *ca.CA) *Collector {
 		),
 		crlChainRefreshFailures: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "crl_chain", "refresh_failures_total"),
-			"Total crl_chain_file refresh passes that failed. The published chain is left alone and "+
-				"the next cycle retries, so alert on a persistent rise: the ancestor CRLs agents "+
-				"need for full-chain revocation checking are then ageing with nothing renewing them.",
+			"Total failed reads of crl_chain_file -- unreadable, unparseable, not ending on a PEM "+
+				"block boundary, or too large. Counted where the file is read, so it moves on every "+
+				"CRL amendment as well as on the maintenance pass, and revocation is blocked until "+
+				"the file is fixed. The published chain is left alone and the next attempt retries. "+
+				"A refresh pass that fails for some other reason -- a lock it could not take, "+
+				"storage it could not read -- moves puppetca_crl_update_failures_total instead, so "+
+				"a rise here always means the file.",
 			nil, nil),
 		crlChainDiscarded: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "crl_chain", "discarded_total"),
