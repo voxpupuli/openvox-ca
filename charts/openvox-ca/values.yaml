@@ -225,12 +225,27 @@ kubernetesExport:
   fieldManager: ""
 
   # Export targets, passed straight through to kubernetes_export.targets.
+  #
+  # Each target selects what it carries: cert (the CA certificate), crl, and —
+  # when config.tls_self_provision is on — serving_cert and serving_key, the
+  # certificate this CA issued for its own listener.
+  #
+  # serving_key is written in plaintext and cannot share a target with cert or
+  # crl: a Secret holding public trust material is mounted far more widely than
+  # one holding a private key. Give them different names as well as different
+  # targets; two targets naming the same object overwrite each other.
   targets: []
   # - kind: Secret
   #   metadata:
   #     name: openvox-ca-trust
   #   cert: true
   #   crl: true
+  # - kind: Secret
+  #   metadata:
+  #     name: openvox-ca-serving
+  #   type: kubernetes.io/tls   # requires both of the next two
+  #   serving_cert: true
+  #   serving_key: true
 
   rbac:
     # Create the Role/RoleBinding (or ClusterRole/ClusterRoleBinding) granting
@@ -347,9 +362,17 @@ readinessProbe:
     path: /healthz/ready
     port: https
 
+# failureThreshold x periodSeconds must exceed the worst-case startup, or the
+# kubelet restarts a pod that was making progress. That budget is 180s.
+#
+# The old 30 x 2 = 60s was exactly one lock timeout and left nothing for a
+# second. Startup can take two: the bootstrap lock during CA init, and the
+# per-subject lock when the CA issues its own serving certificate. Add a
+# signature that may be a Transit round trip rather than local CPU, and 60s is
+# not enough. 90 x 2 leaves room for both plus margin.
 startupProbe:
   enabled: true
-  failureThreshold: 30
+  failureThreshold: 90
   periodSeconds: 2
   httpGet:
     path: /healthz/startup

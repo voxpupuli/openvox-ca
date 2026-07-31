@@ -1,18 +1,23 @@
 # Kubernetes export
 
-openvox-ca can optionally publish the **CA certificate** and/or the **CRL** into
-one or more Kubernetes **Secrets** and **ConfigMaps**, so that other workloads in
-the cluster can mount them directly (e.g. as a trust bundle or for CRL
-distribution) instead of fetching them over the HTTP API or sharing a storage
-volume.
+openvox-ca can optionally publish the **CA certificate**, the **CRL**, and the
+**serving certificate it issued for itself** into one or more Kubernetes
+**Secrets** and **ConfigMaps**, so that other workloads in the cluster can mount
+them directly (e.g. as a trust bundle, for CRL distribution, or for an Ingress
+to terminate TLS) instead of fetching them over the HTTP API or sharing a
+storage volume.
 
 - Any number of targets, each a Secret **or** a ConfigMap.
-- Each target may carry the **CA cert**, the **CRL**, or **both** (PEM only for now).
+- Each target may carry the **CA cert**, the **CRL**, the **serving
+  certificate**, the **serving key**, or a combination (PEM only for now). The
+  serving material requires `tls_self_provision`.
 - The data keys, name, namespace, labels, annotations, and a Secret's `type`
   field are all configurable.
-- CRL-bearing targets are **re-exported whenever the CRL changes** (revoke,
-  reissue, background refresh, expired-cert cleanup). All targets are also
-  reconciled **once at startup**.
+- Targets are re-exported whenever the material they carry changes: **the CRL**
+  (revoke, reissue, background refresh, expired-cert cleanup) or **a serving
+  certificate rotation**. All targets are also reconciled **once at startup**,
+  and a cycle with failures is retried on a bounded interval.
+- A material that cannot be read fails only the targets that asked for it.
 
 The feature is **disabled by default**; it activates only when at least one
 target is configured.
@@ -84,10 +89,91 @@ kubernetes_export:
 | `metadata.labels` | both | — | Merged with the mandatory `managed-by` label |
 | `metadata.annotations` | both | — | Applied verbatim |
 | `cert` | both | `false` | Include the CA certificate |
-| `crl` | both | `false` | Include the CRL (at least one of `cert`/`crl` must be true) |
+| `crl` | both | `false` | Include the CRL |
+| `serving_cert` | both | `false` | Include the self-provisioned serving certificate |
+| `serving_key` | Secret | `false` | Include the serving private key (see below) |
 | `cert_key` | both | `ca.crt` | Data key for the cert |
-| `crl_key` | both | `ca.crl` | Data key for the CRL (must differ from `cert_key`) |
+| `crl_key` | both | `ca.crl` | Data key for the CRL |
+| `serving_cert_key` | both | `tls.crt` | Data key for the serving certificate |
+| `serving_key_key` | Secret | `tls.key` | Data key for the serving key |
 | `type` | Secret | unmanaged | Secret `type` field; unset means the exporter does not own it (see below); rejected on ConfigMaps |
+
+At least one material must be selected, and no two may share a data key.
+
+### Serving certificate and key
+
+With [`tls_self_provision`](configuration.md#self-provisioned-serving-certificate)
+the CA issues its own serving certificate. Exporting it produces a
+`kubernetes.io/tls` Secret an Ingress or Gateway can terminate against — which
+is why these two default to `tls.crt` and `tls.key` rather than the
+trust-bundle convention the other materials use.
+
+**Not for the agent-facing hostname.** A controller that terminates TLS strips
+the client certificate, so every mTLS endpoint stops authenticating; the CA has
+to be reached through a passthrough controller. This pair is for SNI routing at
+such a controller, for an edge serving only the anonymous endpoints (CRL, OCSP,
+health), or for anything else in the cluster that needs the certificate. See
+[Ingress and TLS passthrough](helm-chart.md#ingress).
+
+```yaml
+kubernetes_export:
+  targets:
+    # Public trust material: mounted widely, read by many workloads.
+    - kind: Secret
+      metadata:
+        name: openvox-ca-trust
+      cert: true
+      crl: true
+    # The serving pair, on its own.
+    - kind: Secret
+      metadata:
+        name: openvox-ca-serving
+      type: kubernetes.io/tls
+      serving_cert: true
+      serving_key: true
+```
+
+Two rules apply to `serving_key`, both about blast radius:
+
+- **It is rejected on a ConfigMap.** Those are not encrypted at rest and are
+  readable by anything that can `get` them.
+- **It cannot share a target with `cert` or `crl`.** A Secret holding `ca.crt`
+  is public trust material and gets mounted across the cluster; letting it
+  quietly acquire a `tls.key` entry would extend the serving key's reach to
+  every workload that reads it. Two targets cost nothing — but give them different
+*names* as well: two targets naming the same object overwrite each other on
+every cycle, and the server refuses that at startup. The serving
+  *certificate* is public and may share a target with anything.
+
+**The exported key is always plaintext**, even when
+`tls_self_provision_encrypt_key` is set — the exporter publishes the key the
+listener is already using, which the CA decrypted when it loaded it. A
+`kubernetes.io/tls` Secret holding an encrypted PEM is useless to every
+consumer of one: it would look correct and fail at the first handshake. That is a deliberate downgrade: the key is then plaintext in etcd.
+The server logs a warning at startup whenever a `serving_key` target is
+configured. Restrict who can read that Secret.
+
+**A replica never publishes a serving pair it knows is superseded.** Before
+publishing, it compares the certificate it is presenting with the one in
+storage; if they differ it is behind — another replica has rotated — and it
+publishes nothing that cycle rather than writing its own copy back. That is a
+quiet skip, not a failure: it is normal, it clears when that replica's next
+maintenance pass catches it up, and the replica that rotated has already
+published the new pair. Nothing alerts, and nothing needs to — a replica that
+stays behind is one whose maintenance pass is failing, which
+`PuppetCAServingCertRenewalFailing` already covers.
+
+That is a bound, not an absolute. The comparison happens when the material is
+read, and the apply follows; two replicas can still order their applies against
+each other, so a Secret can briefly carry the pair the losing replica read. The
+ten-minute reconcile corrects it.
+
+Revoking alone does not stop republication: `openvox-ca-ctl revoke` adds the
+serial to the CRL, it does not replace the stored certificate. Republication
+stops once some replica notices the revocation and mints the replacement, which
+happens on its next maintenance pass. **After a key compromise, restart the
+replicas** so a fresh boot mints immediately, and delete or overwrite the
+exported Secret rather than waiting for it to be corrected.
 
 ### Secret type
 
@@ -99,8 +185,8 @@ for example a `kubernetes.io/tls` Secret whose `tls.crt`/`tls.key` are pushed by
 Flux — by applying only the CRL (or cert) into a data key of its own and leaving
 the type, and the other manager's keys, alone. Do not set `type:
 kubernetes.io/tls` on a target that only carries the CA cert/CRL: such a Secret
-must also contain `tls.crt` and `tls.key`, so the API server would reject the
-apply.
+must also contain `tls.crt` and `tls.key`, so the server refuses to start rather
+than letting the apply fail.
 
 Secret data is written under `data` (base64-encoded by the client), and
 ConfigMap data as plain text under `data`. Using `data` rather than the
@@ -123,7 +209,14 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["secrets", "configmaps"]
-    verbs: ["create", "patch"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["patch"]
+    # Named, so this cannot patch any other workload's Secret — which matters
+    # more now the CA publishes a private key. The chart does the same.
+    # `create` cannot be narrowed this way: at admission the object has no name.
+    resourceNames: ["openvox-ca-trust", "openvox-ca-serving"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -150,10 +243,15 @@ resources to the minimum above.
   (e.g. openvox-ca is not running in a cluster, or the namespace cannot be
   resolved), the error is logged and the CA continues serving normally.
 - A failure applying one target is logged and does not prevent the other targets
-  from being applied. Transient failures are retried on the next CRL update, or
-  on the next restart.
+  from being applied. A cycle with failures is retried after two minutes, and
+  cycles run on a ten-minute floor even when nothing has changed, which repairs
+  an object edited or deleted out from under the exporter.
 - Configuration is validated at startup; an invalid `kubernetes_export` block
-  (bad `kind`, a `type` on a ConfigMap, neither `cert` nor `crl`, colliding
+  (bad `kind`, a `type` on a ConfigMap, none of `cert`, `crl`, `serving_cert` or
+  `serving_key`, two targets naming the same object, `serving_key` on a
+  ConfigMap or sharing a target with `cert`/`crl`, `kubernetes.io/tls` without
+  both serving materials, a serving target without `tls_self_provision`,
+  colliding
   keys, …) stops the server with a clear error.
 
 ## Metrics

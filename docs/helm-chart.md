@@ -141,6 +141,7 @@ The alternatives, in the same message:
 
 | Setting | When |
 | --- | --- |
+| `config.tls_self_provision: true` | The CA issues and renews its own serving certificate. See below |
 | `config.tls_cert` / `config.tls_key` | A certificate you mount yourself, via `extraVolumes` |
 | `env` / `extraEnv` — `PUPPET_CA_TLS_CERT` and `PUPPET_CA_TLS_KEY` | The paths come from a Secret at runtime. Environment variables outrank the config file, and the chart counts them |
 | `config.no_tls_required: true` | Only behind a proxy that terminates TLS and re-originates it to the pod. Client certificates do not survive that, so mTLS-authenticated endpoints become unreachable |
@@ -156,6 +157,56 @@ does not read — someone else's ConfigMap, a replaced argv, a Secret — so it
 stops asserting rather than refusing an install it cannot judge. In those modes
 the probes assume HTTPS, and it is on you to set `httpGet.scheme` if the server
 is actually serving cleartext.
+
+### Letting the CA issue its own certificate
+
+Where nothing else can issue it — the CA key is in OpenBao Transit, so
+cert-manager cannot act as a CA issuer for it — the CA can issue its own:
+
+```yaml
+config:
+  hostname: ca.example.com        # required: the certificate's CN and first SAN
+  tls_self_provision: true
+  tls_self_provision_names:
+    - openvox-ca.openvox-ca.svc.cluster.local
+```
+
+There are no `tls.selfProvision.*` values, deliberately. The chart's convenience
+blocks exist to do Kubernetes *wiring* — volumes, mounts, Secrets — and
+self-provisioning needs none: it is a server setting, so you set it as one. The
+chart reads it back out of the merged configuration to decide the probe scheme,
+and it counts `PUPPET_CA_TLS_SELF_PROVISION` from `env`/`extraEnv` too.
+
+The chart refuses two combinations that the server also refuses:
+
+- `config.tls_self_provision` with no `config.hostname`. The chart does not set
+  `hostname` by default, so this is easy to hit; without it the certificate
+  carries the fallback subject `puppet`, which no agent validates.
+- `config.tls_self_provision` together with `tls.existingSecret` or
+  `config.tls_cert`/`tls_key`. Both routes end at the same holder, so there is no
+  meaningful "both" — one supplies the certificate from the CA, the other from a
+  mounted file, and the server refuses to guess which you meant.
+
+The certificate lives in the storage backend, not in `cadir`, so every replica
+serves the same one and an ephemeral `cadir` loses nothing.
+
+You can publish it with a [`serving_cert`/`serving_key` export
+target](kubernetes-export.md#serving-certificate-and-key). **This is not a way
+to terminate TLS at an Ingress for the
+agent-facing hostname.** A controller that terminates strips the client
+certificate, and every mTLS endpoint stops authenticating; the CA must be
+reached through a passthrough controller. The exported pair is for SNI routing
+at such a controller, or for an edge that terminates only the anonymous
+endpoints (CRL, OCSP, health), or for anything else in the cluster that needs
+the certificate. Note what the second
+half of that costs: **the exported key is written to the Secret in plaintext**,
+even when `tls_self_provision_encrypt_key` is set, because a TLS consumer
+cannot use an encrypted PEM. Export `serving_cert` alone unless
+something needs the key. The server requires it in a Secret separate from your trust
+bundle. See
+[configuration](configuration.md#self-provisioned-serving-certificate) for
+renewal, revocation of superseded certificates, and the
+filesystem/SQLite caveat.
 
 Two consequences follow from the CA terminating its own TLS:
 

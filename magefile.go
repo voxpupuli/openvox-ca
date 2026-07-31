@@ -58,7 +58,7 @@ import (
 
 type Build mg.Namespace   // build:all  build:fips  build:dist  build:distVariant
 type Test mg.Namespace    // test:unit  test:integcompose  test:integcomposefips  test:loadcompose  test:bench  test:puppet  test:puppetfips  test:migration  test:backendsRedis  test:backendsEtcd
-type Dev mg.Namespace     // dev:check  dev:tidy    dev:clean  dev:container
+type Dev mg.Namespace     // dev:check  dev:lint  dev:mixin  dev:tidy  dev:clean  dev:container
 type Release mg.Namespace // release:prepare
 type Chart mg.Namespace   // chart:version  chart:lint  chart:validate  chart:package
 
@@ -1068,6 +1068,105 @@ func (Chart) Test() error {
 		},
 	}
 
+	renders = append(renders,
+		chartRenderCase{
+			name: "self-provisioning counts as TLS, so probes render HTTPS",
+			sets: []string{"config.tls_self_provision=true", "config.hostname=ca.example.com"},
+			// No tls.existingSecret: this is the whole point — the chart must
+			// not demand the other route.
+			wants: []string{"scheme: HTTPS"},
+		},
+		chartRenderCase{
+			name: "self-provisioning set by environment variable also counts as TLS",
+			// Missing this is how a correct install renders HTTP probes against
+			// an HTTPS listener and then fails its own validation.
+			sets:  []string{"config.hostname=ca.example.com", "env.PUPPET_CA_TLS_SELF_PROVISION=true"},
+			wants: []string{"scheme: HTTPS"},
+		},
+		chartRenderCase{
+			name: "a hostname supplied through extraEnv satisfies the precondition",
+			// The extraEnv arm of effectiveConfig, which no case reached:
+			// deleting it left all 50 assertions passing while the chart
+			// refused an install the server accepts.
+			sets: []string{
+				"config.tls_self_provision=true",
+				"extraEnv[0].name=PUPPET_CA_HOSTNAME", "extraEnv[0].value=ca.example.com",
+			},
+			wants: []string{"scheme: HTTPS"},
+		},
+		chartRenderCase{
+			name: "an empty extraEnv value does not count as set",
+			// The extraEnv arms had no empty-value guard, so value: "" counted
+			// as configured and tripped the mutual-exclusion precondition on an
+			// install the server accepts.
+			sets: []string{
+				"config.tls_self_provision=true", "config.hostname=ca.example.com",
+				"extraEnv[0].name=PUPPET_CA_TLS_CERT", "extraEnv[0].value=",
+			},
+			wants: []string{"scheme: HTTPS"},
+		},
+		chartRenderCase{
+			name: "a hostname supplied through envFrom is not second-guessed",
+			// envFrom is a route the chart cannot read by design. The two new
+			// preconditions consulted neither configFullyKnown nor it, so they
+			// refused an install that would have run.
+			sets: []string{
+				"config.tls_self_provision=true",
+				"envFrom[0].configMapRef.name=ca-settings",
+			},
+			wants: []string{"scheme: HTTPS"},
+		},
+		chartRenderCase{
+			name: "an empty environment override does not mask the config value",
+			// applyServerEnv skips empty values; the chart used to overwrite
+			// with them, so it failed the install on a hostname the server
+			// keeps from the config file.
+			sets: []string{
+				"config.tls_self_provision=true", "config.hostname=ca.example.com",
+				"env.PUPPET_CA_HOSTNAME=",
+			},
+			wants: []string{"scheme: HTTPS"},
+		},
+		chartRenderCase{
+			name: "a hostname supplied by environment variable satisfies the precondition",
+			// The other direction of the same bug: the precondition read only
+			// the config file, so it refused an install the server accepts --
+			// PUPPET_CA_HOSTNAME is a supported override, and with extraEnv
+			// (valueFrom) there is no workaround but duplicating the value.
+			sets:  []string{"config.tls_self_provision=true", "env.PUPPET_CA_HOSTNAME=ca.example.com"},
+			wants: []string{"scheme: HTTPS"},
+		},
+		chartRenderCase{
+			name:  "the startup budget covers two lock timeouts",
+			sets:  []string{tls},
+			wants: []string{"failureThreshold: 90"},
+		},
+		chartRenderCase{
+			name: "self-provisioning set through extraEnv also counts as TLS",
+			// extraEnv is a list of full EnvVar objects, scanned separately from
+			// the .Values.env map. Only the map was exercised, so a helper that
+			// ignored the list entirely would have rendered HTTP probes against
+			// an HTTPS listener with the suite green.
+			sets: []string{
+				"config.hostname=ca.example.com",
+				"extraEnv[0].name=PUPPET_CA_TLS_SELF_PROVISION",
+				"extraEnv[0].value=true",
+			},
+			wants: []string{"scheme: HTTPS"},
+		},
+		chartRenderCase{
+			name: "an explicit false is off, not merely present",
+			// The string-parsing arm. Treating any value as enabled would make
+			// PUPPET_CA_TLS_SELF_PROVISION=false render as self-provisioning,
+			// which then demands no certificate and fails at startup.
+			sets: []string{
+				tls,
+				"env.PUPPET_CA_TLS_SELF_PROVISION=false",
+			},
+			wants: []string{"secretName: openvox-ca-tls"},
+		},
+	)
+
 	rejects := []chartRejectCase{
 		{
 			name:    "no TLS on a non-loopback address, which the server refuses to serve",
@@ -1115,6 +1214,97 @@ func (Chart) Test() error {
 			name:    "export RBAC bound to the namespace's default ServiceAccount",
 			sets:    []string{tls, "kubernetesExport.enabled=true", "serviceAccount.create=false"},
 			wantErr: "default ServiceAccount",
+		},
+		{
+			name:    "self-provisioning with no hostname to put in the certificate",
+			sets:    []string{"config.tls_self_provision=true"},
+			wantErr: "requires a hostname",
+		},
+		{
+			name: "self-provisioning alongside a certificate path set by environment variable",
+			// The env route is supported and the chart's own tlsConfigured
+			// helper reads it, so a precondition that consults only the config
+			// file lets through an install the server refuses at startup --
+			// a crash-loop instead of the install-time failure this exists for.
+			sets: []string{
+				"config.tls_self_provision=true", "config.hostname=ca.example.com",
+				"env.PUPPET_CA_TLS_CERT=/tls/tls.crt", "env.PUPPET_CA_TLS_KEY=/tls/tls.key",
+			},
+			wantErr: "cannot be combined",
+		},
+		{
+			name: "an environment value the chart cannot read as a boolean",
+			// The server parses this with strconv.ParseBool and keeps the
+			// config-file value when it fails; the chart used to overwrite it
+			// and read anything unrecognised as off, so the two would render and
+			// run different configurations.
+			sets: []string{
+				"config.tls_self_provision=true", "config.hostname=ca.example.com",
+				"env.PUPPET_CA_TLS_SELF_PROVISION=yes",
+			},
+			wantErr: "cannot read as a boolean",
+		},
+		{
+			name:    "self-provisioning alongside the Secret that supplies a certificate",
+			sets:    []string{tls, "config.tls_self_provision=true", "config.hostname=ca.example.com"},
+			wantErr: "cannot be combined",
+		},
+		{
+			name:    "self-provisioning alongside a certificate path",
+			sets:    []string{"config.tls_self_provision=true", "config.hostname=ca.example.com", "config.tls_cert=/tls/tls.crt"},
+			wantErr: "cannot be combined",
+		},
+		{
+			name: "self-provisioning set by valueFrom, which the chart cannot read",
+			// The chart decides here whether to mount tls.existingSecret and how
+			// to shape the probes. A value it cannot see at render time would
+			// silently produce the wrong manifests, so it refuses rather than
+			// guessing — previously it read an absent .value as "off" and the
+			// install failed with no clue why.
+			sets: []string{
+				"config.hostname=ca.example.com",
+				"extraEnv[0].name=PUPPET_CA_TLS_SELF_PROVISION",
+				"extraEnv[0].valueFrom.secretKeyRef.name=flags",
+				"extraEnv[0].valueFrom.secretKeyRef.key=self-provision",
+			},
+			wantErr: "cannot read at render time",
+		},
+		{
+			name: "self-provisioning alongside a certificate path set through extraEnv",
+			// The arm effectiveConfig was written for and the one no case
+			// reached: ci/self-provision-values.yaml already uses this
+			// valueFrom shape for the SQL DSN, so it is the idiomatic route.
+			sets: []string{
+				"config.tls_self_provision=true", "config.hostname=ca.example.com",
+				"extraEnv[0].name=PUPPET_CA_TLS_CERT",
+				"extraEnv[0].valueFrom.secretKeyRef.name=tls",
+				"extraEnv[0].valueFrom.secretKeyRef.key=crt",
+			},
+			wantErr: "cannot be combined",
+		},
+		{
+			name: "self-provisioning alongside a key path alone",
+			// The other half of the mutual-exclusion or: every existing case set
+			// both, so $mxCert satisfied it and $mxKey was never exercised. The
+			// server refuses on either.
+			sets: []string{
+				"config.tls_self_provision=true", "config.hostname=ca.example.com",
+				"env.PUPPET_CA_TLS_KEY=/tls/tls.key",
+			},
+			wantErr: "cannot be combined",
+		},
+		{
+			name: "an environment boolean the chart skips but the server honours",
+			// The regression the empty-value guard introduced: Go template
+			// truthiness skips boolean false and integer 0 as well as "", so an
+			// unquoted false was ignored by the chart and acted on by the
+			// server -- HTTPS probes rendered against a listener that never
+			// came up.
+			sets: []string{
+				"config.tls_self_provision=true", "config.hostname=ca.example.com",
+				"env.PUPPET_CA_TLS_SELF_PROVISION=false",
+			},
+			wantErr: "no server TLS certificate is configured",
 		},
 		{
 			name:    "a mistyped value the schema should catch",
@@ -1763,6 +1953,37 @@ func (Dev) Lint() error {
 		return err
 	}
 	return nil
+}
+
+// Mixin renders the Prometheus mixin and validates the rules it produces.
+//
+// The README documents these two commands; without a target nothing runs them,
+// and a mistyped $._config key or format verb is a Jsonnet error at import time
+// that would otherwise reach a release unnoticed.
+func (Dev) Mixin() error {
+	for _, tool := range []string{"jsonnet", "promtool"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			fmt.Printf("SKIP: %s not found on PATH; skipping mixin validation\n", tool)
+			return nil
+		}
+	}
+
+	fmt.Println("Rendering the Prometheus mixin...")
+	if err := os.MkdirAll(".test-output", 0755); err != nil {
+		return err
+	}
+	rules, err := sh.Output("jsonnet", "-S", "-e",
+		`std.manifestYamlDoc((import 'mixin/mixin.libsonnet').prometheusAlerts)`)
+	if err != nil {
+		return err
+	}
+	out := filepath.Join(".test-output", "puppet_ca_alerts.yaml")
+	if err := os.WriteFile(out, []byte(rules), 0644); err != nil {
+		return err
+	}
+
+	fmt.Println("Checking rules with promtool...")
+	return sh.RunV("promtool", "check", "rules", out)
 }
 
 // Tidy runs go mod tidy and go fmt on any files that need it.

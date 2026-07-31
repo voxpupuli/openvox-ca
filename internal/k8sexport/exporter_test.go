@@ -20,11 +20,13 @@ package k8sexport_test
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"github.com/prometheus/client_golang/prometheus"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
@@ -76,6 +78,19 @@ type stubSource struct {
 
 func (s stubSource) GetCACert(context.Context) ([]byte, error) { return s.cert, s.certErr }
 func (s stubSource) GetCRL(context.Context) ([]byte, error)    { return s.crl, s.crlErr }
+
+// stubServing is a ServingSource returning fixed PEM bytes. It stands in for
+// servingCertHolder, the real implementation, which hands over the pair the
+// listener is presenting -- already decrypted, and swapped atomically so the
+// two halves can never straddle a rotation.
+type stubServing struct {
+	cert, key []byte
+	err       error
+}
+
+func (s stubServing) ServingMaterial(context.Context) ([]byte, []byte, error) {
+	return s.cert, s.key, s.err
+}
 
 var _ = Describe("Exporter", func() {
 	var (
@@ -402,5 +417,275 @@ var _ = Describe("Exporter", func() {
 
 		_, err := client.CoreV1().Secrets("").Get(ctx, "trust", metav1.GetOptions{})
 		Expect(err).To(HaveOccurred()) // never created
+	})
+})
+
+var _ = Describe("Exporter with serving material", func() {
+	var (
+		ctx     context.Context
+		client  *fake.Clientset
+		src     stubSource
+		serving stubServing
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		client = fake.NewClientset()
+		src = stubSource{cert: []byte("CERT-PEM"), crl: []byte("CRL-PEM")}
+		serving = stubServing{cert: []byte("SERVING-CERT-PEM"), key: []byte("SERVING-KEY-PEM")}
+	})
+
+	servingTarget := func() *k8sexport.Config {
+		GinkgoHelper()
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind:        "Secret",
+			Metadata:    k8sexport.Metadata{Name: "serving", Namespace: "ns1"},
+			Type:        "kubernetes.io/tls",
+			ServingCert: true, ServingKey: true,
+		}}}
+		Expect(cfg.Validate()).To(Succeed())
+		return cfg
+	}
+
+	It("publishes the serving pair under the kubernetes.io/tls keys", func() {
+		exp := k8sexport.New(client, *servingTarget(), src, "", nil).WithServingSource(serving)
+		Expect(exp.ExportAll(ctx)).To(Succeed())
+
+		sec, err := client.CoreV1().Secrets("ns1").Get(ctx, "serving", metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sec.Data).To(HaveKeyWithValue("tls.crt", []byte("SERVING-CERT-PEM")))
+		Expect(sec.Data).To(HaveKeyWithValue("tls.key", []byte("SERVING-KEY-PEM")))
+		Expect(sec.Type).To(Equal(corev1.SecretTypeTLS))
+	})
+
+	It("carries no trust material into the serving Secret", func() {
+		// The separation rule is enforced at validation; this asserts the data
+		// actually written matches it.
+		exp := k8sexport.New(client, *servingTarget(), src, "", nil).WithServingSource(serving)
+		Expect(exp.ExportAll(ctx)).To(Succeed())
+
+		sec, err := client.CoreV1().Secrets("ns1").Get(ctx, "serving", metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sec.Data).To(HaveLen(2))
+		Expect(sec.Data).NotTo(HaveKey("ca.crt"))
+	})
+
+	It("fails the cycle when no serving source is attached", func() {
+		// Rather than publishing an empty tls.key, which would look like a
+		// working Secret and fail at the first handshake.
+		exp := k8sexport.New(client, *servingTarget(), src, "", nil)
+		err := exp.ExportAll(ctx)
+		Expect(err).To(HaveOccurred())
+
+		_, getErr := client.CoreV1().Secrets("ns1").Get(ctx, "serving", metav1.GetOptions{})
+		Expect(getErr).To(HaveOccurred(), "nothing should have been applied")
+	})
+
+	It("refuses to publish an empty serving key", func() {
+		serving.key = nil
+		exp := k8sexport.New(client, *servingTarget(), src, "", nil).WithServingSource(serving)
+		Expect(exp.ExportAll(ctx)).To(HaveOccurred())
+
+		_, err := client.CoreV1().Secrets("ns1").Get(ctx, "serving", metav1.GetOptions{})
+		Expect(err).To(HaveOccurred(), "an empty key must not clobber a good one")
+	})
+
+	It("publishes the serving certificate alone without needing the key", func() {
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind:        "ConfigMap",
+			Metadata:    k8sexport.Metadata{Name: "serving-cert", Namespace: "ns1"},
+			ServingCert: true,
+		}}}
+		Expect(cfg.Validate()).To(Succeed())
+
+		// The certificate and key now arrive together, atomically, so what
+		// matters is that the key is not *published* — a private key in a
+		// ConfigMap is world-readable to anything with get on the namespace.
+		exp := k8sexport.New(client, *cfg, src, "", nil).WithServingSource(stubServing{
+			cert: []byte("SERVING-CERT-PEM"),
+			key:  []byte("SERVING-KEY-PEM"),
+		})
+		Expect(exp.ExportAll(ctx)).To(Succeed())
+
+		cm, err := client.CoreV1().ConfigMaps("ns1").Get(ctx, "serving-cert", metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cm.Data).To(HaveKeyWithValue("tls.crt", "SERVING-CERT-PEM"))
+		Expect(cm.Data).NotTo(HaveKey("tls.key"))
+		for _, v := range cm.Data {
+			Expect(v).NotTo(ContainSubstring("SERVING-KEY-PEM"))
+		}
+	})
+})
+
+var _ = Describe("Material read failures", func() {
+	var (
+		ctx    context.Context
+		client *fake.Clientset
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		client = fake.NewClientset()
+	})
+
+	// twoTargets: one wants the CA cert, the other only the CRL.
+	twoTargets := func() k8sexport.Config {
+		return k8sexport.Config{Targets: []k8sexport.Target{
+			{
+				Kind: "ConfigMap", Metadata: k8sexport.Metadata{Name: "wants-cert", Namespace: "ns1"},
+				Cert: true,
+			},
+			{
+				Kind: "ConfigMap", Metadata: k8sexport.Metadata{Name: "wants-crl", Namespace: "ns1"},
+				CRL: true,
+			},
+		}}
+	}
+
+	It("fails only the serving targets when the serving material is unreadable", func() {
+		// The serving arm of the same property. twoTargets configures no serving
+		// material, so widening errs to cert and CRL on a serving read failure
+		// left the suite green -- and that strands the trust bundle every agent
+		// depends on over a transient holder read.
+		cfg := twoTargets()
+		cfg.Targets = append(cfg.Targets, k8sexport.Target{
+			Kind: "Secret", Metadata: k8sexport.Metadata{Name: "wants-serving", Namespace: "ns1"},
+			Type: "kubernetes.io/tls", ServingCert: true, ServingKey: true,
+		})
+		Expect(cfg.Validate()).To(Succeed())
+		src := stubSource{cert: []byte("CA-PEM"), crl: []byte("CRL-PEM")}
+
+		err := k8sexport.New(client, cfg, src, "", nil).
+			WithServingSource(stubServing{err: errors.New("holder empty")}).ExportAll(ctx)
+		Expect(err).To(MatchError(ContainSubstring("holder empty")))
+
+		for _, name := range []string{"wants-cert", "wants-crl"} {
+			_, getErr := client.CoreV1().ConfigMaps("ns1").Get(ctx, name, metav1.GetOptions{})
+			Expect(getErr).NotTo(HaveOccurred(), name+" must still be published")
+		}
+		_, getErr := client.CoreV1().Secrets("ns1").Get(ctx, "wants-serving", metav1.GetOptions{})
+		Expect(getErr).To(HaveOccurred(), "the serving target must not be applied")
+	})
+
+	It("skips serving targets when the source says it is behind, without failing them", func() {
+		// A skip is not a failure. This replica has nothing current to publish,
+		// but another replica does, so the object is already right or about to
+		// be -- recording an error would page for a condition that is normal,
+		// transient and self-correcting. Cert and CRL targets are unaffected:
+		// staleness is a property of the serving pair alone.
+		cfg := twoTargets()
+		cfg.Targets = append(cfg.Targets, k8sexport.Target{
+			Kind: "Secret", Metadata: k8sexport.Metadata{Name: "wants-serving", Namespace: "ns1"},
+			Type: "kubernetes.io/tls", ServingCert: true, ServingKey: true,
+		})
+		Expect(cfg.Validate()).To(Succeed())
+
+		reg := prometheus.NewRegistry()
+		err := k8sexport.New(client, cfg, stubSource{cert: []byte("CA-PEM"), crl: []byte("CRL-PEM")},
+			"", k8sexport.NewMetrics(reg)).
+			WithServingSource(stubServing{err: fmt.Errorf("%w: behind", k8sexport.ErrServingStale)}).
+			ExportAll(ctx)
+		Expect(err).NotTo(HaveOccurred(), "being behind is not an export failure")
+
+		for _, name := range []string{"wants-cert", "wants-crl"} {
+			_, getErr := client.CoreV1().ConfigMaps("ns1").Get(ctx, name, metav1.GetOptions{})
+			Expect(getErr).NotTo(HaveOccurred(), name+" must still be published")
+		}
+		_, getErr := client.CoreV1().Secrets("ns1").Get(ctx, "wants-serving", metav1.GetOptions{})
+		Expect(getErr).To(HaveOccurred(), "a stale replica must not write the serving Secret")
+
+		// And nothing recorded against it, so the alert stays quiet.
+		mfs, gatherErr := reg.Gather()
+		Expect(gatherErr).NotTo(HaveOccurred())
+		for _, mf := range mfs {
+			if mf.GetName() != "puppetca_k8s_export_last_error_timestamp_seconds" {
+				continue
+			}
+			for _, m := range mf.GetMetric() {
+				for _, lp := range m.GetLabel() {
+					Expect(lp.GetValue()).NotTo(Equal("wants-serving"),
+						"a skip must not be recorded as an error")
+				}
+			}
+		}
+	})
+
+	It("refuses to publish an empty serving certificate over a good one", func() {
+		// The fourth guard in the block, and the only one with no spec: the
+		// other three (empty CRL, empty cert, empty serving key) have theirs.
+		// Without it a source returning an empty certificate clobbers a working
+		// kubernetes.io/tls Secret with tls.crt: "".
+		cfg := k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind: "Secret", Metadata: k8sexport.Metadata{Name: "serving", Namespace: "ns1"},
+			Type: "kubernetes.io/tls", ServingCert: true, ServingKey: true,
+		}}}
+		Expect(cfg.Validate()).To(Succeed())
+
+		err := k8sexport.New(client, cfg, stubSource{}, "", nil).
+			WithServingSource(stubServing{cert: nil, key: []byte("KEY-PEM")}).ExportAll(ctx)
+		Expect(err).To(MatchError(ContainSubstring("serving")))
+		_, getErr := client.CoreV1().Secrets("ns1").Get(ctx, "serving", metav1.GetOptions{})
+		Expect(getErr).To(HaveOccurred(), "an empty certificate must not be published")
+	})
+
+	It("fails only the targets that wanted the unreadable material", func() {
+		// The whole cycle used to abort, so recordApply never ran and no
+		// per-target series was written — and both arms of the shipped alert
+		// select on last_error. One transient read left every target stale with
+		// nothing firing.
+		cfg := twoTargets()
+		Expect(cfg.Validate()).To(Succeed())
+		src := stubSource{crl: []byte("CRL-PEM"), certErr: errors.New("storage blip")}
+
+		err := k8sexport.New(client, cfg, src, "", nil).ExportAll(ctx)
+		Expect(err).To(MatchError(ContainSubstring("storage blip")))
+
+		// The CRL-only target is unaffected and still published.
+		cm, getErr := client.CoreV1().ConfigMaps("ns1").Get(ctx, "wants-crl", metav1.GetOptions{})
+		Expect(getErr).NotTo(HaveOccurred())
+		Expect(cm.Data).To(HaveKeyWithValue("ca.crl", "CRL-PEM"))
+
+		// The cert target was not applied at all.
+		_, getErr = client.CoreV1().ConfigMaps("ns1").Get(ctx, "wants-cert", metav1.GetOptions{})
+		Expect(getErr).To(HaveOccurred())
+	})
+
+	It("records a per-target failure so the alert can fire", func() {
+		cfg := twoTargets()
+		Expect(cfg.Validate()).To(Succeed())
+		reg := prometheus.NewRegistry()
+		m := k8sexport.NewMetrics(reg)
+		src := stubSource{crl: []byte("CRL-PEM"), certErr: errors.New("storage blip")}
+
+		_ = k8sexport.New(client, cfg, src, "", m).ExportAll(ctx)
+
+		families, err := reg.Gather()
+		Expect(err).NotTo(HaveOccurred())
+		var sawError bool
+		for _, f := range families {
+			if f.GetName() != "puppetca_k8s_export_last_error_timestamp_seconds" {
+				continue
+			}
+			for _, metric := range f.GetMetric() {
+				for _, l := range metric.GetLabel() {
+					if l.GetName() == "name" && l.GetValue() == "wants-cert" {
+						sawError = true
+					}
+				}
+			}
+		}
+		Expect(sawError).To(BeTrue(),
+			"a target whose material could not be read must record an error, or the alert cannot fire")
+	})
+
+	It("fails a serving target when no serving source is wired, naming the setting", func() {
+		cfg := k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind: "Secret", Metadata: k8sexport.Metadata{Name: "serving", Namespace: "ns1"},
+			ServingCert: true, ServingKey: true,
+		}}}
+		Expect(cfg.Validate()).To(Succeed())
+
+		err := k8sexport.New(client, cfg, stubSource{}, "", nil).ExportAll(ctx)
+		Expect(err).To(MatchError(ContainSubstring("require tls_self_provision")))
 	})
 })

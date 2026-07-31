@@ -39,3 +39,35 @@ var _ = Describe("Config.needsDefaultNamespace", func() {
 		Expect(cfg.needsDefaultNamespace()).To(BeTrue())
 	})
 })
+
+var _ = Describe("newChecked", func() {
+	// The wiring, as distinct from the check itself: NewInCluster needs a real
+	// ServiceAccount mount, so this is the deepest a spec can reach. Dropping
+	// the CheckDistinctObjects call leaves the check's own specs green while the
+	// collision it exists for sails through to runtime.
+	It("refuses a collision only visible once the namespace resolves", func() {
+		cfg := Config{Targets: []Target{
+			{Kind: "Secret", Metadata: Metadata{Name: "trust"}, Cert: true},
+			{Kind: "Secret", Metadata: Metadata{Name: "trust", Namespace: "ns1"}, CRL: true},
+		}}
+		Expect(cfg.Validate()).To(Succeed())
+
+		_, err := newChecked(nil, cfg, nil, "ns1", nil)
+		Expect(err).To(MatchError(ContainSubstring("both resolve to")))
+
+		// Marked as a configuration error, not an environmental one: the caller
+		// routes on that, and without the marking a collision is logged as a
+		// client-init failure and the whole export is silently disabled for the
+		// life of the process, writing no series for the alert to fire on.
+		Expect(err).To(MatchError(ErrInvalidConfig))
+	})
+
+	It("builds an exporter when the objects are genuinely distinct", func() {
+		cfg := Config{Targets: []Target{
+			{Kind: "Secret", Metadata: Metadata{Name: "trust"}, Cert: true},
+			{Kind: "Secret", Metadata: Metadata{Name: "serving", Namespace: "ns1"}, CRL: true},
+		}}
+		Expect(cfg.Validate()).To(Succeed())
+		Expect(newChecked(nil, cfg, nil, "ns1", nil)).Error().NotTo(HaveOccurred())
+	})
+})

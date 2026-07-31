@@ -62,6 +62,39 @@ const (
 	KeyInventoryHMAC = "inventory_hmac"
 	KeyHMACKey       = "hmac_key"
 
+	// KeyServingCert and KeyServingKey hold the certificate and private key the
+	// API listener serves when tls_self_provision is on.
+	//
+	// These are the copies the listener reads, and they are deliberately not
+	// the per-subject cert/key blobs: CA.Clean and CleanupExpiredCerts both act
+	// on per-subject material and would otherwise be able to delete the
+	// certificate the listener is using, as a side effect of routine
+	// administration. Separate keys make that structurally impossible rather
+	// than merely unlikely.
+	//
+	// Issuance is *not* separated, and that is deliberate too. The serving
+	// certificate is an ordinary node certificate for the CA's own hostname:
+	// it occupies that subject's per-subject slot and inventory row, and renews
+	// and revokes through the same machinery as any node's. What keeps the two
+	// from colliding is a configuration rule, not a namespace -- validateTLS
+	// refuses to start when the CA's hostname is also a puppet_server CN.
+	//
+	// Named serving_* and not tls_*, because tls_cert and tls_key already name
+	// the server's certificate *file paths* in the configuration, and one term
+	// with three meanings helps nobody.
+	KeyServingCert = "serving_cert"
+	KeyServingKey  = "serving_key"
+
+	// KeyServingSuperseded holds pending revocations for serving certificates
+	// that have been replaced: a small JSON list of {serial, revoke_at}.
+	//
+	// Durable and shared because the replica that minted the replacement may
+	// die before the delay elapses, and a restarted replica would otherwise
+	// have no idea a supersession was pending. It cannot be derived from the
+	// inventory either: issueLeafLocked backdates NotBefore by a fixed 24
+	// hours, so the recorded timestamp is not the issue time.
+	KeyServingSuperseded = "serving_superseded"
+
 	csrPrefix  = "csr/"
 	certPrefix = "cert/"
 )

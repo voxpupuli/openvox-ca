@@ -90,6 +90,65 @@ the Unix epoch, the Prometheus convention for `*_timestamp_seconds` gauges.
 | `puppetca_crl_revoked_certificates` | Number of certificates currently listed in the CRL. |
 | `puppetca_crl_update_failures_total` | Counter of failures to amend the CRL — a revocation that could not be recorded, or a CRL that could not be re-signed or written (across the revoke, cleanup, reissue and refresh paths). A rising value means the CRL is not being maintained; for revocations it means a superseded certificate may still be a valid credential. Resets to `0` on process restart. |
 
+### Self-provisioned serving certificate
+
+Always exported, so a dashboard or alert can select them whether or not
+[`tls_self_provision`](configuration.md#self-provisioned-serving-certificate) is
+in use.
+
+Two of them read zero without the feature. The **revocation** counter does not:
+the startup sweep that drains pending revocations runs whenever `hostname` is
+set, deliberately without regard to `tls_self_provision`, so that entries a
+previous configuration recorded are not stranded. A backend error at boot
+therefore raises it on a CA that has never enabled the feature — and that is the
+case with no retry, since no periodic task is registered. Do not silence
+`PuppetCAServingCertRevocationFailing` on non-self-provisioning CAs.
+
+| Metric | Description |
+| --- | --- |
+| `puppetca_serving_cert_issued_total` | Counter of serving certificates this process has issued to itself. A sustained rate rather than an occasional increment means replicas disagree about which CA certificate is current, each reissuing over the other; a fleet restart resolves it. **Alerted** as `PuppetCAServingCertChurning`, because inferring it otherwise would mean noticing an inventory growing for no reason. Resets to `0` on process restart. |
+| `puppetca_serving_cert_renewal_failures_total` | Counter of maintenance passes that failed to renew the serving certificate. The existing certificate stays in place and the next cycle retries. **Alert on this** — the shipped mixin does, as `PuppetCAServingCertRenewalFailing`: a persistent rise is invisible until the certificate expires, and it breaks the bound `tls_self_provision_revoke_after_sec` relies on. Resets to `0` on process restart. |
+| `puppetca_serving_cert_revocation_failures_total` | Counter of failures to record or to complete a supersession. The replaced certificate stays a valid credential either way, which is the exposure bound `tls_self_provision_revoke_after_sec` exists to enforce, so the mixin **alerts** on it as `PuppetCAServingCertRevocationFailing`. Some cases retry and some can never be retired; see [Superseded serving certificates](#superseded-serving-certificates) below. Resets to `0` on process restart. |
+
+#### Superseded serving certificates
+
+When `puppetca_serving_cert_revocation_failures_total` rises, the CA log line
+says which case it is. They differ in whether anything will clear it.
+
+**Retried on the next pass.** `Could not reconcile superseded serving
+certificates`, and `will retry` for one entry the sweep could not revoke. The
+pending list is left intact. Because the alert fires only while the counter is
+still rising, a firing instance means the retries are *not* succeeding — treat
+it as a storage-backend fault rather than waiting.
+
+**Not retried.** The same reconcile line ending `at startup`, when
+`tls_self_provision` is off. No periodic task is registered in that
+configuration, so the startup sweep is the only one the process runs and nothing
+retries until the CA restarts.
+
+**Cannot be retired at all.** `will not be scheduled for revocation` and `can
+never be revoked`. The mint has already overwritten what named the old serial,
+so no sweep can rediscover it, and there is **no by-serial revoke**
+([#177](https://github.com/voxpupuli/openvox-ca/issues/177)) — `openvox-ca-ctl
+revoke --certname <hostname>` resolves to the certificate the listener is
+currently serving, so running it makes things worse. The orphan stays a valid
+CA-signed credential for the CA's hostname until its `notAfter`. Contain it at
+the network layer, or rotate the CA.
+
+To record what was orphaned, for the incident:
+
+- the `will not be scheduled for revocation` line carries a `serial` field when
+  it knows one;
+- when the certificate itself was unreadable it does not, and the orphan is the
+  second-newest inventory row for the CA's hostname;
+- when the *pending list* could not be parsed it does not either, and there may
+  have been **several** — the log line carries the raw list as `raw` and a
+  `recovered` count of the entries that still decoded. Reconstruct the rest from
+  the inventory rows for the CA's hostname newer than
+  `tls_self_provision_revoke_after_sec` ago;
+- `can never be revoked` carries only the malformed value that caused it, so use
+  the inventory there too.
+
 ### Leaf certificates
 
 One series per known (non-deleted) leaf certificate or pending request. Cleaned
@@ -122,13 +181,30 @@ configured target (cardinality is bounded by the configuration).
 | `puppetca_k8s_export_last_success_timestamp_seconds` | `kind`, `namespace`, `name` | Time of the last successful apply for each target. |
 | `puppetca_k8s_export_last_error_timestamp_seconds` | `kind`, `namespace`, `name` | Time of the last failed apply for each target. |
 
-> Exports are event-driven (startup and CRL updates) and can be days apart on a
-> quiet CA, so alert by comparing `last_error` against `last_success` (the
-> mixin's `PuppetCAKubernetesExportFailing` does this) rather than with rate
-> windows or staleness thresholds, which misbehave between sparse attempts. A
-> cycle that fails before any target is applied — the cert/CRL cannot be read
-> from storage — touches none of these series, but storage failures already
-> trip `PuppetCAScrapeFailing` via `puppetca_collector_scrape_success`.
+> Exports run on every event (startup, CRL updates, serving-certificate
+> rotations) and on a ten-minute floor besides, so attempts are never sparse. A
+> failed cycle retries after two minutes.
+>
+> One exception: a replica that has not yet caught up with a serving-certificate
+> rotation **skips** its serving targets rather than republishing a superseded
+> pair. A skip records nothing at all, so `applies_total` and
+> `last_success_timestamp_seconds` stop advancing for those targets on that
+> instance while its peers carry on. That is expected and needs no action; it
+> clears on that replica's next maintenance pass, and a replica that stays
+> behind is one whose maintenance pass is failing, which
+> `PuppetCAServingCertRenewalFailing` covers.
+>
+> Alert by comparing
+> `last_error` against `last_success` (the mixin's
+> `PuppetCAKubernetesExportFailing` does this) rather than with rate windows,
+> which a skip would read as an outage.
+>
+> A material that cannot be read from storage fails only the targets that
+> requested it, and each of those records an error here — so the alert fires on
+> exactly the targets that were attempted. A Kubernetes client that fails to
+> initialise disables the exporter entirely and writes no series at all, which
+> is visible only in the log. A failed cycle is also retried on a
+> bounded interval rather than waiting for the next wake-up.
 
 ## Example queries
 
@@ -158,5 +234,6 @@ puppetca_k8s_export_last_error_timestamp_seconds
 See the [`mixin/`](../mixin/) directory for the Jsonnet monitoring mixin and
 instructions for rendering or importing it. It alerts on exporter availability,
 CA/CRL/leaf expiry, pending requests, CRL update failures
-(`puppetca_crl_update_failures_total`), and Kubernetes export failures, with all
-thresholds configurable.
+(`puppetca_crl_update_failures_total`), serving-certificate renewal, revocation and issuance churn
+(`puppetca_serving_cert_*`), and Kubernetes export
+failures, with all thresholds configurable.
