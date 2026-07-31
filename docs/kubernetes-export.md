@@ -133,6 +133,11 @@ chain` **and `crl_scope: chain`** on those targets to keep what they were
 publishing. Under `crl_scope: chain` the value is a multi-block PEM, which a
 consumer expecting exactly one CRL has to handle.
 
+You do not have to work out which targets those are. On the first cycle where a
+scope nobody configured actually drops blocks, the server logs a warning naming
+the target — search for `multi-block`. Setting the scope explicitly, to either
+value, silences it.
+
 **A deliberate asymmetry, worth flagging as intentional rather than
 inconsistent.** The HTTP endpoints `/certificate/ca` and
 `/certificate_revocation_list/ca` always serve the full chain, because Puppet

@@ -18,8 +18,10 @@
 package k8sexport_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -65,6 +67,27 @@ func metricValue(reg *prometheus.Registry, name string, labels map[string]string
 		}
 	}
 	return 0, false
+}
+
+// growingSource returns single-block material on the first read of each
+// material and multi-block thereafter, modelling a CA that has a chain imported
+// while the process is running.
+type growingSource struct {
+	certCalls, crlCalls *int
+	single, multi       string
+}
+
+func (g growingSource) GetCACert(context.Context) ([]byte, error) {
+	*g.certCalls++
+	if *g.certCalls == 1 {
+		return []byte(g.single), nil
+	}
+	return []byte(g.multi), nil
+}
+
+func (g growingSource) GetCRL(context.Context) ([]byte, error) {
+	*g.crlCalls++
+	return []byte("-----BEGIN X509 CRL-----\nT1VSUw==\n-----END X509 CRL-----\n"), nil
 }
 
 // stubSource is a MaterialSource returning fixed PEM bytes.
@@ -535,6 +558,130 @@ var _ = Describe("Export scopes", func() {
 		Expect(string(data["ca.crl"])).To(ContainSubstring("VVBTVFJFQU0="),
 			"self is positional, so a foreign block 0 is what gets published")
 		Expect(string(data["ca.crl"])).NotTo(ContainSubstring("T1VSUw=="))
+	})
+
+	It("warns once per target when a scope nobody set is dropping blocks", func() {
+		// The scopes default to self, so an upgrade with no configuration change
+		// narrows what an existing multi-block target publishes. Nothing errors,
+		// and the empty-material guard cannot catch it because a scoped-down
+		// value is not empty -- so without this the only notice was prose in a
+		// document an upgrading operator has no reason to re-read.
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		defer slog.SetDefault(orig)
+
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind:     "Secret",
+			Metadata: k8sexport.Metadata{Name: "trust", Namespace: "ns1"},
+			Cert:     true,
+			CRL:      true,
+		}}}
+		Expect(cfg.Validate()).To(Succeed())
+		exp := k8sexport.New(client, *cfg, src, "", nil)
+
+		Expect(exp.ExportAll(ctx)).To(Succeed())
+		Expect(buf.String()).To(ContainSubstring("multi-block CA bundle"))
+		Expect(buf.String()).To(ContainSubstring("multi-block CRL chain"))
+		Expect(buf.String()).To(ContainSubstring("trust"))
+
+		// Latched: a steady state must not warn on every reconcile cycle, or the
+		// warning becomes noise an operator filters out.
+		buf.Reset()
+		Expect(exp.ExportAll(ctx)).To(Succeed())
+		Expect(buf.String()).NotTo(ContainSubstring("multi-block"))
+	})
+
+	It("does not warn when the scope was set explicitly, or when nothing is dropped", func() {
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		defer slog.SetDefault(orig)
+
+		// Explicit self: the operator asked for exactly this.
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind:      "Secret",
+			Metadata:  k8sexport.Metadata{Name: "trust", Namespace: "ns1"},
+			Cert:      true,
+			CRL:       true,
+			CertScope: "self",
+			CRLScope:  "self",
+		}}}
+		Expect(cfg.Validate()).To(Succeed())
+		Expect(k8sexport.New(client, *cfg, src, "", nil).ExportAll(ctx)).To(Succeed())
+		Expect(buf.String()).NotTo(ContainSubstring("multi-block"))
+
+		// Defaulted, but single-block material: nothing is being dropped, so
+		// there is nothing to say.
+		single := "-----BEGIN CERTIFICATE-----\nT05MWQ==\n-----END CERTIFICATE-----\n"
+		singleCRL := "-----BEGIN X509 CRL-----\nT1VSUw==\n-----END X509 CRL-----\n"
+		cfg2 := &k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind:     "Secret",
+			Metadata: k8sexport.Metadata{Name: "trust2", Namespace: "ns1"},
+			Cert:     true,
+			CRL:      true,
+		}}}
+		Expect(cfg2.Validate()).To(Succeed())
+		Expect(k8sexport.New(client, *cfg2,
+			stubSource{cert: []byte(single), crl: []byte(singleCRL)}, "", nil).
+			ExportAll(ctx)).To(Succeed())
+		Expect(buf.String()).NotTo(ContainSubstring("multi-block"))
+	})
+
+	It("warns when material becomes multi-block after the process is running", func() {
+		// The latch is per target/material and re-evaluated every cycle, rather
+		// than a sync.Once over the whole check. A Once would be spent on the
+		// first export, so a CA that was single-block then had a chain imported
+		// would narrow silently forever -- which is the case this exists to
+		// catch, and the reason the implementation changed.
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		defer slog.SetDefault(orig)
+
+		certCalls, crlCalls := 0, 0
+		grow := growingSource{
+			certCalls: &certCalls,
+			crlCalls:  &crlCalls,
+			single:    "-----BEGIN CERTIFICATE-----\nT05MWQ==\n-----END CERTIFICATE-----\n",
+			multi:     certChain,
+		}
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind:     "Secret",
+			Metadata: k8sexport.Metadata{Name: "trust", Namespace: "ns1"},
+			Cert:     true,
+		}}}
+		Expect(cfg.Validate()).To(Succeed())
+		exp := k8sexport.New(client, *cfg, grow, "", nil)
+
+		Expect(exp.ExportAll(ctx)).To(Succeed())
+		Expect(buf.String()).NotTo(ContainSubstring("multi-block"),
+			"one block, nothing dropped, nothing to say")
+
+		Expect(exp.ExportAll(ctx)).To(Succeed())
+		Expect(buf.String()).To(ContainSubstring("multi-block CA bundle"),
+			"the chain arrived after the first cycle; a spent latch would miss it")
+	})
+
+	It("names every narrowed target, not just the first", func() {
+		// The latch is keyed on target index as well as material. Keying on
+		// material alone would suppress every target after the first, which is
+		// the opposite of what a per-target warning is for -- and no spec would
+		// notice, because every other log-capturing spec here has one target.
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		defer slog.SetDefault(orig)
+
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{
+			{Kind: "Secret", Metadata: k8sexport.Metadata{Name: "trust-a", Namespace: "ns1"}, Cert: true},
+			{Kind: "Secret", Metadata: k8sexport.Metadata{Name: "trust-b", Namespace: "ns1"}, Cert: true},
+		}}
+		Expect(cfg.Validate()).To(Succeed())
+		Expect(k8sexport.New(client, *cfg, src, "", nil).ExportAll(ctx)).To(Succeed())
+
+		Expect(buf.String()).To(ContainSubstring("trust-a"))
+		Expect(buf.String()).To(ContainSubstring("trust-b"))
 	})
 
 	It("rejects an unknown cert scope", func() {

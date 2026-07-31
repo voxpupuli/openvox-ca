@@ -50,6 +50,12 @@ import (
 // the way up to the root. Nothing enforces that yet, so a partial import shows
 // up as CRLs discarded on every refresh, which crlChainDiscarded counts and the
 // mixin alerts on.
+// errChainFileFault marks an error as the operator's file being at fault, as
+// opposed to the storage or locking beneath it. upstreamCRLs has already counted
+// those on crlChainFailures, so RefreshCRLChainFile uses this to avoid counting
+// the same failure again under a second, different meaning.
+var errChainFileFault = errors.New("crl_chain_file fault")
+
 func (c *CA) upstreamCRLs(ctx context.Context) (crls []*x509.RevocationList, stated bool, err error) {
 	if c.CRLChainFile == "" {
 		return nil, false, nil
@@ -78,7 +84,8 @@ func (c *CA) upstreamCRLs(ctx context.Context) (crls []*x509.RevocationList, sta
 			return nil, false, nil
 		}
 		c.crlChainFailures.Add(1)
-		return nil, false, fmt.Errorf("reading crl_chain_file %s: %w", c.CRLChainFile, err)
+		return nil, false, fmt.Errorf("reading crl_chain_file %s: %w: %w",
+			c.CRLChainFile, errChainFileFault, err)
 	}
 
 	// Stamped before verification: the question this answers is "did we read the
@@ -89,7 +96,8 @@ func (c *CA) upstreamCRLs(ctx context.Context) (crls []*x509.RevocationList, sta
 	parsed, err := decodeCRLChainStrict(data)
 	if err != nil {
 		c.crlChainFailures.Add(1)
-		return nil, false, fmt.Errorf("crl_chain_file %s: %w", c.CRLChainFile, err)
+		return nil, false, fmt.Errorf("crl_chain_file %s: %w: %w",
+			c.CRLChainFile, errChainFileFault, err)
 	}
 
 	issuers, err := c.bundleCertificates(ctx)
@@ -441,6 +449,7 @@ func (c *CA) RefreshCRLChainFile(ctx context.Context) (bool, error) {
 	// lock, the first writer's result is what the rest compare against, so they
 	// see their work already done and stop.
 	rewritten := false
+	countedByCRLLayer := false
 	// No crlChainFailures.Add here. It is counted inside upstreamCRLs, where the
 	// file is what failed, so both writers count it -- this pass and every
 	// revocation through crlChainLocked. Counting it here instead gave the
@@ -500,9 +509,30 @@ func (c *CA) RefreshCRLChainFile(ctx context.Context) (bool, error) {
 		// too. The decision above can therefore be made on marginally older
 		// content than what lands without the ordering guarantee depending on
 		// the two reads agreeing.
-		return c.reissueCRLLocked(ctx)
+		if err := c.reissueCRLLocked(ctx); err != nil {
+			// Counted by signCRLLocked already; say so, so the caller does not
+			// count it a second time under a different meaning.
+			countedByCRLLayer = true
+			return err
+		}
+		return nil
 	})
 	if err != nil {
+		// Every arm above other than the file itself -- a lock this pass could
+		// not take, a bundle it could not parse, a published chain it could not
+		// read -- stopped the CRL being amended, which is what crlUpdateFailures
+		// means and what its own field comment already claims to cover ("during
+		// revoke, cleanup, reissue or refresh").
+		//
+		// Without this they were counted by nothing at all: moving
+		// crlChainFailures to the chokepoint correctly stopped it absorbing them,
+		// but nothing picked them up, so a quiet CA with wedged storage failed
+		// its hourly refresh behind a log line while every series read healthy
+		// until the ancestors expired a fortnight later. The two sibling
+		// maintenance tasks count their own failures for the same reason.
+		if !errors.Is(err, errChainFileFault) && !countedByCRLLayer {
+			c.crlUpdateFailures.Add(1)
+		}
 		return false, err
 	}
 	return rewritten, nil

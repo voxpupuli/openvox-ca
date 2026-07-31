@@ -204,8 +204,9 @@ func NewCollector(c *ca.CA) *Collector {
 			"Total ancestors that crl_chain_file has stopped listing while their CRL was "+
 				"published. The file is authoritative, so the removal is honoured -- but it "+
 				"cannot be undone here, because this CA cannot re-sign another CA's list. A "+
-				"deliberate removal increments this once; a `cat` glob that matched one file "+
-				"fewer increments it the same way, which is why it is worth an alert. Distinct "+
+				"deliberate removal increments this on the pass that applies it; a `cat` glob "+
+				"that matched one file fewer increments it the same way, which is why it is "+
+				"worth an alert. Distinct "+
 				"from puppetca_crl_chain_discarded_total, which counts CRLs the file does carry "+
 				"but nothing in the bundle signed.",
 			nil, nil),

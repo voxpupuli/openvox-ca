@@ -315,6 +315,43 @@ var _ = Describe("CRL chain read failures", func() {
 		Expect(myCA.CRLUpdateFailures()).To(BeNumerically("==", 1))
 	})
 
+	It("blames storage, not the file, when the refresh pass fails beneath a healthy file", func() {
+		// Moving crlChainFailures to the chokepoint stopped it absorbing this
+		// pass's lock and storage faults -- but nothing then picked them up, so
+		// a quiet CA with wedged storage failed its hourly refresh behind a log
+		// line with every series flat. Both halves need pinning: the file's
+		// counter must stay still, and the CRL-maintenance counter must move.
+		ctx := context.Background()
+		dir := GinkgoT().TempDir()
+		backend := &flakyCRLBackend{Backend: storage.NewFilesystemBackend(dir)}
+		store := storage.NewWithBackend(backend, filepath.Join(dir, "private"))
+
+		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(myCA.Init(ctx)).To(Succeed())
+
+		upstream, upsCRL := upstreamCA("Healthy Ancestor CA")
+		ours, err := store.GetCACert(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(store.SaveCACert(ctx, append(append([]byte{}, ours...),
+			pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: upstream.Raw})...))).To(Succeed())
+
+		// A perfectly good file. The fault is underneath it.
+		path := filepath.Join(GinkgoT().TempDir(), "good.pem")
+		Expect(os.WriteFile(path, upsCRL, 0o644)).To(Succeed())
+		myCA.CRLChainFile = path
+
+		backend.failGetCRLAfter(0)
+		_, err = myCA.RefreshCRLChainFile(ctx)
+		Expect(err).To(HaveOccurred())
+		backend.stopFailing()
+
+		Expect(myCA.CRLChainFailures()).To(BeZero(),
+			"a storage fault must not page anyone to go and inspect a healthy file")
+		Expect(myCA.CRLUpdateFailures()).NotTo(BeZero(),
+			"but it must not vanish either -- the chain was not republished")
+	})
+
 	It("fails the re-sign rather than publishing a rollback when the chain read fails", func() {
 		// With crl_chain_file set, crlChainLocked returns before its own read,
 		// so the second CRL read on the re-sign path is publishedUpstream's --
