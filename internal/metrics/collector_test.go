@@ -26,6 +26,8 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	"os"
+	"path/filepath"
 	"time"
 
 	dto "github.com/prometheus/client_model/go"
@@ -251,6 +253,62 @@ var _ = Describe("Collector", func() {
 		Expect(g["puppetca_crl_chain_next_update_timestamp_seconds"]).To(BeNil())
 	})
 
+	It("exports both chain counters by name, and at their value", func() {
+		// Neither name appeared in any spec. Deleting either MustNewConstMetric
+		// line, or renaming either series, left the suite green -- while
+		// PuppetCAUpstreamCRLDiscarded and PuppetCAUpstreamCRLRefreshFailing
+		// route on exactly those names, and docs/metrics.md calls the discard
+		// counter "the only signal that the published chain is smaller than the
+		// file says".
+		g := gather(metrics.NewCollector(myCA))
+		Expect(counterValue(g.findByLabels("puppetca_crl_chain_refresh_failures_total", nil))).
+			To(Equal(0.0))
+		Expect(counterValue(g.findByLabels("puppetca_crl_chain_discarded_total", nil))).
+			To(Equal(0.0))
+
+		// Driven through the real paths, and to distinct values so a
+		// transposition between the two series is caught as well as a rename.
+		// A CRL from a CA the bundle does not vouch for is discarded; a file
+		// that decodes to nothing is a refresh failure.
+		dir := GinkgoT().TempDir()
+		_, strayCRL := upstreamCRLFixture("Stray CA")
+		discardPath := filepath.Join(dir, "stray.pem")
+		Expect(os.WriteFile(discardPath, strayCRL, 0o644)).To(Succeed())
+		myCA.CRLChainFile = discardPath
+		Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
+
+		badPath := filepath.Join(dir, "bad.pem")
+		Expect(os.WriteFile(badPath, []byte("<html>502</html>\n"), 0o644)).To(Succeed())
+		myCA.CRLChainFile = badPath
+		for range 2 {
+			Expect(myCA.RefreshCRLChainFile(ctx)).Error().To(HaveOccurred())
+		}
+
+		g = gather(metrics.NewCollector(myCA))
+		Expect(counterValue(g.findByLabels("puppetca_crl_chain_discarded_total", nil))).
+			To(Equal(1.0))
+		Expect(counterValue(g.findByLabels("puppetca_crl_chain_refresh_failures_total", nil))).
+			To(Equal(2.0))
+	})
+
+	It("reports when the chain file was last read, and nothing until it has been", func() {
+		// An absent or mis-mounted path moves no counter, so every dashboard
+		// read healthy while the ancestors aged. Absent-until-first-read is
+		// what distinguishes "never opened" from "opened and unchanging" -- the
+		// subPath mount Kubernetes never updates.
+		g := gather(metrics.NewCollector(myCA))
+		Expect(g["puppetca_crl_chain_last_read_timestamp_seconds"]).To(BeNil())
+
+		path := filepath.Join(GinkgoT().TempDir(), "empty.pem")
+		Expect(os.WriteFile(path, nil, 0o644)).To(Succeed())
+		myCA.CRLChainFile = path
+		Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
+
+		g = gather(metrics.NewCollector(myCA))
+		Expect(gaugeValue(g.findUnlabelled("puppetca_crl_chain_last_read_timestamp_seconds"))).
+			To(BeNumerically(">", 0), "an empty file is still a file we read")
+	})
+
 	It("reports one labelled upstream CRL series per ancestor in the published chain", func() {
 		// The new series had no coverage at all: not its name, not its label,
 		// not its value. A rename would have stopped the mixin's
@@ -266,7 +324,11 @@ var _ = Describe("Collector", func() {
 		chain := g.findByLabels("puppetca_crl_chain_next_update_timestamp_seconds",
 			map[string]string{"issuer": "CN=Upstream Root CA"})
 		Expect(chain).NotTo(BeNil(), "no series for the upstream issuer")
-		Expect(gaugeValue(chain)).To(BeNumerically(">", 0))
+		// The value, not merely its sign: both ThisUpdate and NextUpdate are
+		// large positive timestamps, so "> 0" passes with the fields
+		// transposed -- which would make PuppetCAUpstreamCRLExpired a
+		// permanent, unclearable critical page.
+		Expect(gaugeValue(chain)).To(BeNumerically("~", float64(upstreamCRLNextUpdate(upsCRL).Unix()), 1))
 
 		// And our own series stays unlabelled and single, which is the whole
 		// point of not relabelling it.
@@ -341,3 +403,15 @@ var _ = Describe("Collector", func() {
 		Expect(names).To(HaveKey("puppetca_http_requests_in_flight"))
 	})
 })
+
+// upstreamCRLNextUpdate reads the NextUpdate out of a PEM-encoded CRL, so a
+// spec can assert the gauge carries that field rather than merely a plausible
+// timestamp.
+func upstreamCRLNextUpdate(crlPEM []byte) time.Time {
+	GinkgoHelper()
+	block, _ := pem.Decode(crlPEM)
+	Expect(block).NotTo(BeNil())
+	crl, err := x509.ParseRevocationList(block.Bytes)
+	Expect(err).NotTo(HaveOccurred())
+	return crl.NextUpdate
+}

@@ -94,9 +94,30 @@ at the front, and only if there is none is an empty CRL generated. Re-running
 the import with a newer ancestor bundle therefore refreshes the ancestor CRLs,
 without exporting and concatenating your own first.
 
+Two limits make re-import a poor refresh mechanism, and neither is changed by
+this feature.
+
+**The bundle replaces the stored ancestor set wholesale.** Only *this CA's own*
+CRL is recovered from storage; ancestors are taken solely from what you supply.
+A refresh bundle must therefore contain **every** ancestor CRL, not just the one
+that changed — supplying a new root CRL alone drops the intermediate's, which is
+exactly the loss chain preservation exists to prevent. (Re-*signing* preserves
+ancestors; importing replaces them, deliberately: the file you hand to `import`
+is authoritative.)
+
+**`import` writes to a local filesystem directory only.** It takes `--cadir` and
+constructs filesystem storage directly; unlike `migrate` it has no
+`--source-config`/`--dest-config`. If your CA runs on **sqlite, postgres, mysql,
+etcd or redis**, re-importing writes to a directory the server never reads,
+prints `CA imported into <dir>`, and changes nothing — the live chain expires
+anyway. It is also unavailable under `encrypt_ca_key` (the stored key is an
+`ENCRYPTED PRIVATE KEY` block `import` cannot parse) and under
+`ca_key_provider: openbao` (there is no exportable key at all). For those
+deployments `crl_chain_file` is not the alternative — it is the only mechanism.
+
 Ancestor CRLs age in place: this CA cannot re-sign another CA's list, so
 whatever was imported stays as it was until something replaces it. Re-importing
-is one way; the other is
+is one way, subject to the above; the other is
 [`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain), which has
 openvox-ca re-read a PEM bundle on every maintenance cycle and republish it, so
 the ancestors stay current without an operator remembering to act before each

@@ -175,7 +175,9 @@ type CA struct {
 	servingRevocationFailures atomic.Uint64
 
 	// crlChainFailures counts refresh passes that could not publish the
-	// upstream chain, and crlChainDiscarded counts CRLs dropped from
+	// upstream chain, and crlChainDiscarded counts discards -- one per CRL
+	// dropped, per evaluation, and the file is evaluated on every CRL amendment
+	// -- from
 	// crl_chain_file because nothing in the CA bundle signed them.
 	//
 	// Two counters because they are two different questions. A failure leaves

@@ -524,8 +524,40 @@ var _ = Describe("crl_chain_file: what makes a CRL acceptable", func() {
 		myCA.CRLChainFile = path
 
 		_, err := myCA.RefreshCRLChainFile(ctx)
-		Expect(err).To(MatchError(ContainSubstring("trailing bytes")))
+		Expect(err).To(MatchError(ContainSubstring("incomplete PEM block")))
 		Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(2))
+	})
+
+	It("finds the signer anywhere in the bundle, not just at the end", func() {
+		// Every accepting spec trusted exactly one ancestor, so the verifying
+		// certificate was always the last entry and the search was never
+		// exercised: `return crlSignedBy(candidates[len(candidates)-1], crl)`
+		// passed. That breaks the deployment this feature exists for --
+		// root -> intermediate -> this CA -- by discarding the intermediate's
+		// CRL on every refresh.
+		intermediate, intKey, _ := upstreamCAWithKey("Intermediate CA")
+		root, _, _ := upstreamCAWithKey("Root CA")
+
+		ours, err := store.GetCACert(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		bundle := append([]byte{}, ours...)
+		for _, cert := range []*x509.Certificate{intermediate, root} {
+			bundle = append(bundle, pem.EncodeToMemory(
+				&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})...)
+		}
+		Expect(store.SaveCACert(ctx, bundle)).To(Succeed())
+
+		// The intermediate signs, and it is not the last entry.
+		path := filepath.Join(GinkgoT().TempDir(), "mid.pem")
+		Expect(os.WriteFile(path, emptyCRLNumbered(intermediate, intKey, 3), 0o644)).To(Succeed())
+		myCA.CRLChainFile = path
+
+		Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
+		chain := crlBlocks(mustGetCRL(ctx, store))
+		Expect(chain).To(HaveLen(2))
+		Expect(chain[1].Issuer.CommonName).To(Equal("Intermediate CA"))
+		Expect(myCA.CRLChainDiscarded()).To(BeZero(),
+			"a CRL the bundle does vouch for must not be discarded")
 	})
 
 	It("refuses an upstream CRL older than the one already published", func() {
@@ -632,6 +664,25 @@ var _ = Describe("crl_chain_file: size and duplicates", func() {
 		chain := crlBlocks(mustGetCRL(ctx, store))
 		Expect(chain).To(HaveLen(2))
 		Expect(chain[1].Number.Int64()).To(Equal(int64(9)))
+	})
+
+	It("accepts a file close to the limit, so the bound cannot be quietly lowered", func() {
+		// The bound was pinned from one side only: raising it fails the
+		// oversized spec, but lowering it to 64 KiB left everything green --
+		// while making the feature unusable on a root CA with a few thousand
+		// revocations, whose CRL comfortably exceeds that. Both directions now
+		// cost a spec.
+		trustUpstream()
+		padded := append(bytes.Repeat([]byte("# padding\n"), (1<<20)/10), upsCRL...)
+		Expect(len(padded)).To(BeNumerically("<", 4<<20))
+
+		path := filepath.Join(GinkgoT().TempDir(), "big.pem")
+		Expect(os.WriteFile(path, padded, 0o644)).To(Succeed())
+		myCA.CRLChainFile = path
+
+		Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
+		Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(2),
+			"a file comfortably under the bound must publish")
 	})
 
 	It("refuses an oversized file rather than reading a truncated chain", func() {

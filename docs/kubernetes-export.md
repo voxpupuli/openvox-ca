@@ -117,7 +117,14 @@ certificate in the bundle, `self`, `chain` and `root` produce identical output.
 It is **not** a no-op on a CA that has already imported a multi-certificate
 bundle. Before these fields existed, every target published the stored bundle
 verbatim; the `self` default now publishes the first block alone. Set
-`cert_scope: chain` on those targets to keep what they were publishing.
+`cert_scope: chain` **and `crl_scope: chain`** on those targets to keep what they
+were publishing.
+
+The CRL half is the one easily missed. The number of certificates in the bundle
+governs `cert_scope`, but a CA with a single certificate can still hold a
+multi-block CRL blob from `import --crl-chain`, so `crl_scope` narrows what it
+publishes too. Under `crl_scope: chain` the value is a multi-block PEM, which a
+consumer expecting exactly one CRL has to handle.
 
 **A deliberate asymmetry, worth flagging as intentional rather than
 inconsistent.** The HTTP endpoints `/certificate/ca` and

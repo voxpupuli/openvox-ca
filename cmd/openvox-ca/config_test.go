@@ -485,6 +485,8 @@ kubernetes_export:
       crl: true
       cert_key: ca.crt
       crl_key: ca.crl
+      cert_scope: chain
+      crl_scope: chain
     - kind: configmap
       metadata:
         name: openvox-ca-crl
@@ -513,6 +515,11 @@ kubernetes_export:
 		// Validate preserves explicitly-set values and applies defaults.
 		Expect(cfg.KubernetesExport.Targets[0].Type).To(Equal("Opaque"))
 		Expect(cfg.KubernetesExport.Targets[0].CertKey).To(Equal("ca.crt"))
+		// The scope tags themselves: every other scope spec builds the struct in
+		// Go, so renaming either yaml tag silently disabled the one documented
+		// remedy for the behaviour break these fields introduce.
+		Expect(cfg.KubernetesExport.Targets[0].CertScope).To(Equal("chain"))
+		Expect(cfg.KubernetesExport.Targets[0].CRLScope).To(Equal("chain"))
 		Expect(cfg.KubernetesExport.Targets[1].CRLKey).To(Equal("ca.crl")) // defaulted
 	})
 
