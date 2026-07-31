@@ -84,6 +84,7 @@ type Collector struct {
 	crlNextUpdate *prometheus.Desc
 
 	crlChainNextUpdate      *prometheus.Desc
+	crlChainLastRead        *prometheus.Desc
 	crlChainRefreshFailures *prometheus.Desc
 	crlChainDiscarded       *prometheus.Desc
 	crlRevoked              *prometheus.Desc
@@ -171,6 +172,13 @@ func NewCollector(c *ca.CA) *Collector {
 				"from puppetca_crl_next_update_timestamp_seconds: an expiring upstream CRL is fixed at "+
 				"the parent CA, not here, so it needs its own alert and its own runbook.",
 			[]string{"issuer"}, nil),
+		crlChainLastRead: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "crl_chain", "last_read_timestamp_seconds"),
+			"When crl_chain_file was last read successfully. Absent until the first "+
+				"successful read, so absent() is how a configured-but-never-read file is "+
+				"detected; static thereafter means the file stopped being readable.",
+			nil, nil,
+		),
 		crlChainRefreshFailures: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "crl_chain", "refresh_failures_total"),
 			"Total crl_chain_file refresh passes that failed. The published chain is left alone and "+
@@ -228,6 +236,7 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.crlThisUpdate
 	ch <- c.crlNextUpdate
 	ch <- c.crlChainNextUpdate
+	ch <- c.crlChainLastRead
 	ch <- c.crlChainRefreshFailures
 	ch <- c.crlChainDiscarded
 	ch <- c.crlRevoked
@@ -257,6 +266,12 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	// backend must not blind operators to CRL-maintenance failures.
 	ch <- prometheus.MustNewConstMetric(c.crlUpdateFailures, prometheus.CounterValue,
 		float64(c.ca.CRLUpdateFailures()))
+	// Only once the file has actually been read: absent is the signal that a
+	// configured chain file has never been opened, which no counter can give.
+	if last := c.ca.CRLChainLastRead(); !last.IsZero() {
+		ch <- prometheus.MustNewConstMetric(c.crlChainLastRead, prometheus.GaugeValue,
+			float64(last.Unix()))
+	}
 	ch <- prometheus.MustNewConstMetric(c.crlChainRefreshFailures, prometheus.CounterValue,
 		float64(c.ca.CRLChainFailures()))
 	ch <- prometheus.MustNewConstMetric(c.crlChainDiscarded, prometheus.CounterValue,

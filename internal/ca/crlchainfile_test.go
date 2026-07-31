@@ -478,6 +478,86 @@ var _ = Describe("crl_chain_file: what makes a CRL acceptable", func() {
 		Expect(after[1].Number.Int64()).To(Equal(int64(99)))
 	})
 
+	DescribeTable("refuses content that yields no CRL rather than treating it as an empty declaration",
+		// The file is authoritative, so "no upstream CRLs" deletes every
+		// ancestor -- permanently, because this CA cannot re-sign another CA's
+		// list. pem.Decode cannot tell a truncated block from rubbish: it
+		// returns nil for a block with no END line, for DER, for a certificate
+		// bundle and for an HTML error page alike. Reading any of those as the
+		// empty declaration is how `cat > file`, the refresh mechanism the
+		// documentation recommends, silently dropped the chain mid-write.
+		//
+		// A genuinely empty file still means "publish nothing extra"; that is
+		// the case below this table.
+		func(content string) {
+			trustUpstream()
+			Expect(store.UpdateCRL(ctx, append(append([]byte{}, mustGetCRL(ctx, store)...), upsCRL...))).
+				To(Succeed())
+			Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(2))
+
+			path := filepath.Join(GinkgoT().TempDir(), "chain.pem")
+			Expect(os.WriteFile(path, []byte(content), 0o644)).To(Succeed())
+			myCA.CRLChainFile = path
+
+			_, err := myCA.RefreshCRLChainFile(ctx)
+			Expect(err).To(HaveOccurred())
+			Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(2),
+				"the published chain must survive a file we could not read")
+		},
+		Entry("a block truncated mid-write", "-----BEGIN X509 CRL-----\nZm9v\n"),
+		Entry("not PEM at all", "<html>502 Bad Gateway</html>\n"),
+		Entry("a certificate bundle by mistake",
+			"-----BEGIN CERTIFICATE-----\nZm9v\n-----END CERTIFICATE-----\n"),
+	)
+
+	It("refuses a valid CRL followed by a truncated one", func() {
+		// The likeliest mid-write shape: the first block flushed, the second
+		// cut. Decoding stops at the incomplete block and reports success, so
+		// the chain silently loses whatever came after it.
+		trustUpstream()
+		Expect(store.UpdateCRL(ctx, append(append([]byte{}, mustGetCRL(ctx, store)...), upsCRL...))).
+			To(Succeed())
+
+		path := filepath.Join(GinkgoT().TempDir(), "cut.pem")
+		cut := append(append([]byte{}, upsCRL...), []byte("-----BEGIN X509 CRL-----\nZm9v\n")...)
+		Expect(os.WriteFile(path, cut, 0o644)).To(Succeed())
+		myCA.CRLChainFile = path
+
+		_, err := myCA.RefreshCRLChainFile(ctx)
+		Expect(err).To(MatchError(ContainSubstring("trailing bytes")))
+		Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(2))
+	})
+
+	It("refuses an upstream CRL older than the one already published", func() {
+		// Everything reaching this point is signature-valid, so an older CRL
+		// from the right issuer passes every other check -- and publishing it
+		// un-revokes, fleet-wide, everything the parent revoked in between.
+		// dedupeCRLs makes this comparison among the CRLs in one file; this is
+		// the same rule against what is already published.
+		keyedCert, keyedKey, _ := upstreamCAWithKey("Rollback Root CA")
+		ours, err := store.GetCACert(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		keyedPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: keyedCert.Raw})
+		Expect(store.SaveCACert(ctx, append(append([]byte{}, ours...), keyedPEM...))).To(Succeed())
+
+		newer := emptyCRLNumbered(keyedCert, keyedKey, 99)
+		Expect(store.UpdateCRL(ctx, append(append([]byte{}, mustGetCRL(ctx, store)...), newer...))).
+			To(Succeed())
+
+		older := emptyCRLNumbered(keyedCert, keyedKey, 7)
+		path := filepath.Join(GinkgoT().TempDir(), "rollback.pem")
+		Expect(os.WriteFile(path, older, 0o644)).To(Succeed())
+		myCA.CRLChainFile = path
+
+		_, err = myCA.RefreshCRLChainFile(ctx)
+		Expect(err).To(MatchError(ContainSubstring("older than the one already published")))
+
+		chain := crlBlocks(mustGetCRL(ctx, store))
+		Expect(chain).To(HaveLen(2))
+		Expect(chain[1].Number.Int64()).To(Equal(int64(99)),
+			"a rollback must leave the newer CRL published")
+	})
+
 	It("fails a revocation rather than publishing a corrupt file", func() {
 		// Fail-closed is the right choice — the alternative is truncating the
 		// chain — but it newly couples revocation to an externally refreshed

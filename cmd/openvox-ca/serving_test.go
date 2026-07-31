@@ -666,3 +666,31 @@ func countCRLPEMBlocks(blob []byte) int {
 		}
 	}
 }
+
+var _ = Describe("crlChainMaintenanceTasks", func() {
+	// The gate lived in RunE, which no spec can execute, so registering the
+	// task under the wrong condition compiled and passed -- leaving the
+	// ancestor CRLs read once at startup and never refreshed, which is a
+	// scheduled fleet-wide verification failure under Puppet's default
+	// certificate_revocation = chain.
+	It("registers the refresh task when a chain file is configured", func() {
+		c, _ := newRefresherTestCA()
+		tasks := crlChainMaintenanceTasks(c, &serverConfig{CRLChainFile: "/etc/puppet-ca/upstream.pem"})
+		Expect(tasks).To(HaveLen(1))
+		Expect(tasks[0].name).To(Equal("crl-chain-file"))
+	})
+
+	It("registers nothing without one", func() {
+		c, _ := newRefresherTestCA()
+		Expect(crlChainMaintenanceTasks(c, &serverConfig{})).To(BeEmpty())
+	})
+
+	It("does not depend on self-provisioning", func() {
+		// The chart's recommended shape is a certificate from a Secret with
+		// self-provisioning off; gating this on it would silently disable the
+		// refresh for exactly that deployment.
+		c, _ := newRefresherTestCA()
+		cfg := &serverConfig{CRLChainFile: "/etc/puppet-ca/upstream.pem", TLSSelfProvision: false}
+		Expect(crlChainMaintenanceTasks(c, cfg)).To(HaveLen(1))
+	})
+})

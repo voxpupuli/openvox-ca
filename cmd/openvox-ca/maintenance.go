@@ -154,3 +154,19 @@ func servingRenewalTask(myCA *ca.CA, cfg *serverConfig, holder *servingCertHolde
 		},
 	}
 }
+
+// crlChainMaintenanceTasks returns the tasks crl_chain_file needs, and none at
+// all when it is unset.
+//
+// Independently gated: an operator publishing an upstream CRL chain need not
+// also be self-provisioning a certificate, which is the chart's own recommended
+// shape. Collected here rather than inlined in the serve command so that gate
+// is a proposition a spec can check -- inline, registering it under the wrong
+// condition compiled, passed, and left the ancestor CRLs read once at startup
+// and never again.
+func crlChainMaintenanceTasks(myCA *ca.CA, cfg *serverConfig) []maintenanceTask {
+	if cfg.CRLChainFile == "" {
+		return nil
+	}
+	return []maintenanceTask{crlChainFileTask(myCA, cfg)}
+}

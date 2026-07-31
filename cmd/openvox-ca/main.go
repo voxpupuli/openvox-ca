@@ -746,11 +746,7 @@ func newRootCmd() *cobra.Command {
 				slog.Info("CRL auto-refresh disabled by configuration")
 			}
 
-			// Independently gated: an operator publishing an upstream CRL
-			// chain need not also be self-provisioning a certificate.
-			if cfg.CRLChainFile != "" {
-				maintenanceTasks = append(maintenanceTasks, crlChainFileTask(myCA, cfg))
-			}
+			maintenanceTasks = append(maintenanceTasks, crlChainMaintenanceTasks(myCA, cfg)...)
 
 			// Shared maintenance loop. Bound to ctx so it stops on shutdown.
 			if len(maintenanceTasks) > 0 {
