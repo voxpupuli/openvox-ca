@@ -93,13 +93,25 @@ func decodeCRLChainStrict(blob []byte) ([]*x509.RevocationList, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Trailing bytes are only fatal when they *started* a block: that is a
-	// truncated write. Bundles legitimately carry commentary between and after
-	// blocks -- `openssl crl -text` emits it -- and pem.Decode skips anything
-	// before a BEGIN line, so only the tail needs judging. Rejecting all of it
-	// would refuse files the operator has every reason to consider valid.
-	if bytes.Contains(rest, []byte("-----BEGIN")) {
-		return nil, fmt.Errorf("the file ends in an incomplete PEM block: " +
+	// The file must end on a block boundary. Anything else non-whitespace after
+	// the last block is a write that was cut short.
+	//
+	// Commentary is still free where bundles actually carry it: pem.Decode
+	// skips everything before a BEGIN line, so `openssl crl -text` output --
+	// which prints its human-readable dump *first* and ends with
+	// `-----END X509 CRL-----` -- passes unchanged, as does commentary between
+	// blocks. Only a trailing footer is refused.
+	//
+	// An earlier revision here judged only whether the tail had started a block
+	// (`bytes.Contains(rest, "-----BEGIN")`). That was too weak, and weak in the
+	// silent direction: a write cut inside the *text* preamble of the next block
+	// leaves a tail with no BEGIN in it, so the file decoded as a valid, shorter
+	// declaration -- and because the file is authoritative, a missing issuer
+	// reads as a deliberate removal. The chain shrank with no error and no
+	// counter. Refusing the tail costs a loud failure on a hand-written footer;
+	// tolerating it costs ancestors, permanently, in silence.
+	if len(bytes.TrimSpace(rest)) > 0 {
+		return nil, fmt.Errorf("the file does not end on a PEM block boundary: " +
 			"it is truncated, which usually means it was read while being rewritten")
 	}
 	if len(out) == 0 && len(bytes.TrimSpace(blob)) > 0 {

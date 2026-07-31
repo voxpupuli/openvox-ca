@@ -85,6 +85,7 @@ type Collector struct {
 	crlChainLastRead        *prometheus.Desc
 	crlChainRefreshFailures *prometheus.Desc
 	crlChainDiscarded       *prometheus.Desc
+	crlChainRegressed       *prometheus.Desc
 	crlRevoked              *prometheus.Desc
 
 	leafInfo       *prometheus.Desc
@@ -169,9 +170,12 @@ func NewCollector(c *ca.CA) *Collector {
 			[]string{"issuer"}, nil),
 		crlChainLastRead: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "crl_chain", "last_read_timestamp_seconds"),
-			"When crl_chain_file was last read successfully. Absent until the first "+
-				"successful read, so absent() is how a configured-but-never-read file is "+
-				"detected; static thereafter means the file stopped being readable.",
+			"When crl_chain_file was last read successfully, or 0 if it never has been. "+
+				"Exported only where crl_chain_file is configured, so absent means the "+
+				"feature is off and 0 means it is on but the file has never been opened -- "+
+				"a wrong path, or a mount that never landed. It does NOT detect a subPath "+
+				"mount: that reads successfully forever, so this advances exactly as it "+
+				"does on a healthy file.",
 			nil, nil,
 		),
 		crlChainRefreshFailures: prometheus.NewDesc(
@@ -184,7 +188,17 @@ func NewCollector(c *ca.CA) *Collector {
 			prometheus.BuildFQName(namespace, "crl_chain", "discarded_total"),
 			"Total CRLs dropped from crl_chain_file because no certificate in the CA bundle signed "+
 				"them. The file is authoritative, so a discard means the published chain is smaller "+
-				"than the operator's file says it should be — the one case where it shrinks silently.",
+				"than the operator's file says it should be — the one case where it shrinks silently. "+
+				"The remedy is to complete the CA bundle. A CRL passed over for being stale is "+
+				"counted separately, by puppetca_crl_chain_regressed_total, because that one is "+
+				"fixed at whatever writes the file instead.",
+			nil, nil),
+		crlChainRegressed: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "crl_chain", "regressed_total"),
+			"Total CRLs in crl_chain_file passed over because the published chain already carried "+
+				"a newer one from the same ancestor. The published CRL is kept, so revocation is "+
+				"unaffected; a rising value means the file is stale, rolled back or replayed. Check "+
+				"whatever refreshes it, not the CA bundle.",
 			nil, nil),
 		crlRevoked: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "crl", "revoked_certificates"),
@@ -233,6 +247,7 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.crlChainLastRead
 	ch <- c.crlChainRefreshFailures
 	ch <- c.crlChainDiscarded
+	ch <- c.crlChainRegressed
 	ch <- c.crlRevoked
 	ch <- c.leafInfo
 	ch <- c.leafNotBefore
@@ -269,16 +284,29 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		num, _ := new(big.Float).SetInt(cached).Float64()
 		ch <- prometheus.MustNewConstMetric(c.crlCachedNumber, prometheus.GaugeValue, num)
 	}
-	// Only once the file has actually been read: absent is the signal that a
-	// configured chain file has never been opened, which no counter can give.
-	if last := c.ca.CRLChainLastRead(); !last.IsZero() {
-		ch <- prometheus.MustNewConstMetric(c.crlChainLastRead, prometheus.GaugeValue,
-			float64(last.Unix()))
+	// Emitted whenever the feature is configured, including before the first
+	// read, when it reads 0.
+	//
+	// Keying on first-read instead was the obvious choice and the wrong one: it
+	// made the series absent both on a CA that had never opened its file and on
+	// every CA in the fleet with no crl_chain_file at all. Nothing else
+	// distinguishes those two -- the counters are unconditional and read 0 in
+	// both -- so absent() could not be written into an alert without firing on
+	// every instance that never configured the feature, and the case the series
+	// was added for stayed unalertable.
+	if c.ca.CRLChainFile != "" {
+		var stamp float64
+		if last := c.ca.CRLChainLastRead(); !last.IsZero() {
+			stamp = float64(last.Unix())
+		}
+		ch <- prometheus.MustNewConstMetric(c.crlChainLastRead, prometheus.GaugeValue, stamp)
 	}
 	ch <- prometheus.MustNewConstMetric(c.crlChainRefreshFailures, prometheus.CounterValue,
 		float64(c.ca.CRLChainFailures()))
 	ch <- prometheus.MustNewConstMetric(c.crlChainDiscarded, prometheus.CounterValue,
 		float64(c.ca.CRLChainDiscarded()))
+	ch <- prometheus.MustNewConstMetric(c.crlChainRegressed, prometheus.CounterValue,
+		float64(c.ca.CRLChainRegressed()))
 
 	if err != nil {
 		slog.Warn("Prometheus CA metrics scrape failed", "error", err)

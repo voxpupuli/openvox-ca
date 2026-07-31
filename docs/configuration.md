@@ -292,7 +292,8 @@ there:
 crl_chain_file: /etc/puppet-ca/upstream-crls.pem
 ```
 
-It is a PEM bundle of upstream CRLs, re-read on every maintenance cycle and
+It is a PEM bundle of upstream CRLs, re-read on every maintenance cycle
+(`maintenance_interval_sec`, 1 hour by default) and on every CRL amendment, and
 published alongside this CA's own CRL at
 `GET /puppet-ca/v1/certificate_revocation_list/ca`. The file is **declarative**:
 whatever it contains is what gets published, so a CRL removed from it disappears
@@ -307,28 +308,65 @@ look:
 | The file is | What gets published | Why |
 | --- | --- | --- |
 | **absent** | the chain already published, unchanged | An absent file is *no statement*, not a statement that the chain should be empty. It has to be: this path runs on every CRL amendment, so a single revocation on a replica whose Secret has not mounted yet would otherwise truncate the chain for the whole fleet — permanently, because this CA cannot re-sign another CA's list. |
-| **empty (zero bytes)** | this CA's own CRL only | An empty file *is* a statement. This is how you say "publish nothing extra". |
+| **empty**, or nothing but whitespace | this CA's own CRL only | An empty file *is* a statement. This is how you say "publish nothing extra". It is also what a failed `cat >` leaves behind, so it is logged at `ERROR` — see the note on atomic writes below. |
 | **unparseable** | the chain already published, unchanged | The refresh fails and is counted. Note this also blocks **revocation** until the file is fixed: refusing to publish half a chain is deliberate, but it does couple CRL amendment to a file refreshed outside openvox-ca. |
-| **truncated, or not a CRL bundle** | the chain already published, unchanged | Refused, not read as an empty declaration. A file that decodes to no CRL at all — a block cut mid-write, DER, a certificate bundle, an HTML error page — is a read that failed, not the operator asking for an empty chain. Only a genuinely empty file means that. |
+| **truncated, or not a CRL bundle** | the chain already published, unchanged | Refused, not read as an empty declaration. A file that does not end on a PEM block boundary, or that decodes to no CRL at all — a block cut mid-write, DER, a certificate bundle, an HTML error page — is a read that failed, not the operator asking for an empty chain. Only an empty file means that. Leading and interleaved commentary is fine; see below. |
+| **carrying a CRL older than the one published** | the newer, already-published CRL for that ancestor; everything else from the file | Not a failure and **not** a block on revocation: the published chain is correct, so the older CRL is simply passed over and counted by `puppetca_crl_chain_regressed_total`. |
 | **present but unreadable** (permissions, or a directory mounted at the path) | the chain already published, unchanged | The refresh fails and is counted, and revocation is blocked as for **unparseable**. A Secret projected `0400` root-owned against an unprivileged container is the usual cause. |
 | **larger than 4 MiB** | the chain already published, unchanged | Refused rather than truncated: a half-read PEM blob would silently drop CRLs. A real chain is a handful of CRLs. |
 
 **Write the file atomically** — write to a temporary path, then rename. A read
-that catches a `cat >` mid-write sees a truncated file, which is refused rather
-than acted on: revocations fail until the next complete write lands, and that is
-deliberate. Treating a truncated read as "the operator says publish nothing"
-would delete the ancestor CRLs permanently, since this CA cannot re-sign them.
+that catches a `cat >` mid-write sees a file that does not end on a PEM block
+boundary, which is refused rather than acted on: revocations fail until the next
+complete write lands, and that is deliberate. Treating a truncated read as "the
+operator says publish nothing" would delete the ancestor CRLs permanently, since
+this CA cannot re-sign them.
+
+The file may carry non-PEM commentary — `openssl crl -text` output is a bundle
+of exactly this shape, since its human-readable dump *precedes* each block and
+everything before a `-----BEGIN` line is skipped. What is refused is trailing
+text after the last block, because that is indistinguishable from a write cut
+short. One truncation is inherently undetectable: a write severed exactly on a
+block boundary yields a valid, shorter file, and since the file is authoritative
+a missing ancestor is a legitimate thing for it to say. Writing atomically is
+what closes that case; nothing in the file's content can.
+
+Atomicity does not, however, cover an **empty** write. `cat upstream/*.pem >
+bundle.pem` with an empty or unmounted source directory produces a zero-byte
+file — and that is the deliberate way to say "publish nothing extra", so it is
+honoured, and every ancestor CRL is dropped permanently. A file of nothing but
+whitespace counts the same. There is no way to tell that apart from intent, so
+it is logged at `ERROR` naming how many CRLs are being dropped. If you generate
+the file from a script, have the script refuse to write an empty one.
 
 In Kubernetes, mount the file from **its own volume, not with `subPath`**. A
 `subPath`-mounted ConfigMap or Secret never receives updates, so the file reads
 successfully forever and never changes — the feature becomes a silent no-op.
-`puppetca_crl_chain_last_read_timestamp_seconds` tells the two apart: absent
-means never read, present-but-static means read and unchanging.
+No metric distinguishes that from a healthy file:
+`puppetca_crl_chain_last_read_timestamp_seconds` advances on every read either
+way, and an earlier version of this page wrongly claimed otherwise. What catches
+it is the consequence — `PuppetCAUpstreamCRLExpiringSoon` firing on a CA that
+*has* `crl_chain_file` configured is the `subPath` signature. That series does
+detect the different case of a file never opened at all: it reads `0`, and
+`PuppetCAUpstreamCRLNeverRead` alerts on it.
 
-If one issuer appears more than once — which is what a CronJob that appends
-rather than replaces produces — only the CRL with the highest CRL number is
-published. Publishing both would let a client that stops at the first match be
-handed the older list, un-revoking a certificate.
+If one ancestor appears more than once — which is what a CronJob that appends
+rather than replaces produces — only the newest of its CRLs is published, by CRL
+number, or by `thisUpdate` for a CRL carrying no `cRLNumber` (`openssl ca
+-gencrl` omits it unless `crl_extensions` is configured). Publishing both would
+let a client that stops at the first match be handed the older list, un-revoking
+a certificate. Ancestors are told apart by which certificate signed their CRL,
+not by issuer name, so a shared root that issued two sub-CAs with the same
+distinguished name still gets both their CRLs published.
+
+**An ancestor's CRL can never move backwards.** A CRL in the file that is older
+than the one already published for the same ancestor is passed over and the
+published one kept, counted by `puppetca_crl_chain_regressed_total`. Publishing
+it would un-revoke, fleet-wide, every certificate that ancestor revoked in
+between, and there is no legitimate cause for it: a stale copy, a rolled-back
+mirror, or a replay. Unlike a corrupt file this does *not* block revocation —
+the published chain is already correct, so failing would let anyone who can
+write the file deny revocation instead.
 
 **Every CRL in the file is signature-verified** against a certificate in the
 stored CA bundle before it is served, and discarded with a warning otherwise.
@@ -356,11 +394,16 @@ Per-issuer freshness is reported as
 separate from `puppetca_crl_next_update_timestamp_seconds`, which continues to
 mean *this CA's own* CRL. An expiring upstream CRL is fixed at the parent CA,
 not here, so it gets its own alert with its own runbook — see the
-[mixin](../mixin/). Two counters cover the failures that would otherwise be one
-warning per cycle in the log: `puppetca_crl_chain_refresh_failures_total` for a
-file that could not be read or parsed, and `puppetca_crl_chain_discarded_total`
-for a CRL dropped because nothing in the bundle signed it — the one case where
-the published chain silently *shrinks*.
+[mixin](../mixin/). Three counters cover what would otherwise be one warning per
+cycle in the log, and they are separate because their remedies are:
+`puppetca_crl_chain_refresh_failures_total` for a file that could not be read or
+parsed (fix the file or its mount); `puppetca_crl_chain_discarded_total` for a
+CRL dropped because nothing in the bundle signed it (complete the CA bundle) —
+the one case where the published chain silently *shrinks*; and
+`puppetca_crl_chain_regressed_total` for a CRL older than the one already
+published (fix whatever refreshes the file). A fourth series,
+`puppetca_crl_chain_last_read_timestamp_seconds`, reads `0` where the file is
+configured but has never been opened.
 
 > **Rolling upgrades.** A replica running a build from before chain preservation
 > re-signs the CRL as a single block and silently drops the chain, so one old

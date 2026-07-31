@@ -111,7 +111,7 @@ func (g gathered) findUnlabelled(name string) *dto.Metric {
 
 // upstreamCRLFixture builds a self-signed CA and an empty CRL from it, standing
 // in for an ancestor whose CRL an intermediate republishes.
-func upstreamCRLFixture(cn string) (*x509.Certificate, []byte) {
+func upstreamCAWithKeyFixture(cn string) (*x509.Certificate, *ecdsa.PrivateKey) {
 	GinkgoHelper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	Expect(err).NotTo(HaveOccurred())
@@ -131,15 +131,25 @@ func upstreamCRLFixture(cn string) (*x509.Certificate, []byte) {
 	Expect(err).NotTo(HaveOccurred())
 	cert, err := x509.ParseCertificate(der)
 	Expect(err).NotTo(HaveOccurred())
+	return cert, key
+}
 
+func numberedCRLFixture(cert *x509.Certificate, key *ecdsa.PrivateKey, number int64) []byte {
+	GinkgoHelper()
 	now := time.Now().UTC()
 	crlDER, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
-		Number:     big.NewInt(7),
+		Number:     big.NewInt(number),
 		ThisUpdate: now,
 		NextUpdate: now.Add(30 * 24 * time.Hour),
 	}, cert, key)
 	Expect(err).NotTo(HaveOccurred())
-	return cert, pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlDER})
+	return pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlDER})
+}
+
+func upstreamCRLFixture(cn string) (*x509.Certificate, []byte) {
+	GinkgoHelper()
+	cert, key := upstreamCAWithKeyFixture(cn)
+	return cert, numberedCRLFixture(cert, key, 7)
 }
 
 func gaugeValue(m *dto.Metric) float64 { return m.GetGauge().GetValue() }
@@ -373,22 +383,79 @@ var _ = Describe("Collector", func() {
 			To(Equal(2.0))
 	})
 
-	It("reports when the chain file was last read, and nothing until it has been", func() {
+	It("reports when the chain file was last read, zero until it has been, "+
+		"and nothing at all when the feature is off", func() {
 		// An absent or mis-mounted path moves no counter, so every dashboard
-		// read healthy while the ancestors aged. Absent-until-first-read is
-		// what distinguishes "never opened" from "opened and unchanging" -- the
-		// subPath mount Kubernetes never updates.
+		// read healthy while the ancestors aged.
+		//
+		// The three states have to be distinguishable in PromQL, which is why
+		// the emission is gated on the file being *configured* rather than on it
+		// having been read. Gating on first read collapsed "configured but never
+		// opened" together with "feature not in use", and since no other series
+		// tells those apart -- the counters are unconditional and read 0 in both
+		// -- absent() could not be put in an alert without firing on every
+		// instance in the fleet that never configured a chain file.
 		g := gather(metrics.NewCollector(myCA))
-		Expect(g["puppetca_crl_chain_last_read_timestamp_seconds"]).To(BeNil())
+		Expect(g["puppetca_crl_chain_last_read_timestamp_seconds"]).To(BeNil(),
+			"no crl_chain_file: the series must not exist")
+
+		// Configured, pointing at a path that never mounted. This is the state
+		// the series exists for, and the one that had no coverage: the previous
+		// absence assertion was taken while the feature was still unconfigured,
+		// so moving the stamp to an *attempted* read left the suite green.
+		myCA.CRLChainFile = filepath.Join(GinkgoT().TempDir(), "never-mounted.pem")
+		Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
+		g = gather(metrics.NewCollector(myCA))
+		Expect(gaugeValue(g.findUnlabelled("puppetca_crl_chain_last_read_timestamp_seconds"))).
+			To(Equal(0.0), "configured but never opened must be reported, and as zero")
 
 		path := filepath.Join(GinkgoT().TempDir(), "empty.pem")
 		Expect(os.WriteFile(path, nil, 0o644)).To(Succeed())
 		myCA.CRLChainFile = path
 		Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
 
+		// Asserted at its value, not merely its sign: the series is documented
+		// as seconds since the epoch, and a UnixMilli stamp would make every
+		// staleness expression written against it silently never fire.
 		g = gather(metrics.NewCollector(myCA))
 		Expect(gaugeValue(g.findUnlabelled("puppetca_crl_chain_last_read_timestamp_seconds"))).
-			To(BeNumerically(">", 0), "an empty file is still a file we read")
+			To(BeNumerically("~", float64(time.Now().Unix()), 5),
+				"an empty file is still a file we read")
+	})
+
+	It("counts a stale upstream CRL separately from an unvouched-for one", func() {
+		// The two share nothing but the word "dropped": a discard means the CA
+		// bundle is incomplete, a regression means the file is stale. They had
+		// one counter between them, so a rolled-back mirror fired
+		// PuppetCAUpstreamCRLDiscarded, whose runbook says to check that the
+		// bundle is complete -- which it is, since a signature-invalid CRL never
+		// reaches the comparison.
+		g := gather(metrics.NewCollector(myCA))
+		Expect(counterValue(g.findByLabels("puppetca_crl_chain_regressed_total", nil))).
+			To(Equal(0.0))
+
+		upstream, upsKey := upstreamCAWithKeyFixture("Rollback CA")
+		ours, err := store.GetCACert(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(store.SaveCACert(ctx, append(append([]byte{}, ours...),
+			pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: upstream.Raw})...))).
+			To(Succeed())
+
+		storedCRL, err := store.GetCRL(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(store.UpdateCRL(ctx, append(append([]byte{}, storedCRL...),
+			numberedCRLFixture(upstream, upsKey, 99)...))).To(Succeed())
+
+		path := filepath.Join(GinkgoT().TempDir(), "rollback.pem")
+		Expect(os.WriteFile(path, numberedCRLFixture(upstream, upsKey, 7), 0o644)).To(Succeed())
+		myCA.CRLChainFile = path
+		Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
+
+		g = gather(metrics.NewCollector(myCA))
+		Expect(counterValue(g.findByLabels("puppetca_crl_chain_regressed_total", nil))).
+			To(Equal(1.0))
+		Expect(counterValue(g.findByLabels("puppetca_crl_chain_discarded_total", nil))).
+			To(Equal(0.0), "a rollback must not move the counter whose runbook blames the bundle")
 	})
 
 	It("reports one labelled upstream CRL series per ancestor in the published chain", func() {

@@ -64,6 +64,8 @@ kubernetes_export:
       crl: true                 # include the CRL (default false)
       cert_key: ca.crt          # data key for the cert; default "ca.crt"
       crl_key: ca.crl           # data key for the CRL; default "ca.crl"
+      cert_scope: self          # "self" (default), "chain" or "root"
+      crl_scope: self           # "self" (default) or "chain"
 
     # A ConfigMap holding only the CRL, in a namespace of its own.
     - kind: ConfigMap
@@ -112,18 +114,23 @@ consumers trusting it simply fail to verify), but it fails, so import the whole
 chain. There is no `root` for CRLs, because a chain has no single anchor CRL —
 the root's own is simply one of its members.
 
-The default changes nothing on a CA that issues its own root: with one
-certificate in the bundle, `self`, `chain` and `root` produce identical output.
-It is **not** a no-op on a CA that has already imported a multi-certificate
-bundle. Before these fields existed, every target published the stored bundle
-verbatim; the `self` default now publishes the first block alone. Set
-`cert_scope: chain` **and `crl_scope: chain`** on those targets to keep what they
-were publishing.
+The default changes nothing only where **both** stored blobs hold a single
+block. The two scopes are applied independently, to different material, so the
+number of certificates in the bundle governs `cert_scope` and tells you nothing
+about `crl_scope`.
 
-The CRL half is the one easily missed. The number of certificates in the bundle
-governs `cert_scope`, but a CA with a single certificate can still hold a
-multi-block CRL blob from `import --crl-chain`, so `crl_scope` narrows what it
-publishes too. Under `crl_scope: chain` the value is a multi-block PEM, which a
+That second half is the one easily missed, and it catches the deployment that
+looks least affected: a CA that issues its own root has one certificate in its
+bundle, so `cert_scope` is genuinely a no-op — but it can still hold a
+multi-block CRL blob from `import --crl-chain` or from `crl_chain_file`, and the
+`self` default drops every ancestor block from what it exports.
+
+So it is **not** a no-op on a CA that has imported a multi-certificate bundle,
+*or* on a single-certificate CA that publishes an upstream CRL chain. Before
+these fields existed, every target published the stored blobs verbatim; the
+`self` default now publishes the first block of each alone. Set `cert_scope:
+chain` **and `crl_scope: chain`** on those targets to keep what they were
+publishing. Under `crl_scope: chain` the value is a multi-block PEM, which a
 consumer expecting exactly one CRL has to handle.
 
 **A deliberate asymmetry, worth flagging as intentional rather than
