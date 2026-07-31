@@ -28,6 +28,13 @@
     // means a human fetching a new CRL from the parent CA — often a different
     // team — and updating crl_chain_file. Two weeks is notice for that, not
     // slack for a self-healing loop.
+    // Calibrated to the CA's maintenance_interval_sec like the serving windows
+    // above: crl_chain_refresh_failures_total increments once per maintenance
+    // pass, so a window shorter than that interval makes a single unchanging
+    // fault fire, resolve and re-fire forever.
+    crlChainWindow: '1h',
+    crlChainFor: '15m',
+
     upstreamCRLExpiryWarningSeconds: 14 * 24 * 3600,  // 14 days
 
     // --- Leaf certificate expiry ---

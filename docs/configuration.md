@@ -309,11 +309,21 @@ look:
 | **absent** | the chain already published, unchanged | An absent file is *no statement*, not a statement that the chain should be empty. It has to be: this path runs on every CRL amendment, so a single revocation on a replica whose Secret has not mounted yet would otherwise truncate the chain for the whole fleet — permanently, because this CA cannot re-sign another CA's list. |
 | **empty (zero bytes)** | this CA's own CRL only | An empty file *is* a statement. This is how you say "publish nothing extra". |
 | **unparseable** | the chain already published, unchanged | The refresh fails and is counted. Note this also blocks **revocation** until the file is fixed: refusing to publish half a chain is deliberate, but it does couple CRL amendment to a file refreshed outside openvox-ca. |
+| **truncated, or not a CRL bundle** | the chain already published, unchanged | Refused, not read as an empty declaration. A file that decodes to no CRL at all — a block cut mid-write, DER, a certificate bundle, an HTML error page — is a read that failed, not the operator asking for an empty chain. Only a genuinely empty file means that. |
+| **present but unreadable** (permissions, or a directory mounted at the path) | the chain already published, unchanged | The refresh fails and is counted, and revocation is blocked as for **unparseable**. A Secret projected `0400` root-owned against an unprivileged container is the usual cause. |
 | **larger than 4 MiB** | the chain already published, unchanged | Refused rather than truncated: a half-read PEM blob would silently drop CRLs. A real chain is a handful of CRLs. |
 
-Write the file atomically (write to a temporary path, then rename) if your
-refresh mechanism allows it. A read that catches a `cat >` mid-write sees an
-unparseable file — safe, but it fails revocations until the next write lands.
+**Write the file atomically** — write to a temporary path, then rename. A read
+that catches a `cat >` mid-write sees a truncated file, which is refused rather
+than acted on: revocations fail until the next complete write lands, and that is
+deliberate. Treating a truncated read as "the operator says publish nothing"
+would delete the ancestor CRLs permanently, since this CA cannot re-sign them.
+
+In Kubernetes, mount the file from **its own volume, not with `subPath`**. A
+`subPath`-mounted ConfigMap or Secret never receives updates, so the file reads
+successfully forever and never changes — the feature becomes a silent no-op.
+`puppetca_crl_chain_last_read_timestamp_seconds` tells the two apart: absent
+means never read, present-but-static means read and unchanging.
 
 If one issuer appears more than once — which is what a CronJob that appends
 rather than replaces produces — only the CRL with the highest CRL number is

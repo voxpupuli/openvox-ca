@@ -120,7 +120,7 @@
         // puppetca_crl_next_update_timestamp_seconds — relabelling would have
         // made the two alerts above fire for CRLs their descriptions do not
         // describe and their remedies do not fix.
-        name: 'openvox-ca-crl-chain-expiry',
+        name: 'openvox-ca-crl-chain',
         rules: [
           {
             alert: 'PuppetCAUpstreamCRLExpiringSoon',
@@ -155,8 +155,11 @@
             // a discarded CRL simply has no series at all. This is the only
             // signal that the published chain is smaller than crl_chain_file
             // says it should be.
-            expr: 'increase(puppetca_crl_chain_discarded_total{%(selector)s}[1h]) > 0' % { selector: $._config.puppetCASelector },
-            'for': '15m',
+            expr: 'increase(puppetca_crl_chain_discarded_total{%(selector)s}[%(window)s]) > 0' % {
+              selector: $._config.puppetCASelector,
+              window: $._config.crlChainWindow,
+            },
+            'for': $._config.crlChainFor,
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
               summary: 'The Puppet CA is discarding CRLs from crl_chain_file.',
@@ -165,8 +168,11 @@
           },
           {
             alert: 'PuppetCAUpstreamCRLRefreshFailing',
-            expr: 'increase(puppetca_crl_chain_refresh_failures_total{%(selector)s}[1h]) > 0' % { selector: $._config.puppetCASelector },
-            'for': '15m',
+            expr: 'increase(puppetca_crl_chain_refresh_failures_total{%(selector)s}[%(window)s]) > 0' % {
+              selector: $._config.puppetCASelector,
+              window: $._config.crlChainWindow,
+            },
+            'for': $._config.crlChainFor,
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
               summary: 'The Puppet CA cannot refresh its upstream CRL chain.',

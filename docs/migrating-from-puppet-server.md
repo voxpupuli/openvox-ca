@@ -365,8 +365,11 @@ back to a mutex inside each process.
 > plaintext key instead succeeds while silently replacing the encrypted at-rest
 > key with a plaintext one, because key loading accepts both forms and nothing
 > warns. Under `ca_key_provider: openbao` there is no exportable key at all, so
-> re-import is unavailable outright. Neither mode has another ancestor-refresh
-> mechanism today.
+> re-import is unavailable outright. For both,
+> [`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain) is not an
+> alternative to re-import but the only ancestor-refresh mechanism there is: it
+> reads a PEM bundle and republishes it, touching neither the CA key nor the
+> import path.
 >
 > **An older replica still flattens the chain.** A build from before this change
 > rewrites the stored blob as a single block, so one un-upgraded replica handling

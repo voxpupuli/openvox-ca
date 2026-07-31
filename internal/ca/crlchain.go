@@ -93,10 +93,14 @@ func decodeCRLChainStrict(blob []byte) ([]*x509.RevocationList, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(bytes.TrimSpace(rest)) > 0 {
-		return nil, fmt.Errorf("trailing bytes that are not a complete PEM block: "+
-			"the file is truncated or is not a CRL bundle (%d byte(s) left undecoded)",
-			len(bytes.TrimSpace(rest)))
+	// Trailing bytes are only fatal when they *started* a block: that is a
+	// truncated write. Bundles legitimately carry commentary between and after
+	// blocks -- `openssl crl -text` emits it -- and pem.Decode skips anything
+	// before a BEGIN line, so only the tail needs judging. Rejecting all of it
+	// would refuse files the operator has every reason to consider valid.
+	if bytes.Contains(rest, []byte("-----BEGIN")) {
+		return nil, fmt.Errorf("the file ends in an incomplete PEM block: " +
+			"it is truncated, which usually means it was read while being rewritten")
 	}
 	if len(out) == 0 && len(bytes.TrimSpace(blob)) > 0 {
 		return nil, fmt.Errorf("no X509 CRL blocks, but the file is not empty: " +
@@ -259,9 +263,11 @@ func orderCRLChain(crls []*x509.RevocationList, cert *x509.Certificate) ([]*x509
 // default certificate_revocation = chain makes an agent parse all of it —
 // applies just as well to a block whose nextUpdate has already lapsed, or to
 // two copies of one ancestor's CRL. Neither is refused, because an operator
-// importing a chain they know is stale is a legitimate intermediate step, but
-// import is the only place either is detectable: no series and no alert covers
-// ancestor expiry.
+// importing a chain they know is stale is a legitimate intermediate step.
+// Duplicate copies are only detectable here -- import writes through
+// Storage.UpdateCRL and never reaches dedupeCRLs. Expiry is no longer: the
+// per-issuer gauge and PuppetCAUpstreamCRLExpired cover it from the stored
+// blob, so this warning is an earlier signal rather than the only one.
 //
 // Called once on the final chain about to be written, rather than from
 // orderCRLChain. It used to live there, after the early return taken when the

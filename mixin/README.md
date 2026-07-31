@@ -6,11 +6,9 @@ alerting rules for the openvox-ca exporter. It alerts on:
 - the exporter being down or unable to read CA state, and the CA not being ready;
 - the **CA certificate** nearing expiry (warning) or expiring imminently (critical);
 - the **CRL** approaching its `NextUpdate` (warning) or having lapsed (critical).
-  This covers **this CA's own CRL only** — block 0 of the stored blob. When a CRL
-  chain has been imported, the ancestor CRLs that follow it are not tracked by any
-  series, so they can lapse while these alerts stay green: the background
-  refresher keeps block 0 fresh regardless. Ancestor `nextUpdate` deadlines need
-  tracking out of band;
+  This covers **this CA's own CRL only** — block 0 of the stored blob, which the
+  background refresher keeps fresh regardless. Ancestor CRLs are covered
+  separately, by the upstream-CRL rules below;
 - **leaf certificates** nearing/at expiry — excluding revoked ones — and
   certificate **requests that stay pending** too long;
 - **CRL update failures** — the CA failing to amend its CRL (a revocation it
@@ -28,8 +26,10 @@ alerting rules for the openvox-ca exporter. It alerts on:
   the two ways that chain goes wrong: a
   [`crl_chain_file`](../docs/configuration.md#publishing-an-upstream-crl-chain)
   that cannot be refreshed, and a CRL discarded from it because no certificate
-  in the CA bundle signed it. Only a CA publishing a chain has these series at
-  all. None of it is fixable here — this CA cannot re-sign another CA's list —
+  in the CA bundle signed it. The per-issuer gauge appears only where the stored
+  blob holds a CRL this CA did not issue — including a chain brought in by
+  `import --crl-chain`, with no `crl_chain_file` in sight. The counters are
+  always exported and read zero without one. None of it is fixable here — this CA cannot re-sign another CA's list —
   so every remedy points at the parent CA or at the file.
 - **Kubernetes export** targets whose applies keep failing (only when the
   [Kubernetes export](../docs/kubernetes-export.md) feature is in use).
@@ -118,6 +118,8 @@ jsonnet -J vendor -m . mixin.jsonnet
 | `caExpiryCriticalSeconds` | 7 days | CA certificate expiry critical threshold. |
 | `crlExpiryWarningSeconds` | 3 days | CRL `NextUpdate` warning threshold. |
 | `upstreamCRLExpiryWarningSeconds` | 14 days | Warning threshold for an upstream CRL in a published chain. Longer than `crlExpiryWarningSeconds` because the remedy is at another CA. |
+| `crlChainWindow` | `1h` | Window over which chain-refresh failures and discards are counted. |
+| `crlChainFor` | `15m` | `for:` debounce for the two chain-failure alerts. |
 | `leafExpiryWarningSeconds` | 7 days | Leaf certificate expiry warning threshold. |
 | `leafExpiryCriticalSeconds` | 1 day | Leaf certificate expiry critical threshold. |
 | `pendingFor` | `1h` | How long a request may stay pending before alerting. |
