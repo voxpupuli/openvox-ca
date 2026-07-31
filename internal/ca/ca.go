@@ -174,32 +174,52 @@ type CA struct {
 	// puppetca_serving_cert_revocation_failures_total.
 	servingRevocationFailures atomic.Uint64
 
-	// crlChainFailures counts refresh passes that could not publish the
-	// upstream chain, and crlChainDiscarded counts discards -- one per CRL
-	// dropped, per evaluation, and the file is evaluated on every CRL amendment
-	// -- from
-	// crl_chain_file because nothing in the CA bundle signed them.
+	// Three counters, because they answer three different questions. Each
+	// increments once per CRL per evaluation, and crl_chain_file is evaluated on
+	// every CRL amendment as well as on the maintenance pass, so all three track
+	// revocation rate rather than the number of bad CRLs in the file.
 	//
-	// Two counters because they are two different questions. A failure leaves
-	// the published chain alone and retries. A discard is the case where the
-	// chain quietly *shrinks*: the file is authoritative, so a CRL the
-	// operator put there and this CA would not accept simply stops being
-	// published — and until now that was one warning per cycle and nothing
-	// else. Surfaced as puppetca_crl_chain_refresh_failures_total and
-	// puppetca_crl_chain_discarded_total.
+	// crlChainFailures counts refresh passes that could not publish the upstream
+	// chain at all -- unreadable, unparseable, truncated or oversized. The
+	// published chain is left alone and the next pass retries.
+	//
+	// crlChainDiscarded counts CRLs dropped from crl_chain_file because nothing
+	// in the CA bundle signed them. This is the case where the chain quietly
+	// *shrinks*: the file is authoritative, so a CRL the operator put there and
+	// this CA would not accept simply stops being published.
+	//
+	// crlChainRegressed counts CRLs in crl_chain_file that were older than the
+	// one already published for the same ancestor, and so were not used -- see
+	// monotonicUpstream. It is deliberately not folded into crlChainDiscarded:
+	// the two have opposite remedies. A discard means the CA bundle is missing
+	// an ancestor, so the operator checks the bundle; a regression means the
+	// file itself is stale, rolled back or replayed, so the operator checks
+	// whatever writes it. One counter would have sent a paged responder to
+	// verify a bundle that was already complete.
+	//
+	// Surfaced as puppetca_crl_chain_refresh_failures_total,
+	// puppetca_crl_chain_discarded_total and
+	// puppetca_crl_chain_regressed_total.
 	crlChainFailures  atomic.Uint64
 	crlChainDiscarded atomic.Uint64
+	crlChainRegressed atomic.Uint64
 
 	// crlChainLastRead is the Unix time of the last successful read of
 	// crl_chain_file, or zero if it has never been read.
 	//
-	// The counters above only move when something goes wrong in a way the CA
-	// recognises. An absent file is deliberately not a failure -- it makes no
-	// statement -- and a path mounted with subPath is read successfully forever
-	// while never changing. Both leave every series flat and healthy while the
-	// ancestors age out, and the shipped expiry alert then tells the responder
-	// to refresh a file the CA may never have opened. This is the series that
-	// distinguishes them.
+	// It exists for the case the counters cannot reach: an absent file is
+	// deliberately not a failure -- it makes no statement -- so a crl_chain_file
+	// pointing at a path that never mounted leaves every counter at zero and
+	// every series flat and healthy while the ancestors age out. This series
+	// stays at zero, which is the signal.
+	//
+	// It does *not* detect a subPath mount, and an earlier revision of this
+	// comment wrongly claimed it did. A subPath mount is read successfully
+	// forever, so the stamp advances every cycle exactly as it does on a healthy
+	// file; the two are indistinguishable here. What catches a frozen mount is
+	// the upstream CRL's own nextUpdate marching towards expiry --
+	// PuppetCAUpstreamCRLExpiringSoon firing on a CA that has crl_chain_file
+	// configured *is* the subPath signature.
 	crlChainLastRead atomic.Int64
 
 	// CRLChainFile is a PEM bundle of upstream CRLs merged into the published
@@ -317,6 +337,13 @@ func (c *CA) CRLChainFailures() uint64 { return c.crlChainFailures.Load() }
 // as puppetca_crl_chain_discarded_total; a rising value means the published
 // chain is smaller than the operator's file says it should be.
 func (c *CA) CRLChainDiscarded() uint64 { return c.crlChainDiscarded.Load() }
+
+// CRLChainRegressed returns how many CRLs in crl_chain_file have been passed
+// over because the published chain already carried a newer one from the same
+// ancestor. Surfaced as puppetca_crl_chain_regressed_total; a rising value means
+// the file is stale, rolled back or replayed, and points at whatever writes it
+// rather than at the CA bundle.
+func (c *CA) CRLChainRegressed() uint64 { return c.crlChainRegressed.Load() }
 
 // CRLChainLastRead returns when crl_chain_file was last read successfully, or
 // the zero time if it never has been. See the field comment for why a feature

@@ -28,7 +28,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
-	"strings"
 	"time"
 )
 
@@ -117,7 +116,115 @@ func (c *CA) upstreamCRLs(ctx context.Context) (crls []*x509.RevocationList, sta
 		}
 		verified = append(verified, crl)
 	}
-	return dedupeCRLs(verified, c.CRLChainFile), true, nil
+	return c.monotonicUpstream(ctx, issuers, dedupeCRLs(issuers, verified, c.CRLChainFile))
+}
+
+// monotonicUpstream holds the one rule the file is not entitled to break: an
+// ancestor's CRL may not move backwards.
+//
+// Everything reaching here is signature-valid, so an older CRL from the right
+// issuer satisfies every check above -- and publishing it un-revokes, fleet-wide,
+// every certificate that ancestor revoked in between. An ancestor's CRL number
+// going backwards has no legitimate cause: it is a stale copy, a rolled-back
+// mirror, or a replay.
+//
+// This lives here, in the function *both* writers call, rather than beside the
+// maintenance pass that first demonstrated the problem. When the check sat in
+// RefreshCRLChainFile only, a rolled-back file was refused by the maintenance
+// task -- loudly, with two alerts asserting the chain was protected -- and then
+// published by the very next revocation, because Revoke reaches the file through
+// crlChainLocked instead. The guard delayed the damage by at most one CRL
+// refresh interval while reporting that it had prevented it.
+//
+// A regression is not a reason to fail the operation. A corrupt file is: nothing
+// trustworthy is available, so refusing to publish half a chain is right, and
+// blocking revocation is the price. A rollback is the opposite case -- the
+// chain already published is correct -- so failing here would let anyone who can
+// write the file deny revocation altogether. The published CRL is kept in place
+// of the older one, counted, and the pass proceeds.
+//
+// c.mu must be held by the caller.
+func (c *CA) monotonicUpstream(ctx context.Context, issuers []*x509.Certificate,
+	incoming []*x509.RevocationList) ([]*x509.RevocationList, bool, error) {
+
+	published, err := c.publishedUpstream(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(incoming) == 0 && len(published) > 0 {
+		// The file is authoritative, so this is a legitimate thing for it to
+		// say -- but it is also what a failed refresh produces. `cat a/*.pem >
+		// bundle.pem` with an empty source directory truncates the destination
+		// and writes nothing, and unlike a torn write that shape is stable, so
+		// writing atomically does not prevent it. Say so at Error: the chain is
+		// about to lose every ancestor, permanently, because this CA cannot
+		// re-sign another CA's list.
+		slog.Error("crl_chain_file declares no upstream CRLs while some are published; "+
+			"dropping every ancestor CRL. If this was not deliberate, check that "+
+			"whatever writes the file did not produce an empty one",
+			"path", c.CRLChainFile, "dropping", len(published))
+	}
+	if len(published) == 0 {
+		return incoming, true, nil
+	}
+
+	// Keyed on the signing certificate, not the issuer DN. See signerOf.
+	current := make(map[string]*x509.RevocationList, len(published))
+	for _, crl := range published {
+		if signer := signerOf(issuers, crl); signer != nil {
+			current[string(signer.Raw)] = crl
+		}
+	}
+
+	out := make([]*x509.RevocationList, 0, len(incoming))
+	for _, crl := range incoming {
+		signer := signerOf(issuers, crl)
+		if signer == nil {
+			out = append(out, crl)
+			continue
+		}
+		prev, ok := current[string(signer.Raw)]
+		// Equal is the steady state between refreshes, and is not a regression.
+		if !ok || !newerCRL(prev, crl) {
+			out = append(out, crl)
+			continue
+		}
+		c.crlChainRegressed.Add(1)
+		slog.Error("crl_chain_file carries an upstream CRL older than the one already "+
+			"published; keeping the published one",
+			"path", c.CRLChainFile, "issuer", crl.Issuer.String())
+		out = append(out, prev)
+	}
+	return out, true, nil
+}
+
+// publishedUpstream returns the upstream CRLs in the stored chain -- every block
+// this CA did not issue.
+//
+// c.mu must be held by the caller.
+func (c *CA) publishedUpstream(ctx context.Context) ([]*x509.RevocationList, error) {
+	blob, err := c.Storage.GetCRL(ctx)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			// Nothing published yet, so nothing can regress against it.
+			return nil, nil
+		}
+		// Not "nothing published" -- a read that failed. Treating it as an empty
+		// set would disable the monotonicity check exactly when storage is
+		// unhealthy, which is when a stale file is most likely to be in play.
+		return nil, fmt.Errorf("reading the published CRL chain to check for regressions: %w", err)
+	}
+	stored, err := decodeCRLChain(blob)
+	if err != nil {
+		return nil, fmt.Errorf("decoding the published CRL chain: %w", err)
+	}
+	var upstream []*x509.RevocationList
+	for _, crl := range stored {
+		if !c.ownsCRL(crl) {
+			upstream = append(upstream, crl)
+		}
+	}
+	return upstream, nil
 }
 
 // maxCRLChainFileBytes bounds the read. Every CRL that survives verification is
@@ -150,51 +257,86 @@ func readCRLChainFile(path string) ([]byte, error) {
 	return data, nil
 }
 
-// dedupeCRLs keeps one CRL per issuer: the one with the highest CRL number.
+// dedupeCRLs keeps one CRL per ancestor: the newest, by newerCRL.
 //
-// Publishing two lists for the same issuer is at best redundant and at worst
+// Publishing two lists for the same ancestor is at best redundant and at worst
 // misleading — a client that stops at the first match could be handed the older
 // one, which is how a revocation gets un-revoked in the eyes of an agent. The
 // case is not hypothetical: the refresh mechanisms this feature is designed
 // around are file concatenation, and a CronJob that appends rather than replaces
 // grows the chain by one stale copy per run.
 //
+// Ancestors are told apart by their signing certificate, not by issuer
+// distinguished name. crlSignedBy's comment sets out why: a shared root can
+// issue two sub-CAs carrying the same DN, and DN-keyed grouping would then treat
+// two genuinely different ancestors as duplicates and publish only one of them —
+// silently dropping a live upstream CRL. A CRL nothing in the bundle signed is
+// left alone; it cannot reach here anyway, since signedByAny filters first.
+//
+// The comparison is newerCRL rather than an inline CRL-number check so that this
+// and monotonicUpstream cannot drift apart, and so that a CRL without a
+// cRLNumber falls back to ThisUpdate instead of silently keeping whichever copy
+// happened to come first. `openssl ca -gencrl` omits cRLNumber unless
+// crl_extensions is configured, which the stock openssl.cnf leaves commented
+// out, so number-less ancestor CRLs are not exotic in this feature's audience.
+//
 // First-appearance order is preserved so that unchanged input keeps producing
 // an unchanged chain, which is what sameCRLSet compares.
-func dedupeCRLs(crls []*x509.RevocationList, path string) []*x509.RevocationList {
+func dedupeCRLs(issuers []*x509.Certificate, crls []*x509.RevocationList,
+	path string) []*x509.RevocationList {
+
 	out := make([]*x509.RevocationList, 0, len(crls))
 	at := make(map[string]int, len(crls))
 	for _, crl := range crls {
-		issuer := string(crl.RawIssuer)
-		i, seen := at[issuer]
+		signer := signerOf(issuers, crl)
+		if signer == nil {
+			out = append(out, crl)
+			continue
+		}
+		i, seen := at[string(signer.Raw)]
 		if !seen {
-			at[issuer] = len(out)
+			at[string(signer.Raw)] = len(out)
 			out = append(out, crl)
 			continue
 		}
 		kept := out[i]
-		if crl.Number != nil && kept.Number != nil && crl.Number.Cmp(kept.Number) > 0 {
+		if newerCRL(crl, kept) {
 			kept, out[i] = crl, crl
 		}
-		slog.Warn("Ignoring a duplicate CRL in crl_chain_file; keeping the one with the highest CRL number",
+		slog.Warn("Ignoring a duplicate CRL in crl_chain_file; keeping the newest",
 			"path", path, "issuer", crl.Issuer.String(), "kept", kept.Number)
 	}
 	return out
 }
 
-// signedByAny reports whether any candidate's key signed crl.
-//
-// A predicate rather than a lookup: the only question here is whether the
-// bundle vouches for this CRL at all, and returning the certificate invited a
-// caller to do something with an identity that the signature check has already
-// finished establishing.
+// signedByAny reports whether any candidate's key signed crl. Most callers want
+// this rather than signerOf: the usual question is whether the bundle vouches
+// for this CRL at all.
 func signedByAny(candidates []*x509.Certificate, crl *x509.RevocationList) bool {
+	return signerOf(candidates, crl) != nil
+}
+
+// signerOf returns the certificate whose key signed crl, or nil.
+//
+// This was deliberately a predicate at first, on the grounds that returning the
+// certificate invited a caller to do something with an identity the signature
+// check had already finished establishing. monotonicUpstream is the caller that
+// legitimately needs it: to ask whether an incoming CRL is older than the
+// published one, it must first decide which published CRL is the *same
+// ancestor's*, and that is a question about identity rather than validity.
+//
+// It must be answered this way and not by comparing issuer distinguished names.
+// crlSignedBy's comment sets out why: a shared root can issue two sub-CAs
+// carrying the same DN, so DN-keyed pairing can compare one ancestor's CRL
+// against another's -- destroying a live upstream CRL, or wedging a legitimate
+// one, while appearing to work.
+func signerOf(candidates []*x509.Certificate, crl *x509.RevocationList) *x509.Certificate {
 	for _, cert := range candidates {
 		if crlSignedBy(cert, crl) {
-			return true
+			return cert
 		}
 	}
-	return false
+	return nil
 }
 
 // bundleCertificates parses the stored CA certificate bundle.
@@ -290,35 +432,24 @@ func (c *CA) RefreshCRLChainFile(ctx context.Context) (bool, error) {
 		if sameCRLSet(storedUpstream, wanted) {
 			return nil
 		}
-		// Refuse to go backwards. Everything reaching here is signature-valid,
-		// so an older CRL from the right issuer is accepted by every check
-		// above -- and publishing it un-revokes, fleet-wide, every certificate
-		// the parent revoked in between. An ancestor's CRL number moving
-		// backwards has no legitimate cause: it is a stale copy, a rolled-back
-		// mirror, or a replay. dedupeCRLs makes this comparison already, but
-		// only among the CRLs in one file; this is the same rule against what
-		// is already published.
-		if regressed := regressedCRLs(storedUpstream, wanted); len(regressed) > 0 {
-			for _, issuer := range regressed {
-				c.crlChainDiscarded.Add(1)
-				slog.Error("Refusing an upstream CRL older than the one already published; "+
-					"keeping the published chain", "path", c.CRLChainFile, "issuer", issuer)
-			}
-			return fmt.Errorf("crl_chain_file %s carries an upstream CRL older than the one "+
-				"already published (%s); refusing to republish it", c.CRLChainFile,
-				strings.Join(regressed, ", "))
-		}
-
+		// No regression check here. monotonicUpstream has already made it, inside
+		// upstreamCRLs, so `wanted` cannot carry a CRL older than the published
+		// one -- which is why sameCRLSet above returns true for a rolled-back
+		// file and this pass does nothing. Checking again here would be the
+		// arrangement this replaced: a rule enforced beside the maintenance pass
+		// that demonstrated it rather than at the chokepoint every writer uses,
+		// so a revocation walked straight past it.
 		slog.Info("Upstream CRLs changed; rewriting the published chain",
 			"path", c.CRLChainFile, "stored", len(storedUpstream), "configured", len(wanted))
 		rewritten = true
 
 		// reissueCRLLocked reaches crlChainLocked, which reads the file again.
 		// That second read is the one published, and it is the right one: it is
-		// the freshest view, taken under the same lock. The decision above can
-		// therefore be made on marginally older content than what lands, which
-		// only ever means the rewrite carries a newer file than the one that
-		// justified it.
+		// the freshest view, taken under the same lock, and it goes through
+		// upstreamCRLs like every other read, so monotonicUpstream applies to it
+		// too. The decision above can therefore be made on marginally older
+		// content than what lands without the ordering guarantee depending on
+		// the two reads agreeing.
 		return c.reissueCRLLocked(ctx)
 	})
 	if err != nil {
@@ -379,29 +510,4 @@ func (c *CA) UpstreamCRLStatuses(blob []byte) ([]UpstreamCRLStatus, error) {
 		})
 	}
 	return out, nil
-}
-
-// regressedCRLs names the issuers whose incoming CRL is older than the one
-// already published.
-//
-// Compared per issuer rather than as a set: an issuer absent from the incoming
-// list is a deliberate removal, which the file is entitled to state, while an
-// issuer present with an older CRL is not.
-func regressedCRLs(published, incoming []*x509.RevocationList) []string {
-	current := make(map[string]*x509.RevocationList, len(published))
-	for _, crl := range published {
-		current[string(crl.RawIssuer)] = crl
-	}
-	var out []string
-	for _, crl := range incoming {
-		prev, ok := current[string(crl.RawIssuer)]
-		if !ok {
-			continue
-		}
-		// Equal is fine -- that is the steady state between refreshes.
-		if newerCRL(prev, crl) {
-			out = append(out, crl.Issuer.String())
-		}
-	}
-	return out
 }

@@ -546,6 +546,15 @@ Notes:
 | Cross-node consistency | single node | single node | strong | strongest | strong (narrow failover window) |
 | Drop-in for OpenVox/Puppet Server CA | yes | no (key paths change) | no (key paths change) | no (key paths change) | no (key paths change) |
 
+> **If you publish an upstream CRL chain**, note that `openvox-ca-ctl import`
+> writes to a local filesystem directory only. On every backend except
+> `filesystem` — and on any backend under `encrypt_ca_key` or
+> `ca_key_provider: openbao` —
+> [`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain) is not
+> merely the better way to keep ancestor CRLs current, it is the only one. See
+> [re-importing a chain](migrating-from-puppet-server.md#step-3-import-the-ca)
+> for the limits.
+
 Use `filesystem` for single-node installs or migrating from an OpenVox/Puppet
 Server CA. Use `sqlite` for a single-node install that prefers one database file
 over a cadir tree (e.g. simpler backups). Use `postgres` or `mysql` when you

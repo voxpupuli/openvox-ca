@@ -685,12 +685,18 @@ var _ = Describe("crlChainMaintenanceTasks", func() {
 		Expect(crlChainMaintenanceTasks(c, &serverConfig{})).To(BeEmpty())
 	})
 
-	It("does not depend on self-provisioning", func() {
+	It("keys only on crl_chain_file, in both directions", func() {
 		// The chart's recommended shape is a certificate from a Secret with
 		// self-provisioning off; gating this on it would silently disable the
-		// refresh for exactly that deployment.
+		// refresh for exactly that deployment. Stating that as
+		// {CRLChainFile: ..., TLSSelfProvision: false} asserted nothing, because
+		// the zero value of a bool makes it the same struct as the spec above.
+		//
+		// The direction that does bite is the other one: `if cfg.CRLChainFile ==
+		// "" && !cfg.TLSSelfProvision` passes both other specs in this block,
+		// and registers a chain-refresh task on every self-provisioning CA that
+		// has no chain file at all.
 		c, _ := newRefresherTestCA()
-		cfg := &serverConfig{CRLChainFile: "/etc/puppet-ca/upstream.pem", TLSSelfProvision: false}
-		Expect(crlChainMaintenanceTasks(c, cfg)).To(HaveLen(1))
+		Expect(crlChainMaintenanceTasks(c, &serverConfig{TLSSelfProvision: true})).To(BeEmpty())
 	})
 })

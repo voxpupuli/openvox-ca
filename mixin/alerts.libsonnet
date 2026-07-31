@@ -163,7 +163,49 @@
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
               summary: 'The Puppet CA is discarding CRLs from crl_chain_file.',
-              description: '{{ $labels.instance }} dropped a CRL from crl_chain_file because no certificate in its CA bundle signed it, so the published chain is smaller than the file says. Check that the file holds CRLs from this CA\'s own ancestors and that the bundle is complete.',
+              description: '{{ $labels.instance }} dropped a CRL from crl_chain_file because no certificate in its CA bundle signed it, so the published chain is smaller than the file says. Check that the file holds CRLs from this CA\'s own ancestors and that the bundle is complete. If the file is stale rather than the bundle incomplete, PuppetCAUpstreamCRLRegressed is the alert for that.',
+            },
+          },
+          {
+            alert: 'PuppetCAUpstreamCRLRegressed',
+            // Deliberately not folded into PuppetCAUpstreamCRLDiscarded. Both
+            // mean "a CRL in the file was not published", and there the
+            // similarity ends: a discard is fixed by completing the CA bundle,
+            // a regression by fixing whatever writes the file. Sharing a counter
+            // sent a paged responder to verify a bundle that was already
+            // complete -- it has to be, or the CRL would have failed the
+            // signature check long before this comparison.
+            expr: 'increase(puppetca_crl_chain_regressed_total{%(selector)s}[%(window)s]) > 0' % {
+              selector: $._config.puppetCASelector,
+              window: $._config.crlChainWindow,
+            },
+            'for': $._config.crlChainFor,
+            labels: { severity: 'warning' } + $._config.alertLabels,
+            annotations: {
+              summary: 'The Puppet CA is being offered stale upstream CRLs.',
+              description: 'crl_chain_file on {{ $labels.instance }} carries an upstream CRL older than the one already published, so it was passed over and the newer one kept. Revocation is unaffected. The file is stale, rolled back or being replayed: check whatever refreshes it. Publishing the older list would have un-revoked, fleet-wide, everything that ancestor revoked in between.',
+            },
+          },
+          {
+            alert: 'PuppetCAUpstreamCRLNeverRead',
+            // The darkest corner of the feature: a wrong path or a Secret that
+            // never mounted is not a failure -- an absent file makes no
+            // statement -- so no counter moves and every dashboard reads
+            // healthy while the ancestors age out.
+            //
+            // This is expressible only because the series is exported wherever
+            // crl_chain_file is *configured* rather than once it has been read;
+            // gating on first read made absent() mean "never opened" and "not
+            // using the feature" indistinguishably, so any alert on it fired
+            // across the whole fleet.
+            expr: 'puppetca_crl_chain_last_read_timestamp_seconds{%(selector)s} == 0' % {
+              selector: $._config.puppetCASelector,
+            },
+            'for': $._config.crlChainFor,
+            labels: { severity: 'warning' } + $._config.alertLabels,
+            annotations: {
+              summary: 'The Puppet CA has never read its configured crl_chain_file.',
+              description: 'crl_chain_file is set on {{ $labels.instance }} but has never been opened -- a wrong path, or a Secret that never mounted. The feature is doing nothing, and because an absent file is treated as "no statement" rather than an error, nothing else reports it. Note this does not catch a subPath mount: that reads successfully forever, so it looks healthy here and shows up as PuppetCAUpstreamCRLExpiringSoon instead.',
             },
           },
           {
@@ -176,7 +218,7 @@
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
               summary: 'The Puppet CA cannot refresh its upstream CRL chain.',
-              description: 'Refreshing crl_chain_file on {{ $labels.instance }} is failing, so the published ancestor CRLs are ageing with nothing renewing them. The existing chain is left in place; check the file is readable and parseable.',
+              description: 'Refreshing crl_chain_file on {{ $labels.instance }} is failing, so the published ancestor CRLs are ageing with nothing renewing them. The existing chain is left in place; check the file is readable, parseable, ends on a PEM block boundary, and is under 4 MiB. Note this also blocks revocation until it is fixed.',
             },
           },
         ],

@@ -94,8 +94,10 @@ at the front, and only if there is none is an empty CRL generated. Re-running
 the import with a newer ancestor bundle therefore refreshes the ancestor CRLs,
 without exporting and concatenating your own first.
 
-Two limits make re-import a poor refresh mechanism, and neither is changed by
-this feature.
+Five limits make re-import a poor refresh mechanism, and none is changed by this
+feature. Each has its own heading below, because which ones apply depends on
+your storage backend and key custody, and the one most likely to catch you out
+is not the first.
 
 **The bundle replaces the stored ancestor set wholesale.** Only *this CA's own*
 CRL is recovered from storage; ancestors are taken solely from what you supply.
@@ -110,29 +112,72 @@ constructs filesystem storage directly; unlike `migrate` it has no
 `--source-config`/`--dest-config`. If your CA runs on **sqlite, postgres, mysql,
 etcd or redis**, re-importing writes to a directory the server never reads,
 prints `CA imported into <dir>`, and changes nothing — the live chain expires
-anyway. It is also unavailable under `encrypt_ca_key` (the stored key is an
-`ENCRYPTED PRIVATE KEY` block `import` cannot parse) and under
-`ca_key_provider: openbao` (there is no exportable key at all). For those
-deployments `crl_chain_file` is not the alternative — it is the only mechanism.
+anyway. For those deployments `crl_chain_file` is not the alternative — it is
+the only mechanism.
+
+There is a round trip through `migrate` if you must do it on a non-filesystem
+backend, but weigh it first: it rewrites the CA key, the inventory HMAC and every
+signed certificate in order to refresh one PEM blob. **Back up the destination
+first** — `migrate` is not transactional.
+
+`scratch.yaml` must describe a **filesystem** backend whose `cadir` is the same
+directory the middle step passes to `--cadir`. `migrate` resolves its destination
+from that file; `import` resolves its own from the flag. If the two disagree, all
+three commands exit 0 and print success while the middle step writes somewhere
+the third never reads — the same silent no-op described above, reintroduced
+inside the workaround for it. Use a **fresh, empty** scratch directory every time
+— `mktemp -d` — because `migrate` copies and never deletes: anything left from a
+previous run is pushed back into the live backend on the return leg, including
+signed certificates that have since been cleaned, which reappear with no
+inventory row and are then invisible to the expiry cleanup. Remove the directory
+afterwards; it holds a plaintext copy of the CA key.
+
+```bash
+# scratch.yaml: storage_backend: filesystem, cadir: /tmp/scratch
+openvox-ca-ctl migrate --source-config live.yaml --dest-config scratch.yaml
+
+# --cert-bundle and --private-key are the copies the first leg just wrote there.
+openvox-ca-ctl import --cadir /tmp/scratch \
+  --cert-bundle /tmp/scratch/ca_crt.pem \
+  --private-key /tmp/scratch/private/ca_key.pem \
+  --crl-chain refreshed-chain.pem
+
+openvox-ca-ctl migrate --source-config scratch.yaml --dest-config live.yaml --force
+```
+
+On the **filesystem** backend `import` does write where the server reads, but
+stop the CA anyway: `import` takes the CRL lock, and that lock is only
+cross-process on backends that implement one — filesystem and sqlite both fall
+back to a mutex inside each process.
+
+**Re-import rewrites the CA key, so two custody modes cannot use it.** Under
+`encrypt_ca_key` the stored key is an `ENCRYPTED PRIVATE KEY` block that `import`
+cannot parse — and that failure is the safe one. Feeding it the original
+plaintext key instead **succeeds while silently replacing the encrypted at-rest
+key with a plaintext one**, because key loading accepts both forms and nothing
+warns: no error, no log line, and `CA imported into <dir>` on stdout. Under
+`ca_key_provider: openbao` there is no exportable key at all, so re-import is
+unavailable outright. Neither mode has another ancestor-refresh mechanism today
+apart from `crl_chain_file`.
+
+**An older replica will drop the ancestors.** A replica running a build older
+than this one rewrites the stored blob as a single block; during a rolling
+upgrade, complete the rollout before importing a chain.
+
+**Re-import is not signalled to consumers.** The Kubernetes exporter republishes
+on CRL notifications, which the import path deliberately does not send. After a
+live ancestor refresh, run `openvox-ca-ctl reissue-crl` or restart to republish
+the exported copies.
 
 Ancestor CRLs age in place: this CA cannot re-sign another CA's list, so
 whatever was imported stays as it was until something replaces it. Re-importing
-is one way, subject to the above; the other is
+is one way, subject to all of the above; the other is
 [`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain), which has
 openvox-ca re-read a PEM bundle on every maintenance cycle and republish it, so
 the ancestors stay current without an operator remembering to act before each
 `nextUpdate`. Either way, watch
 `puppetca_crl_chain_next_update_timestamp_seconds{issuer}` — the shipped mixin
 alerts on it.
-
-One further limit: a replica running a build older than this one will rewrite
-the stored blob as a single block, dropping the ancestors; during a rolling
-upgrade, complete the rollout before importing a chain.
-
-Re-import is also not signalled to consumers: the Kubernetes exporter republishes
-on CRL notifications, which the import path deliberately does not send. After a
-live ancestor refresh, run `openvox-ca-ctl reissue-crl` or restart to republish
-the exported copies.
 
 The `import` command creates the directory structure, writes the CA cert/key/CRL, and
 initialises `inventory.txt` and `serial` (the serial file is written for compatibility but is not used at runtime; openvox-ca generates random serial numbers).

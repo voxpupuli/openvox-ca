@@ -385,6 +385,9 @@ var _ = Describe("crl_chain_file: absent versus empty", func() {
 		// A permission error is not a statement either. Distinct from absent
 		// because it takes the error branch, and distinct from corrupt because
 		// nothing was parsed.
+		if os.Geteuid() == 0 {
+			Skip("mode 0000 does not deny open(2) to root, so this cannot be set up")
+		}
 		path := filepath.Join(GinkgoT().TempDir(), "unreadable.pem")
 		Expect(os.WriteFile(path, upsCRL, 0o000)).To(Succeed())
 		myCA.CRLChainFile = path
@@ -524,7 +527,48 @@ var _ = Describe("crl_chain_file: what makes a CRL acceptable", func() {
 		myCA.CRLChainFile = path
 
 		_, err := myCA.RefreshCRLChainFile(ctx)
-		Expect(err).To(MatchError(ContainSubstring("incomplete PEM block")))
+		Expect(err).To(MatchError(ContainSubstring("does not end on a PEM block boundary")))
+		Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(2))
+	})
+
+	It("refuses a valid CRL followed by a tail that never reached its BEGIN line", func() {
+		// The rule used to be `bytes.Contains(rest, "-----BEGIN")`, which reads
+		// the tail for evidence that a block had started. A write cut inside the
+		// *text preamble* of the next block carries no such evidence, so the file
+		// decoded as a valid, shorter declaration -- and because the file is
+		// authoritative, a missing ancestor reads as a deliberate removal. The
+		// chain shrank with no error and no counter.
+		//
+		// This is the shape `openssl crl -text` produces, which is exactly why
+		// the tolerance was added; the tolerance was unnecessary, because that
+		// commentary *precedes* its block and pem.Decode already skips it.
+		trustUpstream()
+		Expect(store.UpdateCRL(ctx, append(append([]byte{}, mustGetCRL(ctx, store)...), upsCRL...))).
+			To(Succeed())
+
+		path := filepath.Join(GinkgoT().TempDir(), "preamble.pem")
+		cut := append(append([]byte{}, upsCRL...),
+			[]byte("Certificate Revocation List (CRL):\n    Version 2 (0x1)\n")...)
+		Expect(os.WriteFile(path, cut, 0o644)).To(Succeed())
+		myCA.CRLChainFile = path
+
+		_, err := myCA.RefreshCRLChainFile(ctx)
+		Expect(err).To(MatchError(ContainSubstring("does not end on a PEM block boundary")))
+		Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(2))
+	})
+
+	It("accepts commentary that precedes a block, which is where bundles carry it", func() {
+		// The other direction of the same rule: tightening the tail must not
+		// refuse `openssl crl -text` output, whose dump comes before the PEM and
+		// which therefore ends on a block boundary.
+		trustUpstream()
+		path := filepath.Join(GinkgoT().TempDir(), "commented.pem")
+		commented := append([]byte("Certificate Revocation List (CRL):\n    Version 2 (0x1)\n"),
+			upsCRL...)
+		Expect(os.WriteFile(path, commented, 0o644)).To(Succeed())
+		myCA.CRLChainFile = path
+
+		Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
 		Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(2))
 	})
 
@@ -560,12 +604,23 @@ var _ = Describe("crl_chain_file: what makes a CRL acceptable", func() {
 			"a CRL the bundle does vouch for must not be discarded")
 	})
 
-	It("refuses an upstream CRL older than the one already published", func() {
+	It("keeps the published CRL when the file carries an older one, on every write path", func() {
 		// Everything reaching this point is signature-valid, so an older CRL
 		// from the right issuer passes every other check -- and publishing it
 		// un-revokes, fleet-wide, everything the parent revoked in between.
-		// dedupeCRLs makes this comparison among the CRLs in one file; this is
-		// the same rule against what is already published.
+		//
+		// The check used to live beside RefreshCRLChainFile, where it failed the
+		// whole pass. Two things were wrong with that. It guarded one of the two
+		// write paths, so the maintenance task refused the rolled-back file --
+		// loudly, with alerts asserting the chain was protected -- and the next
+		// revocation published it anyway through crlChainLocked. And failing the
+		// pass is the wrong response to a rollback: unlike a corrupt file, the
+		// published chain is still correct, so refusing lets anyone who can write
+		// the file deny revocation. The rule now lives in upstreamCRLs, which
+		// both writers call, and substitutes rather than fails.
+		//
+		// The second half of this spec is the mutation the old arrangement could
+		// not notice: revoke after the refusal and assert 99 is still published.
 		keyedCert, keyedKey, _ := upstreamCAWithKey("Rollback Root CA")
 		ours, err := store.GetCACert(ctx)
 		Expect(err).NotTo(HaveOccurred())
@@ -581,13 +636,69 @@ var _ = Describe("crl_chain_file: what makes a CRL acceptable", func() {
 		Expect(os.WriteFile(path, older, 0o644)).To(Succeed())
 		myCA.CRLChainFile = path
 
-		_, err = myCA.RefreshCRLChainFile(ctx)
-		Expect(err).To(MatchError(ContainSubstring("older than the one already published")))
-
+		// The maintenance path: no error, nothing rewritten, 99 still published.
+		rewritten, err := myCA.RefreshCRLChainFile(ctx)
+		Expect(err).NotTo(HaveOccurred(),
+			"a rollback must not block revocation the way a corrupt file does")
+		Expect(rewritten).To(BeFalse())
 		chain := crlBlocks(mustGetCRL(ctx, store))
 		Expect(chain).To(HaveLen(2))
+		Expect(chain[1].Number.Int64()).To(Equal(int64(99)))
+
+		Expect(myCA.CRLChainRegressed()).NotTo(BeZero(),
+			"the regression must be counted, and on its own counter")
+		Expect(myCA.CRLChainDiscarded()).To(BeZero(),
+			"a rollback is not a discard: the remedies are opposite, so the "+
+				"counters must be too")
+
+		// The revocation path. This is the one the old guard never covered.
+		res, err := myCA.Generate(ctx, "node1.test", nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res).NotTo(BeNil())
+		Expect(myCA.Revoke(ctx, "node1.test")).To(Succeed())
+
+		chain = crlBlocks(mustGetCRL(ctx, store))
+		Expect(chain).To(HaveLen(2))
 		Expect(chain[1].Number.Int64()).To(Equal(int64(99)),
-			"a rollback must leave the newer CRL published")
+			"a revocation must not be the thing that publishes the rolled-back CRL")
+	})
+
+	It("pairs CRLs by signing certificate, not by issuer distinguished name", func() {
+		// crlSignedBy's comment argues at length that a shared root can issue two
+		// sub-CAs carrying the same DN, so DN-keyed pairing compares one
+		// ancestor's CRL against another's. The regression check was keyed on
+		// RawIssuer, against that reasoning: two ancestors with identical DNs and
+		// independent CRL numbering would have had one silently suppress the
+		// other.
+		aCert, aKey, _ := upstreamCAWithKey("Shared DN CA")
+		bCert, bKey, _ := upstreamCAWithKey("Shared DN CA")
+		Expect(aCert.RawIssuer).To(Equal(bCert.RawIssuer), "the fixture needs identical DNs")
+		Expect(aCert.Raw).NotTo(Equal(bCert.Raw))
+
+		ours, err := store.GetCACert(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		bundle := append([]byte{}, ours...)
+		for _, cert := range []*x509.Certificate{aCert, bCert} {
+			bundle = append(bundle, pem.EncodeToMemory(
+				&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})...)
+		}
+		Expect(store.SaveCACert(ctx, bundle)).To(Succeed())
+
+		// A is at 99. B is at 7 -- lower, but a different ancestor entirely, so
+		// it is not a regression and must be published.
+		Expect(store.UpdateCRL(ctx, append(append([]byte{}, mustGetCRL(ctx, store)...),
+			emptyCRLNumbered(aCert, aKey, 99)...))).To(Succeed())
+
+		path := filepath.Join(GinkgoT().TempDir(), "shared-dn.pem")
+		both := append(append([]byte{}, emptyCRLNumbered(aCert, aKey, 99)...),
+			emptyCRLNumbered(bCert, bKey, 7)...)
+		Expect(os.WriteFile(path, both, 0o644)).To(Succeed())
+		myCA.CRLChainFile = path
+
+		Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
+		Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(3))
+		Expect(myCA.CRLChainRegressed()).To(BeZero(),
+			"a different ancestor that happens to share a DN is not a rollback")
 	})
 
 	It("fails a revocation rather than publishing a corrupt file", func() {
@@ -670,8 +781,13 @@ var _ = Describe("crl_chain_file: size and duplicates", func() {
 		// The bound was pinned from one side only: raising it fails the
 		// oversized spec, but lowering it to 64 KiB left everything green --
 		// while making the feature unusable on a root CA with a few thousand
-		// revocations, whose CRL comfortably exceeds that. Both directions now
-		// cost a spec.
+		// revocations, whose CRL comfortably exceeds that.
+		//
+		// This padding is 1 MiB, so it is lowering the bound *below 1 MiB* that
+		// now costs a spec; `2 << 20` still passes. That is deliberate rather
+		// than lazy -- padding to just under 4 MiB would make every run of this
+		// spec allocate and hash the full bound -- and 1 MiB already covers the
+		// stated motivation with room to spare.
 		trustUpstream()
 		padded := append(bytes.Repeat([]byte("# padding\n"), (1<<20)/10), upsCRL...)
 		Expect(len(padded)).To(BeNumerically("<", 4<<20))
