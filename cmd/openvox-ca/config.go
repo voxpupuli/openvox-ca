@@ -97,6 +97,14 @@ type serverConfig struct {
 	// stays valid.
 	TLSSelfProvisionRevokeAfterSec int `yaml:"tls_self_provision_revoke_after_sec"`
 
+	// CRLChainFile is a PEM bundle of upstream CRLs published alongside this
+	// CA's own, for agents doing full-chain revocation checking (Puppet's
+	// default). Re-read on each maintenance cycle, so refreshing the file is
+	// how an operator keeps ancestor CRLs current — every CRL in it is
+	// signature-verified against the stored CA bundle before it is served.
+	// Empty disables the feature.
+	CRLChainFile string `yaml:"crl_chain_file"`
+
 	// MaintenanceIntervalSec is how often the shared maintenance loop runs.
 	// Named for the loop rather than for any one of its tenants: gating the
 	// interval — or the goroutine — on a single feature is how the tasks that
@@ -539,6 +547,9 @@ func applyServerEnv(cfg *serverConfig) {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.TLSSelfProvisionRevokeAfterSec = n
 		}
+	}
+	if v := os.Getenv("PUPPET_CA_CRL_CHAIN_FILE"); v != "" {
+		cfg.CRLChainFile = v
 	}
 	if v := os.Getenv("PUPPET_CA_MAINTENANCE_INTERVAL_SEC"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {

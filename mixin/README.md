@@ -5,12 +5,38 @@ alerting rules for the openvox-ca exporter. It alerts on:
 
 - the exporter being down or unable to read CA state, and the CA not being ready;
 - the **CA certificate** nearing expiry (warning) or expiring imminently (critical);
-- the **CRL** approaching its `NextUpdate` (warning) or having lapsed (critical);
+- the **CRL** approaching its `NextUpdate` (warning) or having lapsed (critical).
+  This covers **this CA's own CRL only** — block 0 of the stored blob, which the
+  background refresher keeps fresh regardless. Ancestor CRLs are covered
+  separately, by the upstream-CRL rules below;
 - **leaf certificates** nearing/at expiry — excluding revoked ones — and
   certificate **requests that stay pending** too long;
 - **CRL update failures** — the CA failing to amend its CRL (a revocation it
   could not record, or a CRL it could not re-sign or write), which can leave
   revoked or superseded certificates still valid.
+- **Upstream CRLs** in a published chain nearing or past their `NextUpdate`, and
+  the five ways that chain goes wrong, each with its own remedy: a
+  [`crl_chain_file`](../docs/configuration.md#publishing-an-upstream-crl-chain)
+  that cannot be refreshed (fix the file or its mount); a CRL discarded from it
+  because no certificate in the CA bundle signed it (complete the bundle); a CRL
+  older than the one already published (fix whatever writes the file); an
+  ancestor the file has stopped listing altogether, which is honoured and
+  unrecoverable (check the file was meant to lose it); and a file that has never
+  been opened at all (wrong path, or a mount that never landed). They are five
+  rules rather than one because a responder sent to the
+  wrong one of those remedies finds nothing wrong. The per-issuer gauge appears
+  only where the stored blob holds a CRL this CA did not issue — including a
+  chain brought in by `import --crl-chain`, with no `crl_chain_file` in sight.
+  The counters are always exported and read zero without one, while
+  `puppetca_crl_chain_last_read_timestamp_seconds` is exported only where
+  `crl_chain_file` is set, which is what makes the never-opened case alertable
+  without firing across the whole fleet. None of it is fixable here — this CA
+  cannot re-sign another CA's list — so every remedy points at the parent CA or
+  at the file.
+
+  One case has no rule and cannot have one: a `subPath` mount reads successfully
+  forever, so it is indistinguishable from a healthy file on every series. It
+  surfaces as *UpstreamCRLExpiringSoon* on a CA that has `crl_chain_file` set.
 - **Serving-certificate failures** — three rules. Two are meaningful only when
   [`tls_self_provision`](../docs/configuration.md#self-provisioned-serving-certificate)
   is in use; *Revocation failing* is live wherever `hostname` is set, because the
@@ -102,6 +128,9 @@ jsonnet -J vendor -m . mixin.jsonnet
 | `caExpiryWarningSeconds` | 30 days | CA certificate expiry warning threshold. |
 | `caExpiryCriticalSeconds` | 7 days | CA certificate expiry critical threshold. |
 | `crlExpiryWarningSeconds` | 3 days | CRL `NextUpdate` warning threshold. |
+| `upstreamCRLExpiryWarningSeconds` | 14 days | Warning threshold for an upstream CRL in a published chain. Longer than `crlExpiryWarningSeconds` because the remedy is at another CA. |
+| `crlChainWindow` | `1h` | Window over which chain-refresh failures, discards, regressions and removals are counted. Equals the CA's default `maintenance_interval_sec` with no margin: raise it alongside any increase to that setting, or a single unchanging fault will fire, resolve and re-fire forever. |
+| `crlChainFor` | `15m` | `for:` debounce for the five upstream-chain alerts. |
 | `leafExpiryWarningSeconds` | 7 days | Leaf certificate expiry warning threshold. |
 | `leafExpiryCriticalSeconds` | 1 day | Leaf certificate expiry critical threshold. |
 | `pendingFor` | `1h` | How long a request may stay pending before alerting. |

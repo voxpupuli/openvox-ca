@@ -64,6 +64,8 @@ kubernetes_export:
       crl: true                 # include the CRL (default false)
       cert_key: ca.crt          # data key for the cert; default "ca.crt"
       crl_key: ca.crl           # data key for the CRL; default "ca.crl"
+      cert_scope: self          # "self" (default), "chain" or "root"
+      crl_scope: self           # "self" (default) or "chain"
 
     # A ConfigMap holding only the CRL, in a namespace of its own.
     - kind: ConfigMap
@@ -87,7 +89,60 @@ kubernetes_export:
 | `crl` | both | `false` | Include the CRL (at least one of `cert`/`crl` must be true) |
 | `cert_key` | both | `ca.crt` | Data key for the cert |
 | `crl_key` | both | `ca.crl` | Data key for the CRL (must differ from `cert_key`) |
+| `cert_scope` | both | `self` | `self`, `chain` or `root` — see below |
+| `crl_scope` | both | `self` | `self` or `chain` |
 | `type` | Secret | unmanaged | Secret `type` field; unset means the exporter does not own it (see below); rejected on ConfigMaps |
+
+### Scopes
+
+Once the CA certificate and the CRL can both be chains, a target has to say how
+much of one it wants:
+
+| Scope | Publishes |
+| --- | --- |
+| `self` (default) | Only this CA's own certificate or CRL |
+| `chain` | The stored bundle or CRL chain verbatim |
+| `root` | The last certificate in the bundle — the trust anchor. Certificates only |
+
+`root` publishes the last certificate in the stored bundle without inspecting
+it, so it is only a *trust anchor* if the bundle you imported was a complete
+chain ending at a self-signed root. Nothing enforces that today —
+`openvox-ca-ctl import` accepts a partial bundle — so `root` on a bundle that
+stops at an intermediate publishes that intermediate. It fails closed rather
+than open (an intermediate grants strictly less trust than the real root, and
+consumers trusting it simply fail to verify), but it fails, so import the whole
+chain. There is no `root` for CRLs, because a chain has no single anchor CRL —
+the root's own is simply one of its members.
+
+The default changes nothing only where **both** stored blobs hold a single
+block. The two scopes are applied independently, to different material, so the
+number of certificates in the bundle governs `cert_scope` and tells you nothing
+about `crl_scope`.
+
+That second half is the one easily missed, and it catches the deployment that
+looks least affected: a CA that issues its own root has one certificate in its
+bundle, so `cert_scope` is genuinely a no-op — but it can still hold a
+multi-block CRL blob from `import --crl-chain` or from `crl_chain_file`, and the
+`self` default drops every ancestor block from what it exports.
+
+So it is **not** a no-op on a CA that has imported a multi-certificate bundle,
+*or* on a single-certificate CA that publishes an upstream CRL chain. Before
+these fields existed, every target published the stored blobs verbatim; the
+`self` default now publishes the first block of each alone. Set `cert_scope:
+chain` **and `crl_scope: chain`** on those targets to keep what they were
+publishing. Under `crl_scope: chain` the value is a multi-block PEM, which a
+consumer expecting exactly one CRL has to handle.
+
+You do not have to work out which targets those are. On the first cycle where a
+scope nobody configured actually drops blocks, the server logs a warning naming
+the target — search for `multi-block`. Setting the scope explicitly, to either
+value, silences it.
+
+**A deliberate asymmetry, worth flagging as intentional rather than
+inconsistent.** The HTTP endpoints `/certificate/ca` and
+`/certificate_revocation_list/ca` always serve the full chain, because Puppet
+agents need it. Export targets default to `self`, because they typically feed
+one specific consumer's trust bundle, where a whole chain is rarely wanted.
 
 ### Secret type
 

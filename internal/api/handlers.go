@@ -234,6 +234,15 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 	case "revoked":
 		if err := s.CA.Revoke(r.Context(), subject); err != nil {
 			slog.Warn("Revoke failed", "subject", subject, "error", err)
+			// This is the boundary an operator reaches first and most often, so
+			// it needs the diagnosis more than reissue-crl does. In this state
+			// the CA cannot record revocations at all, and a bare "conflict"
+			// leaves the cause in the logs of whichever replica served the
+			// request.
+			if errors.Is(err, ca.ErrForeignStoredCRL) {
+				http.Error(w, err.Error(), http.StatusConflict)
+				return
+			}
 			http.Error(w, "conflict", http.StatusConflict)
 			return
 		}
@@ -379,6 +388,14 @@ func (s *Server) handleReissueCRL(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.CA.ReissueCRL(r.Context()); err != nil {
 		slog.Warn("CRL reissue failed", "error", err)
+		if errors.Is(err, ca.ErrForeignStoredCRL) {
+			// Operator-fixable, and the CA's own message names the cause and the
+			// remedy. Surfacing it is the difference between "reissue-crl
+			// returned 500" and knowing the replica needs a restart; a 500 would
+			// leave that in the logs of whichever replica served the request.
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
 		http.Error(w, "failed to reissue CRL", http.StatusInternalServerError)
 		return
 	}

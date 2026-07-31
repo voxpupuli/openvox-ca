@@ -98,14 +98,14 @@ Response:
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/certificate_revocation_list/ca` | Download the current CRL PEM |
-| `PUT` | `/certificate_revocation_list/ca` | Re-sign the CRL with a fresh validity window (preserves all revocations); admin-only. Returns the new CRL PEM |
+| `GET` | `/certificate_revocation_list/ca` | Download the stored CRL PEM verbatim. When a CRL **chain** was imported (see `--crl-chain`) the response is that whole chain, this CA's own CRL first, so agents can perform full-chain revocation checking (Puppet's default `certificate_revocation = chain`). Ancestor CRLs are preserved across re-signing. This CA never *issues* them — it cannot re-sign another CA's list — but it will republish newer copies if [`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain) is configured; without it they stay as current as what was imported |
+| `PUT` | `/certificate_revocation_list/ca` | Re-sign **this CA's own** CRL with a fresh validity window (preserves all revocations, and every ancestor block unless `crl_chain_file` is set — with it, that file decides which ancestors are published); admin-only. Returns the whole stored chain, this CA's own CRL first. Returns `409 Conflict` when the stored CRL was not signed by the CA certificate this process loaded — the usual cause is a replaced CA certificate on an unrestarted replica, and the response body names the remedy |
 
 ## Expirations
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/expirations` | CA cert and CRL expiry dates |
+| `GET` | `/expirations` | CA cert and CRL expiry dates. The CRL date is **this CA's own CRL (block 0) only** — imported ancestor CRLs are not reflected, so an ancestor can be past its `nextUpdate` while this reports a comfortable date. See [metrics](metrics.md#crl) |
 
 ## Server-side key generation
 

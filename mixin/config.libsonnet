@@ -20,6 +20,32 @@
     // the refresher is wedged. Warn a few days out; page once it has lapsed.
     crlExpiryWarningSeconds: 3 * 24 * 3600,  // 3 days
 
+    // --- Upstream CRL expiry ---
+    // Deliberately not crlExpiryWarningSeconds. That threshold is short because
+    // the CA refreshes its own CRL, so the alert only fires when something is
+    // already wedged and three days is ample. An *upstream* CRL is the exact
+    // opposite: openvox-ca cannot re-sign an ancestor's list, so clearing this
+    // means a human fetching a new CRL from the parent CA — often a different
+    // team — and updating crl_chain_file. Two weeks is notice for that, not
+    // slack for a self-healing loop.
+    upstreamCRLExpiryWarningSeconds: 14 * 24 * 3600,  // 14 days
+
+    // --- Upstream CRL chain health ---
+    // Calibrated to the CA's maintenance_interval_sec like the serving windows
+    // above. All four chain counters increment per *evaluation*, and the file is
+    // evaluated on every CRL amendment as well as on the maintenance pass, so on
+    // a busy CA they track revocation rate. What this window is sized against is
+    // the floor they share: a quiet CA evaluates the file once per maintenance
+    // pass, and a window shorter than that interval makes a single unchanging
+    // fault fire, resolve and re-fire forever. This equals the 1h default with no
+    // margin, so raise it alongside any increase to maintenance_interval_sec.
+    //
+    // Do not assume an ordering between the four. An unreadable or unparseable
+    // file increments the failure counter alone, because the read stops before
+    // the per-CRL loops are reached.
+    crlChainWindow: '1h',
+    crlChainFor: '15m',
+
     // --- Leaf certificate expiry ---
     // Agents normally auto-renew; a leaf nearing expiry indicates a node that
     // has stopped checking in. Revoked certs are excluded by the alert exprs.

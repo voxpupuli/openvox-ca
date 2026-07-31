@@ -135,6 +135,7 @@ func applyCAConfig(myCA *ca.CA, cfg *serverConfig) error {
 		myCA.CRLURLs = []string{cfg.CRLUrl}
 	}
 	myCA.CRLValidityDays = cfg.CRLValidityDays
+	myCA.CRLChainFile = cfg.CRLChainFile
 
 	if cfg.CAKeyAlgo != "" || cfg.CAKeySize != 0 {
 		myCA.CAKeyConfig = ca.KeyConfig{
@@ -744,6 +745,8 @@ func newRootCmd() *cobra.Command {
 			} else {
 				slog.Info("CRL auto-refresh disabled by configuration")
 			}
+
+			maintenanceTasks = append(maintenanceTasks, crlChainMaintenanceTasks(myCA, cfg)...)
 
 			// Shared maintenance loop. Bound to ctx so it stops on shutdown.
 			if len(maintenanceTasks) > 0 {

@@ -107,6 +107,34 @@ func supersededRevocationTask(myCA *ca.CA, cfg *serverConfig) maintenanceTask {
 	}
 }
 
+// crlChainFileTask re-reads crl_chain_file and republishes the CRL when the
+// upstream CRLs it names have changed.
+//
+// Gated on crl_chain_file rather than on any other feature. That is the whole
+// reason runMaintenance is a shared loop with per-task gates: in the chart's
+// own recommended shape — a certificate from a Secret, self-provisioning off —
+// a tls_self_provision-gated loop would never run, and the ancestor CRLs would
+// be read once at startup and never again. Under Puppet's default
+// certificate_revocation = chain an expired ancestor CRL is not stale data but
+// a scheduled fleet-wide verification failure, clearing only on restart.
+func crlChainFileTask(myCA *ca.CA, cfg *serverConfig) maintenanceTask {
+	return maintenanceTask{
+		name: "crl-chain-file",
+		run: func(ctx context.Context) {
+			rewritten, err := myCA.RefreshCRLChainFile(ctx)
+			switch {
+			case err != nil:
+				slog.Error("Could not refresh the upstream CRL chain",
+					"path", cfg.CRLChainFile, "error", err)
+			case rewritten:
+				slog.Info("Published an updated CRL chain", "path", cfg.CRLChainFile)
+			default:
+				slog.Debug("Upstream CRL chain unchanged", "path", cfg.CRLChainFile)
+			}
+		},
+	}
+}
+
 // servingRenewalTask reissues the serving certificate when it falls into its
 // renewal window, and swaps the holder so the next handshake uses it.
 func servingRenewalTask(myCA *ca.CA, cfg *serverConfig, holder *servingCertHolder) maintenanceTask {
@@ -125,4 +153,20 @@ func servingRenewalTask(myCA *ca.CA, cfg *serverConfig, holder *servingCertHolde
 			}
 		},
 	}
+}
+
+// crlChainMaintenanceTasks returns the tasks crl_chain_file needs, and none at
+// all when it is unset.
+//
+// Independently gated: an operator publishing an upstream CRL chain need not
+// also be self-provisioning a certificate, which is the chart's own recommended
+// shape. Collected here rather than inlined in the serve command so that gate
+// is a proposition a spec can check -- inline, registering it under the wrong
+// condition compiled, passed, and left the ancestor CRLs read once at startup
+// and never again.
+func crlChainMaintenanceTasks(myCA *ca.CA, cfg *serverConfig) []maintenanceTask {
+	if cfg.CRLChainFile == "" {
+		return nil
+	}
+	return []maintenanceTask{crlChainFileTask(myCA, cfg)}
 }
