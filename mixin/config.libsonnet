@@ -32,16 +32,17 @@
 
     // --- Upstream CRL chain health ---
     // Calibrated to the CA's maintenance_interval_sec like the serving windows
-    // above: crl_chain_refresh_failures_total increments once per maintenance
-    // pass, so a window shorter than that interval makes a single unchanging
-    // fault fire, resolve and re-fire forever. This equals the 1h default with
-    // no margin, so raise it alongside any increase to maintenance_interval_sec.
+    // above. All four chain counters increment per *evaluation*, and the file is
+    // evaluated on every CRL amendment as well as on the maintenance pass, so on
+    // a busy CA they track revocation rate. What this window is sized against is
+    // the floor they share: a quiet CA evaluates the file once per maintenance
+    // pass, and a window shorter than that interval makes a single unchanging
+    // fault fire, resolve and re-fire forever. This equals the 1h default with no
+    // margin, so raise it alongside any increase to maintenance_interval_sec.
     //
-    // The discard and regression counters increment per CRL per *evaluation*,
-    // and the file is evaluated on every CRL amendment as well as on the
-    // maintenance pass, so they track revocation rate and increment strictly
-    // more often than the failure counter. That direction is safe for a window
-    // sized against the slowest of the three.
+    // Do not assume an ordering between the four. An unreadable or unparseable
+    // file increments the failure counter alone, because the read stops before
+    // the per-CRL loops are reached.
     crlChainWindow: '1h',
     crlChainFor: '15m',
 
