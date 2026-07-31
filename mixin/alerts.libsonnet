@@ -183,7 +183,25 @@
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
               summary: 'The Puppet CA is being offered stale upstream CRLs.',
-              description: 'crl_chain_file on {{ $labels.instance }} carries an upstream CRL older than the one already published, so it was passed over and the newer one kept. Revocation is unaffected. The file is stale, rolled back or being replayed: check whatever refreshes it. Publishing the older list would have un-revoked, fleet-wide, everything that ancestor revoked in between.',
+              description: 'crl_chain_file on {{ $labels.instance }} carries an upstream CRL older than the one already published, so it was passed over and the newer one kept. Revocation is unaffected. The file is stale, rolled back or being replayed: check whatever refreshes it. If the ancestor legitimately restarted its CRL numbering (a CA rebuilt from backup, still using the same key), drop it from the file for one publish cycle and then add the new CRL back -- with nothing published to compare against, it is accepted. Publishing the older list would have un-revoked, fleet-wide, everything that ancestor revoked in between.',
+            },
+          },
+          {
+            alert: 'PuppetCAUpstreamCRLRemoved',
+            // The most destructive outcome of the feature had the least
+            // signal: every lesser one moved a counter, while dropping an
+            // ancestor outright produced only a log line. It is not detectable
+            // from the expiry gauges either -- those simply stop being
+            // produced, and a vanished series fires nothing.
+            expr: 'increase(puppetca_crl_chain_removed_total{%(selector)s}[%(window)s]) > 0' % {
+              selector: $._config.puppetCASelector,
+              window: $._config.crlChainWindow,
+            },
+            'for': $._config.crlChainFor,
+            labels: { severity: 'warning' } + $._config.alertLabels,
+            annotations: {
+              summary: 'The Puppet CA has dropped an ancestor CRL from its published chain.',
+              description: 'crl_chain_file on {{ $labels.instance }} stopped listing an ancestor whose CRL was published, so it has been dropped. The file is authoritative, so this is honoured -- and it cannot be undone here, because this CA cannot re-sign another CA\'s list. If you did not mean to remove it, check whatever writes the file: a glob that matched one file fewer produces exactly this. Agents on the default certificate_revocation = chain will stop seeing anything that ancestor revoked.',
             },
           },
           {

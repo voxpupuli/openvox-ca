@@ -122,6 +122,13 @@ type Target struct {
 	// consumer's trust bundle where a whole chain is rarely what is wanted.
 	CertScope string `yaml:"cert_scope"`
 	CRLScope  string `yaml:"crl_scope"`
+
+	// certScopeDefaulted and crlScopeDefaulted record that validate() supplied
+	// the scope rather than the operator. Only a defaulted scope can silently
+	// change what an existing target publishes on upgrade, so only a defaulted
+	// scope is worth warning about when it turns out to drop blocks.
+	certScopeDefaulted bool
+	crlScopeDefaulted  bool
 }
 
 // Enabled reports whether any export target is configured.
@@ -175,10 +182,10 @@ func (t *Target) validate() error {
 	}
 
 	if t.CertScope == "" {
-		t.CertScope = ScopeSelf
+		t.CertScope, t.certScopeDefaulted = ScopeSelf, true
 	}
 	if t.CRLScope == "" {
-		t.CRLScope = ScopeSelf
+		t.CRLScope, t.crlScopeDefaulted = ScopeSelf, true
 	}
 	switch t.CertScope {
 	case ScopeSelf, ScopeChain, ScopeRoot:

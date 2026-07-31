@@ -45,8 +45,14 @@ import (
 //
 // A signature check has neither failure mode: it cannot be forged, it needs no
 // optional extension, and it answers the question every caller actually asks.
-// The cost does not signify — a handful of verifications per re-sign, against a
-// chain two or three blocks long.
+//
+// The cost is a few verifications per CRL per re-sign -- signedByAny filters,
+// then dedupeCRLs and monotonicUpstream each resolve the signer again, and
+// monotonicUpstream also resolves one per published block. Against a chain two
+// or three blocks long that is immaterial. It would not be at the 4 MiB bound
+// maxCRLChainFileBytes allows, since this runs with both the CRL lock and c.mu
+// held; if that bound is ever raised, resolve the signer once in upstreamCRLs
+// and thread it through instead.
 func crlSignedBy(cert *x509.Certificate, crl *x509.RevocationList) bool {
 	if cert == nil || crl == nil {
 		return false

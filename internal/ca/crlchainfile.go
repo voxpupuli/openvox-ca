@@ -77,6 +77,7 @@ func (c *CA) upstreamCRLs(ctx context.Context) (crls []*x509.RevocationList, sta
 				"path", c.CRLChainFile)
 			return nil, false, nil
 		}
+		c.crlChainFailures.Add(1)
 		return nil, false, fmt.Errorf("reading crl_chain_file %s: %w", c.CRLChainFile, err)
 	}
 
@@ -87,6 +88,7 @@ func (c *CA) upstreamCRLs(ctx context.Context) (crls []*x509.RevocationList, sta
 
 	parsed, err := decodeCRLChainStrict(data)
 	if err != nil {
+		c.crlChainFailures.Add(1)
 		return nil, false, fmt.Errorf("crl_chain_file %s: %w", c.CRLChainFile, err)
 	}
 
@@ -163,26 +165,49 @@ func (c *CA) monotonicUpstream(ctx context.Context, issuers []*x509.Certificate,
 			"dropping every ancestor CRL. If this was not deliberate, check that "+
 			"whatever writes the file did not produce an empty one",
 			"path", c.CRLChainFile, "dropping", len(published))
+		// Each dropped ancestor is also reported and counted individually below;
+		// this line survives because it names a cause -- an empty write -- that
+		// the per-ancestor message cannot.
 	}
 	if len(published) == 0 {
 		return incoming, true, nil
 	}
 
 	// Keyed on the signing certificate, not the issuer DN. See signerOf.
+	//
+	// Keeping the *newest* per ancestor rather than the last one encountered,
+	// via the same helper dedupeCRLs uses. The published side can legitimately
+	// carry two CRLs from one ancestor: orderCRLChain collapses duplicates of
+	// this CA's own CRL only, and warnAboutAncestors warns about ancestor
+	// duplicates while publishing "all of them as supplied". Taking whichever
+	// came last in stored order made the comparison depend on how the operator
+	// happened to concatenate their import -- so a stored [A#9, A#5] compared an
+	// incoming A#7 against A#5, called it newer, and published the rollback.
 	current := make(map[string]*x509.RevocationList, len(published))
 	for _, crl := range published {
-		if signer := signerOf(issuers, crl); signer != nil {
+		signer := signerOf(issuers, crl)
+		if signer == nil {
+			continue
+		}
+		if prev, ok := current[string(signer.Raw)]; !ok || newerCRL(crl, prev) {
 			current[string(signer.Raw)] = crl
 		}
 	}
 
+	// mentioned records which published ancestors the file still lists, so the
+	// ones it has stopped listing can be reported below.
+	mentioned := make(map[string]bool, len(incoming))
 	out := make([]*x509.RevocationList, 0, len(incoming))
 	for _, crl := range incoming {
 		signer := signerOf(issuers, crl)
 		if signer == nil {
-			out = append(out, crl)
+			// Unreachable: upstreamCRLs filters with signedByAny against this
+			// same bundle before calling in. Dropping rather than publishing
+			// anyway, because if that ever stops being true the wrong direction
+			// to fail is "serve unattributable bytes to every agent".
 			continue
 		}
+		mentioned[string(signer.Raw)] = true
 		prev, ok := current[string(signer.Raw)]
 		// Equal is the steady state between refreshes, and is not a regression.
 		if !ok || !newerCRL(prev, crl) {
@@ -194,6 +219,22 @@ func (c *CA) monotonicUpstream(ctx context.Context, issuers []*x509.Certificate,
 			"published; keeping the published one",
 			"path", c.CRLChainFile, "issuer", crl.Issuer.String())
 		out = append(out, prev)
+	}
+
+	// Report ancestors the file has stopped listing. Iterating published rather
+	// than the map so the order is the stored chain's rather than Go's map
+	// randomisation; mentioned doubles as the seen-set so each is named once.
+	for _, crl := range published {
+		signer := signerOf(issuers, crl)
+		if signer == nil || mentioned[string(signer.Raw)] {
+			continue
+		}
+		mentioned[string(signer.Raw)] = true
+		c.crlChainRemoved.Add(1)
+		slog.Error("crl_chain_file no longer lists an ancestor whose CRL is published; "+
+			"dropping it. The file is authoritative, so this is honoured -- but it "+
+			"cannot be undone here, because this CA cannot re-sign another CA's list",
+			"path", c.CRLChainFile, "issuer", crl.Issuer.String())
 	}
 	return out, true, nil
 }
@@ -400,6 +441,15 @@ func (c *CA) RefreshCRLChainFile(ctx context.Context) (bool, error) {
 	// lock, the first writer's result is what the rest compare against, so they
 	// see their work already done and stop.
 	rewritten := false
+	// No crlChainFailures.Add here. It is counted inside upstreamCRLs, where the
+	// file is what failed, so both writers count it -- this pass and every
+	// revocation through crlChainLocked. Counting it here instead gave the
+	// counter the same shape monotonicUpstream had before round 3: present on
+	// the maintenance path, absent on the path that runs far more often. It also
+	// attributed this closure's *other* failures -- a lock timeout, a storage
+	// read, a re-sign -- to the chain file, so a storage outage paged someone to
+	// go and inspect a perfectly healthy file. See readStoredCRL's comment in
+	// crl.go for the same argument made about crl_update_failures.
 	err := c.Storage.WithLock(ctx, lockNameCRL, func() error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
@@ -453,7 +503,6 @@ func (c *CA) RefreshCRLChainFile(ctx context.Context) (bool, error) {
 		return c.reissueCRLLocked(ctx)
 	})
 	if err != nil {
-		c.crlChainFailures.Add(1)
 		return false, err
 	}
 	return rewritten, nil

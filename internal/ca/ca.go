@@ -198,10 +198,18 @@ type CA struct {
 	// via the metrics exporter (puppetca_crl_sync_failures_total) for alerting.
 	crlSyncFailures atomic.Uint64
 
-	// Three counters, because they answer three different questions. Each
-	// increments once per CRL per evaluation, and crl_chain_file is evaluated on
-	// every CRL amendment as well as on the maintenance pass, so all three track
-	// revocation rate rather than the number of bad CRLs in the file.
+	// Four counters, because they answer four different questions, and their
+	// remedies differ: one points at the file's contents, one at the CA bundle,
+	// one at whatever writes the file, and one at the file's mount.
+	//
+	// They do not share a cadence, which matters when sizing an alert window.
+	// crlChainFailures increments once per maintenance *pass*. The other three
+	// increment once per CRL per *evaluation*, and crl_chain_file is evaluated
+	// on every CRL amendment as well as on the maintenance pass, so those three
+	// track revocation rate rather than the number of bad CRLs in the file --
+	// strictly more often than the failure counter, which is the direction a
+	// window sized against the slowest of them stays safe in. See
+	// mixin/config.libsonnet, which is calibrated on exactly this.
 	//
 	// crlChainFailures counts refresh passes that could not publish the upstream
 	// chain at all -- unreadable, unparseable, truncated or oversized. The
@@ -221,12 +229,20 @@ type CA struct {
 	// whatever writes it. One counter would have sent a paged responder to
 	// verify a bundle that was already complete.
 	//
+	// crlChainRemoved counts ancestors the file has stopped listing while their
+	// CRL was published. The file is authoritative, so this is honoured rather
+	// than refused -- but it is unrecoverable here, and a `cat` glob that
+	// matched one file fewer produces it just as readily as a deliberate
+	// removal does. Distinct from crlChainDiscarded: that one counts CRLs the
+	// file *does* carry which nothing in the bundle signed.
+	//
 	// Surfaced as puppetca_crl_chain_refresh_failures_total,
-	// puppetca_crl_chain_discarded_total and
-	// puppetca_crl_chain_regressed_total.
+	// puppetca_crl_chain_discarded_total, puppetca_crl_chain_regressed_total and
+	// puppetca_crl_chain_removed_total.
 	crlChainFailures  atomic.Uint64
 	crlChainDiscarded atomic.Uint64
 	crlChainRegressed atomic.Uint64
+	crlChainRemoved   atomic.Uint64
 
 	// crlChainLastRead is the Unix time of the last successful read of
 	// crl_chain_file, or zero if it has never been read.
@@ -308,6 +324,13 @@ func (c *CA) CRLChainDiscarded() uint64 { return c.crlChainDiscarded.Load() }
 // the file is stale, rolled back or replayed, and points at whatever writes it
 // rather than at the CA bundle.
 func (c *CA) CRLChainRegressed() uint64 { return c.crlChainRegressed.Load() }
+
+// CRLChainRemoved returns how many ancestors crl_chain_file has stopped listing
+// while their CRL was published. Surfaced as
+// puppetca_crl_chain_removed_total; the removal is honoured because the file is
+// authoritative, but it cannot be undone here, so a rising value wants checking
+// against whether the operator meant it.
+func (c *CA) CRLChainRemoved() uint64 { return c.crlChainRemoved.Load() }
 
 // CRLChainLastRead returns when crl_chain_file was last read successfully, or
 // the zero time if it never has been. See the field comment for why a feature

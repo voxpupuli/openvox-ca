@@ -33,6 +33,7 @@ import (
 	"errors"
 	"log/slog"
 	"math/big"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -519,6 +520,50 @@ var _ = Describe("CRL chain read failures", func() {
 		// And the ancestor is still there, so the single read is not a saving
 		// made by dropping what the second read was for.
 		Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(2))
+	})
+
+	It("fails the re-sign rather than publishing a rollback when the chain read fails", func() {
+		// With crl_chain_file set, crlChainLocked returns before its own read,
+		// so the second CRL read on the re-sign path is publishedUpstream's --
+		// and that read is now the sole enforcement point of the monotonicity
+		// guarantee. Treating a failed read as "nothing published" would disable
+		// the comparison exactly when storage is unhealthy, which is when a
+		// stale file is most likely to be in play: the rolled-back CRL would
+		// then be published by the very next revocation, un-revoking fleet-wide
+		// everything the ancestor revoked in between.
+		ctx := context.Background()
+		dir := GinkgoT().TempDir()
+		backend := &flakyCRLBackend{Backend: storage.NewFilesystemBackend(dir)}
+		store := storage.NewWithBackend(backend, filepath.Join(dir, "private"))
+
+		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(myCA.Init(ctx)).To(Succeed())
+
+		anc, ancKey, _ := upstreamCAWithKey("Flaky Ancestor CA")
+		ours, err := store.GetCACert(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(store.SaveCACert(ctx, append(append([]byte{}, ours...),
+			pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: anc.Raw})...))).To(Succeed())
+
+		storedCRL, err := store.GetCRL(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(store.UpdateCRL(ctx, append(append([]byte{}, storedCRL...),
+			emptyCRLNumbered(anc, ancKey, 99)...))).To(Succeed())
+		before := mustGetCRL(ctx, store)
+
+		// The file carries the rollback the guard exists to refuse.
+		path := filepath.Join(GinkgoT().TempDir(), "rollback.pem")
+		Expect(os.WriteFile(path, emptyCRLNumbered(anc, ancKey, 7), 0o644)).To(Succeed())
+		myCA.CRLChainFile = path
+
+		// readStoredCRL reads first and succeeds; publishedUpstream's read fails.
+		backend.failGetCRLAfter(1)
+		Expect(myCA.ReissueCRL(ctx)).To(MatchError(ContainSubstring("check for regressions")))
+
+		backend.stopFailing()
+		Expect(mustGetCRL(ctx, store)).To(Equal(before),
+			"the published chain must be untouched, still carrying 99")
 	})
 
 	// Counting was moved into readStoredCRL precisely because reissue, refresh

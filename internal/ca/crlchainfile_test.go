@@ -815,4 +815,143 @@ var _ = Describe("crl_chain_file: size and duplicates", func() {
 		Expect(err).To(MatchError(ContainSubstring("larger than")))
 		Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(1), "nothing published from a file we would not read whole")
 	})
+
+	It("pairs against the newest published CRL when an ancestor has more than one", func() {
+		// monotonicUpstream builds its comparison map from the published chain,
+		// and that side is not deduped: orderCRLChain collapses duplicates of
+		// this CA's own CRL only, and warnAboutAncestors warns about ancestor
+		// duplicates while publishing "all of them as supplied". So a stored
+		// [ours, A#9, A#5] is a shape an import can really produce.
+		//
+		// Assigning into the map unconditionally kept whichever came last, which
+		// is an artefact of how the operator concatenated their bundle. A#7 then
+		// compared against A#5, looked newer, and the rollback was published --
+		// round 2's CRITICAL, reachable again one layer down.
+		anc, ancKey, _ := upstreamCAWithKey("Duplicated Ancestor CA")
+		ours, err := store.GetCACert(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(store.SaveCACert(ctx, append(append([]byte{}, ours...),
+			pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: anc.Raw})...))).To(Succeed())
+
+		// Newest first, then a stale copy -- so "last wins" picks the wrong one.
+		stored := append(append([]byte{}, mustGetCRL(ctx, store)...),
+			emptyCRLNumbered(anc, ancKey, 9)...)
+		stored = append(stored, emptyCRLNumbered(anc, ancKey, 5)...)
+		Expect(store.UpdateCRL(ctx, stored)).To(Succeed())
+
+		myCA.CRLChainFile = writeChainFile(emptyCRLNumbered(anc, ancKey, 7))
+
+		Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
+		Expect(myCA.CRLChainRegressed()).NotTo(BeZero(),
+			"7 is older than the newest published copy, 9")
+
+		res, err := myCA.Generate(ctx, "node1.test", nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res).NotTo(BeNil())
+		Expect(myCA.Revoke(ctx, "node1.test")).To(Succeed())
+
+		chain := crlBlocks(mustGetCRL(ctx, store))
+		Expect(chain).To(HaveLen(2))
+		Expect(chain[1].Number.Int64()).To(Equal(int64(9)))
+	})
+
+	It("counts an ancestor the file has stopped listing", func() {
+		// The shrink alarm was drawn at the degenerate boundary only: going from
+		// two ancestors to one moved no counter and logged nothing at any level,
+		// because crlChainDiscarded counts CRLs the file *carries* that nothing
+		// signed, and an absent one is not carried. Same cause as the empty-file
+		// case -- a glob that matched one file fewer -- and just as permanent.
+		second, secondKey, secondCRL := upstreamCAWithKey("Second Ancestor CA")
+		trustUpstream()
+		ours, err := store.GetCACert(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(store.SaveCACert(ctx, append(append([]byte{}, ours...),
+			pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: second.Raw})...))).To(Succeed())
+		Expect(secondKey).NotTo(BeNil())
+
+		myCA.CRLChainFile = writeChainFile(upsCRL, secondCRL)
+		Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
+		Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(3))
+		Expect(myCA.CRLChainRemoved()).To(BeZero())
+
+		// The file now lists one of the two. The other is dropped -- honoured,
+		// because the file is authoritative, but unrecoverable here.
+		Expect(os.WriteFile(myCA.CRLChainFile, upsCRL, 0o644)).To(Succeed())
+		Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
+
+		Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(2))
+		// Two, not one: a pass that actually rewrites evaluates the file twice --
+		// once to decide, and once more inside crlChainLocked when
+		// reissueCRLLocked re-signs under the lock. That is the "per CRL per
+		// evaluation" cadence documented for the discard and regression counters,
+		// and this one shares it. Pinned at its value so the cadence cannot drift
+		// without a spec noticing.
+		Expect(myCA.CRLChainRemoved()).To(Equal(uint64(2)))
+		Expect(myCA.CRLChainDiscarded()).To(BeZero(),
+			"an ancestor the file omits is not a CRL the bundle refused")
+	})
+
+	It("orders number-less CRLs by ThisUpdate, in the file and against the published chain", func() {
+		// `openssl ca -gencrl` omits cRLNumber unless crl_extensions is
+		// configured, which the stock openssl.cnf leaves commented out -- so a
+		// number-less ancestor CRL is ordinary in this feature's audience. Both
+		// comparison sites fall back to ThisUpdate via newerCRL, and nothing
+		// exercised that: every fixture reaching crl_chain_file set Number, so
+		// reverting either site to an inline `a.Number != nil && b.Number != nil`
+		// check left the suite green while silently keeping whichever copy came
+		// first.
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		Expect(err).NotTo(HaveOccurred())
+		anc := selfSignedCA("Numberless Ancestor CA", key)
+		ours, err := store.GetCACert(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(store.SaveCACert(ctx, append(append([]byte{}, ours...),
+			pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: anc.Raw})...))).To(Succeed())
+
+		base := time.Now().UTC().Truncate(time.Second).Add(-24 * time.Hour)
+		older := handRolledCRLAt(anc, key, base)
+		newer := handRolledCRLAt(anc, key, base.Add(6*time.Hour))
+
+		// dedupeCRLs: the appending-CronJob shape, older copy first. Keeping the
+		// first would hand a client the ancestor's stale list.
+		myCA.CRLChainFile = writeChainFile(older, newer)
+		Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
+		chain := crlBlocks(mustGetCRL(ctx, store))
+		Expect(chain).To(HaveLen(2))
+		Expect(chain[1].Number).To(BeNil(), "the fixture must really carry no cRLNumber")
+		Expect(chain[1].ThisUpdate).To(BeTemporally("==", base.Add(6*time.Hour)))
+
+		// monotonicUpstream: the file now offers only the older one. Without the
+		// ThisUpdate fallback this is not seen as a regression and is published.
+		Expect(os.WriteFile(myCA.CRLChainFile, older, 0o644)).To(Succeed())
+		Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
+		Expect(myCA.CRLChainRegressed()).NotTo(BeZero())
+
+		chain = crlBlocks(mustGetCRL(ctx, store))
+		Expect(chain).To(HaveLen(2))
+		Expect(chain[1].ThisUpdate).To(BeTemporally("==", base.Add(6*time.Hour)),
+			"the newer number-less CRL must survive a rollback to the older one")
+	})
+
+	It("counts a chain-file failure on the revocation path, not only the maintenance pass", func() {
+		// crlChainFailures had one increment site, inside RefreshCRLChainFile.
+		// An unreadable file fails every revocation through crlChainLocked, and
+		// that moved nothing -- so the alert carrying the right remedy could not
+		// fire until the next hourly pass, while PuppetCACRLUpdateFailing sent
+		// the responder to check storage instead. The same shape monotonicUpstream
+		// was moved to the chokepoint to fix, one artefact over.
+		trustUpstream()
+		path := filepath.Join(GinkgoT().TempDir(), "bad.pem")
+		Expect(os.WriteFile(path, []byte("<html>502 Bad Gateway</html>\n"), 0o644)).To(Succeed())
+		myCA.CRLChainFile = path
+
+		res, err := myCA.Generate(ctx, "node1.test", nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res).NotTo(BeNil())
+
+		Expect(myCA.CRLChainFailures()).To(BeZero())
+		Expect(myCA.Revoke(ctx, "node1.test")).NotTo(Succeed())
+		Expect(myCA.CRLChainFailures()).NotTo(BeZero(),
+			"the file is what failed, so the file's counter must move")
+	})
 })

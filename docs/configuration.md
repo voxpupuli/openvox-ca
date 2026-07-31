@@ -359,9 +359,24 @@ a certificate. Ancestors are told apart by which certificate signed their CRL,
 not by issuer name, so a shared root that issued two sub-CAs with the same
 distinguished name still gets both their CRLs published.
 
+**An ancestor that disappears from the file is dropped**, and counted by
+`puppetca_crl_chain_removed_total`. The file is authoritative, so this is the
+documented way to stop publishing an ancestor — but it is also what a `cat`
+glob that matched one file fewer produces, and it cannot be undone here. Both
+cases are logged at `ERROR` naming the issuer.
+
 **An ancestor's CRL can never move backwards.** A CRL in the file that is older
 than the one already published for the same ancestor is passed over and the
-published one kept, counted by `puppetca_crl_chain_regressed_total`. Publishing
+published one kept, counted by `puppetca_crl_chain_regressed_total`. Ancestors
+are matched by which certificate signed their CRL, and ordered by CRL number, or
+by `thisUpdate` where there is none.
+
+There is one legitimate way to trip this: an ancestor CA rebuilt from backup that
+resumes numbering from a low value while still signing with the same key. To
+adopt it, drop that ancestor from the file for one publish cycle and then add the
+new CRL back — with nothing published to compare against, it is accepted. (An
+ancestor that *re-keys* needs nothing special: a different signing certificate is
+a different ancestor to this comparison.) Publishing
 it would un-revoke, fleet-wide, every certificate that ancestor revoked in
 between, and there is no legitimate cause for it: a stale copy, a rolled-back
 mirror, or a replay. Unlike a corrupt file this does *not* block revocation —

@@ -498,17 +498,43 @@ var _ = Describe("Export scopes", func() {
 		Expect(cm.Data["ca.crl"]).To(Equal(crlChain))
 	})
 
-	It("is unchanged for a single-block chain, whichever scope is asked for", func() {
+	DescribeTable("is unchanged for a single-block chain, whichever scope is asked for",
 		// The half of back-compatibility that does hold: a CA that issued its
 		// own root stores one block, so all three scopes agree. A CA that
 		// imported a chain is the case where the self default narrows what was
 		// being published.
-		single := "-----BEGIN CERTIFICATE-----\nT05MWQ==\n-----END CERTIFICATE-----\n"
-		src = stubSource{cert: []byte(single), crl: []byte(crlChain)}
-		for _, scope := range []string{"", "chain", "root"} {
-			data := exportWith(scope, "chain")
-			Expect(string(data["ca.crt"])).To(Equal(single), "scope %q", scope)
-		}
+		func(scope string) {
+			single := "-----BEGIN CERTIFICATE-----\nT05MWQ==\n-----END CERTIFICATE-----\n"
+			src = stubSource{cert: []byte(single), crl: []byte(crlChain)}
+			Expect(string(exportWith(scope, "chain")["ca.crt"])).To(Equal(single))
+		},
+		Entry("defaulted", ""),
+		Entry("chain", "chain"),
+		Entry("root", "root"),
+	)
+
+	It("publishes block 0 for self even when block 0 is not this CA's", func() {
+		// scoped is positional: self takes blocks[0] and root takes the last.
+		// That rests on an invariant enforced in another package -- orderCRLChain
+		// puts this CA's own CRL first -- and that invariant is knowingly
+		// violable: a CA whose stored block 0 is an ancestor's CRL starts and
+		// serves rather than refusing, a deliberate availability trade-off made
+		// on the read path.
+		//
+		// So self can publish an ancestor's CRL under ca.crl, and a consumer
+		// checking revocation against it sees none of this CA's revocations.
+		// Pinning the behaviour rather than changing it: the export layer has no
+		// way to identify which block is ours, and refusing here would turn a
+		// tolerated read-path state into an export outage. The detector is the
+		// warning the read path already emits.
+		upstreamFirst := "-----BEGIN X509 CRL-----\nVVBTVFJFQU0=\n-----END X509 CRL-----\n" +
+			"-----BEGIN X509 CRL-----\nT1VSUw==\n-----END X509 CRL-----\n"
+		src = stubSource{cert: []byte(certChain), crl: []byte(upstreamFirst)}
+
+		data := exportWith("self", "self")
+		Expect(string(data["ca.crl"])).To(ContainSubstring("VVBTVFJFQU0="),
+			"self is positional, so a foreign block 0 is what gets published")
+		Expect(string(data["ca.crl"])).NotTo(ContainSubstring("T1VSUw=="))
 	})
 
 	It("rejects an unknown cert scope", func() {
