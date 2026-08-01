@@ -188,12 +188,21 @@ type routeCase struct {
 //     POST /generate/{subject}, which this table does not cover
 //
 // Only three are listed below. "certificate not eligible for renewal" is
-// deliberately excluded: it is unreachable under the shipped single-anchor
-// topology, and the change that makes it reachable — trusting a second issuer
-// for client authentication — is exactly the change that must not slip past
-// this file. Left out, it lands in unrecognised403, which the route table
-// fails on, forcing a decision then. Listed, it would bucket as "admitted"
-// and the topology change would move no cell.
+// deliberately excluded, so it lands in unrecognised403, which the route table
+// fails on, forcing a decision then. Listed, it would bucket as "admitted" and
+// a change that made it reachable would move no cell.
+//
+// What that guards is the topology change: trusting a second issuer for client
+// authentication is what first lets a certificate the middleware admits fail
+// the gate's provenance question, and it must not slip past this file.
+//
+// It does not follow that the body is unreachable in production. Renewal
+// re-reads the stored CRL under the per-subject lock (reassertNotRevoked in
+// internal/ca) while the middleware answers revocation from this process's CRL
+// cache, so on the HA backends a replica whose cache is behind storage admits a
+// revoked certificate and then refuses the renewal with exactly this body. The
+// fixture cannot reach that: it is one process whose cache is always current,
+// so here the two always agree.
 //
 // Note "client certificate required" is a strict prefix of the renewal
 // handler's "client certificate required for renewal", so these must be

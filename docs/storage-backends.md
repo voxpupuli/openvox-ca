@@ -27,9 +27,17 @@ Two things are true regardless of backend:
   [CA cert/key as local files](#ca-certkey-as-local-files).
 
 In the HA backends (`etcd`, `redis`, `postgres`, `mysql`), any replica can sign,
-revoke, or refresh the CRL and the others see the change immediately;
-`openvox-ca` coordinates the replicas and recovers automatically if one crashes.
-You don't need to configure any of that.
+revoke, or refresh the CRL, and the shared state — certificates, CSRs, the
+inventory, and the CRL as served by `GET /certificate_revocation_list/ca` —
+changes for every replica at once; `openvox-ca` coordinates the replicas and
+recovers automatically if one crashes. You don't need to configure any of that.
+
+One thing does not follow from that, and it matters when you are locking an
+agent out: each process *enforces* revocation from a copy of the CRL it holds in
+memory, so a peer that did not perform the revocation keeps admitting the
+revoked certificate until it re-signs or restarts. See
+[revocation is not enforced cluster-wide straight away](api.md#revocation-cluster-wide),
+which also covers the one route that is exempt.
 
 ---
 
