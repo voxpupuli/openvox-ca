@@ -6,9 +6,8 @@ HTTP request metrics expected of a Go web service, plus CA-specific series
 describing the **CA certificate**, its **CRL**, and every known (non-deleted)
 **leaf certificate** — including issue/expiry timestamps and issuance status.
 
-A ready-to-import [Jsonnet alerting mixin](../mixin/) is included for alerting on
-impending CA, CRL, and leaf-certificate expiry, on pending certificate requests,
-and on Kubernetes export failures.
+A ready-to-import [Jsonnet alerting mixin](../mixin/) is included; see
+[Alerting](#alerting) for what it covers.
 
 ## Enabling the exporter
 
@@ -89,24 +88,15 @@ the Unix epoch, the Prometheus convention for `*_timestamp_seconds` gauges.
 | `puppetca_crl_next_update_timestamp_seconds` | CRL `NextUpdate` (expiry) time. |
 | `puppetca_crl_revoked_certificates` | Number of certificates currently listed in the CRL. |
 | `puppetca_crl_update_failures_total` | Counter of failures to amend the CRL — a revocation that could not be recorded, or a CRL that could not be re-signed or written (across the revoke, cleanup, reissue and refresh paths). A rising value means the CRL is not being maintained; for revocations it means a superseded certificate may still be a valid credential. Resets to `0` on process restart. |
-| `puppetca_crl_cached_number` | CRL number of the copy **this replica** is answering revocation checks from. Every other CRL metric above is read from storage and so is identical on every replica; this one is per-process. |
+| `puppetca_crl_cached_number` | CRL number of the copy **this replica** is answering revocation checks from. `number`, `this_update`, `next_update` and `revoked_certificates` above are read from storage and so are identical on every replica; this one and both `*_failures_total` counters are per-process and have to be checked on each. |
 | `puppetca_crl_sync_failures_total` | Counter of failures to reload the stored CRL into that in-memory copy — an unreadable or unparseable CRL, or one this CA did not sign. While it rises the replica keeps enforcing whichever CRL it already held. Resets to `0` on process restart. |
-
-#### Watching revocation propagate
 
 Each replica decides revocation from `puppetca_crl_cached_number` and reloads it
 from storage every `crl_sync_interval_sec` (60s by default), so after a
-revocation it briefly trails `puppetca_crl_number`:
-
-```promql
-puppetca_crl_number - puppetca_crl_cached_number > 0
-```
-
-A gap that persists is a replica still admitting certificates the rest of the
-fleet has revoked. `puppetca_crl_sync_failures_total` usually says why; if it is
-flat, the reads are succeeding and the stored CRL genuinely has not advanced.
-Restarting the replica reloads the CRL unconditionally. Both are alerted on by
-the [mixin](../mixin/).
+revocation it briefly trails `puppetca_crl_number`. A gap that persists is a
+replica still admitting certificates the rest of the fleet has revoked — see
+[watching revocation propagate](#watching-revocation-propagate) below for the
+query, and `puppetca_crl_sync_failures_total` for why it is stuck.
 
 ### Leaf certificates
 
@@ -169,7 +159,32 @@ puppetca_k8s_export_last_error_timestamp_seconds
 or
 puppetca_k8s_export_last_error_timestamp_seconds
   unless puppetca_k8s_export_last_success_timestamp_seconds
+
+# Replicas enforcing a CRL behind the stored one (see below)
+puppetca_crl_number - puppetca_crl_cached_number > 0
+or
+puppetca_crl_cached_number unless puppetca_crl_number
 ```
+
+### Watching revocation propagate
+
+The query above is how you confirm a revocation has reached the whole fleet. It
+is normally empty, and briefly non-empty after each revocation while replicas
+pick the new CRL up on their `crl_sync_interval_sec` timer. A replica that stays
+in it is still admitting certificates the rest of the fleet has revoked.
+
+The second arm matters as much as the first: a replica whose stored CRL cannot
+be read or parsed publishes no `puppetca_crl_number` at all, so the subtraction
+alone would go quiet in exactly the case worth paging on.
+
+`puppetca_crl_sync_failures_total` usually says why a replica is stuck. If it is
+flat, the reads are succeeding and the stored CRL genuinely has not advanced.
+
+Restarting the replica reloads the CRL — but startup verifies it against this
+CA's certificate the same way the reload does, so if the stored CRL is not one
+this CA signed the process will refuse to start rather than serve from it. That
+is the intended outcome: re-sign the CRL with the current CA certificate (or
+restore the certificate that signed it) instead of working around the refusal.
 
 ## Alerting
 

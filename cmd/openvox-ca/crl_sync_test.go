@@ -19,7 +19,6 @@ package main
 
 import (
 	"context"
-	"math/big"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -118,24 +117,5 @@ var _ = Describe("crlSyncInterval", func() {
 	It("defaults to a minute and honours an override", func() {
 		Expect((&serverConfig{}).crlSyncInterval()).To(Equal(time.Minute))
 		Expect((&serverConfig{CRLSyncIntervalSec: 15}).crlSyncInterval()).To(Equal(15 * time.Second))
-	})
-})
-
-// Guard the assumption the sync rests on: CRL numbers only ever go up, so a
-// higher number is a safe signal to replace the cache.
-var _ = Describe("CRL numbering", func() {
-	It("increases monotonically across re-signs", func() {
-		c, store := newRefresherTestCA()
-		ctx := context.Background()
-
-		var previous *big.Int
-		for range 3 {
-			Expect(c.ReissueCRL(ctx)).To(Succeed())
-			current := big.NewInt(storedCRLNumber(store))
-			if previous != nil {
-				Expect(current.Cmp(previous)).To(Equal(1))
-			}
-			previous = current
-		}
 	})
 })

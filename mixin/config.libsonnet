@@ -55,8 +55,11 @@
 
     // Failures to reload the CRL from storage. Same shape as the CRL-update
     // alert — a counter that resets on restart, so increase() over a window.
+    // Deliberately shorter than crlLagFor: both symptoms of a stuck replica
+    // start at the same instant, so the warning that explains why only reaches
+    // the operator before the page it explains if it debounces for less time.
     crlSyncWindow: '1h',
-    crlSyncFor: '15m',
+    crlSyncFor: '5m',
 
     // --- Kubernetes export ---
     // A target alerts while its most recent apply attempt failed (last-error

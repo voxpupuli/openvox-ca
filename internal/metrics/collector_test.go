@@ -175,6 +175,38 @@ var _ = Describe("Collector", func() {
 		Expect(gaugeValue(g.findByLabels("puppetca_crl_cached_number", nil))).To(Equal(stored))
 	})
 
+	It("reports a nonzero sync-failure count once a replica has failed to reload", func() {
+		peer := ca.New(storage.New(store.CADir()), ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		Expect(peer.Init(ctx)).To(Succeed())
+
+		// Corrupt the stored CRL so the next sync refuses it.
+		Expect(store.UpdateCRL(ctx, []byte("not a CRL"))).To(Succeed())
+		_, err := peer.SyncCRLCache(ctx)
+		Expect(err).To(HaveOccurred())
+
+		// Asserting the value rather than just its presence is the point: both
+		// failure counters start at zero and are otherwise only ever observed
+		// there, so transposing their descriptors would go unnoticed.
+		g := gather(metrics.NewCollector(peer))
+		Expect(counterValue(g.findByLabels("puppetca_crl_sync_failures_total", nil))).
+			To(Equal(float64(peer.CRLSyncFailures())))
+		Expect(counterValue(g.findByLabels("puppetca_crl_sync_failures_total", nil))).
+			To(BeNumerically(">", 0))
+		Expect(counterValue(g.findByLabels("puppetca_crl_update_failures_total", nil))).
+			To(Equal(0.0), "a failed reload is not a failed amendment")
+	})
+
+	It("omits the cached CRL number rather than reporting zero when no CRL is loaded", func() {
+		// The alert subtracts the cached number from the stored one, so a zero
+		// here would read as "maximally behind" and page for every replica that
+		// has not finished initialising. Absent is the only safe encoding.
+		uninitialised := ca.New(storage.New(GinkgoT().TempDir()), ca.AutosignConfig{Mode: "off"}, "puppet.test")
+
+		g := gather(metrics.NewCollector(uninitialised))
+		Expect(g.findByLabels("puppetca_crl_cached_number", nil)).To(BeNil())
+		Expect(gaugeValue(g.findByLabels("puppetca_ca_ready", nil))).To(Equal(0.0))
+	})
+
 	It("reports per-leaf metrics with issuance state", func() {
 		signCert("signed-node")
 		signCert("revoked-node")

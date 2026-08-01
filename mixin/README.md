@@ -98,4 +98,7 @@ jsonnet -J vendor -m . mixin.jsonnet
 | `pendingFor` | `1h` | How long a request may stay pending before alerting. |
 | `crlUpdateWindow` | `1h` | Window over which CRL-update failures are counted (the metric is a restart-resetting counter). |
 | `crlUpdateFor` | `15m` | `for:` debounce for the CRL-update-failure alert. |
+| `crlSyncWindow` | `1h` | Window over which CRL-reload failures are counted (the metric is a restart-resetting counter). |
+| `crlSyncFor` | `5m` | `for:` debounce for the CRL-reload-failure alert. Keep it below `crlLagFor` so the warning precedes the page it explains. |
+| `crlLagFor` | `10m` | How long a replica may keep enforcing a CRL behind the stored one before it is paged on. Raise it if you have raised `crl_sync_interval_sec`. |
 | `expiryFor` / `scrapeFor` / `readyFor` / `downFor` / `k8sExportFailingFor` | `1h` / `15m` / `10m` / `5m` / `15m` | `for:` debounce durations. |
