@@ -274,7 +274,7 @@ func sanitiseForLog(s string) string {
 	s = strings.ReplaceAll(s, "\n", "\uFFFD")
 	s = strings.ReplaceAll(s, "\r", "\uFFFD")
 	return strings.Map(func(r rune) rune {
-		if r == '\uFFFD' || unicode.IsControl(r) {
+		if unicode.IsControl(r) {
 			return '\uFFFD'
 		}
 		return r

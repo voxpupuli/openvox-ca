@@ -281,6 +281,22 @@ func mintCRL(cert *x509.Certificate, key *ecdsa.PrivateKey, revoked ...*big.Int)
 	return crl
 }
 
+// mintCRLUntil is mintCRL with an explicit NextUpdate, so a spec can
+// distinguish which of two sets is installed using only the exported API:
+// Usable at a time past the first CRL's expiry is true only for the second.
+func mintCRLUntil(cert *x509.Certificate, key *ecdsa.PrivateKey, until time.Time) *x509.RevocationList {
+	GinkgoHelper()
+	der, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+		Number:     big.NewInt(time.Now().UnixNano()),
+		ThisUpdate: time.Now().Add(-time.Hour),
+		NextUpdate: until,
+	}, cert, key)
+	Expect(err).NotTo(HaveOccurred())
+	crl, err := x509.ParseRevocationList(der)
+	Expect(err).NotTo(HaveOccurred())
+	return crl
+}
+
 var _ = Describe("client_ca CRL loading", func() {
 	var (
 		root      *x509.Certificate
@@ -470,6 +486,26 @@ var _ = Describe("refreshClientCRLs", func() {
 		return strings.Join(names, " ")
 	}
 
+	lastReload := func(name string) float64 {
+		GinkgoHelper()
+		families, err := reg.Gather()
+		Expect(err).NotTo(HaveOccurred())
+		for _, f := range families {
+			if f.GetName() != "puppetca_client_crl_last_reload_timestamp_seconds" {
+				continue
+			}
+			for _, m := range f.GetMetric() {
+				for _, l := range m.GetLabel() {
+					if l.GetName() == "client_ca" && l.GetValue() == name {
+						return m.GetGauge().GetValue()
+					}
+				}
+			}
+		}
+		Fail("no puppetca_client_crl_last_reload_timestamp_seconds for " + name)
+		return 0
+	}
+
 	gauge := func(name string) float64 {
 		GinkgoHelper()
 		families, err := reg.Gather()
@@ -513,6 +549,29 @@ var _ = Describe("refreshClientCRLs", func() {
 		Expect(gauge("server")).To(Equal(1.0))
 		Expect(gauge("agent")).To(Equal(1.0))
 
+	})
+
+	It("stamps the reload timestamp only when the file is actually applied", func() {
+		// The staleness rule is the only thing covering the retain-previous
+		// branches, and this gauge is its sole input. Stamping it on every pass
+		// -- beside the zero-init, say -- would mean the series never goes stale
+		// and the alert built for those branches could never fire.
+		cfg := &serverConfig{}
+		cfg.ClientCA = []config.ClientCA{{
+			Name: "server", File: writeCertFile(serverCA),
+			CRLFile: writeCRLFile(mintCRL(serverCA, serverKey)),
+		}}
+		domains, err := buildTrustDomains(cfg, ownCA, nil)
+		Expect(err).NotTo(HaveOccurred())
+		refreshClientCRLs(cfg, domains, metrics)
+		applied := lastReload("server")
+		Expect(applied).To(BeNumerically(">", 0))
+
+		// A reload that cannot read the file keeps the previous set and must not
+		// advance the stamp -- that is exactly the state the alert reports.
+		cfg.ClientCA[0].CRLFile = filepath.Join(GinkgoT().TempDir(), "gone.pem")
+		refreshClientCRLs(cfg, domains, metrics)
+		Expect(lastReload("server")).To(Equal(applied), "a failed reload is not an apply")
 	})
 
 	It("keeps the previous set and keeps publishing the gauge when a reload fails", func() {
@@ -673,6 +732,39 @@ var _ = Describe("refreshClientCRLs", func() {
 			"the refusals series is zero-initialised regardless of policy")
 	})
 
+	It("installs the reloaded set, not just the one built at startup", func() {
+		// Every other refresh spec here is a degradation designed to be rejected,
+		// so all of them pass against a build-time set that was never replaced --
+		// deleting the install from the accept arm left the suite green. The
+		// steady state is the branch's whole point: a foreign issuer republishes
+		// its CRL and the next pass has to apply it. Losing that is invisible on
+		// all three signals: the retained CRLs stay current so the gauge reads 1,
+		// clients are still served so no refusal is counted, and recordReload
+		// still fires so the staleness gauge advances.
+		//
+		// The two sets are told apart by validity window, which the exported API
+		// can see: only the reloaded CRL is still current in two hours.
+		soon := time.Now().Add(time.Hour)
+		later := time.Now().Add(48 * time.Hour)
+
+		cfg := &serverConfig{}
+		cfg.ClientCA = []config.ClientCA{{
+			Name: "server", File: writeCertFile(serverCA),
+			CRLFile: writeCRLFile(mintCRLUntil(serverCA, serverKey, soon)),
+		}}
+		domains, err := buildTrustDomains(cfg, ownCA, nil)
+		Expect(err).NotTo(HaveOccurred())
+		refreshClientCRLs(cfg, domains, metrics)
+		Expect(domains[1].RevocationSet().Usable(time.Now().Add(2*time.Hour))).To(BeFalse(),
+			"the startup set expires within the hour")
+
+		cfg.ClientCA[0].CRLFile = writeCRLFile(mintCRLUntil(serverCA, serverKey, later))
+		refreshClientCRLs(cfg, domains, metrics)
+
+		Expect(domains[1].RevocationSet().Usable(time.Now().Add(2*time.Hour))).To(BeTrue(),
+			"a republished crl_file must actually be applied")
+	})
+
 	It("publishes the gauge as unusable when every CRL has expired", func() {
 		cfg := &serverConfig{}
 		cfg.ClientCA = []config.ClientCA{
@@ -764,6 +856,36 @@ var _ = Describe("client_ca startup warnings", func() {
 
 		Expect(out).To(ContainSubstring("honours pp_cli_auth"))
 		Expect(out).To(ContainSubstring("administrator of this CA"))
+	})
+
+	It("warns that a grant spans every anchor in a multi-anchor entry", func() {
+		// admin_cns and allow_pp_cli_auth are properties of the *entry*, so a
+		// file bundling two issuers honours a name from either -- while the
+		// documentation says a name means something only within its issuer's
+		// namespace. This warning is the only thing that says otherwise, and it
+		// had no regression protection while both its siblings did.
+		second, _ := mintCA("Second CA", nil, nil)
+		out := build(config.ClientCA{
+			Name: "pair", File: writeCertFile(serverCA, second),
+			CRLFile:  writeCRLFile(mintCRL(serverCA, serverKey)),
+			AdminCNs: []string{"ops-admin"},
+		}, config.RevocationCheck)
+
+		Expect(out).To(ContainSubstring("more than one anchor"))
+		Expect(out).To(ContainSubstring("Server CA"))
+		Expect(out).To(ContainSubstring("Second CA"))
+	})
+
+	It("says nothing about spanning anchors when the entry grants nothing", func() {
+		// The guard is the half most likely to drift: a bundle with no grants
+		// spans nothing, so the warning would be noise.
+		second, _ := mintCA("Second CA", nil, nil)
+		out := build(config.ClientCA{
+			Name: "pair", File: writeCertFile(serverCA, second),
+			CRLFile: writeCRLFile(mintCRL(serverCA, serverKey)),
+		}, config.RevocationCheck)
+
+		Expect(out).NotTo(ContainSubstring("more than one anchor"))
 	})
 
 	It("names the uncovered anchor under require", func() {

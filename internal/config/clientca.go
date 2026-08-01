@@ -93,7 +93,6 @@ type ClientCAConfig struct {
 // Enabled reports whether any foreign trust domain is configured.
 func (c *ClientCAConfig) Enabled() bool { return c != nil && len(c.ClientCA) > 0 }
 
-// Policy resolves the revocation policy, defaulting to require.
 // ResolvedPolicy is Policy with any unrecognised value folded to require.
 //
 // Validation rejects a bad policy string, but it lives in this package and runs
@@ -109,6 +108,8 @@ func (c *ClientCAConfig) ResolvedPolicy() string {
 	return p
 }
 
+// Policy returns the configured revocation policy, defaulting to require when
+// unset. It does not validate the value; see ResolvedPolicy.
 func (c *ClientCAConfig) Policy() string {
 	if c.ClientRevocationPolicy == "" {
 		return RevocationRequire

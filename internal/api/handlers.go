@@ -197,7 +197,7 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
-	slog.Debug("GET certificate_status", "subject", subject, "client", clientCN(r))
+	slog.Debug("GET certificate_status", "subject", subject, "client", clientCNForLog(r))
 
 	// Check signed dir first.
 	certPEM, err := s.CA.Storage.GetCert(r.Context(), subject)
@@ -237,7 +237,7 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
-	slog.Debug("PUT certificate_status", "subject", subject, "client", clientCN(r))
+	slog.Debug("PUT certificate_status", "subject", subject, "client", clientCNForLog(r))
 
 	var body PutStatusBody
 	if !decodeJSONBody(w, r, &body) {
@@ -285,7 +285,7 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		if cn := clientCN(r); cn != "" && s.destructiveOps != nil && s.destructiveOps.Record(cn) {
 			slog.Warn("High rate of destructive operations detected",
-				"client", cn, "operation", "revoke")
+				"client", sanitiseForLog(cn), "operation", "revoke")
 		}
 		w.WriteHeader(http.StatusNoContent)
 
@@ -298,7 +298,7 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetCert(w http.ResponseWriter, r *http.Request) {
 	subject := r.PathValue("subject")
-	slog.Debug("GET certificate", "subject", subject, "client", clientCN(r))
+	slog.Debug("GET certificate", "subject", subject, "client", clientCNForLog(r))
 
 	// Special case: "ca" returns the CA cert.
 	if subject == "ca" {
@@ -350,7 +350,7 @@ func (s *Server) handlePutCert(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
-	slog.Debug("PUT certificate (import)", "subject", subject, "client", clientCN(r))
+	slog.Debug("PUT certificate (import)", "subject", subject, "client", clientCNForLog(r))
 
 	certPEM, err := io.ReadAll(io.LimitReader(r.Body, maxJSONBody))
 	if err != nil {
@@ -392,7 +392,7 @@ func (s *Server) handlePutCert(w http.ResponseWriter, r *http.Request) {
 // --- CRL ---
 
 func (s *Server) handleGetCRL(w http.ResponseWriter, r *http.Request) {
-	slog.Debug("GET certificate_revocation_list/ca", "client", clientCN(r))
+	slog.Debug("GET certificate_revocation_list/ca", "client", clientCNForLog(r))
 
 	// Honor If-Modified-Since.
 	if ims := r.Header.Get("If-Modified-Since"); ims != "" {
@@ -421,7 +421,7 @@ func (s *Server) handleGetCRL(w http.ResponseWriter, r *http.Request) {
 // operator refresh a CRL whose NextUpdate has lapsed (or is about to) without
 // having to revoke a certificate.
 func (s *Server) handleReissueCRL(w http.ResponseWriter, r *http.Request) {
-	slog.Debug("PUT certificate_revocation_list/ca", "client", clientCN(r))
+	slog.Debug("PUT certificate_revocation_list/ca", "client", clientCNForLog(r))
 
 	if err := s.CA.ReissueCRL(r.Context()); err != nil {
 		slog.Warn("CRL reissue failed", "error", err)
@@ -454,7 +454,7 @@ func (s *Server) handleGetRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
-	slog.Debug("GET certificate_request", "subject", subject, "client", clientCN(r))
+	slog.Debug("GET certificate_request", "subject", subject, "client", clientCNForLog(r))
 
 	csrPEM, err := s.CA.Storage.GetCSR(r.Context(), subject)
 	if err != nil {
@@ -479,7 +479,7 @@ func (s *Server) handlePutRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
-	slog.Debug("PUT certificate_request", "subject", subject, "client", clientCN(r))
+	slog.Debug("PUT certificate_request", "subject", subject, "client", clientCNForLog(r))
 
 	// SECURITY: Limit CSR body to 1 MiB to prevent memory exhaustion.
 	// NIST 800-53: SC-5 (Denial-of-Service Protection)
@@ -526,7 +526,7 @@ func (s *Server) handleDeleteRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
-	slog.Debug("DELETE certificate_request", "subject", subject, "client", clientCN(r))
+	slog.Debug("DELETE certificate_request", "subject", subject, "client", clientCNForLog(r))
 
 	if err := s.CA.Storage.DeleteCSR(r.Context(), subject); err != nil {
 		http.Error(w, "CSR not found", http.StatusNotFound)
@@ -557,7 +557,7 @@ func (s *Server) handlePostGenerate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
-	slog.Debug("POST generate", "subject", subject, "client", clientCN(r))
+	slog.Debug("POST generate", "subject", subject, "client", clientCNForLog(r))
 
 	// Optional DNS alt names from query params (?dns=a&dns=b).
 	dnsAltNames := r.URL.Query()["dns"]
@@ -617,23 +617,33 @@ func csrValidationError(err error) bool {
 		strings.Contains(s, "invalid CSR signature")
 }
 
-// clientCN extracts the Common Name from the TLS client certificate, if any.
-// Returns "" when TLS is not configured or no client cert is presented.
-// clientCN returns the presented certificate's common name, sanitised.
+// clientCN returns the presented certificate's common name, verbatim. Empty
+// when TLS is not configured or no client certificate was presented.
 //
-// Sanitised here rather than at each of its twenty call sites: the value comes
-// straight off a client-supplied certificate, several callers put it in a log
-// line, and a rule applied per call site is a rule that gets missed -- twice,
-// in this middleware alone.
+// Verbatim, because this is an *identity*: the renewal handler compares it
+// against a CSR's subject and passes it to Renew as the name to issue for.
+// Sanitising it here looked like closing the log-injection class at its source
+// and was not -- the middleware reads the field directly anyway, so the class
+// stayed open -- while sanitiseForLog truncates at 256 bytes, which this CA's
+// certname grammar permits. The effect was that an agent with a long certname
+// got a permanent 403 on a re-key renewal, comparing a truncated name against
+// its own correct CSR.
 //
-// This is an identifier for logs and rate limiting, not an authorisation input;
-// authorisation reads the attributed domain's own lists. See clientPrincipal
-// for why the bare name is not an identity once client_ca is configured.
+// Use clientCNForLog anywhere the value is displayed rather than compared.
 func clientCN(r *http.Request) string {
 	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
-		return sanitiseForLog(r.TLS.PeerCertificates[0].Subject.CommonName)
+		return r.TLS.PeerCertificates[0].Subject.CommonName
 	}
 	return ""
+}
+
+// clientCNForLog is clientCN neutralised for a log line.
+//
+// A separate function rather than a rule remembered at each call site: the two
+// uses are genuinely different, and naming them apart is what stops the next
+// edit sanitising an identity or logging one raw.
+func clientCNForLog(r *http.Request) string {
+	return sanitiseForLog(clientCN(r))
 }
 
 // signInBatches signs subjects in chunks of SignBatchLimit (if set) and merges
@@ -810,7 +820,7 @@ func (s *Server) handleDeleteStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
-	slog.Debug("DELETE certificate_status", "subject", subject, "client", clientCN(r))
+	slog.Debug("DELETE certificate_status", "subject", subject, "client", clientCNForLog(r))
 
 	if err := s.CA.Clean(r.Context(), subject); err != nil {
 		slog.Warn("Clean failed", "subject", subject, "error", err)
@@ -823,7 +833,7 @@ func (s *Server) handleDeleteStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if cn := clientCN(r); cn != "" && s.destructiveOps != nil && s.destructiveOps.Record(cn) {
 		slog.Warn("High rate of destructive operations detected",
-			"client", cn, "operation", "clean")
+			"client", sanitiseForLog(cn), "operation", "clean")
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -831,7 +841,7 @@ func (s *Server) handleDeleteStatus(w http.ResponseWriter, r *http.Request) {
 // --- Certificate statuses (list all) ---
 
 func (s *Server) handleGetStatuses(w http.ResponseWriter, r *http.Request) {
-	slog.Debug("GET certificate_statuses", "client", clientCN(r))
+	slog.Debug("GET certificate_statuses", "client", clientCNForLog(r))
 
 	stateFilter := r.URL.Query().Get("state") // "requested", "signed", "revoked", or ""
 
@@ -902,7 +912,7 @@ type CertExpiration struct {
 }
 
 func (s *Server) handleGetExpirations(w http.ResponseWriter, r *http.Request) {
-	slog.Debug("GET expirations", "client", clientCN(r))
+	slog.Debug("GET expirations", "client", clientCNForLog(r))
 
 	// Without this guard a request that reaches the handler before Init()
 	// finishes would dereference a nil CACert below and panic the server.
@@ -938,7 +948,7 @@ type SignRequestBody struct {
 }
 
 func (s *Server) handlePostSign(w http.ResponseWriter, r *http.Request) {
-	cn := clientCN(r)
+	cn := clientCNForLog(r)
 	slog.Debug("POST sign", "client", cn)
 
 	var body SignRequestBody
