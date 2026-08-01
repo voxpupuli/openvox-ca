@@ -11,6 +11,11 @@ alerting rules for the openvox-ca exporter. It alerts on:
 - **CRL update failures** — the CA failing to amend its CRL (a revocation it
   could not record, or a CRL it could not re-sign or write), which can leave
   revoked or superseded certificates still valid.
+- **CRL propagation** — a replica that cannot reload the stored CRL, or that
+  keeps enforcing one behind it. On a shared backend each replica decides
+  revocation from its own copy, so a replica left behind still accepts
+  certificates revoked elsewhere; see `crl_sync_interval_sec` in
+  [configuration](../docs/configuration.md).
 - **Kubernetes export** targets whose applies keep failing (only when the
   [Kubernetes export](../docs/kubernetes-export.md) feature is in use).
 

@@ -89,6 +89,24 @@ the Unix epoch, the Prometheus convention for `*_timestamp_seconds` gauges.
 | `puppetca_crl_next_update_timestamp_seconds` | CRL `NextUpdate` (expiry) time. |
 | `puppetca_crl_revoked_certificates` | Number of certificates currently listed in the CRL. |
 | `puppetca_crl_update_failures_total` | Counter of failures to amend the CRL — a revocation that could not be recorded, or a CRL that could not be re-signed or written (across the revoke, cleanup, reissue and refresh paths). A rising value means the CRL is not being maintained; for revocations it means a superseded certificate may still be a valid credential. Resets to `0` on process restart. |
+| `puppetca_crl_cached_number` | CRL number of the copy **this replica** is answering revocation checks from. Every other CRL metric above is read from storage and so is identical on every replica; this one is per-process. |
+| `puppetca_crl_sync_failures_total` | Counter of failures to reload the stored CRL into that in-memory copy — an unreadable or unparseable CRL, or one this CA did not sign. While it rises the replica keeps enforcing whichever CRL it already held. Resets to `0` on process restart. |
+
+#### Watching revocation propagate
+
+Each replica decides revocation from `puppetca_crl_cached_number` and reloads it
+from storage every `crl_sync_interval_sec` (60s by default), so after a
+revocation it briefly trails `puppetca_crl_number`:
+
+```promql
+puppetca_crl_number - puppetca_crl_cached_number > 0
+```
+
+A gap that persists is a replica still admitting certificates the rest of the
+fleet has revoked. `puppetca_crl_sync_failures_total` usually says why; if it is
+flat, the reads are succeeding and the stored CRL genuinely has not advanced.
+Restarting the replica reloads the CRL unconditionally. Both are alerted on by
+the [mixin](../mixin/).
 
 ### Leaf certificates
 
@@ -158,5 +176,7 @@ puppetca_k8s_export_last_error_timestamp_seconds
 See the [`mixin/`](../mixin/) directory for the Jsonnet monitoring mixin and
 instructions for rendering or importing it. It alerts on exporter availability,
 CA/CRL/leaf expiry, pending requests, CRL update failures
-(`puppetca_crl_update_failures_total`), and Kubernetes export failures, with all
+(`puppetca_crl_update_failures_total`), a replica whose CRL has fallen behind
+the stored one (`puppetca_crl_cached_number`,
+`puppetca_crl_sync_failures_total`), and Kubernetes export failures, with all
 thresholds configurable.

@@ -138,6 +138,41 @@ var _ = Describe("Collector", func() {
 		crlUpdateFailures := g.findByLabels("puppetca_crl_update_failures_total", nil)
 		Expect(crlUpdateFailures).NotTo(BeNil())
 		Expect(counterValue(crlUpdateFailures)).To(Equal(0.0))
+
+		// Likewise the CRL-sync failure counter, which is what tells an operator
+		// this replica may be enforcing an out-of-date revocation list.
+		crlSyncFailures := g.findByLabels("puppetca_crl_sync_failures_total", nil)
+		Expect(crlSyncFailures).NotTo(BeNil())
+		Expect(counterValue(crlSyncFailures)).To(Equal(0.0))
+
+		// The cached CRL number is the copy this replica decides revocation
+		// from; on a replica that is up to date it equals the stored one.
+		cached := g.findByLabels("puppetca_crl_cached_number", nil)
+		Expect(cached).NotTo(BeNil())
+		Expect(gaugeValue(cached)).To(Equal(gaugeValue(g.findByLabels("puppetca_crl_number", nil))))
+	})
+
+	It("reports a cached CRL number behind the stored one on a replica that has not synced", func() {
+		signCert("divergent-node")
+
+		// A second CA over the same storage, with a CRL cache of its own.
+		peer := ca.New(storage.New(store.CADir()), ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		Expect(peer.Init(ctx)).To(Succeed())
+
+		Expect(myCA.Revoke(ctx, "divergent-node")).To(Succeed())
+
+		g := gather(metrics.NewCollector(peer))
+		stored := gaugeValue(g.findByLabels("puppetca_crl_number", nil))
+		cached := gaugeValue(g.findByLabels("puppetca_crl_cached_number", nil))
+		Expect(cached).To(BeNumerically("<", stored),
+			"the gap the alert fires on must be visible in the metrics")
+
+		updated, err := peer.SyncCRLCache(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(updated).To(BeTrue())
+
+		g = gather(metrics.NewCollector(peer))
+		Expect(gaugeValue(g.findByLabels("puppetca_crl_cached_number", nil))).To(Equal(stored))
 	})
 
 	It("reports per-leaf metrics with issuance state", func() {
