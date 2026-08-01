@@ -212,6 +212,22 @@ func (Build) Dist() error {
 
 	bins := []string{"openvox-ca", "openvox-ca-ctl"}
 
+	// Shipped alongside the binaries so a VM install has a unit file that
+	// matches this build's notification behaviour (see docs/systemd.md).
+	const unitFile = "openvox-ca.service"
+	unitSrc := filepath.Join("packaging", "systemd", unitFile)
+
+	// Archive contents, with the mode each entry must extract as. Stating the
+	// modes here rather than reading them back off the staged files keeps the
+	// tarball identical whatever umask the release is built under; deriving the
+	// executables from bins keeps the archive in step with what actually gets
+	// built.
+	archiveFiles := make([]archiveEntry, 0, len(bins)+1)
+	for _, b := range bins {
+		archiveFiles = append(archiveFiles, archiveEntry{name: b, mode: 0755})
+	}
+	archiveFiles = append(archiveFiles, archiveEntry{name: unitFile, mode: 0644})
+
 	var checksums []string
 	for _, v := range variants {
 		fmt.Printf("Building %s...\n", v.name)
@@ -232,7 +248,11 @@ func (Build) Dist() error {
 				}
 			}
 
-			if err := createTarGz(archive, tmpDir, bins); err != nil {
+			if err := sh.Copy(filepath.Join(tmpDir, unitFile), unitSrc); err != nil {
+				return "", fmt.Errorf("stage %s for %s: %w", unitFile, v.name, err)
+			}
+
+			if err := createTarGz(archive, tmpDir, archiveFiles); err != nil {
 				return "", fmt.Errorf("archive %s: %w", v.name, err)
 			}
 			return sha256File(archive)
@@ -300,7 +320,12 @@ func (Test) Unit() error {
 		return err
 	}
 
-	testArgs := append([]string{"test", "-json", "-cover", "-coverprofile=coverage.out"}, pkgs...)
+	// -race is not optional here: the notification path (internal/sdnotify) is
+	// driven concurrently by the heartbeat, the reload watcher, and a deferred
+	// Close, and its locking is only verified by specs that fail exclusively
+	// under the race detector. It costs roughly 15% on the slowest package.
+	// It needs cgo, which is the default everywhere this runs.
+	testArgs := append([]string{"test", "-race", "-json", "-cover", "-coverprofile=coverage.out"}, pkgs...)
 	testCmd := exec.Command("go", testArgs...)
 	tparseCmd := exec.Command("go", "tool", "tparse", "-all")
 
@@ -999,12 +1024,28 @@ func runComposeWithSpinner(extraEnv map[string]string, spinMsg string, args ...s
 	return cmdErr
 }
 
-func createTarGz(dst, srcDir string, files []string) (retErr error) {
+// archiveEntry is one file in a release tarball, with the permissions it must
+// extract as. The archive mixes executables with plain data (the systemd unit),
+// and neither the build host's umask nor a single hard-coded mode gets both
+// right.
+type archiveEntry struct {
+	name string
+	mode int64
+}
+
+func createTarGz(dst, srcDir string, files []archiveEntry) (retErr error) {
 	f, err := os.Create(dst)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	// Closed with the same care as the writers below: a failure surfacing here
+	// (ENOSPC on a deferred allocation, say) would otherwise be dropped, and
+	// the caller would checksum and publish a truncated release artefact.
+	defer func() {
+		if err := f.Close(); err != nil && retErr == nil {
+			retErr = err
+		}
+	}()
 
 	gz := gzip.NewWriter(f)
 	defer func() {
@@ -1019,13 +1060,17 @@ func createTarGz(dst, srcDir string, files []string) (retErr error) {
 		}
 	}()
 
-	for _, name := range files {
-		src := filepath.Join(srcDir, name)
+	for _, entry := range files {
+		src := filepath.Join(srcDir, entry.name)
 		fi, err := os.Stat(src)
 		if err != nil {
 			return err
 		}
-		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0755, Size: fi.Size()}); err != nil {
+		if err := tw.WriteHeader(&tar.Header{
+			Name: entry.name,
+			Mode: entry.mode,
+			Size: fi.Size(),
+		}); err != nil {
 			return err
 		}
 		rf, err := os.Open(src)

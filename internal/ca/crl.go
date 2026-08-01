@@ -161,6 +161,43 @@ func (c *CA) RefreshCRLIfDue(ctx context.Context, refreshBefore time.Duration) (
 	return reissued, err
 }
 
+// CRLSnapshot describes the CRL the CA holds in memory. It is a value copy of
+// the fields worth reporting, so a caller can inspect the CRL's freshness
+// without holding a lock, touching storage, or being handed the live
+// *x509.RevocationList the auth path reads.
+type CRLSnapshot struct {
+	// Number is the CRL number (RFC 5280 §5.2.3), which increases by one on
+	// every re-sign.
+	Number *big.Int
+	// NextUpdate bounds the CRL's validity window; a NextUpdate in the past
+	// means clients are being served a stale CRL. ThisUpdate is deliberately
+	// not carried: no caller needs it, and the Prometheus collector reads its
+	// own copy straight from storage.
+	NextUpdate time.Time
+	// Revoked is the number of certificates listed on the CRL.
+	Revoked int
+}
+
+// CRLSnapshot returns the in-memory CRL's metadata, and whether a CRL has been
+// loaded at all. It reads the same cache the authentication path uses, so it
+// costs a read lock and no storage round-trip — cheap enough to call on a
+// timer (e.g. to refresh the service manager's status text).
+func (c *CA) CRLSnapshot() (CRLSnapshot, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.cachedCRL == nil {
+		return CRLSnapshot{}, false
+	}
+	snap := CRLSnapshot{
+		NextUpdate: c.cachedCRL.NextUpdate,
+		Revoked:    len(c.cachedCRL.RevokedCertificateEntries),
+	}
+	if c.cachedCRL.Number != nil {
+		snap.Number = new(big.Int).Set(c.cachedCRL.Number)
+	}
+	return snap, true
+}
+
 // DefaultCRLRefreshBefore returns the default refresh window: the CRL is
 // re-signed once less than a third of its validity remains (i.e. at ~2/3 of
 // its lifetime), leaving ample margin to ride out replica outages before the

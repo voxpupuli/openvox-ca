@@ -33,6 +33,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/voxpupuli/openvox-ca/internal/ca"
@@ -46,11 +47,52 @@ const maxJSONBody = 1 << 20 // 1 MiB
 
 // AuthConfig is the mTLS authorization configuration wired into the server.
 // Nil means no mTLS enforcement (plain HTTP / dev mode).
+//
+// AuthConfig must be used through a pointer: it carries a lock and is read
+// concurrently by every request.
 type AuthConfig struct {
 	CACert            *x509.Certificate
-	AllowList         map[string]bool // admin CNs (puppet-server hostnames)
+	AllowList         map[string]bool // admin CNs (puppet-server hostnames); read via IsAdminCN
 	NoPpCliAuth       bool            // when true, pp_cli_auth extension does not grant admin access
 	AllowPublicStatus bool            // when true, GET /certificate_status is public (no client cert required)
+
+	// mu guards AllowList, which SetAllowList replaces while requests are in
+	// flight (the operator adding or removing a compile server, without a
+	// restart). The other fields are set once before the server starts
+	// serving and never change.
+	mu sync.RWMutex
+}
+
+// IsAdminCN reports whether cn is on the admin allow list.
+//
+// SECURITY: this is the read side of the allow list and the only place the map
+// may be consulted from. Reading the field directly would race SetAllowList and
+// — because that swap is what a configuration reload uses to withdraw a
+// compile server's admin rights — could serve a stale authorization decision.
+// NIST 800-53: AC-3 (Access Enforcement)
+func (c *AuthConfig) IsAdminCN(cn string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.AllowList[cn]
+}
+
+// SetAllowList replaces the admin allow list and returns the list it replaced,
+// so the caller can log exactly which CNs gained or lost admin authority. The
+// caller must not retain or mutate the map it passes in; ownership passes to
+// the AuthConfig. The returned map is no longer consulted and is the caller's.
+//
+// The replacement is atomic with respect to in-flight requests: each request
+// takes the read lock once, so it sees either the whole old list or the whole
+// new one — never a half-applied update in which a revoked CN is still an
+// admin and a newly added one is not yet. Returning the previous list from
+// under the same write lock keeps the audit record consistent with the swap;
+// reading it separately beforehand would race a concurrent reload.
+func (c *AuthConfig) SetAllowList(allowList map[string]bool) map[string]bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	previous := c.AllowList
+	c.AllowList = allowList
+	return previous
 }
 
 type Server struct {

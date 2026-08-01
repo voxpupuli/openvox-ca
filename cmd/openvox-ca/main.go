@@ -34,7 +34,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -44,6 +43,7 @@ import (
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/k8sexport"
 	"github.com/voxpupuli/openvox-ca/internal/metrics"
+	"github.com/voxpupuli/openvox-ca/internal/sdnotify"
 	"github.com/voxpupuli/openvox-ca/internal/signer"
 	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
@@ -226,6 +226,25 @@ func newRootCmd() *cobra.Command {
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, syscall.SIGINT)
 			defer stop()
 
+			// SIGHUP means "reload" for this service, but its default
+			// disposition is to terminate. Claim it here, before any of the
+			// slow startup work below — opening storage, waiting for the
+			// signer to bootstrap a CA key, binding the listener — so a reload
+			// that arrives while the CA is still coming up cannot kill it. The
+			// channel is handed to whichever role can act on it; a signal that
+			// arrives before then waits in the buffer rather than being fatal.
+			// (The signer overrides this with signal.Ignore; see runSignerMode.)
+			hupCh := make(chan os.Signal, 1)
+			signal.Notify(hupCh, syscall.SIGHUP)
+			defer signal.Stop(hupCh)
+
+			// Service-manager notifications (sd_notify). Inert unless started
+			// by a service manager that asked to be notified, so no
+			// configuration or branching is needed anywhere below.
+			notifier := sdnotify.New()
+			defer func() { _ = notifier.Close() }()
+			notifier.Status("Loading configuration")
+
 			// --- Config loading (file → env → CLI flags) ---
 			resolved := resolveConfigFile(configFile, "PUPPET_CA_CONFIG", "/etc/puppet-ca/config.yaml")
 			cfg, err := loadServerConfig(resolved)
@@ -342,6 +361,13 @@ func newRootCmd() *cobra.Command {
 			// Note: --daemon is intentionally excluded from config file / env var support
 			// because PUPPET_CA_DAEMON is used internally as the fork signal.
 			if daemon && os.Getenv("PUPPET_CA_DAEMON") != "1" {
+				// A service manager tracks the process it started; forking and
+				// exiting makes the service look like it died the moment it
+				// started. Under systemd, drop --daemon and use Type=notify.
+				if notifier.Enabled() {
+					slog.Warn("--daemon is incompatible with a service manager that expects notifications; " +
+						"run in the foreground (Type=notify) instead")
+				}
 				exe, err := os.Executable()
 				if err != nil {
 					return fmt.Errorf("failed to determine executable: %w", err)
@@ -349,7 +375,9 @@ func newRootCmd() *cobra.Command {
 				c := exec.Command(exe, os.Args[1:]...) //nolint:gosec // G204: re-execs this same binary (os.Executable) with the operator's own os.Args to daemonize
 				// Strip internal role/PSK vars to prevent stale values from a
 				// previous run from confusing the daemon child.
-				daemonEnv := filterEnv(os.Environ(), "PUPPET_CA_ROLE", "PUPPET_CA_DAEMON", "PUPPET_CA_SIGNER_PSK")
+				// NOTIFY_SOCKET goes too: the child would otherwise report
+				// readiness for a unit whose main process has just exited.
+				daemonEnv := filterEnv(os.Environ(), "PUPPET_CA_ROLE", "PUPPET_CA_DAEMON", "PUPPET_CA_SIGNER_PSK", "NOTIFY_SOCKET")
 				c.Env = append(daemonEnv, "PUPPET_CA_DAEMON=1")
 				c.Stdin = nil
 				c.Stdout = nil
@@ -371,7 +399,7 @@ func newRootCmd() *cobra.Command {
 
 			// Launcher mode (default): spawn isolated signer + frontend children.
 			if role == "" && !singleProcess {
-				return runLauncher(cfg.shutdownDrain())
+				return runLauncher(cfg.shutdownDrain(), notifier, hupCh)
 			}
 
 			// Frontend mode (role=frontend) or single-process mode: run HTTP server.
@@ -430,6 +458,7 @@ func newRootCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("invalid storage backend config: %w", err)
 			}
+			notifier.Status(fmt.Sprintf("Opening the %s storage backend", backendSpec.Kind))
 			store, err := storage.NewServiceFromSpec(backendSpec)
 			if err != nil {
 				return fmt.Errorf("failed to initialise storage backend: %w", err)
@@ -445,6 +474,11 @@ func newRootCmd() *cobra.Command {
 			// handshake blocks until the signer finishes Init/bootstrap, so
 			// store.GetCACert is guaranteed to succeed after it returns.
 			if role == "frontend" {
+				// This handshake blocks until the signer has finished
+				// bootstrapping, which on a first run means waiting for a CA
+				// key pair to be generated — worth saying out loud, since it
+				// is the longest a cold start ever takes.
+				notifier.Status("Waiting for the signer process to initialise the CA")
 				conn, err := signer.DialConn()
 				if err != nil {
 					return fmt.Errorf("connecting to signer process: %w", err)
@@ -534,6 +568,7 @@ func newRootCmd() *cobra.Command {
 				myCA.KeyProvider = provider
 			}
 
+			notifier.Status("Initialising the CA")
 			if err := myCA.Init(ctx); err != nil {
 				return fmt.Errorf("failed to initialise CA: %w", err)
 			}
@@ -561,19 +596,9 @@ func newRootCmd() *cobra.Command {
 
 			// Wire mTLS auth middleware when TLS is configured.
 			if cfg.TLSCert != "" && cfg.TLSKey != "" {
-				allowList := map[string]bool{}
-				for _, cn := range strings.Split(cfg.PuppetServer, ",") {
-					cn = strings.TrimSpace(cn)
-					if cn != "" {
-						allowList[cn] = true
-					}
-				}
-				fileCNs, err := loadPuppetServerFile(cfg.PuppetServerFile)
+				allowList, err := buildAdminAllowList(cfg.PuppetServer, cfg.PuppetServerFile)
 				if err != nil {
 					return err
-				}
-				for _, cn := range fileCNs {
-					allowList[cn] = true
 				}
 				srv.AuthConfig = &api.AuthConfig{
 					CACert:            myCA.CACert,
@@ -633,10 +658,14 @@ func newRootCmd() *cobra.Command {
 				}()
 			}
 
+			// certs holds the server's TLS keypair, or stays nil without TLS.
+			// It is reachable by the reload handler below so a renewed server
+			// certificate can be picked up without a restart.
+			var certs *certReloader
 			if cfg.TLSCert != "" && cfg.TLSKey != "" {
-				serverCert, err := tls.LoadX509KeyPair(cfg.TLSCert, cfg.TLSKey)
+				certs, err = newCertReloader(cfg.TLSCert, cfg.TLSKey)
 				if err != nil {
-					return fmt.Errorf("failed to load TLS cert/key (cert %s, key %s): %w", cfg.TLSCert, cfg.TLSKey, err)
+					return err
 				}
 
 				caCertPEM, err := myCA.Storage.GetCACert(ctx)
@@ -655,13 +684,15 @@ func newRootCmd() *cobra.Command {
 				// RequestClientCert allows public endpoints to work without a
 				// client cert while the auth middleware enforces cert requirements
 				// per-tier. MinVersion TLS 1.2 blocks legacy protocol downgrades.
+				// The certificate comes from a callback rather than a fixed
+				// list so it can be replaced on reload when it is renewed.
 				// NIST 800-53: SC-8 (Transmission Confidentiality and Integrity),
 				//              SC-23 (Session Authenticity), IA-3 (Device Identification)
 				server.TLSConfig = &tls.Config{
-					Certificates: []tls.Certificate{serverCert},
-					ClientCAs:    caPool,
-					ClientAuth:   tls.RequestClientCert,
-					MinVersion:   tls.VersionTLS12,
+					GetCertificate: certs.GetCertificate,
+					ClientCAs:      caPool,
+					ClientAuth:     tls.RequestClientCert,
+					MinVersion:     tls.VersionTLS12,
 				}
 
 				slog.Info("TLS enabled", "cert", cfg.TLSCert)
@@ -716,8 +747,13 @@ func newRootCmd() *cobra.Command {
 			shutdownDone := make(chan struct{})
 			go func() {
 				<-ctx.Done()
+				drain := cfg.shutdownDrain()
 				slog.Info("Shutting down")
-				shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.shutdownDrain())
+				// Tell the service manager this is a deliberate teardown, not
+				// a crash, and how long it may take — so it waits for the
+				// drain instead of killing connections mid-flight.
+				notifier.Stopping(fmt.Sprintf("Shutting down: draining connections (up to %s)", drain))
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), drain)
 				defer cancel()
 				if metricsServer != nil {
 					if err := metricsServer.Shutdown(shutdownCtx); err != nil {
@@ -730,11 +766,40 @@ func newRootCmd() *cobra.Command {
 				close(shutdownDone)
 			}()
 
+			// Bind the listener explicitly rather than letting ListenAndServe
+			// do it, so readiness can be announced at the point the socket is
+			// actually accepting connections. Anything ordered after this
+			// service can then connect on its first attempt.
+			notifier.Status("Starting the HTTP server")
+			ln, err := net.Listen("tcp", addr)
+			if err != nil {
+				return fmt.Errorf("failed to listen on %s: %w", addr, err)
+			}
+
+			// SIGHUP re-reads the file-backed configuration: the TLS keypair
+			// (so a renewed server certificate does not need a restart) and
+			// the admin allow list.
+			reloader := &configReloader{
+				certs:     certs,
+				auth:      srv.AuthConfig,
+				staticCNs: cfg.PuppetServer,
+				cnFile:    cfg.PuppetServerFile,
+			}
+
+			status := func() string {
+				return newStatusReport(myCA, addr, tlsConfigured).line(time.Now()) + reloader.statusSuffix()
+			}
+			notifier.Ready(status())
+
+			// Both jobs are bound to ctx, so they stop on shutdown.
+			go runNotifyHeartbeat(ctx, notifier, heartbeatInterval(notifier), status)
+			go runReloadWatcher(ctx, hupCh, notifier, reloader, status)
+
 			var serveErr error
 			if cfg.TLSCert != "" && cfg.TLSKey != "" {
-				serveErr = server.ListenAndServeTLS("", "")
+				serveErr = server.ServeTLS(ln, "", "")
 			} else {
-				serveErr = server.ListenAndServe()
+				serveErr = server.Serve(ln)
 			}
 			if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 				return fmt.Errorf("server failed: %w", serveErr)
@@ -879,6 +944,12 @@ func runSignerMode(ctx context.Context, cfg *serverConfig, absCADir string) erro
 			}
 		}()
 	}
+
+	// The signer holds no reloadable configuration, but SIGHUP's default
+	// action is to terminate. Ignoring it means a reload signal delivered to
+	// the process group (rather than to the launcher alone) cannot take the CA
+	// key holder down and force a full restart.
+	signal.Ignore(syscall.SIGHUP)
 
 	slog.Info("Starting CA signer process",
 		"cadir", absCADir,

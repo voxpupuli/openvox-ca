@@ -192,4 +192,6 @@ A client certificate is considered an admin credential if **either** condition i
 
 The `pp_cli_auth` check is enabled by default. Disable it with `--no-pp-cli-auth` (or `no_pp_cli_auth: true` in the config file) if you prefer strict CN-only authorization.
 
+The CN allow list is not fixed for the life of the process: `SIGHUP` (or `systemctl reload`) rebuilds it from `--puppet-server` plus the current contents of `--puppet-server-file`, so admin access can be granted or **withdrawn** without a restart. The swap is atomic with respect to in-flight requests, and the CNs added or removed are named in the log. See [reloading configuration](configuration.md#reloading-configuration).
+
 > **OID source:** [`lib/puppet/ssl/oids.rb`](https://github.com/puppetlabs/puppet/blob/main/lib/puppet/ssl/oids.rb)
