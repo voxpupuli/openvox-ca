@@ -88,11 +88,9 @@ func (c *CA) revokeSerialLocked(ctx context.Context, serialStr string) error {
 
 	// 2. Check for duplicate revocation: a serial that's already in the CRL
 	// should not be appended again (prevents unbounded CRL growth on retries).
-	for _, entry := range crl.RevokedCertificateEntries {
-		if entry.SerialNumber.Cmp(serialInt) == 0 {
-			slog.Debug("Certificate already revoked", "serial", serialStr)
-			return nil
-		}
+	if serialInCRL(crl, serialInt) {
+		slog.Debug("Certificate already revoked", "serial", serialStr)
+		return nil
 	}
 
 	// 3. Append the new entry and re-sign. signCRLLocked counts its own
@@ -152,12 +150,27 @@ func (c *CA) IsRevokedSerial(ctx context.Context, serial *big.Int) (bool, error)
 	if c.cachedCRL == nil {
 		return false, fmt.Errorf("CRL not loaded")
 	}
-	for _, entry := range c.cachedCRL.RevokedCertificateEntries {
+	return serialInCRL(c.cachedCRL, serial), nil
+}
+
+// serialInCRL reports whether serial appears among crl's revoked entries. The
+// one definition of "is this certificate revoked according to this CRL" for
+// every caller that needs only the yes or no — against the cached CRL, one
+// freshly read from storage, or one mid-amendment under the CRL lock.
+//
+// ocsp.go's isRevokedSerial is the deliberate exception: it answers the same
+// question but must return the entry's RevocationTime with it, which a bool
+// cannot carry. Change the predicate here and change it there too.
+//
+// crl may not be nil; every caller guards that first, since a missing CRL is
+// not "nothing is revoked" and each has its own answer for it.
+func serialInCRL(crl *x509.RevocationList, serial *big.Int) bool {
+	for _, entry := range crl.RevokedCertificateEntries {
 		if entry.SerialNumber.Cmp(serial) == 0 {
-			return true, nil
+			return true
 		}
 	}
-	return false, nil
+	return false
 }
 
 // IsRevoked checks whether the certificate for subject appears in the CRL.
@@ -189,10 +202,5 @@ func (c *CA) IsRevoked(ctx context.Context, subject string) bool {
 		return false
 	}
 
-	for _, entry := range crl.RevokedCertificateEntries {
-		if entry.SerialNumber.Cmp(cert.SerialNumber) == 0 {
-			return true
-		}
-	}
-	return false
+	return serialInCRL(crl, cert.SerialNumber)
 }
