@@ -123,6 +123,12 @@
     // an hour because expiry is gradual, while this one wants to fire promptly
     // and only needs to ride out a reload.
     clientCRLUnusableFor: '10m',
+
+    // Window for PuppetCAClientCRLRefusals. Unlike the gauge this is
+    // event-driven -- it moves when a client is actually refused -- so it is
+    // sized like the other increase() windows rather than against the
+    // maintenance interval.
+    clientCRLRefusalWindow: '1h',
     scrapeFor: '15m',
     readyFor: '10m',
     downFor: '5m',

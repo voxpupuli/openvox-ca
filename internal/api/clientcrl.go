@@ -54,13 +54,32 @@ const (
 // KeyUsageCRLSign and the signature, and nothing about names or key
 // identifiers, so "some anchor signed this" is the only property a verification
 // pass establishes. Which anchor is the part that matters, and it is recorded
-// here rather than re-derived, so the trust decision is made once at load.
+// here rather than re-derived per request. (The loader verifies too, to produce
+// its discard warning, so the signature work happens twice at startup -- once
+// there and once here. Only this one decides anything.)
 //
 // Not by distinguished name either: under a shared root two sibling CAs can
 // hold the same DN.
 type ClientCRLSet struct {
-	// bySigner maps an anchor's DER to the CRLs its key signed.
-	bySigner map[string][]*x509.RevocationList
+	// bySignerKey maps an anchor's SubjectPublicKeyInfo to the CRLs that key
+	// signed.
+	//
+	// The public key, not the certificate DER. CheckSignatureFrom establishes
+	// that a *key* signed the CRL, so keying on the certificate is one level
+	// tighter than the property actually verified -- and the gap is a shape
+	// operators really ship: a CA that renews its own certificate keeping its
+	// key, with both certificates in the bundle during the overlap. Its one CRL
+	// would file under whichever certificate came first in the file, and when
+	// that one expired every client would be refused while a valid, verifying
+	// CRL sat in crl_file. Keying on the key gives up nothing: a co-anchor's CRL
+	// still files under the co-anchor's key, so it is still never consulted for
+	// a sibling.
+	bySignerKey map[string][]*x509.RevocationList
+
+	// anchors is what the set was built against, kept so that questions about
+	// coverage are answered by the set itself rather than by a caller supplying
+	// a list again and hoping it matches.
+	anchors []*x509.Certificate
 }
 
 // NewClientCRLSet builds a set from crls, keeping only those an anchor signed
@@ -70,14 +89,17 @@ type ClientCRLSet struct {
 // set is the thing consulted per request, so the binding between a CRL and the
 // issuer it speaks for belongs here, not in a loader that could be bypassed.
 func NewClientCRLSet(crls []*x509.RevocationList, anchors []*x509.Certificate) *ClientCRLSet {
-	set := &ClientCRLSet{bySigner: map[string][]*x509.RevocationList{}}
+	set := &ClientCRLSet{
+		bySignerKey: map[string][]*x509.RevocationList{},
+		anchors:     anchors,
+	}
 	for _, crl := range crls {
 		signer := SignerOfCRL(crl, anchors)
 		if signer == nil {
 			continue
 		}
-		key := string(signer.Raw)
-		set.bySigner[key] = append(set.bySigner[key], crl)
+		key := string(signer.RawSubjectPublicKeyInfo)
+		set.bySignerKey[key] = append(set.bySignerKey[key], crl)
 	}
 	return set
 }
@@ -99,7 +121,7 @@ func (s *ClientCRLSet) forIssuer(cert *x509.Certificate, now time.Time) (crls []
 	if s == nil {
 		return nil, false
 	}
-	for _, crl := range s.bySigner[string(cert.Raw)] {
+	for _, crl := range s.bySignerKey[string(cert.RawSubjectPublicKeyInfo)] {
 		crls = append(crls, crl)
 		if currentAt(crl, now) {
 			anyValid = true
@@ -121,37 +143,61 @@ func currentAt(crl *x509.RevocationList, now time.Time) bool {
 	return !crl.NextUpdate.IsZero() && crl.NextUpdate.After(now)
 }
 
-// Usable reports whether *every* anchor has a currently valid CRL. Drives
-// puppetca_client_crl_usable, because under `require` the recoverable
-// conditions — a CRL expired, or discarded as unverifiable — reject clients of
-// the affected issuer, and the first symptom is otherwise a 403 three layers
-// from where an operator would look.
+// Usable reports whether this entry holds any current revocation material at
+// all. Drives puppetca_client_crl_usable.
 //
-// Every, not any, because that is what enforcement asks: checkChainRevocation
-// refuses as soon as one issuer in the chain has no valid CRL. Reporting "any"
-// meant a two-anchor entry whose second anchor's CRL had expired published 1
-// while every client of that anchor was already being refused, so the alert
-// this metric exists for could not see a partial outage at all.
+// Deliberately *any*, not *every*, and the reasoning is worth keeping because
+// both readings have been shipped and both were wrong in their own direction.
 //
-// Anchors rather than every issuer in every possible chain: an intermediate
-// below an anchor needs its own CRL too, but that CRL cannot verify against the
-// anchor and so is never loaded — which is the shared-root footgun the
-// documentation steers operators away from, not a state this gauge can report
-// on. For the topology the docs recommend, one anchor per issuing CA, the two
-// sets coincide.
-func (s *ClientCRLSet) Usable(now time.Time, anchors []*x509.Certificate) bool {
+// "Any" under-reports: an entry with two anchors, one covered and one not,
+// reads healthy while every client of the second is refused. That is real, and
+// it is what CoverageGaps and the refusal counter exist to report instead.
+//
+// "Every" over-reports, and worse. Enforcement does not ask for a CRL per
+// anchor; it asks for one per issuer *in the chain a client actually presents*.
+// A bundle holding an issuing CA and the root above it — how a partner usually
+// ships their anchors — needs only the issuing CA's CRL, because no client's
+// chain terminates at the root. Demanding one for the root too made a perfectly
+// healthy entry report 0 permanently, fire the mixin's only critical
+// authentication alert forever, and print "every client of this entry will be
+// rejected" while nobody was being rejected. An alert that fires on a working
+// configuration is an alert that gets silenced, taking the real case with it.
+//
+// Which anchors matter cannot be known here: it depends on chains that have not
+// arrived yet. So this answers the question it can answer honestly — is there
+// anything current to check against — and the question it cannot is answered at
+// enforcement time, where a refusal is a fact rather than an estimate.
+func (s *ClientCRLSet) Usable(now time.Time) bool {
 	if s == nil {
 		return false
 	}
-	if len(anchors) == 0 {
-		return false
-	}
-	for _, anchor := range anchors {
-		if _, anyValid := s.forIssuer(anchor, now); !anyValid {
-			return false
+	for _, crls := range s.bySignerKey {
+		for _, crl := range crls {
+			if currentAt(crl, now) {
+				return true
+			}
 		}
 	}
-	return true
+	return false
+}
+
+// CoverageGaps names the anchors this set holds no current CRL for.
+//
+// Advisory, not a verdict: an anchor with no CRL only matters if some client's
+// chain terminates there, which is why this reports rather than decides. It is
+// what the startup warning uses, so an operator is told which anchor is
+// uncovered instead of being told the entry is broken.
+func (s *ClientCRLSet) CoverageGaps(now time.Time) []string {
+	if s == nil {
+		return nil
+	}
+	var out []string
+	for _, anchor := range s.anchors {
+		if _, anyValid := s.forIssuer(anchor, now); !anyValid {
+			out = append(out, anchor.Subject.CommonName)
+		}
+	}
+	return out
 }
 
 // clientCRLs holds the atomically-swappable CRL set for a domain.

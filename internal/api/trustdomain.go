@@ -47,7 +47,12 @@ type TrustDomain struct {
 	Roots *x509.CertPool
 
 	// AdminCNs are the common names granted admin authority *in this domain*.
-	// A name from another issuer is a different name.
+	// A name from a different domain is a different name.
+	//
+	// Within a domain it is not per-issuer: an entry's file may bundle several
+	// anchors, and this list applies to certificates from all of them, which
+	// warnIfGrantsSpanAnchors reports at startup. One anchor per entry is the
+	// shape that makes a grant mean what it looks like.
 	AdminCNs map[string]bool
 
 	// own marks domain zero. Unexported so that only OwnTrustDomain can set it;

@@ -18,6 +18,7 @@
 package api_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -28,6 +29,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"encoding/pem"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -337,6 +339,49 @@ var _ = Describe("Authorisation across trust domains", func() {
 			handler := buildWithRevocation(
 				[]*x509.RevocationList{foreignCRLRevoking(admin.SerialNumber)}, api.RevocationSkip)
 			Expect(probe(handler, "POST", "/sign/all", admin)).NotTo(Equal(http.StatusForbidden))
+		})
+
+		It("sanitises a common name before logging it, on the branch that needs no trust", func() {
+			// Every other CN log in the middleware needs a certificate that
+			// verified against a configured domain. This one is on the failure
+			// branch, so any client presenting any self-signed certificate
+			// reaches it -- which makes it the worst member of the class, and it
+			// was the one a sweep keyed on the clientCN identifier passed over.
+			//
+			// Pinned through captured output: the helper's own behaviour was
+			// tested, but nothing asserted that any call site used it, so all six
+			// could be deleted with the suite green.
+			var buf bytes.Buffer
+			orig := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			defer slog.SetDefault(orig)
+
+			key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			Expect(err).NotTo(HaveOccurred())
+			tmpl := &x509.Certificate{
+				SerialNumber: big.NewInt(99),
+				Subject:      pkix.Name{CommonName: "evil\nAuth: forged record"},
+				NotBefore:    time.Now().Add(-time.Hour),
+				NotAfter:     time.Now().Add(time.Hour),
+				ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+			}
+			der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+			Expect(err).NotTo(HaveOccurred())
+			stranger, err := x509.ParseCertificate(der)
+			Expect(err).NotTo(HaveOccurred())
+
+			handler := buildWithRevocation([]*x509.RevocationList{foreignCRL()}, "")
+			Expect(probe(handler, "GET", "/certificate_request/whatever", stranger)).
+				To(Equal(http.StatusForbidden))
+
+			// Asserting the substitution, not the absence of a raw newline:
+			// slog's TextHandler quotes values, so an unsanitised CN also shows
+			// no literal newline and an absence assertion passes either way.
+			// That is the false-confidence shape this spec exists to avoid.
+			Expect(buf.String()).To(ContainSubstring("\uFFFD"),
+				"the control character must be replaced before it reaches the log")
+			Expect(buf.String()).NotTo(ContainSubstring("evil\\nAuth"),
+				"and not merely escaped by the handler, which a different handler need not do")
 		})
 
 		It("treats an unrecognised policy as require, not as the most permissive arm", func() {

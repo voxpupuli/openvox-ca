@@ -193,7 +193,7 @@ revoking an agent's certificate cuts off its access to every *authenticated*
 endpoint, not merely its next renewal.
 
 That is unconditional for certificates **this CA issued**. For a client from a
-configured [`client_ca`](configuration.md#client-trust-domains) domain, the
+configured [`client_ca`](configuration.md#trusting-client-certificates-from-another-ca) domain, the
 revocation half is governed by `client_revocation_policy`: the default
 `require` refuses a client whose issuer has no currently valid CRL, `check`
 consults whatever CRLs are loaded and admits the client when there are none, and
@@ -267,6 +267,6 @@ A client certificate is considered an admin credential if **either** condition i
 
 The `pp_cli_auth` check is enabled by default. Disable it with `--no-pp-cli-auth` (or `no_pp_cli_auth: true` in the config file) if you prefer strict CN-only authorization.
 
-Both conditions are scoped to the **issuer** that signed the certificate. A CN means something only within the namespace of the CA that signed it, so `--puppet-server` and `pp_cli_auth` grant admin to certificates **this CA issued**. Certificates from another issuer are granted admin by that issuer's own `admin_cns` and `allow_pp_cli_auth` — see [trusting client certificates from another CA](configuration.md#trusting-client-certificates-from-another-ca). With no `client_ca` configured there is one issuer and this distinction has no effect.
+Both conditions are scoped to the **issuer** that signed the certificate. A CN means something only within the namespace of the CA that signed it, so `--puppet-server` and `pp_cli_auth` grant admin to certificates **this CA issued**. Certificates from another issuer are granted admin by **that entry's** `admin_cns` and `allow_pp_cli_auth` — *entry*, not certificate: where an entry's `file` bundles more than one anchor the grant spans all of them, which the server warns about at startup, so give each issuer its own entry — see [trusting client certificates from another CA](configuration.md#trusting-client-certificates-from-another-ca). With no `client_ca` configured there is one issuer and this distinction has no effect.
 
 > **OID source:** [`lib/puppet/ssl/oids.rb`](https://github.com/puppetlabs/puppet/blob/main/lib/puppet/ssl/oids.rb)

@@ -797,6 +797,11 @@ func newRootCmd() *cobra.Command {
 				// unusable from the very first load would otherwise go unalerted
 				// until the first maintenance tick.
 				refreshClientCRLs(cfg, srv.AuthConfig.Domains, crlMetrics)
+				// A refusal is the one unambiguous statement that clients are
+				// being turned away for want of a CRL; load-time coverage can
+				// only estimate it. Wired here because the api package holds no
+				// metrics dependency.
+				srv.AuthConfig.OnRevocationRefusal = crlMetrics.recordRefusal
 				maintenanceTasks = append(maintenanceTasks,
 					clientCRLTask(cfg, srv.AuthConfig.Domains, crlMetrics))
 			}

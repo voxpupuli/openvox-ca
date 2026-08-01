@@ -79,7 +79,7 @@ allow_public_status: false  # set true to allow unauthenticated GET /certificate
                             # (otherwise admin-only: an admin CN of the matched
                             # trust domain, or pp_cli_auth where that domain
                             # honours it)
-client_ca: []               # additional client issuers; see "Client trust domains"
+client_ca: []               # additional client issuers; see "Trusting client certificates from another CA"
 client_revocation_policy: require   # require | check | skip (client_ca entries only)
 autosign_config: ""
 logfile: ""
@@ -147,6 +147,7 @@ Environment variables mirror the CLI flags:
 | `--tls-key` | `PUPPET_CA_TLS_KEY` |
 | `--tls-self-provision` | `PUPPET_CA_TLS_SELF_PROVISION` |
 | `--tls-self-provision-names` | `PUPPET_CA_TLS_SELF_PROVISION_NAMES` |
+| `--client-revocation-policy` | `PUPPET_CA_CLIENT_REVOCATION_POLICY` |
 | `--puppet-server` | `PUPPET_CA_PUPPET_SERVER` |
 | `--puppet-server-file` | `PUPPET_CA_PUPPET_SERVER_FILE` |
 | `--no-pp-cli-auth` | `PUPPET_CA_NO_PP_CLI_AUTH` |
@@ -181,7 +182,6 @@ The CA key passphrase can also be provided via `PUPPET_CA_KEY_PASSPHRASE` (env v
 | Config key | Environment variable |
 | --- | --- |
 | `crl_chain_file` | `PUPPET_CA_CRL_CHAIN_FILE` |
-| `client_revocation_policy` | `PUPPET_CA_CLIENT_REVOCATION_POLICY` |
 | `tls_self_provision_renew_before_sec` | `PUPPET_CA_TLS_SELF_PROVISION_RENEW_BEFORE_SEC` |
 | `tls_self_provision_encrypt_key` | `PUPPET_CA_TLS_SELF_PROVISION_ENCRYPT_KEY` |
 | `tls_self_provision_revoke_after_sec` | `PUPPET_CA_TLS_SELF_PROVISION_REVOKE_AFTER_SEC` |
@@ -678,8 +678,10 @@ starts here would reject every client of the domain while its readiness probe
 reported healthy.
 
 Every CRL in `crl_file` is signature-verified against an anchor in the same
-entry before it is used, and one carrying no Authority Key Identifier is
-discarded. Without verification, a writable `crl_file` would be a way to
+entry before it is used, and each is bound to the anchor whose key signed it.
+The CRL's own Authority Key Identifier is not consulted at all, so an issuer
+that omits the extension — optional under RFC 5280, and omitted by `openssl ca
+-gencrl` under the stock `openssl.cnf` — is fully supported. Without verification, a writable `crl_file` would be a way to
 *clear* revocations, not merely add them.
 
 A client certificate that is *itself* one of your anchors is rejected under
@@ -711,7 +713,13 @@ client, issue it a leaf from the anchor instead.
 > afterwards says so.
 
 An expired CRL is treated differently by the two policies, and deliberately.
-Under `require` it counts as absent, so the policy does not quietly decay into
+A CRL carrying **no `nextUpdate` at all** is treated as expired, and for the
+same reason: RFC 5280 makes the field optional, and reading its absence as
+"never expires" would satisfy `require` forever from a snapshot that says
+nothing about revocations since. `openssl ca -gencrl` omits it without
+`default_crl_days`; the fix is at the issuing CA, not here.
+
+Under `require` an expired CRL counts as absent, so the policy does not quietly decay into
 `skip`. Under `check` it is still consulted — it is loaded, and the serials it
 names are still revoked — because `check` means "tolerate an issuer with no
 CRLs", not "stop reading the ones you were given".
@@ -721,7 +729,10 @@ CRLs", not "stop reading the ones you were given".
 > it presents. Revoking a trusted domain is an operator action: remove or
 > replace the `client_ca` entry. `crl_file` covers what that CA *issued*.
 
-`crl_file` is re-read on every maintenance cycle. **`file` is not**: anchors are
+`crl_file` is re-read on every maintenance cycle. A reload that fails, or that
+would cover fewer anchors than the set already in use, keeps the previous set
+and logs — so an emptied or half-assembled file does not take revocation
+checking down with it, and the file is not authoritative until it loads. **`file` is not**: anchors are
 read once at startup, because a half-applied anchor reload locks out every
 client of a domain, where a half-applied CRL reload costs at most a stale
 revocation. To rotate an anchor, add the new one as a second `client_ca` entry,

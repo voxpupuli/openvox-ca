@@ -262,7 +262,25 @@
             labels: { severity: 'critical' } + $._config.alertLabels,
             annotations: {
               summary: 'A Puppet CA client trust domain has no usable CRL.',
-              description: 'client_ca {{ $labels.client_ca }} on {{ $labels.instance }} has no currently valid CRL — every CRL expired, or every CRL was discarded as unverifiable. Under client_revocation_policy=require every client of that issuer is now rejected. Refresh its crl_file from the issuing CA.',
+              description: 'client_ca {{ $labels.client_ca }} on {{ $labels.instance }} holds no currently valid CRL at all — every CRL expired, or every one was discarded as unverifiable. Under client_revocation_policy=require every client of that issuer is rejected. Refresh its crl_file from the issuing CA. Note this fires only on total loss: a domain holding one anchor\'s CRL and not another\'s reads healthy here, and shows up as PuppetCAClientCRLRefusals instead.',
+            },
+          },
+          {
+            alert: 'PuppetCAClientCRLRefusals',
+            // The unambiguous half. The gauge above can only estimate coverage
+            // at load time -- which anchors matter depends on chains that have
+            // not arrived -- so a partially covered entry reads healthy there.
+            // This counts clients actually turned away, so it sees the partial
+            // case, and it needs no approximation to do it.
+            expr: 'increase(puppetca_client_crl_refusals_total{%(selector)s}[%(window)s]) > 0' % {
+              selector: $._config.puppetCASelector,
+              window: $._config.clientCRLRefusalWindow,
+            },
+            'for': $._config.clientCRLUnusableFor,
+            labels: { severity: 'critical' } + $._config.alertLabels,
+            annotations: {
+              summary: 'The Puppet CA is refusing clients of a trust domain for want of a CRL.',
+              description: 'client_ca {{ $labels.client_ca }} on {{ $labels.instance }} is refusing clients because an issuer in their chain has no currently valid CRL. Unlike the gauge this is a fact rather than an estimate: these are requests that were turned away. The usual cause is an anchor whose CRL is missing or expired while the entry\'s other anchors are fine, or an entry anchored on a shared root whose intermediates cannot have their CRLs verified — see the crl_file notes in the configuration guide.',
             },
           },
         ],

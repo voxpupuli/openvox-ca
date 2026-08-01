@@ -122,7 +122,8 @@ so it stays current by itself".
 
 | Metric | Description |
 | --- | --- |
-| `puppetca_client_crl_usable` | 1 when a `client_ca` trust domain has at least one currently valid CRL, 0 otherwise, labelled by `client_ca`. Only present when `client_ca` is configured. **Alert on 0**: under `client_revocation_policy=require` it rejects every client of that issuer, and the first symptom is otherwise an agent-side 403 whose cause is three layers away. |
+| `puppetca_client_crl_usable` | 1 when a `client_ca` trust domain holds any currently valid CRL, 0 when it holds none, labelled by `client_ca`. Present only where `client_ca` is configured **and the policy is `require`** — `crl_file` is optional under `check` and `skip`, so a domain without CRLs is correct there and a 0 would alert on a healthy server. **Alert on 0**: the domain has nothing to check against. It does **not** report partial coverage — whether an uncovered anchor matters depends on chains that have not arrived, so a domain can read 1 while clients of one of its anchors are refused. `puppetca_client_crl_refusals_total` is the signal for that. |
+| `puppetca_client_crl_refusals_total` | Counter of clients refused because their issuer had no currently valid CRL under `require`, labelled by `client_ca`. Unlike the gauge this is not an estimate: it counts requests actually turned away, so it sees a partially covered entry — one anchor's CRL missing while another's is fine — which no load-time check can distinguish from a healthy one. **Alert on `increase(...) > 0`.** Resets to `0` on process restart. |
 
 Emitted only when [`client_ca`](configuration.md#trusting-client-certificates-from-another-ca) is
 configured. A foreign issuer's CRLs are not the chain above: they come from that

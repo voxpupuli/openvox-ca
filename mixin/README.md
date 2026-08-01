@@ -51,11 +51,15 @@ alerting rules for the openvox-ca exporter. It alerts on:
   since there is no by-serial revoke it cannot be retired — see
   [the metric's notes](../docs/metrics.md#self-provisioned-serving-certificate). *Churning*: replicas reissuing over each other, which grows
   the inventory and the CRL for no reason.
-- **Client trust domains** with no usable CRL — every CRL expired, or every one
-  discarded as unverifiable (only when
+- **Client trust domains** in two rules, both critical, both only when
   [`client_ca`](../docs/configuration.md#trusting-client-certificates-from-another-ca)
-  is in use). The mixin's only critical-severity authentication alert: under
-  the default `require` policy this rejects every client of that issuer.
+  is in use. *CRL unusable*: the domain holds no currently valid CRL at all, so
+  under the default `require` policy every client of that issuer is rejected.
+  *CRL refusals*: clients are actually being turned away for want of a CRL. The
+  second exists because the first can only estimate — which anchors need a CRL
+  depends on the chains clients present, so an entry covering one anchor and not
+  another reads healthy on the gauge while half its clients are refused. A
+  refusal is a fact, so it needs no estimate.
 - **Kubernetes export** targets whose applies keep failing (only when the
   [Kubernetes export](../docs/kubernetes-export.md) feature is in use).
 
@@ -136,6 +140,7 @@ jsonnet -J vendor -m . mixin.jsonnet
 | `upstreamCRLExpiryWarningSeconds` | 14 days | Warning threshold for an upstream CRL in a published chain. Longer than `crlExpiryWarningSeconds` because the remedy is at another CA. |
 | `crlChainWindow` | `1h` | Window over which chain-refresh failures, discards, regressions and removals are counted. Equals the CA's default `maintenance_interval_sec` with no margin: raise it alongside any increase to that setting, or a single unchanging fault will fire, resolve and re-fire forever. |
 | `crlChainFor` | `15m` | `for:` debounce for the five upstream-chain alerts. |
+| `clientCRLRefusalWindow` | `1h` | Window over which client-CRL refusals are counted. Event-driven, so unlike the gauge it is not coupled to `maintenance_interval_sec`. |
 | `clientCRLUnusableFor` | `10m` | `for:` debounce for *ClientCRLUnusable*. Note the detection latency is `maintenance_interval_sec` **plus** this: the gauge is only recomputed on the maintenance pass, so at the 1h default a domain whose last CRL expires just after a pass is refusing every client for up to 70 minutes before this fires. Raising `maintenance_interval_sec` lengthens time-to-page on the mixin's only critical authentication alert. |
 | `leafExpiryWarningSeconds` | 7 days | Leaf certificate expiry warning threshold. |
 | `leafExpiryCriticalSeconds` | 1 day | Leaf certificate expiry critical threshold. |
