@@ -135,7 +135,7 @@ func (s *ClientCRLSet) forIssuer(cert *x509.Certificate, now time.Time) (crls []
 //
 // A CRL with no nextUpdate is *not* current. The field is OPTIONAL in the
 // TBSCertList ASN.1 -- which is why x509.ParseRevocationList leaves it zero --
-// but RFC 5280 5.1.2.5 requires a conforming issuer to include it and does not
+// but RFC 5280 §5.1.2.5 requires a conforming issuer to include it and does not
 // say what a client should do without it, so this is a conforming choice. It is
 // also the safe one: reading absent as
 // "never expires" handed `require` a snapshot that satisfies it forever: the

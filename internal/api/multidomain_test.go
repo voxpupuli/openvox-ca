@@ -430,6 +430,59 @@ var _ = Describe("Authorisation across trust domains", func() {
 			Expect(counted).To(ConsistOf("server-ca"))
 		})
 
+		It("neutralises the common name in a handler's own log line, not just the middleware's", func() {
+			// The middleware's sanitisation was pinned through captured output.
+			// The handler layer was not, so when clientCN stopped sanitising at
+			// source, fourteen handler log sites reverted to raw and every spec
+			// stayed green -- including the one written for the split, which
+			// exercised the two helpers through export hooks and asserted nothing
+			// about which one a call site chose. That is the shape the middleware
+			// spec above exists to reject, repeated one layer down.
+			//
+			// PUT /clean is the sharp case: tierAdminOnly, reachable by a foreign
+			// issuer with allow_pp_cli_auth, and its rate-limit warning is at Warn
+			// so it is on by default.
+			var buf bytes.Buffer
+			orig := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			defer slog.SetDefault(orig)
+
+			hostile := foreignLeaf("ops\nlevel=ERROR msg=\"forged\"", true)
+			handler := build(map[string]bool{}, true)
+
+			// Six, because the rate-limit warning -- the site whose two siblings
+			// were fixed and which was left raw -- only fires once the tracker
+			// trips, and a single request never reaches it.
+			for range 6 {
+				req := httptest.NewRequest("PUT", "/clean",
+					strings.NewReader(`{"certnames":["node1.test"]}`))
+				req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{hostile}}
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, req)
+				Expect(rec.Code).NotTo(Equal(http.StatusForbidden),
+					"pp_cli_auth admits it, which is what makes the log line reachable")
+			}
+			// Scoped to the warning's own record, not the whole buffer: the other
+			// lines in this handler already carry the neutralised name, so a
+			// buffer-wide assertion passes with this one line left raw -- which
+			// is exactly the line whose two siblings were fixed and it was not.
+			var warned string
+			for _, line := range strings.Split(buf.String(), "\n") {
+				if strings.Contains(line, "High rate of destructive operations") {
+					warned = line
+				}
+			}
+			Expect(warned).NotTo(BeEmpty(),
+				"the spec must actually reach the warning it exists to cover")
+			Expect(warned).To(ContainSubstring("\uFFFD"))
+
+			Expect(buf.String()).NotTo(ContainSubstring("\nlevel=ERROR"),
+				"a newline must not survive to start a record of the attacker's choosing; "+
+					"asserting the substitution and this, rather than the absence of a raw "+
+					"newline alone, because TextHandler escapes one anyway and that check "+
+					"would pass unsanitised")
+		})
+
 		It("keeps a common name verbatim as an identity, and neutralises it only for logs", func() {
 			// clientCN feeds the renewal handler's CN comparison and the subject
 			// passed to Renew, so it has to be the certificate's value. It was
