@@ -236,14 +236,21 @@
             // parsed, while still publishing the cached number — and an
             // unreadable stored CRL is one of the two conditions this rule is
             // meant to page on, so without the arm the worst case would be the
-            // quiet one. The reverse (cached absent, stored present) means the
+            // quiet one.
+            //
+            // It is qualified on a successful scrape so that arm covers only
+            // the CRL being unreadable, not the whole gather failing: a storage
+            // outage drops the same series and is already paged by
+            // PuppetCAScrapeFailing, and one cause should not raise two alerts.
+            // The reverse asymmetry (cached absent, stored present) means the
             // replica has no CRL in memory at all and is covered by
             // PuppetCANotReady, so it is deliberately left out.
             expr: |||
               puppetca_crl_number{%(selector)s} - puppetca_crl_cached_number{%(selector)s} > 0
               or
-              puppetca_crl_cached_number{%(selector)s}
-                unless puppetca_crl_number{%(selector)s}
+              (puppetca_crl_cached_number{%(selector)s}
+                 unless puppetca_crl_number{%(selector)s})
+                and on(instance) puppetca_collector_scrape_success{%(selector)s} == 1
             ||| % {
               selector: $._config.puppetCASelector,
             },

@@ -487,30 +487,32 @@ func (c *CA) bootstrapCA(ctx context.Context) error {
 	return nil
 }
 
-// loadCRLCache reads the CRL from disk and caches it in memory.
+// loadCRLCache reads the CRL from storage and caches it in memory.
 // Must be called with c.mu held.
 //
-// It refuses a CRL this CA did not sign, on the same grounds and through the
-// same check as SyncCRLCache — see verifyOwnCRLLocked. Startup is where that
-// matters most: a restart is the remedy an operator reaches for when the sync
-// is refusing, so a startup that skipped the check would install precisely the
-// CRL the sync declined and the refusal would amount to nothing. Failing here
-// keeps the CA from serving on a revocation list it cannot vouch for, and the
-// error says what to do about it.
+// It caches only a CRL this CA signed, on the same grounds and through the same
+// check as SyncCRLCache — see verifyOwnCRLLocked. Startup is where that matters
+// most: a restart is the remedy an operator reaches for when the sync is
+// refusing, so a startup that skipped the check would install precisely the CRL
+// the sync declined and the refusal would amount to nothing.
+//
+// It searches the whole stored blob rather than taking block 0. The blob may be
+// a chain — `openvox-ca-ctl import --crl-chain` writes whatever bundle the
+// operator supplies, verbatim and in their order — and an intermediate CA's
+// bundle can legitimately lead with an ancestor's CRL. Taking block 0 there
+// would either cache a list this CA cannot vouch for (what it did before) or
+// refuse to start a deployment that was working (what checking block 0 alone
+// would do now). Finding ours wherever it sits is the answer to both.
+//
+// Failing outright is reserved for a blob with no CRL of ours in it at all,
+// which no amount of retrying will fix and which the CA must not serve through.
 func (c *CA) loadCRLCache(ctx context.Context) error {
 	crlPEM, err := c.Storage.GetCRL(ctx)
 	if err != nil {
 		return fmt.Errorf("reading CRL: %w", err)
 	}
-	block, _ := pem.Decode(crlPEM)
-	if block == nil {
-		return fmt.Errorf("CRL is empty or not PEM-encoded")
-	}
-	crl, err := x509.ParseRevocationList(block.Bytes)
+	crl, err := c.findOwnStoredCRLLocked(crlPEM)
 	if err != nil {
-		return fmt.Errorf("parsing CRL: %w", err)
-	}
-	if err := c.verifyOwnCRLLocked(crl); err != nil {
 		return err
 	}
 	c.cachedCRL = crl

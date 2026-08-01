@@ -329,24 +329,48 @@ var _ = Describe("SyncCRLCache", func() {
 // check. Otherwise the refusal is decorative: a restart is what an operator
 // reaches for when the sync keeps failing, and it would install exactly the CRL
 // the sync was declining.
-var _ = Describe("Init with a CRL this CA did not sign", func() {
-	It("refuses to start rather than deciding revocation from it", func() {
+var _ = Describe("Init against the stored CRL", func() {
+	// seedCA writes a CA whose stored CRL blob is exactly crlPEM, and returns
+	// the initialised CA or the error Init produced.
+	seedCA := func(crlPEM []byte) (*ca.CA, error) {
+		GinkgoHelper()
 		ctx := context.Background()
-		tmpDir, err := os.MkdirTemp("", "openvox-ca-crlsync-init-test")
+		dir, err := os.MkdirTemp("", "openvox-ca-crlsync-init-test")
 		Expect(err).NotTo(HaveOccurred())
-		defer os.RemoveAll(tmpDir)
+		DeferCleanup(func() { os.RemoveAll(dir) })
 
-		store := storage.New(tmpDir)
+		store := storage.New(dir)
 		Expect(store.EnsureDirs(ctx)).To(Succeed())
 		Expect(store.SaveCAKey(ctx, cachedKeyPEM)).To(Succeed())
 		Expect(store.SaveCACert(ctx, cachedCrtPEM)).To(Succeed())
-		Expect(store.UpdateCRL(ctx, foreignCRLPEM(1))).To(Succeed())
+		Expect(store.UpdateCRL(ctx, crlPEM)).To(Succeed())
 		Expect(store.WriteSerial(ctx, "0001")).To(Succeed())
 		Expect(store.TouchInventory(ctx)).To(Succeed())
 
-		err = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test").Init(ctx)
+		c := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		return c, c.Init(ctx)
+	}
+
+	It("refuses to start when no stored CRL was signed by this CA", func() {
+		_, err := seedCA(foreignCRLPEM(1))
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("not signed by the CA certificate this process is using"))
+	})
+
+	// `openvox-ca-ctl import --crl-chain` stores the operator's bundle verbatim,
+	// and an intermediate's bundle can lead with an ancestor. Refusing that
+	// would break a deployment that works today, so ours is looked for rather
+	// than assumed to be first.
+	It("finds this CA's CRL behind an ancestor's in an imported chain", func() {
+		chain := append(foreignCRLPEM(7), cachedCrlPEM...)
+
+		c, err := seedCA(chain)
+		Expect(err).NotTo(HaveOccurred(), "an ancestor-first chain must still start")
+
+		ours, ok := c.CachedCRLNumber()
+		Expect(ok).To(BeTrue())
+		Expect(ours.Cmp(big.NewInt(7))).NotTo(BeZero(),
+			"the ancestor's CRL number must not be the one we cached")
 	})
 })
 

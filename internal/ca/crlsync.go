@@ -20,6 +20,7 @@ package ca
 import (
 	"context"
 	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -115,6 +116,54 @@ func (c *CA) verifyOwnCRLLocked(crl *x509.RevocationList) error {
 			"If the CA certificate was replaced, re-sign the CRL with it: %w", err)
 	}
 	return nil
+}
+
+// findOwnStoredCRLLocked returns the CRL in blob that this CA signed.
+//
+// The stored blob is usually a single block, but it can be a chain: the import
+// command writes an operator-supplied bundle verbatim, and for an intermediate
+// CA that bundle carries its ancestors' CRLs too. Which position ours occupies
+// is the operator's choice, so this looks for it rather than assuming.
+//
+// A block that will not parse is skipped rather than fatal — one malformed
+// ancestor block must not stop the CA loading its own list — but a blob with no
+// CRL of ours in it is an error, because the alternative is deciding revocation
+// from a list this CA did not issue.
+//
+// c.mu must be held by the caller.
+func (c *CA) findOwnStoredCRLLocked(blob []byte) (*x509.RevocationList, error) {
+	var lastErr error
+	found := 0
+	rest := blob
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type != "X509 CRL" {
+			continue
+		}
+		found++
+		crl, err := x509.ParseRevocationList(block.Bytes)
+		if err != nil {
+			lastErr = fmt.Errorf("parsing CRL: %w", err)
+			continue
+		}
+		if err := c.verifyOwnCRLLocked(crl); err != nil {
+			lastErr = err
+			continue
+		}
+		return crl, nil
+	}
+	switch {
+	case found == 0:
+		return nil, fmt.Errorf("CRL is empty or not PEM-encoded")
+	case lastErr != nil:
+		return nil, lastErr
+	default:
+		return nil, fmt.Errorf("the stored CRL holds no revocation list signed by this CA's certificate")
+	}
 }
 
 // crlSupersedes reports whether stored should replace cached. The CRL number
