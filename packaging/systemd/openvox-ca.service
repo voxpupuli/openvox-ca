@@ -1,0 +1,79 @@
+[Unit]
+Description=OpenVox Certificate Authority
+Documentation=https://github.com/voxpupuli/openvox-ca/blob/main/docs/systemd.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# openvox-ca reports READY=1 once its listener is accepting connections, so
+# anything ordered after this unit starts against a CA that is genuinely
+# serving rather than one that has merely been forked.
+Type=notify
+
+# Readiness is reported by the frontend child process, not the launcher: only
+# the frontend knows when the socket is up. The launcher is the main PID, so
+# the default (NotifyAccess=main) would drop those notifications and the start
+# job would time out.
+NotifyAccess=all
+
+# SIGHUP re-reads the TLS keypair and the admin allow list. On systemd 253 and
+# later you can drop this line and set Type=notify-reload instead, which makes
+# "systemctl reload" wait for the new configuration to be in effect.
+ExecReload=/bin/kill -HUP $MAINPID
+
+ExecStart=/usr/local/bin/openvox-ca --config /etc/puppet-ca/config.yaml
+
+# The frontend feeds the watchdog on a timer, so a process wedged on an
+# unresponsive storage backend is restarted rather than left half-alive.
+WatchdogSec=60s
+Restart=on-failure
+RestartSec=5s
+
+# Bootstrapping a CA generates a key pair, which can take a while on a slow or
+# entropy-starved machine; the status text says what it is waiting on.
+TimeoutStartSec=300s
+
+# Must exceed the drain budget (shutdown_timeout_sec, 25s by default) plus the
+# supervisor's 3s headroom, or systemd will truncate the drain it asked for.
+TimeoutStopSec=35s
+
+User=puppet-ca
+Group=puppet-ca
+
+# /var/lib/puppet-ca, created and owned by systemd. Point cadir at it, or add
+# the directory you use to ReadWritePaths below.
+StateDirectory=puppet-ca
+StateDirectoryMode=0750
+
+# Hardening. The CA holds a private key that signs every certificate in the
+# estate, so it should reach as little of the system as possible.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+# AF_UNIX covers both the notification socket and the launcher's socketpair to
+# the isolated signer process.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# The API listens on 8140 and the metrics exporter on 9140; neither is a
+# privileged port, so the service needs no capabilities at all.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

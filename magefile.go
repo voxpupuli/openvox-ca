@@ -212,6 +212,11 @@ func (Build) Dist() error {
 
 	bins := []string{"openvox-ca", "openvox-ca-ctl"}
 
+	// Shipped alongside the binaries so a VM install has a unit file that
+	// matches this build's notification behaviour (see docs/systemd.md).
+	const unitFile = "openvox-ca.service"
+	unitSrc := filepath.Join("packaging", "systemd", unitFile)
+
 	var checksums []string
 	for _, v := range variants {
 		fmt.Printf("Building %s...\n", v.name)
@@ -232,7 +237,11 @@ func (Build) Dist() error {
 				}
 			}
 
-			if err := createTarGz(archive, tmpDir, bins); err != nil {
+			if err := sh.Copy(filepath.Join(tmpDir, unitFile), unitSrc); err != nil {
+				return "", fmt.Errorf("stage %s for %s: %w", unitFile, v.name, err)
+			}
+
+			if err := createTarGz(archive, tmpDir, append(append([]string{}, bins...), unitFile)); err != nil {
 				return "", fmt.Errorf("archive %s: %w", v.name, err)
 			}
 			return sha256File(archive)
@@ -1025,7 +1034,14 @@ func createTarGz(dst, srcDir string, files []string) (retErr error) {
 		if err != nil {
 			return err
 		}
-		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0755, Size: fi.Size()}); err != nil {
+		// Take the mode from the staged file rather than hard-coding 0755:
+		// the archive carries both executables and plain data files (the
+		// systemd unit), and a unit file installed as executable is wrong.
+		if err := tw.WriteHeader(&tar.Header{
+			Name: name,
+			Mode: int64(fi.Mode().Perm()),
+			Size: fi.Size(),
+		}); err != nil {
 			return err
 		}
 		rf, err := os.Open(src)
