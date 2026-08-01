@@ -31,6 +31,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -456,6 +457,20 @@ var _ = Describe("refreshClientCRLs", func() {
 	})
 
 	// gauge reads puppetca_client_crl_usable for one client_ca label.
+	// gathered lists the metric family names currently registered, so a spec can
+	// assert a series is absent -- which gauge() cannot, since it fails when the
+	// family is missing.
+	gathered := func() string {
+		GinkgoHelper()
+		families, err := reg.Gather()
+		Expect(err).NotTo(HaveOccurred())
+		var names []string
+		for _, f := range families {
+			names = append(names, f.GetName())
+		}
+		return strings.Join(names, " ")
+	}
+
 	gauge := func(name string) float64 {
 		GinkgoHelper()
 		families, err := reg.Gather()
@@ -501,7 +516,7 @@ var _ = Describe("refreshClientCRLs", func() {
 
 	})
 
-	It("keeps the previous set and reports unusable when a reload fails", func() {
+	It("keeps the previous set and keeps publishing the gauge when a reload fails", func() {
 		// The failure the review found five ways: skipping the metric left the
 		// series uncreated, so an `== 0` alert could not fire on a domain whose
 		// very first load failed.
@@ -573,6 +588,90 @@ var _ = Describe("refreshClientCRLs", func() {
 
 		Expect(domains[1].RevocationSet().CoverageGaps(time.Now())).To(BeEmpty(),
 			"the previous, fully covering set must be kept rather than narrowed")
+	})
+
+	It("keeps the previous set when two anchors share a common name", func() {
+		// The guard compared anchors by common name, and a name is not an
+		// identity here -- the same reason CRLs are not keyed by one. A CA that
+		// renews *and* rekeys keeps its subject, so a bundle carrying both
+		// certificates through the overlap has two independent coverage slots
+		// under one name. Name-keyed, the gaps collapsed to one entry and a
+		// strictly narrower reload passed the guard it exists to fail.
+		twinA, twinAKey := mintCA("Twin CA", nil, nil)
+		twinB, twinBKey := mintCA("Twin CA", nil, nil)
+		Expect(twinA.RawSubject).To(Equal(twinB.RawSubject))
+		Expect(twinA.RawSubjectPublicKeyInfo).NotTo(Equal(twinB.RawSubjectPublicKeyInfo))
+		Expect(twinBKey).NotTo(BeNil())
+
+		cfg := &serverConfig{}
+		cfg.ClientCA = []config.ClientCA{{
+			Name:    "twins",
+			File:    writeCertFile(twinA, twinB),
+			CRLFile: writeCRLFile(mintCRL(twinA, twinAKey), mintCRL(twinB, twinBKey)),
+		}}
+		domains, err := buildTrustDomains(cfg, ownCA, nil)
+		Expect(err).NotTo(HaveOccurred())
+		refreshClientCRLs(cfg, domains, metrics)
+		present, current := domains[1].RevocationSet().Coverage(time.Now())
+		Expect(present).To(HaveLen(2), "two distinct keys under one name")
+		Expect(current).To(HaveLen(2))
+
+		// The refresh loses twinA's CRL. Under a name-keyed comparison both the
+		// before and after gap lists read the same, so the narrower set installs.
+		cfg.ClientCA[0].CRLFile = writeCRLFile(mintCRL(twinB, twinBKey))
+		refreshClientCRLs(cfg, domains, metrics)
+
+		_, current = domains[1].RevocationSet().Coverage(time.Now())
+		Expect(current).To(HaveLen(2),
+			"the previous set, covering both keys, must be kept")
+	})
+
+	It("keeps an expired CRL that a reload would drop, because check still reads it", func() {
+		// Coverage has two halves for a reason. Under check, an expired CRL is
+		// still consulted for the serials it names -- discarding it does not make
+		// the policy stricter, it silently re-admits everything it listed. A
+		// guard watching only currency could not see that, and VerifyCRLAgainst's
+		// own comment says clearing revocations is the threat, not just forging.
+		cfg := &serverConfig{}
+		cfg.ClientRevocationPolicy = config.RevocationCheck
+		cfg.ClientCA = []config.ClientCA{{
+			Name:    "server",
+			File:    writeCertFile(serverCA),
+			CRLFile: writeCRLFile(expiredCRL(serverCA, serverKey)),
+		}}
+		domains, err := buildTrustDomains(cfg, ownCA, nil)
+		Expect(err).NotTo(HaveOccurred())
+		refreshClientCRLs(cfg, domains, metrics)
+		present, current := domains[1].RevocationSet().Coverage(time.Now())
+		Expect(present).To(HaveLen(1), "expired, but present and readable under check")
+		Expect(current).To(BeEmpty())
+
+		// A reload that yields nothing for that anchor would drop the serials it
+		// names, so the previous set is kept.
+		cfg.ClientCA[0].CRLFile = writeCRLFile()
+		refreshClientCRLs(cfg, domains, metrics)
+
+		present, _ = domains[1].RevocationSet().Coverage(time.Now())
+		Expect(present).To(HaveLen(1),
+			"dropping an expired CRL re-admits every serial it listed")
+	})
+
+	It("publishes no gauge at all when the policy does not require CRLs", func() {
+		// crl_file is optional under check and skip, so a domain with no CRLs is
+		// a correct configuration there. Publishing 0 for it fired the mixin's
+		// only critical authentication alert forever on a healthy server, and
+		// the realistic response -- silencing the rule -- takes the require case
+		// down with it. The counter is not gated: a refusal is a refusal.
+		cfg := &serverConfig{}
+		cfg.ClientRevocationPolicy = config.RevocationCheck
+		cfg.ClientCA = []config.ClientCA{{Name: "server", File: writeCertFile(serverCA)}}
+		domains, err := buildTrustDomains(cfg, ownCA, nil)
+		Expect(err).NotTo(HaveOccurred())
+		refreshClientCRLs(cfg, domains, metrics)
+
+		Expect(gathered()).NotTo(ContainSubstring("puppetca_client_crl_usable"))
+		Expect(gathered()).To(ContainSubstring("puppetca_client_crl_refusals_total"),
+			"the refusals series is zero-initialised regardless of policy")
 	})
 
 	It("publishes the gauge as unusable when every CRL has expired", func() {
@@ -702,7 +801,7 @@ var _ = Describe("client_ca startup warnings", func() {
 			Name: "server", File: writeCertFile(serverCA),
 		}, config.RevocationCheck)
 
-		Expect(out).NotTo(ContainSubstring("no usable CRLs"))
+		Expect(out).NotTo(ContainSubstring("no currently valid CRL"))
 	})
 })
 

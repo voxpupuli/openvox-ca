@@ -112,6 +112,21 @@ func (c *ClientCAConfig) ClientCRLRefreshInterval() time.Duration {
 func (c *ClientCAConfig) Enabled() bool { return c != nil && len(c.ClientCA) > 0 }
 
 // Policy resolves the revocation policy, defaulting to require.
+// ResolvedPolicy is Policy with any unrecognised value folded to require.
+//
+// Validation rejects a bad policy string, but it lives in this package and runs
+// on one construction path, so every consumer that acts on the value coerces
+// rather than assuming it was reached. Three sites had hand-written copies of
+// that coercion and the newest one omitted it, which left enforcement refusing
+// clients as require while the gauge for those clients was never published.
+func (c *ClientCAConfig) ResolvedPolicy() string {
+	p := c.Policy()
+	if p != RevocationSkip && p != RevocationCheck {
+		return RevocationRequire
+	}
+	return p
+}
+
 func (c *ClientCAConfig) Policy() string {
 	if c.ClientRevocationPolicy == "" {
 		return RevocationRequire

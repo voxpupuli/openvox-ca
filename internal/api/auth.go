@@ -21,6 +21,7 @@ package api
 import (
 	"crypto/x509"
 	"encoding/asn1"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -160,11 +161,15 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 			}
 		} else if err := checkChainRevocation(verified.Chain, domain.RevocationSet(),
 			cfg.revocationPolicy(), time.Now()); err != nil {
-			// Counted here, where a refusal is a fact. Load-time coverage can
-			// only estimate which anchors matter -- it cannot know which chains
-			// will arrive -- so this is the signal that says clients are being
-			// turned away for want of a CRL, right now, and for which domain.
-			if cfg.OnRevocationRefusal != nil {
+			// Counted only when revocation information was *missing*, never when
+			// it was found and said the client is revoked. Load-time coverage
+			// can only estimate which anchors matter -- it cannot know which
+			// chains will arrive -- so this is the signal that says clients are
+			// being turned away for want of a CRL, right now, and for which
+			// domain. Counting a successful revocation here instead made the
+			// alert driveable at will by the holder of a revoked certificate,
+			// which is the one population revocation exists to exclude.
+			if cfg.OnRevocationRefusal != nil && errors.Is(err, ErrNoUsableCRL) {
 				cfg.OnRevocationRefusal(domain.Name)
 			}
 			slog.Warn("Auth: foreign client cert failed revocation checking",

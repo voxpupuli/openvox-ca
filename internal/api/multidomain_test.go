@@ -158,6 +158,26 @@ var _ = Describe("Authorisation across trust domains", func() {
 		return server.Routes()
 	}
 
+	// buildCounting is buildWithRevocation with the refusal callback wired, so a
+	// spec can see which refusals the counter would record.
+	buildCounting := func(crls []*x509.RevocationList, policy string, onRefusal func(string)) http.Handler {
+		GinkgoHelper()
+		domain := api.NewForeignTrustDomain("server-ca", poolOf(foreignCA),
+			[]*x509.Certificate{foreignCA}, map[string]bool{"ops-admin": true}, false)
+		domain.SetRevocationSet(api.NewClientCRLSet(crls, []*x509.Certificate{foreignCA}))
+
+		server := api.New(myCA)
+		server.AuthConfig = &api.AuthConfig{
+			ClientRevocationPolicy: policy,
+			OnRevocationRefusal:    onRefusal,
+			Domains: []api.TrustDomain{
+				api.OwnTrustDomain(caCert, map[string]bool{"puppet-server": true}, true),
+				domain,
+			},
+		}
+		return server.Routes()
+	}
+
 	// build wires a mux whose second trust domain is the foreign issuer, with
 	// the grants under test.
 	//
@@ -382,6 +402,32 @@ var _ = Describe("Authorisation across trust domains", func() {
 				"the control character must be replaced before it reaches the log")
 			Expect(buf.String()).NotTo(ContainSubstring("evil\\nAuth"),
 				"and not merely escaped by the handler, which a different handler need not do")
+		})
+
+		It("counts a refusal only when revocation information was missing", func() {
+			// This counter drives the branch's only critical authentication
+			// alert. Counting a *successful* revocation on it made that alert
+			// driveable at will by the holder of a revoked certificate -- the one
+			// population revocation exists to exclude -- while telling the
+			// responder to refresh a CRL that was present, current and working.
+			admin := foreignLeaf("ops-admin", false)
+
+			var counted []string
+			record := func(d string) { counted = append(counted, d) }
+
+			// Revoked by a CRL that is present, current and verifying. Refused,
+			// and that is the feature working: nothing to count.
+			revoked := buildCounting(
+				[]*x509.RevocationList{foreignCRLRevoking(admin.SerialNumber)}, "", record)
+			Expect(probe(revoked, "POST", "/sign/all", admin)).To(Equal(http.StatusForbidden))
+			Expect(counted).To(BeEmpty(),
+				"a revocation that was found is not a refusal for want of a CRL")
+
+			// No CRL at all. Same 403, entirely different cause.
+			counted = nil
+			missing := buildCounting(nil, "", record)
+			Expect(probe(missing, "POST", "/sign/all", admin)).To(Equal(http.StatusForbidden))
+			Expect(counted).To(ConsistOf("server-ca"))
 		})
 
 		It("treats an unrecognised policy as require, not as the most permissive arm", func() {

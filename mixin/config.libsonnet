@@ -118,6 +118,11 @@
     // sized like the other increase() windows rather than against the
     // maintenance interval.
     clientCRLRefusalWindow: '1h',
+
+    // How long a client_ca entry may go without its crl_file being applied
+    // before that is worth saying. Three maintenance passes at the 1h default,
+    // so a single transient read error does not page.
+    clientCRLStaleSeconds: 3 * 3600,
     scrapeFor: '15m',
     readyFor: '10m',
     downFor: '5m',

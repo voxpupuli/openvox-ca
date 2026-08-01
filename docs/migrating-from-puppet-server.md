@@ -431,7 +431,17 @@ Two ways to restore authenticated access, in order of preference:
    `--puppet-server-file` for one CN per line. Authentication is preserved and
    the grant is explicit. Both are read once at startup, so the CA must be
    restarted before the change takes effect. Grants full admin, as above.
-2. **Give the caller a certificate carrying `pp_cli_auth`**, which is how
+2. **Check which trust domain the caller was attributed to.** Both remedies
+   above are scoped to certificates **this CA issued**. If the caller holds a
+   certificate from a
+   [`client_ca`](configuration.md#trusting-client-certificates-from-another-ca)
+   issuer — the usual shape when the servers and operators administering this CA
+   sit under a sibling intermediate — then `--puppet-server` and `pp_cli_auth`
+   do not reach them: their admin grant is that entry's `admin_cns` and
+   `allow_pp_cli_auth`. The denial log line carries a `domain` field naming
+   which domain the certificate was attributed to, beside `client_cn` and
+   `reason`.
+3. **Give the caller a certificate carrying `pp_cli_auth`**, which is how
    OpenVox Server's own CLI authenticates. It is the *more* invasive of the
    two, not the less: authorisation-arc OIDs are stripped from submitted CSRs (see
    [Auth-arc OID stripping](#auth-arc-oid-stripping)), so such a certificate
