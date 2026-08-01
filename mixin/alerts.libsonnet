@@ -245,8 +245,10 @@
         // client_revocation_policy=require turns "no usable CRL" into a
         // rejection of every client of that domain, and the operator's first
         // symptom is otherwise an agent-side 403 whose cause is three layers
-        // away. Critical rather than warning for that reason: it is an
-        // authentication outage scoped to one issuer, not a degradation.
+        // away. The two outage rules are critical for that reason: each is an
+        // authentication outage scoped to one issuer, not a degradation. The
+        // staleness rule is a warning -- nothing is being refused yet, but the
+        // CRLs in use have stopped being refreshed.
         name: 'openvox-ca-client-crl',
         rules: [
           {
@@ -299,7 +301,7 @@
             labels: { severity: 'critical' } + $._config.alertLabels,
             annotations: {
               summary: 'The Puppet CA is refusing clients of a trust domain for want of a CRL.',
-              description: 'client_ca {{ $labels.client_ca }} on {{ $labels.instance }} is refusing clients because an issuer in their chain has no currently valid CRL. Unlike the gauge this is a fact rather than an estimate: these are requests that were turned away. The usual cause is an anchor whose CRL is missing or expired while the entry\'s other anchors are fine, or an entry anchored on a shared root whose intermediates cannot have their CRLs verified — see the crl_file notes in the configuration guide.',
+              description: 'client_ca {{ $labels.client_ca }} on {{ $labels.instance }} is refusing clients because revocation information was missing: an issuer in their chain has no currently valid CRL, or the presented certificate is itself one of the entry\'s anchors, which nothing can attest to. Unlike the gauge this is a fact rather than an estimate: these are requests that were turned away. The usual cause is an anchor whose CRL is missing or expired while the entry\'s other anchors are fine, or an entry anchored on a shared root whose intermediates cannot have their CRLs verified — see the crl_file notes in the configuration guide.',
             },
           },
         ],

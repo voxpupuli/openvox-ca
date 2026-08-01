@@ -430,6 +430,29 @@ var _ = Describe("Authorisation across trust domains", func() {
 			Expect(counted).To(ConsistOf("server-ca"))
 		})
 
+		It("keeps a common name verbatim as an identity, and neutralises it only for logs", func() {
+			// clientCN feeds the renewal handler's CN comparison and the subject
+			// passed to Renew, so it has to be the certificate's value. It was
+			// briefly sanitised at source, on the argument that a per-call-site
+			// rule gets missed -- but the middleware reads the field directly
+			// anyway, so the class was never closed there, and sanitiseForLog
+			// truncates at 256 bytes, which this CA's certname grammar permits.
+			// An agent with a long certname then got a permanent 403 on a re-key
+			// renewal, its own correct CSR compared against a truncated name.
+			long := strings.Repeat("a", 300) + ".example.com"
+			req := httptest.NewRequest("GET", "/", nil)
+			req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{{
+				Subject: pkix.Name{CommonName: long},
+			}}}
+
+			Expect(api.ClientCNForTest(req)).To(Equal(long),
+				"an identity must survive intact, however long")
+
+			req.TLS.PeerCertificates[0].Subject.CommonName = "evil\nforged"
+			Expect(api.ClientCNForLogForTest(req)).NotTo(ContainSubstring("\n"))
+			Expect(api.ClientCNForLogForTest(req)).To(ContainSubstring("\uFFFD"))
+		})
+
 		It("treats an unrecognised policy as require, not as the most permissive arm", func() {
 			// Validation rejects a bad policy string, but it lives two packages
 			// away and runs on one construction path, so the enforcement point
@@ -462,10 +485,17 @@ var _ = Describe("denial logging", func() {
 		Expect(len([]rune(got))).To(Equal(257), "256 runes plus the ellipsis")
 	})
 
-	It("does not let a replacement character be mistaken for one it stripped", func() {
-		// A caller cannot smuggle in U+FFFD to make sanitised output look
-		// identical to unsanitised: it is escaped the same way.
+	It("passes a replacement character through unchanged", func() {
+		// U+FFFD is not a control character, so it survives -- and a caller
+		// supplying one produces output identical to a sanitised newline. That
+		// collision is unavoidable with a single-rune replacement and is
+		// accepted: what matters is that no control character reaches the log,
+		// not that its origin is recoverable. The previous version of this spec
+		// claimed to prevent the collision while demonstrating it, and pinned a
+		// mapping branch that returned the rune it was given -- so it could not
+		// have detected that branch being deleted.
 		Expect(api.SanitiseForLogForTest("a�b")).To(Equal("a�b"))
+		Expect(api.SanitiseForLogForTest("a\nb")).To(Equal("a�b"))
 	})
 
 })

@@ -355,8 +355,11 @@ func refreshClientCRLs(cfg *serverConfig, domains []api.TrustDomain, m *clientCR
 		// CounterVec child appears only when it is first incremented, so
 		// increase() -- which needs two samples -- could never see a burst that
 		// began and ended inside one interval, and the first increment of any
-		// burst was structurally invisible. Not policy-gated: the counter
-		// records refusals, which happen under require and check alike.
+		// burst was structurally invisible. Not policy-gated, but not because
+		// refusals occur under every policy -- they do not: both ErrNoUsableCRL
+		// arms are require-only, so under check and skip this counter is
+		// provably zero. It is ungated so the series exists whatever the policy,
+		// including after an operator changes it to require.
 		if m != nil {
 			m.refusals.WithLabelValues(entry.Name).Add(0)
 		}
@@ -438,7 +441,9 @@ func newClientCRLMetrics(reg prometheus.Registerer) *clientCRLMetrics {
 			Namespace: "puppetca",
 			Subsystem: "client_crl",
 			Name:      "refusals_total",
-			Help: "Clients refused because their issuer had no currently valid CRL under " +
+			Help: "Clients refused because revocation information was missing -- their issuer " +
+				"had no currently valid CRL, or the presented certificate is itself a trust " +
+				"anchor and nothing can attest to its status -- under " +
 				"client_revocation_policy=require. Unlike the usable gauge this is not an " +
 				"estimate: it counts requests actually turned away, so it sees a partially " +
 				"covered entry -- one anchor's CRL missing while another's is fine -- which no " +
@@ -466,7 +471,10 @@ func (m *clientCRLMetrics) recordReload(domain string, at time.Time) {
 	if m == nil {
 		return
 	}
-	m.lastReload.WithLabelValues(domain).Set(float64(at.Unix()))
+	// Sub-second, as Prometheus timestamps are: whole seconds cannot distinguish
+	// two passes inside the same second, which is exactly what a spec asserting
+	// "a failed reload does not advance this" has to do.
+	m.lastReload.WithLabelValues(domain).Set(float64(at.UnixNano()) / 1e9)
 }
 
 // recordRefusal counts one client turned away for want of a usable CRL.

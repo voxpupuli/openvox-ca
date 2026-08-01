@@ -637,10 +637,13 @@ client, issue it a leaf from the anchor instead.
 
 An expired CRL is treated differently by the two policies, and deliberately.
 A CRL carrying **no `nextUpdate` at all** is treated as expired, and for the
-same reason: RFC 5280 §5.1.2.5 makes the field optional, and reading its absence
-as "never expires" would satisfy `require` forever from a snapshot that says
-nothing about revocations since. The fix is at the issuing CA — give it a
-next-update interval — not here.
+same reason. The field is `OPTIONAL` in the `TBSCertList` ASN.1, which is why
+Go's parser leaves it zero, but RFC 5280 §5.1.2.5 requires a conforming CRL
+issuer to include it and declines to specify what a client should do when it is
+absent — so treating such a CRL as expired is a conforming choice, and the safe
+one: reading its absence as "never expires" would satisfy `require` forever
+from a snapshot that says nothing about revocations since. The fix is at the
+issuing CA — give it a next-update interval — not here.
 
 Under `require` an expired CRL counts as absent, so the policy does not quietly decay into
 `skip`. Under `check` it is still consulted — it is loaded, and the serials it

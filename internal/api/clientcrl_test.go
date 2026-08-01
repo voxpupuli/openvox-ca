@@ -22,6 +22,7 @@ import (
 	"crypto/rand"
 	"crypto/sha1"
 	"crypto/x509"
+	"errors"
 	"math/big"
 	"time"
 
@@ -187,6 +188,8 @@ var _ = Describe("Client CRL checking", func() {
 			err := api.CheckChainRevocationForTest([]*x509.Certificate{serverCA}, api.NewClientCRLSet(nil, anchorSet()),
 				api.RevocationRequire, time.Now())
 			Expect(err).To(MatchError(ContainSubstring("itself a trust anchor")))
+			Expect(errors.Is(err, api.ErrNoUsableCRL)).To(BeTrue(),
+				"nothing can attest to an anchor's status, so this is absence too")
 		})
 
 		It("never checks the anchor itself, even when the anchor is revoked", func() {
@@ -239,8 +242,10 @@ var _ = Describe("Client CRL checking", func() {
 	Describe("CRL matching", func() {
 		It("honours a CRL with no Authority Key Identifier, because matching is by signature", func() {
 			// Matching used to be by the CRL's own AKI against the issuer's SKI,
-			// which meant an issuer that omits the extension -- RFC 5280 makes it
-			// optional and real ones do -- had its revocations silently ignored.
+			// which meant an issuer that omits the extension had its revocations
+			// silently ignored. RFC 5280 5.2.1 requires a conforming CRL issuer
+			// to include it, but not every issuer conforms, and a CRL whose
+			// signature verifies needs no field this CA does not read.
 			// Filing under the certificate that actually signed the CRL removes
 			// the dependence on anything the CRL asserts about itself, so this
 			// revocation is seen.
@@ -274,10 +279,12 @@ var _ = Describe("Client CRL checking", func() {
 			err := api.CheckChainRevocationForTest(chain(), set, api.RevocationRequire, time.Now())
 			Expect(err).To(MatchError(ContainSubstring("no currently valid CRL")))
 			Expect(err).To(MatchError(ContainSubstring("Server CA")))
+			Expect(errors.Is(err, api.ErrNoUsableCRL)).To(BeTrue(),
+				"absence, not revocation -- this is what the refusals counter keys on")
 		})
 
 		It("treats a CRL with no nextUpdate as not currently valid", func() {
-			// RFC 5280 makes nextUpdate optional, and ParseRevocationList leaves
+			// nextUpdate is OPTIONAL in the ASN.1, so ParseRevocationList leaves
 			// it zero when absent. Reading absent as "never expires" handed
 			// require a snapshot that satisfies it forever, so the policy decayed
 			// to skip with no moment at which it decayed and no alert, which is

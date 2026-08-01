@@ -140,7 +140,7 @@ func buildAuthConfig(cfg *serverConfig, myCA *ca.CA) (*api.AuthConfig, error) {
 	return &api.AuthConfig{
 		Domains:                domains,
 		AllowPublicStatus:      cfg.AllowPublicStatus,
-		ClientRevocationPolicy: cfg.Policy(),
+		ClientRevocationPolicy: cfg.ResolvedPolicy(),
 	}, nil
 }
 

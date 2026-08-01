@@ -46,3 +46,14 @@ func CheckChainRevocationForTest(chain []*x509.Certificate, set *ClientCRLSet, p
 
 // SanitiseForLogForTest exposes the log-field sanitiser.
 var SanitiseForLogForTest = sanitiseForLog
+
+// ClientCNForTest and ClientCNForLogForTest expose the identity/display split.
+//
+// Worth a hook of its own: the two differ only for values a certificate may
+// legitimately carry and a log line must not, and conflating them once already
+// truncated an identity that the renewal handler then compared and issued
+// against.
+var (
+	ClientCNForTest       = clientCN
+	ClientCNForLogForTest = clientCNForLog
+)

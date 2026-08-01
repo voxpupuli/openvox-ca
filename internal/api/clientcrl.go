@@ -133,8 +133,11 @@ func (s *ClientCRLSet) forIssuer(cert *x509.Certificate, now time.Time) (crls []
 
 // currentAt reports whether crl is currently valid.
 //
-// A CRL with no nextUpdate is *not* current. RFC 5280 makes the field optional
-// and x509.ParseRevocationList leaves it zero when absent, so reading absent as
+// A CRL with no nextUpdate is *not* current. The field is OPTIONAL in the
+// TBSCertList ASN.1 -- which is why x509.ParseRevocationList leaves it zero --
+// but RFC 5280 5.1.2.5 requires a conforming issuer to include it and does not
+// say what a client should do without it, so this is a conforming choice. It is
+// also the safe one: reading absent as
 // "never expires" handed `require` a snapshot that satisfies it forever: the
 // issuer's later revocations stay invisible, the policy decays to `skip` with
 // no moment at which it decayed, and puppetca_client_crl_usable reports 1

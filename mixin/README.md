@@ -53,6 +53,8 @@ alerting rules for the openvox-ca exporter. It alerts on:
   [`client_ca`](../docs/configuration.md#trusting-client-certificates-from-another-ca)
 - **Client trust domains** in two rules, both critical, both only when
   [`client_ca`](../docs/configuration.md#trusting-client-certificates-from-another-ca)
+- **Client trust domains** in three rules, both critical ones and a warning, all only when
+  [`client_ca`](../docs/configuration.md#trusting-client-certificates-from-another-ca)
 - **Kubernetes export** targets whose applies keep failing (only when the
   [Kubernetes export](../docs/kubernetes-export.md) feature is in use).
 
@@ -144,7 +146,7 @@ jsonnet -J vendor -m . mixin.jsonnet
 | `crlChainFor` | `15m` | `for:` debounce for the five upstream-chain alerts. |
 | `clientCRLRefusalWindow` | `1h` | Window over which client-CRL refusals are counted. Event-driven, so unlike the gauge it is not coupled to `maintenance_interval_sec`. |
 | `clientCRLUnusableFor` | `10m` | Shared `for:` debounce for *ClientCRLUnusable*, *ClientCRLRefusals* and *ClientCRLStale*. Raising it to stop the gauge flapping across a maintenance pass also delays the event-driven refusals page, which is the immediate one. For the *gauge* rule the detection latency is `maintenance_interval_sec` **plus** this, since the gauge is only recomputed on the maintenance pass; the refusals rule is event-driven and not subject to that. |
-| `clientCRLStaleSeconds` | `3h` | How long an entry may go without its `crl_file` being applied before *ClientCRLStale* fires. Three maintenance passes at the 1h default, so a single transient read error does not page. |
+| `clientCRLStaleSeconds` | `3h` | How long an entry may go without its `crl_file` being applied before *ClientCRLStale* fires. Three maintenance passes at the 1h default, so a single transient read error does not page — which means it assumes that default: **raise it alongside any increase to `maintenance_interval_sec`**, or the rule fires permanently on a healthy CA. |
 | `leafExpiryWarningSeconds` | 7 days | Leaf certificate expiry warning threshold. |
 | `leafExpiryCriticalSeconds` | 1 day | Leaf certificate expiry critical threshold. |
 | `pendingFor` | `1h` | How long a request may stay pending before alerting. |
