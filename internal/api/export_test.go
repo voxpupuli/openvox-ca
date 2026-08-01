@@ -19,6 +19,7 @@ package api
 
 import (
 	"crypto/x509"
+	"log/slog"
 	"time"
 )
 
@@ -47,13 +48,20 @@ func CheckChainRevocationForTest(chain []*x509.Certificate, set *ClientCRLSet, p
 // SanitiseForLogForTest exposes the log-field sanitiser.
 var SanitiseForLogForTest = sanitiseForLog
 
-// ClientCNForTest and ClientCNForLogForTest expose the identity/display split.
-//
-// Worth a hook of its own: the two differ only for values a certificate may
-// legitimately carry and a log line must not, and conflating them once already
-// truncated an identity that the renewal handler then compared and issued
-// against.
-var (
-	ClientCNForTest       = clientCN
-	ClientCNForLogForTest = clientCNForLog
-)
+// ClientCNForTest exposes the raw identity read, which must stay verbatim:
+// conflating it with the display form once truncated a name that the renewal
+// handler then compared and issued against.
+var ClientCNForTest = clientCN
+
+// PrincipalKeyForTest and PrincipalLogValueForTest expose what a client becomes
+// once the middleware has attributed it: the key it is counted and audited
+// under, and how it renders into a log record. Both take the domain explicitly,
+// because attribution is the whole point of the type and a spec that could only
+// build an unattributed principal could not tell the domains apart.
+func PrincipalKeyForTest(cn string, domain *TrustDomain) string {
+	return clientPrincipal{cn: cn, domain: domain}.Key()
+}
+
+func PrincipalLogValueForTest(cn string, domain *TrustDomain) slog.Value {
+	return clientPrincipal{cn: cn, domain: domain}.LogValue()
+}

@@ -501,9 +501,81 @@ var _ = Describe("Authorisation across trust domains", func() {
 			Expect(api.ClientCNForTest(req)).To(Equal(long),
 				"an identity must survive intact, however long")
 
-			req.TLS.PeerCertificates[0].Subject.CommonName = "evil\nforged"
-			Expect(api.ClientCNForLogForTest(req)).NotTo(ContainSubstring("\n"))
-			Expect(api.ClientCNForLogForTest(req)).To(ContainSubstring("\uFFFD"))
+			// The display form is no longer a second function beside it -- that
+			// left the choice at every call site -- but a method on the principal,
+			// so a name reaches a record only after passing through it.
+			rendered := api.PrincipalLogValueForTest("evil\nforged", nil).String()
+			Expect(rendered).NotTo(ContainSubstring("\n"))
+			Expect(rendered).To(ContainSubstring("\uFFFD"))
+		})
+
+		It("counts destructive operations per issuing domain, not by common name alone", func() {
+			// ops-admin from our CA and ops-admin from the partner's are different
+			// principals, and keyed on the bare name they shared a rate-limit
+			// bucket. Five destructive operations from the partner left ours one
+			// request away from an alert it had not earned -- and, read the other
+			// way, either could spend the other's allowance to keep its own bulk
+			// clean below the threshold.
+			var buf bytes.Buffer
+			orig := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			defer slog.SetDefault(orig)
+
+			// Both domains grant ops-admin, which is the collision: the name is
+			// admissible in each, and means a different principal in each.
+			domain := api.NewForeignTrustDomain("server-ca", poolOf(foreignCA),
+				[]*x509.Certificate{foreignCA}, map[string]bool{"ops-admin": true}, false)
+			domain.SetRevocationSet(api.NewClientCRLSet(
+				[]*x509.RevocationList{foreignCRL()}, []*x509.Certificate{foreignCA}))
+			server := api.New(myCA)
+			server.AuthConfig = &api.AuthConfig{
+				Domains: []api.TrustDomain{
+					api.OwnTrustDomain(caCert, map[string]bool{"ops-admin": true}, true),
+					domain,
+				},
+			}
+			handler := server.Routes()
+
+			clean := func(cert *x509.Certificate) {
+				GinkgoHelper()
+				req := httptest.NewRequest("PUT", "/clean",
+					strings.NewReader(`{"certnames":["node1.test"]}`))
+				req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, req)
+				Expect(rec.Code).NotTo(Equal(http.StatusForbidden),
+					"both are administrators of the domain that named them")
+			}
+
+			// The threshold is five in a minute, so a sixth request in one bucket
+			// warns. Five from theirs and one from ours is six requests across two
+			// principals, neither of which has reached its own threshold.
+			for range 5 {
+				clean(foreignLeaf("ops-admin", false))
+			}
+			clean(issueClientCert("ops-admin", caCert, caKey))
+
+			Expect(buf.String()).NotTo(ContainSubstring("High rate of destructive operations"),
+				"one domain's traffic must not raise the alarm against another's administrator")
+		})
+
+		It("names the vouching domain in the record, not just the common name", func() {
+			// The audit half of the same defect. A warning that a client is running
+			// destructive operations at rate is actionable only if the reader can
+			// tell which ops-admin it means, and the CN alone cannot say.
+			own := api.OwnTrustDomain(caCert, nil, false)
+			theirs := api.NewForeignTrustDomain("server-ca", nil, nil, nil, false)
+
+			Expect(api.PrincipalKeyForTest("ops-admin", &own)).
+				NotTo(Equal(api.PrincipalKeyForTest("ops-admin", &theirs)),
+					"the same name from two issuers is two principals")
+			Expect(api.PrincipalKeyForTest("ops-admin", nil)).
+				NotTo(Equal(api.PrincipalKeyForTest("ops-admin", &own)),
+					"and a name nothing has vouched for is a third")
+
+			Expect(api.PrincipalLogValueForTest("ops-admin", &theirs).String()).
+				To(ContainSubstring("server-ca"),
+					"a record naming only the CN cannot say which principal acted")
 		})
 
 		It("treats an unrecognised policy as require, not as the most permissive arm", func() {

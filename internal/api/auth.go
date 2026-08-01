@@ -121,13 +121,21 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 		verified, err := attribute(cfg.Domains, clientCert, r.TLS.PeerCertificates[1:])
 		if err != nil {
 			slog.Warn("Auth: client cert verification failed",
-				"cn", sanitiseForLog(clientCert.Subject.CommonName), "error", err)
+				"client", clientPrincipal{cn: clientCert.Subject.CommonName}, "error", err)
 			http.Error(w, "access denied", http.StatusForbidden)
 			return
 		}
 		domain := verified.Domain
 
 		clientCN := clientCert.Subject.CommonName
+
+		// Attribution is not recoverable downstream: a handler sees the
+		// certificate but not which domain's anchors verified it, and the name
+		// alone is not an identity once client_ca is configured. Recording it
+		// here is what lets the destructive-operation tracker and every handler
+		// log line name a principal rather than a string.
+		principal := clientPrincipal{cn: clientCN, domain: domain}
+		r = r.WithContext(withPrincipal(r.Context(), principal))
 
 		// SECURITY: revocation. For our own domain this is the check it has
 		// always been: the presented certificate's serial against our own CRL,
@@ -152,9 +160,9 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 		if domain.IsOwn() {
 			if revoked, err := myCA.IsRevokedSerial(r.Context(), clientCert.SerialNumber); err != nil || revoked {
 				if err != nil {
-					slog.Warn("Auth: CRL check failed (denying)", "cn", sanitiseForLog(clientCN), "error", err)
+					slog.Warn("Auth: CRL check failed (denying)", "client", principal, "error", err)
 				} else {
-					slog.Warn("Auth: client cert is revoked", "cn", sanitiseForLog(clientCN))
+					slog.Warn("Auth: client cert is revoked", "client", principal)
 				}
 				http.Error(w, "access denied", http.StatusForbidden)
 				return
@@ -173,7 +181,7 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 				cfg.OnRevocationRefusal(domain.Name)
 			}
 			slog.Warn("Auth: foreign client cert failed revocation checking",
-				"cn", sanitiseForLog(clientCN), "domain", domain.Describe(), "error", err)
+				"client", principal, "error", err)
 			http.Error(w, "access denied", http.StatusForbidden)
 			return
 		}
@@ -187,7 +195,7 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 				next.ServeHTTP(w, r)
 			} else {
 				slog.Warn("Auth: rejecting a foreign client certificate for an own-CA operation",
-					"cn", sanitiseForLog(clientCN), "domain", domain.Describe())
+					"client", principal)
 				http.Error(w, "access denied", http.StatusForbidden)
 			}
 
@@ -202,18 +210,18 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 			if isAdmin(domain, clientCert, clientCN) || selfMatch {
 				next.ServeHTTP(w, r)
 			} else {
-				denyWithLog(w, r, domain, clientCN, "not an admin and not the subject of the request")
+				denyWithLog(w, r, principal, "not an admin and not the subject of the request")
 			}
 
 		case tierAdminOnly:
 			if isAdmin(domain, clientCert, clientCN) {
 				next.ServeHTTP(w, r)
 			} else {
-				denyWithLog(w, r, domain, clientCN, "route requires admin access")
+				denyWithLog(w, r, principal, "route requires admin access")
 			}
 
 		default:
-			denyWithLog(w, r, domain, clientCN, "unclassified route")
+			denyWithLog(w, r, principal, "unclassified route")
 		}
 	})
 }
@@ -225,9 +233,10 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 // correlate against. Logged at Warn because a denial on these routes is either a
 // misconfiguration or an attempt, and both are worth seeing.
 //
-// Both the path and the CN are sanitised first. The path is straightforwardly
-// attacker-controlled — net/http decodes %0A into a real newline, so a request
-// for /certificate_status/a%0A... puts one in the log record. The CN is less
+// Both the path and the CN are sanitised first — the path here, the CN inside
+// clientPrincipal.LogValue. The path is straightforwardly attacker-controlled —
+// net/http decodes %0A into a real newline, so a request for
+// /certificate_status/a%0A... puts one in the log record. The CN is less
 // obvious: it comes from a certificate verified against a trust anchor, which
 // used to mean our own CA and no longer does. A client_ca entry trusts an issuer
 // the operator does not necessarily control, and nothing stops that issuer
@@ -237,18 +246,13 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 // a property of the handler, not of this call site, and a log that is later
 // piped through anything less careful should not become a way to write arbitrary
 // lines into it.
-func denyWithLog(w http.ResponseWriter, r *http.Request, domain *TrustDomain, clientCN, reason string) {
-	// The domain, not just the CN. Once client_ca is configured a common name
-	// is no longer an identity: ops-admin from our CA and ops-admin from a
-	// partner CA are different principals, and a denial record naming only the
-	// CN cannot tell an investigator which one was refused.
-	where := "unattributed"
-	if domain != nil {
-		where = domain.Describe()
-	}
+func denyWithLog(w http.ResponseWriter, r *http.Request, principal clientPrincipal, reason string) {
+	// The principal, not just the CN: it carries the domain that vouched for the
+	// name, and without it a denial record cannot say which ops-admin was
+	// refused once client_ca is configured.
 	slog.Warn("Request denied by authorisation middleware",
 		"method", r.Method, "path", sanitiseForLog(r.URL.Path),
-		"client_cn", sanitiseForLog(clientCN), "domain", where, "reason", reason)
+		"client", principal, "reason", reason)
 	http.Error(w, "access denied", http.StatusForbidden)
 }
 
