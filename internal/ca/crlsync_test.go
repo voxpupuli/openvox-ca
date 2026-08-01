@@ -239,6 +239,70 @@ var _ = Describe("SyncCRLCache", func() {
 			"the pre-signed Good response must be dropped when the CRL that contradicts it is installed")
 	})
 
+	It("refuses to renew a certificate revoked on another replica", func() {
+		ctx := context.Background()
+		cert := signedCert(signer, "crlsync-renew-node")
+
+		Expect(signer.Revoke(ctx, "crlsync-renew-node")).To(Succeed())
+
+		// The replica's cached CRL still predates the revocation, so the auth
+		// middleware would admit this certificate. Renewal is the one request
+		// that turns that into a permanent bypass — it mints a new serial no CRL
+		// will ever list — so it must not rely on the cache.
+		stale, err := replica.IsRevokedSerial(ctx, cert.SerialNumber)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(stale).To(BeFalse(), "precondition: the replica has not yet synced")
+
+		_, err = replica.AutoRenew(ctx, cert)
+		Expect(err).To(MatchError(ca.ErrCertRevoked))
+	})
+
+	It("still renews a certificate that is not revoked", func() {
+		ctx := context.Background()
+		cert := signedCert(signer, "crlsync-renew-ok-node")
+
+		renewed, err := replica.AutoRenew(ctx, cert)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(decodeCert(renewed).SerialNumber.Cmp(cert.SerialNumber)).NotTo(BeZero(),
+			"renewal should issue a fresh serial")
+	})
+
+	It("leaves the cached OCSP responses of serials it did not revoke alone", func() {
+		ctx := context.Background()
+		revokedCert := signedCert(signer, "crlsync-ocsp-target-node")
+		bystander := signedCert(signer, "crlsync-ocsp-bystander-node")
+
+		// Attach after signing so both serials are in the replica's OCSP index.
+		replica := attachReplica(tmpDir)
+
+		bystanderReq, err := testutil.BuildOCSPRequest(bystander, replica.CACert)
+		Expect(err).NotTo(HaveOccurred())
+		before, err := replica.OCSPResponse(ctx, bystanderReq)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(signer.Revoke(ctx, "crlsync-ocsp-target-node")).To(Succeed())
+		updated, err := replica.SyncCRLCache(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(updated).To(BeTrue())
+
+		// Byte-identical means it came back from the cache rather than being
+		// re-signed. Dropping every revoked serial's entry on each sync instead
+		// of only the newly revoked ones would re-sign the whole revoked set on
+		// every revocation anywhere in the fleet.
+		after, err := replica.OCSPResponse(ctx, bystanderReq)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(after).To(Equal(before), "an unrelated serial's cached response must survive the sync")
+
+		// ...and the serial that was revoked must not have survived.
+		targetReq, err := testutil.BuildOCSPRequest(revokedCert, replica.CACert)
+		Expect(err).NotTo(HaveOccurred())
+		targetResp, err := replica.OCSPResponse(ctx, targetReq)
+		Expect(err).NotTo(HaveOccurred())
+		parsed, err := xocsp.ParseResponse(targetResp, replica.CACert)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(parsed.Status).To(Equal(xocsp.Revoked))
+	})
+
 	It("reports the CRL number it is deciding from", func() {
 		ctx := context.Background()
 		_ = signedCert(signer, "crlsync-number-node")
@@ -258,6 +322,31 @@ var _ = Describe("SyncCRLCache", func() {
 		after, ok := replica.CachedCRLNumber()
 		Expect(ok).To(BeTrue())
 		Expect(after.Cmp(before)).To(Equal(1))
+	})
+})
+
+// Startup writes the same cache the sync does, so it has to apply the same
+// check. Otherwise the refusal is decorative: a restart is what an operator
+// reaches for when the sync keeps failing, and it would install exactly the CRL
+// the sync was declining.
+var _ = Describe("Init with a CRL this CA did not sign", func() {
+	It("refuses to start rather than deciding revocation from it", func() {
+		ctx := context.Background()
+		tmpDir, err := os.MkdirTemp("", "openvox-ca-crlsync-init-test")
+		Expect(err).NotTo(HaveOccurred())
+		defer os.RemoveAll(tmpDir)
+
+		store := storage.New(tmpDir)
+		Expect(store.EnsureDirs(ctx)).To(Succeed())
+		Expect(store.SaveCAKey(ctx, cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(ctx, cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(ctx, foreignCRLPEM(1))).To(Succeed())
+		Expect(store.WriteSerial(ctx, "0001")).To(Succeed())
+		Expect(store.TouchInventory(ctx)).To(Succeed())
+
+		err = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test").Init(ctx)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("not signed by the CA certificate this process is using"))
 	})
 })
 

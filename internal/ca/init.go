@@ -489,6 +489,14 @@ func (c *CA) bootstrapCA(ctx context.Context) error {
 
 // loadCRLCache reads the CRL from disk and caches it in memory.
 // Must be called with c.mu held.
+//
+// It refuses a CRL this CA did not sign, on the same grounds and through the
+// same check as SyncCRLCache — see verifyOwnCRLLocked. Startup is where that
+// matters most: a restart is the remedy an operator reaches for when the sync
+// is refusing, so a startup that skipped the check would install precisely the
+// CRL the sync declined and the refusal would amount to nothing. Failing here
+// keeps the CA from serving on a revocation list it cannot vouch for, and the
+// error says what to do about it.
 func (c *CA) loadCRLCache(ctx context.Context) error {
 	crlPEM, err := c.Storage.GetCRL(ctx)
 	if err != nil {
@@ -501,6 +509,9 @@ func (c *CA) loadCRLCache(ctx context.Context) error {
 	crl, err := x509.ParseRevocationList(block.Bytes)
 	if err != nil {
 		return fmt.Errorf("parsing CRL: %w", err)
+	}
+	if err := c.verifyOwnCRLLocked(crl); err != nil {
+		return err
 	}
 	c.cachedCRL = crl
 	return nil

@@ -37,8 +37,10 @@ import (
 // until it happens to re-sign on its own, which with the default 30-day CRL
 // validity is weeks away. Storage is the shared truth; this pulls from it.
 //
-// Cheap enough to run on a short timer: one CRL read per call, no cluster lock,
-// and c.mu is held only for the comparison and the swap, never across the read.
+// Cheap enough to run on a short timer: one CRL read per call and no cluster
+// lock. c.mu is never held across the storage read; on the rare tick that finds
+// something new it is held for the comparison, the signature check, the swap
+// and the OCSP eviction, and on every other tick for the comparison alone.
 // Taking the CRL lock would serialise every replica's poll against every
 // revocation for no gain — the swap needs no mutual exclusion because it is
 // monotonic in the CRL number, so a poll that raced a local re-sign and lost
@@ -68,27 +70,13 @@ func (c *CA) SyncCRLCache(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 
-	// SECURITY: only install a CRL this CA signed. The cached CRL is the sole
-	// input to the revocation half of every admission decision, so replacing it
-	// with a list issued by some other authority would silently unrevoke
-	// everything this CA has revoked — and a forged CRL needs only a plausible
-	// number to be preferred by the comparison above. The reachable innocent
-	// cause is a CA certificate replaced underneath a replica that has not
-	// restarted; keeping the CRL we already hold is the fail-closed answer
-	// either way, and the counter says it happened.
-	//
-	// The check is the signature rather than the issuer name or the authority
-	// key identifier: the name is not unique among sub-CAs under a shared root,
-	// and the key identifier is an optional extension that openssl omits by
-	// default.
-	if c.CACert == nil {
+	// SECURITY: only install a CRL this CA signed — see verifyOwnCRLLocked. A
+	// forged CRL needs only a plausible number to be preferred by the comparison
+	// above, so the comparison alone is not a gate. Keeping the CRL we already
+	// hold is the fail-closed answer, and the counter says it happened.
+	if err := c.verifyOwnCRLLocked(stored); err != nil {
 		c.crlSyncFailures.Add(1)
-		return false, fmt.Errorf("CA certificate not loaded")
-	}
-	if err := stored.CheckSignatureFrom(c.CACert); err != nil {
-		c.crlSyncFailures.Add(1)
-		return false, fmt.Errorf("stored CRL was not signed by the CA certificate this process is using "+
-			"(refusing to cache it; if the CA certificate was replaced, this replica needs a restart): %w", err)
+		return false, err
 	}
 
 	previous := c.cachedCRL
@@ -99,6 +87,34 @@ func (c *CA) SyncCRLCache(ctx context.Context) (bool, error) {
 		"crl_number", stored.Number,
 		"revoked", len(stored.RevokedCertificateEntries))
 	return true, nil
+}
+
+// verifyOwnCRLLocked reports an error unless crl was issued by the CA
+// certificate this process loaded.
+//
+// The cached CRL is the sole input to the revocation half of every admission
+// decision this CA makes, so caching a list issued by some other authority
+// would silently unrevoke everything this CA has revoked. Both paths that write
+// c.cachedCRL from storage — SyncCRLCache and loadCRLCache — go through here,
+// which is the point: gating only the sync would be theatre, because a restart
+// is the documented remedy for a sync that is refusing, and the startup path
+// would then install exactly the CRL the sync declined.
+//
+// The check is the signature rather than the issuer name or the authority key
+// identifier: the name is not unique among sub-CAs under a shared root, and the
+// key identifier is an optional extension that openssl omits by default.
+//
+// c.mu must be held by the caller.
+func (c *CA) verifyOwnCRLLocked(crl *x509.RevocationList) error {
+	if c.CACert == nil {
+		return fmt.Errorf("cannot verify the stored CRL: CA certificate not loaded")
+	}
+	if err := crl.CheckSignatureFrom(c.CACert); err != nil {
+		return fmt.Errorf("the stored CRL was not signed by the CA certificate this process is using, "+
+			"so it is being refused rather than used to decide revocation. "+
+			"If the CA certificate was replaced, re-sign the CRL with it: %w", err)
+	}
+	return nil
 }
 
 // crlSupersedes reports whether stored should replace cached. The CRL number

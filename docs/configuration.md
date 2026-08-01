@@ -207,8 +207,9 @@ Boolean env vars accept any value accepted by `strconv.ParseBool`: `1`, `t`, `tr
 
 The CA answers "is this certificate revoked?" from a copy of the CRL it holds in
 memory, not from storage — the check is on the hot path of every authenticated
-request. The copy is loaded at startup and rewritten whenever *that* process
-re-signs the CRL, which on a single node is the whole story.
+request, and it also backs the OCSP responses this replica signs. The copy is
+loaded at startup and rewritten whenever *that* process re-signs the CRL, which
+on a single node is the whole story.
 
 On the shared backends (`etcd`, `redis`, `postgres`, `mysql`) it is not: only
 the replica that handled the revocation re-signs, so every other
@@ -217,6 +218,23 @@ its own. `crl_sync_interval_sec` closes that. Each replica re-reads the stored
 CRL on the interval and installs it if it has advanced, which makes the interval
 the worst-case window in which a revoked certificate still works against a
 replica that did not revoke it. The default is 60 seconds.
+
+Two things the window does not cover, both worth knowing before you rely on it:
+
+- **OCSP responses already handed out.** The responder signs each response with
+  four hours of validity and clients cache it, so a verifier that asked before
+  the revocation can keep treating the certificate as valid for that long. The
+  sync drops this replica's own cached responses for newly revoked serials, but
+  answers already in a client's or proxy's cache cannot be recalled. This
+  applies only if you have enabled the responder with `--ocsp-url`.
+- **Certificates issued to the agent before it was locked out.** Revoking one
+  serial does not revoke another the same subject already holds. Renewal cannot
+  be used to escape a revocation — `POST /certificate_renewal` re-reads the CRL
+  from storage rather than trusting the cached copy, so a revoked certificate is
+  refused there even on a replica that has not synced — but if you are locking
+  out a compromised node rather than retiring one certificate, check the
+  inventory for other live serials for that subject, or use
+  `openvox-ca-ctl clean` to revoke and remove them together.
 
 The read is one small blob, takes no cluster lock, and writes nothing, so it
 costs the same on every backend and needs no leader. Lengthening the interval
@@ -230,8 +248,15 @@ the setting does not matter there.
 
 To confirm propagation, compare `puppetca_crl_cached_number` (per replica)
 against `puppetca_crl_number` (from storage) — see
-[metrics](metrics.md#watching-revocation-propagate). Restarting a replica also
-reloads its CRL.
+[metrics](metrics.md#watching-revocation-propagate).
+
+Restarting a replica also reloads its CRL. Both paths verify that the stored CRL
+was signed by the CA certificate the process is using, and refuse it otherwise —
+a running replica keeps the CRL it already holds, and a starting one fails to
+start rather than decide revocation from a list it cannot vouch for. If that
+happens, the CA certificate and the CRL have diverged: re-sign the CRL with the
+current certificate (`openvox-ca-ctl reissue-crl`), or restore the certificate
+that signed it.
 
 ## Autosigning
 

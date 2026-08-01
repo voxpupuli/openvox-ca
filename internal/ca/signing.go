@@ -67,6 +67,12 @@ func serialHexStr(n *big.Int) string {
 // already exists for the requested subject.
 var ErrCertExists = errors.New("certificate already exists")
 
+// ErrCertRevoked is returned by AutoRenew when the certificate presented for
+// renewal is on the CRL. A sentinel because the HTTP layer has to turn it into
+// a 403 rather than a 500: the request is well formed and the answer is a
+// refusal, not a failure.
+var ErrCertRevoked = errors.New("certificate is revoked")
+
 // ErrNotInitialized is returned by signing helpers when the CA's certificate
 // or private key has not been loaded — typically because Init has not been
 // called or it failed. Exposed as a sentinel so HTTP handlers can detect the
@@ -804,6 +810,39 @@ func (c *CA) AutoRenew(ctx context.Context, presentedCert *x509.Certificate) ([]
 	// NIST 800-53: SC-12, SC-13 (Cryptographic Protection)
 	if err := validatePublicKey(presentedCert.PublicKey); err != nil {
 		return nil, fmt.Errorf("rejecting auto-renewal for %s: %w", subject, err)
+	}
+
+	// SECURITY: re-check revocation against storage, not just the cached CRL the
+	// auth middleware consulted on the way in.
+	//
+	// Renewal is the one request that converts a stale cache into a permanent
+	// bypass. Every other decision made from an out-of-date CRL is self-limiting:
+	// it admits a revoked certificate for at most one sync interval, after which
+	// the same certificate is rejected. This one mints a *new* certificate —
+	// fresh serial, full leaf validity, every authorisation OID carried forward —
+	// that no CRL will ever list, because the serial being revoked is the one it
+	// replaces. A revocation racing a renewal on a lagging replica would leave
+	// the agent a credential outliving its lockout by years.
+	//
+	// So this path pays for a storage read that the general auth path cannot:
+	// renewals are rare, and the alternative is that the propagation window this
+	// CA advertises does not actually bound a compromised agent's access.
+	// Fail-closed, matching the middleware: an unreadable CRL denies.
+	// NIST 800-53: IA-5(2) (PKI-Based Authentication), AC-3 (Access Enforcement)
+	if _, err := c.SyncCRLCache(ctx); err != nil {
+		// Not fatal on its own: the check below still runs against the CRL
+		// already held, which is no worse than the pre-sync behaviour. The
+		// failure is counted and logged by SyncCRLCache.
+		slog.Warn("AutoRenew: could not refresh the CRL before renewing; checking against the CRL in memory",
+			"subject", subject, "error", err)
+	}
+	if revoked, err := c.IsRevokedSerial(ctx, presentedCert.SerialNumber); err != nil || revoked {
+		if err != nil {
+			return nil, fmt.Errorf("rejecting auto-renewal for %s: cannot determine revocation status: %w", subject, err)
+		}
+		slog.Warn("AutoRenew: refusing to renew a revoked certificate",
+			"subject", subject, "serial", serialHexStr(presentedCert.SerialNumber))
+		return nil, fmt.Errorf("rejecting auto-renewal for %s: %w", subject, ErrCertRevoked)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, lockTimeout)
