@@ -34,7 +34,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -587,19 +586,9 @@ func newRootCmd() *cobra.Command {
 
 			// Wire mTLS auth middleware when TLS is configured.
 			if cfg.TLSCert != "" && cfg.TLSKey != "" {
-				allowList := map[string]bool{}
-				for _, cn := range strings.Split(cfg.PuppetServer, ",") {
-					cn = strings.TrimSpace(cn)
-					if cn != "" {
-						allowList[cn] = true
-					}
-				}
-				fileCNs, err := loadPuppetServerFile(cfg.PuppetServerFile)
+				allowList, err := buildAdminAllowList(cfg.PuppetServer, cfg.PuppetServerFile)
 				if err != nil {
 					return err
-				}
-				for _, cn := range fileCNs {
-					allowList[cn] = true
 				}
 				srv.AuthConfig = &api.AuthConfig{
 					CACert:            myCA.CACert,
@@ -659,10 +648,14 @@ func newRootCmd() *cobra.Command {
 				}()
 			}
 
+			// certs holds the server's TLS keypair, or stays nil without TLS.
+			// It is reachable by the reload handler below so a renewed server
+			// certificate can be picked up without a restart.
+			var certs *certReloader
 			if cfg.TLSCert != "" && cfg.TLSKey != "" {
-				serverCert, err := tls.LoadX509KeyPair(cfg.TLSCert, cfg.TLSKey)
+				certs, err = newCertReloader(cfg.TLSCert, cfg.TLSKey)
 				if err != nil {
-					return fmt.Errorf("failed to load TLS cert/key (cert %s, key %s): %w", cfg.TLSCert, cfg.TLSKey, err)
+					return fmt.Errorf("failed to load TLS cert/key: %w", err)
 				}
 
 				caCertPEM, err := myCA.Storage.GetCACert(ctx)
@@ -681,13 +674,15 @@ func newRootCmd() *cobra.Command {
 				// RequestClientCert allows public endpoints to work without a
 				// client cert while the auth middleware enforces cert requirements
 				// per-tier. MinVersion TLS 1.2 blocks legacy protocol downgrades.
+				// The certificate comes from a callback rather than a fixed
+				// list so it can be replaced on reload when it is renewed.
 				// NIST 800-53: SC-8 (Transmission Confidentiality and Integrity),
 				//              SC-23 (Session Authenticity), IA-3 (Device Identification)
 				server.TLSConfig = &tls.Config{
-					Certificates: []tls.Certificate{serverCert},
-					ClientCAs:    caPool,
-					ClientAuth:   tls.RequestClientCert,
-					MinVersion:   tls.VersionTLS12,
+					GetCertificate: certs.GetCertificate,
+					ClientCAs:      caPool,
+					ClientAuth:     tls.RequestClientCert,
+					MinVersion:     tls.VersionTLS12,
 				}
 
 				slog.Info("TLS enabled", "cert", cfg.TLSCert)
@@ -771,9 +766,24 @@ func newRootCmd() *cobra.Command {
 				return fmt.Errorf("failed to listen on %s: %w", addr, err)
 			}
 
-			status := func() string { return newStatusReport(myCA, addr, tlsConfigured).line(time.Now()) }
+			// SIGHUP re-reads the file-backed configuration: the TLS keypair
+			// (so a renewed server certificate does not need a restart) and
+			// the admin allow list.
+			reloader := &configReloader{
+				certs:     certs,
+				auth:      srv.AuthConfig,
+				staticCNs: cfg.PuppetServer,
+				cnFile:    cfg.PuppetServerFile,
+			}
+
+			status := func() string {
+				return newStatusReport(myCA, addr, tlsConfigured).line(time.Now()) + reloader.statusSuffix()
+			}
 			notifier.Ready(status())
+
+			// Both jobs are bound to ctx, so they stop on shutdown.
 			go runNotifyHeartbeat(ctx, notifier, heartbeatInterval(notifier), status)
+			go runReloadWatcher(ctx, notifier, reloader, status)
 
 			var serveErr error
 			if cfg.TLSCert != "" && cfg.TLSKey != "" {
@@ -924,6 +934,12 @@ func runSignerMode(ctx context.Context, cfg *serverConfig, absCADir string) erro
 			}
 		}()
 	}
+
+	// The signer holds no reloadable configuration, but SIGHUP's default
+	// action is to terminate. Ignoring it means a reload signal delivered to
+	// the process group (rather than to the launcher alone) cannot take the CA
+	// key holder down and force a full restart.
+	signal.Ignore(syscall.SIGHUP)
 
 	slog.Info("Starting CA signer process",
 		"cadir", absCADir,

@@ -169,6 +169,14 @@ func runLauncher(drain time.Duration, notify *sdnotify.Notifier) error {
 	sigCh := make(chan os.Signal, 2)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
+	// Reload requests arrive here because the service manager signals the
+	// unit's main PID, but the configuration they affect (the TLS keypair, the
+	// admin allow list) belongs to the frontend, so they are forwarded to it.
+	// Registering the handler also stops SIGHUP from doing what it does by
+	// default, which is kill this process.
+	hupCh := make(chan os.Signal, 1)
+	signal.Notify(hupCh, syscall.SIGHUP)
+
 	// Wait for either child to exit.
 	type childResult struct {
 		name string
@@ -190,30 +198,37 @@ func runLauncher(drain time.Duration, notify *sdnotify.Notifier) error {
 		timer.Stop()
 	}
 
-	select {
-	case sig := <-sigCh:
-		slog.Info("Received signal, shutting down CA processes", "signal", sig)
-		notify.Stopping(fmt.Sprintf("Shutting down on %s (up to %s for the children to exit)",
-			sig, gracefulShutdownTimeout))
-		shutdown()
-		return nil
+	for {
+		select {
+		case <-hupCh:
+			slog.Info("Forwarding reload signal to the frontend process")
+			frontendCmd.Process.Signal(syscall.SIGHUP)
+			continue
 
-	case result := <-exitCh:
-		slog.Error("CA child process exited unexpectedly", "process", result.name, "error", result.err)
-		// Report the cause before tearing the rest down: the status text
-		// outlives the process and is what `systemctl status` shows next to
-		// the failure.
-		notify.Stopping(fmt.Sprintf("The %s process exited unexpectedly (%v); stopping", result.name, result.err))
-		// Shut down the surviving child.
-		frontendCmd.Process.Signal(syscall.SIGTERM)
-		signerCmd.Process.Signal(syscall.SIGTERM)
-		timer := time.AfterFunc(crashShutdownTimeout, func() {
-			frontendCmd.Process.Kill()
-			signerCmd.Process.Kill()
-		})
-		<-exitCh // wait for the other child
-		timer.Stop()
-		return fmt.Errorf("%s process exited unexpectedly: %w", result.name, result.err)
+		case sig := <-sigCh:
+			slog.Info("Received signal, shutting down CA processes", "signal", sig)
+			notify.Stopping(fmt.Sprintf("Shutting down on %s (up to %s for the children to exit)",
+				sig, gracefulShutdownTimeout))
+			shutdown()
+			return nil
+
+		case result := <-exitCh:
+			slog.Error("CA child process exited unexpectedly", "process", result.name, "error", result.err)
+			// Report the cause before tearing the rest down: the status text
+			// outlives the process and is what `systemctl status` shows next to
+			// the failure.
+			notify.Stopping(fmt.Sprintf("The %s process exited unexpectedly (%v); stopping", result.name, result.err))
+			// Shut down the surviving child.
+			frontendCmd.Process.Signal(syscall.SIGTERM)
+			signerCmd.Process.Signal(syscall.SIGTERM)
+			timer := time.AfterFunc(crashShutdownTimeout, func() {
+				frontendCmd.Process.Kill()
+				signerCmd.Process.Kill()
+			})
+			<-exitCh // wait for the other child
+			timer.Stop()
+			return fmt.Errorf("%s process exited unexpectedly: %w", result.name, result.err)
+		}
 	}
 }
 

@@ -48,7 +48,7 @@ func hasPpCliAuth(cert *x509.Certificate) bool {
 // is set) if the certificate carries the pp_cli_auth extension
 // (ca.OIDPpCliAuth) with value "true".
 func isAdmin(cfg *AuthConfig, clientCert *x509.Certificate, clientCN string) bool {
-	return cfg.AllowList[clientCN] || (!cfg.NoPpCliAuth && hasPpCliAuth(clientCert))
+	return cfg.IsAdminCN(clientCN) || (!cfg.NoPpCliAuth && hasPpCliAuth(clientCert))
 }
 
 type authTier int
