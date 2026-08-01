@@ -79,6 +79,13 @@ echo "CA imported into $NEW_CADIR"
 This creates the directory structure, writes the CA cert/key/CRL, and
 initialises `inventory.txt` and `serial` (the serial file is written for compatibility but is not used at runtime; openvox-ca generates random serial numbers).
 
+> **`--crl-chain` ordering:** the bundle must start with the CRL issued by the
+> CA being imported. The server reads the first CRL in the stored bundle as its
+> own and refuses to start on one it did not sign, so `import` rejects a bundle
+> that leads with an ancestor's rather than let you discover it on first boot.
+> For a single-CA migration `$CA_CRL` is already the right file; only an
+> intermediate whose bundle carries its ancestors' CRLs needs reordering.
+
 ## Step 4: Copy signed certificates
 
 The `import` command only brings in the CA material. Existing signed

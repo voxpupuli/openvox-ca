@@ -290,8 +290,11 @@ var _ = Describe("SyncCRLCache", func() {
 		// check falls back to the copy in memory.
 		Expect(signer.Storage.UpdateCRL(ctx, []byte("not a CRL"))).To(Succeed())
 
+		before := replica.CRLSyncFailures()
 		_, err = replica.AutoRenew(ctx, cert)
 		Expect(err).To(MatchError(ca.ErrCertRevoked))
+		Expect(replica.CRLSyncFailures()).To(Equal(before+1),
+			"the refresh must actually have failed, or this proves nothing about the fallback")
 	})
 
 	It("still renews a certificate that is not revoked", func() {
@@ -394,48 +397,84 @@ var _ = Describe("Init against the stored CRL", func() {
 		Expect(err.Error()).To(ContainSubstring("not signed by the CA certificate this process is using"))
 	})
 
-	// `openvox-ca-ctl import --crl-chain` stores the operator's bundle verbatim,
-	// and an intermediate's bundle can lead with an ancestor. Refusing that
-	// would break a deployment that works today, so ours is looked for rather
-	// than assumed to be first.
-	It("finds this CA's CRL behind an ancestor's in an imported chain", func() {
+	// Block 0 is ours by convention, shared with the re-sign paths and the
+	// metrics exporter. A chain that leads with an ancestor is refused rather
+	// than searched, because a reader that searched would disagree with those
+	// two — see ownStoredCRLLocked. ImportCA is what stops such a bundle
+	// reaching storage in the first place.
+	It("refuses a chain that leads with an ancestor's CRL", func() {
 		chain := append(foreignCRLPEM(7), cachedCrlPEM...)
 
+		_, err := seedCA(chain)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("not signed by the CA certificate this process is using"))
+	})
+
+	It("reads block 0 when ours leads the chain", func() {
+		ctx := context.Background()
+		chain := append(cachedCrlPEM, foreignCRLPEM(7)...)
+
 		c, err := seedCA(chain)
-		Expect(err).NotTo(HaveOccurred(), "an ancestor-first chain must still start")
+		Expect(err).NotTo(HaveOccurred())
 
 		ours, ok := c.CachedCRLNumber()
 		Expect(ok).To(BeTrue())
 		Expect(ours.Cmp(big.NewInt(1))).To(BeZero(),
 			"must cache this CA's own CRL (number 1), not the ancestor's (7)")
+
+		// The sync reads the same block, so a following ancestor changes nothing.
+		updated, err := c.SyncCRLCache(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(updated).To(BeFalse(), "already current")
+		Expect(c.CRLSyncFailures()).To(BeZero())
+	})
+})
+
+// ImportCA is the gate that keeps a bundle the server cannot start on from
+// reaching storage, so its rejection is worth pinning at the point the operator
+// meets it.
+var _ = Describe("ImportCA with a --crl-chain bundle", func() {
+	var dir string
+
+	BeforeEach(func() {
+		var err error
+		dir, err = os.MkdirTemp("", "openvox-ca-import-crl-test")
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { os.RemoveAll(dir) })
 	})
 
-	It("skips a block it cannot parse and keeps looking for ours", func() {
-		garbage := pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: []byte("not DER")})
-		chain := append(garbage, cachedCrlPEM...)
-
-		c, err := seedCA(chain)
-		Expect(err).NotTo(HaveOccurred(), "one unparseable block must not stop the CA loading its own list")
-
-		ours, ok := c.CachedCRLNumber()
-		Expect(ok).To(BeTrue())
-		Expect(ours.Cmp(big.NewInt(1))).To(BeZero())
+	It("accepts one that leads with this CA's own CRL", func() {
+		chain := append(cachedCrlPEM, foreignCRLPEM(7)...)
+		Expect(ca.ImportCA(context.Background(), storage.New(dir), cachedCrtPEM, cachedKeyPEM, chain)).
+			To(Succeed())
 	})
 
-	It("syncs against our block in a chain, not the first one", func() {
+	It("rejects one that leads with someone else's", func() {
+		chain := append(foreignCRLPEM(7), cachedCrlPEM...)
+		err := ca.ImportCA(context.Background(), storage.New(dir), cachedCrtPEM, cachedKeyPEM, chain)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("put this CA's own CRL first"))
+	})
+
+	// The rejection has to be the same answer the server would give, or import
+	// blesses a bundle that will not boot.
+	It("rejects exactly what the server would refuse to start on", func() {
 		ctx := context.Background()
 		chain := append(foreignCRLPEM(7), cachedCrlPEM...)
 
-		c, err := seedCA(chain)
-		Expect(err).NotTo(HaveOccurred())
+		Expect(ca.ImportCA(ctx, storage.New(dir), cachedCrtPEM, cachedKeyPEM, chain)).NotTo(Succeed())
 
-		// The sync has to search the blob the same way startup did. Reading
-		// block 0 here would find the ancestor: numbered 7 against our 1, it
-		// would be refused on every tick and no revocation would ever land.
-		updated, err := c.SyncCRLCache(ctx)
-		Expect(err).NotTo(HaveOccurred(), "the sync must find our CRL behind the ancestor's")
-		Expect(updated).To(BeFalse(), "already current")
-		Expect(c.CRLSyncFailures()).To(BeZero())
+		// Write the same bundle past the gate and confirm the server agrees.
+		store := storage.New(dir)
+		Expect(store.EnsureDirs(ctx)).To(Succeed())
+		Expect(store.SaveCAKey(ctx, cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(ctx, cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(ctx, chain)).To(Succeed())
+		Expect(store.WriteSerial(ctx, "0001")).To(Succeed())
+		Expect(store.TouchInventory(ctx)).To(Succeed())
+
+		err := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test").Init(ctx)
+		Expect(err).To(HaveOccurred())
 	})
 })
 

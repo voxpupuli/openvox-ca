@@ -63,15 +63,8 @@ func (c *CA) SyncCRLCache(ctx context.Context) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// SECURITY: find the CRL this CA signed, wherever it sits in the stored
-	// blob, and install nothing else — see findOwnStoredCRLLocked and
-	// verifyOwnCRLLocked. The same search the startup loader uses, deliberately:
-	// this is the path that keeps a replica current, so if it took block 0 while
-	// startup searched, an imported chain that leads with an ancestor would sync
-	// against the ancestor's list for the life of the blob — either refusing on
-	// every tick, or, when the ancestor's number is the lower one, declining
-	// silently and never propagating a revocation at all.
-	stored, err := c.findOwnStoredCRLLocked(blob)
+	// SECURITY: install only a CRL this CA signed — see ownStoredCRLLocked.
+	stored, err := c.ownStoredCRLLocked(blob)
 	if err != nil {
 		c.crlSyncFailures.Add(1)
 		return false, err
@@ -121,96 +114,65 @@ func (c *CA) verifyOwnCRLLocked(crl *x509.RevocationList) error {
 	return nil
 }
 
-// findOwnStoredCRLLocked returns the CRL in blob that this CA signed.
+// ownStoredCRLLocked parses this CA's CRL out of a stored blob and refuses one
+// it did not sign.
 //
-// The stored blob is usually a single block, but it can be a chain: the import
-// command writes an operator-supplied bundle verbatim, and for an intermediate
-// CA that bundle carries its ancestors' CRLs too. Which position ours occupies
-// is the operator's choice, so this looks for it rather than assuming.
+// Block 0 is this CA's own CRL. That is an assumption the whole package shares,
+// not a choice made here: the re-sign paths read block 0 through readStoredCRL,
+// signCRLLocked writes a single block over the lot, and the metrics exporter
+// reports block 0 as puppetca_crl_number. A reader that searched the blob
+// instead would disagree with all three — on a bundle whose first block is an
+// ancestor's, it would cache one list while every re-sign amended another and
+// the exporter reported a third, so a revocation could be silently dropped and
+// the CRL-lag alert would fire against a replica that was perfectly current.
 //
-// A block that will not parse is skipped rather than fatal — one malformed
-// ancestor block must not stop the CA loading its own list — but a blob with no
-// CRL of ours in it is an error, because the alternative is deciding revocation
-// from a list this CA did not issue.
-//
-// When more than one block is ours the highest CRL number wins, for the same
-// reason the sync only ever moves forwards: of two lists this CA signed, the
-// later one is the one that has our revocations in it.
+// Preserving and ordering a genuine CRL chain is #162's subject, and it settles
+// the same question the same way: ours leads. Until then ImportCA rejects a
+// bundle that does not, so the assumption is enforced where the operator can
+// still act on it rather than discovered later.
 //
 // c.mu must be held by the caller.
-func (c *CA) findOwnStoredCRLLocked(blob []byte) (*x509.RevocationList, error) {
-	var (
-		best    *x509.RevocationList
-		lastErr error
-		blocks  int
-	)
-	rest := blob
-	for {
-		var block *pem.Block
-		block, rest = pem.Decode(rest)
-		if block == nil {
-			break
-		}
-		if block.Type != crlPEMType {
-			continue
-		}
-		blocks++
-		crl, err := x509.ParseRevocationList(block.Bytes)
-		if err != nil {
-			lastErr = fmt.Errorf("parsing CRL: %w", err)
-			continue
-		}
-		if err := c.verifyOwnCRLLocked(crl); err != nil {
-			lastErr = err
-			continue
-		}
-		if crlSupersedes(crl, best) {
-			best = crl
-		}
+func (c *CA) ownStoredCRLLocked(blob []byte) (*x509.RevocationList, error) {
+	crl, err := parseFirstCRL(blob)
+	if err != nil {
+		return nil, err
 	}
-	switch {
-	case best != nil:
-		return best, nil
-	case blocks == 0:
-		return nil, fmt.Errorf("CRL is empty or not PEM-encoded")
-	case lastErr != nil:
-		return nil, lastErr
-	default:
-		return nil, fmt.Errorf("the stored CRL holds no revocation list signed by this CA's certificate")
+	if err := c.verifyOwnCRLLocked(crl); err != nil {
+		return nil, err
 	}
+	return crl, nil
 }
 
-// crlPEMType is the PEM label every CRL this project writes carries (RFC 7468
-// §5). Named so the readers that filter on it and the import path that validates
-// it cannot drift apart.
-const crlPEMType = "X509 CRL"
+// parseFirstCRL decodes and parses the first CRL block of a stored blob — this
+// CA's own, by the convention ownStoredCRLLocked documents.
+func parseFirstCRL(blob []byte) (*x509.RevocationList, error) {
+	block, _ := pem.Decode(blob)
+	if block == nil {
+		return nil, fmt.Errorf("CRL is empty or not PEM-encoded")
+	}
+	crl, err := x509.ParseRevocationList(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parsing CRL: %w", err)
+	}
+	return crl, nil
+}
 
-// bundleHasCRLFrom reports whether blob carries at least one CRL signed by
-// cert. It is the import-time form of the check the readers apply at startup
-// and on every sync, so a bundle this returns false for is one the server will
-// refuse to start on.
+// bundleLeadsWithCRLFrom reports whether the first CRL in blob was signed by
+// cert.
+//
+// It is the import-time form of the check the CA applies to the stored blob on
+// startup and on every sync, so a bundle this rejects is one the server would
+// refuse to start on — which is the point of running it at import, where the
+// operator still has the file in front of them.
 //
 // A package-level function rather than a method because it runs during import,
 // before any CA value exists.
-func bundleHasCRLFrom(blob []byte, cert *x509.Certificate) bool {
-	rest := blob
-	for {
-		var block *pem.Block
-		block, rest = pem.Decode(rest)
-		if block == nil {
-			return false
-		}
-		if block.Type != crlPEMType {
-			continue
-		}
-		crl, err := x509.ParseRevocationList(block.Bytes)
-		if err != nil {
-			continue
-		}
-		if crl.CheckSignatureFrom(cert) == nil {
-			return true
-		}
+func bundleLeadsWithCRLFrom(blob []byte, cert *x509.Certificate) bool {
+	crl, err := parseFirstCRL(blob)
+	if err != nil {
+		return false
 	}
+	return crl.CheckSignatureFrom(cert) == nil
 }
 
 // crlSupersedes reports whether stored should replace cached. The CRL number

@@ -749,8 +749,13 @@ func (c *CA) SaveRequest(ctx context.Context, subject string, csrPEM []byte) (bo
 // re-checked against the CRL in storage before anything is issued — see
 // refuseIfRevoked. It matters more here than on the auto-renewal path: this one
 // also re-keys, so a revoked agent slipping through would walk away with a
-// credential the CA has never seen the private key of. Pass nil only where
-// there is no presented certificate to check.
+// credential the CA has never seen the private key of.
+//
+// A nil presentedCert skips that check, because there is no credential to
+// check. That is not a way to opt out of it: the HTTP layer reaches this only
+// through the tierAnyClient middleware, which has already established a peer
+// certificate, and passes it. Nil is for callers with no authenticated peer at
+// all — today, only tests.
 func (c *CA) Renew(ctx context.Context, subject string, csrPEM []byte, presentedCert *x509.Certificate) ([]byte, error) {
 	if err := ValidateSubject(subject); err != nil {
 		return nil, err
