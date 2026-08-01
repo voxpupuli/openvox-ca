@@ -19,6 +19,7 @@ operator CLI, see [operator CLI (`openvox-ca-ctl`)](operator-cli.md).
 | `--tls-self-provision-names` | `""` | Extra DNS names for that certificate, beyond `--hostname` |
 | `--puppet-server` | `""` | Comma-separated CNs granted admin API access (mTLS only) |
 | `--puppet-server-file` | `""` | Path to a file of CNs granted admin API access (one per line; `#` comments and blank lines ignored) |
+| `--client-revocation-policy` | `require` | Revocation checking for `client_ca` domains: `require`, `check` or `skip`. Scoped to foreign issuers; this CA always checks its own CRL. See [trusting client certificates from another CA](#trusting-client-certificates-from-another-ca). |
 | `--no-pp-cli-auth` | `false` | Disable `pp_cli_auth` extension as an admin credential; require CN allow list only |
 | `--no-tls-required` | `false` | Allow plain HTTP on non-loopback addresses; use only behind a trusted TLS proxy or in test environments |
 | `--allow-public-status` | `false` | Allow unauthenticated `GET /certificate_status`; by default this endpoint is admin-only, matching Puppet Server's shipped `auth.conf`. "Admin" means an admin CN of the trust domain that verified the client, or `pp_cli_auth` where that domain honours it — see [trusting client certificates from another CA](#trusting-client-certificates-from-another-ca) |
@@ -679,9 +680,10 @@ reported healthy.
 
 Every CRL in `crl_file` is signature-verified against an anchor in the same
 entry before it is used, and each is bound to the anchor whose key signed it.
-The CRL's own Authority Key Identifier is not consulted at all, so an issuer
-that omits the extension — optional under RFC 5280, and omitted by `openssl ca
--gencrl` under the stock `openssl.cnf` — is fully supported. Without verification, a writable `crl_file` would be a way to
+The CRL's own Authority Key Identifier is not consulted at all. RFC 5280 §5.2.1
+requires a conforming CRL issuer to include it, but not every issuer conforms,
+and there is no reason to refuse a CRL whose signature verifies over a field
+this CA does not use — so an issuer that omits it is fully supported. Without verification, a writable `crl_file` would be a way to
 *clear* revocations, not merely add them.
 
 A client certificate that is *itself* one of your anchors is rejected under
@@ -698,12 +700,14 @@ client, issue it a leaf from the anchor instead.
 > `(leaf, intermediate)` pair with no CRL. Every client of the entry is then
 > rejected.
 >
-> The server warns at startup when an entry loads no usable CRL at all, but it
-> **cannot** warn about this case: the root's own CRL does verify and is kept, so
-> the entry looks covered from the outside. Nor can
-> `puppetca_client_crl_usable` see it — that gauge reports on the entry's
-> anchors, and the anchor is fine; it is the intermediate below it that has
-> nothing. The only symptom is a 403 for every client. Anchor on the issuing CA
+> The server warns at startup when any anchor has no currently valid CRL, but it
+> **cannot** warn about this case: the root is an anchor and its own CRL does
+> verify and is kept, so the entry looks covered from the outside. Nor can
+> `puppetca_client_crl_usable` see it — that gauge only reports whether the entry
+> holds *anything* current, which it does. What reports it is
+> `puppetca_client_crl_refusals_total`, which counts clients actually turned
+> away for want of a CRL, because by then the missing issuer is a fact rather
+> than a guess. Anchor on the issuing CA
 > and the problem does not arise: the chain is then `[leaf, anchor]` and the only
 > CRL `crl_file` needs is the one the anchor itself issued.
 >
@@ -714,10 +718,10 @@ client, issue it a leaf from the anchor instead.
 
 An expired CRL is treated differently by the two policies, and deliberately.
 A CRL carrying **no `nextUpdate` at all** is treated as expired, and for the
-same reason: RFC 5280 makes the field optional, and reading its absence as
-"never expires" would satisfy `require` forever from a snapshot that says
-nothing about revocations since. `openssl ca -gencrl` omits it without
-`default_crl_days`; the fix is at the issuing CA, not here.
+same reason: RFC 5280 §5.1.2.5 makes the field optional, and reading its absence
+as "never expires" would satisfy `require` forever from a snapshot that says
+nothing about revocations since. The fix is at the issuing CA — give it a
+next-update interval — not here.
 
 Under `require` an expired CRL counts as absent, so the policy does not quietly decay into
 `skip`. Under `check` it is still consulted — it is loaded, and the serials it
@@ -738,8 +742,14 @@ client of a domain, where a half-applied CRL reload costs at most a stale
 revocation. To rotate an anchor, add the new one as a second `client_ca` entry,
 roll the fleet, then remove the old entry and roll again.
 
-`puppetca_client_crl_usable{client_ca}` reports whether a domain has usable
-revocation material. **Alert on it**: under `require` a `0` rejects every client
+`puppetca_client_crl_usable{client_ca}` reports whether a domain holds any
+currently valid revocation material, and is published **only under `require`** —
+`crl_file` is optional under `check` and `skip`, so a domain without CRLs is
+correct there and a 0 would alert on a healthy server. It does not report
+partial coverage; `puppetca_client_crl_refusals_total{client_ca}` counts clients
+actually refused for want of a CRL, and
+`puppetca_client_crl_last_reload_timestamp_seconds{client_ca}` goes stale when
+`crl_file` has stopped being applied. **Alert on all three**: under `require` a `0` rejects every client
 of that issuer, and the first symptom is otherwise an agent-side 403.
 
 > Not to be confused with [`crl_chain_file`](#publishing-an-upstream-crl-chain),

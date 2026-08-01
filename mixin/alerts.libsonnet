@@ -266,6 +266,25 @@
             },
           },
           {
+            alert: 'PuppetCAClientCRLStale',
+            // The retain-previous branches are right for availability and
+            // invisible everywhere else: the kept CRLs are still current, so
+            // the gauge reads 1, and clients are still served, so no refusal is
+            // counted. What has stopped is the file being applied, so
+            // revocations published since are not honoured -- for as long as
+            // the retained CRLs remain within their nextUpdate, which is days.
+            expr: 'time() - puppetca_client_crl_last_reload_timestamp_seconds{%(selector)s} > %(stale)d' % {
+              selector: $._config.puppetCASelector,
+              stale: $._config.clientCRLStaleSeconds,
+            },
+            'for': $._config.clientCRLUnusableFor,
+            labels: { severity: 'warning' } + $._config.alertLabels,
+            annotations: {
+              summary: 'The Puppet CA has stopped applying a trust domain\'s crl_file.',
+              description: 'crl_file for client_ca {{ $labels.client_ca }} on {{ $labels.instance }} has not been applied for {{ $value | humanizeDuration }}. The previous CRLs are still in use and still current, so nothing else reports a problem -- but revocations published since are not being honoured. Check the server log for a reload error, or for a reload refused because it would have covered fewer anchors than the set in use.',
+            },
+          },
+          {
             alert: 'PuppetCAClientCRLRefusals',
             // The unambiguous half. The gauge above can only estimate coverage
             // at load time -- which anchors matter depends on chains that have

@@ -619,9 +619,19 @@ func csrValidationError(err error) bool {
 
 // clientCN extracts the Common Name from the TLS client certificate, if any.
 // Returns "" when TLS is not configured or no client cert is presented.
+// clientCN returns the presented certificate's common name, sanitised.
+//
+// Sanitised here rather than at each of its twenty call sites: the value comes
+// straight off a client-supplied certificate, several callers put it in a log
+// line, and a rule applied per call site is a rule that gets missed -- twice,
+// in this middleware alone.
+//
+// This is an identifier for logs and rate limiting, not an authorisation input;
+// authorisation reads the attributed domain's own lists. See clientPrincipal
+// for why the bare name is not an identity once client_ca is configured.
 func clientCN(r *http.Request) string {
 	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
-		return r.TLS.PeerCertificates[0].Subject.CommonName
+		return sanitiseForLog(r.TLS.PeerCertificates[0].Subject.CommonName)
 	}
 	return ""
 }
@@ -1031,7 +1041,13 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 		// with a different CN while authenticating as itself.
 		// NIST 800-53: IA-5(2) (PKI-Based Authentication)
 		if csr.Subject.CommonName != cn {
-			slog.Warn("Renewal rejected: CN mismatch", "client_cn", cn, "csr_cn", csr.Subject.CommonName)
+			// The CSR's CN is chosen by the requester and nothing has validated it
+			// at this point -- this is the mismatch branch, before Renew runs. Any
+			// agent holding one of our certificates reaches it, and the record it
+			// would forge is itself a security event.
+			slog.Warn("Renewal rejected: CN mismatch",
+				"client_cn", sanitiseForLog(cn),
+				"csr_cn", sanitiseForLog(csr.Subject.CommonName))
 			http.Error(w, "CSR CN does not match authenticated client CN", http.StatusForbidden)
 			return
 		}

@@ -127,7 +127,7 @@ func buildTrustDomains(cfg *serverConfig, ownCert *x509.Certificate, adminCNs ma
 			return nil, fmt.Errorf("client_ca %q: %w", entry.Name, err)
 		}
 		domain.SetRevocationSet(api.NewClientCRLSet(crls, anchors))
-		warnAboutCRLCoverage(entry, cfg.Policy(), crls, anchors)
+		warnAboutCRLCoverage(entry, cfg.ResolvedPolicy(), crls, anchors)
 
 		domains = append(domains, domain)
 	}
@@ -182,18 +182,32 @@ func warnIfGrantsSpanAnchors(entry *config.ClientCA, anchors []*x509.Certificate
 		"client_ca", entry.Name, "anchors", strings.Join(names, ", "))
 }
 
-// losesCoverage reports whether candidate leaves an anchor uncovered that
-// current covers.
+// losesCoverage reports whether candidate covers less than current does.
+//
+// Compared per anchor *key*, not per common name. Names collapse: a CA that
+// renews and rekeys keeps its subject, so a bundle carrying both certificates
+// through the overlap has two independent coverage slots under one name, and a
+// name-keyed comparison saw one. The guard then passed a strictly narrower
+// reload -- exactly what it exists to stop -- in the topology this feature was
+// built for.
+//
+// Both halves of coverage matter. Losing a *current* CRL breaks `require`;
+// losing a CRL entirely also breaks `check`, which consults expired ones for
+// the serials they name, so dropping one silently re-admits everything it
+// listed.
 func losesCoverage(current, candidate *api.ClientCRLSet, now time.Time) bool {
 	if candidate == nil {
 		return true
 	}
-	was := make(map[string]bool)
-	for _, name := range current.CoverageGaps(now) {
-		was[name] = true
+	wasPresent, wasCurrent := current.Coverage(now)
+	isPresent, isCurrent := candidate.Coverage(now)
+	for key := range wasPresent {
+		if !isPresent[key] {
+			return true
+		}
 	}
-	for _, name := range candidate.CoverageGaps(now) {
-		if !was[name] {
+	for key := range wasCurrent {
+		if !isCurrent[key] {
 			return true
 		}
 	}
@@ -222,12 +236,6 @@ func losesCoverage(current, candidate *api.ClientCRLSet, now time.Time) bool {
 func warnAboutCRLCoverage(entry *config.ClientCA, policy string, crls []*x509.RevocationList,
 	anchors []*x509.Certificate,
 ) {
-	if policy != config.RevocationSkip && policy != config.RevocationCheck {
-		// Same coercion checkChainRevocation makes: anything that is not one of
-		// the two "check less" names behaves as require, so this warning cannot
-		// be suppressed by a value validation never saw.
-		policy = config.RevocationRequire
-	}
 	if policy != config.RevocationRequire {
 		return
 	}
@@ -300,7 +308,7 @@ func loadDomainCRLs(entry *config.ClientCA, anchors []*x509.Certificate) ([]*x50
 // the supported procedure is to add the new anchor as a second entry, roll the
 // fleet, then remove the old one and roll again.
 func refreshClientCRLs(cfg *serverConfig, domains []api.TrustDomain, m *clientCRLMetrics) {
-	policy := cfg.Policy()
+	policy := cfg.ResolvedPolicy()
 	for i := range cfg.ClientCA {
 		entry := &cfg.ClientCA[i]
 		// Domain zero is ours, so entry i is domain i+1.
@@ -335,6 +343,7 @@ func refreshClientCRLs(cfg *serverConfig, domains []api.TrustDomain, m *clientCR
 				"now_uncovered", strings.Join(candidate.CoverageGaps(now), ", "))
 		default:
 			domain.SetRevocationSet(candidate)
+			m.recordReload(entry.Name, now)
 		}
 
 		// Published on every branch, not only the successful one. The gauge is
@@ -342,6 +351,16 @@ func refreshClientCRLs(cfg *serverConfig, domains []api.TrustDomain, m *clientCR
 		// is exactly when they need it: skipping the set here means the series
 		// is never created, and `== 0` cannot fire on a series that does not
 		// exist. The mixin ORs in absent() for the same reason on `up`.
+		// Zero-initialised so the series exists from the first scrape. A
+		// CounterVec child appears only when it is first incremented, so
+		// increase() -- which needs two samples -- could never see a burst that
+		// began and ended inside one interval, and the first increment of any
+		// burst was structurally invisible. Not policy-gated: the counter
+		// records refusals, which happen under require and check alike.
+		if m != nil {
+			m.refusals.WithLabelValues(entry.Name).Add(0)
+		}
+
 		// Published only under require. crl_file is optional under check and
 		// skip -- "that CA publishes OCSP instead, and I accept the risk" -- so a
 		// domain with no CRLs is a correct configuration there, and publishing 0
@@ -378,8 +397,9 @@ func clientCRLTask(cfg *serverConfig, domains []api.TrustDomain, m *clientCRLMet
 // what is not: whether clients are actually being refused, which depends on the
 // chains they present and so cannot be estimated before they arrive.
 type clientCRLMetrics struct {
-	usable   *prometheus.GaugeVec
-	refusals *prometheus.CounterVec
+	usable     *prometheus.GaugeVec
+	refusals   *prometheus.CounterVec
+	lastReload *prometheus.GaugeVec
 }
 
 // newClientCRLMetrics registers the gauge, or returns nil when the exporter is
@@ -412,9 +432,29 @@ func newClientCRLMetrics(reg prometheus.Registerer) *clientCRLMetrics {
 				"covered entry -- one anchor's CRL missing while another's is fine -- which no " +
 				"load-time check can distinguish from a healthy one. Alert on increase() > 0.",
 		}, []string{"client_ca"}),
+		lastReload: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "puppetca",
+			Subsystem: "client_crl",
+			Name:      "last_reload_timestamp_seconds",
+			Help: "When this client_ca entry's crl_file was last applied, in seconds since the " +
+				"epoch. A reload that fails, or that would cover fewer anchors than the set " +
+				"already in use, deliberately keeps the previous set -- which is right for " +
+				"availability and invisible on every other series, because the retained CRLs " +
+				"are still current and clients are still served. Meanwhile the file has stopped " +
+				"being applied, so revocations published since are not honoured. Alert on this " +
+				"going stale relative to maintenance_interval_sec.",
+		}, []string{"client_ca"}),
 	}
-	reg.MustRegister(m.usable, m.refusals)
+	reg.MustRegister(m.usable, m.refusals, m.lastReload)
 	return m
+}
+
+// recordReload stamps a successful application of an entry's crl_file.
+func (m *clientCRLMetrics) recordReload(domain string, at time.Time) {
+	if m == nil {
+		return
+	}
+	m.lastReload.WithLabelValues(domain).Set(float64(at.Unix()))
 }
 
 // recordRefusal counts one client turned away for want of a usable CRL.

@@ -19,6 +19,7 @@ package api
 
 import (
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -187,6 +188,10 @@ func (s *ClientCRLSet) Usable(now time.Time) bool {
 // chain terminates there, which is why this reports rather than decides. It is
 // what the startup warning uses, so an operator is told which anchor is
 // uncovered instead of being told the entry is broken.
+//
+// Names, for humans. Anything comparing coverage must use Coverage instead --
+// a common name is not an identity here, which is the same reason CRLs are not
+// keyed by one.
 func (s *ClientCRLSet) CoverageGaps(now time.Time) []string {
 	if s == nil {
 		return nil
@@ -200,6 +205,39 @@ func (s *ClientCRLSet) CoverageGaps(now time.Time) []string {
 	return out
 }
 
+// Coverage reports, per anchor key, whether this set holds any CRL for it and
+// whether it holds a currently valid one.
+//
+// Keyed on SubjectPublicKeyInfo, the identity bySignerKey uses. Comparing
+// coverage by common name collapsed two anchors that share one -- a CA that
+// renews *and* rekeys keeps its subject, so a bundle holding both certificates
+// during the overlap has two independent coverage slots under one name -- and
+// the reload guard built on that comparison then let a strictly narrower set
+// install, which is the failure it exists to prevent.
+//
+// Both answers, because the policies want different things. `require` needs a
+// currently valid CRL; `check` consults whatever is loaded, expired included,
+// so losing an expired CRL that named a serial silently re-admits it. A guard
+// that watched only currency could not see that, and VerifyCRLAgainst's comment
+// is explicit that clearing revocations is the threat, not only forging them.
+func (s *ClientCRLSet) Coverage(now time.Time) (present, current map[string]bool) {
+	present, current = map[string]bool{}, map[string]bool{}
+	if s == nil {
+		return present, current
+	}
+	for _, anchor := range s.anchors {
+		key := string(anchor.RawSubjectPublicKeyInfo)
+		crls, anyValid := s.forIssuer(anchor, now)
+		if len(crls) > 0 {
+			present[key] = true
+		}
+		if anyValid {
+			current[key] = true
+		}
+	}
+	return present, current
+}
+
 // clientCRLs holds the atomically-swappable CRL set for a domain.
 type clientCRLs struct {
 	current atomic.Pointer[ClientCRLSet]
@@ -210,6 +248,18 @@ func (c *clientCRLs) Set(s *ClientCRLSet) { c.current.Store(s) }
 
 // Get returns the current set, which may be nil before the first load.
 func (c *clientCRLs) Get() *ClientCRLSet { return c.current.Load() }
+
+// ErrNoUsableCRL marks a refusal caused by the absence of revocation
+// information, as opposed to a revocation that was found.
+//
+// The distinction is the whole meaning of the refusals counter. Both outcomes
+// deny the request, but one says "this CA cannot tell whether the client is
+// revoked" and the other says "it is revoked" -- and the second is the feature
+// working. Counting them together made the branch's only critical
+// authentication alert fire whenever a revoked client retried, driveable at
+// will by precisely the population revocation exists to exclude, with a runbook
+// telling the responder to refresh a CRL that was present and current.
+var ErrNoUsableCRL = errors.New("revocation status unavailable")
 
 // checkChainRevocation walks a verified chain and reports the first revoked
 // certificate, or an error when the policy demands a CRL that is not there.
@@ -246,8 +296,8 @@ func checkChainRevocation(chain []*x509.Certificate, set *ClientCRLSet, policy s
 	}
 	if len(chain) < 2 {
 		if policy == RevocationRequire {
-			return fmt.Errorf("the presented certificate is itself a trust anchor, " +
-				"so nothing can attest to its revocation status")
+			return fmt.Errorf("%w: the presented certificate is itself a trust anchor, "+
+				"so nothing can attest to its revocation status", ErrNoUsableCRL)
 		}
 		return nil
 	}
@@ -256,7 +306,8 @@ func checkChainRevocation(chain []*x509.Certificate, set *ClientCRLSet, policy s
 		subject, issuer := chain[i], chain[i+1]
 		crls, anyValid := set.forIssuer(issuer, now)
 		if policy == RevocationRequire && !anyValid {
-			return fmt.Errorf("no currently valid CRL for issuer %q", issuer.Subject.CommonName)
+			return fmt.Errorf("%w: no currently valid CRL for issuer %q",
+				ErrNoUsableCRL, issuer.Subject.CommonName)
 		}
 		if len(crls) == 0 {
 			continue
