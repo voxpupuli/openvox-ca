@@ -29,6 +29,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/voxpupuli/openvox-ca/internal/sdnotify"
 	"github.com/voxpupuli/openvox-ca/internal/signer"
 )
 
@@ -70,8 +71,14 @@ const (
 // for both children to exit after forwarding SIGTERM before hard-killing them,
 // so the frontend always gets its full drain even though the launcher's timer
 // starts first.
+//
+// notify carries the launcher's own service-manager notifications: the status
+// text while the children come up, and STOPPING=1 once teardown begins. READY=1
+// deliberately comes from the frontend child instead, since only it knows when
+// the listener is actually accepting — which is why units must set
+// NotifyAccess=all (see docs/systemd.md).
 // NIST 800-53: SC-3 (Security Function Isolation), SC-4 (Information in Shared System Resources)
-func runLauncher(drain time.Duration) error {
+func runLauncher(drain time.Duration, notify *sdnotify.Notifier) error {
 	gracefulShutdownTimeout := drain + launcherShutdownHeadroom
 
 	// Create the socketpair for signer ↔ frontend communication.
@@ -98,6 +105,7 @@ func runLauncher(drain time.Duration) error {
 	}
 
 	slog.Info("Starting isolated CA processes")
+	notify.Status("Starting the isolated signer and frontend processes")
 
 	// Build base environment: strip role/daemon vars to prevent inheritance loops.
 	// Clip to len==cap so each append below allocates a fresh backing array,
@@ -105,9 +113,17 @@ func runLauncher(drain time.Duration) error {
 	baseEnv := filterEnv(os.Environ(), "PUPPET_CA_ROLE", "PUPPET_CA_DAEMON", "PUPPET_CA_SIGNER_PSK")
 	baseEnv = baseEnv[:len(baseEnv):len(baseEnv)]
 
+	// The signer holds the CA key and talks to nothing but the frontend, so it
+	// has no state a service manager wants to hear about. Withholding
+	// $NOTIFY_SOCKET keeps the notification channel to exactly the two
+	// processes that use it (this launcher and the frontend) even under
+	// NotifyAccess=all.
+	signerEnv := filterEnv(baseEnv, "NOTIFY_SOCKET")
+	signerEnv = signerEnv[:len(signerEnv):len(signerEnv)]
+
 	// Spawn signer child.
 	signerCmd := exec.Command(exe, os.Args[1:]...) //nolint:gosec // G204: re-execs this same binary (os.Executable) with the operator's own os.Args
-	signerCmd.Env = append(baseEnv,
+	signerCmd.Env = append(signerEnv,
 		"PUPPET_CA_ROLE=signer",
 		"PUPPET_CA_DAEMON=1",
 		"PUPPET_CA_SIGNER_PSK="+pskHex,
@@ -142,6 +158,9 @@ func runLauncher(drain time.Duration) error {
 		"signer_pid", signerCmd.Process.Pid,
 		"frontend_pid", frontendCmd.Process.Pid,
 	)
+	// The frontend takes it from here: it reports readiness once its listener
+	// is up, and owns the status text from that point on.
+	notify.Status("Waiting for the frontend process to become ready")
 
 	// Forward termination signals to children. The buffer matches the
 	// number of registered signals so a coincident SIGTERM+SIGINT (e.g.
@@ -174,11 +193,17 @@ func runLauncher(drain time.Duration) error {
 	select {
 	case sig := <-sigCh:
 		slog.Info("Received signal, shutting down CA processes", "signal", sig)
+		notify.Stopping(fmt.Sprintf("Shutting down on %s (up to %s for the children to exit)",
+			sig, gracefulShutdownTimeout))
 		shutdown()
 		return nil
 
 	case result := <-exitCh:
 		slog.Error("CA child process exited unexpectedly", "process", result.name, "error", result.err)
+		// Report the cause before tearing the rest down: the status text
+		// outlives the process and is what `systemctl status` shows next to
+		// the failure.
+		notify.Stopping(fmt.Sprintf("The %s process exited unexpectedly (%v); stopping", result.name, result.err))
 		// Shut down the surviving child.
 		frontendCmd.Process.Signal(syscall.SIGTERM)
 		signerCmd.Process.Signal(syscall.SIGTERM)

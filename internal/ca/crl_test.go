@@ -176,6 +176,45 @@ var _ = Describe("CA CRL reissuance", func() {
 		})
 	})
 
+	Describe("CRLSnapshot", func() {
+		It("reports the cached CRL's number, window and entry count", func() {
+			stored := parseStoredCRL(store)
+
+			snap, ok := myCA.CRLSnapshot()
+			Expect(ok).To(BeTrue())
+			Expect(snap.Number).To(Equal(stored.Number))
+			Expect(snap.ThisUpdate).To(BeTemporally("==", stored.ThisUpdate))
+			Expect(snap.NextUpdate).To(BeTemporally("==", stored.NextUpdate))
+			Expect(snap.Revoked).To(Equal(len(stored.RevokedCertificateEntries)))
+		})
+
+		It("tracks re-signs of the CRL", func() {
+			before, ok := myCA.CRLSnapshot()
+			Expect(ok).To(BeTrue())
+
+			Expect(myCA.ReissueCRL(context.Background())).To(Succeed())
+
+			after, ok := myCA.CRLSnapshot()
+			Expect(ok).To(BeTrue())
+			Expect(after.Number.Cmp(before.Number)).To(Equal(1))
+			Expect(after.NextUpdate).To(BeTemporally(">", before.NextUpdate))
+		})
+
+		It("hands back a copy, so callers cannot mutate the cached CRL", func() {
+			snap, ok := myCA.CRLSnapshot()
+			Expect(ok).To(BeTrue())
+			snap.Number.SetInt64(9999)
+
+			again, _ := myCA.CRLSnapshot()
+			Expect(again.Number.Int64()).NotTo(Equal(int64(9999)))
+		})
+
+		It("reports no CRL before the CA is initialised", func() {
+			_, ok := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test").CRLSnapshot()
+			Expect(ok).To(BeFalse())
+		})
+	})
+
 	Describe("DefaultCRLRefreshBefore", func() {
 		It("defaults to a third of the CRL validity window", func() {
 			// Default validity is 30 days; a third is 10 days.

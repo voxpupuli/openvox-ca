@@ -44,6 +44,7 @@ import (
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/k8sexport"
 	"github.com/voxpupuli/openvox-ca/internal/metrics"
+	"github.com/voxpupuli/openvox-ca/internal/sdnotify"
 	"github.com/voxpupuli/openvox-ca/internal/signer"
 	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
@@ -226,6 +227,13 @@ func newRootCmd() *cobra.Command {
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, syscall.SIGINT)
 			defer stop()
 
+			// Service-manager notifications (sd_notify). Inert unless started
+			// by a service manager that asked to be notified, so no
+			// configuration or branching is needed anywhere below.
+			notifier := sdnotify.New()
+			defer func() { _ = notifier.Close() }()
+			notifier.Status("Loading configuration")
+
 			// --- Config loading (file → env → CLI flags) ---
 			resolved := resolveConfigFile(configFile, "PUPPET_CA_CONFIG", "/etc/puppet-ca/config.yaml")
 			cfg, err := loadServerConfig(resolved)
@@ -342,6 +350,13 @@ func newRootCmd() *cobra.Command {
 			// Note: --daemon is intentionally excluded from config file / env var support
 			// because PUPPET_CA_DAEMON is used internally as the fork signal.
 			if daemon && os.Getenv("PUPPET_CA_DAEMON") != "1" {
+				// A service manager tracks the process it started; forking and
+				// exiting makes the service look like it died the moment it
+				// started. Under systemd, drop --daemon and use Type=notify.
+				if notifier.Enabled() {
+					slog.Warn("--daemon is incompatible with a service manager that expects notifications; " +
+						"run in the foreground (Type=notify) instead")
+				}
 				exe, err := os.Executable()
 				if err != nil {
 					return fmt.Errorf("failed to determine executable: %w", err)
@@ -371,7 +386,7 @@ func newRootCmd() *cobra.Command {
 
 			// Launcher mode (default): spawn isolated signer + frontend children.
 			if role == "" && !singleProcess {
-				return runLauncher(cfg.shutdownDrain())
+				return runLauncher(cfg.shutdownDrain(), notifier)
 			}
 
 			// Frontend mode (role=frontend) or single-process mode: run HTTP server.
@@ -430,6 +445,11 @@ func newRootCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("invalid storage backend config: %w", err)
 			}
+			backendKind := backendSpec.Kind
+			if backendKind == "" {
+				backendKind = storage.BackendFilesystem
+			}
+			notifier.Status(fmt.Sprintf("Opening the %s storage backend", backendKind))
 			store, err := storage.NewServiceFromSpec(backendSpec)
 			if err != nil {
 				return fmt.Errorf("failed to initialise storage backend: %w", err)
@@ -445,6 +465,11 @@ func newRootCmd() *cobra.Command {
 			// handshake blocks until the signer finishes Init/bootstrap, so
 			// store.GetCACert is guaranteed to succeed after it returns.
 			if role == "frontend" {
+				// This handshake blocks until the signer has finished
+				// bootstrapping, which on a first run means waiting for a CA
+				// key pair to be generated — worth saying out loud, since it
+				// is the longest a cold start ever takes.
+				notifier.Status("Waiting for the signer process to initialise the CA")
 				conn, err := signer.DialConn()
 				if err != nil {
 					return fmt.Errorf("connecting to signer process: %w", err)
@@ -534,6 +559,7 @@ func newRootCmd() *cobra.Command {
 				myCA.KeyProvider = provider
 			}
 
+			notifier.Status("Initialising the CA")
 			if err := myCA.Init(ctx); err != nil {
 				return fmt.Errorf("failed to initialise CA: %w", err)
 			}
@@ -716,8 +742,13 @@ func newRootCmd() *cobra.Command {
 			shutdownDone := make(chan struct{})
 			go func() {
 				<-ctx.Done()
+				drain := cfg.shutdownDrain()
 				slog.Info("Shutting down")
-				shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.shutdownDrain())
+				// Tell the service manager this is a deliberate teardown, not
+				// a crash, and how long it may take — so it waits for the
+				// drain instead of killing connections mid-flight.
+				notifier.Stopping(fmt.Sprintf("Shutting down: draining connections (up to %s)", drain))
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), drain)
 				defer cancel()
 				if metricsServer != nil {
 					if err := metricsServer.Shutdown(shutdownCtx); err != nil {
@@ -730,11 +761,25 @@ func newRootCmd() *cobra.Command {
 				close(shutdownDone)
 			}()
 
+			// Bind the listener explicitly rather than letting ListenAndServe
+			// do it, so readiness can be announced at the point the socket is
+			// actually accepting connections. Anything ordered after this
+			// service can then connect on its first attempt.
+			notifier.Status("Starting the HTTP server")
+			ln, err := net.Listen("tcp", addr)
+			if err != nil {
+				return fmt.Errorf("failed to listen on %s: %w", addr, err)
+			}
+
+			status := func() string { return newStatusReport(myCA, addr, tlsConfigured).line(time.Now()) }
+			notifier.Ready(status())
+			go runNotifyHeartbeat(ctx, notifier, heartbeatInterval(notifier), status)
+
 			var serveErr error
 			if cfg.TLSCert != "" && cfg.TLSKey != "" {
-				serveErr = server.ListenAndServeTLS("", "")
+				serveErr = server.ServeTLS(ln, "", "")
 			} else {
-				serveErr = server.ListenAndServe()
+				serveErr = server.Serve(ln)
 			}
 			if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 				return fmt.Errorf("server failed: %w", serveErr)
