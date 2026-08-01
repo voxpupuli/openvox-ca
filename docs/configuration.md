@@ -253,10 +253,23 @@ against `puppetca_crl_number` (from storage) — see
 Restarting a replica also reloads its CRL. Both paths verify that the stored CRL
 was signed by the CA certificate the process is using, and refuse it otherwise —
 a running replica keeps the CRL it already holds, and a starting one fails to
-start rather than decide revocation from a list it cannot vouch for. If that
-happens, the CA certificate and the CRL have diverged: re-sign the CRL with the
-current certificate (`openvox-ca-ctl reissue-crl`), or restore the certificate
-that signed it.
+start rather than decide revocation from a list it cannot vouch for.
+
+If that happens, the CA certificate and the CRL have diverged. How you fix it
+depends on whether anything is still serving, because the two remedies are not
+interchangeable:
+
+- **While at least one replica is still up:** `openvox-ca-ctl reissue-crl`
+  re-signs the stored CRL with the current certificate. It is an HTTP call, so
+  it needs a replica that started successfully — on shared storage, one that was
+  already running when the certificate changed.
+- **When none is:** there is no server to ask, so fix it offline with
+  `openvox-ca-ctl import`, supplying the CA certificate and key together with a
+  `--crl-chain` whose first CRL that certificate signed. Restoring the
+  certificate that signed the stored CRL works equally well. Omitting
+  `--crl-chain` generates a fresh, empty CRL — that starts the CA, but it
+  discards every revocation, so treat it as a last resort and re-revoke
+  afterwards.
 
 ## Autosigning
 

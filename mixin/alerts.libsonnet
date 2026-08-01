@@ -258,7 +258,7 @@
             labels: { severity: 'critical' } + $._config.alertLabels,
             annotations: {
               summary: 'Puppet CA replica is enforcing an out-of-date CRL.',
-              description: 'The Puppet CA on {{ $labels.instance }} has not caught up with the CRL in storage for more than %(crlLagFor)s, so certificates revoked on another replica are still being accepted here. Either it is behind the stored CRL, or the stored CRL cannot be read at all (in which case puppetca_crl_number is absent for this instance). Check puppetca_crl_sync_failures_total and the CA logs. A restart reloads the CRL, but it is verified against this CA certificate on the way in, so a restart will not start the CA at all if the stored CRL is not one this CA signed — check that before reaching for it.' % { crlLagFor: $._config.crlLagFor },
+              description: 'The Puppet CA on {{ $labels.instance }} has not caught up with the CRL in storage for more than %(crlLagFor)s, so certificates revoked on another replica are still being accepted here. Either it is behind the stored CRL, or the stored CRL cannot be read at all (in which case puppetca_crl_number is absent for this instance). Check puppetca_crl_sync_failures_total and the CA logs. A restart reloads the CRL, but it is verified against this CA certificate on the way in, so a restart will not start the CA at all if the stored CRL is not one this CA signed — check that before reaching for it, and note that reissue-crl needs a replica that is still serving.' % { crlLagFor: $._config.crlLagFor },
             },
           },
         ],

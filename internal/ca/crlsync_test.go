@@ -456,6 +456,23 @@ var _ = Describe("ImportCA with a --crl-chain bundle", func() {
 		Expect(err.Error()).To(ContainSubstring("put this CA's own CRL first"))
 	})
 
+	// The rejection has to happen before anything is written. A cadir holding
+	// the key and certificate but no CRL is one the server starts from — it
+	// reads the absence as a fresh install and seeds an empty CRL, so the
+	// revocations the operator was importing vanish without a word.
+	It("writes nothing when it rejects", func() {
+		ctx := context.Background()
+		chain := append(foreignCRLPEM(7), cachedCrlPEM...)
+		store := storage.New(dir)
+
+		Expect(ca.ImportCA(ctx, store, cachedCrtPEM, cachedKeyPEM, chain)).NotTo(Succeed())
+
+		_, err := store.GetCACert(ctx)
+		Expect(err).To(HaveOccurred(), "a rejected import must not leave a CA certificate behind")
+		_, err = store.GetCRL(ctx)
+		Expect(err).To(HaveOccurred())
+	})
+
 	// The rejection has to be the same answer the server would give, or import
 	// blesses a bundle that will not boot.
 	It("rejects exactly what the server would refuse to start on", func() {

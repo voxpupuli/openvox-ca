@@ -115,6 +115,10 @@ func (c *CA) reissueCRLLocked(ctx context.Context) error {
 }
 
 // readStoredCRL loads and parses the CRL currently in storage.
+//
+// Block 0 is this CA's own CRL. That every reader of the stored blob agrees on
+// this is load-bearing — see ownStoredCRLLocked for why, and for what breaks if
+// one of them starts searching the blob instead.
 func (c *CA) readStoredCRL(ctx context.Context) (*x509.RevocationList, error) {
 	crlPEM, err := c.Storage.GetCRL(ctx)
 	if err != nil {

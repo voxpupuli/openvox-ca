@@ -78,6 +78,37 @@ func ImportCA(ctx context.Context, store *storage.StorageService, certBundlePEM,
 		return fmt.Errorf("private key does not match the certificate's public key")
 	}
 
+	// --- Validate the CRL bundle before writing anything ---
+	//
+	// Ahead of the writes below, deliberately. A rejection that had already
+	// stored the key and certificate would leave a cadir the server starts
+	// from — treating the absent CRL as a fresh install and seeding an empty
+	// one (see seedSupportingState), so the revocations in the bundle the
+	// operator was trying to import go silently missing. Failing before the
+	// first write leaves storage untouched and the import repeatable.
+	if crlPEM != nil {
+		crlBlock, _ := pem.Decode(crlPEM)
+		if crlBlock == nil {
+			return fmt.Errorf("crl-chain does not contain a valid PEM block")
+		}
+		if _, err := x509.ParseRevocationList(crlBlock.Bytes); err != nil {
+			return fmt.Errorf("failed to parse CRL: %w", err)
+		}
+		// Reject a bundle that does not lead with a CRL issued by the
+		// certificate being imported.
+		//
+		// Block 0 is this CA's own CRL everywhere in the server — see
+		// ownStoredCRLLocked — so a bundle that leads with an ancestor's
+		// produces a CA that refuses to start. This command is the last point
+		// at which the operator still has the file in front of them and can
+		// reorder it; supplying an ancestor's CRL is an easy mistake to make
+		// from the migration guide's recipe.
+		if !bundleLeadsWithCRLFrom(crlPEM, caCert) {
+			return fmt.Errorf("the first CRL in --crl-chain was not signed by the CA certificate being imported; " +
+				"put this CA's own CRL first in the bundle (ancestors' CRLs may follow it)")
+		}
+	}
+
 	// --- Ensure directories exist ---
 	if err := store.EnsureDirs(ctx); err != nil {
 		return fmt.Errorf("failed to create CA directories: %w", err)
@@ -100,30 +131,8 @@ func ImportCA(ctx context.Context, store *storage.StorageService, certBundlePEM,
 		_ = store.SaveCAPubKey(ctx, pubKeyPEM)
 	}
 
-	// --- Handle CRL ---
+	// --- Write CRL --- (already validated above, before any write)
 	if crlPEM != nil {
-		crlBlock, _ := pem.Decode(crlPEM)
-		if crlBlock == nil {
-			return fmt.Errorf("crl-chain does not contain a valid PEM block")
-		}
-		if _, err := x509.ParseRevocationList(crlBlock.Bytes); err != nil {
-			return fmt.Errorf("failed to parse CRL: %w", err)
-		}
-		// Reject a bundle that does not lead with a CRL issued by the
-		// certificate being imported.
-		//
-		// Every reader in the server takes block 0 as this CA's own — the cache
-		// on startup and on each sync, the re-sign paths, the metrics exporter —
-		// so a bundle that leads with an ancestor's produces a CA that refuses
-		// to start, and would otherwise have had its revocations amended onto
-		// the wrong list. This command is the last point at which the operator
-		// still has the file in front of them and can reorder it; supplying an
-		// ancestor's CRL is an easy mistake to make from the migration guide's
-		// recipe.
-		if !bundleLeadsWithCRLFrom(crlPEM, caCert) {
-			return fmt.Errorf("the first CRL in --crl-chain was not signed by the CA certificate being imported; " +
-				"put this CA's own CRL first in the bundle (ancestors' CRLs may follow it)")
-		}
 		// Import-time write: runs before any CRL consumer exists, so it
 		// deliberately skips the crlNotify signal (see signCRLLocked).
 		if err := store.UpdateCRL(ctx, crlPEM); err != nil {

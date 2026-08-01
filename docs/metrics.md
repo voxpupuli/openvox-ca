@@ -163,7 +163,8 @@ puppetca_k8s_export_last_error_timestamp_seconds
 # Replicas enforcing a CRL behind the stored one (see below)
 puppetca_crl_number - puppetca_crl_cached_number > 0
 or
-puppetca_crl_cached_number unless puppetca_crl_number
+(puppetca_crl_cached_number unless puppetca_crl_number)
+  and on(instance) puppetca_collector_scrape_success == 1
 ```
 
 ### Watching revocation propagate
@@ -175,7 +176,11 @@ in it is still admitting certificates the rest of the fleet has revoked.
 
 The second arm matters as much as the first: a replica whose stored CRL cannot
 be read or parsed publishes no `puppetca_crl_number` at all, so the subtraction
-alone would go quiet in exactly the case worth paging on.
+alone would go quiet in exactly the case worth paging on. It is qualified on a
+successful scrape so that arm covers only the CRL being unreadable — a storage
+outage drops the same series and is already paged by `PuppetCAScrapeFailing`.
+This is the expression the mixin's `PuppetCACRLStale` rule uses, modulo its
+target selector.
 
 `puppetca_crl_sync_failures_total` usually says why a replica is stuck. If it is
 flat, the reads are succeeding and the stored CRL genuinely has not advanced.
@@ -183,8 +188,10 @@ flat, the reads are succeeding and the stored CRL genuinely has not advanced.
 Restarting the replica reloads the CRL — but startup verifies it against this
 CA's certificate the same way the reload does, so if the stored CRL is not one
 this CA signed the process will refuse to start rather than serve from it. That
-is the intended outcome: re-sign the CRL with the current CA certificate (or
-restore the certificate that signed it) instead of working around the refusal.
+is the intended outcome; see
+[Revocation across replicas](configuration.md#revocation-across-replicas) for
+how to reconcile the two, including the offline route for when no replica is
+left running to accept a `reissue-crl`.
 
 ## Alerting
 
