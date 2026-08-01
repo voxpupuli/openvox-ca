@@ -1038,7 +1038,14 @@ func createTarGz(dst, srcDir string, files []archiveEntry) (retErr error) {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	// Closed with the same care as the writers below: a failure surfacing here
+	// (ENOSPC on a deferred allocation, say) would otherwise be dropped, and
+	// the caller would checksum and publish a truncated release artefact.
+	defer func() {
+		if err := f.Close(); err != nil && retErr == nil {
+			retErr = err
+		}
+	}()
 
 	gz := gzip.NewWriter(f)
 	defer func() {

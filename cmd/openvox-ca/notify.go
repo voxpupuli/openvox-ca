@@ -35,15 +35,19 @@ import (
 // costs one datagram.
 const defaultStatusRefresh = time.Minute
 
-// minHeartbeat is the interval below which a WatchdogSec= is reported as
-// suspiciously short. It is not a hard floor: clamping to it would mean
-// returning an interval longer than the deadline it feeds, which guarantees the
-// kill it exists to prevent. See heartbeatInterval.
-const minHeartbeat = 100 * time.Millisecond
+// shortWatchdogWarnBelow is the heartbeat interval below which a WatchdogSec=
+// is reported as suspiciously short. It is a warning threshold, not a floor:
+// clamping up to it would mean returning an interval longer than the deadline
+// being fed, which guarantees the kill the watchdog exists to prevent.
+const shortWatchdogWarnBelow = 100 * time.Millisecond
 
-// absoluteMinHeartbeat bounds the ticker for a WatchdogSec= so short that even
-// half of it is sub-millisecond. Nobody configures this deliberately; the point
-// is only that the CA neither spins nor silently misses the deadline.
+// absoluteMinHeartbeat stops the ticker being shortened without limit for an
+// absurd WatchdogSec=. This is a deliberate trade, and it is the one place the
+// deadline is not honoured: below a 20ms WatchdogSec= the CA feeds slower than
+// half the deadline, and below 10ms slower than the deadline itself, so the
+// service manager will kill it. Spinning a sub-millisecond ticker to chase a
+// deadline nobody configures on purpose is the worse failure, and the warning
+// says which one is happening.
 const absoluteMinHeartbeat = 10 * time.Millisecond
 
 // statusReport is the state summarised into the service manager's status text.
@@ -146,17 +150,19 @@ func heartbeatInterval(n *sdnotify.Notifier) time.Duration {
 		return defaultStatusRefresh
 	}
 	half := watchdog / 2
-	if half >= minHeartbeat {
+	if half >= shortWatchdogWarnBelow {
 		return half
 	}
-	// Half the deadline is still the right answer — an interval longer than the
-	// deadline would guarantee the kill this is meant to prevent — but a
-	// WatchdogSec= this short is almost always a typo, and the symptom
-	// otherwise is a service systemd kills and restarts with nothing to
-	// explain why.
-	slog.Warn("WatchdogSec is very short; the CA will feed the watchdog at half that interval",
-		"watchdog", watchdog, "heartbeat", max(half, absoluteMinHeartbeat))
-	return max(half, absoluteMinHeartbeat)
+	// Half the deadline is still the right answer wherever it is achievable —
+	// an interval longer than the deadline guarantees the kill this is meant to
+	// prevent — but a WatchdogSec= this short is almost always a typo, and the
+	// symptom otherwise is a service the manager kills and restarts with
+	// nothing to explain why. Report the interval actually chosen, which below
+	// a 20ms deadline is the floor rather than half.
+	interval := max(half, absoluteMinHeartbeat)
+	slog.Warn("WatchdogSec is very short; the watchdog may not be fed in time",
+		"watchdog", watchdog, "heartbeat", interval)
+	return interval
 }
 
 // runNotifyHeartbeat keeps the service manager's view of the CA current: it

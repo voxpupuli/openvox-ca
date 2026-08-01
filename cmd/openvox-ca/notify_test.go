@@ -18,7 +18,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"math/big"
 	"net"
 	"os"
@@ -214,11 +216,13 @@ var _ = Describe("Service manager heartbeat", func() {
 			Expect(heartbeatInterval(n)).To(Equal(absoluteMinHeartbeat))
 		})
 
-		DescribeTable("always beats strictly inside the deadline",
+		DescribeTable("beats strictly inside every deadline it can honour",
 			func(usec string) {
-				// The invariant that matters: whatever WatchdogSec is, the
-				// keep-alive must be sent more often than the deadline, or
-				// systemd kills a perfectly healthy CA.
+				// The invariant that matters: for any WatchdogSec an operator
+				// might realistically set, the keep-alive goes out more often
+				// than the deadline, or systemd kills a healthy CA. Below 20ms
+				// the ticker floor wins instead — deliberately, and loudly; see
+				// the spec above.
 				startNotifyRecorder(map[string]string{"WATCHDOG_USEC": usec})
 				n := sdnotify.New()
 				DeferCleanup(func() { Expect(n.Close()).To(Succeed()) })
@@ -231,7 +235,39 @@ var _ = Describe("Service manager heartbeat", func() {
 			Entry("200ms", "200000"),
 			Entry("150ms", "150000"),
 			Entry("30ms", "30000"),
+			Entry("21ms, just above where the floor takes over", "21000"),
 		)
+
+		It("warns when the watchdog is too short to be fed reliably", func() {
+			// The operator-facing half of the trade-off: the CA does not
+			// silently accept a deadline it cannot meet.
+			var buf bytes.Buffer
+			orig := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			defer slog.SetDefault(orig)
+
+			startNotifyRecorder(map[string]string{"WATCHDOG_USEC": "5000"}) // 5ms
+			n := sdnotify.New()
+			DeferCleanup(func() { Expect(n.Close()).To(Succeed()) })
+
+			Expect(heartbeatInterval(n)).To(Equal(absoluteMinHeartbeat))
+			Expect(buf.String()).To(ContainSubstring("WatchdogSec is very short"))
+			Expect(buf.String()).To(ContainSubstring("heartbeat=10ms"))
+		})
+
+		It("says nothing about a watchdog it can honour", func() {
+			var buf bytes.Buffer
+			orig := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			defer slog.SetDefault(orig)
+
+			startNotifyRecorder(map[string]string{"WATCHDOG_USEC": "60000000"})
+			n := sdnotify.New()
+			DeferCleanup(func() { Expect(n.Close()).To(Succeed()) })
+
+			Expect(heartbeatInterval(n)).To(Equal(30 * time.Second))
+			Expect(buf.String()).To(BeEmpty())
+		})
 	})
 
 	Describe("runNotifyHeartbeat", func() {
