@@ -149,6 +149,16 @@ type CA struct {
 	// metrics exporter (puppetca_crl_update_failures_total) for alerting.
 	crlUpdateFailures atomic.Uint64
 
+	// crlSyncFailures counts failures to refresh the in-memory CRL from storage
+	// (see SyncCRLCache): an unreadable or unparseable stored CRL, or one this
+	// CA did not sign. Distinct from crlUpdateFailures, which counts failures to
+	// *amend* the CRL — this one is about a replica falling behind an amendment
+	// some other replica made. While it rises, this process is deciding
+	// revocation from a CRL that may predate a revocation elsewhere in the
+	// fleet, so a certificate revoked there may still be admitted here. Exposed
+	// via the metrics exporter (puppetca_crl_sync_failures_total) for alerting.
+	crlSyncFailures atomic.Uint64
+
 	// crlNotify carries a coalesced signal each time the CRL is re-signed (see
 	// signCRLLocked). It is buffered to depth 1 and written non-blockingly, so a
 	// burst of revocations collapses to a single pending notification and an
@@ -177,6 +187,16 @@ func New(s *storage.StorageService, autosignCfg AutosignConfig, hostname string)
 // it as puppetca_crl_update_failures_total.
 func (c *CA) CRLUpdateFailures() uint64 {
 	return c.crlUpdateFailures.Load()
+}
+
+// CRLSyncFailures returns the number of times the CA failed to refresh its
+// in-memory CRL from storage (see SyncCRLCache). A rising value means this
+// replica's revocation checks are answering from a CRL that may be behind the
+// stored one, so a certificate revoked on another replica may still be
+// accepted here; the metrics exporter surfaces it as
+// puppetca_crl_sync_failures_total.
+func (c *CA) CRLSyncFailures() uint64 {
+	return c.crlSyncFailures.Load()
 }
 
 // CRLUpdated returns a channel that receives a value each time the CRL is

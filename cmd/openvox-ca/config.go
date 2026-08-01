@@ -99,6 +99,12 @@ type serverConfig struct {
 	CRLRefreshIntervalSec int  `yaml:"crl_refresh_interval_sec"` // how often to check; 0 = built-in default (1h)
 	CRLRefreshBeforeSec   int  `yaml:"crl_refresh_before_sec"`   // re-sign when remaining validity < this; 0 = crl_validity/3
 
+	// CRLSyncIntervalSec is how often each replica re-reads the stored CRL into
+	// the copy its revocation checks answer from, and so bounds how long a
+	// certificate revoked on another replica keeps working here. Not covered by
+	// disable_crl_refresh, which governs re-signing rather than propagation.
+	CRLSyncIntervalSec int `yaml:"crl_sync_interval_sec"` // how often to reload the CRL; 0 = built-in default (60s)
+
 	// Background expired-certificate cleanup. Disabled by default: when enabled,
 	// a job periodically removes certificates that expired more than the
 	// retention grace period ago from the inventory and the CRL (and deletes
@@ -199,6 +205,27 @@ func (c *serverConfig) crlRefreshInterval() time.Duration {
 		return time.Duration(c.CRLRefreshIntervalSec) * time.Second
 	}
 	return defaultCRLRefreshInterval
+}
+
+// defaultCRLSyncInterval is how often each replica reloads the stored CRL into
+// the copy its revocation checks read, when the operator has not configured an
+// interval.
+//
+// It is the window in which a revoked certificate still works against a replica
+// that did not perform the revocation, so it is set by how long that is
+// tolerable rather than by cost: a minute is short enough that an operator
+// locking out a compromised agent does not need to restart the fleet, and the
+// read it costs is one small blob per replica per minute against a backend
+// already serving every certificate operation.
+const defaultCRLSyncInterval = time.Minute
+
+// crlSyncInterval resolves how often the background job reloads the CRL,
+// falling back to defaultCRLSyncInterval when unset.
+func (c *serverConfig) crlSyncInterval() time.Duration {
+	if c.CRLSyncIntervalSec > 0 {
+		return time.Duration(c.CRLSyncIntervalSec) * time.Second
+	}
+	return defaultCRLSyncInterval
 }
 
 const (
@@ -365,6 +392,11 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("PUPPET_CA_CRL_REFRESH_BEFORE_SEC"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.CRLRefreshBeforeSec = n
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_CRL_SYNC_INTERVAL_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.CRLSyncIntervalSec = n
 		}
 	}
 	if v := os.Getenv("PUPPET_CA_ENABLE_EXPIRED_CERT_CLEANUP"); v != "" {

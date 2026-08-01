@@ -316,6 +316,63 @@ var _ = Describe("Auth Middleware", func() {
 		})
 	})
 
+	// --- Revocation across replicas ---
+	// The middleware answers from the CA's in-memory CRL, which is written only
+	// when *this* process re-signs or starts up. On a shared backend that left
+	// every replica but the revoking one admitting a revoked certificate until
+	// it happened to re-sign — weeks, at the default CRL validity. The periodic
+	// CA.SyncCRLCache is what closes it, so the middleware is where it has to be
+	// shown closed.
+
+	Context("a certificate revoked by another replica", func() {
+		It("is denied by this replica once it has synced its CRL", func() {
+			ctx := context.Background()
+
+			// Issue and revoke through the CA that owns this store...
+			csrPEM, err := testutil.GenerateCSR("peer-revoked-client")
+			Expect(err).NotTo(HaveOccurred())
+			_, err = myCA.SaveRequest(ctx, "peer-revoked-client", csrPEM)
+			Expect(err).NotTo(HaveOccurred())
+			certPEM, err := myCA.Sign(ctx, "peer-revoked-client")
+			Expect(err).NotTo(HaveOccurred())
+			block, _ := pem.Decode(certPEM)
+			issuedCert, err := x509.ParseCertificate(block.Bytes)
+			Expect(err).NotTo(HaveOccurred())
+
+			// ...and serve from a second CA over the same storage, with its own
+			// CRL cache: a peer replica in an active/active deployment.
+			peerCA := ca.New(storage.New(tmpDir), ca.AutosignConfig{Mode: "off"}, "puppet.test")
+			Expect(peerCA.Init(ctx)).To(Succeed())
+			peerServer := api.New(peerCA)
+			peerServer.AuthConfig = &api.AuthConfig{
+				CACert:    caCert,
+				AllowList: map[string]bool{"puppet-server": true},
+			}
+			peerMux := peerServer.Routes()
+
+			Expect(myCA.Revoke(ctx, "peer-revoked-client")).To(Succeed())
+
+			request := func() int {
+				req := httptest.NewRequest("GET", "/certificate_request/peer-revoked-client", nil)
+				req = withClientCert(req, issuedCert)
+				rr := httptest.NewRecorder()
+				peerMux.ServeHTTP(rr, req)
+				return rr.Code
+			}
+
+			// The bug, stated as a precondition so this spec fails loudly if the
+			// caching that makes the sync necessary is ever removed.
+			Expect(request()).NotTo(Equal(http.StatusForbidden),
+				"precondition: the peer should not yet have seen the revocation")
+
+			updated, err := peerCA.SyncCRLCache(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(updated).To(BeTrue())
+
+			Expect(request()).To(Equal(http.StatusForbidden))
+		})
+	})
+
 	// --- Revocation bypass prevention (re-issuance regression) ---
 	// Before the fix, IsRevoked looked up the cert *on disk* for the CN and
 	// checked that cert's serial.  After a revocation + re-issuance the disk

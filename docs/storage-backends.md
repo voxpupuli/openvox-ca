@@ -27,9 +27,16 @@ Two things are true regardless of backend:
   [CA cert/key as local files](#ca-certkey-as-local-files).
 
 In the HA backends (`etcd`, `redis`, `postgres`, `mysql`), any replica can sign,
-revoke, or refresh the CRL and the others see the change immediately;
-`openvox-ca` coordinates the replicas and recovers automatically if one crashes.
-You don't need to configure any of that.
+revoke, or refresh the CRL, and everything it writes is immediately visible to
+the others and to agents fetching from them; `openvox-ca` coordinates the
+replicas and recovers automatically if one crashes. You don't need to configure
+any of that.
+
+The one thing that is not instant is a replica's *own* decision to reject a
+revoked client: each answers that from a CRL it holds in memory and reloads on a
+timer, so a certificate revoked on one replica stops working against the others
+within `crl_sync_interval_sec` (60s by default) rather than at once. See
+[Revocation across replicas](configuration.md#revocation-across-replicas).
 
 ---
 
