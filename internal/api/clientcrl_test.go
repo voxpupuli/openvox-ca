@@ -56,8 +56,9 @@ func crlFrom(cert *x509.Certificate, key *ecdsa.PrivateKey, notAfter time.Time, 
 	return crl
 }
 
-// withSKI gives a certificate a Subject Key Identifier, which CRL matching
-// requires. mintCert leaves it unset.
+// withSKI gives a certificate a Subject Key Identifier. CRL matching no longer
+// needs one -- it is by signature -- but the impostor spec forges an AKI to
+// prove the field is ignored, and needs a real SKI to forge it from.
 func withSKI(cert *x509.Certificate) *x509.Certificate {
 	GinkgoHelper()
 	pubDER, err := x509.MarshalPKIXPublicKey(cert.PublicKey)
@@ -65,6 +66,27 @@ func withSKI(cert *x509.Certificate) *x509.Certificate {
 	sum := sha1.Sum(pubDER)
 	cert.SubjectKeyId = sum[:]
 	return cert
+}
+
+// reissueCert mints a second certificate over cert's existing key: what a CA
+// that renews its own certificate produces, and what an operator has in the
+// bundle during the overlap.
+func reissueCert(cert *x509.Certificate, key *ecdsa.PrivateKey) *x509.Certificate {
+	GinkgoHelper()
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(time.Now().UnixNano()),
+		Subject:               cert.Subject,
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
+	Expect(err).NotTo(HaveOccurred())
+	out, err := x509.ParseCertificate(der)
+	Expect(err).NotTo(HaveOccurred())
+	return withSKI(out)
 }
 
 var _ = Describe("Client CRL checking", func() {
@@ -269,9 +291,10 @@ var _ = Describe("Client CRL checking", func() {
 
 			err := api.CheckChainRevocationForTest(chain(), set, api.RevocationRequire, time.Now())
 			Expect(err).To(MatchError(ContainSubstring("no currently valid CRL")))
-			Expect(set.Usable(time.Now(), anchorSet())).To(BeFalse(),
-				"one anchor without a current CRL makes the entry unusable, which is "+
-					"what enforcement already did")
+			Expect(set.Usable(time.Now())).To(BeTrue(),
+				"the root's CRL is still current, so the entry has material to check against")
+			Expect(set.CoverageGaps(time.Now())).To(ConsistOf("Server CA"),
+				"but the uncovered anchor is named, which is what an operator needs")
 		})
 	})
 
@@ -296,36 +319,92 @@ var _ = Describe("Client CRL checking", func() {
 				crlFrom(serverCA, caKey, future),
 				crlFrom(root, rootKey, future),
 			}, anchorSet())
-			Expect(set.Usable(time.Now(), anchorSet())).To(BeTrue())
+			Expect(set.Usable(time.Now())).To(BeTrue())
 		})
 
 		It("is false once every CRL has expired", func() {
 			set := api.NewClientCRLSet([]*x509.RevocationList{crlFrom(serverCA, caKey, past)}, anchorSet())
-			Expect(set.Usable(time.Now(), anchorSet())).To(BeFalse())
+			Expect(set.Usable(time.Now())).To(BeFalse())
 		})
 
-		It("is false when one anchor of several has no valid CRL", func() {
-			// The gauge used to be "any anchor has a valid CRL" while enforcement
-			// is "every issuer in the chain must". A two-anchor entry whose second
-			// anchor's CRL had expired published 1 while every client of that
-			// anchor was already being refused, so the alert this metric exists
-			// for could not see a partial outage.
+		It("reports partial coverage through CoverageGaps, not through Usable", func() {
+			// Usable answers "is there anything current to check against", which
+			// is the question it can answer honestly. Whether an *uncovered*
+			// anchor matters depends on chains that have not arrived: a bundle
+			// holding an issuing CA and the root above it needs only the issuing
+			// CA's CRL, because nobody chains to the root. Demanding one per
+			// anchor made that healthy entry report 0 forever.
 			set := api.NewClientCRLSet([]*x509.RevocationList{
 				crlFrom(serverCA, caKey, future),
 				crlFrom(root, rootKey, past),
 			}, anchorSet())
-			Expect(set.Usable(time.Now(), anchorSet())).To(BeFalse())
+			Expect(set.Usable(time.Now())).To(BeTrue())
+			Expect(set.CoverageGaps(time.Now())).To(ConsistOf("Shared Root"))
 
 			both := api.NewClientCRLSet([]*x509.RevocationList{
 				crlFrom(serverCA, caKey, future),
 				crlFrom(root, rootKey, future),
 			}, anchorSet())
-			Expect(both.Usable(time.Now(), anchorSet())).To(BeTrue())
+			Expect(both.Usable(time.Now())).To(BeTrue())
+			Expect(both.CoverageGaps(time.Now())).To(BeEmpty())
+		})
+
+		It("will not let a same-named sibling supply another's CRL", func() {
+			// crlSignedBy's argument, one layer over: under a shared root two
+			// sub-CAs can hold the same distinguished name. Keying on anything
+			// derived from the name -- subject DN included -- would let either
+			// answer for the other, which is the round-1 attack reached through a
+			// different field.
+			twinA, keyA := mintCert("Twin CA", root, rootKey, true)
+			twinB, keyB := mintCert("Twin CA", root, rootKey, true)
+			withSKI(twinA)
+			withSKI(twinB)
+			Expect(twinA.RawSubject).To(Equal(twinB.RawSubject))
+			Expect(keyB).NotTo(BeNil())
+
+			anchors := []*x509.Certificate{twinA, twinB}
+			set := api.NewClientCRLSet([]*x509.RevocationList{crlFrom(twinA, keyA, future)}, anchors)
+
+			Expect(set.CoverageGaps(time.Now())).To(ConsistOf("Twin CA"),
+				"only one of the two is covered, and they share a name")
+
+			twinBLeaf, _ := mintCert("agent.twin", twinB, keyB, false)
+			err := api.CheckChainRevocationForTest(
+				[]*x509.Certificate{twinBLeaf, twinB}, set, api.RevocationRequire, time.Now())
+			Expect(err).To(MatchError(ContainSubstring("no currently valid CRL")))
+		})
+
+		It("fails closed when no set has been installed", func() {
+			// NewForeignTrustDomain returns a domain whose CRL holder is empty,
+			// and buildTrustDomains fills it four statements later. Production is
+			// safe by statement ordering alone, which is exactly why the guard is
+			// worth having and worth pinning.
+			var set *api.ClientCRLSet
+			Expect(set.Usable(time.Now())).To(BeFalse())
+			err := api.CheckChainRevocationForTest(chain(), set, api.RevocationRequire, time.Now())
+			Expect(err).To(MatchError(ContainSubstring("no currently valid CRL")))
+		})
+
+		It("files a CRL under the signer's key, so a renewed certificate keeps working", func() {
+			// CheckSignatureFrom establishes that a *key* signed the CRL, so
+			// keying on the certificate was one level tighter than the property
+			// verified. A CA that renews its certificate keeping its key -- with
+			// both in the bundle during the overlap -- had its one CRL file under
+			// whichever came first, and when that expired every client was
+			// refused with a valid CRL sitting in crl_file.
+			renewed := reissueCert(serverCA, caKey)
+			Expect(renewed.Raw).NotTo(Equal(serverCA.Raw))
+			Expect(renewed.RawSubjectPublicKeyInfo).To(Equal(serverCA.RawSubjectPublicKeyInfo))
+
+			set := api.NewClientCRLSet([]*x509.RevocationList{crlFrom(serverCA, caKey, future)},
+				[]*x509.Certificate{serverCA, renewed})
+			Expect(set.CoverageGaps(time.Now())).To(BeEmpty(),
+				"one key, one CRL: both certificates for it are covered")
 		})
 
 		It("is false for an empty set, which is the discarded-everything case", func() {
 			empty := api.NewClientCRLSet(nil, anchorSet())
-			Expect(empty.Usable(time.Now(), anchorSet())).To(BeFalse())
+			Expect(empty.Usable(time.Now())).To(BeFalse())
 		})
 	})
 })

@@ -127,7 +127,7 @@ func buildTrustDomains(cfg *serverConfig, ownCert *x509.Certificate, adminCNs ma
 			return nil, fmt.Errorf("client_ca %q: %w", entry.Name, err)
 		}
 		domain.SetRevocationSet(api.NewClientCRLSet(crls, anchors))
-		warnIfNoUsableCRLs(entry, cfg.Policy(), crls, anchors)
+		warnAboutCRLCoverage(entry, cfg.Policy(), crls, anchors)
 
 		domains = append(domains, domain)
 	}
@@ -182,37 +182,67 @@ func warnIfGrantsSpanAnchors(entry *config.ClientCA, anchors []*x509.Certificate
 		"client_ca", entry.Name, "anchors", strings.Join(names, ", "))
 }
 
-// warnIfNoUsableCRLs reports an entry that will reject every one of its clients.
+// losesCoverage reports whether candidate leaves an anchor uncovered that
+// current covers.
+func losesCoverage(current, candidate *api.ClientCRLSet, now time.Time) bool {
+	if candidate == nil {
+		return true
+	}
+	was := make(map[string]bool)
+	for _, name := range current.CoverageGaps(now) {
+		was[name] = true
+	}
+	for _, name := range candidate.CoverageGaps(now) {
+		if !was[name] {
+			return true
+		}
+	}
+	return false
+}
+
+// warnAboutCRLCoverage reports anchors this entry holds no current CRL for.
 //
-// Two ways to arrive here, and the second is the one that catches people. A
-// crl_file left unset under the default require policy is the obvious case. The
-// other is an entry anchored on a shared root: the walk needs a CRL for every
-// issuer in the chain, the anchor included, and an intermediate's own CRL is
-// signed by that intermediate — not by the anchor — so loadDomainCRLs discards
-// it as unverifiable and every client of the domain is rejected.
+// Advisory, and worded as such. Whether an uncovered anchor matters depends on
+// whether any client's chain terminates there, which cannot be known at
+// startup: a bundle holding an issuing CA and the root above it needs only the
+// issuing CA's CRL, because nobody chains to the root. The previous wording
+// asserted that every client of the entry would be rejected, which was false
+// for exactly that shape and pushed the operator towards
+// client_revocation_policy: check -- an availability worry answered by turning
+// off leaf revocation checking, along the path of least resistance.
 //
-// Worth a warning rather than a refusal because a root anchor is legitimate
-// when the root really is the intended boundary. Worth *this* warning because
-// the obvious fix is to switch to check, and that silently stops checking leaf
-// revocation for the domain entirely — an availability problem converted into a
-// security one along the path of least resistance.
-func warnIfNoUsableCRLs(entry *config.ClientCA, policy string, crls []*x509.RevocationList,
+// It also cannot see the case it used to claim. An entry anchored on a shared
+// root, whose clients come from an intermediate below it, loads the root's CRL
+// happily -- the root signed it -- while the intermediate's own CRL is signed by
+// the intermediate and so is discarded. The chain then has an issuer with no
+// CRL and every client is refused, with full anchor coverage reported here.
+// Nothing at load time can distinguish that from a healthy entry;
+// puppetca_client_crl_refusals_total is what reports it, because by then a
+// client has actually been turned away.
+func warnAboutCRLCoverage(entry *config.ClientCA, policy string, crls []*x509.RevocationList,
 	anchors []*x509.Certificate,
 ) {
-	// Anchor coverage, not merely "did anything load". A bundle can load one
-	// anchor's CRL and none of another's, which rejects every client of the
-	// second while len(crls) is happily non-zero -- so gating on that reported
-	// health for an entry that was already refusing half its clients.
-	if policy != config.RevocationRequire ||
-		api.NewClientCRLSet(crls, anchors).Usable(time.Now(), anchors) {
+	if policy != config.RevocationSkip && policy != config.RevocationCheck {
+		// Same coercion checkChainRevocation makes: anything that is not one of
+		// the two "check less" names behaves as require, so this warning cannot
+		// be suppressed by a value validation never saw.
+		policy = config.RevocationRequire
+	}
+	if policy != config.RevocationRequire {
 		return
 	}
-	slog.Warn("client_ca entry loaded no usable CRLs under the require policy: every client of this "+
-		"entry will be rejected. If this entry is anchored on a shared root, the issuing CA's own CRL "+
-		"is signed by that CA and not by the anchor, so it cannot be verified here — anchor on the "+
-		"issuing CA instead. Switching to client_revocation_policy: check would restore service by "+
-		"disabling leaf revocation checking for this entry, which is rarely what is wanted",
-		"client_ca", entry.Name, "path", entry.CRLFile)
+	gaps := api.NewClientCRLSet(crls, anchors).CoverageGaps(time.Now())
+	if len(gaps) == 0 {
+		return
+	}
+	slog.Warn("client_ca entry has anchors with no currently valid CRL under the require policy: "+
+		"any client whose chain terminates at one of them is rejected. If this entry is anchored on "+
+		"a shared root, note the issuing CA's own CRL is signed by that CA and not by the anchor, so "+
+		"it cannot be verified here — anchor on the issuing CA instead. Switching to "+
+		"client_revocation_policy: check would restore service by disabling leaf revocation checking "+
+		"for this entry, which is rarely what is wanted",
+		"client_ca", entry.Name, "path", entry.CRLFile,
+		"uncovered_anchors", strings.Join(gaps, ", "))
 }
 
 // loadDomainCRLs reads and verifies the CRLs for one client_ca entry.
@@ -270,12 +300,18 @@ func loadDomainCRLs(entry *config.ClientCA, anchors []*x509.Certificate) ([]*x50
 // the supported procedure is to add the new anchor as a second entry, roll the
 // fleet, then remove the old one and roll again.
 func refreshClientCRLs(cfg *serverConfig, domains []api.TrustDomain, m *clientCRLMetrics) {
+	policy := cfg.Policy()
 	for i := range cfg.ClientCA {
 		entry := &cfg.ClientCA[i]
 		// Domain zero is ours, so entry i is domain i+1.
 		domain := &domains[i+1]
 
 		crls, err := loadDomainCRLs(entry, domain.Anchors)
+		now := time.Now()
+		var candidate *api.ClientCRLSet
+		if err == nil {
+			candidate = api.NewClientCRLSet(crls, domain.Anchors)
+		}
 		switch {
 		case err != nil:
 			// Keep whatever is loaded; the next pass retries. Replacing a good
@@ -283,16 +319,22 @@ func refreshClientCRLs(cfg *serverConfig, domains []api.TrustDomain, m *clientCR
 			// require, which a transient read error must not do.
 			slog.Error("Could not reload client CRLs; keeping the current set",
 				"client_ca", entry.Name, "error", err)
-		case entry.CRLFile != "" && len(crls) == 0:
-			// The file was readable and yielded nothing usable: every CRL in it
-			// was discarded as unverifiable, or it holds no CRL blocks at all.
-			// Installing that empty set would reject every client of this domain
-			// under require, on a file the operator can see is populated — so
-			// keep the previous set and say why.
-			slog.Error("crl_file yielded no usable CRLs; keeping the current set",
-				"client_ca", entry.Name, "path", entry.CRLFile)
+		case entry.CRLFile != "" && losesCoverage(domain.RevocationSet(), candidate, now):
+			// The reload covers fewer anchors than what is already installed.
+			//
+			// Gating this on "yielded nothing at all" protected against total
+			// failure and not against partial, which is the likelier of the two:
+			// a bundle assembled from several upstreams loses one of them, or one
+			// issuer rotates its key so its new CRL no longer verifies. The old
+			// test let that install a set covering fewer anchors and discard the
+			// good one, refusing every client of the anchor that went missing --
+			// while a wholly broken file was safely retained.
+			slog.Error("crl_file reload would cover fewer anchors than the current set; "+
+				"keeping the current set",
+				"client_ca", entry.Name, "path", entry.CRLFile,
+				"now_uncovered", strings.Join(candidate.CoverageGaps(now), ", "))
 		default:
-			domain.SetRevocationSet(api.NewClientCRLSet(crls, domain.Anchors))
+			domain.SetRevocationSet(candidate)
 		}
 
 		// Published on every branch, not only the successful one. The gauge is
@@ -300,8 +342,14 @@ func refreshClientCRLs(cfg *serverConfig, domains []api.TrustDomain, m *clientCR
 		// is exactly when they need it: skipping the set here means the series
 		// is never created, and `== 0` cannot fire on a series that does not
 		// exist. The mixin ORs in absent() for the same reason on `up`.
-		if m != nil {
-			m.set(entry.Name, domain.RevocationSet().Usable(time.Now(), domain.Anchors))
+		// Published only under require. crl_file is optional under check and
+		// skip -- "that CA publishes OCSP instead, and I accept the risk" -- so a
+		// domain with no CRLs is a correct configuration there, and publishing 0
+		// for it fired the mixin's only critical authentication alert forever on
+		// a healthy server. The realistic response to that is to silence the
+		// rule, which takes the require case down with it.
+		if m != nil && policy == config.RevocationRequire {
+			m.set(entry.Name, domain.RevocationSet().Usable(now))
 		}
 	}
 }
@@ -336,8 +384,14 @@ func runClientCRLReloader(ctx context.Context, cfg *serverConfig, domains []api.
 // domain. Without this gauge the first symptom is agents failing to
 // authenticate with a 403 whose cause is three layers from where an operator
 // would look.
+//
+// Two signals, because one cannot do it. The gauge answers what is knowable at
+// load time -- does this entry hold anything current -- and the counter answers
+// what is not: whether clients are actually being refused, which depends on the
+// chains they present and so cannot be estimated before they arrive.
 type clientCRLMetrics struct {
-	usable *prometheus.GaugeVec
+	usable   *prometheus.GaugeVec
+	refusals *prometheus.CounterVec
 }
 
 // newClientCRLMetrics registers the gauge, or returns nil when the exporter is
@@ -351,13 +405,36 @@ func newClientCRLMetrics(reg prometheus.Registerer) *clientCRLMetrics {
 			Namespace: "puppetca",
 			Subsystem: "client_crl",
 			Name:      "usable",
-			Help: "1 when a client_ca trust domain has at least one currently valid CRL, 0 otherwise. " +
-				"Under client_revocation_policy=require a 0 rejects every client of that domain, so " +
-				"alert on it: the alternative is diagnosing a fleet-wide 403 from the agent side.",
+			Help: "1 when a client_ca trust domain holds any currently valid CRL, 0 when it holds " +
+				"none. Exported only under client_revocation_policy=require, where a 0 means the " +
+				"domain has nothing to check against; crl_file is optional under check and skip, so " +
+				"a domain without CRLs is correct there and publishing 0 would alert on a healthy " +
+				"server. This does NOT report partial coverage: whether an uncovered anchor matters " +
+				"depends on chains that have not arrived, so a domain can read 1 while clients of " +
+				"one of its anchors are refused. puppetca_client_crl_refusals_total is the signal " +
+				"for that, because it counts refusals that actually happened.",
+		}, []string{"client_ca"}),
+		refusals: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "puppetca",
+			Subsystem: "client_crl",
+			Name:      "refusals_total",
+			Help: "Clients refused because their issuer had no currently valid CRL under " +
+				"client_revocation_policy=require. Unlike the usable gauge this is not an " +
+				"estimate: it counts requests actually turned away, so it sees a partially " +
+				"covered entry -- one anchor's CRL missing while another's is fine -- which no " +
+				"load-time check can distinguish from a healthy one. Alert on increase() > 0.",
 		}, []string{"client_ca"}),
 	}
-	reg.MustRegister(m.usable)
+	reg.MustRegister(m.usable, m.refusals)
 	return m
+}
+
+// recordRefusal counts one client turned away for want of a usable CRL.
+func (m *clientCRLMetrics) recordRefusal(domain string) {
+	if m == nil {
+		return
+	}
+	m.refusals.WithLabelValues(domain).Inc()
 }
 
 // set records whether a domain's CRLs are usable.

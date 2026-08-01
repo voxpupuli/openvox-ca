@@ -47,17 +47,14 @@ type TrustDomain struct {
 	// its admin CNs — to every intermediate that root has issued or ever will.
 	Roots *x509.CertPool
 
-	// admins holds the common names granted admin authority *in this domain*.
-	// A name from another issuer is a different name.
+	// AdminCNs are the common names granted admin authority *in this domain*.
+	// A name from a different domain is a different name.
 	//
-	// Behind a pointer, and behind a lock, for one reason: `systemctl reload`
-	// withdraws a compile server's admin rights while requests are in flight,
-	// and this domain is copied by value into the domain list. A plain map
-	// would be read by the middleware on one goroutine while the reload
-	// replaced it on another, and copies would go on consulting the map the
-	// swap had already replaced. Reach it through IsAdminCN and SetAdminCNs;
-	// AuthConfig.SetOwnAdminCNs is what reload calls.
-	admins *adminSet
+	// Within a domain it is not per-issuer: an entry's file may bundle several
+	// anchors, and this list applies to certificates from all of them, which
+	// warnIfGrantsSpanAnchors reports at startup. One anchor per entry is the
+	// shape that makes a grant mean what it looks like.
+	AdminCNs map[string]bool
 
 	// own marks domain zero. Unexported so that only OwnTrustDomain can set it;
 	// see IsOwn.

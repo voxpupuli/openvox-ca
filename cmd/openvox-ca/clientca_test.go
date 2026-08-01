@@ -37,6 +37,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/voxpupuli/openvox-ca/internal/api"
 	"github.com/voxpupuli/openvox-ca/internal/config"
 )
 
@@ -298,7 +299,7 @@ var _ = Describe("client_ca CRL loading", func() {
 		otherCA, otherKey = mintCA("Unrelated CA", nil, nil)
 	})
 
-	build := func(entry config.ClientCA) ([]byte, error) {
+	build := func(entry config.ClientCA) ([]api.TrustDomain, error) {
 		cfg := &serverConfig{}
 		cfg.ClientCA = []config.ClientCA{entry}
 		domains, err := buildTrustDomains(cfg, ownCA, nil)
@@ -306,7 +307,7 @@ var _ = Describe("client_ca CRL loading", func() {
 			return nil, err
 		}
 		Expect(domains).To(HaveLen(2))
-		return nil, nil
+		return domains, nil
 	}
 
 	It("refuses to start when crl_file cannot be read", func() {
@@ -333,30 +334,39 @@ var _ = Describe("client_ca CRL loading", func() {
 		// SECURITY: without the check a writable crl_file is a way to *clear*
 		// revocations — replace a CRL naming a revoked certificate with one
 		// signed by anything else, and that certificate is valid again.
-		_, err := build(config.ClientCA{
+		domains, err := build(config.ClientCA{
 			Name: "server", File: writeCertFile(serverCA),
 			CRLFile: writeCRLFile(mintCRL(otherCA, otherKey)),
 		})
 		Expect(err).NotTo(HaveOccurred())
+		Expect(domains[1].RevocationSet().CoverageGaps(time.Now())).To(ConsistOf("Server CA"),
+			"a spec named for a discard must be able to observe one")
 	})
 
-	It("discards a CRL with no Authority Key Identifier", func() {
-		// Issuers are matched by AKI, never by DN: under a shared root two
-		// siblings can carry the same DN, and a DN fallback would consult the
-		// wrong CA's revocations.
-		_, err := build(config.ClientCA{
+	It("keeps a CRL with no Authority Key Identifier, because matching is by signature", func() {
+		// This spec used to be named "discards", for a guard that existed only to
+		// serve AKI-based matching. Binding a CRL to the certificate that signed
+		// it removed the need, and keeping the guard would only have lost
+		// revocations: `openssl ca -gencrl` omits the extension under the stock
+		// openssl.cnf, which is the generator this project's own migration guide
+		// calls out.
+		domains, err := build(config.ClientCA{
 			Name: "server", File: writeCertFile(serverCA),
 			CRLFile: writeCRLFile(crlWithoutAKI(serverCA, serverKey)),
 		})
 		Expect(err).NotTo(HaveOccurred())
+		Expect(domains[1].RevocationSet().CoverageGaps(time.Now())).To(BeEmpty(),
+			"the CRL must be loaded and attributed to its signer")
 	})
 
 	It("loads a CRL its own anchor signed", func() {
-		_, err := build(config.ClientCA{
+		domains, err := build(config.ClientCA{
 			Name: "server", File: writeCertFile(serverCA),
 			CRLFile: writeCRLFile(mintCRL(serverCA, serverKey)),
 		})
 		Expect(err).NotTo(HaveOccurred())
+		Expect(domains[1].RevocationSet().Usable(time.Now())).To(BeTrue())
+		Expect(domains[1].RevocationSet().CoverageGaps(time.Now())).To(BeEmpty())
 	})
 
 	It("starts, having warned, when a root anchor leaves no usable CRLs", func() {
@@ -378,8 +388,8 @@ var _ = Describe("client_ca CRL loading", func() {
 // crlWithoutAKI signs a CRL carrying no Authority Key Identifier.
 //
 // x509.CreateRevocationList always stamps one, so the DER is assembled directly.
-// Without this fixture the "discards a CRL with no AKI" spec passes whether or
-// not the guard exists: every CRL the standard library can produce has one.
+// The fixture survives the guard it was built for: it is now what shows that an
+// AKI-less CRL is *used*, which no standard-library CRL could demonstrate.
 func crlWithoutAKI(cert *x509.Certificate, key *ecdsa.PrivateKey) *x509.RevocationList {
 	GinkgoHelper()
 	algo := pkix.AlgorithmIdentifier{Algorithm: asn1.ObjectIdentifier{1, 2, 840, 10045, 4, 3, 2}}
@@ -484,8 +494,8 @@ var _ = Describe("refreshClientCRLs", func() {
 
 		// Each domain must hold the CRL signed by its own anchor. A swapped
 		// pairing leaves both sets non-empty, so the assertion is per-issuer.
-		Expect(domains[1].RevocationSet().Usable(time.Now(), domains[1].Anchors)).To(BeTrue())
-		Expect(domains[2].RevocationSet().Usable(time.Now(), domains[2].Anchors)).To(BeTrue())
+		Expect(domains[1].RevocationSet().Usable(time.Now())).To(BeTrue())
+		Expect(domains[2].RevocationSet().Usable(time.Now())).To(BeTrue())
 		Expect(gauge("server")).To(Equal(1.0))
 		Expect(gauge("agent")).To(Equal(1.0))
 
@@ -509,7 +519,7 @@ var _ = Describe("refreshClientCRLs", func() {
 		cfg.ClientCA[0].CRLFile = filepath.Join(GinkgoT().TempDir(), "vanished.pem")
 		refreshClientCRLs(cfg, domains, metrics)
 
-		Expect(domains[1].RevocationSet().Usable(time.Now(), domains[1].Anchors)).To(BeTrue(),
+		Expect(domains[1].RevocationSet().Usable(time.Now())).To(BeTrue(),
 			"a transient read error must not discard a working set")
 		Expect(gauge("server")).To(Equal(1.0))
 	})
@@ -531,8 +541,38 @@ var _ = Describe("refreshClientCRLs", func() {
 		cfg.ClientCA[0].CRLFile = writeCRLFile(mintCRL(unrelated, unrelatedKey))
 		refreshClientCRLs(cfg, domains, metrics)
 
-		Expect(domains[1].RevocationSet().Usable(time.Now(), domains[1].Anchors)).To(BeTrue())
+		Expect(domains[1].RevocationSet().Usable(time.Now())).To(BeTrue())
 		Expect(gauge("server")).To(Equal(1.0))
+	})
+
+	It("keeps the previous set when a reload covers fewer anchors than it did", func() {
+		// The guard used to be "yielded nothing at all", which protected against
+		// total failure and not against partial -- and partial is the likelier
+		// of the two in the bundle-assembly topology that produces multi-anchor
+		// entries. One upstream drops out, or one issuer rotates its key so its
+		// new CRL no longer verifies, and the narrower set installed while the
+		// good one was discarded, refusing every client of the anchor that went
+		// missing. A wholly broken file, meanwhile, was safely retained.
+		second, secondKey := mintCA("Second CA", nil, nil)
+		cfg := &serverConfig{}
+		cfg.ClientCA = []config.ClientCA{{
+			Name: "pair",
+			File: writeCertFile(serverCA, second),
+			CRLFile: writeCRLFile(mintCRL(serverCA, serverKey),
+				mintCRL(second, secondKey)),
+		}}
+		domains, err := buildTrustDomains(cfg, ownCA, nil)
+		Expect(err).NotTo(HaveOccurred())
+		refreshClientCRLs(cfg, domains, metrics)
+		Expect(domains[1].RevocationSet().CoverageGaps(time.Now())).To(BeEmpty())
+
+		// The refresh loses the second issuer's CRL but keeps the first's, so
+		// the file is neither empty nor unreadable.
+		cfg.ClientCA[0].CRLFile = writeCRLFile(mintCRL(serverCA, serverKey))
+		refreshClientCRLs(cfg, domains, metrics)
+
+		Expect(domains[1].RevocationSet().CoverageGaps(time.Now())).To(BeEmpty(),
+			"the previous, fully covering set must be kept rather than narrowed")
 	})
 
 	It("publishes the gauge as unusable when every CRL has expired", func() {
@@ -628,18 +668,33 @@ var _ = Describe("client_ca startup warnings", func() {
 		Expect(out).To(ContainSubstring("administrator of this CA"))
 	})
 
-	It("warns when a root anchor leaves no usable CRLs under require", func() {
+	It("names the uncovered anchor under require", func() {
 		// The lockout: the Server CA's own CRL is signed by the Server CA, not
-		// by the root anchor, so it is discarded and every client is rejected.
-		// The warning must name the consequence of the obvious workaround.
+		// by the root anchor, so it is discarded and the root is left uncovered.
+		// The warning must name which anchor, and the consequence of the obvious
+		// workaround.
 		out := build(config.ClientCA{
 			Name: "shared", File: writeCertFile(root),
 			CRLFile: writeCRLFile(mintCRL(serverCA, serverKey)),
 		}, config.RevocationRequire)
 
-		Expect(out).To(ContainSubstring("no usable CRLs"))
+		Expect(out).To(ContainSubstring("no currently valid CRL"))
+		Expect(out).To(ContainSubstring("uncovered_anchors"))
 		Expect(out).To(ContainSubstring("anchor on the issuing CA instead"))
 		Expect(out).To(ContainSubstring("disabling leaf revocation checking"))
+	})
+
+	It("does not warn when an uncovered anchor is one nobody chains to", func() {
+		// A partner ships their issuing CA and the root above it, and a CRL for
+		// the issuing CA only. Every client works -- no chain terminates at the
+		// root -- so asserting that every client would be rejected was false,
+		// and it pushed the operator towards client_revocation_policy: check.
+		out := build(config.ClientCA{
+			Name: "partner", File: writeCertFile(serverCA),
+			CRLFile: writeCRLFile(mintCRL(serverCA, serverKey)),
+		}, config.RevocationRequire)
+
+		Expect(out).NotTo(ContainSubstring("no currently valid CRL"))
 	})
 
 	It("says nothing about CRLs when the policy does not require them", func() {

@@ -51,6 +51,8 @@ alerting rules for the openvox-ca exporter. It alerts on:
 - **Client trust domains** with no usable CRL — every CRL expired, or every one
   [`client_ca`](../docs/configuration.md#client-trust-domains) is in use). The
   [`client_ca`](../docs/configuration.md#trusting-client-certificates-from-another-ca)
+- **Client trust domains** in two rules, both critical, both only when
+  [`client_ca`](../docs/configuration.md#trusting-client-certificates-from-another-ca)
 - **Kubernetes export** targets whose applies keep failing (only when the
   [Kubernetes export](../docs/kubernetes-export.md) feature is in use).
 
@@ -140,6 +142,7 @@ jsonnet -J vendor -m . mixin.jsonnet
 | `upstreamCRLExpiryWarningSeconds` | 14 days | Warning threshold for an upstream CRL in a published chain. Longer than `crlExpiryWarningSeconds` because the remedy is at another CA. |
 | `crlChainWindow` | `2h` | Window over which chain-refresh failures, discards, regressions and removals are counted. Twice the CA's default `crl_chain_refresh_interval_sec`, so that two increments are always in range: at exactly one interval a single unchanging fault fires, resolves and re-fires forever, because the older sample ages out before the next increment lands. Keep it at twice the interval if you change that setting. |
 | `crlChainFor` | `15m` | `for:` debounce for the five upstream-chain alerts. |
+| `clientCRLRefusalWindow` | `1h` | Window over which client-CRL refusals are counted. Event-driven, so unlike the gauge it is not coupled to `maintenance_interval_sec`. |
 | `clientCRLUnusableFor` | `10m` | `for:` debounce for *ClientCRLUnusable*. Note the detection latency is `maintenance_interval_sec` **plus** this: the gauge is only recomputed on the maintenance pass, so at the 1h default a domain whose last CRL expires just after a pass is refusing every client for up to 70 minutes before this fires. Raising `maintenance_interval_sec` lengthens time-to-page on the mixin's only critical authentication alert. |
 | `leafExpiryWarningSeconds` | 7 days | Leaf certificate expiry warning threshold. |
 | `leafExpiryCriticalSeconds` | 1 day | Leaf certificate expiry critical threshold. |

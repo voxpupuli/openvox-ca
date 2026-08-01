@@ -66,10 +66,18 @@ type AuthConfig struct {
 	// Empty means require. Our own domain always checks its own CRL and is
 	// unaffected by this setting.
 	ClientRevocationPolicy string
+
+	// OnRevocationRefusal, when set, is called with the domain name each time a
+	// foreign client is refused for want of a usable CRL.
+	//
+	// A callback rather than a counter because this package holds no metrics
+	// dependency. It exists because load-time coverage cannot tell which anchors
+	// matter -- that depends on chains not yet presented -- so the only
+	// unambiguous statement that clients are being turned away is made here,
+	// when one is.
+	OnRevocationRefusal func(domain string)
 }
 
-// revocationPolicy resolves the foreign-domain revocation policy, defaulting
-// to require so an unset value never defaults into a hole.
 // revocationPolicy resolves the policy for foreign domains.
 //
 // config.ClientCAConfig.Policy() applies the same default, and main.go passes

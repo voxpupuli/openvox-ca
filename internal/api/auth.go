@@ -120,7 +120,7 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 		verified, err := attribute(cfg.Domains, clientCert, r.TLS.PeerCertificates[1:])
 		if err != nil {
 			slog.Warn("Auth: client cert verification failed",
-				"cn", clientCert.Subject.CommonName, "error", err)
+				"cn", sanitiseForLog(clientCert.Subject.CommonName), "error", err)
 			http.Error(w, "access denied", http.StatusForbidden)
 			return
 		}
@@ -160,6 +160,13 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 			}
 		} else if err := checkChainRevocation(verified.Chain, domain.RevocationSet(),
 			cfg.revocationPolicy(), time.Now()); err != nil {
+			// Counted here, where a refusal is a fact. Load-time coverage can
+			// only estimate which anchors matter -- it cannot know which chains
+			// will arrive -- so this is the signal that says clients are being
+			// turned away for want of a CRL, right now, and for which domain.
+			if cfg.OnRevocationRefusal != nil {
+				cfg.OnRevocationRefusal(domain.Name)
+			}
 			slog.Warn("Auth: foreign client cert failed revocation checking",
 				"cn", sanitiseForLog(clientCN), "domain", domain.Describe(), "error", err)
 			http.Error(w, "access denied", http.StatusForbidden)
