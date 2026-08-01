@@ -108,7 +108,7 @@ The keep-alive is sent by the frontend process on a timer at half the configured
 
 Be clear about what this does and does not catch. It stops arriving if the frontend dies outright, if the Go runtime deadlocks, or if the heartbeat goroutine itself stalls — which includes a storage operation wedged while holding the CA's write lock, since composing the status text takes the matching read lock. It keeps arriving quite happily if the API is unresponsive for a reason that leaves that goroutine scheduling normally, such as request handlers blocked on a read-only backend call. For genuine end-to-end liveness, point a probe at `/healthz/ready` as well; the watchdog is a backstop, not a health check.
 
-Remove `WatchdogSec=` to disable it. Note that a watchdog restart is a hard kill: it does not drain in-flight requests, and a `WatchdogSec=` under 200ms is logged as too short to feed reliably. It is still fed at half the deadline down to 20ms; below that the CA stops shortening the ticker at 10ms and the deadline will be missed, which is the deliberate trade against spinning on a value nobody sets on purpose.
+Remove `WatchdogSec=` to disable it. Note that a watchdog restart is a hard kill: it does not drain in-flight requests, and a `WatchdogSec=` under 200ms is logged as too short to feed reliably. It is still fed at half the deadline down to 20ms. Below that the CA stops shortening the ticker at 10ms, which first costs the twice-per-interval margin `sd_watchdog_enabled(3)` recommends and, below about 10ms, stops beating the deadline at all — at which point the service manager kills the CA. That is the deliberate trade against spinning on a value nobody sets on purpose.
 
 ## Shutdown
 
