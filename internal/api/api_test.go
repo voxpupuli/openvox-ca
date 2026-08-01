@@ -1336,6 +1336,35 @@ var _ = Describe("API Workflow", func() {
 			Expect(renewed.SerialNumber.Cmp(clientCert.SerialNumber)).NotTo(Equal(0))
 		})
 
+		// Renewal must refuse a revoked certificate with a clean 403 rather than
+		// a 500, on both branches of the route. Guards the
+		// errors.Is(err, ca.ErrCertRevoked) mappings at the HTTP layer, which
+		// the CA-layer specs cannot exercise. Revoking through the CA the server
+		// holds means its cache is already current here; the cross-replica case,
+		// where only storage knows, is covered in internal/ca/crlsync_test.go.
+		It("should return 403 when renewing a revoked certificate (empty body)", func() {
+			Expect(myCA.Revoke(context.Background(), subject)).To(Succeed())
+
+			req := httptest.NewRequest("POST", "/certificate_renewal", bytes.NewReader(nil))
+			req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{clientCert}}
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusForbidden))
+		})
+
+		It("should return 403 when renewing a revoked certificate (CSR body)", func() {
+			Expect(myCA.Revoke(context.Background(), subject)).To(Succeed())
+
+			csrPEM, err := testutil.GenerateCSR(subject)
+			Expect(err).NotTo(HaveOccurred())
+
+			req := httptest.NewRequest("POST", "/certificate_renewal", bytes.NewReader(csrPEM))
+			req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{clientCert}}
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusForbidden))
+		})
+
 		// A legacy-imported node may present a cert whose key predates this CA's
 		// key-strength policy. The empty-body auto-renewal path must surface that
 		// as a client-actionable 422 (re-key via CSR), not mask it behind a 500.

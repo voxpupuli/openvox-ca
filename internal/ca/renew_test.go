@@ -93,7 +93,7 @@ var _ = Describe("CA Renew", func() {
 
 		// Renew with a brand-new valid CSR for the same CN.
 		csrPEM, _ := buildCSR("renew-node")
-		renewedPEM, err := myCA.Renew(ctx, "renew-node", csrPEM)
+		renewedPEM, err := myCA.Renew(ctx, "renew-node", csrPEM, nil)
 		Expect(err).NotTo(HaveOccurred())
 
 		renewed := parseCertPEM(renewedPEM)
@@ -120,7 +120,7 @@ var _ = Describe("CA Renew", func() {
 		// CSR carries a different CN than the renewal subject. Renew enforces
 		// CN == subject as defence-in-depth (signing.go:647) and must reject.
 		mismatchPEM, _ := buildCSR("attacker-node")
-		_, err := myCA.Renew(ctx, "renew-node", mismatchPEM)
+		_, err := myCA.Renew(ctx, "renew-node", mismatchPEM, nil)
 		Expect(err).To(HaveOccurred(),
 			"renewal must fail when the CSR CN does not match the subject")
 
@@ -144,7 +144,7 @@ var _ = Describe("CA Renew", func() {
 
 		// Renew verifies the CSR proof-of-possession signature (signing.go:642)
 		// before acquiring any lock, so a tampered CSR must be rejected.
-		_, err = myCA.Renew(ctx, "renew-node", tamperedPEM)
+		_, err = myCA.Renew(ctx, "renew-node", tamperedPEM, nil)
 		Expect(err).To(HaveOccurred(),
 			"renewal must fail when the CSR signature is invalid")
 	})
@@ -153,7 +153,7 @@ var _ = Describe("CA Renew", func() {
 		original := issue("renew-node")
 
 		csrPEM, _ := buildCSR("renew-node")
-		_, err := myCA.Renew(ctx, "renew-node", csrPEM)
+		_, err := myCA.Renew(ctx, "renew-node", csrPEM, nil)
 		Expect(err).NotTo(HaveOccurred())
 
 		revoked, err := myCA.IsRevokedSerial(ctx, original.SerialNumber)
@@ -174,7 +174,7 @@ var _ = Describe("CA Renew", func() {
 		Expect(store.UpdateCRL(ctx, []byte("not a valid CRL"))).To(Succeed())
 
 		csrPEM, _ := buildCSR("renew-revoke-fail-node")
-		renewedPEM, err := myCA.Renew(ctx, "renew-revoke-fail-node", csrPEM)
+		renewedPEM, err := myCA.Renew(ctx, "renew-revoke-fail-node", csrPEM, nil)
 		Expect(err).NotTo(HaveOccurred(),
 			"a failed revocation of the replaced cert must not fail the renewal")
 		renewed := parseCertPEM(renewedPEM)
@@ -189,7 +189,7 @@ var _ = Describe("CA Renew", func() {
 		// certificate exists yet. Guards that the happy path does not depend on
 		// a pre-existing cert.
 		csrPEM, _ := buildCSR("fresh-node")
-		renewedPEM, err := myCA.Renew(ctx, "fresh-node", csrPEM)
+		renewedPEM, err := myCA.Renew(ctx, "fresh-node", csrPEM, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(parseCertPEM(renewedPEM).Subject.CommonName).To(Equal("fresh-node"))
 

@@ -67,11 +67,59 @@ func serialHexStr(n *big.Int) string {
 // already exists for the requested subject.
 var ErrCertExists = errors.New("certificate already exists")
 
-// ErrCertRevoked is returned by AutoRenew when the certificate presented for
-// renewal is on the CRL. A sentinel because the HTTP layer has to turn it into
-// a 403 rather than a 500: the request is well formed and the answer is a
-// refusal, not a failure.
+// ErrCertRevoked is returned by the renewal paths when the certificate
+// presented for renewal is on the CRL. A sentinel because the HTTP layer has to
+// turn it into a 403 rather than a 500: the request is well formed and the
+// answer is a refusal, not a failure.
 var ErrCertRevoked = errors.New("certificate is revoked")
+
+// refuseIfRevoked re-checks presentedCert against the CRL in storage, rather
+// than against the cached copy the auth middleware consulted on the way in, and
+// returns ErrCertRevoked when it is listed. A nil presentedCert is a no-op:
+// there is no credential to check.
+//
+// Both renewal paths call it, and renewal is the reason it exists. Every other
+// decision made from an out-of-date CRL is self-limiting: it admits a revoked
+// certificate for at most one sync interval, after which the same certificate
+// is rejected. Renewal mints a *new* certificate — fresh serial, full leaf
+// validity, every authorisation OID carried forward, and on the CSR path a key
+// of the client's choosing — that no CRL will ever list, because the serial the
+// renewal revokes is the one it replaces. A revocation racing a renewal on a
+// lagging replica would otherwise leave the agent a credential outliving its
+// lockout by years, which is not a window anyone would call 60 seconds.
+//
+// So this path pays for a storage read the general auth path cannot: renewals
+// are rare, and the alternative is that the propagation window this CA
+// advertises does not actually bound a compromised agent's access.
+//
+// A failed refresh is not itself a refusal. The check below still runs against
+// the CRL already held, which is exactly the pre-sync behaviour and no worse, so
+// a storage blip costs freshness rather than every renewal in the fleet. What
+// does refuse is an unusable CRL: IsRevokedSerial errors when none is loaded,
+// and that is treated as a denial, matching the middleware.
+//
+// NIST 800-53: IA-5(2) (PKI-Based Authentication), AC-3 (Access Enforcement)
+func (c *CA) refuseIfRevoked(ctx context.Context, presentedCert *x509.Certificate, subject string) error {
+	if presentedCert == nil {
+		return nil
+	}
+	if _, err := c.SyncCRLCache(ctx); err != nil {
+		// Counted and logged by SyncCRLCache; noted here so the renewal that
+		// proceeded on a possibly stale CRL is attributable.
+		slog.Warn("Renewal: could not refresh the CRL first; checking against the CRL in memory",
+			"subject", subject, "error", err)
+	}
+	revoked, err := c.IsRevokedSerial(ctx, presentedCert.SerialNumber)
+	if err != nil {
+		return fmt.Errorf("rejecting renewal for %s: cannot determine revocation status: %w", subject, err)
+	}
+	if revoked {
+		slog.Warn("Renewal: refusing to renew a revoked certificate",
+			"subject", subject, "serial", serialHexStr(presentedCert.SerialNumber))
+		return fmt.Errorf("rejecting renewal for %s: %w", subject, ErrCertRevoked)
+	}
+	return nil
+}
 
 // ErrNotInitialized is returned by signing helpers when the CA's certificate
 // or private key has not been loaded — typically because Init has not been
@@ -696,8 +744,19 @@ func (c *CA) SaveRequest(ctx context.Context, subject string, csrPEM []byte) (bo
 // The caller is responsible for verifying that the CSR CN matches the
 // authenticated client's CN before calling Renew; this method enforces that
 // invariant a second time as defence-in-depth.
-func (c *CA) Renew(ctx context.Context, subject string, csrPEM []byte) ([]byte, error) {
+//
+// presentedCert is the certificate the client authenticated with, and is
+// re-checked against the CRL in storage before anything is issued — see
+// refuseIfRevoked. It matters more here than on the auto-renewal path: this one
+// also re-keys, so a revoked agent slipping through would walk away with a
+// credential the CA has never seen the private key of. Pass nil only where
+// there is no presented certificate to check.
+func (c *CA) Renew(ctx context.Context, subject string, csrPEM []byte, presentedCert *x509.Certificate) ([]byte, error) {
 	if err := ValidateSubject(subject); err != nil {
+		return nil, err
+	}
+
+	if err := c.refuseIfRevoked(ctx, presentedCert, subject); err != nil {
 		return nil, err
 	}
 
@@ -812,37 +871,8 @@ func (c *CA) AutoRenew(ctx context.Context, presentedCert *x509.Certificate) ([]
 		return nil, fmt.Errorf("rejecting auto-renewal for %s: %w", subject, err)
 	}
 
-	// SECURITY: re-check revocation against storage, not just the cached CRL the
-	// auth middleware consulted on the way in.
-	//
-	// Renewal is the one request that converts a stale cache into a permanent
-	// bypass. Every other decision made from an out-of-date CRL is self-limiting:
-	// it admits a revoked certificate for at most one sync interval, after which
-	// the same certificate is rejected. This one mints a *new* certificate —
-	// fresh serial, full leaf validity, every authorisation OID carried forward —
-	// that no CRL will ever list, because the serial being revoked is the one it
-	// replaces. A revocation racing a renewal on a lagging replica would leave
-	// the agent a credential outliving its lockout by years.
-	//
-	// So this path pays for a storage read that the general auth path cannot:
-	// renewals are rare, and the alternative is that the propagation window this
-	// CA advertises does not actually bound a compromised agent's access.
-	// Fail-closed, matching the middleware: an unreadable CRL denies.
-	// NIST 800-53: IA-5(2) (PKI-Based Authentication), AC-3 (Access Enforcement)
-	if _, err := c.SyncCRLCache(ctx); err != nil {
-		// Not fatal on its own: the check below still runs against the CRL
-		// already held, which is no worse than the pre-sync behaviour. The
-		// failure is counted and logged by SyncCRLCache.
-		slog.Warn("AutoRenew: could not refresh the CRL before renewing; checking against the CRL in memory",
-			"subject", subject, "error", err)
-	}
-	if revoked, err := c.IsRevokedSerial(ctx, presentedCert.SerialNumber); err != nil || revoked {
-		if err != nil {
-			return nil, fmt.Errorf("rejecting auto-renewal for %s: cannot determine revocation status: %w", subject, err)
-		}
-		slog.Warn("AutoRenew: refusing to renew a revoked certificate",
-			"subject", subject, "serial", serialHexStr(presentedCert.SerialNumber))
-		return nil, fmt.Errorf("rejecting auto-renewal for %s: %w", subject, ErrCertRevoked)
+	if err := c.refuseIfRevoked(ctx, presentedCert, subject); err != nil {
+		return nil, err
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, lockTimeout)

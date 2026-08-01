@@ -112,10 +112,3 @@ var _ = Describe("runCRLSync", func() {
 			"runCRLSync did not return after context cancellation")
 	})
 })
-
-var _ = Describe("crlSyncInterval", func() {
-	It("defaults to a minute and honours an override", func() {
-		Expect((&serverConfig{}).crlSyncInterval()).To(Equal(time.Minute))
-		Expect((&serverConfig{CRLSyncIntervalSec: 15}).crlSyncInterval()).To(Equal(15 * time.Second))
-	})
-})

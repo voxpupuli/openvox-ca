@@ -109,6 +109,19 @@ func ImportCA(ctx context.Context, store *storage.StorageService, certBundlePEM,
 		if _, err := x509.ParseRevocationList(crlBlock.Bytes); err != nil {
 			return fmt.Errorf("failed to parse CRL: %w", err)
 		}
+		// Reject a bundle carrying no CRL issued by the certificate being
+		// imported. The server refuses to decide revocation from a list this CA
+		// did not sign, so importing one produces a CA that will not start —
+		// and this command is the last point at which the operator still has
+		// the input in front of them and can fix it. Supplying an ancestor's
+		// CRL instead of the intermediate's is an easy mistake to make from the
+		// migration guide's recipe.
+		//
+		// Order within the bundle is not constrained: readers search it.
+		if !bundleHasCRLFrom(crlPEM, caCert) {
+			return fmt.Errorf("none of the CRLs in --crl-chain was signed by the CA certificate being imported; " +
+				"include the CRL issued by this CA (ancestors' CRLs may accompany it, in any order)")
+		}
 		// Import-time write: runs before any CRL consumer exists, so it
 		// deliberately skips the crlNotify signal (see signCRLLocked).
 		if err := store.UpdateCRL(ctx, crlPEM); err != nil {

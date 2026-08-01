@@ -257,6 +257,43 @@ var _ = Describe("SyncCRLCache", func() {
 		Expect(err).To(MatchError(ca.ErrCertRevoked))
 	})
 
+	// The CSR path also re-keys, so a revoked agent getting through it walks
+	// away with a credential whose private key the CA has never seen.
+	It("refuses to re-key a certificate revoked on another replica", func() {
+		ctx := context.Background()
+		cert := signedCert(signer, "crlsync-rekey-node")
+		csrPEM, err := testutil.GenerateCSR("crlsync-rekey-node")
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(signer.Revoke(ctx, "crlsync-rekey-node")).To(Succeed())
+
+		stale, err := replica.IsRevokedSerial(ctx, cert.SerialNumber)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(stale).To(BeFalse(), "precondition: the replica has not yet synced")
+
+		_, err = replica.Renew(ctx, "crlsync-rekey-node", csrPEM, cert)
+		Expect(err).To(MatchError(ca.ErrCertRevoked))
+	})
+
+	// Fail-closed on an unusable CRL, but not on a failed refresh: a storage
+	// blip must cost freshness, not every renewal in the fleet.
+	It("still enforces a revocation it already knows about when the refresh fails", func() {
+		ctx := context.Background()
+		cert := signedCert(signer, "crlsync-renew-degraded-node")
+
+		Expect(signer.Revoke(ctx, "crlsync-renew-degraded-node")).To(Succeed())
+		updated, err := replica.SyncCRLCache(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(updated).To(BeTrue())
+
+		// Now break the stored CRL, so the pre-renewal refresh fails and the
+		// check falls back to the copy in memory.
+		Expect(signer.Storage.UpdateCRL(ctx, []byte("not a CRL"))).To(Succeed())
+
+		_, err = replica.AutoRenew(ctx, cert)
+		Expect(err).To(MatchError(ca.ErrCertRevoked))
+	})
+
 	It("still renews a certificate that is not revoked", func() {
 		ctx := context.Background()
 		cert := signedCert(signer, "crlsync-renew-ok-node")
@@ -369,8 +406,36 @@ var _ = Describe("Init against the stored CRL", func() {
 
 		ours, ok := c.CachedCRLNumber()
 		Expect(ok).To(BeTrue())
-		Expect(ours.Cmp(big.NewInt(7))).NotTo(BeZero(),
-			"the ancestor's CRL number must not be the one we cached")
+		Expect(ours.Cmp(big.NewInt(1))).To(BeZero(),
+			"must cache this CA's own CRL (number 1), not the ancestor's (7)")
+	})
+
+	It("skips a block it cannot parse and keeps looking for ours", func() {
+		garbage := pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: []byte("not DER")})
+		chain := append(garbage, cachedCrlPEM...)
+
+		c, err := seedCA(chain)
+		Expect(err).NotTo(HaveOccurred(), "one unparseable block must not stop the CA loading its own list")
+
+		ours, ok := c.CachedCRLNumber()
+		Expect(ok).To(BeTrue())
+		Expect(ours.Cmp(big.NewInt(1))).To(BeZero())
+	})
+
+	It("syncs against our block in a chain, not the first one", func() {
+		ctx := context.Background()
+		chain := append(foreignCRLPEM(7), cachedCrlPEM...)
+
+		c, err := seedCA(chain)
+		Expect(err).NotTo(HaveOccurred())
+
+		// The sync has to search the blob the same way startup did. Reading
+		// block 0 here would find the ancestor: numbered 7 against our 1, it
+		// would be refused on every tick and no revocation would ever land.
+		updated, err := c.SyncCRLCache(ctx)
+		Expect(err).NotTo(HaveOccurred(), "the sync must find our CRL behind the ancestor's")
+		Expect(updated).To(BeFalse(), "already current")
+		Expect(c.CRLSyncFailures()).To(BeZero())
 	})
 })
 

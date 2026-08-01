@@ -968,8 +968,18 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 			return
 		}
 
-		certPEM, err = s.CA.Renew(r.Context(), cn, body)
+		certPEM, err = s.CA.Renew(r.Context(), cn, body, r.TLS.PeerCertificates[0])
 		if err != nil {
+			// A revoked certificate must not be re-keyed either. This branch
+			// matters more than the auto-renewal one it mirrors: it issues a
+			// certificate for a key the client chose, so a revoked agent
+			// getting through would end up holding a credential this CA has
+			// never seen the private key of.
+			if errors.Is(err, ca.ErrCertRevoked) {
+				slog.Warn("Renewal rejected: certificate is revoked", "subject", cn)
+				http.Error(w, "access denied", http.StatusForbidden)
+				return
+			}
 			// Same key-strength policy applies to the re-key CSR: surface it as
 			// a client error instead of a 500.
 			if errors.Is(err, ca.ErrKeyPolicy) {
