@@ -39,8 +39,11 @@ import (
 )
 
 // writeTestKeypair writes a self-signed server certificate and its key into
-// dir, named after cn so successive keypairs can be told apart, and returns
-// the two paths.
+// dir as the fixed names server.crt and server.key, and returns the two paths.
+// cn sets the certificate's common name, which is how specs tell one keypair
+// from another; calling this twice with the same dir deliberately overwrites,
+// which is how the rotation specs work. Two keypairs that must coexist need
+// two directories.
 func writeTestKeypair(dir, cn string) (certPath, keyPath string) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	Expect(err).NotTo(HaveOccurred())
@@ -249,6 +252,26 @@ var _ = Describe("Configuration reloading", func() {
 		Expect(err.Error()).To(ContainSubstring("puppet-server file"))
 	})
 
+	It("names the CNs that gained and lost admin access", func() {
+		// The audit record: a count alone cannot distinguish "unchanged" from
+		// "one compile server swapped for another".
+		added, removed := diffAllowList(
+			map[string]bool{"stays.example.com": true, "goes.example.com": true},
+			map[string]bool{"stays.example.com": true, "arrives.example.com": true},
+		)
+		Expect(added).To(Equal([]string{"arrives.example.com"}))
+		Expect(removed).To(Equal([]string{"goes.example.com"}))
+	})
+
+	It("reports no change when the allow list is rewritten identically", func() {
+		added, removed := diffAllowList(
+			map[string]bool{"a.example.com": true},
+			map[string]bool{"a.example.com": true},
+		)
+		Expect(added).To(BeEmpty())
+		Expect(removed).To(BeEmpty())
+	})
+
 	It("keeps a failure visible in the status until a reload succeeds", func() {
 		// Otherwise the next heartbeat overwrites the notice and the operator
 		// is left believing the reload took effect.
@@ -277,15 +300,17 @@ var _ = Describe("Reload watcher", func() {
 		reloader *configReloader
 		rec      *notifyRecorder
 		notifier *sdnotify.Notifier
+		hupCh    chan os.Signal
 	)
 
 	BeforeEach(func() {
-		// Claim SIGHUP before anything can send one: the default action for an
+		// Claim SIGHUP before anything can send one, exactly as the server
+		// does before its own startup work: the default action for an
 		// unhandled SIGHUP is to terminate, which would take the test binary
-		// with it if the watcher had not registered yet.
-		guard := make(chan os.Signal, 1)
-		signal.Notify(guard, syscall.SIGHUP)
-		DeferCleanup(func() { signal.Stop(guard) })
+		// with it.
+		hupCh = make(chan os.Signal, 1)
+		signal.Notify(hupCh, syscall.SIGHUP)
+		DeferCleanup(func() { signal.Stop(hupCh) })
 
 		dir = GinkgoT().TempDir()
 		cnFile = filepath.Join(dir, "servers.txt")
@@ -301,13 +326,14 @@ var _ = Describe("Reload watcher", func() {
 		DeferCleanup(func() { Expect(notifier.Close()).To(Succeed()) })
 	})
 
-	// startWatcher runs the watcher for the duration of the spec.
+	// startWatcher runs the watcher for the duration of the spec, fed by the
+	// same pre-registered channel the server wires up in main.
 	startWatcher := func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			runReloadWatcher(ctx, notifier, reloader, func() string { return "serving" + reloader.statusSuffix() })
+			runReloadWatcher(ctx, hupCh, notifier, reloader, func() string { return "serving" + reloader.statusSuffix() })
 		}()
 		DeferCleanup(func() {
 			cancel()

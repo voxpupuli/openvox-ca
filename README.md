@@ -111,7 +111,7 @@ The complete flag, environment-variable, and config-file reference is in
 
 | Guide | What it covers |
 | --- | --- |
-| [Configuring the server](docs/configuration.md) | Every flag, environment variable, config-file key; autosigning; directory layout; graceful shutdown |
+| [Configuring the server](docs/configuration.md) | Every flag, environment variable, config-file key; autosigning; directory layout; graceful shutdown; reloading configuration |
 | [HTTP API reference](docs/api.md) | All endpoints, authorization tiers, and admin credential resolution |
 | [Operator CLI (`openvox-ca-ctl`)](docs/operator-cli.md) | The `openvox-ca-ctl` command reference |
 | [Storage backends](docs/storage-backends.md) | filesystem, SQLite, PostgreSQL, MySQL, etcd, Redis/Valkey; migrating between them |

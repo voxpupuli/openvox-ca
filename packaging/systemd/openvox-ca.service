@@ -23,8 +23,10 @@ ExecReload=/bin/kill -HUP $MAINPID
 
 ExecStart=/usr/local/bin/openvox-ca --config /etc/puppet-ca/config.yaml
 
-# The frontend feeds the watchdog on a timer, so a process wedged on an
-# unresponsive storage backend is restarted rather than left half-alive.
+# The frontend feeds the watchdog on a timer, so a frontend that has died or
+# whose heartbeat has stalled is restarted rather than left half-alive. It is
+# not a backend health check -- see docs/systemd.md for what it does and does
+# not catch.
 WatchdogSec=60s
 Restart=on-failure
 RestartSec=5s
@@ -40,13 +42,22 @@ TimeoutStopSec=35s
 User=puppet-ca
 Group=puppet-ca
 
-# /var/lib/puppet-ca, created and owned by systemd. Point cadir at it, or add
-# the directory you use to ReadWritePaths below.
+# /var/lib/puppet-ca, created and owned by systemd, and the only writable path
+# under ProtectSystem=strict below. Either point cadir at it, or uncomment
+# ReadWritePaths and name the directory you use -- for a CA migrated from
+# OpenVox/Puppet Server that is typically /etc/puppetlabs/puppet/ssl/ca.
 StateDirectory=puppet-ca
 StateDirectoryMode=0750
+#ReadWritePaths=/etc/puppetlabs/puppet/ssl/ca
 
 # Hardening. The CA holds a private key that signs every certificate in the
 # estate, so it should reach as little of the system as possible.
+#
+# The signer holds the decrypted CA private key in memory for its whole life,
+# so a core dump would write that key to /var/lib/systemd/coredump -- defeating
+# encryption at rest. Go re-raises fatal signals with the default handler, so
+# this is reachable from an ordinary crash or a SIGQUIT taken for a stack dump.
+LimitCORE=0
 NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes

@@ -63,26 +63,12 @@ func startNotifyRecorder(env map[string]string) *notifyRecorder {
 		}
 	}()
 
-	setSpecEnv("NOTIFY_SOCKET", path)
+	// setEnv is the package's existing save/restore helper (config_test.go).
+	setEnv("NOTIFY_SOCKET", path)
 	for k, v := range env {
-		setSpecEnv(k, v)
+		setEnv(k, v)
 	}
 	return r
-}
-
-// setSpecEnv sets an environment variable for the duration of the current
-// spec. Ginkgo nodes cannot use testing.T.Setenv, so the previous value (or
-// its absence) is restored explicitly.
-func setSpecEnv(key, value string) {
-	prev, had := os.LookupEnv(key)
-	ExpectWithOffset(1, os.Setenv(key, value)).To(Succeed())
-	DeferCleanup(func() {
-		if had {
-			Expect(os.Setenv(key, prev)).To(Succeed())
-			return
-		}
-		Expect(os.Unsetenv(key)).To(Succeed())
-	})
 }
 
 var _ = Describe("Service manager status text", func() {
@@ -95,8 +81,10 @@ var _ = Describe("Service manager status text", func() {
 				Expect(humanDuration(d)).To(Equal(expected))
 			},
 			Entry("years become days", 1794*24*time.Hour, "1794d"),
+			Entry("exactly two days", 48*time.Hour, "2d"),
 			Entry("days", 72*time.Hour, "3d"),
 			Entry("just under two days falls back to hours", 47*time.Hour, "47h"),
+			Entry("exactly two hours", 2*time.Hour, "2h"),
 			Entry("hours", 5*time.Hour, "5h"),
 			Entry("just under two hours falls back to minutes", 119*time.Minute, "119m"),
 			Entry("minutes", 90*time.Second, "1m"),
@@ -207,12 +195,25 @@ var _ = Describe("Service manager heartbeat", func() {
 		})
 
 		It("never beats faster than the floor", func() {
-			// A 100ms WatchdogSec would otherwise have the CA spinning.
-			startNotifyRecorder(map[string]string{"WATCHDOG_USEC": "100000"})
+			// A 10ms WatchdogSec would otherwise have the CA spinning.
+			startNotifyRecorder(map[string]string{"WATCHDOG_USEC": "10000"})
 			n := sdnotify.New()
 			DeferCleanup(func() { Expect(n.Close()).To(Succeed()) })
 
 			Expect(heartbeatInterval(n)).To(Equal(minHeartbeat))
+		})
+
+		It("keeps the floor below the shortest watchdog it will honour", func() {
+			// The floor must never exceed the deadline it is beating: at
+			// WatchdogSec=1s a one-second floor would send exactly one
+			// keep-alive per interval and systemd would kill the CA on the
+			// first tick that drifted.
+			startNotifyRecorder(map[string]string{"WATCHDOG_USEC": "1000000"})
+			n := sdnotify.New()
+			DeferCleanup(func() { Expect(n.Close()).To(Succeed()) })
+
+			Expect(heartbeatInterval(n)).To(Equal(500 * time.Millisecond))
+			Expect(heartbeatInterval(n)).To(BeNumerically("<", n.WatchdogInterval()))
 		})
 	})
 
@@ -244,7 +245,7 @@ var _ = Describe("Service manager heartbeat", func() {
 			})
 
 			Eventually(calls).Should(Receive())
-			Eventually(rec.msgs).Should(Receive(Equal("WATCHDOG=1")))
+			Eventually(rec.msgs).Should(Receive(Equal("WATCHDOG=1\n")))
 			Eventually(rec.msgs).Should(Receive(Equal("STATUS=still here\n")))
 		})
 

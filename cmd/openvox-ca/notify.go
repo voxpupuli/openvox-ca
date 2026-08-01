@@ -35,9 +35,13 @@ import (
 // costs one datagram.
 const defaultStatusRefresh = time.Minute
 
-// minHeartbeat floors the derived heartbeat interval. A pathologically short
-// WatchdogSec= would otherwise have the CA spinning on a ticker.
-const minHeartbeat = time.Second
+// minHeartbeat floors the derived heartbeat interval so a pathologically short
+// WatchdogSec= cannot have the CA spinning on a ticker. It is well under a
+// second because the floor must never exceed the deadline it is beating: at
+// WatchdogSec=1s a one-second floor would send exactly one keep-alive per
+// interval and the service manager would kill the CA on the first tick that
+// drifted.
+const minHeartbeat = 100 * time.Millisecond
 
 // statusReport is the state summarised into the service manager's status text.
 // It is captured as plain values so the rendering below is a pure function of
@@ -141,6 +145,11 @@ func heartbeatInterval(n *sdnotify.Notifier) time.Duration {
 	if half := watchdog / 2; half > minHeartbeat {
 		return half
 	}
+	// Below 2*minHeartbeat the floor takes over. Say so: a WatchdogSec= this
+	// short is almost always a typo, and the symptom otherwise is a service
+	// that systemd kills and restarts with nothing to explain why.
+	slog.Warn("WatchdogSec is very short; the CA will feed the watchdog at the minimum interval",
+		"watchdog", watchdog, "heartbeat", minHeartbeat)
 	return minHeartbeat
 }
 

@@ -15,12 +15,15 @@ A ready-to-use unit ships in [`packaging/systemd/openvox-ca.service`](../packagi
 
 ```console
 $ sudo useradd --system --home-dir /var/lib/puppet-ca --shell /usr/sbin/nologin puppet-ca
+$ sudo install -m 0755 openvox-ca openvox-ca-ctl /usr/local/bin/
 $ sudo install -m 0644 openvox-ca.service /etc/systemd/system/
 $ sudo systemctl daemon-reload
 $ sudo systemctl enable --now openvox-ca.service
 ```
 
 The unit expects the binary at `/usr/local/bin/openvox-ca` and its configuration at `/etc/puppet-ca/config.yaml`. See [configuring the server](configuration.md).
+
+**Set `cadir` to `/var/lib/puppet-ca`** (the `StateDirectory=` the unit creates), or the CA will not be able to write: `ProtectSystem=strict` makes the rest of the filesystem read-only. To keep an existing directory instead — a CA migrated from OpenVox/Puppet Server usually lives in `/etc/puppetlabs/puppet/ssl/ca` — uncomment the `ReadWritePaths=` line in the unit and point it there.
 
 ### The two settings you must not drop
 
@@ -31,7 +34,7 @@ NotifyAccess=all
 
 `NotifyAccess=all` is required, not optional hardening slack. In the default deployment `openvox-ca` runs as three processes — a launcher supervising an isolated signer that holds the CA key, and a frontend that serves the API (see [CA key security](ca-key-security.md)) — and readiness is reported by the **frontend child**, because only it knows when the listener is accepting. systemd's default (`NotifyAccess=main`) accepts notifications only from the launcher, silently discards the frontend's, and the start job then fails on `TimeoutStartSec`.
 
-The notification socket is withheld from the signer process, so even under `NotifyAccess=all` only the launcher and the frontend can notify.
+The notification socket is withheld from the signer process, so it never notifies in normal operation. Treat that as hygiene rather than as an access control: `NotifyAccess=all` authorises every process in the unit's cgroup, and the socket path is well known, so the isolation is defence in depth — the residual cost of the multi-process design.
 
 Running with `--single-process` collapses this to one process and `NotifyAccess=main` is then sufficient — but the shipped unit keeps `all` so it works either way.
 
@@ -72,7 +75,7 @@ Everything in the line is read from memory. Certificate counts are deliberately 
 | `--tls-cert` / `--tls-key` | The CA's own server certificate expires like any other and has to be renewed |
 | `--puppet-server-file` | A compile server is added, or a decommissioned one must stop being an admin |
 
-Connections in flight keep the certificate they negotiated with; the next TLS handshake picks up the new one. The allow list is swapped atomically with respect to in-flight requests: each request sees either the whole old list or the whole new one.
+Connections in flight keep the certificate they negotiated with; the next TLS handshake picks up the new one. The allow list is swapped atomically with respect to in-flight requests: each request sees either the whole old list or the whole new one, and any CN that gained or lost admin rights is named in the log so the change is auditable.
 
 Everything else — listen address, storage backend, CA key custody, CA properties, autosign configuration — needs a restart. Those are bound to state established at startup, and re-reading them behind your back would be worse than telling you to restart.
 
@@ -101,9 +104,11 @@ WatchdogSec=60s
 Restart=on-failure
 ```
 
-The keep-alive is sent by the frontend process on a timer at half the configured interval, so it stops arriving if the process serving the API wedges — on an unresponsive storage backend, say — and systemd restarts the service. A launcher-side ping would only ever prove the supervisor was alive, which it always is.
+The keep-alive is sent by the frontend process on a timer at half the configured interval — not by the launcher, which would only ever prove the supervisor was alive.
 
-Remove `WatchdogSec=` to disable it. Note that a watchdog restart is a hard kill: it does not drain in-flight requests.
+Be clear about what this does and does not catch. It stops arriving if the frontend dies outright, if the Go runtime deadlocks, or if the heartbeat goroutine itself stalls — which includes a storage operation wedged while holding the CA's write lock, since composing the status text takes the matching read lock. It keeps arriving quite happily if the API is unresponsive for a reason that leaves that goroutine scheduling normally, such as request handlers blocked on a read-only backend call. For genuine end-to-end liveness, point a probe at `/healthz/ready` as well; the watchdog is a backstop, not a health check.
+
+Remove `WatchdogSec=` to disable it. Note that a watchdog restart is a hard kill: it does not drain in-flight requests, and a `WatchdogSec=` under two seconds is reported in the log and clamped rather than honoured.
 
 ## Shutdown
 
@@ -118,6 +123,8 @@ Status: "Shutting down: draining connections (up to 25s)"
 ## Hardening
 
 The shipped unit runs the CA as a dedicated `puppet-ca` user with `ProtectSystem=strict`, an empty capability set (the API's port 8140 and the exporter's 9140 are both unprivileged), and a `@system-service` syscall filter. `RestrictAddressFamilies` includes `AF_UNIX`, which is needed for both the notification socket and the launcher's socketpair to the isolated signer.
+
+`LimitCORE=0` is deliberate and worth keeping: the signer holds the decrypted CA private key in memory for its whole life, so a core dump would write that key to `/var/lib/systemd/coredump` — undoing [key encryption at rest](ca-key-security.md) for anything that ships crash dumps off the host.
 
 If you point `cadir` somewhere other than the `StateDirectory=puppet-ca` the unit creates, add that path to `ReadWritePaths=`. The same applies to `--logfile`, though logging to stderr and letting journald handle it is simpler.
 

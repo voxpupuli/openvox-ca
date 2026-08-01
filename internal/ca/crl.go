@@ -169,9 +169,10 @@ type CRLSnapshot struct {
 	// Number is the CRL number (RFC 5280 §5.2.3), which increases by one on
 	// every re-sign.
 	Number *big.Int
-	// ThisUpdate and NextUpdate bound the CRL's validity window. A NextUpdate
-	// in the past means clients are being served a stale CRL.
-	ThisUpdate time.Time
+	// NextUpdate bounds the CRL's validity window; a NextUpdate in the past
+	// means clients are being served a stale CRL. ThisUpdate is deliberately
+	// not carried: no caller needs it, and the Prometheus collector reads its
+	// own copy straight from storage.
 	NextUpdate time.Time
 	// Revoked is the number of certificates listed on the CRL.
 	Revoked int
@@ -188,7 +189,6 @@ func (c *CA) CRLSnapshot() (CRLSnapshot, bool) {
 		return CRLSnapshot{}, false
 	}
 	snap := CRLSnapshot{
-		ThisUpdate: c.cachedCRL.ThisUpdate,
 		NextUpdate: c.cachedCRL.NextUpdate,
 		Revoked:    len(c.cachedCRL.RevokedCertificateEntries),
 	}

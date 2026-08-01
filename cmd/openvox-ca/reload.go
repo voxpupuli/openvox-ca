@@ -24,10 +24,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/signal"
+	"sort"
 	"strings"
 	"sync/atomic"
-	"syscall"
 
 	"github.com/voxpupuli/openvox-ca/internal/api"
 	"github.com/voxpupuli/openvox-ca/internal/sdnotify"
@@ -151,14 +150,43 @@ func (r *configReloader) reload() error {
 		if err != nil {
 			errs = append(errs, err)
 		} else {
-			r.auth.SetAllowList(allowList)
-			slog.Info("Reloaded admin allow list", "admin_cns", len(allowList))
+			// SECURITY: log which CNs gained or lost admin authority, not just
+			// how many there are. A count alone cannot distinguish "the list is
+			// unchanged" from "one compile server was swapped for another", and
+			// this is the only moment the change is observable — the file can be
+			// rewritten again straight afterwards. CNs are hostnames, not secrets.
+			// NIST 800-53: AU-2 (Event Logging), AC-6 (Least Privilege)
+			added, removed := diffAllowList(r.auth.SetAllowList(allowList), allowList)
+			if len(added) > 0 || len(removed) > 0 {
+				slog.Info("Reloaded admin allow list",
+					"added", added, "removed", removed, "admin_cns", len(allowList))
+			} else {
+				slog.Info("Reloaded admin allow list, unchanged", "admin_cns", len(allowList))
+			}
 		}
 	}
 
 	err := errors.Join(errs...)
 	r.failed.Store(err != nil)
 	return err
+}
+
+// diffAllowList reports which CNs the replacement adds and which it withdraws,
+// each sorted so the log line is stable and diffable.
+func diffAllowList(old, new map[string]bool) (added, removed []string) {
+	for cn := range new {
+		if !old[cn] {
+			added = append(added, cn)
+		}
+	}
+	for cn := range old {
+		if !new[cn] {
+			removed = append(removed, cn)
+		}
+	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	return added, removed
 }
 
 // buildAdminAllowList merges the comma-separated CN list from the running
@@ -182,10 +210,19 @@ func buildAdminAllowList(staticCNs, cnFile string) (map[string]bool, error) {
 	return allowList, nil
 }
 
-// runReloadWatcher applies a configuration reload on every SIGHUP until ctx is
-// cancelled. It also reports the reload to the service manager, which is what
-// makes `systemctl reload` (Type=notify-reload) wait for the new configuration
-// to be in effect rather than returning the instant the signal is delivered.
+// runReloadWatcher applies a configuration reload on every signal delivered to
+// hupCh until ctx is cancelled. It also reports the reload to the service
+// manager, which is what makes `systemctl reload` (Type=notify-reload) wait for
+// the new configuration to be in effect rather than returning the instant the
+// signal is delivered.
+//
+// hupCh is registered by the caller, before the startup work this watcher's
+// configuration depends on. That ordering matters: SIGHUP's default disposition
+// is to terminate, so a reload arriving during a slow start would otherwise kill
+// the process instead of reloading it, and a reload racing the READY=1 that
+// releases a queued reload job would fall into the gap between announcing
+// readiness and this goroutine being scheduled. A signal that arrives before
+// this loop runs waits in the channel buffer and is applied on entry.
 //
 // A reload that fails is not fatal: the previous configuration is still in
 // place and still correct, so the server keeps serving. The failure is logged,
@@ -193,16 +230,12 @@ func buildAdminAllowList(staticCNs, cnFile string) (map[string]bool, error) {
 // succeeds. READY=1 is sent either way — the protocol requires it to close out
 // RELOADING=1, and withholding it would only hang the reload job without
 // telling the operator anything the logs do not.
-func runReloadWatcher(ctx context.Context, n *sdnotify.Notifier, r *configReloader, status func() string) {
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGHUP)
-	defer signal.Stop(sigCh)
-
+func runReloadWatcher(ctx context.Context, hupCh <-chan os.Signal, n *sdnotify.Notifier, r *configReloader, status func() string) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-sigCh:
+		case <-hupCh:
 			slog.Info("Reloading configuration (SIGHUP)")
 			n.Reloading("Reloading TLS material and the admin allow list")
 

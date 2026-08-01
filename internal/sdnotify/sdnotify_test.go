@@ -22,8 +22,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -217,10 +220,32 @@ var _ = Describe("Notifier", func() {
 				Expect(mgr.next()).To(Equal("STATUS=a b c\n"))
 			})
 
+			It("folds every other control character too", func() {
+				// Only the newline can break framing, but the status text is
+				// relayed to a terminal by `systemctl status`, so escape
+				// sequences should not survive either.
+				n.Status("before\x1b[31mred\tafter")
+				Expect(mgr.next()).To(Equal("STATUS=before [31mred after\n"))
+			})
+
 			It("truncates an over-long status", func() {
 				n.Status(strings.Repeat("x", 500))
 				msg := mgr.next()
 				Expect(msg).To(Equal("STATUS=" + strings.Repeat("x", 256) + "\n"))
+			})
+
+			It("does not split a multi-byte character at the truncation point", func() {
+				// The cap counts bytes, so a certificate subject containing an
+				// IDN domain or a non-English organisation name can put a rune
+				// astride the boundary. Emitting half of it would be invalid
+				// UTF-8 in the journal.
+				status := strings.Repeat("x", 255) + "\u20ac" + strings.Repeat("y", 10)
+				n.Status(status)
+
+				msg := mgr.next()
+				value := strings.TrimSuffix(strings.TrimPrefix(msg, "STATUS="), "\n")
+				Expect(utf8.ValidString(value)).To(BeTrue(), "truncated status must stay valid UTF-8")
+				Expect(value).To(Equal(strings.Repeat("x", 255)), "the straddling rune is dropped, not halved")
 			})
 		})
 	})
@@ -239,7 +264,7 @@ var _ = Describe("Notifier", func() {
 
 			Expect(n.WatchdogInterval()).To(Equal(30 * time.Second))
 			n.Watchdog()
-			Expect(mgr.next()).To(Equal("WATCHDOG=1"))
+			Expect(mgr.next()).To(Equal("WATCHDOG=1\n"))
 		})
 
 		It("keeps feeding the watchdog independently of WATCHDOG_PID", func() {
@@ -272,6 +297,96 @@ var _ = Describe("Notifier", func() {
 			// (or negative) interval, causing a keep-alive storm.
 			Entry("beyond time.Duration's range", "18446744073709551615"),
 		)
+
+		It("accepts the largest interval that still fits time.Duration", func() {
+			// Guards the boundary of the overflow check itself: one microsecond
+			// more must be rejected, this value must not be.
+			const maxUsec = uint64(1<<63-1) / uint64(time.Microsecond)
+			setEnv("WATCHDOG_USEC", strconv.FormatUint(maxUsec, 10))
+			n := sdnotify.New()
+			DeferCleanup(func() { Expect(n.Close()).To(Succeed()) })
+
+			Expect(n.WatchdogInterval()).To(Equal(time.Duration(maxUsec) * time.Microsecond))
+		})
+
+		It("rejects one microsecond beyond that", func() {
+			const maxUsec = uint64(1<<63-1) / uint64(time.Microsecond)
+			setEnv("WATCHDOG_USEC", strconv.FormatUint(maxUsec+1, 10))
+			n := sdnotify.New()
+			DeferCleanup(func() { Expect(n.Close()).To(Succeed()) })
+
+			Expect(n.WatchdogInterval()).To(BeZero())
+		})
+	})
+
+	Describe("an abstract-namespace socket", func() {
+		It("connects to a @-prefixed NOTIFY_SOCKET", func() {
+			// sd_notify(3) spells abstract sockets with a leading '@' that the
+			// service has to translate to a NUL byte in sun_path. Only Linux
+			// has the abstract namespace, and only a real round-trip proves the
+			// translation lands on the right socket.
+			if runtime.GOOS != "linux" {
+				Skip("the abstract socket namespace is Linux-only")
+			}
+
+			name := "@openvox-ca-sdnotify-test-" + strconv.Itoa(os.Getpid())
+			conn, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: name, Net: "unixgram"})
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { conn.Close() })
+
+			received := make(chan string, 1)
+			go func() {
+				buf := make([]byte, 4096)
+				n, err := conn.Read(buf)
+				if err != nil {
+					return
+				}
+				received <- string(buf[:n])
+			}()
+
+			setEnv("NOTIFY_SOCKET", name)
+			n := sdnotify.New()
+			DeferCleanup(func() { Expect(n.Close()).To(Succeed()) })
+
+			Expect(n.Enabled()).To(BeTrue())
+			n.Ready("abstract")
+			Eventually(received).Should(Receive(Equal("READY=1\nSTATUS=abstract\n")))
+		})
+	})
+
+	Describe("concurrent use", func() {
+		It("tolerates notifications racing a close", func() {
+			// This is the production shape: the heartbeat and reload goroutines
+			// are never joined before the frontend's deferred Close, so both
+			// sides of that race have to be synchronised. Run with -race.
+			newFakeManager()
+			n := sdnotify.New()
+			Expect(n.Enabled()).To(BeTrue())
+
+			var wg sync.WaitGroup
+			for i := 0; i < 4; i++ {
+				wg.Add(1)
+				go func() {
+					defer GinkgoRecover()
+					defer wg.Done()
+					for j := 0; j < 50; j++ {
+						n.Status("still here")
+						n.Watchdog()
+						n.Enabled()
+					}
+				}()
+			}
+
+			wg.Add(1)
+			go func() {
+				defer GinkgoRecover()
+				defer wg.Done()
+				Expect(n.Close()).To(Succeed())
+			}()
+
+			wg.Wait()
+			Expect(n.Enabled()).To(BeFalse())
+		})
 	})
 
 	Describe("a nil Notifier", func() {

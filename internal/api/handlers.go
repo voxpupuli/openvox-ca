@@ -76,17 +76,23 @@ func (c *AuthConfig) IsAdminCN(cn string) bool {
 	return c.AllowList[cn]
 }
 
-// SetAllowList replaces the admin allow list. The caller must not retain or
-// mutate the map afterwards; ownership passes to the AuthConfig.
+// SetAllowList replaces the admin allow list and returns the list it replaced,
+// so the caller can log exactly which CNs gained or lost admin authority. The
+// caller must not retain or mutate the map it passes in; ownership passes to
+// the AuthConfig. The returned map is no longer consulted and is the caller's.
 //
 // The replacement is atomic with respect to in-flight requests: each request
 // takes the read lock once, so it sees either the whole old list or the whole
 // new one — never a half-applied update in which a revoked CN is still an
-// admin and a newly added one is not yet.
-func (c *AuthConfig) SetAllowList(allowList map[string]bool) {
+// admin and a newly added one is not yet. Returning the previous list from
+// under the same write lock keeps the audit record consistent with the swap;
+// reading it separately beforehand would race a concurrent reload.
+func (c *AuthConfig) SetAllowList(allowList map[string]bool) map[string]bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	previous := c.AllowList
 	c.AllowList = allowList
+	return previous
 }
 
 type Server struct {

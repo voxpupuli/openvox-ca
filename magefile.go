@@ -217,6 +217,15 @@ func (Build) Dist() error {
 	const unitFile = "openvox-ca.service"
 	unitSrc := filepath.Join("packaging", "systemd", unitFile)
 
+	// Archive contents, with the mode each entry must extract as. Stating the
+	// modes here rather than reading them back off the staged files keeps the
+	// tarball identical whatever umask the release is built under.
+	archiveFiles := []archiveEntry{
+		{name: bins[0], mode: 0755},
+		{name: bins[1], mode: 0755},
+		{name: unitFile, mode: 0644},
+	}
+
 	var checksums []string
 	for _, v := range variants {
 		fmt.Printf("Building %s...\n", v.name)
@@ -241,7 +250,7 @@ func (Build) Dist() error {
 				return "", fmt.Errorf("stage %s for %s: %w", unitFile, v.name, err)
 			}
 
-			if err := createTarGz(archive, tmpDir, append(append([]string{}, bins...), unitFile)); err != nil {
+			if err := createTarGz(archive, tmpDir, archiveFiles); err != nil {
 				return "", fmt.Errorf("archive %s: %w", v.name, err)
 			}
 			return sha256File(archive)
@@ -1008,7 +1017,16 @@ func runComposeWithSpinner(extraEnv map[string]string, spinMsg string, args ...s
 	return cmdErr
 }
 
-func createTarGz(dst, srcDir string, files []string) (retErr error) {
+// archiveEntry is one file in a release tarball, with the permissions it must
+// extract as. The archive mixes executables with plain data (the systemd unit),
+// and neither the build host's umask nor a single hard-coded mode gets both
+// right.
+type archiveEntry struct {
+	name string
+	mode int64
+}
+
+func createTarGz(dst, srcDir string, files []archiveEntry) (retErr error) {
 	f, err := os.Create(dst)
 	if err != nil {
 		return err
@@ -1028,18 +1046,15 @@ func createTarGz(dst, srcDir string, files []string) (retErr error) {
 		}
 	}()
 
-	for _, name := range files {
-		src := filepath.Join(srcDir, name)
+	for _, f := range files {
+		src := filepath.Join(srcDir, f.name)
 		fi, err := os.Stat(src)
 		if err != nil {
 			return err
 		}
-		// Take the mode from the staged file rather than hard-coding 0755:
-		// the archive carries both executables and plain data files (the
-		// systemd unit), and a unit file installed as executable is wrong.
 		if err := tw.WriteHeader(&tar.Header{
-			Name: name,
-			Mode: int64(fi.Mode().Perm()),
+			Name: f.name,
+			Mode: f.mode,
 			Size: fi.Size(),
 		}); err != nil {
 			return err

@@ -183,7 +183,6 @@ var _ = Describe("CA CRL reissuance", func() {
 			snap, ok := myCA.CRLSnapshot()
 			Expect(ok).To(BeTrue())
 			Expect(snap.Number).To(Equal(stored.Number))
-			Expect(snap.ThisUpdate).To(BeTemporally("==", stored.ThisUpdate))
 			Expect(snap.NextUpdate).To(BeTemporally("==", stored.NextUpdate))
 			Expect(snap.Revoked).To(Equal(len(stored.RevokedCertificateEntries)))
 		})

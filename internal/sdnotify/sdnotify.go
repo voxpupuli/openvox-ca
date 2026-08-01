@@ -35,7 +35,6 @@
 package sdnotify
 
 import (
-	"fmt"
 	"log/slog"
 	"net"
 	"os"
@@ -43,6 +42,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 // maxStatusLen bounds the STATUS= text. systemd shows the status in
@@ -55,10 +55,11 @@ const maxStatusLen = 256
 // named by $NOTIFY_SOCKET. The zero value and a nil *Notifier are both valid
 // and inert, so callers never need to guard their calls.
 type Notifier struct {
-	// mu serialises writes to conn. Datagram writes are atomic per message,
-	// but the heartbeat goroutine and the shutdown path can notify
-	// concurrently, and Go's net package requires no external locking only for
-	// the write itself — the lock also keeps close/write ordering sane.
+	// mu guards conn, and is held for every read of it (Enabled, send) as well
+	// as the write in Close. Datagram writes are atomic per message, but the
+	// heartbeat goroutine and the shutdown path notify concurrently while a
+	// deferred Close can land at any time, so both sides of that race have to
+	// take the lock.
 	mu   sync.Mutex
 	conn *net.UnixConn
 
@@ -69,8 +70,8 @@ type Notifier struct {
 
 // New returns a Notifier for the current environment. When $NOTIFY_SOCKET is
 // unset — or names a socket that cannot be reached — the returned Notifier is
-// inert; the error is logged at debug level and never returned, because the
-// inability to talk to a service manager must not stop the CA from serving.
+// inert; the error is logged and never returned, because the inability to talk
+// to a service manager must not stop the CA from serving.
 //
 // The connection is established once and held for the process lifetime rather
 // than dialled per message, so the periodic watchdog keep-alive does not churn
@@ -90,7 +91,12 @@ func New() *Notifier {
 
 	conn, err := net.DialUnix("unixgram", nil, &net.UnixAddr{Name: addr, Net: "unixgram"})
 	if err != nil {
-		slog.Debug("Service manager notifications disabled: cannot connect to NOTIFY_SOCKET",
+		// Warn, not Debug: $NOTIFY_SOCKET being set means a service manager is
+		// expecting notifications, so failing to reach it is a real problem —
+		// the unit will sit there until TimeoutStartSec with no READY=1. This
+		// runs before the configured logger is installed, so a lower level
+		// could not be turned up by the operator even with --verbosity.
+		slog.Warn("Service manager notifications disabled: cannot connect to NOTIFY_SOCKET",
 			"socket", os.Getenv("NOTIFY_SOCKET"), "error", err)
 		return &Notifier{}
 	}
@@ -103,8 +109,18 @@ func New() *Notifier {
 // Enabled reports whether notifications are actually going anywhere, i.e.
 // whether the process was started by a service manager that asked to be
 // notified.
+//
+// It takes the lock: Close can run concurrently with the heartbeat and reload
+// goroutines (neither is joined before the deferred Close in the frontend), so
+// reading conn unsynchronised would be a data race even though the value it
+// races with is only ever nil.
 func (n *Notifier) Enabled() bool {
-	return n != nil && n.conn != nil
+	if n == nil {
+		return false
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.conn != nil
 }
 
 // WatchdogInterval returns the WatchdogSec= interval configured for the unit,
@@ -164,7 +180,7 @@ func (n *Notifier) Watchdog() {
 	if n.WatchdogInterval() == 0 {
 		return
 	}
-	n.send("WATCHDOG=1")
+	n.send(assignments("WATCHDOG=1"))
 }
 
 // Close releases the notification socket. Further calls are no-ops.
@@ -186,12 +202,12 @@ func (n *Notifier) Close() error {
 // dropped: a service manager that has gone away, or a full socket buffer, is
 // not a reason to disturb the CA.
 func (n *Notifier) send(msg string) {
-	if !n.Enabled() || msg == "" {
+	if n == nil || msg == "" {
 		return
 	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if n.conn == nil { // closed between the Enabled check and the lock
+	if n.conn == nil { // never connected, or closed while this call was queued
 		return
 	}
 	if _, err := n.conn.Write([]byte(msg)); err != nil {
@@ -222,14 +238,17 @@ func assignments(fields ...string) string {
 // would terminate the assignment and let the remainder be parsed as further
 // protocol fields — for example injecting READY=1 or MAINPID=. Every control
 // character is therefore folded to a space before the value is sent, and the
-// result is truncated to maxStatusLen.
+// result is truncated to maxStatusLen. The fold is deliberately wider than the
+// protocol needs: only the newline can break framing, but the status text is
+// relayed to a terminal by `systemctl status`, so escape sequences are stripped
+// too rather than left for the journal to pass through.
 // NIST 800-53: SI-10 (Information Input Validation)
 func statusLine(status string) string {
 	if status == "" {
 		return ""
 	}
 	clean := strings.Map(func(r rune) rune {
-		if r == '\n' || r == '\r' || r == 0 {
+		if unicode.IsControl(r) {
 			return ' '
 		}
 		return r
@@ -269,12 +288,4 @@ func watchdogIntervalFromEnv() time.Duration {
 		return 0
 	}
 	return time.Duration(usec) * time.Microsecond
-}
-
-// String makes a Notifier readable in log/debug output.
-func (n *Notifier) String() string {
-	if !n.Enabled() {
-		return "sdnotify(disabled)"
-	}
-	return fmt.Sprintf("sdnotify(socket=%s, watchdog=%s)", os.Getenv("NOTIFY_SOCKET"), n.watchdog)
 }

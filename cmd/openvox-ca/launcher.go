@@ -77,8 +77,13 @@ const (
 // deliberately comes from the frontend child instead, since only it knows when
 // the listener is actually accepting — which is why units must set
 // NotifyAccess=all (see docs/systemd.md).
+//
+// hupCh delivers reload requests, which the service manager sends to this
+// process because it is the unit's main PID. It is registered by the caller
+// before any startup work begins, so a reload arriving early is queued rather
+// than fatal — SIGHUP's default disposition would otherwise kill the launcher.
 // NIST 800-53: SC-3 (Security Function Isolation), SC-4 (Information in Shared System Resources)
-func runLauncher(drain time.Duration, notify *sdnotify.Notifier) error {
+func runLauncher(drain time.Duration, notify *sdnotify.Notifier, hupCh <-chan os.Signal) error {
 	gracefulShutdownTimeout := drain + launcherShutdownHeadroom
 
 	// Create the socketpair for signer ↔ frontend communication.
@@ -169,14 +174,6 @@ func runLauncher(drain time.Duration, notify *sdnotify.Notifier) error {
 	sigCh := make(chan os.Signal, 2)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
-	// Reload requests arrive here because the service manager signals the
-	// unit's main PID, but the configuration they affect (the TLS keypair, the
-	// admin allow list) belongs to the frontend, so they are forwarded to it.
-	// Registering the handler also stops SIGHUP from doing what it does by
-	// default, which is kill this process.
-	hupCh := make(chan os.Signal, 1)
-	signal.Notify(hupCh, syscall.SIGHUP)
-
 	// Wait for either child to exit.
 	type childResult struct {
 		name string
@@ -201,6 +198,9 @@ func runLauncher(drain time.Duration, notify *sdnotify.Notifier) error {
 	for {
 		select {
 		case <-hupCh:
+			// The configuration a reload affects (the TLS keypair, the admin
+			// allow list) belongs to the frontend, so the signal is forwarded
+			// there rather than acted on here.
 			slog.Info("Forwarding reload signal to the frontend process")
 			frontendCmd.Process.Signal(syscall.SIGHUP)
 			continue
