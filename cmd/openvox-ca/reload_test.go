@@ -18,6 +18,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -25,6 +26,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"log/slog"
 	"math/big"
 	"os"
 	"os/signal"
@@ -250,6 +252,24 @@ var _ = Describe("Configuration reloading", func() {
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("TLS cert/key"))
 		Expect(err.Error()).To(ContainSubstring("puppet-server file"))
+	})
+
+	It("logs the CNs that a real reload granted and withdrew", func() {
+		// Exercised through the live call site, not just diffAllowList's own
+		// arguments: transposing the two would still leave the allow list
+		// correct (so IsAdminCN specs stay green) while attributing every
+		// grant as a withdrawal in the security audit log.
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+		defer slog.SetDefault(orig)
+
+		Expect(os.WriteFile(cnFile, []byte("compile-2.example.com\n"), 0600)).To(Succeed())
+		Expect(reloader.reload()).To(Succeed())
+
+		logged := buf.String()
+		Expect(logged).To(ContainSubstring("added=[compile-2.example.com]"))
+		Expect(logged).To(ContainSubstring("removed=[compile-1.example.com]"))
 	})
 
 	It("names the CNs that gained and lost admin access", func() {

@@ -35,13 +35,16 @@ import (
 // costs one datagram.
 const defaultStatusRefresh = time.Minute
 
-// minHeartbeat floors the derived heartbeat interval so a pathologically short
-// WatchdogSec= cannot have the CA spinning on a ticker. It is well under a
-// second because the floor must never exceed the deadline it is beating: at
-// WatchdogSec=1s a one-second floor would send exactly one keep-alive per
-// interval and the service manager would kill the CA on the first tick that
-// drifted.
+// minHeartbeat is the interval below which a WatchdogSec= is reported as
+// suspiciously short. It is not a hard floor: clamping to it would mean
+// returning an interval longer than the deadline it feeds, which guarantees the
+// kill it exists to prevent. See heartbeatInterval.
 const minHeartbeat = 100 * time.Millisecond
+
+// absoluteMinHeartbeat bounds the ticker for a WatchdogSec= so short that even
+// half of it is sub-millisecond. Nobody configures this deliberately; the point
+// is only that the CA neither spins nor silently misses the deadline.
+const absoluteMinHeartbeat = 10 * time.Millisecond
 
 // statusReport is the state summarised into the service manager's status text.
 // It is captured as plain values so the rendering below is a pure function of
@@ -142,15 +145,18 @@ func heartbeatInterval(n *sdnotify.Notifier) time.Duration {
 	if watchdog <= 0 {
 		return defaultStatusRefresh
 	}
-	if half := watchdog / 2; half > minHeartbeat {
+	half := watchdog / 2
+	if half >= minHeartbeat {
 		return half
 	}
-	// Below 2*minHeartbeat the floor takes over. Say so: a WatchdogSec= this
-	// short is almost always a typo, and the symptom otherwise is a service
-	// that systemd kills and restarts with nothing to explain why.
-	slog.Warn("WatchdogSec is very short; the CA will feed the watchdog at the minimum interval",
-		"watchdog", watchdog, "heartbeat", minHeartbeat)
-	return minHeartbeat
+	// Half the deadline is still the right answer — an interval longer than the
+	// deadline would guarantee the kill this is meant to prevent — but a
+	// WatchdogSec= this short is almost always a typo, and the symptom
+	// otherwise is a service systemd kills and restarts with nothing to
+	// explain why.
+	slog.Warn("WatchdogSec is very short; the CA will feed the watchdog at half that interval",
+		"watchdog", watchdog, "heartbeat", max(half, absoluteMinHeartbeat))
+	return max(half, absoluteMinHeartbeat)
 }
 
 // runNotifyHeartbeat keeps the service manager's view of the CA current: it
@@ -158,10 +164,13 @@ func heartbeatInterval(n *sdnotify.Notifier) time.Duration {
 // text so its countdowns do not go stale. It returns when ctx is cancelled.
 //
 // The keep-alive is deliberately sent from the process that serves the API
-// rather than the launcher, so a frontend wedged on a stuck backend stops
-// feeding the watchdog and gets restarted — which is the failure the watchdog
-// exists to catch. A launcher-side ping would only prove the supervisor is
-// alive, which it always is.
+// rather than the launcher, which would only ever prove the supervisor is
+// alive. Be precise about what that buys: it proves this process and this
+// goroutine are still scheduling, so it catches death, a runtime deadlock, and
+// a stall behind the CA's write lock (composing the status text takes the
+// matching read lock). It does not catch an API that is unresponsive for a
+// reason that leaves this goroutine running — handlers blocked on a read-only
+// backend call, say. That is what /healthz/ready is for; see docs/systemd.md.
 func runNotifyHeartbeat(ctx context.Context, n *sdnotify.Notifier, interval time.Duration, status func() string) {
 	if !n.Enabled() {
 		return

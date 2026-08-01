@@ -83,8 +83,11 @@ func New() *Notifier {
 	}
 
 	// A leading '@' selects the abstract namespace, which is spelled with a
-	// leading NUL byte in sun_path. sd_notify(3) mandates this translation;
-	// the socket is otherwise a filesystem path (typically /run/systemd/notify).
+	// leading NUL byte in sun_path; the socket is otherwise a filesystem path
+	// (typically /run/systemd/notify). Go's syscall layer happens to accept
+	// either spelling, so this is belt and braces — but sd_notify(3) states the
+	// translation as the service's job, and relying on a convenience of the
+	// standard library for a protocol requirement is how it breaks quietly.
 	if strings.HasPrefix(addr, "@") {
 		addr = "\x00" + addr[1:]
 	}

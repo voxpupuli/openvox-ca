@@ -321,10 +321,11 @@ var _ = Describe("Notifier", func() {
 
 	Describe("an abstract-namespace socket", func() {
 		It("connects to a @-prefixed NOTIFY_SOCKET", func() {
-			// sd_notify(3) spells abstract sockets with a leading '@' that the
-			// service has to translate to a NUL byte in sun_path. Only Linux
-			// has the abstract namespace, and only a real round-trip proves the
-			// translation lands on the right socket.
+			// sd_notify(3) spells abstract sockets with a leading '@'. This
+			// proves an @-prefixed NOTIFY_SOCKET connects and round-trips end
+			// to end; it cannot single out New's own '@'-to-NUL translation,
+			// because Go's syscall layer accepts either spelling. Only Linux
+			// has the abstract namespace at all.
 			if runtime.GOOS != "linux" {
 				Skip("the abstract socket namespace is Linux-only")
 			}
@@ -358,7 +359,8 @@ var _ = Describe("Notifier", func() {
 		It("tolerates notifications racing a close", func() {
 			// This is the production shape: the heartbeat and reload goroutines
 			// are never joined before the frontend's deferred Close, so both
-			// sides of that race have to be synchronised. Run with -race.
+			// sides of that race have to be synchronised. This spec only fails
+			// under -race, which mage test:unit passes (see magefile.go).
 			newFakeManager()
 			n := sdnotify.New()
 			Expect(n.Enabled()).To(BeTrue())

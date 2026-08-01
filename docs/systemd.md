@@ -108,7 +108,7 @@ The keep-alive is sent by the frontend process on a timer at half the configured
 
 Be clear about what this does and does not catch. It stops arriving if the frontend dies outright, if the Go runtime deadlocks, or if the heartbeat goroutine itself stalls — which includes a storage operation wedged while holding the CA's write lock, since composing the status text takes the matching read lock. It keeps arriving quite happily if the API is unresponsive for a reason that leaves that goroutine scheduling normally, such as request handlers blocked on a read-only backend call. For genuine end-to-end liveness, point a probe at `/healthz/ready` as well; the watchdog is a backstop, not a health check.
 
-Remove `WatchdogSec=` to disable it. Note that a watchdog restart is a hard kill: it does not drain in-flight requests, and a `WatchdogSec=` under two seconds is reported in the log and clamped rather than honoured.
+Remove `WatchdogSec=` to disable it. Note that a watchdog restart is a hard kill: it does not drain in-flight requests, and a `WatchdogSec=` short enough that half of it falls below the 100ms heartbeat floor (so, under 200ms) is reported in the log and fed at that floor instead.
 
 ## Shutdown
 
@@ -126,7 +126,7 @@ The shipped unit runs the CA as a dedicated `puppet-ca` user with `ProtectSystem
 
 `LimitCORE=0` is deliberate and worth keeping: the signer holds the decrypted CA private key in memory for its whole life, so a core dump would write that key to `/var/lib/systemd/coredump` — undoing [key encryption at rest](ca-key-security.md) for anything that ships crash dumps off the host.
 
-If you point `cadir` somewhere other than the `StateDirectory=puppet-ca` the unit creates, add that path to `ReadWritePaths=`. The same applies to `--logfile`, though logging to stderr and letting journald handle it is simpler.
+`ProtectSystem=strict` is the directive most likely to bite: see [installing the unit](#installing-the-unit) for the `cadir` / `ReadWritePaths=` choice it forces. The same applies to `--logfile`, though logging to stderr and letting journald handle it is simpler.
 
 Check your changes with:
 

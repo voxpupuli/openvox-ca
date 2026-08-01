@@ -219,12 +219,14 @@ func (Build) Dist() error {
 
 	// Archive contents, with the mode each entry must extract as. Stating the
 	// modes here rather than reading them back off the staged files keeps the
-	// tarball identical whatever umask the release is built under.
-	archiveFiles := []archiveEntry{
-		{name: bins[0], mode: 0755},
-		{name: bins[1], mode: 0755},
-		{name: unitFile, mode: 0644},
+	// tarball identical whatever umask the release is built under; deriving the
+	// executables from bins keeps the archive in step with what actually gets
+	// built.
+	archiveFiles := make([]archiveEntry, 0, len(bins)+1)
+	for _, b := range bins {
+		archiveFiles = append(archiveFiles, archiveEntry{name: b, mode: 0755})
 	}
+	archiveFiles = append(archiveFiles, archiveEntry{name: unitFile, mode: 0644})
 
 	var checksums []string
 	for _, v := range variants {
@@ -318,7 +320,12 @@ func (Test) Unit() error {
 		return err
 	}
 
-	testArgs := append([]string{"test", "-json", "-cover", "-coverprofile=coverage.out"}, pkgs...)
+	// -race is not optional here: the notification path (internal/sdnotify) is
+	// driven concurrently by the heartbeat, the reload watcher, and a deferred
+	// Close, and its locking is only verified by specs that fail exclusively
+	// under the race detector. It costs roughly 15% on the slowest package.
+	// It needs cgo, which is the default everywhere this runs.
+	testArgs := append([]string{"test", "-race", "-json", "-cover", "-coverprofile=coverage.out"}, pkgs...)
 	testCmd := exec.Command("go", testArgs...)
 	tparseCmd := exec.Command("go", "tool", "tparse", "-all")
 
@@ -1046,15 +1053,15 @@ func createTarGz(dst, srcDir string, files []archiveEntry) (retErr error) {
 		}
 	}()
 
-	for _, f := range files {
-		src := filepath.Join(srcDir, f.name)
+	for _, entry := range files {
+		src := filepath.Join(srcDir, entry.name)
 		fi, err := os.Stat(src)
 		if err != nil {
 			return err
 		}
 		if err := tw.WriteHeader(&tar.Header{
-			Name: f.name,
-			Mode: f.mode,
+			Name: entry.name,
+			Mode: entry.mode,
 			Size: fi.Size(),
 		}); err != nil {
 			return err

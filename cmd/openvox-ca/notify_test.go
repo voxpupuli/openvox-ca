@@ -194,27 +194,44 @@ var _ = Describe("Service manager heartbeat", func() {
 			Expect(heartbeatInterval(n)).To(Equal(15 * time.Second))
 		})
 
-		It("never beats faster than the floor", func() {
-			// A 10ms WatchdogSec would otherwise have the CA spinning.
-			startNotifyRecorder(map[string]string{"WATCHDOG_USEC": "10000"})
+		It("still halves a watchdog short enough to warn about", func() {
+			// Clamping up to a fixed floor here would return an interval longer
+			// than the deadline it feeds, guaranteeing the kill the watchdog
+			// exists to prevent. Half is still the right answer; the operator
+			// gets a warning instead.
+			startNotifyRecorder(map[string]string{"WATCHDOG_USEC": "150000"}) // 150ms
 			n := sdnotify.New()
 			DeferCleanup(func() { Expect(n.Close()).To(Succeed()) })
 
-			Expect(heartbeatInterval(n)).To(Equal(minHeartbeat))
+			Expect(heartbeatInterval(n)).To(Equal(75 * time.Millisecond))
 		})
 
-		It("keeps the floor below the shortest watchdog it will honour", func() {
-			// The floor must never exceed the deadline it is beating: at
-			// WatchdogSec=1s a one-second floor would send exactly one
-			// keep-alive per interval and systemd would kill the CA on the
-			// first tick that drifted.
-			startNotifyRecorder(map[string]string{"WATCHDOG_USEC": "1000000"})
+		It("stops shortening the ticker for an absurd watchdog", func() {
+			startNotifyRecorder(map[string]string{"WATCHDOG_USEC": "1000"}) // 1ms
 			n := sdnotify.New()
 			DeferCleanup(func() { Expect(n.Close()).To(Succeed()) })
 
-			Expect(heartbeatInterval(n)).To(Equal(500 * time.Millisecond))
-			Expect(heartbeatInterval(n)).To(BeNumerically("<", n.WatchdogInterval()))
+			Expect(heartbeatInterval(n)).To(Equal(absoluteMinHeartbeat))
 		})
+
+		DescribeTable("always beats strictly inside the deadline",
+			func(usec string) {
+				// The invariant that matters: whatever WatchdogSec is, the
+				// keep-alive must be sent more often than the deadline, or
+				// systemd kills a perfectly healthy CA.
+				startNotifyRecorder(map[string]string{"WATCHDOG_USEC": usec})
+				n := sdnotify.New()
+				DeferCleanup(func() { Expect(n.Close()).To(Succeed()) })
+
+				Expect(heartbeatInterval(n)).To(BeNumerically("<", n.WatchdogInterval()))
+			},
+			Entry("a minute", "60000000"),
+			Entry("two seconds", "2000000"),
+			Entry("one second", "1000000"),
+			Entry("200ms", "200000"),
+			Entry("150ms", "150000"),
+			Entry("30ms", "30000"),
+		)
 	})
 
 	Describe("runNotifyHeartbeat", func() {
