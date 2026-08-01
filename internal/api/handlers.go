@@ -1327,18 +1327,22 @@ func (s *Server) handlePostSign(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Request) {
 	// Renewal requires an authenticated client cert to establish identity.
+	// cn is the identity: it is compared against the CSR's subject below and is
+	// the name Renew issues for, so it must be the certificate's value. logCN is
+	// the display form for every line in this handler.
 	cn := clientCN(r)
 	if cn == "" {
 		http.Error(w, "client certificate required for renewal", http.StatusForbidden)
 		return
 	}
-	slog.Debug("POST certificate_renewal", "client", cn)
+	logCN := clientCNForLog(r)
+	slog.Debug("POST certificate_renewal", "client", logCN)
 
 	// SECURITY: Limit body to 1 MiB to prevent memory exhaustion.
 	// NIST 800-53: SC-5 (Denial-of-Service Protection)
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
-		slog.Error("read renewal body failed", "client", cn, "error", err)
+		slog.Error("read renewal body failed", "client", logCN, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -1420,7 +1424,7 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 			// agent holding one of our certificates reaches it, and the record it
 			// would forge is itself a security event.
 			slog.Warn("Renewal rejected: CN mismatch",
-				"client_cn", sanitiseForLog(cn),
+				"client_cn", logCN,
 				"csr_cn", sanitiseForLog(csr.Subject.CommonName))
 			http.Error(w, "CSR CN does not match authenticated client CN", http.StatusForbidden)
 			return
@@ -1485,7 +1489,8 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 }
 
 func (s *Server) handlePostSignAll(w http.ResponseWriter, r *http.Request) {
-	cn := clientCN(r)
+	// Display only -- nothing here compares or acts on the name.
+	cn := clientCNForLog(r)
 	slog.Debug("POST sign/all", "client", cn)
 
 	pending, err := s.CA.Storage.ListCSRs(r.Context())
@@ -1506,8 +1511,12 @@ func (s *Server) handlePostSignAll(w http.ResponseWriter, r *http.Request) {
 // --- Bulk clean ---
 
 func (s *Server) handlePutClean(w http.ResponseWriter, r *http.Request) {
+	// cn is the rate-limit identity; logCN is what may reach a log line. Both,
+	// because destructiveOps.Record must key on the name the client actually
+	// holds while nothing untrusted goes into a record verbatim.
 	cn := clientCN(r)
-	slog.Debug("PUT clean", "client", cn)
+	logCN := clientCNForLog(r)
+	slog.Debug("PUT clean", "client", logCN)
 
 	var body SignRequestBody
 	if !decodeJSONBody(w, r, &body) {
@@ -1518,10 +1527,10 @@ func (s *Server) handlePutClean(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Debug("Cleaning certificates", "count", len(body.Certnames), "subjects", body.Certnames, "client", cn)
+	slog.Debug("Cleaning certificates", "count", len(body.Certnames), "subjects", body.Certnames, "client", logCN)
 	result := s.CA.CleanMultiple(r.Context(), body.Certnames)
 	if cn != "" && s.destructiveOps != nil && s.destructiveOps.Record(cn) {
-		slog.Warn("High rate of destructive operations detected", "client", cn, "operation", "bulk-clean")
+		slog.Warn("High rate of destructive operations detected", "client", logCN, "operation", "bulk-clean")
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(result); err != nil {

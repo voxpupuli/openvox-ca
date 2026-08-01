@@ -660,7 +660,6 @@ var _ = Describe("refreshClientCRLs", func() {
 		twinB, twinBKey := mintCA("Twin CA", nil, nil)
 		Expect(twinA.RawSubject).To(Equal(twinB.RawSubject))
 		Expect(twinA.RawSubjectPublicKeyInfo).NotTo(Equal(twinB.RawSubjectPublicKeyInfo))
-		Expect(twinBKey).NotTo(BeNil())
 
 		cfg := &serverConfig{}
 		cfg.ClientCA = []config.ClientCA{{

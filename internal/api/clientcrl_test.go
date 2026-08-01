@@ -243,7 +243,7 @@ var _ = Describe("Client CRL checking", func() {
 		It("honours a CRL with no Authority Key Identifier, because matching is by signature", func() {
 			// Matching used to be by the CRL's own AKI against the issuer's SKI,
 			// which meant an issuer that omits the extension had its revocations
-			// silently ignored. RFC 5280 5.2.1 requires a conforming CRL issuer
+			// silently ignored. RFC 5280 §5.2.1 requires a conforming CRL issuer
 			// to include it, but not every issuer conforms, and a CRL whose
 			// signature verifies needs no field this CA does not read.
 			// Filing under the certificate that actually signed the CRL removes
