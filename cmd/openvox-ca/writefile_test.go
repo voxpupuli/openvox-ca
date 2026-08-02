@@ -52,10 +52,12 @@ var _ = Describe("Atomic file writers", func() {
 		Expect(info.Mode().Perm()).To(Equal(os.FileMode(0o600)))
 	})
 
-	It("sets the mode explicitly rather than inheriting the caller's umask", func() {
-		// Without the explicit Chmod, a umask of 077 would yield 0600 for the
-		// public path -- silently correct-looking on a developer's machine with
-		// the usual 022, and wrong wherever an operator's shell differs.
+	It("sets the mode explicitly rather than inheriting it", func() {
+		// os.CreateTemp creates at 0600 whatever the umask, so what the Chmod
+		// actually guards is inheritance from *that*, not from the shell: drop
+		// it and the public path stays 0600 under any umask. The hostile umask
+		// here is belt and braces -- it pins that neither source of inheritance
+		// wins over the explicit mode.
 		old := syscall.Umask(0o077)
 		defer syscall.Umask(old)
 

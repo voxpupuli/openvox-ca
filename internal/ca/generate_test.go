@@ -650,6 +650,29 @@ var _ = Describe("CA GenerateWithOptions replacement", func() {
 		Expect(revokedSerials()).To(HaveLen(before), "nothing may be revoked when the read fails")
 	})
 
+	It("emits the key before the revoke, not after it", func() {
+		// This ordering is the whole reason --force requires --key-out. Move
+		// the EmitKey call inside the lock -- anywhere after the revoke phase
+		// -- and every other spec still passes, while the outcome the design
+		// exists to prevent becomes reachable: the old certificate on the CRL,
+		// no replacement, and no key. Only a replacement with a failing EmitKey
+		// can tell the two orderings apart.
+		first, err := myCA.GenerateWithOptions(ctx, "emit-order-node", ca.GenerateOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		oldSerial := serialOf(first)
+
+		_, err = myCA.GenerateWithOptions(ctx, "emit-order-node", ca.GenerateOptions{
+			ReplaceExisting: true,
+			EmitKey:         func([]byte) error { return errors.New("no room on device") },
+		})
+		Expect(err).To(MatchError(ContainSubstring("no room on device")))
+
+		Expect(revokedSerials()).NotTo(ContainElement(oldSerial),
+			"a key the caller could not keep must not cost them the certificate they still have")
+		Expect(store.HasCert(ctx, "emit-order-node")).To(BeTrue(),
+			"the existing certificate must survive a failure that happened before the revoke")
+	})
+
 	It("reports the revoked-but-not-replaced state when issuance fails after the revoke", func() {
 		// The one irreversible outcome this design cannot rule out: the old
 		// certificate is on the CRL, which cannot be undone, and no replacement
