@@ -105,6 +105,17 @@ before a server exists.`,
 			closeLog := applySubcommandLogging(cfg, out)
 			defer closeLog()
 
+			// The frontend role proxies signing to an isolated signer and never
+			// holds the key, so this command cannot work there. Checked before
+			// resolveRuntime for the reason that function's own godoc gives:
+			// building a key provider opens an authenticated session to the key
+			// backend, and the frontend is precisely the role barred from doing
+			// that. Refusing after the session was opened would defeat the point.
+			if role := os.Getenv("PUPPET_CA_ROLE"); !roleMayReachCAKey(role) {
+				return fmt.Errorf("this process is running as the %q role, which proxies signing to the "+
+					"isolated signer and cannot reach the CA key. Run this on the signer host instead", role)
+			}
+
 			// Checked before resolveRuntime so nothing is opened -- and no
 			// authenticated session to a key provider established -- for a run
 			// that cannot succeed.
@@ -269,13 +280,6 @@ func prepareOutputPath(path string) (string, error) {
 // EnsureHMACKey regenerates the inventory HMAC key if the stored one is the
 // wrong length. Running that against a live CA's storage is its own hazard.
 func assertCAUsable(ctx context.Context, myCA *ca.CA, store *storage.StorageService, cfg *serverConfig) error {
-	// The frontend role proxies signing to an isolated signer and never holds
-	// the key, so this command cannot work there. Every other role can.
-	if role := os.Getenv("PUPPET_CA_ROLE"); !roleMayReachCAKey(role) {
-		return fmt.Errorf("this process is running as the %q role, which proxies signing to the "+
-			"isolated signer and cannot reach the CA key. Run this on the signer host instead", role)
-	}
-
 	hasCert, err := store.HasCACert(ctx)
 	if err != nil {
 		return fmt.Errorf("checking for an existing CA certificate: %w", err)

@@ -194,24 +194,37 @@ First, generate a TLS server certificate for openvox-ca itself:
 
 ```bash
 openvox-ca generate \
+  --cadir    "$NEW_CADIR" \
   --certname openvox-ca.example.com \
   --ttl      8760h \
   --key-out  "$NEW_CADIR/private/openvox-ca.example.com_key.pem" \
-  > "$NEW_CADIR/signed/openvox-ca.example.com.pem"
+  >/dev/null
 
 # Or, if you prefer a DNS SAN for the old puppet-master hostname:
 openvox-ca generate \
+  --cadir    "$NEW_CADIR" \
   --certname openvox-ca.example.com \
   --ttl      8760h \
   --dns      openvox-ca.example.com,puppet-master.example.com \
   --key-out  "$NEW_CADIR/private/openvox-ca.example.com_key.pem" \
-  > "$NEW_CADIR/signed/openvox-ca.example.com.pem"
+  >/dev/null
 ```
 
 This runs before the server starts, against the cadir `openvox-ca-ctl import`
 populated in the previous step. Earlier versions of this guide had to start the
 CA temporarily on loopback without TLS to mint this certificate through the API,
 then restart it with TLS; that is no longer necessary.
+
+Two details worth copying exactly. `--cadir` is required here because this guide
+configures everything by flag and never writes a config file — without it the
+command exits with `cadir is required`. And the certificate is **not** captured
+by redirecting stdout: `generate` already writes it to
+`$NEW_CADIR/signed/openvox-ca.example.com.pem` through the storage layer, which
+is the path the server is pointed at below. Redirecting into that path would
+make the shell truncate it before the command runs, and the CA would then refuse
+to issue because a (zero-length, undecodable) certificate already exists for
+that name. If you want a second copy elsewhere, use `--cert-out` with a path
+outside the cadir.
 
 ```bash
 # Production start with TLS

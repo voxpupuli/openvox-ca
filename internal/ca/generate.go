@@ -302,7 +302,15 @@ func (c *CA) GenerateWithOptions(ctx context.Context, subject string, opts Gener
 					slog.Warn("Failed to clean up cert after private key save failure",
 						"subject", subject, "error", delErr)
 				}
-				return fmt.Errorf("failed to save private key for %s: %w", subject, err)
+				saveErr := fmt.Errorf("failed to save private key for %s: %w", subject, err)
+				if replacing {
+					// The rollback above leaves the subject with no certificate
+					// at all, while its predecessor is already on the CRL. That
+					// is the state the caller most needs told about, and the
+					// raw save error does not mention it.
+					return c.replacementFailed(subject, saveErr)
+				}
+				return saveErr
 			}
 
 			// SECURITY: Log that a private key has been persisted to server storage.
