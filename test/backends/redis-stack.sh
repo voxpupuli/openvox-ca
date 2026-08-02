@@ -789,7 +789,8 @@ fi
 # Phase 5 -- Aggressive race-condition torture
 # Targets the three coordination paths in the redis backend:
 #   (a) per-subject lock around CSR/cert writes (same-CN storm)
-#   (b) "crl" distributed lock around revocations (concurrent revoke storm)
+#   (b) "subject:<cn>" then "crl" distributed locks around revocations
+#       (concurrent revoke storm)
 #   (c) AppendLine Lua atomicity on the shared inventory blob (line storm)
 # Plus cross-replica visibility: state written via replica 1 must be
 # observable from replica 2 within one round-trip after the writer returns.
@@ -1062,7 +1063,7 @@ fi
 #     context.WithTimeout(ctx, lockTimeout) where lockTimeout = 60s
 #     (internal/ca/init.go). The caller's ctx (HTTP request ctx) is
 #     honored AND capped at 60s -- whichever fires first wins.
-#   - cmd/openvox-ca/main.go:595 sets WriteTimeout=60s on the HTTP server.
+#   - cmd/openvox-ca/main.go sets WriteTimeout=60s on the HTTP server.
 #     curl in revoke_via_master uses no -m, so the client side does not
 #     impose a tighter deadline.
 #   - 5s wait + ~20ms of revoke work leaves ~55s of headroom on both

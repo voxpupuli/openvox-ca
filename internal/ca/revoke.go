@@ -49,12 +49,10 @@ import (
 // CRL lock, so the revocation can be queued behind another operation's queueing,
 // and SaveRequest holds it across an autosign signature too.
 //
-// Nor is the wait bounded by lockTimeout in the case that matters most. Every
-// backend serialises same-process callers on a plain mutex before the
-// context-aware acquisition, and the filesystem backend has nothing but that
-// mutex (see StorageService.WithLock), so a revocation queued behind a renewal
-// on this replica blocks without a deadline. The budget binds the cross-replica
-// wait on the HA backends and nothing else. A revocation that does fail is safe
+// Nor is the wait bounded by lockTimeout in the case that matters most:
+// StorageService.WithLock's godoc records that ctx bounds only the cross-node
+// half of an acquisition, so a revocation queued behind a renewal on this
+// replica blocks without a deadline. A revocation that does fail is safe
 // to retry — revokeSerialLocked short-circuits a serial already listed, so
 // revocation is idempotent — and handlePutStatus reports every failure as 409,
 // since the lock cannot currently tell its own timeout from anything else.

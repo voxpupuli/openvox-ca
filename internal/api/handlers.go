@@ -236,10 +236,9 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 			// Every failure answers 409, including the transient ones — a lock
 			// this replica could not get in time, a CRL that could not be read.
 			// Separating those out would need a signal the lock cannot currently
-			// give: each backend serialises same-process callers on a mutex that
-			// predates the deadline (see StorageService.WithLock), so the wait
-			// this route is most likely to lose does not surface as a timeout at
-			// all. Until that changes the honest answer is one status with no
+			// give: see StorageService.WithLock, whose godoc records that a
+			// same-process wait is not bounded by ctx and does not surface as a
+			// timeout. Until that changes the honest answer is one status with no
 			// retry advice in it, and docs/api.md tells operators to retry a 409
 			// here rather than read it as final — revocation is idempotent, so
 			// that costs nothing when the cause was permanent.

@@ -50,7 +50,9 @@ const (
 const lockTimeout = 60 * time.Second
 
 // subjectLockName returns the distributed-lock name used to serialise
-// operations on a single subject (CSR submission, signing, cleaning).
+// operations on a single subject: CSR submission, signing, renewal, import,
+// cleaning and revocation. See docs/development/storage-internals.md for the
+// ordering invariant these share (subject lock first, then the CRL lock).
 func subjectLockName(subject string) string { return lockSubjectPrefix + subject }
 
 func (c *CA) Init(ctx context.Context) error {
