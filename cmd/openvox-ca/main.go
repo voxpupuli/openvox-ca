@@ -781,6 +781,7 @@ func newRootCmd() *cobra.Command {
 	// the server" and cobra.NoArgs above still rejects stray arguments.
 	cmd.AddCommand(newCSRCmd())
 	cmd.AddCommand(newImportCACertCmd())
+	cmd.AddCommand(newGenerateCmd())
 
 	return cmd
 }
