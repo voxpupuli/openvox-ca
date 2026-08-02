@@ -153,6 +153,10 @@ func (c *CA) Init(ctx context.Context) error {
 				"and requires every agent to be re-enrolled: %w", where, loadErr)
 		}
 		if !hasCert || !hasKey {
+			if c.NoBootstrap {
+				return fmt.Errorf("no CA exists in the configured storage, and this caller "+
+					"will not create one: %w", loadErr)
+			}
 			slog.Info("No existing CA found, bootstrapping new CA")
 			return c.bootstrapCA(ctx)
 		}

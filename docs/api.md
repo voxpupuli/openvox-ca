@@ -119,6 +119,14 @@ Response:
 { "private_key": "-----BEGIN RSA PRIVATE KEY-----\n...", "certificate": "-----BEGIN CERTIFICATE-----\n..." }
 ```
 
+This route serialises on the same per-subject lock as signing, so it can block
+while another replica holds that lock.
+
+It cannot issue a certificate carrying `pp_cli_auth` — see
+[authorization tiers](#authorization-tiers) — and it needs a running server.
+Neither is true of [`openvox-ca generate`](operator-cli.md#generate-minting-a-certificate-offline),
+which mints against storage directly.
+
 ## Certificate import
 
 | Method | Path | Description |
@@ -191,5 +199,7 @@ A client certificate is considered an admin credential if **either** condition i
 2. **`pp_cli_auth` extension:** the certificate carries the Puppet authorization extension OID `1.3.6.1.4.1.34380.1.3.39` with the UTF8String value `"true"`. OpenVox Server embeds this extension in its own certificate by default, so the `puppetserver ca` CLI can authenticate without being listed by CN.
 
 The `pp_cli_auth` check is enabled by default. Disable it with `--no-pp-cli-auth` (or `no_pp_cli_auth: true` in the config file) if you prefer strict CN-only authorization.
+
+A certificate carrying `pp_cli_auth` cannot be obtained through this API at all: authorization-arc OIDs are stripped from submitted CSRs so that no request can ask for elevated privileges. Mint one offline with [`openvox-ca generate --pp-cli-auth`](operator-cli.md#administrator-credentials), which also documents what the grant covers and the three steps needed to withdraw it.
 
 > **OID source:** [`lib/puppet/ssl/oids.rb`](https://github.com/puppetlabs/puppet/blob/main/lib/puppet/ssl/oids.rb)

@@ -167,33 +167,40 @@ ca_port   = 8140
 First, generate a TLS server certificate for openvox-ca itself:
 
 ```bash
-openvox-ca-ctl generate \
-  --server-url http://127.0.0.1:8140 \
-  --certname   openvox-ca.example.com
+openvox-ca generate \
+  --cadir    "$NEW_CADIR" \
+  --certname openvox-ca.example.com \
+  --ttl      8760h \
+  --key-out  "$NEW_CADIR/private/openvox-ca.example.com_key.pem" \
+  >/dev/null
 
 # Or, if you prefer a DNS SAN for the old puppet-master hostname:
-openvox-ca-ctl generate \
-  --server-url http://127.0.0.1:8140 \
-  --certname   openvox-ca.example.com \
-  --dns        puppet-master.example.com
+openvox-ca generate \
+  --cadir    "$NEW_CADIR" \
+  --certname openvox-ca.example.com \
+  --ttl      8760h \
+  --dns      openvox-ca.example.com,puppet-master.example.com \
+  --key-out  "$NEW_CADIR/private/openvox-ca.example.com_key.pem" \
+  >/dev/null
 ```
 
-> **Note:** `generate` requires a running openvox-ca instance. Start it
-> temporarily on loopback without TLS, generate the cert, then restart
-> with TLS:
+This runs before the server starts, against the cadir `openvox-ca-ctl import`
+populated in the previous step. Earlier versions of this guide had to start the
+CA temporarily on loopback without TLS to mint this certificate through the API,
+then restart it with TLS; that is no longer necessary.
+
+Two details worth copying exactly. `--cadir` is required here because this guide
+configures everything by flag and never writes a config file — without it the
+command exits with `cadir is required`. And the certificate is **not** captured
+by redirecting stdout: `generate` already writes it to
+`$NEW_CADIR/signed/openvox-ca.example.com.pem` through the storage layer, which
+is the path the server is pointed at below. Redirecting into that path would
+make the shell truncate it before the command runs, and the CA would then refuse
+to issue because a (zero-length, undecodable) certificate already exists for
+that name. If you want a second copy elsewhere, use `--cert-out` with a path
+outside the cadir.
 
 ```bash
-# Temporary start (loopback only, no TLS)
-openvox-ca --cadir "$NEW_CADIR" --host 127.0.0.1 --port 8140 &
-PCA_PID=$!
-sleep 2
-
-openvox-ca-ctl generate \
-  --server-url http://127.0.0.1:8140 \
-  --certname   openvox-ca.example.com
-
-kill $PCA_PID; wait $PCA_PID 2>/dev/null
-
 # Production start with TLS
 openvox-ca \
   --cadir    "$NEW_CADIR" \
@@ -248,7 +255,7 @@ puppet agent --test --noop
 | `puppet cert clean <name>` | `openvox-ca-ctl clean --certname <name>` | Revoke + delete |
 | `puppetserver ca setup` | `openvox-ca-ctl setup --cadir <path>` | |
 | `puppetserver ca import` | `openvox-ca-ctl import --cadir <path> ...` | |
-| `puppetserver ca generate` | `openvox-ca-ctl generate --certname <name>` | |
+| `puppetserver ca generate` | `openvox-ca-ctl generate --certname <name>` | Needs a running server. Use `openvox-ca generate --certname <name> --ttl <duration>` to mint offline, which is also the only way to obtain a `pp_cli_auth` certificate |
 
 ## Differences to be aware of
 
@@ -264,42 +271,70 @@ used to. The `serial` file from old Puppet CAs is ignored.
 openvox-ca strips Puppet authorization-arc OIDs (`1.3.6.1.4.1.34380.1.3.*`)
 from CSRs during signing as a security measure to prevent privilege
 escalation. This means you cannot create admin certificates (with
-`pp_cli_auth`) by submitting a CSR through the API.
+`pp_cli_auth`) by submitting a CSR through the API. That is deliberate and
+unchanged: a request that could ask for `pp_cli_auth` would let any agent ask
+for CA admin.
 
-To create admin certificates with `pp_cli_auth`, sign them directly using
-the CA key with openssl:
+Mint one offline instead:
 
 ```bash
-# Generate key and CSR with pp_cli_auth extension
-openssl genrsa -out admin.key 2048
-cat > admin.cnf <<EOF
-[req]
-distinguished_name = dn
-req_extensions     = v3_req
-prompt             = no
-[dn]
-CN = admin-tool
-[v3_req]
-1.3.6.1.4.1.34380.1.3.39 = DER:0c:04:74:72:75:65
-EOF
-openssl req -new -key admin.key -config admin.cnf -out admin.csr
-
-# Sign directly with the CA key
-cat > admin_ext.cnf <<EOF
-1.3.6.1.4.1.34380.1.3.39 = DER:0c:04:74:72:75:65
-EOF
-openssl x509 -req \
-  -in admin.csr \
-  -CA <cadir>/ca_crt.pem \
-  -CAkey <cadir>/private/ca_key.pem \
-  -CAcreateserial \
-  -days 365 \
-  -extfile admin_ext.cnf \
-  -out admin.crt
+openvox-ca generate --cadir "$NEW_CADIR" --certname admin-cli \
+  --ttl 8760h --pp-cli-auth --key-out admin-cli_key.pem > admin-cli.crt
 ```
 
+Run it on the CA host, against the server's own configuration. No running
+server, no admin certificate, and no API. `--cadir` is spelled out because this
+guide configures the server entirely by flag and never writes
+`/etc/puppet-ca/config.yaml`; where that file does exist, the command reads the
+cadir from it and the flag can be dropped.
+
+This is not merely a shorter recipe than signing with `openssl` by hand. It
+needs no access to the raw CA key, so it works under `ca_key_provider: openbao`
+— where the key never leaves the vault — and under `encrypt_ca_key`, neither of
+which can be fed to `openssl x509 -req` at all. And the certificate it produces
+is one the CA can see: it takes a serial from the CA's own generator, is written
+to the inventory, appears in `openvox-ca-ctl list --all`, is swept by the expiry
+job, and can be revoked by name.
+
+`pp_cli_auth` grants the entire admin tier — signing, revoking, cleaning,
+importing, replacing the CRL. Withdrawing it takes three steps rather than one,
+and `--pp-cli-auth` has other requirements and caveats worth reading before you
+use it: see [`generate`](operator-cli.md#administrator-credentials).
+
+It has no effect where `no_pp_cli_auth: true` is set; the command refuses rather
+than issuing a certificate that would grant nothing.
+
 Alternatively, use the `--puppet-server` flag to grant admin access by CN
-without needing the `pp_cli_auth` extension at all.
+without needing the `pp_cli_auth` extension at all. Prefer it where the caller
+has a stable CN: an allow-list entry is withdrawn by editing a file and
+restarting, whereas this grant is withdrawn only by revoking the certificate and
+restarting every replica.
+
+#### Certificates you already minted with openssl
+
+Earlier versions of this guide told you to sign admin certificates directly with
+the CA key. Those certificates have no inventory row, which means
+`openvox-ca-ctl revoke --certname` cannot find them and `--force` cannot replace
+them: they were never in the CA's storage. They are nonetheless valid,
+CA-signed, admin-granting credentials until they expire.
+
+To retire one, register it first so the CA can see it, then revoke it:
+
+```bash
+# 1. With the server running, authenticated by the very certificate you are
+#    retiring (it is still an admin credential until you revoke it).
+openvox-ca-ctl import-cert --certname admin-tool --cert-file admin.crt
+
+# 2. It is now in the inventory and revocable by name.
+openvox-ca-ctl revoke --certname admin-tool
+
+# 3. Restart every replica so the revocation is honoured, then re-mint.
+openvox-ca generate --cadir "$NEW_CADIR" --certname admin-tool \
+  --ttl 8760h --pp-cli-auth --key-out admin-tool_key.pem > admin-tool.crt
+```
+
+Note that step 1 is an admin-authenticated API call and needs a running server —
+importing is a prerequisite for revoking here, not an alternative to it.
 
 ### No `puppet cert` compatibility shim
 
