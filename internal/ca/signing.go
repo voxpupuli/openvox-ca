@@ -101,17 +101,7 @@ func (c *CA) evictRevokedLocked(ctx context.Context, subject string) error {
 		return fmt.Errorf("certificate already exists for %s: %w", subject, ErrCertExists)
 	}
 
-	revoked := false
-	if c.cachedCRL != nil {
-		for _, entry := range c.cachedCRL.RevokedCertificateEntries {
-			if entry.SerialNumber.Cmp(cert.SerialNumber) == 0 {
-				revoked = true
-				break
-			}
-		}
-	}
-
-	if !revoked {
+	if c.cachedCRL == nil || !serialInCRL(c.cachedCRL, cert.SerialNumber) {
 		return fmt.Errorf("certificate already exists for %s: %w", subject, ErrCertExists)
 	}
 	slog.Debug("Removing revoked certificate", "subject", subject)
@@ -203,6 +193,10 @@ var ErrRenewalSubjectMismatch = errors.New("presented certificate is for a diffe
 // checked separately: a revoked certificate this CA issued would otherwise
 // still satisfy it and remain a self-renewal credential for whoever holds it.
 //
+// This runs before the per-subject lock, so its revocation answer is only as
+// fresh as the moment it was asked; both renewal paths ask again under the lock
+// via reassertNotRevoked before they issue anything.
+//
 // The caller must NOT hold c.mu.
 func (c *CA) assertOwnValidCertificate(ctx context.Context, cert *x509.Certificate) error {
 	if c.CACert == nil {
@@ -211,6 +205,17 @@ func (c *CA) assertOwnValidCertificate(ctx context.Context, cert *x509.Certifica
 	if err := cert.CheckSignatureFrom(c.CACert); err != nil {
 		return fmt.Errorf("%w: %v", ErrForeignCertificate, err)
 	}
+	return c.assertNotRevoked(ctx, cert)
+}
+
+// assertNotRevoked answers the revocation half of the renewal gate from the CRL
+// this process is currently enforcing.
+//
+// Fails closed: an unanswerable question is a refusal, not an assumption that
+// the certificate is live. That is the whole point of asking.
+//
+// The caller must NOT hold c.mu.
+func (c *CA) assertNotRevoked(ctx context.Context, cert *x509.Certificate) error {
 	revoked, err := c.IsRevokedSerial(ctx, cert.SerialNumber)
 	if err != nil {
 		return fmt.Errorf("checking whether the presented certificate is revoked: %w", err)
@@ -219,6 +224,83 @@ func (c *CA) assertOwnValidCertificate(ctx context.Context, cert *x509.Certifica
 		return fmt.Errorf("%w: it has been revoked", ErrForeignCertificate)
 	}
 	return nil
+}
+
+// reassertNotRevoked re-asks the revocation question once the per-subject lock
+// is held, and is called by both renewal paths before either issues anything.
+//
+// It exists because assertOwnValidCertificate answers ahead of that lock, and
+// acquiring it can take up to lockTimeout. A revocation landing inside that
+// window would otherwise be handed a fresh, unrevoked credential for an
+// identity that had just been withdrawn: the gate has already decided, and
+// nothing else on the path looks again.
+//
+// It asks the CRL in storage rather than the cache assertOwnValidCertificate
+// consulted. The cache is only ever refreshed by writing storage first, so
+// storage is never the staler of the two — and on the HA backends it is the
+// only place a revocation another replica performed has reached at all, which
+// is what lets one operator's revocation bind a renewal being served elsewhere.
+// The extra read is bounded by what a renewal already does to storage: on the
+// default configuration the CRL re-sign that retires the replaced certificate
+// dominates it, and with revoke_on_auto_renew disabled it is one read against
+// the certificate write and inventory append that follow.
+//
+// The read is deliberately not taken under lockNameCRL. Every backend writes
+// the CRL as one atomic blob, and the metrics collector and the Kubernetes
+// exporter already read it unlocked; a revocation still mid-flight under that
+// lock has not been committed, and refusing it a moment later is the same
+// answer a caller one instant earlier would have received.
+//
+// An unreadable stored CRL falls back to the cached answer rather than
+// refusing. That leaves the renewal exactly where it started — the same answer
+// the gate gave, no weaker than not having asked twice — whereas refusing would
+// make an unreadable CRL a renewal outage, which renew_test.go pins against for
+// the best-effort revoke on the far side of this same read.
+//
+// Both degraded outcomes get their own log line, because both are conditions an
+// operator can act on and neither is distinguishable from an ordinary refusal by
+// the error alone. They are deliberately not counted into crlUpdateFailures:
+// that counter is documented (docs/metrics.md) as scoped to failures to *amend*
+// the CRL, and a per-replica measure of cache staleness belongs with the CRL
+// cache work rather than bolted onto the renewal path.
+//
+// Nothing can revoke between this check and the issuance it guards. Revoke
+// takes the per-subject lock before the CRL lock (see its godoc), so a
+// revocation for this subject either commits before the renewal acquires that
+// lock — where this check sees it — or waits until the renewal has finished and
+// then retires the serial that renewal issued. Were Revoke to serialise on
+// lockNameCRL alone, an operator revocation starting after this check passed
+// could still resolve the outgoing serial while the replacement was being
+// minted: the same defect as the lock-wait window above, over a shorter one.
+//
+// The caller must NOT hold c.mu.
+func (c *CA) reassertNotRevoked(ctx context.Context, cert *x509.Certificate) error {
+	crl, err := c.readStoredCRL(ctx)
+	if err != nil {
+		// Published verbatim in docs/api.md as something to alert on, since
+		// there is deliberately no metric. Rewording it breaks operator alerts
+		// with nothing failing, so renewrace_test.go pins the message.
+		slog.Warn("Renewal could not read the stored CRL; falling back to this replica's cached copy",
+			"subject", cert.Subject.CommonName, "serial", serialHexStr(cert.SerialNumber), "error", err)
+		return c.assertNotRevoked(ctx, cert)
+	}
+	if !serialInCRL(crl, cert.SerialNumber) {
+		return nil
+	}
+	// Refusing on the stored CRL while the cache still calls the certificate
+	// live means this replica is enforcing a CRL that storage has moved past.
+	// The renewal is safe either way; the log is for the operator, since every
+	// other consumer of the cache — mTLS admission, OCSP, CSR eviction — is
+	// still answering from the stale copy and says nothing about it.
+	//
+	// Published verbatim in docs/api.md as something to alert on, on the same
+	// terms as the message above, and pinned by renewrace_test.go for the same
+	// reason.
+	if cached, cachedErr := c.IsRevokedSerial(ctx, cert.SerialNumber); cachedErr == nil && !cached {
+		slog.Warn("Refusing a renewal on the stored CRL; this replica's cached CRL still calls the certificate live",
+			"subject", cert.Subject.CommonName, "serial", serialHexStr(cert.SerialNumber))
+	}
+	return fmt.Errorf("%w: it has been revoked", ErrForeignCertificate)
 }
 
 // Sign creates and persists a certificate for the pending CSR of subject.
@@ -833,6 +915,15 @@ func (c *CA) Renew(ctx context.Context, subject string, csrPEM []byte, presented
 	defer cancel()
 	var out []byte
 	err = c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
+		// SECURITY: ask the revocation question again now the lock is held. The
+		// gate above answered it before the wait for this lock, and a revocation
+		// that landed during the wait must not be outrun by the renewal it was
+		// meant to stop. See reassertNotRevoked.
+		// NIST 800-53: AC-3 (Access Enforcement), IA-5(2) (PKI-Based Authentication)
+		if err := c.reassertNotRevoked(ctx, presentedCert); err != nil {
+			return err
+		}
+
 		// Capture the serial of the certificate being replaced, if any, before
 		// signing overwrites the cert blob and appends a new inventory row —
 		// afterwards LatestSerialForSubject would resolve to the *new* serial,
@@ -975,6 +1066,14 @@ func (c *CA) AutoRenew(ctx context.Context, presentedCert *x509.Certificate) ([]
 
 	var out []byte
 	err := c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
+		// SECURITY: the twin of Renew's re-check, and not redundant with it —
+		// the two paths reach the lock through separate code. See
+		// reassertNotRevoked.
+		// NIST 800-53: AC-3 (Access Enforcement), IA-5(2) (PKI-Based Authentication)
+		if err := c.reassertNotRevoked(ctx, presentedCert); err != nil {
+			return err
+		}
+
 		// Issue the replacement while holding c.mu, releasing it via defer
 		// before the revoke step below re-acquires it (c.mu is non-reentrant).
 		// The closure keeps the unlock panic-safe: a panic mid-issue still

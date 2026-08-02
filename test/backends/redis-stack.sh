@@ -789,7 +789,8 @@ fi
 # Phase 5 -- Aggressive race-condition torture
 # Targets the three coordination paths in the redis backend:
 #   (a) per-subject lock around CSR/cert writes (same-CN storm)
-#   (b) "crl" distributed lock around revocations (concurrent revoke storm)
+#   (b) "subject:<cn>" then "crl" distributed locks around revocations
+#       (concurrent revoke storm)
 #   (c) AppendLine Lua atomicity on the shared inventory blob (line storm)
 # Plus cross-replica visibility: state written via replica 1 must be
 # observable from replica 2 within one round-trip after the writer returns.
@@ -1006,10 +1007,11 @@ else
 fi
 
 # -- Race E: distributed lock under contention -----------------------------
-# Hammer Storage.WithLock("crl", ...) by issuing many concurrent revocations
+# Hammer the distributed locks by issuing many concurrent revocations
 # against an already-revoked subject. Each call should be a no-op
 # (revocation is idempotent on the CRL by serial), but every call still
-# acquires the "crl" distributed lock. With N=16 concurrent revoke calls
+# acquires "subject:<cn>" and then the "crl" lock nested inside it, so a
+# single-subject storm serialises on the first of those. With N=16 revoke calls
 # split across replicas, every call must complete (HTTP 2xx) within the
 # overall storm window without any caller getting wedged.
 # Reuses the VIS_CN cert above (already revoked, single subject = single
@@ -1057,11 +1059,11 @@ fi
 # CA cluster heal after a SIGKILL'd holder.
 #
 # TTL choice (5s) safety argument:
-#   - internal/ca/revoke.go:42 wraps WithLock with
+#   - internal/ca/revoke.go wraps both WithLock calls with a single
 #     context.WithTimeout(ctx, lockTimeout) where lockTimeout = 60s
-#     (internal/ca/init.go:49). The caller's ctx (HTTP request ctx) is
+#     (internal/ca/init.go). The caller's ctx (HTTP request ctx) is
 #     honored AND capped at 60s -- whichever fires first wins.
-#   - cmd/openvox-ca/main.go:595 sets WriteTimeout=60s on the HTTP server.
+#   - cmd/openvox-ca/main.go sets WriteTimeout=60s on the HTTP server.
 #     curl in revoke_via_master uses no -m, so the client side does not
 #     impose a tighter deadline.
 #   - 5s wait + ~20ms of revoke work leaves ~55s of headroom on both

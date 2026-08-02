@@ -1047,6 +1047,37 @@ var _ = Describe("API Workflow", func() {
 			mux.ServeHTTP(rr, req)
 			Expect(rr.Code).To(Equal(http.StatusConflict))
 		})
+
+		// A revocation can also fail transiently — it could not get the lock in
+		// time, or could not read the CRL — and those answer 409 exactly as the
+		// permanent case above does. Pinned because it is a documented contract
+		// rather than an accident: docs/api.md tells operators a 409 here
+		// carries no retry information and to retry regardless. Driven with an
+		// already-expired request context, which is how a deadline reaches the
+		// handler from inside the revoke.
+		It("should return 409, not a distinct status, when the revoke fails transiently", func() {
+			csrPEM, err := testutil.GenerateCSR("revoke-timeout-node")
+			Expect(err).NotTo(HaveOccurred())
+			rrCSR := httptest.NewRecorder()
+			mux.ServeHTTP(rrCSR, httptest.NewRequest("PUT", "/certificate_request/revoke-timeout-node", bytes.NewReader(csrPEM)))
+			Expect(rrCSR.Code).To(Equal(http.StatusOK))
+			signBody, _ := json.Marshal(api.PutStatusBody{DesiredState: "signed"})
+			rrSign := httptest.NewRecorder()
+			mux.ServeHTTP(rrSign, httptest.NewRequest("PUT", "/certificate_status/revoke-timeout-node", bytes.NewReader(signBody)))
+			Expect(rrSign.Code).To(Equal(http.StatusNoContent))
+
+			expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			defer cancel()
+
+			body, _ := json.Marshal(api.PutStatusBody{DesiredState: "revoked"})
+			req := httptest.NewRequest("PUT", "/certificate_status/revoke-timeout-node", bytes.NewReader(body)).
+				WithContext(expired)
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusConflict))
+			Expect(rr.Header().Get("Retry-After")).To(BeEmpty(),
+				"no retry advice is offered, because the lock cannot currently distinguish its own timeout")
+		})
 	})
 
 	Context("PUT /certificate_request with empty body", func() {

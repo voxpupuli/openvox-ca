@@ -614,6 +614,37 @@ var _ = Describe("CA Revocation", func() {
 		Expect(revoked).To(BeTrue())
 	})
 
+	It("does not list a serial twice when the same subject is revoked again", func() {
+		// The duplicate guard exists so a retried revocation — an operator
+		// running the command twice, or a client retrying a request that timed
+		// out — cannot grow the CRL without bound. Drop it and the second call
+		// still succeeds and the serial is still revoked, so the entry count is
+		// the only thing that says anything went wrong.
+		csrPEM, err := testutil.GenerateCSR("double-revoke-node")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = myCA.SaveRequest(context.Background(), "double-revoke-node", csrPEM)
+		Expect(err).NotTo(HaveOccurred())
+		certPEM, err := myCA.Sign(context.Background(), "double-revoke-node")
+		Expect(err).NotTo(HaveOccurred())
+		block, _ := pem.Decode(certPEM)
+		cert, err := x509.ParseCertificate(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+
+		// Absolute counts, not "the same as last time": this fixture's seeded
+		// CRL starts empty, so a regression that appended nothing at all would
+		// satisfy a self-referential comparison twice over.
+		Expect(myCA.Revoke(context.Background(), "double-revoke-node")).To(Succeed())
+		Expect(parseStoredCRL(store).RevokedCertificateEntries).To(HaveLen(1))
+
+		Expect(myCA.Revoke(context.Background(), "double-revoke-node")).To(Succeed())
+		Expect(parseStoredCRL(store).RevokedCertificateEntries).To(HaveLen(1))
+
+		// And the entry that survived is still the right one.
+		revoked, err := myCA.IsRevokedSerial(context.Background(), cert.SerialNumber)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(revoked).To(BeTrue())
+	})
+
 	It("IsRevokedSerial returns false for an unknown serial", func() {
 		unknownSerial := new(big.Int).SetInt64(999999)
 		revoked, err := myCA.IsRevokedSerial(context.Background(), unknownSerial)

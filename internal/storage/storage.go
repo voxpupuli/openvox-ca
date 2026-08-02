@@ -67,6 +67,16 @@ type StorageService struct {
 // Names should be stable and descriptive (e.g. "bootstrap", "crl",
 // "subject:<name>") since all callers using the same name contend on the
 // same lock.
+//
+// ctx bounds only the cross-node half of the wait. Callers inside one process
+// serialise on a plain mutex first — the fallback below for backends without a
+// Locker, and inside each Locker's own AcquireLock for those with one (see
+// EtcdBackend, RedisBackend, SQLBackend) — and sync.Mutex.Lock takes no
+// context. A deadline therefore caps how long this waits for another
+// *replica*, not for another goroutine here, and a caller cannot tell "the
+// lock was busy" from any other failure by the returned error alone. This is
+// the authoritative statement of that; internal/ca and internal/api cite it
+// rather than restating it.
 func (s *StorageService) WithLock(ctx context.Context, name string, fn func() error) error {
 	if lk, ok := s.backend.(Locker); ok {
 		ul, err := lk.AcquireLock(ctx, name)

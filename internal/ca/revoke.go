@@ -32,6 +32,42 @@ import (
 // Revoke serialises on the cluster-wide "crl" lock so concurrent revocations
 // (and any future CRL rotation) on different replicas cannot both read the
 // same CRL, each append their own entry, and clobber one another's write.
+//
+// It takes the per-subject lock first, as Clean does. Without it reassertNotRevoked
+// would still be a check-then-act: a revocation resolving the outgoing serial
+// while the replacement is being minted is defeated exactly as one landing
+// during the lock wait is, only over a shorter window. Holding the subject lock
+// leaves a revocation two orderings against a renewal for the same subject, and
+// both are answers rather than races — it commits first and the re-check refuses
+// the renewal, or the renewal completes and the revocation then retires the
+// serial that renewal issued.
+//
+// The cost is that a revocation now waits for an issuance already under way for
+// that subject — the same trade Clean has always made, so DELETE
+// /certificate_status has always paid it. Do not read that wait as short. A
+// renewal holds the subject lock across its own acquisition of the cluster-wide
+// CRL lock, so the revocation can be queued behind another operation's queueing,
+// and SaveRequest holds it across an autosign signature too.
+//
+// Nor is the wait bounded by lockTimeout in the case that matters most:
+// StorageService.WithLock's godoc records that ctx bounds only the cross-node
+// half of an acquisition, so a revocation queued behind a renewal on this
+// replica blocks without a deadline. A revocation that does fail is safe
+// to retry — revokeSerialLocked short-circuits a serial already listed, so
+// revocation is idempotent — and handlePutStatus reports every failure as 409,
+// since the lock cannot currently tell its own timeout from anything else.
+//
+// Fairness, where the deadline does apply, is the backend's to give. etcd orders
+// waiters by revision and Postgres queues on pg_advisory_lock, so a revocation
+// there is granted the lock in turn; Redis polls SET NX with backoff and MySQL
+// re-attempts GET_LOCK in a loop, so against a stream of renewals from another
+// replica neither offers an ordering guarantee.
+//
+// Lock ordering: subject-lock (distributed) → CRL-lock (distributed) → c.mu,
+// matching Clean, and no path takes those two in the other order. Callers must
+// therefore not already hold the subject lock: those that do — Clean, and the
+// post-issue revokes in Renew and AutoRenew — reach revokeLocked or
+// revokeSerialLocked directly rather than coming through here.
 func (c *CA) Revoke(ctx context.Context, subject string) error {
 	if err := ValidateSubject(subject); err != nil {
 		return err
@@ -39,10 +75,12 @@ func (c *CA) Revoke(ctx context.Context, subject string) error {
 
 	ctx, cancel := context.WithTimeout(ctx, lockTimeout)
 	defer cancel()
-	return c.Storage.WithLock(ctx, lockNameCRL, func() error {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		return c.revokeLocked(ctx, subject)
+	return c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
+		return c.Storage.WithLock(ctx, lockNameCRL, func() error {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			return c.revokeLocked(ctx, subject)
+		})
 	})
 }
 
@@ -88,11 +126,9 @@ func (c *CA) revokeSerialLocked(ctx context.Context, serialStr string) error {
 
 	// 2. Check for duplicate revocation: a serial that's already in the CRL
 	// should not be appended again (prevents unbounded CRL growth on retries).
-	for _, entry := range crl.RevokedCertificateEntries {
-		if entry.SerialNumber.Cmp(serialInt) == 0 {
-			slog.Debug("Certificate already revoked", "serial", serialStr)
-			return nil
-		}
+	if serialInCRL(crl, serialInt) {
+		slog.Debug("Certificate already revoked", "serial", serialStr)
+		return nil
 	}
 
 	// 3. Append the new entry and re-sign. signCRLLocked counts its own
@@ -152,12 +188,27 @@ func (c *CA) IsRevokedSerial(ctx context.Context, serial *big.Int) (bool, error)
 	if c.cachedCRL == nil {
 		return false, fmt.Errorf("CRL not loaded")
 	}
-	for _, entry := range c.cachedCRL.RevokedCertificateEntries {
+	return serialInCRL(c.cachedCRL, serial), nil
+}
+
+// serialInCRL reports whether serial appears among crl's revoked entries. The
+// one definition of "is this certificate revoked according to this CRL" for
+// every caller that needs only the yes or no — against the cached CRL, one
+// freshly read from storage, or one mid-amendment under the CRL lock.
+//
+// ocsp.go's isRevokedSerial is the deliberate exception: it answers the same
+// question but must return the entry's RevocationTime with it, which a bool
+// cannot carry. Change the predicate here and change it there too.
+//
+// crl may not be nil; every caller guards that first, since a missing CRL is
+// not "nothing is revoked" and each has its own answer for it.
+func serialInCRL(crl *x509.RevocationList, serial *big.Int) bool {
+	for _, entry := range crl.RevokedCertificateEntries {
 		if entry.SerialNumber.Cmp(serial) == 0 {
-			return true, nil
+			return true
 		}
 	}
-	return false, nil
+	return false
 }
 
 // IsRevoked checks whether the certificate for subject appears in the CRL.
@@ -189,10 +240,5 @@ func (c *CA) IsRevoked(ctx context.Context, subject string) bool {
 		return false
 	}
 
-	for _, entry := range crl.RevokedCertificateEntries {
-		if entry.SerialNumber.Cmp(cert.SerialNumber) == 0 {
-			return true
-		}
-	}
-	return false
+	return serialInCRL(crl, cert.SerialNumber)
 }

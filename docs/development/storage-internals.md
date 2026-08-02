@@ -86,8 +86,18 @@ grabs per-name mutexes under `<prefix>/locks/<name>`:
 | Lock name | Held during |
 | --- | --- |
 | `bootstrap` | First-run CA generation (winner writes, loser loads) |
-| `crl` | `Revoke` (read CRL, append entry, write CRL) |
-| `subject:<subject>` | `SaveRequest` and `Sign` for that one subject |
+| `crl` | Any read-modify-write of the CRL: `Revoke`, `Clean`, the post-issue revoke in `Renew`/`AutoRenew`, `ReissueCRL`, `RefreshCRLIfDue`, expired-certificate cleanup |
+| `subject:<subject>` | `SaveRequest`, `Sign`, `Renew`, `AutoRenew`, `Clean`, `ImportCert` and `Revoke`, for that one subject |
+
+**Ordering invariant: `subject:<subject>` first, then `crl`, then the in-process
+`c.mu`.** Every operation needing both distributed locks takes them in that
+order, and nothing takes `crl` and then a subject lock. Revocation is in that
+list deliberately: holding the subject lock is what stops a revocation
+interleaving with an issuance already under way for the same subject, so a
+renewal cannot mint a replacement from the credential being withdrawn. Invert
+the order in one caller and it deadlocks against the others — and on the
+filesystem backend the fallback is a `sync.Mutex` that ignores the context
+deadline, so that deadlock does not time out.
 
 If a replica holding a lock crashes without calling Unlock, the etcd lease
 expires after 30s and the lock is released automatically. For the filesystem

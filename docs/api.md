@@ -19,6 +19,8 @@ All endpoints are served under both the bare path and `/puppet-ca/v1/<path>`, so
 { "desired_state": "signed", "cert_ttl": 86400 }
 ```
 
+A revocation (`"desired_state": "revoked"`) takes the per-subject lock that signing and [renewal](#certificate-renewal) take, so it waits for an issuance already under way for that subject instead of overlapping it. That is what stops a renewal minting from a credential being withdrawn without the revocation noticing: either the revoke commits first and the renewal is refused, or the renewal completes and the revoke then retires the serial it just issued. Once the request returns, the subject's newest serial is revoked either way. If it cannot get that lock, or fails for any other reason, the answer is `409` — the same as for a subject with no certificate, because the CA cannot currently tell the two apart (see [below](#certificate-renewal)). Retry it: revoking a serial already on the CRL is a no-op, so a retry costs nothing when the cause was in fact permanent. A revocation that waits a long time may not answer at all — `openvox-ca-ctl` gives up after 30 seconds and the server's own write deadline is 60, while the CA keeps waiting for the lock and may still commit the revocation afterwards. Treat a transport error here as *unknown*, not failed: check `GET /certificate_status/{subject}` before deciding what to do next. `DELETE /certificate_status/{subject}` waits on the same lock and answers `409` on the same failures, though for a subject it cannot find it answers `404`.
+
 `GET` response:
 
 ```json
@@ -67,7 +69,17 @@ All endpoints are served under both the bare path and `/puppet-ca/v1/<path>`, so
 Requires a valid CA-signed client certificate. The new certificate is issued immediately without entering the pending-CSR queue or autosign evaluation, and the certificate it replaces is revoked once the new one is safely stored (see `revoke_on_auto_renew` below for the auto-renewal case).
 
 <a id="renewal-eligibility"></a>
-**Renewal eligibility.** The presented client certificate must be one **this CA** issued, must not be revoked, and must be the certificate for the subject being renewed. Today none of the three produces a distinct error: the authorisation middleware trusts exactly this CA's certificate, so it refuses a foreign or revoked certificate first with `403 access denied`, and the subject condition cannot be reached at all because the handler derives the subject from the presented certificate. The CA's own `403 certificate not eligible for renewal` becomes reachable for the first two once a second issuer can be trusted for client authentication; the third guards future callers of the internal API rather than any request path.
+**Renewal eligibility.** The presented client certificate must be one **this CA** issued, must not be revoked, and must be the certificate for the subject being renewed. The foreign-certificate condition produces no distinct error today: the authorisation middleware trusts exactly this CA's certificate, so it refuses a foreign certificate first with `403 access denied`, and the CA's own `403 certificate not eligible for renewal` becomes reachable for it once a second issuer can be trusted for client authentication. Nor does the subject condition, which cannot be reached at all because the handler derives the subject from the presented certificate; it guards future callers of the internal API rather than any request path. The revoked condition *is* reachable today, because the middleware answers it from this replica's CRL cache while renewal re-reads the stored CRL — see below.
+
+**When the revocation question is answered.** Not once on arrival, but again immediately before the replacement is issued, with the per-subject lock held. Waiting for that lock is what opens the window this closes — bounded by a 60-second budget against a peer replica, and by however long the current holder takes within this one — and a revocation landing inside it should bind the renewal it overlaps rather than lose a race with it. The second look reads the CRL from storage, so on the [HA backends](storage-backends.md) a revocation performed on *another* replica refuses the renewal here too — with `403 certificate not eligible for renewal`, since the middleware admitted the request from this replica's [not-yet-updated cache](#revocation-cluster-wide) — without waiting for that cache to catch up.
+
+One limit worth knowing. If the stored CRL cannot be read at all, the renewal falls back to this replica's cached answer rather than being refused, so an unreadable CRL is not a renewal outage; the condition is logged as a warning and nothing else.
+
+Nothing can revoke in the gap between that second look and the issuance it guards: [`PUT /certificate_status/{subject}`](#certificate-status) takes the same per-subject lock, so a revocation either commits before the renewal reaches the lock — where the second look refuses it — or waits for the renewal to finish and then retires the serial that renewal issued.
+
+The cost falls on revocation, and it is worth sizing honestly. A revoke waits for whatever issuance holds the lock for that subject, and that issuance may itself be queued on the cluster-wide CRL lock, so the wait is not merely "one signature". Nor is it bounded by the 60-second budget in the case you are most likely to meet: every backend serialises callers *within one process* on a lock that predates the deadline, and the single-node filesystem backend has nothing else, so a revocation queued behind a renewal on the same replica simply waits for it. The budget binds the cross-replica wait on the HA backends. Where it does apply, how the wait is shared out is the backend's business — etcd and PostgreSQL queue waiters in turn, while Redis polls `SET NX` and MySQL retries `GET_LOCK` in a loop, so against a stream of renewals from another replica neither of those grants a revocation its turn in order. A revocation that fails for any of these reasons answers `409` and is safe to retry. If you are containing a compromised agent, the [containment order below](#containment-order) puts closing off issuance first for this reason.
+
+One consequence is worth knowing. Because a successful renewal revokes the certificate it replaced — always on the re-key path, and on the empty-body path unless `revoke_on_auto_renew` is disabled — an agent whose renewal response was lost in transit can no longer *retry the renewal*: the serial it still presents is revoked in shared storage, so now every replica refuses it and not just the one that issued the replacement. It is not locked out. The replacement is already in shared storage and already matches a key the agent holds — the same key on the empty-body path, the CSR's key on the re-key path — so `GET /certificate/{subject}` recovers it, unauthenticated — the same fetch an agent makes when it is waiting for a certificate to be signed. An agent that has not written the replacement to disk needs that fetch before its next run can authenticate.
 
 - **CSR body (re-key):** the CSR Common Name must match the authenticated client CN — an agent can only renew its own certificate, not another's. Issues a certificate for the new key in the CSR. Puppet OID extensions are copied from the CSR **except** authorization-arc OIDs (`1.3.6.1.4.1.34380.1.3.*`, such as `pp_cli_auth`), which are stripped so a submitted CSR cannot request elevated privileges.
 
@@ -217,6 +229,7 @@ queues for manual signing. The CRL entry for the old serial persists in both
 cases, so the old certificate stays refused — but that is not the same as
 locking the *agent* out.
 
+<a id="containment-order"></a>
 When containing a compromised agent, apply the levers that hold, in this order:
 
 1. Close off issuance: disable autosign, or use an autosign policy that
@@ -230,6 +243,7 @@ the revoked certificate and issue a replacement, so running it while autosign
 is still open hands whoever holds the compromised key a fresh, valid
 certificate.
 
+<a id="revocation-cluster-wide"></a>
 > **Revocation is not enforced cluster-wide straight away.** The check reads an
 > in-memory copy of the CRL that each process loads at startup and thereafter
 > refreshes only when *that* process re-signs the CRL — on revocation, reissue,
@@ -242,6 +256,39 @@ certificate.
 > do nothing, so a peer can stay stale well past the refresh interval. Restart
 > the fleet, or force a re-sign on each replica, when locking out a compromised
 > agent promptly matters.
+>
+> [`POST /certificate_renewal`](#certificate-renewal) is the one exception: it
+> re-reads the stored CRL under the per-subject lock before issuing, so a stale
+> peer will not mint a replacement for a revoked serial even while it is still
+> admitting that serial on every other route.
+
+Because renewal is the one place that reads both, it is also the only place that
+can notice a replica has fallen behind, and it says so when it does:
+
+```text
+level=WARN msg="Refusing a renewal on the stored CRL; this replica's cached CRL still calls the certificate live" subject=agent.example.com serial=1A2B3C
+```
+
+That line means this replica is still admitting the named serial on every other
+route. No metric covers it: [`puppetca_crl_update_failures_total`](metrics.md)
+counts failures to *amend* the CRL, which is a different fault. Alert on the log
+line instead — match the message substring rather than the whole rendered line,
+because `logfile` selects the JSON handler and the same fields then arrive as
+`"msg"`, `"subject"` and `"serial"` keys. Forcing a CRL re-sign on that replica,
+or restarting it, clears the condition.
+
+The neighbouring warning is not the same thing:
+
+```text
+level=WARN msg="Renewal could not read the stored CRL; falling back to this replica's cached copy" subject=agent.example.com serial=1A2B3C error=...
+```
+
+That one says the exception above is not in force for this renewal — the stored
+CRL was unreadable, so the decision came from the cache alone, exactly as it
+would have on every other route. Worth alerting on for the same reason, and on
+the same terms: the `error` field carries the storage failure, and until reads
+succeed again this replica's renewals give you nothing the middleware did not
+already give you.
 
 In plain HTTP mode (no TLS), all endpoints are accessible without authentication:
 the authorisation middleware is only installed when `--tls-cert`/`--tls-key`
