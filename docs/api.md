@@ -234,6 +234,15 @@ Response:
 { "private_key": "-----BEGIN RSA PRIVATE KEY-----\n...", "certificate": "-----BEGIN CERTIFICATE-----\n..." }
 ```
 
+This route serialises on the same per-subject lock as signing, so it can answer
+`503 certificate authority busy, retry` when another replica holds that lock or
+the storage backend's lock service is unreachable. That is transient: retry.
+
+It cannot issue a certificate carrying `pp_cli_auth` — see
+[authorization tiers](#authorization-tiers) — and it needs a running server.
+Neither is true of [`openvox-ca generate`](operator-cli.md#generate-minting-a-certificate-offline),
+which mints against storage directly.
+
 ## Certificate import
 
 | Method | Path | Description |
@@ -415,5 +424,7 @@ The `pp_cli_auth` check is enabled by default. Disable it with `--no-pp-cli-auth
 The CN allow list is not fixed for the life of the process: `SIGHUP` (or `systemctl reload`) rebuilds it from the current contents of `--puppet-server-file`, merged with the `--puppet-server` value the process started with, so CN-based admin access can be granted or withdrawn without a restart. The swap is atomic with respect to in-flight requests, and the CNs added or removed are named in the log. See [reloading configuration](configuration.md#reloading-configuration).
 
 Two limits are worth knowing before relying on that to decommission a host. `--puppet-server` itself is frozen at startup — only the file is re-read — and condition 2 is untouched by a reload: a certificate carrying `pp_cli_auth=true`, which OpenVox Server issues to itself by default, remains an admin credential until it is revoked or the server is restarted with `--no-pp-cli-auth`. Revoking the certificate (`openvox-ca-ctl revoke`, or `PUT /certificate_status/{subject}` with `desired_state: revoked`) is the step that actually removes admin authority.
+
+A certificate carrying `pp_cli_auth` cannot be obtained through this API at all: authorization-arc OIDs are stripped from submitted CSRs so that no request can ask for elevated privileges. Mint one offline with [`openvox-ca generate --pp-cli-auth`](operator-cli.md#administrator-credentials), which also documents what the grant covers and the three steps needed to withdraw it.
 
 > **OID source:** [`lib/puppet/ssl/oids.rb`](https://github.com/puppetlabs/puppet/blob/main/lib/puppet/ssl/oids.rb)

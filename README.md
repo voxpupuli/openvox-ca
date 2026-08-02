@@ -160,7 +160,7 @@ The complete flag, environment-variable, and config-file reference is in
 | --- | --- |
 | [Configuring the server](docs/configuration.md) | Every flag, environment variable, config-file key; autosigning; directory layout; graceful shutdown; reloading configuration |
 | [HTTP API reference](docs/api.md) | All endpoints, authorization tiers, and admin credential resolution |
-| [Operator CLI (`openvox-ca-ctl`)](docs/operator-cli.md) | The `openvox-ca-ctl` command reference, and the offline `openvox-ca` subcommands (`csr`, `import-ca-cert`) that run against the server's own configuration |
+| [Operator CLI (`openvox-ca-ctl`)](docs/operator-cli.md) | The `openvox-ca-ctl` command reference, and the offline `openvox-ca` subcommands (`csr`, `import-ca-cert`, `generate`) that run against the server's own configuration |
 | [Storage backends](docs/storage-backends.md) | filesystem, SQLite, PostgreSQL, MySQL, etcd, Redis/Valkey; migrating between them |
 | [CA key security](docs/ca-key-security.md) | Process isolation and the signer handshake, key encryption at rest, key-custody options, PKCS#11 plans, destructive-op monitoring |
 | [OpenBao Transit-engine CA key](docs/openbao-transit.md) | Delegating CA key custody to OpenBao |
