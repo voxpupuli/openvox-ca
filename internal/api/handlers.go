@@ -233,19 +233,17 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 
 	case "revoked":
 		if err := s.CA.Revoke(r.Context(), subject); err != nil {
+			// Every failure answers 409, including the transient ones — a lock
+			// this replica could not get in time, a CRL that could not be read.
+			// Separating those out would need a signal the lock cannot currently
+			// give: each backend serialises same-process callers on a mutex that
+			// predates the deadline (see StorageService.WithLock), so the wait
+			// this route is most likely to lose does not surface as a timeout at
+			// all. Until that changes the honest answer is one status with no
+			// retry advice in it, and docs/api.md tells operators to retry a 409
+			// here rather than read it as final — revocation is idempotent, so
+			// that costs nothing when the cause was permanent.
 			slog.Warn("Revoke failed", "subject", subject, "error", err)
-			// A revocation waits for an issuance already under way for the same
-			// subject, so a busy CA can spend the whole lockTimeout queued and
-			// never reach the CRL. Say so, rather than reporting it as the same
-			// conflict a subject with no certificate gets: revocation is
-			// idempotent — revokeSerialLocked short-circuits a serial already
-			// listed — so retrying is always safe, and containment tooling
-			// needs to know that retrying is what is being asked of it.
-			if errors.Is(err, context.DeadlineExceeded) {
-				w.Header().Set("Retry-After", "5")
-				http.Error(w, "timed out waiting for the certificate lock; retry", http.StatusServiceUnavailable)
-				return
-			}
 			http.Error(w, "conflict", http.StatusConflict)
 			return
 		}

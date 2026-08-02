@@ -47,18 +47,23 @@ import (
 // /certificate_status has always paid it. Do not read that wait as short. A
 // renewal holds the subject lock across its own acquisition of the cluster-wide
 // CRL lock, so the revocation can be queued behind another operation's queueing,
-// and SaveRequest holds it across an autosign signature too. Both acquisitions
-// here spend from one lockTimeout, deliberately, so the HTTP request cannot
-// outlive the server's write deadline — which means a revocation on a busy CA
-// can exhaust the budget and fail where it would previously have reached the CRL
-// lock directly. That failure is safe to retry: revokeSerialLocked short-circuits
-// a serial already listed, so revocation is idempotent, and handlePutStatus
-// answers a deadline with 503 and Retry-After rather than a bare conflict.
+// and SaveRequest holds it across an autosign signature too.
 //
-// Fairness is the backend's to give. etcd orders waiters by revision and
-// Postgres queues on pg_advisory_lock, so a revocation there is granted the lock
-// in turn; the Redis locker polls SET NX with backoff, so a revocation contending
-// with a stream of renewals from another replica has no ordering guarantee.
+// Nor is the wait bounded by lockTimeout in the case that matters most. Every
+// backend serialises same-process callers on a plain mutex before the
+// context-aware acquisition, and the filesystem backend has nothing but that
+// mutex (see StorageService.WithLock), so a revocation queued behind a renewal
+// on this replica blocks without a deadline. The budget binds the cross-replica
+// wait on the HA backends and nothing else. A revocation that does fail is safe
+// to retry — revokeSerialLocked short-circuits a serial already listed, so
+// revocation is idempotent — and handlePutStatus reports every failure as 409,
+// since the lock cannot currently tell its own timeout from anything else.
+//
+// Fairness, where the deadline does apply, is the backend's to give. etcd orders
+// waiters by revision and Postgres queues on pg_advisory_lock, so a revocation
+// there is granted the lock in turn; Redis polls SET NX with backoff and MySQL
+// re-attempts GET_LOCK in a loop, so against a stream of renewals from another
+// replica neither offers an ordering guarantee.
 //
 // Lock ordering: subject-lock (distributed) → CRL-lock (distributed) → c.mu,
 // matching Clean, and no path takes those two in the other order. Callers must

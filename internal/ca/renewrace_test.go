@@ -344,6 +344,11 @@ var _ = Describe("A revocation racing a renewal", func() {
 	// here rather than worked around. Move the serial capture ahead of the lock
 	// and PUT /certificate_status answers 204 while the fresh certificate stays
 	// live, which is this branch's own failure mode reached from the other side.
+	//
+	// Exercised sequentially, deliberately: with both waiters on one mutex,
+	// which is granted first is not deterministic, so a concurrent form would be
+	// a flaky spec. The observable claim is pinned; the in-lock append that
+	// produces it is relied upon rather than guarded.
 	It("retires the certificate a renewal issued when the revocation follows it", func() {
 		_, err := myCA.AutoRenew(ctx, ownCrt)
 		Expect(err).NotTo(HaveOccurred())
