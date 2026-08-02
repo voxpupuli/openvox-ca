@@ -104,49 +104,76 @@ func (c *CA) Generate(ctx context.Context, subject string, dnsAltNames []string)
 	}
 	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
 
-	// Acquire lock for the entire evict + save + sign sequence to prevent
-	// TOCTOU races.
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	// Serialise on the cluster-wide per-subject lock, as every other issuance
+	// path does (Sign, SignWithTTL, SaveRequest, Renew, Clean,
+	// ImportCertificate). Generate was the only one holding just c.mu, which
+	// coordinates nothing between processes — so two replicas, or a replica and
+	// an operator running an offline subcommand, could each pass
+	// evictRevokedLocked and both issue for the same subject.
+	//
+	// Lock ordering: subject-lock (distributed) -> c.mu, matching Sign.
+	ctx, cancel := context.WithTimeout(ctx, LockTimeout)
+	defer cancel()
 
-	if err := c.evictRevokedLocked(ctx, subject); err != nil {
-		return nil, err
-	}
+	var result *GenerateResult
+	lockErr := c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
+		c.mu.Lock()
+		defer c.mu.Unlock()
 
-	if err := c.Storage.SaveCSR(ctx, subject, csrPEM); err != nil {
-		return nil, fmt.Errorf("failed to save internal CSR for %s: %w", subject, err)
-	}
-
-	certPEM, err := c.sign(ctx, subject)
-	if err != nil {
-		_ = c.Storage.DeleteCSR(ctx, subject)
-		return nil, fmt.Errorf("failed to sign generated cert for %s: %w", subject, err)
-	}
-
-	// Encode and save the private key.
-	keyPEM, err := marshalPrivateKeyPEM(key)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal private key for %s: %w", subject, err)
-	}
-	if err := c.Storage.SavePrivateKey(ctx, subject, keyPEM); err != nil {
-		// Clean up the just-issued certificate to avoid inconsistent state
-		// where a cert exists on disk but the corresponding private key doesn't.
-		if delErr := c.Storage.DeleteCert(ctx, subject); delErr != nil {
-			slog.Warn("Failed to clean up cert after private key save failure",
-				"subject", subject, "error", delErr)
+		// Re-read the CRL under the lock. evictRevokedLocked decides whether an
+		// existing certificate may be replaced by consulting c.cachedCRL, which
+		// is otherwise only ever populated at Init and by this process's own
+		// revocations. Without this, a subject revoked by another replica after
+		// our Init is invisible here and we answer ErrCertExists where we should
+		// evict and re-issue.
+		if err := c.loadCRLCache(ctx); err != nil {
+			return fmt.Errorf("refreshing CRL cache for %s: %w", subject, err)
 		}
-		return nil, fmt.Errorf("failed to save private key for %s: %w", subject, err)
-	}
 
-	// SECURITY: Log that a private key has been persisted to server storage.
-	// Generated keys remain on disk indefinitely; operators should implement
-	// external lifecycle controls (rotation, cleanup) for these keys.
-	// NIST 800-53: SC-12 (Cryptographic Key Establishment and Management)
-	slog.Debug("Generated private key persisted to server filesystem",
-		"subject", subject, "path", c.Storage.PrivateKeyPath(subject))
-	slog.Debug("Certificate generated", "subject", subject, "algo", string(leafCfg.Algo))
-	return &GenerateResult{
-		PrivateKeyPEM:  keyPEM,
-		CertificatePEM: certPEM,
-	}, nil
+		if err := c.evictRevokedLocked(ctx, subject); err != nil {
+			return err
+		}
+
+		if err := c.Storage.SaveCSR(ctx, subject, csrPEM); err != nil {
+			return fmt.Errorf("failed to save internal CSR for %s: %w", subject, err)
+		}
+
+		certPEM, err := c.sign(ctx, subject)
+		if err != nil {
+			_ = c.Storage.DeleteCSR(ctx, subject)
+			return fmt.Errorf("failed to sign generated cert for %s: %w", subject, err)
+		}
+
+		// Encode and save the private key.
+		keyPEM, err := marshalPrivateKeyPEM(key)
+		if err != nil {
+			return fmt.Errorf("failed to marshal private key for %s: %w", subject, err)
+		}
+		if err := c.Storage.SavePrivateKey(ctx, subject, keyPEM); err != nil {
+			// Clean up the just-issued certificate to avoid inconsistent state
+			// where a cert exists on disk but the corresponding private key doesn't.
+			if delErr := c.Storage.DeleteCert(ctx, subject); delErr != nil {
+				slog.Warn("Failed to clean up cert after private key save failure",
+					"subject", subject, "error", delErr)
+			}
+			return fmt.Errorf("failed to save private key for %s: %w", subject, err)
+		}
+
+		// SECURITY: Log that a private key has been persisted to server storage.
+		// Generated keys remain on disk indefinitely; operators should implement
+		// external lifecycle controls (rotation, cleanup) for these keys.
+		// NIST 800-53: SC-12 (Cryptographic Key Establishment and Management)
+		slog.Debug("Generated private key persisted to server filesystem",
+			"subject", subject, "path", c.Storage.PrivateKeyPath(subject))
+		slog.Debug("Certificate generated", "subject", subject, "algo", string(leafCfg.Algo))
+		result = &GenerateResult{
+			PrivateKeyPEM:  keyPEM,
+			CertificatePEM: certPEM,
+		}
+		return nil
+	})
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	return result, nil
 }

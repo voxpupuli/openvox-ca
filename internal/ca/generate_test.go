@@ -25,12 +25,57 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
+
+// recordingLockBackend wraps a Backend and implements storage.Locker, recording
+// every lock name acquired. The locks themselves are real (a process-local
+// mutex per name) so behaviour is unchanged; only the observation is added.
+type recordingLockBackend struct {
+	storage.Backend
+
+	mu       sync.Mutex
+	locks    map[string]*sync.Mutex
+	acquired []string
+}
+
+func (b *recordingLockBackend) AcquireLock(_ context.Context, name string) (storage.Unlocker, error) {
+	b.mu.Lock()
+	if b.locks == nil {
+		b.locks = map[string]*sync.Mutex{}
+	}
+	m, ok := b.locks[name]
+	if !ok {
+		m = &sync.Mutex{}
+		b.locks[name] = m
+	}
+	b.acquired = append(b.acquired, name)
+	b.mu.Unlock()
+
+	m.Lock()
+	return unlockFunc(m.Unlock), nil
+}
+
+func (b *recordingLockBackend) reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.acquired = nil
+}
+
+func (b *recordingLockBackend) names() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.acquired...)
+}
+
+type unlockFunc func()
+
+func (f unlockFunc) Unlock() error { f(); return nil }
 
 var _ = Describe("CA Generate", func() {
 	var (
@@ -161,5 +206,54 @@ var _ = Describe("CA Generate", func() {
 		data, err := os.ReadFile(keyPath)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(data).To(ContainSubstring("RSA PRIVATE KEY"))
+	})
+
+	Context("serialisation on the per-subject lock", func() {
+		// Asserting on the lock being taken, rather than on the outcome of a
+		// live race. Racing two Generate calls is not a usable regression test
+		// here: on the filesystem backend WithLock degrades to a process-local
+		// mutex, and even without any lock at all the two goroutines serialise
+		// by luck often enough that the spec passes with the fix reverted --
+		// verified, not assumed. A spec that passes either way pins nothing, so
+		// pin the mechanism instead: Generate must route through the named
+		// cluster lock for its subject, which is what makes it correct on the
+		// backends where that lock is real.
+		It("acquires the subject lock before issuing", func() {
+			ctx := context.Background()
+
+			rec := &recordingLockBackend{Backend: storage.NewFilesystemBackend(tmpDir)}
+			recStore := storage.NewWithBackend(rec, filepath.Join(tmpDir, "private"))
+			recCA := ca.New(recStore, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+			Expect(recCA.Init(ctx)).To(Succeed())
+
+			rec.reset()
+			_, err := recCA.Generate(ctx, "locked-node", nil)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(rec.names()).To(ContainElement("subject:locked-node"),
+				"Generate must serialise on the same per-subject lock Sign and Clean use")
+		})
+	})
+
+	Context("CRL cache freshness", func() {
+		It("re-issues when the subject was revoked after this process started", func() {
+			ctx := context.Background()
+
+			// Issue, then revoke through a second CA value sharing the store --
+			// standing in for another replica. This process's cachedCRL was
+			// snapshotted at Init and knows nothing about it.
+			_, err := myCA.Generate(ctx, "stale-crl-node", nil)
+			Expect(err).NotTo(HaveOccurred())
+
+			other := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+			Expect(other.Init(ctx)).To(Succeed())
+			Expect(other.Revoke(ctx, "stale-crl-node")).To(Succeed())
+
+			// Without the re-read under the lock, evictRevokedLocked consults a
+			// CRL that predates the revocation and refuses with ErrCertExists.
+			_, err = myCA.Generate(ctx, "stale-crl-node", nil)
+			Expect(err).NotTo(HaveOccurred(),
+				"a subject revoked elsewhere must be evictable, not reported as still valid")
+		})
 	})
 })
