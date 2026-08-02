@@ -24,6 +24,8 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"sync"
@@ -476,5 +478,168 @@ var _ = Describe("CA GenerateWithOptions", func() {
 			_, err := bare.GenerateWithOptions(ctx, "uninit-node", ca.GenerateOptions{})
 			Expect(err).To(MatchError(ca.ErrNotInitialized))
 		})
+	})
+})
+
+var _ = Describe("CA GenerateWithOptions replacement", func() {
+	var (
+		ctx    context.Context
+		tmpDir string
+		myCA   *ca.CA
+		store  *storage.StorageService
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		var err error
+		tmpDir, err = os.MkdirTemp("", "openvox-ca-replace-test")
+		Expect(err).NotTo(HaveOccurred())
+
+		store = storage.New(tmpDir)
+		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+
+		Expect(store.EnsureDirs(ctx)).To(Succeed())
+		Expect(store.SaveCAKey(ctx, cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(ctx, cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(ctx, cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial(ctx, "0001")).To(Succeed())
+		Expect(store.TouchInventory(ctx)).To(Succeed())
+		Expect(myCA.Init(ctx)).To(Succeed())
+	})
+
+	AfterEach(func() { os.RemoveAll(tmpDir) })
+
+	// Compared as hex strings: big.Int has unexported fields, so gomega's
+	// structural matchers cannot compare them.
+	serialOf := func(r *ca.GenerateResult) string {
+		block, _ := pem.Decode(r.CertificatePEM)
+		Expect(block).NotTo(BeNil())
+		cert, err := x509.ParseCertificate(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		return fmt.Sprintf("%X", cert.SerialNumber)
+	}
+
+	revokedSerials := func() []string {
+		crlPEM, err := store.GetCRL(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		block, _ := pem.Decode(crlPEM)
+		Expect(block).NotTo(BeNil())
+		crl, err := x509.ParseRevocationList(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		out := make([]string, 0, len(crl.RevokedCertificateEntries))
+		for _, e := range crl.RevokedCertificateEntries {
+			out = append(out, fmt.Sprintf("%X", e.SerialNumber))
+		}
+		return out
+	}
+
+	It("revokes the old certificate and issues a new one", func() {
+		first, err := myCA.GenerateWithOptions(ctx, "replace-node", ca.GenerateOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		oldSerial := serialOf(first)
+
+		second, err := myCA.GenerateWithOptions(ctx, "replace-node", ca.GenerateOptions{
+			ReplaceExisting: true,
+		})
+		Expect(err).NotTo(HaveOccurred())
+		newSerial := serialOf(second)
+
+		Expect(newSerial).NotTo(Equal(oldSerial))
+		Expect(revokedSerials()).To(ContainElement(oldSerial))
+		Expect(revokedSerials()).NotTo(ContainElement(newSerial))
+		Expect(store.HasCert(ctx, "replace-node")).To(BeTrue())
+	})
+
+	It("is not an error when there is nothing to replace", func() {
+		// Unlike Clean, which reports ErrNotFound. This command's job is to end
+		// with a certificate, so being asked to replace one that does not exist
+		// is a no-op, not a failure -- which keeps --force usable in scripts.
+		_, err := myCA.GenerateWithOptions(ctx, "fresh-node", ca.GenerateOptions{
+			ReplaceExisting: true,
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(store.HasCert(ctx, "fresh-node")).To(BeTrue())
+	})
+
+	It("revokes the stored certificate's serial, not the inventory's latest", func() {
+		// The inventory's newest row for a subject and the certificate actually
+		// in storage can diverge. revokeLocked resolves the former, which is
+		// why this path uses the stored certificate instead: putting the wrong
+		// serial on the CRL cannot be undone.
+		first, err := myCA.GenerateWithOptions(ctx, "diverged-node", ca.GenerateOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		storedSerial := serialOf(first)
+
+		// Append a newer inventory row for the same subject without touching
+		// the stored certificate.
+		decoyInt := new(big.Int)
+		_, ok := decoyInt.SetString(storedSerial, 16)
+		Expect(ok).To(BeTrue())
+		decoy := fmt.Sprintf("%X", decoyInt.Add(decoyInt, big.NewInt(1)))
+		line := storage.FormatInventoryLine(decoy,
+			time.Now().Add(-time.Hour), time.Now().Add(time.Hour), "diverged-node")
+		Expect(store.AppendInventory(ctx, line)).To(Succeed())
+
+		_, err = myCA.GenerateWithOptions(ctx, "diverged-node", ca.GenerateOptions{
+			ReplaceExisting: true,
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(revokedSerials()).To(ContainElement(storedSerial),
+			"the certificate actually in storage is what was retired")
+		Expect(revokedSerials()).NotTo(ContainElement(decoy),
+			"the inventory's newest row is not the credential being replaced")
+	})
+
+	It("aborts without revoking when the stored certificate cannot be parsed", func() {
+		_, err := myCA.GenerateWithOptions(ctx, "corrupt-node", ca.GenerateOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		before := len(revokedSerials())
+
+		Expect(store.SaveCert(ctx, "corrupt-node", []byte("not a certificate"))).To(Succeed())
+
+		_, err = myCA.GenerateWithOptions(ctx, "corrupt-node", ca.GenerateOptions{
+			ReplaceExisting: true,
+		})
+		Expect(err).To(HaveOccurred())
+		// Not ErrCertExists: that error tells the operator to pass --force,
+		// which is exactly what they did. A dead-end loop is worse than a
+		// blunt message.
+		Expect(err).NotTo(MatchError(ca.ErrCertExists))
+		Expect(err.Error()).To(ContainSubstring("openvox-ca-ctl clean"))
+		Expect(revokedSerials()).To(HaveLen(before), "nothing may be revoked when the read fails")
+	})
+
+	It("does not deadlock against a concurrent CRL refresh", func() {
+		// The replacement path nests the CRL lock inside the subject lock.
+		// c.mu is non-reentrant and every other lockNameCRL acquisition takes
+		// the distributed lock first, so holding c.mu across the nested
+		// WithLock would invert the ordering against RefreshCRLIfDue and wedge
+		// the process.
+		_, err := myCA.GenerateWithOptions(ctx, "deadlock-node", ca.GenerateOptions{})
+		Expect(err).NotTo(HaveOccurred())
+
+		done := make(chan error, 2)
+		go func() {
+			defer GinkgoRecover()
+			_, err := myCA.RefreshCRLIfDue(ctx, 100*365*24*time.Hour) // always due
+			done <- err
+		}()
+		go func() {
+			defer GinkgoRecover()
+			_, err := myCA.GenerateWithOptions(ctx, "deadlock-node", ca.GenerateOptions{
+				ReplaceExisting: true,
+			})
+			done <- err
+		}()
+
+		for range 2 {
+			select {
+			case err := <-done:
+				Expect(err).NotTo(HaveOccurred())
+			case <-time.After(30 * time.Second):
+				Fail("deadlock: the replacement path and a CRL refresh blocked each other")
+			}
+		}
 	})
 })

@@ -19,7 +19,9 @@ package ca
 
 import (
 	"context"
+	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -73,6 +75,12 @@ type GenerateOptions struct {
 	// TTL overrides the certificate lifetime. Zero means the configured
 	// LeafValidityDays, or the built-in default when that is unset.
 	TTL time.Duration
+
+	// ReplaceExisting revokes the certificate currently stored for the subject
+	// and issues a replacement, rather than failing with ErrCertExists. It is
+	// not an error when there is nothing to replace: the job is to end with a
+	// certificate, not to remove one.
+	ReplaceExisting bool
 
 	// RetainPrivateKeyInStorage saves the generated key to
 	// private/{subject}_key.pem. The zero value does not: a key the CA has no
@@ -202,20 +210,77 @@ func (c *CA) GenerateWithOptions(ctx context.Context, subject string, opts Gener
 
 	var result *GenerateResult
 	lockErr := c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
+		// Read phase. Its own closure because c.mu must not be held across the
+		// nested CRL lock below: c.mu is a non-reentrant RWMutex, and every
+		// lockNameCRL acquisition in this package takes the distributed lock
+		// first and c.mu second. Holding c.mu across WithLock would invert that
+		// ordering against RefreshCRLIfDue and Revoke.
+		serial, replacing, err := func() (string, bool, error) {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+
+			// Re-read the CRL under the lock. evictRevokedLocked decides whether an
+			// existing certificate may be replaced by consulting c.cachedCRL, which
+			// is otherwise only ever populated at Init and by this process's own
+			// revocations. Without this, a subject revoked by another replica after
+			// our Init is invisible here and we answer ErrCertExists where we should
+			// evict and re-issue.
+			if err := c.loadCRLCache(ctx); err != nil {
+				return "", false, fmt.Errorf("refreshing CRL cache for %s: %w", subject, err)
+			}
+			if !opts.ReplaceExisting || !c.Storage.HasCert(ctx, subject) {
+				return "", false, nil
+			}
+			s, err := c.storedCertSerialLocked(ctx, subject)
+			if err != nil {
+				return "", false, err
+			}
+			return s, true, nil
+		}()
+		if err != nil {
+			return err
+		}
+
+		// Revoke phase. CRL lock outside c.mu, matching AutoRenew.
+		//
+		// The serial comes from the stored certificate, not from
+		// LatestSerialForSubject: revokeLocked resolves the latter, and
+		// revoke.go warns against exactly that for replacement paths, because
+		// the inventory's newest row for a subject and the certificate actually
+		// in storage can differ. Revoking the wrong serial is irreversible.
+		if replacing {
+			if err := c.Storage.WithLock(ctx, lockNameCRL, func() error {
+				c.mu.Lock()
+				defer c.mu.Unlock()
+				return c.revokeSerialLocked(ctx, serial)
+			}); err != nil {
+				// Fail closed. Clean logs and continues here because it is
+				// removing the certificate either way; a replacement path that
+				// did the same would leave two live certificates for one
+				// subject, which is what the subject lock exists to prevent.
+				return fmt.Errorf("could not revoke the existing certificate for %s, "+
+					"so no replacement was issued: %w", subject, err)
+			}
+		}
+
+		// Issue phase.
 		c.mu.Lock()
 		defer c.mu.Unlock()
 
-		// Re-read the CRL under the lock. evictRevokedLocked decides whether an
-		// existing certificate may be replaced by consulting c.cachedCRL, which
-		// is otherwise only ever populated at Init and by this process's own
-		// revocations. Without this, a subject revoked by another replica after
-		// our Init is invisible here and we answer ErrCertExists where we should
-		// evict and re-issue.
-		if err := c.loadCRLCache(ctx); err != nil {
-			return fmt.Errorf("refreshing CRL cache for %s: %w", subject, err)
+		if replacing {
+			// signCRLLocked refreshes the cache when it appends, but
+			// revokeSerialLocked returns early without calling it when the
+			// serial was already on the CRL. Re-read so evictRevokedLocked sees
+			// the revocation either way.
+			if err := c.loadCRLCache(ctx); err != nil {
+				return c.replacementFailed(subject, fmt.Errorf("refreshing CRL cache: %w", err))
+			}
 		}
 
 		if err := c.evictRevokedLocked(ctx, subject); err != nil {
+			if replacing {
+				return c.replacementFailed(subject, err)
+			}
 			return err
 		}
 
@@ -223,6 +288,9 @@ func (c *CA) GenerateWithOptions(ctx context.Context, subject string, opts Gener
 			pkix.Name{CommonName: subject}, key.Public(),
 			subjectAltNames{DNSNames: dnsNames}, extraExtensions, opts.TTL)
 		if err != nil {
+			if replacing {
+				return c.replacementFailed(subject, err)
+			}
 			return err
 		}
 
@@ -278,4 +346,44 @@ func (c *CA) GenerateWithOptions(ctx context.Context, subject string, opts Gener
 		return nil, lockErr
 	}
 	return result, nil
+}
+
+// storedCertSerialLocked returns the serial of the certificate currently stored
+// for subject, for a replacement to revoke. c.mu must be held.
+//
+// The stored certificate is the authority here, not the inventory: that is what
+// evictRevokedLocked consults, and revoking anything else would put a serial on
+// the CRL that does not correspond to the credential being retired.
+func (c *CA) storedCertSerialLocked(ctx context.Context, subject string) (string, error) {
+	certPEM, err := c.Storage.GetCert(ctx, subject)
+	if err != nil {
+		return "", fmt.Errorf("reading the stored certificate for %s: %w", subject, err)
+	}
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		// Do not fall through to issuance. evictRevokedLocked also fails an
+		// unparseable certificate, but it does so with ErrCertExists, whose
+		// remedy is "pass --force" -- which is what the operator just did. Say
+		// something they can act on instead.
+		return "", fmt.Errorf("the stored certificate for %s cannot be decoded; remove it with "+
+			"'openvox-ca-ctl clean --certname %s' and retry", subject, subject)
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return "", fmt.Errorf("the stored certificate for %s cannot be parsed (%v); remove it with "+
+			"'openvox-ca-ctl clean --certname %s' and retry", subject, err, subject)
+	}
+	return serialHexStr(cert.SerialNumber), nil
+}
+
+// replacementFailed wraps a failure that happens after the old certificate has
+// already been revoked.
+//
+// This state is not recoverable by retrying blindly: CRL entries are only ever
+// appended, so the predecessor stays revoked whatever happens next. Surfacing
+// the bare error would be worse than unhelpful for ErrCertExists, whose message
+// tells the operator to pass --force -- which is how they got here.
+func (c *CA) replacementFailed(subject string, err error) error {
+	return fmt.Errorf("the existing certificate for %s was revoked, but no replacement was issued: %w."+
+		"\nThat revocation cannot be undone. Re-run to issue a replacement", subject, err)
 }
