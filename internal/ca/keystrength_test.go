@@ -138,4 +138,38 @@ var _ = Describe("Client CSR key-strength policy", func() {
 			Expect(err).To(HaveOccurred(), "Sign must reject a stored weak-key CSR")
 		})
 	})
+
+	Context("at the chokepoint itself", func() {
+		// The policy check lives in issueLeafLocked, ahead of serial allocation
+		// and every write. These pin that placement: a rejection must be free,
+		// consuming no serial and leaving no trace in the inventory. If the
+		// check drifts below the serial or the SaveCert, a refused weak key
+		// starts burning inventory rows and the CA's own records stop matching
+		// what it issued.
+		It("classifies the rejection as ErrKeyPolicy", func() {
+			key, err := rsa.GenerateKey(rand.Reader, 1024)
+			Expect(err).NotTo(HaveOccurred())
+
+			myCA := newCA("true")
+			_, err = myCA.SaveRequest(ctx, "policy-node", csrPEMFor("policy-node", key))
+			Expect(err).To(MatchError(ca.ErrKeyPolicy),
+				"the sentinel is what the HTTP layer discriminates on to answer 4xx, not 5xx")
+		})
+
+		It("consumes no inventory row for a rejected key", func() {
+			myCA := newCA("true")
+
+			before, err := store.ReadInventory(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			key, err := rsa.GenerateKey(rand.Reader, 1024)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = myCA.SaveRequest(ctx, "no-row-node", csrPEMFor("no-row-node", key))
+			Expect(err).To(HaveOccurred())
+
+			after, err := store.ReadInventory(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(after).To(Equal(before), "a refused key must not append an inventory row")
+		})
+	})
 })
