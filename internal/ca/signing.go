@@ -264,13 +264,14 @@ func (c *CA) assertNotRevoked(ctx context.Context, cert *x509.Certificate) error
 // the CRL, and a per-replica measure of cache staleness belongs with the CRL
 // cache work rather than bolted onto the renewal path.
 //
-// One window this does not close. Revoke serialises on lockNameCRL alone, never
-// on the per-subject lock, so an operator revocation that starts after this
-// check has passed can still resolve the outgoing serial while the replacement
-// is being minted. That is a millisecond-scale race against the issuance
-// itself, not the up-to-lockTimeout wait this method exists to close, and
-// shutting it would mean making revocation queue behind every in-flight
-// operation for the subject.
+// Nothing can revoke between this check and the issuance it guards. Revoke
+// takes the per-subject lock before the CRL lock (see its godoc), so a
+// revocation for this subject either commits before the renewal acquires that
+// lock — where this check sees it — or waits until the renewal has finished and
+// then retires the serial that renewal issued. Were Revoke to serialise on
+// lockNameCRL alone, an operator revocation starting after this check passed
+// could still resolve the outgoing serial while the replacement was being
+// minted: the same defect as the lock-wait window above, over a shorter one.
 //
 // The caller must NOT hold c.mu.
 func (c *CA) reassertNotRevoked(ctx context.Context, cert *x509.Certificate) error {

@@ -32,6 +32,26 @@ import (
 // Revoke serialises on the cluster-wide "crl" lock so concurrent revocations
 // (and any future CRL rotation) on different replicas cannot both read the
 // same CRL, each append their own entry, and clobber one another's write.
+//
+// It takes the per-subject lock first, as Clean does. Without it reassertNotRevoked
+// would still be a check-then-act: a revocation resolving the outgoing serial
+// while the replacement is being minted is defeated exactly as one landing
+// during the lock wait is, only over a shorter window. Holding the subject lock
+// leaves a revocation two orderings against a renewal for the same subject, and
+// both are answers rather than races — it commits first and the re-check refuses
+// the renewal, or the renewal completes and the revocation then retires the
+// serial that renewal issued.
+//
+// The cost is that a revocation now waits for an issuance already under way for
+// that subject, which is the same trade Clean has always made (see the lock note
+// there); PUT /certificate_status is not on a latency budget, and one signing
+// operation is the most it can wait behind.
+//
+// Lock ordering: subject-lock (distributed) → CRL-lock (distributed) → c.mu,
+// matching Clean, and no path takes those two in the other order. Callers must
+// therefore not already hold the subject lock: those that do — Clean, and the
+// post-issue revokes in Renew and AutoRenew — reach revokeLocked or
+// revokeSerialLocked directly rather than coming through here.
 func (c *CA) Revoke(ctx context.Context, subject string) error {
 	if err := ValidateSubject(subject); err != nil {
 		return err
@@ -39,10 +59,12 @@ func (c *CA) Revoke(ctx context.Context, subject string) error {
 
 	ctx, cancel := context.WithTimeout(ctx, lockTimeout)
 	defer cancel()
-	return c.Storage.WithLock(ctx, lockNameCRL, func() error {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		return c.revokeLocked(ctx, subject)
+	return c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
+		return c.Storage.WithLock(ctx, lockNameCRL, func() error {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			return c.revokeLocked(ctx, subject)
+		})
 	})
 }
 

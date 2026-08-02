@@ -65,25 +65,47 @@ import (
 // outage, and nothing about what the cache is still allowed to refuse.
 var _ = Describe("A revocation racing a renewal", func() {
 	var (
-		ctx    context.Context
-		store  *storage.StorageService
-		myCA   *CA
-		ownCrt *x509.Certificate
-		csrPEM []byte
+		ctx      context.Context
+		storeDir string
+		store    *storage.StorageService
+		myCA     *CA
+		ownCrt   *x509.Certificate
+		csrPEM   []byte
 	)
 
-	// replica returns a second CA over the same storage, as another process
+	// replicaOn returns a second CA over the given storage, as another process
 	// serving the same cluster would see it. Its Init loads the CA already
 	// bootstrapped there rather than minting a new one, so a revocation it
 	// performs is this CA's own certificate being revoked — reaching storage,
 	// and myCA's in-memory CRL cache not at all.
-	replica := func() *CA {
+	replicaOn := func(s *storage.StorageService) *CA {
 		GinkgoHelper()
-		r := New(store, AutosignConfig{Mode: "off"}, "puppet.test")
+		r := New(s, AutosignConfig{Mode: "off"}, "puppet.test")
 		r.CAKeyConfig = KeyConfig{Algo: KeyAlgoECDSA, Size: 256}
 		r.LeafKeyConfig = KeyConfig{Algo: KeyAlgoECDSA, Size: 256}
 		Expect(r.Init(ctx)).To(Succeed())
 		return r
+	}
+
+	replica := func() *CA {
+		GinkgoHelper()
+		return replicaOn(store)
+	}
+
+	// unlockedReplica is replica() over a second StorageService on the same
+	// directory, so it shares the CA's state but none of its named locks: the
+	// filesystem backend has no distributed locker, and WithLock falls back to
+	// a mutex map held per StorageService.
+	//
+	// The lock-wait spec needs that. Revoke takes the per-subject lock now, so a
+	// revocation issued through `store` would queue behind the lock that spec
+	// holds instead of committing during the wait. What survives on a real HA
+	// backend, where the lock genuinely is shared, is the ordering this stands
+	// in for: a revocation that reached storage before the renewal acquired the
+	// lock, which the re-check must still refuse.
+	unlockedReplica := func() *CA {
+		GinkgoHelper()
+		return replicaOn(storage.New(storeDir))
 	}
 
 	// servedSerial is the serial of the certificate storage currently serves for
@@ -116,7 +138,8 @@ var _ = Describe("A revocation racing a renewal", func() {
 
 	BeforeEach(func() {
 		ctx = context.Background()
-		store = storage.New(GinkgoT().TempDir())
+		storeDir = GinkgoT().TempDir()
+		store = storage.New(storeDir)
 		myCA = replica()
 
 		res, err := myCA.Generate(ctx, "node1.test", nil)
@@ -218,8 +241,11 @@ var _ = Describe("A revocation racing a renewal", func() {
 			// The revocation lands mid-wait. Performed on another replica so
 			// that whether the renewal reached its pre-lock gate before or after
 			// this line cannot decide the outcome: that gate reads myCA's cache,
-			// which this leaves untouched either way.
-			Expect(replica().Revoke(ctx, "node1.test")).To(Succeed())
+			// which this leaves untouched either way. It must be the replica
+			// with its own lock namespace — Revoke takes the per-subject lock,
+			// so one sharing this store would queue behind the lock held above
+			// rather than commit here.
+			Expect(unlockedReplica().Revoke(ctx, "node1.test")).To(Succeed())
 
 			// Nothing decided yet — and this is the half that a re-check hoisted
 			// back above the lock fails. Such a re-check answers before blocking:
@@ -236,6 +262,50 @@ var _ = Describe("A revocation racing a renewal", func() {
 		Entry("on the empty-body path", func() error { return autoRenew() }),
 		Entry("on the CSR path", func() error { return csrRenew() }),
 	)
+
+	// The re-check is only worth its lock if nothing can revoke between it and
+	// the issuance it guards. Revoke takes the same per-subject lock to make
+	// that so; drop it and the defect this branch closes comes back over a
+	// shorter window, with every other spec here still passing.
+	It("makes a revocation wait for an issuance already under way", func() {
+		locked, release := make(chan struct{}), make(chan struct{})
+		held := make(chan error, 1)
+		var releaseOnce sync.Once
+		DeferCleanup(func() { releaseOnce.Do(func() { close(release) }) })
+		go func() {
+			defer GinkgoRecover()
+			held <- store.WithLock(ctx, subjectLockName("node1.test"), func() error {
+				close(locked)
+				<-release
+				return nil
+			})
+		}()
+		Eventually(locked).Should(BeClosed())
+
+		revoked := make(chan error, 1)
+		finished := make(chan struct{})
+		go func() {
+			defer GinkgoRecover()
+			defer close(finished)
+			revoked <- myCA.Revoke(ctx, "node1.test")
+		}()
+		DeferCleanup(func() {
+			releaseOnce.Do(func() { close(release) })
+			Eventually(finished).Should(BeClosed())
+		})
+
+		// A Revoke that took only the CRL lock would be done by now, having
+		// stepped straight past an issuance holding the subject lock.
+		Consistently(revoked, 100*time.Millisecond).ShouldNot(Receive())
+
+		releaseOnce.Do(func() { close(release) })
+		Expect(<-held).To(Succeed())
+
+		Eventually(revoked).Should(Receive(BeNil()))
+		isRevoked, err := myCA.IsRevokedSerial(ctx, ownCrt.SerialNumber)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(isRevoked).To(BeTrue(), "waiting for the lock must not lose the revocation")
+	})
 
 	It("still refuses from the cache when the stored CRL cannot be read", func() {
 		// The fallback, posed directly because no renewal can pose it: the two

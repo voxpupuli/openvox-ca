@@ -19,6 +19,8 @@ All endpoints are served under both the bare path and `/puppet-ca/v1/<path>`, so
 { "desired_state": "signed", "cert_ttl": 86400 }
 ```
 
+A revocation (`"desired_state": "revoked"`) takes the per-subject lock that signing and [renewal](#certificate-renewal) take, so it waits for an issuance already under way for that subject instead of overlapping it. That is what stops an in-flight renewal minting a replacement from the credential being withdrawn.
+
 `GET` response:
 
 ```json
@@ -71,7 +73,9 @@ Requires a valid CA-signed client certificate. The new certificate is issued imm
 
 **When the revocation question is answered.** Not once on arrival, but again immediately before the replacement is issued, with the per-subject lock held. Waiting for that lock can take up to 60 seconds, and a revocation landing inside that window should bind the renewal it overlaps rather than lose a race with it. The second look reads the CRL from storage, so on the [HA backends](storage-backends.md) a revocation performed on *another* replica refuses the renewal here too — with `403 certificate not eligible for renewal`, since the middleware admitted the request from this replica's [not-yet-updated cache](#revocation-cluster-wide) — without waiting for that cache to catch up.
 
-Two limits worth knowing. If the stored CRL cannot be read at all, the renewal falls back to this replica's cached answer rather than being refused, so an unreadable CRL is not a renewal outage; the condition is logged as a warning and nothing else. And the second look does not serialise against revocation itself — `PUT /certificate_status/{subject}` takes only the CRL lock — so a revocation starting after the check has passed can still overlap the issuance it was meant to stop. That residual window is the length of one signing operation, not the lock wait above.
+One limit worth knowing. If the stored CRL cannot be read at all, the renewal falls back to this replica's cached answer rather than being refused, so an unreadable CRL is not a renewal outage; the condition is logged as a warning and nothing else.
+
+Nothing can revoke in the gap between that second look and the issuance it guards: [`PUT /certificate_status/{subject}`](#certificate-status) takes the same per-subject lock, so a revocation either commits before the renewal reaches the lock — where the second look refuses it — or waits for the renewal to finish and then retires the serial that renewal issued. The cost is that a revocation waits behind an issuance already under way for the same subject, which is at most one signing operation.
 
 One consequence is worth knowing. Because a successful renewal revokes the certificate it replaced — always on the re-key path, and on the empty-body path unless `revoke_on_auto_renew` is disabled — an agent whose renewal response was lost in transit can no longer *retry the renewal*: the serial it still presents is revoked in shared storage, so now every replica refuses it and not just the one that issued the replacement. It is not locked out. The replacement is already in shared storage and already matches a key the agent holds — the same key on the empty-body path, the CSR's key on the re-key path — so `GET /certificate/{subject}` recovers it, unauthenticated — the same fetch an agent makes when it is waiting for a certificate to be signed. An agent that has not written the replacement to disk needs that fetch before its next run can authenticate.
 
