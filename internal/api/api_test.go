@@ -1579,6 +1579,54 @@ var _ = Describe("API Workflow", func() {
 			Expect(rr.Code).To(Equal(http.StatusOK))
 		})
 
+		// Both renewal arms take the same per-subject lock as signing and
+		// /generate, so both can lose it. Covered separately because they are
+		// separate code paths: an empty body reaches AutoRenew, a CSR body
+		// reaches Renew, and each has its own error mapping.
+		DescribeTable("should return 503, not 500, when the subject lock cannot be taken",
+			func(withCSR bool) {
+				lockDir, err := os.MkdirTemp("", "openvox-ca-renewlock-test")
+				Expect(err).NotTo(HaveOccurred())
+				defer os.RemoveAll(lockDir)
+
+				failing := &lockFailBackend{Backend: storage.NewFilesystemBackend(lockDir)}
+				failStore := storage.NewWithBackend(failing, filepath.Join(lockDir, "private"))
+				Expect(failStore.EnsureDirs(context.Background())).To(Succeed())
+				Expect(failStore.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+				Expect(failStore.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+				Expect(failStore.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
+				Expect(failStore.WriteSerial(context.Background(), "0001")).To(Succeed())
+				Expect(failStore.TouchInventory(context.Background())).To(Succeed())
+
+				failCA := ca.New(failStore, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+				Expect(failCA.Init(context.Background())).To(Succeed())
+
+				// Mint a certificate to renew while the lock still works.
+				result, err := failCA.Generate(context.Background(), subject, nil)
+				Expect(err).NotTo(HaveOccurred())
+				block, _ := pem.Decode(result.CertificatePEM)
+				Expect(block).NotTo(BeNil())
+				presented, err := x509.ParseCertificate(block.Bytes)
+				Expect(err).NotTo(HaveOccurred())
+
+				failing.fail = true
+
+				var body []byte
+				if withCSR {
+					body, err = testutil.GenerateCSR(subject)
+					Expect(err).NotTo(HaveOccurred())
+				}
+				req := httptest.NewRequest("POST", "/certificate_renewal", bytes.NewReader(body))
+				req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{presented}}
+				rr := httptest.NewRecorder()
+				api.New(failCA).Routes().ServeHTTP(rr, req)
+
+				Expect(rr.Code).To(Equal(http.StatusServiceUnavailable))
+			},
+			Entry("empty body, via AutoRenew", false),
+			Entry("CSR body, via Renew", true),
+		)
+
 		It("should return 403 when no client certificate is presented", func() {
 			renewCSR, err := testutil.GenerateCSR(subject)
 			Expect(err).NotTo(HaveOccurred())

@@ -337,9 +337,13 @@ The probe cannot be folded into `WithLock` — that would add a lock round trip
 to every `Sign` — so the two necessarily duplicate the classification. A
 `DescribeTable` in
 [internal/storage/capability_test.go](../../internal/storage/capability_test.go)
-runs each backend through both and asserts they agree; that spec is what keeps
-them from drifting, not the type system. **A new backend must be added to that
-table**, or its classification is unverified.
+runs the backends constructible without a live service — `filesystem`, `sqlite`
+and a stub `Locker` — through both and asserts they agree. That spec is what
+keeps the probe and `WithLock` from drifting, not the type system. The
+networked backends (`postgres`, `mysql`, `etcd`, `redis`) are classified by the
+code above rather than by a spec, because the table needs no running service.
+**Add a new backend to that table when it can be constructed in-process**, and
+otherwise state its classification here.
 
 `ErrLockUnavailable` (backend.go) is the sentinel `WithLock` wraps around an
 acquisition failure. It is a cross-package contract: the HTTP layer

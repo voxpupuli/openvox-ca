@@ -515,12 +515,15 @@ for CA admin.
 Mint one offline instead:
 
 ```bash
-openvox-ca generate --certname admin-cli --ttl 8760h --pp-cli-auth \
-  --key-out admin-cli_key.pem > admin-cli.crt
+openvox-ca generate --cadir "$NEW_CADIR" --certname admin-cli \
+  --ttl 8760h --pp-cli-auth --key-out admin-cli_key.pem > admin-cli.crt
 ```
 
 Run it on the CA host, against the server's own configuration. No running
-server, no admin certificate, and no API.
+server, no admin certificate, and no API. `--cadir` is spelled out because this
+guide configures the server entirely by flag and never writes
+`/etc/puppet-ca/config.yaml`; where that file does exist, the command reads the
+cadir from it and the flag can be dropped.
 
 This is not merely a shorter recipe than signing with `openssl` by hand. It
 needs no access to the raw CA key, so it works under `ca_key_provider: openbao`
@@ -563,8 +566,8 @@ openvox-ca-ctl import-cert --certname admin-tool --cert-file admin.crt
 openvox-ca-ctl revoke --certname admin-tool
 
 # 3. Restart every replica so the revocation is honoured, then re-mint.
-openvox-ca generate --certname admin-tool --ttl 8760h --pp-cli-auth \
-  --key-out admin-tool_key.pem > admin-tool.crt
+openvox-ca generate --cadir "$NEW_CADIR" --certname admin-tool \
+  --ttl 8760h --pp-cli-auth --key-out admin-tool_key.pem > admin-tool.crt
 ```
 
 Note that step 1 is an admin-authenticated API call and needs a running server —
