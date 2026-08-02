@@ -15,11 +15,14 @@ interface. Every backend serves the following logical keys:
 | `ca_cert` | CA certificate (PEM) | bootstrap / import |
 | `ca_pubkey` | CA public key (PEM, companion to `ca_cert`) | bootstrap |
 | `ca_key` | CA private key (PEM, optionally AES-256-GCM encrypted) | bootstrap / import |
-| `crl` | Current Certificate Revocation List (PEM) | bootstrap, revoke, rotate |
+| `crl` | Certificate Revocation List (PEM). May hold several concatenated CRLs when a chain has been imported: this CA's own first, ancestors after it. The re-sign path (`readStoredCRL`) and every reader that parses a single CRL (`loadCRLCache`, the metrics collector, `/expirations`) take block 0; the whole-blob consumers are `GET`/`PUT /certificate_revocation_list/ca`, the Kubernetes exporter, and — to preserve ancestor blocks — `crlChainLocked` on the re-sign path and `storedCRLChain` on the import path. Revocation questions are answered from `cachedCRL`, which `loadCRLCache` fills with the block this CA signed — block 0 normally, searching the rest of the chain if a foreign block leads | bootstrap, revoke, rotate, import |
 | `serial` | Next leaf certificate serial counter | sign |
 | `inventory` | Append-only log of issued/revoked certificates | sign / revoke |
 | `inventory_hmac` | Inventory integrity head (blob HMAC or hash chain on SQL) | sign / revoke |
 | `hmac_key` | Integrity key for `inventory_hmac` | first run |
+| `serving_cert` | Serving certificate the API listener presents (PEM) | `tls_self_provision` |
+| `serving_key` | Serving private key (PEM, optionally AES-256-GCM encrypted) | `tls_self_provision` |
+| `serving_superseded` | Pending revocations for replaced serving certificates (JSON) | `tls_self_provision` |
 | `csr/<subject>` | Pending certificate signing request (PEM), per subject | CSR submission |
 | `cert/<subject>` | Issued certificate (PEM), per subject | sign |
 
@@ -36,8 +39,11 @@ keys are whole-blob read/write/delete.
 ├── serial                          (KeySerial)
 ├── inventory.txt                   (KeyInventory)
 ├── .inventory.hmac                 (KeyInventoryHMAC)
+├── serving_cert.pem                (KeyServingCert)
+├── serving_superseded.json         (KeyServingSuperseded)
 ├── private/
 │   ├── ca_key.pem                  (KeyCAKey)          0600
+│   ├── serving_key.pem             (KeyServingKey)     0600
 │   ├── .inventory_hmac_key         (KeyHMACKey)        0600
 │   └── <subject>_key.pem           server-gen keys     0600
 ├── requests/
@@ -62,6 +68,9 @@ With the default prefix `/puppet-ca`:
 | `inventory` | `/puppet-ca/inventory/data` |
 | `inventory_hmac` | `/puppet-ca/inventory/hmac` |
 | `hmac_key` | `/puppet-ca/private/hmac_key` |
+| `serving_cert` | `/puppet-ca/serving/cert` |
+| `serving_key` | `/puppet-ca/private/serving_key` |
+| `serving_superseded` | `/puppet-ca/serving/superseded` |
 | `csr/<subject>` | `/puppet-ca/requests/<subject>` |
 | `cert/<subject>` | `/puppet-ca/signed/<subject>` |
 
@@ -111,6 +120,9 @@ separator):
 | `inventory` | `puppet-ca:inventory:data` |
 | `inventory_hmac` | `puppet-ca:inventory:hmac` |
 | `hmac_key` | `puppet-ca:private:hmac_key` |
+| `serving_cert` | `puppet-ca:serving:cert` |
+| `serving_key` | `puppet-ca:private:serving_key` |
+| `serving_superseded` | `puppet-ca:serving:superseded` |
 | `csr/<subject>` | `puppet-ca:requests:<subject>` |
 | `cert/<subject>` | `puppet-ca:signed:<subject>` |
 

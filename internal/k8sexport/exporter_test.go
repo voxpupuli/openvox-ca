@@ -18,8 +18,10 @@
 package k8sexport_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -65,6 +67,27 @@ func metricValue(reg *prometheus.Registry, name string, labels map[string]string
 		}
 	}
 	return 0, false
+}
+
+// growingSource returns single-block material on the first read of each
+// material and multi-block thereafter, modelling a CA that has a chain imported
+// while the process is running.
+type growingSource struct {
+	certCalls, crlCalls *int
+	single, multi       string
+}
+
+func (g growingSource) GetCACert(context.Context) ([]byte, error) {
+	*g.certCalls++
+	if *g.certCalls == 1 {
+		return []byte(g.single), nil
+	}
+	return []byte(g.multi), nil
+}
+
+func (g growingSource) GetCRL(context.Context) ([]byte, error) {
+	*g.crlCalls++
+	return []byte("-----BEGIN X509 CRL-----\nT1VSUw==\n-----END X509 CRL-----\n"), nil
 }
 
 // stubSource is a MaterialSource returning fixed PEM bytes.
@@ -402,5 +425,278 @@ var _ = Describe("Exporter", func() {
 
 		_, err := client.CoreV1().Secrets("").Get(ctx, "trust", metav1.GetOptions{})
 		Expect(err).To(HaveOccurred()) // never created
+	})
+})
+
+var _ = Describe("Export scopes", func() {
+	// Chains run leaf/intermediate first, root last — the order the CA stores
+	// and every consumer expects.
+	const (
+		// Three blocks, not two: with two, "the last certificate" and "the
+		// second certificate" are the same block, so a root scope that returned
+		// blocks[1] would pass. The middle block is what tells them apart.
+		certChain = "-----BEGIN CERTIFICATE-----\nSU5URVJNRURJQVRF\n-----END CERTIFICATE-----\n" +
+			"-----BEGIN CERTIFICATE-----\nTUlERExF\n-----END CERTIFICATE-----\n" +
+			"-----BEGIN CERTIFICATE-----\nUk9PVA==\n-----END CERTIFICATE-----\n"
+		crlChain = "-----BEGIN X509 CRL-----\nT1VSUw==\n-----END X509 CRL-----\n" +
+			"-----BEGIN X509 CRL-----\nVVBTVFJFQU0=\n-----END X509 CRL-----\n"
+	)
+
+	var (
+		ctx    context.Context
+		client *fake.Clientset
+		src    stubSource
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		client = fake.NewClientset()
+		src = stubSource{cert: []byte(certChain), crl: []byte(crlChain)}
+	})
+
+	exportWith := func(certScope, crlScope string) map[string][]byte {
+		GinkgoHelper()
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind:      "Secret",
+			Metadata:  k8sexport.Metadata{Name: "trust", Namespace: "ns1"},
+			Cert:      true,
+			CRL:       true,
+			CertScope: certScope,
+			CRLScope:  crlScope,
+		}}}
+		Expect(cfg.Validate()).To(Succeed())
+		Expect(k8sexport.New(client, *cfg, src, "", nil).ExportAll(ctx)).To(Succeed())
+		sec, err := client.CoreV1().Secrets("ns1").Get(ctx, "trust", metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		return sec.Data
+	}
+
+	It("defaults to self, publishing only this CA's own blocks", func() {
+		// The narrow default: an export target usually feeds one consumer's
+		// trust bundle, where a whole chain is rarely what is wanted.
+		data := exportWith("", "")
+		Expect(string(data["ca.crt"])).To(ContainSubstring("SU5URVJNRURJQVRF"))
+		Expect(string(data["ca.crt"])).NotTo(ContainSubstring("Uk9PVA=="))
+		Expect(string(data["ca.crl"])).To(ContainSubstring("T1VSUw=="))
+		Expect(string(data["ca.crl"])).NotTo(ContainSubstring("VVBTVFJFQU0="))
+	})
+
+	It("publishes the whole chain under chain", func() {
+		data := exportWith("chain", "chain")
+		Expect(string(data["ca.crt"])).To(Equal(certChain))
+		Expect(string(data["ca.crl"])).To(Equal(crlChain))
+	})
+
+	It("publishes the trust anchor under root", func() {
+		// root is positional: the last block, whatever it is. It is a trust
+		// anchor only if the imported bundle was a complete chain, which
+		// nothing currently enforces — see the scopes section of
+		// docs/kubernetes-export.md.
+		data := exportWith("root", "")
+		Expect(string(data["ca.crt"])).To(ContainSubstring("Uk9PVA=="))
+		Expect(string(data["ca.crt"])).NotTo(ContainSubstring("SU5URVJNRURJQVRF"))
+		Expect(string(data["ca.crt"])).NotTo(ContainSubstring("TUlERExF"),
+			"root must be the last block, not merely a later one")
+	})
+
+	It("applies the same scoping to a ConfigMap target", func() {
+		// Secret and ConfigMap build their data through different methods.
+		// Asserting only the Secret leaves the ConfigMap free to regress to
+		// whole-chain output with the suite green.
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind:      "ConfigMap",
+			Metadata:  k8sexport.Metadata{Name: "trust", Namespace: "ns1"},
+			Cert:      true,
+			CRL:       true,
+			CertScope: "root",
+			CRLScope:  "chain",
+		}}}
+		Expect(cfg.Validate()).To(Succeed())
+		Expect(k8sexport.New(client, *cfg, src, "", nil).ExportAll(ctx)).To(Succeed())
+
+		cm, err := client.CoreV1().ConfigMaps("ns1").Get(ctx, "trust", metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cm.Data["ca.crt"]).To(ContainSubstring("Uk9PVA=="))
+		Expect(cm.Data["ca.crt"]).NotTo(ContainSubstring("SU5URVJNRURJQVRF"))
+		Expect(cm.Data["ca.crl"]).To(Equal(crlChain))
+	})
+
+	DescribeTable("is unchanged for a single-block chain, whichever scope is asked for",
+		// The half of back-compatibility that does hold: a CA that issued its
+		// own root stores one block, so all three scopes agree. A CA that
+		// imported a chain is the case where the self default narrows what was
+		// being published.
+		func(scope string) {
+			single := "-----BEGIN CERTIFICATE-----\nT05MWQ==\n-----END CERTIFICATE-----\n"
+			src = stubSource{cert: []byte(single), crl: []byte(crlChain)}
+			Expect(string(exportWith(scope, "chain")["ca.crt"])).To(Equal(single))
+		},
+		Entry("defaulted", ""),
+		Entry("chain", "chain"),
+		Entry("root", "root"),
+	)
+
+	It("publishes block 0 for self even when block 0 is not this CA's", func() {
+		// scoped is positional: self takes blocks[0] and root takes the last.
+		// That rests on an invariant enforced in another package -- orderCRLChain
+		// puts this CA's own CRL first -- and that invariant is knowingly
+		// violable: a CA whose stored block 0 is an ancestor's CRL starts and
+		// serves rather than refusing, a deliberate availability trade-off made
+		// on the read path.
+		//
+		// So self can publish an ancestor's CRL under ca.crl, and a consumer
+		// checking revocation against it sees none of this CA's revocations.
+		// Pinning the behaviour rather than changing it: the export layer has no
+		// way to identify which block is ours, and refusing here would turn a
+		// tolerated read-path state into an export outage. The detector is the
+		// warning the read path already emits.
+		upstreamFirst := "-----BEGIN X509 CRL-----\nVVBTVFJFQU0=\n-----END X509 CRL-----\n" +
+			"-----BEGIN X509 CRL-----\nT1VSUw==\n-----END X509 CRL-----\n"
+		src = stubSource{cert: []byte(certChain), crl: []byte(upstreamFirst)}
+
+		data := exportWith("self", "self")
+		Expect(string(data["ca.crl"])).To(ContainSubstring("VVBTVFJFQU0="),
+			"self is positional, so a foreign block 0 is what gets published")
+		Expect(string(data["ca.crl"])).NotTo(ContainSubstring("T1VSUw=="))
+	})
+
+	It("warns once per target when a scope nobody set is dropping blocks", func() {
+		// The scopes default to self, so an upgrade with no configuration change
+		// narrows what an existing multi-block target publishes. Nothing errors,
+		// and the empty-material guard cannot catch it because a scoped-down
+		// value is not empty -- so without this the only notice was prose in a
+		// document an upgrading operator has no reason to re-read.
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		defer slog.SetDefault(orig)
+
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind:     "Secret",
+			Metadata: k8sexport.Metadata{Name: "trust", Namespace: "ns1"},
+			Cert:     true,
+			CRL:      true,
+		}}}
+		Expect(cfg.Validate()).To(Succeed())
+		exp := k8sexport.New(client, *cfg, src, "", nil)
+
+		Expect(exp.ExportAll(ctx)).To(Succeed())
+		Expect(buf.String()).To(ContainSubstring("multi-block CA bundle"))
+		Expect(buf.String()).To(ContainSubstring("multi-block CRL chain"))
+		Expect(buf.String()).To(ContainSubstring("trust"))
+
+		// Latched: a steady state must not warn on every reconcile cycle, or the
+		// warning becomes noise an operator filters out.
+		buf.Reset()
+		Expect(exp.ExportAll(ctx)).To(Succeed())
+		Expect(buf.String()).NotTo(ContainSubstring("multi-block"))
+	})
+
+	It("does not warn when the scope was set explicitly, or when nothing is dropped", func() {
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		defer slog.SetDefault(orig)
+
+		// Explicit self: the operator asked for exactly this.
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind:      "Secret",
+			Metadata:  k8sexport.Metadata{Name: "trust", Namespace: "ns1"},
+			Cert:      true,
+			CRL:       true,
+			CertScope: "self",
+			CRLScope:  "self",
+		}}}
+		Expect(cfg.Validate()).To(Succeed())
+		Expect(k8sexport.New(client, *cfg, src, "", nil).ExportAll(ctx)).To(Succeed())
+		Expect(buf.String()).NotTo(ContainSubstring("multi-block"))
+
+		// Defaulted, but single-block material: nothing is being dropped, so
+		// there is nothing to say.
+		single := "-----BEGIN CERTIFICATE-----\nT05MWQ==\n-----END CERTIFICATE-----\n"
+		singleCRL := "-----BEGIN X509 CRL-----\nT1VSUw==\n-----END X509 CRL-----\n"
+		cfg2 := &k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind:     "Secret",
+			Metadata: k8sexport.Metadata{Name: "trust2", Namespace: "ns1"},
+			Cert:     true,
+			CRL:      true,
+		}}}
+		Expect(cfg2.Validate()).To(Succeed())
+		Expect(k8sexport.New(client, *cfg2,
+			stubSource{cert: []byte(single), crl: []byte(singleCRL)}, "", nil).
+			ExportAll(ctx)).To(Succeed())
+		Expect(buf.String()).NotTo(ContainSubstring("multi-block"))
+	})
+
+	It("warns when material becomes multi-block after the process is running", func() {
+		// The latch is per target/material and re-evaluated every cycle, rather
+		// than a sync.Once over the whole check. A Once would be spent on the
+		// first export, so a CA that was single-block then had a chain imported
+		// would narrow silently forever -- which is the case this exists to
+		// catch, and the reason the implementation changed.
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		defer slog.SetDefault(orig)
+
+		certCalls, crlCalls := 0, 0
+		grow := growingSource{
+			certCalls: &certCalls,
+			crlCalls:  &crlCalls,
+			single:    "-----BEGIN CERTIFICATE-----\nT05MWQ==\n-----END CERTIFICATE-----\n",
+			multi:     certChain,
+		}
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind:     "Secret",
+			Metadata: k8sexport.Metadata{Name: "trust", Namespace: "ns1"},
+			Cert:     true,
+		}}}
+		Expect(cfg.Validate()).To(Succeed())
+		exp := k8sexport.New(client, *cfg, grow, "", nil)
+
+		Expect(exp.ExportAll(ctx)).To(Succeed())
+		Expect(buf.String()).NotTo(ContainSubstring("multi-block"),
+			"one block, nothing dropped, nothing to say")
+
+		Expect(exp.ExportAll(ctx)).To(Succeed())
+		Expect(buf.String()).To(ContainSubstring("multi-block CA bundle"),
+			"the chain arrived after the first cycle; a spent latch would miss it")
+	})
+
+	It("names every narrowed target, not just the first", func() {
+		// The latch is keyed on target index as well as material. Keying on
+		// material alone would suppress every target after the first, which is
+		// the opposite of what a per-target warning is for -- and no spec would
+		// notice, because every other log-capturing spec here has one target.
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		defer slog.SetDefault(orig)
+
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{
+			{Kind: "Secret", Metadata: k8sexport.Metadata{Name: "trust-a", Namespace: "ns1"}, Cert: true},
+			{Kind: "Secret", Metadata: k8sexport.Metadata{Name: "trust-b", Namespace: "ns1"}, Cert: true},
+		}}
+		Expect(cfg.Validate()).To(Succeed())
+		Expect(k8sexport.New(client, *cfg, src, "", nil).ExportAll(ctx)).To(Succeed())
+
+		Expect(buf.String()).To(ContainSubstring("trust-a"))
+		Expect(buf.String()).To(ContainSubstring("trust-b"))
+	})
+
+	It("rejects an unknown cert scope", func() {
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind: "Secret", Metadata: k8sexport.Metadata{Name: "x"}, Cert: true, CertScope: "everything",
+		}}}
+		Expect(cfg.Validate()).To(MatchError(ContainSubstring("invalid cert_scope")))
+	})
+
+	It("rejects root as a CRL scope", func() {
+		// A CRL chain has no single anchor: the root's own CRL is just one of
+		// its members.
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind: "Secret", Metadata: k8sexport.Metadata{Name: "x"}, CRL: true, CRLScope: "root",
+		}}}
+		Expect(cfg.Validate()).To(MatchError(ContainSubstring("invalid crl_scope")))
 	})
 })

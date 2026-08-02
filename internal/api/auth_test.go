@@ -134,8 +134,7 @@ var _ = Describe("Auth Middleware", func() {
 		// "puppet-server" is the sole admin CN in the allow list.
 		server := api.New(myCA)
 		server.AuthConfig = &api.AuthConfig{
-			CACert:    caCert,
-			AllowList: map[string]bool{"puppet-server": true},
+			Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{"puppet-server": true}, true)},
 		}
 		mux = server.Routes()
 	})
@@ -695,16 +694,18 @@ var _ = Describe("Auth Middleware", func() {
 		})
 	})
 
-	Context("public endpoint is reachable regardless of client cert", func() {
-		It("GET /certificate_status/{own-node} is not rejected with a valid client cert (anyClient tier)", func() {
+	Context("certificate_status is admin-only", func() {
+		// Matches Puppet Server's shipped auth.conf, which grants
+		// certificate_status to pp_cli_auth holders and to nothing else.
+		It("rejects an ordinary CA-signed client cert reading its own status", func() {
 			clientCert := issueClientCert("my-node", caCert, caKey)
 			req := httptest.NewRequest("GET", "/certificate_status/my-node", nil)
 			req = withClientCert(req, clientCert)
 			rr := httptest.NewRecorder()
 			mux.ServeHTTP(rr, req)
-			// 404 because the node does not exist, but not 403.
-			Expect(rr.Code).NotTo(Equal(http.StatusForbidden))
+			Expect(rr.Code).To(Equal(http.StatusForbidden))
 		})
+
 	})
 
 	// --- AllowPublicStatus opt-in ---
@@ -734,8 +735,7 @@ var _ = Describe("Auth Middleware", func() {
 		BeforeEach(func() {
 			srv := api.New(myCA)
 			srv.AuthConfig = &api.AuthConfig{
-				CACert:            caCert,
-				AllowList:         map[string]bool{"puppet-server": true},
+				Domains:           []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{"puppet-server": true}, true)},
 				AllowPublicStatus: true,
 			}
 			publicStatusMux = srv.Routes()
@@ -782,8 +782,7 @@ var _ = Describe("Auth Middleware", func() {
 		BeforeEach(func() {
 			srv := api.New(myCA)
 			srv.AuthConfig = &api.AuthConfig{
-				CACert:    caCert,
-				AllowList: map[string]bool{},
+				Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{}, true)},
 			}
 			muxNoCNList = srv.Routes()
 		})
@@ -853,8 +852,7 @@ var _ = Describe("Auth Middleware", func() {
 			// Step 2: Submit CSR; autosign signs it immediately.
 			srv := api.New(autosignCA)
 			srv.AuthConfig = &api.AuthConfig{
-				CACert:    caCert,
-				AllowList: map[string]bool{},
+				Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{}, true)},
 			}
 			attackMux := srv.Routes()
 
@@ -899,9 +897,7 @@ var _ = Describe("Auth Middleware", func() {
 		BeforeEach(func() {
 			srv := api.New(myCA)
 			srv.AuthConfig = &api.AuthConfig{
-				CACert:      caCert,
-				AllowList:   map[string]bool{},
-				NoPpCliAuth: true,
+				Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{}, false)},
 			}
 			muxNoPpCli = srv.Routes()
 		})
@@ -918,9 +914,7 @@ var _ = Describe("Auth Middleware", func() {
 		It("still allows POST /sign/all for a CN in the allow list", func() {
 			srv := api.New(myCA)
 			srv.AuthConfig = &api.AuthConfig{
-				CACert:      caCert,
-				AllowList:   map[string]bool{"puppet-server": true},
-				NoPpCliAuth: true,
+				Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{"puppet-server": true}, false)},
 			}
 			muxWithCN := srv.Routes()
 
@@ -952,6 +946,13 @@ var _ = Describe("Auth Middleware", func() {
 // /puppet-ca/v1 prefix stripping and the default-deny tierAdminOnly fallthrough
 // for unrecognised paths. A case classifying LESS restrictively than expected
 // would surface here as a probe mismatch.
+// This is the sibling of the oracle in authbaseline_test.go, and the two are
+// deliberately different instruments. This one infers the *tier* each route
+// sits in by probing three certificates and reading the shape of the answers;
+// that one records the observable HTTP outcome for every client class in its
+// expectedClientClasses list and asserts each cell. For the routes both cover,
+// a tier change should move a row in both, and a change that moves only one is
+// worth understanding before it is accepted.
 var _ = Describe("lookupTier classification", func() {
 	var (
 		tmpDir         string
@@ -987,15 +988,13 @@ var _ = Describe("lookupTier classification", func() {
 
 		srv := api.New(myCA)
 		srv.AuthConfig = &api.AuthConfig{
-			CACert:    caCert,
-			AllowList: map[string]bool{"puppet-server": true},
+			Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{"puppet-server": true}, true)},
 		}
 		muxDefault = srv.Routes()
 
 		srvPub := api.New(myCA)
 		srvPub.AuthConfig = &api.AuthConfig{
-			CACert:            caCert,
-			AllowList:         map[string]bool{"puppet-server": true},
+			Domains:           []api.TrustDomain{api.OwnTrustDomain(caCert, map[string]bool{"puppet-server": true}, true)},
 			AllowPublicStatus: true,
 		}
 		muxPublicState = srvPub.Routes()
@@ -1055,8 +1054,9 @@ var _ = Describe("lookupTier classification", func() {
 		Entry("public CSR submission", "PUT", "/certificate_request/node1", "node1", "public"),
 		Entry("public CRL fetch", "GET", "/certificate_revocation_list/ca", "", "public"),
 		Entry("CRL reissue is admin-only", "PUT", "/certificate_revocation_list/ca", "", "adminOnly"),
-		// certificate_status defaults to any-CA-signed-client when not public.
-		Entry("status read requires any client", "GET", "/certificate_status/node1", "node1", "anyClient"),
+		// certificate_status is admin-only unless explicitly made public,
+		// matching Puppet Server's shipped auth.conf.
+		Entry("status read is admin-only", "GET", "/certificate_status/node1", "node1", "adminOnly"),
 		// Self-or-admin read of a pending CSR.
 		Entry("CSR read is self-or-admin", "GET", "/certificate_request/node1", "node1", "selfOrAdmin"),
 		// Default-deny: signing, mutation, and unknown paths are admin-only.

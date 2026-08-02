@@ -23,6 +23,7 @@ import (
 	"crypto/x509"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
@@ -149,6 +150,108 @@ type CA struct {
 	// metrics exporter (puppetca_crl_update_failures_total) for alerting.
 	crlUpdateFailures atomic.Uint64
 
+	// servingCertIssued counts serving certificates this process has minted.
+	// Exposed as puppetca_serving_cert_issued_total, and it is a rate rather
+	// than a total that matters: two replicas can disagree about which CA
+	// certificate is current — one restarted after a re-issue, one not — and
+	// each will then mint over the other's work on every pass. That shows up
+	// here as sustained churn, where inferring it from certificate serials
+	// would mean noticing an inventory growing for no reason.
+	servingCertIssued atomic.Uint64
+
+	// servingRenewalFailures counts maintenance passes that could not renew the
+	// serving certificate. The existing certificate stays in place and the next
+	// cycle retries, so a single failure is harmless — but a persistently
+	// failing pass is invisible until the certificate expires, and it also
+	// breaks the assumption behind tls_self_provision_revoke_after_sec, which
+	// bounds a superseded certificate's exposure on the belief that every
+	// replica notices its replacement within one interval. Alert on this.
+	servingRenewalFailures atomic.Uint64
+
+	// servingRevocationFailures counts failures to record or to complete a
+	// supersession. See IncServingRevocationFailures for the arms and which of
+	// them are self-healing. Surfaced as
+	// puppetca_serving_cert_revocation_failures_total.
+	servingRevocationFailures atomic.Uint64
+
+	// Four counters, because their remedies differ: crlChainFailures points at
+	// the file itself, crlChainDiscarded at the CA bundle, and crlChainRegressed
+	// and crlChainRemoved at whatever writes the file -- one for a stale copy,
+	// one for a dropped ancestor. (The file's *mount* is the fourth question, and
+	// it is crlChainLastRead below, a gauge rather than a counter, because
+	// "never opened" is a state and not an event.)
+	//
+	// All four are per *evaluation*, not per pass: crl_chain_file is evaluated on
+	// every CRL amendment as well as on the maintenance pass, so on a busy CA
+	// they track revocation rate rather than the number of bad CRLs in the file.
+	// crlChainFailures counts the whole file once per evaluation; the other three
+	// count once per CRL per evaluation.
+	//
+	// Do not assume an ordering between them. An unreadable or unparseable file
+	// increments crlChainFailures alone, because upstreamCRLs returns before the
+	// per-CRL loops are reached.
+	//
+	// What an alert window can be sized against is the floor they share: a quiet
+	// CA evaluates the file once per maintenance_interval_sec. See
+	// mixin/config.libsonnet, which says the same thing.
+	//
+	// crlChainFailures counts refresh passes that could not publish the upstream
+	// chain at all -- unreadable, unparseable, truncated or oversized. The
+	// published chain is left alone and the next pass retries.
+	//
+	// crlChainDiscarded counts CRLs dropped from crl_chain_file because nothing
+	// in the CA bundle signed them. This is the case where the chain quietly
+	// *shrinks*: the file is authoritative, so a CRL the operator put there and
+	// this CA would not accept simply stops being published.
+	//
+	// crlChainRegressed counts CRLs in crl_chain_file that were older than the
+	// one already published for the same ancestor, and so were not used -- see
+	// monotonicUpstream. It is deliberately not folded into crlChainDiscarded:
+	// the two have opposite remedies. A discard means the CA bundle is missing
+	// an ancestor, so the operator checks the bundle; a regression means the
+	// file itself is stale, rolled back or replayed, so the operator checks
+	// whatever writes it. One counter would have sent a paged responder to
+	// verify a bundle that was already complete.
+	//
+	// crlChainRemoved counts ancestors the file has stopped listing while their
+	// CRL was published. The file is authoritative, so this is honoured rather
+	// than refused -- but it is unrecoverable here, and a `cat` glob that
+	// matched one file fewer produces it just as readily as a deliberate
+	// removal does. Distinct from crlChainDiscarded: that one counts CRLs the
+	// file *does* carry which nothing in the bundle signed.
+	//
+	// Surfaced as puppetca_crl_chain_refresh_failures_total,
+	// puppetca_crl_chain_discarded_total, puppetca_crl_chain_regressed_total and
+	// puppetca_crl_chain_removed_total.
+	crlChainFailures  atomic.Uint64
+	crlChainDiscarded atomic.Uint64
+	crlChainRegressed atomic.Uint64
+	crlChainRemoved   atomic.Uint64
+
+	// crlChainLastRead is the Unix time of the last successful read of
+	// crl_chain_file, or zero if it has never been read.
+	//
+	// It exists for the case the counters cannot reach: an absent file is
+	// deliberately not a failure -- it makes no statement -- so a crl_chain_file
+	// pointing at a path that never mounted leaves every counter at zero and
+	// every series flat and healthy while the ancestors age out. This series
+	// stays at zero, which is the signal.
+	//
+	// It does *not* detect a subPath mount, and an earlier revision of this
+	// comment wrongly claimed it did. A subPath mount is read successfully
+	// forever, so the stamp advances every cycle exactly as it does on a healthy
+	// file; the two are indistinguishable here. What catches a frozen mount is
+	// the upstream CRL's own nextUpdate marching towards expiry --
+	// PuppetCAUpstreamCRLExpiringSoon firing on a CA that has crl_chain_file
+	// configured *is* the subPath signature.
+	crlChainLastRead atomic.Int64
+
+	// CRLChainFile is a PEM bundle of upstream CRLs merged into the published
+	// chain. Empty disables the feature, which is the whole of it for a CA that
+	// issues its own root. Every CRL in the file is signature-verified against
+	// the stored CA bundle before it is published — see upstreamCRLs.
+	CRLChainFile string
+
 	// crlNotify carries a coalesced signal each time the CRL is re-signed (see
 	// signCRLLocked). It is buffered to depth 1 and written non-blockingly, so a
 	// burst of revocations collapses to a single pending notification and an
@@ -177,6 +280,111 @@ func New(s *storage.StorageService, autosignCfg AutosignConfig, hostname string)
 // it as puppetca_crl_update_failures_total.
 func (c *CA) CRLUpdateFailures() uint64 {
 	return c.crlUpdateFailures.Load()
+}
+
+// ServingCertIssued returns how many serving certificates this process has
+// minted. Surfaced as puppetca_serving_cert_issued_total; a sustained rate
+// rather than a one-off increment indicates replicas disagreeing about which CA
+// certificate is current, which a fleet restart resolves.
+func (c *CA) ServingCertIssued() uint64 {
+	return c.servingCertIssued.Load()
+}
+
+// IncServingRenewalFailures records a maintenance pass that could not renew the
+// serving certificate. Called by the maintenance loop, which owns the retry
+// policy; the CA itself has no periodic tasks.
+func (c *CA) IncServingRenewalFailures() {
+	c.servingRenewalFailures.Add(1)
+}
+
+// ServingRenewalFailureCount returns how many maintenance passes failed to
+// renew the serving certificate. Surfaced as
+// puppetca_serving_cert_renewal_failures_total.
+func (c *CA) ServingRenewalFailureCount() uint64 {
+	return c.servingRenewalFailures.Load()
+}
+
+// IncServingRevocationFailures records a failure to record or to complete a
+// supersession. Seven conditions across six call sites, and they differ in
+// whether they clear themselves.
+//
+// The sweep's increment is once per pass, not once per entry: five entries
+// failing in one pass move the counter by one. The alert fires on any increase,
+// so that does not change whether it fires, only what the value means.
+//
+// Self-healing — the next pass retries:
+//
+//   - a maintenance pass that could not reconcile the pending list, logged
+//     "Could not reconcile superseded serving certificates";
+//   - one or more entries whose revocation failed, each logged "will retry".
+//
+// Not self-healing:
+//
+//   - the startup reconcile failing, logged with the same phrase but ending
+//     "at startup". With tls_self_provision off no periodic task is registered,
+//     so that call is the only sweep the process runs and nothing retries it
+//     until the CA restarts;
+//   - a mint that could not read the certificate it was replacing, or read it
+//     and could not persist the pending list, logged "will not be scheduled for
+//     revocation" — the mint has already overwritten what named that serial, so
+//     no later sweep can find it;
+//   - a pending list that could not be parsed, logged with the same phrase:
+//     whatever those bytes named is gone the same way.
+//
+// An entry discarded for a malformed serial is counted too, logged "can never
+// be revoked". It is unrevokable by construction and will not recur, so it
+// neither heals nor needs to.
+//
+// Counted separately from crlUpdateFailures because the failures this path hits
+// first are not CRL amendments at all — a lock timeout, or a storage error on
+// the pending list — and because it is the counter that bounds how long a
+// superseded serving certificate stays valid. A replica whose sweep fails every
+// hour keeps that credential live indefinitely.
+func (c *CA) IncServingRevocationFailures() {
+	c.servingRevocationFailures.Add(1)
+}
+
+// ServingRevocationFailureCount returns how many supersessions could not be
+// recorded or completed. Only some arms are self-healing; see
+// IncServingRevocationFailures, which enumerates them. Surfaced as
+// puppetca_serving_cert_revocation_failures_total.
+func (c *CA) ServingRevocationFailureCount() uint64 {
+	return c.servingRevocationFailures.Load()
+}
+
+// CRLChainFailures returns how many upstream-chain refresh passes failed.
+// Surfaced as puppetca_crl_chain_refresh_failures_total.
+func (c *CA) CRLChainFailures() uint64 { return c.crlChainFailures.Load() }
+
+// CRLChainDiscarded returns how many CRLs have been dropped from
+// crl_chain_file because no certificate in the CA bundle signed them. Surfaced
+// as puppetca_crl_chain_discarded_total; a rising value means the published
+// chain is smaller than the operator's file says it should be.
+func (c *CA) CRLChainDiscarded() uint64 { return c.crlChainDiscarded.Load() }
+
+// CRLChainRegressed returns how many CRLs in crl_chain_file have been passed
+// over because the published chain already carried a newer one from the same
+// ancestor. Surfaced as puppetca_crl_chain_regressed_total; a rising value means
+// the file is stale, rolled back or replayed, and points at whatever writes it
+// rather than at the CA bundle.
+func (c *CA) CRLChainRegressed() uint64 { return c.crlChainRegressed.Load() }
+
+// CRLChainRemoved returns how many ancestors crl_chain_file has stopped listing
+// while their CRL was published. Surfaced as
+// puppetca_crl_chain_removed_total; the removal is honoured because the file is
+// authoritative, but it cannot be undone here, so a rising value wants checking
+// against whether the operator meant it.
+func (c *CA) CRLChainRemoved() uint64 { return c.crlChainRemoved.Load() }
+
+// CRLChainLastRead returns when crl_chain_file was last read successfully, or
+// the zero time if it never has been. See the field comment for why a feature
+// whose whole value is "the file is re-read" needs to say whether it is.
+func (c *CA) CRLChainLastRead() time.Time {
+	sec := c.crlChainLastRead.Load()
+	if sec == 0 {
+		return time.Time{}
+	}
+	return time.Unix(sec, 0)
 }
 
 // CRLUpdated returns a channel that receives a value each time the CRL is

@@ -43,6 +43,10 @@ import (
 const (
 	// certValidity is the lifetime issued to CA and leaf certificates.
 	certValidity = 5 * 365 * 24 * time.Hour
+	// DefaultCertValidity is certValidity, exported so configuration validation
+	// can reason about the lifetime a certificate will actually get without
+	// duplicating the constant.
+	DefaultCertValidity = certValidity
 	// CRLValidity is the default validity window written into every CRL.
 	CRLValidity = 30 * 24 * time.Hour
 )
@@ -150,6 +154,73 @@ var subjectRegex = regexp.MustCompile(`^[a-z0-9_.][a-z0-9._-]*$`)
 func ValidateSubject(subject string) error {
 	if !subjectRegex.MatchString(subject) || strings.Contains(subject, "..") {
 		return fmt.Errorf("invalid subject name %q: must match ^[a-z0-9_.][a-z0-9._-]*$ and must not contain path traversal", subject)
+	}
+	return nil
+}
+
+// ErrForeignCertificate is returned when an operation that is only meaningful
+// for a live certificate of this CA's own is attempted with one this CA did not
+// issue, or with one it issued and has since revoked.
+//
+// The message covers both: a revoked certificate is one this CA did issue, so
+// "not issued by this CA" alone would be a false statement in an error an
+// operator reads while debugging a renewal failure.
+var ErrForeignCertificate = errors.New("certificate is not a live certificate issued by this CA")
+
+// ErrRenewalSubjectMismatch is returned when the presented certificate is a
+// live one of ours, but for a different subject than the one being renewed.
+//
+// Separate from ErrForeignCertificate deliberately: that sentinel's message
+// asserts the certificate is not ours, which would be false here and is the
+// kind of false statement its own doc comment argues against. Keeping them
+// apart also separates the two in logs — a cross-subject re-key is an
+// authenticated caller reaching for another node's identity, while a foreign
+// certificate is usually a topology or migration problem.
+var ErrRenewalSubjectMismatch = errors.New("presented certificate is for a different subject")
+
+// assertOwnValidCertificate proves that cert was issued by this CA and has not
+// been revoked, and is the gate on both renewal paths.
+//
+// It does not check the validity window, so "valid" here means provenance and
+// revocation only. Expiry is the middleware's: newAuthMiddleware's Verify call
+// enforces NotBefore/NotAfter against time.Now() for every mTLS route, and the
+// own-ca-expired client class in the authorisation baseline pins that.
+//
+// Renewal reissues under this CA's authority using the presented certificate's
+// own subject — and, on the empty-body path only, its Puppet OID extensions.
+// That is safe only while this CA is the only thing that could have produced
+// it: the subject was drawn from a namespace we control, and on that path the
+// extensions were vetted by us at issuance. Neither holds for a certificate
+// some other CA issued, so renewing one would let its issuer choose names, and
+// attributes, inside our namespace.
+//
+// The CSR path does not rely on prior vetting for its extensions — it takes
+// them from the submitted CSR and strips the authorisation arc — but it still
+// needs this gate for the subject, which it reissues from the presented
+// certificate's namespace.
+//
+// Two questions, both required. CheckSignatureFrom answers "did we issue this"
+// with a signature check rather than an issuer-name comparison, because a
+// distinguished name is not a credential — under a shared root a sibling CA can
+// hold the same one. It deliberately says nothing about validity, which is why
+// importcert.go can use it to archive expired certificates, so revocation is
+// checked separately: a revoked certificate this CA issued would otherwise
+// still satisfy it and remain a self-renewal credential for whoever holds it.
+//
+// The caller must NOT hold c.mu.
+func (c *CA) assertOwnValidCertificate(ctx context.Context, cert *x509.Certificate) error {
+	if c.CACert == nil {
+		return ErrNotInitialized
+	}
+	if err := cert.CheckSignatureFrom(c.CACert); err != nil {
+		return fmt.Errorf("%w: %v", ErrForeignCertificate, err)
+	}
+	revoked, err := c.IsRevokedSerial(ctx, cert.SerialNumber)
+	if err != nil {
+		return fmt.Errorf("checking whether the presented certificate is revoked: %w", err)
+	}
+	if revoked {
+		return fmt.Errorf("%w: it has been revoked", ErrForeignCertificate)
 	}
 	return nil
 }
@@ -300,6 +371,16 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 	return certPEM, nil
 }
 
+// extKeyUsageOrDefault resolves issueLeafLocked's variadic eku override to the
+// list that goes in the certificate. No override means the long-standing
+// serverAuth + clientAuth pair.
+func extKeyUsageOrDefault(eku []x509.ExtKeyUsage) []x509.ExtKeyUsage {
+	if len(eku) == 0 {
+		return []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}
+	}
+	return eku
+}
+
 // subjectAltNames carries the full set of Subject Alternative Name entries
 // copied onto an issued leaf certificate. Bundling them keeps issueLeafLocked's
 // signature manageable and ensures every SAN type is threaded through together,
@@ -316,10 +397,17 @@ type subjectAltNames struct {
 // appends the inventory entry and updates the in-memory serial index.
 // ttl=0 means use the default certValidity. c.mu must be held by the caller.
 //
+// eku overrides the extended key usage; omitting it keeps the serverAuth +
+// clientAuth pair every agent certificate has always carried. The override
+// exists for the CA's own serving certificate, which must not be a usable
+// client credential: its common name is the CA's hostname, and in a deployment
+// where that hostname also appears in puppet_server, a clientAuth certificate
+// sitting in the storage backend would be an admin credential.
+//
 // This is the tail shared by signWithDuration (inputs come from a submitted
 // CSR, after CSR-specific validation) and AutoRenew (inputs come from an
 // already-issued certificate's public key, with no CSR involved at all).
-func (c *CA) issueLeafLocked(ctx context.Context, subject string, subjectName pkix.Name, pubKey any, sans subjectAltNames, extraExtensions []pkix.Extension, ttl time.Duration) ([]byte, error) {
+func (c *CA) issueLeafLocked(ctx context.Context, subject string, subjectName pkix.Name, pubKey any, sans subjectAltNames, extraExtensions []pkix.Extension, ttl time.Duration, eku ...x509.ExtKeyUsage) ([]byte, error) {
 	// Defensive: a nil CACert here means the caller skipped Init() (or it
 	// failed). Without this guard the c.CACert.NotAfter dereference below
 	// would panic the entire frontend.
@@ -368,7 +456,7 @@ func (c *CA) issueLeafLocked(ctx context.Context, subject string, subjectName pk
 		NotAfter:     now.Add(validity),
 
 		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		ExtKeyUsage: extKeyUsageOrDefault(eku),
 
 		BasicConstraintsValid: true,
 		IsCA:                  false,
@@ -496,7 +584,16 @@ func (c *CA) Clean(ctx context.Context, subject string) error {
 				defer c.mu.Unlock()
 				return c.revokeLocked(ctx, subject)
 			}); err != nil {
-				slog.Warn("Clean: revoke failed (proceeding with delete)", "subject", subject, "error", err)
+				// Deliberately not fatal: clean's job is to remove the
+				// certificate. But say what that leaves behind — the
+				// certificate is gone from storage while still unrevoked, so
+				// it remains a valid credential until it expires. A foreign
+				// stored CRL now reaches here (readStoredCRL refuses to
+				// re-sign a list this CA did not issue), which is a newly
+				// reachable way into this state and is fixed by restarting
+				// the replica that holds the stale CA certificate.
+				slog.Warn("Clean: revoke failed, deleting the certificate anyway; it stays a valid "+
+					"credential until it expires", "subject", subject, "error", err)
 			}
 			if err := c.Storage.DeleteCert(ctx, subject); err != nil {
 				slog.Warn("Clean: delete cert failed", "subject", subject, "error", err)
@@ -687,10 +784,57 @@ func (c *CA) SaveRequest(ctx context.Context, subject string, csrPEM []byte) (bo
 // is a genuine re-key, so the old key/cert must not remain a valid credential
 // once the new one takes over.
 //
+// presentedCert is the client certificate the caller authenticated with. It is
+// required, and it must be one this CA issued and has not revoked: renewal
+// mints a new credential from an old one, so the old one has to be ours. A nil,
+// foreign or revoked certificate returns ErrForeignCertificate.
+//
+// It must also be the certificate *for* subject. Renewing one subject while
+// presenting another's returns ErrRenewalSubjectMismatch. Callers map both to
+// 403.
+//
 // The caller is responsible for verifying that the CSR CN matches the
 // authenticated client's CN before calling Renew; this method enforces that
 // invariant a second time as defence-in-depth.
-func (c *CA) Renew(ctx context.Context, subject string, csrPEM []byte) ([]byte, error) {
+func (c *CA) Renew(ctx context.Context, subject string, csrPEM []byte, presentedCert *x509.Certificate) ([]byte, error) {
+	// SECURITY: only a certificate this CA issued may be renewed. Without this
+	// the CN check below constrains the caller to a name some *other* CA gave
+	// them, while the certificate produced is issued by us — so a foreign
+	// issuer's namespace would become ours, and any name it hands out could be
+	// claimed here, including one already held by an agent.
+	//
+	// Ahead of ValidateSubject on purpose. Once a second issuer is trusted for
+	// client authentication, a foreign certificate is the one least likely to
+	// respect this CA's lowercase certname grammar — and ValidateSubject
+	// returns an unsentinelled error the handler can only render as a 500. The
+	// provenance question has to be answered first for the refusal to come out
+	// as the 403 the gate exists to give.
+	// NIST 800-53: AC-6 (Least Privilege), IA-5(2) (PKI-Based Authentication)
+	if presentedCert == nil {
+		return nil, fmt.Errorf("%w: no client certificate was presented", ErrForeignCertificate)
+	}
+	if err := c.assertOwnValidCertificate(ctx, presentedCert); err != nil {
+		return nil, err
+	}
+	// SECURITY: and it must be *this* subject's certificate. Provenance alone
+	// says the caller holds something we issued, not that they hold the thing
+	// they are renewing — without this, any live certificate we issued could
+	// re-key any other subject and revoke the incumbent's.
+	//
+	// The one shipping caller cannot trip this: it passes subject=clientCN and
+	// the same certificate, so it satisfies the invariant by construction
+	// rather than by checking it. (What the handler does check is the CSR's CN
+	// against the client's.) That is precisely why the check belongs here —
+	// the guarantee should not rest on every future caller happening to pass
+	// the two consistently.
+	// NIST 800-53: AC-3 (Access Enforcement), IA-5(2) (PKI-Based Authentication)
+	if presentedCert.Subject.CommonName != subject {
+		return nil, fmt.Errorf("%w: presented certificate is for %q, not %q",
+			ErrRenewalSubjectMismatch, presentedCert.Subject.CommonName, subject)
+	}
+
+	// After the gate: this guards a caller-supplied string that becomes a
+	// storage path, so it still has to run.
 	if err := ValidateSubject(subject); err != nil {
 		return nil, err
 	}
@@ -755,6 +899,29 @@ func (c *CA) Renew(ctx context.Context, subject string, csrPEM []byte) ([]byte, 
 		// pass CRL/OCSP checks now that it is no longer the cert served for
 		// this subject. Best-effort like Clean's revoke-then-delete: a
 		// failure here shouldn't undo the renewal the caller is waiting on.
+		// SECURITY: never revoke the certificate the listener is serving.
+		//
+		// The serving certificate is an ordinary node certificate for the CA's
+		// own hostname, which is deliberate — but it means that if a node ever
+		// holds that same certname, LatestSerialForSubject resolves to
+		// whichever was issued last. When that is the CA's, this revoke would
+		// take the live serving certificate out of circulation immediately,
+		// with none of the delay tls_self_provision_revoke_after_sec exists to
+		// give, and every agent doing revocation checking would fail handshakes
+		// until the next maintenance pass re-mints.
+		//
+		// validateTLS refuses to start when hostname is a puppet_server CN, but
+		// it cannot see an ordinary agent that takes the name. This check can:
+		// it compares against the certificate actually stored for serving, so
+		// it holds for any colliding certname however it was issued. Gated on
+		// the hostname so it costs nothing for every other subject.
+		if subject == c.Hostname && c.servingSerialMatches(ctx, oldSerial) {
+			slog.Warn("Renew: refusing to revoke the CA's live serving certificate; "+
+				"another certificate has been issued under the CA's own hostname",
+				"subject", subject, "serial", oldSerial)
+			return nil
+		}
+
 		// Lock ordering: subject-lock (held) -> CRL-lock -> c.mu, matching Clean.
 		if err := c.Storage.WithLock(ctx, lockNameCRL, func() error {
 			c.mu.Lock()
@@ -782,6 +949,19 @@ func (c *CA) Renew(ctx context.Context, subject string, csrPEM []byte) ([]byte, 
 // was issued; only the serial, validity window, and key identifiers are
 // refreshed.
 //
+// That vetting argument holds only because assertOwnValidCertificate has
+// already established that this CA issued presentedCert. The two are a pair:
+// removing the issuer gate while keeping the unfiltered carry-forward would let
+// any CA trusted for client authentication have a pp_cli_auth certificate
+// reissued under *our* authority here, so that it survives as ours.
+//
+// Note what this does not close. isAdmin reads pp_cli_auth straight off
+// whatever certificate the middleware admitted, without regard to issuer, so
+// once a second anchor is trusted for client authentication a foreign leaf
+// carrying pp_cli_auth is already an admin — no reissue needed. Binding
+// isAdmin to certificates this CA issued is a separate control the
+// multi-anchor work still has to add; this gate does not substitute for it.
+//
 // By default the certificate being replaced is revoked once its successor is
 // safely signed and stored, so only the newest serial for a subject is ever
 // valid (see c.RevokeOnAutoRenew). OpenVox Server's own Clojure CA
@@ -791,6 +971,23 @@ func (c *CA) Renew(ctx context.Context, subject string, csrPEM []byte) ([]byte, 
 //
 // The caller must NOT hold c.mu. Same cross-node guarantees as Sign.
 func (c *CA) AutoRenew(ctx context.Context, presentedCert *x509.Certificate) ([]byte, error) {
+	// Guarded before the dereference, and for the same reason as Renew's: a
+	// caller that reaches here without a client certificate has no identity to
+	// renew, and panicking on it would turn an authorisation question into a
+	// crash.
+	if presentedCert == nil {
+		return nil, fmt.Errorf("%w: no client certificate was presented", ErrForeignCertificate)
+	}
+	// SECURITY: only a certificate this CA issued may be renewed. The
+	// carry-forward of authorisation OIDs below depends on it; see
+	// assertOwnValidCertificate. Ahead of ValidateSubject for the reason given
+	// in Renew: a foreign certificate's CN need not be certname-shaped, and
+	// answering grammar first would turn the gate's 403 into a 500.
+	// NIST 800-53: AC-6 (Least Privilege), IA-5(2) (PKI-Based Authentication)
+	if err := c.assertOwnValidCertificate(ctx, presentedCert); err != nil {
+		return nil, err
+	}
+
 	subject := presentedCert.Subject.CommonName
 	if err := ValidateSubject(subject); err != nil {
 		return nil, err
@@ -818,7 +1015,11 @@ func (c *CA) AutoRenew(ctx context.Context, presentedCert *x509.Certificate) ([]
 		// preserving them is required for wire-compat (e.g. OpenVox Server's own
 		// cert keeps pp_cli_auth across renewal, or the CA CLI stops
 		// authenticating). Do NOT add an IsAuthOID filter here; see this
-		// method's godoc. NIST 800-53: AC-6, CM-7.
+		// method's godoc.
+		//
+		// This is safe only because assertOwnValidCertificate above established
+		// that we issued presentedCert. Do not remove that check while leaving
+		// this carry-forward in place. NIST 800-53: AC-6, CM-7.
 		if IsPuppetOID(ext.Id) {
 			extraExtensions = append(extraExtensions, ext)
 		}

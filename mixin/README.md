@@ -5,12 +5,66 @@ alerting rules for the openvox-ca exporter. It alerts on:
 
 - the exporter being down or unable to read CA state, and the CA not being ready;
 - the **CA certificate** nearing expiry (warning) or expiring imminently (critical);
-- the **CRL** approaching its `NextUpdate` (warning) or having lapsed (critical);
+- the **CRL** approaching its `NextUpdate` (warning) or having lapsed (critical).
+  This covers **this CA's own CRL only** — block 0 of the stored blob, which the
+  background refresher keeps fresh regardless. Ancestor CRLs are covered
+  separately, by the upstream-CRL rules below;
 - **leaf certificates** nearing/at expiry — excluding revoked ones — and
   certificate **requests that stay pending** too long;
 - **CRL update failures** — the CA failing to amend its CRL (a revocation it
   could not record, or a CRL it could not re-sign or write), which can leave
   revoked or superseded certificates still valid.
+- **Upstream CRLs** in a published chain nearing or past their `NextUpdate`, and
+  the five ways that chain goes wrong, each with its own remedy: a
+  [`crl_chain_file`](../docs/configuration.md#publishing-an-upstream-crl-chain)
+  that cannot be refreshed (fix the file or its mount); a CRL discarded from it
+  because no certificate in the CA bundle signed it (complete the bundle); a CRL
+  older than the one already published (fix whatever writes the file); an
+  ancestor the file has stopped listing altogether, which is honoured and
+  unrecoverable (check the file was meant to lose it); and a file that has never
+  been opened at all (wrong path, or a mount that never landed). They are five
+  rules rather than one because a responder sent to the
+  wrong one of those remedies finds nothing wrong. The per-issuer gauge appears
+  only where the stored blob holds a CRL this CA did not issue — including a
+  chain brought in by `import --crl-chain`, with no `crl_chain_file` in sight.
+  The counters are always exported and read zero without one, while
+  `puppetca_crl_chain_last_read_timestamp_seconds` is exported only where
+  `crl_chain_file` is set, which is what makes the never-opened case alertable
+  without firing across the whole fleet. None of it is fixable here — this CA
+  cannot re-sign another CA's list — so every remedy points at the parent CA or
+  at the file.
+
+  One case has no rule and cannot have one: a `subPath` mount reads successfully
+  forever, so it is indistinguishable from a healthy file on every series. It
+  surfaces as *UpstreamCRLExpiringSoon* on a CA that has `crl_chain_file` set.
+- **Serving-certificate failures** — three rules. Two are meaningful only when
+  [`tls_self_provision`](../docs/configuration.md#self-provisioned-serving-certificate)
+  is in use; *Revocation failing* is live wherever `hostname` is set, because the
+  startup sweep runs unconditionally, and that is the case with no retry. *Renewal failing*: the CA cannot renew the certificate its own
+  listener presents, which is silent until it expires, at which point every
+  agent handshake fails at once. *Revocation failing*: a superseded certificate was
+  not revoked, so it stays a valid credential past the bound
+  `tls_self_provision_revoke_after_sec` is meant to enforce. The log line
+  distinguishes the cases: a failed sweep or a failed single revocation retries,
+  so a firing alert means the retries are not clearing it; a mint that could not
+  read or write down what it replaced never scheduled that serial at all, and
+  since there is no by-serial revoke it cannot be retired — see
+  [the metric's notes](../docs/metrics.md#self-provisioned-serving-certificate). *Churning*: replicas reissuing over each other, which grows
+  the inventory and the CRL for no reason.
+- **Client trust domains** in three rules, both critical ones and a warning, all only when
+  [`client_ca`](../docs/configuration.md#trusting-client-certificates-from-another-ca)
+  is in use. *CRL unusable*: the domain holds no currently valid CRL at all, so
+  under the default `require` policy every client of that issuer is rejected.
+  *CRL refusals*: clients are actually being turned away for want of a CRL. The
+  second exists because the first can only estimate — which anchors need a CRL
+  depends on the chains clients present, so an entry covering one anchor and not
+  another reads healthy on the gauge while half its clients are refused. A
+  refusal is a fact, so it needs no estimate. *CRL stale* (warning): `crl_file`
+  has stopped being applied — a reload that failed, or one refused because it
+  would have covered fewer anchors — so the CRLs in use are frozen and
+  revocations published since are not honoured. That one is invisible on the
+  other two, because the retained CRLs are still current and clients are still
+  served.
 - **Kubernetes export** targets whose applies keep failing (only when the
   [Kubernetes export](../docs/kubernetes-export.md) feature is in use).
 
@@ -88,9 +142,30 @@ jsonnet -J vendor -m . mixin.jsonnet
 | `caExpiryWarningSeconds` | 30 days | CA certificate expiry warning threshold. |
 | `caExpiryCriticalSeconds` | 7 days | CA certificate expiry critical threshold. |
 | `crlExpiryWarningSeconds` | 3 days | CRL `NextUpdate` warning threshold. |
+| `upstreamCRLExpiryWarningSeconds` | 14 days | Warning threshold for an upstream CRL in a published chain. Longer than `crlExpiryWarningSeconds` because the remedy is at another CA. |
+| `crlChainWindow` | `1h` | Window over which chain-refresh failures, discards, regressions and removals are counted. Equals the CA's default `maintenance_interval_sec` with no margin: raise it alongside any increase to that setting, or a single unchanging fault will fire, resolve and re-fire forever. |
+| `crlChainFor` | `15m` | `for:` debounce for the five upstream-chain alerts. |
+| `clientCRLRefusalWindow` | `1h` | Window over which client-CRL refusals are counted. Event-driven, so unlike the gauge it is not coupled to `maintenance_interval_sec`. |
+| `clientCRLUnusableFor` | `10m` | Shared `for:` debounce for *ClientCRLUnusable*, *ClientCRLRefusals* and *ClientCRLStale*. Raising it to stop the gauge flapping across a maintenance pass also delays the event-driven refusals page, which is the immediate one. For the *gauge* rule the detection latency is `maintenance_interval_sec` **plus** this, since the gauge is only recomputed on the maintenance pass; the refusals rule is event-driven and not subject to that. |
+| `clientCRLStaleSeconds` | `3h` | How long an entry may go without its `crl_file` being applied before *ClientCRLStale* fires. Three maintenance passes at the 1h default, so a single transient read error does not page — which means it assumes that default: **raise it alongside any increase to `maintenance_interval_sec`**, or the rule fires permanently on a healthy CA. |
 | `leafExpiryWarningSeconds` | 7 days | Leaf certificate expiry warning threshold. |
 | `leafExpiryCriticalSeconds` | 1 day | Leaf certificate expiry critical threshold. |
 | `pendingFor` | `1h` | How long a request may stay pending before alerting. |
 | `crlUpdateWindow` | `1h` | Window over which CRL-update failures are counted (the metric is a restart-resetting counter). |
 | `crlUpdateFor` | `15m` | `for:` debounce for the CRL-update-failure alert. |
 | `expiryFor` / `scrapeFor` / `readyFor` / `downFor` / `k8sExportFailingFor` | `1h` / `15m` / `10m` / `5m` / `15m` | `for:` debounce durations. |
+| `servingRenewalWindow` | `1h` | Window over which serving-certificate renewal failures are counted. |
+| `servingRenewalFor` | `15m` | `for:` debounce for the serving-renewal-failure alert. |
+| `servingRevocationWindow` | `1h` | Window over which superseded-revocation failures are counted. |
+| `servingRevocationFor` | `15m` | `for:` debounce for the superseded-revocation-failure alert. |
+| `servingChurnWindow` | `6h` | Window over which serving-certificate reissues are counted. |
+| `servingChurnThreshold` | `4` | Reissues within that window before churn is alerted. One per renewal period is normal. |
+| `servingChurnFor` | `15m` | `for:` debounce for the churn alert. |
+
+> **The three `serving*` windows are calibrated to the CA's
+> `maintenance_interval_sec` (default 1h), and the churn rule breaks if you
+> ignore that.** `servingChurnWindow / maintenance_interval_sec` must exceed
+> `servingChurnThreshold` or the rule can never fire: at a 2h interval the
+> shipped `6h` window yields at most 3 increments against a threshold of 4, and
+> the condition the metric exists to expose becomes permanently invisible. If
+> you raise `maintenance_interval_sec`, raise `servingChurnWindow` with it.

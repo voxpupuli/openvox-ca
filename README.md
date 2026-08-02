@@ -40,12 +40,14 @@ wire-compatible with your existing Puppet/OpenVox fleet.
 - **Random serial numbers:** every issued leaf certificate gets a cryptographically random 128-bit serial (CA/Browser Forum guidance)
 - **CRL Distribution Points:** optionally embed a CRL URL in every issued certificate (`--crl-url`) so verifiers can automatically fetch the CRL
 - **Configurable CRL validity:** control how long each published CRL is valid (`crl_validity_days`)
-- **Automatic CRL refresh:** a background job re-signs the CRL before its validity lapses, so a low-churn CA never serves an expired CRL; safe across replicas (serialised on the shared CRL lock) and tunable or disablable. Operators can also force a refresh on demand via `openvox-ca-ctl reissue-crl`
+- **Automatic CRL refresh:** a background job re-signs this CA's own CRL before its validity lapses, so a low-churn CA never serves an expired CRL; safe across replicas (serialised on the shared CRL lock) and tunable or disablable. Operators can also force a refresh on demand via `openvox-ca-ctl reissue-crl`. Imported ancestor CRLs are preserved but cannot be re-signed here, so keeping them current is `crl_chain_file`'s job (below) or, failing that, a re-import before they expire
+- **Client trust domains (opt-in):** by default the CA trusts exactly one issuer for client authentication — itself. `client_ca` adds others, each with its own admin allow list, its own `pp_cli_auth` setting, and its own CRLs; a foreign client is checked against *its own issuer's* CRLs, chain-wide. Grants default to off, and `client_revocation_policy` defaults to `require`, which refuses a client whose issuer has no currently valid CRL. See [trusting client certificates from another CA](docs/configuration.md#trusting-client-certificates-from-another-ca)
+- **Upstream CRL chain (opt-in):** point `crl_chain_file` at a PEM bundle of *ancestor* CRLs and openvox-ca re-reads it every maintenance cycle and republishes it alongside its own, so a sub-CA's ancestors stay current without anyone remembering to re-import before each `nextUpdate`. An ancestor's CRL can never move backwards. On every storage backend except `filesystem`, and under `encrypt_ca_key` or `ca_key_provider: openbao`, this is the only mechanism that does not require stopping the CA. See [configuration](docs/configuration.md#publishing-an-upstream-crl-chain)
 - **Expired-certificate cleanup (opt-in):** a background job removes certificates that expired more than a configurable grace period ago from the inventory and the CRL (and deletes their stored signed certificate), keeping both from growing without bound as nodes are decommissioned; safe across replicas (serialised on the shared CRL lock)
 - **OCSP responder:** built-in RFC 6960 OCSP responder; AIA extension embedded in issued certs when `--ocsp-url` is set; in-memory cache with nonce bypass
 - **Health probes:** `/healthz/live`, `/healthz/ready`, and `/healthz/startup` endpoints for Kubernetes-style liveness/readiness checks
 - **Prometheus exporter:** optional `/metrics` listener (`--metrics-listen`) exposing Go runtime/process and HTTP metrics plus CA certificate, CRL, and per–leaf-certificate expiry and issuance-status series; ships with a [Jsonnet alerting mixin](mixin/). See [metrics & monitoring](docs/metrics.md)
-- **Kubernetes export (opt-in):** publish the CA certificate and/or CRL into any number of Kubernetes Secrets and ConfigMaps via in-cluster server-side apply, with configurable names, namespaces, data keys, labels, annotations, and Secret `type`; CRL-bearing objects are refreshed whenever the CRL changes. See [Kubernetes export](docs/kubernetes-export.md)
+- **Kubernetes export (opt-in):** publish the CA certificate and/or CRL into any number of Kubernetes Secrets and ConfigMaps via in-cluster server-side apply, with configurable names, namespaces, data keys, labels, annotations, Secret `type`, and how much of the chain to publish (`cert_scope`/`crl_scope`, which default to this CA's own block alone — set them to `chain` on a target that was publishing a full bundle before); CRL-bearing objects are refreshed whenever the CRL changes. See [Kubernetes export](docs/kubernetes-export.md)
 - **Graceful shutdown:** `SIGTERM`/`SIGINT` drains in-flight requests with a configurable window (25s default) before exiting; deferred storage and signer cleanup always runs
 - **FIPS-compatible:** the core CA uses the standard library only (`crypto/x509`, `net/http`); no CGO by default; FIPS build available via `GOEXPERIMENT=boringcrypto` (the optional Kubernetes export adds the `client-go` dependency)
 - **`openvox-ca-ctl`:** operator CLI matching `puppetserver ca` subcommands. See the [operator CLI reference](docs/operator-cli.md)
@@ -102,6 +104,29 @@ When `--tls-cert` and `--tls-key` are both set, the server:
 1. Presents those certs to connecting clients
 2. Requests (but does not require) a client certificate from every connection
 3. Enforces endpoint-level authorization (see [Authorization tiers](docs/api.md#authorization-tiers))
+
+Alternatively, let the CA issue and renew its own serving certificate — useful
+where an external issuer cannot help, such as when the CA key is held in OpenBao
+and cert-manager therefore cannot act as a CA issuer:
+
+```bash
+./bin/openvox-ca \
+  --cadir /etc/puppetlabs/puppet/ssl \
+  --hostname openvox-ca.example.com \
+  --tls-self-provision \
+  --puppet-server puppet.example.com
+```
+
+The CA's `--hostname` must be a name of its own, not one a node also holds. The
+serving certificate is an ordinary node certificate issued under that name, so
+sharing it with the OpenVox Server would put two certificates in one
+per-subject slot. The CA refuses to start when that name is also a
+`--puppet-server` CN, but it cannot detect an ordinary agent sharing it — see
+[the caveat in the configuration guide](docs/configuration.md#self-provisioned-serving-certificate).
+
+It enables HTTPS on the same terms, renews in the background, and is mutually
+exclusive with `--tls-cert`/`--tls-key`. See
+[self-provisioned serving certificate](docs/configuration.md#self-provisioned-serving-certificate).
 
 The complete flag, environment-variable, and config-file reference is in
 [configuring the server](docs/configuration.md).

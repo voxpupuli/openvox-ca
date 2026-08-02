@@ -84,11 +84,110 @@ the Unix epoch, the Prometheus convention for `*_timestamp_seconds` gauges.
 
 | Metric | Description |
 | --- | --- |
-| `puppetca_crl_number` | Monotonic CRL sequence number (`cRLNumber`). |
+| `puppetca_crl_number` | Monotonic CRL sequence number (`cRLNumber`). Expect it to advance without any revocation having happened: a re-sign bumps it, and with [`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain) configured, so does a change to the upstream chain. The number need only increase, so this is harmless — but do not treat a rise as evidence that something was revoked. |
 | `puppetca_crl_this_update_timestamp_seconds` | CRL `ThisUpdate` time. |
 | `puppetca_crl_next_update_timestamp_seconds` | CRL `NextUpdate` (expiry) time. |
 | `puppetca_crl_revoked_certificates` | Number of certificates currently listed in the CRL. |
 | `puppetca_crl_update_failures_total` | Counter of failures to amend the CRL — a revocation that could not be recorded, or a CRL that could not be re-signed or written (across the revoke, cleanup, reissue and refresh paths). A rising value means the CRL is not being maintained; for revocations it means a superseded certificate may still be a valid credential. Resets to `0` on process restart. |
+
+The four CRL gauges above describe **this CA's own CRL**, the first block of the
+stored blob. When a CRL chain has been imported, the ancestor CRLs that follow it
+are not covered: this CA cannot re-sign them, so their expiry is not something a
+re-sign can fix and not something these series track. The series below cover
+those instead.
+
+### Upstream CRL chain
+
+| Metric | Description |
+| --- | --- |
+| `puppetca_crl_chain_next_update_timestamp_seconds` | NextUpdate of each **upstream** CRL in the stored blob — every block this CA did not issue — labelled by `issuer`. Deliberately a separate series from the unlabelled CRL metrics above: an expiring upstream CRL is fixed at the parent CA, not here, so it has its own alert and runbook. |
+| `puppetca_crl_chain_last_read_timestamp_seconds` | When `crl_chain_file` was last read successfully, or `0` if it never has been. Exported **only where `crl_chain_file` is configured**, so `absent()` means the feature is off and `== 0` means it is on but the file has never been opened — a wrong path, or a mount that never landed. That case moves no counter and would otherwise look healthy; `PuppetCAUpstreamCRLNeverRead` alerts on it. It does **not** detect a `subPath` mount: that reads successfully forever, so this advances exactly as it does on a healthy file. See [the `subPath` note](configuration.md#publishing-an-upstream-crl-chain) for what does. |
+| `puppetca_crl_chain_refresh_failures_total` | Counter of failed `crl_chain_file` reads — unreadable, unparseable, not ending on a PEM block boundary, or too large. Counted where the file is read, so it moves on every CRL amendment as well as on the maintenance pass; the visible symptom is that **revocation fails** until the file is fixed, as well as ancestor CRLs ageing. A failure of the refresh pass for some *other* reason — a lock it could not take, storage it could not read — deliberately moves `puppetca_crl_update_failures_total` instead, so this counter's runbook stays "check the file". The chain already published is left in place either way. Zero and static without `crl_chain_file`. Resets to `0` on process restart. |
+| `puppetca_crl_chain_discarded_total` | Counter of discards: one per CRL dropped from `crl_chain_file`, each time the file is evaluated, because no certificate in the stored CA bundle signed it. The file is evaluated on every CRL amendment as well as on the maintenance pass, so with a static bad file the value tracks revocation rate rather than the number of bad CRLs — alert on `increase(...) > 0`, not on the value. **Alert on this** — the shipped mixin does. It is the only signal that the published chain is *smaller* than the file says: a discarded CRL has no series of its own to go missing from. The remedy is to complete the CA bundle; a CRL passed over for being *stale* is counted separately, below. Zero and static without `crl_chain_file`. Resets to `0` on process restart. |
+| `puppetca_crl_chain_removed_total` | Counter of ancestors `crl_chain_file` has stopped listing while their CRL was published. The removal is honoured — the file is authoritative — but it cannot be undone here, because this CA cannot re-sign another CA's list, and the ancestor's own `..._next_update_timestamp_seconds` series simply stops existing, which no alert can fire on. A deliberate removal increments this on the pass that applies it; a `cat` glob that matched one file fewer increments it identically, which is why it is worth alerting on. Distinct from `..._discarded_total`, which counts CRLs the file *does* carry that nothing in the bundle signed. Counted per CRL per evaluation. Zero and static without `crl_chain_file`. Resets to `0` on process restart. |
+| `puppetca_crl_chain_regressed_total` | Counter of CRLs in `crl_chain_file` passed over because the published chain already carried a newer one from the same ancestor. The published CRL is kept, so revocation is unaffected — this is not a failure, and deliberately does not block CRL amendment the way an unreadable file does. A rising value means the file is stale, rolled back or being replayed; the remedy is whatever refreshes the file, **not** the CA bundle, which must already be complete or the CRL would have failed its signature check. Counted per CRL per evaluation, like the discard counter, so alert on `increase(...) > 0`. Zero and static without `crl_chain_file`. Resets to `0` on process restart. |
+
+The gauge appears whenever the stored blob holds a CRL this CA did not issue —
+which includes a chain brought in by `openvox-ca-ctl import --crl-chain` on a
+deployment that has never set `crl_chain_file`. That is deliberate: an ancestor
+CRL ages the same way whether or not anything is refreshing it, and it is
+precisely the import-only deployment where nothing is. The remedy differs,
+though, and the alert text names `crl_chain_file` because that is the standing
+fix. On an import-only deployment, read
+`PuppetCAUpstreamCRLExpiringSoon`/`Expired` as "re-import the chain with a
+current one, or configure [`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain)
+so it stays current by itself".
+
+### Client trust domains
+
+| Metric | Description |
+| --- | --- |
+| `puppetca_client_crl_usable` | 1 when a `client_ca` trust domain holds any currently valid CRL, 0 when it holds none, labelled by `client_ca`. Present only where `client_ca` is configured **and the policy is `require`** — `crl_file` is optional under `check` and `skip`, so a domain without CRLs is correct there and a 0 would alert on a healthy server. **Alert on 0**: the domain has nothing to check against. It does **not** report partial coverage — whether an uncovered anchor matters depends on chains that have not arrived, so a domain can read 1 while clients of one of its anchors are refused. `puppetca_client_crl_refusals_total` is the signal for that. |
+| `puppetca_client_crl_last_reload_timestamp_seconds` | When this `client_ca` entry's `crl_file` was last applied, labelled by `client_ca`. A reload that fails, or that would cover fewer anchors than the set in use, deliberately keeps the previous set — right for availability, and invisible on every other series, because the retained CRLs are still current and clients are still served. What has stopped is the file being applied, so revocations published since are not honoured. **Alert on it going stale** relative to `maintenance_interval_sec`. |
+| `puppetca_client_crl_refusals_total` | Counter of clients refused **because revocation information was missing**, labelled by `client_ca`. Not incremented when a CRL was found and said the client is revoked — that is the feature working, and counting it made this alert driveable at will by the holder of a revoked certificate. Published under every policy, and zero-initialised so `increase()` can see the first refusal. Unlike the gauge this is not an estimate: it counts requests actually turned away, so it sees a partially covered entry — one anchor's CRL missing while another's is fine — which no load-time check can distinguish from a healthy one. **Alert on `increase(...) > 0`.** Resets to `0` on process restart. |
+
+Emitted only when [`client_ca`](configuration.md#trusting-client-certificates-from-another-ca) is
+configured. A foreign issuer's CRLs are not the chain above: they come from that
+issuer's own `crl_file`, and this CA neither issues nor republishes them.
+
+### Self-provisioned serving certificate
+
+Always exported, so a dashboard or alert can select them whether or not
+[`tls_self_provision`](configuration.md#self-provisioned-serving-certificate) is
+in use.
+
+Two of them read zero without the feature. The **revocation** counter does not:
+the startup sweep that drains pending revocations runs whenever `hostname` is
+set, deliberately without regard to `tls_self_provision`, so that entries a
+previous configuration recorded are not stranded. A backend error at boot
+therefore raises it on a CA that has never enabled the feature — and that is the
+case with no retry, since no periodic task is registered. Do not silence
+`PuppetCAServingCertRevocationFailing` on non-self-provisioning CAs.
+
+| Metric | Description |
+| --- | --- |
+| `puppetca_serving_cert_issued_total` | Counter of serving certificates this process has issued to itself. A sustained rate rather than an occasional increment means replicas disagree about which CA certificate is current, each reissuing over the other; a fleet restart resolves it. **Alerted** as `PuppetCAServingCertChurning`, because inferring it otherwise would mean noticing an inventory growing for no reason. Resets to `0` on process restart. |
+| `puppetca_serving_cert_renewal_failures_total` | Counter of maintenance passes that failed to renew the serving certificate. The existing certificate stays in place and the next cycle retries. **Alert on this** — the shipped mixin does, as `PuppetCAServingCertRenewalFailing`: a persistent rise is invisible until the certificate expires, and it breaks the bound `tls_self_provision_revoke_after_sec` relies on. Resets to `0` on process restart. |
+| `puppetca_serving_cert_revocation_failures_total` | Counter of failures to record or to complete a supersession. The replaced certificate stays a valid credential either way, which is the exposure bound `tls_self_provision_revoke_after_sec` exists to enforce, so the mixin **alerts** on it as `PuppetCAServingCertRevocationFailing`. Some cases retry and some can never be retired; see [Superseded serving certificates](#superseded-serving-certificates) below. Resets to `0` on process restart. |
+
+#### Superseded serving certificates
+
+When `puppetca_serving_cert_revocation_failures_total` rises, the CA log line
+says which case it is. They differ in whether anything will clear it.
+
+**Retried on the next pass.** `Could not reconcile superseded serving
+certificates`, and `will retry` for one entry the sweep could not revoke. The
+pending list is left intact. Because the alert fires only while the counter is
+still rising, a firing instance means the retries are *not* succeeding — treat
+it as a storage-backend fault rather than waiting.
+
+**Not retried.** The same reconcile line ending `at startup`, when
+`tls_self_provision` is off. No periodic task is registered in that
+configuration, so the startup sweep is the only one the process runs and nothing
+retries until the CA restarts.
+
+**Cannot be retired at all.** `will not be scheduled for revocation` and `can
+never be revoked`. The mint has already overwritten what named the old serial,
+so no sweep can rediscover it, and there is **no by-serial revoke**
+([#177](https://github.com/voxpupuli/openvox-ca/issues/177)) — `openvox-ca-ctl
+revoke --certname <hostname>` resolves to the certificate the listener is
+currently serving, so running it makes things worse. The orphan stays a valid
+CA-signed credential for the CA's hostname until its `notAfter`. Contain it at
+the network layer, or rotate the CA.
+
+To record what was orphaned, for the incident:
+
+- the `will not be scheduled for revocation` line carries a `serial` field when
+  it knows one;
+- when the certificate itself was unreadable it does not, and the orphan is the
+  second-newest inventory row for the CA's hostname;
+- when the *pending list* could not be parsed it does not either, and there may
+  have been **several** — the log line carries the raw list as `raw` and a
+  `recovered` count of the entries that still decoded. Reconstruct the rest from
+  the inventory rows for the CA's hostname newer than
+  `tls_self_provision_revoke_after_sec` ago;
+- `can never be revoked` carries only the malformed value that caused it, so use
+  the inventory there too.
 
 ### Leaf certificates
 
@@ -158,5 +257,6 @@ puppetca_k8s_export_last_error_timestamp_seconds
 See the [`mixin/`](../mixin/) directory for the Jsonnet monitoring mixin and
 instructions for rendering or importing it. It alerts on exporter availability,
 CA/CRL/leaf expiry, pending requests, CRL update failures
-(`puppetca_crl_update_failures_total`), and Kubernetes export failures, with all
-thresholds configurable.
+(`puppetca_crl_update_failures_total`), serving-certificate renewal, revocation and issuance churn
+(`puppetca_serving_cert_*`), and Kubernetes export
+failures, with all thresholds configurable.

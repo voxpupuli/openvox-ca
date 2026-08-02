@@ -1,0 +1,353 @@
+// Copyright (C) 2026 Chris Boot
+// Copyright (C) 2026 Vox Pupuli and contributors
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along
+// with this program; if not, write to the Free Software Foundation, Inc.,
+// 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+
+package api
+
+import (
+	"crypto/x509"
+	"errors"
+	"fmt"
+	"sync/atomic"
+	"time"
+
+	"github.com/voxpupuli/openvox-ca/internal/config"
+)
+
+// Revocation policies, re-exported so the api package does not force every
+// caller to import internal/config for a string constant.
+const (
+	RevocationRequire = config.RevocationRequire
+	RevocationCheck   = config.RevocationCheck
+	RevocationSkip    = config.RevocationSkip
+)
+
+// ClientCRLSet is the revocation material for one foreign trust domain,
+// swapped atomically when the domain's crl_file is reloaded.
+//
+// Keyed by the certificate that actually signed each CRL.
+//
+// SECURITY: never by the CRL's own Authority Key Identifier. The AKI sits
+// inside the signed TBS, so the CA that signs a CRL chooses what it claims --
+// and a client_ca entry may name a CA the operator does not control, which is
+// the whole reason the entry exists. Keying on the claim let any anchor in an
+// entry supply the CRL consulted for any other: a co-anchor mints an empty CRL
+// asserting a sibling's key identifier, that CRL verifies (the co-anchor really
+// did sign it), it files under the sibling, and it then satisfies `require` for
+// the sibling while saying nothing about the sibling's revocations. A client
+// that sibling revoked is admitted -- as an administrator, if its CN is in the
+// entry's admin_cns.
+//
+// crypto/x509's RevocationList.CheckSignatureFrom validates IsCA,
+// KeyUsageCRLSign and the signature, and nothing about names or key
+// identifiers, so "some anchor signed this" is the only property a verification
+// pass establishes. Which anchor is the part that matters, and it is recorded
+// here rather than re-derived per request. (The loader verifies too, to produce
+// its discard warning, so the signature work happens twice at startup -- once
+// there and once here. Only this one decides anything.)
+//
+// Not by distinguished name either: under a shared root two sibling CAs can
+// hold the same DN.
+type ClientCRLSet struct {
+	// bySignerKey maps an anchor's SubjectPublicKeyInfo to the CRLs that key
+	// signed.
+	//
+	// The public key, not the certificate DER. CheckSignatureFrom establishes
+	// that a *key* signed the CRL, so keying on the certificate is one level
+	// tighter than the property actually verified -- and the gap is a shape
+	// operators really ship: a CA that renews its own certificate keeping its
+	// key, with both certificates in the bundle during the overlap. Its one CRL
+	// would file under whichever certificate came first in the file, and when
+	// that one expired every client would be refused while a valid, verifying
+	// CRL sat in crl_file. Keying on the key gives up nothing: a co-anchor's CRL
+	// still files under the co-anchor's key, so it is still never consulted for
+	// a sibling.
+	bySignerKey map[string][]*x509.RevocationList
+
+	// anchors is what the set was built against, kept so that questions about
+	// coverage are answered by the set itself rather than by a caller supplying
+	// a list again and hoping it matches.
+	anchors []*x509.Certificate
+}
+
+// NewClientCRLSet builds a set from crls, keeping only those an anchor signed
+// and filing each under the anchor that signed it.
+//
+// Taking anchors rather than trusting the caller to have verified already: the
+// set is the thing consulted per request, so the binding between a CRL and the
+// issuer it speaks for belongs here, not in a loader that could be bypassed.
+func NewClientCRLSet(crls []*x509.RevocationList, anchors []*x509.Certificate) *ClientCRLSet {
+	set := &ClientCRLSet{
+		bySignerKey: map[string][]*x509.RevocationList{},
+		anchors:     anchors,
+	}
+	for _, crl := range crls {
+		signer := SignerOfCRL(crl, anchors)
+		if signer == nil {
+			continue
+		}
+		key := string(signer.RawSubjectPublicKeyInfo)
+		set.bySignerKey[key] = append(set.bySignerKey[key], crl)
+	}
+	return set
+}
+
+// forIssuer returns every CRL issued by cert, and whether any of them is
+// currently valid.
+//
+// The two answers are separate because the policies want different things. For
+// `require`, an expired CRL counts as absent: without that the policy silently
+// degrades to `skip` over time, an expired CRL going on satisfying the "has a
+// CRL" test while saying nothing about revocations since.
+//
+// For `check` — "verify against whatever CRLs are loaded" — an expired CRL is
+// still loaded and still names serials that were revoked. Discarding it would
+// turn a stale CRL into no revocation checking at all, which is the outcome
+// `check` exists to avoid; the operator asked to tolerate an issuer without
+// CRLs, not to stop reading the ones they supplied.
+func (s *ClientCRLSet) forIssuer(cert *x509.Certificate, now time.Time) (crls []*x509.RevocationList, anyValid bool) {
+	if s == nil {
+		return nil, false
+	}
+	for _, crl := range s.bySignerKey[string(cert.RawSubjectPublicKeyInfo)] {
+		crls = append(crls, crl)
+		if currentAt(crl, now) {
+			anyValid = true
+		}
+	}
+	return crls, anyValid
+}
+
+// currentAt reports whether crl is currently valid.
+//
+// A CRL with no nextUpdate is *not* current. The field is OPTIONAL in the
+// TBSCertList ASN.1 -- which is why x509.ParseRevocationList leaves it zero --
+// but RFC 5280 §5.1.2.5 requires a conforming issuer to include it and does not
+// say what a client should do without it, so this is a conforming choice. It is
+// also the safe one: reading absent as
+// "never expires" handed `require` a snapshot that satisfies it forever: the
+// issuer's later revocations stay invisible, the policy decays to `skip` with
+// no moment at which it decayed, and puppetca_client_crl_usable reports 1
+// indefinitely so the alert cannot fire. That is exactly the decay the expiry
+// rule exists to prevent, arriving through the one CRL shape it did not cover.
+func currentAt(crl *x509.RevocationList, now time.Time) bool {
+	return !crl.NextUpdate.IsZero() && crl.NextUpdate.After(now)
+}
+
+// Usable reports whether this entry holds any current revocation material at
+// all. Drives puppetca_client_crl_usable.
+//
+// Deliberately *any*, not *every*, and the reasoning is worth keeping because
+// both readings have been shipped and both were wrong in their own direction.
+//
+// "Any" under-reports: an entry with two anchors, one covered and one not,
+// reads healthy while every client of the second is refused. That is real, and
+// it is what CoverageGaps and the refusal counter exist to report instead.
+//
+// "Every" over-reports, and worse. Enforcement does not ask for a CRL per
+// anchor; it asks for one per issuer *in the chain a client actually presents*.
+// A bundle holding an issuing CA and the root above it — how a partner usually
+// ships their anchors — needs only the issuing CA's CRL, because no client's
+// chain terminates at the root. Demanding one for the root too made a perfectly
+// healthy entry report 0 permanently, fire the mixin's only critical
+// authentication alert forever, and print "every client of this entry will be
+// rejected" while nobody was being rejected. An alert that fires on a working
+// configuration is an alert that gets silenced, taking the real case with it.
+//
+// Which anchors matter cannot be known here: it depends on chains that have not
+// arrived yet. So this answers the question it can answer honestly — is there
+// anything current to check against — and the question it cannot is answered at
+// enforcement time, where a refusal is a fact rather than an estimate.
+func (s *ClientCRLSet) Usable(now time.Time) bool {
+	if s == nil {
+		return false
+	}
+	for _, crls := range s.bySignerKey {
+		for _, crl := range crls {
+			if currentAt(crl, now) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// CoverageGaps names the anchors this set holds no current CRL for.
+//
+// Advisory, not a verdict: an anchor with no CRL only matters if some client's
+// chain terminates there, which is why this reports rather than decides. It is
+// what the startup warning uses, so an operator is told which anchor is
+// uncovered instead of being told the entry is broken.
+//
+// Names, for humans. Anything comparing coverage must use Coverage instead --
+// a common name is not an identity here, which is the same reason CRLs are not
+// keyed by one.
+func (s *ClientCRLSet) CoverageGaps(now time.Time) []string {
+	if s == nil {
+		return nil
+	}
+	var out []string
+	for _, anchor := range s.anchors {
+		if _, anyValid := s.forIssuer(anchor, now); !anyValid {
+			out = append(out, anchor.Subject.CommonName)
+		}
+	}
+	return out
+}
+
+// Coverage reports, per anchor key, whether this set holds any CRL for it and
+// whether it holds a currently valid one.
+//
+// Keyed on SubjectPublicKeyInfo, the identity bySignerKey uses. Comparing
+// coverage by common name collapsed two anchors that share one -- a CA that
+// renews *and* rekeys keeps its subject, so a bundle holding both certificates
+// during the overlap has two independent coverage slots under one name -- and
+// the reload guard built on that comparison then let a strictly narrower set
+// install, which is the failure it exists to prevent.
+//
+// Both answers, because the policies want different things. `require` needs a
+// currently valid CRL; `check` consults whatever is loaded, expired included,
+// so losing an expired CRL that named a serial silently re-admits it. A guard
+// that watched only currency could not see that, and VerifyCRLAgainst's comment
+// is explicit that clearing revocations is the threat, not only forging them.
+func (s *ClientCRLSet) Coverage(now time.Time) (present, current map[string]bool) {
+	present, current = map[string]bool{}, map[string]bool{}
+	if s == nil {
+		return present, current
+	}
+	for _, anchor := range s.anchors {
+		key := string(anchor.RawSubjectPublicKeyInfo)
+		crls, anyValid := s.forIssuer(anchor, now)
+		if len(crls) > 0 {
+			present[key] = true
+		}
+		if anyValid {
+			current[key] = true
+		}
+	}
+	return present, current
+}
+
+// clientCRLs holds the atomically-swappable CRL set for a domain.
+type clientCRLs struct {
+	current atomic.Pointer[ClientCRLSet]
+}
+
+// Set installs a reloaded CRL set.
+func (c *clientCRLs) Set(s *ClientCRLSet) { c.current.Store(s) }
+
+// Get returns the current set, which may be nil before the first load.
+func (c *clientCRLs) Get() *ClientCRLSet { return c.current.Load() }
+
+// ErrNoUsableCRL marks a refusal caused by the absence of revocation
+// information, as opposed to a revocation that was found.
+//
+// The distinction is the whole meaning of the refusals counter. Both outcomes
+// deny the request, but one says "this CA cannot tell whether the client is
+// revoked" and the other says "it is revoked" -- and the second is the feature
+// working. Counting them together made the branch's only critical
+// authentication alert fire whenever a revoked client retried, driveable at
+// will by precisely the population revocation exists to exclude, with a runbook
+// telling the responder to refresh a CRL that was present and current.
+var ErrNoUsableCRL = errors.New("revocation status unavailable")
+
+// checkChainRevocation walks a verified chain and reports the first revoked
+// certificate, or an error when the policy demands a CRL that is not there.
+//
+// **The whole chain, not just the leaf.** A sibling CA revoked by the shared
+// root must not go on authenticating its leaves — the same argument that makes
+// `certificate_revocation = leaf` a downgrade for agents applies to this CA
+// checking its clients.
+//
+// **The anchor is never checked**, because it has no issuer inside the chain. A
+// trust anchor is trusted by configuration, not by anything it presents, and
+// the parent's CRL is not something this CA is positioned to evaluate for an
+// anchor it was told to trust. The consequence is worth stating plainly:
+// revoking a trusted domain is an operator action — remove or replace the
+// client_ca entry — not a CRL event. An operator who has diligently wired up
+// crl_file will reasonably assume it covers the CA named in the same block. It
+// does not: crl_file covers what that CA *issued*, never that CA itself.
+//
+// A chain of length one — the presented certificate *is* a configured anchor,
+// which a client_ca entry makes reachable — yields no issuer pairs at all.
+// Under `require` that is a rejection rather than a silent pass, because
+// nothing can attest to its revocation status.
+func checkChainRevocation(chain []*x509.Certificate, set *ClientCRLSet, policy string, now time.Time) error {
+	// An unrecognised value is treated as `require`, not as `check`. Validation
+	// rejects a bad policy string, but it lives two packages away and runs on
+	// one construction path, so a value that never passed it must not arrive
+	// here as the most permissive arm. Only the two names that mean "check less"
+	// get to mean it.
+	if policy != RevocationSkip && policy != RevocationCheck {
+		policy = RevocationRequire
+	}
+	if policy == RevocationSkip {
+		return nil
+	}
+	if len(chain) < 2 {
+		if policy == RevocationRequire {
+			return fmt.Errorf("%w: the presented certificate is itself a trust anchor, "+
+				"so nothing can attest to its revocation status", ErrNoUsableCRL)
+		}
+		return nil
+	}
+
+	for i := 0; i < len(chain)-1; i++ {
+		subject, issuer := chain[i], chain[i+1]
+		crls, anyValid := set.forIssuer(issuer, now)
+		if policy == RevocationRequire && !anyValid {
+			return fmt.Errorf("%w: no currently valid CRL for issuer %q",
+				ErrNoUsableCRL, issuer.Subject.CommonName)
+		}
+		if len(crls) == 0 {
+			continue
+		}
+		for _, crl := range crls {
+			for _, entry := range crl.RevokedCertificateEntries {
+				if entry.SerialNumber.Cmp(subject.SerialNumber) == 0 {
+					return fmt.Errorf("certificate %q is revoked by %q",
+						subject.Subject.CommonName, issuer.Subject.CommonName)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// SignerOfCRL returns the anchor whose key signed crl, or nil.
+//
+// The identity, not merely the fact: see ClientCRLSet for why a CRL must be
+// bound to the certificate that signed it rather than to what it claims.
+func SignerOfCRL(crl *x509.RevocationList, anchors []*x509.Certificate) *x509.Certificate {
+	for _, anchor := range anchors {
+		if crl.CheckSignatureFrom(anchor) == nil {
+			return anchor
+		}
+	}
+	return nil
+}
+
+// VerifyCRLAgainst reports whether crl was signed by one of anchors.
+//
+// SECURITY: every CRL is verified at load, against its own entry's anchors and
+// never against another entry's or against client-supplied intermediates —
+// those would confuse a load-time trust decision with a per-request one.
+// Without this, a writable crl_file is a way to *clear* revocations, not merely
+// to add them: an attacker who can write the file could replace a CRL listing
+// their revoked certificate with an empty one.
+func VerifyCRLAgainst(crl *x509.RevocationList, anchors []*x509.Certificate) bool {
+	return SignerOfCRL(crl, anchors) != nil
+}

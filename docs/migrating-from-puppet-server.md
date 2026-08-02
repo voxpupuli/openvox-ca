@@ -76,7 +76,116 @@ openvox-ca-ctl import \
 echo "CA imported into $NEW_CADIR"
 ```
 
-This creates the directory structure, writes the CA cert/key/CRL, and
+`--crl-chain` accepts a multi-CRL bundle in any order. Every `X509 CRL` block must
+parse, or the whole import is refused; PEM blocks of other types are ignored and
+are not stored, because the blob is served
+to every agent and Puppet's default `certificate_revocation = chain` makes an
+agent parse all of it.
+
+This CA's own CRL is moved to the front, since every reader takes the first
+block as ours, and every other CRL is preserved through subsequent re-signing —
+so `certificate_revocation = chain` keeps working after a revocation or a CRL
+refresh. Which CRL is "ours" is decided by verifying the signature against this
+CA's certificate, not by comparing issuer names or key identifiers: a CRL from
+`openssl ca -gencrl` carries no Authority Key Identifier under the stock
+`openssl.cnf`, and a shared root can issue two sub-CAs with the same name. If
+the bundle contains no CRL signed by this CA, the one already in storage is kept
+at the front, and only if there is none is an empty CRL generated. Re-running
+the import with a newer ancestor bundle therefore refreshes the ancestor CRLs,
+without exporting and concatenating your own first.
+
+Five limits make re-import a poor refresh mechanism, and none is changed by this
+feature. Each has its own heading below, because which ones apply depends on
+your storage backend and key custody, and the one most likely to catch you out
+is not the first.
+
+**The bundle replaces the stored ancestor set wholesale.** Only *this CA's own*
+CRL is recovered from storage; ancestors are taken solely from what you supply.
+A refresh bundle must therefore contain **every** ancestor CRL, not just the one
+that changed — supplying a new root CRL alone drops the intermediate's, which is
+exactly the loss chain preservation exists to prevent. (Re-*signing* preserves
+ancestors; importing replaces them, deliberately: the file you hand to `import`
+is authoritative.)
+
+**`import` writes to a local filesystem directory only.** It takes `--cadir` and
+constructs filesystem storage directly; unlike `migrate` it has no
+`--source-config`/`--dest-config`. If your CA runs on **sqlite, postgres, mysql,
+etcd or redis**, re-importing writes to a directory the server never reads,
+prints `CA imported into <dir>`, and changes nothing — the live chain expires
+anyway. (SQLite is in that list: it keeps the CRL in its database file, so a
+cadir-based import misses it exactly as a networked backend does. See
+[storage backends](storage-backends.md).) For those deployments `crl_chain_file`
+is the only mechanism that does not require stopping the CA and round-tripping
+the whole backend.
+
+There is a round trip through `migrate` if you must do it on a non-filesystem
+backend, and it has to be done **with the CA stopped** — `migrate` copies and
+never deletes, so anything the CA records between the two legs is overwritten by
+the return leg. Weigh it first: it rewrites the CA key, the inventory HMAC and
+every signed certificate in order to refresh one PEM blob. **Back up the
+destination first** — `migrate` is not transactional. See
+[migrating between backends](storage-backends.md#migrating-between-backends).
+
+`scratch.yaml` must describe a **filesystem** backend whose `cadir` is the same
+directory the middle step passes to `--cadir`. `migrate` resolves its destination
+from that file; `import` resolves its own from the flag. If the two disagree, all
+three commands exit 0 and print success while the middle step writes somewhere
+the third never reads — the same silent no-op described above, reintroduced
+inside the workaround for it. Use a **fresh, empty** scratch directory every time
+— `mktemp -d` — because `migrate` copies and never deletes: anything left from a
+previous run is pushed back into the live backend on the return leg, including
+signed certificates that have since been cleaned, which reappear with no
+inventory row and are then invisible to the expiry cleanup. Remove the directory
+afterwards; it holds a plaintext copy of the CA key.
+
+```bash
+# scratch.yaml: storage_backend: filesystem, cadir: /tmp/scratch
+openvox-ca-ctl migrate --source-config live.yaml --dest-config scratch.yaml
+
+# --cert-bundle and --private-key are the copies the first leg just wrote there.
+openvox-ca-ctl import --cadir /tmp/scratch \
+  --cert-bundle /tmp/scratch/ca_crt.pem \
+  --private-key /tmp/scratch/private/ca_key.pem \
+  --crl-chain refreshed-chain.pem
+
+openvox-ca-ctl migrate --source-config scratch.yaml --dest-config live.yaml --force
+```
+
+On the **filesystem** backend `import` does write where the server reads, but
+stop the CA anyway: `import` takes the CRL lock, and that lock is only
+cross-process on backends that implement one — filesystem and sqlite both fall
+back to a mutex inside each process.
+
+**Re-import rewrites the CA key, so two custody modes cannot use it.** Under
+`encrypt_ca_key` the stored key is an `ENCRYPTED PRIVATE KEY` block that `import`
+cannot parse — and that failure is the safe one. Feeding it the original
+plaintext key instead **succeeds while silently replacing the encrypted at-rest
+key with a plaintext one**, because key loading accepts both forms and nothing
+warns: no error, no log line, and `CA imported into <dir>` on stdout. Under
+`ca_key_provider: openbao` there is no exportable key at all, so re-import is
+unavailable outright. Neither mode has another ancestor-refresh mechanism today
+apart from `crl_chain_file`.
+
+**An older replica will drop the ancestors.** A replica running a build older
+than this one rewrites the stored blob as a single block; during a rolling
+upgrade, complete the rollout before importing a chain.
+
+**Re-import is not signalled to consumers.** The Kubernetes exporter republishes
+on CRL notifications, which the import path deliberately does not send. After a
+live ancestor refresh, run `openvox-ca-ctl reissue-crl` or restart to republish
+the exported copies.
+
+Ancestor CRLs age in place: this CA cannot re-sign another CA's list, so
+whatever was imported stays as it was until something replaces it. Re-importing
+is one way, subject to all of the above; the other is
+[`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain), which has
+openvox-ca re-read a PEM bundle on every maintenance cycle and republish it, so
+the ancestors stay current without an operator remembering to act before each
+`nextUpdate`. Either way, watch
+`puppetca_crl_chain_next_update_timestamp_seconds{issuer}` — the shipped mixin
+alerts on it.
+
+The `import` command creates the directory structure, writes the CA cert/key/CRL, and
 initialises `inventory.txt` and `serial` (the serial file is written for compatibility but is not used at runtime; openvox-ca generates random serial numbers).
 
 ## Step 4: Copy signed certificates
@@ -216,6 +325,102 @@ puppet agent --test --noop
 | `ssl/certificate_requests/*.pem` | `<cadir>/requests/*.pem` | Directory renamed |
 | `ssl/certs/ca.pem` | (not needed) | Symlink; agents fetch CA cert via API |
 | `ssl/crl.pem` | (not needed) | Symlink; agents fetch CRL via API |
+
+## Authorisation parity
+
+`GET /certificate_status/{certname}` is **admin-only**, matching Puppet Server's
+shipped `auth.conf`, which grants `certificate_status` and
+`certificate_statuses` to holders of the `pp_cli_auth` extension and to nothing
+else. An existing `auth.conf` expectation therefore carries over unchanged: the
+CA CLI's certificate keeps working, and an ordinary agent certificate does not
+read statuses.
+
+**The symptom, if tooling of yours read statuses with an agent certificate:** the
+request now returns `403 access denied` where it previously returned the status
+JSON. The server logs the refusal with the client CN, the path and the reason. Look
+for a `reason` field of `route requires admin access` — rendered
+`reason="route requires admin access"` on stderr, and
+`"reason":"route requires admin access"` when `logfile` is set, since that
+selects the JSON handler. The message is `Request denied by authorisation
+middleware` and the client is in `client.cn`, beside the `client.domain` that
+vouched for the name.
+
+First, be clear what restoring it costs. Admin is a single boolean
+(`isAdmin`), not a per-route grant, so both of the options that preserve
+authentication give the caller the *entire* admin tier — `POST /sign`,
+`POST /sign/all`, `POST /generate/{subject}`, `PUT /clean`,
+`DELETE /certificate_status/{subject}`, `PUT /certificate/{subject}` and CRL
+replacement, as listed under [Authorization tiers](api.md#authorization-tiers).
+There is no read-only status grant today. A monitoring host given option 1 or 2
+to fix a status poll can also sign and revoke certificates.
+
+If the caller only needs to observe state, `GET /certificate/{subject}` and the
+CRL are both public and need no grant at all.
+
+**First check which trust domain the caller was attributed to**, because it
+decides whether either remedy below can work at all. Both are scoped to
+certificates **this CA issued**. If the caller holds a certificate from a
+[`client_ca`](configuration.md#trusting-client-certificates-from-another-ca)
+issuer — the usual shape when the servers and operators administering this CA
+sit under a sibling intermediate — then neither `--puppet-server` nor
+`pp_cli_auth` reaches them: their admin grant is that entry's `admin_cns` and
+`allow_pp_cli_auth`. The denial log line carries a `client.domain` field naming the
+domain the certificate was attributed to, beside `client.cn` and `reason`.
+
+For a caller this CA issued, two ways to restore authenticated access, in order
+of preference:
+
+1. **Add the caller's CN to the admin allow list** — `--puppet-server`, or
+   `--puppet-server-file` for one CN per line. Authentication is preserved and
+   the grant is explicit. Both are read once at startup, so the CA must be
+   restarted before the change takes effect. Grants full admin, as above.
+2. **Give the caller a certificate carrying `pp_cli_auth`**, which is how
+   OpenVox Server's own CLI authenticates. It is the *more* invasive of the
+   two, not the less: authorisation-arc OIDs are stripped from submitted CSRs (see
+   [Auth-arc OID stripping](#auth-arc-oid-stripping)), so such a certificate
+   cannot be obtained through the API at all and must be signed offline with the
+   CA private key. That is strictly more privilege than editing the allow-list
+   file, and it is unavailable when `ca_key_provider: openbao` holds the key,
+   since the key never leaves the vault. It also has no effect if
+   `--no-pp-cli-auth` / `no_pp_cli_auth: true` is set. Grants full admin.
+
+Separately, **`allow_public_status: true`** exists if agents must poll status
+before they hold a client certificate. It is listed apart from the two above
+because it does not restore *authenticated* access: it makes the route fully
+unauthenticated rather than relaxing it to any client. It is the bootstrapping
+escape hatch, not the way to restore agent access.
+
+### Renewal eligibility
+
+`POST /certificate_renewal` additionally requires that the presented
+certificate is one this CA issued, has not revoked, and is for the subject being
+renewed. Today you will not see a distinct error for the first two: the
+authorisation middleware trusts exactly this CA's certificate, so a foreign or
+revoked certificate is refused earlier, on every mTLS route, with
+`403 access denied`. The CA's own `403 certificate not eligible for renewal`
+becomes reachable once a second issuer can be trusted for client
+authentication.
+
+The third is a defence-in-depth invariant on the internal API rather than
+something a request can trip: the HTTP handler derives the subject from the
+presented certificate, so the two always agree. It guards against a future
+caller that passes them separately, and a second trust anchor does not make it
+reachable.
+
+Renewal reissues under
+this CA's authority using the presented certificate's own subject, so it is
+only meaningful for names this CA assigned. (Extensions differ by path, and on both
+paths only Puppet OID extensions are carried at all: the empty-body form
+carries the presented certificate's SANs and Puppet OIDs forward unchanged,
+while the CSR form takes Puppet OIDs from the CSR and strips authorization-arc
+ones.)
+
+In the default topology every certificate an agent holds was issued by this CA,
+so nothing changes. A certificate issued by a *previous* CA whose material was
+replaced without re-issuing agent certificates cannot be renewed — but note
+that such a certificate already fails the middleware's own chain check, so it
+was locked out of every mTLS route before this change too, not just renewal.
+Those agents must re-enrol.
 
 ## CLI command mapping
 

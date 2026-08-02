@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -53,6 +54,13 @@ type Exporter struct {
 	src       MaterialSource
 	defaultNS string   // resolved pod namespace; used for targets without one
 	metrics   *Metrics // may be nil (metrics disabled)
+
+	// scopeWarned latches warnOnNarrowedScopes per target/material, so a steady
+	// state stays quiet while material that becomes multi-block later is still
+	// reported. It lives here rather than on Target so that Target stays a
+	// plain, copyable configuration value.
+	scopeWarnMu sync.Mutex
+	scopeWarned map[string]bool
 }
 
 // New constructs an Exporter from an existing clientset. cfg must already have
@@ -104,6 +112,7 @@ func (e *Exporter) ExportAll(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	e.warnOnNarrowedScopes(certPEM, crlPEM)
 
 	var errs []error
 	for i := range e.cfg.Targets {
@@ -120,6 +129,67 @@ func (e *Exporter) ExportAll(ctx context.Context) error {
 			"kind", t.Kind, "name", t.Metadata.Name, "namespace", e.namespaceFor(t))
 	}
 	return errors.Join(errs...)
+}
+
+// warnOnNarrowedScopes reports every target whose scope nobody set and which is
+// therefore publishing less than it used to. Each target/material pair is
+// reported once, the first cycle it becomes true.
+//
+// Both scopes default to "self", and before they existed every target published
+// the stored blob verbatim. So an upgrade with no configuration change silently
+// narrows what an existing multi-block target publishes: a trust bundle loses
+// its intermediates, and a CRL blob loses every ancestor block -- which is the
+// material crl_chain_file exists to distribute. Nothing errors, and the
+// empty-material guard cannot catch it, because a scoped-down value is not
+// empty. Without this the only notice was prose in a document an upgrading
+// operator has no reason to re-read.
+//
+// Evaluated every cycle rather than once at startup, because the material can
+// become multi-block after the process is running: a CA that was single-block on
+// the first export and then has a chain imported would otherwise narrow it
+// silently, which is the case this exists to prevent. The latch is per
+// target/material so a steady state stays quiet.
+//
+// Deliberately a warning rather than an error, and deliberately not a default of
+// "chain": the asymmetry between the HTTP endpoints and export targets is
+// intended. It just has to be audible.
+func (e *Exporter) warnOnNarrowedScopes(certPEM, crlPEM []byte) {
+	e.scopeWarnMu.Lock()
+	defer e.scopeWarnMu.Unlock()
+	if e.scopeWarned == nil {
+		e.scopeWarned = make(map[string]bool, len(e.cfg.Targets)*2)
+	}
+	for i := range e.cfg.Targets {
+		t := &e.cfg.Targets[i]
+		for _, m := range []struct {
+			material, blockType, scope string
+			defaulted                  bool
+			want                       bool
+			chain                      []byte
+		}{
+			{"CA bundle", "CERTIFICATE", t.CertScope, t.certScopeDefaulted, t.Cert, certPEM},
+			{"CRL chain", "X509 CRL", t.CRLScope, t.crlScopeDefaulted, t.CRL, crlPEM},
+		} {
+			if !m.want || !m.defaulted || m.scope == ScopeChain {
+				continue
+			}
+			key := fmt.Sprintf("%d/%s", i, m.blockType)
+			if e.scopeWarned[key] {
+				continue
+			}
+			n := len(pemBlocks(m.chain, m.blockType))
+			if n < 2 {
+				continue
+			}
+			e.scopeWarned[key] = true
+			slog.Warn("Exporting only the first block of a multi-block "+m.material+
+				" because no scope was configured for this target; before cert_scope "+
+				"and crl_scope existed it published the whole thing. Set the scope "+
+				"explicitly to silence this",
+				"kind", t.Kind, "name", t.Metadata.Name,
+				"namespace", e.namespaceFor(t), "blocks", n, "publishing", m.scope)
+		}
+	}
 }
 
 // fetchMaterials reads the cert and CRL PEM, fetching each only if some target

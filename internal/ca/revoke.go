@@ -39,7 +39,7 @@ func (c *CA) Revoke(ctx context.Context, subject string) error {
 
 	ctx, cancel := context.WithTimeout(ctx, lockTimeout)
 	defer cancel()
-	return c.Storage.WithLock(ctx, lockNameCRL, func() error {
+	return c.withCRLLockCounted(ctx, func() error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		return c.revokeLocked(ctx, subject)
@@ -79,10 +79,10 @@ func (c *CA) revokeSerialLocked(ctx context.Context, serialStr string) error {
 		return fmt.Errorf("malformed serial %q", serialStr)
 	}
 
-	// 1. Load CRL
+	// 1. Load CRL. readStoredCRL counts its own failures now, so this path must
+	// not add a second increment for the same event.
 	crl, err := c.readStoredCRL(ctx)
 	if err != nil {
-		c.crlUpdateFailures.Add(1)
 		return err
 	}
 

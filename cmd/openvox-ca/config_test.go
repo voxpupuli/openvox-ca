@@ -24,6 +24,9 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
 
 // serverEnvVars is the full list of env vars read by applyServerEnv.
@@ -37,10 +40,18 @@ var serverEnvVars = []string{
 	"PUPPET_CA_LOGFILE",
 	"PUPPET_CA_TLS_CERT",
 	"PUPPET_CA_TLS_KEY",
+	"PUPPET_CA_TLS_SELF_PROVISION",
+	"PUPPET_CA_TLS_SELF_PROVISION_NAMES",
+	"PUPPET_CA_TLS_SELF_PROVISION_RENEW_BEFORE_SEC",
+	"PUPPET_CA_TLS_SELF_PROVISION_ENCRYPT_KEY",
+	"PUPPET_CA_TLS_SELF_PROVISION_REVOKE_AFTER_SEC",
+	"PUPPET_CA_CRL_CHAIN_FILE",
+	"PUPPET_CA_MAINTENANCE_INTERVAL_SEC",
 	"PUPPET_CA_PUPPET_SERVER",
 	"PUPPET_CA_PUPPET_SERVER_FILE",
 	"PUPPET_CA_NO_PP_CLI_AUTH",
 	"PUPPET_CA_NO_TLS_REQUIRED",
+	"PUPPET_CA_CLIENT_REVOCATION_POLICY",
 	"PUPPET_CA_OCSP_URL",
 	"PUPPET_CA_CA_KEY_ALGO",
 	"PUPPET_CA_CA_KEY_SIZE",
@@ -475,6 +486,8 @@ kubernetes_export:
       crl: true
       cert_key: ca.crt
       crl_key: ca.crl
+      cert_scope: chain
+      crl_scope: chain
     - kind: configmap
       metadata:
         name: openvox-ca-crl
@@ -503,6 +516,11 @@ kubernetes_export:
 		// Validate preserves explicitly-set values and applies defaults.
 		Expect(cfg.KubernetesExport.Targets[0].Type).To(Equal("Opaque"))
 		Expect(cfg.KubernetesExport.Targets[0].CertKey).To(Equal("ca.crt"))
+		// The scope tags themselves: every other scope spec builds the struct in
+		// Go, so renaming either yaml tag silently disabled the one documented
+		// remedy for the behaviour break these fields introduce.
+		Expect(cfg.KubernetesExport.Targets[0].CertScope).To(Equal("chain"))
+		Expect(cfg.KubernetesExport.Targets[0].CRLScope).To(Equal("chain"))
 		Expect(cfg.KubernetesExport.Targets[1].CRLKey).To(Equal("ca.crl")) // defaulted
 	})
 
@@ -585,6 +603,8 @@ var _ = Describe("applyServerEnv each variable", func() {
 		},
 		Entry("CADIR", "PUPPET_CA_CADIR", "/some/dir",
 			func(c *serverConfig) bool { return c.CADir == "/some/dir" }, "CADir"),
+		Entry("CLIENT_REVOCATION_POLICY", "PUPPET_CA_CLIENT_REVOCATION_POLICY", "check",
+			func(c *serverConfig) bool { return c.ClientRevocationPolicy == "check" }, "ClientRevocationPolicy"),
 		Entry("AUTOSIGN_CONFIG", "PUPPET_CA_AUTOSIGN_CONFIG", "true",
 			func(c *serverConfig) bool { return c.AutosignConfig == "true" }, "AutosignConfig"),
 		Entry("HOST", "PUPPET_CA_HOST", "1.2.3.4",
@@ -647,6 +667,27 @@ var _ = Describe("applyServerEnv each variable", func() {
 			func(c *serverConfig) bool { return c.DisableCRLRefresh }, "DisableCRLRefresh"),
 		Entry("CRL_REFRESH_INTERVAL_SEC", "PUPPET_CA_CRL_REFRESH_INTERVAL_SEC", "900",
 			func(c *serverConfig) bool { return c.CRLRefreshIntervalSec == 900 }, "CRLRefreshIntervalSec"),
+		// A typo in any of these would leave the feature silently off, or a
+		// duration silently at its default, with the only symptom a listener
+		// that comes up without TLS.
+		Entry("TLS_SELF_PROVISION", "PUPPET_CA_TLS_SELF_PROVISION", "true",
+			func(c *serverConfig) bool { return c.TLSSelfProvision }, "TLSSelfProvision"),
+		Entry("TLS_SELF_PROVISION_NAMES", "PUPPET_CA_TLS_SELF_PROVISION_NAMES", "a.example.com,b.example.com",
+			func(c *serverConfig) bool {
+				return len(c.TLSSelfProvisionNames) == 2 &&
+					c.TLSSelfProvisionNames[0] == "a.example.com" &&
+					c.TLSSelfProvisionNames[1] == "b.example.com"
+			}, "TLSSelfProvisionNames"),
+		Entry("TLS_SELF_PROVISION_RENEW_BEFORE_SEC", "PUPPET_CA_TLS_SELF_PROVISION_RENEW_BEFORE_SEC", "604800",
+			func(c *serverConfig) bool { return c.TLSSelfProvisionRenewBeforeSec == 604800 },
+			"TLSSelfProvisionRenewBeforeSec"),
+		Entry("TLS_SELF_PROVISION_ENCRYPT_KEY", "PUPPET_CA_TLS_SELF_PROVISION_ENCRYPT_KEY", "true",
+			func(c *serverConfig) bool { return c.TLSSelfProvisionEncryptKey }, "TLSSelfProvisionEncryptKey"),
+		Entry("TLS_SELF_PROVISION_REVOKE_AFTER_SEC", "PUPPET_CA_TLS_SELF_PROVISION_REVOKE_AFTER_SEC", "7200",
+			func(c *serverConfig) bool { return c.TLSSelfProvisionRevokeAfterSec == 7200 },
+			"TLSSelfProvisionRevokeAfterSec"),
+		Entry("MAINTENANCE_INTERVAL_SEC", "PUPPET_CA_MAINTENANCE_INTERVAL_SEC", "1800",
+			func(c *serverConfig) bool { return c.MaintenanceIntervalSec == 1800 }, "MaintenanceIntervalSec"),
 		Entry("CRL_REFRESH_BEFORE_SEC", "PUPPET_CA_CRL_REFRESH_BEFORE_SEC", "86400",
 			func(c *serverConfig) bool { return c.CRLRefreshBeforeSec == 86400 }, "CRLRefreshBeforeSec"),
 		// The zero value of RevokeOnAutoRenew is already false, so assert the
@@ -802,5 +843,45 @@ compile-02.example.com
 		cns, err := loadPuppetServerFile(path)
 		Expect(err).NotTo(HaveOccurred(), "unexpected error")
 		Expect(cns).To(BeEmpty(), "expected empty slice for comment-only file, got %v", cns)
+	})
+})
+
+// --- crl_chain_file wiring ---
+
+var _ = Describe("crl_chain_file wiring", func() {
+	// The setting is file-and-environment only, and its failure mode is total
+	// silence: a value that never reaches ca.CRLChainFile leaves the feature
+	// off with no error, no warning and no metric — the published chain simply
+	// never gains the ancestor CRLs the operator configured.
+	BeforeEach(func() { clearServerEnv() })
+
+	It("is empty by default", func() {
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.CRLChainFile).To(BeEmpty())
+	})
+
+	It("is read from the config file", func() {
+		path := writeTempConfig("crl_chain_file: /etc/puppet-ca/upstream-crls.pem\n")
+		cfg, err := loadServerConfig(path)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.CRLChainFile).To(Equal("/etc/puppet-ca/upstream-crls.pem"))
+	})
+
+	It("is read from the environment, which outranks the file", func() {
+		path := writeTempConfig("crl_chain_file: /from/file.pem\n")
+		setEnv("PUPPET_CA_CRL_CHAIN_FILE", "/from/env.pem")
+		cfg, err := loadServerConfig(path)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.CRLChainFile).To(Equal("/from/env.pem"))
+	})
+
+	It("reaches the CA, which is the step whose absence is silent", func() {
+		cfg, err := loadServerConfig(writeTempConfig("crl_chain_file: /etc/puppet-ca/upstream-crls.pem\n"))
+		Expect(err).NotTo(HaveOccurred())
+
+		myCA := ca.New(storage.New(GinkgoT().TempDir()), ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		Expect(applyCAConfig(myCA, cfg)).To(Succeed())
+		Expect(myCA.CRLChainFile).To(Equal("/etc/puppet-ca/upstream-crls.pem"))
 	})
 })

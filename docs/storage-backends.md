@@ -135,6 +135,8 @@ etcd_tls_key_file:  /etc/puppet-ca/etcd-client-key.pem
   [CA key encryption at rest](ca-key-security.md) (`encrypt_ca_key: true`), or
   pin the key to a local file with `ca_key_file` (see
   [CA cert/key as local files](#ca-certkey-as-local-files)).
+
+  > **`tls_self_provision` adds a second private key.** The serving key is stored the same way, and `ca_key_file` does **not** pin it — only `tls_self_provision_encrypt_key` protects it at rest. If you hold the CA key at a provider or in a local file, this is the only private key in the backend. See [CA key security](ca-key-security.md).
 - **`openvox-ca-ctl setup` / `import` work on the local filesystem only.** To
   import a CA into an etcd-backed cluster, run them against a scratch directory
   first, then point `openvox-ca` at a cadir containing the output.
@@ -250,6 +252,8 @@ redis_tls_key_file:  /etc/puppet-ca/redis-client-key.pem
 - **The CA private key lives in Redis by default.** Restrict ACLs, enable
   `encrypt_ca_key`, or pin the key to a local file with `ca_key_file` (see
   [CA cert/key as local files](#ca-certkey-as-local-files)).
+
+  > **`tls_self_provision` adds a second private key.** The serving key is stored the same way, and `ca_key_file` does **not** pin it — only `tls_self_provision_encrypt_key` protects it at rest. If you hold the CA key at a provider or in a local file, this is the only private key in the backend. See [CA key security](ca-key-security.md).
 - **`openvox-ca-ctl setup` / `import` work on the local filesystem only.**
   Bootstrap/import against a scratch directory, then point `openvox-ca` at a
   cadir containing the output.
@@ -291,7 +295,11 @@ than failing under contention.
 **Operational notes.** The database file *is* the CA — back it up (with its WAL
 sidecar) the way you would a cadir tree. The CA private key lives in the
 database by default; enable `encrypt_ca_key` or pin it to a local file with
-`ca_key_file`. `openvox-ca-ctl setup` / `import` work on the local filesystem
+`ca_key_file`.
+
+> **`tls_self_provision` adds a second private key.** The serving key is stored the same way, and `ca_key_file` does **not** pin it — only `tls_self_provision_encrypt_key` protects it at rest. If you hold the CA key at a provider or in a local file, this is the only private key in the backend. See [CA key security](ca-key-security.md).
+
+`openvox-ca-ctl setup` / `import` work on the local filesystem
 only; bootstrap against a scratch directory, then point a SQLite-backed
 `openvox-ca` at a fresh database.
 
@@ -326,7 +334,11 @@ TLS is driven either by the DSN (`sslmode=require`, etc.) or by the
 
 **Operational notes.** Back the database up with your normal PostgreSQL tooling.
 The CA private key lives in the database by default; enable `encrypt_ca_key` or
-pin it to a local file with `ca_key_file`. Grant the configured role rights to
+pin it to a local file with `ca_key_file`.
+
+> **`tls_self_provision` adds a second private key.** The serving key is stored the same way, and `ca_key_file` does **not** pin it — only `tls_self_provision_encrypt_key` protects it at rest. If you hold the CA key at a provider or in a local file, this is the only private key in the backend. See [CA key security](ca-key-security.md).
+
+Grant the configured role rights to
 create tables on first run (or pre-create the schema and grant DML).
 `openvox-ca-ctl setup` / `import` work on the local filesystem only.
 
@@ -360,6 +372,9 @@ form (`user:pass@tcp(host:3306)/dbname`).
 
 **Operational notes.** The CA private key lives in the database by default;
 enable `encrypt_ca_key` or pin it to a local file with `ca_key_file`.
+
+> **`tls_self_provision` adds a second private key.** The serving key is stored the same way, and `ca_key_file` does **not** pin it — only `tls_self_provision_encrypt_key` protects it at rest. If you hold the CA key at a provider or in a local file, this is the only private key in the backend. See [CA key security](ca-key-security.md).
+
 `openvox-ca-ctl setup` / `import` work on the local filesystem only.
 
 ### SQL environment variables
@@ -379,6 +394,27 @@ The SQL backends share one set of config keys and environment variables:
 
 The pool-tuning and TLS settings apply only to the networked SQL dialects;
 SQLite ignores them.
+
+> **`sql_max_open_conns` has a floor.** On PostgreSQL and MySQL each held
+> distributed lock pins one pooled connection for its whole critical section,
+> because both dialects scope their locks to a session. The CA nests locks: a
+> renewal or a clean holds two (subject, then CRL) and needs a third for the
+> work inside, and with `tls_self_provision` on the superseded-certificate sweep
+> holds three (serving, subject, CRL) and needs a fourth. Setting
+> `sql_max_open_conns` below **three** — or below **four** with
+> `tls_self_provision` — stalls the pool until the 60-second lock timeout
+> expires, on every pass.
+>
+> Those are floors for **one operation in isolation**, and the pool is
+> process-wide. A CA serving traffic runs the maintenance sweep, agent
+> renewals, the CRL refresher and the metrics collector concurrently, each
+> needing its own connections and none able to release a lock-pinned one until
+> its work completes — so a working setting is the floor multiplied by the
+> operations you expect in flight. `0` (the default) means no limit; leave it
+> there unless the database forces otherwise, and size any explicit value with
+> plenty of headroom.
+> SQLite is unaffected: it has no distributed locking and falls back to
+> process-local mutexes, which hold no connection.
 
 ---
 
@@ -435,6 +471,9 @@ ca_key_file:  /etc/puppet-ca/secrets/ca_key.pem
 - Existing protections still apply: `encrypt_ca_key` encrypts the key PEM
   before writing, and `ca_key_passphrase_file` overrides the auto-generated
   passphrase file.
+- **This override covers the CA cert and key only.** The
+  `tls_self_provision` serving key has no local-file equivalent and stays in the
+  backend; use `tls_self_provision_encrypt_key` to protect it there.
 
 This override also works with the filesystem backend, e.g. to pull the CA
 key out of the cadir tree and onto a separately-mounted volume.
@@ -506,6 +545,20 @@ Notes:
 | Backup/restore | tar `<cadir>/` | copy `.db` (+ WAL) + local dirs | DB dump + local dirs | etcd snapshot + local dirs | RDB/AOF + local dirs |
 | Cross-node consistency | single node | single node | strong | strongest | strong (narrow failover window) |
 | Drop-in for OpenVox/Puppet Server CA | yes | no (key paths change) | no (key paths change) | no (key paths change) | no (key paths change) |
+
+> **If you publish an upstream CRL chain**, note that `openvox-ca-ctl import`
+> writes to a local filesystem directory only. On every backend except
+> `filesystem` — and on any backend under `encrypt_ca_key` or
+> `ca_key_provider: openbao` —
+> [`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain) is not
+> merely the better way to keep ancestor CRLs current, it is the only one that
+> does not require stopping the CA. On a non-`filesystem` backend there is a
+> `migrate` round trip if you cannot deliver a file to the pod — see
+> [re-importing a chain](migrating-from-puppet-server.md#step-3-import-the-ca)
+> for it, and for the limits. Under `encrypt_ca_key` or
+> `ca_key_provider: openbao` there is **no** fallback: `import` cannot parse an
+> encrypted key, feeding it the plaintext one silently replaces your encrypted
+> key with a plaintext one, and under OpenBao there is no exportable key at all.
 
 Use `filesystem` for single-node installs or migrating from an OpenVox/Puppet
 Server CA. Use `sqlite` for a single-node install that prefers one database file

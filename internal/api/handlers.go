@@ -47,10 +47,47 @@ const maxJSONBody = 1 << 20 // 1 MiB
 // AuthConfig is the mTLS authorization configuration wired into the server.
 // Nil means no mTLS enforcement (plain HTTP / dev mode).
 type AuthConfig struct {
-	CACert            *x509.Certificate
-	AllowList         map[string]bool // admin CNs (puppet-server hostnames)
-	NoPpCliAuth       bool            // when true, pp_cli_auth extension does not grant admin access
-	AllowPublicStatus bool            // when true, GET /certificate_status is public (no client cert required)
+	// Domains are the trust domains a client certificate may be attributed to,
+	// in the order they are tried. Domain zero is always this CA's own; see
+	// TrustDomain and attribute for why the order is part of the contract.
+	//
+	// This replaced a single CACert field. The rename is deliberate: the
+	// meaning genuinely changed from "the certificate every client must chain
+	// to" to "one of several issuers, each with its own authority", and a
+	// silent semantic change on a field named CACert is exactly the kind of
+	// thing that survives review.
+	Domains []TrustDomain
+
+	AllowPublicStatus bool // when true, GET /certificate_status is public (no client cert required)
+
+	// ClientRevocationPolicy governs revocation checking for foreign domains.
+	// Empty means require. Our own domain always checks its own CRL and is
+	// unaffected by this setting.
+	ClientRevocationPolicy string
+
+	// OnRevocationRefusal, when set, is called with the domain name each time a
+	// foreign client is refused for want of a usable CRL.
+	//
+	// A callback rather than a counter because this package holds no metrics
+	// dependency. It exists because load-time coverage cannot tell which anchors
+	// matter -- that depends on chains not yet presented -- so the only
+	// unambiguous statement that clients are being turned away is made here,
+	// when one is.
+	OnRevocationRefusal func(domain string)
+}
+
+// revocationPolicy resolves the policy for foreign domains.
+//
+// config.ClientCAConfig.Policy() applies the same default, and main.go passes
+// its result in, so in production this arm is not reached. It stays because
+// AuthConfig is constructible without going through that path -- every spec in
+// this package does exactly that -- and the fail-closed default has to be a
+// property of the thing making the decision, not of one of its callers.
+func (c *AuthConfig) revocationPolicy() string {
+	if c.ClientRevocationPolicy == "" {
+		return RevocationRequire
+	}
+	return c.ClientRevocationPolicy
 }
 
 type Server struct {
@@ -160,7 +197,7 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
-	slog.Debug("GET certificate_status", "subject", subject, "client", clientCN(r))
+	slog.Debug("GET certificate_status", "subject", subject, "client", clientOf(r))
 
 	// Check signed dir first.
 	certPEM, err := s.CA.Storage.GetCert(r.Context(), subject)
@@ -200,7 +237,7 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
-	slog.Debug("PUT certificate_status", "subject", subject, "client", clientCN(r))
+	slog.Debug("PUT certificate_status", "subject", subject, "client", clientOf(r))
 
 	var body PutStatusBody
 	if !decodeJSONBody(w, r, &body) {
@@ -234,12 +271,21 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 	case "revoked":
 		if err := s.CA.Revoke(r.Context(), subject); err != nil {
 			slog.Warn("Revoke failed", "subject", subject, "error", err)
+			// This is the boundary an operator reaches first and most often, so
+			// it needs the diagnosis more than reissue-crl does. In this state
+			// the CA cannot record revocations at all, and a bare "conflict"
+			// leaves the cause in the logs of whichever replica served the
+			// request.
+			if errors.Is(err, ca.ErrForeignStoredCRL) {
+				http.Error(w, err.Error(), http.StatusConflict)
+				return
+			}
 			http.Error(w, "conflict", http.StatusConflict)
 			return
 		}
-		if cn := clientCN(r); cn != "" && s.destructiveOps != nil && s.destructiveOps.Record(cn) {
+		if p := clientOf(r); p.cn != "" && s.destructiveOps != nil && s.destructiveOps.Record(p.Key()) {
 			slog.Warn("High rate of destructive operations detected",
-				"client", cn, "operation", "revoke")
+				"client", p, "operation", "revoke")
 		}
 		w.WriteHeader(http.StatusNoContent)
 
@@ -252,7 +298,7 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetCert(w http.ResponseWriter, r *http.Request) {
 	subject := r.PathValue("subject")
-	slog.Debug("GET certificate", "subject", subject, "client", clientCN(r))
+	slog.Debug("GET certificate", "subject", subject, "client", clientOf(r))
 
 	// Special case: "ca" returns the CA cert.
 	if subject == "ca" {
@@ -304,7 +350,7 @@ func (s *Server) handlePutCert(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
-	slog.Debug("PUT certificate (import)", "subject", subject, "client", clientCN(r))
+	slog.Debug("PUT certificate (import)", "subject", subject, "client", clientOf(r))
 
 	certPEM, err := io.ReadAll(io.LimitReader(r.Body, maxJSONBody))
 	if err != nil {
@@ -346,7 +392,7 @@ func (s *Server) handlePutCert(w http.ResponseWriter, r *http.Request) {
 // --- CRL ---
 
 func (s *Server) handleGetCRL(w http.ResponseWriter, r *http.Request) {
-	slog.Debug("GET certificate_revocation_list/ca", "client", clientCN(r))
+	slog.Debug("GET certificate_revocation_list/ca", "client", clientOf(r))
 
 	// Honor If-Modified-Since.
 	if ims := r.Header.Get("If-Modified-Since"); ims != "" {
@@ -375,10 +421,18 @@ func (s *Server) handleGetCRL(w http.ResponseWriter, r *http.Request) {
 // operator refresh a CRL whose NextUpdate has lapsed (or is about to) without
 // having to revoke a certificate.
 func (s *Server) handleReissueCRL(w http.ResponseWriter, r *http.Request) {
-	slog.Debug("PUT certificate_revocation_list/ca", "client", clientCN(r))
+	slog.Debug("PUT certificate_revocation_list/ca", "client", clientOf(r))
 
 	if err := s.CA.ReissueCRL(r.Context()); err != nil {
 		slog.Warn("CRL reissue failed", "error", err)
+		if errors.Is(err, ca.ErrForeignStoredCRL) {
+			// Operator-fixable, and the CA's own message names the cause and the
+			// remedy. Surfacing it is the difference between "reissue-crl
+			// returned 500" and knowing the replica needs a restart; a 500 would
+			// leave that in the logs of whichever replica served the request.
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
 		http.Error(w, "failed to reissue CRL", http.StatusInternalServerError)
 		return
 	}
@@ -400,7 +454,7 @@ func (s *Server) handleGetRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
-	slog.Debug("GET certificate_request", "subject", subject, "client", clientCN(r))
+	slog.Debug("GET certificate_request", "subject", subject, "client", clientOf(r))
 
 	csrPEM, err := s.CA.Storage.GetCSR(r.Context(), subject)
 	if err != nil {
@@ -425,7 +479,7 @@ func (s *Server) handlePutRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
-	slog.Debug("PUT certificate_request", "subject", subject, "client", clientCN(r))
+	slog.Debug("PUT certificate_request", "subject", subject, "client", clientOf(r))
 
 	// SECURITY: Limit CSR body to 1 MiB to prevent memory exhaustion.
 	// NIST 800-53: SC-5 (Denial-of-Service Protection)
@@ -472,7 +526,7 @@ func (s *Server) handleDeleteRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
-	slog.Debug("DELETE certificate_request", "subject", subject, "client", clientCN(r))
+	slog.Debug("DELETE certificate_request", "subject", subject, "client", clientOf(r))
 
 	if err := s.CA.Storage.DeleteCSR(r.Context(), subject); err != nil {
 		http.Error(w, "CSR not found", http.StatusNotFound)
@@ -503,7 +557,7 @@ func (s *Server) handlePostGenerate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
-	slog.Debug("POST generate", "subject", subject, "client", clientCN(r))
+	slog.Debug("POST generate", "subject", subject, "client", clientOf(r))
 
 	// Optional DNS alt names from query params (?dns=a&dns=b).
 	dnsAltNames := r.URL.Query()["dns"]
@@ -563,8 +617,27 @@ func csrValidationError(err error) bool {
 		strings.Contains(s, "invalid CSR signature")
 }
 
-// clientCN extracts the Common Name from the TLS client certificate, if any.
-// Returns "" when TLS is not configured or no client cert is presented.
+// clientCN returns the presented certificate's common name, verbatim. Empty
+// when TLS is not configured or no client certificate was presented.
+//
+// Verbatim, because this is an *identity*: the renewal handler compares it
+// against a CSR's subject and passes it to Renew as the name to issue for.
+// Sanitising it here looked like closing the log-injection class at its source
+// and was not -- the middleware reads the field directly anyway, so the class
+// stayed open -- while sanitiseForLog truncates at 256 bytes, which this CA's
+// certname grammar permits. The effect was that an agent with a long certname
+// got a permanent 403 on a re-key renewal, comparing a truncated name against
+// its own correct CSR.
+//
+// Use clientOf anywhere the client is displayed or counted rather than
+// compared. It carries the vouching domain as well as the name, and it is the
+// only way either reaches a log record -- which is what a display *function*
+// beside this one was not. That form left the choice at every call site, and the
+// sweep that introduced it missed fourteen of them.
+//
+// The two callers that remain here are the renewal handler's CSR comparison and
+// the subject it passes to Renew. Both sit behind tierOwnClient, so the domain
+// is ours by construction and the bare name is exactly what is wanted.
 func clientCN(r *http.Request) string {
 	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
 		return r.TLS.PeerCertificates[0].Subject.CommonName
@@ -746,7 +819,7 @@ func (s *Server) handleDeleteStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
-	slog.Debug("DELETE certificate_status", "subject", subject, "client", clientCN(r))
+	slog.Debug("DELETE certificate_status", "subject", subject, "client", clientOf(r))
 
 	if err := s.CA.Clean(r.Context(), subject); err != nil {
 		slog.Warn("Clean failed", "subject", subject, "error", err)
@@ -757,9 +830,9 @@ func (s *Server) handleDeleteStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if cn := clientCN(r); cn != "" && s.destructiveOps != nil && s.destructiveOps.Record(cn) {
+	if p := clientOf(r); p.cn != "" && s.destructiveOps != nil && s.destructiveOps.Record(p.Key()) {
 		slog.Warn("High rate of destructive operations detected",
-			"client", cn, "operation", "clean")
+			"client", p, "operation", "clean")
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -767,7 +840,7 @@ func (s *Server) handleDeleteStatus(w http.ResponseWriter, r *http.Request) {
 // --- Certificate statuses (list all) ---
 
 func (s *Server) handleGetStatuses(w http.ResponseWriter, r *http.Request) {
-	slog.Debug("GET certificate_statuses", "client", clientCN(r))
+	slog.Debug("GET certificate_statuses", "client", clientOf(r))
 
 	stateFilter := r.URL.Query().Get("state") // "requested", "signed", "revoked", or ""
 
@@ -838,7 +911,7 @@ type CertExpiration struct {
 }
 
 func (s *Server) handleGetExpirations(w http.ResponseWriter, r *http.Request) {
-	slog.Debug("GET expirations", "client", clientCN(r))
+	slog.Debug("GET expirations", "client", clientOf(r))
 
 	// Without this guard a request that reaches the handler before Init()
 	// finishes would dereference a nil CACert below and panic the server.
@@ -874,8 +947,8 @@ type SignRequestBody struct {
 }
 
 func (s *Server) handlePostSign(w http.ResponseWriter, r *http.Request) {
-	cn := clientCN(r)
-	slog.Debug("POST sign", "client", cn)
+	client := clientOf(r)
+	slog.Debug("POST sign", "client", client)
 
 	var body SignRequestBody
 	if !decodeJSONBody(w, r, &body) {
@@ -886,7 +959,7 @@ func (s *Server) handlePostSign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Debug("Signing certificates", "count", len(body.Certnames), "subjects", body.Certnames, "client", cn)
+	slog.Debug("Signing certificates", "count", len(body.Certnames), "subjects", body.Certnames, "client", client)
 	result := s.signInBatches(r.Context(), body.Certnames)
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(result); err != nil {
@@ -898,18 +971,22 @@ func (s *Server) handlePostSign(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Request) {
 	// Renewal requires an authenticated client cert to establish identity.
+	// cn is the identity: it is compared against the CSR's subject below and is
+	// the name Renew issues for, so it must be the certificate's value. client is
+	// what every log line in this handler names, sanitised and domain-qualified.
 	cn := clientCN(r)
 	if cn == "" {
 		http.Error(w, "client certificate required for renewal", http.StatusForbidden)
 		return
 	}
-	slog.Debug("POST certificate_renewal", "client", cn)
+	client := clientOf(r)
+	slog.Debug("POST certificate_renewal", "client", client)
 
 	// SECURITY: Limit body to 1 MiB to prevent memory exhaustion.
 	// NIST 800-53: SC-5 (Denial-of-Service Protection)
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
-		slog.Error("read renewal body failed", "client", cn, "error", err)
+		slog.Error("read renewal body failed", "client", client, "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -920,10 +997,21 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 		// (hostcert_renewal_interval) they POST an empty body here, relying
 		// solely on the mTLS-presented client cert to prove identity and key
 		// possession, and expect the SAME key reissued with a fresh serial
-		// and validity. Reissuing without a fresh proof-of-possession is safe
-		// because newAuthMiddleware (the tierAnyClient path guarding this
-		// route) has already verified r.TLS.PeerCertificates[0] chains to our
-		// CA and is not revoked; clientCN(r) only reads its CN.
+		// and validity.
+		//
+		// Reissuing without a fresh proof-of-possession is safe because the
+		// certificate is checked twice over. newAuthMiddleware attributes it to
+		// a trust domain, and the tierOwnClient path guarding this route admits
+		// only domain zero — our own CA — having also confirmed it is not
+		// revoked. AutoRenew then verifies independently that this CA issued it
+		// and has not revoked it, rejecting with ErrForeignCertificate
+		// otherwise.
+		//
+		// The second check is not redundant with the first. They are enforced in
+		// different packages against different state, and renewal is the
+		// operation that mints a new credential from an old one — the place
+		// where a foreign certificate crossing into our namespace would be
+		// hardest to notice afterwards. clientCN(r) only reads the CN.
 		certPEM, err = s.CA.AutoRenew(r.Context(), r.TLS.PeerCertificates[0])
 		if err != nil {
 			// A key-strength rejection is client-actionable: the presented
@@ -933,6 +1021,21 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 			if errors.Is(err, ca.ErrKeyPolicy) {
 				slog.Warn("Auto-renewal rejected: key policy", "subject", cn, "error", err)
 				http.Error(w, "certificate key does not meet policy; renew with a new CSR", http.StatusUnprocessableEntity)
+				return
+			}
+			if errors.Is(err, ca.ErrForeignCertificate) {
+				// Deliberately not "access denied": that is the middleware's
+				// wording, and the authorisation oracle keys on it to tell a
+				// middleware rejection from a handler one. Sharing the string
+				// would make the oracle blind to the middleware's own checks.
+				slog.Warn("Auto-renewal rejected: certificate not eligible", "subject", cn, "error", err)
+				http.Error(w, "certificate not eligible for renewal", http.StatusForbidden)
+				return
+			}
+			if errors.Is(err, ca.ErrNotInitialized) {
+				// Same answer as the import path: not ready is a retryable
+				// condition, not a server fault.
+				http.Error(w, "CA not ready", http.StatusServiceUnavailable)
 				return
 			}
 			slog.Warn("Auto-renewal failed", "subject", cn, "error", err)
@@ -951,18 +1054,53 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 		// with a different CN while authenticating as itself.
 		// NIST 800-53: IA-5(2) (PKI-Based Authentication)
 		if csr.Subject.CommonName != cn {
-			slog.Warn("Renewal rejected: CN mismatch", "client_cn", cn, "csr_cn", csr.Subject.CommonName)
+			// The CSR's CN is chosen by the requester and nothing has validated it
+			// at this point -- this is the mismatch branch, before Renew runs. Any
+			// agent holding one of our certificates reaches it, and the record it
+			// would forge is itself a security event.
+			slog.Warn("Renewal rejected: CN mismatch",
+				"client", client,
+				"csr_cn", sanitiseForLog(csr.Subject.CommonName))
 			http.Error(w, "CSR CN does not match authenticated client CN", http.StatusForbidden)
 			return
 		}
 
-		certPEM, err = s.CA.Renew(r.Context(), cn, body)
+		certPEM, err = s.CA.Renew(r.Context(), cn, body, r.TLS.PeerCertificates[0])
 		if err != nil {
 			// Same key-strength policy applies to the re-key CSR: surface it as
 			// a client error instead of a 500.
 			if errors.Is(err, ca.ErrKeyPolicy) {
 				slog.Warn("Renewal rejected: key policy", "subject", cn, "error", err)
 				http.Error(w, "CSR key does not meet policy", http.StatusUnprocessableEntity)
+				return
+			}
+			if errors.Is(err, ca.ErrRenewalSubjectMismatch) {
+				// Same 403 body as below — the client learns no more either way
+				// — but logged apart, because this one is an authenticated
+				// caller reaching for another node's identity rather than a
+				// topology problem.
+				//
+				// Unreachable from this handler by construction: it passes cn
+				// and the certificate cn came from, so the two always agree.
+				// Unlike the foreign-certificate branch below, no topology
+				// change makes it reachable — only a future caller that passes
+				// subject and certificate separately. It is here so that such a
+				// caller gets a 403 rather than a 500.
+				slog.Warn("Renewal rejected: presented certificate is for another subject",
+					"subject", cn, "error", err)
+				http.Error(w, "certificate not eligible for renewal", http.StatusForbidden)
+				return
+			}
+			if errors.Is(err, ca.ErrForeignCertificate) {
+				// See the auto-renewal branch: the body must not collide with
+				// the middleware's "access denied".
+				slog.Warn("Renewal rejected: certificate not eligible", "subject", cn, "error", err)
+				http.Error(w, "certificate not eligible for renewal", http.StatusForbidden)
+				return
+			}
+			if errors.Is(err, ca.ErrNotInitialized) {
+				// See the auto-renewal branch.
+				http.Error(w, "CA not ready", http.StatusServiceUnavailable)
 				return
 			}
 			slog.Warn("Renewal failed", "subject", cn, "error", err)
@@ -976,8 +1114,9 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 }
 
 func (s *Server) handlePostSignAll(w http.ResponseWriter, r *http.Request) {
-	cn := clientCN(r)
-	slog.Debug("POST sign/all", "client", cn)
+	// Display only -- nothing here compares or acts on the name.
+	client := clientOf(r)
+	slog.Debug("POST sign/all", "client", client)
 
 	pending, err := s.CA.Storage.ListCSRs(r.Context())
 	if err != nil {
@@ -987,7 +1126,7 @@ func (s *Server) handlePostSignAll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result := s.signInBatches(r.Context(), pending)
-	slog.Debug("Signed all pending CSRs", "signed", len(result.Signed), "errors", len(result.SigningErrors), "client", cn)
+	slog.Debug("Signed all pending CSRs", "signed", len(result.Signed), "errors", len(result.SigningErrors), "client", client)
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(result); err != nil {
 		slog.Warn("encode response failed", "error", err)
@@ -997,8 +1136,8 @@ func (s *Server) handlePostSignAll(w http.ResponseWriter, r *http.Request) {
 // --- Bulk clean ---
 
 func (s *Server) handlePutClean(w http.ResponseWriter, r *http.Request) {
-	cn := clientCN(r)
-	slog.Debug("PUT clean", "client", cn)
+	client := clientOf(r)
+	slog.Debug("PUT clean", "client", client)
 
 	var body SignRequestBody
 	if !decodeJSONBody(w, r, &body) {
@@ -1009,10 +1148,10 @@ func (s *Server) handlePutClean(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Debug("Cleaning certificates", "count", len(body.Certnames), "subjects", body.Certnames, "client", cn)
+	slog.Debug("Cleaning certificates", "count", len(body.Certnames), "subjects", body.Certnames, "client", client)
 	result := s.CA.CleanMultiple(r.Context(), body.Certnames)
-	if cn != "" && s.destructiveOps != nil && s.destructiveOps.Record(cn) {
-		slog.Warn("High rate of destructive operations detected", "client", cn, "operation", "bulk-clean")
+	if client.cn != "" && s.destructiveOps != nil && s.destructiveOps.Record(client.Key()) {
+		slog.Warn("High rate of destructive operations detected", "client", client, "operation", "bulk-clean")
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(result); err != nil {
