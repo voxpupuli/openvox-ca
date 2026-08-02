@@ -52,8 +52,18 @@ import (
 // an identity that was withdrawn before the minting — and both are closed by
 // re-asking the question from storage under the lock.
 //
-// The third spec pins reassertNotRevoked's fallback to the cached CRL, and does
-// it by calling the method rather than a renewal. No route through Renew or
+// Two more cover the other side of that lock, where Revoke now takes it too.
+// One pins that a revocation waits for an issuance already under way rather
+// than stepping past it, and that it waits on the subject lock without holding
+// the CRL lock — the ordering every other nested acquisition in the package
+// uses, and an inversion of it deadlocks. The other pins what happens when the
+// renewal wins that race instead: the revocation behind it must retire the
+// serial the renewal issued. Between them the two orderings Revoke's godoc
+// rests on are both answers rather than races, which is the claim that makes
+// the re-check above worth its lock.
+//
+// The corrupt-CRL spec pins reassertNotRevoked's fallback to the cached CRL,
+// and does it by calling the method rather than a renewal. No route through Renew or
 // AutoRenew can reach that branch's interesting case: it needs the cache to say
 // "revoked" while the pre-lock gate, which reads that same cache, has already
 // passed, and nothing a caller can do changes the cache between the two. The
@@ -298,6 +308,24 @@ var _ = Describe("A revocation racing a renewal", func() {
 		// stepped straight past an issuance holding the subject lock.
 		Consistently(revoked, 100*time.Millisecond).ShouldNot(Receive())
 
+		// And it must be waiting on the subject lock specifically, not holding
+		// the CRL lock while it waits. Taking them in the other order deadlocks
+		// against Clean and both renewal paths, all of which take the subject
+		// lock first and the CRL lock inside it — and on the filesystem backend
+		// that deadlock is unbounded, because the process-local fallback is a
+		// mutex that ignores the context deadline. Without this the inversion
+		// passes every spec in the file.
+		crlFree := make(chan struct{})
+		go func() {
+			defer GinkgoRecover()
+			Expect(store.WithLock(ctx, lockNameCRL, func() error {
+				close(crlFree)
+				return nil
+			})).To(Succeed())
+		}()
+		Eventually(crlFree).Should(BeClosed(),
+			"Revoke must not be holding the CRL lock while it waits for the subject lock")
+
 		releaseOnce.Do(func() { close(release) })
 		Expect(<-held).To(Succeed())
 
@@ -305,6 +333,35 @@ var _ = Describe("A revocation racing a renewal", func() {
 		isRevoked, err := myCA.IsRevokedSerial(ctx, ownCrt.SerialNumber)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(isRevoked).To(BeTrue(), "waiting for the lock must not lose the revocation")
+	})
+
+	// The other half of the disjunction Revoke's godoc rests on: when the
+	// renewal wins the lock instead, the revocation that follows must retire
+	// the serial that renewal just issued, not the one it replaced. That holds
+	// because issueLeafLocked appends the new inventory row before the subject
+	// lock is released, so findSerialForSubject resolves to it — the same
+	// latest-wins resolution revokeSerialLocked's godoc warns about, relied on
+	// here rather than worked around. Move the serial capture ahead of the lock
+	// and PUT /certificate_status answers 204 while the fresh certificate stays
+	// live, which is this branch's own failure mode reached from the other side.
+	It("retires the certificate a renewal issued when the revocation follows it", func() {
+		_, err := myCA.AutoRenew(ctx, ownCrt)
+		Expect(err).NotTo(HaveOccurred())
+
+		renewed := servedSerial()
+		Expect(renewed.Cmp(ownCrt.SerialNumber)).NotTo(Equal(0), "the renewal must have issued a fresh serial")
+
+		Expect(myCA.Revoke(ctx, "node1.test")).To(Succeed())
+
+		isRevoked, err := myCA.IsRevokedSerial(ctx, renewed)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(isRevoked).To(BeTrue(), "the revocation must retire the serial the renewal issued")
+
+		// The predecessor stays revoked too — the renewal retired it on the way
+		// past — so neither certificate is left usable.
+		wasRevoked, err := myCA.IsRevokedSerial(ctx, ownCrt.SerialNumber)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(wasRevoked).To(BeTrue())
 	})
 
 	It("still refuses from the cache when the stored CRL cannot be read", func() {

@@ -234,6 +234,18 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 	case "revoked":
 		if err := s.CA.Revoke(r.Context(), subject); err != nil {
 			slog.Warn("Revoke failed", "subject", subject, "error", err)
+			// A revocation waits for an issuance already under way for the same
+			// subject, so a busy CA can spend the whole lockTimeout queued and
+			// never reach the CRL. Say so, rather than reporting it as the same
+			// conflict a subject with no certificate gets: revocation is
+			// idempotent — revokeSerialLocked short-circuits a serial already
+			// listed — so retrying is always safe, and containment tooling
+			// needs to know that retrying is what is being asked of it.
+			if errors.Is(err, context.DeadlineExceeded) {
+				w.Header().Set("Retry-After", "5")
+				http.Error(w, "timed out waiting for the certificate lock; retry", http.StatusServiceUnavailable)
+				return
+			}
 			http.Error(w, "conflict", http.StatusConflict)
 			return
 		}

@@ -160,3 +160,11 @@ instructions for rendering or importing it. It alerts on exporter availability,
 CA/CRL/leaf expiry, pending requests, CRL update failures
 (`puppetca_crl_update_failures_total`), and Kubernetes export failures, with all
 thresholds configurable.
+
+Two renewal conditions have no metric behind them and are reported by log line
+only: a renewal that could not read the stored CRL and fell back to this
+replica's cached copy, and one refused on the stored CRL while that cache still
+called the certificate live. Both say this replica's CRL cache has drifted from
+storage, which is a per-replica condition a cluster-wide counter would
+misrepresent. See [Revocation is not cluster-wide until each replica
+re-signs](api.md#revocation-cluster-wide) for the exact messages to match on.

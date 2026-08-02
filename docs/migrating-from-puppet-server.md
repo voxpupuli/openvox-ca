@@ -286,8 +286,9 @@ HA backends a replica that has not yet caught up admits the request and then
 refuses the renewal. This is a deliberate difference from every other route
 here: a revocation performed on one replica stops renewals everywhere at once,
 rather than waiting for each peer's cache.
-See [Certificate renewal](api.md#renewal-eligibility) for the two limits on
-that guarantee.
+See [Certificate renewal](api.md#renewal-eligibility) for the one limit on that
+guarantee — an unreadable stored CRL falls back to the local cache — and for
+what the revocation itself now waits behind.
 
 The third is a defence-in-depth invariant on the internal API rather than
 something a request can trip: the HTTP handler derives the subject from the

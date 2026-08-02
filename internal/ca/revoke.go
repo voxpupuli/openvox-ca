@@ -43,9 +43,22 @@ import (
 // serial that renewal issued.
 //
 // The cost is that a revocation now waits for an issuance already under way for
-// that subject, which is the same trade Clean has always made (see the lock note
-// there); PUT /certificate_status is not on a latency budget, and one signing
-// operation is the most it can wait behind.
+// that subject — the same trade Clean has always made, so DELETE
+// /certificate_status has always paid it. Do not read that wait as short. A
+// renewal holds the subject lock across its own acquisition of the cluster-wide
+// CRL lock, so the revocation can be queued behind another operation's queueing,
+// and SaveRequest holds it across an autosign signature too. Both acquisitions
+// here spend from one lockTimeout, deliberately, so the HTTP request cannot
+// outlive the server's write deadline — which means a revocation on a busy CA
+// can exhaust the budget and fail where it would previously have reached the CRL
+// lock directly. That failure is safe to retry: revokeSerialLocked short-circuits
+// a serial already listed, so revocation is idempotent, and handlePutStatus
+// answers a deadline with 503 and Retry-After rather than a bare conflict.
+//
+// Fairness is the backend's to give. etcd orders waiters by revision and
+// Postgres queues on pg_advisory_lock, so a revocation there is granted the lock
+// in turn; the Redis locker polls SET NX with backoff, so a revocation contending
+// with a stream of renewals from another replica has no ordering guarantee.
 //
 // Lock ordering: subject-lock (distributed) → CRL-lock (distributed) → c.mu,
 // matching Clean, and no path takes those two in the other order. Callers must

@@ -1047,6 +1047,34 @@ var _ = Describe("API Workflow", func() {
 			mux.ServeHTTP(rr, req)
 			Expect(rr.Code).To(Equal(http.StatusConflict))
 		})
+
+		// A revocation waits for an issuance already under way for the same
+		// subject, so it can now give up on the lock instead. That must not
+		// read as the 409 above, which says trying again will not help: this
+		// one is always safe to retry, and containment tooling has to be able
+		// to tell the two apart. Driven with an already-expired request
+		// context, which is the deadline the lock wait itself surfaces.
+		It("should return 503 with Retry-After when the lock wait times out", func() {
+			csrPEM, err := testutil.GenerateCSR("revoke-timeout-node")
+			Expect(err).NotTo(HaveOccurred())
+			mux.ServeHTTP(httptest.NewRecorder(),
+				httptest.NewRequest("PUT", "/certificate_request/revoke-timeout-node", bytes.NewReader(csrPEM)))
+			signBody, _ := json.Marshal(api.PutStatusBody{DesiredState: "signed"})
+			mux.ServeHTTP(httptest.NewRecorder(),
+				httptest.NewRequest("PUT", "/certificate_status/revoke-timeout-node", bytes.NewReader(signBody)))
+
+			expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			defer cancel()
+
+			body, _ := json.Marshal(api.PutStatusBody{DesiredState: "revoked"})
+			req := httptest.NewRequest("PUT", "/certificate_status/revoke-timeout-node", bytes.NewReader(body)).
+				WithContext(expired)
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusServiceUnavailable),
+				"a lock-wait timeout must not be reported as an unresolvable conflict")
+			Expect(rr.Header().Get("Retry-After")).NotTo(BeEmpty())
+		})
 	})
 
 	Context("PUT /certificate_request with empty body", func() {

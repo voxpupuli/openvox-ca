@@ -338,6 +338,13 @@ pin it to a local file with `ca_key_file`. Grant the configured role rights to
 create tables on first run (or pre-create the schema and grant DML).
 `openvox-ca-ctl setup` / `import` work on the local filesystem only.
 
+Each distributed lock held pins one pooled connection for its lifetime, and the
+write paths nest two: signing, renewal, revocation and cleaning all hold a
+per-subject lock and the CRL lock together, plus a transient connection for the
+CRL read. Leave `sql_max_open_conns` at `0` (unlimited), or set it to at least
+three times the write operations you expect in flight at once — too small a pool
+makes those paths queue for a connection and then time out on the lock.
+
 ### MySQL / MariaDB backend
 
 Stores the entire CA in a MySQL or MariaDB database; multiple `openvox-ca`
