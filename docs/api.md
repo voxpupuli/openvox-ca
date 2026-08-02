@@ -159,11 +159,6 @@ Two refusals are deliberate:
 Requires a valid CA-signed client certificate. The new certificate is issued immediately without entering the pending-CSR queue or autosign evaluation, and the certificate it replaces is revoked once the new one is safely stored (see `revoke_on_auto_renew` below for the auto-renewal case).
 
 - **CSR body (re-key):** the CSR Common Name must match the authenticated client CN — an agent can only renew its own certificate, not another's. Issues a certificate for the new key in the CSR. Puppet OID extensions are copied from the CSR **except** authorization-arc OIDs (`1.3.6.1.4.1.34380.1.3.*`, such as `pp_cli_auth`), which are stripped so a submitted CSR cannot request elevated privileges.
-Both renewal forms serialise on the same per-subject lock as signing, so either
-can answer `503 certificate authority busy, retry` when another replica holds
-that lock or the storage backend's lock service is unreachable. That is
-transient: retry.
-
 - **Empty body (wire-compatible auto-renewal):** matches the request real OpenVox/Puppet agents send by default (`hostcert_renewal_interval`, and the `puppet ssl renew_cert` CLI action). Identity and key possession come solely from the mTLS-presented client certificate; the same public key is reissued with a fresh serial and validity, carrying forward the original certificate's SANs and Puppet OID extensions unchanged. Unlike the CSR path, this **preserves authorization-arc OIDs** (e.g. `pp_cli_auth`): they were already vetted when the presented certificate was issued, so a cert that legitimately holds them keeps them across renewal.
 
 If the CA has not finished initialising, the request returns `503 Service Unavailable` (retry once it is ready).
@@ -238,9 +233,8 @@ Response:
 { "private_key": "-----BEGIN RSA PRIVATE KEY-----\n...", "certificate": "-----BEGIN CERTIFICATE-----\n..." }
 ```
 
-This route serialises on the same per-subject lock as signing, so it can answer
-`503 certificate authority busy, retry` when another replica holds that lock or
-the storage backend's lock service is unreachable. That is transient: retry.
+This route serialises on the same per-subject lock as signing, so it can block
+while another replica holds that lock.
 
 It cannot issue a certificate carrying `pp_cli_auth` — see
 [authorization tiers](#authorization-tiers) — and it needs a running server.

@@ -345,12 +345,6 @@ code above rather than by a spec, because the table needs no running service.
 **Add a new backend to that table when it can be constructed in-process**, and
 otherwise state its classification here.
 
-`ErrLockUnavailable` (backend.go) is the sentinel `WithLock` wraps around an
-acquisition failure. It is a cross-package contract: the HTTP layer
-discriminates on it to answer `503 Service Unavailable` rather than `500`, so a
-client knows a lock timeout is transient and worth retrying. Keep it wrapped
-(`%w`) in any new failure path that can lose a lock.
-
 ## Extending
 
 The `Backend` interface is defined in
