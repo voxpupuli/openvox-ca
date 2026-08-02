@@ -41,6 +41,28 @@ import (
 // way, and docs/storage-backends.md advertises that property; a file destined for
 // the same place should not be weaker.
 func writePublicFile(path string, data []byte) error {
+	return writeFileAtomic(path, data, storage.FilePermPublic)
+}
+
+// writePrivateFile writes private key material to an operator-supplied path.
+//
+// Mode 0600, and the difference from writePublicFile is not only the number.
+// os.CreateTemp already creates at 0600, so unlike the public path there is no
+// window in which the file exists world-readable before the Chmod — the key is
+// never observable by another user, even briefly. The Chmod is kept anyway so
+// the mode is asserted rather than inherited from a stdlib detail.
+//
+// The deferred cleanup of the temporary file also matters more here: a leftover
+// public certificate is litter, a leftover private key is a leaked credential
+// sitting beside the path the operator chose.
+func writePrivateFile(path string, data []byte) error {
+	return writeFileAtomic(path, data, storage.FilePermPrivate)
+}
+
+// writeFileAtomic is the shared implementation. Factored out so the durability
+// reasoning above lives in one place: two copies would drift, and the half that
+// drifted would be the one nobody was looking at.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp*")
 	if err != nil {
@@ -68,7 +90,7 @@ func writePublicFile(path string, data []byte) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
-	if err := os.Chmod(tmpName, storage.FilePermPublic); err != nil {
+	if err := os.Chmod(tmpName, perm); err != nil {
 		return fmt.Errorf("setting permissions on %s: %w", path, err)
 	}
 	if err := os.Rename(tmpName, path); err != nil {
