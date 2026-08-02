@@ -19,13 +19,11 @@ package ca
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/pem"
 	"fmt"
 	"log/slog"
 	"regexp"
+	"time"
 )
 
 // maxDNSAltNames is the maximum number of DNS alt names allowed per certificate.
@@ -61,9 +59,51 @@ type GenerateResult struct {
 	CertificatePEM []byte
 }
 
+// GenerateOptions controls a server-side certificate generation.
+type GenerateOptions struct {
+	// DNSAltNames are added as subjectAltName DNS entries. When empty and
+	// PromoteCNToSAN is set, the subject is promoted to a SAN instead.
+	DNSAltNames []string
+
+	// AuthGrants are Puppet authorisation-arc extensions to stamp onto the
+	// certificate. These bypass the filter the CSR path applies to submitted
+	// requests; see AuthGrant for why that is safe here and what keeps it so.
+	AuthGrants []AuthGrant
+
+	// TTL overrides the certificate lifetime. Zero means the configured
+	// LeafValidityDays, or the built-in default when that is unset.
+	TTL time.Duration
+
+	// RetainPrivateKeyInStorage saves the generated key to
+	// private/{subject}_key.pem. The zero value does not: a key the CA has no
+	// use for is a liability, and this path is always the local filesystem
+	// regardless of the configured backend, so on an ephemeral cadir the copy
+	// is lost at the next restart anyway. Generate opts in for wire
+	// compatibility with the API, which has always left a copy.
+	RetainPrivateKeyInStorage bool
+
+	// EmitKey, when set, receives the freshly generated private key in PEM form
+	// after it is generated and BEFORE anything destructive or persistent
+	// happens -- before the subject lock is taken, before any revocation, and
+	// before issuance. A non-nil error from it aborts the call having changed
+	// nothing.
+	//
+	// This lets a caller put the key somewhere durable first. It matters for
+	// replacement: once the certificate being replaced is revoked, a failure to
+	// write the key would leave the subject with no usable credential and its
+	// previous one on the CRL, and CRL entries cannot be withdrawn. Passing the
+	// bytes out rather than accepting a path keeps this package out of the
+	// business of knowing where an operator wants their key.
+	EmitKey func(keyPEM []byte) error
+}
+
 // Generate creates a fresh key pair for subject, signs a certificate for it
 // without requiring a client-submitted CSR, saves the private key to
 // private/{subject}_key.pem, and returns both PEMs.
+//
+// This is the network-reachable form, called by the /generate handler. Its
+// signature deliberately has no extension parameter: an HTTP caller must not be
+// able to reach the AuthGrants seam, and cannot without a source change here.
 //
 // The key algorithm and size are controlled by CA.LeafKeyConfig; defaults
 // to RSA 2048 when not set.
@@ -71,12 +111,47 @@ type GenerateResult struct {
 // Returns ErrCertExists (wrapped) if a valid (non-revoked) certificate already
 // exists for subject.
 func (c *CA) Generate(ctx context.Context, subject string, dnsAltNames []string) (*GenerateResult, error) {
+	return c.GenerateWithOptions(ctx, subject, GenerateOptions{
+		DNSAltNames:               dnsAltNames,
+		RetainPrivateKeyInStorage: true,
+	})
+}
+
+// GenerateWithOptions is Generate with the knobs the offline CLI needs.
+//
+// Unlike the old implementation it does not build an internal CSR and feed it
+// back through the signing path. That round trip existed only so sign() could
+// be reused, and it had two costs: the auth-OID filter meant for submitted
+// requests also applied to certificates this CA generated for itself, and the
+// CSR was briefly visible in storage where a concurrent "sign all" could pick
+// it up and issue a second certificate for the subject. Calling issueLeafLocked
+// directly removes both, and keeps the filter exactly where it belongs -- on
+// the path that parses network input.
+func (c *CA) GenerateWithOptions(ctx context.Context, subject string, opts GenerateOptions) (*GenerateResult, error) {
 	if err := ValidateSubject(subject); err != nil {
 		return nil, err
 	}
 
 	// Validate DNS alt names: must be valid hostnames, bounded count and length.
-	if err := validateDNSAltNames(dnsAltNames); err != nil {
+	if err := validateDNSAltNames(opts.DNSAltNames); err != nil {
+		return nil, err
+	}
+
+	// Fail fast on an uninitialised CA. issueLeafLocked carries the
+	// authoritative guard, but it is now reached after the CRL cache refresh,
+	// which on an uninitialised CA fails first with a "reading CRL" error --
+	// losing the sentinel callers use to tell "not ready yet" from "broken".
+	c.mu.RLock()
+	initialised := c.CACert != nil && c.CAKey != nil
+	c.mu.RUnlock()
+	if !initialised {
+		return nil, ErrNotInitialized
+	}
+
+	// Encode the grants before generating a key, so a malformed request costs
+	// nothing.
+	extraExtensions, err := authGrantExtensions(opts.AuthGrants)
+	if err != nil {
 		return nil, err
 	}
 
@@ -86,29 +161,39 @@ func (c *CA) Generate(ctx context.Context, subject string, dnsAltNames []string)
 		leafCfg = DefaultLeafKeyConfig
 	}
 
-	// Key generation and CSR creation are CPU-bound and do not touch shared
-	// state, so they run outside the lock.
+	// Key generation is CPU-bound and touches no shared state, so it runs
+	// outside the lock. generateKey validates the config, so an off-policy
+	// algorithm or size fails here, before anything is written.
 	key, err := generateKey(leafCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate key for %s: %w", subject, err)
 	}
 
-	// Build an internal CSR so sign() can process it normally.
-	csrTemplate := &x509.CertificateRequest{
-		Subject:  pkix.Name{CommonName: subject},
-		DNSNames: dnsAltNames,
-	}
-	csrDER, err := x509.CreateCertificateRequest(rand.Reader, csrTemplate, key)
+	keyPEM, err := marshalPrivateKeyPEM(key)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create internal CSR for %s: %w", subject, err)
+		return nil, fmt.Errorf("failed to marshal private key for %s: %w", subject, err)
 	}
-	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
+
+	// Hand the key to the caller before anything irreversible happens.
+	if opts.EmitKey != nil {
+		if err := opts.EmitKey(keyPEM); err != nil {
+			return nil, err
+		}
+	}
+
+	// RFC 2818 3.1: TLS clients match the name against SANs, not the CN. The
+	// CSR path promotes the CN when a request carries no SANs; do the same here
+	// so a generated certificate behaves identically to a signed one.
+	dnsNames := opts.DNSAltNames
+	if c.PromoteCNToSAN && len(dnsNames) == 0 {
+		dnsNames = []string{subject}
+	}
 
 	// Serialise on the cluster-wide per-subject lock, as every other issuance
 	// path does (Sign, SignWithTTL, SaveRequest, Renew, Clean,
-	// ImportCertificate). Generate was the only one holding just c.mu, which
-	// coordinates nothing between processes — so two replicas, or a replica and
-	// an operator running an offline subcommand, could each pass
+	// ImportCertificate). Generate used to hold just c.mu, which coordinates
+	// nothing between processes -- so two replicas, or a replica and an
+	// operator running an offline subcommand, could each pass
 	// evictRevokedLocked and both issue for the same subject.
 	//
 	// Lock ordering: subject-lock (distributed) -> c.mu, matching Sign.
@@ -134,37 +219,54 @@ func (c *CA) Generate(ctx context.Context, subject string, dnsAltNames []string)
 			return err
 		}
 
-		if err := c.Storage.SaveCSR(ctx, subject, csrPEM); err != nil {
-			return fmt.Errorf("failed to save internal CSR for %s: %w", subject, err)
+		certPEM, err := c.issueLeafLocked(ctx, subject,
+			pkix.Name{CommonName: subject}, key.Public(),
+			subjectAltNames{DNSNames: dnsNames}, extraExtensions, opts.TTL)
+		if err != nil {
+			return err
 		}
 
-		certPEM, err := c.sign(ctx, subject)
-		if err != nil {
-			_ = c.Storage.DeleteCSR(ctx, subject)
-			return fmt.Errorf("failed to sign generated cert for %s: %w", subject, err)
-		}
-
-		// Encode and save the private key.
-		keyPEM, err := marshalPrivateKeyPEM(key)
-		if err != nil {
-			return fmt.Errorf("failed to marshal private key for %s: %w", subject, err)
-		}
-		if err := c.Storage.SavePrivateKey(ctx, subject, keyPEM); err != nil {
-			// Clean up the just-issued certificate to avoid inconsistent state
-			// where a cert exists on disk but the corresponding private key doesn't.
-			if delErr := c.Storage.DeleteCert(ctx, subject); delErr != nil {
-				slog.Warn("Failed to clean up cert after private key save failure",
-					"subject", subject, "error", delErr)
+		if opts.RetainPrivateKeyInStorage {
+			if err := c.Storage.SavePrivateKey(ctx, subject, keyPEM); err != nil {
+				// Clean up the just-issued certificate to avoid inconsistent state
+				// where a cert exists on disk but the corresponding private key doesn't.
+				if delErr := c.Storage.DeleteCert(ctx, subject); delErr != nil {
+					slog.Warn("Failed to clean up cert after private key save failure",
+						"subject", subject, "error", delErr)
+				}
+				return fmt.Errorf("failed to save private key for %s: %w", subject, err)
 			}
-			return fmt.Errorf("failed to save private key for %s: %w", subject, err)
+
+			// SECURITY: Log that a private key has been persisted to server storage.
+			// Generated keys remain on disk indefinitely; operators should implement
+			// external lifecycle controls (rotation, cleanup) for these keys.
+			// NIST 800-53: SC-12 (Cryptographic Key Establishment and Management)
+			slog.Debug("Generated private key persisted to server filesystem",
+				"subject", subject, "path", c.Storage.PrivateKeyPath(subject))
 		}
 
-		// SECURITY: Log that a private key has been persisted to server storage.
-		// Generated keys remain on disk indefinitely; operators should implement
-		// external lifecycle controls (rotation, cleanup) for these keys.
-		// NIST 800-53: SC-12 (Cryptographic Key Establishment and Management)
-		slog.Debug("Generated private key persisted to server filesystem",
-			"subject", subject, "path", c.Storage.PrivateKeyPath(subject))
+		// A pending CSR for this subject would otherwise survive and stay
+		// signable, yielding a second certificate for a name that already has
+		// one. The old implementation destroyed it as a side effect of
+		// overwriting the CSR slot with its own; do it deliberately instead.
+		if c.Storage.HasCSR(ctx, subject) {
+			if err := c.Storage.DeleteCSR(ctx, subject); err != nil {
+				slog.Warn("Could not remove pending CSR superseded by generation",
+					"subject", subject, "error", err)
+			} else {
+				slog.Debug("Removed pending CSR superseded by generation", "subject", subject)
+			}
+		}
+
+		for _, g := range opts.AuthGrants {
+			// SECURITY: an authorisation grant is the most privileged thing this
+			// CA issues. Logged here rather than at the call site so it is
+			// recorded whoever reaches this seam.
+			// NIST 800-53: AC-6 (Least Privilege), AU-2 (Event Logging)
+			slog.Warn("Issued certificate carrying a Puppet authorisation extension",
+				"subject", subject, "grant", g.String())
+		}
+
 		slog.Debug("Certificate generated", "subject", subject, "algo", string(leafCfg.Algo))
 		result = &GenerateResult{
 			PrivateKeyPEM:  keyPEM,
