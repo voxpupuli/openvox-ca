@@ -240,6 +240,46 @@ var _ = Describe("CA Generate", func() {
 			Expect(rec.names()).To(ContainElement("subject:locked-node"),
 				"Generate must serialise on the same per-subject lock Sign and Clean use")
 		})
+
+		It("takes the subject lock before the CRL lock when replacing", func() {
+			// The documented ordering is subject-lock -> CRL-lock -> c.mu, and
+			// every lockNameCRL acquisition in this package follows it. Taking
+			// them the other way round would deadlock against RefreshCRLIfDue.
+			// The concurrent smoke test alongside this cannot pin the ordering
+			// -- it has no barrier forcing the hazardous interleaving -- so pin
+			// the sequence directly.
+			ctx := context.Background()
+
+			rec := &recordingLockBackend{Backend: storage.NewFilesystemBackend(tmpDir)}
+			recStore := storage.NewWithBackend(rec, filepath.Join(tmpDir, "private"))
+			recCA := ca.New(recStore, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+			Expect(recCA.Init(ctx)).To(Succeed())
+
+			_, err := recCA.GenerateWithOptions(ctx, "order-node", ca.GenerateOptions{})
+			Expect(err).NotTo(HaveOccurred())
+
+			rec.reset()
+			_, err = recCA.GenerateWithOptions(ctx, "order-node", ca.GenerateOptions{
+				ReplaceExisting: true,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			names := rec.names()
+			subjectAt := -1
+			crlAt := -1
+			for i, n := range names {
+				if n == "subject:order-node" && subjectAt < 0 {
+					subjectAt = i
+				}
+				if n == "crl" && crlAt < 0 {
+					crlAt = i
+				}
+			}
+			Expect(subjectAt).To(BeNumerically(">=", 0), "the subject lock must be taken: %v", names)
+			Expect(crlAt).To(BeNumerically(">=", 0), "the CRL lock must be taken to revoke: %v", names)
+			Expect(subjectAt).To(BeNumerically("<", crlAt),
+				"subject lock must precede the CRL lock, not follow it: %v", names)
+		})
 	})
 
 	Context("CRL cache freshness", func() {
@@ -608,6 +648,35 @@ var _ = Describe("CA GenerateWithOptions replacement", func() {
 		Expect(err).NotTo(MatchError(ca.ErrCertExists))
 		Expect(err.Error()).To(ContainSubstring("openvox-ca-ctl clean"))
 		Expect(revokedSerials()).To(HaveLen(before), "nothing may be revoked when the read fails")
+	})
+
+	It("reports the revoked-but-not-replaced state when issuance fails after the revoke", func() {
+		// The one irreversible outcome this design cannot rule out: the old
+		// certificate is on the CRL, which cannot be undone, and no replacement
+		// exists. Surfacing the bare error would be actively misleading here --
+		// evictRevokedLocked answers ErrCertExists, whose remedy text tells the
+		// operator to pass --force, which is what they just did.
+		_, err := myCA.GenerateWithOptions(ctx, "post-revoke-fail", ca.GenerateOptions{})
+		Expect(err).NotTo(HaveOccurred())
+
+		// Fail the issue phase after the revoke phase has committed: the
+		// private directory is unwritable, so SavePrivateKey fails.
+		privDir := filepath.Join(tmpDir, "private")
+		Expect(os.Chmod(privDir, 0o555)).To(Succeed())
+		DeferCleanup(func() { _ = os.Chmod(privDir, 0o755) })
+		if os.Geteuid() == 0 {
+			Skip("root ignores directory permissions")
+		}
+
+		_, err = myCA.GenerateWithOptions(ctx, "post-revoke-fail", ca.GenerateOptions{
+			ReplaceExisting:           true,
+			RetainPrivateKeyInStorage: true,
+		})
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("was revoked, but no replacement was issued"))
+		Expect(err.Error()).To(ContainSubstring("cannot be undone"))
+		Expect(err).NotTo(MatchError(ca.ErrCertExists),
+			"a bare ErrCertExists here sends the operator round the --force loop again")
 	})
 
 	It("does not deadlock against a concurrent CRL refresh", func() {

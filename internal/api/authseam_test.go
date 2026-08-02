@@ -77,22 +77,33 @@ var _ = Describe("The authorisation-grant seam", func() {
 			Expect(err).NotTo(HaveOccurred(), name)
 
 			ast.Inspect(file, func(n ast.Node) bool {
-				sel, ok := n.(*ast.SelectorExpr)
-				if !ok {
+				// Both forms, because either would work in a handler:
+				//   ca.PpCliAuth()          -> SelectorExpr
+				//   s.CA.GenerateWithOptions -> SelectorExpr (receiver is s.CA,
+				//                               not the package, so match on Sel)
+				//   PpCliAuth()             -> bare Ident, under a dot-import
+				// The Ident case cannot arise today -- a dot-import of
+				// internal/ca into this package does not compile, because both
+				// export New -- so it is unexercised. It costs three lines and
+				// closes the hole that a future rename would open, which is
+				// cheaper than remembering to revisit this then.
+				var name string
+				var pos token.Pos
+				switch node := n.(type) {
+				case *ast.SelectorExpr:
+					name, pos = node.Sel.Name, node.Sel.Pos()
+				case *ast.Ident:
+					name, pos = node.Name, node.Pos()
+				default:
 					return true
 				}
-				why, isForbidden := forbidden[sel.Sel.Name]
+				why, isForbidden := forbidden[name]
 				if !isForbidden {
 					return true
 				}
 
-				// Matched on the selector alone, deliberately. Checking that
-				// the receiver is the ca package would miss the method form:
-				// GenerateWithOptions is a method on *CA, so a handler writes
-				// s.CA.GenerateWithOptions(...), whose receiver is s.CA rather
-				// than the package identifier.
 				Fail(strings.Join([]string{
-					fset.Position(sel.Pos()).String() + " references " + sel.Sel.Name,
+					fset.Position(pos).String() + " references " + name,
 					"Reason it is forbidden: " + why + ".",
 					"If this is deliberate, the security argument in internal/ca/authgrant.go",
 					"has to be revisited first -- not this test.",

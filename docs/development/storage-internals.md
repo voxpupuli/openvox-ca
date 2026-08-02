@@ -217,11 +217,62 @@ migration rewrites the head under the correct scheme; a store cannot be migrated
 onto itself) and then serve from that destination. This affects pre-release
 builds only; deployments created after the fix are unaffected.
 
+## Optional capabilities
+
+Two properties vary by backend and are not visible from the `Backend` interface
+alone. `StorageService` answers both, because callers that need to know cannot
+determine them for themselves — `openvox-ca generate` uses them to decide
+whether it is safe to write to storage a live server is also using.
+
+| Backend | `SupportsDistributedLocking` | `SupportsAtomicInventory` |
+| --- | --- | --- |
+| `postgres`, `mysql` | yes | yes |
+| `sqlite` | no | yes |
+| `etcd`, `redis` | yes | no |
+| `filesystem` | no | no |
+
+`SupportsAtomicInventory` wraps `asInventoryStore`, so it is true exactly for
+backends implementing `InventoryStore` — the SQL backends, including SQLite.
+It is a method rather than a caller-side type assertion because
+`asInventoryStore` unwraps `OverlayBackend`, and a caller asserting on the
+wrapper would answer "no" for a SQL backend that happens to be overlaid by
+`ca_cert_file`.
+
+`SupportsDistributedLocking` deliberately does **not** answer
+`_, ok := backend.(Locker)`. That assertion is true for two backends that
+provide no cross-process lock at all: `SQLBackend` implements `Locker` but
+returns `ErrDistributedLockingUnsupported` for SQLite, and `OverlayBackend`
+implements it but delegates to a base that may not. A caller using the
+assertion to decide whether a second process is safe would be told the opposite
+of the truth in exactly the configurations where it matters. So the method
+reproduces `WithLock`'s decision instead — same `AcquireLock` call, same
+classification of the result, lock released immediately.
+
+It returns three outcomes, not two. A non-sentinel `AcquireLock` failure means
+the lock service is unreachable, which `WithLock` treats as fatal; reporting
+that as `false` would tell an operator their backend does not do distributed
+locking when the truth is that it is temporarily unavailable.
+
+The probe cannot be folded into `WithLock` — that would add a lock round trip
+to every `Sign` — so the two necessarily duplicate the classification. A
+`DescribeTable` in
+[internal/storage/capability_test.go](../../internal/storage/capability_test.go)
+runs each backend through both and asserts they agree; that spec is what keeps
+them from drifting, not the type system. **A new backend must be added to that
+table**, or its classification is unverified.
+
+`ErrLockUnavailable` (backend.go) is the sentinel `WithLock` wraps around an
+acquisition failure. It is a cross-package contract: the HTTP layer
+discriminates on it to answer `503 Service Unavailable` rather than `500`, so a
+client knows a lock timeout is transient and worth retrying. Keep it wrapped
+(`%w`) in any new failure path that can lose a lock.
+
 ## Extending
 
 The `Backend` interface is defined in
 [internal/storage/backend.go](../../internal/storage/backend.go). To add a new
-backend, implement the interface, register it in
+backend, implement the interface, declare its optional capabilities (see above,
+including the `capability_test.go` table), register it in
 [internal/storage/spec.go](../../internal/storage/spec.go)'s
 `NewServiceFromSpec`, and add any backend-specific config fields to
 [internal/config/storage.go](../../internal/config/storage.go)'s `StorageConfig`

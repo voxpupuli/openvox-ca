@@ -109,32 +109,36 @@ var _ = Describe("Backend capability reporting", func() {
 			Expect(ok).To(BeFalse())
 		})
 
-		It("agrees with WithLock about which backends coordinate across processes", func() {
-			// The probe duplicates WithLock's classification by construction --
-			// it cannot be folded into WithLock without adding a lock round
-			// trip to every Sign. This is what stops the two drifting apart.
-			for _, tc := range []struct {
-				name    string
-				backend Backend
-			}{
-				{"filesystem", NewFilesystemBackend(GinkgoT().TempDir())},
-				{"sqlite", newSQLiteBackend()},
-				{"stub locker", &stubLocker{Backend: NewFilesystemBackend(GinkgoT().TempDir())}},
-			} {
-				s := svc(tc.backend)
+		// One Entry per backend rather than a loop: a loop aborts at the first
+		// failed Expect, so a filesystem regression would hide whatever sqlite
+		// and the stub locker were about to say. This spec exists precisely to
+		// stop the probe and WithLock drifting apart, so it must report every
+		// backend that drifted, not just the first.
+		//
+		// The backend is passed as a constructor because Entry arguments are
+		// evaluated at tree-construction time, and GinkgoT().TempDir() must run
+		// inside the spec.
+		DescribeTable("agrees with WithLock about which backends coordinate across processes",
+			func(build func() Backend) {
+				s := svc(build())
 
 				reported, err := s.SupportsDistributedLocking(ctx)
-				Expect(err).NotTo(HaveOccurred(), tc.name)
+				Expect(err).NotTo(HaveOccurred())
 
 				// Observe what WithLock did: a distributed lock leaves no entry
 				// in the process-local map, a fallback creates one.
-				Expect(s.WithLock(ctx, "agreement-probe", func() error { return nil })).To(Succeed(), tc.name)
+				Expect(s.WithLock(ctx, "agreement-probe", func() error { return nil })).To(Succeed())
 				_, usedLocalMutex := s.localLocks.Load("agreement-probe")
 
 				Expect(reported).To(Equal(!usedLocalMutex),
-					"%s: SupportsDistributedLocking must match what WithLock actually does", tc.name)
-			}
-		})
+					"SupportsDistributedLocking must match what WithLock actually does")
+			},
+			Entry("filesystem", func() Backend { return NewFilesystemBackend(GinkgoT().TempDir()) }),
+			Entry("sqlite", func() Backend { return newSQLiteBackend() }),
+			Entry("stub locker", func() Backend {
+				return &stubLocker{Backend: NewFilesystemBackend(GinkgoT().TempDir())}
+			}),
+		)
 	})
 
 	Describe("SupportsAtomicInventory", func() {

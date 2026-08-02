@@ -269,24 +269,41 @@ shared inventory.
 credential whose key evaporates is the worst version of that problem) and with
 `--force` (see below).
 
+Both `--key-out` and `--cert-out` refuse a path that already exists rather than
+overwriting it, and they refuse before anything is issued — a mint cannot be
+undone, so a path collision has to be caught first. There is no `--overwrite`:
+move the previous file aside, which re-minting for a name you already hold will
+require you to do.
+
 #### Running alongside a live server
 
 The command prints whether the resolved backend can coordinate writes with other
 processes, and warns when it cannot.
 
-Certificate issuance is serialised on a per-subject lock, and the inventory
-append is atomic, only on backends that support them: PostgreSQL, MySQL, etcd
-and Redis provide cross-process locking, and the SQL backends provide atomic
-inventory appends. The default `filesystem` backend and `sqlite` provide
-neither — they are documented as single-node — so on those, **stop the server
-before running this command**.
+Two independent capabilities matter, and no backend has both except PostgreSQL
+and MySQL:
 
-Two things can go wrong if you do not. Two writers can each decide a subject has
-no certificate and both issue one. Worse, the inventory's integrity record is
-recomputed from a snapshot on blob backends, so an interleaved append leaves an
-HMAC covering a state that never existed — after which the server refuses to
-start, and there is no supported repair
-([#188](https://github.com/voxpupuli/openvox-ca/issues/188)).
+| Backend | Cross-process locking | Atomic inventory append |
+| --- | --- | --- |
+| `postgres`, `mysql` | yes | yes |
+| `sqlite` | no (single-node) | yes |
+| `etcd`, `redis` | yes | no |
+| `filesystem` (default) | no (single-node) | no |
+
+The command reports safe to run alongside a live server only when **both** are
+present, so everything except PostgreSQL and MySQL gets the stop-the-server
+warning — including etcd and Redis, which lock correctly but still append to the
+inventory non-atomically.
+
+What each missing capability costs is different. Without cross-process locking,
+two writers can each decide a subject has no certificate and both issue one.
+Without an atomic inventory append — the blob backends, `filesystem`, `etcd` and
+`redis` — the integrity record is recomputed from a snapshot, so an interleaved
+append leaves an HMAC covering a state that never existed, after which the
+server refuses to start and there is no supported repair
+([#188](https://github.com/voxpupuli/openvox-ca/issues/188)). That second
+failure is the reason to take this seriously; it does not apply to `sqlite`,
+which is single-node but does append atomically.
 
 On a fresh install this costs nothing, because there is no server running yet.
 It is re-minting on an established CA that forces a real outage.

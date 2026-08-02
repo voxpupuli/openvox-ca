@@ -944,6 +944,15 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 				http.Error(w, "certificate key does not meet policy; renew with a new CSR", http.StatusUnprocessableEntity)
 				return
 			}
+			// Both renewal paths take the same per-subject lock as signing, so
+			// they can lose it to another replica. That is transient and
+			// retryable, exactly as on /generate: answer 503 so an agent backs
+			// off rather than treating contention as a server fault.
+			if errors.Is(err, storage.ErrLockUnavailable) {
+				slog.Warn("Auto-renewal could not take the subject lock", "subject", cn, "error", err)
+				http.Error(w, "certificate authority busy, retry", http.StatusServiceUnavailable)
+				return
+			}
 			slog.Warn("Auto-renewal failed", "subject", cn, "error", err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
@@ -972,6 +981,15 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 			if errors.Is(err, ca.ErrKeyPolicy) {
 				slog.Warn("Renewal rejected: key policy", "subject", cn, "error", err)
 				http.Error(w, "CSR key does not meet policy", http.StatusUnprocessableEntity)
+				return
+			}
+			// Both renewal paths take the same per-subject lock as signing, so
+			// they can lose it to another replica. That is transient and
+			// retryable, exactly as on /generate: answer 503 so an agent backs
+			// off rather than treating contention as a server fault.
+			if errors.Is(err, storage.ErrLockUnavailable) {
+				slog.Warn("Renewal could not take the subject lock", "subject", cn, "error", err)
+				http.Error(w, "certificate authority busy, retry", http.StatusServiceUnavailable)
 				return
 			}
 			slog.Warn("Renewal failed", "subject", cn, "error", err)

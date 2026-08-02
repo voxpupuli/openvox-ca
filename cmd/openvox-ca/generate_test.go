@@ -27,8 +27,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sort"
-	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -56,21 +54,27 @@ func hashTree(dir string) map[string]string {
 		if err != nil {
 			return err
 		}
+		rel, relErr := filepath.Rel(dir, path)
+		if relErr != nil {
+			return relErr
+		}
 		if d.IsDir() {
+			// Recorded too: Init calls EnsureDirs before it reaches the
+			// bootstrap decision, so a guard that moved below it would create
+			// directories and a file-only fingerprint would not notice.
+			out[rel+"/"] = ""
 			return nil
 		}
 		data, readErr := os.ReadFile(path)
 		if readErr != nil {
 			return readErr
 		}
-		rel, relErr := filepath.Rel(dir, path)
-		if relErr != nil {
-			return relErr
-		}
 		sum := sha256.Sum256(data)
 		out[rel] = string(sum[:])
 		return nil
 	})
+	// An absent directory is a legitimate "nothing here" fingerprint; any other
+	// walk error must fail the spec rather than silently yield a partial map.
 	if err != nil && !os.IsNotExist(err) {
 		Expect(err).NotTo(HaveOccurred())
 	}
@@ -140,6 +144,23 @@ var _ = Describe("openvox-ca generate", func() {
 			_, _, err := runGenerate("--cadir", caDir, "--certname", "web01",
 				"--ttl", "1h", "--key-out", keyPath("web01"))
 			Expect(err).To(MatchError(ContainSubstring("its key is missing")))
+			Expect(hashTree(caDir)).To(Equal(before))
+		})
+
+		It("will not issue when the CA key is present but its certificate is gone", func() {
+			// The state openvox-ca csr --create-key leaves behind while an
+			// external root's signature is outstanding. The remedy is
+			// import-ca-cert, and telling the operator to "start the server once
+			// to bootstrap" instead would be the one action that must not be
+			// taken here.
+			bootstrapCAInDir(caDir, "puppet.example.com")
+			Expect(os.Remove(filepath.Join(caDir, "ca_crt.pem"))).To(Succeed())
+			before := hashTree(caDir)
+
+			_, _, err := runGenerate("--cadir", caDir, "--certname", "web01",
+				"--ttl", "1h", "--key-out", keyPath("web01"))
+			Expect(err).To(MatchError(ContainSubstring("its certificate is missing")))
+			Expect(err).To(MatchError(ContainSubstring("import-ca-cert")))
 			Expect(hashTree(caDir)).To(Equal(before))
 		})
 
@@ -381,6 +402,12 @@ var _ = Describe("openvox-ca generate", func() {
 				"the sentinel is what callers discriminate on; a substring is not")
 			Expect(err.Error()).To(ContainSubstring("--force"))
 			Expect(err.Error()).To(ContainSubstring("openvox-ca-ctl clean"))
+
+			// EmitKey writes the key before the CA commits to anything, so a
+			// failed mint leaves one on disk. It must be cleaned up: a private
+			// key with no certificate, at a path the operator will not think to
+			// revisit, is a leaked credential.
+			Expect(keyPath("web01-again")).NotTo(BeAnExistingFile())
 		})
 
 		It("replaces with --force and reports the revocation", func() {
@@ -468,24 +495,5 @@ var _ = Describe("openvox-ca generate", func() {
 			Expect(stderr).To(ContainSubstring("will not be created"))
 			Expect(logPath).NotTo(BeAnExistingFile())
 		})
-	})
-})
-
-// sortedKeys is a small helper for readable failure output when comparing
-// directory fingerprints.
-func sortedKeys(m map[string]string) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
-var _ = Describe("generate helpers", func() {
-	It("fingerprints a directory tree", func() {
-		dir := GinkgoT().TempDir()
-		Expect(os.WriteFile(filepath.Join(dir, "a"), []byte("one"), 0o600)).To(Succeed())
-		Expect(strings.Join(sortedKeys(hashTree(dir)), ",")).To(Equal("a"))
 	})
 })
