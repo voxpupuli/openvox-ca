@@ -28,10 +28,12 @@ import (
 	"encoding/asn1"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -893,6 +895,39 @@ var _ = Describe("API Workflow", func() {
 			mux.ServeHTTP(rr, req)
 			Expect(rr.Code).To(Equal(http.StatusBadRequest))
 		})
+
+		It("should return 503, not 500, when the subject lock cannot be taken", func() {
+			// Generate now serialises on the per-subject lock, so it can fail
+			// on lock acquisition where it previously could not fail at all.
+			// That is transient: the client should back off and retry, which a
+			// 500 does not tell it to do.
+			//
+			// The default fixture cannot produce this -- the filesystem backend
+			// implements no Locker, so WithLock falls through to a mutex that
+			// cannot fail. Inject a backend whose AcquireLock errors.
+			lockDir, err := os.MkdirTemp("", "openvox-ca-lockfail-test")
+			Expect(err).NotTo(HaveOccurred())
+			defer os.RemoveAll(lockDir)
+
+			failing := &lockFailBackend{Backend: storage.NewFilesystemBackend(lockDir)}
+			failStore := storage.NewWithBackend(failing, filepath.Join(lockDir, "private"))
+			Expect(failStore.EnsureDirs(context.Background())).To(Succeed())
+			Expect(failStore.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+			Expect(failStore.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+			Expect(failStore.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
+			Expect(failStore.WriteSerial(context.Background(), "0001")).To(Succeed())
+			Expect(failStore.TouchInventory(context.Background())).To(Succeed())
+
+			failCA := ca.New(failStore, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+			Expect(failCA.Init(context.Background())).To(Succeed())
+			failing.fail = true
+
+			failMux := api.New(failCA).Routes()
+			req := httptest.NewRequest("POST", "/generate/lock-fail-node", nil)
+			rr := httptest.NewRecorder()
+			failMux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusServiceUnavailable))
+		})
 	})
 
 	Context("POST /generate/{subject} over plain HTTP", func() {
@@ -1447,3 +1482,21 @@ var _ = Describe("API Workflow", func() {
 	})
 
 })
+
+// lockFailBackend advertises storage.Locker but refuses to hand out locks once
+// fail is set. It stands in for a backend whose lock service is unreachable or
+// whose lock is held by another replica past the timeout -- the only way to
+// exercise the lock-failure branch, since the filesystem backend used by the
+// rest of this suite implements no Locker at all and falls through to a mutex
+// that cannot fail.
+type lockFailBackend struct {
+	storage.Backend
+	fail bool
+}
+
+func (b *lockFailBackend) AcquireLock(_ context.Context, name string) (storage.Unlocker, error) {
+	if b.fail {
+		return nil, fmt.Errorf("lock service unreachable for %q", name)
+	}
+	return nil, storage.ErrDistributedLockingUnsupported
+}

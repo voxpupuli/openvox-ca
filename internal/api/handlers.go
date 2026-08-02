@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
 
 // maxJSONBody caps the size of JSON request bodies accepted by the POST/PUT
@@ -510,10 +511,18 @@ func (s *Server) handlePostGenerate(w http.ResponseWriter, r *http.Request) {
 
 	result, err := s.CA.Generate(r.Context(), subject, dnsAltNames)
 	if err != nil {
-		if errors.Is(err, ca.ErrCertExists) {
+		switch {
+		case errors.Is(err, ca.ErrCertExists):
 			slog.Warn("Generate conflict", "subject", subject, "error", err)
 			http.Error(w, "certificate already exists", http.StatusConflict)
-		} else {
+		case errors.Is(err, storage.ErrLockUnavailable):
+			// Generate now serialises on the per-subject lock, so it can time
+			// out waiting for another replica. That is transient and retryable,
+			// not a fault: answer 503 so the client backs off rather than
+			// reporting it as a bug.
+			slog.Warn("Generate could not take the subject lock", "subject", subject, "error", err)
+			http.Error(w, "certificate authority busy, retry", http.StatusServiceUnavailable)
+		default:
 			slog.Error("Generate failed", "subject", subject, "error", err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 		}

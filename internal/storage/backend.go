@@ -34,6 +34,18 @@ import (
 // back to a process-local mutex.
 var ErrDistributedLockingUnsupported = errors.New("distributed locking unsupported by this backend")
 
+// ErrLockUnavailable is wrapped by StorageService.WithLock when a distributed
+// lock could not be acquired — the backend is unreachable, or the context
+// expired waiting for a lock another node holds. It is deliberately distinct
+// from ErrDistributedLockingUnsupported, which means "this backend does not do
+// distributed locking at all" and is handled by falling back to a process-local
+// mutex rather than failing.
+//
+// Exposed as a sentinel so callers can tell a transient contention failure from
+// a fault: the HTTP layer answers 503 for this and 500 for everything else, so
+// a client knows to retry rather than treating it as a bug.
+var ErrLockUnavailable = errors.New("could not acquire lock")
+
 // BlobKind signals the desired visibility of a stored blob. The filesystem
 // backend maps these to file permissions (0600 vs 0644); remote backends
 // may ignore it or use the hint to pick a storage namespace.

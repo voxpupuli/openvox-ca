@@ -79,7 +79,7 @@ func (s *StorageService) WithLock(ctx context.Context, name string, fn func() er
 			return fn()
 		}
 		if !errors.Is(err, ErrDistributedLockingUnsupported) {
-			return fmt.Errorf("acquiring distributed lock %q: %w", name, err)
+			return fmt.Errorf("%w %q: %w", ErrLockUnavailable, name, err)
 		}
 		// Backend advertises Locker but cannot actually provide one (e.g.
 		// OverlayBackend wrapping a filesystem base); fall through to the
