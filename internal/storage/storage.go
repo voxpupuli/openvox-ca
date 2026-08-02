@@ -91,6 +91,73 @@ func (s *StorageService) WithLock(ctx context.Context, name string, fn func() er
 	return fn()
 }
 
+// lockProbeName is the throwaway lock SupportsDistributedLocking acquires and
+// immediately releases. It is deliberately outside the namespaces real callers
+// use ("bootstrap", "crl", "subject:<name>") so a probe can never contend with
+// an operation in flight.
+const lockProbeName = "capability-probe"
+
+// SupportsDistributedLocking reports whether WithLock actually coordinates
+// across processes for the configured backend.
+//
+// This deliberately does NOT answer `_, ok := backend.(Locker)`, which is a
+// different and misleading question. SQLBackend implements Locker but reports
+// ErrDistributedLockingUnsupported for SQLite, and OverlayBackend implements it
+// but delegates to a base that may not — so a type assertion says "yes" for
+// SQLite and for any backend an overlay wraps over a filesystem base, both of
+// which fall through to a process-local mutex. Callers that use this to decide
+// whether it is safe to run a second process against the same storage would be
+// told exactly the wrong thing.
+//
+// Instead it reproduces WithLock's decision by making the same AcquireLock call
+// and classifying the outcome the same way, releasing the lock immediately. The
+// probe cannot live inside WithLock: that would add a lock round trip to every
+// Sign. Keeping the two in step is a test's job (see the storage suite), not
+// the type system's.
+//
+// The three outcomes are distinct, and the error case matters: WithLock treats
+// a non-sentinel AcquireLock failure as fatal, so reporting it as "false" would
+// tell an operator their backend does not do distributed locking when the truth
+// is that it is unreachable.
+func (s *StorageService) SupportsDistributedLocking(ctx context.Context) (bool, error) {
+	lk, ok := s.backend.(Locker)
+	if !ok {
+		return false, nil
+	}
+	ul, err := lk.AcquireLock(ctx, lockProbeName)
+	switch {
+	case err == nil:
+		// Release at once. A probe that leaked would hold a Postgres advisory
+		// lock on a pooled connection, or a Redis lease with a heartbeat
+		// goroutine, for the lifetime of the process.
+		if unlockErr := ul.Unlock(); unlockErr != nil {
+			slog.Warn("Failed to release capability probe lock", "error", unlockErr)
+		}
+		return true, nil
+	case errors.Is(err, ErrDistributedLockingUnsupported):
+		return false, nil
+	default:
+		return false, fmt.Errorf("probing distributed locking: %w", err)
+	}
+}
+
+// SupportsAtomicInventory reports whether AppendInventory is atomic with
+// respect to writers in other processes.
+//
+// Only structured (InventoryStore) backends are: they append a row and advance
+// the integrity chain in one transaction. Blob backends read the whole
+// inventory, append, and rewrite an HMAC computed over their own
+// reconstruction, so two concurrent appenders leave an HMAC covering a blob
+// that never existed — which fails the integrity check at the next startup.
+//
+// Needed as a method because asInventoryStore unwraps OverlayBackend, so a
+// caller-side type assertion would answer "no" for a SQL backend that happens
+// to be wrapped by ca_cert_file/ca_key_file.
+func (s *StorageService) SupportsAtomicInventory() bool {
+	_, ok := asInventoryStore(s.backend)
+	return ok
+}
+
 // localNamedLock returns the process-local mutex for name, creating it
 // on first use. Mutexes are never removed from the map; the namespace
 // is small and bounded.
