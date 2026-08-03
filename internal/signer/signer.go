@@ -43,8 +43,9 @@ import (
 // endpoint to child processes via exec.Cmd.ExtraFiles.
 const InheritedFD = 3
 
-// pskEnvVar is the environment variable containing the hex-encoded PSK.
-const pskEnvVar = "PUPPET_CA_SIGNER_PSK"
+// PSKFD is the file descriptor number used to pass the read end of the
+// PSK pipe to child processes via exec.Cmd.ExtraFiles.
+const PSKFD = 4
 
 // pskLen is the expected PSK length in bytes.
 const pskLen = 32
@@ -80,9 +81,10 @@ func (s *Service) Sign(req *SignRequest, resp *SignResponse) error {
 // Serve runs the signer RPC server on the inherited socketpair fd.
 // It blocks until the connection is closed or a SIGTERM/SIGINT is received.
 //
-// If PUPPET_CA_SIGNER_PSK is set, the signer performs a challenge-response
-// handshake before serving RPC calls: it sends a 32-byte random nonce,
-// then expects the client to respond with HMAC-SHA256(PSK, nonce).
+// Before serving RPC calls the signer performs a mandatory mutual
+// challenge-response handshake using the PSK read from the inherited pipe
+// (fd 4): it verifies the frontend's HMAC proof before serving any request,
+// and supplies its own proof so the frontend can reject an impostor signer.
 func Serve(key crypto.Signer) error {
 	// Recover the socketpair endpoint passed via ExtraFiles (fd 3).
 	conn, err := connFromFD(InheritedFD)
@@ -92,14 +94,14 @@ func Serve(key crypto.Signer) error {
 	defer conn.Close()
 
 	// PSK authentication handshake.
-	if psk, err := loadPSK(); err != nil {
+	psk, err := loadPSK()
+	if err != nil {
 		return fmt.Errorf("loading PSK: %w", err)
-	} else if psk != nil {
-		if err := serverHandshake(conn, psk); err != nil {
-			return fmt.Errorf("PSK handshake failed: %w", err)
-		}
-		slog.Info("PSK handshake succeeded")
 	}
+	if err := serverHandshake(conn, psk); err != nil {
+		return fmt.Errorf("PSK handshake failed: %w", err)
+	}
+	slog.Info("PSK handshake succeeded")
 
 	svc := &Service{key: key}
 	server := rpc.NewServer()
@@ -171,9 +173,11 @@ type RemoteSigner struct {
 	pub    crypto.PublicKey
 }
 
-// DialConn connects to the signer process and performs the PSK handshake,
-// returning the authenticated connection. The caller must eventually create
-// a RemoteSigner via NewRemoteSigner once the public key is available.
+// DialConn connects to the signer process and performs the mutual PSK
+// handshake, returning the authenticated connection: the frontend proves
+// knowledge of the PSK to the signer and verifies the signer's counter-proof
+// before returning. The caller must eventually create a RemoteSigner via
+// NewRemoteSigner once the public key is available.
 //
 // This two-step approach allows the frontend to wait for the signer to be
 // ready (via the PSK handshake) before reading the CA cert from disk.
@@ -184,16 +188,16 @@ func DialConn() (net.Conn, error) {
 	}
 
 	// PSK authentication handshake.
-	if psk, err := loadPSK(); err != nil {
+	psk, err := loadPSK()
+	if err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("loading PSK: %w", err)
-	} else if psk != nil {
-		if err := clientHandshake(conn, psk); err != nil {
-			conn.Close()
-			return nil, fmt.Errorf("PSK handshake failed: %w", err)
-		}
-		slog.Info("PSK handshake succeeded")
 	}
+	if err := clientHandshake(conn, psk); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("PSK handshake failed: %w", err)
+	}
+	slog.Info("PSK handshake succeeded")
 
 	return conn, nil
 }
@@ -239,67 +243,139 @@ func (r *RemoteSigner) Close() error {
 
 // ---------- PSK handshake ----------
 
-// loadPSK reads the PSK from the environment variable. Returns nil if unset.
+// loadPSK reads the hex-encoded PSK from the pipe inherited on fd 4. The
+// launcher pre-loads the pipe and closes the write end before spawning, so
+// a single read drains it to EOF.
+//
+// SECURITY: the PSK deliberately travels over a pipe rather than an
+// environment variable. A process's exec-time environment stays visible in
+// /proc/<pid>/environ for its whole lifetime (os.Unsetenv only mutates the
+// process's own copy) and is captured verbatim by crash-dump and support
+// tooling such as systemd-coredump; a pipe is consumed once and leaves no
+// such residue.
 func loadPSK() ([]byte, error) {
-	hexPSK := os.Getenv(pskEnvVar)
-	if hexPSK == "" {
-		return nil, nil
+	// Verify fd 4 really is a pipe before wrapping it in an os.File. If the
+	// process was not spawned by the launcher, fd 4 is either closed or owned
+	// by something else entirely (e.g. the runtime's poller), and it must not
+	// be read from or closed.
+	var st syscall.Stat_t
+	if err := syscall.Fstat(PSKFD, &st); err != nil {
+		return nil, fmt.Errorf("PSK pipe fd %d unavailable (process not spawned by the launcher?): %w", PSKFD, err)
 	}
-	psk, err := hex.DecodeString(hexPSK)
+	if st.Mode&syscall.S_IFMT != syscall.S_IFIFO {
+		return nil, fmt.Errorf("fd %d is not a pipe (process not spawned by the launcher?)", PSKFD)
+	}
+
+	f := os.NewFile(uintptr(PSKFD), "signer-psk-pipe")
+	defer f.Close()
+	psk, err := parsePSK(f)
 	if err != nil {
-		return nil, fmt.Errorf("decoding %s: %w", pskEnvVar, err)
+		return nil, fmt.Errorf("reading PSK from inherited fd %d: %w", PSKFD, err)
 	}
-	if len(psk) != pskLen {
-		return nil, fmt.Errorf("%s must be %d bytes, got %d", pskEnvVar, pskLen, len(psk))
-	}
-	// Clear from environment after reading to reduce exposure.
-	os.Unsetenv(pskEnvVar)
 	return psk, nil
 }
 
-// serverHandshake sends a random nonce and verifies the client's HMAC response.
+// parsePSK reads a hex-encoded PSK from r and decodes and validates it.
+func parsePSK(r io.Reader) ([]byte, error) {
+	// Read one byte beyond the expected hex length so over-length input
+	// becomes an odd-length hex string and fails decoding, rather than
+	// being silently truncated to a plausible PSK.
+	hexPSK, err := io.ReadAll(io.LimitReader(r, 2*pskLen+1))
+	if err != nil {
+		return nil, err
+	}
+	psk, err := hex.DecodeString(string(hexPSK))
+	if err != nil {
+		return nil, fmt.Errorf("decoding PSK: %w", err)
+	}
+	if len(psk) != pskLen {
+		return nil, fmt.Errorf("PSK must be %d bytes, got %d", pskLen, len(psk))
+	}
+	return psk, nil
+}
+
+// nonceLen is the length of each side's random handshake nonce.
+const nonceLen = 32
+
+// Handshake proof labels provide domain separation between the two
+// directions, so a proof generated by one endpoint can never be replayed
+// as the other endpoint's proof.
+var (
+	frontendProofLabel = []byte("openvox-ca frontend")
+	signerProofLabel   = []byte("openvox-ca signer")
+)
+
+// handshakeProof computes HMAC-SHA256(psk, label || serverNonce || clientNonce).
+// Binding both nonces makes each proof unique to this handshake run.
+func handshakeProof(psk, label, serverNonce, clientNonce []byte) []byte {
+	mac := hmac.New(sha256.New, psk)
+	mac.Write(label)
+	mac.Write(serverNonce)
+	mac.Write(clientNonce)
+	return mac.Sum(nil)
+}
+
+// serverHandshake runs the signer's side of the mutual handshake: send a
+// random nonce, verify the frontend's proof over both nonces, then return
+// the signer's own proof so the frontend can reject an impostor signer.
 func serverHandshake(conn net.Conn, psk []byte) error {
 	// Generate and send a random nonce.
-	nonce := make([]byte, 32)
-	if _, err := rand.Read(nonce); err != nil {
+	serverNonce := make([]byte, nonceLen)
+	if _, err := rand.Read(serverNonce); err != nil {
 		return fmt.Errorf("generating nonce: %w", err)
 	}
-	if _, err := conn.Write(nonce); err != nil {
+	if _, err := conn.Write(serverNonce); err != nil {
 		return fmt.Errorf("sending nonce: %w", err)
 	}
 
-	// Read the client's HMAC response.
-	clientMAC := make([]byte, sha256.Size)
-	if _, err := io.ReadFull(conn, clientMAC); err != nil {
-		return fmt.Errorf("reading client HMAC: %w", err)
+	// Read the frontend's nonce and proof, sent in one flight.
+	buf := make([]byte, nonceLen+sha256.Size)
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		return fmt.Errorf("reading frontend nonce and proof: %w", err)
+	}
+	clientNonce, clientProof := buf[:nonceLen], buf[nonceLen:]
+
+	if !hmac.Equal(clientProof, handshakeProof(psk, frontendProofLabel, serverNonce, clientNonce)) {
+		return fmt.Errorf("PSK authentication failed: frontend proof mismatch")
 	}
 
-	// Compute expected HMAC and compare.
-	mac := hmac.New(sha256.New, psk)
-	mac.Write(nonce)
-	expectedMAC := mac.Sum(nil)
-
-	if !hmac.Equal(clientMAC, expectedMAC) {
-		return fmt.Errorf("PSK authentication failed: HMAC mismatch")
+	// Prove our own knowledge of the PSK to the frontend.
+	if _, err := conn.Write(handshakeProof(psk, signerProofLabel, serverNonce, clientNonce)); err != nil {
+		return fmt.Errorf("sending signer proof: %w", err)
 	}
 	return nil
 }
 
-// clientHandshake reads the server's nonce and responds with HMAC-SHA256(PSK, nonce).
+// clientHandshake runs the frontend's side of the mutual handshake: read
+// the signer's nonce, send our own nonce plus a proof over both, then
+// verify the signer's proof so a process that merely holds the socketpair
+// fd cannot impersonate the signer.
 func clientHandshake(conn net.Conn, psk []byte) error {
 	// Read nonce from server.
-	nonce := make([]byte, 32)
-	if _, err := io.ReadFull(conn, nonce); err != nil {
+	serverNonce := make([]byte, nonceLen)
+	if _, err := io.ReadFull(conn, serverNonce); err != nil {
 		return fmt.Errorf("reading server nonce: %w", err)
 	}
 
-	// Compute and send HMAC response.
-	mac := hmac.New(sha256.New, psk)
-	mac.Write(nonce)
-	response := mac.Sum(nil)
+	// Send our nonce and proof in one flight.
+	clientNonce := make([]byte, nonceLen)
+	if _, err := rand.Read(clientNonce); err != nil {
+		return fmt.Errorf("generating nonce: %w", err)
+	}
+	msg := make([]byte, 0, nonceLen+sha256.Size)
+	msg = append(msg, clientNonce...)
+	msg = append(msg, handshakeProof(psk, frontendProofLabel, serverNonce, clientNonce)...)
+	if _, err := conn.Write(msg); err != nil {
+		return fmt.Errorf("sending frontend nonce and proof: %w", err)
+	}
 
-	if _, err := conn.Write(response); err != nil {
-		return fmt.Errorf("sending HMAC response: %w", err)
+	// Verify the signer's counter-proof.
+	serverProof := make([]byte, sha256.Size)
+	if _, err := io.ReadFull(conn, serverProof); err != nil {
+		return fmt.Errorf("reading signer proof: %w", err)
+	}
+	if !hmac.Equal(serverProof, handshakeProof(psk, signerProofLabel, serverNonce, clientNonce)) {
+		return fmt.Errorf("PSK authentication failed: signer proof mismatch")
 	}
 	return nil
 }
@@ -314,5 +390,11 @@ func Socketpair() (signer, frontend *os.File, err error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("socketpair: %w", err)
 	}
+	// Raw socketpair fds are inheritable by default. Mark them close-on-exec
+	// so a child only ever receives the end deliberately passed to it via
+	// ExtraFiles (which dups the fd with the flag cleared) — otherwise a
+	// child spawned while either end is open would inherit both.
+	syscall.CloseOnExec(fds[0])
+	syscall.CloseOnExec(fds[1])
 	return os.NewFile(uintptr(fds[0]), "signer-sock"), os.NewFile(uintptr(fds[1]), "frontend-sock"), nil
 }

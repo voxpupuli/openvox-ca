@@ -24,33 +24,21 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/rpc"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
+	"testing/iotest"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
-
-// setPSKEnv sets the PSK environment variable for the duration of the current
-// spec, restoring its prior value (set or unset) via DeferCleanup. It replaces
-// the upstream tests' use of t.Setenv, which is unavailable inside Ginkgo
-// nodes.
-func setPSKEnv(value string) {
-	prev, had := os.LookupEnv(pskEnvVar)
-	Expect(os.Setenv(pskEnvVar, value)).To(Succeed())
-	DeferCleanup(func() {
-		if had {
-			Expect(os.Setenv(pskEnvVar, prev)).To(Succeed())
-		} else {
-			Expect(os.Unsetenv(pskEnvVar)).To(Succeed())
-		}
-	})
-}
 
 var _ = Describe("RemoteSigner over RPC", func() {
 	// verifies that a signing request can be sent over an RPC connection and
@@ -172,7 +160,9 @@ var _ = Describe("PSK handshake", func() {
 		Expect(<-errCh).NotTo(HaveOccurred(), "server handshake")
 	})
 
-	// verifies the handshake fails with mismatched PSKs.
+	// verifies the handshake fails on both sides with mismatched PSKs: the
+	// server rejects the frontend's proof, and the client consequently never
+	// receives a valid counter-proof.
 	It("fails with mismatched PSKs", func() {
 		serverPSK := make([]byte, 32)
 		clientPSK := make([]byte, 32)
@@ -185,14 +175,53 @@ var _ = Describe("PSK handshake", func() {
 
 		errCh := make(chan error, 1)
 		go func() {
-			errCh <- serverHandshake(serverConn, serverPSK)
+			err := serverHandshake(serverConn, serverPSK)
+			if err != nil {
+				// Close so the client's read of the never-sent counter-proof
+				// fails instead of blocking forever.
+				serverConn.Close()
+			}
+			errCh <- err
 		}()
 
-		// Client uses a different PSK; handshake should complete on client side
-		// but server should reject.
-		_ = clientHandshake(clientConn, clientPSK)
+		Expect(clientHandshake(clientConn, clientPSK)).To(
+			MatchError(ContainSubstring("reading signer proof")),
+			"client should fail once the server aborts")
+		Expect(<-errCh).To(
+			MatchError(ContainSubstring("frontend proof mismatch")),
+			"server should reject the mismatched frontend proof")
+	})
 
-		Expect(<-errCh).To(HaveOccurred(), "server handshake should have failed with wrong PSK")
+	// verifies the frontend rejects an endpoint that holds the socketpair but
+	// not the PSK — the impostor-signer case the mutual handshake exists to
+	// prevent.
+	It("rejects a signer that cannot prove knowledge of the PSK", func() {
+		psk := make([]byte, 32)
+		rand.Read(psk)
+
+		serverConn, clientConn := net.Pipe()
+		DeferCleanup(serverConn.Close)
+		DeferCleanup(clientConn.Close)
+
+		// Impostor signer: follows the message flow but forges the proof.
+		go func() {
+			defer GinkgoRecover()
+			nonce := make([]byte, 32)
+			rand.Read(nonce)
+			_, err := serverConn.Write(nonce)
+			Expect(err).NotTo(HaveOccurred(), "impostor sending nonce")
+			buf := make([]byte, 32+sha256.Size)
+			_, err = io.ReadFull(serverConn, buf)
+			Expect(err).NotTo(HaveOccurred(), "impostor reading frontend flight")
+			forged := make([]byte, sha256.Size)
+			rand.Read(forged)
+			_, err = serverConn.Write(forged)
+			Expect(err).NotTo(HaveOccurred(), "impostor sending forged proof")
+		}()
+
+		Expect(clientHandshake(clientConn, psk)).To(
+			MatchError(ContainSubstring("signer proof mismatch")),
+			"client should reject a forged signer proof")
 	})
 
 	// verifies signing works after a successful PSK handshake.
@@ -219,10 +248,10 @@ var _ = Describe("PSK handshake", func() {
 			srv.ServeConn(serverConn)
 		}()
 
-		// Client side: handshake then create RemoteSigner.
-		setPSKEnv(pskHex)
-		loadedPSK, err := loadPSK()
-		Expect(err).NotTo(HaveOccurred(), "loadPSK")
+		// Client side: parse the PSK as the frontend would, handshake, then
+		// create a RemoteSigner.
+		loadedPSK, err := parsePSK(strings.NewReader(pskHex))
+		Expect(err).NotTo(HaveOccurred(), "parsePSK")
 		Expect(clientHandshake(clientConn, loadedPSK)).To(Succeed(), "client handshake")
 
 		rs := &RemoteSigner{
@@ -238,42 +267,67 @@ var _ = Describe("PSK handshake", func() {
 	})
 })
 
-var _ = Describe("loadPSK", func() {
-	// verifies loadPSK returns nil when env var is unset.
-	It("returns nil when the env var is empty", func() {
-		setPSKEnv("")
-		psk, err := loadPSK()
-		Expect(err).NotTo(HaveOccurred(), "unexpected error")
-		Expect(psk).To(BeNil(), "expected nil PSK when env var is empty")
-	})
-
-	// verifies loadPSK rejects non-hex values.
-	It("rejects non-hex values", func() {
-		setPSKEnv("not-hex-data")
-		_, err := loadPSK()
-		Expect(err).To(HaveOccurred(), "expected error for invalid hex PSK")
-	})
-
-	// verifies loadPSK rejects PSKs of wrong length.
-	It("rejects PSKs of wrong length", func() {
-		setPSKEnv(hex.EncodeToString([]byte("short")))
-		_, err := loadPSK()
-		Expect(err).To(HaveOccurred(), "expected error for wrong-length PSK")
-	})
-
-	// verifies loadPSK removes the env var after reading.
-	It("clears the env var after reading", func() {
+var _ = Describe("parsePSK", func() {
+	// verifies parsePSK drains a pre-loaded pipe to EOF, matching how the
+	// launcher delivers the PSK to a child on fd 4.
+	It("reads a PSK from a pre-loaded pipe", func() {
 		psk := make([]byte, 32)
 		rand.Read(psk)
-		// Note: loadPSK calls os.Unsetenv, so setPSKEnv's restore must not
-		// reintroduce the value; it saves the prior (unset) state and restores
-		// that, matching the upstream test's os.Setenv + t.Cleanup(os.Unsetenv).
-		setPSKEnv(hex.EncodeToString(psk))
 
-		_, err := loadPSK()
-		Expect(err).NotTo(HaveOccurred(), "unexpected error")
-		// After loadPSK, the env var should be cleared.
-		Expect(os.Getenv(pskEnvVar)).To(Equal(""), "env var should be cleared after loadPSK")
+		r, w, err := os.Pipe()
+		Expect(err).NotTo(HaveOccurred(), "creating pipe")
+		DeferCleanup(func() { _ = r.Close() })
+		_, err = w.WriteString(hex.EncodeToString(psk))
+		Expect(err).NotTo(HaveOccurred(), "writing PSK to pipe")
+		Expect(w.Close()).To(Succeed(), "closing pipe write end")
+
+		parsed, err := parsePSK(r)
+		Expect(err).NotTo(HaveOccurred(), "parsePSK")
+		Expect(parsed).To(Equal(psk), "parsed PSK should round-trip")
+	})
+
+	// verifies parsePSK rejects an empty stream via the length check: the
+	// handshake is mandatory, so a missing PSK must be an error rather than
+	// a silent downgrade.
+	It("rejects an empty stream", func() {
+		_, err := parsePSK(strings.NewReader(""))
+		Expect(err).To(MatchError(ContainSubstring("PSK must be 32 bytes, got 0")),
+			"empty stream should fail the length check")
+	})
+
+	// verifies parsePSK rejects non-hex values via the hex decoder.
+	It("rejects non-hex values", func() {
+		_, err := parsePSK(strings.NewReader("not-hex-data"))
+		Expect(err).To(MatchError(ContainSubstring("decoding PSK")),
+			"non-hex input should fail hex decoding")
+	})
+
+	// verifies parsePSK rejects a well-formed but short PSK via the length
+	// check.
+	It("rejects PSKs of wrong length", func() {
+		_, err := parsePSK(strings.NewReader(hex.EncodeToString([]byte("short"))))
+		Expect(err).To(MatchError(ContainSubstring("PSK must be 32 bytes, got 5")),
+			"short PSK should fail the length check")
+	})
+
+	// verifies parsePSK rejects trailing garbage after a valid PSK rather
+	// than silently truncating it. The one-byte read overshoot makes the
+	// input an odd-length hex string, so this surfaces as a decode error —
+	// never as the length check.
+	It("rejects trailing garbage", func() {
+		psk := make([]byte, 32)
+		rand.Read(psk)
+		_, err := parsePSK(strings.NewReader(hex.EncodeToString(psk) + "\n"))
+		Expect(err).To(MatchError(ContainSubstring("decoding PSK")),
+			"trailing bytes should surface as an odd-length hex decode error")
+	})
+
+	// verifies parsePSK propagates reader failures, covering the read-error
+	// branch distinctly from the validation branches.
+	It("propagates read errors", func() {
+		readErr := errors.New("pipe exploded")
+		_, err := parsePSK(iotest.ErrReader(readErr))
+		Expect(err).To(MatchError(readErr), "reader failure should propagate unwrapped")
 	})
 })
 
