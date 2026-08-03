@@ -26,7 +26,7 @@ $ docker pull ghcr.io/voxpupuli/openvox-ca:latest-alpine   # Alpine
 | Tag | Points at |
 | --- | --- |
 | `latest` / `latest-alpine` | The most recent release |
-| `1.2.3`, `1.2`, `1` (+ `-alpine`) | A specific release and its semver aliases |
+| `1.2.3`, `1.2`, `1` (+ `-alpine`) | A specific release and its semver aliases; the major-only tag (`1`) is published for v1+ releases only, so `0.x` releases have no `0` tag |
 | `edge` / `edge-alpine` | The latest build from the default branch (`main`) |
 | `main` / `main-alpine` | Same as `edge`; the head of `main` |
 

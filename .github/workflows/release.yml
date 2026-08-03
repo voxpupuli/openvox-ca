@@ -5,30 +5,120 @@ on:
     tags:
       - 'v*'
 
+# The verify and build jobs only read; contents: write is granted to the
+# release job alone, so a compromise in the build path cannot push refs or
+# publish releases.
 permissions:
-  contents: write  # required to create releases and upload assets
+  contents: read
+  checks: read  # verify-release-tag reads the tagged commit's check runs
 
 jobs:
-  release:
-    name: Build and publish release
+  # -- Gate: tag matches the source version, tagged commit went green ---------
+  verify:
+    name: Verify release tag
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/verify-release-tag
+
+  # -- Build one variant per native runner ------------------------------------
+  # Same variant/runner matrix as CI's dist job (which keeps the per-variant
+  # caches warm on main), so the FIPS cgo builds run natively with no cross
+  # toolchain.
+  build:
+    name: Build ${{ matrix.variant }}
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: linux_amd64
+            runner: ubuntu-latest
+          - variant: linux_arm64
+            runner: ubuntu-24.04-arm
+          - variant: linux_amd64_fips
+            runner: ubuntu-latest
+          - variant: linux_arm64_fips
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          cache: true
+          # Per-variant cache shared with ci.yml's dist job; see the comment
+          # there. CI's runs on main keep it warm, so the tag build mostly
+          # just links.
+          cache: false
+      - name: Go caches (${{ matrix.variant }})
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: dist-gocache-${{ matrix.variant }}-${{ hashFiles('go.mod', 'go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            dist-gocache-${{ matrix.variant }}-${{ hashFiles('go.mod', 'go.sum') }}-
+            dist-gocache-${{ matrix.variant }}-
       - name: Install Mage
         run: go install github.com/magefile/mage@v1.17.2
-      - name: Build release artifacts
-        run: mage build:dist
+      - name: Build release artifact
+        run: mage build:distVariant ${{ matrix.variant }}
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist-${{ matrix.variant }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  # -- Aggregate the artefacts and publish the GitHub release -----------------
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # create the release and upload assets
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
+      - name: Generate checksums
+        # checksums.txt is generated here, across all variants, so the
+        # published file has the same single-file shape it always had.
+        run: |
+          cd dist
+          ls -l
+          # Refuse to publish an incomplete release: every variant in the
+          # build matrix must have produced exactly one tarball, and nothing
+          # unexpected may sneak in. Keep this list in sync with the matrix
+          # above and distVariants() in magefile.go.
+          for variant in linux_amd64 linux_arm64 linux_amd64_fips linux_arm64_fips; do
+            ls -- openvox-ca_*_"$variant".tar.gz > /dev/null
+          done
+          tarballs="$(ls -- *.tar.gz | wc -l)"
+          if [ "$tarballs" -ne 4 ]; then
+            echo "::error::Expected 4 release tarballs, found $tarballs"
+            exit 1
+          fi
+          sha256sum -- *.tar.gz > checksums.txt
+          cat checksums.txt
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
+        # A semver pre-release tag (any tag with a hyphen, e.g. v0.9.0-rc1)
+        # is published as a GitHub pre-release, so RCs and rehearsals never
+        # appear as the latest stable release.
         run: |
-          gh release create "$TAG" \
-            --title "$TAG" \
-            --generate-notes \
+          args=("$TAG" --title "$TAG" --verify-tag --generate-notes)
+          case "$TAG" in
+            *-*) args+=(--prerelease) ;;
+          esac
+          gh release create "${args[@]}" \
             dist/*.tar.gz \
             dist/checksums.txt

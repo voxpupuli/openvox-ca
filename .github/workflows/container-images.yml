@@ -31,12 +31,13 @@ on:
         type: boolean
         default: false
 
-# GITHUB_TOKEN needs packages:write to push to GHCR. On pull requests from
-# forks GitHub automatically downgrades this to read-only; the build job
-# detects that and skips pushing.
+# GITHUB_TOKEN needs packages:write to push to GHCR; it is granted per-job to
+# the build and merge jobs that actually push. On pull requests from forks
+# GitHub automatically downgrades it to read-only; the build job detects that
+# and skips pushing.
 permissions:
   contents: read
-  packages: write
+  checks: read  # verify-release-tag reads the tagged commit's check runs
 
 # Cancel superseded PR runs, but never cancel a release/tag build mid-flight.
 concurrency:
@@ -79,13 +80,31 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "push=$push image=$image"
 
+  # -- Gate release-tag builds like the Release workflow ----------------------─
+  # On v* tags only: the tag must match the internal/version constant and the
+  # tagged commit must have gone green in CI, so a bad tag cannot publish
+  # versioned images either. On every other event the steps are skipped and
+  # the job passes in seconds, existing only so `build` can depend on it
+  # unconditionally.
+  verify-tag:
+    name: Verify release tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: startsWith(github.ref, 'refs/tags/v')
+      - uses: ./.github/actions/verify-release-tag
+        if: startsWith(github.ref, 'refs/tags/v')
+
   # -- Build one (variant x architecture) on a native runner ------------------─
   # Each image is pushed by digest (no tag); the merge job assembles the
   # per-variant multi-arch manifest from the collected digests.
   build:
     name: Build ${{ matrix.variant }} (${{ matrix.arch }})
-    needs: setup
+    needs: [setup, verify-tag]
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write  # push per-arch images by digest
     strategy:
       fail-fast: false
       matrix:
@@ -175,6 +194,8 @@ jobs:
     needs: [setup, build]
     if: needs.setup.outputs.push == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      packages: write  # push the multi-arch manifests and tags
     strategy:
       fail-fast: false
       matrix:

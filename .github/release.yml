@@ -1,0 +1,32 @@
+# Configuration for GitHub's auto-generated release notes
+# (gh release create --generate-notes). Dependency-bot PRs are excluded
+# entirely -- they dominate the merge history and drown out real changes --
+# and everything else is grouped by PR label, with unlabelled PRs falling
+# through to "Other changes".
+changelog:
+  exclude:
+    authors:
+      - renovate
+      - renovate[bot]
+      - dependabot
+      - dependabot[bot]
+  categories:
+    - title: Breaking changes
+      labels:
+        - breaking
+        - backwards-incompatible
+    - title: Enhancements
+      labels:
+        - enhancement
+        - feature
+    - title: Bug fixes
+      labels:
+        - bug
+        - bugfix
+    - title: Documentation
+      labels:
+        - documentation
+        - docs
+    - title: Other changes
+      labels:
+        - "*"

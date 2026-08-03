@@ -10,10 +10,14 @@
 --ca-cert      ""                       CA cert PEM for TLS verification (omit to skip verify)
 --client-cert  ""                       Client certificate PEM for mTLS
 --client-key   ""                       Client private key PEM for mTLS
---verbose                               Enable debug logging
+--verbose, -v                           Enable debug logging
 ```
 
 Global flags may be placed before or after the subcommand name.
+
+`openvox-ca-ctl --version` prints the version (including commit metadata when
+built from a git checkout) and exits. Unlike the global flags above,
+`--version` is accepted only on the root command, not after a subcommand.
 
 ## Configuration
 

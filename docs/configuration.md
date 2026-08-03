@@ -36,6 +36,7 @@ operator CLI, see [operator CLI (`openvox-ca-ctl`)](operator-cli.md).
 | `--daemon` | `false` | Fork to background (not recommended in containers) |
 | `--logfile` | `""` | Write JSON logs to this file instead of stderr |
 | `--verbosity` / `-v` | `0` | Verbosity: `0`=Info, `1`=Debug, `2`=Trace |
+| `--version` | | Print the version and exit; includes commit metadata when built from a git checkout |
 
 ## Precedence
 

@@ -32,6 +32,13 @@ pre-commit:
 
 pre-push:
   parallel: false
+  # verify-tags.sh (in .lefthook/pre-push/) is a script rather than a command:
+  # lefthook skips commands when the push-file list is empty, which is exactly
+  # the tag-push case the check exists for; scripts always run.
+  scripts:
+    "verify-tags.sh":
+      runner: sh
+      use_stdin: true  # git feeds the pushed refs to the pre-push hook on stdin
   commands:
     go-test:
       run: go test ./...

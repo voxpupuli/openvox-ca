@@ -46,6 +46,7 @@ import (
 	"github.com/voxpupuli/openvox-ca/internal/metrics"
 	"github.com/voxpupuli/openvox-ca/internal/signer"
 	"github.com/voxpupuli/openvox-ca/internal/storage"
+	"github.com/voxpupuli/openvox-ca/internal/version"
 )
 
 // setupLogger creates and sets the default slog logger based on config.
@@ -219,6 +220,7 @@ func newRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "openvox-ca",
 		Short:         "Puppet-compatible certificate authority server",
+		Version:       version.Full(),
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

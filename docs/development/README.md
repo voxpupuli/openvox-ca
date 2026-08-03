@@ -17,3 +17,4 @@ style).
 | [Storage internals](storage-internals.md) | Backend key layouts, cross-node coordination, SQL schema, and how to add a backend |
 | [Inventory store](inventory-store.md) | Internal design of the structured (`InventoryStore`) inventory capability |
 | [Publishing container images](publishing-images.md) | The GHCR publishing workflow and one-time repository setup |
+| [Cutting a release](releasing.md) | Tagging a release, what the automation publishes, release notes, and rehearsing on a fork |

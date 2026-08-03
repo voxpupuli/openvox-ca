@@ -40,6 +40,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/storage"
+	"github.com/voxpupuli/openvox-ca/internal/version"
 )
 
 // ---------- global state (set by persistent flags / config) ----------
@@ -564,12 +565,22 @@ func newImportCmd() *cobra.Command {
 // ---------- main ----------
 
 func main() {
+	if err := newRootCmd().Execute(); err != nil {
+		os.Exit(1)
+	}
+}
+
+// newRootCmd builds and returns the fully-configured root command, including
+// all flag wiring. Extracted from main() so the command can be exercised in
+// unit tests (e.g. flag behaviour) without invoking os.Exit.
+func newRootCmd() *cobra.Command {
 	rootCmd := &cobra.Command{
-		Use:   "openvox-ca-ctl",
-		Short: "Operator management CLI for openvox-ca",
+		Use:     "openvox-ca-ctl",
+		Short:   "Operator management CLI for openvox-ca",
+		Version: version.Full(),
 		Long: `openvox-ca-ctl manages certificates on a running openvox-ca server.
 
-Global flags must be specified before the subcommand.`,
+Global flags may be placed before or after the subcommand name.`,
 		SilenceUsage: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			resolved := resolveConfigFile(globalConfigFile, "PUPPET_CA_CTL_CONFIG", "/etc/puppet-ca/ctl.yaml")
@@ -620,7 +631,11 @@ Global flags must be specified before the subcommand.`,
 	pf.StringVar(&globalCACert, "ca-cert", "", "Path to CA cert PEM for TLS verification (omit to use system trust store)")
 	pf.StringVar(&globalClientCert, "client-cert", "", "Path to client certificate PEM for mTLS")
 	pf.StringVar(&globalClientKey, "client-key", "", "Path to client private key PEM for mTLS")
-	pf.BoolVar(&globalVerbose, "verbose", false, "Enable verbose logging")
+	// The -v shorthand keeps this in line with the server binary, where -v is
+	// --verbosity; it also stops cobra claiming -v as a shorthand for the
+	// synthesised --version flag, which would give the two sibling binaries
+	// opposite meanings for -v.
+	pf.BoolVarP(&globalVerbose, "verbose", "v", false, "Enable verbose logging")
 	pf.BoolVar(&globalInsecure, "insecure", false, "Skip TLS server certificate verification (vulnerable to MITM; use only for testing)")
 
 	rootCmd.AddCommand(
@@ -636,7 +651,5 @@ Global flags must be specified before the subcommand.`,
 		newMigrateCmd(),
 	)
 
-	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
-	}
+	return rootCmd
 }

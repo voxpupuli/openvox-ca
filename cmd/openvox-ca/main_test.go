@@ -18,10 +18,13 @@
 package main
 
 import (
+	"bytes"
 	"io"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/voxpupuli/openvox-ca/internal/version"
 )
 
 // The root command must reject stray positional arguments instead of silently
@@ -33,5 +36,24 @@ var _ = Describe("Root command", func() {
 		cmd.SetOut(io.Discard)
 		cmd.SetErr(io.Discard)
 		Expect(cmd.Execute()).To(HaveOccurred(), "expected error for unexpected positional arg, got nil")
+	})
+
+	It("prints the release version for --version", func() {
+		var out bytes.Buffer
+		cmd := newRootCmd()
+		cmd.SetArgs([]string{"--version"})
+		cmd.SetOut(&out)
+		cmd.SetErr(io.Discard)
+		Expect(cmd.Execute()).To(Succeed())
+		Expect(out.String()).To(ContainSubstring("openvox-ca version " + version.Version))
+	})
+
+	// -v must stay the shorthand for --verbosity: cobra would otherwise claim
+	// it for the synthesised --version flag, silently changing what -v does.
+	It("keeps -v as the shorthand for --verbosity", func() {
+		cmd := newRootCmd()
+		flag := cmd.Flags().ShorthandLookup("v")
+		Expect(flag).NotTo(BeNil())
+		Expect(flag.Name).To(Equal("verbosity"))
 	})
 })
