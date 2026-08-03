@@ -349,6 +349,12 @@ func (b *EtcdBackend) AppendLine(ctx context.Context, key string, data []byte, _
 		// under load). Honour the caller's cancellation rather than spinning
 		// past it.
 		window := time.Duration(attempt+1) * 10 * time.Millisecond
+		// math/rand/v2 is deliberate here: this value is retry timing only,
+		// never a token or key, and the v2 generator is ChaCha8 seeded
+		// per-process from OS entropy, so remote writers cannot predict each
+		// other's jitter. All security-relevant randomness in this codebase
+		// uses crypto/rand.
+		// nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used
 		backoff := time.Duration(rand.Int64N(int64(window))) //nolint:gosec // jitter, not security-sensitive
 		select {
 		case <-ctx.Done():
