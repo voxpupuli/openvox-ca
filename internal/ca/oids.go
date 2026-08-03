@@ -17,7 +17,11 @@
 
 package ca
 
-import "encoding/asn1"
+import (
+	"crypto/x509/pkix"
+	"encoding/asn1"
+	"encoding/hex"
+)
 
 var (
 	// OIDAIA is the Authority Information Access extension (RFC 5280 §4.2.2.1).
@@ -119,4 +123,28 @@ func OIDKey(oid asn1.ObjectIdentifier) string {
 		return short
 	}
 	return s
+}
+
+// AuthExtensionMap extracts Puppet authorization extensions (the
+// PuppetAuthOIDArc) from a certificate or CSR extension list as a name→value
+// map. Keys are Puppet short names when known (e.g. "pp_auth_role"), raw
+// dotted OID strings otherwise; values are the decoded UTF-8 strings, or the
+// hex-encoded raw bytes when the value is not an ASN.1 string. Always returns
+// a non-nil map. This is the single producer of the auth-extension display
+// form, shared by the status API and the certificate index projection.
+func AuthExtensionMap(exts []pkix.Extension) map[string]string {
+	result := make(map[string]string)
+	for _, ext := range exts {
+		if !IsAuthOID(ext.Id) {
+			continue
+		}
+		key := OIDKey(ext.Id)
+		var s string
+		if _, err := asn1.Unmarshal(ext.Value, &s); err == nil {
+			result[key] = s
+		} else {
+			result[key] = hex.EncodeToString(ext.Value)
+		}
+	}
+	return result
 }

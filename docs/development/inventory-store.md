@@ -61,12 +61,13 @@ type InventoryEntry struct {
 // render → scan → reparse round-trip. Backends that do not implement it keep
 // using the KeyInventory blob via AppendLine/Get.
 type InventoryStore interface {
-    // AppendEntry inserts e and advances the integrity head atomically.
+    // AppendEntry inserts rec and advances the integrity head atomically.
     // newHead computes the chained head MAC from the previous head (nil when
     // the inventory is empty); the backend MUST invoke it inside the same
     // transaction/lock that serialises appends so the chain cannot fork under
-    // concurrent appenders.
-    AppendEntry(ctx context.Context, e InventoryEntry, newHead func(prev []byte) []byte) error
+    // concurrent appenders. rec is a CertRecord (see "The certificate index"
+    // below); only its canonical InventoryEntry fields feed the chain.
+    AppendEntry(ctx context.Context, rec CertRecord, newHead func(prev []byte) []byte) error
 
     // Entries returns every entry in issuance order, for the OCSP index build
     // and for chain verification.
@@ -136,6 +137,51 @@ blob HMAC ≠ a chain head over the same entries). So after the copy,
 recomputes the destination's integrity head from its entries
 (`RebuildInventoryHMAC`). This resolves the otherwise-spurious
 `ErrInventoryTampered` that copying a foreign `inventory_hmac` would cause.
+
+### The certificate index (`CertIndex`)
+
+The inventory table doubles as a **certificate index**: alongside the four
+canonical columns, each row carries a denormalised display projection
+(`fingerprint_sha256`, `dns_alt_names`, `auth_extensions`, filled at signing)
+and the one mutable fact, revocation (`state`, `revoked_at`). Backends owning
+the rows may advertise a second optional capability:
+
+```go
+type CertIndex interface {
+    // One record per subject with a stored certificate (latest issuance),
+    // optionally filtered by state ("signed"/"revoked").
+    Statuses(ctx context.Context, stateFilter string) ([]CertRecord, error)
+    SetRevoked(ctx context.Context, serial string, at time.Time) error
+    ClearRevoked(ctx context.Context, serial string) error
+    SetProjection(ctx context.Context, serial string, proj CertProjection) error
+}
+```
+
+`GET /certificate_statuses` probes it (via `StorageService.CertStatuses`,
+mirroring `asInventoryStore`) and collapses from an O(N) *list-certs →
+read-PEM → parse → CRL-check* scan to indexed queries; blob backends keep the
+scan path verbatim. Pending CSRs are not issued certificates and stay on the
+`csr/` list-and-parse path.
+
+Design rules that keep the index honest:
+
+- **The PEM and the signed CRL stay authoritative.** The projection columns
+  are immutable copies of fields fixed at signing (so they cannot drift); the
+  revocation columns are written by the revoke path right after the CRL is
+  re-signed. Every column is rebuildable from the artefacts.
+- **The hash chain covers only the canonical columns.** Chaining the
+  projection would add nothing: each projected field is independently
+  verifiable against a signed artefact.
+- **Blob-imported rows carry no projection** (`fingerprint_sha256` NULL). The
+  CA runs an index repair pass at startup (`rebuildCertIndex`) that backfills
+  projections from the stored PEMs and reconciles `state` against the CRL —
+  this is what makes a `storage migrate` from a blob backend converge. Until
+  repair runs, the statuses handler falls back to the PEM per projection-less
+  record.
+- **Statuses is gated on blob existence.** Historical rows survive cleaning
+  (that is the inventory's job), so the index reports only subjects whose
+  `cert/<subject>` blob still exists, and only their latest issuance —
+  matching what the scan path would have listed.
 
 ## Scope
 

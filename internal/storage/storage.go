@@ -191,6 +191,16 @@ var ErrDuplicateSerial = errors.New("serial number already exists in inventory")
 // and the whole-blob HMAC is recomputed. Returns ErrDuplicateSerial (wrapped)
 // if the entry's serial is already present anywhere in the inventory.
 func (s *StorageService) AppendInventory(ctx context.Context, entry string) error {
+	return s.AppendInventoryRecord(ctx, entry, nil)
+}
+
+// AppendInventoryRecord is AppendInventory with an optional certificate-index
+// projection. Issuance paths (signing, import) pass the display fields
+// denormalised from the certificate they just stored; backends with the
+// CertIndex capability persist them on the new row (state "signed"), all
+// others ignore them. A nil proj records the entry without a projection,
+// which index readers treat as "fall back to the stored PEM".
+func (s *StorageService) AppendInventoryRecord(ctx context.Context, entry string, proj *CertProjection) error {
 	s.inventoryMu.Lock()
 	defer s.inventoryMu.Unlock()
 
@@ -200,12 +210,16 @@ func (s *StorageService) AppendInventory(ctx context.Context, entry string) erro
 	}
 
 	if store, ok := asInventoryStore(s.backend); ok {
+		rec := CertRecord{InventoryEntry: parsed, State: CertStateSigned}
+		if proj != nil {
+			rec.CertProjection = *proj
+		}
 		var newHead func(prev []byte) []byte
 		if s.hmacKey != nil {
 			key := s.hmacKey
 			newHead = func(prev []byte) []byte { return chainInventoryMAC(key, prev, entry) }
 		}
-		if err := store.AppendEntry(ctx, parsed, newHead); err != nil {
+		if err := store.AppendEntry(ctx, rec, newHead); err != nil {
 			if isUniqueSerialViolation(err) {
 				return fmt.Errorf("%w: %s", ErrDuplicateSerial, parsed.Serial)
 			}
@@ -425,6 +439,59 @@ func (s *StorageService) PruneInventory(ctx context.Context, keep func(Inventory
 		}
 	}
 	return removed, nil
+}
+
+// --- Certificate index ---
+//
+// The methods below expose the optional CertIndex backend capability. On
+// backends without it they degrade gracefully: reads report ok=false so the
+// caller keeps its list-and-parse path, writes are silent no-ops. The index is
+// a projection of authoritative artefacts (certificate PEMs, the signed CRL),
+// so a lost index write is at worst a stale display value that the CA's index
+// repair pass reconciles at the next startup.
+
+// CertStatuses answers the certificate-status listing from the certificate
+// index. ok reports whether the backend has the capability at all; when false
+// the caller must fall back to enumerating and parsing the stored PEMs.
+// stateFilter narrows the records to CertStateSigned or CertStateRevoked; ""
+// returns everything the index tracks.
+func (s *StorageService) CertStatuses(ctx context.Context, stateFilter string) (records []CertRecord, ok bool, err error) {
+	idx, ok := asCertIndex(s.backend)
+	if !ok {
+		return nil, false, nil
+	}
+	records, err = idx.Statuses(ctx, stateFilter)
+	return records, true, err
+}
+
+// MarkCertRevoked projects a revocation into the certificate index; no-op
+// when the backend has no index.
+func (s *StorageService) MarkCertRevoked(ctx context.Context, serial string, at time.Time) error {
+	idx, ok := asCertIndex(s.backend)
+	if !ok {
+		return nil
+	}
+	return idx.SetRevoked(ctx, serial, at)
+}
+
+// ClearCertRevoked removes a revocation projection from the certificate
+// index; no-op when the backend has no index.
+func (s *StorageService) ClearCertRevoked(ctx context.Context, serial string) error {
+	idx, ok := asCertIndex(s.backend)
+	if !ok {
+		return nil
+	}
+	return idx.ClearRevoked(ctx, serial)
+}
+
+// SetCertProjection backfills the denormalised display fields for serial in
+// the certificate index; no-op when the backend has no index.
+func (s *StorageService) SetCertProjection(ctx context.Context, serial string, proj CertProjection) error {
+	idx, ok := asCertIndex(s.backend)
+	if !ok {
+		return nil
+	}
+	return idx.SetProjection(ctx, serial, proj)
 }
 
 // TouchInventory creates an empty inventory blob if one does not already

@@ -169,6 +169,109 @@ type InventoryEntry struct {
 	Subject   string
 }
 
+// Certificate index states recorded in CertRecord.State. Pending CSRs are not
+// issued certificates and never appear in the index; the API layer derives the
+// "requested" state from the csr/ namespace instead.
+const (
+	CertStateSigned  = "signed"
+	CertStateRevoked = "revoked"
+)
+
+// CertProjection carries the display fields denormalised from a signed
+// certificate into the certificate index. Every field is immutable for the
+// life of the certificate (they are fixed at signing), so the projection can
+// never drift from the stored PEM — the PEM remains the authoritative
+// artefact and the projection is rebuildable from it at any time.
+type CertProjection struct {
+	// Fingerprint is the SHA-256 digest of the certificate's DER encoding,
+	// rendered as colon-separated hex pairs exactly as the status API emits it.
+	// An empty Fingerprint marks a record whose projection has not been
+	// populated (e.g. rows imported from a legacy inventory blob); readers must
+	// fall back to parsing the stored PEM for such records.
+	Fingerprint string
+	// DNSAltNames holds the certificate's DNS subject alternative names.
+	DNSAltNames []string
+	// AuthExtensions holds Puppet auth-arc extension values keyed by short
+	// name (e.g. "pp_auth_role") or dotted OID when no short name is known.
+	AuthExtensions map[string]string
+}
+
+// CertRecord is one issued certificate as the certificate index sees it: the
+// canonical inventory fields, the denormalised display projection, and the one
+// mutable fact — revocation. State/RevokedAt are a projection of the signed
+// CRL (the source of truth), written alongside CRL updates and rebuildable
+// from it, exactly as the projection fields relate to the PEM.
+//
+// Note the integrity hash chain covers only the canonical InventoryEntry
+// fields (via canonicalInventoryLine); the projection columns are not chained.
+// That is deliberate: each projection field is independently verifiable
+// against a signed artefact (the certificate PEM or the CRL), so chaining
+// them would add nothing the artefacts do not already guarantee.
+type CertRecord struct {
+	InventoryEntry
+	CertProjection
+	State     string     // CertStateSigned or CertStateRevoked
+	RevokedAt *time.Time // nil unless revoked
+}
+
+// CertIndex is an optional capability of InventoryStore backends: the backend
+// that owns the structured inventory rows can answer certificate-status
+// queries from indexed columns instead of forcing the caller into a
+// list-certs → read-PEM → parse → CRL-check scan per subject.
+//
+// The certificate blobs stay authoritative. Statuses reflects the index rows
+// joined against blob existence, so a certificate removed by clean/cleanup
+// stops being reported even though its historical inventory rows remain.
+type CertIndex interface {
+	// Statuses returns one record per subject that currently holds a stored
+	// signed certificate — the latest issuance for that subject — in subject
+	// order. stateFilter narrows the result to CertStateSigned or
+	// CertStateRevoked; "" returns all records. Records whose projection has
+	// never been populated are returned with an empty Fingerprint so the
+	// caller can fall back to the stored PEM for display fields.
+	//
+	// Note today's in-tree callers always pass "": the statuses handler must
+	// see every certified subject to keep its CSR-dedup set complete (it
+	// filters per record in Go), and the index repair pass reconciles all
+	// records. The filter is nevertheless part of the capability contract —
+	// it is the indexed query shape issue #137 fixes the schema for, it is
+	// dialect-tested, and direct consumers (CLI/report tooling) can use it
+	// without a schema change.
+	Statuses(ctx context.Context, stateFilter string) ([]CertRecord, error)
+
+	// SetRevoked marks every index row bearing serial as revoked at the given
+	// time. Idempotent: re-marking an already-revoked serial keeps the
+	// original revocation time. A serial with no matching row is a no-op, not
+	// an error (the CRL may legitimately reference certs the index no longer
+	// tracks).
+	SetRevoked(ctx context.Context, serial string, at time.Time) error
+
+	// ClearRevoked returns every index row bearing serial to the signed
+	// state. Used by index repair when a row claims a revocation the signed
+	// CRL does not corroborate.
+	ClearRevoked(ctx context.Context, serial string) error
+
+	// SetProjection fills the denormalised display fields for every index row
+	// bearing serial. Used to backfill rows created from projection-less
+	// sources (legacy inventory blobs, direct AppendLine writes).
+	SetProjection(ctx context.Context, serial string, proj CertProjection) error
+}
+
+// asCertIndex probes b for the CertIndex capability, unwrapping wrapper
+// backends the same way asInventoryStore does.
+func asCertIndex(b Backend) (CertIndex, bool) {
+	for {
+		if idx, ok := b.(CertIndex); ok {
+			return idx, true
+		}
+		unwrapper, ok := b.(interface{ Unwrap() Backend })
+		if !ok {
+			return nil, false
+		}
+		b = unwrapper.Unwrap()
+	}
+}
+
 // InventoryStore is an optional Backend capability for storing the certificate
 // inventory as structured records (e.g. a SQL table) rather than the single
 // append-only KeyInventory blob. Backends that implement it let StorageService
@@ -184,14 +287,16 @@ type InventoryEntry struct {
 // parsing text back to rows) so that Migrate and the OCSP index build remain
 // backend-agnostic.
 type InventoryStore interface {
-	// AppendEntry inserts e and advances the integrity head atomically. newHead
-	// computes the chained head MAC from the previous head (nil when the
-	// inventory is empty); the backend MUST invoke it inside the same
+	// AppendEntry inserts rec and advances the integrity head atomically.
+	// newHead computes the chained head MAC from the previous head (nil when
+	// the inventory is empty); the backend MUST invoke it inside the same
 	// transaction or lock that serialises appends so the chain cannot fork
 	// under concurrent appenders. A nil newHead means integrity is disabled
 	// (no HMAC key configured): the backend appends the entry and leaves the
-	// stored head untouched.
-	AppendEntry(ctx context.Context, e InventoryEntry, newHead func(prev []byte) []byte) error
+	// stored head untouched. Only rec's canonical InventoryEntry fields feed
+	// the chain; the projection/state columns are stored uncovered (see
+	// CertRecord).
+	AppendEntry(ctx context.Context, rec CertRecord, newHead func(prev []byte) []byte) error
 
 	// Entries returns every entry in issuance order, for the OCSP index build
 	// and for chain verification.

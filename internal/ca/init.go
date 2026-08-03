@@ -142,6 +142,7 @@ func (c *CA) finishLoadExisting(ctx context.Context) error {
 	}
 	err := c.loadCRLCache(ctx)
 	if err == nil {
+		c.rebuildCertIndex(ctx)
 		return nil
 	}
 	if !errors.Is(err, fs.ErrNotExist) {
@@ -155,7 +156,13 @@ func (c *CA) finishLoadExisting(ctx context.Context) error {
 	if err := c.seedSupportingState(ctx); err != nil {
 		return fmt.Errorf("seeding CA supporting state: %w", err)
 	}
-	return c.loadCRLCache(ctx)
+	if err := c.loadCRLCache(ctx); err != nil {
+		return err
+	}
+	// A freshly seeded CA has an empty index; running the repair pass anyway
+	// keeps this path identical to the loaded-CRL one (it is a no-op then).
+	c.rebuildCertIndex(ctx)
+	return nil
 }
 
 // seedSupportingState writes the CRL, inventory, and serial counter that

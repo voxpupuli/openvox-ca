@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -36,6 +37,12 @@ import (
 // which drives both the rendered inventory.txt ordering and the integrity hash
 // chain. NotBefore/NotAfter are stored verbatim as the formatted strings the
 // signing path produces so that rendering is byte-identical to the legacy blob.
+//
+// The table doubles as the certificate index (see CertIndex): the projection
+// columns denormalise immutable display fields filled at signing time, and
+// state/revoked_at project the CRL's one mutable fact. Rows created from
+// projection-less sources (legacy blob imports) leave fingerprint_sha256 NULL,
+// which readers treat as "projection missing, fall back to the PEM".
 type sqlInventoryRow struct {
 	bun.BaseModel `bun:"table:puppet_ca_inventory,alias:inv"`
 
@@ -44,6 +51,17 @@ type sqlInventoryRow struct {
 	Subject   string `bun:"subject,notnull,type:varchar(512)"`
 	NotBefore string `bun:"not_before,notnull,type:varchar(64)"`
 	NotAfter  string `bun:"not_after,notnull,type:varchar(64)"`
+
+	// Denormalised display projection (immutable, filled at signing).
+	// DNSAltNames is a JSON array, AuthExts a JSON object; both NULL when
+	// empty. See CertProjection for the field semantics.
+	Fingerprint string `bun:"fingerprint_sha256,nullzero,type:varchar(95)"`
+	DNSAltNames string `bun:"dns_alt_names,nullzero,type:text"`
+	AuthExts    string `bun:"auth_extensions,nullzero,type:text"`
+
+	// The one mutable fact, projected from the signed CRL.
+	State     string     `bun:"state,notnull,type:varchar(16)"`
+	RevokedAt *time.Time `bun:"revoked_at,nullzero"`
 }
 
 func inventoryRowFromEntry(e InventoryEntry) *sqlInventoryRow {
@@ -52,8 +70,41 @@ func inventoryRowFromEntry(e InventoryEntry) *sqlInventoryRow {
 		Subject:   e.Subject,
 		NotBefore: e.NotBefore,
 		NotAfter:  e.NotAfter,
+		State:     CertStateSigned,
 	}
 }
+
+func inventoryRowFromRecord(rec CertRecord) (*sqlInventoryRow, error) {
+	row := inventoryRowFromEntry(rec.InventoryEntry)
+	if rec.State != "" {
+		row.State = rec.State
+	}
+	row.RevokedAt = rec.RevokedAt
+	row.Fingerprint = rec.Fingerprint
+	if len(rec.DNSAltNames) > 0 {
+		data, err := json.Marshal(rec.DNSAltNames)
+		if err != nil {
+			return nil, fmt.Errorf("encoding dns_alt_names: %w", err)
+		}
+		row.DNSAltNames = string(data)
+	}
+	if len(rec.AuthExtensions) > 0 {
+		data, err := json.Marshal(rec.AuthExtensions)
+		if err != nil {
+			return nil, fmt.Errorf("encoding auth_extensions: %w", err)
+		}
+		row.AuthExts = string(data)
+	}
+	return row, nil
+}
+
+// inventoryEntryColumns are the columns needed to build an InventoryEntry (plus
+// the id that orders and identifies rows). Queries that only render inventory
+// entries name these explicitly instead of selecting the whole model: the
+// integrity check reads the inventory before anything else at startup, so a
+// select naming columns it does not need turns any unrelated schema drift into
+// a fatal — and thoroughly misleading — "inventory integrity check failed".
+var inventoryEntryColumns = []string{"id", "serial", "subject", "not_before", "not_after"}
 
 func (r sqlInventoryRow) entry() InventoryEntry {
 	return InventoryEntry{
@@ -62,6 +113,35 @@ func (r sqlInventoryRow) entry() InventoryEntry {
 		NotAfter:  r.NotAfter,
 		Subject:   r.Subject,
 	}
+}
+
+// record decodes the row into a CertRecord. Undecodable projection JSON is
+// treated as a missing projection (empty Fingerprint) rather than an error:
+// the projection is a rebuildable cache of the PEM, so readers fall back to
+// the authoritative artefact instead of failing the whole listing.
+func (r sqlInventoryRow) record() CertRecord {
+	rec := CertRecord{
+		InventoryEntry: r.entry(),
+		State:          r.State,
+		RevokedAt:      r.RevokedAt,
+	}
+	if rec.State == "" {
+		rec.State = CertStateSigned
+	}
+	rec.Fingerprint = r.Fingerprint
+	if r.DNSAltNames != "" {
+		if err := json.Unmarshal([]byte(r.DNSAltNames), &rec.DNSAltNames); err != nil {
+			rec.CertProjection = CertProjection{}
+			return rec
+		}
+	}
+	if r.AuthExts != "" {
+		if err := json.Unmarshal([]byte(r.AuthExts), &rec.AuthExtensions); err != nil {
+			rec.CertProjection = CertProjection{}
+			return rec
+		}
+	}
+	return rec
 }
 
 // SQLBackend implements InventoryStore: the certificate inventory lives in the
@@ -73,13 +153,13 @@ func (r sqlInventoryRow) entry() InventoryEntry {
 // chain (see StorageService.AppendInventory).
 var _ InventoryStore = (*SQLBackend)(nil)
 
-// AppendEntry inserts e and advances the integrity head atomically. The whole
-// operation runs in one transaction that locks the presence-marker row, so
-// concurrent appenders — including separate replicas — serialise and the hash
-// chain cannot fork. newHead is invoked inside that transaction with the
+// AppendEntry inserts rec and advances the integrity head atomically. The
+// whole operation runs in one transaction that locks the presence-marker row,
+// so concurrent appenders — including separate replicas — serialise and the
+// hash chain cannot fork. newHead is invoked inside that transaction with the
 // current head (nil when none); a nil newHead means integrity is disabled and
 // the stored head is left untouched.
-func (b *SQLBackend) AppendEntry(ctx context.Context, e InventoryEntry, newHead func(prev []byte) []byte) error {
+func (b *SQLBackend) AppendEntry(ctx context.Context, rec CertRecord, newHead func(prev []byte) []byte) error {
 	b.appendMu.Lock()
 	defer b.appendMu.Unlock()
 
@@ -88,7 +168,7 @@ func (b *SQLBackend) AppendEntry(ctx context.Context, e InventoryEntry, newHead 
 
 	const maxAttempts = 10
 	for attempt := 0; ; attempt++ {
-		err := b.appendEntryOnce(ctx, e, newHead)
+		err := b.appendEntryOnce(ctx, rec, newHead)
 		if err == nil {
 			return nil
 		}
@@ -103,7 +183,11 @@ func (b *SQLBackend) AppendEntry(ctx context.Context, e InventoryEntry, newHead 
 	}
 }
 
-func (b *SQLBackend) appendEntryOnce(ctx context.Context, e InventoryEntry, newHead func(prev []byte) []byte) error {
+func (b *SQLBackend) appendEntryOnce(ctx context.Context, rec CertRecord, newHead func(prev []byte) []byte) error {
+	row, err := inventoryRowFromRecord(rec)
+	if err != nil {
+		return err
+	}
 	return b.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		// Lock the presence marker (created by TouchInventory during bootstrap)
 		// to serialise appends across replicas before reading the head. On the
@@ -114,7 +198,7 @@ func (b *SQLBackend) appendEntryOnce(ctx context.Context, e InventoryEntry, newH
 			return err
 		}
 
-		if _, err := tx.NewInsert().Model(inventoryRowFromEntry(e)).Exec(ctx); err != nil {
+		if _, err := tx.NewInsert().Model(row).Exec(ctx); err != nil {
 			return err
 		}
 
@@ -149,7 +233,10 @@ func (b *SQLBackend) Entries(ctx context.Context) ([]InventoryEntry, error) {
 	defer cancel()
 
 	var rows []sqlInventoryRow
-	if err := b.db.NewSelect().Model(&rows).Order("id ASC").Scan(ctx); err != nil {
+	if err := b.db.NewSelect().Model(&rows).
+		Column(inventoryEntryColumns...).
+		Order("id ASC").
+		Scan(ctx); err != nil {
 		return nil, err
 	}
 	entries := make([]InventoryEntry, len(rows))
@@ -223,7 +310,10 @@ func (b *SQLBackend) pruneEntriesOnce(ctx context.Context, keep func(InventoryEn
 		}
 
 		var rows []sqlInventoryRow
-		if err := tx.NewSelect().Model(&rows).Order("id ASC").Scan(ctx); err != nil {
+		if err := tx.NewSelect().Model(&rows).
+			Column(inventoryEntryColumns...).
+			Order("id ASC").
+			Scan(ctx); err != nil {
 			return err
 		}
 
@@ -262,6 +352,122 @@ func (b *SQLBackend) pruneEntriesOnce(ctx context.Context, keep func(InventoryEn
 	return removed, nil
 }
 
+// --- CertIndex ---
+
+// SQLBackend implements CertIndex: certificate-status queries are answered
+// from the indexed inventory columns instead of reading and parsing every
+// stored certificate PEM. See CertIndex for the capability contract.
+var _ CertIndex = (*SQLBackend)(nil)
+
+// Statuses returns one record per subject that currently holds a stored
+// signed certificate (the subject's latest issuance), in subject order,
+// optionally narrowed to stateFilter. Blob existence is resolved with a
+// single indexed key listing rather than a cross-table SQL join so the query
+// stays dialect-free; historical rows for cleaned or superseded certificates
+// are never returned.
+func (b *SQLBackend) Statuses(ctx context.Context, stateFilter string) ([]CertRecord, error) {
+	certKeys, err := b.List(ctx, certPrefix)
+	if err != nil {
+		return nil, err
+	}
+	if len(certKeys) == 0 {
+		return nil, nil
+	}
+	stored := make(map[string]bool, len(certKeys))
+	for _, key := range certKeys {
+		stored[strings.TrimPrefix(key, certPrefix)] = true
+	}
+
+	ctx, cancel := b.callCtx(ctx)
+	defer cancel()
+
+	var rows []sqlInventoryRow
+	latest := b.db.NewSelect().
+		Model((*sqlInventoryRow)(nil)).
+		ColumnExpr("MAX(id)").
+		GroupExpr("subject")
+	q := b.db.NewSelect().Model(&rows).Where("id IN (?)", latest)
+	if stateFilter != "" {
+		q = q.Where("state = ?", stateFilter)
+	}
+	if err := q.Order("subject ASC").Scan(ctx); err != nil {
+		return nil, err
+	}
+
+	records := make([]CertRecord, 0, len(rows))
+	for _, r := range rows {
+		if !stored[r.Subject] {
+			continue
+		}
+		records = append(records, r.record())
+	}
+	return records, nil
+}
+
+// SetRevoked marks every row bearing serial as revoked at the given time. The
+// state guard keeps the first recorded revocation time on repeat calls, and a
+// serial with no rows is a no-op.
+func (b *SQLBackend) SetRevoked(ctx context.Context, serial string, at time.Time) error {
+	ctx, cancel := b.callCtx(ctx)
+	defer cancel()
+
+	_, err := b.db.NewUpdate().
+		Model((*sqlInventoryRow)(nil)).
+		Set("state = ?", CertStateRevoked).
+		Set("revoked_at = ?", at.UTC()).
+		Where("serial = ?", serial).
+		Where("state <> ?", CertStateRevoked).
+		Exec(ctx)
+	return err
+}
+
+// ClearRevoked returns every row bearing serial to the signed state.
+func (b *SQLBackend) ClearRevoked(ctx context.Context, serial string) error {
+	ctx, cancel := b.callCtx(ctx)
+	defer cancel()
+
+	_, err := b.db.NewUpdate().
+		Model((*sqlInventoryRow)(nil)).
+		Set("state = ?", CertStateSigned).
+		Set("revoked_at = NULL").
+		Where("serial = ?", serial).
+		Exec(ctx)
+	return err
+}
+
+// SetProjection fills the denormalised display columns for every row bearing
+// serial. Empty DNS names / auth extensions are stored as NULL, matching what
+// AppendEntry writes for a fresh issuance.
+func (b *SQLBackend) SetProjection(ctx context.Context, serial string, proj CertProjection) error {
+	var dnsNames, authExts any
+	if len(proj.DNSAltNames) > 0 {
+		data, err := json.Marshal(proj.DNSAltNames)
+		if err != nil {
+			return fmt.Errorf("encoding dns_alt_names: %w", err)
+		}
+		dnsNames = string(data)
+	}
+	if len(proj.AuthExtensions) > 0 {
+		data, err := json.Marshal(proj.AuthExtensions)
+		if err != nil {
+			return fmt.Errorf("encoding auth_extensions: %w", err)
+		}
+		authExts = string(data)
+	}
+
+	ctx, cancel := b.callCtx(ctx)
+	defer cancel()
+
+	_, err := b.db.NewUpdate().
+		Model((*sqlInventoryRow)(nil)).
+		Set("fingerprint_sha256 = ?", proj.Fingerprint).
+		Set("dns_alt_names = ?", dnsNames).
+		Set("auth_extensions = ?", authExts).
+		Where("serial = ?", serial).
+		Exec(ctx)
+	return err
+}
+
 // --- KeyInventory blob shim ---
 //
 // A structured backend must still serve the KeyInventory logical key through
@@ -286,7 +492,10 @@ func (b *SQLBackend) getInventory(ctx context.Context) ([]byte, error) {
 	}
 
 	var rows []sqlInventoryRow
-	if err := b.db.NewSelect().Model(&rows).Order("id ASC").Scan(ctx); err != nil {
+	if err := b.db.NewSelect().Model(&rows).
+		Column(inventoryEntryColumns...).
+		Order("id ASC").
+		Scan(ctx); err != nil {
 		return nil, err
 	}
 	var buf bytes.Buffer

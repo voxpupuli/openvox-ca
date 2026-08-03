@@ -199,8 +199,9 @@ func (c *CA) importCertificateLocked(ctx context.Context, subject, serialStr str
 		return nil, fmt.Errorf("failed to save imported cert for %s: %w", subject, err)
 	}
 
+	proj := certProjectionFor(cert)
 	inventoryEntry := storage.FormatInventoryLine(serialStr, cert.NotBefore, cert.NotAfter, subject)
-	if err := c.Storage.AppendInventory(ctx, inventoryEntry); err != nil {
+	if err := c.Storage.AppendInventoryRecord(ctx, inventoryEntry, &proj); err != nil {
 		// Roll back the cert so storage and inventory stay in sync, same as
 		// signWithDuration's rollback-on-failure.
 		if delErr := c.Storage.DeleteCert(ctx, subject); delErr != nil {

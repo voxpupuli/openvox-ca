@@ -91,6 +91,10 @@ func (c *CA) revokeSerialLocked(ctx context.Context, serialStr string) error {
 	for _, entry := range crl.RevokedCertificateEntries {
 		if entry.SerialNumber.Cmp(serialInt) == 0 {
 			slog.Debug("Certificate already revoked", "serial", serialStr)
+			// Still project the state into the certificate index: a retried
+			// revocation may be exactly the case where the CRL write landed
+			// but the index update did not.
+			c.markCertRevokedIndex(ctx, serialStr, entry.RevocationTime)
 			return nil
 		}
 	}
@@ -110,12 +114,27 @@ func (c *CA) revokeSerialLocked(ctx context.Context, serialStr string) error {
 		return err
 	}
 
+	// Project the revocation into the certificate index. The signed CRL just
+	// written is the source of truth; the index column is a display cache of
+	// it, so a failure here is logged, not propagated — the revocation has
+	// already happened, and the startup index repair reconverges the column.
+	c.markCertRevokedIndex(ctx, serialStr, newRevoked.RevocationTime)
+
 	// Invalidate the cached OCSP response for this serial so the next query
 	// returns the correct Revoked status instead of a stale Good response.
 	// Use the same normalised key as the OCSP index (uppercase hex, no padding).
 	delete(c.ocspCache, serialHexStr(serialInt))
 
 	return nil
+}
+
+// markCertRevokedIndex is the log-and-continue wrapper around
+// StorageService.MarkCertRevoked used by the revocation paths.
+func (c *CA) markCertRevokedIndex(ctx context.Context, serialStr string, at time.Time) {
+	if err := c.Storage.MarkCertRevoked(ctx, serialStr, at); err != nil {
+		slog.Warn("Failed to project revocation into certificate index",
+			"serial", serialStr, "error", err)
+	}
 }
 
 // parseInventoryLine parses a single line of the certificate inventory file.

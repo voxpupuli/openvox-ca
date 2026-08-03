@@ -20,22 +20,21 @@ package api
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/asn1"
-	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
 
 // maxJSONBody caps the size of JSON request bodies accepted by the POST/PUT
@@ -623,39 +622,22 @@ func parseCSR(pemData []byte) (*x509.CertificateRequest, error) {
 
 // authExtensions extracts Puppet authorization extensions (OID arc 1.3.6.1.4.1.34380.1.3)
 // from a certificate or CSR extension list and returns them as a name→value map.
-// The key is the Puppet short name when known (e.g. "pp_auth_role"), otherwise
-// the raw dotted OID string. The value is the decoded UTF-8 string.
-// Always returns a non-nil map (empty when no auth extensions are present).
+// See ca.AuthExtensionMap, which is shared with the certificate index
+// projection so the two can never disagree on the display form.
 func authExtensions(exts []pkix.Extension) map[string]string {
-	result := make(map[string]string)
-	for _, ext := range exts {
-		if !ca.IsAuthOID(ext.Id) {
-			continue
-		}
-		key := ca.OIDKey(ext.Id)
-		var s string
-		if _, err := asn1.Unmarshal(ext.Value, &s); err == nil {
-			result[key] = s
-		} else {
-			result[key] = hex.EncodeToString(ext.Value)
-		}
-	}
-	return result
+	return ca.AuthExtensionMap(exts)
 }
 
+// fingerprint renders the SHA-256 fingerprint of a PEM-encoded certificate or
+// CSR as Puppet's colon-separated hex pairs, or "" when data is not PEM. The
+// digest formatting is shared with the certificate index projection (see
+// ca.SHA256ColonFingerprint).
 func fingerprint(data []byte) string {
 	block, _ := pem.Decode(data)
 	if block == nil {
 		return ""
 	}
-	sum := sha256.Sum256(block.Bytes)
-	// Puppet formats fingerprints as colon-separated hex pairs.
-	raw := hex.EncodeToString(sum[:])
-	var parts []string
-	for i := 0; i < len(raw); i += 2 {
-		parts = append(parts, raw[i:i+2])
-	}
-	return strings.Join(parts, ":")
+	return ca.SHA256ColonFingerprint(block.Bytes)
 }
 
 // noNilSlice returns s unchanged when non-nil, or an empty non-nil slice.
@@ -708,6 +690,50 @@ func certStatusFromCert(subject string, certPEM []byte, state string, timeFmt st
 		NotBefore:               &nb,
 		NotAfter:                &na,
 	}
+}
+
+// certStatusFromRecord builds a CertStatusResponse from a certificate-index
+// record without touching the stored PEM. ok=false means the record cannot
+// stand alone — its display projection was never populated (legacy inventory
+// import) or a canonical field does not parse — and the caller should fall
+// back to the PEM path for that subject.
+func certStatusFromRecord(rec storage.CertRecord, timeFmt string) (CertStatusResponse, bool) {
+	if rec.Fingerprint == "" {
+		return CertStatusResponse{}, false
+	}
+	serialInt := new(big.Int)
+	if _, ok := serialInt.SetString(rec.Serial, 16); !ok {
+		return CertStatusResponse{}, false
+	}
+	nb, err := time.Parse(storage.InventoryTimeFormat, rec.NotBefore)
+	if err != nil {
+		return CertStatusResponse{}, false
+	}
+	na, err := time.Parse(storage.InventoryTimeFormat, rec.NotAfter)
+	if err != nil {
+		return CertStatusResponse{}, false
+	}
+
+	serial := serialInt.Text(10) // decimal string; preserves full 128-bit value
+	nbs := nb.UTC().Format(timeFmt)
+	nas := na.UTC().Format(timeFmt)
+	dnsNames := noNilSlice(rec.DNSAltNames)
+	authExts := rec.AuthExtensions
+	if authExts == nil {
+		authExts = map[string]string{}
+	}
+	return CertStatusResponse{
+		Name:                    rec.Subject,
+		State:                   rec.State,
+		Fingerprint:             rec.Fingerprint,
+		Fingerprints:            map[string]string{"SHA256": rec.Fingerprint, "default": rec.Fingerprint},
+		DNSAltNames:             dnsNames,
+		SubjectAltNames:         dnsNames,
+		AuthorizationExtensions: authExts,
+		SerialNumber:            &serial,
+		NotBefore:               &nbs,
+		NotAfter:                &nas,
+	}, true
 }
 
 // certStatusFromCSR builds a CertStatusResponse for a pending (requested) CSR.
@@ -771,36 +797,77 @@ func (s *Server) handleGetStatuses(w http.ResponseWriter, r *http.Request) {
 
 	stateFilter := r.URL.Query().Get("state") // "requested", "signed", "revoked", or ""
 
-	certs, err := s.CA.Storage.ListCerts(r.Context())
+	statuses := []CertStatusResponse{}
+	seen := make(map[string]bool)
+
+	// Signed/revoked certificates. Backends with a certificate index answer
+	// this from indexed columns — one query instead of a read-PEM-parse-and-
+	// CRL-check per subject; all others walk the stored PEMs. Either way,
+	// every subject holding a certificate lands in seen, so that under a
+	// "requested" filter a pending re-submission for an already-certified
+	// subject is not listed (the certificate wins until it is cleaned).
+	//
+	// The index is queried unfiltered: the state filter is applied against
+	// each record below, which both keeps seen complete and pins filter
+	// semantics to the same value the response would show.
+	records, indexed, err := s.CA.Storage.CertStatuses(r.Context(), "")
 	if err != nil {
-		slog.Error("list certs failed", "error", err)
+		slog.Error("certificate index statuses failed", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
+	if indexed {
+		for _, rec := range records {
+			seen[rec.Subject] = true
+			if stateFilter != "" && rec.State != stateFilter {
+				continue
+			}
+			resp, ok := certStatusFromRecord(rec, s.timeFormat())
+			if !ok {
+				// Projection not (yet) populated for this record — fall back
+				// to the stored PEM for this one subject, keeping the record's
+				// state so the response matches the filter just applied.
+				certPEM, err := s.CA.Storage.GetCert(r.Context(), rec.Subject)
+				if err != nil {
+					slog.Warn("statuses: reading stored certificate failed, omitting subject",
+						"subject", rec.Subject, "error", err)
+					continue
+				}
+				resp = certStatusFromCert(rec.Subject, certPEM, rec.State, s.timeFormat())
+			}
+			statuses = append(statuses, resp)
+		}
+	} else {
+		certs, err := s.CA.Storage.ListCerts(r.Context())
+		if err != nil {
+			slog.Error("list certs failed", "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		for _, subject := range certs {
+			seen[subject] = true
+			certPEM, err := s.CA.Storage.GetCert(r.Context(), subject)
+			if err != nil {
+				slog.Warn("statuses: reading stored certificate failed, omitting subject",
+					"subject", subject, "error", err)
+				continue
+			}
+			state := "signed"
+			if s.CA.IsRevoked(r.Context(), subject) {
+				state = "revoked"
+			}
+			if stateFilter != "" && state != stateFilter {
+				continue
+			}
+			statuses = append(statuses, certStatusFromCert(subject, certPEM, state, s.timeFormat()))
+		}
+	}
+
 	csrs, err := s.CA.Storage.ListCSRs(r.Context())
 	if err != nil {
 		slog.Error("list CSRs failed", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
-	}
-
-	statuses := make([]CertStatusResponse, 0, len(certs)+len(csrs))
-
-	seen := make(map[string]bool)
-	for _, subject := range certs {
-		seen[subject] = true
-		certPEM, err := s.CA.Storage.GetCert(r.Context(), subject)
-		if err != nil {
-			continue
-		}
-		state := "signed"
-		if s.CA.IsRevoked(r.Context(), subject) {
-			state = "revoked"
-		}
-		if stateFilter != "" && state != stateFilter {
-			continue
-		}
-		statuses = append(statuses, certStatusFromCert(subject, certPEM, state, s.timeFormat()))
 	}
 	for _, subject := range csrs {
 		if seen[subject] {

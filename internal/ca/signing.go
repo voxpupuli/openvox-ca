@@ -433,8 +433,23 @@ func (c *CA) issueLeafLocked(ctx context.Context, subject string, subjectName pk
 		return nil, fmt.Errorf("failed to save cert for %s: %w", subject, err)
 	}
 
+	// Denormalise the display projection for the certificate index from the
+	// certificate as actually signed (parsed back from the DER, not the
+	// template, so the recorded extensions are exactly what verifiers see).
+	// A parse failure here is unreachable for bytes CreateCertificate just
+	// produced; degrade to a projection-less record rather than failing the
+	// issuance.
+	var proj *storage.CertProjection
+	if signedCert, perr := x509.ParseCertificate(certBytes); perr == nil {
+		p := certProjectionFor(signedCert)
+		proj = &p
+	} else {
+		slog.Warn("Failed to parse just-signed certificate for index projection",
+			"subject", subject, "error", perr)
+	}
+
 	inventoryEntry := storage.FormatInventoryLine(serialStr, template.NotBefore, template.NotAfter, subject)
-	if err := c.Storage.AppendInventory(ctx, inventoryEntry); err != nil {
+	if err := c.Storage.AppendInventoryRecord(ctx, inventoryEntry, proj); err != nil {
 		// Roll back the cert so storage and inventory stay in sync. Log but don't
 		// propagate the cleanup error; the caller already has an error to handle.
 		if delErr := c.Storage.DeleteCert(ctx, subject); delErr != nil {

@@ -157,10 +157,55 @@ Most logical keys live in a key-value table, `puppet_ca_blobs`:
 
 Migrations are managed by [bun](https://bun.uptrace.dev/)'s migrator. On every
 start the backend runs any pending migrations and records applied versions in
-its own `bun_migrations` table; a `bun_migration_locks` table serialises
-concurrent runners so multiple replicas can start against the same database
-safely. Migrations are defined as Go functions, so one definition emits
-dialect-correct DDL across SQLite, PostgreSQL, and MySQL/MariaDB.
+its own `bun_migrations` table. Migrations are defined as Go functions, so one
+definition emits dialect-correct DDL across SQLite, PostgreSQL, and
+MySQL/MariaDB.
+
+bun does **not** serialise concurrent migration runners on its own. It creates a
+`bun_migration_locks` table and exposes `Migrator.Lock`/`Unlock`, but `Migrate`
+never calls them, and it records a migration as applied *before* running it. Two
+processes starting together — separate replicas, or the signer and frontend of
+one replica — will therefore both see a version as unapplied, both record it,
+and both run its DDL; the loser fails on work the winner already did, and the
+version stays recorded and is never retried. `EnsureReady` closes that hole with
+four measures:
+
+- It holds the backend's own distributed lock (`sql-schema-migrate`) across the
+  whole run, taken before any migration state is read.
+- It passes `WithMarkAppliedOnSuccess`, so a failed migration is retried on the
+  next start rather than remembered as done.
+- Each migration's DDL runs in a transaction where the dialect has transactional
+  DDL (PostgreSQL and SQLite), and every statement is idempotent, so MySQL —
+  which commits implicitly on each DDL statement — recovers by re-running.
+- The run gets its own timeout rather than the per-statement request timeout, so
+  a slow index build cannot be cut off part-way.
+
+SQLite has no distributed lock and falls back to a process-local mutex. Two
+processes sharing one file can still race there; the transactional, idempotent
+migrations mean the loser fails cleanly and succeeds on its next start rather
+than leaving the schema half-changed.
+
+#### Recovering a half-migrated schema
+
+A database migrated by a build without those measures can hold a version in
+`bun_migrations` whose DDL only partly ran — typically visible as a startup
+failure naming a column that does not exist, reported as an inventory integrity
+failure because the integrity check is the first thing to read the table.
+Confirm it by listing the table's columns and the recorded versions:
+
+```sql
+SELECT column_name FROM information_schema.columns
+ WHERE table_name = 'puppet_ca_inventory' ORDER BY ordinal_position;
+SELECT id, name, group_id, migrated_at FROM bun_migrations ORDER BY id;
+```
+
+Two rows for one version, recorded milliseconds apart, are the fingerprint of
+two runners having raced. To recover, stop every replica, delete the duplicate
+rows for the affected version, and start one replica: migrations are idempotent,
+so the run completes the missing DDL and leaves the already-applied statements
+alone. Applying the remaining DDL by hand and leaving the rows in place works
+equally well and is the safer choice on a large table, where the missing
+statement may be a long index build you would rather schedule.
 
 On MySQL/MariaDB, the first-run migration widens the `data` column to `LONGBLOB`
 (MySQL's default `BLOB` caps at 64 KiB, too small for large blobs such as the
@@ -178,6 +223,16 @@ indexed by subject:
 | `serial` | certificate serial (unique) |
 | `subject` | certificate subject (indexed) |
 | `not_before` / `not_after` | validity window, stored as the inventory.txt strings |
+| `fingerprint_sha256` | SHA-256 fingerprint; `NULL` means "no projection, read the PEM" |
+| `dns_alt_names` | subject alternative names, JSON array; `NULL` when empty |
+| `auth_extensions` | Puppet auth extensions, JSON object; `NULL` when empty |
+| `state` | `signed` or `revoked`, projected from the signed CRL (indexed) |
+| `revoked_at` | revocation time; `NULL` unless revoked |
+
+The last five columns make the table double as the certificate index; see
+[the inventory store](inventory-store.md) for what reads them and how a missing
+projection falls back to the stored PEM. `not_after` is indexed alongside
+`state` for consumers that have not landed yet (see the migration's own note).
 
 This turns appends and revocation lookups (`LatestSerialForSubject`) into
 single-row operations instead of scanning the whole inventory. Integrity uses a
