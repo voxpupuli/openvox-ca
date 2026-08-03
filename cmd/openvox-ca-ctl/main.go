@@ -531,6 +531,19 @@ func newImportCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("reading --cert-bundle: %w", err)
 			}
+			if privateKey == "" {
+				// The CA key may legitimately not exist as a file: with
+				// ca_key_provider set it lives in OpenBao Transit or a PKCS#11
+				// token and is never exportable. That case is served by
+				// "openvox-ca import-ca-cert", which reaches the configured
+				// provider and proves the certificate matches the key instead of
+				// being handed it. This command cannot: it addresses a local
+				// directory only.
+				return fmt.Errorf("--private-key is required by this command.\n\n" +
+					"If the CA key lives at a provider (ca_key_provider: openbao) there is no key file to " +
+					"supply — use 'openvox-ca import-ca-cert --cert-bundle <file>' instead, which reads the " +
+					"server configuration and reaches the key where it actually lives")
+			}
 			keyPEM, err := os.ReadFile(privateKey)
 			if err != nil {
 				return fmt.Errorf("reading --private-key: %w", err)
@@ -553,11 +566,10 @@ func newImportCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&caDir, "cadir", "", "CA storage directory")
 	cmd.Flags().StringVar(&certBundle, "cert-bundle", "", "Path to CA certificate PEM")
-	cmd.Flags().StringVar(&privateKey, "private-key", "", "Path to CA private key PEM")
+	cmd.Flags().StringVar(&privateKey, "private-key", "", "Path to CA private key PEM (required; see 'openvox-ca import-ca-cert' when the key lives at a provider)")
 	cmd.Flags().StringVar(&crlChain, "crl-chain", "", "Path to CRL PEM (optional; one will be generated if absent)")
 	_ = cmd.MarkFlagRequired("cadir")
 	_ = cmd.MarkFlagRequired("cert-bundle")
-	_ = cmd.MarkFlagRequired("private-key")
 	return cmd
 }
 

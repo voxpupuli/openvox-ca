@@ -50,7 +50,7 @@ func (c *CA) signCRLLocked(ctx context.Context, prevNumber *big.Int, revoked []x
 		Number:                    nextNum,
 		RevokedCertificateEntries: revoked,
 		ThisUpdate:                now,
-		NextUpdate:                now.Add(c.crlValidity()),
+		NextUpdate:                now.Add(c.CRLValidityDuration()),
 	}
 
 	crlBytes, err := x509.CreateRevocationList(rand.Reader, template, c.CACert, c.CAKey)
@@ -166,5 +166,5 @@ func (c *CA) RefreshCRLIfDue(ctx context.Context, refreshBefore time.Duration) (
 // its lifetime), leaving ample margin to ride out replica outages before the
 // CRL would lapse.
 func (c *CA) DefaultCRLRefreshBefore() time.Duration {
-	return c.crlValidity() / 3
+	return c.CRLValidityDuration() / 3
 }

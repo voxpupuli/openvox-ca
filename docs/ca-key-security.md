@@ -78,6 +78,14 @@ ever supplants key custody, never CSR/certificate/CRL/inventory storage. See
 [OpenBao Transit-engine CA key](openbao-transit.md) for full configuration
 reference and setup instructions.
 
+Whatever holds the key, the CA can run as an intermediate under an external root
+rather than as its own root: `openvox-ca csr` emits a signing request bound to
+the key the configured provider holds, and `openvox-ca import-ca-cert` installs
+the chain the parent signs. No key material is passed on the command line at any
+point, which is what lets the same procedure work for a Transit key that never
+leaves the vault. See [offline subcommands on the server
+binary](operator-cli.md#offline-subcommands-on-the-server-binary).
+
 This integration is built and tested against OpenBao specifically, against current
 OpenBao releases. It should also work against HashiCorp Vault, since Vault's Transit
 engine, AppRole/Kubernetes auth methods, and Go client API are what OpenBao forked from

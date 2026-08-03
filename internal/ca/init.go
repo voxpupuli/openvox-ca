@@ -24,7 +24,6 @@ import (
 	"crypto"
 	"crypto/rand"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -104,22 +103,54 @@ func (c *CA) Init(ctx context.Context) error {
 		if errCert != nil {
 			return fmt.Errorf("checking CA cert: %w", errCert)
 		}
-		hasKey, errKey := c.hasCAKey(ctx)
+		hasKey, errKey := c.HasCAKey(ctx)
 		if errKey != nil {
 			return fmt.Errorf("checking CA key: %w", errKey)
 		}
-		// Fail closed when a KeyProvider already holds a key but the CA
-		// certificate is missing (the DR case: storage/cert wiped while the
-		// provider's key persists). bootstrapCA would call KeyProvider.Generate
-		// on that populated slot, and a provider implementing Generate as
-		// create-or-rotate would silently rotate the live CA key — destroying
-		// the ability to verify every previously issued certificate. Refuse
-		// with guidance rather than regenerate. (Only for KeyProvider mode:
-		// the local-file bootstrap path keeps its long-standing behaviour.)
-		if c.KeyProvider != nil && !hasCert && hasKey {
-			return fmt.Errorf("CA key provider already holds a key but the CA certificate is missing from storage: "+
-				"refusing to bootstrap, as that would rotate the existing CA key and invalidate all previously issued "+
-				"certificates. Restore the CA certificate, or remove the orphaned provider key before bootstrapping: %w", loadErr)
+		// Fail closed when a CA key already exists but the certificate does
+		// not. Two situations produce that state and bootstrapping ruins both:
+		//
+		//   - Disaster recovery: storage or the certificate was wiped while the
+		//     key persists. bootstrapCA would call KeyProvider.Generate on a
+		//     populated slot, and a provider implementing that as
+		//     create-or-rotate would silently rotate the live CA key, destroying
+		//     the ability to verify every previously issued certificate.
+		//   - An outstanding external signing request from
+		//     "openvox-ca csr --create-key": regenerating destroys the key the
+		//     parent CA is in the middle of certifying, and the signed chain
+		//     that comes back can then never be imported.
+		//
+		// The local-key path is included deliberately. It used to bootstrap over
+		// an orphaned key, which is harmless after a half-finished bootstrap and
+		// unrecoverable mid-request — and the two are indistinguishable from
+		// here. The harmless case costs the operator one deletion.
+		if !hasCert && hasKey {
+			where := "in storage"
+			if c.KeyProvider != nil {
+				where = "at the configured key provider"
+			}
+			return fmt.Errorf("a CA key already exists %s but the CA certificate is missing: refusing to "+
+				"bootstrap, as that would replace the key and invalidate every certificate issued under it. "+
+				"If a certificate signing request is outstanding, install the signed chain with "+
+				"'openvox-ca import-ca-cert'; otherwise restore the CA certificate, or remove the orphaned "+
+				"key (see the storage backends guide for how, per backend) to bootstrap afresh: %w",
+				where, loadErr)
+		}
+		// The mirror case, and the argument for refusing is the same one. A
+		// certificate with no key cannot sign anything, so bootstrapping does
+		// not recover the CA — it discards the certificate every already-issued
+		// certificate is verified against, and replaces it with one for a key
+		// nobody has seen. Losing the key is the disaster; overwriting the only
+		// record of what the CA was is not the remedy for it.
+		if hasCert && !hasKey {
+			where := "in storage"
+			if c.KeyProvider != nil {
+				where = "at the configured key provider"
+			}
+			return fmt.Errorf("a CA certificate exists but its key is missing %s: refusing to bootstrap, "+
+				"as that would discard the certificate every certificate issued so far is verified against. "+
+				"Restore the key, or remove the CA certificate to bootstrap afresh — which retires this CA "+
+				"and requires every agent to be re-enrolled: %w", where, loadErr)
 		}
 		if !hasCert || !hasKey {
 			slog.Info("No existing CA found, bootstrapping new CA")
@@ -177,7 +208,7 @@ func (c *CA) seedSupportingState(ctx context.Context) error {
 		crlTemplate := &x509.RevocationList{
 			Number:     big.NewInt(1),
 			ThisUpdate: now,
-			NextUpdate: now.Add(c.crlValidity()),
+			NextUpdate: now.Add(c.CRLValidityDuration()),
 		}
 		crlBytes, err := x509.CreateRevocationList(rand.Reader, crlTemplate, c.CACert, c.CAKey)
 		if err != nil {
@@ -348,25 +379,10 @@ func (c *CA) bootstrapCA(ctx context.Context) error {
 		return fmt.Errorf("failed to compute SubjectKeyIdentifier: %w", err)
 	}
 
-	// Build subject DN.
-	subject := pkix.Name{
-		CommonName: "Puppet CA: " + hostname,
-	}
-	if c.CASubject.Org != "" {
-		subject.Organization = []string{c.CASubject.Org}
-	}
-	if c.CASubject.OrgUnit != "" {
-		subject.OrganizationalUnit = []string{c.CASubject.OrgUnit}
-	}
-	if c.CASubject.Country != "" {
-		subject.Country = []string{c.CASubject.Country}
-	}
-	if c.CASubject.Locality != "" {
-		subject.Locality = []string{c.CASubject.Locality}
-	}
-	if c.CASubject.Province != "" {
-		subject.Province = []string{c.CASubject.Province}
-	}
+	// Build subject DN. Shared with the CSR path (see CASubjectName) so a
+	// self-signed bootstrap and a request sent to an external parent can never
+	// disagree about this CA's own name.
+	subject := CASubjectName(hostname, c.CASubject)
 
 	now := time.Now().UTC()
 
@@ -410,26 +426,9 @@ func (c *CA) bootstrapCA(ctx context.Context) error {
 	// lives at its provider (e.g. an OpenBao Transit key) and there is no
 	// local blob to write or encrypt.
 	if c.KeyProvider == nil {
-		var keyPEM []byte
-		if c.EncryptCAKey {
-			passphrase, autoGenerated, err := resolvePassphrase(c.KeyPassphrase, c.Storage.CADir())
-			if err != nil {
-				return fmt.Errorf("resolving CA key passphrase: %w", err)
-			}
-			keyPEM, err = encryptAndMarshalKey(key, passphrase)
-			if err != nil {
-				return fmt.Errorf("encrypting CA key: %w", err)
-			}
-			if autoGenerated {
-				slog.Info("CA key passphrase auto-generated",
-					"path", autoPassphrasePath(c.Storage.CADir()))
-			}
-			slog.Info("CA private key encrypted at rest")
-		} else {
-			keyPEM, err = marshalPrivateKeyPEM(key)
-			if err != nil {
-				return fmt.Errorf("failed to marshal CA key: %w", err)
-			}
+		keyPEM, err := c.marshalCAKeyForStorage(key)
+		if err != nil {
+			return err
 		}
 		if err := c.Storage.SaveCAKey(ctx, keyPEM); err != nil {
 			return fmt.Errorf("failed to write CA key: %w", err)
@@ -453,7 +452,7 @@ func (c *CA) bootstrapCA(ctx context.Context) error {
 	crlTemplate := &x509.RevocationList{
 		Number:     big.NewInt(1),
 		ThisUpdate: now,
-		NextUpdate: now.Add(c.crlValidity()),
+		NextUpdate: now.Add(c.CRLValidityDuration()),
 	}
 	crlBytes, err := x509.CreateRevocationList(rand.Reader, crlTemplate, c.CACert, c.CAKey)
 	if err != nil {

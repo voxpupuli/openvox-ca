@@ -428,6 +428,17 @@ ca_key_file:  /etc/puppet-ca/secrets/ca_key.pem
 
 - On **first start** with no existing CA, `openvox-ca` bootstraps a new CA
   and writes the cert/key to the configured local paths (not the backend).
+- A populated `ca_key_file` with **no** CA certificate is refused rather than
+  bootstrapped over. That state is what `openvox-ca csr --create-key` leaves
+  behind while a parent signs the request, and also what a partial restore or an
+  interrupted bootstrap looks like; overwriting the key would orphan every
+  certificate issued under it, and would destroy the key an outstanding signing
+  request is bound to. The startup error names the three ways out: install the
+  signed chain with `openvox-ca import-ca-cert`, restore the certificate, or
+  remove the orphaned key. See
+  [offline subcommands on the server binary](operator-cli.md#offline-subcommands-on-the-server-binary),
+  and [removing an orphaned CA key](#removing-an-orphaned-ca-key) below for how
+  to do the last of those on each backend.
 - On subsequent starts, the cert and key are loaded from the local paths.
 - `openvox-ca` writes the cert at mode `0644` and the key at mode `0600`
   atomically (temp-file + rename). If you supply pre-existing files, they are
@@ -440,6 +451,60 @@ This override also works with the filesystem backend, e.g. to pull the CA
 key out of the cadir tree and onto a separately-mounted volume.
 
 ---
+
+### Removing an orphaned CA key
+
+A CA key with no CA certificate makes the server refuse to start, deliberately —
+see [Behaviour](#behaviour) above. If the key really is orphaned (no signing
+request is outstanding and no certificate is coming), removing it lets the CA
+bootstrap afresh. **This retires the CA:** every certificate already issued
+stops verifying, and every agent must be re-enrolled. There is no
+`openvox-ca-ctl` command for it precisely because it is not an operation to
+perform casually. Take a backup and stop the CA first.
+
+Where the key lives depends on the backend. Note the physical names differ from
+the logical key `ca_key`:
+
+| Backend | Where the key is | How to remove it |
+| --- | --- | --- |
+| `filesystem` (default) | `private/ca_key.pem` under the cadir | `rm` the file |
+| `ca_key_file` overlay | the configured path | `rm` the file |
+| `sqlite`, `postgres`, `mysql` | table `puppet_ca_blobs`, column `blob_key`, value `ca_key` | `DELETE FROM puppet_ca_blobs WHERE blob_key = 'ca_key';` |
+| `etcd` | `<prefix>/ca/key` | `etcdctl del <prefix>/ca/key` |
+| `redis` / `valkey` | `<prefix>:ca:key` | `redis-cli DEL <prefix>:ca:key` |
+
+The column is `blob_key` rather than `key` because `KEY` is reserved in
+MySQL/MariaDB. The etcd and Redis paths are `ca/key` and `ca:key`, not `ca_key` —
+and both `etcdctl del` and `redis-cli DEL` exit successfully having deleted
+nothing when the name is wrong, so check the reported count. A zero means you
+have the wrong name, not that the problem is solved. Do not reach for
+`del --prefix` to compensate: that removes the whole CA.
+
+#### With the CA key at a provider
+
+`ca_key_provider: openbao` puts the key in a Transit engine rather than a
+storage backend, and `hasCAKey` asks the provider directly — so a populated
+Transit slot counts as present however empty the backend is. Three routes exist
+for abandoning a half-finished sub-CA, and only the first two are cheap:
+
+1. **Finish the round trip.** Have the parent sign the outstanding request and
+   install it with `openvox-ca import-ca-cert`. This is the intended path and
+   costs nothing.
+2. **Have any CA you control sign the outstanding request.** `openvox-ca csr`
+   emits a PKCS#10 request bound to the Transit key; a throwaway root made with
+   `openssl` or `bao pki` can sign it, and `import-ca-cert` accepts the result
+   (a lone self-signed CA is a valid bundle). This satisfies the startup check
+   without touching the key. Note that *self*-signing a certificate for a
+   non-exportable Transit key is not one of the options: it would mean signing a
+   TBSCertificate with the Transit key and assembling the DER by hand, and
+   neither `openvox-ca` nor `openvox-ca-ctl` will do that.
+3. **Delete the Transit key**, which requires `deletion_allowed` on it, and let
+   the CA bootstrap afresh. Irreversible, and it retires the CA as above.
+
+Deleting the *CA certificate* and keeping the key is **not** a route: that is
+exactly the state the startup refusal exists for, so the server will not
+bootstrap over it. It leaves you with less to recover from and no closer to a
+working CA.
 
 ## Migrating between backends
 

@@ -249,3 +249,105 @@ func GenerateCSR(commonName string) ([]byte, error) {
 
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrBytes}), nil
 }
+
+// TestChain is a two-level PKI for exercising intermediate-CA behaviour: a
+// self-signed root, an intermediate it issued, and a leaf issued by that
+// intermediate. Certificates are ECDSA P-256 for speed — these fixtures are
+// built per-spec, and RSA key generation dominates the runtime otherwise.
+//
+// Bundle is the intermediate and root concatenated in the order openvox-ca
+// stores them (nearest first, root last), which is what a valid CA bundle
+// looks like on the way in.
+type TestChain struct {
+	RootCert    *x509.Certificate
+	RootKey     crypto.Signer
+	RootPEM     []byte
+	InterPEM    []byte
+	InterKeyPEM []byte
+	LeafPEM     []byte
+	Bundle      []byte
+}
+
+// GenerateTestChain builds a root -> intermediate -> leaf chain. leafCN names
+// the leaf; the CA subjects are fixed so tests can assert against them.
+func GenerateTestChain(leafCN string) (*TestChain, error) {
+	root, rootKey, rootPEM, err := issueTestCert("Test Root CA", nil, nil, true)
+	if err != nil {
+		return nil, err
+	}
+	inter, interKey, interPEM, err := issueTestCert("Test Intermediate CA", root, rootKey, true)
+	if err != nil {
+		return nil, err
+	}
+	_, _, leafPEM, err := issueTestCert(leafCN, inter, interKey, false)
+	if err != nil {
+		return nil, err
+	}
+
+	interKeyDER, err := x509.MarshalPKCS8PrivateKey(interKey)
+	if err != nil {
+		return nil, err
+	}
+
+	return &TestChain{
+		RootCert:    root,
+		RootKey:     rootKey,
+		RootPEM:     rootPEM,
+		InterPEM:    interPEM,
+		InterKeyPEM: pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: interKeyDER}),
+		LeafPEM:     leafPEM,
+		Bundle:      append(append([]byte{}, interPEM...), rootPEM...),
+	}, nil
+}
+
+// issueTestCert creates one certificate, self-signed when parent is nil.
+func issueTestCert(cn string, parent *x509.Certificate, parentKey crypto.Signer, isCA bool) (*x509.Certificate, crypto.Signer, []byte, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	serialLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serial, err := rand.Int(rand.Reader, serialLimit)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	pubDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	skid := sha1.Sum(pubDER)
+
+	template := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: cn},
+		NotBefore:             time.Now().Add(-1 * time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		BasicConstraintsValid: true,
+		IsCA:                  isCA,
+		SubjectKeyId:          skid[:],
+	}
+	if isCA {
+		template.KeyUsage = x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature
+	} else {
+		template.KeyUsage = x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment
+		template.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}
+		template.DNSNames = []string{cn}
+	}
+
+	signerCert, signerKey := template, crypto.Signer(key)
+	if parent != nil {
+		signerCert, signerKey = parent, parentKey
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, template, signerCert, &key.PublicKey, signerKey)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return cert, key, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), nil
+}

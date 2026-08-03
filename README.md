@@ -35,6 +35,7 @@ wire-compatible with your existing Puppet/OpenVox fleet.
 - **Autosigning:** `true`, glob-pattern file, or executable plugin modes
 - **mTLS support:** optional HTTPS with per-endpoint tier-based client certificate authorization
 - **CA import:** replace a bootstrapped CA with an external cert/key pair offline
+- **Intermediate CA:** run under an external root, with `openvox-ca csr` emitting a signing request for a parent CA and `openvox-ca import-ca-cert` installing the signed chain. No key material is ever supplied on the command line, so it works identically for every `ca_key_provider` including an OpenBao Transit key that never leaves the vault. See the [operator CLI reference](docs/operator-cli.md)
 - **Server-side key generation:** issue cert+key pairs without a node-submitted CSR; configurable RSA (2048/3072/4096) or ECDSA (P-256/P-384/P-521)
 - **Configurable key algorithms:** CA and leaf certificates can use RSA or ECDSA; ECDSA support for both bootstrapped CAs and generated leaf certs
 - **Random serial numbers:** every issued leaf certificate gets a cryptographically random 128-bit serial (CA/Browser Forum guidance)
@@ -112,7 +113,7 @@ The complete flag, environment-variable, and config-file reference is in
 | --- | --- |
 | [Configuring the server](docs/configuration.md) | Every flag, environment variable, config-file key; autosigning; directory layout; graceful shutdown |
 | [HTTP API reference](docs/api.md) | All endpoints, authorization tiers, and admin credential resolution |
-| [Operator CLI (`openvox-ca-ctl`)](docs/operator-cli.md) | The `openvox-ca-ctl` command reference |
+| [Operator CLI (`openvox-ca-ctl`)](docs/operator-cli.md) | The `openvox-ca-ctl` command reference, and the offline `openvox-ca` subcommands (`csr`, `import-ca-cert`) that run against the server's own configuration |
 | [Storage backends](docs/storage-backends.md) | filesystem, SQLite, PostgreSQL, MySQL, etcd, Redis/Valkey; migrating between them |
 | [CA key security](docs/ca-key-security.md) | Key encryption at rest, key-custody options, PKCS#11 plans, destructive-op monitoring |
 | [OpenBao Transit-engine CA key](docs/openbao-transit.md) | Delegating CA key custody to OpenBao |

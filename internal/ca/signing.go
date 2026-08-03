@@ -47,9 +47,13 @@ const (
 	CRLValidity = 30 * 24 * time.Hour
 )
 
-// crlValidity returns the CA's configured CRL validity period.
+// CRLValidityDuration returns the CA's configured CRL validity period.
 // When CRLValidityDays is zero the package-level CRLValidity default is used.
-func (c *CA) crlValidity() time.Duration {
+//
+// Exported because offline commands re-sign a CRL outside the CA's own signing
+// paths and must use the same window; duplicating the defaulting rule there is
+// how the two quietly diverge.
+func (c *CA) CRLValidityDuration() time.Duration {
 	if c.CRLValidityDays > 0 {
 		return time.Duration(c.CRLValidityDays) * 24 * time.Hour
 	}

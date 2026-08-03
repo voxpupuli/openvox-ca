@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"sync"
 	"sync/atomic"
 
@@ -37,6 +38,37 @@ type CASubjectConfig struct {
 	Country  string
 	Locality string
 	Province string
+}
+
+// CASubjectName builds the X.509 subject DN for this CA's own certificate.
+//
+// It is exported and used from two places that MUST agree: bootstrapCA, which
+// self-signs a certificate carrying this DN, and the certificate signing
+// request emitted for an external parent to sign. A CSR whose subject differs
+// from the DN the CA would otherwise use produces an intermediate certificate
+// issued for the wrong name — discovered only after a third party has signed
+// it, which is expensive to undo. Keeping one builder makes the two
+// structurally incapable of disagreeing.
+func CASubjectName(hostname string, cfg CASubjectConfig) pkix.Name {
+	subject := pkix.Name{
+		CommonName: "Puppet CA: " + hostname,
+	}
+	if cfg.Org != "" {
+		subject.Organization = []string{cfg.Org}
+	}
+	if cfg.OrgUnit != "" {
+		subject.OrganizationalUnit = []string{cfg.OrgUnit}
+	}
+	if cfg.Country != "" {
+		subject.Country = []string{cfg.Country}
+	}
+	if cfg.Locality != "" {
+		subject.Locality = []string{cfg.Locality}
+	}
+	if cfg.Province != "" {
+		subject.Province = []string{cfg.Province}
+	}
+	return subject
 }
 
 type CA struct {

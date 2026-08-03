@@ -20,65 +20,12 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
-
-// serverEnvVars is the full list of env vars read by applyServerEnv.
-var serverEnvVars = []string{
-	"PUPPET_CA_CADIR",
-	"PUPPET_CA_AUTOSIGN_CONFIG",
-	"PUPPET_CA_HOST",
-	"PUPPET_CA_PORT",
-	"PUPPET_CA_HOSTNAME",
-	"PUPPET_CA_VERBOSITY",
-	"PUPPET_CA_LOGFILE",
-	"PUPPET_CA_TLS_CERT",
-	"PUPPET_CA_TLS_KEY",
-	"PUPPET_CA_PUPPET_SERVER",
-	"PUPPET_CA_PUPPET_SERVER_FILE",
-	"PUPPET_CA_NO_PP_CLI_AUTH",
-	"PUPPET_CA_NO_TLS_REQUIRED",
-	"PUPPET_CA_OCSP_URL",
-	"PUPPET_CA_CA_KEY_ALGO",
-	"PUPPET_CA_CA_KEY_SIZE",
-	"PUPPET_CA_LEAF_KEY_ALGO",
-	"PUPPET_CA_LEAF_KEY_SIZE",
-	"PUPPET_CA_CA_SUBJECT_ORG",
-	"PUPPET_CA_CA_SUBJECT_OU",
-	"PUPPET_CA_CA_SUBJECT_COUNTRY",
-	"PUPPET_CA_CA_SUBJECT_LOCALITY",
-	"PUPPET_CA_CA_SUBJECT_PROVINCE",
-	"PUPPET_CA_CA_PATH_LENGTH",
-	"PUPPET_CA_CA_VALIDITY_DAYS",
-	"PUPPET_CA_LEAF_VALIDITY_DAYS",
-	"PUPPET_CA_SHUTDOWN_TIMEOUT_SEC",
-	"PUPPET_CA_DISABLE_CRL_REFRESH",
-	"PUPPET_CA_CRL_REFRESH_INTERVAL_SEC",
-	"PUPPET_CA_CRL_REFRESH_BEFORE_SEC",
-	"PUPPET_CA_REVOKE_ON_AUTO_RENEW",
-	"PUPPET_CA_ENABLE_EXPIRED_CERT_CLEANUP",
-	"PUPPET_CA_EXPIRED_CERT_RETENTION_SEC",
-	"PUPPET_CA_EXPIRED_CERT_CLEANUP_INTERVAL_SEC",
-	"PUPPET_CA_CA_KEY_PROVIDER",
-	"PUPPET_CA_OPENBAO_ADDR",
-	"PUPPET_CA_OPENBAO_TRANSIT_MOUNT",
-	"PUPPET_CA_OPENBAO_KEY_NAME",
-	"PUPPET_CA_OPENBAO_TLS_CA_FILE",
-	"PUPPET_CA_OPENBAO_TLS_CERT_FILE",
-	"PUPPET_CA_OPENBAO_TLS_KEY_FILE",
-	"PUPPET_CA_OPENBAO_AUTH_METHOD",
-	"PUPPET_CA_OPENBAO_APPROLE_MOUNT",
-	"PUPPET_CA_OPENBAO_APPROLE_ROLE_ID",
-	"PUPPET_CA_OPENBAO_APPROLE_ROLE_ID_FILE",
-	"PUPPET_CA_OPENBAO_APPROLE_SECRET_ID_FILE",
-	"PUPPET_CA_OPENBAO_TOKEN_FILE",
-	"PUPPET_CA_OPENBAO_KUBERNETES_MOUNT",
-	"PUPPET_CA_OPENBAO_KUBERNETES_ROLE",
-	"PUPPET_CA_OPENBAO_KUBERNETES_JWT_FILE",
-}
 
 // setEnv sets an environment variable for the duration of the current spec,
 // saving the prior value and restoring it via DeferCleanup. Go's t.Setenv is
@@ -97,10 +44,30 @@ func setEnv(key, value string) {
 	Expect(os.Setenv(key, value)).To(Succeed())
 }
 
-// clearServerEnv unsets all PUPPET_CA_* vars and restores them after the spec.
+// clearServerEnv unsets every PUPPET_CA_* var and restores them after the spec.
+//
+// Enumerated from the live environment rather than from serverEnvVars, which is
+// a hand-written list and had fallen well short of the ~90 the server actually
+// reads. The gap mattered once specs began driving whole commands through
+// resolveRuntime: PUPPET_CA_STORAGE_BACKEND or PUPPET_CA_SQL_DSN exported on a
+// developer box would silently point them at a real database instead of the
+// --cadir filesystem backend, and PUPPET_CA_ENCRYPT_CA_KEY would make the
+// "encrypts the created key at rest when configured" spec pass without its
+// config file doing anything — a test that can no longer fail. Reading the
+// environment cannot drift from what the server reads.
 func clearServerEnv() {
 	GinkgoHelper()
-	for _, key := range serverEnvVars {
+	for _, entry := range os.Environ() {
+		key, _, found := strings.Cut(entry, "=")
+		if !found || !strings.HasPrefix(key, "PUPPET_CA_") {
+			continue
+		}
+		// PUPPET_CA_CONFIG is the pin, not ambient state: callers set it to a
+		// fixture config immediately before calling this, and clearing it would
+		// send them to the host's /etc/puppet-ca/config.yaml instead.
+		if key == "PUPPET_CA_CONFIG" {
+			continue
+		}
 		setEnv(key, "") // empty string is treated as unset by applyServerEnv
 	}
 }
