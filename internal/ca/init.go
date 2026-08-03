@@ -494,6 +494,12 @@ func (c *CA) loadCRLCache(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("reading CRL: %w", err)
 	}
+	// Block 0 is parsed on its own, and is the only part whose failure is fatal.
+	// Decoding the whole blob here would make a single corrupt trailing block
+	// abort startup — which is both harsher than this function's own policy for
+	// a strictly worse condition (a foreign block 0, warned about below) and
+	// unnecessary: the cache answers from block 0, and handleGetCRL streams the
+	// blob without parsing it, so a malformed ancestor block affects neither.
 	block, _ := pem.Decode(crlPEM)
 	if block == nil {
 		return fmt.Errorf("CRL is empty or not PEM-encoded")
@@ -502,6 +508,60 @@ func (c *CA) loadCRLCache(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("parsing CRL: %w", err)
 	}
+
+	// The cache answers "did we revoke this serial", so it must hold our own
+	// CRL. Block 0 is ours by construction — signCRLLocked writes it first and
+	// import reorders to match — but a hand-assembled blob could put an
+	// ancestor's CRL there, and checking revocation against an ancestor's list
+	// would let a certificate this CA revoked go on authenticating.
+	//
+	// A warning rather than a hard failure: refusing to start leaves the CA
+	// entirely unavailable, where continuing gives a running CA with a loud,
+	// actionable message. The write path (readStoredCRL) does fail closed,
+	// because re-signing over an ancestor's CRL destroys it.
+	//
+	// The remedy offered is a re-import. 'openvox-ca-ctl reissue-crl' is
+	// deliberately not suggested: it reaches readStoredCRL and fails closed on
+	// this very condition, so it would send the operator to a command that
+	// returns 500 without surfacing why.
+	if !c.ownsCRL(crl) {
+		slog.Warn("Stored CRL does not lead with this CA's own CRL; revocation checks may be using the wrong list. "+
+			"Re-import the CRL chain with this CA's own CRL first",
+			"crl_authority_key_id", fmt.Sprintf("%x", crl.AuthorityKeyId),
+			"ca_subject_key_id", fmt.Sprintf("%x", c.CACert.SubjectKeyId))
+
+		// Search the rest of the chain for the block this CA actually signed,
+		// rather than answering revocation questions from an ancestor's list —
+		// which contains none of our serials, so every certificate we revoked
+		// would authenticate.
+		//
+		// When the chain holds no block of ours at all there is nothing better
+		// to cache, so the foreign block stays: the same outcome as an empty
+		// CRL, and the deliberate availability trade-off described above. A
+		// chain that will not decode is treated the same way — the warning
+		// stands, and startup continues.
+		if chain, decodeErr := decodeCRLChain(crlPEM); decodeErr == nil {
+			if ours := ownCRLIn(chain, c.CACert); ours != nil {
+				slog.Warn("Using this CA's own CRL found later in the stored chain",
+					"position", indexOfCRL(chain, ours))
+				crl = ours
+			}
+		} else {
+			slog.Warn("Could not decode the stored CRL chain to look for this CA's own block; "+
+				"continuing with block 0", "error", decodeErr)
+		}
+	}
+
 	c.cachedCRL = crl
 	return nil
+}
+
+// indexOfCRL returns the position of crl in chain, for diagnostics.
+func indexOfCRL(chain []*x509.RevocationList, crl *x509.RevocationList) int {
+	for i, candidate := range chain {
+		if candidate == crl {
+			return i
+		}
+	}
+	return -1
 }

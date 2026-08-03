@@ -496,7 +496,16 @@ func (c *CA) Clean(ctx context.Context, subject string) error {
 				defer c.mu.Unlock()
 				return c.revokeLocked(ctx, subject)
 			}); err != nil {
-				slog.Warn("Clean: revoke failed (proceeding with delete)", "subject", subject, "error", err)
+				// Deliberately not fatal: clean's job is to remove the
+				// certificate. But say what that leaves behind — the
+				// certificate is gone from storage while still unrevoked, so
+				// it remains a valid credential until it expires. A foreign
+				// stored CRL now reaches here (readStoredCRL refuses to
+				// re-sign a list this CA did not issue), which is a newly
+				// reachable way into this state and is fixed by restarting
+				// the replica that holds the stale CA certificate.
+				slog.Warn("Clean: revoke failed, deleting the certificate anyway; it stays a valid "+
+					"credential until it expires", "subject", subject, "error", err)
 			}
 			if err := c.Storage.DeleteCert(ctx, subject); err != nil {
 				slog.Warn("Clean: delete cert failed", "subject", subject, "error", err)

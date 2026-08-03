@@ -5,7 +5,12 @@ alerting rules for the openvox-ca exporter. It alerts on:
 
 - the exporter being down or unable to read CA state, and the CA not being ready;
 - the **CA certificate** nearing expiry (warning) or expiring imminently (critical);
-- the **CRL** approaching its `NextUpdate` (warning) or having lapsed (critical);
+- the **CRL** approaching its `NextUpdate` (warning) or having lapsed (critical).
+  This covers **this CA's own CRL only** — block 0 of the stored blob. When a CRL
+  chain has been imported, the ancestor CRLs that follow it are not tracked by any
+  series, so they can lapse while these alerts stay green: the background
+  refresher keeps block 0 fresh regardless. Ancestor `nextUpdate` deadlines need
+  tracking out of band;
 - **leaf certificates** nearing/at expiry — excluding revoked ones — and
   certificate **requests that stay pending** too long;
 - **CRL update failures** — the CA failing to amend its CRL (a revocation it

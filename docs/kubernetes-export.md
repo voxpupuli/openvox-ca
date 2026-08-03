@@ -86,7 +86,7 @@ kubernetes_export:
 | `cert` | both | `false` | Include the CA certificate |
 | `crl` | both | `false` | Include the CRL (at least one of `cert`/`crl` must be true) |
 | `cert_key` | both | `ca.crt` | Data key for the cert |
-| `crl_key` | both | `ca.crl` | Data key for the CRL (must differ from `cert_key`) |
+| `crl_key` | both | `ca.crl` | Data key for the CRL. Carries the whole stored chain — this CA's own CRL first, then every ancestor's — when a chain has been imported, matching what `GET /certificate_revocation_list/ca` serves. Consumers expecting exactly one CRL need to handle a multi-block PEM (must differ from `cert_key`) |
 | `type` | Secret | unmanaged | Secret `type` field; unset means the exporter does not own it (see below); rejected on ConfigMaps |
 
 ### Secret type

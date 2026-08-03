@@ -76,7 +76,105 @@ openvox-ca-ctl import \
 echo "CA imported into $NEW_CADIR"
 ```
 
-This creates the directory structure, writes the CA cert/key/CRL, and
+`--crl-chain` accepts a multi-CRL bundle in any order. Every `X509 CRL` block must
+parse, or the whole import is refused; PEM blocks of other types are ignored and
+are not stored, because the blob is served
+to every agent and Puppet's default `certificate_revocation = chain` makes an
+agent parse all of it.
+
+This CA's own CRL is moved to the front, since every reader takes the first
+block as ours, and every other CRL is preserved through subsequent re-signing —
+so `certificate_revocation = chain` keeps working after a revocation or a CRL
+refresh. Which CRL is "ours" is decided by verifying the signature against this
+CA's certificate, not by comparing issuer names or key identifiers: a CRL from
+`openssl ca -gencrl` carries no Authority Key Identifier under the stock
+`openssl.cnf`, and a shared root can issue two sub-CAs with the same name. If
+the bundle contains no CRL signed by this CA, the one already in storage is kept
+at the front, and only if there is none is an empty CRL generated. That makes
+re-running the import with a newer ancestor bundle the way to refresh ancestor
+CRLs today, without exporting and concatenating your own first.
+
+Some limits worth knowing before you rely on re-import as a refresh mechanism.
+
+**The bundle replaces the stored ancestor set wholesale.** Only *this CA's own*
+CRL is recovered from storage; ancestors are taken solely from what you supply.
+So a refresh bundle must contain **every** ancestor CRL, not just the one that
+changed — supplying a new root CRL alone drops the intermediate's, which is
+exactly the loss this preservation exists to prevent. (Re-*signing* preserves
+ancestors; importing replaces them. The two paths differ deliberately: the file
+you hand to `import` is authoritative.)
+
+**Ancestor CRLs age in place.** This CA cannot re-sign another CA's list, so
+whatever was imported stays until something replaces it, and it must be replaced
+before its own `nextUpdate` lapses. Nothing alerts on this — see
+[the metrics reference](metrics.md#crl) — so track those deadlines out of band.
+
+**`import` writes to a local filesystem directory only.** It takes `--cadir` and
+constructs filesystem storage directly; unlike `migrate` it has no
+`--source-config`/`--dest-config`. If your CA runs on **sqlite, postgres, mysql,
+etcd or redis**, re-importing writes to a directory the server never reads,
+prints `CA imported into <dir>`, and changes nothing — the live chain expires
+anyway. (SQLite is in that list: it keeps the CRL in its database file, so a
+cadir-based import misses it exactly as a networked backend does. See
+[storage backends](storage-backends.md).)
+
+On those backends the refresh is a round trip with the CA stopped, and the
+return leg needs `--force` because the destination still holds a CA
+certificate. **Back up the destination first** — `migrate` is not
+transactional, and the write-back covers the cert, key, inventory, inventory
+HMAC and every signed certificate in order to refresh one PEM blob:
+
+`scratch.yaml` must describe a **filesystem** backend whose `cadir` is the same
+directory the middle step passes to `--cadir`. `migrate` resolves its destination
+from that file; `import` resolves its own from the flag. If the two disagree,
+all three commands exit 0 and print success while the middle step writes
+somewhere the third never reads — the same silent no-op described above,
+reintroduced inside the workaround for it. Use a **fresh, empty** scratch directory
+every time — `mktemp -d` — because `migrate` copies and never deletes: anything
+left from a previous run is pushed back into the live backend on the return leg,
+including signed certificates that have since been cleaned, which reappear with
+no inventory row and are then invisible to the expiry cleanup. Remove the
+directory afterwards; it holds a plaintext copy of the CA key.
+
+```bash
+# scratch.yaml: storage_backend: filesystem, cadir: /tmp/scratch
+openvox-ca-ctl migrate --source-config live.yaml --dest-config scratch.yaml
+
+# --cert-bundle and --private-key are the copies the first leg just wrote there.
+openvox-ca-ctl import --cadir /tmp/scratch \
+  --cert-bundle /tmp/scratch/ca_crt.pem \
+  --private-key /tmp/scratch/private/ca_key.pem \
+  --crl-chain refreshed-chain.pem
+
+openvox-ca-ctl migrate --source-config scratch.yaml --dest-config live.yaml --force
+```
+
+On the **filesystem** backend `import` does write where the server reads, but
+stop the CA anyway: `import` takes the CRL lock, and that lock is only
+cross-process on backends that implement one — filesystem and sqlite both fall
+back to a mutex inside each process.
+
+**Re-import rewrites the CA key, so two custody modes cannot use it.** `import`
+writes whatever `--private-key` holds, and offers no encryption flags. Under
+`encrypt_ca_key` the stored key is an `ENCRYPTED PRIVATE KEY` block that
+`import` cannot parse, so feeding it back fails — and feeding the original
+plaintext key instead succeeds while silently replacing the encrypted at-rest
+key with a plaintext one, because key loading accepts both forms and nothing
+warns. Under `ca_key_provider: openbao` there is no exportable key at all, so
+re-import is unavailable outright. Neither mode has another ancestor-refresh
+mechanism today.
+
+**An older replica still flattens the chain.** A build from before this change
+rewrites the stored blob as a single block, so one un-upgraded replica handling
+one revocation drops the ancestors for everyone. Complete the rollout before
+importing a chain.
+
+Re-import is also not signalled to consumers: the Kubernetes exporter republishes
+on CRL notifications, which the import path deliberately does not send. After a
+live ancestor refresh, run `openvox-ca-ctl reissue-crl` or restart to republish
+the exported copies.
+
+The `import` command creates the directory structure, writes the CA cert/key/CRL, and
 initialises `inventory.txt` and `serial` (the serial file is written for compatibility but is not used at runtime; openvox-ca generates random serial numbers).
 
 ## Step 4: Copy signed certificates
