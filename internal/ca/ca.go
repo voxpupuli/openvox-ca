@@ -149,6 +149,30 @@ type CA struct {
 	// metrics exporter (puppetca_crl_update_failures_total) for alerting.
 	crlUpdateFailures atomic.Uint64
 
+	// servingCertIssued counts serving certificates this process has minted.
+	// Exposed as puppetca_serving_cert_issued_total, and it is a rate rather
+	// than a total that matters: two replicas can disagree about which CA
+	// certificate is current — one restarted after a re-issue, one not — and
+	// each will then mint over the other's work on every pass. That shows up
+	// here as sustained churn, where inferring it from certificate serials
+	// would mean noticing an inventory growing for no reason.
+	servingCertIssued atomic.Uint64
+
+	// servingRenewalFailures counts maintenance passes that could not renew the
+	// serving certificate. The existing certificate stays in place and the next
+	// cycle retries, so a single failure is harmless — but a persistently
+	// failing pass is invisible until the certificate expires, and it also
+	// breaks the assumption behind tls_self_provision_revoke_after_sec, which
+	// bounds a superseded certificate's exposure on the belief that every
+	// replica notices its replacement within one interval. Alert on this.
+	servingRenewalFailures atomic.Uint64
+
+	// servingRevocationFailures counts failures to record or to complete a
+	// supersession. See IncServingRevocationFailures for the arms and which of
+	// them are self-healing. Surfaced as
+	// puppetca_serving_cert_revocation_failures_total.
+	servingRevocationFailures atomic.Uint64
+
 	// crlNotify carries a coalesced signal each time the CRL is re-signed (see
 	// signCRLLocked). It is buffered to depth 1 and written non-blockingly, so a
 	// burst of revocations collapses to a single pending notification and an
@@ -177,6 +201,76 @@ func New(s *storage.StorageService, autosignCfg AutosignConfig, hostname string)
 // it as puppetca_crl_update_failures_total.
 func (c *CA) CRLUpdateFailures() uint64 {
 	return c.crlUpdateFailures.Load()
+}
+
+// ServingCertIssued returns how many serving certificates this process has
+// minted. Surfaced as puppetca_serving_cert_issued_total; a sustained rate
+// rather than a one-off increment indicates replicas disagreeing about which CA
+// certificate is current, which a fleet restart resolves.
+func (c *CA) ServingCertIssued() uint64 {
+	return c.servingCertIssued.Load()
+}
+
+// IncServingRenewalFailures records a maintenance pass that could not renew the
+// serving certificate. Called by the maintenance loop, which owns the retry
+// policy; the CA itself has no periodic tasks.
+func (c *CA) IncServingRenewalFailures() {
+	c.servingRenewalFailures.Add(1)
+}
+
+// ServingRenewalFailureCount returns how many maintenance passes failed to
+// renew the serving certificate. Surfaced as
+// puppetca_serving_cert_renewal_failures_total.
+func (c *CA) ServingRenewalFailureCount() uint64 {
+	return c.servingRenewalFailures.Load()
+}
+
+// IncServingRevocationFailures records a failure to record or to complete a
+// supersession. Seven conditions across six call sites, and they differ in
+// whether they clear themselves.
+//
+// The sweep's increment is once per pass, not once per entry: five entries
+// failing in one pass move the counter by one. The alert fires on any increase,
+// so that does not change whether it fires, only what the value means.
+//
+// Self-healing — the next pass retries:
+//
+//   - a maintenance pass that could not reconcile the pending list, logged
+//     "Could not reconcile superseded serving certificates";
+//   - one or more entries whose revocation failed, each logged "will retry".
+//
+// Not self-healing:
+//
+//   - the startup reconcile failing, logged with the same phrase but ending
+//     "at startup". With tls_self_provision off no periodic task is registered,
+//     so that call is the only sweep the process runs and nothing retries it
+//     until the CA restarts;
+//   - a mint that could not read the certificate it was replacing, or read it
+//     and could not persist the pending list, logged "will not be scheduled for
+//     revocation" — the mint has already overwritten what named that serial, so
+//     no later sweep can find it;
+//   - a pending list that could not be parsed, logged with the same phrase:
+//     whatever those bytes named is gone the same way.
+//
+// An entry discarded for a malformed serial is counted too, logged "can never
+// be revoked". It is unrevokable by construction and will not recur, so it
+// neither heals nor needs to.
+//
+// Counted separately from crlUpdateFailures because the failures this path hits
+// first are not CRL amendments at all — a lock timeout, or a storage error on
+// the pending list — and because it is the counter that bounds how long a
+// superseded serving certificate stays valid. A replica whose sweep fails every
+// hour keeps that credential live indefinitely.
+func (c *CA) IncServingRevocationFailures() {
+	c.servingRevocationFailures.Add(1)
+}
+
+// ServingRevocationFailureCount returns how many supersessions could not be
+// recorded or completed. Only some arms are self-healing; see
+// IncServingRevocationFailures, which enumerates them. Surfaced as
+// puppetca_serving_cert_revocation_failures_total.
+func (c *CA) ServingRevocationFailureCount() uint64 {
+	return c.servingRevocationFailures.Load()
 }
 
 // CRLUpdated returns a channel that receives a value each time the CRL is

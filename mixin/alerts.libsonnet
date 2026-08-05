@@ -199,6 +199,77 @@
         ],
       },
       {
+        name: 'openvox-ca-serving-certificate',
+        rules: [
+          {
+            alert: 'PuppetCAServingCertRenewalFailing',
+            // The CA could not renew the certificate its own listener presents.
+            // Nothing breaks at the moment of failure — the current certificate
+            // keeps serving — so this is invisible until it expires and every
+            // agent's TLS handshake starts failing at once. It also undermines
+            // tls_self_provision_revoke_after_sec, whose exposure bound assumes
+            // a superseded certificate is promptly replaced. The counter resets
+            // on restart, so alert on increase() over a window.
+            expr: 'increase(puppetca_serving_cert_renewal_failures_total{%(selector)s}[%(window)s]) > 0' % {
+              selector: $._config.puppetCASelector,
+              window: $._config.servingRenewalWindow,
+            },
+            'for': $._config.servingRenewalFor,
+            labels: { severity: 'warning' } + $._config.alertLabels,
+            annotations: {
+              summary: 'Puppet CA is failing to renew its own serving certificate.',
+              description: 'The Puppet CA on {{ $labels.instance }} could not renew the certificate its listener presents (puppetca_serving_cert_renewal_failures_total is rising). The current certificate still serves, so this is silent until it expires; check the CA logs and its storage backend.',
+            },
+          },
+          {
+            alert: 'PuppetCAServingCertRevocationFailing',
+            // The sweep that revokes superseded serving certificates is
+            // failing, or a mint could not record what it replaced. Nothing
+            // breaks visibly: the CA serves its current certificate
+            // throughout. What is lost is the exposure bound
+            // tls_self_provision_revoke_after_sec exists to enforce. The sweep
+            // retries, so a single failure clears itself -- but this alert only
+            // fires on a counter still rising, so a firing instance is a fault
+            // the retries are not clearing. A failure to *record* leaves nothing
+            // for any sweep to find, and there is no by-serial revoke, so that
+            // one cannot be retired at all: see the runbook annotation.
+            expr: 'increase(puppetca_serving_cert_revocation_failures_total{%(selector)s}[%(window)s]) > 0' % {
+              selector: $._config.puppetCASelector,
+              window: $._config.servingRevocationWindow,
+            },
+            'for': $._config.servingRevocationFor,
+            labels: { severity: 'warning' } + $._config.alertLabels,
+            annotations: {
+              summary: 'Puppet CA is failing to revoke superseded serving certificates.',
+              description: 'The Puppet CA on {{ $labels.instance }} could not revoke a serving certificate it has replaced (puppetca_serving_cert_revocation_failures_total is rising). That certificate stays a valid credential for the CA hostname past the bound tls_self_provision_revoke_after_sec exists to enforce. This alert fires only while the counter is still rising, so the retries are not clearing it: check the CA logs and its storage backend. Do NOT run "openvox-ca-ctl revoke --certname" against the CA hostname -- it resolves to the certificate the listener is currently serving. The log line names which case it is; see the runbook for what each one needs.',
+              runbook_url: '%(servingRevocationRunbook)s' % $._config,
+            },
+          },
+          {
+            alert: 'PuppetCAServingCertChurning',
+            // Replicas minting over each other. Each pass writes an inventory
+            // row, schedules a revocation and re-signs the CRL -- a remote
+            // round trip under ca_key_provider: openbao -- and the CRL entries
+            // persist for the certificate's full validity. Inferring this from
+            // serials would mean noticing an inventory growing for no reason.
+            expr: 'increase(puppetca_serving_cert_issued_total{%(selector)s}[%(window)s]) > %(threshold)d' % {
+              selector: $._config.puppetCASelector,
+              window: $._config.servingChurnWindow,
+              threshold: $._config.servingChurnThreshold,
+            },
+            'for': $._config.servingChurnFor,
+            labels: { severity: 'warning' } + $._config.alertLabels,
+            annotations: {
+              summary: 'Puppet CA is reissuing its serving certificate repeatedly.',
+              description: 'The Puppet CA on {{ $labels.instance }} has reissued its serving certificate more than %(threshold)d times in %(window)s. Replicas that disagree about which CA certificate is current will mint over each other on every maintenance pass; a fleet restart resolves it.' % {
+                threshold: $._config.servingChurnThreshold,
+                window: $._config.servingChurnWindow,
+              },
+            },
+          },
+        ],
+      },
+      {
         name: 'openvox-ca-kubernetes-export',
         rules: [
           {

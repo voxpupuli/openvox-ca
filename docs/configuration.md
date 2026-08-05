@@ -15,6 +15,8 @@ operator CLI, see [operator CLI (`openvox-ca-ctl`)](operator-cli.md).
 | `--autosign-config` | `""` | Autosign mode: `true`, `false`, or path to a file/executable |
 | `--tls-cert` | `""` | Server TLS certificate PEM (enables HTTPS when set with `--tls-key`) |
 | `--tls-key` | `""` | Server TLS private key PEM |
+| `--tls-self-provision` | `false` | Let the CA issue and renew its own serving certificate (enables HTTPS). Requires `--hostname`; cannot be combined with `--tls-cert`/`--tls-key`. See [self-provisioned serving certificate](#self-provisioned-serving-certificate) |
+| `--tls-self-provision-names` | `""` | Extra DNS names for that certificate, beyond `--hostname` |
 | `--puppet-server` | `""` | Comma-separated CNs granted admin API access (mTLS only) |
 | `--puppet-server-file` | `""` | Path to a file of CNs granted admin API access (one per line; `#` comments and blank lines ignored) |
 | `--no-pp-cli-auth` | `false` | Disable `pp_cli_auth` extension as an admin credential; require CN allow list only |
@@ -61,6 +63,14 @@ port: 8140
 hostname: puppet.example.com
 tls_cert: /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem
 tls_key:  /etc/puppetlabs/puppet/ssl/ca/ca_key.pem
+# ... or let the CA issue its own serving certificate instead of the two above.
+tls_self_provision: false
+tls_self_provision_names: []          # extra DNS SANs beyond hostname
+tls_self_provision_renew_before_sec: 0   # 0 = one third of the leaf validity
+tls_self_provision_encrypt_key: false    # requires an explicit passphrase source
+tls_self_provision_revoke_after_sec: -1   # -1/unset = built-in default (24h); 0 = never revoke
+maintenance_interval_sec: 0           # shared maintenance loop; 0 = built-in default (1h)
+                                      # raising this needs a matching mixin change; see mixin/README.md
 puppet_server: puppet.example.com
 puppet_server_file: ""
 no_pp_cli_auth: false
@@ -127,6 +137,8 @@ Environment variables mirror the CLI flags:
 | `--logfile` | `PUPPET_CA_LOGFILE` |
 | `--tls-cert` | `PUPPET_CA_TLS_CERT` |
 | `--tls-key` | `PUPPET_CA_TLS_KEY` |
+| `--tls-self-provision` | `PUPPET_CA_TLS_SELF_PROVISION` |
+| `--tls-self-provision-names` | `PUPPET_CA_TLS_SELF_PROVISION_NAMES` |
 | `--puppet-server` | `PUPPET_CA_PUPPET_SERVER` |
 | `--puppet-server-file` | `PUPPET_CA_PUPPET_SERVER_FILE` |
 | `--no-pp-cli-auth` | `PUPPET_CA_NO_PP_CLI_AUTH` |
@@ -160,6 +172,10 @@ The CA key passphrase can also be provided via `PUPPET_CA_KEY_PASSPHRASE` (env v
 
 | Config key | Environment variable |
 | --- | --- |
+| `tls_self_provision_renew_before_sec` | `PUPPET_CA_TLS_SELF_PROVISION_RENEW_BEFORE_SEC` |
+| `tls_self_provision_encrypt_key` | `PUPPET_CA_TLS_SELF_PROVISION_ENCRYPT_KEY` |
+| `tls_self_provision_revoke_after_sec` | `PUPPET_CA_TLS_SELF_PROVISION_REVOKE_AFTER_SEC` |
+| `maintenance_interval_sec` | `PUPPET_CA_MAINTENANCE_INTERVAL_SEC` |
 | `ca_key_algo` | `PUPPET_CA_CA_KEY_ALGO` |
 | `ca_key_size` | `PUPPET_CA_CA_KEY_SIZE` |
 | `leaf_key_algo` | `PUPPET_CA_LEAF_KEY_ALGO` |
@@ -196,6 +212,226 @@ The CA key passphrase can also be provided via `PUPPET_CA_KEY_PASSPHRASE` (env v
 
 Boolean env vars accept any value accepted by `strconv.ParseBool`: `1`, `t`, `true`,
 `yes`, `on` (case-insensitive) to enable; `0`, `f`, `false`, `no`, `off` to disable.
+
+## Self-provisioned serving certificate
+
+By default `openvox-ca` serves TLS from `tls_cert` and `tls_key` on disk. With
+`tls_self_provision: true` it instead issues that certificate to itself, from
+its own CA key, and renews it in the background.
+
+This exists for deployments where nothing else can issue it. With the CA key
+held at a provider (`ca_key_provider: openbao`) cert-manager cannot act as a CA
+issuer, and `openvox-ca-ctl generate` needs an admin client certificate — which
+needs a running server, which needs a serving certificate.
+
+```yaml
+hostname: openvox-ca.example.com     # required: the CN and first SAN
+tls_self_provision: true
+tls_self_provision_names:
+  - openvox-ca.puppet.svc.cluster.local
+  - puppet.example.com
+```
+
+`tls_self_provision` and `tls_cert`/`tls_key` are mutually exclusive, and
+`hostname` is required. The CA layer rejects an empty serving subject too, but
+its error names neither `hostname` nor `tls_self_provision`, so the check is
+here for the message rather than for the behaviour.
+
+The certificate and its private key live in the storage backend
+(`serving_cert`, `serving_key`), not in `cadir`, so every replica serves the
+same certificate and it survives a restart with an ephemeral `cadir`. It is
+issued **serverAuth only**, so it is never usable as a client credential.
+
+Otherwise it is an ordinary node certificate issued for the CA's own hostname:
+it occupies that subject's certificate slot and inventory row, and it renews and
+revokes through exactly the same machinery as any node's. That uniformity is
+deliberate — there is nothing about it to special-case — and it is why the CA's
+`hostname` **must be a name of its own**. If a node holds the same certname,
+both certificates land in one per-subject slot and whichever was issued last
+wins: issuing one overwrites the other's stored certificate, and revoking the
+CA's hostname to rotate a compromised serving key can revoke the node's
+credential instead, leaving the compromised key serving. (Renewal is separately
+guarded — the CA refuses to revoke the certificate its own listener is
+presenting — but that is a backstop, not a licence to share the name.) `openvox-ca` refuses to start when `hostname` is also
+a `puppet_server` CN, but it cannot detect an ordinary agent that happens to
+share the name — choose a distinct one.
+
+### Renewal
+
+A background maintenance loop re-checks the certificate every
+`maintenance_interval_sec` (default one hour) and reissues once remaining
+validity falls below `tls_self_provision_renew_before_sec` — by default a third
+of the leaf validity. Zero *or negative* takes that default (unlike
+`tls_self_provision_revoke_after_sec`, where `-1` and `0` mean different
+things), and a value at or beyond the leaf validity is refused at startup. The
+window is also clamped: a certificate's effective lifetime shrinks as the CA
+certificate ages, since no leaf outlives its issuer, so a window that was
+comfortably inside the configured validity can grow to exceed the real one. When
+it reaches or passes that, the CA renews at half-life instead of reissuing on
+every pass. Below that it is used exactly as configured — so a window close to
+the effective lifetime still means renewing very soon after each issuance. Rotation takes effect on the next TLS handshake; no
+restart, and established connections are unaffected.
+
+A certificate is also reissued when it stops being usable for any other reason:
+it no longer covers a configured name, it does not verify against the current CA
+certificate, or it has been revoked.
+
+**Adding a name reissues; withdrawing one does not.** Every replica evaluates
+one shared certificate against its own configuration, which it read at startup,
+so the check has to be one-directional or a fleet part-way through a config
+change would mint over itself indefinitely. A name added to
+`tls_self_provision_names` is picked up on the next maintenance pass; a name
+removed stays on the live certificate until it is reissued for some other
+reason. To apply a withdrawal immediately, revoke the serving certificate — the
+next pass then mints from the configured names alone:
+
+```bash
+openvox-ca-ctl revoke --certname openvox-ca.example.com
+```
+
+> **This costs an outage.** Revoking the CA's own hostname takes the certificate
+> the listener is presenting out of circulation immediately, with none of the
+> delay `tls_self_provision_revoke_after_sec` exists to give. Every client that
+> checks revocation fails its handshake against the CA until the next
+> maintenance pass mints the replacement — up to one `maintenance_interval_sec`,
+> an hour at the defaults.
+>
+> Rolling the fleet immediately after the revoke shortens that gap, because
+> startup resolves the certificate too, so each replica mints as it comes back
+> instead of waiting for its next tick. It is not an alternative to revoking: a
+> restart alone reissues nothing, since a certificate that still parses,
+> verifies and covers the configured names is reused.
+>
+> The same cost applies under *Replacing a compromised serving key* below. It
+> does not apply under *Turning it off*, where the switch-over happens first.
+
+A *rename* — adding one name and removing another in the same edit — briefly
+carries both while the fleet disagrees, and settles on the union until every
+replica has the new configuration and the certificate is revoked once.
+
+Renewal failures are logged and counted as
+`puppetca_serving_cert_renewal_failures_total`, leaving the existing certificate
+in place. **Alert on that counter** — a persistently failing renewal is
+otherwise invisible until the certificate expires.
+`puppetca_serving_cert_issued_total` counts issuance; a sustained rate rather
+than an occasional increment means replicas disagree about which CA certificate
+is current, which a fleet restart resolves.
+
+### Replacing a compromised serving key
+
+Revoke the CA's own hostname:
+
+```bash
+openvox-ca-ctl revoke --certname openvox-ca.example.com
+```
+
+Revocation is one of the reuse conditions, so the next maintenance pass issues a
+replacement. The exposure is one maintenance interval — and so is the outage:
+see the warning under [Renewal](#renewal). Roll the fleet straight after the
+revoke to shorten it.
+
+### Superseded certificates
+
+When a certificate is replaced the old one stays valid until it expires, which
+leaves a second usable credential in circulation.
+`tls_self_provision_revoke_after_sec` revokes it after a delay. It has three
+states, matching `csr_rate_limit`: unset (`-1`) takes the built-in default of
+**24 hours**, `0` never revokes, and a positive value is used as given.
+
+The default is 24 hours rather than "never" because a second valid serving
+credential in circulation is the worse outcome, and it matches this project's
+existing posture — `revoke_on_auto_renew` is already `true` so that only the
+newest serial for a subject stays valid.
+
+The delay is not optional padding. The certificate swap is per-process, so a
+sibling replica may still be serving the old certificate; revoking immediately
+breaks every client that checks revocation. A replica picks up the replacement
+within one maintenance interval, so the value must be at least **twice**
+`maintenance_interval_sec` — two hours at the defaults — and the server refuses
+to start otherwise.
+
+Only a value you set explicitly is checked against that floor. Left unset, the
+delay is the built-in 24 hours *or* the floor, whichever is longer — so raising
+`maintenance_interval_sec` past 12 hours lengthens the default rather than
+refusing to start over a value you never chose. A delay you did configure is
+never silently lengthened, because that would misrepresent how long a
+superseded credential stays valid.
+
+That bound assumes maintenance passes succeed. A replica whose passes keep
+failing will go on serving a superseded certificate while a healthy replica's
+clock runs down and revokes it, which is the other reason to alert on
+`puppetca_serving_cert_renewal_failures_total`.
+
+### Turning it off
+
+Clearing `tls_self_provision` stops the CA renewing the certificate, but it does
+**not** remove what is already there: `serving_cert` and `serving_key` stay in
+the backend, and the key is plaintext unless
+`tls_self_provision_encrypt_key` was set. That is a valid CA-signed credential
+for the CA's own hostname, so when migrating to an externally supplied
+certificate:
+
+1. Switch to `tls_cert`/`tls_key` and restart.
+2. *Then* revoke it — `openvox-ca-ctl revoke --certname <hostname>` — so the
+   credential is dead even though the blobs remain.
+
+Step 2 assumes the replacement certificate was **not** issued by this CA under
+the same name. `revoke --certname` resolves to the newest serial for that
+subject, so if you replaced the self-provisioned certificate with one this CA
+issued for the same hostname, it would revoke the replacement and leave the
+self-provisioned one valid — both the outage and the retained credential. There
+is no by-serial revoke ([#177](https://github.com/voxpupuli/openvox-ca/issues/177)),
+so take the replacement from a different issuer, or give it a different name.
+
+The order matters. While `tls_self_provision` is still on, revocation is a
+*reuse* condition, not a retirement: the next maintenance pass sees the
+revocation and mints a replacement. Revoking first would leave you with a fresh,
+valid, unrevoked serving certificate — exactly the credential this section
+exists to retire.
+
+There is no command to delete the stored blobs; remove them with your backend's
+own tooling if you want them gone.
+
+Related: rotating `ca_key_passphrase_file` across a rolling update leaves
+replicas briefly unable to decrypt each other's stored key, so each reissues its
+own until every replica is on the new passphrase. That churn is harmless — the
+reuse predicate treats an undecryptable key as "mint again" rather than failing
+— but it does mean a burst of issuance and superseded entries.
+
+### Encryption at rest
+
+`tls_self_provision_encrypt_key: true` encrypts the stored serving key the same
+way `encrypt_ca_key` does for the CA key, and **requires** an explicit
+passphrase (`ca_key_passphrase_file` or `PUPPET_CA_KEY_PASSPHRASE`). The
+auto-generated passphrase is written into `cadir`, so with an ephemeral `cadir`
+each replica would encrypt under a different one and none could read the shared
+key after a restart.
+
+With encryption off and a SQL backend, the serving private key is stored in your
+database in plaintext.
+
+If your CA key is already a backend blob — the default — that is the posture
+`ca_key` has by default and this is one blob over. **If you hold the CA key at a
+provider (`ca_key_provider: openbao`), behind an external signer, or pinned with
+`ca_key_file`, your backend holds no private key today and this changes that.**
+`ca_key_file` pins only the CA key; there is no serving-key equivalent, so
+`tls_self_provision_encrypt_key` is the protection available — and it applies to
+the next key issued, not the one already stored, so enabling it on an existing
+deployment leaves the plaintext key in the backend until the certificate is
+reissued. See
+[CA key security](ca-key-security.md).
+
+### Sharing a backend between replicas
+
+The mint is serialised on a fixed serving lock plus the per-subject lock, both
+real distributed locks on etcd, Redis/Valkey, PostgreSQL and MySQL. The fixed
+one is what makes replicas exclude each other even when they disagree about the
+hostname, and so about which subject lock to take. On the **filesystem and SQLite**
+backends it degrades to a process-local mutex, so two replicas can mint
+concurrently and the last writer wins; the loser serves a certificate no longer
+in storage until its next pass. Those backends are already documented as
+unsuitable for sharing between replicas, and the remedy is the same: use a
+shared backend.
 
 ## Autosigning
 

@@ -33,6 +33,40 @@ jobs:
       - name: Check formatting, vet, module tidy, and lint
         run: mage dev:check
 
+      # The mixin is Jsonnet, so a mistyped $._config key or format verb is an
+      # error at render time that no Go target would catch. dev:mixin skips
+      # cleanly when the tools are absent, so pin them here.
+      # promtool cannot be `go install`ed: the Prometheus module's go.mod carries
+      # replace directives, which `go install pkg@version` refuses. Take it from
+      # the release tarball instead.
+      - name: Install jsonnet and promtool
+        env:
+          PROMETHEUS_VERSION: 3.13.2
+        run: |
+          go install github.com/google/go-jsonnet/cmd/jsonnet@v0.21.0
+          # Checksum-verified against the release's own sha256sums.txt. That
+          # covers a truncated or corrupted download, not asset substitution --
+          # anyone able to replace the tarball could replace the sums beside it.
+          # Pinning the digest inline would close that, at the cost of a second
+          # value for Renovate to keep in step. promtool cannot be `go install`ed
+          # (the Prometheus module carries replace directives), so it is the one
+          # binary here that neither a commit SHA nor the Go checksum database
+          # covers.
+          curl -sSfL --retry 3 -o "${RUNNER_TEMP}/prometheus.tar.gz" \
+            "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz"
+          curl -sSfL --retry 3 -o "${RUNNER_TEMP}/sha256sums.txt" \
+            "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/sha256sums.txt"
+          (cd "${RUNNER_TEMP}" \
+            && grep " prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz$" sha256sums.txt \
+            | sed "s| prometheus-.*| prometheus.tar.gz|" \
+            | sha256sum -c -)
+          tar -xzf "${RUNNER_TEMP}/prometheus.tar.gz" -C "${RUNNER_TEMP}"
+          sudo install "${RUNNER_TEMP}/prometheus-${PROMETHEUS_VERSION}.linux-amd64/promtool" /usr/local/bin/promtool
+          promtool --version
+
+      - name: Render and validate the Prometheus mixin
+        run: mage dev:mixin
+
   # -- Dockerfile lint (hadolint) ----------------------------------------------
   # Lints every Dockerfile in the repo. hadolint has no auto-fix mode (it only
   # reports), so this job fails the build on violations and the developer fixes

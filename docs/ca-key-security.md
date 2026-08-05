@@ -62,6 +62,53 @@ today; see [OpenBao Transit-engine key custody](#openbao-transit-engine-key-cust
 below) or consider a hardware security module (HSM) via PKCS#11 (planned; see
 [Planned: PKCS#11 / HSM support](#planned-pkcs11--hsm-support) below).
 
+## The serving private key
+
+When `tls_self_provision` is enabled the CA also holds a **serving** private
+key — the one its own HTTPS listener presents. It lives in the storage backend
+as `serving_key`, alongside `ca_key`, and `tls_self_provision_encrypt_key`
+encrypts it at rest using exactly the machinery described above.
+
+**It applies to the next key the CA issues, not to the one already stored.**
+Like `--encrypt-ca-key`, the setting is read when a key is written, and the
+serving key is only ever rewritten by a reissue. Turning it on and restarting
+therefore changes nothing: the existing plaintext key parses fine, the
+certificate is still usable, and it is reused. On default settings the next
+reissue is up to two thirds of the leaf validity away — years. To apply it now, force a
+reissue by revoking the serving certificate, and read the
+warning under [Renewal](configuration.md#renewal) first: doing that on a live CA
+interrupts every client that checks revocation until the next maintenance pass
+mints the replacement.
+
+Two things are worth stating plainly:
+
+- With encryption off and a SQL backend, that key is stored in your database in
+  plaintext. **Whether that is a new exposure depends on where your CA key
+  lives**, and the two cases are genuinely different:
+  - **CA key in the backend** (the default, `ca_key_provider: file` with no
+    `ca_key_file`): this is the same posture `ca_key` already has, since
+    `encrypt_ca_key` is off unless enabled. An operator who accepted it for the
+    CA key has already made this decision; it is one blob over.
+  - **CA key held elsewhere** — `ca_key_provider: openbao`, an external signer,
+    or pinned to local disk with `ca_key_file` — your backend holds **no private
+    key at all** today. Enabling `tls_self_provision` puts one there, and that
+    *is* a new class of exposure. `ca_key_file` does not help: it pins only the
+    CA key, and there is no equivalent for the serving key. Set
+    `tls_self_provision_encrypt_key` (with an explicit passphrase — see below),
+    which is the protection available here.
+
+  This matters because holding the CA key at a provider is one of the reasons
+  this feature exists: cert-manager cannot act as a CA issuer without the key.
+- The serving key is far less valuable than the CA key. It authenticates one
+  host for one hostname and can be replaced at will — revoke the CA's own
+  hostname and the next maintenance pass issues a new one. Compromising the CA
+  key means reissuing every certificate in the fleet.
+
+`tls_self_provision_encrypt_key` requires an explicit passphrase source; it
+refuses the auto-generated one, because that passphrase is written into `cadir`
+and replicas with an ephemeral `cadir` could not read each other's key. See
+[configuration](configuration.md#self-provisioned-serving-certificate).
+
 ## OpenBao Transit-engine key custody
 
 `--ca-key-provider openbao` delegates the CA private key entirely to an
