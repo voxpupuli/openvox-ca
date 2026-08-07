@@ -487,20 +487,25 @@ func (c *CA) bootstrapCA(ctx context.Context) error {
 	return nil
 }
 
-// loadCRLCache reads the CRL from disk and caches it in memory.
+// loadCRLCache reads the CRL from storage and caches it in memory.
 // Must be called with c.mu held.
+//
+// It caches only a CRL this CA signed, on the same grounds and through the same
+// check as SyncCRLCache — see ownStoredCRLLocked. Startup is where that matters
+// most: a restart is the remedy an operator reaches for when the sync is
+// refusing, so a startup that skipped the check would install precisely the CRL
+// the sync declined and the refusal would amount to nothing.
+//
+// Failing outright is deliberate. A CA that cannot vouch for its own revocation
+// list must not serve on it, and the error names the divergence and the remedy.
 func (c *CA) loadCRLCache(ctx context.Context) error {
 	crlPEM, err := c.Storage.GetCRL(ctx)
 	if err != nil {
 		return fmt.Errorf("reading CRL: %w", err)
 	}
-	block, _ := pem.Decode(crlPEM)
-	if block == nil {
-		return fmt.Errorf("CRL is empty or not PEM-encoded")
-	}
-	crl, err := x509.ParseRevocationList(block.Bytes)
+	crl, err := c.ownStoredCRLLocked(crlPEM)
 	if err != nil {
-		return fmt.Errorf("parsing CRL: %w", err)
+		return err
 	}
 	c.cachedCRL = crl
 	return nil

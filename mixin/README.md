@@ -11,6 +11,11 @@ alerting rules for the openvox-ca exporter. It alerts on:
 - **CRL update failures** — the CA failing to amend its CRL (a revocation it
   could not record, or a CRL it could not re-sign or write), which can leave
   revoked or superseded certificates still valid.
+- **CRL propagation** — a replica that cannot reload the stored CRL, or that
+  keeps enforcing one behind it. On a shared backend each replica decides
+  revocation from its own copy, so a replica left behind still accepts
+  certificates revoked elsewhere; see `crl_sync_interval_sec` in
+  [configuration](../docs/configuration.md).
 - **Kubernetes export** targets whose applies keep failing (only when the
   [Kubernetes export](../docs/kubernetes-export.md) feature is in use).
 
@@ -93,4 +98,7 @@ jsonnet -J vendor -m . mixin.jsonnet
 | `pendingFor` | `1h` | How long a request may stay pending before alerting. |
 | `crlUpdateWindow` | `1h` | Window over which CRL-update failures are counted (the metric is a restart-resetting counter). |
 | `crlUpdateFor` | `15m` | `for:` debounce for the CRL-update-failure alert. |
+| `crlSyncWindow` | `1h` | Window over which CRL-reload failures are counted (the metric is a restart-resetting counter). |
+| `crlSyncFor` | `5m` | `for:` debounce for the CRL-reload-failure alert. Keep it below `crlLagFor` so the warning precedes the page it explains. |
+| `crlLagFor` | `10m` | How long a replica may keep enforcing a CRL behind the stored one before it is paged on. Raise it if you have raised `crl_sync_interval_sec`. |
 | `expiryFor` / `scrapeFor` / `readyFor` / `downFor` / `k8sExportFailingFor` | `1h` / `15m` / `10m` / `5m` / `15m` | `for:` debounce durations. |

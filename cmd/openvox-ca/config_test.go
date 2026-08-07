@@ -58,6 +58,7 @@ var serverEnvVars = []string{
 	"PUPPET_CA_DISABLE_CRL_REFRESH",
 	"PUPPET_CA_CRL_REFRESH_INTERVAL_SEC",
 	"PUPPET_CA_CRL_REFRESH_BEFORE_SEC",
+	"PUPPET_CA_CRL_SYNC_INTERVAL_SEC",
 	"PUPPET_CA_REVOKE_ON_AUTO_RENEW",
 	"PUPPET_CA_ENABLE_EXPIRED_CERT_CLEANUP",
 	"PUPPET_CA_EXPIRED_CERT_RETENTION_SEC",
@@ -254,6 +255,63 @@ var _ = Describe("crlRefreshInterval", func() {
 		Expect(err).NotTo(HaveOccurred(), "unexpected error")
 		Expect(cfg.crlRefreshInterval()).To(Equal(defaultCRLRefreshInterval),
 			"crlRefreshInterval() with 0 = %v; want default %v", cfg.crlRefreshInterval(), defaultCRLRefreshInterval)
+	})
+})
+
+// crl_sync_interval_sec bounds how long a certificate revoked on another
+// replica keeps working here, so its resolution is worth pinning end to end
+// rather than only from a struct literal: a typo in the env key, or a guard
+// that let a non-positive value through to time.NewTicker, would both be
+// invisible to a test that sets the field directly.
+var _ = Describe("crlSyncInterval", func() {
+	It("returns the default when unset", func() {
+		clearServerEnv()
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred(), "unexpected error")
+		Expect(cfg.crlSyncInterval()).To(Equal(defaultCRLSyncInterval),
+			"crlSyncInterval() = %v; want default %v", cfg.crlSyncInterval(), defaultCRLSyncInterval)
+	})
+
+	It("honours the env override", func() {
+		clearServerEnv()
+		setEnv("PUPPET_CA_CRL_SYNC_INTERVAL_SEC", "15")
+
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred(), "unexpected error")
+		Expect(cfg.crlSyncInterval()).To(Equal(15*time.Second),
+			"crlSyncInterval() = %v; want %v", cfg.crlSyncInterval(), 15*time.Second)
+	})
+
+	It("falls back to the default for a non-positive value", func() {
+		clearServerEnv()
+		setEnv("PUPPET_CA_CRL_SYNC_INTERVAL_SEC", "0")
+
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred(), "unexpected error")
+		Expect(cfg.crlSyncInterval()).To(Equal(defaultCRLSyncInterval),
+			"crlSyncInterval() with 0 = %v; want default %v", cfg.crlSyncInterval(), defaultCRLSyncInterval)
+	})
+
+	// The sync is not one of the things disable_crl_refresh turns off — a
+	// promise the documentation makes in as many words, and one the serve
+	// command keeps only by where a line sits: `go runCRLSync(...)` is the
+	// statement immediately after the `if !cfg.DisableCRLRefresh { ... }` block
+	// that starts the refresher, two adjacent near-identical goroutine starts
+	// distinguished by nothing but indentation.
+	//
+	// This pins the resolver half: the interval an operator gets is the same
+	// whether or not refreshing is disabled. It cannot pin the placement, since
+	// the goroutine is started inline in the cobra RunE and nothing in the
+	// package can observe it; that half rests on the comment at the call site.
+	It("is unaffected by disable_crl_refresh", func() {
+		clearServerEnv()
+		setEnv("PUPPET_CA_DISABLE_CRL_REFRESH", "true")
+
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred(), "unexpected error")
+		Expect(cfg.DisableCRLRefresh).To(BeTrue(), "precondition: refresh is disabled")
+		Expect(cfg.crlSyncInterval()).To(Equal(defaultCRLSyncInterval),
+			"disabling CRL refresh must not change how often revocations propagate")
 	})
 })
 
@@ -649,6 +707,8 @@ var _ = Describe("applyServerEnv each variable", func() {
 			func(c *serverConfig) bool { return c.CRLRefreshIntervalSec == 900 }, "CRLRefreshIntervalSec"),
 		Entry("CRL_REFRESH_BEFORE_SEC", "PUPPET_CA_CRL_REFRESH_BEFORE_SEC", "86400",
 			func(c *serverConfig) bool { return c.CRLRefreshBeforeSec == 86400 }, "CRLRefreshBeforeSec"),
+		Entry("CRL_SYNC_INTERVAL_SEC", "PUPPET_CA_CRL_SYNC_INTERVAL_SEC", "15",
+			func(c *serverConfig) bool { return c.CRLSyncIntervalSec == 15 }, "CRLSyncIntervalSec"),
 		// The zero value of RevokeOnAutoRenew is already false, so assert the
 		// env var flips it to true — a value distinct from the zero value —
 		// which proves the env key is parsed and wired to the right field. A

@@ -923,9 +923,22 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 		// and validity. Reissuing without a fresh proof-of-possession is safe
 		// because newAuthMiddleware (the tierAnyClient path guarding this
 		// route) has already verified r.TLS.PeerCertificates[0] chains to our
-		// CA and is not revoked; clientCN(r) only reads its CN.
+		// CA; clientCN(r) only reads its CN. Revocation is re-checked against
+		// storage rather than relying on the middleware's check, which answers
+		// from a cache that can lag a revocation performed on another replica —
+		// see the SECURITY note on ca.refuseIfRevoked, which both renewal paths
+		// go through.
 		certPEM, err = s.CA.AutoRenew(r.Context(), r.TLS.PeerCertificates[0])
 		if err != nil {
+			// A revoked certificate must not be renewed into a fresh one. This
+			// is reachable even though the middleware checks revocation: it
+			// reads the in-memory CRL, and on a replica that did not perform the
+			// revocation that copy can be up to crl_sync_interval_sec behind.
+			if errors.Is(err, ca.ErrCertRevoked) {
+				slog.Warn("Auto-renewal rejected: certificate is revoked", "subject", cn)
+				http.Error(w, "access denied", http.StatusForbidden)
+				return
+			}
 			// A key-strength rejection is client-actionable: the presented
 			// cert (e.g. imported from a legacy CA) carries a key below policy
 			// and the agent must re-key via the CSR-based renewal path. Report
@@ -956,8 +969,18 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 			return
 		}
 
-		certPEM, err = s.CA.Renew(r.Context(), cn, body)
+		certPEM, err = s.CA.Renew(r.Context(), cn, body, r.TLS.PeerCertificates[0])
 		if err != nil {
+			// A revoked certificate must not be re-keyed either. This branch
+			// matters more than the auto-renewal one it mirrors: it issues a
+			// certificate for a key the client chose, so a revoked agent
+			// getting through would end up holding a credential this CA has
+			// never seen the private key of.
+			if errors.Is(err, ca.ErrCertRevoked) {
+				slog.Warn("Renewal rejected: certificate is revoked", "subject", cn)
+				http.Error(w, "access denied", http.StatusForbidden)
+				return
+			}
 			// Same key-strength policy applies to the re-key CSR: surface it as
 			// a client error instead of a 500.
 			if errors.Is(err, ca.ErrKeyPolicy) {

@@ -680,6 +680,16 @@ func newRootCmd() *cobra.Command {
 				slog.Info("CRL auto-refresh disabled by configuration")
 			}
 
+			// Background CRL sync: reloads the stored CRL into the copy this
+			// process's revocation checks read, so a certificate revoked on
+			// another replica stops working here within an interval rather than
+			// whenever this replica happens to re-sign. Read-only, takes no
+			// cluster lock, runs on every replica. Not gated on
+			// disable_crl_refresh: that switch governs re-signing, and turning it
+			// off must not leave this replica admitting certificates the fleet
+			// has revoked. Bound to ctx so it stops on shutdown.
+			go runCRLSync(ctx, myCA, cfg.crlSyncInterval())
+
 			// Background expired-certificate cleanup (opt-in): prunes certs that
 			// expired more than the retention grace period ago from the inventory
 			// and CRL. Safe on every replica (serialised on the shared CRL lock).

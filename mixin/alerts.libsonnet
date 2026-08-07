@@ -196,6 +196,71 @@
               description: 'The Puppet CA on {{ $labels.instance }} could not amend its CRL (puppetca_crl_update_failures_total is rising). Revocations may not have taken effect and superseded certificates may still be valid; check CRL storage and the CA logs.',
             },
           },
+          {
+            alert: 'PuppetCACRLSyncFailing',
+            // This replica could not reload the stored CRL into the copy its
+            // revocation checks read: an unreadable CRL, or one signed by a
+            // different CA certificate than the one this process loaded (the
+            // usual cause of the latter is a rotated CA certificate on a replica
+            // that has not restarted). Counter resets on restart, so alert on
+            // increase() over a window. It leads the lag alert below by design —
+            // this says why a replica is falling behind, that one says it has.
+            expr: 'increase(puppetca_crl_sync_failures_total{%(selector)s}[%(window)s]) > 0' % {
+              selector: $._config.puppetCASelector,
+              window: $._config.crlSyncWindow,
+            },
+            'for': $._config.crlSyncFor,
+            labels: { severity: 'warning' } + $._config.alertLabels,
+            annotations: {
+              summary: 'Puppet CA cannot reload its CRL from storage.',
+              description: 'The Puppet CA on {{ $labels.instance }} could not reload the stored CRL (puppetca_crl_sync_failures_total is rising), so it is enforcing whichever CRL it already held. A certificate revoked on another replica may still be accepted here. Check CRL storage, and whether the CA certificate was replaced without restarting this replica.',
+            },
+          },
+          {
+            alert: 'PuppetCACRLStale',
+            // The revocation list this replica enforces is behind the stored
+            // one. Every replica polls storage on crl_sync_interval_sec, so a
+            // gap is normal for a moment after each revocation and abnormal
+            // beyond crlLagFor.
+            //
+            // Both series come from the same exporter, so this compares an
+            // instance against itself rather than against the fleet — no fan-in,
+            // and it fires on the replica that is actually stale. Subtracting
+            // rather than comparing makes $value the size of the gap; a bare
+            // '>' would report the stored number instead.
+            //
+            // The second arm exists because the two series go missing for
+            // different reasons, and a subtraction over a missing operand is
+            // silence rather than an alert. The exporter drops
+            // puppetca_crl_number whenever the stored CRL cannot be read or
+            // parsed, while still publishing the cached number — and an
+            // unreadable stored CRL is one of the two conditions this rule is
+            // meant to page on, so without the arm the worst case would be the
+            // quiet one.
+            //
+            // It is qualified on a successful scrape so that arm covers only
+            // the CRL being unreadable, not the whole gather failing: a storage
+            // outage drops the same series and is already paged by
+            // PuppetCAScrapeFailing, and one cause should not raise two alerts.
+            // The reverse asymmetry (cached absent, stored present) means the
+            // replica has no CRL in memory at all and is covered by
+            // PuppetCANotReady, so it is deliberately left out.
+            expr: |||
+              puppetca_crl_number{%(selector)s} - puppetca_crl_cached_number{%(selector)s} > 0
+              or
+              (puppetca_crl_cached_number{%(selector)s}
+                 unless puppetca_crl_number{%(selector)s})
+                and on(instance) puppetca_collector_scrape_success{%(selector)s} == 1
+            ||| % {
+              selector: $._config.puppetCASelector,
+            },
+            'for': $._config.crlLagFor,
+            labels: { severity: 'critical' } + $._config.alertLabels,
+            annotations: {
+              summary: 'Puppet CA replica is enforcing an out-of-date CRL.',
+              description: 'The Puppet CA on {{ $labels.instance }} has not caught up with the CRL in storage for more than %(crlLagFor)s, so certificates revoked on another replica are still being accepted here. Either it is behind the stored CRL, or the stored CRL cannot be read at all (in which case puppetca_crl_number is absent for this instance). Check puppetca_crl_sync_failures_total and the CA logs. A restart reloads the CRL, but it is verified against this CA certificate on the way in, so a restart will not start the CA at all if the stored CRL is not one this CA signed — check that before reaching for it, and note that reissue-crl needs a replica that is still serving.' % { crlLagFor: $._config.crlLagFor },
+            },
+          },
         ],
       },
       {

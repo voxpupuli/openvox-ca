@@ -86,7 +86,12 @@ openvox-ca-ctl import \
   --cadir      /etc/puppetlabs/puppet/ssl \
   --cert-bundle ca_cert.pem \
   --private-key ca_key.pem \
-  --crl-chain   ca_crl.pem     # optional; a new CRL is generated if omitted
+  --crl-chain   ca_crl.pem     # optional; a new CRL is generated if omitted.
+                               # Must LEAD with the CRL issued by the CA being
+                               # imported — the server reads the first CRL in
+                               # the stored bundle as its own and refuses to
+                               # start on one it did not sign. Ancestors' CRLs
+                               # may follow it. Rejected at import if not.
 
 # Migrate an entire CA between storage backends offline (any pair of backends:
 # filesystem, sqlite, postgres, mysql, etcd, redis/valkey). Each backend is
