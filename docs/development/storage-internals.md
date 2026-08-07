@@ -81,13 +81,10 @@ Operations that perform a read-modify-write against shared state — CA
 bootstrap, CRL rotation during revocation, CSR-then-autosign sequencing — are
 serialised across replicas by distributed locks implemented on top of etcd's
 `concurrency.Mutex`. The backend keeps a lease-backed session (30s TTL) and
-grabs per-name mutexes under `<prefix>/locks/<name>`:
-
-| Lock name | Held during |
-| --- | --- |
-| `bootstrap` | First-run CA generation (winner writes, loser loads) |
-| `crl` | `Revoke` (read CRL, append entry, write CRL) |
-| `subject:<subject>` | `SaveRequest` and `Sign` for that one subject |
+grabs per-name mutexes under `<prefix>/locks/<name>`. The lock names, every
+operation that holds each one, and the ordering invariant are documented in
+[locking and concurrency](locking.md) — that table is authoritative, so it is
+not duplicated here.
 
 If a replica holding a lock crashes without calling Unlock, the etcd lease
 expires after 30s and the lock is released automatically. For the filesystem
@@ -124,8 +121,9 @@ single-step atomic across all replicas.
 Cross-replica locks are implemented with `SET NX PX` using a per-acquisition
 random token. A background heartbeat extends the TTL (default 30s) while the
 lock is held; `Unlock` runs a Lua script that deletes the key only when the
-stored value still matches the caller's token. Lock names mirror the etcd
-backend (`bootstrap`, `crl`, `subject:<subject>`). If a replica holding a lock
+stored value still matches the caller's token. Lock names and their holders
+are shared across every backend and documented in
+[locking and concurrency](locking.md). If a replica holding a lock
 crashes, the lock releases automatically when the TTL elapses.
 
 Redis replication under Sentinel is asynchronous, so an in-flight failover
@@ -185,6 +183,9 @@ single-row operations instead of scanning the whole inventory. Integrity uses a
 [the inventory store](inventory-store.md) for the full design.
 
 ### Cross-node coordination
+
+Lock names, holders, and ordering are documented in
+[locking and concurrency](locking.md); only the per-dialect mechanism differs:
 
 - **SQLite** is single-node: `WithLock` falls back to a process-local
   `sync.Mutex` per lock name, exactly as the filesystem backend does. The

@@ -139,6 +139,20 @@ The build tags in use are `etcd_integration`, `redis_integration`,
 must be reachable from a `magefile.go` `Test.Backends*` target so it runs in CI;
 a build-tagged suite wired to no target is dead code.
 
+## Locking and concurrency
+
+Any change that reads or mutates shared CA state (certificates, CSRs, the CRL,
+the inventory, in-memory caches) must follow
+[docs/development/locking.md](docs/development/locking.md). The short form:
+
+- Mutations serialise on cluster-wide named locks via `StorageService.WithLock`
+  (`bootstrap`, `crl`, `subject:<name>`); the check that justifies a mutation
+  must run inside the same lock as the mutation.
+- Read-only paths must **not** take `WithLock` — they use in-memory caches and
+  read locks only.
+- Lock ordering is `subject:<name>` → `crl` → `c.mu`; lock names are a stable
+  cross-replica protocol — never invent or rename one casually.
+
 ## Compatibility contracts (do not rename)
 
 openvox-ca is a drop-in for the OpenVox/Puppet Server CA. The following
