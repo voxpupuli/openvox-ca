@@ -137,6 +137,14 @@ before a server exists.`,
 					"having already revoked the old one, and CRL entries cannot be withdrawn")
 			}
 
+			// MarkFlagRequired only checks the flag was given, not that its
+			// value is usable: --ttl 0 would fall through to the built-in
+			// default, which is the multi-year lifetime this command exists to
+			// stop anyone inheriting silently.
+			if ttl <= 0 {
+				return fmt.Errorf("--ttl must be a positive duration, e.g. 8760h for one year (got %s)", ttl)
+			}
+
 			// Resolve output paths before anything is issued. Everything after
 			// the mint is irreversible: the certificate has taken a serial and
 			// is in the inventory, and under --force its predecessor is on the
@@ -148,6 +156,13 @@ before a server exists.`,
 			certPath, err := prepareOutputPath(certOut)
 			if err != nil {
 				return err
+			}
+			// Both are written, key first. Pointed at one path, the certificate
+			// write would land on top of the key -- leaving a live, inventoried
+			// certificate whose key no longer exists anywhere.
+			if keyPath != "" && keyPath == certPath {
+				return fmt.Errorf("--key-out and --cert-out are the same path (%s); "+
+					"the certificate would overwrite the key", keyPath)
 			}
 
 			rt, err := resolveRuntime(ctx, cfg, true)
@@ -212,15 +227,25 @@ before a server exists.`,
 				return annotateGenerateError(err, certname)
 			}
 
+			// Both of these fail *after* the certificate is committed: it holds
+			// a serial, it is in the inventory, and under --force its
+			// predecessor is revoked. Report what happened before returning the
+			// error, or the operator is left believing nothing was issued and
+			// re-runs into ErrCertExists.
 			if certPath != "" {
 				if err := writePublicFile(certPath, result.CertificatePEM); err != nil {
-					return fmt.Errorf("writing the certificate to %s: %w", certPath, err)
+					reportSuccess(out, rt.Store, result, certname, keyPath, "", ppCliAuth, cfg)
+					return fmt.Errorf("the certificate was issued and recorded, but writing it to %s "+
+						"failed: %w.\nRetrieve it with 'openvox-ca-ctl list --all' or from the cadir "+
+						"rather than re-running", certPath, err)
 				}
 			} else if _, err := cmd.OutOrStdout().Write(result.CertificatePEM); err != nil {
-				return err
+				reportSuccess(out, rt.Store, result, certname, keyPath, "", ppCliAuth, cfg)
+				return fmt.Errorf("the certificate was issued and recorded, but could not be written "+
+					"to stdout: %w", err)
 			}
 
-			reportSuccess(out, rt.Store, result, certname, keyPath, certPath, ppCliAuth, force, cfg)
+			reportSuccess(out, rt.Store, result, certname, keyPath, certPath, ppCliAuth, cfg)
 			return nil
 		},
 	}
@@ -337,20 +362,33 @@ func reportBackendCapabilities(ctx context.Context, w io.Writer, store *storage.
 	locking, lockErr := store.SupportsDistributedLocking(ctx)
 	atomicInventory := store.SupportsAtomicInventory()
 
+	// "Unknown" is a third answer, not a synonym for "no" -- which is why
+	// SupportsDistributedLocking returns (bool, error) rather than a bare bool.
+	// Reporting an unreachable lock service as "locking: false" would tell an
+	// operator their backend lacks a capability it has, and send them to stop a
+	// server for the wrong reason.
+	lockingStatus := "no"
 	switch {
 	case lockErr != nil:
-		_, _ = fmt.Fprintf(w, "Warning: could not determine whether this backend coordinates locks "+
-			"across processes: %v\n", lockErr)
-	case locking && atomicInventory:
+		lockingStatus = "unknown"
+	case locking:
+		lockingStatus = "yes"
+	}
+
+	if lockErr == nil && locking && atomicInventory {
 		_, _ = fmt.Fprintf(w, "Backend coordinates across processes: safe to run alongside a live server.\n")
 		return
 	}
 
+	if lockErr != nil {
+		_, _ = fmt.Fprintf(w, "Warning: could not determine whether this backend coordinates locks "+
+			"across processes: %v\n", lockErr)
+	}
 	_, _ = fmt.Fprintf(w, "Warning: this backend does not fully coordinate writes across processes "+
-		"(cross-process locking: %t; atomic inventory append: %t).\n"+
+		"(cross-process locking: %s; atomic inventory append: %t).\n"+
 		"  Stop the server before running this. A concurrent write can issue a duplicate\n"+
 		"  certificate, or corrupt the inventory integrity record so the server will not restart.\n",
-		locking, atomicInventory)
+		lockingStatus, atomicInventory)
 }
 
 // warnAdminCredential states what a pp_cli_auth certificate grants, and what it
@@ -397,7 +435,7 @@ func annotateGenerateError(err error, certname string) error {
 // reportSuccess prints what was issued, and the consequences the operator now
 // owns.
 func reportSuccess(w io.Writer, store *storage.StorageService, result *ca.GenerateResult,
-	certname, keyPath, certPath string, ppCliAuth, force bool, cfg *serverConfig,
+	certname, keyPath, certPath string, ppCliAuth bool, cfg *serverConfig,
 ) {
 	if serial, notAfter, err := describeIssued(result); err == nil {
 		_, _ = fmt.Fprintf(w, "Issued %s: serial %s, expires %s\n",
@@ -418,7 +456,7 @@ func reportSuccess(w io.Writer, store *storage.StorageService, result *ca.Genera
 		_, _ = fmt.Fprintf(w, "Certificate: %s\n", certPath)
 	}
 
-	if force {
+	if result.Replaced {
 		_, _ = fmt.Fprintf(w, "The previous certificate for %s was revoked. A running server honours it "+
 			"until it reloads the CRL.\n", certname)
 		if cfg.Hostname != "" && certname == cfg.Hostname {

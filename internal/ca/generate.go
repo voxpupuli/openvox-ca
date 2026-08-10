@@ -59,6 +59,13 @@ func validateDNSAltNames(names []string) error {
 type GenerateResult struct {
 	PrivateKeyPEM  []byte
 	CertificatePEM []byte
+
+	// Replaced reports whether a previously stored certificate for the subject
+	// was revoked to make room for this one. ReplaceExisting being set is not
+	// the same thing: with nothing stored for the subject there is nothing to
+	// revoke, and the caller must not tell an operator a revocation happened
+	// when none did.
+	Replaced bool
 }
 
 // GenerateOptions controls a server-side certificate generation.
@@ -88,6 +95,16 @@ type GenerateOptions struct {
 	// regardless of the configured backend, so on an ephemeral cadir the copy
 	// is lost at the next restart anyway. Generate opts in for wire
 	// compatibility with the API, which has always left a copy.
+	//
+	// Note what this does NOT do on a replacement. Storage has no
+	// DeletePrivateKey, so when ReplaceExisting retires a certificate whose key
+	// was written here by an earlier call, that key stays at
+	// private/{subject}_key.pem and now outlives the certificate it belonged
+	// to. Clean behaves the same way -- it deletes the certificate and leaves
+	// the key -- so this is the established behaviour rather than an exception,
+	// but it means the cadir accumulates keys for revoked certificates and
+	// needs external cleanup. See issue #188's neighbourhood for the wider
+	// question of what the cadir owns.
 	RetainPrivateKeyInStorage bool
 
 	// EmitKey, when set, receives the freshly generated private key in PEM form
@@ -219,6 +236,20 @@ func (c *CA) GenerateWithOptions(ctx context.Context, subject string, opts Gener
 			c.mu.Lock()
 			defer c.mu.Unlock()
 
+			// Nothing stored for the subject means nothing to evict and nothing
+			// to replace, so neither the CRL re-read nor the serial lookup below
+			// is needed. Worth skipping: loadCRLCache is a storage round trip
+			// plus a full CRL parse on every call, and the overwhelmingly common
+			// case for both /generate and a first offline mint is a name that
+			// has no certificate yet.
+			//
+			// This trusts HasCert the same way evictRevokedLocked does a few
+			// lines later, and is exactly as strong as the subject lock, which
+			// on filesystem and SQLite is process-local.
+			if !c.Storage.HasCert(ctx, subject) {
+				return "", false, nil
+			}
+
 			// Re-read the CRL under the lock. evictRevokedLocked decides whether an
 			// existing certificate may be replaced by consulting c.cachedCRL, which
 			// is otherwise only ever populated at Init and by this process's own
@@ -228,9 +259,16 @@ func (c *CA) GenerateWithOptions(ctx context.Context, subject string, opts Gener
 			if err := c.loadCRLCache(ctx); err != nil {
 				return "", false, fmt.Errorf("refreshing CRL cache for %s: %w", subject, err)
 			}
-			if !opts.ReplaceExisting || !c.Storage.HasCert(ctx, subject) {
+			if !opts.ReplaceExisting {
 				return "", false, nil
 			}
+
+			// Read the certificate rather than re-asking HasCert, which returns
+			// a bare bool and cannot report a backend failure. Answering "false"
+			// to a transient read error would silently skip the revoke and issue
+			// a second live certificate for the subject -- the one outcome
+			// --force must never produce. A genuine absence is impossible here
+			// (HasCert said otherwise above), so any error is real.
 			s, err := c.storedCertSerialLocked(ctx, subject)
 			if err != nil {
 				return "", false, err
@@ -261,6 +299,13 @@ func (c *CA) GenerateWithOptions(ctx context.Context, subject string, opts Gener
 				return fmt.Errorf("could not revoke the existing certificate for %s, "+
 					"so no replacement was issued: %w", subject, err)
 			}
+			// SECURITY: an operator-forced revocation is irreversible and
+			// removes a credential a node may still be using. revokeSerialLocked
+			// records only at Debug, so without this the only trace at default
+			// level is the CRL itself.
+			// NIST 800-53: AU-2 (Event Logging)
+			slog.Info("Revoked a certificate to make room for its replacement",
+				"subject", subject, "serial", serial)
 		}
 
 		// Issue phase.
@@ -347,6 +392,7 @@ func (c *CA) GenerateWithOptions(ctx context.Context, subject string, opts Gener
 		result = &GenerateResult{
 			PrivateKeyPEM:  keyPEM,
 			CertificatePEM: certPEM,
+			Replaced:       replacing,
 		}
 		return nil
 	})
@@ -373,13 +419,15 @@ func (c *CA) storedCertSerialLocked(ctx context.Context, subject string) (string
 		// unparseable certificate, but it does so with ErrCertExists, whose
 		// remedy is "pass --force" -- which is what the operator just did. Say
 		// something they can act on instead.
-		return "", fmt.Errorf("the stored certificate for %s cannot be decoded; remove it with "+
-			"'openvox-ca-ctl clean --certname %s' and retry", subject, subject)
+		return "", fmt.Errorf("the stored certificate for %s cannot be decoded; remove it from the "+
+			"cadir (or with 'openvox-ca-ctl clean --certname %s', which needs a running server) "+
+			"and retry", subject, subject)
 	}
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		return "", fmt.Errorf("the stored certificate for %s cannot be parsed (%v); remove it with "+
-			"'openvox-ca-ctl clean --certname %s' and retry", subject, err, subject)
+		return "", fmt.Errorf("the stored certificate for %s cannot be parsed (%v); remove it from "+
+			"the cadir (or with 'openvox-ca-ctl clean --certname %s', which needs a running server) "+
+			"and retry", subject, err, subject)
 	}
 	return serialHexStr(cert.SerialNumber), nil
 }

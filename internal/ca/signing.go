@@ -424,8 +424,10 @@ type subjectAltNames struct {
 // ttl=0 means use the default certValidity. c.mu must be held by the caller.
 //
 // This is the tail shared by signWithDuration (inputs come from a submitted
-// CSR, after CSR-specific validation) and AutoRenew (inputs come from an
-// already-issued certificate's public key, with no CSR involved at all).
+// CSR, after CSR-specific validation), AutoRenew (inputs come from an
+// already-issued certificate's public key, with no CSR involved at all), and
+// GenerateWithOptions (inputs come from a key this CA just generated, with no
+// client involved at all).
 func (c *CA) issueLeafLocked(ctx context.Context, subject string, subjectName pkix.Name, pubKey any, sans subjectAltNames, extraExtensions []pkix.Extension, ttl time.Duration) ([]byte, error) {
 	// Defensive: a nil CACert here means the caller skipped Init() (or it
 	// failed). Without this guard the c.CACert.NotAfter dereference below
