@@ -18,6 +18,7 @@
 package ca_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/rsa"
 	"crypto/x509"
@@ -25,9 +26,11 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -438,6 +441,24 @@ var _ = Describe("CA GenerateWithOptions", func() {
 		})
 	})
 
+	Describe("DNS alt-name validation", func() {
+		// Reached by POST /generate/{subject}?dns=..., so these are the bounds
+		// on attacker-influenced input. Only the accepting paths were covered.
+		DescribeTable("rejects malformed or oversized alt names, issuing nothing",
+			func(names []string, wants string) {
+				_, err := myCA.GenerateWithOptions(ctx, "dns-node", ca.GenerateOptions{
+					DNSAltNames: names,
+				})
+				Expect(err).To(MatchError(ContainSubstring(wants)))
+				Expect(store.HasCert(ctx, "dns-node")).To(BeFalse())
+			},
+			Entry("not a hostname", []string{"not a hostname"}, "invalid DNS alt name"),
+			Entry("trailing hyphen", []string{"bad-.example.com"}, "invalid DNS alt name"),
+			Entry("over the length limit", []string{strings.Repeat("a", 254)}, "exceeds maximum length"),
+			Entry("too many", make([]string, 101), "too many DNS alt names"),
+		)
+	})
+
 	Describe("consequences of not round-tripping through a CSR", func() {
 		It("leaves no pending CSR behind", func() {
 			_, err := myCA.GenerateWithOptions(ctx, "no-csr-node", ca.GenerateOptions{})
@@ -648,6 +669,29 @@ var _ = Describe("CA GenerateWithOptions replacement", func() {
 		Expect(err).NotTo(MatchError(ca.ErrCertExists))
 		Expect(err.Error()).To(ContainSubstring("openvox-ca-ctl clean"))
 		Expect(revokedSerials()).To(HaveLen(before), "nothing may be revoked when the read fails")
+	})
+
+	It("records an authorisation grant in the log, and nothing without one", func() {
+		// SECURITY: the inventory line carries no record of the grant, so this
+		// message is the only durable trace distinguishing an administrator
+		// credential from a node one. NIST 800-53: AU-2.
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		defer slog.SetDefault(orig)
+
+		_, err := myCA.GenerateWithOptions(ctx, "audited-node", ca.GenerateOptions{
+			AuthGrants: []ca.AuthGrant{ca.PpCliAuth()},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(buf.String()).To(ContainSubstring("audited-node"))
+		Expect(buf.String()).To(ContainSubstring("pp_cli_auth=true"))
+
+		buf.Reset()
+		_, err = myCA.GenerateWithOptions(ctx, "unaudited-node", ca.GenerateOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(buf.String()).NotTo(ContainSubstring("authorisation extension"),
+			"an ordinary node certificate must not look like a grant in the log")
 	})
 
 	It("emits the key before the revoke, not after it", func() {

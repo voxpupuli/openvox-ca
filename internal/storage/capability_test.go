@@ -80,6 +80,33 @@ var _ = Describe("Backend capability reporting", func() {
 			Expect(ok).To(BeTrue())
 		})
 
+		It("probes a dedicated name, never one a real caller uses", func() {
+			// The probe takes a real lock. Asking for "crl" or a subject name
+			// would contend with a live server -- on Postgres it would block in
+			// pg_advisory_lock rather than answering -- so the name is the whole
+			// reason this is safe to run against a working CA. stubLocker
+			// ignores the name it is given, so nothing else would notice.
+			stub := &stubLocker{Backend: NewFilesystemBackend(GinkgoT().TempDir())}
+			_, err := svc(stub).SupportsDistributedLocking(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(stub.lastName).To(Equal(lockProbeName))
+			Expect(stub.lastName).NotTo(HavePrefix("subject:"))
+			Expect(stub.lastName).NotTo(BeElementOf("crl", "bootstrap"))
+		})
+
+		It("still reports true when releasing the probe fails", func() {
+			// A backend that cannot release has still demonstrated it can take a
+			// lock, which is the question being asked. The failure is logged,
+			// not promoted into a wrong answer.
+			ok, err := svc(&stubLocker{
+				Backend:   NewFilesystemBackend(GinkgoT().TempDir()),
+				unlockErr: errors.New("connection reset"),
+			}).SupportsDistributedLocking(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ok).To(BeTrue())
+		})
+
 		It("releases the probe lock it acquires", func() {
 			// A probe that leaked would hold a Postgres advisory lock on a
 			// pooled connection, or a Redis lease with its heartbeat goroutine,
@@ -142,9 +169,17 @@ var _ = Describe("Backend capability reporting", func() {
 	})
 
 	Describe("SupportsAtomicInventory", func() {
-		It("is false for the filesystem backend", func() {
-			Expect(svc(NewFilesystemBackend(GinkgoT().TempDir())).SupportsAtomicInventory()).To(BeFalse())
-		})
+		// The locking column needs a live service for the networked backends,
+		// but this one does not: it is a pure type probe, so etcd and Redis are
+		// classified in-process like everything else.
+		DescribeTable("is false for every backend that appends to the inventory blob",
+			func(build func() Backend) {
+				Expect(svc(build()).SupportsAtomicInventory()).To(BeFalse())
+			},
+			Entry("filesystem", func() Backend { return NewFilesystemBackend(GinkgoT().TempDir()) }),
+			Entry("etcd", func() Backend { return &EtcdBackend{} }),
+			Entry("redis", func() Backend { return &RedisBackend{} }),
+		)
 
 		It("is true for a SQL backend", func() {
 			// Note this is true for SQLite while SupportsDistributedLocking is

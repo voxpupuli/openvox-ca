@@ -23,10 +23,12 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/pem"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -196,6 +198,50 @@ var _ = Describe("openvox-ca generate", func() {
 			Expect(err).To(MatchError(ContainSubstring(`"ttl" not set`)))
 		})
 
+		It("refuses a zero or negative ttl", func() {
+			// MarkFlagRequired only asserts the flag was given. Without an
+			// explicit check, --ttl 0 reaches issueLeafLocked and inherits the
+			// multi-year built-in -- the exact silent default this command
+			// requires --ttl in order to prevent.
+			for _, bad := range []string{"0", "0s", "-1h"} {
+				_, _, err := runGenerate("--cadir", caDir, "--certname", "web01",
+					"--ttl", bad, "--key-out", keyPath("web01"))
+				Expect(err).To(MatchError(ContainSubstring("--ttl must be a positive duration")), bad)
+			}
+			Expect(storage.New(caDir).HasCert(context.Background(), "web01")).To(BeFalse())
+		})
+
+		It("refuses --key-out and --cert-out pointing at one path", func() {
+			// The key is written first and the certificate second, so a shared
+			// path ends with a live inventoried certificate whose key was
+			// overwritten and exists nowhere.
+			shared := filepath.Join(outDir, "both.pem")
+			_, _, err := runGenerate("--cadir", caDir, "--certname", "web01",
+				"--ttl", "8760h", "--key-out", shared, "--cert-out", shared)
+			Expect(err).To(MatchError(ContainSubstring("same path")))
+			Expect(storage.New(caDir).HasCert(context.Background(), "web01")).To(BeFalse())
+		})
+
+		It("refuses when the output path's parent is a file, not a directory", func() {
+			notADir := filepath.Join(outDir, "regular-file")
+			Expect(os.WriteFile(notADir, []byte("x"), 0o600)).To(Succeed())
+
+			_, _, err := runGenerate("--cadir", caDir, "--certname", "web01",
+				"--ttl", "8760h", "--key-out", filepath.Join(notADir, "web01.key"))
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("reports the serial and expiry of what it issued", func() {
+			stdout, stderr, err := runGenerate("--cadir", caDir, "--certname", "web01",
+				"--ttl", "8760h", "--key-out", keyPath("web01"))
+			Expect(err).NotTo(HaveOccurred())
+
+			cert := certFromPEM(stdout)
+			Expect(stderr).To(ContainSubstring(fmt.Sprintf("%X", cert.SerialNumber)),
+				"the operator needs the serial to revoke this later")
+			Expect(stderr).To(ContainSubstring(cert.NotAfter.Format(time.RFC3339)))
+		})
+
 		It("emits a certificate signed by the CA on stdout", func() {
 			stdout, _, err := runGenerate("--cadir", caDir, "--certname", "web01.example.com",
 				"--ttl", "8760h", "--key-out", keyPath("web01"))
@@ -265,6 +311,12 @@ var _ = Describe("openvox-ca generate", func() {
 			info, err := os.Stat(certOut)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(info.Mode().Perm()).To(Equal(os.FileMode(0o644)))
+
+			// The mode alone would stay green if the file were handed the key
+			// PEM, or nothing at all.
+			written, err := os.ReadFile(certOut)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(certFromPEM(string(written)).Subject.CommonName).To(Equal("web01"))
 		})
 
 		It("reports the configuration and backend capabilities before acting", func() {
@@ -282,14 +334,25 @@ var _ = Describe("openvox-ca generate", func() {
 		It("bypasses autosign policy, which is not consulted at all", func() {
 			// Deliberate: this is an operator action, not a request, and must
 			// work when there is no policy and no server to evaluate one.
-			denyAll := filepath.Join(GinkgoT().TempDir(), "autosign.conf")
-			Expect(os.WriteFile(denyAll, []byte("# matches nothing\n"), 0o644)).To(Succeed())
-			setEnv("PUPPET_CA_AUTOSIGN_CONFIG", denyAll)
+			//
+			// This cannot fail today, and that is the point of writing it down:
+			// generate hardcodes AutosignConfig{Mode: "off"}, and
+			// GenerateWithOptions never reaches CheckAutosign at all -- its one
+			// non-test caller is SaveRequest, on the CSR path. What this guards
+			// is a future change that starts consulting policy here, which with
+			// a deny-everything config would then fail. The config below is set
+			// through the file rather than the environment so it really is
+			// loaded into serverConfig, rather than being inert twice over.
+			cfgPath := filepath.Join(GinkgoT().TempDir(), "denyall.yaml")
+			Expect(os.WriteFile(cfgPath, []byte(
+				"ca_key_algo: ecdsa\nca_key_size: 256\nautosign_config: \"false\"\n"), 0o644)).To(Succeed())
+			setEnv("PUPPET_CA_CONFIG", cfgPath)
 
 			_, _, err := runGenerate("--cadir", caDir, "--certname", "web01",
 				"--ttl", "8760h", "--key-out", keyPath("web01"))
 			Expect(err).NotTo(HaveOccurred())
 		})
+
 	})
 
 	Describe("output pre-flight", func() {
@@ -429,6 +492,18 @@ var _ = Describe("openvox-ca generate", func() {
 			_, _, err := runGenerate("--cadir", caDir, "--certname", "web01",
 				"--ttl", "8760h", "--force")
 			Expect(err).To(MatchError(ContainSubstring("--key-out is required with --force")))
+		})
+
+		It("does not claim a revocation when --force had nothing to replace", func() {
+			// reportSuccess used to key off the flag rather than the outcome, so
+			// this printed "the previous certificate was revoked" for a name
+			// that never had one -- and, for the CA's own hostname, told the
+			// operator to restart a server over a revocation that never
+			// happened.
+			_, stderr, err := runGenerate("--cadir", caDir, "--certname", "brand-new",
+				"--ttl", "8760h", "--force", "--key-out", keyPath("brand-new"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(stderr).NotTo(ContainSubstring("was revoked"))
 		})
 
 		It("issues again once an existing certificate has been revoked", func() {

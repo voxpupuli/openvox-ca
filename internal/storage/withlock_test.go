@@ -220,9 +220,13 @@ type stubLocker struct {
 	err        error
 	unlockErr  error
 	unlockedCh chan struct{}
+	// lastName records the most recent name passed to AcquireLock, so a spec
+	// can assert which lock a caller actually asked for.
+	lastName string
 }
 
 func (s *stubLocker) AcquireLock(ctx context.Context, name string) (Unlocker, error) {
+	s.lastName = name
 	if s.err != nil {
 		return nil, s.err
 	}
