@@ -46,8 +46,9 @@ less protocol for it.
 | --- | --- | --- |
 | `bootstrap` | First-run CA generation; seeding supporting state (CRL/inventory/serial) for a mounted cert+key; whole-store migration | `CA.Init`, `CA.seedSupportingState`, `storage.MigrateService` (which reuses the name deliberately so a migration and a bootstrapping server exclude each other) |
 | `crl` | Every CRL read-modify-write (read entries → re-sign → write) | `Revoke`, `RevokeSerial`, `ReissueCRL`, `RefreshCRLIfDue`, `CleanupExpiredCerts`, and the revoke step inside `Clean`, `Renew`, `AutoRenew` |
-| `subject:<name>` | The whole lifecycle of one subject: evict/save CSR/sign/import/clean/revoke | `SaveRequest`, `Sign`, `SignWithTTL`, `Renew`, `AutoRenew`, `Clean`, `ImportCertificate`, `Revoke` — but currently **not** `Generate` (see known gaps below) |
+| `subject:<name>` | The whole lifecycle of one subject: evict/save CSR/sign/renew/import/clean/revoke/generate | `SaveRequest`, `Sign`, `SignWithTTL`, `Renew`, `AutoRenew`, `Clean`, `ImportCertificate`, `Revoke`, `Generate`/`GenerateWithOptions` |
 | `inventory-decompose` | One-time legacy inventory blob conversion (etcd backend only) on the first start after upgrading | `EtcdBackend.decomposeLegacyInventory`, from `EnsureReady` |
+| `capability-probe` | Nothing. Acquired and released immediately by `StorageService.SupportsDistributedLocking` to find out whether this backend coordinates locks across processes at all | The offline `openvox-ca generate` pre-flight. The name sits deliberately outside every namespace above so a probe can never contend with an operation in flight |
 
 How each backend provides the distributed lock (a summary — the full per-backend
 mechanism, key layouts and transaction/retry detail lives in
@@ -311,11 +312,6 @@ path — still provides no cross-replica guarantee anyway.
 Concurrency limitations that are understood and tracked. This list reflects the
 state when the document was last updated and is not guaranteed exhaustive.
 
-- [#195](https://github.com/voxpupuli/openvox-ca/issues/195) — `CA.Generate`
-  (the `POST /generate/{subject}` endpoint) is the one issuance path that
-  takes only `c.mu`, not the `subject:<name>` cluster lock. On an HA backend,
-  a `Generate` on one replica can race a `Sign`/`SaveRequest`/`Generate` for
-  the same subject on another and double-issue.
 - [#196](https://github.com/voxpupuli/openvox-ca/issues/196) —
   `DELETE /certificate_request/{subject}` deletes the CSR directly through
   `StorageService`, bypassing the subject lock, so a deletion can be outrun
@@ -342,14 +338,17 @@ state when the document was last updated and is not guaranteed exhaustive.
   could collide with the `crl`/`bootstrap` key and deny revocation.
 - [#187](https://github.com/voxpupuli/openvox-ca/issues/187) — filesystem and
   SQLite backends have no same-host, cross-**process** locking; a `ctl`
-  command (or the planned offline `generate`,
-  [#175](https://github.com/voxpupuli/openvox-ca/issues/175)) racing a running
-  server on the same cadir is uncoordinated. The related blob-backend gap —
-  nothing wraps `AppendInventory` in a cluster lock on Redis, so its
-  duplicate-serial check is not cross-replica there — is tracked separately
-  as [#204](https://github.com/voxpupuli/openvox-ca/issues/204); the etcd
-  half of that gap was closed by the decomposed inventory's atomic
-  `by-serial` guard ([#138](https://github.com/voxpupuli/openvox-ca/issues/138)).
+  command, or the offline `generate`
+  ([#175](https://github.com/voxpupuli/openvox-ca/issues/175)), racing a running
+  server on the same cadir is uncoordinated. `generate` reports this before it
+  acts, via `SupportsDistributedLocking`/`SupportsAtomicInventory`, and tells
+  the operator to stop the server; that is a warning rather than a fix. The
+  related blob-backend gap — nothing wraps `AppendInventory` in a cluster lock
+  on Redis, so its duplicate-serial check is not cross-replica there — is
+  tracked separately as
+  [#204](https://github.com/voxpupuli/openvox-ca/issues/204); the etcd half of
+  that gap was closed by the decomposed inventory's atomic `by-serial` guard
+  ([#138](https://github.com/voxpupuli/openvox-ca/issues/138)).
 - [#171](https://github.com/voxpupuli/openvox-ca/issues/171) — `cachedCRL` is
   per-replica, so authentication and renewal keep accepting a certificate
   revoked elsewhere until this process re-signs the CRL.

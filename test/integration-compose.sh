@@ -1282,9 +1282,12 @@ openvox-ca-ctl --config="$_CTL_CFG" list >/dev/null 2>&1 \
 #   Starts short-lived local openvox-ca instances on port 8142 inside this
 #   container.  The shared openvox-ca service (port 8140) is untouched.
 #
-#   Phase 1 (loopback HTTP, autosign=true): bootstrap CA, generate a TLS
-#   server cert, a plain client cert, and an admin client cert carrying the
-#   pp_cli_auth OID (1.3.6.1.4.1.34380.1.3.39).
+#   Setup: bootstrap the CA, then mint the admin client cert carrying the
+#   pp_cli_auth OID (1.3.6.1.4.1.34380.1.3.39) offline with `openvox-ca
+#   generate --pp-cli-auth`, before any server starts -- the API cannot issue
+#   that grant at all.
+#   Phase 1 (loopback HTTP, autosign=true): generate a TLS server cert and a
+#   plain client cert through the API.
 #   Phase 2 (TLS, no CN allow list): verify the pp_cli_auth cert reaches
 #   admin endpoints while the plain cert is denied.
 #
@@ -1319,18 +1322,24 @@ openvox-ca-ctl setup --cadir "$_AUTH_DIR" --hostname auth-test-ca \
 # CSRs to prevent privilege escalation, so no API route can issue this. Minting
 # it here rather than during Phase 1 also exercises the claim that the command
 # needs no running server.
-if openvox-ca generate --cadir "$_AUTH_DIR" --certname openvox-admin \
-        --ttl 8760h --pp-cli-auth --key-out "$WORK_DIR/admin.key" \
-        > "$WORK_DIR/admin.crt" 2>/dev/null \
-    && [ -s "$WORK_DIR/admin.crt" ] && [ -s "$WORK_DIR/admin.key" ]; then
+# stderr is captured rather than discarded: this command refuses for several
+# tailored reasons (no CA, wrong role, no_pp_cli_auth set, a path collision),
+# and each names its own remedy. Throwing them away leaves a bare "did not
+# produce a cert" for four downstream assertions to fail behind.
+_gen_err=$(openvox-ca generate --cadir "$_AUTH_DIR" --certname openvox-admin \
+    --ttl 8760h --pp-cli-auth --key-out "$WORK_DIR/admin.key" \
+    2>&1 > "$WORK_DIR/admin.crt")
+if [ -s "$WORK_DIR/admin.crt" ] && [ -s "$WORK_DIR/admin.key" ]; then
     pass "pp_cli_auth: admin cert minted offline, with no server running"
 else
     fail "pp_cli_auth: admin cert minted offline, with no server running" \
-        "openvox-ca generate --pp-cli-auth did not produce a cert and key"
+        "openvox-ca generate --pp-cli-auth did not produce a cert and key: ${_gen_err}"
 fi
 
-# The extension must survive as UTF8String "true"; a cert without it would sail
-# through the Phase 2 checks below for the wrong reason.
+# The extension must be present; a cert without it would sail through the Phase 2
+# checks below for the wrong reason. This is a presence check only -- `openssl
+# x509 -text` renders a PrintableString identically, so the UTF8String encoding
+# is pinned by the unit specs in internal/ca and cmd/openvox-ca instead.
 _pp_oid_count=$(openssl x509 -text -noout -in "$WORK_DIR/admin.crt" 2>/dev/null \
     | grep -c "1.3.6.1.4.1.34380.1.3.39") || true
 [ "${_pp_oid_count:-0}" -gt 0 ] \

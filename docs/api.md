@@ -423,6 +423,8 @@ The CN allow list is not fixed for the life of the process: `SIGHUP` (or `system
 
 Two limits are worth knowing before relying on that to decommission a host. `--puppet-server` itself is frozen at startup — only the file is re-read — and condition 2 is untouched by a reload: a certificate carrying `pp_cli_auth=true`, which OpenVox Server issues to itself by default, remains an admin credential until it is revoked or the server is restarted with `--no-pp-cli-auth`. Revoking the certificate (`openvox-ca-ctl revoke`, or `PUT /certificate_status/{subject}` with `desired_state: revoked`) is the step that actually removes admin authority.
 
-A certificate carrying `pp_cli_auth` cannot be obtained through this API at all: authorization-arc OIDs are stripped from submitted CSRs so that no request can ask for elevated privileges. Mint one offline with [`openvox-ca generate --pp-cli-auth`](operator-cli.md#administrator-credentials), which also documents what the grant covers and the three steps needed to withdraw it.
+No *new* `pp_cli_auth` grant can be requested through this API: authorization-arc OIDs are stripped from submitted CSRs so that no request can ask for elevated privileges. Mint one offline with [`openvox-ca generate --pp-cli-auth`](operator-cli.md#administrator-credentials), which also documents what the grant covers and the three steps needed to withdraw it.
+
+An existing holder can still obtain a *fresh certificate* carrying the grant, because empty-body auto-renewal preserves authorization-arc OIDs deliberately (see [Certificate renewal](#certificate-renewal) above). That is not an escalation — it requires already holding one — but it does mean a compromised admin credential can renew itself into a new serial and a new validity window, which is why withdrawing one is not simply a matter of waiting for it to expire.
 
 > **OID source:** [`lib/puppet/ssl/oids.rb`](https://github.com/puppetlabs/puppet/blob/main/lib/puppet/ssl/oids.rb)

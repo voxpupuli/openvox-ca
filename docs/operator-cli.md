@@ -294,9 +294,23 @@ command exists for the two cases the API cannot serve:
 
 - a `pp_cli_auth` administrator credential, which the API refuses to issue by
   construction (see [Auth-arc OID stripping](migrating-from-puppet-server.md#auth-arc-oid-stripping));
-- minting before a server exists, which is the circle `openvox-ca-ctl generate`
-  cannot break — it needs an admin certificate, which needs a running server,
-  which needs a serving certificate.
+- minting before a server exists. `openvox-ca-ctl generate` can only reach that
+  by starting the CA temporarily on loopback with TLS disabled, where every
+  endpoint is unauthenticated — which is exactly the dance the migration guide
+  used to prescribe, and what this command exists to make unnecessary.
+
+`--dns` adds subject alternative names, repeatable or comma-separated. Supplying
+it **suppresses CN promotion**: with no `--dns`, the certname is added as a DNS
+SAN automatically (RFC 2818 clients match SANs, not the CN), but as soon as you
+supply any, the list is taken verbatim. So a serving certificate that must answer
+to both its own name and an alias has to list both:
+
+```bash
+openvox-ca generate --certname ca.example.com --ttl 8760h \
+  --dns ca.example.com,puppet.example.com --key-out ca_key.pem > ca.crt
+```
+
+Omitting the certname there yields a certificate no client will accept for it.
 
 `--ttl` is required. There is deliberately no default: a certificate minted this
 way is usually long-lived and privileged, and inheriting a multi-year built-in
@@ -378,10 +392,24 @@ container against the same volume, mounting somewhere for `--key-out` to land
 that outlives the container:
 
 ```bash
-podman run --rm -v ca-data:/data -v "$PWD":/out:z openvox-ca:latest \
+mkdir -p ca-admin-out
+podman run --rm \
+  -v ca-data:/data \
+  -v "$PWD/ca-admin-out":/out:Z \
+  --userns=keep-id \
+  ghcr.io/voxpupuli/openvox-ca:latest \
   generate --cadir /data --certname admin-cli --ttl 8760h \
   --pp-cli-auth --key-out /out/admin-cli_key.pem > admin-cli.crt
 ```
+
+Three details that are easy to get wrong. The image must be fully qualified —
+an unqualified name will not resolve without registry search configured. The
+images run as `USER puppet`, so under rootless podman a bind mount owned by your
+host user is not writable inside the container without `--userns=keep-id`;
+without it the mint fails at the key write, cleanly but confusingly. And the
+mount is a dedicated directory with `:Z` rather than `$PWD` with `:z`, because
+`:Z` relabels its target private to the container — pointing that at a whole
+project or home directory would relabel unrelated files with it.
 
 On Kubernetes the equivalent is scaling the Deployment to zero and running a Job
 that mounts the same PVC, with a retrieval step for the key — a `--key-out` path
@@ -445,7 +473,12 @@ format — serial, dates, subject — with nothing about the grant, so the log
 message this command emits is the only record distinguishing an administrator
 credential from a node one. It is written by whoever ran the command, and it
 only lands somewhere durable if `logfile` is configured in a file this command
-can read.
+can read **and that file already exists**. `generate` deliberately never creates
+it: run before the server has ever started, and as root, it would leave a
+root-owned logfile the unprivileged server then cannot open, and the service
+would fail to start. In the flagship case — minting before the first start —
+that means the record is terminal-only unless you create the file first with the
+server's runtime ownership, or capture stderr.
 
 **Who can do this.** The `openssl` recipe this replaces required the raw CA key
 file. This requires the ability to run the binary with the server's

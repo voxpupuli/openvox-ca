@@ -520,7 +520,13 @@ openvox-ca generate --cadir "$NEW_CADIR" --certname admin-cli \
 ```
 
 Run it on the CA host, against the server's own configuration. No running
-server, no admin certificate, and no API. `--cadir` is spelled out because this
+server, no admin certificate, and no API — and on the filesystem backend this
+guide configures, **stop the CA first if it is already running**: `generate`
+cannot coordinate with it, and a concurrent write can corrupt the inventory
+integrity record (see
+[running alongside a live server](operator-cli.md#running-alongside-a-live-server)).
+During the migration itself this costs nothing, because the new CA has not been
+started yet. `--cadir` is spelled out because this
 guide configures the server entirely by flag and never writes
 `/etc/puppet-ca/config.yaml`; where that file does exist, the command reads the
 cadir from it and the flag can be dropped.
@@ -565,9 +571,18 @@ openvox-ca-ctl import-cert --certname admin-tool --cert-file admin.crt
 # 2. It is now in the inventory and revocable by name.
 openvox-ca-ctl revoke --certname admin-tool
 
-# 3. Restart every replica so the revocation is honoured, then re-mint.
+# 3. Restart every replica so the revocation is honoured.
+#
+# 4. Stop the CA before re-minting. On the filesystem backend this guide
+#    configures, generate does not coordinate with a running server, and a
+#    concurrent write can corrupt the inventory integrity record so the server
+#    will not restart. See docs/operator-cli.md#running-alongside-a-live-server.
+systemctl stop openvox-ca
+
 openvox-ca generate --cadir "$NEW_CADIR" --certname admin-tool \
   --ttl 8760h --pp-cli-auth --key-out admin-tool_key.pem > admin-tool.crt
+
+systemctl start openvox-ca
 ```
 
 Note that step 1 is an admin-authenticated API call and needs a running server —

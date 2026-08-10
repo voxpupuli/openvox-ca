@@ -95,6 +95,7 @@ ca_subject_province: ""
 ca_path_length: -1    # -1 = unconstrained, 0 = leaf certs only, N = N levels of intermediates
 ca_validity_days: 0   # 0 = built-in default (~5 years); positive integer overrides
 leaf_validity_days: 0 # 0 = built-in default (~5 years); positive integer overrides
+promote_cn_to_san: true # add the CN as a DNS SAN when a CSR carries none (RFC 2818)
 crl_validity_days: 0  # 0 = built-in default (30 days); positive integer overrides
 csr_rate_limit: 60    # max CSR submissions per IP per minute; 0 = disable rate limiting
 # Background CRL refresh keeps the CRL's NextUpdate from lapsing on a low-churn CA.
@@ -183,6 +184,7 @@ The CA key passphrase can also be provided via `PUPPET_CA_KEY_PASSPHRASE` (env v
 | `ca_path_length` | `PUPPET_CA_CA_PATH_LENGTH` |
 | `ca_validity_days` | `PUPPET_CA_CA_VALIDITY_DAYS` |
 | `leaf_validity_days` | `PUPPET_CA_LEAF_VALIDITY_DAYS` |
+| `promote_cn_to_san` | `PUPPET_CA_PROMOTE_CN_TO_SAN` |
 | `crl_validity_days` | `PUPPET_CA_CRL_VALIDITY_DAYS` |
 | `disable_crl_refresh` | `PUPPET_CA_DISABLE_CRL_REFRESH` |
 | `crl_refresh_interval_sec` | `PUPPET_CA_CRL_REFRESH_INTERVAL_SEC` |

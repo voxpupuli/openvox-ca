@@ -311,6 +311,15 @@ whether it is safe to write to storage a live server is also using.
 | `etcd`, `redis` | yes | no |
 | `filesystem` | no | no |
 
+**"Atomic" here covers the line append *and* the integrity-head update
+together**, which is narrower than the word's use in the backend sections above.
+etcd's CAS append and Redis's Lua append are genuinely atomic for the line
+itself; what follows them is a separate write of a recomputed whole-blob HMAC,
+and it is that pair being non-atomic which makes a concurrent appender able to
+leave an integrity value covering a state that never existed. A backend can
+therefore append atomically and still answer `false` here without either claim
+being wrong.
+
 `SupportsAtomicInventory` wraps `asInventoryStore`, so it is true exactly for
 backends implementing `InventoryStore` — the SQL backends, including SQLite.
 It is a method rather than a caller-side type assertion because
@@ -350,7 +359,10 @@ otherwise state its classification here.
 The `Backend` interface is defined in
 [internal/storage/backend.go](../../internal/storage/backend.go). To add a new
 backend, implement the interface, declare its optional capabilities (see above,
-including the `capability_test.go` table), register it in
+including the `capability_test.go` table **and the operator-facing table in
+[operator-cli.md](../operator-cli.md#running-alongside-a-live-server)**, which
+tells operators whether it is safe to mint against a running server), register
+it in
 [internal/storage/spec.go](../../internal/storage/spec.go)'s
 `NewServiceFromSpec`, and add any backend-specific config fields to
 [internal/config/storage.go](../../internal/config/storage.go)'s `StorageConfig`

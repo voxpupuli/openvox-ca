@@ -39,6 +39,7 @@ wire-compatible with your existing Puppet/OpenVox fleet.
 - **CA import:** replace a bootstrapped CA with an external cert/key pair offline
 - **Intermediate CA:** run under an external root, with `openvox-ca csr` emitting a signing request for a parent CA and `openvox-ca import-ca-cert` installing the signed chain. No key material is ever supplied on the command line, so it works identically for every `ca_key_provider` including an OpenBao Transit key that never leaves the vault. See the [operator CLI reference](docs/operator-cli.md)
 - **Server-side key generation:** issue cert+key pairs without a node-submitted CSR; configurable RSA (2048/3072/4096) or ECDSA (P-256/P-384/P-521)
+- **Offline certificate minting:** `openvox-ca generate` issues a certificate directly against storage with no running server and no API — the only way to obtain a `pp_cli_auth` administrator credential, and the way to mint before a server exists
 - **Configurable key algorithms:** CA and leaf certificates can use RSA or ECDSA; ECDSA support for both bootstrapped CAs and generated leaf certs
 - **Random serial numbers:** every issued leaf certificate gets a cryptographically random 128-bit serial (CA/Browser Forum guidance)
 - **CRL Distribution Points:** optionally embed a CRL URL in every issued certificate (`--crl-url`) so verifiers can automatically fetch the CRL
