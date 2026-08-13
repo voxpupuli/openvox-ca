@@ -19,6 +19,7 @@ package ca_test
 
 import (
 	"context"
+	"path/filepath"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -48,6 +49,16 @@ var _ = Describe("CA Init with NoBootstrap", func() {
 		hasCert, err := store.HasCACert(ctx)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(hasCert).To(BeFalse())
+
+		// And the limit of the flag, which is load-bearing for callers: Init
+		// reaches EnsureDirs and InitHMAC before it decides, so NoBootstrap is
+		// not a read-only mode. cmd/openvox-ca's generate therefore runs its own
+		// guard *before* Init rather than relying on this one, and the spec
+		// asserting the cadir is byte-identical after that refusal is only
+		// meaningful because this side effect is real. If Init ever does become
+		// read-only here, that guard can be simplified -- but do not delete this
+		// assertion to make an unrelated change pass.
+		Expect(filepath.Dir(store.PrivateKeyPath("anything"))).To(BeADirectory())
 	})
 
 	It("still loads a CA that already exists", func() {

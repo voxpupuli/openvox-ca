@@ -23,6 +23,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -228,7 +229,14 @@ var _ = Describe("openvox-ca generate", func() {
 
 			_, _, err := runGenerate("--cadir", caDir, "--certname", "web01",
 				"--ttl", "8760h", "--key-out", filepath.Join(notADir, "web01.key"))
-			Expect(err).To(HaveOccurred())
+			// Both of prepareOutputPath's branches for this case say "not a
+			// directory" -- the explicit one, and the wrapped ENOTDIR that
+			// os.Stat actually produces on Unix -- so this holds whichever
+			// fires, without pinning which. A bare HaveOccurred() would pass
+			// just as well if the refusal came from somewhere else entirely.
+			Expect(err).To(MatchError(ContainSubstring("not a directory")))
+			Expect(err).To(MatchError(ContainSubstring("web01.key")))
+			Expect(storage.New(caDir).HasCert(context.Background(), "web01")).To(BeFalse())
 		})
 
 		It("reports the serial and expiry of what it issued", func() {
@@ -317,6 +325,45 @@ var _ = Describe("openvox-ca generate", func() {
 			written, err := os.ReadFile(certOut)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(certFromPEM(string(written)).Subject.CommonName).To(Equal("web01"))
+		})
+
+		It("says what was issued when the --cert-out write fails afterwards", func() {
+			// The one place the command can fail with the certificate already
+			// committed: it holds a serial, it is in the inventory, and under
+			// --force its predecessor is on the CRL. Returning the bare write
+			// error would leave the operator believing nothing was issued, and
+			// their re-run would hit ErrCertExists on a name they thought was
+			// free. Every other spec here fails before issuance, so nothing
+			// else exercises the reportSuccess-then-error shape.
+			if os.Geteuid() == 0 {
+				Skip("root ignores directory permissions")
+			}
+			roDir := filepath.Join(outDir, "readonly")
+			Expect(os.Mkdir(roDir, 0o755)).To(Succeed())
+			// After prepareOutputPath's checks, which only stat: 0500 still
+			// permits the lookup that finds the target absent and the parent a
+			// directory, and denies the CreateTemp that comes later.
+			Expect(os.Chmod(roDir, 0o500)).To(Succeed())
+			DeferCleanup(func() { _ = os.Chmod(roDir, 0o755) })
+
+			_, stderr, err := runGenerate("--cadir", caDir, "--certname", "web01",
+				"--ttl", "8760h", "--key-out", keyPath("web01"),
+				"--cert-out", filepath.Join(roDir, "web01.crt"))
+
+			Expect(err).To(MatchError(ContainSubstring("issued and recorded, but writing it to")))
+			Expect(err).To(MatchError(ContainSubstring("rather than re-running")))
+
+			store := storage.New(caDir)
+			Expect(store.HasCert(context.Background(), "web01")).To(BeTrue(),
+				"the error must not imply the certificate can be minted again")
+			certPEM, readErr := store.GetCert(context.Background(), "web01")
+			Expect(readErr).NotTo(HaveOccurred())
+			Expect(stderr).To(ContainSubstring(fmt.Sprintf("%X", certFromPEM(string(certPEM)).SerialNumber)),
+				"the serial is how the operator finds what they now own")
+
+			// The key belongs to a live certificate, so the unused-key cleanup
+			// that runs on an issuance failure must not have reached it.
+			Expect(keyPath("web01")).To(BeAnExistingFile())
 		})
 
 		It("reports the configuration and backend capabilities before acting", func() {
@@ -570,5 +617,94 @@ var _ = Describe("openvox-ca generate", func() {
 			Expect(stderr).To(ContainSubstring("will not be created"))
 			Expect(logPath).NotTo(BeAnExistingFile())
 		})
+	})
+})
+
+// capBackend is a Backend that answers only the capability probe. The embedded
+// nil interface panics on anything else, which is the point: it fails loudly if
+// reportBackendCapabilities ever starts touching storage.
+type capBackend struct {
+	storage.Backend
+	acquire func(ctx context.Context, name string) (storage.Unlocker, error)
+}
+
+func (b capBackend) AcquireLock(ctx context.Context, name string) (storage.Unlocker, error) {
+	return b.acquire(ctx, name)
+}
+
+// noopUnlocker satisfies the probe's release step.
+type noopUnlocker struct{}
+
+func (noopUnlocker) Unlock() error { return nil }
+
+// atomicCapBackend additionally claims a structured inventory, so the two
+// capabilities can be varied independently.
+type atomicCapBackend struct {
+	capBackend
+}
+
+func (atomicCapBackend) AppendEntry(context.Context, storage.CertRecord, func([]byte) []byte) error {
+	return nil
+}
+func (atomicCapBackend) Entries(context.Context) ([]storage.InventoryEntry, error) { return nil, nil }
+func (atomicCapBackend) LatestSerialForSubject(context.Context, string) (string, error) {
+	return "", nil
+}
+func (atomicCapBackend) PruneEntries(context.Context, func(storage.InventoryEntry) bool,
+	func([]storage.InventoryEntry) []byte,
+) ([]storage.InventoryEntry, error) {
+	return nil, nil
+}
+
+var _ = Describe("reportBackendCapabilities", func() {
+	// The command-level specs above run on the filesystem backend, which
+	// provides neither capability, so they only ever reach the warning branch.
+	// The other two answers are what an operator on Postgres or etcd sees, and
+	// getting either wrong sends them to stop a server for no reason -- or,
+	// worse, tells them it is safe not to.
+	var buf bytes.Buffer
+
+	BeforeEach(func() { buf.Reset() })
+
+	report := func(b storage.Backend) string {
+		reportBackendCapabilities(context.Background(), &buf,
+			storage.NewWithBackend(b, GinkgoT().TempDir()))
+		return buf.String()
+	}
+
+	lockOK := func(context.Context, string) (storage.Unlocker, error) { return noopUnlocker{}, nil }
+
+	It("clears the backend when both capabilities are present", func() {
+		out := report(atomicCapBackend{capBackend{acquire: lockOK}})
+		Expect(out).To(ContainSubstring("safe to run alongside a live server"))
+		Expect(out).NotTo(ContainSubstring("Warning"))
+	})
+
+	It("reports an unreachable lock service as unknown, not as absent", func() {
+		// SupportsDistributedLocking returns (bool, error) precisely so this
+		// case is distinguishable. Collapsing it to false would tell an
+		// operator whose etcd is briefly unreachable that their backend lacks
+		// cross-process locking, which is not true and not the problem.
+		out := report(atomicCapBackend{capBackend{
+			acquire: func(context.Context, string) (storage.Unlocker, error) {
+				return nil, errors.New("etcd: context deadline exceeded")
+			},
+		}})
+		Expect(out).To(ContainSubstring("could not determine"))
+		Expect(out).To(ContainSubstring("etcd: context deadline exceeded"))
+		Expect(out).To(ContainSubstring("cross-process locking: unknown"))
+		Expect(out).NotTo(ContainSubstring("cross-process locking: no"))
+		Expect(out).NotTo(ContainSubstring("safe to run alongside"))
+	})
+
+	It("still warns when locking is real but the inventory append is not", func() {
+		// etcd and Redis: the subject lock coordinates, but AppendInventory
+		// recomputes a whole-blob HMAC from a snapshot, so a concurrent
+		// appender can still leave a record the server refuses to start on.
+		out := report(capBackend{acquire: lockOK})
+		Expect(out).To(ContainSubstring("cross-process locking: yes"))
+		Expect(out).To(ContainSubstring("atomic inventory append: false"))
+		Expect(out).To(ContainSubstring("Stop the server"))
+		Expect(out).NotTo(ContainSubstring("safe to run alongside"))
 	})
 })

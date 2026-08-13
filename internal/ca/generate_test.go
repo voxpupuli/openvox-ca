@@ -609,17 +609,28 @@ var _ = Describe("CA GenerateWithOptions replacement", func() {
 		Expect(revokedSerials()).To(ContainElement(oldSerial))
 		Expect(revokedSerials()).NotTo(ContainElement(newSerial))
 		Expect(store.HasCert(ctx, "replace-node")).To(BeTrue())
+
+		// Replaced is what the command keys its "revoked the previous
+		// certificate" advisory off, and nothing else observes it. Without this
+		// the field could report anything and every other spec would pass.
+		Expect(second.Replaced).To(BeTrue())
+		Expect(first.Replaced).To(BeFalse(), "an ordinary issuance retired nothing")
 	})
 
 	It("is not an error when there is nothing to replace", func() {
 		// Unlike Clean, which reports ErrNotFound. This command's job is to end
 		// with a certificate, so being asked to replace one that does not exist
 		// is a no-op, not a failure -- which keeps --force usable in scripts.
-		_, err := myCA.GenerateWithOptions(ctx, "fresh-node", ca.GenerateOptions{
+		result, err := myCA.GenerateWithOptions(ctx, "fresh-node", ca.GenerateOptions{
 			ReplaceExisting: true,
 		})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(store.HasCert(ctx, "fresh-node")).To(BeTrue())
+
+		// Replaced reports what was retired, not what was asked for. Deriving
+		// it from opts.ReplaceExisting would make the command tell the operator
+		// it revoked a certificate that never existed.
+		Expect(result.Replaced).To(BeFalse())
 	})
 
 	It("revokes the stored certificate's serial, not the inventory's latest", func() {
@@ -692,6 +703,39 @@ var _ = Describe("CA GenerateWithOptions replacement", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(buf.String()).NotTo(ContainSubstring("authorisation extension"),
 			"an ordinary node certificate must not look like a grant in the log")
+	})
+
+	It("records the grant even when a later step fails and rolls the certificate back", func() {
+		// SECURITY: the audit line must not be contingent on the rest of the
+		// call succeeding. By the time issueLeafLocked returns, the grant is
+		// signed into a certificate and has consumed a serial and an inventory
+		// row; the SavePrivateKey rollback below deletes the certificate blob
+		// but neither of those, so a grant logged at the end of the closure
+		// would leave a privileged issuance with no trace outside the DER.
+		// Move the AuthGrants loop back below SavePrivateKey and this is the
+		// only spec that notices. NIST 800-53: AU-2.
+		privDir := filepath.Join(tmpDir, "private")
+		Expect(os.Chmod(privDir, 0o555)).To(Succeed())
+		DeferCleanup(func() { _ = os.Chmod(privDir, 0o755) })
+		if os.Geteuid() == 0 {
+			Skip("root ignores directory permissions")
+		}
+
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		defer slog.SetDefault(orig)
+
+		_, err := myCA.GenerateWithOptions(ctx, "rolled-back-node", ca.GenerateOptions{
+			AuthGrants:                []ca.AuthGrant{ca.PpCliAuth()},
+			RetainPrivateKeyInStorage: true,
+		})
+		Expect(err).To(HaveOccurred())
+		Expect(store.HasCert(ctx, "rolled-back-node")).To(BeFalse(),
+			"the rollback is what makes this the awkward case worth pinning")
+
+		Expect(buf.String()).To(ContainSubstring("rolled-back-node"))
+		Expect(buf.String()).To(ContainSubstring("pp_cli_auth=true"))
 	})
 
 	It("emits the key before the revoke, not after it", func() {

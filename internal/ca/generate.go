@@ -339,6 +339,21 @@ func (c *CA) GenerateWithOptions(ctx context.Context, subject string, opts Gener
 			return err
 		}
 
+		for _, g := range opts.AuthGrants {
+			// SECURITY: an authorisation grant is the most privileged thing this
+			// CA issues. Logged here rather than at the call site so it is
+			// recorded whoever reaches this seam, and immediately after
+			// issueLeafLocked rather than at the end of the closure so no later
+			// step can return early and lose the record. By this point the
+			// certificate is signed, its serial allocated and its inventory row
+			// written; the SavePrivateKey rollback below deletes the certificate
+			// blob but neither the serial nor the row, so a grant logged only at
+			// the end would leave that issuance with no trace outside the DER.
+			// NIST 800-53: AC-6 (Least Privilege), AU-2 (Event Logging)
+			slog.Warn("Issued certificate carrying a Puppet authorisation extension",
+				"subject", subject, "grant", g.String())
+		}
+
 		if opts.RetainPrivateKeyInStorage {
 			if err := c.Storage.SavePrivateKey(ctx, subject, keyPEM); err != nil {
 				// Clean up the just-issued certificate to avoid inconsistent state
@@ -377,15 +392,6 @@ func (c *CA) GenerateWithOptions(ctx context.Context, subject string, opts Gener
 			} else {
 				slog.Debug("Removed pending CSR superseded by generation", "subject", subject)
 			}
-		}
-
-		for _, g := range opts.AuthGrants {
-			// SECURITY: an authorisation grant is the most privileged thing this
-			// CA issues. Logged here rather than at the call site so it is
-			// recorded whoever reaches this seam.
-			// NIST 800-53: AC-6 (Least Privilege), AU-2 (Event Logging)
-			slog.Warn("Issued certificate carrying a Puppet authorisation extension",
-				"subject", subject, "grant", g.String())
 		}
 
 		slog.Debug("Certificate generated", "subject", subject, "algo", string(leafCfg.Algo))
