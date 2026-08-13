@@ -178,6 +178,14 @@ operators to potentially anomalous administrative activity. Operators should:
 - Forward `openvox-ca` logs to a centralized log aggregator (e.g. Loki,
   Elasticsearch, Splunk)
 - Create alerts on `"High rate of destructive operations"` log messages
+- Create alerts on `"Issued certificate carrying a Puppet authorisation
+  extension"` too. That one is emitted by `openvox-ca generate --pp-cli-auth`
+  (see [operator-cli.md](operator-cli.md#administrator-credentials)) and marks
+  the minting of a CA administrator credential — the only record that
+  distinguishes one from an ordinary node certificate, since the inventory line
+  keeps the Puppet-compatible format and says nothing about the grant. It is
+  the counterpart to the alert above: this one fires when the privilege is
+  handed out, that one when it is used destructively
 - Investigate any alerts promptly. A burst of revocations may indicate a
   compromised admin certificate or an operational error
 - Consider whether the `--puppet-server` allow list should be tightened if

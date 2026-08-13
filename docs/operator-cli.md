@@ -480,6 +480,21 @@ would fail to start. In the flagship case — minting before the first start —
 that means the record is terminal-only unless you create the file first with the
 server's runtime ownership, or capture stderr.
 
+The line to alert on, as emitted:
+
+```text
+level=WARN msg="Issued certificate carrying a Puppet authorisation extension" subject=openvox-admin grant="pp_cli_auth=true"
+```
+
+`--force` emits a second one for the certificate it retired, at `INFO`:
+
+```text
+level=INFO msg="Revoked a certificate to make room for its replacement" subject=web01.example.com serial=0A
+```
+
+Both are worth a rule wherever these logs are aggregated; see
+[Monitoring destructive operations](ca-key-security.md#monitoring-destructive-operations).
+
 **Who can do this.** The `openssl` recipe this replaces required the raw CA key
 file. This requires the ability to run the binary with the server's
 configuration — which under `ca_key_provider: openbao` means Transit sign

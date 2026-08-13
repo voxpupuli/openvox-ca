@@ -90,9 +90,9 @@ var _ = Describe("Backend capability reporting", func() {
 			_, err := svc(stub).SupportsDistributedLocking(ctx)
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(stub.lastName).To(Equal(lockProbeName))
-			Expect(stub.lastName).NotTo(HavePrefix("subject:"))
-			Expect(stub.lastName).NotTo(BeElementOf("crl", "bootstrap"))
+			Expect(stub.name()).To(Equal(lockProbeName))
+			Expect(stub.name()).NotTo(HavePrefix("subject:"))
+			Expect(stub.name()).NotTo(BeElementOf("crl", "bootstrap"))
 		})
 
 		It("still reports true when releasing the probe fails", func() {

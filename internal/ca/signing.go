@@ -1072,15 +1072,20 @@ func (c *CA) AutoRenew(ctx context.Context, presentedCert *x509.Certificate) ([]
 		return nil, err
 	}
 
-	// SECURITY: the key-strength policy is enforced by issueLeafLocked, the tail
-	// every issuance path shares. It matters most on this path: a cert imported
-	// from a legacy CA (see the migrate command) may predate this CA's key
-	// policy, and auto-renewal must not be a backdoor to indefinitely extend a
+	// The key-strength policy is enforced by issueLeafLocked, the tail every
+	// issuance path shares. It matters most on this path: a cert imported from
+	// a legacy CA (see the migrate command) may predate this CA's key policy,
+	// and auto-renewal must not be a backdoor to indefinitely extend a
 	// substandard key — the operator/agent should re-key via the CSR-based Renew
 	// path instead. The rejection now happens after the subject lock is taken
 	// rather than before it, which is acceptable: this route is
 	// mTLS-authenticated and the lock is scoped to the caller's own subject.
-	// NIST 800-53: SC-12, SC-13 (Cryptographic Protection)
+	//
+	// A pointer, not a control: this is deliberately a plain comment, matching
+	// the equivalent signpost in signWithDuration. The SECURITY / NIST 800-53
+	// SC-12, SC-13 annotation belongs with the check itself, in
+	// issueLeafLocked, so that enumerating the annotations in this tree maps
+	// each one to the line implementing it rather than to the timeout below.
 
 	ctx, cancel := context.WithTimeout(ctx, LockTimeout)
 	defer cancel()

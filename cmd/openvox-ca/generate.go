@@ -376,7 +376,18 @@ func reportBackendCapabilities(ctx context.Context, w io.Writer, store *storage.
 	}
 
 	if lockErr == nil && locking && atomicInventory {
-		_, _ = fmt.Fprintf(w, "Backend coordinates across processes: safe to run alongside a live server.\n")
+		// The one branch that gives an operator a green light, so it is the one
+		// that must not over-reassure. Writes are coordinated; the running
+		// server's view of them is not. serialIndex is an in-process map built
+		// by Init, so a serial minted by this process is absent from it until
+		// that server restarts, and OCSPResponse answers "unknown" for an
+		// unknown serial. A verifier set to hard-fail on unknown rejects a
+		// correctly issued certificate, and nothing else in this command's
+		// output points at the restart that fixes it. The --force path already
+		// surfaces the analogous CRL-reload staleness in reportSuccess.
+		_, _ = fmt.Fprintf(w, "Backend coordinates across processes: safe to run alongside a live server.\n"+
+			"  Note: a running server answers OCSP 'unknown' for the new serial until it restarts,\n"+
+			"  because its serial index is built at startup. The CRL and inventory are correct immediately.\n")
 		return
 	}
 

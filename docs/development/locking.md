@@ -170,14 +170,15 @@ Nested acquisition always follows one global order:
 subject:<name>  →  crl  →  c.mu  →  (StorageService internal mutexes)
 ```
 
-- `Revoke`, `Clean`, `Renew`, and `AutoRenew` are the paths that take all
-  three. For the three issuance paths it is the subject lock around the whole
-  operation, then the `crl` lock + `c.mu` for the revocation step; note they
-  release and re-acquire `c.mu` between the signing and revocation steps —
-  `c.mu` is not held across a `WithLock` acquisition. `Revoke` has the same
-  nesting for a different reason: the `crl` lock + `c.mu` cover the revocation
-  that is the whole operation, and the subject lock is there only to serialise
-  it against an issuance already under way for that subject.
+- `Revoke`, `Clean`, `Renew`, `AutoRenew` and `GenerateWithOptions` (the last
+  on its `ReplaceExisting` path only) are the paths that take all three. For
+  the four issuance paths it is the subject lock around the whole operation,
+  then the `crl` lock + `c.mu` for the revocation step; note they release and
+  re-acquire `c.mu` between the signing and revocation steps — `c.mu` is not
+  held across a `WithLock` acquisition. `Revoke` has the same nesting for a
+  different reason: the `crl` lock + `c.mu` cover the revocation that is the
+  whole operation, and the subject lock is there only to serialise it against
+  an issuance already under way for that subject.
 - No code path acquires `subject:<name>` while holding `crl`, and none acquires
   either while holding `c.mu`. Keep it that way; the comments in
   [signing.go](../../internal/ca/signing.go) and
@@ -242,8 +243,9 @@ path — still provides no cross-replica guarantee anyway.
    / [PR #186](https://github.com/voxpupuli/openvox-ca/pull/186) exist because
    a renewal once did such a re-check outside the lock.
 3. **Keep expensive, shared-state-free work outside the lock.** Key
-   generation and CSR assembly in `Generate` run before any lock is taken;
-   parsing and validation in `Renew`/`SaveRequest` likewise. Only the
+   generation in `Generate` runs before any lock is taken (it no longer
+   assembles a CSR at all — that round trip through the signing path was
+   removed); parsing and validation in `Renew`/`SaveRequest` likewise. Only the
    storage-touching tail belongs inside. The deliberate exception is the CA
    signature itself: `x509.CreateCertificate` runs under `c.mu` (see Tier 3),
    because the cache update it guards must be atomic with the issuance.

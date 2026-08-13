@@ -25,6 +25,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -47,6 +48,26 @@ func runGenerate(args ...string) (stdout, stderr string, err error) {
 	err = root.Execute()
 	return out.String(), errOut.String(), err
 }
+
+// runGenerateStdout is runGenerate with the caller's own stdout writer, so a
+// spec can drive the failure of the default output path. The certificate goes
+// to stdout unless --cert-out is given, and that is the form every documented
+// invocation uses.
+func runGenerateStdout(stdout io.Writer, args ...string) (stderr string, err error) {
+	root := newRootCmd()
+	var errOut bytes.Buffer
+	root.SetOut(stdout)
+	root.SetErr(&errOut)
+	root.SetArgs(append([]string{"generate"}, args...))
+	err = root.Execute()
+	return errOut.String(), err
+}
+
+// failingWriter refuses every write, standing in for a closed pipe or a full
+// filesystem behind stdout.
+type failingWriter struct{ err error }
+
+func (f failingWriter) Write([]byte) (int, error) { return 0, f.err }
 
 // hashTree fingerprints every file under dir, so a spec can assert that a
 // refusal changed nothing at all rather than only that one file survived.
@@ -199,18 +220,25 @@ var _ = Describe("openvox-ca generate", func() {
 			Expect(err).To(MatchError(ContainSubstring(`"ttl" not set`)))
 		})
 
-		It("refuses a zero or negative ttl", func() {
-			// MarkFlagRequired only asserts the flag was given. Without an
-			// explicit check, --ttl 0 reaches issueLeafLocked and inherits the
-			// multi-year built-in -- the exact silent default this command
-			// requires --ttl in order to prevent.
-			for _, bad := range []string{"0", "0s", "-1h"} {
+		// MarkFlagRequired only asserts the flag was given. Without an explicit
+		// check, --ttl 0 reaches issueLeafLocked and inherits the multi-year
+		// built-in -- the exact silent default this command requires --ttl in
+		// order to prevent.
+		//
+		// One Entry per spelling rather than a loop: a loop stops at the first
+		// failed Expect, so a regression reaching only "-1h" would stay hidden
+		// behind "0" until that was fixed and the suite re-run.
+		DescribeTable("refuses a zero or negative ttl",
+			func(bad string) {
 				_, _, err := runGenerate("--cadir", caDir, "--certname", "web01",
 					"--ttl", bad, "--key-out", keyPath("web01"))
-				Expect(err).To(MatchError(ContainSubstring("--ttl must be a positive duration")), bad)
-			}
-			Expect(storage.New(caDir).HasCert(context.Background(), "web01")).To(BeFalse())
-		})
+				Expect(err).To(MatchError(ContainSubstring("--ttl must be a positive duration")))
+				Expect(storage.New(caDir).HasCert(context.Background(), "web01")).To(BeFalse())
+			},
+			Entry("bare zero", "0"),
+			Entry("zero seconds", "0s"),
+			Entry("negative", "-1h"),
+		)
 
 		It("refuses --key-out and --cert-out pointing at one path", func() {
 			// The key is written first and the certificate second, so a shared
@@ -364,6 +392,27 @@ var _ = Describe("openvox-ca generate", func() {
 			// The key belongs to a live certificate, so the unused-key cleanup
 			// that runs on an issuance failure must not have reached it.
 			Expect(keyPath("web01")).To(BeAnExistingFile())
+		})
+
+		It("says what was issued when the stdout write fails afterwards", func() {
+			// The --cert-out twin above is the rarer path. Stdout is the
+			// default, and the form every documented invocation uses
+			// ('openvox-ca generate ... > web01.crt'), so a closed pipe or a
+			// full filesystem lands here -- with the certificate already
+			// committed, exactly as in the sibling spec.
+			stderr, err := runGenerateStdout(failingWriter{err: errors.New("broken pipe")},
+				"--cadir", caDir, "--certname", "web01",
+				"--ttl", "8760h", "--key-out", keyPath("web01"))
+
+			Expect(err).To(MatchError(ContainSubstring("could not be written to stdout")))
+			Expect(err).To(MatchError(ContainSubstring("broken pipe")))
+
+			store := storage.New(caDir)
+			Expect(store.HasCert(context.Background(), "web01")).To(BeTrue())
+			certPEM, readErr := store.GetCert(context.Background(), "web01")
+			Expect(readErr).NotTo(HaveOccurred())
+			Expect(stderr).To(ContainSubstring(fmt.Sprintf("%X", certFromPEM(string(certPEM)).SerialNumber)),
+				"stderr is the only place left to tell the operator what they now own")
 		})
 
 		It("reports the configuration and backend capabilities before acting", func() {
@@ -617,6 +666,45 @@ var _ = Describe("openvox-ca generate", func() {
 			Expect(stderr).To(ContainSubstring("will not be created"))
 			Expect(logPath).NotTo(BeAnExistingFile())
 		})
+
+		It("says the record is terminal-only when no logfile is configured", func() {
+			// SECURITY: the flagship case. Minting before the first server
+			// start is exactly when no logfile exists, and the grant line is
+			// the only record distinguishing an administrator credential from
+			// a node one -- docs/operator-cli.md tells the operator to capture
+			// stderr because of this notice. Lose it silently and a
+			// pp_cli_auth mint leaves no trace and no warning that it did not.
+			// The pinned config in the outer BeforeEach sets no logfile.
+			_, stderr, err := runGenerate("--cadir", caDir, "--certname", "admin",
+				"--ttl", "8760h", "--pp-cli-auth", "--key-out", keyPath("admin"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(stderr).To(ContainSubstring("terminal-only"))
+		})
+
+		It("falls back to stderr when the configured logfile cannot be opened", func() {
+			// Present, so it survives the not-present check above, and still
+			// unopenable. The command must degrade rather than abort: an
+			// interactive mint failing because a log file is unwritable would
+			// be the wrong trade, and the root command's own behaviour here
+			// (return the error) is the one precedent not to follow.
+			if os.Geteuid() == 0 {
+				Skip("root ignores file permissions")
+			}
+			logPath := filepath.Join(outDir, "unwritable.log")
+			Expect(os.WriteFile(logPath, nil, 0o400)).To(Succeed())
+
+			cfgPath := filepath.Join(GinkgoT().TempDir(), "log.yaml")
+			Expect(os.WriteFile(cfgPath, []byte(
+				"ca_key_algo: ecdsa\nca_key_size: 256\nlogfile: "+logPath+"\n"), 0o644)).To(Succeed())
+			setEnv("PUPPET_CA_CONFIG", cfgPath)
+
+			_, stderr, err := runGenerate("--cadir", caDir, "--certname", "web01",
+				"--ttl", "8760h", "--key-out", keyPath("web01"))
+			Expect(err).NotTo(HaveOccurred(), "a logging problem must not stop an operator issuing")
+			Expect(stderr).To(ContainSubstring("could not open"))
+			Expect(stderr).To(ContainSubstring("logging to stderr instead"))
+			Expect(storage.New(caDir).HasCert(context.Background(), "web01")).To(BeTrue())
+		})
 	})
 })
 
@@ -678,6 +766,15 @@ var _ = Describe("reportBackendCapabilities", func() {
 		out := report(atomicCapBackend{capBackend{acquire: lockOK}})
 		Expect(out).To(ContainSubstring("safe to run alongside a live server"))
 		Expect(out).NotTo(ContainSubstring("Warning"))
+
+		// The green light is qualified, and the qualification is the part that
+		// costs an operator something if it goes missing: writes coordinate,
+		// but the running server's serialIndex is built at Init, so it answers
+		// OCSP "unknown" for this serial until it restarts. A verifier set to
+		// hard-fail on unknown then rejects a correctly issued certificate,
+		// with nothing in this output pointing at the restart that fixes it.
+		Expect(out).To(ContainSubstring("OCSP 'unknown'"))
+		Expect(out).To(ContainSubstring("until it restarts"))
 	})
 
 	It("reports an unreachable lock service as unknown, not as absent", func() {
