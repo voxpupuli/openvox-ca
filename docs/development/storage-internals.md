@@ -348,11 +348,15 @@ to every `Sign` — so the two necessarily duplicate the classification. A
 [internal/storage/capability_test.go](../../internal/storage/capability_test.go)
 runs the backends constructible without a live service — `filesystem`, `sqlite`
 and a stub `Locker` — through both and asserts they agree. That spec is what
-keeps the probe and `WithLock` from drifting, not the type system. The
-networked backends (`postgres`, `mysql`, `etcd`, `redis`) are classified by the
-code above rather than by a spec, because the table needs no running service.
-**Add a new backend to that table when it can be constructed in-process**, and
-otherwise state its classification here.
+keeps the probe and `WithLock` from drifting, not the type system.
+
+That agreement table covers the *locking* column only: `postgres`, `mysql`,
+`etcd` and `redis` are classified there by the code above rather than by a spec,
+because the probe needs a live service to answer. `SupportsAtomicInventory` has
+no such constraint — it is a pure type probe, so the same file covers `etcd` and
+`redis` in-process alongside `filesystem`. **Add a new backend to whichever of
+the two tables can construct it in-process**, and otherwise state its
+classification here.
 
 ## Extending
 

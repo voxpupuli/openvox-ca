@@ -39,7 +39,10 @@ import (
 // wants to succeed, whereas this only decides which of three sentences to
 // print. A backend that cannot answer in this long is one the operator needs
 // told about promptly, not waited on.
-const lockProbeTimeout = 5 * time.Second
+//
+// A var rather than a const so the spec covering a backend that never answers
+// can shorten it instead of spending this long. Nothing else reassigns it.
+var lockProbeTimeout = 5 * time.Second
 
 // retrievalAdvice is shared by both post-issuance write-failure branches. The
 // operator owns a certificate they have no copy of, and the thing they must not
@@ -58,9 +61,10 @@ const retrievalAdvice = "Retrieve it with 'openvox-ca-ctl list --all' or from th
 // Two things the API cannot do are the reason this exists. A pp_cli_auth
 // certificate cannot be obtained through it at all, because the CSR path strips
 // authorisation-arc OIDs; and nothing can be issued before a server is running,
-// which is the bootstrap circle tls_self_provision was added to break. Ordinary
-// node certificates should keep using POST /generate/{subject}, which needs no
-// outage -- see the scope note in docs/operator-cli.md.
+// so a serving certificate cannot be minted through the API that needs it --
+// the bootstrap circle this command breaks. Ordinary node certificates should
+// keep using POST /generate/{subject}, which needs no outage -- see the scope
+// note in docs/operator-cli.md.
 func newGenerateCmd() *cobra.Command {
 	var (
 		configFile string

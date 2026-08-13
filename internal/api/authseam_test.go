@@ -15,7 +15,7 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-package api
+package api_test
 
 import (
 	"go/ast"
@@ -38,7 +38,10 @@ import (
 // entry in `forbidden` needs the new name -- do not simply delete the binding.
 //
 // They live in a _test.go file, which the walk skips, so the gate cannot trip
-// on them.
+// on them. This file is package api_test rather than package api: it reaches no
+// unexported identifier of the package it guards, and AGENTS.md asks for
+// black-box unless internals are genuinely needed. The walk reads the same
+// directory either way.
 var (
 	_ = ca.PpCliAuth
 	_ = ca.AuthGrant{}
@@ -91,10 +94,10 @@ var _ = Describe("The authorisation-grant seam", func() {
 	//   s.CA.GenerateWithOptions -> SelectorExpr whose receiver is s.CA rather
 	//                               than the package, hence matching on Sel
 	//   PpCliAuth()              -> bare Ident, under a dot-import
-	// The Ident case cannot arise today -- a dot-import of internal/ca into this
-	// package does not compile, because both export New -- so it is unexercised
-	// against real source. It costs three lines and closes the hole a future
-	// rename would open.
+	// The Ident case cannot arise today -- a dot-import of internal/ca into
+	// package api does not compile, because both export New -- so it is
+	// unexercised against real source. It costs three lines and closes the hole
+	// a future rename would open.
 	forbiddenRefs := func(fset *token.FileSet, file *ast.File) []string {
 		var found []string
 		ast.Inspect(file, func(n ast.Node) bool {

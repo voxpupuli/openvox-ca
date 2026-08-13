@@ -31,6 +31,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -478,6 +479,15 @@ var _ = Describe("openvox-ca generate", func() {
 			// The filesystem backend provides neither capability, so the
 			// stop-the-server warning is the correct output here.
 			Expect(stderr).To(ContainSubstring("Stop the server before running this"))
+
+			// "Before acting" is the whole value of the warning, and presence
+			// alone does not pin it: move reportBackendCapabilities below
+			// reportSuccess and every assertion above still holds, while the
+			// operator learns their backend cannot coordinate writes only
+			// after the mint it was meant to stop.
+			Expect(strings.Index(stderr, "Stop the server before running this")).
+				To(BeNumerically("<", strings.Index(stderr, "Issued web01")),
+					"the pre-flight report must precede the issuance it guards")
 		})
 
 		It("reports the issuance settings it actually resolved", func() {
@@ -547,6 +557,10 @@ var _ = Describe("openvox-ca generate", func() {
 			_, _, err := runGenerate("--cadir", caDir, "--certname", "web01",
 				"--ttl", "8760h", "--key-out", filepath.Join(outDir, "nope", "web01.key"))
 			Expect(err).To(MatchError(ContainSubstring("does not exist")))
+			// Same invariant as the sibling above: the refusal has to happen
+			// before issuance, or a serial is consumed and an inventory row
+			// written for a mint that then reports failure.
+			Expect(storage.New(caDir).HasCert(context.Background(), "web01")).To(BeFalse())
 		})
 
 		It("refuses to overwrite an existing certificate file", func() {
@@ -556,6 +570,7 @@ var _ = Describe("openvox-ca generate", func() {
 			_, _, err := runGenerate("--cadir", caDir, "--certname", "web01",
 				"--ttl", "8760h", "--key-out", keyPath("web01"), "--cert-out", certOut)
 			Expect(err).To(MatchError(ContainSubstring("refusing to overwrite")))
+			Expect(storage.New(caDir).HasCert(context.Background(), "web01")).To(BeFalse())
 		})
 	})
 
@@ -875,6 +890,40 @@ var _ = Describe("reportBackendCapabilities", func() {
 		Expect(out).To(ContainSubstring("cross-process locking: unknown"))
 		Expect(out).NotTo(ContainSubstring("cross-process locking: no"))
 		Expect(out).NotTo(ContainSubstring("safe to run alongside"))
+	})
+
+	It("does not wait forever on a backend that never answers", func() {
+		// The bound, not just its consequence. The spec above pins that an
+		// AcquireLock *error* becomes "unknown", but a backend that simply
+		// never returns produces no error to map: pg_advisory_lock blocks
+		// until granted or the context is cancelled, and cmd.Execute() runs on
+		// context.Background(). Drop the WithTimeout in
+		// reportBackendCapabilities and every other spec here still passes
+		// while the command hangs before printing anything.
+		orig := lockProbeTimeout
+		lockProbeTimeout = 50 * time.Millisecond
+		DeferCleanup(func() { lockProbeTimeout = orig })
+
+		var reached string
+		done := make(chan struct{})
+		go func() {
+			defer GinkgoRecover()
+			defer close(done)
+			reached = report(atomicCapBackend{capBackend{
+				acquire: func(ctx context.Context, _ string) (storage.Unlocker, error) {
+					<-ctx.Done()
+					return nil, ctx.Err()
+				},
+			}})
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			Fail("the capability probe never returned: it is running on an unbounded context")
+		}
+		Expect(reached).To(ContainSubstring("cross-process locking: unknown"))
+		Expect(reached).NotTo(ContainSubstring("safe to run alongside"))
 	})
 
 	It("still warns when locking is real but the inventory append is not", func() {

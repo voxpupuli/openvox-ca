@@ -428,7 +428,7 @@ appears in the inventory.
 
 `--force` revokes the existing certificate and issues a replacement. The old
 serial goes on the CRL, but **a running server honours it until that server
-reloads the CRL**, which can be a substantial fraction of `crl_validity` away.
+reloads the CRL**, which can be a substantial fraction of `crl_validity_days` away.
 Restart it if that matters. If the name is the CA's own hostname, the command
 says so: you may be revoking the certificate the server is currently serving.
 
@@ -451,7 +451,7 @@ get wrong:
 1. `openvox-ca-ctl revoke --certname <name>` — revokes the newest serial.
 2. **Restart every replica.** Each holds its own CRL cache, so a revocation made
    elsewhere is not honoured until the process reloads it; waiting for that can
-   take roughly two-thirds of `crl_validity`, and even afterwards a pre-signed
+   take roughly two-thirds of `crl_validity_days`, and even afterwards a pre-signed
    OCSP response can vouch for the revoked serial for up to another four hours.
 3. **Check the inventory for other live serials for that name.** With
    `revoke_on_auto_renew: false`, or after a renewal whose best-effort revoke

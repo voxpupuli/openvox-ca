@@ -181,6 +181,15 @@ Conventions:
   `docs/api.md#authorization-tiers` publishes the tier assignment to operators,
   so update it when a change moves a route between tiers — it is a tier table,
   not this matrix, and most cells here have no counterpart there.
+- `internal/api/authseam_test.go` is the second structural gate in that package.
+  It parses `internal/api`'s own non-test files and fails if any of them names
+  `AuthGrant`, `PpCliAuth`, `GenerateOptions` or `GenerateWithOptions` — the
+  in-process seam for minting a `pp_cli_auth` credential, which the CSR path
+  deliberately strips so that no request can ask for one. If it fires, revisit
+  the security argument in `internal/ca/authgrant.go` before touching the gate.
+  Renaming any of those identifiers breaks the compile-time bindings at the top
+  of that file: update the bindings and the `forbidden` map together, and do not
+  delete either to restore the build.
 
 ### Integration suites (build-tagged)
 
