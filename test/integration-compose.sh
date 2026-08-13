@@ -1310,7 +1310,7 @@ _wait_auth_ca() {
     return 1
 }
 
-# --- Phase 1: loopback HTTP, autosign=true, generate all certs ---------------
+# --- Setup: bootstrap the CA and mint the admin credential, no server ---------
 
 openvox-ca-ctl setup --cadir "$_AUTH_DIR" --hostname auth-test-ca \
     2>/dev/null
@@ -1353,6 +1353,8 @@ grep -q "openvox-admin" "$_AUTH_DIR/inventory.txt" 2>/dev/null \
     && pass "pp_cli_auth: offline-minted cert is recorded in the inventory" \
     || fail "pp_cli_auth: offline-minted cert is recorded in the inventory" \
            "no inventory row for openvox-admin"
+
+# --- Phase 1: loopback HTTP, autosign=true, TLS server + plain client certs ---
 
 openvox-ca --cadir "$_AUTH_DIR" \
     --host 127.0.0.1 --port "$_AUTH_PORT" \

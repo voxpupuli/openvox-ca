@@ -54,6 +54,24 @@ type recordingLockBackend struct {
 	acquired []string
 }
 
+// crlWriteFailBackend fails only the CRL write, so a spec can drive the revoke
+// phase of a replacement into failure while everything else keeps working.
+// Chmod cannot do this job: the CRL is rewritten by a temp file plus rename in
+// the cadir, so making it unwritable means making the whole directory
+// unwritable, which fails the certificate write too and would satisfy the
+// assertions for the wrong reason.
+type crlWriteFailBackend struct {
+	storage.Backend
+	err error
+}
+
+func (b *crlWriteFailBackend) Put(ctx context.Context, key string, data []byte, kind storage.BlobKind) error {
+	if key == storage.KeyCRL {
+		return b.err
+	}
+	return b.Backend.Put(ctx, key, data, kind)
+}
+
 func (b *recordingLockBackend) AcquireLock(_ context.Context, name string) (storage.Unlocker, error) {
 	b.mu.Lock()
 	if b.locks == nil {
@@ -617,6 +635,34 @@ var _ = Describe("CA GenerateWithOptions replacement", func() {
 		Expect(first.Replaced).To(BeFalse(), "an ordinary issuance retired nothing")
 	})
 
+	It("records the forced revocation in the log", func() {
+		// SECURITY: docs/operator-cli.md publishes this message and its
+		// attributes as a line to alert on, and revokeSerialLocked itself
+		// records only at Debug -- so without this line the only trace of an
+		// operator-forced revocation at default level is the CRL. Captured at
+		// Info rather than Warn: the sibling grant spec installs a Warn handler
+		// and would not see this one at all. NIST 800-53: AU-2.
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+		defer slog.SetDefault(orig)
+
+		first, err := myCA.GenerateWithOptions(ctx, "logged-replace-node", ca.GenerateOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		oldSerial := serialOf(first)
+		buf.Reset()
+
+		_, err = myCA.GenerateWithOptions(ctx, "logged-replace-node", ca.GenerateOptions{
+			ReplaceExisting: true,
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(buf.String()).To(ContainSubstring("Revoked a certificate to make room for its replacement"))
+		Expect(buf.String()).To(ContainSubstring("subject=logged-replace-node"))
+		Expect(buf.String()).To(ContainSubstring("serial="+oldSerial),
+			"the retired serial is what an operator needs to correlate with the CRL")
+	})
+
 	It("is not an error when there is nothing to replace", func() {
 		// Unlike Clean, which reports ErrNotFound. This command's job is to end
 		// with a certificate, so being asked to replace one that does not exist
@@ -680,6 +726,44 @@ var _ = Describe("CA GenerateWithOptions replacement", func() {
 		Expect(err).NotTo(MatchError(ca.ErrCertExists))
 		Expect(err.Error()).To(ContainSubstring("openvox-ca-ctl clean"))
 		Expect(revokedSerials()).To(HaveLen(before), "nothing may be revoked when the read fails")
+	})
+
+	It("issues nothing when the revoke fails, rather than leaving two live certificates", func() {
+		// The fail-closed half of the replacement path, and the one the two
+		// neighbouring specs bracket without entering: one fails in the read
+		// phase and one in the issue phase, so nothing makes revokeSerialLocked
+		// itself fail. Clean logs and proceeds here, deliberately, because the
+		// certificate is going away either way -- on a replacement the same
+		// choice would leave the subject with two live certificates. Downgrade
+		// this return to a slog.Warn and only this spec notices.
+		failStore := storage.NewWithBackend(
+			&crlWriteFailBackend{
+				Backend: storage.NewFilesystemBackend(tmpDir),
+				err:     errors.New("crl storage is offline"),
+			},
+			filepath.Join(tmpDir, "private"))
+		failCA := ca.New(failStore, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		Expect(failCA.Init(ctx)).To(Succeed())
+
+		first, err := failCA.GenerateWithOptions(ctx, "revoke-fail-node", ca.GenerateOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		firstSerial := serialOf(first)
+
+		_, err = failCA.GenerateWithOptions(ctx, "revoke-fail-node", ca.GenerateOptions{
+			ReplaceExisting: true,
+		})
+		Expect(err).To(MatchError(ContainSubstring("could not revoke the existing certificate")))
+		Expect(err).To(MatchError(ContainSubstring("no replacement was issued")))
+
+		// The original must still be the one in storage: a second certificate
+		// for the subject is exactly what failing open would produce.
+		stored, err := failStore.GetCert(ctx, "revoke-fail-node")
+		Expect(err).NotTo(HaveOccurred())
+		block, _ := pem.Decode(stored)
+		Expect(block).NotTo(BeNil())
+		cert, err := x509.ParseCertificate(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fmt.Sprintf("%X", cert.SerialNumber)).To(Equal(firstSerial))
 	})
 
 	It("aborts without revoking when the stored certificate cannot be read", func() {

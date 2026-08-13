@@ -230,6 +230,10 @@ var _ = Describe("openvox-ca generate", func() {
 			_, _, err := runGenerate("--cadir", caDir, "--certname", "web01",
 				"--ttl", "1h", "--key-out", keyPath("web01"))
 			Expect(err).NotTo(HaveOccurred())
+			// A nil error is not the claim; the claim is that it issued. The
+			// refusing direction is pinned by its sibling above, so without
+			// this the predicate could be inverted to refuse nothing at all.
+			Expect(storage.New(caDir).HasCert(context.Background(), "web01")).To(BeTrue())
 		})
 	})
 
@@ -422,7 +426,12 @@ var _ = Describe("openvox-ca generate", func() {
 				"--cert-out", filepath.Join(roDir, "web01.crt"))
 
 			Expect(err).To(MatchError(ContainSubstring("issued and recorded, but writing it to")))
-			Expect(err).To(MatchError(ContainSubstring("rather than re-running")))
+			// The remedy has to name a route that works. 'openvox-ca-ctl list'
+			// does not: it reports name and state only, never the PEM, and it
+			// needs the running server this command exists to work without.
+			Expect(err).To(MatchError(ContainSubstring("Do not re-run")))
+			Expect(err).To(MatchError(ContainSubstring("signed/")))
+			Expect(err).NotTo(MatchError(ContainSubstring("openvox-ca-ctl list")))
 
 			store := storage.New(caDir)
 			Expect(store.HasCert(context.Background(), "web01")).To(BeTrue(),
@@ -450,9 +459,11 @@ var _ = Describe("openvox-ca generate", func() {
 			Expect(err).To(MatchError(ContainSubstring("could not be written to stdout")))
 			Expect(err).To(MatchError(ContainSubstring("broken pipe")))
 			// The same remedy the --cert-out branch gives. Telling the operator
-			// what failed without telling them not to re-run is the half that
-			// sends them into ErrCertExists on a name they think is free.
-			Expect(err).To(MatchError(ContainSubstring("rather than re-running")))
+			// what failed without telling them where the certificate is, and
+			// not to re-run, is the half that sends them into ErrCertExists on
+			// a name they think is free.
+			Expect(err).To(MatchError(ContainSubstring("Do not re-run")))
+			Expect(err).To(MatchError(ContainSubstring("signed/")))
 
 			store := storage.New(caDir)
 			Expect(store.HasCert(context.Background(), "web01")).To(BeTrue())
@@ -529,6 +540,9 @@ var _ = Describe("openvox-ca generate", func() {
 			_, _, err := runGenerate("--cadir", caDir, "--certname", "web01",
 				"--ttl", "8760h", "--key-out", keyPath("web01"))
 			Expect(err).NotTo(HaveOccurred())
+			// The whole claim is that a certificate is minted despite a
+			// deny-everything policy, so a nil error alone does not make it.
+			Expect(storage.New(caDir).HasCert(context.Background(), "web01")).To(BeTrue())
 		})
 
 	})
@@ -620,6 +634,15 @@ var _ = Describe("openvox-ca generate", func() {
 			Expect(stderr).To(ContainSubstring("openvox-ca-ctl revoke --certname admin"))
 			Expect(stderr).To(ContainSubstring("restart every replica"))
 			Expect(stderr).To(ContainSubstring("other live serials"))
+
+			// Every configuration key this procedure names must be one the
+			// operator can look up. docs/operator-cli.md transcribes these
+			// steps, so the two drift apart silently: correcting the doc alone
+			// once left this string naming a crl_validity key that does not
+			// exist, in the withdrawal instructions for the most privileged
+			// credential the CA issues.
+			Expect(stderr).To(ContainSubstring("crl_validity_days"))
+			Expect(stderr).To(ContainSubstring("revoke_on_auto_renew"))
 		})
 
 		It("refuses when the CA is configured to ignore pp_cli_auth", func() {
@@ -904,21 +927,31 @@ var _ = Describe("reportBackendCapabilities", func() {
 		lockProbeTimeout = 50 * time.Millisecond
 		DeferCleanup(func() { lockProbeTimeout = orig })
 
-		var reached string
-		done := make(chan struct{})
+		// A local buffer and a channel carrying the result, deliberately: on
+		// the Fail branch below this goroutine is abandoned while still
+		// running. Writing to the container-scoped buf, which the next spec's
+		// BeforeEach resets, or assigning to a captured variable, would race a
+		// sibling spec under -race and bury the real diagnosis under unrelated
+		// race reports. Reading lockProbeTimeout is the same hazard against
+		// the DeferCleanup above; nothing can be done about that from here,
+		// which is another reason not to add a second one.
+		done := make(chan string, 1)
 		go func() {
 			defer GinkgoRecover()
-			defer close(done)
-			reached = report(atomicCapBackend{capBackend{
-				acquire: func(ctx context.Context, _ string) (storage.Unlocker, error) {
-					<-ctx.Done()
-					return nil, ctx.Err()
-				},
-			}})
+			var local bytes.Buffer
+			reportBackendCapabilities(context.Background(), &local,
+				storage.NewWithBackend(atomicCapBackend{capBackend{
+					acquire: func(ctx context.Context, _ string) (storage.Unlocker, error) {
+						<-ctx.Done()
+						return nil, ctx.Err()
+					},
+				}}, GinkgoT().TempDir()))
+			done <- local.String()
 		}()
 
+		var reached string
 		select {
-		case <-done:
+		case reached = <-done:
 		case <-time.After(30 * time.Second):
 			Fail("the capability probe never returned: it is running on an unbounded context")
 		}

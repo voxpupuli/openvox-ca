@@ -47,7 +47,15 @@ var lockProbeTimeout = 5 * time.Second
 // retrievalAdvice is shared by both post-issuance write-failure branches. The
 // operator owns a certificate they have no copy of, and the thing they must not
 // do is re-run -- that meets ErrCertExists on a name they believe is free.
-const retrievalAdvice = "Retrieve it with 'openvox-ca-ctl list --all' or from the cadir rather than re-running."
+//
+// Both routes are qualified because neither is universal, and naming one that
+// does not work is worse than naming none. 'openvox-ca-ctl list' is not an
+// option at all: it reports name and state only, never the PEM, and it needs
+// the running server this command exists to work without.
+const retrievalAdvice = "The certificate is in storage under that name. Retrieve it from " +
+	"<cadir>/signed/ on the filesystem backend, or from a running server with " +
+	"GET /puppet-ca/v1/certificate/<certname>. Do not re-run: that reports " +
+	"a certificate already exists."
 
 // newGenerateCmd builds the offline `openvox-ca generate` subcommand: mint a
 // certificate directly against storage and the configured key provider, with no
@@ -351,12 +359,18 @@ func assertCAUsable(ctx context.Context, myCA *ca.CA, store *storage.StorageServ
 // reportIssuanceSettings prints the resolved settings that shape or record what
 // is about to be issued.
 //
-// These are root-command flags as well as config keys, and this command sees
-// only the config file and PUPPET_CA_* environment. A server configured
-// entirely by flags -- the shipped container image, the compose topology -- is
-// invisible here, so a certificate could silently be minted with no CRL
-// distribution point while the server's own issuance carries one. Printing what
-// was resolved is what makes that visible while it is still cheap to fix.
+// crl_url, ocsp_url and logfile are root-command flags as well as config keys,
+// and this command sees only the config file and PUPPET_CA_* environment. A
+// server configured entirely by flags -- the shipped container image, the
+// compose topology -- is invisible here, so a certificate could silently be
+// minted with no CRL distribution point while the server's own issuance carries
+// one. Printing what was resolved is what makes that visible while it is still
+// cheap to fix.
+//
+// promote_cn_to_san has no flag: config file and environment are its only
+// sources, the same two this command reads, so it cannot diverge. It is printed
+// anyway because it decides whether a run without --dns produces a certificate
+// with a usable SAN or none at all.
 func reportIssuanceSettings(w io.Writer, cfg *serverConfig) {
 	value := func(s string) string {
 		if s == "" {
@@ -457,7 +471,7 @@ WARNING: --pp-cli-auth mints a full CA administrator credential.
   Withdrawing it is not one step:
     1. openvox-ca-ctl revoke --certname %s
     2. restart every replica. Waiting for the CRL to refresh on its own can take
-       roughly two-thirds of crl_validity, and even then a pre-signed OCSP
+       roughly two-thirds of crl_validity_days, and even then a pre-signed OCSP
        response can vouch for the revoked serial for up to another 4 hours.
     3. check the inventory for other live serials for this name. If renewal
        replaced it and revoke_on_auto_renew is off -- or a renewal's best-effort

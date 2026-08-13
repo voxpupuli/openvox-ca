@@ -236,10 +236,15 @@ together, or stop the service while you do.
 > these commands.
 >
 > `generate` extends this to the settings that shape or record what it issues:
-> `crl_url`, `ocsp_url`, `promote_cn_to_san` and `logfile`. A flag-configured
-> server would otherwise leave it minting certificates with no CRL distribution
-> point while the server's own issuance carries one, and with no durable record
-> that an administrator credential was created. Mirror those too.
+> `crl_url`, `ocsp_url` and `logfile`. A flag-configured server would otherwise
+> leave it minting certificates with no CRL distribution point while the
+> server's own issuance carries one, and with no durable record that an
+> administrator credential was created. Mirror those too.
+>
+> `promote_cn_to_san` needs no mirroring: it has no flag, so the config file and
+> `PUPPET_CA_*` are its only sources — the same two this command reads, and it
+> cannot diverge from the server. It is still printed in the pre-flight, because
+> it decides what a run without `--dns` produces.
 
 `import-ca-cert` requires a **complete chain, nearest first**: this CA's own
 certificate, each issuer after it, ending with a self-signed root. Supply only
@@ -301,8 +306,11 @@ command exists for the two cases the API cannot serve:
 
 `--dns` adds subject alternative names, repeatable or comma-separated. Supplying
 it **suppresses CN promotion**: with no `--dns`, the certname is added as a DNS
-SAN automatically (RFC 2818 clients match SANs, not the CN), but as soon as you
-supply any, the list is taken verbatim. So a serving certificate that must answer
+SAN automatically (RFC 2818 clients match SANs, not the CN) — unless
+`promote_cn_to_san: false` is set, in which case a run with no `--dns` mints a
+certificate with **no SANs at all**, which is the same unusable outcome by
+configuration rather than by flag. Check the value the pre-flight prints. As
+soon as you supply any `--dns`, the list is taken verbatim. So a serving certificate that must answer
 to both its own name and an alias has to list both:
 
 ```bash

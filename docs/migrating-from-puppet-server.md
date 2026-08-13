@@ -496,7 +496,7 @@ each with the `subject` and the reason in `error`.
 | `puppet cert clean <name>` | `openvox-ca-ctl clean --certname <name>` | Revoke + delete |
 | `puppetserver ca setup` | `openvox-ca-ctl setup --cadir <path>` | |
 | `puppetserver ca import` | `openvox-ca-ctl import --cadir <path> ...` | |
-| `puppetserver ca generate` | `openvox-ca-ctl generate --certname <name>` | Needs a running server. Use `openvox-ca generate --certname <name> --ttl <duration>` to mint offline, which is also the only way to obtain a `pp_cli_auth` certificate |
+| `puppetserver ca generate` | `openvox-ca-ctl generate --certname <name>` | Needs a running server. Use `openvox-ca generate --certname <name> --ttl <duration>` to mint offline, which is also the only way to mint a *new* `pp_cli_auth` certificate |
 
 ## Differences to be aware of
 
