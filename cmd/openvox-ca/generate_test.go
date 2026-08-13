@@ -969,4 +969,24 @@ var _ = Describe("reportBackendCapabilities", func() {
 		Expect(out).To(ContainSubstring("Stop the server"))
 		Expect(out).NotTo(ContainSubstring("safe to run alongside"))
 	})
+
+	It("still warns when the inventory append is atomic but locking is not", func() {
+		// SQLite: a shipped backend, classified no/yes by
+		// docs/operator-cli.md and pinned at the storage layer by
+		// internal/storage/capability_test.go. It is the fourth quadrant of the
+		// green-light guard and the one the other specs leave open -- drop the
+		// `locking` conjunct from that guard and every one of them still
+		// passes, while a SQLite operator is told it is safe to mint alongside
+		// a live server on a backend with no cross-process lock at all. This
+		// also gives the "no" rendering its only positive assertion.
+		out := report(atomicCapBackend{capBackend{
+			acquire: func(context.Context, string) (storage.Unlocker, error) {
+				return nil, storage.ErrDistributedLockingUnsupported
+			},
+		}})
+		Expect(out).To(ContainSubstring("cross-process locking: no"))
+		Expect(out).To(ContainSubstring("atomic inventory append: true"))
+		Expect(out).To(ContainSubstring("Stop the server"))
+		Expect(out).NotTo(ContainSubstring("safe to run alongside"))
+	})
 })
