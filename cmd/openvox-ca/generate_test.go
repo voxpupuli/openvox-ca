@@ -22,6 +22,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -68,6 +69,26 @@ func runGenerateStdout(stdout io.Writer, args ...string) (stderr string, err err
 type failingWriter struct{ err error }
 
 func (f failingWriter) Write([]byte) (int, error) { return 0, f.err }
+
+// logRecord decodes the JSON log record carrying msg, so a spec can assert on
+// its fields. A configured logfile receives every record the run emits, and the
+// one under test is not the first: Init logs "Loaded existing CA" ahead of it.
+func logRecord(data []byte, msg string) map[string]any {
+	GinkgoHelper()
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var entry map[string]any
+		Expect(json.Unmarshal(line, &entry)).To(Succeed(),
+			"a configured logfile receives JSON, one record per line")
+		if entry["msg"] == msg {
+			return entry
+		}
+	}
+	Fail(fmt.Sprintf("no log record with msg %q in:\n%s", msg, data))
+	return nil
+}
 
 // hashTree fingerprints every file under dir, so a spec can assert that a
 // refusal changed nothing at all rather than only that one file survived.
@@ -251,6 +272,27 @@ var _ = Describe("openvox-ca generate", func() {
 			Expect(storage.New(caDir).HasCert(context.Background(), "web01")).To(BeFalse())
 		})
 
+		It("refuses two spellings of one path, not just two identical strings", func() {
+			// The guard compares what prepareOutputPath returns, which is
+			// cleaned and absolute -- not the raw flag values. Passing the same
+			// string twice cannot tell those apart: compare the raw flags
+			// instead and the spec above still passes, while this spelling
+			// walks straight into the outcome the guard exists to prevent, a
+			// live inventoried certificate whose key was overwritten by it.
+			// Built by concatenation, not filepath.Join: Join cleans its result,
+			// so a Join-built "equivalent" would be the identical string and
+			// this spec would be the one above again.
+			shared := filepath.Join(outDir, "both.pem")
+			viaDot := outDir + "/sub/../both.pem"
+			Expect(viaDot).NotTo(Equal(shared), "the two spellings must differ as strings")
+			Expect(filepath.Clean(viaDot)).To(Equal(shared), "but must name the same file")
+
+			_, _, err := runGenerate("--cadir", caDir, "--certname", "web01",
+				"--ttl", "8760h", "--key-out", shared, "--cert-out", viaDot)
+			Expect(err).To(MatchError(ContainSubstring("same path")))
+			Expect(storage.New(caDir).HasCert(context.Background(), "web01")).To(BeFalse())
+		})
+
 		It("refuses when the output path's parent is a file, not a directory", func() {
 			notADir := filepath.Join(outDir, "regular-file")
 			Expect(os.WriteFile(notADir, []byte("x"), 0o600)).To(Succeed())
@@ -406,6 +448,10 @@ var _ = Describe("openvox-ca generate", func() {
 
 			Expect(err).To(MatchError(ContainSubstring("could not be written to stdout")))
 			Expect(err).To(MatchError(ContainSubstring("broken pipe")))
+			// The same remedy the --cert-out branch gives. Telling the operator
+			// what failed without telling them not to re-run is the half that
+			// sends them into ErrCertExists on a name they think is free.
+			Expect(err).To(MatchError(ContainSubstring("rather than re-running")))
 
 			store := storage.New(caDir)
 			Expect(store.HasCert(context.Background(), "web01")).To(BeTrue())
@@ -421,10 +467,36 @@ var _ = Describe("openvox-ca generate", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(stderr).To(ContainSubstring("Storage backend: filesystem"))
-			Expect(stderr).To(ContainSubstring("Issuance settings:"))
+			// The pinned config sets neither URL, so this is also the "(none)"
+			// rendering. Asserting the label alone would stay green with the
+			// whole payload dropped -- and the payload is the point: a
+			// flag-configured server is invisible to this command, so an
+			// absent crl_url here means a certificate about to be minted
+			// without a distribution point the server's own issuance carries.
+			Expect(stderr).To(ContainSubstring(
+				"Issuance settings: crl_url: (none); ocsp_url: (none); promote_cn_to_san: true"))
 			// The filesystem backend provides neither capability, so the
 			// stop-the-server warning is the correct output here.
 			Expect(stderr).To(ContainSubstring("Stop the server before running this"))
+		})
+
+		It("reports the issuance settings it actually resolved", func() {
+			cfgPath := filepath.Join(GinkgoT().TempDir(), "urls.yaml")
+			Expect(os.WriteFile(cfgPath, []byte(
+				"ca_key_algo: ecdsa\nca_key_size: 256\nleaf_key_algo: ecdsa\nleaf_key_size: 256\n"+
+					"crl_url: http://ca.example.com/crl\nocsp_url: http://ca.example.com/ocsp\n"+
+					// false, because true is the default and would not
+					// distinguish a resolved value from an ignored one.
+					"promote_cn_to_san: false\n"), 0o644)).To(Succeed())
+			setEnv("PUPPET_CA_CONFIG", cfgPath)
+
+			_, stderr, err := runGenerate("--cadir", caDir, "--certname", "web01",
+				"--ttl", "8760h", "--key-out", keyPath("web01"))
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(stderr).To(ContainSubstring(
+				"Issuance settings: crl_url: http://ca.example.com/crl; " +
+					"ocsp_url: http://ca.example.com/ocsp; promote_cn_to_san: false"))
 		})
 
 		It("bypasses autosign policy, which is not consulted at all", func() {
@@ -647,6 +719,17 @@ var _ = Describe("openvox-ca generate", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(string(logged)).To(ContainSubstring("pp_cli_auth=true"))
 			Expect(string(logged)).To(ContainSubstring("admin"))
+
+			// The encoding, not just the content. setupLogger installs a JSON
+			// handler for a logfile and a text handler for stderr, so the two
+			// sinks do not look alike -- and docs/operator-cli.md publishes
+			// both forms for operators to build aggregator rules from. A
+			// ContainSubstring on the value alone holds under either encoding,
+			// so it would not notice the handler changing underneath the docs.
+			entry := logRecord(logged, "Issued certificate carrying a Puppet authorisation extension")
+			Expect(entry).To(HaveKeyWithValue("grant", "pp_cli_auth=true"))
+			Expect(entry).To(HaveKeyWithValue("subject", "admin"))
+			Expect(entry).To(HaveKeyWithValue("level", "WARN"))
 		})
 
 		It("does not create a missing logfile, and mints anyway", func() {

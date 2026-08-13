@@ -42,6 +42,13 @@ import-direction reason: `etcdDecomposeLockName` (`"inventory-decompose"`) in
 [etcd_inventory.go](../../internal/storage/etcd_inventory.go). They are no
 less protocol for it.
 
+One name in `internal/storage` is not a lock in that sense at all:
+`lockProbeName` in [storage.go](../../internal/storage/storage.go) defines
+`capability-probe`, which `SupportsDistributedLocking` acquires and releases
+purely to find out whether the backend coordinates across processes. It sits
+outside every namespace above so it can never contend with an operation in
+flight — see its row below.
+
 | Lock name | Serialises | Taken by |
 | --- | --- | --- |
 | `bootstrap` | First-run CA generation; seeding supporting state (CRL/inventory/serial) for a mounted cert+key; whole-store migration | `CA.Init`, `CA.seedSupportingState`, `storage.MigrateService` (which reuses the name deliberately so a migration and a bootstrapping server exclude each other) |

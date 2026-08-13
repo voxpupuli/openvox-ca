@@ -682,6 +682,37 @@ var _ = Describe("CA GenerateWithOptions replacement", func() {
 		Expect(revokedSerials()).To(HaveLen(before), "nothing may be revoked when the read fails")
 	})
 
+	It("aborts without revoking when the stored certificate cannot be read", func() {
+		// The sibling above covers an unreadable *value*; this covers an
+		// unreadable *file*, which is the branch the whole function is
+		// justified by: answering "no certificate here" to a transient read
+		// error would skip the revoke and issue a second live certificate for
+		// the subject, the one outcome --force must never produce. The two
+		// branches also report differently, so the sibling's assertion on
+		// "openvox-ca-ctl clean" would not hold here.
+		if os.Geteuid() == 0 {
+			Skip("root ignores file permissions")
+		}
+		first, err := myCA.GenerateWithOptions(ctx, "unreadable-node", ca.GenerateOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		storedSerial := serialOf(first)
+		before := len(revokedSerials())
+
+		certFile := filepath.Join(tmpDir, "signed", "unreadable-node.pem")
+		Expect(certFile).To(BeAnExistingFile())
+		Expect(os.Chmod(certFile, 0o000)).To(Succeed())
+		DeferCleanup(func() { _ = os.Chmod(certFile, 0o644) })
+
+		_, err = myCA.GenerateWithOptions(ctx, "unreadable-node", ca.GenerateOptions{
+			ReplaceExisting: true,
+		})
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("reading the stored certificate"))
+		Expect(revokedSerials()).To(HaveLen(before),
+			"a read failure must not put a serial on the CRL")
+		Expect(revokedSerials()).NotTo(ContainElement(storedSerial))
+	})
+
 	It("records an authorisation grant in the log, and nothing without one", func() {
 		// SECURITY: the inventory line carries no record of the grant, so this
 		// message is the only durable trace distinguishing an administrator

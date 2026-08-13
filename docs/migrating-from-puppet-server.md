@@ -425,10 +425,14 @@ Two ways to restore authenticated access, in order of preference:
    OpenVox Server's own CLI authenticates. It is the *more* invasive of the
    two, not the less: authorisation-arc OIDs are stripped from submitted CSRs (see
    [Auth-arc OID stripping](#auth-arc-oid-stripping)), so such a certificate
-   cannot be obtained through the API at all and must be signed offline with the
-   CA private key. That is strictly more privilege than editing the allow-list
-   file, and it is unavailable when `ca_key_provider: openbao` holds the key,
-   since the key never leaves the vault. It also has no effect if
+   cannot be obtained through the API at all. Mint it offline with
+   [`openvox-ca generate --pp-cli-auth`](operator-cli.md#administrator-credentials),
+   which needs no access to the raw CA key and so works under
+   `ca_key_provider: openbao` and `encrypt_ca_key` as well as with a key file.
+   The reason to prefer option 1 is not availability but withdrawal: an
+   allow-list entry is taken back by editing a file and restarting, whereas this
+   grant is baked into a certificate and comes back only by revoking every live
+   serial for that subject *and* restarting the server. It also has no effect if
    `--no-pp-cli-auth` / `no_pp_cli_auth: true` is set. Grants full admin.
 
 Separately, **`allow_public_status: true`** exists if agents must poll status

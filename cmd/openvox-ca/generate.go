@@ -34,6 +34,18 @@ import (
 	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
 
+// lockProbeTimeout bounds the pre-flight capability probe. Deliberately far
+// shorter than ca.LockTimeout: that one bounds work the operator asked for and
+// wants to succeed, whereas this only decides which of three sentences to
+// print. A backend that cannot answer in this long is one the operator needs
+// told about promptly, not waited on.
+const lockProbeTimeout = 5 * time.Second
+
+// retrievalAdvice is shared by both post-issuance write-failure branches. The
+// operator owns a certificate they have no copy of, and the thing they must not
+// do is re-run -- that meets ErrCertExists on a name they believe is free.
+const retrievalAdvice = "Retrieve it with 'openvox-ca-ctl list --all' or from the cadir rather than re-running."
+
 // newGenerateCmd builds the offline `openvox-ca generate` subcommand: mint a
 // certificate directly against storage and the configured key provider, with no
 // running server and no API.
@@ -236,13 +248,16 @@ before a server exists.`,
 				if err := writePublicFile(certPath, result.CertificatePEM); err != nil {
 					reportSuccess(out, rt.Store, result, certname, keyPath, "", ppCliAuth, cfg)
 					return fmt.Errorf("the certificate was issued and recorded, but writing it to %s "+
-						"failed: %w.\nRetrieve it with 'openvox-ca-ctl list --all' or from the cadir "+
-						"rather than re-running", certPath, err)
+						"failed: %w.\n%s", certPath, err, retrievalAdvice)
 				}
 			} else if _, err := cmd.OutOrStdout().Write(result.CertificatePEM); err != nil {
+				// Same remedy as the branch above, and the same reason for it.
+				// Stdout is the default and the form every documented
+				// invocation uses, so a closed pipe or a full filesystem lands
+				// here -- it must not be the less helpful of the two messages.
 				reportSuccess(out, rt.Store, result, certname, keyPath, "", ppCliAuth, cfg)
 				return fmt.Errorf("the certificate was issued and recorded, but could not be written "+
-					"to stdout: %w", err)
+					"to stdout: %w.\n%s", err, retrievalAdvice)
 			}
 
 			reportSuccess(out, rt.Store, result, certname, keyPath, certPath, ppCliAuth, cfg)
@@ -359,7 +374,22 @@ func reportIssuanceSettings(w io.Writer, cfg *serverConfig) {
 // HMAC covers a blob that never existed, which makes the server refuse to start
 // with no supported repair (see #188).
 func reportBackendCapabilities(ctx context.Context, w io.Writer, store *storage.StorageService) {
-	locking, lockErr := store.SupportsDistributedLocking(ctx)
+	// Bound the probe. It takes a real backend lock, and pg_advisory_lock blocks
+	// until granted or the context is cancelled -- while cmd.Execute() runs on
+	// context.Background(), so there is no deadline anywhere above here. Without
+	// this, a stalled lock service hangs the command before it has printed
+	// anything, on the one call an operator hits first and on a command whose
+	// premise is being run by hand against a possibly-degraded CA host. Every
+	// WithLock in internal/ca bounds itself with ca.LockTimeout for the same
+	// reason; this is shorter because it is a pre-flight report, not the work.
+	//
+	// A timeout lands in the (bool, error) signature's third answer, so the
+	// operator gets "cross-process locking: unknown" rather than a stall or a
+	// false "no".
+	probeCtx, cancel := context.WithTimeout(ctx, lockProbeTimeout)
+	defer cancel()
+
+	locking, lockErr := store.SupportsDistributedLocking(probeCtx)
 	atomicInventory := store.SupportsAtomicInventory()
 
 	// "Unknown" is a third answer, not a synonym for "no" -- which is why

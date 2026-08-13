@@ -480,16 +480,24 @@ would fail to start. In the flagship case — minting before the first start —
 that means the record is terminal-only unless you create the file first with the
 server's runtime ownership, or capture stderr.
 
-The line to alert on, as emitted:
+The line to alert on is `Issued certificate carrying a Puppet authorisation
+extension`, with attributes `subject` and `grant`. `--force` emits a second one
+for the certificate it retired: `Revoked a certificate to make room for its
+replacement`, at `INFO`, with `subject` and `serial`.
+
+Match on the message string and the attribute names, not on a copied line: the
+two sinks use different encodings. With no `logfile`, logging goes to stderr as
+logfmt —
 
 ```text
 level=WARN msg="Issued certificate carrying a Puppet authorisation extension" subject=openvox-admin grant="pp_cli_auth=true"
 ```
 
-`--force` emits a second one for the certificate it retired, at `INFO`:
+— while a configured `logfile`, which is what reaches a log aggregator, gets
+JSON:
 
-```text
-level=INFO msg="Revoked a certificate to make room for its replacement" subject=web01.example.com serial=0A
+```json
+{"level":"WARN","msg":"Issued certificate carrying a Puppet authorisation extension","subject":"openvox-admin","grant":"pp_cli_auth=true"}
 ```
 
 Both are worth a rule wherever these logs are aggregated; see
