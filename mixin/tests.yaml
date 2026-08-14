@@ -128,3 +128,38 @@ tests:
       - eval_time: 8m
         alertname: PuppetCACRLStale
         exp_alerts: []
+
+  # The chain window is twice crl_chain_refresh_interval_sec, and that ratio is
+  # a timing argument rather than a preference: at exactly one interval a
+  # persistent fault flaps. Consecutive increments sit one window apart, so the
+  # last sample carrying the older value ages out of the range before the next
+  # increment lands, increase() reads 0 for a scrape or two, the alert resolves
+  # and its `for` restarts from zero. This drives a fault that increments once
+  # an hour and asserts the alert is still firing three hours in, which is where
+  # a window equal to the interval would have gone quiet at least twice.
+  - interval: 1m
+    name: a persistent chain-refresh fault does not flap
+    input_series:
+      - series: 'puppetca_crl_chain_refresh_failures_total{job="openvox-ca",instance="ca-1:9140"}'
+        values: "0+0x59 1+0x59 2+0x59 3+0x59"
+    alert_rule_test:
+      - eval_time: 119m
+        alertname: PuppetCAUpstreamCRLRefreshFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              instance: ca-1:9140
+            exp_annotations:
+              summary: "The Puppet CA cannot refresh its upstream CRL chain."
+              description: "Refreshing crl_chain_file on ca-1:9140 is failing, so the published ancestor CRLs are ageing with nothing renewing them. The existing chain is left in place; check the file is readable, parseable, ends on a PEM block boundary, and is under 4 MiB. Note this also blocks revocation until it is fixed."
+      - eval_time: 179m
+        alertname: PuppetCAUpstreamCRLRefreshFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              instance: ca-1:9140
+            exp_annotations:
+              summary: "The Puppet CA cannot refresh its upstream CRL chain."
+              description: "Refreshing crl_chain_file on ca-1:9140 is failing, so the published ancestor CRLs are ageing with nothing renewing them. The existing chain is left in place; check the file is readable, parseable, ends on a PEM block boundary, and is under 4 MiB. Note this also blocks revocation until it is fixed."

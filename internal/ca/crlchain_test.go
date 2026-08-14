@@ -1666,10 +1666,6 @@ func handRolledCRL(cert *x509.Certificate, key *ecdsa.PrivateKey) []byte {
 	return handRolledCRLAt(cert, key, time.Now().UTC().Truncate(time.Second).Add(-time.Hour))
 }
 
-// handRolledCRLAt is handRolledCRL with ThisUpdate under the caller's control.
-// A numberless CRL that is also the *later* of the two is what separates "a
-// numbered block wins" from "the later block wins" -- with the fixed -1h stamp,
-// both rules give the same answer whichever order the bundle arrives in.
 // handRolledCRLNoNextUpdate signs a CRL that omits nextUpdate entirely. It is
 // OPTIONAL in RFC 5280's ASN.1, and x509.CreateRevocationList refuses to mint
 // one, so the only way to have the shape a non-conforming ancestor CA can
@@ -1704,6 +1700,10 @@ func handRolledCRLNoNextUpdate(cert *x509.Certificate, key *ecdsa.PrivateKey) []
 	return pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: der})
 }
 
+// handRolledCRLAt is handRolledCRL with ThisUpdate under the caller's control.
+// A numberless CRL that is also the *later* of the two is what separates "a
+// numbered block wins" from "the later block wins" -- with the fixed -1h stamp,
+// both rules give the same answer whichever order the bundle arrives in.
 func handRolledCRLAt(cert *x509.Certificate, key *ecdsa.PrivateKey, thisUpdate time.Time) []byte {
 	GinkgoHelper()
 	// ecdsa-with-SHA256

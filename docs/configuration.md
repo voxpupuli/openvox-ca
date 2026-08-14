@@ -433,7 +433,9 @@ the one case where the published chain silently *shrinks*;
 `puppetca_crl_chain_regressed_total` for a CRL older than the one already
 published (fix whatever refreshes the file); and
 `puppetca_crl_chain_removed_total` for an ancestor that has disappeared from the
-file altogether (restore it, or accept the removal). A fifth series,
+file altogether (restore it, or accept the removal) — or whose certificate has
+left the CA bundle, so its published CRL can no longer be attributed to anyone
+(re-import the bundle). A fifth series,
 `puppetca_crl_chain_last_read_timestamp_seconds`, reads `0` where the file is
 configured but has never been opened.
 

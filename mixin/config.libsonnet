@@ -34,11 +34,9 @@
     // Calibrated to the CA's crl_chain_refresh_interval_sec. All four chain
     // counters increment per *evaluation*, and the file is evaluated on every
     // CRL amendment as well as on each refresh pass, so on a busy CA they track
-    // revocation rate. What this window is sized against is the floor they
-    // share: a quiet CA evaluates the file once per refresh pass, and a window
-    // shorter than that interval makes a single unchanging fault fire, resolve
-    // and re-fire forever. This equals the 1h default with no margin, so raise
-    // it alongside any increase to crl_chain_refresh_interval_sec.
+    // revocation rate. What the window is sized against is the floor they
+    // share: a quiet CA evaluates the file once per refresh pass, so raise this
+    // alongside any increase to crl_chain_refresh_interval_sec.
     //
     // Twice the interval, not equal to it. At exactly one interval a persistent
     // fault flaps: consecutive increments sit one window apart, so the last

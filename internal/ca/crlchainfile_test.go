@@ -115,17 +115,11 @@ func emptyCRLNumbered(cert *x509.Certificate, key crypto.Signer, number int64) [
 func emptyCRLExpiring(cert *x509.Certificate, key crypto.Signer, number int64, in time.Duration) []byte {
 	GinkgoHelper()
 	now := time.Now().UTC()
-	tmpl := &x509.RevocationList{
+	der, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
 		Number:     big.NewInt(number),
 		ThisUpdate: now,
 		NextUpdate: now.Add(in),
-	}
-	if in == 0 {
-		// The non-conforming shape: nextUpdate is OPTIONAL in RFC 5280, and a
-		// CRL without one parses with a zero time.
-		tmpl.NextUpdate = time.Time{}
-	}
-	der, err := x509.CreateRevocationList(rand.Reader, tmpl, cert, key)
+	}, cert, key)
 	Expect(err).NotTo(HaveOccurred())
 	return pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: der})
 }
@@ -272,11 +266,12 @@ var _ = Describe("crl_chain_file", func() {
 		before := myCA.CRLChainRemoved()
 		_, err := myCA.RefreshCRLChainFile(ctx)
 		Expect(err).NotTo(HaveOccurred())
-		// At least one, not exactly one: these counters are per *evaluation*,
-		// and a pass that rewrites evaluates the file twice -- once to decide,
-		// then again inside the re-sign that publishes.
-		Expect(myCA.CRLChainRemoved()).To(BeNumerically(">=", before+1),
-			"a chain that shrinks unattributably must still be counted")
+		// Exactly two, matching the sibling spec above: these counters are per
+		// *evaluation*, and a pass that rewrites evaluates the file twice --
+		// once to decide, then again inside the re-sign that publishes. A
+		// looser assertion would pass just as well if the arm double-counted.
+		Expect(myCA.CRLChainRemoved()).To(Equal(before+2),
+			"a chain that shrinks unattributably must be counted once per evaluation")
 	})
 
 	// docs/configuration.md promises "**empty**, or nothing but whitespace"
@@ -427,34 +422,49 @@ var _ = Describe("crl_chain_file", func() {
 		// parses with a zero time, which the collector renders as 0 and the
 		// expiry alert reads as "expired in 1970". Letting that win the
 		// collapse would hide the real deadline of the ancestor beside it.
-		It("does not let a CRL without a nextUpdate mask a real deadline", func() {
-			aCert, aKeySigner, _ := upstreamCAWithKey("No NextUpdate CA")
-			aKeyEC, ok := aKeySigner.(*ecdsa.PrivateKey)
-			Expect(ok).To(BeTrue(), "the fixture helper mints ECDSA keys")
-			bCert, bKey, _ := upstreamCAWithKey("No NextUpdate CA")
+		// Driven in both orders on purpose. The collapse keeps the first entry
+		// for a DN and folds later ones into it, so each order exercises a
+		// different clause: zero-first is rescued by taking a real deadline over
+		// a stored zero, zero-second by refusing to let a zero win the
+		// comparison. Pinning one order leaves the other clause deletable with
+		// the suite green -- and it is the zero-second order that produces the
+		// reported defect, a real deadline overwritten with "expired in 1970".
+		DescribeTable("does not let a CRL without a nextUpdate mask a real deadline",
+			func(zeroFirst bool) {
+				aCert, aKeySigner, _ := upstreamCAWithKey("No NextUpdate CA")
+				aKeyEC, ok := aKeySigner.(*ecdsa.PrivateKey)
+				Expect(ok).To(BeTrue(), "the fixture helper mints ECDSA keys")
+				bCert, bKey, _ := upstreamCAWithKey("No NextUpdate CA")
 
-			ours, err := store.GetCACert(ctx)
-			Expect(err).NotTo(HaveOccurred())
-			bundle := append([]byte{}, ours...)
-			for _, cert := range []*x509.Certificate{aCert, bCert} {
-				bundle = append(bundle, pem.EncodeToMemory(
-					&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})...)
-			}
-			Expect(store.SaveCACert(ctx, bundle)).To(Succeed())
+				ours, err := store.GetCACert(ctx)
+				Expect(err).NotTo(HaveOccurred())
+				bundle := append([]byte{}, ours...)
+				for _, cert := range []*x509.Certificate{aCert, bCert} {
+					bundle = append(bundle, pem.EncodeToMemory(
+						&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})...)
+				}
+				Expect(store.SaveCACert(ctx, bundle)).To(Succeed())
 
-			// A carries no nextUpdate at all; B expires in 10 days.
-			both := append(append([]byte{}, handRolledCRLNoNextUpdate(aCert, aKeyEC)...),
-				emptyCRLExpiring(bCert, bKey, 1, 10*24*time.Hour)...)
-			myCA.CRLChainFile = writeChainFile(both)
-			Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
+				// A carries no nextUpdate at all; B expires in 10 days.
+				zero := handRolledCRLNoNextUpdate(aCert, aKeyEC)
+				real := emptyCRLExpiring(bCert, bKey, 1, 10*24*time.Hour)
+				first, second := zero, real
+				if !zeroFirst {
+					first, second = real, zero
+				}
+				myCA.CRLChainFile = writeChainFile(append(append([]byte{}, first...), second...))
+				Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
 
-			statuses, err := myCA.UpstreamCRLStatuses(mustGetCRL(ctx, store))
-			Expect(err).NotTo(HaveOccurred())
-			Expect(statuses).To(HaveLen(1))
-			Expect(statuses[0].NextUpdate).NotTo(BeZero(),
-				"the real deadline must survive the collapse, not be masked by a missing one")
-			Expect(statuses[0].NextUpdate).To(BeTemporally(">", time.Now().Add(9*24*time.Hour)))
-		})
+				statuses, err := myCA.UpstreamCRLStatuses(mustGetCRL(ctx, store))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(statuses).To(HaveLen(1))
+				Expect(statuses[0].NextUpdate).NotTo(BeZero(),
+					"the real deadline must survive the collapse, not be masked by a missing one")
+				Expect(statuses[0].NextUpdate).To(BeTemporally(">", time.Now().Add(9*24*time.Hour)))
+			},
+			Entry("the CRL without a nextUpdate is published first", true),
+			Entry("the CRL without a nextUpdate is published second", false),
+		)
 
 		It("is empty on a CA with no upstream", func() {
 			statuses, err := myCA.UpstreamCRLStatuses(mustGetCRL(ctx, store))
@@ -992,7 +1002,7 @@ var _ = Describe("crl_chain_file: size and duplicates", func() {
 		// Assigning into the map unconditionally kept whichever came last, which
 		// is an artefact of how the operator concatenated their bundle. A#7 then
 		// compared against A#5, looked newer, and the rollback was published --
-		// round 2's CRITICAL, reachable again one layer down.
+		// The refusal above, reachable again one layer down.
 		anc, ancKey, _ := upstreamCAWithKey("Duplicated Ancestor CA")
 		ours, err := store.GetCACert(ctx)
 		Expect(err).NotTo(HaveOccurred())

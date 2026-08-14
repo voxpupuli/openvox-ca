@@ -549,6 +549,31 @@ var _ = Describe("Export scopes", func() {
 		Expect(string(data["ca.crl"])).NotTo(ContainSubstring("T1VSUw=="))
 	})
 
+	// scoped() and validate() have to agree about what an unset scope means, and
+	// only validate() is exercised by everything above -- every other spec here
+	// calls Validate() first, which fills the scopes in. A Target built in code
+	// and exported without validation is the case where scoped() answers alone,
+	// and answering "self" there would narrow silently: the failure the chain
+	// default exists to prevent, reachable by a missed Validate() call.
+	It("publishes the whole chain for a target whose scopes were never validated", func() {
+		cfg := k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind:     "Secret",
+			Metadata: k8sexport.Metadata{Name: "trust", Namespace: "ns1"},
+			Cert:     true,
+			CRL:      true,
+			CertKey:  "ca.crt",
+			CRLKey:   "ca.crl",
+		}}}
+		Expect(k8sexport.New(client, cfg, src, "", nil).ExportAll(ctx)).To(Succeed())
+
+		sec, err := client.CoreV1().Secrets("ns1").Get(ctx, "trust", metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(sec.Data["ca.crt"])).To(ContainSubstring("Uk9PVA=="),
+			"an unset cert_scope must mean the whole chain here too")
+		Expect(string(sec.Data["ca.crl"])).To(ContainSubstring("VVBTVFJFQU0="),
+			"an unset crl_scope must mean the whole chain here too")
+	})
+
 	It("rejects an unknown cert scope", func() {
 		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
 			Kind: "Secret", Metadata: k8sexport.Metadata{Name: "x"}, Cert: true, CertScope: "everything",

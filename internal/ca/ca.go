@@ -205,11 +205,21 @@ type CA struct {
 	// it is crlChainLastRead below, a gauge rather than a counter, because
 	// "never opened" is a state and not an event.)
 	//
+	// crlChainRemoved is the one with two causes, because it is named for an
+	// outcome rather than a fault: an ancestor's CRL stops being published
+	// either because the file stopped listing it, or because the ancestor's
+	// certificate left the CA bundle and nothing signs its CRL any more. The
+	// second points at the bundle, like crlChainDiscarded, so an incomplete
+	// bundle can move both at once -- discarded for the file's copy, removed for
+	// the published one. The log line names which fired.
+	//
 	// All four are per *evaluation*, not per pass: crl_chain_file is evaluated on
 	// every CRL amendment as well as on each refresh pass, so on a busy CA
 	// they track revocation rate rather than the number of bad CRLs in the file.
 	// crlChainFailures counts the whole file once per evaluation; the other three
-	// count once per CRL per evaluation.
+	// count once per CRL per evaluation, except crlChainRemoved's
+	// bundle-attribution arm, which counts once per issuer DN because there is
+	// no signer left to key on.
 	//
 	// Do not assume an ordering between them. An unreadable or unparseable file
 	// increments crlChainFailures alone, because upstreamCRLs returns before the
