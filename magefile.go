@@ -2614,8 +2614,8 @@ func (Test) Migration() error {
 // sharing a single Redis prefix. Validates: catalog application end-to-end
 // over Redis-backed storage; cert blobs offloaded to Redis (not local disk);
 // distributed bootstrap lock when two CAs race; cross-replica state
-// visibility; concurrent CSR submissions split across replicas with
-// AppendLine atomicity on the inventory blob.
+// visibility; concurrent CSR submissions split across replicas with atomic
+// appends to the decomposed inventory.
 //
 // Requires podman-compose (or docker compose) and network access to pull
 // docker.io/redis:7-alpine plus the same images as Test:Puppet.

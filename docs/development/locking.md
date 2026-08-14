@@ -39,15 +39,18 @@ independently (the `internal/storage` package cannot import `internal/ca`), so
 the two are coupled only by the string literal and must be renamed together.
 Backend-internal locks live beside the backend that takes them, for the same
 import-direction reason: `etcdDecomposeLockName` (`"inventory-decompose"`) in
-[etcd_inventory.go](../../internal/storage/etcd_inventory.go). They are no
-less protocol for it.
+[etcd_inventory.go](../../internal/storage/etcd_inventory.go), which
+`redisDecomposeLockName` in
+[redis_inventory.go](../../internal/storage/redis_inventory.go) deliberately
+aliases — a deployment only ever has one backend, so the two can never
+contend. They are no less protocol for it.
 
 | Lock name | Serialises | Taken by |
 | --- | --- | --- |
 | `bootstrap` | First-run CA generation; seeding supporting state (CRL/inventory/serial) for a mounted cert+key; whole-store migration | `CA.Init`, `CA.seedSupportingState`, `storage.MigrateService` (which reuses the name deliberately so a migration and a bootstrapping server exclude each other) |
 | `crl` | Every CRL read-modify-write (read entries → re-sign → write) | `Revoke`, `RevokeSerial`, `ReissueCRL`, `RefreshCRLIfDue`, `CleanupExpiredCerts`, and the revoke step inside `Clean`, `Renew`, `AutoRenew` |
 | `subject:<name>` | The whole lifecycle of one subject: evict/save CSR/sign/import/clean/revoke | `SaveRequest`, `Sign`, `SignWithTTL`, `Renew`, `AutoRenew`, `Clean`, `ImportCertificate`, `Revoke` — but currently **not** `Generate` (see known gaps below) |
-| `inventory-decompose` | One-time legacy inventory blob conversion (etcd backend only) on the first start after upgrading | `EtcdBackend.decomposeLegacyInventory`, from `EnsureReady` |
+| `inventory-decompose` | One-time legacy inventory blob conversion (etcd and redis backends) on the first start after upgrading | `EtcdBackend.decomposeLegacyInventory` and `RedisBackend.decomposeLegacyInventory`, from `EnsureReady` |
 
 How each backend provides the distributed lock (a summary — the full per-backend
 mechanism, key layouts and transaction/retry detail lives in
@@ -265,11 +268,12 @@ path — still provides no cross-replica guarantee anyway.
    `AppendInventory`'s duplicate-serial check (`ErrDuplicateSerial`) is the
    worked example: it is a cluster-wide guarantee on the structured backends —
    SQL via the database's unique index, etcd via the `by-serial` key's
-   `CreateRevision == 0` guard inside the append transaction — but on the
-   remaining blob backends (filesystem, redis) the scan runs under the
+   `CreateRevision == 0` guard inside the append transaction, redis via the
+   `by-serial` hash field the append script refuses to overwrite — but on the
+   filesystem backend, the only remaining blob one, the scan runs under the
    process-local `inventoryMu` only (the doc comment on `ErrDuplicateSerial`
    in [storage.go](../../internal/storage/storage.go) spells this out, and
-   the blob-backend gap is tracked as
+   the remaining gap is tracked as
    [#204](https://github.com/voxpupuli/openvox-ca/issues/204)).
 7. **New lock names are protocol.** Define CA-layer names as constants in
    [init.go](../../internal/ca/init.go) (keeping `migrateLockName` in
@@ -344,12 +348,14 @@ state when the document was last updated and is not guaranteed exhaustive.
   SQLite backends have no same-host, cross-**process** locking; a `ctl`
   command (or the planned offline `generate`,
   [#175](https://github.com/voxpupuli/openvox-ca/issues/175)) racing a running
-  server on the same cadir is uncoordinated. The related blob-backend gap —
-  nothing wraps `AppendInventory` in a cluster lock on Redis, so its
-  duplicate-serial check is not cross-replica there — is tracked separately
-  as [#204](https://github.com/voxpupuli/openvox-ca/issues/204); the etcd
-  half of that gap was closed by the decomposed inventory's atomic
-  `by-serial` guard ([#138](https://github.com/voxpupuli/openvox-ca/issues/138)).
+  server on the same cadir is uncoordinated. The related blob-backend gap
+  ([#204](https://github.com/voxpupuli/openvox-ca/issues/204)) no longer
+  applies to the distributed backends: both halves were closed by their
+  decomposed inventories' atomic `by-serial` guards
+  ([#138](https://github.com/voxpupuli/openvox-ca/issues/138) for etcd,
+  [#139](https://github.com/voxpupuli/openvox-ca/issues/139) for Redis), which
+  also removed the read-compute-write whole-blob HMAC update that made #204 a
+  live CI flake rather than a theoretical gap.
 - [#171](https://github.com/voxpupuli/openvox-ca/issues/171) — `cachedCRL` is
   per-replica, so authentication and renewal keep accepting a certificate
   revoked elsewhere until this process re-signs the CRL.
@@ -366,12 +372,11 @@ state when the document was last updated and is not guaranteed exhaustive.
   revoke in the gap between that answer and the issuance it guards. The one
   issuance path a revocation still cannot wait for is `Generate`, which takes
   no distributed lock — see the `Generate` gap above.
-- On blob backends (filesystem/redis), an inventory append and its HMAC
-  update are two writes, not one atomic unit; the failure window is documented
-  at the write site in `AppendInventory` and the structured (SQL, etcd)
-  inventory — which commits the entry and its integrity head in one
-  transaction — is the durable answer. See
-  [the inventory store](inventory-store.md).
+- On the filesystem backend, an inventory append and its HMAC update are two
+  writes, not one atomic unit; the failure window is documented at the write
+  site in `AppendInventory` and the structured inventory — SQL and etcd commit
+  the entry and its integrity head in one transaction, redis in one Lua script
+  — is the durable answer. See [the inventory store](inventory-store.md).
 
 ## Tests
 

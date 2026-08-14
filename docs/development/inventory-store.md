@@ -47,9 +47,9 @@ an internal and on-disk-compatibility concern only.
 ## Goal
 
 Let backends that can do better store the inventory as **structured records**
-(e.g. a SQL table, or one etcd key per entry) while preserving exact behaviour
-for backends that keep the blob (filesystem, redis/valkey). This is opt-in per
-backend.
+(e.g. a SQL table, one etcd key per entry, one Redis hash field per entry)
+while preserving exact behaviour for backends that keep the blob (filesystem).
+This is opt-in per backend.
 
 ## Design
 
@@ -312,6 +312,91 @@ Rules that keep the decomposed structure coherent:
   own ModRevision (the mutable fields are not chain input), so index repair
   cannot fork the integrity head.
 
+### The Redis decomposition
+
+The Redis/Valkey backend implements both capabilities too (issue #139), with a
+layout that mirrors etcd's but plays to a different strength — Lua scripts that
+execute atomically:
+
+```text
+<prefix>:inventory:entries     HASH seq → JSON CertRecord, one field per
+                               issuance
+<prefix>:inventory:seq         last allocated sequence number, allocated by
+                               INCR and doubling as the mutation fence
+<prefix>:inventory:by-serial   HASH serial → seq; the field the append script
+                               refuses to overwrite is the duplicate-serial
+                               guard
+<prefix>:inventory:by-subject  HASH subject → latest serial (O(1) lookup)
+<prefix>:inventory:data        presence marker for the KeyInventory logical
+                               key (empty payload)
+<prefix>:inventory:hmac        chain head, unchanged logical key
+```
+
+Rules that keep the decomposed structure coherent:
+
+- **Every mutation is one script, and a script is atomic.** Nothing else runs
+  on the server while it does, so unlike etcd — which can only compare-then-op,
+  and so needs individually-consistent batches — an append, a prune, or an
+  import batch either happens whole or not at all. There is no window in which
+  entries and head are out of sync, and no partial-completion case for callers
+  to handle.
+- **The one thing the server cannot do is the chain.** `chainInventoryMAC` is
+  keyed and the key is deliberately not on the server, so the new head is
+  computed in Go from the head that was read and both are handed to the
+  script, which aborts if the stored head has moved. That optimistic check is
+  the only reason anything here retries. With integrity disabled there is no
+  head and no check, so the sequence counter — which an append advances and a
+  prune only reads — is the fence that catches an interleaved append instead.
+  Both are checked: without the fence, a prune could repoint a subject's index
+  at a serial its own stale snapshot chose, silently undoing a newer issuance.
+- **Appends are O(1)** — a handful of hash writes, where the blob path read and
+  rewrote the entire inventory per certificate issued. The by-serial field the
+  script refuses to overwrite makes duplicate-serial rejection atomic
+  cluster-wide, and writing the entry and the head in the same script closes
+  the Redis half of
+  [#204](https://github.com/voxpupuli/openvox-ca/issues/204): the blob path
+  computed its whole-blob HMAC from the bytes it read *before* its own append,
+  so two replicas interleaving left the stored HMAC covering a blob that no
+  longer existed and the next verifying read failed with
+  `ErrInventoryTampered`.
+- **Bulk rewrites are bounded, not batched-for-consistency.** A prune commits
+  its whole removal in one script, so `PruneEntries` here only ever reports a
+  completed removal — the strongest form of a contract etcd satisfies more
+  weakly. What is bounded is *size*: a script blocks the single-threaded server
+  for its duration, so one prune call removes at most 5000 entries (oldest
+  first) and an import is split into scripts of 512 records. Deferred prune
+  matches stay present and consistent for later calls, and the server logs what
+  it deferred.
+- **Legacy blobs are decomposed in place**, under the same
+  `inventory-decompose` lock etcd takes, with the same fail-closed rules:
+  `EnsureReady` verifies the pre-decomposition blob against its stored
+  whole-blob HMAC before trusting it (a mismatch, or a stored HMAC that cannot
+  be verified because the key is missing or malformed, fails startup with
+  `ErrInventoryTampered`; the operator acknowledges a lost baseline by deleting
+  the `inventory:hmac` key), imports the lines into hash fields, and empties
+  the marker only in the final script. The verified HMAC is deleted in the same
+  import — it is not a chain head — and the next verification re-baselines from
+  the imported entries; a CA upgraded while its inventory was *empty* has no
+  import to drop it as part of, so `EnsureReady` handles that separately, on
+  exactly the same terms as etcd. Because the blob stays authoritative until
+  the final script, an interrupted import is detected on the next start (the
+  partial entries are the import-written prefix of the blob) and redone from
+  the intact blob; entries that are *not* such a prefix mean a mixed-version
+  deployment wrote both forms, which is refused rather than guessed at. A
+  not-yet-upgraded replica writing the blob mid-import is caught by a guard on
+  the marker's stored mtime prefix and length — every writer stamps a fresh
+  mtime, so an unchanged prefix means nothing has touched it — and the import
+  restarts from the new blob. Duplicate serials are imported verbatim with a
+  warning and carry the same ambiguity sentinel, with the same consequences:
+  the serial stays reserved against reissue, certificate-index writes for it
+  are explicit no-ops, `Statuses` reports its bearers as `CertStateUnknown` so
+  readers derive their state from the signed CRL, the repair pass skips them,
+  and a prune releases the sentinel only when the last bearer goes.
+- **Certificate-index writes stay off the chain.** `SetRevoked` /
+  `ClearRevoked` / `SetProjection` rewrite a single entry field, guarded on the
+  stored value still being the one that was decoded (the mutable fields are not
+  chain input), so index repair cannot fork the integrity head.
+
 ## Scope
 
 - **SQL backend** (sqlite/postgres/mysql) implements `InventoryStore` with a
@@ -320,10 +405,12 @@ Rules that keep the decomposed structure coherent:
   where decomposition pays off.
 - **etcd** implements `InventoryStore` and `CertIndex` with per-entry keys —
   see [The etcd decomposition](#the-etcd-decomposition) above.
-- **Filesystem and redis/valkey keep the blob.** They do not implement the
-  interface; the type assertion fails and they behave exactly as before. Adding
-  the capability to redis later is possible (issue #139) but not currently
-  motivated.
+- **redis/valkey** implements `InventoryStore` and `CertIndex` with per-entry
+  hash fields — see [The Redis decomposition](#the-redis-decomposition) above.
+- **The filesystem backend keeps the blob.** It does not implement the
+  interface; the type assertion fails and it behaves exactly as before. It is
+  single-node, so the cost the decomposition removes (and the cross-replica
+  guarantee it adds) does not arise there in the same way.
 - **Wrapper backends unwrap to their base.** The probe is `asInventoryStore`,
   not a bare `s.backend.(InventoryStore)`: it sees through wrappers such as
   `OverlayBackend` (the `ca_cert_file`/`ca_key_file` local-override wrapper) via
@@ -357,3 +444,7 @@ Each phase is a separate commit.
 6. **etcd decomposition** (issue #138, a later extension). Implement
    `InventoryStore` and `CertIndex` on the etcd backend with per-entry keys,
    including the in-place legacy blob conversion described above.
+7. **Redis decomposition** (issue #139, a later extension). The same for the
+   Redis/Valkey backend with per-entry hash fields, resolving the chain's one
+   unavoidable read-compute-write optimistically because Lua cannot compute a
+   keyed hash server-side.
