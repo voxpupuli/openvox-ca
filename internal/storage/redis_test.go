@@ -286,9 +286,12 @@ var _ = Describe("RedisBackend", func() {
 		}
 	})
 
-	// TestRedisBackendAppendLineConcurrent hammers AppendLine from several
-	// goroutines across two backends (simulating two replicas on one Redis) and
-	// asserts no lines are lost — the Lua append script is atomic server-side.
+	// Hammers AppendLine on the inventory from several goroutines across two
+	// backends (simulating two replicas on one Redis) and asserts no lines are
+	// lost. Since the inventory decomposition this exercises
+	// appendInventoryLines rather than the blob append script, so the lines
+	// must be well-formed inventory entries with distinct serials — a
+	// duplicate would now be rejected rather than appended.
 	It("loses no lines under concurrent AppendLine", func() {
 		_, cli, stop := newMiniredis()
 		defer stop()
@@ -308,7 +311,8 @@ var _ = Describe("RedisBackend", func() {
 				defer GinkgoRecover()
 				defer wg.Done()
 				for i := range perWriter {
-					line := fmt.Sprintf("w%d-i%d\n", w, i)
+					line := fmt.Sprintf("%04d 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node-w%d-i%d\n",
+						w*perWriter+i, w, i)
 					Expect(backend.AppendLine(context.Background(), KeyInventory, []byte(line), BlobPrivate)).NotTo(HaveOccurred())
 				}
 			}()
