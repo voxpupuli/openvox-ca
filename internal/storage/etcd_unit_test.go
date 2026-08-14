@@ -275,24 +275,24 @@ var _ = Describe("EtcdLegacyPrefixCheck", func() {
 		Expect(err).NotTo(HaveOccurred())
 		return recs
 	}
-	entryOf := func(seq uint64, line string) etcdIndexedRecord {
+	entryOf := func(seq uint64, line string) indexedRecord {
 		e, ok := parseInventoryEntry(line)
 		Expect(ok).To(BeTrue())
-		return etcdIndexedRecord{seq: seq, rec: CertRecord{InventoryEntry: e, State: CertStateSigned}}
+		return indexedRecord{seq: seq, rec: CertRecord{InventoryEntry: e, State: CertStateSigned}}
 	}
 
 	It("accepts an import-written prefix and rejects everything else", func() {
 		recs := recsOf("0001 nb na /a\n0002 nb na /b\n0003 nb na /c\n")
-		prefix := []etcdIndexedRecord{entryOf(1, "0001 nb na /a"), entryOf(2, "0002 nb na /b")}
+		prefix := []indexedRecord{entryOf(1, "0001 nb na /a"), entryOf(2, "0002 nb na /b")}
 		Expect(recordsArePrefixOf(prefix, recs)).To(BeTrue())
 		Expect(recordsArePrefixOf(nil, recs)).To(BeTrue(), "no entries at all is the trivial prefix")
 
 		// Wrong contents, wrong sequence numbering, or more entries than the
 		// blob has lines all mean the entries did not come from importing
 		// this blob.
-		Expect(recordsArePrefixOf([]etcdIndexedRecord{entryOf(1, "0009 nb na /x")}, recs)).To(BeFalse())
-		Expect(recordsArePrefixOf([]etcdIndexedRecord{entryOf(5, "0001 nb na /a")}, recs)).To(BeFalse())
-		long := []etcdIndexedRecord{
+		Expect(recordsArePrefixOf([]indexedRecord{entryOf(1, "0009 nb na /x")}, recs)).To(BeFalse())
+		Expect(recordsArePrefixOf([]indexedRecord{entryOf(5, "0001 nb na /a")}, recs)).To(BeFalse())
+		long := []indexedRecord{
 			entryOf(1, "0001 nb na /a"), entryOf(2, "0002 nb na /b"),
 			entryOf(3, "0003 nb na /c"), entryOf(4, "0004 nb na /d"),
 		}

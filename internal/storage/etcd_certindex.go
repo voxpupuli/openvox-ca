@@ -73,7 +73,7 @@ func (b *EtcdBackend) Statuses(ctx context.Context, stateFilter string) ([]CertR
 	}
 	ambiguous := make(map[string]bool)
 	for _, kv := range resp.Responses[1].GetResponseRange().Kvs {
-		if string(kv.Value) == etcdSerialAmbiguous {
+		if string(kv.Value) == serialAmbiguous {
 			ambiguous[strings.TrimPrefix(string(kv.Key), b.invPhys(etcdInvSerialSub))] = true
 		}
 	}
@@ -175,7 +175,7 @@ func (b *EtcdBackend) mutateRecordBySerial(ctx context.Context, serial string, m
 		if len(resp.Kvs) == 0 {
 			return nil
 		}
-		if string(resp.Kvs[0].Value) == etcdSerialAmbiguous {
+		if string(resp.Kvs[0].Value) == serialAmbiguous {
 			// The serial appears on several imported legacy records; applying
 			// the write through the one-to-one index would land it on an
 			// arbitrary bearer (e.g. another subject's record receiving this
