@@ -40,10 +40,19 @@
     // and re-fire forever. This equals the 1h default with no margin, so raise
     // it alongside any increase to crl_chain_refresh_interval_sec.
     //
+    // Twice the interval, not equal to it. At exactly one interval a persistent
+    // fault flaps: consecutive increments sit one window apart, so the last
+    // sample carrying the older value ages out of the range before the next
+    // increment lands, increase() reads 0 for a scrape or two, the alert
+    // resolves and its `for` starts again from zero. Tick drift widens that gap
+    // rather than closing it. Doubling the window keeps two increments in range
+    // throughout, at the cost of an alert that takes an interval longer to
+    // clear once the fault is fixed.
+    //
     // Do not assume an ordering between the four. An unreadable or unparseable
     // file increments the failure counter alone, because the read stops before
     // the per-CRL loops are reached.
-    crlChainWindow: '1h',
+    crlChainWindow: '2h',
     crlChainFor: '15m',
 
     // --- Leaf certificate expiry ---

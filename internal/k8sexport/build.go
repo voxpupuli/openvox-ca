@@ -71,7 +71,13 @@ func pemBlocks(data []byte, blockType string) [][]byte {
 // scope cannot occur after Validate; an empty chain passes through untouched so
 // the caller's own empty-material guard reports it.
 func scoped(chain []byte, blockType, scope string) []byte {
-	if scope == ScopeChain {
+	// An unset scope means the same thing here as it does in validate(): the
+	// whole chain. Validation is what normally fills it in, so this only
+	// matters for a Target assembled in code rather than loaded from
+	// configuration -- but the two must not disagree about the default, or a
+	// missed Validate() call would silently narrow what a target publishes,
+	// which is the failure this feature's default was chosen to avoid.
+	if scope == ScopeChain || scope == "" {
 		return chain
 	}
 	blocks := pemBlocks(chain, blockType)

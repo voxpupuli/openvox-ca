@@ -53,7 +53,6 @@ type Exporter struct {
 	src       MaterialSource
 	defaultNS string   // resolved pod namespace; used for targets without one
 	metrics   *Metrics // may be nil (metrics disabled)
-
 }
 
 // New constructs an Exporter from an existing clientset. cfg must already have
@@ -105,6 +104,7 @@ func (e *Exporter) ExportAll(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+
 	var errs []error
 	for i := range e.cfg.Targets {
 		t := &e.cfg.Targets[i]

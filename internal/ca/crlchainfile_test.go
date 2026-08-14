@@ -115,11 +115,17 @@ func emptyCRLNumbered(cert *x509.Certificate, key crypto.Signer, number int64) [
 func emptyCRLExpiring(cert *x509.Certificate, key crypto.Signer, number int64, in time.Duration) []byte {
 	GinkgoHelper()
 	now := time.Now().UTC()
-	der, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+	tmpl := &x509.RevocationList{
 		Number:     big.NewInt(number),
 		ThisUpdate: now,
 		NextUpdate: now.Add(in),
-	}, cert, key)
+	}
+	if in == 0 {
+		// The non-conforming shape: nextUpdate is OPTIONAL in RFC 5280, and a
+		// CRL without one parses with a zero time.
+		tmpl.NextUpdate = time.Time{}
+	}
+	der, err := x509.CreateRevocationList(rand.Reader, tmpl, cert, key)
 	Expect(err).NotTo(HaveOccurred())
 	return pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: der})
 }
@@ -248,6 +254,51 @@ var _ = Describe("crl_chain_file", func() {
 		Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(1))
 	})
 
+	// The other way a published ancestor disappears: its certificate leaves the
+	// CA bundle, so nothing signs its CRL any more. It is dropped exactly as a
+	// removed one is, and before this it was the only drop with no counter
+	// behind it -- the published chain shrank with nothing to alert on.
+	It("counts a published CRL whose signer has left the CA bundle", func() {
+		trustUpstream()
+		myCA.CRLChainFile = writeChainFile(upsCRL)
+		Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
+		Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(2))
+
+		// Take the ancestor's certificate back out of the bundle, leaving its
+		// CRL published and unattributable.
+		Expect(store.SaveCACert(ctx, cachedCrtPEM)).To(Succeed())
+		myCA.CRLChainFile = writeChainFile()
+
+		before := myCA.CRLChainRemoved()
+		_, err := myCA.RefreshCRLChainFile(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		// At least one, not exactly one: these counters are per *evaluation*,
+		// and a pass that rewrites evaluates the file twice -- once to decide,
+		// then again inside the re-sign that publishes.
+		Expect(myCA.CRLChainRemoved()).To(BeNumerically(">=", before+1),
+			"a chain that shrinks unattributably must still be counted")
+	})
+
+	// docs/configuration.md promises "**empty**, or nothing but whitespace"
+	// counts as the empty declaration, and decodeCRLChainStrict implements the
+	// whitespace half specifically (`len(bytes.TrimSpace(blob)) > 0`). Nothing
+	// drove it: every other spec writes either real PEM or a zero-byte file, so
+	// the trailing-content refusal could swallow a file of newlines -- turning
+	// a documented "publish nothing extra" into a refusal that keeps publishing
+	// the old ancestors.
+	It("treats a file of nothing but whitespace as the empty declaration", func() {
+		trustUpstream()
+		myCA.CRLChainFile = writeChainFile(upsCRL)
+		Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
+		Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(2))
+
+		myCA.CRLChainFile = writeChainFile([]byte("\n  \n\t\n"))
+		rewritten, err := myCA.RefreshCRLChainFile(ctx)
+		Expect(err).NotTo(HaveOccurred(), "whitespace is a declaration, not a torn write")
+		Expect(rewritten).To(BeTrue())
+		Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(1))
+	})
+
 	It("survives a configured file that does not exist yet", func() {
 		// A mounted Secret may not have landed. Refusing to serve would turn a
 		// slow rollout into an outage.
@@ -370,6 +421,39 @@ var _ = Describe("crl_chain_file", func() {
 			Expect(statuses[0].Issuer).To(ContainSubstring("Shared DN CA"))
 			Expect(statuses[0].NextUpdate).To(BeTemporally("<", time.Now().Add(3*24*time.Hour)),
 				"the nearest deadline is the one the expiry alert exists to catch")
+		})
+
+		// nextUpdate is OPTIONAL in RFC 5280, so a non-conforming ancestor
+		// parses with a zero time, which the collector renders as 0 and the
+		// expiry alert reads as "expired in 1970". Letting that win the
+		// collapse would hide the real deadline of the ancestor beside it.
+		It("does not let a CRL without a nextUpdate mask a real deadline", func() {
+			aCert, aKeySigner, _ := upstreamCAWithKey("No NextUpdate CA")
+			aKeyEC, ok := aKeySigner.(*ecdsa.PrivateKey)
+			Expect(ok).To(BeTrue(), "the fixture helper mints ECDSA keys")
+			bCert, bKey, _ := upstreamCAWithKey("No NextUpdate CA")
+
+			ours, err := store.GetCACert(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			bundle := append([]byte{}, ours...)
+			for _, cert := range []*x509.Certificate{aCert, bCert} {
+				bundle = append(bundle, pem.EncodeToMemory(
+					&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})...)
+			}
+			Expect(store.SaveCACert(ctx, bundle)).To(Succeed())
+
+			// A carries no nextUpdate at all; B expires in 10 days.
+			both := append(append([]byte{}, handRolledCRLNoNextUpdate(aCert, aKeyEC)...),
+				emptyCRLExpiring(bCert, bKey, 1, 10*24*time.Hour)...)
+			myCA.CRLChainFile = writeChainFile(both)
+			Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
+
+			statuses, err := myCA.UpstreamCRLStatuses(mustGetCRL(ctx, store))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(statuses).To(HaveLen(1))
+			Expect(statuses[0].NextUpdate).NotTo(BeZero(),
+				"the real deadline must survive the collapse, not be masked by a missing one")
+			Expect(statuses[0].NextUpdate).To(BeTemporally(">", time.Now().Add(9*24*time.Hour)))
 		})
 
 		It("is empty on a CA with no upstream", func() {

@@ -176,8 +176,6 @@ The CA key passphrase can also be provided via `PUPPET_CA_KEY_PASSPHRASE` (env v
 
 | Config key | Environment variable |
 | --- | --- |
-| `crl_chain_file` | `PUPPET_CA_CRL_CHAIN_FILE` |
-| `crl_chain_refresh_interval_sec` | `PUPPET_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC` |
 | `ca_key_algo` | `PUPPET_CA_CA_KEY_ALGO` |
 | `ca_key_size` | `PUPPET_CA_CA_KEY_SIZE` |
 | `leaf_key_algo` | `PUPPET_CA_LEAF_KEY_ALGO` |
@@ -195,6 +193,8 @@ The CA key passphrase can also be provided via `PUPPET_CA_KEY_PASSPHRASE` (env v
 | `crl_refresh_interval_sec` | `PUPPET_CA_CRL_REFRESH_INTERVAL_SEC` |
 | `crl_refresh_before_sec` | `PUPPET_CA_CRL_REFRESH_BEFORE_SEC` |
 | `crl_sync_interval_sec` | `PUPPET_CA_CRL_SYNC_INTERVAL_SEC` |
+| `crl_chain_file` | `PUPPET_CA_CRL_CHAIN_FILE` |
+| `crl_chain_refresh_interval_sec` | `PUPPET_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC` |
 | `enable_expired_cert_cleanup` | `PUPPET_CA_ENABLE_EXPIRED_CERT_CLEANUP` |
 | `expired_cert_retention_sec` | `PUPPET_CA_EXPIRED_CERT_RETENTION_SEC` |
 | `expired_cert_cleanup_interval_sec` | `PUPPET_CA_EXPIRED_CERT_CLEANUP_INTERVAL_SEC` |
@@ -360,9 +360,10 @@ No metric distinguishes that from a healthy file:
 `puppetca_crl_chain_last_read_timestamp_seconds` advances on every read either
 way, because the read genuinely succeeds — it is the content that is frozen.
 What catches it is the consequence — `PuppetCAUpstreamCRLExpiringSoon` firing on a CA that
-*has* `crl_chain_file` configured is the `subPath` signature. That series does
-detect the different case of a file never opened at all: it reads `0`, and
-`PuppetCAUpstreamCRLNeverRead` alerts on it.
+*has* `crl_chain_file` configured is the `subPath` signature.
+`puppetca_crl_chain_last_read_timestamp_seconds` does detect the different case
+of a file never opened at all: it reads `0`, and `PuppetCAUpstreamCRLNeverRead`
+alerts on it.
 
 If one ancestor appears more than once — which is what a CronJob that appends
 rather than replaces produces — only the newest of its CRLs is published, by CRL

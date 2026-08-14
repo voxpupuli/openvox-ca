@@ -133,7 +133,7 @@ jsonnet -J vendor -m . mixin.jsonnet
 | `caExpiryCriticalSeconds` | 7 days | CA certificate expiry critical threshold. |
 | `crlExpiryWarningSeconds` | 3 days | CRL `NextUpdate` warning threshold. |
 | `upstreamCRLExpiryWarningSeconds` | 14 days | Warning threshold for an upstream CRL in a published chain. Longer than `crlExpiryWarningSeconds` because the remedy is at another CA. |
-| `crlChainWindow` | `1h` | Window over which chain-refresh failures, discards, regressions and removals are counted. Equals the CA's default `crl_chain_refresh_interval_sec` with no margin: raise it alongside any increase to that setting, or a single unchanging fault will fire, resolve and re-fire forever. |
+| `crlChainWindow` | `2h` | Window over which chain-refresh failures, discards, regressions and removals are counted. Twice the CA's default `crl_chain_refresh_interval_sec`, so that two increments are always in range: at exactly one interval a single unchanging fault fires, resolves and re-fires forever, because the older sample ages out before the next increment lands. Keep it at twice the interval if you change that setting. |
 | `crlChainFor` | `15m` | `for:` debounce for the five upstream-chain alerts. |
 | `leafExpiryWarningSeconds` | 7 days | Leaf certificate expiry warning threshold. |
 | `leafExpiryCriticalSeconds` | 1 day | Leaf certificate expiry critical threshold. |

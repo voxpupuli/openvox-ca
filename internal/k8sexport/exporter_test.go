@@ -493,7 +493,7 @@ var _ = Describe("Export scopes", func() {
 			Cert:      true,
 			CRL:       true,
 			CertScope: "root",
-			CRLScope:  "chain",
+			CRLScope:  "self",
 		}}}
 		Expect(cfg.Validate()).To(Succeed())
 		Expect(k8sexport.New(client, *cfg, src, "", nil).ExportAll(ctx)).To(Succeed())
@@ -502,14 +502,19 @@ var _ = Describe("Export scopes", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cm.Data["ca.crt"]).To(ContainSubstring("Uk9PVA=="))
 		Expect(cm.Data["ca.crt"]).NotTo(ContainSubstring("SU5URVJNRURJQVRF"))
-		Expect(cm.Data["ca.crl"]).To(Equal(crlChain))
+		// A narrowing crl_scope, not "chain": ScopeChain short-circuits inside
+		// scoped() and returns the blob untouched, so asserting it would hold
+		// with the CRL scoping deleted from the ConfigMap path entirely.
+		Expect(cm.Data["ca.crl"]).To(ContainSubstring("T1VSUw=="))
+		Expect(cm.Data["ca.crl"]).NotTo(ContainSubstring("VVBTVFJFQU0="),
+			"crl_scope: self must narrow the ConfigMap the same way it narrows a Secret")
 	})
 
 	DescribeTable("is unchanged for a single-block chain, whichever scope is asked for",
-		// The half of back-compatibility that does hold: a CA that issued its
-		// own root stores one block, so all three scopes agree. A CA that
-		// imported a chain is the case where the self default narrows what was
-		// being published.
+		// A CA that issued its own root stores one block, so all three scopes
+		// agree there and the setting is a no-op. It is the CA that imported a
+		// chain where the scopes differ at all, which is what the specs above
+		// cover.
 		func(scope string) {
 			single := "-----BEGIN CERTIFICATE-----\nT05MWQ==\n-----END CERTIFICATE-----\n"
 			src = stubSource{cert: []byte(single), crl: []byte(crlChain)}

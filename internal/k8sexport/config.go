@@ -51,8 +51,8 @@ const (
 // Export scopes select how much of a chain a target publishes.
 const (
 	// ScopeSelf publishes only this CA's own certificate or CRL — block 0 of
-	// the stored bundle. The default, and identical to ScopeChain on a CA that
-	// issues its own root.
+	// the stored bundle. Opted into per target; identical to ScopeChain on a CA
+	// that issues its own root.
 	ScopeSelf = "self"
 	// ScopeChain publishes the stored bundle or CRL chain verbatim.
 	ScopeChain = "chain"

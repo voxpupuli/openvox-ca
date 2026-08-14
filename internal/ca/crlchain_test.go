@@ -720,8 +720,6 @@ var _ = Describe("CRL chain read failures", func() {
 	)
 })
 
-// flakyCRLBackend fails Get on the CRL key after a set number of successful
-// reads, standing in for a transient fault on a network backend.
 // unlockableBackend advertises Locker and always refuses. Deliberately not
 // ErrDistributedLockingUnsupported, which WithLock falls through on by design;
 // this models the arm that matters -- etcd with a lost session, or a SQL
@@ -734,6 +732,8 @@ func (b *unlockableBackend) AcquireLock(context.Context, string) (storage.Unlock
 	return nil, errors.New("lock unavailable")
 }
 
+// flakyCRLBackend fails Get on the CRL key after a set number of successful
+// reads, standing in for a transient fault on a network backend.
 type flakyCRLBackend struct {
 	storage.Backend
 	mu        sync.Mutex
@@ -1670,6 +1670,40 @@ func handRolledCRL(cert *x509.Certificate, key *ecdsa.PrivateKey) []byte {
 // A numberless CRL that is also the *later* of the two is what separates "a
 // numbered block wins" from "the later block wins" -- with the fixed -1h stamp,
 // both rules give the same answer whichever order the bundle arrives in.
+// handRolledCRLNoNextUpdate signs a CRL that omits nextUpdate entirely. It is
+// OPTIONAL in RFC 5280's ASN.1, and x509.CreateRevocationList refuses to mint
+// one, so the only way to have the shape a non-conforming ancestor CA can
+// legitimately emit is to assemble the DER.
+func handRolledCRLNoNextUpdate(cert *x509.Certificate, key *ecdsa.PrivateKey) []byte {
+	GinkgoHelper()
+	algo := pkix.AlgorithmIdentifier{Algorithm: asn1.ObjectIdentifier{1, 2, 840, 10045, 4, 3, 2}}
+
+	tbsDER, err := asn1.Marshal(tbsCertList{
+		Version:    1, // v2
+		Signature:  algo,
+		Issuer:     asn1.RawValue{FullBytes: cert.RawSubject},
+		ThisUpdate: time.Now().UTC().Truncate(time.Second).Add(-time.Hour),
+	})
+	Expect(err).NotTo(HaveOccurred())
+
+	digest := sha256.Sum256(tbsDER)
+	sig, err := ecdsa.SignASN1(rand.Reader, key, digest[:])
+	Expect(err).NotTo(HaveOccurred())
+
+	der, err := asn1.Marshal(certificateList{
+		TBS:       asn1.RawValue{FullBytes: tbsDER},
+		Signature: algo,
+		Sig:       asn1.BitString{Bytes: sig, BitLength: len(sig) * 8},
+	})
+	Expect(err).NotTo(HaveOccurred())
+
+	parsed, err := x509.ParseRevocationList(der)
+	Expect(err).NotTo(HaveOccurred(), "the hand-rolled CRL must be parseable")
+	Expect(parsed.NextUpdate).To(BeZero(), "the fixture must actually omit nextUpdate")
+
+	return pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: der})
+}
+
 func handRolledCRLAt(cert *x509.Certificate, key *ecdsa.PrivateKey, thisUpdate time.Time) []byte {
 	GinkgoHelper()
 	// ecdsa-with-SHA256

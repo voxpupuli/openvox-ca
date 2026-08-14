@@ -249,9 +249,28 @@ func (c *CA) monotonicUpstream(storedBlob []byte, issuers []*x509.Certificate,
 	// Report ancestors the file has stopped listing. Iterating published rather
 	// than the map so the order is the stored chain's rather than Go's map
 	// randomisation; mentioned doubles as the seen-set so each is named once.
+	unattributable := make(map[string]bool)
 	for _, crl := range published {
 		signer := signerOf(issuers, crl)
-		if signer == nil || mentioned[string(signer.Raw)] {
+		if signer == nil {
+			// Published, but nothing in the CA bundle signs it any more -- an
+			// ancestor's certificate dropped from the bundle, or a partial
+			// re-import. It is about to disappear from the published chain
+			// exactly as a removed one does, so it is counted the same way
+			// rather than vanishing with only this line to show for it. Keyed
+			// on the DN because there is no signer to key on.
+			if unattributable[crl.Issuer.String()] {
+				continue
+			}
+			unattributable[crl.Issuer.String()] = true
+			c.crlChainRemoved.Add(1)
+			slog.Error("A published upstream CRL is signed by no certificate in the stored "+
+				"CA bundle and is being dropped; re-import the bundle with that ancestor's "+
+				"certificate to keep publishing its CRL",
+				"path", c.CRLChainFile, "issuer", crl.Issuer.String())
+			continue
+		}
+		if mentioned[string(signer.Raw)] {
 			continue
 		}
 		mentioned[string(signer.Raw)] = true
@@ -609,8 +628,8 @@ type UpstreamCRLStatus struct {
 // CRLs this CA cannot reissue — a real page with a wrong runbook, since the
 // remedy is at the parent.
 //
-// One status per issuer distinguished name, carrying the *nearest* NextUpdate
-// when a DN appears more than once. The rest of this file pairs CRLs by signing
+// One status per issuer distinguished name, carrying the *nearest* real
+// NextUpdate when a DN appears more than once. The rest of this file pairs CRLs by signing
 // certificate precisely because a DN does not identify an ancestor, and two
 // ancestors sharing a DN are published as separate blocks -- but the metric has
 // only the DN to label with, so two statuses for one DN would be two samples
@@ -619,6 +638,14 @@ type UpstreamCRLStatus struct {
 // series at all and PuppetCAUpstreamCRLExpired unable to fire for it. Reporting
 // the nearest deadline collapses them without hiding anything: the alert exists
 // to catch the ancestor closest to lapsing, and that is the one it now reports.
+//
+// A zero NextUpdate never wins that comparison. nextUpdate is OPTIONAL in RFC
+// 5280's ASN.1, so a non-conforming ancestor parses with a zero time, and the
+// collector renders that as 0 -- which the expiry alert reads as "expired in
+// 1970". Letting it win would hide a real deadline behind an unusable one for
+// every ancestor sharing the DN. A DN whose only CRL is zero still reports 0,
+// which is the honest answer: nothing about that CRL says when it goes stale,
+// and treating it as fresh would be the worse guess.
 //
 // blob is the stored CRL the caller has already read. Taking it as a parameter
 // rather than re-reading keeps the collector's "parse the CRL once" rule true:
@@ -638,7 +665,10 @@ func (c *CA) UpstreamCRLStatuses(blob []byte) ([]UpstreamCRLStatus, error) {
 		}
 		issuer := crl.Issuer.String()
 		if i, ok := seen[issuer]; ok {
-			if crl.NextUpdate.Before(out[i].NextUpdate) {
+			if crl.NextUpdate.IsZero() {
+				continue
+			}
+			if out[i].NextUpdate.IsZero() || crl.NextUpdate.Before(out[i].NextUpdate) {
 				out[i].NextUpdate = crl.NextUpdate
 			}
 			continue
