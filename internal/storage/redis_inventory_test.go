@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -447,6 +448,33 @@ var _ = Describe("RedisInventoryPrune", func() {
 		Expect(removed).To(HaveLen(1))
 		Expect(hashFields(cli, invKey(redisInvSubjectSub))["node1"]).To(Equal("0008"),
 			"node1 must point at the interleaved issuance, not the snapshot's older one")
+	})
+
+	It("prunes every entry, leaving a present-but-empty inventory", func() {
+		ctx := context.Background()
+		svc, _, cli, stop := newRedisInventoryService()
+		defer stop()
+
+		removed, err := svc.PruneInventory(ctx, func(InventoryEntry) bool { return false })
+		Expect(err).NotTo(HaveOccurred())
+		Expect(removed).To(HaveLen(3))
+
+		Expect(hashFields(cli, invKey(redisInvEntriesSub))).To(BeEmpty())
+		Expect(hashFields(cli, invKey(redisInvSerialSub))).To(BeEmpty())
+		Expect(hashFields(cli, invKey(redisInvSubjectSub))).To(BeEmpty())
+
+		// The chain over zero entries is the empty head, which must still
+		// verify — a stored empty payload and a computed nil compare equal —
+		// and the inventory must read as present-but-empty, not absent.
+		got, err := svc.ReadInventory(ctx)
+		Expect(err).NotTo(HaveOccurred(), "ReadInventory after a total prune")
+		Expect(got).NotTo(BeNil())
+		Expect(got).To(BeEmpty())
+
+		Expect(svc.AppendInventory(ctx, "0005 2024-01-05T00:00:00UTC 2029-01-05T00:00:00UTC /node5")).To(Succeed())
+		got, err = svc.ReadInventory(ctx)
+		Expect(err).NotTo(HaveOccurred(), "the chain restarts cleanly from empty")
+		Expect(string(got)).To(Equal("0005 2024-01-05T00:00:00UTC 2029-01-05T00:00:00UTC /node5\n"))
 	})
 
 	It("returns nothing and touches nothing when no entry matches", func() {
@@ -1066,5 +1094,45 @@ var _ = Describe("RedisCertIndex", func() {
 		Expect(recs[0].Fingerprint).To(HavePrefix("w"))
 		_, err = svc.ReadInventory(ctx)
 		Expect(err).NotTo(HaveOccurred())
+	})
+})
+
+var _ = Describe("RedisMigrateFromFilesystem", func() {
+	It("imports a filesystem CA and rebuilds the chain head for the decomposed inventory", func() {
+		ctx := context.Background()
+		_, cli, stop := newMiniredis()
+		defer stop()
+
+		src := New(GinkgoT().TempDir())
+		Expect(src.EnsureDirs(ctx)).To(Succeed())
+		Expect(src.SaveCACert(ctx, []byte("ca-cert-pem"))).To(Succeed())
+		Expect(src.TouchInventory(ctx)).To(Succeed())
+		Expect(src.InitHMAC(ctx)).To(Succeed())
+		for _, line := range sampleInventoryLines {
+			Expect(src.AppendInventory(ctx, line)).To(Succeed())
+		}
+		Expect(src.SaveCert(ctx, "node1", []byte("cert-pem"))).To(Succeed())
+
+		// Migrate copies KeyInventory as text through the blob shim, so the
+		// destination parses it back into hash fields and rebuilds the head
+		// in its own scheme — the source's whole-blob HMAC cannot carry over.
+		dstBackend := newRedisBackend(cli, redisTestPrefix)
+		dst := NewWithBackend(dstBackend, filepath.Join(GinkgoT().TempDir(), "private"))
+		_, err := MigrateService(ctx, src, dst, MigrateOptions{})
+		Expect(err).NotTo(HaveOccurred(), "MigrateService")
+
+		// InitHMAC verifies against the head MigrateService rebuilt over the
+		// decomposed entries; a whole-blob HMAC left behind would fail here.
+		Expect(dst.InitHMAC(ctx)).To(Succeed(), "InitHMAC on destination")
+
+		srcInv, err := src.ReadInventory(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		dstInv, err := dst.ReadInventory(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(dstInv).To(Equal(srcInv), "migrated inventory must render identically")
+
+		serial, err := dst.LatestSerialForSubject(ctx, "node1")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(serial).To(Equal("0003"), "the subject index must be built during import")
 	})
 })
