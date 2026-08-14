@@ -229,9 +229,9 @@ func (s *StorageService) AppendInventoryRecord(ctx context.Context, entry string
 			newHead = func(prev []byte) []byte { return chainInventoryMAC(key, prev, entry) }
 		}
 		if err := store.AppendEntry(ctx, rec, newHead); err != nil {
-			// The etcd backend already wraps ErrDuplicateSerial itself; SQL
-			// backends surface the dialect's unique-index violation instead
-			// and are translated here.
+			// The etcd and redis backends already wrap ErrDuplicateSerial
+			// themselves; SQL backends surface the dialect's unique-index
+			// violation instead and are translated here.
 			if !errors.Is(err, ErrDuplicateSerial) && isUniqueSerialViolation(err) {
 				return fmt.Errorf("%w: %s", ErrDuplicateSerial, parsed.Serial)
 			}

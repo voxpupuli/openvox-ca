@@ -18,8 +18,10 @@
 package storage
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -188,4 +190,76 @@ func recordsArePrefixOf(entries []indexedRecord, recs []CertRecord) bool {
 		}
 	}
 	return true
+}
+
+// renderInventoryText renders records to inventory.txt text, byte-identical to
+// what the append-only blob held — the contract the KeyInventory blob shim
+// owes Migrate and the OCSP index build on every decomposed backend.
+//
+// A record set that renders to nothing yields a non-nil empty slice, so a
+// touched-but-empty inventory reads as present-but-empty rather than absent,
+// matching the blob backends' Get.
+func renderInventoryText(recs []indexedRecord) []byte {
+	var buf bytes.Buffer
+	for _, r := range recs {
+		buf.WriteString(canonicalInventoryLine(r.rec.InventoryEntry))
+		buf.WriteByte('\n')
+	}
+	if buf.Len() == 0 {
+		return []byte{}
+	}
+	return buf.Bytes()
+}
+
+// latestPerSubject folds recs (in ascending issuance order) to one record per
+// subject — the latest issuance wins — keeps only subjects that still hold a
+// stored certificate, and returns them in subject order, optionally narrowed
+// to stateFilter. This is the semantics of the CertIndex.Statuses contract for
+// the backends that cannot push the fold into an indexed query; see that
+// contract in backend.go.
+//
+// ambiguous reports whether a serial's index entry carries the ambiguity
+// sentinel. Such records are reported as CertStateUnknown, which tells the
+// reader to derive state from the signed CRL instead of trusting a value that
+// revocation writes were never able to update. The sentinel, not a live
+// duplicate count, is the source of truth: it survives a partial prune, so a
+// lone remaining bearer whose writes were refused while it was ambiguous stays
+// unknown until the serial is fully released.
+func latestPerSubject(recs []indexedRecord, stored map[string]bool, ambiguous func(serial string) bool, stateFilter string) []CertRecord {
+	latest := make(map[string]CertRecord, len(recs))
+	for _, r := range recs {
+		rec := r.rec
+		if ambiguous(rec.Serial) {
+			rec.State = CertStateUnknown
+			rec.RevokedAt = nil
+		}
+		latest[rec.Subject] = rec
+	}
+
+	subjects := make([]string, 0, len(latest))
+	for subject := range latest {
+		if stored[subject] {
+			subjects = append(subjects, subject)
+		}
+	}
+	sort.Strings(subjects)
+
+	records := make([]CertRecord, 0, len(subjects))
+	for _, subject := range subjects {
+		rec := latest[subject]
+		if stateFilter != "" && rec.State != stateFilter {
+			continue
+		}
+		records = append(records, rec)
+	}
+	return records
+}
+
+// pruneBacklogGrowing reports whether a prune's deferred-match count exceeds
+// perCall, what one whole call can remove — the signal that, at the current
+// cleanup cadence, the backlog is growing rather than draining, which the
+// deferral log escalates to a warning. Below that threshold a deferral is
+// expected (a one-off backlog draining over several runs) and logs at info.
+func pruneBacklogGrowing(deferred, perCall int) bool {
+	return deferred > perCall
 }

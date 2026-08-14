@@ -169,6 +169,14 @@ etcd_tls_key_file:  /etc/puppet-ca/etcd-client-key.pem
   not-yet-upgraded replica writing the old blob format while an upgraded one
   serves the converted inventory is not supported and is refused with an
   explicit error when detected.
+- **The conversion is one-way; take a snapshot before the first upgraded
+  start.** Downgrading to a release that predates it is not supported, and
+  fails quietly rather than loudly: the old binary reads `inventory/data`,
+  finds the empty marker the conversion left, and reports an *empty* inventory
+  rather than an error — so it prunes nothing, and starts appending new
+  issuances to the legacy blob. Upgrading again is then refused, because the
+  blob and the decomposed entries no longer agree. Recovery is a restore from
+  an etcd snapshot taken before the upgrade, so take one.
 - **The etcd backend also maintains the certificate index**: `GET
   /certificate_statuses` (`puppetserver ca list`) is answered from the
   decomposed inventory entries instead of reading and parsing every stored
@@ -187,9 +195,11 @@ etcd_tls_key_file:  /etc/puppet-ca/etcd-client-key.pem
   stalling signing. At the default daily cleanup interval that is 900
   entries/day: enabling cleanup for the first time on a large backlog, or
   running a fleet whose expiry churn exceeds it, calls for a shorter
-  `expired_cert_cleanup_interval_sec` — the server logs a warning when a
-  single pass cannot keep up. An in-progress *conversion* is instead covered
-  by the blob-stays-authoritative resume behaviour described above.
+  `expired_cert_cleanup_interval_sec` — the server logs every deferral, and
+  escalates to a warning once the deferred backlog exceeds what a whole pass
+  can remove, which is the point at which the backlog is growing rather than
+  draining. An in-progress *conversion* is instead covered by the
+  blob-stays-authoritative resume behaviour described above.
 - **Legacy inventories with duplicate serial numbers** (possible, because the
   pre-conversion blob had no cluster-wide uniqueness guarantee) are imported
   verbatim with a startup warning naming the serials. The certificate index
@@ -329,6 +339,14 @@ redis_tls_key_file:  /etc/puppet-ca/redis-client-key.pem
   not-yet-upgraded replica writing the old blob format while an upgraded one
   serves the converted inventory is not supported and is refused with an
   explicit error when detected.
+- **The conversion is one-way; take a snapshot before the first upgraded
+  start.** Downgrading to a release that predates it is not supported, and
+  fails quietly rather than loudly: the old binary reads `inventory:data`,
+  finds the bare marker the conversion left, and reports an *empty* inventory
+  rather than an error — so it prunes nothing, and starts appending new
+  issuances to the legacy blob. Upgrading again is then refused, because the
+  blob and the entries hash no longer agree. Recovery is a restore from a
+  Redis snapshot (RDB/AOF) taken before the upgrade, so take one.
 - **The Redis backend also maintains the certificate index**: `GET
   /certificate_statuses` (`puppetserver ca list`) is answered from the
   decomposed inventory entries instead of reading and parsing every stored
@@ -347,8 +365,10 @@ redis_tls_key_file:  /etc/puppet-ca/redis-client-key.pem
   stalling signing. At the default daily cleanup interval that is 5000
   entries/day: enabling cleanup for the first time on a large backlog, or
   running a fleet whose expiry churn exceeds it, calls for a shorter
-  `expired_cert_cleanup_interval_sec` — the server logs a warning when a single
-  pass cannot keep up.
+  `expired_cert_cleanup_interval_sec` — the server logs every deferral, and
+  escalates to a warning once the deferred backlog exceeds what a whole pass
+  can remove, which is the point at which the backlog is growing rather than
+  draining.
 - **Legacy inventories with duplicate serial numbers** (possible, because the
   pre-conversion blob had no cluster-wide uniqueness guarantee) are imported
   verbatim with a startup warning naming the serials. The certificate index

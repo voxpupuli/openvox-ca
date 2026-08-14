@@ -18,7 +18,6 @@
 package storage
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"errors"
@@ -40,8 +39,9 @@ import (
 //	                      issuance; seq is the decimal issuance counter
 //	inventory:seq         last allocated sequence number, allocated by INCR
 //	                      and doubling as the mutation fence
-//	inventory:by-serial   HASH serial → seq; HSETNX on it is the atomic,
-//	                      cluster-wide duplicate-serial guard
+//	inventory:by-serial   HASH serial → seq; the field the append script
+//	                      refuses to overwrite (see redisAppendEntryLua) is
+//	                      the atomic, cluster-wide duplicate-serial guard
 //	inventory:by-subject  HASH subject → most recently issued serial
 //	inventory:data        presence marker (empty payload); also where
 //	                      pre-decomposition versions kept the blob
@@ -262,6 +262,14 @@ return {'ok'}
 // The sequence counter is a fence, not a value to update: a prune allocates
 // nothing, so it leaves the counter exactly as it found it and survivors keep
 // their original sequence numbers (and thus issuance order).
+//
+// The lists are applied in chunks rather than through one unpack() per list.
+// Redis bundles Lua 5.1, whose unpack() raises "too many results to unpack"
+// above LUAI_MAXCSTACK (8000) results — and the by-subject repoint list is two
+// elements per subject, so it crosses that ceiling well inside
+// redisPruneMaxPerCall. Chunking keeps the cap a latency decision rather than
+// one silently coupled to the interpreter's stack, and the whole script stays
+// atomic regardless of how many commands it issues.
 const redisPruneLua = redisHeadGuardLua + `
 local seq = redis.call('GET', KEYS[2])
 if seq == false then seq = '0' end
@@ -279,14 +287,31 @@ local function take()
   i = i + n + 1
   return out, n
 end
+-- stride is even so a field/value pair is never split across two calls.
+local function apply(cmd, key, args, n)
+  local stride = 500
+  local at = 1
+  while at <= n do
+    local last = at + stride - 1
+    if last > n then last = n end
+    local chunk = {}
+    local c = 1
+    for j = at, last do
+      chunk[c] = args[j]
+      c = c + 1
+    end
+    redis.call(cmd, key, unpack(chunk))
+    at = last + 1
+  end
+end
 local entryFields, nEntries = take()
 local serialFields, nSerials = take()
 local subjectPairs, nSubjectPairs = take()
 local subjectDrops, nSubjectDrops = take()
-if nEntries > 0 then redis.call('HDEL', KEYS[1], unpack(entryFields)) end
-if nSerials > 0 then redis.call('HDEL', KEYS[3], unpack(serialFields)) end
-if nSubjectPairs > 0 then redis.call('HSET', KEYS[4], unpack(subjectPairs)) end
-if nSubjectDrops > 0 then redis.call('HDEL', KEYS[4], unpack(subjectDrops)) end
+apply('HDEL', KEYS[1], entryFields, nEntries)
+apply('HDEL', KEYS[3], serialFields, nSerials)
+apply('HSET', KEYS[4], subjectPairs, nSubjectPairs)
+apply('HDEL', KEYS[4], subjectDrops, nSubjectDrops)
 write_head()
 return {'ok'}
 `
@@ -531,6 +556,9 @@ func (b *RedisBackend) AppendEntry(ctx context.Context, rec CertRecord, newHead 
 		}
 		argv := b.headArgs(newHead, prev)
 		argv = append(argv, rec.Serial, rec.Subject, string(val))
+		if b.appendHeadHook != nil {
+			b.appendHeadHook()
+		}
 
 		status, _, err := b.runInvScript(ctx, b.invAppendEntryScript, argv...)
 		if err != nil {
@@ -709,7 +737,7 @@ func planRedisPrune(recs []indexedRecord, keep func(InventoryEntry) bool) redisP
 		// a backlog bigger than a whole call can remove is growing rather
 		// than draining at the current cleanup cadence.
 		logFn := slog.Info
-		if deferred > redisPruneMaxPerCall {
+		if pruneBacklogGrowing(deferred, redisPruneMaxPerCall) {
 			logFn = slog.Warn
 		}
 		logFn("Bounding inventory prune to keep it inside the caller's time budget; later runs will remove the rest",
@@ -797,7 +825,7 @@ func (b *RedisBackend) getInventory(ctx context.Context) ([]byte, error) {
 	}
 
 	raw, markerErr := markerCmd.Bytes()
-	if markerErr != nil && markerErr != redis.Nil {
+	if markerErr != nil && !errors.Is(markerErr, redis.Nil) {
 		return nil, markerErr
 	}
 	markerPresent := markerErr == nil
@@ -818,17 +846,7 @@ func (b *RedisBackend) getInventory(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	var buf bytes.Buffer
-	for _, r := range recs {
-		buf.WriteString(canonicalInventoryLine(r.rec.InventoryEntry))
-		buf.WriteByte('\n')
-	}
-	// Normalise to a non-nil empty slice so a touched-but-empty inventory
-	// reads as present-but-empty, not absent (matching the other backends).
-	if buf.Len() == 0 {
-		return []byte{}, nil
-	}
-	return buf.Bytes(), nil
+	return renderInventoryText(recs), nil
 }
 
 // putInventory replaces the entire decomposed inventory with the entries
@@ -997,6 +1015,14 @@ func (b *RedisBackend) appendInventoryLines(ctx context.Context, data []byte) er
 	}
 	if len(recs) == 0 {
 		return nil
+	}
+	// This path appends every line in one script (unlike imports and prunes,
+	// which chunk), so bound it explicitly rather than let a large caller
+	// block the single-threaded server for the whole batch. The etcd sibling
+	// refuses an oversized batch for the same reason, against its transaction
+	// budget rather than a latency one.
+	if len(recs) > redisImportBatch {
+		return fmt.Errorf("appending %d inventory lines in one call exceeds the redis single-script budget of %d; append in smaller chunks", len(recs), redisImportBatch)
 	}
 
 	b.appendMu.Lock()

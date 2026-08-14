@@ -18,7 +18,6 @@
 package storage
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"fmt"
@@ -100,18 +99,13 @@ const etcdImportProgressEvery = 1024
 // PruneEntries contract permits.
 const etcdPruneMaxBatchesPerCall = 30
 
-// pruneBacklogGrowing reports whether a prune's deferred-match count exceeds
-// what one whole call can remove — the signal that, at the current cleanup
-// cadence, the backlog is growing rather than draining, which the deferral
-// log escalates to a warning.
-func pruneBacklogGrowing(deferred int) bool {
-	return deferred > etcdPruneMaxBatchesPerCall*etcdPruneBatch
-}
-
 // etcdDecomposeLockName is the distributed lock serialising the one-time
 // legacy inventory blob conversion across replicas starting up together. Lock
-// names are protocol (see docs/development/locking.md); this one is scoped to
-// the etcd backend, which is the only backend with a blob to decompose.
+// names are protocol (see docs/development/locking.md), and this one is shared
+// by both decomposing backends: redisDecomposeLockName in redis_inventory.go
+// aliases this constant, so renaming it here renames Redis's lock too, with no
+// compile error to warn you. A deployment only ever has one backend, so the
+// two can never contend.
 const etcdDecomposeLockName = "inventory-decompose"
 
 // invPhys returns the physical etcd key for an inventory sub-path.
@@ -413,7 +407,7 @@ func (b *EtcdBackend) pruneEntriesOnce(ctx context.Context, keep func(InventoryE
 	if len(starts) > maxBatches {
 		starts = starts[len(starts)-maxBatches:]
 		logFn := slog.Info
-		if pruneBacklogGrowing(starts[0]) {
+		if pruneBacklogGrowing(starts[0], etcdPruneMaxBatchesPerCall*etcdPruneBatch) {
 			// More is deferred than a whole run can remove: at the current
 			// cleanup interval the backlog is growing, not draining. Make
 			// that visible rather than inferable — the operator's lever is
@@ -584,17 +578,7 @@ func (b *EtcdBackend) getInventory(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	var buf bytes.Buffer
-	for _, r := range recs {
-		buf.WriteString(canonicalInventoryLine(r.rec.InventoryEntry))
-		buf.WriteByte('\n')
-	}
-	// Normalise to a non-nil empty slice so a touched-but-empty inventory
-	// reads as present-but-empty, not absent (matching the other backends).
-	if buf.Len() == 0 {
-		return []byte{}, nil
-	}
-	return buf.Bytes(), nil
+	return renderInventoryText(recs), nil
 }
 
 // putInventory replaces the entire decomposed inventory with the entries

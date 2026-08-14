@@ -143,11 +143,13 @@ type RedisBackend struct {
 	appendMu sync.Mutex // serialises inventory mutations within this process
 
 	// importBatchHook, when non-nil, runs after each committed import script;
-	// pruneSnapshotHook runs between a prune's snapshot read and its guarded
-	// commit; mutateRecordHook does the same for an index write. Test seams
+	// appendHeadHook runs between an append's head read and its guarded
+	// commit; pruneSnapshotHook does the same between a prune's snapshot read
+	// and its commit; mutateRecordHook the same for an index write. Test seams
 	// only: they let the suite interleave conflicting writes deterministically
 	// to exercise the resume and guard-retry paths.
 	importBatchHook   func()
+	appendHeadHook    func()
 	pruneSnapshotHook func()
 	mutateRecordHook  func()
 

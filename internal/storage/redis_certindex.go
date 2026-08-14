@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sort"
 	"strings"
 	"time"
 
@@ -83,43 +82,12 @@ func (b *RedisBackend) Statuses(ctx context.Context, stateFilter string) ([]Cert
 		return nil, err
 	}
 
-	// Ascending issuance order: a later record for the same subject wins.
-	// Serials whose by-serial field carries the ambiguity sentinel (imported
-	// legacy duplicates) cannot have index-maintained state —
-	// mutateRecordBySerial refuses writes for them — so report those records
-	// as CertStateUnknown, which tells the reader to derive state from the
-	// signed CRL instead of trusting a value that revocation writes were never
-	// able to update. The sentinel, not a live duplicate count, is the source
-	// of truth: it survives a partial prune, so a lone remaining bearer whose
-	// writes were refused while it was ambiguous stays unknown until the
-	// serial is fully released.
-	latest := make(map[string]CertRecord, len(recs))
-	for _, r := range recs {
-		rec := r.rec
-		if serialFields[rec.Serial] == serialAmbiguous {
-			rec.State = CertStateUnknown
-			rec.RevokedAt = nil
-		}
-		latest[rec.Subject] = rec
-	}
-
-	subjects := make([]string, 0, len(latest))
-	for subject := range latest {
-		if stored[subject] {
-			subjects = append(subjects, subject)
-		}
-	}
-	sort.Strings(subjects)
-
-	records := make([]CertRecord, 0, len(subjects))
-	for _, subject := range subjects {
-		rec := latest[subject]
-		if stateFilter != "" && rec.State != stateFilter {
-			continue
-		}
-		records = append(records, rec)
-	}
-	return records, nil
+	// Ascending issuance order, latest per subject, gated on a stored
+	// certificate; ambiguity comes from the by-serial sentinel rather than a
+	// live duplicate count (see latestPerSubject).
+	return latestPerSubject(recs, stored, func(serial string) bool {
+		return serialFields[serial] == serialAmbiguous
+	}, stateFilter), nil
 }
 
 // SetRevoked marks the entry bearing serial as revoked at the given time.

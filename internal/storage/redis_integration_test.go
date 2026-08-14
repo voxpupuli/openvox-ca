@@ -425,3 +425,75 @@ var _ = Describe("RedisIntegrationInventoryStore", func() {
 		Expect(err).NotTo(HaveOccurred(), "index writes must leave the chain untouched")
 	})
 })
+
+var _ = Describe("RedisIntegrationPruneAtScale", func() {
+	// Regression test for the Lua unpack ceiling. Redis bundles Lua 5.1, whose
+	// unpack() raises "too many results to unpack" above LUAI_MAXCSTACK
+	// (8000) results. The prune's by-subject repoint list is TWO elements per
+	// affected subject, so a full-cap prune of entries with distinct subjects
+	// built a 10000-element list and every cleanup run failed identically —
+	// the inventory would then grow without bound until an operator noticed.
+	//
+	// This can only be caught against a real server: miniredis interprets Lua
+	// with gopher-lua, which has no such limit, so the unit suite passes
+	// either way. It is also why the assertion below is the prune succeeding
+	// rather than anything about the data.
+	It("prunes a full-cap batch of distinct subjects without tripping Lua's unpack limit", func() {
+		ctx := context.Background()
+		b := newIntegrationBackend("prune-scale")
+		svc := NewWithBackend(b, "")
+		Expect(svc.TouchInventory(ctx)).To(Succeed(), "TouchInventory")
+		Expect(svc.InitHMAC(ctx)).To(Succeed(), "InitHMAC")
+
+		// Every entry gets its own subject and a surviving newer issuance, so
+		// the prune must emit a repoint pair per removed entry — the worst
+		// case for the list that overflowed.
+		const subjects = redisPruneMaxPerCall
+		recs := make([]CertRecord, 0, subjects*2)
+		for i := 0; i < subjects; i++ {
+			subject := fmt.Sprintf("node%d", i)
+			recs = append(recs,
+				// Expired: pruned.
+				CertRecord{InventoryEntry: InventoryEntry{
+					Serial:    fmt.Sprintf("%06d", i*2+1),
+					NotBefore: "2020-01-01T00:00:00UTC",
+					NotAfter:  "2021-01-01T00:00:00UTC",
+					Subject:   subject,
+				}},
+				// Still valid: survives, and becomes the repoint target.
+				CertRecord{InventoryEntry: InventoryEntry{
+					Serial:    fmt.Sprintf("%06d", i*2+2),
+					NotBefore: "2024-01-01T00:00:00UTC",
+					NotAfter:  "2039-01-01T00:00:00UTC",
+					Subject:   subject,
+				}})
+		}
+		// Seed through the blob shim: one script per redisImportBatch, far
+		// faster than 10000 individual appends.
+		var buf bytes.Buffer
+		for _, r := range recs {
+			buf.WriteString(canonicalInventoryLine(r.InventoryEntry))
+			buf.WriteByte('\n')
+		}
+		Expect(b.Put(ctx, KeyInventory, buf.Bytes(), BlobPrivate)).To(Succeed(), "seed inventory")
+		Expect(svc.RebuildInventoryHMAC(ctx)).To(Succeed(), "RebuildInventoryHMAC")
+
+		cutoff, err := time.Parse(InventoryTimeFormat, "2023-01-01T00:00:00UTC")
+		Expect(err).NotTo(HaveOccurred())
+		removed, err := svc.PruneInventory(ctx, func(e InventoryEntry) bool {
+			notAfter, perr := time.Parse(InventoryTimeFormat, e.NotAfter)
+			Expect(perr).NotTo(HaveOccurred())
+			return !notAfter.Before(cutoff)
+		})
+		Expect(err).NotTo(HaveOccurred(), "PruneInventory at the per-call cap")
+		Expect(removed).To(HaveLen(redisPruneMaxPerCall), "the whole cap must be removed in one call")
+
+		// The chain must still verify, and every subject must have been
+		// repointed at its surviving issuance.
+		_, err = svc.ReadInventory(ctx)
+		Expect(err).NotTo(HaveOccurred(), "ReadInventory verifies the rewritten head")
+		serial, err := svc.LatestSerialForSubject(ctx, "node0")
+		Expect(err).NotTo(HaveOccurred(), "LatestSerialForSubject")
+		Expect(serial).To(Equal("000002"), "node0 must point at its surviving issuance")
+	})
+})

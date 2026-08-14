@@ -293,9 +293,10 @@ func asCertIndex(b Backend) (CertIndex, bool) {
 
 // InventoryStore is an optional Backend capability for storing the certificate
 // inventory as structured records (a SQL table, etcd keys, redis hash fields)
-// rather than the single append-only KeyInventory blob. Backends that implement it let StorageService
-// skip the render → scan → reparse round-trip for appends and subject lookups,
-// and verify integrity with a hash chain instead of re-hashing the whole blob.
+// rather than the single append-only KeyInventory blob. Backends that
+// implement it let StorageService skip the render → scan → reparse round-trip
+// for appends and subject lookups, and verify integrity with a hash chain
+// instead of re-hashing the whole blob.
 //
 // Backends that do not implement it keep using the KeyInventory blob via
 // AppendLine/Get; StorageService selects the path with a type assertion, the

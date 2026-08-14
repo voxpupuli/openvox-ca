@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -306,6 +305,73 @@ var _ = Describe("RedisInventoryConcurrentAppends", func() {
 	})
 })
 
+var _ = Describe("RedisInventoryAppendHeadGuard", func() {
+	// The storm test above proves the end state is right, but it cannot prove
+	// the head guard ever fired: if the two replicas' read→commit windows
+	// happen not to overlap (a loaded or single-CPU runner), it passes having
+	// exercised zero conflicts. These two drive the guard deterministically.
+	It("retries past an append that advanced the head, chaining onto it", func() {
+		ctx := context.Background()
+		svc, b, cli, stop := newRedisInventoryService()
+		defer stop()
+
+		other := NewWithBackend(newRedisBackend(cli, redisTestPrefix), "")
+		Expect(other.InitHMAC(ctx)).To(Succeed())
+
+		// One interleaved append from a second replica, landing after our head
+		// read and before our commit. The stored head is then no longer the
+		// one our chain value was computed from, so the script must refuse it.
+		var once sync.Once
+		var attempts atomic.Int32
+		b.appendHeadHook = func() {
+			attempts.Add(1)
+			once.Do(func() {
+				Expect(other.AppendInventory(ctx,
+					"0006 2024-01-06T00:00:00UTC 2029-01-06T00:00:00UTC /node6")).To(Succeed())
+			})
+		}
+
+		Expect(svc.AppendInventory(ctx, "0007 2024-01-07T00:00:00UTC 2029-01-07T00:00:00UTC /node7")).To(Succeed())
+		Expect(attempts.Load()).To(Equal(int32(2)), "the first attempt must have been refused and retried")
+
+		// Both appends are present and the chain covers them in issuance
+		// order — the retry re-read and chained onto the interloper rather
+		// than overwriting its head.
+		got, err := svc.ReadInventory(ctx)
+		Expect(err).NotTo(HaveOccurred(), "the chain must verify after the retry")
+		Expect(string(got)).To(HaveSuffix(
+			"0006 2024-01-06T00:00:00UTC 2029-01-06T00:00:00UTC /node6\n" +
+				"0007 2024-01-07T00:00:00UTC 2029-01-07T00:00:00UTC /node7\n"))
+	})
+
+	It("gives up with a named error when the head never stops moving", func() {
+		ctx := context.Background()
+		svc, b, cli, stop := newRedisInventoryService()
+		defer stop()
+
+		other := NewWithBackend(newRedisBackend(cli, redisTestPrefix), "")
+		Expect(other.InitHMAC(ctx)).To(Succeed())
+
+		var n atomic.Int32
+		b.appendHeadHook = func() {
+			i := n.Add(1)
+			Expect(other.AppendInventory(ctx, fmt.Sprintf(
+				"%04d 2024-02-01T00:00:00UTC 2029-02-01T00:00:00UTC /interloper%d", 1000+i, i))).To(Succeed())
+		}
+
+		err := svc.AppendInventory(ctx, "0008 2024-01-08T00:00:00UTC 2029-01-08T00:00:00UTC /node8")
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("too many concurrent writers"))
+		Expect(int(n.Load())).To(Equal(redisMaxRetries), "the retry loop is bounded")
+
+		// Nothing of ours was written, and the chain the interlopers built is
+		// intact — a refused append must leave no trace.
+		got, err := svc.ReadInventory(ctx)
+		Expect(err).NotTo(HaveOccurred(), "the chain must still verify")
+		Expect(string(got)).NotTo(ContainSubstring("/node8"))
+	})
+})
+
 var _ = Describe("RedisInventoryChainTamperDetection", func() {
 	var (
 		svc  *StorageService
@@ -475,6 +541,38 @@ var _ = Describe("RedisInventoryPrune", func() {
 		got, err = svc.ReadInventory(ctx)
 		Expect(err).NotTo(HaveOccurred(), "the chain restarts cleanly from empty")
 		Expect(string(got)).To(Equal("0005 2024-01-05T00:00:00UTC 2029-01-05T00:00:00UTC /node5\n"))
+	})
+
+	It("gives up without removing anything when the fence never stops moving", func() {
+		ctx := context.Background()
+		svc, b, cli, stop := newRedisInventoryService()
+		defer stop()
+
+		other := NewWithBackend(newRedisBackend(cli, redisTestPrefix), "")
+		Expect(other.InitHMAC(ctx)).To(Succeed())
+
+		// An append on every attempt, so the fence and the head have both
+		// moved by the time each commit is tried.
+		var n atomic.Int32
+		b.pruneSnapshotHook = func() {
+			i := n.Add(1)
+			Expect(other.AppendInventory(ctx, fmt.Sprintf(
+				"%04d 2024-03-01T00:00:00UTC 2029-03-01T00:00:00UTC /latecomer%d", 2000+i, i))).To(Succeed())
+		}
+
+		removed, err := svc.PruneInventory(ctx, keepNotSerial("0002"))
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("too many concurrent writers"))
+		Expect(int(n.Load())).To(Equal(redisMaxRetries), "the retry loop is bounded")
+
+		// The Redis half of the PruneEntries contract: the whole removal is
+		// one atomic script, so a failed prune removes NOTHING and returns an
+		// empty slice — unlike etcd, which may partially complete and must
+		// report what it durably removed.
+		Expect(removed).To(BeEmpty(), "a failed redis prune must not have removed anything")
+		Expect(hashFields(cli, invKey(redisInvEntriesSub))).To(HaveKey("2"), "0002 must still be present")
+		_, err = svc.ReadInventory(ctx)
+		Expect(err).NotTo(HaveOccurred(), "the chain must still verify")
 	})
 
 	It("returns nothing and touches nothing when no entry matches", func() {
@@ -847,8 +945,16 @@ var _ = Describe("RedisLegacyInventoryDecompose", func() {
 		cli, stop, key, blob := legacySetup(sampleInventoryLines)
 		defer stop()
 
+		// Counting committed import steps is the assertion, not the end state:
+		// a second replica that re-wiped and re-imported the same blob would
+		// leave exactly the same three entries, so an entry count alone would
+		// stay green with the decompose lock removed. One import of a
+		// three-line blob commits two steps — the wipe and a single batch.
+		var steps atomic.Int32
 		a := newRawRedisBackend(cli, redisTestPrefix)
 		b := newRawRedisBackend(cli, redisTestPrefix)
+		a.importBatchHook = func() { steps.Add(1) }
+		b.importBatchHook = func() { steps.Add(1) }
 		var wg sync.WaitGroup
 		wg.Add(2)
 		for _, backend := range []*RedisBackend{a, b} {
@@ -860,6 +966,7 @@ var _ = Describe("RedisLegacyInventoryDecompose", func() {
 		}
 		wg.Wait()
 
+		Expect(steps.Load()).To(Equal(int32(2)), "the lock must keep the second replica from re-importing")
 		Expect(hashFields(cli, invKey(redisInvEntriesSub))).To(HaveLen(3), "imported exactly once")
 		got, err := a.Get(ctx, KeyInventory)
 		Expect(err).NotTo(HaveOccurred())
@@ -1063,12 +1170,23 @@ var _ = Describe("RedisCertIndex", func() {
 		Expect(int(n.Load())).To(Equal(redisMaxRetries), "the retry loop is bounded")
 	})
 
-	It("serialises concurrent index writers on one serial", func() {
+	It("keeps a record coherent under concurrent index writers on one serial", func() {
 		ctx := context.Background()
 		svc, _, cli, stop := newCertIndexRedis()
 		defer stop()
 		other := NewWithBackend(newRedisBackend(cli, redisTestPrefix), "")
 
+		// This is a coherence and race-detector exercise, not a test of the
+		// compare-and-set: SetProjection overwrites the projection wholesale,
+		// and Redis never tears a whole-value HSET, so removing the CAS from
+		// redisSetRecordLua would leave this spec green. The CAS is covered
+		// deterministically by the conflict spec above, which needs it to
+		// preserve a concurrent writer's change. What this one asserts is that
+		// concurrent writers across two replicas leave a record that still
+		// decodes, carries a value some writer actually sent, and has its
+		// canonical (chained) fields untouched.
+		want := make(map[string]bool)
+		var mu sync.Mutex
 		var wg sync.WaitGroup
 		wg.Add(4)
 		for w := range 4 {
@@ -1079,19 +1197,26 @@ var _ = Describe("RedisCertIndex", func() {
 			go func() {
 				defer GinkgoRecover()
 				defer wg.Done()
-				for range 10 {
-					Expect(s.SetCertProjection(ctx, "0003",
-						CertProjection{Fingerprint: "w" + strconv.Itoa(i)})).To(Succeed())
+				for n := range 10 {
+					fp := fmt.Sprintf("w%d-%d", i, n)
+					mu.Lock()
+					want[fp] = true
+					mu.Unlock()
+					Expect(s.SetCertProjection(ctx, "0003", CertProjection{Fingerprint: fp})).To(Succeed())
 				}
 			}()
 		}
 		wg.Wait()
 
-		// Whichever writer landed last, the record must still decode and the
-		// chain must still verify: no write may have been torn or lost.
 		recs, _, err := svc.CertStatuses(ctx, "")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(recs[0].Fingerprint).To(HavePrefix("w"))
+		Expect(want).To(HaveKey(recs[0].Fingerprint),
+			"the surviving projection must be a value some writer actually sent")
+
+		// The canonical fields are not the index's to touch, and the chain
+		// covers only them — both must have come through untouched.
+		Expect(recs[0].Serial).To(Equal("0003"))
+		Expect(recs[0].Subject).To(Equal("node1"))
 		_, err = svc.ReadInventory(ctx)
 		Expect(err).NotTo(HaveOccurred())
 	})

@@ -260,9 +260,9 @@ var _ = Describe("EtcdInventoryDecodeCorruptKeyspace", func() {
 var _ = Describe("EtcdPruneBacklogGrowing", func() {
 	It("warns only when more is deferred than a full call can remove", func() {
 		capacity := etcdPruneMaxBatchesPerCall * etcdPruneBatch
-		Expect(pruneBacklogGrowing(0)).To(BeFalse())
-		Expect(pruneBacklogGrowing(capacity)).To(BeFalse(), "a backlog one run can clear is not growing")
-		Expect(pruneBacklogGrowing(capacity+1)).To(BeTrue(), "beyond one run's capacity the backlog outpaces the cadence")
+		Expect(pruneBacklogGrowing(0, capacity)).To(BeFalse())
+		Expect(pruneBacklogGrowing(capacity, capacity)).To(BeFalse(), "a backlog one run can clear is not growing")
+		Expect(pruneBacklogGrowing(capacity+1, capacity)).To(BeTrue(), "beyond one run's capacity the backlog outpaces the cadence")
 	})
 })
 
