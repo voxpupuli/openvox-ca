@@ -341,9 +341,13 @@ Rules that keep the decomposed structure coherent:
   entries and head are out of sync, and no partial-completion case for callers
   to handle.
 - **The one thing the server cannot do is the chain.** `chainInventoryMAC` is
-  keyed and the key is deliberately not on the server, so the new head is
-  computed in Go from the head that was read and both are handed to the
-  script, which aborts if the stored head has moved. That optimistic check is
+  HMAC-SHA256 and the Lua sandbox has no HMAC primitive (only
+  `redis.sha1hex`), so the new head is computed in Go from the head that was
+  read and both are handed to the script, which aborts if the stored head has
+  moved. Note the HMAC key is itself a backend blob
+  (`<prefix>:private:hmac_key`), so it shares the instance with the entries it
+  covers: the chain detects accidental corruption, a lost or reordered write
+  and a racing writer, not an attacker who owns the Redis instance. That optimistic check is
   the only reason anything here retries. With integrity disabled there is no
   head and no check, so the sequence counter — which an append advances and a
   prune only reads — is the fence that catches an interleaved append instead.

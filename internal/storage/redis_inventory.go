@@ -52,14 +52,21 @@ import (
 // while it does — so unlike etcd, which can only compare-then-op, every
 // mutation here commits in a single indivisible step and needs no
 // multi-transaction batching to stay observably consistent. What Redis cannot
-// do server-side is compute the integrity chain: chainInventoryMAC is a keyed
-// hash, and the key is deliberately not on the server. So the one
-// read-compute-write the design cannot avoid is resolved optimistically, as
-// issue #139 proposed: the new head is computed in Go from the head that was
-// read, the script is handed both, and it aborts if the stored head is no
-// longer the one we read. That check is the only reason any of these
-// operations retries. When integrity is disabled there is no head, no check,
-// and no retry — the script alone is the whole guarantee.
+// do server-side is compute the integrity chain: chainInventoryMAC is
+// HMAC-SHA256, and the Lua sandbox has no HMAC primitive (it offers only
+// redis.sha1hex). So the one read-compute-write the design cannot avoid is
+// resolved optimistically, as issue #139 proposed: the new head is computed in
+// Go from the head that was read, the script is handed both, and it aborts if
+// the stored head is no longer the one we read. That check is the only reason
+// any of these operations retries. When integrity is disabled there is no
+// head, no check, and no retry — the script alone is the whole guarantee.
+//
+// What the chain is and is not: the HMAC key is a backend blob like any other
+// (KeyHMACKey, stored here at <prefix>:private:hmac_key), so it shares the
+// instance with the entries it covers. The chain therefore detects accidental
+// corruption, a lost or reordered write, and a racing writer — not an attacker
+// who owns the Redis instance, who holds both the key and the entries and can
+// recompute a consistent head.
 //
 // Appends are O(1) in the inventory size (a handful of hash writes), where
 // the blob path was O(size-of-entire-inventory) per certificate issued. The

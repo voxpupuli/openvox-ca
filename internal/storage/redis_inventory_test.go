@@ -600,7 +600,6 @@ var _ = Describe("RedisInventoryPrune", func() {
 		other := NewWithBackend(newRedisBackend(cli, redisTestPrefix), "")
 		Expect(other.InitHMAC(ctx)).To(Succeed())
 		var once sync.Once
-		b.importBatchHook = nil
 		b.pruneSnapshotHook = func() {
 			once.Do(func() {
 				Expect(other.AppendInventory(ctx,
@@ -1219,6 +1218,53 @@ var _ = Describe("RedisCertIndex", func() {
 		Expect(recs[0].Subject).To(Equal("node1"))
 		_, err = svc.ReadInventory(ctx)
 		Expect(err).NotTo(HaveOccurred())
+	})
+})
+
+// Mirrors EtcdInventoryDecodeCorruptKeyspace: decodeEntryFields gates every
+// Redis inventory read (readInventorySnapshot, Entries, getInventory,
+// Statuses), and Statuses does not verify the integrity chain — so a
+// regression that skipped an undecodable field instead of erroring would
+// silently under-report certificates rather than fail closed.
+var _ = Describe("RedisInventoryDecodeCorruptKeyspace", func() {
+	It("rejects a hash field whose name is not a sequence number, naming the field", func() {
+		_, err := decodeEntryFields(map[string]string{"stray": "{}"})
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("stray"))
+	})
+
+	It("rejects an entry with an undecodable value, naming the field", func() {
+		_, err := decodeEntryFields(map[string]string{"1": "{not-json"})
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring(`"1"`))
+	})
+
+	It("surfaces a corrupt field through a real read rather than skipping it", func() {
+		ctx := context.Background()
+		svc, _, cli, stop := newRedisInventoryService()
+		defer stop()
+
+		Expect(cli.HSet(ctx, invKey(redisInvEntriesSub), "4", "{not-json").Err()).To(Succeed())
+		_, err := svc.ReadInventory(ctx)
+		Expect(err).To(HaveOccurred(), "a corrupt entry must fail the read, not be dropped from it")
+	})
+})
+
+var _ = Describe("RedisInventoryAppendLineBudget", func() {
+	It("refuses a direct AppendLine larger than one script's budget", func() {
+		ctx := context.Background()
+		_, b, cli, stop := newRedisInventoryService()
+		defer stop()
+
+		var buf strings.Builder
+		for i := range redisImportBatch + 1 {
+			fmt.Fprintf(&buf, "%06d 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /bulk%d\n", 10000+i, i)
+		}
+		err := b.AppendLine(ctx, KeyInventory, []byte(buf.String()), BlobPrivate)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("exceeds the redis single-script budget"))
+		Expect(hashFields(cli, invKey(redisInvEntriesSub))).To(HaveLen(len(sampleInventoryLines)),
+			"a refused batch must write nothing")
 	})
 })
 
