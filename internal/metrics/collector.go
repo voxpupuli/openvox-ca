@@ -200,13 +200,16 @@ func NewCollector(c *ca.CA) *Collector {
 			nil, nil),
 		crlChainRemoved: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "crl_chain", "removed_total"),
-			"Total ancestors that crl_chain_file has stopped listing while their CRL was "+
-				"published. The file is authoritative, so the removal is honoured -- but it "+
-				"cannot be undone here, because this CA cannot re-sign another CA's list. A "+
-				"deliberate removal increments this on the pass that applies it; a `cat` glob "+
-				"that matched one file fewer increments it the same way, which is why it is "+
-				"worth an alert. Distinct "+
-				"from puppetca_crl_chain_discarded_total, which counts CRLs the file does carry "+
+			"Total ancestors whose published CRL has been dropped from the chain, either "+
+				"because crl_chain_file stopped listing them or because their certificate has "+
+				"left the stored CA bundle, so nothing signs that CRL any more. The removal is "+
+				"honoured -- the file is authoritative -- but it cannot be undone here, because "+
+				"this CA cannot re-sign another CA's list. A deliberate removal increments this "+
+				"on the pass that applies it; a `cat` glob that matched one file fewer "+
+				"increments it the same way, which is why it is worth an alert. The log line "+
+				"names which cause fired, and the remedies differ: fix whatever writes the file, "+
+				"or re-import the CA bundle. An incomplete bundle moves this counter and "+
+				"puppetca_crl_chain_discarded_total together -- the latter counts CRLs the file does carry "+
 				"but nothing in the bundle signed.",
 			nil, nil),
 		crlChainRegressed: prometheus.NewDesc(

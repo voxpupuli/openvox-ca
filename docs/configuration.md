@@ -377,8 +377,11 @@ distinguished name still gets both their CRLs published.
 **An ancestor that disappears from the file is dropped**, and counted by
 `puppetca_crl_chain_removed_total`. The file is authoritative, so this is the
 documented way to stop publishing an ancestor — but it is also what a `cat`
-glob that matched one file fewer produces, and it cannot be undone here. Both
-cases are logged at `ERROR` naming the issuer.
+glob that matched one file fewer produces, and it cannot be undone here. The
+same counter covers a second way an ancestor disappears: its certificate leaving
+the CA bundle, so nothing signs its published CRL any more. That one is fixed by
+re-importing the bundle rather than by touching the file. Every case is logged
+at `ERROR` naming the issuer, and the message says which happened.
 
 **An ancestor's CRL can never move backwards.** A CRL in the file that is older
 than the one already published for the same ancestor is passed over and the

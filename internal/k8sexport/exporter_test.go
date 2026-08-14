@@ -568,9 +568,9 @@ var _ = Describe("Export scopes", func() {
 
 		sec, err := client.CoreV1().Secrets("ns1").Get(ctx, "trust", metav1.GetOptions{})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(string(sec.Data["ca.crt"])).To(ContainSubstring("Uk9PVA=="),
+		Expect(string(sec.Data["ca.crt"])).To(Equal(certChain),
 			"an unset cert_scope must mean the whole chain here too")
-		Expect(string(sec.Data["ca.crl"])).To(ContainSubstring("VVBTVFJFQU0="),
+		Expect(string(sec.Data["ca.crl"])).To(Equal(crlChain),
 			"an unset crl_scope must mean the whole chain here too")
 	})
 

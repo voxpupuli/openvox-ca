@@ -509,8 +509,8 @@ func (c *CA) RefreshCRLChainFile(ctx context.Context) (bool, error) {
 	// No crlChainFailures.Add here. It is counted inside upstreamCRLs, where the
 	// file is what failed, so both writers count it -- this pass and every
 	// revocation through crlChainLocked. Counting it here instead gave the
-	// counter a shape this feature has already been through once: present on
-	// the maintenance path, absent on the path that runs far more often. It also
+	// counter the shape monotonicUpstream itself once had: present on the
+	// maintenance path, absent on the path that runs far more often. It also
 	// attributed this closure's *other* failures -- a lock timeout, a storage
 	// read, a re-sign -- to the chain file, so a storage outage paged someone to
 	// go and inspect a perfectly healthy file. See readStoredCRL's comment in

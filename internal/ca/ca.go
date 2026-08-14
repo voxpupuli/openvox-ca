@@ -199,9 +199,9 @@ type CA struct {
 	crlSyncFailures atomic.Uint64
 
 	// Four counters, because their remedies differ: crlChainFailures points at
-	// the file itself, crlChainDiscarded at the CA bundle, and crlChainRegressed
-	// and crlChainRemoved at whatever writes the file -- one for a stale copy,
-	// one for a dropped ancestor. (The file's *mount* is the fourth question, and
+	// the file itself, crlChainDiscarded at the CA bundle, crlChainRegressed at
+	// whatever writes the file, and crlChainRemoved at either the file or the
+	// bundle -- see below, it is the one with two causes. (The file's *mount* is the fourth question, and
 	// it is crlChainLastRead below, a gauge rather than a counter, because
 	// "never opened" is a state and not an event.)
 	//
@@ -216,9 +216,10 @@ type CA struct {
 	// All four are per *evaluation*, not per pass: crl_chain_file is evaluated on
 	// every CRL amendment as well as on each refresh pass, so on a busy CA
 	// they track revocation rate rather than the number of bad CRLs in the file.
-	// crlChainFailures counts the whole file once per evaluation; the other three
-	// count once per CRL per evaluation, except crlChainRemoved's
-	// bundle-attribution arm, which counts once per issuer DN because there is
+	// crlChainFailures counts the whole file once per evaluation. crlChainDiscarded
+	// and crlChainRegressed count once per CRL per evaluation. crlChainRemoved
+	// counts once per *ancestor*: its main arm deduplicates by signing
+	// certificate, and its bundle-attribution arm by issuer DN, because there is
 	// no signer left to key on.
 	//
 	// Do not assume an ordering between them. An unreadable or unparseable file
@@ -247,12 +248,14 @@ type CA struct {
 	// whatever writes it. One counter would have sent a paged responder to
 	// verify a bundle that was already complete.
 	//
-	// crlChainRemoved counts ancestors the file has stopped listing while their
-	// CRL was published. The file is authoritative, so this is honoured rather
-	// than refused -- but it is unrecoverable here, and a `cat` glob that
-	// matched one file fewer produces it just as readily as a deliberate
-	// removal does. Distinct from crlChainDiscarded: that one counts CRLs the
-	// file *does* carry which nothing in the bundle signed.
+	// crlChainRemoved counts ancestors whose published CRL has been dropped from
+	// the chain: either the file stopped listing them, or their certificate left
+	// the CA bundle so nothing signs that CRL any more. Honoured rather than
+	// refused, unrecoverable here, and a `cat` glob that matched one file fewer
+	// produces the first just as readily as a deliberate removal does. It
+	// overlaps crlChainDiscarded rather than being distinct from it: an
+	// incomplete bundle moves both, discarded for the copy the file carries and
+	// removed for the copy already published.
 	//
 	// Surfaced as puppetca_crl_chain_refresh_failures_total,
 	// puppetca_crl_chain_discarded_total, puppetca_crl_chain_regressed_total and
@@ -343,11 +346,13 @@ func (c *CA) CRLChainDiscarded() uint64 { return c.crlChainDiscarded.Load() }
 // rather than at the CA bundle.
 func (c *CA) CRLChainRegressed() uint64 { return c.crlChainRegressed.Load() }
 
-// CRLChainRemoved returns how many ancestors crl_chain_file has stopped listing
-// while their CRL was published. Surfaced as
+// CRLChainRemoved returns how many ancestors have had their published CRL
+// dropped from the chain, whether because crl_chain_file stopped listing them or
+// because their certificate left the CA bundle. Surfaced as
 // puppetca_crl_chain_removed_total; the removal is honoured because the file is
 // authoritative, but it cannot be undone here, so a rising value wants checking
-// against whether the operator meant it.
+// against whether the operator meant it -- and the log line says which of the
+// two causes fired, because the remedies differ.
 func (c *CA) CRLChainRemoved() uint64 { return c.crlChainRemoved.Load() }
 
 // CRLChainLastRead returns when crl_chain_file was last read successfully, or

@@ -266,7 +266,8 @@ var _ = Describe("crl_chain_file", func() {
 		before := myCA.CRLChainRemoved()
 		_, err := myCA.RefreshCRLChainFile(ctx)
 		Expect(err).NotTo(HaveOccurred())
-		// Exactly two, matching the sibling spec above: these counters are per
+		// Exactly two, matching "counts an ancestor the file has stopped listing":
+		// these counters are per
 		// *evaluation*, and a pass that rewrites evaluates the file twice --
 		// once to decide, then again inside the re-sign that publishes. A
 		// looser assertion would pass just as well if the arm double-counted.
@@ -455,7 +456,12 @@ var _ = Describe("crl_chain_file", func() {
 				myCA.CRLChainFile = writeChainFile(append(append([]byte{}, first...), second...))
 				Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
 
-				statuses, err := myCA.UpstreamCRLStatuses(mustGetCRL(ctx, store))
+				blob := mustGetCRL(ctx, store)
+				Expect(crlBlocks(blob)).To(HaveLen(3),
+					"both ancestors must be published, or HaveLen(1) below would pass "+
+						"because only one survived rather than because they collapsed")
+
+				statuses, err := myCA.UpstreamCRLStatuses(blob)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(statuses).To(HaveLen(1))
 				Expect(statuses[0].NextUpdate).NotTo(BeZero(),
@@ -1002,7 +1008,7 @@ var _ = Describe("crl_chain_file: size and duplicates", func() {
 		// Assigning into the map unconditionally kept whichever came last, which
 		// is an artefact of how the operator concatenated their bundle. A#7 then
 		// compared against A#5, looked newer, and the rollback was published --
-		// The refusal above, reachable again one layer down.
+		// monotonicUpstream's refusal, reachable again one layer down.
 		anc, ancKey, _ := upstreamCAWithKey("Duplicated Ancestor CA")
 		ours, err := store.GetCACert(ctx)
 		Expect(err).NotTo(HaveOccurred())
