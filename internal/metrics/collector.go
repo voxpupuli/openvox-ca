@@ -183,7 +183,7 @@ func NewCollector(c *ca.CA) *Collector {
 			prometheus.BuildFQName(namespace, "crl_chain", "refresh_failures_total"),
 			"Total failed reads of crl_chain_file -- unreadable, unparseable, not ending on a PEM "+
 				"block boundary, or too large. Counted where the file is read, so it moves on every "+
-				"CRL amendment as well as on the maintenance pass, and revocation is blocked until "+
+				"CRL amendment as well as on each refresh pass, and revocation is blocked until "+
 				"the file is fixed. The published chain is left alone and the next attempt retries. "+
 				"A refresh pass that fails for some other reason -- a lock it could not take, "+
 				"storage it could not read -- moves puppetca_crl_update_failures_total instead, so "+

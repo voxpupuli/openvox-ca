@@ -31,14 +31,14 @@
     upstreamCRLExpiryWarningSeconds: 14 * 24 * 3600,  // 14 days
 
     // --- Upstream CRL chain health ---
-    // Calibrated to the CA's maintenance_interval_sec like the serving windows
-    // above. All four chain counters increment per *evaluation*, and the file is
-    // evaluated on every CRL amendment as well as on the maintenance pass, so on
-    // a busy CA they track revocation rate. What this window is sized against is
-    // the floor they share: a quiet CA evaluates the file once per maintenance
-    // pass, and a window shorter than that interval makes a single unchanging
-    // fault fire, resolve and re-fire forever. This equals the 1h default with no
-    // margin, so raise it alongside any increase to maintenance_interval_sec.
+    // Calibrated to the CA's crl_chain_refresh_interval_sec. All four chain
+    // counters increment per *evaluation*, and the file is evaluated on every
+    // CRL amendment as well as on each refresh pass, so on a busy CA they track
+    // revocation rate. What this window is sized against is the floor they
+    // share: a quiet CA evaluates the file once per refresh pass, and a window
+    // shorter than that interval makes a single unchanging fault fire, resolve
+    // and re-fire forever. This equals the 1h default with no margin, so raise
+    // it alongside any increase to crl_chain_refresh_interval_sec.
     //
     // Do not assume an ordering between the four. An unreadable or unparseable
     // file increments the failure counter alone, because the read stops before

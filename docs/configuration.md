@@ -292,8 +292,9 @@ there:
 crl_chain_file: /etc/puppet-ca/upstream-crls.pem
 ```
 
-It is a PEM bundle of upstream CRLs, re-read on every maintenance cycle
-(`maintenance_interval_sec`, 1 hour by default) and on every CRL amendment, and
+It is a PEM bundle of upstream CRLs, re-read by the `crl-chain-refresh`
+background job (`crl_chain_refresh_interval_sec`, 1 hour by default) and on
+every CRL amendment, and
 published alongside this CA's own CRL at
 `GET /puppet-ca/v1/certificate_revocation_list/ca`. The file is **declarative**:
 whatever it contains is what gets published, so a CRL removed from it disappears

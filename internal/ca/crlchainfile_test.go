@@ -933,7 +933,7 @@ var _ = Describe("crl_chain_file: size and duplicates", func() {
 			"the newer number-less CRL must survive a rollback to the older one")
 	})
 
-	It("counts a chain-file failure on the revocation path, not only the maintenance pass", func() {
+	It("counts a chain-file failure on the revocation path, not only the refresh pass", func() {
 		// crlChainFailures had one increment site, inside RefreshCRLChainFile.
 		// An unreadable file fails every revocation through crlChainLocked, and
 		// that moved nothing -- so the alert carrying the right remedy could not

@@ -139,7 +139,7 @@ func (c *CA) upstreamCRLs(ctx context.Context) (crls []*x509.RevocationList, sta
 // mirror, or a replay.
 //
 // This lives here, in the function *both* writers call, rather than beside the
-// maintenance pass that first demonstrated the problem. When the check sat in
+// refresh pass that first demonstrated the problem. When the check sat in
 // RefreshCRLChainFile only, a rolled-back file was refused by the maintenance
 // task -- loudly, with two alerts asserting the chain was protected -- and then
 // published by the very next revocation, because Revoke reaches the file through
@@ -495,7 +495,7 @@ func (c *CA) RefreshCRLChainFile(ctx context.Context) (bool, error) {
 		// upstreamCRLs, so `wanted` cannot carry a CRL older than the published
 		// one -- which is why sameCRLSet above returns true for a rolled-back
 		// file and this pass does nothing. Checking again here would be the
-		// arrangement this replaced: a rule enforced beside the maintenance pass
+		// arrangement this replaced: a rule enforced beside the refresh pass
 		// that demonstrated it rather than at the chokepoint every writer uses,
 		// so a revocation walked straight past it.
 		slog.Info("Upstream CRLs changed; rewriting the published chain",

@@ -206,7 +206,7 @@ type CA struct {
 	// "never opened" is a state and not an event.)
 	//
 	// All four are per *evaluation*, not per pass: crl_chain_file is evaluated on
-	// every CRL amendment as well as on the maintenance pass, so on a busy CA
+	// every CRL amendment as well as on each refresh pass, so on a busy CA
 	// they track revocation rate rather than the number of bad CRLs in the file.
 	// crlChainFailures counts the whole file once per evaluation; the other three
 	// count once per CRL per evaluation.
@@ -216,7 +216,7 @@ type CA struct {
 	// per-CRL loops are reached.
 	//
 	// What an alert window can be sized against is the floor they share: a quiet
-	// CA evaluates the file once per maintenance_interval_sec. See
+	// CA evaluates the file once per crl_chain_refresh_interval_sec. See
 	// mixin/config.libsonnet, which says the same thing.
 	//
 	// crlChainFailures counts refresh passes that could not publish the upstream
