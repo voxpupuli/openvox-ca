@@ -124,7 +124,7 @@ func (c *CA) rebuildCertIndex(ctx context.Context) {
 		}
 		if rec.State == storage.CertStateUnknown {
 			// The backend cannot address this record's serial one-to-one
-			// (duplicated legacy serial on etcd): index writes for it are
+			// (duplicated legacy serial on etcd/redis): index writes for it are
 			// refused, so backfill and reconciliation can never converge.
 			// Readers derive its state from the CRL instead; skip it rather
 			// than re-attempt and warn on every start.

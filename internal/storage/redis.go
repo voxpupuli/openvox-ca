@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	mrand "math/rand/v2"
 	"strings"
 	"sync"
 	"time"
@@ -107,8 +108,11 @@ func (c *RedisConfig) applyDefaults() {
 //
 // Blob contents are wrapped with an 8-byte big-endian nanosecond mtime prefix
 // (same encoding as the etcd backend) so ModTime answers from the same
-// round-trip as Get. AppendLine is performed server-side via a Lua script so
-// concurrent appenders on different replicas do not lose lines. Distributed
+// round-trip as Get. The certificate inventory is not stored as a blob: it is
+// decomposed into per-entry hash fields (see redis_inventory.go), and the
+// backend implements InventoryStore and CertIndex. AppendLine on any other key
+// is performed server-side via a Lua script so concurrent appenders on
+// different replicas do not lose lines. Distributed
 // locks use SET NX PX with a per-acquisition token, a background heartbeat
 // while the lock is held, and a token-matching Lua script on Unlock; this is
 // sufficient for a single logical Redis/Sentinel-primary, which is the
@@ -124,7 +128,28 @@ type RedisBackend struct {
 	renewScript  *redis.Script
 	unlockScript *redis.Script
 
-	appendMu sync.Mutex // serialises AppendLine within this process
+	// Inventory scripts. Each spans the six keys invKeys returns, in that
+	// order; see redis_inventory.go for the layout and each script's ARGV.
+	invAppendEntryScript   *redis.Script
+	invAppendLinesScript   *redis.Script
+	invPruneScript         *redis.Script
+	invReplaceWipeScript   *redis.Script
+	invReplaceBatchScript  *redis.Script
+	invReplaceFinishScript *redis.Script
+	invDeleteScript        *redis.Script
+	invDropHeadScript      *redis.Script
+	invSetRecordScript     *redis.Script
+
+	appendMu sync.Mutex // serialises inventory mutations within this process
+
+	// importBatchHook, when non-nil, runs after each committed import script;
+	// pruneSnapshotHook runs between a prune's snapshot read and its guarded
+	// commit; mutateRecordHook does the same for an index write. Test seams
+	// only: they let the suite interleave conflicting writes deterministically
+	// to exercise the resume and guard-retry paths.
+	importBatchHook   func()
+	pruneSnapshotHook func()
+	mutateRecordHook  func()
 
 	// localLocks holds a *sync.Mutex per lock name. Redis's SET NX is not
 	// re-entrant from the same client, and even if it were, multiple
@@ -135,15 +160,17 @@ type RedisBackend struct {
 }
 
 // redisLayout maps logical keys to their physical Redis sub-keys. CSR and
-// signed-cert keys are handled in physicalKey.
+// signed-cert keys are handled in physicalKey. KeyInventory's physical key
+// holds only a presence marker: the inventory itself is decomposed into
+// per-entry hash fields (see redis_inventory.go).
 var redisLayout = map[string]string{
 	KeyCACert:        "ca:cert",
 	KeyCAPubKey:      "ca:pubkey",
 	KeyCAKey:         "ca:key",
 	KeyCRL:           "ca:crl",
 	KeySerial:        "serial",
-	KeyInventory:     "inventory:data",
-	KeyInventoryHMAC: "inventory:hmac",
+	KeyInventory:     redisInvDataSub,
+	KeyInventoryHMAC: redisInvHMACSub,
 	KeyHMACKey:       "private:hmac_key",
 }
 
@@ -249,6 +276,16 @@ func newRedisBackendFromClient(client redis.UniversalClient, owned bool, prefix 
 		appendScript: redis.NewScript(appendLuaScript),
 		renewScript:  redis.NewScript(renewLuaScript),
 		unlockScript: redis.NewScript(unlockLuaScript),
+
+		invAppendEntryScript:   redis.NewScript(redisAppendEntryLua),
+		invAppendLinesScript:   redis.NewScript(redisAppendLinesLua),
+		invPruneScript:         redis.NewScript(redisPruneLua),
+		invReplaceWipeScript:   redis.NewScript(redisReplaceWipeLua),
+		invReplaceBatchScript:  redis.NewScript(redisReplaceBatchLua),
+		invReplaceFinishScript: redis.NewScript(redisReplaceFinishLua),
+		invDeleteScript:        redis.NewScript(redisDeleteInventoryLua),
+		invDropHeadScript:      redis.NewScript(redisDropHeadLua),
+		invSetRecordScript:     redis.NewScript(redisSetRecordLua),
 	}
 }
 
@@ -279,22 +316,30 @@ func (b *RedisBackend) callCtx(parent context.Context) (context.Context, context
 	return context.WithTimeout(parent, b.timeout)
 }
 
-// EnsureReady verifies connectivity with a PING. Redis has no directory
-// concept so there is nothing else to prepare.
+// EnsureReady verifies connectivity with a PING (Redis has no directory
+// concept so there is nothing to create), then decomposes a legacy inventory
+// blob left by a pre-decomposition version of this backend into the per-entry
+// structure. Decomposition must run before the inventory is used: the
+// structured paths assume the blob key is only a presence marker.
 func (b *RedisBackend) EnsureReady(ctx context.Context) error {
-	ctx, cancel := b.callCtx(ctx)
+	pingCtx, cancel := b.callCtx(ctx)
 	defer cancel()
-	if err := b.client.Ping(ctx).Err(); err != nil {
+	if err := b.client.Ping(pingCtx).Err(); err != nil {
 		return fmt.Errorf("redis not reachable: %w", err)
 	}
-	return nil
+	return b.decomposeLegacyInventory(ctx)
 }
 
-// Get returns the (unwrapped) blob at key, wrapping fs.ErrNotExist when absent.
+// Get returns the (unwrapped) blob at key, wrapping fs.ErrNotExist when
+// absent. The KeyInventory key is served from the decomposed entry fields
+// (rendered to inventory.txt text) rather than a stored blob.
 func (b *RedisBackend) Get(ctx context.Context, key string) ([]byte, error) {
 	phys, err := b.physicalKey(key)
 	if err != nil {
 		return nil, err
+	}
+	if key == KeyInventory {
+		return b.getInventory(ctx)
 	}
 	ctx, cancel := b.callCtx(ctx)
 	defer cancel()
@@ -314,10 +359,14 @@ func (b *RedisBackend) Get(ctx context.Context, key string) ([]byte, error) {
 
 // Put writes the blob at key. The BlobKind hint is recorded but has no
 // effect on the stored form: Redis access control is managed server-side.
+// Putting KeyInventory parses the text and replaces the decomposed entries.
 func (b *RedisBackend) Put(ctx context.Context, key string, data []byte, _ BlobKind) error {
 	phys, err := b.physicalKey(key)
 	if err != nil {
 		return err
+	}
+	if key == KeyInventory {
+		return b.putInventory(ctx, data)
 	}
 	ctx, cancel := b.callCtx(ctx)
 	defer cancel()
@@ -325,10 +374,14 @@ func (b *RedisBackend) Put(ctx context.Context, key string, data []byte, _ BlobK
 }
 
 // Delete removes key, wrapping fs.ErrNotExist when the key is absent.
+// Deleting KeyInventory removes the marker and the decomposed structure.
 func (b *RedisBackend) Delete(ctx context.Context, key string) error {
 	phys, err := b.physicalKey(key)
 	if err != nil {
 		return err
+	}
+	if key == KeyInventory {
+		return b.deleteInventory(ctx)
 	}
 	ctx, cancel := b.callCtx(ctx)
 	defer cancel()
@@ -410,15 +463,24 @@ func (b *RedisBackend) List(ctx context.Context, prefix string) ([]string, error
 // AppendLine atomically appends data to key. Concurrent appends from this
 // process are serialised on appendMu; concurrent appends from other
 // processes are resolved by a server-side Lua script that reads the current
-// blob, appends, and writes back in a single atomic step.
+// blob, appends, and writes back in a single atomic step. KeyInventory does
+// not take this path: it is decomposed, and appending to it means adding
+// entry fields (see redis_inventory.go).
 func (b *RedisBackend) AppendLine(ctx context.Context, key string, data []byte, _ BlobKind) error {
-	b.appendMu.Lock()
-	defer b.appendMu.Unlock()
-
 	phys, err := b.physicalKey(key)
 	if err != nil {
 		return err
 	}
+	if key == KeyInventory {
+		// Inventory is decomposed: parse the lines and append them as entry
+		// fields. StorageService routes inventory appends through AppendEntry,
+		// so this only runs if a caller uses AppendLine(KeyInventory, ...)
+		// directly.
+		return b.appendInventoryLines(ctx, data)
+	}
+
+	b.appendMu.Lock()
+	defer b.appendMu.Unlock()
 
 	ctx, cancel := b.callCtx(ctx)
 	defer cancel()
@@ -426,6 +488,28 @@ func (b *RedisBackend) AppendLine(ctx context.Context, key string, data []byte, 
 	mtime := encodeMtime(time.Now())
 	_, err = b.appendScript.Run(ctx, b.client, []string{phys}, mtime, data).Result()
 	return err
+}
+
+// scriptBackoff sleeps between optimistic-script retries. The sleep is a
+// growing window with full jitter: jitter decorrelates two writers that would
+// otherwise retry in lock-step on the same schedule and keep colliding (the
+// cause of spurious "too many concurrent writers" under load). Honours the
+// caller's cancellation rather than spinning past it.
+func (b *RedisBackend) scriptBackoff(ctx context.Context, attempt int) error {
+	window := time.Duration(attempt+1) * 10 * time.Millisecond
+	// math/rand/v2 (aliased mrand; crypto/rand owns the bare name in this
+	// file) is deliberate here: this value is retry timing only, never a
+	// token or key, and the v2 generator is ChaCha8 seeded per-process from OS
+	// entropy, so remote writers cannot predict each other's jitter. All
+	// security-relevant randomness in this codebase uses crypto/rand.
+	// nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used
+	backoff := time.Duration(mrand.Int64N(int64(window))) //nolint:gosec // jitter, not security-sensitive
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(backoff):
+		return nil
+	}
 }
 
 // ModTime returns the wall-clock timestamp recorded when the blob was last

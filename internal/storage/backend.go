@@ -174,9 +174,9 @@ type InventoryEntry struct {
 // "requested" state from the csr/ namespace instead.
 //
 // CertStateUnknown is reported (never stored as a target state) by a backend
-// that cannot maintain per-serial state for a record — today only the etcd
-// backend for serials that appeared more than once in a converted legacy
-// blob, which its one-to-one by-serial index cannot address. Readers must
+// that cannot maintain per-serial state for a record — the etcd and redis
+// backends, for serials that appeared more than once in a converted legacy
+// blob, which their one-to-one by-serial index cannot address. Readers must
 // derive such a record's real state from the signed CRL (the authoritative
 // artefact) rather than trust the index.
 const (
@@ -258,10 +258,11 @@ type CertIndex interface {
 	//
 	// SetRevoked, ClearRevoked, and SetProjection may also decline a write —
 	// as a logged no-op, not an error — when the implementation cannot
-	// unambiguously identify the bearing rows (the etcd backend's one-to-one
-	// by-serial index cannot address a serial duplicated in a converted
-	// legacy blob). Statuses reports such records with CertStateUnknown so
-	// callers know to derive their state from the CRL instead.
+	// unambiguously identify the bearing rows (the etcd and redis backends'
+	// one-to-one by-serial index cannot address a serial duplicated in a
+	// converted legacy blob). Statuses reports such records with
+	// CertStateUnknown so callers know to derive their state from the CRL
+	// instead.
 	SetRevoked(ctx context.Context, serial string, at time.Time) error
 
 	// ClearRevoked returns every index row bearing serial to the signed
@@ -291,8 +292,8 @@ func asCertIndex(b Backend) (CertIndex, bool) {
 }
 
 // InventoryStore is an optional Backend capability for storing the certificate
-// inventory as structured records (e.g. a SQL table) rather than the single
-// append-only KeyInventory blob. Backends that implement it let StorageService
+// inventory as structured records (a SQL table, etcd keys, redis hash fields)
+// rather than the single append-only KeyInventory blob. Backends that implement it let StorageService
 // skip the render → scan → reparse round-trip for appends and subject lookups,
 // and verify integrity with a hash chain instead of re-hashing the whole blob.
 //
@@ -336,9 +337,11 @@ type InventoryStore interface {
 	// it in batches, each of which writes a head covering exactly the entries
 	// that remain after it — so a prune may partially complete on conflict or
 	// error, and an implementation may deliberately bound how much one call
-	// removes (etcd caps a call's batches so a huge backlog cannot blow the
-	// caller's time budget; deferred matches stay present and consistent for
-	// later calls). Whatever happens, the returned slice must contain every
+	// removes (etcd caps a call's batches, and redis — which commits the
+	// whole removal in one atomic script, so it never partially completes —
+	// caps a call's entries, both so a huge backlog cannot blow the caller's
+	// time budget; deferred matches stay present and consistent for later
+	// calls). Whatever happens, the returned slice must contain every
 	// entry actually removed (in issuance order), including alongside a
 	// non-nil error: callers drive CRL entry removal and blob cleanup from
 	// it, and an entry that was durably removed but not returned can never be

@@ -183,13 +183,14 @@ func (s *StorageService) InitHMAC(ctx context.Context) error {
 // number already exists in the inventory. SQL backends detect this via their
 // unique index (translated from the dialect-specific driver error); the etcd
 // backend via a by-serial marker key whose absence is a condition of the
-// append transaction. Both are true cluster-wide guarantees. The remaining
-// blob backends (filesystem, redis) detect it via an explicit scan performed
-// under the same inventoryMu that already serialises every append within a
-// process — NOT a cross-replica guarantee: nothing wraps the whole
-// AppendInventory call in a distributed lock for them (see the blob-fallback
-// HMAC-update comment below, which documents a similar limitation for that
-// path).
+// append transaction; the redis backend via a by-serial hash field the append
+// script refuses to overwrite. All three are true cluster-wide guarantees. The
+// filesystem backend — the only remaining blob one — detects it via an
+// explicit scan performed under the same inventoryMu that already serialises
+// every append within a process, which is NOT a cross-replica guarantee:
+// nothing wraps the whole AppendInventory call in a distributed lock for it
+// (see the blob-fallback HMAC-update comment below, which documents a similar
+// limitation for that path).
 var ErrDuplicateSerial = errors.New("serial number already exists in inventory")
 
 // AppendInventory adds entry (a single inventory.txt line, without a trailing
@@ -496,9 +497,10 @@ func (s *StorageService) inventoryEntriesLocked(ctx context.Context) ([]Inventor
 // Concurrency: appends (AppendInventory) and reads (ReadInventory) take the
 // same inventoryMu, so within a process a prune never interleaves with them.
 // Structured backends prune through PruneEntries (see the contract in
-// backend.go: SQL in one transaction, etcd in individually-consistent
-// batches); the blob fallback below rewrites the whole inventory with a
-// single Backend.Put, which blob backends service as an atomic file swap.
+// backend.go: SQL in one transaction, redis in one atomic script, etcd in
+// individually-consistent batches); the blob fallback below rewrites the whole
+// inventory with a single Backend.Put, which blob backends service as an
+// atomic file swap.
 // Callers needing cross-replica serialisation against revocation should hold
 // the cluster CRL lock around this (see ca.CA.CleanupExpiredCerts).
 func (s *StorageService) PruneInventory(ctx context.Context, keep func(InventoryEntry) bool) ([]InventoryEntry, error) {
@@ -513,8 +515,9 @@ func (s *StorageService) PruneInventory(ctx context.Context, keep func(Inventory
 
 	// Structured backends prune rows and rewrite the chained integrity head
 	// so the two are never observed out of sync across replicas: SQL in a
-	// single transaction, etcd in batches whose every commit is internally
-	// consistent (see the PruneEntries contract in backend.go).
+	// single transaction, redis in a single script, etcd in batches whose
+	// every commit is internally consistent (see the PruneEntries contract in
+	// backend.go).
 	if store, ok := asInventoryStore(s.backend); ok {
 		var advanceHead func(prev []byte, e InventoryEntry) []byte
 		if s.hmacKey != nil {
