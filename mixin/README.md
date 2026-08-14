@@ -28,19 +28,21 @@ alerting rules for the openvox-ca exporter. It alerts on:
   that cannot be refreshed (fix the file or its mount); a CRL discarded from it
   because no certificate in the CA bundle signed it (complete the bundle); a CRL
   older than the one already published (fix whatever writes the file); an
-  ancestor the file has stopped listing altogether, which is honoured and
-  unrecoverable (check the file was meant to lose it); and a file that has never
-  been opened at all (wrong path, or a mount that never landed). They are five
-  rules rather than one because a responder sent to the
-  wrong one of those remedies finds nothing wrong. The per-issuer gauge appears
+  ancestor whose published CRL has been dropped, which is honoured and
+  unrecoverable — either the file stopped listing it (check the file was meant
+  to lose it) or its certificate has left the CA bundle (re-import the bundle),
+  and the log line says which; and a file that has never been opened at all
+  (wrong path, or a mount that never landed). They are five rules rather than
+  one because a responder sent to the wrong one of those remedies finds nothing
+  wrong. The per-issuer gauge appears
   only where the stored blob holds a CRL this CA did not issue — including a
   chain brought in by `import --crl-chain`, with no `crl_chain_file` in sight.
   The counters are always exported and read zero without one, while
   `puppetca_crl_chain_last_read_timestamp_seconds` is exported only where
   `crl_chain_file` is set, which is what makes the never-opened case alertable
   without firing across the whole fleet. None of it is fixable here — this CA
-  cannot re-sign another CA's list — so every remedy points at the parent CA or
-  at the file.
+  cannot re-sign another CA's list — so every remedy points at the parent CA, at
+  the file, or at the CA bundle.
 
   One case has no rule and cannot have one: a `subPath` mount reads successfully
   forever, so it is indistinguishable from a healthy file on every series. It

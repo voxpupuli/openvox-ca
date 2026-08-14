@@ -201,9 +201,9 @@ type CA struct {
 	// Four counters, because their remedies differ: crlChainFailures points at
 	// the file itself, crlChainDiscarded at the CA bundle, crlChainRegressed at
 	// whatever writes the file, and crlChainRemoved at either the file or the
-	// bundle -- see below, it is the one with two causes. (The file's *mount* is the fourth question, and
-	// it is crlChainLastRead below, a gauge rather than a counter, because
-	// "never opened" is a state and not an event.)
+	// bundle, being the one with two causes. (The file's *mount* is a fifth
+	// question, and it is crlChainLastRead below, a gauge rather than a counter,
+	// because "never opened" is a state and not an event.)
 	//
 	// crlChainRemoved is the one with two causes, because it is named for an
 	// outcome rather than a fault: an ancestor's CRL stops being published

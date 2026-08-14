@@ -246,9 +246,11 @@ func (c *CA) monotonicUpstream(storedBlob []byte, issuers []*x509.Certificate,
 		out = append(out, prev)
 	}
 
-	// Report ancestors the file has stopped listing. Iterating published rather
-	// than the map so the order is the stored chain's rather than Go's map
-	// randomisation; mentioned doubles as the seen-set so each is named once.
+	// Report published ancestors that are about to disappear: the ones the file
+	// has stopped listing, and the ones whose signer has left the bundle.
+	// Iterating published rather than the map so the order is the stored chain's
+	// rather than Go's map randomisation; mentioned doubles as the seen-set so
+	// each is named once.
 	unattributable := make(map[string]bool)
 	for _, crl := range published {
 		signer := signerOf(issuers, crl)

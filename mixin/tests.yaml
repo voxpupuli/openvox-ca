@@ -3,8 +3,8 @@
 # Run with `mage test:mixin` from the repository root, which renders the mixin
 # to the path below and then runs both promtool checks over it.
 #
-# Two things are covered here, both being properties that reading the PromQL does
-# not settle. PuppetCACRLStale's expression is the only one in the mixin built
+# What is covered here is the properties that reading the PromQL does not settle,
+# rather than the rule set as a whole. PuppetCACRLStale's expression is the only one in the mixin built
 # from set operators (`or`, `unless`, `and on(...)`): its two arms exist for
 # different failure shapes, and the qualifier on the second exists to keep it
 # quiet during a third. The upstream-chain case covers a timing argument instead

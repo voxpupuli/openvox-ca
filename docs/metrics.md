@@ -127,13 +127,12 @@ query, and `puppetca_crl_sync_failures_total` for why it is stuck.
 > not take the lock at all, on the four writers that go through
 > `withCRLLockCounted` — revoke, reissue, refresh and cleanup. The closure never
 > runs in that case, so nothing beneath it could count anything, and the error
-> used to reach a log line only. Two other paths take the same lock directly:
-> the `crl_chain_file` refresh, which counts a lock it could not take on this
-> same counter itself rather than through the helper (a failure there is not the
-> file's fault, so it does not touch
-> `puppetca_crl_chain_refresh_failures_total`); and the revoke step inside
-> `Clean`, `Renew` and `AutoRenew`, and `ImportCA`, which are not counted on
-> that arm at all.
+> used to reach a log line only. Other paths take the same lock directly. The
+> `crl_chain_file` refresh counts a lock it could not take on this same counter
+> itself rather than through the helper (a failure there is not the file's
+> fault, so it does not touch `puppetca_crl_chain_refresh_failures_total`). The
+> revoke step inside `Clean`, `Renew` and `AutoRenew`, and `ImportCA`, are not
+> counted on that arm at all.
 >
 > The read half of that is `readStoredCRL`'s doing: it increments before
 > returning, on every path that calls it.
