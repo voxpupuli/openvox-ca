@@ -841,7 +841,12 @@ var _ = Describe("Auth Middleware", func() {
 			// set; the spec below pins that selection.
 			Expect(buf.String()).To(ContainSubstring("Request denied by authorisation middleware"))
 			Expect(buf.String()).To(ContainSubstring(`reason="route requires admin access"`))
-			Expect(buf.String()).To(ContainSubstring("client_cn=my-node"))
+			// client.cn, not client_cn: the field is namespaced now, and
+			// client.domain beside it names the trust domain that vouched for
+			// the name — a CN means nothing without knowing who signed it.
+			// The migration guide publishes both.
+			Expect(buf.String()).To(ContainSubstring("client.cn=my-node"))
+			Expect(buf.String()).To(ContainSubstring(`client.domain="this CA"`))
 			Expect(buf.String()).To(ContainSubstring("path=/certificate_status/my-node"))
 			Expect(buf.String()).To(ContainSubstring("method=GET"))
 		})

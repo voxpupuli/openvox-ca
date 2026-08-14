@@ -679,29 +679,16 @@ func newRootCmd() *cobra.Command {
 
 			// Wire mTLS auth middleware when TLS is configured.
 			if cfg.TLSCert != "" && cfg.TLSKey != "" {
-				allowList, err := buildAdminAllowList(cfg.PuppetServer, cfg.PuppetServerFile)
+				// Every trust domain this CA will accept a client from: its own
+				// first, then each client_ca entry. buildAuthConfig owns the
+				// assembly so that what the middleware trusts is decided in one
+				// place a spec can call, rather than inline here where nothing
+				// can reach it.
+				authCfg, err := buildAuthConfig(cfg, myCA)
 				if err != nil {
 					return err
 				}
-				// Domain zero is this CA, always, and is not configurable: an
-				// operator cannot remove it, rename it, or drop their own CA out
-				// of the trust set. With no other domain the list has length one
-				// and authorisation is exactly what it was.
-				srv.AuthConfig = &api.AuthConfig{
-					Domains: []api.TrustDomain{
-						api.OwnTrustDomain(myCA.CACert, allowList, !cfg.NoPpCliAuth),
-					},
-					AllowPublicStatus: cfg.AllowPublicStatus,
-				}
-				if !cfg.NoPpCliAuth {
-					// SECURITY: Inform the operator that pp_cli_auth OID grants admin access.
-					// Any certificate carrying this extension with value "true" will be treated
-					// as an admin. Use --no-pp-cli-auth to restrict admin access to the CN allow list only.
-					// NIST 800-53: AC-6 (Least Privilege)
-					slog.Info("pp_cli_auth extension is enabled as an admin credential (default). " +
-						"Any certificate carrying pp_cli_auth=true will have admin access. " +
-						"Use --no-pp-cli-auth to disable this and require explicit CN allow list.")
-				}
+				srv.AuthConfig = authCfg
 			}
 
 			addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
@@ -828,8 +815,8 @@ func newRootCmd() *cobra.Command {
 				// only estimate it. Wired here because the api package holds no
 				// metrics dependency.
 				srv.AuthConfig.OnRevocationRefusal = crlMetrics.recordRefusal
-				maintenanceTasks = append(maintenanceTasks,
-					clientCRLTask(cfg, srv.AuthConfig.Domains, crlMetrics))
+				go runClientCRLReloader(ctx, cfg, srv.AuthConfig.Domains, crlMetrics,
+					cfg.ClientCRLRefreshInterval())
 			}
 
 			// Periodic upkeep. Which jobs a configuration runs is decided by
