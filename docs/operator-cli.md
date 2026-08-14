@@ -149,6 +149,13 @@ openvox-ca-ctl import \
                                # revocation checking. Every X509 CRL block must
                                # parse; other PEM block types are ignored and
                                # not stored.
+                               #
+                               # With crl_chain_file configured on the server,
+                               # that file is authoritative instead: ancestors
+                               # imported here but absent from it are dropped
+                               # on the next CRL amendment. See "Publishing an
+                               # upstream CRL chain" in the configuration
+                               # guide.
 # The bundle must be a complete chain, nearest first, ending at a self-signed
 # root, and every certificate in it must be within its validity window. If the
 # CA's key is held by a provider rather than a file, there is no --private-key

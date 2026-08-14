@@ -42,10 +42,14 @@ import (
 // local path does not work on a projected volume that swaps a symlinked
 // directory underneath it.
 //
-// Runs a pass immediately rather than waiting out the first tick. CA.Init
-// published whatever the file held at startup, but a Secret that was not yet
-// mounted then is the case this exists to recover from, and waiting an hour to
-// notice would make a slow rollout look like a broken one.
+// Runs a pass immediately rather than waiting out the first tick, and that pass
+// is load-bearing rather than a recovery nicety: nothing else publishes the
+// file. CA.Init does not -- finishLoadExisting only reloads the CRL cache, and
+// bootstrap writes through Storage.UpdateCRL, which bypasses signCRLLocked and
+// so never reaches crlChainLocked -- so until this runs, a configured chain
+// file has had no effect at all. Deleting the immediate pass would leave a
+// freshly started CA serving no ancestor CRLs for a whole interval, and make a
+// slow rollout look like a broken one.
 //
 // Every replica runs it: the rewrite is serialised on the shared CRL lock, so
 // concurrent passes converge rather than conflict. It returns when ctx is

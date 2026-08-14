@@ -107,28 +107,22 @@ type Target struct {
 	CRLKey  string `yaml:"crl_key"`
 
 	// CertScope and CRLScope select how much of each chain to publish. Empty
-	// selects ScopeSelf. On a CA storing a single certificate — every CA that
-	// issued its own root — self, chain and root are byte-identical, so the
-	// default changes nothing there.
+	// selects ScopeChain, so an existing target keeps publishing exactly what it
+	// published before these fields existed. On a CA storing a single
+	// certificate — every CA that issued its own root — self, chain and root are
+	// byte-identical anyway.
 	//
-	// It is not a no-op everywhere. A deployment that has already imported a
-	// multi-certificate bundle got byte-for-byte pass-through before these
-	// fields existed and now gets block 0 alone; cert_scope: chain restores
-	// what those targets were publishing.
-	//
-	// Note the deliberate asymmetry with the HTTP endpoints. GET /certificate/ca
-	// and the CRL endpoint always serve the full chain, because Puppet agents
-	// need it; export targets default to self, because they typically feed one
-	// consumer's trust bundle where a whole chain is rarely what is wanted.
+	// Both default to "chain", which is what every target published before these
+	// settings existed: the stored blob verbatim. Defaulting to "self" instead
+	// would have narrowed every already-deployed target on upgrade with no
+	// configuration change -- a consumer's trust bundle losing its
+	// intermediates, and a CRL blob losing every ancestor block, which is the
+	// material crl_chain_file exists to distribute. Narrowing is therefore
+	// something an operator opts into per target, and it matches what the HTTP
+	// endpoints serve: GET /certificate/ca and the CRL endpoint always return
+	// the full chain.
 	CertScope string `yaml:"cert_scope"`
 	CRLScope  string `yaml:"crl_scope"`
-
-	// certScopeDefaulted and crlScopeDefaulted record that validate() supplied
-	// the scope rather than the operator. Only a defaulted scope can silently
-	// change what an existing target publishes on upgrade, so only a defaulted
-	// scope is worth warning about when it turns out to drop blocks.
-	certScopeDefaulted bool
-	crlScopeDefaulted  bool
 }
 
 // Enabled reports whether any export target is configured.
@@ -182,10 +176,10 @@ func (t *Target) validate() error {
 	}
 
 	if t.CertScope == "" {
-		t.CertScope, t.certScopeDefaulted = ScopeSelf, true
+		t.CertScope = ScopeChain
 	}
 	if t.CRLScope == "" {
-		t.CRLScope, t.crlScopeDefaulted = ScopeSelf, true
+		t.CRLScope = ScopeChain
 	}
 	switch t.CertScope {
 	case ScopeSelf, ScopeChain, ScopeRoot:

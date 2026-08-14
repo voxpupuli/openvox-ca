@@ -44,7 +44,8 @@ alerting rules for the openvox-ca exporter. It alerts on:
 
   One case has no rule and cannot have one: a `subPath` mount reads successfully
   forever, so it is indistinguishable from a healthy file on every series. It
-  surfaces as *UpstreamCRLExpiringSoon* on a CA that has `crl_chain_file` set.
+  surfaces as `PuppetCAUpstreamCRLExpiringSoon` on a CA that has
+  `crl_chain_file` set.
 - **Kubernetes export** targets whose applies keep failing (only when the
   [Kubernetes export](../docs/kubernetes-export.md) feature is in use).
 

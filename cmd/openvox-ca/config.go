@@ -233,6 +233,15 @@ func (c *serverConfig) crlRefreshInterval() time.Duration {
 // already serving every certificate operation.
 const defaultCRLSyncInterval = time.Minute
 
+// crlSyncInterval resolves how often the background job reloads the CRL,
+// falling back to defaultCRLSyncInterval when unset.
+func (c *serverConfig) crlSyncInterval() time.Duration {
+	if c.CRLSyncIntervalSec > 0 {
+		return time.Duration(c.CRLSyncIntervalSec) * time.Second
+	}
+	return defaultCRLSyncInterval
+}
+
 // defaultCRLChainRefreshInterval is how often crl_chain_file is re-read when
 // the operator has not configured an interval.
 //
@@ -250,15 +259,6 @@ func (c *serverConfig) crlChainRefreshInterval() time.Duration {
 		return time.Duration(c.CRLChainRefreshIntervalSec) * time.Second
 	}
 	return defaultCRLChainRefreshInterval
-}
-
-// crlSyncInterval resolves how often the background job reloads the CRL,
-// falling back to defaultCRLSyncInterval when unset.
-func (c *serverConfig) crlSyncInterval() time.Duration {
-	if c.CRLSyncIntervalSec > 0 {
-		return time.Duration(c.CRLSyncIntervalSec) * time.Second
-	}
-	return defaultCRLSyncInterval
 }
 
 const (

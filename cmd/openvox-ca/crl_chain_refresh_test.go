@@ -81,16 +81,112 @@ var _ = Describe("refreshCRLChainOnce", func() {
 			"the published blob must carry the upstream CRL beside our own")
 	})
 
-	It("survives a failing refresh without panicking or stopping the loop", func() {
-		// A pass that failed hard would take the ticker down with it, and the
-		// chain would then be refreshed exactly once per process lifetime.
+	It("swallows a failing pass so the caller can keep ticking", func() {
+		// The pass returns nothing, so the only contract it has with its caller
+		// is that a bad file neither panics nor propagates. The loop's own
+		// survival is pinned separately, below, against the ticker.
 		path := filepath.Join(GinkgoT().TempDir(), "corrupt.pem")
 		Expect(os.WriteFile(path, []byte("-----BEGIN X509 CRL-----\nZm9v\n-----END X509 CRL-----\n"), 0o644)).To(Succeed())
 		myCA.CRLChainFile = path
 
-		refreshCRLChainOnce(ctx, myCA, path)
-		Expect(myCA.CRLChainFailures()).To(BeNumerically(">", 0),
+		Expect(func() { refreshCRLChainOnce(ctx, myCA, path) }).NotTo(Panic())
+		Expect(myCA.CRLChainFailures()).To(BeNumerically("==", 1),
 			"a refusal that is not counted is a refusal nothing can alert on")
+	})
+})
+
+// The loop, as distinct from the pass. Each of the three sibling jobs has this
+// spec; without it the immediate pass, the ticker re-arm and the return on
+// cancellation are all unexercised, and main.go starts these as bare
+// `go job.run(ctx)`, so a loop that never returns leaks a goroutine at shutdown.
+var _ = Describe("runCRLChainRefresher", func() {
+	var (
+		store    *storage.StorageService
+		myCA     *ca.CA
+		upstream *x509.Certificate
+		upsCRL   []byte
+		path     string
+	)
+
+	BeforeEach(func() {
+		ctx := context.Background()
+		store = storage.New(GinkgoT().TempDir())
+		myCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		myCA.LeafKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(myCA.Init(ctx)).To(Succeed())
+
+		upstream, upsCRL = chainUpstreamCA("Loop Upstream CA")
+		ours, err := store.GetCACert(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(store.SaveCACert(ctx, append(append([]byte{}, ours...),
+			pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: upstream.Raw})...))).To(Succeed())
+
+		path = filepath.Join(GinkgoT().TempDir(), "upstream.pem")
+		myCA.CRLChainFile = path
+	})
+
+	It("publishes before its first tick, and returns on cancellation", func() {
+		// The immediate pass is load-bearing rather than a nicety: nothing else
+		// publishes the file's contents, so without it a Secret that arrives
+		// late is not picked up for a whole interval. The hour-long interval
+		// here means only the immediate pass can satisfy the assertion.
+		Expect(os.WriteFile(path, upsCRL, 0o644)).To(Succeed())
+		ctx, cancel := context.WithCancel(context.Background())
+
+		done := make(chan struct{})
+		go func() {
+			runCRLChainRefresher(ctx, myCA, path, time.Hour)
+			close(done)
+		}()
+
+		Eventually(func() int {
+			blob, err := store.GetCRL(context.Background())
+			if err != nil {
+				return 0
+			}
+			return countCRLPEMBlocks(blob)
+		}).WithTimeout(2*time.Second).WithPolling(10*time.Millisecond).
+			Should(Equal(2), "the immediate pass did not publish the upstream CRL within 2s")
+
+		cancel()
+		Eventually(done).WithTimeout(2*time.Second).Should(BeClosed(),
+			"runCRLChainRefresher did not return after context cancellation")
+	})
+
+	It("keeps ticking after a pass that failed", func() {
+		// The ticker must re-arm across a failure: a chain file that is
+		// unreadable for one pass -- mid-rewrite, or a mount that has not landed
+		// -- must not stop the job for the process lifetime, which is exactly
+		// what an unrecovered pass would do.
+		Expect(os.WriteFile(path,
+			[]byte("-----BEGIN X509 CRL-----\nZm9v\n-----END X509 CRL-----\n"), 0o644)).To(Succeed())
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		done := make(chan struct{})
+		go func() {
+			runCRLChainRefresher(ctx, myCA, path, 10*time.Millisecond)
+			close(done)
+		}()
+
+		Eventually(myCA.CRLChainFailures).WithTimeout(2*time.Second).WithPolling(10*time.Millisecond).
+			Should(BeNumerically(">=", 3), "the ticker stopped after the first failing pass")
+
+		// And it recovers: a good file published on a later tick, by the same
+		// loop that has been failing.
+		Expect(os.WriteFile(path, upsCRL, 0o644)).To(Succeed())
+		Eventually(func() int {
+			blob, err := store.GetCRL(context.Background())
+			if err != nil {
+				return 0
+			}
+			return countCRLPEMBlocks(blob)
+		}).WithTimeout(2*time.Second).WithPolling(10*time.Millisecond).
+			Should(Equal(2), "the loop never recovered once the file became readable")
+
+		cancel()
+		Eventually(done).WithTimeout(2 * time.Second).Should(BeClosed())
 	})
 })
 

@@ -123,12 +123,18 @@ query, and `puppetca_crl_sync_failures_total` for why it is stuck.
 > the CRL, and the certificate they leave behind is still reachable by subject
 > until a replacement is issued.
 >
-> Uncounted, and logged only: a revocation refused at a cross-node lock
-> acquisition, which fails ahead of any CRL work (this is the `409` a spent
-> budget produces on PostgreSQL, MySQL, etcd and Redis — the single-node
-> backends take the lock and fail later, which *is* counted, as above), a
-> subject that was simply never issued — though `PUT /certificate_status` also
-> answers its caller `409` in both cases — and a malformed serial met by the
+> Counted since the CRL lock gained its own accounting: a write path that could
+> not take that lock at all, on every writer that takes it — revoke, reissue,
+> refresh and cleanup. The closure never runs in that case, so nothing beneath
+> it could count anything, and the error used to reach a log line only.
+>
+> Uncounted, and logged only: a revocation refused at the **subject** lock,
+> which fails ahead of any CRL work (this is the `409` a spent budget produces
+> on PostgreSQL, MySQL, etcd and Redis — the single-node backends take the lock
+> and fail later, which *is* counted, as above; the CRL lock beneath it is
+> counted either way, by the rule in the paragraph above), a subject that was
+> simply never issued — though `PUT /certificate_status` also answers its caller
+> `409` in both cases — and a malformed serial met by the
 > cleanup job.
 >
 > A background refresh that cannot read the CRL does move this counter, by the
@@ -293,5 +299,8 @@ instructions for rendering or importing it. It alerts on exporter availability,
 CA/CRL/leaf expiry, pending requests, CRL update failures
 (`puppetca_crl_update_failures_total`), a replica whose CRL has fallen behind
 the stored one (`puppetca_crl_cached_number`,
-`puppetca_crl_sync_failures_total`), and Kubernetes export failures, with all
-thresholds configurable.
+`puppetca_crl_sync_failures_total`), the [upstream CRL
+chain](#upstream-crl-chain) (an ancestor nearing or past its `NextUpdate`, and
+the four ways `crl_chain_file` goes wrong — unreadable, a CRL discarded, one
+rolled back, one removed — plus a file that has never been read at all), and
+Kubernetes export failures, with all thresholds configurable.

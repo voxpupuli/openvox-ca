@@ -834,6 +834,65 @@ compile-02.example.com
 	})
 })
 
+var _ = Describe("crlChainRefreshInterval", func() {
+	// The interval the crl-chain-refresh job actually runs on. Setting the
+	// field directly would prove nothing about the two names an operator uses:
+	// a typo in the yaml tag or the env key leaves the job silently on the 1h
+	// default, and a guard that let a non-positive value through would reach
+	// time.NewTicker, which panics.
+	It("returns the default when unset", func() {
+		clearServerEnv()
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred(), "unexpected error")
+		Expect(cfg.crlChainRefreshInterval()).To(Equal(defaultCRLChainRefreshInterval),
+			"crlChainRefreshInterval() = %v; want default %v",
+			cfg.crlChainRefreshInterval(), defaultCRLChainRefreshInterval)
+	})
+
+	It("is read from the config file", func() {
+		clearServerEnv()
+		cfg, err := loadServerConfig(writeTempConfig("crl_chain_refresh_interval_sec: 300\n"))
+		Expect(err).NotTo(HaveOccurred(), "unexpected error")
+		Expect(cfg.crlChainRefreshInterval()).To(Equal(5*time.Minute),
+			"crlChainRefreshInterval() = %v; want %v", cfg.crlChainRefreshInterval(), 5*time.Minute)
+	})
+
+	It("honours the env override", func() {
+		clearServerEnv()
+		setEnv("PUPPET_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC", "15")
+
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred(), "unexpected error")
+		Expect(cfg.crlChainRefreshInterval()).To(Equal(15*time.Second),
+			"crlChainRefreshInterval() = %v; want %v", cfg.crlChainRefreshInterval(), 15*time.Second)
+	})
+
+	It("falls back to the default for a non-positive value", func() {
+		clearServerEnv()
+		setEnv("PUPPET_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC", "0")
+
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred(), "unexpected error")
+		Expect(cfg.crlChainRefreshInterval()).To(Equal(defaultCRLChainRefreshInterval),
+			"crlChainRefreshInterval() with 0 = %v; want default %v",
+			cfg.crlChainRefreshInterval(), defaultCRLChainRefreshInterval)
+	})
+
+	// The two knobs are independent: sharing a resolver by mistake would leave
+	// the chain refreshed every minute, or revocations propagating hourly, with
+	// nothing else to notice.
+	It("is independent of crl_sync_interval_sec", func() {
+		clearServerEnv()
+		setEnv("PUPPET_CA_CRL_SYNC_INTERVAL_SEC", "15")
+
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred(), "unexpected error")
+		Expect(cfg.crlSyncInterval()).To(Equal(15 * time.Second))
+		Expect(cfg.crlChainRefreshInterval()).To(Equal(defaultCRLChainRefreshInterval),
+			"crl_sync_interval_sec must not decide how often the chain file is re-read")
+	})
+})
+
 // --- crl_chain_file wiring ---
 
 var _ = Describe("crl_chain_file wiring", func() {

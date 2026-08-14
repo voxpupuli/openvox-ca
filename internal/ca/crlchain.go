@@ -49,10 +49,10 @@ import (
 // The cost is a few verifications per CRL per re-sign -- signedByAny filters,
 // then dedupeCRLs and monotonicUpstream each resolve the signer again, and
 // monotonicUpstream also resolves one per published block. Against a chain two
-// or three blocks long that is immaterial. It would not be at the 4 MiB bound
-// maxCRLChainFileBytes allows, since this runs with both the CRL lock and c.mu
-// held; if that bound is ever raised, resolve the signer once in upstreamCRLs
-// and thread it through instead.
+// or three blocks long that is immaterial, and maxCRLChainFileEntries is what
+// keeps it that way: the count is bounded precisely because this runs with both
+// the CRL lock and c.mu held. If that bound is ever raised, resolve the signer
+// once in upstreamCRLs and thread it through instead.
 func crlSignedBy(cert *x509.Certificate, crl *x509.RevocationList) bool {
 	if cert == nil || crl == nil {
 		return false
@@ -188,7 +188,7 @@ func (c *CA) crlChainLocked(ctx context.Context, ourCRL *x509.RevocationList, st
 	// from it is meant to disappear and the stored blob's own upstream blocks
 	// are not carried across.
 	if c.CRLChainFile != "" {
-		upstream, stated, err := c.upstreamCRLs(ctx)
+		upstream, stated, err := c.upstreamCRLs(ctx, storedBlob)
 		if err != nil {
 			return nil, err
 		}

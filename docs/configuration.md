@@ -315,6 +315,19 @@ look:
 | **carrying a CRL older than the one published** | the newer, already-published CRL for that ancestor; everything else from the file | Not a failure and **not** a block on revocation: the published chain is correct, so the older CRL is simply passed over and counted by `puppetca_crl_chain_regressed_total`. |
 | **present but unreadable** (permissions, or a directory mounted at the path) | the chain already published, unchanged | The refresh fails and is counted, and revocation is blocked as for **unparseable**. A Secret projected `0400` root-owned against an unprivileged container is the usual cause. |
 | **larger than 4 MiB** | the chain already published, unchanged | Refused rather than truncated: a half-read PEM blob would silently drop CRLs. A real chain is a handful of CRLs. |
+| **holding more than 64 CRLs** | the chain already published, unchanged | Refused. The byte bound does not cover this: one ancestor with a long revocation list is legitimately large, while many small CRLs are what cost, since each one's signer is resolved by trial verification against the whole CA bundle while the CRL lock is held. A chain is one CRL per ancestor, so more than a couple of dozen means a directory concatenated by accident or a file appended to instead of replaced. |
+
+> **The one revocation this does not block is auto-renewal's.** When an agent
+> renews, the CA revokes the certificate it just replaced (`revoke_on_auto_renew`,
+> on by default) on a best-effort basis: a failure there is logged
+> (`AutoRenew: failed to revoke replaced certificate`) and the renewal is allowed
+> to stand, with no retry. So a chain file that is unreadable at that moment does
+> not block the renewal — it skips that one revocation permanently, and the
+> superseded certificate stays valid until it expires. `puppetca_crl_update_failures_total`
+> counts it, but nothing records which serial now needs revoking by hand. Grep
+> for that message alongside a rising
+> `puppetca_crl_chain_refresh_failures_total`, and revoke by subject afterwards
+> if the window mattered.
 
 **Write the file atomically** — write to a temporary path, then rename. A read
 that catches a `cat >` mid-write sees a file that does not end on a PEM block
@@ -345,8 +358,8 @@ In Kubernetes, mount the file from **its own volume, not with `subPath`**. A
 successfully forever and never changes — the feature becomes a silent no-op.
 No metric distinguishes that from a healthy file:
 `puppetca_crl_chain_last_read_timestamp_seconds` advances on every read either
-way, and an earlier version of this page wrongly claimed otherwise. What catches
-it is the consequence — `PuppetCAUpstreamCRLExpiringSoon` firing on a CA that
+way, because the read genuinely succeeds — it is the content that is frozen.
+What catches it is the consequence — `PuppetCAUpstreamCRLExpiringSoon` firing on a CA that
 *has* `crl_chain_file` configured is the `subPath` signature. That series does
 detect the different case of a file never opened at all: it reads `0`, and
 `PuppetCAUpstreamCRLNeverRead` alerts on it.
@@ -410,14 +423,16 @@ Per-issuer freshness is reported as
 separate from `puppetca_crl_next_update_timestamp_seconds`, which continues to
 mean *this CA's own* CRL. An expiring upstream CRL is fixed at the parent CA,
 not here, so it gets its own alert with its own runbook — see the
-[mixin](../mixin/). Three counters cover what would otherwise be one warning per
+[mixin](../mixin/). Four counters cover what would otherwise be one warning per
 cycle in the log, and they are separate because their remedies are:
 `puppetca_crl_chain_refresh_failures_total` for a file that could not be read or
 parsed (fix the file or its mount); `puppetca_crl_chain_discarded_total` for a
 CRL dropped because nothing in the bundle signed it (complete the CA bundle) —
-the one case where the published chain silently *shrinks*; and
+the one case where the published chain silently *shrinks*;
 `puppetca_crl_chain_regressed_total` for a CRL older than the one already
-published (fix whatever refreshes the file). A fourth series,
+published (fix whatever refreshes the file); and
+`puppetca_crl_chain_removed_total` for an ancestor that has disappeared from the
+file altogether (restore it, or accept the removal). A fifth series,
 `puppetca_crl_chain_last_read_timestamp_seconds`, reads `0` where the file is
 configured but has never been opened.
 

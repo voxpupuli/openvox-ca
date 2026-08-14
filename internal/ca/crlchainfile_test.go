@@ -110,6 +110,20 @@ func emptyCRLNumbered(cert *x509.Certificate, key crypto.Signer, number int64) [
 	return pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: der})
 }
 
+// emptyCRLExpiring issues an empty CRL from cert whose NextUpdate is `in` from
+// now, so two CRLs from the same issuer can be told apart by deadline.
+func emptyCRLExpiring(cert *x509.Certificate, key crypto.Signer, number int64, in time.Duration) []byte {
+	GinkgoHelper()
+	now := time.Now().UTC()
+	der, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+		Number:     big.NewInt(number),
+		ThisUpdate: now,
+		NextUpdate: now.Add(in),
+	}, cert, key)
+	Expect(err).NotTo(HaveOccurred())
+	return pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: der})
+}
+
 var _ = Describe("crl_chain_file", func() {
 	var (
 		ctx      context.Context
@@ -277,6 +291,33 @@ var _ = Describe("crl_chain_file", func() {
 		Expect(chain[1].Issuer.CommonName).To(Equal("Upstream Root CA"))
 	})
 
+	// The count bound, not the byte bound. One ancestor with a long revocation
+	// list is legitimately large and few; a file of many small CRLs is what
+	// costs, because every entry has its signer resolved by trial verification
+	// against the whole bundle several times per evaluation, with the CRL lock
+	// and c.mu held. Refused like any other unusable file: the published chain
+	// stays as it was.
+	It("refuses a file holding more CRLs than the entry bound allows", func() {
+		trustUpstream()
+		myCA.CRLChainFile = writeChainFile(upsCRL)
+		Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
+		before := mustGetCRL(ctx, store)
+		failures := myCA.CRLChainFailures()
+
+		var many []byte
+		for i := 0; i < 65; i++ {
+			many = append(many, upsCRL...)
+		}
+		myCA.CRLChainFile = writeChainFile(many)
+
+		_, err := myCA.RefreshCRLChainFile(ctx)
+		Expect(err).To(MatchError(ContainSubstring("more than the 64 allowed")))
+		Expect(myCA.CRLChainFailures()).To(Equal(failures+1),
+			"a refusal nothing counts is a refusal nothing can alert on")
+		Expect(mustGetCRL(ctx, store)).To(Equal(before),
+			"the published chain must survive a file that was refused")
+	})
+
 	Describe("UpstreamCRLStatuses", func() {
 		It("reports the upstream entries and not our own", func() {
 			trustUpstream()
@@ -288,6 +329,47 @@ var _ = Describe("crl_chain_file", func() {
 			Expect(statuses).To(HaveLen(1))
 			Expect(statuses[0].Issuer).To(ContainSubstring("Upstream Root CA"))
 			Expect(statuses[0].NextUpdate).NotTo(BeZero())
+		})
+
+		// Two ancestors under one shared root can carry the same DN, and this
+		// file pairs CRLs by signing certificate precisely so that both are
+		// published. The metric has only the DN to label with, so two statuses
+		// for one DN would be two samples with identical label sets: Gather
+		// drops the second and errors on every scrape, leaving that ancestor
+		// with no expiry series and PuppetCAUpstreamCRLExpired unable to fire
+		// for it. One status per DN, carrying the nearest deadline, is what the
+		// alert needs -- and asserting the *earlier* of the two is what stops a
+		// "keep the first one seen" implementation passing.
+		It("reports one status per issuer DN, carrying the nearest deadline", func() {
+			aCert, aKey, _ := upstreamCAWithKey("Shared DN CA")
+			bCert, bKey, _ := upstreamCAWithKey("Shared DN CA")
+			Expect(aCert.RawIssuer).To(Equal(bCert.RawIssuer), "the fixture needs identical DNs")
+
+			ours, err := store.GetCACert(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			bundle := append([]byte{}, ours...)
+			for _, cert := range []*x509.Certificate{aCert, bCert} {
+				bundle = append(bundle, pem.EncodeToMemory(
+					&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})...)
+			}
+			Expect(store.SaveCACert(ctx, bundle)).To(Succeed())
+
+			// A expires in 20 days and is published first; B expires in 2 and is
+			// the one an operator has to act on.
+			both := append(append([]byte{}, emptyCRLExpiring(aCert, aKey, 1, 20*24*time.Hour)...),
+				emptyCRLExpiring(bCert, bKey, 1, 2*24*time.Hour)...)
+			myCA.CRLChainFile = writeChainFile(both)
+			Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
+
+			blob := mustGetCRL(ctx, store)
+			Expect(crlBlocks(blob)).To(HaveLen(3), "both ancestors must still be published")
+
+			statuses, err := myCA.UpstreamCRLStatuses(blob)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(statuses).To(HaveLen(1), "two samples sharing a label set are one dropped series")
+			Expect(statuses[0].Issuer).To(ContainSubstring("Shared DN CA"))
+			Expect(statuses[0].NextUpdate).To(BeTemporally("<", time.Now().Add(3*24*time.Hour)),
+				"the nearest deadline is the one the expiry alert exists to catch")
 		})
 
 		It("is empty on a CA with no upstream", func() {

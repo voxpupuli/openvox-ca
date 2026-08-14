@@ -559,6 +559,12 @@ var _ = Describe("CRL chain read failures", func() {
 
 		Expect(myCA.Revoke(ctx, "node1.test")).NotTo(Succeed())
 		Expect(myCA.CRLUpdateFailures()).To(Equal(before+3), "Revoke")
+
+		// The fourth writer, and the one whose omission was invisible: cleanup
+		// runs unattended on a timer, so a lock it can never take is exactly the
+		// failure that would otherwise sit in a log nobody reads.
+		Expect(myCA.CleanupExpiredCerts(ctx, 0)).Error().To(HaveOccurred())
+		Expect(myCA.CRLUpdateFailures()).To(Equal(before+4), "CleanupExpiredCerts")
 	})
 
 	It("blames the file, not storage, when the refresh pass fails on the file itself", func() {
@@ -624,14 +630,16 @@ var _ = Describe("CRL chain read failures", func() {
 	})
 
 	It("fails the re-sign rather than publishing a rollback when the chain read fails", func() {
-		// With crl_chain_file set, crlChainLocked returns before its own read,
-		// so the second CRL read on the re-sign path is publishedUpstream's --
-		// and that read is now the sole enforcement point of the monotonicity
-		// guarantee. Treating a failed read as "nothing published" would disable
-		// the comparison exactly when storage is unhealthy, which is when a
-		// stale file is most likely to be in play: the rolled-back CRL would
-		// then be published by the very next revocation, un-revoking fleet-wide
-		// everything the ancestor revoked in between.
+		// The re-sign path reads the stored chain exactly once, and hands those
+		// bytes to the regression check rather than fetching a second copy. So
+		// the single read is the enforcement point: if it fails, the re-sign
+		// must fail with it. Publishing anyway would mean assembling a chain
+		// with no idea what is already published, and the file here carries a
+		// rollback -- the next revocation would push CRL number 7 over the
+		// stored 99, un-revoking fleet-wide everything the ancestor revoked in
+		// between. publishedUpstream refuses a nil blob for the same reason:
+		// "nothing published" and "nothing could be read" are indistinguishable
+		// by the time they reach it.
 		ctx := context.Background()
 		dir := GinkgoT().TempDir()
 		backend := &flakyCRLBackend{Backend: storage.NewFilesystemBackend(dir)}
@@ -658,15 +666,13 @@ var _ = Describe("CRL chain read failures", func() {
 		Expect(os.WriteFile(path, emptyCRLNumbered(anc, ancKey, 7), 0o644)).To(Succeed())
 		myCA.CRLChainFile = path
 
-		// readStoredCRL reads first and succeeds; publishedUpstream's read fails.
-		backend.failGetCRLAfter(1)
-		Expect(myCA.ReissueCRL(ctx)).To(MatchError(ContainSubstring("check for regressions")))
+		backend.failGetCRLAfter(0)
+		Expect(myCA.ReissueCRL(ctx)).To(HaveOccurred())
 
 		backend.stopFailing()
 		Expect(mustGetCRL(ctx, store)).To(Equal(before),
 			"the published chain must be untouched, still carrying 99")
 	})
-
 	// Counting was moved into readStoredCRL precisely because reissue, refresh
 	// and cleanup previously returned this error uncounted, leaving the metric
 	// the shipped mixin alerts on flat while the CA logged every tick. Reverting
