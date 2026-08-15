@@ -39,3 +39,39 @@ var _ = Describe("Config.needsDefaultNamespace", func() {
 		Expect(cfg.needsDefaultNamespace()).To(BeTrue())
 	})
 })
+
+// pemBlocks filters by block type, and that filter is what stops a private key
+// or a certificate in a CRL file being republished into a Secret. Nothing drove
+// the mismatch branch: every fixture elsewhere holds one block type, so a
+// regression that dropped the `continue` would pass the whole suite while
+// exporting whatever else the blob contained.
+var _ = Describe("pemBlocks", func() {
+	const mixed = "-----BEGIN CERTIFICATE-----\nQ0VSVA==\n-----END CERTIFICATE-----\n" +
+		"-----BEGIN X509 CRL-----\nQ1JM\n-----END X509 CRL-----\n" +
+		"-----BEGIN RSA PRIVATE KEY-----\nS0VZ\n-----END RSA PRIVATE KEY-----\n"
+
+	It("keeps only the blocks of the type asked for", func() {
+		certs := pemBlocks([]byte(mixed), "CERTIFICATE")
+		Expect(certs).To(HaveLen(1))
+		Expect(string(certs[0])).To(ContainSubstring("Q0VSVA=="))
+
+		crls := pemBlocks([]byte(mixed), "X509 CRL")
+		Expect(crls).To(HaveLen(1))
+		Expect(string(crls[0])).To(ContainSubstring("Q1JM"))
+	})
+
+	It("drops a private key rather than passing it through", func() {
+		// The consequence that makes the filter load-bearing: what this returns
+		// is written into a Secret or ConfigMap, and ca_crt.pem is served
+		// unauthenticated, so a key that survived the filter would be published.
+		for _, t := range []string{"CERTIFICATE", "X509 CRL"} {
+			for _, b := range pemBlocks([]byte(mixed), t) {
+				Expect(string(b)).NotTo(ContainSubstring("PRIVATE KEY"))
+			}
+		}
+	})
+
+	It("returns nothing when no block matches", func() {
+		Expect(pemBlocks([]byte(mixed), "CERTIFICATE REQUEST")).To(BeEmpty())
+	})
+})

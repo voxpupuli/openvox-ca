@@ -338,6 +338,37 @@ var _ = Describe("crl_chain_file", func() {
 		Expect(chain[1].Issuer.CommonName).To(Equal("Upstream Root CA"))
 	})
 
+	// bundleCertificates is the gate every upstream CRL is verified against, so
+	// its two refusals decide whether an unverifiable CRL reaches agents. Both
+	// were unexercised: a change that returned an empty set instead of an error
+	// would make signedByAny reject everything, which looks like "the operator's
+	// file is wrong" rather than "this CA cannot read its own bundle".
+	It("refuses a CA bundle it cannot parse rather than verifying against nothing", func() {
+		trustUpstream()
+		myCA.CRLChainFile = writeChainFile(upsCRL)
+		Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
+		before := mustGetCRL(ctx, store)
+
+		// A PEM block that decodes and is not a certificate: the shape a
+		// truncated or mis-assembled bundle leaves behind.
+		Expect(store.SaveCACert(ctx, pem.EncodeToMemory(
+			&pem.Block{Type: "CERTIFICATE", Bytes: []byte("not a certificate")}))).To(Succeed())
+
+		_, err := myCA.RefreshCRLChainFile(ctx)
+		Expect(err).To(MatchError(ContainSubstring("stored CA bundle")))
+		Expect(mustGetCRL(ctx, store)).To(Equal(before),
+			"a bundle this CA cannot read must not rewrite the published chain")
+	})
+
+	It("refuses a CA bundle holding no certificates at all", func() {
+		trustUpstream()
+		myCA.CRLChainFile = writeChainFile(upsCRL)
+		Expect(store.SaveCACert(ctx, []byte("-----BEGIN X509 CRL-----\nZm9v\n-----END X509 CRL-----\n"))).To(Succeed())
+
+		_, err := myCA.RefreshCRLChainFile(ctx)
+		Expect(err).To(MatchError(ContainSubstring("no certificates")))
+	})
+
 	// The count bound, not the byte bound. One ancestor with a long revocation
 	// list is legitimately large and few; a file of many small CRLs is what
 	// costs, because every entry has its signer resolved by trial verification

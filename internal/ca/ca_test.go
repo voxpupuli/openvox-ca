@@ -1643,7 +1643,25 @@ var _ = Describe("CA ImportCA", func() {
 		Expect(ca.ImportCA(context.Background(), store, certPEM, keyPEM, nil)).To(Succeed())
 		crlPEM, err := store.GetCRL(context.Background())
 		Expect(err).NotTo(HaveOccurred())
-		Expect(crlPEM).NotTo(BeEmpty())
+
+		// Not merely non-empty: the sibling cases in this block check what was
+		// written, and "a CRL was generated" is satisfied by any bytes at all.
+		// What matters is that it parses and that this CA signed it, since a
+		// CRL the imported certificate did not sign fails every write path
+		// afterwards.
+		block, _ := pem.Decode(crlPEM)
+		Expect(block).NotTo(BeNil())
+		Expect(block.Type).To(Equal("X509 CRL"))
+		crl, err := x509.ParseRevocationList(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		imported, err := x509.ParseCertificate(func() []byte {
+			b, _ := pem.Decode(certPEM)
+			return b.Bytes
+		}())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(crl.CheckSignatureFrom(imported)).To(Succeed(),
+			"the generated CRL must be signed by the CA just imported")
+		Expect(crl.RevokedCertificateEntries).To(BeEmpty())
 	})
 
 	It("returns an error when the certificate is not a CA certificate", func() {

@@ -574,6 +574,24 @@ var _ = Describe("Export scopes", func() {
 			"an unset crl_scope must mean the whole chain here too")
 	})
 
+	// Validate compares against the constants exactly, so "Chain" or " chain "
+	// is an unknown scope and is refused at startup rather than silently
+	// narrowing what a target publishes. Pinning it because the failure mode of
+	// a lenient parse is invisible: a typo would be accepted and would export
+	// block 0, which looks like a working target.
+	DescribeTable("refuses a scope that differs only in case or whitespace",
+		func(scope string) {
+			cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+				Kind: "Secret", Metadata: k8sexport.Metadata{Name: "x"}, Cert: true, CertScope: scope,
+			}}}
+			Expect(cfg.Validate()).To(MatchError(ContainSubstring("invalid cert_scope")))
+		},
+		Entry("capitalised", "Chain"),
+		Entry("upper case", "SELF"),
+		Entry("leading space", " chain"),
+		Entry("trailing space", "chain "),
+	)
+
 	It("rejects an unknown cert scope", func() {
 		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
 			Kind: "Secret", Metadata: k8sexport.Metadata{Name: "x"}, Cert: true, CertScope: "everything",

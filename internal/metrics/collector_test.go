@@ -423,6 +423,34 @@ var _ = Describe("Collector", func() {
 				"an empty file is still a file we read")
 	})
 
+	It("still exports every other series when the chain cannot be decoded", func() {
+		// gather()'s upstream branch is best-effort by design: a blob it cannot
+		// decode must cost the per-issuer chain gauge and nothing else, because
+		// the CA gauges beside it are what an operator pages on. Nothing drove
+		// that arm, so a change that returned early -- or let the error escape
+		// -- would take the whole scrape down with it, and the two shipped CRL
+		// expiry alerts would go quiet rather than fire.
+		ours, err := store.GetCACert(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(store.SaveCACert(ctx, ours)).To(Succeed())
+
+		// Our own CRL first so block 0 still parses, then a block that decodes
+		// as PEM and fails to parse as a CRL: the shape a truncated append
+		// leaves behind.
+		stored, err := store.GetCRL(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(store.UpdateCRL(ctx, append(append([]byte{}, stored...),
+			pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: []byte("not a CRL")})...))).
+			To(Succeed())
+
+		g := gather(metrics.NewCollector(myCA))
+		Expect(g.findByLabels("puppetca_crl_number", nil)).NotTo(BeNil(),
+			"a chain it cannot read must not cost the CA's own CRL series")
+		Expect(g.findByLabels("puppetca_ca_certificate_not_after_timestamp_seconds", nil)).NotTo(BeNil())
+		Expect(g).NotTo(HaveKey("puppetca_crl_chain_next_update_timestamp_seconds"),
+			"the per-issuer gauge is the one thing the failure costs")
+	})
+
 	It("exports the removal counter by name, and at its value", func() {
 		// The only one of the four chain counters never gathered in a spec, and
 		// the worst to leave uncovered: PuppetCAUpstreamCRLRemoved routes on this

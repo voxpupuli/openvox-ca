@@ -618,6 +618,15 @@ func (c *CA) Clean(ctx context.Context, subject string) error {
 			// Revoke first so the CRL is updated before the file is removed.
 			// Acquire the CRL lock directly here (inside the subject lock) and
 			// call revokeLocked to avoid double-locking via the public Revoke().
+			// Deliberately not withCRLLockCounted. That helper counts a lock
+			// this CA could not take, and here the revoke is best-effort inside
+			// a larger operation that has already succeeded: the certificate is
+			// deleted (or renewed) whatever happens next, and the caller is told
+			// so. Counting a failure to take the lock would put a best-effort
+			// miss on the same counter as a revocation that was asked for and
+			// refused, which is what puppetca_crl_update_failures_total means to
+			// an operator. The miss is logged, and docs/metrics.md names these
+			// three paths as uncounted on that arm.
 			if err := c.Storage.WithLock(ctx, lockNameCRL, func() error {
 				c.mu.Lock()
 				defer c.mu.Unlock()
@@ -978,6 +987,15 @@ func (c *CA) Renew(ctx context.Context, subject string, csrPEM []byte, presented
 		// this subject. Best-effort like Clean's revoke-then-delete: a
 		// failure here shouldn't undo the renewal the caller is waiting on.
 		// Lock ordering: subject-lock (held) -> CRL-lock -> c.mu, matching Clean.
+		// Deliberately not withCRLLockCounted. That helper counts a lock
+		// this CA could not take, and here the revoke is best-effort inside
+		// a larger operation that has already succeeded: the certificate is
+		// deleted (or renewed) whatever happens next, and the caller is told
+		// so. Counting a failure to take the lock would put a best-effort
+		// miss on the same counter as a revocation that was asked for and
+		// refused, which is what puppetca_crl_update_failures_total means to
+		// an operator. The miss is logged, and docs/metrics.md names these
+		// three paths as uncounted on that arm.
 		if err := c.Storage.WithLock(ctx, lockNameCRL, func() error {
 			c.mu.Lock()
 			defer c.mu.Unlock()
@@ -1134,6 +1152,15 @@ func (c *CA) AutoRenew(ctx context.Context, presentedCert *x509.Certificate) ([]
 		// effort: a failure here shouldn't undo the renewal the agent is
 		// waiting on.
 		// Lock ordering: subject-lock (held) -> CRL-lock -> c.mu, matching Clean.
+		// Deliberately not withCRLLockCounted. That helper counts a lock
+		// this CA could not take, and here the revoke is best-effort inside
+		// a larger operation that has already succeeded: the certificate is
+		// deleted (or renewed) whatever happens next, and the caller is told
+		// so. Counting a failure to take the lock would put a best-effort
+		// miss on the same counter as a revocation that was asked for and
+		// refused, which is what puppetca_crl_update_failures_total means to
+		// an operator. The miss is logged, and docs/metrics.md names these
+		// three paths as uncounted on that arm.
 		if err := c.Storage.WithLock(ctx, lockNameCRL, func() error {
 			c.mu.Lock()
 			defer c.mu.Unlock()
