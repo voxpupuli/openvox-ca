@@ -48,6 +48,9 @@ func CheckChainRevocationForTest(chain []*x509.Certificate, set *ClientCRLSet, p
 // SanitiseForLogForTest exposes the log-field sanitiser.
 var SanitiseForLogForTest = sanitiseForLog
 
+// SanitiseAllForLogForTest exposes the slice form, used by the bulk endpoints.
+var SanitiseAllForLogForTest = sanitiseAllForLog
+
 // ClientCNForTest exposes the raw identity read, which must stay verbatim:
 // conflating it with the display form once truncated a name that the renewal
 // handler then compared and issued against.

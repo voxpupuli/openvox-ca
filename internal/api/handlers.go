@@ -1314,7 +1314,8 @@ func (s *Server) handlePostSign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Debug("Signing certificates", "count", len(body.Certnames), "subjects", body.Certnames, "client", client)
+	slog.Debug("Signing certificates", "count", len(body.Certnames),
+		"subjects", sanitiseAllForLog(body.Certnames), "client", client)
 	result := s.signInBatches(r.Context(), body.Certnames)
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(result); err != nil {
@@ -1522,7 +1523,8 @@ func (s *Server) handlePutClean(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Debug("Cleaning certificates", "count", len(body.Certnames), "subjects", body.Certnames, "client", client)
+	slog.Debug("Cleaning certificates", "count", len(body.Certnames),
+		"subjects", sanitiseAllForLog(body.Certnames), "client", client)
 	result := s.CA.CleanMultiple(r.Context(), body.Certnames)
 	if client.cn != "" && s.destructiveOps != nil && s.destructiveOps.Record(client.Key()) {
 		slog.Warn("High rate of destructive operations detected", "client", client, "operation", "bulk-clean")

@@ -361,6 +361,32 @@ var _ = Describe("Authorisation across trust domains", func() {
 			Expect(probe(handler, "POST", "/sign/all", admin)).NotTo(Equal(http.StatusForbidden))
 		})
 
+		// The bulk endpoints take a list of names from the request body, and
+		// CodeQL flagged both of them: handleSignMultiple and handleCleanMultiple
+		// logged body.Certnames verbatim. The elements go through the same
+		// sanitiser as a single CN, and the list itself is bounded, because one
+		// request may carry thousands of names and a log line naming all of them
+		// is write amplification bought with a single POST.
+		It("sanitises and bounds a list of names from a request body", func() {
+			out := api.SanitiseAllForLogForTest([]string{
+				"good.example.com",
+				"evil\n2026-01-01 ERROR forged log line",
+				"carriage\rreturn",
+			})
+			Expect(out).To(HaveLen(3))
+			Expect(out[0]).To(Equal("good.example.com"))
+			Expect(out[1]).NotTo(ContainSubstring("\n"))
+			Expect(out[2]).NotTo(ContainSubstring("\r"))
+
+			many := make([]string, 100)
+			for i := range many {
+				many[i] = "node.example.com"
+			}
+			bounded := api.SanitiseAllForLogForTest(many)
+			Expect(bounded).To(HaveLen(33), "32 names plus the elision marker")
+			Expect(bounded[32]).To(Equal("…"))
+		})
+
 		It("sanitises a common name before logging it, on the branch that needs no trust", func() {
 			// Every other CN log in the middleware needs a certificate that
 			// verified against a configured domain. This one is on the failure

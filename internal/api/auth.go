@@ -285,6 +285,26 @@ func sanitiseForLog(s string) string {
 	}, s)
 }
 
+// sanitiseAllForLog applies sanitiseForLog to every element, for the bulk
+// endpoints whose request bodies carry a list of names.
+//
+// The list is bounded as well as the elements: a caller may send thousands of
+// certnames in one body, and a log line naming all of them is a write
+// amplification an unauthenticated-shaped request should not buy. The count is
+// logged beside it, so a truncated list never reads as the whole request.
+func sanitiseAllForLog(values []string) []string {
+	const maxLoggedValues = 32
+	out := make([]string, 0, min(len(values), maxLoggedValues))
+	for i, v := range values {
+		if i == maxLoggedValues {
+			out = append(out, "…")
+			break
+		}
+		out = append(out, sanitiseForLog(v))
+	}
+	return out
+}
+
 // lookupTier classifies a request into an authorization tier based on method and path.
 func lookupTier(method, path string, cfg *AuthConfig) authTier {
 	// Strip the /puppet-ca/v1 prefix if present for uniform matching.
