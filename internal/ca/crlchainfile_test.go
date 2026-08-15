@@ -355,7 +355,9 @@ var _ = Describe("crl_chain_file", func() {
 			&pem.Block{Type: "CERTIFICATE", Bytes: []byte("not a certificate")}))).To(Succeed())
 
 		_, err := myCA.RefreshCRLChainFile(ctx)
-		Expect(err).To(MatchError(ContainSubstring("stored CA bundle")))
+		// "parsing certificate", not "stored CA bundle": both refusals carry the
+		// latter, so asserting on it would pass with this branch deleted.
+		Expect(err).To(MatchError(ContainSubstring("parsing certificate")))
 		Expect(mustGetCRL(ctx, store)).To(Equal(before),
 			"a bundle this CA cannot read must not rewrite the published chain")
 	})

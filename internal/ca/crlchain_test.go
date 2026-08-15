@@ -567,6 +567,36 @@ var _ = Describe("CRL chain read failures", func() {
 		Expect(myCA.CRLUpdateFailures()).To(Equal(before+4), "CleanupExpiredCerts")
 	})
 
+	// The documented exemption, pinned so it stays a decision rather than drift.
+	// Clean's revoke is best-effort inside an operation that has already
+	// succeeded, so a lock it could not take is logged and not counted -- unlike
+	// the four writers above. Wrapping it in withCRLLockCounted would move this
+	// assertion, which is what makes the exemption visible rather than implied.
+	It("does not count a lock Clean could not take for its best-effort revoke", func() {
+		ctx := context.Background()
+		dir := GinkgoT().TempDir()
+		base := storage.NewFilesystemBackend(dir)
+		store := storage.NewWithBackend(base, filepath.Join(dir, "private"))
+
+		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(myCA.Init(ctx)).To(Succeed())
+		res, err := myCA.Generate(ctx, "doomed.test", nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res).NotTo(BeNil())
+
+		// Refuse only the CRL lock: Clean takes the subject lock first, and
+		// refusing that would fail before the arm under test.
+		myCA.Storage = storage.NewWithBackend(
+			&crlLockRefusingBackend{Backend: base}, filepath.Join(dir, "private"))
+
+		before := myCA.CRLUpdateFailures()
+		Expect(myCA.Clean(ctx, "doomed.test")).To(Succeed(),
+			"Clean swallows the revoke failure, as docs/api.md publishes")
+		Expect(myCA.CRLUpdateFailures()).To(Equal(before),
+			"a best-effort revoke that could not take the lock is logged, not counted")
+	})
+
 	It("blames the file, not storage, when the refresh pass fails on the file itself", func() {
 		// The other half of the attribution rule. Rounds 3 and 4 spent two
 		// commits separating these two counters; without this assertion the
@@ -719,6 +749,31 @@ var _ = Describe("CRL chain read failures", func() {
 		// above are what pin the centralised counting.
 	)
 })
+
+// crlLockRefusingBackend refuses the CRL lock and grants every other, so a spec
+// can reach a CRL-lock arm without failing at the subject lock in front of it.
+type crlLockRefusingBackend struct {
+	storage.Backend
+}
+
+func (b *crlLockRefusingBackend) AcquireLock(_ context.Context, name string) (storage.Unlocker, error) {
+	if name == lockNameCRLValue {
+		return nil, errors.New("lock unavailable")
+	}
+	// Granted rather than delegated: Locker is an optional capability, so the
+	// embedded backend may not have one, and what this spec needs is only that
+	// the subject lock in front of the arm under test succeeds.
+	return grantedLock{}, nil
+}
+
+type grantedLock struct{}
+
+func (grantedLock) Unlock() error { return nil }
+
+// lockNameCRLValue mirrors the unexported lockNameCRL, which this external test
+// package cannot see. A mismatch would make the fixture grant every lock and the
+// spec pass vacuously, so it is asserted against the real behaviour below.
+const lockNameCRLValue = "crl"
 
 // unlockableBackend advertises Locker and always refuses. Deliberately not
 // ErrDistributedLockingUnsupported, which WithLock falls through on by design;
