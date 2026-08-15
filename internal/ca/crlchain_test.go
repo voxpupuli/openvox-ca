@@ -587,12 +587,15 @@ var _ = Describe("CRL chain read failures", func() {
 
 		// Refuse only the CRL lock: Clean takes the subject lock first, and
 		// refusing that would fail before the arm under test.
-		myCA.Storage = storage.NewWithBackend(
-			&crlLockRefusingBackend{Backend: base}, filepath.Join(dir, "private"))
+		refusing := &crlLockRefusingBackend{Backend: base}
+		myCA.Storage = storage.NewWithBackend(refusing, filepath.Join(dir, "private"))
 
 		before := myCA.CRLUpdateFailures()
 		Expect(myCA.Clean(ctx, "doomed.test")).To(Succeed(),
 			"Clean swallows the revoke failure, as docs/api.md publishes")
+		Expect(refusing.refused).To(BeNumerically(">", 0),
+			"the fixture must actually have refused the CRL lock; if lockNameCRL is "+
+				"renamed it grants everything and the assertion below means nothing")
 		Expect(myCA.CRLUpdateFailures()).To(Equal(before),
 			"a best-effort revoke that could not take the lock is logged, not counted")
 	})
@@ -754,10 +757,12 @@ var _ = Describe("CRL chain read failures", func() {
 // can reach a CRL-lock arm without failing at the subject lock in front of it.
 type crlLockRefusingBackend struct {
 	storage.Backend
+	refused int
 }
 
 func (b *crlLockRefusingBackend) AcquireLock(_ context.Context, name string) (storage.Unlocker, error) {
 	if name == lockNameCRLValue {
+		b.refused++
 		return nil, errors.New("lock unavailable")
 	}
 	// Granted rather than delegated: Locker is an optional capability, so the
@@ -771,8 +776,9 @@ type grantedLock struct{}
 func (grantedLock) Unlock() error { return nil }
 
 // lockNameCRLValue mirrors the unexported lockNameCRL, which this external test
-// package cannot see. A mismatch would make the fixture grant every lock and the
-// spec pass vacuously, so it is asserted against the real behaviour below.
+// package cannot see. If the two ever diverge this fixture grants every lock and
+// the spec asserting "not counted" passes for the wrong reason -- so the spec
+// checks refused, which only a genuine match can make non-zero.
 const lockNameCRLValue = "crl"
 
 // unlockableBackend advertises Locker and always refuses. Deliberately not

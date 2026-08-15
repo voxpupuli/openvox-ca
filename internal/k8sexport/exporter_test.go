@@ -592,6 +592,21 @@ var _ = Describe("Export scopes", func() {
 		Entry("trailing space", "chain "),
 	)
 
+	// The same strictness on the CRL side, which has its own switch in
+	// validate() and its own set of accepted values (no "root"), so the cert
+	// half passing says nothing about it.
+	DescribeTable("refuses a crl_scope that differs only in case or whitespace",
+		func(scope string) {
+			cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+				Kind: "Secret", Metadata: k8sexport.Metadata{Name: "x"}, CRL: true, CRLScope: scope,
+			}}}
+			Expect(cfg.Validate()).To(MatchError(ContainSubstring("invalid crl_scope")))
+		},
+		Entry("capitalised", "Chain"),
+		Entry("upper case", "SELF"),
+		Entry("trailing space", "self "),
+	)
+
 	It("rejects an unknown cert scope", func() {
 		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
 			Kind: "Secret", Metadata: k8sexport.Metadata{Name: "x"}, Cert: true, CertScope: "everything",

@@ -430,12 +430,26 @@ var _ = Describe("Collector", func() {
 		// that arm, so a change that returned early -- or let the error escape
 		// -- would take the whole scrape down with it, and the two shipped CRL
 		// expiry alerts would go quiet rather than fire.
+		// Publish a real ancestor first, so the gauge this failure costs is
+		// present to begin with. Asserting its absence without that proves
+		// nothing: it is absent on any CA with no chain at all.
+		upstream, upsKey := upstreamCAWithKeyFixture("Undecodable Chain CA")
 		ours, err := store.GetCACert(ctx)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(store.SaveCACert(ctx, ours)).To(Succeed())
+		Expect(store.SaveCACert(ctx, append(append([]byte{}, ours...),
+			pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: upstream.Raw})...))).
+			To(Succeed())
+		path := filepath.Join(GinkgoT().TempDir(), "chain.pem")
+		Expect(os.WriteFile(path, numberedCRLFixture(upstream, upsKey, 3), 0o644)).To(Succeed())
+		myCA.CRLChainFile = path
+		Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
 
-		// Our own CRL first so block 0 still parses, then a block that decodes
-		// as PEM and fails to parse as a CRL: the shape a truncated append
+		healthy := gather(metrics.NewCollector(myCA))
+		Expect(healthy).To(HaveKey("puppetca_crl_chain_next_update_timestamp_seconds"),
+			"precondition: the gauge this failure costs must exist first")
+
+		// Now a block that decodes as PEM and fails to parse as a CRL, appended
+		// after our own so block 0 still parses: the shape a truncated append
 		// leaves behind.
 		stored, err := store.GetCRL(ctx)
 		Expect(err).NotTo(HaveOccurred())
