@@ -172,9 +172,14 @@ func coversPartially(crl *x509.RevocationList) (string, bool) {
 // forRevocationLookup is forIssuer plus the partial-scope CRLs, for deciding
 // whether a serial is revoked.
 //
-// anyValid still comes from the full CRLs alone: a delta is evidence that a
-// serial *is* revoked and never evidence that an issuer is covered, so it must
-// not be able to satisfy `require` for an issuer whose full CRL is missing.
+// Only the partials are added: forIssuer's slice already carries every full CRL
+// this set holds for the anchor, not-yet-issued ones included, because it gates
+// the date test on anyValid rather than on what it returns.
+//
+// anyValid still comes from the full, believably-dated CRLs alone: a delta is
+// evidence that a serial *is* revoked and never that an issuer is covered, and
+// neither is a CRL this host thinks has not been issued -- so neither can
+// satisfy `require` for an issuer whose current full CRL is missing.
 func (s *ClientCRLSet) forRevocationLookup(cert *x509.Certificate, now time.Time) (crls []*x509.RevocationList, anyValid bool) {
 	crls, anyValid = s.forIssuer(cert, now)
 	if s == nil {
@@ -250,7 +255,8 @@ const clockSkewTolerance = 5 * time.Minute
 // twice, in opposite directions. Something that takes a single CRL has no sides
 // to get wrong.
 //
-// Such a CRL still denies the serials it names -- see forRevocationLookup. It
+// Such a CRL still denies the serials it names: forIssuer returns it in the
+// slice and gates only anyValid, so every reader of the serials sees it. It
 // is refused as *evidence of currency*, which is a claim about the issuer's
 // timeline, and believed as *evidence of revocation*, which is a claim the
 // signature already backs. Discarding the second would let a clock difference
@@ -394,10 +400,12 @@ func (s *ClientCRLSet) freshness(now time.Time) map[string]crlFreshness {
 		for _, crl := range crls {
 			f := out[key]
 			f.subject = anchor.Subject.String()
-			// The date gate lives here and only here. forIssuer deliberately
-			// does not apply it: its slice also answers Coverage's `present`
-			// and this map's entry existence, both questions about the file
-			// rather than about the clock, and gating it there emptied
+			// The date gate applies to the marks here, and to currency in
+			// forIssuer's anyValid -- those are the two clock-dependent
+			// answers. What it must not touch is forIssuer's slice, which also
+			// answers Coverage's `present` and this map's entry existence,
+			// both questions about the file rather than about the clock:
+			// gating it there emptied
 			// coverage and zeroed both marks together.
 			//
 			// Gating the mark without recording that it was gated is what made
@@ -478,10 +486,16 @@ func (f crlFreshness) advancedOver(other crlFreshness) bool {
 // both to regress would let them replay using whichever axis their target
 // issuer keeps badly.
 //
-// Numbers are compared only where both sides have one. Deciding on the presence
-// of the extension was shipped once and was unsafe in both directions -- see the
-// history in the git log for 4079b29 -- so absence stays vacuous here and the
-// dates carry the comparison alone.
+// Arm 1 compares numbers only where both sides have one. Ranking a numbered CRL
+// above an unnumbered one *on that basis alone* was shipped once and was unsafe
+// in both directions -- it let an older numbered CRL displace a newer unnumbered
+// one, and pinned any anchor whose issuer stopped publishing the extension.
+//
+// Arm 2 does consult presence, and is not that mistake returning. It fires only
+// where the installed side is undated, so the dates have already dropped out of
+// the comparison and presence is the last thing left to reason from -- and it
+// refuses rather than ranking, which is the direction that cannot admit a
+// replay. Arm 1 still never ranks on presence.
 func (f crlFreshness) regressedFrom(other crlFreshness) bool {
 	if f.maxNumber != nil && other.maxNumber != nil && f.maxNumber.Cmp(other.maxNumber) < 0 {
 		return true

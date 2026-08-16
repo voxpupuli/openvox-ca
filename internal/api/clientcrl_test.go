@@ -1053,26 +1053,40 @@ var _ = Describe("ClientCRLSet.Regresses", func() {
 	})
 
 	It("still catches a numbered replay while the anchor is undated", func() {
-		// S4. cRLNumber sits inside the signed TBS, so an attacker who can
-		// write crl_file can only replay numbers the issuer really published,
-		// and the issuer's own numbering is monotonic. A future ThisUpdate is
-		// therefore no reason to disbelieve a number -- and keeping maxNumber
-		// outside the date gate is what leaves a guard standing in exactly the
-		// window where the date ratchet is suppressed.
+		// Site 9: maxNumber is raised by a CRL this host will not date. The
+		// anchor deliberately holds two full CRLs -- one past-dated, so the
+		// anchor is dated and the undated-installed arm cannot fire, and one
+		// dated ahead carrying a higher number. That is the only shape in which
+		// the number mark's placement decides the outcome on its own.
 		//
-		// The *installed* side is the undated one: the guard must survive with
-		// its own view suppressed, which is the state the defect creates.
+		// An earlier version used a single undated CRL and passed under the
+		// very mutation it named: with maxNumber suppressed the anchor had no
+		// number at all, the undated-installed arm fired instead, and the
+		// assertion held for a reason that had nothing to do with site 9.
+		//
+		// cRLNumber sits inside the signed TBS, so a replayer can only present
+		// numbers the issuer really published and the issuer's own numbering is
+		// monotonic. A future ThisUpdate is no reason to disbelieve a number,
+		// and keeping it outside the gate is what leaves a guard standing in
+		// exactly the window where the date ratchet is suppressed.
 		T0 := time.Now()
-		cur := numberedCRLFrom(serverCA, caKey, future, 9)
-		cur.ThisUpdate = T0.Add(24 * time.Hour)
-		installed := api.NewClientCRLSet([]*x509.RevocationList{cur}, anchorSet())
 
-		replay := api.NewClientCRLSet(
-			[]*x509.RevocationList{numberedCRLFrom(serverCA, caKey, future, 4)}, anchorSet())
+		settled := numberedCRLFrom(serverCA, caKey, future, 4)
+		settled.ThisUpdate = T0.Add(-2 * time.Hour) // dated: the arm cannot fire
+		ahead := numberedCRLFrom(serverCA, caKey, future, 9)
+		ahead.ThisUpdate = T0.Add(24 * time.Hour) // undated, and carries the mark
+		installed := api.NewClientCRLSet(
+			[]*x509.RevocationList{settled, ahead}, anchorSet())
 
-		who, back := installed.Regresses(replay, T0)
+		// Between the two numbers, and later than the dated CRL, so only the
+		// number mark can refuse it.
+		replayed := numberedCRLFrom(serverCA, caKey, future, 6)
+		replayed.ThisUpdate = T0.Add(-time.Hour)
+		candidate := api.NewClientCRLSet([]*x509.RevocationList{replayed}, anchorSet())
+
+		who, back := installed.Regresses(candidate, T0)
 		Expect(back).To(BeTrue(),
-			"number 4 must not replace 9 merely because this host will not date 9's CRL")
+			"number 6 must not replace 9 merely because this host will not date 9's CRL")
 		Expect(who).To(Equal(serverCA.Subject.String()))
 	})
 

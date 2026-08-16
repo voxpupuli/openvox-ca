@@ -608,7 +608,10 @@ the issuer's CDP — and this only notices; nothing in openvox-ca writes it. A
 reload is refused, keeping the previous set, when it fails outright, when it
 would cover fewer anchors than the set already in use, when it would drop a partial CRL whose
 serials are enforced while that issuer's full CRL stays where it was, or when it
-would move any anchor *backwards* — an older CRL from the same issuer.
+would move any anchor *backwards* — an older CRL from the same issuer, or one
+that cannot be shown to be newer at all, which is the case when this server
+will not date what it already holds for that anchor and neither side publishes
+a `cRLNumber`.
 
 Refusing a backwards move is what stops a replayed file: it verifies, it is
 current, and it covers everything the installed set covers, so nothing else on
@@ -640,9 +643,18 @@ publication interval.
 
 A CRL whose `thisUpdate` is more than five minutes ahead of this server's clock
 is treated as **not yet issued**, the same way a certificate's `notBefore` is.
-It cannot count towards coverage, cannot make an issuer current, and cannot move
-either high-water mark — so neither a forward-skewed signer nor a replayed CRL
-can pin an anchor against every later one. Five minutes because the signer and
+It cannot make an issuer **current**, and cannot move that anchor's
+`thisUpdate` high-water mark — so neither a forward-skewed signer nor a
+replayed CRL can pin an anchor against every later one.
+
+It does still count as revocation material the entry *holds*, and it does still
+raise the `cRLNumber` mark. Both are deliberate. What the server holds is a fact
+about the file rather than about its clock, and the guard that refuses a
+narrowing reload rests on it — suppressing it once emptied that guard's view of
+the installed set and let an empty file install unchallenged. And `cRLNumber`
+sits inside the signed CRL, so only the issuer can mint one and its numbering
+runs forwards; a date this server will not believe is no reason to disbelieve a
+number, which leaves one ordering intact exactly when the other is suppressed. Five minutes because the signer and
 this server keep separate clocks and neither is authoritative; a small forward
 difference is ordinary rather than suspicious.
 

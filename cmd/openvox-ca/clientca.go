@@ -421,7 +421,9 @@ func refreshClientCRLs(cfg *serverConfig, domains []api.TrustDomain, m *clientCR
 			// it names the clock as the thing to check.
 			slog.Error("crl_file reload would move an anchor backwards, or cannot be shown to be "+
 				"newer than the installed set because this host believes the installed CRLs are "+
-				"not yet issued; keeping the current set. Check this host's clock",
+				"not yet issued; keeping the current set. If the issuer named below is dated "+
+				"ahead of this server, check both clocks; otherwise the delivered file is older "+
+				"than what is installed",
 				"client_ca", entry.Name, "path", entry.CRLFile,
 				"issuer", regressedAnchor)
 		case dropped:
