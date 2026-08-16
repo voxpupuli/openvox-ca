@@ -408,9 +408,12 @@ podman run --rm \
   ghcr.io/voxpupuli/openvox-ca:1.2.3 \
   generate --cadir /data --certname admin-cli --ttl 8760h \
   --pp-cli-auth --key-out /out/admin-cli_key.pem > admin-cli.crt
+
+# Take the key back: it lands 0600 owned by the container's user.
+podman unshare chown 0:0 ca-admin-out/admin-cli_key.pem
 ```
 
-Four details that are easy to get wrong. **Pin the image to the version the
+Five details that are easy to get wrong. **Pin the image to the version the
 stopped server was running**, as shown, rather than taking `:latest`: this
 container writes on-disk state that the server wrote and will read again when it
 restarts, the inventory and its integrity record among it, so a version
@@ -423,6 +426,15 @@ cleanly but confusingly. Hence the `podman unshare chown`: it sets the
 directory's owner to whatever container uid 1000 maps to on the host, which is
 what `puppet` runs as.
 
+That mapping has to be undone afterwards, which is the last line of the recipe.
+The key is written `0600` as `puppet`, so on the host it belongs to a subuid you
+are not, and reading it back as yourself gives `Permission denied` — a key you
+cannot open is the same as no key at all, which is the standard this section
+already sets for the Kubernetes path. Inside `podman unshare` you *are* uid 0,
+so `chown 0:0` hands it back; do not reach for `$(id -u)`, which the shell
+expands outside the namespace and would hand the file to a different subuid
+again.
+
 Resist fixing that with `--userns` instead. A remap applies to every path the
 container touches, `ca-data` included, so mapping yourself onto uid 1000 shifts
 the CA files the server left behind out from under it — and the failure moves
@@ -431,8 +443,8 @@ The images create `puppet` with no explicit id, so it takes the distro's first
 regular uid; confirm yours with
 `podman run --rm --entrypoint id ghcr.io/voxpupuli/openvox-ca:<tag>`. The
 `--entrypoint` is needed because the images set one — which is also why the
-recipe above appends `generate ...` rather than a shell command. And the mount is a
-dedicated directory with `:Z` rather than `$PWD` with `:z`, because `:Z`
+recipe above appends `generate ...` rather than a shell command. And the mount
+is a dedicated directory with `:Z` rather than `$PWD` with `:z`, because `:Z`
 relabels its target private to the container — pointing that at a whole project
 or home directory would relabel unrelated files with it.
 
