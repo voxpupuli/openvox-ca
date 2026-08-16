@@ -939,6 +939,46 @@ var _ = Describe("RedisLegacyInventoryDecompose", func() {
 		Expect(svc.VerifyInventoryHMAC(ctx, key)).To(MatchError(ErrInventoryTampered))
 	})
 
+	// The two //nolint:nilerr branches of convertLegacyEmptyHead: an empty
+	// pre-decomposition inventory whose stored whole-blob head cannot be
+	// verified, because the HMAC key is missing or malformed. Both deliberately
+	// leave the head in place rather than dropping it — dropping an
+	// unverifiable head would launder a tampered-away entry set into a clean
+	// baseline — so the fail-closed claim is that startup succeeds and the
+	// NEXT verification rejects the state. The sibling spec above proves that
+	// for the mismatching-head branch; these prove it for the unverifiable
+	// ones, which the comments only asserted in prose.
+	It("leaves the head alone when the HMAC key is missing, failing closed later", func() {
+		ctx := context.Background()
+		cli, stop, key, _ := legacySetup(nil)
+		defer stop()
+		Expect(cli.Del(ctx, redisTestPrefix+":private:hmac_key").Err()).To(Succeed())
+
+		b := newRawRedisBackend(cli, redisTestPrefix)
+		Expect(b.EnsureReady(ctx)).To(Succeed(), "an unverifiable head must not block startup")
+		Expect(cli.Exists(ctx, invKey(redisInvHMACSub)).Val()).To(Equal(int64(1)),
+			"the head must be left in place, not dropped unverified")
+
+		Expect(NewWithBackend(b, "").VerifyInventoryHMAC(ctx, key)).To(MatchError(ErrInventoryTampered),
+			"verification must reject the state the conversion declined to resolve")
+	})
+
+	It("leaves the head alone when the HMAC key is malformed, failing closed later", func() {
+		ctx := context.Background()
+		cli, stop, key, _ := legacySetup(nil)
+		defer stop()
+		Expect(cli.Set(ctx, redisTestPrefix+":private:hmac_key",
+			encodeBlob(time.Now(), []byte("too-short")), 0).Err()).To(Succeed())
+
+		b := newRawRedisBackend(cli, redisTestPrefix)
+		Expect(b.EnsureReady(ctx)).To(Succeed(), "an unverifiable head must not block startup")
+		Expect(cli.Exists(ctx, invKey(redisInvHMACSub)).Val()).To(Equal(int64(1)),
+			"the head must be left in place, not dropped unverified")
+
+		Expect(NewWithBackend(b, "").VerifyInventoryHMAC(ctx, key)).To(MatchError(ErrInventoryTampered),
+			"verification must reject the state the conversion declined to resolve")
+	})
+
 	It("lets two replicas decompose concurrently without double-importing", func() {
 		ctx := context.Background()
 		cli, stop, key, blob := legacySetup(sampleInventoryLines)
