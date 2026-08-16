@@ -545,7 +545,8 @@ var _ = Describe("CRL chain read failures", func() {
 		Expect(res).NotTo(BeNil())
 
 		// Swap in a backend that will not hand out the lock.
-		wedged := storage.NewWithBackend(&unlockableBackend{Backend: base},
+		wedged := storage.NewWithBackend(
+			&unlockableBackend{Backend: base, grant: "subject:"},
 			filepath.Join(dir, "private"))
 		myCA.Storage = wedged
 
@@ -870,13 +871,11 @@ func (b *crlLockRefusingBackend) AcquireLock(_ context.Context, name string) (st
 	}
 	// Granted rather than delegated: Locker is an optional capability, so the
 	// embedded backend may not have one, and what this spec needs is only that
-	// the subject lock in front of the arm under test succeeds.
+	// the subject lock in front of the arm under test succeeds. grantedLock
+	// itself lives in ca_test.go, which arrived with #186 -- this package had
+	// two identical copies after the rebase.
 	return grantedLock{}, nil
 }
-
-type grantedLock struct{}
-
-func (grantedLock) Unlock() error { return nil }
 
 // lockNameCRLValue mirrors the unexported lockNameCRL, which this external test
 // package cannot see. If the two ever diverge this fixture grants every lock and
@@ -888,11 +887,24 @@ const lockNameCRLValue = "crl"
 // ErrDistributedLockingUnsupported, which WithLock falls through on by design;
 // this models the arm that matters -- etcd with a lost session, or a SQL
 // advisory lock that could not be taken.
+// unlockableBackend refuses every lock except those whose name carries the
+// grant prefix.
+//
+// The grant exists because #186 put a per-subject lock in front of Revoke,
+// outside the CRL lock. Refusing every lock therefore stops Revoke at the
+// subject lock -- an arm that is uncounted by design -- so it never reaches the
+// counted CRL acquisition this spec is about, and the counter does not move.
+// Granting "subject:" lets Revoke through to the lock under test while every
+// other writer still meets a refusal at the CRL lock directly.
 type unlockableBackend struct {
 	storage.Backend
+	grant string
 }
 
-func (b *unlockableBackend) AcquireLock(context.Context, string) (storage.Unlocker, error) {
+func (b *unlockableBackend) AcquireLock(_ context.Context, name string) (storage.Unlocker, error) {
+	if b.grant != "" && strings.HasPrefix(name, b.grant) {
+		return grantedLock{}, nil
+	}
 	return nil, errors.New("lock unavailable")
 }
 
