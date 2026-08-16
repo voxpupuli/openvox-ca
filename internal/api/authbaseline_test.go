@@ -616,9 +616,15 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"none": true, "own-ca-plain": true, "own-ca-allowlisted": false,
 				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": true,
 				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
-				"own-ca-pp-cli-auth-false": true, "foreign-ca": true,
+				"own-ca-pp-cli-auth-false": true, "untrusted-ca": true,
+				"client-ca-plain": true,
 			},
-			fingerprint: "c00e954e2057a4c0",
+			changedBy: "arrived on main with revoke-by-serial, which predates this branch's class " +
+				"changes: foreign-ca was renamed untrusted-ca because it means an issuer configured " +
+				"nowhere, and client-ca-plain was added. Denied for both -- an admin-only route " +
+				"admits neither an unknown issuer's certificate nor a trusted foreign issuer's " +
+				"client that holds no admin grant",
+			fingerprint: "8c543c73b603d38c",
 			baseline:    "b384bfaa38f960fd",
 		},
 	}
