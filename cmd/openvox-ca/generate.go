@@ -475,8 +475,10 @@ WARNING: --pp-cli-auth mints a full CA administrator credential.
        response can vouch for the revoked serial for up to another 4 hours.
     3. check the inventory for other live serials for this name. If renewal
        replaced it and revoke_on_auto_renew is off -- or a renewal's best-effort
-       revoke failed -- there may be more than one, and current tooling cannot
-       revoke a superseded serial (see issue #177).
+       revoke failed -- there may be more than one. Step 1 retires only the
+       newest; retire each of the others with
+       'openvox-ca-ctl revoke --serial <serial>', which needs --force when the
+       serial is still the certificate stored for its subject.
 
 `, keyPath, certname)
 }

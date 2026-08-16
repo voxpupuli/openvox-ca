@@ -559,12 +559,15 @@ get wrong:
    OCSP response can vouch for the revoked serial for up to another four hours.
 3. **Check the inventory for other live serials for that name.** With
    `revoke_on_auto_renew: false`, or after a renewal whose best-effort revoke
-   failed, more than one can be valid — and current tooling cannot revoke a
-   superseded serial
-   ([#177](https://github.com/voxpupuli/openvox-ca/issues/177)).
+   failed, more than one can be valid. Step 1 retires only the newest; retire
+   each of the others with `openvox-ca-ctl revoke --serial <serial>`, which
+   needs `--force` where the serial is still the certificate stored for its
+   subject. Step 2 applies to each of them: a revocation is not honoured by a
+   replica until it reloads.
 
-Bear that cost in mind when choosing `--ttl`: until #177 lands, a short lifetime
-is the most reliable limit on a credential you may not be able to fully retire.
+Choose `--ttl` with that in mind even so. Every extra live serial is another
+round of the three steps above, and the operator retiring the credential has to
+find them all — a short lifetime bounds the damage of missing one.
 
 `no_pp_cli_auth: true` makes the extension grant nothing, and the command
 refuses rather than minting an inert certificate. Treat that as a convenience
