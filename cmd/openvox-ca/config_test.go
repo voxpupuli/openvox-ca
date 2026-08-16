@@ -857,6 +857,22 @@ var _ = Describe("crlChainRefreshInterval", func() {
 			"crlChainRefreshInterval() = %v; want %v", cfg.crlChainRefreshInterval(), 5*time.Minute)
 	})
 
+	It("falls back to the default for a non-positive env value", func() {
+		// The guard is load-bearing rather than tidy: a zero or negative
+		// interval reaches time.NewTicker, which panics. The comment above has
+		// claimed as much since this Describe was written while only the yaml
+		// path was driven, so the env key -- the likelier place for an operator
+		// to put a "0" meaning "off" -- could have been let through unnoticed.
+		for _, v := range []string{"0", "-30"} {
+			clearServerEnv()
+			setEnv("PUPPET_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC", v)
+			cfg, err := loadServerConfig("")
+			Expect(err).NotTo(HaveOccurred(), "unexpected error")
+			Expect(cfg.crlChainRefreshInterval()).To(Equal(defaultCRLChainRefreshInterval),
+				"%s must not reach time.NewTicker", v)
+		}
+	})
+
 	It("honours the env override", func() {
 		clearServerEnv()
 		setEnv("PUPPET_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC", "15")

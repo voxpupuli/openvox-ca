@@ -90,7 +90,18 @@ func (c *CA) signCRLLocked(ctx context.Context, prev *storedCRL, revoked []x509.
 	// there is nothing upstream and this is byte-for-byte what it was.
 	newCRLPEM, err := c.crlChainLocked(ctx, parsedCRL, prevBlob)
 	if err != nil {
-		c.crlUpdateFailures.Add(1)
+		// A fault in the operator's crl_chain_file is counted by
+		// crlChainFailures and not here, the same exemption RefreshCRLChainFile
+		// makes. This path reaches the file too -- crlChainLocked calls
+		// upstreamCRLs, which marks an unreadable, over-limit or regressing
+		// file as errChainFileFault -- so without the exemption every revoke
+		// and every reissue also moved crl_update_failures, the series that
+		// means this CA cannot write its CRL. An operator would be paged
+		// towards storage for a typo in a file, which is the confusion the two
+		// separate series exist to prevent.
+		if !errors.Is(err, errChainFileFault) {
+			c.crlUpdateFailures.Add(1)
+		}
 		return err
 	}
 	if err := c.Storage.UpdateCRL(ctx, newCRLPEM); err != nil {

@@ -600,6 +600,39 @@ var _ = Describe("CRL chain read failures", func() {
 			"a best-effort revoke that could not take the lock is logged, not counted")
 	})
 
+	It("does not count a lock Renew could not take for its best-effort revoke", func() {
+		// The comment at Renew's lock site says its exemption is the same as
+		// Clean's, and only Clean's was pinned. The two are separate call sites
+		// with separate arms, so wrapping this one in withCRLLockCounted would
+		// have left every spec green while making a contended lock during a
+		// renewal read as a revocation that did not happen.
+		ctx := context.Background()
+		dir := GinkgoT().TempDir()
+		base := storage.NewFilesystemBackend(dir)
+		store := storage.NewWithBackend(base, filepath.Join(dir, "private"))
+
+		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(myCA.Init(ctx)).To(Succeed())
+		cert := signedCert(myCA, "renewme.test")
+		csrPEM, err := testutil.GenerateCSR("renewme.test")
+		Expect(err).NotTo(HaveOccurred())
+
+		// Only the CRL lock is refused: Renew holds the subject lock already,
+		// and refusing that would fail before the arm under test.
+		refusing := &crlLockRefusingBackend{Backend: base}
+		myCA.Storage = storage.NewWithBackend(refusing, filepath.Join(dir, "private"))
+
+		before := myCA.CRLUpdateFailures()
+		Expect(myCA.Renew(ctx, "renewme.test", csrPEM, cert)).Error().NotTo(HaveOccurred(),
+			"the renewal stands; revoking the replaced certificate is best-effort")
+		Expect(refusing.refused).To(BeNumerically(">", 0),
+			"the fixture must actually have refused the CRL lock; if lockNameCRL is "+
+				"renamed it grants everything and the assertion below means nothing")
+		Expect(myCA.CRLUpdateFailures()).To(Equal(before),
+			"a lock the best-effort revoke could not take is logged, not counted")
+	})
+
 	It("blames the file, not storage, when the refresh pass fails on the file itself", func() {
 		// The other half of the attribution rule. Rounds 3 and 4 spent two
 		// commits separating these two counters; without this assertion the
@@ -622,6 +655,76 @@ var _ = Describe("CRL chain read failures", func() {
 		Expect(myCA.CRLChainFailures()).To(BeNumerically("==", 1))
 		Expect(myCA.CRLUpdateFailures()).To(BeZero(),
 			"the file is what failed; the storage counter must not move too")
+	})
+
+	It("counts a lock the refresh pass could not take as a CRL-update failure", func() {
+		// The refresh job's own arm, and the counterpart to the best-effort
+		// exemptions above rather than a copy of them: this pass exists solely
+		// to amend the CRL, so a lock it could not take *is* an amendment that
+		// did not happen, and something has to say so. Before the arm existed
+		// these were counted by nothing at all -- a quiet CA with contended
+		// storage failed its hourly refresh behind a log line while every
+		// series read healthy until the ancestors expired.
+		ctx := context.Background()
+		dir := GinkgoT().TempDir()
+		base := storage.NewFilesystemBackend(dir)
+		store := storage.NewWithBackend(base, filepath.Join(dir, "private"))
+
+		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(myCA.Init(ctx)).To(Succeed())
+
+		// A healthy file, so the fault under test is the lock and nothing else.
+		_, upsCRLPEM := upstreamCA("Upstream Root CA")
+		path := filepath.Join(GinkgoT().TempDir(), "chain.pem")
+		Expect(os.WriteFile(path, upsCRLPEM, 0o644)).To(Succeed())
+		myCA.CRLChainFile = path
+
+		refusing := &crlLockRefusingBackend{Backend: base}
+		myCA.Storage = storage.NewWithBackend(refusing, filepath.Join(dir, "private"))
+
+		before := myCA.CRLUpdateFailures()
+		beforeChain := myCA.CRLChainFailures()
+
+		_, err := myCA.RefreshCRLChainFile(ctx)
+		Expect(err).To(HaveOccurred())
+
+		Expect(refusing.refused).To(BeNumerically(">", 0),
+			"the fixture must actually have refused the CRL lock")
+		Expect(myCA.CRLUpdateFailures()).To(BeNumerically(">", before),
+			"a refresh that could not take the lock amended nothing, and must be counted")
+		Expect(myCA.CRLChainFailures()).To(Equal(beforeChain),
+			"the operator's file was fine; its counter must not move")
+	})
+
+	It("blames the file, not storage, when a revoke reaches it through the signing path", func() {
+		// The refresh job is not the only reader of crl_chain_file. Revoke,
+		// cleanup and reissue all reach it through signCRLLocked, which had no
+		// exemption -- so a file the operator had broken moved
+		// crl_update_failures on every revocation, sending whoever answered
+		// PuppetCACRLUpdateFailing to inspect storage that was working
+		// perfectly. The refresh pass alone was exempt, which made the split
+		// look correct from the one path that had a test.
+		ctx := context.Background()
+		store := storage.New(GinkgoT().TempDir())
+		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(myCA.Init(ctx)).To(Succeed())
+		Expect(myCA.Generate(ctx, "node1.test", nil)).Error().NotTo(HaveOccurred())
+
+		// Broken only after the certificate exists, so the revoke below fails
+		// on the file and on nothing else.
+		path := filepath.Join(GinkgoT().TempDir(), "corrupt.pem")
+		Expect(os.WriteFile(path, []byte("<html>502 Bad Gateway</html>\n"), 0o644)).To(Succeed())
+		myCA.CRLChainFile = path
+
+		before := myCA.CRLUpdateFailures()
+		Expect(myCA.Revoke(ctx, "node1.test")).NotTo(Succeed())
+
+		Expect(myCA.CRLUpdateFailures()).To(Equal(before),
+			"the file is what failed; the storage counter must not move on this path either")
+		Expect(myCA.CRLChainFailures()).To(BeNumerically(">", 0),
+			"and the file's own counter must say so, or the fault is counted by nothing")
 	})
 
 	It("blames storage, not the file, when the refresh pass fails beneath a healthy file", func() {
