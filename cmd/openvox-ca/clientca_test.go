@@ -1345,6 +1345,47 @@ var _ = Describe("refreshClientCRLs", func() {
 		Expect(buf.String()).NotTo(ContainSubstring("\nlevel=ERROR"))
 	})
 
+	It("names the arm that refused, so the arms cannot be reordered unnoticed", func() {
+		// The switch has four refusal arms and every spec until now asserted
+		// only that a reload did not apply -- which any of them produces. So
+		// the arm *selection* was pinned by nothing: swapping two would leave
+		// the suite green while sending operators to the wrong diagnosis, and
+		// the order is load-bearing (losesCoverage runs before regressed, which
+		// is what keeps the undated-candidate arm hard to reach at all).
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelError})))
+		defer slog.SetDefault(orig)
+
+		T0 := time.Now()
+		cfg := &serverConfig{}
+		cfg.ClientRevocationPolicy = config.RevocationRequire
+		cfg.ClientCA = []config.ClientCA{{
+			Name: "server",
+			File: writeCertFile(serverCA),
+			CRLFile: writeCRLFile(crlIssuedAt(serverCA, serverKey, 9,
+				T0.Add(-2*time.Hour), T0.Add(48*time.Hour))),
+		}}
+		domains, err := buildTrustDomains(cfg, ownCA, nil)
+		Expect(err).NotTo(HaveOccurred())
+		refreshClientCRLs(cfg, domains, metrics)
+
+		// A genuinely older CRL for the same anchor: covers what the installed
+		// set covers, so losesCoverage passes and the backwards arm is the one
+		// that must fire.
+		buf.Reset()
+		cfg.ClientCA[0].CRLFile = writeCRLFile(crlIssuedAt(serverCA, serverKey, 4,
+			T0.Add(-48*time.Hour), T0.Add(24*time.Hour)))
+		refreshClientCRLs(cfg, domains, metrics)
+
+		Expect(buf.String()).To(ContainSubstring("would move an anchor backwards"),
+			"the backwards arm must be the one that reports, not a neighbouring refusal")
+		Expect(buf.String()).To(ContainSubstring("issuer="),
+			"and it must name the issuer, which is the only arm-specific field")
+		Expect(buf.String()).NotTo(ContainSubstring("cover fewer anchors"),
+			"losesCoverage must not have claimed this one")
+	})
+
 	It("refuses an empty reload while the installed anchor is undated", func() {
 		// S9, the defect as an operator meets it. With the installed CRL dated
 		// ahead of this host, filtering it out of Coverage's `present` left the

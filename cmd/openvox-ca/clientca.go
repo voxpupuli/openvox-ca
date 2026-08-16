@@ -417,8 +417,10 @@ func refreshClientCRLs(cfg *serverConfig, domains []api.TrustDomain, m *clientCR
 			// ordering decision lives in one function because having it in two
 			// is how this went wrong six times. The cost is that while an
 			// anchor is undated and unnumbered, even a re-read of the identical
-			// file is refused and this line repeats every pass -- which is why
-			// it names the clock as the thing to check.
+			// file is refused and this line repeats every pass. The message
+			// therefore has to serve both reasons: only one of them is a clock
+			// problem, and telling an operator to check the clock when the
+			// delivered file is simply older would send them the wrong way.
 			slog.Error("crl_file reload would move an anchor backwards, or cannot be shown to be "+
 				"newer than the installed set because this host believes the installed CRLs are "+
 				"not yet issued; keeping the current set. If the issuer named below is dated "+
@@ -591,7 +593,9 @@ func newClientCRLMetrics(reg prometheus.Registerer) *clientCRLMetrics {
 			Help: "When this client_ca entry's crl_file was last applied, in seconds since the " +
 				"epoch. A reload that fails, that would cover fewer anchors than the set " +
 				"already in use, that would drop an enforced partial CRL, or that would " +
-				"move an anchor backwards to an older CRL, " +
+				"move an anchor backwards -- or cannot be shown to be newer at all, " +
+				"which happens when this host will not date the CRLs it already holds " +
+				"for that anchor and neither side publishes a cRLNumber -- " +
 				"deliberately keeps the previous set -- which is right for " +
 				"availability and invisible on every other series, because the retained CRLs " +
 				"are still current and clients are still served. Meanwhile the file has stopped " +

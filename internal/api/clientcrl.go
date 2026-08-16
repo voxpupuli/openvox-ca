@@ -400,13 +400,14 @@ func (s *ClientCRLSet) freshness(now time.Time) map[string]crlFreshness {
 		for _, crl := range crls {
 			f := out[key]
 			f.subject = anchor.Subject.String()
-			// The date gate applies to the marks here, and to currency in
-			// forIssuer's anyValid -- those are the two clock-dependent
-			// answers. What it must not touch is forIssuer's slice, which also
-			// answers Coverage's `present` and this map's entry existence,
-			// both questions about the file rather than about the clock:
-			// gating it there emptied
-			// coverage and zeroed both marks together.
+			// The date gate applies to the ThisUpdate mark here, and to
+			// currency in forIssuer's anyValid. Those are the two
+			// clock-dependent answers, and they are the only two: maxNumber
+			// below is deliberately outside it, and so is forIssuer's slice,
+			// which answers Coverage's `present` and this map's entry
+			// existence. Both of those are questions about what the file
+			// contains rather than about this host's clock, and gating them
+			// emptied coverage and zeroed the marks together.
 			//
 			// Gating the mark without recording that it was gated is what made
 			// this look like the wrong home twice: a suppressed mark is zero,
