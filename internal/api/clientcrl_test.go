@@ -34,6 +34,22 @@ import (
 
 // crlFrom issues a CRL from cert covering the given serials, expiring at
 // notAfter.
+// numberedCRLFrom is crlFrom with the CRL number under the caller's control,
+// which is what a replay test needs: two CRLs from one issuer, both valid, in a
+// defined order.
+func numberedCRLFrom(cert *x509.Certificate, key *ecdsa.PrivateKey, notAfter time.Time, number int64) *x509.RevocationList {
+	GinkgoHelper()
+	der, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+		Number:     big.NewInt(number),
+		ThisUpdate: notAfter.Add(-24 * time.Hour),
+		NextUpdate: notAfter,
+	}, cert, key)
+	Expect(err).NotTo(HaveOccurred())
+	crl, err := x509.ParseRevocationList(der)
+	Expect(err).NotTo(HaveOccurred())
+	return crl
+}
+
 func crlFrom(cert *x509.Certificate, key *ecdsa.PrivateKey, notAfter time.Time, revoked ...*big.Int) *x509.RevocationList {
 	GinkgoHelper()
 	entries := make([]x509.RevocationListEntry, 0, len(revoked))
@@ -413,5 +429,69 @@ var _ = Describe("Client CRL checking", func() {
 			empty := api.NewClientCRLSet(nil, anchorSet())
 			Expect(empty.Usable(time.Now())).To(BeFalse())
 		})
+	})
+})
+
+// A CRL that verifies, is current, and covers every anchor the installed set
+// covers can still be *older* than what is installed. Nothing else on the
+// reload path notices: the signature is good and coverage is unchanged. What it
+// costs is every serial revoked between the two, silently re-admitted.
+var _ = Describe("ClientCRLSet.Regresses", func() {
+	var (
+		root     *x509.Certificate
+		rootKey  *ecdsa.PrivateKey
+		serverCA *x509.Certificate
+		caKey    *ecdsa.PrivateKey
+		future   time.Time
+	)
+
+	anchorSet := func() []*x509.Certificate { return []*x509.Certificate{serverCA} }
+
+	BeforeEach(func() {
+		root, rootKey = mintCert("Shared Root", nil, nil, true)
+		serverCA, caKey = mintCert("Server CA", root, rootKey, true)
+		withSKI(serverCA)
+		future = time.Now().Add(30 * 24 * time.Hour)
+	})
+
+	It("reports an anchor whose CRL number would go backwards", func() {
+		current := api.NewClientCRLSet(
+			[]*x509.RevocationList{numberedCRLFrom(serverCA, caKey, future, 9)}, anchorSet())
+		older := api.NewClientCRLSet(
+			[]*x509.RevocationList{numberedCRLFrom(serverCA, caKey, future, 4)}, anchorSet())
+
+		_, back := current.Regresses(older, time.Now())
+		Expect(back).To(BeTrue(), "CRL number 4 must not replace 9")
+	})
+
+	It("accepts a newer CRL for the same anchor", func() {
+		current := api.NewClientCRLSet(
+			[]*x509.RevocationList{numberedCRLFrom(serverCA, caKey, future, 9)}, anchorSet())
+		newer := api.NewClientCRLSet(
+			[]*x509.RevocationList{numberedCRLFrom(serverCA, caKey, future, 10)}, anchorSet())
+
+		_, back := current.Regresses(newer, time.Now())
+		Expect(back).To(BeFalse())
+	})
+
+	It("does not call an equal CRL a regression, since that is the steady state", func() {
+		current := api.NewClientCRLSet(
+			[]*x509.RevocationList{numberedCRLFrom(serverCA, caKey, future, 9)}, anchorSet())
+		same := api.NewClientCRLSet(
+			[]*x509.RevocationList{numberedCRLFrom(serverCA, caKey, future, 9)}, anchorSet())
+
+		_, back := current.Regresses(same, time.Now())
+		Expect(back).To(BeFalse(), "every unchanged reload would otherwise be refused")
+	})
+
+	// An anchor the candidate drops entirely is losesCoverage's business, and
+	// answering it here too would report one fault as two.
+	It("says nothing about an anchor the candidate no longer covers", func() {
+		current := api.NewClientCRLSet(
+			[]*x509.RevocationList{numberedCRLFrom(serverCA, caKey, future, 9)}, anchorSet())
+		empty := api.NewClientCRLSet(nil, anchorSet())
+
+		_, back := current.Regresses(empty, time.Now())
+		Expect(back).To(BeFalse())
 	})
 })

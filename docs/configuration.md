@@ -185,7 +185,7 @@ The CA key passphrase can also be provided via `PUPPET_CA_KEY_PASSPHRASE` (env v
 | Config key | Environment variable |
 | --- | --- |
 | `crl_chain_file` | `PUPPET_CA_CRL_CHAIN_FILE` |
-| `maintenance_interval_sec` | `PUPPET_CA_MAINTENANCE_INTERVAL_SEC` |
+| `client_crl_refresh_interval_sec` | `PUPPET_CA_CLIENT_CRL_REFRESH_INTERVAL_SEC` |
 | `ca_key_algo` | `PUPPET_CA_CA_KEY_ALGO` |
 | `ca_key_size` | `PUPPET_CA_CA_KEY_SIZE` |
 | `leaf_key_algo` | `PUPPET_CA_LEAF_KEY_ALGO` |
@@ -601,6 +601,21 @@ requires a conforming CRL issuer to include it, but not every issuer conforms,
 and there is no reason to refuse a CRL whose signature verifies over a field
 this CA does not use — so an issuer that omits it is fully supported. Without verification, a writable `crl_file` would be a way to
 *clear* revocations, not merely add them.
+
+**`client_crl_refresh_interval_sec`** is how often each entry's `crl_file` is
+re-read, defaulting to an hour. The file is refreshed by whatever mechanism
+already delivers it — a mounted Secret, a config-management run, a job fetching
+the issuer's CDP — and this only notices; nothing in openvox-ca writes it. A
+reload that fails, or that would cover fewer anchors than the set already in
+use, keeps the previous set rather than narrowing what is enforced, so a
+transient read error costs freshness and not availability.
+
+The anchors themselves deliberately do not reload: re-reading them would mean
+re-parsing what a domain trusts while requests are being decided against it, and
+adding or removing an issuer is a restart-shaped change. `admin_cns` on a
+`client_ca` entry are startup configuration for the same reason. Only domain
+zero's admin allow list is reloadable, through `SIGHUP` — see [reloading
+configuration](#reloading-configuration).
 
 A client certificate that is *itself* one of your anchors is rejected under
 `require`: the chain is one element long, so there is nothing above it to attest

@@ -21,6 +21,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"math/big"
 	"sync/atomic"
 	"time"
 
@@ -239,6 +240,71 @@ func (s *ClientCRLSet) Coverage(now time.Time) (present, current map[string]bool
 		}
 	}
 	return present, current
+}
+
+// Freshness reports, per anchor key, the newest CRL this set holds for that
+// anchor -- by CRL number where the issuer publishes one, and by ThisUpdate
+// otherwise, since cRLNumber is required of a conforming issuer but not
+// universally present (`openssl ca -gencrl` omits it under the stock config).
+//
+// It exists so a reload can refuse to go backwards. A CRL that verifies, has
+// not expired, and covers every anchor the current set covers still must not
+// replace a newer one: an attacker who can write crl_file, or a mirror serving
+// a stale copy, would otherwise re-admit every serial revoked since it was
+// signed, and nothing else in the reload path would notice.
+func (s *ClientCRLSet) Freshness(now time.Time) map[string]crlFreshness {
+	out := map[string]crlFreshness{}
+	if s == nil {
+		return out
+	}
+	for _, anchor := range s.anchors {
+		key := string(anchor.RawSubjectPublicKeyInfo)
+		crls, _ := s.forIssuer(anchor, now)
+		for _, crl := range crls {
+			f := crlFreshness{thisUpdate: crl.ThisUpdate}
+			if crl.Number != nil {
+				f.number = new(big.Int).Set(crl.Number)
+			}
+			if best, ok := out[key]; !ok || f.newerThan(best) {
+				out[key] = f
+			}
+		}
+	}
+	return out
+}
+
+// crlFreshness is a CRL's position in its issuer's sequence.
+type crlFreshness struct {
+	number     *big.Int
+	thisUpdate time.Time
+}
+
+// newerThan compares by cRLNumber when both carry one -- the field RFC 5280
+// defines for exactly this -- and falls back to ThisUpdate when either does not.
+// A numbered CRL is never ranked against an unnumbered one by number alone,
+// because the two sequences are unrelated.
+func (f crlFreshness) newerThan(other crlFreshness) bool {
+	if f.number != nil && other.number != nil {
+		return f.number.Cmp(other.number) > 0
+	}
+	return f.thisUpdate.After(other.thisUpdate)
+}
+
+// Regresses reports whether candidate would move any anchor backwards relative
+// to this set.
+func (s *ClientCRLSet) Regresses(candidate *ClientCRLSet, now time.Time) (string, bool) {
+	currentF := s.Freshness(now)
+	candidateF := candidate.Freshness(now)
+	for key, cur := range currentF {
+		cand, ok := candidateF[key]
+		if !ok {
+			continue // a lost anchor is losesCoverage's business, not this one
+		}
+		if cur.newerThan(cand) {
+			return key, true
+		}
+	}
+	return "", false
 }
 
 // clientCRLs holds the atomically-swappable CRL set for a domain.

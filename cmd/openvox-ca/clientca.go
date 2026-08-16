@@ -182,6 +182,16 @@ func warnIfGrantsSpanAnchors(entry *config.ClientCA, anchors []*x509.Certificate
 		"client_ca", entry.Name, "anchors", strings.Join(names, ", "))
 }
 
+// regressesCRLSet reports whether candidate would move any anchor backwards.
+//
+// Separate from losesCoverage because the two answer different questions: that
+// one asks whether an anchor lost its CRL, this one whether an anchor's CRL got
+// older. A replayed file passes the first and fails the second.
+func regressesCRLSet(current, candidate *api.ClientCRLSet, now time.Time) bool {
+	_, back := current.Regresses(candidate, now)
+	return back
+}
+
 // losesCoverage reports whether candidate covers less than current does.
 //
 // Compared per anchor *key*, not per common name. Names collapse: a CA that
@@ -341,6 +351,15 @@ func refreshClientCRLs(cfg *serverConfig, domains []api.TrustDomain, m *clientCR
 				"keeping the current set",
 				"client_ca", entry.Name, "path", entry.CRLFile,
 				"now_uncovered", strings.Join(candidate.CoverageGaps(now), ", "))
+		case entry.CRLFile != "" && regressesCRLSet(domain.RevocationSet(), candidate, now):
+			// Verifies, covers every anchor the current set covers, and is still
+			// older than what is installed. Applying it would re-admit every
+			// serial revoked since it was signed, and nothing else on this path
+			// would notice: coverage is unchanged and the signature is good.
+			// The upstream chain refuses the same shape for the same reason;
+			// see monotonicUpstream.
+			slog.Error("crl_file reload would move an anchor backwards; keeping the current set",
+				"client_ca", entry.Name, "path", entry.CRLFile)
 		default:
 			domain.SetRevocationSet(candidate)
 			m.recordReload(entry.Name, now)
@@ -459,7 +478,7 @@ func newClientCRLMetrics(reg prometheus.Registerer) *clientCRLMetrics {
 				"availability and invisible on every other series, because the retained CRLs " +
 				"are still current and clients are still served. Meanwhile the file has stopped " +
 				"being applied, so revocations published since are not honoured. Alert on this " +
-				"going stale relative to maintenance_interval_sec.",
+				"going stale relative to client_crl_refresh_interval_sec.",
 		}, []string{"client_ca"}),
 	}
 	reg.MustRegister(m.usable, m.refusals, m.lastReload)

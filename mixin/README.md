@@ -48,13 +48,19 @@ alerting rules for the openvox-ca exporter. It alerts on:
   forever, so it is indistinguishable from a healthy file on every series. It
   surfaces as `PuppetCAUpstreamCRLExpiringSoon` on a CA that has
   `crl_chain_file` set.
-- **Client trust domains** with no usable CRL — every CRL expired, or every one
-  [`client_ca`](../docs/configuration.md#client-trust-domains) is in use). The
+- **Client trust domains** in three rules, and only where
   [`client_ca`](../docs/configuration.md#trusting-client-certificates-from-another-ca)
-- **Client trust domains** in two rules, both critical, both only when
-  [`client_ca`](../docs/configuration.md#trusting-client-certificates-from-another-ca)
-- **Client trust domains** in three rules, both critical ones and a warning, all only when
-  [`client_ca`](../docs/configuration.md#trusting-client-certificates-from-another-ca)
+  is configured. Two are critical because they mean clients of a foreign issuer
+  are being turned away: *ClientCRLUnusable*, where an entry has no currently
+  valid CRL at all — every one expired, or every one discarded as unverifiable —
+  which under the default `require` policy rejects every client of that issuer;
+  and *ClientCRLRefusals*, which counts the refusals themselves rather than
+  inferring them, so it fires on the thing an operator would otherwise learn from
+  an agent-side 403 three layers away. The warning, *ClientCRLStale*, is the
+  early one: the entry's `crl_file` has not been applied for three refresh
+  intervals, so the CRLs in use are still valid but revocations published since
+  are not being honoured. None of it is fixable here — the remedy is at the
+  issuing CA, or at whatever writes the file.
 - **Kubernetes export** targets whose applies keep failing (only when the
   [Kubernetes export](../docs/kubernetes-export.md) feature is in use).
 
@@ -144,9 +150,9 @@ jsonnet -J vendor -m . mixin.jsonnet
 | `upstreamCRLExpiryWarningSeconds` | 14 days | Warning threshold for an upstream CRL in a published chain. Longer than `crlExpiryWarningSeconds` because the remedy is at another CA. |
 | `crlChainWindow` | `2h` | Window over which chain-refresh failures, discards, regressions and removals are counted. Twice the CA's default `crl_chain_refresh_interval_sec`, so that two increments are always in range: at exactly one interval a single unchanging fault fires, resolves and re-fires forever, because the older sample ages out before the next increment lands. Keep it at twice the interval if you change that setting. |
 | `crlChainFor` | `15m` | `for:` debounce for the five upstream-chain alerts. |
-| `clientCRLRefusalWindow` | `1h` | Window over which client-CRL refusals are counted. Event-driven, so unlike the gauge it is not coupled to `maintenance_interval_sec`. |
-| `clientCRLUnusableFor` | `10m` | Shared `for:` debounce for *ClientCRLUnusable*, *ClientCRLRefusals* and *ClientCRLStale*. Raising it to stop the gauge flapping across a maintenance pass also delays the event-driven refusals page, which is the immediate one. For the *gauge* rule the detection latency is `maintenance_interval_sec` **plus** this, since the gauge is only recomputed on the maintenance pass; the refusals rule is event-driven and not subject to that. |
-| `clientCRLStaleSeconds` | `3h` | How long an entry may go without its `crl_file` being applied before *ClientCRLStale* fires. Three maintenance passes at the 1h default, so a single transient read error does not page — which means it assumes that default: **raise it alongside any increase to `maintenance_interval_sec`**, or the rule fires permanently on a healthy CA. |
+| `clientCRLRefusalWindow` | `1h` | Window over which client-CRL refusals are counted. Event-driven, so unlike the gauge it is not coupled to `client_crl_refresh_interval_sec`. |
+| `clientCRLUnusableFor` | `10m` | Shared `for:` debounce for *ClientCRLUnusable*, *ClientCRLRefusals* and *ClientCRLStale*. Raising it to stop the gauge flapping across a maintenance pass also delays the event-driven refusals page, which is the immediate one. For the *gauge* rule the detection latency is `client_crl_refresh_interval_sec` **plus** this, since the gauge is only recomputed on the maintenance pass; the refusals rule is event-driven and not subject to that. |
+| `clientCRLStaleSeconds` | `3h` | How long an entry may go without its `crl_file` being applied before *ClientCRLStale* fires. Three maintenance passes at the 1h default, so a single transient read error does not page — which means it assumes that default: **raise it alongside any increase to `client_crl_refresh_interval_sec`**, or the rule fires permanently on a healthy CA. |
 | `leafExpiryWarningSeconds` | 7 days | Leaf certificate expiry warning threshold. |
 | `leafExpiryCriticalSeconds` | 1 day | Leaf certificate expiry critical threshold. |
 | `pendingFor` | `1h` | How long a request may stay pending before alerting. |
