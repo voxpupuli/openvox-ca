@@ -9,9 +9,11 @@ on:
   # a full row of green checks from image builds alone, so the checks tab read
   # as a passing build. An allowlist only narrows that trap: the next base
   # prefix nobody thought of fails the same silent way. Running on any base
-  # means a stacked PR is verified before it merges into its base, rather than
-  # first being exercised by the downstream PR into main where the regression
-  # is already buried in the stack's history.
+  # means a stacked PR is exercised before it merges into its base, rather than
+  # first being run by the downstream PR into main where the regression is
+  # already buried in the stack's history. Exercised, not gated: the "Main"
+  # ruleset covers the default branch only, so on a stacked PR these results
+  # are the author's to read rather than a merge block.
   #
   # push stays on main: a PR already gets a pull_request run, and widening
   # push would double the load for no extra signal.

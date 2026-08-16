@@ -388,6 +388,61 @@ var _ = Describe("verifyWorkflowBaseScoping", func() {
 		Expect(verifyWorkflowBaseScoping()).To(Succeed())
 	})
 
+	// Which files get checked is itself logic, and the real-tree spec above
+	// passes just as happily for a dispatcher that checks nothing. These drive
+	// it over synthetic sources so both halves of the dispatch are pinned.
+	Describe("dispatch", func() {
+		clean := []byte("on:\n  pull_request:\njobs: {}\n")
+
+		It("checks every workflow it is given, not only the first", func() {
+			// Pins codeql.yml's membership: drop it from baseScopedWorkflows
+			// and it could be re-filtered with nothing to catch it.
+			err := verifyWorkflowBaseScopingIn(map[string][]byte{
+				"ci.yml":     clean,
+				"codeql.yml": []byte("on:\n  pull_request:\n    branches: [\"main\"]\njobs: {}\n"),
+			})
+			Expect(err).To(MatchError(ContainSubstring("codeql.yml")))
+		})
+
+		It("applies the pin check, not only the trigger check", func() {
+			err := verifyWorkflowBaseScopingIn(map[string][]byte{
+				"ci.yml": []byte(`
+on:
+  pull_request:
+jobs:
+  automerge:
+    steps:
+      - run: gh pr merge --auto "$PR_URL"
+`),
+				"codeql.yml": clean,
+			})
+			Expect(err).To(MatchError(ContainSubstring(`job "automerge"`)))
+		})
+
+		// The pin check is no longer special-cased to ci.yml, so a merging job
+		// that moves into another listed workflow is still caught, and the
+		// error names the file it is actually in.
+		It("names the workflow a misplaced merging job landed in", func() {
+			err := verifyWorkflowBaseScopingIn(map[string][]byte{
+				"ci.yml": clean,
+				"codeql.yml": []byte(`
+on:
+  pull_request:
+jobs:
+  automerge:
+    steps:
+      - run: gh pr merge --auto "$PR_URL"
+`),
+			})
+			Expect(err).To(MatchError(ContainSubstring("codeql.yml job")))
+		})
+
+		It("reports a workflow whose source was not supplied", func() {
+			Expect(verifyWorkflowBaseScopingIn(map[string][]byte{"ci.yml": clean})).To(
+				MatchError(ContainSubstring("codeql.yml")))
+		})
+	})
+
 	// The pin half. Fixtures are synthetic so the failure branches are driven
 	// without touching the real workflow files.
 	Describe("auto-merge base pin", func() {
@@ -411,12 +466,12 @@ jobs:
 `)
 
 		It("accepts a merging job that carries the pin", func() {
-			Expect(verifyAutomergeBasePinIn(unfiltered)).To(Succeed())
+			Expect(verifyAutomergeBasePinIn("ci.yml", unfiltered)).To(Succeed())
 		})
 
 		It("rejects a dropped pin and names the job", func() {
 			bad := bytes.Replace(unfiltered, []byte(pinClause), nil, 1)
-			err := verifyAutomergeBasePinIn(bad)
+			err := verifyAutomergeBasePinIn("ci.yml", bad)
 			Expect(err).To(MatchError(ContainSubstring(`job "automerge"`)))
 			Expect(err).To(MatchError(ContainSubstring("merges pull requests")))
 		})
@@ -431,7 +486,7 @@ jobs:
       && (github.event.pull_request.user.login == 'dependabot[bot]'
       || github.event.pull_request.user.login == 'renovate[bot]')
 `), nil, 1)
-			Expect(verifyAutomergeBasePinIn(bad)).To(MatchError(ContainSubstring(`job "automerge"`)))
+			Expect(verifyAutomergeBasePinIn("ci.yml", bad)).To(MatchError(ContainSubstring(`job "automerge"`)))
 		})
 
 		// The guard checks that the condition consults the base ref, not how
@@ -442,7 +497,7 @@ jobs:
 			literal := bytes.Replace(unfiltered,
 				[]byte("github.event.pull_request.base.ref == github.event.repository.default_branch"),
 				[]byte("github.event.pull_request.base.ref == 'main'"), 1)
-			Expect(verifyAutomergeBasePinIn(literal)).To(Succeed())
+			Expect(verifyAutomergeBasePinIn("ci.yml", literal)).To(Succeed())
 		})
 
 		// Matching on what the job does, not on the name "automerge", means a
@@ -450,7 +505,7 @@ jobs:
 		It("still requires the pin when the merging job is renamed", func() {
 			bad := bytes.Replace(unfiltered, []byte("  automerge:\n"), []byte("  land-bot-prs:\n"), 1)
 			bad = bytes.Replace(bad, []byte(pinClause), nil, 1)
-			Expect(verifyAutomergeBasePinIn(bad)).To(MatchError(ContainSubstring(`job "land-bot-prs"`)))
+			Expect(verifyAutomergeBasePinIn("ci.yml", bad)).To(MatchError(ContainSubstring(`job "land-bot-prs"`)))
 		})
 
 		// A step that enables auto-merge through an action rather than an
@@ -460,7 +515,7 @@ jobs:
 				[]byte(`      - run: gh pr merge --auto --merge "$PR_URL"`),
 				[]byte(`      - uses: peter-evans/enable-pull-request-automerge@v3`), 1)
 			bad = bytes.Replace(bad, []byte(pinClause), nil, 1)
-			Expect(verifyAutomergeBasePinIn(bad)).To(MatchError(ContainSubstring(`job "automerge"`)))
+			Expect(verifyAutomergeBasePinIn("ci.yml", bad)).To(MatchError(ContainSubstring(`job "automerge"`)))
 		})
 
 		// The pin is required whatever the trigger looks like: a filter is
@@ -471,7 +526,7 @@ jobs:
 			filtered := bytes.Replace(unfiltered,
 				[]byte("  pull_request:\n"), []byte("  pull_request:\n    branches: [\"main\", \"release/**\"]\n"), 1)
 			filtered = bytes.Replace(filtered, []byte(pinClause), nil, 1)
-			Expect(verifyAutomergeBasePinIn(filtered)).To(MatchError(ContainSubstring(`job "automerge"`)))
+			Expect(verifyAutomergeBasePinIn("ci.yml", filtered)).To(MatchError(ContainSubstring(`job "automerge"`)))
 		})
 
 		It("ignores jobs that do not merge pull requests", func() {
@@ -479,7 +534,7 @@ jobs:
 				[]byte(`      - run: gh pr merge --auto --merge "$PR_URL"`),
 				[]byte(`      - run: gh pr view "$PR_URL"`), 1)
 			noMerge = bytes.Replace(noMerge, []byte(pinClause), nil, 1)
-			Expect(verifyAutomergeBasePinIn(noMerge)).To(Succeed())
+			Expect(verifyAutomergeBasePinIn("ci.yml", noMerge)).To(Succeed())
 		})
 
 		// Two offenders: the reported job must be the alphabetically first,
@@ -502,7 +557,7 @@ jobs:
       - run: gh pr merge --auto "$PR_URL"
 `)
 			for range 20 {
-				Expect(verifyAutomergeBasePinIn(bad)).To(MatchError(ContainSubstring(`job "merge-alpha"`)))
+				Expect(verifyAutomergeBasePinIn("ci.yml", bad)).To(MatchError(ContainSubstring(`job "merge-alpha"`)))
 			}
 		})
 	})
@@ -523,7 +578,15 @@ jobs:
 			src := []byte("on:\n  pull_request:\n    branches: [\"main\"]\njobs: {}\n")
 			err := verifyPullRequestUnfilteredIn("codeql.yml", src)
 			Expect(err).To(MatchError(ContainSubstring("codeql.yml")))
-			Expect(err).To(MatchError(ContainSubstring("main")))
+			Expect(err).To(MatchError(ContainSubstring("branches: [main]")))
+		})
+
+		// branches-ignore filters on the same field -- the PR's base -- so a
+		// re-narrowing written that way skips stacked PRs exactly as silently.
+		It("rejects a branches-ignore filter and names the key", func() {
+			src := []byte("on:\n  pull_request:\n    branches-ignore: [\"feature/**\"]\njobs: {}\n")
+			err := verifyPullRequestUnfilteredIn("ci.yml", src)
+			Expect(err).To(MatchError(ContainSubstring("branches-ignore: [feature/**]")))
 		})
 
 		// Deleting the trigger skips stacked PRs just as thoroughly as
@@ -537,6 +600,14 @@ jobs:
 		It("reports a malformed workflow against its file name", func() {
 			Expect(verifyPullRequestUnfilteredIn("ci.yml", []byte("on: [\n"))).To(
 				MatchError(ContainSubstring("ci.yml")))
+		})
+
+		// The trigger key present but carrying a scalar rather than a mapping:
+		// the one error path the specs above do not reach.
+		It("reports a pull_request trigger that is not a mapping", func() {
+			src := []byte("on:\n  pull_request: main\njobs: {}\n")
+			Expect(verifyPullRequestUnfilteredIn("ci.yml", src)).To(
+				MatchError(ContainSubstring("on.pull_request")))
 		})
 	})
 })

@@ -355,18 +355,38 @@ type workflowGuardDoc struct {
 // first half is lost; drop the pin and the second is. Either way the loss is
 // silent, which is precisely the failure mode the change existed to fix.
 func verifyWorkflowBaseScoping() error {
+	sources := make(map[string][]byte, len(baseScopedWorkflows))
 	for _, name := range baseScopedWorkflows {
 		src, err := os.ReadFile(filepath.Join(".github", "workflows", name))
 		if err != nil {
 			return err
 		}
+		sources[name] = src
+	}
+	return verifyWorkflowBaseScopingIn(sources)
+}
+
+// verifyWorkflowBaseScopingIn is verifyWorkflowBaseScoping over
+// caller-supplied workflow contents, split out so which files get checked is
+// itself testable. Without it the only coverage of this layer is a Succeed()
+// against the real tree, which passes just as happily for a function that
+// checks nothing.
+//
+// Both guards run over every workflow in baseScopedWorkflows. The pin guard
+// used to be special-cased to ci.yml, the only file carrying a merging job
+// today -- but that made the list a half-truth, since a merging job moved into
+// codeql.yml would have been read and not checked.
+func verifyWorkflowBaseScopingIn(sources map[string][]byte) error {
+	for _, name := range baseScopedWorkflows {
+		src, ok := sources[name]
+		if !ok {
+			return fmt.Errorf("no source supplied for %s", name)
+		}
 		if err := verifyPullRequestUnfilteredIn(name, src); err != nil {
 			return err
 		}
-		if name == "ci.yml" {
-			if err := verifyAutomergeBasePinIn(src); err != nil {
-				return err
-			}
+		if err := verifyAutomergeBasePinIn(name, src); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -377,6 +397,14 @@ func verifyWorkflowBaseScoping() error {
 // there does not fail loudly: the workflow simply never runs for a PR whose
 // base is outside it, while container-images.yml keeps supplying a full row of
 // green checks, so the checks tab reads as a passing build.
+//
+// Both spellings are rejected. GitHub accepts branches and branches-ignore --
+// mutually exclusive, but both filtering on the same field, the PR's base --
+// so checking only the first would leave the guard passing on a re-narrowing
+// written the other way. Only base filters are covered: a paths filter also
+// skips runs, but it discriminates on what the PR changed rather than on where
+// it is aimed, so it is a deliberate choice about cost rather than the silent
+// base-scoping loss this guards.
 func verifyPullRequestUnfilteredIn(name string, src []byte) error {
 	var doc workflowGuardDoc
 	if err := yaml.Unmarshal(src, &doc); err != nil {
@@ -389,17 +417,26 @@ func verifyPullRequestUnfilteredIn(name string, src []byte) error {
 	}
 	// An empty trigger is the whole point, and decodes to the zero value.
 	var trigger struct {
-		Branches []string `yaml:"branches"`
+		Branches       []string `yaml:"branches"`
+		BranchesIgnore []string `yaml:"branches-ignore"`
 	}
 	if node.Kind != 0 && node.Tag != "!!null" {
 		if err := node.Decode(&trigger); err != nil {
 			return fmt.Errorf("%s: on.pull_request: %w", name, err)
 		}
 	}
-	if len(trigger.Branches) > 0 {
-		return fmt.Errorf("%s filters its pull_request trigger to %v; leave it unfiltered by base. "+
-			"A filter matches the PR's base branch, so a stacked PR targeting anything outside the list "+
-			"is skipped with no failure to notice", name, trigger.Branches)
+	for _, filter := range []struct {
+		key    string
+		values []string
+	}{
+		{"branches", trigger.Branches},
+		{"branches-ignore", trigger.BranchesIgnore},
+	} {
+		if len(filter.values) > 0 {
+			return fmt.Errorf("%s filters its pull_request trigger with %s: %v; leave it unfiltered by base. "+
+				"That filter matches the PR's base branch, so a stacked PR aimed outside it "+
+				"is skipped with no failure to notice", name, filter.key, filter.values)
+		}
 	}
 	return nil
 }
@@ -424,17 +461,18 @@ func verifyPullRequestUnfilteredIn(name string, src []byte) error {
 // to matter. The pin costs nothing when it is redundant.
 //
 // Scope, stated because the matcher is a heuristic and its limits should not
-// be discovered later: a job counts as merging if an inline step runs
-// `gh pr merge`, or if a step's `uses` names an auto-merge action. Matching on
+// be discovered later. A job counts as merging if an inline step runs
+// `gh pr merge`, or if a step's `uses` names an auto-merge action; matching on
 // what the job does rather than on the name "automerge" means a rename cannot
-// retire the guard. Moving the job into a different workflow file would,
-// since only baseScopedWorkflows are read; so would enabling auto-merge
-// through a local composite action whose name does not say so. Neither is
-// covered, and both would need this list or this matcher extended.
-func verifyAutomergeBasePinIn(src []byte) error {
+// retire the guard. Two things are not covered: a merging job in a workflow
+// outside baseScopedWorkflows, since nothing else is read; and auto-merge
+// reached through a local composite action whose own name does not say so,
+// since only the `uses` reference is inspected and not the action it names.
+// Either would need this list or this matcher extended.
+func verifyAutomergeBasePinIn(name string, src []byte) error {
 	var doc workflowGuardDoc
 	if err := yaml.Unmarshal(src, &doc); err != nil {
-		return fmt.Errorf("ci.yml: %w", err)
+		return fmt.Errorf("%s: %w", name, err)
 	}
 	for _, job := range slices.Sorted(maps.Keys(doc.Jobs)) {
 		j := doc.Jobs[job]
@@ -449,9 +487,9 @@ func verifyAutomergeBasePinIn(src []byte) error {
 			continue
 		}
 		if !strings.Contains(j.If, automergeBasePin) {
-			return fmt.Errorf("ci.yml job %q merges pull requests but its 'if:' never consults %s; "+
+			return fmt.Errorf("%s job %q merges pull requests but its 'if:' never consults %s; "+
 				"nothing else confines it to the default branch, and the \"Main\" ruleset covers no other",
-				job, automergeBasePin)
+				name, job, automergeBasePin)
 		}
 	}
 	return nil
