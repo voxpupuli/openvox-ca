@@ -484,9 +484,22 @@ jobs:
         with:
           jobs: ${{ toJSON(needs) }}
 
+  # -- Auto-merge bot PRs -------------------------------------------------------
+  # Holds contents: write / pull-requests: write and runs `gh pr merge`, so it
+  # is pinned to a default-branch base. The repository's "Main" ruleset -- the
+  # required reviews, status checks and code scanning that make an unattended
+  # merge safe -- applies to ~DEFAULT_BRANCH only, so enabling auto-merge on a
+  # PR targeting any other branch would merge it under no ruleset at all. The
+  # workflow's pull_request trigger is deliberately unfiltered by base (see the
+  # top of this file), which is what makes the condition load-bearing rather
+  # than a restatement of the trigger.
   automerge:
     name: Enable auto-merge
-    if: github.event_name == 'pull_request' && (github.event.pull_request.user.login == 'dependabot[bot]' || github.event.pull_request.user.login == 'renovate[bot]')
+    if: >-
+      github.event_name == 'pull_request'
+      && github.event.pull_request.base.ref == github.event.repository.default_branch
+      && (github.event.pull_request.user.login == 'dependabot[bot]'
+      || github.event.pull_request.user.login == 'renovate[bot]')
     needs:
       - ci
     runs-on: ubuntu-24.04
