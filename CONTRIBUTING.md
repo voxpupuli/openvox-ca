@@ -94,8 +94,10 @@ See [`AGENTS.md`](AGENTS.md) for the details. The essentials:
   on another unmerged branch may instead be stacked — branch off that branch
   and target it — in which case say so in the PR description and note that it
   cannot merge until its base does. CI and CodeQL run on pull requests
-  whatever their base, so a stacked PR is verified before it merges into its
-  base.
+  whatever their base, so a stacked PR is exercised before it merges into its
+  base — but only pull requests targeting `main` are gated by the repository
+  ruleset, so on a stacked one read the results rather than relying on a
+  merge block.
 - Keep commits focused: imperative subject ≤ 72 characters, with a body that
   explains *why*. Stage files by name and review `git diff --staged` before
   committing.
