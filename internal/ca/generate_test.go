@@ -181,10 +181,29 @@ func (b *twoReplicaBackend) Exists(ctx context.Context, key string) (bool, error
 	return b.recordingLockBackend.Exists(ctx, key)
 }
 
+// degraded reports that a caller reached the barrier and waited out limit, i.e.
+// the rendezvous was engaged but never completed.
 func (b *twoReplicaBackend) degraded() bool {
 	b.barrierMu.Lock()
 	defer b.barrierMu.Unlock()
 	return b.timedOut
+}
+
+// rendezvoused reports that the barrier actually did its job: both replicas
+// recorded themselves at the existence check and the release fired.
+//
+// degraded() alone cannot say this. It is vacuously false in the one way left
+// for this fixture to go inert -- the barrier key never being touched at all.
+// It is reached only because HasCert resolves existence through
+// backend.Exists(CertKey(subject)); an inventory fast path, a cached HasCert or
+// an existence check routed through GetCert would bypass it, leaving seen empty,
+// release unclosed and timedOut unset. The spec would then be the unsynchronised
+// race this fixture exists to replace -- 4-in-20 detection, green either way.
+// Round two closed the "engaged too early" failure; this closes "never engaged".
+func (b *twoReplicaBackend) rendezvoused() bool {
+	b.barrierMu.Lock()
+	defer b.barrierMu.Unlock()
+	return b.released && len(b.seen) == 2
 }
 
 // crlWriteFailBackend fails only the CRL write, so a spec can drive the revoke
@@ -434,6 +453,8 @@ var _ = Describe("CA Generate", func() {
 
 			Expect(two.degraded()).To(BeFalse(),
 				"the barrier timed out, so neither replica met the other and this run proved nothing")
+			Expect(two.rendezvoused()).To(BeTrue(),
+				"the barrier was never engaged, so this run was an unsynchronised race")
 
 			var issued int
 			for _, err := range errs {
