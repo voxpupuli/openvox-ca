@@ -979,6 +979,34 @@ var _ = Describe("RedisLegacyInventoryDecompose", func() {
 			"verification must reject the state the conversion declined to resolve")
 	})
 
+	// redisDropHeadLua is the last compare-and-set in this file without a
+	// conflict spec. Its guard matters in one narrow window: another replica
+	// signing the first certificate — and so writing a chained head — between
+	// this replica's read of the legacy head and its delete. Were the guard an
+	// unconditional DEL, that live chained head would be dropped, and the next
+	// verification would find nothing, log "No inventory HMAC found" and
+	// silently adopt whatever it saw. That is the same laundering the two
+	// specs above exist to prevent, in the concurrent case.
+	It("refuses to drop a head that changed since it was read", func() {
+		ctx := context.Background()
+		cli, stop, _, _ := legacySetup(nil)
+		defer stop()
+		b := newRawRedisBackend(cli, redisTestPrefix)
+
+		before, err := cli.Get(ctx, invKey(redisInvHMACSub)).Bytes()
+		Expect(err).NotTo(HaveOccurred())
+
+		// Present the script a payload that is not the stored one, which is
+		// exactly what a caller holding a stale read would present.
+		status, _, err := b.runInvScript(ctx, b.invDropHeadScript, "not-the-stored-payload")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(status).To(Equal(redisResultConflict))
+
+		after, err := cli.Get(ctx, invKey(redisInvHMACSub)).Bytes()
+		Expect(err).NotTo(HaveOccurred(), "the head must survive a refused drop")
+		Expect(after).To(Equal(before))
+	})
+
 	It("lets two replicas decompose concurrently without double-importing", func() {
 		ctx := context.Background()
 		cli, stop, key, blob := legacySetup(sampleInventoryLines)
