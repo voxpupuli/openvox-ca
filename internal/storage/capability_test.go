@@ -170,15 +170,28 @@ var _ = Describe("Backend capability reporting", func() {
 
 	Describe("SupportsAtomicInventory", func() {
 		// The locking column needs a live service for the networked backends,
-		// but this one does not: it is a pure type probe, so etcd and Redis are
-		// classified in-process like everything else.
+		// but this one does not: it is a pure type probe, so every backend is
+		// classified in-process.
 		DescribeTable("is false for every backend that appends to the inventory blob",
 			func(build func() Backend) {
 				Expect(svc(build()).SupportsAtomicInventory()).To(BeFalse())
 			},
 			Entry("filesystem", func() Backend { return NewFilesystemBackend(GinkgoT().TempDir()) }),
-			Entry("etcd", func() Backend { return &EtcdBackend{} }),
+			// Redis stays here until #212 decomposes its inventory the way #154
+			// did etcd's; that branch moves this entry to the table below rather
+			// than pre-empting it here.
 			Entry("redis", func() Backend { return &RedisBackend{} }),
+		)
+
+		DescribeTable("is true for every backend with a structured inventory",
+			func(build func() Backend) {
+				Expect(svc(build()).SupportsAtomicInventory()).To(BeTrue())
+			},
+			// etcd joined these when #154 gave EtcdBackend AppendEntry and
+			// PruneEntries. The capability is a type assertion for
+			// InventoryStore, so it follows the implementation rather than the
+			// backend's name.
+			Entry("etcd", func() Backend { return &EtcdBackend{} }),
 		)
 
 		It("is true for a SQL backend", func() {

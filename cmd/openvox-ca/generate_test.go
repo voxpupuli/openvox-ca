@@ -860,10 +860,19 @@ func (atomicCapBackend) LatestSerialForSubject(context.Context, string) (string,
 	return "", nil
 }
 func (atomicCapBackend) PruneEntries(context.Context, func(storage.InventoryEntry) bool,
-	func([]storage.InventoryEntry) []byte,
+	func([]byte, storage.InventoryEntry) []byte,
 ) ([]storage.InventoryEntry, error) {
 	return nil, nil
 }
+
+// Satisfying InventoryStore is the whole point of this double: SupportsAtomicInventory
+// type-asserts for it, so a signature that drifts out of step stops satisfying it
+// silently and the two specs above run the warning branch they exist to tell apart
+// from the clear one. That is how it drifted the first time -- #154 changed
+// PruneEntries' second callback from the survivors to (prev, entry) and nothing
+// here complained until the specs failed for a reason that looked unrelated.
+// Compile-time assertion so the next change is a build error instead.
+var _ storage.InventoryStore = atomicCapBackend{}
 
 var _ = Describe("reportBackendCapabilities", func() {
 	// The command-level specs above run on the filesystem backend, which
