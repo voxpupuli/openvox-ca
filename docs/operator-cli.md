@@ -401,10 +401,10 @@ that outlives the container:
 
 ```bash
 mkdir -p ca-admin-out
+podman unshare chown 1000:1000 ca-admin-out
 podman run --rm \
   -v ca-data:/data \
   -v "$PWD/ca-admin-out":/out:Z \
-  --userns=keep-id:uid=1000,gid=1000 \
   ghcr.io/voxpupuli/openvox-ca:1.2.3 \
   generate --cadir /data --certname admin-cli --ttl 8760h \
   --pp-cli-auth --key-out /out/admin-cli_key.pem > admin-cli.crt
@@ -418,14 +418,20 @@ difference here is between two writers of the same data rather than between a
 client and a server. The image must be fully qualified — an unqualified name
 will not resolve without registry search configured. The images run as
 `USER puppet`, so under rootless podman a bind mount owned by your host user is
-not writable inside the container unless the two are mapped onto each other.
-Bare `--userns=keep-id` does not do that: it maps your host uid to *the same*
-uid inside, which helps only if that already happens to be puppet's. Map it
-explicitly instead, as the example does — `--userns=keep-id:uid=1000,gid=1000`,
-podman 4.3 or newer. The images create puppet with no explicit id, so it takes
-the distro's first regular uid; confirm yours with
-`podman run --rm ghcr.io/voxpupuli/openvox-ca:<tag> id`. Get this wrong and the
-mint fails at the key write, cleanly but confusingly. And the mount is a
+not writable inside the container — the mint then fails at the key write,
+cleanly but confusingly. Hence the `podman unshare chown`: it sets the
+directory's owner to whatever container uid 1000 maps to on the host, which is
+what `puppet` runs as.
+
+Resist fixing that with `--userns` instead. A remap applies to every path the
+container touches, `ca-data` included, so mapping yourself onto uid 1000 shifts
+the CA files the server left behind out from under it — and the failure moves
+from the key write to the CA directory, which is a worse place to discover it.
+The images create `puppet` with no explicit id, so it takes the distro's first
+regular uid; confirm yours with
+`podman run --rm --entrypoint id ghcr.io/voxpupuli/openvox-ca:<tag>`. The
+`--entrypoint` is needed because the images set one — which is also why the
+recipe above appends `generate ...` rather than a shell command. And the mount is a
 dedicated directory with `:Z` rather than `$PWD` with `:z`, because `:Z`
 relabels its target private to the container — pointing that at a whole project
 or home directory would relabel unrelated files with it.
@@ -492,15 +498,18 @@ skopeo inspect --format '{{.Digest}}' \
   docker://ghcr.io/voxpupuli/openvox-ca:<tag>
 ```
 
-Two caveats, because this asks the registry what the tag means *now* — the very
-thing the top of this subsection says not to trust. It is the running image only
-if the tag has not moved since the pod started, and the bare `sha256:` config id
-you already hold is what confirms that: compare it against the manifest's
-`config.digest` from `skopeo inspect --raw`. And without `--raw`, skopeo
-resolves a manifest list for your workstation's own platform, so an arm64 laptop
-returns an arm64 digest for an amd64 cluster; pass `--override-os`/
-`--override-arch` to match the nodes. Once the pod is gone, the tag is all there
-is — which is the whole reason to take the digest before scaling down.
+Two caveats. This asks the registry what the tag means *now*, which is the very
+thing the top of this subsection says not to trust: it is the running image only
+if nothing has re-pointed the tag since the pod started, and from a bare config
+id that is awkward to confirm — these are multi-arch tags, so `--raw` returns an
+image index with no `config` object to compare against, and getting one means
+selecting the platform entry and inspecting that digest in turn. If you are in
+this branch, treat the result as a best effort and take the digest properly next
+time. Second, without `--raw` skopeo resolves the index for your workstation's
+platform, so an arm64 laptop returns an arm64 digest for an amd64 cluster; pass
+`--override-os`/`--override-arch` to match the nodes. Once the pod is gone the
+tag is all there is — which is the whole reason to take the digest before
+scaling down.
 
 #### Replacing a certificate
 
