@@ -42,13 +42,17 @@ import (
 // numberedCRLFrom issues a CRL expiring at notAfter, carrying an explicit
 // cRLNumber.
 //
-// ThisUpdate is placed well before now, offset by a constant from notAfter, so
-// callers passing notAfter values relative to `future` keep the exact relative
-// ordering they intend while every CRL is dated in the past like a real one.
-// The constant exceeds `future`'s distance from now: dating ThisUpdate 24 hours
-// before a notAfter thirty days out put every fixture's issue date in the
-// future, which is not a shape any issuer produces and which hid a bug where a
-// future-dated CRL pinned an anchor's freshness mark for ever.
+// ThisUpdate is a constant offset before notAfter, so callers passing notAfter
+// values relative to `future` keep the exact relative ordering they intend
+// while every CRL is dated in the past like a real one. The offset is four days
+// more than `future`'s thirty, which leaves only about a day in hand for the
+// largest offset any caller uses (`future.Add(72 * time.Hour)`) -- so the
+// assertion below states the invariant rather than trusting the arithmetic.
+//
+// Dating ThisUpdate 24 hours before a notAfter thirty days out put every
+// fixture's issue date in the *future*, which is not a shape any issuer
+// produces and which hid a bug where a future-dated CRL pinned an anchor's
+// freshness mark for ever.
 func numberedCRLFrom(cert *x509.Certificate, key *ecdsa.PrivateKey, notAfter time.Time, number int64) *x509.RevocationList {
 	GinkgoHelper()
 	der, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
@@ -59,6 +63,9 @@ func numberedCRLFrom(cert *x509.Certificate, key *ecdsa.PrivateKey, notAfter tim
 	Expect(err).NotTo(HaveOccurred())
 	crl, err := x509.ParseRevocationList(der)
 	Expect(err).NotTo(HaveOccurred())
+	Expect(crl.ThisUpdate).To(BeTemporally("<", time.Now()),
+		"a fixture dated in the future exercises the not-yet-valid path instead of the "+
+			"ordering it means to test, which has hidden a bug once")
 	return crl
 }
 
@@ -545,6 +552,55 @@ var _ = Describe("partial-scope client CRLs", func() {
 		Expect(err).To(MatchError(api.ErrNoUsableCRL))
 	})
 
+	It("still denies the serials a not-yet-issued CRL names", func() {
+		// The amendment that keeps this rule's blast radius small. A CRL the
+		// host thinks is not yet issued cannot speak to coverage or currency --
+		// those are claims about the issuer's timeline -- but the serials it
+		// names are revoked whatever this host's clock says, and that claim the
+		// signature already backs. Discarding it would let a clock difference
+		// re-admit revoked clients, which is the failure the whole feature is
+		// against.
+		revoked := big.NewInt(4242)
+		base := crlFrom(serverCA, caKey, time.Now().Add(time.Hour))
+		ahead := crlFrom(serverCA, caKey, time.Now().Add(48*time.Hour), revoked)
+		ahead.ThisUpdate = time.Now().Add(24 * time.Hour)
+
+		set := api.NewClientCRLSet([]*x509.RevocationList{base, ahead}, anchorSet())
+
+		leaf := &x509.Certificate{SerialNumber: revoked, Subject: pkix.Name{CommonName: "node1.test"}}
+		err := api.CheckChainRevocationForTest(
+			[]*x509.Certificate{leaf, serverCA}, set, api.RevocationRequire, time.Now())
+		Expect(err).To(MatchError(ContainSubstring("node1.test")),
+			"a serial named only by a not-yet-issued CRL must still be refused")
+	})
+
+	It("does not let a not-yet-issued CRL satisfy require on its own", func() {
+		// The other half: it can deny, and it can never be the reason an issuer
+		// counts as covered.
+		ahead := crlFrom(serverCA, caKey, time.Now().Add(48*time.Hour))
+		ahead.ThisUpdate = time.Now().Add(24 * time.Hour)
+		set := api.NewClientCRLSet([]*x509.RevocationList{ahead}, anchorSet())
+
+		Expect(set.Usable(time.Now())).To(BeFalse())
+
+		leaf := &x509.Certificate{SerialNumber: big.NewInt(7), Subject: pkix.Name{CommonName: "node2.test"}}
+		err := api.CheckChainRevocationForTest(
+			[]*x509.Certificate{leaf, serverCA}, set, api.RevocationRequire, time.Now())
+		Expect(err).To(MatchError(api.ErrNoUsableCRL))
+	})
+
+	It("treats a CRL within the skew tolerance as issued", func() {
+		// Signers and this CA keep separate clocks and neither is
+		// authoritative, so a small forward difference is ordinary. Refusing on
+		// it would make an unremarkable deployment lose coverage.
+		soon := crlFrom(serverCA, caKey, time.Now().Add(time.Hour))
+		soon.ThisUpdate = time.Now().Add(time.Minute)
+		set := api.NewClientCRLSet([]*x509.RevocationList{soon}, anchorSet())
+
+		Expect(set.Usable(time.Now())).To(BeTrue(),
+			"a CRL a minute ahead is a clock difference, not a forgery")
+	})
+
 	It("still accepts a CRL carrying an unrelated extension", func() {
 		// The refusal is on two specific OIDs, not on extensions in general.
 		// A CRL with, say, an authority key identifier is entirely ordinary and
@@ -563,6 +619,89 @@ var _ = Describe("partial-scope client CRLs", func() {
 // covers can still be *older* than what is installed. Nothing else on the
 // reload path notices: the signature is good and coverage is unchanged. What it
 // costs is every serial revoked between the two, silently re-admitted.
+var _ = Describe("ClientCRLSet.PartialsDropped", func() {
+	var (
+		serverCA *x509.Certificate
+		caKey    *ecdsa.PrivateKey
+		future   time.Time
+	)
+
+	anchorSet := func() []*x509.Certificate { return []*x509.Certificate{serverCA} }
+
+	BeforeEach(func() {
+		root, rootKey := mintCert("Shared Root", nil, nil, true)
+		serverCA, caKey = mintCert("Server CA", root, rootKey, true)
+		withSKI(serverCA)
+		future = time.Now().Add(30 * 24 * time.Hour)
+	})
+
+	delta := func(revoked ...*big.Int) *x509.RevocationList {
+		return scopedCRLFrom(serverCA, caKey, asn1.ObjectIdentifier{2, 5, 29, 27}, revoked...)
+	}
+
+	// advancedOver is a conjunction, and each half needs killing on its own or
+	// one can be deleted with every spec still green.
+	It("does not accept a lower-numbered base as an advance", func() {
+		// Date forward, number backward. Only the number-non-regression half of
+		// advancedOver refuses this; the date half is satisfied.
+		current := api.NewClientCRLSet([]*x509.RevocationList{
+			numberedCRLFrom(serverCA, caKey, future, 9), delta(big.NewInt(7)),
+		}, anchorSet())
+		candidate := api.NewClientCRLSet([]*x509.RevocationList{
+			numberedCRLFrom(serverCA, caKey, future.Add(time.Hour), 3),
+		}, anchorSet())
+
+		_, dropped := current.PartialsDropped(candidate, time.Now())
+		Expect(dropped).To(BeTrue(),
+			"a base whose number went backwards has not rotated forward")
+	})
+
+	It("does not accept an unchanged base as an advance", func() {
+		// The same base, and the delta simply gone -- which is the drop this
+		// guard exists to catch. Only the date-advance half refuses it: the
+		// candidate is level on both axes, so it has not regressed, and a rule
+		// asking merely "did it avoid going backwards" would excuse it.
+		base := numberedCRLFrom(serverCA, caKey, future, 9)
+		current := api.NewClientCRLSet([]*x509.RevocationList{
+			base, delta(big.NewInt(7)),
+		}, anchorSet())
+		candidate := api.NewClientCRLSet([]*x509.RevocationList{base}, anchorSet())
+
+		_, dropped := current.PartialsDropped(candidate, time.Now())
+		Expect(dropped).To(BeTrue(),
+			"a delta vanishing while its base stands still is exactly the drop to refuse")
+	})
+
+	It("reports a delta dropped where the anchor never had a full CRL", func() {
+		// With no full CRL there is no base, so currentF holds no entry and the
+		// zero mark would let any full CRL -- however old -- read as an advance.
+		// That is enough to excuse dropping an enforced delta, which is the
+		// whole guard.
+		current := api.NewClientCRLSet([]*x509.RevocationList{delta(big.NewInt(7))}, anchorSet())
+		candidate := api.NewClientCRLSet([]*x509.RevocationList{
+			numberedCRLFrom(serverCA, caKey, future.Add(-20*24*time.Hour), 1),
+		}, anchorSet())
+
+		who, dropped := current.PartialsDropped(candidate, time.Now())
+		Expect(dropped).To(BeTrue(),
+			"an ancient full CRL must not excuse dropping the only revocations there were")
+		Expect(who).To(Equal(serverCA.Subject.String()))
+	})
+
+	It("accepts a genuine base rotation beside a reset delta", func() {
+		// The legitimate case both halves must still allow.
+		current := api.NewClientCRLSet([]*x509.RevocationList{
+			numberedCRLFrom(serverCA, caKey, future, 9), delta(big.NewInt(7)),
+		}, anchorSet())
+		candidate := api.NewClientCRLSet([]*x509.RevocationList{
+			numberedCRLFrom(serverCA, caKey, future.Add(time.Hour), 10),
+		}, anchorSet())
+
+		_, dropped := current.PartialsDropped(candidate, time.Now())
+		Expect(dropped).To(BeFalse())
+	})
+})
+
 var _ = Describe("ClientCRLSet.Regresses", func() {
 	var (
 		root     *x509.Certificate
@@ -729,9 +868,12 @@ var _ = Describe("ClientCRLSet.Regresses", func() {
 
 	It("tracks the two marks independently, not one elected CRL", func() {
 		// Where an anchor holds several CRLs, each axis takes its own maximum.
-		// Electing one CRL as newest needs a comparator, and a comparator over
-		// two disagreeing orderings is intransitive -- so which CRL won could
-		// depend on the order they appeared in the file.
+		// Electing one instead needs a comparator, and the comparator this
+		// replaced switched axis on whether both sides published a cRLNumber,
+		// which is intransitive once some CRLs carry the extension and others
+		// do not -- so which CRL won depended on the order they appeared in the
+		// file. See crlFreshness for the worked cycle.
+		//
 		// The fixture has to separate three implementations that a careless one
 		// makes agree: componentwise maxima, electing one CRL as newest, and
 		// keeping whichever CRL came last. So no single CRL carries both marks
@@ -774,6 +916,51 @@ var _ = Describe("ClientCRLSet.Regresses", func() {
 
 		_, back := current.Regresses(ahead, time.Now())
 		Expect(back).To(BeFalse())
+	})
+
+	It("admits a candidate whose own CRL is dated ahead of this host's clock", func() {
+		// The fifth regression, and the one this rule exists to make
+		// impossible. Gating the mark inside freshness filtered both sides, so
+		// a forward-skewed issuer's genuine new CRL came back with a zero mark
+		// and was refused as a regression -- breaking reloads for a deployment
+		// whose only fault was a clock a few minutes fast.
+		current := api.NewClientCRLSet(
+			[]*x509.RevocationList{numberedCRLFrom(serverCA, caKey, future, 5)}, anchorSet())
+
+		skewed := numberedCRLFrom(serverCA, caKey, future, 6)
+		skewed.ThisUpdate = time.Now().Add(90 * 24 * time.Hour)
+		candidate := api.NewClientCRLSet([]*x509.RevocationList{skewed}, anchorSet())
+
+		_, back := current.Regresses(candidate, time.Now())
+		Expect(back).To(BeFalse(),
+			"a candidate the host thinks is not yet issued must not read as going backwards")
+	})
+
+	It("keeps the date ratchet when this host's clock is behind", func() {
+		// The other half of the same regression, in the fail-open direction:
+		// `now` is the local clock, so a lagging one made every genuine CRL
+		// look future-dated. Gating inside freshness then zeroed the mark on
+		// both sides and switched the ratchet off entirely -- and for an issuer
+		// publishing no cRLNumber there was no guard left at all.
+		//
+		// Modelled by an issuer whose CRLs are all far newer than this host
+		// believes, which is what a lagging clock looks like from in here.
+		newer := numberedCRLFrom(serverCA, caKey, future, 1)
+		newer.ThisUpdate = time.Now().Add(60 * 24 * time.Hour)
+		newer.Number = nil
+		older := numberedCRLFrom(serverCA, caKey, future, 1)
+		older.ThisUpdate = time.Now().Add(30 * 24 * time.Hour)
+		older.Number = nil
+
+		current := api.NewClientCRLSet([]*x509.RevocationList{newer}, anchorSet())
+		candidate := api.NewClientCRLSet([]*x509.RevocationList{older}, anchorSet())
+
+		// Evaluated at a time by which both have been issued: the ratchet must
+		// still order them, rather than having been disarmed.
+		at := time.Now().Add(70 * 24 * time.Hour)
+		_, back := current.Regresses(candidate, at)
+		Expect(back).To(BeTrue(),
+			"an unnumbered issuer's replay must still be refused on the dates alone")
 	})
 
 	It("is not pinned for ever by a CRL dated in the future", func() {

@@ -639,10 +639,25 @@ mark — which here means a `thisUpdate` at or after the highest already seen,
 the number axis being ahead already. That normally resolves within a
 publication interval.
 
-A CRL dated *ahead* of the current time does not raise the date mark at all, so
-a forward-skewed or replayed one cannot pin an anchor against every later CRL.
-Once the clock passes that `thisUpdate` it counts like any other, so an honestly
-skewed signer sees no difference.
+A CRL whose `thisUpdate` is more than five minutes ahead of this server's clock
+is treated as **not yet issued**, the same way a certificate's `notBefore` is.
+It cannot count towards coverage, cannot make an issuer current, and cannot move
+either high-water mark — so neither a forward-skewed signer nor a replayed CRL
+can pin an anchor against every later one. Five minutes because the signer and
+this server keep separate clocks and neither is authoritative; a small forward
+difference is ordinary rather than suspicious.
+
+The serials such a CRL names **are** still enforced. Whether a CRL is current is
+a claim about the issuer's timeline, which this server cannot verify; whether it
+revokes a serial is a claim its signature already backs. Discarding the second
+would let a clock difference re-admit revoked clients, which is the outcome the
+whole setting exists to prevent.
+
+If the difference is larger than the tolerance the effect is loud rather than
+silent: that issuer loses coverage, `puppetca_client_crl_usable` goes to 0 for
+the entry, and under `require` its clients are rejected while their revocations
+go on being honoured. Fix the clock on whichever side is wrong — that is a
+genuine fault, not something to tune the tolerance around.
 
 The marks are held in memory and not persisted, so this is a ratchet for the
 life of the process rather than tamper-evidence across restarts. Restarting is

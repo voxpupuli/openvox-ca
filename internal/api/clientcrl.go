@@ -180,6 +180,15 @@ func (s *ClientCRLSet) forRevocationLookup(cert *x509.Certificate, now time.Time
 	if s == nil {
 		return crls, anyValid
 	}
+	// Not-yet-issued CRLs are added back: forIssuer drops them so they cannot
+	// speak to coverage or currency, but the serials they name are revoked
+	// whatever this host's clock says, and anyValid is unchanged so they still
+	// cannot satisfy require on their own.
+	for _, crl := range s.bySignerKey[string(cert.RawSubjectPublicKeyInfo)] {
+		if notYetIssued(crl, now) {
+			crls = append(crls, crl)
+		}
+	}
 	return append(crls, s.partialBySignerKey[string(cert.RawSubjectPublicKeyInfo)]...), anyValid
 }
 
@@ -201,6 +210,14 @@ func (s *ClientCRLSet) forIssuer(cert *x509.Certificate, now time.Time) (crls []
 		return nil, false
 	}
 	for _, crl := range s.bySignerKey[string(cert.RawSubjectPublicKeyInfo)] {
+		// Filtered here rather than in currentAt, which is the tempting home
+		// and the wrong one: freshness builds its marks from the *slice* this
+		// returns and never calls currentAt, so a bound placed there would
+		// leave a future-dated CRL ratcheting the mark with every coverage
+		// spec still green.
+		if notYetIssued(crl, now) {
+			continue
+		}
 		crls = append(crls, crl)
 		if currentAt(crl, now) {
 			anyValid = true
@@ -221,6 +238,33 @@ func (s *ClientCRLSet) forIssuer(cert *x509.Certificate, now time.Time) (crls []
 // no moment at which it decayed, and puppetca_client_crl_usable reports 1
 // indefinitely so the alert cannot fire. That is exactly the decay the expiry
 // rule exists to prevent, arriving through the one CRL shape it did not cover.
+// clockSkewTolerance is how far ahead of this host's clock a CRL's ThisUpdate
+// may sit and still be treated as issued.
+//
+// Signers and this CA keep separate clocks and neither is authoritative, so a
+// small forward difference is ordinary rather than suspicious. Beyond it, the
+// CRL is treated as not yet issued -- which is what X.509 already does with a
+// certificate's notBefore, and the reason this borrows that rule rather than
+// inventing one.
+const clockSkewTolerance = 5 * time.Minute
+
+// notYetIssued reports whether a CRL claims an issue date meaningfully ahead of
+// now, and so cannot yet be treated as the issuer's current word.
+//
+// A predicate over one CRL and one time, deliberately: the mistake this
+// replaces was a filter applied to one side of a comparison and not the other,
+// twice, in opposite directions. Something that takes a single CRL has no sides
+// to get wrong.
+//
+// Such a CRL still denies the serials it names -- see forRevocationLookup. It
+// is refused as *evidence of currency*, which is a claim about the issuer's
+// timeline, and believed as *evidence of revocation*, which is a claim the
+// signature already backs. Discarding the second would let a clock difference
+// re-admit revoked clients.
+func notYetIssued(crl *x509.RevocationList, now time.Time) bool {
+	return crl.ThisUpdate.After(now.Add(clockSkewTolerance))
+}
+
 func currentAt(crl *x509.RevocationList, now time.Time) bool {
 	return !crl.NextUpdate.IsZero() && crl.NextUpdate.After(now)
 }
@@ -265,9 +309,14 @@ func (s *ClientCRLSet) Usable(now time.Time) bool {
 	if s == nil {
 		return false
 	}
+	// Reads the map rather than forIssuer because it asks about the whole set
+	// and not one anchor, so the not-yet-issued filter has to be repeated here.
+	// A CRL this host thinks is not yet issued cannot be the reason a domain
+	// counts as covered -- and this is the gauge an operator alerts on, so it
+	// answering "usable" while enforcement disagrees is the worst shape of all.
 	for _, crls := range s.bySignerKey {
 		for _, crl := range crls {
-			if currentAt(crl, now) {
+			if !notYetIssued(crl, now) && currentAt(crl, now) {
 				return true
 			}
 		}
@@ -359,23 +408,13 @@ func (s *ClientCRLSet) freshness(now time.Time) map[string]crlFreshness {
 		for _, crl := range crls {
 			f := out[key]
 			f.subject = anchor.Subject.String()
-			// A CRL dated ahead of now does not raise the mark.
-			//
-			// ThisUpdate is the issuer's own timestamp and nothing here can
-			// check it. Letting it ratchet the mark turns one forward-skewed or
-			// replayed CRL into a permanent refusal of every later genuine one
-			// -- and it fails *open*: the pinning CRL stays current, so require
-			// keeps admitting clients while revocations published afterwards
-			// are never installed. Restarting does not recover it either, since
-			// startup rebuilds the marks from the same file.
-			//
-			// Skipping it rather than clamping to now, because clamping would
-			// push the mark to the present and refuse the issuer's next
-			// genuinely-past CRL. Skipping only ever leaves the mark lower,
-			// which accepts more reloads and never fewer, and it self-corrects:
-			// once now passes that ThisUpdate the CRL raises the mark like any
-			// other. An honestly skewed signer therefore notices nothing.
-			if crl.ThisUpdate.After(f.latest) && !crl.ThisUpdate.After(now) {
+			// No date gate here: forIssuer has already dropped anything not
+			// yet issued, for every reader at once. Gating in this loop instead
+			// filtered one side of a comparison and not the other -- a
+			// future-dated candidate came back with a zero mark and read as a
+			// regression -- which is the shape this arrangement exists to make
+			// impossible.
+			if crl.ThisUpdate.After(f.latest) {
 				f.latest = crl.ThisUpdate
 			}
 			if crl.Number != nil && (f.maxNumber == nil || crl.Number.Cmp(f.maxNumber) > 0) {
@@ -467,8 +506,14 @@ func (s *ClientCRLSet) PartialsDropped(candidate *ClientCRLSet, now time.Time) (
 		if candidate != nil && len(candidate.partialBySignerKey[key]) >= len(partials) {
 			continue
 		}
-		if cand, ok := candidateF[key]; ok && cand.advancedOver(currentF[key]) {
-			continue // the base moved on, so the delta resetting is expected
+		// "The base moved on" is only meaningful if there was a base. Where the
+		// anchor holds partials and no full CRL, currentF has no entry and the
+		// zero mark would make any full CRL at all -- however old -- read as an
+		// advance, which is enough to excuse dropping an enforced delta.
+		if cur, hadBase := currentF[key]; hadBase {
+			if cand, ok := candidateF[key]; ok && cand.advancedOver(cur) {
+				continue // the base moved on, so the delta resetting is expected
+			}
 		}
 		return partials[0].Issuer.String(), true
 	}
