@@ -424,6 +424,16 @@ dedicated directory with `:Z` rather than `$PWD` with `:z`, because `:Z`
 relabels its target private to the container — pointing that at a whole project
 or home directory would relabel unrelated files with it.
 
+On Kubernetes the equivalent is scaling the Deployment to zero and running a Job
+that mounts the same PVC, pinned for the reason above to the digest the
+Deployment was running — the subsection below has how to read that back — and
+with a retrieval step for the key: a `--key-out` path inside a Job pod that is
+then reaped is the same as having no key at all.
+
+One more asymmetry to expect: a running server answers OCSP `unknown` for a
+certificate minted this way until it restarts, because its serial index is built
+at startup. The CRL and the inventory are correct immediately.
+
 ##### Reading the version back off a floating tag
 
 Pin the *version*, not whatever tag the deployment names. `compose.yml` ships
@@ -442,13 +452,16 @@ podman inspect --format '{{index .RepoDigests 0}}' \
 `openvox-ca` is the container name — `compose.yml` sets none, so under compose
 it is named for the project and service; `podman ps` will tell you. The command
 prints `ghcr.io/voxpupuli/openvox-ca@sha256:…`, which goes into the `podman run`
-above in place of the tag. An image built locally rather than pulled has no
-repo digest, and the command errors rather than printing one; pin such a build
-by whatever tag you gave it. Prefer it to the
+above in place of the tag. Prefer that digest to the
 `org.opencontainers.image.version` label: the label is stamped from the git ref,
 so on a release it reads `v1.2.3` while the published tag is `1.2.3`, and
 pasting it back gives `manifest unknown` at the point you have already stopped
 the CA.
+
+An image built locally rather than pulled has no repo digest, and the command
+errors rather than printing one. Pin such a build by the image id the inner
+command prints, which `podman run` also accepts — not by the tag you gave it,
+which the next `podman build -t` moves.
 
 On Kubernetes take the resolved digest from the running pod, again before
 scaling the Deployment down:
@@ -465,17 +478,17 @@ scale down will tell you
 empty result means the selector matched nothing, not that there is no digest.
 Expect `ghcr.io/voxpupuli/openvox-ca@sha256:…`, usable as the Job's `image:`
 verbatim; some runtimes report a bare `sha256:…` config id instead, which is not
-pullable, and in that case read the digest from the registry side with
-`podman image inspect` as above.
+pullable. Resolve it registry-side in that case, with the tag the pod is still
+running (`kubectl get pod <name> -o jsonpath='{.spec.containers[0].image}'`):
 
-On Kubernetes the equivalent is scaling the Deployment to zero and running a Job
-that mounts the same PVC, pinned to the digest the Deployment was running for
-the reason above, and with a retrieval step for the key — a `--key-out` path
-inside a Job pod that is then reaped is the same as having no key at all.
+```bash
+skopeo inspect --format '{{.Digest}}' \
+  docker://ghcr.io/voxpupuli/openvox-ca:<tag>
+```
 
-One more asymmetry to expect: a running server answers OCSP `unknown` for a
-certificate minted this way until it restarts, because its serial index is built
-at startup. The CRL and the inventory are correct immediately.
+That only helps while the pod is up. Once it is gone the tag is all you have,
+and a floating one may already have moved — which is the whole reason to take
+the digest before scaling down.
 
 #### Replacing a certificate
 

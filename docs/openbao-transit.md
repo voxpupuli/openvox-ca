@@ -334,6 +334,11 @@ request has to outlive the pod, so write it somewhere that survives: a
 PersistentVolumeClaim, or stdout, which `kubectl logs` can retrieve after the
 Job completes.
 
+Pin the Job to the version the Deployment was actually running rather than to
+its tag; [reading the version back off a floating tag](operator-cli.md#reading-the-version-back-off-a-floating-tag)
+has how to recover it, and warns that it is much harder once the Deployment has
+already been scaled down.
+
 ```yaml
 apiVersion: batch/v1
 kind: Job
