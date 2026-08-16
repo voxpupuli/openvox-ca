@@ -437,9 +437,13 @@ jobs:
 			Expect(err).To(MatchError(ContainSubstring("codeql.yml job")))
 		})
 
+		// Asserted on the branch's own message, not just the file name: a nil
+		// source parses as an empty document and reaches the missing-trigger
+		// error, which also names codeql.yml, so matching the name alone
+		// would pass with the !ok guard deleted.
 		It("reports a workflow whose source was not supplied", func() {
 			Expect(verifyWorkflowBaseScopingIn(map[string][]byte{"ci.yml": clean})).To(
-				MatchError(ContainSubstring("codeql.yml")))
+				MatchError(ContainSubstring("no source supplied for codeql.yml")))
 		})
 	})
 

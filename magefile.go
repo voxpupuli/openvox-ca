@@ -333,7 +333,9 @@ const automergeBasePin = "github.event.pull_request.base.ref"
 var baseScopedWorkflows = []string{"ci.yml", "codeql.yml"}
 
 // workflowGuardDoc is the slice of a workflow document the two guards below
-// read: which triggers are declared, and each job's condition and steps.
+// read. The fields declared here are the whole of it -- deliberately not
+// restated in prose, because the previous enumeration went stale the moment a
+// field was added, and the struct cannot.
 type workflowGuardDoc struct {
 	On   map[string]yaml.Node `yaml:"on"`
 	Jobs map[string]struct {
@@ -505,8 +507,10 @@ func verifyAutomergeBasePinIn(name string, src []byte) error {
 	return nil
 }
 
-// automergeActionRE matches the `uses:` of a step that enables auto-merge via
-// an action rather than an inline `gh pr merge`.
+// automergeActionRE matches a `uses:` that enables auto-merge via an action
+// rather than an inline `gh pr merge` -- a step's, or a job's own
+// reusable-workflow call. Both call sites matter: a job written as a
+// reusable-workflow call has no steps for the step-level check to walk.
 var automergeActionRE = regexp.MustCompile(`(?i)auto-?merge`)
 
 // distVariantSpec describes one release artefact: its short name (the
