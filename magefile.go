@@ -337,7 +337,12 @@ var baseScopedWorkflows = []string{"ci.yml", "codeql.yml"}
 type workflowGuardDoc struct {
 	On   map[string]yaml.Node `yaml:"on"`
 	Jobs map[string]struct {
-		If    string `yaml:"if"`
+		If string `yaml:"if"`
+		// Uses is the job-level reusable-workflow call. A job written that
+		// way has no steps at all, so a matcher that only walked Steps would
+		// skip it -- while the caller job is still where the `if:`, the
+		// permissions and the base pin live.
+		Uses  string `yaml:"uses"`
 		Steps []struct {
 			Run  string `yaml:"run"`
 			Uses string `yaml:"uses"`
@@ -462,13 +467,18 @@ func verifyPullRequestUnfilteredIn(name string, src []byte) error {
 //
 // Scope, stated because the matcher is a heuristic and its limits should not
 // be discovered later. A job counts as merging if an inline step runs
-// `gh pr merge`, or if a step's `uses` names an auto-merge action; matching on
-// what the job does rather than on the name "automerge" means a rename cannot
-// retire the guard. Two things are not covered: a merging job in a workflow
-// outside baseScopedWorkflows, since nothing else is read; and auto-merge
-// reached through a local composite action whose own name does not say so,
-// since only the `uses` reference is inspected and not the action it names.
-// Either would need this list or this matcher extended.
+// `gh pr merge`, if a step's `uses` names an auto-merge action, or if the job
+// itself `uses` one as a reusable workflow. Matching on what the job does
+// rather than on the name "automerge" means a rename cannot retire the guard.
+//
+// Rather than enumerate the gaps, which twice missed one, here is the whole
+// observation surface: the literal text of a step's `run`, the text of a
+// step's `uses`, the text of the job's own `uses`, and nothing else. Anything
+// that reaches auto-merge without one of those three strings saying so is not
+// detected -- a script the `run` line invokes, an action or reusable workflow
+// whose name does not mention merging, or a merging job in a workflow outside
+// baseScopedWorkflows, since nothing else is read at all. Closing any of those
+// means extending this matcher or that list.
 func verifyAutomergeBasePinIn(name string, src []byte) error {
 	var doc workflowGuardDoc
 	if err := yaml.Unmarshal(src, &doc); err != nil {
@@ -476,7 +486,7 @@ func verifyAutomergeBasePinIn(name string, src []byte) error {
 	}
 	for _, job := range slices.Sorted(maps.Keys(doc.Jobs)) {
 		j := doc.Jobs[job]
-		merges := false
+		merges := automergeActionRE.MatchString(j.Uses)
 		for _, s := range j.Steps {
 			if strings.Contains(s.Run, "gh pr merge") || automergeActionRE.MatchString(s.Uses) {
 				merges = true
@@ -3141,8 +3151,10 @@ func checkModuleTidy(dir string, files []string, tidy func() error) error {
 	return nil
 }
 
-// Check verifies formatting, module tidiness, go vet, and the golangci-lint
-// gate. Unlike `mage dev:tidy`, it is a non-mutating verifier: it reports drift
+// Check verifies formatting, module tidiness, go vet, the golangci-lint gate,
+// and the workflow invariants that no other check would catch (the release
+// variant lists, and the base scoping of the pull_request triggers and the
+// auto-merge job). Unlike `mage dev:tidy`, it is a non-mutating verifier: it reports drift
 // as a failure instead of silently fixing it, so CI catches untidy code and
 // modules. gofmt -l prints unformatted files without rewriting them, and the
 // tidiness step runs `go mod tidy` then restores go.mod/go.sum, treating any

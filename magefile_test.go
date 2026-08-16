@@ -518,6 +518,21 @@ jobs:
 			Expect(verifyAutomergeBasePinIn("ci.yml", bad)).To(MatchError(ContainSubstring(`job "automerge"`)))
 		})
 
+		// A job that calls a reusable workflow has no steps at all, so a
+		// matcher walking only steps would skip it -- while the caller job is
+		// still where the if:, the permissions and the pin live.
+		It("still requires the pin when the job itself calls an auto-merge workflow", func() {
+			bad := []byte(`
+on:
+  pull_request:
+
+jobs:
+  automerge:
+    uses: ./.github/workflows/automerge.yml
+`)
+			Expect(verifyAutomergeBasePinIn("ci.yml", bad)).To(MatchError(ContainSubstring(`job "automerge"`)))
+		})
+
 		// The pin is required whatever the trigger looks like: a filter is
 		// only equivalent to it when it names the default branch alone, so
 		// disarming on any filter would retire the guard exactly when a
