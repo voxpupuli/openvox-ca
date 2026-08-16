@@ -285,6 +285,16 @@ func sanitiseForLog(s string) string {
 	}, s)
 }
 
+// SanitiseForLog is sanitiseForLog for callers outside this package.
+//
+// Exported because the same untrusted values reach log records from
+// cmd/openvox-ca -- a CRL's issuer DN, chosen freely by whoever wrote the file
+// -- and a second implementation there would be a second thing to keep correct.
+// The CodeQL argument in sanitiseForLog's comment applies to those call sites
+// identically, and it is the kind of reasoning that survives in one place and
+// not in two.
+func SanitiseForLog(s string) string { return sanitiseForLog(s) }
+
 // sanitiseAllForLog applies sanitiseForLog to every element, for the bulk
 // endpoints whose request bodies carry a list of names.
 //

@@ -156,7 +156,7 @@ func warnIfSelfSigned(entry *config.ClientCA, anchor *x509.Certificate) {
 	slog.Warn("client_ca anchor is a self-signed root: this entry now trusts every certificate "+
 		"issued anywhere beneath it, including by intermediates that do not exist yet, and its "+
 		"admin_cns apply to all of them. Anchor on the issuing CA instead if you meant to scope it.",
-		"client_ca", entry.Name, "anchor", anchor.Subject.CommonName)
+		"client_ca", entry.Name, "anchor", api.SanitiseForLog(anchor.Subject.CommonName))
 }
 
 // warnIfGrantsSpanAnchors reports an entry whose grants reach further than the
@@ -176,9 +176,14 @@ func warnIfGrantsSpanAnchors(entry *config.ClientCA, anchors []*x509.Certificate
 	if len(anchors) < 2 || (len(entry.AdminCNs) == 0 && !entry.AllowPpCliAuth) {
 		return
 	}
+	// Sanitised like the CRL issuer below, though the risk is smaller: an
+	// attacker who can write the anchor bundle owns this domain outright, so
+	// log injection is the least of it. The rule is still cheaper to apply
+	// everywhere than the distinction is to maintain, and a reader should not
+	// have to work out which of an entry's two files is the trusted one.
 	names := make([]string, 0, len(anchors))
 	for _, a := range anchors {
-		names = append(names, a.Subject.CommonName)
+		names = append(names, api.SanitiseForLog(a.Subject.CommonName))
 	}
 	slog.Warn("client_ca entry grants admin authority across more than one anchor: its admin_cns "+
 		"and allow_pp_cli_auth apply to certificates from every anchor in its file, so a name "+
@@ -327,8 +332,13 @@ func loadDomainCRLs(entry *config.ClientCA, anchors []*x509.Certificate) ([]*x50
 			return nil, fmt.Errorf("parsing CRL %d in %s: %w", len(out)+1, entry.CRLFile, err)
 		}
 		if !api.VerifyCRLAgainst(crl, anchors) {
+			// Sanitised because nothing vouches for this name: the CRL verified
+			// against no anchor at all, so its issuer DN is whatever whoever
+			// wrote the file chose to put there. Its sibling in internal/api
+			// sanitises the same value for the same reason.
 			slog.Warn("Discarding a CRL that no anchor in this client_ca entry signed",
-				"client_ca", entry.Name, "path", entry.CRLFile, "issuer", crl.Issuer.String())
+				"client_ca", entry.Name, "path", entry.CRLFile,
+				"issuer", api.SanitiseForLog(crl.Issuer.String()))
 			continue
 		}
 		out = append(out, crl)

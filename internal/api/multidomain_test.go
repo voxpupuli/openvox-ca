@@ -510,6 +510,44 @@ var _ = Describe("Authorisation across trust domains", func() {
 					"would pass unsanitised")
 		})
 
+		It("truncates an over-long value at the documented boundary", func() {
+			// The cutoff is a contract: sanitiseForLog is *not* used on
+			// identities for exactly this reason -- a truncated name once cost
+			// an agent with a long certname a permanent 403 on re-key renewal.
+			// Asserting on both sides of the boundary is what stops the limit
+			// drifting silently, which would either re-open the padding problem
+			// or start truncating names that fit today.
+			atLimit := strings.Repeat("a", 256)
+			Expect(api.SanitiseForLog(atLimit)).To(Equal(atLimit),
+				"a value exactly at the limit must survive whole")
+
+			overLimit := strings.Repeat("a", 257)
+			out := api.SanitiseForLog(overLimit)
+			Expect(out).To(HaveSuffix("…"))
+			Expect(strings.TrimSuffix(out, "…")).To(HaveLen(256),
+				"one byte over must keep 256 and mark the cut")
+		})
+
+		It("bounds a bulk list at the documented count", func() {
+			// The slice form's own cutoff, separate from the per-value one: a
+			// caller can pad a record with many short names as easily as one
+			// long one, and only this limit stops that.
+			names := make([]string, 40)
+			for i := range names {
+				names[i] = "node.test"
+			}
+			out := api.SanitiseAllForLogForTest(names)
+			Expect(out).To(HaveLen(33), "32 names plus the marker")
+			Expect(out[32]).To(Equal("…"))
+
+			exact := make([]string, 32)
+			for i := range exact {
+				exact[i] = "node.test"
+			}
+			Expect(api.SanitiseAllForLogForTest(exact)).To(HaveLen(32),
+				"a list exactly at the limit must not gain a marker")
+		})
+
 		It("neutralises the subject on the unauthenticated certificate fetch", func() {
 			// The one subject log that precedes ValidateSubject, on the one
 			// endpoint reachable with no client certificate at all. Every

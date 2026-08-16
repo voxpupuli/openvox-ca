@@ -39,8 +39,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
 	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/voxpupuli/openvox-ca/internal/api"
 	"github.com/voxpupuli/openvox-ca/internal/config"
 )
@@ -1215,6 +1215,103 @@ var _ = Describe("refreshClientCRLs", func() {
 
 		Expect(buf.String()).To(ContainSubstring("cover only part"),
 			"with no exporter this warning is the only signal there is")
+	})
+
+	It("counts a refusal against the entry that refused it", func() {
+		// recordRefusal is the counter behind PuppetCAClientCRLRefusals, the
+		// one signal in this feature that reports a fact rather than an
+		// estimate -- these are clients that were actually turned away. It is
+		// wired in main.go as a callback the api package invokes, so nothing
+		// in either package's own specs reaches it, and it is labelled by
+		// client_ca: unlabelled or mislabelled, an operator sees refusals with
+		// no way to tell which issuer to fix.
+		metrics.recordRefusal("server")
+		metrics.recordRefusal("server")
+		metrics.recordRefusal("partner")
+
+		refusals := func(name string) float64 {
+			GinkgoHelper()
+			families, err := reg.Gather()
+			Expect(err).NotTo(HaveOccurred())
+			for _, f := range families {
+				if f.GetName() != "puppetca_client_crl_refusals_total" {
+					continue
+				}
+				for _, mm := range f.GetMetric() {
+					for _, l := range mm.GetLabel() {
+						if l.GetName() == "client_ca" && l.GetValue() == name {
+							return mm.GetCounter().GetValue()
+						}
+					}
+				}
+			}
+			Fail("no puppetca_client_crl_refusals_total for " + name)
+			return 0
+		}
+
+		Expect(refusals("server")).To(Equal(2.0))
+		Expect(refusals("partner")).To(Equal(1.0),
+			"labelled per entry, or an operator cannot tell which issuer to fix")
+	})
+
+	It("is a no-op when no exporter is configured", func() {
+		// The nil path is the production one whenever Prometheus is disabled,
+		// and it is reached through a callback the api package holds, so a
+		// panic here would surface as a failed request rather than at startup.
+		var m *clientCRLMetrics
+		Expect(func() { m.recordRefusal("server") }).NotTo(Panic())
+	})
+
+	It("refuses to start on a CERTIFICATE block that does not parse", func() {
+		// The anchor bundle's sibling of the crl_file parse failure, which is
+		// specced. Both fail closed on purpose: an anchor that does not parse
+		// means the trust set is not what the operator wrote, and starting
+		// anyway would reject every client of the domain while the readiness
+		// probe reported healthy. The block type is right and only the DER is
+		// wrong, so the "not a certificate block" skip above it cannot absorb
+		// this case.
+		path := filepath.Join(GinkgoT().TempDir(), "anchors.pem")
+		Expect(os.WriteFile(path, pem.EncodeToMemory(&pem.Block{
+			Type: "CERTIFICATE", Bytes: []byte("not DER at all"),
+		}), 0o644)).To(Succeed())
+
+		cfg := &serverConfig{}
+		cfg.ClientCA = []config.ClientCA{{Name: "server", File: path}}
+
+		_, err := buildTrustDomains(cfg, ownCA, nil)
+		Expect(err).To(MatchError(ContainSubstring("parsing certificate 1")))
+		Expect(err).To(MatchError(ContainSubstring(path)),
+			"the message must name the file, or an operator cannot find it")
+	})
+
+	It("neutralises a CRL issuer name that no anchor vouched for", func() {
+		// This CRL verified against no anchor at all, so its issuer DN is
+		// whatever whoever wrote crl_file chose -- the least constrained value
+		// this feature logs, since nothing has attested to it. The partial-CRL
+		// discard beside it was sanitised and this one was not, which is the
+		// sibling-site pattern rather than a judgement about the two.
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		defer slog.SetDefault(orig)
+
+		// Signed by a CA that is not this entry's anchor, and named to forge a
+		// log record if it survives unneutralised.
+		hostile, hostileKey := mintCA("evil\nlevel=ERROR msg=\"forged\"", nil, nil)
+
+		cfg := &serverConfig{}
+		cfg.ClientRevocationPolicy = config.RevocationCheck
+		cfg.ClientCA = []config.ClientCA{{
+			Name:    "server",
+			File:    writeCertFile(serverCA),
+			CRLFile: writeCRLFile(mintCRL(hostile, hostileKey)),
+		}}
+		_, err := buildTrustDomains(cfg, ownCA, nil)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(buf.String()).To(ContainSubstring("\uFFFD"),
+			"the newline must be substituted, not merely escaped by the handler")
+		Expect(buf.String()).NotTo(ContainSubstring("\nlevel=ERROR"))
 	})
 
 	It("publishes no gauge at all when the policy does not require CRLs", func() {

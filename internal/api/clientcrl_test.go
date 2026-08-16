@@ -34,13 +34,9 @@ import (
 	"github.com/voxpupuli/openvox-ca/internal/api"
 )
 
-// crlFrom issues a CRL from cert covering the given serials, expiring at
-// notAfter.
 // numberedCRLFrom is crlFrom with the CRL number under the caller's control,
 // which is what a replay test needs: two CRLs from one issuer, both valid, in a
 // defined order.
-// numberedCRLFrom issues a CRL expiring at notAfter, carrying an explicit
-// cRLNumber.
 //
 // ThisUpdate is a constant offset before notAfter, so callers passing notAfter
 // values relative to `future` keep the exact relative ordering they intend
@@ -99,6 +95,8 @@ func scopedCRLFrom(cert *x509.Certificate, key *ecdsa.PrivateKey, oid asn1.Objec
 	return crl
 }
 
+// crlFrom issues a CRL from cert covering the given serials, expiring at
+// notAfter.
 func crlFrom(cert *x509.Certificate, key *ecdsa.PrivateKey, notAfter time.Time, revoked ...*big.Int) *x509.RevocationList {
 	GinkgoHelper()
 	entries := make([]x509.RevocationListEntry, 0, len(revoked))

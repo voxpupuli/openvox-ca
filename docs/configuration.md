@@ -148,9 +148,9 @@ Environment variables mirror the CLI flags:
 | `--logfile` | `PUPPET_CA_LOGFILE` |
 | `--tls-cert` | `PUPPET_CA_TLS_CERT` |
 | `--tls-key` | `PUPPET_CA_TLS_KEY` |
-| `--client-revocation-policy` | `PUPPET_CA_CLIENT_REVOCATION_POLICY` |
 | `--puppet-server` | `PUPPET_CA_PUPPET_SERVER` |
 | `--puppet-server-file` | `PUPPET_CA_PUPPET_SERVER_FILE` |
+| `--client-revocation-policy` | `PUPPET_CA_CLIENT_REVOCATION_POLICY` |
 | `--no-pp-cli-auth` | `PUPPET_CA_NO_PP_CLI_AUTH` |
 | `--no-tls-required` | `PUPPET_CA_NO_TLS_REQUIRED` |
 | `--allow-public-status` | `PUPPET_CA_ALLOW_PUBLIC_STATUS` |
@@ -182,7 +182,6 @@ The CA key passphrase can also be provided via `PUPPET_CA_KEY_PASSPHRASE` (env v
 
 | Config key | Environment variable |
 | --- | --- |
-| `crl_chain_file` | `PUPPET_CA_CRL_CHAIN_FILE` |
 | `client_crl_refresh_interval_sec` | `PUPPET_CA_CLIENT_CRL_REFRESH_INTERVAL_SEC` |
 | `ca_key_algo` | `PUPPET_CA_CA_KEY_ALGO` |
 | `ca_key_size` | `PUPPET_CA_CA_KEY_SIZE` |
