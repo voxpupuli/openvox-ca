@@ -23,6 +23,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.yaml.in/yaml/v3"
 )
 
 var _ = Describe("absIfSet", func() {
@@ -84,9 +85,10 @@ var _ = Describe("ClientCAConfig.ResolvedPolicy", func() {
 	})
 })
 
-// The interval the client-CRL reload job runs on. Setting the field directly
-// would prove nothing about the two names an operator uses; a wrong yaml tag or
-// env key leaves the job silently on the default.
+// The interval the client-CRL reload job runs on. The accessor's own arms are
+// worth pinning, but so is the name an operator writes: this setting has no
+// env key, so the yaml tag is the only way to reach it, and a wrong tag leaves
+// the job silently on the default with a valid-looking config file.
 var _ = Describe("ClientCAConfig.ClientCRLRefreshInterval", func() {
 	It("defaults to an hour when unset", func() {
 		Expect((&ClientCAConfig{}).ClientCRLRefreshInterval()).To(Equal(time.Hour))
@@ -95,6 +97,13 @@ var _ = Describe("ClientCAConfig.ClientCRLRefreshInterval", func() {
 	It("honours a configured value", func() {
 		Expect((&ClientCAConfig{ClientCRLRefreshIntervalSec: 300}).ClientCRLRefreshInterval()).
 			To(Equal(5 * time.Minute))
+	})
+
+	It("is reachable under the name an operator writes", func() {
+		var c ClientCAConfig
+		Expect(yaml.Unmarshal([]byte("client_crl_refresh_interval_sec: 300\n"), &c)).To(Succeed())
+		Expect(c.ClientCRLRefreshInterval()).To(Equal(5*time.Minute),
+			"a wrong yaml tag would leave this at the default and nothing else would say so")
 	})
 
 	It("falls back to the default for a non-positive value", func() {

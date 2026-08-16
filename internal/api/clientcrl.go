@@ -293,7 +293,7 @@ func (s *ClientCRLSet) Coverage(now time.Time) (present, current map[string]bool
 // replace a newer one: an attacker who can write crl_file, or a mirror serving
 // a stale copy, would otherwise re-admit every serial revoked since it was
 // signed, and nothing else in the reload path would notice.
-func (s *ClientCRLSet) Freshness(now time.Time) map[string]crlFreshness {
+func (s *ClientCRLSet) freshness(now time.Time) map[string]crlFreshness {
 	out := map[string]crlFreshness{}
 	if s == nil {
 		return out
@@ -302,7 +302,7 @@ func (s *ClientCRLSet) Freshness(now time.Time) map[string]crlFreshness {
 		key := string(anchor.RawSubjectPublicKeyInfo)
 		crls, _ := s.forIssuer(anchor, now)
 		for _, crl := range crls {
-			f := crlFreshness{thisUpdate: crl.ThisUpdate}
+			f := crlFreshness{subject: anchor.Subject.String(), thisUpdate: crl.ThisUpdate}
 			if crl.Number != nil {
 				f.number = new(big.Int).Set(crl.Number)
 			}
@@ -316,6 +316,9 @@ func (s *ClientCRLSet) Freshness(now time.Time) map[string]crlFreshness {
 
 // crlFreshness is a CRL's position in its issuer's sequence.
 type crlFreshness struct {
+	// subject names the anchor in a refusal message; the map key is its raw
+	// SubjectPublicKeyInfo, which is binary and cannot be logged.
+	subject    string
 	number     *big.Int
 	thisUpdate time.Time
 }
@@ -324,25 +327,43 @@ type crlFreshness struct {
 // defines for exactly this -- and falls back to ThisUpdate when either does not.
 // A numbered CRL is never ranked against an unnumbered one by number alone,
 // because the two sequences are unrelated.
+// newerThan orders two CRLs from one issuer.
+//
+// The first three arms are internal/ca's newerCRL rule: cRLNumber decides where
+// both publish one, and a published number beats an absent one, since an issuer
+// that stops publishing the number has itself gone backwards.
+//
+// The fourth arm is one newerCRL does not have. Equal numbers fall back to
+// ThisUpdate, because an issuer that reissues without incrementing leaves that
+// as the only ordering there is, and calling the pair equal would let the older
+// of the two install. The steady state between refreshes is the same file,
+// equal on both fields, so this still reports no regression.
 func (f crlFreshness) newerThan(other crlFreshness) bool {
-	if f.number != nil && other.number != nil {
-		return f.number.Cmp(other.number) > 0
+	switch {
+	case f.number != nil && other.number != nil:
+		if c := f.number.Cmp(other.number); c != 0 {
+			return c > 0
+		}
+	case f.number != nil:
+		return true
+	case other.number != nil:
+		return false
 	}
 	return f.thisUpdate.After(other.thisUpdate)
 }
 
-// Regresses reports whether candidate would move any anchor backwards relative
-// to this set.
+// Regresses reports whether candidate would move any anchor backwards, naming
+// the first anchor it would, so a refusal can say which issuer regressed.
 func (s *ClientCRLSet) Regresses(candidate *ClientCRLSet, now time.Time) (string, bool) {
-	currentF := s.Freshness(now)
-	candidateF := candidate.Freshness(now)
+	currentF := s.freshness(now)
+	candidateF := candidate.freshness(now)
 	for key, cur := range currentF {
 		cand, ok := candidateF[key]
 		if !ok {
 			continue // a lost anchor is losesCoverage's business, not this one
 		}
 		if cur.newerThan(cand) {
-			return key, true
+			return cur.subject, true
 		}
 	}
 	return "", false

@@ -368,6 +368,30 @@ func mintCRL(cert *x509.Certificate, key *ecdsa.PrivateKey, revoked ...*big.Int)
 	return crl
 }
 
+// numberedCRLUntil is mintCRL with an explicit cRLNumber and NextUpdate, so a
+// spec can order two CRLs from one issuer deliberately rather than relying on
+// mintCRL's clock, and tell which of the two ended up installed.
+func numberedCRLUntil(cert *x509.Certificate, key *ecdsa.PrivateKey, number int64, until time.Time, revoked ...*big.Int) *x509.RevocationList {
+	GinkgoHelper()
+	entries := make([]x509.RevocationListEntry, 0, len(revoked))
+	for _, serial := range revoked {
+		entries = append(entries, x509.RevocationListEntry{
+			SerialNumber:   serial,
+			RevocationTime: time.Now().Add(-time.Minute),
+		})
+	}
+	der, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+		Number:                    big.NewInt(number),
+		RevokedCertificateEntries: entries,
+		ThisUpdate:                time.Now().Add(-time.Hour),
+		NextUpdate:                until,
+	}, cert, key)
+	Expect(err).NotTo(HaveOccurred())
+	crl, err := x509.ParseRevocationList(der)
+	Expect(err).NotTo(HaveOccurred())
+	return crl
+}
+
 // mintCRLUntil is mintCRL with an explicit NextUpdate, so a spec can
 // distinguish which of two sets is installed using only the exported API:
 // Usable at a time past the first CRL's expiry is true only for the second.
@@ -798,6 +822,94 @@ var _ = Describe("refreshClientCRLs", func() {
 		present, _ = domains[1].RevocationSet().Coverage(time.Now())
 		Expect(present).To(HaveLen(1),
 			"dropping an expired CRL re-admits every serial it listed")
+	})
+
+	It("refuses a replayed CRL that would re-admit a revoked serial", func() {
+		// The reload path's own guard, not ClientCRLSet.Regresses in isolation:
+		// a replayed file verifies, covers exactly the anchors the current set
+		// covers, and is older. Both arms above this one pass it, so without
+		// this case a replay installs and every serial revoked since the older
+		// CRL was signed becomes valid again.
+		//
+		// Which set is installed is read the way mintCRLUntil describes: the
+		// replay expires sooner, so Usable past that point is true only while
+		// the newer set is still in place.
+		soon := time.Now().Add(30 * time.Minute)
+		late := time.Now().Add(2 * time.Hour)
+		replay := numberedCRLUntil(serverCA, serverKey, 7, soon)
+		current := numberedCRLUntil(serverCA, serverKey, 8, late)
+
+		cfg := &serverConfig{}
+		cfg.ClientRevocationPolicy = config.RevocationRequire
+		cfg.ClientCA = []config.ClientCA{{
+			Name:    "server",
+			File:    writeCertFile(serverCA),
+			CRLFile: writeCRLFile(current),
+		}}
+		domains, err := buildTrustDomains(cfg, ownCA, nil)
+		Expect(err).NotTo(HaveOccurred())
+		refreshClientCRLs(cfg, domains, metrics)
+		applied := lastReload("server")
+
+		// An attacker with write access to crl_file substitutes a genuine,
+		// correctly signed, earlier CRL from the same issuer.
+		cfg.ClientCA[0].CRLFile = writeCRLFile(replay)
+		refreshClientCRLs(cfg, domains, metrics)
+
+		Expect(lastReload("server")).To(Equal(applied),
+			"a replayed CRL must not count as an applied reload")
+		Expect(domains[1].RevocationSet().Usable(soon.Add(time.Minute))).To(BeTrue(),
+			"the replay installed, discarding every revocation made since it was signed")
+	})
+
+	It("accepts a CRL that moves forward, so the guard is not refusing everything", func() {
+		// The companion to the spec above. A guard that never lets anything
+		// through would satisfy it while breaking every legitimate rotation,
+		// which is the likelier way to take a fleet down.
+		soon := time.Now().Add(30 * time.Minute)
+		late := time.Now().Add(2 * time.Hour)
+
+		cfg := &serverConfig{}
+		cfg.ClientRevocationPolicy = config.RevocationRequire
+		cfg.ClientCA = []config.ClientCA{{
+			Name:    "server",
+			File:    writeCertFile(serverCA),
+			CRLFile: writeCRLFile(numberedCRLUntil(serverCA, serverKey, 7, soon)),
+		}}
+		domains, err := buildTrustDomains(cfg, ownCA, nil)
+		Expect(err).NotTo(HaveOccurred())
+		refreshClientCRLs(cfg, domains, metrics)
+		applied := lastReload("server")
+
+		cfg.ClientCA[0].CRLFile = writeCRLFile(numberedCRLUntil(serverCA, serverKey, 8, late))
+		refreshClientCRLs(cfg, domains, metrics)
+
+		Expect(lastReload("server")).To(BeNumerically(">", applied),
+			"a newer CRL must install, or no revocation ever takes effect")
+		Expect(domains[1].RevocationSet().Usable(soon.Add(time.Minute))).To(BeTrue())
+	})
+
+	It("accepts a re-read of the same file, since that is the steady state", func() {
+		// Equality is deliberately not a regression. Between refreshes the file
+		// is usually byte-identical, and treating that as a replay would leave
+		// every domain on its first load forever, logging an error each pass.
+		crl := numberedCRLUntil(serverCA, serverKey, 7, time.Now().Add(time.Hour))
+		cfg := &serverConfig{}
+		cfg.ClientRevocationPolicy = config.RevocationRequire
+		cfg.ClientCA = []config.ClientCA{{
+			Name:    "server",
+			File:    writeCertFile(serverCA),
+			CRLFile: writeCRLFile(crl),
+		}}
+		domains, err := buildTrustDomains(cfg, ownCA, nil)
+		Expect(err).NotTo(HaveOccurred())
+		refreshClientCRLs(cfg, domains, metrics)
+		applied := lastReload("server")
+
+		refreshClientCRLs(cfg, domains, metrics)
+
+		Expect(lastReload("server")).To(BeNumerically(">", applied),
+			"an unchanged file must not be refused as a replay")
 	})
 
 	It("publishes no gauge at all when the policy does not require CRLs", func() {

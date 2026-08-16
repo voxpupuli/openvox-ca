@@ -187,9 +187,11 @@ func warnIfGrantsSpanAnchors(entry *config.ClientCA, anchors []*x509.Certificate
 // Separate from losesCoverage because the two answer different questions: that
 // one asks whether an anchor lost its CRL, this one whether an anchor's CRL got
 // older. A replayed file passes the first and fails the second.
-func regressesCRLSet(current, candidate *api.ClientCRLSet, now time.Time) bool {
-	_, back := current.Regresses(candidate, now)
-	return back
+// Returns the anchor's subject when it does, so the refusal can name the issuer
+// that went backwards; an operator holding a bundle of several upstreams needs
+// to know which one to chase.
+func regressesCRLSet(current, candidate *api.ClientCRLSet, now time.Time) (string, bool) {
+	return current.Regresses(candidate, now)
 }
 
 // losesCoverage reports whether candidate covers less than current does.
@@ -330,6 +332,17 @@ func refreshClientCRLs(cfg *serverConfig, domains []api.TrustDomain, m *clientCR
 		if err == nil {
 			candidate = api.NewClientCRLSet(crls, domain.Anchors)
 		}
+
+		// Computed before the switch rather than inside a case guard, because
+		// the refusal names the anchor that moved and a case cannot bind a
+		// value. Empty where there is no crl_file to reload, where the read
+		// failed, and where nothing went backwards -- the first two of which
+		// the arms above it own.
+		regressedAnchor := ""
+		if entry.CRLFile != "" && err == nil {
+			regressedAnchor, _ = regressesCRLSet(domain.RevocationSet(), candidate, now)
+		}
+
 		switch {
 		case err != nil:
 			// Keep whatever is loaded; the next pass retries. Replacing a good
@@ -351,7 +364,7 @@ func refreshClientCRLs(cfg *serverConfig, domains []api.TrustDomain, m *clientCR
 				"keeping the current set",
 				"client_ca", entry.Name, "path", entry.CRLFile,
 				"now_uncovered", strings.Join(candidate.CoverageGaps(now), ", "))
-		case entry.CRLFile != "" && regressesCRLSet(domain.RevocationSet(), candidate, now):
+		case regressedAnchor != "":
 			// Verifies, covers every anchor the current set covers, and is still
 			// older than what is installed. Applying it would re-admit every
 			// serial revoked since it was signed, and nothing else on this path
@@ -359,7 +372,8 @@ func refreshClientCRLs(cfg *serverConfig, domains []api.TrustDomain, m *clientCR
 			// The upstream chain refuses the same shape for the same reason;
 			// see monotonicUpstream.
 			slog.Error("crl_file reload would move an anchor backwards; keeping the current set",
-				"client_ca", entry.Name, "path", entry.CRLFile)
+				"client_ca", entry.Name, "path", entry.CRLFile,
+				"issuer", regressedAnchor)
 		default:
 			domain.SetRevocationSet(candidate)
 			m.recordReload(entry.Name, now)
@@ -473,8 +487,9 @@ func newClientCRLMetrics(reg prometheus.Registerer) *clientCRLMetrics {
 			Subsystem: "client_crl",
 			Name:      "last_reload_timestamp_seconds",
 			Help: "When this client_ca entry's crl_file was last applied, in seconds since the " +
-				"epoch. A reload that fails, or that would cover fewer anchors than the set " +
-				"already in use, deliberately keeps the previous set -- which is right for " +
+				"epoch. A reload that fails, that would cover fewer anchors than the set " +
+				"already in use, or that would move an anchor backwards to an older CRL, " +
+				"deliberately keeps the previous set -- which is right for " +
 				"availability and invisible on every other series, because the retained CRLs " +
 				"are still current and clients are still served. Meanwhile the file has stopped " +
 				"being applied, so revocations published since are not honoured. Alert on this " +

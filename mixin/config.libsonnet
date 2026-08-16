@@ -116,11 +116,11 @@
     // Window for PuppetCAClientCRLRefusals. Unlike the gauge this is
     // event-driven -- it moves when a client is actually refused -- so it is
     // sized like the other increase() windows rather than against the
-    // maintenance interval.
+    // refresh interval.
     clientCRLRefusalWindow: '1h',
 
     // How long a client_ca entry may go without its crl_file being applied
-    // before that is worth saying. Three maintenance passes at the 1h default,
+    // before that is worth saying. Three refresh passes at the 1h default,
     // so a single transient read error does not page.
     clientCRLStaleSeconds: 3 * 3600,
     scrapeFor: '15m',

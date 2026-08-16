@@ -22,6 +22,8 @@ import (
 	"crypto/rand"
 	"crypto/sha1"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
 	"errors"
 	"math/big"
 	"time"
@@ -43,6 +45,36 @@ func numberedCRLFrom(cert *x509.Certificate, key *ecdsa.PrivateKey, notAfter tim
 		Number:     big.NewInt(number),
 		ThisUpdate: notAfter.Add(-24 * time.Hour),
 		NextUpdate: notAfter,
+	}, cert, key)
+	Expect(err).NotTo(HaveOccurred())
+	crl, err := x509.ParseRevocationList(der)
+	Expect(err).NotTo(HaveOccurred())
+	return crl
+}
+
+// scopedCRLFrom issues a CRL carrying a scope-limiting extension: either the
+// delta CRL indicator (2.5.29.27) or an issuing distribution point (2.5.29.28).
+// Both mean the list is a fraction of what the issuer has revoked.
+func scopedCRLFrom(cert *x509.Certificate, key *ecdsa.PrivateKey, oid asn1.ObjectIdentifier, revoked ...*big.Int) *x509.RevocationList {
+	GinkgoHelper()
+	entries := make([]x509.RevocationListEntry, 0, len(revoked))
+	for _, serial := range revoked {
+		entries = append(entries, x509.RevocationListEntry{
+			SerialNumber:   serial,
+			RevocationTime: time.Now().Add(-time.Minute),
+		})
+	}
+	// The value is deliberately not a well-formed IDP or base-CRL number. The
+	// refusal keys on the extension being *present*, so a spec that supplied a
+	// valid one would leave the parsing this code declines to do looking
+	// necessary.
+	ext := pkix.Extension{Id: oid, Value: []byte{0x30, 0x00}}
+	der, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+		Number:                    big.NewInt(1),
+		RevokedCertificateEntries: entries,
+		ThisUpdate:                time.Now().Add(-time.Hour),
+		NextUpdate:                time.Now().Add(time.Hour),
+		ExtraExtensions:           []pkix.Extension{ext},
 	}, cert, key)
 	Expect(err).NotTo(HaveOccurred())
 	crl, err := x509.ParseRevocationList(der)
@@ -432,6 +464,57 @@ var _ = Describe("Client CRL checking", func() {
 	})
 })
 
+var _ = Describe("partial-scope client CRLs", func() {
+	var (
+		serverCA *x509.Certificate
+		caKey    *ecdsa.PrivateKey
+	)
+
+	anchorSet := func() []*x509.Certificate { return []*x509.Certificate{serverCA} }
+
+	BeforeEach(func() {
+		root, rootKey := mintCert("Shared Root", nil, nil, true)
+		serverCA, caKey = mintCert("Server CA", root, rootKey, true)
+		withSKI(serverCA)
+	})
+
+	// A delta CRL lists only what changed since a base it names, and an IDP-
+	// scoped CRL lists only one distribution point's share. Either satisfies a
+	// signature check and covers its anchor, so before this refusal one could
+	// be dropped in as an issuer's whole CRL and `require` would report the
+	// domain fully covered while consulting a list missing most of its
+	// revocations. This CA is handed a file and never fetches a distribution
+	// point, so the rest of the picture is not available to go and get.
+	DescribeTable("are refused rather than treated as full coverage",
+		func(oid asn1.ObjectIdentifier) {
+			revoked := big.NewInt(99)
+			set := api.NewClientCRLSet(
+				[]*x509.RevocationList{scopedCRLFrom(serverCA, caKey, oid, revoked)},
+				anchorSet(),
+			)
+
+			Expect(set.Usable(time.Now())).To(BeFalse(),
+				"a partial CRL must not count as coverage for its issuer")
+			Expect(set.CoverageGaps(time.Now())).To(ContainElement(ContainSubstring("Server CA")))
+		},
+		Entry("delta CRL indicator", asn1.ObjectIdentifier{2, 5, 29, 27}),
+		Entry("issuing distribution point", asn1.ObjectIdentifier{2, 5, 29, 28}),
+	)
+
+	It("still accepts a CRL carrying an unrelated extension", func() {
+		// The refusal is on two specific OIDs, not on extensions in general.
+		// A CRL with, say, an authority key identifier is entirely ordinary and
+		// must not be swept up -- that would refuse most real CRLs.
+		set := api.NewClientCRLSet(
+			[]*x509.RevocationList{
+				scopedCRLFrom(serverCA, caKey, asn1.ObjectIdentifier{2, 5, 29, 35}),
+			},
+			anchorSet(),
+		)
+		Expect(set.Usable(time.Now())).To(BeTrue())
+	})
+})
+
 // A CRL that verifies, is current, and covers every anchor the installed set
 // covers can still be *older* than what is installed. Nothing else on the
 // reload path notices: the signature is good and coverage is unchanged. What it
@@ -482,6 +565,55 @@ var _ = Describe("ClientCRLSet.Regresses", func() {
 
 		_, back := current.Regresses(same, time.Now())
 		Expect(back).To(BeFalse(), "every unchanged reload would otherwise be refused")
+	})
+
+	// The three specs below drive the ordering rule's arms beyond plain number
+	// comparison. All three describe issuers that exist: cRLNumber is OPTIONAL
+	// in RFC 5280, and an issuer that publishes one is not obliged to increment
+	// it correctly.
+	It("falls back to ThisUpdate when the issuer did not increment its number", func() {
+		// Equal numbers used to compare equal, so a reissue that kept the
+		// number could install in either direction and the older one silently
+		// won whenever it was the file on disk.
+		current := api.NewClientCRLSet(
+			[]*x509.RevocationList{numberedCRLFrom(serverCA, caKey, future, 9)}, anchorSet())
+		older := api.NewClientCRLSet(
+			[]*x509.RevocationList{
+				numberedCRLFrom(serverCA, caKey, future.Add(-24*time.Hour), 9),
+			}, anchorSet())
+
+		_, back := current.Regresses(older, time.Now())
+		Expect(back).To(BeTrue(),
+			"same number, earlier ThisUpdate: nothing else would have caught it")
+	})
+
+	It("treats dropping the CRL number as a regression", func() {
+		// An issuer that was publishing a number and stops has gone backwards
+		// in the only ordering it offered. internal/ca's newerCRL says the same
+		// of the chain CRLs, and the two rules are meant to agree.
+		current := api.NewClientCRLSet(
+			[]*x509.RevocationList{numberedCRLFrom(serverCA, caKey, future, 9)}, anchorSet())
+
+		unnumbered := numberedCRLFrom(serverCA, caKey, future, 9)
+		unnumbered.Number = nil // as an issuer omitting the extension parses
+		candidate := api.NewClientCRLSet([]*x509.RevocationList{unnumbered}, anchorSet())
+
+		_, back := current.Regresses(candidate, time.Now())
+		Expect(back).To(BeTrue())
+	})
+
+	It("orders two unnumbered CRLs by ThisUpdate", func() {
+		// An issuer that never publishes a number still must not be able to
+		// replay: ThisUpdate is the only ordering it gives, so it is used.
+		newer := numberedCRLFrom(serverCA, caKey, future, 1)
+		older := numberedCRLFrom(serverCA, caKey, future.Add(-24*time.Hour), 1)
+		newer.Number, older.Number = nil, nil
+
+		current := api.NewClientCRLSet([]*x509.RevocationList{newer}, anchorSet())
+		candidate := api.NewClientCRLSet([]*x509.RevocationList{older}, anchorSet())
+
+		_, back := current.Regresses(candidate, time.Now())
+		Expect(back).To(BeTrue())
 	})
 
 	// An anchor the candidate drops entirely is losesCoverage's business, and

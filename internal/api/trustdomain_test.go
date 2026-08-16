@@ -225,4 +225,28 @@ var _ = Describe("TrustDomain.SetRevocationSet without a holder", func() {
 		d.SetRevocationSet(api.NewClientCRLSet(nil, nil))
 		Expect(d.RevocationSet()).NotTo(BeNil())
 	})
+
+	// The sibling the comment above claims follows the same discipline. It was
+	// asserted about and not driven, which is how the claim and the code get to
+	// disagree.
+	It("refuses an admin-CN write to a domain with no holder", func() {
+		var d api.TrustDomain
+
+		var previous map[string]bool
+		Expect(func() { previous = d.SetAdminCNs(map[string]bool{"ops": true}) }).NotTo(Panic())
+		Expect(previous).To(BeNil())
+		Expect(d.IsAdminCN("ops")).To(BeFalse(),
+			"a domain with no holder must not gain administrators on write")
+	})
+
+	It("swaps admin CNs and returns the previous set when there is a holder", func() {
+		d := api.NewForeignTrustDomain("server-ca", nil, nil, map[string]bool{"old": true}, false)
+
+		previous := d.SetAdminCNs(map[string]bool{"new": true})
+
+		Expect(previous).To(HaveKey("old"))
+		Expect(d.IsAdminCN("new")).To(BeTrue())
+		Expect(d.IsAdminCN("old")).To(BeFalse(),
+			"a replaced admin list must not leave the old names honoured")
+	})
 })

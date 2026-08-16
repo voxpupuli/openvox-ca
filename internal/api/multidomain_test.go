@@ -509,6 +509,45 @@ var _ = Describe("Authorisation across trust domains", func() {
 					"would pass unsanitised")
 		})
 
+		It("neutralises certnames from the request body at the bulk endpoints", func() {
+			// The helper had a spec; the two call sites that use it did not. A
+			// certname arrives in the *body*, so unlike the CN it is not filtered
+			// by certificate issuance at all -- any client permitted to call the
+			// endpoint chooses it freely, which makes these the least constrained
+			// injection points in the API.
+			var buf bytes.Buffer
+			orig := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			defer slog.SetDefault(orig)
+
+			handler := build(map[string]bool{}, true)
+			admin := foreignLeaf("ops.example.com", true)
+
+			for _, ep := range []struct{ method, path, record string }{
+				{"POST", "/sign", "Signing certificates"},
+				{"PUT", "/clean", "Cleaning certificates"},
+			} {
+				buf.Reset()
+				req := httptest.NewRequest(ep.method, ep.path,
+					strings.NewReader(`{"certnames":["node1.test\nlevel=ERROR msg=\"forged\""]}`))
+				req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{admin}}
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, req)
+
+				var logged string
+				for _, line := range strings.Split(buf.String(), "\n") {
+					if strings.Contains(line, ep.record) {
+						logged = line
+					}
+				}
+				Expect(logged).NotTo(BeEmpty(),
+					"%s %s must reach the record this spec covers", ep.method, ep.path)
+				Expect(logged).To(ContainSubstring("\uFFFD"),
+					"the newline must be substituted, not merely escaped by the handler")
+				Expect(buf.String()).NotTo(ContainSubstring("\nlevel=ERROR"))
+			}
+		})
+
 		It("keeps a common name verbatim as an identity, and neutralises it only for logs", func() {
 			// clientCN feeds the renewal handler's CN comparison and the subject
 			// passed to Renew, so it has to be the certificate's value. It was
@@ -585,34 +624,34 @@ var _ = Describe("Authorisation across trust domains", func() {
 				"one domain's traffic must not raise the alarm against another's administrator")
 		})
 
-		// Key() quotes the CN rather than concatenating it, and the quoting is
-		// what stops one principal forging another's key. A CN is attacker-chosen
-		// within its own namespace, so without it a name containing the
-		// separator could be crafted to collide with a different domain's
-		// principal -- and the destructive-operations counter this key feeds is
-		// exactly what an attacker would want to attribute elsewhere.
-		It("cannot be made to collide by a common name containing the separator", func() {
+		// Key() renders the CN with strconv.Quote. The separation of principals
+		// is structural -- the domain half is itself %q-quoted, so the key is
+		// injective in the CN either way -- and what the quoting buys is that
+		// the key is unambiguous and printable: a CN carrying a newline, a
+		// quote or a slash cannot produce a key that reads as a different
+		// principal in an audit trail or a rate-limit table.
+		It("renders the common name quoted, so a crafted one cannot read as another", func() {
 			own := api.OwnTrustDomain(caCert, nil, false)
-			theirs := api.NewForeignTrustDomain("server-ca", nil, nil, nil, false)
 
-			// A name crafted to look like "the server-ca domain's ops-admin"
-			// when read as a flat string.
-			crafted := api.PrincipalKeyForTest(`ops-admin"`, &own)
-			genuine := api.PrincipalKeyForTest("ops-admin", &theirs)
-			Expect(crafted).NotTo(Equal(genuine))
+			Expect(api.PrincipalKeyForTest("ops-admin", &own)).
+				To(ContainSubstring(`"ops-admin"`),
+					"an unquoted CN would let a crafted name read as part of the key's structure")
 
-			// And the general property: two distinct names never share a key
-			// within one domain, however they are punctuated.
+			// The property that must hold whatever the rendering: no two names
+			// share a key within one domain.
 			seen := map[string]string{}
 			for _, cn := range []string{
 				"ops-admin", `ops-admin"`, `"ops-admin`, "ops/admin", `ops\admin`,
-				"ops-admin\n", "", " ",
+				"ops\nadmin", "", " ",
 			} {
 				key := api.PrincipalKeyForTest(cn, &own)
 				Expect(seen).NotTo(HaveKey(key),
 					"two names collided on one key: %q and %q", seen[key], cn)
 				seen[key] = cn
 			}
+
+			// And a newline in a CN cannot break the key across lines.
+			Expect(api.PrincipalKeyForTest("ops\nadmin", &own)).NotTo(ContainSubstring("\n"))
 		})
 
 		It("names the vouching domain in the record, not just the common name", func() {

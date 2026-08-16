@@ -604,9 +604,24 @@ this CA does not use — so an issuer that omits it is fully supported. Without 
 re-read, defaulting to an hour. The file is refreshed by whatever mechanism
 already delivers it — a mounted Secret, a config-management run, a job fetching
 the issuer's CDP — and this only notices; nothing in openvox-ca writes it. A
-reload that fails, or that would cover fewer anchors than the set already in
-use, keeps the previous set rather than narrowing what is enforced, so a
-transient read error costs freshness and not availability.
+reload is refused, keeping the previous set, when it fails outright, when it
+would cover fewer anchors than the set already in use, or when it would move any
+anchor *backwards* — an older CRL from the same issuer, by `cRLNumber` where the
+issuer publishes one and by `thisUpdate` otherwise. The last of these is what
+stops a replayed file: it verifies and covers everything the current set covers,
+so nothing else on the path would notice, while re-admitting every serial
+revoked since it was signed. Refusing costs freshness and never availability,
+and each refusal is logged with the `client_ca` entry and the issuer concerned.
+
+A **delta CRL** or one scoped to an **issuing distribution point** is dropped
+with a log line rather than accepted. Either lists a fraction of what its issuer
+has revoked, and this CA is handed a file rather than fetching distribution
+points, so it has no way to obtain the rest; treating a partial list as full
+coverage would report a domain fully covered while consulting a list missing
+most of its revocations. If every CRL in an entry's file is partial the entry
+has no usable coverage at all, which under `require` refuses that domain's
+clients — so `puppetca_client_crl_usable` going to 0 right after a CRL delivery
+change is the signal to check what the file now contains.
 
 The anchors themselves deliberately do not reload: re-reading them would mean
 re-parsing what a domain trusts while requests are being decided against it, and
@@ -665,10 +680,10 @@ CRLs", not "stop reading the ones you were given".
 > it presents. Revoking a trusted domain is an operator action: remove or
 > replace the `client_ca` entry. `crl_file` covers what that CA *issued*.
 
-`crl_file` is re-read on every maintenance cycle. A reload that fails, or that
-would cover fewer anchors than the set already in use, keeps the previous set
-and logs — so an emptied or half-assembled file does not take revocation
-checking down with it, and the file is not authoritative until it loads. **`file` is not**: anchors are
+`crl_file` is re-read on the interval set by `client_crl_refresh_interval_sec`,
+and a reload that cannot be trusted is refused rather than applied — see
+[Revocation](#revocation) above for which reloads those
+are. **`file` is not**: anchors are
 read once at startup, because a half-applied anchor reload locks out every
 client of a domain, where a half-applied CRL reload costs at most a stale
 revocation. To rotate an anchor, add the new one as a second `client_ca` entry,
