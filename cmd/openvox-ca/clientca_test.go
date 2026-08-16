@@ -997,6 +997,49 @@ var _ = Describe("refreshClientCRLs", func() {
 			"and the issuer, so a bundle of several upstreams says which one")
 	})
 
+	It("suppresses per entry, so one entry's standing fault does not mute another's", func() {
+		// The map is keyed by client_ca entry, and nothing drove that: with a
+		// single entry, collapsing it to one package-level string passes. Two
+		// entries whose bundles produce the same "issuer (reason)" string would
+		// then silence the second entry's newly broken delivery -- which is the
+		// case the keying exists for.
+		//
+		// Both entries anchor the same CA deliberately, so their discard
+		// strings are identical and only the key can tell them apart.
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		defer slog.SetDefault(orig)
+
+		broken := writeCRLFile(deltaCRL(serverCA, serverKey))
+		cfg := &serverConfig{}
+		cfg.ClientRevocationPolicy = config.RevocationCheck
+		cfg.ClientCA = []config.ClientCA{
+			{Name: "first", File: writeCertFile(serverCA), CRLFile: broken},
+			{Name: "second", File: writeCertFile(serverCA), CRLFile: writeCRLFile(mintCRL(serverCA, serverKey))},
+		}
+		domains, err := buildTrustDomains(cfg, ownCA, nil)
+		Expect(err).NotTo(HaveOccurred())
+		refreshClientCRLs(cfg, domains, metrics)
+
+		// "first" is now a standing fault and must fall silent. "second" breaks
+		// the same way for the first time and must be reported.
+		buf.Reset()
+		cfg.ClientCA[1].CRLFile = broken
+		refreshClientCRLs(cfg, domains, metrics)
+
+		reported := ""
+		for _, line := range strings.Split(buf.String(), "\n") {
+			if strings.Contains(line, "cover only part") {
+				reported += line
+			}
+		}
+		Expect(reported).To(ContainSubstring("client_ca=second"),
+			"a newly broken entry must be reported even when another has the same fault")
+		Expect(reported).NotTo(ContainSubstring("client_ca=first"),
+			"the entry whose fault is unchanged must stay suppressed")
+	})
+
 	It("does not reprint the discard warning while the file is unchanged", func() {
 		// A partial file that is *refused* on reload is the case the first
 		// version got wrong: it compared against the installed set, which only
