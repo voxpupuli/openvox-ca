@@ -616,9 +616,14 @@ jobs:
 				MatchError(ContainSubstring("declares no pull_request trigger")))
 		})
 
+		// Asserted on the parse failure, not just the file name: every error
+		// this function returns leads with the workflow name, so matching the
+		// name alone would pass with the yaml.Unmarshal check deleted — the
+		// malformed input would then fall through to the missing-trigger
+		// error, which names ci.yml too. Same trap as the missing-source spec.
 		It("reports a malformed workflow against its file name", func() {
 			Expect(verifyPullRequestUnfilteredIn("ci.yml", []byte("on: [\n"))).To(
-				MatchError(ContainSubstring("ci.yml")))
+				MatchError(ContainSubstring("ci.yml: yaml:")))
 		})
 
 		// The trigger key present but carrying a scalar rather than a mapping:

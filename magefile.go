@@ -332,10 +332,12 @@ const automergeBasePin = "github.event.pull_request.base.ref"
 // added these guards, which meant neither ran on a stacked PR.
 var baseScopedWorkflows = []string{"ci.yml", "codeql.yml"}
 
-// workflowGuardDoc is the slice of a workflow document the two guards below
-// read. The fields declared here are the whole of it -- deliberately not
-// restated in prose, because the previous enumeration went stale the moment a
-// field was added, and the struct cannot.
+// workflowGuardDoc, with pullRequestTrigger below, is the slice of a workflow
+// document the two guards read. The `on:` subtree is kept as raw nodes and the
+// trigger decoded separately, so the two types together are the read surface,
+// not this one alone. The field lists live in the types rather than in a
+// summary here: an enumeration in prose goes stale the moment a field is
+// added, and this one did.
 type workflowGuardDoc struct {
 	On   map[string]yaml.Node `yaml:"on"`
 	Jobs map[string]struct {
@@ -350,6 +352,14 @@ type workflowGuardDoc struct {
 			Uses string `yaml:"uses"`
 		} `yaml:"steps"`
 	} `yaml:"jobs"`
+}
+
+// pullRequestTrigger is the decoded on.pull_request node: the two keys that
+// scope a workflow by the PR's base branch. GitHub treats them as mutually
+// exclusive, but either one narrows the same field, so both are read.
+type pullRequestTrigger struct {
+	Branches       []string `yaml:"branches"`
+	BranchesIgnore []string `yaml:"branches-ignore"`
 }
 
 // verifyWorkflowBaseScoping runs both base-scoping guards over the real
@@ -423,10 +433,7 @@ func verifyPullRequestUnfilteredIn(name string, src []byte) error {
 			"it is meant to run on every PR whatever the base", name)
 	}
 	// An empty trigger is the whole point, and decodes to the zero value.
-	var trigger struct {
-		Branches       []string `yaml:"branches"`
-		BranchesIgnore []string `yaml:"branches-ignore"`
-	}
+	var trigger pullRequestTrigger
 	if node.Kind != 0 && node.Tag != "!!null" {
 		if err := node.Decode(&trigger); err != nil {
 			return fmt.Errorf("%s: on.pull_request: %w", name, err)
@@ -473,14 +480,14 @@ func verifyPullRequestUnfilteredIn(name string, src []byte) error {
 // itself `uses` one as a reusable workflow. Matching on what the job does
 // rather than on the name "automerge" means a rename cannot retire the guard.
 //
-// Rather than enumerate the gaps, which twice missed one, here is the whole
-// observation surface: the literal text of a step's `run`, the text of a
-// step's `uses`, the text of the job's own `uses`, and nothing else. Anything
-// that reaches auto-merge without one of those three strings saying so is not
-// detected -- a script the `run` line invokes, an action or reusable workflow
-// whose name does not mention merging, or a merging job in a workflow outside
-// baseScopedWorkflows, since nothing else is read at all. Closing any of those
-// means extending this matcher or that list.
+// Rather than enumerate the gaps, which twice missed one, here is the property
+// that produces them: the matcher reads only literal text -- the `run` and
+// `uses` strings on a job and its steps -- and never follows a reference.
+// Anything reaching auto-merge without one of those strings saying so is
+// invisible to it: a script the `run` line invokes, an action or reusable
+// workflow whose name does not mention merging, or a merging job in a workflow
+// outside baseScopedWorkflows, since nothing else is read at all. Closing any
+// of those means extending this matcher or that list.
 func verifyAutomergeBasePinIn(name string, src []byte) error {
 	var doc workflowGuardDoc
 	if err := yaml.Unmarshal(src, &doc); err != nil {
