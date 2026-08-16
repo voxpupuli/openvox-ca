@@ -201,7 +201,12 @@ func (d *TrustDomain) IsAdminCN(cn string) bool {
 // write to a map the middleware is reading.
 func (d *TrustDomain) SetAdminCNs(cns map[string]bool) map[string]bool {
 	if d.admins == nil {
-		d.admins = newAdminSet(nil)
+		// Refused rather than allocated, matching SetRevocationSet: a domain
+		// without a holder was not built by a constructor, and allocating one
+		// here would be an unsynchronised write to a value the middleware may
+		// already be reading through a copy. The constructors are the only
+		// place a holder appears.
+		return nil
 	}
 	d.admins.mu.Lock()
 	defer d.admins.mu.Unlock()

@@ -103,16 +103,13 @@ func buildBackendSpec(cfg *serverConfig, absCADir string) (storage.BackendSpec, 
 // them in one inline block is what made it easy to add a TLS mode that silently
 // skipped the first.
 func buildAuthConfig(cfg *serverConfig, myCA *ca.CA) (*api.AuthConfig, error) {
-	allowList := map[string]bool{}
-	for _, cn := range splitAndTrim(cfg.PuppetServer, ",") {
-		allowList[cn] = true
-	}
-	fileCNs, err := loadPuppetServerFile(cfg.PuppetServerFile)
+	// Through buildAdminAllowList, not an inline merge: that function is the
+	// single construction point for this list, and reload calls it too. Two
+	// implementations of the same merge is how startup and SIGHUP come to
+	// disagree about who is an administrator.
+	allowList, err := buildAdminAllowList(cfg.PuppetServer, cfg.PuppetServerFile)
 	if err != nil {
 		return nil, err
-	}
-	for _, cn := range fileCNs {
-		allowList[cn] = true
 	}
 
 	if !cfg.NoPpCliAuth {

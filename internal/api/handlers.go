@@ -134,14 +134,6 @@ func (c *AuthConfig) SetOwnAdminCNs(cns map[string]bool) map[string]bool {
 	return nil
 }
 
-// OwnDomain returns domain zero, this CA's own issuer.
-func (c *AuthConfig) OwnDomain() *TrustDomain {
-	if len(c.Domains) == 0 {
-		return nil
-	}
-	return &c.Domains[0]
-}
-
 type Server struct {
 	CA         *ca.CA
 	AuthConfig *AuthConfig

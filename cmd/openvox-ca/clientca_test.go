@@ -19,6 +19,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -27,6 +28,8 @@ import (
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"encoding/pem"
+	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/storage"
 	"log/slog"
 	"math/big"
 	"os"
@@ -135,6 +138,89 @@ var _ = Describe("client_ca configuration", func() {
 			}
 			Expect(cfg.Validate()).To(Succeed())
 		})
+	})
+
+	// buildAuthConfig is the only path from operator configuration to what the
+	// middleware trusts, and until now nothing called it with a client_ca
+	// present: the specs below it exercise buildTrustDomains directly, so the
+	// assembly around it -- validation, the admin allow list, the revocation
+	// policy -- was reachable only by starting a server.
+	Describe("buildAuthConfig", func() {
+		var (
+			serverCA *x509.Certificate
+			caKey    *ecdsa.PrivateKey
+		)
+
+		BeforeEach(func() {
+			root, rootKey := mintCA("Shared Root", nil, nil)
+			serverCA, caKey = mintCA("Server CA", root, rootKey)
+		})
+
+		newCA := func() *ca.CA {
+			store := storage.New(GinkgoT().TempDir())
+			c := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+			c.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+			Expect(c.Init(context.Background())).To(Succeed())
+			return c
+		}
+
+		It("assembles every configured domain, with ours first", func() {
+			myCA := newCA()
+			cfg := &serverConfig{PuppetServer: "compile-1.example.com"}
+			cfg.ClientCA = []config.ClientCA{{
+				Name: "server", File: writeCertFile(serverCA),
+				CRLFile:  writeCRLFile(mintCRL(serverCA, caKey)),
+				AdminCNs: []string{"ops-admin"},
+			}}
+
+			authCfg, err := buildAuthConfig(cfg, myCA)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(authCfg.Domains).To(HaveLen(2))
+
+			// Domain zero takes the allow list from the flags, and only it.
+			Expect(authCfg.Domains[0].IsOwn()).To(BeTrue())
+			Expect(authCfg.Domains[0].IsAdminCN("compile-1.example.com")).To(BeTrue())
+			Expect(authCfg.Domains[0].IsAdminCN("ops-admin")).To(BeFalse(),
+				"a foreign entry's admin_cns must not grant admin in our own domain")
+
+			// The foreign entry takes its own, and neither leaks the other way.
+			Expect(authCfg.Domains[1].Name).To(Equal("server"))
+			Expect(authCfg.Domains[1].IsAdminCN("ops-admin")).To(BeTrue())
+			Expect(authCfg.Domains[1].IsAdminCN("compile-1.example.com")).To(BeFalse(),
+				"our allow list must not grant admin in a foreign domain")
+		})
+
+		It("refuses to start on an invalid client_ca rather than trusting less than asked", func() {
+			myCA := newCA()
+			cfg := &serverConfig{}
+			cfg.ClientCA = []config.ClientCA{{Name: "server"}} // no file
+
+			_, err := buildAuthConfig(cfg, myCA)
+			Expect(err).To(MatchError(ContainSubstring("client_ca")))
+		})
+
+		It("carries the resolved revocation policy through, defaulting to require", func() {
+			myCA := newCA()
+			cfg := &serverConfig{}
+			cfg.ClientCA = []config.ClientCA{{
+				Name: "server", File: writeCertFile(serverCA),
+				CRLFile: writeCRLFile(mintCRL(serverCA, caKey)),
+			}}
+
+			authCfg, err := buildAuthConfig(cfg, myCA)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(authCfg.ClientRevocationPolicy).To(Equal(config.RevocationRequire),
+				"an unset policy must reach the middleware as require, not as empty")
+		})
+
+		It("builds one domain when no client_ca is configured", func() {
+			myCA := newCA()
+			authCfg, err := buildAuthConfig(&serverConfig{}, myCA)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(authCfg.Domains).To(HaveLen(1))
+			Expect(authCfg.Domains[0].IsOwn()).To(BeTrue())
+		})
+
 	})
 
 	Describe("buildTrustDomains", func() {

@@ -148,8 +148,6 @@ Environment variables mirror the CLI flags:
 | `--logfile` | `PUPPET_CA_LOGFILE` |
 | `--tls-cert` | `PUPPET_CA_TLS_CERT` |
 | `--tls-key` | `PUPPET_CA_TLS_KEY` |
-| `--tls-self-provision` | `PUPPET_CA_TLS_SELF_PROVISION` |
-| `--tls-self-provision-names` | `PUPPET_CA_TLS_SELF_PROVISION_NAMES` |
 | `--client-revocation-policy` | `PUPPET_CA_CLIENT_REVOCATION_POLICY` |
 | `--puppet-server` | `PUPPET_CA_PUPPET_SERVER` |
 | `--puppet-server-file` | `PUPPET_CA_PUPPET_SERVER_FILE` |

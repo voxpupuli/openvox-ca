@@ -19,8 +19,10 @@ package api
 
 import (
 	"crypto/x509"
+	"encoding/asn1"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"sync/atomic"
 	"time"
@@ -100,10 +102,49 @@ func NewClientCRLSet(crls []*x509.RevocationList, anchors []*x509.Certificate) *
 		if signer == nil {
 			continue
 		}
+		if reason, partial := coversPartially(crl); partial {
+			// Admitted on the signature alone, a partial-scope CRL would satisfy
+			// `require` while listing only some of what its issuer has revoked.
+			// A delta CRL names only the changes since a base it does not carry;
+			// an issuing-distribution-point CRL may cover only one reason code or
+			// only CA certificates. Either is a valid CRL its issuer meant for a
+			// client that also fetches the rest, and this CA fetches nothing --
+			// it is handed a file. Refusing beats silently covering less than the
+			// operator believes.
+			slog.Warn("Ignoring a client CRL that covers only part of its issuer's revocations",
+				"issuer", sanitiseForLog(crl.Issuer.String()), "reason", reason)
+			continue
+		}
 		key := string(signer.RawSubjectPublicKeyInfo)
 		set.bySignerKey[key] = append(set.bySignerKey[key], crl)
 	}
 	return set
+}
+
+// OID registry for the two extensions that narrow a CRL's scope (RFC 5280
+// s5.2.3 and s5.2.5).
+var (
+	oidDeltaCRLIndicator      = asn1.ObjectIdentifier{2, 5, 29, 27}
+	oidIssuingDistributionPnt = asn1.ObjectIdentifier{2, 5, 29, 28}
+)
+
+// coversPartially reports whether a CRL declares itself narrower than its
+// issuer's full revocation list, and which extension says so.
+//
+// Presence is the whole test. An issuing distribution point can in principle
+// describe a scope equal to the full list, but parsing it to find out means
+// implementing a decision this CA has no way to act on: if the IDP names a
+// distribution point, the complete picture lives at a URL nobody here fetches.
+func coversPartially(crl *x509.RevocationList) (string, bool) {
+	for _, ext := range crl.Extensions {
+		switch {
+		case ext.Id.Equal(oidDeltaCRLIndicator):
+			return "delta CRL", true
+		case ext.Id.Equal(oidIssuingDistributionPnt):
+			return "issuing distribution point", true
+		}
+	}
+	return "", false
 }
 
 // forIssuer returns every CRL issued by cert, and whether any of them is
