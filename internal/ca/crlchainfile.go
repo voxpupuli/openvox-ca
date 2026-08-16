@@ -50,6 +50,31 @@ import (
 // the way up to the root. Nothing enforces that yet, so a partial import shows
 // up as CRLs discarded on every refresh, which crlChainDiscarded counts and the
 // mixin alerts on.
+//
+// Two consequences of that requirement, neither obvious from here, and both
+// decisions an operator makes once and lives with:
+//
+// The bundle is not private verification material. Storage.GetCACert is what
+// GET /certificate/ca serves, so every certificate in it is a CA the fleet
+// trusts. Publishing an ancestor's CRL therefore means adding that ancestor to
+// what agents trust — and adding a root admits every sibling sub-CA beneath it,
+// present and future, not only the ancestors this CA needs.
+//
+// That is the price of the default certificate_revocation = chain rather than a
+// mistake to design around. Under it, a bundle ending anywhere short of a
+// self-signed root does not degrade to weaker checking; agents stop connecting.
+// Tested on a reconstructed root → intermediate → leaf PKI with OpenSSL 3.6.3,
+// where it fails twice over: path building will not end at a non-self-signed
+// anchor without PARTIAL_CHAIN, which Puppet does not set, and with that forced
+// CRL_CHECK_ALL then demands a CRL for the anchor itself, which only the
+// anchor's issuer can supply. certificate_revocation = leaf permits a narrow
+// bundle, at the cost of no revocation checking above the leaf's issuer.
+//
+// So bundle contents and crl_chain_file contents are one decision. An issuer in
+// the bundle whose CRL is not published fails verification fleet-wide under
+// chain; a CRL published for an issuer not in the bundle is discarded here and
+// alerts. Changing either without the other is a fault an operator meets as an
+// alert or an outage rather than as a configuration error.
 
 // errChainFileFault marks an error as the operator's file being at fault, as
 // opposed to the storage or locking beneath it. upstreamCRLs has already counted

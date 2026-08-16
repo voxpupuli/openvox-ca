@@ -239,6 +239,36 @@ certificate, each issuer after it, ending with a self-signed root. Supply only
 certificates; a bundle carrying a private key is rejected, because this file is
 stored world-readable and served to every agent.
 
+> [!IMPORTANT]
+> **This bundle is what every agent trusts.** It is served by
+> `GET /certificate/ca`, so each certificate in it is a CA the fleet accepts —
+> and ending at a root admits every sibling sub-CA beneath that root, present
+> and future, not only this CA's own ancestors.
+>
+> That is the price of Puppet's default `certificate_revocation = chain`, not
+> something to design around: under it a shorter bundle does not check less, it
+> stops agents connecting. Tested on a reconstructed `root → intermediate →
+> leaf` PKI with OpenSSL 3.6.3, where it fails twice over — path building will
+> not end at a non-self-signed anchor without `PARTIAL_CHAIN`, which Puppet does
+> not set, and with that forced, `-crl_check_all` then demands a CRL for the
+> anchor itself:
+>
+> ```bash
+> openssl verify -CAfile intermediate.pem -crl_check_all -CRLfile crls.pem leaf.pem
+> ```
+>
+> `certificate_revocation = leaf` permits a narrow bundle, at the cost of no
+> revocation checking above the leaf's issuer.
+
+**Ancestor CRLs are part of the same decision.** Whatever issuers this bundle
+carries, their CRLs must be published too or agents running `chain` fail
+verification — and a CRL for an issuer *not* in the bundle is discarded and
+alerts, because nothing here can verify it. `openvox-ca-ctl import --crl-chain`
+seeds them where the key is a file; where the key is held by a provider there is
+no `--private-key` to pass, so use `crl_chain_file` in the server configuration
+instead, which re-reads the ancestors on a timer and needs no key at all. See
+[Publishing an upstream CRL chain](configuration.md#publishing-an-upstream-crl-chain).
+
 Two further rules, both checked before anything is written, and both worth
 knowing before you ask the parent to sign rather than after:
 

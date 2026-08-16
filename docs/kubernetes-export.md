@@ -111,7 +111,12 @@ chain ending at a self-signed root. Nothing enforces that today —
 stops at an intermediate publishes that intermediate. It fails closed rather
 than open (an intermediate grants strictly less trust than the real root, and
 consumers trusting it simply fail to verify), but it fails, so import the whole
-chain. There is no `root` for CRLs, because a chain has no single anchor CRL —
+chain. For a Puppet agent that failure is not subtle and is not confined to
+revocation: with `certificate_revocation = chain`, OpenSSL will not end a path
+at a non-self-signed anchor at all, so the agent stops connecting rather than
+checking less — see the note under
+[Offline subcommands on the server binary](operator-cli.md#offline-subcommands-on-the-server-binary)
+for the test that establishes it. There is no `root` for CRLs, because a chain has no single anchor CRL —
 the root's own is simply one of its members.
 
 The default is `chain` so that upgrading changes nothing: before these fields
