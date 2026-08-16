@@ -931,12 +931,10 @@ var _ = Describe("refreshClientCRLs", func() {
 	})
 
 	It("names the entry and file when it drops a partial-scope CRL, once per change", func() {
-		// The api package sees the CRL and not the configuration, so the entry
-		// and path are the caller's to add -- and every other diagnostic in
-		// this feature carries both. A standing misconfiguration must also not
-		// reprint every refresh: the file looks valid, so the warning is the
-		// operator's only signal, and an hourly repeat is how it gets filtered
-		// out before anyone reads it.
+		// Asserted on the discard warning's own wording, not on the client_ca
+		// and path keys alone: warnAboutCRLCoverage logs the same two keys for
+		// the same entry, so a spec keyed on those passed with the whole
+		// discard-recording feature deleted.
 		var buf bytes.Buffer
 		orig := slog.Default()
 		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
@@ -952,13 +950,61 @@ var _ = Describe("refreshClientCRLs", func() {
 		domains, err := buildTrustDomains(cfg, ownCA, nil)
 		Expect(err).NotTo(HaveOccurred())
 
-		Expect(buf.String()).To(ContainSubstring("client_ca=server"))
-		Expect(buf.String()).To(ContainSubstring(cfg.ClientCA[0].CRLFile))
+		refreshClientCRLs(cfg, domains, metrics)
+
+		warned := ""
+		for _, line := range strings.Split(buf.String(), "\n") {
+			if strings.Contains(line, "cover only part") {
+				warned = line
+			}
+		}
+		Expect(warned).NotTo(BeEmpty(), "the discard must be reported at all")
+		Expect(warned).To(ContainSubstring("client_ca=server"))
+		Expect(warned).To(ContainSubstring(cfg.ClientCA[0].CRLFile),
+			"the path is the entry's own, which the api package cannot know")
+		// Parenthesised, because the static warning text also contains the
+		// words "a delta CRL" -- an assertion on the bare phrase passes with
+		// the per-CRL reason replaced by a count.
+		Expect(warned).To(ContainSubstring("(delta CRL)"),
+			"the reason distinguishes a delta from an IDP scope, and they are fixed differently")
+		Expect(warned).To(ContainSubstring("Server CA"),
+			"and the issuer, so a bundle of several upstreams says which one")
+	})
+
+	It("does not reprint the discard warning while the file is unchanged", func() {
+		// A partial file that is *refused* on reload is the case the first
+		// version got wrong: it compared against the installed set, which only
+		// changes when a reload is accepted, so the very configuration the
+		// operator had just broken warned every hour until it was filtered out.
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		defer slog.SetDefault(orig)
+
+		cfg := &serverConfig{}
+		cfg.ClientRevocationPolicy = config.RevocationRequire
+		cfg.ClientCA = []config.ClientCA{{
+			Name:    "server",
+			File:    writeCertFile(serverCA),
+			CRLFile: writeCRLFile(mintCRL(serverCA, serverKey)),
+		}}
+		domains, err := buildTrustDomains(cfg, ownCA, nil)
+		Expect(err).NotTo(HaveOccurred())
+		refreshClientCRLs(cfg, domains, metrics)
+
+		// A delta-only file now arrives: it covers nothing, so the reload is
+		// refused and the good set stays installed.
+		cfg.ClientCA[0].CRLFile = writeCRLFile(deltaCRL(serverCA, serverKey))
+		refreshClientCRLs(cfg, domains, metrics)
+		Expect(buf.String()).To(ContainSubstring("cover only part"),
+			"a newly broken delivery must be reported")
 
 		buf.Reset()
 		refreshClientCRLs(cfg, domains, metrics)
+		refreshClientCRLs(cfg, domains, metrics)
+
 		Expect(buf.String()).NotTo(ContainSubstring("cover only part"),
-			"an unchanged file must not reprint the warning every refresh")
+			"a refused reload repeating unchanged must not warn every pass")
 	})
 
 	It("publishes no gauge at all when the policy does not require CRLs", func() {

@@ -52,8 +52,9 @@ alerting rules for the openvox-ca exporter. It alerts on:
   [`client_ca`](../docs/configuration.md#trusting-client-certificates-from-another-ca)
   is configured. Two are critical because they mean clients of a foreign issuer
   are being turned away: *ClientCRLUnusable*, where an entry has no currently
-  valid CRL at all — every one expired, or every one discarded as unverifiable —
-  which under the default `require` policy rejects every client of that issuer;
+  valid CRL at all — every one expired, every one discarded as unverifiable, or
+  every one discarded as partial-scope — which under the default `require`
+  policy rejects every client of that issuer;
   and *ClientCRLRefusals*, which counts the refusals themselves rather than
   inferring them, so it fires on the thing an operator would otherwise learn from
   an agent-side 403 three layers away. The warning, *ClientCRLStale*, is the

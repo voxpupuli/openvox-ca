@@ -587,13 +587,12 @@ Under the default `require` policy, **`crl_file` is mandatory** for every entry:
 configuration validation rejects a block without one. Separately, and under
 *every* policy, the server refuses to start if a `crl_file` that is set cannot
 be read or holds a CRL that does not parse — so a stale path left behind on
-`skip` stops the server rather than being ignored. This check runs where the
-trust set is assembled, which is when TLS is configured; with no `tls_cert` and
-`tls_key` there is no client authentication to configure and `client_ca` is not
-consulted at all. That is
-deliberate — the anchor bundle beside it already fails closed, and a server that
-starts here would reject every client of the domain while its readiness probe
-reported healthy.
+`skip` stops the server rather than being ignored. That is deliberate — the
+anchor bundle beside it already fails closed, and a server that starts here
+would reject every client of the domain while its readiness probe reported
+healthy. The check runs where the trust set is assembled, which is when TLS is
+configured; with no `tls_cert` and `tls_key` there is no client authentication
+to set up and `client_ca` is not consulted at all.
 
 Every CRL in `crl_file` is signature-verified against an anchor in the same
 entry before it is used, and each is bound to the anchor whose key signed it.
@@ -609,8 +608,12 @@ already delivers it — a mounted Secret, a config-management run, a job fetchin
 the issuer's CDP — and this only notices; nothing in openvox-ca writes it. A
 reload is refused, keeping the previous set, when it fails outright, when it
 would cover fewer anchors than the set already in use, or when it would move any
-anchor *backwards* — an older CRL from the same issuer, by `cRLNumber` where the
-issuer publishes one and by `thisUpdate` otherwise. The last of these is what
+anchor *backwards* — an older CRL from the same issuer. Older means a lower
+`cRLNumber` where both the installed and the candidate CRL publish one; where
+their numbers are equal, or where either omits the extension, it means an
+earlier `thisUpdate`. The dates decide whenever the numbers cannot, rather than
+a numbered CRL outranking an unnumbered one: an issuer that stops publishing
+`cRLNumber` would otherwise pin the anchor, unable to update it ever again. The last of these is what
 stops a replayed file: it verifies and covers everything the current set covers,
 so nothing else on the path would notice, while re-admitting every serial
 revoked since it was signed. Refusing costs freshness and never availability.

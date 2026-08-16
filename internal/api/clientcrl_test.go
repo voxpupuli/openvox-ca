@@ -501,6 +501,40 @@ var _ = Describe("partial-scope client CRLs", func() {
 		Entry("issuing distribution point", asn1.ObjectIdentifier{2, 5, 29, 28}),
 	)
 
+	It("still denies the serials a partial CRL names", func() {
+		// Refusing it as *coverage* must not discard the revocations it lists.
+		// A bundle holding a base CRL beside its delta is what concatenating an
+		// issuer's CDP and freshestCRL output gives you, and a client revoked
+		// since the base was signed appears only in the delta -- so dropping it
+		// re-admits exactly the clients the operator most recently excluded.
+		revoked := big.NewInt(4242)
+		base := crlFrom(serverCA, caKey, time.Now().Add(time.Hour))
+		delta := scopedCRLFrom(serverCA, caKey, asn1.ObjectIdentifier{2, 5, 29, 27}, revoked)
+
+		set := api.NewClientCRLSet([]*x509.RevocationList{base, delta}, anchorSet())
+
+		// The base answers coverage; the delta is not counted towards it.
+		Expect(set.Usable(time.Now())).To(BeTrue())
+
+		leaf := &x509.Certificate{SerialNumber: revoked, Subject: pkix.Name{CommonName: "node1.test"}}
+		err := api.CheckChainRevocationForTest(
+			[]*x509.Certificate{leaf, serverCA}, set, api.RevocationRequire, time.Now())
+		Expect(err).To(MatchError(ContainSubstring("node1.test")),
+			"a serial named only by the delta must still be refused")
+	})
+
+	It("does not let a partial CRL satisfy require on its own", func() {
+		// The other half: it can deny, but it can never be the reason an issuer
+		// counts as covered, or a delta alone would answer for its whole issuer.
+		delta := scopedCRLFrom(serverCA, caKey, asn1.ObjectIdentifier{2, 5, 29, 27})
+		set := api.NewClientCRLSet([]*x509.RevocationList{delta}, anchorSet())
+
+		leaf := &x509.Certificate{SerialNumber: big.NewInt(7), Subject: pkix.Name{CommonName: "node2.test"}}
+		err := api.CheckChainRevocationForTest(
+			[]*x509.Certificate{leaf, serverCA}, set, api.RevocationRequire, time.Now())
+		Expect(err).To(MatchError(api.ErrNoUsableCRL))
+	})
+
 	It("still accepts a CRL carrying an unrelated extension", func() {
 		// The refusal is on two specific OIDs, not on extensions in general.
 		// A CRL with, say, an authority key identifier is entirely ordinary and
@@ -595,19 +629,43 @@ var _ = Describe("ClientCRLSet.Regresses", func() {
 			"same number, earlier ThisUpdate: nothing else would have caught it")
 	})
 
-	It("treats dropping the CRL number as a regression", func() {
-		// An issuer that was publishing a number and stops has gone backwards
-		// in the only ordering it offered. internal/ca's newerCRL says the same
-		// of the chain CRLs, and the two rules are meant to agree.
+	// Where only one side carries a cRLNumber the dates decide, never the
+	// presence of the extension. Deciding on presence was shipped briefly and
+	// was unsafe in both directions, so both are pinned here.
+	It("does not let a numbered CRL replace a newer unnumbered one", func() {
+		// The downgrade direction. An installed unnumbered CRL from today,
+		// against a numbered one three weeks old but still current: judged on
+		// presence, the older one is "not a regression" and installs,
+		// re-admitting every serial revoked in between.
+		installed := numberedCRLFrom(serverCA, caKey, future, 1)
+		installed.Number = nil // as an issuer omitting the extension parses
+		current := api.NewClientCRLSet([]*x509.RevocationList{installed}, anchorSet())
+
+		older := api.NewClientCRLSet(
+			[]*x509.RevocationList{
+				numberedCRLFrom(serverCA, caKey, future.Add(-21*24*time.Hour), 9),
+			}, anchorSet())
+
+		_, back := current.Regresses(older, time.Now())
+		Expect(back).To(BeTrue(),
+			"an older CRL must be refused whether or not it carries a number")
+	})
+
+	It("does not pin an anchor against an issuer that stops publishing numbers", func() {
+		// The denial-of-service direction, and the more likely of the two.
+		// Judged on presence, once any numbered CRL is installed an issuer that
+		// drops the extension can never update the anchor again -- every
+		// delivery refused, indefinitely, looking exactly like an attack.
 		current := api.NewClientCRLSet(
 			[]*x509.RevocationList{numberedCRLFrom(serverCA, caKey, future, 9)}, anchorSet())
 
-		unnumbered := numberedCRLFrom(serverCA, caKey, future, 9)
-		unnumbered.Number = nil // as an issuer omitting the extension parses
-		candidate := api.NewClientCRLSet([]*x509.RevocationList{unnumbered}, anchorSet())
+		newer := numberedCRLFrom(serverCA, caKey, future.Add(24*time.Hour), 1)
+		newer.Number = nil
+		candidate := api.NewClientCRLSet([]*x509.RevocationList{newer}, anchorSet())
 
 		_, back := current.Regresses(candidate, time.Now())
-		Expect(back).To(BeTrue())
+		Expect(back).To(BeFalse(),
+			"a newer CRL must install even though it publishes no number")
 	})
 
 	It("orders two unnumbered CRLs by ThisUpdate", func() {

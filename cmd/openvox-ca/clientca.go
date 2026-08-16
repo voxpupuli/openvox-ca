@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -126,9 +127,11 @@ func buildTrustDomains(cfg *serverConfig, ownCert *x509.Certificate, adminCNs ma
 		if err != nil {
 			return nil, fmt.Errorf("client_ca %q: %w", entry.Name, err)
 		}
-		set := api.NewClientCRLSet(crls, anchors)
-		warnAboutPartialCRLs(entry, set)
-		domain.SetRevocationSet(set)
+		// Partial-CRL discards are not reported here: main.go runs an immediate
+		// refreshClientCRLs pass before serving, which reports them once with
+		// the dedupe state that stops an unchanged file repeating hourly.
+		// Warning in both places printed every startup twice.
+		domain.SetRevocationSet(api.NewClientCRLSet(crls, anchors))
 		warnAboutCRLCoverage(entry, cfg.ResolvedPolicy(), crls, anchors)
 
 		domains = append(domains, domain)
@@ -203,21 +206,14 @@ func warnAboutPartialCRLs(entry *config.ClientCA, set *api.ClientCRLSet) {
 		"discarded", strings.Join(discarded, "; "))
 }
 
-// sameDiscards reports whether two sets discarded the same CRLs, so a standing
-// misconfiguration is not reprinted on every refresh while a newly introduced
-// one still is.
-func sameDiscards(a, b *api.ClientCRLSet) bool {
-	return strings.Join(a.Discarded(), "; ") == strings.Join(b.Discarded(), "; ")
-}
-
-// regressesCRLSet reports whether candidate would move any anchor backwards.
+// regressesCRLSet reports whether candidate would move any anchor backwards,
+// and the subject of an anchor it would, so the refusal can name the issuer
+// that regressed -- an operator holding a bundle of several upstreams needs to
+// know which one to chase.
 //
 // Separate from losesCoverage because the two answer different questions: that
 // one asks whether an anchor lost its CRL, this one whether an anchor's CRL got
 // older. A replayed file passes the first and fails the second.
-// Returns the anchor's subject when it does, so the refusal can name the issuer
-// that went backwards; an operator holding a bundle of several upstreams needs
-// to know which one to chase.
 func regressesCRLSet(current, candidate *api.ClientCRLSet, now time.Time) (string, bool) {
 	return current.Regresses(candidate, now)
 }
@@ -361,15 +357,15 @@ func refreshClientCRLs(cfg *serverConfig, domains []api.TrustDomain, m *clientCR
 			candidate = api.NewClientCRLSet(crls, domain.Anchors)
 		}
 
+		if candidate != nil && m.shouldWarnDiscards(entry.Name, candidate.Discarded()) {
+			warnAboutPartialCRLs(entry, candidate)
+		}
+
 		// Computed before the switch rather than inside a case guard, because
 		// the refusal names the anchor that moved and a case cannot bind a
 		// value. Empty where there is no crl_file to reload, where the read
 		// failed, and where nothing went backwards -- the first two of which
-		// the arms above it own.
-		if candidate != nil && !sameDiscards(domain.RevocationSet(), candidate) {
-			warnAboutPartialCRLs(entry, candidate)
-		}
-
+		// the err and losesCoverage arms below already answer for.
 		regressedAnchor := ""
 		if entry.CRLFile != "" && err == nil {
 			regressedAnchor, _ = regressesCRLSet(domain.RevocationSet(), candidate, now)
@@ -466,9 +462,9 @@ func runClientCRLReloader(ctx context.Context, cfg *serverConfig, domains []api.
 // clientCRLMetrics exposes whether each foreign trust domain currently has
 // usable revocation material.
 //
-// Under the require policy two recoverable conditions — every CRL for a domain
-// expired, or every CRL discarded as unverifiable — reject every client of that
-// domain. Without this gauge the first symptom is agents failing to
+// Under the require policy three recoverable conditions — every CRL for a
+// domain expired, every CRL discarded as unverifiable, or every CRL discarded
+// as partial-scope — reject every client of that domain. Without this gauge the first symptom is agents failing to
 // authenticate with a 403 whose cause is three layers from where an operator
 // would look.
 //
@@ -480,6 +476,44 @@ type clientCRLMetrics struct {
 	usable     *prometheus.GaugeVec
 	refusals   *prometheus.CounterVec
 	lastReload *prometheus.GaugeVec
+
+	// warnedDiscards remembers, per client_ca entry, the partial-CRL discards
+	// last reported, so a standing misconfiguration is not reprinted on every
+	// refresh while a newly introduced one still is.
+	//
+	// Kept here rather than compared against the installed set, which is what
+	// the first version did: the installed set only changes when a reload is
+	// *accepted*, so a candidate that is refused -- exactly the case where the
+	// operator has just broken the delivery -- differed from it every pass and
+	// warned every hour, which is the behaviour the suppression exists to stop.
+	discardMu      sync.Mutex
+	warnedDiscards map[string]string
+}
+
+// shouldWarnDiscards reports whether this entry's discards differ from the last
+// reported, recording them either way.
+func (m *clientCRLMetrics) shouldWarnDiscards(entry string, discards []string) bool {
+	if len(discards) == 0 {
+		return false
+	}
+	if m == nil {
+		// No exporter configured, so no per-entry state to dedupe against.
+		// Reporting every pass beats reporting nothing: the warning is the only
+		// signal a partial delivery gives, and without metrics it is the only
+		// signal at all.
+		return true
+	}
+	joined := strings.Join(discards, "; ")
+	m.discardMu.Lock()
+	defer m.discardMu.Unlock()
+	if m.warnedDiscards == nil {
+		m.warnedDiscards = map[string]string{}
+	}
+	if m.warnedDiscards[entry] == joined {
+		return false
+	}
+	m.warnedDiscards[entry] = joined
+	return true
 }
 
 // newClientCRLMetrics registers the gauge, or returns nil when the exporter is

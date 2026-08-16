@@ -84,6 +84,12 @@ type ClientCRLSet struct {
 	// a list again and hoping it matches.
 	anchors []*x509.Certificate
 
+	// partialBySignerKey holds CRLs that cannot stand in for their issuer's
+	// full list -- deltas and IDP-scoped ones. Read for the serials they name,
+	// never for coverage or currency, so a partial CRL can deny a client but
+	// can never satisfy `require` on its own.
+	partialBySignerKey map[string][]*x509.RevocationList
+
 	// discarded holds "issuer (reason)" for each CRL refused at construction,
 	// for the caller to report with the entry and path it knows.
 	discarded []string
@@ -97,8 +103,9 @@ type ClientCRLSet struct {
 // issuer it speaks for belongs here, not in a loader that could be bypassed.
 func NewClientCRLSet(crls []*x509.RevocationList, anchors []*x509.Certificate) *ClientCRLSet {
 	set := &ClientCRLSet{
-		bySignerKey: map[string][]*x509.RevocationList{},
-		anchors:     anchors,
+		bySignerKey:        map[string][]*x509.RevocationList{},
+		partialBySignerKey: map[string][]*x509.RevocationList{},
+		anchors:            anchors,
 	}
 	for _, crl := range crls {
 		signer := SignerOfCRL(crl, anchors)
@@ -115,10 +122,19 @@ func NewClientCRLSet(crls []*x509.RevocationList, anchors []*x509.Certificate) *
 			// it is handed a file. Refusing beats silently covering less than the
 			// operator believes.
 			// Recorded rather than logged here: the api package does not know
-			// which client_ca entry or file this came from, and every other
-			// diagnostic in this feature carries both. The caller reports it.
+			// which client_ca entry or file this came from, and an operator
+			// holding several entries needs both to act. The caller reports it.
 			set.discarded = append(set.discarded,
 				fmt.Sprintf("%s (%s)", sanitiseForLog(crl.Issuer.String()), reason))
+			// Filed apart rather than dropped. It cannot answer "is this
+			// issuer covered", but the serials it does name are genuinely
+			// revoked, and a bundle holding a base CRL beside its delta -- what
+			// concatenating an issuer's CDP and freshestCRL gives you -- would
+			// otherwise re-admit every client revoked since the base was
+			// signed. The same argument forIssuer makes for keeping expired
+			// CRLs readable: discarding one does not make the policy stricter.
+			pkey := string(signer.RawSubjectPublicKeyInfo)
+			set.partialBySignerKey[pkey] = append(set.partialBySignerKey[pkey], crl)
 			continue
 		}
 		key := string(signer.RawSubjectPublicKeyInfo)
@@ -166,6 +182,20 @@ func coversPartially(crl *x509.RevocationList) (string, bool) {
 // turn a stale CRL into no revocation checking at all, which is the outcome
 // `check` exists to avoid; the operator asked to tolerate an issuer without
 // CRLs, not to stop reading the ones they supplied.
+// forRevocationLookup is forIssuer plus the partial-scope CRLs, for deciding
+// whether a serial is revoked.
+//
+// anyValid still comes from the full CRLs alone: a delta is evidence that a
+// serial *is* revoked and never evidence that an issuer is covered, so it must
+// not be able to satisfy `require` for an issuer whose full CRL is missing.
+func (s *ClientCRLSet) forRevocationLookup(cert *x509.Certificate, now time.Time) (crls []*x509.RevocationList, anyValid bool) {
+	crls, anyValid = s.forIssuer(cert, now)
+	if s == nil {
+		return crls, anyValid
+	}
+	return append(crls, s.partialBySignerKey[string(cert.RawSubjectPublicKeyInfo)]...), anyValid
+}
+
 func (s *ClientCRLSet) forIssuer(cert *x509.Certificate, now time.Time) (crls []*x509.RevocationList, anyValid bool) {
 	if s == nil {
 		return nil, false
@@ -195,6 +225,18 @@ func currentAt(crl *x509.RevocationList, now time.Time) bool {
 	return !crl.NextUpdate.IsZero() && crl.NextUpdate.After(now)
 }
 
+// Discarded lists the CRLs this set refused to admit, as "issuer (reason)".
+//
+// Non-empty means the file held CRLs that cannot stand in for their issuer's
+// full list, so the coverage this set reports is not the coverage the operator
+// believed they were delivering.
+func (s *ClientCRLSet) Discarded() []string {
+	if s == nil {
+		return nil
+	}
+	return s.discarded
+}
+
 // Usable reports whether this entry holds any current revocation material at
 // all. Drives puppetca_client_crl_usable.
 //
@@ -219,18 +261,6 @@ func currentAt(crl *x509.RevocationList, now time.Time) bool {
 // arrived yet. So this answers the question it can answer honestly — is there
 // anything current to check against — and the question it cannot is answered at
 // enforcement time, where a refusal is a fact rather than an estimate.
-// Discarded lists the CRLs this set refused to admit, as "issuer (reason)".
-//
-// Non-empty means the file held CRLs that cannot stand in for their issuer's
-// full list, so the coverage this set reports is not the coverage the operator
-// believed they were delivering.
-func (s *ClientCRLSet) Discarded() []string {
-	if s == nil {
-		return nil
-	}
-	return s.discarded
-}
-
 func (s *ClientCRLSet) Usable(now time.Time) bool {
 	if s == nil {
 		return false
@@ -341,27 +371,36 @@ type crlFreshness struct {
 	thisUpdate time.Time
 }
 
-// newerThan orders two CRLs from one issuer.
+// newerThan orders two CRLs from one issuer: by cRLNumber where both publish
+// one, and by ThisUpdate otherwise -- the one dimension every CRL carries.
 //
-// The first three arms are internal/ca's newerCRL rule: cRLNumber decides where
-// both publish one, and a published number beats an absent one, since an issuer
-// that stops publishing the number has itself gone backwards.
+// It deliberately does *not* follow internal/ca's newerCRL in treating a
+// published number as beating an absent one. That rule is safe there, where
+// this CA issues both CRLs and controls whether the extension appears. Here the
+// CRLs come from a foreign issuer through a file, and deciding on the presence
+// of an extension is unsafe in both directions:
 //
-// The fourth arm is one newerCRL does not have. Equal numbers fall back to
-// ThisUpdate, because an issuer that reissues without incrementing leaves that
-// as the only ordering there is, and calling the pair equal would let the older
-// of the two install. The steady state between refreshes is the same file,
-// equal on both fields, so this still reports no regression.
+//   - An installed unnumbered CRL against a numbered candidate would say "not a
+//     regression" whatever the dates, so a numbered CRL three weeks old could
+//     replace a current one and re-admit everything revoked since.
+//   - An installed numbered CRL against an unnumbered candidate would say
+//     "regression" whatever the dates, pinning the anchor: once any numbered
+//     CRL is installed, an issuer that stops publishing the extension can never
+//     update it again, and the refusal is indistinguishable from an attack.
+//
+// Comparing the dates instead costs nothing against a replay, which is the
+// threat this exists for: an attacker who cannot forge a signature can only
+// replay CRLs the issuer really published, and a genuinely older one carries a
+// genuinely older ThisUpdate. The steady state between refreshes is the same
+// file, equal on both fields, so this still reports no regression.
 func (f crlFreshness) newerThan(other crlFreshness) bool {
-	switch {
-	case f.number != nil && other.number != nil:
+	if f.number != nil && other.number != nil {
 		if c := f.number.Cmp(other.number); c != 0 {
 			return c > 0
 		}
-	case f.number != nil:
-		return true
-	case other.number != nil:
-		return false
+		// Equal numbers: an issuer that reissues without incrementing leaves
+		// ThisUpdate as the only ordering there is, and calling the pair equal
+		// would let the older of the two install.
 	}
 	return f.thisUpdate.After(other.thisUpdate)
 }
@@ -454,7 +493,7 @@ func checkChainRevocation(chain []*x509.Certificate, set *ClientCRLSet, policy s
 
 	for i := 0; i < len(chain)-1; i++ {
 		subject, issuer := chain[i], chain[i+1]
-		crls, anyValid := set.forIssuer(issuer, now)
+		crls, anyValid := set.forRevocationLookup(issuer, now)
 		if policy == RevocationRequire && !anyValid {
 			return fmt.Errorf("%w: no currently valid CRL for issuer %q",
 				ErrNoUsableCRL, issuer.Subject.CommonName)
