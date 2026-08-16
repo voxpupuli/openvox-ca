@@ -86,9 +86,10 @@ var _ = Describe("ClientCAConfig.ResolvedPolicy", func() {
 })
 
 // The interval the client-CRL reload job runs on. The accessor's own arms are
-// worth pinning, but so is the name an operator writes: this setting has no
-// env key, so the yaml tag is the only way to reach it, and a wrong tag leaves
-// the job silently on the default with a valid-looking config file.
+// worth pinning, but so are the two names an operator writes: a wrong yaml tag
+// leaves the job silently on the default with a valid-looking config file. The
+// tag is covered below; the env key is bound in cmd/openvox-ca, so it is
+// covered beside its siblings in that package's applyServerEnv table.
 var _ = Describe("ClientCAConfig.ClientCRLRefreshInterval", func() {
 	It("defaults to an hour when unset", func() {
 		Expect((&ClientCAConfig{}).ClientCRLRefreshInterval()).To(Equal(time.Hour))

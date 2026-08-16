@@ -543,8 +543,16 @@ var _ = Describe("ClientCRLSet.Regresses", func() {
 		older := api.NewClientCRLSet(
 			[]*x509.RevocationList{numberedCRLFrom(serverCA, caKey, future, 4)}, anchorSet())
 
-		_, back := current.Regresses(older, time.Now())
+		who, back := current.Regresses(older, time.Now())
 		Expect(back).To(BeTrue(), "CRL number 4 must not replace 9")
+
+		// The name is the point of the return value: the map is keyed by raw
+		// SubjectPublicKeyInfo, which is binary and cannot go in a log line, so
+		// an operator holding a bundle of several upstreams would otherwise be
+		// told a reload was refused and not which issuer to chase.
+		Expect(who).To(Equal(serverCA.Subject.String()))
+		Expect(who).NotTo(ContainSubstring(string(serverCA.RawSubjectPublicKeyInfo)),
+			"the raw key must not reach a message an operator reads")
 	})
 
 	It("accepts a newer CRL for the same anchor", func() {

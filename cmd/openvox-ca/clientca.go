@@ -126,7 +126,9 @@ func buildTrustDomains(cfg *serverConfig, ownCert *x509.Certificate, adminCNs ma
 		if err != nil {
 			return nil, fmt.Errorf("client_ca %q: %w", entry.Name, err)
 		}
-		domain.SetRevocationSet(api.NewClientCRLSet(crls, anchors))
+		set := api.NewClientCRLSet(crls, anchors)
+		warnAboutPartialCRLs(entry, set)
+		domain.SetRevocationSet(set)
 		warnAboutCRLCoverage(entry, cfg.ResolvedPolicy(), crls, anchors)
 
 		domains = append(domains, domain)
@@ -180,6 +182,32 @@ func warnIfGrantsSpanAnchors(entry *config.ClientCA, anchors []*x509.Certificate
 		"granted for one issuer is honoured from the others too. Split the entry, one per issuer, "+
 		"if you meant to scope the grant.",
 		"client_ca", entry.Name, "anchors", strings.Join(names, ", "))
+}
+
+// warnAboutPartialCRLs reports CRLs dropped for covering only part of their
+// issuer's revocations, with the entry and file the api package cannot know.
+//
+// Worth a warning rather than a debug line because the file looks valid: every
+// CRL in it verifies, and the operator's evidence that the delivery works is
+// that nothing complained.
+func warnAboutPartialCRLs(entry *config.ClientCA, set *api.ClientCRLSet) {
+	discarded := set.Discarded()
+	if len(discarded) == 0 {
+		return
+	}
+	slog.Warn("Ignoring client CRLs that cover only part of their issuer's revocations: "+
+		"a delta CRL, or one scoped to an issuing distribution point, lists a fraction of "+
+		"what its issuer has revoked, and this CA is handed a file rather than fetching the "+
+		"rest. Deliver the issuer's full CRL.",
+		"client_ca", entry.Name, "path", entry.CRLFile,
+		"discarded", strings.Join(discarded, "; "))
+}
+
+// sameDiscards reports whether two sets discarded the same CRLs, so a standing
+// misconfiguration is not reprinted on every refresh while a newly introduced
+// one still is.
+func sameDiscards(a, b *api.ClientCRLSet) bool {
+	return strings.Join(a.Discarded(), "; ") == strings.Join(b.Discarded(), "; ")
 }
 
 // regressesCRLSet reports whether candidate would move any anchor backwards.
@@ -338,6 +366,10 @@ func refreshClientCRLs(cfg *serverConfig, domains []api.TrustDomain, m *clientCR
 		// value. Empty where there is no crl_file to reload, where the read
 		// failed, and where nothing went backwards -- the first two of which
 		// the arms above it own.
+		if candidate != nil && !sameDiscards(domain.RevocationSet(), candidate) {
+			warnAboutPartialCRLs(entry, candidate)
+		}
+
 		regressedAnchor := ""
 		if entry.CRLFile != "" && err == nil {
 			regressedAnchor, _ = regressesCRLSet(domain.RevocationSet(), candidate, now)

@@ -22,7 +22,6 @@ import (
 	"encoding/asn1"
 	"errors"
 	"fmt"
-	"log/slog"
 	"math/big"
 	"sync/atomic"
 	"time"
@@ -84,6 +83,10 @@ type ClientCRLSet struct {
 	// coverage are answered by the set itself rather than by a caller supplying
 	// a list again and hoping it matches.
 	anchors []*x509.Certificate
+
+	// discarded holds "issuer (reason)" for each CRL refused at construction,
+	// for the caller to report with the entry and path it knows.
+	discarded []string
 }
 
 // NewClientCRLSet builds a set from crls, keeping only those an anchor signed
@@ -111,8 +114,11 @@ func NewClientCRLSet(crls []*x509.RevocationList, anchors []*x509.Certificate) *
 			// client that also fetches the rest, and this CA fetches nothing --
 			// it is handed a file. Refusing beats silently covering less than the
 			// operator believes.
-			slog.Warn("Ignoring a client CRL that covers only part of its issuer's revocations",
-				"issuer", sanitiseForLog(crl.Issuer.String()), "reason", reason)
+			// Recorded rather than logged here: the api package does not know
+			// which client_ca entry or file this came from, and every other
+			// diagnostic in this feature carries both. The caller reports it.
+			set.discarded = append(set.discarded,
+				fmt.Sprintf("%s (%s)", sanitiseForLog(crl.Issuer.String()), reason))
 			continue
 		}
 		key := string(signer.RawSubjectPublicKeyInfo)
@@ -213,6 +219,18 @@ func currentAt(crl *x509.RevocationList, now time.Time) bool {
 // arrived yet. So this answers the question it can answer honestly — is there
 // anything current to check against — and the question it cannot is answered at
 // enforcement time, where a refusal is a fact rather than an estimate.
+// Discarded lists the CRLs this set refused to admit, as "issuer (reason)".
+//
+// Non-empty means the file held CRLs that cannot stand in for their issuer's
+// full list, so the coverage this set reports is not the coverage the operator
+// believed they were delivering.
+func (s *ClientCRLSet) Discarded() []string {
+	if s == nil {
+		return nil
+	}
+	return s.discarded
+}
+
 func (s *ClientCRLSet) Usable(now time.Time) bool {
 	if s == nil {
 		return false
@@ -283,7 +301,7 @@ func (s *ClientCRLSet) Coverage(now time.Time) (present, current map[string]bool
 	return present, current
 }
 
-// Freshness reports, per anchor key, the newest CRL this set holds for that
+// freshness reports, per anchor key, the newest CRL this set holds for that
 // anchor -- by CRL number where the issuer publishes one, and by ThisUpdate
 // otherwise, since cRLNumber is required of a conforming issuer but not
 // universally present (`openssl ca -gencrl` omits it under the stock config).
@@ -323,10 +341,6 @@ type crlFreshness struct {
 	thisUpdate time.Time
 }
 
-// newerThan compares by cRLNumber when both carry one -- the field RFC 5280
-// defines for exactly this -- and falls back to ThisUpdate when either does not.
-// A numbered CRL is never ranked against an unnumbered one by number alone,
-// because the two sequences are unrelated.
 // newerThan orders two CRLs from one issuer.
 //
 // The first three arms are internal/ca's newerCRL rule: cRLNumber decides where
@@ -353,7 +367,12 @@ func (f crlFreshness) newerThan(other crlFreshness) bool {
 }
 
 // Regresses reports whether candidate would move any anchor backwards, naming
-// the first anchor it would, so a refusal can say which issuer regressed.
+// one of the anchors it would, so a refusal can say which issuer regressed.
+//
+// One rather than the first: the scan is over a map, so where several anchors
+// regress at once the name reported varies between passes. That is sufficient
+// for its purpose -- an operator needs a thread to pull, and the reload is
+// refused whole either way -- but it is not a stable identifier to match on.
 func (s *ClientCRLSet) Regresses(candidate *ClientCRLSet, now time.Time) (string, bool) {
 	currentF := s.freshness(now)
 	candidateF := candidate.freshness(now)

@@ -33,6 +33,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"time"
 
@@ -507,6 +508,29 @@ var _ = Describe("Authorisation across trust domains", func() {
 					"asserting the substitution and this, rather than the absence of a raw "+
 					"newline alone, because TextHandler escapes one anyway and that check "+
 					"would pass unsanitised")
+		})
+
+		It("neutralises the subject on the unauthenticated certificate fetch", func() {
+			// The one subject log that precedes ValidateSubject, on the one
+			// endpoint reachable with no client certificate at all. Every
+			// sibling handler validates first and so logs a name the subject
+			// grammar already constrains; this one cannot, because the "ca"
+			// branch returns before validation and logging after it would lose
+			// the line for the endpoint's commonest request.
+			var buf bytes.Buffer
+			orig := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			defer slog.SetDefault(orig)
+
+			handler := build(map[string]bool{}, true)
+			req := httptest.NewRequest("GET",
+				"/certificate/"+url.PathEscape("x\nlevel=ERROR msg=\"forged\""), nil)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			Expect(buf.String()).To(ContainSubstring("\uFFFD"),
+				"the newline must be substituted, not merely escaped by the handler")
+			Expect(buf.String()).NotTo(ContainSubstring("\nlevel=ERROR"))
 		})
 
 		It("neutralises certnames from the request body at the bulk endpoints", func() {

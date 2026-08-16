@@ -587,7 +587,10 @@ Under the default `require` policy, **`crl_file` is mandatory** for every entry:
 configuration validation rejects a block without one. Separately, and under
 *every* policy, the server refuses to start if a `crl_file` that is set cannot
 be read or holds a CRL that does not parse — so a stale path left behind on
-`skip` stops the server rather than being ignored. That is
+`skip` stops the server rather than being ignored. This check runs where the
+trust set is assembled, which is when TLS is configured; with no `tls_cert` and
+`tls_key` there is no client authentication to configure and `client_ca` is not
+consulted at all. That is
 deliberate — the anchor bundle beside it already fails closed, and a server that
 starts here would reject every client of the domain while its readiness probe
 reported healthy.
@@ -610,18 +613,24 @@ anchor *backwards* — an older CRL from the same issuer, by `cRLNumber` where t
 issuer publishes one and by `thisUpdate` otherwise. The last of these is what
 stops a replayed file: it verifies and covers everything the current set covers,
 so nothing else on the path would notice, while re-admitting every serial
-revoked since it was signed. Refusing costs freshness and never availability,
-and each refusal is logged with the `client_ca` entry and the issuer concerned.
+revoked since it was signed. Refusing costs freshness and never availability.
+Every refusal is logged with the `client_ca` entry; the two that compare against
+the installed set also name the anchor concerned, while a read failure has no
+parsed issuer to name and logs the error instead.
 
 A **delta CRL** or one scoped to an **issuing distribution point** is dropped
 with a log line rather than accepted. Either lists a fraction of what its issuer
 has revoked, and this CA is handed a file rather than fetching distribution
 points, so it has no way to obtain the rest; treating a partial list as full
 coverage would report a domain fully covered while consulting a list missing
-most of its revocations. If every CRL in an entry's file is partial the entry
-has no usable coverage at all, which under `require` refuses that domain's
-clients — so `puppetca_client_crl_usable` going to 0 right after a CRL delivery
-change is the signal to check what the file now contains.
+most of its revocations. If every CRL in an entry's file is partial, the
+result is a set covering nothing — and what happens next depends on when it
+arrives. At **startup** that is the entry's only set, so under `require` the
+domain refuses its clients and `puppetca_client_crl_usable` is 0 for it. On a
+**reload** it is refused like any other narrowing candidate, the previous CRLs
+stay in use, and the visible signal is instead
+`puppetca_client_crl_last_reload_timestamp_seconds` going stale while the log
+records the discard and the refusal.
 
 The anchors themselves deliberately do not reload: re-reading them would mean
 re-parsing what a domain trusts while requests are being decided against it, and

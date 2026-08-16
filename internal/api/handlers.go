@@ -474,7 +474,13 @@ func (s *Server) handlePutStatusBySerial(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleGetCert(w http.ResponseWriter, r *http.Request) {
 	subject := r.PathValue("subject")
-	slog.Debug("GET certificate", "subject", subject, "client", clientOf(r))
+	// Sanitised, unlike its siblings, because this is the one subject log that
+	// runs *before* ValidateSubject -- the "ca" branch below returns without
+	// ever reaching it, so validating first would cost the log line for the
+	// most common request on the endpoint. GET /certificate is also reachable
+	// unauthenticated, which makes this the least constrained path segment the
+	// API logs.
+	slog.Debug("GET certificate", "subject", sanitiseForLog(subject), "client", clientOf(r))
 
 	// Special case: "ca" returns the CA cert.
 	if subject == "ca" {

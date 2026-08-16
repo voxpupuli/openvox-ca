@@ -805,7 +805,7 @@ func newRootCmd() *cobra.Command {
 				// is not about the first request -- it is that `== 0` cannot fire
 				// on a series that does not exist, so a domain whose CRLs are
 				// unusable from the very first load would otherwise go unalerted
-				// until the first maintenance tick.
+				// until the first refresh tick.
 				refreshClientCRLs(cfg, srv.AuthConfig.Domains, crlMetrics)
 				// A refusal is the one unambiguous statement that clients are
 				// being turned away for want of a CRL; load-time coverage can

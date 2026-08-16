@@ -264,7 +264,7 @@
             labels: { severity: 'critical' } + $._config.alertLabels,
             annotations: {
               summary: 'A Puppet CA client trust domain has no usable CRL.',
-              description: 'client_ca {{ $labels.client_ca }} on {{ $labels.instance }} holds no currently valid CRL at all — every CRL expired, or every one was discarded as unverifiable. Under client_revocation_policy=require every client of that issuer is rejected. Refresh its crl_file from the issuing CA. Note this fires only on total loss: a domain holding one anchor\'s CRL and not another\'s reads healthy here, and shows up as PuppetCAClientCRLRefusals instead.',
+              description: 'client_ca {{ $labels.client_ca }} on {{ $labels.instance }} holds no currently valid CRL at all — every CRL expired, every one was discarded as unverifiable, or every one was discarded as partial-scope (a delta CRL, or one scoped to an issuing distribution point, which lists only a fraction of what its issuer has revoked). Under client_revocation_policy=require every client of that issuer is rejected. Refresh its crl_file from the issuing CA, and if the delivery was recently changed check the server log for discard warnings — a full CRL is required here, since this CA is handed a file and fetches no distribution points. Note this fires only on total loss: a domain holding one anchor\'s CRL and not another\'s reads healthy here, and shows up as PuppetCAClientCRLRefusals instead.',
             },
           },
           {

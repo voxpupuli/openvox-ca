@@ -368,6 +368,24 @@ func mintCRL(cert *x509.Certificate, key *ecdsa.PrivateKey, revoked ...*big.Int)
 	return crl
 }
 
+// deltaCRL issues a CRL carrying the delta CRL indicator, which makes it a
+// fraction of its issuer's revocations rather than the whole list.
+func deltaCRL(cert *x509.Certificate, key *ecdsa.PrivateKey) *x509.RevocationList {
+	GinkgoHelper()
+	der, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+		Number:     big.NewInt(1),
+		ThisUpdate: time.Now().Add(-time.Hour),
+		NextUpdate: time.Now().Add(time.Hour),
+		ExtraExtensions: []pkix.Extension{
+			{Id: asn1.ObjectIdentifier{2, 5, 29, 27}, Value: []byte{0x30, 0x00}},
+		},
+	}, cert, key)
+	Expect(err).NotTo(HaveOccurred())
+	crl, err := x509.ParseRevocationList(der)
+	Expect(err).NotTo(HaveOccurred())
+	return crl
+}
+
 // numberedCRLUntil is mintCRL with an explicit cRLNumber and NextUpdate, so a
 // spec can order two CRLs from one issuer deliberately rather than relying on
 // mintCRL's clock, and tell which of the two ended up installed.
@@ -910,6 +928,37 @@ var _ = Describe("refreshClientCRLs", func() {
 
 		Expect(lastReload("server")).To(BeNumerically(">", applied),
 			"an unchanged file must not be refused as a replay")
+	})
+
+	It("names the entry and file when it drops a partial-scope CRL, once per change", func() {
+		// The api package sees the CRL and not the configuration, so the entry
+		// and path are the caller's to add -- and every other diagnostic in
+		// this feature carries both. A standing misconfiguration must also not
+		// reprint every refresh: the file looks valid, so the warning is the
+		// operator's only signal, and an hourly repeat is how it gets filtered
+		// out before anyone reads it.
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		defer slog.SetDefault(orig)
+
+		cfg := &serverConfig{}
+		cfg.ClientRevocationPolicy = config.RevocationRequire
+		cfg.ClientCA = []config.ClientCA{{
+			Name:    "server",
+			File:    writeCertFile(serverCA),
+			CRLFile: writeCRLFile(deltaCRL(serverCA, serverKey)),
+		}}
+		domains, err := buildTrustDomains(cfg, ownCA, nil)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(buf.String()).To(ContainSubstring("client_ca=server"))
+		Expect(buf.String()).To(ContainSubstring(cfg.ClientCA[0].CRLFile))
+
+		buf.Reset()
+		refreshClientCRLs(cfg, domains, metrics)
+		Expect(buf.String()).NotTo(ContainSubstring("cover only part"),
+			"an unchanged file must not reprint the warning every refresh")
 	})
 
 	It("publishes no gauge at all when the policy does not require CRLs", func() {
