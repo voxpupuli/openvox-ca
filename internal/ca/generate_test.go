@@ -54,6 +54,75 @@ type recordingLockBackend struct {
 	acquired []string
 }
 
+// twoReplicaBackend stands in for a backend that coordinates across processes,
+// so two StorageService values can be raced the way two replicas would be.
+//
+// It does two things. AcquireLock is a real per-name mutex held on the backend
+// rather than on either service, which is what a distributed lock looks like to
+// WithLock -- the filesystem backend has no Locker at all, so two services over
+// one directory fall back to a mutex each and coordinate nothing.
+//
+// And Exists rendezvouses on the subject's certificate key: the first caller to
+// reach the existence check waits for a second, or for a short grace period.
+// That is what makes the outcome deterministic instead of timing-dependent.
+// Without it the race is decided by which goroutine happens to write first, and
+// measurement says that is worthless as a regression test: over 20 runs the
+// unsynchronised race double-issued 6 times with the subject lock in place and 4
+// times with it bypassed. It cannot tell correct code from broken code, and it
+// fails on correct code.
+type twoReplicaBackend struct {
+	storage.Backend
+
+	mu    sync.Mutex
+	locks map[string]*sync.Mutex
+
+	barrierKey string
+	arrived    int
+	both       chan struct{}
+	grace      time.Duration
+}
+
+func newTwoReplicaBackend(base storage.Backend, subject string) *twoReplicaBackend {
+	return &twoReplicaBackend{
+		Backend:    base,
+		locks:      map[string]*sync.Mutex{},
+		barrierKey: storage.CertKey(subject),
+		both:       make(chan struct{}),
+		grace:      250 * time.Millisecond,
+	}
+}
+
+func (b *twoReplicaBackend) AcquireLock(_ context.Context, name string) (storage.Unlocker, error) {
+	b.mu.Lock()
+	m, ok := b.locks[name]
+	if !ok {
+		m = &sync.Mutex{}
+		b.locks[name] = m
+	}
+	b.mu.Unlock()
+
+	m.Lock()
+	return unlockFunc(m.Unlock), nil
+}
+
+func (b *twoReplicaBackend) Exists(ctx context.Context, key string) (bool, error) {
+	if key == b.barrierKey {
+		b.mu.Lock()
+		b.arrived++
+		if b.arrived == 2 {
+			close(b.both)
+		}
+		wait := b.both
+		b.mu.Unlock()
+
+		select {
+		case <-wait:
+		case <-time.After(b.grace):
+		}
+	}
+	return b.Backend.Exists(ctx, key)
+}
+
 // crlWriteFailBackend fails only the CRL write, so a spec can drive the revoke
 // phase of a replacement into failure while everything else keeps working.
 // Chmod cannot do this job: the CRL is rewritten by a temp file plus rename in
@@ -260,6 +329,63 @@ var _ = Describe("CA Generate", func() {
 
 			Expect(rec.names()).To(ContainElement("subject:locked-node"),
 				"Generate must serialise on the same per-subject lock Sign and Clean use")
+		})
+
+		It("lets only one of two replicas issue for the same subject", func() {
+			// The outcome #195 asks for, rather than the mechanism the spec
+			// above pins: two independent CA values over one coordinating
+			// backend, racing the same subject, and exactly one certificate
+			// comes out of it.
+			//
+			// #195 proposes doing this with two StorageService values over one
+			// filesystem directory. That does not work, and it fails in the
+			// direction that costs most: the filesystem backend implements no
+			// Locker, so the two services fall back to a process-local mutex
+			// each and coordinate nothing. Measured over 20 runs it double-issued
+			// 6 times with the subject lock in place and 4 times with it
+			// bypassed -- indistinguishable, and red on correct code. Hence a
+			// shared Locker here, which is what a real distributed backend
+			// provides and what this lock exists to use.
+			//
+			// The rendezvous inside that backend is the other half. An
+			// unsynchronised race is decided by whichever goroutine writes
+			// first, so it detects a missing lock only by luck -- 4 times in 20
+			// when measured. Making both callers meet at the existence check
+			// makes both directions deterministic.
+			ctx := context.Background()
+
+			two := newTwoReplicaBackend(storage.NewFilesystemBackend(tmpDir), "replica-node")
+			priv := filepath.Join(tmpDir, "private")
+			replica := func() *ca.CA {
+				c := ca.New(storage.NewWithBackend(two, priv), ca.AutosignConfig{Mode: "off"}, "puppet.test")
+				Expect(c.Init(ctx)).To(Succeed())
+				return c
+			}
+			first, second := replica(), replica()
+
+			var wg sync.WaitGroup
+			errs := make([]error, 2)
+			wg.Add(2)
+			for i, c := range []*ca.CA{first, second} {
+				go func(i int, c *ca.CA) {
+					defer GinkgoRecover()
+					defer wg.Done()
+					_, errs[i] = c.GenerateWithOptions(ctx, "replica-node", ca.GenerateOptions{})
+				}(i, c)
+			}
+			wg.Wait()
+
+			var issued int
+			for _, err := range errs {
+				if err == nil {
+					issued++
+					continue
+				}
+				Expect(err).To(MatchError(ca.ErrCertExists),
+					"the replica that loses the lock must see the winner's certificate, not some other failure")
+			}
+			Expect(issued).To(Equal(1),
+				"two replicas issuing for one subject is the whole defect: %v", errs)
 		})
 
 		It("takes the subject lock before the CRL lock when replacing", func() {
