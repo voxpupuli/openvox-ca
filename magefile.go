@@ -327,77 +327,139 @@ func verifyDistVariantsIn(ciSrc, relSrc []byte) error {
 // pin rather than to dictate how a present one is spelled.
 const automergeBasePin = "github.event.pull_request.base.ref"
 
-// verifyAutomergeBasePin asserts that any ci.yml job which runs `gh pr merge`
-// stays pinned to a default-branch base for as long as the workflow's
-// pull_request trigger is unfiltered by base. Wired into dev:check.
-//
-// The two are a pair. Such a job holds contents: write and pull-requests:
-// write, and what confined it to main used to be the trigger's own
-// branches: ["main"] filter rather than anything in the job. With that filter
-// gone the `if:` is the only thing left, and the repository's "Main" ruleset
-// applies to ~DEFAULT_BRANCH only -- so on any other base an auto-merge would
-// land a bot PR under no ruleset at all. ci.yml says as much in a comment
-// beside the job, but a comment does not fail a build: a reflow of the folded
-// `if:` block that mis-parenthesises it, or a tidy-up that drops the clause,
-// would otherwise go green. This is the same class of silent loss that
-// verifyDistVariants guards, and the same class the unfiltered trigger exists
-// to fix.
-//
-// The job is matched on what it does rather than on being named "automerge",
-// so renaming it does not quietly retire the guard.
-func verifyAutomergeBasePin() error {
-	ciSrc, err := os.ReadFile(filepath.Join(".github", "workflows", "ci.yml"))
-	if err != nil {
-		return err
-	}
-	return verifyAutomergeBasePinIn(ciSrc)
+// baseScopedWorkflows are the workflows whose pull_request trigger must stay
+// unfiltered by base. Both were filtered to ["main"] until the change that
+// added these guards, which meant neither ran on a stacked PR.
+var baseScopedWorkflows = []string{"ci.yml", "codeql.yml"}
+
+// workflowGuardDoc is the slice of a workflow document the two guards below
+// read: which triggers are declared, and each job's condition and steps.
+type workflowGuardDoc struct {
+	On   map[string]yaml.Node `yaml:"on"`
+	Jobs map[string]struct {
+		If    string `yaml:"if"`
+		Steps []struct {
+			Run  string `yaml:"run"`
+			Uses string `yaml:"uses"`
+		} `yaml:"steps"`
+	} `yaml:"jobs"`
 }
 
-// verifyAutomergeBasePinIn is verifyAutomergeBasePin over caller-supplied
-// workflow contents, split out so the failure branches are testable without
-// touching the real workflow file.
-func verifyAutomergeBasePinIn(ciSrc []byte) error {
-	var doc struct {
-		On struct {
-			PullRequest struct {
-				Branches []string `yaml:"branches"`
-			} `yaml:"pull_request"`
-		} `yaml:"on"`
-		Jobs map[string]struct {
-			If    string `yaml:"if"`
-			Steps []struct {
-				Run string `yaml:"run"`
-			} `yaml:"steps"`
-		} `yaml:"jobs"`
+// verifyWorkflowBaseScoping runs both base-scoping guards over the real
+// workflow files. Wired into dev:check as a single step.
+//
+// They are two halves of one invariant. CI and CodeQL run on pull requests
+// whatever the base, so that a stacked PR is exercised rather than silently
+// skipped; and because that leaves the auto-merge job unconfined by its
+// trigger, the job carries its own base pin. Re-filter the triggers and the
+// first half is lost; drop the pin and the second is. Either way the loss is
+// silent, which is precisely the failure mode the change existed to fix.
+func verifyWorkflowBaseScoping() error {
+	for _, name := range baseScopedWorkflows {
+		src, err := os.ReadFile(filepath.Join(".github", "workflows", name))
+		if err != nil {
+			return err
+		}
+		if err := verifyPullRequestUnfilteredIn(name, src); err != nil {
+			return err
+		}
+		if name == "ci.yml" {
+			if err := verifyAutomergeBasePinIn(src); err != nil {
+				return err
+			}
+		}
 	}
-	if err := yaml.Unmarshal(ciSrc, &doc); err != nil {
-		return err
-	}
+	return nil
+}
 
-	// A base filter on the trigger confines every job in the workflow, so the
-	// per-job pin is not load-bearing and its absence is not drift.
-	if len(doc.On.PullRequest.Branches) > 0 {
-		return nil
+// verifyPullRequestUnfilteredIn asserts that a workflow declares a
+// pull_request trigger and does not filter it by base branch. A base filter
+// there does not fail loudly: the workflow simply never runs for a PR whose
+// base is outside it, while container-images.yml keeps supplying a full row of
+// green checks, so the checks tab reads as a passing build.
+func verifyPullRequestUnfilteredIn(name string, src []byte) error {
+	var doc workflowGuardDoc
+	if err := yaml.Unmarshal(src, &doc); err != nil {
+		return fmt.Errorf("%s: %w", name, err)
 	}
+	node, ok := doc.On["pull_request"]
+	if !ok {
+		return fmt.Errorf("%s declares no pull_request trigger, so it never runs on a pull request; "+
+			"it is meant to run on every PR whatever the base", name)
+	}
+	// An empty trigger is the whole point, and decodes to the zero value.
+	var trigger struct {
+		Branches []string `yaml:"branches"`
+	}
+	if node.Kind != 0 && node.Tag != "!!null" {
+		if err := node.Decode(&trigger); err != nil {
+			return fmt.Errorf("%s: on.pull_request: %w", name, err)
+		}
+	}
+	if len(trigger.Branches) > 0 {
+		return fmt.Errorf("%s filters its pull_request trigger to %v; leave it unfiltered by base. "+
+			"A filter matches the PR's base branch, so a stacked PR targeting anything outside the list "+
+			"is skipped with no failure to notice", name, trigger.Branches)
+	}
+	return nil
+}
 
+// verifyAutomergeBasePinIn asserts that every job in the workflow which merges
+// pull requests confines itself by base branch.
+//
+// Such a job holds contents: write and pull-requests: write, and what confined
+// it to main used to be the trigger's own branches: ["main"] filter rather
+// than anything in the job. With that filter gone the `if:` is the only thing
+// left, and the repository's "Main" ruleset applies to ~DEFAULT_BRANCH only --
+// so on any other base an auto-merge would land a bot PR under no ruleset at
+// all. ci.yml says as much in a comment beside the job, but a comment does not
+// fail a build. This is the same class of silent loss that verifyDistVariants
+// guards.
+//
+// The pin is required whatever the trigger looks like. An earlier draft
+// returned early when the trigger carried a base filter, on the grounds that
+// the filter confined the job anyway -- but that only holds for a filter
+// naming the default branch alone, so a later widening to
+// ["main", "release/**"] would have retired the guard exactly when it started
+// to matter. The pin costs nothing when it is redundant.
+//
+// Scope, stated because the matcher is a heuristic and its limits should not
+// be discovered later: a job counts as merging if an inline step runs
+// `gh pr merge`, or if a step's `uses` names an auto-merge action. Matching on
+// what the job does rather than on the name "automerge" means a rename cannot
+// retire the guard. Moving the job into a different workflow file would,
+// since only baseScopedWorkflows are read; so would enabling auto-merge
+// through a local composite action whose name does not say so. Neither is
+// covered, and both would need this list or this matcher extended.
+func verifyAutomergeBasePinIn(src []byte) error {
+	var doc workflowGuardDoc
+	if err := yaml.Unmarshal(src, &doc); err != nil {
+		return fmt.Errorf("ci.yml: %w", err)
+	}
 	for _, job := range slices.Sorted(maps.Keys(doc.Jobs)) {
 		j := doc.Jobs[job]
-		merges := slices.ContainsFunc(j.Steps, func(s struct {
-			Run string `yaml:"run"`
-		}) bool {
-			return strings.Contains(s.Run, "gh pr merge")
-		})
+		merges := false
+		for _, s := range j.Steps {
+			if strings.Contains(s.Run, "gh pr merge") || automergeActionRE.MatchString(s.Uses) {
+				merges = true
+				break
+			}
+		}
 		if !merges {
 			continue
 		}
 		if !strings.Contains(j.If, automergeBasePin) {
-			return fmt.Errorf("ci.yml job %q runs 'gh pr merge' but its 'if:' never consults %s; "+
-				"the pull_request trigger is unfiltered by base, so nothing else confines it to the default branch",
+			return fmt.Errorf("ci.yml job %q merges pull requests but its 'if:' never consults %s; "+
+				"nothing else confines it to the default branch, and the \"Main\" ruleset covers no other",
 				job, automergeBasePin)
 		}
 	}
 	return nil
 }
+
+// automergeActionRE matches the `uses:` of a step that enables auto-merge via
+// an action rather than an inline `gh pr merge`.
+var automergeActionRE = regexp.MustCompile(`(?i)auto-?merge`)
 
 // distVariantSpec describes one release artefact: its short name (the
 // artefact-name suffix, e.g. "linux_arm64_fips") and the build environment
@@ -3073,7 +3135,8 @@ func (Dev) Check() error {
 	if err := verifyChartPins(); err != nil {
 		return err
 	}
-	if err := verifyAutomergeBasePin(); err != nil {
+	fmt.Println("Checking workflow base scoping...")
+	if err := verifyWorkflowBaseScoping(); err != nil {
 		return err
 	}
 	// Vet the one package with a non-Linux build-tagged file. Every CI check

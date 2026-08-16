@@ -380,17 +380,19 @@ jobs:
 	})
 })
 
-var _ = Describe("verifyAutomergeBasePin", func() {
-	// Runs against the repository's real ci.yml: the pull_request trigger is
-	// unfiltered by base, so the auto-merge job must carry the pin (it also
+var _ = Describe("verifyWorkflowBaseScoping", func() {
+	// Runs against the repository's real ci.yml and codeql.yml: both triggers
+	// are unfiltered by base and the auto-merge job carries its pin (this also
 	// runs as part of `mage dev:check`).
-	It("finds the real ci.yml auto-merge job pinned to the default branch", func() {
-		Expect(verifyAutomergeBasePin()).To(Succeed())
+	It("finds the real workflows unfiltered by base and the merge job pinned", func() {
+		Expect(verifyWorkflowBaseScoping()).To(Succeed())
 	})
 
-	// The point of the guard is the pair: an unfiltered trigger plus a job
-	// that merges. Each branch below breaks exactly one half.
-	Describe("pairing", func() {
+	// The pin half. Fixtures are synthetic so the failure branches are driven
+	// without touching the real workflow files.
+	Describe("auto-merge base pin", func() {
+		const pinClause = "      && github.event.pull_request.base.ref == github.event.repository.default_branch\n"
+
 		unfiltered := []byte(`
 on:
   push:
@@ -408,16 +410,15 @@ jobs:
       - run: gh pr merge --auto --merge "$PR_URL"
 `)
 
-		It("accepts an unfiltered trigger when the merging job carries the pin", func() {
+		It("accepts a merging job that carries the pin", func() {
 			Expect(verifyAutomergeBasePinIn(unfiltered)).To(Succeed())
 		})
 
-		It("rejects an unfiltered trigger when the pin is dropped, and names the job", func() {
-			bad := bytes.Replace(unfiltered,
-				[]byte("      && github.event.pull_request.base.ref == github.event.repository.default_branch\n"), nil, 1)
+		It("rejects a dropped pin and names the job", func() {
+			bad := bytes.Replace(unfiltered, []byte(pinClause), nil, 1)
 			err := verifyAutomergeBasePinIn(bad)
 			Expect(err).To(MatchError(ContainSubstring(`job "automerge"`)))
-			Expect(err).To(MatchError(ContainSubstring("gh pr merge")))
+			Expect(err).To(MatchError(ContainSubstring("merges pull requests")))
 		})
 
 		// Losing the condition wholesale is the same defect as losing the
@@ -444,32 +445,98 @@ jobs:
 			Expect(verifyAutomergeBasePinIn(literal)).To(Succeed())
 		})
 
-		// Matching on `gh pr merge` rather than the job name means renaming
-		// the job cannot quietly retire the guard.
+		// Matching on what the job does, not on the name "automerge", means a
+		// rename cannot quietly retire the guard.
 		It("still requires the pin when the merging job is renamed", func() {
 			bad := bytes.Replace(unfiltered, []byte("  automerge:\n"), []byte("  land-bot-prs:\n"), 1)
-			bad = bytes.Replace(bad,
-				[]byte("      && github.event.pull_request.base.ref == github.event.repository.default_branch\n"), nil, 1)
+			bad = bytes.Replace(bad, []byte(pinClause), nil, 1)
 			Expect(verifyAutomergeBasePinIn(bad)).To(MatchError(ContainSubstring(`job "land-bot-prs"`)))
 		})
 
-		// A base filter on the trigger confines every job in the workflow, so
-		// the per-job pin is not load-bearing and its absence is not drift.
-		It("accepts a missing pin when the trigger still filters by base", func() {
+		// A step that enables auto-merge through an action rather than an
+		// inline `gh pr merge` is the same job wearing a different hat.
+		It("still requires the pin when auto-merge is enabled via an action", func() {
+			bad := bytes.Replace(unfiltered,
+				[]byte(`      - run: gh pr merge --auto --merge "$PR_URL"`),
+				[]byte(`      - uses: peter-evans/enable-pull-request-automerge@v3`), 1)
+			bad = bytes.Replace(bad, []byte(pinClause), nil, 1)
+			Expect(verifyAutomergeBasePinIn(bad)).To(MatchError(ContainSubstring(`job "automerge"`)))
+		})
+
+		// The pin is required whatever the trigger looks like: a filter is
+		// only equivalent to it when it names the default branch alone, so
+		// disarming on any filter would retire the guard exactly when a
+		// widened filter started to matter.
+		It("still requires the pin when the trigger filters by base", func() {
 			filtered := bytes.Replace(unfiltered,
-				[]byte("  pull_request:\n"), []byte("  pull_request:\n    branches: [\"main\"]\n"), 1)
-			filtered = bytes.Replace(filtered,
-				[]byte("      && github.event.pull_request.base.ref == github.event.repository.default_branch\n"), nil, 1)
-			Expect(verifyAutomergeBasePinIn(filtered)).To(Succeed())
+				[]byte("  pull_request:\n"), []byte("  pull_request:\n    branches: [\"main\", \"release/**\"]\n"), 1)
+			filtered = bytes.Replace(filtered, []byte(pinClause), nil, 1)
+			Expect(verifyAutomergeBasePinIn(filtered)).To(MatchError(ContainSubstring(`job "automerge"`)))
 		})
 
 		It("ignores jobs that do not merge pull requests", func() {
 			noMerge := bytes.Replace(unfiltered,
 				[]byte(`      - run: gh pr merge --auto --merge "$PR_URL"`),
 				[]byte(`      - run: gh pr view "$PR_URL"`), 1)
-			noMerge = bytes.Replace(noMerge,
-				[]byte("      && github.event.pull_request.base.ref == github.event.repository.default_branch\n"), nil, 1)
+			noMerge = bytes.Replace(noMerge, []byte(pinClause), nil, 1)
 			Expect(verifyAutomergeBasePinIn(noMerge)).To(Succeed())
+		})
+
+		// Two offenders: the reported job must be the alphabetically first,
+		// so the message does not change from run to run with map order. The
+		// non-merging job sorts before both and must be skipped.
+		It("names the first offending job when several are unpinned", func() {
+			bad := []byte(`
+on:
+  pull_request:
+
+jobs:
+  aardvark-lint:
+    steps:
+      - run: gh pr view "$PR_URL"
+  merge-zulu:
+    steps:
+      - run: gh pr merge --auto "$PR_URL"
+  merge-alpha:
+    steps:
+      - run: gh pr merge --auto "$PR_URL"
+`)
+			for range 20 {
+				Expect(verifyAutomergeBasePinIn(bad)).To(MatchError(ContainSubstring(`job "merge-alpha"`)))
+			}
+		})
+	})
+
+	// The trigger half: what stops the widening this guard accompanies from
+	// being silently reverted.
+	Describe("pull_request trigger", func() {
+		It("accepts a trigger with no base filter", func() {
+			Expect(verifyPullRequestUnfilteredIn("ci.yml", []byte("on:\n  pull_request:\njobs: {}\n"))).To(Succeed())
+		})
+
+		It("accepts a trigger that filters on event type but not base", func() {
+			src := []byte("on:\n  pull_request:\n    types: [opened, synchronize]\njobs: {}\n")
+			Expect(verifyPullRequestUnfilteredIn("ci.yml", src)).To(Succeed())
+		})
+
+		It("rejects a base filter and names the workflow and the branches", func() {
+			src := []byte("on:\n  pull_request:\n    branches: [\"main\"]\njobs: {}\n")
+			err := verifyPullRequestUnfilteredIn("codeql.yml", src)
+			Expect(err).To(MatchError(ContainSubstring("codeql.yml")))
+			Expect(err).To(MatchError(ContainSubstring("main")))
+		})
+
+		// Deleting the trigger skips stacked PRs just as thoroughly as
+		// filtering it, so it must not read as "no filter, therefore fine".
+		It("rejects a workflow with no pull_request trigger at all", func() {
+			src := []byte("on:\n  push:\n    branches: [\"main\"]\njobs: {}\n")
+			Expect(verifyPullRequestUnfilteredIn("ci.yml", src)).To(
+				MatchError(ContainSubstring("declares no pull_request trigger")))
+		})
+
+		It("reports a malformed workflow against its file name", func() {
+			Expect(verifyPullRequestUnfilteredIn("ci.yml", []byte("on: [\n"))).To(
+				MatchError(ContainSubstring("ci.yml")))
 		})
 	})
 })

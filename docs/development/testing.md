@@ -14,7 +14,7 @@ mage test:unit
 # Run the magefile's own suite (build-tagged; not covered by `go test ./...`)
 mage test:magefile
 
-# Format, vet, tidy modules, and lint (the CI gate)
+# Format, vet, tidy modules, lint, and check the workflows for drift (the CI gate)
 mage dev:check
 
 # Run integration tests using the compose stack
