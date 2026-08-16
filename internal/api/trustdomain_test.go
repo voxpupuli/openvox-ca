@@ -205,3 +205,24 @@ var _ = Describe("Trust domains", func() {
 		})
 	})
 })
+
+// A domain built as a struct literal rather than through a constructor has no
+// CRL holder, and SetRevocationSet returns rather than allocating one -- the
+// same discipline SetAdminCNs follows, for the same reason: allocating here
+// writes to a value the middleware may already hold a copy of. Nothing drove
+// that branch, so a change to allocate lazily would have passed.
+var _ = Describe("TrustDomain.SetRevocationSet without a holder", func() {
+	It("is a no-op rather than an allocation", func() {
+		var d api.TrustDomain // no constructor, so no holder
+
+		Expect(func() { d.SetRevocationSet(api.NewClientCRLSet(nil, nil)) }).NotTo(Panic())
+		Expect(d.RevocationSet()).To(BeNil(),
+			"a domain with no holder must stay without one, not gain a set on write")
+	})
+
+	It("installs the set when the constructor made a holder", func() {
+		d := api.NewForeignTrustDomain("server-ca", nil, nil, nil, false)
+		d.SetRevocationSet(api.NewClientCRLSet(nil, nil))
+		Expect(d.RevocationSet()).NotTo(BeNil())
+	})
+})

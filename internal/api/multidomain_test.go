@@ -585,6 +585,36 @@ var _ = Describe("Authorisation across trust domains", func() {
 				"one domain's traffic must not raise the alarm against another's administrator")
 		})
 
+		// Key() quotes the CN rather than concatenating it, and the quoting is
+		// what stops one principal forging another's key. A CN is attacker-chosen
+		// within its own namespace, so without it a name containing the
+		// separator could be crafted to collide with a different domain's
+		// principal -- and the destructive-operations counter this key feeds is
+		// exactly what an attacker would want to attribute elsewhere.
+		It("cannot be made to collide by a common name containing the separator", func() {
+			own := api.OwnTrustDomain(caCert, nil, false)
+			theirs := api.NewForeignTrustDomain("server-ca", nil, nil, nil, false)
+
+			// A name crafted to look like "the server-ca domain's ops-admin"
+			// when read as a flat string.
+			crafted := api.PrincipalKeyForTest(`ops-admin"`, &own)
+			genuine := api.PrincipalKeyForTest("ops-admin", &theirs)
+			Expect(crafted).NotTo(Equal(genuine))
+
+			// And the general property: two distinct names never share a key
+			// within one domain, however they are punctuated.
+			seen := map[string]string{}
+			for _, cn := range []string{
+				"ops-admin", `ops-admin"`, `"ops-admin`, "ops/admin", `ops\admin`,
+				"ops-admin\n", "", " ",
+			} {
+				key := api.PrincipalKeyForTest(cn, &own)
+				Expect(seen).NotTo(HaveKey(key),
+					"two names collided on one key: %q and %q", seen[key], cn)
+				seen[key] = cn
+			}
+		})
+
 		It("names the vouching domain in the record, not just the common name", func() {
 			// The audit half of the same defect. A warning that a client is running
 			// destructive operations at rate is actionable only if the reader can
