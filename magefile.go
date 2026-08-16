@@ -3162,14 +3162,19 @@ func checkModuleTidy(dir string, files []string, tidy func() error) error {
 	return nil
 }
 
-// Check verifies formatting, module tidiness, go vet, the golangci-lint gate,
-// and the workflow invariants that no other check would catch (the release
-// variant lists, and the base scoping of the pull_request triggers and the
-// auto-merge job). Unlike `mage dev:tidy`, it is a non-mutating verifier: it reports drift
-// as a failure instead of silently fixing it, so CI catches untidy code and
-// modules. gofmt -l prints unformatted files without rewriting them, and the
-// tidiness step runs `go mod tidy` then restores go.mod/go.sum, treating any
-// change as a failure.
+// Check is the CI gate: everything that must hold before a change can merge,
+// gathered behind one target. Unlike `mage dev:tidy`, it is a non-mutating
+// verifier -- it reports drift as a failure instead of silently fixing it, so
+// CI catches untidy code and modules. gofmt -l prints unformatted files
+// without rewriting them, and the tidiness step runs `go mod tidy` then
+// restores go.mod/go.sum, treating any change as a failure.
+//
+// What it runs is the body below, which announces each phase as it goes; this
+// comment deliberately does not list them. The list here was wrong twice --
+// silently omitting the release-variant check, then the workflow guards -- and
+// is one addition away from being wrong again, because a phase can be added
+// without anyone thinking to look up here. A reader wanting the coverage runs
+// the target or reads the banners.
 func (Dev) Check() error {
 	fmt.Println("Running verify...")
 	out, err := sh.Output("gofmt", "-l", ".")
