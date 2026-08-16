@@ -412,6 +412,29 @@ func deltaCRLRevoking(cert *x509.Certificate, key *ecdsa.PrivateKey, revoked ...
 	return crl
 }
 
+// numberedCRLAged issues a CRL numbered explicitly and dated `age` in the past,
+// for the archived material an attacker replays.
+func numberedCRLAged(cert *x509.Certificate, key *ecdsa.PrivateKey, number int64, age time.Duration, revoked ...*big.Int) *x509.RevocationList {
+	GinkgoHelper()
+	entries := make([]x509.RevocationListEntry, 0, len(revoked))
+	for _, serial := range revoked {
+		entries = append(entries, x509.RevocationListEntry{
+			SerialNumber:   serial,
+			RevocationTime: time.Now().Add(-age),
+		})
+	}
+	der, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+		Number:                    big.NewInt(number),
+		RevokedCertificateEntries: entries,
+		ThisUpdate:                time.Now().Add(-age),
+		NextUpdate:                time.Now().Add(time.Hour),
+	}, cert, key)
+	Expect(err).NotTo(HaveOccurred())
+	crl, err := x509.ParseRevocationList(der)
+	Expect(err).NotTo(HaveOccurred())
+	return crl
+}
+
 // numberedCRLUntil is mintCRL with an explicit cRLNumber and NextUpdate, so a
 // spec can order two CRLs from one issuer deliberately rather than relying on
 // mintCRL's clock, and tell which of the two ended up installed.
@@ -1104,11 +1127,47 @@ var _ = Describe("refreshClientCRLs", func() {
 			"dropping an enforced delta must not count as an applied reload")
 	})
 
+	It("refuses a delta drop excused only by an archived higher-numbered CRL", func() {
+		// advancedOver decides whether a shrinking delta is an ordinary base
+		// rotation. Letting a higher cRLNumber alone answer that was a hole:
+		// an attacker who can write crl_file has only to append a genuine
+		// archived CRL numbered above the base to claim the base rotated, at
+		// which point the delta can be dropped and every serial only it named
+		// is re-admitted. Archived material is exactly what such an attacker
+		// has; a later date is what they cannot manufacture.
+		revoked := big.NewInt(4242)
+		base := numberedCRLUntil(serverCA, serverKey, 5, time.Now().Add(2*time.Hour))
+
+		cfg := &serverConfig{}
+		cfg.ClientRevocationPolicy = config.RevocationRequire
+		cfg.ClientCA = []config.ClientCA{{
+			Name:    "server",
+			File:    writeCertFile(serverCA),
+			CRLFile: writeCRLFile(base, deltaCRLRevoking(serverCA, serverKey, revoked)),
+		}}
+		domains, err := buildTrustDomains(cfg, ownCA, nil)
+		Expect(err).NotTo(HaveOccurred())
+		refreshClientCRLs(cfg, domains, metrics)
+		applied := lastReload("server")
+
+		// Same base, no delta, plus an older CRL carrying a higher number.
+		cfg.ClientCA[0].CRLFile = writeCRLFile(base,
+			numberedCRLAged(serverCA, serverKey, 9, 30*24*time.Hour))
+		refreshClientCRLs(cfg, domains, metrics)
+
+		Expect(lastReload("server")).To(Equal(applied),
+			"a higher number on older material must not excuse dropping the delta")
+	})
+
 	It("accepts a smaller delta once the base has moved on", func() {
 		// The legitimate half, and why the guard is conditioned on the base
 		// rather than on the count: when an issuer publishes a new base, the
 		// serials in the old delta fold into it and the delta resets. Refusing
 		// on the count alone would reject every ordinary base rotation.
+		// A real rotation advances both the number and the issue date, so the
+		// fixture does too: an earlier base dated two hours ago, replaced by one
+		// dated a minute ago. Rotating the number alone left both bases sharing
+		// an issue date, which is not a shape an issuer produces.
 		revoked := big.NewInt(4242)
 
 		cfg := &serverConfig{}
@@ -1116,7 +1175,7 @@ var _ = Describe("refreshClientCRLs", func() {
 		cfg.ClientCA = []config.ClientCA{{
 			Name: "server",
 			File: writeCertFile(serverCA),
-			CRLFile: writeCRLFile(numberedCRLUntil(serverCA, serverKey, 7, time.Now().Add(time.Hour)),
+			CRLFile: writeCRLFile(numberedCRLAged(serverCA, serverKey, 7, 2*time.Hour),
 				deltaCRLRevoking(serverCA, serverKey, revoked)),
 		}}
 		domains, err := buildTrustDomains(cfg, ownCA, nil)
@@ -1126,7 +1185,7 @@ var _ = Describe("refreshClientCRLs", func() {
 
 		// A newer base, carrying the serial itself, and no delta beside it.
 		cfg.ClientCA[0].CRLFile = writeCRLFile(
-			numberedCRLUntil(serverCA, serverKey, 8, time.Now().Add(2*time.Hour), revoked))
+			numberedCRLAged(serverCA, serverKey, 8, time.Minute, revoked))
 		refreshClientCRLs(cfg, domains, metrics)
 
 		Expect(lastReload("server")).To(BeNumerically(">", applied),

@@ -335,11 +335,10 @@ func (s *ClientCRLSet) Coverage(now time.Time) (present, current map[string]bool
 // information has advanced: the highest cRLNumber and the latest ThisUpdate
 // seen among its full CRLs, tracked as two independent marks.
 //
-// Not "the newest CRL": electing one needs a comparator over two orderings that
-// can disagree, and cRLNumber is required of a conforming issuer but not
+// Not "the newest CRL": cRLNumber is required of a conforming issuer but not
 // universally present (`openssl ca -gencrl` omits it under the stock config),
-// so neither field can serve alone. See crlFreshness for why two marks rather
-// than one election.
+// so a bundle can hold numbered and unnumbered CRLs for one anchor and neither
+// field can serve alone. See crlFreshness for why that ruled out electing one.
 //
 // It exists so a reload can refuse to go backwards. A CRL that verifies, has
 // not expired, and covers every anchor the current set covers still must not
@@ -360,7 +359,23 @@ func (s *ClientCRLSet) freshness(now time.Time) map[string]crlFreshness {
 		for _, crl := range crls {
 			f := out[key]
 			f.subject = anchor.Subject.String()
-			if crl.ThisUpdate.After(f.latest) {
+			// A CRL dated ahead of now does not raise the mark.
+			//
+			// ThisUpdate is the issuer's own timestamp and nothing here can
+			// check it. Letting it ratchet the mark turns one forward-skewed or
+			// replayed CRL into a permanent refusal of every later genuine one
+			// -- and it fails *open*: the pinning CRL stays current, so require
+			// keeps admitting clients while revocations published afterwards
+			// are never installed. Restarting does not recover it either, since
+			// startup rebuilds the marks from the same file.
+			//
+			// Skipping it rather than clamping to now, because clamping would
+			// push the mark to the present and refuse the issuer's next
+			// genuinely-past CRL. Skipping only ever leaves the mark lower,
+			// which accepts more reloads and never fewer, and it self-corrects:
+			// once now passes that ThisUpdate the CRL raises the mark like any
+			// other. An honestly skewed signer therefore notices nothing.
+			if crl.ThisUpdate.After(f.latest) && !crl.ThisUpdate.After(now) {
 				f.latest = crl.ThisUpdate
 			}
 			if crl.Number != nil && (f.maxNumber == nil || crl.Number.Cmp(f.maxNumber) > 0) {
@@ -375,11 +390,15 @@ func (s *ClientCRLSet) freshness(now time.Time) map[string]crlFreshness {
 // crlFreshness is how far an anchor's revocation information has advanced, as
 // two independent high-water marks rather than a single "newest CRL".
 //
-// Two marks because the two orderings a CRL offers are not reducible to one.
-// Electing a newest CRL needs a comparator, and any comparator that consults
-// both fields is intransitive where an issuer's numbers and dates disagree --
-// so which CRL "won" could depend on the order they appeared in the file.
-// Taking the maximum of each field separately has no such freedom.
+// Two marks because electing a single newest CRL needs a comparator, and the
+// comparator this replaced switched axis on whether *both* sides published a
+// cRLNumber -- number when they did, ThisUpdate when they did not. That switch
+// is what made it intransitive, and it needs mixed presence of the extension to
+// bite, not merely numbers and dates that disagree: with A(num 1, date 3),
+// B(num 2, date 1) and C(unnumbered, date 2), B beats A by number, C beats B by
+// date, and A beats C by date. Which CRL was elected then depended on the order
+// they appeared in the file. Taking the maximum of each field separately is
+// order-independent whatever the inputs, so the question does not arise.
 type crlFreshness struct {
 	// subject names the anchor in a refusal message; the map key is its raw
 	// SubjectPublicKeyInfo, which is binary and cannot be logged.
@@ -391,13 +410,18 @@ type crlFreshness struct {
 	latest    time.Time
 }
 
-// advancedOver reports whether f is ahead of other on either axis, used to tell
-// an ordinary base rotation from a delta silently disappearing.
+// advancedOver reports whether the anchor's full CRLs have genuinely moved on,
+// used to tell an ordinary base rotation from a delta silently disappearing.
+//
+// The date must advance, and the number must not go backwards. A higher number
+// alone is not enough, and allowing it was a hole: an attacker who can write
+// crl_file has only to append a genuine archived CRL numbered above the base to
+// satisfy "the base rotated", at which point PartialsDropped reports nothing
+// and an enforced delta can be dropped -- re-admitting every serial only that
+// delta named. Archived material is what such an attacker has; a *later date*
+// is the thing they cannot manufacture without the issuer's key.
 func (f crlFreshness) advancedOver(other crlFreshness) bool {
-	if f.maxNumber != nil && other.maxNumber != nil && f.maxNumber.Cmp(other.maxNumber) > 0 {
-		return true
-	}
-	return f.latest.After(other.latest)
+	return f.latest.After(other.latest) && !f.regressedFrom(other)
 }
 
 // regressedFrom reports whether f has gone backwards from other on either axis.

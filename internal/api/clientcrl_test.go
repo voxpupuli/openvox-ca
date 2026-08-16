@@ -39,11 +39,21 @@ import (
 // numberedCRLFrom is crlFrom with the CRL number under the caller's control,
 // which is what a replay test needs: two CRLs from one issuer, both valid, in a
 // defined order.
+// numberedCRLFrom issues a CRL expiring at notAfter, carrying an explicit
+// cRLNumber.
+//
+// ThisUpdate is placed well before now, offset by a constant from notAfter, so
+// callers passing notAfter values relative to `future` keep the exact relative
+// ordering they intend while every CRL is dated in the past like a real one.
+// The constant exceeds `future`'s distance from now: dating ThisUpdate 24 hours
+// before a notAfter thirty days out put every fixture's issue date in the
+// future, which is not a shape any issuer produces and which hid a bug where a
+// future-dated CRL pinned an anchor's freshness mark for ever.
 func numberedCRLFrom(cert *x509.Certificate, key *ecdsa.PrivateKey, notAfter time.Time, number int64) *x509.RevocationList {
 	GinkgoHelper()
 	der, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
 		Number:     big.NewInt(number),
-		ThisUpdate: notAfter.Add(-24 * time.Hour),
+		ThisUpdate: notAfter.Add(-34 * 24 * time.Hour),
 		NextUpdate: notAfter,
 	}, cert, key)
 	Expect(err).NotTo(HaveOccurred())
@@ -722,14 +732,18 @@ var _ = Describe("ClientCRLSet.Regresses", func() {
 		// Electing one CRL as newest needs a comparator, and a comparator over
 		// two disagreeing orderings is intransitive -- so which CRL won could
 		// depend on the order they appeared in the file.
-		// The current CRL first and the superseded one after it -- the order a
-		// bundle carrying both usually has. Deliberately not the other way
-		// round: with the maximum of each axis appearing last, "keep the
-		// highest" and "keep whichever came last" agree, and a spec built that
-		// way cannot tell them apart.
+		// The fixture has to separate three implementations that a careless one
+		// makes agree: componentwise maxima, electing one CRL as newest, and
+		// keeping whichever CRL came last. So no single CRL carries both marks
+		// -- otherwise electing that one agrees with taking maxima -- and the
+		// CRL listed last carries neither, otherwise "last seen" agrees too.
+		//
+		// Two earlier versions of this fixture failed that: the first put both
+		// maxima on the last CRL, the second put both on the first.
 		current := api.NewClientCRLSet([]*x509.RevocationList{
-			numberedCRLFrom(serverCA, caKey, future.Add(48*time.Hour), 9), // both marks
-			numberedCRLFrom(serverCA, caKey, future, 2),                   // superseded
+			numberedCRLFrom(serverCA, caKey, future, 9),                    // highest number
+			numberedCRLFrom(serverCA, caKey, future.Add(48*time.Hour), 2),  // latest date
+			numberedCRLFrom(serverCA, caKey, future.Add(-24*time.Hour), 1), // neither
 		}, anchorSet())
 
 		// A candidate behind on either mark regresses, even though it is ahead
@@ -751,8 +765,8 @@ var _ = Describe("ClientCRLSet.Regresses", func() {
 		// The rule must still let an ordinary refresh through, or it is just a
 		// slower way of pinning every anchor.
 		current := api.NewClientCRLSet([]*x509.RevocationList{
-			numberedCRLFrom(serverCA, caKey, future.Add(48*time.Hour), 9),
-			numberedCRLFrom(serverCA, caKey, future, 2),
+			numberedCRLFrom(serverCA, caKey, future, 9),
+			numberedCRLFrom(serverCA, caKey, future.Add(48*time.Hour), 2),
 		}, anchorSet())
 		ahead := api.NewClientCRLSet(
 			[]*x509.RevocationList{numberedCRLFrom(serverCA, caKey, future.Add(72*time.Hour), 10)},
@@ -760,6 +774,42 @@ var _ = Describe("ClientCRLSet.Regresses", func() {
 
 		_, back := current.Regresses(ahead, time.Now())
 		Expect(back).To(BeFalse())
+	})
+
+	It("is not pinned for ever by a CRL dated in the future", func() {
+		// ThisUpdate is the issuer's own timestamp and nothing here can check
+		// it. If it could ratchet the mark, one forward-skewed or replayed CRL
+		// would refuse every later genuine one -- and fail *open*, because that
+		// CRL stays current, so require goes on admitting clients while nothing
+		// published afterwards is ever installed. Restarting does not help: the
+		// mark is rebuilt from the same file.
+		ahead := numberedCRLFrom(serverCA, caKey, future, 1)
+		ahead.ThisUpdate = time.Now().Add(90 * 24 * time.Hour)
+		current := api.NewClientCRLSet([]*x509.RevocationList{ahead}, anchorSet())
+
+		// An ordinary CRL issued an hour ago, which any real issuer would send
+		// next and which must not be read as going backwards.
+		normal := numberedCRLFrom(serverCA, caKey, future, 2)
+		normal.ThisUpdate = time.Now().Add(-time.Hour)
+		candidate := api.NewClientCRLSet([]*x509.RevocationList{normal}, anchorSet())
+
+		_, back := current.Regresses(candidate, time.Now())
+		Expect(back).To(BeFalse(),
+			"a future-dated CRL must not pin the anchor against every later one")
+	})
+
+	It("still ratchets on a CRL dated in the past", func() {
+		// The companion: skipping future dates must not disable the mark. A
+		// normal CRL raises it exactly as before, or the ratchet is gone and
+		// replays install freely.
+		current := api.NewClientCRLSet(
+			[]*x509.RevocationList{numberedCRLFrom(serverCA, caKey, future, 5)}, anchorSet())
+		older := numberedCRLFrom(serverCA, caKey, future, 5)
+		older.ThisUpdate = time.Now().Add(-90 * 24 * time.Hour)
+		candidate := api.NewClientCRLSet([]*x509.RevocationList{older}, anchorSet())
+
+		_, back := current.Regresses(candidate, time.Now())
+		Expect(back).To(BeTrue(), "an older date must still be refused")
 	})
 
 	// An anchor the candidate drops entirely is losesCoverage's business, and
