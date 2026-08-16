@@ -411,43 +411,65 @@ podman run --rm \
 ```
 
 Four details that are easy to get wrong. **Pin the image to the version the
-stopped server was running**, as shown, rather than taking `:latest` — the same
-rule the [Kubernetes Job recipe](openbao-transit.md#the-server-will-not-start-between-steps-1-and-3)
-applies. This container writes on-disk state that server wrote and will read
-again when it restarts, the inventory and its integrity record among it, so a
-version difference here is between two writers of the same data rather than
-between a client and a server.
+stopped server was running**, as shown, rather than taking `:latest`: this
+container writes on-disk state that the server wrote and will read again when it
+restarts, the inventory and its integrity record among it, so a version
+difference here is between two writers of the same data rather than between a
+client and a server. The image must be fully qualified — an unqualified name
+will not resolve without registry search configured. The images run as
+`USER puppet`, so under rootless podman a bind mount owned by your host user is
+not writable inside the container without `--userns=keep-id`; without it the
+mint fails at the key write, cleanly but confusingly. And the mount is a
+dedicated directory with `:Z` rather than `$PWD` with `:z`, because `:Z`
+relabels its target private to the container — pointing that at a whole project
+or home directory would relabel unrelated files with it.
 
-Pin the *version*, not whatever tag the deployment names: `compose.yml` ships
+##### Reading the version back off a floating tag
+
+Pin the *version*, not whatever tag the deployment names. `compose.yml` ships
 `:latest` deliberately, so copying the tag from a deployment that floats would
-reintroduce exactly the skew this avoids. Where the running tag is mutable, read
-the version back off the image the server actually ran —
+reintroduce exactly the skew this avoids.
+
+Take the digest off the **running container, before you stop it**. Inspecting
+the tag instead would resolve to whatever `:latest` points at now, which is the
+one thing it may no longer be:
 
 ```bash
-podman inspect --format \
-  '{{index .Config.Labels "org.opencontainers.image.version"}}' \
-  ghcr.io/voxpupuli/openvox-ca:latest
+podman inspect --format '{{index .RepoDigests 0}}' \
+  "$(podman inspect --format '{{.Image}}' openvox-ca)"
 ```
 
-— or on Kubernetes take the resolved digest from the running pod *before*
-scaling it down, and use that digest as the Job's `image:`:
+`openvox-ca` is the container name — `compose.yml` sets none, so under compose
+it is named for the project and service; `podman ps` will tell you. The command
+prints `ghcr.io/voxpupuli/openvox-ca@sha256:…`, which goes into the `podman run`
+above in place of the tag. An image built locally rather than pulled has no
+repo digest, and the command errors rather than printing one; pin such a build
+by whatever tag you gave it. Prefer it to the
+`org.opencontainers.image.version` label: the label is stamped from the git ref,
+so on a release it reads `v1.2.3` while the published tag is `1.2.3`, and
+pasting it back gives `manifest unknown` at the point you have already stopped
+the CA.
+
+On Kubernetes take the resolved digest from the running pod, again before
+scaling the Deployment down:
 
 ```bash
 kubectl get pod -l app=openvox-ca \
   -o jsonpath='{.items[0].status.containerStatuses[0].imageID}'
 ```
 
-The image must be fully qualified — an unqualified name will not resolve without
-registry search configured. The images run as `USER puppet`, so under rootless
-podman a bind mount owned by your host user is not writable inside the container
-without `--userns=keep-id`;
-without it the mint fails at the key write, cleanly but confusingly. And the
-mount is a dedicated directory with `:Z` rather than `$PWD` with `:z`, because
-`:Z` relabels its target private to the container — pointing that at a whole
-project or home directory would relabel unrelated files with it.
+`app=openvox-ca` is only an example — this project ships no manifests, so use
+whatever selector your own Deployment carries; the Deployment you are about to
+scale down will tell you
+(`kubectl get deploy <name> -o jsonpath='{.spec.selector.matchLabels}'`). An
+empty result means the selector matched nothing, not that there is no digest.
+Expect `ghcr.io/voxpupuli/openvox-ca@sha256:…`, usable as the Job's `image:`
+verbatim; some runtimes report a bare `sha256:…` config id instead, which is not
+pullable, and in that case read the digest from the registry side with
+`podman image inspect` as above.
 
 On Kubernetes the equivalent is scaling the Deployment to zero and running a Job
-that mounts the same PVC, pinned to the version the Deployment was running for
+that mounts the same PVC, pinned to the digest the Deployment was running for
 the reason above, and with a retrieval step for the key — a `--key-out` path
 inside a Job pod that is then reaped is the same as having no key at all.
 

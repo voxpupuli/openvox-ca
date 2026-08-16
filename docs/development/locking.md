@@ -401,3 +401,19 @@ run: `mage test:unit` passes `-race` over every unit package, `internal/ca`
 included. What is still unraced is the build-tagged backend integration
 suites — tracked as
 [#205](https://github.com/voxpupuli/openvox-ca/issues/205).
+
+`GenerateWithOptions` is a fifth holder of both locks, on its `ReplaceExisting`
+path. It is not in that fixture; two things are pinned for it separately, in
+[generate_test.go](../../internal/ca/generate_test.go):
+
+- **The subject → CRL ordering**, asserted directly rather than raced, for the
+  same reason `renewrace_test.go` parks rather than races: nothing forces the
+  hazardous interleaving reliably.
+- **The cross-replica outcome** — two `CA` values over one `StorageService`-shared
+  backend that implements `Locker`, racing the same subject, exactly one
+  certificate. This is the outcome the per-subject lock exists for, as opposed
+  to the per-backend mechanism the integration suites cover. Note what the
+  fixture has to do to be a test at all: the two callers rendezvous at the
+  existence check, because an unsynchronised race is decided by whichever
+  goroutine writes first and detects a missing lock only by luck. Its doc
+  comment records the measurements.

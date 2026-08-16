@@ -346,7 +346,7 @@ spec:
       serviceAccountName: openvox-ca        # the same one the Deployment uses
       containers:
         - name: csr
-          image: ghcr.io/voxpupuli/openvox-ca:1.2.3   # pin to the Deployment's tag
+          image: ghcr.io/voxpupuli/openvox-ca:1.2.3   # the version it was running, not its tag
           # No --out: the request goes to stdout, so it survives the pod. Logs
           # go to stderr and kubectl merges the two streams, so extract the
           # block rather than redirecting wholesale:

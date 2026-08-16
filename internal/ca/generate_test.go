@@ -88,6 +88,7 @@ type twoReplicaBackend struct {
 	*recordingLockBackend
 
 	barrierKey string
+	lockName   string
 
 	barrierMu sync.Mutex
 	seen      map[int]bool
@@ -102,6 +103,7 @@ func newTwoReplicaBackend(base storage.Backend, subject string) *twoReplicaBacke
 	return &twoReplicaBackend{
 		recordingLockBackend: &recordingLockBackend{Backend: base},
 		barrierKey:           storage.CertKey(subject),
+		lockName:             "subject:" + subject,
 		seen:                 map[int]bool{},
 		release:              make(chan struct{}),
 		limit:                30 * time.Second,
@@ -110,17 +112,33 @@ func newTwoReplicaBackend(base storage.Backend, subject string) *twoReplicaBacke
 
 // signalLocked releases the barrier once either event has happened. Callers hold
 // barrierMu.
+//
+// Both arms require somebody to be *at* the barrier already. Releasing on
+// b.waiting alone would fire on the first, uncontended acquisition -- which
+// happens before either replica reaches the existence check -- so the barrier
+// would already be open when they got there and would never engage at all. The
+// spec would still catch a missing lock, because that path takes no lock and so
+// releases on the two-arrival arm, but the green path would silently decay to
+// the unsynchronised race this fixture exists to replace, and degraded() could
+// never fail.
 func (b *twoReplicaBackend) signalLocked() {
 	if b.released {
 		return
 	}
-	if len(b.seen) >= 2 || b.waiting > 0 {
+	if len(b.seen) >= 2 || (len(b.seen) >= 1 && b.waiting > 0) {
 		b.released = true
 		close(b.release)
 	}
 }
 
 func (b *twoReplicaBackend) AcquireLock(ctx context.Context, name string) (storage.Unlocker, error) {
+	// Only the subject lock counts. A replacement path also takes the CRL lock,
+	// and letting that satisfy the barrier would release it for a reason that
+	// has nothing to do with two replicas contending for one subject.
+	if name != b.lockName {
+		return b.recordingLockBackend.AcquireLock(ctx, name)
+	}
+
 	b.barrierMu.Lock()
 	b.waiting++
 	b.signalLocked()
@@ -139,7 +157,14 @@ func (b *twoReplicaBackend) Exists(ctx context.Context, key string) (bool, error
 		return b.recordingLockBackend.Exists(ctx, key)
 	}
 
-	id, _ := ctx.Value(replicaIDKey{}).(int)
+	// Ids are 1-based so the zero value means "no identity threaded", which must
+	// never be mistaken for a replica: an unthreaded caller counting as replica
+	// zero would let one arrival plus one stranger satisfy the two-arrival arm
+	// and release a rendezvous that never happened.
+	id, ok := ctx.Value(replicaIDKey{}).(int)
+	Expect(ok && id > 0).To(BeTrue(),
+		"a barrier-key existence check arrived without a replica identity")
+
 	b.barrierMu.Lock()
 	b.seen[id] = true
 	b.signalLocked()
@@ -401,7 +426,7 @@ var _ = Describe("CA Generate", func() {
 					// The replica id is what lets the barrier tell two callers
 					// apart from one caller reaching the check twice --
 					// evictRevokedLocked consults it again after Generate does.
-					own := context.WithValue(ctx, replicaIDKey{}, i)
+					own := context.WithValue(ctx, replicaIDKey{}, i+1)
 					_, errs[i] = c.GenerateWithOptions(own, "replica-node", ca.GenerateOptions{})
 				}(i, c)
 			}
