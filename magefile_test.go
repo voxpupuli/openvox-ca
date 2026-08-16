@@ -379,3 +379,97 @@ jobs:
 		})
 	})
 })
+
+var _ = Describe("verifyAutomergeBasePin", func() {
+	// Runs against the repository's real ci.yml: the pull_request trigger is
+	// unfiltered by base, so the auto-merge job must carry the pin (it also
+	// runs as part of `mage dev:check`).
+	It("finds the real ci.yml auto-merge job pinned to the default branch", func() {
+		Expect(verifyAutomergeBasePin()).To(Succeed())
+	})
+
+	// The point of the guard is the pair: an unfiltered trigger plus a job
+	// that merges. Each branch below breaks exactly one half.
+	Describe("pairing", func() {
+		unfiltered := []byte(`
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  automerge:
+    if: >-
+      github.event_name == 'pull_request'
+      && github.event.pull_request.base.ref == github.event.repository.default_branch
+      && (github.event.pull_request.user.login == 'dependabot[bot]'
+      || github.event.pull_request.user.login == 'renovate[bot]')
+    steps:
+      - run: gh pr merge --auto --merge "$PR_URL"
+`)
+
+		It("accepts an unfiltered trigger when the merging job carries the pin", func() {
+			Expect(verifyAutomergeBasePinIn(unfiltered)).To(Succeed())
+		})
+
+		It("rejects an unfiltered trigger when the pin is dropped, and names the job", func() {
+			bad := bytes.Replace(unfiltered,
+				[]byte("      && github.event.pull_request.base.ref == github.event.repository.default_branch\n"), nil, 1)
+			err := verifyAutomergeBasePinIn(bad)
+			Expect(err).To(MatchError(ContainSubstring(`job "automerge"`)))
+			Expect(err).To(MatchError(ContainSubstring("gh pr merge")))
+		})
+
+		// Losing the condition wholesale is the same defect as losing the
+		// clause, and it is what a botched edit to the folded block leaves
+		// behind most often.
+		It("rejects a merging job with no 'if:' at all, and names the job", func() {
+			bad := bytes.Replace(unfiltered, []byte(`    if: >-
+      github.event_name == 'pull_request'
+      && github.event.pull_request.base.ref == github.event.repository.default_branch
+      && (github.event.pull_request.user.login == 'dependabot[bot]'
+      || github.event.pull_request.user.login == 'renovate[bot]')
+`), nil, 1)
+			Expect(verifyAutomergeBasePinIn(bad)).To(MatchError(ContainSubstring(`job "automerge"`)))
+		})
+
+		// The guard checks that the condition consults the base ref, not how
+		// the comparison is spelled: ci.yml uses default_branch so the pin
+		// tracks the ruleset, but a literal confines the job just as well and
+		// must not be reported as drift.
+		It("accepts a pin written against a literal branch name", func() {
+			literal := bytes.Replace(unfiltered,
+				[]byte("github.event.pull_request.base.ref == github.event.repository.default_branch"),
+				[]byte("github.event.pull_request.base.ref == 'main'"), 1)
+			Expect(verifyAutomergeBasePinIn(literal)).To(Succeed())
+		})
+
+		// Matching on `gh pr merge` rather than the job name means renaming
+		// the job cannot quietly retire the guard.
+		It("still requires the pin when the merging job is renamed", func() {
+			bad := bytes.Replace(unfiltered, []byte("  automerge:\n"), []byte("  land-bot-prs:\n"), 1)
+			bad = bytes.Replace(bad,
+				[]byte("      && github.event.pull_request.base.ref == github.event.repository.default_branch\n"), nil, 1)
+			Expect(verifyAutomergeBasePinIn(bad)).To(MatchError(ContainSubstring(`job "land-bot-prs"`)))
+		})
+
+		// A base filter on the trigger confines every job in the workflow, so
+		// the per-job pin is not load-bearing and its absence is not drift.
+		It("accepts a missing pin when the trigger still filters by base", func() {
+			filtered := bytes.Replace(unfiltered,
+				[]byte("  pull_request:\n"), []byte("  pull_request:\n    branches: [\"main\"]\n"), 1)
+			filtered = bytes.Replace(filtered,
+				[]byte("      && github.event.pull_request.base.ref == github.event.repository.default_branch\n"), nil, 1)
+			Expect(verifyAutomergeBasePinIn(filtered)).To(Succeed())
+		})
+
+		It("ignores jobs that do not merge pull requests", func() {
+			noMerge := bytes.Replace(unfiltered,
+				[]byte(`      - run: gh pr merge --auto --merge "$PR_URL"`),
+				[]byte(`      - run: gh pr view "$PR_URL"`), 1)
+			noMerge = bytes.Replace(noMerge,
+				[]byte("      && github.event.pull_request.base.ref == github.event.repository.default_branch\n"), nil, 1)
+			Expect(verifyAutomergeBasePinIn(noMerge)).To(Succeed())
+		})
+	})
+})

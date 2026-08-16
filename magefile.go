@@ -29,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -314,6 +315,86 @@ func verifyDistVariantsIn(ciSrc, relSrc []byte) error {
 	if count, _ := strconv.Atoi(string(m[1])); count != len(want) {
 		return fmt.Errorf("release.yml expects %s tarballs, but distVariants() defines %d; update them together",
 			m[1], len(want))
+	}
+	return nil
+}
+
+// automergeBasePin is the context an auto-merge job's condition must consult
+// to be confined by base branch. Deliberately just the operand and not a whole
+// comparison: ci.yml compares it against github.event.repository.default_branch
+// so the pin tracks the ruleset's ~DEFAULT_BRANCH scope, but a literal
+// == 'main' would confine the job too, and the guard exists to catch a missing
+// pin rather than to dictate how a present one is spelled.
+const automergeBasePin = "github.event.pull_request.base.ref"
+
+// verifyAutomergeBasePin asserts that any ci.yml job which runs `gh pr merge`
+// stays pinned to a default-branch base for as long as the workflow's
+// pull_request trigger is unfiltered by base. Wired into dev:check.
+//
+// The two are a pair. Such a job holds contents: write and pull-requests:
+// write, and what confined it to main used to be the trigger's own
+// branches: ["main"] filter rather than anything in the job. With that filter
+// gone the `if:` is the only thing left, and the repository's "Main" ruleset
+// applies to ~DEFAULT_BRANCH only -- so on any other base an auto-merge would
+// land a bot PR under no ruleset at all. ci.yml says as much in a comment
+// beside the job, but a comment does not fail a build: a reflow of the folded
+// `if:` block that mis-parenthesises it, or a tidy-up that drops the clause,
+// would otherwise go green. This is the same class of silent loss that
+// verifyDistVariants guards, and the same class the unfiltered trigger exists
+// to fix.
+//
+// The job is matched on what it does rather than on being named "automerge",
+// so renaming it does not quietly retire the guard.
+func verifyAutomergeBasePin() error {
+	ciSrc, err := os.ReadFile(filepath.Join(".github", "workflows", "ci.yml"))
+	if err != nil {
+		return err
+	}
+	return verifyAutomergeBasePinIn(ciSrc)
+}
+
+// verifyAutomergeBasePinIn is verifyAutomergeBasePin over caller-supplied
+// workflow contents, split out so the failure branches are testable without
+// touching the real workflow file.
+func verifyAutomergeBasePinIn(ciSrc []byte) error {
+	var doc struct {
+		On struct {
+			PullRequest struct {
+				Branches []string `yaml:"branches"`
+			} `yaml:"pull_request"`
+		} `yaml:"on"`
+		Jobs map[string]struct {
+			If    string `yaml:"if"`
+			Steps []struct {
+				Run string `yaml:"run"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(ciSrc, &doc); err != nil {
+		return err
+	}
+
+	// A base filter on the trigger confines every job in the workflow, so the
+	// per-job pin is not load-bearing and its absence is not drift.
+	if len(doc.On.PullRequest.Branches) > 0 {
+		return nil
+	}
+
+	for _, job := range slices.Sorted(maps.Keys(doc.Jobs)) {
+		j := doc.Jobs[job]
+		merges := slices.ContainsFunc(j.Steps, func(s struct {
+			Run string `yaml:"run"`
+		}) bool {
+			return strings.Contains(s.Run, "gh pr merge")
+		})
+		if !merges {
+			continue
+		}
+		if !strings.Contains(j.If, automergeBasePin) {
+			return fmt.Errorf("ci.yml job %q runs 'gh pr merge' but its 'if:' never consults %s; "+
+				"the pull_request trigger is unfiltered by base, so nothing else confines it to the default branch",
+				job, automergeBasePin)
+		}
 	}
 	return nil
 }
@@ -2990,6 +3071,9 @@ func (Dev) Check() error {
 	}
 	fmt.Println("Checking chart version pins...")
 	if err := verifyChartPins(); err != nil {
+		return err
+	}
+	if err := verifyAutomergeBasePin(); err != nil {
 		return err
 	}
 	// Vet the one package with a non-Linux build-tagged file. Every CI check
