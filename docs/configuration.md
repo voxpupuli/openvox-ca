@@ -607,8 +607,9 @@ re-read, defaulting to an hour. The file is refreshed by whatever mechanism
 already delivers it — a mounted Secret, a config-management run, a job fetching
 the issuer's CDP — and this only notices; nothing in openvox-ca writes it. A
 reload is refused, keeping the previous set, when it fails outright, when it
-would cover fewer anchors than the set already in use, or when it would move any
-anchor *backwards* — an older CRL from the same issuer. Older means a lower
+would cover fewer anchors than the set already in use, when it would drop a partial CRL whose
+serials are enforced while that issuer's full CRL stays where it was, or when it
+would move any anchor *backwards* — an older CRL from the same issuer. Older means a lower
 `cRLNumber` where both the installed and the candidate CRL publish one; where
 their numbers are equal, or where either omits the extension, it means an
 earlier `thisUpdate`. The dates decide whenever the numbers cannot, rather than
@@ -621,12 +622,19 @@ Every refusal is logged with the `client_ca` entry; the two that compare against
 the installed set also name the anchor concerned, while a read failure has no
 parsed issuer to name and logs the error instead.
 
-A **delta CRL** or one scoped to an **issuing distribution point** is dropped
-with a log line rather than accepted. Either lists a fraction of what its issuer
-has revoked, and this CA is handed a file rather than fetching distribution
-points, so it has no way to obtain the rest; treating a partial list as full
-coverage would report a domain fully covered while consulting a list missing
-most of its revocations. If every CRL in an entry's file is partial, the
+A **delta CRL** or one scoped to an **issuing distribution point** does not
+count as coverage for its issuer, and is logged when one is seen. Either lists a
+fraction of what its issuer has revoked, and this CA is handed a file rather
+than fetching distribution points, so it has no way to obtain the rest; treating
+a partial list as a full one would report a domain fully covered while
+consulting a list missing most of its revocations.
+
+The serials such a CRL *does* name are still enforced. Refusing to let it answer
+"is this issuer covered" is not a reason to stop believing it about the clients
+it revokes — a file holding a base CRL beside its delta is what concatenating an
+issuer's CDP and freshestCRL output gives you, and discarding the delta would
+re-admit everything revoked since the base was signed. So a partial CRL can deny
+a client and can never, on its own, satisfy `require`. If every CRL in an entry's file is partial, the
 result is a set covering nothing — and what happens next depends on when it
 arrives. At **startup** that is the entry's only set, so under `require` the
 domain refuses its clients and `puppetca_client_crl_usable` is 0 for it. On a

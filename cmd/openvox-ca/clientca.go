@@ -187,8 +187,9 @@ func warnIfGrantsSpanAnchors(entry *config.ClientCA, anchors []*x509.Certificate
 		"client_ca", entry.Name, "anchors", strings.Join(names, ", "))
 }
 
-// warnAboutPartialCRLs reports CRLs dropped for covering only part of their
-// issuer's revocations, with the entry and file the api package cannot know.
+// warnAboutPartialCRLs reports CRLs not counted towards coverage because they
+// cover only part of their issuer's revocations, with the entry and file the
+// api package cannot know. Their serials are still enforced.
 //
 // Worth a warning rather than a debug line because the file looks valid: every
 // CRL in it verifies, and the operator's evidence that the delivery works is
@@ -198,10 +199,11 @@ func warnAboutPartialCRLs(entry *config.ClientCA, set *api.ClientCRLSet) {
 	if len(discarded) == 0 {
 		return
 	}
-	slog.Warn("Ignoring client CRLs that cover only part of their issuer's revocations: "+
+	slog.Warn("Not counting client CRLs that cover only part of their issuer's revocations: "+
 		"a delta CRL, or one scoped to an issuing distribution point, lists a fraction of "+
 		"what its issuer has revoked, and this CA is handed a file rather than fetching the "+
-		"rest. Deliver the issuer's full CRL.",
+		"rest. The serials they name are still enforced; they just cannot show this issuer "+
+		"is covered. Deliver the issuer's full CRL.",
 		"client_ca", entry.Name, "path", entry.CRLFile,
 		"discarded", strings.Join(discarded, "; "))
 }
@@ -366,9 +368,11 @@ func refreshClientCRLs(cfg *serverConfig, domains []api.TrustDomain, m *clientCR
 		// value. Empty where there is no crl_file to reload, where the read
 		// failed, and where nothing went backwards -- the first two of which
 		// the err and losesCoverage arms below already answer for.
-		regressedAnchor := ""
+		regressedAnchor, regressed := "", false
+		droppedAnchor, dropped := "", false
 		if entry.CRLFile != "" && err == nil {
-			regressedAnchor, _ = regressesCRLSet(domain.RevocationSet(), candidate, now)
+			regressedAnchor, regressed = regressesCRLSet(domain.RevocationSet(), candidate, now)
+			droppedAnchor, dropped = domain.RevocationSet().PartialsDropped(candidate, now)
 		}
 
 		switch {
@@ -392,7 +396,7 @@ func refreshClientCRLs(cfg *serverConfig, domains []api.TrustDomain, m *clientCR
 				"keeping the current set",
 				"client_ca", entry.Name, "path", entry.CRLFile,
 				"now_uncovered", strings.Join(candidate.CoverageGaps(now), ", "))
-		case regressedAnchor != "":
+		case regressed:
 			// Verifies, covers every anchor the current set covers, and is still
 			// older than what is installed. Applying it would re-admit every
 			// serial revoked since it was signed, and nothing else on this path
@@ -402,6 +406,16 @@ func refreshClientCRLs(cfg *serverConfig, domains []api.TrustDomain, m *clientCR
 			slog.Error("crl_file reload would move an anchor backwards; keeping the current set",
 				"client_ca", entry.Name, "path", entry.CRLFile,
 				"issuer", regressedAnchor)
+		case dropped:
+			// Partial CRLs are invisible to the two guards above: they are filed
+			// apart, so an anchor's coverage and freshness read the same whether
+			// or not its delta is present. Since a delta can deny a client, a
+			// reload that quietly drops one re-admits every serial only it named
+			// -- narrowing enforcement while looking like an ordinary refresh.
+			slog.Error("crl_file reload would drop a partial CRL whose serials are enforced, "+
+				"without its issuer's full CRL moving on; keeping the current set",
+				"client_ca", entry.Name, "path", entry.CRLFile,
+				"issuer", droppedAnchor)
 		default:
 			domain.SetRevocationSet(candidate)
 			m.recordReload(entry.Name, now)
@@ -493,27 +507,29 @@ type clientCRLMetrics struct {
 // shouldWarnDiscards reports whether this entry's discards differ from the last
 // reported, recording them either way.
 func (m *clientCRLMetrics) shouldWarnDiscards(entry string, discards []string) bool {
-	if len(discards) == 0 {
-		return false
-	}
 	if m == nil {
-		// No exporter configured, so no per-entry state to dedupe against.
-		// Reporting every pass beats reporting nothing: the warning is the only
-		// signal a partial delivery gives, and without metrics it is the only
-		// signal at all.
-		return true
+		// No exporter configured, so there is no per-entry state to dedupe
+		// against. Reporting every pass beats reporting nothing: the warning is
+		// the only signal a partial delivery gives, and without metrics it is
+		// the only signal at all.
+		return len(discards) > 0
 	}
+
 	joined := strings.Join(discards, "; ")
+
 	m.discardMu.Lock()
 	defer m.discardMu.Unlock()
+	previous, seen := m.warnedDiscards[entry]
 	if m.warnedDiscards == nil {
 		m.warnedDiscards = map[string]string{}
 	}
-	if m.warnedDiscards[entry] == joined {
-		return false
-	}
+	// Recorded on every pass including the empty one, so the state clears when
+	// the fault does. Returning early on an empty set left the old discards
+	// remembered, and a delivery broken, fixed, then broken the same way again
+	// stayed silent for ever.
 	m.warnedDiscards[entry] = joined
-	return true
+
+	return len(discards) > 0 && (!seen || previous != joined)
 }
 
 // newClientCRLMetrics registers the gauge, or returns nil when the exporter is
@@ -554,7 +570,8 @@ func newClientCRLMetrics(reg prometheus.Registerer) *clientCRLMetrics {
 			Name:      "last_reload_timestamp_seconds",
 			Help: "When this client_ca entry's crl_file was last applied, in seconds since the " +
 				"epoch. A reload that fails, that would cover fewer anchors than the set " +
-				"already in use, or that would move an anchor backwards to an older CRL, " +
+				"already in use, that would drop an enforced partial CRL, or that would " +
+				"move an anchor backwards to an older CRL, " +
 				"deliberately keeps the previous set -- which is right for " +
 				"availability and invisible on every other series, because the retained CRLs " +
 				"are still current and clients are still served. Meanwhile the file has stopped " +

@@ -169,19 +169,6 @@ func coversPartially(crl *x509.RevocationList) (string, bool) {
 	return "", false
 }
 
-// forIssuer returns every CRL issued by cert, and whether any of them is
-// currently valid.
-//
-// The two answers are separate because the policies want different things. For
-// `require`, an expired CRL counts as absent: without that the policy silently
-// degrades to `skip` over time, an expired CRL going on satisfying the "has a
-// CRL" test while saying nothing about revocations since.
-//
-// For `check` — "verify against whatever CRLs are loaded" — an expired CRL is
-// still loaded and still names serials that were revoked. Discarding it would
-// turn a stale CRL into no revocation checking at all, which is the outcome
-// `check` exists to avoid; the operator asked to tolerate an issuer without
-// CRLs, not to stop reading the ones they supplied.
 // forRevocationLookup is forIssuer plus the partial-scope CRLs, for deciding
 // whether a serial is revoked.
 //
@@ -196,6 +183,19 @@ func (s *ClientCRLSet) forRevocationLookup(cert *x509.Certificate, now time.Time
 	return append(crls, s.partialBySignerKey[string(cert.RawSubjectPublicKeyInfo)]...), anyValid
 }
 
+// forIssuer returns every CRL issued by cert, and whether any of them is
+// currently valid.
+//
+// The two answers are separate because the policies want different things. For
+// `require`, an expired CRL counts as absent: without that the policy silently
+// degrades to `skip` over time, an expired CRL going on satisfying the "has a
+// CRL" test while saying nothing about revocations since.
+//
+// For `check` — "verify against whatever CRLs are loaded" — an expired CRL is
+// still loaded and still names serials that were revoked. Discarding it would
+// turn a stale CRL into no revocation checking at all, which is the outcome
+// `check` exists to avoid; the operator asked to tolerate an issuer without
+// CRLs, not to stop reading the ones they supplied.
 func (s *ClientCRLSet) forIssuer(cert *x509.Certificate, now time.Time) (crls []*x509.RevocationList, anyValid bool) {
 	if s == nil {
 		return nil, false
@@ -403,6 +403,38 @@ func (f crlFreshness) newerThan(other crlFreshness) bool {
 		// would let the older of the two install.
 	}
 	return f.thisUpdate.After(other.thisUpdate)
+}
+
+// PartialsDropped reports whether candidate holds fewer partial-scope CRLs than
+// this set for some anchor whose full CRL has not moved forward, naming that
+// anchor's issuer.
+//
+// Needed because partials are deliberately invisible to the other two guards:
+// they are filed apart, so an anchor's Coverage and freshness are identical
+// whether or not its delta is present. Once a delta can deny a client -- which
+// is the point of keeping it -- a reload that silently drops it re-admits every
+// serial only it named, and neither losesCoverage nor Regresses can see that.
+//
+// Conditioned on the full CRL not advancing, because a shrinking delta is the
+// normal case and not a fault: when an issuer publishes a new base, the serials
+// accumulated in the old delta fold into it and the delta legitimately resets.
+// Refusing on the count alone would reject every ordinary base rotation.
+func (s *ClientCRLSet) PartialsDropped(candidate *ClientCRLSet, now time.Time) (string, bool) {
+	if s == nil {
+		return "", false
+	}
+	currentF := s.freshness(now)
+	candidateF := candidate.freshness(now)
+	for key, partials := range s.partialBySignerKey {
+		if candidate != nil && len(candidate.partialBySignerKey[key]) >= len(partials) {
+			continue
+		}
+		if cand, ok := candidateF[key]; ok && cand.newerThan(currentF[key]) {
+			continue // the base moved on, so the delta resetting is expected
+		}
+		return partials[0].Issuer.String(), true
+	}
+	return "", false
 }
 
 // Regresses reports whether candidate would move any anchor backwards, naming

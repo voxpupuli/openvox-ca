@@ -386,6 +386,32 @@ func deltaCRL(cert *x509.Certificate, key *ecdsa.PrivateKey) *x509.RevocationLis
 	return crl
 }
 
+// deltaCRLRevoking is deltaCRL naming serials, for the case where the delta is
+// the only thing revoking them.
+func deltaCRLRevoking(cert *x509.Certificate, key *ecdsa.PrivateKey, revoked ...*big.Int) *x509.RevocationList {
+	GinkgoHelper()
+	entries := make([]x509.RevocationListEntry, 0, len(revoked))
+	for _, serial := range revoked {
+		entries = append(entries, x509.RevocationListEntry{
+			SerialNumber:   serial,
+			RevocationTime: time.Now().Add(-time.Minute),
+		})
+	}
+	der, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+		Number:                    big.NewInt(1),
+		RevokedCertificateEntries: entries,
+		ThisUpdate:                time.Now().Add(-time.Hour),
+		NextUpdate:                time.Now().Add(time.Hour),
+		ExtraExtensions: []pkix.Extension{
+			{Id: asn1.ObjectIdentifier{2, 5, 29, 27}, Value: []byte{0x30, 0x00}},
+		},
+	}, cert, key)
+	Expect(err).NotTo(HaveOccurred())
+	crl, err := x509.ParseRevocationList(der)
+	Expect(err).NotTo(HaveOccurred())
+	return crl
+}
+
 // numberedCRLUntil is mintCRL with an explicit cRLNumber and NextUpdate, so a
 // spec can order two CRLs from one issuer deliberately rather than relying on
 // mintCRL's clock, and tell which of the two ended up installed.
@@ -930,7 +956,7 @@ var _ = Describe("refreshClientCRLs", func() {
 			"an unchanged file must not be refused as a replay")
 	})
 
-	It("names the entry and file when it drops a partial-scope CRL, once per change", func() {
+	It("names the entry and file when it does not count a partial-scope CRL", func() {
 		// Asserted on the discard warning's own wording, not on the client_ca
 		// and path keys alone: warnAboutCRLCoverage logs the same two keys for
 		// the same entry, so a spec keyed on those passed with the whole
@@ -1005,6 +1031,88 @@ var _ = Describe("refreshClientCRLs", func() {
 
 		Expect(buf.String()).NotTo(ContainSubstring("cover only part"),
 			"a refused reload repeating unchanged must not warn every pass")
+	})
+
+	It("refuses a reload that drops a delta whose serials are enforced", func() {
+		// The guards above this one cannot see it. Partials are filed apart, so
+		// base+delta and base-alone have identical coverage and identical
+		// freshness -- losesCoverage and Regresses both pass, and the narrower
+		// set installs, re-admitting every serial only the delta named.
+		revoked := big.NewInt(4242)
+		base := mintCRL(serverCA, serverKey)
+
+		cfg := &serverConfig{}
+		cfg.ClientRevocationPolicy = config.RevocationRequire
+		cfg.ClientCA = []config.ClientCA{{
+			Name:    "server",
+			File:    writeCertFile(serverCA),
+			CRLFile: writeCRLFile(base, deltaCRLRevoking(serverCA, serverKey, revoked)),
+		}}
+		domains, err := buildTrustDomains(cfg, ownCA, nil)
+		Expect(err).NotTo(HaveOccurred())
+		refreshClientCRLs(cfg, domains, metrics)
+		applied := lastReload("server")
+
+		// The delta disappears while the base stays exactly as it was.
+		cfg.ClientCA[0].CRLFile = writeCRLFile(base)
+		refreshClientCRLs(cfg, domains, metrics)
+
+		Expect(lastReload("server")).To(Equal(applied),
+			"dropping an enforced delta must not count as an applied reload")
+	})
+
+	It("accepts a smaller delta once the base has moved on", func() {
+		// The legitimate half, and why the guard is conditioned on the base
+		// rather than on the count: when an issuer publishes a new base, the
+		// serials in the old delta fold into it and the delta resets. Refusing
+		// on the count alone would reject every ordinary base rotation.
+		revoked := big.NewInt(4242)
+
+		cfg := &serverConfig{}
+		cfg.ClientRevocationPolicy = config.RevocationRequire
+		cfg.ClientCA = []config.ClientCA{{
+			Name: "server",
+			File: writeCertFile(serverCA),
+			CRLFile: writeCRLFile(numberedCRLUntil(serverCA, serverKey, 7, time.Now().Add(time.Hour)),
+				deltaCRLRevoking(serverCA, serverKey, revoked)),
+		}}
+		domains, err := buildTrustDomains(cfg, ownCA, nil)
+		Expect(err).NotTo(HaveOccurred())
+		refreshClientCRLs(cfg, domains, metrics)
+		applied := lastReload("server")
+
+		// A newer base, carrying the serial itself, and no delta beside it.
+		cfg.ClientCA[0].CRLFile = writeCRLFile(
+			numberedCRLUntil(serverCA, serverKey, 8, time.Now().Add(2*time.Hour), revoked))
+		refreshClientCRLs(cfg, domains, metrics)
+
+		Expect(lastReload("server")).To(BeNumerically(">", applied),
+			"a base rotation that absorbs the delta must install")
+	})
+
+	It("reports a partial delivery even with no metrics exporter configured", func() {
+		// The nil-metrics arm is the production path whenever Prometheus is
+		// disabled, and it is where the warning is the operator's *only* signal
+		// -- there is no gauge to notice instead.
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		defer slog.SetDefault(orig)
+
+		cfg := &serverConfig{}
+		cfg.ClientRevocationPolicy = config.RevocationRequire
+		cfg.ClientCA = []config.ClientCA{{
+			Name:    "server",
+			File:    writeCertFile(serverCA),
+			CRLFile: writeCRLFile(deltaCRL(serverCA, serverKey)),
+		}}
+		domains, err := buildTrustDomains(cfg, ownCA, nil)
+		Expect(err).NotTo(HaveOccurred())
+
+		refreshClientCRLs(cfg, domains, nil)
+
+		Expect(buf.String()).To(ContainSubstring("cover only part"),
+			"with no exporter this warning is the only signal there is")
 	})
 
 	It("publishes no gauge at all when the policy does not require CRLs", func() {
