@@ -331,10 +331,15 @@ func (s *ClientCRLSet) Coverage(now time.Time) (present, current map[string]bool
 	return present, current
 }
 
-// freshness reports, per anchor key, the newest CRL this set holds for that
-// anchor -- by CRL number where the issuer publishes one, and by ThisUpdate
-// otherwise, since cRLNumber is required of a conforming issuer but not
-// universally present (`openssl ca -gencrl` omits it under the stock config).
+// freshness reports, per anchor key, how far that anchor's revocation
+// information has advanced: the highest cRLNumber and the latest ThisUpdate
+// seen among its full CRLs, tracked as two independent marks.
+//
+// Not "the newest CRL": electing one needs a comparator over two orderings that
+// can disagree, and cRLNumber is required of a conforming issuer but not
+// universally present (`openssl ca -gencrl` omits it under the stock config),
+// so neither field can serve alone. See crlFreshness for why two marks rather
+// than one election.
 //
 // It exists so a reload can refuse to go backwards. A CRL that verifies, has
 // not expired, and covers every anchor the current set covers still must not
@@ -348,61 +353,70 @@ func (s *ClientCRLSet) freshness(now time.Time) map[string]crlFreshness {
 	}
 	for _, anchor := range s.anchors {
 		key := string(anchor.RawSubjectPublicKeyInfo)
+		// Full CRLs only. A delta's cRLNumber exceeds the base it is relative
+		// to, so folding partials into the watermark would leave every later
+		// base rotation looking like a regression and pin the anchor.
 		crls, _ := s.forIssuer(anchor, now)
 		for _, crl := range crls {
-			f := crlFreshness{subject: anchor.Subject.String(), thisUpdate: crl.ThisUpdate}
-			if crl.Number != nil {
-				f.number = new(big.Int).Set(crl.Number)
+			f := out[key]
+			f.subject = anchor.Subject.String()
+			if crl.ThisUpdate.After(f.latest) {
+				f.latest = crl.ThisUpdate
 			}
-			if best, ok := out[key]; !ok || f.newerThan(best) {
-				out[key] = f
+			if crl.Number != nil && (f.maxNumber == nil || crl.Number.Cmp(f.maxNumber) > 0) {
+				f.maxNumber = new(big.Int).Set(crl.Number)
 			}
+			out[key] = f
 		}
 	}
 	return out
 }
 
-// crlFreshness is a CRL's position in its issuer's sequence.
+// crlFreshness is how far an anchor's revocation information has advanced, as
+// two independent high-water marks rather than a single "newest CRL".
+//
+// Two marks because the two orderings a CRL offers are not reducible to one.
+// Electing a newest CRL needs a comparator, and any comparator that consults
+// both fields is intransitive where an issuer's numbers and dates disagree --
+// so which CRL "won" could depend on the order they appeared in the file.
+// Taking the maximum of each field separately has no such freedom.
 type crlFreshness struct {
 	// subject names the anchor in a refusal message; the map key is its raw
 	// SubjectPublicKeyInfo, which is binary and cannot be logged.
-	subject    string
-	number     *big.Int
-	thisUpdate time.Time
+	subject string
+
+	// maxNumber is the highest cRLNumber seen for this anchor, nil where no CRL
+	// for it published one. latest is the latest ThisUpdate seen.
+	maxNumber *big.Int
+	latest    time.Time
 }
 
-// newerThan orders two CRLs from one issuer: by cRLNumber where both publish
-// one, and by ThisUpdate otherwise -- the one dimension every CRL carries.
-//
-// It deliberately does *not* follow internal/ca's newerCRL in treating a
-// published number as beating an absent one. That rule is safe there, where
-// this CA issues both CRLs and controls whether the extension appears. Here the
-// CRLs come from a foreign issuer through a file, and deciding on the presence
-// of an extension is unsafe in both directions:
-//
-//   - An installed unnumbered CRL against a numbered candidate would say "not a
-//     regression" whatever the dates, so a numbered CRL three weeks old could
-//     replace a current one and re-admit everything revoked since.
-//   - An installed numbered CRL against an unnumbered candidate would say
-//     "regression" whatever the dates, pinning the anchor: once any numbered
-//     CRL is installed, an issuer that stops publishing the extension can never
-//     update it again, and the refusal is indistinguishable from an attack.
-//
-// Comparing the dates instead costs nothing against a replay, which is the
-// threat this exists for: an attacker who cannot forge a signature can only
-// replay CRLs the issuer really published, and a genuinely older one carries a
-// genuinely older ThisUpdate. The steady state between refreshes is the same
-// file, equal on both fields, so this still reports no regression.
-func (f crlFreshness) newerThan(other crlFreshness) bool {
-	if f.number != nil && other.number != nil {
-		if c := f.number.Cmp(other.number); c != 0 {
-			return c > 0
-		}
-		// Equal numbers: an issuer that reissues without incrementing leaves
-		// ThisUpdate as the only ordering there is, and calling the pair equal
-		// would let the older of the two install.
+// advancedOver reports whether f is ahead of other on either axis, used to tell
+// an ordinary base rotation from a delta silently disappearing.
+func (f crlFreshness) advancedOver(other crlFreshness) bool {
+	if f.maxNumber != nil && other.maxNumber != nil && f.maxNumber.Cmp(other.maxNumber) > 0 {
+		return true
 	}
-	return f.thisUpdate.After(other.thisUpdate)
+	return f.latest.After(other.latest)
+}
+
+// regressedFrom reports whether f has gone backwards from other on either axis.
+//
+// Either, not both: an attacker who can write crl_file cannot forge a
+// signature, so they can only replay CRLs the issuer genuinely published, at a
+// time of their choosing. A replay is older on at least one axis, and requiring
+// both to regress would let them replay using whichever axis their target
+// issuer keeps badly.
+//
+// Numbers are compared only where both sides have one. Deciding on the presence
+// of the extension was shipped once and was unsafe in both directions -- see the
+// history in the git log for 4079b29 -- so absence stays vacuous here and the
+// dates carry the comparison alone.
+func (f crlFreshness) regressedFrom(other crlFreshness) bool {
+	if f.maxNumber != nil && other.maxNumber != nil && f.maxNumber.Cmp(other.maxNumber) < 0 {
+		return true
+	}
+	return f.latest.Before(other.latest)
 }
 
 // PartialsDropped reports whether candidate holds fewer partial-scope CRLs than
@@ -429,7 +443,7 @@ func (s *ClientCRLSet) PartialsDropped(candidate *ClientCRLSet, now time.Time) (
 		if candidate != nil && len(candidate.partialBySignerKey[key]) >= len(partials) {
 			continue
 		}
-		if cand, ok := candidateF[key]; ok && cand.newerThan(currentF[key]) {
+		if cand, ok := candidateF[key]; ok && cand.advancedOver(currentF[key]) {
 			continue // the base moved on, so the delta resetting is expected
 		}
 		return partials[0].Issuer.String(), true
@@ -452,7 +466,7 @@ func (s *ClientCRLSet) Regresses(candidate *ClientCRLSet, now time.Time) (string
 		if !ok {
 			continue // a lost anchor is losesCoverage's business, not this one
 		}
-		if cur.newerThan(cand) {
+		if cand.regressedFrom(cur) {
 			return cur.subject, true
 		}
 	}

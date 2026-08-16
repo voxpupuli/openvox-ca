@@ -609,12 +609,29 @@ the issuer's CDP — and this only notices; nothing in openvox-ca writes it. A
 reload is refused, keeping the previous set, when it fails outright, when it
 would cover fewer anchors than the set already in use, when it would drop a partial CRL whose
 serials are enforced while that issuer's full CRL stays where it was, or when it
-would move any anchor *backwards* — an older CRL from the same issuer. Older means a lower
-`cRLNumber` where both the installed and the candidate CRL publish one; where
-their numbers are equal, or where either omits the extension, it means an
-earlier `thisUpdate`. The dates decide whenever the numbers cannot, rather than
-a numbered CRL outranking an unnumbered one: an issuer that stops publishing
-`cRLNumber` would otherwise pin the anchor, unable to update it ever again. The last of these is what
+would move any anchor *backwards* — an older CRL from the same issuer. Each anchor carries two
+high-water marks — the highest `cRLNumber` seen for it, and the latest
+`thisUpdate` — and a candidate that is behind on **either** is refused.
+
+Either, rather than both, because an attacker who can write `crl_file` cannot
+forge a signature: they can only replay CRLs the issuer really published, at a
+time of their choosing. A replay is behind on at least one mark, and requiring
+both to regress would let them replay using whichever mark their target issuer
+keeps badly. `cRLNumber` is compared only where both sides publish one, so an
+issuer that never publishes it, or stops, is ordered by date alone rather than
+pinned.
+
+Two marks rather than one "newest CRL" because the two orderings a CRL offers
+cannot be reduced to one: any comparison consulting both is intransitive where
+an issuer's numbers and dates disagree, which would leave the outcome depending
+on the order CRLs appear in the file.
+
+The practical cost is that an issuer whose `thisUpdate` moves backwards while
+its numbers rise — two signers with a clock skew between them is the usual way —
+has reloads refused until it publishes something ahead on both marks. That is
+normally self-correcting within a publication interval. The marks are held in
+memory and not persisted, so a restart clears them: this is a ratchet for the
+life of the process, not tamper-evidence across restarts. The last of these is what
 stops a replayed file: it verifies and covers everything the current set covers,
 so nothing else on the path would notice, while re-admitting every serial
 revoked since it was signed. Refusing costs freshness and never availability.

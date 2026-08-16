@@ -682,6 +682,86 @@ var _ = Describe("ClientCRLSet.Regresses", func() {
 		Expect(back).To(BeTrue())
 	})
 
+	It("refuses a higher-numbered CRL that is older by date", func() {
+		// The rule this replaced trusted cRLNumber outright where both sides
+		// had one. RFC 5280 requires the number to increase monotonically, but
+		// a foreign issuer's compliance is not something this CA can check, and
+		// assuming it is the same class of assumption that produced the
+		// round-3 regression. An issuer that numbers badly -- two signers with
+		// independent counters is the usual way -- would otherwise let an
+		// attacker replay an old CRL that happens to carry a higher number.
+		current := api.NewClientCRLSet(
+			[]*x509.RevocationList{numberedCRLFrom(serverCA, caKey, future, 5)}, anchorSet())
+		olderButHigher := api.NewClientCRLSet(
+			[]*x509.RevocationList{
+				numberedCRLFrom(serverCA, caKey, future.Add(-21*24*time.Hour), 9),
+			}, anchorSet())
+
+		who, back := current.Regresses(olderButHigher, time.Now())
+		Expect(back).To(BeTrue(), "a higher number must not excuse an earlier date")
+		Expect(who).To(Equal(serverCA.Subject.String()))
+	})
+
+	It("refuses a later-dated CRL whose number went backwards", func() {
+		// The mirror, and the reason the test is on either axis rather than
+		// both: requiring both to regress would let an attacker replay using
+		// whichever axis their issuer happens to keep badly.
+		current := api.NewClientCRLSet(
+			[]*x509.RevocationList{numberedCRLFrom(serverCA, caKey, future, 9)}, anchorSet())
+		laterButLower := api.NewClientCRLSet(
+			[]*x509.RevocationList{
+				numberedCRLFrom(serverCA, caKey, future.Add(24*time.Hour), 4),
+			}, anchorSet())
+
+		_, back := current.Regresses(laterButLower, time.Now())
+		Expect(back).To(BeTrue(), "a later date must not excuse a lower number")
+	})
+
+	It("tracks the two marks independently, not one elected CRL", func() {
+		// Where an anchor holds several CRLs, each axis takes its own maximum.
+		// Electing one CRL as newest needs a comparator, and a comparator over
+		// two disagreeing orderings is intransitive -- so which CRL won could
+		// depend on the order they appeared in the file.
+		// The current CRL first and the superseded one after it -- the order a
+		// bundle carrying both usually has. Deliberately not the other way
+		// round: with the maximum of each axis appearing last, "keep the
+		// highest" and "keep whichever came last" agree, and a spec built that
+		// way cannot tell them apart.
+		current := api.NewClientCRLSet([]*x509.RevocationList{
+			numberedCRLFrom(serverCA, caKey, future.Add(48*time.Hour), 9), // both marks
+			numberedCRLFrom(serverCA, caKey, future, 2),                   // superseded
+		}, anchorSet())
+
+		// A candidate behind on either mark regresses, even though it is ahead
+		// of the superseded CRL on both.
+		behindOnDate := api.NewClientCRLSet(
+			[]*x509.RevocationList{numberedCRLFrom(serverCA, caKey, future.Add(24*time.Hour), 10)},
+			anchorSet())
+		_, back := current.Regresses(behindOnDate, time.Now())
+		Expect(back).To(BeTrue(), "the latest date seen is the mark, whichever CRL carried it")
+
+		behindOnNumber := api.NewClientCRLSet(
+			[]*x509.RevocationList{numberedCRLFrom(serverCA, caKey, future.Add(72*time.Hour), 3)},
+			anchorSet())
+		_, back = current.Regresses(behindOnNumber, time.Now())
+		Expect(back).To(BeTrue(), "the highest number seen is the mark, whichever CRL carried it")
+	})
+
+	It("accepts a candidate that advances on both marks", func() {
+		// The rule must still let an ordinary refresh through, or it is just a
+		// slower way of pinning every anchor.
+		current := api.NewClientCRLSet([]*x509.RevocationList{
+			numberedCRLFrom(serverCA, caKey, future.Add(48*time.Hour), 9),
+			numberedCRLFrom(serverCA, caKey, future, 2),
+		}, anchorSet())
+		ahead := api.NewClientCRLSet(
+			[]*x509.RevocationList{numberedCRLFrom(serverCA, caKey, future.Add(72*time.Hour), 10)},
+			anchorSet())
+
+		_, back := current.Regresses(ahead, time.Now())
+		Expect(back).To(BeFalse())
+	})
+
 	// An anchor the candidate drops entirely is losesCoverage's business, and
 	// answering it here too would report one fault as two.
 	It("says nothing about an anchor the candidate no longer covers", func() {
