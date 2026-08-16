@@ -410,27 +410,46 @@ podman run --rm \
   --pp-cli-auth --key-out /out/admin-cli_key.pem > admin-cli.crt
 ```
 
-Four details that are easy to get wrong. **Pin the tag to the version of the
-server you just stopped**, as shown, rather than taking `:latest` — the same
-rule [`openbao-transit.md`](openbao-transit.md) applies to the equivalent
-Kubernetes Job. This container writes to on-disk state the stopped server wrote
-and will read again when it restarts, including the inventory and its integrity
-record, so it is the one place a version difference is between two writers of
-the same data rather than between a client and a server.
+Four details that are easy to get wrong. **Pin the image to the version the
+stopped server was running**, as shown, rather than taking `:latest` — the same
+rule the [Kubernetes Job recipe](openbao-transit.md#the-server-will-not-start-between-steps-1-and-3)
+applies. This container writes on-disk state that server wrote and will read
+again when it restarts, the inventory and its integrity record among it, so a
+version difference here is between two writers of the same data rather than
+between a client and a server.
 
-The image must be fully qualified — an unqualified name will not resolve
-without registry search configured. The images run as `USER puppet`, so under
-rootless podman a bind mount owned by your host user is not writable inside the
-container without `--userns=keep-id`;
+Pin the *version*, not whatever tag the deployment names: `compose.yml` ships
+`:latest` deliberately, so copying the tag from a deployment that floats would
+reintroduce exactly the skew this avoids. Where the running tag is mutable, read
+the version back off the image the server actually ran —
+
+```bash
+podman inspect --format \
+  '{{index .Config.Labels "org.opencontainers.image.version"}}' \
+  ghcr.io/voxpupuli/openvox-ca:latest
+```
+
+— or on Kubernetes take the resolved digest from the running pod *before*
+scaling it down, and use that digest as the Job's `image:`:
+
+```bash
+kubectl get pod -l app=openvox-ca \
+  -o jsonpath='{.items[0].status.containerStatuses[0].imageID}'
+```
+
+The image must be fully qualified — an unqualified name will not resolve without
+registry search configured. The images run as `USER puppet`, so under rootless
+podman a bind mount owned by your host user is not writable inside the container
+without `--userns=keep-id`;
 without it the mint fails at the key write, cleanly but confusingly. And the
 mount is a dedicated directory with `:Z` rather than `$PWD` with `:z`, because
 `:Z` relabels its target private to the container — pointing that at a whole
 project or home directory would relabel unrelated files with it.
 
 On Kubernetes the equivalent is scaling the Deployment to zero and running a Job
-that mounts the same PVC, pinned to the Deployment's own image tag for the
-reason above, and with a retrieval step for the key — a `--key-out` path inside
-a Job pod that is then reaped is the same as having no key at all.
+that mounts the same PVC, pinned to the version the Deployment was running for
+the reason above, and with a retrieval step for the key — a `--key-out` path
+inside a Job pod that is then reaped is the same as having no key at all.
 
 One more asymmetry to expect: a running server answers OCSP `unknown` for a
 certificate minted this way until it restarts, because its serial index is built
