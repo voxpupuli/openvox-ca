@@ -180,15 +180,6 @@ func (s *ClientCRLSet) forRevocationLookup(cert *x509.Certificate, now time.Time
 	if s == nil {
 		return crls, anyValid
 	}
-	// Not-yet-issued CRLs are added back: forIssuer drops them so they cannot
-	// speak to coverage or currency, but the serials they name are revoked
-	// whatever this host's clock says, and anyValid is unchanged so they still
-	// cannot satisfy require on their own.
-	for _, crl := range s.bySignerKey[string(cert.RawSubjectPublicKeyInfo)] {
-		if notYetIssued(crl, now) {
-			crls = append(crls, crl)
-		}
-	}
 	return append(crls, s.partialBySignerKey[string(cert.RawSubjectPublicKeyInfo)]...), anyValid
 }
 
@@ -210,16 +201,19 @@ func (s *ClientCRLSet) forIssuer(cert *x509.Certificate, now time.Time) (crls []
 		return nil, false
 	}
 	for _, crl := range s.bySignerKey[string(cert.RawSubjectPublicKeyInfo)] {
-		// Filtered here rather than in currentAt, which is the tempting home
-		// and the wrong one: freshness builds its marks from the *slice* this
-		// returns and never calls currentAt, so a bound placed there would
-		// leave a future-dated CRL ratcheting the mark with every coverage
-		// spec still green.
-		if notYetIssued(crl, now) {
-			continue
-		}
+		// The slice is every full CRL this set holds for the anchor,
+		// unfiltered. It answers Coverage's `present` and freshness's map-entry
+		// existence, both of which are questions about what the file contains
+		// rather than about this host's clock -- and gating it here emptied
+		// coverage and zeroed both marks together, disarming losesCoverage and
+		// Regresses at once.
+		//
+		// The date test guards anyValid alone, which is the currency claim: a
+		// CRL this host thinks is not yet issued is not yet anybody's word. The
+		// one consumer needing a dated view of the slice, freshness's `latest`,
+		// applies notYetIssued itself and records that it did.
 		crls = append(crls, crl)
-		if currentAt(crl, now) {
+		if !notYetIssued(crl, now) && currentAt(crl, now) {
 			anyValid = true
 		}
 	}
@@ -306,22 +300,14 @@ func (s *ClientCRLSet) Discarded() []string {
 // anything current to check against — and the question it cannot is answered at
 // enforcement time, where a refusal is a fact rather than an estimate.
 func (s *ClientCRLSet) Usable(now time.Time) bool {
-	if s == nil {
-		return false
-	}
-	// Reads the map rather than forIssuer because it asks about the whole set
-	// and not one anchor, so the not-yet-issued filter has to be repeated here.
-	// A CRL this host thinks is not yet issued cannot be the reason a domain
-	// counts as covered -- and this is the gauge an operator alerts on, so it
-	// answering "usable" while enforcement disagrees is the worst shape of all.
-	for _, crls := range s.bySignerKey {
-		for _, crl := range crls {
-			if !notYetIssued(crl, now) && currentAt(crl, now) {
-				return true
-			}
-		}
-	}
-	return false
+	// Derived from Coverage rather than repeating the currency rule over the
+	// map. The rule has been placed wrongly six times, and this gauge
+	// disagreeing with enforcement is the worst shape of all -- so it is read
+	// from where enforcement reads it rather than restated. Coverage returns
+	// empty maps for a nil receiver, so the nil check this used to carry is
+	// covered.
+	_, current := s.Coverage(now)
+	return len(current) > 0
 }
 
 // CoverageGaps names the anchors this set holds no current CRL for.
@@ -408,14 +394,23 @@ func (s *ClientCRLSet) freshness(now time.Time) map[string]crlFreshness {
 		for _, crl := range crls {
 			f := out[key]
 			f.subject = anchor.Subject.String()
-			// No date gate here: forIssuer has already dropped anything not
-			// yet issued, for every reader at once. Gating in this loop instead
-			// filtered one side of a comparison and not the other -- a
-			// future-dated candidate came back with a zero mark and read as a
-			// regression -- which is the shape this arrangement exists to make
-			// impossible.
-			if crl.ThisUpdate.After(f.latest) {
-				f.latest = crl.ThisUpdate
+			// The date gate lives here and only here. forIssuer deliberately
+			// does not apply it: its slice also answers Coverage's `present`
+			// and this map's entry existence, both questions about the file
+			// rather than about the clock, and gating it there emptied
+			// coverage and zeroed both marks together.
+			//
+			// Gating the mark without recording that it was gated is what made
+			// this look like the wrong home twice: a suppressed mark is zero,
+			// zero.Before(real) is true and real.After(zero) is true, so a
+			// suppressed mark compared against a real one reads as a regression
+			// in one direction and an advance in the other. `dated` makes the
+			// two non-comparable instead -- see regressedFrom.
+			if !notYetIssued(crl, now) {
+				f.dated = true
+				if crl.ThisUpdate.After(f.latest) {
+					f.latest = crl.ThisUpdate
+				}
 			}
 			if crl.Number != nil && (f.maxNumber == nil || crl.Number.Cmp(f.maxNumber) > 0) {
 				f.maxNumber = new(big.Int).Set(crl.Number)
@@ -447,6 +442,13 @@ type crlFreshness struct {
 	// for it published one. latest is the latest ThisUpdate seen.
 	maxNumber *big.Int
 	latest    time.Time
+
+	// dated is true where at least one full CRL for this anchor carried a
+	// ThisUpdate this host is prepared to believe, so latest means something.
+	// A zero latest is otherwise ambiguous -- it reads as both "no believable
+	// date" and "the beginning of time" -- and comparing the second reading
+	// against a real date is the whole of the fifth and sixth regressions.
+	dated bool
 }
 
 // advancedOver reports whether the anchor's full CRLs have genuinely moved on,
@@ -460,7 +462,12 @@ type crlFreshness struct {
 // delta named. Archived material is what such an attacker has; a *later date*
 // is the thing they cannot manufacture without the issuer's key.
 func (f crlFreshness) advancedOver(other crlFreshness) bool {
-	return f.latest.After(other.latest) && !f.regressedFrom(other)
+	// An undated mark on either side means no advance can be demonstrated, so
+	// the delta drop is refused. Without those conjuncts an installed set whose
+	// full CRL is dated ahead has a zero latest, any full CRL at all reads as
+	// an advance, and an enforced delta can be dropped -- the same overload the
+	// hadBase guard exists to prevent, arriving through the other door.
+	return f.dated && other.dated && f.latest.After(other.latest) && !f.regressedFrom(other)
 }
 
 // regressedFrom reports whether f has gone backwards from other on either axis.
@@ -478,6 +485,22 @@ func (f crlFreshness) advancedOver(other crlFreshness) bool {
 func (f crlFreshness) regressedFrom(other crlFreshness) bool {
 	if f.maxNumber != nil && other.maxNumber != nil && f.maxNumber.Cmp(other.maxNumber) < 0 {
 		return true
+	}
+	// The installed side carries full CRLs this host will not date. Ordering
+	// then rests entirely on the numbers, and where either side has none there
+	// is nothing left to order by -- so refuse rather than install a file that
+	// cannot be shown to be newer. Self-limiting: once now passes those
+	// ThisUpdates the anchor is dated again and this arm stops firing. Without
+	// it, an unnumbered issuer whose CRLs sit beyond the skew tolerance has no
+	// replay guard at all, which is what suppressing `latest` would cost.
+	if !other.dated {
+		return f.maxNumber == nil || other.maxNumber == nil
+	}
+	// The candidate is the undated one: a forward-skewed issuer's genuine new
+	// CRL. The numbers above have already had their say, and its date must not
+	// be read as the beginning of time and called a regression.
+	if !f.dated {
+		return false
 	}
 	return f.latest.Before(other.latest)
 }

@@ -550,6 +550,30 @@ var _ = Describe("partial-scope client CRLs", func() {
 		Expect(err).To(MatchError(api.ErrNoUsableCRL))
 	})
 
+	It("counts a not-yet-issued CRL as present, so an empty reload is still refused", func() {
+		// S1, the live defect. `present` answers "does this set hold a CRL for
+		// this anchor", which is a question about the file and not about the
+		// clock -- and losesCoverage rests on it. Filtering it emptied the
+		// installed side's view, so the loop refusing an empty reload became
+		// vacuous while the marks went to zero at the same moment, disarming
+		// both guards together.
+		//
+		// NextUpdate is deliberately after T0, so the CRL is current and only
+		// notYetIssued can withhold it: otherwise expiry would carry the
+		// assertion and the two implementations would agree.
+		T0 := time.Now()
+		ahead := crlFrom(serverCA, caKey, T0.Add(48*time.Hour))
+		ahead.ThisUpdate = T0.Add(24 * time.Hour)
+		set := api.NewClientCRLSet([]*x509.RevocationList{ahead}, anchorSet())
+
+		present, current := set.Coverage(T0)
+		key := string(serverCA.RawSubjectPublicKeyInfo)
+		Expect(present).To(HaveKey(key),
+			"the file holds a CRL for this anchor whatever this host's clock says")
+		Expect(current).NotTo(HaveKey(key),
+			"but it is not yet anybody's word, so it cannot make the issuer current")
+	})
+
 	It("still denies the serials a not-yet-issued CRL names", func() {
 		// The amendment that keeps this rule's blast radius small. A CRL the
 		// host thinks is not yet issued cannot speak to coverage or currency --
@@ -580,6 +604,11 @@ var _ = Describe("partial-scope client CRLs", func() {
 		set := api.NewClientCRLSet([]*x509.RevocationList{ahead}, anchorSet())
 
 		Expect(set.Usable(time.Now())).To(BeFalse())
+		// The third reader of the currency answer. Without this, an ungated
+		// anyValid paired with Usable keeping its own copy of the predicate
+		// passes the assertion above -- which is the "which reader" failure of
+		// rounds 7 and 8 exactly.
+		Expect(set.CoverageGaps(time.Now())).To(ContainElement(ContainSubstring("Server CA")))
 
 		leaf := &x509.Certificate{SerialNumber: big.NewInt(7), Subject: pkix.Name{CommonName: "node2.test"}}
 		err := api.CheckChainRevocationForTest(
@@ -683,6 +712,28 @@ var _ = Describe("ClientCRLSet.PartialsDropped", func() {
 		who, dropped := current.PartialsDropped(candidate, time.Now())
 		Expect(dropped).To(BeTrue(),
 			"an ancient full CRL must not excuse dropping the only revocations there were")
+		Expect(who).To(Equal(serverCA.Subject.String()))
+	})
+
+	It("cannot excuse a dropped delta with an undated installed mark", func() {
+		// S8. advancedOver asks whether the base moved on. With the installed
+		// side undated its latest is zero, so real.After(zero) is true and any
+		// full CRL at all would read as an advance -- excusing the drop of a
+		// delta whose serials are enforced. Requiring both sides dated is what
+		// makes "no advance can be demonstrated" the answer instead.
+		T0 := time.Now()
+		base := numberedCRLFrom(serverCA, caKey, future, 1)
+		base.ThisUpdate = T0.Add(24 * time.Hour) // undated at T0
+		current := api.NewClientCRLSet([]*x509.RevocationList{
+			base, delta(big.NewInt(4242)),
+		}, anchorSet())
+
+		candidate := api.NewClientCRLSet(
+			[]*x509.RevocationList{numberedCRLFrom(serverCA, caKey, future, 2)}, anchorSet())
+
+		who, dropped := current.PartialsDropped(candidate, T0)
+		Expect(dropped).To(BeTrue(),
+			"a base this host will not date cannot be shown to have rotated")
 		Expect(who).To(Equal(serverCA.Subject.String()))
 	})
 
@@ -934,31 +985,95 @@ var _ = Describe("ClientCRLSet.Regresses", func() {
 			"a candidate the host thinks is not yet issued must not read as going backwards")
 	})
 
-	It("keeps the date ratchet when this host's clock is behind", func() {
-		// The other half of the same regression, in the fail-open direction:
-		// `now` is the local clock, so a lagging one made every genuine CRL
-		// look future-dated. Gating inside freshness then zeroed the mark on
-		// both sides and switched the ratchet off entirely -- and for an issuer
-		// publishing no cRLNumber there was no guard left at all.
+	It("refuses a reload when the installed CRLs are neither dated nor numbered", func() {
+		// Rewritten: the previous version named this case and evaluated at
+		// T0+70d, by which both fixture dates were a month in the past, no CRL
+		// was not-yet-issued, the filter never engaged and the ordinary date
+		// arm carried the assertion. It passed under every candidate rule --
+		// including the one that shipped the defect it was written to catch.
 		//
-		// Modelled by an issuer whose CRLs are all far newer than this host
-		// believes, which is what a lagging clock looks like from in here.
+		// Suppressing `latest` for an undated anchor leaves an unnumbered
+		// issuer with nothing to order by, so the guard refuses rather than
+		// installing a file it cannot show to be newer. Self-limiting: once the
+		// clock passes those ThisUpdates the anchor is dated again.
+		T0 := time.Now()
+
 		newer := numberedCRLFrom(serverCA, caKey, future, 1)
-		newer.ThisUpdate = time.Now().Add(60 * 24 * time.Hour)
+		newer.ThisUpdate = T0.Add(24 * time.Hour) // undated at T0, by ~24h
 		newer.Number = nil
 		older := numberedCRLFrom(serverCA, caKey, future, 1)
-		older.ThisUpdate = time.Now().Add(30 * 24 * time.Hour)
+		older.ThisUpdate = T0.Add(-time.Hour)
 		older.Number = nil
 
 		current := api.NewClientCRLSet([]*x509.RevocationList{newer}, anchorSet())
 		candidate := api.NewClientCRLSet([]*x509.RevocationList{older}, anchorSet())
 
-		// Evaluated at a time by which both have been issued: the ratchet must
-		// still order them, rather than having been disarmed.
-		at := time.Now().Add(70 * 24 * time.Hour)
-		_, back := current.Regresses(candidate, at)
+		_, back := current.Regresses(candidate, T0)
 		Expect(back).To(BeTrue(),
-			"an unnumbered issuer's replay must still be refused on the dates alone")
+			"with no believable date and no number there is nothing to order by")
+	})
+
+	It("does not refuse an unnumbered issuer's ordinary reload", func() {
+		// S6b: the steady state for an issuer that never publishes cRLNumber.
+		// Both dates are in the past at T0, so both sides are dated and the
+		// arm above must not fire -- otherwise every such issuer's every
+		// reload is refused for ever.
+		T0 := time.Now()
+
+		installed := numberedCRLFrom(serverCA, caKey, future, 1)
+		installed.ThisUpdate = T0.Add(-2 * time.Hour)
+		installed.Number = nil
+		candidate := numberedCRLFrom(serverCA, caKey, future, 1)
+		candidate.ThisUpdate = T0.Add(-time.Hour)
+		candidate.Number = nil
+
+		_, back := api.NewClientCRLSet([]*x509.RevocationList{installed}, anchorSet()).
+			Regresses(api.NewClientCRLSet([]*x509.RevocationList{candidate}, anchorSet()), T0)
+		Expect(back).To(BeFalse())
+	})
+
+	It("does not refuse an unnumbered candidate this host will not date", func() {
+		// S6c: the same arm, keyed the other way round. It must test the
+		// *installed* side's datedness, not the candidate's -- swapping them
+		// refuses a forward-skewed issuer's genuine CRL, which is the round-5
+		// and round-6 mistake ("which side of the comparison") reappearing on
+		// a new arm. S6 alone cannot catch that; the two together pin it.
+		T0 := time.Now()
+
+		installed := numberedCRLFrom(serverCA, caKey, future, 1)
+		installed.ThisUpdate = T0.Add(-2 * time.Hour)
+		installed.Number = nil
+		candidate := numberedCRLFrom(serverCA, caKey, future, 1)
+		candidate.ThisUpdate = T0.Add(24 * time.Hour) // undated at T0
+		candidate.Number = nil
+
+		_, back := api.NewClientCRLSet([]*x509.RevocationList{installed}, anchorSet()).
+			Regresses(api.NewClientCRLSet([]*x509.RevocationList{candidate}, anchorSet()), T0)
+		Expect(back).To(BeFalse())
+	})
+
+	It("still catches a numbered replay while the anchor is undated", func() {
+		// S4. cRLNumber sits inside the signed TBS, so an attacker who can
+		// write crl_file can only replay numbers the issuer really published,
+		// and the issuer's own numbering is monotonic. A future ThisUpdate is
+		// therefore no reason to disbelieve a number -- and keeping maxNumber
+		// outside the date gate is what leaves a guard standing in exactly the
+		// window where the date ratchet is suppressed.
+		//
+		// The *installed* side is the undated one: the guard must survive with
+		// its own view suppressed, which is the state the defect creates.
+		T0 := time.Now()
+		cur := numberedCRLFrom(serverCA, caKey, future, 9)
+		cur.ThisUpdate = T0.Add(24 * time.Hour)
+		installed := api.NewClientCRLSet([]*x509.RevocationList{cur}, anchorSet())
+
+		replay := api.NewClientCRLSet(
+			[]*x509.RevocationList{numberedCRLFrom(serverCA, caKey, future, 4)}, anchorSet())
+
+		who, back := installed.Regresses(replay, T0)
+		Expect(back).To(BeTrue(),
+			"number 4 must not replace 9 merely because this host will not date 9's CRL")
+		Expect(who).To(Equal(serverCA.Subject.String()))
 	})
 
 	It("is not pinned for ever by a CRL dated in the future", func() {

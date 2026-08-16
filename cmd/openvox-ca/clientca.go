@@ -413,7 +413,15 @@ func refreshClientCRLs(cfg *serverConfig, domains []api.TrustDomain, m *clientCR
 			// would notice: coverage is unchanged and the signature is good.
 			// The upstream chain refuses the same shape for the same reason;
 			// see monotonicUpstream.
-			slog.Error("crl_file reload would move an anchor backwards; keeping the current set",
+			// Two reasons share this arm, and they share it deliberately: the
+			// ordering decision lives in one function because having it in two
+			// is how this went wrong six times. The cost is that while an
+			// anchor is undated and unnumbered, even a re-read of the identical
+			// file is refused and this line repeats every pass -- which is why
+			// it names the clock as the thing to check.
+			slog.Error("crl_file reload would move an anchor backwards, or cannot be shown to be "+
+				"newer than the installed set because this host believes the installed CRLs are "+
+				"not yet issued; keeping the current set. Check this host's clock",
 				"client_ca", entry.Name, "path", entry.CRLFile,
 				"issuer", regressedAnchor)
 		case dropped:

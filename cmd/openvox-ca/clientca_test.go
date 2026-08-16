@@ -435,6 +435,37 @@ func numberedCRLAged(cert *x509.Certificate, key *ecdsa.PrivateKey, number int64
 	return crl
 }
 
+// crlIssuedAt mints a CRL with ThisUpdate and NextUpdate given explicitly.
+//
+// Required rather than convenient: writeCRLFile encodes c.Raw, so the
+// `crl.ThisUpdate = ...` mutation the internal/api specs use is *not written to
+// the file* and a spec built that way silently tests a past-dated CRL. The
+// filter would never engage and the spec would pass under every candidate rule
+// -- the same shape as a spec that evaluates at a time its own condition cannot
+// reach.
+func crlIssuedAt(cert *x509.Certificate, key *ecdsa.PrivateKey, number int64, thisUpdate, nextUpdate time.Time, revoked ...*big.Int) *x509.RevocationList {
+	GinkgoHelper()
+	entries := make([]x509.RevocationListEntry, 0, len(revoked))
+	for _, serial := range revoked {
+		entries = append(entries, x509.RevocationListEntry{
+			SerialNumber:   serial,
+			RevocationTime: time.Now().Add(-time.Minute),
+		})
+	}
+	der, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+		Number:                    big.NewInt(number),
+		RevokedCertificateEntries: entries,
+		ThisUpdate:                thisUpdate,
+		NextUpdate:                nextUpdate,
+	}, cert, key)
+	Expect(err).NotTo(HaveOccurred())
+	crl, err := x509.ParseRevocationList(der)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(crl.ThisUpdate).To(BeTemporally("~", thisUpdate, time.Second),
+		"the date must survive into the DER, or the spec tests a CRL it did not mean to")
+	return crl
+}
+
 // numberedCRLUntil is mintCRL with an explicit cRLNumber and NextUpdate, so a
 // spec can order two CRLs from one issuer deliberately rather than relying on
 // mintCRL's clock, and tell which of the two ended up installed.
@@ -1312,6 +1343,42 @@ var _ = Describe("refreshClientCRLs", func() {
 		Expect(buf.String()).To(ContainSubstring("\uFFFD"),
 			"the newline must be substituted, not merely escaped by the handler")
 		Expect(buf.String()).NotTo(ContainSubstring("\nlevel=ERROR"))
+	})
+
+	It("refuses an empty reload while the installed anchor is undated", func() {
+		// S9, the defect as an operator meets it. With the installed CRL dated
+		// ahead of this host, filtering it out of Coverage's `present` left the
+		// installed side's view empty, so losesCoverage's loop had nothing to
+		// compare and an empty crl_file installed unchallenged -- every
+		// revocation for that issuer discarded, while the gauge and the marks
+		// went quiet at the same moment.
+		//
+		// The dates come from the fixture and not from an evaluation time:
+		// refreshClientCRLs calls time.Now() itself, so the condition can only
+		// be reached by minting the CRL ahead of the wall clock.
+		T0 := time.Now()
+
+		cfg := &serverConfig{}
+		cfg.ClientRevocationPolicy = config.RevocationRequire
+		cfg.ClientCA = []config.ClientCA{{
+			Name: "server",
+			File: writeCertFile(serverCA),
+			CRLFile: writeCRLFile(crlIssuedAt(serverCA, serverKey, 9,
+				T0.Add(24*time.Hour), T0.Add(48*time.Hour))),
+		}}
+		domains, err := buildTrustDomains(cfg, ownCA, nil)
+		Expect(err).NotTo(HaveOccurred())
+		refreshClientCRLs(cfg, domains, metrics)
+		applied := lastReload("server")
+
+		// A file whose only CRL is from an unrelated CA: it is discarded, so
+		// the candidate covers nothing at all.
+		other, otherKey := mintCA("Unrelated CA", nil, nil)
+		cfg.ClientCA[0].CRLFile = writeCRLFile(mintCRL(other, otherKey))
+		refreshClientCRLs(cfg, domains, metrics)
+
+		Expect(lastReload("server")).To(Equal(applied),
+			"an empty candidate must be refused even while this host will not date what it holds")
 	})
 
 	It("publishes no gauge at all when the policy does not require CRLs", func() {
