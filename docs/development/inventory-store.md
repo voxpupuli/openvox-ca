@@ -347,10 +347,11 @@ Rules that keep the decomposed structure coherent:
   moved. Note the HMAC key is itself a backend blob
   (`<prefix>:private:hmac_key`), so it shares the instance with the entries it
   covers: the chain detects accidental corruption, a lost or reordered write
-  and a racing writer, not an attacker who owns the Redis instance. That optimistic check is
-  the only reason anything here retries. With integrity disabled there is no
-  head and no check, so the sequence counter — which an append advances and a
-  prune only reads — is the fence that catches an interleaved append instead.
+  and a racing writer, not an attacker who owns the Redis instance. That
+  optimistic check is the only reason anything here retries. With integrity
+  disabled there is no head and no check, so the sequence counter — which an
+  append advances and a prune only reads — is the fence that catches an
+  interleaved append instead.
   Both are checked: without the fence, a prune could repoint a subject's index
   at a serial its own stale snapshot chose, silently undoing a newer issuance.
 - **Appends are O(1)** — a handful of hash writes, where the blob path read and

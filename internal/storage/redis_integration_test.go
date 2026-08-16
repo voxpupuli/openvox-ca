@@ -286,7 +286,10 @@ var _ = Describe("RedisIntegrationInventoryStore", func() {
 		// The regression test for the Redis half of issue #204: on the blob
 		// path two replicas interleaving here left the stored whole-blob HMAC
 		// covering a blob that no longer existed, and the next verifying read
-		// failed with ErrInventoryTampered (it reproduced in ~15% of runs).
+		// failed with ErrInventoryTampered. The issue reports ~15% of storms
+		// in the CI incident that surfaced it; running this storm against the
+		// blob path directly failed 4 times in 20, so roughly one run in five
+		// either way.
 		ctx := context.Background()
 		backends := newSharedIntegrationBackends("inv-storm", 2)
 		a := NewWithBackend(backends[0], "")

@@ -1129,6 +1129,30 @@ var _ = Describe("RedisCertIndex", func() {
 		Expect(hashFields(cli, invKey(redisInvEntriesSub))).To(HaveLen(3))
 	})
 
+	It("treats an entry pruned between the read and the write as a no-op", func() {
+		ctx := context.Background()
+		svc, b, cli, stop := newCertIndexRedis()
+		defer stop()
+
+		// The prune-during-revocation race: the entry exists when
+		// mutateRecordBySerial reads it and is gone by the time the script
+		// runs. Nothing serialises those across replicas, so the script's
+		// "missing" status must be a silent no-op — matching the SQL
+		// backend's zero-rows-updated — rather than an error surfaced to the
+		// operator during a routine CRL cleanup.
+		var once sync.Once
+		b.mutateRecordHook = func() {
+			once.Do(func() {
+				Expect(cli.HDel(ctx, invKey(redisInvEntriesSub), "3").Err()).To(Succeed())
+			})
+		}
+
+		Expect(svc.MarkCertRevoked(ctx, "0003", time.Now())).To(Succeed(),
+			"a vanished entry must not surface as an error")
+		Expect(hashFields(cli, invKey(redisInvEntriesSub))).NotTo(HaveKey("3"),
+			"the write must not resurrect the pruned entry")
+	})
+
 	It("retries an index write once past a conflict, and errors when conflicts never stop", func() {
 		ctx := context.Background()
 		svc, b, cli, stop := newCertIndexRedis()
@@ -1239,14 +1263,29 @@ var _ = Describe("RedisInventoryDecodeCorruptKeyspace", func() {
 		Expect(err.Error()).To(ContainSubstring(`"1"`))
 	})
 
-	It("surfaces a corrupt field through a real read rather than skipping it", func() {
+	It("surfaces a corrupt field through both the verified and unverified reads", func() {
 		ctx := context.Background()
-		svc, _, cli, stop := newRedisInventoryService()
+		svc, b, cli, stop := newRedisInventoryService()
 		defer stop()
+		Expect(b.Put(ctx, CertKey("node1"), []byte("pem-node1"), BlobPublic)).To(Succeed())
 
 		Expect(cli.HSet(ctx, invKey(redisInvEntriesSub), "4", "{not-json").Err()).To(Succeed())
+
+		// ReadInventory verifies before it renders, so its error comes from
+		// the chain fold. Asserting the field name (not merely that some error
+		// occurred) is what distinguishes fail-loud from a regression that
+		// substitutes a placeholder record: that would still fail the read,
+		// but with ErrInventoryTampered rather than by naming the entry.
 		_, err := svc.ReadInventory(ctx)
-		Expect(err).To(HaveOccurred(), "a corrupt entry must fail the read, not be dropped from it")
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring(`entry "4"`))
+
+		// CertStatuses does NOT verify the chain, so it is the path where a
+		// dropped error check would silently under-report certificates to the
+		// CRL and OCSP consumers. It must fail closed on its own account.
+		_, _, err = svc.CertStatuses(ctx, "")
+		Expect(err).To(HaveOccurred(), "Statuses must fail closed, not skip the corrupt entry")
+		Expect(err.Error()).To(ContainSubstring(`entry "4"`))
 	})
 })
 

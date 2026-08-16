@@ -2652,9 +2652,14 @@ func (Test) BackendsRedisGo() error {
 	}()
 
 	fmt.Println("Running Redis-backend Go integration tests...")
+	// The suite is concurrent by design since the inventory decomposition
+	// (cross-replica append storms, duplicate-serial races, a full-cap prune),
+	// so it runs under the race detector like its etcd counterpart; -race
+	// needs cgo, hence the explicit CGO_ENABLED override of the repository's
+	// CGO_ENABLED=0 default.
 	return sh.RunWithV(
-		map[string]string{"PUPPET_CA_TEST_REDIS_ADDR": addr},
-		"go", "test", "-tags", "redis_integration", "-count=1", "./internal/storage/...",
+		map[string]string{"PUPPET_CA_TEST_REDIS_ADDR": addr, "CGO_ENABLED": "1"},
+		"go", "test", "-tags", "redis_integration", "-race", "-count=1", "./internal/storage/...",
 	)
 }
 
