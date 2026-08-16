@@ -3,8 +3,19 @@ name: CI
 on:
   push:
     branches: ["main"]
+  # Deliberately unfiltered by base branch. A filter of ["main"] silently
+  # skipped every stacked PR — one targeting another unmerged branch rather
+  # than main — while container-images.yml, which has no filter, still showed
+  # a full row of green checks from image builds alone, so the checks tab read
+  # as a passing build. An allowlist only narrows that trap: the next base
+  # prefix nobody thought of fails the same silent way. Running on any base
+  # means a stacked PR is verified before it merges into its base, rather than
+  # first being exercised by the downstream PR into main where the regression
+  # is already buried in the stack's history.
+  #
+  # push stays on main: a PR already gets a pull_request run, and widening
+  # push would double the load for no extra signal.
   pull_request:
-    branches: ["main"]
 
 permissions:
   contents: read
