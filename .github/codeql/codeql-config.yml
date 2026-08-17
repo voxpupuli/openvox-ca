@@ -1,0 +1,48 @@
+name: "openvox-ca CodeQL config"
+
+# Query filters applied on top of the query suite selected in
+# .github/workflows/codeql.yml. That workflow's `queries: security-and-quality`
+# input is deliberately left alone: without a `+` prefix the input replaces a
+# config file's `queries:` key, but `query-filters` is a separate key and is
+# unaffected, so coverage is not narrowed by this file. Only the one rule named
+# below stops being reported.
+
+query-filters:
+  # go/log-injection reports every untrusted value that reaches a log call --
+  # certnames off the request path, serials, r.URL.Path, decoded JSON bodies.
+  # Thirty-eight of these were dismissed by hand as false positives before this
+  # exclusion; the 39th would have been dismissed for the same reason, which is
+  # the argument for saying it once, here, instead.
+  #
+  # They are false positives for one uniform reason. The query models log
+  # *sinks* and cannot see what a handler does with the bytes: its only
+  # recognised sanitisers are strings.ReplaceAll against "\n"/"\r" and the %q
+  # verb, neither of which suits structured logging. This project logs only
+  # through log/slog, whose TextHandler and JSONHandler escape control
+  # characters in the message, the attribute key, the attribute value, group
+  # attributes and slice elements alike -- so a newline in a certname renders
+  # as the two characters \ and n and cannot forge a second entry. That is a
+  # modelling gap in the query, not a judgement call about any one call site.
+  #
+  # SECURITY: an exclusion is only as good as the invariant it rests on, and
+  # excluding a rule is silent where a dismissal is at least visible. Two guards
+  # keep this one honest, and a reviewer should treat their removal as removing
+  # this exclusion too:
+  #
+  #   1. .golangci.yml, depguard rule `only-slog-logs` -- keeps log/slog the
+  #      only logger in non-test code, so no unescaped logger can be adopted.
+  #   2. cmd/openvox-ca/main_test.go, "control characters in logged data cannot
+  #      forge a second entry" -- pins that both handlers setupLogger installs
+  #      escape, across all five positions attacker data can occupy. Verified
+  #      against Go 1.26.6, so a stdlib regression fails CI rather than passing
+  #      quietly.
+  #
+  # What this exclusion does NOT cover: writing untrusted data to a
+  # line-oriented file that is not a log. internal/storage/storage.go's
+  # AppendInventory takes an already-rendered inventory line as an opaque
+  # string, and inventory.txt is parsed back with strings.Fields, so its
+  # defence is caller-side validation (ca.ValidateSubject) rather than escaping
+  # at the sink. CodeQL does not model that as a log sink and never reported it;
+  # it is called out here so this comment is not misread as covering it.
+  - exclude:
+      id: go/log-injection

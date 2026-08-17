@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -141,6 +142,95 @@ var _ = Describe("setupLogger handler selection", func() {
 		Entry("-vv is Trace", 2,
 			[]slog.Level{slog.LevelDebug, levelTrace}, nil),
 	)
+
+	// SECURITY: the property the CodeQL go/log-injection exclusion rests on.
+	//
+	// That query reports every untrusted value that reaches a log call --
+	// certnames off the request path, serials, r.URL.Path -- because it models
+	// log *sinks* and cannot see what the handler does with the bytes. Its only
+	// recognised sanitisers are strings.ReplaceAll against "\n"/"\r" and the %q
+	// verb, neither of which suits structured logging, so the finding recurs for
+	// every new attribute forever. Thirty-eight were dismissed by hand before
+	// .github/codeql/codeql-config.yml excluded the rule.
+	//
+	// What makes that exclusion honest is that both handlers setupLogger can
+	// install escape control characters, so a newline in attacker-supplied data
+	// renders as the two characters \ and n rather than terminating the record.
+	// Verified against Go 1.26.6; a stdlib change that stopped escaping would
+	// invalidate the exclusion silently, which is what these specs exist to
+	// catch. The companion guard is the depguard `only-slog-logs` rule in
+	// .golangci.yml, which keeps slog the only logger in non-test code -- this
+	// pins that slog escapes, that pins that nothing else does the logging.
+	//
+	// The assertion is deliberately "one record renders as one line" rather
+	// than a substring match: forging a second entry is precisely what an
+	// injected newline would buy, so counting lines tests the consequence
+	// instead of the mechanism.
+	Describe("control characters in logged data cannot forge a second entry", func() {
+		// A payload that would open a fake ERROR record if the newline reached
+		// the output raw. Shaped for the text handler; the JSON handler would
+		// need a different tail, but the newline is what matters to both.
+		const forged = "ok\nlevel=ERROR msg=\"CA key stolen\" subject=forged"
+
+		expectSingleRecord := func(out string) {
+			GinkgoHelper()
+			Expect(out).NotTo(BeEmpty(), "the record must actually have been written")
+			Expect(out).To(HaveSuffix("\n"), "a record is terminated by a newline")
+			Expect(strings.Count(out, "\n")).To(Equal(1),
+				"one log call must render as exactly one line; a second line means the "+
+					"payload's newline reached the output unescaped:\n%s", out)
+			Expect(out).To(ContainSubstring(`\n`),
+				"the newline must survive as the escape sequence \\n; if it were dropped "+
+					"instead the entry would be safe but lossy, and that is a change worth "+
+					"noticing:\n%s", out)
+		}
+
+		DescribeTable("escapes the newline wherever attacker data lands",
+			func(emit func()) {
+				By("the JSON handler, which a configured log file selects")
+				path := filepath.Join(GinkgoT().TempDir(), "ca.log")
+				f, err := setupLogger(&serverConfig{LogFile: path})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(slog.Default().Handler()).To(BeAssignableToTypeOf(&slog.JSONHandler{}))
+				emit()
+				Expect(f.Close()).To(Succeed())
+				data, err := os.ReadFile(path)
+				Expect(err).NotTo(HaveOccurred())
+				expectSingleRecord(string(data))
+
+				By("the text handler, which stderr logging selects")
+				r, w, err := os.Pipe()
+				Expect(err).NotTo(HaveOccurred())
+				origStderr := os.Stderr
+				os.Stderr = w
+				stderrFile, err := setupLogger(&serverConfig{})
+				os.Stderr = origStderr
+				Expect(err).NotTo(HaveOccurred())
+				Expect(stderrFile).To(BeNil())
+				Expect(slog.Default().Handler()).To(BeAssignableToTypeOf(&slog.TextHandler{}))
+				emit()
+				Expect(w.Close()).To(Succeed())
+				out, err := io.ReadAll(r)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(r.Close()).To(Succeed())
+				expectSingleRecord(string(out))
+			},
+			// The five positions attacker-influenced data can occupy. Values and
+			// slices are the shapes the dismissed alerts actually flagged; the
+			// message, key and group cases are forward defence, since nothing in
+			// the tree puts untrusted data there today and this is what would
+			// notice if something started to.
+			Entry("in the message", func() { slog.Warn("boundary " + forged) }),
+			Entry("in an attribute value", func() { slog.Warn("boundary", "subject", forged) }),
+			Entry("in an attribute key", func() { slog.Warn("boundary", forged, "v") }),
+			Entry("in a group attribute", func() {
+				slog.Warn("boundary", slog.Group("g", "subject", forged))
+			}),
+			Entry("in a []string element", func() {
+				slog.Warn("boundary", "subjects", []string{forged})
+			}),
+		)
+	})
 
 	It("refuses to start when the log file cannot be opened", func() {
 		// What the two callers do with this differs — the server command

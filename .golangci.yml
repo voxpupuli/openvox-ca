@@ -15,6 +15,7 @@ linters:
   enable:
     - gosec       # SAST: security problems
     - bodyclose   # HTTP response bodies are closed
+    - depguard    # only log/slog may log; see the rule's comment
     - errname     # sentinel errors prefixed Err, error types suffixed Error
     - misspell    # common English misspellings
     - nilerr      # returning nil after a non-nil error check
@@ -22,6 +23,47 @@ linters:
     - copyloopvar # loop-variable copy detection (Go 1.22+ semantics)
 
   settings:
+    depguard:
+      rules:
+        # SECURITY: this rule is what makes the CodeQL go/log-injection
+        # exclusion in .github/codeql/codeql-config.yml sound. That query flags
+        # every untrusted value reaching a log call, because it models sinks
+        # rather than handlers and so cannot see that log/slog's TextHandler
+        # and JSONHandler escape control characters in the message, the
+        # attribute key, the attribute value, group attributes and slice
+        # elements alike. Escaping is why a newline in a certname cannot forge
+        # a second log entry here, and it is a property of the *logger*, not of
+        # the call sites -- so it survives only while slog is the only logger.
+        #
+        # The loggers denied below all write attacker-supplied bytes through
+        # unescaped; adopting any of them would silently invalidate the
+        # exclusion, and 38 hand-dismissed alerts would stop meaning what they
+        # were dismissed for. cmd/openvox-ca/main_test.go pins the escaping
+        # behaviour itself; this pins that nothing else does the logging.
+        #
+        # Scoped to non-test files: a test that logs through another library is
+        # not a production log entry an operator or a log pipeline will read.
+        only-slog-logs:
+          # "lax" so a longer allow prefix beats a shorter deny prefix.
+          # depguard matches package paths by prefix, so denying "log" also
+          # denies "log/slog" under the default mode -- which would reject all
+          # 258 slog imports in the tree.
+          list-mode: lax
+          files:
+            - "!$test"
+          allow:
+            - "log/slog"
+          deny:
+            - pkg: "log"
+              desc: "the standard log package does not escape; log through log/slog, whose handlers do"
+            - pkg: "github.com/sirupsen/logrus"
+              desc: "logrus does not escape control characters; log through log/slog"
+            - pkg: "go.uber.org/zap"
+              desc: "zap's console encoder does not escape control characters; log through log/slog"
+            - pkg: "github.com/golang/glog"
+              desc: "glog does not escape control characters; log through log/slog"
+            - pkg: "k8s.io/klog"
+              desc: "klog does not escape control characters; log through log/slog"
     nolintlint:
       require-explanation: true
       require-specific: true
