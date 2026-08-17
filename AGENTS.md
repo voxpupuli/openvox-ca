@@ -246,7 +246,8 @@ Two guards back it up, and neither is complete on its own:
 Output that is operator-facing but not `slog` — such as
 `internal/storage/migrate.go`'s `Logf`, which the CLI writes straight to stderr
 — gets no escaping from anything. Format values that have not passed
-`ca.ValidateSubject` with `%q` there. `cmd/openvox-ca-ctl`'s status table and
+`ca.ValidateSubject` with `%q` there — including values decoded from a server
+response, which nothing re-validates. `cmd/openvox-ca-ctl`'s status table and
 sign/clean summaries are the deliberate exception: they print server-returned
 names with `%s` because quoting would break the column alignment, on the
 judgement that an operator's terminal is not a log pipeline.

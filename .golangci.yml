@@ -79,17 +79,22 @@ linters:
               desc: "glog does not escape control characters; log through log/slog"
             - pkg: "k8s.io/klog"
               desc: "klog does not escape control characters; log through log/slog"
-            # Listed separately because the "log" deny above does not catch it:
-            # depguard matches by prefix, and "github.com/go-logr/stdr" does not
-            # start with "log" -- yet stdr writes through that very package.
-            # (go-logr, logrus and zap are all already indirect dependencies, so
-            # none of the three needs a new module to reach for.)
+            # Listed separately because the "log" deny above cannot reach it:
+            # depguard matches by prefix and no go-logr path starts with "log".
+            # The objection is not that logr writes raw -- the stdr sink that
+            # is in our module graph escapes via funcr's strconv.Quote. It is
+            # that logr is a facade over a pluggable LogSink, so whether
+            # anything escapes is decided by which sink is installed, somewhere
+            # other than the import this rule can see. A sink over klog, for
+            # one, inherits klog's raw fmt.Sprint output. (go-logr, logrus and
+            # zap are all already indirect dependencies, so none of the three
+            # needs a new module to reach for.)
             - pkg: "github.com/go-logr"
-              desc: "go-logr's stdr sink writes through the unescaped standard log package; log through log/slog"
+              desc: "go-logr is a facade; whether anything escapes depends on the LogSink installed elsewhere. Log through log/slog"
             - pkg: "github.com/rs/zerolog"
               desc: "zerolog's ConsoleWriter does not escape control characters; log through log/slog"
             - pkg: "github.com/hashicorp/go-hclog"
-              desc: "hclog's default text output does not escape control characters; log through log/slog"
+              desc: "hclog writes the log message raw; only attribute values are quoted. Log through log/slog"
             - pkg: "github.com/charmbracelet/log"
               desc: "charmbracelet/log's text output does not escape control characters; log through log/slog"
             - pkg: "github.com/apex/log"

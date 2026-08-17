@@ -59,11 +59,12 @@ query-filters:
   #     passed ValidateSubject. internal/storage/migrate.go's Logf is written
   #     straight to stderr by the CLI with no escaping, and its key comes from
   #     source directory names, so that call site formats with %q rather than
-  #     %s. cmd/openvox-ca-ctl's status table and sign/clean summaries print
-  #     names with %s and are deliberately left alone: they render names the
-  #     server returns, and quoting them would wreck the column alignment that
-  #     is the point of a table. That is a judgement that the operator's own
-  #     terminal is not a log pipeline, not an oversight -- revisit it if those
-  #     names ever reach something that parses them. Lint catches none of this.
+  #     %s, as does openvox-ca-ctl's import summary, which prints a
+  #     server-returned subject on a free-form line. What is deliberately left
+  #     alone is openvox-ca-ctl's status table and its sign/clean summaries:
+  #     those render names in aligned columns that quoting would wreck, on the
+  #     judgement that an operator's own terminal is not a log pipeline. That
+  #     is a judgement rather than an oversight -- revisit it if those names
+  #     ever reach something that parses them. Lint catches none of this.
   - exclude:
       id: go/log-injection

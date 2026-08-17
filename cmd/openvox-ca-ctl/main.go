@@ -556,11 +556,17 @@ func newImportCertCmd() *cobra.Command {
 			if err := json.Unmarshal(body, &result); err != nil {
 				return fmt.Errorf("could not parse response: %w", err)
 			}
+			// %q on the subject: it is decoded from the server's response and
+			// nothing re-validates it on the way out (handleGetStatuses feeds
+			// subjects straight from ListCerts/ListCSRs, which the filesystem
+			// backend derives from directory entry names). These are free-form
+			// lines, so unlike the status table there is no column alignment to
+			// lose by quoting.
 			if result.Imported {
-				fmt.Printf("Imported %s (serial %s, valid %s to %s)\n",
+				fmt.Printf("Imported %q (serial %s, valid %s to %s)\n",
 					result.Subject, result.Serial, result.NotBefore, result.NotAfter)
 			} else {
-				fmt.Printf("%s already tracked (serial %s), no changes made\n",
+				fmt.Printf("%q already tracked (serial %s), no changes made\n",
 					result.Subject, result.Serial)
 			}
 			return nil
