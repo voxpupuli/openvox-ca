@@ -161,8 +161,9 @@ type sqlBlob struct {
 // concurrent appenders — including separate replicas sharing one database —
 // never lose lines. Distributed locking is provided per dialect via AcquireLock
 // (PostgreSQL advisory locks, MySQL GET_LOCK); SQLite, being single-node,
-// reports ErrDistributedLockingUnsupported so StorageService falls back to a
-// process-local mutex.
+// reports ErrDistributedLockingUnsupported. That is not the end of its locking:
+// StorageService.WithLock then reaches AcquireSameHostLock, an flock(2) beside
+// the database file that excludes another process on the same host.
 type SQLBackend struct {
 	db      *bun.DB
 	owned   bool // true when Close should close the underlying *sql.DB
@@ -693,8 +694,8 @@ func (b *SQLBackend) ModTime(ctx context.Context, key string) (time.Time, error)
 
 // AcquireLock obtains a cross-node distributed mutex named name. The mechanism
 // is dialect-specific; SQLite is single-node and reports
-// ErrDistributedLockingUnsupported so StorageService falls back to a
-// process-local mutex.
+// ErrDistributedLockingUnsupported, which sends StorageService.WithLock down to
+// AcquireSameHostLock rather than straight to a process-local mutex.
 func (b *SQLBackend) AcquireLock(ctx context.Context, name string) (Unlocker, error) {
 	switch b.db.Dialect().Name() {
 	case dialect.PG:
@@ -702,7 +703,8 @@ func (b *SQLBackend) AcquireLock(ctx context.Context, name string) (Unlocker, er
 	case dialect.MySQL:
 		return b.acquireMySQLLock(ctx, name)
 	default:
-		// SQLite is single-node: fall back to the process-local mutex.
+		// SQLite is single-node. This sentinel is how WithLock is told to try
+		// the same-host tier, which SQLite does provide (AcquireSameHostLock).
 		return nil, ErrDistributedLockingUnsupported
 	}
 }

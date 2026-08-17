@@ -21,6 +21,7 @@ package storage
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 )
 
@@ -45,7 +46,11 @@ func tryLockFile(_ *os.File) (bool, error) {
 	return false, errors.New("flock(2) is not available on this platform")
 }
 
-// isUnwritableStoreError is likewise unreachable — nothing here ever creates a
-// lock file — and answers false so that, if it ever became reachable, a failure
+// isReadOnlyFSError is likewise unreachable — nothing here ever creates a lock
+// file — and answers false so that, if it ever became reachable, a failure
 // would be reported rather than quietly downgraded.
-func isUnwritableStoreError(_ error) bool { return false }
+func isReadOnlyFSError(_ error) bool { return false }
+
+// statUID has no portable answer off Unix, so it declines rather than guessing;
+// the caller degrades its diagnostic message accordingly.
+func statUID(_ fs.FileInfo) (uint32, bool) { return 0, false }

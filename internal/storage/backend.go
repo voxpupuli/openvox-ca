@@ -29,9 +29,10 @@ import (
 
 // ErrDistributedLockingUnsupported signals that a backend advertising the
 // Locker interface cannot actually provide a distributed lock in the current
-// configuration (typically because it wraps a base backend that has no
-// locking support). StorageService.WithLock treats this as a hint to fall
-// back to a process-local mutex.
+// configuration (SQLite, which is single-node; an OverlayBackend wrapping a
+// base with no locking support). StorageService.WithLock treats this as a hint
+// to try the next tier down — SameHostLocker, and only then a process-local
+// mutex.
 var ErrDistributedLockingUnsupported = errors.New("distributed locking unsupported by this backend")
 
 // ErrSameHostLockingUnsupported signals that a backend advertising the
@@ -379,9 +380,14 @@ func asInventoryStore(b Backend) (InventoryStore, bool) {
 // Locker is an optional Backend capability that provides a cross-node
 // distributed mutex. Backends implement it when they have a natural way
 // to coordinate a lock across replicas (etcd's concurrency.Mutex, Redis
-// SET NX, etc.). Backends without this capability let StorageService
-// fall back to a process-local named mutex, which is sufficient for
-// single-node backends like the filesystem one.
+// SET NX, etc.).
+//
+// A backend without this capability is not left unlocked: StorageService.WithLock
+// falls through to SameHostLocker, which the single-node backends implement, and
+// only to a process-local named mutex when neither is available. Implement this
+// one *only* if the coordination genuinely spans hosts — a single-node backend
+// that implements it claims a guarantee it cannot keep, and callers deciding
+// whether a second replica is safe probe exactly this.
 //
 // The returned Unlocker must be called exactly once, typically via defer.
 // Implementations are free to use leases, so a long-delayed Unlock may

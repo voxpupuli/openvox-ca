@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -100,6 +101,10 @@ func startLockHelper(cadir, name string) *lockHelper {
 	cmd := exec.Command(os.Args[0])
 	cmd.Env = append(os.Environ(), lockHelperEnv+"="+cadir+"|"+name)
 	cmd.Stderr = GinkgoWriter
+	// A child that ignores the closed pipe must not turn a failed spec into a
+	// suite-wide hang: Wait gives up and kills it rather than blocking until
+	// `go test -timeout` takes the whole binary down.
+	cmd.WaitDelay = 10 * time.Second
 
 	stdin, err := cmd.StdinPipe()
 	Expect(err).NotTo(HaveOccurred(), "helper stdin")
@@ -107,11 +112,17 @@ func startLockHelper(cadir, name string) *lockHelper {
 	Expect(err).NotTo(HaveOccurred(), "helper stdout")
 	Expect(cmd.Start()).To(Succeed(), "starting the lock helper")
 
+	// Registered here, not by the caller: between Start and the caller's
+	// DeferCleanup there are assertions that can abort the spec, and an abort
+	// there would leave a live process holding a lock with no cleanup attached.
+	h := &lockHelper{cmd: cmd, stdin: stdin}
+	DeferCleanup(h.stop)
+
 	line, err := bufio.NewReader(stdout).ReadString('\n')
 	Expect(err).NotTo(HaveOccurred(), "the helper exited before taking the lock")
 	Expect(strings.TrimSpace(line)).To(Equal(lockHelperReady))
 
-	return &lockHelper{cmd: cmd, stdin: stdin}
+	return h
 }
 
 // stop releases the lock by closing the helper's stdin and waiting for it to

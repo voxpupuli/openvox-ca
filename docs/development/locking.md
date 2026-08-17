@@ -46,11 +46,20 @@ What sub-tier 2 buys is the case an operator actually meets: an
 `openvox-ca-ctl` command, or a second server, run against the same store on the
 same host as a live one. Before it, both wrote with no coordination at all —
 two issuers could each pass `evictRevokedLocked` and produce two certificates
-for one subject, and `AppendInventory`'s blob path could leave an HMAC covering
-a blob that never existed, which fails `InitHMAC` at the *next* start and
-leaves the server unable to boot. Now the second process waits, and then fails
-with "another process on this host holds the CA lock" if it waits past its
-deadline.
+for one subject. Now the second process waits, and then fails with "another
+process on this host holds the CA lock" if it waits past its deadline.
+
+Read that as scoped to the lock names, because it is. Two processes contending
+for the *same* name — the same subject, the CRL, bootstrap, a migration — now
+exclude each other. Two processes issuing for **different** subjects hold
+different `subject:<name>` locks and are not serialised against each other at
+all, so the inventory-HMAC corruption in the motivating issue is *not* fully
+closed by this tier: `AppendInventory` is guarded by `inventoryMu` and no
+cluster lock, so its append and integrity rewrite can still interleave and
+leave an HMAC covering a blob that never existed, which fails `InitHMAC` at the
+*next* start. That is [#204](https://github.com/voxpupuli/openvox-ca/issues/204)
+in the known gaps below, and the fix for it inherits cross-process coverage on
+these backends from this tier.
 
 What it does not buy is clustering. `flock(2)` is not a sound basis for
 coordination across hosts — over NFS it depends on the server, the mount
@@ -97,18 +106,42 @@ chosen over an `O_EXCL` lockfile, whose stale-lock cleanup and PID-liveness
 guessing are the maintenance burden that makes lockfiles a poor fit for a
 service operators restart and kill. Two consequences worth knowing:
 
-- **Lock files are never removed.** Unlinking one while another process is
-  blocked on that path would let a third create a fresh inode at the same name
-  and take a lock the blocked one is still waiting for. A handful of empty
-  0600 files, one per distinct lock name, is the cheaper side of that trade.
-  They are safe to delete while nothing is running, and pointless to delete
-  while something is.
+- **Lock files are never removed, and deleting one on a live store is
+  unsafe** — not merely useless. Unlinking a file another process is blocked on
+  lets a third create a fresh inode at that name and take a lock the blocked one
+  is still waiting for, so both then believe they hold it. Empty 0600 files are
+  the cheaper side of that trade. They can be swept while nothing is using the
+  store; while anything is, sweeping them silently defeats the exclusion.
+- **The directory grows with the fleet.** One file per distinct lock name means
+  `bootstrap`, `crl` — and one per subject, since `subject:<name>` is a lock
+  name. It is roughly an inode per node the CA has ever locked, it never
+  shrinks (`Clean` retires a node's certificate, not its lock file), and it
+  rides along in any `tar <cadir>/` backup.
 - **The lock identity is the path, not the inode.** Two processes exclude each
   other only if they resolve the same lock directory. The path is made
   absolute, so differently spelled configuration for one store still agrees,
   but a *relative* `cadir` or `sql_dsn` resolved from two different working
   directories will not, and neither will one store reached through two
   different symlinks. Configure absolute paths.
+- **A wait announces itself once.** The first refused attempt logs `Waiting for
+  the CA lock`, naming the lock and the file. Without it an `openvox-ca-ctl
+  migrate` — which inherits a context with no deadline — would print nothing and
+  never return, and a lock wait would be indistinguishable from a hang.
+- **An unwritable store disables the tier; an unwritable lock file does not.**
+  The distinction is deliberate and is the difference between two call sites.
+  Failing to *create* the lock directory with `EROFS` or `EACCES` means the store
+  cannot be written at all, which has no writer to exclude — `openvox-ca-ctl
+  migrate` takes `bootstrap` on a source it only reads, and that source may be a
+  read-only snapshot — so the capability reports itself absent and `WithLock`
+  drops to the mutex. Failing to *open a lock file* in a directory that already
+  exists is a hard error, because `os.MkdirAll` returns nil for an existing
+  directory without checking writability: `EACCES` there means the directory
+  belongs to another user, typically because a `ctl` command was run under sudo
+  against a cadir the server owns. Downgrading on that would silently return the
+  server to its pre-#187 behaviour for the rest of its life while the root
+  process went on taking flocks it believed were exclusive — both sides think
+  they are safe, which is worse than neither being. The error names the owning
+  uid and says to `chown` it back.
 
 Crash recovery is not uniform across the distributed backends. etcd and Redis self-heal
 within the lock TTL (30 s): a crashed holder's lease or key expires and the lock

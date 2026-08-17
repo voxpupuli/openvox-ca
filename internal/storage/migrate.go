@@ -95,9 +95,15 @@ const migrateLockName = "bootstrap"
 // source-first, then destination, and released in reverse on return.
 //
 // Note: pointing both src and dst at the same store would have the two lock
-// acquisitions deadlock — from separate sessions on a distributed backend, and
-// on the process-local mutex in front of the same-host lock for a single-node
-// one. Migrating a store onto itself is not a supported operation.
+// acquisitions deadlock. On a distributed backend they are separate sessions;
+// on a single-node one they are two separate backend values, each with its own
+// per-name mutex, so the second blocks on the *flock* and spins in its backoff
+// loop rather than parking on a mutex — a live poll, not a blocked goroutine,
+// which is what a maintainer reading a stack dump needs to know. Since
+// MigrateService applies no timeout, that wait never ends; it announces itself
+// on the first refusal ("Waiting for the CA lock"), so interrupt it. Migrating
+// a store onto itself is not a supported operation, and this is now the same
+// failure on every backend rather than only the distributed ones.
 //
 // A source this process cannot write to is fine: the same-host lock reports
 // itself unsupported rather than failing there, since a store nothing can write

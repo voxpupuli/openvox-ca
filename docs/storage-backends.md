@@ -58,11 +58,26 @@ What that changes for you:
   CA lock "<name>"` naming the lock file, rather than a silent double write.
   The typical cause is exactly what it says: a server is running. Stop it, or
   wait for whatever it is doing.
+- **A wait says so.** The first time an acquisition is refused, the waiting
+  process logs `Waiting for the CA lock: another process on this host holds it`
+  with the lock name and file, so a command that pauses is distinguishable from
+  one that has hung.
 - **`openvox-ca-ctl migrate` applies no timeout at all** and will wait
-  indefinitely for the `bootstrap` lock. Interrupt it and stop the server.
+  indefinitely for the `bootstrap` lock — it will log the line above and
+  otherwise sit there. Interrupt it and stop the server. For the same reason,
+  pointing `--source-config` and `--dest-config` at one store now waits forever
+  instead of failing; migrating a store onto itself was never supported, and
+  this is the behaviour the HA backends already had.
+- **Both processes must be on a release that has this.** The exclusion works
+  only if each side takes the lock, so a new `openvox-ca-ctl` beside an older
+  running server — or the reverse, during a staged upgrade where the package is
+  updated but the service has not been restarted — silently gets the old
+  behaviour: no coordination at all. Upgrade and restart the server before
+  relying on any of this.
 - **Nothing to clean up after a crash.** The kernel releases an `flock` when the
   holding process dies, however it dies. There is no stale lock to remove and no
-  lock file that needs deleting — see the note on `locks/` above.
+  lock file that needs deleting — see the note on `locks/` under
+  [the filesystem backend](#filesystem-backend-default).
 - **Absolute paths matter.** Two processes exclude each other only if they
   resolve the same lock directory, so `cadir` and `sql_dsn` should be absolute.
   A relative path used from two different working directories, or one store
@@ -116,18 +131,25 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
 > [storage internals](development/storage-internals.md).
 
 (The directory also holds small internal integrity files; leave them in place.)
-File permissions are fixed: `0600` for anything under `private/`, `0644` for
-everything else. `openvox-ca` warns at startup about any `*_key.pem` in
+File permissions are fixed: `0600` for anything under `private/` and for the
+lock files under `locks/`, `0644` for everything else. `openvox-ca` warns at startup about any `*_key.pem` in
 `private/` whose permissions are looser than `0600` and leaves them for you to
 fix.
 
-`locks/` holds empty lock files, not CA state — one per lock the CA takes, named
-after a hash of the lock rather than anything readable. They are how a second
-process on the same host is kept from writing behind a running server's back;
-see [Running a second process against a live
-store](#running-a-second-process-against-a-live-store). They are deliberately
-never deleted and carry no information: an empty file means nothing is held.
-Back them up or don't, either is harmless.
+`locks/` holds lock files, not CA state — named after a hash of the lock rather
+than anything readable. They are how a second process on the same host is kept
+from writing behind a running server's back; see [Running a second process
+against a live store](#running-a-second-process-against-a-live-store).
+
+Two things to expect of them. There is one per distinct lock name, and that
+**includes one per subject**, so on a large fleet the directory holds roughly as
+many files as `signed/` and never shrinks — retiring a node with
+`openvox-ca-ctl clean` removes its certificate, not its lock file. And the files
+are always empty whether the lock is held or not, so their contents tell you
+nothing; whether a lock is held is visible only to `fuser`/`lsof`. Do not delete
+them while anything may be using the store — see the deletion hazard in
+[locking and concurrency](development/locking.md). Sweeping them while
+everything is stopped is safe, and backing them up is harmless.
 
 ### Configuration
 

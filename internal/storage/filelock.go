@@ -21,7 +21,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -101,7 +103,9 @@ func fileLockFileName(name string) string {
 // Returns ErrSameHostLockingUnsupported when this lock set cannot lock at all,
 // so callers can report the capability honestly rather than appearing to lock.
 func (l *fileLocks) acquire(ctx context.Context, name string) (Unlocker, error) {
-	if !fileLockingSupported || l == nil || l.dir == "" {
+	// The nil check is for a backend that holds no lock set at all — SQLite with
+	// an in-memory database constructs none — so a caller need not repeat it.
+	if !fileLockingSupported || l == nil {
 		return nil, ErrSameHostLockingUnsupported
 	}
 
@@ -129,16 +133,17 @@ func (l *fileLocks) acquire(ctx context.Context, name string) (Unlocker, error) 
 	//nolint:gosec // G703: l.dir is the configured store root, not request input; the leaf is a hex sha256 of the lock name, so no caller-supplied character reaches the path
 	if err := os.MkdirAll(l.dir, DirPerm); err != nil {
 		local.Unlock()
-		return nil, l.classify(err, "creating same-host lock directory "+l.dir)
+		return nil, l.unwritableStore(err, "creating same-host lock directory "+l.dir)
 	}
 	//nolint:gosec // G703: as above -- filepath.Join of the configured root and a hex digest cannot leave the lock directory
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, FilePermPrivate)
 	if err != nil {
 		local.Unlock()
-		return nil, l.classify(err, "opening same-host lock file "+path)
+		return nil, l.inaccessibleLockFile(err, path)
 	}
 
 	backoff := fileLockRetryInitial
+	waiting := false
 	for {
 		locked, lockErr := tryLockFile(f)
 		if lockErr != nil {
@@ -147,7 +152,22 @@ func (l *fileLocks) acquire(ctx context.Context, name string) (Unlocker, error) 
 			return nil, fmt.Errorf("locking %s: %w", path, lockErr)
 		}
 		if locked {
+			if waiting {
+				slog.Info("Acquired the CA lock the other process was holding", "name", name)
+			}
 			return &fileUnlocker{f: f, local: local, path: path}, nil
+		}
+
+		if !waiting {
+			// Say so on the first refusal, once. An `openvox-ca-ctl migrate`
+			// inherits a context with no deadline at all, so without this an
+			// operator who forgot to stop the server watches a command that
+			// prints nothing and never returns, with no way to tell a lock wait
+			// from a hang. Mirrors the announcement EnsureReady makes before its
+			// own migration lock.
+			waiting = true
+			slog.Info("Waiting for the CA lock: another process on this host holds it",
+				"name", name, "lock_file", path)
 		}
 
 		timer := time.NewTimer(backoff)
@@ -164,22 +184,23 @@ func (l *fileLocks) acquire(ctx context.Context, name string) (Unlocker, error) 
 	}
 }
 
-// classify turns a failure to create the lock file into either a hard error or
-// ErrSameHostLockingUnsupported.
+// unwritableStore classifies a failure to *create the lock directory*, which is
+// the one place a permission error genuinely proves the store cannot be written.
+// It reports ErrSameHostLockingUnsupported for that case and a hard error for
+// everything else.
 //
 // A store this process cannot write to has no writer for a lock to exclude, so
 // refusing to proceed would break a real and read-only-safe operation for no
 // gain: `openvox-ca-ctl migrate` takes the "bootstrap" lock on its *source*
-// store, which it then only reads, and a source may legitimately be a
-// read-only snapshot or a backup mount. Every path that would actually mutate
-// the store fails on its own writes moments later, with a clearer error than
-// this one.
+// store, which it then only reads, and a source may legitimately be a read-only
+// snapshot or a backup mount. Every path that would actually mutate the store
+// fails on its own writes moments later, with a clearer error than this one.
 //
 // Anything else — ENOSPC, a lock path shadowed by a plain file, an I/O error —
-// is a genuine failure and is reported, because it leaves the question of
-// whether another process is writing unanswered.
-func (l *fileLocks) classify(err error, what string) error {
-	if !isUnwritableStoreError(err) {
+// is reported, because it leaves the question of whether another process is
+// writing unanswered.
+func (l *fileLocks) unwritableStore(err error, what string) error {
+	if !errors.Is(err, fs.ErrPermission) && !isReadOnlyFSError(err) {
 		return fmt.Errorf("%s: %w", what, err)
 	}
 	l.warnOnce.Do(func() {
@@ -187,6 +208,57 @@ func (l *fileLocks) classify(err error, what string) error {
 			"lock_dir", l.dir, "error", err)
 	})
 	return ErrSameHostLockingUnsupported
+}
+
+// inaccessibleLockFile classifies a failure to open a lock file inside a lock
+// directory that already exists. Unlike unwritableStore, a permission error here
+// is a hard error, and the distinction is the whole point of splitting the two.
+//
+// os.MkdirAll returns nil for a directory that already exists without checking
+// whether it can be written, so EACCES at this point does not mean "the store is
+// read-only" — it means this lock directory or lock file belongs to another
+// user. That is a reachable configuration, not a hypothetical: the server runs
+// as `puppet-ca` under systemd, and an operator running `openvox-ca-ctl` under
+// sudo against the same cadir creates the lock directory as root. Treating that
+// as "no locking needed" would silently return the server to its pre-#187
+// behaviour for the rest of its life (warnOnce says it once and never again)
+// while the root process goes on taking flocks it believes are exclusive —
+// strictly worse than not having the feature, because both sides now think they
+// are safe. Failing loudly is recoverable in one chown; a silent downgrade is
+// not detectable from either side.
+//
+// A read-only filesystem still reports the capability as absent: EROFS says
+// nothing about ownership, and a lock directory left behind on a since-remounted
+// store is exactly the read-only snapshot unwritableStore exists for.
+func (l *fileLocks) inaccessibleLockFile(err error, path string) error {
+	if isReadOnlyFSError(err) {
+		l.warnOnce.Do(func() {
+			slog.Warn("Same-host locking is unavailable: the store is on a read-only filesystem",
+				"lock_dir", l.dir, "error", err)
+		})
+		return ErrSameHostLockingUnsupported
+	}
+	if errors.Is(err, fs.ErrPermission) {
+		return fmt.Errorf("opening same-host lock file %s: %w (the lock directory %s is %s; "+
+			"another user, typically a ctl command run under sudo, created it — chown it back to "+
+			"the user openvox-ca runs as)", path, err, l.dir, ownerOf(l.dir))
+	}
+	return fmt.Errorf("opening same-host lock file %s: %w", path, err)
+}
+
+// ownerOf describes a path's owning uid for a diagnostic message, degrading to a
+// bare "inaccessible" rather than failing: it is decorating an error that is
+// already being returned.
+func ownerOf(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "inaccessible"
+	}
+	uid, ok := statUID(info)
+	if !ok {
+		return "owned by another user"
+	}
+	return fmt.Sprintf("owned by uid %d, and this process runs as uid %d", uid, os.Geteuid())
 }
 
 // localFor returns the process-local mutex for lock name, creating it on first

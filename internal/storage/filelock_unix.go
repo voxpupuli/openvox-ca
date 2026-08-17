@@ -59,11 +59,22 @@ func tryLockFile(f *os.File) (bool, error) {
 	}
 }
 
-// isUnwritableStoreError reports whether err says the store cannot be written
-// by this process at all, as opposed to something having gone wrong while
-// writing it. Only these two: the filesystem is mounted read-only, or the
-// process lacks permission on the directory. See fileLocks.classify for why
-// they are treated as "no lock needed" rather than as failures.
-func isUnwritableStoreError(err error) bool {
-	return errors.Is(err, syscall.EROFS) || errors.Is(err, fs.ErrPermission)
+// isReadOnlyFSError reports whether err says the filesystem itself is mounted
+// read-only. Deliberately narrower than "this process cannot write here":
+// EROFS admits no writer at all, whereas a permission error only says *this*
+// process cannot write, which is a different claim and safe to act on in only
+// one of the two places it can arise. See fileLocks.inaccessibleLockFile.
+func isReadOnlyFSError(err error) bool {
+	return errors.Is(err, syscall.EROFS)
+}
+
+// statUID extracts the owning uid from a FileInfo. The stat structure is
+// platform-specific, so it lives beside the other shims; the second return is
+// false where the platform does not carry one.
+func statUID(info fs.FileInfo) (uint32, bool) {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return st.Uid, true
 }

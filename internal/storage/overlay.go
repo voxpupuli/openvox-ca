@@ -209,7 +209,8 @@ func (o *OverlayBackend) Unwrap() Backend {
 // across replicas even when the CA key sits on a local file), so it is the
 // base backend's job to provide cross-node coordination. When the base does
 // not implement Locker, this returns ErrDistributedLockingUnsupported so
-// StorageService.WithLock falls back to a process-local mutex.
+// StorageService.WithLock drops to the next tier — AcquireSameHostLock below,
+// and only then a process-local mutex.
 func (o *OverlayBackend) AcquireLock(ctx context.Context, name string) (Unlocker, error) {
 	if lk, ok := o.base.(Locker); ok {
 		return lk.AcquireLock(ctx, name)

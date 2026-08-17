@@ -161,8 +161,33 @@ var _ = Describe("Same-host locking", func() {
 			for _, e := range entries {
 				Expect(e.Name()).To(HaveSuffix(".lock"))
 				Expect(e.Name()).To(HaveLen(64+len(".lock")), "a sha256 hex digest, not the name itself")
+
+				info, err := e.Info()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(info.Mode().Perm()).To(Equal(os.FileMode(FilePermPrivate)),
+					"docs/storage-backends.md documents these as 0600")
 			}
 		})
+
+		DescribeTable("maps a lock name to a fixed file name",
+			// The mapping is cross-release protocol: a server and a `ctl`
+			// command exclude each other only by deriving the same file from the
+			// same name, so an upgrade that changed it would silently stop the
+			// two coordinating — the exact double-write this change prevents,
+			// with a green suite. Asserting the shape (64 hex characters) does
+			// not pin that; a different digest, a salt, or hashing name+"\n"
+			// all keep the shape. These literals are the pin. Regenerate them
+			// only alongside a deliberate compatibility story.
+			func(name, want string) {
+				Expect(fileLockFileName(name)).To(Equal(want))
+			},
+			Entry("crl", "crl",
+				"861aaa0731bdaea1fa598d1750466ef6210c4a1cc1e39d3ea4f3ee4f1bc9e5a2.lock"),
+			Entry("bootstrap", "bootstrap",
+				"333c04dd151a2a6831c039cb9a651df29198be8a04e16ce861d4b6a34a11c954.lock"),
+			Entry("a subject lock", "subject:node1.test",
+				"3d5323adb88053356f4fe3797846b0268d1b0fef11f5205e248e6435475201ab.lock"),
+		)
 
 		It("resolves the same lock directory from equivalent spellings of the root", func() {
 			// Two processes are given the same store as differently written
@@ -195,6 +220,28 @@ var _ = Describe("Same-host locking", func() {
 				To(BeTrue(), "a relative lock directory must be resolved at construction")
 		})
 
+		// Each failing acquisition below re-attempts on the *same* backend value
+		// afterwards. That second call is not redundant: `acquire` takes the
+		// per-name mutex before it touches the filesystem and has to hand it
+		// back on every error path by hand, and a missed `local.Unlock()` is
+		// invisible to a spec that acquires once and discards the backend. The
+		// consequence in production is not a slow lock but a permanent one —
+		// sync.Mutex honours no context, so the process wedges on that lock name
+		// for its lifetime after a single transient failure.
+		expectRetryable := func(b *FilesystemBackend, name string) {
+			GinkgoHelper()
+			done := make(chan struct{})
+			go func() {
+				defer GinkgoRecover()
+				defer close(done)
+				if ul, err := b.AcquireSameHostLock(ctx, name); err == nil {
+					_ = ul.Unlock()
+				}
+			}()
+			Eventually(done, 5*time.Second).Should(BeClosed(),
+				"the failed acquisition leaked its per-name mutex: this lock name is now wedged for the process's lifetime")
+		}
+
 		It("reports the lock unsupported rather than failing on a read-only store", func() {
 			// `openvox-ca-ctl migrate` takes the bootstrap lock on a source it
 			// only reads, and that source may be a read-only snapshot. A store
@@ -207,8 +254,10 @@ var _ = Describe("Same-host locking", func() {
 			Expect(os.Chmod(dir, 0500)).To(Succeed())
 			DeferCleanup(func() { _ = os.Chmod(dir, 0700) })
 
-			_, err := NewFilesystemBackend(dir).AcquireSameHostLock(ctx, "bootstrap")
+			b := NewFilesystemBackend(dir)
+			_, err := b.AcquireSameHostLock(ctx, "bootstrap")
 			Expect(err).To(MatchError(ErrSameHostLockingUnsupported))
+			expectRetryable(b, "bootstrap")
 		})
 
 		It("reports a genuine filesystem failure rather than hiding it", func() {
@@ -220,10 +269,41 @@ var _ = Describe("Same-host locking", func() {
 			dir := GinkgoT().TempDir()
 			Expect(os.WriteFile(filepath.Join(dir, fsLockDir), []byte("not a directory"), 0600)).To(Succeed())
 
-			_, err := NewFilesystemBackend(dir).AcquireSameHostLock(ctx, "bootstrap")
+			b := NewFilesystemBackend(dir)
+			_, err := b.AcquireSameHostLock(ctx, "bootstrap")
 			Expect(err).To(HaveOccurred())
 			Expect(err).NotTo(MatchError(ErrSameHostLockingUnsupported))
 			Expect(err.Error()).To(ContainSubstring("same-host lock"))
+			expectRetryable(b, "bootstrap")
+		})
+
+		It("fails loudly when the lock directory belongs to another user", func() {
+			// The distinction the two specs above turn on. os.MkdirAll returns
+			// nil for a directory that already exists without checking whether
+			// it can be written, so a permission error at the *file* is not
+			// evidence the store is read-only — it is evidence the lock
+			// directory belongs to someone else, which is what an
+			// `openvox-ca-ctl` run under sudo leaves behind for a server running
+			// as puppet-ca. Downgrading there would return that server to its
+			// pre-#187 behaviour permanently and silently, while the root
+			// process went on taking flocks it believed were exclusive.
+			if os.Geteuid() == 0 {
+				Skip("root ignores the directory mode this case depends on")
+			}
+			dir := GinkgoT().TempDir()
+			locks := filepath.Join(dir, fsLockDir)
+			Expect(os.MkdirAll(locks, DirPerm)).To(Succeed())
+			Expect(os.Chmod(locks, 0500)).To(Succeed())
+			DeferCleanup(func() { _ = os.Chmod(locks, 0700) })
+
+			b := NewFilesystemBackend(dir)
+			_, err := b.AcquireSameHostLock(ctx, "bootstrap")
+			Expect(err).To(HaveOccurred())
+			Expect(err).NotTo(MatchError(ErrSameHostLockingUnsupported),
+				"an unwritable lock directory that already exists is not a read-only store")
+			Expect(err.Error()).To(ContainSubstring("chown"),
+				"the error must tell the operator how to fix it")
+			expectRetryable(b, "bootstrap")
 		})
 
 		It("grants an uncontended lock even to a caller whose deadline has gone", func() {
@@ -252,15 +332,62 @@ var _ = Describe("Same-host locking", func() {
 			dir := GinkgoT().TempDir()
 			held, err := NewFilesystemBackend(dir).AcquireSameHostLock(ctx, "crl")
 			Expect(err).NotTo(HaveOccurred())
-			DeferCleanup(func() { _ = held.Unlock() })
+			// Released explicitly below rather than in a cleanup: Unlocker's
+			// contract is exactly-once, and a second call unlocks an unlocked
+			// mutex, which is fatal rather than merely wrong.
 
 			cancelled, cancel := context.WithCancel(ctx)
 			cancel()
 
+			waiter := NewFilesystemBackend(dir)
 			start := time.Now()
-			_, err = NewFilesystemBackend(dir).AcquireSameHostLock(cancelled, "crl")
+			_, err = waiter.AcquireSameHostLock(cancelled, "crl")
 			Expect(err).To(MatchError(context.Canceled))
 			Expect(time.Since(start)).To(BeNumerically("<", contendedTimeout))
+
+			Expect(held.Unlock()).To(Succeed())
+			expectRetryable(waiter, "crl")
+		})
+
+		It("picks up a release promptly however long it has been waiting", func() {
+			// The backoff doubles, and without its ceiling a waiter under the
+			// production 60s lockTimeout reaches a ~40s sleep: a lock released
+			// at 25s would not be noticed until past 40s, so a revocation that
+			// should have succeeded fails at its deadline instead. Every other
+			// contended spec here gives up well before the doubling saturates,
+			// so none of them would notice the ceiling going missing.
+			//
+			// Held for comfortably longer than the point at which the backoff
+			// reaches fileLockRetryMax (5ms doubling: ~635ms to saturate), then
+			// the hand-off is required to be quick rather than another doubling.
+			dir := GinkgoT().TempDir()
+			holder, waiter := NewFilesystemBackend(dir), NewFilesystemBackend(dir)
+
+			held, err := holder.AcquireSameHostLock(ctx, "crl")
+			Expect(err).NotTo(HaveOccurred())
+
+			acquired := make(chan time.Duration, 1)
+			go func() {
+				defer GinkgoRecover()
+				attempt, cancel := context.WithTimeout(ctx, 30*time.Second)
+				defer cancel()
+				start := time.Now()
+				ul, err := waiter.AcquireSameHostLock(attempt, "crl")
+				Expect(err).NotTo(HaveOccurred())
+				acquired <- time.Since(start)
+				Expect(ul.Unlock()).To(Succeed())
+			}()
+
+			// Long enough that the backoff has saturated at its ceiling.
+			time.Sleep(1500 * time.Millisecond)
+			releasedAt := time.Now()
+			Expect(held.Unlock()).To(Succeed())
+
+			var waited time.Duration
+			Eventually(acquired, 10*time.Second).Should(Receive(&waited))
+			Expect(time.Since(releasedAt)).To(BeNumerically("<", 2*fileLockRetryMax),
+				"the waiter must notice the release within a capped poll interval, not after an unbounded doubling")
+			Expect(waited).To(BeNumerically(">", time.Second), "sanity: it really did wait")
 		})
 	})
 
@@ -314,6 +441,39 @@ var _ = Describe("Same-host locking", func() {
 			info, err := os.Stat(dbPath)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(info.IsDir()).To(BeFalse())
+		})
+
+		It("holds the migration lock across the whole schema migration", func() {
+			// The SQLite half of the change: EnsureReady walks the tiers by hand
+			// so two starters cannot both record a version and run the DDL. The
+			// lock file merely existing proves only that AcquireSameHostLock was
+			// called — move the Unlock out of its defer and that assertion stays
+			// green while the race returns in full. This holds the lock from
+			// outside and requires EnsureReady to be refused.
+			dsn := "file:" + filepath.Join(GinkgoT().TempDir(), "ca.db")
+			holder, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: dsn})
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { _ = holder.Close() })
+
+			held, err := holder.AcquireSameHostLock(ctx, lockNameSQLMigrate)
+			Expect(err).NotTo(HaveOccurred())
+
+			// A short migration budget so the refusal arrives inside the spec
+			// rather than after the default ten minutes.
+			second, err := NewSQLBackend(SQLConfig{
+				Dialect: SQLitePure, DSN: dsn, MigrationTimeout: contendedTimeout,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { _ = second.Close() })
+
+			err = second.EnsureReady(ctx)
+			Expect(err).To(HaveOccurred(), "a second starter must not migrate under a held lock")
+			Expect(err.Error()).To(ContainSubstring("another process on this host may be migrating"),
+				"and the error must say why, since this is a startup failure an operator sees")
+
+			// Released, it proceeds — so the refusal was the lock, not the DSN.
+			Expect(held.Unlock()).To(Succeed())
+			Expect(second.EnsureReady(ctx)).To(Succeed())
 		})
 
 		It("reports the lock unsupported for an in-memory database", func() {
@@ -428,15 +588,29 @@ var _ = Describe("Same-host locking", func() {
 			Expect(s.WithLock(ctx, "crl", func() error { return nil })).To(Succeed())
 		})
 
-		It("prefers the distributed lock when the backend has one", func() {
-			// A backend offering both must be locked the strong way. stubLocker
-			// wraps a filesystem base, which now offers a same-host lock too;
-			// WithLock must not settle for it.
+		It("prefers the distributed lock when the backend offers both", func() {
+			// The tier order is the whole of the "two distinct capabilities"
+			// argument: a backend that can coordinate across hosts must be
+			// locked that way, not settled for the weaker one.
+			//
+			// bothLocker embeds the *concrete* filesystem backend rather than
+			// the Backend interface, and that is load-bearing. Embedding the
+			// interface promotes only the interface's own methods, and
+			// AcquireSameHostLock is not among them — so a stub built that way
+			// does not satisfy SameHostLocker at all, and this spec would pass
+			// with the tiers reversed, or with tier 2 deleted outright.
 			dir := GinkgoT().TempDir()
-			stub := &stubLocker{Backend: NewFilesystemBackend(dir)}
-			Expect(svc(stub).WithLock(ctx, "crl", func() error { return nil })).To(Succeed())
+			both := &bothLocker{FilesystemBackend: NewFilesystemBackend(dir)}
 
-			// Nothing took the same-host lock, so its directory was never made.
+			var asSameHost any = both
+			_, ok := asSameHost.(SameHostLocker)
+			Expect(ok).To(BeTrue(), "precondition: this backend really does offer both tiers")
+
+			Expect(svc(both).WithLock(ctx, "crl", func() error { return nil })).To(Succeed())
+			Expect(both.distributedCalls).To(Equal(1), "the distributed lock must be the one taken")
+
+			// And the same-host tier was not reached: it would have left its
+			// directory behind.
 			_, err := os.Stat(filepath.Join(dir, fsLockDir))
 			Expect(errors.Is(err, os.ErrNotExist)).To(BeTrue(),
 				"the same-host tier must not run when a distributed lock succeeded")
@@ -455,8 +629,8 @@ var _ = Describe("Same-host locking", func() {
 			}
 			dir := GinkgoT().TempDir()
 
+			// startLockHelper registers its own cleanup.
 			helper := startLockHelper(dir, "crl")
-			DeferCleanup(helper.stop)
 
 			deadline, cancel := context.WithTimeout(ctx, contendedTimeout)
 			defer cancel()
@@ -483,3 +657,26 @@ var _ = Describe("Same-host locking", func() {
 // backend that can only be serialised in-process. The embedded nil Backend is
 // never called: every spec using it stops at the capability probe.
 type noLockBackend struct{ Backend }
+
+// bothLocker offers both locking capabilities: a working same-host lock from the
+// embedded concrete filesystem backend, and a distributed one of its own. It
+// exists to pin WithLock's tier order, which no real backend can currently
+// exercise — the two that implement SameHostLocker are precisely the two that
+// have no distributed lock.
+//
+// The concrete type is embedded deliberately. An embedded *interface* promotes
+// only that interface's method set, so a stub built over Backend would silently
+// fail to satisfy SameHostLocker and make the ordering assertion vacuous.
+type bothLocker struct {
+	*FilesystemBackend
+	distributedCalls int
+}
+
+func (b *bothLocker) AcquireLock(context.Context, string) (Unlocker, error) {
+	b.distributedCalls++
+	return noopUnlocker{}, nil
+}
+
+type noopUnlocker struct{}
+
+func (noopUnlocker) Unlock() error { return nil }

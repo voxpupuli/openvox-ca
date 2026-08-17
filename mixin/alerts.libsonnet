@@ -185,12 +185,14 @@
             // this (e.g. the best-effort revoke of a superseded cert on
             // renewal), so a revoked/superseded certificate may remain valid.
             // Not every revocation that missed the CRL lands here, and which
-            // ones do depends on the backend: one refused at a cross-node lock
-            // acquisition fails ahead of any CRL work and is logged only, while
-            // on filesystem/SQLite a revocation that merely queued behind an
-            // issuance past lockTimeout fails at its first storage read and is
-            // counted — a benign cause worth ruling out first on those
-            // backends. See docs/metrics.md. The counter resets on restart, so
+            // ones do depends on the backend: one refused at a lock
+            // acquisition fails ahead of any CRL work and is logged only —
+            // every backend's cross-node acquisition, and on filesystem/SQLite
+            // a wait for another process on the host — while on
+            // filesystem/SQLite a revocation that merely queued behind an
+            // issuance in this same process past lockTimeout fails at its first
+            // storage read and is counted: a benign cause worth ruling out
+            // first on those backends. See docs/metrics.md. The counter resets on restart, so
             // alert on increase() over a window rather than a raw value.
             expr: 'increase(puppetca_crl_update_failures_total{%(selector)s}[%(window)s]) > 0' % {
               selector: $._config.puppetCASelector,
