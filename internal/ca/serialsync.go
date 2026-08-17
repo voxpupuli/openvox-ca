@@ -116,14 +116,24 @@ func (c *CA) reconcileSerialIndexLocked(stored map[string]string, readEpoch uint
 	// Decided before the additions below, which move the epoch themselves.
 	raced := c.serialIndexEpoch != readEpoch
 
+	// Read before writing, and write only on a difference. The overwhelmingly
+	// common pass changes nothing at all, and this runs under the exclusive
+	// c.mu — the same lock the mTLS admission path and the OCSP slow path take —
+	// so an unconditional write per stored serial would put a map store per
+	// certificate ever issued in front of every authentication on this replica,
+	// once per interval. Reads leave the map's internals alone; stores can grow
+	// and rehash it.
 	var delta SerialIndexDelta
 	for serial, subject := range stored {
-		if _, known := c.serialIndex[serial]; !known {
+		known, ok := c.serialIndex[serial]
+		if !ok {
 			delta.Added++
 		}
-		// Rewriting a known serial's subject is deliberate: storage is
-		// authoritative, and the two agreeing is the normal case.
-		c.serialIndex[serial] = subject
+		if !ok || known != subject {
+			// Storage is authoritative where the two disagree, which they only
+			// do for a serial whose row was rewritten.
+			c.serialIndex[serial] = subject
+		}
 	}
 
 	// No cached OCSP response is dropped for an added serial, because there

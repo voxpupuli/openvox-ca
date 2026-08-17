@@ -378,7 +378,13 @@ state when the document was last updated and is not guaranteed exhaustive.
   what makes the gap safe: an issuance landing inside it moves the counter, and
   a pass that sees it moved applies its additions but stands its removals down,
   because it cannot then tell "pruned elsewhere" from "signed here, after I
-  read". Additions are always safe, removals never are. `SyncCRLCache` takes
+  read". Additions are always safe, removals never are.
+
+  The exception is bounded rather than free. The reconciliation still holds the
+  write lock for O(n) map *reads* over the inventory, so a very large fleet
+  pays a brief pause on the admission path once per interval; it writes only
+  where storage and the index disagree, so the steady-state pass — the
+  overwhelmingly common one — stores nothing. `SyncCRLCache` takes
   the same shape for the same reason and is ordered instead by CRL number.
 
   `InventoryEntries` exists for this path: `ReadInventory` verifies and then
