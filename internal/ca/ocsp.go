@@ -319,6 +319,12 @@ func (c *CA) AnswerOCSP(ctx context.Context, reqDER []byte) (OCSPAnswer, error) 
 	// It costs no DoS protection to leave out: a request carrying a nonce
 	// bypasses the cache entirely and is answered with a fresh signature, so an
 	// attacker who wants to make this CA sign per request already can.
+	//
+	// One consequence for an operator running an external key provider: an
+	// unnonced query about a serial this replica has not yet indexed now signs
+	// every time rather than once, so for up to one sync interval after each
+	// issuance those queries join the nonced ones in the signer-round-trip-
+	// under-c.mu class that docs/development/locking.md records as #197.
 	if !hasNonce && template.Status != ocsp.Unknown {
 		c.ocspCache[serialHex] = ocspCacheEntry{
 			der:       bytes.Clone(respDER),

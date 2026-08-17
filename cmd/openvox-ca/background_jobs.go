@@ -88,10 +88,17 @@ func backgroundJobs(cfg *serverConfig, myCA *ca.CA) []backgroundJob {
 
 	// Reloads the inventory into the serial index this process's OCSP responder
 	// answers from, so a certificate signed on another replica stops being
-	// reported as `unknown` within an interval rather than never. Read-only,
-	// takes no cluster lock, and — like crl-sync — runs unconditionally: the
-	// /ocsp endpoint answers whatever ocsp_url says, so gating this on it would
-	// leave the responder wrong for anyone distributing the URL another way.
+	// reported as `unknown` within an interval rather than never. Takes no
+	// cluster lock, and — like crl-sync — runs unconditionally: the /ocsp
+	// endpoint answers whatever ocsp_url says, so gating this on it would leave
+	// the responder wrong for anyone distributing the URL another way.
+	//
+	// Read-only in every reachable state but one: on a blob backend the
+	// integrity check re-baselines a missing MAC rather than failing, so a pass
+	// can write if KeyInventoryHMAC has been deleted out from under a running
+	// server. InitHMAC establishes it at startup, so that is a repair path
+	// rather than a normal one — but "nothing is written" is part of why this
+	// runs on every replica at once, so it is worth being exact about.
 	ocspIndexInterval := cfg.ocspIndexSyncInterval()
 	jobs = append(jobs, backgroundJob{jobOCSPIndexSync, func(ctx context.Context) {
 		runOCSPIndexSync(ctx, myCA, ocspIndexInterval)
