@@ -158,7 +158,7 @@ func (l *fileLocks) acquire(ctx context.Context, name string) (Unlocker, error) 
 			local.Unlock()
 			if isLockingUnavailableError(lockErr) {
 				l.warnOnce.Do(func() {
-					slog.Warn("Same-host locking is unavailable: this filesystem does not support flock(2)",
+					slog.Warn("Same-host locking is unavailable: this filesystem or kernel cannot provide flock(2)",
 						"lock_dir", l.dir, "error", lockErr)
 				})
 				return nil, ErrSameHostLockingUnsupported

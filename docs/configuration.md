@@ -312,6 +312,7 @@ csr_pem=$(cat)
   inventory.txt       Signed certificate log (hex serial, dates, subject per line)
   signed/             Issued certificates
   requests/           Pending CSRs
+  locks/              Same-host lock files (empty, mode 0600) — see below
   private/
     ca_key.pem              CA private key (mode 0600; encrypted PEM when --encrypt-ca-key)
     .ca_key_passphrase      Auto-generated passphrase file (mode 0600; only when --encrypt-ca-key
@@ -334,9 +335,16 @@ store the same logical state elsewhere.
 | Directories | `0750` |
 | Private keys | `0600` |
 | CRL file | `0600` |
+| Lock files under `locks/` | `0600` |
 | Public data (certs, CSRs, inventory) | `0644` |
 
-The user running `openvox-ca` must own (or have write access to) `--cadir`.
+The user running `openvox-ca` must own (or have write access to) `--cadir` —
+and so must anything else that touches the store. `openvox-ca-ctl` and the
+offline `openvox-ca` subcommands take the same locks the server does, so run
+them as that user rather than under `sudo`: a root-owned lock file left in
+`locks/` will fail the server's next acquisition of that name. See [running a
+second process against a live
+store](storage-backends.md#running-a-second-process-against-a-live-store).
 
 ## Graceful shutdown
 

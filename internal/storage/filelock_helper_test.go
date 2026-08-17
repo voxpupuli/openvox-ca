@@ -126,8 +126,8 @@ func startLockHelper(cadir, name string) *lockHelper {
 }
 
 // stop releases the lock by closing the helper's stdin and waiting for it to
-// exit. Safe to call twice, so a spec may stop it explicitly and still register
-// the cleanup.
+// exit cleanly, so the helper's own Unlock runs. Safe to call twice, so a spec
+// may stop it explicitly and still register the cleanup.
 func (h *lockHelper) stop() {
 	GinkgoHelper()
 	if h.cmd.Process == nil {
@@ -137,4 +137,21 @@ func (h *lockHelper) stop() {
 	err := h.cmd.Wait()
 	h.cmd.Process = nil
 	Expect(err).NotTo(HaveOccurred(), "the lock helper exited badly")
+}
+
+// kill takes the helper down with SIGKILL, giving it no opportunity to release
+// anything. Nothing else in the suite exercises that: stop lets the helper's own
+// Unlock run, so a lock available afterwards is equally explained by the orderly
+// release. The kernel-drops-it-on-death property is the whole argument for
+// flock(2) over an O_EXCL lockfile — it is why docs/development/locking.md says
+// there is no stale lock to clean up — and this is what pins it.
+func (h *lockHelper) kill() {
+	GinkgoHelper()
+	if h.cmd.Process == nil {
+		return
+	}
+	Expect(h.cmd.Process.Kill()).To(Succeed())
+	_ = h.cmd.Wait() // SIGKILL, so a non-nil "signal: killed" is expected.
+	h.cmd.Process = nil
+	_ = h.stdin.Close()
 }

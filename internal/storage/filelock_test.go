@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -304,6 +305,28 @@ var _ = Describe("Same-host locking", func() {
 			expectRetryable(b, "bootstrap")
 		})
 
+		DescribeTable("reports the capability absent on a read-only filesystem",
+			// EROFS degrades at *both* call sites, and the reasoning differs
+			// from the permission case beside it: EROFS says nothing about
+			// ownership, and a store nothing can write has no writer to
+			// exclude. The documented case is `openvox-ca-ctl migrate` reading a
+			// source on a read-only snapshot whose lock directory already
+			// exists, so MkdirAll succeeds and the open is what fails. Neither
+			// arm is reachable from a temp directory, so the classifiers are
+			// called directly -- this file is package storage.
+			func(classify func(*fileLocks, error) error) {
+				l := newFileLocks(GinkgoT().TempDir())
+				err := classify(l, &fs.PathError{Op: "open", Path: "x", Err: syscall.EROFS})
+				Expect(err).To(MatchError(ErrSameHostLockingUnsupported))
+			},
+			Entry("creating the lock directory", func(l *fileLocks, err error) error {
+				return l.unwritableStore(err, "creating same-host lock directory")
+			}),
+			Entry("opening a lock file in a directory that already exists", func(l *fileLocks, err error) error {
+				return l.inaccessibleLockFile(err, "x.lock")
+			}),
+		)
+
 		It("fails loudly when the lock directory belongs to another user", func() {
 			// The distinction the two specs above turn on. os.MkdirAll returns
 			// nil for a directory that already exists without checking whether
@@ -482,9 +505,13 @@ var _ = Describe("Same-host locking", func() {
 			// contended spec here gives up well before the doubling saturates,
 			// so none of them would notice the ceiling going missing.
 			//
-			// Held for comfortably longer than the point at which the backoff
-			// reaches fileLockRetryMax (5ms doubling: ~635ms to saturate), then
-			// the hand-off is required to be quick rather than another doubling.
+			// The hold has to outlast a specific un-ceilinged attempt, not just
+			// saturation. Doubling from 5ms puts attempts at 635, 1275, 2555 and
+			// 5115ms; releasing at ~2600ms means a waiter without the ceiling
+			// would not look again until 5115ms — 2.5s late against the 1s bound
+			// below — while the ceilinged path hands off within one 250ms poll.
+			// Releasing at 1500ms instead leaves only 55ms between the two, which
+			// a loaded -race runner can eat.
 			dir := GinkgoT().TempDir()
 			holder, waiter := NewFilesystemBackend(dir), NewFilesystemBackend(dir)
 
@@ -504,12 +531,12 @@ var _ = Describe("Same-host locking", func() {
 			}()
 
 			// Long enough that the backoff has saturated at its ceiling.
-			time.Sleep(1500 * time.Millisecond)
+			time.Sleep(2600 * time.Millisecond)
 			releasedAt := time.Now()
 			Expect(held.Unlock()).To(Succeed())
 
 			var waited time.Duration
-			Eventually(acquired, 10*time.Second).Should(Receive(&waited))
+			Eventually(acquired, 15*time.Second).Should(Receive(&waited))
 			// 4x the ceiling, not 2x: the worst legitimate case is a release
 			// landing just after a failed attempt (one full interval), plus
 			// Eventually's polling granularity and two goroutine wakeups under
@@ -518,7 +545,7 @@ var _ = Describe("Same-host locking", func() {
 			// headroom costs nothing.
 			Expect(time.Since(releasedAt)).To(BeNumerically("<", 4*fileLockRetryMax),
 				"the waiter must notice the release within a capped poll interval, not after an unbounded doubling")
-			Expect(waited).To(BeNumerically(">", time.Second), "sanity: it really did wait")
+			Expect(waited).To(BeNumerically(">", 2*time.Second), "sanity: it really did wait")
 		})
 	})
 
@@ -868,9 +895,13 @@ var _ = Describe("Same-host locking", func() {
 			Expect(err).To(MatchError(context.DeadlineExceeded))
 			Expect(err.Error()).To(ContainSubstring("another process on this host holds the CA lock"))
 
-			// And the lock is genuinely released when that process exits, with
-			// no cleanup of our own: the kernel drops it with the descriptor.
-			helper.stop()
+			// And the lock is genuinely released when that process dies, with no
+			// cleanup by anyone: SIGKILL, so the helper never reaches its own
+			// Unlock and the kernel is the only thing that can drop it. Stopping
+			// it politely instead would prove nothing here — the orderly release
+			// would explain the result just as well — and this is the property
+			// the whole flock-over-lockfile choice rests on.
+			helper.kill()
 			Eventually(func() error {
 				attempt, cancel := context.WithTimeout(ctx, contendedTimeout)
 				defer cancel()

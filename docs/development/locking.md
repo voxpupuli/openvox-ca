@@ -148,11 +148,14 @@ service operators restart and kill. Consequences worth knowing:
     directory is actually foreign, and its uid, because a sudo `ctl` leaves a
     root-owned *file* inside a server-owned directory as often as it creates the
     directory itself.
-  - *`EROFS` at either site, or a filesystem that rejects BSD locks at all*
-    (`ENOLCK`, `EOPNOTSUPP`, `ENOSYS`) — absent again, not fatal. `EROFS` says
-    nothing about ownership, and a store nobody can lock is the runtime form of
-    a platform without `flock(2)`; failing hard there would take down a CA that
-    worked before this tier existed.
+  - *`EROFS` at either site, a filesystem that rejects BSD locks*
+    (`EOPNOTSUPP`, `ENOSYS`), or a kernel out of lock records (`ENOLCK`) —
+    absent again, not fatal. `EROFS` says nothing about ownership, and a store
+    nobody can lock is the runtime form of a platform without `flock(2)`;
+    failing hard there would take down a CA that worked before this tier
+    existed. The three are grouped by what they cost, not by what they mean:
+    the first two are properties of the mount and the third is transient
+    pressure, so read the errno in the log line rather than the message.
 
 Crash recovery is not uniform across the distributed backends. etcd and Redis self-heal
 within the lock TTL (30 s): a crashed holder's lease or key expires and the lock
@@ -523,7 +526,10 @@ them. One spec does not settle for that: it re-executes the test binary (via a
 `TestMain` guard in
 [filelock_helper_test.go](../../internal/storage/filelock_helper_test.go)) so a
 real second process holds the lock, and asserts both that this process is
-refused and that the kernel releases the lock when that process exits.
+refused and that the lock frees itself when that process is **SIGKILLed** — no
+orderly release, so the kernel dropping the descriptor is the only thing that
+can explain it. That is the property the whole flock-over-lockfile choice rests
+on, and it is asserted rather than assumed.
 
 The nested lock-ordering invariant *is* now automated, in
 [renewrace_test.go](../../internal/ca/renewrace_test.go): for each caller that
