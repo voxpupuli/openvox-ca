@@ -371,10 +371,16 @@ When containing a compromised agent, apply the levers that hold, in this order:
    The status probe also needs that certificate to still be there, so it suits
    the `PUT` route: after a `DELETE` — what `openvox-ca-ctl clean` sends — every
    replica answers `404` and it distinguishes nothing, so record the serial
-   beforehand and use OCSP or the gauge. OCSP additionally answers `Unknown` for
-   a serial a peer issued since this replica started, and a nonce-free query may
-   be served from a pre-signed cache the sync does not clear for serials it did
-   not just revoke. What cannot answer it at all is anything reading shared
+   beforehand and use OCSP or the gauge. OCSP answers `Unknown` — not
+   `revoked` — for a serial a peer issued that this replica has not yet indexed,
+   which the index sync bounds at `ocsp_index_sync_interval_sec` (5 minutes by
+   default); see [OCSP status across
+   replicas](configuration.md#ocsp-status-across-replicas). Send the nonce
+   (`openssl ocsp` does unless you pass `-no_nonce`), because a nonce-free query
+   may be answered from a response pre-signed up to four hours ago. That cache
+   cannot contradict this replica's own CRL — every install of a new CRL drops
+   the responses it revokes — but for a probe, a freshly signed answer is the
+   one worth having. What cannot answer it at all is anything reading shared
    storage: `GET /certificate_revocation_list/ca`, `puppetca_crl_number` and
    `puppetca_crl_revoked_certificates` all read the same on a stale replica as
    on a fresh one.
