@@ -102,7 +102,7 @@ func (c *CA) signCRLLocked(ctx context.Context, prev *storedCRL, revoked []x509.
 	// immediately without reading from storage. The cache holds only this CA's
 	// own CRL: it answers "did we revoke this serial", which an ancestor's CRL
 	// can never speak to.
-	c.cachedCRL = parsedCRL
+	c.installCachedCRLLocked(parsedCRL)
 
 	// Signal consumers (e.g. the Kubernetes exporter) that the CRL changed.
 	// Non-blocking: a full buffer means a notification is already pending, and a
@@ -114,6 +114,61 @@ func (c *CA) signCRLLocked(ctx context.Context, prev *storedCRL, revoked []x509.
 	default:
 	}
 	return nil
+}
+
+// installCachedCRLLocked makes next the CRL this process decides revocation
+// from, and drops the pre-signed OCSP responses the outgoing one justified.
+//
+// Every write of c.cachedCRL goes through here, and that is the whole point.
+// The two are a pair: the responder pre-signs a `good` for OCSPValidity — four
+// hours — against the CRL current at the time, so any code that advances the
+// CRL and forgets the cache leaves the responder affirmatively vouching for a
+// certificate the CRL it is now enforcing says is revoked. Only two of the four
+// install sites used to evict, and the ones that did not were reachable: a
+// revocation performed on another replica reaches this one through the stored
+// CRL, and whichever path installs it first wins — SyncCRLCache, which evicted,
+// or the periodic re-sign in RefreshCRLIfDue, which did not. Losing that race
+// left a stale `good` for the full four hours, because the sync that would have
+// evicted then found the CRLs identical and returned early. Routing every
+// install through one function is what makes the omission unrepeatable rather
+// than merely fixed.
+//
+// c.mu must be held by the caller.
+func (c *CA) installCachedCRLLocked(next *x509.RevocationList) {
+	previous := c.cachedCRL
+	c.cachedCRL = next
+	c.invalidateOCSPForNewlyRevokedLocked(previous, next)
+}
+
+// invalidateOCSPForNewlyRevokedLocked drops the cached OCSP responses for
+// serials that the newly installed CRL revokes and the previous one did not, so
+// the responder stops handing out a pre-signed "good" for a certificate that
+// has since been revoked. Without it the CRL would be current while OCSP kept
+// answering from responses signed up to OCSPValidity ago.
+//
+// Only the newly revoked serials are dropped, mirroring what revokeSerialLocked
+// does on the replica that performs a revocation. Clearing every revoked
+// serial's entry instead would re-sign the whole revoked set on every
+// revocation anywhere in the fleet.
+//
+// A nil previous means nothing was cached from it either — the startup installs
+// run before the responder has answered anything — so the loop is a no-op there
+// rather than a special case.
+//
+// c.mu must be held by the caller.
+func (c *CA) invalidateOCSPForNewlyRevokedLocked(previous, current *x509.RevocationList) {
+	was := make(map[string]struct{})
+	if previous != nil {
+		for _, entry := range previous.RevokedCertificateEntries {
+			was[serialHexStr(entry.SerialNumber)] = struct{}{}
+		}
+	}
+	for _, entry := range current.RevokedCertificateEntries {
+		key := serialHexStr(entry.SerialNumber)
+		if _, seen := was[key]; !seen {
+			delete(c.ocspCache, key)
+		}
+	}
 }
 
 // newEmptyCRL signs a fresh, empty CRL for cert, valid for validity.
@@ -301,7 +356,7 @@ func (c *CA) RefreshCRLIfDue(ctx context.Context, refreshBefore time.Duration) (
 			// this costs only the comparison.
 			if stored.own.Number != nil && (c.cachedCRL == nil || c.cachedCRL.Number == nil ||
 				stored.own.Number.Cmp(c.cachedCRL.Number) > 0) {
-				c.cachedCRL = stored.own
+				c.installCachedCRLLocked(stored.own)
 			}
 			return nil
 		}
