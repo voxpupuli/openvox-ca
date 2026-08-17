@@ -61,6 +61,16 @@
     crlSyncWindow: '1h',
     crlSyncFor: '5m',
 
+    // Window and dwell for PuppetCAOCSPIndexSyncFailing. Same shape and same
+    // defaults as the CRL sync pair above: the counter resets on restart, so
+    // the rule alerts on increase() over a window, and the dwell is comfortably
+    // longer than any single sync interval so one transient read error does not
+    // page. Kept as its own knob rather than reusing crlSync* because the two
+    // jobs poll on different intervals and an operator lengthening one has no
+    // reason to lengthen the other.
+    ocspIndexSyncWindow: '1h',
+    ocspIndexSyncFor: '15m',
+
     // --- Kubernetes export ---
     // A target alerts while its most recent apply attempt failed (last-error
     // newer than last-success). Exports are event-driven and can be days apart

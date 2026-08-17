@@ -193,14 +193,27 @@ unrecognised — see
 
 ```promql
 # Replicas whose OCSP index has fallen behind the fleet
-max(puppetca_ocsp_index_serials) - puppetca_ocsp_index_serials > 0
+scalar(max(puppetca_ocsp_index_serials)) - puppetca_ocsp_index_serials > 0
 ```
+
+`scalar()` is load-bearing. A bare `max(...)` returns one sample with no labels
+at all, and binary arithmetic between two instant vectors matches on the full
+label set — so `max(x) - x` never matches anything carrying `job`/`instance`
+and is silently always empty. The CRL query below can subtract two vectors
+directly only because both sides carry identical labels, which is not the case
+here.
 
 Expect this to be briefly non-empty after each issuance and to clear on the next
 sync. A replica that stays in it is answering `unknown` for certificates its
 peers have signed; `puppetca_ocsp_index_sync_failures_total` usually says why.
 Unlike the CRL gap this is not a security lag — `unknown` is not `good` — but a
 verifier that hard-fails on `unknown` will reject against that replica alone.
+A replica reading *above* the others is not a fault: a pass that overlaps a
+local issuance defers its removals, so pruned serials linger an interval or two.
+
+`puppetca_ocsp_index_sync_failures_total` has a shipped alert
+(`PuppetCAOCSPIndexSyncFailing`); the fleet-relative gauge comparison above does
+not, and has to be added by hand if you want it.
 
 ### Leaf certificates
 
@@ -304,5 +317,9 @@ instructions for rendering or importing it. It alerts on exporter availability,
 CA/CRL/leaf expiry, pending requests, CRL update failures
 (`puppetca_crl_update_failures_total`), a replica whose CRL has fallen behind
 the stored one (`puppetca_crl_cached_number`,
-`puppetca_crl_sync_failures_total`), and Kubernetes export failures, with all
-thresholds configurable.
+`puppetca_crl_sync_failures_total`), a replica that cannot reload its OCSP
+serial index (`puppetca_ocsp_index_sync_failures_total`), and Kubernetes export
+failures, with all thresholds configurable. It does **not** alert on the
+fleet-relative `puppetca_ocsp_index_serials` comparison — that one is left to
+the operator, since it needs a `by (job)` aggregation to avoid fanning in
+across unrelated CAs and the condition it catches is not fail-open.

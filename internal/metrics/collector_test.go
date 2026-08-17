@@ -188,8 +188,9 @@ var _ = Describe("Collector", func() {
 	It("reports an OCSP index behind the fleet, and the failure count when it cannot catch up", func() {
 		signCert("ocsp-index-node")
 
-		// A second CA over the same storage. Its index was built at Init, so it
-		// holds nothing the signing above added.
+		// A second CA over the same storage. Its index was built at Init from
+		// the inventory as it then stood, so it holds the serial signed above
+		// and not the one signed below — which is where the gap comes from.
 		peer := ca.New(storage.New(store.CADir()), ca.AutosignConfig{Mode: "off"}, "puppet.test")
 		Expect(peer.Init(ctx)).To(Succeed())
 		signCert("signed-after-the-peer-started")

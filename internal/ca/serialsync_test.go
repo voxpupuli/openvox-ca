@@ -209,21 +209,26 @@ var _ = Describe("SyncSerialIndex", func() {
 		delta, err := replica.SyncSerialIndex(context.Background())
 		Expect(err).NotTo(HaveOccurred())
 		Expect(delta.Removed).To(BeNumerically(">=", 1))
+		Expect(delta.Changed()).To(BeTrue(),
+			"a removal-only pass has changed the index, and must log and report as much")
 
 		Expect(ocspStatusFor(replica, cert)).To(Equal(xocsp.Unknown),
 			"a cached good must not outlive the index entry it was derived from")
 	})
 
 	// The read happens outside c.mu so it cannot block the auth path, which means
-	// a pass and an issuance genuinely do run concurrently. This is the
-	// concurrency-safety half of that — no torn map, no lost update once the
-	// passes have settled, and under -race no unsynchronised access.
+	// a pass and an issuance genuinely do run concurrently. What this can
+	// falsify is exactly one thing: unsynchronised access to the index — a torn
+	// map, or the runtime's concurrent-map-write throw — which is why the name
+	// says "does not race" and not "does not lose".
 	//
-	// It is deliberately NOT the epoch guard's spec, though it looks like one.
-	// The interleaving that guard exists for is corrected by the following pass,
-	// so this assertion holds with the guard removed; serialindexepoch_test.go
-	// states the guard directly instead, and says why there.
-	It("keeps its index consistent while passes and issuances overlap", func() {
+	// It is deliberately NOT the epoch guard's spec, though it looks like one,
+	// and the distinction cost a rewrite to find. The final loop is repaired by
+	// the settling pass, which re-adds every serial unconditionally because
+	// additions are not epoch-gated, so it holds whether the guard exists or not
+	// — measured, not assumed. serialindexepoch_test.go states the guard
+	// directly instead.
+	It("does not race the index while passes and issuances overlap", func() {
 		const signings = 25
 
 		ctx, stop := context.WithCancel(context.Background())

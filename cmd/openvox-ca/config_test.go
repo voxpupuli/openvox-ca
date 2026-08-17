@@ -229,6 +229,56 @@ var _ = Describe("crlRefreshInterval", func() {
 // rather than only from a struct literal: a typo in the env key, or a guard
 // that let a non-positive value through to time.NewTicker, would both be
 // invisible to a test that sets the field directly.
+// The OCSP index sync interval bounds how long a certificate signed on another
+// replica is reported `unknown` here, so its resolution is worth pinning end to
+// end for the same reason crlSyncInterval's is: a typo in the env key, or a
+// guard that let a non-positive value reach time.NewTicker, would both be
+// invisible to a test that sets the field directly.
+var _ = Describe("ocspIndexSyncInterval", func() {
+	It("returns the default when unset", func() {
+		clearServerEnv()
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred(), "unexpected error")
+		Expect(cfg.ocspIndexSyncInterval()).To(Equal(defaultOCSPIndexSyncInterval),
+			"ocspIndexSyncInterval() = %v; want default %v",
+			cfg.ocspIndexSyncInterval(), defaultOCSPIndexSyncInterval)
+	})
+
+	It("honours the env override", func() {
+		clearServerEnv()
+		setEnv("PUPPET_CA_OCSP_INDEX_SYNC_INTERVAL_SEC", "30")
+
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred(), "unexpected error")
+		Expect(cfg.ocspIndexSyncInterval()).To(Equal(30*time.Second),
+			"ocspIndexSyncInterval() = %v; want %v", cfg.ocspIndexSyncInterval(), 30*time.Second)
+	})
+
+	It("falls back to the default for a non-positive value", func() {
+		clearServerEnv()
+		setEnv("PUPPET_CA_OCSP_INDEX_SYNC_INTERVAL_SEC", "0")
+
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred(), "unexpected error")
+		Expect(cfg.ocspIndexSyncInterval()).To(Equal(defaultOCSPIndexSyncInterval),
+			"ocspIndexSyncInterval() with 0 = %v; want default %v",
+			cfg.ocspIndexSyncInterval(), defaultOCSPIndexSyncInterval)
+	})
+
+	// It is a separate knob from the CRL sync's on purpose: the two jobs read
+	// different things at different costs, and an operator lengthening one has
+	// no reason to lengthen the other. Setting one must not move the other.
+	It("is independent of crl_sync_interval_sec", func() {
+		clearServerEnv()
+		setEnv("PUPPET_CA_CRL_SYNC_INTERVAL_SEC", "15")
+
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred(), "unexpected error")
+		Expect(cfg.crlSyncInterval()).To(Equal(15 * time.Second))
+		Expect(cfg.ocspIndexSyncInterval()).To(Equal(defaultOCSPIndexSyncInterval))
+	})
+})
+
 var _ = Describe("crlSyncInterval", func() {
 	It("returns the default when unset", func() {
 		clearServerEnv()
@@ -668,6 +718,8 @@ var _ = Describe("applyServerEnv each variable", func() {
 			func(c *serverConfig) bool { return c.CRLRefreshBeforeSec == 86400 }, "CRLRefreshBeforeSec"),
 		Entry("CRL_SYNC_INTERVAL_SEC", "PUPPET_CA_CRL_SYNC_INTERVAL_SEC", "15",
 			func(c *serverConfig) bool { return c.CRLSyncIntervalSec == 15 }, "CRLSyncIntervalSec"),
+		Entry("OCSP_INDEX_SYNC_INTERVAL_SEC", "PUPPET_CA_OCSP_INDEX_SYNC_INTERVAL_SEC", "300",
+			func(c *serverConfig) bool { return c.OCSPIndexSyncIntervalSec == 300 }, "OCSPIndexSyncIntervalSec"),
 		// The zero value of RevokeOnAutoRenew is already false, so assert the
 		// env var flips it to true — a value distinct from the zero value —
 		// which proves the env key is parsed and wired to the right field. A

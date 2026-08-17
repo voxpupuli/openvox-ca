@@ -224,6 +224,37 @@
             },
           },
           {
+            alert: 'PuppetCAOCSPIndexSyncFailing',
+            // This replica could not reload the inventory into the serial index
+            // its OCSP responder answers from: an unreadable inventory, or one
+            // whose integrity MAC no longer verifies. While it rises the
+            // responder answers "unknown" for every certificate a peer has
+            // signed since the last successful pass.
+            //
+            // Not fail-open — "unknown" is not "good", and the mTLS admission
+            // path reads the CRL rather than this index — so it is a warning
+            // rather than a critical. It is still worth paging on: a verifier
+            // that hard-fails on "unknown" rejects against this replica and no
+            // other, which is a split that is unpleasant to diagnose from the
+            // client end. Counter resets on restart, hence increase().
+            //
+            // The fleet-relative comparison of puppetca_ocsp_index_serials is
+            // deliberately not shipped: it needs a by (job) aggregation to
+            // avoid fanning in across unrelated CAs, and a replica reading
+            // above its peers is a deferred removal rather than a fault. See
+            // docs/metrics.md for the query to add by hand.
+            expr: 'increase(puppetca_ocsp_index_sync_failures_total{%(selector)s}[%(window)s]) > 0' % {
+              selector: $._config.puppetCASelector,
+              window: $._config.ocspIndexSyncWindow,
+            },
+            'for': $._config.ocspIndexSyncFor,
+            labels: { severity: 'warning' } + $._config.alertLabels,
+            annotations: {
+              summary: 'Puppet CA cannot reload its OCSP serial index from storage.',
+              description: 'The Puppet CA on {{ $labels.instance }} could not reload the inventory into its OCSP serial index (puppetca_ocsp_index_sync_failures_total is rising), so it is answering "unknown" for certificates its peers have signed since the last successful pass. Check inventory storage, and the inventory integrity MAC if the logs report a mismatch.',
+            },
+          },
+          {
             alert: 'PuppetCACRLStale',
             // The revocation list this replica enforces is behind the stored
             // one. Every replica polls storage on crl_sync_interval_sec, so a

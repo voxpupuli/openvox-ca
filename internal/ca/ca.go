@@ -265,9 +265,11 @@ func (c *CA) SerialIndexSyncFailures() uint64 {
 	return c.serialIndexSyncFailures.Load()
 }
 
-// SerialIndexSize returns how many serials the OCSP index currently holds. It
-// exists for specs asserting that a sync pass reached this process's index
-// without reaching into unexported state.
+// SerialIndexSize returns how many serials this replica's OCSP responder
+// recognises. A serial it does not hold is answered `unknown` before the CRL is
+// consulted, so this is the size of what the responder will speak about at all;
+// the metrics exporter surfaces it as puppetca_ocsp_index_serials, and specs
+// use it to assert a sync pass landed without reaching into unexported state.
 func (c *CA) SerialIndexSize() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

@@ -235,11 +235,13 @@ Two things the window does not cover, both worth knowing before you rely on it:
 - **OCSP responses already handed out.** The responder signs each response with
   four hours of validity and clients cache it, so a verifier that asked before
   the revocation can keep treating the certificate as valid for that long. The
-  sync drops this replica's own cached responses for newly revoked serials, but
-  answers already in a client's or proxy's cache cannot be recalled. This
-  applies only if you have enabled the responder with `--ocsp-url`. An
-  `unknown` is never cached, so it is not subject to this (see
-  [OCSP status across replicas](#ocsp-status-across-replicas)).
+  replica drops its own cached responses for a serial whenever it installs a
+  CRL revoking it — by any route, not only the sync — but answers already in a
+  client's or proxy's cache cannot be recalled. This applies whether or not you
+  set `--ocsp-url`: that flag decides whether issued certificates advertise the
+  responder, not whether `/ocsp` answers. An `unknown` is treated differently
+  and is not subject to this — see
+  [OCSP status across replicas](#ocsp-status-across-replicas).
 - **Certificates issued to the agent before it was locked out.** Revoking one
   serial does not revoke another the same subject already holds. Renewal is not
   a way out — `POST /certificate_renewal` re-reads the CRL from storage rather
@@ -251,6 +253,36 @@ Two things the window does not cover, both worth knowing before you rely on it:
   [revocation by serial](api.md#revocation-by-serial). `openvox-ca-ctl clean` is
   not a substitute: it revokes the most recently issued serial for the subject
   and removes the stored certificate, leaving the subject's other serials valid.
+
+- **A renewal that coincides with a storage read failure.** That re-read is
+  best-effort: if it fails, the check falls back to the CRL already in memory
+  rather than refusing every renewal in the fleet over a transient backend
+  error. Such a renewal is bounded by the ordinary propagation window instead of
+  by the read-through check. `puppetca_crl_sync_failures_total` is what tells
+  you it happened.
+
+The read is one small blob, takes no cluster lock, and writes nothing, so it
+costs the same on every backend and needs no leader. Lengthening the interval
+trades that cost against the window; there is no switch to turn it off, and
+`disable_crl_refresh` does not — that setting governs whether this deployment
+*re-signs* the CRL on a timer, which is a separate question from whether
+revocations reach it.
+
+`filesystem` and `sqlite` are single-node, so the sync has nothing to find and
+the setting does not matter there.
+
+To confirm propagation, compare `puppetca_crl_cached_number` (per replica)
+against `puppetca_crl_number` (from storage) — see
+[metrics](metrics.md#watching-revocation-propagate).
+
+Restarting a replica also reloads its CRL. The sync installs only a CRL this CA
+signed, picking out the newest such block wherever it sits in the stored chain —
+the same selection the startup loader and the re-sign paths make. A stored chain
+carrying nothing of ours leaves the replica on the CRL it already holds and
+raises `puppetca_crl_sync_failures_total`; startup warns about the same
+condition and the re-sign paths refuse it outright. See
+[storage backends](storage-backends.md) for how that state is reached and
+repaired.
 
 ## OCSP status across replicas
 
@@ -282,44 +314,33 @@ What that window does and does not mean:
   treats `unknown` as a failure sees one replica reject a certificate the others
   accept, which is an unpleasant split to diagnose; one that soft-fails sees
   nothing.
-- **No stale answer outlives the fix.** The responder caches `good` and
-  `revoked` for four hours but never caches `unknown`, so a refreshed index
-  takes effect on the very next request rather than when a cached answer
-  expires.
+- **An `unknown` is not cached anywhere, by anyone.** A `good` or a `revoked`
+  is pre-signed and held for four hours, here and in the verifier. An `unknown`
+  is not: this replica does not keep one, and the response carries no
+  `NextUpdate` and (on the GET form) `Cache-Control: no-store`, so no verifier
+  or proxy keeps one either. That is what makes the window above the whole
+  story rather than the window plus four hours — an index refresh changes the
+  answer on the very next request that reaches this replica.
+- **The pass also removes.** A serial another replica's expired-certificate
+  cleanup has pruned leaves this index on the next pass, taking its cached
+  response with it, so `puppetca_ocsp_index_serials` tracks the inventory
+  downward as well as upward.
 - **`filesystem` and `sqlite` are single-node**, so the job has nothing to find
   there; it costs one local inventory read per interval.
 
+The read takes no cluster lock and does not re-sign anything, but it is not
+free: it is the whole inventory, so unlike the CRL sync its cost grows with the
+number of certificates ever issued, and on the structured backends it is a full
+row fetch. That is what the five-minute default is buying back. Lengthening the
+interval trades cost against the window; there is no switch to turn it off, for
+the same reason the CRL sync has none — a deployment cannot opt out of `/ocsp`
+answering, so it should not be able to opt out of answering correctly.
+
 Watch `puppetca_ocsp_index_serials` across replicas to confirm they agree, and
-`puppetca_ocsp_index_sync_failures_total` for a replica that cannot catch up.
-- **A renewal that coincides with a storage read failure.** That re-read is
-  best-effort: if it fails, the check falls back to the CRL already in memory
-  rather than refusing every renewal in the fleet over a transient backend
-  error. Such a renewal is bounded by the ordinary propagation window instead of
-  by the read-through check. `puppetca_crl_sync_failures_total` is what tells
-  you it happened.
-
-The read is one small blob, takes no cluster lock, and writes nothing, so it
-costs the same on every backend and needs no leader. Lengthening the interval
-trades that cost against the window; there is no switch to turn it off, and
-`disable_crl_refresh` does not — that setting governs whether this deployment
-*re-signs* the CRL on a timer, which is a separate question from whether
-revocations reach it.
-
-`filesystem` and `sqlite` are single-node, so the sync has nothing to find and
-the setting does not matter there.
-
-To confirm propagation, compare `puppetca_crl_cached_number` (per replica)
-against `puppetca_crl_number` (from storage) — see
-[metrics](metrics.md#watching-revocation-propagate).
-
-Restarting a replica also reloads its CRL. The sync installs only a CRL this CA
-signed, picking out the newest such block wherever it sits in the stored chain —
-the same selection the startup loader and the re-sign paths make. A stored chain
-carrying nothing of ours leaves the replica on the CRL it already holds and
-raises `puppetca_crl_sync_failures_total`; startup warns about the same
-condition and the re-sign paths refuse it outright. See
-[storage backends](storage-backends.md) for how that state is reached and
-repaired.
+`puppetca_ocsp_index_sync_failures_total` for a replica that cannot catch up. A
+replica reading *above* its peers is not a fault: a pass that overlaps a local
+issuance defers its removals to the next one, so a busy replica can hold pruned
+serials a little longer.
 
 ## Autosigning
 
