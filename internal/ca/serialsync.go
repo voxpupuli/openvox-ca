@@ -68,8 +68,8 @@ func (d SerialIndexDelta) Changed() bool { return d.Added > 0 || d.Removed > 0 }
 // caller drives with arbitrary serials. That trades a read per interval for a
 // full inventory scan per made-up serial.
 //
-// c.mu is not held across the storage read. The reconciliation that follows
-// takes it, so an issuance can land between the two; the epoch counter is how
+// c.mu is not held across the storage read. reconcileSerialIndexLocked takes it
+// afterwards, so an issuance can land between the two; the epoch counter is how
 // this pass tells. Additions from the read always apply — a serial in the
 // inventory was issued by someone — but the removal half is skipped when the
 // count moved, because this pass cannot distinguish "pruned elsewhere" from
@@ -91,8 +91,28 @@ func (c *CA) SyncSerialIndex(ctx context.Context) (SerialIndexDelta, error) {
 	}
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	delta := c.reconcileSerialIndexLocked(stored, epoch)
+	c.mu.Unlock()
 
+	if delta.Changed() {
+		slog.Info("Refreshed the OCSP serial index from the inventory",
+			"added", delta.Added, "removed", delta.Removed, "serials", delta.Total)
+	}
+	return delta, nil
+}
+
+// reconcileSerialIndexLocked applies an inventory read to the index, where
+// readEpoch is the mutation count sampled before that read was taken.
+//
+// Split from SyncSerialIndex so the epoch guard can be asserted rather than
+// raced: the interleaving it protects against lasts microseconds and is
+// re-corrected by the following pass, so a spec built on two goroutines passes
+// whether or not the guard is there — measured, not assumed; see
+// serialindexepoch_test.go. Given the read and the epoch it belongs to, the
+// same decision is a proposition a spec can simply state.
+//
+// c.mu must be held by the caller.
+func (c *CA) reconcileSerialIndexLocked(stored map[string]string, readEpoch uint64) SerialIndexDelta {
 	var delta SerialIndexDelta
 	for serial, subject := range stored {
 		if _, known := c.serialIndex[serial]; !known {
@@ -109,7 +129,7 @@ func (c *CA) SyncSerialIndex(ctx context.Context) (SerialIndexDelta, error) {
 	// is load-bearing rather than incidental — were unknowns cached, every
 	// serial added here would need evicting or the responder would keep serving
 	// the pre-index answer for up to OCSPValidity.
-	if c.serialIndexEpoch == epoch {
+	if c.serialIndexEpoch == readEpoch {
 		for serial := range c.serialIndex {
 			if _, present := stored[serial]; !present {
 				delta.Removed++
@@ -124,9 +144,5 @@ func (c *CA) SyncSerialIndex(ctx context.Context) (SerialIndexDelta, error) {
 	}
 
 	delta.Total = len(c.serialIndex)
-	if delta.Changed() {
-		slog.Info("Refreshed the OCSP serial index from the inventory",
-			"added", delta.Added, "removed", delta.Removed, "serials", delta.Total)
-	}
-	return delta, nil
+	return delta
 }

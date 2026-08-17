@@ -170,13 +170,16 @@ var _ = Describe("SyncSerialIndex", func() {
 			"a cached good must not outlive the index entry it was derived from")
 	})
 
-	// The read happens outside c.mu so it cannot block the auth path, which
-	// means an issuance can land between the read and the reconciliation. A
-	// pass that simply installed what it read would drop that serial, and this
-	// replica would then answer unknown about a certificate it signed itself —
-	// strictly worse than the bug being fixed. The epoch counter is what makes
-	// the removal half stand down when that happens.
-	It("never drops a serial this process issued while a pass was in flight", func() {
+	// The read happens outside c.mu so it cannot block the auth path, which means
+	// a pass and an issuance genuinely do run concurrently. This is the
+	// concurrency-safety half of that — no torn map, no lost update once the
+	// passes have settled, and under -race no unsynchronised access.
+	//
+	// It is deliberately NOT the epoch guard's spec, though it looks like one.
+	// The interleaving that guard exists for is corrected by the following pass,
+	// so this assertion holds with the guard removed; serialindexepoch_test.go
+	// states the guard directly instead, and says why there.
+	It("keeps its index consistent while passes and issuances overlap", func() {
 		const signings = 25
 
 		ctx, stop := context.WithCancel(context.Background())
@@ -197,9 +200,14 @@ var _ = Describe("SyncSerialIndex", func() {
 		stop()
 		syncs.Wait()
 
+		// One settling pass, for the same reason the job runs on a timer: the
+		// assertion is that the index converges, not that it is never mid-flight.
+		_, err := replica.SyncSerialIndex(context.Background())
+		Expect(err).NotTo(HaveOccurred())
+
 		for i, cert := range certs {
 			Expect(ocspStatusFor(replica, cert)).To(Equal(xocsp.Good),
-				"racer-%02d was signed by this process and must stay in its own index", i)
+				"racer-%02d must be in the index once the passes have settled", i)
 		}
 	})
 
