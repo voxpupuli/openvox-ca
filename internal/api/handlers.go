@@ -363,6 +363,10 @@ func (s *Server) handlePutStatusBySerial(w http.ResponseWriter, r *http.Request)
 	// caller. So this is tidiness rather than containment — and containment is
 	// not needed, because slog's Text and JSON handlers are the only two this
 	// project installs and both escape, so a newline cannot forge an entry.
+	// That escaping is pinned by cmd/openvox-ca/main_test.go ("control
+	// characters in logged data cannot forge a second entry") and is what the
+	// CodeQL go/log-injection exclusion in .github/codeql/codeql-config.yml
+	// rests on; AGENTS.md carries the convention that keeps it true.
 	//
 	// RevokeSerial normalises again. It has no non-HTTP caller today; keeping it
 	// is forward defence for an exported entry point, and it is what produces the

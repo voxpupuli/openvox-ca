@@ -25,29 +25,44 @@ linters:
   settings:
     depguard:
       rules:
-        # SECURITY: this rule is what makes the CodeQL go/log-injection
-        # exclusion in .github/codeql/codeql-config.yml sound. That query flags
-        # every untrusted value reaching a log call, because it models sinks
-        # rather than handlers and so cannot see that log/slog's TextHandler
-        # and JSONHandler escape control characters in the message, the
-        # attribute key, the attribute value, group attributes and slice
-        # elements alike. Escaping is why a newline in a certname cannot forge
-        # a second log entry here, and it is a property of the *logger*, not of
-        # the call sites -- so it survives only while slog is the only logger.
+        # SECURITY: this rule is one of the two guards behind the CodeQL
+        # go/log-injection exclusion in .github/codeql/codeql-config.yml. That
+        # query flags every untrusted value reaching a log call, because it
+        # models sinks rather than handlers and so cannot see that log/slog's
+        # TextHandler and JSONHandler escape control characters in the message,
+        # the attribute key, the attribute value, group attributes and slice
+        # elements alike. Escaping is why a newline in a certname cannot forge a
+        # second log entry here, and it is a property of the *logger*, not of
+        # the call sites. cmd/openvox-ca/main_test.go pins that slog escapes;
+        # this rule is about what else might end up doing the logging.
         #
-        # The loggers denied below all write attacker-supplied bytes through
-        # unescaped; adopting any of them would silently invalidate the
-        # exclusion, and 38 hand-dismissed alerts would stop meaning what they
-        # were dismissed for. cmd/openvox-ca/main_test.go pins the escaping
-        # behaviour itself; this pins that nothing else does the logging.
+        # What it enforces, precisely: no *enumerated* logging library may be
+        # imported by non-test code. It is a denylist, not an allowlist -- see
+        # the list-mode note below -- so it stops the well-known alternatives
+        # from being adopted by accident and cannot prove slog is the only
+        # logger. Two cases it structurally cannot see: an unlisted third-party
+        # logger, and an slog.Handler implemented in this tree, which needs no
+        # import beyond log/slog. AGENTS.md carries the convention in words for
+        # exactly those cases; a reviewer weighing a new logging dependency
+        # should treat that as part of this guard rather than assume lint has
+        # it covered.
+        #
+        # Each denied package has at least one commonly used output path that
+        # writes attacker-supplied bytes through unescaped -- see the individual
+        # desc lines, which are deliberately specific, because several of these
+        # libraries escape on some paths and not others.
         #
         # Scoped to non-test files: a test that logs through another library is
         # not a production log entry an operator or a log pipeline will read.
         only-slog-logs:
-          # "lax" so a longer allow prefix beats a shorter deny prefix.
-          # depguard matches package paths by prefix, so denying "log" also
-          # denies "log/slog" under the default mode -- which would reject all
-          # 258 slog imports in the tree.
+          # "lax" resolves as: allowed unless a deny prefix matches, and a
+          # longer allow prefix beats a shorter deny prefix. The allow entry
+          # below is doing only that one job -- depguard matches package paths
+          # by prefix, so denying "log" also denies "log/slog" under the default
+          # "original" mode, which would reject every log/slog import in the
+          # tree. Note the consequence: because lax permits anything unlisted,
+          # this is a denylist. "strict" would make it an allowlist but would
+          # then need every legitimate import in the module enumerated here.
           list-mode: lax
           files:
             - "!$test"
@@ -55,15 +70,29 @@ linters:
             - "log/slog"
           deny:
             - pkg: "log"
-              desc: "the standard log package does not escape; log through log/slog, whose handlers do"
+              desc: "the standard log package does not escape at all; log through log/slog, whose handlers do"
             - pkg: "github.com/sirupsen/logrus"
-              desc: "logrus does not escape control characters; log through log/slog"
+              desc: "logrus escapes in its default TextFormatter, but not with DisableQuote or on the coloured TTY path; log through log/slog"
             - pkg: "go.uber.org/zap"
               desc: "zap's console encoder does not escape control characters; log through log/slog"
             - pkg: "github.com/golang/glog"
               desc: "glog does not escape control characters; log through log/slog"
             - pkg: "k8s.io/klog"
               desc: "klog does not escape control characters; log through log/slog"
+            # Already in the module graph as an indirect dependency, so this one
+            # is adoptable today with no go.mod change: go-logr/stdr writes
+            # through the standard log package, which the "log" deny above does
+            # not catch because the import path does not start with it.
+            - pkg: "github.com/go-logr"
+              desc: "go-logr's stdr sink writes through the unescaped standard log package; log through log/slog"
+            - pkg: "github.com/rs/zerolog"
+              desc: "zerolog's ConsoleWriter does not escape control characters; log through log/slog"
+            - pkg: "github.com/hashicorp/go-hclog"
+              desc: "hclog's default text output does not escape control characters; log through log/slog"
+            - pkg: "github.com/charmbracelet/log"
+              desc: "charmbracelet/log's text output does not escape control characters; log through log/slog"
+            - pkg: "github.com/apex/log"
+              desc: "apex/log's text and cli handlers do not escape control characters; log through log/slog"
     nolintlint:
       require-explanation: true
       require-specific: true

@@ -156,21 +156,30 @@ var _ = Describe("setupLogger handler selection", func() {
 	// What makes that exclusion honest is that both handlers setupLogger can
 	// install escape control characters, so a newline in attacker-supplied data
 	// renders as the two characters \ and n rather than terminating the record.
-	// Verified against Go 1.26.6; a stdlib change that stopped escaping would
-	// invalidate the exclusion silently, which is what these specs exist to
-	// catch. The companion guard is the depguard `only-slog-logs` rule in
-	// .golangci.yml, which keeps slog the only logger in non-test code -- this
-	// pins that slog escapes, that pins that nothing else does the logging.
+	// Verified against the Go version in go.mod, which is what every workflow
+	// builds with (go-version-file: go.mod); a stdlib change that stopped
+	// escaping would invalidate the exclusion silently, which is what these
+	// specs exist to catch. The companion guard is the depguard
+	// `only-slog-logs` rule in .golangci.yml, which denies the loggers most
+	// likely to be reached for instead. That rule is a denylist, so it cannot
+	// prove slog is the only logger -- AGENTS.md carries the convention for the
+	// cases it cannot see. These specs pin the other half: that slog, which is
+	// what does the logging, escapes.
 	//
-	// The assertion is deliberately "one record renders as one line" rather
-	// than a substring match: forging a second entry is precisely what an
-	// injected newline would buy, so counting lines tests the consequence
-	// instead of the mechanism.
+	// The primary assertion is "one record renders as one line" rather than a
+	// substring match: forging a second entry is precisely what an injected
+	// newline would buy, so counting lines tests the consequence instead of the
+	// mechanism. The tail check below is secondary, and covers the different
+	// failure of dropping the bytes rather than escaping them.
 	Describe("control characters in logged data cannot forge a second entry", func() {
-		// A payload that would open a fake ERROR record if the newline reached
-		// the output raw. Shaped for the text handler; the JSON handler would
-		// need a different tail, but the newline is what matters to both.
-		const forged = "ok\nlevel=ERROR msg=\"CA key stolen\" subject=forged"
+		// A payload that would open a fake ERROR record if a terminator reached
+		// the output raw. It carries both terminators: CodeQL's own sanitiser
+		// model recognises \r as well as \n, and a lone \r still starts a fresh
+		// line for terminal and journal consumers, so escaping one and not the
+		// other would leave the invariant false with these specs green.
+		// Shaped for the text handler; the JSON handler would need a different
+		// tail, but the terminators are what matter to both.
+		const forged = "ok\r\nlevel=ERROR msg=\"CA key stolen\" subject=forged"
 
 		expectSingleRecord := func(out string) {
 			GinkgoHelper()
@@ -179,18 +188,27 @@ var _ = Describe("setupLogger handler selection", func() {
 			Expect(strings.Count(out, "\n")).To(Equal(1),
 				"one log call must render as exactly one line; a second line means the "+
 					"payload's newline reached the output unescaped:\n%s", out)
-			Expect(out).To(ContainSubstring(`\n`),
-				"the newline must survive as the escape sequence \\n; if it were dropped "+
-					"instead the entry would be safe but lossy, and that is a change worth "+
-					"noticing:\n%s", out)
+			Expect(strings.Count(out, "\r")).To(Equal(0),
+				"a bare carriage return starts a fresh line for terminal and journal "+
+					"consumers, so it must be escaped too:\n%s", out)
+			// Deliberately not asserting the escape's spelling: \n and
+
+			// are both correct escapes, and pinning one would fail a stdlib
+			// change that is still safe. What must hold is that the bytes were
+			// escaped rather than discarded, and the tail proves that.
+			Expect(out).To(ContainSubstring("level=ERROR"),
+				"the payload's tail must survive; if the terminator were dropped rather "+
+					"than escaped the entry would be safe but lossy, and that is a change "+
+					"worth noticing:\n%s", out)
 		}
 
-		DescribeTable("escapes the newline wherever attacker data lands",
+		DescribeTable("escapes the terminators wherever attacker data lands",
 			func(emit func()) {
 				By("the JSON handler, which a configured log file selects")
 				path := filepath.Join(GinkgoT().TempDir(), "ca.log")
 				f, err := setupLogger(&serverConfig{LogFile: path})
 				Expect(err).NotTo(HaveOccurred())
+				DeferCleanup(func() { _ = f.Close() })
 				Expect(slog.Default().Handler()).To(BeAssignableToTypeOf(&slog.JSONHandler{}))
 				emit()
 				Expect(f.Close()).To(Succeed())
@@ -201,7 +219,12 @@ var _ = Describe("setupLogger handler selection", func() {
 				By("the text handler, which stderr logging selects")
 				r, w, err := os.Pipe()
 				Expect(err).NotTo(HaveOccurred())
+				DeferCleanup(func() { _, _ = r.Close(), w.Close() })
 				origStderr := os.Stderr
+				// Belt and braces with the inline restore below: if anything
+				// panics or the suite is interrupted while os.Stderr points at
+				// this pipe, the run's own diagnostics would vanish into it.
+				defer func() { os.Stderr = origStderr }()
 				os.Stderr = w
 				stderrFile, err := setupLogger(&serverConfig{})
 				os.Stderr = origStderr
@@ -215,16 +238,32 @@ var _ = Describe("setupLogger handler selection", func() {
 				Expect(r.Close()).To(Succeed())
 				expectSingleRecord(string(out))
 			},
-			// The five positions attacker-influenced data can occupy. Values and
+			// The positions attacker-influenced data can occupy. Values and
 			// slices are the shapes the dismissed alerts actually flagged; the
-			// message, key and group cases are forward defence, since nothing in
-			// the tree puts untrusted data there today and this is what would
-			// notice if something started to.
+			// rest are forward defence, since nothing in the tree puts untrusted
+			// data there today and this is what would notice if something did.
+			//
+			// These are distinct as positions, but mostly not as code paths:
+			// message, plain key, plain value and group value all funnel into
+			// handleState.appendString. The two that are genuinely separate
+			// implementations are worth the lines -- a key inside a group and a
+			// group name both reach handleState.appendTwoStrings, which escapes
+			// in its own right, and under the text handler openGroup writes the
+			// group name into the key prefix entirely unescaped, leaving
+			// appendTwoStrings the only thing standing between it and the
+			// output. The []string element is the third, taking the JSON
+			// handler through encoding/json rather than appendEscapedJSONString.
 			Entry("in the message", func() { slog.Warn("boundary " + forged) }),
 			Entry("in an attribute value", func() { slog.Warn("boundary", "subject", forged) }),
 			Entry("in an attribute key", func() { slog.Warn("boundary", forged, "v") }),
-			Entry("in a group attribute", func() {
+			Entry("in a value inside a group", func() {
 				slog.Warn("boundary", slog.Group("g", "subject", forged))
+			}),
+			Entry("in a key inside a group", func() {
+				slog.Warn("boundary", slog.Group("g", forged, "v"))
+			}),
+			Entry("in a group name", func() {
+				slog.Warn("boundary", slog.Group(forged, "k", "v"))
 			}),
 			Entry("in a []string element", func() {
 				slog.Warn("boundary", "subjects", []string{forged})

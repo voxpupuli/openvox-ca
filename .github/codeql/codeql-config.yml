@@ -29,20 +29,31 @@ query-filters:
   # keep this one honest, and a reviewer should treat their removal as removing
   # this exclusion too:
   #
-  #   1. .golangci.yml, depguard rule `only-slog-logs` -- keeps log/slog the
-  #      only logger in non-test code, so no unescaped logger can be adopted.
+  #   1. .golangci.yml, depguard rule `only-slog-logs` -- denies the known
+  #      logging libraries whose text output passes control characters through,
+  #      so the common ways to adopt an unescaped logger fail lint. Read its
+  #      comment before relying on it: it is a denylist, so an unlisted library
+  #      or an slog.Handler implemented in this tree would pass. AGENTS.md
+  #      carries the convention in words for those cases.
   #   2. cmd/openvox-ca/main_test.go, "control characters in logged data cannot
   #      forge a second entry" -- pins that both handlers setupLogger installs
-  #      escape, across all five positions attacker data can occupy. Verified
-  #      against Go 1.26.6, so a stdlib regression fails CI rather than passing
-  #      quietly.
+  #      escape both terminators, across the positions attacker data can occupy,
+  #      including the separately-implemented group-key path. Verified against
+  #      the Go version in go.mod, which is what CI builds with, so a stdlib
+  #      regression fails CI rather than passing quietly.
   #
-  # What this exclusion does NOT cover: writing untrusted data to a
-  # line-oriented file that is not a log. internal/storage/storage.go's
-  # AppendInventory takes an already-rendered inventory line as an opaque
-  # string, and inventory.txt is parsed back with strings.Fields, so its
-  # defence is caller-side validation (ca.ValidateSubject) rather than escaping
-  # at the sink. CodeQL does not model that as a log sink and never reported it;
-  # it is called out here so this comment is not misread as covering it.
+  # What this exclusion does NOT cover, and what these guards do not claim:
+  #
+  #   * Line-oriented files that are not logs. internal/storage/storage.go's
+  #     AppendInventory takes an already-rendered inventory line, parsing it
+  #     only to extract the fields it stores; nothing escapes the line on the
+  #     way to disk, and inventory.txt is read back with strings.Fields. Its
+  #     defence is therefore caller-side validation (ca.ValidateSubject, which
+  #     rejects every newline form) rather than escaping at the sink. CodeQL
+  #     does not model it as a log sink and never reported it.
+  #   * Operator-facing output that is not slog. internal/storage/migrate.go's
+  #     Logf is written straight to stderr by the CLI with no escaping, so its
+  #     one call site formats the key with %q rather than %s. Anything similar
+  #     added later must do the same; lint will not catch it.
   - exclude:
       id: go/log-injection
