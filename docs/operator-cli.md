@@ -170,7 +170,8 @@ openvox-ca-ctl migrate \
 
 `setup`, `import` and `migrate` operate directly on storage. No running server is
 needed — and since they reach storage directly, they now take the same locks a
-running server takes. Run one beside a live server and it waits rather than
+running server takes, so run them as the user the server runs as rather than
+under `sudo` (see the link below for why). Run one beside a live server and it waits rather than
 racing, then fails with `another process on this host holds the CA lock`
 (`migrate` has no timeout and waits indefinitely). Stop the server first; see
 [running a second process against a live

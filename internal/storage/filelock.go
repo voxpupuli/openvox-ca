@@ -142,7 +142,7 @@ func (l *fileLocks) acquire(ctx context.Context, name string) (Unlocker, error) 
 		local.Unlock()
 		return nil, l.unwritableStore(err, "creating same-host lock directory "+l.dir)
 	}
-	//nolint:gosec // G703: as above -- filepath.Join of the configured root and a hex digest cannot leave the lock directory
+	//nolint:gosec // G703: filepath.Join of the operator-configured store root and a hex sha256 digest, which cannot contain a separator, so the path cannot leave the lock directory
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, FilePermPrivate)
 	if err != nil {
 		local.Unlock()

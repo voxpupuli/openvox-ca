@@ -78,6 +78,16 @@ What that changes for you:
   holding process dies, however it dies. There is no stale lock to remove and no
   lock file that needs deleting — see the note on `locks/` under
   [the filesystem backend](#filesystem-backend-default).
+- **Run `openvox-ca-ctl` as the user the server runs as**, not under `sudo`.
+  The lock files are `0600` and the directory `0750`, so a command run as root
+  leaves a root-owned lock file in a store the service account owns, and the
+  server's next acquisition of that name fails — deliberately and loudly, with
+  an error naming the file, its owner and `chown -R`, because the alternative is
+  it quietly giving up on locking while the root process believes it holds an
+  exclusive one. Under systemd that means `sudo -u puppet-ca openvox-ca-ctl …`
+  (or `runuser -u puppet-ca --`), matching the `User=` in the unit. It applies
+  even to commands that only read, such as `migrate` from a live source, since
+  taking the lock is what creates the file.
 - **Absolute paths matter.** Two processes exclude each other only if they
   resolve the same lock directory, so `cadir` and `sql_dsn` should be absolute.
   A relative path used from two different working directories, or one store
