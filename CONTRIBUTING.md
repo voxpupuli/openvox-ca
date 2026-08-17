@@ -85,6 +85,7 @@ See [`AGENTS.md`](AGENTS.md) for the details. The essentials:
 
 - **Tests use [Ginkgo](https://onsi.github.io/ginkgo/) v2 + [Gomega](https://onsi.github.io/gomega/)** — no plain `testing.T` tests (beyond the one suite bootstrap per package) and no other assertion library.
 - **Compatibility contracts must not be renamed.** openvox-ca is a drop-in for the Puppet CA, so the `/puppet-ca/v1` route prefix, the `PUPPET_CA_` / `PUPPET_CA_CTL_` environment prefixes, the `puppetca_` metric namespace, and the default `puppet-ca` / `/etc/puppet-ca` / `/var/lib/puppet-ca` paths are deliberately preserved.
+- **Non-test code logs through `log/slog`** — no other logging library, and no in-tree `slog.Handler`. slog's handlers escape control characters, which is what the CodeQL `go/log-injection` exclusion depends on; the lint rule that backs this is a denylist, so it will not stop you reaching for an unlisted one.
 - **Route test artifacts to `.test-output/`** (gitignored).
 - **British English** in prose (docs, comments, commit messages, PR text); code identifiers follow the surrounding codebase.
 

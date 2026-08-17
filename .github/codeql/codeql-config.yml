@@ -49,11 +49,21 @@ query-filters:
   #     only to extract the fields it stores; nothing escapes the line on the
   #     way to disk, and inventory.txt is read back with strings.Fields. Its
   #     defence is therefore caller-side validation (ca.ValidateSubject, which
-  #     rejects every newline form) rather than escaping at the sink. CodeQL
-  #     does not model it as a log sink and never reported it.
-  #   * Operator-facing output that is not slog. internal/storage/migrate.go's
-  #     Logf is written straight to stderr by the CLI with no escaping, so its
-  #     one call site formats the key with %q rather than %s. Anything similar
-  #     added later must do the same; lint will not catch it.
+  #     rejects every newline form) rather than escaping at the sink -- and
+  #     that covers the CA's own appends only. A migrated inventory does not
+  #     come through AppendInventory at all: Migrate copies the whole blob
+  #     verbatim as a singleton (migrate.go's migratableSingletons), so it
+  #     inherits whatever validation the source CA applied, not this one's.
+  #     CodeQL does not model any of this as a log sink and never reported it.
+  #   * Operator-facing output that is not slog, carrying values that never
+  #     passed ValidateSubject. internal/storage/migrate.go's Logf is written
+  #     straight to stderr by the CLI with no escaping, and its key comes from
+  #     source directory names, so that call site formats with %q rather than
+  #     %s. cmd/openvox-ca-ctl's status table and sign/clean summaries print
+  #     names with %s and are deliberately left alone: they render names the
+  #     server returns, and quoting them would wreck the column alignment that
+  #     is the point of a table. That is a judgement that the operator's own
+  #     terminal is not a log pipeline, not an oversight -- revisit it if those
+  #     names ever reach something that parses them. Lint catches none of this.
   - exclude:
       id: go/log-injection

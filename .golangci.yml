@@ -79,10 +79,11 @@ linters:
               desc: "glog does not escape control characters; log through log/slog"
             - pkg: "k8s.io/klog"
               desc: "klog does not escape control characters; log through log/slog"
-            # Already in the module graph as an indirect dependency, so this one
-            # is adoptable today with no go.mod change: go-logr/stdr writes
-            # through the standard log package, which the "log" deny above does
-            # not catch because the import path does not start with it.
+            # Listed separately because the "log" deny above does not catch it:
+            # depguard matches by prefix, and "github.com/go-logr/stdr" does not
+            # start with "log" -- yet stdr writes through that very package.
+            # (go-logr, logrus and zap are all already indirect dependencies, so
+            # none of the three needs a new module to reach for.)
             - pkg: "github.com/go-logr"
               desc: "go-logr's stdr sink writes through the unescaped standard log package; log through log/slog"
             - pkg: "github.com/rs/zerolog"

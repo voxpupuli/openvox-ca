@@ -20,6 +20,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"io"
 	"log/slog"
 	"os"
@@ -177,11 +178,19 @@ var _ = Describe("setupLogger handler selection", func() {
 		// model recognises \r as well as \n, and a lone \r still starts a fresh
 		// line for terminal and journal consumers, so escaping one and not the
 		// other would leave the invariant false with these specs green.
-		// Shaped for the text handler; the JSON handler would need a different
-		// tail, but the terminators are what matter to both.
+		// The forged record body is shaped for the text handler, but what is
+		// asserted -- one line out, no bare terminator -- holds for both.
 		const forged = "ok\r\nlevel=ERROR msg=\"CA key stolen\" subject=forged"
 
-		expectSingleRecord := func(out string) {
+		// The substring that proves the payload's tail survived the escaping
+		// rather than being truncated at the terminator. Both handlers keep it
+		// verbatim for every position except a []byte under the JSON handler,
+		// which base64-encodes the value -- still lossless, just spelled
+		// differently, which is why the table carries the JSON tail per entry.
+		const textTail = "level=ERROR"
+		jsonTailForBytes := base64.StdEncoding.EncodeToString([]byte(forged))
+
+		expectSingleRecord := func(out, tail string) {
 			GinkgoHelper()
 			Expect(out).NotTo(BeEmpty(), "the record must actually have been written")
 			Expect(out).To(HaveSuffix("\n"), "a record is terminated by a newline")
@@ -191,19 +200,20 @@ var _ = Describe("setupLogger handler selection", func() {
 			Expect(strings.Count(out, "\r")).To(Equal(0),
 				"a bare carriage return starts a fresh line for terminal and journal "+
 					"consumers, so it must be escaped too:\n%s", out)
-			// Deliberately not asserting the escape's spelling: \n and
-
-			// are both correct escapes, and pinning one would fail a stdlib
-			// change that is still safe. What must hold is that the bytes were
-			// escaped rather than discarded, and the tail proves that.
-			Expect(out).To(ContainSubstring("level=ERROR"),
+			// Deliberately not asserting how the escape is spelled. A handler may
+			// render a control character as a short two-character escape or as a
+			// six-character Unicode one, and both are correct; pinning either
+			// spelling would fail a stdlib change that is still safe. What must
+			// hold is that the bytes were escaped rather than discarded, and the
+			// tail proves that.
+			Expect(out).To(ContainSubstring(tail),
 				"the payload's tail must survive; if the terminator were dropped rather "+
 					"than escaped the entry would be safe but lossy, and that is a change "+
 					"worth noticing:\n%s", out)
 		}
 
 		DescribeTable("escapes the terminators wherever attacker data lands",
-			func(emit func()) {
+			func(emit func(), jsonTail string) {
 				By("the JSON handler, which a configured log file selects")
 				path := filepath.Join(GinkgoT().TempDir(), "ca.log")
 				f, err := setupLogger(&serverConfig{LogFile: path})
@@ -214,7 +224,7 @@ var _ = Describe("setupLogger handler selection", func() {
 				Expect(f.Close()).To(Succeed())
 				data, err := os.ReadFile(path)
 				Expect(err).NotTo(HaveOccurred())
-				expectSingleRecord(string(data))
+				expectSingleRecord(string(data), jsonTail)
 
 				By("the text handler, which stderr logging selects")
 				r, w, err := os.Pipe()
@@ -236,7 +246,7 @@ var _ = Describe("setupLogger handler selection", func() {
 				out, err := io.ReadAll(r)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(r.Close()).To(Succeed())
-				expectSingleRecord(string(out))
+				expectSingleRecord(string(out), textTail)
 			},
 			// The positions attacker-influenced data can occupy. Values and
 			// slices are the shapes the dismissed alerts actually flagged; the
@@ -245,29 +255,41 @@ var _ = Describe("setupLogger handler selection", func() {
 			//
 			// These are distinct as positions, but mostly not as code paths:
 			// message, plain key, plain value and group value all funnel into
-			// handleState.appendString. The two that are genuinely separate
-			// implementations are worth the lines -- a key inside a group and a
-			// group name both reach handleState.appendTwoStrings, which escapes
-			// in its own right, and under the text handler openGroup writes the
-			// group name into the key prefix entirely unescaped, leaving
-			// appendTwoStrings the only thing standing between it and the
-			// output. The []string element is the third, taking the JSON
-			// handler through encoding/json rather than appendEscapedJSONString.
-			Entry("in the message", func() { slog.Warn("boundary " + forged) }),
-			Entry("in an attribute value", func() { slog.Warn("boundary", "subject", forged) }),
-			Entry("in an attribute key", func() { slog.Warn("boundary", forged, "v") }),
+			// handleState.appendString. Three reach a separately-written
+			// escaper, and those are the ones earning their lines:
+			//
+			//   - a key inside a group, and a group name, both reach
+			//     handleState.appendTwoStrings *under the text handler only* --
+			//     JSON never populates the key prefix, so there they collapse
+			//     back into appendString with the rest. The group name is the
+			//     sharper of the two: text-mode openGroup writes it into the
+			//     key prefix entirely unescaped, leaving appendTwoStrings the
+			//     only thing standing between it and the output.
+			//   - a []string element takes the JSON handler through
+			//     encoding/json rather than appendEscapedJSONString.
+			//   - a []byte value takes the text handler through strconv.Quote
+			//     directly, bypassing appendString and needsQuoting, and the
+			//     JSON handler through base64. Nothing logs a []byte today;
+			//     it is here because this is a CA and DER is a plausible thing
+			//     for someone to reach for.
+			Entry("in the message", func() { slog.Warn("boundary " + forged) }, textTail),
+			Entry("in an attribute value", func() { slog.Warn("boundary", "subject", forged) }, textTail),
+			Entry("in an attribute key", func() { slog.Warn("boundary", forged, "v") }, textTail),
 			Entry("in a value inside a group", func() {
 				slog.Warn("boundary", slog.Group("g", "subject", forged))
-			}),
+			}, textTail),
 			Entry("in a key inside a group", func() {
 				slog.Warn("boundary", slog.Group("g", forged, "v"))
-			}),
+			}, textTail),
 			Entry("in a group name", func() {
 				slog.Warn("boundary", slog.Group(forged, "k", "v"))
-			}),
+			}, textTail),
 			Entry("in a []string element", func() {
 				slog.Warn("boundary", "subjects", []string{forged})
-			}),
+			}, textTail),
+			Entry("in a []byte value", func() {
+				slog.Warn("boundary", "der", []byte(forged))
+			}, jsonTailForBytes),
 		)
 	})
 
