@@ -331,10 +331,11 @@ The read takes no cluster lock and does not re-sign anything, but it is not
 free: it is the whole inventory, so unlike the CRL sync its cost grows with the
 number of certificates ever issued — one blob read on `filesystem` and `redis`,
 one full row fetch on `sqlite`, `postgres`, `mysql` and `etcd`, plus the small
-integrity value in both cases. That is what the five-minute default is buying back. Lengthening the
-interval trades cost against the window; there is no switch to turn it off, for
-the same reason the CRL sync has none — a deployment cannot opt out of `/ocsp`
-answering, so it should not be able to opt out of answering correctly.
+integrity value in both cases. That is what the five-minute default is buying
+back. Lengthening the interval trades cost against the window; there is no
+switch to turn it off, for the same reason the CRL sync has none — a deployment
+cannot opt out of `/ocsp` answering, so it should not be able to opt out of
+answering correctly.
 
 Watch `puppetca_ocsp_index_serials` across replicas to confirm they agree, and
 `puppetca_ocsp_index_sync_failures_total` for a replica that cannot catch up. A
