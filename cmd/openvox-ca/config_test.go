@@ -224,11 +224,6 @@ var _ = Describe("crlRefreshInterval", func() {
 	})
 })
 
-// crl_sync_interval_sec bounds how long a certificate revoked on another
-// replica keeps working here, so its resolution is worth pinning end to end
-// rather than only from a struct literal: a typo in the env key, or a guard
-// that let a non-positive value through to time.NewTicker, would both be
-// invisible to a test that sets the field directly.
 // The OCSP index sync interval bounds how long a certificate signed on another
 // replica is reported `unknown` here, so its resolution is worth pinning end to
 // end for the same reason crlSyncInterval's is: a typo in the env key, or a
@@ -279,6 +274,11 @@ var _ = Describe("ocspIndexSyncInterval", func() {
 	})
 })
 
+// crl_sync_interval_sec bounds how long a certificate revoked on another
+// replica keeps working here, so its resolution is worth pinning end to end
+// rather than only from a struct literal: a typo in the env key, or a guard
+// that let a non-positive value through to time.NewTicker, would both be
+// invisible to a test that sets the field directly.
 var _ = Describe("crlSyncInterval", func() {
 	It("returns the default when unset", func() {
 		clearServerEnv()

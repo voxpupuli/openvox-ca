@@ -150,6 +150,66 @@ var _ = Describe("SQLiteInventoryRenderByteIdentical", func() {
 // kind of out-of-band edit to the inventory table: modification, insertion, and
 // deletion of a row. Each mutates rows directly via the backend's db handle,
 // bypassing AppendEntry so the stored head is not advanced.
+// InventoryEntries verifies from the rows it has just fetched rather than
+// recomputing from a second read, so its integrity guarantee has to be asserted
+// separately from ReadInventory's — a fold that drifted from
+// computeInventoryHMAC's would leave the OCSP index refresh reading from a
+// tampered inventory while every ReadInventory caller still failed closed.
+//
+// The deletion case is the one that matters most to that caller: the refresh
+// drives removals, so a row deleted out of band would otherwise take a serial
+// out of the index and downgrade the responder's answer for it from revoked to
+// unknown.
+var _ = Describe("SQLiteInventoryEntriesIntegrity", func() {
+	ctx := context.Background()
+
+	It("returns the entries when the chain verifies", func() {
+		svc, _ := newInventoryService()
+		entries, err := svc.InventoryEntries(ctx)
+		Expect(err).NotTo(HaveOccurred(), "InventoryEntries")
+		Expect(entries).To(HaveLen(len(sampleInventoryLines)),
+			"every appended entry must come back, or the tamper assertions below are vacuous")
+	})
+
+	It("refuses a modified row", func() {
+		svc, b := newInventoryService()
+		_, err := b.db.NewUpdate().
+			Model((*sqlInventoryRow)(nil)).
+			Set("serial = ?", "DEAD").
+			Where("subject = ?", "node2").
+			Exec(ctx)
+		Expect(err).NotTo(HaveOccurred(), "tamper update")
+		_, err = svc.InventoryEntries(ctx)
+		Expect(err).To(MatchError(ErrInventoryTampered), "InventoryEntries")
+	})
+
+	It("refuses an inserted row", func() {
+		svc, b := newInventoryService()
+		_, err := b.db.NewInsert().
+			Model(&sqlInventoryRow{
+				Serial:    "9999",
+				Subject:   "rogue",
+				NotBefore: "2024-06-01T00:00:00UTC",
+				NotAfter:  "2029-06-01T00:00:00UTC",
+			}).
+			Exec(ctx)
+		Expect(err).NotTo(HaveOccurred(), "tamper insert")
+		_, err = svc.InventoryEntries(ctx)
+		Expect(err).To(MatchError(ErrInventoryTampered), "InventoryEntries")
+	})
+
+	It("refuses a deleted row", func() {
+		svc, b := newInventoryService()
+		_, err := b.db.NewDelete().
+			Model((*sqlInventoryRow)(nil)).
+			Where("subject = ?", "node2").
+			Exec(ctx)
+		Expect(err).NotTo(HaveOccurred(), "tamper delete")
+		_, err = svc.InventoryEntries(ctx)
+		Expect(err).To(MatchError(ErrInventoryTampered), "InventoryEntries")
+	})
+})
+
 var _ = Describe("SQLiteInventoryChainTamperDetection", func() {
 	ctx := context.Background()
 

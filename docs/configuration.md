@@ -329,8 +329,9 @@ What that window does and does not mean:
 
 The read takes no cluster lock and does not re-sign anything, but it is not
 free: it is the whole inventory, so unlike the CRL sync its cost grows with the
-number of certificates ever issued, and on the structured backends it is a full
-row fetch. That is what the five-minute default is buying back. Lengthening the
+number of certificates ever issued — one blob read on `filesystem` and `redis`,
+one full row fetch on `sqlite`, `postgres`, `mysql` and `etcd`, plus the small
+integrity value in both cases. That is what the five-minute default is buying back. Lengthening the
 interval trades cost against the window; there is no switch to turn it off, for
 the same reason the CRL sync has none — a deployment cannot opt out of `/ocsp`
 answering, so it should not be able to opt out of answering correctly.

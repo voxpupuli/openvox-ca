@@ -251,7 +251,8 @@ func (c *serverConfig) crlSyncInterval() time.Duration {
 // not fail-open, verifiers commonly soft-fail on it, and a newly signed
 // certificate is not usually OCSP-checked by a peer in its first minutes; five
 // minutes bounds it well inside the four-hour life of any response and costs a
-// twelfth of what the CRL cadence would.
+// fifth of what the CRL cadence would — twelve passes an hour rather than
+// sixty.
 const defaultOCSPIndexSyncInterval = 5 * time.Minute
 
 // ocspIndexSyncInterval resolves how often the background job reloads the OCSP

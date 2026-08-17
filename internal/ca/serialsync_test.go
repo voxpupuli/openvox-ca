@@ -174,6 +174,44 @@ var _ = Describe("SyncSerialIndex", func() {
 		Expect(parsed.NextUpdate).To(BeTemporally("~", time.Now().Add(ca.OCSPValidity), time.Minute))
 	})
 
+	// The nonce half of the same condition. RFC 8954 §3: a nonced response
+	// answers one request and no other, so it must not be stored either — and
+	// the failure mode if it were is the same one the unknown case closes, a
+	// shared proxy replaying a response to somebody who did not ask for it.
+	It("gives a nonced response no reuse window either", func() {
+		cert := signedCert(signer, "nonced.example.com")
+		_, err := replica.SyncSerialIndex(context.Background())
+		Expect(err).NotTo(HaveOccurred())
+
+		nonced, err := testutil.BuildOCSPRequestWithNonce(cert, replica.CACert, []byte("0123456789abcdef"))
+		Expect(err).NotTo(HaveOccurred())
+
+		answer, err := replica.AnswerOCSP(context.Background(), nonced)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(statusOf(replica, answer.DER)).To(Equal(xocsp.Good),
+			"precondition: a nonced request about a known serial is still answered")
+		Expect(answer.MaxAge).To(BeZero(), "a nonced response must not be storable")
+	})
+
+	// The cached path returns what is left of the entry's window, not a fresh
+	// one. Handing out OCSPValidity again on every hit would let a downstream
+	// cache keep a response for up to twice its own NextUpdate.
+	It("counts the reuse window down as a cached answer ages", func() {
+		cert := signedCert(signer, "counts-down.example.com")
+		_, err := replica.SyncSerialIndex(context.Background())
+		Expect(err).NotTo(HaveOccurred())
+
+		first, err := replica.AnswerOCSP(context.Background(), ocspRequestFor(replica, cert))
+		Expect(err).NotTo(HaveOccurred())
+		second, err := replica.AnswerOCSP(context.Background(), ocspRequestFor(replica, cert))
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(second.DER).To(Equal(first.DER), "precondition: the second answer came from the cache")
+		Expect(second.MaxAge).To(BeNumerically(">", 0))
+		Expect(second.MaxAge).To(BeNumerically("<", first.MaxAge),
+			"a cached answer must offer only the window it has left")
+	})
+
 	It("is idempotent: a second pass over an unchanged inventory changes nothing", func() {
 		signedCert(signer, "idempotent.example.com")
 
@@ -258,6 +296,33 @@ var _ = Describe("SyncSerialIndex", func() {
 			Expect(ocspStatusFor(replica, cert)).To(Equal(xocsp.Good),
 				"racer-%02d must be in the index once the passes have settled", i)
 		}
+	})
+
+	// The integrity check is the reason the sync reads through InventoryEntries
+	// rather than trusting the rows. A forged inventory row would otherwise be
+	// indexed, and the responder would then speak about — and vouch for — a
+	// serial this CA never issued.
+	It("refuses a tampered inventory rather than indexing from it", func() {
+		cert := signedCert(signer, "genuine.example.com")
+		_, err := replica.SyncSerialIndex(context.Background())
+		Expect(err).NotTo(HaveOccurred())
+		before := replica.SerialIndexSize()
+
+		// Append a row for a serial this CA never issued, straight to the blob,
+		// leaving the stored MAC describing the inventory as it was.
+		forged := "0BADC0DE 2024-06-01T00:00:00UTC 2029-06-01T00:00:00UTC /forged.example.com\n"
+		data, err := os.ReadFile(replica.Storage.InventoryPath())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(os.WriteFile(replica.Storage.InventoryPath(), append(data, []byte(forged)...), 0o600)).To(Succeed())
+
+		_, err = replica.SyncSerialIndex(context.Background())
+		Expect(err).To(MatchError(storage.ErrInventoryTampered))
+		Expect(replica.SerialIndexSyncFailures()).To(BeNumerically(">=", 1))
+		Expect(replica.SerialIndexSize()).To(Equal(before),
+			"a tampered inventory must not reach the index at all")
+
+		// And the responder still answers only for what it legitimately knows.
+		Expect(ocspStatusFor(replica, cert)).To(Equal(xocsp.Good))
 	})
 
 	It("counts an unreadable inventory rather than emptying the index", func() {

@@ -95,6 +95,34 @@ var _ = Describe("serial index epoch guard", func() {
 		Expect(c.serialIndex).To(HaveKey("CC"))
 	})
 
+	// The guard's other half, and the reason a pass counts its own additions as
+	// a mutation. Two passes overlapping sample the same epoch; without the
+	// bump, the one whose read is older would see an unmoved counter, believe
+	// nothing had happened, and delete what the newer pass had just added —
+	// dropping a live serial by a different route than an issuance would.
+	//
+	// Stated as two reconciliations sharing one stale readEpoch, because that
+	// is precisely what two overlapping passes are.
+	It("makes a pass that added something look like a mutation to a stale pass", func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+
+		readEpoch := c.serialIndexEpoch
+
+		// The newer pass: its read found a serial this process did not hold.
+		first := c.reconcileSerialIndexLocked(
+			map[string]string{"CC": "peer-signed.example.com"}, readEpoch)
+		Expect(first.Added).To(Equal(1))
+
+		// The older pass, whose read predates that serial existing, finishing
+		// second and still holding the epoch it sampled before either ran.
+		second := c.reconcileSerialIndexLocked(map[string]string{"AA": "already-known.example.com"}, readEpoch)
+
+		Expect(second.Removed).To(BeZero(),
+			"the addition must have moved the epoch, standing the stale pass's removals down")
+		Expect(c.serialIndex).To(HaveKey("CC"), "the serial the newer pass added")
+	})
+
 	// A pruned serial's pre-signed response must go with its index entry, or a
 	// good signed while the certificate was still known outlives the index that
 	// justified it — the same coupling CleanupExpiredCerts maintains on the
