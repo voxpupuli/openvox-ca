@@ -113,6 +113,9 @@ func (c *CA) SyncSerialIndex(ctx context.Context) (SerialIndexDelta, error) {
 //
 // c.mu must be held by the caller.
 func (c *CA) reconcileSerialIndexLocked(stored map[string]string, readEpoch uint64) SerialIndexDelta {
+	// Decided before the additions below, which move the epoch themselves.
+	raced := c.serialIndexEpoch != readEpoch
+
 	var delta SerialIndexDelta
 	for serial, subject := range stored {
 		if _, known := c.serialIndex[serial]; !known {
@@ -129,16 +132,26 @@ func (c *CA) reconcileSerialIndexLocked(stored map[string]string, readEpoch uint
 	// is load-bearing rather than incidental — were unknowns cached, every
 	// serial added here would need evicting or the responder would keep serving
 	// the pre-index answer for up to OCSPValidity.
-	if c.serialIndexEpoch == readEpoch {
+	// A pass that added something counts as a mutation for the *next* pass, even
+	// though it is not an issuance. Without this two overlapping passes sample
+	// the same epoch, and the one whose read is older can delete what the newer
+	// one just added — dropping a live serial, which is the failure the guard
+	// exists to prevent, reached by a different route. Only one goroutine runs
+	// this today; SyncSerialIndex is exported, and the next caller should not
+	// have to discover that.
+	if delta.Added > 0 {
+		c.serialIndexEpoch++
+	}
+
+	if !raced {
 		for serial := range c.serialIndex {
 			if _, present := stored[serial]; !present {
 				delta.Removed++
-				// The cached response goes with it. A `good` signed before
-				// another replica pruned the certificate would otherwise
-				// outlive the index entry it was derived from, mirroring what
-				// CleanupExpiredCerts does on the replica that prunes.
-				delete(c.serialIndex, serial)
-				delete(c.ocspCache, serial)
+				// The cached response goes with it, via the same helper the
+				// prune path uses. A `good` signed before another replica
+				// pruned the certificate would otherwise outlive the index
+				// entry it was derived from.
+				c.dropSerialLocked(serial)
 			}
 		}
 	}

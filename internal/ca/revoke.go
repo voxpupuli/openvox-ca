@@ -27,7 +27,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"math/big"
-	"strings"
 	"time"
 
 	"github.com/voxpupuli/openvox-ca/internal/storage"
@@ -375,18 +374,6 @@ func (c *CA) markCertRevokedIndex(ctx context.Context, serialStr string, at time
 		slog.Warn("Failed to project revocation into certificate index",
 			"serial", serialStr, "error", err)
 	}
-}
-
-// parseInventoryLine parses a single line of the certificate inventory file.
-// The format is: SERIAL NOT_BEFORE NOT_AFTER /SUBJECT
-// Returns (serial, subject, true) on success; ("", "", false) for blank or malformed lines.
-// The returned subject has its leading "/" stripped.
-func parseInventoryLine(line string) (serial, subject string, ok bool) {
-	parts := strings.Fields(line)
-	if len(parts) < 4 {
-		return "", "", false
-	}
-	return parts[0], strings.TrimPrefix(parts[3], "/"), true
 }
 
 // findSerialForSubject returns the most-recently issued serial for subject.

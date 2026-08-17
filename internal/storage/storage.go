@@ -459,6 +459,34 @@ func (s *StorageService) ReadInventory(ctx context.Context) ([]byte, error) {
 // inventoryEntriesLocked returns every inventory entry in issuance order. On
 // InventoryStore backends it reads the structured rows; otherwise it parses the
 // rendered blob. Caller must hold inventoryMu (read or write).
+// InventoryEntries returns every inventory entry in issuance order.
+//
+// The structured twin of ReadInventory, for a caller that wants the entries
+// rather than the rendered blob. ReadInventory is the wrong tool on a timer:
+// it verifies and then fetches, and on an InventoryStore backend that is two
+// full materialisations of the inventory per call — Entries plus a hash chain
+// for the verify, then every row again through the render shim — where this is
+// one.
+//
+// Integrity matches SubjectForSerial's, which is the same trade for the same
+// reason: a blob backend is verified before the scan, so an altered inventory
+// surfaces ErrInventoryTampered; an InventoryStore backend is not, because its
+// head advances atomically per append rather than being recomputed over a blob,
+// and re-verifying would cost a second full fetch of every row. Callers that
+// need the stronger guarantee on every backend should keep using ReadInventory
+// and pay for it deliberately.
+func (s *StorageService) InventoryEntries(ctx context.Context) ([]InventoryEntry, error) {
+	s.inventoryMu.RLock()
+	defer s.inventoryMu.RUnlock()
+
+	if _, indexed := asInventoryStore(s.backend); !indexed && s.hmacKey != nil {
+		if err := s.verifyInventoryHMACLocked(ctx, s.hmacKey); err != nil {
+			return nil, err
+		}
+	}
+	return s.inventoryEntriesLocked(ctx)
+}
+
 func (s *StorageService) inventoryEntriesLocked(ctx context.Context) ([]InventoryEntry, error) {
 	if store, ok := asInventoryStore(s.backend); ok {
 		return store.Entries(ctx)

@@ -70,7 +70,7 @@ func (s *Server) handleOCSP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respDER, err := s.CA.OCSPResponse(r.Context(), reqDER)
+	answer, err := s.CA.AnswerOCSP(r.Context(), reqDER)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/ocsp-response")
 		if errors.Is(err, ca.ErrInternal) {
@@ -87,14 +87,26 @@ func (s *Server) handleOCSP(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/ocsp-response")
 	if r.Method == http.MethodGet {
-		// Clamp the validity window to a non-negative value bounded by
-		// int32: HTTP cache directives are practically restricted to
-		// ~68 years (RFC 7234 §1.2.1), and bare int(float) is both
-		// platform-dependent on 32-bit targets and silently wraps for
-		// negative inputs.
-		secs := ca.OCSPValidity.Seconds()
-		secs = math.Max(0, math.Min(math.MaxInt32, secs))
-		w.Header().Set("Cache-Control", fmt.Sprintf("max-age=%d, public", int64(secs)))
+		// The window comes from the answer rather than from ca.OCSPValidity,
+		// because they are not always the same and the difference matters more
+		// here than anywhere else. An `unknown` means "this replica has not read
+		// that serial yet", which its index sync corrects within minutes;
+		// telling a shared proxy to store that for four hours would have it
+		// replayed to every client behind the proxy long after this CA would
+		// answer differently. The CA decides how long its answer is good for and
+		// this only transcribes it.
+		if answer.MaxAge > 0 {
+			// Clamp the validity window to a non-negative value bounded by
+			// int32: HTTP cache directives are practically restricted to
+			// ~68 years (RFC 7234 §1.2.1), and bare int(float) is both
+			// platform-dependent on 32-bit targets and silently wraps for
+			// negative inputs.
+			secs := answer.MaxAge.Seconds()
+			secs = math.Max(0, math.Min(math.MaxInt32, secs))
+			w.Header().Set("Cache-Control", fmt.Sprintf("max-age=%d, public", int64(secs)))
+		} else {
+			w.Header().Set("Cache-Control", "no-store")
+		}
 	}
-	w.Write(respDER)
+	w.Write(answer.DER)
 }

@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -38,10 +39,22 @@ import (
 // between them is factored out rather than repeated.
 func ocspStatusFor(c *ca.CA, cert *x509.Certificate) int {
 	GinkgoHelper()
+	respDER, err := c.OCSPResponse(context.Background(), ocspRequestFor(c, cert))
+	Expect(err).NotTo(HaveOccurred())
+	return statusOf(c, respDER)
+}
+
+// ocspRequestFor builds a nonce-free OCSP request about cert.
+func ocspRequestFor(c *ca.CA, cert *x509.Certificate) []byte {
+	GinkgoHelper()
 	reqDER, err := testutil.BuildOCSPRequest(cert, c.CACert)
 	Expect(err).NotTo(HaveOccurred())
-	respDER, err := c.OCSPResponse(context.Background(), reqDER)
-	Expect(err).NotTo(HaveOccurred())
+	return reqDER
+}
+
+// statusOf parses a response signed by c and returns its status.
+func statusOf(c *ca.CA, respDER []byte) int {
+	GinkgoHelper()
 	resp, err := xocsp.ParseResponse(respDER, c.CACert)
 	Expect(err).NotTo(HaveOccurred())
 	return resp.Status
@@ -128,6 +141,37 @@ var _ = Describe("SyncSerialIndex", func() {
 
 		Expect(ocspStatusFor(replica, cert)).To(Equal(xocsp.Good),
 			"an unknown must not be cached, or the index refresh is invisible until it expires")
+	})
+
+	// Not caching the unknown in ocspCache only fixes this replica's own memory.
+	// The response goes out to a verifier and through whatever proxies sit
+	// between, so an unknown stamped with the usual four hours would be replayed
+	// there long after the index caught up — the same staleness, one hop out.
+	It("gives an unknown no reuse window, and a definite answer the full one", func() {
+		cert := signedCert(signer, "reuse-window.example.com")
+
+		unknown, err := replica.AnswerOCSP(context.Background(), ocspRequestFor(replica, cert))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(statusOf(replica, unknown.DER)).To(Equal(xocsp.Unknown))
+		Expect(unknown.MaxAge).To(BeZero(), "an unknown must not be storable at all")
+
+		parsed, err := xocsp.ParseResponse(unknown.DER, replica.CACert)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(parsed.NextUpdate.IsZero()).To(BeTrue(),
+			"an unknown must carry no NextUpdate for a client to reuse it against")
+
+		_, err = replica.SyncSerialIndex(context.Background())
+		Expect(err).NotTo(HaveOccurred())
+
+		good, err := replica.AnswerOCSP(context.Background(), ocspRequestFor(replica, cert))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(statusOf(replica, good.DER)).To(Equal(xocsp.Good))
+		Expect(good.MaxAge).To(BeNumerically("~", ca.OCSPValidity, time.Minute),
+			"a definite answer keeps the full window")
+
+		parsed, err = xocsp.ParseResponse(good.DER, replica.CACert)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(parsed.NextUpdate).To(BeTemporally("~", time.Now().Add(ca.OCSPValidity), time.Minute))
 	})
 
 	It("is idempotent: a second pass over an unchanged inventory changes nothing", func() {

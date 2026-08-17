@@ -18,7 +18,6 @@
 package ca
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/x509/pkix"
@@ -37,9 +36,13 @@ import (
 // uses this to write an OCSP InternalError response instead of MalformedRequest.
 var ErrInternal = errors.New("internal CA error")
 
-// OCSPValidity is the NextUpdate window written into every OCSP response.
-// Pre-signed responses are cached for this duration; GET responses include
-// a matching Cache-Control: max-age header for downstream HTTP caches.
+// OCSPValidity is the NextUpdate window written into a definite OCSP response —
+// a good or a revoked. Those are pre-signed and cached for this duration, and a
+// GET carries a matching Cache-Control: max-age for downstream HTTP caches.
+//
+// An unknown gets neither: see AnswerOCSP for why a status that a later
+// inventory read can overturn must not be given a four-hour licence to be
+// replayed.
 const OCSPValidity = 4 * time.Hour
 
 // ocspCacheEntry holds a pre-signed OCSP response DER and its expiry.
@@ -101,35 +104,35 @@ func (c *CA) buildSerialIndex(ctx context.Context) error {
 	return nil
 }
 
-// readSerialIndex renders the stored inventory into a serial → subject map.
+// readSerialIndex reads the stored inventory into a serial → subject map.
 // Serials are normalised to uppercase hex without leading zeros (via
 // serialHexStr) so that lookups are consistent regardless of whether the
 // inventory was written by this version (random serials) or an older version
 // (zero-padded sequential serials).
 //
+// It goes through InventoryEntries rather than ReadInventory because this runs
+// on a timer. ReadInventory verifies and then fetches, which on an
+// InventoryStore backend is two full materialisations of the inventory per call
+// — and those are exactly the HA backends this sync exists for. InventoryEntries
+// is one, and carries the same integrity policy SubjectForSerial settled on.
+//
 // It touches no CA state, so it may be called without c.mu held — which
 // SyncSerialIndex does, to keep a storage round-trip off the auth path.
 func (c *CA) readSerialIndex(ctx context.Context) (map[string]string, error) {
-	data, err := c.Storage.ReadInventory(ctx)
+	entries, err := c.Storage.InventoryEntries(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	index := make(map[string]string)
-	scanner := bufio.NewScanner(bytes.NewReader(data))
-	for scanner.Scan() {
-		if serial, subject, ok := parseInventoryLine(scanner.Text()); ok {
-			n := new(big.Int)
-			if _, ok := n.SetString(serial, 16); !ok {
-				slog.Warn("readSerialIndex: skipping malformed serial in inventory",
-					"serial", serial, "subject", subject)
-				continue
-			}
-			index[serialHexStr(n)] = subject
+	index := make(map[string]string, len(entries))
+	for _, e := range entries {
+		n := new(big.Int)
+		if _, ok := n.SetString(e.Serial, 16); !ok {
+			slog.Warn("readSerialIndex: skipping malformed serial in inventory",
+				"serial", e.Serial, "subject", e.Subject)
+			continue
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
+		index[serialHexStr(n)] = e.Subject
 	}
 	return index, nil
 }
@@ -149,9 +152,24 @@ func (c *CA) indexSerialLocked(serial, subject string) {
 // indexSerialLocked; see it for why the epoch matters. c.mu must be held by the
 // caller.
 func (c *CA) unindexSerialLocked(serial string) {
+	c.dropSerialLocked(serial)
+	c.serialIndexEpoch++
+}
+
+// dropSerialLocked forgets a serial: out of the index, and out of the response
+// cache with it, because a pre-signed answer derived from an index entry must
+// not outlive it.
+//
+// Shared with the sync's removal half, which must do exactly this and must NOT
+// bump the epoch — that counter means "this process issued or pruned
+// something", and a pass reconciling with storage has done neither. Keeping the
+// pair of deletes in one place is the same argument installCachedCRLLocked
+// makes about CRL installs: the divergence between the two callers is the epoch
+// and nothing else, and a third thing to forget later should only have to be
+// added here. c.mu must be held by the caller.
+func (c *CA) dropSerialLocked(serial string) {
 	delete(c.serialIndex, serial)
 	delete(c.ocspCache, serial)
-	c.serialIndexEpoch++
 }
 
 // OCSPResponse builds a DER-encoded OCSPResponse for the given DER-encoded
@@ -159,7 +177,44 @@ func (c *CA) unindexSerialLocked(serial string) {
 //
 // Responses are cached by serial for OCSPValidity; the cache is bypassed when
 // a nonce is present in the request (RFC 8954). The caller must NOT hold c.mu.
+//
+// Callers that hand the answer to an HTTP cache want AnswerOCSP instead, which
+// carries how long it may be reused. This form is kept because most callers —
+// the specs, and anything that only wants the bytes — do not.
 func (c *CA) OCSPResponse(ctx context.Context, reqDER []byte) ([]byte, error) {
+	answer, err := c.AnswerOCSP(ctx, reqDER)
+	if err != nil {
+		return nil, err
+	}
+	return answer.DER, nil
+}
+
+// OCSPAnswer is a signed OCSP response together with how long a cache may reuse
+// it. MaxAge of zero means it must not be stored at all.
+type OCSPAnswer struct {
+	DER    []byte
+	MaxAge time.Duration
+}
+
+// AnswerOCSP builds a signed response and reports how long it may be reused.
+//
+// The reuse window is not always OCSPValidity, and the difference is the point.
+// An `unknown` is the one status this replica can be wrong about for a reason
+// that resolves on its own: the serial may simply have been signed on another
+// replica and not yet reached this one's index, which SyncSerialIndex corrects
+// within ocsp_index_sync_interval_sec. Declining to cache it in ocspCache only
+// fixes half of that — a response handed out with four hours of validity is
+// kept by the verifier and by every proxy between, so an `unknown` stamped the
+// usual way would go on being replayed long after this replica learned better,
+// which is the symptom the index refresh exists to end.
+//
+// So an unknown carries no NextUpdate (RFC 6960 §4.2.2.1: an absent nextUpdate
+// says newer information is always available) and a MaxAge of zero. A nonced
+// request gets the same MaxAge for a different reason: an RFC 8954 response
+// answers one request and must not be served to another.
+//
+// The caller must NOT hold c.mu.
+func (c *CA) AnswerOCSP(ctx context.Context, reqDER []byte) (OCSPAnswer, error) {
 	// Extract nonce before acquiring any lock (pure DER parse, no shared state).
 	nonce, hasNonce := extractNonce(reqDER)
 
@@ -174,7 +229,7 @@ func (c *CA) OCSPResponse(ctx context.Context, reqDER []byte) ([]byte, error) {
 
 	req, err := ocsp.ParseRequest(reqDER)
 	if err != nil {
-		return nil, fmt.Errorf("parsing OCSP request: %w", err)
+		return OCSPAnswer{}, fmt.Errorf("parsing OCSP request: %w", err)
 	}
 
 	// Compute the cache key in the same format used by signWithDuration/revoke:
@@ -190,7 +245,7 @@ func (c *CA) OCSPResponse(ctx context.Context, reqDER []byte) ([]byte, error) {
 		entry, ok := c.ocspCache[serialHex]
 		c.mu.RUnlock()
 		if ok && time.Now().Before(entry.expiresAt) {
-			return bytes.Clone(entry.der), nil
+			return OCSPAnswer{DER: bytes.Clone(entry.der), MaxAge: time.Until(entry.expiresAt)}, nil
 		}
 	}
 
@@ -201,7 +256,7 @@ func (c *CA) OCSPResponse(ctx context.Context, reqDER []byte) ([]byte, error) {
 	// Double-check after acquiring the write lock.
 	if !hasNonce {
 		if entry, ok := c.ocspCache[serialHex]; ok && time.Now().Before(entry.expiresAt) {
-			return bytes.Clone(entry.der), nil
+			return OCSPAnswer{DER: bytes.Clone(entry.der), MaxAge: time.Until(entry.expiresAt)}, nil
 		}
 	}
 
@@ -209,15 +264,19 @@ func (c *CA) OCSPResponse(ctx context.Context, reqDER []byte) ([]byte, error) {
 	template := ocsp.Response{
 		SerialNumber: req.SerialNumber,
 		ThisUpdate:   now,
-		NextUpdate:   now.Add(OCSPValidity),
 	}
 
 	if _, known := c.serialIndex[serialHex]; !known {
+		// NextUpdate stays zero, which x/crypto/ocsp omits from the encoding.
+		// This is the answer a later inventory read can overturn without
+		// anything happening here, so it must not carry a four-hour licence to
+		// be replayed by the verifier and every cache between.
 		template.Status = ocsp.Unknown
 	} else {
+		template.NextUpdate = now.Add(OCSPValidity)
 		revoked, revokedAt, err := c.isRevokedSerial(ctx, req.SerialNumber)
 		if err != nil {
-			return nil, fmt.Errorf("%w: %w", ErrInternal, err)
+			return OCSPAnswer{}, fmt.Errorf("%w: %w", ErrInternal, err)
 		}
 		if revoked {
 			template.Status = ocsp.Revoked
@@ -234,7 +293,7 @@ func (c *CA) OCSPResponse(ctx context.Context, reqDER []byte) ([]byte, error) {
 
 	respDER, err := ocsp.CreateResponse(c.CACert, c.CACert, template, c.CAKey)
 	if err != nil {
-		return nil, fmt.Errorf("creating OCSP response: %w", err)
+		return OCSPAnswer{}, fmt.Errorf("creating OCSP response: %w", err)
 	}
 
 	// Cache the response only when there is no nonce (RFC 8954 §3), and never
@@ -267,7 +326,14 @@ func (c *CA) OCSPResponse(ctx context.Context, reqDER []byte) ([]byte, error) {
 		}
 	}
 
-	return respDER, nil
+	// A nonced response answers one request and no other (RFC 8954 §3), and an
+	// unknown carries no NextUpdate to derive a window from; both are zero, which
+	// the HTTP layer turns into "do not store".
+	answer := OCSPAnswer{DER: respDER}
+	if !hasNonce && template.Status != ocsp.Unknown {
+		answer.MaxAge = OCSPValidity
+	}
+	return answer, nil
 }
 
 // isRevokedSerial checks the in-memory CRL cache for the given serial number.
