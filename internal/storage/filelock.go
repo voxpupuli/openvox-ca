@@ -50,13 +50,13 @@ const (
 	fileLockRetryMax     = 250 * time.Millisecond
 )
 
-// errLockingUnavailable is tryLockFile's way of saying the platform, not this
-// particular attempt, is the problem: the filesystem or kernel cannot do BSD
-// locks at all. acquire turns it into ErrSameHostLockingUnsupported so the
-// capability reports itself absent, rather than failing every WithLock caller
-// on a store nobody can lock. Not exported: no caller outside this file should
-// be distinguishing it from any other reason the tier is unavailable.
-var errLockingUnavailable = errors.New("flock(2) is not available on this filesystem")
+// tryLock is indirected through a variable so a spec can drive acquire's
+// handling of errno classes the test environment cannot produce on demand: a
+// filesystem that rejects BSD locks outright answers EOPNOTSUPP, and no
+// temporary directory available to `go test` does that. The path it guards
+// turns a graceful degradation into a total CA outage if it regresses, which is
+// worth one seam. Production always uses the platform implementation.
+var tryLock = tryLockFile
 
 // fileLocks hands out same-host locks as flock(2) holds on files in one
 // directory. A backend owns one of these; every process addressing the same
@@ -152,11 +152,11 @@ func (l *fileLocks) acquire(ctx context.Context, name string) (Unlocker, error) 
 	backoff := fileLockRetryInitial
 	waiting := false
 	for {
-		locked, lockErr := tryLockFile(f)
+		locked, lockErr := tryLock(f)
 		if lockErr != nil {
 			_ = f.Close()
 			local.Unlock()
-			if errors.Is(lockErr, errLockingUnavailable) {
+			if isLockingUnavailableError(lockErr) {
 				l.warnOnce.Do(func() {
 					slog.Warn("Same-host locking is unavailable: this filesystem does not support flock(2)",
 						"lock_dir", l.dir, "error", lockErr)

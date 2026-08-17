@@ -54,9 +54,13 @@ func tryLockFile(f *os.File) (bool, error) {
 		// A signal arrived before the lock was decided. Retrying is the whole
 		// of the recovery.
 		return false, nil
-	case isLockingUnavailableError(err):
-		return false, errLockingUnavailable
 	default:
+		// Every other errno, including the "this filesystem cannot lock at all"
+		// class, is returned raw. Classifying it is acquire's job, not this
+		// shim's: the decision is policy (degrade or fail), the errnos it turns
+		// on are platform-specific and so live below, and keeping the two apart
+		// is what lets a spec drive the policy without a filesystem that
+		// actually rejects flock(2).
 		return false, err
 	}
 }

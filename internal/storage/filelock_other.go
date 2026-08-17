@@ -46,10 +46,13 @@ func tryLockFile(_ *os.File) (bool, error) {
 	return false, errors.New("flock(2) is not available on this platform")
 }
 
-// isReadOnlyFSError is likewise unreachable — nothing here ever creates a lock
-// file — and answers false so that, if it ever became reachable, a failure
-// would be reported rather than quietly downgraded.
+// isReadOnlyFSError and isLockingUnavailableError are likewise unreachable —
+// nothing here ever creates a lock file or calls flock(2) — and answer false so
+// that, if either ever became reachable, a failure would be reported rather
+// than quietly downgraded.
 func isReadOnlyFSError(_ error) bool { return false }
+
+func isLockingUnavailableError(_ error) bool { return false }
 
 // statUID has no portable answer off Unix, so it declines rather than guessing;
 // the caller degrades its diagnostic message accordingly.

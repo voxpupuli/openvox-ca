@@ -27,6 +27,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -91,6 +92,22 @@ var _ = Describe("Same-host locking", func() {
 	})
 
 	Describe("the filesystem backend", func() {
+		It("creates the lock directory at EnsureReady, not lazily", func() {
+			// So the server owns it from first boot. Left to the lazy path it is
+			// created by whichever process first needs a lock, and on an
+			// upgraded CA — where Init takes the fast load path and takes no
+			// lock at all — that could be a `ctl` command run under sudo, which
+			// manufactures the root-owned directory acquire then has to refuse.
+			// Creating it here also turns an unwritable cadir into a startup
+			// failure rather than one that surfaces on a request weeks later.
+			dir := GinkgoT().TempDir()
+			Expect(NewFilesystemBackend(dir).EnsureReady(ctx)).To(Succeed())
+
+			info, err := os.Stat(filepath.Join(dir, fsLockDir))
+			Expect(err).NotTo(HaveOccurred(), "EnsureReady must create the lock directory")
+			Expect(info.IsDir()).To(BeTrue())
+		})
+
 		It("excludes a second holder of the same lock name", func() {
 			dir := GinkgoT().TempDir()
 			first, second := NewFilesystemBackend(dir), NewFilesystemBackend(dir)
@@ -342,6 +359,46 @@ var _ = Describe("Same-host locking", func() {
 			// path: "the lock directory <path> is owned by uid N".
 			Expect(err.Error()).NotTo(ContainSubstring("the lock directory "+locks),
 				"the directory is fine; diagnosing it would send the operator to the wrong place")
+			expectRetryable(b, "crl")
+		})
+
+		DescribeTable("reports the capability absent when the filesystem cannot lock at all",
+			// A store on a mount that rejects BSD locks, or a kernel out of lock
+			// records, is the runtime form of a platform without flock(2), and
+			// gets the same answer: warn, report absent, let WithLock fall
+			// through to the mutex. Failing hard instead would break bootstrap,
+			// signing, revocation and CRL refresh on a store that worked before
+			// this tier existed — a whole-CA outage introduced by a lock nobody
+			// asked that filesystem to take.
+			func(errno error) {
+				orig := tryLock
+				tryLock = func(*os.File) (bool, error) { return false, errno }
+				DeferCleanup(func() { tryLock = orig })
+
+				b := NewFilesystemBackend(GinkgoT().TempDir())
+				_, err := b.AcquireSameHostLock(ctx, "crl")
+				Expect(err).To(MatchError(ErrSameHostLockingUnsupported))
+
+				// And the tier being absent must not wedge the next caller.
+				expectRetryable(b, "crl")
+			},
+			Entry("ENOLCK, the kernel is out of lock records", syscall.ENOLCK),
+			Entry("EOPNOTSUPP, the filesystem rejects BSD locks", syscall.EOPNOTSUPP),
+			Entry("ENOSYS, the call is unimplemented", syscall.ENOSYS),
+		)
+
+		It("still fails hard on an flock error it cannot classify", func() {
+			// The complement: an errno that is not "this filesystem cannot
+			// lock" leaves it unknown whether another process is writing, and
+			// proceeding on that is the corruption this tier exists to prevent.
+			orig := tryLock
+			tryLock = func(*os.File) (bool, error) { return false, syscall.EIO }
+			DeferCleanup(func() { tryLock = orig })
+
+			b := NewFilesystemBackend(GinkgoT().TempDir())
+			_, err := b.AcquireSameHostLock(ctx, "crl")
+			Expect(err).To(MatchError(syscall.EIO))
+			Expect(err).NotTo(MatchError(ErrSameHostLockingUnsupported))
 			expectRetryable(b, "crl")
 		})
 
