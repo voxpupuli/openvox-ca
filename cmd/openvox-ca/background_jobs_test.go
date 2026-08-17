@@ -27,7 +27,7 @@ import (
 func jobNames(cfg *serverConfig) []string {
 	GinkgoHelper()
 	c, _ := newRefresherTestCA()
-	names := make([]string, 0, 3)
+	names := make([]string, 0, 4)
 	for _, job := range backgroundJobs(cfg, c) {
 		Expect(job.run).NotTo(BeNil(), "job %q has no runner", job.name)
 		names = append(names, job.name)
@@ -36,10 +36,10 @@ func jobNames(cfg *serverConfig) []string {
 }
 
 var _ = Describe("backgroundJobs", func() {
-	It("runs CRL refresh and CRL sync by default, and cleanup only on request", func() {
-		Expect(jobNames(&serverConfig{})).To(ConsistOf(jobCRLRefresh, jobCRLSync))
+	It("runs CRL refresh and both sync jobs by default, and cleanup only on request", func() {
+		Expect(jobNames(&serverConfig{})).To(ConsistOf(jobCRLRefresh, jobCRLSync, jobOCSPIndexSync))
 		Expect(jobNames(&serverConfig{EnableExpiredCertCleanup: true})).
-			To(ConsistOf(jobCRLRefresh, jobCRLSync, jobCertCleanup))
+			To(ConsistOf(jobCRLRefresh, jobCRLSync, jobOCSPIndexSync, jobCertCleanup))
 	})
 
 	// The promise this whole change rests on. disable_crl_refresh governs
@@ -55,8 +55,21 @@ var _ = Describe("backgroundJobs", func() {
 		Expect(names).NotTo(ContainElement(jobCRLRefresh))
 	})
 
-	It("still runs CRL sync when every other job is switched off", func() {
+	It("still runs both sync jobs when every other job is switched off", func() {
 		Expect(jobNames(&serverConfig{DisableCRLRefresh: true, EnableExpiredCertCleanup: false})).
-			To(ConsistOf(jobCRLSync))
+			To(ConsistOf(jobCRLSync, jobOCSPIndexSync))
+	})
+
+	// The OCSP index sync has no switch of its own, and specifically is not
+	// gated on ocsp_url. That setting decides whether issued certificates carry
+	// an AIA extension pointing here; the /ocsp endpoint answers either way, so
+	// gating on it would leave the responder saying "unknown" about valid
+	// certificates for any operator who distributes the responder URL by another
+	// route. There is no configuration in which the endpoint answers and the
+	// index behind it is left to go stale.
+	It("runs the OCSP index sync whatever ocsp_url says", func() {
+		Expect(jobNames(&serverConfig{})).To(ContainElement(jobOCSPIndexSync))
+		Expect(jobNames(&serverConfig{OCSPUrl: "http://ca.example.com:8140/ocsp"})).
+			To(ContainElement(jobOCSPIndexSync))
 	})
 })

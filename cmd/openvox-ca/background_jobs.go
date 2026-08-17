@@ -29,9 +29,10 @@ import (
 // literals so a spec asserting which jobs a configuration starts cannot drift
 // from the thing it is asserting about.
 const (
-	jobCRLRefresh  = "crl-refresh"
-	jobCRLSync     = "crl-sync"
-	jobCertCleanup = "expired-cert-cleanup"
+	jobCRLRefresh    = "crl-refresh"
+	jobCRLSync       = "crl-sync"
+	jobOCSPIndexSync = "ocsp-index-sync"
+	jobCertCleanup   = "expired-cert-cleanup"
 )
 
 // backgroundJob is one periodic job the serve command runs for the lifetime of
@@ -83,6 +84,17 @@ func backgroundJobs(cfg *serverConfig, myCA *ca.CA) []backgroundJob {
 	syncInterval := cfg.crlSyncInterval()
 	jobs = append(jobs, backgroundJob{jobCRLSync, func(ctx context.Context) {
 		runCRLSync(ctx, myCA, syncInterval)
+	}})
+
+	// Reloads the inventory into the serial index this process's OCSP responder
+	// answers from, so a certificate signed on another replica stops being
+	// reported as `unknown` within an interval rather than never. Read-only,
+	// takes no cluster lock, and — like crl-sync — runs unconditionally: the
+	// /ocsp endpoint answers whatever ocsp_url says, so gating this on it would
+	// leave the responder wrong for anyone distributing the URL another way.
+	ocspIndexInterval := cfg.ocspIndexSyncInterval()
+	jobs = append(jobs, backgroundJob{jobOCSPIndexSync, func(ctx context.Context) {
+		runOCSPIndexSync(ctx, myCA, ocspIndexInterval)
 	}})
 
 	// Prunes certificates that expired more than the retention grace period ago

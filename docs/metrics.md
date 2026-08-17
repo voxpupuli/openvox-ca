@@ -177,6 +177,31 @@ refresh can fix and not something these series track.
 > across, and import discards duplicates of our own. Treat one as a chain to
 > inspect.
 
+### OCSP responder
+
+| Metric | Description |
+| --- | --- |
+| `puppetca_ocsp_index_serials` | Number of certificate serials **this replica's** responder recognises. A serial it does not hold is answered `unknown`, before the CRL is consulted. |
+| `puppetca_ocsp_index_sync_failures_total` | Counter of failures to reload the inventory into that index — an unreadable inventory, or one whose integrity MAC no longer verifies. While it rises the replica keeps whatever index it already held. Resets to `0` on process restart. |
+
+Both are per-process, like the two CRL series above, and that is the point:
+every replica sharing a backend should converge on the same
+`puppetca_ocsp_index_serials` within one `ocsp_index_sync_interval_sec` (5m by
+default). One persistently below the others is reporting valid certificates as
+unrecognised — see
+[OCSP status across replicas](configuration.md#ocsp-status-across-replicas).
+
+```promql
+# Replicas whose OCSP index has fallen behind the fleet
+max(puppetca_ocsp_index_serials) - puppetca_ocsp_index_serials > 0
+```
+
+Expect this to be briefly non-empty after each issuance and to clear on the next
+sync. A replica that stays in it is answering `unknown` for certificates its
+peers have signed; `puppetca_ocsp_index_sync_failures_total` usually says why.
+Unlike the CRL gap this is not a security lag — `unknown` is not `good` — but a
+verifier that hard-fails on `unknown` will reject against that replica alone.
+
 ### Leaf certificates
 
 One series per known (non-deleted) leaf certificate or pending request. Cleaned

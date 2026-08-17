@@ -85,32 +85,73 @@ func extractNonce(reqDER []byte) (pkix.Extension, bool) {
 	return pkix.Extension{}, false
 }
 
-// buildSerialIndex populates c.serialIndex from the on-disk inventory file.
+// buildSerialIndex populates c.serialIndex from the stored inventory,
+// discarding whatever the index held before.
+//
+// Only startup calls this. Once the CA is serving, the index is reconciled by
+// SyncSerialIndex instead, which keeps in-process additions a concurrent
+// issuance may have made while it was reading. It must be called while c.mu is
+// already held by the caller.
+func (c *CA) buildSerialIndex(ctx context.Context) error {
+	index, err := c.readSerialIndex(ctx)
+	if err != nil {
+		return err
+	}
+	c.serialIndex = index
+	return nil
+}
+
+// readSerialIndex renders the stored inventory into a serial → subject map.
 // Serials are normalised to uppercase hex without leading zeros (via
 // serialHexStr) so that lookups are consistent regardless of whether the
 // inventory was written by this version (random serials) or an older version
 // (zero-padded sequential serials).
-// It must be called while c.mu is already held by the caller.
-func (c *CA) buildSerialIndex(ctx context.Context) error {
+//
+// It touches no CA state, so it may be called without c.mu held — which
+// SyncSerialIndex does, to keep a storage round-trip off the auth path.
+func (c *CA) readSerialIndex(ctx context.Context) (map[string]string, error) {
 	data, err := c.Storage.ReadInventory(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	c.serialIndex = make(map[string]string)
+	index := make(map[string]string)
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	for scanner.Scan() {
 		if serial, subject, ok := parseInventoryLine(scanner.Text()); ok {
 			n := new(big.Int)
 			if _, ok := n.SetString(serial, 16); !ok {
-				slog.Warn("buildSerialIndex: skipping malformed serial in inventory",
+				slog.Warn("readSerialIndex: skipping malformed serial in inventory",
 					"serial", serial, "subject", subject)
 				continue
 			}
-			c.serialIndex[serialHexStr(n)] = subject
+			index[serialHexStr(n)] = subject
 		}
 	}
-	return scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return index, nil
+}
+
+// indexSerialLocked records that this process issued serial for subject, and
+// counts the mutation so a SyncSerialIndex whose storage read overlapped it can
+// tell. Going through a helper rather than assigning the map directly is what
+// makes that counter impossible to forget at a new issuance site. c.mu must be
+// held by the caller.
+func (c *CA) indexSerialLocked(serial, subject string) {
+	c.serialIndex[serial] = subject
+	c.serialIndexEpoch++
+}
+
+// unindexSerialLocked drops serial from the index and from the OCSP response
+// cache, for a certificate this process has just pruned. The twin of
+// indexSerialLocked; see it for why the epoch matters. c.mu must be held by the
+// caller.
+func (c *CA) unindexSerialLocked(serial string) {
+	delete(c.serialIndex, serial)
+	delete(c.ocspCache, serial)
+	c.serialIndexEpoch++
 }
 
 // OCSPResponse builds a DER-encoded OCSPResponse for the given DER-encoded
@@ -196,11 +237,30 @@ func (c *CA) OCSPResponse(ctx context.Context, reqDER []byte) ([]byte, error) {
 		return nil, fmt.Errorf("creating OCSP response: %w", err)
 	}
 
-	// Cache the response only when there is no nonce (RFC 8954 §3).
-	// The cache stores its own copy so the slice we return to the caller
-	// stays exclusively theirs even if the cache later evicts or rewrites
-	// the entry.
-	if !hasNonce {
+	// Cache the response only when there is no nonce (RFC 8954 §3), and never
+	// cache an unknown. The cache stores its own copy so the slice we return to
+	// the caller stays exclusively theirs even if the cache later evicts or
+	// rewrites the entry.
+	//
+	// Unknown is excluded for two reasons, and neither is a micro-optimisation:
+	//
+	//   - It is the one status that a *later* read of storage can overturn
+	//     without anything happening on this replica. A serial signed elsewhere
+	//     reaches this process only when SyncSerialIndex next runs, and caching
+	//     the unknown would pin the wrong answer for OCSPValidity — four hours —
+	//     past the point the index learned better. Leaving it uncached is what
+	//     makes an index refresh take effect on the next request rather than on
+	//     the next restart.
+	//   - The cache key is the requested serial, which is chosen by an
+	//     unauthenticated caller. Every other status can only be reached for a
+	//     serial this CA issued, so the cache is bounded by the inventory;
+	//     caching unknowns would let anyone who can reach /ocsp grow the map
+	//     without limit, an entry (and a signed response) per made-up serial.
+	//
+	// It costs no DoS protection to leave out: a request carrying a nonce
+	// bypasses the cache entirely and is answered with a fresh signature, so an
+	// attacker who wants to make this CA sign per request already can.
+	if !hasNonce && template.Status != ocsp.Unknown {
 		c.ocspCache[serialHex] = ocspCacheEntry{
 			der:       bytes.Clone(respDER),
 			expiresAt: now.Add(OCSPValidity),

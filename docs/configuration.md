@@ -106,6 +106,11 @@ crl_refresh_before_sec: 0      # re-sign when remaining validity < this; 0 = crl
 # effect here. Read-only, runs on every replica, and is not covered by
 # disable_crl_refresh. See "Revocation across replicas" below.
 crl_sync_interval_sec: 0       # how often to reload; 0 = built-in default (60s)
+# Background OCSP index sync reloads the inventory into the serial index this
+# replica's OCSP responder answers from, so a certificate signed on another
+# replica stops being reported as "unknown". Read-only, runs on every replica.
+# See "OCSP status across replicas" below.
+ocsp_index_sync_interval_sec: 0  # how often to reload; 0 = built-in default (5m)
 # Background expired-certificate cleanup (opt-in). When enabled, a job removes
 # certificates that expired more than the retention grace period ago from the
 # inventory and the CRL, and deletes their stored signed certificate. Safe to run
@@ -187,6 +192,7 @@ The CA key passphrase can also be provided via `PUPPET_CA_KEY_PASSPHRASE` (env v
 | `crl_refresh_interval_sec` | `PUPPET_CA_CRL_REFRESH_INTERVAL_SEC` |
 | `crl_refresh_before_sec` | `PUPPET_CA_CRL_REFRESH_BEFORE_SEC` |
 | `crl_sync_interval_sec` | `PUPPET_CA_CRL_SYNC_INTERVAL_SEC` |
+| `ocsp_index_sync_interval_sec` | `PUPPET_CA_OCSP_INDEX_SYNC_INTERVAL_SEC` |
 | `enable_expired_cert_cleanup` | `PUPPET_CA_ENABLE_EXPIRED_CERT_CLEANUP` |
 | `expired_cert_retention_sec` | `PUPPET_CA_EXPIRED_CERT_RETENTION_SEC` |
 | `expired_cert_cleanup_interval_sec` | `PUPPET_CA_EXPIRED_CERT_CLEANUP_INTERVAL_SEC` |
@@ -231,7 +237,9 @@ Two things the window does not cover, both worth knowing before you rely on it:
   the revocation can keep treating the certificate as valid for that long. The
   sync drops this replica's own cached responses for newly revoked serials, but
   answers already in a client's or proxy's cache cannot be recalled. This
-  applies only if you have enabled the responder with `--ocsp-url`.
+  applies only if you have enabled the responder with `--ocsp-url`. An
+  `unknown` is never cached, so it is not subject to this (see
+  [OCSP status across replicas](#ocsp-status-across-replicas)).
 - **Certificates issued to the agent before it was locked out.** Revoking one
   serial does not revoke another the same subject already holds. Renewal is not
   a way out — `POST /certificate_renewal` re-reads the CRL from storage rather
@@ -243,6 +251,46 @@ Two things the window does not cover, both worth knowing before you rely on it:
   [revocation by serial](api.md#revocation-by-serial). `openvox-ca-ctl clean` is
   not a substitute: it revokes the most recently issued serial for the subject
   and removes the stored certificate, leaving the subject's other serials valid.
+
+## OCSP status across replicas
+
+The responder answers from a second per-process copy of shared state: an index
+of every serial this CA has issued, built from the inventory. A serial the index
+does not hold is answered `unknown` — before the CRL is consulted at all — so
+the index decides whether the responder will speak about a certificate, and the
+CRL decides what it says.
+
+Like the CRL cache, that index was loaded once at startup and afterwards only
+recorded this process's own issuances. On the shared backends that meant a
+replica answered `unknown` for every certificate one of its peers had signed,
+indefinitely: the certificate is valid, the inventory row is in shared storage,
+and only a restart made the replica see it. `ocsp_index_sync_interval_sec`
+closes that. Each replica re-reads the inventory on the interval and adds what
+it does not already hold, so the interval is the worst-case window in which a
+newly issued certificate is reported as unrecognised elsewhere in the fleet.
+The default is five minutes — longer than the CRL sync's minute because the
+inventory is much larger than the CRL and because `unknown` is not fail-open.
+
+What that window does and does not mean:
+
+- **It is not a revocation bypass.** `unknown` is not `good`, and the mTLS
+  admission path reads the CRL rather than this index. What the window costs is
+  a peer's ability to say `revoked` at all: an index miss answers before the CRL
+  lookup, so during it the responder is silent about a certificate's revocation
+  rather than wrong about it.
+- **Whether a client notices depends on its soft-fail policy.** A verifier that
+  treats `unknown` as a failure sees one replica reject a certificate the others
+  accept, which is an unpleasant split to diagnose; one that soft-fails sees
+  nothing.
+- **No stale answer outlives the fix.** The responder caches `good` and
+  `revoked` for four hours but never caches `unknown`, so a refreshed index
+  takes effect on the very next request rather than when a cached answer
+  expires.
+- **`filesystem` and `sqlite` are single-node**, so the job has nothing to find
+  there; it costs one local inventory read per interval.
+
+Watch `puppetca_ocsp_index_serials` across replicas to confirm they agree, and
+`puppetca_ocsp_index_sync_failures_total` for a replica that cannot catch up.
 - **A renewal that coincides with a storage read failure.** That re-read is
   best-effort: if it fails, the check falls back to the CRL already in memory
   rather than refusing every renewal in the fleet over a transient backend
