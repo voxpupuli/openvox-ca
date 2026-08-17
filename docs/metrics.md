@@ -193,10 +193,18 @@ unrecognised — see
 
 ```promql
 # Replicas whose OCSP index has fallen behind the fleet
-scalar(max(puppetca_ocsp_index_serials)) - puppetca_ocsp_index_serials > 0
+scalar(max(puppetca_ocsp_index_serials{job="openvox-ca"}))
+  - puppetca_ocsp_index_serials{job="openvox-ca"} > 0
 ```
 
-`scalar()` is load-bearing. A bare `max(...)` returns one sample with no labels
+Both parts are load-bearing. The selector scopes the comparison to one CA: a
+bare `max(...)` folds in every `puppetca_ocsp_index_serials` the Prometheus
+scrapes, so a second, smaller CA — a staging instance, or an unrelated PKI —
+would show every one of its replicas permanently "behind the fleet". Widen it
+with `max by (job)` and an explicit `on(job)` match if you want one rule
+covering several CAs.
+
+And `scalar()` is load-bearing. A bare `max(...)` returns one sample with no labels
 at all, and binary arithmetic between two instant vectors matches on the full
 label set — so `max(x) - x` never matches anything carrying `job`/`instance`
 and is silently always empty. The CRL query below can subtract two vectors

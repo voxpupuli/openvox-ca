@@ -269,7 +269,9 @@ Response:
 | `POST` | `/ocsp` | RFC 6960 OCSP request; body is DER-encoded `OCSPRequest` |
 | `GET` | `/ocsp/{request}` | RFC 6960 GET form; `{request}` is standard or URL-safe base64-encoded DER |
 
-Both paths are also served under `/puppet-ca/v1/`. Responses are signed by the CA key directly (`Content-Type: application/ocsp-response`). GET responses include `Cache-Control: max-age=…, public`; requests carrying a nonce bypass the cache. The AIA extension is embedded in issued certificates when `--ocsp-url` is set.
+Both paths are also served under `/puppet-ca/v1/`. Responses are signed by the CA key directly (`Content-Type: application/ocsp-response`). The AIA extension is embedded in issued certificates when `--ocsp-url` is set; the endpoint answers either way.
+
+A GET carries `Cache-Control: max-age=…, public` for a `good` or `revoked` answer to a nonce-free request, and `Cache-Control: no-store` otherwise. Two cases get `no-store`: a request carrying a nonce, since an RFC 8954 response answers that request and no other and so also bypasses the pre-signed cache; and an `unknown`, which additionally carries no `NextUpdate`, because a later inventory read can overturn it — see [OCSP status across replicas](configuration.md#ocsp-status-across-replicas). A POST carries no `Cache-Control` at all.
 
 ## Health probes
 

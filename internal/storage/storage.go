@@ -456,9 +456,6 @@ func (s *StorageService) ReadInventory(ctx context.Context) ([]byte, error) {
 	return s.backend.Get(ctx, KeyInventory)
 }
 
-// inventoryEntriesLocked returns every inventory entry in issuance order. On
-// InventoryStore backends it reads the structured rows; otherwise it parses the
-// rendered blob. Caller must hold inventoryMu (read or write).
 // InventoryEntries returns every inventory entry in issuance order.
 //
 // The structured twin of ReadInventory, for a caller that wants the entries
@@ -487,6 +484,9 @@ func (s *StorageService) InventoryEntries(ctx context.Context) ([]InventoryEntry
 	return s.inventoryEntriesLocked(ctx)
 }
 
+// inventoryEntriesLocked returns every inventory entry in issuance order. On
+// InventoryStore backends it reads the structured rows; otherwise it parses the
+// rendered blob. Caller must hold inventoryMu (read or write).
 func (s *StorageService) inventoryEntriesLocked(ctx context.Context) ([]InventoryEntry, error) {
 	if store, ok := asInventoryStore(s.backend); ok {
 		return store.Entries(ctx)

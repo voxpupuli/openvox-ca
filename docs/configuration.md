@@ -230,7 +230,7 @@ CRL on the interval and installs it if it has advanced, which makes the interval
 the worst-case window in which a revoked certificate still works against a
 replica that did not revoke it. The default is 60 seconds.
 
-Two things the window does not cover, both worth knowing before you rely on it:
+Three things the window does not cover, all worth knowing before you rely on it:
 
 - **OCSP responses already handed out.** The responder signs each response with
   four hours of validity and clients cache it, so a verifier that asked before
@@ -253,7 +253,6 @@ Two things the window does not cover, both worth knowing before you rely on it:
   [revocation by serial](api.md#revocation-by-serial). `openvox-ca-ctl clean` is
   not a substitute: it revokes the most recently issued serial for the subject
   and removes the stored certificate, leaving the subject's other serials valid.
-
 - **A renewal that coincides with a storage read failure.** That re-read is
   best-effort: if it fails, the check falls back to the CRL already in memory
   rather than refusing every renewal in the fleet over a transient backend
