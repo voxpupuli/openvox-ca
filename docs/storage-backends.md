@@ -41,10 +41,12 @@ on one replica stops working against the others within `crl_sync_interval_sec`
 [Revocation across replicas](configuration.md#revocation-across-replicas).
 
 The responder keeps a second such copy: the set of serials this CA has issued,
-which decides whether it will speak about a certificate at all. It is reloaded
-on its own timer, so a certificate signed on one replica stops being reported
-`unknown` by the others within `ocsp_index_sync_interval_sec` (5m by default).
-See [OCSP status across
+which decides whether it will speak about a certificate at all. On the shared
+backends it is reloaded on its own timer, so a certificate signed on one replica
+stops being reported `unknown` by the others within `ocsp_index_sync_interval_sec`
+(5m by default). `filesystem` and `sqlite` do not run that job — nothing else
+can be writing certificates there — so on those two the set is what it was at
+startup. See [OCSP status across
 replicas](configuration.md#ocsp-status-across-replicas).
 
 ---

@@ -108,8 +108,9 @@ crl_refresh_before_sec: 0      # re-sign when remaining validity < this; 0 = crl
 crl_sync_interval_sec: 0       # how often to reload; 0 = built-in default (60s)
 # Background OCSP index sync reloads the inventory into the serial index this
 # replica's OCSP responder answers from, so a certificate signed on another
-# replica stops being reported as "unknown". Read-only, runs on every replica.
-# See "OCSP status across replicas" below.
+# replica stops being reported as "unknown". Read-only; runs on the shared
+# backends only, since nothing else can be writing certificates on filesystem
+# or sqlite. See "OCSP status across replicas" below.
 ocsp_index_sync_interval_sec: 0  # how often to reload; 0 = built-in default (5m)
 # Background expired-certificate cleanup (opt-in). When enabled, a job removes
 # certificates that expired more than the retention grace period ago from the
@@ -329,9 +330,9 @@ What that window does and does not mean:
 
 The read takes no cluster lock and does not re-sign anything, but it is not
 free: it is the whole inventory, so unlike the CRL sync its cost grows with the
-number of certificates ever issued — one blob read on `filesystem` and `redis`,
-one full row fetch on `sqlite`, `postgres`, `mysql` and `etcd`, plus the small
-integrity value in both cases. That is what the five-minute default is buying
+number of certificates ever issued — one read of the whole thing, as a blob or
+as a row fetch depending on how the backend stores it, plus the small integrity
+value either way. That is what the five-minute default is buying
 back. Lengthening the interval trades cost against the window; there is no
 switch to turn it off, for the same reason the CRL sync has none — a deployment
 cannot opt out of `/ocsp` answering, so it should not be able to opt out of

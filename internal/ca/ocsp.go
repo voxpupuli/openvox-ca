@@ -113,10 +113,10 @@ func (c *CA) buildSerialIndex(ctx context.Context) error {
 // It goes through InventoryEntries rather than ReadInventory because this runs
 // on a timer. ReadInventory verifies and then fetches, and its verification
 // recomputes from storage, so every call materialises the whole inventory
-// twice — on every backend family, not just the structured ones. Redis is a
-// blob backend and an HA one, so it would have paid that too. InventoryEntries
-// fetches once and folds the integrity value over what it holds, so the check
-// is still made everywhere.
+// twice — on both backend families, not only the structured ones, so which
+// side of that line a given backend sits on does not change the answer.
+// InventoryEntries fetches once and folds the integrity value over what it
+// holds, so the check is still made everywhere.
 //
 // It touches no CA state, so it may be called without c.mu held — which
 // SyncSerialIndex does, to keep a storage round-trip off the auth path.

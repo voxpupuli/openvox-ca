@@ -20,6 +20,8 @@ package main
 import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/voxpupuli/openvox-ca/internal/config"
 )
 
 // jobNames reduces the job list to the names it contains, which is what these
@@ -36,10 +38,12 @@ func jobNames(cfg *serverConfig) []string {
 }
 
 var _ = Describe("backgroundJobs", func() {
-	It("runs CRL refresh and both sync jobs by default, and cleanup only on request", func() {
-		Expect(jobNames(&serverConfig{})).To(ConsistOf(jobCRLRefresh, jobCRLSync, jobOCSPIndexSync))
+	// The default backend is filesystem, so the default job set deliberately
+	// does not include the OCSP index sync; the table below owns that decision.
+	It("runs CRL refresh and CRL sync by default, and cleanup only on request", func() {
+		Expect(jobNames(&serverConfig{})).To(ConsistOf(jobCRLRefresh, jobCRLSync))
 		Expect(jobNames(&serverConfig{EnableExpiredCertCleanup: true})).
-			To(ConsistOf(jobCRLRefresh, jobCRLSync, jobOCSPIndexSync, jobCertCleanup))
+			To(ConsistOf(jobCRLRefresh, jobCRLSync, jobCertCleanup))
 	})
 
 	// The promise this whole change rests on. disable_crl_refresh governs
@@ -56,20 +60,52 @@ var _ = Describe("backgroundJobs", func() {
 	})
 
 	It("still runs both sync jobs when every other job is switched off", func() {
-		Expect(jobNames(&serverConfig{DisableCRLRefresh: true, EnableExpiredCertCleanup: false})).
-			To(ConsistOf(jobCRLSync, jobOCSPIndexSync))
+		Expect(jobNames(&serverConfig{
+			StorageConfig:            config.StorageConfig{StorageBackend: "etcd"},
+			DisableCRLRefresh:        true,
+			EnableExpiredCertCleanup: false,
+		})).To(ConsistOf(jobCRLSync, jobOCSPIndexSync))
 	})
 
-	// The OCSP index sync has no switch of its own, and specifically is not
-	// gated on ocsp_url. That setting decides whether issued certificates carry
-	// an AIA extension pointing here; the /ocsp endpoint answers either way, so
-	// gating on it would leave the responder saying "unknown" about valid
-	// certificates for any operator who distributes the responder URL by another
-	// route. There is no configuration in which the endpoint answers and the
-	// index behind it is left to go stale.
-	It("runs the OCSP index sync whatever ocsp_url says", func() {
-		Expect(jobNames(&serverConfig{})).To(ContainElement(jobOCSPIndexSync))
-		Expect(jobNames(&serverConfig{OCSPUrl: "http://ca.example.com:8140/ocsp"})).
+	// The OCSP index goes stale when a *second* process issues certificates
+	// this one will not hear about, which is a property of the backend and of
+	// nothing else. filesystem and SQLite are a local file with no
+	// cross-process coordination, so there is no supported way to have that
+	// second writer; every other backend is reachable by several replicas by
+	// design.
+	//
+	// A table rather than two examples, because the cost of getting one entry
+	// wrong is asymmetric and invisible: a backend wrongly called single-node
+	// answers `unknown` for its peers' certificates until someone restarts it,
+	// and nothing in the logs says why.
+	DescribeTable("starts the OCSP index sync only where a second writer is possible",
+		func(backend string, want bool) {
+			names := jobNames(&serverConfig{StorageConfig: config.StorageConfig{StorageBackend: backend}})
+			if want {
+				Expect(names).To(ContainElement(jobOCSPIndexSync))
+			} else {
+				Expect(names).NotTo(ContainElement(jobOCSPIndexSync))
+			}
+		},
+		Entry("filesystem", "filesystem", false),
+		Entry("the empty default, which is filesystem", "", false),
+		Entry("sqlite", "sqlite", false),
+		Entry("etcd", "etcd", true),
+		Entry("redis", "redis", true),
+		Entry("postgres", "postgres", true),
+		Entry("mysql", "mysql", true),
+		// Unparseable: run it. A needless read is the cheaper mistake.
+		Entry("a name that does not parse", "no-such-backend", true),
+	)
+
+	// Not gated on ocsp_url, which is a different question: that setting
+	// decides whether issued certificates carry an AIA extension pointing here,
+	// while /ocsp answers either way. On a shared backend the job runs whatever
+	// it says, so an operator distributing the responder URL by another route
+	// still gets correct answers.
+	It("runs the OCSP index sync on a shared backend whatever ocsp_url says", func() {
+		Expect(jobNames(&serverConfig{StorageConfig: config.StorageConfig{StorageBackend: "etcd"}})).To(ContainElement(jobOCSPIndexSync))
+		Expect(jobNames(&serverConfig{StorageConfig: config.StorageConfig{StorageBackend: "etcd"}, OCSPUrl: "http://ca.example.com:8140/ocsp"})).
 			To(ContainElement(jobOCSPIndexSync))
 	})
 })

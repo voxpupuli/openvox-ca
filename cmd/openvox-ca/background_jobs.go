@@ -23,7 +23,28 @@ import (
 	"time"
 
 	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
+
+// sharedStorageBackend reports whether name is a backend more than one CA
+// process can be serving from at once, and echoes the parsed kind for logging.
+//
+// Only filesystem and SQLite are not: both are a local file with no
+// cross-process coordination (see docs/development/locking.md on #187), so a
+// second writer is not a configuration this project supports rather than one it
+// merely does not expect. Everything else is reachable by several replicas by
+// design, which is what makes an in-memory index built at startup go stale.
+//
+// A name that will not parse is treated as shared. The cost of that mistake is
+// a periodic inventory read; the cost of the opposite one is a responder
+// quietly answering `unknown` for certificates its peers have signed.
+func sharedStorageBackend(name string) (bool, storage.BackendKind) {
+	kind, err := storage.ParseBackendKind(name)
+	if err != nil {
+		return true, storage.BackendKind(name)
+	}
+	return kind != storage.BackendFilesystem && kind != storage.BackendSQLite, kind
+}
 
 // Background job names, as reported by backgroundJobs. Constants rather than
 // literals so a spec asserting which jobs a configuration starts cannot drift
@@ -88,21 +109,32 @@ func backgroundJobs(cfg *serverConfig, myCA *ca.CA) []backgroundJob {
 
 	// Reloads the inventory into the serial index this process's OCSP responder
 	// answers from, so a certificate signed on another replica stops being
-	// reported as `unknown` within an interval rather than never. Takes no
-	// cluster lock, and — like crl-sync — runs unconditionally: the /ocsp
-	// endpoint answers whatever ocsp_url says, so gating this on it would leave
-	// the responder wrong for anyone distributing the URL another way.
+	// reported as `unknown` within an interval rather than never. Read-only and
+	// takes no cluster lock.
 	//
-	// Read-only in every reachable state but one: on a blob backend the
-	// integrity check re-baselines a missing MAC rather than failing, so a pass
-	// can write if KeyInventoryHMAC has been deleted out from under a running
-	// server. InitHMAC establishes it at startup, so that is a repair path
-	// rather than a normal one — but "nothing is written" is part of why this
-	// runs on every replica at once, so it is worth being exact about.
-	ocspIndexInterval := cfg.ocspIndexSyncInterval()
-	jobs = append(jobs, backgroundJob{jobOCSPIndexSync, func(ctx context.Context) {
-		runOCSPIndexSync(ctx, myCA, ocspIndexInterval)
-	}})
+	// Not gated on ocsp_url: the /ocsp endpoint answers whatever that setting
+	// says, so gating on it would leave the responder wrong for anyone
+	// distributing the URL another way. It *is* gated on the backend being one
+	// several processes can share, which is a different question with a
+	// different answer — the staleness needs a second process writing
+	// certificates this one will never hear about, and on filesystem and SQLite
+	// there is no supported way to have one. Running it there would read the
+	// whole inventory every interval, for ever, on the default backend, to
+	// detect something that cannot happen.
+	//
+	// An unrecognised backend name runs the job. Being wrong in that direction
+	// costs a periodic read; being wrong in the other costs correct OCSP
+	// answers, silently, until a restart.
+	if shared, kind := sharedStorageBackend(cfg.StorageBackend); shared {
+		ocspIndexInterval := cfg.ocspIndexSyncInterval()
+		jobs = append(jobs, backgroundJob{jobOCSPIndexSync, func(ctx context.Context) {
+			runOCSPIndexSync(ctx, myCA, ocspIndexInterval)
+		}})
+	} else {
+		slog.Info("OCSP serial index sync not started: the storage backend is single-node, "+
+			"so no other process can issue certificates this one would not already know about",
+			"backend", kind)
+	}
 
 	// Prunes certificates that expired more than the retention grace period ago
 	// from the inventory and the CRL. Opt-in; safe on every replica.
