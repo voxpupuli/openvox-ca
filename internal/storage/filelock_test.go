@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -443,13 +444,51 @@ var _ = Describe("Same-host locking", func() {
 			Expect(info.IsDir()).To(BeFalse())
 		})
 
-		It("holds the migration lock across the whole schema migration", func() {
-			// The SQLite half of the change: EnsureReady walks the tiers by hand
-			// so two starters cannot both record a version and run the DDL. The
-			// lock file merely existing proves only that AcquireSameHostLock was
-			// called — move the Unlock out of its defer and that assertion stays
-			// green while the race returns in full. This holds the lock from
-			// outside and requires EnsureReady to be refused.
+		It("serialises schema migrations across separate backends on one file", func() {
+			// The property the change actually adds. sql_migrations_test.go
+			// already races four EnsureReady calls on *one* backend, but those
+			// share a per-name mutex, so it passed before this change and passes
+			// with the same-host tier deleted. Four separate backends over one
+			// DSN share no mutex and meet only at the flock — the in-process
+			// stand-in for four starting processes — so this is what fails if
+			// the lock is not held across the whole migration.
+			dsn := "file:" + filepath.Join(GinkgoT().TempDir(), "ca.db")
+
+			const runners = 4
+			backends := make([]*SQLBackend, runners)
+			for i := range backends {
+				b, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: dsn})
+				Expect(err).NotTo(HaveOccurred())
+				backends[i] = b
+				DeferCleanup(func() { _ = b.Close() })
+			}
+
+			errs := make([]error, runners)
+			var wg sync.WaitGroup
+			wg.Add(runners)
+			for i := range runners {
+				go func() {
+					defer GinkgoRecover()
+					defer wg.Done()
+					errs[i] = backends[i].EnsureReady(ctx)
+				}()
+			}
+			wg.Wait()
+			for i, err := range errs {
+				Expect(err).NotTo(HaveOccurred(), "runner %d", i)
+			}
+
+			// One row per migration: two runners that both recorded a version
+			// and ran the DDL is exactly the corruption the lock prevents.
+			expectOneRowPerMigration(ctx, backends[0])
+		})
+
+		It("refuses a schema migration while another holder has the lock", func() {
+			// The complement, and the operator-visible half: a startup that
+			// cannot get the migration lock must say so rather than proceed.
+			// (That the lock is *held* across the migration is the spec above;
+			// this one pins that EnsureReady takes it at all, and the message it
+			// fails with.)
 			dsn := "file:" + filepath.Join(GinkgoT().TempDir(), "ca.db")
 			holder, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: dsn})
 			Expect(err).NotTo(HaveOccurred())
