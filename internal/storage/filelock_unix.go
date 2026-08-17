@@ -54,9 +54,29 @@ func tryLockFile(f *os.File) (bool, error) {
 		// A signal arrived before the lock was decided. Retrying is the whole
 		// of the recovery.
 		return false, nil
+	case isLockingUnavailableError(err):
+		return false, errLockingUnavailable
 	default:
 		return false, err
 	}
+}
+
+// isLockingUnavailableError reports whether err says this filesystem or kernel
+// cannot do BSD locks at all, as opposed to refusing this particular one.
+//
+// The three of them are the "the platform cannot deliver" case arriving at
+// runtime rather than at compile time: a store on a mount whose filesystem
+// rejects flock(2) (EOPNOTSUPP, ENOSYS on some FUSE and network filesystems),
+// or a kernel out of lock records (ENOLCK). Treating those as hard errors would
+// fail every WithLock caller — bootstrap, signing, revocation, CRL refresh —
+// and so take down a CA that worked before this capability existed, on a store
+// nobody can lock and where the previous release simply did not try. That is
+// the same trade filelock_other.go makes for a platform with no flock(2) at
+// all, and it is made the same way: report the capability absent.
+func isLockingUnavailableError(err error) bool {
+	return errors.Is(err, syscall.ENOLCK) ||
+		errors.Is(err, syscall.EOPNOTSUPP) ||
+		errors.Is(err, syscall.ENOSYS)
 }
 
 // isReadOnlyFSError reports whether err says the filesystem itself is mounted

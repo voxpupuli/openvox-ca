@@ -48,9 +48,16 @@ itself, which nothing else would write again.
 │   └── <subject>_key.pem           server-gen keys     0600
 ├── requests/
 │   └── <subject>.pem               (csr/<subject>)
-└── signed/
-    └── <subject>.pem               (cert/<subject>)
+├── signed/
+│   └── <subject>.pem               (cert/<subject>)
+└── locks/
+    └── <sha256(name)>.lock         not a logical key   0600
 ```
+
+`locks/` is the exception to the mapping above: its files are not blobs and have
+no logical key, so `Get`/`Put`/`List`/`Migrate` never touch them. They are the
+same-host `flock(2)` targets described under
+[cross-node coordination](#cross-node-coordination) below.
 
 ## etcd backend
 

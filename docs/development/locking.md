@@ -104,7 +104,7 @@ The same-host lock is the one entry in that table with nothing to recover.
 descriptor closes or the process dies, however it dies — which is why it was
 chosen over an `O_EXCL` lockfile, whose stale-lock cleanup and PID-liveness
 guessing are the maintenance burden that makes lockfiles a poor fit for a
-service operators restart and kill. Two consequences worth knowing:
+service operators restart and kill. Consequences worth knowing:
 
 - **Lock files are never removed, and deleting one on a live store is
   unsafe** — not merely useless. Unlinking a file another process is blocked on
@@ -127,21 +127,32 @@ service operators restart and kill. Two consequences worth knowing:
   the CA lock`, naming the lock and the file. Without it an `openvox-ca-ctl
   migrate` — which inherits a context with no deadline — would print nothing and
   never return, and a lock wait would be indistinguishable from a hang.
-- **An unwritable store disables the tier; an unwritable lock file does not.**
-  The distinction is deliberate and is the difference between two call sites.
-  Failing to *create* the lock directory with `EROFS` or `EACCES` means the store
-  cannot be written at all, which has no writer to exclude — `openvox-ca-ctl
-  migrate` takes `bootstrap` on a source it only reads, and that source may be a
-  read-only snapshot — so the capability reports itself absent and `WithLock`
-  drops to the mutex. Failing to *open a lock file* in a directory that already
-  exists is a hard error, because `os.MkdirAll` returns nil for an existing
-  directory without checking writability: `EACCES` there means the directory
-  belongs to another user, typically because a `ctl` command was run under sudo
-  against a cadir the server owns. Downgrading on that would silently return the
-  server to its pre-#187 behaviour for the rest of its life while the root
-  process went on taking flocks it believed were exclusive — both sides think
-  they are safe, which is worse than neither being. The error names the owning
-  uid and says to `chown` it back.
+- **A store nobody can write disables the tier; a lock path this process
+  cannot write does not.** Three outcomes, and which one you get depends on the
+  errno and the call site:
+  - *Cannot create the lock directory* (`EROFS` or `EACCES`) — the capability
+    reports itself absent and `WithLock` drops to the mutex. On both backends
+    that directory sits where the store's own writes go, so failing to create it
+    really does mean the store cannot be written, and a store with no writer has
+    nothing to exclude. `openvox-ca-ctl migrate` takes `bootstrap` on a source it
+    only reads, and that source may be a read-only snapshot.
+  - *Cannot open a lock file in a directory that already exists*, with
+    `EACCES` — a **hard error**. `os.MkdirAll` returns nil for an existing
+    directory without checking writability, so this says nothing about the
+    store: it means the lock directory or the lock file belongs to another user,
+    typically because a `ctl` command was run under sudo against a cadir the
+    server owns. Downgrading would silently return the server to its pre-#187
+    behaviour for the rest of its life while the root process went on taking
+    flocks it believed were exclusive — both sides think they are safe, which is
+    worse than neither being. The error names whichever of the file and the
+    directory is actually foreign, and its uid, because a sudo `ctl` leaves a
+    root-owned *file* inside a server-owned directory as often as it creates the
+    directory itself.
+  - *`EROFS` at either site, or a filesystem that rejects BSD locks at all*
+    (`ENOLCK`, `EOPNOTSUPP`, `ENOSYS`) — absent again, not fatal. `EROFS` says
+    nothing about ownership, and a store nobody can lock is the runtime form of
+    a platform without `flock(2)`; failing hard there would take down a CA that
+    worked before this tier existed.
 
 Crash recovery is not uniform across the distributed backends. etcd and Redis self-heal
 within the lock TTL (30 s): a crashed holder's lease or key expires and the lock
@@ -291,8 +302,13 @@ subject:<name>  →  crl  →  c.mu  →  (StorageService internal mutexes)
   its slow path can re-enter `bootstrap` and deadlock startup
   ([#201](https://github.com/voxpupuli/openvox-ca/issues/201)); see known gaps.
 - `MigrateService` holds two `bootstrap` locks (source backend, then
-  destination). Pointing both at the same distributed backend would deadlock;
-  migrating a store onto itself is unsupported.
+  destination). Pointing both at the same store deadlocks on **every** backend
+  now, not only the distributed ones: on filesystem and SQLite the two are
+  separate backend values with separate per-name mutexes, so the second
+  acquisition blocks on the `flock` and spins in its backoff loop — a live poll
+  rather than a parked goroutine, which is what a stack dump will show. Since
+  `MigrateService` applies no deadline it waits forever, announcing itself once.
+  Migrating a store onto itself is unsupported.
 
 ## Read paths take no distributed locks — by design
 

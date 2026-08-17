@@ -39,8 +39,8 @@ import (
 // ErrDistributedLockingUnsupported, but since #187 that is no longer the end of
 // it: EnsureReady falls through to the same-host flock, so two backends on one
 // file do exclude each other, and that case is asserted in the ordinary unit
-// suite — see "holds the migration lock across the whole schema migration" in
-// filelock_test.go.
+// suite — see the Describe("the SQLite backend") block in filelock_test.go,
+// which races four backends over one DSN and asserts one row per migration.
 func sqlMigrationsConcurrentRunners(newBackend func() *SQLBackend) {
 	ctx := context.Background()
 	runners := []*SQLBackend{newBackend(), newBackend()}

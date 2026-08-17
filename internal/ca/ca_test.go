@@ -2105,8 +2105,13 @@ var _ = Describe("Bootstrap public key write", func() {
 // reproduced without either backend: context.DeadlineExceeded stands in for a
 // cross-node acquisition rejecting a spent deadline, so WithLock wraps it and
 // returns without running the closure at all, while
-// ErrDistributedLockingUnsupported is what SQLite answers, sending WithLock
-// down its fall-through to the process-local mutex and into the closure.
+// ErrDistributedLockingUnsupported is the sentinel SQLite answers. Note what
+// that models here and what it does not: since #187 SQLite's fall-through
+// reaches the same-host flock, whereas this stub embeds the storage.Backend
+// *interface*, which promotes only that interface's methods, so it offers no
+// SameHostLocker and WithLock lands on the process-local mutex. It stands in
+// for a backend with neither tier. Either way the closure runs, which is the
+// property the specs using it turn on.
 type refusingLocker struct {
 	storage.Backend
 	refuse atomic.Bool

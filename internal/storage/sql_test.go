@@ -179,14 +179,19 @@ var _ = Describe("SQLiteEnsureReadyIdempotent", func() {
 })
 
 var _ = Describe("SQLiteDistributedLockingUnsupported", func() {
-	It("reports distributed locking unsupported and falls back to a local mutex", func() {
+	It("reports distributed locking unsupported and still runs the closure", func() {
 		b := newSQLiteBackend()
-		// SQLite is single-node: it must report the lock as unsupported so
-		// StorageService falls back to a process-local mutex.
+		// SQLite is single-node: it must report the *distributed* lock as
+		// unsupported. Since #187 that sentinel is not the end of the ladder —
+		// WithLock goes on to AcquireSameHostLock, which this backend provides
+		// because newSQLiteBackend opens a file-backed DSN. The mutex fallback
+		// is reached only by a backend with neither tier; filelock_test.go
+		// covers that, and the in-memory case.
 		_, err := b.AcquireLock(context.Background(), "bootstrap")
 		Expect(err).To(MatchError(ErrDistributedLockingUnsupported), "AcquireLock")
 
-		// WithLock over the service must still serialise via the local fallback.
+		// WithLock over the service must still run fn exactly once, whichever
+		// tier grants the lock.
 		svc := NewWithBackend(b, filepath.Join(GinkgoT().TempDir(), "private"))
 		var n int
 		err = svc.WithLock(context.Background(), "bootstrap", func() error {

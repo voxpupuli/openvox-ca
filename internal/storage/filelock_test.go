@@ -18,8 +18,10 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -156,7 +158,14 @@ var _ = Describe("Same-host locking", func() {
 				Expect(ul.Unlock()).To(Succeed())
 			}
 
-			entries, err := os.ReadDir(filepath.Join(dir, fsLockDir))
+			// The literal, not the constant: the directory half of the path is
+			// protocol for the same reason the file half is, and
+			// docs/storage-backends.md publishes it in the on-disk layout. Every
+			// other reference here goes through fsLockDir, so a rename would
+			// otherwise keep the suite green.
+			Expect(fsLockDir).To(Equal("locks"))
+
+			entries, err := os.ReadDir(filepath.Join(dir, "locks"))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(entries).To(HaveLen(4), "one file per distinct lock name, all inside the lock directory")
 			for _, e := range entries {
@@ -304,7 +313,36 @@ var _ = Describe("Same-host locking", func() {
 				"an unwritable lock directory that already exists is not a read-only store")
 			Expect(err.Error()).To(ContainSubstring("chown"),
 				"the error must tell the operator how to fix it")
+			Expect(err.Error()).To(ContainSubstring("the lock directory "+locks+" is owned by uid"),
+				"and must diagnose the directory, which is the thing to chown here")
 			expectRetryable(b, "bootstrap")
+		})
+
+		It("blames the lock file, not its directory, when the file is the obstruction", func() {
+			// The other half of the same scenario, and the likelier one: a `ctl`
+			// command run under sudo against a cadir that already has a lock
+			// directory creates a root-owned *file* inside a directory the
+			// server owns perfectly well. An error blaming the directory sends
+			// the operator to chown something that is already correct.
+			if os.Geteuid() == 0 {
+				Skip("root ignores the file mode this case depends on")
+			}
+			dir := GinkgoT().TempDir()
+			locks := filepath.Join(dir, fsLockDir)
+			Expect(os.MkdirAll(locks, DirPerm)).To(Succeed())
+			Expect(os.WriteFile(filepath.Join(locks, fileLockFileName("crl")), nil, 0000)).To(Succeed())
+
+			b := NewFilesystemBackend(dir)
+			_, err := b.AcquireSameHostLock(ctx, "crl")
+			Expect(err).To(HaveOccurred())
+			Expect(err).NotTo(MatchError(ErrSameHostLockingUnsupported))
+			Expect(err.Error()).To(ContainSubstring("the lock file is owned by uid"))
+			// The remedy sentence mentions the lock directory legitimately, so
+			// the negative has to target the *diagnosis* clause, which names a
+			// path: "the lock directory <path> is owned by uid N".
+			Expect(err.Error()).NotTo(ContainSubstring("the lock directory "+locks),
+				"the directory is fine; diagnosing it would send the operator to the wrong place")
+			expectRetryable(b, "crl")
 		})
 
 		It("grants an uncontended lock even to a caller whose deadline has gone", func() {
@@ -350,6 +388,35 @@ var _ = Describe("Same-host locking", func() {
 			expectRetryable(waiter, "crl")
 		})
 
+		It("announces a wait once, naming the lock file", func() {
+			// docs/storage-backends.md promises operators this line, and it is
+			// the only thing that distinguishes an `openvox-ca-ctl migrate`
+			// waiting on a lock — with no deadline at all — from one that has
+			// hung. Nothing else asserts it exists, so a refactor could drop it
+			// silently and leave that command mute.
+			dir := GinkgoT().TempDir()
+			holder, waiter := NewFilesystemBackend(dir), NewFilesystemBackend(dir)
+
+			held, err := holder.AcquireSameHostLock(ctx, "crl")
+			Expect(err).NotTo(HaveOccurred())
+
+			var buf bytes.Buffer
+			orig := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+			defer slog.SetDefault(orig)
+
+			deadline, cancel := context.WithTimeout(ctx, contendedTimeout)
+			defer cancel()
+			_, err = waiter.AcquireSameHostLock(deadline, "crl")
+			Expect(err).To(HaveOccurred())
+			Expect(held.Unlock()).To(Succeed())
+
+			// Once, not once per retry: the wait above runs several attempts.
+			Expect(strings.Count(buf.String(), "Waiting for the CA lock")).To(Equal(1))
+			Expect(buf.String()).To(ContainSubstring(fileLockFileName("crl")),
+				"the line must name the lock file, so the operator can find the holder")
+		})
+
 		It("picks up a release promptly however long it has been waiting", func() {
 			// The backoff doubles, and without its ceiling a waiter under the
 			// production 60s lockTimeout reaches a ~40s sleep: a lock released
@@ -386,7 +453,13 @@ var _ = Describe("Same-host locking", func() {
 
 			var waited time.Duration
 			Eventually(acquired, 10*time.Second).Should(Receive(&waited))
-			Expect(time.Since(releasedAt)).To(BeNumerically("<", 2*fileLockRetryMax),
+			// 4x the ceiling, not 2x: the worst legitimate case is a release
+			// landing just after a failed attempt (one full interval), plus
+			// Eventually's polling granularity and two goroutine wakeups under
+			// -race on a loaded runner. The mutation this kills — the ceiling
+			// removed — is not noticed until ~1s after the release, so the
+			// headroom costs nothing.
+			Expect(time.Since(releasedAt)).To(BeNumerically("<", 4*fileLockRetryMax),
 				"the waiter must notice the release within a capped poll interval, not after an unbounded doubling")
 			Expect(waited).To(BeNumerically(">", time.Second), "sanity: it really did wait")
 		})
@@ -454,6 +527,21 @@ var _ = Describe("Same-host locking", func() {
 			// the lock is not held across the whole migration.
 			dsn := "file:" + filepath.Join(GinkgoT().TempDir(), "ca.db")
 
+			// Seed the database first, then rewind the migration ledger. Racing
+			// four backends at a file that does not exist yet races their
+			// `PRAGMA journal_mode=WAL` instead, which is not what this pins and
+			// which fails SQLITE_BUSY about one run in four regardless of
+			// busy_timeout, since a journal-mode change needs an exclusive lock.
+			// Rewinding leaves every migration pending against a database that
+			// is already there and already in WAL, so the four runners meet at
+			// the DDL — and at the lock that is supposed to serialise it.
+			seed, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: dsn})
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { _ = seed.Close() })
+			Expect(seed.EnsureReady(ctx)).To(Succeed())
+			_, err = seed.db.ExecContext(ctx, "DELETE FROM bun_migrations")
+			Expect(err).NotTo(HaveOccurred())
+
 			const runners = 4
 			backends := make([]*SQLBackend, runners)
 			for i := range backends {
@@ -513,6 +601,26 @@ var _ = Describe("Same-host locking", func() {
 			// Released, it proceeds — so the refusal was the lock, not the DSN.
 			Expect(held.Unlock()).To(Succeed())
 			Expect(second.EnsureReady(ctx)).To(Succeed())
+		})
+
+		It("still migrates an in-memory database, which has no same-host lock", func() {
+			// EnsureReady's ladder has three arms and this is the one nothing
+			// else reaches: the same-host lock reports itself unsupported, and
+			// the process-local mutex has to carry it. Folding this arm into the
+			// `default:` beside it — they switch on the same error — would make
+			// every in-memory start fail outright, and the rest of the suite
+			// would stay green, since nothing else calls EnsureReady on a
+			// backend without a lock set.
+			b, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: ":memory:"})
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { _ = b.Close() })
+
+			_, lockErr := b.AcquireSameHostLock(ctx, lockNameSQLMigrate)
+			Expect(lockErr).To(MatchError(ErrSameHostLockingUnsupported),
+				"precondition: this backend has no same-host lock")
+
+			Expect(b.EnsureReady(ctx)).To(Succeed(),
+				"an unavailable same-host lock must degrade to the mutex, not refuse the migration")
 		})
 
 		It("reports the lock unsupported for an in-memory database", func() {
@@ -625,6 +733,29 @@ var _ = Describe("Same-host locking", func() {
 			// before same-host locking existed: fn runs, serialised in-process.
 			s := svc(&noLockBackend{})
 			Expect(s.WithLock(ctx, "crl", func() error { return nil })).To(Succeed())
+		})
+
+		It("releases the same-host lock when fn panics", func() {
+			// withlock_test.go pins this for tier 1 only — its stub embeds the
+			// Backend interface, so it never reaches tier 2. The consequence
+			// here is worse than there: net/http recovers a panicking handler,
+			// so a leaked fileUnlocker holds both the per-name mutex and the
+			// kernel flock for the life of the process, wedging that lock name
+			// for every process on the host rather than just this one.
+			dir := GinkgoT().TempDir()
+			s := svc(NewFilesystemBackend(dir))
+
+			func() {
+				defer func() { Expect(recover()).NotTo(BeNil(), "the panic must propagate") }()
+				_ = s.WithLock(ctx, "crl", func() error { panic("boom") })
+			}()
+
+			deadline, cancel := context.WithTimeout(ctx, contendedTimeout)
+			defer cancel()
+			ul, err := NewFilesystemBackend(dir).AcquireSameHostLock(deadline, "crl")
+			Expect(err).NotTo(HaveOccurred(),
+				"the flock outlived the panic: it is now held for the life of this process")
+			Expect(ul.Unlock()).To(Succeed())
 		})
 
 		It("prefers the distributed lock when the backend offers both", func() {

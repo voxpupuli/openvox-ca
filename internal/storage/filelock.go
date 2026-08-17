@@ -50,6 +50,14 @@ const (
 	fileLockRetryMax     = 250 * time.Millisecond
 )
 
+// errLockingUnavailable is tryLockFile's way of saying the platform, not this
+// particular attempt, is the problem: the filesystem or kernel cannot do BSD
+// locks at all. acquire turns it into ErrSameHostLockingUnsupported so the
+// capability reports itself absent, rather than failing every WithLock caller
+// on a store nobody can lock. Not exported: no caller outside this file should
+// be distinguishing it from any other reason the tier is unavailable.
+var errLockingUnavailable = errors.New("flock(2) is not available on this filesystem")
+
 // fileLocks hands out same-host locks as flock(2) holds on files in one
 // directory. A backend owns one of these; every process addressing the same
 // store must derive the same directory, which is what makes the lock mutual.
@@ -130,7 +138,6 @@ func (l *fileLocks) acquire(ctx context.Context, name string) (Unlocker, error) 
 	local.Lock()
 
 	path := filepath.Join(l.dir, fileLockFileName(name))
-	//nolint:gosec // G703: l.dir is the configured store root, not request input; the leaf is a hex sha256 of the lock name, so no caller-supplied character reaches the path
 	if err := os.MkdirAll(l.dir, DirPerm); err != nil {
 		local.Unlock()
 		return nil, l.unwritableStore(err, "creating same-host lock directory "+l.dir)
@@ -149,6 +156,13 @@ func (l *fileLocks) acquire(ctx context.Context, name string) (Unlocker, error) 
 		if lockErr != nil {
 			_ = f.Close()
 			local.Unlock()
+			if errors.Is(lockErr, errLockingUnavailable) {
+				l.warnOnce.Do(func() {
+					slog.Warn("Same-host locking is unavailable: this filesystem does not support flock(2)",
+						"lock_dir", l.dir, "error", lockErr)
+				})
+				return nil, ErrSameHostLockingUnsupported
+			}
 			return nil, fmt.Errorf("locking %s: %w", path, lockErr)
 		}
 		if locked {
@@ -239,26 +253,43 @@ func (l *fileLocks) inaccessibleLockFile(err error, path string) error {
 		return ErrSameHostLockingUnsupported
 	}
 	if errors.Is(err, fs.ErrPermission) {
-		return fmt.Errorf("opening same-host lock file %s: %w (the lock directory %s is %s; "+
-			"another user, typically a ctl command run under sudo, created it — chown it back to "+
-			"the user openvox-ca runs as)", path, err, l.dir, ownerOf(l.dir))
+		return fmt.Errorf("opening same-host lock file %s: %w (%s, and this process runs as uid %d; "+
+			"another user — typically a ctl command run under sudo — owns it, so `chown -R` the lock "+
+			"directory back to the user openvox-ca runs as)", path, err, obstruction(path, l.dir), os.Geteuid())
 	}
 	return fmt.Errorf("opening same-host lock file %s: %w", path, err)
 }
 
-// ownerOf describes a path's owning uid for a diagnostic message, degrading to a
-// bare "inaccessible" rather than failing: it is decorating an error that is
-// already being returned.
-func ownerOf(path string) string {
+// obstruction names whichever of the lock file and its directory this process
+// cannot get past, and who owns it.
+//
+// Which one it is matters, and both happen. A `ctl` command run under sudo
+// against a cadir that has no lock directory yet creates the *directory* as
+// root; run against one the server already made, it creates a root-owned
+// *file* inside a directory the server owns perfectly well. Blaming the
+// directory in the second case sends the operator to chown something that is
+// already correct.
+//
+// Stat is cheap and this only ever decorates an error already being returned,
+// so it degrades rather than failing: an unstattable path, or a platform with
+// no uid, still leaves the caller with the path itself.
+func obstruction(path, dir string) string {
+	if uid, ok := ownerUID(path); ok {
+		return fmt.Sprintf("the lock file is owned by uid %d", uid)
+	}
+	if uid, ok := ownerUID(dir); ok {
+		return fmt.Sprintf("the lock directory %s is owned by uid %d", dir, uid)
+	}
+	return "the lock path is inaccessible"
+}
+
+func ownerUID(path string) (uint32, bool) {
+	//nolint:gosec // G703: the same lock path acquire just built -- the configured store root joined with a hex digest -- and this only reads its owner for a message
 	info, err := os.Stat(path)
 	if err != nil {
-		return "inaccessible"
+		return 0, false
 	}
-	uid, ok := statUID(info)
-	if !ok {
-		return "owned by another user"
-	}
-	return fmt.Sprintf("owned by uid %d, and this process runs as uid %d", uid, os.Geteuid())
+	return statUID(info)
 }
 
 // localFor returns the process-local mutex for lock name, creating it on first

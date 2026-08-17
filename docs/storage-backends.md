@@ -120,7 +120,7 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
 ├── signed/
 │   └── <subject>.pem       issued certificates
 └── locks/
-    └── <hash>.lock         same-host lock files                0600
+    └── <hash>.lock         same-host lock files              0600
 ```
 
 > **`ca_crl.pem` may hold more than one CRL.** Once a chain has been imported
@@ -737,7 +737,11 @@ honoured on both ends.
 Notes:
 
 - **Stop the server first.** Run `migrate` while no `openvox-ca` is serving
-  either backend, so the copy sees a consistent snapshot.
+  either backend, so the copy sees a consistent snapshot. It no longer races one
+  that is: `migrate` takes the `bootstrap` lock cross-process on every backend
+  and applies no timeout, so beside a live server it logs one `Waiting for the
+  CA lock` line and waits indefinitely. See [running a second process against a
+  live store](#running-a-second-process-against-a-live-store).
 - **Overwrite protection.** `migrate` refuses to write into a destination that
   already holds a CA certificate. Pass `--force` to overwrite it.
 - **Re-runnable.** The copy is idempotent per item; an interrupted run can be

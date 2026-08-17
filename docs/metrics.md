@@ -106,9 +106,12 @@ query, and `puppetca_crl_sync_failures_total` for why it is stuck.
 > a malformed serial, or an inventory read that failed while resolving the
 > subject's serial. That last one
 > includes a revocation whose wait for the per-subject lock spent the 60-second
-> budget on the single-node backends, which reach the read with the deadline
-> already gone; see [revocation cost](api.md#certificate-status). So a queued
-> revocation is a benign cause of this alert on filesystem and SQLite. The
+> budget behind another goroutine *in this process* on the single-node backends,
+> which reach the read with the deadline already gone; see
+> [revocation cost](api.md#certificate-status). So a queued revocation is a
+> benign cause of this alert on filesystem and SQLite. A wait for another
+> *process* on the host is refused at acquisition instead and never reaches the
+> read, so it does not move this counter — see the uncounted list below. The
 > revoke path is the shared revoke-by-serial code, so it also covers
 > `DELETE /certificate_status` (`puppet cert clean`) and the best-effort
 > revocation of a superseded certificate on renewal, which on a busy fleet is
