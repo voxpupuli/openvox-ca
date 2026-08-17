@@ -104,8 +104,12 @@ mechanism detail below).
 
 If a replica holding a lock crashes without calling Unlock, the etcd lease
 expires after 30s and the lock is released automatically. For the filesystem
-backend (single-node), the same call path falls back to a process-local
-`sync.Mutex` per lock name.
+backend (single-node), the same call path falls through to a same-host lock: an
+exclusive `flock(2)` on `<cadir>/locks/<sha256 of the name>.lock`, taken behind
+a per-name process-local `sync.Mutex` and released when the descriptor closes.
+That excludes another process on the host and nothing beyond it — see
+[locking and concurrency](locking.md) for why the two capabilities are separate
+interfaces.
 
 ## Redis / Valkey backend
 
@@ -194,10 +198,14 @@ four measures:
 - The run gets its own timeout rather than the per-statement request timeout, so
   a slow index build cannot be cut off part-way.
 
-SQLite has no distributed lock and falls back to a process-local mutex. Two
-processes sharing one file can still race there; the transactional, idempotent
-migrations mean the loser fails cleanly and succeeds on its next start rather
-than leaving the schema half-changed.
+SQLite has no distributed lock, so `EnsureReady` walks the same tiers
+`WithLock` does — by hand, since the migration budget and the "waiting for the
+lock" announcement belong to it — and takes the same-host `flock` instead. Two
+processes sharing one file therefore no longer race here. Where even that is
+unavailable (an in-memory database, a platform without `flock(2)`) the fallback
+is the process-local mutex, and the transactional, idempotent migrations mean a
+loser fails cleanly and succeeds on its next start rather than leaving the
+schema half-changed.
 
 #### Recovering a half-migrated schema
 
@@ -266,10 +274,17 @@ single-row operations instead of scanning the whole inventory. Integrity uses a
 Lock names, holders, and ordering are documented in
 [locking and concurrency](locking.md); only the per-dialect mechanism differs:
 
-- **SQLite** is single-node: `WithLock` falls back to a process-local
-  `sync.Mutex` per lock name, exactly as the filesystem backend does. The
-  backend appends `_txlock=immediate`, `busy_timeout`, and `journal_mode=WAL`
-  to the DSN unless already set, and pins the pool to a single connection.
+- **SQLite** is single-node: `AcquireLock` reports
+  `ErrDistributedLockingUnsupported` and `WithLock` falls through to the
+  same-host `flock`, exactly as the filesystem backend does. The lock files live
+  in a hidden `.<database>.locks/` directory beside the database, alongside the
+  `-wal` and `-shm` files SQLite maintains itself; the database file is never
+  flocked, because SQLite locks that. A lock *table* was rejected rather than
+  merely not chosen: the pool is pinned to one connection, so a `BEGIN
+  IMMEDIATE` held for the duration of the critical section would own the only
+  connection the work inside it needs. The backend also appends
+  `_txlock=immediate`, `busy_timeout`, and `journal_mode=WAL` to the DSN unless
+  already set.
 - **PostgreSQL** uses session-level advisory locks: the lock name is hashed to
   the `bigint` key `pg_advisory_lock` requires, taken on a dedicated connection
   and released with `pg_advisory_unlock` on that same connection. A crashed

@@ -220,10 +220,13 @@ var _ = Describe("MigrateServiceLocksBothBackends", func() {
 })
 
 // MigrateServiceWithoutLocker confirms MigrateService still works against
-// backends that do not implement Locker (it falls back to a process-local
-// mutex via WithLock).
+// backends that do not implement Locker: WithLock falls through to the
+// same-host lock the filesystem backend provides, and the copy completes.
+// Source and destination are distinct directories, so the two "bootstrap"
+// acquisitions are distinct locks — pointing both at one store deadlocks, and
+// is documented as unsupported.
 var _ = Describe("MigrateServiceWithoutLocker", func() {
-	It("falls back to a process-local mutex when backends lack a Locker", func() {
+	It("completes against backends that lack a distributed Locker", func() {
 		ctx := context.Background()
 		srcB := NewFilesystemBackend(GinkgoT().TempDir())
 		want := seedCA(srcB)

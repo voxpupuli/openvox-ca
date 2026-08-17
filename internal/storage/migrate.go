@@ -81,21 +81,27 @@ var ErrDestinationNotEmpty = errors.New("destination backend already contains a 
 // and so two migrations cannot run against the same backend at once.
 //
 // Per-subject signing uses different lock names and is therefore not held off;
-// operators should still stop the server during a migration. Backends without
-// distributed locking fall back to a process-local mutex (no cross-process
-// effect), which is why MigrateService is best-effort for those.
+// operators should still stop the server during a migration. The exclusion it
+// does provide is cross-process on every backend: those without a distributed
+// lock fall through to the same-host flock, so a migration and a booting server
+// on one host now exclude each other rather than racing. What that costs is
+// patience — MigrateService applies no timeout, so a contended lock waits
+// indefinitely (see docs/development/locking.md).
 const migrateLockName = "bootstrap"
 
 // MigrateService copies src to dst exactly like Migrate, but holds each
-// backend's distributed lock (when the backend supports one) for the whole
-// copy, guarding against a concurrent migration or a CA bootstrap racing on
-// either backend. Locks are acquired source-first, then destination, and
-// released in reverse on return. Backends that cannot provide a distributed
-// lock fall back to a process-local mutex via StorageService.WithLock.
+// backend's strongest lock for the whole copy, guarding against a concurrent
+// migration or a CA bootstrap racing on either backend. Locks are acquired
+// source-first, then destination, and released in reverse on return.
 //
-// Note: pointing both src and dst at the same distributed backend would have
-// the two lock acquisitions (from separate sessions) deadlock; migrating a
-// store onto itself is not a supported operation.
+// Note: pointing both src and dst at the same store would have the two lock
+// acquisitions deadlock — from separate sessions on a distributed backend, and
+// on the process-local mutex in front of the same-host lock for a single-node
+// one. Migrating a store onto itself is not a supported operation.
+//
+// A source this process cannot write to is fine: the same-host lock reports
+// itself unsupported rather than failing there, since a store nothing can write
+// to has no writer to exclude, and a migration only reads its source.
 func MigrateService(ctx context.Context, src, dst *StorageService, opts MigrateOptions) (MigrateReport, error) {
 	var report MigrateReport
 	err := src.WithLock(ctx, migrateLockName, func() error {

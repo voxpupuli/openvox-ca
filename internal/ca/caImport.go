@@ -260,10 +260,11 @@ func importCAMaterial(ctx context.Context, store *storage.StorageService, certBu
 	// Re-import is the documented way to refresh ancestor CRLs on a CA that has
 	// been issuing for months, so that window is not hypothetical.
 	//
-	// The lock is only genuinely cross-process on backends that implement one;
-	// on filesystem and sqlite it degrades to a process-local mutex, so a live
-	// import there still races the server and the documentation says to stop it
-	// first.
+	// The lock is cross-process on every backend since #187 — the single-node
+	// ones coordinate two processes on a host with flock(2) — so a live import
+	// no longer loses a concurrent revocation. The documentation still says to
+	// stop the server first, because the inventory append this and the server
+	// both perform is under no shared lock on any backend (#204).
 	//
 	// A nil plan means the stored chain is already exactly what should be there,
 	// so nothing is written — re-taking the lock to rewrite identical bytes

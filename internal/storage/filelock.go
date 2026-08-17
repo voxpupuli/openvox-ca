@@ -1,0 +1,226 @@
+// Copyright (C) 2026 Chris Boot
+// Copyright (C) 2026 Vox Pupuli and contributors
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along
+// with this program; if not, write to the Free Software Foundation, Inc.,
+// 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+
+package storage
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+)
+
+// Same-host locking, shared by the two single-node backends. The mechanism is
+// an exclusive flock(2) on one file per lock name, chosen over an O_EXCL
+// lockfile because the kernel releases it when the descriptor closes or the
+// process dies: there is no stale lock to clean up and no PID liveness to
+// guess at, which is the maintenance burden that makes lockfiles a poor fit
+// for a CA that operators restart and kill.
+//
+// Platform support is in filelock_unix.go / filelock_other.go.
+
+const (
+	// fileLockRetryInitial and fileLockRetryMax bound the backoff between
+	// non-blocking acquisition attempts. Blocking flock(2) would ignore the
+	// caller's context, and WithLock callers pass a lockTimeout-bounded one, so
+	// the wait is a poll rather than a park. The floor keeps an uncontended
+	// hand-off quick; the ceiling keeps a long wait from spinning.
+	fileLockRetryInitial = 5 * time.Millisecond
+	fileLockRetryMax     = 250 * time.Millisecond
+)
+
+// fileLocks hands out same-host locks as flock(2) holds on files in one
+// directory. A backend owns one of these; every process addressing the same
+// store must derive the same directory, which is what makes the lock mutual.
+type fileLocks struct {
+	dir string
+
+	// local holds a *sync.Mutex per lock name, serialising this process's own
+	// callers before any of them touches the filesystem. Same pattern, and the
+	// same reason, as the etcd/Redis/SQL backends: only one goroutine then
+	// contends for the flock, so in-process waiters queue on a mutex instead of
+	// each running its own retry loop.
+	local sync.Map
+
+	// warnOnce keeps the "store is not writable" warning to one line per lock
+	// set rather than one per acquisition.
+	warnOnce sync.Once
+}
+
+// newFileLocks returns a lock set rooted at dir, which is created on first use.
+//
+// The path is made absolute here rather than at each call site: two processes
+// must agree on it, and a server and a `ctl` command may well be given the same
+// store as differently spelled configuration. Two residual ways to defeat that
+// remain, both documented in docs/development/locking.md — a relative path
+// resolved from two different working directories, and one store reached
+// through two different symlinks — because the lock identity is the path, not
+// the inode.
+func newFileLocks(dir string) *fileLocks {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		abs = dir
+	}
+	return &fileLocks{dir: abs}
+}
+
+// fileLockFileName maps a lock name to the file representing it. Hashing
+// sidesteps every question about which characters a lock name may contain:
+// "subject:<name>" carries a colon, and the subject alphabet ValidateSubject
+// admits is not the filesystem's. It also means no name can escape the lock
+// directory or collide with another's file by way of path separators.
+//
+// The mapping is protocol, in the same sense the lock names themselves are: a
+// server and a `ctl` command exclude each other only by deriving the same file
+// from the same name, so it must stay stable across releases.
+func fileLockFileName(name string) string {
+	sum := sha256.Sum256([]byte(name))
+	return hex.EncodeToString(sum[:]) + ".lock"
+}
+
+// acquire takes the same-host lock called name, waiting until ctx expires.
+// Returns ErrSameHostLockingUnsupported when this lock set cannot lock at all,
+// so callers can report the capability honestly rather than appearing to lock.
+func (l *fileLocks) acquire(ctx context.Context, name string) (Unlocker, error) {
+	if !fileLockingSupported || l == nil || l.dir == "" {
+		return nil, ErrSameHostLockingUnsupported
+	}
+
+	// Deliberately no up-front ctx.Err() check. ctx bounds the *wait* for
+	// another process, not the acquisition itself, exactly as the process-local
+	// mutex this tier replaces bounds nothing at all: an uncontended lock is
+	// granted even to a caller whose deadline has already gone, so the caller
+	// fails on its own first storage read rather than here. Revoke's failure
+	// accounting is built on that distinction — a revocation that reached the
+	// CRL work and failed is counted, one refused at a cross-node acquisition
+	// is not (see docs/metrics.md) — and checking here would silently move the
+	// single-node backends from one side of it to the other.
+
+	// Like the distributed implementations — and like WithLock's own fallback —
+	// this half is a plain sync.Mutex and does not honour ctx, so same-process
+	// waiters queue unboundedly while ctx bounds only the wait for another
+	// process. Taking it first is what keeps a re-entrant acquisition
+	// deadlocking here rather than in the kernel: flock(2) is per open file
+	// description, so a second descriptor in this same process would otherwise
+	// block against the first.
+	local := l.localFor(name)
+	local.Lock()
+
+	path := filepath.Join(l.dir, fileLockFileName(name))
+	//nolint:gosec // G703: l.dir is the configured store root, not request input; the leaf is a hex sha256 of the lock name, so no caller-supplied character reaches the path
+	if err := os.MkdirAll(l.dir, DirPerm); err != nil {
+		local.Unlock()
+		return nil, l.classify(err, "creating same-host lock directory "+l.dir)
+	}
+	//nolint:gosec // G703: as above -- filepath.Join of the configured root and a hex digest cannot leave the lock directory
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, FilePermPrivate)
+	if err != nil {
+		local.Unlock()
+		return nil, l.classify(err, "opening same-host lock file "+path)
+	}
+
+	backoff := fileLockRetryInitial
+	for {
+		locked, lockErr := tryLockFile(f)
+		if lockErr != nil {
+			_ = f.Close()
+			local.Unlock()
+			return nil, fmt.Errorf("locking %s: %w", path, lockErr)
+		}
+		if locked {
+			return &fileUnlocker{f: f, local: local, path: path}, nil
+		}
+
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			_ = f.Close()
+			local.Unlock()
+			return nil, fmt.Errorf(
+				"another process on this host holds the CA lock %q (%s): %w", name, path, ctx.Err())
+		case <-timer.C:
+		}
+		backoff = min(backoff*2, fileLockRetryMax)
+	}
+}
+
+// classify turns a failure to create the lock file into either a hard error or
+// ErrSameHostLockingUnsupported.
+//
+// A store this process cannot write to has no writer for a lock to exclude, so
+// refusing to proceed would break a real and read-only-safe operation for no
+// gain: `openvox-ca-ctl migrate` takes the "bootstrap" lock on its *source*
+// store, which it then only reads, and a source may legitimately be a
+// read-only snapshot or a backup mount. Every path that would actually mutate
+// the store fails on its own writes moments later, with a clearer error than
+// this one.
+//
+// Anything else — ENOSPC, a lock path shadowed by a plain file, an I/O error —
+// is a genuine failure and is reported, because it leaves the question of
+// whether another process is writing unanswered.
+func (l *fileLocks) classify(err error, what string) error {
+	if !isUnwritableStoreError(err) {
+		return fmt.Errorf("%s: %w", what, err)
+	}
+	l.warnOnce.Do(func() {
+		slog.Warn("Same-host locking is unavailable: the store is not writable by this process",
+			"lock_dir", l.dir, "error", err)
+	})
+	return ErrSameHostLockingUnsupported
+}
+
+// localFor returns the process-local mutex for lock name, creating it on first
+// use. Mutexes are never removed; the namespace is small and bounded.
+func (l *fileLocks) localFor(name string) *sync.Mutex {
+	if v, ok := l.local.Load(name); ok {
+		return v.(*sync.Mutex)
+	}
+	v, _ := l.local.LoadOrStore(name, &sync.Mutex{})
+	return v.(*sync.Mutex)
+}
+
+// fileUnlocker releases the flock by closing the descriptor that holds it, then
+// releases the process-local mutex — in that order, so no in-process waiter can
+// be handed the mutex while the kernel still considers the file locked.
+//
+// The lock file itself is deliberately never removed. Unlinking it while
+// another process is blocked on the same path lets a third process create a
+// fresh inode at that name and take a lock the blocked one is still waiting
+// for, so both would believe they hold it. A handful of empty 0600 files, one
+// per distinct lock name, is the cheaper side of that trade.
+type fileUnlocker struct {
+	f     *os.File
+	local *sync.Mutex
+	path  string
+}
+
+func (u *fileUnlocker) Unlock() error {
+	// close(2) drops every flock this descriptor holds; there is no window
+	// between the two where the lock is held without an owner.
+	err := u.f.Close()
+	u.local.Unlock()
+	if err != nil {
+		return fmt.Errorf("releasing same-host lock %s: %w", u.path, err)
+	}
+	return nil
+}

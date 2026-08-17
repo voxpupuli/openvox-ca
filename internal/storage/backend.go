@@ -34,6 +34,15 @@ import (
 // back to a process-local mutex.
 var ErrDistributedLockingUnsupported = errors.New("distributed locking unsupported by this backend")
 
+// ErrSameHostLockingUnsupported signals that a backend advertising the
+// SameHostLocker interface cannot actually provide a same-host lock in the
+// current configuration: an in-memory SQLite database (no file to lock beside,
+// and no second process that could open it), a platform without flock(2), or an
+// overlay over a base that offers neither. StorageService.WithLock treats this
+// the same way it treats ErrDistributedLockingUnsupported — as a hint to fall
+// back to a process-local mutex.
+var ErrSameHostLockingUnsupported = errors.New("same-host locking unsupported by this backend")
+
 // BlobKind signals the desired visibility of a stored blob. The filesystem
 // backend maps these to file permissions (0600 vs 0644); remote backends
 // may ignore it or use the hint to pick a storage namespace.
@@ -379,6 +388,31 @@ func asInventoryStore(b Backend) (InventoryStore, bool) {
 // no-op if the lease has already expired.
 type Locker interface {
 	AcquireLock(ctx context.Context, name string) (Unlocker, error)
+}
+
+// SameHostLocker is an optional Backend capability that provides a mutex
+// excluding other *processes on this host* — an `openvox-ca-ctl` command, or a
+// second server — from the same named lock. It is a strictly weaker promise
+// than Locker and a deliberately separate capability, not a second way to
+// spell it.
+//
+// The distinction is load-bearing. The single-node backends (filesystem,
+// SQLite) can coordinate two processes sharing one host cheaply and soundly,
+// but nothing about that extends across hosts: flock(2) over NFS is not a
+// basis for clustering, and a caller deciding whether it is safe to run a
+// second *replica* must not be told "yes" because a second *process* is
+// handled. Backends therefore advertise the two capabilities independently,
+// and a backend implementing this one must not be taken to implement Locker.
+//
+// StorageService.WithLock prefers Locker and falls back to this, so a backend
+// may implement both: the distributed lock already excludes same-host peers,
+// and this capability is consulted only when the distributed one reports
+// itself unsupported (SQLite's answer, and an overlay's over a base without
+// one).
+//
+// The returned Unlocker must be called exactly once, typically via defer.
+type SameHostLocker interface {
+	AcquireSameHostLock(ctx context.Context, name string) (Unlocker, error)
 }
 
 // Unlocker releases a lock previously acquired via Locker.AcquireLock.

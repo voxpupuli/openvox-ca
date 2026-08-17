@@ -123,10 +123,11 @@ query, and `puppetca_crl_sync_failures_total` for why it is stuck.
 > the CRL, and the certificate they leave behind is still reachable by subject
 > until a replacement is issued.
 >
-> Uncounted, and logged only: a revocation refused at a cross-node lock
-> acquisition, which fails ahead of any CRL work (this is the `409` a spent
-> budget produces on PostgreSQL, MySQL, etcd and Redis — the single-node
-> backends take the lock and fail later, which *is* counted, as above), a
+> Uncounted, and logged only: a revocation refused at a lock acquisition, which
+> fails ahead of any CRL work (this is the `409` a spent budget produces on
+> PostgreSQL, MySQL, etcd and Redis — the single-node backends take the lock and
+> fail later, which *is* counted, as above, *unless* another process on the same
+> host was holding it, the one case where they too refuse at acquisition), a
 > subject that was simply never issued — though `PUT /certificate_status` also
 > answers its caller `409` in both cases — and a malformed serial met by the
 > cleanup job.

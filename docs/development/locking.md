@@ -18,17 +18,45 @@ protects against a different class of interleaving.
 
 | Tier | Mechanism | Protects against | Defined in |
 | --- | --- | --- | --- |
-| Cluster-wide named locks | `StorageService.WithLock(ctx, name, fn)` | Concurrent mutations from **other replicas** sharing the same backend | [storage.go](../../internal/storage/storage.go) |
+| Cluster-wide named locks | `StorageService.WithLock(ctx, name, fn)` | Concurrent mutations from **other replicas** sharing the same backend, or failing that from **other processes on this host** | [storage.go](../../internal/storage/storage.go) |
 | Storage-service mutexes | `serialMu`, `inventoryMu` (RW), `crlMu` (RW), `fileMu` (RW) | Interleaved compound storage operations **within this process** | [storage.go](../../internal/storage/storage.go) |
 | CA in-memory state | `ca.CA.mu` (RW) | Torn reads/writes of the CA's **in-memory caches** | [ca.go](../../internal/ca/ca.go) |
 
 ### Tier 1: cluster-wide named locks (`WithLock`)
 
-`StorageService.WithLock` runs `fn` while holding a named lock. When the
-backend implements the optional `Locker` capability the lock is coordinated
-across every replica sharing that backend; otherwise it falls back to a
-process-local named `sync.Mutex`, which is correct for genuinely single-node
-backends (filesystem, SQLite).
+`StorageService.WithLock` runs `fn` while holding a named lock, taking the
+strongest lock the backend offers. Three sub-tiers, tried in order:
+
+1. **`Locker`** — coordinated across every replica sharing the backend (etcd,
+   Redis, PostgreSQL, MySQL).
+2. **`SameHostLocker`** — coordinated across every process on this host, and
+   across no more than that. An exclusive `flock(2)` on a file per lock name,
+   provided by the two single-node backends (filesystem, SQLite).
+3. A process-local named `sync.Mutex`, for a backend offering neither.
+
+The two capabilities are deliberately separate interfaces rather than one with
+a quality setting. A caller deciding whether it is safe to start a second
+*replica* must not be told "yes" because a second *process* is handled, so the
+filesystem backend implements `SameHostLocker` and still implements no
+`Locker`, and SQLite still answers `ErrDistributedLockingUnsupported`. Nothing
+that probes for cross-node coordination changed its answer when same-host
+locking landed.
+
+What sub-tier 2 buys is the case an operator actually meets: an
+`openvox-ca-ctl` command, or a second server, run against the same store on the
+same host as a live one. Before it, both wrote with no coordination at all —
+two issuers could each pass `evictRevokedLocked` and produce two certificates
+for one subject, and `AppendInventory`'s blob path could leave an HMAC covering
+a blob that never existed, which fails `InitHMAC` at the *next* start and
+leaves the server unable to boot. Now the second process waits, and then fails
+with "another process on this host holds the CA lock" if it waits past its
+deadline.
+
+What it does not buy is clustering. `flock(2)` is not a sound basis for
+coordination across hosts — over NFS it depends on the server, the mount
+options and the client's `lockd`, none of which this code can see — so shared
+storage across hosts stays unsupported for both backends, exactly as
+[storage backends](../storage-backends.md) scopes them.
 
 The lock names are part of the cross-replica protocol: every replica must agree
 on them, so they are **stable across releases**. Names taken through
@@ -59,10 +87,30 @@ mechanism, key layouts and transaction/retry detail lives in
 | Redis/Valkey | `SET NX PX` with a per-acquisition random token; a heartbeat goroutine extends the TTL while held; unlock is a Lua compare-token-and-delete | Key expires within the TTL, lock releases |
 | PostgreSQL | `pg_advisory_lock` (session-level) on a dedicated pooled connection | Only when the server reaps the session — no TTL (see below) |
 | MySQL/MariaDB | `GET_LOCK` on a dedicated connection, polled with a 1 s server-side wait so context cancellation is honoured | Only when the server reaps the session — no TTL (see below) |
-| SQLite, filesystem | None — `ErrDistributedLockingUnsupported` / no `Locker`; `WithLock` falls back to a process-local mutex | n/a (single process assumed; see [#187](https://github.com/voxpupuli/openvox-ca/issues/187)) |
-| Overlay | Delegates to the base backend's `Locker`; reports unsupported when the base has none | as base |
+| SQLite, filesystem | No cross-node lock — `ErrDistributedLockingUnsupported` / no `Locker`. Same-host only: an exclusive `flock(2)` per lock name, under `<cadir>/locks/` or a `.<db>.locks/` directory beside the SQLite file | Kernel releases the lock when the descriptor closes or the holder dies — no stale lock, no TTL |
+| Overlay | Delegates to the base backend's `Locker`, then to its `SameHostLocker`; reports unsupported when the base has neither | as base |
 
-Crash recovery is not uniform across those backends. etcd and Redis self-heal
+The same-host lock is the one entry in that table with nothing to recover.
+`flock(2)` is held by an open file description, so the kernel drops it when the
+descriptor closes or the process dies, however it dies — which is why it was
+chosen over an `O_EXCL` lockfile, whose stale-lock cleanup and PID-liveness
+guessing are the maintenance burden that makes lockfiles a poor fit for a
+service operators restart and kill. Two consequences worth knowing:
+
+- **Lock files are never removed.** Unlinking one while another process is
+  blocked on that path would let a third create a fresh inode at the same name
+  and take a lock the blocked one is still waiting for. A handful of empty
+  0600 files, one per distinct lock name, is the cheaper side of that trade.
+  They are safe to delete while nothing is running, and pointless to delete
+  while something is.
+- **The lock identity is the path, not the inode.** Two processes exclude each
+  other only if they resolve the same lock directory. The path is made
+  absolute, so differently spelled configuration for one store still agrees,
+  but a *relative* `cadir` or `sql_dsn` resolved from two different working
+  directories will not, and neither will one store reached through two
+  different symlinks. Configure absolute paths.
+
+Crash recovery is not uniform across the distributed backends. etcd and Redis self-heal
 within the lock TTL (30 s): a crashed holder's lease or key expires and the lock
 frees itself, which is what the 60 s `lockTimeout` below is sized to ride out.
 The SQL advisory locks have **no TTL** — `pg_advisory_lock` and `GET_LOCK`
@@ -75,24 +123,42 @@ revoke/sign fails at that timeout; the recovery action is to terminate the
 orphaned backend session (`pg_terminate_backend` / `KILL`) or to lower those
 server-side keepalives for HA deployments.
 
-Every distributed implementation first takes a **per-name process-local mutex**
-before touching the network. This is load-bearing, not an optimisation: etcd's
-`concurrency.Mutex` is not safe for re-entry on one session, and on the SQL
-backends it stops N in-process callers each pinning a pooled connection just to
-queue on the same lock.
+Every implementation of either capability first takes a **per-name
+process-local mutex** before touching the network or the filesystem. This is
+load-bearing, not an optimisation: etcd's `concurrency.Mutex` is not safe for
+re-entry on one session, on the SQL backends it stops N in-process callers each
+pinning a pooled connection just to queue on the same lock, and for the
+same-host lock it keeps in-process contention a mutex wait rather than N
+goroutines each running their own `flock` retry loop. It is also what preserves
+the existing re-entrancy behaviour: `flock(2)` is per open file description, so
+without the mutex a second acquisition in this same process would block in the
+kernel rather than on the mutex it blocks on today.
 
 CA request paths bound lock acquisition *and* the critical section together
 with `lockTimeout` (60 s, [init.go](../../internal/ca/init.go)) via
 `context.WithTimeout` — long enough to ride out a brief leader election, short
-enough that a crashed replica's stale lease doesn't hang requests forever. Two
-things that timeout does *not* cover. First, it bounds only the *distributed*
-half: the process-local mutexes (both the fallback path and the per-name gate
-in front of every distributed implementation) are plain `sync.Mutex` and do not
-honour context cancellation, so same-process waiters queue unboundedly. Second,
-the offline `openvox-ca-ctl migrate` path applies no timeout at all —
-`MigrateService` inherits the caller's context, which is signal-cancellable but
-carries no deadline — so a migration waits indefinitely on a contended
-`bootstrap` lock; interrupt it and stop the server rather than waiting.
+enough that a crashed replica's stale lease doesn't hang requests forever. Three
+things that timeout does *not* cover. First, it bounds only the
+*other-process* half: the process-local mutexes (both the fallback path and the
+per-name gate in front of every distributed and same-host implementation) are
+plain `sync.Mutex` and do not honour context cancellation, so same-process
+waiters queue unboundedly. Second, the offline `openvox-ca-ctl migrate` path
+applies no timeout at all — `MigrateService` inherits the caller's context,
+which is signal-cancellable but carries no deadline — so a migration waits
+indefinitely on a contended `bootstrap` lock; interrupt it and stop the server
+rather than waiting. Since same-host locking landed that applies to the
+filesystem and SQLite backends too, where the wait used to be no wait at all.
+
+Third, and specific to the same-host tier: the deadline bounds *waiting* for
+another process, not the acquisition itself. An **uncontended** same-host lock
+is granted even to a caller whose deadline has already gone, matching the
+process-local mutex it replaces — that caller then fails on its own first
+storage read. The distinction is visible in metrics: `Revoke` counts a failure
+that reached the CRL work and does not count one refused at lock acquisition
+(see [metrics](../metrics.md)), so the single-node backends stay on the
+"counted" side for a spent deadline exactly as they were. A *contended*
+same-host acquisition that outlasts the deadline does fail at acquisition, and
+so is not counted — the one place where the split moved.
 
 ### Tier 2: storage-service mutexes
 
@@ -300,11 +366,21 @@ path — still provides no cross-replica guarantee anyway.
    [storage backends](../storage-backends.md).
 9. **Offline `openvox-ca-ctl` commands** (import, migrate) assume the server
    is stopped. `MigrateService` holds `bootstrap` on both stores, which
-   excludes a booting server but deliberately not per-subject signing — and on
-   filesystem/SQLite the fallback mutex has no cross-process effect at all
-   ([#187](https://github.com/voxpupuli/openvox-ca/issues/187)). It also
-   inherits the caller's context with no `lockTimeout`, so it waits
-   indefinitely on a contended `bootstrap` lock (see Tier 1).
+   excludes a booting server but deliberately not per-subject signing. That
+   exclusion is now genuinely cross-process on every backend — the same-host
+   lock covers filesystem and SQLite, where the fallback mutex used to have no
+   cross-process effect at all — but the scope is unchanged: a migration and a
+   concurrent `Sign` still take different names and do not exclude each other,
+   so stop the server. `MigrateService` also inherits the caller's context with
+   no `lockTimeout`, so it waits indefinitely on a contended `bootstrap` lock
+   (see Tier 1).
+10. **A lock name is now also a filename.** On the single-node backends each
+    name maps to `sha256(name).lock` in the store's lock directory. The mapping
+    is protocol for the same reason the names are: a server and a `ctl` command
+    exclude each other only by deriving the same file, so neither the hash nor
+    the directory layout may change without a compatibility story. Hashing is
+    also what keeps a name from addressing a path — nothing about a new lock
+    name needs to be filesystem-safe.
 
 ## Known gaps
 
@@ -340,16 +416,23 @@ state when the document was last updated and is not guaranteed exhaustive.
   backends the distributed-lock identity is a 64-bit FNV-1a hash of the name,
   so distinct names can alias; a crafted subject that passes `ValidateSubject`
   could collide with the `crl`/`bootstrap` key and deny revocation.
-- [#187](https://github.com/voxpupuli/openvox-ca/issues/187) — filesystem and
-  SQLite backends have no same-host, cross-**process** locking; a `ctl`
-  command (or the planned offline `generate`,
-  [#175](https://github.com/voxpupuli/openvox-ca/issues/175)) racing a running
-  server on the same cadir is uncoordinated. The related blob-backend gap —
-  nothing wraps `AppendInventory` in a cluster lock on Redis, so its
-  duplicate-serial check is not cross-replica there — is tracked separately
-  as [#204](https://github.com/voxpupuli/openvox-ca/issues/204); the etcd
-  half of that gap was closed by the decomposed inventory's atomic
-  `by-serial` guard ([#138](https://github.com/voxpupuli/openvox-ca/issues/138)).
+- ~~[#187](https://github.com/voxpupuli/openvox-ca/issues/187) — filesystem and
+  SQLite backends have no same-host, cross-**process** locking.~~ Fixed: both
+  now implement `SameHostLocker`, so every name taken through `WithLock`
+  excludes another process on the host. What that does *not* reach is the
+  inventory append, which is guarded by `inventoryMu` and no cluster lock: two
+  processes issuing for **different** subjects hold different `subject:<name>`
+  locks and can still interleave an `AppendInventory` and its HMAC rewrite.
+  That is the blob-backend gap below, and closing it closes the filesystem case
+  with it.
+- [#204](https://github.com/voxpupuli/openvox-ca/issues/204) — nothing wraps
+  `AppendInventory` in a cluster lock on any blob backend, so its
+  duplicate-serial check is not cross-writer on filesystem or Redis, and the
+  whole-blob HMAC rewrite can cover a blob that never existed. The etcd half of
+  that gap was closed by the decomposed inventory's atomic `by-serial` guard
+  ([#138](https://github.com/voxpupuli/openvox-ca/issues/138)). Whatever lock
+  the fix takes, the single-node backends will get it cross-process for free
+  now that `WithLock` reaches a same-host tier.
 - [#171](https://github.com/voxpupuli/openvox-ca/issues/171) — `cachedCRL` is
   per-replica, so authentication and renewal keep accepting a certificate
   revoked elsewhere until this process re-signs the CRL.
@@ -380,6 +463,18 @@ unlock-error handling are covered in
 [withlock_test.go](../../internal/storage/withlock_test.go); each distributed
 implementation's mutual exclusion is exercised in its backend integration
 suite (build-tagged; see [testing](testing.md)).
+
+The same-host tier is covered in
+[filelock_test.go](../../internal/storage/filelock_test.go), which runs in the
+ordinary unit suite because it needs nothing but a temporary directory. Most of
+it uses two backend values over one store, which is an exact substitution
+rather than a convenient one — `flock(2)` is held by an open file description,
+so two `os.OpenFile` calls exclude each other whether or not a fork separates
+them. One spec does not settle for that: it re-executes the test binary (via a
+`TestMain` guard in
+[filelock_helper_test.go](../../internal/storage/filelock_helper_test.go)) so a
+real second process holds the lock, and asserts both that this process is
+refused and that the kernel releases the lock when that process exits.
 
 The nested lock-ordering invariant *is* now automated, in
 [renewrace_test.go](../../internal/ca/renewrace_test.go): for each caller that

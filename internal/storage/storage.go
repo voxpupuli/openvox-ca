@@ -59,22 +59,29 @@ type StorageService struct {
 	localLocks sync.Map
 }
 
-// WithLock runs fn while holding the named lock. When the underlying
-// backend implements Locker, the lock is coordinated across nodes;
-// otherwise it falls back to a process-local named mutex, sufficient for
-// single-node backends. The lock is always released when fn returns,
-// including on panic.
+// WithLock runs fn while holding the named lock, taking the strongest lock the
+// backend offers. The lock is always released when fn returns, including on
+// panic. Three tiers, tried in order:
+//
+//  1. Locker — coordinated across every replica sharing the backend
+//     (etcd, Redis, PostgreSQL, MySQL).
+//  2. SameHostLocker — coordinated across every process on this host, an
+//     flock(2) on the single-node backends (filesystem, SQLite). Enough to
+//     stop an `openvox-ca-ctl` command corrupting a running server's state;
+//     no promise at all across hosts, which is what those backends are
+//     scoped to.
+//  3. A process-local named mutex, for a backend offering neither.
 //
 // Names should be stable and descriptive (e.g. "bootstrap", "crl",
 // "subject:<name>") since all callers using the same name contend on the
 // same lock.
 //
-// ctx bounds only the cross-node half of an acquisition. Callers inside one
-// process serialise on a plain mutex first — the fallback below for backends
-// without a Locker, and inside each Locker's own AcquireLock for those with one
-// — and sync.Mutex.Lock takes no context. A deadline therefore caps how long
-// this waits for another *replica*, not for another goroutine here, which is
-// why an inverted lock order deadlocks rather than timing out. See
+// ctx bounds only the *other-process* half of an acquisition. Callers inside
+// one process serialise on a plain mutex first — the tier-3 fallback below, and
+// inside each tier-1/tier-2 implementation's own acquisition — and
+// sync.Mutex.Lock takes no context. A deadline therefore caps how long this
+// waits for another replica or another process, not for another goroutine here,
+// which is why an inverted lock order deadlocks rather than timing out. See
 // docs/development/locking.md.
 func (s *StorageService) WithLock(ctx context.Context, name string, fn func() error) error {
 	if lk, ok := s.backend.(Locker); ok {
@@ -90,9 +97,28 @@ func (s *StorageService) WithLock(ctx context.Context, name string, fn func() er
 		if !errors.Is(err, ErrDistributedLockingUnsupported) {
 			return fmt.Errorf("acquiring distributed lock %q: %w", name, err)
 		}
-		// Backend advertises Locker but cannot actually provide one (e.g.
-		// OverlayBackend wrapping a filesystem base); fall through to the
-		// process-local mutex, which is correct for single-node backends.
+		// Backend advertises Locker but cannot actually provide one (SQLite;
+		// OverlayBackend wrapping a base without one). Try the same-host tier,
+		// which those two backends do provide.
+	}
+	if hl, ok := s.backend.(SameHostLocker); ok {
+		ul, err := hl.AcquireSameHostLock(ctx, name)
+		if err == nil {
+			defer func() {
+				if err := ul.Unlock(); err != nil {
+					slog.Warn("Failed to release same-host lock", "name", name, "error", err)
+				}
+			}()
+			return fn()
+		}
+		if !errors.Is(err, ErrSameHostLockingUnsupported) {
+			// A contended lock that outlasts ctx arrives here, and failing is
+			// the point of the tier: an operator running a second process
+			// against a live store gets told so, instead of both writing.
+			return fmt.Errorf("acquiring same-host lock %q: %w", name, err)
+		}
+		// No same-host lock either (an in-memory SQLite database, a platform
+		// without flock(2), an overlay over a base with neither): fall through.
 	}
 	m := s.localNamedLock(name)
 	m.Lock()
