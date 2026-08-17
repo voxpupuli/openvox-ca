@@ -519,19 +519,32 @@ func (s *StorageService) InventoryEntries(ctx context.Context) ([]InventoryEntry
 // missing stored value is a baseline to establish rather than a failure.
 //
 // Split out so a caller holding the inventory can verify without recomputing
-// from storage. verifyInventoryHMACLocked is the same check for a caller that
-// does not, and both must stay in step.
+// from storage. verifyInventoryHMACLocked is the same comparison for a caller
+// that has not computed the value itself.
 //
 // It takes no HMAC key, deliberately: the key has already been consumed in
 // producing computed, and a parameter that looks like it participates in the
 // comparison but does not is how the two sides come to be keyed differently
-// without anything failing. Caller must hold inventoryMu.
+// without anything failing.
+//
+// It differs from verifyInventoryHMACLocked in one way, also deliberately: a
+// missing stored value is accepted without establishing one. That function
+// baselines because its callers hold the write lock and one of them is
+// InitHMAC, whose job that is; this one is reached from InventoryEntries under
+// a *read* lock, and a read path writing to storage — from every replica at
+// once, on a timer — is not worth leaving available for the sake of a state
+// InitHMAC has already ruled out before the CA serves anything. The security
+// posture is unchanged either way: an inventory whose MAC was deleted alongside
+// the edit verifies clean, which SubjectForSerial's comment above sets out at
+// length as a known, accepted limit of the scheme.
+//
+// Caller must hold inventoryMu (read or write).
 func (s *StorageService) compareInventoryMACLocked(ctx context.Context, computed []byte) error {
 	storedMAC, err := s.backend.Get(ctx, KeyInventoryHMAC)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			slog.Info("No inventory HMAC found; initializing integrity baseline")
-			return s.backend.Put(ctx, KeyInventoryHMAC, computed, BlobPrivate)
+			slog.Warn("No inventory HMAC stored; skipping the integrity check for this read")
+			return nil
 		}
 		return fmt.Errorf("reading inventory HMAC: %w", err)
 	}

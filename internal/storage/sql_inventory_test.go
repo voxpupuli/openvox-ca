@@ -171,6 +171,25 @@ var _ = Describe("SQLiteInventoryEntriesIntegrity", func() {
 			"every appended entry must come back, or the tamper assertions below are vacuous")
 	})
 
+	// The arm that runs when there is no stored value to compare against.
+	// InitHMAC establishes one before the CA serves anything, so this is
+	// unreachable in production — but InventoryEntries is exported and holds
+	// only a read lock, and the arm it replaced established the baseline with a
+	// Put. A read path that writes, from every replica at once on a timer, is
+	// the thing this pins shut.
+	It("accepts a missing stored value without writing one", func() {
+		svc, b := newInventoryService()
+		Expect(b.Delete(ctx, KeyInventoryHMAC)).To(Succeed(), "delete stored MAC")
+
+		entries, err := svc.InventoryEntries(ctx)
+		Expect(err).NotTo(HaveOccurred(), "a missing MAC must not fail the read")
+		Expect(entries).To(HaveLen(len(sampleInventoryLines)))
+
+		exists, err := b.Exists(ctx, KeyInventoryHMAC)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(exists).To(BeFalse(), "a read must not establish the baseline; that is InitHMAC's job")
+	})
+
 	It("refuses a modified row", func() {
 		svc, b := newInventoryService()
 		_, err := b.db.NewUpdate().

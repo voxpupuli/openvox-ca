@@ -159,9 +159,11 @@ tests:
   # the window stays true until the window rolls past the step. This pins the
   # latching behaviour the config comment describes — a `for` cannot debounce
   # this expression, and a reader who assumed it could would size the knobs
-  # wrongly. The 40-sample series ends well inside the 1h window, so shortening
-  # ocspIndexSyncWindow below ~40m fails this case: the window is constrained
-  # here and nowhere else.
+  # wrongly. It is also the only case that constrains ocspIndexSyncWindow at all
+  # — case 1's counter rises every step, so any window over a couple of minutes
+  # satisfies it. The single step is at t=0 and the assertion is at t=35m, so
+  # increase() sees it only while the window exceeds 35m: any value of 35m or
+  # less fails here.
   - interval: 1m
     name: OCSP index sync latches after a single failure
     input_series:
