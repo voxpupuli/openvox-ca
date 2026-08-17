@@ -492,7 +492,7 @@ func (s *StorageService) InventoryEntries(ctx context.Context) ([]InventoryEntry
 			for _, e := range entries {
 				head = chainInventoryMAC(s.hmacKey, head, canonicalInventoryLine(e))
 			}
-			if err := s.compareInventoryMACLocked(ctx, s.hmacKey, head); err != nil {
+			if err := s.compareInventoryMACLocked(ctx, head); err != nil {
 				return nil, err
 			}
 		}
@@ -507,7 +507,7 @@ func (s *StorageService) InventoryEntries(ctx context.Context) ([]InventoryEntry
 		// Hashed over the bytes as stored, never over a re-render of the parsed
 		// entries: the blob scheme covers the blob, and a round trip through
 		// parse-and-render need not reproduce it byte for byte.
-		if err := s.compareInventoryMACLocked(ctx, s.hmacKey, wholeBlobInventoryMAC(s.hmacKey, data)); err != nil {
+		if err := s.compareInventoryMACLocked(ctx, wholeBlobInventoryMAC(s.hmacKey, data)); err != nil {
 			return nil, err
 		}
 	}
@@ -520,8 +520,13 @@ func (s *StorageService) InventoryEntries(ctx context.Context) ([]InventoryEntry
 //
 // Split out so a caller holding the inventory can verify without recomputing
 // from storage. verifyInventoryHMACLocked is the same check for a caller that
-// does not, and both must stay in step. Caller must hold inventoryMu.
-func (s *StorageService) compareInventoryMACLocked(ctx context.Context, hmacKey, computed []byte) error {
+// does not, and both must stay in step.
+//
+// It takes no HMAC key, deliberately: the key has already been consumed in
+// producing computed, and a parameter that looks like it participates in the
+// comparison but does not is how the two sides come to be keyed differently
+// without anything failing. Caller must hold inventoryMu.
+func (s *StorageService) compareInventoryMACLocked(ctx context.Context, computed []byte) error {
 	storedMAC, err := s.backend.Get(ctx, KeyInventoryHMAC)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
