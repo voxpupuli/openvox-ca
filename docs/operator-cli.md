@@ -29,6 +29,19 @@ root plus its intermediates can be passed as one file. A file holding no usable
 certificate (a DER export, a truncated download, the wrong file) is rejected
 before the connection is attempted rather than failing later in the handshake.
 
+`--insecure` disables verification of the **server** and nothing else. The
+client certificate is still sent, and the server still verifies it in full:
+chain back to this CA, the client-authentication extended key usage, and the
+serial against the CRL. None of that is influenced by a flag on the client. So
+`--insecure` widens what *you* will talk to; it does not widen what the server
+will accept from you.
+
+That distinction is worth having in advance, because the `WARNING:` line says
+`vulnerable to MITM` and an operator part-way through a key ceremony may
+reasonably decline on those grounds — see [The first credential on a new
+CA](#the-first-credential-on-a-new-ca), where it is the flag that unblocks the
+one route available.
+
 `--client-cert` and `--client-key` must be supplied together; giving only one is
 an error.
 
@@ -303,6 +316,9 @@ command exists for the two cases the API cannot serve:
   by starting the CA temporarily on loopback with TLS disabled, where every
   endpoint is unauthenticated — which is exactly the dance the migration guide
   used to prescribe, and what this command exists to make unnecessary.
+  [The first credential on a new CA](#the-first-credential-on-a-new-ca) walks
+  through that case: it is a deadlock rather than an inconvenience, and it is
+  the one an operator meets first.
 
 `--dns` adds subject alternative names, repeatable or comma-separated. Supplying
 it **suppresses CN promotion**: with no `--dns`, the certname is added as a DNS
@@ -620,3 +636,64 @@ worth knowing when deciding who gets a shell on the CA host.
 Where the caller has a stable CN, `--puppet-server` remains the lower-privilege
 alternative: an allow-list entry is withdrawn by editing a file and restarting,
 with none of the above.
+
+#### The first credential on a new CA
+
+A CA that has just been stood up — self-signed, or a Transit-backed sub-CA whose
+chain has only now been imported — has a deadlock in it. It is easy to walk into
+and hard to reason about from inside, so it is worth meeting on paper first:
+
+- signing a pending request is an admin-tier operation;
+- admin membership is the `--puppet-server` allow list, or `pp_cli_auth`;
+- client certificates are verified against **this** CA and no other.
+
+The allow list is a list of names, and it survives the change perfectly well.
+What does not survive is the certificates behind those names: they were issued
+by the CA you have just replaced, so they no longer verify, and an allow-listed
+name whose certificate does not verify never reaches the tier check. The first
+agent to check in leaves a pending CSR that nothing in existence can sign.
+
+Nothing is broken at that point. There is simply no credential yet that this CA
+will accept, and no way to create one through an API that requires one.
+
+`generate` is the way out, because it never touches the API:
+
+```bash
+# 1. Mint the first administrator credential, offline, against the new CA.
+openvox-ca generate --certname openvox-admin --ttl 8760h --pp-cli-auth \
+  --key-out openvox-admin_key.pem > openvox-admin.crt
+
+# 2. Start the server. It indexes the new serial as it comes up.
+
+# 3. Sign the waiting request, using the credential from step 1.
+openvox-ca-ctl sign --certname agent01.example.com \
+  --client-cert openvox-admin.crt --client-key openvox-admin_key.pem \
+  --insecure
+```
+
+Minting **before** the first start, rather than after, is also what keeps step 1
+in the case that needs no coordination: no server is running, so none of
+[Running alongside a live server](#running-alongside-a-live-server) applies. If
+the server is already up, read that section first — the answer depends on your
+storage backend.
+
+Two details in that sequence cost time if you meet them cold.
+
+**`--ttl` has no default and step 1 fails without it.** That is deliberate, for
+the reason given above, and it fails before doing anything — but a bare `required
+flag(s) "ttl" not set` part-way through a ceremony reads as the command being
+broken rather than as an argument you have not supplied yet.
+
+**Step 3 needs `--insecure`, and that is less alarming than it sounds.** The
+serving certificate names the CA's public hostname; you are connecting to
+`localhost`, the default `--server-url`, so the name check fails. `--insecure`
+turns off verification of the *server* only. The credential you just minted is
+still verified in full at the other end — chain, extended key usage and
+revocation — so this weakens what you will talk to, not what the CA will accept
+from you.
+
+If you would rather not pass it at all, the alternative is to reach the server
+by a name on its certificate, arranging resolution locally and passing
+`--server-url https://puppet.example.com:8140`. That is the same trust decision
+made in a different place, not a stronger one; the flag is not the thing to
+avoid here.

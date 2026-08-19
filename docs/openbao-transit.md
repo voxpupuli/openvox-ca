@@ -301,6 +301,31 @@ unauthenticated at `GET /certificate/ca`, so anything in that file is published.
 `bao write pki/intermediate/generate/exported ... format=pem_bundle` produces
 exactly that shape, which is why the check exists.
 
+#### Transit will not hold the CA certificate alongside its key
+
+`transit/keys/<openbao.key_name>/set-certificate` looks like the way to record
+which certificate belongs to the key OpenBao is holding — the more so because
+its sibling `transit/keys/<openbao.key_name>/csr` does exactly what you would
+expect. It will not take a CA certificate, and the error does not explain
+itself:
+
+```text
+certificate in the first element is not a valid leaf certificate
+```
+
+The endpoint exists for end-entity certificates. It rejects any chain whose
+first element carries `basicConstraints` with `CA:TRUE` — which every CA
+certificate does, including the one your parent has just signed. There is no
+parameter that relaxes it.
+
+The consequence is worth stating plainly, because nothing surfaces it: **a
+Transit-backed CA has no record inside OpenBao of which certificate its key
+belongs to.** Transit holds the key, openvox-ca's storage backend holds the
+certificate, and the only thing tying them together is whatever you wrote down.
+Keep `signed-chain.pem` somewhere durable and off the cluster. `import-ca-cert`
+will reinstall it, and proves the binding when it does — but only if you still
+have the file.
+
 ### The server will not start between steps 1 and 3
 
 This is by design and is worth expecting. After `csr --create-key` the key
