@@ -300,6 +300,53 @@ published alongside this CA's own CRL at
 whatever it contains is what gets published, so a CRL removed from it disappears
 from the served chain. Refresh it by whatever mechanism you already have — a
 mounted Secret, a sidecar, a CronJob — and openvox-ca picks the change up.
+Getting the file there in the *first* place carries an ordering requirement,
+which is what the next section is about.
+
+### Order the writer before the server
+
+**Whatever populates `crl_chain_file` must be ordered before the server starts,
+not merely started alongside it.**
+
+The refresh job runs a pass immediately rather than waiting out its first tick,
+so a file already in place is picked up at startup. A file that is not there
+*yet* is not an error — an absent file is no statement, as below — so the CA
+starts, publishes its own CRL alone, and does not look again until
+`crl_chain_refresh_interval_sec` elapses. For that whole interval every agent on
+the default `certificate_revocation = chain` rejects the CRL it is served.
+
+This is the ordinary shape of the deployment rather than an unusual one: where
+the thing that writes the file starts concurrently with the server — a sidecar,
+a config-management run, a job fetching a CDP — the server generally wins the
+race, having nothing to fetch.
+
+Nothing rescues that window:
+
+- **No counter moves.** An absent file is not a failure, so
+  `puppetca_crl_chain_refresh_failures_total` stays flat. The one signal is
+  `puppetca_crl_chain_last_read_timestamp_seconds` reading `0`, which
+  `PuppetCAUpstreamCRLNeverRead` alerts on — after the shipped mixin's
+  `for: 15m`. At the default hourly interval that is a quarter of an hour of
+  failing agents before anything fires; at a fifteen-minute interval the outage
+  ends about when the alert would have. Neither arrives in time to be a warning.
+- **The other trigger does not fire.** The file is re-read on every CRL
+  amendment too, but amendments come from revoking or cleaning a certificate —
+  operator activity, not something a fleet of agents failing verification
+  produces. Nor does the scheduled re-sign of this CA's own CRL, which runs only
+  as that CRL nears expiry, and a CA that has just started has just signed one.
+
+So gate the server on the file rather than leaving it to the timer. In
+Kubernetes that is a native sidecar: run whatever writes the file as an
+`initContainer` with `restartPolicy: Always`, and give *that container* a
+`startupProbe` which does not succeed until the file is non-empty. A native
+sidecar's startup probe gates the containers after it, so the server cannot
+start before the chain exists. Under systemd the equivalent is an ordering
+dependency — `Before=` on the unit that writes the file, or an `ExecStartPre=`
+that waits for it — rather than two units started together.
+
+Probe for a **non-empty** file, not merely an existing one: a zero-byte file is
+a deliberate statement here (see the table below), so a probe testing only for
+existence passes on exactly the case that publishes no ancestors at all.
 
 ### What each failure to read the file does
 
