@@ -51,6 +51,16 @@
       ],
       "depNameTemplate": "github.com/yannh/kubeconform",
       "datasourceTemplate": "go"
+    },
+    {
+      "customType": "regex",
+      "description": "Update versions carrying a '# renovate:' annotation in GitHub Actions workflows, for values no manager can attribute on its own (ci.yml's Helm matrix is a bare list of strings, not an action reference)",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/.*\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: packageName=(?<packageName>\\S+))?\\s+- (?<currentValue>\\S+)"
+      ]
     }
   ],
 
@@ -75,6 +85,23 @@
         "quay.io/centos/centos"
       ],
       "pinDigests": false
+    },
+    {
+      "description": "The chart is validated against both Helm majors in ci.yml's chart matrix and packaged by one of them in helm-chart.yml; dev:check (verifyChartPins) refuses a packaging pin the matrix does not list, so the matrix leg and the packaging pin have to arrive together. Renovate's default branch topic already co-locates them (same depName, same newMajor); grouping per major states that requirement instead of inheriting it. The major must stay in the group name — a bare 'Helm' collapses both legs into one branch, which is the coupling ci.yml's fail-fast: false exists to avoid",
+      "matchPackageNames": [
+        "helm/helm"
+      ],
+      "groupName": "Helm {{{newMajor}}}"
+    },
+    {
+      "description": "Never offer to move a Helm pin across a major. Each matrix leg exists to cover the major it names, so a major update proposes deleting that coverage rather than refreshing it, and it would collide with the other leg's own patch update in the same group. Adding or retiring a major is a hand edit to the matrix",
+      "matchPackageNames": [
+        "helm/helm"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "enabled": false
     },
     {
       "description": "Allow Renovate to bump the 'go' directive in go.mod",

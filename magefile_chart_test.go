@@ -21,6 +21,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -280,6 +281,250 @@ var _ = Describe("verifyChartPins", func() {
 			pub := []byte("jobs:\n  publish:\n    steps:\n      - uses: Azure/setup-helm@abc\n" +
 				"        with:\n          version: v3.21.3\n")
 			Expect(verifyChartPinsIn(goodChart, goodCI, pub)).To(Succeed())
+		})
+	})
+
+	// The matrix is a bare list of strings, so Renovate only maintains a leg
+	// that carries an annotation its customManager matches. An unannotated leg
+	// is the quiet failure: nothing goes red, the version just stops moving.
+	// The guard reads renovate.json's own expression rather than a copy of it,
+	// so these exercise both files — drift on either side has to fail.
+	Describe("Renovate annotations on the helm matrix", func() {
+		const annotation = "          # renovate: datasource=github-releases depName=helm packageName=helm/helm\n"
+		annotated := []byte("jobs:\n  chart:\n    strategy:\n      matrix:\n        helm:\n" +
+			annotation + "          - v3.21.3\n" +
+			annotation + "          - v4.2.3\n")
+
+		// The real renovate.json, so the fixtures are matched by the expression
+		// Renovate will actually use rather than one written to suit them.
+		realRenovate, readErr := os.ReadFile("renovate.json")
+
+		BeforeEach(func() {
+			Expect(readErr).NotTo(HaveOccurred())
+		})
+
+		It("accepts a matrix whose every entry is annotated", func() {
+			Expect(verifyCIHelmAnnotationsIn(annotated, realRenovate)).To(Succeed())
+		})
+
+		It("rejects an entry added without an annotation", func() {
+			bare := append(append([]byte{}, annotated...), []byte("          - v5.0.0\n")...)
+			Expect(verifyCIHelmAnnotationsIn(bare, realRenovate)).To(
+				MatchError(ContainSubstring("lists Helm v5.0.0")))
+			Expect(verifyCIHelmAnnotationsIn(bare, realRenovate)).To(
+				MatchError(ContainSubstring("without a '# renovate:' annotation")))
+		})
+
+		// The same fault read the other way. Note what does NOT need guarding:
+		// a comment left dangling above nothing matches no annotation and is
+		// inert. What bites is an annotation that still has a value under it
+		// but sits outside the matrix — Renovate keeps bumping a version no job
+		// runs, churning PRs against a line nobody reads.
+		It("rejects an annotated list item outside the chart matrix", func() {
+			stray := []byte("jobs:\n  chart:\n    strategy:\n      matrix:\n        helm:\n" +
+				annotation + "          - v3.21.3\n" +
+				annotation + "          - v4.2.3\n" +
+				"  other:\n    steps:\n" +
+				annotation + "          - v2.17.0\n")
+			Expect(verifyCIHelmAnnotationsIn(stray, realRenovate)).To(
+				MatchError(ContainSubstring("annotation for v2.17.0 (line 13)")))
+			Expect(verifyCIHelmAnnotationsIn(stray, realRenovate)).To(
+				MatchError(ContainSubstring("not a chart matrix entry")))
+		})
+
+		// Two strays, so the report has something to choose between: the lowest
+		// line is the one a reader scrolls to first.
+		//
+		// The repetitions sample Go's random map-iteration start offset, and
+		// they are not a coin flip. Matches are collected in ascending line
+		// order, so an unsorted range still happens to yield the lower line for
+		// most start offsets — one in eight reverses them. Sixty-four rounds
+		// put an unsorted implementation's survival near 2e-4; eight would let
+		// it through about a third of the time. Correct code is deterministic,
+		// so this never flakes in the other direction.
+		It("reports the lowest stray line when there is more than one", func() {
+			strays := []byte("jobs:\n  chart:\n    strategy:\n      matrix:\n        helm:\n" +
+				annotation + "          - v3.21.3\n" +
+				annotation + "          - v4.2.3\n" +
+				"  other:\n    steps:\n" +
+				annotation + "          - v2.17.0\n" +
+				annotation + "          - v2.16.0\n")
+			for range 64 {
+				Expect(verifyCIHelmAnnotationsIn(strays, realRenovate)).To(
+					MatchError(ContainSubstring("annotation for v2.17.0 (line 13)")))
+			}
+		})
+
+		// A comment naming some other package is not this annotation: it would
+		// leave the leg unmanaged while looking managed to a reader. Derived
+		// from the accepting fixture so the package name is the only thing that
+		// can differ — a hand-written near-copy could pass on a stray typo and
+		// stop testing the discrimination it is named for.
+		It("does not accept an annotation for a different package", func() {
+			wrong := bytes.Replace(annotated, []byte("packageName=helm/helm"), []byte("packageName=helm/chart-testing"), 1)
+			Expect(verifyCIHelmAnnotationsIn(wrong, realRenovate)).To(
+				MatchError(ContainSubstring("lists Helm v3.21.3")))
+			Expect(verifyCIHelmAnnotationsIn(wrong, realRenovate)).To(
+				MatchError(ContainSubstring("without a '# renovate:' annotation")))
+		})
+
+		// The annotation vouches only for the entry it sits above. Matching on
+		// the version alone would let this decoy — the right annotation in the
+		// wrong job — cover a bare matrix entry, and the leg would be exactly
+		// as invisible to Renovate as if nothing had been annotated at all.
+		It("does not let an annotation elsewhere in the file cover a bare entry", func() {
+			decoy := []byte("jobs:\n  other:\n    steps:\n" +
+				annotation + "          - v4.2.3\n" +
+				"  chart:\n    strategy:\n      matrix:\n        helm:\n" +
+				annotation + "          - v3.21.3\n" +
+				"          - v4.2.3\n")
+			// The line is the assertion here: the decoy's own v4.2.3 sits on
+			// line 5, so naming line 12 is what proves the pairing is by
+			// position and not by version.
+			Expect(verifyCIHelmAnnotationsIn(decoy, realRenovate)).To(
+				MatchError(ContainSubstring("lists Helm v4.2.3 (line 12) without a '# renovate:' annotation")))
+		})
+
+		// A quoted entry is legal YAML and identical to ciChartHelmMatrix, so
+		// it looks harmless — but Renovate matches raw text and would carry the
+		// quotes into the lookup, which then finds nothing and says nothing.
+		// The guard has to name that, and name it as its own fault rather than
+		// as a missing annotation, or the message sends a maintainer looking at
+		// the comment sitting correctly right above the entry.
+		It("rejects an entry written as a quoted scalar, naming the real fault", func() {
+			quoted := bytes.Replace(annotated, []byte("- v4.2.3"), []byte(`- "v4.2.3"`), 1)
+			Expect(verifyCIHelmAnnotationsIn(quoted, realRenovate)).To(
+				MatchError(ContainSubstring(`reads "\"v4.2.3\"" from that line`)))
+			Expect(verifyCIHelmAnnotationsIn(quoted, realRenovate)).To(
+				MatchError(ContainSubstring("Write the version as a bare scalar")))
+		})
+
+		// The other half of the contract: renovate.json is where the annotation
+		// stops being inert prose. Deleting or narrowing the customManager has
+		// to fail here, or the config could be gutted with every check green.
+		It("rejects a renovate.json with no annotation customManager", func() {
+			Expect(verifyCIHelmAnnotationsIn(annotated, []byte(`{"customManagers": []}`))).To(
+				MatchError(ContainSubstring("no regex customManager that covers .github/workflows/ci.yml")))
+		})
+
+		It("rejects a customManager narrowed so it no longer matches the annotations", func() {
+			narrowed := bytes.Replace(realRenovate,
+				[]byte(`# renovate: datasource=(?<datasource>`), []byte(`# renovate-disabled: datasource=(?<datasource>`), 1)
+			Expect(narrowed).NotTo(Equal(realRenovate), "the customManager regex should be present to narrow")
+			Expect(verifyCIHelmAnnotationsIn(annotated, narrowed)).To(
+				MatchError(ContainSubstring("without a '# renovate:' annotation")))
+		})
+
+		// The other way to stop the manager reaching ci.yml, and the one the
+		// regex check alone cannot see: leave the expression intact and point
+		// the manager at a different file.
+		//
+		// Edited structurally rather than by bytes.Replace: all four managers
+		// share the same managerFilePatterns string, so a textual replace
+		// silently narrows whichever comes first — which is not this one, and
+		// leaves the spec passing for a reason it does not name.
+		It("rejects a customManager whose managerFilePatterns no longer cover ci.yml", func() {
+			var cfg map[string]any
+			Expect(json.Unmarshal(realRenovate, &cfg)).To(Succeed())
+			managers, ok := cfg["customManagers"].([]any)
+			Expect(ok).To(BeTrue(), "renovate.json should declare customManagers")
+
+			narrowed := 0
+			for _, m := range managers {
+				mm, ok := m.(map[string]any)
+				Expect(ok).To(BeTrue())
+				ms, _ := mm["matchStrings"].([]any)
+				if len(ms) > 0 && strings.Contains(ms[0].(string), "# renovate:") {
+					mm["managerFilePatterns"] = []any{`/^\.github/workflows/helm-chart\.yml$/`}
+					narrowed++
+				}
+			}
+			Expect(narrowed).To(Equal(1), "exactly one annotation customManager should have been narrowed")
+
+			elsewhere, err := json.Marshal(cfg)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(verifyCIHelmAnnotationsIn(annotated, elsewhere)).To(
+				MatchError(ContainSubstring("no regex customManager that covers .github/workflows/ci.yml")))
+		})
+
+		// Anchored to the annotation manager specifically: a future manager
+		// added ahead of it could otherwise absorb the mutation and leave this
+		// passing while testing something else entirely.
+		It("rejects a customManager whose regex Renovate could not compile", func() {
+			broken := bytes.Replace(realRenovate,
+				[]byte(`(?<currentValue>\\S+)`), []byte(`(?<currentValue>\\S+`), 1)
+			Expect(broken).NotTo(Equal(realRenovate), "the currentValue group should be present to break")
+			Expect(verifyCIHelmAnnotationsIn(annotated, broken)).To(
+				MatchError(ContainSubstring("Renovate could not compile")))
+			Expect(verifyCIHelmAnnotationsIn(annotated, broken)).To(
+				MatchError(ContainSubstring(`# renovate: datasource=`)))
+		})
+
+		// An annotation Renovate cannot resolve is as good as no annotation:
+		// with no datasourceTemplate to fall back on, it logs and skips, and
+		// the leg stops being bumped with nothing going red.
+		It("rejects an annotation whose datasource is misspelt", func() {
+			typo := bytes.Replace(annotated,
+				[]byte("datasource=github-releases"), []byte("datasource=github-release"), 1)
+			Expect(typo).NotTo(Equal(annotated), "the datasource should be present to misspell")
+			Expect(verifyCIHelmAnnotationsIn(typo, realRenovate)).To(
+				MatchError(ContainSubstring("lists Helm v3.21.3")))
+		})
+
+		// The reader's own failure branches. Without these, mutating either to
+		// a nil error leaves the suite green while the guard degrades to a
+		// no-op on any ci.yml whose matrix has moved. They are asserted
+		// separately because the whole point of the two messages is that they
+		// send a maintainer to different lines.
+		It("rejects a chart job with no helm matrix at all", func() {
+			noMatrix := []byte("jobs:\n  chart:\n    strategy:\n      matrix:\n        other: [a]\n")
+			Expect(verifyCIHelmAnnotationsIn(noMatrix, realRenovate)).To(
+				MatchError(ContainSubstring("could not read the chart job's helm matrix")))
+			Expect(verifyCIHelmAnnotationsIn(noMatrix, realRenovate)).To(
+				MatchError(ContainSubstring("declares no helm matrix legs")))
+		})
+
+		It("rejects a ci.yml with no chart job, naming that instead", func() {
+			noChart := []byte("jobs:\n  other:\n    steps: []\n")
+			Expect(verifyCIHelmAnnotationsIn(noChart, realRenovate)).To(
+				MatchError(ContainSubstring("has no 'chart' job to read a helm matrix from")))
+		})
+
+		// The permissive branch of renovateManagerCoversCI. Renovate also
+		// accepts glob patterns, which this guard declines to reimplement
+		// rather than risk failing the build on a correct config — a decision
+		// that silently reverts if nothing holds it.
+		It("accepts a customManager whose file patterns use the glob spelling", func() {
+			var cfg map[string]any
+			Expect(json.Unmarshal(realRenovate, &cfg)).To(Succeed())
+			managers, ok := cfg["customManagers"].([]any)
+			Expect(ok).To(BeTrue(), "renovate.json should declare customManagers")
+
+			globbed := 0
+			for _, m := range managers {
+				mm, ok := m.(map[string]any)
+				Expect(ok).To(BeTrue())
+				ms, _ := mm["matchStrings"].([]any)
+				if len(ms) > 0 && strings.Contains(ms[0].(string), "# renovate:") {
+					mm["managerFilePatterns"] = []any{".github/workflows/*.yml"}
+					globbed++
+				}
+			}
+			Expect(globbed).To(Equal(1), "exactly one annotation customManager should have been reglobbed")
+
+			glob, err := json.Marshal(cfg)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(verifyCIHelmAnnotationsIn(annotated, glob)).To(Succeed())
+		})
+
+		// The synthetic shapes above prove the branches; this proves the pair
+		// of files actually in the repo agree, which is the thing that has to
+		// hold. It names the annotation check specifically, so a failure points
+		// at ci.yml or renovate.json rather than at any of the other pins.
+		It("finds the real ci.yml and renovate.json in agreement", func() {
+			ciSrc, err := os.ReadFile(filepath.Join(".github", "workflows", "ci.yml"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(verifyCIHelmAnnotationsIn(ciSrc, realRenovate)).To(Succeed())
 		})
 	})
 })

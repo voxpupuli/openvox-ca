@@ -57,7 +57,11 @@ against the 1.26 schemas in CI). Two optional values need more:
 `podDisruptionBudget.unhealthyPodEvictionPolicy` needs 1.27, and
 `service.trafficDistribution` needs 1.31.
 
-Helm 3.21 or 4.2; both are exercised in CI.
+Helm 3 or 4. CI validates the chart against one pinned version of each major —
+see the chart matrix in
+[`.github/workflows/ci.yml`](https://github.com/voxpupuli/openvox-ca/blob/main/.github/workflows/ci.yml).
+Renovate moves those pins forward within each major, so treat them as the
+tested floor rather than a ceiling; naming them here would go stale on its own.
 
 ## Values
 

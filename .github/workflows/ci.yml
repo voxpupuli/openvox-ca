@@ -132,10 +132,28 @@ jobs:
       fail-fast: false
       matrix:
         # Both supported Helm majors: the chart has to render identically for
-        # users still on 3 and for those who have moved to 4. Bumped by hand —
-        # Renovate would collapse the pair onto whichever is newest, which is
-        # precisely the coverage this matrix exists to keep.
-        helm: [v3.21.3, v4.2.3]
+        # users still on 3 and for those who have moved to 4. Renovate keeps
+        # each leg current within its own major, one PR per major — the Helm 3
+        # PR carries this leg and helm-chart.yml's packaging pin together,
+        # because verifyChartPins refuses them separately. The two majors stay
+        # in separate PRs on purpose: fail-fast: false above says a Helm 4
+        # regression must not take the Helm 3 leg down with it, and a shared PR
+        # would do exactly that.
+        #
+        # Major bumps are off (see renovate.json): moving a leg across a major
+        # deletes the coverage that leg exists to provide, and adding or
+        # retiring a major is a decision about what the chart supports rather
+        # than a version bump. The cost is that nothing here will announce
+        # Helm 5 — that one is on whoever is watching upstream.
+        #
+        # Renovate only sees an entry that carries the annotation below;
+        # verifyChartPins fails the build on one that does not, because a leg
+        # it cannot see is a leg that silently goes stale.
+        helm:
+          # renovate: datasource=github-releases depName=helm packageName=helm/helm
+          - v3.21.3
+          # renovate: datasource=github-releases depName=helm packageName=helm/helm
+          - v4.2.3
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0

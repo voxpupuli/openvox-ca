@@ -92,6 +92,12 @@ jobs:
           # validated the chart against — packaging with a Helm nobody linted
           # the chart on is how a chart ships broken. `mage dev:check` enforces
           # it (verifyChartPins), so this is not left to a reader's diligence.
+          #
+          # Renovate keeps this current and groups it with ci.yml's Helm 3
+          # matrix leg (see renovate.json), so the two arrive in one PR and the
+          # gate above never sees them disagree; major bumps are off. It needs
+          # no '# renovate:' annotation the way ci.yml's legs do — this is an
+          # azure/setup-helm input, which Renovate attributes on its own.
           version: v3.21.3
 
       # Packaging goes through the same mage target CI runs, so the step CI

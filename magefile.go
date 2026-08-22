@@ -26,9 +26,11 @@ import (
 	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -787,9 +789,9 @@ func (Chart) Version() error {
 	return nil
 }
 
-// verifyChartPins asserts the two hand-maintained cross-file agreements the
-// chart depends on, in the same spirit as verifyDistVariants and wired into
-// dev:check alongside it:
+// verifyChartPins asserts the three cross-file agreements the chart depends
+// on, in the same spirit as verifyDistVariants and wired into dev:check
+// alongside it:
 //
 //   - kubeconformFloorVersion must be the floor Chart.yaml advertises, so the
 //     "checked promise rather than a claim" the constant's comment makes is
@@ -797,9 +799,15 @@ func (Chart) Version() error {
 //   - the Helm version helm-chart.yml packages with must be one the chart was
 //     validated against in ci.yml's matrix, because packaging with a Helm
 //     nobody linted the chart on is how a chart ships broken.
+//   - ci.yml's matrix and renovate.json must still agree on which Helm
+//     versions Renovate maintains: every matrix entry annotated, and no such
+//     annotation sitting anywhere but directly above one of those entries,
+//     which would point Renovate at a line no job runs.
 //
-// Both were previously guarded only by comments asking the next editor to keep
-// them in step.
+// The first two are hand-maintained and were previously guarded only by
+// comments asking the next editor to keep them in step. The third is the
+// opposite — it exists so the matrix stays current *without* anyone
+// remembering to bump it — and each has its own testable seam below.
 func verifyChartPins() error {
 	chartSrc, err := os.ReadFile(filepath.Join(chartDir, "Chart.yaml"))
 	if err != nil {
@@ -813,7 +821,14 @@ func verifyChartPins() error {
 	if err != nil {
 		return err
 	}
-	return verifyChartPinsIn(chartSrc, ciSrc, publishSrc)
+	renovateSrc, err := os.ReadFile("renovate.json")
+	if err != nil {
+		return err
+	}
+	if err := verifyChartPinsIn(chartSrc, ciSrc, publishSrc); err != nil {
+		return err
+	}
+	return verifyCIHelmAnnotationsIn(ciSrc, renovateSrc)
 }
 
 // kubeVersion: ">=1.26.0-0" — capture the bare version. Chart.yaml is parsed
@@ -870,6 +885,242 @@ func ciChartHelmMatrix(src []byte) ([]string, error) {
 	return j.Strategy.Matrix.Helm, nil
 }
 
+// helmPackageName is the package Renovate resolves a Helm version to, and the
+// name renovate.json's packageRules match on. The built-in github-actions
+// manager emits it for helm-chart.yml's azure/setup-helm step, and ci.yml's
+// annotations name it explicitly because a bare list of version strings gives
+// no manager anything to attribute.
+const helmPackageName = "helm/helm"
+
+// helmDatasource is where Renovate looks that package up. The annotation has to
+// name it too, and correctly: with no datasourceTemplate on the customManager
+// there is nothing to fall back to.
+const helmDatasource = "github-releases"
+
+// ciHelmMatrixEntry is one leg of ci.yml's chart matrix, with the line it sits
+// on. The line is what pairs a leg with its annotation: matching on the version
+// alone would let an annotation anywhere else in the file vouch for a bare
+// matrix entry, which is the same "reading a pin that belongs to something
+// else" failure ciChartHelmMatrix's decoy tests guard against.
+type ciHelmMatrixEntry struct {
+	Version string
+	Line    int
+}
+
+// ciHelmMatrixEntries returns the chart job's helm matrix legs with their line
+// numbers, read through the YAML node tree so it accepts the same entries
+// ciChartHelmMatrix does — a bare `- v3.21.3`, with or without a trailing
+// comment. A second textual parser here would drift from that one and report a
+// missing annotation for a leg whose annotation is sitting right above it,
+// exactly the phantom setupHelmVersion's case-insensitivity exists to avoid.
+//
+// The quoted form `- "v3.21.3"` parses here too, and is then rejected by the
+// caller rather than accepted: Renovate matches raw text, quotes included. See
+// verifyCIHelmAnnotationsIn.
+func ciHelmMatrixEntries(ciSrc []byte) ([]ciHelmMatrixEntry, error) {
+	var root yaml.Node
+	if err := yaml.Unmarshal(ciSrc, &root); err != nil {
+		return nil, err
+	}
+	if len(root.Content) == 0 {
+		return nil, fmt.Errorf("ci.yml is empty")
+	}
+	field := func(n *yaml.Node, key string) *yaml.Node {
+		if n == nil {
+			return nil
+		}
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			if n.Content[i].Value == key {
+				return n.Content[i+1]
+			}
+		}
+		return nil
+	}
+	// Distinct messages per step, rather than one shared with ciChartHelmMatrix:
+	// two readers of this same path emitting the same sentence would drift into
+	// disagreeing about the same fault, and "no chart job" and "chart job with
+	// no matrix" send a maintainer to different lines.
+	chart := field(field(root.Content[0], "jobs"), "chart")
+	if chart == nil {
+		return nil, fmt.Errorf("ci.yml has no 'chart' job to read a helm matrix from")
+	}
+	helm := field(field(field(chart, "strategy"), "matrix"), "helm")
+	if helm == nil || len(helm.Content) == 0 {
+		return nil, fmt.Errorf("ci.yml's chart job declares no helm matrix legs to annotate")
+	}
+	entries := make([]ciHelmMatrixEntry, 0, len(helm.Content))
+	for _, item := range helm.Content {
+		entries = append(entries, ciHelmMatrixEntry{Version: item.Value, Line: item.Line})
+	}
+	return entries, nil
+}
+
+// ciWorkflowPath is ci.yml as Renovate addresses it — repository-relative,
+// forward slashes — which is what managerFilePatterns are matched against.
+const ciWorkflowPath = ".github/workflows/ci.yml"
+
+// renovateManagerCoversCI reports whether a customManager's managerFilePatterns
+// would apply it to ci.yml.
+//
+// Renovate accepts two spellings. A slash-delimited entry is a regex, which is
+// what this repo uses throughout and what this checks exactly. Anything else is
+// a glob, whose minimatch semantics are more than this guard should reimplement
+// — those are accepted rather than guessed at, because a matcher that got
+// `**` subtly wrong would fail the build on a config that is perfectly correct,
+// and a phantom failure costs more here than the narrow case it would catch.
+func renovateManagerCoversCI(patterns []string) bool {
+	for _, p := range patterns {
+		body, ok := strings.CutPrefix(p, "/")
+		if !ok {
+			return true // glob form: not verified, not second-guessed
+		}
+		body, ok = strings.CutSuffix(body, "/")
+		if !ok {
+			return true
+		}
+		if re, err := regexp.Compile(body); err == nil && re.MatchString(ciWorkflowPath) {
+			return true
+		}
+	}
+	return false
+}
+
+// renovateHelmAnnotationRe returns the regex renovate.json's annotation
+// customManager actually uses: the regex-type manager that ci.yml's path falls
+// under and whose matchStrings capture both packageName and currentValue. The
+// other customManagers set their package by template and cannot describe a
+// helm/helm annotation.
+//
+// Reading Renovate's own expression rather than restating it is the point: a
+// copy here would agree on the day it was written and silently diverge later,
+// and the direction that costs is the quiet one, where the guard passes while
+// Renovate sees nothing. Every way to stop that manager reaching ci.yml fails
+// the build, though not all in the same place: deleting it, narrowing its
+// managerFilePatterns, or dropping a capture group land on the error here,
+// while a regex narrowed so it still captures both groups but no longer matches
+// the annotations lands on verifyCIHelmAnnotationsIn's missing-annotation error
+// instead. That second check is not redundant with this one.
+func renovateHelmAnnotationRe(renovateSrc []byte) (*regexp.Regexp, error) {
+	var cfg struct {
+		CustomManagers []struct {
+			CustomType          string   `json:"customType"`
+			ManagerFilePatterns []string `json:"managerFilePatterns"`
+			MatchStrings        []string `json:"matchStrings"`
+		} `json:"customManagers"`
+	}
+	if err := json.Unmarshal(renovateSrc, &cfg); err != nil {
+		return nil, fmt.Errorf("could not parse renovate.json: %w", err)
+	}
+	for _, cm := range cfg.CustomManagers {
+		// matchStrings only means a regex to a regex-type manager; a jsonata
+		// manager's are queries, and compiling one as a regex would be reading
+		// a pin that belongs to something else.
+		if cm.CustomType != "regex" || !renovateManagerCoversCI(cm.ManagerFilePatterns) {
+			continue
+		}
+		for _, ms := range cm.MatchStrings {
+			re, err := regexp.Compile(ms)
+			if err != nil {
+				// Renovate uses RE2 too, so an expression Go rejects is one
+				// Renovate would reject: worth failing on rather than skipping.
+				return nil, fmt.Errorf("renovate.json has a customManager matchStrings Renovate could not compile "+
+					"either (%q): %w", ms, err)
+			}
+			if re.SubexpIndex("packageName") >= 0 && re.SubexpIndex("currentValue") >= 0 {
+				return re, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("renovate.json has no regex customManager that covers %s and captures both packageName "+
+		"and currentValue, so nothing can pick up ci.yml's '# renovate:' Helm annotations and both matrix legs "+
+		"would silently stop being bumped", ciWorkflowPath)
+}
+
+// verifyCIHelmAnnotationsIn asserts ci.yml's chart matrix and renovate.json
+// still agree: every matrix leg carries an annotation renovate.json's own
+// customManager matches, and no such annotation sits anywhere but directly
+// above one of those legs — an annotated entry elsewhere in the file would have
+// Renovate bumping a line no job runs.
+//
+// Without it the failure is silent in the direction that costs the most: a leg
+// added without the annotation is invisible to Renovate, so it never bumps,
+// and nothing goes red — it just quietly validates the chart against a Helm
+// that stopped being current months ago. A stray annotation is the same fault
+// read the other way. Both halves are checked against renovate.json rather
+// than against a restatement of it, so editing either file breaks the build
+// loudly.
+func verifyCIHelmAnnotationsIn(ciSrc, renovateSrc []byte) error {
+	entries, err := ciHelmMatrixEntries(ciSrc)
+	if err != nil {
+		return fmt.Errorf("could not read the chart job's helm matrix: %w", err)
+	}
+	re, err := renovateHelmAnnotationRe(renovateSrc)
+	if err != nil {
+		return err
+	}
+
+	// Pair by line: an annotation vouches only for the entry it sits above.
+	group := func(loc []int, idx int) (string, bool) {
+		// A group that did not participate reports -1. The expression comes
+		// from renovate.json, so which groups are optional is not ours to
+		// assume — slicing on -1 would panic the whole gate.
+		if idx < 0 || loc[2*idx] < 0 {
+			return "", false
+		}
+		return string(ciSrc[loc[2*idx]:loc[2*idx+1]]), true
+	}
+	dsIdx := re.SubexpIndex("datasource")
+	pkgIdx, valIdx := re.SubexpIndex("packageName"), re.SubexpIndex("currentValue")
+	annotated := map[int]string{}
+	for _, loc := range re.FindAllSubmatchIndex(ciSrc, -1) {
+		// Every field Renovate needs to resolve the leg is checked, not just
+		// the one the packageRules key on: the customManager declares no
+		// datasourceTemplate fallback, so `datasource=github-release` — one
+		// character off, and a plausible hand-copy when a third leg is added —
+		// leaves Renovate unable to resolve it. It logs and moves on, which is
+		// the same silent staleness as no annotation at all.
+		if ds, ok := group(loc, dsIdx); !ok || ds != helmDatasource {
+			continue
+		}
+		if pkg, ok := group(loc, pkgIdx); !ok || pkg != helmPackageName {
+			continue
+		}
+		val, ok := group(loc, valIdx)
+		if !ok {
+			continue
+		}
+		annotated[1+bytes.Count(ciSrc[:loc[2*valIdx]], []byte("\n"))] = val
+	}
+
+	for _, e := range entries {
+		got, ok := annotated[e.Line]
+		if !ok {
+			return fmt.Errorf("ci.yml's chart matrix lists Helm %s (line %d) without a '# renovate:' annotation on "+
+				"the line above it that renovate.json's customManager matches, so Renovate cannot see that leg and "+
+				"would never bump it; annotate it the way the other entries are", e.Version, e.Line)
+		}
+		// The annotation is there and the line is right, but Renovate reads the
+		// raw text where the YAML parser reads a scalar. A quoted entry is the
+		// case that bites: Renovate would look up `"v3.21.3"`, quotes included,
+		// and find nothing — silently, since a datasource miss is not an error.
+		if got != e.Version {
+			return fmt.Errorf("ci.yml's chart matrix entry on line %d is Helm %s, but renovate.json's customManager "+
+				"reads %q from that line — Renovate matches raw text, so it would look that up verbatim and find "+
+				"nothing. Write the version as a bare scalar", e.Line, e.Version, got)
+		}
+		delete(annotated, e.Line)
+	}
+	// Lowest line first, not map order: two strays would otherwise be reported
+	// in a different order each run, and a gate whose message moves under you
+	// is one you stop trusting.
+	if strays := slices.Sorted(maps.Keys(annotated)); len(strays) > 0 {
+		line := strays[0]
+		return fmt.Errorf("ci.yml carries a '# renovate:' %s annotation for %s (line %d), which is not a chart "+
+			"matrix entry; it would point Renovate at a version no job runs", helmPackageName, annotated[line], line)
+	}
+	return nil
+}
+
 // setupHelmVersion returns the `with.version` of the named job's
 // azure/setup-helm step. Both the CI gate and the publish pin need exactly
 // this, and they had a copy each until the two uses diverged in spelling
@@ -916,8 +1167,12 @@ func publishHelmVersion(src []byte) (string, error) {
 	return setupHelmVersion(src, "publish", "helm-chart.yml")
 }
 
-// verifyChartPinsIn is verifyChartPins over caller-supplied file contents, so
-// the mismatch branches are testable without editing the real files.
+// verifyChartPinsIn is the seam for verifyChartPins' first two agreements —
+// the kubeVersion floor and the packaging pin — over caller-supplied file
+// contents, so their mismatch branches are testable without editing the real
+// files. The third agreement is ci.yml against renovate.json, a different pair
+// of files, and has its own seam in verifyCIHelmAnnotationsIn; a new assertion
+// belongs in whichever of the two names the files it reads.
 func verifyChartPinsIn(chartSrc, ciSrc, publishSrc []byte) error {
 	m := chartKubeVersionRe.FindSubmatch(chartSrc)
 	if m == nil {
