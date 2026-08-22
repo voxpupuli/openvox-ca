@@ -1,13 +1,20 @@
 name: CodeQL
 
 # Static analysis (code scanning) for the Go sources. Results are uploaded to
-# the repository's Security -> Code scanning tab and satisfy the "Main" ruleset's
-# code_scanning rule, which otherwise blocks every PR from merging.
+# the repository's Security -> Code scanning tab and satisfy the "Main"
+# ruleset's code_scanning rule, which otherwise blocks any PR targeting the
+# default branch from merging. That ruleset covers ~DEFAULT_BRANCH only, so a
+# PR targeting another branch is not gated by it — which is precisely why the
+# pull_request trigger below is unfiltered: a stacked PR was neither gated nor
+# scanned, and its code first met CodeQL only once it reached main, inside a
+# larger change where a finding is harder to attribute.
 #
 # Triggers:
-#   * Push to main      -> establish the baseline analysis on the default branch.
-#   * Pull requests      -> analyse the proposed changes so the merge gate has
-#     fresh results to evaluate.
+#   * Push to main       -> establish the baseline analysis on the default
+#     branch. Left on main deliberately: a PR already gets a pull_request run.
+#   * Pull requests      -> analyse the proposed changes, whatever the base, so
+#     the merge gate has fresh results and stacked work is scanned when it is
+#     written rather than when it lands.
 #   * Weekly schedule    -> re-scan with updated CodeQL queries even when the
 #     code is quiet, so newly published advisories are still caught.
 
@@ -15,7 +22,6 @@ on:
   push:
     branches: ["main"]
   pull_request:
-    branches: ["main"]
   schedule:
     - cron: "27 4 * * 1"
 

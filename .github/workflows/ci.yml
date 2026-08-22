@@ -3,8 +3,21 @@ name: CI
 on:
   push:
     branches: ["main"]
+  # Deliberately unfiltered by base branch. A filter of ["main"] silently
+  # skipped every stacked PR — one targeting another unmerged branch rather
+  # than main — while container-images.yml, which has no filter, still showed
+  # a full row of green checks from image builds alone, so the checks tab read
+  # as a passing build. An allowlist only narrows that trap: the next base
+  # prefix nobody thought of fails the same silent way. Running on any base
+  # means a stacked PR is exercised before it merges into its base, rather than
+  # first being run by the downstream PR into main where the regression is
+  # already buried in the stack's history. Exercised, not gated: the "Main"
+  # ruleset covers the default branch only, so on a stacked PR these results
+  # are the author's to read rather than a merge block.
+  #
+  # push stays on main: a PR already gets a pull_request run, and widening
+  # push would double the load for no extra signal.
   pull_request:
-    branches: ["main"]
 
 permissions:
   contents: read
@@ -30,7 +43,9 @@ jobs:
         run: go install github.com/magefile/mage@v1.17.2
       - name: Install golangci-lint
         run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.0
-      - name: Check formatting, vet, module tidy, and lint
+      # Named for the target rather than its contents: the enumeration this
+      # step used to carry went stale twice as dev:check grew checks.
+      - name: Run the CI gate (mage dev:check)
         run: mage dev:check
       - name: Magefile tests
         # The magefile is build-tagged, so its Ginkgo suite is invisible to
@@ -473,9 +488,22 @@ jobs:
         with:
           jobs: ${{ toJSON(needs) }}
 
+  # -- Auto-merge bot PRs -------------------------------------------------------
+  # Holds contents: write / pull-requests: write and runs `gh pr merge`, so it
+  # is pinned to a default-branch base. The repository's "Main" ruleset -- the
+  # required reviews, status checks and code scanning that make an unattended
+  # merge safe -- applies to ~DEFAULT_BRANCH only, so enabling auto-merge on a
+  # PR targeting any other branch would merge it under no ruleset at all. The
+  # workflow's pull_request trigger is deliberately unfiltered by base (see the
+  # top of this file), which is what makes the condition load-bearing rather
+  # than a restatement of the trigger.
   automerge:
     name: Enable auto-merge
-    if: github.event_name == 'pull_request' && (github.event.pull_request.user.login == 'dependabot[bot]' || github.event.pull_request.user.login == 'renovate[bot]')
+    if: >-
+      github.event_name == 'pull_request'
+      && github.event.pull_request.base.ref == github.event.repository.default_branch
+      && (github.event.pull_request.user.login == 'dependabot[bot]'
+      || github.event.pull_request.user.login == 'renovate[bot]')
     needs:
       - ci
     runs-on: ubuntu-24.04
