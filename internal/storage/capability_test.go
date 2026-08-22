@@ -80,6 +80,13 @@ func (l *lockerSpy) tookDistributedLock() bool {
 	return l.acquired
 }
 
+// Unwrap lets capability probes that see through wrappers (asInventoryStore)
+// reach the real backend, so wrapping changes what is observed and nothing
+// else. Not needed by the table below, which asks only about locking, but a
+// wrapper that silently reclassified a backend would be an unpleasant thing to
+// leave lying in a test helper.
+func (l *lockerSpy) Unwrap() Backend { return l.Backend }
+
 var _ = Describe("Backend capability reporting", func() {
 	var ctx context.Context
 
@@ -244,6 +251,17 @@ var _ = Describe("Backend capability reporting", func() {
 				// is drift too.
 				Expect(took()).To(Equal(reported),
 					"SupportsDistributedLocking must match whether WithLock actually took a distributed lock")
+
+				// And when it did grant, it must have been the only thing that
+				// ran. The converse is deliberately not asserted: where the
+				// distributed tier does not grant, WithLock may legitimately
+				// reach either a weaker lock tier or the process-local mutex,
+				// and which one is not observable from this package alone.
+				if took() {
+					_, usedLocalMutex := s.localLocks.Load("agreement-probe")
+					Expect(usedLocalMutex).To(BeFalse(),
+						"the distributed tier granted; the process-local mutex must not also have been taken")
+				}
 			},
 			Entry("filesystem", func() Backend { return NewFilesystemBackend(GinkgoT().TempDir()) }),
 			Entry("sqlite", func() Backend { return newSQLiteBackend() }),
