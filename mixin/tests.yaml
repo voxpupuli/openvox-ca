@@ -326,3 +326,79 @@ tests:
       - eval_time: 2h
         alertname: PuppetCAUpstreamCRLExpiringSoon
         exp_alerts: []
+
+  # The client-CRL rules. Three failure modes an operator must act on
+  # differently, and the boundary each turns on is a number in config.libsonnet
+  # that reading the PromQL will not settle.
+  - interval: 1m
+    name: a trust domain with no usable CRL pages, but not before the debounce
+    input_series:
+      - series: 'puppetca_client_crl_usable{job="openvox-ca",instance="ca-1:9140",client_ca="server"}'
+        values: "0+0x30"
+    alert_rule_test:
+      # Under `for`, so pending rather than firing: a reload in progress must
+      # not page.
+      - eval_time: 5m
+        alertname: PuppetCAClientCRLUnusable
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: PuppetCAClientCRLUnusable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: openvox-ca
+              instance: ca-1:9140
+              client_ca: server
+            exp_annotations:
+              summary: "A Puppet CA client trust domain has no usable CRL."
+              description: "client_ca server on ca-1:9140 holds no currently valid CRL at all — every CRL expired, every one was discarded as unverifiable, or every one was discarded as partial-scope (a delta CRL, or one scoped to an issuing distribution point, which lists only a fraction of what its issuer has revoked). Under client_revocation_policy=require every client of that issuer is rejected. Refresh its crl_file from the issuing CA, and if the delivery was recently changed check the server log for discard warnings — a full CRL is required here, since this CA is handed a file and fetches no distribution points. Note this fires only on total loss: a domain holding one anchor's CRL and not another's reads healthy here, and shows up as PuppetCAClientCRLRefusals instead."
+
+  - interval: 1m
+    name: a domain whose crl_file stopped being applied goes stale, not before
+    input_series:
+      # The gauge holds the timestamp of the last successful apply, so a domain
+      # that never applies again leaves it fixed while time() runs on.
+      - series: 'puppetca_client_crl_last_reload_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",client_ca="server"}'
+        values: "0+0x240"
+    alert_rule_test:
+      # clientCRLStaleSeconds is three refresh passes at the 1h default, so two
+      # hours of staleness is a missed pass and not yet a fault.
+      - eval_time: 2h
+        alertname: PuppetCAClientCRLStale
+        exp_alerts: []
+      - eval_time: 3h20m
+        alertname: PuppetCAClientCRLStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              instance: ca-1:9140
+              client_ca: server
+            exp_annotations:
+              summary: "The Puppet CA has stopped applying a trust domain's crl_file."
+              description: "crl_file for client_ca server on ca-1:9140 has not been applied for 3h 20m 0s. The previous CRLs are still in use and still current, so nothing else reports a problem -- but revocations published since are not being honoured. Check the server log for a reload error, or for a reload refused because it would have covered fewer anchors than the set in use, dropped an enforced partial CRL, moved an anchor backwards to an older CRL, or could not be shown to be newer at all because this server will not date the CRLs it holds for that anchor -- check this server's clock and the issuer's."
+
+  - interval: 1m
+    name: refusals stop paging once they stop happening
+    input_series:
+      # Refusals for the first twenty minutes, then none. Event-driven, so the
+      # rule must fall silent on its own once the cause is fixed rather than
+      # latching -- the counter never goes down.
+      - series: 'puppetca_client_crl_refusals_total{job="openvox-ca",instance="ca-1:9140",client_ca="server"}'
+        values: "0+1x20 21+0x120"
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: PuppetCAClientCRLRefusals
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: openvox-ca
+              instance: ca-1:9140
+              client_ca: server
+            exp_annotations:
+              summary: "The Puppet CA is refusing clients of a trust domain for want of a CRL."
+              description: "client_ca server on ca-1:9140 is refusing clients because revocation information was missing: an issuer in their chain has no currently valid CRL, or the presented certificate is itself one of the entry's anchors, which nothing can attest to. Unlike the gauge this is a fact rather than an estimate: these are requests that were turned away. The usual cause is an anchor whose CRL is missing or expired while the entry's other anchors are fine, or an entry anchored on a shared root whose intermediates cannot have their CRLs verified — see the crl_file notes in the configuration guide."
+      # An hour and the debounce after the last refusal, the window has emptied.
+      - eval_time: 2h
+        alertname: PuppetCAClientCRLRefusals
+        exp_alerts: []

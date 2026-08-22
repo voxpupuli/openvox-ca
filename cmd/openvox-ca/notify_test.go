@@ -391,7 +391,7 @@ var _ = Describe("Service manager heartbeat", func() {
 			// Drive a real reload while the heartbeat is ticking.
 			Expect(os.WriteFile(cnFile, []byte("compile-2.example.com\n"), 0600)).To(Succeed())
 			Expect(syscall.Kill(os.Getpid(), syscall.SIGHUP)).To(Succeed())
-			Eventually(func() bool { return reloader.auth.IsAdminCN("compile-2.example.com") }).Should(BeTrue())
+			Eventually(func() bool { return reloader.auth.IsOwnAdminCN("compile-2.example.com") }).Should(BeTrue())
 
 			// Close underneath both of them, exactly as the deferred Close in
 			// main.go can, before the context is cancelled.

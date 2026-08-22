@@ -104,6 +104,25 @@
     // 'for' durations applied to the expiry alerts to debounce flapping at the
     // threshold boundary.
     expiryFor: '1h',
+
+    // --- Client trust domains ---
+    // A domain with no usable CRL rejects every one of its clients under the
+    // require policy, so this is an authentication outage rather than a
+    // degradation. Debounced separately from the expiry alerts: those tolerate
+    // an hour because expiry is gradual, while this one wants to fire promptly
+    // and only needs to ride out a reload.
+    clientCRLUnusableFor: '10m',
+
+    // Window for PuppetCAClientCRLRefusals. Unlike the gauge this is
+    // event-driven -- it moves when a client is actually refused -- so it is
+    // sized like the other increase() windows rather than against the
+    // refresh interval.
+    clientCRLRefusalWindow: '1h',
+
+    // How long a client_ca entry may go without its crl_file being applied
+    // before that is worth saying. Three refresh passes at the 1h default,
+    // so a single transient read error does not page.
+    clientCRLStaleSeconds: 3 * 3600,
     scrapeFor: '15m',
     readyFor: '10m',
     downFor: '5m',

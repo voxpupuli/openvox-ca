@@ -20,9 +20,10 @@ external root CA with any `ca_key_provider`.
 | `--tls-key` | `""` | Server TLS private key PEM |
 | `--puppet-server` | `""` | Comma-separated CNs granted admin API access (mTLS only) |
 | `--puppet-server-file` | `""` | Path to a file of CNs granted admin API access (one per line; `#` comments and blank lines ignored) |
+| `--client-revocation-policy` | `require` | Revocation checking for `client_ca` domains: `require`, `check` or `skip`. Scoped to foreign issuers; this CA always checks its own CRL. See [trusting client certificates from another CA](#trusting-client-certificates-from-another-ca). |
 | `--no-pp-cli-auth` | `false` | Disable `pp_cli_auth` extension as an admin credential; require CN allow list only |
 | `--no-tls-required` | `false` | Allow plain HTTP on non-loopback addresses; use only behind a trusted TLS proxy or in test environments |
-| `--allow-public-status` | `false` | Allow unauthenticated `GET /certificate_status`; by default this endpoint is admin-only, matching Puppet Server's shipped `auth.conf` |
+| `--allow-public-status` | `false` | Allow unauthenticated `GET /certificate_status`; by default this endpoint is admin-only, matching Puppet Server's shipped `auth.conf`. "Admin" means an admin CN of the trust domain that verified the client, or `pp_cli_auth` where that domain honours it — see [trusting client certificates from another CA](#trusting-client-certificates-from-another-ca) |
 | `--ocsp-url` | `""` | OCSP responder URL to embed in issued certificates |
 | `--crl-url` | `""` | CRL distribution point URL to embed in issued certificates |
 | `--metrics-listen` | `""` | Address for the Prometheus exporter (e.g. `127.0.0.1:9140`); empty disables it. See [metrics & monitoring](metrics.md) |
@@ -70,7 +71,11 @@ puppet_server_file: ""
 no_pp_cli_auth: false
 no_tls_required: false
 allow_public_status: false  # set true to allow unauthenticated GET /certificate_status
-                            # (otherwise admin-only: puppet_server CN or pp_cli_auth)
+                            # (otherwise admin-only: an admin CN of the matched
+                            # trust domain, or pp_cli_auth where that domain
+                            # honours it)
+client_ca: []               # additional client issuers; see "Trusting client certificates from another CA"
+client_revocation_policy: require   # require | check | skip (client_ca entries only)
 autosign_config: ""
 logfile: ""
 verbosity: 0
@@ -145,6 +150,7 @@ Environment variables mirror the CLI flags:
 | `--tls-key` | `PUPPET_CA_TLS_KEY` |
 | `--puppet-server` | `PUPPET_CA_PUPPET_SERVER` |
 | `--puppet-server-file` | `PUPPET_CA_PUPPET_SERVER_FILE` |
+| `--client-revocation-policy` | `PUPPET_CA_CLIENT_REVOCATION_POLICY` |
 | `--no-pp-cli-auth` | `PUPPET_CA_NO_PP_CLI_AUTH` |
 | `--no-tls-required` | `PUPPET_CA_NO_TLS_REQUIRED` |
 | `--allow-public-status` | `PUPPET_CA_ALLOW_PUBLIC_STATUS` |
@@ -176,6 +182,7 @@ The CA key passphrase can also be provided via `PUPPET_CA_KEY_PASSPHRASE` (env v
 
 | Config key | Environment variable |
 | --- | --- |
+| `client_crl_refresh_interval_sec` | `PUPPET_CA_CLIENT_CRL_REFRESH_INTERVAL_SEC` |
 | `ca_key_algo` | `PUPPET_CA_CA_KEY_ALGO` |
 | `ca_key_size` | `PUPPET_CA_CA_KEY_SIZE` |
 | `leaf_key_algo` | `PUPPET_CA_LEAF_KEY_ALGO` |
@@ -495,6 +502,292 @@ configured but has never been opened.
 > replica is running a build with chain preservation *before* configuring
 > `crl_chain_file`. Preservation is a no-op on a single-CRL deployment, so that
 > ordering costs nothing.
+
+## Trusting client certificates from another CA
+
+By default openvox-ca authenticates exactly one set of clients: the ones it
+issued. `client_ca` adds others.
+
+This is for the topology where the servers and operators administering this CA
+hold certificates from a *different* CA — typically a sibling intermediate under
+a shared root, one issuing agent certificates and one issuing server
+certificates. Without it, those administrators cannot authenticate at all.
+
+**Nothing below applies unless `client_ca` is set.** With it absent there is one
+trust domain, it is ours, and admin is `puppet_server` plus `pp_cli_auth`
+exactly as it has always been.
+
+```yaml
+client_ca:
+  - name: server-ca
+    file: /etc/openvox-ca/server-ca.pem          # anchors for THIS entry only
+    crl_file: /etc/openvox-ca/server-ca-crls.pem # CRLs for THIS entry only
+    admin_cns:
+      - openvox-server.example.com
+    allow_pp_cli_auth: false
+client_revocation_policy: require                # require | check | skip
+```
+
+### Anchor on the issuing CA, not the root
+
+`file` should contain the **issuing** CA, not the root above it.
+
+A trust anchor need not be self-signed. Anchoring on an intermediate accepts
+what that intermediate issued and nothing else — so two sibling CAs under a
+shared root stay separate, even when a client presents the shared root and the
+sibling CA in its own chain. Putting the root there instead silently extends
+this entry's authority, **including its `admin_cns`**, to every intermediate
+that root has issued or ever will.
+
+openvox-ca warns at startup when an entry's anchor is self-signed, naming the
+entry and the certificate. It warns rather than refuses, because anchoring on a
+root is legitimate when the root really is the intended boundary — but it is the
+natural mistake, since "the CA bundle" usually means the whole chain.
+
+### A name means something only within its issuer's namespace
+
+Every CA has its own namespace of names it has signed, and a name means nothing
+outside the one it was issued in. So:
+
+| Grant | Our own CA | A `client_ca` entry |
+| --- | --- | --- |
+| Admin CNs | `puppet_server` / `puppet_server_file` — unchanged | that entry's `admin_cns` |
+| `pp_cli_auth` | honoured unless `no_pp_cli_auth` — unchanged | honoured only if that entry sets `allow_pp_cli_auth: true` |
+
+Both foreign grants default to off, so adding an entry authenticates an issuer
+without granting it anything.
+
+`allow_pp_cli_auth` **delegates admin admission to that CA**: every certificate
+it chooses to stamp with the extension is an administrator here. For a Server CA
+under the same operator's control that is correct, and is how the Puppet CA CLI
+authenticates upstream. For a CA you do not control it is a full delegation.
+Enabling it emits a startup warning naming the issuer.
+
+Two operations remain **own-CA only** regardless of any entry, because they act
+on this CA's own namespace: renewing a certificate (`POST /certificate_renewal`)
+and the self-match on `GET /certificate_request/{subject}`. A foreign
+certificate named `agent1.example.com` is not our `agent1.example.com`.
+
+### Revocation
+
+`client_revocation_policy` governs foreign issuers only; our own clients are
+always checked against our own CRL.
+
+| Policy | Behaviour |
+| --- | --- |
+| `require` (default) | A client whose issuer has no currently valid CRL is rejected |
+| `check` | Verify against whatever CRLs are loaded; allow where an issuer has none |
+| `skip` | No revocation checking for foreign issuers. **Unsafe** |
+
+Checking covers the **whole verified chain**, not just the leaf: a sibling CA
+revoked by the shared root must not go on authenticating its leaves.
+
+Under the default `require` policy, **`crl_file` is mandatory** for every entry:
+configuration validation rejects a block without one. Separately, and under
+*every* policy, the server refuses to start if a `crl_file` that is set cannot
+be read or holds a CRL that does not parse — so a stale path left behind on
+`skip` stops the server rather than being ignored. That is deliberate — the
+anchor bundle beside it already fails closed, and a server that starts here
+would reject every client of the domain while its readiness probe reported
+healthy. The check runs where the trust set is assembled, which is when TLS is
+configured; with no `tls_cert` and `tls_key` there is no client authentication
+to set up and `client_ca` is not consulted at all.
+
+Every CRL in `crl_file` is signature-verified against an anchor in the same
+entry before it is used, and each is bound to the anchor whose key signed it.
+The CRL's own Authority Key Identifier is not consulted at all. RFC 5280 §5.2.1
+requires a conforming CRL issuer to include it, but not every issuer conforms,
+and there is no reason to refuse a CRL whose signature verifies over a field
+this CA does not use — so an issuer that omits it is fully supported. Without verification, a writable `crl_file` would be a way to
+*clear* revocations, not merely add them.
+
+**`client_crl_refresh_interval_sec`** is how often each entry's `crl_file` is
+re-read, defaulting to an hour. The file is refreshed by whatever mechanism
+already delivers it — a mounted Secret, a config-management run, a job fetching
+the issuer's CDP — and this only notices; nothing in openvox-ca writes it. A
+reload is refused, keeping the previous set, when it fails outright, when it
+would cover fewer anchors than the set already in use, when it would drop a partial CRL whose
+serials are enforced while that issuer's full CRL stays where it was, or when it
+would move any anchor *backwards* — an older CRL from the same issuer, or one
+that cannot be shown to be newer at all, which is the case when this server
+will not date what it already holds for that anchor and neither side publishes
+a `cRLNumber`.
+
+Refusing a backwards move is what stops a replayed file: it verifies, it is
+current, and it covers everything the installed set covers, so nothing else on
+the path would notice — while re-admitting every serial revoked since it was
+signed. Each anchor carries two high-water marks for the purpose — the highest
+`cRLNumber` seen for it, and the latest `thisUpdate` — and a candidate that is
+behind on **either** is refused.
+
+Either, rather than both, because an attacker who can write `crl_file` cannot
+forge a signature: they can only replay CRLs the issuer really published, at a
+time of their choosing. A replay is behind on at least one mark, and requiring
+both to regress would let them replay using whichever mark their target issuer
+keeps badly. `cRLNumber` is compared only where both sides publish one, so an
+issuer that never publishes it, or stops, is ordered by date alone rather than
+pinned.
+
+Two marks rather than one "newest CRL" because a bundle can hold numbered and
+unnumbered CRLs for the same anchor, and a comparison that switches axis
+depending on whether both sides carry a number is intransitive across such a
+mixture — which would leave the outcome depending on the order the CRLs happen
+to appear in the file. Taking each maximum separately is order-independent.
+
+The practical cost is that an issuer whose `thisUpdate` moves backwards while
+its numbers rise — two signers with a clock skew between them is the usual way —
+has reloads refused until it publishes something that is not behind on either
+mark — which here means a `thisUpdate` at or after the highest already seen,
+the number axis being ahead already. That normally resolves within a
+publication interval.
+
+A CRL whose `thisUpdate` is more than five minutes ahead of this server's clock
+is treated as **not yet issued**, the same way a certificate's `notBefore` is.
+It cannot make an issuer **current**, and cannot move that anchor's
+`thisUpdate` high-water mark — so neither a forward-skewed signer nor a
+replayed CRL can pin an anchor against every later one.
+
+It does still count as revocation material the entry *holds*, and it does still
+raise the `cRLNumber` mark. Both are deliberate. What the server holds is a fact
+about the file rather than about its clock, and the guard that refuses a
+narrowing reload rests on it — suppressing it once emptied that guard's view of
+the installed set and let an empty file install unchallenged. And `cRLNumber`
+sits inside the signed CRL, so only the issuer can mint one and its numbering
+runs forwards; a date this server will not believe is no reason to disbelieve a
+number, which leaves one ordering intact exactly when the other is suppressed. Five minutes because the signer and
+this server keep separate clocks and neither is authoritative; a small forward
+difference is ordinary rather than suspicious.
+
+The serials such a CRL names **are** still enforced. Whether a CRL is current is
+a claim about the issuer's timeline, which this server cannot verify; whether it
+revokes a serial is a claim its signature already backs. Discarding the second
+would let a clock difference re-admit revoked clients, which is the outcome the
+whole setting exists to prevent.
+
+If the difference is larger than the tolerance the effect is loud rather than
+silent: that issuer loses coverage, `puppetca_client_crl_usable` goes to 0 for
+the entry, and under `require` its clients are rejected while their revocations
+go on being honoured. Fix the clock on whichever side is wrong — that is a
+genuine fault, not something to tune the tolerance around.
+
+The marks are held in memory and not persisted, so this is a ratchet for the
+life of the process rather than tamper-evidence across restarts. Restarting is
+**not** a way out of a refusal, though: startup rebuilds the marks from the same
+`crl_file`, so whatever that file contains still decides. The way out is to fix
+the file.
+
+A refusal costs freshness at once, and availability if it persists: the
+installed CRLs go on being served, but once they pass their own `nextUpdate`
+they stop counting as current, and under `require` every client of that issuer
+is then rejected. So a refusal that does not clear by the next publication is
+an incident, not a nuisance — which is what
+`puppetca_client_crl_last_reload_timestamp_seconds` going stale is for.
+
+Every refusal is logged with the `client_ca` entry; the three that compare
+against the installed set also name the anchors concerned, while a read failure
+has no parsed issuer to name and logs the error instead.
+
+A **delta CRL** or one scoped to an **issuing distribution point** does not
+count as coverage for its issuer, and is logged when one is seen. Either lists a
+fraction of what its issuer has revoked, and this CA is handed a file rather
+than fetching distribution points, so it has no way to obtain the rest; treating
+a partial list as a full one would report a domain fully covered while
+consulting a list missing most of its revocations.
+
+The serials such a CRL *does* name are still enforced. Refusing to let it answer
+"is this issuer covered" is not a reason to stop believing it about the clients
+it revokes — a file holding a base CRL beside its delta is what concatenating an
+issuer's CDP and freshestCRL output gives you, and discarding the delta would
+re-admit everything revoked since the base was signed. So a partial CRL can deny
+a client and can never, on its own, satisfy `require`. If every CRL in an entry's file is partial, the
+result is a set covering nothing — and what happens next depends on when it
+arrives. At **startup** that is the entry's only set, so under `require` the
+domain refuses its clients and `puppetca_client_crl_usable` is 0 for it. On a
+**reload** it is refused like any other narrowing candidate, the previous CRLs
+stay in use, and the visible signal is instead
+`puppetca_client_crl_last_reload_timestamp_seconds` going stale while the log
+records the discard and the refusal.
+
+The anchors themselves deliberately do not reload: re-reading them would mean
+re-parsing what a domain trusts while requests are being decided against it, and
+adding or removing an issuer is a restart-shaped change. `admin_cns` on a
+`client_ca` entry are startup configuration for the same reason. Only domain
+zero's admin allow list is reloadable, through `SIGHUP` — see [reloading
+configuration](#reloading-configuration).
+
+A client certificate that is *itself* one of your anchors is rejected under
+`require`: the chain is one element long, so there is nothing above it to attest
+to its revocation status, and a trust anchor is trusted by configuration rather
+than by anything it presents. If you meant that certificate to authenticate as a
+client, issue it a leaf from the anchor instead.
+
+> **Anchoring on a shared root and using `require` locks everyone out.** The
+> walk needs a CRL for every issuer in the chain, **the anchor included** — what
+> is never checked is the anchor as a *subject*, which is a different question.
+> An intermediate's own CRL is signed by that intermediate — not by the root — so
+> it fails the verification above and is discarded, leaving the
+> `(leaf, intermediate)` pair with no CRL. Every client of the entry is then
+> rejected.
+>
+> The server warns at startup when any anchor has no currently valid CRL, but it
+> **cannot** warn about this case: the root is an anchor and its own CRL does
+> verify and is kept, so the entry looks covered from the outside. Nor can
+> `puppetca_client_crl_usable` see it — that gauge only reports whether the entry
+> holds *anything* current, which it does. What reports it is
+> `puppetca_client_crl_refusals_total`, which counts clients actually turned
+> away for want of a CRL, because by then the missing issuer is a fact rather
+> than a guess. Anchor on the issuing CA
+> and the problem does not arise: the chain is then `[leaf, anchor]` and the only
+> CRL `crl_file` needs is the one the anchor itself issued.
+>
+> The fix is to anchor on the issuing CA, which is what scopes the entry anyway.
+> **Do not reach for `client_revocation_policy: check`**: it restores service by
+> disabling leaf revocation checking for that domain entirely, and nothing
+> afterwards says so.
+
+An expired CRL is treated differently by the two policies, and deliberately.
+A CRL carrying **no `nextUpdate` at all** is treated as expired, and for the
+same reason. The field is `OPTIONAL` in the `TBSCertList` ASN.1, which is why
+Go's parser leaves it zero, but RFC 5280 §5.1.2.5 requires a conforming CRL
+issuer to include it and declines to specify what a client should do when it is
+absent — so treating such a CRL as expired is a conforming choice, and the safe
+one: reading its absence as "never expires" would satisfy `require` forever
+from a snapshot that says nothing about revocations since. The fix is at the
+issuing CA — give it a next-update interval — not here.
+
+Under `require` an expired CRL counts as absent, so the policy does not quietly decay into
+`skip`. Under `check` it is still consulted — it is loaded, and the serials it
+names are still revoked — because `check` means "tolerate an issuer with no
+CRLs", not "stop reading the ones you were given".
+
+> **`crl_file` does not cover the CA named in the same block.** The trust anchor
+> is never revocation-checked — it is trusted by configuration, not by anything
+> it presents. Revoking a trusted domain is an operator action: remove or
+> replace the `client_ca` entry. `crl_file` covers what that CA *issued*.
+
+`crl_file` is re-read on the interval set by `client_crl_refresh_interval_sec`,
+and a reload that cannot be trusted is refused rather than applied — see
+[Revocation](#revocation) above for which reloads those
+are. **`file` is not**: anchors are
+read once at startup, because a half-applied anchor reload locks out every
+client of a domain, where a half-applied CRL reload costs at most a stale
+revocation. To rotate an anchor, add the new one as a second `client_ca` entry,
+roll the fleet, then remove the old entry and roll again.
+
+`puppetca_client_crl_usable{client_ca}` reports whether a domain holds any
+currently valid revocation material, and is published **only under `require`** —
+`crl_file` is optional under `check` and `skip`, so a domain without CRLs is
+correct there and a 0 would alert on a healthy server. It does not report
+partial coverage; `puppetca_client_crl_refusals_total{client_ca}` counts clients
+actually refused for want of a CRL, and
+`puppetca_client_crl_last_reload_timestamp_seconds{client_ca}` goes stale when
+`crl_file` has stopped being applied. **Alert on all three**: under `require` a `0` rejects every client
+of that issuer, and the first symptom is otherwise an agent-side 403.
+
+> Not to be confused with a CRL this CA *publishes*: those carry its own and its
+> ancestors' revocations and are served to agents. `client_ca[].crl_file` is
+> inbound, used only by the
+> authorisation middleware, and never served.
 
 ## Autosigning
 

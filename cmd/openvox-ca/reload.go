@@ -172,10 +172,14 @@ func (r *configReloader) reload() error {
 			// rewritten again straight afterwards. CNs are hostnames, not secrets.
 			// NIST 800-53: AU-2 (Event Logging), AC-6 (Least Privilege)
 			// Read everything the log line needs before the swap: once
-			// SetAllowList returns, the map belongs to the AuthConfig and
+			// SetOwnAdminCNs returns, the map belongs to the trust domain and
 			// request goroutines are reading it under the lock.
+			//
+			// Domain zero only. A client_ca entry's admin_cns are startup
+			// configuration: re-reading them would mean re-reading that
+			// issuer's certificates too, which is not what reload promises.
 			count := len(allowList)
-			added, removed := diffAllowList(r.auth.SetAllowList(allowList), allowList)
+			added, removed := diffAllowList(r.auth.SetOwnAdminCNs(allowList), allowList)
 			if len(added) > 0 || len(removed) > 0 {
 				slog.Info("Reloaded admin allow list",
 					"added", added, "removed", removed, "admin_cns", count)

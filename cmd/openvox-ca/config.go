@@ -156,6 +156,11 @@ type serverConfig struct {
 	// via config.StorageConfig.
 	config.StorageConfig `yaml:",inline"`
 
+	// Foreign client trust domains (client_ca) and the revocation policy that
+	// applies to them. Absent by default: with no entry there is exactly one
+	// trust domain, it is ours, and authorisation is what it has always been.
+	config.ClientCAConfig `yaml:",inline"`
+
 	// CA key provider selection (ca_key_provider) and, when it selects
 	// "openbao", the nested "openbao" settings block. Embedded inline so
 	// ca_key_provider stays at the top level like StorageConfig's keys above.
@@ -348,6 +353,14 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("PUPPET_CA_NO_TLS_REQUIRED"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.NoTLSRequired = b
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_CLIENT_REVOCATION_POLICY"); v != "" {
+		cfg.ClientRevocationPolicy = v
+	}
+	if v := os.Getenv("PUPPET_CA_CLIENT_CRL_REFRESH_INTERVAL_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.ClientCRLRefreshIntervalSec = n
 		}
 	}
 	if v := os.Getenv("PUPPET_CA_ALLOW_PUBLIC_STATUS"); v != "" {

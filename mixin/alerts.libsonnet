@@ -242,6 +242,71 @@
         ],
       },
       {
+        // client_revocation_policy=require turns "no usable CRL" into a
+        // rejection of every client of that domain, and the operator's first
+        // symptom is otherwise an agent-side 403 whose cause is three layers
+        // away. The two outage rules are critical for that reason: each is an
+        // authentication outage scoped to one issuer, not a degradation. The
+        // staleness rule is a warning -- nothing is being refused yet, but the
+        // CRLs in use have stopped being refreshed.
+        name: 'openvox-ca-client-crl',
+        rules: [
+          {
+            alert: 'PuppetCAClientCRLUnusable',
+            // A plain == 0 is sufficient because the gauge is published on
+            // every reload branch, including a failed one — see
+            // refreshClientCRLs. It used to be skipped when the load failed,
+            // which meant the series was never created for a domain whose very
+            // first load failed, and `== 0` cannot fire on a series that does
+            // not exist.
+            expr: 'puppetca_client_crl_usable{%(selector)s} == 0' % { selector: $._config.puppetCASelector },
+            'for': $._config.clientCRLUnusableFor,
+            labels: { severity: 'critical' } + $._config.alertLabels,
+            annotations: {
+              summary: 'A Puppet CA client trust domain has no usable CRL.',
+              description: 'client_ca {{ $labels.client_ca }} on {{ $labels.instance }} holds no currently valid CRL at all — every CRL expired, every one was discarded as unverifiable, or every one was discarded as partial-scope (a delta CRL, or one scoped to an issuing distribution point, which lists only a fraction of what its issuer has revoked). Under client_revocation_policy=require every client of that issuer is rejected. Refresh its crl_file from the issuing CA, and if the delivery was recently changed check the server log for discard warnings — a full CRL is required here, since this CA is handed a file and fetches no distribution points. Note this fires only on total loss: a domain holding one anchor\'s CRL and not another\'s reads healthy here, and shows up as PuppetCAClientCRLRefusals instead.',
+            },
+          },
+          {
+            alert: 'PuppetCAClientCRLStale',
+            // The retain-previous branches are right for availability and
+            // invisible everywhere else: the kept CRLs are still current, so
+            // the gauge reads 1, and clients are still served, so no refusal is
+            // counted. What has stopped is the file being applied, so
+            // revocations published since are not honoured -- for as long as
+            // the retained CRLs remain within their nextUpdate, which is days.
+            expr: 'time() - puppetca_client_crl_last_reload_timestamp_seconds{%(selector)s} > %(stale)d' % {
+              selector: $._config.puppetCASelector,
+              stale: $._config.clientCRLStaleSeconds,
+            },
+            'for': $._config.clientCRLUnusableFor,
+            labels: { severity: 'warning' } + $._config.alertLabels,
+            annotations: {
+              summary: 'The Puppet CA has stopped applying a trust domain\'s crl_file.',
+              description: 'crl_file for client_ca {{ $labels.client_ca }} on {{ $labels.instance }} has not been applied for {{ $value | humanizeDuration }}. The previous CRLs are still in use and still current, so nothing else reports a problem -- but revocations published since are not being honoured. Check the server log for a reload error, or for a reload refused because it would have covered fewer anchors than the set in use, dropped an enforced partial CRL, moved an anchor backwards to an older CRL, or could not be shown to be newer at all because this server will not date the CRLs it holds for that anchor -- check this server\'s clock and the issuer\'s.',
+            },
+          },
+          {
+            alert: 'PuppetCAClientCRLRefusals',
+            // The unambiguous half. The gauge above can only estimate coverage
+            // at load time -- which anchors matter depends on chains that have
+            // not arrived -- so a partially covered entry reads healthy there.
+            // This counts clients actually turned away, so it sees the partial
+            // case, and it needs no approximation to do it.
+            expr: 'increase(puppetca_client_crl_refusals_total{%(selector)s}[%(window)s]) > 0' % {
+              selector: $._config.puppetCASelector,
+              window: $._config.clientCRLRefusalWindow,
+            },
+            'for': $._config.clientCRLUnusableFor,
+            labels: { severity: 'critical' } + $._config.alertLabels,
+            annotations: {
+              summary: 'The Puppet CA is refusing clients of a trust domain for want of a CRL.',
+              description: 'client_ca {{ $labels.client_ca }} on {{ $labels.instance }} is refusing clients because revocation information was missing: an issuer in their chain has no currently valid CRL, or the presented certificate is itself one of the entry\'s anchors, which nothing can attest to. Unlike the gauge this is a fact rather than an estimate: these are requests that were turned away. The usual cause is an anchor whose CRL is missing or expired while the entry\'s other anchors are fine, or an entry anchored on a shared root whose intermediates cannot have their CRLs verified — see the crl_file notes in the configuration guide.',
+            },
+          },
+        ],
+      },
+      {
         name: 'openvox-ca-leaf-certificates',
         rules: [
           {

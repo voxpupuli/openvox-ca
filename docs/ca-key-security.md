@@ -169,8 +169,14 @@ deletion) per authenticated client. When a single client exceeds **5 destructive
 operations per minute**, a warning is emitted to the structured log:
 
 ```text
-level=WARN msg="High rate of destructive operations detected" client=admin.example.com operation=revoke
+level=WARN msg="High rate of destructive operations detected" client.cn=admin.example.com client.domain="this CA" operation=revoke
 ```
+
+A client is identified by its common name *and* the trust domain that vouched for
+it. With [`client_ca`](configuration.md#trusting-client-certificates-from-another-ca)
+configured, an `ops-admin` issued by a partner CA is therefore counted separately
+from an `ops-admin` this CA issued: they are different principals, so neither can
+spend the other's allowance or raise an alert against it.
 
 This is a detective control, not a preventive one. It does not block the operation, but alerts
 operators to potentially anomalous administrative activity. Operators should:

@@ -21,9 +21,12 @@ package api
 import (
 	"crypto/x509"
 	"encoding/asn1"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
+	"unicode"
 
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 )
@@ -43,19 +46,29 @@ func hasPpCliAuth(cert *x509.Certificate) bool {
 	return false
 }
 
-// isAdmin reports whether the client is authorized for admin-only operations.
-// A client is an admin if its CN is in the allow list, or (unless NoPpCliAuth
-// is set) if the certificate carries the pp_cli_auth extension
-// (ca.OIDPpCliAuth) with value "true".
-func isAdmin(cfg *AuthConfig, clientCert *x509.Certificate, clientCN string) bool {
-	return cfg.IsAdminCN(clientCN) || (!cfg.NoPpCliAuth && hasPpCliAuth(clientCert))
+// isAdmin reports whether the client is authorized for admin-only operations,
+// **within the domain that verified it**.
+//
+// A CN-based identity claim is only meaningful inside the namespace of the
+// issuer that made it: every CA has its own namespace of names it has signed,
+// and a name means nothing outside the one it was issued in. So the allow list
+// consulted is the matched domain's, never a global one — which is what makes
+// "an administrator of the Server CA" expressible without also trusting that
+// name from anywhere else.
+//
+// pp_cli_auth is honoured per domain for the same reason. For our own CA it is
+// on unless no_pp_cli_auth says otherwise, exactly as before; for a foreign
+// issuer it is off unless that entry opts in, because honouring it delegates
+// admin admission to that CA entirely.
+func isAdmin(domain *TrustDomain, clientCert *x509.Certificate, clientCN string) bool {
+	return domain.IsAdminCN(clientCN) || (domain.PpCliAuth && hasPpCliAuth(clientCert))
 }
 
 type authTier int
 
 const (
 	tierPublic      authTier = iota // no client cert required
-	tierAnyClient                   // any cert signed by this CA
+	tierOwnClient                   // a client certificate THIS CA issued
 	tierSelfOrAdmin                 // own cert or an admin CN
 	tierAdminOnly                   // admin CN only
 )
@@ -67,9 +80,15 @@ const (
 // SECURITY: This is the primary access control enforcement point.
 // All non-public requests are validated through a four-tier model:
 //   - tierPublic: no client cert required (bootstrap endpoints)
-//   - tierAnyClient: any CA-signed client cert
+//   - tierOwnClient: a client certificate this CA itself issued
 //   - tierSelfOrAdmin: own cert or admin CN
 //   - tierAdminOnly: admin CN only (signing, revocation, generation, status reads)
+//
+// tierOwnClient was tierAnyClient ("any certificate that chains to our trust
+// anchor"). The two only ever coincided because there was a single issuer; once
+// a client can be issued by a foreign CA they are different questions, and the
+// endpoints in this tier act on *our* namespace. Renaming rather than
+// redefining forces every call site to be re-read.
 //
 // NIST 800-53: AC-3 (Access Enforcement), IA-3 (Device Identification and Authentication)
 func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Handler {
@@ -94,59 +113,115 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 
 		clientCert := r.TLS.PeerCertificates[0]
 
-		// SECURITY: Verify the client cert was signed by our CA.
+		// SECURITY: attribute the certificate to exactly one trust domain, by
+		// verifying against each domain's anchors alone. The domain that
+		// verifies establishes both trust and identity namespace; everything
+		// below — admin, revocation, CN scoping — is decided by it.
 		// NIST 800-53: IA-5(2) (PKI-Based Authentication)
-		pool := x509.NewCertPool()
-		pool.AddCert(cfg.CACert)
-		if _, err := clientCert.Verify(x509.VerifyOptions{
-			Roots:     pool,
-			KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-		}); err != nil {
+		verified, err := attribute(cfg.Domains, clientCert, r.TLS.PeerCertificates[1:])
+		if err != nil {
 			slog.Warn("Auth: client cert verification failed",
-				"cn", clientCert.Subject.CommonName, "error", err)
+				"client", clientPrincipal{cn: clientCert.Subject.CommonName}, "error", err)
 			http.Error(w, "access denied", http.StatusForbidden)
 			return
 		}
+		domain := verified.Domain
 
 		clientCN := clientCert.Subject.CommonName
 
-		// SECURITY: CRL-based revocation check on the presented certificate's
-		// serial number. Checks the actual presented cert, not the cert on
-		// disk for the same CN, so old revoked credentials are rejected even
-		// after re-issuance. Fail-closed: a CRL read error is also treated
-		// as a denial.
+		// Attribution is not recoverable downstream: a handler sees the
+		// certificate but not which domain's anchors verified it, and the name
+		// alone is not an identity once client_ca is configured. Recording it
+		// here is what lets the destructive-operation tracker and every handler
+		// log line name a principal rather than a string.
+		principal := clientPrincipal{cn: clientCN, domain: domain}
+		r = r.WithContext(withPrincipal(r.Context(), principal))
+
+		// SECURITY: revocation. For our own domain this is the check it has
+		// always been: the presented certificate's serial against our own CRL,
+		// not the certificate on disk for the same CN, so an old revoked
+		// credential is rejected even after re-issuance. Fail-closed — a CRL
+		// read error is a denial.
+		//
+		// For a foreign domain our CRL says nothing, and serial numbers are
+		// unique only per issuer, so consulting it could even reject a valid
+		// client on a collision. Those go to that domain's own CRLs, and the
+		// walk covers the whole verified chain rather than just the leaf: a
+		// sibling CA revoked by the shared root must not go on authenticating
+		// its leaves.
 		// NIST 800-53: IA-5(2) (PKI-Based Authentication), SC-17 (PKI Certificates)
-		if revoked, err := myCA.IsRevokedSerial(r.Context(), clientCert.SerialNumber); err != nil || revoked {
-			if err != nil {
-				slog.Warn("Auth: CRL check failed (denying)", "cn", clientCN, "error", err)
-			} else {
-				slog.Warn("Auth: client cert is revoked", "cn", clientCN)
+		// The own arm checks the leaf's serial alone, where the foreign arm walks
+		// every issuer in the chain. That is sound only because this CA issues no
+		// CA certificates -- signing.go sets IsCA false on everything it signs,
+		// refuses a CSR asserting CA:TRUE, and import refuses a CA certificate --
+		// so our chains are never longer than leaf plus us, and there is no
+		// intermediate whose own revocation could be missed. If that ever
+		// changes, this arm has to walk too.
+		if domain.IsOwn() {
+			if revoked, err := myCA.IsRevokedSerial(r.Context(), clientCert.SerialNumber); err != nil || revoked {
+				if err != nil {
+					slog.Warn("Auth: CRL check failed (denying)", "client", principal, "error", err)
+				} else {
+					slog.Warn("Auth: client cert is revoked", "client", principal)
+				}
+				http.Error(w, "access denied", http.StatusForbidden)
+				return
 			}
+		} else if err := checkChainRevocation(verified.Chain, domain.RevocationSet(),
+			cfg.revocationPolicy(), time.Now()); err != nil {
+			// Counted only when revocation information was *missing*, never when
+			// it was found and said the client is revoked. Load-time coverage
+			// can only estimate which anchors matter -- it cannot know which
+			// chains will arrive -- so this is the signal that says clients are
+			// being turned away for want of a CRL, right now, and for which
+			// domain. Counting a successful revocation here instead made the
+			// alert driveable at will by the holder of a revoked certificate,
+			// which is the one population revocation exists to exclude.
+			if cfg.OnRevocationRefusal != nil && errors.Is(err, ErrNoUsableCRL) {
+				cfg.OnRevocationRefusal(domain.Name)
+			}
+			slog.Warn("Auth: foreign client cert failed revocation checking",
+				"client", principal, "error", err)
 			http.Error(w, "access denied", http.StatusForbidden)
 			return
 		}
 
 		switch tier {
-		case tierAnyClient:
-			next.ServeHTTP(w, r)
-
-		case tierSelfOrAdmin:
-			subject := extractPathSubject(r.URL.Path)
-			if isAdmin(cfg, clientCert, clientCN) || (subject != "" && clientCN == subject) {
+		case tierOwnClient:
+			// Operations on our own namespace: renewing a certificate we
+			// issued. A foreign certificate is authenticated but has no
+			// standing here, whatever name it carries.
+			if domain.IsOwn() {
 				next.ServeHTTP(w, r)
 			} else {
-				denyWithLog(w, r, clientCN, "not an admin and not the subject of the request")
+				slog.Warn("Auth: rejecting a foreign client certificate for an own-CA operation",
+					"client", principal)
+				http.Error(w, "access denied", http.StatusForbidden)
+			}
+
+		case tierSelfOrAdmin:
+			// The self-match is scoped to our own domain for the same reason:
+			// without it, a foreign certificate named agent1.example.com could
+			// read *our* agent1.example.com's pending CSR. Only an information
+			// leak — a public key and requested extensions — but the same
+			// defect class, and the rule closes it for free.
+			subject := extractPathSubject(r.URL.Path)
+			selfMatch := domain.IsOwn() && subject != "" && clientCN == subject
+			if isAdmin(domain, clientCert, clientCN) || selfMatch {
+				next.ServeHTTP(w, r)
+			} else {
+				denyWithLog(w, r, principal, "not an admin and not the subject of the request")
 			}
 
 		case tierAdminOnly:
-			if isAdmin(cfg, clientCert, clientCN) {
+			if isAdmin(domain, clientCert, clientCN) {
 				next.ServeHTTP(w, r)
 			} else {
-				denyWithLog(w, r, clientCN, "route requires admin access")
+				denyWithLog(w, r, principal, "route requires admin access")
 			}
 
 		default:
-			denyWithLog(w, r, clientCN, "unclassified route")
+			denyWithLog(w, r, principal, "unclassified route")
 		}
 	})
 }
@@ -156,13 +231,88 @@ func newAuthMiddleware(cfg *AuthConfig, myCA *ca.CA, next http.Handler) http.Han
 // The HTTP metrics carry no path label, so a 403 is otherwise invisible beyond a
 // counter: an operator whose tooling broke against a tier change has nothing to
 // correlate against. Logged at Warn because a denial on these routes is either a
-// misconfiguration or an attempt, and both are worth seeing. The client CN is
-// included; it comes from a certificate that has already been verified against
-// the trust anchor, so it is not attacker-controlled free text.
-func denyWithLog(w http.ResponseWriter, r *http.Request, clientCN, reason string) {
+// misconfiguration or an attempt, and both are worth seeing.
+//
+// Both the path and the CN are sanitised first — the path here, the CN inside
+// clientPrincipal.LogValue. The path is straightforwardly attacker-controlled —
+// net/http decodes %0A into a real newline, so a request for
+// /certificate_status/a%0A... puts one in the log record. The CN is less
+// obvious: it comes from a certificate verified against a trust anchor, which
+// used to mean our own CA and no longer does. A client_ca entry trusts an issuer
+// the operator does not necessarily control, and nothing stops that issuer
+// putting a newline in a common name.
+//
+// slog's own handlers happen to quote both, so nothing is forged today. That is
+// a property of the handler, not of this call site, and a log that is later
+// piped through anything less careful should not become a way to write arbitrary
+// lines into it.
+func denyWithLog(w http.ResponseWriter, r *http.Request, principal clientPrincipal, reason string) {
+	// The principal, not just the CN: it carries the domain that vouched for the
+	// name, and without it a denial record cannot say which ops-admin was
+	// refused once client_ca is configured.
 	slog.Warn("Request denied by authorisation middleware",
-		"method", r.Method, "path", r.URL.Path, "client_cn", clientCN, "reason", reason)
+		"method", r.Method, "path", sanitiseForLog(r.URL.Path),
+		"client", principal, "reason", reason)
 	http.Error(w, "access denied", http.StatusForbidden)
+}
+
+// maxLoggedValue bounds a sanitised log field. Long enough for any real path or
+// common name, short enough that a large request cannot pad the log.
+const maxLoggedValue = 256
+
+// sanitiseForLog makes an untrusted string safe to put in a log record:
+// control characters become U+FFFD and the result is truncated.
+//
+// The two ReplaceAll calls look redundant beside the Map that follows, and
+// functionally they are — the Map already covers CR and LF along with every
+// other control character. They are here because CodeQL's log-injection query
+// recognises replacement of those two specifically as a sanitiser and does not
+// model strings.Map, so without them the taint is reported as flowing straight
+// through this function. Writing the check twice is a smaller price than either
+// suppressing a real query or leaving a security alert open on the assumption
+// that a reviewer will re-derive this argument.
+func sanitiseForLog(s string) string {
+	if len(s) > maxLoggedValue {
+		s = s[:maxLoggedValue] + "…"
+	}
+	s = strings.ReplaceAll(s, "\n", "\uFFFD")
+	s = strings.ReplaceAll(s, "\r", "\uFFFD")
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return '\uFFFD'
+		}
+		return r
+	}, s)
+}
+
+// SanitiseForLog is sanitiseForLog for callers outside this package.
+//
+// Exported because the same untrusted values reach log records from
+// cmd/openvox-ca -- a CRL's issuer DN, chosen freely by whoever wrote the file
+// -- and a second implementation there would be a second thing to keep correct.
+// The CodeQL argument in sanitiseForLog's comment applies to those call sites
+// identically, and it is the kind of reasoning that survives in one place and
+// not in two.
+func SanitiseForLog(s string) string { return sanitiseForLog(s) }
+
+// sanitiseAllForLog applies sanitiseForLog to every element, for the bulk
+// endpoints whose request bodies carry a list of names.
+//
+// The list is bounded as well as the elements: a caller may send thousands of
+// certnames in one body, and a log line naming all of them is a write
+// amplification an unauthenticated-shaped request should not buy. The count is
+// logged beside it, so a truncated list never reads as the whole request.
+func sanitiseAllForLog(values []string) []string {
+	const maxLoggedValues = 32
+	out := make([]string, 0, min(len(values), maxLoggedValues))
+	for i, v := range values {
+		if i == maxLoggedValues {
+			out = append(out, "…")
+			break
+		}
+		out = append(out, sanitiseForLog(v))
+	}
+	return out
 }
 
 // lookupTier classifies a request into an authorization tier based on method and path.
@@ -209,11 +359,13 @@ func lookupTier(method, path string, cfg *AuthConfig) authTier {
 	case method == "GET" && strings.HasPrefix(p, "/certificate_request/"):
 		return tierSelfOrAdmin
 
-	// Certificate renewal: any CA-signed client cert may renew itself.
-	// The handler enforces that the CSR CN matches the authenticated client CN,
-	// so an agent can only renew its own certificate.
+	// Certificate renewal: a client certificate THIS CA issued may renew
+	// itself. The handler enforces that the CSR CN matches the authenticated
+	// client CN, so an agent can only renew its own certificate — and the tier
+	// enforces that the name was ours to begin with, since a CN asserted by a
+	// foreign issuer says nothing about our namespace.
 	case method == "POST" && p == "/certificate_renewal":
-		return tierAnyClient
+		return tierOwnClient
 
 	// Admin only: all other operations.
 	default:

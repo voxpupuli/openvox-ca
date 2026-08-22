@@ -66,7 +66,7 @@ import (
 // boolean that skipped assertion for flagged rows, which would have left
 // exactly the rows under active change as the only unasserted ones — and on
 // `GET /certificate_status/{subject}`, where three cells of eleven move, it
-// would have silently retired the foreign-issuer, expired and revoked cells on
+// would have silently retired the untrusted-issuer, expired and revoked cells on
 // the very route being restructured.
 //
 // Scope, stated plainly so nobody mistakes this for total coverage:
@@ -87,9 +87,10 @@ import (
 //     404, for which see the status-code dimension left open at classify;
 //     renewal gating only if it lands in the
 //     middleware rather than in handlePostCertificateRenewal, where the route's
-//     existing refusals live; and issuer-scoping not at all through the
-//     foreign-CA row, since this fixture's CA stays unconfigured as a second
-//     trust anchor (see foreignClientCert). Anything landing in a handler needs
+//     existing refusals live; and issuer-scoping through client-ca-plain, which
+//     the trust-domain work brought with it — the untrusted-CA row cannot show
+//     it, since that fixture's CA is configured nowhere and the row passes
+//     either way (see untrustedClientCert). Anything landing in a handler needs
 //     its own anchor in that handler's tests.
 //   - The default AuthConfig, an absent one, plus the two flags that change who
 //     reaches a route — AllowPublicStatus by moving a tier, NoPpCliAuth by
@@ -273,14 +274,16 @@ func classify(rec *httptest.ResponseRecorder) denialKind {
 // above the key pool.
 var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 	var (
-		ctx        context.Context
-		myCA       *ca.CA
-		store      *storage.StorageService
-		mux        http.Handler
-		caCert     *x509.Certificate
-		caKey      *rsa.PrivateKey
-		newClasses func() []clientClass
-		selfName   = "agent1"
+		ctx         context.Context
+		myCA        *ca.CA
+		store       *storage.StorageService
+		mux         http.Handler
+		caCert      *x509.Certificate
+		caKey       *rsa.PrivateKey
+		clientCA    *x509.Certificate
+		clientCAKey *ecdsa.PrivateKey
+		newClasses  func() []clientClass
+		selfName    = "agent1"
 	)
 
 	BeforeAll(func() {
@@ -310,8 +313,29 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 		caKey, err = x509.ParsePKCS1PrivateKey(block.Bytes)
 		Expect(err).NotTo(HaveOccurred())
 
+		// A second trust domain, configured exactly as an operator's client_ca
+		// entry would be: its own anchor, no admin grants, pp_cli_auth off, and
+		// a current CRL of its own.
+		//
+		// The CRL is not decoration. The default revocation policy is require,
+		// so a domain with no usable CRL has every one of its clients refused
+		// before the tier switch is reached -- which would make the whole
+		// client-ca-plain column read "denied" for a reason that has nothing to
+		// do with authorisation, while looking like it had.
+		clientCA, clientCAKey = mintCert("Baseline Client CA", nil, nil, true)
+		trusted := api.NewForeignTrustDomain("baseline-client-ca", poolOf(clientCA),
+			[]*x509.Certificate{clientCA}, nil, false)
+		trusted.SetRevocationSet(api.NewClientCRLSet(
+			[]*x509.RevocationList{emptyCRLFrom(clientCA, clientCAKey)},
+			[]*x509.Certificate{clientCA}))
+
 		server := api.New(myCA)
-		server.AuthConfig = api.NewAuthConfig(caCert, adminAllowList)
+		server.AuthConfig = &api.AuthConfig{
+			Domains: []api.TrustDomain{
+				api.OwnTrustDomain(caCert, adminAllowList, true),
+				trusted,
+			},
+		}
 		mux = server.Routes()
 
 		// Fresh certificates per route, not one shared set.
@@ -327,12 +351,12 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 		// is the certificate — its serial is what the CRL names — and RSA key
 		// generation is the whole cost of minting one. Re-minting per route with
 		// cached keys keeps the independence and takes the matrix from ~180
-		// RSA-2048 generations to four (seven of the eleven classes draw from
-		// the pool; the other four are keyless or ECDSA). The CA-issued and
+		// RSA-2048 generations to four (seven of the twelve classes draw from
+		// the pool; the other five are keyless or ECDSA). The CA-issued and
 		// revoked fixtures go through myCA.Generate, so they are ECDSA P-256 by
-		// virtue of the
-		// LeafKeyConfig set above; the foreign fixture generates its own CA and
-		// leaf, also P-256. None is worth pooling at that cost.
+		// virtue of the LeafKeyConfig set above; the untrusted fixture generates
+		// its own CA and leaf, and client-ca-plain a leaf under the anchor built
+		// in BeforeAll, both P-256. None is worth pooling at that cost.
 		keyPool := newRSAKeyPool(4)
 
 		newClasses = func() []clientClass {
@@ -372,7 +396,21 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				// would grant admin to this certificate and, again, move no
 				// existing cell.
 				{name: "own-ca-pp-cli-auth-false", cert: ppCliAuthValueCert(keyPool[2], "cli-false", caCert, caKey, "false")},
-				{name: "foreign-ca", cert: foreignClientCert(selfName)},
+				{name: "untrusted-ca", cert: untrustedClientCert(selfName)},
+				// Trusted *and* foreign: issued by an issuer configured as a
+				// client_ca anchor, carrying a CN this CA's own namespace uses.
+				// The column the untrusted-ca row above could never provide,
+				// and said so before this existed -- an unconfigured issuer is
+				// refused at verification, so every question about what a
+				// trusted one may do went unrecorded.
+				//
+				// Its outcomes match untrusted-ca's in all twelve rows today,
+				// which is the point rather than a redundancy: the two columns
+				// agree for entirely different reasons, and the changes that
+				// would move them are disjoint. Letting a foreign certificate
+				// inherit our namespace's self-match, or our allow list, moves
+				// this column and not that one.
+				{name: "client-ca-plain", cert: clientCACert(selfName, clientCA, clientCAKey)},
 			}
 		}
 	})
@@ -386,9 +424,11 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"none": false, "own-ca-plain": false, "own-ca-allowlisted": false,
 				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": false,
 				"own-ca-expired": false, "own-ca-revoked": false, "own-ca-server-eku": false,
-				"own-ca-pp-cli-auth-false": false, "foreign-ca": false,
+				"own-ca-pp-cli-auth-false": false, "untrusted-ca": false,
+				"client-ca-plain": false,
 			},
-			fingerprint: "23628229767a2378",
+			changedBy:   "client_ca trust domains added the client-ca-plain class, so every row records one more outcome",
+			fingerprint: "a5d3f239c5c9c2ba",
 			baseline:    "8afc7a5fa37545dc",
 		},
 		{
@@ -397,9 +437,11 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"none": false, "own-ca-plain": false, "own-ca-allowlisted": false,
 				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": false,
 				"own-ca-expired": false, "own-ca-revoked": false, "own-ca-server-eku": false,
-				"own-ca-pp-cli-auth-false": false, "foreign-ca": false,
+				"own-ca-pp-cli-auth-false": false, "untrusted-ca": false,
+				"client-ca-plain": false,
 			},
-			fingerprint: "312c3e08f991cd3c",
+			changedBy:   "client_ca trust domains added the client-ca-plain class, so every row records one more outcome",
+			fingerprint: "cfa9e87acd462b2d",
 			baseline:    "0764b50dcaf3e3a4",
 		},
 		{
@@ -408,9 +450,11 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"none": false, "own-ca-plain": false, "own-ca-allowlisted": false,
 				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": false,
 				"own-ca-expired": false, "own-ca-revoked": false, "own-ca-server-eku": false,
-				"own-ca-pp-cli-auth-false": false, "foreign-ca": false,
+				"own-ca-pp-cli-auth-false": false, "untrusted-ca": false,
+				"client-ca-plain": false,
 			},
-			fingerprint: "d02baba4850135c7",
+			changedBy:   "client_ca trust domains added the client-ca-plain class, so every row records one more outcome",
+			fingerprint: "5f2b0eb4e159ec1a",
 			baseline:    "9f56b7fa5cfd0a0b",
 		},
 		{
@@ -426,9 +470,11 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"none": false, "own-ca-plain": false, "own-ca-allowlisted": false,
 				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": false,
 				"own-ca-expired": false, "own-ca-revoked": false, "own-ca-server-eku": false,
-				"own-ca-pp-cli-auth-false": false, "foreign-ca": false,
+				"own-ca-pp-cli-auth-false": false, "untrusted-ca": false,
+				"client-ca-plain": false,
 			},
-			fingerprint: "0383bfa6921981a9",
+			changedBy:   "client_ca trust domains added the client-ca-plain class, so every row records one more outcome",
+			fingerprint: "482036cf4abcaf71",
 			baseline:    "b77de287975a13ee",
 		},
 		{
@@ -450,9 +496,11 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"none": false, "own-ca-plain": false, "own-ca-allowlisted": false,
 				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": false,
 				"own-ca-expired": false, "own-ca-revoked": false, "own-ca-server-eku": false,
-				"own-ca-pp-cli-auth-false": false, "foreign-ca": false,
+				"own-ca-pp-cli-auth-false": false, "untrusted-ca": false,
+				"client-ca-plain": false,
 			},
-			fingerprint: "b8f39578c7d8c805",
+			changedBy:   "client_ca trust domains added the client-ca-plain class, so every row records one more outcome",
+			fingerprint: "9f2580f8cd1bf22f",
 			baseline:    "262bb3133fe936c2",
 		},
 		{
@@ -464,22 +512,25 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"none": true, "own-ca-plain": true, "own-ca-allowlisted": false,
 				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": true,
 				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
-				"own-ca-pp-cli-auth-false": true, "foreign-ca": true,
+				"own-ca-pp-cli-auth-false": true, "untrusted-ca": true,
+				"client-ca-plain": true,
 			},
-			changedBy: "certificate_status moved from any-client to admin-only for upstream parity; " +
+			changedBy: "client_ca trust domains added the client-ca-plain class, so every row records one more outcome; certificate_status moved from any-client to admin-only for upstream parity; " +
 				"own-ca-plain, own-ca-issued and own-ca-pp-cli-auth-false were previously allowed",
-			fingerprint: "95290d13546028eb",
+			fingerprint: "a76f3309c301e0bb",
 			baseline:    "ceb90b2e2a7b4481",
 		},
 		{
-			name: "any-client: renew own certificate", method: "POST", path: "/certificate_renewal",
+			name: "own-client: renew own certificate", method: "POST", path: "/certificate_renewal",
 			denied: map[string]bool{
 				"none": true, "own-ca-plain": false, "own-ca-allowlisted": false,
 				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": false,
 				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
-				"own-ca-pp-cli-auth-false": false, "foreign-ca": true,
+				"own-ca-pp-cli-auth-false": false, "untrusted-ca": true,
+				"client-ca-plain": true,
 			},
-			fingerprint: "f8ccf600945d4713",
+			changedBy:   "client_ca trust domains added the client-ca-plain class, so every row records one more outcome",
+			fingerprint: "d52c0831ddb3aa4e",
 			baseline:    "fb886df81021f5dc",
 		},
 		{
@@ -490,9 +541,11 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"none": true, "own-ca-plain": false, "own-ca-allowlisted": false,
 				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": true,
 				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
-				"own-ca-pp-cli-auth-false": true, "foreign-ca": true,
+				"own-ca-pp-cli-auth-false": true, "untrusted-ca": true,
+				"client-ca-plain": true,
 			},
-			fingerprint: "9ed2a7448b79fd43",
+			changedBy:   "client_ca trust domains added the client-ca-plain class, so every row records one more outcome",
+			fingerprint: "2e4989e8d1a0e209",
 			baseline:    "1e5309144d9f7eb5",
 		},
 		{
@@ -501,9 +554,11 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"none": true, "own-ca-plain": true, "own-ca-allowlisted": false,
 				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": true,
 				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
-				"own-ca-pp-cli-auth-false": true, "foreign-ca": true,
+				"own-ca-pp-cli-auth-false": true, "untrusted-ca": true,
+				"client-ca-plain": true,
 			},
-			fingerprint: "b0ab430df60f9374",
+			changedBy:   "client_ca trust domains added the client-ca-plain class, so every row records one more outcome",
+			fingerprint: "3bedb38f7cdb0739",
 			baseline:    "b00be875b450b375",
 		},
 		{
@@ -512,9 +567,11 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"none": true, "own-ca-plain": true, "own-ca-allowlisted": false,
 				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": true,
 				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
-				"own-ca-pp-cli-auth-false": true, "foreign-ca": true,
+				"own-ca-pp-cli-auth-false": true, "untrusted-ca": true,
+				"client-ca-plain": true,
 			},
-			fingerprint: "86782f93aa9620d3",
+			changedBy:   "client_ca trust domains added the client-ca-plain class, so every row records one more outcome",
+			fingerprint: "78fc1ce0af8fe43a",
 			baseline:    "3c6c2b41a06a003d",
 		},
 		{
@@ -523,9 +580,11 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"none": true, "own-ca-plain": true, "own-ca-allowlisted": false,
 				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": true,
 				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
-				"own-ca-pp-cli-auth-false": true, "foreign-ca": true,
+				"own-ca-pp-cli-auth-false": true, "untrusted-ca": true,
+				"client-ca-plain": true,
 			},
-			fingerprint: "aa15b530c895d58e",
+			changedBy:   "client_ca trust domains added the client-ca-plain class, so every row records one more outcome",
+			fingerprint: "b857421ab81b93e2",
 			baseline:    "dafb6d11e0b2bd1b",
 		},
 		{
@@ -534,9 +593,11 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"none": true, "own-ca-plain": true, "own-ca-allowlisted": false,
 				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": true,
 				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
-				"own-ca-pp-cli-auth-false": true, "foreign-ca": true,
+				"own-ca-pp-cli-auth-false": true, "untrusted-ca": true,
+				"client-ca-plain": true,
 			},
-			fingerprint: "eab32b2174903242",
+			changedBy:   "client_ca trust domains added the client-ca-plain class, so every row records one more outcome",
+			fingerprint: "c72146bf7b30b0a3",
 			baseline:    "2429990f643028ba",
 		},
 		{
@@ -555,9 +616,15 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				"none": true, "own-ca-plain": true, "own-ca-allowlisted": false,
 				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": true,
 				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
-				"own-ca-pp-cli-auth-false": true, "foreign-ca": true,
+				"own-ca-pp-cli-auth-false": true, "untrusted-ca": true,
+				"client-ca-plain": true,
 			},
-			fingerprint: "c00e954e2057a4c0",
+			changedBy: "arrived on main with revoke-by-serial, which predates this branch's class " +
+				"changes: foreign-ca was renamed untrusted-ca because it means an issuer configured " +
+				"nowhere, and client-ca-plain was added. Denied for both -- an admin-only route " +
+				"admits neither an unknown issuer's certificate nor a trusted foreign issuer's " +
+				"client that holds no admin grant",
+			fingerprint: "8c543c73b603d38c",
 			baseline:    "b384bfaa38f960fd",
 		},
 	}
@@ -836,10 +903,13 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 	It("pins what each client class is, not merely what it is called", func() {
 		// The digests bind what a row *records*. Nothing in them binds the
 		// certificate that produced the recording, and that gap is wide: the
-		// eleven classes collapse into only four distinct outcome columns, so
-		// ten of them are indistinguishable from a sibling by recorded outcome
-		// alone. own-ca-pp-cli-auth-false's column is identical to
-		// own-ca-issued's; own-ca-server-eku's is identical to own-ca-expired's.
+		// twelve classes collapse into only four distinct outcome columns, so
+		// eleven of them are indistinguishable from a sibling by recorded
+		// outcome alone. own-ca-pp-cli-auth-false's column is identical to
+		// own-ca-issued's; own-ca-server-eku's is identical to own-ca-expired's;
+		// and client-ca-plain's is identical, cell for cell, to untrusted-ca's —
+		// the newest of them and the one whose fixture claim carries the most,
+		// since nothing in the recorded row says it was ever trusted.
 		//
 		// So a one-line argument swap — handing own-ca-pp-cli-auth-false an
 		// ordinary CA-issued certificate — reproduces its column exactly on
@@ -980,7 +1050,7 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				Expect(adminAllowList).NotTo(HaveKey(c.Subject.CommonName),
 					"must not be admin by the allow-list route either")
 			},
-			"foreign-ca": func(c *x509.Certificate) {
+			"untrusted-ca": func(c *x509.Certificate) {
 				unexpired(c)
 				clientAuth(c)
 				Expect(c.Issuer.String()).NotTo(Equal(caCert.Subject.String()),
@@ -988,6 +1058,22 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				Expect(c.CheckSignatureFrom(caCert)).NotTo(Succeed())
 				Expect(c.Subject.CommonName).To(Equal(selfName),
 					"the CN collision with our own namespace is deliberate groundwork")
+			},
+			"client-ca-plain": func(c *x509.Certificate) {
+				unexpired(c)
+				clientAuth(c)
+				// Trusted and foreign at once, which is the combination, and
+				// each half needs its own claim: signed by the issuer the mux
+				// was configured with, and not by ours.
+				Expect(c.CheckSignatureFrom(clientCA)).To(Succeed(),
+					"it must chain to the anchor this file configures as a client_ca")
+				Expect(c.CheckSignatureFrom(caCert)).NotTo(Succeed())
+				Expect(c.Subject.CommonName).To(Equal(selfName),
+					"the CN collides with our own namespace on purpose: it is what a "+
+						"self-match scoped to the wrong domain would admit")
+				Expect(adminAllowList).NotTo(HaveKey(c.Subject.CommonName),
+					"and it holds no grant, in either domain, so every denial is the tier's")
+				noPpCliAuth(c)
 			},
 		}
 
@@ -1016,7 +1102,7 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 		// test less than it appears to.
 		//
 		// The class list is pinned by name, not merely counted. Counting alone
-		// lets an adversarial fixture be swapped out — delete "foreign-ca", add
+		// lets an adversarial fixture be swapped out — delete "untrusted-ca", add
 		// a second benign class, and the length still matches while the row that
 		// mattered is gone. The names are checked inside the route table, where
 		// the classes are minted anyway, so this spec reads no certificates at
@@ -1065,7 +1151,8 @@ var expectedClientClasses = []string{
 	"own-ca-revoked",
 	"own-ca-server-eku",
 	"own-ca-pp-cli-auth-false",
-	"foreign-ca",
+	"untrusted-ca",
+	"client-ca-plain",
 }
 
 var expectedRoutes = []string{
@@ -1075,7 +1162,7 @@ var expectedRoutes = []string{
 	"public: read expiry metadata",
 	"public: query OCSP",
 	"admin: read a certificate status",
-	"any-client: renew own certificate",
+	"own-client: renew own certificate",
 	"self-or-admin: read own CSR",
 	"self-or-admin: read another node's CSR",
 	"admin: list all statuses",
@@ -1284,18 +1371,20 @@ func revokedClientCert(ctx context.Context, myCA *ca.CA) *x509.Certificate {
 	return cert
 }
 
-// foreignClientCert issues a certificate from an unrelated CA, carrying a CN
+// untrustedClientCert issues a certificate from an unrelated CA, carrying a CN
 // this CA's own namespace also uses.
 //
 // What this row pins is narrow, and worth stating so it is not mistaken for
 // more: an issuer that is not configured as a trust anchor is rejected. It
 // cannot demonstrate that a *trusted* second issuer fails to inherit identity
-// claims, because this fixture's CA will still be unconfigured after that work
-// lands — the row would keep passing either way. The cross-issuer case needs a
-// certificate from an issuer the server has been told to trust, which is a
-// fixture the change that introduces multiple trust anchors has to bring with
-// it. The CN collision here is deliberate groundwork for that, not the test.
-func foreignClientCert(cn string) *x509.Certificate {
+// claims, because this fixture's CA is unconfigured — the row keeps passing
+// either way. That case is clientCACert below, the fixture the trust-domain
+// work owed this file; the CN collision here was groundwork for it.
+//
+// It was called foreign-ca until then, which had come to mean the opposite of
+// what the production code means by foreign: there, a foreign domain is one
+// this CA trusts and did not issue. Here it was one nothing trusts at all.
+func untrustedClientCert(cn string) *x509.Certificate {
 	GinkgoHelper()
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	Expect(err).NotTo(HaveOccurred())
@@ -1328,6 +1417,51 @@ func foreignClientCert(cn string) *x509.Certificate {
 	leaf, err := x509.ParseCertificate(leafDER)
 	Expect(err).NotTo(HaveOccurred())
 	return leaf
+}
+
+// clientCACert issues a certificate from an issuer this server *is* configured
+// to trust, under the same CN this CA's own namespace uses.
+//
+// The pair with untrustedClientCert is the whole point. That one asks "is an
+// unknown issuer refused", which was never really in doubt; this one asks what a
+// certificate that has passed verification may then do — the question every
+// decision after attribution turns on, and the one nothing in this file could
+// pose while a single anchor was configured.
+func clientCACert(cn string, issuer *x509.Certificate, issuerKey *ecdsa.PrivateKey) *x509.Certificate {
+	GinkgoHelper()
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	Expect(err).NotTo(HaveOccurred())
+
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: cn},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, issuer, &leafKey.PublicKey, issuerKey)
+	Expect(err).NotTo(HaveOccurred())
+	leaf, err := x509.ParseCertificate(der)
+	Expect(err).NotTo(HaveOccurred())
+	return leaf
+}
+
+// emptyCRLFrom is a current, empty CRL signed by issuer, which is what a
+// client_ca domain needs before the default require policy will let any of its
+// clients through to a tier decision at all.
+func emptyCRLFrom(issuer *x509.Certificate, issuerKey *ecdsa.PrivateKey) *x509.RevocationList {
+	GinkgoHelper()
+	now := time.Now()
+	der, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+		Number:     big.NewInt(1),
+		ThisUpdate: now.Add(-time.Hour),
+		NextUpdate: now.Add(24 * time.Hour),
+	}, issuer, issuerKey)
+	Expect(err).NotTo(HaveOccurred())
+	crl, err := x509.ParseRevocationList(der)
+	Expect(err).NotTo(HaveOccurred())
+	return crl
 }
 
 // The two AuthConfig flags that change who reaches a route get their own
@@ -1420,12 +1554,12 @@ var _ = Describe("Authorisation baseline: configuration axes", func() {
 			Expect(probe(handler, "GET", "/certificate_status/somenode", nil)).To(BeFalse())
 		})
 
-		It("admits a self-or-admin route for a foreign certificate", func() {
+		It("admits a self-or-admin route for an untrusted certificate", func() {
 			// Not merely "no certificate is enough": a certificate from an
 			// unrelated CA is equally unexamined, because nothing examines it.
 			handler := muxWith(nil)
 			Expect(probe(handler, "GET", "/certificate_request/othernode",
-				foreignClientCert("intruder"))).To(BeFalse())
+				untrustedClientCert("intruder"))).To(BeFalse())
 		})
 	})
 
@@ -1459,8 +1593,12 @@ var _ = Describe("Authorisation baseline: configuration axes", func() {
 			// The one input that narrows admin authority. Every cell in the main
 			// table is computed with this false, so without this pair a change
 			// that dropped the flag would move nothing the oracle watches.
-			cfg := api.NewAuthConfig(caCert, adminAllowList)
-			cfg.NoPpCliAuth = true
+			// no_pp_cli_auth is a property of the domain now, not of the config:
+			// honouring the extension is what a domain grants, and domain zero
+			// is the only one this spec has.
+			cfg := &api.AuthConfig{
+				Domains: []api.TrustDomain{api.OwnTrustDomain(caCert, adminAllowList, false)},
+			}
 			handler := muxWith(cfg)
 			byExtension := issueClientCertWithPpCliAuth("cli-user", caCert, caKey)
 			Expect(probe(handler, "PUT", "/certificate_revocation_list/ca", byExtension)).To(BeTrue())

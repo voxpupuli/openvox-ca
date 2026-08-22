@@ -93,6 +93,54 @@ func buildBackendSpec(cfg *serverConfig, absCADir string) (storage.BackendSpec, 
 	return cfg.StorageConfig.ToBackendSpec(absCADir)
 }
 
+// buildAuthConfig assembles the API's authorisation configuration: the admin CN
+// allow list drawn from puppet_server and puppet_server_file, and the flags
+// governing pp_cli_auth and public status.
+//
+// Extracted from the startup path so that what the middleware is configured
+// with is separable from when it is installed. Those are different decisions —
+// the caller decides whether to authorise at all, this decides how — and having
+// them in one inline block is what made it easy to add a TLS mode that silently
+// skipped the first.
+func buildAuthConfig(cfg *serverConfig, myCA *ca.CA) (*api.AuthConfig, error) {
+	// Through buildAdminAllowList, not an inline merge: that function is the
+	// single construction point for this list, and reload calls it too. Two
+	// implementations of the same merge is how startup and SIGHUP come to
+	// disagree about who is an administrator.
+	allowList, err := buildAdminAllowList(cfg.PuppetServer, cfg.PuppetServerFile)
+	if err != nil {
+		return nil, err
+	}
+
+	if !cfg.NoPpCliAuth {
+		// SECURITY: Inform the operator that pp_cli_auth OID grants admin access.
+		// Any certificate carrying this extension with value "true" will be treated
+		// as an admin. Use --no-pp-cli-auth to restrict admin access to the CN allow list only.
+		// NIST 800-53: AC-6 (Least Privilege)
+		slog.Info("pp_cli_auth extension is enabled as an admin credential (default). " +
+			"Any certificate carrying pp_cli_auth=true will have admin access. " +
+			"Use --no-pp-cli-auth to disable this and require explicit CN allow list.")
+	}
+
+	// Domain zero is this CA, always, and is not configurable: an operator
+	// cannot remove it, rename it, or drop their own CA out of the trust set.
+	// With no client_ca configured the list has length one and authorisation
+	// is exactly what it was.
+	if err := cfg.ClientCAConfig.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid client_ca config: %w", err)
+	}
+	domains, err := buildTrustDomains(cfg, myCA.CACert, allowList)
+	if err != nil {
+		return nil, err
+	}
+
+	return &api.AuthConfig{
+		Domains:                domains,
+		AllowPublicStatus:      cfg.AllowPublicStatus,
+		ClientRevocationPolicy: cfg.ResolvedPolicy(),
+	}, nil
+}
+
 // applyCAConfig applies the common CA configuration fields from serverConfig
 // to a CA instance. Used by both frontend and signer modes.
 func applyCAConfig(myCA *ca.CA, cfg *serverConfig) error {
@@ -195,6 +243,7 @@ func newRootCmd() *cobra.Command {
 		puppetServers           string
 		puppetServerFile        string
 		noPpCliAuth             bool
+		clientRevocationPolicy  string
 		noTLSRequired           bool
 		allowPublicStatus       bool
 		ocspURL                 string
@@ -297,6 +346,9 @@ func newRootCmd() *cobra.Command {
 			}
 			if cmd.Flags().Changed("no-pp-cli-auth") {
 				cfg.NoPpCliAuth = noPpCliAuth
+			}
+			if cmd.Flags().Changed("client-revocation-policy") {
+				cfg.ClientRevocationPolicy = clientRevocationPolicy
 			}
 			if cmd.Flags().Changed("no-tls-required") {
 				cfg.NoTLSRequired = noTLSRequired
@@ -624,22 +676,16 @@ func newRootCmd() *cobra.Command {
 
 			// Wire mTLS auth middleware when TLS is configured.
 			if cfg.TLSCert != "" && cfg.TLSKey != "" {
-				allowList, err := buildAdminAllowList(cfg.PuppetServer, cfg.PuppetServerFile)
+				// Every trust domain this CA will accept a client from: its own
+				// first, then each client_ca entry. buildAuthConfig owns the
+				// assembly so that what the middleware trusts is decided in one
+				// place a spec can call, rather than inline here where nothing
+				// can reach it.
+				authCfg, err := buildAuthConfig(cfg, myCA)
 				if err != nil {
 					return err
 				}
-				srv.AuthConfig = api.NewAuthConfig(myCA.CACert, allowList)
-				srv.AuthConfig.NoPpCliAuth = cfg.NoPpCliAuth
-				srv.AuthConfig.AllowPublicStatus = cfg.AllowPublicStatus
-				if !cfg.NoPpCliAuth {
-					// SECURITY: Inform the operator that pp_cli_auth OID grants admin access.
-					// Any certificate carrying this extension with value "true" will be treated
-					// as an admin. Use --no-pp-cli-auth to restrict admin access to the CN allow list only.
-					// NIST 800-53: AC-6 (Least Privilege)
-					slog.Info("pp_cli_auth extension is enabled as an admin credential (default). " +
-						"Any certificate carrying pp_cli_auth=true will have admin access. " +
-						"Use --no-pp-cli-auth to disable this and require explicit CN allow list.")
-				}
+				srv.AuthConfig = authCfg
 			}
 
 			addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
@@ -704,6 +750,26 @@ func newRootCmd() *cobra.Command {
 						caPool.AddCert(caCert)
 					}
 				}
+				// Every anchor from every trust domain, so a client holding a
+				// certificate from any trusted issuer actually offers it. This
+				// is a handshake hint only — it populates the
+				// certificate_authorities list — and deliberately broader than
+				// any single domain's authority: it does not merge trust, which
+				// the middleware decides per domain.
+				//
+				// Taken from the domains already built rather than re-read from
+				// disk. Re-parsing would let the pool and the authorisation
+				// decision diverge if a bundle changed between the two reads,
+				// and it is the pool that tells a client which certificate to
+				// offer — so the mismatch would present as a client silently
+				// offering nothing.
+				if srv.AuthConfig != nil {
+					for i := range srv.AuthConfig.Domains {
+						for _, anchor := range srv.AuthConfig.Domains[i].Anchors {
+							caPool.AddCert(anchor)
+						}
+					}
+				}
 
 				// SECURITY: TLS server configuration with mTLS support.
 				// RequestClientCert allows public endpoints to work without a
@@ -721,6 +787,33 @@ func newRootCmd() *cobra.Command {
 				}
 
 				slog.Info("TLS enabled", "cert", cfg.TLSCert)
+			}
+
+			// Foreign client CRLs reload on their own timer, gated on client_ca
+			// alone: an operator trusting a foreign issuer need not be running
+			// anything else. Anchors deliberately do not reload — see
+			// refreshClientCRLs. Started here rather than in backgroundJobs
+			// because it needs the trust domains the auth config holds, the
+			// same reason the Kubernetes exporter is started here.
+			if cfg.ClientCAConfig.Enabled() && srv.AuthConfig != nil {
+				var crlMetrics *clientCRLMetrics
+				if exporter != nil {
+					crlMetrics = newClientCRLMetrics(exporter.Registry())
+				}
+				// Publish puppetca_client_crl_usable before serving. The sets
+				// themselves are already installed by buildTrustDomains, so this
+				// is not about the first request -- it is that `== 0` cannot fire
+				// on a series that does not exist, so a domain whose CRLs are
+				// unusable from the very first load would otherwise go unalerted
+				// until the first refresh tick.
+				refreshClientCRLs(cfg, srv.AuthConfig.Domains, crlMetrics)
+				// A refusal is the one unambiguous statement that clients are
+				// being turned away for want of a CRL; load-time coverage can
+				// only estimate it. Wired here because the api package holds no
+				// metrics dependency.
+				srv.AuthConfig.OnRevocationRefusal = crlMetrics.recordRefusal
+				go runClientCRLReloader(ctx, cfg, srv.AuthConfig.Domains, crlMetrics,
+					cfg.ClientCRLRefreshInterval())
 			}
 
 			// Periodic upkeep. Which jobs a configuration runs is decided by
@@ -836,6 +929,7 @@ func newRootCmd() *cobra.Command {
 	f.StringVar(&puppetServers, "puppet-server", "", "Comma-separated list of puppet-server CNs allowed admin access")
 	f.StringVar(&puppetServerFile, "puppet-server-file", "", "Path to a file of puppet-server CNs allowed admin access (one per line; # comments and blank lines ignored)")
 	f.BoolVar(&noPpCliAuth, "no-pp-cli-auth", false, "Disable pp_cli_auth extension as an admin credential; require CN allow list only")
+	f.StringVar(&clientRevocationPolicy, "client-revocation-policy", "", "Revocation checking for client_ca domains: require (default), check, or skip. Our own CA always checks its own CRL")
 	f.BoolVar(&noTLSRequired, "no-tls-required", false, "Allow plain HTTP on non-loopback addresses (use only behind a trusted TLS proxy or in test environments)")
 	f.BoolVar(&allowPublicStatus, "allow-public-status", false, "Allow unauthenticated GET /certificate_status (by default this route is admin-only)")
 	f.StringVar(&ocspURL, "ocsp-url", "", "OCSP responder URL to embed in issued certificates (e.g. http://openvox-ca:8140/ocsp)")

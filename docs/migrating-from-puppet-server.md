@@ -411,7 +411,8 @@ for a `reason` field of `route requires admin access` — rendered
 `reason="route requires admin access"` on stderr, and
 `"reason":"route requires admin access"` when `logfile` is set, since that
 selects the JSON handler. The message is `Request denied by authorisation
-middleware` and the CN is in `client_cn`.
+middleware` and the client is in `client.cn`, beside the `client.domain` that
+vouched for the name.
 
 First, be clear what restoring it costs. Admin is a single boolean
 (`isAdmin`), not a per-route grant, so both of the options that preserve
@@ -425,7 +426,18 @@ to fix a status poll can also sign and revoke certificates.
 If the caller only needs to observe state, `GET /certificate/{subject}` and the
 CRL are both public and need no grant at all.
 
-Two ways to restore authenticated access, in order of preference:
+**First check which trust domain the caller was attributed to**, because it
+decides whether either remedy below can work at all. Both are scoped to
+certificates **this CA issued**. If the caller holds a certificate from a
+[`client_ca`](configuration.md#trusting-client-certificates-from-another-ca)
+issuer — the usual shape when the servers and operators administering this CA
+sit under a sibling intermediate — then neither `--puppet-server` nor
+`pp_cli_auth` reaches them: their admin grant is that entry's `admin_cns` and
+`allow_pp_cli_auth`. The denial log line carries a `client.domain` field naming the
+domain the certificate was attributed to, beside `client.cn` and `reason`.
+
+For a caller this CA issued, two ways to restore authenticated access, in order
+of preference:
 
 1. **Add the caller's CN to the admin allow list** — `--puppet-server`, or
    `--puppet-server-file` for one CN per line. Authentication is preserved and
