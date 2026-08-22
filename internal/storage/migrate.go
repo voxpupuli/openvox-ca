@@ -160,7 +160,15 @@ func Migrate(ctx context.Context, src, dst Backend, opts MigrateOptions) (Migrat
 		if err := dst.Put(ctx, key, data, kind); err != nil {
 			return false, fmt.Errorf("writing %q to destination: %w", key, err)
 		}
-		logf("copied %s (%d bytes)", key, len(data))
+		// %q, not %s: Logf is operator-facing and its only implementation
+		// (cmd/openvox-ca-ctl/migrate.go) writes the line to stderr with no
+		// escaping. Keys are built from source directory entry names
+		// (filesystem.go's listing trims ".pem" off e.Name()), which nothing
+		// validates -- migrating a foreign or legacy CA directory is exactly
+		// the case where a filename could carry a newline and forge a second
+		// progress line. %q escapes it, and is one of the two sanitisers
+		// CodeQL's go/log-injection query itself recognises.
+		logf("copied %q (%d bytes)", key, len(data))
 		return true, nil
 	}
 

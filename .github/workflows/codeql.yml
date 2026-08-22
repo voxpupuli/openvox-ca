@@ -48,6 +48,10 @@ jobs:
           # "security-and-quality" widens coverage beyond the default security
           # queries; the ruleset only gates on error-level alerts.
           queries: security-and-quality
+          # Filters only -- the file sets no `queries:` key of its own, so it
+          # does not interact with the input above. It excludes go/log-injection
+          # and explains what makes that sound; read it before adding anything.
+          config-file: ./.github/codeql/codeql-config.yml
 
       - name: Autobuild
         uses: github/codeql-action/autobuild@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7

@@ -217,6 +217,41 @@ the inventory, in-memory caches) must follow
 - Lock ordering is `subject:<name>` → `crl` → `c.mu`; lock names are a stable
   cross-replica protocol — never invent or rename one casually.
 
+## Logging: `log/slog` only
+
+**Non-test code logs through `log/slog`.** This is a hard convention — do not
+introduce `logrus`, `zap`, `zerolog`, `hclog`, `go-logr` or any other logging
+library, and do not implement your own `slog.Handler`.
+
+The reason is a security property, not taste. `slog`'s `TextHandler` and
+`JSONHandler` escape control characters in every position — message, attribute
+key, attribute value, group name, group-prefixed key and slice element — so a
+newline in a certname cannot terminate a record and forge a second log entry.
+That is why CodeQL's `go/log-injection` rule is excluded in
+[.github/codeql/codeql-config.yml](.github/codeql/codeql-config.yml): the query
+models sinks rather than handlers, and would otherwise report every untrusted
+value reaching a log call, for ever. The exclusion is sound only while this
+convention holds.
+
+Two guards back it up, and neither is complete on its own:
+
+- `.golangci.yml`'s `only-slog-logs` depguard rule denies the known unescaped
+  logging libraries. It is a **denylist** — an unlisted library, or an
+  `slog.Handler` written in this tree, passes lint. That gap is why this
+  section exists.
+- `cmd/openvox-ca/main_test.go` ("control characters in logged data cannot
+  forge a second entry") pins the escaping behaviour itself, so a stdlib
+  regression fails CI.
+
+Output that is operator-facing but not `slog` — such as
+`internal/storage/migrate.go`'s `Logf`, which the CLI writes straight to stderr
+— gets no escaping from anything. Format values that have not passed
+`ca.ValidateSubject` with `%q` there — including values decoded from a server
+response, which nothing re-validates. `cmd/openvox-ca-ctl`'s status table and
+sign/clean summaries are the deliberate exception: they print server-returned
+names with `%s` because quoting would break the column alignment, on the
+judgement that an operator's terminal is not a log pipeline.
+
 ## Compatibility contracts (do not rename)
 
 openvox-ca is a drop-in for the OpenVox/Puppet Server CA. The following
