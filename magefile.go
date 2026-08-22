@@ -2180,7 +2180,7 @@ func (Chart) Test() error {
 			// only. U+2028 is a YAML line break that survives go-yaml's
 			// normalisation.
 			name:       "a puppetServers entry carrying a Unicode line separator",
-			valuesYAML: "tls:\n  existingSecret: s\npuppetServers:\n  - \"compiler.example.com       config.yaml: |         no_tls_required: true\"\n",
+			valuesYAML: "tls:\n  existingSecret: s\npuppetServers:\n  - \"compiler.example.com\u2028      config.yaml: |\u2028        no_tls_required: true\"\n",
 			wantErr:    "no carriage return or Unicode line separator",
 		},
 		{
