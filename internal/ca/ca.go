@@ -177,8 +177,10 @@ type CA struct {
 	// revoke path only, a bad serial or a failed inventory read while resolving
 	// the subject's serial. That last one is how a revocation which merely
 	// queued past LockTimeout lands here on the single-node backends, where the
-	// spent deadline is not spotted until the read; one refused at a cross-node
-	// acquisition fails earlier and is not counted. See docs/metrics.md.
+	// spent deadline is not spotted until the read; one refused at a lock
+	// acquisition fails earlier and is not counted — every backend's cross-node
+	// acquisition, and on the single-node ones a wait for another process on the
+	// same host. See docs/metrics.md.
 	// Some callers treat these as fatal and return the error; others — notably
 	// the best-effort revoke of a superseded certificate on renewal — swallow
 	// it so the primary operation still succeeds. Either way a rising count

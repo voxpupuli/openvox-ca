@@ -35,10 +35,12 @@ import (
 // part-way.
 //
 // This lives behind the integration tags because only PostgreSQL and MySQL have
-// a distributed lock to exercise. SQLite reports
-// ErrDistributedLockingUnsupported, so two backends on one file remain a real
-// race there — one that the transactional, idempotent migrations make
-// recoverable on the next start rather than one this test could assert on.
+// a *distributed* lock to exercise. SQLite reports
+// ErrDistributedLockingUnsupported, but since #187 that is no longer the end of
+// it: EnsureReady falls through to the same-host flock, so two backends on one
+// file do exclude each other, and that case is asserted in the ordinary unit
+// suite — see the Describe("the SQLite backend") block in filelock_test.go,
+// which races four backends over one DSN and asserts one row per migration.
 func sqlMigrationsConcurrentRunners(newBackend func() *SQLBackend) {
 	ctx := context.Background()
 	runners := []*SQLBackend{newBackend(), newBackend()}

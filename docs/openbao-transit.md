@@ -404,14 +404,16 @@ the result as a new CA, with every issued certificate reissued under it.
 Re-issuance needs an ordered procedure, because `--force` re-signs the stored
 CRL and every replica caches the CA certificate for its process lifetime.
 
-> **Stop the CA first on `filesystem` and `sqlite`.** `--force` is a
-> read-modify-write spanning the certificate and the CRL, and it takes the
-> bootstrap lock to keep a concurrent revocation from being lost. That lock is
-> only genuinely cross-process on the backends that implement one — PostgreSQL,
-> MySQL, etcd and Redis. On `filesystem` and `sqlite` it degrades to a mutex
-> inside each process, so the CLI and a running server do not serialise against
-> each other at all, and a revocation landing mid-import is silently discarded.
-> The shared backends can take the import against a live CA.
+> **Stop the CA first, on any backend.** `--force` is a read-modify-write
+> spanning the certificate and the CRL, and it takes the bootstrap and CRL locks
+> to keep a concurrent revocation from being lost. Those locks are now genuinely
+> cross-process everywhere — `filesystem` and `sqlite` coordinate two processes
+> on one host with `flock(2)`, the others with their cluster lock — so a
+> revocation is no longer silently discarded, and the CLI will instead wait and
+> then fail if the server holds the lock past the timeout. What no lock covers
+> on any backend is the inventory append, so an import racing issuance can still
+> leave the inventory's integrity value inconsistent. Stopping the CA is a
+> one-line step; the import is not the place to economise.
 
 1. Keep a copy of the bundle you are about to replace:
    `curl -sk https://<ca>/puppet-ca/v1/certificate/ca > ca-bundle.backup.pem`.

@@ -40,6 +40,14 @@ const (
 	DirPerm         = 0750
 )
 
+// fsLockDir is the cadir subdirectory holding same-host lock files. It sits
+// beside signed/, requests/ and private/ rather than inside one of them: the
+// files are neither CA material nor request material, and a name a migration or
+// a backup script already knows to skip is easier to reason about than one
+// hidden among keys. Nothing lists or copies it — List serves only the
+// requests/ and signed/ prefixes, and a store migration moves logical keys.
+const fsLockDir = "locks"
+
 // fsLayout maps logical keys to paths relative to the backend's baseDir.
 // Keys of the form "csr/<subject>" and "cert/<subject>" are handled
 // explicitly in pathFor.
@@ -60,11 +68,28 @@ var fsLayout = map[string]string{
 type FilesystemBackend struct {
 	baseDir  string
 	appendMu sync.Mutex // serialises AppendLine across the backend
+	locks    *fileLocks // same-host locks, as flock(2) holds under fsLockDir
 }
 
 // NewFilesystemBackend constructs a FilesystemBackend rooted at baseDir.
 func NewFilesystemBackend(baseDir string) *FilesystemBackend {
-	return &FilesystemBackend{baseDir: baseDir}
+	return &FilesystemBackend{
+		baseDir: baseDir,
+		locks:   newFileLocks(filepath.Join(baseDir, fsLockDir)),
+	}
+}
+
+// AcquireSameHostLock takes the named lock as an exclusive flock(2) on a file
+// under <baseDir>/locks, excluding another process on this host — an
+// `openvox-ca-ctl` command, or a second server — from the same name.
+//
+// It deliberately promises nothing across hosts, and this backend still
+// implements no Locker, so anything asking whether the store coordinates across
+// *replicas* continues to be told no. That is the honest answer:
+// docs/storage-backends.md scopes the filesystem backend to single-node
+// installs, and flock(2) over NFS is not a basis for widening it.
+func (b *FilesystemBackend) AcquireSameHostLock(ctx context.Context, name string) (Unlocker, error) {
+	return b.locks.acquire(ctx, name)
 }
 
 // BaseDir returns the filesystem root.
@@ -117,6 +142,14 @@ func (b *FilesystemBackend) EnsureReady(ctx context.Context) error {
 		filepath.Join(b.baseDir, "signed"),
 		filepath.Join(b.baseDir, "requests"),
 		filepath.Join(b.baseDir, "private"),
+		// Created here as well as lazily on first use, so the server owns it
+		// from first boot. Left to the lazy path it would be created by
+		// whichever process first needed a lock, quite possibly a `ctl` command
+		// run under sudo — the root-owned directory AcquireSameHostLock then has
+		// to refuse. Creating it at start also turns a permission problem into a
+		// startup failure an operator is watching for, rather than one that
+		// surfaces weeks later on whichever request first needs that lock.
+		filepath.Join(b.baseDir, fsLockDir),
 	} {
 		if err := os.MkdirAll(d, DirPerm); err != nil {
 			return err

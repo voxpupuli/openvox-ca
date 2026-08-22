@@ -168,7 +168,14 @@ openvox-ca-ctl migrate \
   --dest-config   /etc/puppet-ca/postgres.yaml
 ```
 
-`setup`, `import` and `migrate` operate directly on storage. No running server is needed.
+`setup`, `import` and `migrate` operate directly on storage. No running server is
+needed — and since they reach storage directly, they now take the same locks a
+running server takes, so run them as the user the server runs as rather than
+under `sudo` (see the link below for why). Run one beside a live server and it waits rather than
+racing, then fails with `another process on this host holds the CA lock`
+(`migrate` has no timeout and waits indefinitely). Stop the server first; see
+[running a second process against a live
+store](storage-backends.md#running-a-second-process-against-a-live-store).
 See [storage backends](storage-backends.md#migrating-between-backends) for migration details.
 
 ## Offline subcommands on the server binary
@@ -179,7 +186,11 @@ configuration. `openvox-ca-ctl` reads a different configuration file and can
 only address a local filesystem directory, so it cannot serve a CA whose state
 is in PostgreSQL or whose key is in OpenBao Transit.
 
-Neither needs a running server.
+Neither needs a running server, and both take the CA's locks while they work —
+`csr --create-key` and `import-ca-cert` take `bootstrap`, and `import-ca-cert`
+the CRL lock too — so running one beside a live server waits and may fail rather
+than racing it. Stop the server first; see [running a second process against a
+live store](storage-backends.md#running-a-second-process-against-a-live-store).
 
 Both read the **server's** configuration, not `openvox-ca-ctl`'s: `--config`, or
 `PUPPET_CA_CONFIG`, defaulting to `/etc/puppet-ca/config.yaml`. A working

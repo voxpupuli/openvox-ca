@@ -340,9 +340,13 @@ rm -rf "$SCRATCH"
 ```
 
 On the **filesystem** backend `import` does write where the server reads, but
-stop the CA anyway: `import` takes the CRL lock, and that lock is only
-cross-process on backends that implement one — filesystem and sqlite both fall
-back to a mutex inside each process.
+stop the CA anyway. The CRL lock `import` takes is genuinely cross-process on
+every backend now, including this one, so the two will not overwrite each
+other's CRL — but the inventory append is not under any shared lock, so an
+import and a running server issuing certificates can still leave the inventory's
+integrity value covering something that never existed, which the next start
+rejects (see
+[running a second process against a live store](storage-backends.md#running-a-second-process-against-a-live-store)).
 
 > **Re-import rewrites the CA key, so two custody modes cannot use it.** `import`
 > writes whatever `--private-key` holds, and offers no encryption flags. Under

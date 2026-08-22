@@ -31,6 +31,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -87,9 +88,7 @@ var _ = Describe("A revocation racing a renewal", func() {
 	}
 
 	// unlockedReplica is a second CA over a second StorageService on the same
-	// directory, so it shares the CA's state but none of its named locks: the
-	// filesystem backend has no distributed locker, and WithLock falls back to a
-	// mutex map held per StorageService.
+	// directory, sharing the CA's state but none of its named locks.
 	//
 	// The lock-wait spec needs that. Revoke takes the per-subject lock now, so a
 	// revocation issued through `store` would queue behind the lock that spec
@@ -97,9 +96,19 @@ var _ = Describe("A revocation racing a renewal", func() {
 	// backend, where the lock genuinely is shared, is the ordering it stands in
 	// for: a revocation that reached storage before the renewal acquired the
 	// lock, which the re-check must still refuse.
+	//
+	// The separation has to be asked for. A plain second StorageService over the
+	// same directory used to provide it by accident — the filesystem backend
+	// offered no lock at all, so WithLock fell back to a mutex map held per
+	// StorageService — and #187 removed that accident by giving the backend a
+	// same-host flock the two would now share. noSameHostLocks declines the
+	// capability so the fallback is reached deliberately, which is also the more
+	// honest model of the two replicas this spec is about: on a real HA backend
+	// they are on different hosts.
 	unlockedReplica := func() *CA {
 		GinkgoHelper()
-		return replicaOn(storage.New(storeDir))
+		backend := &noSameHostLocks{FilesystemBackend: storage.NewFilesystemBackend(storeDir)}
+		return replicaOn(storage.NewWithBackend(backend, filepath.Join(storeDir, "private")))
 	}
 
 	// servedSerial is the serial of the certificate storage currently serves for
@@ -398,3 +407,19 @@ var _ = Describe("A revocation racing a renewal", func() {
 		Expect(wasRevoked).To(BeTrue())
 	})
 })
+
+// noSameHostLocks is a filesystem backend that declines the same-host locking
+// capability, so StorageService.WithLock falls back to the per-service mutex
+// map. It models a replica on another host — which is what the specs using it
+// are about — without needing a distributed backend to model it with.
+//
+// The concrete backend is embedded rather than the Backend interface so that
+// Path, BaseDir and the rest stay promoted: StorageService probes for several
+// of them, and a wrapper that hid them would change more than the lock.
+type noSameHostLocks struct {
+	*storage.FilesystemBackend
+}
+
+func (*noSameHostLocks) AcquireSameHostLock(context.Context, string) (storage.Unlocker, error) {
+	return nil, storage.ErrSameHostLockingUnsupported
+}

@@ -31,10 +31,13 @@ import (
 )
 
 var _ = Describe("WithLock", func() {
-	// TestWithLockLocalFallbackSerialises covers the process-local fallback used
-	// when the backend does not implement Locker (i.e. the filesystem backend).
-	// Many goroutines hammering the same lock must enter the critical section
-	// strictly one-at-a-time.
+	// TestWithLockLocalFallbackSerialises covers in-process serialisation on the
+	// filesystem backend. Many goroutines hammering the same lock must enter the
+	// critical section strictly one-at-a-time. Since #187 that is the per-name
+	// mutex the backend's same-host lock takes before touching the filesystem
+	// rather than WithLock's own fallback map, which is the point of taking it
+	// first: in-process contention must stay a mutex wait, not N processes'
+	// worth of flock retries. The cross-process half is in filelock_test.go.
 	Context("local fallback", func() {
 		It("serialises concurrent callers", func() {
 			dir := GinkgoT().TempDir()
@@ -115,13 +118,18 @@ var _ = Describe("WithLock", func() {
 	// TestWithLockFallsBackOnUnsupported drives the case a wrapping backend
 	// produces — e.g. OverlayBackend over a base with no Locker: the backend
 	// advertises Locker but reports ErrDistributedLockingUnsupported, and
-	// WithLock must fall back to the process-local mutex rather than erroring.
-	// A stubLocker stands in for the wrapper here; the real OverlayBackend
-	// delegation is covered in overlay_test.go.
+	// WithLock must fall through rather than erroring. A stubLocker stands in
+	// for the wrapper here; the real OverlayBackend delegation is covered in
+	// overlay_test.go.
+	//
+	// The stub's embedded Backend is a bare interface value, so it offers no
+	// same-host lock either and the fall-through reaches WithLock's own mutex —
+	// which is what this spec is about. Where the base does offer one, the
+	// same-host tier catches the fall-through instead; filelock_test.go pins
+	// that, and both orders are covered.
 	It("falls back to the local mutex when distributed locking is unsupported", func() {
 		dir := GinkgoT().TempDir()
-		base := NewFilesystemBackend(dir)
-		sl := &stubLocker{Backend: base, err: ErrDistributedLockingUnsupported}
+		sl := &stubLocker{err: ErrDistributedLockingUnsupported}
 		svc := NewWithBackend(sl, filepath.Join(dir, "private"))
 
 		// Serialises via local fallback.

@@ -26,6 +26,8 @@ import (
 	"hash/fnv"
 	"io/fs"
 	"log/slog"
+	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -159,8 +161,9 @@ type sqlBlob struct {
 // concurrent appenders — including separate replicas sharing one database —
 // never lose lines. Distributed locking is provided per dialect via AcquireLock
 // (PostgreSQL advisory locks, MySQL GET_LOCK); SQLite, being single-node,
-// reports ErrDistributedLockingUnsupported so StorageService falls back to a
-// process-local mutex.
+// reports ErrDistributedLockingUnsupported. That is not the end of its locking:
+// StorageService.WithLock then reaches AcquireSameHostLock, an flock(2) beside
+// the database file that excludes another process on the same host.
 type SQLBackend struct {
 	db      *bun.DB
 	owned   bool // true when Close should close the underlying *sql.DB
@@ -175,6 +178,12 @@ type SQLBackend struct {
 	// this process do not each hold a blocked connection waiting on the same
 	// lock. Same pattern as the etcd and Redis backends.
 	localLocks sync.Map
+
+	// sameHostLocks backs AcquireSameHostLock on SQLite, and is nil for every
+	// other dialect (they have a real distributed lock, which WithLock prefers)
+	// and for an in-memory database (no file to sit beside, and no second
+	// process that could open it).
+	sameHostLocks *fileLocks
 }
 
 // sqlTLSConfigSeq names the per-backend TLS configs the MySQL driver requires
@@ -210,7 +219,13 @@ func NewSQLBackend(cfg SQLConfig) (*SQLBackend, error) {
 		}
 	}
 
-	return newSQLBackend(bun.NewDB(sqldb, bunDialect), true, cfg.RequestTimeout, cfg.MigrationTimeout), nil
+	b := newSQLBackend(bun.NewDB(sqldb, bunDialect), true, cfg.RequestTimeout, cfg.MigrationTimeout)
+	if cfg.Dialect == SQLitePure {
+		if dir, ok := sqliteLockDir(cfg.DSN); ok {
+			b.sameHostLocks = newFileLocks(dir)
+		}
+	}
+	return b, nil
 }
 
 // newSQLBackend takes both budgets already defaulted: applyDefaults is the single
@@ -342,14 +357,37 @@ func (b *SQLBackend) EnsureReady(ctx context.Context) error {
 			}
 		}()
 	case errors.Is(lockErr, ErrDistributedLockingUnsupported):
-		// SQLite has no distributed lock. Two processes sharing one file can
-		// still race here; the migrations are transactional and idempotent, so
-		// the loser fails cleanly and succeeds on its next start rather than
-		// leaving the schema half-changed. The process-local mutex at least
-		// serialises goroutines within this process.
-		local := b.localLockFor(lockNameSQLMigrate)
-		local.Lock()
-		defer local.Unlock()
+		// SQLite has no distributed lock, but two processes sharing one file is
+		// precisely the case the same-host lock exists for, and a migration is
+		// the worst moment to lose that race: this is the one place where both
+		// runners can record a version and run the DDL. Reproduce WithLock's
+		// fall-through here rather than settling for the process-local mutex,
+		// which only ever covered goroutines within one process.
+		//
+		// EnsureReady takes this lock through AcquireLock directly rather than
+		// through WithLock because the migration budget and the announcement
+		// above belong to it, so the tiers have to be walked by hand.
+		sameHost, shErr := b.AcquireSameHostLock(ctx, lockNameSQLMigrate)
+		switch {
+		case shErr == nil:
+			defer func() {
+				if err := sameHost.Unlock(); err != nil {
+					slog.Warn("Failed to release migration lock", "name", lockNameSQLMigrate, "error", err)
+				}
+			}()
+		case errors.Is(shErr, ErrSameHostLockingUnsupported):
+			// An in-memory database, or a platform without flock(2). Nothing
+			// outside this process can be migrating it in the first case; in the
+			// second the migrations are transactional and idempotent, so a loser
+			// fails cleanly and succeeds on its next start rather than leaving
+			// the schema half-changed.
+			local := b.localLockFor(lockNameSQLMigrate)
+			local.Lock()
+			defer local.Unlock()
+		default:
+			return fmt.Errorf("acquiring migration lock (another process on this host may be "+
+				"migrating the same database): %w", shErr)
+		}
 	default:
 		return fmt.Errorf("acquiring migration lock (raise sql_migration_timeout_sec if a peer's "+
 			"migration legitimately takes longer): %w", lockErr)
@@ -656,8 +694,8 @@ func (b *SQLBackend) ModTime(ctx context.Context, key string) (time.Time, error)
 
 // AcquireLock obtains a cross-node distributed mutex named name. The mechanism
 // is dialect-specific; SQLite is single-node and reports
-// ErrDistributedLockingUnsupported so StorageService falls back to a
-// process-local mutex.
+// ErrDistributedLockingUnsupported, which sends StorageService.WithLock down to
+// AcquireSameHostLock rather than straight to a process-local mutex.
 func (b *SQLBackend) AcquireLock(ctx context.Context, name string) (Unlocker, error) {
 	switch b.db.Dialect().Name() {
 	case dialect.PG:
@@ -665,9 +703,80 @@ func (b *SQLBackend) AcquireLock(ctx context.Context, name string) (Unlocker, er
 	case dialect.MySQL:
 		return b.acquireMySQLLock(ctx, name)
 	default:
-		// SQLite is single-node: fall back to the process-local mutex.
+		// SQLite is single-node. This sentinel is how WithLock is told to try
+		// the same-host tier, which SQLite does provide (AcquireSameHostLock).
 		return nil, ErrDistributedLockingUnsupported
 	}
+}
+
+// AcquireSameHostLock takes the named lock as an exclusive flock(2) on a file
+// in a hidden directory beside the SQLite database, so a `ctl` command and a
+// running server on one host exclude each other. It reports
+// ErrSameHostLockingUnsupported for every other dialect, whose real distributed
+// lock WithLock takes first, and for an in-memory database.
+//
+// A sidecar rather than a lock table, which the two obvious alternatives make
+// unworkable:
+//
+//   - The database file itself must not be flocked. SQLite locks it, and adding
+//     a second, independent locking scheme over the same file would leave two
+//     answers to "is this database busy" that nothing reconciles.
+//   - A locks table entered under BEGIN IMMEDIATE self-deadlocks. The SQLite
+//     pool is pinned to one connection (see NewSQLBackend), so a transaction
+//     held open for the duration of fn owns the only connection fn's own reads
+//     and writes need. Committing it immediately instead would leave nothing
+//     held for the duration that matters, which is the whole requirement.
+//
+// The sidecar also keeps per-name granularity, which SQLite's single-writer
+// model cannot express, and shares one implementation with the filesystem
+// backend so the two cannot drift.
+func (b *SQLBackend) AcquireSameHostLock(ctx context.Context, name string) (Unlocker, error) {
+	if b.sameHostLocks == nil {
+		return nil, ErrSameHostLockingUnsupported
+	}
+	return b.sameHostLocks.acquire(ctx, name)
+}
+
+// sqliteLockDir derives the same-host lock directory for a SQLite DSN: a hidden
+// sibling of the database file, alongside the -wal and -shm files SQLite
+// maintains itself. Reports false for an in-memory database, which is private
+// to the process that opened it and so has nothing to exclude.
+func sqliteLockDir(dsn string) (string, bool) {
+	path, ok := sqliteFilePath(dsn)
+	if !ok {
+		return "", false
+	}
+	return filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+".locks"), true
+}
+
+// sqliteFilePath extracts the database file path from a SQLite DSN, which the
+// driver accepts either as a bare path ("/var/lib/puppet-ca/ca.db") or as a
+// "file:" URI, both optionally carrying query parameters. Reports false when
+// the DSN names no file on disk.
+func sqliteFilePath(dsn string) (string, bool) {
+	path, query := dsn, ""
+	if strings.HasPrefix(path, "file:") {
+		u, err := url.Parse(path)
+		if err != nil {
+			return "", false
+		}
+		query = u.RawQuery
+		// A URI whose path is absolute parses into Path ("file:/a/b" and
+		// "file:///a/b"); a relative one lands in Opaque ("file:ca.db"), as
+		// does the ":memory:" spelling.
+		if path = u.Opaque; path == "" {
+			path = u.Path
+		}
+	} else if i := strings.IndexByte(path, '?'); i >= 0 {
+		path, query = path[:i], path[i+1:]
+	}
+	if path == "" || path == ":memory:" {
+		return "", false
+	}
+	if v, err := url.ParseQuery(query); err == nil && v.Get("mode") == "memory" {
+		return "", false
+	}
+	return path, true
 }
 
 // acquirePostgresLock takes a session-level PostgreSQL advisory lock on a

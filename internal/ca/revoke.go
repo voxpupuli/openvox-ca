@@ -64,16 +64,19 @@ import (
 // renewal holds the subject lock across its own acquisition of the cluster-wide
 // CRL lock, and SaveRequest holds it across an autosign signature. Nor does
 // LockTimeout bound it in the case that matters most, since WithLock's ctx
-// covers only the cross-node half of an acquisition (see its godoc).
+// covers only the other-process half of an acquisition (see its godoc).
 //
 // It does not bound that wait, but it is spent by it, so a wait longer than
 // LockTimeout ends in a failure rather than a late commit — on every backend,
 // just in two different places. Where there is a cross-node acquisition the
 // revocation is rejected there, before any of the work below. Where there is
-// not (SQLite, the filesystem) the local mutex is granted after the wait with
-// the deadline already gone, so the first storage read in revokeLocked fails
+// not (SQLite, the filesystem) the lock is granted after the wait with the
+// deadline already gone, so the first storage read in revokeLocked fails
 // instead — and that one is counted into crlUpdateFailures, unlike the other,
-// because a spent deadline is not fs.ErrNotExist. A revocation that fails is
+// because a spent deadline is not fs.ErrNotExist. Those backends have one
+// acquisition that can reject a spent deadline: a wait for another *process* on
+// the host, which since #187 they coordinate with an flock. That refusal lands
+// with the cross-node case, ahead of any CRL work, and is likewise uncounted. A revocation that fails is
 // safe to retry either way: revokeSerialLocked short-circuits a serial already
 // listed, so revocation is idempotent.
 //

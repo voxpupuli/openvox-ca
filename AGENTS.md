@@ -214,6 +214,9 @@ the inventory, in-memory caches) must follow
   second recognised pattern — see locking.md for when each applies.
 - Read-only paths must **not** take `WithLock` — they use in-memory caches and
   read locks only.
+- On `filesystem` and `sqlite` a lock name also derives a lock *filename*
+  (`sha256(name).lock` under the operator's store), so adding one creates a file
+  in every operator's cadir and the mapping is protocol too.
 - Lock ordering is `subject:<name>` → `crl` → `c.mu`; lock names are a stable
   cross-replica protocol — never invent or rename one casually.
 

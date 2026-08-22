@@ -573,11 +573,16 @@ section is only that:
 - **A restart is required, not a signal.** `SIGHUP` covers the TLS keypair and the
   admin allow list; the CA certificate is read at startup, so a signalled process
   carries on issuing under the certificate you just replaced.
-- **Re-issuing later on `filesystem` or `sqlite` needs the CA stopped.** The
-  `--force` re-issuance is a read-modify-write across the certificate and the CRL,
-  and the bootstrap lock is process-local on those backends, so a revocation
-  landing mid-import is discarded silently. This is the chart's default backend.
-  Only the shared backends can take it against a live CA.
+- **Re-issuing later needs the CA stopped, on any backend.** The `--force`
+  re-issuance is a read-modify-write across the certificate and the CRL, and it
+  takes the bootstrap and CRL locks. Those are genuinely cross-process
+  everywhere now — `filesystem` and `sqlite`, the chart's default, coordinate two
+  processes on one host with `flock(2)` — so a revocation is no longer silently
+  discarded, and the import will instead wait and then fail if the CA holds the
+  lock. What no lock covers on any backend is the inventory append, so an import
+  racing issuance can still leave the inventory's integrity value inconsistent.
+  See [running a second process against a live
+  store](storage-backends.md#running-a-second-process-against-a-live-store).
 - **With `ca.existingSecret` the CA certificate is mounted read-only**, so the
   import cannot write it back. That is the `--out` route in the procedure, which
   cannot be combined with `--force`, and which ends in `openvox-ca-ctl

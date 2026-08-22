@@ -678,13 +678,21 @@ var _ = Describe("CA Revocation", func() {
 	})
 
 	It("counts a queued revocation on a backend without distributed locking", func() {
-		// The SQLite arm of the same split. The alert text names filesystem and
-		// SQLite together, but they reach the counted failure by different
-		// routes: the filesystem backend implements no Locker at all (the
-		// sibling spec above), whereas SQLite answers
-		// ErrDistributedLockingUnsupported and WithLock falls through to the
-		// process-local mutex. Both then enter revokeLocked carrying the spent
-		// deadline and fail at the first storage read, which is counted.
+		// The other route into the counted arm. The alert text names filesystem
+		// and SQLite together, and they reach it differently: the filesystem
+		// backend implements no Locker at all (the sibling spec above), whereas
+		// SQLite answers ErrDistributedLockingUnsupported. Both then enter
+		// revokeLocked carrying the spent deadline and fail at the first storage
+		// read, which is counted.
+		//
+		// refusingLocker embeds the storage.Backend *interface*, which promotes
+		// only that interface's methods, so it offers no same-host lock either
+		// and WithLock reaches its process-local fallback. That models a backend
+		// with neither capability rather than SQLite specifically -- since #187
+		// SQLite falls through to an flock, not to the mutex -- and the property
+		// under test is the same for both: an uncontended acquisition grants the
+		// lock to a spent deadline instead of rejecting it. The same-host
+		// refusal, which is the case that does *not* count, is the spec below.
 		dir := GinkgoT().TempDir()
 		backend := &refusingLocker{
 			Backend: storage.NewFilesystemBackend(dir),
@@ -720,6 +728,60 @@ var _ = Describe("CA Revocation", func() {
 		Expect(sqliteish.IsRevoked(context.Background(), "unsupported-node")).To(BeFalse())
 		Expect(sqliteish.CRLUpdateFailures()).To(BeNumerically("==", 1),
 			"the alert text names SQLite alongside filesystem, so this arm must count too")
+	})
+
+	It("does not count a revocation refused at a same-host lock acquisition", func() {
+		// The fourth arm of the split, added by #187 and until now asserted only
+		// in docs/metrics.md, docs/api.md and docs/development/locking.md. On the
+		// single-node backends there is now one acquisition that *can* reject a
+		// spent deadline -- a wait for another process on this host -- and like
+		// the cross-node rejection it fails ahead of any CRL work, so it must not
+		// move the counter that drives PuppetCACRLUpdateFailing.
+		//
+		// A second FilesystemBackend value over the same cadir is a faithful
+		// stand-in for that other process: flock(2) is held per open file
+		// description, so two independent opens exclude each other whether or not
+		// a fork separates them.
+		dir := GinkgoT().TempDir()
+		st := storage.New(dir)
+
+		Expect(st.EnsureDirs(context.Background())).To(Succeed())
+		Expect(st.SaveCAKey(context.Background(), cachedKeyPEM)).To(Succeed())
+		Expect(st.SaveCACert(context.Background(), cachedCrtPEM)).To(Succeed())
+		Expect(st.UpdateCRL(context.Background(), cachedCrlPEM)).To(Succeed())
+		Expect(st.WriteSerial(context.Background(), "0001")).To(Succeed())
+		Expect(st.TouchInventory(context.Background())).To(Succeed())
+
+		localCA := ca.New(st, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		Expect(localCA.Init(context.Background())).To(Succeed())
+
+		csrPEM, err := testutil.GenerateCSR("samehost-node")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = localCA.SaveRequest(context.Background(), "samehost-node", csrPEM)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = localCA.Sign(context.Background(), "samehost-node")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(localCA.CRLUpdateFailures()).To(BeNumerically("==", 0))
+
+		// Hold the subject lock as another process would. Revoke takes
+		// subject:<name> before crl, so this is the outer acquisition and the one
+		// that must refuse.
+		other := storage.NewFilesystemBackend(dir)
+		held, err := other.AcquireSameHostLock(context.Background(), "subject:samehost-node")
+		Expect(err).NotTo(HaveOccurred())
+		defer func() { Expect(held.Unlock()).To(Succeed()) }()
+
+		bounded, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
+		defer cancel()
+
+		Expect(localCA.Revoke(bounded, "samehost-node")).To(SatisfyAll(
+			MatchError(context.DeadlineExceeded),
+			MatchError(ContainSubstring("another process on this host holds the CA lock")),
+		), "the refusal must come from the same-host acquisition")
+		Expect(localCA.IsRevoked(context.Background(), "samehost-node")).To(BeFalse(),
+			"a refused acquisition must leave the CRL untouched")
+		Expect(localCA.CRLUpdateFailures()).To(BeNumerically("==", 0),
+			"refused ahead of any CRL work, so the alert must stay quiet -- as for the cross-node arm")
 	})
 
 	It("IsRevokedSerial returns true for a revoked certificate's serial", func() {
@@ -2043,8 +2105,13 @@ var _ = Describe("Bootstrap public key write", func() {
 // reproduced without either backend: context.DeadlineExceeded stands in for a
 // cross-node acquisition rejecting a spent deadline, so WithLock wraps it and
 // returns without running the closure at all, while
-// ErrDistributedLockingUnsupported is what SQLite answers, sending WithLock
-// down its fall-through to the process-local mutex and into the closure.
+// ErrDistributedLockingUnsupported is the sentinel SQLite answers. Note what
+// that models here and what it does not: since #187 SQLite's fall-through
+// reaches the same-host flock, whereas this stub embeds the storage.Backend
+// *interface*, which promotes only that interface's methods, so it offers no
+// SameHostLocker and WithLock lands on the process-local mutex. It stands in
+// for a backend with neither tier. Either way the closure runs, which is the
+// property the specs using it turn on.
 type refusingLocker struct {
 	storage.Backend
 	refuse atomic.Bool

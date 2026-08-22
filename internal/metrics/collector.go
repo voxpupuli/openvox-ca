@@ -113,9 +113,10 @@ func NewCollector(c *ca.CA) *Collector {
 				"on any of the revoke, reissue, refresh and expired-cert cleanup paths, plus, on the "+
 				"revoke path only, a malformed serial or a failed inventory read while resolving the "+
 				"subject's serial. Not every revocation that missed the CRL lands here: one refused "+
-				"at a cross-node lock acquisition fails ahead of any CRL work and is logged only, so "+
-				"this is a lower bound, while on filesystem and SQLite a revocation that queued past "+
-				"lockTimeout fails at that inventory read and is counted. A rising value means the "+
+				"at a cross-node lock acquisition, or at a same-host one on filesystem and SQLite, "+
+				"fails ahead of any CRL work and is logged only, so this is a lower bound, while on "+
+				"filesystem and SQLite a revocation that queued past lockTimeout behind another "+
+				"goroutine in this process fails at that inventory read and is counted. A rising value means the "+
 				"CRL is not being maintained; for revocations it means a superseded certificate may "+
 				"still be a valid credential.",
 			nil, nil),

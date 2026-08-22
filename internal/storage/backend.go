@@ -29,10 +29,20 @@ import (
 
 // ErrDistributedLockingUnsupported signals that a backend advertising the
 // Locker interface cannot actually provide a distributed lock in the current
-// configuration (typically because it wraps a base backend that has no
-// locking support). StorageService.WithLock treats this as a hint to fall
-// back to a process-local mutex.
+// configuration (SQLite, which is single-node; an OverlayBackend wrapping a
+// base with no locking support). StorageService.WithLock treats this as a hint
+// to try the next tier down — SameHostLocker, and only then a process-local
+// mutex.
 var ErrDistributedLockingUnsupported = errors.New("distributed locking unsupported by this backend")
+
+// ErrSameHostLockingUnsupported signals that a backend advertising the
+// SameHostLocker interface cannot actually provide a same-host lock in the
+// current configuration: an in-memory SQLite database (no file to lock beside,
+// and no second process that could open it), a platform without flock(2), or an
+// overlay over a base that offers neither. StorageService.WithLock treats this
+// the same way it treats ErrDistributedLockingUnsupported — as a hint to fall
+// back to a process-local mutex.
+var ErrSameHostLockingUnsupported = errors.New("same-host locking unsupported by this backend")
 
 // BlobKind signals the desired visibility of a stored blob. The filesystem
 // backend maps these to file permissions (0600 vs 0644); remote backends
@@ -370,15 +380,45 @@ func asInventoryStore(b Backend) (InventoryStore, bool) {
 // Locker is an optional Backend capability that provides a cross-node
 // distributed mutex. Backends implement it when they have a natural way
 // to coordinate a lock across replicas (etcd's concurrency.Mutex, Redis
-// SET NX, etc.). Backends without this capability let StorageService
-// fall back to a process-local named mutex, which is sufficient for
-// single-node backends like the filesystem one.
+// SET NX, etc.).
+//
+// A backend without this capability is not left unlocked: StorageService.WithLock
+// falls through to SameHostLocker, which the single-node backends implement, and
+// only to a process-local named mutex when neither is available. Implement this
+// one *only* if the coordination genuinely spans hosts — a single-node backend
+// that implements it claims a guarantee it cannot keep, and callers deciding
+// whether a second replica is safe probe exactly this.
 //
 // The returned Unlocker must be called exactly once, typically via defer.
 // Implementations are free to use leases, so a long-delayed Unlock may
 // no-op if the lease has already expired.
 type Locker interface {
 	AcquireLock(ctx context.Context, name string) (Unlocker, error)
+}
+
+// SameHostLocker is an optional Backend capability that provides a mutex
+// excluding other *processes on this host* — an `openvox-ca-ctl` command, or a
+// second server — from the same named lock. It is a strictly weaker promise
+// than Locker and a deliberately separate capability, not a second way to
+// spell it.
+//
+// The distinction is load-bearing. The single-node backends (filesystem,
+// SQLite) can coordinate two processes sharing one host cheaply and soundly,
+// but nothing about that extends across hosts: flock(2) over NFS is not a
+// basis for clustering, and a caller deciding whether it is safe to run a
+// second *replica* must not be told "yes" because a second *process* is
+// handled. Backends therefore advertise the two capabilities independently,
+// and a backend implementing this one must not be taken to implement Locker.
+//
+// StorageService.WithLock prefers Locker and falls back to this, so a backend
+// may implement both: the distributed lock already excludes same-host peers,
+// and this capability is consulted only when the distributed one reports
+// itself unsupported (SQLite's answer, and an overlay's over a base without
+// one).
+//
+// The returned Unlocker must be called exactly once, typically via defer.
+type SameHostLocker interface {
+	AcquireSameHostLock(ctx context.Context, name string) (Unlocker, error)
 }
 
 // Unlocker releases a lock previously acquired via Locker.AcquireLock.
