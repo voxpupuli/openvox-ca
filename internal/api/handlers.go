@@ -682,8 +682,25 @@ func (s *Server) handleDeleteRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Debug("DELETE certificate_request", "subject", subject, "client", clientCN(r))
 
-	if err := s.CA.Storage.DeleteCSR(r.Context(), subject); err != nil {
-		http.Error(w, "CSR not found", http.StatusNotFound)
+	if err := s.CA.DeleteRequest(r.Context(), subject); err != nil {
+		if errors.Is(err, ca.ErrNoCSR) {
+			http.Error(w, "CSR not found", http.StatusNotFound)
+			return
+		}
+		// Anything else and the CSR is still there, still signable. Reporting
+		// "CSR not found" here would tell the operator their rejection landed
+		// when it did not — the same misreport the subject lock on this path
+		// exists to prevent. Storage and lock failures also embed absolute
+		// paths and backend addresses, so log the detail and answer generically.
+		//
+		// 503 for the same reason handlePutStatusBySerial gives above: what is
+		// left here is a CA-side fault — a storage error, or a lock that could
+		// not be taken — and none of it is a conflict with the request. Nothing
+		// was deleted in any of those cases, so the operator's retry is safe
+		// and 503 is the code that says so.
+		slog.Error("DeleteRequest failed", "subject", subject, "error", err)
+		http.Error(w, "the CA could not service this request; see the server log",
+			http.StatusServiceUnavailable)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

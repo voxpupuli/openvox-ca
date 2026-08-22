@@ -144,6 +144,53 @@ Two refusals are deliberate:
 | `PUT` | `/certificate_request/{subject}` | Submit a new CSR (body: raw PEM) |
 | `DELETE` | `/certificate_request/{subject}` | Delete a pending CSR |
 
+`DELETE /certificate_request/{subject}` is an operator rejecting a request
+rather than signing it, and it takes the same per-subject lock that `POST
+/sign`, `PUT /certificate_request`'s autosign and [renewal](#certificate-renewal)
+take. The rejection therefore orders against those issuances rather than racing
+them, and both orderings are answers. Win the lock and the pending CSR is gone
+before the sign looks for it, so the sign fails with nothing to sign. Lose it
+and the CSR has usually been consumed already — signing removes it once the
+certificate is stored — so the delete answers `404` with the certificate
+issued. That removal is best-effort and only warns when it fails, so on a
+storage fault there the delete removes the CSR instead and answers `204` for a
+subject that already has a certificate. What the lock rules out is the case
+that made this a bug: a `204` telling the operator the request was rejected
+while a certificate was being issued for it.
+
+While [#195](https://github.com/voxpupuli/openvox-ca/issues/195) is open,
+`POST /generate/{subject}` is the exception: it takes no per-subject lock at
+all, so a deletion can still land inside the sequence in which it saves a CSR
+and signs it — within a single process as well as across replicas. Close off
+server-side generation before rejecting requests you are containing. This
+paragraph retires with that issue.
+
+The endpoint answers `400 Bad Request` for a subject that fails validation,
+`404 Not Found` when there is no pending CSR for the subject, and `503 Service
+Unavailable` when the deletion could not be carried out — a storage fault, or a
+lock it could not take. The `404` and the `503` are deliberately different
+answers: a `404` says the request is no longer queued, so reporting a failed
+deletion as one would tell an operator their rejection had landed while the CSR
+was still there and still signable. Nothing is deleted in any of the `503`
+cases, so retrying is always safe.
+
+The wait for that lock is bounded the way a revocation's is, which is to say
+not uniformly.
+The server's 60-second `lockTimeout` bounds only a wait for *another replica*,
+because every backend serialises callers within one process on a lock that
+ignores the deadline — so a delete queued behind an issuance on the same
+replica waits as long as that issuance takes, and an autosigning `SaveRequest`
+holds the subject lock across a signature that has no bound of its own. Note
+too that the server's `WriteTimeout` is itself 60 seconds: a wait that exhausts
+the lock budget reaches the response write with the connection's deadline
+already spent, so expect a dropped connection rather than the `503` above. The
+`DeleteRequest failed` line in the serving replica's log is the authoritative
+record. To settle it from the outside, repeat the `DELETE` — it is a safe
+retry, and its three answers distinguish all three outcomes. Do not reach for
+`GET /certificate_request/{subject}`: that route reports a storage failure as
+`404` as well, so it cannot tell "no longer queued" from "could not tell you",
+which is the conflation this endpoint just stopped making.
+
 ## Certificate retrieval
 
 | Method | Path | Description |

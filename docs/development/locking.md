@@ -46,7 +46,7 @@ less protocol for it.
 | --- | --- | --- |
 | `bootstrap` | First-run CA generation; seeding supporting state (CRL/inventory/serial) for a mounted cert+key; whole-store migration | `CA.Init`, `CA.seedSupportingState`, `storage.MigrateService` (which reuses the name deliberately so a migration and a bootstrapping server exclude each other) |
 | `crl` | Every CRL read-modify-write (read entries → re-sign → write) | `Revoke`, `RevokeSerial`, `ReissueCRL`, `RefreshCRLIfDue`, `CleanupExpiredCerts`, and the revoke step inside `Clean`, `Renew`, `AutoRenew` |
-| `subject:<name>` | The whole lifecycle of one subject: evict/save CSR/sign/import/clean/revoke | `SaveRequest`, `Sign`, `SignWithTTL`, `Renew`, `AutoRenew`, `Clean`, `ImportCertificate`, `Revoke` — but currently **not** `Generate` (see known gaps below) |
+| `subject:<name>` | The whole lifecycle of one subject: evict/save CSR/sign/delete CSR/import/clean/revoke | `SaveRequest`, `Sign`, `SignWithTTL`, `DeleteRequest`, `Renew`, `AutoRenew`, `Clean`, `ImportCertificate`, `Revoke` — but currently **not** `Generate` (see known gaps below) |
 | `inventory-decompose` | One-time legacy inventory blob conversion (etcd backend only) on the first start after upgrading | `EtcdBackend.decomposeLegacyInventory`, from `EnsureReady` |
 
 How each backend provides the distributed lock (a summary — the full per-backend
@@ -133,6 +133,12 @@ without a storage round-trip).
 Mutating operations hold `c.mu` (write) across the storage mutation *and* the
 cache update, so within a process the caches can never be observed out of step
 with what the same process just wrote. Read paths take `c.mu.RLock` only.
+
+`DeleteRequest` is the one mutation that takes no `c.mu` at all: a pending CSR
+backs none of these caches, so there is nothing to keep in step with the write.
+That is worth knowing beyond cache coherence — it is why a rejection does not
+serialise against `Generate` even within a single process, where `c.mu` is what
+the two would otherwise have in common.
 
 `c.mu` is also held across the signing call itself. Every issuance path (`Sign`,
 `SignWithTTL`, `SaveRequest`'s autosign, `Renew`, `AutoRenew`,
@@ -315,11 +321,12 @@ state when the document was last updated and is not guaranteed exhaustive.
   (the `POST /generate/{subject}` endpoint) is the one issuance path that
   takes only `c.mu`, not the `subject:<name>` cluster lock. On an HA backend,
   a `Generate` on one replica can race a `Sign`/`SaveRequest`/`Generate` for
-  the same subject on another and double-issue.
-- [#196](https://github.com/voxpupuli/openvox-ca/issues/196) —
-  `DELETE /certificate_request/{subject}` deletes the CSR directly through
-  `StorageService`, bypassing the subject lock, so a deletion can be outrun
-  by an in-flight sign for the same subject.
+  the same subject on another and double-issue. Two passages retire with this
+  gap and are reachable only from here: the `POST /generate/{subject}`
+  paragraph under [CSR management](../api.md#csr-management), and the
+  `Generate` paragraph in `CA.DeleteRequest`'s godoc
+  ([signing.go](../../internal/ca/signing.go)). Delete both when closing it —
+  they describe a mechanism that goes away with the lock.
 - [#197](https://github.com/voxpupuli/openvox-ca/issues/197) — OCSP's slow
   path signs responses while holding `c.mu` exclusively, so nonced requests
   (which always miss the cache) serialise process-wide behind the signing
@@ -359,6 +366,16 @@ state when the document was last updated and is not guaranteed exhaustive.
   `serialIndex` is built once at startup, so certificates issued on another
   replica answer `unknown`; the `ocspCache` half can even keep serving a
   pre-signed `good` for a certificate revoked elsewhere.
+- ~~[#196](https://github.com/voxpupuli/openvox-ca/issues/196) —
+  `DELETE /certificate_request/{subject}` deleted the CSR directly through
+  `StorageService`, bypassing the subject lock.~~ Fixed: the handler now goes
+  through `CA.DeleteRequest`, which takes `subject:<name>` for the delete, so a
+  rejection orders against an in-flight sign instead of racing it. The HTTP
+  layer also stopped reporting a failed deletion as `404`, which had told the
+  operator the request was gone at the moment it was still queued; it answers
+  `503` now. The one issuance a rejection still cannot wait for is `Generate`,
+  which saves and signs a CSR under `c.mu` alone — see the `Generate` gap
+  above.
 - ~~[#173](https://github.com/voxpupuli/openvox-ca/issues/173) — renewal
   re-checked revocation before acquiring the subject lock.~~ Fixed: both
   renewal paths now call `refuseIfRevoked` again as the first statement inside
@@ -380,6 +397,22 @@ unlock-error handling are covered in
 [withlock_test.go](../../internal/storage/withlock_test.go); each distributed
 implementation's mutual exclusion is exercised in its backend integration
 suite (build-tagged; see [testing](testing.md)).
+
+That a given path takes its lock *at all* is automated for five of them, all in
+the same shape: park the operation on a held `subject:<name>` and require it to
+wait, since one that stopped taking the lock returns immediately instead.
+[renewrace_test.go](../../internal/ca/renewrace_test.go) does this for `Revoke`,
+`Clean`, `Renew` and `AutoRenew` alongside the ordering assertions described
+below, and
+[deleterequest_test.go](../../internal/ca/deleterequest_test.go) for
+`DeleteRequest`. That last one also pins the far side — it parks a delete on
+the inventory append inside an autosigning `SaveRequest`'s issuance, so it
+observes the lock being held from that append until `SaveRequest` returns, not
+across the evict/save prefix ahead of it. Dropping `SaveRequest`'s `WithLock`
+still fails it, which is what makes `SaveRequest` pinned too. `Sign`,
+`SignWithTTL` and `ImportCertificate` are the ones with no such spec: for those
+the lock-name table above is the only record, and dropping the lock fails no
+assertion. That is the shape to copy when closing one of the gaps above.
 
 The nested lock-ordering invariant *is* now automated, in
 [renewrace_test.go](../../internal/ca/renewrace_test.go): for each caller that
