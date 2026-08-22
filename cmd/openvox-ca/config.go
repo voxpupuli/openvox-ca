@@ -105,6 +105,16 @@ type serverConfig struct {
 	// disable_crl_refresh, which governs re-signing rather than propagation.
 	CRLSyncIntervalSec int `yaml:"crl_sync_interval_sec"` // how often to reload the CRL; 0 = built-in default (60s)
 
+	// OCSPIndexSyncIntervalSec is how often each replica re-reads the inventory
+	// into the serial index its OCSP responder answers from, and so bounds how
+	// long that responder says `unknown` about a certificate signed on another
+	// replica. Separate from crl_sync_interval_sec because the two answer
+	// different questions at different costs: that one re-reads a single small
+	// CRL blob and bounds a certificate outliving its revocation, this one
+	// re-reads the whole inventory and bounds a correct certificate being
+	// reported as unrecognised.
+	OCSPIndexSyncIntervalSec int `yaml:"ocsp_index_sync_interval_sec"` // how often to reload the OCSP serial index; 0 = built-in default (5m)
+
 	// Background expired-certificate cleanup. Disabled by default: when enabled,
 	// a job periodically removes certificates that expired more than the
 	// retention grace period ago from the inventory and the CRL (and deletes
@@ -226,6 +236,32 @@ func (c *serverConfig) crlSyncInterval() time.Duration {
 		return time.Duration(c.CRLSyncIntervalSec) * time.Second
 	}
 	return defaultCRLSyncInterval
+}
+
+// defaultOCSPIndexSyncInterval is how often each replica reloads the inventory
+// into the serial index its OCSP responder answers from, when the operator has
+// not configured an interval.
+//
+// Five minutes rather than the CRL sync's one, because the two are not the same
+// trade. That job reads one small blob and shortens how long a revoked
+// certificate keeps authenticating, which is a security window worth paying a
+// per-minute read for. This one reads the entire inventory — a line per
+// certificate ever issued, so megabytes on a large fleet — and shortens how
+// long the responder calls a *valid* certificate unrecognised. An `unknown` is
+// not fail-open, verifiers commonly soft-fail on it, and a newly signed
+// certificate is not usually OCSP-checked by a peer in its first minutes; five
+// minutes bounds it well inside the four-hour life of any response and costs a
+// fifth of what the CRL cadence would — twelve passes an hour rather than
+// sixty.
+const defaultOCSPIndexSyncInterval = 5 * time.Minute
+
+// ocspIndexSyncInterval resolves how often the background job reloads the OCSP
+// serial index, falling back to defaultOCSPIndexSyncInterval when unset.
+func (c *serverConfig) ocspIndexSyncInterval() time.Duration {
+	if c.OCSPIndexSyncIntervalSec > 0 {
+		return time.Duration(c.OCSPIndexSyncIntervalSec) * time.Second
+	}
+	return defaultOCSPIndexSyncInterval
 }
 
 const (
@@ -397,6 +433,11 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("PUPPET_CA_CRL_SYNC_INTERVAL_SEC"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.CRLSyncIntervalSec = n
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_OCSP_INDEX_SYNC_INTERVAL_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.OCSPIndexSyncIntervalSec = n
 		}
 	}
 	if v := os.Getenv("PUPPET_CA_ENABLE_EXPIRED_CERT_CLEANUP"); v != "" {

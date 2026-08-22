@@ -61,6 +61,26 @@
     crlSyncWindow: '1h',
     crlSyncFor: '5m',
 
+    // Window and dwell for PuppetCAOCSPIndexSyncFailing. Same shape as the CRL
+    // sync pair above: the counter resets on restart, so the rule alerts on
+    // increase() over a window.
+    //
+    // Be clear about what the dwell does, because it is not what it looks like.
+    // increase(...[1h]) > 0 stays true for the whole window after a single
+    // failure, so `for` cannot filter a transient — it delays the page by 15
+    // minutes and the alert then latches until the window rolls past the last
+    // failure. That is deliberate: a replica that failed one read is answering
+    // `unknown` for peer-signed certificates until its next successful pass, and
+    // an alert that cleared before somebody looked would be worse than one that
+    // lingers. The dwell is longer than the CRL sibling's 5m because this
+    // condition is not fail-open and does not warrant waking anyone quickly.
+    //
+    // Kept as its own knob rather than reusing crlSync* because the two jobs
+    // poll on different intervals and an operator lengthening one has no reason
+    // to lengthen the other.
+    ocspIndexSyncWindow: '1h',
+    ocspIndexSyncFor: '15m',
+
     // --- Kubernetes export ---
     // A target alerts while its most recent apply attempt failed (last-error
     // newer than last-success). Exports are event-driven and can be days apart

@@ -20,7 +20,6 @@ package ca
 import (
 	"bytes"
 	"context"
-	"crypto/x509"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -115,41 +114,12 @@ func (c *CA) SyncCRLCache(ctx context.Context) (bool, error) {
 			"crl_number", ours.Number)
 	}
 
-	previous := c.cachedCRL
-	c.cachedCRL = ours
-	c.invalidateOCSPForNewlyRevokedLocked(previous, ours)
+	c.installCachedCRLLocked(ours)
 
 	slog.Info("Reloaded the CRL from storage",
 		"crl_number", ours.Number,
 		"revoked", len(ours.RevokedCertificateEntries))
 	return true, nil
-}
-
-// invalidateOCSPForNewlyRevokedLocked drops the cached OCSP responses for
-// serials that the newly loaded CRL revokes and the previous one did not, so
-// the responder stops handing out a pre-signed "good" for a certificate
-// another replica has just revoked. Without it the CRL would be current while
-// OCSP kept answering from responses signed up to OCSPValidity ago.
-//
-// Only the newly revoked serials are dropped, mirroring what revokeSerialLocked
-// does on the replica that performs a revocation. Clearing every revoked
-// serial's entry instead would re-sign the whole revoked set on every
-// revocation anywhere in the fleet.
-//
-// c.mu must be held by the caller.
-func (c *CA) invalidateOCSPForNewlyRevokedLocked(previous, current *x509.RevocationList) {
-	was := make(map[string]struct{})
-	if previous != nil {
-		for _, entry := range previous.RevokedCertificateEntries {
-			was[serialHexStr(entry.SerialNumber)] = struct{}{}
-		}
-	}
-	for _, entry := range current.RevokedCertificateEntries {
-		key := serialHexStr(entry.SerialNumber)
-		if _, seen := was[key]; !seen {
-			delete(c.ocspCache, key)
-		}
-	}
 }
 
 // CachedCRLNumber returns the CRL number of the copy this process is making

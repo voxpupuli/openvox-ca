@@ -128,3 +128,74 @@ tests:
       - eval_time: 8m
         alertname: PuppetCACRLStale
         exp_alerts: []
+
+  # The OCSP index sync failure warning. Its dwell (ocspIndexSyncFor, 15m) is
+  # deliberately longer than the CRL one's, because a missed inventory read is
+  # not fail-open and a single transient failure should not page — so this
+  # checks both sides of that: quiet at 8m, firing at 20m.
+  - interval: 1m
+    name: OCSP index sync failures page only after the longer dwell
+    input_series:
+      - series: 'puppetca_ocsp_index_sync_failures_total{job="openvox-ca",instance="ca-1:9140"}'
+        values: "0 1+1x40"
+      - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+        values: "1+0x40"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: PuppetCAOCSPIndexSyncFailing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: PuppetCAOCSPIndexSyncFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              instance: ca-1:9140
+            exp_annotations:
+              summary: "Puppet CA cannot reload its OCSP serial index from storage."
+              description: "The Puppet CA on ca-1:9140 could not reload the inventory into its OCSP serial index (puppetca_ocsp_index_sync_failures_total is rising), so it is answering \"unknown\" for certificates its peers have signed since the last successful pass. Check inventory storage, and the inventory integrity MAC if the logs report a mismatch."
+
+  # One failure and then nothing: the alert still fires, because increase() over
+  # the window stays true until the window rolls past the step. This pins the
+  # latching behaviour the config comment describes — a `for` cannot debounce
+  # this expression, and a reader who assumed it could would size the knobs
+  # wrongly. It is also the only case that constrains ocspIndexSyncWindow at all
+  # — case 1's counter rises every step, so any window over a couple of minutes
+  # satisfies it. The single step is at t=0 and the assertion is at t=35m, so
+  # increase() sees it only while the window exceeds 35m: any value of 35m or
+  # less fails here.
+  - interval: 1m
+    name: OCSP index sync latches after a single failure
+    input_series:
+      - series: 'puppetca_ocsp_index_sync_failures_total{job="openvox-ca",instance="ca-1:9140"}'
+        values: "0 1+0x40"
+      - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+        values: "1+0x40"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: PuppetCAOCSPIndexSyncFailing
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: PuppetCAOCSPIndexSyncFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              instance: ca-1:9140
+            exp_annotations:
+              summary: "Puppet CA cannot reload its OCSP serial index from storage."
+              description: "The Puppet CA on ca-1:9140 could not reload the inventory into its OCSP serial index (puppetca_ocsp_index_sync_failures_total is rising), so it is answering \"unknown\" for certificates its peers have signed since the last successful pass. Check inventory storage, and the inventory integrity MAC if the logs report a mismatch."
+
+  # A replica whose index reads are all succeeding must not appear, or the rule
+  # would page on every healthy CA in the fleet.
+  - interval: 1m
+    name: OCSP index sync quiet when reads succeed
+    input_series:
+      - series: 'puppetca_ocsp_index_sync_failures_total{job="openvox-ca",instance="ca-1:9140"}'
+        values: "0+0x40"
+      - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+        values: "1+0x40"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: PuppetCAOCSPIndexSyncFailing
+        exp_alerts: []

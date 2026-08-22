@@ -147,6 +147,14 @@ var _ = Describe("Collector", func() {
 		Expect(crlSyncFailures).NotTo(BeNil())
 		Expect(counterValue(crlSyncFailures)).To(Equal(0.0))
 
+		// The OCSP index series are per-process in the same way, and are how an
+		// operator spots a replica calling valid certificates unknown.
+		ocspFailures := g.findByLabels("puppetca_ocsp_index_sync_failures_total", nil)
+		Expect(ocspFailures).NotTo(BeNil())
+		Expect(counterValue(ocspFailures)).To(Equal(0.0))
+		Expect(gaugeValue(g.findByLabels("puppetca_ocsp_index_serials", nil))).To(Equal(0.0),
+			"a freshly bootstrapped CA has issued nothing")
+
 		// The cached CRL number is the copy this replica decides revocation
 		// from; on a replica that is up to date it equals the stored one.
 		cached := g.findByLabels("puppetca_crl_cached_number", nil)
@@ -175,6 +183,48 @@ var _ = Describe("Collector", func() {
 
 		g = gather(metrics.NewCollector(peer))
 		Expect(gaugeValue(g.findByLabels("puppetca_crl_cached_number", nil))).To(Equal(stored))
+	})
+
+	It("reports an OCSP index behind the fleet, and the failure count when it cannot catch up", func() {
+		signCert("ocsp-index-node")
+
+		// A second CA over the same storage. Its index was built at Init from
+		// the inventory as it then stood, so it holds the serial signed above
+		// and not the one signed below — which is where the gap comes from.
+		peer := ca.New(storage.New(store.CADir()), ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		Expect(peer.Init(ctx)).To(Succeed())
+		signCert("signed-after-the-peer-started")
+
+		g := gather(metrics.NewCollector(peer))
+		behind := gaugeValue(g.findByLabels("puppetca_ocsp_index_serials", nil))
+		Expect(gaugeValue(gather(metrics.NewCollector(myCA)).
+			findByLabels("puppetca_ocsp_index_serials", nil))).
+			To(BeNumerically(">", behind),
+				"the gap the fleet-relative query fires on must be visible in the metrics")
+
+		_, err := peer.SyncSerialIndex(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		g = gather(metrics.NewCollector(peer))
+		Expect(gaugeValue(g.findByLabels("puppetca_ocsp_index_serials", nil))).
+			To(Equal(gaugeValue(gather(metrics.NewCollector(myCA)).
+				findByLabels("puppetca_ocsp_index_serials", nil))),
+				"after a sync the two replicas must agree")
+
+		// Now make the read fail. Asserting the value rather than its presence
+		// keeps this counter distinguishable from the two CRL ones, which stay
+		// at zero throughout: a reload that failed is neither an amendment that
+		// failed nor a CRL that could not be read.
+		Expect(os.Remove(store.InventoryPath())).To(Succeed())
+		_, err = peer.SyncSerialIndex(ctx)
+		Expect(err).To(HaveOccurred())
+
+		g = gather(metrics.NewCollector(peer))
+		Expect(counterValue(g.findByLabels("puppetca_ocsp_index_sync_failures_total", nil))).
+			To(Equal(float64(peer.SerialIndexSyncFailures())))
+		Expect(counterValue(g.findByLabels("puppetca_ocsp_index_sync_failures_total", nil))).
+			To(BeNumerically(">", 0))
+		Expect(counterValue(g.findByLabels("puppetca_crl_sync_failures_total", nil))).
+			To(Equal(0.0), "an unreadable inventory is not an unreadable CRL")
 	})
 
 	It("reports a nonzero sync-failure count once a replica has failed to reload", func() {

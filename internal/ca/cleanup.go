@@ -112,8 +112,7 @@ func (c *CA) CleanupExpiredCerts(ctx context.Context, retain time.Duration) (int
 			}
 			key := serialHexStr(n)
 			removedSerials[key] = n
-			delete(c.serialIndex, key)
-			delete(c.ocspCache, key)
+			c.unindexSerialLocked(key)
 		}
 
 		// A CRL failure must not abort the rest: the "clean up NOW" rule above

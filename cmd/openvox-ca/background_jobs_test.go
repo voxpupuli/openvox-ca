@@ -20,6 +20,8 @@ package main
 import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/voxpupuli/openvox-ca/internal/config"
 )
 
 // jobNames reduces the job list to the names it contains, which is what these
@@ -27,7 +29,7 @@ import (
 func jobNames(cfg *serverConfig) []string {
 	GinkgoHelper()
 	c, _ := newRefresherTestCA()
-	names := make([]string, 0, 3)
+	names := make([]string, 0, 4)
 	for _, job := range backgroundJobs(cfg, c) {
 		Expect(job.run).NotTo(BeNil(), "job %q has no runner", job.name)
 		names = append(names, job.name)
@@ -36,6 +38,8 @@ func jobNames(cfg *serverConfig) []string {
 }
 
 var _ = Describe("backgroundJobs", func() {
+	// The default backend is filesystem, so the default job set deliberately
+	// does not include the OCSP index sync; the table below owns that decision.
 	It("runs CRL refresh and CRL sync by default, and cleanup only on request", func() {
 		Expect(jobNames(&serverConfig{})).To(ConsistOf(jobCRLRefresh, jobCRLSync))
 		Expect(jobNames(&serverConfig{EnableExpiredCertCleanup: true})).
@@ -55,8 +59,53 @@ var _ = Describe("backgroundJobs", func() {
 		Expect(names).NotTo(ContainElement(jobCRLRefresh))
 	})
 
-	It("still runs CRL sync when every other job is switched off", func() {
-		Expect(jobNames(&serverConfig{DisableCRLRefresh: true, EnableExpiredCertCleanup: false})).
-			To(ConsistOf(jobCRLSync))
+	It("still runs both sync jobs when every other job is switched off", func() {
+		Expect(jobNames(&serverConfig{
+			StorageConfig:            config.StorageConfig{StorageBackend: "etcd"},
+			DisableCRLRefresh:        true,
+			EnableExpiredCertCleanup: false,
+		})).To(ConsistOf(jobCRLSync, jobOCSPIndexSync))
+	})
+
+	// The OCSP index goes stale when a *second* process issues certificates
+	// this one will not hear about, which is a property of the backend and of
+	// nothing else. filesystem and SQLite are a local file with no
+	// cross-process coordination, so there is no supported way to have that
+	// second writer; every other backend is reachable by several replicas by
+	// design.
+	//
+	// A table rather than two examples, because the cost of getting one entry
+	// wrong is asymmetric and invisible: a backend wrongly called single-node
+	// answers `unknown` for its peers' certificates until someone restarts it,
+	// and nothing in the logs says why.
+	DescribeTable("starts the OCSP index sync only where a second writer is possible",
+		func(backend string, want bool) {
+			names := jobNames(&serverConfig{StorageConfig: config.StorageConfig{StorageBackend: backend}})
+			if want {
+				Expect(names).To(ContainElement(jobOCSPIndexSync))
+			} else {
+				Expect(names).NotTo(ContainElement(jobOCSPIndexSync))
+			}
+		},
+		Entry("filesystem", "filesystem", false),
+		Entry("the empty default, which is filesystem", "", false),
+		Entry("sqlite", "sqlite", false),
+		Entry("etcd", "etcd", true),
+		Entry("redis", "redis", true),
+		Entry("postgres", "postgres", true),
+		Entry("mysql", "mysql", true),
+		// Unparseable: run it. A needless read is the cheaper mistake.
+		Entry("a name that does not parse", "no-such-backend", true),
+	)
+
+	// Not gated on ocsp_url, which is a different question: that setting
+	// decides whether issued certificates carry an AIA extension pointing here,
+	// while /ocsp answers either way. On a shared backend the job runs whatever
+	// it says, so an operator distributing the responder URL by another route
+	// still gets correct answers.
+	It("runs the OCSP index sync on a shared backend whatever ocsp_url says", func() {
+		Expect(jobNames(&serverConfig{StorageConfig: config.StorageConfig{StorageBackend: "etcd"}})).To(ContainElement(jobOCSPIndexSync))
+		Expect(jobNames(&serverConfig{StorageConfig: config.StorageConfig{StorageBackend: "etcd"}, OCSPUrl: "http://ca.example.com:8140/ocsp"})).
+			To(ContainElement(jobOCSPIndexSync))
 	})
 })

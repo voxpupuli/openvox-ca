@@ -456,6 +456,109 @@ func (s *StorageService) ReadInventory(ctx context.Context) ([]byte, error) {
 	return s.backend.Get(ctx, KeyInventory)
 }
 
+// InventoryEntries returns every inventory entry in issuance order, verifying
+// the stored integrity value before returning them.
+//
+// The structured twin of ReadInventory, for a caller that wants the entries
+// rather than the rendered blob — and the one to reach for on a timer.
+// ReadInventory verifies and *then* fetches, and its verification recomputes
+// from storage, so every call materialises the whole inventory twice: on a blob
+// backend two full blob reads, and on an InventoryStore backend a full row
+// fetch plus a hash chain followed by every row again through the render shim.
+// This fetches once and folds the integrity value over what it already holds,
+// so the cost is one materialisation plus the small stored-MAC read, on every
+// backend family.
+//
+// Verification is not skipped anywhere, which is the difference between this
+// and SubjectForSerial: that method declines to verify on InventoryStore
+// backends precisely because doing so "would cost a second full fetch of every
+// row", and here it costs no fetch at all. The distinction matters for this
+// caller, which drives removals — a deleted row silently downgrades the OCSP
+// responder's answer for that serial from revoked to unknown and evicts the
+// pre-signed response, so tampering must fail closed rather than be absorbed.
+func (s *StorageService) InventoryEntries(ctx context.Context) ([]InventoryEntry, error) {
+	s.inventoryMu.RLock()
+	defer s.inventoryMu.RUnlock()
+
+	if store, ok := asInventoryStore(s.backend); ok {
+		entries, err := store.Entries(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if s.hmacKey != nil {
+			// The same fold computeInventoryHMAC performs, over the rows in
+			// hand rather than over a second fetch of them.
+			var head []byte
+			for _, e := range entries {
+				head = chainInventoryMAC(s.hmacKey, head, canonicalInventoryLine(e))
+			}
+			if err := s.compareInventoryMACLocked(ctx, head); err != nil {
+				return nil, err
+			}
+		}
+		return entries, nil
+	}
+
+	data, err := s.readInventoryForHMAC(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if s.hmacKey != nil {
+		// Hashed over the bytes as stored, never over a re-render of the parsed
+		// entries: the blob scheme covers the blob, and a round trip through
+		// parse-and-render need not reproduce it byte for byte.
+		if err := s.compareInventoryMACLocked(ctx, wholeBlobInventoryMAC(s.hmacKey, data)); err != nil {
+			return nil, err
+		}
+	}
+	return parseInventoryBlob(data), nil
+}
+
+// compareInventoryMACLocked checks an already-computed integrity value against
+// the stored one, with verifyInventoryHMACLocked's first-run behaviour: a
+// missing stored value is a baseline to establish rather than a failure.
+//
+// Split out so a caller holding the inventory can verify without recomputing
+// from storage. verifyInventoryHMACLocked is the same comparison for a caller
+// that has not computed the value itself.
+//
+// It takes no HMAC key, deliberately: the key has already been consumed in
+// producing computed, and a parameter that looks like it participates in the
+// comparison but does not is how the two sides come to be keyed differently
+// without anything failing.
+//
+// It differs from verifyInventoryHMACLocked in one way, also deliberately: a
+// missing stored value is accepted without establishing one. That function
+// baselines because its callers hold the write lock and one of them is
+// InitHMAC, whose job that is; this one is reached from InventoryEntries under
+// a *read* lock, and a read path writing to storage — from every replica at
+// once, on a timer — is not worth leaving available for the sake of a state
+// InitHMAC has already ruled out before the CA serves anything. The security
+// posture is unchanged either way: an inventory whose MAC was deleted alongside
+// the edit verifies clean, which SubjectForSerial's comment above sets out at
+// length as a known, accepted limit of the scheme.
+//
+// Caller must hold inventoryMu (read or write).
+func (s *StorageService) compareInventoryMACLocked(ctx context.Context, computed []byte) error {
+	storedMAC, err := s.backend.Get(ctx, KeyInventoryHMAC)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			slog.Warn("No inventory HMAC stored; skipping the integrity check for this read")
+			return nil
+		}
+		return fmt.Errorf("reading inventory HMAC: %w", err)
+	}
+	if !hmac.Equal(storedMAC, computed) {
+		scheme := "whole-blob-hmac"
+		if _, ok := asInventoryStore(s.backend); ok {
+			scheme = "hash-chain"
+		}
+		slog.Warn("inventory HMAC mismatch; integrity check failed", "scheme", scheme)
+		return ErrInventoryTampered
+	}
+	return nil
+}
+
 // inventoryEntriesLocked returns every inventory entry in issuance order. On
 // InventoryStore backends it reads the structured rows; otherwise it parses the
 // rendered blob. Caller must hold inventoryMu (read or write).
@@ -467,6 +570,13 @@ func (s *StorageService) inventoryEntriesLocked(ctx context.Context) ([]Inventor
 	if err != nil {
 		return nil, err
 	}
+	return parseInventoryBlob(data), nil
+}
+
+// parseInventoryBlob parses a rendered inventory into entries, skipping blank
+// and malformed lines. Shared by the two readers of the blob form so they
+// cannot disagree about what counts as an entry.
+func parseInventoryBlob(data []byte) []InventoryEntry {
 	var entries []InventoryEntry
 	for _, line := range strings.Split(string(data), "\n") {
 		if strings.TrimSpace(line) == "" {
@@ -476,7 +586,7 @@ func (s *StorageService) inventoryEntriesLocked(ctx context.Context) ([]Inventor
 			entries = append(entries, e)
 		}
 	}
-	return entries, nil
+	return entries
 }
 
 // PruneInventory removes every inventory entry for which keep returns false,

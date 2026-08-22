@@ -572,7 +572,7 @@ func (c *CA) issueLeafLocked(ctx context.Context, subject string, subjectName pk
 	}
 
 	// Update in-memory serial index for O(1) OCSP lookups.
-	c.serialIndex[serialStr] = subject
+	c.indexSerialLocked(serialStr, subject)
 
 	slog.Debug("Certificate signed",
 		"subject", subject,

@@ -215,7 +215,7 @@ func (c *CA) importCertificateLocked(ctx context.Context, subject, serialStr str
 	}
 
 	// Update in-memory serial index for O(1) OCSP lookups.
-	c.serialIndex[serialStr] = subject
+	c.indexSerialLocked(serialStr, subject)
 
 	slog.Info("Certificate imported",
 		"subject", subject,

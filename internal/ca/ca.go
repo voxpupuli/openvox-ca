@@ -170,6 +170,25 @@ type CA struct {
 	cachedCRL   *x509.RevocationList      // in-memory CRL for auth checks; protected by mu
 	mu          sync.RWMutex
 
+	// serialIndexEpoch counts in-process mutations of serialIndex (issuance and
+	// cleanup, via indexSerialLocked/unindexSerialLocked). SyncSerialIndex
+	// samples it before its storage read and again after taking the lock, so it
+	// can tell whether the inventory it read is still a complete account of
+	// what this process knows. Protected by mu; not atomic, because every
+	// reader and writer holds the lock anyway and an atomic would suggest
+	// otherwise.
+	serialIndexEpoch uint64
+
+	// serialIndexSyncFailures counts failures to refresh the OCSP serial index
+	// from the inventory (see SyncSerialIndex): an unreadable inventory, or on a
+	// blob backend one whose HMAC no longer verifies. While it rises, this
+	// replica's OCSP responder answers `unknown` for any certificate signed
+	// elsewhere since the last successful pass — not a revocation bypass, but a
+	// verifier that hard-fails on `unknown` sees one replica reject what the
+	// others accept. Exposed via the metrics exporter
+	// (puppetca_ocsp_index_sync_failures_total) for alerting.
+	serialIndexSyncFailures atomic.Uint64
+
 	// crlUpdateFailures counts failures to amend the CRL: a CRL that could not
 	// be re-signed, written or read, on any of the four paths that write one
 	// (revoke, cleanup, reissue, refresh) — the read half centrally, in
@@ -235,6 +254,26 @@ func (c *CA) CRLUpdateFailures() uint64 {
 // puppetca_crl_sync_failures_total.
 func (c *CA) CRLSyncFailures() uint64 {
 	return c.crlSyncFailures.Load()
+}
+
+// SerialIndexSyncFailures returns the number of times the CA failed to refresh
+// its OCSP serial index from the inventory (see SyncSerialIndex). A rising
+// value means this replica's OCSP responder is answering `unknown` for
+// certificates issued elsewhere since the last successful pass; the metrics
+// exporter surfaces it as puppetca_ocsp_index_sync_failures_total.
+func (c *CA) SerialIndexSyncFailures() uint64 {
+	return c.serialIndexSyncFailures.Load()
+}
+
+// SerialIndexSize returns how many serials this replica's OCSP responder
+// recognises. A serial it does not hold is answered `unknown` before the CRL is
+// consulted, so this is the size of what the responder will speak about at all;
+// the metrics exporter surfaces it as puppetca_ocsp_index_serials, and specs
+// use it to assert a sync pass landed without reaching into unexported state.
+func (c *CA) SerialIndexSize() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return len(c.serialIndex)
 }
 
 // CRLUpdated returns a channel that receives a value each time the CRL is

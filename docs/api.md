@@ -269,7 +269,9 @@ Response:
 | `POST` | `/ocsp` | RFC 6960 OCSP request; body is DER-encoded `OCSPRequest` |
 | `GET` | `/ocsp/{request}` | RFC 6960 GET form; `{request}` is standard or URL-safe base64-encoded DER |
 
-Both paths are also served under `/puppet-ca/v1/`. Responses are signed by the CA key directly (`Content-Type: application/ocsp-response`). GET responses include `Cache-Control: max-age=…, public`; requests carrying a nonce bypass the cache. The AIA extension is embedded in issued certificates when `--ocsp-url` is set.
+Both paths are also served under `/puppet-ca/v1/`. Responses are signed by the CA key directly (`Content-Type: application/ocsp-response`). The AIA extension is embedded in issued certificates when `--ocsp-url` is set; the endpoint answers either way.
+
+A GET carries `Cache-Control: max-age=…, public` for a `good` or `revoked` answer to a nonce-free request, and `Cache-Control: no-store` otherwise. Two cases get `no-store`: a request carrying a nonce, since an RFC 8954 response answers that request and no other and so also bypasses the pre-signed cache; and an `unknown`, which additionally carries no `NextUpdate`, because a later inventory read can overturn it — see [OCSP status across replicas](configuration.md#ocsp-status-across-replicas). A POST carries no `Cache-Control` at all.
 
 ## Health probes
 
@@ -371,10 +373,16 @@ When containing a compromised agent, apply the levers that hold, in this order:
    The status probe also needs that certificate to still be there, so it suits
    the `PUT` route: after a `DELETE` — what `openvox-ca-ctl clean` sends — every
    replica answers `404` and it distinguishes nothing, so record the serial
-   beforehand and use OCSP or the gauge. OCSP additionally answers `Unknown` for
-   a serial a peer issued since this replica started, and a nonce-free query may
-   be served from a pre-signed cache the sync does not clear for serials it did
-   not just revoke. What cannot answer it at all is anything reading shared
+   beforehand and use OCSP or the gauge. OCSP answers `Unknown` — not
+   `revoked` — for a serial a peer issued that this replica has not yet indexed,
+   which the index sync bounds at `ocsp_index_sync_interval_sec` (5 minutes by
+   default); see [OCSP status across
+   replicas](configuration.md#ocsp-status-across-replicas). Send the nonce
+   (`openssl ocsp` does unless you pass `-no_nonce`), because a nonce-free query
+   may be answered from a response pre-signed up to four hours ago. That cache
+   cannot contradict this replica's own CRL — every install of a new CRL drops
+   the responses it revokes — but for a probe, a freshly signed answer is the
+   one worth having. What cannot answer it at all is anything reading shared
    storage: `GET /certificate_revocation_list/ca`, `puppetca_crl_number` and
    `puppetca_crl_revoked_certificates` all read the same on a stale replica as
    on a fresh one.

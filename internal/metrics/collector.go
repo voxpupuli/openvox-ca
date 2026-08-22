@@ -73,6 +73,9 @@ type Collector struct {
 	crlSyncFailures   *prometheus.Desc
 	crlCachedNumber   *prometheus.Desc
 
+	ocspIndexSyncFailures *prometheus.Desc
+	ocspIndexSerials      *prometheus.Desc
+
 	caInfo      *prometheus.Desc
 	caNotBefore *prometheus.Desc
 	caNotAfter  *prometheus.Desc
@@ -124,6 +127,19 @@ func NewCollector(c *ca.CA) *Collector {
 			"Total failures to reload the stored CRL into the copy this replica's revocation checks "+
 				"read — an unreadable or unparseable CRL, or one this CA did not sign. While it is "+
 				"rising, a certificate revoked on another replica may still be accepted here.",
+			nil, nil),
+		ocspIndexSyncFailures: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "ocsp_index", "sync_failures_total"),
+			"Total failures to reload the inventory into the serial index this replica's OCSP "+
+				"responder answers from — an unreadable inventory, or one whose integrity MAC no "+
+				"longer verifies. While it is rising, this replica answers 'unknown' for "+
+				"certificates signed elsewhere since the last successful pass.",
+			nil, nil),
+		ocspIndexSerials: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "ocsp_index", "serials"),
+			"Number of certificate serials this replica's OCSP responder recognises. Every replica "+
+				"sharing a backend should converge on the same value within one sync interval; a "+
+				"replica persistently below the others is reporting valid certificates as unknown.",
 			nil, nil),
 		crlCachedNumber: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "crl", "cached_number"),
@@ -192,6 +208,8 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.crlUpdateFailures
 	ch <- c.crlSyncFailures
 	ch <- c.crlCachedNumber
+	ch <- c.ocspIndexSyncFailures
+	ch <- c.ocspIndexSerials
 	ch <- c.caInfo
 	ch <- c.caNotBefore
 	ch <- c.caNotAfter
@@ -230,6 +248,10 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		float64(c.ca.CRLUpdateFailures()))
 	ch <- prometheus.MustNewConstMetric(c.crlSyncFailures, prometheus.CounterValue,
 		float64(c.ca.CRLSyncFailures()))
+	ch <- prometheus.MustNewConstMetric(c.ocspIndexSyncFailures, prometheus.CounterValue,
+		float64(c.ca.SerialIndexSyncFailures()))
+	ch <- prometheus.MustNewConstMetric(c.ocspIndexSerials, prometheus.GaugeValue,
+		float64(c.ca.SerialIndexSize()))
 	if cached, ok := c.ca.CachedCRLNumber(); ok {
 		num, _ := new(big.Float).SetInt(cached).Float64()
 		ch <- prometheus.MustNewConstMetric(c.crlCachedNumber, prometheus.GaugeValue, num)

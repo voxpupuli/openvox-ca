@@ -501,7 +501,7 @@ func (c *CA) bootstrapCA(ctx context.Context) error {
 
 	// Cache the CRL we just created. newEmptyCRL returns it parsed, so there is
 	// nothing to re-parse and no second failure mode to report.
-	c.cachedCRL = crl
+	c.installCachedCRLLocked(crl)
 
 	// Touch inventory.
 	if err := c.Storage.TouchInventory(ctx); err != nil {
@@ -602,7 +602,7 @@ func (c *CA) loadCRLCache(ctx context.Context) error {
 			"ca_subject_key_id", fmt.Sprintf("%x", c.CACert.SubjectKeyId))
 	}
 
-	c.cachedCRL = crl
+	c.installCachedCRLLocked(crl)
 	return nil
 }
 
