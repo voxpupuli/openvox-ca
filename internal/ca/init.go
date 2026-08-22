@@ -60,10 +60,10 @@ const (
 const LockTimeout = 60 * time.Second
 
 // subjectLockName returns the distributed-lock name used to serialise
-// operations on a single subject: evict, save CSR, sign, import, clean and
-// revoke. Keep this list and the Serialises cell of the Tier 1 table in
-// docs/development/locking.md in step — they are the same claim written twice,
-// so they should read the same.
+// operations on a single subject: evict, save CSR, sign, delete CSR, import,
+// clean and revoke. Keep this list and the Serialises cell of the Tier 1
+// table in docs/development/locking.md in step — they are the same claim
+// written twice, so they should read the same.
 func subjectLockName(subject string) string { return lockSubjectPrefix + subject }
 
 func (c *CA) Init(ctx context.Context) error {

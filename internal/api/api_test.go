@@ -30,11 +30,13 @@ import (
 	"encoding/asn1"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"log/slog"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -568,6 +570,65 @@ var _ = Describe("API Workflow", func() {
 			rr := httptest.NewRecorder()
 			mux.ServeHTTP(rr, req)
 			Expect(rr.Code).To(Equal(http.StatusNotFound))
+		})
+
+		It("returns 503, not 404, when the delete fails for a reason other than absence", func() {
+			// The 404 used to be the answer to every error from this endpoint,
+			// including a lock timeout or an unreachable backend — telling the
+			// operator their rejection landed while the CSR was still queued and
+			// still signable. Nothing above exercises the distinction: collapse
+			// the errors.Is branch in the handler and the CA-layer specs stay
+			// green, because they only prove DeleteRequest returns the sentinel.
+			// 503 rather than 500 follows the rule handlePutStatusBySerial
+			// already wrote down for this class: nothing was deleted, so the
+			// fault is transient and the retry is safe.
+			subject := "delete-fault-node"
+			csrPEM, err := testutil.GenerateCSR(subject)
+			Expect(err).NotTo(HaveOccurred())
+
+			faultDir, err := os.MkdirTemp("", "openvox-ca-api-delete-fault")
+			Expect(err).NotTo(HaveOccurred())
+			defer os.RemoveAll(faultDir)
+
+			backend := &deleteFaultBackend{
+				Backend: storage.NewFilesystemBackend(faultDir),
+				key:     storage.CSRKey(subject),
+				err:     errors.New("backend unavailable"),
+			}
+			faultStore := storage.NewWithBackend(backend, filepath.Join(faultDir, "private"))
+			faultCA := ca.New(faultStore, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+
+			ctx := context.Background()
+			Expect(faultStore.EnsureDirs(ctx)).To(Succeed())
+			Expect(faultStore.SaveCAKey(ctx, cachedKeyPEM)).To(Succeed())
+			Expect(faultStore.SaveCACert(ctx, cachedCrtPEM)).To(Succeed())
+			Expect(faultStore.UpdateCRL(ctx, cachedCrlPEM)).To(Succeed())
+			Expect(faultStore.WriteSerial(ctx, "0001")).To(Succeed())
+			Expect(faultStore.TouchInventory(ctx)).To(Succeed())
+			Expect(faultCA.Init(ctx)).To(Succeed())
+			faultMux := api.New(faultCA).Routes()
+
+			faultMux.ServeHTTP(httptest.NewRecorder(),
+				httptest.NewRequest("PUT", "/certificate_request/"+subject, bytes.NewReader(csrPEM)))
+			Expect(faultStore.HasCSR(ctx, subject)).To(BeTrue())
+
+			rr := httptest.NewRecorder()
+			faultMux.ServeHTTP(rr, httptest.NewRequest("DELETE", "/certificate_request/"+subject, nil))
+			Expect(rr.Code).To(Equal(http.StatusServiceUnavailable))
+			// The backend's own message names a path; it must not reach the client.
+			Expect(rr.Body.String()).NotTo(ContainSubstring("backend unavailable"))
+			// And the CSR the operator was not told about is still there.
+			Expect(faultStore.HasCSR(ctx, subject)).To(BeTrue())
+		})
+
+		It("should return 400 for an invalid subject", func() {
+			// The handler's own guard, distinct from the one inside
+			// DeleteRequest. Both exist, and only this spec tells them apart:
+			// remove the handler's and the request reaches the CA layer, which
+			// refuses it too — but as a 503, not a 400.
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, httptest.NewRequest("DELETE", "/certificate_request/a..b", nil))
+			Expect(rr.Code).To(Equal(http.StatusBadRequest))
 		})
 
 		It("should serve DELETE /puppet-ca/v1/certificate_request/{subject}", func() {
@@ -1790,4 +1851,20 @@ func foreignCRL() []byte {
 	}, cert, key)
 	Expect(err).NotTo(HaveOccurred())
 	return pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlDER})
+}
+
+// deleteFaultBackend fails Delete on one CSR key with something that is not
+// os.ErrNotExist — a backend that is reachable but refusing writes, which is
+// the case the endpoint used to report as "CSR not found".
+type deleteFaultBackend struct {
+	storage.Backend
+	key string
+	err error
+}
+
+func (b *deleteFaultBackend) Delete(ctx context.Context, key string) error {
+	if key == b.key {
+		return b.err
+	}
+	return b.Backend.Delete(ctx, key)
 }

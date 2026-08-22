@@ -816,6 +816,72 @@ func (c *CA) SaveRequest(ctx context.Context, subject string, csrPEM []byte) (bo
 	return autosigned, nil
 }
 
+// ErrNoCSR is returned by DeleteRequest when subject has no pending CSR. A
+// sentinel because the HTTP layer has to separate "there was nothing to delete"
+// from "the deletion could not be performed": answering 404 to both tells the
+// operator the request is gone at the very moment it is still there and still
+// signable.
+var ErrNoCSR = errors.New("no pending CSR")
+
+// DeleteRequest removes the pending CSR for subject — the operator rejecting a
+// request rather than signing it.
+//
+// The delete runs under the cluster-wide per-subject lock, which is what makes
+// it an ordering rather than a race. Sign, SignWithTTL and SaveRequest's
+// autosign all read the CSR inside that lock and write the certificate later
+// in the same critical section, so an unlocked delete could land in between:
+// the request the operator rejected was signed anyway, and the 204 told them
+// otherwise. It also stops the delete landing inside SaveRequest's
+// evict/save/autosign section, where it turned an agent's submission into a
+// "CSR not found" failure.
+//
+// The two orderings the lock leaves are both answers rather than races. A
+// delete that wins the lock against a pending Sign leaves it nothing to sign,
+// and it fails with ErrNoCSR. A delete that loses usually finds the CSR
+// already gone — signWithDuration removes it once the certificate is stored —
+// so it returns ErrNoCSR too, and the operator gets a 404 with the certificate
+// issued. That removal is best-effort and only warns on failure, so when it
+// fails this delete removes the CSR instead and answers 204 for a subject that
+// already has a certificate. What the lock rules out is the case that made
+// this a bug: a 204 concurrent with an issuance for the same request.
+//
+// While #195 is open, Generate is the exception, and not one this method can
+// close: it saves a CSR and signs it under c.mu alone, taking no distributed
+// lock, so a delete can still land inside that sequence. Closing it means
+// giving Generate the subject lock, not widening this method's — and when that
+// lands, this paragraph goes with it.
+//
+// The caller must NOT hold c.mu, and this takes no CA-level lock: a pending CSR
+// backs no in-memory cache, so there is nothing to keep in step with the write.
+//
+// Lock ordering: the subject lock only, nothing nested — see
+// docs/development/locking.md.
+func (c *CA) DeleteRequest(ctx context.Context, subject string) error {
+	if err := ValidateSubject(subject); err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, LockTimeout)
+	defer cancel()
+
+	if err := c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
+		if err := c.Storage.DeleteCSR(ctx, subject); err != nil {
+			// Backend.Delete wraps os.ErrNotExist when the key is absent; any
+			// other error is a backend fault, not an empty queue.
+			if errors.Is(err, fs.ErrNotExist) {
+				return ErrNoCSR
+			}
+			return fmt.Errorf("failed to delete CSR for %s: %w", subject, err)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	slog.Debug("Certificate request deleted", "subject", subject)
+	return nil
+}
+
 // Renew issues a replacement certificate for subject from the provided CSR,
 // bypassing the pending-CSR queue and autosign check. The existing certificate
 // (if any) is replaced atomically under the per-subject distributed lock, and
