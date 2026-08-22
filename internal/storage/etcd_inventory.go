@@ -18,10 +18,8 @@
 package storage
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
-	"encoding/json"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -101,90 +99,14 @@ const etcdImportProgressEvery = 1024
 // PruneEntries contract permits.
 const etcdPruneMaxBatchesPerCall = 30
 
-// pruneBacklogGrowing reports whether a prune's deferred-match count exceeds
-// what one whole call can remove — the signal that, at the current cleanup
-// cadence, the backlog is growing rather than draining, which the deferral
-// log escalates to a warning.
-func pruneBacklogGrowing(deferred int) bool {
-	return deferred > etcdPruneMaxBatchesPerCall*etcdPruneBatch
-}
-
 // etcdDecomposeLockName is the distributed lock serialising the one-time
 // legacy inventory blob conversion across replicas starting up together. Lock
-// names are protocol (see docs/development/locking.md); this one is scoped to
-// the etcd backend, which is the only backend with a blob to decompose.
+// names are protocol (see docs/development/locking.md), and this one is shared
+// by both decomposing backends: redisDecomposeLockName in redis_inventory.go
+// aliases this constant, so renaming it here renames Redis's lock too, with no
+// compile error to warn you. A deployment only ever has one backend, so the
+// two can never contend.
 const etcdDecomposeLockName = "inventory-decompose"
-
-// etcdSerialAmbiguous is the by-serial index value recorded for a serial that
-// appears on more than one imported record (possible only in a legacy blob:
-// blob backends never had a cluster-wide uniqueness guarantee, and every
-// other write path rejects duplicates). The one-to-one index cannot name all
-// bearers, so instead of silently aliasing certificate-index writes onto an
-// arbitrary record, the sentinel makes them explicit no-ops while still
-// keeping the serial reserved against reissue.
-const etcdSerialAmbiguous = "ambiguous"
-
-// etcdInventoryRecord is the stored JSON form of a CertRecord. The field set
-// is spelled out (rather than marshalling CertRecord directly) so the wire
-// format is explicit and stable against refactors of the in-memory structs.
-type etcdInventoryRecord struct {
-	Serial         string            `json:"serial"`
-	NotBefore      string            `json:"not_before"`
-	NotAfter       string            `json:"not_after"`
-	Subject        string            `json:"subject"`
-	Fingerprint    string            `json:"fingerprint,omitempty"`
-	DNSAltNames    []string          `json:"dns_alt_names,omitempty"`
-	AuthExtensions map[string]string `json:"auth_extensions,omitempty"`
-	State          string            `json:"state,omitempty"`
-	RevokedAt      *time.Time        `json:"revoked_at,omitempty"`
-}
-
-func encodeInventoryRecord(rec CertRecord) ([]byte, error) {
-	if rec.State == "" {
-		rec.State = CertStateSigned
-	}
-	return json.Marshal(etcdInventoryRecord{
-		Serial:         rec.Serial,
-		NotBefore:      rec.NotBefore,
-		NotAfter:       rec.NotAfter,
-		Subject:        rec.Subject,
-		Fingerprint:    rec.Fingerprint,
-		DNSAltNames:    rec.DNSAltNames,
-		AuthExtensions: rec.AuthExtensions,
-		State:          rec.State,
-		RevokedAt:      rec.RevokedAt,
-	})
-}
-
-// decodeInventoryRecord is the inverse of encodeInventoryRecord. Unlike the
-// SQL row decoder — which can salvage the canonical columns when only the
-// projection JSON is corrupt — the whole record shares one JSON value here, so
-// an undecodable value is a hard error: there is nothing left to fall back on.
-func decodeInventoryRecord(data []byte) (CertRecord, error) {
-	var r etcdInventoryRecord
-	if err := json.Unmarshal(data, &r); err != nil {
-		return CertRecord{}, fmt.Errorf("decoding inventory record: %w", err)
-	}
-	rec := CertRecord{
-		InventoryEntry: InventoryEntry{
-			Serial:    r.Serial,
-			NotBefore: r.NotBefore,
-			NotAfter:  r.NotAfter,
-			Subject:   r.Subject,
-		},
-		CertProjection: CertProjection{
-			Fingerprint:    r.Fingerprint,
-			DNSAltNames:    r.DNSAltNames,
-			AuthExtensions: r.AuthExtensions,
-		},
-		State:     r.State,
-		RevokedAt: r.RevokedAt,
-	}
-	if rec.State == "" {
-		rec.State = CertStateSigned
-	}
-	return rec, nil
-}
 
 // invPhys returns the physical etcd key for an inventory sub-path.
 func (b *EtcdBackend) invPhys(sub string) string { return b.prefix + "/" + sub }
@@ -222,14 +144,8 @@ func (b *EtcdBackend) seqGuard(seq etcdSeqState) clientv3.Cmp {
 	return clientv3.Compare(clientv3.ModRevision(b.invPhys(etcdInvSeqSub)), "=", seq.rev)
 }
 
-// etcdIndexedRecord pairs a decoded record with its sequence number.
-type etcdIndexedRecord struct {
-	seq uint64
-	rec CertRecord
-}
-
-func decodeIndexedRecords(prefix string, kvs []*mvccpb.KeyValue) ([]etcdIndexedRecord, error) {
-	out := make([]etcdIndexedRecord, 0, len(kvs))
+func decodeIndexedRecords(prefix string, kvs []*mvccpb.KeyValue) ([]indexedRecord, error) {
+	out := make([]indexedRecord, 0, len(kvs))
 	for _, kv := range kvs {
 		seq, err := strconv.ParseUint(strings.TrimPrefix(string(kv.Key), prefix), 10, 64)
 		if err != nil {
@@ -239,22 +155,14 @@ func decodeIndexedRecords(prefix string, kvs []*mvccpb.KeyValue) ([]etcdIndexedR
 		if err != nil {
 			return nil, fmt.Errorf("entry %q: %w", kv.Key, err)
 		}
-		out = append(out, etcdIndexedRecord{seq: seq, rec: rec})
+		out = append(out, indexedRecord{seq: seq, rec: rec})
 	}
 	return out, nil
 }
 
-func entriesOf(recs []etcdIndexedRecord) []InventoryEntry {
-	entries := make([]InventoryEntry, len(recs))
-	for i, r := range recs {
-		entries[i] = r.rec.InventoryEntry
-	}
-	return entries
-}
-
 // readIndexedRecords returns every inventory entry in issuance order together
 // with the fence snapshot, read atomically in a single transaction.
-func (b *EtcdBackend) readIndexedRecords(ctx context.Context) ([]etcdIndexedRecord, etcdSeqState, error) {
+func (b *EtcdBackend) readIndexedRecords(ctx context.Context) ([]indexedRecord, etcdSeqState, error) {
 	ctx, cancel := b.callCtx(ctx)
 	defer cancel()
 	resp, err := b.client.Txn(ctx).Then(
@@ -412,7 +320,7 @@ func (b *EtcdBackend) PruneEntries(ctx context.Context, keep func(InventoryEntry
 	// Committed removals accumulate across attempts: a retry re-reads the
 	// inventory, so entries deleted by an earlier attempt's batches no longer
 	// appear in its view and would otherwise vanish from the result.
-	var all []etcdIndexedRecord
+	var all []indexedRecord
 	finish := func() []InventoryEntry {
 		if len(all) == 0 {
 			return nil
@@ -459,14 +367,14 @@ func (b *EtcdBackend) PruneEntries(ctx context.Context, keep func(InventoryEntry
 // tail — one O(n) checkpoint pass plus the survivor tails, instead of a full
 // O(n) refold per batch (quadratic when a large expiry cleanup prunes most of
 // a large inventory).
-func (b *EtcdBackend) pruneEntriesOnce(ctx context.Context, keep func(InventoryEntry) bool, advanceHead func(prev []byte, e InventoryEntry) []byte, maxBatches int) ([]etcdIndexedRecord, int, bool, error) {
+func (b *EtcdBackend) pruneEntriesOnce(ctx context.Context, keep func(InventoryEntry) bool, advanceHead func(prev []byte, e InventoryEntry) []byte, maxBatches int) ([]indexedRecord, int, bool, error) {
 	recs, seq, err := b.readIndexedRecords(ctx)
 	if err != nil {
 		return nil, 0, false, err
 	}
 
-	var removed []etcdIndexedRecord
-	survivors := make([]etcdIndexedRecord, 0, len(recs))
+	var removed []indexedRecord
+	survivors := make([]indexedRecord, 0, len(recs))
 	for _, r := range recs {
 		if keep(r.rec.InventoryEntry) {
 			survivors = append(survivors, r)
@@ -499,7 +407,7 @@ func (b *EtcdBackend) pruneEntriesOnce(ctx context.Context, keep func(InventoryE
 	if len(starts) > maxBatches {
 		starts = starts[len(starts)-maxBatches:]
 		logFn := slog.Info
-		if pruneBacklogGrowing(starts[0]) {
+		if pruneBacklogGrowing(starts[0], etcdPruneMaxBatchesPerCall*etcdPruneBatch) {
 			// More is deferred than a whole run can remove: at the current
 			// cleanup interval the backlog is growing, not draining. Make
 			// that visible rather than inferable — the operator's lever is
@@ -530,11 +438,11 @@ func (b *EtcdBackend) pruneEntriesOnce(ctx context.Context, keep func(InventoryE
 
 	// Per-subject indices for repointing by-subject keys without rescanning
 	// the whole record set per batch.
-	subjAll := make(map[string][]etcdIndexedRecord)
+	subjAll := make(map[string][]indexedRecord)
 	for _, r := range recs {
 		subjAll[r.rec.Subject] = append(subjAll[r.rec.Subject], r)
 	}
-	subjSurvLast := make(map[string]etcdIndexedRecord, len(survivors))
+	subjSurvLast := make(map[string]indexedRecord, len(survivors))
 	for _, r := range survivors {
 		subjSurvLast[r.rec.Subject] = r
 	}
@@ -670,48 +578,7 @@ func (b *EtcdBackend) getInventory(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	var buf bytes.Buffer
-	for _, r := range recs {
-		buf.WriteString(canonicalInventoryLine(r.rec.InventoryEntry))
-		buf.WriteByte('\n')
-	}
-	// Normalise to a non-nil empty slice so a touched-but-empty inventory
-	// reads as present-but-empty, not absent (matching the other backends).
-	if buf.Len() == 0 {
-		return []byte{}, nil
-	}
-	return buf.Bytes(), nil
-}
-
-// parseInventoryRecords parses an inventory.txt blob into projection-less
-// records. Malformed lines are rejected so a corrupt import fails loudly
-// rather than silently dropping entries.
-func parseInventoryRecords(data []byte) ([]CertRecord, error) {
-	var recs []CertRecord
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		e, ok := parseInventoryEntry(line)
-		if !ok {
-			return nil, fmt.Errorf("malformed inventory line %q", line)
-		}
-		recs = append(recs, CertRecord{InventoryEntry: e, State: CertStateSigned})
-	}
-	return recs, nil
-}
-
-// rejectDuplicateSerials returns ErrDuplicateSerial (wrapped) when two records
-// share a serial, mirroring the unique index a SQL import would trip over.
-func rejectDuplicateSerials(recs []CertRecord) error {
-	seen := make(map[string]bool, len(recs))
-	for _, r := range recs {
-		if seen[r.Serial] {
-			return fmt.Errorf("%w: %s", ErrDuplicateSerial, r.Serial)
-		}
-		seen[r.Serial] = true
-	}
-	return nil
+	return renderInventoryText(recs), nil
 }
 
 // putInventory replaces the entire decomposed inventory with the entries
@@ -828,7 +695,7 @@ func (b *EtcdBackend) replaceInventoryOnce(ctx context.Context, recs []CertRecor
 			n := uint64(start+i) + 1
 			ops = append(ops, clientv3.OpPut(b.entryPhys(n), string(val)))
 			if dupSerials[rec.Serial] {
-				serialValue[rec.Serial] = etcdSerialAmbiguous
+				serialValue[rec.Serial] = serialAmbiguous
 			} else {
 				serialValue[rec.Serial] = strconv.FormatUint(n, 10)
 			}
@@ -1057,7 +924,7 @@ func (b *EtcdBackend) decomposeLegacyInventory(ctx context.Context) error {
 			// repeats. Refusing would brick startup; instead every line is
 			// imported verbatim (preserving the rendered text), the serials
 			// stay reserved against reissue, and certificate-index writes
-			// for them are refused (see etcdSerialAmbiguous) so revocation
+			// for them are refused (see serialAmbiguous) so revocation
 			// state and projections cannot land on the wrong record.
 			slog.Warn("Legacy etcd inventory contains duplicate serials; certificate-index state for them will be unavailable until the duplicates are resolved",
 				"serials", dups)
@@ -1083,7 +950,7 @@ func (b *EtcdBackend) decomposeLegacyInventory(ctx context.Context) error {
 type etcdLegacyState struct {
 	blob      []byte
 	markerRev int64
-	entries   []etcdIndexedRecord
+	entries   []indexedRecord
 }
 
 // legacyInventoryState returns the not-yet-decomposed inventory blob together
@@ -1214,23 +1081,6 @@ func (b *EtcdBackend) convertLegacyEmptyHead(ctx context.Context) error {
 	return fmt.Errorf("removing legacy inventory HMAC: too many concurrent writers")
 }
 
-// recordsArePrefixOf reports whether the stored entries are exactly the
-// import-written prefix of recs: sequence numbers 1..len(entries) carrying the
-// same canonical fields. That is the state an interrupted import leaves
-// behind (the wipe ran, then some batches committed), and the only state a
-// re-run may safely overwrite.
-func recordsArePrefixOf(entries []etcdIndexedRecord, recs []CertRecord) bool {
-	if len(entries) > len(recs) {
-		return false
-	}
-	for i, e := range entries {
-		if e.seq != uint64(i)+1 || e.rec.InventoryEntry != recs[i].InventoryEntry {
-			return false
-		}
-	}
-	return true
-}
-
 // verifyLegacyInventoryMAC checks the legacy blob against its stored
 // whole-blob HMAC before the blob is trusted as the import source. Absent
 // head: nothing to check (the baseline is established after the import).
@@ -1279,22 +1129,4 @@ func (b *EtcdBackend) verifyLegacyInventoryMAC(ctx context.Context, blob []byte)
 		return fmt.Errorf("legacy etcd inventory failed integrity verification before decomposition: %w", ErrInventoryTampered)
 	}
 	return nil
-}
-
-// duplicateSerials returns each serial that appears on more than one record,
-// once, in first-seen order.
-func duplicateSerials(recs []CertRecord) []string {
-	counts := make(map[string]int, len(recs))
-	for _, r := range recs {
-		counts[r.Serial]++
-	}
-	var dups []string
-	seen := make(map[string]bool)
-	for _, r := range recs {
-		if counts[r.Serial] > 1 && !seen[r.Serial] {
-			dups = append(dups, r.Serial)
-			seen[r.Serial] = true
-		}
-	}
-	return dups
 }

@@ -169,6 +169,14 @@ etcd_tls_key_file:  /etc/puppet-ca/etcd-client-key.pem
   not-yet-upgraded replica writing the old blob format while an upgraded one
   serves the converted inventory is not supported and is refused with an
   explicit error when detected.
+- **The conversion is one-way; take a snapshot before the first upgraded
+  start.** Downgrading to a release that predates it is not supported, and
+  fails quietly rather than loudly: the old binary reads `inventory/data`,
+  finds the empty marker the conversion left, and reports an *empty* inventory
+  rather than an error — so it prunes nothing, and starts appending new
+  issuances to the legacy blob. Upgrading again is then refused, because the
+  blob and the decomposed entries no longer agree. Recovery is a restore from
+  an etcd snapshot taken before the upgrade, so take one.
 - **The etcd backend also maintains the certificate index**: `GET
   /certificate_statuses` (`puppetserver ca list`) is answered from the
   decomposed inventory entries instead of reading and parsing every stored
@@ -187,9 +195,11 @@ etcd_tls_key_file:  /etc/puppet-ca/etcd-client-key.pem
   stalling signing. At the default daily cleanup interval that is 900
   entries/day: enabling cleanup for the first time on a large backlog, or
   running a fleet whose expiry churn exceeds it, calls for a shorter
-  `expired_cert_cleanup_interval_sec` — the server logs a warning when a
-  single pass cannot keep up. An in-progress *conversion* is instead covered
-  by the blob-stays-authoritative resume behaviour described above.
+  `expired_cert_cleanup_interval_sec` — the server logs every deferral, and
+  escalates to a warning once the deferred backlog exceeds what a whole pass
+  can remove, which is the point at which the backlog is growing rather than
+  draining. An in-progress *conversion* is instead covered by the
+  blob-stays-authoritative resume behaviour described above.
 - **Legacy inventories with duplicate serial numbers** (possible, because the
   pre-conversion blob had no cluster-wide uniqueness guarantee) are imported
   verbatim with a startup warning naming the serials. The certificate index
@@ -314,6 +324,63 @@ redis_tls_key_file:  /etc/puppet-ca/redis-client-key.pem
 - **`openvox-ca-ctl setup` / `import` work on the local filesystem only.**
   Bootstrap/import against a scratch directory, then point `openvox-ca` at a
   cadir containing the output.
+- **The certificate inventory is stored as one hash field per issued
+  certificate**, not as a single ever-growing text value, so signing cost does
+  not grow with the size of the inventory and duplicate serial numbers are
+  rejected atomically across all replicas (see
+  [the inventory internals](development/inventory-store.md)). On first start
+  after upgrading from a version that stored the inventory as a blob, the
+  backend converts it in place automatically: the blob is first verified
+  against its stored HMAC (a mismatch fails startup, exactly as it would have
+  before the upgrade), and after the conversion the integrity value is
+  re-established over the converted entries — the conversion window itself is
+  the one moment tamper detection does not cover. An interrupted conversion
+  resumes safely on the next start. **Upgrade all replicas together**: a
+  not-yet-upgraded replica writing the old blob format while an upgraded one
+  serves the converted inventory is not supported and is refused with an
+  explicit error when detected.
+- **The conversion is one-way; take a snapshot before the first upgraded
+  start.** Downgrading to a release that predates it is not supported, and
+  fails quietly rather than loudly: the old binary reads `inventory:data`,
+  finds the bare marker the conversion left, and reports an *empty* inventory
+  rather than an error — so it prunes nothing, and starts appending new
+  issuances to the legacy blob. Upgrading again is then refused, because the
+  blob and the entries hash no longer agree. Recovery is a restore from a
+  Redis snapshot (RDB/AOF) taken before the upgrade, so take one.
+- **The Redis backend also maintains the certificate index**: `GET
+  /certificate_statuses` (`puppetserver ca list`) is answered from the
+  decomposed inventory entries instead of reading and parsing every stored
+  certificate, with the same rebuildable-projection semantics as the SQL
+  backends — after migrating from another backend the display fields are
+  backfilled automatically on the next server start. Note the first start
+  after an upgrade or migration therefore performs both the inventory
+  conversion and a per-certificate projection backfill before serving; on a
+  large fleet expect it to take a while (progress is logged).
+- **Bulk inventory rewrites are bounded.** Redis executes a Lua script
+  atomically, blocking every other client for its duration, so an inventory
+  conversion is split into scripts of 512 records and a single
+  expired-certificate cleanup pass removes at most 5000 entries. Each pass is
+  atomic — the inventory and its integrity head are never observably out of
+  step — and a large backlog simply drains over several runs rather than
+  stalling signing. At the default daily cleanup interval that is 5000
+  entries/day: enabling cleanup for the first time on a large backlog, or
+  running a fleet whose expiry churn exceeds it, calls for a shorter
+  `expired_cert_cleanup_interval_sec` — the server logs every deferral, and
+  escalates to a warning once the deferred backlog exceeds what a whole pass
+  can remove, which is the point at which the backlog is growing rather than
+  draining.
+- **Legacy inventories with duplicate serial numbers** (possible, because the
+  pre-conversion blob had no cluster-wide uniqueness guarantee) are imported
+  verbatim with a startup warning naming the serials. The certificate index
+  cannot track per-serial state for them, so their status in
+  `certificate_statuses` output is derived from the signed CRL on each
+  request (always correct, slightly slower) and their display fields come
+  from the stored certificate. This resolves itself once the affected
+  certificates expire and are cleaned up, or when they are revoked and
+  reissued under fresh serials.
+- **Redis Cluster is not supported.** The backend dials a single primary,
+  directly or through Sentinel. The inventory scripts span several keys, which
+  Cluster would require to share a hash slot.
 
 ---
 
@@ -324,8 +391,9 @@ backend creates and upgrades its own tables automatically on startup, so
 multiple replicas can start against the same database safely. `cadir` is still
 required for per-subject keys and ancillary local state.
 
-SQL backends additionally maintain a certificate index (as does
-[etcd](#etcd-backend)): `GET /certificate_statuses` (`puppetserver ca list`)
+SQL backends additionally maintain a certificate index (as do
+[etcd](#etcd-backend) and [Redis](#redis--valkey-backend)): `GET
+/certificate_statuses` (`puppetserver ca list`)
 is answered from indexed columns instead of reading and parsing every stored
 certificate, which matters for large fleets. The index is a rebuildable
 projection of the stored certificates and the CRL — after migrating from

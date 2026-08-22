@@ -62,10 +62,11 @@ func (b *failHMACPutBackend) Put(ctx context.Context, key string, data []byte, k
 	return b.Backend.Put(ctx, key, data, kind)
 }
 
-// PruneInventory exercises StorageService.PruneInventory against both the
-// structured (SQLite) and blob (filesystem) backends. The critical property is
-// that after a prune the integrity head is rewritten so ReadInventory — which
-// verifies the HMAC/hash chain — still succeeds; a stale head would surface as
+// PruneInventory exercises StorageService.PruneInventory against the
+// structured backends that can run in process (SQLite, Redis via miniredis)
+// and the blob one (filesystem). The critical property is that after a prune
+// the integrity head is rewritten so ReadInventory — which verifies the
+// HMAC/hash chain — still succeeds; a stale head would surface as
 // ErrInventoryTampered.
 var _ = Describe("PruneInventory", func() {
 	backends := map[string]func() *StorageService{
@@ -74,6 +75,11 @@ var _ = Describe("PruneInventory", func() {
 			return svc
 		},
 		"filesystem": newFilesystemInventoryService,
+		"redis": func() *StorageService {
+			svc, _, _, stop := newRedisInventoryService()
+			DeferCleanup(stop)
+			return svc
+		},
 	}
 
 	for name, mk := range backends {

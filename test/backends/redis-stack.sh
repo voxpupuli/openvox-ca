@@ -289,14 +289,30 @@ all_redis_keys_exist() {  # key1 key2 ...
     return 0
 }
 
-# -- Helper: predicate "<inventory blob> contains every passed CN" --------
+# -- Helper: dump the decomposed inventory records to a file --------------
+# Since issue #139 the inventory is not a single blob at
+# <prefix>:inventory:data -- that key is now only a presence marker. It is one
+# JSON record per issuance in the <prefix>:inventory:entries hash, and since
+# json.Marshal never emits a newline, HVALS gives exactly one record per line.
+dump_inventory() {  # dest-file
+    redis_cli --raw HVALS "${REDIS_PREFIX}:inventory:entries" \
+        > "$1" 2>/dev/null
+}
+
+# -- Helper: the exact match for one CN in a dumped inventory -------------
+# Matching the whole "subject":"<cn>" field rather than the bare CN, so
+# torture-r1-<ts>-1 cannot be counted as a hit for torture-r1-<ts>-10.
+inventory_subject_pattern() {  # cn
+    printf '"subject":"%s"' "$1"
+}
+
+# -- Helper: predicate "the inventory holds every passed CN" --------------
 inventory_contains_all() {  # cn1 cn2 ...
     local _f="$WORK_DIR/.inv-poll.dat"
-    redis_cli --raw GETRANGE "${REDIS_PREFIX}:inventory:data" 8 -1 \
-        > "$_f" 2>/dev/null || return 1
+    dump_inventory "$_f" || return 1
     local _cn
     for _cn in "$@"; do
-        grep -qF "$_cn" "$_f" || return 1
+        grep -qF "$(inventory_subject_pattern "$_cn")" "$_f" || return 1
     done
     return 0
 }
@@ -439,6 +455,20 @@ if [ "$_hmac_exists" = "1" ]; then
     pass "Inventory HMAC key stored in Redis at ${_hmac_key}"
 else
     fail "Inventory HMAC key stored in Redis at ${_hmac_key}" "EXISTS returned '$_hmac_exists'"
+fi
+
+# -- Probe: the inventory is decomposed, not a blob ------------------------
+# Issue #139: <prefix>:inventory:data must be a bare presence marker (its
+# 8-byte mtime header and nothing else) with the records living in the
+# inventory:entries hash. A regression to the blob would show up here as a
+# marker longer than 8 bytes and an empty entries hash.
+_marker_len=$(redis_cli --raw STRLEN "${REDIS_PREFIX}:inventory:data" 2>/dev/null | tr -d '\r[:space:]')
+_entries_len=$(redis_cli --raw HLEN "${REDIS_PREFIX}:inventory:entries" 2>/dev/null | tr -d '\r[:space:]')
+if [ "${_marker_len:-0}" = "8" ] && [ "${_entries_len:-0}" -gt 0 ]; then
+    pass "Inventory is decomposed into ${_entries_len} entries, not a blob"
+else
+    fail "Inventory is decomposed into per-entry hash fields, not a blob" \
+         "marker STRLEN=${_marker_len:-?} (want 8), entries HLEN=${_entries_len:-?} (want > 0)"
 fi
 
 # -- Probe: round-trip a fresh CSR through the API and observe it in Redis ─
@@ -754,8 +784,8 @@ fi
 # Submits N CSRs to each replica simultaneously. After all submissions:
 #   1. Every CSR must be signed (cert downloadable from BOTH replicas).
 #   2. The Redis signed:* count must reflect every new cert.
-# This exercises the AppendLine-based inventory writes (single shared blob,
-# multiple writers across replicas), the per-subject locks, and the
+# This exercises the decomposed inventory writes (one atomic Lua script per
+# issuance, multiple writers across replicas), the per-subject locks, and the
 # bootstrap CRL lock when concurrent revocations happen.
 N_PER_REPLICA=4
 START_SIGNED_COUNT=$(redis_cli --raw KEYS "${REDIS_PREFIX}:signed:*" \
@@ -837,19 +867,18 @@ else
          "saw growth ${_actual_growth} (start=${START_SIGNED_COUNT}, end=${END_SIGNED_COUNT})"
 fi
 
-# Inventory must contain a line per concurrent CN -- this is the AppendLine
-# concurrency path under load. We grep the body (skipping mtime header) for
-# each CN and require all to be present.
-redis_cli --raw GETRANGE "${REDIS_PREFIX}:inventory:data" 8 -1 \
-    > "$WORK_DIR/inventory.dat" 2>/dev/null || true
+# The inventory must hold a record per concurrent CN -- this is the append
+# path under load, one atomic Lua script per issuance.
+dump_inventory "$WORK_DIR/inventory.dat" || true
 _missing_inventory=()
 for _cn in "${CONC_NAMES[@]}"; do
-    grep -qF "$_cn" "$WORK_DIR/inventory.dat" || _missing_inventory+=("$_cn")
+    grep -qF "$(inventory_subject_pattern "$_cn")" "$WORK_DIR/inventory.dat" \
+        || _missing_inventory+=("$_cn")
 done
 if [ "${#_missing_inventory[@]}" -eq 0 ]; then
-    pass "Inventory blob contains every concurrent CN (AppendLine atomicity)"
+    pass "Inventory holds every concurrent CN (append atomicity)"
 else
-    fail "Inventory blob contains every concurrent CN (AppendLine atomicity)" \
+    fail "Inventory holds every concurrent CN (append atomicity)" \
          "missing from inventory: ${_missing_inventory[*]:0:6}..."
 fi
 
@@ -858,7 +887,7 @@ fi
 # Targets the three coordination paths in the redis backend:
 #   (a) per-subject lock around CSR/cert writes (same-CN storm)
 #   (b) "crl" distributed lock around revocations (concurrent revoke storm)
-#   (c) AppendLine Lua atomicity on the shared inventory blob (line storm)
+#   (c) Lua-script atomicity of the decomposed inventory append (record storm)
 # Plus cross-replica visibility: state written via replica 1 must be
 # observable from replica 2 within one round-trip after the writer returns.
 # ═════════════════════════════════════════════════════════════════════════
@@ -1021,11 +1050,18 @@ else
          "r2 CRL count before=${_vis_before:-?} after=${_vis_after:-?}"
 fi
 
-# -- Race D: AppendLine torture under cross-replica contention -------------
-# Many parallel writers call AppendLine on the inventory via the CA's CSR
-# autosign path. Each CSR submission writes one inventory line. We spawn
-# 2*N submitters, alternating replicas, with no per-replica slow-down.
-# Every submitted CN must end up in the inventory blob exactly once.
+# -- Race D: inventory-append torture under cross-replica contention -------
+# Many parallel writers append to the inventory via the CA's CSR autosign
+# path. Each CSR submission writes one inventory record. We spawn 2*N
+# submitters, alternating replicas, with no per-replica slow-down. Every
+# submitted CN must end up in the inventory exactly once.
+#
+# Race E below (the revoke storm) is the other half of what this exercises:
+# on the pre-#139 blob path this storm could leave the stored whole-blob HMAC
+# covering a blob that no longer existed, and every subsequent revocation
+# failed with a 409 (issue #204). The decomposed inventory advances the
+# integrity head atomically with each record, so there is no longer a
+# read-compute-write window for the two to diverge.
 TORTURE_BASE=$(date +%s)
 TORTURE_PER_REPLICA=8
 TORTURE_NAMES=()
@@ -1037,19 +1073,19 @@ for _i in $(seq 1 "$TORTURE_PER_REPLICA"); do
     submit_one 8242 "$_r2_cn" &
 done
 wait
-# Wait until every torture CN is present in the inventory blob rather than
-# guessing a sleep. Each AppendLine takes a Lua-script round-trip; with 16
+# Wait until every torture CN is present in the inventory rather than
+# guessing a sleep. Each append takes a Lua-script round-trip; with 16
 # concurrent writers across replicas the tail latency can run to a couple
 # of seconds on a contended runner.
 poll_until 30 inventory_contains_all "${TORTURE_NAMES[@]}" || true
 
-redis_cli --raw GETRANGE "${REDIS_PREFIX}:inventory:data" 8 -1 \
-    > "$WORK_DIR/inventory-after-torture.dat" 2>/dev/null || true
+dump_inventory "$WORK_DIR/inventory-after-torture.dat" || true
 
 _torture_missing=()
 _torture_dupes=()
 for _cn in "${TORTURE_NAMES[@]}"; do
-    _hits=$(grep -cF "$_cn" "$WORK_DIR/inventory-after-torture.dat" || true)
+    _hits=$(grep -cF "$(inventory_subject_pattern "$_cn")" \
+        "$WORK_DIR/inventory-after-torture.dat" || true)
     case "${_hits:-0}" in
         0) _torture_missing+=("$_cn") ;;
         1) ;;
@@ -1057,19 +1093,19 @@ for _cn in "${TORTURE_NAMES[@]}"; do
     esac
 done
 if [ "${#_torture_missing[@]}" -eq 0 ]; then
-    pass "AppendLine torture: every CN appears in inventory (no lost writes)"
+    pass "Append torture: every CN appears in inventory (no lost writes)"
 else
-    fail "AppendLine torture: every CN appears in inventory" \
+    fail "Append torture: every CN appears in inventory" \
          "missing: ${_torture_missing[*]:0:6}..."
 fi
 
 # Inventory may legitimately have multiple entries for the same CN if a
 # subject was issued more than once historically -- but inside one storm
-# of fresh CNs, dupes would indicate the AppendLine script ran twice.
+# of fresh CNs, dupes would indicate the append script ran twice.
 if [ "${#_torture_dupes[@]}" -eq 0 ]; then
-    pass "AppendLine torture: no CN appears more than once (no double writes)"
+    pass "Append torture: no CN appears more than once (no double writes)"
 else
-    fail "AppendLine torture: no CN appears more than once" \
+    fail "Append torture: no CN appears more than once" \
          "duped: ${_torture_dupes[*]:0:6}..."
 fi
 

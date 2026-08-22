@@ -2614,8 +2614,8 @@ func (Test) Migration() error {
 // sharing a single Redis prefix. Validates: catalog application end-to-end
 // over Redis-backed storage; cert blobs offloaded to Redis (not local disk);
 // distributed bootstrap lock when two CAs race; cross-replica state
-// visibility; concurrent CSR submissions split across replicas with
-// AppendLine atomicity on the inventory blob.
+// visibility; concurrent CSR submissions split across replicas with atomic
+// appends to the decomposed inventory.
 //
 // Requires podman-compose (or docker compose) and network access to pull
 // docker.io/redis:7-alpine plus the same images as Test:Puppet.
@@ -2652,9 +2652,14 @@ func (Test) BackendsRedisGo() error {
 	}()
 
 	fmt.Println("Running Redis-backend Go integration tests...")
+	// The suite is concurrent by design since the inventory decomposition
+	// (cross-replica append storms, duplicate-serial races, a full-cap prune),
+	// so it runs under the race detector like its etcd counterpart; -race
+	// needs cgo, hence the explicit CGO_ENABLED override of the repository's
+	// CGO_ENABLED=0 default.
 	return sh.RunWithV(
-		map[string]string{"PUPPET_CA_TEST_REDIS_ADDR": addr},
-		"go", "test", "-tags", "redis_integration", "-count=1", "./internal/storage/...",
+		map[string]string{"PUPPET_CA_TEST_REDIS_ADDR": addr, "CGO_ENABLED": "1"},
+		"go", "test", "-tags", "redis_integration", "-race", "-count=1", "./internal/storage/...",
 	)
 }
 
