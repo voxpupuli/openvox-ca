@@ -21,10 +21,64 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sync"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
+
+// lockerSpy wraps a Backend and records whether the distributed (Locker) tier
+// was actually entered. It exists so the agreement table below can observe
+// which tier WithLock took, rather than inferring it from the absence of a
+// process-local mutex entry.
+//
+// Both StorageService.SupportsDistributedLocking and StorageService.WithLock
+// reach the backend through the same s.backend.(Locker) assertion, so a spy
+// placed there sits in both paths -- which is precisely the agreement under
+// test. It forwards to the base's Locker when there is one and reports
+// ErrDistributedLockingUnsupported when there is not, so the classification a
+// caller sees is still the base backend's own.
+//
+// Scope, deliberately: this pins the probe against the *distributed* tier and
+// says nothing about any tier below it. The spy does not implement whatever
+// optional interfaces a lower tier may key off, so with a same-host tier in the
+// tree a single-node backend falls past it to the process mutex here. That is
+// intended -- lower tiers are not what SupportsDistributedLocking reports on,
+// and the specs for those tiers belong with the code that adds them.
+type lockerSpy struct {
+	Backend
+
+	mu       sync.Mutex
+	acquired bool
+}
+
+func (l *lockerSpy) AcquireLock(ctx context.Context, name string) (Unlocker, error) {
+	lk, ok := l.Backend.(Locker)
+	if !ok {
+		return nil, ErrDistributedLockingUnsupported
+	}
+	ul, err := lk.AcquireLock(ctx, name)
+	if err == nil {
+		l.mu.Lock()
+		l.acquired = true
+		l.mu.Unlock()
+	}
+	return ul, err
+}
+
+// forget clears the record, so an acquisition made by the capability probe is
+// not mistaken for one made by WithLock.
+func (l *lockerSpy) forget() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.acquired = false
+}
+
+func (l *lockerSpy) tookDistributedLock() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.acquired
+}
 
 var _ = Describe("Backend capability reporting", func() {
 	var ctx context.Context
@@ -147,18 +201,49 @@ var _ = Describe("Backend capability reporting", func() {
 		// inside the spec.
 		DescribeTable("agrees with WithLock about which backends coordinate across processes",
 			func(build func() Backend) {
-				s := svc(build())
+				base := build()
+
+				// Wrap only a backend that already implements Locker. Wrapping
+				// one that does not would *make* it implement Locker, sending
+				// the probe down its AcquireLock path instead of the
+				// no-Locker-at-all path this table exercises for the filesystem
+				// backend -- and a probe that wrongly claimed true there would
+				// then go unnoticed here. Where the backend offers no Locker at
+				// all, "WithLock took a distributed lock" is false by the type
+				// system rather than by observation, so no spy is needed.
+				var (
+					s      *StorageService
+					took   func() bool
+					forget = func() {}
+				)
+				if _, isLocker := base.(Locker); isLocker {
+					spy := &lockerSpy{Backend: base}
+					s, took, forget = svc(spy), spy.tookDistributedLock, spy.forget
+				} else {
+					s, took = svc(base), func() bool { return false }
+				}
 
 				reported, err := s.SupportsDistributedLocking(ctx)
 				Expect(err).NotTo(HaveOccurred())
 
-				// Observe what WithLock did: a distributed lock leaves no entry
-				// in the process-local map, a fallback creates one.
-				Expect(s.WithLock(ctx, "agreement-probe", func() error { return nil })).To(Succeed())
-				_, usedLocalMutex := s.localLocks.Load("agreement-probe")
+				// The probe acquires a lock of its own; only WithLock's
+				// acquisition is under test, so discard that record before
+				// calling it.
+				forget()
 
-				Expect(reported).To(Equal(!usedLocalMutex),
-					"SupportsDistributedLocking must match what WithLock actually does")
+				// Observe which tier WithLock took, rather than inferring it
+				// from the process-local map. "No entry in localLocks" implies
+				// "a distributed lock was taken" only while those are the sole
+				// two outcomes, so that inference stops holding silently the
+				// moment a tier is added between them.
+				Expect(s.WithLock(ctx, "agreement-probe", func() error { return nil })).To(Succeed())
+
+				// Equality rather than an implication, so both directions stay
+				// pinned: reporting true while falling back is the dangerous
+				// drift, and reporting false while holding a distributed lock
+				// is drift too.
+				Expect(took()).To(Equal(reported),
+					"SupportsDistributedLocking must match whether WithLock actually took a distributed lock")
 			},
 			Entry("filesystem", func() Backend { return NewFilesystemBackend(GinkgoT().TempDir()) }),
 			Entry("sqlite", func() Backend { return newSQLiteBackend() }),
