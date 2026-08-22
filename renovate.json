@@ -88,6 +88,18 @@
         "golang"
       ],
       "rangeStrategy": "bump"
+    },
+    {
+      "description": "The 'go' directive in go.mod and the golang builder image are the same toolchain; move them in one PR",
+      "matchDatasources": [
+        "golang-version",
+        "docker"
+      ],
+      "matchDepNames": [
+        "go",
+        "golang"
+      ],
+      "groupName": "Go toolchain"
     }
   ]
 }
