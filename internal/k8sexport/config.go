@@ -48,6 +48,20 @@ const (
 	defaultCRLKey  = "ca.crl"
 )
 
+// Export scopes select how much of a chain a target publishes.
+const (
+	// ScopeSelf publishes only this CA's own certificate or CRL — block 0 of
+	// the stored bundle. Opted into per target; identical to ScopeChain on a CA
+	// that issues its own root.
+	ScopeSelf = "self"
+	// ScopeChain publishes the stored bundle or CRL chain verbatim.
+	ScopeChain = "chain"
+	// ScopeRoot publishes the last certificate in the bundle: the trust anchor
+	// rather than the issuing CA. Certificates only — a CRL chain has no
+	// equivalent, since the root's CRL is simply one of its members.
+	ScopeRoot = "root"
+)
+
 // Config is the top-level kubernetes_export configuration block. The feature is
 // considered enabled when Targets is non-empty.
 type Config struct {
@@ -91,6 +105,24 @@ type Target struct {
 	// selects defaultCertKey / defaultCRLKey.
 	CertKey string `yaml:"cert_key"`
 	CRLKey  string `yaml:"crl_key"`
+
+	// CertScope and CRLScope select how much of each chain to publish. Empty
+	// selects ScopeChain, so an existing target keeps publishing exactly what it
+	// published before these fields existed. On a CA storing a single
+	// certificate — every CA that issued its own root — self, chain and root are
+	// byte-identical anyway.
+	//
+	// Both default to "chain", which is what every target published before these
+	// settings existed: the stored blob verbatim. Defaulting to "self" instead
+	// would have narrowed every already-deployed target on upgrade with no
+	// configuration change -- a consumer's trust bundle losing its
+	// intermediates, and a CRL blob losing every ancestor block, which is the
+	// material crl_chain_file exists to distribute. Narrowing is therefore
+	// something an operator opts into per target, and it matches what the HTTP
+	// endpoints serve: GET /certificate/ca and the CRL endpoint always return
+	// the full chain.
+	CertScope string `yaml:"cert_scope"`
+	CRLScope  string `yaml:"crl_scope"`
 }
 
 // Enabled reports whether any export target is configured.
@@ -141,6 +173,27 @@ func (t *Target) validate() error {
 	}
 	if t.CRL && t.CRLKey == "" {
 		t.CRLKey = defaultCRLKey
+	}
+
+	if t.CertScope == "" {
+		t.CertScope = ScopeChain
+	}
+	if t.CRLScope == "" {
+		t.CRLScope = ScopeChain
+	}
+	switch t.CertScope {
+	case ScopeSelf, ScopeChain, ScopeRoot:
+	default:
+		return fmt.Errorf("invalid cert_scope %q (must be %q, %q or %q)",
+			t.CertScope, ScopeSelf, ScopeChain, ScopeRoot)
+	}
+	switch t.CRLScope {
+	case ScopeSelf, ScopeChain:
+	default:
+		// No "root" for CRLs: a chain has no single anchor CRL, and the root's
+		// own CRL is just one of its members.
+		return fmt.Errorf("invalid crl_scope %q (must be %q or %q)",
+			t.CRLScope, ScopeSelf, ScopeChain)
 	}
 
 	// A single object cannot store both materials under the same key.

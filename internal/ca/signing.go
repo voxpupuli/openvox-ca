@@ -618,6 +618,18 @@ func (c *CA) Clean(ctx context.Context, subject string) error {
 			// Revoke first so the CRL is updated before the file is removed.
 			// Acquire the CRL lock directly here (inside the subject lock) and
 			// call revokeLocked to avoid double-locking via the public Revoke().
+			// Deliberately not withCRLLockCounted. Most failures inside this
+			// closure are already counted -- revokeLocked and signCRLLocked both
+			// do it -- so what
+			// wrapping would add is the arm where the lock could not be taken at
+			// all, and a contended lock during a best-effort revoke is not a
+			// revocation that did not happen. Note revokeLocked has its own
+			// uncounted arm besides, and hasCert above is what makes it
+			// interesting: the certificate is in storage, so reaching
+			// revokeLocked's fs.ErrNotExist means the *inventory* has no entry
+			// for it. That divergence is classed as never-issued rather than as
+			// a failed revocation. docs/metrics.md names this path as uncounted
+			// on the lock arm.
 			if err := c.Storage.WithLock(ctx, lockNameCRL, func() error {
 				c.mu.Lock()
 				defer c.mu.Unlock()
@@ -978,6 +990,16 @@ func (c *CA) Renew(ctx context.Context, subject string, csrPEM []byte, presented
 		// this subject. Best-effort like Clean's revoke-then-delete: a
 		// failure here shouldn't undo the renewal the caller is waiting on.
 		// Lock ordering: subject-lock (held) -> CRL-lock -> c.mu, matching Clean.
+		// Deliberately not withCRLLockCounted, and note the narrowness of
+		// that: failures *inside* this closure are already counted, by
+		// revokeSerialLocked and signCRLLocked, so a best-effort revoke that
+		// fails does move crl_update_failures. What is exempt is only the
+		// arm where the lock could not be taken at all -- the closure never
+		// runs, so nothing beneath it counts. Wrapping these three would
+		// make a contended lock during a best-effort revoke read the same as
+		// one during a revocation an operator asked for, and only the second
+		// is a revocation that did not happen. docs/metrics.md names these
+		// three paths as uncounted on that arm.
 		if err := c.Storage.WithLock(ctx, lockNameCRL, func() error {
 			c.mu.Lock()
 			defer c.mu.Unlock()
@@ -1134,6 +1156,16 @@ func (c *CA) AutoRenew(ctx context.Context, presentedCert *x509.Certificate) ([]
 		// effort: a failure here shouldn't undo the renewal the agent is
 		// waiting on.
 		// Lock ordering: subject-lock (held) -> CRL-lock -> c.mu, matching Clean.
+		// Deliberately not withCRLLockCounted, and note the narrowness of
+		// that: failures *inside* this closure are already counted, by
+		// revokeSerialLocked and signCRLLocked, so a best-effort revoke that
+		// fails does move crl_update_failures. What is exempt is only the
+		// arm where the lock could not be taken at all -- the closure never
+		// runs, so nothing beneath it counts. Wrapping these three would
+		// make a contended lock during a best-effort revoke read the same as
+		// one during a revocation an operator asked for, and only the second
+		// is a revocation that did not happen. docs/metrics.md names these
+		// three paths as uncounted on that arm.
 		if err := c.Storage.WithLock(ctx, lockNameCRL, func() error {
 			c.mu.Lock()
 			defer c.mu.Unlock()

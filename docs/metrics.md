@@ -83,7 +83,7 @@ the Unix epoch, the Prometheus convention for `*_timestamp_seconds` gauges.
 
 | Metric | Description |
 | --- | --- |
-| `puppetca_crl_number` | Monotonic CRL sequence number (`cRLNumber`). |
+| `puppetca_crl_number` | Monotonic CRL sequence number (`cRLNumber`). Expect it to advance without any revocation having happened: a re-sign bumps it, and with [`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain) configured, so does a change to the upstream chain. The number need only increase, so this is harmless — but do not treat a rise as evidence that something was revoked. |
 | `puppetca_crl_this_update_timestamp_seconds` | CRL `ThisUpdate` time. |
 | `puppetca_crl_next_update_timestamp_seconds` | CRL `NextUpdate` (expiry) time. |
 | `puppetca_crl_revoked_certificates` | Number of certificates currently listed in the CRL. |
@@ -123,18 +123,33 @@ query, and `puppetca_crl_sync_failures_total` for why it is stuck.
 > the CRL, and the certificate they leave behind is still reachable by subject
 > until a replacement is issued.
 >
-> Uncounted, and logged only: a revocation refused at a cross-node lock
-> acquisition, which fails ahead of any CRL work (this is the `409` a spent
-> budget produces on PostgreSQL, MySQL, etcd and Redis — the single-node
-> backends take the lock and fail later, which *is* counted, as above), a
-> subject that was simply never issued — though `PUT /certificate_status` also
-> answers its caller `409` in both cases — and a malformed serial met by the
-> cleanup job.
+> Counted since the CRL lock gained its own accounting: a write path that could
+> not take the lock at all, on the four writers that go through
+> `withCRLLockCounted` — revoke, reissue, refresh and cleanup. The closure never
+> runs in that case, so nothing beneath it could count anything, and the error
+> used to reach a log line only. Other paths take the same lock directly. The
+> `crl_chain_file` refresh counts a lock it could not take on this same counter
+> itself rather than through the helper (a failure there is not the file's
+> fault, so it does not touch `puppetca_crl_chain_refresh_failures_total`). The
+> revoke step inside `Clean`, `Renew` and `AutoRenew`, and `ImportCA`, are not
+> counted on that arm at all.
 >
-> A background refresh that cannot read the CRL does move this counter, by the
-> rule above. What it stays invisible to is `puppetca_collector_scrape_success`:
-> the exporter drops the CRL gauges and still reports a successful scrape. It
-> does not show up as an
+> The read half of that is `readStoredCRL`'s doing: it increments before
+> returning, on every path that calls it.
+>
+> Uncounted, and logged only: a revocation refused at the **subject** lock,
+> which `Revoke` takes outside the CRL lock and which therefore fails ahead of
+> any CRL work (this is the `409` a spent lock budget produces on PostgreSQL,
+> MySQL, etcd and Redis; the single-node backends take the subject lock and fail
+> at the CRL lock beneath it, which *is* counted, by the rule above), a
+> revocation that failed before reaching the CRL because the inventory could not
+> resolve the subject's serial (though `PUT /certificate_status` also answers
+> its caller `409` in both cases), and a malformed serial met by the cleanup
+> job.
+>
+> A CRL the *exporter* cannot read is a different matter, and is invisible here
+> — as it is to `puppetca_collector_scrape_success`: the exporter drops the
+> CRL gauges and still reports a successful scrape. It does not show up as an
 > expiring CRL either, because the gauge is *absent* rather than stale — the
 > shipped `PuppetCACRLExpiringSoon` and `PuppetCACRLExpired` rules compare
 > `puppetca_crl_next_update_timestamp_seconds` against `time()` and match
@@ -150,17 +165,31 @@ in the chain (see [storage internals](development/storage-internals.md)) while
 these series still describe block 0. Startup warns loudly in that state, and every
 write path refuses it, so it is a condition to fix rather than to monitor. When a CRL chain has been imported, the ancestor CRLs that follow it
 are not covered: this CA cannot re-sign them, so their expiry is not something a
-refresh can fix and not something these series track.
+re-sign can fix and not something these series track. The series below cover
+those instead.
 
-> **The shipped CRL expiry alerts do not cover ancestor CRLs.**
-> `PuppetCACRLExpiringSoon` and `PuppetCACRLExpired` read
-> `puppetca_crl_next_update_timestamp_seconds`, which is block 0 — and the
-> background refresher keeps block 0 perpetually fresh. So an ancestor CRL can
-> lapse, breaking full-chain revocation checking for every agent running Puppet's
-> default `certificate_revocation = chain`, while both alerts stay green. Until
-> a chain-aware series exists, track ancestor `nextUpdate` deadlines out of band
-> and re-import before they lapse.
->
+### Upstream CRL chain
+
+| Metric | Description |
+| --- | --- |
+| `puppetca_crl_chain_next_update_timestamp_seconds` | NextUpdate of each **upstream** CRL in the stored blob — every block this CA did not issue — labelled by `issuer`. Deliberately a separate series from the unlabelled CRL metrics above: an expiring upstream CRL is fixed at the parent CA, not here, so it has its own alert and runbook. |
+| `puppetca_crl_chain_last_read_timestamp_seconds` | When `crl_chain_file` was last read successfully, or `0` if it never has been. Exported **only where `crl_chain_file` is configured**, so `absent()` means the feature is off and `== 0` means it is on but the file has never been opened — a wrong path, or a mount that never landed. That case moves no counter and would otherwise look healthy; `PuppetCAUpstreamCRLNeverRead` alerts on it. It does **not** detect a `subPath` mount: that reads successfully forever, so this advances exactly as it does on a healthy file. See [the `subPath` note](configuration.md#publishing-an-upstream-crl-chain) for what does. |
+| `puppetca_crl_chain_refresh_failures_total` | Counter of failed `crl_chain_file` reads — unreadable, unparseable, not ending on a PEM block boundary, or too large. Counted where the file is read, so it moves on every CRL amendment as well as on each refresh pass; the visible symptom is that **revocation fails** until the file is fixed, as well as ancestor CRLs ageing. A failure of the refresh pass for some *other* reason — a lock it could not take, storage it could not read — deliberately moves `puppetca_crl_update_failures_total` instead, so this counter's runbook stays "check the file". The chain already published is left in place either way. Zero and static without `crl_chain_file`. Resets to `0` on process restart. |
+| `puppetca_crl_chain_discarded_total` | Counter of discards: one per CRL dropped from `crl_chain_file`, each time the file is evaluated, because no certificate in the stored CA bundle signed it. The file is evaluated on every CRL amendment as well as on each refresh pass, so with a static bad file the value tracks revocation rate rather than the number of bad CRLs — alert on `increase(...) > 0`, not on the value. **Alert on this** — the shipped mixin does. It is the only signal that the published chain is *smaller* than the file says: a discarded CRL has no series of its own to go missing from. The remedy is to complete the CA bundle; a CRL passed over for being *stale* is counted separately, below. Zero and static without `crl_chain_file`. Resets to `0` on process restart. |
+| `puppetca_crl_chain_removed_total` | Counter of ancestors `crl_chain_file` has stopped listing while their CRL was published. The removal is honoured — the file is authoritative — but it cannot be undone here, because this CA cannot re-sign another CA's list, and the ancestor's own `..._next_update_timestamp_seconds` series simply stops existing, which no alert can fire on. A deliberate removal increments this on the pass that applies it; a `cat` glob that matched one file fewer increments it identically, which is why it is worth alerting on. It also counts a second cause with the same outcome: a published ancestor whose certificate has left the stored CA bundle, so nothing signs its CRL any more and it can no longer be published. Its remedy is to re-import the bundle with that certificate — not to touch the file — and the log line names which cause fired. An incomplete bundle can therefore move this counter and `..._discarded_total` together: discarded for the copy the file carries, removed for the copy already published. Counted once per *ancestor* per evaluation on both arms, not once per CRL: the first deduplicates by signing certificate, the second by issuer distinguished name, since there is no signer left to key on. Two published CRLs from one ancestor removed together therefore count once. Zero and static without `crl_chain_file`. Resets to `0` on process restart. |
+| `puppetca_crl_chain_regressed_total` | Counter of CRLs in `crl_chain_file` passed over because the published chain already carried a newer one from the same ancestor. The published CRL is kept, so revocation is unaffected — this is not a failure, and deliberately does not block CRL amendment the way an unreadable file does. A rising value means the file is stale, rolled back or being replayed; the remedy is whatever refreshes the file, **not** the CA bundle, which must already be complete or the CRL would have failed its signature check. Counted per CRL per evaluation, like the discard counter, so alert on `increase(...) > 0`. Zero and static without `crl_chain_file`. Resets to `0` on process restart. |
+
+The gauge appears whenever the stored blob holds a CRL this CA did not issue —
+which includes a chain brought in by `openvox-ca-ctl import --crl-chain` on a
+deployment that has never set `crl_chain_file`. That is deliberate: an ancestor
+CRL ages the same way whether or not anything is refreshing it, and it is
+precisely the import-only deployment where nothing is. The remedy differs,
+though, and the alert text names `crl_chain_file` because that is the standing
+fix. On an import-only deployment, read
+`PuppetCAUpstreamCRLExpiringSoon`/`Expired` as "re-import the chain with a
+current one, or configure [`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain)
+so it stays current by itself".
+
 > **No series tracks the chain's length either, so watch the log during a rolling
 > upgrade.** A replica running a build from before chain preservation re-signs the
 > CRL by writing one block, dropping every ancestor — and nothing detects it,
@@ -279,5 +308,8 @@ instructions for rendering or importing it. It alerts on exporter availability,
 CA/CRL/leaf expiry, pending requests, CRL update failures
 (`puppetca_crl_update_failures_total`), a replica whose CRL has fallen behind
 the stored one (`puppetca_crl_cached_number`,
-`puppetca_crl_sync_failures_total`), and Kubernetes export failures, with all
-thresholds configurable.
+`puppetca_crl_sync_failures_total`), the [upstream CRL
+chain](#upstream-crl-chain) (an ancestor nearing or past its `NextUpdate`, and
+the four ways `crl_chain_file` goes wrong — unreadable, a CRL discarded, one
+rolled back, one removed — plus a file that has never been read at all), and
+Kubernetes export failures, with all thresholds configurable.

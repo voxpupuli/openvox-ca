@@ -64,6 +64,8 @@ kubernetes_export:
       crl: true                 # include the CRL (default false)
       cert_key: ca.crt          # data key for the cert; default "ca.crt"
       crl_key: ca.crl           # data key for the CRL; default "ca.crl"
+      cert_scope: chain         # "chain" (default), "self" or "root"
+      crl_scope: chain          # "chain" (default) or "self"
 
     # A ConfigMap holding only the CRL, in a namespace of its own.
     - kind: ConfigMap
@@ -86,8 +88,59 @@ kubernetes_export:
 | `cert` | both | `false` | Include the CA certificate |
 | `crl` | both | `false` | Include the CRL (at least one of `cert`/`crl` must be true) |
 | `cert_key` | both | `ca.crt` | Data key for the cert |
-| `crl_key` | both | `ca.crl` | Data key for the CRL. Carries the whole stored chain — this CA's own CRL first, then every ancestor's — when a chain has been imported, matching what `GET /certificate_revocation_list/ca` serves. Consumers expecting exactly one CRL need to handle a multi-block PEM (must differ from `cert_key`) |
+| `crl_key` | both | `ca.crl` | Data key for the CRL (must differ from `cert_key`) |
+| `cert_scope` | both | `chain` | `chain`, `self` or `root` — see below |
+| `crl_scope` | both | `chain` | `chain` or `self` |
 | `type` | Secret | unmanaged | Secret `type` field; unset means the exporter does not own it (see below); rejected on ConfigMaps |
+
+### Scopes
+
+Once the CA certificate and the CRL can both be chains, a target has to say how
+much of one it wants:
+
+| Scope | Publishes |
+| --- | --- |
+| `chain` (default) | The stored bundle or CRL chain verbatim |
+| `self` | Only this CA's own certificate or CRL |
+| `root` | The last certificate in the bundle — the trust anchor. Certificates only |
+
+`root` publishes the last certificate in the stored bundle without inspecting
+it, so it is only a *trust anchor* if the bundle you imported was a complete
+chain ending at a self-signed root. Nothing enforces that today —
+`openvox-ca-ctl import` accepts a partial bundle — so `root` on a bundle that
+stops at an intermediate publishes that intermediate. It fails closed rather
+than open (an intermediate grants strictly less trust than the real root, and
+consumers trusting it simply fail to verify), but it fails, so import the whole
+chain. For a Puppet agent that failure is not subtle and is not confined to
+revocation: with `certificate_revocation = chain`, OpenSSL will not end a path
+at a non-self-signed anchor at all, so the agent stops connecting rather than
+checking less — see the note under
+[Offline subcommands on the server binary](operator-cli.md#offline-subcommands-on-the-server-binary)
+for the test that establishes it. There is no `root` for CRLs, because a chain has no single anchor CRL —
+the root's own is simply one of its members.
+
+The default is `chain` so that upgrading changes nothing: before these fields
+existed, every target published the stored blobs verbatim, and that is what an
+unset scope still publishes. Narrowing is something you opt into, per target.
+
+Opt in where a consumer wants exactly one block — a trust bundle that should
+carry this CA alone, or a CRL a consumer expects to parse as a single list. The
+two scopes are applied independently, to different material, so the number of
+certificates in the bundle governs `cert_scope` and tells you nothing about
+`crl_scope`: a CA that issued its own root has one certificate in its bundle,
+where `cert_scope` is a no-op, and can still hold a multi-block CRL blob from
+`import --crl-chain` or from `crl_chain_file`, where `crl_scope` is not.
+
+Setting `crl_scope: self` on a target that feeds agents doing full-chain
+revocation checking drops every ancestor CRL from what they receive, which is
+the material `crl_chain_file` exists to distribute. Under `chain` the value is a
+multi-block PEM, which a consumer expecting exactly one CRL has to handle; that
+trade-off is the reason `self` exists.
+
+Exports and the HTTP endpoints therefore agree by default: `/certificate/ca` and
+`/certificate_revocation_list/ca` always serve the full chain, because Puppet
+agents need it, and an export target publishes the same thing until you narrow
+it.
 
 ### Secret type
 

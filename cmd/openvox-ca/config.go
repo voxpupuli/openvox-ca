@@ -53,6 +53,20 @@ type serverConfig struct {
 	OCSPUrl           string `yaml:"ocsp_url"`
 	CRLUrl            string `yaml:"crl_url"`
 
+	// CRLChainFile is a PEM bundle of upstream CRLs published alongside this
+	// CA's own, for agents doing full-chain revocation checking (Puppet's
+	// default). Re-read by the crl-chain-refresh job, so refreshing the file is
+	// how an operator keeps ancestor CRLs current — every CRL in it is
+	// signature-verified against the stored CA bundle before it is served.
+	// Empty disables the feature.
+	CRLChainFile string `yaml:"crl_chain_file"`
+
+	// CRLChainRefreshIntervalSec is how often that file is re-read and the
+	// published CRL rewritten if its upstream blocks changed. 0 = built-in
+	// default (1h). Gated on crl_chain_file alone: an operator publishing an
+	// upstream chain is not necessarily running any other periodic job.
+	CRLChainRefreshIntervalSec int `yaml:"crl_chain_refresh_interval_sec"`
+
 	// MetricsListen, when non-empty, enables the Prometheus exporter on the
 	// given address (e.g. "127.0.0.1:9140" or ":9140"). The exporter serves
 	// /metrics over plain HTTP on a separate listener from the Puppet API and is
@@ -228,6 +242,25 @@ func (c *serverConfig) crlSyncInterval() time.Duration {
 	return defaultCRLSyncInterval
 }
 
+// defaultCRLChainRefreshInterval is how often crl_chain_file is re-read when
+// the operator has not configured an interval.
+//
+// An hour, because the file names ancestor CRLs this CA cannot re-sign: the
+// operator refreshes it by whatever mechanism already delivers it, and this job
+// only notices. The cost of noticing late is that agents doing full-chain
+// revocation checking keep verifying against an ancestor CRL the operator has
+// already replaced; the cost of noticing often is a file read.
+const defaultCRLChainRefreshInterval = time.Hour
+
+// crlChainRefreshInterval resolves how often crl_chain_file is re-read, falling
+// back to defaultCRLChainRefreshInterval when unset.
+func (c *serverConfig) crlChainRefreshInterval() time.Duration {
+	if c.CRLChainRefreshIntervalSec > 0 {
+		return time.Duration(c.CRLChainRefreshIntervalSec) * time.Second
+	}
+	return defaultCRLChainRefreshInterval
+}
+
 const (
 	// defaultExpiredCertRetention is how long past a certificate's NotAfter the
 	// expired-cert cleanup job waits before removing it when the operator has not
@@ -292,6 +325,14 @@ func applyServerEnv(cfg *serverConfig) {
 	}
 	if v := os.Getenv("PUPPET_CA_TLS_KEY"); v != "" {
 		cfg.TLSKey = v
+	}
+	if v := os.Getenv("PUPPET_CA_CRL_CHAIN_FILE"); v != "" {
+		cfg.CRLChainFile = v
+	}
+	if v := os.Getenv("PUPPET_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.CRLChainRefreshIntervalSec = n
+		}
 	}
 	if v := os.Getenv("PUPPET_CA_PUPPET_SERVER"); v != "" {
 		cfg.PuppetServer = v

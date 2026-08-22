@@ -120,6 +120,26 @@ var _ = Describe("API Workflow", func() {
 			Expect(rr.Body.String()).To(ContainSubstring("needs a restart"))
 		})
 
+		It("keeps the generic 500 generic when the failure is not the sentinel", func() {
+			// The other arm of the same branch. It matters that this one does
+			// *not* surface err.Error(): the sentinel's message is written for
+			// an operator, and everything else is internal detail on a route
+			// reachable from the network. A regression that replaced this with
+			// err.Error() -- the obvious "improvement" once the sibling arm
+			// shows a real message -- would leak storage internals, and no
+			// existing spec drives ReissueCRL into a non-sentinel failure.
+			ctx := context.Background()
+			Expect(myCA.Storage.UpdateCRL(ctx, []byte("not a PEM block at all"))).To(Succeed())
+
+			req := httptest.NewRequest("PUT", "/certificate_revocation_list/ca", nil)
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusInternalServerError))
+			Expect(rr.Body.String()).To(ContainSubstring("failed to reissue CRL"))
+			Expect(rr.Body.String()).NotTo(ContainSubstring("PEM"),
+				"the generic arm must not surface the underlying error")
+		})
+
 		It("re-signs the CRL on PUT and returns the fresh CRL", func() {
 			getReq := httptest.NewRequest("GET", "/certificate_revocation_list/ca", nil)
 			getRR := httptest.NewRecorder()

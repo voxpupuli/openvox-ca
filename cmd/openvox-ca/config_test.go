@@ -25,6 +25,9 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
 
 // setEnv sets an environment variable for the duration of the current spec,
@@ -492,6 +495,8 @@ kubernetes_export:
       crl: true
       cert_key: ca.crt
       crl_key: ca.crl
+      cert_scope: chain
+      crl_scope: chain
     - kind: configmap
       metadata:
         name: openvox-ca-crl
@@ -520,6 +525,11 @@ kubernetes_export:
 		// Validate preserves explicitly-set values and applies defaults.
 		Expect(cfg.KubernetesExport.Targets[0].Type).To(Equal("Opaque"))
 		Expect(cfg.KubernetesExport.Targets[0].CertKey).To(Equal("ca.crt"))
+		// The scope tags themselves: every other scope spec builds the struct in
+		// Go, so renaming either yaml tag silently disabled the one documented
+		// remedy for the behaviour break these fields introduce.
+		Expect(cfg.KubernetesExport.Targets[0].CertScope).To(Equal("chain"))
+		Expect(cfg.KubernetesExport.Targets[0].CRLScope).To(Equal("chain"))
 		Expect(cfg.KubernetesExport.Targets[1].CRLKey).To(Equal("ca.crl")) // defaulted
 	})
 
@@ -821,5 +831,120 @@ compile-02.example.com
 		cns, err := loadPuppetServerFile(path)
 		Expect(err).NotTo(HaveOccurred(), "unexpected error")
 		Expect(cns).To(BeEmpty(), "expected empty slice for comment-only file, got %v", cns)
+	})
+})
+
+var _ = Describe("crlChainRefreshInterval", func() {
+	// The interval the crl-chain-refresh job actually runs on. Setting the
+	// field directly would prove nothing about the two names an operator uses:
+	// a typo in the yaml tag or the env key leaves the job silently on the 1h
+	// default, and a guard that let a non-positive value through would reach
+	// time.NewTicker, which panics.
+	It("returns the default when unset", func() {
+		clearServerEnv()
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred(), "unexpected error")
+		Expect(cfg.crlChainRefreshInterval()).To(Equal(defaultCRLChainRefreshInterval),
+			"crlChainRefreshInterval() = %v; want default %v",
+			cfg.crlChainRefreshInterval(), defaultCRLChainRefreshInterval)
+	})
+
+	It("is read from the config file", func() {
+		clearServerEnv()
+		cfg, err := loadServerConfig(writeTempConfig("crl_chain_refresh_interval_sec: 300\n"))
+		Expect(err).NotTo(HaveOccurred(), "unexpected error")
+		Expect(cfg.crlChainRefreshInterval()).To(Equal(5*time.Minute),
+			"crlChainRefreshInterval() = %v; want %v", cfg.crlChainRefreshInterval(), 5*time.Minute)
+	})
+
+	It("falls back to the default for a non-positive env value", func() {
+		// The guard is load-bearing rather than tidy: a zero or negative
+		// interval reaches time.NewTicker, which panics. The comment above has
+		// claimed as much since this Describe was written while only the yaml
+		// path was driven, so the env key -- the likelier place for an operator
+		// to put a "0" meaning "off" -- could have been let through unnoticed.
+		for _, v := range []string{"0", "-30"} {
+			clearServerEnv()
+			setEnv("PUPPET_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC", v)
+			cfg, err := loadServerConfig("")
+			Expect(err).NotTo(HaveOccurred(), "unexpected error")
+			Expect(cfg.crlChainRefreshInterval()).To(Equal(defaultCRLChainRefreshInterval),
+				"%s must not reach time.NewTicker", v)
+		}
+	})
+
+	It("honours the env override", func() {
+		clearServerEnv()
+		setEnv("PUPPET_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC", "15")
+
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred(), "unexpected error")
+		Expect(cfg.crlChainRefreshInterval()).To(Equal(15*time.Second),
+			"crlChainRefreshInterval() = %v; want %v", cfg.crlChainRefreshInterval(), 15*time.Second)
+	})
+
+	It("falls back to the default for a non-positive value", func() {
+		clearServerEnv()
+		setEnv("PUPPET_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC", "0")
+
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred(), "unexpected error")
+		Expect(cfg.crlChainRefreshInterval()).To(Equal(defaultCRLChainRefreshInterval),
+			"crlChainRefreshInterval() with 0 = %v; want default %v",
+			cfg.crlChainRefreshInterval(), defaultCRLChainRefreshInterval)
+	})
+
+	// The two knobs are independent: sharing a resolver by mistake would leave
+	// the chain refreshed every minute, or revocations propagating hourly, with
+	// nothing else to notice.
+	It("is independent of crl_sync_interval_sec", func() {
+		clearServerEnv()
+		setEnv("PUPPET_CA_CRL_SYNC_INTERVAL_SEC", "15")
+
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred(), "unexpected error")
+		Expect(cfg.crlSyncInterval()).To(Equal(15 * time.Second))
+		Expect(cfg.crlChainRefreshInterval()).To(Equal(defaultCRLChainRefreshInterval),
+			"crl_sync_interval_sec must not decide how often the chain file is re-read")
+	})
+})
+
+// --- crl_chain_file wiring ---
+
+var _ = Describe("crl_chain_file wiring", func() {
+	// The setting is file-and-environment only, and its failure mode is total
+	// silence: a value that never reaches ca.CRLChainFile leaves the feature
+	// off with no error, no warning and no metric — the published chain simply
+	// never gains the ancestor CRLs the operator configured.
+	BeforeEach(func() { clearServerEnv() })
+
+	It("is empty by default", func() {
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.CRLChainFile).To(BeEmpty())
+	})
+
+	It("is read from the config file", func() {
+		path := writeTempConfig("crl_chain_file: /etc/puppet-ca/upstream-crls.pem\n")
+		cfg, err := loadServerConfig(path)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.CRLChainFile).To(Equal("/etc/puppet-ca/upstream-crls.pem"))
+	})
+
+	It("is read from the environment, which outranks the file", func() {
+		path := writeTempConfig("crl_chain_file: /from/file.pem\n")
+		setEnv("PUPPET_CA_CRL_CHAIN_FILE", "/from/env.pem")
+		cfg, err := loadServerConfig(path)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.CRLChainFile).To(Equal("/from/env.pem"))
+	})
+
+	It("reaches the CA, which is the step whose absence is silent", func() {
+		cfg, err := loadServerConfig(writeTempConfig("crl_chain_file: /etc/puppet-ca/upstream-crls.pem\n"))
+		Expect(err).NotTo(HaveOccurred())
+
+		myCA := ca.New(storage.New(GinkgoT().TempDir()), ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		Expect(applyCAConfig(myCA, cfg)).To(Succeed())
+		Expect(myCA.CRLChainFile).To(Equal("/etc/puppet-ca/upstream-crls.pem"))
 	})
 })

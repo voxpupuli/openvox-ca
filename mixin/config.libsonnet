@@ -20,6 +20,39 @@
     // the refresher is wedged. Warn a few days out; page once it has lapsed.
     crlExpiryWarningSeconds: 3 * 24 * 3600,  // 3 days
 
+    // --- Upstream CRL expiry ---
+    // Deliberately not crlExpiryWarningSeconds. That threshold is short because
+    // the CA refreshes its own CRL, so the alert only fires when something is
+    // already wedged and three days is ample. An *upstream* CRL is the exact
+    // opposite: openvox-ca cannot re-sign an ancestor's list, so clearing this
+    // means a human fetching a new CRL from the parent CA — often a different
+    // team — and updating crl_chain_file. Two weeks is notice for that, not
+    // slack for a self-healing loop.
+    upstreamCRLExpiryWarningSeconds: 14 * 24 * 3600,  // 14 days
+
+    // --- Upstream CRL chain health ---
+    // Calibrated to the CA's crl_chain_refresh_interval_sec. All four chain
+    // counters increment per *evaluation*, and the file is evaluated on every
+    // CRL amendment as well as on each refresh pass, so on a busy CA they track
+    // revocation rate. What the window is sized against is the floor they
+    // share: a quiet CA evaluates the file once per refresh pass, so raise this
+    // alongside any increase to crl_chain_refresh_interval_sec.
+    //
+    // Twice the interval, not equal to it. At exactly one interval a persistent
+    // fault flaps: consecutive increments sit one window apart, so the last
+    // sample carrying the older value ages out of the range before the next
+    // increment lands, increase() reads 0 for a scrape or two, the alert
+    // resolves and its `for` starts again from zero. Tick drift widens that gap
+    // rather than closing it. Doubling the window keeps two increments in range
+    // throughout, at the cost of an alert that takes an interval longer to
+    // clear once the fault is fixed.
+    //
+    // Do not assume an ordering between the four. An unreadable or unparseable
+    // file increments the failure counter alone, because the read stops before
+    // the per-CRL loops are reached.
+    crlChainWindow: '2h',
+    crlChainFor: '15m',
+
     // --- Leaf certificate expiry ---
     // Agents normally auto-renew; a leaf nearing expiry indicates a node that
     // has stopped checking in. Revoked certs are excluded by the alert exprs.

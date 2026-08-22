@@ -19,6 +19,7 @@ package ca
 
 import (
 	"bytes"
+	"context"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
@@ -44,8 +45,14 @@ import (
 //
 // A signature check has neither failure mode: it cannot be forged, it needs no
 // optional extension, and it answers the question every caller actually asks.
-// The cost does not signify — a handful of verifications per re-sign, against a
-// chain two or three blocks long.
+//
+// The cost is a few verifications per CRL per re-sign -- signedByAny filters,
+// then dedupeCRLs and monotonicUpstream each resolve the signer again, and
+// monotonicUpstream also resolves one per published block. Against a chain two
+// or three blocks long that is immaterial, and maxCRLChainFileEntries is what
+// keeps it that way: the count is bounded precisely because this runs with both
+// the CRL lock and c.mu held. If that bound is ever raised, resolve the signer
+// once in upstreamCRLs and thread it through instead.
 func crlSignedBy(cert *x509.Certificate, crl *x509.RevocationList) bool {
 	if cert == nil || crl == nil {
 		return false
@@ -69,20 +76,74 @@ func (c *CA) ownsCRL(crl *x509.RevocationList) bool {
 // commentary, and none of it reaches storage, because callers re-encode from
 // the parsed list rather than passing the original bytes through.
 func decodeCRLChain(blob []byte) ([]*x509.RevocationList, error) {
+	out, _, err := decodeCRLChainRest(blob)
+	return out, err
+}
+
+// decodeCRLChainStrict is decodeCRLChain for content whose *absence of CRLs is
+// meaningful* -- currently crl_chain_file, which is authoritative, so "no CRLs"
+// deletes every ancestor.
+//
+// pem.Decode cannot tell a truncated block from trailing rubbish: it returns nil
+// for a block with no END line, for DER, for a certificate bundle and for an
+// HTML error page. The lenient decoder reports all of those as an empty chain
+// with no error, so a `cat >` caught mid-write -- the refresh mechanism the
+// documentation recommends -- published a chain with the ancestors silently
+// removed, permanently, because this CA cannot re-sign another CA's list.
+//
+// So: an empty file is the empty declaration. Anything else that decodes to no
+// CRL, or that leaves bytes the decoder could not consume, is a failure. The
+// caller keeps what is already published rather than acting on it.
+func decodeCRLChainStrict(blob []byte) ([]*x509.RevocationList, error) {
+	out, rest, err := decodeCRLChainRest(blob)
+	if err != nil {
+		return nil, err
+	}
+	// The file must end on a block boundary. Anything else non-whitespace after
+	// the last block is a write that was cut short.
+	//
+	// Commentary is still free where bundles actually carry it: pem.Decode
+	// skips everything before a BEGIN line, so `openssl crl -text` output --
+	// which prints its human-readable dump *first* and ends with
+	// `-----END X509 CRL-----` -- passes unchanged, as does commentary between
+	// blocks. Only a trailing footer is refused.
+	//
+	// An earlier revision here judged only whether the tail had started a block
+	// (`bytes.Contains(rest, "-----BEGIN")`). That was too weak, and weak in the
+	// silent direction: a write cut inside the *text* preamble of the next block
+	// leaves a tail with no BEGIN in it, so the file decoded as a valid, shorter
+	// declaration -- and because the file is authoritative, a missing issuer
+	// reads as a deliberate removal. The chain shrank with no error and no
+	// counter. Refusing the tail costs a loud failure on a hand-written footer;
+	// tolerating it costs ancestors, permanently, in silence.
+	if len(bytes.TrimSpace(rest)) > 0 {
+		return nil, fmt.Errorf("the file does not end on a PEM block boundary: " +
+			"it is truncated, which usually means it was read while being rewritten")
+	}
+	if len(out) == 0 && len(bytes.TrimSpace(blob)) > 0 {
+		return nil, fmt.Errorf("no X509 CRL blocks, but the file is not empty: " +
+			"an empty file means publish no upstream CRLs; this does not")
+	}
+	return out, nil
+}
+
+// decodeCRLChainRest also reports what it could not decode, so a caller that
+// needs to tell "nothing there" from "could not read it" can.
+func decodeCRLChainRest(blob []byte) ([]*x509.RevocationList, []byte, error) {
 	var out []*x509.RevocationList
 	rest := blob
 	for {
 		var block *pem.Block
 		block, rest = pem.Decode(rest)
 		if block == nil {
-			return out, nil
+			return out, rest, nil
 		}
 		if block.Type != "X509 CRL" {
 			continue
 		}
 		crl, err := x509.ParseRevocationList(block.Bytes)
 		if err != nil {
-			return nil, fmt.Errorf("parsing CRL %d in chain: %w", len(out)+1, err)
+			return nil, nil, fmt.Errorf("parsing CRL %d in chain: %w", len(out)+1, err)
 		}
 		out = append(out, crl)
 	}
@@ -98,14 +159,18 @@ func encodeCRLChain(crls []*x509.RevocationList) []byte {
 }
 
 // crlChainLocked assembles the blob to store: this CA's freshly signed CRL
-// first, followed by every upstream CRL already present, in their original
-// order.
+// first, followed by the upstream CRLs.
 //
-// Our CRL leads because readStoredCRL takes block 0, and
-// because it mirrors the certificate bundle's nearest-first convention. Every
-// block that is not ours is carried across, because an ancestor's CRL cannot be
-// regenerated here: dropping one is unrecoverable, while keeping one costs a
-// wasted block at worst.
+// Our CRL leads because readStoredCRL and loadCRLCache both take block 0, and
+// because it mirrors the certificate bundle's nearest-first convention.
+//
+// Where the upstream blocks come from depends on configuration. With
+// crl_chain_file set, that file is authoritative: it is the operator's
+// declarative statement of which ancestor CRLs to publish, refreshed by
+// whatever mechanism they already have, so a CRL dropped from the file is meant
+// to disappear. Without it, every stored block that is not ours is carried
+// across — an ancestor's CRL cannot be regenerated here, so dropping one is
+// unrecoverable while keeping one costs a wasted block at worst.
 //
 // storedBlob is the blob readStoredCRL already read, not a fresh fetch. It used
 // to fetch its own copy, which cost a second backend round trip inside the
@@ -115,8 +180,26 @@ func encodeCRLChain(crls []*x509.RevocationList) []byte {
 // does today — bootstrap and import write through Storage.UpdateCRL directly.
 //
 // c.mu must be held by the caller.
-func (c *CA) crlChainLocked(ourCRL *x509.RevocationList, storedBlob []byte) ([]byte, error) {
+func (c *CA) crlChainLocked(ctx context.Context, ourCRL *x509.RevocationList, storedBlob []byte) ([]byte, error) {
 	chain := []*x509.RevocationList{ourCRL}
+
+	// With crl_chain_file set, the file is authoritative: it is the operator's
+	// declarative statement of which ancestor CRLs to publish, so a CRL dropped
+	// from it is meant to disappear and the stored blob's own upstream blocks
+	// are not carried across.
+	if c.CRLChainFile != "" {
+		upstream, stated, err := c.upstreamCRLs(ctx, storedBlob)
+		if err != nil {
+			return nil, err
+		}
+		// Only a file this process could actually read is authoritative. An
+		// absent one makes no statement, so fall through and preserve whatever
+		// is already published — see upstreamCRLs for why the distinction
+		// matters on this path in particular.
+		if stated {
+			return encodeCRLChain(append(chain, upstream...)), nil
+		}
+	}
 
 	stored, err := decodeCRLChain(storedBlob)
 	if err != nil {
@@ -198,9 +281,11 @@ func orderCRLChain(crls []*x509.RevocationList, cert *x509.Certificate) ([]*x509
 // default certificate_revocation = chain makes an agent parse all of it —
 // applies just as well to a block whose nextUpdate has already lapsed, or to
 // two copies of one ancestor's CRL. Neither is refused, because an operator
-// importing a chain they know is stale is a legitimate intermediate step, but
-// import is the only place either is detectable: no series and no alert covers
-// ancestor expiry.
+// importing a chain they know is stale is a legitimate intermediate step.
+// Duplicate copies are only detectable here -- import writes through
+// Storage.UpdateCRL and never reaches dedupeCRLs. Expiry is no longer: the
+// per-issuer gauge and PuppetCAUpstreamCRLExpired cover it from the stored
+// blob, so this warning is an earlier signal rather than the only one.
 //
 // Called once on the final chain about to be written, rather than from
 // orderCRLChain. It used to live there, after the early return taken when the

@@ -39,3 +39,41 @@ var _ = Describe("Config.needsDefaultNamespace", func() {
 		Expect(cfg.needsDefaultNamespace()).To(BeTrue())
 	})
 })
+
+// pemBlocks filters by block type, and it decides what a *narrowed* target
+// publishes: scoped() returns the blob untouched under the default chain scope,
+// so this is reached only for self and root. On those, dropping the filter would
+// make "block 0" mean whatever came first in the blob rather than the first
+// certificate. Nothing drove the mismatch branch: every fixture elsewhere holds
+// one block type.
+var _ = Describe("pemBlocks", func() {
+	const mixed = "-----BEGIN CERTIFICATE-----\nQ0VSVA==\n-----END CERTIFICATE-----\n" +
+		"-----BEGIN X509 CRL-----\nQ1JM\n-----END X509 CRL-----\n" +
+		"-----BEGIN RSA PRIVATE KEY-----\nS0VZ\n-----END RSA PRIVATE KEY-----\n"
+
+	It("keeps only the blocks of the type asked for", func() {
+		certs := pemBlocks([]byte(mixed), "CERTIFICATE")
+		Expect(certs).To(HaveLen(1))
+		Expect(string(certs[0])).To(ContainSubstring("Q0VSVA=="))
+
+		crls := pemBlocks([]byte(mixed), "X509 CRL")
+		Expect(crls).To(HaveLen(1))
+		Expect(string(crls[0])).To(ContainSubstring("Q1JM"))
+	})
+
+	It("drops a private key rather than passing it through", func() {
+		// What this returns is written into a Secret or ConfigMap by a narrowed
+		// target, so a key surviving the filter would be published there.
+		for _, t := range []string{"CERTIFICATE", "X509 CRL"} {
+			blocks := pemBlocks([]byte(mixed), t)
+			Expect(blocks).NotTo(BeEmpty(), "an empty result would pass the loop below vacuously")
+			for _, b := range blocks {
+				Expect(string(b)).NotTo(ContainSubstring("PRIVATE KEY"))
+			}
+		}
+	})
+
+	It("returns nothing when no block matches", func() {
+		Expect(pemBlocks([]byte(mixed), "CERTIFICATE REQUEST")).To(BeEmpty())
+	})
+})

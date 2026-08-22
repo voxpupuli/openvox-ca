@@ -60,7 +60,7 @@ func (c *CA) CleanupExpiredCerts(ctx context.Context, retain time.Duration) (int
 	defer cancel()
 
 	var removed int
-	err := c.Storage.WithLock(ctx, lockNameCRL, func() error {
+	err := c.withCRLLockCounted(ctx, func() error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 

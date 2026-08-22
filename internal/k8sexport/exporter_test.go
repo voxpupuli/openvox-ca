@@ -404,3 +404,222 @@ var _ = Describe("Exporter", func() {
 		Expect(err).To(HaveOccurred()) // never created
 	})
 })
+
+var _ = Describe("Export scopes", func() {
+	// Chains run leaf/intermediate first, root last — the order the CA stores
+	// and every consumer expects.
+	const (
+		// Three blocks, not two: with two, "the last certificate" and "the
+		// second certificate" are the same block, so a root scope that returned
+		// blocks[1] would pass. The middle block is what tells them apart.
+		certChain = "-----BEGIN CERTIFICATE-----\nSU5URVJNRURJQVRF\n-----END CERTIFICATE-----\n" +
+			"-----BEGIN CERTIFICATE-----\nTUlERExF\n-----END CERTIFICATE-----\n" +
+			"-----BEGIN CERTIFICATE-----\nUk9PVA==\n-----END CERTIFICATE-----\n"
+		crlChain = "-----BEGIN X509 CRL-----\nT1VSUw==\n-----END X509 CRL-----\n" +
+			"-----BEGIN X509 CRL-----\nVVBTVFJFQU0=\n-----END X509 CRL-----\n"
+	)
+
+	var (
+		ctx    context.Context
+		client *fake.Clientset
+		src    stubSource
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		client = fake.NewClientset()
+		src = stubSource{cert: []byte(certChain), crl: []byte(crlChain)}
+	})
+
+	exportWith := func(certScope, crlScope string) map[string][]byte {
+		GinkgoHelper()
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind:      "Secret",
+			Metadata:  k8sexport.Metadata{Name: "trust", Namespace: "ns1"},
+			Cert:      true,
+			CRL:       true,
+			CertScope: certScope,
+			CRLScope:  crlScope,
+		}}}
+		Expect(cfg.Validate()).To(Succeed())
+		Expect(k8sexport.New(client, *cfg, src, "", nil).ExportAll(ctx)).To(Succeed())
+		sec, err := client.CoreV1().Secrets("ns1").Get(ctx, "trust", metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		return sec.Data
+	}
+
+	It("defaults to chain, publishing what the target published before scopes existed", func() {
+		// The upgrade property, and the reason the default is not "self": before
+		// these settings existed every target got the stored blob verbatim. A
+		// narrow default would have silently dropped every intermediate from a
+		// consumer's trust bundle and every ancestor block from a CRL blob --
+		// the material crl_chain_file exists to distribute -- with no
+		// configuration change to notice and no error to catch, since a
+		// scoped-down value is not empty.
+		data := exportWith("", "")
+		Expect(string(data["ca.crt"])).To(ContainSubstring("SU5URVJNRURJQVRF"))
+		Expect(string(data["ca.crt"])).To(ContainSubstring("Uk9PVA=="),
+			"an unset cert_scope must not drop the root a deployed target was publishing")
+		Expect(string(data["ca.crl"])).To(ContainSubstring("T1VSUw=="))
+		Expect(string(data["ca.crl"])).To(ContainSubstring("VVBTVFJFQU0="),
+			"an unset crl_scope must not drop the ancestor CRLs this feature publishes")
+	})
+
+	It("publishes the whole chain under chain", func() {
+		data := exportWith("chain", "chain")
+		Expect(string(data["ca.crt"])).To(Equal(certChain))
+		Expect(string(data["ca.crl"])).To(Equal(crlChain))
+	})
+
+	It("publishes the trust anchor under root", func() {
+		// root is positional: the last block, whatever it is. It is a trust
+		// anchor only if the imported bundle was a complete chain, which
+		// nothing currently enforces — see the scopes section of
+		// docs/kubernetes-export.md.
+		data := exportWith("root", "")
+		Expect(string(data["ca.crt"])).To(ContainSubstring("Uk9PVA=="))
+		Expect(string(data["ca.crt"])).NotTo(ContainSubstring("SU5URVJNRURJQVRF"))
+		Expect(string(data["ca.crt"])).NotTo(ContainSubstring("TUlERExF"),
+			"root must be the last block, not merely a later one")
+	})
+
+	It("applies the same scoping to a ConfigMap target", func() {
+		// Secret and ConfigMap build their data through different methods.
+		// Asserting only the Secret leaves the ConfigMap free to regress to
+		// whole-chain output with the suite green.
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind:      "ConfigMap",
+			Metadata:  k8sexport.Metadata{Name: "trust", Namespace: "ns1"},
+			Cert:      true,
+			CRL:       true,
+			CertScope: "root",
+			CRLScope:  "self",
+		}}}
+		Expect(cfg.Validate()).To(Succeed())
+		Expect(k8sexport.New(client, *cfg, src, "", nil).ExportAll(ctx)).To(Succeed())
+
+		cm, err := client.CoreV1().ConfigMaps("ns1").Get(ctx, "trust", metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cm.Data["ca.crt"]).To(ContainSubstring("Uk9PVA=="))
+		Expect(cm.Data["ca.crt"]).NotTo(ContainSubstring("SU5URVJNRURJQVRF"))
+		// A narrowing crl_scope, not "chain": ScopeChain short-circuits inside
+		// scoped() and returns the blob untouched, so asserting it would hold
+		// with the CRL scoping deleted from the ConfigMap path entirely.
+		Expect(cm.Data["ca.crl"]).To(ContainSubstring("T1VSUw=="))
+		Expect(cm.Data["ca.crl"]).NotTo(ContainSubstring("VVBTVFJFQU0="),
+			"crl_scope: self must narrow the ConfigMap the same way it narrows a Secret")
+	})
+
+	DescribeTable("is unchanged for a single-block chain, whichever scope is asked for",
+		// A CA that issued its own root stores one block, so all three scopes
+		// agree there and the setting is a no-op. It is the CA that imported a
+		// chain where the scopes differ at all, which is what the specs above
+		// cover.
+		func(scope string) {
+			single := "-----BEGIN CERTIFICATE-----\nT05MWQ==\n-----END CERTIFICATE-----\n"
+			src = stubSource{cert: []byte(single), crl: []byte(crlChain)}
+			Expect(string(exportWith(scope, "chain")["ca.crt"])).To(Equal(single))
+		},
+		Entry("defaulted", ""),
+		Entry("chain", "chain"),
+		Entry("root", "root"),
+	)
+
+	It("publishes block 0 for self even when block 0 is not this CA's", func() {
+		// scoped is positional: self takes blocks[0] and root takes the last.
+		// That rests on an invariant enforced in another package -- orderCRLChain
+		// puts this CA's own CRL first -- and that invariant is knowingly
+		// violable: a CA whose stored block 0 is an ancestor's CRL starts and
+		// serves rather than refusing, a deliberate availability trade-off made
+		// on the read path.
+		//
+		// So self can publish an ancestor's CRL under ca.crl, and a consumer
+		// checking revocation against it sees none of this CA's revocations.
+		// Pinning the behaviour rather than changing it: the export layer has no
+		// way to identify which block is ours, and refusing here would turn a
+		// tolerated read-path state into an export outage. The detector is the
+		// warning the read path already emits.
+		upstreamFirst := "-----BEGIN X509 CRL-----\nVVBTVFJFQU0=\n-----END X509 CRL-----\n" +
+			"-----BEGIN X509 CRL-----\nT1VSUw==\n-----END X509 CRL-----\n"
+		src = stubSource{cert: []byte(certChain), crl: []byte(upstreamFirst)}
+
+		data := exportWith("self", "self")
+		Expect(string(data["ca.crl"])).To(ContainSubstring("VVBTVFJFQU0="),
+			"self is positional, so a foreign block 0 is what gets published")
+		Expect(string(data["ca.crl"])).NotTo(ContainSubstring("T1VSUw=="))
+	})
+
+	// scoped() and validate() have to agree about what an unset scope means, and
+	// only validate() is exercised by everything above -- every other spec here
+	// calls Validate() first, which fills the scopes in. A Target built in code
+	// and exported without validation is the case where scoped() answers alone,
+	// and answering "self" there would narrow silently: the failure the chain
+	// default exists to prevent, reachable by a missed Validate() call.
+	It("publishes the whole chain for a target whose scopes were never validated", func() {
+		cfg := k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind:     "Secret",
+			Metadata: k8sexport.Metadata{Name: "trust", Namespace: "ns1"},
+			Cert:     true,
+			CRL:      true,
+			CertKey:  "ca.crt",
+			CRLKey:   "ca.crl",
+		}}}
+		Expect(k8sexport.New(client, cfg, src, "", nil).ExportAll(ctx)).To(Succeed())
+
+		sec, err := client.CoreV1().Secrets("ns1").Get(ctx, "trust", metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(sec.Data["ca.crt"])).To(Equal(certChain),
+			"an unset cert_scope must mean the whole chain here too")
+		Expect(string(sec.Data["ca.crl"])).To(Equal(crlChain),
+			"an unset crl_scope must mean the whole chain here too")
+	})
+
+	// Validate compares against the constants exactly, so "Chain" or " chain "
+	// is an unknown scope and is refused at startup rather than silently
+	// narrowing what a target publishes. Pinning it because the failure mode of
+	// a lenient parse is invisible: a typo would be accepted and would export
+	// block 0, which looks like a working target.
+	DescribeTable("refuses a scope that differs only in case or whitespace",
+		func(scope string) {
+			cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+				Kind: "Secret", Metadata: k8sexport.Metadata{Name: "x"}, Cert: true, CertScope: scope,
+			}}}
+			Expect(cfg.Validate()).To(MatchError(ContainSubstring("invalid cert_scope")))
+		},
+		Entry("capitalised", "Chain"),
+		Entry("upper case", "SELF"),
+		Entry("leading space", " chain"),
+		Entry("trailing space", "chain "),
+	)
+
+	// The same strictness on the CRL side, which has its own switch in
+	// validate() and its own set of accepted values (no "root"), so the cert
+	// half passing says nothing about it.
+	DescribeTable("refuses a crl_scope that differs only in case or whitespace",
+		func(scope string) {
+			cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+				Kind: "Secret", Metadata: k8sexport.Metadata{Name: "x"}, CRL: true, CRLScope: scope,
+			}}}
+			Expect(cfg.Validate()).To(MatchError(ContainSubstring("invalid crl_scope")))
+		},
+		Entry("capitalised", "Chain"),
+		Entry("upper case", "SELF"),
+		Entry("trailing space", "self "),
+	)
+
+	It("rejects an unknown cert scope", func() {
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind: "Secret", Metadata: k8sexport.Metadata{Name: "x"}, Cert: true, CertScope: "everything",
+		}}}
+		Expect(cfg.Validate()).To(MatchError(ContainSubstring("invalid cert_scope")))
+	})
+
+	It("rejects root as a CRL scope", func() {
+		// A CRL chain has no single anchor: the root's own CRL is just one of
+		// its members.
+		cfg := &k8sexport.Config{Targets: []k8sexport.Target{{
+			Kind: "Secret", Metadata: k8sexport.Metadata{Name: "x"}, CRL: true, CRLScope: "root",
+		}}}
+		Expect(cfg.Validate()).To(MatchError(ContainSubstring("invalid crl_scope")))
+	})
+})

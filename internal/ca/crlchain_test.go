@@ -33,6 +33,7 @@ import (
 	"errors"
 	"log/slog"
 	"math/big"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -521,6 +522,294 @@ var _ = Describe("CRL chain read failures", func() {
 		Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(2))
 	})
 
+	It("counts a CRL lock it could not take, on every writer that takes it", func() {
+		// The arm nobody counted. Every writer's own failures are counted beneath
+		// the lock -- readStoredCRL and signCRLLocked both do it -- but when the
+		// lock cannot be taken the closure never runs, so nothing beneath it
+		// counts anything and the error only ever reached a log line.
+		//
+		// It bites hardest where crl_chain_file is *not* configured, which is the
+		// common deployment: the background refresher fails every tick, this
+		// CA's own CRL runs to NextUpdate, and every series reads healthy.
+		ctx := context.Background()
+		dir := GinkgoT().TempDir()
+		base := storage.NewFilesystemBackend(dir)
+		store := storage.NewWithBackend(base, filepath.Join(dir, "private"))
+
+		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(myCA.Init(ctx)).To(Succeed())
+
+		res, err := myCA.Generate(ctx, "node1.test", nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res).NotTo(BeNil())
+
+		// Swap in a backend that will not hand out the lock.
+		wedged := storage.NewWithBackend(
+			&unlockableBackend{Backend: base, grant: "subject:"},
+			filepath.Join(dir, "private"))
+		myCA.Storage = wedged
+
+		before := myCA.CRLUpdateFailures()
+		Expect(myCA.ReissueCRL(ctx)).NotTo(Succeed())
+		Expect(myCA.CRLUpdateFailures()).To(Equal(before+1), "ReissueCRL")
+
+		_, err = myCA.RefreshCRLIfDue(ctx, 24*time.Hour)
+		Expect(err).To(HaveOccurred())
+		Expect(myCA.CRLUpdateFailures()).To(Equal(before+2), "RefreshCRLIfDue")
+
+		Expect(myCA.Revoke(ctx, "node1.test")).NotTo(Succeed())
+		Expect(myCA.CRLUpdateFailures()).To(Equal(before+3), "Revoke")
+
+		// The fourth writer, and the one whose omission was invisible: cleanup
+		// runs unattended on a timer, so a lock it can never take is exactly the
+		// failure that would otherwise sit in a log nobody reads.
+		Expect(myCA.CleanupExpiredCerts(ctx, 0)).Error().To(HaveOccurred())
+		Expect(myCA.CRLUpdateFailures()).To(Equal(before+4), "CleanupExpiredCerts")
+	})
+
+	// The documented exemption, pinned so it stays a decision rather than drift.
+	// Clean's revoke is best-effort inside an operation that has already
+	// succeeded, so a lock it could not take is logged and not counted -- unlike
+	// the four writers above. Wrapping it in withCRLLockCounted would move this
+	// assertion, which is what makes the exemption visible rather than implied.
+	It("does not count a lock Clean could not take for its best-effort revoke", func() {
+		ctx := context.Background()
+		dir := GinkgoT().TempDir()
+		base := storage.NewFilesystemBackend(dir)
+		store := storage.NewWithBackend(base, filepath.Join(dir, "private"))
+
+		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(myCA.Init(ctx)).To(Succeed())
+		res, err := myCA.Generate(ctx, "doomed.test", nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res).NotTo(BeNil())
+
+		// Refuse only the CRL lock: Clean takes the subject lock first, and
+		// refusing that would fail before the arm under test.
+		refusing := &crlLockRefusingBackend{Backend: base}
+		myCA.Storage = storage.NewWithBackend(refusing, filepath.Join(dir, "private"))
+
+		before := myCA.CRLUpdateFailures()
+		Expect(myCA.Clean(ctx, "doomed.test")).To(Succeed(),
+			"Clean swallows the revoke failure, as docs/api.md publishes")
+		Expect(refusing.refused).To(BeNumerically(">", 0),
+			"the fixture must actually have refused the CRL lock; if lockNameCRL is "+
+				"renamed it grants everything and the assertion below means nothing")
+		Expect(myCA.CRLUpdateFailures()).To(Equal(before),
+			"a best-effort revoke that could not take the lock is logged, not counted")
+	})
+
+	It("does not count a lock Renew could not take for its best-effort revoke", func() {
+		// The comment at Renew's lock site says its exemption is the same as
+		// Clean's, and only Clean's was pinned. The two are separate call sites
+		// with separate arms, so wrapping this one in withCRLLockCounted would
+		// have left every spec green while making a contended lock during a
+		// renewal read as a revocation that did not happen.
+		ctx := context.Background()
+		dir := GinkgoT().TempDir()
+		base := storage.NewFilesystemBackend(dir)
+		store := storage.NewWithBackend(base, filepath.Join(dir, "private"))
+
+		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(myCA.Init(ctx)).To(Succeed())
+		cert := signedCert(myCA, "renewme.test")
+		csrPEM, err := testutil.GenerateCSR("renewme.test")
+		Expect(err).NotTo(HaveOccurred())
+
+		// Only the CRL lock is refused: Renew holds the subject lock already,
+		// and refusing that would fail before the arm under test.
+		refusing := &crlLockRefusingBackend{Backend: base}
+		myCA.Storage = storage.NewWithBackend(refusing, filepath.Join(dir, "private"))
+
+		before := myCA.CRLUpdateFailures()
+		Expect(myCA.Renew(ctx, "renewme.test", csrPEM, cert)).Error().NotTo(HaveOccurred(),
+			"the renewal stands; revoking the replaced certificate is best-effort")
+		Expect(refusing.refused).To(BeNumerically(">", 0),
+			"the fixture must actually have refused the CRL lock; if lockNameCRL is "+
+				"renamed it grants everything and the assertion below means nothing")
+		Expect(myCA.CRLUpdateFailures()).To(Equal(before),
+			"a lock the best-effort revoke could not take is logged, not counted")
+	})
+
+	It("blames the file, not storage, when the refresh pass fails on the file itself", func() {
+		// The other half of the attribution rule. Rounds 3 and 4 spent two
+		// commits separating these two counters; without this assertion the
+		// sentinel check can be deleted and the split collapses back to counting
+		// a file fault twice, firing PuppetCACRLUpdateFailing alongside and
+		// sending the responder to check storage that is perfectly healthy.
+		ctx := context.Background()
+		store := storage.New(GinkgoT().TempDir())
+		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(myCA.Init(ctx)).To(Succeed())
+
+		path := filepath.Join(GinkgoT().TempDir(), "corrupt.pem")
+		Expect(os.WriteFile(path, []byte("<html>502 Bad Gateway</html>\n"), 0o644)).To(Succeed())
+		myCA.CRLChainFile = path
+
+		_, err := myCA.RefreshCRLChainFile(ctx)
+		Expect(err).To(HaveOccurred())
+
+		Expect(myCA.CRLChainFailures()).To(BeNumerically("==", 1))
+		Expect(myCA.CRLUpdateFailures()).To(BeZero(),
+			"the file is what failed; the storage counter must not move too")
+	})
+
+	It("counts a lock the refresh pass could not take as a CRL-update failure", func() {
+		// The refresh job's own arm, and the counterpart to the best-effort
+		// exemptions above rather than a copy of them: this pass exists solely
+		// to amend the CRL, so a lock it could not take *is* an amendment that
+		// did not happen, and something has to say so. Before the arm existed
+		// these were counted by nothing at all -- a quiet CA with contended
+		// storage failed its hourly refresh behind a log line while every
+		// series read healthy until the ancestors expired.
+		ctx := context.Background()
+		dir := GinkgoT().TempDir()
+		base := storage.NewFilesystemBackend(dir)
+		store := storage.NewWithBackend(base, filepath.Join(dir, "private"))
+
+		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(myCA.Init(ctx)).To(Succeed())
+
+		// A healthy file, so the fault under test is the lock and nothing else.
+		_, upsCRLPEM := upstreamCA("Upstream Root CA")
+		path := filepath.Join(GinkgoT().TempDir(), "chain.pem")
+		Expect(os.WriteFile(path, upsCRLPEM, 0o644)).To(Succeed())
+		myCA.CRLChainFile = path
+
+		refusing := &crlLockRefusingBackend{Backend: base}
+		myCA.Storage = storage.NewWithBackend(refusing, filepath.Join(dir, "private"))
+
+		before := myCA.CRLUpdateFailures()
+		beforeChain := myCA.CRLChainFailures()
+
+		_, err := myCA.RefreshCRLChainFile(ctx)
+		Expect(err).To(HaveOccurred())
+
+		Expect(refusing.refused).To(BeNumerically(">", 0),
+			"the fixture must actually have refused the CRL lock")
+		Expect(myCA.CRLUpdateFailures()).To(BeNumerically(">", before),
+			"a refresh that could not take the lock amended nothing, and must be counted")
+		Expect(myCA.CRLChainFailures()).To(Equal(beforeChain),
+			"the operator's file was fine; its counter must not move")
+	})
+
+	It("blames the file, not storage, when a revoke reaches it through the signing path", func() {
+		// The refresh job is not the only reader of crl_chain_file. Revoke,
+		// cleanup and reissue all reach it through signCRLLocked, which had no
+		// exemption -- so a file the operator had broken moved
+		// crl_update_failures on every revocation, sending whoever answered
+		// PuppetCACRLUpdateFailing to inspect storage that was working
+		// perfectly. The refresh pass alone was exempt, which made the split
+		// look correct from the one path that had a test.
+		ctx := context.Background()
+		store := storage.New(GinkgoT().TempDir())
+		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(myCA.Init(ctx)).To(Succeed())
+		Expect(myCA.Generate(ctx, "node1.test", nil)).Error().NotTo(HaveOccurred())
+
+		// Broken only after the certificate exists, so the revoke below fails
+		// on the file and on nothing else.
+		path := filepath.Join(GinkgoT().TempDir(), "corrupt.pem")
+		Expect(os.WriteFile(path, []byte("<html>502 Bad Gateway</html>\n"), 0o644)).To(Succeed())
+		myCA.CRLChainFile = path
+
+		before := myCA.CRLUpdateFailures()
+		Expect(myCA.Revoke(ctx, "node1.test")).NotTo(Succeed())
+
+		Expect(myCA.CRLUpdateFailures()).To(Equal(before),
+			"the file is what failed; the storage counter must not move on this path either")
+		Expect(myCA.CRLChainFailures()).To(BeNumerically(">", 0),
+			"and the file's own counter must say so, or the fault is counted by nothing")
+	})
+
+	It("blames storage, not the file, when the refresh pass fails beneath a healthy file", func() {
+		// Moving crlChainFailures to the chokepoint stopped it absorbing this
+		// pass's lock and storage faults -- but nothing then picked them up, so
+		// a quiet CA with wedged storage failed its hourly refresh behind a log
+		// line with every series flat. Both halves need pinning: the file's
+		// counter must stay still, and the CRL-maintenance counter must move.
+		ctx := context.Background()
+		dir := GinkgoT().TempDir()
+		backend := &flakyCRLBackend{Backend: storage.NewFilesystemBackend(dir)}
+		store := storage.NewWithBackend(backend, filepath.Join(dir, "private"))
+
+		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(myCA.Init(ctx)).To(Succeed())
+
+		upstream, upsCRL := upstreamCA("Healthy Ancestor CA")
+		ours, err := store.GetCACert(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(store.SaveCACert(ctx, append(append([]byte{}, ours...),
+			pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: upstream.Raw})...))).To(Succeed())
+
+		// A perfectly good file. The fault is underneath it.
+		path := filepath.Join(GinkgoT().TempDir(), "good.pem")
+		Expect(os.WriteFile(path, upsCRL, 0o644)).To(Succeed())
+		myCA.CRLChainFile = path
+
+		backend.failGetCRLAfter(0)
+		_, err = myCA.RefreshCRLChainFile(ctx)
+		Expect(err).To(HaveOccurred())
+		backend.stopFailing()
+
+		Expect(myCA.CRLChainFailures()).To(BeZero(),
+			"a storage fault must not page anyone to go and inspect a healthy file")
+		Expect(myCA.CRLUpdateFailures()).To(BeNumerically("==", 1),
+			"but it must not vanish either -- the chain was not republished. Exactly "+
+				"one: two would mean the arm was counted both here and by the CRL layer")
+	})
+
+	It("fails the re-sign rather than publishing a rollback when the chain read fails", func() {
+		// The re-sign path reads the stored chain exactly once, and hands those
+		// bytes to the regression check rather than fetching a second copy. So
+		// the single read is the enforcement point: if it fails, the re-sign
+		// must fail with it. Publishing anyway would mean assembling a chain
+		// with no idea what is already published, and the file here carries a
+		// rollback -- the next revocation would push CRL number 7 over the
+		// stored 99, un-revoking fleet-wide everything the ancestor revoked in
+		// between. publishedUpstream refuses a nil blob for the same reason:
+		// "nothing published" and "nothing could be read" are indistinguishable
+		// by the time they reach it.
+		ctx := context.Background()
+		dir := GinkgoT().TempDir()
+		backend := &flakyCRLBackend{Backend: storage.NewFilesystemBackend(dir)}
+		store := storage.NewWithBackend(backend, filepath.Join(dir, "private"))
+
+		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(myCA.Init(ctx)).To(Succeed())
+
+		anc, ancKey, _ := upstreamCAWithKey("Flaky Ancestor CA")
+		ours, err := store.GetCACert(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(store.SaveCACert(ctx, append(append([]byte{}, ours...),
+			pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: anc.Raw})...))).To(Succeed())
+
+		storedCRL, err := store.GetCRL(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(store.UpdateCRL(ctx, append(append([]byte{}, storedCRL...),
+			emptyCRLNumbered(anc, ancKey, 99)...))).To(Succeed())
+		before := mustGetCRL(ctx, store)
+
+		// The file carries the rollback the guard exists to refuse.
+		path := filepath.Join(GinkgoT().TempDir(), "rollback.pem")
+		Expect(os.WriteFile(path, emptyCRLNumbered(anc, ancKey, 7), 0o644)).To(Succeed())
+		myCA.CRLChainFile = path
+
+		backend.failGetCRLAfter(0)
+		Expect(myCA.ReissueCRL(ctx)).To(HaveOccurred())
+
+		backend.stopFailing()
+		Expect(mustGetCRL(ctx, store)).To(Equal(before),
+			"the published chain must be untouched, still carrying 99")
+	})
 	// Counting was moved into readStoredCRL precisely because reissue, refresh
 	// and cleanup previously returned this error uncounted, leaving the metric
 	// the shipped mixin alerts on flat while the CA logged every tick. Reverting
@@ -567,6 +856,57 @@ var _ = Describe("CRL chain read failures", func() {
 		// above are what pin the centralised counting.
 	)
 })
+
+// crlLockRefusingBackend refuses the CRL lock and grants every other, so a spec
+// can reach a CRL-lock arm without failing at the subject lock in front of it.
+type crlLockRefusingBackend struct {
+	storage.Backend
+	refused int
+}
+
+func (b *crlLockRefusingBackend) AcquireLock(_ context.Context, name string) (storage.Unlocker, error) {
+	if name == lockNameCRLValue {
+		b.refused++
+		return nil, errors.New("lock unavailable")
+	}
+	// Granted rather than delegated: Locker is an optional capability, so the
+	// embedded backend may not have one, and what this spec needs is only that
+	// the subject lock in front of the arm under test succeeds. grantedLock
+	// itself lives in ca_test.go, which arrived with #186 -- this package had
+	// two identical copies after the rebase.
+	return grantedLock{}, nil
+}
+
+// lockNameCRLValue mirrors the unexported lockNameCRL, which this external test
+// package cannot see. If the two ever diverge this fixture grants every lock and
+// the spec asserting "not counted" passes for the wrong reason -- so the spec
+// checks refused, which only a genuine match can make non-zero.
+const lockNameCRLValue = "crl"
+
+// unlockableBackend advertises Locker and always refuses. Deliberately not
+// ErrDistributedLockingUnsupported, which WithLock falls through on by design;
+// this models the arm that matters -- etcd with a lost session, or a SQL
+// advisory lock that could not be taken.
+// unlockableBackend refuses every lock except those whose name carries the
+// grant prefix.
+//
+// The grant exists because #186 put a per-subject lock in front of Revoke,
+// outside the CRL lock. Refusing every lock therefore stops Revoke at the
+// subject lock -- an arm that is uncounted by design -- so it never reaches the
+// counted CRL acquisition this spec is about, and the counter does not move.
+// Granting "subject:" lets Revoke through to the lock under test while every
+// other writer still meets a refusal at the CRL lock directly.
+type unlockableBackend struct {
+	storage.Backend
+	grant string
+}
+
+func (b *unlockableBackend) AcquireLock(_ context.Context, name string) (storage.Unlocker, error) {
+	if b.grant != "" && strings.HasPrefix(name, b.grant) {
+		return grantedLock{}, nil
+	}
+	return nil, errors.New("lock unavailable")
+}
 
 // flakyCRLBackend fails Get on the CRL key after a set number of successful
 // reads, standing in for a transient fault on a network backend.
@@ -1500,6 +1840,40 @@ type certificateList struct {
 func handRolledCRL(cert *x509.Certificate, key *ecdsa.PrivateKey) []byte {
 	GinkgoHelper()
 	return handRolledCRLAt(cert, key, time.Now().UTC().Truncate(time.Second).Add(-time.Hour))
+}
+
+// handRolledCRLNoNextUpdate signs a CRL that omits nextUpdate entirely. It is
+// OPTIONAL in RFC 5280's ASN.1, and x509.CreateRevocationList refuses to mint
+// one, so the only way to have the shape a non-conforming ancestor CA can
+// legitimately emit is to assemble the DER.
+func handRolledCRLNoNextUpdate(cert *x509.Certificate, key *ecdsa.PrivateKey) []byte {
+	GinkgoHelper()
+	algo := pkix.AlgorithmIdentifier{Algorithm: asn1.ObjectIdentifier{1, 2, 840, 10045, 4, 3, 2}}
+
+	tbsDER, err := asn1.Marshal(tbsCertList{
+		Version:    1, // v2
+		Signature:  algo,
+		Issuer:     asn1.RawValue{FullBytes: cert.RawSubject},
+		ThisUpdate: time.Now().UTC().Truncate(time.Second).Add(-time.Hour),
+	})
+	Expect(err).NotTo(HaveOccurred())
+
+	digest := sha256.Sum256(tbsDER)
+	sig, err := ecdsa.SignASN1(rand.Reader, key, digest[:])
+	Expect(err).NotTo(HaveOccurred())
+
+	der, err := asn1.Marshal(certificateList{
+		TBS:       asn1.RawValue{FullBytes: tbsDER},
+		Signature: algo,
+		Sig:       asn1.BitString{Bytes: sig, BitLength: len(sig) * 8},
+	})
+	Expect(err).NotTo(HaveOccurred())
+
+	parsed, err := x509.ParseRevocationList(der)
+	Expect(err).NotTo(HaveOccurred(), "the hand-rolled CRL must be parseable")
+	Expect(parsed.NextUpdate).To(BeZero(), "the fixture must actually omit nextUpdate")
+
+	return pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: der})
 }
 
 // handRolledCRLAt is handRolledCRL with ThisUpdate under the caller's control.

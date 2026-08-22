@@ -29,9 +29,10 @@ import (
 // literals so a spec asserting which jobs a configuration starts cannot drift
 // from the thing it is asserting about.
 const (
-	jobCRLRefresh  = "crl-refresh"
-	jobCRLSync     = "crl-sync"
-	jobCertCleanup = "expired-cert-cleanup"
+	jobCRLRefresh      = "crl-refresh"
+	jobCRLSync         = "crl-sync"
+	jobCertCleanup     = "expired-cert-cleanup"
+	jobCRLChainRefresh = "crl-chain-refresh"
 )
 
 // backgroundJob is one periodic job the serve command runs for the lifetime of
@@ -91,6 +92,23 @@ func backgroundJobs(cfg *serverConfig, myCA *ca.CA) []backgroundJob {
 		interval, retention := cfg.expiredCertCleanupInterval(), cfg.expiredCertRetention()
 		jobs = append(jobs, backgroundJob{jobCertCleanup, func(ctx context.Context) {
 			runCertCleaner(ctx, myCA, interval, retention)
+		}})
+	}
+
+	// Re-reads crl_chain_file and republishes the CRL when the upstream CRLs it
+	// names have changed.
+	//
+	// Gated on crl_chain_file alone, and deliberately not on any other feature:
+	// an operator publishing an upstream chain need not be running expired-cert
+	// cleanup or re-signing on a timer. Under Puppet's default
+	// certificate_revocation = chain, an expired ancestor CRL is not stale data
+	// but a scheduled fleet-wide verification failure that clears only on
+	// restart, so the job that notices must not be reachable only through
+	// somebody else's switch.
+	if cfg.CRLChainFile != "" {
+		chainInterval := cfg.crlChainRefreshInterval()
+		jobs = append(jobs, backgroundJob{jobCRLChainRefresh, func(ctx context.Context) {
+			runCRLChainRefresher(ctx, myCA, cfg.CRLChainFile, chainInterval)
 		}})
 	}
 

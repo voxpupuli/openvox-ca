@@ -112,14 +112,24 @@ CA's certificate, not by comparing issuer names or key identifiers: a CRL from
 `openssl ca -gencrl` carries no Authority Key Identifier under the stock
 `openssl.cnf`, and a shared root can issue two sub-CAs with the same name. If
 the bundle contains no CRL signed by this CA, the one already in storage is kept
-at the front, and only if there is none is an empty CRL generated. That makes
-re-running the import with a newer ancestor bundle the way to refresh ancestor
-CRLs today, without exporting and concatenating your own first.
+at the front, and only if there is none is an empty CRL generated. Re-running
+the import with a newer ancestor bundle therefore refreshes the ancestor CRLs,
+without exporting and concatenating your own first.
 
 Ancestor CRLs cannot be re-signed by this CA, so they have to be replaced before
-they lapse — and how you do that depends on the storage backend. See
-[Refreshing ancestor CRLs](#refreshing-ancestor-crls) below; do not plan on
-re-import as a refresh mechanism without reading it.
+they lapse. There are two ways. Re-importing is one, and its limits are worth
+reading before you rely on it: see [Refreshing ancestor
+CRLs](#refreshing-ancestor-crls) below. The other is
+[`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain), which has
+openvox-ca re-read a PEM bundle on a timer and republish it, so the ancestors
+stay current without an operator remembering to act before each `nextUpdate`.
+Either way, watch `puppetca_crl_chain_next_update_timestamp_seconds{issuer}` —
+the shipped mixin alerts on it.
+
+Re-import is also not signalled to consumers: the Kubernetes exporter republishes
+on CRL notifications, which the import path deliberately does not send. After a
+live ancestor refresh, run `openvox-ca-ctl reissue-crl` or restart to republish
+the exported copies.
 
 The `import` command creates the directory structure, writes the CA cert/key/CRL, and
 initialises `inventory.txt` and `serial` (the serial file is written for compatibility but is not used at runtime; openvox-ca generates random serial numbers).
@@ -268,8 +278,12 @@ Some limits worth knowing before you rely on re-import as a refresh mechanism.
 >
 > **Ancestor CRLs age in place.** This CA cannot re-sign another CA's list, so
 > whatever was imported stays until something replaces it, and it must be replaced
-> before its own `nextUpdate` lapses. Nothing alerts on this — see
-> [the metrics reference](metrics.md#crl) — so track those deadlines out of band.
+> before its own `nextUpdate` lapses.
+> `puppetca_crl_chain_next_update_timestamp_seconds{issuer}` reports each
+> ancestor's deadline and the shipped mixin alerts on it — see
+> [the metrics reference](metrics.md#upstream-crl-chain). Configuring
+> [`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain) is what
+> keeps them current without an operator acting before each lapse.
 >
 > `import` is the one place it is detectable, so read its output. It warns when a
 > supplied ancestor is already past its `nextUpdate`, and when the chain carries
@@ -351,8 +365,11 @@ back to a mutex inside each process.
 > plaintext key instead succeeds while silently replacing the encrypted at-rest
 > key with a plaintext one, because key loading accepts both forms and nothing
 > warns. Under `ca_key_provider: openbao` there is no exportable key at all, so
-> re-import is unavailable outright. Neither mode has another ancestor-refresh
-> mechanism today.
+> re-import is unavailable outright. For both,
+> [`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain) is not an
+> alternative to re-import but the only ancestor-refresh mechanism there is: it
+> reads a PEM bundle and republishes it, touching neither the CA key nor the
+> import path.
 >
 > **An older replica still flattens the chain.** A build from before this change
 > rewrites the stored blob as a single block, so one un-upgraded replica handling
