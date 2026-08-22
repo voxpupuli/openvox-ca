@@ -60,10 +60,11 @@ const (
 const LockTimeout = 60 * time.Second
 
 // subjectLockName returns the distributed-lock name used to serialise
-// operations on a single subject: evict, save CSR, sign, import, clean and
-// revoke. Keep this list and the Serialises cell of the Tier 1 table in
-// docs/development/locking.md in step — they are the same claim written twice,
-// so they should read the same.
+// operations on a single subject: evict, save CSR, sign, renew, import, clean,
+// revoke and offline generation. Anything that issues or mutates that subject's
+// certificate takes it. Keep this list and the Serialises cell of the Tier 1
+// table in docs/development/locking.md in step — they are the same claim
+// written twice, so they should read the same.
 func subjectLockName(subject string) string { return lockSubjectPrefix + subject }
 
 func (c *CA) Init(ctx context.Context) error {
@@ -167,6 +168,10 @@ func (c *CA) Init(ctx context.Context) error {
 				"and requires every agent to be re-enrolled: %w", where, loadErr)
 		}
 		if !hasCert || !hasKey {
+			if c.NoBootstrap {
+				return fmt.Errorf("no CA exists in the configured storage, and this caller "+
+					"will not create one: %w", loadErr)
+			}
 			slog.Info("No existing CA found, bootstrapping new CA")
 			return c.bootstrapCA(ctx)
 		}

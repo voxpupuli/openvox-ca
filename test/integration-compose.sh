@@ -1282,9 +1282,12 @@ openvox-ca-ctl --config="$_CTL_CFG" list >/dev/null 2>&1 \
 #   Starts short-lived local openvox-ca instances on port 8142 inside this
 #   container.  The shared openvox-ca service (port 8140) is untouched.
 #
-#   Phase 1 (loopback HTTP, autosign=true): bootstrap CA, generate a TLS
-#   server cert, a plain client cert, and an admin client cert carrying the
-#   pp_cli_auth OID (1.3.6.1.4.1.34380.1.3.39).
+#   Setup: bootstrap the CA, then mint the admin client cert carrying the
+#   pp_cli_auth OID (1.3.6.1.4.1.34380.1.3.39) offline with `openvox-ca
+#   generate --pp-cli-auth`, before any server starts -- the API cannot issue
+#   that grant at all.
+#   Phase 1 (loopback HTTP, autosign=true): generate a TLS server cert and a
+#   plain client cert through the API.
 #   Phase 2 (TLS, no CN allow list): verify the pp_cli_auth cert reaches
 #   admin endpoints while the plain cert is denied.
 #
@@ -1307,10 +1310,51 @@ _wait_auth_ca() {
     return 1
 }
 
-# --- Phase 1: loopback HTTP, autosign=true, generate all certs ---------------
+# --- Setup: bootstrap the CA and mint the admin credential, no server ---------
 
 openvox-ca-ctl setup --cadir "$_AUTH_DIR" --hostname auth-test-ca \
     2>/dev/null
+
+# Admin client cert with pp_cli_auth, minted offline BEFORE any server starts.
+#
+# This is the supported way to provision an administrator credential, and the
+# only one: the CA strips auth-arc OIDs (1.3.6.1.4.1.34380.1.3.*) from submitted
+# CSRs to prevent privilege escalation, so no API route can issue this. Minting
+# it here rather than during Phase 1 also exercises the claim that the command
+# needs no running server.
+# stderr is captured rather than discarded: this command refuses for several
+# tailored reasons (no CA, wrong role, no_pp_cli_auth set, a path collision),
+# and each names its own remedy. Throwing them away leaves a bare "did not
+# produce a cert" for four downstream assertions to fail behind.
+_gen_err=$(openvox-ca generate --cadir "$_AUTH_DIR" --certname openvox-admin \
+    --ttl 8760h --pp-cli-auth --key-out "$WORK_DIR/admin.key" \
+    2>&1 > "$WORK_DIR/admin.crt")
+if [ -s "$WORK_DIR/admin.crt" ] && [ -s "$WORK_DIR/admin.key" ]; then
+    pass "pp_cli_auth: admin cert minted offline, with no server running"
+else
+    fail "pp_cli_auth: admin cert minted offline, with no server running" \
+        "openvox-ca generate --pp-cli-auth did not produce a cert and key: ${_gen_err}"
+fi
+
+# The extension must be present; a cert without it would sail through the Phase 2
+# checks below for the wrong reason. This is a presence check only -- `openssl
+# x509 -text` renders a PrintableString identically, so the UTF8String encoding
+# is pinned by the unit specs in internal/ca and cmd/openvox-ca instead.
+_pp_oid_count=$(openssl x509 -text -noout -in "$WORK_DIR/admin.crt" 2>/dev/null \
+    | grep -c "1.3.6.1.4.1.34380.1.3.39") || true
+[ "${_pp_oid_count:-0}" -gt 0 ] \
+    && pass "pp_cli_auth: OID present in the offline-minted cert" \
+    || fail "pp_cli_auth: OID present in the offline-minted cert" \
+           "OID 1.3.6.1.4.1.34380.1.3.39 not found in openssl -text output"
+
+# It must also be tracked -- an inventory row is what makes it revocable by
+# name, and is the difference from the openssl recipe this replaced.
+grep -q "openvox-admin" "$_AUTH_DIR/inventory.txt" 2>/dev/null \
+    && pass "pp_cli_auth: offline-minted cert is recorded in the inventory" \
+    || fail "pp_cli_auth: offline-minted cert is recorded in the inventory" \
+           "no inventory row for openvox-admin"
+
+# --- Phase 1: loopback HTTP, autosign=true, TLS server + plain client certs ---
 
 openvox-ca --cadir "$_AUTH_DIR" \
     --host 127.0.0.1 --port "$_AUTH_PORT" \
@@ -1331,53 +1375,6 @@ if _wait_auth_ca "$_AUTH_CA_URL"; then
     openvox-ca-ctl --server-url "$_AUTH_CA_URL" \
         generate --certname regular-client --out-dir "$WORK_DIR" \
         > "$WORK_DIR/regular-client.crt" 2>/dev/null
-
-    # Admin client cert with pp_cli_auth extension.
-    # DER:0c:04:74:72:75:65 is the DER encoding of UTF8String "true"
-    # (tag=0x0c, length=4, bytes="true").
-    #
-    # IMPORTANT: We sign this cert directly with openssl rather than submitting
-    # it through the CA API, because the CA correctly strips auth-arc OIDs
-    # (1.3.6.1.4.1.34380.1.3.*) from CSRs to prevent privilege escalation
-    # (see internal/ca/signing.go lines 239-243). Direct signing with the CA
-    # key is how a real deployment would provision admin certificates.
-    openssl genrsa -out "$WORK_DIR/admin.key" 2048 2>/dev/null
-    cat > "$WORK_DIR/pp_cli_auth.cnf" << 'OPENSSLEOF'
-[req]
-distinguished_name = dn
-req_extensions     = v3_req
-prompt             = no
-[dn]
-CN = openvox-admin
-[v3_req]
-1.3.6.1.4.1.34380.1.3.39 = DER:0c:04:74:72:75:65
-OPENSSLEOF
-
-    openssl req -new \
-        -key    "$WORK_DIR/admin.key" \
-        -config "$WORK_DIR/pp_cli_auth.cnf" \
-        -out    "$WORK_DIR/admin.csr" 2>/dev/null
-
-    # Sign the CSR directly with the CA key (preserves the pp_cli_auth OID).
-    cat > "$WORK_DIR/pp_cli_auth_ext.cnf" << 'OPENSSLEOF'
-1.3.6.1.4.1.34380.1.3.39 = DER:0c:04:74:72:75:65
-OPENSSLEOF
-    openssl x509 -req \
-        -in      "$WORK_DIR/admin.csr" \
-        -CA      "$_AUTH_DIR/ca_crt.pem" \
-        -CAkey   "$_AUTH_DIR/private/ca_key.pem" \
-        -CAcreateserial \
-        -days    365 \
-        -extfile "$WORK_DIR/pp_cli_auth_ext.cnf" \
-        -out     "$WORK_DIR/admin.crt" 2>/dev/null
-
-    # Verify the cert carries the pp_cli_auth OID.
-    _pp_oid_count=$(openssl x509 -text -noout -in "$WORK_DIR/admin.crt" 2>/dev/null \
-        | grep -c "1.3.6.1.4.1.34380.1.3.39") || true
-    [ "${_pp_oid_count:-0}" -gt 0 ] \
-        && pass "pp_cli_auth: OID preserved in signed cert" \
-        || fail "pp_cli_auth: OID preserved in signed cert" \
-               "OID 1.3.6.1.4.1.34380.1.3.39 not found in openssl -text output"
 else
     fail "pp_cli_auth: Phase 1 CA started (loopback HTTP, autosign=true)" \
         "timed out waiting for health"
@@ -1404,9 +1401,12 @@ if _wait_auth_ca "https://127.0.0.1:${_AUTH_PORT}"; then
         --cert "$WORK_DIR/admin.crt" \
         --key  "$WORK_DIR/admin.key" \
         -X POST "https://127.0.0.1:${_AUTH_PORT}/sign/all") || true
-    [ "$_st" != "403" ] \
-        && pass "pp_cli_auth: cert with extension reaches admin endpoint (not 403)" \
-        || fail "pp_cli_auth: cert with extension reaches admin endpoint (not 403)" \
+    # Explicitly 200, not merely "not 403": a curl failure yields 000, which
+    # would satisfy != 403 and pass this step with no certificate at all.
+    # handlePostSignAll returns 200 even with no pending CSRs.
+    [ "$_st" = "200" ] \
+        && pass "pp_cli_auth: cert with extension reaches admin endpoint (200)" \
+        || fail "pp_cli_auth: cert with extension reaches admin endpoint (200)" \
                "got HTTP $_st"
 
     # Plain cert → POST /sign/all must be 403.

@@ -29,6 +29,19 @@ root plus its intermediates can be passed as one file. A file holding no usable
 certificate (a DER export, a truncated download, the wrong file) is rejected
 before the connection is attempted rather than failing later in the handshake.
 
+`--insecure` disables verification of the **server** and nothing else. The
+client certificate is still sent, and the server still verifies it in full:
+chain back to this CA, the client-authentication extended key usage, and the
+serial against the CRL. None of that is influenced by a flag on the client. So
+`--insecure` widens what *you* will talk to; it does not widen what the server
+will accept from you.
+
+That distinction is worth having in advance, because the `WARNING:` line says
+`vulnerable to MITM` and an operator part-way through a key ceremony may
+reasonably decline on those grounds — see [The first credential on a new
+CA](#the-first-credential-on-a-new-ca), where it is the flag that unblocks the
+one route available.
+
 `--client-cert` and `--client-key` must be supplied together; giving only one is
 an error.
 
@@ -173,15 +186,15 @@ See [storage backends](storage-backends.md#migrating-between-backends) for migra
 
 ## Offline subcommands on the server binary
 
-Two subcommands live on `openvox-ca` rather than `openvox-ca-ctl`, because they
+Three subcommands live on `openvox-ca` rather than `openvox-ca-ctl`, because they
 must reach the storage backend and CA key provider named in the *server's*
 configuration. `openvox-ca-ctl` reads a different configuration file and can
 only address a local filesystem directory, so it cannot serve a CA whose state
 is in PostgreSQL or whose key is in OpenBao Transit.
 
-Neither needs a running server.
+None of them needs a running server.
 
-Both read the **server's** configuration, not `openvox-ca-ctl`'s: `--config`, or
+All three read the **server's** configuration, not `openvox-ca-ctl`'s: `--config`, or
 `PUPPET_CA_CONFIG`, defaulting to `/etc/puppet-ca/config.yaml`. A working
 `ctl.yaml` has no effect on them. `--cadir` overrides the configured storage
 directory for a one-off run.
@@ -196,6 +209,14 @@ openvox-ca csr --hostname puppet.example.com --create-key --out ca-request.pem
 
 # Install the chain the parent signed, completing the round trip
 openvox-ca import-ca-cert --cert-bundle signed-chain.pem
+
+# Mint a certificate with no running server and no API
+openvox-ca generate --certname web01.example.com --ttl 8760h \
+  --key-out web01_key.pem > web01.crt
+
+# ... and make it a CA administrator credential
+openvox-ca generate --certname admin-cli --ttl 8760h --pp-cli-auth \
+  --key-out admin-cli_key.pem > admin-cli.crt
 ```
 
 `csr` reuses an existing CA certificate's subject verbatim — the encoded DN is
@@ -221,11 +242,22 @@ together, or stop the service while you do.
 > matters: with no config file, `csr --create-key` would resolve
 > `ca_key_provider: file`, mint a **local** CA key, and emit a request bound to a
 > key a Transit-backed server will never use, so the parent would sign the wrong
-> key. Both commands therefore print the config file, storage backend and key
-> provider they resolved before doing anything — check those lines match the
+> key. All three commands therefore print the config file, storage backend and
+> key provider they resolved before doing anything — check those lines match the
 > server. If your server is configured by flags, mirror the storage and
 > key-provider settings into the config file or `PUPPET_CA_*` environment for
 > these commands.
+>
+> `generate` extends this to the settings that shape or record what it issues:
+> `crl_url`, `ocsp_url` and `logfile`. A flag-configured server would otherwise
+> leave it minting certificates with no CRL distribution point while the
+> server's own issuance carries one, and with no durable record that an
+> administrator credential was created. Mirror those too.
+>
+> `promote_cn_to_san` needs no mirroring: it has no flag, so the config file and
+> `PUPPET_CA_*` are its only sources — the same two this command reads, and it
+> cannot diverge from the server. It is still printed in the pre-flight, because
+> it decides what a run without `--dns` produces.
 
 `import-ca-cert` requires a **complete chain, nearest first**: this CA's own
 certificate, each issuer after it, ending with a self-signed root. Supply only
@@ -268,3 +300,400 @@ See [running under an external root CA](openbao-transit.md#running-under-an-exte
 — written against OpenBao Transit, but the procedure is identical for every
 `ca_key_provider`, including the default file provider —
 for the end-to-end procedure.
+
+### `generate`: minting a certificate offline
+
+`generate` issues a certificate directly against the configured storage backend
+and CA key provider. No running server, no API, and no admin client certificate.
+
+**Use the API for ordinary node certificates.** `POST /generate/{subject}`, or
+an agent submitting a CSR, needs no outage and no shell on the CA host. This
+command exists for the two cases the API cannot serve:
+
+- a `pp_cli_auth` administrator credential, which the API refuses to issue by
+  construction (see [Auth-arc OID stripping](migrating-from-puppet-server.md#auth-arc-oid-stripping));
+- minting before a server exists. `openvox-ca-ctl generate` can only reach that
+  by starting the CA temporarily on loopback with TLS disabled, where every
+  endpoint is unauthenticated — which is exactly the dance the migration guide
+  used to prescribe, and what this command exists to make unnecessary.
+  [The first credential on a new CA](#the-first-credential-on-a-new-ca) walks
+  through that case: it is a deadlock rather than an inconvenience, and it is
+  the one an operator meets first.
+
+`--dns` adds subject alternative names, repeatable or comma-separated. Supplying
+it **suppresses CN promotion**: with no `--dns`, the certname is added as a DNS
+SAN automatically (RFC 2818 clients match SANs, not the CN) — unless
+`promote_cn_to_san: false` is set, in which case a run with no `--dns` mints a
+certificate with **no SANs at all**, which is the same unusable outcome by
+configuration rather than by flag. Check the value the pre-flight prints. As
+soon as you supply any `--dns`, the list is taken verbatim. So a serving certificate that must answer
+to both its own name and an alias has to list both:
+
+```bash
+openvox-ca generate --certname ca.example.com --ttl 8760h \
+  --dns ca.example.com,puppet.example.com --key-out ca_key.pem > ca.crt
+```
+
+Omitting the certname there yields a certificate no client will accept for it.
+
+`--ttl` is required. There is deliberately no default: a certificate minted this
+way is usually long-lived and privileged, and inheriting a multi-year built-in
+silently is the wrong failure. One year is `8760h`.
+
+What you get is a certificate the CA can see. It takes a serial from the CA's
+own generator, is written to the inventory, appears in `openvox-ca-ctl list
+--all`, is swept by the expiry job, and can be revoked by name — none of which
+is true of a certificate signed out of band with `openssl`.
+
+**Autosign policy is not consulted.** This is an operator action rather than a
+request, and it has to work when there is no policy configured and no server
+running to evaluate one.
+
+**It refuses rather than bootstrapping.** If the configured storage holds no CA
+certificate and no key, the command stops. A mistyped `--cadir` would otherwise
+mint a brand-new CA and issue under it, leaving you with certificates nothing in
+your fleet trusts and no obvious sign of why.
+
+#### Where the private key goes
+
+`--key-out` writes the key to a path you choose, at mode 0600, and keeps no copy.
+
+Without it the key goes to the cadir's `private/` directory, which has two
+properties worth knowing. Nothing sweeps that directory, so the key persists
+there until you remove it. And it is written to the **local filesystem whatever
+the storage backend**, so on an ephemeral cadir — a container with no persistent
+volume — it is lost at the next restart while its certificate stays live in the
+shared inventory.
+
+`--key-out` is therefore **required** with `--pp-cli-auth` (an administrator
+credential whose key evaporates is the worst version of that problem) and with
+`--force` (see below).
+
+Both `--key-out` and `--cert-out` refuse a path that already exists rather than
+overwriting it, and they refuse before anything is issued — a mint cannot be
+undone, so a path collision has to be caught first. There is no `--overwrite`:
+move the previous file aside, which re-minting for a name you already hold will
+require you to do.
+
+#### Running alongside a live server
+
+The command prints whether the resolved backend can coordinate writes with other
+processes, and warns when it cannot.
+
+Two independent capabilities matter, and no backend has both except PostgreSQL
+and MySQL:
+
+| Backend | Cross-process locking | Atomic inventory append |
+| --- | --- | --- |
+| `postgres`, `mysql` | yes | yes |
+| `sqlite` | no (single-node) | yes |
+| `etcd`, `redis` | yes | no |
+| `filesystem` (default) | no (single-node) | no |
+
+The command reports safe to run alongside a live server only when **both** are
+present, so everything except PostgreSQL and MySQL gets the stop-the-server
+warning — including etcd and Redis, which lock correctly but still append to the
+inventory non-atomically.
+
+What each missing capability costs is different. Without cross-process locking,
+two writers can each decide a subject has no certificate and both issue one.
+Without an atomic inventory append — the blob backends, `filesystem`, `etcd` and
+`redis` — the integrity record is recomputed from a snapshot, so an interleaved
+append leaves an HMAC covering a state that never existed, after which the
+server refuses to start and there is no supported repair
+([#188](https://github.com/voxpupuli/openvox-ca/issues/188)). That second
+failure is the reason to take this seriously; it does not apply to `sqlite`,
+which is single-node but does append atomically.
+
+On a fresh install this costs nothing, because there is no server running yet.
+It is re-minting on an established CA that forces a real outage.
+
+In containers, pass `--cadir` explicitly: the shipped image sets it in the
+image's `CMD` rather than in a config file, so the bare command cannot find it.
+Where the backend does coordinate, `podman exec` or `kubectl exec` into the
+running CA is fine. Where it does not, stop the service and run a one-shot
+container against the same volume, mounting somewhere for `--key-out` to land
+that outlives the container:
+
+```bash
+mkdir -p ca-admin-out
+podman unshare chown 1000:1000 ca-admin-out
+podman run --rm \
+  -v ca-data:/data \
+  -v "$PWD/ca-admin-out":/out:Z \
+  ghcr.io/voxpupuli/openvox-ca:1.2.3 \
+  generate --cadir /data --certname admin-cli --ttl 8760h \
+  --pp-cli-auth --key-out /out/admin-cli_key.pem > admin-cli.crt
+
+# Take the key back: it lands 0600 owned by the container's user.
+podman unshare chown 0:0 ca-admin-out/admin-cli_key.pem
+```
+
+Five details that are easy to get wrong. **Pin the image to the version the
+stopped server was running**, as shown, rather than taking `:latest`: this
+container writes on-disk state that the server wrote and will read again when it
+restarts, the inventory and its integrity record among it, so a version
+difference here is between two writers of the same data rather than between a
+client and a server. The image must be fully qualified — an unqualified name
+will not resolve without registry search configured. The images run as
+`USER puppet`, so under rootless podman a bind mount owned by your host user is
+not writable inside the container — the mint then fails at the key write,
+cleanly but confusingly. Hence the `podman unshare chown`: it sets the
+directory's owner to whatever container uid 1000 maps to on the host, which is
+what `puppet` runs as.
+
+That mapping has to be undone afterwards, which is the last line of the recipe.
+The key is written `0600` as `puppet`, so on the host it belongs to a subuid you
+are not, and reading it back as yourself gives `Permission denied` — a key you
+cannot open is the same as no key at all, which is the standard this section
+already sets for the Kubernetes path. Inside `podman unshare` you *are* uid 0,
+so `chown 0:0` hands it back; do not reach for `$(id -u)`, which the shell
+expands outside the namespace and would hand the file to a different subuid
+again.
+
+Resist fixing that with `--userns` instead. A remap applies to every path the
+container touches, `ca-data` included, so mapping yourself onto uid 1000 shifts
+the CA files the server left behind out from under it — and the failure moves
+from the key write to the CA directory, which is a worse place to discover it.
+The images create `puppet` with no explicit id, so it takes the distro's first
+regular uid; confirm yours with
+`podman run --rm --entrypoint id ghcr.io/voxpupuli/openvox-ca:<tag>`. The
+`--entrypoint` is needed because the images set one — which is also why the
+recipe above appends `generate ...` rather than a shell command. And the mount
+is a dedicated directory with `:Z` rather than `$PWD` with `:z`, because `:Z`
+relabels its target private to the container — pointing that at a whole project
+or home directory would relabel unrelated files with it.
+
+On Kubernetes the equivalent is scaling the Deployment to zero and running a Job
+that mounts the same PVC, pinned for the reason above to the digest the
+Deployment was running — the subsection below has how to read that back — and
+with a retrieval step for the key: a `--key-out` path inside a Job pod that is
+then reaped is the same as having no key at all.
+
+One more asymmetry to expect: a running server answers OCSP `unknown` for a
+certificate minted this way until it restarts, because its serial index is built
+at startup. The CRL and the inventory are correct immediately.
+
+##### Reading the version back off a floating tag
+
+Pin the *version*, not whatever tag the deployment names. `compose.yml` ships
+`:latest` deliberately, so copying the tag from a deployment that floats would
+reintroduce exactly the skew this avoids.
+
+Take the digest off the **running container, before you stop it**. Inspecting
+the tag instead would resolve to whatever `:latest` points at now, which is the
+one thing it may no longer be:
+
+```bash
+podman inspect --format '{{index .RepoDigests 0}}' \
+  "$(podman inspect --format '{{.Image}}' openvox-ca)"
+```
+
+`openvox-ca` is the container name — `compose.yml` sets none, so under compose
+it is named for the project and service; `podman ps` will tell you. The command
+prints `ghcr.io/voxpupuli/openvox-ca@sha256:…`, which goes into the `podman run`
+above in place of the tag. Prefer that digest to the
+`org.opencontainers.image.version` label: the label is stamped from the git ref,
+so on a release it reads `v1.2.3` while the published tag is `1.2.3`, and
+pasting it back gives `manifest unknown` at the point you have already stopped
+the CA.
+
+An image built locally rather than pulled has no repo digest, and the command
+errors rather than printing one. Pin such a build by the image id the inner
+command prints, which `podman run` also accepts — not by the tag you gave it,
+which the next `podman build -t` moves.
+
+On Kubernetes take the resolved digest from the running pod, again before
+scaling the Deployment down:
+
+```bash
+kubectl get pod -l app=openvox-ca \
+  -o jsonpath='{.items[0].status.containerStatuses[0].imageID}'
+```
+
+`app=openvox-ca` is only an example — this project ships no manifests, so use
+whatever selector your own Deployment carries; the Deployment you are about to
+scale down will tell you
+(`kubectl get deploy <name> -o jsonpath='{.spec.selector.matchLabels}'`). An
+empty result means the selector matched nothing, not that there is no digest.
+Expect `ghcr.io/voxpupuli/openvox-ca@sha256:…`, usable as the Job's `image:`
+verbatim; some runtimes report a bare `sha256:…` config id instead, which is not
+pullable. Resolve it registry-side in that case, with the tag the pod is still
+running (`kubectl get pod <name> -o jsonpath='{.spec.containers[0].image}'`):
+
+```bash
+skopeo inspect --format '{{.Digest}}' \
+  docker://ghcr.io/voxpupuli/openvox-ca:<tag>
+```
+
+Two caveats. This asks the registry what the tag means *now*, which is the very
+thing the top of this subsection says not to trust: it is the running image only
+if nothing has re-pointed the tag since the pod started, and from a bare config
+id that is awkward to confirm — these are multi-arch tags, so `--raw` returns an
+image index with no `config` object to compare against, and getting one means
+selecting the platform entry and inspecting that digest in turn. If you are in
+this branch, treat the result as a best effort and take the digest properly next
+time. Second, without `--raw` skopeo resolves the index for your workstation's
+platform, so an arm64 laptop returns an arm64 digest for an amd64 cluster; pass
+`--override-os`/`--override-arch` to match the nodes. Once the pod is gone the
+tag is all there is — which is the whole reason to take the digest before
+scaling down.
+
+#### Replacing a certificate
+
+By default a live certificate for the name blocks re-issuance with `certificate
+already exists`. A name whose certificate was previously cleaned or revoked
+re-issues freely — the block is on a live certificate, not on a name that
+appears in the inventory.
+
+`--force` revokes the existing certificate and issues a replacement. The old
+serial goes on the CRL, but **a running server honours it until that server
+reloads the CRL**, which can be a substantial fraction of `crl_validity_days` away.
+Restart it if that matters. If the name is the CA's own hostname, the command
+says so: you may be revoking the certificate the server is currently serving.
+
+`--force` revokes the serial of the certificate in storage, which is not
+necessarily every live serial for the name — see the withdrawal note below.
+
+#### Administrator credentials
+
+`--pp-cli-auth` stamps the `pp_cli_auth` extension, which grants the holder the
+entire admin tier: signing any request, signing all of them, generating for any
+name, revoking, cleaning, importing, and replacing the CRL. See
+[authorization tiers](api.md#authorization-tiers).
+
+The command prints a warning naming all of that before it issues, and requires
+`--key-out`.
+
+**Withdrawing the grant is not one step**, and this is the part that is easy to
+get wrong:
+
+1. `openvox-ca-ctl revoke --certname <name>` — revokes the newest serial.
+2. **Restart every replica.** Each holds its own CRL cache, so a revocation made
+   elsewhere is not honoured until the process reloads it; waiting for that can
+   take roughly two-thirds of `crl_validity_days`, and even afterwards a pre-signed
+   OCSP response can vouch for the revoked serial for up to another four hours.
+3. **Check the inventory for other live serials for that name.** With
+   `revoke_on_auto_renew: false`, or after a renewal whose best-effort revoke
+   failed, more than one can be valid. Step 1 retires only the newest; retire
+   each of the others with `openvox-ca-ctl revoke --serial <serial>`, which
+   needs `--force` where the serial is still the certificate stored for its
+   subject. Step 2 applies to each of them: a revocation is not honoured by a
+   replica until it reloads.
+
+Choose `--ttl` with that in mind even so. Every extra live serial is another
+round of the three steps above, and the operator retiring the credential has to
+find them all — a short lifetime bounds the damage of missing one.
+
+`no_pp_cli_auth: true` makes the extension grant nothing, and the command
+refuses rather than minting an inert certificate. Treat that as a convenience
+check rather than a security boundary: it reads the configuration *this command*
+resolved, so it cannot see `--no-pp-cli-auth` passed as a server flag, and it
+can refuse when a shared config file sets it but the running server does not.
+
+Note also what is *not* recorded. The inventory line is the Puppet-compatible
+format — serial, dates, subject — with nothing about the grant, so the log
+message this command emits is the only record distinguishing an administrator
+credential from a node one. It is written by whoever ran the command, and it
+only lands somewhere durable if `logfile` is configured in a file this command
+can read **and that file already exists**. `generate` deliberately never creates
+it: run before the server has ever started, and as root, it would leave a
+root-owned logfile the unprivileged server then cannot open, and the service
+would fail to start. In the flagship case — minting before the first start —
+that means the record is terminal-only unless you create the file first with the
+server's runtime ownership, or capture stderr.
+
+The line to alert on is `Issued certificate carrying a Puppet authorisation
+extension`, with attributes `subject` and `grant`. `--force` emits a second one
+for the certificate it retired: `Revoked a certificate to make room for its
+replacement`, at `INFO`, with `subject` and `serial`.
+
+Match on the message string and the attribute names, not on a copied line: the
+two sinks use different encodings. With no `logfile`, logging goes to stderr as
+logfmt —
+
+```text
+level=WARN msg="Issued certificate carrying a Puppet authorisation extension" subject=openvox-admin grant="pp_cli_auth=true"
+```
+
+— while a configured `logfile`, which is what reaches a log aggregator, gets
+JSON:
+
+```json
+{"level":"WARN","msg":"Issued certificate carrying a Puppet authorisation extension","subject":"openvox-admin","grant":"pp_cli_auth=true"}
+```
+
+Both are worth a rule wherever these logs are aggregated; see
+[Monitoring destructive operations](ca-key-security.md#monitoring-destructive-operations).
+
+**Who can do this.** The `openssl` recipe this replaces required the raw CA key
+file. This requires the ability to run the binary with the server's
+configuration — which under `ca_key_provider: openbao` means Transit sign
+permission plus write access to the cadir, rather than the key itself. That is a
+deliberate widening, and the reason the feature is possible at all, but it is
+worth knowing when deciding who gets a shell on the CA host.
+
+Where the caller has a stable CN, `--puppet-server` remains the lower-privilege
+alternative: an allow-list entry is withdrawn by editing a file and restarting,
+with none of the above.
+
+#### The first credential on a new CA
+
+A CA that has just been stood up — self-signed, or a Transit-backed sub-CA whose
+chain has only now been imported — has a deadlock in it. It is easy to walk into
+and hard to reason about from inside, so it is worth meeting on paper first:
+
+- signing a pending request is an admin-tier operation;
+- admin membership is the `--puppet-server` allow list, or `pp_cli_auth`;
+- client certificates are verified against **this** CA and no other.
+
+The allow list is a list of names, and it survives the change perfectly well.
+What does not survive is the certificates behind those names: they were issued
+by the CA you have just replaced, so they no longer verify, and an allow-listed
+name whose certificate does not verify never reaches the tier check. The first
+agent to check in leaves a pending CSR that nothing in existence can sign.
+
+Nothing is broken at that point. There is simply no credential yet that this CA
+will accept, and no way to create one through an API that requires one.
+
+`generate` is the way out, because it never touches the API:
+
+```bash
+# 1. Mint the first administrator credential, offline, against the new CA.
+openvox-ca generate --certname openvox-admin --ttl 8760h --pp-cli-auth \
+  --key-out openvox-admin_key.pem > openvox-admin.crt
+
+# 2. Start the server. It indexes the new serial as it comes up.
+
+# 3. Sign the waiting request, using the credential from step 1.
+openvox-ca-ctl sign --certname agent01.example.com \
+  --client-cert openvox-admin.crt --client-key openvox-admin_key.pem \
+  --insecure
+```
+
+Minting **before** the first start, rather than after, is also what keeps step 1
+in the case that needs no coordination: no server is running, so none of
+[Running alongside a live server](#running-alongside-a-live-server) applies. If
+the server is already up, read that section first — the answer depends on your
+storage backend.
+
+Two details in that sequence cost time if you meet them cold.
+
+**`--ttl` has no default and step 1 fails without it.** That is deliberate, for
+the reason given above, and it fails before doing anything — but a bare `required
+flag(s) "ttl" not set` part-way through a ceremony reads as the command being
+broken rather than as an argument you have not supplied yet.
+
+**Step 3 needs `--insecure`, and that is less alarming than it sounds.** The
+serving certificate names the CA's public hostname; you are connecting to
+`localhost`, the default `--server-url`, so the name check fails. `--insecure`
+turns off verification of the *server* only. The credential you just minted is
+still verified in full at the other end — chain, extended key usage and
+revocation — so this weakens what you will talk to, not what the CA will accept
+from you.
+
+If you would rather not pass it at all, the alternative is to reach the server
+by a name on its certificate, arranging resolution locally and passing
+`--server-url https://puppet.example.com:8140`. That is the same trust decision
+made in a different place, not a stronger one; the flag is not the thing to
+avoid here.

@@ -297,11 +297,76 @@ migration rewrites the head under the correct scheme; a store cannot be migrated
 onto itself) and then serve from that destination. This affects pre-release
 builds only; deployments created after the fix are unaffected.
 
+## Optional capabilities
+
+Two properties vary by backend and are not visible from the `Backend` interface
+alone. `StorageService` answers both, because callers that need to know cannot
+determine them for themselves — `openvox-ca generate` uses them to decide
+whether it is safe to write to storage a live server is also using.
+
+| Backend | `SupportsDistributedLocking` | `SupportsAtomicInventory` |
+| --- | --- | --- |
+| `postgres`, `mysql` | yes | yes |
+| `sqlite` | no | yes |
+| `etcd`, `redis` | yes | no |
+| `filesystem` | no | no |
+
+**"Atomic" here covers the line append *and* the integrity-head update
+together**, which is narrower than the word's use in the backend sections above.
+etcd's CAS append and Redis's Lua append are genuinely atomic for the line
+itself; what follows them is a separate write of a recomputed whole-blob HMAC,
+and it is that pair being non-atomic which makes a concurrent appender able to
+leave an integrity value covering a state that never existed. A backend can
+therefore append atomically and still answer `false` here without either claim
+being wrong.
+
+`SupportsAtomicInventory` wraps `asInventoryStore`, so it is true exactly for
+backends implementing `InventoryStore` — the SQL backends, including SQLite.
+It is a method rather than a caller-side type assertion because
+`asInventoryStore` unwraps `OverlayBackend`, and a caller asserting on the
+wrapper would answer "no" for a SQL backend that happens to be overlaid by
+`ca_cert_file`.
+
+`SupportsDistributedLocking` deliberately does **not** answer
+`_, ok := backend.(Locker)`. That assertion is true for two backends that
+provide no cross-process lock at all: `SQLBackend` implements `Locker` but
+returns `ErrDistributedLockingUnsupported` for SQLite, and `OverlayBackend`
+implements it but delegates to a base that may not. A caller using the
+assertion to decide whether a second process is safe would be told the opposite
+of the truth in exactly the configurations where it matters. So the method
+reproduces `WithLock`'s decision instead — same `AcquireLock` call, same
+classification of the result, lock released immediately.
+
+It returns three outcomes, not two. A non-sentinel `AcquireLock` failure means
+the lock service is unreachable, which `WithLock` treats as fatal; reporting
+that as `false` would tell an operator their backend does not do distributed
+locking when the truth is that it is temporarily unavailable.
+
+The probe cannot be folded into `WithLock` — that would add a lock round trip
+to every `Sign` — so the two necessarily duplicate the classification. A
+`DescribeTable` in
+[internal/storage/capability_test.go](../../internal/storage/capability_test.go)
+runs the backends constructible without a live service — `filesystem`, `sqlite`
+and a stub `Locker` — through both and asserts they agree. That spec is what
+keeps the probe and `WithLock` from drifting, not the type system.
+
+That agreement table covers the *locking* column only: `postgres`, `mysql`,
+`etcd` and `redis` are classified there by the code above rather than by a spec,
+because the probe needs a live service to answer. `SupportsAtomicInventory` has
+no such constraint — it is a pure type probe, so the same file covers `etcd` and
+`redis` in-process alongside `filesystem`. **Add a new backend to whichever of
+the two tables can construct it in-process**, and otherwise state its
+classification here.
+
 ## Extending
 
 The `Backend` interface is defined in
 [internal/storage/backend.go](../../internal/storage/backend.go). To add a new
-backend, implement the interface, register it in
+backend, implement the interface, declare its optional capabilities (see above,
+including the `capability_test.go` table **and the operator-facing table in
+[operator-cli.md](../operator-cli.md#running-alongside-a-live-server)**, which
+tells operators whether it is safe to mint against a running server), register
+it in
 [internal/storage/spec.go](../../internal/storage/spec.go)'s
 `NewServiceFromSpec`, and add any backend-specific config fields to
 [internal/config/storage.go](../../internal/config/storage.go)'s `StorageConfig`

@@ -139,6 +139,19 @@ type CA struct {
 	// handle the SAN extension.
 	PromoteCNToSAN bool
 
+	// NoBootstrap makes Init refuse to create a new CA when none is found,
+	// rather than bootstrapping one. For tools that operate on an existing CA
+	// and have nothing sensible to do without it: minting a fresh root because
+	// a path was mistyped is far worse than an error, since the operator ends
+	// up with certificates nobody trusts and no obvious sign of why.
+	//
+	// This is a backstop, not a read-only mode. Init writes before it reaches
+	// the bootstrap decision — EnsureDirs, InitHMAC (which regenerates the
+	// inventory HMAC key if the stored one is the wrong length), and the CRL
+	// seeding on the load path — so a caller that must not touch storage at all
+	// has to check before calling Init, not rely on this.
+	NoBootstrap bool
+
 	// RevokeOnAutoRenew, when true (the default), revokes the certificate
 	// being replaced by AutoRenew (the empty-body /certificate_renewal path)
 	// once its successor is safely signed and stored, so only the newest

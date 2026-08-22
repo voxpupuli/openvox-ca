@@ -220,13 +220,33 @@ type stubLocker struct {
 	err        error
 	unlockErr  error
 	unlockedCh chan struct{}
+
+	// mu guards lastName only. The other fields are set at construction and
+	// never written again, but this one is written on every AcquireLock -- and
+	// one stubLocker above is shared by six concurrent goroutines, which reach
+	// AcquireLock before WithLock's local-mutex fallback orders anything. An
+	// unguarded write there is a race the detector reports even though every
+	// goroutine writes the same value, and mage test:unit runs -race.
+	mu       sync.Mutex
+	lastName string
 }
 
 func (s *stubLocker) AcquireLock(ctx context.Context, name string) (Unlocker, error) {
+	s.mu.Lock()
+	s.lastName = name
+	s.mu.Unlock()
 	if s.err != nil {
 		return nil, s.err
 	}
 	return &stubUnlocker{err: s.unlockErr, done: s.unlockedCh}, nil
+}
+
+// name returns the most recent name passed to AcquireLock, so a spec can assert
+// which lock a caller actually asked for.
+func (s *stubLocker) name() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastName
 }
 
 type stubUnlocker struct {

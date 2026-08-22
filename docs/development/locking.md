@@ -42,12 +42,20 @@ import-direction reason: `etcdDecomposeLockName` (`"inventory-decompose"`) in
 [etcd_inventory.go](../../internal/storage/etcd_inventory.go). They are no
 less protocol for it.
 
+One name in `internal/storage` is not a lock in that sense at all:
+`lockProbeName` in [storage.go](../../internal/storage/storage.go) defines
+`capability-probe`, which `SupportsDistributedLocking` acquires and releases
+purely to find out whether the backend coordinates across processes. It sits
+outside every namespace above so it can never contend with an operation in
+flight — see its row below.
+
 | Lock name | Serialises | Taken by |
 | --- | --- | --- |
 | `bootstrap` | First-run CA generation; seeding supporting state (CRL/inventory/serial) for a mounted cert+key; whole-store migration | `CA.Init`, `CA.seedSupportingState`, `storage.MigrateService` (which reuses the name deliberately so a migration and a bootstrapping server exclude each other) |
-| `crl` | Every CRL read-modify-write (read entries → re-sign → write) | `Revoke`, `RevokeSerial`, `ReissueCRL`, `RefreshCRLIfDue`, `CleanupExpiredCerts`, and the revoke step inside `Clean`, `Renew`, `AutoRenew` |
-| `subject:<name>` | The whole lifecycle of one subject: evict/save CSR/sign/import/clean/revoke | `SaveRequest`, `Sign`, `SignWithTTL`, `Renew`, `AutoRenew`, `Clean`, `ImportCertificate`, `Revoke` — but currently **not** `Generate` (see known gaps below) |
+| `crl` | Every CRL read-modify-write (read entries → re-sign → write) | `Revoke`, `RevokeSerial`, `ReissueCRL`, `RefreshCRLIfDue`, `CleanupExpiredCerts`, and the revoke step inside `Clean`, `Renew`, `AutoRenew`, `GenerateWithOptions` |
+| `subject:<name>` | The whole lifecycle of one subject: evict/save CSR/sign/renew/import/clean/revoke/generate | `SaveRequest`, `Sign`, `SignWithTTL`, `Renew`, `AutoRenew`, `Clean`, `ImportCertificate`, `Revoke`, `Generate`/`GenerateWithOptions` |
 | `inventory-decompose` | One-time legacy inventory blob conversion (etcd backend only) on the first start after upgrading | `EtcdBackend.decomposeLegacyInventory`, from `EnsureReady` |
+| `capability-probe` | Nothing. Acquired and released immediately by `StorageService.SupportsDistributedLocking` to find out whether this backend coordinates locks across processes at all | The offline `openvox-ca generate` pre-flight. The name sits deliberately outside every namespace above so a probe can never contend with an operation in flight |
 
 How each backend provides the distributed lock (a summary — the full per-backend
 mechanism, key layouts and transaction/retry detail lives in
@@ -169,14 +177,15 @@ Nested acquisition always follows one global order:
 subject:<name>  →  crl  →  c.mu  →  (StorageService internal mutexes)
 ```
 
-- `Revoke`, `Clean`, `Renew`, and `AutoRenew` are the paths that take all
-  three. For the three issuance paths it is the subject lock around the whole
-  operation, then the `crl` lock + `c.mu` for the revocation step; note they
-  release and re-acquire `c.mu` between the signing and revocation steps —
-  `c.mu` is not held across a `WithLock` acquisition. `Revoke` has the same
-  nesting for a different reason: the `crl` lock + `c.mu` cover the revocation
-  that is the whole operation, and the subject lock is there only to serialise
-  it against an issuance already under way for that subject.
+- `Revoke`, `Clean`, `Renew`, `AutoRenew` and `GenerateWithOptions` (the last
+  on its `ReplaceExisting` path only) are the paths that take all three. For
+  the four issuance paths it is the subject lock around the whole operation,
+  then the `crl` lock + `c.mu` for the revocation step; note they release and
+  re-acquire `c.mu` between the signing and revocation steps — `c.mu` is not
+  held across a `WithLock` acquisition. `Revoke` has the same nesting for a
+  different reason: the `crl` lock + `c.mu` cover the revocation that is the
+  whole operation, and the subject lock is there only to serialise it against
+  an issuance already under way for that subject.
 - No code path acquires `subject:<name>` while holding `crl`, and none acquires
   either while holding `c.mu`. Keep it that way; the comments in
   [signing.go](../../internal/ca/signing.go) and
@@ -241,8 +250,9 @@ path — still provides no cross-replica guarantee anyway.
    / [PR #186](https://github.com/voxpupuli/openvox-ca/pull/186) exist because
    a renewal once did such a re-check outside the lock.
 3. **Keep expensive, shared-state-free work outside the lock.** Key
-   generation and CSR assembly in `Generate` run before any lock is taken;
-   parsing and validation in `Renew`/`SaveRequest` likewise. Only the
+   generation in `Generate` runs before any lock is taken (it no longer
+   assembles a CSR at all — that round trip through the signing path was
+   removed); parsing and validation in `Renew`/`SaveRequest` likewise. Only the
    storage-touching tail belongs inside. The deliberate exception is the CA
    signature itself: `x509.CreateCertificate` runs under `c.mu` (see Tier 3),
    because the cache update it guards must be atomic with the issuance.
@@ -311,11 +321,6 @@ path — still provides no cross-replica guarantee anyway.
 Concurrency limitations that are understood and tracked. This list reflects the
 state when the document was last updated and is not guaranteed exhaustive.
 
-- [#195](https://github.com/voxpupuli/openvox-ca/issues/195) — `CA.Generate`
-  (the `POST /generate/{subject}` endpoint) is the one issuance path that
-  takes only `c.mu`, not the `subject:<name>` cluster lock. On an HA backend,
-  a `Generate` on one replica can race a `Sign`/`SaveRequest`/`Generate` for
-  the same subject on another and double-issue.
 - [#196](https://github.com/voxpupuli/openvox-ca/issues/196) —
   `DELETE /certificate_request/{subject}` deletes the CSR directly through
   `StorageService`, bypassing the subject lock, so a deletion can be outrun
@@ -342,14 +347,17 @@ state when the document was last updated and is not guaranteed exhaustive.
   could collide with the `crl`/`bootstrap` key and deny revocation.
 - [#187](https://github.com/voxpupuli/openvox-ca/issues/187) — filesystem and
   SQLite backends have no same-host, cross-**process** locking; a `ctl`
-  command (or the planned offline `generate`,
-  [#175](https://github.com/voxpupuli/openvox-ca/issues/175)) racing a running
-  server on the same cadir is uncoordinated. The related blob-backend gap —
-  nothing wraps `AppendInventory` in a cluster lock on Redis, so its
-  duplicate-serial check is not cross-replica there — is tracked separately
-  as [#204](https://github.com/voxpupuli/openvox-ca/issues/204); the etcd
-  half of that gap was closed by the decomposed inventory's atomic
-  `by-serial` guard ([#138](https://github.com/voxpupuli/openvox-ca/issues/138)).
+  command, or the offline `generate`
+  ([#175](https://github.com/voxpupuli/openvox-ca/issues/175)), racing a running
+  server on the same cadir is uncoordinated. `generate` reports this before it
+  acts, via `SupportsDistributedLocking`/`SupportsAtomicInventory`, and tells
+  the operator to stop the server; that is a warning rather than a fix. The
+  related blob-backend gap — nothing wraps `AppendInventory` in a cluster lock
+  on Redis, so its duplicate-serial check is not cross-replica there — is
+  tracked separately as
+  [#204](https://github.com/voxpupuli/openvox-ca/issues/204); the etcd half of
+  that gap was closed by the decomposed inventory's atomic `by-serial` guard
+  ([#138](https://github.com/voxpupuli/openvox-ca/issues/138)).
 - [#171](https://github.com/voxpupuli/openvox-ca/issues/171) — `cachedCRL` is
   per-replica, so authentication and renewal keep accepting a certificate
   revoked elsewhere until this process re-signs the CRL.
@@ -393,3 +401,19 @@ run: `mage test:unit` passes `-race` over every unit package, `internal/ca`
 included. What is still unraced is the build-tagged backend integration
 suites — tracked as
 [#205](https://github.com/voxpupuli/openvox-ca/issues/205).
+
+`GenerateWithOptions` is a fifth holder of both locks, on its `ReplaceExisting`
+path. It is not in that fixture; two things are pinned for it separately, in
+[generate_test.go](../../internal/ca/generate_test.go):
+
+- **The subject → CRL ordering**, asserted directly rather than raced, for the
+  same reason `renewrace_test.go` parks rather than races: nothing forces the
+  hazardous interleaving reliably.
+- **The cross-replica outcome** — two `CA` values over one `StorageService`-shared
+  backend that implements `Locker`, racing the same subject, exactly one
+  certificate. This is the outcome the per-subject lock exists for, as opposed
+  to the per-backend mechanism the integration suites cover. Note what the
+  fixture has to do to be a test at all: the two callers rendezvous at the
+  existence check, because an unsynchronised race is decided by whichever
+  goroutine writes first and detects a missing lock only by luck. Its doc
+  comment records the measurements.

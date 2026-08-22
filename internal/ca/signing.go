@@ -354,14 +354,9 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 		return nil, fmt.Errorf("invalid CSR signature for %s: %w", subject, err)
 	}
 
-	// SECURITY: Enforce the CA's key-strength policy on the client-submitted
-	// key (RSA >= 2048, ECDSA on an approved NIST curve), mirroring the policy
-	// ValidateKeyConfig applies to server-side key generation. Placed at the
-	// issuance chokepoint so no signing path can ever produce a certificate
-	// over a weak key. NIST 800-53: SC-12, SC-13 (Cryptographic Protection)
-	if err := validatePublicKey(csr.PublicKey); err != nil {
-		return nil, fmt.Errorf("rejecting CSR for %s: %w", subject, err)
-	}
+	// The key-strength policy is enforced by issueLeafLocked, the tail every
+	// issuance path shares, so a submitted CSR carrying a weak key is rejected
+	// there rather than here.
 
 	// SECURITY: Reject CSRs that request CA capabilities (BasicConstraints:
 	// CA:TRUE, OID 2.5.29.19). Without this check a submitted CSR could produce
@@ -429,14 +424,29 @@ type subjectAltNames struct {
 // ttl=0 means use the default certValidity. c.mu must be held by the caller.
 //
 // This is the tail shared by signWithDuration (inputs come from a submitted
-// CSR, after CSR-specific validation) and AutoRenew (inputs come from an
-// already-issued certificate's public key, with no CSR involved at all).
+// CSR, after CSR-specific validation), AutoRenew (inputs come from an
+// already-issued certificate's public key, with no CSR involved at all), and
+// GenerateWithOptions (inputs come from a key this CA just generated, with no
+// client involved at all).
 func (c *CA) issueLeafLocked(ctx context.Context, subject string, subjectName pkix.Name, pubKey any, sans subjectAltNames, extraExtensions []pkix.Extension, ttl time.Duration) ([]byte, error) {
 	// Defensive: a nil CACert here means the caller skipped Init() (or it
 	// failed). Without this guard the c.CACert.NotAfter dereference below
 	// would panic the entire frontend.
 	if c.CACert == nil || c.CAKey == nil {
 		return nil, ErrNotInitialized
+	}
+
+	// SECURITY: Enforce the CA's key-strength policy (RSA >= 2048, ECDSA on an
+	// approved NIST curve), mirroring the policy ValidateKeyConfig applies to
+	// server-side key generation. This is the issuance chokepoint every path
+	// shares — a submitted CSR (signWithDuration), an already-issued
+	// certificate's key (AutoRenew), and a freshly generated one
+	// (GenerateWithOptions) — so no signing path can produce a certificate over
+	// a weak key without deleting this check. It runs before the serial is
+	// allocated and before anything is written, so a rejected key consumes
+	// nothing. NIST 800-53: SC-12, SC-13 (Cryptographic Protection)
+	if err := validatePublicKey(pubKey); err != nil {
+		return nil, fmt.Errorf("rejecting certificate for %s: %w", subject, err)
 	}
 
 	// SECURITY: Generate a random 128-bit serial number (CA/Browser Forum guidance).
@@ -1054,19 +1064,28 @@ func (c *CA) AutoRenew(ctx context.Context, presentedCert *x509.Certificate) ([]
 	// policy, "renew with a new CSR" (422) is the wrong one: it points a revoked
 	// identity at the re-key path without mentioning that it is revoked. A
 	// revoked certificate is refused as revoked, whatever else is wrong with it.
+	//
+	// That ordering still holds now the key-strength check has moved into
+	// issueLeafLocked, which this path reaches only after the refusal above:
+	// the policy check is enforced no less, but it can no longer answer first.
 	if err := c.refuseIfRevoked(ctx, presentedCert, subject); err != nil {
 		return nil, err
 	}
 
-	// SECURITY: Re-check the key-strength policy before perpetuating a key
-	// via auto-renewal. A cert imported from a legacy CA (see the migrate
-	// command) may predate this CA's key policy; auto-renewal must not be a
-	// backdoor to indefinitely extend a substandard key — the operator/agent
-	// should re-key via the CSR-based Renew path instead.
-	// NIST 800-53: SC-12, SC-13 (Cryptographic Protection)
-	if err := validatePublicKey(presentedCert.PublicKey); err != nil {
-		return nil, fmt.Errorf("rejecting auto-renewal for %s: %w", subject, err)
-	}
+	// The key-strength policy is enforced by issueLeafLocked, the tail every
+	// issuance path shares. It matters most on this path: a cert imported from
+	// a legacy CA (see the migrate command) may predate this CA's key policy,
+	// and auto-renewal must not be a backdoor to indefinitely extend a
+	// substandard key — the operator/agent should re-key via the CSR-based Renew
+	// path instead. The rejection now happens after the subject lock is taken
+	// rather than before it, which is acceptable: this route is
+	// mTLS-authenticated and the lock is scoped to the caller's own subject.
+	//
+	// A pointer, not a control: this is deliberately a plain comment, matching
+	// the equivalent signpost in signWithDuration. The SECURITY / NIST 800-53
+	// SC-12, SC-13 annotation belongs with the check itself, in
+	// issueLeafLocked, so that enumerating the annotations in this tree maps
+	// each one to the line implementing it rather than to the timeout below.
 
 	ctx, cancel := context.WithTimeout(ctx, LockTimeout)
 	defer cancel()

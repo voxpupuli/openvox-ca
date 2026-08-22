@@ -78,7 +78,7 @@ mage test:puppet
 | 15 | OCSP: good/revoked status, nonce handling, cache invalidation on revoke, malformed request (400) |
 | 16 | Autosign modes: `true`, glob-pattern file, executable plugin |
 | 17 | Config drivers: env vars, config file |
-| 18 | `pp_cli_auth` mTLS: Phase 1 bootstraps certs (loopback HTTP); Phase 2 asserts pp_cli_auth cert reaches admin endpoints while plain cert is denied |
+| 18 | `pp_cli_auth` mTLS: the admin credential is minted offline with `openvox-ca generate --pp-cli-auth` before any server starts; Phase 1 bootstraps the remaining certs (loopback HTTP); Phase 2 asserts the pp_cli_auth cert reaches admin endpoints while a plain cert is denied |
 | 19 | `openvox-ca-ctl` error paths: revoke/clean/sign/generate against non-existent or duplicate subjects; arg validation; `--dns` SAN delivery; full mTLS via `--ca-cert`/`--client-cert`/`--client-key`; unreachable server |
 | 20 | Migration from an OpenVox/Puppet Server CA: import CA cert/key/CRL via `openvox-ca-ctl import`, copy pre-existing signed certs, verify fetch/sign/revoke/list all work on the migrated CA |
 | 21 | `POST /certificate_renewal` over mTLS: agent renews its own certificate; CN-mismatch renewal rejected |

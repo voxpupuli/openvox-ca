@@ -42,3 +42,17 @@ import (
 func writePublicFile(path string, data []byte) error {
 	return storage.AtomicWriteFile(path, data, storage.FilePermPublic)
 }
+
+// writePrivateFile writes private key material to an operator-supplied path.
+//
+// Mode 0600, and the difference from writePublicFile is not only the number.
+// AtomicWriteFile applies the mode to the descriptor before the rename, so a
+// private key never exists at the target path under a permissive umask, not
+// even briefly.
+//
+// The temporary-file cleanup the shared helper performs also matters more here:
+// a leftover public certificate is litter, a leftover private key is a leaked
+// credential sitting beside the path the operator chose.
+func writePrivateFile(path string, data []byte) error {
+	return storage.AtomicWriteFile(path, data, storage.FilePermPrivate)
+}
