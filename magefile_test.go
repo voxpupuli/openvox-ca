@@ -202,6 +202,27 @@ var _ = Describe("packagedDistVariants", func() {
 	})
 })
 
+var _ = Describe("withoutCommentLines", func() {
+	It("drops whole-line comments at any indentation", func() {
+		src := []byte("keep *.deb\n# drop *.rpm\n      # drop *.rpm too\nkeep *.rpm\n")
+		Expect(string(withoutCommentLines(src))).To(Equal("keep *.deb\nkeep *.rpm\n"))
+	})
+
+	It("returns a comment-free input unchanged", func() {
+		src := []byte("keep *.deb\nkeep *.rpm\n")
+		Expect(withoutCommentLines(src)).To(Equal(src))
+	})
+
+	// The stated KNOWN LIMIT, asserted rather than only described. Recording
+	// it as a spec is what stops a later reader assuming the stripping is
+	// thorough, and what makes closing the limit a deliberate change to this
+	// expectation rather than a silent widening.
+	It("keeps a trailing comment after code, which is the limit it documents", func() {
+		src := []byte("sha256sum -- *.deb  # and *.rpm\n")
+		Expect(string(withoutCommentLines(src))).To(ContainSubstring("# and *.rpm"))
+	})
+})
+
 var _ = Describe("packageExtensions", func() {
 	// Two specs, because they pin different things and only one of them can
 	// tell a derivation from a literal. Asserting `[".deb", ".rpm"]` against
@@ -1262,6 +1283,21 @@ jobs:
 				ContainSubstring("expects 3 tarballs")))
 		})
 
+		// Relocating packaging into the release job satisfies every other
+		// check here -- the sites, parity, the set and the counts all still
+		// hold, and the tag would publish a correct set of artefacts. What
+		// changes is that the magefile and its dependency tree execute beside
+		// id-token: write. A reviewer reading a diff that deletes one job and
+		// adds one step has to notice what those permissions mean; this does
+		// not require them to.
+		It("refuses to let packaging move into the job that holds the signing identity", func() {
+			badRel := bytes.Replace(goodRel, []byte("      - run: mage build:packages\n"), nil, 1)
+			badRel = bytes.Replace(badRel, []byte("  release:\n    steps:\n"),
+				[]byte("  release:\n    steps:\n      - run: mage build:packages\n"), 1)
+			Expect(verifyDistVariantsIn(goodCI, badRel, goodSBOM)).To(MatchError(
+				And(ContainSubstring("release job runs mage"), ContainSubstring("id-token: write"))))
+		})
+
 		It("is not satisfied by a comment mentioning the package build command", func() {
 			badRel := bytes.Replace(goodRel, []byte("      - run: mage build:packages\n"),
 				[]byte("      - run: |\n          # mage build:packages builds them\n          true\n"), 1)
@@ -1311,15 +1347,46 @@ jobs:
 				ContainSubstring("package set is empty")))
 		})
 
-		// The patterns are anchored on the commands and on checksums.txt rather
-		// than on the workflow's layout, and this is what says so: re-indenting
-		// every line of the step must not change the verdict. Without a spec
-		// the claim in releaseArtefactSites' doc comment is just an assertion
-		// about a regex nobody has re-read.
-		It("accepts the sites however they are indented", func() {
-			reindented := bytes.ReplaceAll(goodRel, []byte("\n          "), []byte("\n              "))
-			reindented = bytes.ReplaceAll(reindented, []byte("\n            dist/"), []byte("\n                dist/"))
+		// Only *relative* indentation is a real variation to test. A block
+		// scalar's common leading indentation is stripped by the YAML parse
+		// before any pattern sees it, so shifting every line of a step by the
+		// same amount feeds the site patterns byte-identical input and asserts
+		// nothing they do not already get from the baseline spec above. What
+		// does survive the parse is the offset of the continuation lines from
+		// the command they belong to, so that is what this varies.
+		It("accepts the asset list however its continuation lines are indented", func() {
+			reindented := bytes.ReplaceAll(goodRel, []byte("\n            dist/"), []byte("\n                dist/"))
+			Expect(reindented).NotTo(Equal(goodRel), "the fixture must actually have changed")
 			Expect(verifyDistVariantsIn(goodCI, reindented, goodSBOM)).To(Succeed())
+		})
+
+		// Mention counting strips comment lines too, and until now nothing
+		// asserted it: neither the fixture nor the real release.yml contains a
+		// comment naming a glob, so the branch never ran to any effect and
+		// could be deleted with the suite green.
+		//
+		// The path it closes is narrow but real. Two sites that name every
+		// package are deliberately unpinned -- the packaging job's upload list
+		// and the gate's count globs -- and both are covered by parity alone.
+		// A comment naming *.rpm can therefore make up for an *.rpm dropped
+		// from one of them, holding the count at four against .deb's four.
+		//
+		// The comment names one glob, not both: naming both moves the two
+		// counts together and parity holds either way, which would leave this
+		// spec passing whether the stripping happened or not.
+		It("does not count a glob named in a comment", func() {
+			withComment := bytes.Replace(goodRel, []byte("  release:\n"),
+				[]byte("  # the package job uploads dist/*.rpm too\n  release:\n"), 1)
+			Expect(withComment).NotTo(Equal(goodRel))
+			Expect(verifyDistVariantsIn(goodCI, withComment, goodSBOM)).To(Succeed())
+		})
+
+		It("does not let a comment restore a mention a real site has lost", func() {
+			badRel := bytes.Replace(goodRel, []byte("            dist/*.rpm\n"), nil, 1)
+			badRel = bytes.Replace(badRel, []byte("  release:\n"),
+				[]byte("  # the package job uploads dist/*.rpm too\n  release:\n"), 1)
+			Expect(verifyDistVariantsIn(goodCI, badRel, goodSBOM)).To(MatchError(
+				ContainSubstring("every place that lists one package must list them all")))
 		})
 
 		// Zero matches is not an omission: the guard's own pattern stopped

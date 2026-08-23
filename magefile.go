@@ -569,8 +569,30 @@ func verifyDistVariantsIn(ciSrc, relSrc, sbomSrc []byte) error {
 	}
 	if !strings.Contains(allScripts, distPackageBuildCommand) {
 		return fmt.Errorf("release.yml: no step runs %q, so the package counts and globs guard nothing; "+
-			"if packaging was removed, drop packageFormats and the packaged field with them; if it moved "+
-			"or is now built another way, teach verifyDistVariantsIn to find it", distPackageBuildCommand)
+			"if packaging was removed, drop packageFormats and the packaged field with them; if it moved, "+
+			"teach verifyDistVariantsIn to find it in its new job -- but see below for the one job it may "+
+			"not move into", distPackageBuildCommand)
+	}
+
+	// And it must not have moved into the release job. That job holds
+	// contents: write, id-token: write and attestations: write, and carries no
+	// checkout precisely so that repository code never runs beside the
+	// signing identity -- the property the workflow's header comment and the
+	// package job's comment both assert. Nothing else in the repository
+	// enforces it: there is no actionlint or zizmor here, and a reviewer
+	// reading a diff that deletes one job and adds one step to another has to
+	// notice what those permissions mean.
+	//
+	// Checked as "no mage at all" rather than "not this target". The release
+	// job runs cp, ls, find, sha256sum and gh; any mage invocation there is
+	// repository code, whichever target it names, and the narrower check would
+	// pass for a differently-named target that does the same damage.
+	if strings.Contains(relScript, "mage ") {
+		return fmt.Errorf("release.yml: the release job runs mage. It is the one job holding contents: " +
+			"write, id-token: write and attestations: write, so running repository code there puts the " +
+			"magefile and its whole dependency tree beside the identity that mints Sigstore certificates " +
+			"for this repository. Build in a job without those permissions and hand the result over as an " +
+			"artefact, the way the package job does")
 	}
 	return nil
 }
@@ -607,8 +629,15 @@ type artefactSite struct {
 //
 // Both patterns are anchored at both ends -- on the command that starts the
 // list and on `checksums.txt`, which terminates each of them -- rather than on
-// the workflow's current indentation, so re-indenting is free and removing an
+// the workflow's current layout, so reformatting is free and removing an
 // operand is not.
+//
+// Be precise about where that tolerance comes from: a block scalar's common
+// leading indentation is stripped by the YAML parse, before any pattern here
+// runs, so shifting a whole step costs these patterns nothing and is not
+// evidence that they are tolerant. What they do absorb on their own is the
+// offset of a continuation line from the command it belongs to, which is what
+// the spec varies.
 //
 // `checksums.txt` doing the terminating also means it has to stay last in the
 // asset list. Move it to the head and the capture shrinks to almost nothing,
@@ -752,15 +781,19 @@ func globbedExtensionsIn(src []byte) []string {
 // catching it means knowing where each line's shell ends, which is more
 // machinery than the failure deserves.
 func withoutCommentLines(src []byte) []byte {
-	var b bytes.Buffer
-	for _, line := range bytes.Split(src, []byte("\n")) {
+	// Joined rather than written line-by-line with a trailing newline each:
+	// splitting "a\n" yields a final empty element, so appending a newline per
+	// line would add one the input did not have. Joining round-trips a
+	// comment-free input to itself exactly.
+	lines := bytes.Split(src, []byte("\n"))
+	kept := make([][]byte, 0, len(lines))
+	for _, line := range lines {
 		if bytes.HasPrefix(bytes.TrimSpace(line), []byte("#")) {
 			continue
 		}
-		b.Write(line)
-		b.WriteByte('\n')
+		kept = append(kept, line)
 	}
-	return b.Bytes()
+	return bytes.Join(kept, []byte("\n"))
 }
 
 // sbomExtensionsIn returns the SBOM extensions named in release.yml: every
