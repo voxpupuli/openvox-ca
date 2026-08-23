@@ -164,6 +164,53 @@ var _ = Describe("distVariants", func() {
 			}
 		}
 	})
+
+	// Which variants are packaged is a decision, not an implementation
+	// detail: release.yml's package counts are derived from it, and the FIPS
+	// exclusion is the reason those counts are two rather than four. Asserted
+	// by name so that packaging a FIPS variant is a deliberate edit to this
+	// spec rather than something that slips through as a count changing.
+	It("packages the two pure-Go variants and neither FIPS variant", func() {
+		packaged := map[string]bool{}
+		for _, v := range distVariants() {
+			packaged[v.name] = v.packaged
+		}
+		Expect(packaged).To(Equal(map[string]bool{
+			"linux_amd64":      true,
+			"linux_arm64":      true,
+			"linux_amd64_fips": false,
+			"linux_arm64_fips": false,
+		}))
+	})
+})
+
+var _ = Describe("packagedDistVariants", func() {
+	It("returns exactly the variants distVariants marks packaged", func() {
+		var want []string
+		for _, v := range distVariants() {
+			if v.packaged {
+				want = append(want, v.name)
+			}
+		}
+		var got []string
+		for _, v := range packagedDistVariants() {
+			Expect(v.packaged).To(BeTrue(), "returned an unpackaged variant")
+			got = append(got, v.name)
+		}
+		Expect(got).To(Equal(want))
+		Expect(got).To(HaveLen(2))
+	})
+})
+
+var _ = Describe("packageExtensions", func() {
+	// The extensions are derived from packageFormats rather than written out
+	// a second time, so that `mage build:packages` and release.yml's gate
+	// cannot disagree about which formats exist. This spec is what stops the
+	// derivation being quietly replaced by a literal.
+	It("is packageFormats with a leading dot, in the same order", func() {
+		Expect(packageFormats).To(Equal([]string{"deb", "rpm"}))
+		Expect(packageExtensions()).To(Equal([]string{".deb", ".rpm"}))
+	})
 })
 
 var _ = Describe("release archive contents", func() {
@@ -862,7 +909,15 @@ jobs:
           if [ "$sboms" -ne 8 ]; then
             exit 1
           fi
-          sha256sum -- *.tar.gz *.spdx.json *.cdx.json > checksums.txt
+          debs="$(ls -- *.deb | wc -l)"
+          if [ "$debs" -ne 2 ]; then
+            exit 1
+          fi
+          rpms="$(ls -- *.rpm | wc -l)"
+          if [ "$rpms" -ne 2 ]; then
+            exit 1
+          fi
+          sha256sum -- *.tar.gz *.spdx.json *.cdx.json *.deb *.rpm > checksums.txt
 `)
 
 		// The generate-sbom action's output formats, whose count must equal
@@ -971,6 +1026,80 @@ jobs:
 				[]byte(`sha256sum -- *.tar.gz *.spdx.json`), 1)
 			Expect(verifyDistVariantsIn(goodCI, badRel, goodSBOM)).To(MatchError(
 				ContainSubstring("every place that lists one SBOM document must list them all")))
+		})
+
+		// The package counts are the one place release.yml records that the
+		// packaged set is smaller than the variant set. Nothing else in the
+		// workflow names it, so if these literals stop agreeing with
+		// packagedDistVariants() the disagreement is invisible until a tag.
+		It("rejects a stale deb-count literal and names the counts", func() {
+			badRel := bytes.Replace(goodRel, []byte(`"$debs" -ne 2`), []byte(`"$debs" -ne 4`), 1)
+			Expect(verifyDistVariantsIn(goodCI, badRel, goodSBOM)).To(MatchError(
+				And(ContainSubstring("expects 4 debs"), ContainSubstring("implies 2"))))
+		})
+
+		It("rejects a stale rpm-count literal and names the counts", func() {
+			badRel := bytes.Replace(goodRel, []byte(`"$rpms" -ne 2`), []byte(`"$rpms" -ne 3`), 1)
+			Expect(verifyDistVariantsIn(goodCI, badRel, goodSBOM)).To(MatchError(
+				And(ContainSubstring("expects 3 rpms"), ContainSubstring("implies 2"))))
+		})
+
+		// Same distinction the SBOM-count specs draw: a check the guard cannot
+		// parse is a different failure from a check that disagrees, and it
+		// gets a message naming the pattern rather than a count.
+		It("rejects a package-count check the guard cannot parse", func() {
+			badRel := bytes.Replace(goodRel, []byte(`"$debs" -ne 2`), []byte(`"$debs" -lt 2`), 1)
+			Expect(verifyDistVariantsIn(goodCI, badRel, goodSBOM)).To(MatchError(
+				ContainSubstring(`no debs-count check matching`)))
+		})
+
+		// A format built by `mage build:packages` that release.yml never names
+		// is built into dist/ and then left there: not counted, not
+		// checksummed, not attested, not published.
+		It("rejects a release.yml that names no site for one package format", func() {
+			badRel := bytes.ReplaceAll(goodRel, []byte(`*.rpm`), nil)
+			Expect(verifyDistVariantsIn(goodCI, badRel, goodSBOM)).To(MatchError(
+				And(ContainSubstring("packageFormats implies"), ContainSubstring(".rpm"))))
+		})
+
+		// The subtraction in sbomExtensionsIn makes the SBOM set the catch-all:
+		// an extension that is neither the tarball's nor a declared package
+		// format lands there, and is rejected for not being something
+		// generate-sbom writes. That is the intended behaviour -- nothing
+		// release.yml globs for may go undeclared -- but the message it
+		// produces attributes the extension to the SBOMs, so record which
+		// check actually fires rather than leaving a reader to assume it is
+		// the package one. Verified by mutation: removing the package set
+		// check leaves this spec passing.
+		It("rejects an extension no list declares, through the SBOM set check", func() {
+			badRel := bytes.Replace(goodRel, []byte(`*.tar.gz *.spdx.json`), []byte(`*.tar.gz *.apk *.spdx.json`), 1)
+			Expect(verifyDistVariantsIn(goodCI, badRel, goodSBOM)).To(MatchError(
+				And(ContainSubstring("generate-sbom writes"), ContainSubstring(".apk"))))
+		})
+
+		// The failure that costs the most: a package published as a release
+		// asset but absent from the sha256sum operands is absent from
+		// checksums.txt, and the attestation's subjects are that file's lines.
+		// An unattested artefact in a release whose whole point is that
+		// everything in it is attested.
+		It("rejects a release.yml that checksums one package format but not the other", func() {
+			badRel := bytes.Replace(goodRel, []byte(`*.cdx.json *.deb *.rpm > checksums.txt`),
+				[]byte(`*.cdx.json *.deb > checksums.txt`), 1)
+			Expect(verifyDistVariantsIn(goodCI, badRel, goodSBOM)).To(MatchError(
+				ContainSubstring("every place that lists one package must list them all")))
+		})
+
+		// The tarball extension and the package extensions are subtracted from
+		// the SBOM set before it is compared. Getting that subtraction wrong
+		// in either direction breaks a correct workflow, so assert that the
+		// real thing -- which names all three kinds at overlapping sites --
+		// still passes; the "accepts synthetic workflows" spec above uses a
+		// fixture, and a fixture is only as good as its resemblance.
+		It("does not confuse package extensions for SBOM documents", func() {
+			Expect(sbomExtensionsIn(goodRel)).NotTo(ContainElement(".deb"))
+			Expect(sbomExtensionsIn(goodRel)).NotTo(ContainElement(".rpm"))
+			Expect(sbomExtensionsIn(goodRel)).NotTo(ContainElement(".tar.gz"))
+			Expect(packageExtensionsIn(goodRel)).To(Equal([]string{".deb", ".rpm", ".deb", ".rpm"}))
 		})
 	})
 })

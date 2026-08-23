@@ -125,8 +125,8 @@ sharing the `puppet` account.
 ### Verifying what you downloaded
 
 `checksums.txt` establishes that a download arrived intact. Provenance establishes
-where it came from: every tarball, container image and chart published from a
-release tag carries a [SLSA v1.0](https://slsa.dev/spec/v1.0/provenance) build
+where it came from: every tarball, package, container image and chart published
+from a release tag carries a [SLSA v1.0](https://slsa.dev/spec/v1.0/provenance) build
 provenance attestation, signed through [Sigstore](https://www.sigstore.dev/) with a
 short-lived certificate — there is no long-lived signing key to trust or rotate.
 
@@ -164,8 +164,10 @@ $ cosign verify-blob-attestation openvox-ca_${VERSION}_linux_amd64.tar.gz \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
-The bundle covers every file listed in `checksums.txt` — each tarball and each SBOM —
-so the same bundle verifies any of them.
+The bundle covers every file listed in `checksums.txt` — each tarball, each SBOM and
+each `.deb`/`.rpm` — so the same bundle verifies any of them. Note what that does *not*
+include: the `.rpm` carries no rpm header signature, so `dnf` with `gpgcheck=1` has
+nothing of its own to check. Verify the package with the bundle above before installing it.
 
 Container images and the Helm chart are both attested and signed. Because images are
 also built for pull requests, whose certificates name `refs/pull/N/merge`, pin the

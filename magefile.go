@@ -283,8 +283,8 @@ const sbomFormatsPerVariant = 2
 // but not the others fails CI loudly instead of silently shipping an
 // incomplete release. The checked copies: ci.yml's dist job matrix,
 // release.yml's build job matrix, release.yml's checksum-step shell loop and
-// its tarball- and SBOM-count literals, and the generate-sbom action's output
-// format count.
+// its tarball-, SBOM- and package-count literals, and the generate-sbom
+// action's output format count.
 func verifyDistVariants() error {
 	ciSrc, err := os.ReadFile(filepath.Join(".github", "workflows", "ci.yml"))
 	if err != nil {
@@ -331,17 +331,33 @@ func verifyDistVariantsIn(ciSrc, relSrc, sbomSrc []byte) error {
 	}
 
 	// The checksum step also asserts exact artefact counts: one tarball per
-	// variant, and sbomFormatsPerVariant SBOM documents per variant. Both
-	// literals are checked, because a variant added to every list above but
-	// missed here would leave the release publishing fewer artefacts than it
-	// built while every matrix still agreed.
-	counts := []struct {
+	// variant, sbomFormatsPerVariant SBOM documents per variant, and one
+	// package per format per packaged variant. Every literal is checked,
+	// because a variant added to every list above but missed here would leave
+	// the release publishing fewer artefacts than it built while every matrix
+	// still agreed.
+	//
+	// The package counts are keyed on packagedDistVariants() rather than on
+	// every variant -- see distVariantSpec.packaged for why those differ --
+	// and there is one literal per format rather than a single total. A total
+	// of four is satisfied by four .deb files and no .rpm at all; two counts
+	// of two are not, and they name the format that went missing.
+	packagedWant := packagedDistVariants()
+	type artefactCount struct {
 		what     string
 		pattern  string
 		expected int
-	}{
+	}
+	counts := []artefactCount{
 		{"tarballs", `"\$tarballs" -ne (\d+)`, len(want)},
 		{"SBOMs", `"\$sboms" -ne (\d+)`, len(want) * sbomFormatsPerVariant},
+	}
+	for _, f := range packageFormats {
+		counts = append(counts, artefactCount{
+			what:     f + "s",
+			pattern:  `"\$` + f + `s" -ne (\d+)`,
+			expected: len(packagedWant),
+		})
 	}
 	for _, c := range counts {
 		m := regexp.MustCompile(c.pattern).FindSubmatch(relSrc)
@@ -405,28 +421,97 @@ func verifyDistVariantsIn(ciSrc, relSrc, sbomSrc []byte) error {
 		return fmt.Errorf("generate-sbom writes %v, but release.yml names %v; update them together",
 			written, distinct)
 	}
-	mentions := make(map[string]int, len(written))
+	if err := verifyExtensionParity(globbed, written, "SBOM document"); err != nil {
+		return err
+	}
+
+	// The packages get the same treatment, and for the same reason. They are
+	// named at four sites -- the packaging job's upload list, the checksum
+	// step's two count globs, its sha256sum operands and the release step's
+	// asset list -- and the site that matters is the sha256sum: a package
+	// missing from checksums.txt is published unattested, because the
+	// attestation's subjects are exactly that file's lines.
+	//
+	// The set check is the other half: a format in packageFormats that
+	// release.yml names nowhere would be built by `mage build:packages` and
+	// then silently left behind in dist/, and a format release.yml names that
+	// packageFormats does not would have its count literal go unchecked.
+	pkgWant := packageExtensions()
+	pkgGlobbed := packageExtensionsIn(relSrc)
+	pkgDistinct := slices.Compact(slices.Sorted(slices.Values(pkgGlobbed)))
+	if !slices.Equal(pkgDistinct, slices.Sorted(slices.Values(pkgWant))) {
+		return fmt.Errorf("packageFormats implies %v, but release.yml names %v; update them together",
+			pkgWant, pkgDistinct)
+	}
+	return verifyExtensionParity(pkgGlobbed, pkgWant, "package")
+}
+
+// verifyExtensionParity asserts that release.yml names every extension in want
+// the same number of times, given every mention of any of them in globbed.
+//
+// Counting mentions rather than pinning a regex to each site is what keeps
+// this guard from being fragile against anyone reformatting the workflow: it
+// does not care where the names appear or how they are written, only that no
+// site lists one member of a set and not another. noun names one member, for
+// the error message.
+func verifyExtensionParity(globbed, want []string, noun string) error {
+	mentions := make(map[string]int, len(want))
 	for _, ext := range globbed {
 		mentions[ext]++
 	}
-	for _, ext := range written[1:] {
-		if mentions[ext] != mentions[written[0]] {
-			return fmt.Errorf("release.yml names %s %d time(s) but %s %d time(s); every place that lists one SBOM document must list them all",
-				written[0], mentions[written[0]], ext, mentions[ext])
+	for _, ext := range want[1:] {
+		if mentions[ext] != mentions[want[0]] {
+			return fmt.Errorf("release.yml names %s %d time(s) but %s %d time(s); every place that lists one %s must list them all",
+				want[0], mentions[want[0]], ext, mentions[ext], noun)
 		}
 	}
 	return nil
 }
 
-// sbomExtensionsIn returns every SBOM file extension named in release.yml, in
-// the two shapes it uses: a glob (`*.spdx.json`, `dist/*.cdx.json`) or a
-// per-variant name (`openvox-ca_*_"$variant".cdx.json`). The tarball extension
-// is dropped, since most of these sites list it alongside the SBOMs and it has
-// its own count check above.
-func sbomExtensionsIn(src []byte) []string {
+// globbedExtensionsIn returns every release-artefact file extension named in
+// release.yml, in the two shapes it uses: a glob (`*.spdx.json`,
+// `dist/*.cdx.json`, `dist/*.deb`) or a per-variant name
+// (`openvox-ca_*_"$variant".cdx.json`). Duplicates are kept -- the callers
+// count mentions, not distinct names.
+//
+// Only these two shapes count, which is why prose may name a file freely: a
+// comment saying "openvox-ca_VER_amd64.deb" has no `*` or `"$variant"` in
+// front of the extension and so cannot satisfy a check by being written down.
+func globbedExtensionsIn(src []byte) []string {
 	var out []string
 	for _, m := range regexp.MustCompile(`(?:\*|"\$variant")(\.[a-z0-9.]+)`).FindAllSubmatch(src, -1) {
-		if ext := string(m[1]); ext != ".tar.gz" {
+		out = append(out, string(m[1]))
+	}
+	return out
+}
+
+// sbomExtensionsIn returns the SBOM extensions named in release.yml: every
+// globbed extension that is neither the tarball's nor a package's. Both are
+// listed alongside the SBOMs at most of these sites and both have their own
+// count checks, so leaving them in would make the SBOM set check fail on a
+// perfectly correct workflow.
+//
+// The exclusions are a subtraction rather than an allow-list on purpose. A
+// third SBOM format added to generate-sbom must show up here, because that is
+// how the guard notices release.yml has not been taught to publish it.
+func sbomExtensionsIn(src []byte) []string {
+	pkgs := packageExtensions()
+	var out []string
+	for _, ext := range globbedExtensionsIn(src) {
+		if ext == distArchiveExtension || slices.Contains(pkgs, ext) {
+			continue
+		}
+		out = append(out, ext)
+	}
+	return out
+}
+
+// packageExtensionsIn returns the package extensions named in release.yml.
+func packageExtensionsIn(src []byte) []string {
+	pkgs := packageExtensions()
+	var out []string
+	for _, ext := range globbedExtensionsIn(src) {
+		if slices.Contains(pkgs, ext) {
 			out = append(out, ext)
 		}
 	}
@@ -1906,13 +1991,14 @@ type distVariantSpec struct {
 	//
 	// The FIPS variants are deliberately excluded. They exist so an operator
 	// under a FIPS obligation can run a boringcrypto build; that operator is
-	// installing into a controlled estate, not apt-getting from a repository.
-	// Packaging them would also mean hand-writing their dependencies and
-	// keeping them true: those binaries are cgo and dynamically linked, and
-	// nfpm runs neither dpkg-shlibdeps nor rpm's automatic requires. Not an
-	// oversight -- flip this to true and every count derived from this set
-	// moves with it, including the artefact counts the release workflow
-	// asserts once #266 has added its packaging job.
+	// installing into a controlled estate, not apt-getting from a repository,
+	// and packaging them would double the package matrix to serve a case
+	// nobody has asked for. Packaging them would also mean hand-writing their
+	// dependencies and keeping them true: those binaries are cgo and
+	// dynamically linked, and nfpm runs neither dpkg-shlibdeps nor rpm's
+	// automatic requires. Not an oversight -- flip this to true and every
+	// count derived from this set moves with it, including the artefact counts
+	// the release workflow asserts in its packaging job.
 	packaged bool
 }
 
@@ -1953,6 +2039,12 @@ func packageExtensions() []string {
 	}
 	return out
 }
+
+// distArchiveExtension is the extension of a variant's tarball. Named because
+// the extension checks below have to exclude it: it is listed alongside the
+// SBOMs and the packages at most of the sites they scan, and it has its own
+// count check.
+const distArchiveExtension = ".tar.gz"
 
 // distVariants returns the full set of release artefact variants. The FIPS
 // variants are cgo builds, so they need a Linux host with a C toolchain for
