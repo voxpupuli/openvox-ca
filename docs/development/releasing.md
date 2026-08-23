@@ -46,16 +46,18 @@ Each tarball contains both binaries, `openvox-ca` and `openvox-ca-ctl` (mode
 0755), and the systemd unit `openvox-ca.service` (mode 0644) — see [running
 under systemd](../systemd.md). Only Linux is built: there are no macOS or
 Windows release artefacts. To build the same four tarballs (plus a
-tarballs-only `checksums.txt`) locally in one go, run `mage build:dist`, and
-`mage build:packages` for the packages — both are ordinary local targets. The
-SBOMs and the provenance bundle are the two things that are not: they are
-produced by the release workflow only.
+tarballs-only `checksums.txt`) locally in one go, run `mage build:dist`. Once
+[#250](https://github.com/voxpupuli/openvox-ca/issues/250) lands,
+`mage build:packages` will build the packages from those tarballs the same way
+— it is an ordinary local target, not a workflow-only step. The SBOMs and the
+provenance bundle are the two things that will still not build locally: they
+are produced by the release workflow only.
 
 ### Packages
 
 The `.deb` and `.rpm` are built from the tarballs, not from a separate compile:
 the binaries inside `openvox-ca_X.Y.Z_amd64.deb` are byte-for-byte the ones
-inside `openvox-ca_X.Y.Z_linux_amd64.tar.gz`. Three consequences:
+inside `openvox-ca_X.Y.Z_linux_amd64.tar.gz`. What follows from that:
 
 - **No package-specific SBOM.** The variant's existing SPDX and CycloneDX pair
   already describes the package's contents. The cost is a mapping step: a
@@ -67,14 +69,19 @@ inside `openvox-ca_X.Y.Z_linux_amd64.tar.gz`. Three consequences:
 - **The packages are attested with no extra step.** They are listed in
   `checksums.txt`, and the attestation's subjects are exactly that file's
   lines, so they acquire the same SLSA provenance the tarballs have.
-- **The exact filenames are nfpm's, and #250 fixes them.** The shapes above
-  are the conventional ones each format uses, and the architecture spellings
-  are the format's own — `x86_64`/`aarch64` for rpm, `amd64`/`arm64` for deb —
-  but the rpm `release` field (the `-1`) and any epoch are nfpm configuration,
-  so treat the worked examples here as illustrative until #250 has landed.
-  Nothing in the repository can check them: `verifyDistVariants` deliberately
-  matches only globbed extensions, so a filename written in prose cannot
-  satisfy a guard by being written down.
+- **The exact filenames are nfpm's, and #250 fixes them.** The shapes above are
+  the conventional ones each format uses, but the rpm `release` field (the
+  `-1`) and any epoch are nfpm configuration, so treat the worked examples here
+  as illustrative until #250 has landed. Nothing in the repository checks them:
+  `verifyDistVariants` reads the workflows, not this file, and even there it
+  matches only globbed extensions by design — so a filename written in prose
+  cannot satisfy a guard by being written down.
+- **`packageFormats` in `magefile.go` is the list of formats, and #250 must
+  build from it.** `verifyDistVariants` holds `release.yml`'s package counts
+  and globs to that variable, but it cannot see the packaging code, so nothing
+  stops an implementation of `mage build:packages` carrying a second list of
+  its own — which is the drift the `packaged` field was made a field to avoid.
+  Whoever implements #250 should read the formats from `packageFormats`.
 - **The FIPS variants are not packaged.** An operator under a FIPS obligation
   installs into a controlled estate rather than from a repository, so
   `linux_amd64_fips` and `linux_arm64_fips` ship as tarballs only. This is
@@ -122,6 +129,13 @@ chart can never name an image that does not exist.
 > leg is [#254](https://github.com/voxpupuli/openvox-ca/issues/254).)
 
 ## Before you tag
+
+> **Blocked until [#250](https://github.com/voxpupuli/openvox-ca/issues/250)
+> merges.** `mage build:packages` does not exist yet, so the Release workflow
+> fails at its packaging job while *Container images* and *Helm chart* publish
+> regardless — including the mutable `latest` tags. Check that `mage
+> build:packages` runs before you go any further; the reasoning and the
+> recovery are under [Packages](#packages).
 
 1. **Land the version bump.** Run:
 
@@ -621,5 +635,6 @@ release](#verifying-a-release).)
 | Gap | Impact |
 | --- | --- |
 | **`helm verify` has nothing to check.** | The chart is signed with cosign and carries SLSA provenance like everything else, but it is packaged without `helm package --sign`, so there is no `.prov` file for `helm push` to upload. Helm's own provenance mechanism is PGP: it wants a long-lived keyring, which is the thing Sigstore's short-lived certificates exist to avoid. Anyone whose tooling asserts specifically on `helm verify`, rather than on a cosign signature, is not served. |
+| **Packaging is not implemented, so no tag can be cut.** | `mage build:packages` is [#250](https://github.com/voxpupuli/openvox-ca/issues/250) and does not exist yet, so the Release workflow's packaging job fails and no release is published — while *Container images* and *Helm chart*, which trigger on the same tag and do not depend on Release, publish anyway. This is the one gap here that blocks releasing outright rather than degrading it. See [Before you tag](#before-you-tag). |
 | **`dnf` with `gpgcheck=1` has nothing to check either.** | The same gap in a second ecosystem, and for the same reason. The `.rpm` carries no rpm header signature, so a `gpgcheck=1` repository rejects it; what it carries instead is the Sigstore bundle over `checksums.txt`, which `dnf` cannot read. `apt` is unaffected, because it verifies the repository index rather than the individual `.deb`, as Debian's own archive does. Signing rpm headers is [#256](https://github.com/voxpupuli/openvox-ca/issues/256), deferred on the question of whose key. See [verifying a release](#verifying-a-release). |
 | **Nothing verifies what is inside a package.** | Tarballs are unpacked and their binaries executed by `verify-dist-artifact` before they are attested. The packages have no counterpart, so a well-formed package with the wrong contents is checksummed, attested and published, and the first person to find out runs `apt install`. The install-and-verify legs that close it are [#254](https://github.com/voxpupuli/openvox-ca/issues/254); until then the [rehearsal checklist](#rehearsing-on-your-own-fork) asks a maintainer to open one by hand. |

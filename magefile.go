@@ -257,6 +257,58 @@ func workflowMatrixVariants(src []byte, job string) ([]string, error) {
 	return names, nil
 }
 
+// workflowRunScripts returns the shell of a workflow's `run:` steps, with
+// comment lines removed. Pass a job name for one job's steps in order, or ""
+// for every job's.
+//
+// This exists so the checks below match what a workflow *runs* rather than
+// what its file *contains*. It is the same distinction automergeRequiredClauses
+// draws one screen down, and for the same reason: this file carries long
+// explanatory comments that quote the very commands the checks look for, so a
+// raw byte search can be satisfied by prose describing a step instead of by the
+// step. `regexp.FindSubmatch` returns the first match in the file, so a comment
+// above the real site does not merely also match -- it is matched instead, and
+// the real site is then free to lose an operand silently.
+//
+// Comment lines inside a run scalar are stripped for the same reason: parsing
+// the YAML removes `#` comments between steps but not the ones inside a block
+// scalar, which is shell text as far as the parser is concerned.
+func workflowRunScripts(src []byte, job string) (string, error) {
+	var doc struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				Run string `yaml:"run"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(src, &doc); err != nil {
+		return "", err
+	}
+	names := slices.Sorted(maps.Keys(doc.Jobs))
+	if job != "" {
+		if _, ok := doc.Jobs[job]; !ok {
+			return "", fmt.Errorf("job %q not found", job)
+		}
+		names = []string{job}
+	}
+	var b strings.Builder
+	for _, name := range names {
+		for _, step := range doc.Jobs[name].Steps {
+			for _, line := range strings.Split(step.Run, "\n") {
+				if strings.HasPrefix(strings.TrimSpace(line), "#") {
+					continue
+				}
+				b.WriteString(line)
+				b.WriteByte('\n')
+			}
+		}
+	}
+	if b.Len() == 0 {
+		return "", fmt.Errorf("job %q has no run: steps", job)
+	}
+	return b.String(), nil
+}
+
 // shellVariantList extracts the variant names iterated by the
 // `for variant in ...; do` loop in the release workflow's checksum step.
 func shellVariantList(src []byte) ([]string, error) {
@@ -311,13 +363,24 @@ func verifyDistVariantsIn(ciSrc, relSrc, sbomSrc []byte) error {
 	}
 	sortedWant := slices.Sorted(slices.Values(want))
 
+	// The release job's shell, parsed and stripped of comment lines, is what
+	// every shell-shaped check below reads. Reading the file instead lets a
+	// comment quoting a command be found in that command's place -- see
+	// workflowRunScripts. The loop below was doing exactly that before the
+	// package checks were added, so this is one fix for four checks rather
+	// than three new ones beside an old one left as a trap.
+	relScript, err := workflowRunScripts(relSrc, "release")
+	if err != nil {
+		return fmt.Errorf("release.yml: %w", err)
+	}
+
 	checks := []struct {
 		where string
 		got   func() ([]string, error)
 	}{
 		{"ci.yml dist job matrix", func() ([]string, error) { return workflowMatrixVariants(ciSrc, "dist") }},
 		{"release.yml build job matrix", func() ([]string, error) { return workflowMatrixVariants(relSrc, "build") }},
-		{"release.yml checksum-step shell loop", func() ([]string, error) { return shellVariantList(relSrc) }},
+		{"release.yml checksum-step shell loop", func() ([]string, error) { return shellVariantList([]byte(relScript)) }},
 	}
 	for _, c := range checks {
 		got, err := c.got()
@@ -343,6 +406,20 @@ func verifyDistVariantsIn(ciSrc, relSrc, sbomSrc []byte) error {
 	// of four is satisfied by four .deb files and no .rpm at all; two counts
 	// of two are not, and they name the format that went missing.
 	packagedWant := packagedDistVariants()
+
+	// Both emptiness cases are abstention, not "packaging is switched off".
+	// With either list empty every package check below passes vacuously --
+	// the counts loop adds no entries, packageExtensionsIn filters everything
+	// away, and the set comparison holds between two empty sets -- while
+	// release.yml goes on counting, checksumming and publishing packages.
+	// Caught here rather than left to fall through, because further down the
+	// symptom is sbomExtensionsIn's catch-all reporting .deb and .rpm as
+	// documents generate-sbom does not write, which sends the reader to
+	// entirely the wrong place.
+	if err := verifyPackageSetNonEmpty(packageFormats, packagedWant); err != nil {
+		return err
+	}
+
 	type artefactCount struct {
 		what     string
 		pattern  string
@@ -360,7 +437,7 @@ func verifyDistVariantsIn(ciSrc, relSrc, sbomSrc []byte) error {
 		})
 	}
 	for _, c := range counts {
-		m := regexp.MustCompile(c.pattern).FindSubmatch(relSrc)
+		m := regexp.MustCompile(c.pattern).FindSubmatch([]byte(relScript))
 		if m == nil {
 			return fmt.Errorf("release.yml: no %s-count check matching %q", c.what, c.pattern)
 		}
@@ -472,7 +549,7 @@ func verifyDistVariantsIn(ciSrc, relSrc, sbomSrc []byte) error {
 	published = append(published, distArchiveExtension)
 	published = append(published, written...)
 	published = append(published, pkgWant...)
-	if err := verifyArtefactSites(relSrc, published); err != nil {
+	if err := verifyArtefactSites(relScript, published); err != nil {
 		return err
 	}
 
@@ -481,7 +558,16 @@ func verifyDistVariantsIn(ciSrc, relSrc, sbomSrc []byte) error {
 	// untouched -- leaving a gate that would first fail at tag time on
 	// "Expected 2 release deb packages, found 0", which is precisely the
 	// failure this function exists to move earlier.
-	if !bytes.Contains(relSrc, []byte(distPackageBuildCommand)) {
+	// Every job's shell, not the file: the step this looks for is described in
+	// a comment directly above itself, so a file-wide byte search would be
+	// satisfied by that comment alone -- and commenting out the `run:` line
+	// while leaving its comment block is exactly the shape a "disable
+	// packaging while I debug this tag" edit takes.
+	allScripts, err := workflowRunScripts(relSrc, "")
+	if err != nil {
+		return fmt.Errorf("release.yml: %w", err)
+	}
+	if !strings.Contains(allScripts, distPackageBuildCommand) {
 		return fmt.Errorf("release.yml: no step runs %q, so the package counts and globs guard nothing; "+
 			"if packaging was removed, drop packageFormats and the packaged field with them; if it moved "+
 			"or is now built another way, teach verifyDistVariantsIn to find it", distPackageBuildCommand)
@@ -502,8 +588,15 @@ type artefactSite struct {
 }
 
 // releaseArtefactSites are the two lists in release.yml where an omission is
-// silent and expensive, as distinct from the several where it is merely
-// asymmetric and caught by parity.
+// silent and expensive. The other two sites that name every package -- the
+// packaging job's upload list and the gate's own count globs -- are left
+// unpinned deliberately: losing a format from either does not publish anything
+// wrong, it makes the count gate fire at tag time on "Expected 2 release deb
+// packages, found 0". Loud and blocking, so there is nothing for a
+// pull-request-time check to rescue. (Note that parity is not what saves those
+// two: a symmetric removal moves both counts in step and parity holds. The
+// count gate is the backstop, and it runs at tag time, which is exactly why
+// the two sites below -- where there is no backstop at all -- are pinned.)
 //
 // Losing an extension from the checksums.txt operands publishes that artefact
 // with no provenance at all, because the attestation's subjects are exactly
@@ -513,9 +606,23 @@ type artefactSite struct {
 // exist.
 //
 // Both patterns are anchored at both ends -- on the command that starts the
-// list and on `checksums.txt`, which terminates each of them -- rather than
-// pinned to the workflow's current indentation, so reformatting is free and
-// removing an operand is not.
+// list and on `checksums.txt`, which terminates each of them -- rather than on
+// the workflow's current indentation, so re-indenting is free and removing an
+// operand is not.
+//
+// `checksums.txt` doing the terminating also means it has to stay last in the
+// asset list. Move it to the head and the capture shrinks to almost nothing,
+// and the guard reports the first artefact as missing -- loud, but with a
+// message that describes the wrong problem.
+//
+// They differ in how much more than indentation they tolerate, and the weaker
+// one is worth naming. The asset list is `(?s)`, so it survives being
+// re-wrapped across lines. The checksums operand list is not: its capture
+// class excludes newlines, so splitting that line with backslash continuations
+// stops it matching -- a plausible edit, since the line already runs to about
+// eighty characters and grows by one operand per format. That failure is loud
+// rather than silent, taking the "could not find" branch below, which names
+// the pattern and says to teach it rather than delete it.
 func releaseArtefactSites() []artefactSite {
 	return []artefactSite{
 		{"the checksums.txt operand list", `sha256sum -- ([^\n>]+) > checksums\.txt`},
@@ -527,9 +634,21 @@ func releaseArtefactSites() []artefactSite {
 // site in releaseArtefactSites. exts holds extensions, so the check is for the
 // glob `*<ext>`: matching the bare extension would be satisfied by a mention
 // in a comment.
-func verifyArtefactSites(relSrc []byte, exts []string) error {
+func verifyArtefactSites(script string, exts []string) error {
 	for _, site := range releaseArtefactSites() {
-		m := regexp.MustCompile(site.pattern).FindSubmatch(relSrc)
+		// Exactly one, not the first of several. A second occurrence means the
+		// guard is choosing between two candidate sites with no way to know
+		// which one publishes the release, and picking the earlier silently is
+		// how a shadowed site goes unchecked.
+		all := regexp.MustCompile(site.pattern).FindAllStringSubmatch(script, -1)
+		if len(all) > 1 {
+			return fmt.Errorf("release.yml: found %d candidates for %s; the guard cannot tell which one "+
+				"publishes the release, so leave one", len(all), site.what)
+		}
+		var m []string
+		if len(all) == 1 {
+			m = all[0]
+		}
 		if m == nil {
 			// Distinct from an omission, and it gets its own message for the
 			// same reason the SBOM output-flag branch does: the guard could
@@ -540,12 +659,32 @@ func verifyArtefactSites(relSrc []byte, exts []string) error {
 				site.what, site.pattern)
 		}
 		for _, ext := range exts {
-			if !bytes.Contains(m[1], []byte("*"+ext)) {
+			if !strings.Contains(m[1], "*"+ext) {
 				return fmt.Errorf("release.yml: %s does not name *%s; every artefact a release publishes "+
 					"must be both checksummed and published, and the parity check above cannot see a "+
 					"format dropped from a site alongside its siblings", site.what, ext)
 			}
 		}
+	}
+	return nil
+}
+
+// verifyPackageSetNonEmpty rejects the two ways the package half of this guard
+// can end up guarding nothing. Split out from verifyDistVariantsIn so that both
+// branches can be reached from a spec: distVariants() is a function rather than
+// a variable, so the second one is otherwise unreachable without building a
+// synthetic workflow around it -- and an untestable branch in a guard is the
+// thing this file keeps finding in everyone else's work.
+func verifyPackageSetNonEmpty(formats []string, packaged []distVariantSpec) error {
+	if len(formats) == 0 {
+		return fmt.Errorf("the package set is empty: packageFormats lists no formats, so release.yml's " +
+			"package counts and globs are held to nothing; if packages are no longer published, remove " +
+			"them from release.yml and drop the packaged field too")
+	}
+	if len(packaged) == 0 {
+		return fmt.Errorf("the package set is empty: no variant in distVariants() is marked packaged, so " +
+			"release.yml's package counts and globs are held to nothing; if packages are no longer " +
+			"published, remove them from release.yml and drop packageFormats too")
 	}
 	return nil
 }
@@ -559,6 +698,16 @@ func verifyArtefactSites(relSrc []byte, exts []string) error {
 // site lists one member of a set and not another. noun names one member, for
 // the error message.
 func verifyExtensionParity(globbed, want []string, noun string) error {
+	// want[1:] would panic on an empty slice, and empty is a state a
+	// maintainer can reach by following this guard's own advice to "drop
+	// packageFormats" -- which would hand them a stack trace out of
+	// `mage dev:check` instead of the clean result the message implies. It is
+	// also the abstaining case: with nothing to compare, every check below
+	// passes vacuously.
+	if len(want) == 0 {
+		return fmt.Errorf("the %s set is empty, so release.yml's %s lists are held to nothing; "+
+			"if that artefact is no longer published, remove its checks rather than emptying its list", noun, noun)
+	}
 	mentions := make(map[string]int, len(want))
 	for _, ext := range globbed {
 		mentions[ext]++
@@ -583,10 +732,35 @@ func verifyExtensionParity(globbed, want []string, noun string) error {
 // front of the extension and so cannot satisfy a check by being written down.
 func globbedExtensionsIn(src []byte) []string {
 	var out []string
-	for _, m := range regexp.MustCompile(`(?:\*|"\$variant")(\.[a-z0-9.]+)`).FindAllSubmatch(src, -1) {
+	for _, m := range regexp.MustCompile(`(?:\*|"\$variant")(\.[a-z0-9.]+)`).FindAllSubmatch(withoutCommentLines(src), -1) {
 		out = append(out, string(m[1]))
 	}
 	return out
+}
+
+// withoutCommentLines drops every line whose first non-space character is `#`.
+//
+// Applied before counting mentions because release.yml is heavily commented and
+// those comments discuss the very globs being counted. Without it, writing
+// `*.deb` in a comment would tip the parity check into "release.yml names .deb
+// 5 time(s) but .rpm 4 time(s)" -- an error that names counts rather than the
+// comment that caused them, sending the reader to look for a missing artefact
+// that is not missing.
+//
+// KNOWN LIMIT, stated rather than closed: this catches whole-line comments,
+// not a trailing `# *.deb` after code. That form does not occur here and
+// catching it means knowing where each line's shell ends, which is more
+// machinery than the failure deserves.
+func withoutCommentLines(src []byte) []byte {
+	var b bytes.Buffer
+	for _, line := range bytes.Split(src, []byte("\n")) {
+		if bytes.HasPrefix(bytes.TrimSpace(line), []byte("#")) {
+			continue
+		}
+		b.Write(line)
+		b.WriteByte('\n')
+	}
+	return b.Bytes()
 }
 
 // sbomExtensionsIn returns the SBOM extensions named in release.yml: every
