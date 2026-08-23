@@ -80,7 +80,8 @@ root for a Docker/Podman Compose deployment.
 ### Release tarballs
 
 Each release publishes four tarballs — `linux_amd64` and `linux_arm64`, each in a standard and a
-FIPS (`_fips`) build — plus an SBOM pair per tarball, `checksums.txt`, and a signed provenance
+FIPS (`_fips`) build — plus a `.deb` and an `.rpm` for each of the two non-FIPS architectures, an
+SBOM pair per tarball, `checksums.txt`, and a signed provenance
 bundle (see [verifying what you downloaded](#verifying-what-you-downloaded)). Every archive
 contains both binaries (`openvox-ca`, `openvox-ca-ctl`) and the systemd unit
 `openvox-ca.service`. Asset names carry the release version, so set `VERSION` to the release you

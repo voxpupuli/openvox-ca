@@ -432,10 +432,16 @@ func verifyDistVariantsIn(ciSrc, relSrc, sbomSrc []byte) error {
 	// missing from checksums.txt is published unattested, because the
 	// attestation's subjects are exactly that file's lines.
 	//
-	// The set check is the other half: a format in packageFormats that
-	// release.yml names nowhere would be built by `mage build:packages` and
-	// then silently left behind in dist/, and a format release.yml names that
-	// packageFormats does not would have its count literal go unchecked.
+	// The set check is the other half, and it works in one direction only:
+	// a format in packageFormats that release.yml names nowhere would be built
+	// by `mage build:packages` and then silently left behind in dist/. The
+	// converse -- release.yml naming a format packageFormats does not define
+	// -- cannot reach here, because packageExtensionsIn filters through
+	// packageExtensions(), so pkgGlobbed is always a subset of pkgWant. That
+	// case is caught, but by sbomExtensionsIn's catch-all above, which reports
+	// it as an extension generate-sbom does not write. Said here because the
+	// error a maintainer sees names the SBOMs, and a comment claiming this
+	// check catches it would send them to the wrong place.
 	pkgWant := packageExtensions()
 	pkgGlobbed := packageExtensionsIn(relSrc)
 	pkgDistinct := slices.Compact(slices.Sorted(slices.Values(pkgGlobbed)))
@@ -443,7 +449,105 @@ func verifyDistVariantsIn(ciSrc, relSrc, sbomSrc []byte) error {
 		return fmt.Errorf("packageFormats implies %v, but release.yml names %v; update them together",
 			pkgWant, pkgDistinct)
 	}
-	return verifyExtensionParity(pkgGlobbed, pkgWant, "package")
+	if err := verifyExtensionParity(pkgGlobbed, pkgWant, "package"); err != nil {
+		return err
+	}
+
+	// Everything above is relative: it compares copies of a list against each
+	// other, and every comparison is satisfied by dropping a whole set at
+	// once. Delete `*.deb *.rpm` from the sha256sum operands together and the
+	// mention counts fall from four to three in step, parity holds, the set
+	// check still sees both formats at the three remaining sites, and the
+	// count literals are in a different part of the step entirely -- so the
+	// guard passes while the release publishes two packages that appear in no
+	// line of checksums.txt, and therefore in no subject of the attestation.
+	// That is not a contrived edit: it is what a rebase or merge taking main's
+	// side of that one line produces.
+	//
+	// So the sites that cannot be allowed to lose an artefact are named
+	// outright. This is the same lesson as the sibling guard below, whose
+	// `merging == 0` branch exists because a guard that finds nothing to guard
+	// has abstained rather than passed.
+	published := make([]string, 0, 1+len(written)+len(pkgWant))
+	published = append(published, distArchiveExtension)
+	published = append(published, written...)
+	published = append(published, pkgWant...)
+	if err := verifyArtefactSites(relSrc, published); err != nil {
+		return err
+	}
+
+	// And the packaging itself. Delete the whole `package` job and every check
+	// above still passes -- the release job's counts, globs and asset list are
+	// untouched -- leaving a gate that would first fail at tag time on
+	// "Expected 2 release deb packages, found 0", which is precisely the
+	// failure this function exists to move earlier.
+	if !bytes.Contains(relSrc, []byte(distPackageBuildCommand)) {
+		return fmt.Errorf("release.yml: no step runs %q, so the package counts and globs guard nothing; "+
+			"if packaging was removed, drop packageFormats and the packaged field with them; if it moved "+
+			"or is now built another way, teach verifyDistVariantsIn to find it", distPackageBuildCommand)
+	}
+	return nil
+}
+
+// distPackageBuildCommand is the command release.yml must run to produce the
+// packages. Named as a constant so the check for it cannot drift from the
+// workflow by a rename that leaves a plausible-looking string behind.
+const distPackageBuildCommand = "mage build:packages"
+
+// artefactSite is one place in release.yml that must name every artefact the
+// release publishes, identified by a pattern capturing the list it holds.
+type artefactSite struct {
+	what    string
+	pattern string
+}
+
+// releaseArtefactSites are the two lists in release.yml where an omission is
+// silent and expensive, as distinct from the several where it is merely
+// asymmetric and caught by parity.
+//
+// Losing an extension from the checksums.txt operands publishes that artefact
+// with no provenance at all, because the attestation's subjects are exactly
+// that file's lines. Losing one from the asset list is the mirror image: the
+// artefact is built, checksummed and attested, and then never published, so
+// every consumer's `sha256sum -c checksums.txt` fails on a file that does not
+// exist.
+//
+// Both patterns are anchored at both ends -- on the command that starts the
+// list and on `checksums.txt`, which terminates each of them -- rather than
+// pinned to the workflow's current indentation, so reformatting is free and
+// removing an operand is not.
+func releaseArtefactSites() []artefactSite {
+	return []artefactSite{
+		{"the checksums.txt operand list", `sha256sum -- ([^\n>]+) > checksums\.txt`},
+		{"the gh release create asset list", `(?s)gh release create (.*?)dist/checksums\.txt`},
+	}
+}
+
+// verifyArtefactSites asserts that every extension in exts is named at every
+// site in releaseArtefactSites. exts holds extensions, so the check is for the
+// glob `*<ext>`: matching the bare extension would be satisfied by a mention
+// in a comment.
+func verifyArtefactSites(relSrc []byte, exts []string) error {
+	for _, site := range releaseArtefactSites() {
+		m := regexp.MustCompile(site.pattern).FindSubmatch(relSrc)
+		if m == nil {
+			// Distinct from an omission, and it gets its own message for the
+			// same reason the SBOM output-flag branch does: the guard could
+			// not see the list at all, which usually means the step was
+			// reshaped rather than that an artefact was dropped.
+			return fmt.Errorf("release.yml: could not find %s (pattern %q); if the release step was "+
+				"reshaped, teach releaseArtefactSites to find it rather than deleting the check",
+				site.what, site.pattern)
+		}
+		for _, ext := range exts {
+			if !bytes.Contains(m[1], []byte("*"+ext)) {
+				return fmt.Errorf("release.yml: %s does not name *%s; every artefact a release publishes "+
+					"must be both checksummed and published, and the parity check above cannot see a "+
+					"format dropped from a site alongside its siblings", site.what, ext)
+			}
+		}
+	}
+	return nil
 }
 
 // verifyExtensionParity asserts that release.yml names every extension in want

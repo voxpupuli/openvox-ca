@@ -11,8 +11,9 @@ on:
 # signing certificate that speaks for this repository. The cost of keeping the signing
 # identity in one job is that provenance binds the bytes the release job
 # downloaded from the run's artifact store, rather than binding them to the
-# individual build job that compiled them; attesting in build instead would
-# tighten that at the price of granting attestations: write to four more jobs.
+# individual build job that compiled them; attesting where each artefact is
+# produced instead would tighten that at the price of granting attestations:
+# write to five more jobs -- the four build legs and the packaging job.
 permissions:
   contents: read
   checks: read  # verify-release-tag reads the tagged commit's check runs
@@ -88,10 +89,12 @@ jobs:
           retention-days: 1
 
   # -- Package the built binaries as .deb and .rpm ----------------------------
-  # One runner packages every variant. nfpm is pure Go and reads the target
-  # architecture out of its configuration rather than out of the host, so there
-  # is no cross toolchain to arrange and no reason to spend a native runner per
-  # format -- which is why this is not folded into the build matrix above.
+  # One runner packages both packaged variants -- the FIPS pair is deliberately
+  # not packaged, see distVariantSpec.packaged. The build matrix above spends a
+  # native runner per variant because the FIPS builds are cgo and would
+  # otherwise need a cross toolchain; packaging has no such constraint. nfpm is
+  # pure Go and takes the target architecture from its configuration rather
+  # than from the host, so a second per-variant matrix would buy nothing.
   #
   # It is a job of its own rather than a step in `release` for the reason the
   # header comment gives: packaging means executing this repository's magefile,
@@ -128,6 +131,18 @@ jobs:
         # knows the package filenames -- they are the format-native ones that
         # apt and dnf expect, and they carry no variant name, which is why the
         # completeness gate below counts them rather than globbing per variant.
+        #
+        # NOT VERIFIED HERE, and said plainly rather than left to be noticed:
+        # the build job runs verify-dist-artifact over the tarballs, executing
+        # the exact binaries it is about to publish, and the packages have no
+        # counterpart. A package that is well formed but wrong -- a binary at
+        # the wrong path, a missing unit, the wrong mode -- passes the count
+        # gate, is checksummed, is attested and is published. Closing it means
+        # asserting an install layout, which is #250's to define and #254's to
+        # exercise in CI; a check written here first would be asserting a
+        # payload that does not exist yet. Until then the rehearsal checklist
+        # in docs/development/releasing.md asks a maintainer to open one by
+        # hand, which is a worse guarantee honestly labelled.
         run: mage build:packages
       - name: Upload packages
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -177,38 +192,50 @@ jobs:
             ls -- openvox-ca_*_"$variant".spdx.json > /dev/null
             ls -- openvox-ca_*_"$variant".cdx.json > /dev/null
           done
-          tarballs="$(ls -- *.tar.gz | wc -l)"
+          # Counted with find, not `ls | wc -l`. This step declares no shell:
+          # key and the workflow has no defaults: block, so it runs under
+          # bash -e with pipefail off, where an unmatched glob leaves ls
+          # failing and the pipeline reporting wc's zero -- which happens to
+          # give the right answer. It stops giving the right answer the moment
+          # anyone adds `shell: bash` or `set -o pipefail`, which is the house
+          # style everywhere else here (see verify-dist-artifact, which opts
+          # into pipefail deliberately). find exits 0 on no matches, so the
+          # count below is the assertion under every combination of options
+          # rather than only under today's.
+          tarballs="$(find . -maxdepth 1 -name '*.tar.gz' | wc -l)"
           if [ "$tarballs" -ne 4 ]; then
             echo "::error::Expected 4 release tarballs, found $tarballs"
             exit 1
           fi
           # Two documents per variant: SPDX-JSON and CycloneDX-JSON.
-          sboms="$(ls -- *.spdx.json *.cdx.json | wc -l)"
+          sboms="$(find . -maxdepth 1 \( -name '*.spdx.json' -o -name '*.cdx.json' \) | wc -l)"
           if [ "$sboms" -ne 8 ]; then
             echo "::error::Expected 8 release SBOMs, found $sboms"
             exit 1
           fi
           # One package per format for each packaged variant -- the FIPS
           # variants are deliberately not packaged, so this is two, not four.
-          # Counted rather than globbed per variant because a package's
-          # filename is the format-native one and carries no variant name;
-          # renaming them to match would break the convention apt and dnf
-          # expect. Both literals are checked against packagedDistVariants()
-          # by verifyDistVariants, so a variant that starts or stops being
+          # Both literals are checked against packagedDistVariants() by
+          # verifyDistVariants, so a variant that starts or stops being
           # packaged fails `mage dev:check` on a pull request rather than
           # failing a tag.
           #
-          # A count of zero is the no-match case as well as the empty case:
-          # with no packages present the glob goes unexpanded, ls fails, and
-          # the pipeline still yields 0 because its status is wc's. That is
-          # deliberate -- the count below is the assertion, and it reports the
-          # shortfall rather than leaving ls's message to explain itself.
-          debs="$(ls -- *.deb | wc -l)"
+          # Counted, not globbed per variant: a package's filename is the
+          # format-native one and carries no variant name, and renaming them
+          # to match would break the convention apt and dnf expect. Globbing
+          # per architecture instead was considered and is not worth it --
+          # dist/ is one directory, so two files cannot share a name, and a
+          # count of two therefore already means two distinct packages. The
+          # only extra case a per-architecture glob would catch is a wrong
+          # architecture spelling, which would mean hard-coding nfpm's output
+          # names here and failing a tag if #250 chooses differently. It would
+          # add a way to be wrong and almost no way to be right.
+          debs="$(find . -maxdepth 1 -name '*.deb' | wc -l)"
           if [ "$debs" -ne 2 ]; then
             echo "::error::Expected 2 release deb packages, found $debs"
             exit 1
           fi
-          rpms="$(ls -- *.rpm | wc -l)"
+          rpms="$(find . -maxdepth 1 -name '*.rpm' | wc -l)"
           if [ "$rpms" -ne 2 ]; then
             echo "::error::Expected 2 release rpm packages, found $rpms"
             exit 1
