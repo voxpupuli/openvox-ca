@@ -222,8 +222,8 @@ jobs:
           # variants are deliberately not packaged, so this is two, not four.
           # Both literals are checked against packagedDistVariants() by
           # verifyDistVariants, so a variant that starts or stops being
-          # packaged fails `mage dev:check` on a pull request rather than
-          # failing a tag.
+          # packaged fails `mage dev:check` on a pull request rather than at
+          # tag time.
           #
           # Counted, not globbed per variant: a package's filename is the
           # format-native one and carries no variant name, and renaming them
@@ -254,11 +254,11 @@ jobs:
       - name: Attest build provenance
         id: attest
         # One call, whose subjects are exactly the lines of checksums.txt —
-        # every tarball, every SBOM and every package. Using the checksum file
-        # as the subject
-        # list rather than a glob means the attested set and the published set
-        # cannot drift apart, and it authenticates checksums.txt's contents as
-        # a side effect: the signed subject list is the same list.
+        # every tarball, every SBOM and every package. Using the checksum
+        # file as the subject list rather than a glob means the attested set
+        # and the published set cannot drift apart, and it authenticates
+        # checksums.txt's contents as a side effect: the signed subject list
+        # is the same list.
         #
         # Provenance only, no SBOM attestation. The SBOM documents are
         # published as release assets and are themselves subjects of this

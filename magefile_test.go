@@ -202,6 +202,45 @@ var _ = Describe("packagedDistVariants", func() {
 	})
 })
 
+var _ = Describe("workflowRunScripts", func() {
+	// Both error branches were unreachable from any spec before this: every
+	// fixture called it with "release" (always present, always carrying run
+	// steps) or "" (never empty for the same reason), so the messages could
+	// have said anything.
+	src := []byte(`
+jobs:
+  build:
+    steps:
+      - run: mage build:dist
+  actionsOnly:
+    steps:
+      - uses: actions/checkout@0000000000000000000000000000000000000000
+`)
+
+	It("returns one job's run steps", func() {
+		Expect(workflowRunScripts(src, "build")).To(Equal("mage build:dist\n"))
+	})
+
+	It("names the job it could not find", func() {
+		_, err := workflowRunScripts(src, "nope")
+		Expect(err).To(MatchError(ContainSubstring(`job "nope" not found`)))
+	})
+
+	// A step that is purely `uses:` has an empty Run, and splitting "" yields
+	// one empty line -- so counting written bytes rather than run steps made
+	// this branch fire only for a job with no steps at all, which workflow
+	// YAML does not produce.
+	It("reports a job whose steps are all uses:", func() {
+		_, err := workflowRunScripts(src, "actionsOnly")
+		Expect(err).To(MatchError(ContainSubstring(`job "actionsOnly" has no run: steps`)))
+	})
+
+	It("does not say `job \"\"` when asked for every job", func() {
+		_, err := workflowRunScripts([]byte("jobs:\n  a:\n    steps:\n      - uses: x\n"), "")
+		Expect(err).To(MatchError(ContainSubstring("no job in the workflow has no run: steps")))
+	})
+})
+
 var _ = Describe("withoutCommentLines", func() {
 	It("drops whole-line comments at any indentation", func() {
 		src := []byte("keep *.deb\n# drop *.rpm\n      # drop *.rpm too\nkeep *.rpm\n")
@@ -1298,6 +1337,35 @@ jobs:
 				And(ContainSubstring("release job runs mage"), ContainSubstring("id-token: write"))))
 		})
 
+		// Shell is one of two ways repository code enters a job, and the
+		// other is the one release.yml already reaches for three times. A
+		// guard reading only `run:` cannot see `uses: ./...`, so moving
+		// packaging behind a local composite action -- the more idiomatic
+		// refactor here than inlining mage -- would have walked straight past
+		// it into the job holding id-token: write.
+		It("refuses a local action in the job that holds the signing identity", func() {
+			badRel := bytes.Replace(goodRel, []byte("  release:\n    steps:\n"),
+				[]byte("  release:\n    steps:\n      - uses: ./.github/actions/build-packages\n"), 1)
+			Expect(verifyDistVariantsIn(goodCI, badRel, goodSBOM)).To(MatchError(
+				And(ContainSubstring("local action"), ContainSubstring("id-token: write"))))
+		})
+
+		It("refuses a checkout in the job that holds the signing identity", func() {
+			badRel := bytes.Replace(goodRel, []byte("  release:\n    steps:\n"),
+				[]byte("  release:\n    steps:\n      - uses: actions/checkout@0000000000000000000000000000000000000000\n"), 1)
+			Expect(verifyDistVariantsIn(goodCI, badRel, goodSBOM)).To(MatchError(
+				ContainSubstring("checks the repository out")))
+		})
+
+		// "mage " is a substring of "image ". The gate is deliberately broad
+		// over mage targets, and must not be broad over English.
+		It("does not mistake the word image for a mage invocation", func() {
+			ok := bytes.Replace(goodRel, []byte("          sha256sum -- "),
+				[]byte("          echo \"the image digest is pinned\"\n          sha256sum -- "), 1)
+			Expect(ok).NotTo(Equal(goodRel))
+			Expect(verifyDistVariantsIn(goodCI, ok, goodSBOM)).To(Succeed())
+		})
+
 		It("is not satisfied by a comment mentioning the package build command", func() {
 			badRel := bytes.Replace(goodRel, []byte("      - run: mage build:packages\n"),
 				[]byte("      - run: |\n          # mage build:packages builds them\n          true\n"), 1)
@@ -1387,6 +1455,21 @@ jobs:
 				[]byte("  # the package job uploads dist/*.rpm too\n  release:\n"), 1)
 			Expect(verifyDistVariantsIn(goodCI, badRel, goodSBOM)).To(MatchError(
 				ContainSubstring("every place that lists one package must list them all")))
+		})
+
+		// releaseArtefactSites' doc comment names this edit as the one the
+		// operand pattern cannot absorb -- the capture class excludes
+		// newlines, so a backslash continuation stops it matching. Asserting
+		// it makes the documented failure mode a tested one, and pins that it
+		// is loud rather than silently wrong.
+		It("reports a wrapped checksums operand line rather than silently missing it", func() {
+			badRel := bytes.Replace(goodRel,
+				[]byte("          sha256sum -- *.tar.gz *.spdx.json *.cdx.json *.deb *.rpm > checksums.txt\n"),
+				[]byte("          sha256sum -- *.tar.gz *.spdx.json *.cdx.json \\\n            *.deb *.rpm > checksums.txt\n"), 1)
+			Expect(badRel).NotTo(Equal(goodRel))
+			Expect(verifyDistVariantsIn(goodCI, badRel, goodSBOM)).To(MatchError(
+				And(ContainSubstring("could not find the checksums.txt operand list"),
+					ContainSubstring("teach releaseArtefactSites"))))
 		})
 
 		// Zero matches is not an omission: the guard's own pattern stopped

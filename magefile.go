@@ -292,8 +292,13 @@ func workflowRunScripts(src []byte, job string) (string, error) {
 		names = []string{job}
 	}
 	var b strings.Builder
+	scripts := 0
 	for _, name := range names {
 		for _, step := range doc.Jobs[name].Steps {
+			if step.Run == "" {
+				continue
+			}
+			scripts++
 			for _, line := range strings.Split(step.Run, "\n") {
 				if strings.HasPrefix(strings.TrimSpace(line), "#") {
 					continue
@@ -303,10 +308,50 @@ func workflowRunScripts(src []byte, job string) (string, error) {
 			}
 		}
 	}
-	if b.Len() == 0 {
-		return "", fmt.Errorf("job %q has no run: steps", job)
+	// Counted, not measured by b.Len(). Splitting an empty Run yields one
+	// empty line, so a step that is purely `uses:` still wrote a newline and
+	// the length test could only ever fire on a job with no steps at all --
+	// which workflow YAML does not produce. The branch was dead.
+	if scripts == 0 {
+		return "", fmt.Errorf("%s has no run: steps", describeJobScope(job))
 	}
 	return b.String(), nil
+}
+
+// describeJobScope names what a workflowRunScripts call was looking at, so its
+// errors read correctly for both call shapes rather than saying `job ""`.
+func describeJobScope(job string) string {
+	if job == "" {
+		return "no job in the workflow"
+	}
+	return fmt.Sprintf("job %q", job)
+}
+
+// workflowStepUses returns the `uses:` reference of every step in one job, in
+// order. Separate from workflowRunScripts because the two answer different
+// questions: what a job *runs* as shell, and what it *pulls in* as an action.
+func workflowStepUses(src []byte, job string) ([]string, error) {
+	var doc struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				Uses string `yaml:"uses"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(src, &doc); err != nil {
+		return nil, err
+	}
+	j, ok := doc.Jobs[job]
+	if !ok {
+		return nil, fmt.Errorf("job %q not found", job)
+	}
+	out := make([]string, 0, len(j.Steps))
+	for _, step := range j.Steps {
+		if step.Uses != "" {
+			out = append(out, step.Uses)
+		}
+	}
+	return out, nil
 }
 
 // shellVariantList extracts the variant names iterated by the
@@ -587,15 +632,52 @@ func verifyDistVariantsIn(ciSrc, relSrc, sbomSrc []byte) error {
 	// job runs cp, ls, find, sha256sum and gh; any mage invocation there is
 	// repository code, whichever target it names, and the narrower check would
 	// pass for a differently-named target that does the same damage.
-	if strings.Contains(relScript, "mage ") {
+	if releaseJobMageRE.MatchString(relScript) {
 		return fmt.Errorf("release.yml: the release job runs mage. It is the one job holding contents: " +
 			"write, id-token: write and attestations: write, so running repository code there puts the " +
 			"magefile and its whole dependency tree beside the identity that mints Sigstore certificates " +
 			"for this repository. Build in a job without those permissions and hand the result over as an " +
 			"artefact, the way the package job does")
 	}
+
+	// Shell is only one of the two ways repository code enters a job, and it
+	// is the less idiomatic one here: release.yml already reaches for a local
+	// composite action three times (verify-release-tag, verify-dist-artifact,
+	// generate-sbom), so `uses: ./.github/actions/build-packages` is the more
+	// natural way someone would move packaging into this job -- and a check
+	// that reads only `run:` cannot see it. A checkout is refused for the same
+	// reason one step further back: it is what puts the code on disk for a
+	// local action to run, and the header comment's claim is that this job
+	// carries none.
+	//
+	// Third-party actions pinned by SHA are not repository code and are what
+	// this job is built from, so only `./` references and checkout are named.
+	uses, err := workflowStepUses(relSrc, "release")
+	if err != nil {
+		return fmt.Errorf("release.yml: %w", err)
+	}
+	for _, u := range uses {
+		switch {
+		case strings.HasPrefix(u, "./"):
+			return fmt.Errorf("release.yml: the release job uses the local action %q. A local action is "+
+				"repository code, and this is the one job holding contents: write, id-token: write and "+
+				"attestations: write -- the same objection as running mage here, by the route that does "+
+				"not go through a run: step", u)
+		case strings.HasPrefix(u, "actions/checkout@"):
+			return fmt.Errorf("release.yml: the release job checks the repository out (%q). It carries no "+
+				"checkout deliberately: with no working tree there is nothing for a local action or an "+
+				"inline script to execute beside the signing identity", u)
+		}
+	}
 	return nil
 }
+
+// releaseJobMageRE matches a mage invocation in shell. Anchored on a
+// word boundary rather than testing for the substring "mage ", which is also a
+// substring of "image ", "damage " and "homage " -- a release-job line
+// mentioning an image would otherwise fail dev:check with an error telling the
+// maintainer to look for a mage call that is not there.
+var releaseJobMageRE = regexp.MustCompile(`(^|[^\w.-])mage\s`)
 
 // distPackageBuildCommand is the command release.yml must run to produce the
 // packages. Named as a constant so the check for it cannot drift from the
