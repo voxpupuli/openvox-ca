@@ -1119,6 +1119,32 @@ jobs:
 		Expect(workflowMageTargets(src)).To(ConsistOf("dev:check", "test:unit"))
 	})
 
+	// The trap that made the first version of the workflow floor fire on a
+	// correct file: "image " ends in "mage ". Pinned in both directions so a
+	// future widening of the leading class cannot reintroduce it.
+	It("does not mistake a word ending in mage for an invocation", func() {
+		src := []byte(`
+jobs:
+  images:
+    steps:
+      - run: docker build -t image .
+      - run: echo "publishing the image now"
+`)
+		Expect(workflowMageTargets(src)).To(BeEmpty())
+		Expect(mageInvocationRE.Match(src)).To(BeFalse())
+	})
+
+	It("finds an invocation by an explicit path as well as a bare one", func() {
+		src := []byte(`
+jobs:
+  gate:
+    steps:
+      - run: |
+          "$HOME"/go/bin/mage dev:check
+`)
+		Expect(workflowMageTargets(src)).To(ConsistOf("dev:check"))
+	})
+
 	It("skips invocations no static reading can resolve", func() {
 		src := []byte(`
 jobs:

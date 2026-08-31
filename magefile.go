@@ -1021,7 +1021,17 @@ func mageTargetNames(src []byte) ([]string, error) {
 
 // mageInvocationRE matches a `mage <target>` call in shell. The target is
 // whatever follows, up to the first character that ends a word or a command.
-var mageInvocationRE = regexp.MustCompile(`(?m)(?:^|[\s;&|(])mage\s+([^\s;&|)]+)`)
+//
+// The leading class is #266's, from its releaseJobMageRE: anything that is not
+// a word character, a dot or a dash. Both guards are answering "is this an
+// invocation or a word ending in mage", and two expressions for one question
+// drift. It is written non-capturing here only so the target stays group 1;
+// the matching is the same.
+//
+// A bare `[\s]` prefix is not enough and a bare substring search is much worse:
+// "image " ends in "mage ", so a search for that finds one in every workflow
+// that mentions a container image.
+var mageInvocationRE = regexp.MustCompile(`(?m)(?:^|[^\w.-])mage\s+([^\s;&|)]+)`)
 
 // workflowMageTargets returns the mage targets a workflow's run: steps invoke,
 // lowercased, skipping the ones no static reading can resolve.
@@ -1165,13 +1175,19 @@ func distVariants() []distVariantSpec {
 			env:      map[string]string{"CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "arm64"},
 			packaged: true,
 		},
+		// packaged is stated rather than left to the zero value. There is no
+		// behavioural difference; the difference is to the next person adding
+		// a variant, for whom an omission reads as an oversight and a false
+		// reads as a decision. This one is a decision -- see the field.
 		{
-			name: "linux_amd64_fips",
-			env:  fipsEnv("amd64"),
+			name:     "linux_amd64_fips",
+			env:      fipsEnv("amd64"),
+			packaged: false,
 		},
 		{
-			name: "linux_arm64_fips",
-			env:  fipsEnv("arm64"),
+			name:     "linux_arm64_fips",
+			env:      fipsEnv("arm64"),
+			packaged: false,
 		},
 	}
 }
