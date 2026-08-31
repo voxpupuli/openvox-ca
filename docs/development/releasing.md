@@ -47,7 +47,7 @@ Each tarball contains both binaries, `openvox-ca` and `openvox-ca-ctl` (mode
 under systemd](../systemd.md). Only Linux is built: there are no macOS or
 Windows release artefacts. To build the same four tarballs (plus a
 tarballs-only `checksums.txt`) locally in one go, run `mage build:dist`. Once
-[#250](https://github.com/voxpupuli/openvox-ca/issues/250) lands,
+[#282](https://github.com/voxpupuli/openvox-ca/pull/282) merges,
 `mage build:packages` will build the packages from those tarballs the same way
 — it is an ordinary local target, not a workflow-only step. The SBOMs and the
 provenance bundle are the two things that will still not build locally: they
@@ -72,7 +72,7 @@ inside `openvox-ca_X.Y.Z_linux_amd64.tar.gz`. What follows from that:
 - **The exact filenames are nfpm's, and #250 fixes them.** The shapes above are
   the conventional ones each format uses, but the rpm `release` field (the
   `-1`) and any epoch are nfpm configuration, so treat the worked examples here
-  as illustrative until #250 has landed. Nothing in the repository checks them:
+  as illustrative until #282 has merged. Nothing in the repository checks them:
   `verifyDistVariants` reads the workflows, not this file, and even there it
   matches only globbed extensions by design — so a filename written in prose
   cannot satisfy a guard by being written down.
@@ -130,7 +130,7 @@ chart can never name an image that does not exist.
 
 ## Before you tag
 
-> **Blocked until [#250](https://github.com/voxpupuli/openvox-ca/issues/250)
+> **Blocked until [#282](https://github.com/voxpupuli/openvox-ca/pull/282)
 > merges.** `mage build:packages` does not exist yet, so the Release workflow
 > fails at its packaging job while *Container images* and *Helm chart* publish
 > regardless — including the mutable `latest` tags. Check that `mage
@@ -635,6 +635,6 @@ release](#verifying-a-release).)
 | Gap | Impact |
 | --- | --- |
 | **`helm verify` has nothing to check.** | The chart is signed with cosign and carries SLSA provenance like everything else, but it is packaged without `helm package --sign`, so there is no `.prov` file for `helm push` to upload. Helm's own provenance mechanism is PGP: it wants a long-lived keyring, which is the thing Sigstore's short-lived certificates exist to avoid. Anyone whose tooling asserts specifically on `helm verify`, rather than on a cosign signature, is not served. |
-| **Packaging is not implemented, so no tag can be cut.** | `mage build:packages` is [#250](https://github.com/voxpupuli/openvox-ca/issues/250) and does not exist yet, so the Release workflow's packaging job fails and no release is published — while *Container images* and *Helm chart*, which trigger on the same tag and do not depend on Release, publish anyway. This is the one gap here that blocks releasing outright rather than degrading it. See [Before you tag](#before-you-tag). |
+| **Packaging is not implemented, so no tag can be cut.** | `mage build:packages` is [#250](https://github.com/voxpupuli/openvox-ca/issues/250), implemented by [#282](https://github.com/voxpupuli/openvox-ca/pull/282), and is not on `main` yet, so the Release workflow's packaging job fails and no release is published — while *Container images* and *Helm chart*, which trigger on the same tag and do not depend on Release, publish anyway. This is the one gap here that blocks releasing outright rather than degrading it. See [Before you tag](#before-you-tag). |
 | **`dnf` with `gpgcheck=1` has nothing to check either.** | The same gap in a second ecosystem, and for the same reason. The `.rpm` carries no rpm header signature, so a `gpgcheck=1` repository rejects it; what it carries instead is the Sigstore bundle over `checksums.txt`, which `dnf` cannot read. `apt` is unaffected, because it verifies the repository index rather than the individual `.deb`, as Debian's own archive does. Signing rpm headers is [#256](https://github.com/voxpupuli/openvox-ca/issues/256), deferred on the question of whose key. See [verifying a release](#verifying-a-release). |
 | **Nothing verifies what is inside a package.** | Tarballs are unpacked and their binaries executed by `verify-dist-artifact` before they are attested. The packages have no counterpart, so a well-formed package with the wrong contents is checksummed, attested and published, and the first person to find out runs `apt install`. The install-and-verify legs that close it are [#254](https://github.com/voxpupuli/openvox-ca/issues/254); until then the [rehearsal checklist](#rehearsing-on-your-own-fork) asks a maintainer to open one by hand. |

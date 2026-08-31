@@ -125,10 +125,14 @@ jobs:
           pattern: dist-*
           merge-multiple: true
       - name: Build packages
-        # THIS TARGET DOES NOT EXIST YET. It is #250, and until that merges
-        # this step fails with mage's "unknown target" and nothing in the log
-        # says why -- hence this line. See the "Packages" section of
-        # docs/development/releasing.md before pushing a v* tag.
+        # THIS TARGET DOES NOT EXIST YET. It is #250, implemented by PR #282,
+        # and until #282 merges this step fails with mage's "unknown target"
+        # and nothing in the log says why -- hence this line. The PR number is
+        # the one that matters here because the thing being waited on is a
+        # merge; elsewhere in this file #250 is named instead, because there
+        # the subject is whose work it is rather than when it lands. See the
+        # "Packages" section of docs/development/releasing.md before pushing a
+        # v* tag.
         #
         # The contract with `mage build:packages`: it reads the variant
         # tarballs already in dist/ and writes one package per format for each
