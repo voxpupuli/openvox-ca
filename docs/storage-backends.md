@@ -148,8 +148,8 @@ one instance, and the lock catches the case it can.
   server's next acquisition of that name fails — deliberately and loudly, with
   an error naming the file, its owner and `chown -R`, because the alternative is
   it quietly giving up on locking while the root process believes it holds an
-  exclusive one. Under systemd that means `sudo -u puppet-ca openvox-ca-ctl …`
-  (or `runuser -u puppet-ca --`), matching the `User=` in the unit. It applies
+  exclusive one. Under systemd that means `sudo -u puppet openvox-ca-ctl …`
+  (or `runuser -u puppet --`), matching the `User=` in the unit. It applies
   even to commands that only read, such as `migrate` from a live source, since
   taking the lock is what creates the file.
 
