@@ -3,9 +3,15 @@
 # ONE configuration for both formats, with `overrides:` for the one thing that
 # genuinely differs: the dependency naming, where the same tools have different
 # package names on Debian and on EL. It is not parameterised by format anywhere
-# else, and it should not become so -- the place deb and rpm really diverge is
-# the configuration file, and that is deliberately not in this package (it
-# belongs to openvox-ca#251 and #252).
+# else, and it should not become so.
+#
+# The configuration file IS in this package (see the config|noreplace entry
+# below), which is a change from openvox-ca#250's original payload. That issue
+# excluded it on the grounds that a configuration file is where the two formats
+# diverge -- true of hand-written packaging, and not true here: nfpm renders one
+# `config|noreplace` declaration as a dpkg conffile and as rpm
+# %config(noreplace). openvox-ca#251 and #252 extend the file rather than each
+# creating one.
 #
 # `mage build:packages` renders this, once per packaged variant per format. The
 # four ${...} values are the only things that vary between those runs; they

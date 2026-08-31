@@ -896,13 +896,29 @@ func verifyMageTargets() error {
 	if err != nil {
 		return err
 	}
+	// Globbed, not listed. A hand-maintained list of filenames is a list that
+	// stops matching the directory: a workflow added later would invoke mage
+	// and simply not be checked, and nothing would say so -- the guard would
+	// keep passing while covering less than it claims.
+	paths, err := filepath.Glob(filepath.Join(".github", "workflows", "*.yml"))
+	if err != nil {
+		return err
+	}
+	// The floor over the glob itself. A pattern that stopped matching -- the
+	// directory moved, this run started somewhere else -- would hand
+	// verifyMageTargetsIn an empty map, and every per-workflow check below
+	// would pass by having nothing to look at.
+	if len(paths) < 2 {
+		return fmt.Errorf("found %d workflow files under .github/workflows, which is too few to be "+
+			"the real directory; the glob is wrong rather than the repository", len(paths))
+	}
 	workflows := map[string][]byte{}
-	for _, name := range []string{"ci.yml", "release.yml", "container-images.yml", "helm-chart.yml", "codeql.yml"} {
-		src, err := os.ReadFile(filepath.Join(".github", "workflows", name))
+	for _, path := range paths {
+		src, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
-		workflows[name] = src
+		workflows[filepath.Base(path)] = src
 	}
 	return verifyMageTargetsIn(mageSrc, workflows)
 }
@@ -1235,6 +1251,14 @@ func renderUnit(bindir string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	return renderUnitFrom(src, bindir)
+}
+
+// renderUnitFrom is renderUnit over caller-supplied template bytes, so the
+// missing-placeholder branch can be exercised without editing the real unit --
+// which is the only way to reach the one failure this function exists to
+// produce.
+func renderUnitFrom(src []byte, bindir string) ([]byte, error) {
 	if !bytes.Contains(src, []byte(unitBindirPlaceholder)) {
 		return nil, fmt.Errorf(
 			"packaging/systemd/%s contains no %s placeholder, so rendering it for %q would silently "+
@@ -1407,7 +1431,12 @@ func (Build) Unit(bindir string) error {
 		return fmt.Errorf("bindir %q is not an absolute path (try %s or %s)",
 			bindir, tarballUnitBindir, packageUnitBindir)
 	}
-	unit, err := renderUnit(strings.TrimSuffix(bindir, "/"))
+	// Trimmed once, and everything below uses the trimmed value -- including
+	// the message. Printing the argument instead reported
+	// "ExecStart=/opt/bin//openvox-ca" for a bindir given with a trailing
+	// slash, describing a unit that had been rendered correctly.
+	bindir = strings.TrimSuffix(bindir, "/")
+	unit, err := renderUnit(bindir)
 	if err != nil {
 		return err
 	}
@@ -1643,7 +1672,12 @@ var stageDocTreeFloor = []string{"LICENSE", "README.md"}
 // nothing in the build output to distinguish the two. Tracked files are what
 // the release is made of.
 func stageDocTree(dest string) error {
-	out, err := sh.Output("git", "ls-files", "--", docTreeEntries[0], docTreeEntries[1], docTreeEntries[2])
+	// Every entry, not the first three. Indexing them by hand meant a fourth
+	// documentation path could be added to docTreeEntries and silently never
+	// packaged -- the list would say it shipped and the package would not
+	// contain it, with nothing failing.
+	args := append([]string{"ls-files", "--"}, docTreeEntries...)
+	out, err := sh.Output("git", args...)
 	if err != nil {
 		return fmt.Errorf("listing tracked documentation (packaging enumerates it from git, so it "+
 			"needs a git checkout rather than an unpacked source archive): %w", err)

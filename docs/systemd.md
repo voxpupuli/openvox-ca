@@ -42,6 +42,12 @@ OpenVox Server creates `puppet:puppet` in its own `preinst` and chowns `/etc/pup
 
 openvox-ca does not assume either is installed. The packages create the account themselves, and the recipe above does it by hand, because the CA has to work on a host running neither. Divergence is tolerable in one direction only: Server's `preinst` runs `usermod` over an account it finds, so installing Server afterwards repairs the home directory and shell to its own values rather than creating a second account.
 
+**What sharing the account costs, stated plainly.** On a host that also runs OpenVox Server, the CA's private key is now readable by Server's own uid — the two are the same account. Anything running as `puppet` can read the key that signs every certificate in the estate, so a compromise of Server is a compromise of the CA on that host, without a privilege boundary in between.
+
+That is the price of fitting the layout Server already establishes, and it is worth knowing rather than discovering. Two things reduce it. [Encrypting the CA key at rest](ca-key-security.md) means the file alone is not enough. Better, a CA that matters should not share a host with the server it issues for — a dedicated CA host has no `puppet` account but its own, and the question does not arise.
+
+A private `puppet-ca` account was the alternative and was rejected deliberately: it leaves `/etc/puppetlabs/puppet/ssl` owned by one account and written by another, which is a permissions problem an operator has to solve on every upgrade of either package.
+
 ### The two settings you must not drop
 
 ```ini
@@ -162,7 +168,9 @@ Every step it takes is guarded on absence, so it is idempotent and **a takeover 
 3. Adopt this host's node certificate if `certs/$NAME.pem` and `private_keys/$NAME.pem` both exist; otherwise mint one.
 4. Link `certs/ca.pem` and `crl.pem` into the CA directory, as Puppet's own layout does, if nothing is there already.
 
-`$NAME` is resolved first-usable-wins: `OPENVOX_CA_CERTNAME` from a systemd drop-in, then `certname` from `/etc/puppetlabs/puppet/puppet.conf`, then `hostname -f` if it is dotted and not a localhost form, then the short hostname, then `localhost`. The last two are failure states that still produce a running CA; both warn, naming what will not work and how to re-mint, and the last also writes `/etc/puppetlabs/puppet/ssl/openvox-ca-certname-unresolved`, because a CA nothing can reach still looks healthy in `systemctl status`.
+Step 3 is the one that can stop rather than warn, and it does so in two cases. If **one half of a credential** is present — a certificate with no key, or the reverse — it refuses to guess and says which file to move aside. If the binary has **no `generate` subcommand** it stops too, because a build that cannot mint leaves the service with no certificate to serve and `openvox-ca` refuses to start without TLS on a non-loopback address; failing here names the cause, where failing at the service would only report that TLS is not configured. In both cases the CA itself is bootstrapped and intact, and the message says so.
+
+`$NAME` is resolved first-usable-wins: `OPENVOX_CA_CERTNAME` from a systemd drop-in, then `certname` from `/etc/puppetlabs/puppet/puppet.conf`, then `hostname -f` if it is dotted and not a localhost form, then the short hostname, then `localhost`. Every source is also checked against an allow-list of characters that cannot express a path, because the name is joined to one. The last two are failure states that still produce a running CA; both warn, naming what will not work and how to re-mint, and the last also writes `/etc/puppetlabs/puppet/ssl/openvox-ca-certname-unresolved`, because a CA nothing can reach still looks healthy in `systemctl status`.
 
 A oneshot rather than a maintainer script because it runs under the same hardening as the service, re-runs after the CA directory is wiped, and fails visibly in `systemctl status` rather than in package-manager output nobody keeps.
 
@@ -175,6 +183,16 @@ The binary's own default is 8140, and the packages ship `/etc/puppet-ca/config.y
 The release tarballs are unaffected and stay on 8140 — they ship no configuration file at all.
 
 It is set in the configuration file rather than as `--port` in the unit or `PUPPET_CA_PORT` in the environment, and that is deliberate: the server resolves the port as **file, then environment, then flag**, so a value in either of those would outrank the file and silently ignore an operator who edited it. A default has to sit at the layer an operator can override. Edit the file, and neither `apt upgrade` nor `dnf update` will overwrite you — it is marked as a configuration file in both formats.
+
+### What removing the package does not do
+
+Neither `apt remove` nor `dnf remove` deletes **the CA private key, anything else under `/etc/puppetlabs/puppet/ssl`, or the `puppet` account.** The service is stopped and disabled and the shipped files go; the CA's material stays exactly where it was.
+
+That is deliberate. `/etc/puppetlabs/puppet/ssl` holds the key that signs every certificate in the estate, and the account may be shared with openvox-agent or OpenVox Server, so removing either could take an estate's trust root — or another product's account — with it on what an operator meant as an uninstall. `apt purge` does not change this: the tree is not registered as configuration.
+
+The consequence worth knowing is the other one: **removing the package does not decommission the CA.** Reinstalling adopts the existing directory rather than provisioning a new one, and the key remains on disk and readable by anything running as `puppet` until someone deletes it. To actually retire a CA, remove `/etc/puppetlabs/puppet/ssl/ca` yourself, having first understood that every certificate it issued stops being verifiable.
+
+The one file an upgrade will not overwrite is `/etc/puppet-ca/config.yaml`: it is marked as a configuration file in both formats, so your edits survive and a changed default arrives beside it as `.dpkg-dist` or `.rpmnew`.
 
 ### One instance per CA directory
 

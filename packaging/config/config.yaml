@@ -7,10 +7,43 @@
 # shipped defaults have moved leaves the new file beside yours
 # (.dpkg-dist / .rpmnew) for you to merge.
 #
-# It deliberately sets ONE thing. Everything else stays at the built-in
-# defaults so that what a packaged CA does is the documented behaviour of the
-# binary, not a second set of values to look up. See
+# It sets the two things a packaged CA cannot start without or would get
+# wrong. Everything else stays at the built-in defaults, so that what a
+# packaged CA does is otherwise the documented behaviour of the binary rather
+# than a second set of values to look up. See
 # /usr/share/doc/openvox-ca/docs/configuration.md for the full list.
+
+# Where the CA keeps its material. REQUIRED: openvox-ca has no built-in default
+# for it and refuses to start without one ("cadir is required"), so a package
+# that omitted this would install a service that cannot start at all.
+#
+# /etc/puppetlabs/puppet/ssl/ca is the Clojure CA's own layout, so a CA
+# migrated from OpenVox/Puppet Server is already here. It is also the one
+# writable path openvox-ca.service grants under ProtectSystem=strict -- change
+# this and the unit's ReadWritePaths= has to move with it, or the CA will not
+# be able to write.
+cadir: /etc/puppetlabs/puppet/ssl/ca
+
+# The certificate and key the server presents.
+#
+# REQUIRED in practice, for the same reason as cadir: the server binds
+# 0.0.0.0, and it refuses to serve plain HTTP on a non-loopback address
+# ("refusing to start: plain HTTP on a non-loopback address is vulnerable to
+# certificate injection"). Without these a packaged install starts, loads its
+# CA, and then exits.
+#
+# These are STABLE ALIASES, not this host's certificate name. The credential
+# first-boot provisioning mints is named for the host
+# (certs/<certname>.pem), which no file shipped in a package can know; the
+# oneshot links these two paths to it once it does. So this file names a fixed
+# path and provisioning points that path at the right file -- which is also
+# what makes re-minting under a corrected name a matter of relinking rather
+# than editing configuration.
+#
+# Point them elsewhere and provisioning leaves them alone: like every other
+# step, the link is only made when nothing is already there.
+tls_cert: /etc/puppetlabs/puppet/ssl/certs/openvox-ca-server.pem
+tls_key: /etc/puppetlabs/puppet/ssl/private_keys/openvox-ca-server.pem
 
 # 8141, not the binary's built-in 8140.
 #

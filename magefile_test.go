@@ -27,7 +27,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -1571,6 +1573,47 @@ var _ = Describe("buildVariantPackages", func() {
 			Expect(modes["/etc/puppet-ca/config.yaml"]).To(Equal(int64(0o640)))
 		})
 
+		// Every setting the server refuses to start without. Each of these was
+		// missing at some point in this branch's life and each produced the
+		// same symptom -- a package that installs cleanly and whose service
+		// then exits -- so they are asserted by name rather than by the file
+		// merely being present.
+		DescribeTable("sets the settings a packaged install cannot start without",
+			func(pattern string) {
+				Expect(contents["/etc/puppet-ca/config.yaml"]).To(MatchRegexp(pattern))
+			},
+			// No built-in default: "cadir is required".
+			Entry("cadir", `(?m)^cadir: /etc/puppetlabs/puppet/ssl/ca$`),
+			// Without these the server refuses plain HTTP on 0.0.0.0.
+			Entry("tls_cert", `(?m)^tls_cert: /etc/puppetlabs/puppet/ssl/certs/openvox-ca-server\.pem$`),
+			Entry("tls_key", `(?m)^tls_key: /etc/puppetlabs/puppet/ssl/private_keys/openvox-ca-server\.pem$`),
+		)
+
+		// The configuration names fixed paths because a shipped file cannot
+		// know this host's certname; provisioning links them. If the two ever
+		// disagree the service starts and exits, so they are checked against
+		// each other rather than each against a literal.
+		It("names serving paths that the provisioning script links", func() {
+			cfg := contents["/etc/puppet-ca/config.yaml"]
+			script, err := os.ReadFile(firstBootScript)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Compared on the part below the ssl root, because that is the
+			// part both sides spell the same way: the config file needs an
+			// absolute path, and the script builds one from $SSLDIR so it can
+			// be run against a scratch directory.
+			const sslRoot = "/etc/puppetlabs/puppet/ssl/"
+			for _, key := range []string{"tls_cert", "tls_key"} {
+				m := regexp.MustCompile(`(?m)^` + key + `: (\S+)$`).FindStringSubmatch(cfg)
+				Expect(m).To(HaveLen(2), "%s is not set in the packaged config", key)
+				Expect(m[1]).To(HavePrefix(sslRoot), "%s must live under the ssl tree", key)
+
+				suffix := strings.TrimPrefix(m[1], sslRoot)
+				Expect(string(script)).To(ContainSubstring(suffix),
+					"%s names %s, which the provisioning script never links", key, m[1])
+			}
+		})
+
 		// It has to be a configuration file rather than a flag in the unit or
 		// a variable in the environment: the server resolves the port as file,
 		// then environment, then flag, so either of those would beat the file
@@ -1646,6 +1689,24 @@ var _ = Describe("stageDocTree", func() {
 	})
 })
 
+var _ = Describe("renderUnitFrom", func() {
+	// The guard exists so that deleting the placeholder cannot render
+	// "successfully" and ship a unit naming the wrong prefix. Reaching it
+	// needs a template without one, which is why renderUnit was split.
+	It("refuses a template with no placeholder, rather than rendering it unchanged", func() {
+		_, err := renderUnitFrom([]byte("[Service]\nExecStart=/usr/bin/openvox-ca\n"), packageUnitBindir)
+		Expect(err).To(MatchError(And(
+			ContainSubstring("contains no "+unitBindirPlaceholder),
+			ContainSubstring("hard-coded"))))
+	})
+
+	It("substitutes every occurrence, not just the first", func() {
+		out, err := renderUnitFrom([]byte("A=@BINDIR@/x\nB=@BINDIR@/y\n"), "/usr/bin")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(out)).To(Equal("A=/usr/bin/x\nB=/usr/bin/y\n"))
+	})
+})
+
 var _ = Describe("Build.Unit", func() {
 	It("refuses a bindir that is not absolute, naming both channels", func() {
 		err := Build{}.Unit("usr/bin")
@@ -1654,4 +1715,155 @@ var _ = Describe("Build.Unit", func() {
 			ContainSubstring(tarballUnitBindir),
 			ContainSubstring(packageUnitBindir))))
 	})
+
+	// The success path writes a file, so it is exercised where that file can
+	// be inspected and then removed rather than left in the working tree.
+	It("writes a unit rendered for the bindir it was given", func() {
+		out := filepath.Join("dist", distUnitFile)
+		_, existed := os.Stat(out)
+		DeferCleanup(func() {
+			if existed != nil {
+				os.Remove(out)
+			}
+		})
+
+		Expect(Build{}.Unit("/opt/openvox/bin")).To(Succeed())
+		body, err := os.ReadFile(out)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(body)).To(ContainSubstring("ExecStart=/opt/openvox/bin/openvox-ca"))
+		Expect(string(body)).NotTo(ContainSubstring(unitBindirPlaceholder))
+	})
+
+	It("trims a trailing slash rather than doubling it", func() {
+		out := filepath.Join("dist", distUnitFile)
+		_, existed := os.Stat(out)
+		DeferCleanup(func() {
+			if existed != nil {
+				os.Remove(out)
+			}
+		})
+
+		Expect(Build{}.Unit("/opt/openvox/bin/")).To(Succeed())
+		body, err := os.ReadFile(out)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(body)).To(ContainSubstring("ExecStart=/opt/openvox/bin/openvox-ca"))
+	})
+})
+
+var _ = Describe("extractTarGz", func() {
+	// The guard refuses an entry whose name is not a plain filename. The
+	// archives this reads are ones the build just wrote, so reaching it needs
+	// an archive built to reach it -- which is the point: a check only present
+	// for trusted input is a check absent when it is needed.
+	It("refuses an entry that is not a plain filename", func() {
+		dir := GinkgoT().TempDir()
+		archive := filepath.Join(dir, "evil.tar.gz")
+
+		f, err := os.Create(archive)
+		Expect(err).NotTo(HaveOccurred())
+		gz := gzip.NewWriter(f)
+		tw := tar.NewWriter(gz)
+		body := []byte("owned")
+		Expect(tw.WriteHeader(&tar.Header{
+			Name: "../../openvox-ca", Mode: 0o755, Size: int64(len(body)), Typeflag: tar.TypeReg,
+		})).To(Succeed())
+		_, err = tw.Write(body)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(tw.Close()).To(Succeed())
+		Expect(gz.Close()).To(Succeed())
+		Expect(f.Close()).To(Succeed())
+
+		dest := GinkgoT().TempDir()
+		err = extractTarGz(archive, dest, []string{"../../openvox-ca"})
+		Expect(err).To(MatchError(ContainSubstring("is not a plain filename")))
+
+		// And nothing was written outside the destination.
+		Expect(filepath.Join(filepath.Dir(dest), "openvox-ca")).NotTo(BeAnExistingFile())
+	})
+})
+
+// firstBootScript is the provisioning script as installed. The specs below run
+// its own functions rather than a copy of them: the shell is the artefact, and
+// a Go reimplementation of an allow-list would be testing the wrong thing.
+const firstBootScript = "packaging/scripts/first-boot"
+
+// runFirstBootFunc sources the script far enough to define its functions, then
+// evaluates one shell expression against them.
+//
+// The script guards its executable section behind the binaries check, so
+// sourcing it outright would run provisioning. Instead everything up to the
+// "-- Run --" banner is taken, which is definitions only.
+func runFirstBootFunc(expr string) (bool, error) {
+	src, err := os.ReadFile(firstBootScript)
+	if err != nil {
+		return false, err
+	}
+	const banner = "# -- Run ---"
+	i := bytes.Index(src, []byte(banner))
+	if i < 0 {
+		return false, fmt.Errorf("%s has no %q banner, so the definitions cannot be separated from "+
+			"the code that runs provisioning", firstBootScript, banner)
+	}
+
+	script := string(src[:i]) + "\n" + expr + "\n"
+	cmd := exec.Command("sh", "-c", script)
+	cmd.Env = append(os.Environ(), "OPENVOX_CA_SSLDIR=/nonexistent", "OPENVOX_CA_BINDIR=/nonexistent")
+	if err := cmd.Run(); err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+var _ = Describe("first-boot's certname allow-list", func() {
+	// The certificate name is joined to a path and passed to --cert-out and
+	// --key-out, and two of its three sources are not under this host's
+	// control in the way they look: `hostname -f` is whatever reverse DNS
+	// answers, and puppet.conf is writable by anything with access to it.
+	//
+	// This runs the shipped shell function, not a restatement of it.
+	DescribeTable("is_safe_certname",
+		func(name string, want bool) {
+			got, err := runFirstBootFunc(fmt.Sprintf("is_safe_certname %q", name))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got).To(Equal(want), "is_safe_certname %q", name)
+		},
+		Entry("an ordinary FQDN", "ca.example.com", true),
+		Entry("a short name", "ca", true),
+		Entry("digits, dots, dashes and underscores", "ca-01_test.example.com", true),
+
+		// The traversal this allow-list exists for: it has a dot and is not a
+		// localhost form, so the reachability check accepts it.
+		Entry("a relative traversal", "../../../etc/x.example.com", false),
+		Entry("an absolute path", "/etc/puppetlabs/x.example.com", false),
+		Entry("a bare slash", "a/b.example.com", false),
+		Entry("a backslash", `a\b.example.com`, false),
+		Entry("empty", "", false),
+		Entry("a leading dash, which a command could read as an option", "-rf.example.com", false),
+		Entry("dot", ".", false),
+		Entry("dot-dot", "..", false),
+		Entry("a shell metacharacter", "a;rm -rf /.example.com", false),
+		Entry("a newline", "ca.example.com\nevil", false),
+		Entry("a space", "ca example.com", false),
+	)
+
+	// The reachability check is a separate question from safety, and every
+	// source is put through both.
+	DescribeTable("is_localhost_name covers both callers' patterns",
+		func(name string, want bool) {
+			got, err := runFirstBootFunc(fmt.Sprintf("is_localhost_name %q", name))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got).To(Equal(want), "is_localhost_name %q", name)
+		},
+		Entry("localhost", "localhost", true),
+		Entry("localhost.localdomain", "localhost.localdomain", true),
+		Entry("localhost6", "localhost6", true),
+		// The pattern the two duplicated copies disagreed about: it was
+		// rejected as an FQDN and accepted as a short hostname.
+		Entry("any .localdomain name", "box.localdomain", true),
+		Entry("a real name", "ca.example.com", false),
+	)
 })
