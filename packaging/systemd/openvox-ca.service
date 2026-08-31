@@ -1,3 +1,14 @@
+# This file is a TEMPLATE, not an installable unit: the placeholder in
+# ExecStart below is substituted at build time. The release tarballs get
+# /usr/local/bin, which is what an unmanaged `install` prefix means; the deb
+# and rpm get /usr/bin, which is what a package must use. `mage build:unit`
+# renders a copy locally -- see docs/systemd.md.
+#
+# The placeholder is deliberately not spelled out here: rendering replaces
+# every occurrence, so naming it in prose would have this comment rewritten
+# too, and the shipped unit would explain itself with the substitution already
+# applied.
+
 [Unit]
 Description=OpenVox Certificate Authority
 Documentation=https://github.com/voxpupuli/openvox-ca/blob/main/docs/systemd.md
@@ -24,7 +35,7 @@ ExecReload=/bin/kill -HUP $MAINPID
 # No --config: the binary already auto-detects /etc/puppet-ca/config.yaml when
 # it exists, and pinning the path here would make PUPPET_CA_CONFIG inert and
 # turn an env-only deployment (no YAML on disk) into a start failure.
-ExecStart=/usr/local/bin/openvox-ca
+ExecStart=@BINDIR@/openvox-ca
 
 # The frontend feeds the watchdog on a timer, so a frontend that has died or
 # whose heartbeat has stalled is restarted rather than left half-alive. It is
@@ -52,16 +63,26 @@ TimeoutStartSec=300s
 # supervisor's 3s headroom, or systemd will truncate the drain it asked for.
 TimeoutStopSec=35s
 
-User=puppet-ca
-Group=puppet-ca
+# `puppet`, not a private `puppet-ca`: OpenVox Server already creates
+# puppet:puppet and chowns /etc/puppetlabs/puppet/ssl to it, so the tree this
+# service writes is already expected to be owned by that account. See
+# docs/systemd.md. The account is not assumed to exist -- the packages create
+# it themselves, because this host may run neither openvox-agent nor
+# openvox-server.
+User=puppet
+Group=puppet
 
-# /var/lib/puppet-ca, created and owned by systemd, and the only writable path
-# under ProtectSystem=strict below. Either point cadir at it, or uncomment
-# ReadWritePaths and name the directory you use -- for a CA migrated from
-# OpenVox/Puppet Server that is typically /etc/puppetlabs/puppet/ssl/ca.
-StateDirectory=puppet-ca
-StateDirectoryMode=0750
-#ReadWritePaths=/etc/puppetlabs/puppet/ssl/ca
+# The only writable path under ProtectSystem=strict below, and it is the CA
+# directory alone. A filesystem-backend CA writes a signed certificate, a
+# serial and a CRL under here, so without this the service cannot issue.
+#
+# Deliberately narrower than openvox-ca-first-boot.service, which gets the
+# parent /etc/puppetlabs/puppet/ssl because it links certs/ca.pem and crl.pem
+# into the tree above this one. The long-running service never needs to write
+# there, so it does not get to.
+#
+# Point cadir somewhere else and this line has to move with it.
+ReadWritePaths=/etc/puppetlabs/puppet/ssl/ca
 
 # Hardening. The CA holds a private key that signs every certificate in the
 # estate, so it should reach as little of the system as possible.
@@ -94,8 +115,10 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
-# The API listens on 8140 and the metrics exporter on 9140; neither is a
-# privileged port, so the service needs no capabilities at all.
+# The API and the metrics exporter both listen on unprivileged ports -- 8140
+# and 9140 by default, and any port an operator configures instead is
+# unprivileged too or the service could not bind it. So the service needs no
+# capabilities at all.
 CapabilityBoundingSet=
 AmbientCapabilities=
 

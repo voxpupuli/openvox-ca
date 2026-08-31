@@ -1,0 +1,276 @@
+#!/bin/sh
+#
+# First-boot provisioning for a packaged openvox-ca, installed as
+# /usr/libexec/openvox-ca/first-boot and run only by
+# openvox-ca-first-boot.service. Not an operator entry point: it takes no
+# arguments, and everything it decides it decides from the filesystem.
+#
+# Every step is guarded on absence. Running it twice does nothing the second
+# time, and running it on a host that already has a CA -- a takeover -- does
+# nothing at all.
+#
+# It runs BEFORE openvox-ca.service, never alongside it. That ordering is not
+# tidiness: this script writes to the configured storage backend directly, and
+# the packages default to the filesystem backend, which coordinates no writes
+# across processes on different hosts and cannot append to the inventory
+# atomically. Two writers there leave an integrity record covering a state that
+# never existed, after which the server refuses to start.
+
+set -eu
+
+# The two roots. Both are overridable from the environment so this script can
+# be exercised against a scratch directory -- nothing in the packages sets
+# either, and the unit passes no environment at all, so an installed system
+# always takes the defaults.
+SSLDIR="${OPENVOX_CA_SSLDIR:-/etc/puppetlabs/puppet/ssl}"
+CADIR="$SSLDIR/ca"
+
+# The package's own binaries, by absolute path rather than through PATH. An
+# operator who tried the release tarball before installing the package has
+# /usr/local/bin/openvox-ca ahead of /usr/bin on the default systemd PATH, and
+# provisioning must use the build it ships with, not the one that happens to
+# sort first.
+BINDIR="${OPENVOX_CA_BINDIR:-/usr/bin}"
+OPENVOX_CA="$BINDIR/openvox-ca"
+OPENVOX_CA_CTL="$BINDIR/openvox-ca-ctl"
+
+# The built-in leaf default, matched deliberately: a node certificate minted
+# here should expire when one issued by the running CA would.
+NODE_TTL=43800h
+
+# Left behind when the certname could not be resolved to anything an agent
+# could use. Outside the CA directory on purpose -- the storage backend owns
+# that tree, and this is a note to a human.
+UNRESOLVED_MARKER="$SSLDIR/openvox-ca-certname-unresolved"
+
+warn() { echo "openvox-ca first-boot: WARNING: $*" >&2; }
+info() { echo "openvox-ca first-boot: $*" >&2; }
+fail() { echo "openvox-ca first-boot: ERROR: $*" >&2; exit 1; }
+
+# -- The certificate name ----------------------------------------------------
+
+# is_usable_fqdn rejects the names that produce a CA nothing can reach: an
+# undotted short name, and the localhost forms a resolver hands back when it
+# has nothing better.
+is_usable_fqdn() {
+	case "$1" in
+	*.*) ;;
+	*) return 1 ;;
+	esac
+	case "$1" in
+	localhost | localhost.* | *.localdomain | localhost6 | localhost6.*) return 1 ;;
+	esac
+	return 0
+}
+
+# puppet_conf_certname reads `certname` out of puppet.conf when this host runs
+# an agent that has already been told its name. Not a general INI parser: it
+# takes the last `certname = value` outside a comment, which is what puppet
+# itself would resolve for any section this file can meaningfully set it in.
+puppet_conf_certname() {
+	conf=/etc/puppetlabs/puppet/puppet.conf
+	[ -r "$conf" ] || return 1
+	sed -n 's/^[[:space:]]*certname[[:space:]]*=[[:space:]]*\([^[:space:]#]*\).*/\1/p' "$conf" |
+		tail -n 1 | grep . || return 1
+}
+
+# resolve_certname picks this host's certificate name, first usable answer
+# wins. The last two are failure states that still produce a running CA, so
+# they say what will not work rather than stopping.
+resolve_certname() {
+	# 1. An explicit answer. OPENVOX_CA_CERTNAME is the operator's override,
+	#    set through a systemd drop-in (Environment= or EnvironmentFile=);
+	#    puppet.conf is the answer a host running an agent has already given.
+	#    Neither is second-guessed: an explicit name is taken as it stands,
+	#    dotted or not, because the operator may know something the resolver
+	#    does not.
+	if [ -n "${OPENVOX_CA_CERTNAME:-}" ]; then
+		echo "$OPENVOX_CA_CERTNAME"
+		return 0
+	fi
+	if name="$(puppet_conf_certname)"; then
+		echo "$name"
+		return 0
+	fi
+
+	# 2. The resolver's fully qualified answer, if it is one.
+	if name="$(hostname -f 2>/dev/null)" && [ -n "$name" ] && is_usable_fqdn "$name"; then
+		echo "$name"
+		return 0
+	fi
+
+	# 3. The short hostname. A CA under this name works for anything that
+	#    reaches it by the same short name and for nothing else.
+	if name="$(hostname -s 2>/dev/null || hostname 2>/dev/null)" && [ -n "$name" ] &&
+		! is_localhost_name "$name"; then
+		warn "this host has no fully qualified domain name; the CA will be issued as \"$name\"."
+		warn "Agents configured with a dotted server name will not accept it. To re-mint under the"
+		warn "right name: set the name in /etc/puppetlabs/puppet/puppet.conf or in a drop-in for"
+		warn "openvox-ca-first-boot.service, remove $SSLDIR/certs/$name.pem and"
+		warn "$SSLDIR/private_keys/$name.pem, then 'systemctl restart openvox-ca-first-boot'."
+		echo "$name"
+		return 0
+	fi
+
+	# 4. Nothing usable at all. The CA will start, serve, and be reachable
+	#    under no name any agent uses -- which looks healthy, so it leaves a
+	#    marker as well as a warning.
+	warn "could not determine this host's name; falling back to \"localhost\"."
+	warn "The CA will start and appear healthy while being unusable by any agent."
+	warn "See $UNRESOLVED_MARKER."
+	echo "localhost"
+}
+
+is_localhost_name() {
+	case "$1" in
+	localhost | localhost.* | localhost6 | localhost6.*) return 0 ;;
+	esac
+	return 1
+}
+
+# -- Steps -------------------------------------------------------------------
+
+# 1. The ssl tree. The package ships $SSLDIR and $SSLDIR/ca already, because
+#    systemd cannot bind-mount a ReadWritePaths= that does not exist; these are
+#    the per-name subdirectories underneath, in the layout puppet uses.
+ensure_ssl_tree() {
+	# 0771 on the root and 0750 on private_keys are puppet's own modes: an
+	# agent's group traverses the root without listing it, and nothing but the
+	# owner and its group reads a private key.
+	[ -d "$SSLDIR" ] || fail "$SSLDIR does not exist; the package should have created it"
+	for d in certs private_keys public_keys; do
+		if [ ! -d "$SSLDIR/$d" ]; then
+			info "creating $SSLDIR/$d"
+			mkdir -m 0755 "$SSLDIR/$d"
+		fi
+	done
+	chmod 0750 "$SSLDIR/private_keys"
+}
+
+# 2. The CA itself, unless one is already there. ca_crt.pem is the filesystem
+#    backend's name for the CA certificate, so its presence is what "there is
+#    already a CA here" means.
+ensure_ca() {
+	if [ -f "$CADIR/ca_crt.pem" ]; then
+		info "a CA already exists in $CADIR; leaving it alone"
+		return 0
+	fi
+	info "bootstrapping a new CA in $CADIR as \"$NAME\""
+	"$OPENVOX_CA_CTL" setup --cadir "$CADIR" --hostname "$NAME"
+}
+
+# has_generate_subcommand reports whether this build can mint offline.
+#
+# It reads the command listing, and the obvious probes do not work. Both
+# `openvox-ca generate --help` and `openvox-ca help generate` exit 0 on a build
+# with no such subcommand -- cobra answers --help from the root command before
+# it validates arguments, and an unknown help topic is not an error to it. A
+# probe on either would report every build as capable and turn the check below
+# into a no-op, which is a worse failure than not checking at all: the mint
+# would then fail on its own terms, with a message about arguments.
+#
+# Verified in both directions rather than by inspection: it finds nothing in
+# the help output of a build without the subcommand, and finds it in the
+# listing of one with it.
+has_generate_subcommand() {
+	"$OPENVOX_CA" --help 2>&1 | grep -qE '^[[:space:]]+generate([[:space:]]|$)'
+}
+
+# 3. This host's node certificate: adopt one if it is already here, mint one if
+#    it is not.
+#
+#    The mint path needs `openvox-ca generate`, which is
+#    https://github.com/voxpupuli/openvox-ca/issues/189 and is not in every
+#    build. It is probed rather than assumed, and its absence is a hard failure
+#    with the reason named: a build that cannot mint leaves the service with no
+#    certificate to serve, and openvox-ca refuses to start without TLS on a
+#    non-loopback address. Failing here says why; failing at the service says
+#    only that TLS is not configured.
+ensure_node_certificate() {
+	cert="$SSLDIR/certs/$NAME.pem"
+	key="$SSLDIR/private_keys/$NAME.pem"
+
+	if [ -f "$cert" ] && [ -f "$key" ]; then
+		info "adopting the existing certificate for \"$NAME\""
+		return 0
+	fi
+	if [ -f "$cert" ] || [ -f "$key" ]; then
+		fail "half a credential for \"$NAME\" is present ($cert / $key): one of the pair exists and the
+other does not. Refusing to guess -- move the odd one aside and re-run."
+	fi
+
+	if ! has_generate_subcommand; then
+		fail "this openvox-ca build has no 'generate' subcommand, so it cannot mint this host's
+certificate offline (openvox-ca#189). The CA in $CADIR is bootstrapped and intact; what is
+missing is only the node certificate. Supply one out of band as $cert and $key and re-run
+'systemctl restart openvox-ca-first-boot', or install a build that has 'openvox-ca generate'."
+	fi
+
+	info "minting a node certificate for \"$NAME\""
+	"$OPENVOX_CA" generate \
+		--cadir "$CADIR" \
+		--certname "$NAME" \
+		--ttl "$NODE_TTL" \
+		--cert-out "$cert" \
+		--key-out "$key"
+}
+
+# 4. The agent-side copies of the CA certificate and the CRL, as symlinks into
+#    the CA directory -- puppet's own layout, so an agent on this host finds
+#    them where it expects and they cannot go stale.
+link_ca_material() {
+	link_if_absent "$SSLDIR/certs/ca.pem" "../ca/ca_crt.pem"
+	link_if_absent "$SSLDIR/crl.pem" "ca/ca_crl.pem"
+}
+
+# link_if_absent creates a relative symlink, and leaves anything already at the
+# path alone -- including a regular file, which is what a host that ran an
+# agent against another CA will have. Overwriting that would repoint the agent.
+link_if_absent() {
+	path=$1
+	target=$2
+	if [ -e "$path" ] || [ -L "$path" ]; then
+		return 0
+	fi
+	info "linking $path -> $target"
+	ln -s "$target" "$path"
+}
+
+# -- Run ---------------------------------------------------------------------
+
+# Both binaries, before anything reads their output. Without this, a missing
+# openvox-ca reaches has_generate_subcommand as a pipeline whose exit status is
+# grep's -- no match, so "this build has no generate subcommand", which sends
+# the reader to openvox-ca#189 for a package that is simply broken.
+for bin in "$OPENVOX_CA" "$OPENVOX_CA_CTL"; do
+	[ -x "$bin" ] || fail "$bin is missing or not executable; the openvox-ca package is incomplete."
+done
+
+NAME="$(resolve_certname)"
+if [ "$NAME" = localhost ]; then
+	printf '%s\n' \
+		"openvox-ca could not determine this host's fully qualified domain name during first-boot" \
+		"provisioning, and issued its CA and node certificate as \"localhost\"." \
+		"" \
+		"The service will start and look healthy. No agent will be able to use it: agents verify the" \
+		"name they connected to against the certificate, and none of them connects to \"localhost\"." \
+		"" \
+		"To fix it, give the host a resolvable name (or set certname in" \
+		"/etc/puppetlabs/puppet/puppet.conf), then start again from an empty $CADIR:" \
+		"" \
+		"    systemctl stop openvox-ca" \
+		"    rm -rf $CADIR $SSLDIR/certs $SSLDIR/private_keys $SSLDIR/public_keys" \
+		"    rm -f $SSLDIR/crl.pem $UNRESOLVED_MARKER" \
+		"    systemctl restart openvox-ca-first-boot openvox-ca" \
+		"" \
+		"Re-minting replaces the CA, so every certificate it has already issued stops being trusted." \
+		"On a host that has served agents, migrate instead -- see docs/migrating-from-puppet-server.md." \
+		>"$UNRESOLVED_MARKER"
+fi
+
+info "provisioning as \"$NAME\""
+ensure_ssl_tree
+ensure_ca
+ensure_node_certificate
+link_ca_material
+info "provisioning complete"

@@ -1,0 +1,67 @@
+#!/bin/sh
+#
+# Shared postinstall for the deb and the rpm. Two jobs: make sure the `puppet`
+# account exists, and make sure systemd knows about the units.
+#
+# It is shared rather than per-format because nothing in it diverges: the
+# configuration file is where deb and rpm genuinely differ, and that is not in
+# this package.
+
+set -eu
+
+SSLDIR=/etc/puppetlabs/puppet/ssl
+
+# -- The service account -----------------------------------------------------
+
+# sysusers.d is the declarative answer and the one we ship. It is not enough on
+# its own: rpm distributions wire a file trigger for /usr/lib/sysusers.d and
+# Debian's does not reliably, so a package that only dropped the file would
+# create no account on some hosts and the units would fail to start with a
+# message about an unknown user. Calling systemd-sysusers directly makes the
+# declaration authoritative on both; the useradd path is for hosts with no
+# systemd-sysusers at all.
+#
+# Every branch is idempotent: systemd-sysusers leaves an existing account
+# alone, and the fallback creates nothing it already found. That matters on
+# upgrade, and it matters on a host where openvox-server got here first -- its
+# account is the one we want, not one to correct.
+if command -v systemd-sysusers >/dev/null 2>&1; then
+	systemd-sysusers /usr/lib/sysusers.d/openvox-ca.conf
+else
+	if ! getent group puppet >/dev/null 2>&1; then
+		groupadd --system puppet
+	fi
+	if ! getent passwd puppet >/dev/null 2>&1; then
+		useradd --system --gid puppet \
+			--home-dir /etc/puppetlabs/puppet \
+			--shell /usr/sbin/nologin \
+			--comment "OpenVox Certificate Authority" \
+			puppet
+	fi
+fi
+
+# The ssl tree ships in the package, so it exists before the account does and
+# is packaged root-owned. Hand it over now that `puppet` is certain to exist.
+# Not recursive: an existing tree may hold an agent's or a server's files, and
+# this package is not entitled to reassign those.
+if [ -d "$SSLDIR" ]; then
+	chown puppet:puppet "$SSLDIR" "$SSLDIR/ca" 2>/dev/null || :
+fi
+
+# -- systemd -----------------------------------------------------------------
+
+# openvox-ca.service is neither enabled nor started here: the operator gets a
+# configuration file to review first, and an install is not consent to create a
+# certificate authority.
+#
+# openvox-ca-first-boot.service IS enabled, and that is not the same thing.
+# Its [Install] section carries only RequiredBy=openvox-ca.service, so enabling
+# it installs one symlink into openvox-ca.service.requires/ and nothing that
+# any target pulls in. It therefore runs when the operator first starts
+# openvox-ca and at no other time -- not at install, not on the next boot.
+# Without this the [Install] section is inert, because systemd acts on
+# [Install] at enable time and never merely because a unit file is present.
+if [ -d /run/systemd/system ]; then
+	systemctl daemon-reload >/dev/null 2>&1 || :
+	systemctl enable openvox-ca-first-boot.service >/dev/null 2>&1 || :
+fi
