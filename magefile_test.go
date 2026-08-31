@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -989,6 +990,331 @@ jobs:
 			src := []byte("on:\n  pull_request: main\njobs: {}\n")
 			Expect(verifyPullRequestUnfilteredIn("ci.yml", src)).To(
 				MatchError(ContainSubstring("on.pull_request")))
+		})
+	})
+})
+
+var _ = Describe("the packaged variant set", func() {
+	It("packages the two pure-Go variants and neither FIPS variant", func() {
+		var names []string
+		for _, v := range packagedDistVariants() {
+			names = append(names, v.name)
+		}
+		Expect(names).To(ConsistOf("linux_amd64", "linux_arm64"))
+	})
+
+	It("keeps the packaged set a subset of the variant set", func() {
+		all := map[string]bool{}
+		for _, v := range distVariants() {
+			all[v.name] = true
+		}
+		for _, v := range packagedDistVariants() {
+			Expect(all).To(HaveKey(v.name))
+		}
+	})
+
+	It("names the formats in the order release.yml's counts assume", func() {
+		Expect(packageFormats).To(Equal([]string{"deb", "rpm"}))
+	})
+
+	// packageExtensions could be written as a literal that happens to agree
+	// with packageFormats today, and every assertion above would still pass.
+	// Substituting the list is what tells a derivation from a copy.
+	It("derives the extensions from packageFormats rather than restating them", func() {
+		original := packageFormats
+		DeferCleanup(func() { packageFormats = original })
+
+		packageFormats = []string{"deb", "rpm", "apk"}
+		Expect(packageExtensions()).To(Equal([]string{".deb", ".rpm", ".apk"}))
+
+		packageFormats = []string{"rpm"}
+		Expect(packageExtensions()).To(Equal([]string{".rpm"}))
+	})
+})
+
+var _ = Describe("renderUnit", func() {
+	It("renders the repository's own template for both channels", func() {
+		tarball, err := renderUnit(tarballUnitBindir)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(tarball)).To(ContainSubstring("ExecStart=" + tarballUnitBindir + "/openvox-ca"))
+
+		pkg, err := renderUnit(packageUnitBindir)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(pkg)).To(ContainSubstring("ExecStart=" + packageUnitBindir + "/openvox-ca"))
+	})
+
+	It("leaves no placeholder behind in either rendering", func() {
+		for _, bindir := range []string{tarballUnitBindir, packageUnitBindir} {
+			out, err := renderUnit(bindir)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(out)).NotTo(ContainSubstring(unitBindirPlaceholder), "rendered for %s", bindir)
+		}
+	})
+
+	// The two channels differ in exactly one line. If they ever differ in
+	// more, the template has stopped being one file's worth of truth.
+	It("produces two renderings that differ only in ExecStart", func() {
+		tarball, err := renderUnit(tarballUnitBindir)
+		Expect(err).NotTo(HaveOccurred())
+		pkg, err := renderUnit(packageUnitBindir)
+		Expect(err).NotTo(HaveOccurred())
+
+		normalise := func(b []byte) string {
+			return strings.ReplaceAll(string(b), "ExecStart="+tarballUnitBindir, "ExecStart="+packageUnitBindir)
+		}
+		Expect(normalise(tarball)).To(Equal(normalise(pkg)))
+	})
+
+	// The unit the packages install must not need a writable path the unit
+	// no longer asks for: StateDirectory= was removed in favour of naming the
+	// CA directory outright, and a service under ProtectSystem=strict with
+	// neither cannot write a signed certificate at all.
+	It("gives the long-running service exactly one writable path, the CA directory", func() {
+		out, err := renderUnit(packageUnitBindir)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(out)).To(ContainSubstring("\nReadWritePaths=/etc/puppetlabs/puppet/ssl/ca\n"))
+		Expect(string(out)).NotTo(ContainSubstring("\nStateDirectory="))
+	})
+})
+
+var _ = Describe("mageTargetNames", func() {
+	It("finds the namespaced targets the command line uses", func() {
+		src, err := os.ReadFile("magefile.go")
+		Expect(err).NotTo(HaveOccurred())
+		targets, err := mageTargetNames(src)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(targets).To(ContainElements("build:dist", "build:packages", "build:unit", "dev:check"))
+	})
+
+	It("takes methods on namespace types and leaves methods on other types alone", func() {
+		src := []byte(`package main
+
+import "github.com/magefile/mage/mg"
+
+type Build mg.Namespace
+type helper struct{}
+
+func (Build) Packages() error { return nil }
+func (Build) unexported() error { return nil }
+func (helper) Packages() error { return nil }
+func Standalone() error { return nil }
+`)
+		targets, err := mageTargetNames(src)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(targets).To(ConsistOf("build:packages", "standalone"))
+	})
+})
+
+var _ = Describe("workflowMageTargets", func() {
+	It("reads the run: steps and not the comments quoting them", func() {
+		src := []byte(`
+jobs:
+  gate:
+    steps:
+      - run: mage dev:check
+      - run: |
+          # This comment says mage build:invented and must not be believed.
+          mage test:unit
+`)
+		Expect(workflowMageTargets(src)).To(ConsistOf("dev:check", "test:unit"))
+	})
+
+	It("skips invocations no static reading can resolve", func() {
+		src := []byte(`
+jobs:
+  matrix:
+    steps:
+      - run: mage "$MAGE_TARGET"
+      - run: mage -l
+      - run: mage build:distVariant ${{ matrix.variant }}
+`)
+		// The target of the third is resolvable even though its argument is
+		// not; the first two name no target at all.
+		Expect(workflowMageTargets(src)).To(ConsistOf("build:distvariant"))
+	})
+})
+
+var _ = Describe("verifyMageTargets", func() {
+	// Against the repository's real magefile and workflows, which is what
+	// `mage dev:check` runs.
+	It("finds every mage target named outside Go resolving", func() {
+		Expect(verifyMageTargets()).To(Succeed())
+	})
+
+	Describe("drift detection", func() {
+		goodMage := []byte(`package main
+
+import "github.com/magefile/mage/mg"
+
+type Build mg.Namespace
+type Dev mg.Namespace
+
+func (Build) Dist() error { return nil }
+func (Build) Packages() error { return nil }
+func (Dev) Check() error { return nil }
+`)
+		goodWorkflow := []byte(`
+jobs:
+  release:
+    steps:
+      - run: mage build:packages
+`)
+
+		It("accepts a magefile and a workflow in agreement", func() {
+			Expect(verifyMageTargetsIn(goodMage, map[string][]byte{"release.yml": goodWorkflow})).To(Succeed())
+		})
+
+		// The deliverable: release.yml's packaging job calls this by name,
+		// and nothing in Go would notice it going away.
+		It("rejects a magefile that has lost build:packages, naming the target", func() {
+			without := bytes.Replace(goodMage, []byte("func (Build) Packages() error { return nil }\n"), nil, 1)
+			err := verifyMageTargetsIn(without, map[string][]byte{"release.yml": goodWorkflow})
+			Expect(err).To(MatchError(ContainSubstring(`mage target "build:packages" does not exist`)))
+		})
+
+		It("rejects a workflow calling a target the magefile does not define", func() {
+			bad := []byte(`
+jobs:
+  release:
+    steps:
+      - run: mage build:packages
+      - run: mage build:invented
+`)
+			err := verifyMageTargetsIn(goodMage, map[string][]byte{"release.yml": bad})
+			Expect(err).To(MatchError(And(
+				ContainSubstring("release.yml runs `mage build:invented`"),
+				ContainSubstring("not a target magefile.go defines"))))
+		})
+
+		// The floor on the magefile parse. Every check is a membership test
+		// against the parsed set, so a parse that returns nothing would make
+		// all of them pass.
+		It("rejects a magefile it could parse but found no build:dist in", func() {
+			src := []byte(`package main
+
+func main() {}
+`)
+			err := verifyMageTargetsIn(src, map[string][]byte{"release.yml": goodWorkflow})
+			Expect(err).To(MatchError(ContainSubstring("build:dist was not among them")))
+		})
+
+		// The floor on the workflow parse, calibrated against the file it is
+		// reading rather than against a fixed count.
+		It("rejects a workflow that mentions mage where the parse finds none", func() {
+			// A `mage ` outside any run: step -- which is what a workflow
+			// looks like when the steps have moved somewhere the parse below
+			// does not reach.
+			bad := []byte(`
+# mage build:packages is run somewhere else now
+jobs:
+  release:
+    steps:
+      - uses: ./.github/actions/build-packages
+`)
+			err := verifyMageTargetsIn(goodMage, map[string][]byte{"release.yml": bad})
+			Expect(err).To(MatchError(And(
+				ContainSubstring("mentions `mage `"),
+				ContainSubstring("no-op"))))
+		})
+
+		It("does not fire that floor on a workflow that never mentions mage", func() {
+			quiet := []byte(`
+jobs:
+  lint:
+    steps:
+      - run: echo hello
+`)
+			Expect(verifyMageTargetsIn(goodMage, map[string][]byte{"release.yml": quiet})).To(Succeed())
+		})
+	})
+})
+
+var _ = Describe("packaging helpers", func() {
+	Describe("variantGOARCH", func() {
+		It("takes the architecture from the environment that compiled the binaries", func() {
+			for _, v := range packagedDistVariants() {
+				arch, err := variantGOARCH(v)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(v.name).To(HaveSuffix(arch))
+			}
+		})
+
+		It("refuses a variant with no GOARCH rather than guessing one", func() {
+			_, err := variantGOARCH(distVariantSpec{name: "linux_amd64", env: map[string]string{}})
+			Expect(err).To(MatchError(ContainSubstring("sets no GOARCH")))
+		})
+	})
+
+	Describe("verifyPackagesWritten", func() {
+		var dir string
+
+		BeforeEach(func() {
+			dir = GinkgoT().TempDir()
+		})
+
+		write := func(name string) {
+			Expect(os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644)).To(Succeed())
+		}
+
+		It("accepts one package per format per packaged variant", func() {
+			write("openvox-ca_1.2.3-1_amd64.deb")
+			write("openvox-ca_1.2.3-1_arm64.deb")
+			write("openvox-ca-1.2.3-1.x86_64.rpm")
+			write("openvox-ca-1.2.3-1.aarch64.rpm")
+			Expect(verifyPackagesWritten(dir, 2)).To(Succeed())
+		})
+
+		// Two variants whose configuration resolved to one architecture
+		// overwrite each other's file: the loop reports two successes and
+		// leaves one package. Counting what is on disk is what notices.
+		It("rejects a short count and names the format that came up short", func() {
+			write("openvox-ca_1.2.3-1_amd64.deb")
+			write("openvox-ca-1.2.3-1.x86_64.rpm")
+			write("openvox-ca-1.2.3-1.aarch64.rpm")
+			err := verifyPackagesWritten(dir, 2)
+			Expect(err).To(MatchError(And(
+				ContainSubstring("expected 2 .deb packages"),
+				ContainSubstring("found 1"))))
+		})
+	})
+
+	Describe("extractTarGz", func() {
+		var archive string
+
+		BeforeEach(func() {
+			dir := GinkgoT().TempDir()
+			src := filepath.Join(dir, "src")
+			Expect(os.MkdirAll(src, 0o755)).To(Succeed())
+			for _, name := range []string{"openvox-ca", "openvox-ca-ctl", "openvox-ca.service"} {
+				Expect(os.WriteFile(filepath.Join(src, name), []byte(name), 0o644)).To(Succeed())
+			}
+			archive = filepath.Join(dir, "a.tar.gz")
+			Expect(createTarGz(archive, src, []archiveEntry{
+				{name: "openvox-ca", mode: 0o755},
+				{name: "openvox-ca-ctl", mode: 0o755},
+				{name: "openvox-ca.service", mode: 0o644},
+			})).To(Succeed())
+		})
+
+		It("extracts only the entries asked for", func() {
+			dest := GinkgoT().TempDir()
+			Expect(extractTarGz(archive, dest, []string{"openvox-ca", "openvox-ca-ctl"})).To(Succeed())
+
+			entries, err := os.ReadDir(dest)
+			Expect(err).NotTo(HaveOccurred())
+			var names []string
+			for _, e := range entries {
+				names = append(names, e.Name())
+			}
+			Expect(names).To(ConsistOf("openvox-ca", "openvox-ca-ctl"))
+		})
+
+		// A tarball missing a binary would otherwise produce a package that
+		// is well formed and installs a service with nothing to run.
+		It("refuses an archive missing one of them, naming it", func() {
+			dest := GinkgoT().TempDir()
+			err := extractTarGz(archive, dest, []string{"openvox-ca", "openvox-ca-agent"})
+			Expect(err).To(MatchError(ContainSubstring(`holds no "openvox-ca-agent"`)))
 		})
 	})
 })
