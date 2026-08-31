@@ -49,9 +49,38 @@ fail() { echo "openvox-ca first-boot: ERROR: $*" >&2; exit 1; }
 
 # -- The certificate name ----------------------------------------------------
 
+# is_safe_certname rejects a name that must never be joined to a path.
+#
+# $NAME becomes $SSLDIR/certs/$NAME.pem and $SSLDIR/private_keys/$NAME.pem, and
+# is passed to --certname, --cert-out and --key-out. Two of its three sources
+# are not under this host's control in the way they look: `hostname -f` is
+# whatever reverse DNS answers, and puppet.conf may be written by anything with
+# access to it. A name like ../../../etc/x.example.com is a plausible-looking
+# FQDN to the check below -- it has a dot and is not a localhost form -- and
+# would resolve out of certs/ and into the CA directory, where the file it
+# overwrites is ca_crt.pem.
+#
+# The sandbox bounds that: the oneshot runs unprivileged under
+# ProtectSystem=strict with ReadWritePaths=/etc/puppetlabs/puppet/ssl, so
+# nothing outside that subtree is reachable. It does not bound it to nothing --
+# the CA's own trust material lives inside that subtree.
+#
+# An allow-list, not a search for "..": the way to be sure a string cannot
+# leave a directory is to permit only characters that cannot express leaving
+# one. A leading dash is refused as well, so a name can never be read as an
+# option by the commands it is passed to.
+is_safe_certname() {
+	case "$1" in
+	"" | -* | . | ..) return 1 ;;
+	*[!A-Za-z0-9._-]*) return 1 ;;
+	esac
+	return 0
+}
+
 # is_usable_fqdn rejects the names that produce a CA nothing can reach: an
 # undotted short name, and the localhost forms a resolver hands back when it
-# has nothing better.
+# has nothing better. Reachability only -- safety is is_safe_certname's job,
+# and every source is checked by both.
 is_usable_fqdn() {
 	case "$1" in
 	*.*) ;;
@@ -81,20 +110,31 @@ resolve_certname() {
 	# 1. An explicit answer. OPENVOX_CA_CERTNAME is the operator's override,
 	#    set through a systemd drop-in (Environment= or EnvironmentFile=);
 	#    puppet.conf is the answer a host running an agent has already given.
-	#    Neither is second-guessed: an explicit name is taken as it stands,
-	#    dotted or not, because the operator may know something the resolver
-	#    does not.
+	#    Neither is second-guessed for reachability: an explicit name is taken
+	#    as it stands, dotted or not, because the operator may know something
+	#    the resolver does not. Both are still checked for safety.
+	#
+	#    An unsafe explicit answer stops rather than falls through. It is a
+	#    mistake in a file someone wrote by hand, and silently provisioning
+	#    under a different name than the one they set would hide it.
 	if [ -n "${OPENVOX_CA_CERTNAME:-}" ]; then
+		is_safe_certname "$OPENVOX_CA_CERTNAME" ||
+			fail "OPENVOX_CA_CERTNAME=\"$OPENVOX_CA_CERTNAME\" is not a usable certificate name.
+Names may contain only letters, digits, dots, dashes and underscores, and may not begin with a dash."
 		echo "$OPENVOX_CA_CERTNAME"
 		return 0
 	fi
 	if name="$(puppet_conf_certname)"; then
-		echo "$name"
-		return 0
+		if is_safe_certname "$name"; then
+			echo "$name"
+			return 0
+		fi
+		warn "ignoring certname \"$name\" from puppet.conf: not a usable certificate name."
 	fi
 
 	# 2. The resolver's fully qualified answer, if it is one.
-	if name="$(hostname -f 2>/dev/null)" && [ -n "$name" ] && is_usable_fqdn "$name"; then
+	if name="$(hostname -f 2>/dev/null)" && [ -n "$name" ] && is_safe_certname "$name" &&
+		is_usable_fqdn "$name"; then
 		echo "$name"
 		return 0
 	fi
@@ -102,7 +142,7 @@ resolve_certname() {
 	# 3. The short hostname. A CA under this name works for anything that
 	#    reaches it by the same short name and for nothing else.
 	if name="$(hostname -s 2>/dev/null || hostname 2>/dev/null)" && [ -n "$name" ] &&
-		! is_localhost_name "$name"; then
+		is_safe_certname "$name" && ! is_localhost_name "$name"; then
 		warn "this host has no fully qualified domain name; the CA will be issued as \"$name\"."
 		warn "Agents configured with a dotted server name will not accept it. To re-mint under the"
 		warn "right name: set the name in /etc/puppetlabs/puppet/puppet.conf or in a drop-in for"

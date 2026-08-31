@@ -863,20 +863,29 @@ var automergeActionRE = regexp.MustCompile(`(?i)auto-?merge`)
 // requiredMageTargets are targets something outside this repository's Go code
 // depends on by name, and which nothing in Go would notice the loss of.
 //
-// build:packages is called twice by release.yml's packaging job. A workflow
-// names a target as a string, so deleting or renaming the target compiles
-// cleanly, passes every test, and fails at tag time -- after the tag is
-// pushed, and while container-images.yml and helm-chart.yml publish their
-// images regardless, including the mutable latest tags. Recovery is deleting
-// GHCR package versions, not re-tagging.
+// build:packages is listed BEFORE its caller exists. Nothing in this tree runs
+// it: release.yml here has three jobs (verify, build, release) and no
+// packaging job, and docs/development/releasing.md does not mention packages
+// at all. The packaging job that calls it twice arrives with #266, which was
+// held until this target existed. So this entry is deliberately early rather
+// than describing the tree you are reading -- do not delete it as unused on
+// the evidence of a grep through release.yml.
+//
+// What it is worth once that caller lands: a workflow names a target as a
+// string, so deleting or renaming the target would compile cleanly, pass every
+// test, and fail at tag time -- after the tag is pushed, and while
+// container-images.yml and helm-chart.yml publish their images regardless,
+// including the mutable latest tags. Recovery is deleting GHCR package
+// versions, not re-tagging.
 //
 // This list is the machine-checked half of that dependency; the loop over the
 // workflows below is the other half, and neither subsumes the other. The
 // workflow scan catches a target a workflow calls and the magefile does not
-// have. This catches the target being renamed and the workflow updated to
-// match, which the scan would call correct -- and it would be correct, for
-// this repository, while every operator's `mage build:packages` in
-// docs/development/releasing.md had silently stopped working.
+// have -- but it can only see callers that exist, which today is why the scan
+// alone would not notice build:packages disappearing. This catches that, and
+// it also catches the target being renamed and its caller updated to match,
+// which the scan would call correct while every `mage build:packages` written
+// down outside this repository had silently stopped working.
 var requiredMageTargets = []string{"build:packages"}
 
 // verifyMageTargets asserts that every mage target named outside Go resolves
@@ -1442,19 +1451,8 @@ func (Build) Packages() error {
 	}
 
 	variants := packagedDistVariants()
-	// Both emptiness cases would otherwise be a silent success: every loop
-	// below runs zero times, the target prints nothing and exits 0, and a
-	// release publishes no packages while every count that reads these same
-	// lists agrees with it. Refuse instead. Neither list being empty means
-	// "packaging is switched off" -- switching packaging off means removing it
-	// from release.yml too.
-	if len(variants) == 0 {
-		return errors.New("no dist variant is marked packaged, so there is nothing to package; " +
-			"if packaging was meant to be removed, take it out of release.yml and drop the packaged field too")
-	}
-	if len(packageFormats) == 0 {
-		return errors.New("packageFormats lists no formats, so there is nothing to build; " +
-			"if packaging was meant to be removed, take it out of release.yml and drop packageFormats too")
+	if err := checkPackagingInputs(variants, packageFormats); err != nil {
+		return err
 	}
 
 	for _, v := range variants {
@@ -1464,6 +1462,36 @@ func (Build) Packages() error {
 	}
 
 	return verifyPackagesWritten(distDir, len(variants))
+}
+
+// checkPackagingInputs refuses the two ways this target can do nothing and
+// report success.
+//
+// Either list being empty makes every loop in Packages run zero times: it
+// prints nothing, exits 0, and a release then publishes no packages at all
+// while every count that reads these same lists agrees with it. Neither
+// emptiness means "packaging is switched off" -- switching packaging off means
+// taking it out of release.yml as well, so the error says that rather than
+// just reporting a count.
+//
+// Separate from Packages so both branches can be exercised with synthetic
+// input, which is the only way to reach them: the real lists are never empty,
+// so a test that could not supply its own would be asserting nothing.
+//
+// Deliberately not named verifyPackageSetNonEmpty: #266 has a function by that
+// name doing the workflow-side half of this, with a different signature. Two
+// same-named functions across two branches would collide at rebase; two
+// differently-named ones are two checks, which is what these are.
+func checkPackagingInputs(variants []distVariantSpec, formats []string) error {
+	if len(variants) == 0 {
+		return errors.New("no dist variant is marked packaged, so there is nothing to package; " +
+			"if packaging was meant to be removed, take it out of release.yml and drop the packaged field too")
+	}
+	if len(formats) == 0 {
+		return errors.New("packageFormats lists no formats, so there is nothing to build; " +
+			"if packaging was meant to be removed, take it out of release.yml and drop packageFormats too")
+	}
+	return nil
 }
 
 // buildVariantPackages unpacks one variant's tarball into a staging directory,
@@ -1628,20 +1656,34 @@ func stageDocTree(dest string) error {
 		}
 	}
 
-	// The floor. `git ls-files` exits 0 and prints nothing when it matches
-	// nothing, so a pathspec that stopped matching -- docs/ renamed, this
-	// target run from a subdirectory -- would stage an empty tree and package
-	// a /usr/share/doc/openvox-ca holding no documentation at all, silently.
-	for _, want := range stageDocTreeFloor {
-		if !slices.Contains(paths, want) {
-			return fmt.Errorf("git tracks no %q under %s, so the documentation enumeration is wrong "+
-				"rather than empty (found %d paths)", want, strings.Join(docTreeEntries, ", "), len(paths))
-		}
+	if err := checkDocTreeFloor(paths); err != nil {
+		return err
 	}
 
 	for _, path := range paths {
 		if err := copyStagedFile(path, filepath.Join(dest, path)); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// checkDocTreeFloor rejects a documentation enumeration that is wrong rather
+// than merely empty.
+//
+// `git ls-files` exits 0 and prints nothing when it matches nothing, so a
+// pathspec that stopped matching -- docs/ renamed, this target run from a
+// subdirectory -- would otherwise stage an empty tree and package a
+// /usr/share/doc/openvox-ca holding no documentation at all, silently.
+//
+// Split out from stageDocTree so it can be exercised without renaming
+// directories in the working tree: the enumeration is the hard part to
+// arrange, the check over it is not.
+func checkDocTreeFloor(paths []string) error {
+	for _, want := range stageDocTreeFloor {
+		if !slices.Contains(paths, want) {
+			return fmt.Errorf("git tracks no %q under %s, so the documentation enumeration is wrong "+
+				"rather than empty (found %d paths)", want, strings.Join(docTreeEntries, ", "), len(paths))
 		}
 	}
 	return nil

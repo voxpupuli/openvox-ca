@@ -23,10 +23,13 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -1003,15 +1006,17 @@ var _ = Describe("the packaged variant set", func() {
 		Expect(names).To(ConsistOf("linux_amd64", "linux_arm64"))
 	})
 
-	It("keeps the packaged set a subset of the variant set", func() {
-		all := map[string]bool{}
-		for _, v := range distVariants() {
-			all[v.name] = true
-		}
-		for _, v := range packagedDistVariants() {
-			Expect(all).To(HaveKey(v.name))
-		}
-	})
+	DescribeTable("keeps the packaged set a subset of the variant set",
+		func(name string) {
+			all := map[string]bool{}
+			for _, v := range distVariants() {
+				all[v.name] = true
+			}
+			Expect(all).To(HaveKey(name))
+		},
+		Entry("linux_amd64", "linux_amd64"),
+		Entry("linux_arm64", "linux_arm64"),
+	)
 
 	It("names the formats in the order release.yml's counts assume", func() {
 		Expect(packageFormats).To(Equal([]string{"deb", "rpm"}))
@@ -1257,13 +1262,23 @@ jobs:
 
 var _ = Describe("packaging helpers", func() {
 	Describe("variantGOARCH", func() {
-		It("takes the architecture from the environment that compiled the binaries", func() {
-			for _, v := range packagedDistVariants() {
-				arch, err := variantGOARCH(v)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(v.name).To(HaveSuffix(arch))
-			}
-		})
+		DescribeTable("takes the architecture from the environment that compiled the binaries",
+			func(name, arch string) {
+				var found bool
+				for _, v := range packagedDistVariants() {
+					if v.name != name {
+						continue
+					}
+					found = true
+					got, err := variantGOARCH(v)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(got).To(Equal(arch))
+				}
+				Expect(found).To(BeTrue(), "%s is no longer a packaged variant", name)
+			},
+			Entry("linux_amd64", "linux_amd64", "amd64"),
+			Entry("linux_arm64", "linux_arm64", "arm64"),
+		)
 
 		It("refuses a variant with no GOARCH rather than guessing one", func() {
 			_, err := variantGOARCH(distVariantSpec{name: "linux_amd64", env: map[string]string{}})
@@ -1342,5 +1357,260 @@ var _ = Describe("packaging helpers", func() {
 			err := extractTarGz(archive, dest, []string{"openvox-ca", "openvox-ca-agent"})
 			Expect(err).To(MatchError(ContainSubstring(`holds no "openvox-ca-agent"`)))
 		})
+	})
+})
+
+// arEntry is one member of a .deb's outer `ar` archive.
+type arEntry struct {
+	name string
+	data []byte
+}
+
+// readAr parses the `ar` container a .deb is. Small enough to do here, and
+// worth doing: without reading the payload back, a packaging test can only
+// assert that some file appeared with the right name, which is satisfied by a
+// package containing nothing.
+func readAr(path string) ([]arEntry, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	const magic = "!<arch>\n"
+	if !bytes.HasPrefix(raw, []byte(magic)) {
+		return nil, fmt.Errorf("%s is not an ar archive", path)
+	}
+	var out []arEntry
+	for off := len(magic); off+60 <= len(raw); {
+		hdr := raw[off : off+60]
+		name := strings.TrimSpace(string(hdr[0:16]))
+		size, err := strconv.Atoi(strings.TrimSpace(string(hdr[48:58])))
+		if err != nil {
+			return nil, fmt.Errorf("bad ar member size at %d: %w", off, err)
+		}
+		start := off + 60
+		if start+size > len(raw) {
+			return nil, fmt.Errorf("ar member %q runs past end of file", name)
+		}
+		out = append(out, arEntry{name: strings.TrimSuffix(name, "/"), data: raw[start : start+size]})
+		off = start + size
+		if size%2 == 1 {
+			off++ // members are padded to an even offset
+		}
+	}
+	return out, nil
+}
+
+// debPayload returns a .deb's installed files: path -> mode, and path ->
+// contents.
+func debPayload(path string) (map[string]int64, map[string]string, error) {
+	members, err := readAr(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	var data []byte
+	for _, m := range members {
+		if m.name == "data.tar.gz" {
+			data = m.data
+		}
+	}
+	if data == nil {
+		return nil, nil, fmt.Errorf("%s has no data.tar.gz", path)
+	}
+	gz, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, nil, err
+	}
+	defer gz.Close()
+
+	modes := map[string]int64{}
+	contents := map[string]string{}
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		// tar records a directory with a trailing slash; strip it so a
+		// caller can name a directory the same way it names a file.
+		name := strings.TrimPrefix(hdr.Name, ".")
+		if name != "/" {
+			name = strings.TrimSuffix(name, "/")
+		}
+		modes[name] = hdr.Mode
+		if hdr.Typeflag == tar.TypeReg {
+			body, err := io.ReadAll(tr)
+			if err != nil {
+				return nil, nil, err
+			}
+			contents[name] = string(body)
+		}
+	}
+	return modes, contents, nil
+}
+
+var _ = Describe("checkPackagingInputs", func() {
+	// Both branches stop a release that publishes nothing while exiting 0, so
+	// each error message is asserted rather than just the fact of an error: a
+	// guard that fires with the other one's message sends the reader to the
+	// wrong list.
+	good := []distVariantSpec{{name: "linux_amd64", env: map[string]string{"GOARCH": "amd64"}, packaged: true}}
+
+	It("accepts the real lists", func() {
+		Expect(checkPackagingInputs(packagedDistVariants(), packageFormats)).To(Succeed())
+	})
+
+	It("refuses when no variant is marked packaged", func() {
+		Expect(checkPackagingInputs(nil, packageFormats)).To(MatchError(And(
+			ContainSubstring("no dist variant is marked packaged"),
+			ContainSubstring("drop the packaged field"))))
+	})
+
+	It("refuses when no format is configured", func() {
+		Expect(checkPackagingInputs(good, nil)).To(MatchError(And(
+			ContainSubstring("packageFormats lists no formats"),
+			ContainSubstring("drop packageFormats too"))))
+	})
+})
+
+var _ = Describe("buildVariantPackages", func() {
+	// End to end over the real nfpm configuration: stages a tarball the way
+	// build:dist writes one, then builds both formats from it. No compilation
+	// -- the "binaries" are fixtures, which is the point. This is the only
+	// test that exercises the nfpm dependency at all.
+	var (
+		distDir string
+		variant distVariantSpec
+	)
+	const ver = "9.9.9"
+
+	BeforeEach(func() {
+		distDir = GinkgoT().TempDir()
+		variant = distVariantSpec{
+			name:     "linux_amd64",
+			env:      map[string]string{"GOOS": "linux", "GOARCH": "amd64"},
+			packaged: true,
+		}
+
+		src := GinkgoT().TempDir()
+		for _, name := range []string{"openvox-ca", "openvox-ca-ctl"} {
+			Expect(os.WriteFile(filepath.Join(src, name), []byte("#!/bin/true\n"), 0o755)).To(Succeed())
+		}
+		unit, err := renderUnit(tarballUnitBindir)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(os.WriteFile(filepath.Join(src, distUnitFile), unit, 0o644)).To(Succeed())
+
+		archive := filepath.Join(distDir, fmt.Sprintf("openvox-ca_%s_%s.tar.gz", ver, variant.name))
+		Expect(createTarGz(archive, src, distArchiveFiles([]string{"openvox-ca", "openvox-ca-ctl"}))).To(Succeed())
+	})
+
+	It("writes one package per format, under the names apt and dnf expect", func() {
+		Expect(buildVariantPackages(distDir, ver, variant)).To(Succeed())
+
+		Expect(filepath.Join(distDir, "openvox-ca_9.9.9-1_amd64.deb")).To(BeAnExistingFile())
+		Expect(filepath.Join(distDir, "openvox-ca-9.9.9-1.x86_64.rpm")).To(BeAnExistingFile())
+		Expect(verifyPackagesWritten(distDir, 1)).To(Succeed())
+	})
+
+	Describe("the deb's payload", func() {
+		var (
+			modes    map[string]int64
+			contents map[string]string
+		)
+
+		BeforeEach(func() {
+			Expect(buildVariantPackages(distDir, ver, variant)).To(Succeed())
+			var err error
+			modes, contents, err = debPayload(filepath.Join(distDir, "openvox-ca_9.9.9-1_amd64.deb"))
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		DescribeTable("installs the payload entry",
+			func(path string, mode int64) {
+				Expect(modes).To(HaveKey(path))
+				Expect(modes[path]).To(Equal(mode), "mode of %s", path)
+			},
+			Entry("the server binary", "/usr/bin/openvox-ca", int64(0o755)),
+			Entry("the operator CLI", "/usr/bin/openvox-ca-ctl", int64(0o755)),
+			Entry("the service unit", "/usr/lib/systemd/system/openvox-ca.service", int64(0o644)),
+			Entry("the provisioning oneshot", "/usr/lib/systemd/system/openvox-ca-first-boot.service", int64(0o644)),
+			Entry("the provisioning script", "/usr/libexec/openvox-ca/first-boot", int64(0o755)),
+			Entry("the sysusers declaration", "/usr/lib/sysusers.d/openvox-ca.conf", int64(0o644)),
+		)
+
+		// The tarball in the fixture carries the unit rendered for
+		// /usr/local/bin. If the package ever shipped that copy instead of
+		// re-rendering, every packaged install would point at a path the
+		// package does not own -- and nothing else would say so.
+		It("ships the unit rendered for /usr/bin, not the tarball's copy", func() {
+			unit := contents["/usr/lib/systemd/system/openvox-ca.service"]
+			Expect(unit).To(ContainSubstring("ExecStart=" + packageUnitBindir + "/openvox-ca"))
+			Expect(unit).NotTo(ContainSubstring("ExecStart=" + tarballUnitBindir + "/openvox-ca"))
+			Expect(unit).NotTo(ContainSubstring(unitBindirPlaceholder))
+		})
+
+		It("carries the documentation tree with its repository layout", func() {
+			Expect(contents).To(HaveKey("/usr/share/doc/openvox-ca/LICENSE"))
+			Expect(contents).To(HaveKey("/usr/share/doc/openvox-ca/README.md"))
+			Expect(contents).To(HaveKey("/usr/share/doc/openvox-ca/docs/systemd.md"))
+		})
+
+		It("creates the ssl tree the units bind-mount", func() {
+			Expect(modes).To(HaveKey("/etc/puppetlabs/puppet/ssl"))
+			Expect(modes).To(HaveKey("/etc/puppetlabs/puppet/ssl/ca"))
+		})
+	})
+
+	// The target does not build binaries, so a missing tarball has to be an
+	// error naming the target that produces one rather than a silent rebuild.
+	It("refuses a variant whose tarball is not there, naming how to build it", func() {
+		missing := distVariantSpec{name: "linux_arm64", env: map[string]string{"GOARCH": "arm64"}, packaged: true}
+		err := buildVariantPackages(distDir, ver, missing)
+		Expect(err).To(MatchError(And(
+			ContainSubstring("does not build binaries"),
+			ContainSubstring("mage build:distVariant linux_arm64"))))
+	})
+})
+
+var _ = Describe("stageDocTree", func() {
+	It("stages LICENSE, README and docs/ at their repository paths", func() {
+		dest := GinkgoT().TempDir()
+		Expect(stageDocTree(dest)).To(Succeed())
+
+		for _, want := range []string{"LICENSE", "README.md", filepath.Join("docs", "systemd.md")} {
+			Expect(filepath.Join(dest, want)).To(BeAnExistingFile())
+		}
+	})
+
+	// The floor exists because `git ls-files` says nothing and exits 0 when
+	// its pathspec matches nothing, which would package an empty doc tree.
+	Describe("checkDocTreeFloor", func() {
+		It("accepts an enumeration carrying the files that must be there", func() {
+			Expect(checkDocTreeFloor([]string{"LICENSE", "README.md", "docs/systemd.md"})).To(Succeed())
+		})
+
+		DescribeTable("rejects an enumeration that is wrong rather than empty",
+			func(paths []string, missing string) {
+				err := checkDocTreeFloor(paths)
+				Expect(err).To(MatchError(And(
+					ContainSubstring(fmt.Sprintf("git tracks no %q", missing)),
+					ContainSubstring("wrong rather than empty"))))
+			},
+			Entry("nothing at all", []string(nil), "LICENSE"),
+			Entry("docs but no LICENSE", []string{"README.md", "docs/systemd.md"}, "LICENSE"),
+			Entry("LICENSE but no README", []string{"LICENSE", "docs/systemd.md"}, "README.md"),
+		)
+	})
+})
+
+var _ = Describe("Build.Unit", func() {
+	It("refuses a bindir that is not absolute, naming both channels", func() {
+		err := Build{}.Unit("usr/bin")
+		Expect(err).To(MatchError(And(
+			ContainSubstring("is not an absolute path"),
+			ContainSubstring(tarballUnitBindir),
+			ContainSubstring(packageUnitBindir))))
 	})
 })

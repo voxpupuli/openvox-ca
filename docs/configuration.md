@@ -274,7 +274,8 @@ service first if one is already running on port 8140, then:
 ```bash
 # Your configured cadir. The CA writes the serving key under it, and pointing
 # --out-dir at the same place keeps a second copy from being left elsewhere.
-# The systemd unit's default is /var/lib/puppet-ca, not the path below.
+# The path the systemd unit grants as its one writable directory, so this is
+# also what the unit expects cadir to be.
 CADIR=/etc/puppetlabs/puppet/ssl/ca
 
 openvox-ca --tls-cert= --tls-key= --host 127.0.0.1 --port 8140 &
@@ -370,7 +371,7 @@ two production deployments in these docs work:
 
 - Under [systemd](systemd.md) the unit is already bound to 8140, so stop it
   first. It also runs as a dedicated user, so run both commands as that user
-  rather than under plain `sudo` — `sudo -u puppet-ca openvox-ca --tls-cert=
+  rather than under plain `sudo` — `sudo -u puppet openvox-ca --tls-cert=
   ...`. Anything created as `root` is left behind for a service that is not
   root: directories most of all, since they are created `0750` and the service
   then cannot write in them at all, and the private key, which is written
