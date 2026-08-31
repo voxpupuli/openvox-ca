@@ -1,0 +1,34 @@
+# Configuration for a packaged openvox-ca, installed as
+# /etc/puppet-ca/config.yaml -- the path the server auto-detects, which is why
+# the unit passes no --config and PUPPET_CA_CONFIG still works in a drop-in.
+#
+# Yours to edit. Both packages mark it as a configuration file, so neither
+# `apt upgrade` nor `dnf update` will overwrite your changes; an upgrade whose
+# shipped defaults have moved leaves the new file beside yours
+# (.dpkg-dist / .rpmnew) for you to merge.
+#
+# It deliberately sets ONE thing. Everything else stays at the built-in
+# defaults so that what a packaged CA does is the documented behaviour of the
+# binary, not a second set of values to look up. See
+# /usr/share/doc/openvox-ca/docs/configuration.md for the full list.
+
+# 8141, not the binary's built-in 8140.
+#
+# 8140 is right for a release tarball, a container and a host that runs
+# nothing but the CA. It is wrong for a package, because a package is what
+# gets installed alongside OpenVox Server -- which binds 8140 itself. Two
+# services claiming the same port is a first-boot failure that reads as a
+# CA fault rather than a collision.
+#
+# So agents are configured with `ca_port = 8141` against a packaged CA. This
+# is the only place that value is set: the Debian and EL packaging build on
+# this file rather than each declaring it, so there is one number to change.
+#
+# It is set HERE, in a configuration file, rather than as `--port` in the unit
+# or PUPPET_CA_PORT in the environment, and that is not a stylistic choice.
+# The server resolves the port as config file, then environment, then flag
+# (cmd/openvox-ca/config.go applyServerEnv, then the Changed("port") override
+# in main.go), so a value in the unit or the environment would beat this file
+# and silently ignore an operator who edited it. A default has to sit at the
+# layer an operator can override, and that is this one.
+port: 8141

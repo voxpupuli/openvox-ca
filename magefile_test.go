@@ -1561,6 +1561,47 @@ var _ = Describe("buildVariantPackages", func() {
 			Expect(modes).To(HaveKey("/etc/puppetlabs/puppet/ssl"))
 			Expect(modes).To(HaveKey("/etc/puppetlabs/puppet/ssl/ca"))
 		})
+
+		// The packaged default that the binary's own default gets wrong: a
+		// package is what gets installed beside OpenVox Server, and Server
+		// binds 8140.
+		It("sets the packaged port in the configuration file, at 0640", func() {
+			Expect(contents).To(HaveKey("/etc/puppet-ca/config.yaml"))
+			Expect(contents["/etc/puppet-ca/config.yaml"]).To(MatchRegexp(`(?m)^port: 8141$`))
+			Expect(modes["/etc/puppet-ca/config.yaml"]).To(Equal(int64(0o640)))
+		})
+
+		// It has to be a configuration file rather than a flag in the unit or
+		// a variable in the environment: the server resolves the port as file,
+		// then environment, then flag, so either of those would beat the file
+		// and silently ignore an operator who edited it. A default belongs at
+		// the layer an operator can override.
+		It("does not set the port anywhere that would outrank the file", func() {
+			unit := contents["/usr/lib/systemd/system/openvox-ca.service"]
+			Expect(unit).NotTo(ContainSubstring("--port"))
+			Expect(unit).NotTo(ContainSubstring("PUPPET_CA_PORT"))
+			Expect(contents).NotTo(HaveKey("/usr/lib/systemd/system/openvox-ca.service.d/port.conf"))
+		})
+	})
+
+	// The tarball channel keeps the binary's 8140. Only the packages move,
+	// because only a package assumes the CA may share a host with Server.
+	Describe("the tarball channel", func() {
+		It("is left on the binary's own default port", func() {
+			unit, err := renderUnit(tarballUnitBindir)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(unit)).NotTo(ContainSubstring("8141"))
+			Expect(string(unit)).NotTo(ContainSubstring("--port"))
+		})
+
+		It("ships no configuration file at all", func() {
+			// distArchiveFiles is the tarball's whole manifest.
+			var names []string
+			for _, e := range distArchiveFiles([]string{"openvox-ca", "openvox-ca-ctl"}) {
+				names = append(names, e.name)
+			}
+			Expect(names).To(ConsistOf("openvox-ca", "openvox-ca-ctl", distUnitFile))
+		})
 	})
 
 	// The target does not build binaries, so a missing tarball has to be an

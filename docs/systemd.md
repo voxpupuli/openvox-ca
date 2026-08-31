@@ -168,6 +168,14 @@ A oneshot rather than a maintainer script because it runs under the same hardeni
 
 **The mint step prints a warning, and on a first boot it is expected.** `openvox-ca generate` reports that the `filesystem` backend coordinates no writes across processes and says to stop the server before running it. That is the right warning in general and it is why this unit is ordered `Before=openvox-ca.service`: at the moment it runs there is no server to stop. Seeing it in `journalctl -u openvox-ca-first-boot` after a first boot is not a fault. Seeing it after starting the oneshot by hand on a **running** CA is — stop the service first.
 
+### The packages listen on 8141
+
+The binary's own default is 8140, and the packages ship `/etc/puppet-ca/config.yaml` setting `port: 8141`. The reason is collision, not preference: 8140 is right for a release tarball, a container and a host running nothing but the CA, but a *package* is what gets installed alongside OpenVox Server, and Server binds 8140 itself. So agents talking to a packaged CA are configured with `ca_port = 8141`.
+
+The release tarballs are unaffected and stay on 8140 — they ship no configuration file at all.
+
+It is set in the configuration file rather than as `--port` in the unit or `PUPPET_CA_PORT` in the environment, and that is deliberate: the server resolves the port as **file, then environment, then flag**, so a value in either of those would outrank the file and silently ignore an operator who edited it. A default has to sit at the layer an operator can override. Edit the file, and neither `apt upgrade` nor `dnf update` will overwrite you — it is marked as a configuration file in both formats.
+
 ### One instance per CA directory
 
 The packages configure the `filesystem` storage backend, which coordinates no writes between hosts and cannot append to its inventory atomically. **Exactly one `openvox-ca` may run against a given CA directory.** Running two — on one host or two — can leave an integrity record covering a state that never existed, after which the server refuses to start.

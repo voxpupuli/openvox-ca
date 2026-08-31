@@ -92,6 +92,29 @@ contents:
     file_info:
       mode: 0644
 
+  # The one setting a packaged CA needs that the binary's defaults get wrong:
+  # port 8141, because a package is what gets installed beside OpenVox Server
+  # and Server binds 8140. See the file for why it is a config file rather
+  # than a flag in the unit.
+  #
+  # `config|noreplace` is one declaration that nfpm renders as a dpkg conffile
+  # and as rpm %config(noreplace), so an upgrade never overwrites an operator's
+  # edit on either format. That is also what makes this file shared rather than
+  # per-format: the divergence between deb and rpm here is in how the format
+  # marks a config file, and nfpm expresses both from this line.
+  #
+  # 0640 root:puppet, not 0644: it is the file that will hold credentials once
+  # a storage backend needs them (etcd_password, an inline OpenBao role_id),
+  # and the service only needs to read it. Getting the mode right now costs
+  # nothing; discovering it later means a permissions change on upgrade.
+  - src: packaging/config/config.yaml
+    dst: /etc/puppet-ca/config.yaml
+    type: "config|noreplace"
+    file_info:
+      mode: 0640
+      owner: root
+      group: puppet
+
   # The ssl tree ships as directories so systemd has something to bind-mount:
   # ReadWritePaths= fails the unit outright when its path does not exist, and
   # both units name a path under here. They are packaged root-owned and handed
