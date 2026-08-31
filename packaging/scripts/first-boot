@@ -219,13 +219,18 @@ has_generate_subcommand() {
 # 3. This host's node certificate: adopt one if it is already here, mint one if
 #    it is not.
 #
-#    The mint path needs `openvox-ca generate`, which is
-#    https://github.com/voxpupuli/openvox-ca/issues/189 and is not in every
-#    build. It is probed rather than assumed, and its absence is a hard failure
-#    with the reason named: a build that cannot mint leaves the service with no
-#    certificate to serve, and openvox-ca refuses to start without TLS on a
-#    non-loopback address. Failing here says why; failing at the service says
-#    only that TLS is not configured.
+#    The mint path needs `openvox-ca generate`. It is probed rather than
+#    assumed, and its absence is a hard failure with the reason named: a build
+#    that cannot mint leaves the service with no certificate to serve, and
+#    openvox-ca refuses to start without TLS on a non-loopback address. Failing
+#    here says why; failing at the service says only that TLS is not
+#    configured.
+#
+#    The probe is kept now that every shipped build has the subcommand,
+#    because what it now catches is a mismatched pair rather than a missing
+#    feature -- an older binary on PATH, or a partial upgrade -- which is a
+#    state a package cannot prevent and which produces exactly the same
+#    unusable install.
 ensure_node_certificate() {
 	cert="$SSLDIR/certs/$NAME.pem"
 	key="$SSLDIR/private_keys/$NAME.pem"
@@ -240,10 +245,12 @@ other does not. Refusing to guess -- move the odd one aside and re-run."
 	fi
 
 	if ! has_generate_subcommand; then
-		fail "this openvox-ca build has no 'generate' subcommand, so it cannot mint this host's
-certificate offline (openvox-ca#189). The CA in $CADIR is bootstrapped and intact; what is
-missing is only the node certificate. Supply one out of band as $cert and $key and re-run
-'systemctl restart openvox-ca-first-boot', or install a build that has 'openvox-ca generate'."
+		fail "$OPENVOX_CA has no 'generate' subcommand, so it cannot mint this host's certificate
+offline. Every openvox-ca that ships this script has one, so the likely cause is a mismatched
+pair -- an older binary left on PATH by a tarball install, or a partial upgrade -- rather than
+a missing feature. The CA in $CADIR is bootstrapped and intact; what is missing is only the
+node certificate. Either install a matching openvox-ca and re-run 'systemctl restart
+openvox-ca-first-boot', or supply the credential out of band as $cert and $key."
 	fi
 
 	info "minting a node certificate for \"$NAME\""
