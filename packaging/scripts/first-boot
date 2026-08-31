@@ -19,9 +19,11 @@
 set -eu
 
 # The two roots. Both are overridable from the environment so this script can
-# be exercised against a scratch directory -- nothing in the packages sets
-# either, and the unit passes no environment at all, so an installed system
-# always takes the defaults.
+# be exercised against a scratch directory -- and it is: magefile_test.go's
+# "first-boot's certname allow-list" specs run the functions below directly,
+# and the end-to-end runs recorded on openvox-ca#282 drive the whole script
+# this way. Nothing in the packages sets either, and the unit passes no
+# environment at all, so an installed system always takes the defaults.
 SSLDIR="${OPENVOX_CA_SSLDIR:-/etc/puppetlabs/puppet/ssl}"
 CADIR="$SSLDIR/ca"
 
@@ -42,6 +44,13 @@ NODE_TTL=43800h
 # could use. Outside the CA directory on purpose -- the storage backend owns
 # that tree, and this is a note to a human.
 UNRESOLVED_MARKER="$SSLDIR/openvox-ca-certname-unresolved"
+
+# The stable paths the packaged configuration names for the server's own
+# keypair. They are aliases for this host's credential, which is named after
+# the certname and so cannot be written into a file the package ships. See
+# link_serving_credential.
+SERVING_CERT="$SSLDIR/certs/openvox-ca-server.pem"
+SERVING_KEY="$SSLDIR/private_keys/openvox-ca-server.pem"
 
 warn() { echo "openvox-ca first-boot: WARNING: $*" >&2; }
 info() { echo "openvox-ca first-boot: $*" >&2; }
@@ -86,10 +95,7 @@ is_usable_fqdn() {
 	*.*) ;;
 	*) return 1 ;;
 	esac
-	case "$1" in
-	localhost | localhost.* | *.localdomain | localhost6 | localhost6.*) return 1 ;;
-	esac
-	return 0
+	! is_localhost_name "$1"
 }
 
 # puppet_conf_certname reads `certname` out of puppet.conf when this host runs
@@ -161,9 +167,13 @@ Names may contain only letters, digits, dots, dashes and underscores, and may no
 	echo "localhost"
 }
 
+# is_localhost_name matches the names a resolver hands back when it has nothing
+# better. One list, used by both callers: it was written twice, and the two
+# copies had already drifted -- only one of them knew about *.localdomain, so
+# the same name was unusable as an FQDN and acceptable as a short hostname.
 is_localhost_name() {
 	case "$1" in
-	localhost | localhost.* | localhost6 | localhost6.*) return 0 ;;
+	localhost | localhost.* | localhost6 | localhost6.* | *.localdomain) return 0 ;;
 	esac
 	return 1
 }
@@ -174,17 +184,28 @@ is_localhost_name() {
 #    systemd cannot bind-mount a ReadWritePaths= that does not exist; these are
 #    the per-name subdirectories underneath, in the layout puppet uses.
 ensure_ssl_tree() {
-	# 0771 on the root and 0750 on private_keys are puppet's own modes: an
-	# agent's group traverses the root without listing it, and nothing but the
-	# owner and its group reads a private key.
+	# Puppet's own modes: 0755 on the public directories, 0750 on
+	# private_keys, where nothing but the owner and its group may read.
+	#
+	# Each mode is given to mkdir rather than applied afterwards, for two
+	# reasons. A chmod after the fact leaves private_keys briefly at 0755 --
+	# world-readable, in the directory whose whole purpose is that it is not.
+	# And an unconditional chmod is not "guarded on absence": on a takeover
+	# host, where these directories already exist and may be owned by an agent
+	# or by Server, it would either change a mode this package did not set or
+	# fail outright under `set -e` and abort provisioning that had nothing left
+	# to do. A directory that is already there is left exactly as it is.
 	[ -d "$SSLDIR" ] || fail "$SSLDIR does not exist; the package should have created it"
-	for d in certs private_keys public_keys; do
+	for d in certs public_keys; do
 		if [ ! -d "$SSLDIR/$d" ]; then
 			info "creating $SSLDIR/$d"
 			mkdir -m 0755 "$SSLDIR/$d"
 		fi
 	done
-	chmod 0750 "$SSLDIR/private_keys"
+	if [ ! -d "$SSLDIR/private_keys" ]; then
+		info "creating $SSLDIR/private_keys"
+		mkdir -m 0750 "$SSLDIR/private_keys"
+	fi
 }
 
 # 2. The CA itself, unless one is already there. ca_crt.pem is the filesystem
@@ -270,6 +291,23 @@ link_ca_material() {
 	link_if_absent "$SSLDIR/crl.pem" "ca/ca_crl.pem"
 }
 
+# 5. The server's own keypair, under the stable names the packaged
+#    configuration points tls_cert and tls_key at.
+#
+#    Without this the service starts, loads its CA and exits: it binds
+#    0.0.0.0 and refuses plain HTTP on a non-loopback address. The credential
+#    exists by now -- step 3 either adopted or minted it -- but it is named
+#    after this host, and no file shipped in a package can know that name. The
+#    indirection is one symlink, and it is what lets re-minting under a
+#    corrected name be a relink rather than a configuration edit.
+#
+#    Guarded on absence like everything else, so an operator who has pointed
+#    tls_cert at their own certificate keeps it.
+link_serving_credential() {
+	link_if_absent "$SERVING_CERT" "$NAME.pem"
+	link_if_absent "$SERVING_KEY" "$NAME.pem"
+}
+
 # link_if_absent creates a relative symlink, and leaves anything already at the
 # path alone -- including a regular file, which is what a host that ran an
 # agent against another CA will have. Overwriting that would repoint the agent.
@@ -293,8 +331,16 @@ for bin in "$OPENVOX_CA" "$OPENVOX_CA_CTL"; do
 	[ -x "$bin" ] || fail "$bin is missing or not executable; the openvox-ca package is incomplete."
 done
 
-NAME="$(resolve_certname)"
-if [ "$NAME" = localhost ]; then
+# write_unresolved_marker records that the CA was issued under an unusable
+# name. Written AFTER the CA exists, and only when this run created it.
+#
+# Written before, it asserted something it could not know. On a takeover --
+# a host that already had a CA, where every step is a no-op -- an unresolvable
+# hostname would still have produced a marker claiming this run "issued its CA
+# and node certificate as localhost", and its recovery steps begin `rm -rf
+# $CADIR`. That is an instruction to destroy a working CA, addressed to an
+# operator who has just been told something alarming.
+write_unresolved_marker() {
 	printf '%s\n' \
 		"openvox-ca could not determine this host's fully qualified domain name during first-boot" \
 		"provisioning, and issued its CA and node certificate as \"localhost\"." \
@@ -313,11 +359,24 @@ if [ "$NAME" = localhost ]; then
 		"Re-minting replaces the CA, so every certificate it has already issued stops being trusted." \
 		"On a host that has served agents, migrate instead -- see docs/migrating-from-puppet-server.md." \
 		>"$UNRESOLVED_MARKER"
-fi
+}
+
+NAME="$(resolve_certname)"
 
 info "provisioning as \"$NAME\""
 ensure_ssl_tree
+
+# Whether this run is the one that creates the CA decides whether the
+# unresolved-name marker is true, so it has to be read before ensure_ca.
+ca_existed=no
+[ -f "$CADIR/ca_crt.pem" ] && ca_existed=yes
+
 ensure_ca
+
+if [ "$NAME" = localhost ] && [ "$ca_existed" = no ]; then
+	write_unresolved_marker
+fi
 ensure_node_certificate
 link_ca_material
+link_serving_credential
 info "provisioning complete"

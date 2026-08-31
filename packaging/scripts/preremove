@@ -16,5 +16,9 @@ esac
 
 if [ -d /run/systemd/system ]; then
 	systemctl --no-reload disable --now openvox-ca.service >/dev/null 2>&1 || :
-	systemctl --no-reload disable openvox-ca-first-boot.service >/dev/null 2>&1 || :
+	# --now on the oneshot too. RemainAfterExit=yes leaves it "active
+	# (exited)" after a successful run, so a plain disable removes the symlink
+	# and leaves the unit active with no unit file behind it -- which systemd
+	# then reports as "not-found" for as long as the machine stays up.
+	systemctl --no-reload disable --now openvox-ca-first-boot.service >/dev/null 2>&1 || :
 fi

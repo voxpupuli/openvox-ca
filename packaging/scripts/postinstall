@@ -10,6 +10,16 @@
 set -eu
 
 SSLDIR=/etc/puppetlabs/puppet/ssl
+CONFIG=/etc/puppet-ca/config.yaml
+
+# dpkg passes "configure" on install and upgrade; rpm passes the number of
+# packages that will remain, 1 on install and 2 on upgrade. Anything else --
+# dpkg's abort-upgrade, abort-remove and friends -- is a rollback, where
+# re-running this would fight the very state being rolled back to.
+case "${1:-configure}" in
+configure | 1 | 2) ;;
+*) exit 0 ;;
+esac
 
 # -- The service account -----------------------------------------------------
 
@@ -40,12 +50,29 @@ else
 	fi
 fi
 
-# The ssl tree ships in the package, so it exists before the account does and
-# is packaged root-owned. Hand it over now that `puppet` is certain to exist.
+# Everything the package ships that the service must reach is packaged
+# root-owned, because at the moment dpkg or rpm unpacks it the `puppet` account
+# does not exist yet -- it is created above, in this script. rpm notices and
+# falls back to root:root with a warning; dpkg simply writes what it was told.
+# Either way the owner has to be set here, after the account exists.
+#
+# --no-dereference, and it matters: $SSLDIR is writable by `puppet`, this runs
+# as root, and a symlink planted at one of these paths would otherwise have
+# chown follow it and change the owner of whatever it points at.
+#
 # Not recursive: an existing tree may hold an agent's or a server's files, and
 # this package is not entitled to reassign those.
 if [ -d "$SSLDIR" ]; then
-	chown puppet:puppet "$SSLDIR" "$SSLDIR/ca" 2>/dev/null || :
+	chown --no-dereference puppet:puppet "$SSLDIR" "$SSLDIR/ca" 2>/dev/null || :
+fi
+
+# The configuration file is 0640 and can hold credentials, so the service must
+# be able to read it and nothing else should. Without this it stays root:root
+# and openvox-ca -- which runs as `puppet` -- cannot read its own
+# configuration, including the cadir it refuses to start without.
+if [ -f "$CONFIG" ]; then
+	chown --no-dereference root:puppet "$CONFIG" 2>/dev/null || :
+	chmod 0640 "$CONFIG" 2>/dev/null || :
 fi
 
 # -- systemd -----------------------------------------------------------------
@@ -61,7 +88,15 @@ fi
 # openvox-ca and at no other time -- not at install, not on the next boot.
 # Without this the [Install] section is inert, because systemd acts on
 # [Install] at enable time and never merely because a unit file is present.
+#
+# Enabled on first install only. On an upgrade the operator's own choice is
+# already recorded in /etc/systemd/system, and re-enabling here would silently
+# undo a deliberate `systemctl disable openvox-ca-first-boot` every time the
+# package is updated. dpkg gives the previous version as $2 on an upgrade; rpm
+# gives 2 as $1.
 if [ -d /run/systemd/system ]; then
 	systemctl daemon-reload >/dev/null 2>&1 || :
-	systemctl enable openvox-ca-first-boot.service >/dev/null 2>&1 || :
+	if [ -z "${2:-}" ] && [ "${1:-configure}" != 2 ]; then
+		systemctl enable openvox-ca-first-boot.service >/dev/null 2>&1 || :
+	fi
 fi
