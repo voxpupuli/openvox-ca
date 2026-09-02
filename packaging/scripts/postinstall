@@ -12,6 +12,16 @@ set -eu
 SSLDIR=/etc/puppetlabs/puppet/ssl
 CONFIG=/etc/puppet-ca/config.yaml
 
+# Failures here are reported and not fatal. Reported, because the previous
+# version sent every one of them to /dev/null: a package could install
+# "successfully" and leave a service that cannot read its own configuration,
+# with nothing anywhere saying why. Not fatal, because a maintainer script
+# that exits non-zero leaves the package half-configured, which is a worse
+# state to hand an operator than a working install with a loud warning.
+warn() {
+	echo "openvox-ca: WARNING: $*" >&2
+}
+
 # dpkg passes "configure" on install and upgrade; rpm passes the number of
 # packages that will remain, 1 on install and 2 on upgrade. Anything else --
 # dpkg's abort-upgrade, abort-remove and friends -- is a rollback, where
@@ -63,7 +73,9 @@ fi
 # Not recursive: an existing tree may hold an agent's or a server's files, and
 # this package is not entitled to reassign those.
 if [ -d "$SSLDIR" ]; then
-	chown --no-dereference puppet:puppet "$SSLDIR" "$SSLDIR/ca" 2>/dev/null || :
+	chown --no-dereference puppet:puppet "$SSLDIR" "$SSLDIR/ca" || warn \
+		"could not give $SSLDIR to puppet:puppet. Provisioning runs as \`puppet\` and will not be" \
+		"able to write there; fix the ownership and run 'systemctl restart openvox-ca-first-boot'."
 fi
 
 # The configuration file is 0640 and can hold credentials, so the service must
@@ -71,8 +83,10 @@ fi
 # and openvox-ca -- which runs as `puppet` -- cannot read its own
 # configuration, including the cadir it refuses to start without.
 if [ -f "$CONFIG" ]; then
-	chown --no-dereference root:puppet "$CONFIG" 2>/dev/null || :
-	chmod 0640 "$CONFIG" 2>/dev/null || :
+	chown --no-dereference root:puppet "$CONFIG" || warn \
+		"could not give $CONFIG to root:puppet. openvox-ca runs as \`puppet\` and will not be able to" \
+		"read its own configuration, including the cadir it refuses to start without."
+	chmod 0640 "$CONFIG" || warn "could not set mode 0640 on $CONFIG; it may be readable by others."
 fi
 
 # -- systemd -----------------------------------------------------------------
