@@ -159,7 +159,9 @@ The shipped unit runs the CA as the `puppet` user with `ProtectSystem=strict`, a
 
 The `.deb` and `.rpm` install the same unit, rendered for `/usr/bin`, and add a second one: `openvox-ca-first-boot.service`, a `Type=oneshot` that provisions the CA the first time you start the service.
 
-It is pulled in by `openvox-ca.service` and runs nowhere else. There is no `WantedBy=multi-user.target` on it, so installing the package provisions nothing and neither does the next reboot — a CA is created the first time you run `systemctl start openvox-ca`, after you have written the configuration file. It is ordered `Before=openvox-ca.service` and is required by it, so provisioning that fails stops the service rather than letting it start against a half-provisioned directory.
+It is pulled in by `openvox-ca.service` and runs nowhere else. There is no `WantedBy=multi-user.target` on it, so installing the package provisions nothing and neither does the next reboot — a CA is created the first time you run `systemctl start openvox-ca`. It is ordered `Before=openvox-ca.service` and is required by it, so provisioning that fails stops the service rather than letting it start against a half-provisioned directory.
+
+**You do not have to write a configuration file first.** The package ships `/etc/puppet-ca/config.yaml` already set up: the CA directory, the serving certificate and key, and the port. Review it if you like — it is marked as a configuration file, so your edits survive upgrades — but a default install needs no edit to start.
 
 Every step it takes is guarded on absence, so it is idempotent and **a takeover does nothing**:
 
@@ -167,10 +169,13 @@ Every step it takes is guarded on absence, so it is idempotent and **a takeover 
 2. Bootstrap a CA in `/etc/puppetlabs/puppet/ssl/ca` unless one is already there.
 3. Adopt this host's node certificate if `certs/$NAME.pem` and `private_keys/$NAME.pem` both exist; otherwise mint one.
 4. Link `certs/ca.pem` and `crl.pem` into the CA directory, as Puppet's own layout does, if nothing is there already.
+5. Link the serving credential the shipped configuration names — `certs/openvox-ca-server.pem` and `private_keys/openvox-ca-server.pem` — to the certificate step 3 produced.
+
+Step 5 is what makes the service able to start at all: it binds `0.0.0.0` and refuses plain HTTP on a non-loopback address, so it needs `tls_cert` and `tls_key`. Those name fixed paths because a file shipped in a package cannot know this host's certificate name, and provisioning points them at the credential it just adopted or minted. Re-minting under a corrected name is then a matter of replacing those two links rather than editing configuration. Like every other step it is guarded on absence, so pointing `tls_cert` at your own certificate keeps it.
 
 Step 3 is the one that can stop rather than warn, and it does so in two cases. If **one half of a credential** is present — a certificate with no key, or the reverse — it refuses to guess and says which file to move aside. If the binary has **no `generate` subcommand** it stops too, because a build that cannot mint leaves the service with no certificate to serve and `openvox-ca` refuses to start without TLS on a non-loopback address; failing here names the cause, where failing at the service would only report that TLS is not configured. In both cases the CA itself is bootstrapped and intact, and the message says so.
 
-`$NAME` is resolved first-usable-wins: `OPENVOX_CA_CERTNAME` from a systemd drop-in, then `certname` from `/etc/puppetlabs/puppet/puppet.conf`, then `hostname -f` if it is dotted and not a localhost form, then the short hostname, then `localhost`. Every source is also checked against an allow-list of characters that cannot express a path, because the name is joined to one. The last two are failure states that still produce a running CA; both warn, naming what will not work and how to re-mint, and the last also writes `/etc/puppetlabs/puppet/ssl/openvox-ca-certname-unresolved`, because a CA nothing can reach still looks healthy in `systemctl status`.
+`$NAME` is resolved first-usable-wins: `OPENVOX_CA_CERTNAME` from a systemd drop-in, then `certname` from `/etc/puppetlabs/puppet/puppet.conf`, then `hostname -f` if it is dotted and not a localhost form, then the short hostname, then `localhost`. Every source is also checked against an allow-list of characters that cannot express a path, because the name is joined to one. The last two are failure states that still produce a running CA; both warn, naming what will not work and how to re-mint. The `localhost` case also writes `/etc/puppetlabs/puppet/ssl/openvox-ca-certname-unresolved`, because a CA nothing can reach still looks healthy in `systemctl status` — but only when that run created the CA. On a takeover the marker would be describing a CA this run did not issue, and its recovery steps begin by deleting one.
 
 A oneshot rather than a maintainer script because it runs under the same hardening as the service, re-runs after the CA directory is wiped, and fails visibly in `systemctl status` rather than in package-manager output nobody keeps.
 

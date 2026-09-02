@@ -36,6 +36,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/sassoftware/go-rpmutils"
 
 	"github.com/voxpupuli/openvox-ca/internal/version"
 )
@@ -1686,6 +1687,18 @@ var _ = Describe("stageDocTree", func() {
 			Entry("docs but no LICENSE", []string{"README.md", "docs/systemd.md"}, "LICENSE"),
 			Entry("LICENSE but no README", []string{"LICENSE", "docs/systemd.md"}, "README.md"),
 		)
+
+		// The case the floor previously could not fail on. docs/ is the one
+		// entry whose pathspec can stop matching by itself -- a rename, a run
+		// from a subdirectory -- and it was the one entry the floor did not
+		// check, so LICENSE and README would have shipped beside an empty
+		// tree. Its own It because it fails with its own message.
+		It("rejects an enumeration carrying the two files but nothing from docs/", func() {
+			err := checkDocTreeFloor([]string{"LICENSE", "README.md"})
+			Expect(err).To(MatchError(And(
+				ContainSubstring(`git tracks no path under "docs/"`),
+				ContainSubstring("wrong rather than empty"))))
+		})
 	})
 })
 
@@ -1716,37 +1729,38 @@ var _ = Describe("Build.Unit", func() {
 			ContainSubstring(packageUnitBindir))))
 	})
 
-	// The success path writes a file, so it is exercised where that file can
-	// be inspected and then removed rather than left in the working tree.
-	It("writes a unit rendered for the bindir it was given", func() {
-		out := filepath.Join("dist", distUnitFile)
-		_, existed := os.Stat(out)
-		DeferCleanup(func() {
-			if existed != nil {
-				os.Remove(out)
-			}
+	// The success path goes through writeRenderedUnit against a temporary
+	// directory, so no spec writes into the repository's own dist/.
+	Describe("writeRenderedUnit", func() {
+		It("writes a unit rendered for the bindir it was given", func() {
+			dir := GinkgoT().TempDir()
+			out, err := writeRenderedUnit(dir, "/opt/openvox/bin")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out).To(Equal(filepath.Join(dir, distUnitFile)))
+
+			body, err := os.ReadFile(out)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(body)).To(ContainSubstring("ExecStart=/opt/openvox/bin/openvox-ca"))
+			Expect(string(body)).NotTo(ContainSubstring(unitBindirPlaceholder))
 		})
 
-		Expect(Build{}.Unit("/opt/openvox/bin")).To(Succeed())
-		body, err := os.ReadFile(out)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(string(body)).To(ContainSubstring("ExecStart=/opt/openvox/bin/openvox-ca"))
-		Expect(string(body)).NotTo(ContainSubstring(unitBindirPlaceholder))
-	})
+		It("trims a trailing slash rather than doubling it", func() {
+			dir := GinkgoT().TempDir()
+			out, err := writeRenderedUnit(dir, "/opt/openvox/bin/")
+			Expect(err).NotTo(HaveOccurred())
 
-	It("trims a trailing slash rather than doubling it", func() {
-		out := filepath.Join("dist", distUnitFile)
-		_, existed := os.Stat(out)
-		DeferCleanup(func() {
-			if existed != nil {
-				os.Remove(out)
-			}
+			body, err := os.ReadFile(out)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(body)).To(ContainSubstring("ExecStart=/opt/openvox/bin/openvox-ca"))
+			Expect(string(body)).NotTo(ContainSubstring("//openvox-ca"))
 		})
 
-		Expect(Build{}.Unit("/opt/openvox/bin/")).To(Succeed())
-		body, err := os.ReadFile(out)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(string(body)).To(ContainSubstring("ExecStart=/opt/openvox/bin/openvox-ca"))
+		It("creates the destination directory when it is not there", func() {
+			dir := filepath.Join(GinkgoT().TempDir(), "nested", "dist")
+			_, err := writeRenderedUnit(dir, packageUnitBindir)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(filepath.Join(dir, distUnitFile)).To(BeAnExistingFile())
+		})
 	})
 })
 
@@ -1866,4 +1880,426 @@ var _ = Describe("first-boot's certname allow-list", func() {
 		Entry("any .localdomain name", "box.localdomain", true),
 		Entry("a real name", "ca.example.com", false),
 	)
+})
+
+// rpmFile is one entry of an rpm's payload, with the metadata that decides how
+// it is installed.
+type rpmFile struct {
+	mode      int
+	owner     string
+	group     string
+	config    bool
+	noreplace bool
+}
+
+// rpmPayload returns an rpm's installed files by path.
+//
+// The deb has a hand-written ar/tar reader above because its container is two
+// formats deep and both are in the standard library. The rpm's is neither, so
+// this uses the reader nfpm already depends on rather than a second
+// hand-rolled header parser -- the risk in parsing an rpm header by hand is
+// getting it subtly wrong and asserting against the mistake.
+func rpmPayload(path string) (map[string]rpmFile, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	r, err := rpmutils.ReadRpm(f)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := r.Header.GetFiles()
+	if err != nil {
+		return nil, err
+	}
+
+	out := make(map[string]rpmFile, len(entries))
+	for _, e := range entries {
+		out[e.Name()] = rpmFile{
+			mode:      e.Mode() & 0o7777,
+			owner:     e.UserName(),
+			group:     e.GroupName(),
+			config:    e.Flags()&rpmutils.RPMFILE_CONFIG != 0,
+			noreplace: e.Flags()&rpmutils.RPMFILE_NOREPLACE != 0,
+		}
+	}
+	return out, nil
+}
+
+var _ = Describe("the rpm's payload", func() {
+	// The deb and the rpm come out of one code path, but "one code path" is an
+	// argument, not a check: nfpm renders per-format metadata differently for
+	// each, and only the deb's was ever opened. Everything asserted of the deb
+	// is asserted here too.
+	var (
+		distDir string
+		files   map[string]rpmFile
+	)
+	const ver = "9.9.9"
+
+	BeforeEach(func() {
+		distDir = GinkgoT().TempDir()
+		variant := distVariantSpec{
+			name:     "linux_amd64",
+			env:      map[string]string{"GOOS": "linux", "GOARCH": "amd64"},
+			packaged: true,
+		}
+
+		src := GinkgoT().TempDir()
+		for _, name := range []string{"openvox-ca", "openvox-ca-ctl"} {
+			Expect(os.WriteFile(filepath.Join(src, name), []byte("#!/bin/true\n"), 0o755)).To(Succeed())
+		}
+		unit, err := renderUnit(tarballUnitBindir)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(os.WriteFile(filepath.Join(src, distUnitFile), unit, 0o644)).To(Succeed())
+		archive := filepath.Join(distDir, fmt.Sprintf("openvox-ca_%s_%s.tar.gz", ver, variant.name))
+		Expect(createTarGz(archive, src, distArchiveFiles([]string{"openvox-ca", "openvox-ca-ctl"}))).To(Succeed())
+
+		Expect(buildVariantPackages(distDir, ver, variant)).To(Succeed())
+		files, err = rpmPayload(filepath.Join(distDir, "openvox-ca-9.9.9-1.x86_64.rpm"))
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	DescribeTable("installs the payload entry",
+		func(path string, mode int) {
+			Expect(files).To(HaveKey(path))
+			Expect(files[path].mode).To(Equal(mode), "mode of %s", path)
+		},
+		Entry("the server binary", "/usr/bin/openvox-ca", 0o755),
+		Entry("the operator CLI", "/usr/bin/openvox-ca-ctl", 0o755),
+		Entry("the service unit", "/usr/lib/systemd/system/openvox-ca.service", 0o644),
+		Entry("the provisioning oneshot", "/usr/lib/systemd/system/openvox-ca-first-boot.service", 0o644),
+		Entry("the provisioning script", "/usr/libexec/openvox-ca/first-boot", 0o755),
+		Entry("the sysusers declaration", "/usr/lib/sysusers.d/openvox-ca.conf", 0o644),
+		Entry("the configuration file", "/etc/puppet-ca/config.yaml", 0o640),
+	)
+
+	// The claim the PR body previously made by citing nfpm's source rather
+	// than by inspecting a built package. An rpm that installed the config
+	// without noreplace would overwrite an operator's edits on every update.
+	It("marks the configuration file %config(noreplace)", func() {
+		cfg := files["/etc/puppet-ca/config.yaml"]
+		Expect(cfg.config).To(BeTrue(), "config.yaml is not marked %%config")
+		Expect(cfg.noreplace).To(BeTrue(), "config.yaml is %%config but not noreplace")
+	})
+
+	It("marks nothing else as configuration", func() {
+		for path, f := range files {
+			if path == "/etc/puppet-ca/config.yaml" {
+				continue
+			}
+			Expect(f.config).To(BeFalse(), "%s is marked %%config and should not be", path)
+		}
+	})
+
+	It("gives the configuration file to root:puppet", func() {
+		Expect(files["/etc/puppet-ca/config.yaml"].owner).To(Equal("root"))
+		Expect(files["/etc/puppet-ca/config.yaml"].group).To(Equal("puppet"))
+	})
+
+	It("carries the documentation tree and the ssl directories", func() {
+		Expect(files).To(HaveKey("/usr/share/doc/openvox-ca/LICENSE"))
+		Expect(files).To(HaveKey("/usr/share/doc/openvox-ca/README.md"))
+		Expect(files).To(HaveKey("/usr/share/doc/openvox-ca/docs/systemd.md"))
+		Expect(files).To(HaveKey("/etc/puppetlabs/puppet/ssl"))
+		Expect(files).To(HaveKey("/etc/puppetlabs/puppet/ssl/ca"))
+	})
+})
+
+// firstBootDefs returns the provisioning script's definitions -- everything
+// above the "-- Run --" banner -- so a spec can call one function without
+// running provisioning.
+func firstBootDefs() (string, error) {
+	src, err := os.ReadFile(firstBootScript)
+	if err != nil {
+		return "", err
+	}
+	const banner = "# -- Run ---"
+	i := bytes.Index(src, []byte(banner))
+	if i < 0 {
+		return "", fmt.Errorf("%s has no %q banner, so the definitions cannot be separated from the "+
+			"code that runs provisioning", firstBootScript, banner)
+	}
+	return string(src[:i]), nil
+}
+
+// firstBootResult is what a spec gets back from driving the script.
+type firstBootResult struct {
+	ok     bool
+	output string
+}
+
+// runFirstBootIn evaluates a shell expression against the script's definitions
+// with a scratch ssldir and bindir, and returns whether it succeeded plus
+// everything it wrote to either stream.
+func runFirstBootIn(sslDir, binDir, expr string, extraEnv ...string) (firstBootResult, error) {
+	defs, err := firstBootDefs()
+	if err != nil {
+		return firstBootResult{}, err
+	}
+	cmd := exec.Command("sh", "-c", defs+"\n"+expr+"\n")
+	cmd.Env = append(os.Environ(),
+		"OPENVOX_CA_SSLDIR="+sslDir,
+		"OPENVOX_CA_BINDIR="+binDir,
+	)
+	cmd.Env = append(cmd.Env, extraEnv...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			return firstBootResult{ok: false, output: string(out)}, nil
+		}
+		return firstBootResult{}, err
+	}
+	return firstBootResult{ok: true, output: string(out)}, nil
+}
+
+// stubOpenvoxCA writes a fake openvox-ca whose --help output does or does not
+// list a `generate` subcommand, which is the only thing has_generate_subcommand
+// reads.
+func stubOpenvoxCA(binDir string, withGenerate bool) {
+	listing := "Available Commands:\n  csr            Emit a certificate signing request\n"
+	if withGenerate {
+		listing += "  generate       Mint a certificate offline, without a running server\n"
+	}
+	listing += "  help           Help about any command\n"
+
+	script := "#!/bin/sh\ncase \"${1:-}\" in\n--help) printf '%s' " +
+		shellQuote(listing) + "; exit 0 ;;\nesac\nexit 0\n"
+	Expect(os.WriteFile(filepath.Join(binDir, "openvox-ca"), []byte(script), 0o755)).To(Succeed())
+	Expect(os.WriteFile(filepath.Join(binDir, "openvox-ca-ctl"), []byte("#!/bin/sh\nexit 0\n"), 0o755)).To(Succeed())
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+var _ = Describe("first-boot's node-certificate step", func() {
+	var sslDir, binDir string
+
+	BeforeEach(func() {
+		sslDir = GinkgoT().TempDir()
+		binDir = GinkgoT().TempDir()
+		for _, d := range []string{"certs", "private_keys", "ca"} {
+			Expect(os.MkdirAll(filepath.Join(sslDir, d), 0o755)).To(Succeed())
+		}
+	})
+
+	writePair := func(cert, key bool) {
+		if cert {
+			Expect(os.WriteFile(filepath.Join(sslDir, "certs", "ca.example.com.pem"), []byte("cert"), 0o644)).To(Succeed())
+		}
+		if key {
+			Expect(os.WriteFile(filepath.Join(sslDir, "private_keys", "ca.example.com.pem"), []byte("key"), 0o600)).To(Succeed())
+		}
+	}
+
+	// The probe reads the root command's listing rather than invoking
+	// `generate --help`, because that exits 0 on a build without the
+	// subcommand -- cobra answers --help from the root before validating
+	// arguments. A probe built the obvious way reports every build as capable,
+	// so both directions are pinned here.
+	Describe("has_generate_subcommand", func() {
+		It("finds the subcommand when the listing has it", func() {
+			stubOpenvoxCA(binDir, true)
+			r, err := runFirstBootIn(sslDir, binDir, "has_generate_subcommand")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(r.ok).To(BeTrue())
+		})
+
+		It("does not find it when the listing does not", func() {
+			stubOpenvoxCA(binDir, false)
+			r, err := runFirstBootIn(sslDir, binDir, "has_generate_subcommand")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(r.ok).To(BeFalse())
+		})
+	})
+
+	Describe("ensure_node_certificate", func() {
+		It("adopts an existing pair without minting", func() {
+			stubOpenvoxCA(binDir, true)
+			writePair(true, true)
+			r, err := runFirstBootIn(sslDir, binDir, `NAME=ca.example.com; ensure_node_certificate`)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(r.ok).To(BeTrue())
+			Expect(r.output).To(ContainSubstring("adopting the existing certificate"))
+		})
+
+		// Half a credential is the case where guessing is worse than stopping:
+		// minting over a key whose certificate is missing, or vice versa,
+		// silently replaces material an operator may still need.
+		DescribeTable("refuses half a credential rather than guessing",
+			func(cert, key bool) {
+				stubOpenvoxCA(binDir, true)
+				writePair(cert, key)
+				r, err := runFirstBootIn(sslDir, binDir, `NAME=ca.example.com; ensure_node_certificate`)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(r.ok).To(BeFalse())
+				Expect(r.output).To(ContainSubstring("half a credential"))
+			},
+			Entry("a certificate with no key", true, false),
+			Entry("a key with no certificate", false, true),
+		)
+
+		// A build that cannot mint leaves the service with no certificate to
+		// serve, so this stops with the cause named rather than letting the
+		// service fail later about TLS.
+		It("stops when the build cannot mint, naming the binary", func() {
+			stubOpenvoxCA(binDir, false)
+			r, err := runFirstBootIn(sslDir, binDir, `NAME=ca.example.com; ensure_node_certificate`)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(r.ok).To(BeFalse())
+			Expect(r.output).To(And(
+				ContainSubstring("no 'generate' subcommand"),
+				ContainSubstring(filepath.Join(binDir, "openvox-ca")),
+			))
+		})
+	})
+
+	// First usable answer wins, and the order is the whole point: an explicit
+	// answer beats the resolver, and the resolver's dotted answer beats the
+	// short name.
+	Describe("resolve_certname", func() {
+		It("takes an explicit answer ahead of anything the resolver says", func() {
+			stubOpenvoxCA(binDir, true)
+			r, err := runFirstBootIn(sslDir, binDir, "resolve_certname 2>/dev/null",
+				"OPENVOX_CA_CERTNAME=explicit.example.com")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(r.ok).To(BeTrue())
+			Expect(strings.TrimSpace(r.output)).To(Equal("explicit.example.com"))
+		})
+
+		// An unsafe explicit answer stops rather than falling through to the
+		// next source: it is a mistake in a hand-written file, and quietly
+		// provisioning under a different name would hide it.
+		It("stops on an unsafe explicit answer rather than falling through", func() {
+			stubOpenvoxCA(binDir, true)
+			r, err := runFirstBootIn(sslDir, binDir, "resolve_certname",
+				"OPENVOX_CA_CERTNAME=../../../etc/evil.example.com")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(r.ok).To(BeFalse())
+			Expect(r.output).To(ContainSubstring("not a usable certificate name"))
+		})
+	})
+})
+
+var _ = Describe("the packages' maintainer scripts", func() {
+	// What is exercised here is the argument handling and the enable-once
+	// decision: which invocations act at all, and whether an upgrade re-enables
+	// a unit the operator disabled. Every external command is a stub that logs
+	// its arguments, so nothing touches this machine's accounts.
+	//
+	// What is NOT exercised, deliberately: whether systemd-sysusers actually
+	// creates the account it is handed. That needs a real /etc/passwd and a
+	// real systemd, which is the packaging CI leg (#254). A test that stubbed
+	// systemd-sysusers and then asserted the stub had been called would be
+	// asserting its own fixture.
+	var stubBin, log string
+
+	BeforeEach(func() {
+		stubBin = GinkgoT().TempDir()
+		log = filepath.Join(GinkgoT().TempDir(), "calls.log")
+
+		for _, name := range []string{
+			"systemctl", "systemd-sysusers", "getent", "groupadd", "useradd", "chown", "chmod",
+		} {
+			body := fmt.Sprintf("#!/bin/sh\necho \"%s $*\" >> %s\nexit 0\n", name, log)
+			// getent must report the account as absent so the creation branch
+			// is the one taken; every other stub succeeds.
+			if name == "getent" {
+				body = fmt.Sprintf("#!/bin/sh\necho \"getent $*\" >> %s\nexit 2\n", log)
+			}
+			Expect(os.WriteFile(filepath.Join(stubBin, name), []byte(body), 0o755)).To(Succeed())
+		}
+	})
+
+	run := func(script string, args ...string) (firstBootResult, string) {
+		cmd := exec.Command("sh", append([]string{script}, args...)...)
+		cmd.Env = append(os.Environ(), "PATH="+stubBin+":/usr/bin:/bin")
+		out, err := cmd.CombinedOutput()
+		res := firstBootResult{ok: true, output: string(out)}
+		if err != nil {
+			var exit *exec.ExitError
+			if errors.As(err, &exit) {
+				res.ok = false
+			} else {
+				Expect(err).NotTo(HaveOccurred())
+			}
+		}
+		calls, readErr := os.ReadFile(log)
+		if readErr != nil {
+			calls = nil
+		}
+		return res, string(calls)
+	}
+
+	// dpkg's prerm never receives "purge" -- that is a postrm argument -- so
+	// the accepted set is exactly dpkg's `remove` and rpm's remaining-count 0.
+	DescribeTable("preremove acts only on a real removal",
+		func(arg string, shouldAct bool) {
+			r, _ := run("packaging/scripts/preremove", arg)
+			Expect(r.ok).To(BeTrue(), "preremove %q exited non-zero: %s", arg, r.output)
+		},
+		Entry("dpkg remove", "remove", true),
+		Entry("rpm erase", "0", true),
+		Entry("dpkg upgrade", "upgrade", false),
+		Entry("rpm upgrade", "1", false),
+		Entry("dpkg failed-upgrade", "failed-upgrade", false),
+		Entry("no argument at all", "", false),
+	)
+
+	It("preremove does not accept purge, which dpkg sends to postrm", func() {
+		src, err := os.ReadFile("packaging/scripts/preremove")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(src)).To(MatchRegexp(`(?m)^0 \| remove\) ;;$`),
+			"the accepted set should be dpkg's remove and rpm's 0, and nothing else")
+	})
+
+	DescribeTable("postinstall runs on install and upgrade, and stops on a rollback",
+		func(args []string, shouldAct bool) {
+			r, calls := run("packaging/scripts/postinstall", args...)
+			Expect(r.ok).To(BeTrue(), "postinstall %v exited non-zero: %s", args, r.output)
+			if shouldAct {
+				Expect(calls).To(ContainSubstring("systemd-sysusers"),
+					"postinstall %v should have provisioned the account", args)
+			} else {
+				Expect(calls).To(BeEmpty(),
+					"postinstall %v should have done nothing at all", args)
+			}
+		},
+		Entry("dpkg configure", []string{"configure"}, true),
+		Entry("rpm install", []string{"1"}, true),
+		Entry("rpm upgrade", []string{"2"}, true),
+		// dpkg's rollback arguments: re-running here would fight the state
+		// being rolled back to.
+		Entry("dpkg abort-upgrade", []string{"abort-upgrade", "1.0.0"}, false),
+		Entry("dpkg abort-remove", []string{"abort-remove"}, false),
+	)
+
+	// The finding behind this: without an argument guard, every upgrade
+	// re-enabled the oneshot and silently undid a deliberate
+	// `systemctl disable openvox-ca-first-boot`.
+	Describe("enabling the provisioning oneshot", func() {
+		It("enables it on a first install", func() {
+			// The systemd branch is guarded on /run/systemd/system, which does
+			// not exist here, so the decision is read from the script rather
+			// than from a call. Asserting the guard's shape is the honest
+			// check on a machine with no systemd.
+			src, err := os.ReadFile("packaging/scripts/postinstall")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(src)).To(ContainSubstring(`if [ -z "${2:-}" ] && [ "${1:-configure}" != 2 ]; then`),
+				"the enable must be conditional on this being a first install")
+			Expect(string(src)).To(MatchRegexp(`(?s)if \[ -z "\$\{2:-\}" \].*systemctl enable openvox-ca-first-boot`),
+				"the enable must sit inside that condition, not beside it")
+		})
+	})
+
+	It("postremove exits cleanly whatever it is given", func() {
+		for _, arg := range []string{"remove", "purge", "upgrade", "0", "1", ""} {
+			r, _ := run("packaging/scripts/postremove", arg)
+			Expect(r.ok).To(BeTrue(), "postremove %q exited non-zero: %s", arg, r.output)
+		}
+	})
 })

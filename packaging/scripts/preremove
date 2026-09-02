@@ -6,11 +6,18 @@
 # Removal only. Both package managers run this on upgrade as well, with an
 # argument that says so -- dpkg passes "upgrade", rpm passes a remaining-count
 # of 1 -- and stopping the service on an upgrade would be a needless outage.
+#
+# The accepted set is exactly what each can send here on a removal: dpkg's
+# `prerm remove`, and rpm's `%preun` remaining-count of 0. "purge" is NOT in
+# it, and its absence is deliberate: dpkg passes purge to *postrm*, never to
+# prerm, so accepting it here would be a branch nothing can reach -- which
+# reads to the next person as though purge were handled, when the file that
+# handles it is postremove.
 
 set -eu
 
 case "${1:-}" in
-0 | remove | purge) ;;
+0 | remove) ;;
 *) exit 0 ;;
 esac
 

@@ -1431,24 +1431,37 @@ func (Build) Unit(bindir string) error {
 		return fmt.Errorf("bindir %q is not an absolute path (try %s or %s)",
 			bindir, tarballUnitBindir, packageUnitBindir)
 	}
+	out, err := writeRenderedUnit("dist", bindir)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Wrote %s (ExecStart=%s/openvox-ca)\n", out, strings.TrimSuffix(bindir, "/"))
+	return nil
+}
+
+// writeRenderedUnit renders the unit for bindir into distDir and returns the
+// path written. Separate from Build.Unit so specs can exercise the rendering
+// and the trailing-slash handling against a temporary directory: a test that
+// wrote into the repository's own dist/ would leave a file behind and would
+// differ depending on whether a build had run first.
+func writeRenderedUnit(distDir, bindir string) (string, error) {
 	// Trimmed once, and everything below uses the trimmed value -- including
-	// the message. Printing the argument instead reported
+	// the message Build.Unit prints. Printing the argument instead reported
 	// "ExecStart=/opt/bin//openvox-ca" for a bindir given with a trailing
 	// slash, describing a unit that had been rendered correctly.
 	bindir = strings.TrimSuffix(bindir, "/")
 	unit, err := renderUnit(bindir)
 	if err != nil {
-		return err
+		return "", err
 	}
-	if err := os.MkdirAll("dist", 0755); err != nil {
-		return err
+	if err := os.MkdirAll(distDir, 0755); err != nil {
+		return "", err
 	}
-	out := filepath.Join("dist", distUnitFile)
+	out := filepath.Join(distDir, distUnitFile)
 	if err := os.WriteFile(out, unit, 0644); err != nil {
-		return err
+		return "", err
 	}
-	fmt.Printf("Wrote %s (ExecStart=%s/openvox-ca)\n", out, bindir)
-	return nil
+	return out, nil
 }
 
 // Packages builds the .deb and .rpm for every packaged variant from the
@@ -1657,8 +1670,13 @@ func verifyPackagesWritten(distDir string, want int) error {
 // relative link between two documents still resolves once installed.
 var docTreeEntries = []string{"LICENSE", "README.md", "docs"}
 
-// stageDocTreeFloor are paths every enumeration must contain. See stageDocTree.
-var stageDocTreeFloor = []string{"LICENSE", "README.md"}
+// stageDocTreeFloor are paths every enumeration must contain, and
+// stageDocTreePrefix is the directory at least one path must come from. See
+// checkDocTreeFloor.
+var (
+	stageDocTreeFloor  = []string{"LICENSE", "README.md"}
+	stageDocTreePrefix = "docs/"
+)
 
 // stageDocTree copies the tracked files under docTreeEntries into dest,
 // keeping their relative paths.
@@ -1720,7 +1738,20 @@ func checkDocTreeFloor(paths []string) error {
 				"rather than empty (found %d paths)", want, strings.Join(docTreeEntries, ", "), len(paths))
 		}
 	}
-	return nil
+
+	// And at least one path from docs/ itself. Without this the floor checked
+	// only the two single-file entries, so the one entry that can silently
+	// stop matching -- the directory, whose pathspec is the whole reason this
+	// enumeration is not a fixed list -- was the one it did not cover. A
+	// renamed docs/ would have passed the floor and packaged LICENSE and
+	// README beside an empty tree.
+	for _, p := range paths {
+		if strings.HasPrefix(p, stageDocTreePrefix) {
+			return nil
+		}
+	}
+	return fmt.Errorf("git tracks no path under %q, so the documentation enumeration is wrong rather "+
+		"than empty (found %d paths: %s)", stageDocTreePrefix, len(paths), strings.Join(paths, ", "))
 }
 
 // copyStagedFile copies one file into the staging tree, creating its parents.
