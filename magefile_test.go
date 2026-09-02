@@ -2196,10 +2196,11 @@ var _ = Describe("the packages' maintainer scripts", func() {
 	// real systemd, which is the packaging CI leg (#254). A test that stubbed
 	// systemd-sysusers and then asserted the stub had been called would be
 	// asserting its own fixture.
-	var stubBin, log string
+	var stubBin, log, systemdRuntime string
 
 	BeforeEach(func() {
 		stubBin = GinkgoT().TempDir()
+		systemdRuntime = GinkgoT().TempDir()
 		log = filepath.Join(GinkgoT().TempDir(), "calls.log")
 
 		for _, name := range []string{
@@ -2217,7 +2218,14 @@ var _ = Describe("the packages' maintainer scripts", func() {
 
 	run := func(script string, args ...string) (firstBootResult, string) {
 		cmd := exec.Command("sh", append([]string{script}, args...)...)
-		cmd.Env = append(os.Environ(), "PATH="+stubBin+":/usr/bin:/bin")
+		// A directory standing in for /run/systemd/system, so the systemd
+		// branch is reachable on a host that has no systemd. Without it the
+		// scripts correctly do nothing here and the "acts on a removal" half
+		// of the table below could not be asserted at all.
+		cmd.Env = append(os.Environ(),
+			"PATH="+stubBin+":/usr/bin:/bin",
+			"OPENVOX_CA_SYSTEMD_RUNTIME="+systemdRuntime,
+		)
 		out, err := cmd.CombinedOutput()
 		res := firstBootResult{ok: true, output: string(out)}
 		if err != nil {
@@ -2237,10 +2245,27 @@ var _ = Describe("the packages' maintainer scripts", func() {
 
 	// dpkg's prerm never receives "purge" -- that is a postrm argument -- so
 	// the accepted set is exactly dpkg's `remove` and rpm's remaining-count 0.
+	// shouldAct is read. The previous version of this table declared it and
+	// never used it, so all six entries asserted the same thing -- that the
+	// script exited 0 -- which is true of a stubbed systemctl whatever the
+	// script decides. A table named "acts only on a real removal" would have
+	// passed had preremove done nothing at all, or disabled the service on
+	// every upgrade. Go does not warn on an unused function parameter, so
+	// nothing caught it but a reader.
 	DescribeTable("preremove acts only on a real removal",
 		func(arg string, shouldAct bool) {
-			r, _ := run("packaging/scripts/preremove", arg)
+			r, calls := run("packaging/scripts/preremove", arg)
 			Expect(r.ok).To(BeTrue(), "preremove %q exited non-zero: %s", arg, r.output)
+			if shouldAct {
+				Expect(calls).To(ContainSubstring("systemctl"),
+					"preremove %q should have stopped and disabled the units", arg)
+				Expect(calls).To(ContainSubstring("openvox-ca.service"))
+				Expect(calls).To(ContainSubstring("openvox-ca-first-boot.service"))
+			} else {
+				Expect(calls).To(BeEmpty(),
+					"preremove %q must not touch the units: stopping the service on an upgrade is an "+
+						"outage nobody asked for", arg)
+			}
 		},
 		Entry("dpkg remove", "remove", true),
 		Entry("rpm erase", "0", true),
@@ -2301,5 +2326,171 @@ var _ = Describe("the packages' maintainer scripts", func() {
 			r, _ := run("packaging/scripts/postremove", arg)
 			Expect(r.ok).To(BeTrue(), "postremove %q exited non-zero: %s", arg, r.output)
 		}
+	})
+})
+
+var _ = Describe("first-boot's certname fallback tiers", func() {
+	// resolve_certname is first-usable-wins across four tiers, and only the
+	// first was reachable before: a spec had no way to control what `hostname`
+	// returns. A stub on PATH is the unlock -- the same technique the
+	// maintainer-script specs use -- and it makes the tier that matters most
+	// testable: the localhost fallback, whose whole purpose is to flag a CA
+	// that looks healthy while no agent can reach it.
+	var sslDir, binDir, stubBin string
+
+	BeforeEach(func() {
+		sslDir = GinkgoT().TempDir()
+		binDir = GinkgoT().TempDir()
+		stubBin = GinkgoT().TempDir()
+		for _, d := range []string{"certs", "private_keys", "ca"} {
+			Expect(os.MkdirAll(filepath.Join(sslDir, d), 0o755)).To(Succeed())
+		}
+		stubOpenvoxCA(binDir, true)
+	})
+
+	// stubHostname writes a `hostname` that answers -f and -s as told. An
+	// empty answer stands for the command failing to produce one.
+	stubHostname := func(fqdn, short string) {
+		body := fmt.Sprintf(`#!/bin/sh
+case "${1:-}" in
+-f) [ -n %s ] && printf '%%s\n' %s || exit 1 ;;
+-s) [ -n %s ] && printf '%%s\n' %s || exit 1 ;;
+*)  [ -n %s ] && printf '%%s\n' %s || exit 1 ;;
+esac
+`, shellQuote(fqdn), shellQuote(fqdn), shellQuote(short), shellQuote(short), shellQuote(short), shellQuote(short))
+		Expect(os.WriteFile(filepath.Join(stubBin, "hostname"), []byte(body), 0o755)).To(Succeed())
+	}
+
+	resolve := func() firstBootResult {
+		defs, err := firstBootDefs()
+		Expect(err).NotTo(HaveOccurred())
+		cmd := exec.Command("sh", "-c", defs+"\nresolve_certname\n")
+		cmd.Env = append(os.Environ(),
+			"OPENVOX_CA_SSLDIR="+sslDir,
+			"OPENVOX_CA_BINDIR="+binDir,
+			"PATH="+stubBin+":/usr/bin:/bin",
+			"OPENVOX_CA_CERTNAME=",
+		)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			var exit *exec.ExitError
+			if errors.As(err, &exit) {
+				return firstBootResult{ok: false, output: string(out)}
+			}
+			Expect(err).NotTo(HaveOccurred())
+		}
+		return firstBootResult{ok: true, output: string(out)}
+	}
+
+	// Tier 2: the resolver's fully qualified answer.
+	It("takes a dotted hostname -f", func() {
+		stubHostname("ca.example.com", "ca")
+		r := resolve()
+		Expect(r.ok).To(BeTrue())
+		Expect(r.output).To(ContainSubstring("ca.example.com"))
+		Expect(r.output).NotTo(ContainSubstring("WARNING"))
+	})
+
+	// Tier 3: the short hostname, which works only for whatever reaches this
+	// host by the same short name -- so it warns rather than passing silently.
+	It("falls back to the short hostname and warns about what will not work", func() {
+		stubHostname("", "ca")
+		r := resolve()
+		Expect(r.ok).To(BeTrue())
+		Expect(r.output).To(And(
+			ContainSubstring("ca"),
+			ContainSubstring("no fully qualified domain name"),
+			ContainSubstring("re-mint"),
+		))
+	})
+
+	// A localhost form from the resolver is not a usable FQDN, so it must not
+	// satisfy tier 2 -- this is the pattern the two duplicated lists used to
+	// disagree about.
+	It("does not accept a localhost form as the resolver's answer", func() {
+		stubHostname("localhost.localdomain", "localhost")
+		r := resolve()
+		Expect(r.ok).To(BeTrue())
+		Expect(strings.TrimSpace(lastLine(r.output))).To(Equal("localhost"))
+	})
+
+	// Tier 4: nothing usable at all.
+	It("falls back to localhost when the resolver answers nothing", func() {
+		stubHostname("", "")
+		r := resolve()
+		Expect(r.ok).To(BeTrue())
+		Expect(r.output).To(And(
+			ContainSubstring("could not determine this host's name"),
+			ContainSubstring("appear healthy"),
+		))
+		Expect(strings.TrimSpace(lastLine(r.output))).To(Equal("localhost"))
+	})
+
+	// The marker is the part that matters: a CA under an unusable name looks
+	// healthy in systemctl status, so something has to say otherwise on disk.
+	Describe("write_unresolved_marker", func() {
+		It("records what is wrong and how to recover", func() {
+			defs, err := firstBootDefs()
+			Expect(err).NotTo(HaveOccurred())
+			cmd := exec.Command("sh", "-c", defs+"\nwrite_unresolved_marker\n")
+			cmd.Env = append(os.Environ(),
+				"OPENVOX_CA_SSLDIR="+sslDir,
+				"OPENVOX_CA_BINDIR="+binDir,
+			)
+			Expect(cmd.Run()).To(Succeed())
+
+			body, err := os.ReadFile(filepath.Join(sslDir, "openvox-ca-certname-unresolved"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(body)).To(And(
+				ContainSubstring("could not determine this host's fully qualified domain name"),
+				ContainSubstring("No agent will be able to use it"),
+				ContainSubstring("systemctl stop openvox-ca"),
+			))
+			// The recovery destroys a CA, so it must say what that costs.
+			Expect(string(body)).To(ContainSubstring("stops being trusted"))
+		})
+	})
+})
+
+// lastLine returns the final non-empty line of s, which is where
+// resolve_certname's answer lands: its warnings go to stderr and the name to
+// stdout, and CombinedOutput interleaves them.
+func lastLine(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) != "" {
+			return lines[i]
+		}
+	}
+	return ""
+}
+
+var _ = Describe("Build.Packages", func() {
+	// The target itself, not just the per-variant helper underneath it. It
+	// orchestrates: resolve the version, check the inputs, loop the packaged
+	// variants, then count what landed. Nothing exercised that assembly.
+	//
+	// It writes into dist/, which is the repository's own -- so this runs only
+	// when the tarballs a real build would have left are already there, and
+	// asserts against what it finds rather than creating them.
+	It("refuses to run when the tarballs it consumes are absent", func() {
+		ver, err := releaseVersion()
+		Expect(err).NotTo(HaveOccurred())
+
+		missing := true
+		for _, v := range packagedDistVariants() {
+			if _, statErr := os.Stat(filepath.Join("dist", fmt.Sprintf("openvox-ca_%s_%s.tar.gz", ver, v.name))); statErr == nil {
+				missing = false
+			}
+		}
+		if !missing {
+			Skip("dist/ already holds this version's tarballs; this spec covers the empty case")
+		}
+
+		err = Build{}.Packages()
+		Expect(err).To(MatchError(And(
+			ContainSubstring("does not build binaries"),
+			ContainSubstring("mage build:distVariant"),
+		)))
 	})
 })

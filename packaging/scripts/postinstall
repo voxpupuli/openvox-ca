@@ -12,6 +12,16 @@ set -eu
 SSLDIR=/etc/puppetlabs/puppet/ssl
 CONFIG=/etc/puppet-ca/config.yaml
 
+# Where systemd's runtime directory lives. Overridable from the environment for
+# the same reason first-boot's roots are, and with the same caveat: nothing in
+# the packages sets it, and neither dpkg nor rpm passes an environment, so an
+# installed system always takes the default. It exists so a test can assert
+# what this script does on a machine that has no systemd -- without it the
+# systemd branch is unreachable off a Linux host, and a table asserting "acts
+# on a removal, not on an upgrade" could only ever check the second half.
+SYSTEMD_RUNTIME="${OPENVOX_CA_SYSTEMD_RUNTIME:-/run/systemd/system}"
+
+
 # Failures here are reported and not fatal. Reported, because the previous
 # version sent every one of them to /dev/null: a package could install
 # "successfully" and leave a service that cannot read its own configuration,
@@ -82,7 +92,23 @@ fi
 # be able to read it and nothing else should. Without this it stays root:root
 # and openvox-ca -- which runs as `puppet` -- cannot read its own
 # configuration, including the cadir it refuses to start without.
-if [ -f "$CONFIG" ]; then
+#
+# The symlink check comes first and is not decoration. `chown` has
+# --no-dereference, so it was already safe; `chmod` has no portable
+# equivalent -- GNU chmod grew -h only recently, and it is rejected outright by
+# coreutils 8.32 (RHEL and Rocky 9) and 9.1 (Debian bookworm), two of the
+# platforms these packages exist for. Using it there would fail, be swallowed
+# by the `|| warn` below, and leave the mode unset altogether: worse than the
+# hole it was meant to close. `[ -L ]` is POSIX and works everywhere.
+#
+# -L before -f, because -f follows the link and a symlink to a regular file
+# would otherwise pass it.
+if [ -L "$CONFIG" ]; then
+	warn "$CONFIG is a symlink, so this package will not change its owner or mode --" \
+		"both would apply to whatever it points at, which is not ours to alter. If that link is" \
+		"deliberate, give its target root:puppet and mode 0640 yourself; openvox-ca runs as" \
+		"\`puppet\` and must be able to read it."
+elif [ -f "$CONFIG" ]; then
 	chown --no-dereference root:puppet "$CONFIG" || warn \
 		"could not give $CONFIG to root:puppet. openvox-ca runs as \`puppet\` and will not be able to" \
 		"read its own configuration, including the cadir it refuses to start without."
@@ -108,7 +134,7 @@ fi
 # undo a deliberate `systemctl disable openvox-ca-first-boot` every time the
 # package is updated. dpkg gives the previous version as $2 on an upgrade; rpm
 # gives 2 as $1.
-if [ -d /run/systemd/system ]; then
+if [ -d "$SYSTEMD_RUNTIME" ]; then
 	systemctl daemon-reload >/dev/null 2>&1 || :
 	if [ -z "${2:-}" ] && [ "${1:-configure}" != 2 ]; then
 		systemctl enable openvox-ca-first-boot.service >/dev/null 2>&1 || :

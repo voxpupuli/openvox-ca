@@ -168,7 +168,7 @@ Every step it takes is guarded on absence, so it is idempotent and **a takeover 
 1. Create the `certs/`, `private_keys/` and `public_keys/` directories under `/etc/puppetlabs/puppet/ssl` if they are absent.
 2. Bootstrap a CA in `/etc/puppetlabs/puppet/ssl/ca` unless one is already there.
 3. Adopt this host's node certificate if `certs/$NAME.pem` and `private_keys/$NAME.pem` both exist; otherwise mint one.
-4. Link `certs/ca.pem` and `crl.pem` into the CA directory, as Puppet's own layout does, if nothing is there already.
+4. Create `certs/ca.pem` and `crl.pem` in the ssl tree as symlinks pointing into the CA directory (`../ca/ca_crt.pem` and `ca/ca_crl.pem`), as Puppet's own layout does, if nothing is there already.
 5. Link the serving credential the shipped configuration names — `certs/openvox-ca-server.pem` and `private_keys/openvox-ca-server.pem` — to the certificate step 3 produced.
 
 Step 5 is what makes the service able to start at all: it binds `0.0.0.0` and refuses plain HTTP on a non-loopback address, so it needs `tls_cert` and `tls_key`. Those name fixed paths because a file shipped in a package cannot know this host's certificate name, and provisioning points them at the credential it just adopted or minted. Re-minting under a corrected name is then a matter of replacing those two links rather than editing configuration. Like every other step it is guarded on absence, so pointing `tls_cert` at your own certificate keeps it.

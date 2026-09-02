@@ -16,12 +16,21 @@
 
 set -eu
 
+# Where systemd's runtime directory lives. Overridable from the environment for
+# the same reason first-boot's roots are, and with the same caveat: nothing in
+# the packages sets it, and neither dpkg nor rpm passes an environment, so an
+# installed system always takes the default. It exists so a test can assert
+# what this script does on a machine that has no systemd -- without it the
+# systemd branch is unreachable off a Linux host, and a table asserting "acts
+# on a removal, not on an upgrade" could only ever check the second half.
+SYSTEMD_RUNTIME="${OPENVOX_CA_SYSTEMD_RUNTIME:-/run/systemd/system}"
+
 case "${1:-}" in
 0 | remove) ;;
 *) exit 0 ;;
 esac
 
-if [ -d /run/systemd/system ]; then
+if [ -d "$SYSTEMD_RUNTIME" ]; then
 	systemctl --no-reload disable --now openvox-ca.service >/dev/null 2>&1 || :
 	# --now on the oneshot too. RemainAfterExit=yes leaves it "active
 	# (exited)" after a successful run, so a plain disable removes the symlink
