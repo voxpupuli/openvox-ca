@@ -231,8 +231,10 @@ var _ = Describe("Subject alternative name policy", func() {
 
 		It("does not gate the offline minting path", func() {
 			// Deliberate: those names come from an operator's --dns flags, not
-			// from a request. See the AuthGrant note on why the offline path is
-			// exempt from the filtering the CSR path applies.
+			// from a request. Generate reaches issueLeafLocked without passing
+			// through signWithDuration at all, which is where GenerateWithOptions'
+			// doc comment says the filtering belongs — on the path that parses
+			// network input.
 			res, err := myCA.Generate(ctx, "offline01", []string{"offline01.example.com"})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(parse(res.CertificatePEM).DNSNames).To(ContainElement("offline01.example.com"))

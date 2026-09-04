@@ -154,10 +154,16 @@ type CA struct {
 	// operator arriving from Puppet Server expects to exist and to be off.
 	// NIST 800-53: AC-6 (Least Privilege), IA-5(2) (PKI-Based Authentication)
 	//
+	// Enforcement only: it decides what a CSR may *ask* for, not what is
+	// issued. Only DNS names are carried onto a certificate today, so with this
+	// set to true a request for an IP, email or URI SAN is signed and the SAN
+	// dropped — see #241, which adds the carry-through this gate assumes.
+	//
 	// This governs SANs a *client* asks for. It has no bearing on the offline
 	// minting path, where the names come from an operator's --dns flags rather
-	// than from a request: see AuthGrant's note on why that path is deliberately
-	// exempt from the filtering the CSR path applies.
+	// than from a request: GenerateWithOptions calls issueLeafLocked directly
+	// and so keeps the filtering "exactly where it belongs -- on the path that
+	// parses network input", as its own doc comment puts it.
 	AllowSubjectAltNames bool
 
 	// NoBootstrap makes Init refuse to create a new CA when none is found,

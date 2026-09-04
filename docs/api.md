@@ -152,6 +152,20 @@ Two refusals are deliberate:
 | `PUT` | `/certificate_request/{subject}` | Submit a new CSR (body: raw PEM) |
 | `DELETE` | `/certificate_request/{subject}` | Delete a pending CSR |
 
+`PUT /certificate_request/{subject}` answers `200 OK` when the CSR is accepted —
+whether it was autosigned immediately or queued for manual signing, and also
+when a signed certificate already exists for the subject, which is a `200` so
+that an agent continues its poll loop and collects the certificate by `GET`
+rather than treating the submission as fatal. It answers `400 Bad Request` for a
+CSR that cannot be decoded or parsed, whose signature does not verify, or whose
+Common Name does not match the subject in the path; and `400` too for a CSR
+requesting subject alternative names it may not have, which
+[`allow_subject_alt_names`](configuration.md#subject-alternative-names-requested-by-a-csr)
+governs. That last refusal is deliberately generic — it names no entries, so a
+caller on this unauthenticated endpoint cannot use it to discover which names
+the CA would issue; the refused entries go to the CA's log at `WARN`. Anything
+else is a `500`, whose message is withheld for the same reason.
+
 `DELETE /certificate_request/{subject}` is an operator rejecting a request
 rather than signing it, and it takes the same per-subject lock that `POST
 /sign`, `PUT /certificate_request`'s autosign and [renewal](#certificate-renewal)

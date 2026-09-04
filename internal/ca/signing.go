@@ -408,7 +408,15 @@ func (c *CA) checkSubjectAltNames(subject string, csr *x509.CertificateRequest, 
 	// Unlike upstream, which reads a CSR's SANs through a helper that
 	// enumerates only DNS and IP names — so an email- or URI-only CSR reads as
 	// having none and passes its gate untouched — this covers all four kinds
-	// crypto/x509 parses. We refuse to sign what we would not faithfully issue.
+	// crypto/x509 parses.
+	//
+	// That coverage is enforcement only, and stops at the short-circuit above.
+	// signWithDuration threads nothing but DNS names onto the certificate, so
+	// with the policy ON a CSR requesting an IP, email or URI SAN signs and
+	// loses it silently — #241's defect, not something this gate repairs. What
+	// four-kind coverage buys is that with the policy OFF such a request is
+	// refused rather than quietly trimmed. When #241 lands and all four kinds
+	// are carried through, this comment stops needing the qualification.
 	own := "DNS:" + strings.ToLower(subject)
 	carried := make(map[string]struct{})
 	if baseline != nil {
