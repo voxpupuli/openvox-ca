@@ -52,6 +52,19 @@ UNRESOLVED_MARKER="$SSLDIR/openvox-ca-certname-unresolved"
 SERVING_CERT="$SSLDIR/certs/openvox-ca-server.pem"
 SERVING_KEY="$SSLDIR/private_keys/openvox-ca-server.pem"
 
+# Basenames this script creates under certs/ or private_keys/ that are NOT a
+# node's certificate. A certname equal to one of them collides: step 3 writes
+# certs/$NAME.pem, step 4 and step 5 then find their target already present and
+# -- being guarded on absence, correctly -- leave it alone. The result is a
+# regular file where an alias belongs, holding the wrong certificate, with
+# nothing logged because every step did exactly what it was told.
+#
+# `ca` is the one that matters. certs/ca.pem is where every agent on this host
+# looks for the CA certificate, and a host named `ca` is ordinary in a Puppet
+# estate -- it is what `hostname -s` returns for ca.example.com, so tier 3
+# reaches this without anyone typing it.
+RESERVED_CERTNAMES="ca openvox-ca-server"
+
 warn() { echo "openvox-ca first-boot: WARNING: $*" >&2; }
 info() { echo "openvox-ca first-boot: $*" >&2; }
 fail() { echo "openvox-ca first-boot: ERROR: $*" >&2; exit 1; }
@@ -84,6 +97,17 @@ is_safe_certname() {
 	*[!A-Za-z0-9._-]*) return 1 ;;
 	esac
 	return 0
+}
+
+# is_reserved_certname matches a name that would displace one of the aliases
+# this script creates. Separate from is_safe_certname because it is a different
+# question -- those names are perfectly well formed, and the objection is that
+# something else already owns the file.
+is_reserved_certname() {
+	for reserved in $RESERVED_CERTNAMES; do
+		[ "$1" = "$reserved" ] && return 0
+	done
+	return 1
 }
 
 # is_usable_fqdn rejects the names that produce a CA nothing can reach: an
@@ -362,6 +386,25 @@ for bin in "$OPENVOX_CA" "$OPENVOX_CA_CTL"; do
 done
 
 NAME="$(resolve_certname)"
+
+# Checked here rather than inside resolve_certname, so that every tier goes
+# through it -- an explicit answer, puppet.conf, and both hostname tiers alike
+# -- and so the message can say what to do about it.
+#
+# A hard failure rather than a fallback. `ca` is a legitimate hostname, and an
+# operator whose host is called that needs to be told why it cannot also be the
+# certname; quietly provisioning under some other name would leave them with a
+# CA whose certificate does not match the host they think they configured.
+if is_reserved_certname "$NAME"; then
+	fail "\"$NAME\" cannot be used as this host's certificate name: openvox-ca reserves it for
+$SSLDIR/certs/$NAME.pem, which is an alias this script maintains rather than a node certificate.
+Provisioning under it would leave that path holding a node certificate where every agent on this
+host looks for the CA certificate.
+
+Set a different name -- certname in /etc/puppetlabs/puppet/puppet.conf, or OPENVOX_CA_CERTNAME in
+a drop-in for openvox-ca-first-boot.service -- and run 'systemctl restart openvox-ca-first-boot'.
+The fully qualified name is the right answer where there is one. Reserved names: $RESERVED_CERTNAMES"
+fi
 
 info "provisioning as \"$NAME\""
 ensure_ssl_tree
