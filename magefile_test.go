@@ -2494,3 +2494,185 @@ var _ = Describe("Build.Packages", func() {
 		)))
 	})
 })
+
+// runFirstBootScript runs the whole provisioning script -- not one function --
+// against a scratch ssl tree with stub binaries, and returns what it did.
+//
+// The stubs stand in for the CA, not for the script: openvox-ca-ctl `setup`
+// creates the files a bootstrapped cadir has, and `generate` writes the
+// credential it is asked for. What is under test is the script's own
+// behaviour, which is what the packages ship and what no CI leg installs.
+func runFirstBootScript(sslDir, binDir, certname string) firstBootResult {
+	cmd := exec.Command("sh", firstBootScript)
+	cmd.Env = append(os.Environ(),
+		"OPENVOX_CA_SSLDIR="+sslDir,
+		"OPENVOX_CA_BINDIR="+binDir,
+		"OPENVOX_CA_CERTNAME="+certname,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			return firstBootResult{ok: false, output: string(out)}
+		}
+		Expect(err).NotTo(HaveOccurred())
+	}
+	return firstBootResult{ok: true, output: string(out)}
+}
+
+// stubCA writes an openvox-ca-ctl whose `setup` bootstraps a cadir, and an
+// openvox-ca whose `generate` writes the cert and key it is told to.
+func stubCA(binDir string) {
+	ctl := `#!/bin/sh
+cadir=""
+prev=""
+for a in "$@"; do
+  case "$prev" in --cadir) cadir=$a ;; esac
+  prev=$a
+done
+[ -n "$cadir" ] || exit 1
+mkdir -p "$cadir/private" "$cadir/signed"
+printf 'CA-CERT\n' > "$cadir/ca_crt.pem"
+printf 'CA-CRL\n'  > "$cadir/ca_crl.pem"
+exit 0
+`
+	ca := `#!/bin/sh
+case "${1:-}" in
+--help) printf 'Available Commands:\n  generate       Mint a certificate offline\n'; exit 0 ;;
+generate) ;;
+*) exit 0 ;;
+esac
+certout=""; keyout=""; prev=""
+for a in "$@"; do
+  case "$prev" in --cert-out) certout=$a ;; --key-out) keyout=$a ;; esac
+  prev=$a
+done
+[ -n "$certout" ] && printf 'NODE-CERT\n' > "$certout"
+[ -n "$keyout" ]  && { printf 'NODE-KEY\n' > "$keyout"; chmod 0600 "$keyout"; }
+exit 0
+`
+	Expect(os.WriteFile(filepath.Join(binDir, "openvox-ca-ctl"), []byte(ctl), 0o755)).To(Succeed())
+	Expect(os.WriteFile(filepath.Join(binDir, "openvox-ca"), []byte(ca), 0o755)).To(Succeed())
+}
+
+var _ = Describe("first-boot's provisioning steps", func() {
+	var sslDir, binDir string
+
+	BeforeEach(func() {
+		sslDir = GinkgoT().TempDir()
+		binDir = GinkgoT().TempDir()
+		// The package ships these two; the script refuses without them.
+		Expect(os.MkdirAll(filepath.Join(sslDir, "ca"), 0o755)).To(Succeed())
+		stubCA(binDir)
+	})
+
+	Describe("a first boot on an empty tree", func() {
+		BeforeEach(func() {
+			r := runFirstBootScript(sslDir, binDir, "ca.example.com")
+			Expect(r.ok).To(BeTrue(), "provisioning failed: %s", r.output)
+		})
+
+		// Step 1, with the mode that matters: private_keys is created 0750
+		// rather than created 0755 and narrowed afterwards.
+		DescribeTable("creates the ssl tree",
+			func(dir string, mode os.FileMode) {
+				info, err := os.Stat(filepath.Join(sslDir, dir))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(info.IsDir()).To(BeTrue())
+				Expect(info.Mode().Perm()).To(Equal(mode), "mode of %s", dir)
+			},
+			Entry("certs", "certs", os.FileMode(0o755)),
+			Entry("public_keys", "public_keys", os.FileMode(0o755)),
+			Entry("private_keys", "private_keys", os.FileMode(0o750)),
+		)
+
+		It("bootstraps the CA", func() {
+			Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).To(BeAnExistingFile())
+		})
+
+		It("mints this host's credential", func() {
+			Expect(filepath.Join(sslDir, "certs", "ca.example.com.pem")).To(BeAnExistingFile())
+			Expect(filepath.Join(sslDir, "private_keys", "ca.example.com.pem")).To(BeAnExistingFile())
+		})
+
+		// Step 4 and step 5. Asserted as symlinks with their targets, not
+		// merely as existing paths: the defect this covers was a regular file
+		// sitting where the alias belongs, which every "does it exist" check
+		// passes.
+		DescribeTable("links the aliases into place",
+			func(path, target string) {
+				full := filepath.Join(sslDir, path)
+				info, err := os.Lstat(full)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(info.Mode()&os.ModeSymlink).NotTo(BeZero(), "%s is not a symlink", path)
+
+				got, err := os.Readlink(full)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(got).To(Equal(target))
+				Expect(full).To(BeAnExistingFile(), "%s does not resolve", path)
+			},
+			Entry("the CA certificate alias", "certs/ca.pem", "../ca/ca_crt.pem"),
+			Entry("the CRL alias", "crl.pem", "ca/ca_crl.pem"),
+			Entry("the serving certificate", "certs/openvox-ca-server.pem", "ca.example.com.pem"),
+			Entry("the serving key", "private_keys/openvox-ca-server.pem", "ca.example.com.pem"),
+		)
+
+		It("writes no unresolved-name marker when the name resolved", func() {
+			Expect(filepath.Join(sslDir, "openvox-ca-certname-unresolved")).NotTo(BeAnExistingFile())
+		})
+	})
+
+	It("is idempotent: a second run adopts and changes nothing", func() {
+		Expect(runFirstBootScript(sslDir, binDir, "ca.example.com").ok).To(BeTrue())
+		before, err := os.ReadFile(filepath.Join(sslDir, "certs", "ca.example.com.pem"))
+		Expect(err).NotTo(HaveOccurred())
+
+		r := runFirstBootScript(sslDir, binDir, "ca.example.com")
+		Expect(r.ok).To(BeTrue(), "second run failed: %s", r.output)
+		Expect(r.output).To(And(
+			ContainSubstring("a CA already exists"),
+			ContainSubstring("adopting the existing certificate"),
+		))
+
+		after, err := os.ReadFile(filepath.Join(sslDir, "certs", "ca.example.com.pem"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(after).To(Equal(before), "the second run re-minted rather than adopting")
+	})
+
+	// The certname that collides with an alias this script maintains. Before
+	// the check, provisioning succeeded and left certs/ca.pem a regular file
+	// holding a NODE certificate -- where every agent on this host looks for
+	// the CA certificate, and with nothing logged, because each step had done
+	// exactly what it was told.
+	Describe("a certname that collides with an alias", func() {
+		DescribeTable("is refused rather than silently displacing the alias",
+			func(certname string) {
+				r := runFirstBootScript(sslDir, binDir, certname)
+				Expect(r.ok).To(BeFalse(), "provisioning should have refused %q", certname)
+				Expect(r.output).To(And(
+					ContainSubstring("cannot be used as this host's certificate name"),
+					ContainSubstring("reserves it"),
+				))
+				Expect(filepath.Join(sslDir, "certs", certname+".pem")).NotTo(BeAnExistingFile())
+			},
+			Entry("the CA alias", "ca"),
+			Entry("the serving alias", "openvox-ca-server"),
+		)
+
+		// The property the collision violated, stated on its own so a
+		// regression is named for what it breaks rather than for the input
+		// that triggers it.
+		It("keeps certs/ca.pem a symlink to the CA certificate", func() {
+			Expect(runFirstBootScript(sslDir, binDir, "ca.example.com").ok).To(BeTrue())
+
+			info, err := os.Lstat(filepath.Join(sslDir, "certs", "ca.pem"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(info.Mode()&os.ModeSymlink).NotTo(BeZero(),
+				"certs/ca.pem is a regular file; agents fetching the CA certificate would get whatever it holds")
+
+			body, err := os.ReadFile(filepath.Join(sslDir, "certs", "ca.pem"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(body)).To(Equal("CA-CERT\n"), "certs/ca.pem does not resolve to the CA certificate")
+		})
+	})
+})
