@@ -541,7 +541,9 @@ that waits for it — rather than two units started together.
 The published chart has no dedicated support for this: it exposes
 `initContainers`, `extraContainers`, `extraVolumes` and `extraVolumeMounts` as
 generic escape hatches, and the sidecar above is assembled from those rather
-than configured by a value of its own — see [Helm chart](helm-chart.md).
+than configured by a value of its own — see [trust and revocation across
+CAs](helm-chart.md#trust-and-revocation-across-cas), which works the sidecar
+above through as chart values.
 
 Probe for a **non-empty** file, not merely an existing one: a zero-byte file is
 a deliberate statement here (see the table below), so a probe testing only for
@@ -1195,6 +1197,12 @@ of that issuer, and the first symptom is otherwise an agent-side 403.
 > ancestors' revocations and are served to agents. `client_ca[].crl_file` is
 > inbound, used only by the
 > authorisation middleware, and never served.
+
+Under Kubernetes the anchor and its CRL are a mounted Secret and the entry is
+`config.client_ca`, with the same rule against `subPath` that `crl_chain_file`
+carries, and one further consequence: anchors are read only at startup, so
+editing that Secret in place changes nothing until the pods roll. See [trust and
+revocation across CAs](helm-chart.md#trust-and-revocation-across-cas).
 
 ## Autosigning
 

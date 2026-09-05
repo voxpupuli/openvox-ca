@@ -632,8 +632,13 @@ networkPolicy:
   metricsNamespaces:
     - monitoring
 
-  # Egress rules. DNS is always allowed when egress is enabled; add rules for
-  # your storage backend, OpenBao, and the Kubernetes API as needed.
+  # Egress rules. DNS is always allowed when egress is enabled; everything else
+  # is yours to list. The policy binds the whole POD, so any initContainers or
+  # extraContainers you add are bound by it too and need their own destinations
+  # listed. Typically: your storage backend, OpenBao if the key lives there,
+  # anything your sidecars fetch, and the Kubernetes API only when
+  # kubernetesExport is in use -- OpenBao's kubernetes auth needs no API egress,
+  # since the pod presents a mounted token and OpenBao does the TokenReview.
   egress:
     enabled: false
     rules: []

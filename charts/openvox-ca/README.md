@@ -249,7 +249,7 @@ certificate, so the controller **must** pass TLS through untouched.
 | `networkPolicy.apiAccess` | `any` | `any` (agents live anywhere), `namespace`, or `none` |
 | `networkPolicy.metricsNamespaces` | `[monitoring]` | Namespaces allowed to scrape the exporter |
 | `networkPolicy.egress.enabled` | `false` | Adds an Egress policy; DNS is always allowed |
-| `networkPolicy.egress.rules` | `[]` | Your storage backend, OpenBao, the API server |
+| `networkPolicy.egress.rules` | `[]` | Everything the **pod** reaches, sidecars included: your storage backend, OpenBao if the key lives there, anything `initContainers`/`extraContainers` fetch, and the API server only when `kubernetesExport` is in use (OpenBao's kubernetes auth needs no API egress). DNS is always allowed |
 | `networkPolicy.extraIngress` | `[]` | |
 
 ### Availability

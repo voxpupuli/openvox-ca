@@ -515,8 +515,26 @@ networkPolicy:
             protocol: TCP
 ```
 
-Turning egress on means you must enumerate everything the CA talks to — its
-storage backend, OpenBao, the Kubernetes API. DNS is always allowed.
+Turning egress on means you must enumerate everything **the pod** talks to. DNS
+is always allowed; everything else is yours to list. Two things about that are
+easy to get wrong:
+
+- **The policy governs the whole pod, not the server container.** A
+  `NetworkPolicy` selects pods, so every `initContainers` and `extraContainers`
+  entry you add is bound by the same rules. A sidecar that fetches something
+  over the network — an upstream CRL chain is the common case, see [trust and
+  revocation across CAs](#trust-and-revocation-across-cas) — needs its own
+  destination listed, or it fails with a timeout and no file, which several of
+  these features read as "nothing to say" rather than as an error.
+- **OpenBao's Kubernetes auth needs no egress to the Kubernetes API.** The pod
+  presents its own projected ServiceAccount token, which it reads from a mounted
+  file, and OpenBao performs the `TokenReview` itself — so the API server is
+  OpenBao's peer here, not the CA's. Egress to the API is needed for
+  [Kubernetes export](#kubernetes-export), which really does call it. Listing it
+  unconditionally opens a hole the deployment does not use.
+
+So the list is: your storage backend, OpenBao if the key lives there, anything
+your sidecars fetch, and the Kubernetes API only if you export.
 
 ## Kubernetes export
 
@@ -622,6 +640,346 @@ section is only that:
 Everything else about the resulting CA — storage, TLS, export — is unchanged; only
 the certificate's issuer differs.
 
+## Trust and revocation across CAs
+
+Running under an external root brings two more features into scope, and the
+chart models neither with a value of its own. Both are `config` plus a mount,
+and they are documented together because a deployment under a shared root
+usually wants both:
+
+| Feature | Direction | What it is for |
+| --- | --- | --- |
+| `crl_chain_file` | **outbound** — published to agents | Serving the ancestors' CRLs alongside this CA's own, so agents on Puppet's default `certificate_revocation = chain` can complete the walk |
+| `client_ca` | **inbound** — consulted by the authorisation middleware, never served | Authenticating clients that a *different* CA issued, typically a sibling intermediate under the same root |
+
+Both are about CRLs and they point in opposite directions, which is what makes
+them easy to confuse. The canonical
+descriptions are [publishing an upstream CRL
+chain](configuration.md#publishing-an-upstream-crl-chain) and [trusting client
+certificates from another CA](configuration.md#trusting-client-certificates-from-another-ca);
+read those for the semantics. This section is only what changes in Kubernetes.
+
+Two chart facts apply to both:
+
+- **`/etc/puppet-ca` is not yours to write into.** It is `configMount`, where
+  the chart projects its rendered ConfigMap read-only. The standalone examples
+  in [configuration.md](configuration.md) put these files there because that is
+  the conventional config directory outside Kubernetes; under the chart you must
+  give them a path of their own. `/run/secrets/...` is the idiom the chart
+  already uses for `tls`, `ca` and the OpenBao credentials.
+- **`extraConfigFiles` is the wrong escape hatch for either file.** It writes
+  into that same ConfigMap, so the content would live in your values and refresh
+  only on `helm upgrade` — and both of these files exist precisely to carry
+  revocation data that must stay current between upgrades.
+
+`crl_chain_file` can alternatively be fed in as `PUPPET_CA_CRL_CHAIN_FILE`
+through `env` or `extraEnv`, as can `client_revocation_policy` and
+`client_crl_refresh_interval_sec`. The `client_ca` list itself has no
+environment encoding at all — it is a list of structures, file-only like
+`kubernetes_export` — so it has to come through `config`.
+
+### Publishing an upstream CRL chain
+
+Before the mount, one decision that is not a chart decision at all: a CRL is
+only published if a certificate in this CA's **stored bundle** signed it, so
+publishing an ancestor's CRL means adding that ancestor to the bundle — and the
+bundle is what `GET /certificate/ca` serves every agent. Make that choice with
+[the bundle note in the operator CLI
+guide](operator-cli.md#offline-subcommands-on-the-server-binary) in front of
+you; it is the authoritative statement and it covers the case that catches
+people, which is that ending the bundle at a root admits every sibling sub-CA
+beneath it. Nothing about it changes under Helm.
+
+Mount the bundle from its own volume and point `config.crl_chain_file` at it:
+
+```yaml
+extraVolumes:
+  - name: upstream-crls
+    secret:
+      secretName: openvox-ca-upstream-crls
+extraVolumeMounts:
+  - name: upstream-crls
+    mountPath: /run/secrets/upstream-crls
+    readOnly: true
+
+config:
+  crl_chain_file: /run/secrets/upstream-crls/upstream-crls.pem
+```
+
+Nothing in openvox-ca writes that Secret. Refresh it with whatever already
+fetches your root's CRL — a CronJob, a config-management run, cert-manager — and
+the `crl-chain-refresh` job picks the change up within
+`crl_chain_refresh_interval_sec` (an hour by default).
+
+**Turn it on in a separate `helm upgrade` from the one that bumps the chart.**
+A Deployment rolls rather than recreates, so for the length of a rollout you
+have old and new pods serving at once — and a replica running a build from
+before chain preservation re-signs the CRL as a single block and silently drops
+the chain, which one revocation in that window makes permanent for the whole
+fleet. Upgrade first, let the rollout finish, then set `config.crl_chain_file`.
+See [rolling upgrades](configuration.md#publishing-an-upstream-crl-chain).
+
+> **Never mount it with `subPath`.** A `subPath`-mounted ConfigMap or Secret
+> never receives updates: the file reads successfully forever and never changes,
+> so the whole feature becomes a silent no-op while every metric reports health.
+> `puppetca_crl_chain_last_read_timestamp_seconds` advances exactly as it does on
+> a healthy file, because the read genuinely does succeed — it is the *content*
+> that is frozen, and no metric distinguishes that from a file that is simply not
+> changing yet. What eventually catches it is the consequence:
+> `PuppetCAUpstreamCRLExpiringSoon` firing on a CA that *has* `crl_chain_file`
+> configured is the `subPath` signature. By then the ancestors' CRLs are already
+> close to expiry.
+>
+> This is the single most likely way to get this feature wrong from a values
+> file, because `subPath` is the reflex for mounting one file without hiding the
+> rest of a directory — and here the volume has a directory to itself, so there
+> is nothing to hide and no reason to reach for it.
+>
+> **`subPath` is the sharpest instance of a wider rule: whatever delivers this
+> file must refresh on the *CRL's* schedule, not on yours.** A ConfigMap of CRLs
+> committed to Git and applied with the release has the same silent ending
+> without `subPath` anywhere in sight — it is perfectly current the day you
+> apply it and goes stale on the upstream's publication interval thereafter,
+> reading successfully the whole time. Choosing a mount shape here means taking
+> ownership of a refresh mechanism; the shapes below differ mainly in who owns
+> it.
+
+You need not set `defaultMode`. With `fsGroup` in play the kubelet chowns a
+projected volume to `root:fsGroup` and **ORs** a read mask into whatever mode is
+there, so the container reads the file whether you set a restrictive mode or
+leave the default alone — the same mechanism [the TLS section](#tls-the-charts-most-important-setting)
+describes, and the one the chart's own `0600` key-material Secrets rely on.
+
+Where that does bite is if you replace `podSecurityContext` wholesale and drop
+`fsGroup`: the projection is then root-owned with no group access and the CA
+cannot read it, which is the **present but unreadable** row of [what each
+failure to read the file
+does](configuration.md#what-each-failure-to-read-the-file-does) — the refresh
+fails, and revocation is blocked with it. Keep `fsGroup` aligned with
+`runAsUser`/`runAsGroup`, as that section already says.
+
+#### Order the writer before the server
+
+**Whatever populates the file must be ordered before the server starts**, not
+merely started alongside it — see [order the writer before the
+server](configuration.md#order-the-writer-before-the-server) for why the timer
+does not rescue the window. A Secret that some other controller populates is
+already subject to this: if it is not there at startup, the CA publishes its own
+CRL alone and does not look again for an hour, and every agent on the default
+`certificate_revocation = chain` rejects the CRL it is served for that whole
+interval.
+
+In Kubernetes the fix is a **native sidecar** — an `initContainer` with
+`restartPolicy: Always` whose `startupProbe` gates the containers after it.
+
+> **This shape needs Kubernetes 1.29 or newer.** `restartPolicy` on an init
+> container enters the API in 1.28, behind the `SidecarContainers` feature gate,
+> and is on by default from 1.29. Older clusters do not have it: the field is
+> not part of their pod schema, so the container is an ordinary init container
+> that this example's `while true` loop never lets finish. The chart's own
+> `kubeVersion` floor is `>=1.26.0-0`, which is deliberately wider than this
+> one recipe — check your cluster rather than the chart. On 1.26 or 1.27, order
+> the writer with a one-shot init container that fetches once and exits instead,
+> and accept that nothing keeps the file fresh between restarts.
+
+```yaml
+extraVolumes:
+  - name: upstream-crls
+    emptyDir:
+      medium: Memory       # a shared tmpfs; never touches the node's disk
+extraVolumeMounts:
+  - name: upstream-crls
+    mountPath: /run/crl-chain
+    readOnly: true
+
+initContainers:
+  - name: fetch-upstream-crls
+    image: curlimages/curl:8.11.1
+    restartPolicy: Always          # native sidecar (Kubernetes 1.29+): starts before, runs alongside
+    command: ["/bin/sh", "-c"]
+    args:
+      - |
+        while true; do
+          curl -sSf -o /run/crl-chain/.tmp https://pki.example.com/root.crl.pem \
+            && mv /run/crl-chain/.tmp /run/crl-chain/upstream-crls.pem
+          sleep 900
+        done
+    volumeMounts:
+      - name: upstream-crls
+        mountPath: /run/crl-chain
+    startupProbe:
+      exec:
+        command: ["/bin/sh", "-c", "test -s /run/crl-chain/upstream-crls.pem"]
+      periodSeconds: 5
+      failureThreshold: 60
+
+config:
+  crl_chain_file: /run/crl-chain/upstream-crls.pem
+```
+
+Four details in that carry the weight:
+
+- **`test -s`, not `test -f`.** Probe for a *non-empty* file. A zero-byte file
+  is a deliberate statement here — it means "publish nothing extra" — so a probe
+  testing only for existence passes on exactly the case that drops every
+  ancestor CRL, permanently, since this CA cannot re-sign another CA's list.
+- **The `mv` is the point of the `curl`.** Write to a temporary path and rename,
+  so a read never catches a partial write. A file not ending on a PEM block
+  boundary is refused rather than acted on, and until the next complete write
+  lands, revocation fails.
+- **A `startupProbe` and no `readinessProbe`.** The startup probe is what gates
+  the server; a readiness probe on the writer would be actively harmful, because
+  a sidecar's readiness feeds the pod's, so a later fetch failure would take a
+  perfectly healthy CA out of the Service. A stale chain is far better than no
+  CA: the writer's job is to block the *first* start, not to keep voting on the
+  pod's fitness afterwards.
+- **`initContainers` runs through `tpl`**, so the image can reference `.Values`
+  and the chart's helpers if you would rather not hard-code it.
+  `extraVolumeMounts` does **not** — it is the one member of this group that is
+  passed through as written.
+
+If you have `networkPolicy.egress` enabled, the sidecar's own destination must
+be listed in it. The policy binds the whole pod, and a blocked fetch leaves no
+file at all — which this feature reads as "no statement" rather than as a
+failure, so nothing goes red. See [network policy](#network-policy).
+
+### Trusting client certificates from another CA
+
+`client_ca` is the topology where the servers and operators administering this
+CA hold certificates from a sibling intermediate rather than from this CA.
+Without it they cannot authenticate at all. It is a mount plus an entry plus a
+deliberate decision about authority, in that order.
+
+**1. Choose the anchor: the issuing CA, not the root.** Take the certificate of
+the intermediate that actually signs the client certificates. Anchoring on the
+root above it silently extends this entry's authority — `admin_cns` included —
+to every intermediate that root has issued or ever will, and under
+`client_revocation_policy: require` it also [locks everyone
+out](configuration.md#trusting-client-certificates-from-another-ca), because an
+intermediate's own CRL is signed by that intermediate rather than by the root
+and so is discarded. The server warns at startup on a self-signed anchor.
+
+**2. Obtain that CA's CRL.** openvox-ca is handed a file; it never fetches a
+distribution point. Read the CDP out of a certificate that CA issued —
+`openssl x509 -noout -text -in client.pem | grep -A2 'CRL Distribution'` — and
+fetch from there. A delta CRL or one scoped to an issuing distribution point
+does not count as coverage, so fetch the full list.
+
+**3. One entry per issuer.** `admin_cns` and `allow_pp_cli_auth` belong to the
+*entry*, while its `file` may hold any number of anchors — so two issuers
+bundled into one entry share one admin list, and a CN you meant for one is
+honoured from the other. The server warns at startup when an entry that grants
+anything has more than one anchor. Entries are cheap; give each issuer its own,
+with its own `crl_file`.
+
+**4. Put the anchor and the CRL in a Secret, and mount it.** Both files, one
+volume, no `subPath` — `crl_file` is re-read on a timer exactly as
+`crl_chain_file` is, so the trap above applies to it identically.
+
+> **`crl_file` does not cover the CA named beside it.** An operator who has
+> carefully wired up a `crl_file` will reasonably assume it covers the issuer in
+> the same block. It does not: it covers what that CA **issued**, never that CA
+> itself. The anchor is never revocation-checked, because it is trusted by
+> configuration rather than by anything it presents, and it has no issuer inside
+> the chain to attest for it. So **revoking a trusted domain is an operator
+> action** — remove or replace the `client_ca` entry and roll — and no CRL you
+> can put in that file will do it for you.
+
+This is also why the two features do not share a delivery path, despite both
+being "a file of CRLs". `crl_chain_file` publishes ancestors' CRLs outbound and
+accepts only CRLs signed by a certificate in this CA's own bundle;
+`client_ca[].crl_file` is a separate inbound mechanism, verified per entry
+against that entry's own anchors. Neither file can stand in for the other, and
+adding an issuer to one has no effect on the other.
+
+**5. Write the entry, and grant deliberately.** Both foreign grants default to
+off, so an entry with neither adds an issuer that can authenticate and do
+nothing:
+
+```yaml
+extraVolumes:
+  - name: server-ca-trust
+    secret:
+      secretName: openvox-ca-server-ca-trust
+extraVolumeMounts:
+  - name: server-ca-trust
+    mountPath: /run/secrets/server-ca
+    readOnly: true
+
+config:
+  client_ca:
+    - name: server-ca                                       # required, unique; the metric and log label
+      file: /run/secrets/server-ca/server-ca.pem            # the ISSUING CA, not the root
+      crl_file: /run/secrets/server-ca/server-ca-crls.pem   # mandatory under `require`
+      admin_cns:
+        - openvox-server.example.com
+      allow_pp_cli_auth: false
+  client_revocation_policy: require
+  client_crl_refresh_interval_sec: 900
+```
+
+Choose `name` for the operator who will meet it in an alert: it is the
+`client_ca` label on `puppetca_client_crl_usable`,
+`puppetca_client_crl_refusals_total` and
+`puppetca_client_crl_last_reload_timestamp_seconds`, and the `client_ca` field
+on every log line about the entry. Startup refuses a duplicate.
+
+`allow_pp_cli_auth: true` **delegates admin admission to that CA** — every
+certificate it chooses to stamp with the extension becomes an administrator
+here. Correct for a Server CA under the same operators; a full delegation for a
+CA you do not control. Enabling it warns at startup.
+
+**6. Keep the CRL current.** Refresh the Secret by whatever already delivers it;
+each entry's `crl_file` is re-read every `client_crl_refresh_interval_sec` (an
+hour by default) and openvox-ca only notices. Not every reload is applied: four
+conditions make one untrustworthy enough to refuse, and [the revocation
+section](configuration.md#revocation) lists them. What matters here is the shape
+they share — the previous set is kept, which is right for availability and
+invisible on every other series, because the retained CRLs are still being
+served. The signal is `puppetca_client_crl_last_reload_timestamp_seconds` going
+stale, which `PuppetCAClientCRLStale` alerts on. Alert on `PuppetCAClientCRLUnusable` and
+`PuppetCAClientCRLRefusals` too: under `require` an entry with no current CRL
+rejects every one of its clients, and the first symptom is otherwise an
+agent-side 403 three layers away.
+
+#### Two failure modes specific to the chart
+
+**A bad `crl_file` is a crash-loop, not a warning.** Under *every* policy the
+server refuses to start when a `crl_file` that is set cannot be read or holds a
+CRL that does not parse, and under `require` configuration validation rejects an
+entry without one at all. In Kubernetes that is `CrashLoopBackOff` on a rollout
+that looked routine. Render the values and check the paths against the mounts
+before you apply — `helm template` shows both the `config.yaml` and the pod's
+`volumeMounts`.
+
+**Editing the anchor Secret in place does nothing.** Anchors are read once at
+startup and deliberately never reload, because a half-applied anchor reload
+locks out every client of a domain. A Secret's contents changing does not roll
+the pods either — `configChecksumAnnotation` hashes the ConfigMap the chart
+renders, not Secrets you mount yourself — so the new anchor sits on disk,
+unread, until something else restarts the pod, and the old one goes on being
+trusted. Nothing reports this.
+
+To rotate an anchor, use the supported procedure: **add the new anchor as a
+second `client_ca` entry, roll the fleet, then remove the old entry and roll
+again.** Both halves are `config` changes, so on a default install each `helm
+upgrade` moves the checksum annotation and rolls the pods for you. Changing
+`admin_cns` is a restart-shaped change for the same reason, and gets the same
+treatment — only domain zero's own admin allow list is reloadable through
+`SIGHUP`.
+
+> **Confirm the pods actually rolled before you treat the old anchor as
+> untrusted.** The annotation is rendered only when `configChecksumAnnotation`
+> is true *and* `existingConfigMap` is unset, and both of those are supported
+> configurations. With either in play the `helm upgrade` that removes an entry
+> updates the ConfigMap and leaves the running pods alone — so the issuer you
+> just withdrew, and every CN in its `admin_cns`, goes on authenticating
+> administrators until something else restarts them. Nothing reports this: the
+> release succeeded, and the pods are healthy on the trust configuration you
+> meant to delete. Roll them yourself (`kubectl rollout restart deployment/...`,
+> or whatever reloader you run in place of the annotation), and treat the
+> withdrawal as complete only once they have.
+
 ## OpenBao CA key custody
 
 Keeping the CA private key in an OpenBao Transit engine (see
@@ -683,7 +1041,7 @@ Several escape hatches exist for things the chart does not model:
 | `existingConfigMap` | A `config.yaml` you generate elsewhere |
 | `persistence.existingClaim` | A PVC you provision yourself |
 | `serviceAccount.create: false` + `serviceAccount.name` | An account managed outside the release |
-| `extraVolumes` / `extraVolumeMounts` | etcd/Redis/SQL client certificates, passphrase files, autosign plugins |
+| `extraVolumes` / `extraVolumeMounts` | etcd/Redis/SQL client certificates, passphrase files, autosign plugins, an upstream CRL chain or a `client_ca` anchor and its CRL (see [trust and revocation across CAs](#trust-and-revocation-across-cas)) |
 | `initContainers` / `extraContainers` | Waiting on a dependency, sidecars |
 | `command` / `args` | Full control of the container's invocation |
 | `extraObjects` | Arbitrary manifests rendered with the release |
