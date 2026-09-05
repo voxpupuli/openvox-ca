@@ -93,6 +93,17 @@ func (b *FilesystemBackend) AcquireSameHostLock(ctx context.Context, name string
 	return b.locks.acquire(ctx, name)
 }
 
+// AcquireInstanceLock takes the store-wide lock permitting one running instance,
+// as an exclusive flock(2) under <baseDir>/locks alongside the per-name locks.
+//
+// The cadir is the store, so locking within it is locking the store. It shares
+// the lock directory rather than taking a lock of its own beside it so that a
+// single chown fixes every lock a store has, which is the recovery the
+// permission error in inaccessibleLockFile sends operators to.
+func (b *FilesystemBackend) AcquireInstanceLock() (Unlocker, error) {
+	return b.locks.acquireInstance()
+}
+
 // BaseDir returns the filesystem root.
 func (b *FilesystemBackend) BaseDir() string { return b.baseDir }
 

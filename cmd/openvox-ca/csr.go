@@ -95,6 +95,13 @@ identically whether the key is a local PEM file or lives in OpenBao Transit.`,
 			}
 			defer func() { _ = rt.Close() }()
 
+			// Refuse while a server holds the store. --create-key writes the CA
+			// key, and a backend without distributed locking supports exactly
+			// one running process against it.
+			if err := holdInstanceLock(cmd.Context(), rt); err != nil {
+				return err
+			}
+
 			myCA := ca.New(rt.Store, ca.AutosignConfig{Mode: "off"}, cfg.Hostname)
 			if err := applyCAConfig(myCA, cfg); err != nil {
 				return err

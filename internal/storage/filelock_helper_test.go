@@ -69,7 +69,19 @@ func runLockHelper(spec string) int {
 		return 2
 	}
 
-	ul, err := NewFilesystemBackend(cadir).AcquireSameHostLock(context.Background(), name)
+	// instanceLockName diverts the helper to the store-wide lock, so the specs
+	// for that one get a genuine second process too. It is the same mechanism
+	// either way; only the granularity differs.
+	b := NewFilesystemBackend(cadir)
+	var (
+		ul  Unlocker
+		err error
+	)
+	if name == instanceLockName {
+		ul, err = b.AcquireInstanceLock()
+	} else {
+		ul, err = b.AcquireSameHostLock(context.Background(), name)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "lock helper: acquiring %q: %v\n", name, err)
 		return 1

@@ -360,13 +360,11 @@ openvox-ca-ctl migrate --source-config scratch.yaml --dest-config live.yaml --fo
 rm -rf "$SCRATCH"
 ```
 
-On the **filesystem** backend `import` does write where the server reads, but
-stop the CA anyway. The CRL lock `import` takes is genuinely cross-process on
-every backend now, including this one, so the two will not overwrite each
-other's CRL — but the inventory append is not under any shared lock, so an
-import and a running server issuing certificates can still leave the inventory's
-integrity value covering something that never existed, which the next start
-rejects (see
+On the **filesystem** backend `import` does write where the server reads, and
+the CA must be stopped: that backend supports one running instance, so `import`
+is refused while a server holds the store and tells you which process does. This
+is not a limitation of `import` but the shape of the backend — nothing
+reconciles what two processes would each hold in memory (see
 [running a second process against a live store](storage-backends.md#running-a-second-process-against-a-live-store)).
 
 > **Re-import rewrites the CA key, so two custody modes cannot use it.** `import`

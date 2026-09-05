@@ -120,22 +120,32 @@ func backgroundJobs(cfg *serverConfig, myCA *ca.CA) []backgroundJob {
 	// different question with a different answer.
 	//
 	// The staleness needs a second process *issuing* certificates this one will
-	// never hear about. Issuing, specifically — not merely writing: since #187
-	// was closed, SameHostLocker coordinates several processes writing to a
-	// filesystem or SQLite store on one host, so second writers there are
-	// supported and expected. What no second writer does today is mint a
-	// certificate. As of main 65a00adb51f9, nothing under cmd/ outside the
-	// server calls AppendInventory, issueLeafLocked, CA.Generate or
-	// SignWithTTL, so no inventory row can appear that a running server did not
-	// write itself, and its index cannot fall behind. Running the job on those
-	// two backends would read the whole inventory every interval, for ever, on
-	// the default backend, to detect something that cannot yet happen.
+	// never hear about, and on these two backends there is not supposed to be
+	// one. A backend without distributed locking supports exactly one running
+	// instance: nothing reconciles the serial index, OCSP cache and cached CRL
+	// that each process holds privately, so a second instance issues
+	// certificates the first never learns of and a revocation on one leaves the
+	// other still authenticating the revoked certificate. The server takes a
+	// store-wide lock at startup to hold operators to that — a second
+	// `openvox-ca` fails to start, and an `openvox-ca-ctl` or offline command
+	// run beside a live server is refused and told which process holds it.
 	//
-	// That enumeration is the whole justification, so here is what voids it: the
-	// day any command other than the server issues a certificate — an offline
-	// `generate` is the one in flight — this reason is gone and the gate has to
-	// be re-decided, not merely re-worded. Re-run the enumeration above against
-	// the tree in front of you rather than trusting this paragraph.
+	// The gate rests on that rule and deliberately not on a list of the callers
+	// that write, which is what this comment used to do: it enumerated them
+	// ("nothing under cmd/ outside the server calls AppendInventory,
+	// issueLeafLocked, CA.Generate or SignWithTTL", pinned to 65a00adb51f9) and
+	// #189's offline `generate` falsified it by calling CA.Generate on every
+	// backend. The conclusion survived, which is the whole reason to state a
+	// rule instead: #189 documents filesystem and SQLite as *stop the server*
+	// for that command (docs/operator-cli.md, "Running alongside a live
+	// server"), and a server stopped while a certificate was minted offline
+	// rebuilds its serial index when it next starts, so the index cannot fall
+	// behind. An enumeration is falsified by any new caller. The rule is not.
+	//
+	// Running the job on those two backends would read the whole inventory
+	// every interval, for ever, on the default backend, to mitigate one symptom
+	// of a configuration that is not supported and that the startup lock now
+	// refuses on the host where it can be detected at all.
 	//
 	// An unrecognised backend name runs the job. Being wrong in that direction
 	// costs a periodic read; being wrong in the other costs correct OCSP
@@ -146,8 +156,9 @@ func backgroundJobs(cfg *serverConfig, myCA *ca.CA) []backgroundJob {
 			runOCSPIndexSync(ctx, myCA, ocspIndexInterval)
 		}})
 	} else {
-		slog.Info("OCSP serial index sync not started: the storage backend is single-node, "+
-			"so no other process can issue certificates this one would not already know about",
+		slog.Info("OCSP serial index sync not started: this storage backend supports one running "+
+			"instance, so no other process should be issuing certificates this one would not "+
+			"already know about",
 			"backend", kind)
 	}
 

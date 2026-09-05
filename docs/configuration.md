@@ -38,7 +38,7 @@ certificate with no running server.
 | `--ca-cert-file` | `""` | Keep the CA certificate at this local path regardless of backend |
 | `--ca-key-file` | `""` | Keep the CA private key at this local path regardless of backend |
 | `--ca-key-provider` | `file` | CA private key custody: `file` (default) or `openbao` (OpenBao Transit key). See [OpenBao Transit-engine CA key](openbao-transit.md) for the full `--openbao-*` flag reference |
-| `--daemon` | `false` | Fork to background (not recommended in containers; incompatible with the `Type=notify` systemd unit — see [running under systemd](systemd.md)) |
+| `--daemon` | `false` | Fork to background (not recommended in containers; incompatible with the `Type=notify` systemd unit — see [running under systemd](systemd.md)). The single-instance check runs *before* the fork, so starting a second instance against a `filesystem` or `sqlite` store fails here with a non-zero exit rather than in a child whose output is discarded |
 | `--logfile` | `""` | Write JSON logs to this file instead of stderr |
 | `--verbosity` / `-v` | `0` | Verbosity: `0`=Info, `1`=Debug, `2`=Trace |
 | `--version` | | Print the version and exit; includes commit metadata when built from a git checkout |
@@ -1237,7 +1237,8 @@ csr_pem=$(cat)
                       the first supersession) — see "Delayed supersession" above
   signed/             Issued certificates
   requests/           Pending CSRs
-  locks/              Same-host lock files (empty, mode 0600) — see below
+  locks/              Same-host lock files (mode 0600; empty but for the store-wide
+                      instance lock, which records its holder) — see below
   private/
     ca_key.pem              CA private key (mode 0600; encrypted PEM when --encrypt-ca-key)
     .ca_key_passphrase      Auto-generated passphrase file (mode 0600; only when --encrypt-ca-key
@@ -1268,8 +1269,9 @@ The user running `openvox-ca` must own (or have write access to) `--cadir` —
 and so must anything else that touches the store. `openvox-ca-ctl` and the
 offline `openvox-ca` subcommands take the same locks the server does, so run
 them as that user rather than under `sudo`: a root-owned lock file left in
-`locks/` will fail the server's next acquisition of that name. See [running a
-second process against a live
+`locks/` will fail the server's next acquisition of that name. They also require
+the server to be stopped, because the filesystem backend supports a single
+running instance. See [running a second process against a live
 store](storage-backends.md#running-a-second-process-against-a-live-store).
 
 ## Graceful shutdown

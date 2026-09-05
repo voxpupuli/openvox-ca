@@ -231,3 +231,20 @@ func (o *OverlayBackend) AcquireSameHostLock(ctx context.Context, name string) (
 	}
 	return nil, ErrSameHostLockingUnsupported
 }
+
+// AcquireInstanceLock delegates to the base backend's InstanceLocker when
+// present, for the same reason the two lock methods above delegate: the
+// override files are local copies of CA material, but the store an instance
+// must be alone in is the base backend's.
+//
+// Forwarding is what makes the rule hold for an overlay at all. An overlay over
+// a filesystem base reports no distributed locking, so the single-instance rule
+// applies to it — and without this method a type assertion would find no
+// InstanceLocker and silently permit the second instance the rule exists to
+// refuse.
+func (o *OverlayBackend) AcquireInstanceLock() (Unlocker, error) {
+	if il, ok := o.base.(InstanceLocker); ok {
+		return il.AcquireInstanceLock()
+	}
+	return nil, ErrSameHostLockingUnsupported
+}

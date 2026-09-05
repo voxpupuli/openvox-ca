@@ -739,6 +739,22 @@ func (b *SQLBackend) AcquireSameHostLock(ctx context.Context, name string) (Unlo
 	return b.sameHostLocks.acquire(ctx, name)
 }
 
+// AcquireInstanceLock takes the store-wide lock permitting one running instance,
+// in the same hidden directory beside the database file as the per-name
+// same-host locks, and for the same reasons: the database file itself must not
+// be flocked, and a locks table cannot be held open for a process lifetime on a
+// single-connection pool.
+//
+// A nil lock set is every dialect but SQLite — whose real distributed lock makes
+// this rule inapplicable — and an in-memory database, which no second process
+// can open in the first place.
+func (b *SQLBackend) AcquireInstanceLock() (Unlocker, error) {
+	if b.sameHostLocks == nil {
+		return nil, ErrSameHostLockingUnsupported
+	}
+	return b.sameHostLocks.acquireInstance()
+}
+
 // sqliteLockDir derives the same-host lock directory for a SQLite DSN: a hidden
 // sibling of the database file, alongside the -wal and -shm files SQLite
 // maintains itself. Reports false for an in-memory database, which is private

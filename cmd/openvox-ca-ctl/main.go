@@ -633,6 +633,17 @@ func newSetupCmd() *cobra.Command {
 			}
 
 			store := storage.New(absDir)
+
+			// A cadir with a server already running against it is not one to
+			// initialise. The filesystem backend has no distributed locking, so
+			// exactly one process may be running against it, and this refuses
+			// with the holder's name rather than racing the server's bootstrap.
+			instanceLock, err := store.AcquireInstanceLock(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer func() { _ = instanceLock.Unlock() }()
+
 			myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, hostname)
 			myCA.EncryptCAKey = encryptKey
 			myCA.KeyPassphrase = ca.KeyPassphraseConfig{
@@ -695,6 +706,16 @@ func newImportCmd() *cobra.Command {
 			}
 
 			store := storage.New(absDir)
+
+			// Replacing the CA certificate and key under a running server is the
+			// unsupported configuration this refuses: one instance is all the
+			// filesystem backend supports.
+			instanceLock, err := store.AcquireInstanceLock(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer func() { _ = instanceLock.Unlock() }()
+
 			if err := ca.ImportCA(cmd.Context(), store, certPEM, keyPEM, crlPEM); err != nil {
 				return err
 			}

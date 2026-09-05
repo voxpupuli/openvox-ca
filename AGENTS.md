@@ -221,6 +221,17 @@ the inventory, in-memory caches) must follow
   must run inside the same lock as the mutation. Backend-internal locks taken
   directly via `Backend.AcquireLock` (e.g. etcd's `inventory-decompose`) are a
   second recognised pattern — see locking.md for when each applies.
+- **One running instance, unless the backend has distributed locking.** A
+  backend without it permits exactly one, because nothing reconciles the serial
+  index, OCSP cache and cached CRL each process holds. `StorageService.
+  AcquireInstanceLock` takes a store-wide `store-instance` lock for the life of
+  the process, gated on `SupportsDistributedLocking` — **on the capability,
+  never on a backend name**, so a new backend inherits the right behaviour. It
+  is taken *outside* `WithLock` and never reaches a cross-node lock. Two things
+  to keep right when touching it: release it after closing the backend, not
+  before; and take it once per *instance* — the launcher forks children that
+  open the store for themselves, so a lock taken per process deadlocks the
+  default topology against itself.
 - Read-only paths must **not** take `WithLock` — they use in-memory caches and
   read locks only.
 - On `filesystem` and `sqlite` a lock name also derives a lock *filename*

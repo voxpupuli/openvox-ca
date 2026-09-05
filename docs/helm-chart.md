@@ -604,13 +604,11 @@ section is only that:
   carries on issuing under the certificate you just replaced.
 - **Re-issuing later needs the CA stopped, on any backend.** The `--force`
   re-issuance is a read-modify-write across the certificate and the CRL, and it
-  takes the bootstrap and CRL locks. Those are genuinely cross-process
-  everywhere now — `filesystem` and `sqlite`, the chart's default, coordinate two
-  processes on one host with `flock(2)` — so a revocation is no longer silently
-  discarded, and the import will instead wait and then fail if the CA holds the
-  lock. What no lock covers on any backend is the inventory append, so an import
-  racing issuance can still leave the inventory's integrity value inconsistent.
-  See [running a second process against a live
+  takes the bootstrap and CRL locks. On `filesystem` and `sqlite` — the chart's
+  default — a second process against the store is not supported at all, so the
+  import is refused outright while the CA is running, naming the process that
+  holds the store. Scale the release to zero, or run the import before the
+  rollout. See [running a second process against a live
   store](storage-backends.md#running-a-second-process-against-a-live-store).
 - **With `ca.existingSecret` the CA certificate is mounted read-only**, so the
   import cannot write it back. That is the `--out` route in the procedure, which

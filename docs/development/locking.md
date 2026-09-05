@@ -100,6 +100,7 @@ flight — see its row below.
 | `sql-schema-migrate` | One schema-migration run, so two replicas starting at once do not migrate concurrently (SQL backends only) | `SQLBackend.EnsureReady` |
 | `inventory-decompose` | One-time legacy inventory blob conversion (etcd and redis backends) on the first start after upgrading | `EtcdBackend.decomposeLegacyInventory` and `RedisBackend.decomposeLegacyInventory`, from `EnsureReady` |
 | `capability-probe` | Nothing. Acquired and released immediately by `StorageService.SupportsDistributedLocking` to find out whether this backend coordinates locks across processes at all | The offline `openvox-ca generate` pre-flight. The name sits deliberately outside every namespace above so a probe can never contend with an operation in flight |
+| `store-instance` | The store as a whole, for as long as a process is running against it. Taken **outside `WithLock`**, through `StorageService.AcquireInstanceLock` → `InstanceLocker`, so it never reaches a cross-node lock and needs no ordinal: it applies only where `SupportsDistributedLocking` is false, and those backends have no SQL advisory lock to reach. Acquired without waiting, and refused with the holder's identity rather than a timeout | The server (the launcher, or a single-process server — never the signer or frontend children, which are inside an instance that already holds it), `openvox-ca-ctl setup`/`import`/`migrate`, and the offline `csr`/`generate`/`import-ca-cert`. Like `capability-probe` the name sits outside every namespace above, so the lock proving an instance is alone can never contend with that instance's own work |
 
 How each backend provides the distributed lock (a summary — the full per-backend
 mechanism, key layouts and transaction/retry detail lives in
@@ -111,7 +112,7 @@ mechanism, key layouts and transaction/retry detail lives in
 | Redis/Valkey | `SET NX PX` with a per-acquisition random token; a heartbeat goroutine extends the TTL while held; unlock is a Lua compare-token-and-delete | Key expires within the TTL, lock releases |
 | PostgreSQL | `pg_advisory_lock` (session-level) on a dedicated pooled connection | Only when the server reaps the session — no TTL (see below) |
 | MySQL/MariaDB | `GET_LOCK` on a dedicated connection, polled with a 1 s server-side wait so context cancellation is honoured | Only when the server reaps the session — no TTL (see below) |
-| SQLite, filesystem | No cross-node lock — `ErrDistributedLockingUnsupported` / no `Locker`. Same-host only: an exclusive `flock(2)` per lock name, under `<cadir>/locks/` or a `.<db>.locks/` directory beside the SQLite file | Kernel releases the lock when the descriptor closes or the holder dies — no stale lock, no TTL |
+| SQLite, filesystem | No cross-node lock — `ErrDistributedLockingUnsupported` / no `Locker`. Same-host only: an exclusive `flock(2)` per lock name, under `<cadir>/locks/` or a `.<db>.locks/` directory beside the SQLite file. These are also the backends the store-wide `store-instance` lock applies to, in the same directories, since they are the ones that support a single running instance | Kernel releases the lock when the descriptor closes or the holder dies — no stale lock, no TTL |
 | Overlay | Delegates to the base backend's `Locker`, then to its `SameHostLocker`; reports unsupported when the base has neither | as base |
 
 The same-host lock is the one entry in that table with nothing to recover.
@@ -422,6 +423,11 @@ written as two.
   rather than a parked goroutine, which is what a stack dump will show. Since
   `MigrateService` applies no deadline it waits forever, announcing itself once.
   Migrating a store onto itself is unsupported.
+  That is the behaviour of `MigrateService` called directly. `openvox-ca-ctl
+  migrate` no longer reaches it: since #275 the command takes the store-wide
+  instance lock on both ends first, so a store pointed at itself is refused
+  immediately rather than deadlocking, and so is either end held by a running
+  server.
 
 ## Read paths take no distributed locks — by design
 
@@ -577,7 +583,10 @@ path — still provides no cross-replica guarantee anyway.
    concurrent `Sign` still take different names and do not exclude each other,
    so stop the server. `MigrateService` also inherits the caller's context with
    no `lockTimeout`, so it waits indefinitely on a contended `bootstrap` lock
-   (see Tier 1).
+   (see Tier 1). Reaching that wait through `openvox-ca-ctl migrate` is no
+   longer possible on a backend that supports a single running instance: the
+   command takes the store-wide instance lock on both ends before any of this
+   and is refused, by name, if a server holds either.
 10. **A lock name is now also a filename.** On the single-node backends each
     name maps to `sha256(name).lock` in the store's lock directory. The mapping
     is protocol for the same reason the names are: a server and a `ctl` command
@@ -857,9 +866,14 @@ state when the document was last updated and is not guaranteed exhaustive.
   lock *name*, and two processes issuing for different subjects hold different
   `subject:<name>` locks — but that is outside #204's scope and is not a
   tracked defect: two processes writing one filesystem store is an unsupported
-  configuration. Enforcing it is
-  [#275](https://github.com/voxpupuli/openvox-ca/issues/275), a cadir-wide lock
-  that would stop a second instance starting at all. See
+  configuration. That is now **enforced** rather than merely stated:
+  [#275](https://github.com/voxpupuli/openvox-ca/issues/275) added the
+  store-wide `store-instance` lock, held for the life of the process, so a
+  second instance is refused at startup and an `openvox-ca-ctl` or offline
+  command run beside a live server is told which process holds the store. The
+  enforcement is best-effort by design — `flock(2)` says nothing useful over
+  NFS, and a process on another host cannot be excluded at all — so the rule,
+  not the lock, remains the guarantee. See
   [storage backends](../storage-backends.md).
   The offline `generate` still reports both capabilities in its pre-flight, via
   `SupportsDistributedLocking`/`SupportsAtomicInventory`, and still tells the

@@ -195,14 +195,14 @@ openvox-ca-ctl migrate \
   --dest-config   /etc/puppet-ca/postgres.yaml
 ```
 
-`setup`, `import` and `migrate` operate directly on storage. No running server is
-needed — and since they reach storage directly, they now take the same locks a
-running server takes, so run them as the user the server runs as rather than
-under `sudo` (see the link below for why). Run one beside a live server and it waits rather than
-racing, then fails with `another process on this host holds the CA lock`
-(`migrate` has no timeout and waits indefinitely). Stop the server first; see
-[running a second process against a live
-store](storage-backends.md#running-a-second-process-against-a-live-store).
+`setup`, `import` and `migrate` operate directly on storage, and each requires
+the server to be **stopped** on a backend that supports one running instance
+(`filesystem`, `sqlite`). Run one beside a live server and it is refused, naming
+the process holding the store — not left waiting for a lock it was never going
+to get. Because they reach storage directly they take the same locks a running
+server takes, so run them as the user the server runs as rather than under
+`sudo` (see the link below for why). See [running a second process against a
+live store](storage-backends.md#running-a-second-process-against-a-live-store).
 See [storage backends](storage-backends.md#migrating-between-backends) for migration details.
 
 ## Offline subcommands on the server binary
@@ -213,13 +213,14 @@ configuration. `openvox-ca-ctl` reads a different configuration file and can
 only address a local filesystem directory, so it cannot serve a CA whose state
 is in PostgreSQL or whose key is in OpenBao Transit.
 
-None of them needs a running server, and all three take the CA's locks while
-they work — `csr --create-key` and `import-ca-cert` take `bootstrap`,
-`import-ca-cert` the CRL lock too, and `generate` takes `subject:<name>` for the
-name it is minting, plus the CRL lock when `--force` revokes the certificate it
-replaces — so running one beside a live server waits and may fail rather than
-racing it. Stop the server first; see [running a second process against a live
-store](storage-backends.md#running-a-second-process-against-a-live-store).
+None of them needs a running server, and on a backend that supports one running
+instance none of them will run beside one: each is refused, naming the process
+holding the store. Stop the server first. Within an instance they take the CA's
+locks while they work — `csr --create-key` and `import-ca-cert` take
+`bootstrap`, `import-ca-cert` the CRL lock too, and `generate` takes
+`subject:<name>` for the name it is minting, plus the CRL lock when `--force`
+revokes the certificate it replaces. See [running a second process against a
+live store](storage-backends.md#running-a-second-process-against-a-live-store).
 
 All three read the **server's** configuration, not `openvox-ca-ctl`'s: `--config`, or
 `PUPPET_CA_CONFIG`, defaulting to `/etc/puppet-ca/config.yaml`. A working
@@ -445,15 +446,24 @@ alongside a live server only when a backend has **both**:
 | `postgres`, `mysql` | yes | yes | safe |
 | `etcd` | yes | yes | safe |
 | `redis` | yes | no | stop the server |
-| `sqlite` | no (single-node) | yes | stop the server |
-| `filesystem` (default) | no (single-node) | no | stop the server |
+| `sqlite` | no (single-node) | yes | refused while the server runs |
+| `filesystem` (default) | no (single-node) | no | refused while the server runs |
+
+The last two rows are not advice. A backend without cross-node locking supports
+one running instance, so the server holds the store while it runs and `generate`
+is refused outright, naming the process holding it — see [running a second
+process against a live
+store](storage-backends.md#running-a-second-process-against-a-live-store).
+`redis` is the row where the verdict really is advice: it coordinates across
+nodes, so several instances are supported, but its inventory append is not
+atomic and this command can still corrupt the integrity value.
 
 Note which lock the first column measures: the **cross-node** one, which is what
 `SupportsDistributedLocking` probes and the only one that helps when the other
-writer is on another host. `filesystem` and `sqlite` do coordinate across
-processes *on one host* — they take an `flock(2)`, so an `openvox-ca-ctl`
-command cannot interleave with a server on the same machine — but that is a
-different guarantee and the probe deliberately does not report it as this one.
+writer is on another host. `filesystem` and `sqlite` also take an `flock(2)`
+between processes on one host, but that is a different and weaker guarantee —
+the probe deliberately does not report it as this one, and it is what the
+single-instance rule is enforced with rather than a substitute for it.
 
 What each missing capability costs is different. Without cross-node locking, two
 writers on different hosts can each decide a subject has no certificate and both

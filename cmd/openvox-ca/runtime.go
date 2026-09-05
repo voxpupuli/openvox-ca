@@ -117,6 +117,62 @@ func resolveRuntime(ctx context.Context, cfg *serverConfig, withKeyProvider bool
 	return rt, nil
 }
 
+// lockStoreInstance takes the store-wide lock permitting one running instance,
+// opening the configured store for no other purpose and closing it again at
+// once.
+//
+// Used by the two entry points that have no runtime of their own to hang the
+// lock on: the launcher, which forks children that open the store themselves,
+// and the single-process server, which opens it moments later. Closing the
+// store here is deliberate and safe — the lock is an flock(2) on a descriptor
+// the Unlocker owns outright, so it outlives the backend handle that led us to
+// it. That is what keeps a cluster backend from carrying a connection it has no
+// use for: the probe dials, answers "distributed", and everything opened for it
+// is released before the server proper starts.
+//
+// The caller must Unlock for as long as it intends to be the running instance.
+func lockStoreInstance(ctx context.Context, cfg *serverConfig) (storage.Unlocker, error) {
+	rt, err := resolveRuntime(ctx, cfg, false)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rt.Close() }()
+	return rt.Store.AcquireInstanceLock(ctx)
+}
+
+// preflightInstanceLock reports whether another instance already holds the
+// store, without keeping the lock.
+//
+// For the one caller that is about to hand startup to a process whose
+// diagnostics nobody will read: `--daemon` discards the child's stderr, so a
+// refusal raised there reaches no one. Taking the lock and immediately
+// releasing it answers the question while there is still somewhere to print the
+// answer. It is a check, not a guarantee -- the child takes the real lock, and
+// the gap between the two belongs to whoever wants it.
+func preflightInstanceLock(ctx context.Context, cfg *serverConfig) error {
+	ul, err := lockStoreInstance(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	return ul.Unlock()
+}
+
+// holdInstanceLock takes the store's instance lock and ties its release to rt,
+// for callers that already hold a runtime.
+//
+// The release is inserted at the front of the closer list rather than appended,
+// because Close runs closers in reverse and the lock must outlive the backend
+// handle it protects. Why that ordering matters, and why openvox-ca-ctl reaches
+// it by a different route, is stated once on StorageService.AcquireInstanceLock.
+func holdInstanceLock(ctx context.Context, rt *caRuntime, opts ...storage.InstanceLockOption) error {
+	ul, err := rt.Store.AcquireInstanceLock(ctx, opts...)
+	if err != nil {
+		return err
+	}
+	rt.closers = append([]func() error{ul.Unlock}, rt.closers...)
+	return nil
+}
+
 // resolveRuntimeForRole resolves the runtime a process running as role should
 // operate on, deciding key-provider access from the role itself.
 //

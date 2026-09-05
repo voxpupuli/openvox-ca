@@ -18,6 +18,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -109,17 +110,42 @@ local filesystem under cadir, never in a storage backend.`,
 				return fmt.Errorf("destination backend: %w", err)
 			}
 
+			// Both ends are locked, and the source is not the lenient one.
+			// Migrating from a live store reads an inventory the server is still
+			// appending to, so the copy can be internally inconsistent even
+			// though nothing here writes to it. On a backend that supports one
+			// running instance this says so at once and names the server,
+			// instead of the indefinite wait for the bootstrap lock that migrate
+			// used to sit in.
+			//
+			// Each store gets ONE deferred cleanup closing the backend and only
+			// then releasing the lock, rather than a defer apiece. The order is
+			// the point: the store-wide lock must outlive the backend handle it
+			// protects, or between the two a second process could take the store
+			// while this one still holds an open connection to it. Two defers
+			// would run in exactly the wrong order, LIFO putting Unlock first.
+			// cmd/openvox-ca/runtime.go's holdInstanceLock keeps the same
+			// invariant by inserting its release at the front of a closer list
+			// that runs in reverse.
 			srcSvc, err := storage.NewServiceFromSpec(srcSpec)
 			if err != nil {
 				return fmt.Errorf("opening source backend: %w", err)
 			}
-			defer func() { _ = srcSvc.Backend().Close() }()
+			releaseSrc, err := lockStore(cmd.Context(), srcSvc)
+			if err != nil {
+				return fmt.Errorf("source backend: %w", err)
+			}
+			defer releaseSrc()
 
 			dstSvc, err := storage.NewServiceFromSpec(dstSpec)
 			if err != nil {
 				return fmt.Errorf("opening destination backend: %w", err)
 			}
-			defer func() { _ = dstSvc.Backend().Close() }()
+			releaseDst, err := lockStore(cmd.Context(), dstSvc)
+			if err != nil {
+				return fmt.Errorf("destination backend: %w", err)
+			}
+			defer releaseDst()
 
 			report, err := storage.MigrateService(cmd.Context(), srcSvc, dstSvc, storage.MigrateOptions{
 				Force: force,
@@ -144,4 +170,28 @@ local filesystem under cadir, never in a storage backend.`,
 	_ = cmd.MarkFlagRequired("source-config")
 	_ = cmd.MarkFlagRequired("dest-config")
 	return cmd
+}
+
+// lockStore takes svc's store-wide instance lock and returns the cleanup that
+// gives both the store and the lock back.
+//
+// A helper rather than two pairs of defers at the call site, because the order
+// inside it is load-bearing and a defer pair gets it backwards: two defers run
+// LIFO and would release the lock before closing the backend. Why that ordering
+// matters, and why openvox-ca reaches it by a different route, is stated once on
+// StorageService.AcquireInstanceLock. Both routes are covered by specs that
+// assert the order rather than trusting it.
+//
+// On failure to acquire, the backend is closed here: the caller has nothing to
+// release and would otherwise leak the handle.
+func lockStore(ctx context.Context, svc *storage.StorageService) (func(), error) {
+	ul, err := svc.AcquireInstanceLock(ctx)
+	if err != nil {
+		_ = svc.Backend().Close()
+		return nil, err
+	}
+	return func() {
+		_ = svc.Backend().Close()
+		_ = ul.Unlock()
+	}, nil
 }

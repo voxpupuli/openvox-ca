@@ -195,7 +195,7 @@ before a server exists.`,
 			}
 			defer func() { _ = rt.Close() }()
 
-			reportBackendCapabilities(ctx, out, rt.Store)
+			distributed, capabilityKnown := reportBackendCapabilities(ctx, out, rt.Store)
 
 			myCA := ca.New(rt.Store, ca.AutosignConfig{Mode: "off"}, cfg.Hostname)
 			if err := applyCAConfig(myCA, cfg); err != nil {
@@ -205,6 +205,31 @@ before a server exists.`,
 			myCA.NoBootstrap = true
 
 			if err := assertCAUsable(ctx, myCA, rt.Store, cfg); err != nil {
+				return err
+			}
+
+			// Refuse while a server holds the store. On a backend without
+			// distributed locking exactly one process may run against it, and
+			// this command mints a certificate a running server would never
+			// learn of. The refusal names the holder, which is the answer the
+			// operator needs; waiting for a lock they were never going to get is
+			// not.
+			//
+			// Taken *after* the checks above and before the first write, rather
+			// than at the top with the runtime. Acquiring creates the lock file,
+			// and the refusals above promise to leave the cadir exactly as they
+			// found it -- a command that declines to act should not leave a
+			// locks/ directory in a cadir that has no CA in it. Everything
+			// between here and the checks only reads.
+			//
+			// Reuse the answer the capability report just paid for, when it got
+			// one. Omitting it on an undetermined capability is deliberate: that
+			// case has a policy and it belongs in one place.
+			var lockOpts []storage.InstanceLockOption
+			if capabilityKnown {
+				lockOpts = append(lockOpts, storage.WithKnownDistributedLocking(distributed))
+			}
+			if err := holdInstanceLock(ctx, rt, lockOpts...); err != nil {
 				return err
 			}
 
@@ -400,7 +425,15 @@ func reportIssuanceSettings(w io.Writer, cfg *serverConfig) {
 }
 
 // reportBackendCapabilities warns when the resolved backend cannot serialise
-// this process against a running server.
+// this process against a running server, and returns the distributed-locking
+// answer it probed for.
+//
+// The return exists so the caller need not buy that answer twice: the probe
+// takes and releases a real backend lock, and the instance lock this command
+// goes on to take asks the same question. `known` is false when the probe could
+// not answer, in which case the caller must not pass the result on as a hint --
+// an undetermined capability has its own policy, and it lives in
+// StorageService.AcquireInstanceLock rather than here.
 //
 // The per-subject lock is real only on backends that provide distributed
 // locking, and the inventory append is atomic only on structured ones. Where
@@ -408,7 +441,7 @@ func reportIssuanceSettings(w io.Writer, cfg *serverConfig) {
 // same subject, or -- worse -- interleave an inventory append so the integrity
 // HMAC covers a blob that never existed, which makes the server refuse to start
 // with no supported repair (see #188).
-func reportBackendCapabilities(ctx context.Context, w io.Writer, store *storage.StorageService) {
+func reportBackendCapabilities(ctx context.Context, w io.Writer, store *storage.StorageService) (distributed, known bool) {
 	// Bound the probe. It takes a real backend lock, and pg_advisory_lock blocks
 	// until granted or the context is cancelled -- while cmd.Execute() runs on
 	// context.Background(), so there is no deadline anywhere above here. Without
@@ -453,7 +486,7 @@ func reportBackendCapabilities(ctx context.Context, w io.Writer, store *storage.
 		_, _ = fmt.Fprintf(w, "Backend coordinates across processes: safe to run alongside a live server.\n"+
 			"  Note: a running server answers OCSP 'unknown' for the new serial until it restarts,\n"+
 			"  because its serial index is built at startup. The CRL and inventory are correct immediately.\n")
-		return
+		return locking, true
 	}
 
 	if lockErr != nil {
@@ -465,6 +498,8 @@ func reportBackendCapabilities(ctx context.Context, w io.Writer, store *storage.
 		"  Stop the server before running this. A concurrent write can issue a duplicate\n"+
 		"  certificate, or corrupt the inventory integrity record so the server will not restart.\n",
 		lockingStatus, atomicInventory)
+
+	return locking, lockErr == nil
 }
 
 // warnAdminCredential states what a pp_cli_auth certificate grants, and what it

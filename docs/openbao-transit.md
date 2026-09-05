@@ -436,14 +436,15 @@ CRL and every replica caches the CA certificate for its process lifetime.
 
 > **Stop the CA first, on any backend.** `--force` is a read-modify-write
 > spanning the certificate and the CRL, and it takes the bootstrap and CRL locks
-> to keep a concurrent revocation from being lost. Those locks are now genuinely
-> cross-process everywhere — `filesystem` and `sqlite` coordinate two processes
-> on one host with `flock(2)`, the others with their cluster lock — so a
-> revocation is no longer silently discarded, and the CLI will instead wait and
-> then fail if the server holds the lock past the timeout. What no lock covers
-> on any backend is the inventory append, so an import racing issuance can still
-> leave the inventory's integrity value inconsistent. Stopping the CA is a
-> one-line step; the import is not the place to economise.
+> to keep a concurrent revocation from being lost. On `filesystem` and `sqlite`
+> this is not advice you can weigh up: those backends support one running
+> instance, so the command is refused outright while a server holds the store,
+> naming the process that holds it. On the backends that do coordinate across
+> nodes the command can run, but what no lock covers anywhere is the inventory
+> append, so an import racing issuance can still leave the inventory's integrity
+> value inconsistent. Stopping the CA is a one-line step; the import is not the
+> place to economise. See [running a second process against a live
+> store](storage-backends.md#running-a-second-process-against-a-live-store).
 
 1. Keep a copy of the bundle you are about to replace:
    `curl -sk https://<ca>/puppet-ca/v1/certificate/ca > ca-bundle.backup.pem`.

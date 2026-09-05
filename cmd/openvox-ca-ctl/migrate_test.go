@@ -157,6 +157,11 @@ func assertTreesEqual(want, got string) {
 	wantFiles := collectFiles(want)
 	gotFiles := collectFiles(got)
 
+	// Guards the exclusion in collectFiles: if it ever swallowed the tree, every
+	// assertion below would pass having compared nothing.
+	Expect(wantFiles).NotTo(BeEmpty(),
+		"nothing was compared -- the walk or its exclusion is wrong, not the migration")
+
 	for rel, data := range wantFiles {
 		other, ok := gotFiles[rel]
 		if !ok {
@@ -172,7 +177,16 @@ func assertTreesEqual(want, got string) {
 }
 
 // collectFiles returns a map of relative path => contents for every regular
-// file under root.
+// file under root, excluding the lock directory.
+//
+// locks/ is skipped deliberately, and its absence is not a weakening. Lock
+// files are process-coordination artefacts rather than CA state: nothing
+// migrates them, and each tree has its own only because each backend was
+// opened. They used to compare equal by accident -- they were empty -- but the
+// store-wide instance lock records its holder, so two trees now differ there
+// whenever the two acquisitions fall either side of a second boundary. That
+// made this spec fail perhaps one run in five while asserting nothing about the
+// migration in the other four.
 func collectFiles(root string) map[string][]byte {
 	out := map[string][]byte{}
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
@@ -180,6 +194,9 @@ func collectFiles(root string) map[string][]byte {
 			return err
 		}
 		if d.IsDir() {
+			if d.Name() == "locks" && path != root {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		rel, err := filepath.Rel(root, path)

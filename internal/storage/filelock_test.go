@@ -935,6 +935,5 @@ func (b *bothLocker) AcquireLock(context.Context, string) (Unlocker, error) {
 	return noopUnlocker{}, nil
 }
 
-type noopUnlocker struct{}
-
-func (noopUnlocker) Unlock() error { return nil }
+// noopUnlocker now lives in instancelock.go, where StorageService.AcquireInstanceLock
+// returns one for every case in which the single-instance rule does not apply.

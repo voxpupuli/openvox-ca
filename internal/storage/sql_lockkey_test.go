@@ -310,6 +310,7 @@ var _ = Describe("SQLMySQLLockName", func() {
 // true, move it into reservedLockOrdinals rather than leaving it here.
 var lockNameConstantExemptions = map[string]string{
 	"etcdDecomposeLockName": "is taken only by a method on the concrete *EtcdBackend, never routed through StorageService, so it cannot reach a SQL backend",
+	"instanceLockName":      "is taken only through fileLocks.acquireInstance, never through WithLock or any Locker; SQLBackend routes it to the flock sidecar beside the database file, and the backends that do have SQL advisory locks are exactly the ones AcquireInstanceLock exempts",
 }
 
 var _ = Describe("SQLLockNameConstantsAreRegistered", func() {

@@ -44,49 +44,104 @@ The responder keeps a second such copy: the set of serials this CA has issued,
 which decides whether it will speak about a certificate at all. On the shared
 backends it is reloaded on its own timer, so a certificate signed on one replica
 stops being reported `unknown` by the others within `ocsp_index_sync_interval_sec`
-(5m by default). `filesystem` and `sqlite` do not run that job — nothing else
-can be writing certificates there — so on those two the set is what it was at
-startup. See [OCSP status across
+(5m by default). `filesystem` and `sqlite` do not run that job — they
+support a single running instance, so nothing else should be writing
+certificates there — so on those two the set is what it was at startup. See [OCSP status across
 replicas](configuration.md#ocsp-status-across-replicas).
 
 ---
 
 ## Running a second process against a live store
 
-Every backend now coordinates two processes on the same host, so an
-`openvox-ca-ctl` command run beside a running server takes the same locks the
-server does instead of writing straight past it. The single-node backends
-(`filesystem`, `sqlite`) do it with an exclusive `flock(2)` per lock — under
-`<cadir>/locks/` and in a hidden directory beside the database file
-respectively; the HA backends already did it with their cluster lock.
+**Running more than one `openvox-ca` against a `filesystem` or `sqlite` store is
+not supported.** Those two have no distributed locking, and a backend without it
+permits exactly one running instance. Stop the server before running any command
+that reaches storage directly.
 
-What that changes for you:
+This is a property of the backend's locking rather than of its name. The HA
+backends — `etcd`, `redis`, `postgres` and `mysql` — coordinate writers across
+processes *and* hosts, so on those you may run as many instances as you like, on
+as many machines as you like, and none of this section applies to them. A future
+backend inherits whichever behaviour its locking earns it.
 
-- **A command that would have raced now waits, and then fails.** If the lock is
-  still held after its timeout you get `another process on this host holds the
-  CA lock "<name>"` naming the lock file, rather than a silent double write.
-  The typical cause is exactly what it says: a server is running. Stop it, or
-  wait for whatever it is doing.
-- **A wait says so.** The first time an acquisition is refused, the waiting
-  process logs `Waiting for the CA lock: another process on this host holds it`
-  with the lock name and file, so a command that pauses is distinguishable from
-  one that has hung.
-- **`openvox-ca-ctl migrate` applies no timeout at all** and will wait
-  indefinitely for the `bootstrap` lock — it will log the line above and
-  otherwise sit there. Interrupt it and stop the server. For the same reason,
-  pointing `--source-config` and `--dest-config` at one store now waits forever
-  instead of failing; migrating a store onto itself was never supported, and
-  this is the behaviour the HA backends already had.
+### Why only one
+
+Not because of what lands on disk, but because of what does not. Each running CA
+answers from state held in its own memory and reconciled through shared storage:
+the index of serials it has issued, its OCSP cache, and the CRL its revocation
+checks read. On a backend with distributed locking, storage is what the replicas
+reconcile that state through. `filesystem` and `sqlite` have no such mechanism,
+by design — so a second instance issues certificates the first never hears of,
+and **a certificate revoked on one goes on being accepted by the other**. No
+amount of finer-grained locking fixes that; only running one instance does.
+
+### What the server does about it
+
+At startup the server takes an exclusive `flock(2)` on the store and holds it
+until it exits — under `<cadir>/locks/` for `filesystem`, and in the hidden
+directory beside the database file for `sqlite`. So:
+
+- **A second `openvox-ca` fails to start**, naming the process that holds the
+  store: `another openvox-ca process is already running against this store:
+  openvox-ca (pid 1234) on ca1.example.com since …`. It is a refusal rather than
+  a wait, because waiting would only postpone the same answer.
+- **`openvox-ca-ctl setup`, `import` and `migrate` are refused the same way**,
+  as are the offline `openvox-ca` subcommands (`csr`, `generate`,
+  `import-ca-cert`). Those are the commands that reach storage directly. Every
+  other `openvox-ca-ctl` subcommand works through the admin API over HTTP
+  instead, never opens the store, and is unaffected — asking a running CA to
+  sign, revoke or list remains an ordinary thing to do.
+- **`migrate` no longer hangs when both ends are the same store.** That was
+  never supported, and it used to wait for ever on a lock it had already taken
+  itself; it now fails immediately.
+- **Nothing to clean up after a crash.** The kernel releases an `flock` when the
+  holding process dies, however it dies. There is no stale lock to remove and no
+  lock file that needs deleting — see the note on `locks/` under
+  [the filesystem backend](#filesystem-backend-default).
+- **Under `--daemon` the refusal comes before the fork.** That flag re-execs the
+  server and discards the child's output, so a refusal raised there would reach
+  nobody: you would be told the CA had started, get a zero exit, and have the
+  child die in silence. The check therefore runs in the process you started,
+  which fails with a non-zero exit and names the holder. It is a pre-flight — it
+  takes the lock and releases it again, and the child takes the real one — so a
+  third process that wins the moment between them still produces the silent
+  failure. A server that is already running does not, which is the case this
+  exists for.
+
+Under the default isolated-process topology the lock is held by the supervisor
+process, once, on behalf of the signer and frontend children it starts. One
+instance means one `openvox-ca` service, not one operating-system process.
+
+### What the lock cannot do, and why the rule matters more than it does
+
+The lock is a backstop, not a licence. It reduces the damage when the
+unsupported thing is attempted on one host. It cannot do more than that:
+
+- **`flock(2)` says nothing useful over NFS**, so a cadir or SQLite file shared
+  between hosts is not protected at all, and sharing one was never supported.
+- **A second process on another host cannot be excluded**, by this or by
+  anything else we could build.
 - **Both processes must be on a release that has this.** The exclusion works
   only if each side takes the lock, so a new `openvox-ca-ctl` beside an older
   running server — or the reverse, during a staged upgrade where the package is
   updated but the service has not been restarted — silently gets the old
   behaviour: no coordination at all. Upgrade and restart the server before
-  relying on any of this.
-- **Nothing to clean up after a crash.** The kernel releases an `flock` when the
-  holding process dies, however it dies. There is no stale lock to remove and no
-  lock file that needs deleting — see the note on `locks/` under
-  [the filesystem backend](#filesystem-backend-default).
+  relying on any of it.
+- **Absolute paths matter.** Two processes exclude each other only if they
+  resolve the same lock directory, so `cadir` and `sql_dsn` should be absolute.
+  A relative path used from two different working directories, or one store
+  reached through two different symlinks, gives two independent locks and no
+  mutual exclusion.
+- **Where the store cannot be locked at all** — a filesystem without `flock(2)`,
+  a read-only mount — the server logs a warning and starts anyway, because
+  refusing over a lock that is unavailable rather than held would take down a CA
+  that worked before. The rule still holds; only the enforcement is missing.
+
+So the rule is not "the lock will stop you". It is that these backends support
+one instance, and the lock catches the case it can.
+
+### Running `openvox-ca-ctl` as the service user
+
 - **Run `openvox-ca-ctl` as the user the server runs as**, not under `sudo`.
   The lock files are `0600` and the directory `0750`, so a command run as root
   leaves a root-owned lock file in a store the service account owns, and the
@@ -97,36 +152,36 @@ What that changes for you:
   (or `runuser -u puppet-ca --`), matching the `User=` in the unit. It applies
   even to commands that only read, such as `migrate` from a live source, since
   taking the lock is what creates the file.
-- **Absolute paths matter.** Two processes exclude each other only if they
-  resolve the same lock directory, so `cadir` and `sql_dsn` should be absolute.
-  A relative path used from two different working directories, or one store
-  reached through two different symlinks, gives two independent locks and no
-  mutual exclusion.
 
-This is emphatically **not** clustering. `flock(2)` says nothing useful over
-NFS, so sharing a cadir or a SQLite file between hosts remains unsupported on
-these backends whatever the locking does — use an HA backend for that. The
-scope is unchanged: it is still one active `openvox-ca` per store.
+Within a single instance the per-lock-name `flock(2)` coordination added for
+`filesystem` and `sqlite` still applies: a command that is not refused outright
+waits for the named lock it needs and then fails if it cannot get it, logging
+`Waiting for the CA lock: another process on this host holds it` the first time
+it is refused, so a command that pauses is distinguishable from one that has
+hung.
 
-One consequence is worth knowing before running an issuing command beside a
-live server. `SameHostLocker` excludes another process per lock *name*, and the
-inventory append takes no cluster lock of its own — it is serialised by a
-process-local mutex. Two processes issuing for **different** subjects therefore
-hold different `subject:<name>` locks, and can still interleave an append with
-its integrity update, leaving an integrity value covering an inventory that
-never existed — which the *next* start rejects.
+### If you run two anyway
 
-This is not a tracked defect, because **two processes writing to one filesystem
-store is not a supported configuration**. The filesystem backend is single-node
-by design and the supported shape is one active `openvox-ca` per store, so stop
-the server before issuing certificates from a second process — the advice this
-section otherwise makes optional. A deployment that genuinely needs concurrent
-writers wants a structured backend, where the entry and its integrity head are
-written in one step: SQL in one transaction, redis in one atomic script, etcd
-in one transaction.
-[#275](https://github.com/voxpupuli/openvox-ca/issues/275) would enforce the
-rule rather than document it — a cadir-wide lock so a second instance cannot
-start — and if it lands this warning goes away rather than needing a rewrite.
+The damage is not limited to the stale caches above. `SameHostLocker` excludes
+another process per lock *name*, and the inventory append takes no cluster lock
+of its own — it is serialised by a process-local mutex. Two processes issuing
+for **different** subjects therefore hold different `subject:<name>` locks, and
+can still interleave an append with its integrity update, leaving an integrity
+value covering an inventory that never existed — which the *next* start rejects.
+
+That is not a tracked defect, because it describes a configuration that is not
+supported rather than a bug in one that is. Note *why* it is not one, because
+the distinction decides whether this paragraph is still worth reading: it is
+closed by **scope**, not by mechanism. Nothing makes the interleave impossible —
+the same-host locking work did not close it and was never going to — so the
+rule, and the store lock that holds operators to it, are the whole of the
+protection. Stop the server before issuing certificates from a second process.
+
+A deployment that genuinely needs concurrent writers wants a structured backend,
+where the entry and its integrity head are written in one step: SQL in one
+transaction, redis in one atomic script, etcd in one transaction. On those
+backends concurrent writers are the supported case, and this whole section is
+moot.
 
 ---
 
@@ -183,11 +238,19 @@ against a live store](#running-a-second-process-against-a-live-store).
 Two things to expect of them. There is one per distinct lock name, and that
 **includes one per subject**, so on a large fleet the directory holds roughly as
 many files as `signed/` and never shrinks — retiring a node with
-`openvox-ca-ctl clean` removes its certificate, not its lock file. And the files
-are always empty whether the lock is held or not, so their contents tell you
-nothing; whether a lock is held is visible only to `fuser`/`lsof`. Do not delete
-them while anything may be using the store — see the deletion hazard in
-[locking and concurrency](development/locking.md). Sweeping them while
+`openvox-ca-ctl clean` removes its certificate, not its lock file.
+
+And with one exception their contents tell you nothing: the per-name lock files
+are empty whether the lock is held or not, and whether one is held is visible
+only to `fuser`/`lsof`. The exception is the store-wide instance lock, which
+records the process holding it — binary name, pid, host and the time it started
+— so that a refused second instance can name it. A non-empty lock file is
+therefore normal and is **not** a sign of corruption; the record may equally
+well name a process that has since exited, because the file outlives every
+holder and the kernel releases the lock without erasing it.
+
+Do not delete them while anything may be using the store — see the deletion
+hazard in [locking and concurrency](development/locking.md). Sweeping them while
 everything is stopped is safe, and backing them up is harmless.
 
 ### Configuration
@@ -567,8 +630,11 @@ only; bootstrap against a scratch directory, then point a SQLite-backed
 `openvox-ca` at a fresh database.
 
 Alongside the database, `openvox-ca` keeps a hidden `.<database>.locks/`
-directory — `.ca.db.locks/` for the DSN above — holding the empty lock files
-that stop a second process on the host writing behind a running server's back.
+directory — `.ca.db.locks/` for the DSN above — holding the lock files that stop
+a second process on the host writing behind a running server's back, and the
+store-wide lock that refuses a second instance outright. They are empty but for
+that last one, which records its holder; see the note under [the filesystem
+backend](#filesystem-backend-default).
 The database file itself is never locked this way; SQLite locks that. See
 [Running a second process against a live
 store](#running-a-second-process-against-a-live-store).
@@ -870,12 +936,16 @@ honoured on both ends.
 
 Notes:
 
-- **Stop the server first.** Run `migrate` while no `openvox-ca` is serving
-  either backend, so the copy sees a consistent snapshot. It no longer races one
-  that is: `migrate` takes the `bootstrap` lock cross-process on every backend
-  and applies no timeout, so beside a live server it logs one `Waiting for the
-  CA lock` line and waits indefinitely. See [running a second process against a
-  live store](#running-a-second-process-against-a-live-store).
+- **Stop the server first**, on both ends. Run `migrate` while no `openvox-ca`
+  is serving either backend, so the copy sees a consistent snapshot. It does not
+  race one that is, and it no longer waits for one either: on a backend that
+  supports a single running instance it is refused at once, naming the process
+  holding the store, for the source as well as the destination — reading a live
+  store still copies an inventory the server is appending to. Pointing
+  `--source-config` and `--dest-config` at the same store is refused for the
+  same reason, rather than waiting for ever on a lock it has already taken
+  itself. See [running a second process against a live
+  store](#running-a-second-process-against-a-live-store).
 - **Overwrite protection.** `migrate` refuses to write into a destination that
   already holds a CA certificate. Pass `--force` to overwrite it.
 - **Re-runnable.** The copy is idempotent per item; an interrupted run can be
@@ -893,7 +963,7 @@ Notes:
 | CA key exposure | local file | in DB unless `ca_key_file` set | in DB unless `ca_key_file` set | in etcd unless `ca_key_file` set | in Redis unless `ca_key_file` set |
 | Backup/restore | tar `<cadir>/` | copy `.db` (+ WAL) + local dirs | DB dump + local dirs | etcd snapshot + local dirs | RDB/AOF + local dirs |
 | Cross-node consistency | single node | single node | strong | strongest | strong (narrow failover window) |
-| Two processes, one host | coordinated (`flock`) | coordinated (`flock`) | coordinated (cluster lock) | coordinated (cluster lock) | coordinated (cluster lock) |
+| Second instance, same store | refused (`flock`) | refused (`flock`) | supported | supported | supported |
 | Drop-in for OpenVox/Puppet Server CA | yes | no (key paths change) | no (key paths change) | no (key paths change) | no (key paths change) |
 
 > **If you publish an upstream CRL chain**, note that `openvox-ca-ctl import`
