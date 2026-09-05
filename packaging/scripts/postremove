@@ -1,0 +1,25 @@
+#!/bin/sh
+#
+# Shared postremove for the deb and the rpm.
+#
+# What it does NOT do is the point of it. The `puppet` account stays, and so
+# does everything under /etc/puppetlabs/puppet/ssl. Both are shared with
+# openvox-agent and openvox-server, and both hold or own the CA's private key
+# and its issued certificates. A package that deleted either would take an
+# estate's trust root with it on an `apt remove`, and might take another
+# product's account while it was there.
+
+set -eu
+
+# Where systemd's runtime directory lives. Overridable from the environment for
+# the same reason first-boot's roots are, and with the same caveat: nothing in
+# the packages sets it, and neither dpkg nor rpm passes an environment, so an
+# installed system always takes the default. It exists so a test can assert
+# what this script does on a machine that has no systemd -- without it the
+# systemd branch is unreachable off a Linux host, and a table asserting "acts
+# on a removal, not on an upgrade" could only ever check the second half.
+SYSTEMD_RUNTIME="${OPENVOX_CA_SYSTEMD_RUNTIME:-/run/systemd/system}"
+
+if [ -d "$SYSTEMD_RUNTIME" ]; then
+	systemctl daemon-reload >/dev/null 2>&1 || :
+fi
