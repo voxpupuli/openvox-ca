@@ -696,6 +696,14 @@ func (s *Server) handlePutRequest(w http.ResponseWriter, r *http.Request) {
 			// Returning 409 here causes the node (e.g. openvox-agent) to treat the
 			// submission as fatal and abort the run entirely.
 			w.WriteHeader(http.StatusOK)
+		} else if errors.Is(err, ca.ErrDisallowedSubjectAltNames) {
+			// Policy refusal, not a fault: the CSR is well-formed but asks for
+			// names it may not have. 400 rather than 500 so the agent stops
+			// rather than retrying a request that can never succeed, and the
+			// sentinel's own message rather than err.Error() so the response
+			// stays generic — which entries were refused is in the CA's log.
+			slog.Warn("SaveRequest refused: disallowed subject alternative names", "subject", subject)
+			http.Error(w, ca.ErrDisallowedSubjectAltNames.Error(), http.StatusBadRequest)
 		} else if csrValidationError(err) {
 			// Client-actionable validation failure (malformed or mis-signed CSR,
 			// or CN/subject mismatch). The message is path-free and useful to the

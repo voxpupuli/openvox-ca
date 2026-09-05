@@ -232,6 +232,17 @@ var ErrForeignCertificate = errors.New("certificate was not issued by this CA")
 // certificate is usually a topology or migration problem.
 var ErrRenewalSubjectMismatch = errors.New("presented certificate is for a different subject")
 
+// ErrDisallowedSubjectAltNames is returned when a submitted CSR requests
+// Subject Alternative Names that the AllowSubjectAltNames policy does not
+// permit.
+//
+// The message is deliberately generic. It names neither the entries refused nor
+// anything else the requester supplied: the specifics go to the CA's log, where
+// an operator can read them and the requester cannot. A refusal that listed them
+// back would double as an oracle for which names this CA will and will not
+// issue, on an endpoint reachable before any certificate has been granted.
+var ErrDisallowedSubjectAltNames = errors.New("CSR requests subject alternative names that are not allowed; set allow_subject_alt_names to permit them")
+
 // assertOwnCertificate proves that cert was issued by this CA, and is the
 // issuer half of the gate on both renewal paths. The revocation half is
 // refuseIfRevoked, which runs immediately after it and re-reads the CRL from
@@ -289,7 +300,7 @@ func (c *CA) Sign(ctx context.Context, subject string) ([]byte, error) {
 	err := c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		pem, err := c.signWithDuration(ctx, subject, 0)
+		pem, err := c.signWithDuration(ctx, subject, 0, nil)
 		if err != nil {
 			return err
 		}
@@ -312,7 +323,7 @@ func (c *CA) SignWithTTL(ctx context.Context, subject string, ttl time.Duration)
 	err := c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		pem, err := c.signWithDuration(ctx, subject, ttl)
+		pem, err := c.signWithDuration(ctx, subject, ttl, nil)
 		if err != nil {
 			return err
 		}
@@ -325,13 +336,126 @@ func (c *CA) SignWithTTL(ctx context.Context, subject string, ttl time.Duration)
 // sign is the internal (unlocked) signing implementation using the default TTL.
 // c.mu must be held by the caller.
 func (c *CA) sign(ctx context.Context, subject string) ([]byte, error) {
-	return c.signWithDuration(ctx, subject, 0)
+	return c.signWithDuration(ctx, subject, 0, nil)
+}
+
+// sanStrings renders a SAN set as canonical "type:value" strings, so entries of
+// different kinds can be compared and reported as one set.
+//
+// Only DNS names are case-folded, because only DNS names are case-insensitive
+// by specification. Email local-parts and URI paths are not, so they are
+// compared verbatim: over-folding here would make two entries that a TLS peer
+// treats as different compare equal, and every such comparison in this file
+// decides whether something is already permitted. Where the normalisation is
+// unsure, it must say "different" and let the gate refuse. A URI is compared on
+// its unnormalised String() for that reason: two spellings of one resource read
+// as two names, and the gate refuses rather than guesses.
+//
+// IP addresses are the deliberate exception, because net.IP.String() is
+// canonical: a baseline holding 192.0.2.1 matches a request for
+// ::ffff:192.0.2.1. Those are one address, and equating them only ever carries
+// forward a name the presented certificate already had.
+func sanStrings(dns []string, ips []net.IP, emails []string, uris []*url.URL) []string {
+	out := make([]string, 0, len(dns)+len(ips)+len(emails)+len(uris))
+	for _, d := range dns {
+		out = append(out, "DNS:"+strings.ToLower(d))
+	}
+	for _, ip := range ips {
+		out = append(out, "IP:"+ip.String())
+	}
+	for _, e := range emails {
+		out = append(out, "email:"+e)
+	}
+	for _, u := range uris {
+		out = append(out, "URI:"+u.String())
+	}
+	return out
+}
+
+// maxLoggedSANs bounds how many refused entries reach a log record. The set is
+// requester-supplied and a CSR can carry a great many of them; the operator
+// needs enough to recognise what was asked for, not all of it.
+const maxLoggedSANs = 10
+
+// checkSubjectAltNames enforces the AllowSubjectAltNames policy against a
+// submitted CSR. It is the single gate for every path that signs one, which is
+// why it lives on signWithDuration's doorstep rather than at an entry point.
+//
+// baseline, when non-nil, is the certificate this request renews. SANs it
+// already carries were vetted when it was issued, so they are carried forward
+// rather than re-judged: without that, turning the policy on would strand
+// exactly the nodes it was turned on for — a certificate legitimately holding
+// SANs could never be renewed, because its own CSR would be refused. Only
+// entries the presented certificate does not already have face the gate, so a
+// renewal cannot be used to launder a new name past it.
+//
+// A DNS entry equal to the subject never counts against a CSR, per RFC 2818
+// §3.1 (upstream's SERVER-2338): an agent that puts its own certname in the SAN
+// set is complying with the standard, not asking for anything. It is exempt
+// wherever it appears rather than only when it appears alone — a CSR asking for
+// its own name beside another is refused for the other one, not for its own.
+// That is distinct from PromoteCNToSAN, which adds that entry when a CSR
+// carries none; this tolerates it when the CSR carries it itself.
+func (c *CA) checkSubjectAltNames(subject string, csr *x509.CertificateRequest, baseline *x509.Certificate) error {
+	if c.AllowSubjectAltNames {
+		return nil
+	}
+	requested := sanStrings(csr.DNSNames, csr.IPAddresses, csr.EmailAddresses, csr.URIs)
+	if len(requested) == 0 {
+		return nil
+	}
+
+	// Unlike upstream, which reads a CSR's SANs through a helper that
+	// enumerates only DNS and IP names — so an email- or URI-only CSR reads as
+	// having none and passes its gate untouched — this covers all four kinds
+	// crypto/x509 parses.
+	//
+	// That coverage is enforcement only, and stops at the short-circuit above.
+	// signWithDuration threads nothing but DNS names onto the certificate, so
+	// with the policy ON a CSR requesting an IP, email or URI SAN signs and
+	// loses it silently — #241's defect, not something this gate repairs. What
+	// four-kind coverage buys is that with the policy OFF such a request is
+	// refused rather than quietly trimmed. When #241 lands and all four kinds
+	// are carried through, this comment stops needing the qualification.
+	own := "DNS:" + strings.ToLower(subject)
+	carried := make(map[string]struct{})
+	if baseline != nil {
+		for _, name := range sanStrings(baseline.DNSNames, baseline.IPAddresses, baseline.EmailAddresses, baseline.URIs) {
+			carried[name] = struct{}{}
+		}
+	}
+
+	disallowed := make([]string, 0, len(requested))
+	for _, name := range requested {
+		if name == own {
+			continue
+		}
+		if _, ok := carried[name]; ok {
+			continue
+		}
+		disallowed = append(disallowed, name)
+	}
+	if len(disallowed) == 0 {
+		return nil
+	}
+
+	logged := disallowed
+	if len(logged) > maxLoggedSANs {
+		logged = logged[:maxLoggedSANs]
+	}
+	slog.Warn("Refusing CSR: requested subject alternative names are not allowed",
+		"subject", subject,
+		"disallowed", logged,
+		"disallowed_count", len(disallowed),
+		"renewal", baseline != nil,
+		"setting", "allow_subject_alt_names")
+	return ErrDisallowedSubjectAltNames
 }
 
 // signWithDuration is the actual internal signing implementation.
 // ttl=0 means use the default certValidity.
 // c.mu must be held by the caller.
-func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Duration) ([]byte, error) {
+func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Duration, baseline *x509.Certificate) ([]byte, error) {
 	// Fail fast on an uninitialised CA (caller skipped Init(), or it failed)
 	// before we bother reading a CSR from storage, so Sign() returns a clear
 	// ErrNotInitialized rather than a misleading "CSR not found". The actual
@@ -381,6 +505,15 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 				return nil, fmt.Errorf("found extensions that disallow signing: [2.5.29.19]")
 			}
 		}
+	}
+
+	// SECURITY: refuse a CSR that names anything it has not been permitted to
+	// name, before any of it reaches a certificate template. TLS peers match on
+	// the SAN set, so an unconstrained request here is a request to be somebody
+	// else — including this CA's own server name.
+	// NIST 800-53: AC-6 (Least Privilege), IA-5(2) (PKI-Based Authentication)
+	if err := c.checkSubjectAltNames(subject, csr, baseline); err != nil {
+		return nil, err
 	}
 
 	dnsNames := csr.DNSNames
@@ -1062,7 +1195,20 @@ func (c *CA) Renew(ctx context.Context, subject string, csrPEM []byte, presented
 			if err := c.Storage.SaveCSR(ctx, subject, csrPEM); err != nil {
 				return nil, fmt.Errorf("saving renewal CSR: %w", err)
 			}
-			return c.signWithDuration(ctx, subject, 0)
+			// The certificate being renewed is the baseline: SANs it already
+			// carries are carried forward, anything new faces the gate.
+			//
+			// SECURITY: that is only safe because presentedCert has been
+			// authenticated by the time it gets here — issued by us, not
+			// revoked, and for this subject. The revocation half of that is
+			// asked twice, and the second ask (above, inside this lock) is what
+			// this depends on: the first answers before the lock is acquired,
+			// so on its own a revocation landing in that window would be
+			// outrun, and a revoked agent's SAN set would become a baseline
+			// that carries its names onto a fresh certificate. Do not collapse
+			// the two checks into one on the grounds that they look redundant.
+			// NIST 800-53: IA-5(2) (PKI-Based Authentication), AC-3 (Access Enforcement)
+			return c.signWithDuration(ctx, subject, 0, presentedCert)
 		}()
 		if err != nil {
 			return err

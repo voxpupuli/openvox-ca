@@ -140,6 +140,32 @@ type CA struct {
 	// handle the SAN extension.
 	PromoteCNToSAN bool
 
+	// AllowSubjectAltNames, when true, lets a submitted CSR request Subject
+	// Alternative Names of its own. When false (the default), a CSR carrying any
+	// SAN other than a lone DNS entry equal to its own certname is refused at
+	// signing time rather than being trimmed or honoured.
+	//
+	// SECURITY: TLS peers match the name they dialled against the SAN set, not
+	// the Common Name, so an unconstrained SAN request is a request to be
+	// somebody else. A node autosigned as web01 asking for
+	// DNS:puppet.example.com would otherwise be handed a certificate that
+	// impersonates the CA server to everything trusting this PKI. Defaults to
+	// false to match OpenVox Server's own allow-subject-alt-names, which an
+	// operator arriving from Puppet Server expects to exist and to be off.
+	// NIST 800-53: AC-6 (Least Privilege), IA-5(2) (PKI-Based Authentication)
+	//
+	// Enforcement only: it decides what a CSR may *ask* for, not what is
+	// issued. Only DNS names are carried onto a certificate today, so with this
+	// set to true a request for an IP, email or URI SAN is signed and the SAN
+	// dropped — see #241, which adds the carry-through this gate assumes.
+	//
+	// This governs SANs a *client* asks for. It has no bearing on the offline
+	// minting path, where the names come from an operator's --dns flags rather
+	// than from a request: GenerateWithOptions calls issueLeafLocked directly
+	// and so keeps the filtering "exactly where it belongs -- on the path that
+	// parses network input", as its own doc comment puts it.
+	AllowSubjectAltNames bool
+
 	// NoBootstrap makes Init refuse to create a new CA when none is found,
 	// rather than bootstrapping one. For tools that operate on an existing CA
 	// and have nothing sensible to do without it: minting a fresh root because
@@ -400,11 +426,13 @@ type CA struct {
 
 func New(s *storage.StorageService, autosignCfg AutosignConfig, hostname string) *CA {
 	return &CA{
-		Storage:           s,
-		AutosignConfig:    autosignCfg,
-		Hostname:          hostname,
-		CAPathLength:      -1,   // unconstrained by default
-		PromoteCNToSAN:    true, // on by default; RFC 2818 deprecates CN-only certs
+		Storage:        s,
+		AutosignConfig: autosignCfg,
+		Hostname:       hostname,
+		CAPathLength:   -1,   // unconstrained by default
+		PromoteCNToSAN: true, // on by default; RFC 2818 deprecates CN-only certs
+		// AllowSubjectAltNames is deliberately left false: a CSR may not name
+		// itself anything it likes. See the field's comment.
 		RevokeOnAutoRenew: true, // on by default; only the newest serial should be valid
 		serialIndex:       make(map[string]string),
 		ocspCache:         make(map[string]ocspCacheEntry),

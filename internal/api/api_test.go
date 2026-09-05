@@ -1295,6 +1295,45 @@ var _ = Describe("API Workflow", func() {
 		})
 	})
 
+	Context("CSR requesting disallowed subject alternative names", func() {
+		// The branch only fires where SaveRequest itself signs, so this needs an
+		// autosigning CA rather than the suite's manual-signing fixture. That is
+		// also the configuration the refusal exists for: with autosign off an
+		// operator sees the CSR before it becomes a certificate.
+		autosignMux := func() http.Handler {
+			GinkgoHelper()
+			dir := GinkgoT().TempDir()
+			autoStore := storage.New(dir)
+			autoCA := ca.New(autoStore, ca.AutosignConfig{Mode: "true"}, "puppet.test")
+
+			ctx := context.Background()
+			Expect(autoStore.EnsureDirs(ctx)).To(Succeed())
+			Expect(autoStore.SaveCAKey(ctx, cachedKeyPEM)).To(Succeed())
+			Expect(autoStore.SaveCACert(ctx, cachedCrtPEM)).To(Succeed())
+			Expect(autoStore.UpdateCRL(ctx, cachedCrlPEM)).To(Succeed())
+			Expect(autoStore.WriteSerial(ctx, "0001")).To(Succeed())
+			Expect(autoStore.TouchInventory(ctx)).To(Succeed())
+			Expect(autoCA.Init(ctx)).To(Succeed())
+			return api.New(autoCA).Routes()
+		}
+
+		It("should return 400 without echoing the refused name back", func() {
+			// 400 rather than 500: the CSR is well-formed and the request can
+			// never succeed, so the agent should stop rather than retry.
+			csrPEM := generateCSRWithSANs("san-refused-node", []string{"puppet.example.com"})
+
+			req := httptest.NewRequest("PUT", "/certificate_request/san-refused-node", bytes.NewReader(csrPEM))
+			rr := httptest.NewRecorder()
+			autosignMux().ServeHTTP(rr, req)
+
+			Expect(rr.Code).To(Equal(http.StatusBadRequest))
+			// Generic by design: this endpoint is unauthenticated, so a refusal
+			// must not tell a caller which names the CA would have issued.
+			Expect(rr.Body.String()).To(ContainSubstring(ca.ErrDisallowedSubjectAltNames.Error()))
+			Expect(rr.Body.String()).NotTo(ContainSubstring("puppet.example.com"))
+		})
+	})
+
 	Context("PUT /certificate_status sign when no CSR exists", func() {
 		It("should return 404 when trying to sign a subject with no pending CSR", func() {
 			body, _ := json.Marshal(api.PutStatusBody{DesiredState: "signed"})
