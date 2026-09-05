@@ -78,6 +78,10 @@ type Collector struct {
 	supersedeFailures     *prometheus.Desc
 	supersedePending      *prometheus.Desc
 
+	signingInFlight *prometheus.Desc
+	signingLimit    *prometheus.Desc
+	signingShed     *prometheus.Desc
+
 	caInfo      *prometheus.Desc
 	caNotBefore *prometheus.Desc
 	caNotAfter  *prometheus.Desc
@@ -144,6 +148,29 @@ func NewCollector(c *ca.CA) *Collector {
 				"responder answers from — an unreadable inventory, or one whose integrity MAC no "+
 				"longer verifies. While it is rising, this replica answers 'unknown' for "+
 				"certificates signed elsewhere since the last successful pass.",
+			nil, nil),
+		signingInFlight: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "ca_signing", "in_flight"),
+			"CA-key signatures in flight right now, across certificate issuance, CRL re-signing and "+
+				"the OCSP responder together — they share one bound because they share one key. "+
+				"Read it against puppetca_ca_signing_limit: what matters is the headroom, not the "+
+				"absolute number. Always 0 when signing is unbounded.",
+			nil, nil),
+		signingLimit: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "ca_signing", "limit"),
+			"Configured ceiling on concurrent CA-key signatures (ca_signing_concurrency). 0 means "+
+				"unbounded, in which case an unauthenticated caller can drive as many concurrent "+
+				"signatures against the CA key as it can open connections.",
+			nil, nil),
+		signingShed: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "ca_signing", "shed_total"),
+			"Total OCSP responses refused with RFC 6960 tryLater because the CA-key signing bound "+
+				"was full. Only the OCSP responder sheds; issuance and CRL re-signing queue for a "+
+				"slot instead and never appear here. A rising value is the bound working rather than "+
+				"a fault, but it means verifiers are being turned away, so it asks whether the limit "+
+				"matches this deployment's signer — sustained shedding on a signer with capacity to "+
+				"spare means the limit is too low, while shedding under an unauthenticated flood is "+
+				"the protection this metric exists to make visible.",
 			nil, nil),
 		ocspIndexSerials: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "ocsp_index", "serials"),
@@ -308,6 +335,9 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.crlCachedNumber
 	ch <- c.ocspIndexSyncFailures
 	ch <- c.ocspIndexSerials
+	ch <- c.signingInFlight
+	ch <- c.signingLimit
+	ch <- c.signingShed
 	ch <- c.caInfo
 	ch <- c.caNotBefore
 	ch <- c.caNotAfter
@@ -358,6 +388,15 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		float64(c.ca.SerialIndexSize()))
 	ch <- prometheus.MustNewConstMetric(c.supersedeFailures, prometheus.CounterValue,
 		float64(c.ca.SupersedeFailures()))
+	// Emitted alongside the failure counters, and for the same reason: these
+	// are in-process state, so an unreadable storage backend must not blind an
+	// operator to the responder shedding. The limit is emitted even when it is
+	// 0 — "unbounded" is exactly the state worth being able to alert on.
+	inFlight, limit := c.ca.SigningInFlight()
+	ch <- prometheus.MustNewConstMetric(c.signingInFlight, prometheus.GaugeValue, float64(inFlight))
+	ch <- prometheus.MustNewConstMetric(c.signingLimit, prometheus.GaugeValue, float64(limit))
+	ch <- prometheus.MustNewConstMetric(c.signingShed, prometheus.CounterValue,
+		float64(c.ca.SigningShedTotal()))
 	if cached, ok := c.ca.CachedCRLNumber(); ok {
 		num, _ := new(big.Float).SetInt(cached).Float64()
 		ch <- prometheus.MustNewConstMetric(c.crlCachedNumber, prometheus.GaugeValue, num)

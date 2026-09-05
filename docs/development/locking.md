@@ -372,6 +372,21 @@ written as two.
   nesting site.
 - Two *different* subject locks are never held at once (bulk operations like
   `SignMultiple` loop, taking one at a time).
+- The **CA-key signing bound** (`signSlots`, see
+  [signbound.go](../../internal/ca/signbound.go)) is not one of the three tiers
+  and does not appear in the chain above, but it is acquired *inside* `c.mu` on
+  the issuance and CRL paths and so belongs here. The one-way rule is
+  `c.mu` → signing slot: a slot is never held while acquiring `c.mu`, and
+  nothing acquires a second slot while holding one.
+
+  That nesting is only safe because slot occupancy is bounded. The OCSP
+  responder refuses rather than queues, so it cannot build a line an issuance
+  under `c.mu` would have to join; and both acquisitions honour `ctx`, so a
+  caller that has gone away stops waiting rather than holding `c.mu` on nobody's
+  behalf. Let the OCSP path queue here, or drop the `ctx`, and an
+  unauthenticated flood stalls every `c.mu` reader — the same process-wide stall
+  [#197](https://github.com/voxpupuli/openvox-ca/issues/197) removed, reached
+  by a different queue.
 - `CA.Init` inverts the order (it holds `c.mu` while acquiring **two**
   distributed locks in turn: `hmac-key`, via `InitHMAC` → `EnsureHMACKey` on a
   cold start, and then `bootstrap`). They are sequential, never nested. The
@@ -701,10 +716,50 @@ state when the document was last updated and is not guaranteed exhaustive.
   shape, and the #183 entry below says why the index sync has to use it —
   that path cannot re-check its own predicate, and this one can.
 
-- [#274](https://github.com/voxpupuli/openvox-ca/issues/274) — unbounded
+- ~~[#274](https://github.com/voxpupuli/openvox-ca/issues/274) — unbounded
   concurrent signing on `/ocsp`, opened by the #197 fix above. Recorded here
   because closing one gap opened another, and a known-gaps list that only
-  records what was closed is misleading.
+  records what was closed is misleading.~~ Fixed: `ca_signing_concurrency` caps
+  concurrent CA-key signatures across all three signing paths together, since
+  they share one key. The two halves behave differently under it, and that
+  asymmetry is the fix rather than an implementation detail. Issuance and CRL
+  re-signing **queue** for a slot; the OCSP responder **sheds**, answering RFC
+  6960 `tryLater` after a bounded wait.
+
+  Shedding on the public path is not a preference. Letting `/ocsp` queue would
+  have converted unbounded signing into unbounded queueing — and worse, it
+  would have reinstated the very stall #197 removed, by a different route:
+  `issueLeafLocked` and `signCRLLocked` acquire their slot *while holding
+  `c.mu`*, so an anonymous flood owning every slot would block a `c.mu` holder
+  and stall every reader behind it, including the revocation check on the
+  authentication path. Both acquisitions also honour `ctx`. Remove either
+  property and the stall returns; the invariant is recorded under **Lock
+  ordering** above.
+
+  The default is `max(4, GOMAXPROCS)` and is a **safe ceiling, not a tuning** —
+  its only job is to make the number finite. The reasoning below for why #197
+  declined to pick one still holds: the right size is a property of the
+  deployment's signer, so an operator with a remote signer is told to lower it
+  to that signer's capacity, which openvox-ca cannot discover.
+
+  The metric gap named below is closed with it: `puppetca_ca_signing_in_flight`,
+  `puppetca_ca_signing_limit` and `puppetca_ca_signing_shed_total`.
+
+  What that does **not** reach: the bound is per process, so N replicas permit
+  N × the limit against one shared signer; it caps CA-key work and not the
+  connections, handshakes and goroutines carrying the requests; and
+  `RemoteSigner.Sign`'s new two-minute deadline bounds *the caller's wait, not
+  the signer's work* — the RPC layer has no cancellation, so an abandoned call
+  leaves the child still signing. That deadline is what lets a slot come back
+  from a wedged signer, which is what makes the cap a limit rather than an
+  outage; it does not reduce the load on the signer itself. The coalescing
+  sub-bullet at the end of this entry is also still open.
+
+  **The rest of this entry is retained as the reasoning, and is now history in
+  two places**: "The missing half is a cap on concurrent signing … deliberately
+  not attempted" describes what #197 left rather than what is missing today,
+  and "No metric covers either of these" is no longer true of concurrent
+  signing (it remains true of the raced cache write).
 
   Before #197, `c.mu` capped CA-key use at **one signature in flight
   process-wide**: every `CAKey.Sign` call site — `issueLeafLocked`,

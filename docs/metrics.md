@@ -227,6 +227,46 @@ so it stays current by itself".
 > across, and import discards duplicates of our own. Treat one as a chain to
 > inspect.
 
+### CA-key signing bound
+
+| Metric | Description |
+| --- | --- |
+| `puppetca_ca_signing_in_flight` | CA-key signatures in flight right now, across certificate issuance, CRL re-signing and the OCSP responder together — they share one bound because they share one key. Always `0` when signing is unbounded. |
+| `puppetca_ca_signing_limit` | The configured ceiling (`ca_signing_concurrency`). `0` means unbounded. |
+| `puppetca_ca_signing_shed_total` | Counter of OCSP responses refused with RFC 6960 `tryLater` because the bound was full. Resets to `0` on process restart. |
+
+Read the first two together: in-flight alone cannot say whether 8 concurrent
+signatures is comfortable or is the ceiling. Headroom is the quantity worth
+graphing.
+
+```promql
+puppetca_ca_signing_in_flight / puppetca_ca_signing_limit > 0.8
+```
+
+`puppetca_ca_signing_shed_total` rising is **not by itself a fault** — it is the
+bound doing the job it exists for, and on an unauthenticated `/ocsp` flood it is
+the protection working. What it asks is whether the limit matches the
+deployment's signer, and the two answers look different:
+
+- Shedding while `puppetca_ca_signing_in_flight` sits at the limit and the
+  signer has capacity to spare → the limit is too low. Raise it.
+- Shedding in bursts that correlate with request volume rather than with
+  issuance → something is driving `/ocsp` harder than this responder is sized
+  for. That is either growth to provision for or a caller to rate-limit
+  upstream.
+
+`puppetca_ca_signing_limit` is worth an alert of its own where an operator
+intends signing to be bounded, because `0` is a legitimate configured value and
+is indistinguishable at a glance from a bound that is simply working:
+
+```promql
+puppetca_ca_signing_limit == 0
+```
+
+All three are per-process. The bound itself is per-process too, so N replicas
+against one shared OpenBao Transit key permit N × the limit against that key —
+sum the series across the job to see what the signer actually faces.
+
 ### OCSP responder
 
 | Metric | Description |

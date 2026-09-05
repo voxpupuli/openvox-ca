@@ -553,7 +553,23 @@ func (c *CA) issueLeafLocked(ctx context.Context, subject string, subjectName pk
 	// round trip, and under key isolation no RPC beyond the one Sign this call
 	// already makes.
 	// NIST 800-53: SC-12 (Cryptographic Key Establishment and Management)
-	certBytes, err := x509.CreateCertificate(rand.Reader, template, c.CACert, pubKey, c.CAKey)
+	// Take a CA-key signing slot for the signature below. Issuance queues for
+	// one rather than shedding: the client asked for this certificate and is
+	// authenticated, so refusing it to protect an unauthenticated responder
+	// would be the wrong way round. The wait honours ctx, so a client that has
+	// given up does not leave this holding c.mu on its behalf — see
+	// signbound.go, where that is half of what makes waiting here safe.
+	if err := c.acquireSigningSlot(ctx); err != nil {
+		return nil, fmt.Errorf("waiting for a CA signing slot to sign for %s: %w", subject, err)
+	}
+	// Released by a deferred call inside this closure; see releaseSigningSlot.
+	// The same shape rule 4 of docs/development/locking.md prescribes for the
+	// mutexes, and for the same reason: a panic must not wedge the thing it was
+	// holding.
+	certBytes, err := func() ([]byte, error) {
+		defer c.releaseSigningSlot()
+		return x509.CreateCertificate(rand.Reader, template, c.CACert, pubKey, c.CAKey)
+	}()
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign certificate for %s: %w", subject, err)
 	}

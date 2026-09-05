@@ -72,16 +72,32 @@ func (s *Server) handleOCSP(w http.ResponseWriter, r *http.Request) {
 
 	answer, err := s.CA.AnswerOCSP(r.Context(), reqDER)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/ocsp-response")
-		if errors.Is(err, ca.ErrInternal) {
+		status, body := ocspErrorResponse(err)
+		switch status {
+		case http.StatusInternalServerError:
 			slog.Error("OCSP internal error", "error", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write(xocsp.InternalErrorErrorResponse)
-		} else {
+		case http.StatusServiceUnavailable:
+			// Debug, not Warn, and the level is the point. A shed is the bound
+			// working, and this fires once per refused request on an
+			// unauthenticated endpoint — so at Warn an anonymous caller chooses
+			// how much this CA writes to disk, turning a request flood into a
+			// log flood and amplifying exactly the load the bound exists to
+			// shed.
+			//
+			// Nothing is lost by dropping it: puppetca_ca_signing_shed_total
+			// counts every one of these, and the metric is already what the
+			// docs tell operators to alert on. This line only adds which caller
+			// provoked it, which is a debugging question rather than a
+			// monitoring one — so it belongs at the level you turn on when you
+			// are asking it.
+			slog.Debug("OCSP response shed: CA signing concurrency limit reached",
+				"client_ip", clientIP(r))
+		default:
 			slog.Warn("OCSP request error", "error", err)
-			w.WriteHeader(http.StatusBadRequest)
-			w.Write(xocsp.MalformedRequestErrorResponse)
 		}
+		w.Header().Set("Content-Type", "application/ocsp-response")
+		w.WriteHeader(status)
+		w.Write(body)
 		return
 	}
 
@@ -109,4 +125,35 @@ func (s *Server) handleOCSP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.Write(answer.DER)
+}
+
+// ocspErrorResponse maps an AnswerOCSP failure to the HTTP status and the
+// pre-serialised RFC 6960 response body to answer it with.
+//
+// Split out from the handler so the classification can be stated directly. It
+// is the part worth pinning — it decides what a verifier does next — and
+// exercising it through the handler would mean holding a signature open just
+// to observe which constant comes back. (That the bound really engages under
+// concurrent signing is a separate claim, and belongs where it can be shown:
+// internal/ca/signboundrace_test.go.)
+//
+// The three cases say genuinely different things to a verifier:
+//
+//   - tryLater: the responder is at the concurrency its operator configured for
+//     the deployment's signer. Nothing is broken and the request was well
+//     formed; come back (RFC 6960 §2.3).
+//   - internalError: a server fault. A verifier may retry, and an operator has
+//     something to fix.
+//   - malformedRequest: the request itself was bad, and retrying it unchanged
+//     will not help. Never reach for this on a server-side failure — it tells a
+//     verifier not to retry, and records an outage as a client error.
+func ocspErrorResponse(err error) (int, []byte) {
+	switch {
+	case errors.Is(err, ca.ErrSigningBusy):
+		return http.StatusServiceUnavailable, xocsp.TryLaterErrorResponse
+	case errors.Is(err, ca.ErrInternal):
+		return http.StatusInternalServerError, xocsp.InternalErrorErrorResponse
+	default:
+		return http.StatusBadRequest, xocsp.MalformedRequestErrorResponse
+	}
 }

@@ -106,6 +106,18 @@ type serverConfig struct {
 	CRLValidityDays  int `yaml:"crl_validity_days"`  // 0 = built-in default (30 days)
 	CSRRateLimit     int `yaml:"csr_rate_limit"`     // max CSR submissions per IP per minute; 0 disables, -1/unset = built-in default (60)
 
+	// CASigningConcurrency caps concurrent CA-key signatures across issuance,
+	// CRL re-signing and the OCSP responder together. Same three-state
+	// convention as CSRRateLimit: 0 disables the bound (unbounded signing),
+	// -1/unset takes the built-in default, positive values pass through.
+	//
+	// The default is a ceiling rather than a tuning — it exists to stop
+	// unbounded growth, not to match any particular signer. Deployments using
+	// an isolated signer over IPC or ca_key_provider: openbao should set this
+	// to what that signer can actually sustain, which openvox-ca has no way to
+	// discover.
+	CASigningConcurrency int `yaml:"ca_signing_concurrency"`
+
 	// Background CRL refresh keeps the CRL's NextUpdate from lapsing when no
 	// certificates are being revoked. Safe to run on every replica: the work is
 	// serialised on the shared CRL lock, so only one replica re-signs per cycle.
@@ -223,12 +235,14 @@ type serverConfig struct {
 // loading.
 func loadServerConfig(configFile string) (*serverConfig, error) {
 	cfg := &serverConfig{
-		Host:              "0.0.0.0",
-		Port:              8140,
-		CAPathLength:      -1,   // unconstrained; 0 = leaf-only, N = N levels of intermediates
-		CSRRateLimit:      -1,   // unset sentinel; 0 disables, -1 falls back to defaultCSRRateLimit
-		PromoteCNToSAN:    true, // RFC 2818: add CN as SAN when CSR has no SANs
-		RevokeOnAutoRenew: true, // only the newest serial per subject should be valid
+		Host:         "0.0.0.0",
+		Port:         8140,
+		CAPathLength: -1, // unconstrained; 0 = leaf-only, N = N levels of intermediates
+		CSRRateLimit: -1, // unset sentinel; 0 disables, -1 falls back to defaultCSRRateLimit
+		// Same sentinel convention; see resolveSigningConcurrency.
+		CASigningConcurrency: -1,
+		PromoteCNToSAN:       true, // RFC 2818: add CN as SAN when CSR has no SANs
+		RevokeOnAutoRenew:    true, // only the newest serial per subject should be valid
 		// unset sentinel; 0 revokes inside the renewal, -1 falls back to
 		// defaultSupersededCertRevokeAfter
 		SupersededCertRevokeAfterSec: -1,
@@ -593,6 +607,11 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("PUPPET_CA_CSR_RATE_LIMIT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.CSRRateLimit = n
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_SIGNING_CONCURRENCY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.CASigningConcurrency = n
 		}
 	}
 	if v := os.Getenv("PUPPET_CA_ENCRYPT_CA_KEY"); v != "" {

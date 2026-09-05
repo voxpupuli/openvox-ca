@@ -210,6 +210,40 @@ type CA struct {
 	// ExternalSigner, which is used by the frontend instead. See
 	// keyprovider.go.
 	KeyProvider KeyProvider
+
+	// SigningConcurrency caps how many CA-key signatures may be in flight at
+	// once, across issuance, CRL re-signing and the OCSP responder together.
+	// Zero (the type's zero value) means unbounded. Set before calling Init(),
+	// which is what sizes the bound.
+	//
+	// The cap is shared deliberately: there is one key, and what needs bounding
+	// is the load on whatever holds it, not the load on any one endpoint. The
+	// two halves behave differently under it, which is the substance rather
+	// than a detail — issuance and CRL work waits for a slot, the OCSP
+	// responder sheds. See signbound.go for why, and
+	// docs/development/locking.md for what it does and does not protect.
+	//
+	// The right size is a property of the deployment's signer: an in-process
+	// software key, an isolated signer over IPC and an OpenBao Transit key have
+	// very different concurrency envelopes. `openvox-ca serve` resolves an
+	// unset ca_signing_concurrency to a ceiling that is safe rather than tuned;
+	// an operator running a remote signer should lower it to that signer's
+	// capacity.
+	SigningConcurrency int
+
+	// signSlots is the signing bound itself: a token per permitted concurrent
+	// signature. Nil means unbounded, which is what every helper in
+	// signbound.go checks for, so a CA that never had Init called — or one
+	// configured with a non-positive limit — signs exactly as it did before the
+	// bound existed. Sized by initSigningBound.
+	signSlots chan struct{}
+
+	// signWait is how long acquireSigningSlotOrShed waits for a slot before
+	// shedding. Set to ocspSigningWait by initSigningBound; overridden in tests
+	// so a spec that must observe a shed does not spend a real second doing it,
+	// the same seam destructiveOpTracker's now() provides in internal/api.
+	signWait time.Duration
+
 	serialIndex map[string]string         // uppercase hex serial (no leading zeros) → subject; protected by mu
 	ocspCache   map[string]ocspCacheEntry // same key; protected by mu
 	cachedCRL   *x509.RevocationList      // in-memory CRL for auth checks; protected by mu
@@ -390,6 +424,18 @@ type CA struct {
 	// issues its own root. Every CRL in the file is signature-verified against
 	// the stored CA bundle before it is published — see upstreamCRLs.
 	CRLChainFile string
+
+	// signingShed counts OCSP responses refused because the CA-key signing
+	// bound was full for longer than ocspSigningWait. Only the OCSP path can
+	// raise it; issuance and CRL re-signing queue rather than shed, so they
+	// never appear here however long they waited.
+	//
+	// A rising value is the bound working, not a fault — but it is the only
+	// signal that distinguishes "this deployment never approaches its limit"
+	// from "this deployment is refusing revocation-status answers continuously",
+	// and those want very different responses from an operator. Exposed via the
+	// metrics exporter (puppetca_ca_signing_shed_total) for alerting.
+	signingShed atomic.Uint64
 
 	// crlNotify carries a coalesced signal each time the CRL is re-signed (see
 	// signCRLLocked). It is buffered to depth 1 and written non-blockingly, so a

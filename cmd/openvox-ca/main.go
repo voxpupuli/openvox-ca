@@ -34,6 +34,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -185,6 +186,7 @@ func applyCAConfig(myCA *ca.CA, cfg *serverConfig) error {
 	myCA.PromoteCNToSAN = cfg.PromoteCNToSAN
 	myCA.RevokeOnAutoRenew = cfg.RevokeOnAutoRenew
 	myCA.SupersedeAfter = cfg.supersededCertRevokeAfter()
+	myCA.SigningConcurrency = resolveSigningConcurrency(cfg.CASigningConcurrency)
 	myCA.KeyPassphrase = ca.KeyPassphraseConfig{
 		PassphraseFile: cfg.CAKeyPassphraseFile,
 	}
@@ -216,6 +218,68 @@ func resolveCSRRateLimit(configured int) int {
 		return defaultCSRRateLimit
 	}
 	return configured
+}
+
+// minSigningConcurrency is the floor under the built-in CA signing bound.
+// GOMAXPROCS alone would give a single-CPU container a bound of 1, serialising
+// issuance behind the OCSP responder and making a certificate request wait on
+// verifier traffic. Four keeps a small deployment working while staying far
+// below anything that could saturate a signer.
+const minSigningConcurrency = 4
+
+// resolveSigningConcurrency maps a configured CA signing concurrency to the
+// value handed to the CA, following the CSRRateLimit convention exactly: -1
+// ("unset") takes the built-in default, an explicit 0 disables the bound, and
+// positive values pass through.
+//
+// The default is max(4, GOMAXPROCS). Scaling with the CPU count is right for
+// the two backends where a signature is CPU-bound — a software key in process,
+// and the default isolated signer, where it is CPU-bound in the signer child —
+// because past that point extra concurrency buys latency and memory rather
+// than throughput. It is deliberately a safe ceiling and not a tuned value: the
+// right number is a property of the deployment's signer, and for a remote one
+// (ca_key_provider: openbao) an operator should set the limit to that signer's
+// capacity. What the default guarantees is only that the number is finite,
+// which is the property #274 is about.
+func resolveSigningConcurrency(configured int) int {
+	if configured >= 0 {
+		return configured
+	}
+	return max(minSigningConcurrency, runtime.GOMAXPROCS(0))
+}
+
+// warnIfSigningBoundIsCPUDerived says so when the CA signing bound was left
+// unset on a deployment whose signer is reached over the network.
+//
+// The default is CPU-shaped and the work is not. Under `ca_key_provider:
+// openbao` every signature is a round trip to a Transit key, so GOMAXPROCS
+// measures this host's cores and says nothing about what that key — possibly
+// shared with other consumers — can sustain. On a well-provisioned node the
+// derived number is likely far above what the provider wants, and the
+// deployment has no way to notice.
+//
+// Deriving a *different* default instead would be worse: it would invent a
+// number for a capacity openvox-ca cannot discover, which is exactly what #265
+// declined to do and what resolveSigningConcurrency's own doc disclaims. So say
+// it once, plainly, and leave the number to the operator who can measure it.
+//
+// Not warned for the isolated signer, which is the default topology: signing
+// there is CPU-bound in the signer child, so a CPU-derived ceiling is the right
+// shape and lowering it is a tuning rather than a correction.
+//
+// Serve only. The offline commands share applyCAConfig but sign one certificate
+// at a time, so the bound never binds and the warning would be noise.
+func warnIfSigningBoundIsCPUDerived(cfg *serverConfig, resolved int) {
+	if !cfg.UsesOpenBao() || cfg.CASigningConcurrency >= 0 {
+		return
+	}
+	slog.Warn("ca_signing_concurrency is unset, so the CA-key signing bound was derived from this "+
+		"host's CPU count — which says nothing about what an OpenBao Transit key can sustain. "+
+		"Set it to that signer's capacity; the bound is per process, so N replicas permit N times "+
+		"this value against one shared key.",
+		"ca_signing_concurrency", resolved,
+		"derived_from", "GOMAXPROCS",
+		"ca_key_provider", cfg.CAKeyProvider)
 }
 
 func main() {
@@ -251,6 +315,7 @@ func newRootCmd() *cobra.Command {
 		crlURL                  string
 		metricsListen           string
 		csrRateLimit            int
+		caSigningConcurrency    int
 		configFile              string
 		encryptCAKey            bool
 		caKeyPassphraseFile     string
@@ -368,6 +433,9 @@ func newRootCmd() *cobra.Command {
 			}
 			if cmd.Flags().Changed("csr-rate-limit") {
 				cfg.CSRRateLimit = csrRateLimit
+			}
+			if cmd.Flags().Changed("ca-signing-concurrency") {
+				cfg.CASigningConcurrency = caSigningConcurrency
 			}
 			if cmd.Flags().Changed("encrypt-ca-key") {
 				cfg.EncryptCAKey = encryptCAKey
@@ -641,6 +709,7 @@ func newRootCmd() *cobra.Command {
 			if err := applyCAConfig(myCA, cfg); err != nil {
 				return err
 			}
+			warnIfSigningBoundIsCPUDerived(cfg, myCA.SigningConcurrency)
 
 			// SECURITY: In frontend mode, use the remote signer: the CA private
 			// key is never loaded into this process's address space.
@@ -918,6 +987,7 @@ func newRootCmd() *cobra.Command {
 	f.StringVar(&crlURL, "crl-url", "", "CRL distribution point URL to embed in issued certificates (e.g. http://openvox-ca:8140/puppet-ca/v1/certificate_revocation_list/ca)")
 	f.StringVar(&metricsListen, "metrics-listen", "", "Address for the Prometheus metrics exporter (e.g. 127.0.0.1:9140 or :9140); empty disables it. Serves /metrics over plain HTTP on a separate listener; restrict to a trusted network as it reveals node hostnames")
 	f.IntVar(&csrRateLimit, "csr-rate-limit", -1, "Max CSR submissions per IP per minute on the public PUT /certificate_request endpoint (0 disables; unset uses the default of 60)")
+	f.IntVar(&caSigningConcurrency, "ca-signing-concurrency", -1, "Max concurrent CA-key signatures across issuance, CRL re-signing and the OCSP responder (0 disables the bound; unset uses max(4, GOMAXPROCS)). Lower it to a remote signer's capacity")
 	f.BoolVar(&encryptCAKey, "encrypt-ca-key", false, "Encrypt the CA private key at rest (AES-256-GCM + Argon2id); a passphrase is auto-generated if not provided")
 	f.StringVar(&caKeyPassphraseFile, "ca-key-passphrase-file", "", "Path to file containing the CA key passphrase (first line used)")
 	f.BoolVar(&singleProcess, "single-process", false, "Disable CA key isolation (run signer and frontend in a single process)")

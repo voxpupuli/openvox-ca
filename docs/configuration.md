@@ -31,6 +31,7 @@ certificate with no running server.
 | `--encrypt-ca-key` | `false` | Encrypt the CA private key at rest (AES-256-GCM + Argon2id). See [CA key security](ca-key-security.md) |
 | `--ca-key-passphrase-file` | `""` | Path to file containing the CA key passphrase (first line used) |
 | `--csr-rate-limit` | `60` | Max CSR submissions per IP per minute on the public `PUT /certificate_request` endpoint (0 disables) |
+| `--ca-signing-concurrency` | `max(4, GOMAXPROCS)` | Max concurrent CA-key signatures across issuance, CRL re-signing and the OCSP responder (0 disables the bound) |
 | `--single-process` | `false` | Disable CA key isolation (run signer and frontend in a single process) |
 | `--storage-backend` | `filesystem` | Storage backend for CA state: `filesystem`, `sqlite`, `postgres`, `mysql`, `etcd`, or `redis`. See [storage backends](storage-backends.md) |
 | `--etcd-endpoints` | `""` | Comma-separated etcd endpoints (used when `--storage-backend etcd`) |
@@ -106,6 +107,10 @@ leaf_validity_days: 0 # 0 = built-in default (~5 years); positive integer overri
 promote_cn_to_san: true # add the CN as a DNS SAN when a CSR carries none (RFC 2818)
 crl_validity_days: 0  # 0 = built-in default (30 days); positive integer overrides
 csr_rate_limit: 60    # max CSR submissions per IP per minute; 0 = disable rate limiting
+# Caps concurrent CA-key signatures across issuance, CRL re-signing and the OCSP
+# responder together. Unset uses max(4, GOMAXPROCS); 0 disables the bound.
+# Lower it to a remote signer's capacity — see "Bounding CA-key signing" below.
+ca_signing_concurrency: -1     # -1/unset = max(4, GOMAXPROCS); 0 = unbounded
 # Background CRL refresh keeps the CRL's NextUpdate from lapsing on a low-churn CA.
 # Safe to run on every replica (serialised on the shared CRL lock).
 disable_crl_refresh: false     # true = never auto-refresh the CRL
@@ -175,6 +180,7 @@ Environment variables mirror the CLI flags:
 | `--crl-url` | `PUPPET_CA_CRL_URL` |
 | `--metrics-listen` | `PUPPET_CA_METRICS_LISTEN` |
 | `--csr-rate-limit` | `PUPPET_CA_CSR_RATE_LIMIT` |
+| `--ca-signing-concurrency` | `PUPPET_CA_SIGNING_CONCURRENCY` |
 | `--encrypt-ca-key` | `PUPPET_CA_ENCRYPT_CA_KEY` |
 | `--ca-key-passphrase-file` | `PUPPET_CA_KEY_PASSPHRASE_FILE` |
 | `--storage-backend` | `PUPPET_CA_STORAGE_BACKEND` |
@@ -763,6 +769,72 @@ Watch `puppetca_ocsp_index_serials` across replicas to confirm they agree, and
 replica reading *above* its peers is not a fault: a pass that overlaps a local
 issuance defers its removals to the next one, so a busy replica can hold pruned
 serials a little longer.
+
+## Bounding CA-key signing
+
+`ca_signing_concurrency` caps how many CA-key signatures may be in flight at
+once. The cap is shared across certificate issuance, CRL re-signing and the
+OCSP responder, because they share one key: what needs bounding is the load on
+whatever holds that key, not the load on any one endpoint.
+
+```yaml
+ca_signing_concurrency: -1   # -1/unset = max(4, GOMAXPROCS); 0 = unbounded
+```
+
+### Why there is a bound at all
+
+`/ocsp` is unauthenticated, the rate limiter in front of the API covers CSR
+submissions only, and an OCSP cache miss signs. Without a cap, an anonymous
+caller can drive as many concurrent signatures as it can open connections,
+against the same key and the same signer that issuance uses.
+
+### Issuance waits; OCSP is refused
+
+The two halves behave differently, and the asymmetry is deliberate:
+
+- **Issuance and CRL re-signing queue** for a slot. They are authenticated, and
+  refusing a certificate a client asked for in order to protect an
+  unauthenticated responder would be the wrong way round.
+- **The OCSP responder sheds**, answering RFC 6960 `tryLater` over HTTP 503
+  after a short wait. Letting it queue would convert unbounded signing into
+  unbounded queueing and bound nothing.
+
+Shedding is cheap here in a way that is specific to OCSP: a non-success OCSP
+response carries no signature, so a refused request costs no CA-key work.
+
+Verifiers see `tryLater` as "ask again", not as "this certificate is bad". A
+verifier configured to hard-fail on an unavailable responder will still treat
+sustained shedding as a revocation-checking outage, so the limit wants to be
+above your steady-state verifier traffic, not merely above your issuance rate.
+
+### Choosing a value
+
+The right number is a property of your signer, which openvox-ca cannot
+discover:
+
+| Deployment | Guidance |
+| --- | --- |
+| Isolated signer (the default) | The built-in default is sized for this: signing is CPU-bound in the signer child, so past `GOMAXPROCS` extra concurrency buys latency and memory rather than throughput. |
+| `ca_key_provider: openbao` | **Set this explicitly.** Every signature is a network round trip to a Transit key that other consumers may share, and the default — derived from this host's CPU count — has no relationship to what that key can sustain. The server logs a warning at startup if you leave it unset here, naming the value it derived. |
+| Single-process software key | The default is fine. |
+
+The shipped default is a *ceiling*, not a tuning. Its only job is to keep the
+number finite; it is not a claim about what your signer can take.
+
+Note the bound is per process. Running N replicas against one shared OpenBao
+Transit key permits N × `ca_signing_concurrency` concurrent operations against
+that key, so size it against your replica count.
+
+### Watching it
+
+Three metrics (see [metrics.md](metrics.md)):
+
+- `puppetca_ca_signing_in_flight` — signatures in flight now.
+- `puppetca_ca_signing_limit` — the configured ceiling; `0` means unbounded.
+- `puppetca_ca_signing_shed_total` — OCSP responses refused with `tryLater`.
+
+Sustained shedding while the signer has capacity to spare means the limit is
+too low. Shedding under an unauthenticated flood is the bound doing its job.
 
 ## Delayed supersession
 

@@ -519,15 +519,31 @@ failure and throughput profile; plan for it:
     and if `/ocsp` is exposed to untrusted clients consider fronting it with a
     cache or a proxy-level rate limit.
 
-  This is tracked as
-  [#274](https://github.com/voxpupuli/openvox-ca/issues/274), which is where a
-  configurable bound would land if one is added.
+  `ca_signing_concurrency` is that aggregate bound
+  ([#274](https://github.com/voxpupuli/openvox-ca/issues/274)); the bullet
+  below says why you should set it explicitly here rather than take its
+  default.
 - **A stalled backend cannot pin the CA indefinitely.** Each signing round
   trip is bounded by `openbao` login/renew timeout (`LoginTimeout`, default
   10s), so a hung Transit backend fails that request and releases the lock
   rather than wedging all issuance forever. Raising that timeout for a slow or
   distant OpenBao correspondingly raises the worst-case time the lock can be
   held.
+- **Set `ca_signing_concurrency` explicitly.** The bound on concurrent CA-key
+  signatures defaults to `max(4, GOMAXPROCS)`, derived from *this host's* CPU
+  count — a number with no relationship to what your Transit key can sustain,
+  especially where other consumers share it. Set it to that key's capacity. The
+  bound is per process, so N replicas permit N × the limit against one shared
+  key; size it against your replica count too. Leaving it unset here logs a
+  warning at startup naming the derived value, because a CPU-derived ceiling is
+  the wrong shape for a signer reached over the network — it is not an error,
+  but it is almost certainly not the number you want. See
+  [bounding CA-key signing](configuration.md#bounding-ca-key-signing).
+
+  This matters most on `/ocsp`, which is unauthenticated and signs on a cache
+  miss: it is the one path where a caller you did not authorise decides how many
+  Transit requests you make. Requests over the limit are refused with RFC 6960
+  `tryLater` and counted in `puppetca_ca_signing_shed_total`.
 
 In short, `ca_key_provider: openbao` makes OpenBao's availability and HA a
 hard dependency of CA availability. This is the intended trade-off — the key
@@ -556,9 +572,14 @@ local-key custody, where the CA can sign with no external dependency at all.
   certificate-issuance error rates. Watch OCSP request rates too, if `/ocsp` is
   reachable by untrusted clients: those signatures hit the same backend and are
   not serialised, so they can crowd out issuance without issuance itself
-  looking abnormal until it starts failing. There is no CA-side metric for this
-  yet (see [#274](https://github.com/voxpupuli/openvox-ca/issues/274)), so the
-  signal to watch today is on the OpenBao side. Also watch for repeated
+  looking abnormal until it starts failing. Three CA-side metrics cover exactly
+  this: `puppetca_ca_signing_in_flight` against `puppetca_ca_signing_limit`
+  shows how close the shared bound is to saturation, and
+  `puppetca_ca_signing_shed_total` rising means OCSP requests are being refused
+  at it. Sustained shedding while Transit has capacity to spare means
+  `ca_signing_concurrency` is set below what this deployment needs. Watch the
+  OpenBao side too — the CA metrics show contention for the bound, not the
+  health of the backend behind it. Also watch for repeated
   "re-authentication failed" warnings in the `openvox-ca` logs — a steady
   stream of those means the source credential can no longer authenticate and
   needs operator attention before the current token lease runs out.

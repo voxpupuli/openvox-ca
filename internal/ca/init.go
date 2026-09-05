@@ -98,6 +98,20 @@ func (c *CA) Init(ctx context.Context) error {
 		return fmt.Errorf("CA misconfigured: ExternalSigner and KeyProvider are mutually exclusive")
 	}
 
+	// Size the CA-key signing bound first, because Init has several exits and
+	// only the first statement is on all of them. The fast path below returns
+	// as soon as an existing CA loads — which is what almost every start does —
+	// so a sizing placed after it would leave the commonest deployment
+	// unbounded, and nothing would say so.
+	//
+	// Not because Init signs through it: it does not. The bootstrap's
+	// self-signature calls x509.CreateCertificate directly and its CRL goes
+	// straight to storage, so neither takes a slot. That is correct rather than
+	// an omission — startup is single-threaded and has nothing to contend with —
+	// but it does mean this ordering is about Init's control flow, not about
+	// beating a signature to it.
+	c.initSigningBound()
+
 	if err := c.Storage.EnsureDirs(ctx); err != nil {
 		return err
 	}

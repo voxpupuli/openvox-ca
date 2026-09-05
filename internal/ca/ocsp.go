@@ -335,11 +335,11 @@ func (c *CA) AnswerOCSP(ctx context.Context, reqDER []byte) (OCSPAnswer, error) 
 	// Shed abandoned requests before signing rather than after. Under an
 	// external signer this is the one expensive step, and a client that has
 	// already disconnected — or a server deadline that has already expired —
-	// makes it work whose result nobody can receive. Cheap load-shedding on the
-	// path that lost its concurrency bound when the signature left c.mu (#274,
-	// in docs/development/locking.md); it does not replace a bound, it just
-	// declines to spend a signer round trip on an answer that cannot be
-	// delivered.
+	// makes it work whose result nobody can receive. It is the half of the
+	// problem that needs no configured size, and it does not replace the bound
+	// immediately below: it declines to spend a signer round trip on an answer
+	// that cannot be delivered, which is a different question from how many
+	// round trips may be in flight at once.
 	//
 	// ErrInternal, so a request cancelled by a *server* deadline is reported as
 	// RFC 6960 internalError, which a verifier may retry. Nothing about the
@@ -348,7 +348,42 @@ func (c *CA) AnswerOCSP(ctx context.Context, reqDER []byte) (OCSPAnswer, error) 
 		return OCSPAnswer{}, fmt.Errorf("%w: %w", ErrInternal, err)
 	}
 
-	respDER, err := ocsp.CreateResponse(caCert, caCert, template, caKey)
+	// Take a CA-key signing slot, or shed. Unlike the issuance and CRL paths
+	// this one refuses rather than queues, because `/ocsp` is unauthenticated
+	// and a cache miss signs: an anonymous caller decides how much work arrives
+	// here, and queueing that would bound nothing — it would only move the
+	// unbounded growth from concurrent signatures to waiting goroutines.
+	//
+	// This is what closes the gap the lock-scope change above opened. Signing
+	// outside c.mu is what makes the responder concurrent at all; without a cap
+	// the only limit is how many connections a caller can open. See #274 and
+	// signbound.go.
+	//
+	// ErrSigningBusy is not ErrInternal. The handler answers RFC 6960
+	// `tryLater`, which says exactly what happened and invites a retry; a
+	// non-success OCSP response carries no signature, so refusing costs no key
+	// work at all. That is what makes shedding a real relief valve here rather
+	// than a slower route to the same load.
+	if err := c.acquireSigningSlotOrShed(ctx); err != nil {
+		if errors.Is(err, ErrSigningBusy) {
+			return OCSPAnswer{}, err
+		}
+		// The context went away while queueing for a slot — classified exactly
+		// as the ctx.Err() check above does, and for the same reason.
+		return OCSPAnswer{}, fmt.Errorf("%w: %w", ErrInternal, err)
+	}
+
+	// caCert/caKey, not c.CACert/c.CAKey: no lock is held here, and the
+	// snapshot taken under the single RLock above is the whole reason this can
+	// sign without one.
+	// Released by a deferred call inside this closure; see releaseSigningSlot.
+	// This is the site where it matters most: /ocsp is unauthenticated, so a
+	// panic reachable from a request an anonymous caller can shape would leak
+	// slots on demand.
+	respDER, err := func() ([]byte, error) {
+		defer c.releaseSigningSlot()
+		return ocsp.CreateResponse(caCert, caCert, template, caKey)
+	}()
 	if err != nil {
 		// ErrInternal, so the handler answers RFC 6960 `internalError` rather
 		// than `malformedRequest`. A failed CA signature is a server fault and
