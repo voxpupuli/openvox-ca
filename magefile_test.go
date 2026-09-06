@@ -3088,9 +3088,21 @@ var _ = Describe("postinstall's ownership and permission hardening", func() {
 	var stubBin, log, sslDir, configPath, systemdRuntime string
 
 	run := func(args ...string) (firstBootResult, string) {
-		cmd := exec.Command("sh", append([]string{"packaging/scripts/postinstall"}, args...)...)
+		// /bin/sh by absolute path, because PATH below deliberately holds
+		// nothing but the stubs.
+		cmd := exec.Command("/bin/sh", append([]string{"packaging/scripts/postinstall"}, args...)...)
+		// The stub directory ALONE. Leaving /usr/bin on PATH meant that
+		// removing the systemd-sysusers stub did not make the command absent
+		// on a host that has a real one -- `command -v` found /usr/bin's, ran
+		// it, and the script died under `set -e`. That passed on a machine
+		// with no systemd and failed on CI: a test passing for the wrong
+		// reason, and the wrong reason was the platform.
+		//
+		// Every external command postinstall calls is stubbed below, so this
+		// exercises the script's branching on any platform rather than the
+		// host's idea of which tools exist.
 		cmd.Env = append(os.Environ(),
-			"PATH="+stubBin+":/usr/bin:/bin",
+			"PATH="+stubBin,
 			"OPENVOX_CA_SYSTEMD_RUNTIME="+systemdRuntime,
 			"OPENVOX_CA_SSLDIR="+sslDir,
 			"OPENVOX_CA_CONFIG="+configPath,
@@ -3182,6 +3194,13 @@ var _ = Describe("postinstall's ownership and permission hardening", func() {
 	// groupadd/useradd path is the one taken.
 	It("falls back to groupadd and useradd where systemd-sysusers is absent", func() {
 		Expect(os.Remove(filepath.Join(stubBin, "systemd-sysusers"))).To(Succeed())
+		// The premise, asserted rather than assumed: with PATH holding only
+		// the stub directory, removing the stub is what makes the command
+		// absent. If PATH ever widens again this fails here, naming the
+		// reason, instead of quietly testing the host's real systemd-sysusers.
+		Expect(exec.Command("/bin/sh", "-c",
+			"PATH="+stubBin+" command -v systemd-sysusers").Run()).To(HaveOccurred(),
+			"systemd-sysusers is still reachable, so this spec is not exercising the fallback")
 
 		r, calls := run("configure")
 		Expect(r.ok).To(BeTrue(), "postinstall exited non-zero: %s", r.output)
