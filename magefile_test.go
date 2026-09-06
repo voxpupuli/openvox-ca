@@ -1903,8 +1903,12 @@ var _ = Describe("checkPackagingInputs", func() {
 var _ = Describe("buildVariantPackages", func() {
 	// End to end over the real nfpm configuration: stages a tarball the way
 	// build:dist writes one, then builds both formats from it. No compilation
-	// -- the "binaries" are fixtures, which is the point. This is the only
-	// test that exercises the nfpm dependency at all.
+	// -- the "binaries" are fixtures, which is the point.
+	//
+	// This block owns what a run produces: the filenames, that both formats
+	// appear, and the failure when an input is missing. What is inside a
+	// package is asserted by "the deb's payload" nested below and by "the
+	// rpm's payload", both of which build through this same function.
 	var (
 		distDir string
 		variant distVariantSpec

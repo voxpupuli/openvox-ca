@@ -7,10 +7,12 @@
 # shipped defaults have moved leaves the new file beside yours
 # (.dpkg-dist / .rpmnew) for you to merge.
 #
-# It sets the two things a packaged CA cannot start without or would get
-# wrong. Everything else stays at the built-in defaults, so that what a
-# packaged CA does is otherwise the documented behaviour of the binary rather
-# than a second set of values to look up. See
+# It sets four keys, and only four: cadir and the tls_cert/tls_key pair,
+# without which a packaged CA cannot start at all, and port, which it would
+# otherwise get wrong on the host a package is most likely to land on.
+# Everything else stays at the built-in defaults, so that what a packaged CA
+# does is otherwise the documented behaviour of the binary rather than a second
+# set of values to look up. See
 # /usr/share/doc/openvox-ca/docs/configuration.md for the full list.
 
 # Where the CA keeps its material. REQUIRED: openvox-ca has no built-in default

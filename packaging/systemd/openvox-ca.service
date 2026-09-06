@@ -1,13 +1,17 @@
-# This file is a TEMPLATE, not an installable unit: the placeholder in
-# ExecStart below is substituted at build time. The release tarballs get
-# /usr/local/bin, which is what an unmanaged `install` prefix means; the deb
-# and rpm get /usr/bin, which is what a package must use. `mage build:unit`
-# renders a copy locally -- see docs/systemd.md.
+# One unit, rendered per channel: ExecStart below carries a placeholder in the
+# copy kept in the repository, and rendering substitutes it. The release
+# tarballs get /usr/local/bin, which is what an unmanaged `install` prefix
+# means; the deb and rpm get /usr/bin, which is what a package must use.
+# `mage build:unit <bindir>` renders a copy locally -- see docs/systemd.md.
 #
-# The placeholder is deliberately not spelled out here: rendering replaces
-# every occurrence, so naming it in prose would have this comment rewritten
-# too, and the shipped unit would explain itself with the substitution already
-# applied.
+# This comment travels into both rendered copies, so ExecStart is what tells
+# you which one you are reading: an absolute path means an installable unit, a
+# placeholder means the template and not something to install.
+#
+# The placeholder is deliberately not spelled out in prose here, because
+# rendering replaces every occurrence of it in the file -- naming it would have
+# this comment rewritten too, and the shipped unit would then explain itself
+# with the substitution already applied.
 
 [Unit]
 Description=OpenVox Certificate Authority
@@ -115,10 +119,14 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
-# The API and the metrics exporter both listen on unprivileged ports -- 8140
-# and 9140 by default, and any port an operator configures instead is
-# unprivileged too or the service could not bind it. So the service needs no
-# capabilities at all.
+# The API and the metrics exporter both listen on unprivileged ports -- the
+# binary defaults to 8140 and 9140, the packages ship a configuration file
+# that moves the API off 8140 to leave it to OpenVox Server, and any port an
+# operator configures instead is unprivileged too or the service could not bind
+# it. So the service needs no capabilities at all. (The number itself is
+# deliberately not repeated here: it is set in one place, the packaged
+# /etc/puppet-ca/config.yaml, and a unit shared with the release tarballs is
+# not that place.)
 CapabilityBoundingSet=
 AmbientCapabilities=
 

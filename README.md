@@ -97,6 +97,28 @@ $ tar xzf openvox-ca_${VERSION}_linux_amd64.tar.gz
 
 See [running under systemd](docs/systemd.md) for the rest of a VM install.
 
+### Packages (`.deb`, `.rpm`)
+
+A `.deb` and an `.rpm` per architecture install the binaries, a unit rendered
+for `/usr/bin`, a working `/etc/puppet-ca/config.yaml`, and a `Type=oneshot`
+that provisions the CA the first time you start the service — so a package
+install is `install`, then `systemctl enable --now openvox-ca`, with no
+configuration to write first. They create the `puppet` service account and use
+the OpenVox/Puppet layout (`/etc/puppetlabs/puppet/ssl`), so they coexist with
+an openvox-agent or OpenVox Server on the same host; that is also why they
+listen on **8141** rather than 8140, which Server binds itself.
+
+**They are not published as release assets yet.** Adding the packaging job to
+the release workflow is
+[#266](https://github.com/voxpupuli/openvox-ca/pull/266); until it lands, build
+them from a checkout with `mage build:dist && mage build:packages`, which
+writes them into `dist/` beside the tarballs. The packages carry the pure-Go
+build only — a FIPS deployment uses the `_fips` tarball.
+
+See [installing from a package](docs/systemd.md#installing-from-a-package) for
+what provisioning does, what an uninstall deliberately leaves behind, and the
+cost of sharing the `puppet` account.
+
 ### Verifying what you downloaded
 
 `checksums.txt` establishes that a download arrived intact. Provenance establishes

@@ -5,9 +5,14 @@
 # openvox-ca-first-boot.service. Not an operator entry point: it takes no
 # arguments, and everything it decides it decides from the filesystem.
 #
-# Every step is guarded on absence. Running it twice does nothing the second
-# time, and running it on a host that already has a CA -- a takeover -- does
-# nothing at all.
+# Every step is guarded on absence, so it adopts rather than replaces: nothing
+# already on disk is overwritten, moved or re-signed. Running it twice does
+# nothing the second time. Running it on a host that already has a CA -- a
+# takeover -- leaves that CA alone but still fills in whatever is missing
+# around it: a node certificate for this host, the certs/ca.pem and crl.pem
+# aliases, and the serving-credential links the shipped configuration names.
+# That is the point; it is what makes an install on a host with an existing
+# cadir produce a service that starts.
 #
 # It runs BEFORE openvox-ca.service, never alongside it. That ordering is not
 # tidiness: this script writes to the configured storage backend directly, and
@@ -21,9 +26,9 @@ set -eu
 # The two roots. Both are overridable from the environment so this script can
 # be exercised against a scratch directory -- and it is: magefile_test.go's
 # "first-boot's certname allow-list" specs run the functions below directly,
-# and the end-to-end runs recorded on openvox-ca#282 drive the whole script
-# this way. Nothing in the packages sets either, and the unit passes no
-# environment at all, so an installed system always takes the defaults.
+# and "first-boot's provisioning steps" drives the whole script this way.
+# Nothing in the packages sets either, and the unit passes no environment at
+# all, so an installed system always takes the defaults.
 SSLDIR="${OPENVOX_CA_SSLDIR:-/etc/puppetlabs/puppet/ssl}"
 CADIR="$SSLDIR/ca"
 

@@ -1398,8 +1398,9 @@ type distVariantSpec struct {
 	// Packaging them would also mean hand-writing their dependencies and
 	// keeping them true: those binaries are cgo and dynamically linked, and
 	// nfpm runs neither dpkg-shlibdeps nor rpm's automatic requires. Not an
-	// oversight -- flip this to true and release.yml's package counts must
-	// move with it.
+	// oversight -- flip this to true and every count derived from this set
+	// moves with it, including the artefact counts the release workflow
+	// asserts once #266 has added its packaging job.
 	packaged bool
 }
 

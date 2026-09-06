@@ -1,14 +1,18 @@
 # First-boot provisioning for a packaged openvox-ca.
 #
 # A unit rather than a maintainer script, for three reasons. It runs under the
-# same hardening as the service, so provisioning cannot reach anything the
-# service could not. It re-runs after the CA directory is wiped, which a
-# postinst that already ran will not. And it fails visibly in `systemctl
-# status` rather than in package-manager output nobody keeps.
+# service's hardening directives rather than as unconfined root -- the one
+# deliberate difference is ReadWritePaths= below, which is wider. It can run
+# again after the CA directory is wiped, which a postinst that already ran will
+# not; RemainAfterExit=yes means that is the next boot or an explicit
+# `systemctl restart openvox-ca-first-boot`, not a restart of the service. And
+# it fails visibly in `systemctl status` rather than in package-manager output
+# nobody keeps.
 #
-# Every step is guarded on absence, so this is idempotent and a takeover -- a
-# host that already has a CA, or an openvox-agent certificate to adopt -- does
-# nothing at all.
+# Every step is guarded on absence, so this adopts rather than replaces:
+# nothing already on disk is overwritten, moved or re-signed. A takeover -- a
+# host that already has a CA, or an openvox-agent certificate to adopt --
+# leaves what it finds alone and fills in only what is missing around it.
 
 [Unit]
 Description=OpenVox Certificate Authority first-boot provisioning
@@ -95,7 +99,10 @@ AmbientCapabilities=
 # consent to create a certificate authority.
 #
 # And provisioning that fails stops the service, rather than letting it start
-# against a CA directory that provisioning did not finish.
+# against a CA directory that provisioning did not finish. That edge carries
+# stop and restart in both directions, which is the price of the guarantee:
+# stopping this unit stops openvox-ca with it, even long after provisioning has
+# finished.
 #
 # It lives here rather than as a Requires= in openvox-ca.service because that
 # unit is shared with the release tarballs, which ship no oneshot for it to

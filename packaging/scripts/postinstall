@@ -3,9 +3,11 @@
 # Shared postinstall for the deb and the rpm. Two jobs: make sure the `puppet`
 # account exists, and make sure systemd knows about the units.
 #
-# It is shared rather than per-format because nothing in it diverges: the
-# configuration file is where deb and rpm genuinely differ, and that is not in
-# this package.
+# It is shared rather than per-format because nothing in it diverges. Both
+# formats install the same units, the same binaries and the same
+# /etc/puppet-ca/config.yaml, and the one thing that does differ between them
+# -- the argument contract this script is called under -- is handled by the
+# case below rather than by two scripts.
 
 set -eu
 
