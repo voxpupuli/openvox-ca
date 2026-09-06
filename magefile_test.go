@@ -23,6 +23,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1825,53 +1826,119 @@ func readAr(path string) ([]arEntry, error) {
 	return out, nil
 }
 
-// debPayload returns a .deb's installed files: path -> mode, and path ->
-// contents.
-func debPayload(path string) (map[string]int64, map[string]string, error) {
+// debMember returns one named member of a .deb's ar container.
+func debMember(path, name string) ([]byte, error) {
 	members, err := readAr(path)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	var data []byte
 	for _, m := range members {
-		if m.name == "data.tar.gz" {
-			data = m.data
+		if m.name == name {
+			return m.data, nil
 		}
 	}
-	if data == nil {
-		return nil, nil, fmt.Errorf("%s has no data.tar.gz", path)
-	}
+	return nil, fmt.Errorf("%s has no %s", path, name)
+}
+
+// debTarGz walks a gzipped tar member of a .deb and calls fn for each entry.
+// The tar records paths relative to the archive root ("./usr/bin/openvox-ca"),
+// so they are rewritten to the absolute path dpkg installs, and a directory's
+// trailing slash is stripped: a caller names a directory the way it names a
+// file.
+func debTarGz(data []byte, fn func(hdr *tar.Header, name string, r io.Reader) error) error {
 	gz, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
 	defer gz.Close()
 
-	modes := map[string]int64{}
-	contents := map[string]string{}
 	tr := tar.NewReader(gz)
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
-			break
+			return nil
 		}
 		if err != nil {
-			return nil, nil, err
+			return err
 		}
-		// tar records a directory with a trailing slash; strip it so a
-		// caller can name a directory the same way it names a file.
 		name := strings.TrimPrefix(hdr.Name, ".")
 		if name != "/" {
 			name = strings.TrimSuffix(name, "/")
 		}
+		if err := fn(hdr, name, tr); err != nil {
+			return err
+		}
+	}
+}
+
+// debControl returns the .deb's control archive: name -> contents. That is
+// where the maintainer scripts and the conffiles list live, neither of which
+// appears in the payload dpkg unpacks.
+func debControl(path string) (map[string]string, error) {
+	data, err := debMember(path, "control.tar.gz")
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	err = debTarGz(data, func(hdr *tar.Header, name string, r io.Reader) error {
+		if hdr.Typeflag != tar.TypeReg {
+			return nil
+		}
+		body, err := io.ReadAll(r)
+		if err != nil {
+			return err
+		}
+		out[strings.TrimPrefix(name, "/")] = string(body)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// debOwners returns path -> "user:group" as recorded in the payload. dpkg
+// writes what it is told here, so a wrong owner is not corrected at install
+// time the way rpm corrects one it cannot resolve.
+func debOwners(path string) (map[string]string, error) {
+	data, err := debMember(path, "data.tar.gz")
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	err = debTarGz(data, func(hdr *tar.Header, name string, _ io.Reader) error {
+		out[name] = hdr.Uname + ":" + hdr.Gname
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// debPayload returns a .deb's installed files: path -> mode, and path ->
+// contents.
+func debPayload(path string) (map[string]int64, map[string]string, error) {
+	data, err := debMember(path, "data.tar.gz")
+	if err != nil {
+		return nil, nil, err
+	}
+
+	modes := map[string]int64{}
+	contents := map[string]string{}
+	err = debTarGz(data, func(hdr *tar.Header, name string, r io.Reader) error {
 		modes[name] = hdr.Mode
 		if hdr.Typeflag == tar.TypeReg {
-			body, err := io.ReadAll(tr)
+			body, err := io.ReadAll(r)
 			if err != nil {
-				return nil, nil, err
+				return err
 			}
 			contents[name] = string(body)
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
 	}
 	return modes, contents, nil
 }
@@ -2064,6 +2131,102 @@ var _ = Describe("buildVariantPackages", func() {
 		})
 	})
 
+	// dpkg reads the maintainer scripts and the conffiles list from the
+	// control archive, which is a separate ar member from the payload -- so
+	// every assertion above this point would hold for a package that shipped
+	// neither. A package with no postinst installs cleanly and leaves no
+	// `puppet` account, no enabled oneshot and an unreadable configuration
+	// file; a package with no conffiles entry overwrites an operator's edits
+	// on the next upgrade. Both are silent at build time.
+	Describe("the deb's control archive", func() {
+		var control map[string]string
+
+		BeforeEach(func() {
+			_, err := buildVariantPackages(distDir, ver, variant)
+			Expect(err).NotTo(HaveOccurred())
+			control, err = debControl(filepath.Join(distDir, "openvox-ca_9.9.9-1_amd64.deb"))
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		// Byte-identical to the source, not merely present: nfpm copies the
+		// script in verbatim, so anything else means the wrong file was
+		// packaged.
+		DescribeTable("ships the maintainer script dpkg will run",
+			func(member, src string) {
+				want, err := os.ReadFile(src)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(control).To(HaveKey(member))
+				Expect(control[member]).To(Equal(string(want)),
+					"%s is not the script at %s", member, src)
+			},
+			Entry("postinst", "postinst", "packaging/scripts/postinstall"),
+			Entry("prerm", "prerm", "packaging/scripts/preremove"),
+			Entry("postrm", "postrm", "packaging/scripts/postremove"),
+		)
+
+		// The dpkg half of the config|noreplace declaration. The rpm half is
+		// asserted in "the rpm's payload"; one line in nfpm.yaml produces
+		// both, and reading only one of them would not notice the other
+		// silently stopping.
+		It("registers the configuration file as a conffile, and nothing else", func() {
+			Expect(control).To(HaveKey("conffiles"))
+			var listed []string
+			for _, line := range strings.Split(control["conffiles"], "\n") {
+				if line = strings.TrimSpace(line); line != "" {
+					listed = append(listed, line)
+				}
+			}
+			Expect(listed).To(ConsistOf("/etc/puppet-ca/config.yaml"))
+		})
+	})
+
+	// dpkg writes the owner it is given and does not correct one it cannot
+	// resolve, so a wrong owner here is a configuration file the service
+	// cannot read -- and it is 0640, so root:root means openvox-ca exits at
+	// startup without reading its own cadir.
+	It("gives the deb's configuration file to root:puppet", func() {
+		_, err := buildVariantPackages(distDir, ver, variant)
+		Expect(err).NotTo(HaveOccurred())
+		owners, err := debOwners(filepath.Join(distDir, "openvox-ca_9.9.9-1_amd64.deb"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(owners).To(HaveKeyWithValue("/etc/puppet-ca/config.yaml", "root:puppet"))
+	})
+
+	// nfpm stamps every payload entry, and the rpm's BUILDTIME, with the
+	// current time unless SOURCE_DATE_EPOCH says otherwise -- so a rebuild
+	// differs from the build before it, and no checksum over a package means
+	// anything across one. nfpm reads that variable itself; what is checked
+	// here is that this code path does not defeat it, which is the property a
+	// release job that publishes checksums would depend on.
+	//
+	// Both halves are needed. "Two builds agree" is true on its own of a
+	// package built twice inside the same second, which is exactly what this
+	// spec does -- it passed with the variable unset. So it is paired with a
+	// build at a different epoch, which must differ. Together they say the
+	// stamp reaches the bytes AND that pinning it is what makes a rebuild
+	// identical.
+	It("stamps packages from SOURCE_DATE_EPOCH, so a rebuild is identical", func() {
+		sum := func(epoch string) map[string]string {
+			GinkgoT().Setenv("SOURCE_DATE_EPOCH", epoch)
+			out := map[string]string{}
+			written, err := buildVariantPackages(distDir, ver, variant)
+			Expect(err).NotTo(HaveOccurred())
+			for _, path := range written {
+				body, err := os.ReadFile(path)
+				Expect(err).NotTo(HaveOccurred())
+				out[filepath.Base(path)] = fmt.Sprintf("%x", sha256.Sum256(body))
+			}
+			return out
+		}
+
+		first := sum("1700000000")
+		Expect(first).To(HaveLen(len(packageFormats)))
+		Expect(sum("1700000000")).To(Equal(first),
+			"a rebuild at the same epoch produced different bytes")
+		Expect(sum("1600000000")).NotTo(Equal(first),
+			"the epoch does not reach the packages, so the check above proves nothing")
+	})
+
 	// The tarball channel keeps the binary's 8140. Only the packages move,
 	// because only a package assumes the CA may share a host with Server.
 	Describe("the tarball channel", func() {
@@ -2103,6 +2266,33 @@ var _ = Describe("stageDocTree", func() {
 		for _, want := range []string{"LICENSE", "README.md", filepath.Join("docs", "systemd.md")} {
 			Expect(filepath.Join(dest, want)).To(BeAnExistingFile())
 		}
+	})
+
+	// The whole reason this enumerates through `git ls-files` rather than
+	// walking docs/. A working tree routinely holds untracked drafts, notes
+	// and scratch files under docs/, and a walk would package every one of
+	// them into /usr/share/doc on every user's machine. Nothing else would
+	// notice: the package builds, installs and works.
+	It("stages tracked files only, not an untracked draft under docs/", func() {
+		draft := filepath.Join("docs", "zz-untracked-spec-draft.md")
+		Expect(os.WriteFile(draft, []byte("not for packaging\n"), 0o644)).To(Succeed())
+		DeferCleanup(func() { Expect(os.Remove(draft)).To(Succeed()) })
+
+		// The premise: git must actually consider this untracked. A spec that
+		// silently ran against a tracked file would pass without testing
+		// anything.
+		out, err := exec.Command("git", "ls-files", "--", draft).Output()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(strings.TrimSpace(string(out))).To(BeEmpty(),
+			"the fixture is tracked, so this spec proves nothing")
+
+		dest := GinkgoT().TempDir()
+		Expect(stageDocTree(dest)).To(Succeed())
+		Expect(filepath.Join(dest, draft)).NotTo(BeAnExistingFile())
+		// And the tracked neighbour in the same directory did get staged, so
+		// the absence above is exclusion rather than a doc tree that failed to
+		// stage at all.
+		Expect(filepath.Join(dest, "docs", "systemd.md")).To(BeAnExistingFile())
 	})
 
 	// The floor exists because `git ls-files` says nothing and exits 0 when
@@ -2364,6 +2554,40 @@ func rpmPayload(path string) (map[string]rpmFile, error) {
 	return out, nil
 }
 
+// rpmScriptlets returns the rpm's scriptlets by tag name. They live in the
+// header rather than the payload, so a package can carry every file this
+// suite asserts and still run nothing at install or erase time.
+func rpmScriptlets(path string) (map[string]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	r, err := rpmutils.ReadRpm(f)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for name, tag := range map[string]int{
+		"postin": rpmutils.POSTIN,
+		"preun":  rpmutils.PREUN,
+		"postun": rpmutils.POSTUN,
+	} {
+		// A missing tag is not an error here: reporting it as an absent key
+		// is what lets a spec say which scriptlet is missing.
+		if !r.Header.HasTag(tag) {
+			continue
+		}
+		body, err := r.Header.GetString(tag)
+		if err != nil {
+			return nil, fmt.Errorf("reading the %s scriptlet: %w", name, err)
+		}
+		out[name] = body
+	}
+	return out, nil
+}
+
 var _ = Describe("the rpm's payload", func() {
 	// The deb and the rpm come out of one code path, but "one code path" is an
 	// argument, not a check: nfpm renders per-format metadata differently for
@@ -2443,6 +2667,33 @@ var _ = Describe("the rpm's payload", func() {
 		Expect(files).To(HaveKey("/etc/puppetlabs/puppet/ssl"))
 		Expect(files).To(HaveKey("/etc/puppetlabs/puppet/ssl/ca"))
 	})
+
+	// The rpm half of what "the deb's control archive" asserts. Scriptlets are
+	// header tags rather than payload entries, so an rpm can carry every file
+	// checked above and still create no account, enable nothing, and stop
+	// nothing on erase.
+	Describe("the scriptlets", func() {
+		var scriptlets map[string]string
+
+		BeforeEach(func() {
+			var err error
+			scriptlets, err = rpmScriptlets(filepath.Join(distDir, "openvox-ca-9.9.9-1.x86_64.rpm"))
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		DescribeTable("carries the scriptlet rpm will run",
+			func(tag, src string) {
+				want, err := os.ReadFile(src)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(scriptlets).To(HaveKey(tag))
+				Expect(scriptlets[tag]).To(Equal(string(want)),
+					"the %s scriptlet is not the script at %s", tag, src)
+			},
+			Entry("%post", "postin", "packaging/scripts/postinstall"),
+			Entry("%preun", "preun", "packaging/scripts/preremove"),
+			Entry("%postun", "postun", "packaging/scripts/postremove"),
+		)
+	})
 })
 
 // firstBootDefs returns the provisioning script's definitions -- everything
@@ -2512,6 +2763,199 @@ func stubOpenvoxCA(binDir string, withGenerate bool) {
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
+
+// firstBootUnit is the provisioning oneshot as shipped. Unlike the service
+// unit it is not a template: it is packaged verbatim, so what is asserted here
+// is what gets installed.
+const firstBootUnit = "packaging/systemd/openvox-ca-first-boot.service"
+
+// unitDirectives returns a unit file's directives as key -> values, with every
+// occurrence of a key kept: systemd treats a repeated directive as additive
+// for some settings and last-wins for others, and a spec that read only the
+// first would pass for a unit that overrode it two lines later.
+func unitDirectives(path string) (map[string][]string, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string][]string{}
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "[") {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		out[k] = append(out[k], v)
+	}
+	return out, nil
+}
+
+var _ = Describe("the provisioning oneshot's unit", func() {
+	// Everything asserted here is a property the packaging depends on and
+	// nothing else checks. The payload specs prove the file is installed; they
+	// say nothing about what is in it, and each of these directives has a
+	// failure mode that is silent at build time and at install time.
+	var directives map[string][]string
+
+	BeforeEach(func() {
+		var err error
+		directives, err = unitDirectives(firstBootUnit)
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	// RequiredBy=, and no WantedBy=. With a WantedBy=multi-user.target the
+	// oneshot would provision on the next boot after an install, which is the
+	// thing this design refuses: installing a package is not consent to create
+	// a certificate authority.
+	It("is required by the service and wanted by nothing", func() {
+		Expect(directives).To(HaveKeyWithValue("RequiredBy", []string{"openvox-ca.service"}))
+		Expect(directives).NotTo(HaveKey("WantedBy"),
+			"a WantedBy= would provision on the next boot rather than on the first deliberate start")
+	})
+
+	// Before=, not After=. This writes to storage directly, so running it
+	// beside a live server makes it a second writer to a backend that permits
+	// exactly one.
+	It("is ordered before the service", func() {
+		Expect(directives).To(HaveKeyWithValue("Before", []string{"openvox-ca.service"}))
+		for _, v := range directives["After"] {
+			Expect(v).NotTo(ContainSubstring("openvox-ca.service"),
+				"ordering this after the service makes provisioning a second writer against a live CA")
+		}
+	})
+
+	// RemainAfterExit=yes is what makes "required by an already-active unit"
+	// a no-op, so the oneshot does not re-run on every restart of the service.
+	It("is a oneshot that stays active once it has succeeded", func() {
+		Expect(directives).To(HaveKeyWithValue("Type", []string{"oneshot"}))
+		Expect(directives).To(HaveKeyWithValue("RemainAfterExit", []string{"yes"}))
+	})
+
+	// The script is packaged at this path and invoked from nowhere else, so
+	// the two have to agree; nothing else would notice a rename.
+	It("runs the provisioning script at the path the package installs it to", func() {
+		Expect(directives).To(HaveKeyWithValue("ExecStart", []string{"/usr/libexec/openvox-ca/first-boot"}))
+
+		nfpm, err := os.ReadFile("packaging/nfpm.yaml")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(nfpm)).To(ContainSubstring("dst: /usr/libexec/openvox-ca/first-boot"))
+	})
+
+	// It links certs/ca.pem and crl.pem above the CA directory, so it needs
+	// the parent -- and the service, which never writes there, must not have
+	// it. A ReadWritePaths= that named only the CA directory would fail every
+	// link step under ProtectSystem=strict.
+	It("gets the parent ssl tree, where the service gets only the CA directory", func() {
+		Expect(directives).To(HaveKeyWithValue("ReadWritePaths", []string{"/etc/puppetlabs/puppet/ssl"}))
+
+		service, err := unitDirectives(filepath.Join("packaging", "systemd", distUnitFile))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(service).To(HaveKeyWithValue("ReadWritePaths", []string{"/etc/puppetlabs/puppet/ssl/ca"}))
+	})
+
+	// Both units run as the account the postinstall creates. A unit naming an
+	// account nothing creates fails to start with a message about an unknown
+	// user, and neither the package build nor the install says anything.
+	DescribeTable("runs as the account the packaging creates",
+		func(path string) {
+			d, err := unitDirectives(path)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(d).To(HaveKeyWithValue("User", []string{"puppet"}))
+			Expect(d).To(HaveKeyWithValue("Group", []string{"puppet"}))
+		},
+		Entry("the service", filepath.Join("packaging", "systemd", distUnitFile)),
+		Entry("the oneshot", firstBootUnit),
+	)
+
+	// The oneshot handles the CA private key for as long as it takes to sign,
+	// so it is no less sensitive than the service -- and the two hardening
+	// blocks are maintained by hand in two files. Drift here is silent: the
+	// unit still starts, it is simply less confined than the comment in it
+	// claims. ReadWritePaths= is excluded because it differs deliberately,
+	// and that difference has its own spec above.
+	It("keeps the same hardening as the service, bar the writable path", func() {
+		hardening := []string{
+			"LimitCORE", "NoNewPrivileges", "PrivateTmp", "PrivateDevices",
+			"ProtectSystem", "ProtectHome", "ProtectProc", "ProtectClock",
+			"ProtectHostname", "ProtectKernelLogs", "ProtectKernelModules",
+			"ProtectKernelTunables", "ProtectControlGroups", "RestrictNamespaces",
+			"RestrictRealtime", "RestrictSUIDSGID", "LockPersonality", "RemoveIPC",
+			"RestrictAddressFamilies", "SystemCallArchitectures", "SystemCallFilter",
+			"SystemCallErrorNumber", "CapabilityBoundingSet", "AmbientCapabilities",
+		}
+		service, err := unitDirectives(filepath.Join("packaging", "systemd", distUnitFile))
+		Expect(err).NotTo(HaveOccurred())
+
+		for _, key := range hardening {
+			Expect(service).To(HaveKey(key), "the service no longer sets %s, so this list is stale", key)
+			Expect(directives).To(HaveKeyWithValue(key, service[key]),
+				"%s differs between the two units", key)
+		}
+	})
+})
+
+var _ = Describe("the service account the packages create", func() {
+	// The postinstall creates the account twice over: declaratively through
+	// systemd-sysusers, and imperatively through groupadd/useradd where
+	// systemd-sysusers is absent. Both paths run on real hosts, and a host
+	// that took the fallback must not end up with a different account from one
+	// that did not -- a different home directory or shell is the kind of
+	// divergence that surfaces months later, on the host nobody tested on.
+	//
+	// The postinstall's own comment claimed this was asserted here. It was
+	// not, until now.
+	var sysusers, postinstall string
+
+	BeforeEach(func() {
+		body, err := os.ReadFile("packaging/sysusers/openvox-ca.conf")
+		Expect(err).NotTo(HaveOccurred())
+		sysusers = string(body)
+
+		body, err = os.ReadFile("packaging/scripts/postinstall")
+		Expect(err).NotTo(HaveOccurred())
+		postinstall = string(body)
+	})
+
+	// The sysusers `u` line is: type, name, id, GECOS, home, shell.
+	userLine := func() []string {
+		for _, line := range strings.Split(sysusers, "\n") {
+			if strings.HasPrefix(line, "u ") {
+				return strings.Fields(line)
+			}
+		}
+		Fail("packaging/sysusers/openvox-ca.conf declares no user")
+		return nil
+	}
+
+	It("declares the same account in both, or the fallback host gets a different one", func() {
+		// u name id GECOS home shell, and the GECOS is quoted and has spaces
+		// in it -- so home and shell are taken from the end rather than by
+		// index.
+		fields := userLine()
+		Expect(len(fields)).To(BeNumerically(">=", 6), "the u line should be: u name id GECOS home shell")
+		name, home, shell := fields[1], fields[len(fields)-2], fields[len(fields)-1]
+
+		Expect(name).To(Equal("puppet"))
+		Expect(postinstall).To(ContainSubstring("--home-dir " + home))
+		Expect(postinstall).To(ContainSubstring("--shell " + shell))
+		Expect(postinstall).To(MatchRegexp(`(?m)^\t\t\t`+name+`\b`),
+			"the useradd fallback should create %q", name)
+	})
+
+	// The units name this account, and systemd refuses to start a unit whose
+	// User= does not exist.
+	It("is the account both units run as", func() {
+		fields := userLine()
+		for _, path := range []string{filepath.Join("packaging", "systemd", distUnitFile), firstBootUnit} {
+			d, err := unitDirectives(path)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(d).To(HaveKeyWithValue("User", []string{fields[1]}), "User= in %s", path)
+		}
+	})
+})
 
 var _ = Describe("first-boot's node-certificate step", func() {
 	var sslDir, binDir string
@@ -2643,6 +3087,10 @@ var _ = Describe("the packages' maintainer scripts", func() {
 
 		for _, name := range []string{
 			"systemctl", "systemd-sysusers", "getent", "groupadd", "useradd", "chown", "chmod",
+			// Not called by anything, and that is the point: they are here so
+			// that a maintainer script which grew a call to one would show up
+			// in the log rather than silently failing to resolve.
+			"userdel", "groupdel",
 		} {
 			body := fmt.Sprintf("#!/bin/sh\necho \"%s $*\" >> %s\nexit 0\n", name, log)
 			// getent must report the account as absent so the creation branch
@@ -2827,11 +3275,39 @@ var _ = Describe("the packages' maintainer scripts", func() {
 			"a failed enable must not record itself, or the next upgrade will not retry")
 	})
 
-	It("postremove exits cleanly whatever it is given", func() {
-		for _, arg := range []string{"remove", "purge", "upgrade", "0", "1", ""} {
-			r, _ := run("packaging/scripts/postremove", arg)
+	// What postremove does NOT do is the whole point of it, and asserting only
+	// that it exits 0 is satisfied by a script that deletes the `puppet`
+	// account and the CA tree with it. So the call log is matched exactly: the
+	// one thing it may do is tell systemd the units are gone.
+	DescribeTable("postremove reloads systemd and does nothing else",
+		func(arg string) {
+			r, calls := run("packaging/scripts/postremove", arg)
 			Expect(r.ok).To(BeTrue(), "postremove %q exited non-zero: %s", arg, r.output)
-		}
+			Expect(strings.Fields(calls)).To(Equal([]string{"systemctl", "daemon-reload"}),
+				"postremove %q did something other than reloading systemd: %s", arg, calls)
+		},
+		Entry("dpkg remove", "remove"),
+		// purge above all: this is where dpkg would expect a package to delete
+		// what it left behind, and where this one deliberately does not.
+		Entry("dpkg purge", "purge"),
+		Entry("dpkg upgrade", "upgrade"),
+		Entry("rpm erase", "0"),
+		Entry("rpm upgrade", "1"),
+		Entry("no argument at all", ""),
+	)
+
+	// daemon-reload needs a running systemd, so on a host without one the
+	// script must do nothing rather than fail the removal.
+	It("postremove does nothing at all where systemd is not running", func() {
+		absent := filepath.Join(GinkgoT().TempDir(), "no-such-runtime")
+		cmd := exec.Command("/bin/sh", "packaging/scripts/postremove", "remove")
+		cmd.Env = append(os.Environ(),
+			"PATH="+stubBin,
+			"OPENVOX_CA_SYSTEMD_RUNTIME="+absent,
+		)
+		out, err := cmd.CombinedOutput()
+		Expect(err).NotTo(HaveOccurred(), "postremove failed: %s", out)
+		Expect(log).NotTo(BeAnExistingFile(), "postremove called something")
 	})
 })
 
@@ -2874,6 +3350,13 @@ esac
 		cmd.Env = append(os.Environ(),
 			"OPENVOX_CA_SSLDIR="+sslDir,
 			"OPENVOX_CA_BINDIR="+binDir,
+			// puppet.conf is the tier above the hostname tiers, and it
+			// defaults to /etc/puppetlabs/puppet/puppet.conf -- a real path on
+			// any machine that has run an agent, this developer's and a CI
+			// runner's alike. Left unset, a host with a certname in it would
+			// answer every case below from that file and none of the tiers
+			// this block exists to exercise would run.
+			"OPENVOX_CA_PUPPET_CONF="+filepath.Join(GinkgoT().TempDir(), "no-puppet.conf"),
 			"PATH="+stubBin+":/usr/bin:/bin",
 			"OPENVOX_CA_CERTNAME=",
 		)
@@ -3125,6 +3608,51 @@ var _ = Describe("first-boot's provisioning steps", func() {
 
 		It("writes no unresolved-name marker when the name resolved", func() {
 			Expect(filepath.Join(sslDir, "openvox-ca-certname-unresolved")).NotTo(BeAnExistingFile())
+		})
+	})
+
+	// The marker's text tells the operator to `rm -rf $CADIR` and start over.
+	// That is sound advice about a CA this run just minted under an unusable
+	// name, and it is an instruction to destroy a working CA on a host that
+	// already had one -- so it is written only when this run created the CA.
+	// The guard reads the cadir before ensure_ca and nothing else does, which
+	// makes it exactly the kind of ordering a later edit moves without
+	// noticing.
+	Describe("the unresolved-name marker", func() {
+		var sslDir, binDir, marker string
+
+		BeforeEach(func() {
+			sslDir = GinkgoT().TempDir()
+			binDir = GinkgoT().TempDir()
+			marker = filepath.Join(sslDir, "openvox-ca-certname-unresolved")
+			Expect(os.MkdirAll(filepath.Join(sslDir, "ca"), 0o755)).To(Succeed())
+			stubCA(binDir)
+		})
+
+		It("is written when this run mints the CA under \"localhost\"", func() {
+			r := runFirstBootScript(sslDir, binDir, "localhost")
+			Expect(r.ok).To(BeTrue(), "provisioning failed: %s", r.output)
+			Expect(marker).To(BeAnExistingFile())
+
+			body, err := os.ReadFile(marker)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(body)).To(ContainSubstring("rm -rf"),
+				"the marker's recovery steps are what make writing it on a takeover dangerous")
+		})
+
+		// A takeover: the CA is already there, so every step is a no-op and
+		// this run issued nothing. Writing the marker here would tell an
+		// operator to delete a CA that is working.
+		It("is not written on a takeover of an existing CA", func() {
+			Expect(os.WriteFile(filepath.Join(sslDir, "ca", "ca_crt.pem"),
+				[]byte("CA-CERT\n"), 0o644)).To(Succeed())
+			Expect(os.WriteFile(filepath.Join(sslDir, "ca", "ca_crl.pem"),
+				[]byte("CA-CRL\n"), 0o644)).To(Succeed())
+
+			r := runFirstBootScript(sslDir, binDir, "localhost")
+			Expect(r.ok).To(BeTrue(), "provisioning failed: %s", r.output)
+			Expect(marker).NotTo(BeAnExistingFile(),
+				"the marker tells the operator to rm -rf a CA this run did not create")
 		})
 	})
 

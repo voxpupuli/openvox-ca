@@ -2013,11 +2013,47 @@ func stageDocTree(dest string) error {
 	}
 
 	for _, path := range paths {
-		if err := copyStagedFile(path, filepath.Join(dest, path)); err != nil {
+		staged := filepath.Join(dest, path)
+		if err := copyStagedFile(path, staged); err != nil {
+			return err
+		}
+		if err := stampStagedFile(staged); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// stampStagedFile pins a staged file's modification time to SOURCE_DATE_EPOCH,
+// and does nothing when that is unset.
+//
+// nfpm stamps everything it generates itself from that variable -- every other
+// payload entry, the rpm's BUILDTIME, the deb's control archive -- but the
+// documentation goes in as a `tree` of real files, and a tree entry keeps the
+// mtime it finds on disk. These files are written by copyStagedFile moments
+// earlier, so that mtime is "now": two builds of the same commit differ, and a
+// checksum published against a package means nothing across a rebuild. Every
+// other byte in the package is already reproducible, which makes this the only
+// thing standing between the packages and a verifiable rebuild.
+//
+// Unset is left alone deliberately. SOURCE_DATE_EPOCH is the caller's
+// statement that this build is meant to be reproducible; inventing a timestamp
+// when nobody asked would put a wrong date on installed documentation for the
+// ordinary developer build.
+func stampStagedFile(path string) error {
+	epoch := os.Getenv("SOURCE_DATE_EPOCH")
+	if epoch == "" {
+		return nil
+	}
+	// nfpm ignores a SOURCE_DATE_EPOCH it cannot parse rather than failing, so
+	// this does the same: a malformed value must not make the two halves of
+	// one package disagree about which rule they followed.
+	secs, err := strconv.ParseInt(epoch, 10, 64)
+	if err != nil {
+		return nil
+	}
+	when := time.Unix(secs, 0).UTC()
+	return os.Chtimes(path, when, when)
 }
 
 // checkDocTreeFloor rejects a documentation enumeration that is wrong rather
