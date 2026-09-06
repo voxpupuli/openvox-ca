@@ -1749,8 +1749,16 @@ func writeRenderedUnit(distDir, bindir string) (string, error) {
 // expect: openvox-ca_VER_amd64.deb, openvox-ca-VER-1.x86_64.rpm. They carry no
 // variant name, and nothing downstream should try to derive one from them.
 func (Build) Packages() error {
-	const distDir = "dist"
+	return buildPackagesInto("dist")
+}
 
+// buildPackagesInto is Build.Packages against a caller-supplied directory, so
+// the orchestration -- resolve the version, check the inputs, loop the packaged
+// variants, count what landed -- can be exercised end to end without writing
+// into the repository's own dist/. The per-variant work is
+// buildVariantPackages; what this adds is the assembly, and the assembly is
+// what had no test.
+func buildPackagesInto(distDir string) error {
 	ver, err := releaseVersion()
 	if err != nil {
 		return err

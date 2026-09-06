@@ -1942,10 +1942,19 @@ var _ = Describe("buildVariantPackages", func() {
 			Expect(contents).To(HaveKey("/usr/share/doc/openvox-ca/docs/systemd.md"))
 		})
 
-		It("creates the ssl tree the units bind-mount", func() {
-			Expect(modes).To(HaveKey("/etc/puppetlabs/puppet/ssl"))
-			Expect(modes).To(HaveKey("/etc/puppetlabs/puppet/ssl/ca"))
-		})
+		// The modes, not just the paths. 0771 lets an agent's group traverse
+		// the ssl root without listing it; 0770 keeps the CA directory to its
+		// owner and group. Asserting existence alone is the same weakness that
+		// let a regular file stand in for the certs/ca.pem symlink -- the
+		// check passes for a directory with any permissions at all.
+		DescribeTable("creates the ssl tree the units bind-mount, with the modes that matter",
+			func(path string, mode int64) {
+				Expect(modes).To(HaveKey(path))
+				Expect(modes[path]).To(Equal(mode), "mode of %s", path)
+			},
+			Entry("the ssl root", "/etc/puppetlabs/puppet/ssl", int64(0o771)),
+			Entry("the CA directory", "/etc/puppetlabs/puppet/ssl/ca", int64(0o770)),
+		)
 
 		// The packaged default that the binary's own default gets wrong: a
 		// package is what gets installed beside OpenVox Server, and Server
@@ -2688,20 +2697,31 @@ var _ = Describe("the packages' maintainer scripts", func() {
 	// The finding behind this: without an argument guard, every upgrade
 	// re-enabled the oneshot and silently undid a deliberate
 	// `systemctl disable openvox-ca-first-boot`.
-	Describe("enabling the provisioning oneshot", func() {
-		It("enables it on a first install", func() {
-			// The systemd branch is guarded on /run/systemd/system, which does
-			// not exist here, so the decision is read from the script rather
-			// than from a call. Asserting the guard's shape is the honest
-			// check on a machine with no systemd.
-			src, err := os.ReadFile("packaging/scripts/postinstall")
-			Expect(err).NotTo(HaveOccurred())
-			Expect(string(src)).To(ContainSubstring(`if [ -z "${2:-}" ] && [ "${1:-configure}" != 2 ]; then`),
-				"the enable must be conditional on this being a first install")
-			Expect(string(src)).To(MatchRegexp(`(?s)if \[ -z "\$\{2:-\}" \].*systemctl enable openvox-ca-first-boot`),
-				"the enable must sit inside that condition, not beside it")
-		})
-	})
+	// Executed, not grepped. An earlier version of this read the script's
+	// source and asserted the guard's *shape*, justified by systemd being
+	// absent here -- but the SYSTEMD_RUNTIME seam added in the same round made
+	// the branch reachable, and the justification was stale from the moment it
+	// was written. A test that inspects source text cannot fail for the
+	// property it names: it passes for a script whose condition is spelled
+	// correctly and does the wrong thing.
+	DescribeTable("enables the provisioning oneshot on a first install and not on an upgrade",
+		func(args []string, shouldEnable bool) {
+			_, calls := run("packaging/scripts/postinstall", args...)
+			if shouldEnable {
+				Expect(calls).To(ContainSubstring("systemctl enable openvox-ca-first-boot.service"),
+					"postinstall %v should have enabled the oneshot", args)
+			} else {
+				Expect(calls).NotTo(ContainSubstring("systemctl enable"),
+					"postinstall %v re-enabled the oneshot, overriding an operator's disable", args)
+			}
+			// daemon-reload happens either way; it is not the thing under test.
+			Expect(calls).To(ContainSubstring("systemctl daemon-reload"))
+		},
+		Entry("dpkg first install", []string{"configure"}, true),
+		Entry("rpm first install", []string{"1"}, true),
+		Entry("dpkg upgrade (previous version in $2)", []string{"configure", "1.0.0"}, false),
+		Entry("rpm upgrade ($1 is 2)", []string{"2"}, false),
+	)
 
 	It("postremove exits cleanly whatever it is given", func() {
 		for _, arg := range []string{"remove", "purge", "upgrade", "0", "1", ""} {
@@ -3056,5 +3076,261 @@ var _ = Describe("first-boot's provisioning steps", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(string(body)).To(Equal("CA-CERT\n"), "certs/ca.pem does not resolve to the CA certificate")
 		})
+	})
+})
+
+var _ = Describe("postinstall's ownership and permission hardening", func() {
+	// The branch that hands the shipped files to `puppet` after sysusers has
+	// created it. Nothing could reach it before: it operates on absolute paths,
+	// so a spec had no way in without a container. The seam makes the
+	// hardening itself assertable -- --no-dereference, the symlink refusal, and
+	// mode 0640 on a file that will hold credentials.
+	var stubBin, log, sslDir, configPath, systemdRuntime string
+
+	run := func(args ...string) (firstBootResult, string) {
+		cmd := exec.Command("sh", append([]string{"packaging/scripts/postinstall"}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"PATH="+stubBin+":/usr/bin:/bin",
+			"OPENVOX_CA_SYSTEMD_RUNTIME="+systemdRuntime,
+			"OPENVOX_CA_SSLDIR="+sslDir,
+			"OPENVOX_CA_CONFIG="+configPath,
+		)
+		out, err := cmd.CombinedOutput()
+		res := firstBootResult{ok: true, output: string(out)}
+		if err != nil {
+			var exit *exec.ExitError
+			if errors.As(err, &exit) {
+				res.ok = false
+			} else {
+				Expect(err).NotTo(HaveOccurred())
+			}
+		}
+		calls, readErr := os.ReadFile(log)
+		if readErr != nil {
+			calls = nil
+		}
+		return res, string(calls)
+	}
+
+	BeforeEach(func() {
+		stubBin = GinkgoT().TempDir()
+		sslDir = GinkgoT().TempDir()
+		systemdRuntime = GinkgoT().TempDir()
+		log = filepath.Join(GinkgoT().TempDir(), "calls.log")
+		configPath = filepath.Join(GinkgoT().TempDir(), "config.yaml")
+
+		// chown and chmod are stubs: this runs as an ordinary user, and the
+		// question is which arguments the script passes, not whether the
+		// kernel honours them.
+		for _, name := range []string{"systemctl", "systemd-sysusers", "getent", "groupadd", "useradd", "chown", "chmod"} {
+			body := fmt.Sprintf("#!/bin/sh\necho \"%s $*\" >> %s\nexit 0\n", name, log)
+			if name == "getent" {
+				body = fmt.Sprintf("#!/bin/sh\necho \"getent $*\" >> %s\nexit 2\n", log)
+			}
+			Expect(os.WriteFile(filepath.Join(stubBin, name), []byte(body), 0o755)).To(Succeed())
+		}
+		Expect(os.MkdirAll(filepath.Join(sslDir, "ca"), 0o755)).To(Succeed())
+	})
+
+	It("hands the ssl tree to puppet without following symlinks", func() {
+		_, calls := run("configure")
+		Expect(calls).To(ContainSubstring("chown --no-dereference puppet:puppet " + sslDir))
+		// --no-dereference is the point: this runs as root over a directory
+		// `puppet` can write, so a planted symlink would otherwise redirect it.
+		Expect(calls).NotTo(MatchRegexp(`(?m)^chown puppet:puppet`))
+	})
+
+	It("gives the configuration file to root:puppet at 0640", func() {
+		Expect(os.WriteFile(configPath, []byte("port: 8141\n"), 0o644)).To(Succeed())
+		_, calls := run("configure")
+		Expect(calls).To(ContainSubstring("chown --no-dereference root:puppet " + configPath))
+		Expect(calls).To(ContainSubstring("chmod 0640 " + configPath))
+	})
+
+	// The case chmod cannot be made safe for: GNU chmod has no portable -h, so
+	// the script refuses rather than following the link.
+	It("refuses to touch the configuration file when it is a symlink", func() {
+		target := filepath.Join(GinkgoT().TempDir(), "elsewhere.yaml")
+		Expect(os.WriteFile(target, []byte("port: 9999\n"), 0o644)).To(Succeed())
+		Expect(os.Symlink(target, configPath)).To(Succeed())
+
+		r, calls := run("configure")
+		Expect(r.ok).To(BeTrue(), "postinstall exited non-zero: %s", r.output)
+		Expect(r.output).To(ContainSubstring("is a symlink"))
+		Expect(calls).NotTo(ContainSubstring("chmod 0640 "+configPath),
+			"chmod on a symlink changes the target's mode, which is not ours to alter")
+		Expect(calls).NotTo(ContainSubstring("chown --no-dereference root:puppet " + configPath))
+	})
+
+	// Both fixups are non-fatal by design: a maintainer script that exits
+	// non-zero leaves the package half-configured.
+	It("warns rather than failing when the ownership fixup cannot be applied", func() {
+		Expect(os.WriteFile(configPath, []byte("port: 8141\n"), 0o644)).To(Succeed())
+		Expect(os.WriteFile(filepath.Join(stubBin, "chown"),
+			[]byte("#!/bin/sh\nexit 1\n"), 0o755)).To(Succeed())
+
+		r, _ := run("configure")
+		Expect(r.ok).To(BeTrue(), "a failed chown must not fail the install")
+		Expect(r.output).To(And(
+			ContainSubstring("WARNING"),
+			ContainSubstring("root:puppet"),
+		))
+	})
+
+	// The account-creation fallback for hosts with no systemd-sysusers. The
+	// stub set deliberately omits it so `command -v` misses and the
+	// groupadd/useradd path is the one taken.
+	It("falls back to groupadd and useradd where systemd-sysusers is absent", func() {
+		Expect(os.Remove(filepath.Join(stubBin, "systemd-sysusers"))).To(Succeed())
+
+		r, calls := run("configure")
+		Expect(r.ok).To(BeTrue(), "postinstall exited non-zero: %s", r.output)
+		Expect(calls).NotTo(ContainSubstring("systemd-sysusers"))
+		Expect(calls).To(ContainSubstring("groupadd --system puppet"))
+		Expect(calls).To(ContainSubstring("useradd --system --gid puppet"))
+	})
+
+	// Idempotent: an account that already exists is left exactly as it is,
+	// which matters on upgrade and on a host where OpenVox Server got there
+	// first -- its account is the one we want, not one to correct.
+	It("creates nothing when the account already exists", func() {
+		Expect(os.Remove(filepath.Join(stubBin, "systemd-sysusers"))).To(Succeed())
+		Expect(os.WriteFile(filepath.Join(stubBin, "getent"),
+			[]byte("#!/bin/sh\nexit 0\n"), 0o755)).To(Succeed())
+
+		_, calls := run("configure")
+		Expect(calls).NotTo(ContainSubstring("groupadd"))
+		Expect(calls).NotTo(ContainSubstring("useradd"))
+	})
+})
+
+var _ = Describe("first-boot's puppet.conf certname tier", func() {
+	var sslDir, binDir, stubBin, puppetConf string
+
+	BeforeEach(func() {
+		sslDir = GinkgoT().TempDir()
+		binDir = GinkgoT().TempDir()
+		stubBin = GinkgoT().TempDir()
+		puppetConf = filepath.Join(GinkgoT().TempDir(), "puppet.conf")
+		stubOpenvoxCA(binDir, true)
+		// hostname answers nothing, so the only name available is whichever
+		// tier is under test -- and, critically, the specs below cannot fall
+		// through to this developer's own hostname.
+		Expect(os.WriteFile(filepath.Join(stubBin, "hostname"),
+			[]byte("#!/bin/sh\nexit 1\n"), 0o755)).To(Succeed())
+	})
+
+	resolve := func() firstBootResult {
+		defs, err := firstBootDefs()
+		Expect(err).NotTo(HaveOccurred())
+		cmd := exec.Command("sh", "-c", defs+"\nresolve_certname\n")
+		cmd.Env = append(os.Environ(),
+			"OPENVOX_CA_SSLDIR="+sslDir,
+			"OPENVOX_CA_BINDIR="+binDir,
+			"OPENVOX_CA_PUPPET_CONF="+puppetConf,
+			"PATH="+stubBin+":/usr/bin:/bin",
+			"OPENVOX_CA_CERTNAME=",
+		)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			var exit *exec.ExitError
+			if errors.As(err, &exit) {
+				return firstBootResult{ok: false, output: string(out)}
+			}
+			Expect(err).NotTo(HaveOccurred())
+		}
+		return firstBootResult{ok: true, output: string(out)}
+	}
+
+	It("takes certname from puppet.conf when there is no explicit answer", func() {
+		Expect(os.WriteFile(puppetConf,
+			[]byte("[main]\ncertname = agent.example.com\nserver = puppet\n"), 0o644)).To(Succeed())
+		Expect(strings.TrimSpace(lastLine(resolve().output))).To(Equal("agent.example.com"))
+	})
+
+	// Not a general INI parser: the last uncommented certname wins, which is
+	// what puppet itself would resolve for any section this file can set it in.
+	It("takes the last uncommented certname and ignores commented ones", func() {
+		Expect(os.WriteFile(puppetConf,
+			[]byte("[main]\n#certname = commented.example.com\ncertname = first.example.com\n"+
+				"[agent]\ncertname = last.example.com\n"), 0o644)).To(Succeed())
+		Expect(strings.TrimSpace(lastLine(resolve().output))).To(Equal("last.example.com"))
+	})
+
+	// An unsafe name from a file anything with write access can edit must not
+	// be used, and must not stop provisioning either -- it falls through.
+	It("ignores an unsafe certname from puppet.conf and says so", func() {
+		Expect(os.WriteFile(puppetConf,
+			[]byte("[main]\ncertname = ../../../etc/evil.example.com\n"), 0o644)).To(Succeed())
+		r := resolve()
+		Expect(r.output).To(ContainSubstring("ignoring certname"))
+		Expect(strings.TrimSpace(lastLine(r.output))).To(Equal("localhost"))
+	})
+
+	It("falls through when there is no puppet.conf at all", func() {
+		Expect(strings.TrimSpace(lastLine(resolve().output))).To(Equal("localhost"))
+	})
+})
+
+var _ = Describe("buildPackagesInto", func() {
+	// Build.Packages' orchestration on its success path: resolve the version,
+	// check the inputs, loop every packaged variant, count what landed. The
+	// per-variant work has its own specs; what had none was the assembly.
+	It("builds every packaged variant's formats and accepts the result", func() {
+		distDir := GinkgoT().TempDir()
+		ver, err := releaseVersion()
+		Expect(err).NotTo(HaveOccurred())
+
+		src := GinkgoT().TempDir()
+		for _, name := range []string{"openvox-ca", "openvox-ca-ctl"} {
+			Expect(os.WriteFile(filepath.Join(src, name), []byte("#!/bin/true\n"), 0o755)).To(Succeed())
+		}
+		unit, err := renderUnit(tarballUnitBindir)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(os.WriteFile(filepath.Join(src, distUnitFile), unit, 0o644)).To(Succeed())
+
+		// A tarball per packaged variant, named as build:dist writes them.
+		for _, v := range packagedDistVariants() {
+			archive := filepath.Join(distDir, fmt.Sprintf("openvox-ca_%s_%s.tar.gz", ver, v.name))
+			Expect(createTarGz(archive, src, distArchiveFiles([]string{"openvox-ca", "openvox-ca-ctl"}))).To(Succeed())
+		}
+
+		Expect(buildPackagesInto(distDir)).To(Succeed())
+
+		// One package per format per packaged variant, and nothing else.
+		for _, ext := range packageExtensions() {
+			found, err := filepath.Glob(filepath.Join(distDir, "*"+ext))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(found).To(HaveLen(len(packagedDistVariants())), "%s packages", ext)
+		}
+	})
+
+	// The FIPS variants are not packaged, and the count above would not notice
+	// if they suddenly were -- it is derived from the same list.
+	It("packages the non-FIPS variants only", func() {
+		distDir := GinkgoT().TempDir()
+		ver, err := releaseVersion()
+		Expect(err).NotTo(HaveOccurred())
+
+		src := GinkgoT().TempDir()
+		for _, name := range []string{"openvox-ca", "openvox-ca-ctl"} {
+			Expect(os.WriteFile(filepath.Join(src, name), []byte("#!/bin/true\n"), 0o755)).To(Succeed())
+		}
+		unit, err := renderUnit(tarballUnitBindir)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(os.WriteFile(filepath.Join(src, distUnitFile), unit, 0o644)).To(Succeed())
+
+		// Tarballs for EVERY variant, including the FIPS pair, so that
+		// packaging them would succeed if the code tried.
+		for _, v := range distVariants() {
+			archive := filepath.Join(distDir, fmt.Sprintf("openvox-ca_%s_%s.tar.gz", ver, v.name))
+			Expect(createTarGz(archive, src, distArchiveFiles([]string{"openvox-ca", "openvox-ca-ctl"}))).To(Succeed())
+		}
+
+		Expect(buildPackagesInto(distDir)).To(Succeed())
+
+		debs, err := filepath.Glob(filepath.Join(distDir, "*.deb"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(debs).To(HaveLen(2), "four tarballs were available; only the two non-FIPS may be packaged")
 	})
 })

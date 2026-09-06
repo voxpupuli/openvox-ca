@@ -16,13 +16,10 @@
 
 set -eu
 
-# Where systemd's runtime directory lives. Overridable from the environment for
-# the same reason first-boot's roots are, and with the same caveat: nothing in
-# the packages sets it, and neither dpkg nor rpm passes an environment, so an
-# installed system always takes the default. It exists so a test can assert
-# what this script does on a machine that has no systemd -- without it the
-# systemd branch is unreachable off a Linux host, and a table asserting "acts
-# on a removal, not on an upgrade" could only ever check the second half.
+# Overridable so a test can reach the systemd branch on a host without
+# systemd. Duplicated rather than sourced, deliberately -- see the comment on
+# this line in packaging/scripts/postinstall for why a maintainer script must
+# be self-contained.
 SYSTEMD_RUNTIME="${OPENVOX_CA_SYSTEMD_RUNTIME:-/run/systemd/system}"
 
 case "${1:-}" in

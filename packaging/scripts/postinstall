@@ -9,8 +9,15 @@
 
 set -eu
 
-SSLDIR=/etc/puppetlabs/puppet/ssl
-CONFIG=/etc/puppet-ca/config.yaml
+# The two paths this script hands to `puppet`. Overridable from the
+# environment for the same reason SYSTEMD_RUNTIME below is: without it the
+# ownership and permission branch is unreachable outside a container, and the
+# hardening it applies -- --no-dereference, the symlink refusal, mode 0640 on a
+# file that can hold credentials -- would go untested. Nothing in the packages
+# sets either, and neither dpkg nor rpm passes an environment, so an installed
+# system always takes the defaults.
+SSLDIR="${OPENVOX_CA_SSLDIR:-/etc/puppetlabs/puppet/ssl}"
+CONFIG="${OPENVOX_CA_CONFIG:-/etc/puppet-ca/config.yaml}"
 
 # Where systemd's runtime directory lives. Overridable from the environment for
 # the same reason first-boot's roots are, and with the same caveat: nothing in
@@ -19,6 +26,14 @@ CONFIG=/etc/puppet-ca/config.yaml
 # what this script does on a machine that has no systemd -- without it the
 # systemd branch is unreachable off a Linux host, and a table asserting "acts
 # on a removal, not on an upgrade" could only ever check the second half.
+#
+# The line below is repeated in all three maintainer scripts rather than
+# sourced from a shared file, and that duplication is deliberate. A maintainer
+# script has to be self-contained: postrm in particular runs at moments when
+# this package's files are partly or wholly gone, so sourcing anything the
+# package ships would make removal depend on the very files being removed. One
+# assignment repeated three times is cheaper than that failure. This comment is
+# the canonical explanation; the other two point here.
 SYSTEMD_RUNTIME="${OPENVOX_CA_SYSTEMD_RUNTIME:-/run/systemd/system}"
 
 

@@ -127,7 +127,11 @@ is_usable_fqdn() {
 # takes the last `certname = value` outside a comment, which is what puppet
 # itself would resolve for any section this file can meaningfully set it in.
 puppet_conf_certname() {
-	conf=/etc/puppetlabs/puppet/puppet.conf
+	# Overridable so this tier is reachable from a spec, and -- more
+	# importantly -- so a spec exercising the *other* tiers is isolated from
+	# whatever puppet.conf this machine happens to have. A test that silently
+	# reads the developer's own certname passes for the wrong reason.
+	conf="${OPENVOX_CA_PUPPET_CONF:-/etc/puppetlabs/puppet/puppet.conf}"
 	[ -r "$conf" ] || return 1
 	sed -n 's/^[[:space:]]*certname[[:space:]]*=[[:space:]]*\([^[:space:]#]*\).*/\1/p' "$conf" |
 		tail -n 1 | grep . || return 1
