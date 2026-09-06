@@ -1769,13 +1769,16 @@ func buildPackagesInto(distDir string) error {
 		return err
 	}
 
+	var written []string
 	for _, v := range variants {
-		if err := buildVariantPackages(distDir, ver, v); err != nil {
+		paths, err := buildVariantPackages(distDir, ver, v)
+		if err != nil {
 			return err
 		}
+		written = append(written, paths...)
 	}
 
-	return verifyPackagesWritten(distDir, len(variants))
+	return verifyPackagesWritten(written, len(variants))
 }
 
 // checkPackagingInputs refuses the two ways this target can do nothing and
@@ -1811,23 +1814,24 @@ func checkPackagingInputs(variants []distVariantSpec, formats []string) error {
 // buildVariantPackages unpacks one variant's tarball into a staging directory,
 // adds the files that are in the packages but not in the tarball, and writes
 // one package per format.
-func buildVariantPackages(distDir, ver string, v distVariantSpec) error {
+func buildVariantPackages(distDir, ver string, v distVariantSpec) ([]string, error) {
+	var written []string
 	bins := []string{"openvox-ca", "openvox-ca-ctl"}
 	archive := filepath.Join(distDir, fmt.Sprintf("openvox-ca_%s_%s.tar.gz", ver, v.name))
 	if _, err := os.Stat(archive); err != nil {
-		return fmt.Errorf("%s is not in %s, and this target does not build binaries: "+
+		return nil, fmt.Errorf("%s is not in %s, and this target does not build binaries: "+
 			"run `mage build:dist` for every variant, or `mage build:distVariant %s` for this one, first",
 			filepath.Base(archive), distDir, v.name)
 	}
 
 	stage, err := os.MkdirTemp("", "openvox-ca-pkg-*")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer os.RemoveAll(stage)
 
 	if err := extractTarGz(archive, stage, bins); err != nil {
-		return fmt.Errorf("unpacking %s: %w", filepath.Base(archive), err)
+		return nil, fmt.Errorf("unpacking %s: %w", filepath.Base(archive), err)
 	}
 
 	// The unit in the tarball names /usr/local/bin, so the package cannot use
@@ -1836,20 +1840,20 @@ func buildVariantPackages(distDir, ver string, v distVariantSpec) error {
 	// tarball's copy.
 	unit, err := renderUnit(packageUnitBindir)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	stagedUnit := filepath.Join(stage, "openvox-ca.service.pkg")
 	if err := os.WriteFile(stagedUnit, unit, 0644); err != nil {
-		return err
+		return nil, err
 	}
 
 	if err := stageDocTree(filepath.Join(stage, "doc")); err != nil {
-		return fmt.Errorf("staging documentation for %s: %w", v.name, err)
+		return nil, fmt.Errorf("staging documentation for %s: %w", v.name, err)
 	}
 
 	goarch, err := variantGOARCH(v)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	env := map[string]string{
 		"PKG_VERSION": ver,
@@ -1862,43 +1866,44 @@ func buildVariantPackages(distDir, ver string, v distVariantSpec) error {
 		return env[k]
 	})
 	if err != nil {
-		return fmt.Errorf("reading packaging/nfpm.yaml: %w", err)
+		return nil, fmt.Errorf("reading packaging/nfpm.yaml: %w", err)
 	}
 
 	for _, format := range packageFormats {
 		info, err := cfg.Get(format)
 		if err != nil {
-			return fmt.Errorf("%s configuration for %s: %w", format, v.name, err)
+			return nil, fmt.Errorf("%s configuration for %s: %w", format, v.name, err)
 		}
 		info = nfpm.WithDefaults(info)
 		if err := nfpm.Validate(info); err != nil {
-			return fmt.Errorf("%s configuration for %s: %w", format, v.name, err)
+			return nil, fmt.Errorf("%s configuration for %s: %w", format, v.name, err)
 		}
 
 		packager, err := nfpm.Get(format)
 		if err != nil {
-			return fmt.Errorf("no packager for format %q (packageFormats names it, nfpm does not "+
+			return nil, fmt.Errorf("no packager for format %q (packageFormats names it, nfpm does not "+
 				"provide it): %w", format, err)
 		}
 
 		out := filepath.Join(distDir, packager.ConventionalFileName(info))
 		f, err := os.Create(out)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if err := packager.Package(info, f); err != nil {
 			f.Close()
 			// A half-written package is worse than none: it satisfies a count
 			// and an `ls`, and fails at install.
 			os.Remove(out)
-			return fmt.Errorf("building %s for %s: %w", format, v.name, err)
+			return nil, fmt.Errorf("building %s for %s: %w", format, v.name, err)
 		}
 		if err := f.Close(); err != nil {
-			return err
+			return nil, err
 		}
 		fmt.Printf("Wrote %s\n", out)
+		written = append(written, out)
 	}
-	return nil
+	return written, nil
 }
 
 // variantGOARCH recovers a variant's target architecture from its build
@@ -1913,25 +1918,47 @@ func variantGOARCH(v distVariantSpec) (string, error) {
 	return "", fmt.Errorf("variant %q sets no GOARCH, so its packages have no architecture to declare", v.name)
 }
 
-// verifyPackagesWritten checks that dist/ holds one package per format per
-// packaged variant once the loop above has finished.
+// verifyPackagesWritten checks that the packaging run produced one package per
+// format per packaged variant, and that no two of them are the same file.
 //
-// It is not a restatement of what the loop just did. nfpm derives each
-// filename from the configuration, so two variants whose configuration
-// resolved to the same architecture would write the same path twice -- the
-// second silently overwriting the first, leaving a run that reported two
-// successes and produced one file. Counting what is on disk is the only check
-// that notices.
-func verifyPackagesWritten(distDir string, want int) error {
-	for _, ext := range packageExtensions() {
-		found, err := filepath.Glob(filepath.Join(distDir, "*"+ext))
-		if err != nil {
-			return err
+// It is not a restatement of what the loop just did. nfpm derives each filename
+// from the configuration, so two variants whose configuration resolved to the
+// same architecture would write the same path twice -- the second silently
+// overwriting the first, leaving a run that reported two successes and produced
+// one file. Comparing the paths the run actually wrote is what notices.
+//
+// Deliberately NOT a census of distDir. That version counted every matching
+// file in the directory, and build:distVariant -- which is what CI, the release
+// workflow and this target's own error message all tell you to run -- does not
+// clear dist/ the way build:dist does. So a version bump followed by
+// distVariant and packages left the previous version's packages sitting there,
+// the count came to four, and a correct build failed while naming a
+// filename collision that had not happened.
+func verifyPackagesWritten(written []string, wantPerFormat int) error {
+	seen := map[string]bool{}
+	for _, p := range written {
+		if seen[p] {
+			return fmt.Errorf("%s was written twice: two variants resolved to one filename, so the "+
+				"second overwrote the first", p)
 		}
-		if len(found) != want {
-			return fmt.Errorf("expected %d %s packages in %s, found %d (%s); "+
-				"two variants resolving to one filename would look exactly like this",
-				want, ext, distDir, len(found), strings.Join(found, ", "))
+		seen[p] = true
+	}
+
+	for _, ext := range packageExtensions() {
+		var got []string
+		for _, p := range written {
+			if filepath.Ext(p) == ext {
+				got = append(got, p)
+			}
+		}
+		if len(got) != wantPerFormat {
+			return fmt.Errorf("expected %d %s packages, the run wrote %d (%s)",
+				wantPerFormat, ext, len(got), strings.Join(got, ", "))
+		}
+		for _, p := range got {
+			if _, err := os.Stat(p); err != nil {
+				return fmt.Errorf("%s was reported written but is not there: %w", p, err)
+			}
 		}
 	}
 	return nil
@@ -2041,6 +2068,12 @@ func copyStagedFile(src, dst string) error {
 	return os.WriteFile(dst, data, 0644)
 }
 
+// maxExtractedFileBytes caps a single entry unpacked from a release tarball.
+// The binaries are around 100MB; 2GB leaves room for growth by an order of
+// magnitude while still bounding what a malformed or hostile archive can write
+// to a build host.
+const maxExtractedFileBytes = 2 << 30
+
 // extractTarGz extracts the named entries of a .tar.gz into destDir, and fails
 // if any of them is missing. Only the names asked for are written, and any
 // entry whose name is not a plain filename is refused: this reads an archive
@@ -2070,20 +2103,40 @@ func extractTarGz(archive, destDir string, want []string) error {
 		if err != nil {
 			return err
 		}
+		// Checked before the allowlist, not after. Behind it, this could
+		// only ever fire for a name the *caller* asked for -- an archive
+		// entry called ../../openvox-ca simply failed the allowlist and was
+		// skipped, so the guard the comment above describes could not be
+		// reached by a hostile archive at all, and the spec that appeared to
+		// cover it was passing the traversing name in `want`.
+		if hdr.Name != filepath.Base(hdr.Name) {
+			return fmt.Errorf("archive entry %q is not a plain filename", hdr.Name)
+		}
 		if !slices.Contains(want, hdr.Name) || found[hdr.Name] {
 			continue
 		}
-		if hdr.Name != filepath.Base(hdr.Name) {
-			return fmt.Errorf("archive entry %q is not a plain filename", hdr.Name)
+		// Regular files only. A symlink, hardlink or directory entry carries
+		// no payload, so io.Copy would write nothing, found[] would mark the
+		// name satisfied, and a later real entry of the same name would be
+		// skipped -- yielding a package containing a zero-byte binary from a
+		// build that reported success. The missing-entry check at the end
+		// cannot see it, because the name was found.
+		if hdr.Typeflag != tar.TypeReg {
+			return fmt.Errorf("archive entry %q is not a regular file (type %q)",
+				hdr.Name, string(hdr.Typeflag))
 		}
 		out := filepath.Join(destDir, hdr.Name)
 		w, err := os.OpenFile(out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, os.FileMode(hdr.Mode).Perm())
 		if err != nil {
 			return err
 		}
-		// G110 does not apply: the entry list is fixed by the caller and every
-		// member of it is a binary this build wrote.
-		if _, err := io.Copy(w, tr); err != nil { //nolint:gosec
+		// Bounded rather than suppressed. G110 is about how far the gzip
+		// stream expands, which the entry allowlist above does not constrain
+		// -- the previous //nolint:gosec here gave the allowlist as its
+		// reason, which answered a different question. The limit is generous
+		// enough that no real binary approaches it and small enough that a
+		// malformed archive cannot fill the build host's disk.
+		if _, err := io.Copy(w, io.LimitReader(tr, maxExtractedFileBytes)); err != nil {
 			w.Close()
 			return err
 		}

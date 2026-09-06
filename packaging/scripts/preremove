@@ -27,6 +27,14 @@ case "${1:-}" in
 *) exit 0 ;;
 esac
 
+# The marker postinstall writes when it enables the oneshot. Removing it here
+# is what lets a later reinstall enable again: dpkg cannot distinguish
+# "removed, now being reinstalled" from "being upgraded" by its arguments
+# alone, and without this a reinstall would leave the unit disabled by the very
+# disable below.
+STATEDIR="${OPENVOX_CA_STATEDIR:-/var/lib/openvox-ca}"
+rm -f "$STATEDIR/first-boot-enabled" 2>/dev/null || :
+
 if [ -d "$SYSTEMD_RUNTIME" ]; then
 	systemctl --no-reload disable --now openvox-ca.service >/dev/null 2>&1 || :
 	# --now on the oneshot too. RemainAfterExit=yes leaves it "active

@@ -1678,29 +1678,69 @@ var _ = Describe("packaging helpers", func() {
 			dir = GinkgoT().TempDir()
 		})
 
-		write := func(name string) {
-			Expect(os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644)).To(Succeed())
+		// The paths a packaging run reports having written. They must exist,
+		// because the check now confirms that too.
+		write := func(names ...string) []string {
+			var paths []string
+			for _, name := range names {
+				full := filepath.Join(dir, name)
+				Expect(os.WriteFile(full, []byte("x"), 0o644)).To(Succeed())
+				paths = append(paths, full)
+			}
+			return paths
 		}
 
 		It("accepts one package per format per packaged variant", func() {
-			write("openvox-ca_1.2.3-1_amd64.deb")
-			write("openvox-ca_1.2.3-1_arm64.deb")
-			write("openvox-ca-1.2.3-1.x86_64.rpm")
-			write("openvox-ca-1.2.3-1.aarch64.rpm")
-			Expect(verifyPackagesWritten(dir, 2)).To(Succeed())
+			written := write(
+				"openvox-ca_1.2.3-1_amd64.deb", "openvox-ca_1.2.3-1_arm64.deb",
+				"openvox-ca-1.2.3-1.x86_64.rpm", "openvox-ca-1.2.3-1.aarch64.rpm",
+			)
+			Expect(verifyPackagesWritten(written, 2)).To(Succeed())
 		})
 
-		// Two variants whose configuration resolved to one architecture
-		// overwrite each other's file: the loop reports two successes and
-		// leaves one package. Counting what is on disk is what notices.
 		It("rejects a short count and names the format that came up short", func() {
-			write("openvox-ca_1.2.3-1_amd64.deb")
-			write("openvox-ca-1.2.3-1.x86_64.rpm")
-			write("openvox-ca-1.2.3-1.aarch64.rpm")
-			err := verifyPackagesWritten(dir, 2)
+			written := write(
+				"openvox-ca_1.2.3-1_amd64.deb",
+				"openvox-ca-1.2.3-1.x86_64.rpm", "openvox-ca-1.2.3-1.aarch64.rpm",
+			)
+			err := verifyPackagesWritten(written, 2)
 			Expect(err).To(MatchError(And(
 				ContainSubstring("expected 2 .deb packages"),
-				ContainSubstring("found 1"))))
+				ContainSubstring("wrote 1"))))
+		})
+
+		// The collision the check exists for: two variants resolving to one
+		// filename, so the second overwrote the first.
+		It("rejects the same path written twice", func() {
+			written := write("openvox-ca_1.2.3-1_amd64.deb", "openvox-ca-1.2.3-1.x86_64.rpm")
+			written = append(written, written[0])
+			err := verifyPackagesWritten(written, 2)
+			Expect(err).To(MatchError(And(
+				ContainSubstring("written twice"),
+				ContainSubstring("the second overwrote the first"))))
+		})
+
+		// A leftover package from an earlier version used to fail a correct
+		// build, because the check censused the directory instead of the run.
+		It("ignores an unrelated package left in the directory from an earlier build", func() {
+			written := write(
+				"openvox-ca_2.0.0-1_amd64.deb", "openvox-ca_2.0.0-1_arm64.deb",
+				"openvox-ca-2.0.0-1.x86_64.rpm", "openvox-ca-2.0.0-1.aarch64.rpm",
+			)
+			// Not part of this run.
+			Expect(os.WriteFile(filepath.Join(dir, "openvox-ca_1.2.3-1_amd64.deb"),
+				[]byte("stale"), 0o644)).To(Succeed())
+			Expect(verifyPackagesWritten(written, 2)).To(Succeed())
+		})
+
+		It("rejects a path the run claimed but did not leave behind", func() {
+			written := write(
+				"openvox-ca_1.2.3-1_amd64.deb", "openvox-ca_1.2.3-1_arm64.deb",
+				"openvox-ca-1.2.3-1.x86_64.rpm", "openvox-ca-1.2.3-1.aarch64.rpm",
+			)
+			Expect(os.Remove(written[0])).To(Succeed())
+			Expect(verifyPackagesWritten(written, 2)).To(MatchError(
+				ContainSubstring("was reported written but is not there")))
 		})
 	})
 
@@ -1892,11 +1932,12 @@ var _ = Describe("buildVariantPackages", func() {
 	})
 
 	It("writes one package per format, under the names apt and dnf expect", func() {
-		Expect(buildVariantPackages(distDir, ver, variant)).To(Succeed())
+		written, err := buildVariantPackages(distDir, ver, variant)
+		Expect(err).NotTo(HaveOccurred())
 
 		Expect(filepath.Join(distDir, "openvox-ca_9.9.9-1_amd64.deb")).To(BeAnExistingFile())
 		Expect(filepath.Join(distDir, "openvox-ca-9.9.9-1.x86_64.rpm")).To(BeAnExistingFile())
-		Expect(verifyPackagesWritten(distDir, 1)).To(Succeed())
+		Expect(verifyPackagesWritten(written, 1)).To(Succeed())
 	})
 
 	Describe("the deb's payload", func() {
@@ -1906,8 +1947,8 @@ var _ = Describe("buildVariantPackages", func() {
 		)
 
 		BeforeEach(func() {
-			Expect(buildVariantPackages(distDir, ver, variant)).To(Succeed())
-			var err error
+			_, err := buildVariantPackages(distDir, ver, variant)
+			Expect(err).NotTo(HaveOccurred())
 			modes, contents, err = debPayload(filepath.Join(distDir, "openvox-ca_9.9.9-1_amd64.deb"))
 			Expect(err).NotTo(HaveOccurred())
 		})
@@ -2043,7 +2084,7 @@ var _ = Describe("buildVariantPackages", func() {
 	// error naming the target that produces one rather than a silent rebuild.
 	It("refuses a variant whose tarball is not there, naming how to build it", func() {
 		missing := distVariantSpec{name: "linux_arm64", env: map[string]string{"GOARCH": "arm64"}, packaged: true}
-		err := buildVariantPackages(distDir, ver, missing)
+		_, err := buildVariantPackages(distDir, ver, missing)
 		Expect(err).To(MatchError(And(
 			ContainSubstring("does not build binaries"),
 			ContainSubstring("mage build:distVariant linux_arm64"))))
@@ -2348,7 +2389,8 @@ var _ = Describe("the rpm's payload", func() {
 		archive := filepath.Join(distDir, fmt.Sprintf("openvox-ca_%s_%s.tar.gz", ver, variant.name))
 		Expect(createTarGz(archive, src, distArchiveFiles([]string{"openvox-ca", "openvox-ca-ctl"}))).To(Succeed())
 
-		Expect(buildVariantPackages(distDir, ver, variant)).To(Succeed())
+		_, err = buildVariantPackages(distDir, ver, variant)
+		Expect(err).NotTo(HaveOccurred())
 		files, err = rpmPayload(filepath.Join(distDir, "openvox-ca-9.9.9-1.x86_64.rpm"))
 		Expect(err).NotTo(HaveOccurred())
 	})
@@ -2587,11 +2629,12 @@ var _ = Describe("the packages' maintainer scripts", func() {
 	// real systemd, which is the packaging CI leg (#254). A test that stubbed
 	// systemd-sysusers and then asserted the stub had been called would be
 	// asserting its own fixture.
-	var stubBin, log, systemdRuntime string
+	var stubBin, log, systemdRuntime, stateDir string
 
 	BeforeEach(func() {
 		stubBin = GinkgoT().TempDir()
 		systemdRuntime = GinkgoT().TempDir()
+		stateDir = GinkgoT().TempDir()
 		log = filepath.Join(GinkgoT().TempDir(), "calls.log")
 
 		for _, name := range []string{
@@ -2616,6 +2659,7 @@ var _ = Describe("the packages' maintainer scripts", func() {
 		cmd.Env = append(os.Environ(),
 			"PATH="+stubBin+":/usr/bin:/bin",
 			"OPENVOX_CA_SYSTEMD_RUNTIME="+systemdRuntime,
+			"OPENVOX_CA_STATEDIR="+stateDir,
 		)
 		out, err := cmd.CombinedOutput()
 		res := firstBootResult{ok: true, output: string(out)}
@@ -2704,24 +2748,80 @@ var _ = Describe("the packages' maintainer scripts", func() {
 	// was written. A test that inspects source text cannot fail for the
 	// property it names: it passes for a script whose condition is spelled
 	// correctly and does the wrong thing.
-	DescribeTable("enables the provisioning oneshot on a first install and not on an upgrade",
-		func(args []string, shouldEnable bool) {
+	// The enable decision is the marker, not the package manager's arguments.
+	// dpkg passes the previously-configured version in $2 for a package that
+	// was removed but not purged as well as for an upgrade, so the arguments
+	// alone cannot tell a reinstall from an update -- and a reinstall must
+	// re-enable, because our own preremove disabled the unit on the way out.
+	markerPath := func() string { return filepath.Join(stateDir, "first-boot-enabled") }
+
+	DescribeTable("enables the provisioning oneshot exactly once, and again after a removal",
+		func(args []string, markerPresent, shouldEnable bool) {
+			if markerPresent {
+				Expect(os.WriteFile(markerPath(), nil, 0o644)).To(Succeed())
+			}
+
 			_, calls := run("packaging/scripts/postinstall", args...)
 			if shouldEnable {
 				Expect(calls).To(ContainSubstring("systemctl enable openvox-ca-first-boot.service"),
 					"postinstall %v should have enabled the oneshot", args)
+				Expect(markerPath()).To(BeAnExistingFile(),
+					"a successful enable must record itself, or the next upgrade re-enables")
 			} else {
 				Expect(calls).NotTo(ContainSubstring("systemctl enable"),
 					"postinstall %v re-enabled the oneshot, overriding an operator's disable", args)
 			}
-			// daemon-reload happens either way; it is not the thing under test.
-			Expect(calls).To(ContainSubstring("systemctl daemon-reload"))
 		},
-		Entry("dpkg first install", []string{"configure"}, true),
-		Entry("rpm first install", []string{"1"}, true),
-		Entry("dpkg upgrade (previous version in $2)", []string{"configure", "1.0.0"}, false),
-		Entry("rpm upgrade ($1 is 2)", []string{"2"}, false),
+		Entry("dpkg first install", []string{"configure"}, false, true),
+		Entry("rpm first install", []string{"1"}, false, true),
+		Entry("dpkg upgrade, already enabled once", []string{"configure", "1.0.0"}, true, false),
+		Entry("rpm upgrade, already enabled once", []string{"2"}, true, false),
+		// preremove deletes the marker, so this is what a reinstall looks
+		// like: dpkg still passes a version in $2, but the unit is disabled
+		// and must be enabled again.
+		Entry("dpkg reinstall after remove", []string{"configure", "1.0.0"}, false, true),
 	)
+
+	// Enabling is on-disk symlink work. Gating it on a running systemd meant a
+	// chroot, image build or mounted-root install never enabled the oneshot,
+	// and because its only [Install] directive is RequiredBy=, never ran it.
+	It("enables the oneshot even where systemd is not running", func() {
+		absent := filepath.Join(GinkgoT().TempDir(), "no-such-runtime")
+		cmd := exec.Command("/bin/sh", "packaging/scripts/postinstall", "configure")
+		// SSLDIR and CONFIG are left at their defaults: they do not exist
+		// here, so those guards skip and what remains under test is the
+		// enable.
+		cmd.Env = append(os.Environ(),
+			"PATH="+stubBin,
+			"OPENVOX_CA_SYSTEMD_RUNTIME="+absent,
+			"OPENVOX_CA_STATEDIR="+stateDir,
+		)
+		out, err := cmd.CombinedOutput()
+		Expect(err).NotTo(HaveOccurred(), "postinstall failed: %s", out)
+
+		calls, readErr := os.ReadFile(log)
+		Expect(readErr).NotTo(HaveOccurred())
+		Expect(string(calls)).To(ContainSubstring("systemctl enable openvox-ca-first-boot.service"))
+		// daemon-reload genuinely needs a running systemd, so it stays behind
+		// the guard and must NOT have been attempted.
+		Expect(string(calls)).NotTo(ContainSubstring("daemon-reload"))
+	})
+
+	// The outcome decides whether provisioning ever runs, so it is reported
+	// rather than swallowed -- and the install still succeeds.
+	It("warns rather than failing when the oneshot cannot be enabled", func() {
+		Expect(os.WriteFile(filepath.Join(stubBin, "systemctl"),
+			[]byte("#!/bin/sh\nexit 1\n"), 0o755)).To(Succeed())
+
+		r, _ := run("packaging/scripts/postinstall", "configure")
+		Expect(r.ok).To(BeTrue(), "a failed enable must not fail the install")
+		Expect(r.output).To(And(
+			ContainSubstring("could not enable openvox-ca-first-boot.service"),
+			ContainSubstring("systemctl enable openvox-ca-first-boot"),
+		))
+		Expect(markerPath()).NotTo(BeAnExistingFile(),
+			"a failed enable must not record itself, or the next upgrade will not retry")
+	})
 
 	It("postremove exits cleanly whatever it is given", func() {
 		for _, arg := range []string{"remove", "purge", "upgrade", "0", "1", ""} {
@@ -3085,7 +3185,7 @@ var _ = Describe("postinstall's ownership and permission hardening", func() {
 	// so a spec had no way in without a container. The seam makes the
 	// hardening itself assertable -- --no-dereference, the symlink refusal, and
 	// mode 0640 on a file that will hold credentials.
-	var stubBin, log, sslDir, configPath, systemdRuntime string
+	var stubBin, log, sslDir, configPath, systemdRuntime, stateDir string
 
 	run := func(args ...string) (firstBootResult, string) {
 		// /bin/sh by absolute path, because PATH below deliberately holds
@@ -3106,6 +3206,7 @@ var _ = Describe("postinstall's ownership and permission hardening", func() {
 			"OPENVOX_CA_SYSTEMD_RUNTIME="+systemdRuntime,
 			"OPENVOX_CA_SSLDIR="+sslDir,
 			"OPENVOX_CA_CONFIG="+configPath,
+			"OPENVOX_CA_STATEDIR="+stateDir,
 		)
 		out, err := cmd.CombinedOutput()
 		res := firstBootResult{ok: true, output: string(out)}
@@ -3128,6 +3229,7 @@ var _ = Describe("postinstall's ownership and permission hardening", func() {
 		stubBin = GinkgoT().TempDir()
 		sslDir = GinkgoT().TempDir()
 		systemdRuntime = GinkgoT().TempDir()
+		stateDir = GinkgoT().TempDir()
 		log = filepath.Join(GinkgoT().TempDir(), "calls.log")
 		configPath = filepath.Join(GinkgoT().TempDir(), "config.yaml")
 

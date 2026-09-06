@@ -154,8 +154,15 @@ overrides:
       # the postinstall on a host with no systemd-sysusers.
       - systemd
       - passwd
+      # first-boot resolves this host's certificate name with `hostname -f` and
+      # `hostname -s`. /usr/bin/hostname is its own package on both formats and
+      # is absent from minimal and container base images, where both calls
+      # would fail into /dev/null, both resolver tiers would be skipped, and
+      # provisioning would mint a CA under `localhost` that no agent can use.
+      - hostname
   rpm:
     depends:
       - systemd
       # The same fallback's tools; on rpm distributions they are here.
       - shadow-utils
+      - hostname
