@@ -1159,6 +1159,81 @@ var automergeActionRE = regexp.MustCompile(`(?i)auto-?merge`)
 // down outside this repository had silently stopped working.
 var requiredMageTargets = []string{"build:packages"}
 
+// The two files verifyNodeTTL compares. Named rather than inlined so the
+// error messages can point at them and a rename breaks the build here.
+const (
+	firstBootScriptPath = "packaging/scripts/first-boot"
+	caSigningPath       = "internal/ca/signing.go"
+)
+
+// nodeTTLRE and certValidityRE read the two copies of the leaf lifetime.
+//
+// The shell one is a literal; the Go one is an expression, so it is matched as
+// its factors rather than evaluated -- reproducing Go's constant arithmetic
+// here would be a third place for this to be wrong.
+var (
+	nodeTTLRE      = regexp.MustCompile(`(?m)^NODE_TTL=([0-9]+)h$`)
+	certValidityRE = regexp.MustCompile(`(?m)certValidity\s*=\s*([0-9]+)\s*\*\s*([0-9]+)\s*\*\s*([0-9]+)\s*\*\s*time\.Hour`)
+)
+
+// verifyNodeTTL asserts that first-boot's NODE_TTL is the CA's own leaf
+// default, which its comment says it deliberately matches.
+//
+// Two copies of one policy in two languages, and nothing but a human
+// remembering kept them together. The drift is silent in the worst way: node
+// certificates minted by provisioning would expire on a different schedule
+// from every certificate the running CA issues, and nothing surfaces that
+// until one expires unexpectedly, potentially years later.
+//
+// A guard rather than a spec asserting today's value, because a spec that
+// hard-codes 43800h has to be edited whenever the policy legitimately changes
+// -- which is exactly the moment someone would edit it to match one side and
+// not notice the other. This derives both sides and compares them, so a
+// deliberate policy change passes as soon as both files agree and needs no
+// edit here at all.
+func verifyNodeTTL() error {
+	script, err := os.ReadFile(firstBootScriptPath)
+	if err != nil {
+		return err
+	}
+	m := nodeTTLRE.FindSubmatch(script)
+	if m == nil {
+		return fmt.Errorf("%s no longer sets NODE_TTL=<hours>h, so the CA's leaf lifetime and the "+
+			"lifetime provisioning mints with can no longer be compared", firstBootScriptPath)
+	}
+	shellHours, err := strconv.Atoi(string(m[1]))
+	if err != nil {
+		return err
+	}
+
+	signing, err := os.ReadFile(caSigningPath)
+	if err != nil {
+		return err
+	}
+	g := certValidityRE.FindSubmatch(signing)
+	if g == nil {
+		return fmt.Errorf("%s no longer spells certValidity as <n> * <n> * <n> * time.Hour, so this "+
+			"check cannot read it; update the pattern rather than deleting the check", caSigningPath)
+	}
+	goHours := 1
+	for _, f := range g[1:] {
+		n, err := strconv.Atoi(string(f))
+		if err != nil {
+			return err
+		}
+		goHours *= n
+	}
+
+	if shellHours != goHours {
+		return fmt.Errorf("provisioning mints node certificates with a %dh TTL (%s) but the CA issues "+
+			"leaf certificates for %dh (%s certValidity). They are meant to be the same lifetime: a "+
+			"node certificate minted at first boot should expire when one issued by the running CA "+
+			"would. Change both, or change the comment that says they match",
+			shellHours, firstBootScriptPath, goHours, caSigningPath)
+	}
+	return nil
+}
+
 // verifyMageTargets asserts that every mage target named outside Go resolves
 // to a target that exists: the ones in requiredMageTargets, and every
 // statically resolvable `mage <target>` invocation in the workflows.
@@ -2000,11 +2075,28 @@ var (
 // nothing in the build output to distinguish the two. Tracked files are what
 // the release is made of.
 func stageDocTree(dest string) error {
+	return stageDocTreeFrom(".", dest)
+}
+
+// stageDocTreeFrom is stageDocTree against a named checkout.
+//
+// The seam exists for one spec and is worth naming why: the property that
+// matters here is that an UNTRACKED file under docs/ is not packaged, and the
+// only way to exercise it is to create one. Doing that in the real working
+// tree means a `go test` timeout or a Ctrl-C between the write and the cleanup
+// leaves a stray untracked file under docs/ -- which is precisely the
+// category of file this function exists to keep out of a package. A spec for
+// that property should not be able to create one as a side effect.
+//
+// Same shape as renderUnitFrom and buildPackagesInto: the exported entry point
+// keeps its single-argument signature, and the root is a parameter only
+// underneath.
+func stageDocTreeFrom(repoRoot, dest string) error {
 	// Every entry, not the first three. Indexing them by hand meant a fourth
 	// documentation path could be added to docTreeEntries and silently never
 	// packaged -- the list would say it shipped and the package would not
 	// contain it, with nothing failing.
-	args := append([]string{"ls-files", "--"}, docTreeEntries...)
+	args := append([]string{"-C", repoRoot, "ls-files", "--"}, docTreeEntries...)
 	out, err := sh.Output("git", args...)
 	if err != nil {
 		return fmt.Errorf("listing tracked documentation (packaging enumerates it from git, so it "+
@@ -2024,7 +2116,7 @@ func stageDocTree(dest string) error {
 
 	for _, path := range paths {
 		staged := filepath.Join(dest, path)
-		if err := copyStagedFile(path, staged); err != nil {
+		if err := copyStagedFile(filepath.Join(repoRoot, path), staged); err != nil {
 			return err
 		}
 		if err := stampStagedFile(staged); err != nil {
@@ -2112,6 +2204,11 @@ func copyStagedFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
+	// 0644 explicitly, and NOT the source file's mode. What ends up in the
+	// package must not depend on the umask of whoever ran the build, nor on
+	// the mode a document happens to carry in one contributor's checkout --
+	// otherwise the same commit produces packages whose documentation is
+	// world-readable on one build host and not on another.
 	return os.WriteFile(dst, data, 0644)
 }
 
@@ -5058,6 +5155,10 @@ func (Dev) Check() error {
 	}
 	fmt.Println("Checking workflow base scoping...")
 	if err := verifyWorkflowBaseScoping(); err != nil {
+		return err
+	}
+	fmt.Println("Checking the provisioning TTL against the CA's own default...")
+	if err := verifyNodeTTL(); err != nil {
 		return err
 	}
 	// Vet the two packages with non-Linux build-tagged files. Every CI check

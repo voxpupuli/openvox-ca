@@ -1776,6 +1776,44 @@ var _ = Describe("packaging helpers", func() {
 			Expect(names).To(ConsistOf("openvox-ca", "openvox-ca-ctl"))
 		})
 
+		// The guard whose whole purpose is that a package cannot ship a
+		// zero-byte binary while the build reports success. A symlink,
+		// hardlink or directory entry carries no payload, so without the
+		// Typeflag check io.Copy writes nothing, the wanted name is marked
+		// found, and extraction "succeeds" -- producing exactly the artefact
+		// this refuses. Driven with a real archive rather than asserted from
+		// the source, because reading the guard cannot show it fires.
+		DescribeTable("refuses an entry that carries no payload",
+			func(flag byte, linkname string) {
+				archive := filepath.Join(GinkgoT().TempDir(), "bad.tar.gz")
+				f, err := os.Create(archive)
+				Expect(err).NotTo(HaveOccurred())
+				gz := gzip.NewWriter(f)
+				tw := tar.NewWriter(gz)
+				// Under one of the names the caller asks for: the guard has to
+				// fire on a wanted entry, not merely on some entry.
+				Expect(tw.WriteHeader(&tar.Header{
+					Name:     "openvox-ca",
+					Typeflag: flag,
+					Linkname: linkname,
+					Mode:     0o755,
+				})).To(Succeed())
+				Expect(tw.Close()).To(Succeed())
+				Expect(gz.Close()).To(Succeed())
+				Expect(f.Close()).To(Succeed())
+
+				dest := GinkgoT().TempDir()
+				err = extractTarGz(archive, dest, []string{"openvox-ca"})
+				Expect(err).To(MatchError(ContainSubstring("is not a regular file")))
+				// And nothing was written under the wanted name -- the failure
+				// must not leave the empty file it was refusing to create.
+				Expect(filepath.Join(dest, "openvox-ca")).NotTo(BeAnExistingFile())
+			},
+			Entry("a symlink", byte(tar.TypeSymlink), "openvox-ca-ctl"),
+			Entry("a hardlink", byte(tar.TypeLink), "openvox-ca-ctl"),
+			Entry("a directory", byte(tar.TypeDir), ""),
+		)
+
 		// A tarball missing a binary would otherwise produce a package that
 		// is well formed and installs a service with nothing to run.
 		It("refuses an archive missing one of them, naming it", func() {
@@ -2337,31 +2375,110 @@ var _ = Describe("stageDocTree", func() {
 		}
 	})
 
+	// The third branch of stampStagedFile: unset (no-op) and valid (stamp)
+	// are both exercised by the reproducibility spec, and a malformed value
+	// was not. It must degrade to "unstamped" rather than fail the build --
+	// nfpm is lenient about the same variable, and a build that died on a
+	// malformed SOURCE_DATE_EPOCH would be stricter than the tool whose
+	// behaviour it is mirroring.
+	DescribeTable("leaves the mtime alone when SOURCE_DATE_EPOCH cannot be parsed",
+		func(epoch string) {
+			GinkgoT().Setenv("SOURCE_DATE_EPOCH", epoch)
+
+			staged := filepath.Join(GinkgoT().TempDir(), "doc.md")
+			Expect(os.WriteFile(staged, []byte("x\n"), 0o644)).To(Succeed())
+			before, err := os.Stat(staged)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(stampStagedFile(staged)).To(Succeed(), "a malformed epoch must not fail the build")
+
+			after, err := os.Stat(staged)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(after.ModTime()).To(Equal(before.ModTime()),
+				"the file was stamped from a value that does not parse")
+		},
+		Entry("not a number", "not-a-number"),
+		Entry("a float", "1700000000.5"),
+		Entry("empty after trimming", " "),
+	)
+
 	// The whole reason this enumerates through `git ls-files` rather than
 	// walking docs/. A working tree routinely holds untracked drafts, notes
 	// and scratch files under docs/, and a walk would package every one of
 	// them into /usr/share/doc on every user's machine. Nothing else would
 	// notice: the package builds, installs and works.
-	It("stages tracked files only, not an untracked draft under docs/", func() {
-		draft := filepath.Join("docs", "zz-untracked-spec-draft.md")
-		Expect(os.WriteFile(draft, []byte("not for packaging\n"), 0o644)).To(Succeed())
-		DeferCleanup(func() { Expect(os.Remove(draft)).To(Succeed()) })
+	//
+	// Run against a scratch checkout rather than this one. The earlier version
+	// wrote the untracked draft into the real docs/ and removed it with
+	// DeferCleanup -- which holds for a passing run and for an assertion
+	// failure, but not for a `go test` timeout, a Ctrl-C or an OOM kill. A
+	// spec whose subject is "a stray untracked file under docs/ must never
+	// reach a package" should not be able to leave one behind.
+	Describe("against a scratch checkout", func() {
+		var repo string
 
-		// The premise: git must actually consider this untracked. A spec that
-		// silently ran against a tracked file would pass without testing
-		// anything.
-		out, err := exec.Command("git", "ls-files", "--", draft).Output()
-		Expect(err).NotTo(HaveOccurred())
-		Expect(strings.TrimSpace(string(out))).To(BeEmpty(),
-			"the fixture is tracked, so this spec proves nothing")
+		BeforeEach(func() {
+			repo = GinkgoT().TempDir()
+			git := func(args ...string) {
+				out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput()
+				Expect(err).NotTo(HaveOccurred(), "git %v: %s", args, out)
+			}
+			git("init", "--quiet")
+			// Committing needs an identity, and the ambient one may be absent
+			// on a CI runner.
+			git("config", "user.email", "spec@example.com")
+			git("config", "user.name", "Spec")
 
-		dest := GinkgoT().TempDir()
-		Expect(stageDocTree(dest)).To(Succeed())
-		Expect(filepath.Join(dest, draft)).NotTo(BeAnExistingFile())
-		// And the tracked neighbour in the same directory did get staged, so
-		// the absence above is exclusion rather than a doc tree that failed to
-		// stage at all.
-		Expect(filepath.Join(dest, "docs", "systemd.md")).To(BeAnExistingFile())
+			Expect(os.MkdirAll(filepath.Join(repo, "docs"), 0o755)).To(Succeed())
+			for path, body := range map[string]string{
+				"LICENSE":             "licence\n",
+				"README.md":           "readme\n",
+				"docs/systemd.md":     "tracked\n",
+				"docs/development.md": "tracked too\n",
+			} {
+				Expect(os.WriteFile(filepath.Join(repo, path), []byte(body), 0o600)).To(Succeed())
+			}
+			git("add", "LICENSE", "README.md", "docs")
+			git("commit", "--quiet", "-m", "fixture")
+		})
+
+		It("stages tracked files only, not an untracked draft under docs/", func() {
+			draft := filepath.Join(repo, "docs", "draft.md")
+			Expect(os.WriteFile(draft, []byte("not for packaging\n"), 0o644)).To(Succeed())
+
+			// The premise: git must actually consider this untracked. A spec
+			// that silently ran against a tracked file would prove nothing.
+			out, err := exec.Command("git", "-C", repo, "ls-files", "--", "docs/draft.md").Output()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(strings.TrimSpace(string(out))).To(BeEmpty(),
+				"the fixture is tracked, so this spec proves nothing")
+
+			dest := GinkgoT().TempDir()
+			Expect(stageDocTreeFrom(repo, dest)).To(Succeed())
+
+			Expect(filepath.Join(dest, "docs", "draft.md")).NotTo(BeAnExistingFile())
+			// And its tracked neighbours did stage, so the absence above is
+			// exclusion rather than a doc tree that failed to stage at all.
+			Expect(filepath.Join(dest, "docs", "systemd.md")).To(BeAnExistingFile())
+			Expect(filepath.Join(dest, "LICENSE")).To(BeAnExistingFile())
+		})
+
+		// What lands in the package must not depend on the mode a document
+		// happens to carry in somebody's checkout, nor on the umask of the
+		// build host -- otherwise one commit yields packages whose docs are
+		// world-readable on one machine and not on another. The fixtures are
+		// written 0600 above precisely so a copy that preserved the source
+		// mode would fail here.
+		It("stages every file 0644 regardless of the source mode", func() {
+			dest := GinkgoT().TempDir()
+			Expect(stageDocTreeFrom(repo, dest)).To(Succeed())
+
+			for _, rel := range []string{"LICENSE", "README.md", filepath.Join("docs", "systemd.md")} {
+				info, err := os.Stat(filepath.Join(dest, rel))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(info.Mode().Perm()).To(Equal(os.FileMode(0o644)), "mode of %s", rel)
+			}
+		})
 	})
 
 	// The floor exists because `git ls-files` says nothing and exits 0 when
@@ -3387,6 +3504,52 @@ var _ = Describe("the packages' maintainer scripts", func() {
 		))
 		Expect(markerPath()).NotTo(BeAnExistingFile(),
 			"a failed enable must not record itself, or the next upgrade will not retry")
+	})
+
+	// The branch added when the marker write stopped being swallowed: the
+	// enable succeeded, so provisioning is correctly set up and the install
+	// must not fail -- but nothing recorded that we enabled it, and the marker
+	// is the only thing stopping the NEXT upgrade re-enabling a unit the
+	// operator has since disabled. Silence here would put that back exactly
+	// where it was before round seven.
+	//
+	// Forced by pointing $STATEDIR at a regular file, so `mkdir -p` fails for
+	// a mundane, deterministic reason -- the same shape as the read-only /var
+	// or occupied path the script's comment names.
+	It("warns, but still succeeds, when the enable cannot be recorded", func() {
+		blocked := filepath.Join(GinkgoT().TempDir(), "not-a-directory")
+		Expect(os.WriteFile(blocked, []byte("in the way\n"), 0o644)).To(Succeed())
+
+		cmd := exec.Command("/bin/sh", "packaging/scripts/postinstall", "configure")
+		cmd.Env = append(os.Environ(),
+			"PATH="+stubBin,
+			"OPENVOX_CA_SYSTEMD_RUNTIME="+systemdRuntime,
+			"OPENVOX_CA_STATEDIR="+blocked,
+		)
+		out, err := cmd.CombinedOutput()
+		Expect(err).NotTo(HaveOccurred(), "a marker that cannot be written must not fail the install: %s", out)
+
+		Expect(string(out)).To(And(
+			ContainSubstring("could not record it"),
+			ContainSubstring("the next package upgrade will re-enable it"),
+		))
+
+		// The enable itself must still have happened -- this is the branch
+		// where it succeeded, and a spec that passed with no enable at all
+		// would be asserting the wrong failure.
+		calls, readErr := os.ReadFile(log)
+		Expect(readErr).NotTo(HaveOccurred())
+		Expect(string(calls)).To(ContainSubstring("systemctl enable openvox-ca-first-boot.service"))
+
+		// And nothing was recorded, which is what makes the warning true. The
+		// path is asserted through the blocking file itself rather than with
+		// BeAnExistingFile on a path beneath it -- stat under a regular file
+		// answers ENOTDIR, which Gomega reports as an error rather than as
+		// absence, and the spec would fail for the wrong reason.
+		info, statErr := os.Stat(blocked)
+		Expect(statErr).NotTo(HaveOccurred())
+		Expect(info.Mode().IsRegular()).To(BeTrue(),
+			"the blocking file was replaced, so mkdir -p did not fail as this spec assumes")
 	})
 
 	// A full uninstall should leave nothing of ours behind, and $STATEDIR is
