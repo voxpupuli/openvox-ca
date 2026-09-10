@@ -1,13 +1,17 @@
 #!/bin/bash
 # Migration integration test: VoxPupuli Puppet Server CA → openvox-ca.
 #
-# Runs inside the test-runner container (openvox-ca image) with the old
+# Runs inside the test-runner container (the integration fixture image built
+# from test/Dockerfile.run, not the published openvox-ca image) with the old
 # Puppet Server's CA directory mounted at /old-ca (read-only).
 #
 # Prerequisites (handled by test/compose-migration.yml):
 #   - old-puppet service is healthy (JVM Puppet Server with built-in CA)
 #   - /old-ca contains the real Puppet Server CA directory
 #   - openvox-ca and openvox-ca-ctl are on PATH
+#   - the fixture image provides the commands declared in
+#     test/fixture-commands.sh (their packages in test/Dockerfile.run);
+#     require_fixture_commands asserts this before Phase 1
 #
 # Output: TAP format.  Exit 0 when all pass, exit 1 if any fail.
 #
@@ -29,6 +33,12 @@
 # being re-rolled until it comes out green.
 
 set -uo pipefail
+
+# Asserted before anything else, including the mktemp calls below. See
+# test/fixture-commands.sh for what this guards against.
+# shellcheck source=test/fixture-commands.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../fixture-commands.sh"
+require_fixture_commands || exit 1
 
 # shellcheck source=test/migration/http-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/http-helpers.sh"
@@ -104,6 +114,7 @@ cleanup() {
     fi
 
     rm -rf "$NEW_CA_DIR" "$WORK_DIR" "$_HTTP_TMPDIR"
+    fixture_missing_cleanup
 }
 trap cleanup EXIT
 
@@ -358,6 +369,9 @@ if [ "$_new_ready" != "true" ]; then
          "no ready response after ${_i} attempts over ${_ready_elapsed}s (bound: ${READY_ATTEMPTS} x (${READY_MAX_TIME}s + ${READY_SLEEP}s)); $_proc_state; last probe: $_HTTP_INFO"
     # No dump here: the EXIT trap below dumps on any non-zero exit, and doing
     # it in both places would print the log twice.
+    # Reported here too: this early exit is the path most likely to be taken
+    # when a command is missing, so it is the path that most needs to say so.
+    fixture_missing_assert
     printf '\n1..%d\n' "$T"
     printf '# Results: %d passed, %d failed out of %d\n' \
         $(( T - FAILURES )) "$FAILURES" "$T"
@@ -529,6 +543,11 @@ http_ok "BEGIN CERTIFICATE" \
 # ═════════════════════════════════════════════════════════════════════════════
 # Results
 # ═════════════════════════════════════════════════════════════════════════════
+# Anything Bash could not resolve during the run. Without this the handler in
+# fixture-commands.sh records misses that nothing ever reads, and an undeclared
+# command that vanished would cost one line of stderr in a green run.
+fixture_missing_assert
+
 printf '\n1..%d\n' "$T"
 printf '# Results: %d passed, %d failed out of %d\n' \
     $(( T - FAILURES )) "$FAILURES" "$T"

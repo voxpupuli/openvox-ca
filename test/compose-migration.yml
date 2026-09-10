@@ -53,7 +53,7 @@ services:
       retries: 30
       start_period: 120s
 
-  # -- Test runner (openvox-ca image, runs migration test script) ------------─
+  # -- Test runner (integration fixture image, runs migration test script) ---─
   # Runs as root so it can read the old CA files (VoxPupuli creates them
   # 0600 root:root).  The test script copies them to a writable temp dir
   # before use, same as a real migration where an admin would scp/rsync.

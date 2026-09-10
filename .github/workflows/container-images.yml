@@ -195,8 +195,10 @@ jobs:
       # -- Provenance and SBOM for this per-architecture image ---------------─
       # The per-arch images are the meaningful ones to catalogue: each has its
       # own binary and its own base package set (CentOS Stream vs Alpine), so
-      # scanning them here catalogues curl, openssl and the rest of the base
-      # layer as well as the Go modules. The merged index gets provenance only.
+      # scanning them here catalogues that variant's base-layer packages as well
+      # as the Go modules. Which packages those are is whatever the image's own
+      # install line declares, so they are not listed here. The merged index
+      # gets provenance only.
       #
       # Every step below is keyed off the same push output as the build: fork
       # PRs push nothing and so sign nothing, and their GITHUB_TOKEN could not

@@ -3374,6 +3374,31 @@ func (Test) FailureLogHelpers() error {
 	return sh.RunV("bash", "test/failure-log-test.sh")
 }
 
+// FixtureCommands runs the regression suite for test/fixture-commands.sh, the
+// integration fixture image's command contract.
+//
+// The contract exists because a command satisfied only by whatever the base
+// image happens to ship is not declared: on 2026-09-10 the rolling stream10 tag
+// dropped diffutils, nothing had ever asked for the suite's one `diff` call, and
+// the assertion that broke reported a certificate-content mismatch on files that
+// were byte for byte identical. A missing binary was indistinguishable from a
+// defect in the code under test.
+//
+// Every branch that makes the contract useful is a failing branch, and CI only
+// ever takes the passing one, so each is exercised here instead -- including the
+// two that would otherwise re-create that dishonesty: a size check loose enough
+// to let `diff` go, and a dead recorder reporting "nothing was missing". The
+// suite builds a stub directory that IS the whole PATH rather than a prefix,
+// because prepending proves nothing about a command meant to be absent.
+//
+// Host-side, no container runtime, sub-second, so it rides in the unit job like
+// FailureLogHelpers. The mutations that need a real image are in
+// docs/development/testing.md, "Fixture image command contract".
+func (Test) FixtureCommands() error {
+	fmt.Println("Running fixture command contract tests...")
+	return sh.RunV("bash", "test/fixture-commands-test.sh")
+}
+
 // Puppet builds the Puppet stack images (puppet-master, puppet-client) and runs
 // the full Puppet integration test suite: CA TLS, catalog application,
 // PuppetDB reporting, exported resources, and CRL revocation enforcement.

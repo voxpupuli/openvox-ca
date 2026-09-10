@@ -230,6 +230,23 @@ jobs:
       # compute on a rare red one.
       - name: Run failure-log helper tests
         run: mage test:failureLogHelpers
+      # Host-side, sub-second, no container runtime, and it guards the fixture
+      # image's command contract that both in-container suites assert -- so it
+      # sits here rather than being duplicated into each of them.
+      #
+      # NOT the same reasoning as the step above, which is ungated because it
+      # only decides what gets printed after something else has already failed.
+      # This one guards a hard precondition: `require_fixture_commands || exit 1`
+      # is the first thing both suites do, so a broken helper aborts the compose
+      # and migration jobs before their first assertion. Gating is still the
+      # wrong trade, for a different reason -- the abort names its own cause in
+      # its Bail out! line, and this job is already red in parallel by then, so
+      # serialising three container jobs behind it on every green run buys
+      # nothing. Compare test:migrationHelpers, which does run inside the job it
+      # supports, because there the suite's own assertions depend on a retry
+      # bound the helper sets.
+      - name: Run fixture command contract tests
+        run: mage test:fixtureCommands
       - name: Coverage summary
         if: always()
         continue-on-error: true

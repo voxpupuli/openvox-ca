@@ -45,8 +45,11 @@ diverge.
 | `merge` (×2) | SLSA v1.0 provenance; a `cosign sign` signature, `--recursive` | The index digest — and, via `--recursive`, each child manifest |
 
 The per-architecture images are the ones worth cataloguing: each has its own
-binary and its own base package set, so the SBOM records the CentOS Stream or
-Alpine packages — `curl`, `openssl` and the rest — as well as the Go modules.
+binary and its own base package set, so the SBOM records whichever CentOS
+Stream or Alpine packages that variant installs, as well as the Go modules.
+The packages are deliberately not enumerated here: each image's `dnf install` or
+`apk add` line is the authority, and naming a subset in prose guarantees this
+sentence is wrong the next time one of them changes.
 Syft reads the image back out of the registry by digest rather than scanning a
 local rebuild, so the document describes what was actually pushed. The merged
 index carries provenance only; an SBOM of an index would just be the union of

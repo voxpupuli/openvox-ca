@@ -17,8 +17,21 @@ RUN go build -ldflags="-s -w" -o /openvox-ca     ./cmd/openvox-ca/ && \
 # ---- Runtime Stage ----
 FROM quay.io/centos/centos:stream10
 
-# curl: health checks and agent CSR submission
-# openssl: CSR generation and cert verification in integration tests
+# curl: the healthcheck in this repository's compose.yml runs
+#   `curl -skf https://localhost:8140/healthz/ready` inside this container, with
+#   a busybox-wget fallback that only exists in the -alpine variant. stream10
+#   ships no wget, so curl is what makes that example work. It is declared
+#   rather than left to the base even though curl-minimal is currently part of
+#   it: a dependency satisfied only by what the base happens to include is the
+#   failure mode that #316 exists to stop repeating.
+#
+# openssl is NOT installed. It was here for CSR generation and certificate
+# inspection in the integration suites, which do not run in this image -- they
+# run in the one built from test/Dockerfile.run, which now declares it. The
+# binaries are built CGO_ENABLED=0 and link no OpenSSL; nothing in this image
+# invokes the command. Removing it is the point of #316: the published image
+# should carry what openvox-ca needs to run, so that a future change of base
+# (#292) is not also a negotiation with the test suites.
 #
 # The puppet uid/gid is pinned to 1000 rather than left to useradd's first-free
 # allocation: `USER` below has to be numeric so a host that cannot read the
@@ -28,7 +41,7 @@ FROM quay.io/centos/centos:stream10
 # Both assertions below must be re-verified by hand when edited -- CI only ever
 # takes their passing branch. See docs/development/testing.md, "Container
 # identity guards", for the mutations and the messages they should produce.
-RUN dnf install -y curl openssl && dnf clean all && \
+RUN dnf install -y curl && dnf clean all && \
     groupadd -g 1000 puppet && \
     useradd -m -u 1000 -g 1000 puppet && \
     { [ "$(id -u puppet):$(id -g puppet)" = "1000:1000" ] || \

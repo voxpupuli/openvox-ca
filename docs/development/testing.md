@@ -42,6 +42,9 @@ wall clock than the same run without it.
 ## Container / Compose topologies
 
 A test runtime image (`test/Dockerfile.run`) and `test/compose.yml` are provided for development and integration testing.
+That image is the *fixture* image, separate from the two published ones: it carries the packages the suites
+invoke rather than the ones `openvox-ca` needs to run. Its command contract is described under
+[Fixture image command contract](#fixture-image-command-contract).
 
 ```bash
 # Build images and run the full integration test suite
@@ -220,6 +223,66 @@ sed 's|^RUN expected=|RUN usermod -aG wheel puppet \&\& expected=|' \
 These are deliberately not a CI job: each mutation is a full image build, and
 the failure they guard against is introduced by editing the assertion itself —
 which is exactly when this procedure is required.
+
+## Fixture image command contract
+
+`test/Dockerfile.run` builds the image the integration suites run *inside*. It is
+not either published image, and its package list exists for the suites rather
+than for `openvox-ca` — which needs none of it, being statically linked.
+
+The contract is split across two files on purpose, and they have to move
+together:
+
+- **`test/Dockerfile.run`** declares the **packages**, each annotated with the
+  commands it provides.
+- **`test/fixture-commands.sh`** declares the **commands** those packages must
+  deliver, and asserts them. `require_fixture_commands` runs before either
+  in-container suite does any work; `command_not_found_handle` catches a command
+  nobody wrote down, on a path nobody enumerated; `fixture_missing_assert` turns
+  what it caught into one TAP assertion at the end of the run.
+
+**Adding a command to an in-container script means adding it to both files.**
+Declaring a package without adding its commands leaves the check blind; adding a
+command without its package fails the preflight. Six scripts run in the image —
+`test/integration-compose.sh`, `test/migration/migration-test.sh`, the
+`test/migration/http-helpers.sh` it sources, the two
+`docker/puppet/ca-entrypoint*.sh`, and `test/fixture-commands.sh` itself — and two
+more, `test/puppet/puppet-stack.sh` and `test/backends/redis-stack.sh`, reach into
+it from the host with `compose exec`.
+
+A `Bail out!` naming an absent command means one of two things: the package was
+never declared, or the base image dropped it. The second is not hypothetical —
+on 2026-09-10 the rolling `stream10` tag dropped `diffutils`, and because
+nothing had ever declared the suite's one `diff` call, both Compose legs failed
+while *asserting a certificate-content mismatch on byte-identical files*. The
+base cannot be pinned against a repeat: quay does not retain superseded CentOS
+Stream digests, which `renovate.json` records as its reason for declining.
+
+`mage test:fixtureCommands` exercises the guard logic on the host. CI never takes
+its failing branches, so the mutations below check the parts that only a real
+image can show. Apply each to a copy, never to the tracked file, and read the
+message rather than just the non-zero exit.
+
+```bash
+# 1. A declared package the base no longer provides. Drop diffutils from the
+#    install line, rebuild, and run a compose leg.
+#    -- expect "Bail out! ... # absent from PATH: diff", before test 1 runs.
+sed 's/ diffutils findutils/ findutils/' test/Dockerfile.run > /tmp/mut && \
+    docker build -f /tmp/mut -t openvox-ca-integ:latest . && \
+    docker compose -f test/compose.yml up --exit-code-from test-runner
+
+# 2. The contract's size check. Delete any entry from FIXTURE_COMMANDS without
+#    adjusting FIXTURE_COMMANDS_EXPECTED.
+#    -- expect "Bail out! fixture command contract lists 27 commands, expected 28".
+sed '/^    diff$/d' test/fixture-commands.sh > /tmp/mut && \
+    bash -c 'set -uo pipefail; . /tmp/mut; require_fixture_commands'
+
+# 3. The recorder. Point FIXTURE_MISSING_LOG somewhere unwritable; without this
+#    check a dead recorder reports "nothing was missing".
+#    -- expect "Bail out! cannot write the supplied FIXTURE_MISSING_LOG at /proc/x".
+bash -c 'set -uo pipefail; FIXTURE_MISSING_LOG=/proc/x; . test/fixture-commands.sh; \
+    require_fixture_commands'
+```
 
 ## Diagnosing a failed compose suite
 

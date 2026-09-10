@@ -1,4 +1,10 @@
-# Runtime image built from locally-compiled binaries.
+# Integration test fixture image, built from locally-compiled binaries.
+#
+# This is NOT the published runtime image -- see Dockerfile and
+# Dockerfile.alpine for those. It exists to run the suites, and the packages
+# below are chosen for what the suites invoke, not for what openvox-ca needs in
+# order to run. Keeping the two apart is what lets the published image be
+# minimised independently of the test suites (#316, under #292).
 #
 # Build the binaries first:
 #   mage build:all
@@ -12,8 +18,56 @@
 
 FROM quay.io/centos/centos:stream10
 
-# curl: health checks and agent CSR submission
-# openssl: CSR generation and cert verification in integration tests
+# Declared dependencies of the suites that run INSIDE this image. Six scripts
+# run here: test/integration-compose.sh, test/migration/migration-test.sh, the
+# test/migration/http-helpers.sh it sources, docker/puppet/ca-entrypoint.sh,
+# docker/puppet/ca-entrypoint-redis.sh, and test/fixture-commands.sh itself,
+# which uses mktemp, rm, sort, tr and sed -- though the suites call those
+# heavily too, so the helper is an additional consumer rather than the reason
+# any of them is declared. Two more --
+# test/puppet/puppet-stack.sh and test/backends/redis-stack.sh -- run on the
+# host and reach in with `compose exec`, which is why `sh` matters below even
+# though nothing in the image's own scripts uses it.
+#
+#   bash             the interpreter every in-container script is invoked with,
+#                    and the owner of /bin/sh, which the two host-side suites
+#                    exec into this image
+#   coreutils-single basename cat chmod cp cut date dirname head ls mkdir
+#                    mktemp rm seq sleep sort tail touch tr wc
+#   curl             HTTP API exercise, and the `curl` healthcheck of every
+#                    test/compose*.yml service built from this file that declares
+#                    one -- five of the six do; compose-migration.yml's
+#                    test-runner has no healthcheck. Stated as a property rather
+#                    than a list because an enumeration here was already wrong
+#                    once, and quantified over the services that have one so it
+#                    stays true when a seventh arrives
+#   diffutils        `diff`, in integration-compose.sh's import assertion
+#   findutils        `find`, over the migrated signed-cert directory
+#   grep             assertions throughout
+#   openssl          CSR generation, and certificate/CRL inspection
+#   python3          JSON field extraction in two assertions: the certificate
+#                    out of a `generate` response, and the count out of a
+#                    `sign/all` response. Not the inventory assertions,
+#                    which use [ -f ] and grep
+#   sed              output normalisation in a handful of assertions
+#
+# `coreutils` is deliberately NOT requested: it conflicts with the
+# coreutils-single the base ships, and dnf fails the build rather than
+# substituting. coreutils-single provides every command listed against it.
+#
+# This list is enforced at runtime, not taken on trust: test/fixture-commands.sh
+# carries the same set as commands and both in-container suites assert it before
+# doing any work. Declaring a package here without adding its commands there
+# leaves the check blind, so change the two together. The mutations that prove
+# those guards still fail are registered in docs/development/testing.md,
+# "Fixture image command contract".
+#
+# Why these are declared at all, rather than left to the base: on 2026-09-10 the
+# rolling stream10 tag dropped diffutils, which no Dockerfile had ever asked
+# for, and both Compose legs failed. A dependency satisfied only by whatever the
+# base happens to include is not declared. Pinning the base is not the
+# alternative -- quay does not retain superseded CentOS Stream digests, which
+# renovate.json records as its reason for declining to pin it.
 #
 # uid/gid 1000 pinned to match the published images (see Dockerfile): `USER`
 # has to be numeric, and the local runtime image should present the same
@@ -21,7 +75,9 @@ FROM quay.io/centos/centos:stream10
 # The assertion below must be re-verified by hand when edited -- CI only ever
 # takes its passing branch. See docs/development/testing.md, "Container
 # identity guards".
-RUN dnf install -y curl openssl && dnf clean all && \
+RUN dnf install -y bash coreutils-single curl diffutils findutils grep \
+        openssl python3 sed && \
+    dnf clean all && \
     groupadd -g 1000 puppet && \
     useradd -m -u 1000 -g 1000 puppet && \
     { [ "$(id -u puppet):$(id -g puppet)" = "1000:1000" ] || \
