@@ -67,6 +67,16 @@ commonAnnotations: {}
 #     enable_expired_cert_cleanup: true
 #     leaf_backdate_sec: 300   # clock-skew tolerance on every leaf; assumes synchronised clocks
 #     managed_cert_interval_sec: 900   # how often managed certificates are reconciled
+#     # Certificates openvox-ca issues and renews for OpenVox components. Each
+#     # entry needs a store: a Kubernetes Secret or a local file pair, never
+#     # inferred. The Secret holding OpenVox Server's key is a CA admin
+#     # credential; see docs/configuration.md before enabling this.
+#     managed_certs:
+#       - certname: puppetserver.openvox.svc.cluster.local
+#         names: [puppetserver, puppetserver.openvox.svc]
+#         renew_before: 720h
+#         store:
+#           secret: {name: puppetserver-tls, namespace: openvox}
 config: {}
 
 # Use a ConfigMap you manage yourself instead of one rendered from `config`.
@@ -317,6 +327,19 @@ kubernetesExport:
     # target namespace you export into needs a binding. Ignored when scope is
     # ClusterRole.
     namespaces: []
+
+# Kubernetes wiring for `config.managed_certs`, the certificates openvox-ca
+# issues and renews for OpenVox components. The certificates themselves are
+# configured under `config`, not here; see docs/configuration.md.
+managedCerts:
+  rbac:
+    # Create the Role/RoleBinding granting get, patch and create on the Secrets
+    # that config.managed_certs names -- one pair per namespace those Secrets
+    # live in, taken from the entries themselves. Nothing is rendered when no
+    # managed certificate uses a Secret store, or when the chart cannot read
+    # the configuration (existingConfigMap, args, or a --config in extraArgs);
+    # manage the Role yourself in that case.
+    create: true
 
 # -- Workload ------------------------------------------------------------------
 

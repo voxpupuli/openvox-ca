@@ -1,0 +1,65 @@
+{{/*
+The Role openvox-ca needs to keep a managed certificate's Secret current.
+
+A separate Role from the export's rather than more rules in it, and that is a
+decision rather than tidiness. The export needs create and patch and no more --
+it writes its targets and never reads them back -- whereas this needs `get` as
+well, for the renewal decision and to tell an adoption from drift. Putting them
+in one Role would give the exporter read access to every Secret it can write,
+including, under rbac.scope: ClusterRole, cluster-wide. It would also bind in
+the wrong namespaces: an export target's namespace is listed in values, while a
+managed certificate's is in the entry, and the two sets are usually different
+because a component's Secret lives with the component.
+
+Namespace-scoped only, for the same reason: the namespaces are known, so a
+ClusterRole would be strictly wider for nothing.
+
+Rendered only when the chart can read the configuration. Unlike the export
+there is no chart-level flag that says the feature is on, so under
+existingConfigMap, `args`, or a --config in extraArgs the chart knows neither
+that a managed certificate exists nor what its Secret is called -- and granting
+get/patch on every Secret in scope on the chance that one does would be a much
+wider grant than the export's equivalent. Nothing is rendered instead, and
+NOTES.txt says so.
+*/}}
+{{- if eq (include "openvox-ca.managedCertRBACRendered" .) "true" }}
+{{- $fullName := include "openvox-ca.fullname" . }}
+{{- $namespace := include "openvox-ca.namespace" . }}
+{{- $labels := include "openvox-ca.labels" . }}
+{{- $serviceAccount := include "openvox-ca.serviceAccountName" . }}
+{{- range $ns := fromJsonArray (include "openvox-ca.managedCertNamespaces" $) }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullName }}-managed-certs
+  namespace: {{ $ns }}
+  labels:
+    {{- $labels | nindent 4 }}
+  {{- with $.Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- include "openvox-ca.managedCertRules" (dict "context" $ "namespace" $ns) | nindent 0 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullName }}-managed-certs
+  namespace: {{ $ns }}
+  labels:
+    {{- $labels | nindent 4 }}
+  {{- with $.Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fullName }}-managed-certs
+subjects:
+  - kind: ServiceAccount
+    name: {{ $serviceAccount }}
+    namespace: {{ $namespace }}
+{{- end }}
+{{- end }}

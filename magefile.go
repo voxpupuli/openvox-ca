@@ -2198,6 +2198,132 @@ func (Chart) Test() error {
 			notWants: []string{"kind: Role\n"},
 		},
 		{
+			// A managed certificate's Role comes from the configuration, not
+			// from values: the entry names its own Secret and namespace,
+			// because a component's Secret lives with the component rather
+			// than with the CA.
+			name: "a managed certificate in a Secret renders a narrowed Role in its own namespace",
+			sets: []string{tls, "serviceAccount.create=true"},
+			valuesYAML: `
+config:
+  managed_certs:
+    - certname: puppetserver.openvox.svc.cluster.local
+      names: [puppetserver]
+      renew_before: 720h
+      store:
+        secret:
+          name: puppetserver-tls
+          namespace: openvox
+`,
+			wants: []string{
+				"name: openvox-ca-managed-certs",
+				"namespace: openvox",
+				"- puppetserver-tls",
+				`verbs: ["get", "patch"]`,
+				"automountServiceAccountToken: true",
+			},
+			// get is what separates this Role from the export's, and it must
+			// not have arrived cluster-wide.
+			notWants: []string{"kind: ClusterRole"},
+		},
+		{
+			// The systemd shape. A file store talks to nothing, so it must
+			// render no Role and mount no token -- a chart that inferred
+			// Kubernetes from its own presence would give both.
+			name: "a file-store managed certificate needs no Role and no token",
+			sets: []string{tls},
+			valuesYAML: `
+config:
+  managed_certs:
+    - certname: openvoxview.example.com
+      names: [openvoxview.example.com]
+      renew_before: 720h
+      store:
+        files:
+          cert: /etc/openvox/ssl/cert.pem
+          key: /etc/openvox/ssl/key.pem
+`,
+			wants:    []string{"kind: Deployment"},
+			notWants: []string{"kind: Role\n", "kind: RoleBinding\n", "automountServiceAccountToken: true"},
+		},
+		{
+			// The other half of managedCertRBACRendered. Without this, both
+			// dropping the rbac.create conjunct and hardwiring the helper to
+			// true leave every assertion above green -- the mistake the
+			// export's own history records.
+			name: "managedCerts.rbac.create: false renders no Role at all",
+			sets: []string{tls, "serviceAccount.create=true", "managedCerts.rbac.create=false"},
+			valuesYAML: `
+config:
+  managed_certs:
+    - certname: a.example.com
+      names: [a]
+      renew_before: 720h
+      store: {secret: {name: a-tls, namespace: openvox}}
+`,
+			wants: []string{"kind: Deployment"},
+			notWants: []string{
+				"name: openvox-ca-managed-certs",
+				// Still needs the token: the CA will talk to the API server
+				// whether or not this chart created the Role for it.
+				"kind: Role\n",
+			},
+		},
+		{
+			// The third consumer of the predicate. With no Role rendered there
+			// is nothing to bind, so the default-ServiceAccount refusal must
+			// stay silent -- otherwise this valid install is refused and the
+			// reject case below would not notice.
+			name: "no managed-certificate Role means no default-ServiceAccount refusal",
+			sets: []string{tls, "managedCerts.rbac.create=false", "serviceAccount.create=false"},
+			valuesYAML: `
+config:
+  managed_certs:
+    - certname: a.example.com
+      names: [a]
+      renew_before: 720h
+      store: {secret: {name: a-tls, namespace: openvox}}
+`,
+			wants:    []string{"kind: Deployment"},
+			notWants: []string{"name: openvox-ca-managed-certs"},
+		},
+		{
+			// The chart cannot read a config it does not render, so it knows
+			// neither that a managed certificate exists nor what its Secret is
+			// called. Unlike the export there is no chart-level flag that
+			// could tell it the feature is on, so granting get/patch on every
+			// Secret in scope on the chance that one exists would be far wider
+			// than the export's equivalent. Nothing is rendered, and the notes
+			// say what to create by hand.
+			name:  "an unreadable config renders no managed-certificate Role, and says so",
+			sets:  []string{tls, "existingConfigMap=my-config", "serviceAccount.create=true"},
+			notes: true,
+			wants: []string{
+				"no Role was created for managed certificates",
+				"narrowed by resourceNames",
+			},
+			notWants: []string{"name: openvox-ca-managed-certs"},
+		},
+		{
+			// SECURITY: whoever can read the Secret holding OpenVox Server's
+			// key can administer this CA, because its certname is listed in
+			// puppetServers. That is the intended configuration and not new
+			// exposure -- it is what the operator is told, not prevented from
+			// doing.
+			name:  "an operator installing managed certificates is told those Secrets are admin credentials",
+			sets:  []string{tls, "serviceAccount.create=true"},
+			notes: true,
+			valuesYAML: `
+config:
+  managed_certs:
+    - certname: puppetserver.openvox.svc.cluster.local
+      names: [puppetserver]
+      renew_before: 720h
+      store: {secret: {name: puppetserver-tls, namespace: openvox}}
+`,
+			wants: []string{"CA admin credential"},
+		},
+		{
 			name:     "rbac.scope: ClusterRole selects the cluster-scoped kinds",
 			sets:     []string{tls, "kubernetesExport.enabled=true", "kubernetesExport.rbac.scope=ClusterRole", "kubernetesExport.targets[0].kind=Secret", "kubernetesExport.targets[0].metadata.name=t", "kubernetesExport.targets[0].cert=true"},
 			wants:    []string{"kind: ClusterRole\n", "kind: ClusterRoleBinding\n"},
@@ -2762,6 +2888,25 @@ func (Chart) Test() error {
 			name:    "a ServiceMonitor for an exporter that is switched off",
 			sets:    []string{tls, "metrics.serviceMonitor.enabled=true"},
 			wantErr: "nothing to scrape",
+		},
+		{
+			// Worse to hand out by accident than the export's, which this
+			// message has to distinguish itself from: the managed-certificate
+			// Role carries `get`, so binding it to the default ServiceAccount
+			// would let every pod in the namespace read the private keys this
+			// CA issues -- OpenVox Server's among them, which is an admin
+			// credential for the CA itself.
+			name: "a managed-certificate Role bound to the namespace's default ServiceAccount",
+			sets: []string{tls, "serviceAccount.create=false"},
+			valuesYAML: `
+config:
+  managed_certs:
+    - certname: a.example.com
+      names: [a]
+      renew_before: 720h
+      store: {secret: {name: a-tls, namespace: openvox}}
+`,
+			wantErr: "managedCerts.rbac.create",
 		},
 		{
 			name:    "an ingress routed to a metrics port that was never created",

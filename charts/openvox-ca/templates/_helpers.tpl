@@ -267,6 +267,8 @@ true
 {{- end -}}
 {{- if eq (include "openvox-ca.exportConfigured" .) "true" -}}
 true
+{{- else if eq (include "openvox-ca.managedCertsNeedAPI" .) "true" -}}
+true
 {{- else if eq ($authMethod | toString) "kubernetes" -}}
 true
 {{- else -}}
@@ -320,6 +322,147 @@ false
 {{- end -}}
 
 {{/*
+The Secrets `config.managed_certs` stores certificates in, as a JSON list of
+{namespace, name} objects, or "unknown" when the chart cannot read the
+configuration.
+
+Only entries whose store is a Secret: a managed certificate may equally keep
+its material in local files, which needs no Kubernetes access at all. Which one
+an entry uses is configuration and never inference, so this reads the store
+block rather than guessing from the environment.
+
+A namespace is resolved to the release namespace when the entry omits one,
+because that is what the server does with it — the pod's own. Resolving it here
+rather than leaving it empty is what lets the RBAC be rendered per namespace:
+an entry without a namespace needs a Role in the release namespace, not a Role
+in "".
+
+Keyed on configFileKnown for the same reason exportTargetNames is: the question
+is not "can the chart read the values" but "might the server be reading a
+different file". Under existingConfigMap, args, or a --config in extraArgs the
+answer is "unknown", and unlike the export there is no chart-level flag that
+could tell us the feature is on at all — so the callers render nothing rather
+than granting something in full. See the NOTES warning, which says so.
+*/}}
+{{- define "openvox-ca.managedCertSecrets" -}}
+{{- if ne (include "openvox-ca.configFileKnown" .) "true" -}}
+unknown
+{{- else -}}
+{{- $namespace := include "openvox-ca.namespace" . -}}
+{{- $config := include "openvox-ca.config" . | fromYaml -}}
+{{- $secrets := list -}}
+{{- range (dig "managed_certs" list $config) -}}
+{{- $secret := dig "store" "secret" dict . -}}
+{{- with (dig "name" "" $secret) -}}
+{{- $secrets = append $secrets (dict "namespace" (default $namespace (dig "namespace" "" $secret)) "name" .) -}}
+{{- end -}}
+{{- end -}}
+{{- $secrets | toJson -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Whether any managed certificate stores its material in a Kubernetes Secret, and
+so whether the pod needs to talk to the API server for one.
+
+False for a file-only configuration, which is the systemd shape and must not be
+given a projected token it has no use for. "unknown" from managedCertSecrets is
+not this predicate's problem: needsAPIAccess already answers true for an
+unreadable configuration, before it reaches here.
+*/}}
+{{- define "openvox-ca.managedCertsNeedAPI" -}}
+{{- $raw := include "openvox-ca.managedCertSecrets" . -}}
+{{- if or (eq $raw "unknown") (fromJsonArray $raw) -}}
+true
+{{- else -}}
+false
+{{- end -}}
+{{- end -}}
+
+{{/*
+Whether the managed-certificate Role and its bindings are rendered.
+
+The same coupling exportRBACRendered exists for, and kept separate for the same
+reason it is one definition: the RBAC template renders on this, the
+default-ServiceAccount refusal guards it, and the NOTES warning discloses what
+it could not narrow. One of those moving without the others is the mistake the
+export's own history records twice.
+*/}}
+{{- define "openvox-ca.managedCertRBACRendered" -}}
+{{- $raw := include "openvox-ca.managedCertSecrets" . -}}
+{{- if and .Values.managedCerts.rbac.create (ne $raw "unknown") (fromJsonArray $raw) -}}
+true
+{{- else -}}
+false
+{{- end -}}
+{{- end -}}
+
+{{/*
+The namespaces a managed-certificate Role has to exist in: one per namespace
+some managed certificate's Secret lives in.
+
+Derived from the configuration rather than listed in values, unlike the
+export's rbac.namespaces. The export's target namespaces are not in the config
+in a form the chart can always resolve, whereas a managed certificate names its
+own -- so asking an operator to repeat them would be a second place for the
+same fact to be wrong.
+*/}}
+{{- define "openvox-ca.managedCertNamespaces" -}}
+{{- $raw := include "openvox-ca.managedCertSecrets" . -}}
+{{- $namespaces := list -}}
+{{- if ne $raw "unknown" -}}
+{{- range (fromJsonArray $raw) -}}
+{{- $namespaces = append $namespaces .namespace -}}
+{{- end -}}
+{{- end -}}
+{{- $namespaces | uniq | sortAlpha | toJson -}}
+{{- end -}}
+
+{{/*
+The managed-certificate Role's rules for one namespace.
+
+Three verbs, and the split between them is the whole of the design:
+
+  * get is narrowed. The reconcile decision reads the stored material to
+    decide whether a replacement is due, and reads the object's managedFields
+    to tell an adoption from drift.
+  * patch is narrowed. It is the server-side apply that writes the material.
+  * create cannot be narrowed, because an object has no name at admission
+    time. It is kept rather than dropped: a pre-created Secret makes the apply
+    a plain patch and works without it, but requiring N Secrets to exist first
+    stops the CA being installable without this chart, and it is what makes
+    "delete the Secret" a working remedy for a refused adoption.
+
+list and watch are deliberately absent. Neither can be narrowed by
+resourceNames, so an informer would need broad read access to every Secret in
+the namespace; a periodic get per certificate is enough for a handful of them.
+
+For comparison, cert-manager's controller ClusterRole takes get, list, watch,
+create, update, delete and patch on secrets cluster-wide with no resourceNames
+at all. This stays the tighter grant.
+*/}}
+{{- define "openvox-ca.managedCertRules" -}}
+{{- $names := list -}}
+{{- range (fromJsonArray (include "openvox-ca.managedCertSecrets" .context)) -}}
+{{- if eq .namespace $.namespace -}}
+{{- $names = append $names .name -}}
+{{- end -}}
+{{- end -}}
+rules:
+  # create cannot be restricted by resourceNames -- the object has no name yet
+  # at admission time -- but get and patch can, so reading and overwriting an
+  # *existing* Secret is held to the ones config.managed_certs names.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "patch"]
+    resourceNames:
+      {{- toYaml ($names | uniq | sortAlpha) | nindent 6 }}
+{{- end -}}
+
+{{/*
 Why the pod needs the Kubernetes API, as an operator-facing phrase, or empty
 when the chart cannot name a reason.
 
@@ -340,6 +483,8 @@ chart cannot see far enough to rule anything out.
 {{- define "openvox-ca.apiAccessReason" -}}
 {{- if eq (include "openvox-ca.exportConfigured" .) "true" -}}
 Kubernetes export
+{{- else if and (eq (include "openvox-ca.configFileKnown" .) "true") (eq (include "openvox-ca.managedCertsNeedAPI" .) "true") -}}
+managed certificates stored in Secrets
 {{- else if eq (include "openvox-ca.configFullyKnown" .) "true" -}}
 {{- if eq (include "openvox-ca.needsAPIAccess" .) "true" -}}
 OpenBao Kubernetes auth
@@ -635,6 +780,21 @@ CrashLoopBackOff or a Service that silently routes nowhere.
 {{- end -}}
 
 {{/*
+  The same refusal for the managed-certificate Role, which is worse to hand out
+  by accident: it carries `get` as well, so every pod in the namespace could
+  read the private keys of the certificates this CA issues -- including OpenVox
+  Server's, which is an admin credential for this CA.
+
+  Its own `if` rather than an `or` with the export's, so the message names the
+  setting the operator actually set.
+*/}}
+{{- if eq (include "openvox-ca.managedCertRBACRendered" .) "true" -}}
+{{- if eq (include "openvox-ca.serviceAccountName" .) "default" -}}
+{{- fail "managedCerts.rbac.create would bind the managed-certificate Role to the namespace's default ServiceAccount, granting get/create/patch on those Secrets to every pod in the namespace -- which means every pod could read the private keys openvox-ca issues. Set serviceAccount.create: true, or serviceAccount.name to a dedicated account." -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
   extraConfigFiles is emitted into the same ConfigMap `data` map as the files the
   chart renders, and it is ranged last, so a colliding key produces two entries
   of one name and the operator's wins. Then every decision the chart made — the
@@ -903,6 +1063,23 @@ Moving the targets into kubernetesExport.targets will not help while the config
 stays unreadable — drop kubernetesExport.rbac.create and manage the Role yourself
 with an explicit resourceNames list.
 {{- end }}
+{{- end }}
+{{- if and .Values.managedCerts.rbac.create (eq (include "openvox-ca.configFileKnown" .) "false") }}
+
+NOTE: the chart cannot read the configuration{{ if .Values.existingConfigMap }} (existingConfigMap){{ else }} (args, or a --config in
+extraArgs){{ end }}, so no Role was created for managed certificates. If your
+config.yaml has a managed_certs entry with a Secret store, openvox-ca will be
+refused by RBAC when it tries to write that Secret — while readiness stays
+green. Create a Role yourself granting get, patch and create on secrets,
+narrowed by resourceNames to the Secrets it names, in each of their namespaces.
+{{- end }}
+{{- if eq (include "openvox-ca.managedCertRBACRendered" .) "true" }}
+
+WARNING: openvox-ca is configured to issue certificates into Secrets, and can
+read and overwrite every Secret those entries name. A component certificate for
+a certname listed in puppetServers is a CA admin credential, because that
+listing is what grants administrative access — so treat those Secrets and their
+namespaces with the care you would give the CA's own key.
 {{- end }}
 {{- if and .Values.metrics.enabled (not .Values.networkPolicy.enabled) }}
 
