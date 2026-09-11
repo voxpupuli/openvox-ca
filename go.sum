@@ -231,8 +231,8 @@ github.com/onsi/ginkgo/v2 v2.32.1 h1:6tlvcDm/3sE8lGJbZ4+d4mO3RLy24/tQWOFzVSQNIfw
 github.com/onsi/ginkgo/v2 v2.32.1/go.mod h1:+aXOY+vzZ5mu2iI2HpTZUPmM//oQfsNFX6gU9kNcA44=
 github.com/onsi/gomega v1.43.0 h1:VlG/1FxqNxhSO+lq/OHBNaaqwiBK/mO8JbVkX9Y+FeU=
 github.com/onsi/gomega v1.43.0/go.mod h1:REff/hsDsodHoKlWsP2mAPhu1+5/6hVYNf9rIEBpeSg=
-github.com/openbao/openbao/api/auth/approle/v2 v2.6.0 h1:b24RZeBFDUyQX4liW07KMczDj2R9R/CsZgCKifSyOcs=
-github.com/openbao/openbao/api/auth/approle/v2 v2.6.0/go.mod h1:bR50ddAcm6UWz1k13ZOtCOC90vqfCmA2V+lKa7sfoBU=
+github.com/openbao/openbao/api/auth/approle/v2 v2.7.0 h1:Z3sEM22/Nr5IrKmBXoR+b3okH/A5JjyiGOW74PKRscg=
+github.com/openbao/openbao/api/auth/approle/v2 v2.7.0/go.mod h1:OoMbWNiRtOdkxEMyzBTDyCzVv2uM3xzE4YMhwMOnux0=
 github.com/openbao/openbao/api/auth/kubernetes/v2 v2.6.0 h1:54qt4Xqqa6QjquAK+IalrLWdQaRq23uDi25S4Oww7yE=
 github.com/openbao/openbao/api/auth/kubernetes/v2 v2.6.0/go.mod h1:ym1wB1TkbsGmQNR9aFNDK7YXxzESv+dAL2wkkhq4Dx8=
 github.com/openbao/openbao/api/v2 v2.6.0 h1:KvfspAaL9bab9hI8jFYkV2cgtSrwWtaG+k9AUTHWU4M=
