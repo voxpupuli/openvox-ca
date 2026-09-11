@@ -1039,8 +1039,10 @@ managed_certs:
 
   - certname: openvoxview.example.com
     names: [openvoxview.example.com]
+    ip_addresses: [10.0.0.42]
     renew_before: 720h
     usages: [serverAuth]
+    reuse_key: true
     store:
       files:
         cert: /etc/openvox/ssl/openvoxview-cert.pem
@@ -1064,12 +1066,14 @@ carry on.
 | Key | Required | Unset means |
 | --- | --- | --- |
 | `certname` | yes | — |
-| `names` | yes, at least one | — |
+| `names` | at least one name, of any kind | no DNS names |
+| `ip_addresses`, `email_addresses`, `uris` | " | none of that kind |
 | `usages` | no | `serverAuth` and `clientAuth` |
 | `ttl` | no | `leaf_validity_days`, then the built-in |
 | `renew_before` | yes, and positive | — |
 | `revoke_after` | no | `superseded_cert_revoke_after_sec` |
 | `key_algo` / `key_size` | no | `leaf_key_algo` / `leaf_key_size`, then the built-in |
+| `reuse_key` | no | `false` — re-key on every renewal |
 
 Every optional key **inherits the CA-wide setting** rather than resetting to a
 built-in, so raising `leaf_validity_days` lengthens a managed certificate that
@@ -1088,7 +1092,23 @@ the ordinary inventory slot for that subject. A component certificate and an
 agent certificate therefore cannot share a certname, and neither can two
 managed certificates.
 
-**`names` are used verbatim.** Two behaviours that apply to a submitted CSR
+**A certificate can be named four ways**, and at least one name of some kind is
+required. `names` carries the DNS entries, and `ip_addresses`,
+`email_addresses` and `uris` carry the other three subjectAltName types. An IP
+address is the case that makes the others concrete: a component reached at a
+fixed address has nothing else to be named by.
+
+`names` rather than `dns_names` is the one asymmetry, and it is deliberate —
+DNS is what almost every entry uses. The other three say what they carry
+because there is nothing to infer them from: a list of strings that might be a
+hostname, an address or an email address is exactly the guess the `store` block
+refuses to make.
+
+An address the CA cannot parse, or a URI with no scheme, is refused at startup
+naming the string. Both would otherwise reach the certificate as a name that
+matches nothing, on a certificate that looks perfectly well-formed.
+
+**Names are used verbatim.** Two behaviours that apply to a submitted CSR
 deliberately do not apply here:
 
 - `promote_cn_to_san` does not add the certname. An entry that wants its
@@ -1099,7 +1119,7 @@ deliberately do not apply here:
   *request* may ask for, and there is no request: the names come from a file an
   administrator wrote.
 
-At least one name is therefore required. With no promotion and no names, the
+That is why at least one name is required. With no promotion and no names, the
 certificate would carry no `subjectAltName` extension at all — and RFC 2818
 clients ignore the Common Name, so it would be refused for every name including
 its own while looking perfectly well-formed.
@@ -1114,6 +1134,32 @@ effect at the next reconcile pass rather than at natural expiry — the CA treat
 a usage mismatch as grounds to reissue. A component certificate needs
 `clientAuth`, because it is a CA client; `serverAuth` alone is for something
 that only ever answers handshakes.
+
+**`reuse_key` pins the private key** instead of generating a fresh one on every
+renewal. The default is `false`, and it is the better hygiene: a key replaced on
+every renewal is one a disclosure stops mattering about. Set it where the key is
+the identity rather than an implementation detail — a TLSA record with a
+key-based selector, or an SPKI pin, names the key, and re-keying breaks it.
+
+Four things it does not mean, each of which the obvious reading gets wrong:
+
+- **A revoked certificate is re-keyed anyway**, and the CA warns. Reissuing over
+  the same key would hand back — on a fresh serial, with a full lifetime, and on
+  no CRL — exactly the material an operator revoking for key disclosure was
+  retiring.
+- **A stored key below the CA's key-strength policy is refused, not replaced.**
+  The entry fails every pass until it is fixed, because silently re-keying would
+  defeat the pin entirely.
+- **`key_algo` and `key_size` describe what to *generate*.** A reused key keeps
+  whatever it already has, so the settings do not interact: changing them under
+  `reuse_key` takes effect only when there is no key to reuse.
+- **It is not a guarantee the key survives.** A store whose key has gone missing
+  gets a fresh one, loudly — a pin really is being broken. A first issuance
+  generates quietly, because there was never a pin to break.
+
+This is the only path in the CA that reads a leaf private key back, and it reads
+it from the entry's own store. No leaf key reaches the CA's backing store on any
+path.
 
 ### The store
 

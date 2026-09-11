@@ -80,6 +80,8 @@ import (
 	"context"
 	"crypto/x509"
 	"fmt"
+	"net"
+	"net/url"
 	"strings"
 	"time"
 
@@ -145,12 +147,25 @@ type Entry struct {
 	// component certificate and an agent certificate cannot share a certname.
 	Certname string `yaml:"certname"`
 
-	// Names are the subjectAltName DNS entries. At least one is required, and
-	// they are used verbatim: `promote_cn_to_san` does not add the certname
+	// Names are the subjectAltName DNS entries, and IPAddresses,
+	// EmailAddresses and URIs are the other three types. At least one name of
+	// some kind is required across all four.
+	//
+	// They are used verbatim: `promote_cn_to_san` does not add the certname
 	// here, and `allow_subject_alt_names` does not gate them, because both
 	// govern what a submitted request may ask for and there is no request. See
 	// ca.CertSpec.DNSNames, which is where that contract lives.
-	Names []string `yaml:"names"`
+	//
+	// `names` rather than `dns_names` for the DNS list, which is the one
+	// asymmetry in the four: DNS is what almost every entry uses, and it is the
+	// spelling #243 wrote. The other three are named for what they carry
+	// because there is nothing to infer them from -- a list of strings that
+	// might be a hostname, an address or an email address would be exactly the
+	// kind of guessing the store block refuses to do.
+	Names          []string `yaml:"names"`
+	IPAddresses    []string `yaml:"ip_addresses"`
+	EmailAddresses []string `yaml:"email_addresses"`
+	URIs           []string `yaml:"uris"`
 
 	// Usages are the extended key usages, as `serverAuth` and/or `clientAuth`.
 	// Unset means both -- the pair every other issuance path uses.
@@ -205,6 +220,34 @@ type Entry struct {
 	// ECDSA key where agent certificates stay on RSA for compatibility.
 	KeyAlgo string `yaml:"key_algo"`
 	KeySize int    `yaml:"key_size"`
+
+	// ReuseKey reissues against the private key already in this entry's store
+	// rather than generating a fresh one. Default false, and the default is the
+	// better hygiene: a key replaced on every renewal is one a disclosure stops
+	// mattering about, and re-keying also makes a Secret's apply naturally
+	// atomic.
+	//
+	// True is for the cases where the key is the identity rather than an
+	// implementation detail -- a TLSA record with a key-based selector, or an
+	// SPKI pin, names the key, and re-keying breaks it.
+	//
+	// Four things it does not mean, each of which the obvious reading gets
+	// wrong:
+	//
+	//   - A revoked certificate is replaced with a new key whatever this says,
+	//     and the CA warns. Reissuing over the same key would hand back, on a
+	//     fresh serial with a full lifetime and on no CRL, exactly the material
+	//     an operator revoking for key disclosure was retiring.
+	//   - A stored key below the CA's key-strength policy is refused, not
+	//     silently replaced. The entry fails every pass until the operator
+	//     fixes it, because re-keying quietly would defeat the pin entirely.
+	//   - `key_algo` and `key_size` describe what to *generate*. A reused key
+	//     keeps whatever it already has, so changing them under `reuse_key`
+	//     takes effect only when there is no key to reuse.
+	//   - It is not a guarantee the key survives. A store whose key has gone
+	//     missing gets a fresh one, loudly -- a pin really is being broken. A
+	//     first issuance generates quietly, because there was never a pin.
+	ReuseKey bool `yaml:"reuse_key"`
 
 	// Store is where the certificate and its key live. Exactly one of its two
 	// members must be set.
@@ -371,18 +414,81 @@ func (e *Entry) spec() (ca.CertSpec, error) {
 		d := e.RevokeAfter.AsDuration()
 		supersede = &d
 	}
+	ips, err := e.ipAddresses()
+	if err != nil {
+		return ca.CertSpec{}, err
+	}
+	uris, err := e.uris()
+	if err != nil {
+		return ca.CertSpec{}, err
+	}
 	return ca.CertSpec{
-		Subject:     e.Certname,
-		DNSNames:    e.Names,
-		ExtKeyUsage: usages,
-		TTL:         e.TTL.AsDuration(),
-		RenewBefore: e.RenewBefore.AsDuration(),
+		Subject:        e.Certname,
+		DNSNames:       e.Names,
+		IPAddresses:    ips,
+		EmailAddresses: e.EmailAddresses,
+		URIs:           uris,
+		ExtKeyUsage:    usages,
+		TTL:            e.TTL.AsDuration(),
+		RenewBefore:    e.RenewBefore.AsDuration(),
 		KeyConfig: ca.KeyConfig{
 			Algo: ca.KeyAlgo(strings.ToLower(strings.TrimSpace(e.KeyAlgo))),
 			Size: e.KeySize,
 		},
+		ReuseKey:       e.ReuseKey,
 		SupersedeAfter: supersede,
 	}, nil
+}
+
+// ipAddresses parses the entry's IP alternative names.
+//
+// Refused here rather than passed on, because net.ParseIP returns nil for
+// anything it cannot read and a nil net.IP marshals into an empty SAN entry
+// instead of failing -- so a typo would reach the certificate as a name
+// matching nothing, on a certificate that otherwise looks well-formed. The
+// mechanism refuses an empty entry too; this is the arm that can say which
+// string was wrong.
+func (e *Entry) ipAddresses() ([]net.IP, error) {
+	if len(e.IPAddresses) == 0 {
+		return nil, nil
+	}
+	out := make([]net.IP, 0, len(e.IPAddresses))
+	for _, raw := range e.IPAddresses {
+		text := strings.TrimSpace(raw)
+		ip := net.ParseIP(text)
+		if ip == nil {
+			return nil, fmt.Errorf("%q is not an IP address", raw)
+		}
+		out = append(out, ip)
+	}
+	return out, nil
+}
+
+// uris parses the entry's URI alternative names.
+//
+// Absolute only. url.Parse accepts almost anything, including a bare word,
+// which becomes a relative reference -- and a uniformResourceIdentifier SAN
+// that is not absolute names nothing a verifier can compare against. An
+// operator who meant a DNS name and wrote it here should be told, not given a
+// certificate carrying it as a URI.
+func (e *Entry) uris() ([]*url.URL, error) {
+	if len(e.URIs) == 0 {
+		return nil, nil
+	}
+	out := make([]*url.URL, 0, len(e.URIs))
+	for _, raw := range e.URIs {
+		text := strings.TrimSpace(raw)
+		u, err := url.Parse(text)
+		if err != nil {
+			return nil, fmt.Errorf("%q is not a URI: %w", raw, err)
+		}
+		if !u.IsAbs() {
+			return nil, fmt.Errorf("URI %q has no scheme; a uniformResourceIdentifier "+
+				"alternative name must be absolute (did you mean to put it under `names`?)", raw)
+		}
+		out = append(out, u)
+	}
+	return out, nil
 }
 
 // Validate checks every entry and returns an error describing the first problem,

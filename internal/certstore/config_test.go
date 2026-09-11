@@ -19,6 +19,7 @@ package certstore_test
 
 import (
 	"crypto/x509"
+	"net"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -258,12 +259,12 @@ managed_certs:
 			// subjectAltName extension at all, and RFC 2818 clients ignore the
 			// Common Name -- so it would be refused for every name including
 			// its own, while looking perfectly well-formed.
-			Entry("no names", `
+			Entry("no names of any kind", `
 managed_certs:
   - certname: a.example.com
     renew_before: 720h
     store: {files: {cert: /c.pem, key: /k.pem}}
-`, "at least one DNS name"),
+`, "at least one subject alternative name"),
 
 			Entry("no renew window", `
 managed_certs:
@@ -298,6 +299,96 @@ managed_certs:
 `).Validate()
 			Expect(err).To(MatchError(ContainSubstring("managed_certs[0]")))
 			Expect(err).To(MatchError(ContainSubstring("inventory slot")))
+		})
+	})
+
+	// A managed certificate may be named by DNS, IP, email or URI, and at least
+	// one of some kind is required. A component reached at a fixed address has
+	// nothing else to be named by, which is the case that makes it concrete.
+	Describe("the other three kinds of name", func() {
+		It("carries IP, email and URI names through alongside DNS", func() {
+			managed := build(decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    ip_addresses: [10.0.0.5, "2001:db8::1"]
+    email_addresses: [ca@example.com]
+    uris: ["spiffe://example.com/ns/openvox/sa/a"]
+    renew_before: 720h
+    store: {files: {cert: /c.pem, key: /k.pem}}
+`))
+			spec := managed[0].Spec
+			Expect(spec.DNSNames).To(Equal([]string{"a"}))
+			Expect(spec.IPAddresses).To(HaveLen(2))
+			// net.IP has a 4-byte and a 16-byte form for the same address and
+			// x509 does not promise which it returns, so this compares by
+			// value rather than bytewise.
+			Expect(spec.IPAddresses[0].Equal(net.ParseIP("10.0.0.5"))).To(BeTrue())
+			Expect(spec.IPAddresses[1].Equal(net.ParseIP("2001:db8::1"))).To(BeTrue())
+			Expect(spec.EmailAddresses).To(Equal([]string{"ca@example.com"}))
+			Expect(spec.URIs).To(HaveLen(1))
+			Expect(spec.URIs[0].String()).To(Equal("spiffe://example.com/ns/openvox/sa/a"))
+		})
+
+		It("accepts an entry named only by IP address", func() {
+			managed := build(decode(`
+managed_certs:
+  - certname: a.example.com
+    ip_addresses: [10.0.0.5]
+    renew_before: 720h
+    store: {files: {cert: /c.pem, key: /k.pem}}
+`))
+			Expect(managed[0].Spec.DNSNames).To(BeEmpty())
+			Expect(managed[0].Spec.IPAddresses).To(HaveLen(1))
+		})
+
+		// net.ParseIP returns nil for anything it cannot read, and a nil net.IP
+		// marshals into an empty SAN entry rather than failing -- so a typo
+		// would otherwise reach the certificate as a name matching nothing, on
+		// a certificate that looks perfectly well-formed.
+		It("refuses an address it cannot parse, naming the string", func() {
+			err := decode(`
+managed_certs:
+  - certname: a.example.com
+    ip_addresses: ["10.0.0.256"]
+    renew_before: 720h
+    store: {files: {cert: /c.pem, key: /k.pem}}
+`).Validate()
+			Expect(err).To(MatchError(ContainSubstring("10.0.0.256")))
+			Expect(err).To(MatchError(ContainSubstring("not an IP address")))
+		})
+
+		// url.Parse accepts a bare word as a relative reference, and a
+		// uniformResourceIdentifier SAN that is not absolute names nothing a
+		// verifier can compare against.
+		It("refuses a URI with no scheme, and guesses what was meant", func() {
+			err := decode(`
+managed_certs:
+  - certname: a.example.com
+    uris: [puppetserver]
+    renew_before: 720h
+    store: {files: {cert: /c.pem, key: /k.pem}}
+`).Validate()
+			Expect(err).To(MatchError(ContainSubstring("must be absolute")))
+			Expect(err).To(MatchError(ContainSubstring("`names`")))
+		})
+	})
+
+	Describe("reuse_key", func() {
+		It("generates a fresh key on every renewal by default", func() {
+			Expect(build(decode(minimal))[0].Spec.ReuseKey).To(BeFalse())
+		})
+
+		It("pins the stored key when the entry asks for it", func() {
+			managed := build(decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    reuse_key: true
+    store: {files: {cert: /c.pem, key: /k.pem}}
+`))
+			Expect(managed[0].Spec.ReuseKey).To(BeTrue())
 		})
 	})
 

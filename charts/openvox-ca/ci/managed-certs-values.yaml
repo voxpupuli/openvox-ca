@@ -65,9 +65,21 @@ config:
     - certname: openvoxview.example.com
       names:
         - openvoxview.example.com
+      # The other three subjectAltName types, on the entry that needs no Role,
+      # so the chart's own branch is exercised by the shape that contributes
+      # nothing to it.
+      ip_addresses:
+        - 10.0.0.42
+      email_addresses:
+        - openvox@example.com
+      uris:
+        - spiffe://example.com/ns/openvox/sa/openvoxview
       renew_before: 720h
       usages:
         - serverAuth
+      # The key is the identity here: pin it rather than re-keying, which is
+      # what a TLSA record or an SPKI pin needs.
+      reuse_key: true
       store:
         files:
           cert: /etc/openvox/ssl/openvoxview-cert.pem
