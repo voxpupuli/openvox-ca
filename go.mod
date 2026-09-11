@@ -11,7 +11,7 @@ require (
 	github.com/onsi/ginkgo/v2 v2.32.1
 	github.com/onsi/gomega v1.43.0
 	github.com/openbao/openbao/api/auth/approle/v2 v2.6.0
-	github.com/openbao/openbao/api/auth/kubernetes/v2 v2.6.0
+	github.com/openbao/openbao/api/auth/kubernetes/v2 v2.7.0
 	github.com/openbao/openbao/api/v2 v2.6.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.3
