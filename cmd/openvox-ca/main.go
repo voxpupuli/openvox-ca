@@ -812,6 +812,18 @@ func newRootCmd() *cobra.Command {
 			}
 			warnIfSigningBoundIsCPUDerived(cfg, myCA.SigningConcurrency)
 
+			// The certificates this CA keeps alive on behalf of OpenVox
+			// components. Assembled before backgroundJobs, which is what
+			// decides whether the reconcile loop runs at all, and fail-fast for
+			// the reasons buildManagedCerts gives. Serve only: the offline
+			// commands sign one certificate and exit, so a renewal loop has
+			// nothing to do there.
+			managedCerts, err := buildManagedCerts(cfg, store)
+			if err != nil {
+				return err
+			}
+			myCA.ManagedCerts = managedCerts
+
 			// SECURITY: In frontend mode, use the remote signer: the CA private
 			// key is never loaded into this process's address space.
 			// NIST 800-53: SC-3 (Security Function Isolation)

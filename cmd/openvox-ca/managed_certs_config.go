@@ -1,0 +1,169 @@
+// Copyright (C) 2026 Chris Boot
+// Copyright (C) 2026 Vox Pupuli and contributors
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along
+// with this program; if not, write to the Free Software Foundation, Inc.,
+// 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+
+package main
+
+import (
+	"crypto/x509"
+	"fmt"
+	"log/slog"
+	"strings"
+
+	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/certstore"
+	"github.com/voxpupuli/openvox-ca/internal/k8sclient"
+	"github.com/voxpupuli/openvox-ca/internal/k8sexport"
+)
+
+// buildManagedCerts turns the `managed_certs` block into the entries the
+// reconcile loop walks, or returns nil when none is configured.
+//
+// Fail-fast, like the storage and kubernetes_export blocks: every failure here
+// is a configuration failure rather than a transient one. A certname the CA's
+// grammar refuses, a renewal window that can never open, a Secret store on a CA
+// that is not running in a pod -- none of those gets better by waiting, and
+// nothing else supplies the certificates an operator configured. A CA that came
+// up serving while quietly issuing none of them would be discovered when the
+// component it was for failed to start.
+//
+// Note what is deliberately not fatal: a store that cannot be written *at
+// runtime*. That is routine, is logged per entry, and self-heals on the next
+// pass. The distinction is between a configuration that can never work and a
+// pass that did not work this time.
+func buildManagedCerts(cfg *serverConfig, caCerts certstore.CACertSource) ([]ca.ManagedCert, error) {
+	if !cfg.ManagedCerts.Enabled() {
+		return nil, nil
+	}
+	if err := cfg.ManagedCerts.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid managed_certs config: %w", err)
+	}
+	if err := cfg.ManagedCerts.CheckExportOverlap(exportSecretTargets(cfg.KubernetesExport)); err != nil {
+		return nil, fmt.Errorf("invalid managed_certs config: %w", err)
+	}
+
+	deps := certstore.Deps{CACerts: caCerts}
+	if cfg.ManagedCerts.NeedsKubernetes() {
+		client, err := k8sclient.InClusterClientset("a managed certificate's Kubernetes Secret store")
+		if err != nil {
+			return nil, err
+		}
+		deps.Client = client
+		// Only resolved when something relies on it, so a configuration that
+		// spells out every namespace is not held up by an unreadable
+		// ServiceAccount mount -- the same rule the exporter follows.
+		if cfg.ManagedCerts.NeedsDefaultNamespace() {
+			ns, err := k8sclient.PodNamespace()
+			if err != nil {
+				return nil, fmt.Errorf("resolving the namespace for a managed certificate "+
+					"whose store does not name one: %w", err)
+			}
+			deps.DefaultNamespace = ns
+		}
+	}
+
+	managed, err := cfg.ManagedCerts.Build(deps)
+	if err != nil {
+		return nil, err
+	}
+	warnIfManagedCertIsAdmin(cfg, managed)
+	return managed, nil
+}
+
+// exportSecretTargets lists the (namespace, name) of every Secret the
+// Kubernetes exporter writes, for the overlap check.
+//
+// ConfigMap targets are excluded: they cannot be a managed certificate's store,
+// so an overlap is impossible and reporting one would be a false refusal. Kind
+// is matched case-insensitively because this runs before the export config's
+// own Validate normalises it, and an operator who wrote `kind: secret` means
+// the same thing.
+func exportSecretTargets(cfg k8sexport.Config) [][2]string {
+	var out [][2]string
+	for i := range cfg.Targets {
+		t := &cfg.Targets[i]
+		if strings.EqualFold(strings.TrimSpace(t.Kind), k8sexport.KindSecret) {
+			out = append(out, [2]string{t.Metadata.Namespace, t.Metadata.Name})
+		}
+	}
+	return out
+}
+
+// warnIfManagedCertIsAdmin says so when a managed certificate's certname is
+// listed in puppet_server.
+//
+// SECURITY: such a certificate is a CA admin credential. The listing is what
+// grants the authority and clientAuth is what lets it be presented, and a
+// managed certificate carries clientAuth unless the entry narrows it away. This
+// is not new exposure -- it is the same trust as OpenVox Server holding its
+// certificate on disk today -- but the store now holds that credential, and its
+// namespace, RBAC and file permissions deserve the same care as the CA's own.
+// An operator left to infer that a component store is ordinary will infer
+// wrongly, so this is said once at startup rather than only in the reference
+// documentation.
+//
+// Not a refusal. This is the intended configuration for OpenVox Server, which
+// is the whole point of #243 -- naming it is the objective, not preventing it.
+// NIST 800-53: AC-6 (Least Privilege), AU-2 (Event Logging)
+func warnIfManagedCertIsAdmin(cfg *serverConfig, managed []ca.ManagedCert) {
+	// Through buildAdminAllowList, which is the single construction point for
+	// this list and is what the middleware and SIGHUP both use. A second
+	// comma-splitting merge here would be a second answer to "who is an
+	// administrator", and the one that drifted would be this one.
+	//
+	// A failure is not reported here. buildAuthConfig calls the same function a
+	// moment later and fails the startup with it, so saying it twice would only
+	// make the first mention look like the cause.
+	admins, err := buildAdminAllowList(cfg.PuppetServer, cfg.PuppetServerFile)
+	if err != nil || len(admins) == 0 {
+		return
+	}
+	for i := range managed {
+		subject := managed[i].Spec.Subject
+		if !admins[subject] {
+			continue
+		}
+		if !carriesClientAuth(managed[i].Spec) {
+			// Listed, but narrowed so it cannot be presented as a client. Worth
+			// a word too: the listing grants nothing this certificate can use,
+			// which is usually a mistake in one of the two settings.
+			slog.Warn("A managed certificate's certname is listed in puppet_server, but the "+
+				"certificate does not carry clientAuth, so it cannot be used to administer "+
+				"this CA. Add clientAuth to its usages, or remove the name from puppet_server",
+				"subject", subject)
+			continue
+		}
+		slog.Warn("A managed certificate is a CA admin credential: its certname is listed in "+
+			"puppet_server and it carries clientAuth. Whoever can read its store can "+
+			"administer this CA, so protect that store as you would the CA's own key",
+			"subject", subject)
+	}
+}
+
+// carriesClientAuth reports whether a spec's certificate will be usable as a
+// client. An unset usage list means the serverAuth+clientAuth pair every other
+// issuance path uses, so it counts.
+func carriesClientAuth(spec ca.CertSpec) bool {
+	if len(spec.ExtKeyUsage) == 0 {
+		return true
+	}
+	for _, u := range spec.ExtKeyUsage {
+		if u == x509.ExtKeyUsageClientAuth {
+			return true
+		}
+	}
+	return false
+}
