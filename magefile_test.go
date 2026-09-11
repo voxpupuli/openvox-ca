@@ -3536,10 +3536,17 @@ var _ = Describe("the packages' maintainer scripts", func() {
 			r, calls := run("packaging/scripts/preremove", arg)
 			Expect(r.ok).To(BeTrue(), "preremove %q exited non-zero: %s", arg, r.output)
 			if shouldAct {
-				Expect(calls).To(ContainSubstring("systemctl"),
-					"preremove %q should have stopped and disabled the units", arg)
-				Expect(calls).To(ContainSubstring("openvox-ca.service"))
-				Expect(calls).To(ContainSubstring("openvox-ca-first-boot.service"))
+				// The exact lines, not a substring of each: `--now` is the one
+				// flag this script argues for in its own comments, and
+				// ContainSubstring("openvox-ca.service") cannot tell
+				// `disable --now` from a plain `disable`. A plain disable
+				// removes the symlink and leaves the oneshot active with no
+				// unit file behind it, which systemd then reports as
+				// "not-found" until the machine reboots.
+				Expect(strings.Split(strings.TrimSpace(calls), "\n")).To(Equal([]string{
+					"systemctl --no-reload disable --now openvox-ca.service",
+					"systemctl --no-reload disable --now openvox-ca-first-boot.service",
+				}), "preremove %q did not disable --now both units, in order", arg)
 			} else {
 				Expect(calls).To(BeEmpty(),
 					"preremove %q must not touch the units: stopping the service on an upgrade is an "+
@@ -3552,14 +3559,16 @@ var _ = Describe("the packages' maintainer scripts", func() {
 		Entry("rpm upgrade", "1", false),
 		Entry("dpkg failed-upgrade", "failed-upgrade", false),
 		Entry("no argument at all", "", false),
+		// dpkg sends purge to postrm, never to prerm, so reaching it here at
+		// all would mean the argument contract had changed under us.
+		Entry("dpkg purge", "purge", false),
 	)
 
-	It("preremove does not accept purge, which dpkg sends to postrm", func() {
-		src, err := os.ReadFile("packaging/scripts/preremove")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(string(src)).To(MatchRegexp(`(?m)^0 \| remove\) ;;$`),
-			"the accepted set should be dpkg's remove and rpm's 0, and nothing else")
-	})
+	// purge used to be asserted by grepping the script for its case arm, 30
+	// lines above this file's own rule that a source-text spec cannot fail for
+	// the property it names. It is an Entry in the table above now: dpkg sends
+	// purge to postrm and never to prerm, so the correct behaviour is to do
+	// nothing, and that is observable by running it.
 
 	DescribeTable("postinstall runs on install and upgrade, and stops on a rollback",
 		func(args []string, shouldAct bool) {
@@ -4093,8 +4102,13 @@ func runFirstBootScript(sslDir, binDir, certname string, extraEnv ...string) fir
 
 // stubCA writes an openvox-ca-ctl whose `setup` bootstraps a cadir, and an
 // openvox-ca whose `generate` writes the cert and key it is told to.
+// stubCALog is where stubCA's two stubs record their argument lists, so a spec
+// can assert what provisioning actually passed them.
+func stubCALog(binDir string) string { return filepath.Join(binDir, "ca-calls.log") }
+
 func stubCA(binDir string) {
 	ctl := `#!/bin/sh
+echo "openvox-ca-ctl $*" >> "$(dirname "$0")/ca-calls.log"
 cadir=""
 prev=""
 for a in "$@"; do
@@ -4108,6 +4122,7 @@ printf 'CA-CRL\n'  > "$cadir/ca_crl.pem"
 exit 0
 `
 	ca := `#!/bin/sh
+echo "openvox-ca $*" >> "$(dirname "$0")/ca-calls.log"
 case "${1:-}" in
 --help) printf 'Available Commands:\n  generate       Mint a certificate offline\n'; exit 0 ;;
 generate) ;;
@@ -4270,6 +4285,95 @@ var _ = Describe("first-boot's provisioning steps", func() {
 			Expect(r.ok).To(BeTrue(), "provisioning failed: %s", r.output)
 			Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).To(BeAnExistingFile())
 		})
+	})
+
+	// The script's central promise -- "nothing already on disk is overwritten,
+	// moved or re-signed" -- rests entirely on link_if_absent, and nothing
+	// asserted it. Change its `ln -s` to `ln -sf` and every existing spec
+	// still passes while a host that enrolled against another CA silently
+	// gets repointed at this one.
+	Describe("a tree that already holds its own files", func() {
+		var sslDir, binDir string
+
+		BeforeEach(func() {
+			sslDir = GinkgoT().TempDir()
+			binDir = GinkgoT().TempDir()
+			Expect(os.MkdirAll(filepath.Join(sslDir, "ca"), 0o755)).To(Succeed())
+			Expect(os.MkdirAll(filepath.Join(sslDir, "certs"), 0o755)).To(Succeed())
+			Expect(os.MkdirAll(filepath.Join(sslDir, "private_keys"), 0o750)).To(Succeed())
+			stubCA(binDir)
+		})
+
+		It("leaves an existing certs/ca.pem exactly as it found it", func() {
+			// A regular file, not a symlink: what a host that ran an agent
+			// against another CA actually has there.
+			ca := filepath.Join(sslDir, "certs", "ca.pem")
+			Expect(os.WriteFile(ca, []byte("SOMEBODY-ELSES-CA\n"), 0o644)).To(Succeed())
+
+			r := runFirstBootScript(sslDir, binDir, "ca.example.com")
+			Expect(r.ok).To(BeTrue(), "provisioning failed: %s", r.output)
+
+			body, err := os.ReadFile(ca)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(body)).To(Equal("SOMEBODY-ELSES-CA\n"),
+				"the agent's trust anchor was repointed at this CA")
+			info, err := os.Lstat(ca)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(info.Mode()&os.ModeSymlink).To(BeZero(), "a regular file became a symlink")
+		})
+
+		It("leaves an existing serving credential pointing where it did", func() {
+			link := filepath.Join(sslDir, "certs", "openvox-ca-server.pem")
+			Expect(os.Symlink("elsewhere.pem", link)).To(Succeed())
+
+			r := runFirstBootScript(sslDir, binDir, "ca.example.com")
+			Expect(r.ok).To(BeTrue(), "provisioning failed: %s", r.output)
+
+			target, err := os.Readlink(link)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(target).To(Equal("elsewhere.pem"),
+				"an operator's own tls_cert was relinked")
+		})
+
+		// ensure_ssl_tree says a directory that is already there is left
+		// exactly as it is. Nothing checked the modes.
+		It("leaves the modes of directories it did not create", func() {
+			certs := filepath.Join(sslDir, "certs")
+			keys := filepath.Join(sslDir, "private_keys")
+			Expect(os.Chmod(certs, 0o750)).To(Succeed())
+			Expect(os.Chmod(keys, 0o700)).To(Succeed())
+
+			r := runFirstBootScript(sslDir, binDir, "ca.example.com")
+			Expect(r.ok).To(BeTrue(), "provisioning failed: %s", r.output)
+
+			for path, want := range map[string]os.FileMode{certs: 0o750, keys: 0o700} {
+				info, err := os.Stat(path)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(info.Mode().Perm()).To(Equal(want), "mode of %s", path)
+			}
+		})
+	})
+
+	// Provisioning resolves a certname through four tiers and then has to
+	// actually USE it. Nothing asserted it reached either command, so a
+	// resolver change could have left both running under a different name.
+	It("passes the resolved certname and cadir to both the bootstrap and the mint", func() {
+		sslDir := GinkgoT().TempDir()
+		binDir := GinkgoT().TempDir()
+		Expect(os.MkdirAll(filepath.Join(sslDir, "ca"), 0o755)).To(Succeed())
+		stubCA(binDir)
+
+		r := runFirstBootScript(sslDir, binDir, "resolved.example.com")
+		Expect(r.ok).To(BeTrue(), "provisioning failed: %s", r.output)
+
+		calls, err := os.ReadFile(stubCALog(binDir))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(calls)).To(And(
+			ContainSubstring("openvox-ca-ctl setup --cadir "+filepath.Join(sslDir, "ca")+
+				" --hostname resolved.example.com"),
+			ContainSubstring("--certname resolved.example.com"),
+			ContainSubstring("--cadir "+filepath.Join(sslDir, "ca")),
+		))
 	})
 
 	// The default cadir moved this release. A host that followed the old
@@ -4665,6 +4769,30 @@ var _ = Describe("postinstall's ownership and permission hardening", func() {
 			ContainSubstring("WARNING"),
 			ContainSubstring("root:puppet"),
 		))
+	})
+
+	// The branch the `|| warn` was added for, and which nothing drove. Before
+	// it, a non-zero systemd-sysusers aborted the postinstall under `set -e`
+	// BEFORE the ownership fixes below -- so a host where the account already
+	// existed but sysusers failed for an unrelated reason (a read-only /etc in
+	// an image build, an account visible through NSS but absent from
+	// /etc/passwd) ended up with a configuration file the service could not
+	// read, and no warning either.
+	It("warns and carries on when systemd-sysusers fails", func() {
+		Expect(os.WriteFile(configPath, []byte("port: 8141\n"), 0o644)).To(Succeed())
+		Expect(os.WriteFile(filepath.Join(stubBin, "systemd-sysusers"),
+			[]byte("#!/bin/sh\nexit 1\n"), 0o755)).To(Succeed())
+
+		r, calls := run("configure")
+		Expect(r.ok).To(BeTrue(), "a failed sysusers must not fail the install")
+		Expect(r.output).To(And(
+			ContainSubstring("WARNING"),
+			ContainSubstring("puppet"),
+		))
+		// And it must have carried on to the ownership work, which is the
+		// half that was being skipped.
+		Expect(calls).To(ContainSubstring("chown --no-dereference puppet:puppet"),
+			"the run stopped at the account step instead of continuing")
 	})
 
 	// The account-creation fallback for hosts with no systemd-sysusers. The
