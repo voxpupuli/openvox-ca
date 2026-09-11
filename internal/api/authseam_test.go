@@ -76,7 +76,90 @@ const caImportPath = "github.com/voxpupuli/openvox-ca/internal/ca"
 // a glob: a package arrives here because somebody decided it was reachable, and
 // a glob would enrol packages nobody had thought about, which is the opposite
 // of the property wanted.
+//
+// A list is also the failure mode this repository keeps paying for -- working
+// from an enumeration misses sites -- so the list is not trusted on its own.
+// The spec below sweeps every package that imports internal/ca and requires
+// each to be either guarded or in exemptPackages, which turns "somebody
+// remembered" into "somebody decided".
 var guardedPackages = []string{".", "../certstore"}
+
+// exemptPackages are the other importers of internal/ca, each with the reason
+// it is not guarded. Being here is a decision, not an oversight; the sweep
+// below fails on an importer that is in neither list.
+//
+// Paths are relative to this directory, matching guardedPackages.
+var exemptPackages = map[string]string{
+	"../metrics": "exposes only a Prometheus collector, with no issuance surface. " +
+		"If that changes it belongs in guardedPackages rather than here",
+	"../signer/openbao": "signs with a CA key it holds; it issues nothing and serves nothing",
+	"../../cmd/openvox-ca": "the server binary, which assembles the CA. It reaches no " +
+		"grant constructor, but it is not guarded because it is the composition root " +
+		"and a rule about it would be a rule about the whole binary",
+	"../../cmd/openvox-ca-ctl": "the operator CLI, which is the ONE caller that may mint " +
+		"an admin credential -- `generate --allow-authorization-extensions` is exactly " +
+		"the operator-at-a-terminal case the gate exists to confine this to",
+}
+
+// caImporters returns every package directory under internal/ and cmd/ whose
+// non-test source imports internal/ca, relative to this directory.
+//
+// Measured rather than listed, which is the whole point: an enumeration is what
+// misses a new importer, and a new importer of internal/ca is precisely the
+// event this gate has to notice.
+func caImporters() []string {
+	GinkgoHelper()
+	var found []string
+	for _, root := range []string{"..", "../../cmd"} {
+		entries, err := os.ReadDir(root)
+		Expect(err).NotTo(HaveOccurred(), root)
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			// One level of nesting, for internal/signer/openbao.
+			dirs := []string{filepath.Join(root, entry.Name())}
+			if subs, err := os.ReadDir(dirs[0]); err == nil {
+				for _, sub := range subs {
+					if sub.IsDir() {
+						dirs = append(dirs, filepath.Join(dirs[0], sub.Name()))
+					}
+				}
+			}
+			for _, dir := range dirs {
+				if importsCA(dir) {
+					found = append(found, dir)
+				}
+			}
+		}
+	}
+	return found
+}
+
+// importsCA reports whether any non-test file in dir imports internal/ca.
+func importsCA(dir string) bool {
+	GinkgoHelper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(token.NewFileSet(), filepath.Join(dir, name), nil, parser.ImportsOnly)
+		if err != nil {
+			continue
+		}
+		for _, imp := range file.Imports {
+			if p, err := strconv.Unquote(imp.Path.Value); err == nil && p == caImportPath {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // SECURITY: the CSR signing path strips Puppet authorisation-arc OIDs from
 // submitted requests, so no agent can ask for pp_cli_auth. ca.AuthGrant is the
@@ -398,4 +481,44 @@ func check(c *x509.Certificate) bool { return hasPpCliAuth(c) && ca.OIDPpCliAuth
 		tableArgs = append(tableArgs, Entry(dir, dir))
 	}
 	DescribeTable("is not reachable from any of the guarded packages", tableArgs...)
+
+	// What makes guardedPackages authoritative rather than remembered.
+	//
+	// Without this, adding a package that imports internal/ca and forgetting
+	// this file leaves the new package unguarded and every spec above green --
+	// which is exactly how an enumeration fails, and this repository has a
+	// recorded history of it. The sweep does not decide anything: it requires a
+	// decision to have been recorded, in one list or the other.
+	//
+	// "." is this package, which the walk reaches by its own directory rather
+	// than by the relative path the sweep produces; it is translated so the two
+	// spellings of the same package do not read as an unguarded importer.
+	It("has a recorded decision for every package that imports internal/ca", func() {
+		known := map[string]bool{}
+		for _, dir := range guardedPackages {
+			if dir == "." {
+				dir = "../api"
+			}
+			known[filepath.Clean(dir)] = true
+		}
+		for dir := range exemptPackages {
+			known[filepath.Clean(dir)] = true
+		}
+
+		importers := caImporters()
+		Expect(importers).NotTo(BeEmpty(),
+			"no importer of internal/ca was found at all; the sweep is not working, "+
+				"and a sweep that finds nothing agrees with every list")
+
+		for _, dir := range importers {
+			Expect(known).To(HaveKey(filepath.Clean(dir)), strings.Join([]string{
+				dir + " imports " + caImportPath + " and is in neither guardedPackages nor exemptPackages.",
+				"That is a decision nobody has recorded, not a test to silence.",
+				"If the package offers a surface something other than an operator at a",
+				"terminal can reach, add it to guardedPackages. If it does not, add it to",
+				"exemptPackages with the reason -- which is what makes the next reader able",
+				"to check the judgement rather than inherit it.",
+			}, "\n"))
+		}
+	})
 })
