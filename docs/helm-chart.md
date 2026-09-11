@@ -639,6 +639,7 @@ because it cannot see far enough to rule it out:
 | Input | Why it mounts |
 | --- | --- |
 | `kubernetesExport.enabled`, or `config.kubernetes_export.targets` | Export is configured, so the exporter needs the API |
+| `config.managed_certs` with a `store.secret` | A managed certificate is kept in a Secret, so the CA reads and writes it. A file store needs nothing and mounts nothing |
 | `config.openbao.auth_method: kubernetes` | The key provider authenticates with the pod's own token |
 | `PUPPET_CA_OPENBAO_AUTH_METHOD: kubernetes` in `env` or `extraEnv` | Environment variables outrank the config file, so the chart reads those two values too. An empty value is ignored, as the server ignores it |
 | `--openbao-auth-method=kubernetes` in `extraArgs` | Arguments outrank both, and `extraArgs` is appended to the argv the chart builds, so it is readable |
@@ -648,6 +649,40 @@ because it cannot see far enough to rule it out:
 | A `--config` in `extraArgs` | The chart renders its own `--config` and appends `extraArgs` after it, so a second one wins and the server reads a file the chart never saw |
 
 `automountServiceAccountToken` forces the decision either way.
+
+### Managed certificates
+
+`config.managed_certs` makes openvox-ca issue and renew certificates for OpenVox
+components — see [managed certificates](configuration.md#managed-certificates)
+for the entries themselves, which are server configuration rather than chart
+values.
+
+The chart's only part in it is the RBAC, and it is derived from those entries
+rather than repeated in values: one Role and RoleBinding per namespace some
+entry's Secret lives in, granting `get` and `patch` narrowed by `resourceNames`
+plus an unnarrowable `create`. That is a separate Role from the export's,
+because the export needs neither `get` nor those namespaces.
+
+```yaml
+managedCerts:
+  rbac:
+    create: true
+```
+
+Nothing is rendered when no entry uses a Secret store — a file store talks to
+nothing — or when the chart cannot read the configuration. Under
+`existingConfigMap`, `args`, or a `--config` in `extraArgs` the chart knows
+neither that a managed certificate exists nor what its Secret is called, and
+unlike the export there is no chart value that would tell it, so it creates
+nothing rather than granting `get` and `patch` on every Secret in scope. The
+post-install notes say so, and say what to create by hand.
+
+> **The Secret holding OpenVox Server's key is a CA admin credential**, because
+> its certname is listed in `puppetServers` and a component certificate carries
+> `clientAuth`. Give that Secret's namespace and RBAC the care you would give
+> the CA's own key. The chart refuses to bind this Role to the namespace's
+> default ServiceAccount for the same reason — it carries `get`, so every pod in
+> the namespace could read those keys.
 
 ## Running under an external root
 

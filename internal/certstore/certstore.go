@@ -320,12 +320,6 @@ var usageByName = map[string]x509.ExtKeyUsage{
 	"clientauth": x509.ExtKeyUsageClientAuth,
 }
 
-// canonicalUsage renders a usage the way configuration spells it, for errors.
-var canonicalUsage = map[string]string{
-	"serverauth": "serverAuth",
-	"clientauth": "clientAuth",
-}
-
 // extKeyUsage resolves the entry's configured usages.
 //
 // An empty result is returned for an empty list as well as an absent one, and

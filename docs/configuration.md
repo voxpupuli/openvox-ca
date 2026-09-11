@@ -167,9 +167,14 @@ superseded_cert_sweep_interval_sec: 0  # how often the sweep runs; 0 = built-in 
 leaf_backdate_sec: 0                   # 0 = built-in default (5m)
 
 # How often the managed-certificate reconcile loop runs. A managed certificate is
-# a named leaf the CA issues and renews on a loop; nothing configures one yet, so
-# this setting has no effect until an instance of that mechanism ships.
+# a named leaf the CA issues and renews on a loop; see "Managed certificates"
+# below. Nothing runs when `managed_certs` is empty.
 managed_cert_interval_sec: 0           # 0 = built-in default (15m)
+
+# Certificates this CA issues and renews for OpenVox components, each into a
+# Kubernetes Secret or a local file pair. See "Managed certificates" below —
+# including what it means for the store holding OpenVox Server's key.
+managed_certs: []
 ```
 
 ## Environment variables
@@ -951,7 +956,7 @@ Two settings, two questions:
 | Setting | Question |
 | --- | --- |
 | `revoke_on_auto_renew` | *Whether* an auto-renewal retires its predecessor at all. `false` keeps it valid until it naturally expires and records nothing. |
-| `superseded_cert_revoke_after_sec` | *When*, on every path that retires a predecessor: both renewal paths and the managed-certificate reconcile, which nothing configures yet. `0` means inside the renewal call; unset means 24 hours later. |
+| `superseded_cert_revoke_after_sec` | *When*, on every path that retires a predecessor: both renewal paths and the managed-certificate reconcile. `0` means inside the renewal call; unset means 24 hours later. A `managed_certs` entry can override it per certificate with `revoke_after`. |
 
 They compose as you would expect: with `revoke_on_auto_renew: false` the
 auto-renewal path records nothing, whatever the delay says, and the CSR-body
@@ -1008,6 +1013,243 @@ Some things worth knowing before you rely on it:
   supersessions that were lost or could not be carried out — see
   [metrics](metrics.md#delayed-supersession). A pending count that does not fall
   means the sweep is not completing.
+
+## Managed certificates
+
+`managed_certs` is how openvox-ca issues and renews certificates for OpenVox
+components without anybody hand-issuing them, converting them to Secrets, and
+hand-renewing them later. Install the CA with this configured and the component
+certificates exist and stay current.
+
+It is not a general-purpose certificate authority for a cluster. A certificate
+the CA does not like is refused rather than accommodated, and the set of things
+it will issue is exactly the set an administrator wrote in this file.
+
+```yaml
+managed_certs:
+  - certname: puppetserver.openvox.svc.cluster.local
+    names: [puppetserver, puppetserver.openvox.svc]
+    ttl: 2160h
+    renew_before: 720h
+    revoke_after: 24h
+    store:
+      secret:
+        name: puppetserver-tls
+        namespace: openvox
+
+  - certname: openvoxview.example.com
+    names: [openvoxview.example.com]
+    renew_before: 720h
+    usages: [serverAuth]
+    store:
+      files:
+        cert: /etc/openvox/ssl/openvoxview-cert.pem
+        key: /etc/openvox/ssl/openvoxview-key.pem
+        ca: /etc/openvox/ssl/ca.pem
+```
+
+A reconcile pass walks the list every `managed_cert_interval_sec` (15 minutes by
+default) and once at startup, so a fresh deployment does not wait an interval
+for the certificate whatever depends on it needs. Each entry is independent: one
+whose store is unreachable is logged and retried on the next pass while the rest
+carry on.
+
+> **This block has no environment variable and no flag.** An entry is a nested
+> structure with a list of names and a choice of store, and expressing that
+> outside YAML would mean inventing a second syntax for it. It is also
+> file-only in the Helm chart's sense: set it under `config.managed_certs`.
+
+### The certificate
+
+| Key | Required | Unset means |
+| --- | --- | --- |
+| `certname` | yes | — |
+| `names` | yes, at least one | — |
+| `usages` | no | `serverAuth` and `clientAuth` |
+| `ttl` | no | `leaf_validity_days`, then the built-in |
+| `renew_before` | yes, and positive | — |
+| `revoke_after` | no | `superseded_cert_revoke_after_sec` |
+| `key_algo` / `key_size` | no | `leaf_key_algo` / `leaf_key_size`, then the built-in |
+
+Every optional key **inherits the CA-wide setting** rather than resetting to a
+built-in, so raising `leaf_validity_days` lengthens a managed certificate that
+did not set its own `ttl`.
+
+Durations are written in Go's syntax — `2160h` for ninety days, `720h` for
+thirty, `24h`, `90m`. That differs from the `_sec` integers elsewhere in this
+file, and deliberately: days cannot express a six-hour `revoke_after`, and
+seconds are unreadable at thirty days. The `2160h`-for-ninety-days wart is the
+price. A bare number is refused rather than guessed, because `ttl: 2160` could
+mean either unit.
+
+**`certname` goes through the CA's ordinary name grammar**, so a bad name is
+refused at startup rather than discovered at issuance, and each name occupies
+the ordinary inventory slot for that subject. A component certificate and an
+agent certificate therefore cannot share a certname, and neither can two
+managed certificates.
+
+**`names` are used verbatim.** Two behaviours that apply to a submitted CSR
+deliberately do not apply here:
+
+- `promote_cn_to_san` does not add the certname. An entry that wants its
+  certname as a subject alternative name says so, as the example above does not
+  — that certificate answers to `puppetserver` and `puppetserver.openvox.svc`
+  and *not* to its own certname.
+- `allow_subject_alt_names` does not gate them. That setting governs what a
+  *request* may ask for, and there is no request: the names come from a file an
+  administrator wrote.
+
+At least one name is therefore required. With no promotion and no names, the
+certificate would carry no `subjectAltName` extension at all — and RFC 2818
+clients ignore the Common Name, so it would be refused for every name including
+its own while looking perfectly well-formed.
+
+**`revoke_after` tells zero from unset.** `revoke_after: 0` means revoke the
+predecessor inside the reconcile pass, with no overlap at all; omitting the key
+inherits the CA's window. Both are useful and they are not the same thing. See
+[Delayed supersession](#delayed-supersession) for what the window buys.
+
+**`usages` narrows what the certificate may be used for**, and a narrowing takes
+effect at the next reconcile pass rather than at natural expiry — the CA treats
+a usage mismatch as grounds to reissue. A component certificate needs
+`clientAuth`, because it is a CA client; `serverAuth` alone is for something
+that only ever answers handshakes.
+
+### The store
+
+Every entry needs a `store`, naming exactly one of `secret` or `files`. **Which
+one a deployment uses is configuration and is never inferred.** A CA that
+guessed it was in Kubernetes would surprise whoever ran the container
+deliberately.
+
+A store is the only copy of the private key it holds. Nothing writes a managed
+certificate's key to the CA's backing store or to the local `cadir`: the key is
+generated, handed to the store, and dropped.
+
+#### `store.secret`
+
+One Kubernetes Secret per certificate, in the component's own namespace,
+carrying `tls.crt`, `tls.key` and `ca.crt`, and typed `kubernetes.io/tls` so it
+can be mounted or referenced by anything that understands a TLS Secret.
+
+| Key | Unset means |
+| --- | --- |
+| `name` | required |
+| `namespace` | the CA pod's own namespace |
+| `labels` / `annotations` | none beyond `app.kubernetes.io/managed-by: openvox-ca` |
+| `adopt_existing` | `false` — see below |
+
+All three keys are written in a single server-side apply, which is what makes a
+renewal atomic: a Secret holding one issuance's certificate and another's key is
+well-formed and fails every handshake made against it. It is also why a pass
+that cannot read the CA chain fails rather than writing two of the three —
+server-side apply removes a key its manager stops sending.
+
+**The Secret is fully owned by the CA.** Hand-edited contents are reverted at the
+next reconcile, deliberately: an operator who wants different material should
+change this configuration rather than the object. Ownership is per key, so the
+CA owns the three data entries and the label keys it sets and nothing else — a
+co-tenant's labels and an out-of-band `kubectl label` both survive. Two quiet
+consequences follow: a configured label another manager already owns is taken
+silently, and removing a label from this file removes it from the object.
+
+**`adopt_existing` governs the first write only.** A Secret the CA has never
+written that already holds somebody else's material is *not* overwritten: the
+pass fails and names the two remedies — set `adopt_existing: true`, or delete
+the Secret and let the CA create it. Drift is the opposite case and is always
+reconciled, including after an external edit reassigns one of the CA's fields.
+
+A managed certificate's Secret must not also be a `kubernetes_export` target.
+Both write `ca.crt`, and the CA refuses the configuration at startup rather than
+letting the two take the key from each other for ever.
+
+The Helm chart renders the RBAC for this from the entries themselves: `get` and
+`patch` narrowed by `resourceNames`, plus an unnarrowable `create`, in each
+namespace a Secret lives in. `list` and `watch` are deliberately absent, since
+neither can be narrowed. Set `managedCerts.rbac.create: false` to manage those
+Roles yourself.
+
+#### `store.files`
+
+A certificate and key pair on local disk, for a deployment that is not in
+Kubernetes.
+
+| Key | Unset means |
+| --- | --- |
+| `cert` | required, absolute |
+| `key` | required, absolute |
+| `ca` | no chain is written |
+
+This exists for a reason rather than as a fallback. A CA using an external
+signer or `ca_key_provider: openbao` cannot mint its own serving certificate,
+because `openvox-ca-ctl generate` needs an admin certificate that does not exist
+until the CA is already serving — and that applies to a systemd unit as much as
+to a pod.
+
+Two things a file store cannot do that a Secret store can, stated rather than
+quietly worked around:
+
+- **There is no adoption.** A file carries no record of who wrote it, so
+  `adopt_existing` has nothing to consult — which is why it is a key of
+  `store.secret` and not of the entry. Material already at these paths is judged
+  against the entry's spec like any other and replaced when it does not satisfy
+  it; a certificate this CA did not issue is replaced on that ground alone.
+- **A write is not atomic across the pair.** Each file is written to a temporary
+  path and renamed, so no reader ever sees a half-written file, but two renames
+  are two operations. A reader that catches the gap sees one issuance's
+  certificate with another's key, which fails every handshake until it re-reads.
+  The certificate is renamed last, so a component watching it for a renewal
+  fires on a pair that is already complete.
+
+The key is written `0600` and the certificate and chain `0644`. **The directory
+must already exist**; the CA will not create it. One of these files is a private
+key, and the safe guess and the useful one are not the same — `0700` locks out
+the very component the certificate is for, and anything wider exposes the key by
+default — so the choice stays with whoever lays the deployment out.
+
+### The certificate that administers this CA
+
+> **SECURITY.** Admin access to this CA is granted by listing a certname in
+> `puppet_server`, and a component certificate carries `clientAuth` because it
+> is a CA client. So **a managed certificate whose certname is listed in
+> `puppet_server` is a CA admin credential, and its store holds that
+> credential.**
+>
+> That is the intended configuration for OpenVox Server, and it is not new
+> exposure: it is the same trust as OpenVox Server holding its certificate on
+> disk today. But it means the Secret's namespace and RBAC, or the file's
+> ownership and mode, deserve the care the CA's own key gets — and an operator
+> left to infer that a component store is ordinary would infer wrongly. The CA
+> says so once at startup for each such entry.
+>
+> The listing is what grants the authority; `clientAuth` is what lets it be
+> presented. Neither alone is an admin credential, and narrowing an entry to
+> `usages: [serverAuth]` while leaving its certname in `puppet_server` grants
+> authority the certificate cannot use — which the CA also warns about, because
+> it is almost always a mistake in one setting or the other.
+
+### When something goes wrong
+
+A pass reports why it is issuing, in a log line naming the entry's certname:
+`absent`, `unparseable`, `key-unusable`, `key-mismatch`,
+`not-issued-by-this-ca`, `names-missing`, `usage-mismatch`, `revoked` or
+`renew-window`. Anything other than `renew-window` appearing repeatedly means
+the store is not holding what the CA writes to it.
+
+Deleting a store is a supported remedy and not a disaster: the next pass finds
+it absent and writes a fresh certificate. That is what makes "delete the Secret"
+the answer to a stuck adoption, and it is why the chart keeps `create` in the
+grant.
+
+One case to know about. If the CA holds a certificate at this certname that the
+entry's own store cannot account for — a Secret that was emptied, a file that
+will not parse — the issuance goes ahead and the replaced certificate **stays
+valid**, addressable only by serial, because by-name revocation now reaches the
+new one. The CA logs the displaced serial and the command that retires it:
+
+```
+openvox-ca-ctl revoke --serial <hex>
+```
 
 ## Trusting client certificates from another CA
 

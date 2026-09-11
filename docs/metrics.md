@@ -161,11 +161,11 @@ query, and `puppetca_crl_sync_failures_total` for why it is stuck.
 > enumeration above is now every writer, with nothing falling into an unnamed
 > remainder.
 >
-> Two of those writers are managed certificates', and neither can move a counter
-> on any deployment today: nothing configures a managed certificate yet, so the
-> mechanism is dormant. They are named anyway, because the enumeration claims
-> completeness and a claim that is true only of the paths an operator can
-> currently reach is a claim the next change will read as false.
+> Two of those writers are managed certificates', and they move only on a
+> deployment that configures `managed_certs`. They are named regardless,
+> because the enumeration claims completeness and a claim that is true only of
+> the paths a particular deployment reaches is a claim the next change will
+> read as false.
 >
 > The read half of that is `readStoredCRL`'s doing: it increments before
 > returning, on every path that calls it.
