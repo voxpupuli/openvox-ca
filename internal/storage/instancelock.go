@@ -161,10 +161,14 @@ type InstanceLocker interface {
 // database file the lock exists to keep to one writer.
 //
 // The mechanism differs by caller because their lifetimes do, and neither can
-// borrow the other's: `openvox-ca` hangs the release off a runtime whose closer
-// list runs in reverse, so it inserts the release at the front
-// (cmd/openvox-ca/runtime.go, holdInstanceLock); `openvox-ca-ctl` has no such
-// list and returns one cleanup that does both in order
+// borrow the other's: `openvox-ca` hangs the release off a runtime whose
+// store-lifetime closer group runs in reverse, so it inserts the release at the
+// front of that group (cmd/openvox-ca/runtime.go, holdInstanceLock). The
+// runtime keeps a second, key-lifetime group that this rule has nothing to say
+// about — it exists so the isolated signer can release the store and go on
+// signing, and the instance lock belongs with the store it names.
+// `openvox-ca-ctl` has no such group and returns one cleanup that does both in
+// order
 // (cmd/openvox-ca-ctl/migrate.go, lockStore). What they share is this rule and
 // the spec helper that asserts it, testutil.RecordingBackend -- so the
 // invariant is stated once here rather than argued twice there.

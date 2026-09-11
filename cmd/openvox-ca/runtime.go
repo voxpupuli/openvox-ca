@@ -44,15 +44,63 @@ type caRuntime struct {
 	// provider means the CA key is a local PEM blob reached through Store.
 	KeyProvider ca.KeyProvider
 
-	closers []func() error
+	// Closers are held in two groups rather than one list because the two
+	// things a runtime owns do not always stop being needed at the same moment.
+	// storeClosers releases the backend handle and anything hung on it;
+	// keyClosers releases the session a key provider holds open. Every caller
+	// but one wants both at once and calls Close; the isolated signer parts
+	// them, and CloseStore says why.
+	storeClosers []func() error
+	keyClosers   []func() error
 }
 
-// Close releases everything resolveRuntime opened, in reverse order. Safe to
-// call on a partially-constructed runtime.
+// Close releases everything resolveRuntime opened: the key-lifetime group
+// first, then the store-lifetime group, each in reverse. Safe to call on a
+// partially-constructed runtime, and safe after CloseStore — running a group
+// empties it, so nothing closes twice.
 func (r *caRuntime) Close() error {
+	firstErr := runClosers(&r.keyClosers)
+	if err := r.CloseStore(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
+
+// CloseStore releases the store-lifetime group — the backend handle, and any
+// instance lock hung on it — and leaves a key provider's session running.
+//
+// For the one caller whose two halves genuinely part company. The isolated
+// signer opens a backend solely so ca.Init can bootstrap or load, and then
+// answers Sign(digest) from a crypto.Signer for the rest of the process
+// lifetime. Under a local PEM key that Signer owes the store nothing once Init
+// has read it; under an OpenBao Transit provider it is backed by the token
+// manager, whose session has to outlive the store by exactly this much.
+//
+// That asymmetry is why this is a split and not a reordering. Moving Close
+// earlier would take Transit's token manager with it, and the resulting signer
+// would pass every test that does not configure Transit while failing on the
+// first signature in a deployment that does.
+//
+// Store is deliberately left set and closed rather than nilled. The backends
+// that own anything report their own error on use after Close, so the state is
+// observable — which is what lets a spec assert the store really was released
+// instead of only that a reference was dropped. A nil would turn the same
+// mistake into a panic in the process holding the CA key.
+//
+// Idempotent; a later Close runs only what is left.
+func (r *caRuntime) CloseStore() error {
+	return runClosers(&r.storeClosers)
+}
+
+// runClosers runs a closer group in reverse and empties it, returning the first
+// error. Emptying is not tidiness: it is what makes CloseStore idempotent and
+// keeps the Close that follows it from closing a backend handle twice.
+func runClosers(group *[]func() error) error {
+	closers := *group
+	*group = nil
 	var firstErr error
-	for i := len(r.closers) - 1; i >= 0; i-- {
-		if err := r.closers[i](); err != nil && firstErr == nil {
+	for i := len(closers) - 1; i >= 0; i-- {
+		if err := closers[i](); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -63,6 +111,36 @@ func (r *caRuntime) Close() error {
 // on. Subcommands take one rather than calling resolveRuntime directly so a
 // test can substitute a provider that fails as only a real backend would.
 type runtimeResolver func(ctx context.Context, cfg *serverConfig) (*caRuntime, error)
+
+// keyProviderResolver builds the CA key provider and returns the closer that
+// releases the session behind it.
+//
+// The closer rather than the *openbao.TokenManager that owns it, because
+// releasing the session is the only thing resolveRuntime does with it. Naming
+// the narrower thing is what lets a spec supply one.
+type keyProviderResolver func(ctx context.Context, cfg *serverConfig) (closeSession func() error, provider ca.KeyProvider, err error)
+
+// newKeyProvider is the seam resolveRuntime reaches the key backend through. A
+// variable so a spec can drive its success path; it is the real thing
+// everywhere else.
+//
+// The assignment it feeds decides whether the store/key split is correct at
+// all — the session's closer must join the key-lifetime group, or CloseStore
+// tears down the token manager the signer signs every certificate with. Nothing
+// could reach it: every test that configures OpenBao points at a deliberately
+// unreachable address so newOpenBaoKeyProvider fails, which is right for what
+// those specs assert and leaves this branch unexecuted with err == nil. The
+// assignment was therefore invisible — a mutation filing it under storeClosers
+// compiled, passed the whole suite, and broke Transit in production. Same
+// reason as logCloseErrOut: a branch nothing can drive is a branch nothing can
+// defend.
+var newKeyProvider keyProviderResolver = func(ctx context.Context, cfg *serverConfig) (func() error, ca.KeyProvider, error) {
+	tm, provider, err := newOpenBaoKeyProvider(ctx, cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	return tm.Close, provider, nil
+}
 
 // resolveRuntime builds the storage service and, when one is configured, the CA
 // key provider, from an already-resolved server configuration.
@@ -102,16 +180,18 @@ func resolveRuntime(ctx context.Context, cfg *serverConfig, withKeyProvider bool
 		return nil, fmt.Errorf("failed to initialise storage backend: %w", err)
 	}
 	rt.Store = store
-	rt.closers = append(rt.closers, store.Backend().Close)
+	rt.storeClosers = append(rt.storeClosers, store.Backend().Close)
 
 	if withKeyProvider && cfg.UsesOpenBao() {
-		tm, provider, err := newOpenBaoKeyProvider(ctx, cfg)
+		closeSession, provider, err := newKeyProvider(ctx, cfg)
 		if err != nil {
 			_ = rt.Close()
 			return nil, fmt.Errorf("initialising OpenBao key provider: %w", err)
 		}
 		rt.KeyProvider = provider
-		rt.closers = append(rt.closers, tm.Close)
+		// The key-lifetime group, not the store's: the signer goes on signing
+		// through this session long after CloseStore has released the backend.
+		rt.keyClosers = append(rt.keyClosers, closeSession)
 	}
 
 	return rt, nil
@@ -160,16 +240,23 @@ func preflightInstanceLock(ctx context.Context, cfg *serverConfig) error {
 // holdInstanceLock takes the store's instance lock and ties its release to rt,
 // for callers that already hold a runtime.
 //
-// The release is inserted at the front of the closer list rather than appended,
-// because Close runs closers in reverse and the lock must outlive the backend
-// handle it protects. Why that ordering matters, and why openvox-ca-ctl reaches
-// it by a different route, is stated once on StorageService.AcquireInstanceLock.
+// The release is inserted at the front of the store-lifetime group rather than
+// appended, because each group runs in reverse and the lock must outlive the
+// backend handle it protects. Why that ordering matters, and why openvox-ca-ctl
+// reaches it by a different route, is stated once on
+// StorageService.AcquireInstanceLock.
+//
+// The store group rather than the key group: this lock says "I am the process
+// holding this store", so whatever releases the store releases it too. No
+// caller both takes this lock and calls CloseStore today; a caller that did
+// would be announcing it had stopped being that process, which is what
+// releasing the lock means.
 func holdInstanceLock(ctx context.Context, rt *caRuntime, opts ...storage.InstanceLockOption) error {
 	ul, err := rt.Store.AcquireInstanceLock(ctx, opts...)
 	if err != nil {
 		return err
 	}
-	rt.closers = append([]func() error{ul.Unlock}, rt.closers...)
+	rt.storeClosers = append([]func() error{ul.Unlock}, rt.storeClosers...)
 	return nil
 }
 

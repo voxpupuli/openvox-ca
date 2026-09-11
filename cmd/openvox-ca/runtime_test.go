@@ -20,9 +20,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto"
+	"errors"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/voxpupuli/openvox-ca/internal/ca"
 )
 
 var _ = Describe("resolveRuntime", func() {
@@ -89,6 +93,179 @@ var _ = Describe("resolveRuntime", func() {
 		// first use, so any such assertion passes whether validation runs
 		// before or after storage construction. Claiming to pin the ordering
 		// while proving nothing is worse than not claiming it.
+	})
+})
+
+// stubProvider stands in for a reachable key backend. resolveRuntime only ever
+// stores the provider, so neither method is called from these specs; they exist
+// to satisfy ca.KeyProvider, and they fail rather than return a usable key so
+// that a spec which starts exercising them cannot pass by accident.
+type stubProvider struct{}
+
+func (stubProvider) Load(context.Context) (crypto.Signer, error) {
+	return nil, errors.New("stubProvider.Load must not be called")
+}
+
+func (stubProvider) Generate(context.Context, ca.KeyConfig) (crypto.Signer, error) {
+	return nil, errors.New("stubProvider.Generate must not be called")
+}
+
+var _ = Describe("resolveRuntime's key-provider branch", func() {
+	// The one line the whole store/key split rests on, and the one nothing
+	// could execute. resolveRuntime files the key session's closer in the
+	// key-lifetime group; file it under storeClosers instead and CloseStore --
+	// which the signer calls the moment ca.Init returns -- tears down the token
+	// manager every subsequent signature goes through.
+	//
+	// Until newKeyProvider became a seam, no test in this repository reached
+	// that assignment with a nil error. The two specs below that configure
+	// OpenBao point at an unreachable address deliberately, so the provider
+	// fails first; the OpenBao integration suite is behind a build tag and
+	// never calls resolveRuntime at all. A mutation moving the append to
+	// storeClosers therefore compiled and passed everything, while breaking
+	// Transit in production on the first signature.
+
+	openBaoCfg := func() *serverConfig {
+		cfg := &serverConfig{CADir: GinkgoT().TempDir()}
+		cfg.CAKeyProvider = "openbao"
+		cfg.OpenBao.Addr = "http://127.0.0.1:1"
+		cfg.OpenBao.KeyName = "openvox-ca"
+		cfg.OpenBao.AuthMethod = "token"
+		return cfg
+	}
+
+	// Substitutes the seam for the duration of one spec. The stub stands in for
+	// a *reachable* key backend, which is the state no real configuration can
+	// produce here -- not for a different kind of provider.
+	stubKeyProvider := func(ran *bool) {
+		original := newKeyProvider
+		DeferCleanup(func() { newKeyProvider = original })
+		newKeyProvider = func(_ context.Context, _ *serverConfig) (func() error, ca.KeyProvider, error) {
+			return func() error {
+				*ran = true
+				return nil
+			}, stubProvider{}, nil
+		}
+	}
+
+	It("files the key session's closer where CloseStore will not reach it", func() {
+		var closed bool
+		stubKeyProvider(&closed)
+
+		rt, err := resolveRuntime(context.Background(), openBaoCfg(), true)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(rt.KeyProvider).NotTo(BeNil(), "the branch under test must actually have run")
+
+		Expect(rt.CloseStore()).To(Succeed())
+		Expect(closed).To(BeFalse(),
+			"CloseStore must not release the key session the signer signs with")
+
+		Expect(rt.Close()).To(Succeed())
+		Expect(closed).To(BeTrue(), "Close must still release it")
+	})
+
+	It("does not build one when the role may not reach the key", func() {
+		// Without this, the spec above passes just as well against a
+		// resolveRuntime that ignores withKeyProvider and always builds a
+		// provider -- which is the frontend holding the CA key.
+		var closed bool
+		stubKeyProvider(&closed)
+
+		rt, err := resolveRuntime(context.Background(), openBaoCfg(), false)
+		Expect(err).NotTo(HaveOccurred())
+		defer func() { Expect(rt.Close()).To(Succeed()) }()
+		Expect(rt.KeyProvider).To(BeNil())
+		Expect(closed).To(BeFalse(), "nothing was opened, so nothing is closed")
+	})
+})
+
+var _ = Describe("caRuntime closer groups", func() {
+	// The split exists for one caller in one deployment shape: the isolated
+	// signer under an OpenBao Transit provider, which is finished with the
+	// store the moment ca.Init returns and is not finished with the token
+	// manager backing its key until the process exits.
+	//
+	// Everything here is about which group a closer lands in and when it runs,
+	// because a closer filed in the wrong group is invisible in every
+	// configuration that has no key provider at all -- which is every
+	// configuration in this suite except the ones that say otherwise.
+
+	// Closers that record, so the assertions are about order rather than about
+	// side effects some backend happens to have.
+	recorded := func(log *[]string) *caRuntime {
+		note := func(name string) func() error {
+			return func() error {
+				*log = append(*log, name)
+				return nil
+			}
+		}
+		return &caRuntime{
+			// Two store closers, because a single one cannot tell "reverse
+			// order" from "any order".
+			storeClosers: []func() error{note("store-first"), note("store-second")},
+			keyClosers:   []func() error{note("key")},
+		}
+	}
+
+	It("preserves the order a single reversed list produced", func() {
+		// resolveRuntime registers the backend before the key provider, so the
+		// one list it used to build released the provider's session first and
+		// the backend handle second. This is a regrouping and not a reordering:
+		// a provider torn down after the store it was resolved alongside would
+		// be a change to shutdown that nobody asked for and nothing else here
+		// would notice.
+		var log []string
+		rt := recorded(&log)
+		Expect(rt.Close()).To(Succeed())
+		Expect(log).To(Equal([]string{"key", "store-second", "store-first"}))
+	})
+
+	It("leaves the key group running when only the store is closed", func() {
+		// The Transit case in miniature, and the whole reason CloseStore is a
+		// split rather than an earlier Close. Get it wrong and the signer still
+		// comes up, still passes this suite, and fails on its first signature
+		// in the one deployment that configures a key provider.
+		var log []string
+		rt := recorded(&log)
+		Expect(rt.CloseStore()).To(Succeed())
+		Expect(log).To(Equal([]string{"store-second", "store-first"}))
+	})
+
+	It("does not run the store group twice when Close follows CloseStore", func() {
+		// The signer's actual sequence: CloseStore once Init returns, Close on
+		// the way out. Closing a backend handle twice is usually harmless;
+		// unlocking an instance lock twice is not, and holdInstanceLock files
+		// one in this very group.
+		var log []string
+		rt := recorded(&log)
+		Expect(rt.CloseStore()).To(Succeed())
+		Expect(rt.Close()).To(Succeed())
+		Expect(log).To(Equal([]string{"store-second", "store-first", "key"}))
+	})
+
+	It("runs every closer even when one fails, and reports the first failure", func() {
+		// A backend that fails to close must not strand the key provider's
+		// session, which is the resource that costs something to leak.
+		var log []string
+		boom := errors.New("backend close failed")
+		rt := &caRuntime{
+			storeClosers: []func() error{
+				func() error { log = append(log, "store"); return boom },
+			},
+			keyClosers: []func() error{
+				func() error { log = append(log, "key"); return nil },
+			},
+		}
+		Expect(rt.Close()).To(MatchError(boom))
+		Expect(log).To(Equal([]string{"key", "store"}))
+	})
+
+	It("is safe to close a runtime that was never built", func() {
+		// resolveRuntime's own failure paths call Close on a partially
+		// constructed runtime, and the zero value is the furthest that goes.
+		rt := &caRuntime{}
+		Expect(rt.CloseStore()).To(Succeed())
+		Expect(rt.Close()).To(Succeed())
 	})
 })
 

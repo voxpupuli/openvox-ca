@@ -165,7 +165,7 @@ var _ = Describe("the store instance lock", func() {
 			// resolveRuntime registers the backend's Close first, so Close runs
 			// it last. Reproduced here, because the invariant is about where the
 			// release lands relative to it.
-			rt.closers = append(rt.closers, rec.Close)
+			rt.storeClosers = append(rt.storeClosers, rec.Close)
 			return rt
 		}
 

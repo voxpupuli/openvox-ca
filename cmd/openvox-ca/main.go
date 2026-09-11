@@ -20,6 +20,7 @@ package main
 
 import (
 	"context"
+	"crypto"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
@@ -36,6 +37,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -1225,6 +1227,41 @@ func runSignerMode(ctx context.Context, cfg *serverConfig, absCADir string) erro
 		"pid", os.Getpid(),
 	)
 
+	key, rt, err := initSignerKey(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rt.Close() }()
+
+	slog.Info("CA initialized, serving signing requests")
+	return signer.Serve(key)
+}
+
+// initSignerKey runs CA initialisation and returns the key the signer serves,
+// having already released everything only initialisation needed.
+//
+// Bootstrapping is why the signer opens a storage backend at all: it is the
+// process holding the CA key, so it is the process that has to write a new CA
+// out on first run. On every subsequent start the work is a load — the serial
+// index, the CRL cache and the certificate index are built and then never read
+// again, because the only RPC this process answers is Sign(digest), which needs
+// a crypto.Signer and nothing else. Left to the deferred Close in the caller,
+// the backend handle and its connection pool stayed open for the process
+// lifetime for no reader.
+//
+// What that costs is modest and worth stating honestly: the indexes are
+// single-digit MiB at a ten-thousand-certificate fleet. The connection pool is
+// the part that is not ours to spend — a configured sql_max_open_conns is
+// doubled per replica against the database's own max_connections (#304 is the
+// other half of that multiplication) — and the released heap only becomes RSS
+// the container gets back because FreeOSMemory asks for it.
+//
+// The caller still owns the returned runtime and must Close it: under an
+// OpenBao Transit provider the returned Signer is backed by the token manager,
+// which is in the key-lifetime group and is deliberately still running. The
+// runtime rather than a bare closer so the split is assertable — see
+// caRuntime.CloseStore.
+func initSignerKey(ctx context.Context, cfg *serverConfig) (crypto.Signer, *caRuntime, error) {
 	// The signer role always holds the CA key, so it resolves its runtime with
 	// the key provider enabled.
 	//
@@ -1234,26 +1271,92 @@ func runSignerMode(ctx context.Context, cfg *serverConfig, absCADir string) erro
 	// posture class as the local-key case (key confined to this isolated
 	// process), extended one step further: the key doesn't exist in this
 	// process either.
-	rt, err := resolveRuntime(ctx, cfg, true)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = rt.Close() }()
+	return initSignerKeyWith(ctx, cfg, func(ctx context.Context, cfg *serverConfig) (*caRuntime, error) {
+		return resolveRuntime(ctx, cfg, true)
+	})
+}
 
+// initSignerKeyWith is initSignerKey with runtime resolution injected.
+//
+// The seam exists for the one thing that decides whether this change is correct
+// and that no ordinary test can see: a key-lifetime closer. With a local PEM key
+// there is nothing in the key group, so closing the whole runtime here and
+// closing only its store half are indistinguishable — every spec passes either
+// way, and the deployment that breaks is the Transit one, on its first
+// signature, in production. A resolver that hangs a closer it can watch on the
+// key group makes the distinction observable without an OpenBao server.
+func initSignerKeyWith(ctx context.Context, cfg *serverConfig, resolve runtimeResolver) (crypto.Signer, *caRuntime, error) {
+	rt, err := resolve(ctx, cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	key, err := initCAForSigner(ctx, rt, cfg)
+	if err != nil {
+		_ = rt.Close()
+		return nil, nil, err
+	}
+
+	// Store-lifetime only. Init is the last reader of the backend in this
+	// process; the key provider's session, when there is one, has to keep
+	// running for every signature from here on.
+	closeErr := rt.CloseStore()
+	if closeErr != nil {
+		// Not fatal. The CA exists, the key is in hand, and refusing to serve
+		// because a handle nobody will use again closed untidily would turn a
+		// leak into an outage.
+		slog.Warn("Failed to close the signer's storage backend after initialisation", "error", closeErr)
+	}
+
+	// Ask for the heap back rather than waiting for the background scavenger.
+	// One call, at the one moment this process's live set collapses and stops
+	// growing: from here it allocates a signature at a time and nothing else,
+	// so there is no later allocation to reuse the pages the indexes occupied.
+	// It is the difference between a transient peak and a persistent RSS
+	// against the tree's divided GOMEMLIMIT.
+	//
+	// Debug rather than Info: it says nothing an operator needs on a healthy
+	// start, and the question it does answer — whether this build reached the
+	// release path at all — is the one profiling cannot. store_closed carries
+	// CloseStore's actual result rather than a constant: the branch above means
+	// there is a result to carry, and a field hardcoded true would report
+	// success on the very path that has just logged a failure.
+	//
+	// Its neighbour is named for a request, not an outcome, and the two are not
+	// inconsistent for that. FreeOSMemory returns nothing and promises only an
+	// attempt, so there is no result to carry and no honest way to say whether
+	// the pages actually went back. An operator whose RSS did not fall wants to
+	// know this line ran, and must not read it as proof the reclaim succeeded.
+	debug.FreeOSMemory()
+	slog.Debug("Released the signer's initialisation state",
+		"store_closed", closeErr == nil, "os_memory_release_requested", true)
+
+	return key, rt, nil
+}
+
+// initCAForSigner builds the CA, initialises it, and returns only the key.
+//
+// A function rather than statements in its caller's frame, and deliberately not
+// for the reason it looks like: Go's collector works from liveness rather than
+// scope, so a *ca.CA whose last use has passed is collectable either way, and
+// this is not a claim that writing it inline would leak. What the boundary buys
+// is that the CA cannot be reached again by a later edit. It owns the serial
+// index, the OCSP cache and the CRL cache built during Init, and in a function
+// that goes on to serve for the process lifetime a single added line mentioning
+// it would keep all of that resident with nothing to report it.
+func initCAForSigner(ctx context.Context, rt *caRuntime, cfg *serverConfig) (crypto.Signer, error) {
 	// Full CA initialization: handles bootstrap on first run, loads existing
 	// CA on subsequent runs. This writes ca_crt.pem, CRL, inventory, etc.
 	myCA := ca.New(rt.Store, ca.AutosignConfig{}, cfg.Hostname)
 	if err := applyCAConfig(myCA, cfg); err != nil {
-		return err
+		return nil, err
 	}
 	myCA.KeyProvider = rt.KeyProvider
 
 	if err := myCA.Init(ctx); err != nil {
-		return fmt.Errorf("CA initialization failed: %w", err)
+		return nil, fmt.Errorf("CA initialization failed: %w", err)
 	}
-
-	slog.Info("CA initialized, serving signing requests")
-	return signer.Serve(myCA.CAKey)
+	return myCA.CAKey, nil
 }
 
 // validateAutosignExecutable checks the integrity of an autosign executable:
