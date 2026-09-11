@@ -2419,10 +2419,16 @@ var _ = Describe("stageDocTree", func() {
 
 		BeforeEach(func() {
 			repo = GinkgoT().TempDir()
-			git := func(args ...string) {
-				out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput()
-				Expect(err).NotTo(HaveOccurred(), "git %v: %s", args, out)
-			}
+			// gitIn, not a bare exec.Command: it sets cmd.Env = fixtureEnv(),
+			// which strips GIT_* and redirects HOME/XDG_CONFIG_HOME/global
+			// config. Without it this fixture inherits the ambient
+			// environment, and git exports GIT_DIR, GIT_WORK_TREE,
+			// GIT_INDEX_FILE and GIT_OBJECT_DIRECTORY to the hooks it runs --
+			// where they outrank `-C`, so `commit` under a pre-push hook
+			// writes into the repository being pushed. This suite has paid
+			// for that once already; see the note on gitIn in
+			// magefile_chart_test.go.
+			git := func(args ...string) { gitIn(repo, args...) }
 			git("init", "--quiet")
 			// Committing needs an identity, and the ambient one may be absent
 			// on a CI runner.
@@ -2448,9 +2454,10 @@ var _ = Describe("stageDocTree", func() {
 
 			// The premise: git must actually consider this untracked. A spec
 			// that silently ran against a tracked file would prove nothing.
-			out, err := exec.Command("git", "-C", repo, "ls-files", "--", "docs/draft.md").Output()
-			Expect(err).NotTo(HaveOccurred())
-			Expect(strings.TrimSpace(string(out))).To(BeEmpty(),
+			// Through gitIn for the same reason: a premise check that read a
+			// leaked repository would confirm the premise against the wrong
+			// tree.
+			Expect(gitIn(repo, "ls-files", "--", "docs/draft.md")).To(BeEmpty(),
 				"the fixture is tracked, so this spec proves nothing")
 
 			dest := GinkgoT().TempDir()
@@ -2944,6 +2951,10 @@ func runFirstBootIn(sslDir, binDir, expr string, extraEnv ...string) (firstBootR
 	cmd.Env = append(os.Environ(),
 		"OPENVOX_CA_SSLDIR="+sslDir,
 		"OPENVOX_CA_BINDIR="+binDir,
+		// See runFirstBootScript: the config file first-boot reads defaults to
+		// a real path on a host with a packaged CA, so it is pinned away from
+		// the host here too.
+		"OPENVOX_CA_CONFIG="+filepath.Join(GinkgoT().TempDir(), "no-config.yaml"),
 	)
 	cmd.Env = append(cmd.Env, extraEnv...)
 	out, err := cmd.CombinedOutput()
@@ -3676,6 +3687,7 @@ esac
 			// answer every case below from that file and none of the tiers
 			// this block exists to exercise would run.
 			"OPENVOX_CA_PUPPET_CONF="+filepath.Join(GinkgoT().TempDir(), "no-puppet.conf"),
+			"OPENVOX_CA_CONFIG="+filepath.Join(GinkgoT().TempDir(), "no-config.yaml"),
 			"PATH="+stubBin+":/usr/bin:/bin",
 			"OPENVOX_CA_CERTNAME=",
 		)
@@ -3823,6 +3835,13 @@ func runFirstBootScript(sslDir, binDir, certname string, extraEnv ...string) fir
 		// defect in the script rather than in the fixture. Specs that want the
 		// guard point this at a directory they built.
 		"OPENVOX_CA_LEGACY_CADIR="+filepath.Join(GinkgoT().TempDir(), "no-legacy-cadir"),
+		// first-boot now resolves `cadir` and `storage_backend` from the
+		// server's own configuration file, which defaults to
+		// /etc/puppet-ca/config.yaml -- a real path on any machine with a
+		// packaged CA installed. Pinned at a path that does not exist so
+		// these specs read the fixture and never the host, the same way
+		// OPENVOX_CA_PUPPET_CONF and OPENVOX_CA_LEGACY_CADIR are pinned.
+		"OPENVOX_CA_CONFIG="+filepath.Join(GinkgoT().TempDir(), "no-config.yaml"),
 	)
 	cmd.Env = append(cmd.Env, extraEnv...)
 	out, err := cmd.CombinedOutput()
@@ -3938,6 +3957,85 @@ var _ = Describe("first-boot's provisioning steps", func() {
 		})
 	})
 
+	// first-boot now resolves cadir and storage_backend from the server's own
+	// configuration file. Three properties, each of which decides whether
+	// provisioning lands where the service will look for it.
+	Describe("reading the server's configuration", func() {
+		var sslDir, binDir, cfg string
+
+		BeforeEach(func() {
+			sslDir = GinkgoT().TempDir()
+			binDir = GinkgoT().TempDir()
+			cfg = filepath.Join(GinkgoT().TempDir(), "config.yaml")
+			Expect(os.MkdirAll(filepath.Join(sslDir, "ca"), 0o755)).To(Succeed())
+			stubCA(binDir)
+		})
+
+		withCfg := func() string { return "OPENVOX_CA_CONFIG=" + cfg }
+
+		// The operator is invited to move cadir, and before this the service
+		// read the new location while provisioning still wrote to the old one
+		// -- bootstrapping a second CA and pointing the serving credential at
+		// a leaf no agent's trust anchor verifies.
+		It("bootstraps into the cadir the configuration names, not the default", func() {
+			moved := filepath.Join(GinkgoT().TempDir(), "elsewhere")
+			Expect(os.MkdirAll(moved, 0o755)).To(Succeed())
+			Expect(os.WriteFile(cfg, []byte("cadir: "+moved+"\nport: 8141\n"), 0o644)).To(Succeed())
+
+			r := runFirstBootScript(sslDir, binDir, "ca.example.com", withCfg())
+			Expect(r.ok).To(BeTrue(), "provisioning failed: %s", r.output)
+
+			Expect(filepath.Join(moved, "ca_crt.pem")).To(BeAnExistingFile(),
+				"the CA was not created where the configuration says it lives")
+			Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).NotTo(BeAnExistingFile(),
+				"a second CA was bootstrapped at the shipped default")
+		})
+
+		// No file, or no cadir in it, must still give the shipped default --
+		// the overwhelmingly common case.
+		It("falls back to the shipped default when the configuration says nothing", func() {
+			Expect(os.WriteFile(cfg, []byte("port: 8141\n"), 0o644)).To(Succeed())
+
+			r := runFirstBootScript(sslDir, binDir, "ca.example.com", withCfg())
+			Expect(r.ok).To(BeTrue(), "provisioning failed: %s", r.output)
+			Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).To(BeAnExistingFile())
+		})
+
+		// `openvox-ca-ctl setup` is filesystem-only while `openvox-ca
+		// generate` mints through the configured backend, so on any other
+		// backend the two address different stores. Refuse rather than leave
+		// two CAs and nothing to say which one agents should trust.
+		DescribeTable("refuses to bootstrap when another storage backend is configured",
+			func(backend string) {
+				Expect(os.WriteFile(cfg,
+					[]byte("cadir: "+filepath.Join(sslDir, "ca")+"\nstorage_backend: "+backend+"\n"),
+					0o644)).To(Succeed())
+
+				r := runFirstBootScript(sslDir, binDir, "ca.example.com", withCfg())
+				Expect(r.ok).To(BeFalse(), "provisioning should have refused: %s", r.output)
+				Expect(r.output).To(And(
+					ContainSubstring("storage_backend: "+backend),
+					ContainSubstring("only supports"),
+				))
+				// And it stopped before creating a CA of its own, which is the
+				// whole point of refusing.
+				Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).NotTo(BeAnExistingFile())
+			},
+			Entry("etcd", "etcd"),
+			Entry("redis", "redis"),
+			Entry("postgres", "postgres"),
+			Entry("sqlite", "sqlite"),
+		)
+
+		It("proceeds when the configuration names filesystem explicitly", func() {
+			Expect(os.WriteFile(cfg, []byte("storage_backend: filesystem\n"), 0o644)).To(Succeed())
+
+			r := runFirstBootScript(sslDir, binDir, "ca.example.com", withCfg())
+			Expect(r.ok).To(BeTrue(), "provisioning failed: %s", r.output)
+			Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).To(BeAnExistingFile())
+		})
+	})
+
 	// The default cadir moved this release. A host that followed the old
 	// advice has a real CA the new default cannot see, and bootstrapping over
 	// it would mint a second one that every already-enrolled agent distrusts
@@ -3998,6 +4096,52 @@ var _ = Describe("first-boot's provisioning steps", func() {
 			Expect(r.ok).To(BeTrue(), "provisioning failed: %s", r.output)
 			Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).To(BeAnExistingFile())
 		})
+	})
+
+	// The co-existence case the shared `puppet` account exists for: a host
+	// where openvox-agent got here first, running as root, created certs/ and
+	// private_keys/ itself. ensure_ssl_tree deliberately leaves an existing
+	// directory exactly as it is, so nothing corrects the ownership -- and
+	// before this check the run died three steps later on a bare
+	// "ln: Permission denied" with no guidance at all.
+	//
+	// Skipped as root, where every directory is writable and the branch cannot
+	// be reached.
+	Describe("an ssl subdirectory this account cannot write", func() {
+		var sslDir, binDir string
+
+		BeforeEach(func() {
+			if os.Geteuid() == 0 {
+				Skip("running as root: every directory is writable, so the guard cannot fire")
+			}
+			sslDir = GinkgoT().TempDir()
+			binDir = GinkgoT().TempDir()
+			Expect(os.MkdirAll(filepath.Join(sslDir, "ca"), 0o755)).To(Succeed())
+			stubCA(binDir)
+		})
+
+		DescribeTable("refuses with the chown to run",
+			func(dir string) {
+				// Present but not writable -- exactly what an agent-created
+				// tree looks like to the `puppet` account.
+				path := filepath.Join(sslDir, dir)
+				Expect(os.MkdirAll(path, 0o555)).To(Succeed())
+				DeferCleanup(func() { _ = os.Chmod(path, 0o755) })
+
+				r := runFirstBootScript(sslDir, binDir, "ca.example.com")
+				Expect(r.ok).To(BeFalse(), "provisioning should have refused: %s", r.output)
+				Expect(r.output).To(And(
+					ContainSubstring(path+" is not writable"),
+					ContainSubstring("chown puppet:puppet"),
+					ContainSubstring("systemctl restart openvox-ca-first-boot"),
+				))
+				// It must stop before minting anything, not part way through.
+				Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).NotTo(BeAnExistingFile())
+			},
+			Entry("certs", "certs"),
+			Entry("private_keys", "private_keys"),
+			Entry("public_keys", "public_keys"),
+		)
 	})
 
 	// Both guards below exist to turn a confusing downstream failure into a

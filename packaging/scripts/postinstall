@@ -122,7 +122,32 @@ fi
 # Not recursive: an existing tree may hold an agent's or a server's files, and
 # this package is not entitled to reassign those.
 if [ -d "$SSLDIR" ]; then
-	chown --no-dereference puppet:puppet "$SSLDIR" "$SSLDIR/ca" || warn \
+	# The ssl root and the CA directory, plus the three subdirectories
+	# provisioning writes INTO rather than merely under.
+	#
+	# The first two are shipped by the package, so they exist and are
+	# root-owned by construction. The other three are not packaged: on a fresh
+	# host first-boot creates them itself and owns them, but on the
+	# co-existence case this package advertises -- a host already running
+	# openvox-agent, which creates no account and runs as root -- they are
+	# already there, root-owned, 0755 and 0750. `puppet` cannot create a file
+	# in any of them, and ensure_ssl_tree deliberately leaves a directory that
+	# already exists exactly as it is, so nothing else corrects them either.
+	# Provisioning then dies on a bare `ln: Permission denied` at the last
+	# step, with none of the guidance every other failure here carries.
+	#
+	# Still --no-dereference and still not recursive: only these directories
+	# change hands, and whatever an agent or Server has put inside them is
+	# left alone. A path that is absent is skipped rather than created --
+	# creating one here would pre-empt the modes ensure_ssl_tree chooses.
+	ssl_dirs="$SSLDIR $SSLDIR/ca"
+	for d in certs private_keys public_keys; do
+		[ -d "$SSLDIR/$d" ] && ssl_dirs="$ssl_dirs $SSLDIR/$d"
+	done
+
+	# shellcheck disable=SC2086 # deliberately word-split: the list is built
+	# from literals above, never from operator input.
+	chown --no-dereference puppet:puppet $ssl_dirs || warn \
 		"could not give $SSLDIR to puppet:puppet. Provisioning runs as \`puppet\` and will not be" \
 		"able to write there; fix the ownership and run 'systemctl restart openvox-ca-first-boot'."
 fi

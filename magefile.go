@@ -2097,7 +2097,7 @@ func stageDocTreeFrom(repoRoot, dest string) error {
 	// packaged -- the list would say it shipped and the package would not
 	// contain it, with nothing failing.
 	args := append([]string{"-C", repoRoot, "ls-files", "--"}, docTreeEntries...)
-	out, err := sh.Output("git", args...)
+	out, err := gitListFiles(args)
 	if err != nil {
 		return fmt.Errorf("listing tracked documentation (packaging enumerates it from git, so it "+
 			"needs a git checkout rather than an unpacked source archive): %w", err)
@@ -2156,6 +2156,40 @@ func stampStagedFile(path string) error {
 	}
 	when := time.Unix(secs, 0).UTC()
 	return os.Chtimes(path, when, when)
+}
+
+// gitListFiles runs `git ls-files` with the GIT_* environment removed.
+//
+// `-C <dir>` does not win against GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE or
+// GIT_OBJECT_DIRECTORY -- git exports those to every hook it runs, and they
+// outrank the flag. So a `mage build:packages` invoked from inside a hook, or
+// from any wrapper that sets them, would enumerate a different checkout than
+// the one it is packaging, and the documentation tree in the package would
+// come from somewhere nobody chose.
+//
+// Stripped rather than overridden: this is asking a fixed question about a
+// named directory, so there is no ambient value it wants. The test suite does
+// the same for its own git fixtures through fixtureEnv, for the same reason.
+func gitListFiles(args []string) (string, error) {
+	cmd := exec.Command("git", args...)
+	env := make([]string, 0, len(os.Environ()))
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "GIT_") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	cmd.Env = env
+
+	out, err := cmd.Output()
+	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && len(exit.Stderr) > 0 {
+			return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(string(exit.Stderr)))
+		}
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // checkDocTreeFloor rejects a documentation enumeration that is wrong rather

@@ -30,7 +30,37 @@ set -eu
 # Nothing in the packages sets either, and the unit passes no environment at
 # all, so an installed system always takes the defaults.
 SSLDIR="${OPENVOX_CA_SSLDIR:-/etc/puppetlabs/puppet/ssl}"
-CADIR="$SSLDIR/ca"
+
+# The configuration file the SERVER reads. Provisioning has to resolve the same
+# one, because everything it creates is only useful where openvox-ca will look
+# for it.
+CONFIG="${OPENVOX_CA_CONFIG:-/etc/puppet-ca/config.yaml}"
+
+# read_config_key prints the value of a top-level scalar key from $CONFIG, or
+# nothing if the file, the key or a usable value is absent.
+#
+# Deliberately not a YAML parser. It reads the two keys provisioning cannot
+# proceed without agreeing on, both of which the shipped file writes as plain
+# unquoted scalars at column 0. Anything it cannot read confidently -- a
+# quoted, folded, anchored or nested value -- it declines to read at all, and
+# every caller below treats "no answer" as a reason to stop or to fall back,
+# never as a licence to guess. A wrong answer here would be worse than none:
+# it would point provisioning at a directory the service does not use.
+read_config_key() {
+	key=$1
+	[ -f "$CONFIG" ] || return 0
+	sed -n "s/^${key}:[[:space:]]*\\([^[:space:]#][^#]*\\)[[:space:]]*$/\\1/p" "$CONFIG" |
+		sed -e 's/[[:space:]]*$//' -e "s/^['\"]//" -e "s/['\"]$//" |
+		grep -v '[][{}&*]' | tail -n 1
+}
+
+# Where the CA lives. $SSLDIR/ca is the shipped default and the fallback, but
+# the operator is invited to move `cadir` (packaging/config/config.yaml says
+# so), and if they do, the service reads there while provisioning would
+# otherwise still write here -- bootstrapping a second CA and pointing the
+# serving credential at a leaf no agent's trust anchor verifies.
+CADIR="$(read_config_key cadir)"
+[ -n "$CADIR" ] || CADIR="$SSLDIR/ca"
 
 # A cadir location openvox-ca CAs are commonly found at: it is the Helm chart's
 # persistence.mountPath default, it is what the StateDirectory=puppet-ca on
@@ -246,12 +276,68 @@ ensure_ssl_tree() {
 		info "creating $SSLDIR/private_keys"
 		mkdir -m 0750 "$SSLDIR/private_keys"
 	fi
+
+	# Whichever of those already existed, this account has to be able to write
+	# in it. On a host that ran openvox-agent first they exist, owned by root
+	# and 0755/0750, and the loop above deliberately left them alone -- so
+	# every check so far has passed and the run would die three steps later on
+	# a bare "ln: Permission denied", with none of the guidance the rest of
+	# this script carries. Checked here, while there is still something useful
+	# to say.
+	#
+	# `test -w` answers for the account this process is actually running as,
+	# which is the question that matters and not one the mode bits answer on
+	# their own.
+	for d in certs private_keys public_keys; do
+		[ -w "$SSLDIR/$d" ] && continue
+		fail "$SSLDIR/$d is not writable by $(id -un). Provisioning creates this host's node
+certificate, the CA alias and the serving credential inside these directories, so it cannot
+continue.
+
+This normally means the directory was created by something else -- openvox-agent runs as root and
+creates no account -- and the package left it alone rather than take ownership of a tree it does
+not own. Hand it over, then start again:
+
+    chown puppet:puppet $SSLDIR/certs $SSLDIR/private_keys $SSLDIR/public_keys
+    systemctl restart openvox-ca-first-boot
+
+Only the directories change owner; nothing inside them is touched."
+	done
 }
 
 # 2. The CA itself, unless one is already there. ca_crt.pem is the filesystem
 #    backend's name for the CA certificate, so its presence is what "there is
 #    already a CA here" means.
+# The bootstrap in ensure_ca is filesystem-only: `openvox-ca-ctl setup` builds
+# storage.New(<cadir>) and reads no configuration, while `openvox-ca generate`
+# in step 3 resolves $CONFIG and mints through whatever backend it names. On a
+# host configured for etcd, redis or SQL those two address different stores:
+# step 2 would write a second CA onto the filesystem, step 3 would mint from
+# the real one, and step 4 would then point $SSLDIR/certs/ca.pem -- where every
+# agent on this host reads the CA certificate -- at the stray one.
+#
+# So this refuses, in the same spirit as the legacy-cadir block below: the
+# packages default to `filesystem` and provisioning supports exactly that.
+require_filesystem_backend() {
+	backend="$(read_config_key storage_backend)"
+	case "${backend:-filesystem}" in
+	filesystem) return 0 ;;
+	esac
+	fail "$CONFIG sets storage_backend: $backend, and first-boot provisioning only supports
+\"filesystem\". Bootstrapping here would write a CA to $CADIR while the server reads its own from
+the $backend store, leaving two CAs and nothing to say which one agents should trust.
+
+Provision that CA yourself, then start the service:
+
+  systemctl disable --now openvox-ca-first-boot
+  openvox-ca-ctl setup   # against your configured backend, per docs/storage-backends.md
+
+and supply the credential the shipped configuration names -- $SSLDIR/certs/openvox-ca-server.pem
+and $SSLDIR/private_keys/openvox-ca-server.pem -- or point tls_cert and tls_key at your own."
+}
+
 ensure_ca() {
+	require_filesystem_backend
 	if [ -f "$CADIR/ca_crt.pem" ]; then
 		info "a CA already exists in $CADIR; leaving it alone"
 		return 0
