@@ -1244,8 +1244,10 @@ grant.
 One case to know about. If the CA holds a certificate at this certname that the
 entry's own store cannot account for — a Secret that was emptied, a file that
 will not parse — the issuance goes ahead and the replaced certificate **stays
-valid**, addressable only by serial, because by-name revocation now reaches the
-new one. The CA logs the displaced serial and the command that retires it:
+valid**, addressable by serial rather than by name, because `revoke --certname`
+now resolves to the new one. The CA logs the displaced serial and the command
+that retires it, and the certificate keeps its own inventory row, so an operator
+who missed that line finds it as a second row under one certname:
 
 ```
 openvox-ca-ctl revoke --serial <hex>

@@ -421,6 +421,62 @@ with no issued certificate), `signed`, or `revoked`.
 > To alert on expiry while ignoring revoked certs, filter on `state!="revoked"`,
 > as the mixin does.
 
+### Managed certificates
+
+Only present when [`managed_certs`](configuration.md#managed-certificates) is
+configured. One series per entry, whatever store it uses, published from the
+configuration rather than from anything that has happened.
+
+| Metric | Labels | Description |
+| --- | --- | --- |
+| `puppetca_managed_certificate_configured` | `subject` | Constant `1`, one per configured entry. |
+
+**A constant is the point.** The reconcile loop's outcomes are otherwise
+ordinary certificate facts: a managed certificate is a certificate with an
+inventory row, so once one exists the leaf series above cover its expiry and
+the shipped expiry alerts cover it with no new series at all. The one outcome
+that reasoning cannot reach is an entry that has *never* issued — a store that
+never accepted a write — because there is no series for a certificate that does
+not exist, and no PromQL comparison matches an absence.
+
+Publishing the configuration turns that absence into a value something can be
+tested against:
+
+```promql
+puppetca_managed_certificate_configured
+  unless
+max without (serial, state) (puppetca_leaf_certificate_not_after_timestamp_seconds)
+```
+
+`max without (serial, state)` rather than `on (subject)`: it collapses the
+leaf series' per-certificate labels while keeping every target label the
+deployment attached, so the two sides match per scrape target instead of across
+all of them. A replica whose configuration differs from its siblings' is then
+its own answer rather than being masked by theirs.
+
+This says nothing about *where* a certificate is stored, deliberately. A
+managed certificate may live in a Kubernetes Secret or in local files, and the
+CA's own serving certificate will be a third case with different failure
+semantics again — a series shaped around Secrets would be one those could not
+use.
+
+**Displacement is not a gap here, though it reads like one.** When a managed
+issuance replaces a certificate the CA already held for that name, the
+*subject's* expiry series continues uninterrupted: the leaf series are built by
+walking the CA's certificates per subject, and the new certificate is at that
+subject with an inventory row like any other. What stops being exported is the
+*displaced* certificate's own series — and that is the wanted behaviour, not a
+loss. An expiry alert for a certificate an operator deliberately replaced is
+noise; it is supposed to expire.
+
+What displacement does leave is not a metrics problem. The displaced
+certificate stays valid and is no longer what `revoke --certname` resolves to,
+so retiring it early needs its serial. The CA logs that serial at the time,
+with the remedy, and the certificate keeps its own inventory row — so an
+operator who missed the line finds it as a second row under one subject. Grep
+for `is replacing a different certificate stored for its name` and retire what
+it names with `openvox-ca-ctl revoke --serial`.
+
 ### Kubernetes export
 
 Only present when [Kubernetes export](kubernetes-export.md) targets are

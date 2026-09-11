@@ -751,6 +751,45 @@ var _ = Describe("Collector", func() {
 			map[string]string{"state": "requested"}))).To(Equal(1.0))
 	})
 
+	// The series exists so that an entry which has never issued is a value
+	// rather than an absence, which is the one managed-certificate outcome no
+	// comparison over the leaf series can express.
+	Describe("managed certificates", func() {
+		It("publishes nothing when none is configured", func() {
+			g := gather(metrics.NewCollector(myCA))
+
+			Expect(g.findByLabels("puppetca_managed_certificate_configured", nil)).To(BeNil())
+		})
+
+		It("publishes one series per configured entry, whether or not it has issued", func() {
+			myCA.ManagedCerts = []ca.ManagedCert{
+				{Spec: ca.CertSpec{Subject: "issued.example.com"}},
+				{Spec: ca.CertSpec{Subject: "never-issued.example.com"}},
+			}
+			signCert("issued.example.com")
+
+			g := gather(metrics.NewCollector(myCA))
+
+			Expect(g.findByLabels("puppetca_managed_certificate_configured",
+				map[string]string{"subject": "issued.example.com"})).NotTo(BeNil())
+			// The one that matters: configured, no certificate, still a series.
+			never := g.findByLabels("puppetca_managed_certificate_configured",
+				map[string]string{"subject": "never-issued.example.com"})
+			Expect(never).NotTo(BeNil())
+			Expect(gaugeValue(never)).To(Equal(1.0))
+
+			// And the other half of what PuppetCAManagedCertificateNeverIssued
+			// subtracts, so the alert's two sides are both pinned here: the
+			// entry that issued has a leaf series and the one that did not has
+			// none. Without this the rule could be satisfied by a leaf series
+			// that never appears for anything.
+			Expect(g.findByLabels("puppetca_leaf_certificate_not_after_timestamp_seconds",
+				map[string]string{"subject": "issued.example.com"})).NotTo(BeNil())
+			Expect(g.findByLabels("puppetca_leaf_certificate_not_after_timestamp_seconds",
+				map[string]string{"subject": "never-issued.example.com"})).To(BeNil())
+		})
+	})
+
 	It("excludes cleaned (deleted) certificates from the live set", func() {
 		signCert("keep-node")
 		signCert("clean-node")

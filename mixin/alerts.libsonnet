@@ -653,6 +653,56 @@
               description: 'The Puppet CA on {{ $labels.instance }} has {{ $labels.kind }}/{{ $labels.name }} in namespace {{ $labels.namespace }} configured for export but has not attempted a single apply in %(k8sExportNotRunningFor)s. The exported object holds whatever it held before, and PuppetCAKubernetesExportFailing cannot report on a target with no apply results. Check the CA logs for the Kubernetes export job starting, and for errors initialising the in-cluster client.' % { k8sExportNotRunningFor: $._config.k8sExportNotRunningFor },
             },
           },
+          {
+            alert: 'PuppetCAManagedCertificateNeverIssued',
+            // A configured managed certificate that has never produced a
+            // certificate at all -- a store that has never accepted a write.
+            //
+            // Everything else about a managed certificate is an ordinary
+            // certificate fact. Once one exists it has an inventory row and the
+            // leaf series cover its expiry, so the shipped expiry alerts cover
+            // it with nothing new. This is the one outcome that reasoning
+            // cannot reach, and for the same structural reason
+            // PuppetCAKubernetesExportNotRunning exists: there is no series for
+            // a certificate that does not exist, and no PromQL comparison
+            // matches an absence. The answer has to come from the CA, which
+            // publishes its configuration so that "nothing has happened" is a
+            // value.
+            //
+            // `max without (serial, state)` rather than `unless on (subject)`.
+            // Both collapse the leaf series' per-certificate labels, but
+            // `on (subject)` also discards every target label, so one replica's
+            // certificate would satisfy another replica's entry -- and a
+            // replica whose configuration differs from its siblings' is exactly
+            // the case worth catching. `without` keeps whatever labels the
+            // deployment attached, so the two sides match per scrape target.
+            //
+            // A revoked certificate still emits its leaf series, so this stays
+            // silent for an entry whose certificate was revoked and is awaiting
+            // reissue. That is deliberate: the next reconcile pass replaces it,
+            // and alerting inside one interval would fire on the mechanism
+            // working.
+            //
+            // It does not cover a crashlooping CA and must not be read as
+            // doing so -- that is PuppetCAExporterDown's job. What it covers is
+            // a CA that stays up, scrapes cleanly and reports readiness while
+            // a certificate something else is waiting for never appears.
+            expr: |||
+              puppetca_managed_certificate_configured{%(selector)s}
+                unless
+              max without (serial, state) (
+                puppetca_leaf_certificate_not_after_timestamp_seconds{%(selector)s}
+              )
+            ||| % {
+              selector: $._config.puppetCASelector,
+            },
+            'for': $._config.managedCertNeverIssuedFor,
+            labels: { severity: 'warning' } + $._config.alertLabels,
+            annotations: {
+              summary: 'A managed certificate has never been issued.',
+              description: 'The Puppet CA on {{ $labels.instance }} has {{ $labels.subject }} configured in managed_certs but no certificate for it exists after %(managedCertNeverIssuedFor)s. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else\'s material, or a directory that does not exist.' % { managedCertNeverIssuedFor: $._config.managedCertNeverIssuedFor },
+            },
+          },
         ],
       },
     ],
