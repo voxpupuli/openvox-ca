@@ -209,7 +209,7 @@ They land in `dist/`, one `.deb` and one `.rpm` per non-FIPS architecture. A FIP
 Then install and start:
 
 ```console
-$ sudo apt install ./openvox-ca_<version>_amd64.deb     # Debian, Ubuntu
+$ sudo apt install ./openvox-ca_<version>-1_amd64.deb   # Debian, Ubuntu
 $ sudo dnf install ./openvox-ca-<version>-1.x86_64.rpm  # RHEL, Rocky, Fedora
 $ sudo systemctl enable --now openvox-ca
 ```
@@ -276,6 +276,14 @@ Neither `apt remove` nor `dnf remove` deletes **the CA private key, anything els
 That is deliberate. `/etc/puppetlabs/puppet/ssl` holds the key that signs every certificate in the estate, and the account may be shared with openvox-agent or OpenVox Server, so removing either could take an estate's trust root — or another product's account — with it on what an operator meant as an uninstall. `apt purge` does not change this: the tree is not registered as configuration.
 
 The consequence worth knowing is the other one: **removing the package does not decommission the CA.** Reinstalling adopts the existing directory rather than provisioning a new one, and the key remains on disk and readable by anything running as `puppet` until someone deletes it. To actually retire a CA, remove `/etc/puppetlabs/puppet/ssl/ca` yourself, having first understood that every certificate it issued stops being verifiable.
+
+**An upgrade restarts a running CA.** The postinstall issues `systemctl
+try-restart openvox-ca.service`, so the new binary is the one serving rather
+than the old process continuing on the superseded image — an upgrade that
+silently does not take effect is the wrong default for a service whose fixes
+are certificate-handling ones. It is `try-restart` rather than `restart`: a CA
+you have deliberately left stopped stays stopped, and an install still never
+starts one.
 
 The one file an upgrade will not overwrite is `/etc/puppet-ca/config.yaml`: it is marked as a configuration file in both formats, so your edits survive and a changed default arrives beside it as `.dpkg-dist` or `.rpmnew`.
 

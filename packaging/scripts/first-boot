@@ -419,6 +419,34 @@ ensure_node_certificate() {
 	key="$SSLDIR/private_keys/$NAME.pem"
 
 	if [ -f "$cert" ] && [ -f "$key" ]; then
+		# Adoption is right on a takeover -- the CA that issued this
+		# credential is the one in $CADIR, and re-minting would needlessly
+		# replace a working certificate.
+		#
+		# It is wrong when THIS run created the CA. A Server compile master is
+		# exactly the host a package lands on: /etc/puppetlabs/puppet/ssl is
+		# already puppet:puppet and already holds an openvox-agent credential
+		# signed by the estate's REMOTE CA, with no local cadir. Adopting it
+		# would make a brand-new CA serve a certificate it did not issue, and
+		# link_serving_credential would point tls_cert/tls_key straight at it.
+		# Nothing downstream would notice: the server starts, and every client
+		# that verifies rejects the handshake.
+		if [ "$ca_existed" = no ]; then
+			fail "found an existing credential for \"$NAME\" ($cert), but the CA in $CADIR was created
+by this run -- so that certificate was issued by a different CA and this one cannot serve it.
+
+That usually means this host already belongs to another CA, which is the estate's real one. Pick
+the CA this service should be:
+
+  Use the existing CA -- point cadir in $CONFIG at it (and ReadWritePaths= in
+  openvox-ca.service to match), delete the CA this run just created at $CADIR, then
+  'systemctl restart openvox-ca-first-boot'.
+
+  Or run a new, separate CA here -- move $cert and $key aside, and provisioning will mint this
+  host a certificate from the CA in $CADIR.
+
+Nothing has been linked, and the existing credential is untouched."
+		fi
 		info "adopting the existing certificate for \"$NAME\""
 		return 0
 	fi
@@ -504,9 +532,16 @@ write_unresolved_marker() {
 		"/etc/puppetlabs/puppet/puppet.conf), then start again from an empty $CADIR:" \
 		"" \
 		"    systemctl stop openvox-ca" \
-		"    rm -rf $CADIR $SSLDIR/certs $SSLDIR/private_keys $SSLDIR/public_keys" \
-		"    rm -f $SSLDIR/crl.pem $UNRESOLVED_MARKER" \
+		"    rm -rf $CADIR" \
+		"    rm -f $SSLDIR/certs/$NAME.pem $SSLDIR/private_keys/$NAME.pem" \
+		"    rm -f $SSLDIR/certs/ca.pem $SSLDIR/crl.pem" \
+		"    rm -f $SSLDIR/certs/openvox-ca-server.pem $SSLDIR/private_keys/openvox-ca-server.pem" \
+		"    rm -f $UNRESOLVED_MARKER" \
 		"    systemctl restart openvox-ca-first-boot openvox-ca" \
+		"" \
+		"That list is exactly what this run created. Anything else under certs/ or private_keys/" \
+		"belongs to something this package did not install -- an agent's own credential, most" \
+		"likely -- and deleting it would cost that host its enrolment." \
 		"" \
 		"Re-minting replaces the CA, so every certificate it has already issued stops being trusted." \
 		"On a host that has served agents, migrate instead -- see docs/migrating-from-puppet-server.md." \

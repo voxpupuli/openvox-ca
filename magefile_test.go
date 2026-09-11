@@ -35,6 +35,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -1551,6 +1552,58 @@ jobs:
 	})
 })
 
+var _ = Describe("verifyNodeTTL", func() {
+	// The guard that keeps first-boot's NODE_TTL and internal/ca's certValidity
+	// from drifting. Driven over content through verifyNodeTTLIn, because a
+	// guard exercised only against today's tree cannot tell working from
+	// vacuous -- delete the comparison and "it passes here" still passes.
+	const goodGo = "const (\n\tcertValidity = 5 * 365 * 24 * time.Hour\n)\n"
+
+	It("passes against the repository as it stands", func() {
+		Expect(verifyNodeTTL()).To(Succeed())
+	})
+
+	It("accepts a shell TTL that equals the Go product", func() {
+		Expect(verifyNodeTTLIn([]byte("NODE_TTL=43800h\n"), []byte(goodGo))).To(Succeed())
+	})
+
+	// The case the guard exists for, from each side.
+	DescribeTable("refuses a disagreement, naming both numbers and both files",
+		func(script, signing string, wantShell, wantGo string) {
+			err := verifyNodeTTLIn([]byte(script), []byte(signing))
+			Expect(err).To(MatchError(And(
+				ContainSubstring(wantShell),
+				ContainSubstring(wantGo),
+				ContainSubstring(firstBootScriptPath),
+				ContainSubstring(caSigningPath),
+			)))
+		},
+		Entry("the shell value moved", "NODE_TTL=8760h\n", goodGo, "8760h", "43800h"),
+		Entry("the Go value moved", "NODE_TTL=43800h\n",
+			"const (\n\tcertValidity = 3 * 365 * 24 * time.Hour\n)\n", "43800h", "26280h"),
+	)
+
+	// A guard that cannot read its input must say so rather than pass. Both
+	// halves, because a silent "no match, therefore fine" is how this class of
+	// check dies.
+	It("refuses when the shell constant can no longer be found", func() {
+		err := verifyNodeTTLIn([]byte("NODE_TTL=$(compute_it)\n"), []byte(goodGo))
+		Expect(err).To(MatchError(And(
+			ContainSubstring("no longer sets NODE_TTL"),
+			ContainSubstring(firstBootScriptPath),
+		)))
+	})
+
+	It("refuses when the Go constant can no longer be found", func() {
+		err := verifyNodeTTLIn([]byte("NODE_TTL=43800h\n"),
+			[]byte("const certValidity = fiveYears\n"))
+		Expect(err).To(MatchError(And(
+			ContainSubstring("no longer spells certValidity"),
+			ContainSubstring("update the pattern rather than deleting the check"),
+		)))
+	})
+})
+
 var _ = Describe("verifyMageTargets", func() {
 	// Against the repository's real magefile and workflows, which is what
 	// `mage dev:check` runs.
@@ -1813,6 +1866,46 @@ var _ = Describe("packaging helpers", func() {
 			Entry("a hardlink", byte(tar.TypeLink), "openvox-ca-ctl"),
 			Entry("a directory", byte(tar.TypeDir), ""),
 		)
+
+		// The size bound must refuse rather than truncate. io.Copy against a
+		// plain LimitReader stops at the bound and reports success, so an
+		// oversized entry used to yield a SHORT binary that is present, well
+		// named and broken only at run time -- the same hazard the Typeflag
+		// guard refuses outright.
+		It("refuses an entry larger than the extraction bound", func() {
+			archive := filepath.Join(GinkgoT().TempDir(), "big.tar.gz")
+			f, err := os.Create(archive)
+			Expect(err).NotTo(HaveOccurred())
+			gz := gzip.NewWriter(f)
+			tw := tar.NewWriter(gz)
+
+			// One byte past the bound, declared and delivered.
+			const size = int64(maxExtractedFileBytes) + 1
+			Expect(tw.WriteHeader(&tar.Header{
+				Name: "openvox-ca", Typeflag: tar.TypeReg, Mode: 0o755, Size: size,
+			})).To(Succeed())
+			// Written in chunks so the fixture costs memory, not 2GB of it.
+			chunk := make([]byte, 1<<20)
+			for written := int64(0); written < size; {
+				n := int64(len(chunk))
+				if size-written < n {
+					n = size - written
+				}
+				_, err := tw.Write(chunk[:n])
+				Expect(err).NotTo(HaveOccurred())
+				written += n
+			}
+			Expect(tw.Close()).To(Succeed())
+			Expect(gz.Close()).To(Succeed())
+			Expect(f.Close()).To(Succeed())
+
+			dest := GinkgoT().TempDir()
+			err = extractTarGz(archive, dest, []string{"openvox-ca"})
+			Expect(err).To(MatchError(And(
+				ContainSubstring("larger than"),
+				ContainSubstring("truncated"),
+			)))
+		})
 
 		// A tarball missing a binary would otherwise produce a package that
 		// is well formed and installs a service with nothing to run.
@@ -2476,6 +2569,24 @@ var _ = Describe("stageDocTree", func() {
 		// world-readable on one machine and not on another. The fixtures are
 		// written 0600 above precisely so a copy that preserved the source
 		// mode would fail here.
+		// The mode promise under a umask that would otherwise break it.
+		// os.WriteFile's mode is masked by the process umask, so before the
+		// explicit Chmod this staged 0640 under 0027 and the packages' docs
+		// differed by build host. The sibling spec below covers the source
+		// mode; this one covers the umask, and they are separate axes.
+		It("stages 0644 even under a umask that would mask it", func() {
+			old := syscall.Umask(0o027)
+			DeferCleanup(func() { syscall.Umask(old) })
+
+			dest := GinkgoT().TempDir()
+			Expect(stageDocTreeFrom(repo, dest)).To(Succeed())
+
+			info, err := os.Stat(filepath.Join(dest, "LICENSE"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(info.Mode().Perm()).To(Equal(os.FileMode(0o644)),
+				"the umask reached the staged file, so the package's docs depend on the build host")
+		})
+
 		It("stages every file 0644 regardless of the source mode", func() {
 			dest := GinkgoT().TempDir()
 			Expect(stageDocTreeFrom(repo, dest)).To(Succeed())
@@ -2660,7 +2771,7 @@ var _ = Describe("first-boot's certname allow-list", func() {
 	// This runs the shipped shell function, not a restatement of it.
 	DescribeTable("is_safe_certname",
 		func(name string, want bool) {
-			got, err := runFirstBootFunc(fmt.Sprintf("is_safe_certname %q", name))
+			got, err := runFirstBootFunc("is_safe_certname " + shellQuote(name))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got).To(Equal(want), "is_safe_certname %q", name)
 		},
@@ -2687,7 +2798,7 @@ var _ = Describe("first-boot's certname allow-list", func() {
 	// source is put through both.
 	DescribeTable("is_localhost_name covers both callers' patterns",
 		func(name string, want bool) {
-			got, err := runFirstBootFunc(fmt.Sprintf("is_localhost_name %q", name))
+			got, err := runFirstBootFunc("is_localhost_name " + shellQuote(name))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got).To(Equal(want), "is_localhost_name %q", name)
 		},
@@ -3241,13 +3352,52 @@ var _ = Describe("first-boot's node-certificate step", func() {
 	})
 
 	Describe("ensure_node_certificate", func() {
-		It("adopts an existing pair without minting", func() {
+		// The takeover case: the CA in $CADIR predates this run, so it is the
+		// CA that issued this credential and re-minting would replace a
+		// working certificate for nothing.
+		It("adopts an existing pair without minting, on a takeover", func() {
+			stubOpenvoxCA(binDir, true)
+			writePair(true, true)
+			r, err := runFirstBootIn(sslDir, binDir,
+				`ca_existed=yes; NAME=ca.example.com; ensure_node_certificate`)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(r.ok).To(BeTrue())
+			Expect(r.output).To(ContainSubstring("adopting the existing certificate"))
+		})
+
+		// And the case that is not a takeover at all. A Server compile master
+		// already has an openvox-agent credential signed by the estate's
+		// remote CA and no local cadir: adopting it would make the CA this run
+		// just created serve a certificate it did not issue, and every client
+		// that verifies would reject the handshake.
+		It("refuses to adopt a credential the CA it just created did not issue", func() {
+			stubOpenvoxCA(binDir, true)
+			writePair(true, true)
+			r, err := runFirstBootIn(sslDir, binDir,
+				`ca_existed=no; NAME=ca.example.com; ensure_node_certificate`)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(r.ok).To(BeFalse(), "provisioning should have refused: %s", r.output)
+			Expect(r.output).To(And(
+				ContainSubstring("was created\nby this run"),
+				ContainSubstring("issued by a different CA"),
+			))
+			// Both routes out have to be offered: an operator told only to
+			// move the credential aside would strand a host that should be
+			// joining the estate's existing CA.
+			Expect(r.output).To(And(
+				ContainSubstring("Use the existing CA"),
+				ContainSubstring("Or run a new, separate CA here"),
+			))
+		})
+
+		// An unset ca_existed must be fatal rather than silently adopting:
+		// `set -u` is what makes a future caller that forgets it fail loudly.
+		It("refuses to run at all when ca_existed was never established", func() {
 			stubOpenvoxCA(binDir, true)
 			writePair(true, true)
 			r, err := runFirstBootIn(sslDir, binDir, `NAME=ca.example.com; ensure_node_certificate`)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(r.ok).To(BeTrue())
-			Expect(r.output).To(ContainSubstring("adopting the existing certificate"))
+			Expect(r.ok).To(BeFalse(), "an unset ca_existed must not adopt by default")
 		})
 
 		// Half a credential is the case where guessing is worse than stopping:
@@ -3563,6 +3713,57 @@ var _ = Describe("the packages' maintainer scripts", func() {
 			"the blocking file was replaced, so mkdir -p did not fail as this spec assumes")
 	})
 
+	// The abstention docs/systemd.md promises in as many words: installing a
+	// package is not consent to create a certificate authority, so the
+	// postinstall must never enable or start openvox-ca.service. Only the
+	// oneshot is enabled, and that is a RequiredBy= symlink and nothing else.
+	DescribeTable("never enables or starts the service itself",
+		func(args ...string) {
+			_, calls := run("packaging/scripts/postinstall", args...)
+			Expect(calls).NotTo(ContainSubstring("systemctl enable openvox-ca.service"),
+				"an install enabled the CA, which is consent nobody gave")
+			Expect(calls).NotTo(ContainSubstring("start openvox-ca.service"))
+			// The oneshot IS enabled, so this is an abstention rather than a
+			// spec that would pass against a script doing nothing at all.
+			Expect(calls).To(ContainSubstring("systemctl enable openvox-ca-first-boot.service"))
+		},
+		Entry("dpkg first install", "configure"),
+		Entry("rpm first install", "1"),
+	)
+
+	// An upgrade replaces the binary under a running service. Nothing restarts
+	// it unless this does, and preremove deliberately does not stop it -- so
+	// before this the CA went on serving the superseded image indefinitely,
+	// with nothing anywhere saying a restart was outstanding.
+	DescribeTable("restarts a running CA on an upgrade, and only on an upgrade",
+		func(args []string, wantRestart bool) {
+			_, calls := run("packaging/scripts/postinstall", args...)
+			if wantRestart {
+				Expect(calls).To(ContainSubstring("systemctl try-restart openvox-ca.service"),
+					"the upgrade left the old binary serving")
+			} else {
+				Expect(calls).NotTo(ContainSubstring("try-restart"),
+					"a first install has nothing running to restart")
+			}
+		},
+		// dpkg passes the previously-configured version in $2 on an upgrade.
+		Entry("dpkg upgrade", []string{"configure", "1.0.0"}, true),
+		// rpm passes the number of packages that will remain: 2 on upgrade.
+		Entry("rpm upgrade", []string{"2"}, true),
+		Entry("dpkg first install", []string{"configure"}, false),
+		Entry("rpm first install", []string{"1"}, false),
+	)
+
+	// try-restart, not restart: a CA the operator has deliberately left
+	// stopped must stay stopped across an upgrade.
+	It("uses try-restart so a stopped CA is not started by an upgrade", func() {
+		src, err := os.ReadFile("packaging/scripts/postinstall")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(src)).To(ContainSubstring("systemctl try-restart openvox-ca.service"))
+		Expect(string(src)).NotTo(MatchRegexp(`(?m)^\s*systemctl restart openvox-ca\.service`),
+			"a plain restart would start a CA the operator chose to leave stopped")
+	})
+
 	// A full uninstall should leave nothing of ours behind, and $STATEDIR is
 	// the only directory this package creates outside the payload -- so
 	// nothing but these scripts will ever remove it.
@@ -3752,7 +3953,7 @@ esac
 		It("records what is wrong and how to recover", func() {
 			defs, err := firstBootDefs()
 			Expect(err).NotTo(HaveOccurred())
-			cmd := exec.Command("sh", "-c", defs+"\nwrite_unresolved_marker\n")
+			cmd := exec.Command("sh", "-c", defs+"\nNAME=localhost\nwrite_unresolved_marker\n")
 			cmd.Env = append(os.Environ(),
 				"OPENVOX_CA_SSLDIR="+sslDir,
 				"OPENVOX_CA_BINDIR="+binDir,
@@ -3768,6 +3969,41 @@ esac
 			))
 			// The recovery destroys a CA, so it must say what that costs.
 			Expect(string(body)).To(ContainSubstring("stops being trusted"))
+		})
+
+		// The remediation must delete only what this run created. It used to
+		// say `rm -rf $SSLDIR/certs $SSLDIR/private_keys`, which on the very
+		// host this marker is most likely to appear on -- one that already ran
+		// an agent -- destroys a credential issued by another CA, recoverable
+		// only by re-enrolment. That contradicted the script's own stated
+		// invariant that nothing already on disk is overwritten or moved.
+		It("names only what this run created, not the whole tree", func() {
+			defs, err := firstBootDefs()
+			Expect(err).NotTo(HaveOccurred())
+			cmd := exec.Command("sh", "-c", defs+"\nNAME=localhost\nwrite_unresolved_marker\n")
+			cmd.Env = append(os.Environ(),
+				"OPENVOX_CA_SSLDIR="+sslDir,
+				"OPENVOX_CA_BINDIR="+binDir,
+			)
+			Expect(cmd.Run()).To(Succeed())
+
+			body, err := os.ReadFile(filepath.Join(sslDir, "openvox-ca-certname-unresolved"))
+			Expect(err).NotTo(HaveOccurred())
+			text := string(body)
+
+			// Never the directories wholesale.
+			Expect(text).NotTo(ContainSubstring("rm -rf " + sslDir + "/certs"))
+			Expect(text).NotTo(ContainSubstring(sslDir + "/private_keys\n"))
+			Expect(text).NotTo(ContainSubstring("public_keys"))
+
+			// Only this run's own files, named individually.
+			Expect(text).To(And(
+				ContainSubstring(sslDir+"/certs/localhost.pem"),
+				ContainSubstring(sslDir+"/private_keys/localhost.pem"),
+				ContainSubstring(sslDir+"/certs/openvox-ca-server.pem"),
+			))
+			// And it must say why the rest is off limits.
+			Expect(text).To(ContainSubstring("belongs to something this package did not install"))
 		})
 	})
 })
@@ -4370,6 +4606,19 @@ var _ = Describe("postinstall's ownership and permission hardening", func() {
 			}
 			Expect(os.WriteFile(filepath.Join(stubBin, name), []byte(body), 0o755)).To(Succeed())
 		}
+
+		// mkdir logs AND does the work, unlike the stubs above.
+		//
+		// PATH here is stubBin alone, so an unstubbed mkdir is an ABSENT
+		// mkdir, and `mkdir -p "$STATEDIR"` in the enable block then fails on
+		// every run -- sending every spec in this block down the
+		// marker-write-failed branch and making the "a failure is reported"
+		// assertion below pass whatever the script does. It is not stubbed to
+		// exit 0 either: that would make the marker appear written when it was
+		// not, which the sibling block's specs then contradict.
+		Expect(os.WriteFile(filepath.Join(stubBin, "mkdir"),
+			[]byte(fmt.Sprintf("#!/bin/sh\necho \"mkdir $*\" >> %s\nexec /bin/mkdir \"$@\"\n", log)),
+			0o755)).To(Succeed())
 		Expect(os.MkdirAll(filepath.Join(sslDir, "ca"), 0o755)).To(Succeed())
 	})
 

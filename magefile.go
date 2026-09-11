@@ -1196,6 +1196,20 @@ func verifyNodeTTL() error {
 	if err != nil {
 		return err
 	}
+	signing, err := os.ReadFile(caSigningPath)
+	if err != nil {
+		return err
+	}
+	return verifyNodeTTLIn(script, signing)
+}
+
+// verifyNodeTTLIn is verifyNodeTTL over content rather than paths.
+//
+// The seam exists so the disagreement case can be driven. A guard whose only
+// exercise is "it passes against today's tree" cannot distinguish working from
+// vacuous: it would go on passing if the comparison were deleted. Same shape
+// as verifyMageTargetsIn and stageDocTreeFrom.
+func verifyNodeTTLIn(script, signing []byte) error {
 	m := nodeTTLRE.FindSubmatch(script)
 	if m == nil {
 		return fmt.Errorf("%s no longer sets NODE_TTL=<hours>h, so the CA's leaf lifetime and the "+
@@ -1206,10 +1220,6 @@ func verifyNodeTTL() error {
 		return err
 	}
 
-	signing, err := os.ReadFile(caSigningPath)
-	if err != nil {
-		return err
-	}
 	g := certValidityRE.FindSubmatch(signing)
 	if g == nil {
 		return fmt.Errorf("%s no longer spells certValidity as <n> * <n> * <n> * time.Hour, so this "+
@@ -2243,7 +2253,15 @@ func copyStagedFile(src, dst string) error {
 	// the mode a document happens to carry in one contributor's checkout --
 	// otherwise the same commit produces packages whose documentation is
 	// world-readable on one build host and not on another.
-	return os.WriteFile(dst, data, 0644)
+	if err := os.WriteFile(dst, data, 0644); err != nil {
+		return err
+	}
+	// And the chmod is what makes the sentence above true. os.WriteFile's mode
+	// is a REQUEST: the kernel masks it with the process umask, so a build run
+	// under 0027 writes 0640 and the promise fails silently. Chmod is not
+	// masked. Same shape as stampStagedFile correcting the mtime nfpm would
+	// otherwise take from the clock.
+	return os.Chmod(dst, 0644)
 }
 
 // maxExtractedFileBytes caps a single entry unpacked from a release tarball.
@@ -2314,7 +2332,20 @@ func extractTarGz(archive, destDir string, want []string) error {
 		// reason, which answered a different question. The limit is generous
 		// enough that no real binary approaches it and small enough that a
 		// malformed archive cannot fill the build host's disk.
-		if _, err := io.Copy(w, io.LimitReader(tr, maxExtractedFileBytes)); err != nil {
+		// LimitReader + 1, and the count checked: io.Copy against a plain
+		// LimitReader stops at the bound and reports SUCCESS, so an entry over
+		// the limit would be silently truncated -- a binary that is well
+		// formed, present, the right name, and short. That is the same
+		// zero-byte-binary hazard the Typeflag check above refuses outright,
+		// reached by a different route. Refuse it the same way.
+		n, err := io.Copy(w, io.LimitReader(tr, maxExtractedFileBytes+1))
+		if err == nil && n > maxExtractedFileBytes {
+			w.Close()
+			return fmt.Errorf("%s in %s is larger than %d bytes: refusing to extract a truncated "+
+				"file, because a short binary installs and fails at run time rather than at build "+
+				"time", hdr.Name, filepath.Base(archive), maxExtractedFileBytes)
+		}
+		if err != nil {
 			w.Close()
 			return err
 		}

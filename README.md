@@ -111,8 +111,17 @@ listen on **8141** rather than 8140, which Server binds itself.
 **They are not published as release assets yet.** Adding the packaging job to
 the release workflow is
 [#266](https://github.com/voxpupuli/openvox-ca/pull/266); until it lands, build
-them from a checkout with `mage build:dist && mage build:packages`, which
-writes them into `dist/` beside the tarballs. The packages carry the pure-Go
+them from a checkout with:
+
+```console
+$ mage build:distVariant linux_amd64    # or linux_arm64
+$ mage build:packages
+```
+
+`build:dist` also works, but it builds all four release tarballs including the
+two FIPS ones, which need a cgo cross toolchain the packages never use. The
+packaging step reads whichever variant tarballs are in `dist/` and writes the
+`.deb` and `.rpm` beside them. The packages carry the pure-Go
 build only — a FIPS deployment uses the `_fips` tarball.
 
 See [installing from a package](docs/systemd.md#installing-from-a-package) for

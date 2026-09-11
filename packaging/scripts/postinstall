@@ -205,6 +205,36 @@ fi
 # retries the enable on the next boot.
 if [ -d "$SYSTEMD_RUNTIME" ]; then
 	systemctl daemon-reload >/dev/null 2>&1 || :
+
+	# And restart a RUNNING CA on an upgrade, so the new binary is the one
+	# serving.
+	#
+	# Without this, `apt upgrade` replaces /usr/bin/openvox-ca and both units,
+	# reports success, and leaves the old process running the superseded image
+	# indefinitely -- with nothing in the package-manager output or the journal
+	# to say a restart is outstanding. preremove deliberately does not stop the
+	# service on an upgrade, which is right (an upgrade is not an outage), but
+	# nothing was then picking the new binary up. For a service whose upgrades
+	# carry certificate-handling fixes, an upgrade that silently does not take
+	# effect is the wrong default.
+	#
+	# try-restart, not restart: it restarts the unit only if it is already
+	# running, so an install that deliberately left the CA stopped -- which is
+	# every fresh install, because this script never starts it -- stays
+	# stopped. An install is not consent to create a certificate authority, and
+	# that has to remain true on the upgrade path too.
+	#
+	# Not on a first install: dpkg passes no $2 and rpm passes 1, and there is
+	# nothing running to restart.
+	case "${1:-configure}" in
+	2) upgrading=yes ;;                         # rpm: 2 packages will remain
+	configure) [ -n "${2:-}" ] && upgrading=yes ;; # dpkg: $2 is the old version
+	esac
+	if [ "${upgrading:-no}" = yes ]; then
+		systemctl try-restart openvox-ca.service >/dev/null 2>&1 || warn \
+			"could not restart openvox-ca.service after the upgrade. If it is running it is still" \
+			"executing the previous binary; run 'systemctl restart openvox-ca' when convenient."
+	fi
 fi
 
 # Enabled once, by us, and not re-enabled afterwards -- an operator who runs
