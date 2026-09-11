@@ -1157,7 +1157,7 @@ var automergeActionRE = regexp.MustCompile(`(?i)auto-?merge`)
 // it also catches the target being renamed and its caller updated to match,
 // which the scan would call correct while every `mage build:packages` written
 // down outside this repository had silently stopped working.
-var requiredMageTargets = []string{"build:packages"}
+var requiredMageTargets = []string{"build:packages", "build:unit"}
 
 // The two files verifyNodeTTL compares. Named rather than inlined so the
 // error messages can point at them and a rename breaks the build here.
@@ -1256,10 +1256,21 @@ func verifyMageTargets() error {
 	// stops matching the directory: a workflow added later would invoke mage
 	// and simply not be checked, and nothing would say so -- the guard would
 	// keep passing while covering less than it claims.
-	paths, err := filepath.Glob(filepath.Join(".github", "workflows", "*.yml"))
-	if err != nil {
-		return err
+	//
+	// Both extensions, because GitHub accepts both and the extension is the
+	// other half of that same list. Every workflow here is .yml today, so a
+	// .yaml one added later would have been invisible -- and the floor below
+	// could not have noticed, the five existing files keeping it satisfied.
+	// renovate.json already matches `.ya?ml$` for the same reason.
+	var paths []string
+	for _, ext := range []string{"*.yml", "*.yaml"} {
+		matched, err := filepath.Glob(filepath.Join(".github", "workflows", ext))
+		if err != nil {
+			return err
+		}
+		paths = append(paths, matched...)
 	}
+	slices.Sort(paths)
 	// The floor over the glob itself. A pattern that stopped matching -- the
 	// directory moved, this run started somewhere else -- would hand
 	// verifyMageTargetsIn an empty map, and every per-workflow check below
@@ -1324,6 +1335,23 @@ func verifyMageTargetsIn(mageSrc []byte, workflows map[string][]byte) error {
 		// container-images.yml says "image" constantly. That version of this
 		// floor fired on a correct workflow, which is the other way a floor
 		// fails -- it stops being believed.
+		// Matched against the RAW file, deliberately, while the scan above
+		// matches comment-stripped shell. The asymmetry is the point and it
+		// reads as a defect, so: this is a tripwire, not a second scan. It
+		// fires when the file says "mage" anywhere and the parse found no
+		// invocation -- including when the only mention is a comment, because
+		// a comment naming a mage command is evidence a human believed mage
+		// ran here. The case it exists for is steps moving somewhere the
+		// parse cannot reach (a composite action, a reusable workflow),
+		// which characteristically leaves exactly such a comment behind.
+		//
+		// Narrowing it to the stripped shell was proposed and declined: it
+		// would trade a hypothetical false positive -- a workflow that
+		// mentions mage only in a comment AND invokes it nowhere, which no
+		// workflow here does, release.yml invoking it at line 64 -- for
+		// blindness to the real case. The spec "rejects a workflow that
+		// mentions mage where the parse finds none" pins this, and its
+		// fixture is comment-only on purpose.
 		if len(invoked) == 0 && mageInvocationRE.Match(workflows[name]) {
 			return fmt.Errorf("%s mentions `mage ` but no mage invocation was found in its run: steps; "+
 				"the workflow parse has gone wrong, and this check is a no-op for that file", name)

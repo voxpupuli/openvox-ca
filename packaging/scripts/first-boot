@@ -544,16 +544,21 @@ write_unresolved_marker() {
 		"likely -- and deleting it would cost that host its enrolment." \
 		"" \
 		"Re-minting replaces the CA, so every certificate it has already issued stops being trusted." \
-		"On a host that has served agents, migrate instead -- see docs/migrating-from-puppet-server.md." \
-		>"$UNRESOLVED_MARKER"
+		"On a host that has served agents, migrate instead -- see" \
+		"/usr/share/doc/openvox-ca/docs/migrating-from-puppet-server.md, which this package installs." \
+		>"$UNRESOLVED_MARKER" || warn \
+		"could not write $UNRESOLVED_MARKER. The CA has been created under the name \"localhost\", which" \
+		"no agent can use; see the openvox-ca documentation for how to re-mint it under a resolvable name."
 }
 
 # -- Run ---------------------------------------------------------------------
 
 # Both binaries, before anything reads their output. Without this, a missing
 # openvox-ca reaches has_generate_subcommand as a pipeline whose exit status is
-# grep's -- no match, so "this build has no generate subcommand", which sends
-# the reader to openvox-ca#189 for a package that is simply broken.
+# grep's -- no match, so "this build has no generate subcommand" -- and the
+# operator is sent after a missing FEATURE when the real fault is a package
+# that is simply incomplete. The two have different remedies, which is why
+# this check exists rather than letting the later one speak.
 for bin in "$OPENVOX_CA" "$OPENVOX_CA_CTL"; do
 	[ -x "$bin" ] || fail "$bin is missing or not executable; the openvox-ca package is incomplete."
 done

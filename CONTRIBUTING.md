@@ -43,7 +43,19 @@ mage build:all
 # Or with plain Go
 go build -o bin/openvox-ca     ./cmd/openvox-ca
 go build -o bin/openvox-ca-ctl ./cmd/openvox-ca-ctl
+
+# Render the systemd unit template for a prefix, into dist/
+mage build:unit /usr/local/bin
+
+# Build the deb and rpm from the variant tarballs already in dist/
+mage build:distVariant linux_amd64
+mage build:packages
 ```
+
+`build:unit` takes the prefix because the unit is one template rendered per
+channel: tarballs get `/usr/local/bin`, packages get `/usr/bin`.
+`build:packages` builds no binaries — it reads the tarballs `build:dist` or
+`build:distVariant` left in `dist/` and writes the packages beside them.
 
 ### FIPS build (Linux/amd64)
 

@@ -59,8 +59,9 @@ When that job lands it should export `SOURCE_DATE_EPOCH`. nfpm stamps every
 entry it generates from that variable, and `stageDocTree` stamps the
 documentation tree with it too, so with it set a rebuild of the same inputs is
 byte-identical and a published checksum keeps its meaning; with it unset the
-packages carry the build's own clock and no two builds agree. The magefile
-specs assert both halves of that.
+packages carry the build's own clock and no two builds agree. The magefile specs assert both halves of that -- that two builds at one epoch
+are identical, and that a build at a different epoch differs, because the first
+alone is satisfied by any two builds inside the same second.
 
 The major-only container tag (`:1`, `:2`) is deliberately suppressed while the
 version is `v0.*`, because a `0.x` major carries no compatibility promise.

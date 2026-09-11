@@ -366,9 +366,13 @@ layout and the one path the hardened unit grants under `ProtectSystem=strict`
 (see [docs/systemd.md](docs/systemd.md)). Neither of those is a rename, so
 neither breaches this contract.
 
-One deliberate exception, and it is the only path in the tree spelled the new
-way: the packages record whether they have enabled their provisioning oneshot
-under **`/var/lib/openvox-ca`** (`packaging/scripts/postinstall`). It is not a
+One deliberate exception. The packages record whether they have enabled their
+provisioning oneshot under **`/var/lib/openvox-ca`** -- the only path holding
+STATE that is spelled the new way. (Program and documentation paths are a
+different matter and are not covered by this contract at all: the packages
+install `/usr/bin/openvox-ca`, `/usr/libexec/openvox-ca`,
+`/usr/lib/sysusers.d/openvox-ca.conf` and `/usr/share/doc/openvox-ca`, none of
+which was ever spelled `puppet-ca` and none of which a drop-in has to match.) (`packaging/scripts/postinstall`). It is not a
 rebrand of `/var/lib/puppet-ca` but a different directory for a different
 thing — packaging bookkeeping that never existed in Puppet Server, so there is
 nothing to be a drop-in for. It must not be moved under `/var/lib/puppet-ca`,

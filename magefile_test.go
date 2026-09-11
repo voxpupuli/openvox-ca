@@ -1393,7 +1393,25 @@ var _ = Describe("the packaged variant set", func() {
 		Expect(names).To(ConsistOf("linux_amd64", "linux_arm64"))
 	})
 
-	DescribeTable("keeps the packaged set a subset of the variant set",
+	// Derived from packagedDistVariants(), not from literals. The earlier
+	// version asserted two hard-coded names were keys of the distVariants()
+	// set, which is a claim about those strings and not about the subset
+	// relation the title names -- a third packaged variant absent from
+	// distVariants() would have left it green.
+	It("keeps the packaged set a subset of the variant set", func() {
+		all := map[string]bool{}
+		for _, v := range distVariants() {
+			all[v.name] = true
+		}
+		packaged := packagedDistVariants()
+		Expect(packaged).NotTo(BeEmpty(), "nothing is marked packaged, so this asserts nothing")
+		for _, v := range packaged {
+			Expect(all).To(HaveKey(v.name),
+				"%s is marked packaged but is not a variant", v.name)
+		}
+	})
+
+	DescribeTable("names the variants that are packaged today",
 		func(name string) {
 			all := map[string]bool{}
 			for _, v := range distVariants() {
@@ -1621,6 +1639,7 @@ type Dev mg.Namespace
 
 func (Build) Dist() error { return nil }
 func (Build) Packages() error { return nil }
+func (Build) Unit(bindir string) error { return nil }
 func (Dev) Check() error { return nil }
 `)
 		goodWorkflow := []byte(`
@@ -2121,16 +2140,7 @@ var _ = Describe("buildVariantPackages", func() {
 			packaged: true,
 		}
 
-		src := GinkgoT().TempDir()
-		for _, name := range []string{"openvox-ca", "openvox-ca-ctl"} {
-			Expect(os.WriteFile(filepath.Join(src, name), []byte("#!/bin/true\n"), 0o755)).To(Succeed())
-		}
-		unit, err := renderUnit(tarballUnitBindir)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(os.WriteFile(filepath.Join(src, distUnitFile), unit, 0o644)).To(Succeed())
-
-		archive := filepath.Join(distDir, fmt.Sprintf("openvox-ca_%s_%s.tar.gz", ver, variant.name))
-		Expect(createTarGz(archive, src, distArchiveFiles([]string{"openvox-ca", "openvox-ca-ctl"}))).To(Succeed())
+		stageDistTarball(distDir, ver, variant)
 	})
 
 	It("writes one package per format, under the names apt and dnf expect", func() {
@@ -2928,17 +2938,9 @@ var _ = Describe("the rpm's payload", func() {
 			packaged: true,
 		}
 
-		src := GinkgoT().TempDir()
-		for _, name := range []string{"openvox-ca", "openvox-ca-ctl"} {
-			Expect(os.WriteFile(filepath.Join(src, name), []byte("#!/bin/true\n"), 0o755)).To(Succeed())
-		}
-		unit, err := renderUnit(tarballUnitBindir)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(os.WriteFile(filepath.Join(src, distUnitFile), unit, 0o644)).To(Succeed())
-		archive := filepath.Join(distDir, fmt.Sprintf("openvox-ca_%s_%s.tar.gz", ver, variant.name))
-		Expect(createTarGz(archive, src, distArchiveFiles([]string{"openvox-ca", "openvox-ca-ctl"}))).To(Succeed())
+		stageDistTarball(distDir, ver, variant)
 
-		_, err = buildVariantPackages(distDir, ver, variant)
+		_, err := buildVariantPackages(distDir, ver, variant)
 		Expect(err).NotTo(HaveOccurred())
 		files, err = rpmPayload(filepath.Join(distDir, "openvox-ca-9.9.9-1.x86_64.rpm"))
 		Expect(err).NotTo(HaveOccurred())
@@ -4031,33 +4033,32 @@ func lastLine(s string) string {
 }
 
 var _ = Describe("Build.Packages", func() {
-	// The target itself, not just the per-variant helper underneath it. It
-	// orchestrates: resolve the version, check the inputs, loop the packaged
-	// variants, then count what landed. Nothing exercised that assembly.
+	// The refusal when the tarballs it consumes are absent, driven through the
+	// seam rather than through the target.
 	//
-	// It writes into dist/, which is the repository's own -- so this runs only
-	// when the tarballs a real build would have left are already there, and
-	// asserts against what it finds rather than creating them.
+	// It used to call Build{}.Packages() directly and Skip() whenever dist/
+	// already held this version's tarballs -- which is the state of every
+	// machine that has just run `mage build:dist`, i.e. precisely the machine
+	// most likely to be exercising this path. The target's only coverage
+	// disappeared exactly where it mattered, silently and with a green suite.
+	// buildPackagesInto is what Build.Packages is, so pointing it at an empty
+	// temporary directory asks the same question unconditionally and writes
+	// nothing into the repository.
 	It("refuses to run when the tarballs it consumes are absent", func() {
-		ver, err := releaseVersion()
-		Expect(err).NotTo(HaveOccurred())
-
-		missing := true
-		for _, v := range packagedDistVariants() {
-			if _, statErr := os.Stat(filepath.Join("dist", fmt.Sprintf("openvox-ca_%s_%s.tar.gz", ver, v.name))); statErr == nil {
-				missing = false
-			}
-		}
-		if !missing {
-			Skip("dist/ already holds this version's tarballs; this spec covers the empty case")
-		}
-
-		err = Build{}.Packages()
+		err := buildPackagesInto(GinkgoT().TempDir())
 		Expect(err).To(MatchError(And(
 			ContainSubstring("does not build binaries"),
 			ContainSubstring("mage build:distVariant"),
 		)))
 	})
+
+	// Deliberately NOT paired with a spec asserting that Build.Packages is a
+	// bare call to buildPackagesInto. That would be a source-text assertion
+	// over formatting, which this file argues against elsewhere and which
+	// breaks on a gofmt line wrap rather than on a behaviour change. The
+	// consequence is stated instead: if Build.Packages ever grows logic of its
+	// own, the seam stops standing in for it and that logic needs its own
+	// coverage.
 })
 
 // runFirstBootScript runs the whole provisioning script -- not one function --
@@ -4102,6 +4103,28 @@ func runFirstBootScript(sslDir, binDir, certname string, extraEnv ...string) fir
 
 // stubCA writes an openvox-ca-ctl whose `setup` bootstraps a cadir, and an
 // openvox-ca whose `generate` writes the cert and key it is told to.
+// stageDistTarball writes the tarball `mage build:dist` would have left for one
+// variant: both binaries, and the unit rendered for the TARBALL prefix.
+//
+// One statement of that contract rather than four copies. The prefix matters
+// and is why this is not parameterised: the tarball carries the unit rendered
+// for /usr/local/bin, and the packaging path must RE-render it for /usr/bin
+// rather than ship this one. A fixture that quietly staged the package prefix
+// would make that distinction untestable, which is most of what the payload
+// specs are for.
+func stageDistTarball(distDir, ver string, variant distVariantSpec) {
+	GinkgoHelper()
+	src := GinkgoT().TempDir()
+	for _, name := range []string{"openvox-ca", "openvox-ca-ctl"} {
+		Expect(os.WriteFile(filepath.Join(src, name), []byte("#!/bin/true\n"), 0o755)).To(Succeed())
+	}
+	unit, err := renderUnit(tarballUnitBindir)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(os.WriteFile(filepath.Join(src, distUnitFile), unit, 0o644)).To(Succeed())
+	archive := filepath.Join(distDir, fmt.Sprintf("openvox-ca_%s_%s.tar.gz", ver, variant.name))
+	Expect(createTarGz(archive, src, distArchiveFiles([]string{"openvox-ca", "openvox-ca-ctl"}))).To(Succeed())
+}
+
 // stubCALog is where stubCA's two stubs record their argument lists, so a spec
 // can assert what provisioning actually passed them.
 func stubCALog(binDir string) string { return filepath.Join(binDir, "ca-calls.log") }
@@ -4906,18 +4929,9 @@ var _ = Describe("buildPackagesInto", func() {
 		ver, err := releaseVersion()
 		Expect(err).NotTo(HaveOccurred())
 
-		src := GinkgoT().TempDir()
-		for _, name := range []string{"openvox-ca", "openvox-ca-ctl"} {
-			Expect(os.WriteFile(filepath.Join(src, name), []byte("#!/bin/true\n"), 0o755)).To(Succeed())
-		}
-		unit, err := renderUnit(tarballUnitBindir)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(os.WriteFile(filepath.Join(src, distUnitFile), unit, 0o644)).To(Succeed())
-
 		// A tarball per packaged variant, named as build:dist writes them.
 		for _, v := range packagedDistVariants() {
-			archive := filepath.Join(distDir, fmt.Sprintf("openvox-ca_%s_%s.tar.gz", ver, v.name))
-			Expect(createTarGz(archive, src, distArchiveFiles([]string{"openvox-ca", "openvox-ca-ctl"}))).To(Succeed())
+			stageDistTarball(distDir, ver, v)
 		}
 
 		Expect(buildPackagesInto(distDir)).To(Succeed())
@@ -4937,19 +4951,10 @@ var _ = Describe("buildPackagesInto", func() {
 		ver, err := releaseVersion()
 		Expect(err).NotTo(HaveOccurred())
 
-		src := GinkgoT().TempDir()
-		for _, name := range []string{"openvox-ca", "openvox-ca-ctl"} {
-			Expect(os.WriteFile(filepath.Join(src, name), []byte("#!/bin/true\n"), 0o755)).To(Succeed())
-		}
-		unit, err := renderUnit(tarballUnitBindir)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(os.WriteFile(filepath.Join(src, distUnitFile), unit, 0o644)).To(Succeed())
-
 		// Tarballs for EVERY variant, including the FIPS pair, so that
 		// packaging them would succeed if the code tried.
 		for _, v := range distVariants() {
-			archive := filepath.Join(distDir, fmt.Sprintf("openvox-ca_%s_%s.tar.gz", ver, v.name))
-			Expect(createTarGz(archive, src, distArchiveFiles([]string{"openvox-ca", "openvox-ca-ctl"}))).To(Succeed())
+			stageDistTarball(distDir, ver, v)
 		}
 
 		Expect(buildPackagesInto(distDir)).To(Succeed())

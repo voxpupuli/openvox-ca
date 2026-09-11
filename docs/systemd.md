@@ -216,7 +216,7 @@ $ sudo systemctl enable --now openvox-ca
 
 **`enable --now`, not `start`.** The package deliberately leaves `openvox-ca.service` disabled — an install is not consent to create a certificate authority — so `start` alone gives you a running CA that does not come back after a reboot. Enabling is the step that says yes.
 
-The `.deb` and `.rpm` install the same unit, rendered for `/usr/bin`, and add a second one: `openvox-ca-first-boot.service`, a `Type=oneshot` that provisions the CA the first time you start the service.
+The `.deb` and `.rpm` install the same unit, rendered for `/usr/bin`, and add a second one: `openvox-ca-first-boot.service`, a `Type=oneshot` that provisions the CA the first time you start the service. They also install this documentation tree at `/usr/share/doc/openvox-ca`, which is where the shipped configuration file points you when it says to read the full reference — so the answers are on the host rather than only in the repository.
 
 It is pulled in by `openvox-ca.service` and runs nowhere else. There is no `WantedBy=multi-user.target` on it, so installing the package provisions nothing and neither does the next reboot — a CA is created the first time you run `systemctl start openvox-ca`. It is ordered `Before=openvox-ca.service` and is required by it, so provisioning that fails stops the service rather than letting it start against a half-provisioned directory.
 
