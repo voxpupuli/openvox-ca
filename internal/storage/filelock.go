@@ -142,6 +142,13 @@ func (l *fileLocks) acquire(ctx context.Context, name string) (Unlocker, error) 
 		local.Unlock()
 		return nil, l.unwritableStore(err, "creating same-host lock directory "+l.dir)
 	}
+	// This directive and its twin in ownerUID are load-bearing beyond this
+	// file: gosec's taint pass reaches these two sites only about 95% of the
+	// time, so .golangci.yml carries a temporary nolintlint exclusion to stop
+	// the other 5% reporting them as unused, and verifyNolintlintCarveOut in
+	// magefile.go holds the golangci-lint pin while that exclusion exists.
+	// Changing or removing either directive means revisiting all three. See
+	// voxpupuli/openvox-ca#313.
 	//nolint:gosec // G703: filepath.Join of the operator-configured store root and a hex sha256 digest, which cannot contain a separator, so the path cannot leave the lock directory
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, FilePermPrivate)
 	if err != nil {

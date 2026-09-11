@@ -151,6 +151,76 @@ linters:
       - linters:
           - staticcheck
         text: "QF1008"
+      # TEMPORARY, with a removal condition -- see the end of this comment.
+      #
+      # gosec's taint engine examines at most maxCallerEdges = 32 of a
+      # function's incoming call-graph edges, and those edges come from
+      # x/tools' cha.CallGraph, which builds them by iterating a
+      # map[*ssa.Function]bool. Go randomises map iteration order per process,
+      # so the edge list is in a different order on every run.
+      #
+      # (*FilesystemBackend).AcquireSameHostLock has 35 incoming edges under
+      # CHA's over-approximation of interface dispatch -- three over the cap --
+      # and its `name` parameter is the taint source that reaches both G703
+      # sinks in filelock.go: the os.OpenFile on the joined lock path, and the
+      # os.Stat that ownerUID does on the same path to decorate an error. One
+      # source, two sinks, which is why both directives fire together or not at
+      # all. Whether the tainted caller lands inside the randomly ordered first
+      # 32 is chance: measured at roughly 5 runs in 100 where it does not, on
+      # linux/amd64 and darwin/arm64 alike. On those runs gosec reports nothing
+      # at the two sites and nolintlint calls the suppressions unused, failing
+      # the gate on unchanged code.
+      #
+      # The suppressions are load-bearing -- strip them and gosec reports G703
+      # at both sites -- so the linter's own recommendation ("unused, delete
+      # it") removes an audited security suppression. This rule closes that
+      # trap by never making the recommendation.
+      #
+      # Deliberately narrow, and the `text` regexp is what makes it so. Every
+      # nolintlint message quotes the whole directive, explanation included --
+      # that is why matching a rule ID works at all, and it is also why a bare
+      # `text: "G703"` would match nolintlint's *other* checks on the same
+      # directive. It would then silence the require-specific report for a
+      # future `//nolint // G703: ...` here, and an unspecific //nolint
+      # suppresses every linter on its line, so the one check that stops a
+      # blanket suppression appearing in this file would go quiet for exactly
+      # the directives this rule is about. Anchoring on "is unused for linter"
+      # keeps the match to the staleness report and leaves nolintlint's
+      # require-specific and require-explanation settings in force.
+      #
+      # So: G703 stays enabled across the module, both directives stay, gosec
+      # is still suppressed at the two sites on every run where its analysis
+      # reaches them, and of nolintlint only the unused-directive report is
+      # dropped, only in this file, and only for directives naming G703. A
+      # stale //nolint:gosec // G204 in filelock.go is still reported, and so
+      # is a malformed G703 directive. The cost is that if these two
+      # directives ever do go genuinely stale, nothing will say so.
+      #
+      # If a future golangci-lint reworded that message the regexp would stop
+      # matching and the flake would come back visibly, as a red gate -- which
+      # is the failure direction to prefer over silently widening.
+      #
+      # Upstream: securego/gosec#1711 and #1712, fixed by securego/gosec#1733
+      # ("fix(taint): make wide caller traversal deterministic", merged
+      # 2026-09-04), which sorts the edges and raises the cap to 1024. That is
+      # in no gosec release yet, and golangci-lint pins gosec v2.28.0.
+      # REMOVE THIS RULE once the pinned golangci-lint ships a gosec containing
+      # that fix -- and with it verifyNolintlintCarveOut in magefile.go and its
+      # specs in magefile_test.go, which exist only to make this rule's removal
+      # condition reachable, plus the paragraph about it in AGENTS.md under
+      # the golangci-lint pin and the note above the first directive in
+      # internal/storage/filelock.go, which describes this rule and that guard
+      # and becomes false the moment either goes. Delete this rule on its own and `mage dev:check`
+      # still passes -- the guard treats an absent carve-out as the outcome it
+      # was built to reach -- but `mage test:magefile` fails on "finds the real
+      # carve-out, and it matches the real golangci-lint pin", which asserts
+      # the rule is still here. Both run in CI's check job, so a partial
+      # removal is reported; it is reported by that spec rather than by the
+      # guard. See voxpupuli/openvox-ca#313.
+      - path: internal/storage/filelock\.go
+        linters:
+          - nolintlint
+        text: 'G703.*is unused for linter "gosec"'
 
 formatters:
   enable:
