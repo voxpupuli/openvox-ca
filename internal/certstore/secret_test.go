@@ -48,6 +48,11 @@ func (s stubCA) GetCACert(context.Context) ([]byte, error) { return s.pem, s.err
 // and reassigns a field to whoever last forced it. Every claim these specs make
 // about apply semantics is therefore exercised rather than asserted, which
 // matters because none of it can be settled by reading this repository.
+// managedCertFieldManagerName is the field manager these specs seed and assert
+// against. Named once: a fixture that spelled it differently from production
+// would test nothing, and would look exactly like a passing spec.
+const managedCertFieldManagerName = "openvox-ca-managed-certs"
+
 var _ = Describe("SecretStore", func() {
 	const (
 		ns   = "openvox"
@@ -181,7 +186,7 @@ var _ = Describe("SecretStore", func() {
 				"tls.crt": []byte("CERT"), "tls.key": []byte("KEY"),
 			})
 			_, err := client.CoreV1().Secrets(ns).Apply(ctx, ac,
-				metav1.ApplyOptions{FieldManager: "openvox-ca-managed-certs", Force: true})
+				metav1.ApplyOptions{FieldManager: managedCertFieldManagerName, Force: true})
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(get().Data).NotTo(HaveKey("ca.crt"))
@@ -254,7 +259,7 @@ var _ = Describe("SecretStore", func() {
 			// Proof the trap is real: an unforced apply from us now conflicts,
 			// so a store that reasoned only from "did this write conflict"
 			// would treat its own Secret as an adoption.
-			Expect(applyAs("openvox-ca-managed-certs", false,
+			Expect(applyAs(managedCertFieldManagerName, false,
 				map[string][]byte{"tls.crt": []byte("CERT")}, nil)).To(HaveOccurred())
 
 			Expect(s.Save(ctx, []byte("CERT-2"), []byte("KEY-2"))).To(Succeed())
@@ -274,12 +279,34 @@ var _ = Describe("SecretStore", func() {
 
 			sec, err := client.CoreV1().Secrets(ns).Get(ctx, name, metav1.GetOptions{})
 			Expect(err).NotTo(HaveOccurred())
+			// APIVersion and FieldsType are load-bearing, not decoration: the
+			// field-managed tracker refuses to decode an entry missing either,
+			// and on a decode failure it discards the whole incoming list and
+			// keeps the live one. An entry without them evaporates silently,
+			// which is how the first version of this spec passed without ever
+			// creating the state it names.
 			sec.ManagedFields = append(sec.ManagedFields, metav1.ManagedFieldsEntry{
-				Manager:   "openvox-ca-managed-certs",
-				Operation: metav1.ManagedFieldsOperationUpdate,
+				Manager:    managedCertFieldManagerName,
+				Operation:  metav1.ManagedFieldsOperationUpdate,
+				APIVersion: "v1",
+				FieldsType: "FieldsV1",
+				FieldsV1:   metav1.NewFieldsV1(`{"f:data":{"f:tls.key":{}}}`),
 			})
 			Expect(client.Tracker().Update(
 				corev1.SchemeGroupVersion.WithResource("secrets"), sec, ns)).To(Succeed())
+
+			// The precondition. Without it the fixture can evaporate again and
+			// this spec goes back to passing for flux's sake rather than ours.
+			seeded, err := client.CoreV1().Secrets(ns).Get(ctx, name, metav1.GetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			var ours []metav1.ManagedFieldsEntry
+			for _, f := range seeded.ManagedFields {
+				if f.Manager == managedCertFieldManagerName {
+					ours = append(ours, f)
+				}
+			}
+			Expect(ours).To(HaveLen(1), "precondition: the seeded entry must have survived")
+			Expect(ours[0].Operation).To(Equal(metav1.ManagedFieldsOperationUpdate))
 
 			err = newStore(certstore.SecretConfig{}).Save(ctx, []byte("OURS"), []byte("OURS-KEY"))
 			Expect(err).To(MatchError(ContainSubstring("adopt_existing")),

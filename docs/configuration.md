@@ -1121,9 +1121,10 @@ matches nothing, on a certificate that looks perfectly well-formed.
 deliberately do not apply here:
 
 - `promote_cn_to_san` does not add the certname. An entry that wants its
-  certname as a subject alternative name says so, as the example above does not
-  — that certificate answers to `puppetserver` and `puppetserver.openvox.svc`
-  and *not* to its own certname.
+  certname as a subject alternative name says so — as the example above does,
+  listing `puppetserver.openvox.svc.cluster.local` alongside the short forms.
+  Leave it out and the certificate does not answer to the name it is called
+  after, which is nearly always a mistake.
 - `allow_subject_alt_names` does not gate them. That setting governs what a
   *request* may ask for, and there is no request: the names come from a file an
   administrator wrote.
@@ -1135,12 +1136,12 @@ its own while looking perfectly well-formed.
 
 **`renew_before` is an upper bound, not the window itself.** The window actually
 in force is the smaller of what you wrote and half the certificate's forward
-lifetime — its validity less `leaf_backdate_sec`. The floor exists because
+lifetime — its validity less `leaf_backdate_sec`. The cap exists because
 issuance caps a leaf at the CA certificate's *remaining* life, so a window that
 sits comfortably inside the configured `ttl` grows larger than the certificate's
 real one as the CA certificate ages, and without the clamp every pass would
 reissue. In an ordinary deployment it never binds: a 30-day window on a 90-day
-certificate is nowhere near the 45-day floor. It binds when you write a very
+certificate is nowhere near the 45-day cap. It binds when you write a very
 wide window, and again for every entry once the CA certificate is inside one
 `ttl` of its own expiry.
 
@@ -1197,6 +1198,14 @@ generated, handed to the store, and dropped.
 One Kubernetes Secret per certificate, in the component's own namespace,
 carrying `tls.crt`, `tls.key` and `ca.crt`, and typed `kubernetes.io/tls` so it
 can be mounted or referenced by anything that understands a TLS Secret.
+
+> **A Secret store makes in-cluster credentials a startup requirement.** One
+> entry using `store.secret` and the CA refuses to start anywhere it cannot
+> build a Kubernetes client — outside a pod, or with no ServiceAccount token
+> mounted. That differs from `kubernetes_export`, which logs the same failure
+> and carries on serving: an export is an auxiliary copy of material the CA
+> still serves over HTTP, whereas a managed certificate is load-bearing for the
+> component waiting on it. A file store needs none of this.
 
 | Key | Unset means |
 | --- | --- |
@@ -1275,10 +1284,11 @@ also collapses an ACL's mask. A `chown` applied by hand is discarded at the next
 renewal, because the file is replaced rather than rewritten. A component running
 as a different user needs a mode or ownership setting this store does not have.
 
-**The directory must already exist**; the CA will not create it. One of these files is a private
-key, and the safe guess and the useful one are not the same — `0700` locks out
-the very component the certificate is for, and anything wider exposes the key by
-default — so the choice stays with whoever lays the deployment out.
+**The directory must already exist**; the CA will not create it. One of these
+files is a private key, so who may traverse the directory holding it is a
+decision for whoever lays the deployment out rather than one this store should
+guess — and since the component shares the CA's user, the question is which
+*other* users can reach it, which only the operator knows.
 
 ### The certificate that administers this CA
 
@@ -1294,6 +1304,11 @@ default — so the choice stays with whoever lays the deployment out.
 > ownership and mode, deserve the care the CA's own key gets — and an operator
 > left to infer that a component store is ordinary would infer wrongly. The CA
 > says so once at startup for each such entry.
+>
+> **Said once, at startup.** A SIGHUP that adds a certname to
+> `puppet_server_file` can create this condition at runtime, and the warning
+> does not repeat — the added CN in the `Reloaded admin allow list` line is the
+> signal to check against `managed_certs`.
 >
 > The listing is what grants the authority; `clientAuth` is what lets it be
 > presented. Neither alone is an admin credential, and narrowing an entry to

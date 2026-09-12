@@ -2348,13 +2348,26 @@ config:
 			notWants: []string{"name: openvox-ca-managed-certs", "(existingConfigMap)"},
 		},
 		{
-			// HIGH-value case: every other render case configures exactly one
-			// entry, so the per-namespace narrowing -- the filter in
-			// managedCertRules, the uniq in managedCertNamespaces, and the
-			// default-namespace resolution -- has no witness that can fail.
-			// Drop the filter and a single-entry render is byte-identical,
-			// while a Role in one namespace would carry another namespace's
-			// Secret name and grant get/patch on it.
+			// Every other render case configures exactly one entry, so the
+			// per-namespace narrowing has no witness that can fail: drop the
+			// filter in managedCertRules and a single-entry render is
+			// byte-identical, while a Role in one namespace would carry
+			// another namespace's Secret name and grant get/patch on it.
+			//
+			// Three entries rather than two: the third shares a namespace with
+			// the first, so the openvox Role has to carry both names and the
+			// notWants below can only hold because the filter kept b-tls out.
+			//
+			// The `\n  namespace: default` want is anchored to a line start on
+			// purpose. Written unanchored it also matches the RoleBinding's
+			// `    namespace: default` subject, which is indented four -- so it
+			// held whether or not the default-namespace resolution ran, and the
+			// mutation survived.
+			//
+			// What this case still does NOT witness is the `uniq` in
+			// managedCertNamespaces: dropping it renders openvox's Role twice,
+			// and the two documents are byte-identical, so no substring
+			// assertion can tell them apart and applying both is harmless.
 			name: "two Secrets in two namespaces render two Roles, each narrowed to its own",
 			sets: []string{tls, "serviceAccount.create=true"},
 			valuesYAML: `
@@ -2368,13 +2381,24 @@ config:
       names: [b]
       renew_before: 720h
       store: {secret: {name: b-tls}}
+    - certname: c.example.com
+      names: [c]
+      renew_before: 720h
+      store: {secret: {name: c-tls, namespace: openvox}}
 `,
 			wants: []string{
 				// The entry that names a namespace, and the one that does not
-				// and so resolves to the release namespace.
-				"  namespace: openvox\n",
+				// and so resolves to the release namespace. The second is
+				// anchored, so an unresolved empty namespace fails here.
+				// Anchored to the managed-certs object's own name. A bare
+				// "namespace: default" matches the ServiceAccount, the
+				// ConfigMap and everything else in the release namespace, so
+				// it held whether or not the default-namespace resolution ran.
+				"  name: openvox-ca-managed-certs\n  namespace: openvox\n",
+				"  name: openvox-ca-managed-certs\n  namespace: default\n",
 				"      - a-tls",
 				"      - b-tls",
+				"      - c-tls",
 				// The binding's subject is the CA's own namespace, not the
 				// Role's -- a binding that used $ns would be a silent, total
 				// RBAC failure in every namespace but one.

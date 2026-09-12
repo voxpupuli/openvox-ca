@@ -266,4 +266,10 @@ to initialise client` line in the CA log, which names the actual error.
 - In-cluster ServiceAccount authentication only (no external kubeconfig).
 - PEM encoding only (no DER).
 - Objects are not deleted when a target is removed from the config; delete them
-  manually (they carry the `app.kubernetes.io/managed-by=openvox-ca` label).
+  manually. They carry the `app.kubernetes.io/managed-by=openvox-ca` label — but
+  **that label alone is not a safe delete selector**: a
+  [managed certificate](configuration.md#managed-certificates) Secret carries
+  the identical label and holds a component's only private key. Name the
+  exported objects, or give them a label of your own under
+  `metadata.labels` and select on that. See
+  [uninstalling](helm-chart.md#uninstalling).

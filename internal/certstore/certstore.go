@@ -562,19 +562,29 @@ func (s *SecretConfig) validate(where string, secrets map[[2]string]int, idx int
 	if s.Name == "" {
 		return fmt.Errorf("%s: store.secret.name is required", where)
 	}
-	// Namespaces are compared as configured rather than as resolved: an entry
-	// that omits the namespace and one that spells out the pod's own are the
-	// same Secret, but the pod's namespace is not known at validation time.
-	// This catches the case that is checkable and leaves the other to the
-	// conflict semantics, which refuse rather than corrupt.
-	key := [2]string{s.Namespace, s.Name}
-	if prev, dup := secrets[key]; dup {
-		return fmt.Errorf("%s: Secret %s/%s is already the store for managed_certs[%d]; "+
-			"two certificates in one Secret would each remove the other's keys, because "+
-			"omitting a previously-owned key deletes it",
-			where, nsOrPod(s.Namespace), s.Name, prev)
+	// Compared the way CheckExportOverlap compares: on the name first, and then
+	// on whether the two namespaces can name the same one. An omission on
+	// either side resolves to the CA pod's own namespace, which is not known
+	// here, so the pair is refused.
+	//
+	// There is no weaker fallback to lean on. Every managed certificate applies
+	// under one shared field manager, so two entries pointed at one Secret each
+	// read the other's apply entry as their own: ownedByUs answers true, force
+	// is set, and no conflict is ever raised. They would overwrite each other's
+	// certificate and key on every pass, for ever, exactly as this message
+	// says -- and for a certname in puppet_server, that is a CA admin
+	// credential being reissued and its predecessor revoked each time.
+	for prevKey, prev := range secrets {
+		if prevKey[1] == s.Name && namespacesMayCollide(prevKey[0], s.Namespace) {
+			return fmt.Errorf("%s: Secret %s/%s is already the store for managed_certs[%d]; "+
+				"two certificates in one Secret would each remove the other's keys, because "+
+				"omitting a previously-owned key deletes it. An omitted namespace resolves to "+
+				"the CA pod's own, so it is treated as possibly naming the same Secret; spell "+
+				"both namespaces out if they genuinely differ",
+				where, nsOrPod(s.Namespace), s.Name, prev)
+		}
 	}
-	secrets[key] = idx
+	secrets[[2]string{s.Namespace, s.Name}] = idx
 	return nil
 }
 
@@ -670,12 +680,22 @@ func (c Config) CheckExportOverlap(exportTargets [][2]string) error {
 			if t[1] != s.Name || !namespacesMayCollide(t[0], s.Namespace) {
 				continue
 			}
+			remedy := "Give the managed certificate a Secret of its own, or drop the " +
+				"export target -- a managed certificate's Secret already carries the CA chain"
+			if s.Namespace == "" || t[0] == "" {
+				// The conservative arm. The two namespaces may render as
+				// visibly different, so say why they are being treated as one
+				// and give the cheap remedy before the structural ones.
+				remedy = "One of them omits its namespace, which resolves to the CA pod's own " +
+					"-- not known before the Kubernetes client exists -- so the pair is " +
+					"refused rather than risked. Spell both namespaces out if they genuinely " +
+					"differ; otherwise " + "give the managed certificate a Secret of its own, " +
+					"or drop the export target"
+			}
 			return fmt.Errorf("managed_certs[%d] (%s) stores its certificate in Secret %s/%s, "+
 				"which is also a kubernetes_export target in %s: both write ca.crt, so they "+
-				"would take the key from each other on every pass. Give the managed "+
-				"certificate a Secret of its own, or drop the export target -- a managed "+
-				"certificate's Secret already carries the CA chain",
-				i, c[i].Certname, nsOrPod(s.Namespace), s.Name, nsOrPod(t[0]))
+				"would take the key from each other on every pass. %s",
+				i, c[i].Certname, nsOrPod(s.Namespace), s.Name, nsOrPod(t[0]), remedy)
 		}
 	}
 	return nil

@@ -695,8 +695,9 @@ networkPolicy:
   # is yours to list. The policy binds the whole POD, so any initContainers or
   # extraContainers you add are bound by it too and need their own destinations
   # listed. Typically: your storage backend, OpenBao if the key lives there,
-  # anything your sidecars fetch, and the Kubernetes API only when
-  # kubernetesExport is in use -- OpenBao's kubernetes auth needs no API egress,
+  # anything your sidecars fetch, and the Kubernetes API when kubernetesExport
+  # is in use or a managed certificate uses a Secret store (a file store needs
+  # none) -- OpenBao's kubernetes auth needs no API egress,
   # since the pod presents a mounted token and OpenBao does the TokenReview.
   egress:
     enabled: false

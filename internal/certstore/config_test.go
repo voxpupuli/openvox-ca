@@ -448,6 +448,41 @@ managed_certs:
 			Expect(err).To(MatchError(ContainSubstring("remove the other's keys")))
 		})
 
+		// The sibling of the export-overlap case, and the same class: an entry
+		// omitting its namespace and one spelling out the pod's own are the
+		// same Secret. There is no weaker fallback here -- both entries apply
+		// under one shared field manager, so each reads the other's apply entry
+		// as its own and no conflict is ever raised.
+		It("refuses two entries in one Secret when only one names the namespace", func() {
+			err := decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {secret: {name: shared-tls, namespace: openvox}}
+  - certname: b.example.com
+    names: [b]
+    renew_before: 720h
+    store: {secret: {name: shared-tls}}
+`).Validate()
+			Expect(err).To(MatchError(ContainSubstring("shared-tls")))
+			Expect(err).To(MatchError(ContainSubstring("resolves to")))
+		})
+
+		It("still allows the same Secret name in two namespaces both spelled out", func() {
+			Expect(decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {secret: {name: shared-tls, namespace: openvox}}
+  - certname: b.example.com
+    names: [b]
+    renew_before: 720h
+    store: {secret: {name: shared-tls, namespace: puppet}}
+`).Validate()).To(Succeed())
+		})
+
 		It("refuses a relative path, which resolves differently in each way of running the CA", func() {
 			err := decode(`
 managed_certs:

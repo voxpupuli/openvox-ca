@@ -139,10 +139,10 @@ func readIfPresent(path string) ([]byte, error) {
 // is deliberate: one of these files is a private key, so who may read the
 // directory holding it is a decision for whoever lays the deployment out. A
 // store that created a missing directory would have to guess a mode, and the
-// safe guess and the useful one are not the same -- 0700 locks out the very
-// component the certificate is for, and anything wider exposes the key by
-// default. Failing names the directory instead, and the next pass retries once
-// it exists.
+// question it would be guessing at -- which users other than the CA's own may
+// traverse a directory holding a private key -- is one only whoever lays the
+// deployment out can answer. Failing names the directory instead, and the next
+// pass retries once it exists.
 func (f *FileStore) Save(ctx context.Context, certPEM, keyPEM []byte) error {
 	// Read before anything is written, so a chain we cannot read fails the
 	// write rather than leaving a new certificate beside a stale chain.

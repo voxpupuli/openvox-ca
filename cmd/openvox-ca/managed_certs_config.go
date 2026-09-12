@@ -48,7 +48,8 @@ import (
 // and a CA that came up serving while quietly issuing none of them would be
 // discovered when that component failed to start. So one entry with a Secret
 // store makes in-cluster credentials a startup requirement for the whole
-// process, which docs/configuration.md states where an operator will meet it.
+// process, which docs/configuration.md states in its own `store.secret`
+// section, where an operator choosing that store will meet it.
 //
 // Note what is deliberately not fatal: a store that cannot be written *at
 // runtime*. That is routine, is logged per entry, and self-heals on the next
