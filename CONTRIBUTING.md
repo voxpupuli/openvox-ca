@@ -100,6 +100,22 @@ See [`AGENTS.md`](AGENTS.md) for the details. The essentials:
   base — but only pull requests targeting `main` are gated by the repository
   ruleset, so on a stacked one read the results rather than relying on a
   merge block.
+- Every Go file carries a GPL-2.0-or-later header, and a **new** one leads with
+  your own copyright line, above Vox Pupuli's:
+
+  ```go
+  // Copyright (C) 2026 Your Name
+  // Copyright (C) 2026 Vox Pupuli and contributors
+  //
+  // This program is free software; you can redistribute it and/or modify
+  // ... (the rest of the notice, verbatim from any existing file)
+  ```
+
+  Do not copy a neighbouring file's header wholesale: the nearest example is
+  somebody else's attribution, and copying it credits your work to them. A file
+  written by more than one person carries each of them, with `Vox Pupuli and
+  contributors` last; a build constraint goes above the header, not below it.
+  Only Go files carry it — YAML, workflows and shell scripts do not.
 - Keep commits focused: imperative subject ≤ 72 characters, with a body that
   explains *why*. Stage files by name and review `git diff --staged` before
   committing.
