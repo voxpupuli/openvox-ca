@@ -342,7 +342,12 @@ The chart deliberately does **not** enumerate the server's settings as values.
 convenience blocks (`tls`, `ca`, `metrics`, `kubernetesExport`, …) do the
 Kubernetes wiring *and* set the config keys pointing at it, deep-merged with
 `config` winning. Adding a server setting to `docs/configuration.md` therefore
-needs no chart change; adding a value that duplicates one is a regression.
+needs no *values* change, and adding a value that duplicates one is a
+regression. It does need one thing: a commented-out default with a one-line
+explanation in the `config:` example block in `values.yaml`, so an operator
+reaching for the passthrough can see the setting exists and what its default
+assumes. The reference material stays in `docs/configuration.md`, which is what
+keeps the two from drifting.
 
 Every fixture under `charts/openvox-ca/ci/` is linted and schema-checked in CI.
 A new template branch needs a fixture that exercises it, or it is untested —

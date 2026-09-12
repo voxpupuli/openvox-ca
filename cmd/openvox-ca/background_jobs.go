@@ -56,6 +56,7 @@ const (
 	jobCertCleanup     = "expired-cert-cleanup"
 	jobSupersededSweep = "superseded-cert-revocation"
 	jobCRLChainRefresh = "crl-chain-refresh"
+	jobManagedCerts    = "managed-cert-reconcile"
 )
 
 // backgroundJob is one periodic job the serve command runs for the lifetime of
@@ -182,6 +183,21 @@ func backgroundJobs(cfg *serverConfig, myCA *ca.CA) []backgroundJob {
 	jobs = append(jobs, backgroundJob{jobSupersededSweep, func(ctx context.Context) {
 		runSupersededSweeper(ctx, myCA, sweepInterval)
 	}})
+	// Issues and renews the certificates this CA keeps alive on behalf of
+	// something else, and supersedes each predecessor with a delay.
+	//
+	// Gated on there being any: the mechanism is entirely dormant otherwise,
+	// which is what lets a CA that configures none run exactly as it did
+	// before, with no goroutine and no storage key. Safe on every replica --
+	// each entry's work is serialised on that subject's cluster lock, and the
+	// replica that loses the race reads what the winner wrote and does nothing.
+	if len(myCA.ManagedCerts) > 0 {
+		managedInterval := cfg.managedCertInterval()
+		jobs = append(jobs, backgroundJob{jobManagedCerts, func(ctx context.Context) {
+			runManagedCertReconciler(ctx, myCA, managedInterval)
+		}})
+	}
+
 	// Re-reads crl_chain_file and republishes the CRL when the upstream CRLs it
 	// names have changed.
 	//

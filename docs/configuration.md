@@ -158,6 +158,15 @@ revoke_on_auto_renew: true      # false matches OpenVox Server's Clojure CA (no 
 # below, and set 0 for the earlier behaviour of revoking inside the call.
 superseded_cert_revoke_after_sec: -1   # overlap window; 0 = revoke inside the renewal; -1/unset = 24h
 superseded_cert_sweep_interval_sec: 0  # how often the sweep runs; 0 = built-in default (15m)
+
+# Clock-skew tolerance on every leaf certificate's NotBefore. See "Clock skew and
+# NotBefore" below.
+leaf_backdate_sec: 0                   # 0 = built-in default (5m)
+
+# How often the managed-certificate reconcile loop runs. A managed certificate is
+# a named leaf the CA issues and renews on a loop; nothing configures one yet, so
+# this setting has no effect until an instance of that mechanism ships.
+managed_cert_interval_sec: 0           # 0 = built-in default (15m)
 ```
 
 ## Environment variables
@@ -251,6 +260,8 @@ The CA key passphrase can also be provided via `PUPPET_CA_KEY_PASSPHRASE` (env v
 | `revoke_on_auto_renew` | `PUPPET_CA_REVOKE_ON_AUTO_RENEW` |
 | `superseded_cert_revoke_after_sec` | `PUPPET_CA_SUPERSEDED_CERT_REVOKE_AFTER_SEC` |
 | `superseded_cert_sweep_interval_sec` | `PUPPET_CA_SUPERSEDED_CERT_SWEEP_INTERVAL_SEC` |
+| `leaf_backdate_sec` | `PUPPET_CA_LEAF_BACKDATE_SEC` |
+| `managed_cert_interval_sec` | `PUPPET_CA_MANAGED_CERT_INTERVAL_SEC` |
 
 > **Note:** `--daemon` is intentionally excluded from config file and environment
 > variable support because `PUPPET_CA_DAEMON` is used internally as the daemon fork
@@ -583,14 +594,15 @@ look:
 > **The one revocation this does not block is auto-renewal's.** When an agent
 > renews, the CA revokes the certificate it just replaced (`revoke_on_auto_renew`,
 > on by default) on a best-effort basis: a failure there is logged
-> (`AutoRenew: failed to revoke replaced certificate`) and the renewal is allowed
+> (`AutoRenew: failed to retire replaced certificate`) and the renewal is allowed
 > to stand, with no retry. So a chain file that is unreadable at that moment does
 > not block the renewal — it skips that one revocation permanently, and the
 > superseded certificate stays valid until it expires. `puppetca_crl_update_failures_total`
-> counts it, but nothing records which serial now needs revoking by hand. Grep
-> for that message alongside a rising
-> `puppetca_crl_chain_refresh_failures_total`, and revoke by subject afterwards
-> if the window mattered.
+> counts it. Grep for that message alongside a rising
+> `puppetca_crl_chain_refresh_failures_total`: the warning names the serial, and
+> revoking by subject will not reach it — the replacement is what makes it a
+> renewal, so `revoke --certname` retires that instead. Retire it with
+> `openvox-ca-ctl revoke --serial <hex>` if the window mattered.
 
 **Write the file atomically** — write to a temporary path, then rename. A read
 that catches a `cat >` mid-write sees a file that does not end on a PEM block
@@ -848,6 +860,38 @@ Three metrics (see [metrics.md](metrics.md)):
 Sustained shedding while the signer has capacity to spare means the limit is
 too low. Shedding under an unauthenticated flood is the bound doing its job.
 
+## Clock skew and NotBefore
+
+Every **leaf** certificate this CA issues is backdated: its `NotBefore` is set a
+little earlier than the moment it was signed, so a client whose clock is behind
+the CA's still accepts a certificate that has just been issued. Without it, an
+agent running a few seconds slow rejects its own brand-new certificate as not
+yet valid.
+
+`leaf_backdate_sec` sets how far, and defaults to **5 minutes**. It assumes the
+fleet's clocks are synchronised, which is what NTP is for. A client further out
+than the backdate refuses the certificate and keeps refusing it until its clock
+is corrected — and that is the intended behaviour, not a gap in it. Five minutes
+of skew is a clock-sync fault, and a fault is better seen than absorbed: a
+backdate wide enough to hide one is a defect wearing a safety margin.
+
+It applies to every leaf — signed from a CSR, generated, renewed or managed — so
+raising it widens the window in which every certificate is valid before anyone
+asked for it. A negative value is refused at startup, because it would issue
+certificates that are valid only in the future. So is anything above 30 days,
+for the same reason in the other direction: this is a clock-skew tolerance, and
+a certificate valid that far before it was issued is not one.
+
+It does **not** govern the CA's own certificate, which is backdated a fixed 24
+hours when the CA is bootstrapped. That one is written once, by the process that
+creates it, and nothing renews it on a timer, so this setting does not reach it.
+
+The setting also feeds the managed-certificate renewal decision, which derives
+how much serving life a certificate was granted by subtracting the backdate from
+its validity period. Changing the setting therefore mis-measures certificates
+already issued under the old value, by exactly the difference; the error is
+bounded and corrects itself at the next issuance.
+
 ## Delayed supersession
 
 A renewal replaces a certificate. What happens to the one it replaced is
@@ -904,7 +948,7 @@ Two settings, two questions:
 | Setting | Question |
 | --- | --- |
 | `revoke_on_auto_renew` | *Whether* an auto-renewal retires its predecessor at all. `false` keeps it valid until it naturally expires and records nothing. |
-| `superseded_cert_revoke_after_sec` | *When*, on both renewal paths. `0` means inside the renewal call; unset means 24 hours later. |
+| `superseded_cert_revoke_after_sec` | *When*, on every path that retires a predecessor: both renewal paths and the managed-certificate reconcile, which nothing configures yet. `0` means inside the renewal call; unset means 24 hours later. |
 
 They compose as you would expect: with `revoke_on_auto_renew: false` the
 auto-renewal path records nothing, whatever the delay says, and the CSR-body

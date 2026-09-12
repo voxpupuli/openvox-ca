@@ -380,8 +380,12 @@ var _ = Describe("openvox-ca generate", func() {
 
 			cert := certFromPEM(stdout)
 			Expect(cert.DNSNames).To(ConsistOf("a.example.com", "b.example.com"))
-			Expect(cert.NotAfter.Sub(cert.NotBefore)).To(BeNumerically("<", 26*60*60*1e9),
-				"a 1h ttl plus the 24h backdate, not the multi-year default")
+			// A 1h ttl plus the default 5m backdate, not the multi-year default.
+			// The bound tracks the backdate: it used to allow 26 hours against a
+			// 24-hour backdate, which after the backdate shrank would have
+			// passed just as happily with the backdate removed altogether.
+			Expect(cert.NotAfter.Sub(cert.NotBefore)).To(BeNumerically("<", 70*time.Minute),
+				"a 1h ttl plus the 5m backdate, not the multi-year default")
 		})
 
 		It("writes the certificate to --cert-out at 0644, leaving stdout empty", func() {
