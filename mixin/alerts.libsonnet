@@ -692,12 +692,30 @@
             // doing so -- that is PuppetCAExporterDown's job. What it covers is
             // a CA that stays up, scrapes cleanly and reports readiness while
             // a certificate something else is waiting for never appears.
+            //
+            // Qualified on a successful scrape, the same way PuppetCACRLStale
+            // is and for the same reason. The two sides of the `unless` come
+            // from different places: the configured series is built from the
+            // in-process configuration and is published even when the gather
+            // fails, deliberately, so that a CA which cannot reach storage
+            // still reports what it is meant to be keeping alive. The leaf
+            // series are read from storage and all vanish together. So during a
+            // storage outage the left side stands and the right side is empty,
+            // and without this qualifier every configured entry would match --
+            // healthy ones included -- an hour into an outage that
+            // PuppetCAScrapeFailing has already been paging for. One cause
+            // should not raise two alerts, and the second one here would name
+            // the wrong remedy: it would send an operator to check RBAC and
+            // store permissions for certificates that exist and are fine.
             expr: |||
-              puppetca_managed_certificate_configured{%(selector)s}
-                unless
-              max without (serial, state) (
-                puppetca_leaf_certificate_not_after_timestamp_seconds{%(selector)s}
+              (
+                puppetca_managed_certificate_configured{%(selector)s}
+                  unless
+                max without (serial, state) (
+                  puppetca_leaf_certificate_not_after_timestamp_seconds{%(selector)s}
+                )
               )
+              and on(instance) puppetca_collector_scrape_success{%(selector)s} == 1
             ||| % {
               selector: $._config.puppetCASelector,
             },

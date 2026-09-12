@@ -232,7 +232,7 @@ tests:
 
   # PuppetCAManagedCertificateNeverIssued, whose whole job is a shape no
   # comparison over the leaf series can express: a configured certificate that
-  # does not exist. Four cases, because three different things could make it
+  # does not exist. Five cases, because four different things could make it
   # wrong and each would look like the rule working.
   - interval: 1m
     name: a managed certificate that never appears
@@ -313,7 +313,7 @@ tests:
   # and its comment says why -- a revoked certificate awaiting reissue is the
   # mechanism working, and the next pass replaces it. Adding state!="revoked"
   # here "for consistency" would page for every normal revoke-then-reissue, and
-  # the four cases above would all stay green.
+  # every other case in this file would stay green.
   - interval: 1m
     name: a managed certificate awaiting reissue after revocation is silent
     input_series:
@@ -325,6 +325,45 @@ tests:
         values: "1+0x90"
     alert_rule_test:
       - eval_time: 70m
+        alertname: PuppetCAManagedCertificateNeverIssued
+        exp_alerts: []
+
+  # The one shape the rule's own two sides disagree about, and the reason the
+  # expression is qualified on a successful scrape.
+  #
+  # The configured series is built from the in-process configuration and is
+  # published even when the gather fails; the leaf series are read from storage
+  # and all vanish together. So a storage outage leaves the left side of the
+  # `unless` standing with nothing on the right, and every configured entry
+  # matches -- healthy ones included. Without the qualifier this fires an hour
+  # into an outage PuppetCAScrapeFailing has already been paging for, and sends
+  # an operator to check RBAC for certificates that exist and are fine.
+  #
+  # Both certificates here are healthy and present up to the outage: the series
+  # stop at 40m, which is what a gather failure looks like to Prometheus, and
+  # scrape_success goes to 0 at the same moment. The assertion is silence at
+  # 110m, more than managedCertNeverIssuedFor past the failure.
+  - interval: 1m
+    name: a storage outage does not page for every managed certificate
+    input_series:
+      - series: 'puppetca_managed_certificate_configured{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local"}'
+        values: "1+0x120"
+      - series: 'puppetca_managed_certificate_configured{job="openvox-ca",instance="ca-1:9140",subject="puppetdb.openvox.svc.cluster.local"}'
+        values: "1+0x120"
+      - series: 'puppetca_leaf_certificate_not_after_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local",serial="0a1b",state="signed"}'
+        values: "9999999999+0x40"
+      - series: 'puppetca_leaf_certificate_not_after_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",subject="puppetdb.openvox.svc.cluster.local",serial="0a1c",state="signed"}'
+        values: "9999999999+0x40"
+      - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+        values: "1+0x40 0+0x80"
+    alert_rule_test:
+      # Healthy, before the outage.
+      - eval_time: 30m
+        alertname: PuppetCAManagedCertificateNeverIssued
+        exp_alerts: []
+      # Well past managedCertNeverIssuedFor into the outage: still silent,
+      # because the gather is failing rather than the certificates missing.
+      - eval_time: 110m
         alertname: PuppetCAManagedCertificateNeverIssued
         exp_alerts: []
 

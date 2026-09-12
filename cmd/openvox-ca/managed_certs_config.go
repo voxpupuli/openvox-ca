@@ -108,6 +108,25 @@ func buildManagedCerts(cfg *serverConfig, absCADir string, caCerts certstore.CAC
 	return managed, nil
 }
 
+// attachManagedCerts builds the managed certificates and hands them to the CA.
+//
+// A function rather than two lines inline in the serve command, because the
+// assignment is the whole feature's switch: the reconcile job is registered
+// only when ca.CA.ManagedCerts is non-empty, the configured gauge is emitted by
+// walking it, and the never-issued alert has nothing to match if it stays nil.
+// Every other spec sets that field by hand, so the one line that sets it in
+// production was deletable with the suite green -- the same gap applyCAConfig
+// and its wiring spec exist to close for ca_signing_concurrency.
+func attachManagedCerts(myCA *ca.CA, cfg *serverConfig, absCADir string,
+	caCerts certstore.CACertSource) error {
+	managed, err := buildManagedCerts(cfg, absCADir, caCerts)
+	if err != nil {
+		return err
+	}
+	myCA.ManagedCerts = managed
+	return nil
+}
+
 // exportSecretTargets lists the (namespace, name) of every Secret the
 // Kubernetes exporter writes, for the overlap check.
 //
@@ -139,6 +158,16 @@ func exportSecretTargets(cfg k8sexport.Config) [][2]string {
 // to choose rather than an operator's to predict. The rest are single files the
 // server reads or writes under a configured name.
 //
+// ca_cert_file and ca_key_file are the reason this list is swept rather than
+// written once. They are local-file overrides that put the CA's own certificate
+// and private key outside cadir -- the usual shape when the backend is remote --
+// and they live in the embedded StorageConfig rather than beside the settings
+// above. The first version of this function enumerated only serverConfig's own
+// fields and so omitted them, which left the one path the check exists to
+// protect unprotected while the documentation said otherwise. reservedSettings
+// in the spec file now measures the class instead: every path-shaped
+// configuration key is either here or carries a recorded reason for not being.
+//
 // tls_cert and tls_key are on the list on purpose. Making the CA's own serving
 // certificate a managed one is openvox-ca#326 and is a different mechanism from
 // this; until it exists, an entry pointed at that pair would have the reconcile
@@ -151,15 +180,32 @@ func exportSecretTargets(cfg k8sexport.Config) [][2]string {
 // dropped entry is a gap that looks like a passing check.
 func caOwnedPaths(cfg *serverConfig, absCADir string) ([]certstore.ReservedPath, error) {
 	out := []certstore.ReservedPath{{Setting: "cadir", Path: absCADir, Tree: true}}
-	for _, r := range []certstore.ReservedPath{
+	named := []certstore.ReservedPath{
 		{Setting: "tls_cert", Path: cfg.TLSCert},
 		{Setting: "tls_key", Path: cfg.TLSKey},
+		{Setting: "ca_cert_file", Path: cfg.CACertFile},
+		{Setting: "ca_key_file", Path: cfg.CAKeyFile},
 		{Setting: "ca_key_passphrase_file", Path: cfg.CAKeyPassphraseFile},
 		{Setting: "crl_chain_file", Path: cfg.CRLChainFile},
 		{Setting: "logfile", Path: cfg.LogFile},
 		{Setting: "puppet_server_file", Path: cfg.PuppetServerFile},
 		{Setting: "autosign_config", Path: cfg.AutosignConfig},
-	} {
+	}
+	// One entry per configured foreign trust domain, named after the entry so a
+	// refusal says which. These are read on every client handshake: a
+	// certificate written over an anchor would be trusted as an issuer, and one
+	// written over a CRL bundle would silently stop revocation checking for
+	// that domain.
+	for i := range cfg.ClientCA {
+		e := &cfg.ClientCA[i]
+		named = append(named,
+			certstore.ReservedPath{
+				Setting: fmt.Sprintf("client_ca[%d].file (%s)", i, e.Name), Path: e.File},
+			certstore.ReservedPath{
+				Setting: fmt.Sprintf("client_ca[%d].crl_file (%s)", i, e.Name), Path: e.CRLFile},
+		)
+	}
+	for _, r := range named {
 		if strings.TrimSpace(r.Path) == "" {
 			continue
 		}

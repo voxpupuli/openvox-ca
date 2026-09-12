@@ -26,15 +26,14 @@ import (
 
 // jobNames reduces the job list to the names it contains, which is what these
 // specs are about: which jobs a configuration starts, not what they do.
+//
+// The CA is a fresh one, so this answers for configuration alone. A job gated
+// on the CA's own state -- the managed-certificate reconciler is -- needs
+// jobNamesForCA, which takes the CA the caller has arranged.
 func jobNames(cfg *serverConfig) []string {
 	GinkgoHelper()
 	c, _ := newRefresherTestCA()
-	names := make([]string, 0, 4)
-	for _, job := range backgroundJobs(cfg, c) {
-		Expect(job.run).NotTo(BeNil(), "job %q has no runner", job.name)
-		names = append(names, job.name)
-	}
-	return names
+	return jobNamesForCA(cfg, c)
 }
 
 var _ = Describe("backgroundJobs", func() {
