@@ -239,8 +239,8 @@ tests:
 
   # PuppetCAManagedCertificateNeverIssued, whose whole job is a shape no
   # comparison over the leaf series can express: a configured certificate that
-  # does not exist. Five cases, because four different things could make it
-  # wrong and each would look like the rule working.
+  # does not exist. Eight cases, because each of them could go wrong on its own
+  # and every one of those would look like the rule working.
   - interval: 1m
     name: a managed certificate that never appears
     input_series:
@@ -315,14 +315,42 @@ tests:
               summary: "A managed certificate has never been issued."
               description: "The Puppet CA on ca-1:9140 has puppetserver.openvox.svc.cluster.local configured in managed_certs but no certificate for it exists after 1h. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else's material, or a directory that does not exist."
 
-  # The rule's one deliberate deviation from its neighbours, which nothing else
-  # pins. All three leaf-expiry rules carry state!="revoked"; this one does not,
-  # and its comment says why -- a revoked certificate awaiting reissue is the
-  # mechanism working, and the next pass replaces it. Adding state!="revoked"
-  # here "for consistency" would page for every normal revoke-then-reissue, and
-  # every other case in this file would stay green.
+  # An ordinary revoke-then-reissue, which must stay silent. The predecessor is
+  # revoked and the replacement is signed, both under the same subject, so
+  # `max without (serial, state)` collapses them and the signed one satisfies
+  # the entry. Without that collapse the rule would page on every renewal that
+  # ran alongside a delayed supersession, which is the normal shape of this
+  # feature rather than an edge of it.
   - interval: 1m
-    name: a managed certificate awaiting reissue after revocation is silent
+    name: a revoked predecessor beside a signed certificate is silent
+    input_series:
+      - series: 'puppetca_managed_certificate_configured{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local"}'
+        values: "1+0x90"
+      - series: 'puppetca_leaf_certificate_not_after_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local",serial="0a1b",state="revoked"}'
+        values: "9999999999+0x90"
+      - series: 'puppetca_leaf_certificate_not_after_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local",serial="0a1c",state="signed"}'
+        values: "9999999999+0x90"
+      - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+        values: "1+0x90"
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: PuppetCAManagedCertificateNeverIssued
+        exp_alerts: []
+
+  # The case the rule existed for and could not reach. A store write that fails
+  # does not leave the new certificate in place: ReconcileManaged revokes what
+  # it has just issued and restores the predecessor, because nothing ever saw
+  # the new key. On a first issuance there is no predecessor to restore, so the
+  # subject is left with one revoked certificate and nothing usable -- which is
+  # precisely the RBAC refusal, the unadoptable Secret and the missing directory
+  # that this rule's own annotation sends an operator to check.
+  #
+  # Before `state!="revoked"` the revoked series satisfied the `unless` and the
+  # rule was silent for ever. This case is what that matcher is for: an earlier
+  # version of this file asserted the opposite outcome here, so the expectation
+  # is the thing that changed, not the fixture.
+  - interval: 1m
+    name: a subject whose only certificate is revoked pages
     input_series:
       - series: 'puppetca_managed_certificate_configured{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local"}'
         values: "1+0x90"
@@ -331,9 +359,51 @@ tests:
       - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
         values: "1+0x90"
     alert_rule_test:
-      - eval_time: 70m
+      # Inside managedCertNeverIssuedFor, which absorbs the moment between a
+      # revocation and the reissue that normally follows it.
+      - eval_time: 30m
         alertname: PuppetCAManagedCertificateNeverIssued
         exp_alerts: []
+      - eval_time: 70m
+        alertname: PuppetCAManagedCertificateNeverIssued
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              instance: ca-1:9140
+              subject: puppetserver.openvox.svc.cluster.local
+            exp_annotations:
+              summary: "A managed certificate has never been issued."
+              description: "The Puppet CA on ca-1:9140 has puppetserver.openvox.svc.cluster.local configured in managed_certs but no certificate for it exists after 1h. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else's material, or a directory that does not exist."
+
+  # Two entries on one target, one issued and one not, which pins that the
+  # `unless` matches per subject rather than across the whole vector. Nothing
+  # else does: every other case here has one configured entry, or two that fare
+  # alike, so a rule that cancelled on any certificate anywhere would pass them
+  # all.
+  - interval: 1m
+    name: one entry issued does not silence another that is not
+    input_series:
+      - series: 'puppetca_managed_certificate_configured{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local"}'
+        values: "1+0x90"
+      - series: 'puppetca_managed_certificate_configured{job="openvox-ca",instance="ca-1:9140",subject="puppetdb.openvox.svc.cluster.local"}'
+        values: "1+0x90"
+      - series: 'puppetca_leaf_certificate_not_after_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local",serial="0a1b",state="signed"}'
+        values: "9999999999+0x90"
+      - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+        values: "1+0x90"
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: PuppetCAManagedCertificateNeverIssued
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              instance: ca-1:9140
+              subject: puppetdb.openvox.svc.cluster.local
+            exp_annotations:
+              summary: "A managed certificate has never been issued."
+              description: "The Puppet CA on ca-1:9140 has puppetdb.openvox.svc.cluster.local configured in managed_certs but no certificate for it exists after 1h. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else's material, or a directory that does not exist."
 
   # The one shape the rule's own two sides disagree about, and the reason the
   # expression is qualified on a successful scrape.

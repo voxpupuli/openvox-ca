@@ -374,6 +374,52 @@ managed_certs:
 			Expect(err).To(MatchError(ContainSubstring("must be absolute")))
 			Expect(err).To(MatchError(ContainSubstring("`names`")))
 		})
+
+		// The fourth name type, which was the only one passed through
+		// verbatim: a stray space or a bare word reached the certificate and
+		// the operator found out from whatever failed to verify it.
+		It("refuses an email address that is not one", func() {
+			for _, bad := range []string{"puppetserver", "@example.com", "ca@", "ca@ example.com"} {
+				err := decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    email_addresses: ["` + bad + `"]
+    renew_before: 720h
+    store: {files: {cert: /c.pem, key: /k.pem}}
+`).Validate()
+				Expect(err).To(MatchError(ContainSubstring("not an email address")), bad)
+				Expect(err).To(MatchError(ContainSubstring(bad)), bad)
+			}
+		})
+
+		It("trims an email address, as it does every other name type", func() {
+			managed := build(decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    email_addresses: ["  ca@example.com  "]
+    renew_before: 720h
+    store: {files: {cert: /c.pem, key: /k.pem}}
+`))
+			Expect(managed[0].Spec.EmailAddresses).To(Equal([]string{"ca@example.com"}))
+		})
+
+		// A plus-addressed and a subdomained address, which the shallow check
+		// must not refuse: the useful property is that an address was written,
+		// not that a parser approves of its shape.
+		It("accepts the addresses an operator actually writes", func() {
+			managed := build(decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    email_addresses: [ca+openvox@sub.example.co.uk, "ops@example.com"]
+    renew_before: 720h
+    store: {files: {cert: /c.pem, key: /k.pem}}
+`))
+			Expect(managed[0].Spec.EmailAddresses).To(Equal(
+				[]string{"ca+openvox@sub.example.co.uk", "ops@example.com"}))
+		})
 	})
 
 	Describe("reuse_key", func() {

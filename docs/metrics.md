@@ -437,22 +437,57 @@ configuration rather than from anything that has happened.
 **A constant is the point.** The reconcile loop's outcomes are otherwise
 ordinary certificate facts: a managed certificate is a certificate with an
 inventory row, so once one exists the leaf series above cover its expiry and
-the shipped expiry alerts cover it with no new series at all. The one outcome
-that reasoning cannot reach is an entry that has *never* issued — a store that
-never accepted a write — because there is no series for a certificate that does
-not exist, and no PromQL comparison matches an absence.
+the shipped expiry alerts cover it with no new series at all. The outcome that
+reasoning cannot reach is an entry that has *never* issued — a store that never
+accepted a write — because there is no series for a certificate that does not
+exist, and no PromQL comparison matches an absence.
 
 Publishing the configuration turns that absence into a value something can be
 tested against:
 
 ```promql
-puppetca_managed_certificate_configured
-  unless
-max without (serial, state) (puppetca_leaf_certificate_not_after_timestamp_seconds)
+(
+  puppetca_managed_certificate_configured
+    unless
+  max without (serial, state) (
+    puppetca_leaf_certificate_not_after_timestamp_seconds{state!="revoked"}
+  )
+)
+and on(instance) puppetca_collector_scrape_success == 1
 ```
 
 The mixin ships this as `PuppetCAManagedCertificateNeverIssued`, modulo its
 target selector and a `for` of `managedCertNeverIssuedFor` (1 hour).
+
+The two qualifiers are not decoration, and each was added after the rule was
+found to be wrong without it:
+
+- `and on(instance) ... scrape_success == 1`, because the two sides come from
+  different places. The configured series is built from the CA's own
+  configuration and is published even when the gather fails; the leaf series are
+  read from storage and vanish together. Without the qualifier a storage outage
+  matches every configured entry, healthy ones included, an hour into an outage
+  `PuppetCAScrapeFailing` is already paging for.
+- `state!="revoked"`, because a failed store write does not leave the new
+  certificate in place: the CA revokes what it has just issued and restores the
+  predecessor. On a first issuance there is no predecessor, so the subject is
+  left holding one revoked certificate — and a revoked certificate still emits
+  its leaf series, which silenced the rule for precisely the RBAC refusal and
+  unadoptable-Secret failures its description tells you to go and check. An
+  ordinary revoke-then-reissue is unaffected: `max without (serial, state)`
+  collapses every serial for the subject, so a signed certificate beside a
+  revoked predecessor still satisfies the entry.
+
+**What this still does not cover.** An entry that has issued before, whose
+reissue then keeps failing, is not silent because of this rule: the CA restores
+the predecessor after a failed store write, so a signed certificate remains and
+the component keeps working. The failure is logged every pass, and the ordinary
+expiry alerts take over as that predecessor ages — but there is no series that
+says "this entry's last reconcile failed", so between those two there is a
+window where only the logs show it. Closing that needs a per-entry
+reconcile-failure series, of the shape
+`puppetca_kubernetes_export_last_error_timestamp_seconds` takes for the
+exporter; it is not in this release.
 
 `max without (serial, state)` rather than `on (subject)`: it collapses the
 leaf series' per-certificate labels while keeping every target label the

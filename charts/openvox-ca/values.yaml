@@ -349,8 +349,11 @@ managedCerts:
     #
     # get and patch are narrowed by resourceNames to the Secrets named. create
     # is NOT, and cannot be: an object has no name at admission time, so the
-    # grant is create-any-Secret in each of those namespaces. Pre-create the
-    # Secrets and the apply becomes a plain patch, which works without it.
+    # grant is create-any-Secret in each of those namespaces -- which also
+    # permits creating a service-account-token Secret for any ServiceAccount
+    # in them, so keep managed certificates in namespaces the CA is already
+    # trusted in. Pre-create the Secrets and the apply becomes a plain patch,
+    # which works without it.
     #
     # Nothing is rendered when no managed certificate uses a Secret store, or
     # when the chart cannot read the configuration (existingConfigMap, args, or

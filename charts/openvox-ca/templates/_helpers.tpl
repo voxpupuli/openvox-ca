@@ -438,10 +438,22 @@ Three verbs, and the split between them is the whole of the design:
     It is kept rather than dropped: a pre-created Secret makes the apply a
     plain patch and works without it, but requiring N Secrets to exist first
     stops the CA being installable without this chart, and it is what makes
-    "delete the Secret" a working remedy for a refused adoption. An operator
-    who does pre-create every Secret can drop this Role and bind a narrower
-    one of their own -- managedCerts.rbac.create: false leaves the RBAC
-    entirely to them.
+    "delete the Secret" a working remedy for a refused adoption.
+
+    SECURITY: create on secrets grants more than creating the CA's own
+    objects, and the wider part is worth naming. A principal that may create a
+    Secret in a namespace may create one of type
+    kubernetes.io/service-account-token annotated for a ServiceAccount there,
+    and the token controller populates it with a usable token for that
+    account. So this Role is bounded by the namespaces it is rendered into
+    rather than by the Secret names in its get/patch rules: within each of
+    those namespaces it reaches every ServiceAccount's authority.
+
+    That is a reason to keep managed certificates in namespaces the CA is
+    already trusted in, not a reason to drop the verb -- without it the CA
+    cannot create the Secret it is being asked to fill. An operator who
+    pre-creates every Secret can set managedCerts.rbac.create: false and bind
+    a Role carrying get and patch alone, which does not.
 
 list and watch are deliberately absent. Neither can be narrowed by
 resourceNames, so an informer would need broad read access to every Secret in

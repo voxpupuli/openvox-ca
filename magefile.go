@@ -2225,7 +2225,14 @@ config:
 				// the create rule could be dropped and the CA would fail to
 				// create a Secret that does not exist yet -- the first-install
 				// case, and the one nothing else here covers.
-				`verbs: ["create"]`,
+				//
+				// Anchored through to the next rule, because the substring
+				// alone is also satisfied by a create rule that someone has
+				// narrowed with resourceNames -- which would render, look
+				// right here, and refuse every first install. What must hold
+				// is that nothing sits between this verb and the `get`/`patch`
+				// rule that follows it.
+				"    resources: [\"secrets\"]\n    verbs: [\"create\"]\n  - apiGroups:",
 				"automountServiceAccountToken: true",
 			},
 			// get is what separates this Role from the export's, and it must

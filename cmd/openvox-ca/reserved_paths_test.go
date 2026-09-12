@@ -79,11 +79,29 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 		"openbao.kubernetes_jwt_file":    "projected by the kubelet, not ours to protect",
 	}
 
-	// pathShaped decides which YAML keys name a filesystem location. Deliberately
-	// broad: a key this matches that is not a path costs one line in the map
-	// above, whereas a path it misses is the defect this spec exists to catch.
+	// pathShaped decides which YAML keys name a filesystem location.
+	//
+	// The first version matched four suffixes -- file, dir, path, _config --
+	// and that is how sql_dsn got through: it is the SQLite database holding
+	// the inventory, the certificates and the CRL, it is spelled like none of
+	// those, and so the sweep never yielded it and neither list had to account
+	// for it. tls_cert and tls_key were invisible for the same reason while
+	// being reserved, so the sweep was not even checking the entries that were
+	// there.
+	//
+	// Deliberately broad now, and the asymmetry is the point: a key this
+	// matches that is not a path costs one line in the map above, whereas a
+	// path it misses is the defect this spec exists to catch. Everything that
+	// could name a file, a directory or a connection string is swept, and the
+	// exemptions carry the reasons.
 	pathShaped := func(key string) bool {
-		for _, suffix := range []string{"file", "dir", "path", "_config"} {
+		// A suffix test over the whole key, deliberately. Splitting the last
+		// dotted segment off first cannot change the answer -- the key's
+		// ending is its leaf's ending -- and a version of this that did so was
+		// removed when a mutation proved no spec could tell the two apart.
+		for _, suffix := range []string{
+			"file", "dir", "path", "_config", "dsn", "cert", "key", "keyfile",
+		} {
 			if strings.HasSuffix(key, suffix) {
 				return true
 			}
@@ -133,11 +151,16 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 		// Every path-shaped setting given a value, so caOwnedPaths cannot skip
 		// one as empty. The values are never read from disk: the check is
 		// lexical, which is what lets it run against paths that do not exist.
+		// SQLite, because that is the backend for which sql_dsn names a file:
+		// the sweep yields the key either way, and this is the configuration
+		// where it has to be reserved rather than explained.
 		cfg := &serverConfig{}
 		fields := pathKeys(cfg)
 		for key, fv := range fields {
 			fv.SetString("/spec/" + strings.ReplaceAll(key, ".", "/"))
 		}
+		cfg.StorageBackend = "sqlite"
+		cfg.SQLDSN = "file:/spec/sql_dsn"
 
 		// The sweep must have found something to judge, and specifically the
 		// setting whose omission this spec exists for. A reflection walk that
@@ -150,7 +173,7 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 			"precondition: the sweep must descend into named blocks, or every "+
 				"exemption naming one is unchecked")
 
-		reserved, err := caOwnedPaths(cfg, "/spec/cadir")
+		reserved, err := caOwnedPaths(cfg, "/spec/cadir", "/spec/config.yaml")
 		Expect(err).NotTo(HaveOccurred())
 
 		got := map[string]bool{}
@@ -187,12 +210,99 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 		}
 	})
 
+	// The third direction, and the one whose absence let sql_dsn through
+	// twice. The two specs above ask whether every swept setting is accounted
+	// for and whether every exemption is swept -- neither asks whether the
+	// things caOwnedPaths *reserves* are swept at all. tls_cert and tls_key
+	// were reserved and invisible, so the sweep was silently checking a
+	// smaller list than the one in force, and a setting could be added to
+	// caOwnedPaths in a spelling the predicate misses without anything saying
+	// so.
+	//
+	// Settings that are not configuration keys are exempt by construction:
+	// cadir is a flag with its own resolution, --config is the flag that
+	// produces the file, and a client_ca entry is named after its position in
+	// a list. Each is named here rather than pattern-matched, so a new one has
+	// to be added deliberately.
+	It("sweeps every setting caOwnedPaths reserves", func() {
+		notKeys := map[string]bool{"cadir": true, "--config": true}
+
+		cfg := &serverConfig{}
+		for key, fv := range pathKeys(cfg) {
+			fv.SetString("/spec/" + strings.ReplaceAll(key, ".", "/"))
+		}
+		cfg.StorageBackend = "sqlite"
+		cfg.SQLDSN = "file:/spec/sql_dsn"
+		cfg.ClientCA = []config.ClientCA{{
+			Name: "partner", File: "/spec/anchor.pem", CRLFile: "/spec/anchor-crl.pem",
+		}}
+
+		reserved, err := caOwnedPaths(cfg, "/spec/cadir", "/spec/config.yaml")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(reserved).NotTo(BeEmpty())
+
+		swept := pathKeys(cfg)
+		for _, r := range reserved {
+			if notKeys[r.Setting] || strings.HasPrefix(r.Setting, "client_ca[") {
+				continue
+			}
+			Expect(swept).To(HaveKey(r.Setting),
+				"caOwnedPaths reserves %q, but the sweep does not yield it, so "+
+					"nothing checks that it stays reserved", r.Setting)
+		}
+
+		// And the DSN specifically, because it is the one whose reserved path
+		// is derived rather than copied: a parser change that stopped
+		// extracting the file would leave the entry absent, not wrong.
+		var settings []string
+		for _, r := range reserved {
+			settings = append(settings, r.Setting)
+		}
+		Expect(settings).To(ContainElement("sql_dsn"))
+		Expect(settings).To(ContainElement("--config"))
+	})
+
+	It("reserves the SQLite database, and only when SQLite is the backend", func() {
+		cfg := &serverConfig{StorageBackend: "sqlite", SQLDSN: "file:/var/lib/puppet-ca/ca.db"}
+		reserved, err := caOwnedPaths(cfg, "/var/lib/openvox-ca", "")
+		Expect(err).NotTo(HaveOccurred())
+
+		entry := certstore.Config{{
+			Certname:    "a.example.com",
+			Names:       []string{"a"},
+			RenewBefore: certstore.Duration(720 * time.Hour),
+			Store: certstore.StoreConfig{Files: &certstore.FilesConfig{
+				Cert: "/etc/a.pem", Key: "/var/lib/puppet-ca/ca.db",
+			}},
+		}}
+		Expect(entry.CheckReservedPaths(reserved)).
+			To(MatchError(ContainSubstring("is sql_dsn")))
+
+		// A server-backed dialect names no file, so there is nothing to
+		// reserve and an entry writing to a path that happens to look like the
+		// DSN is not this check's business.
+		pg := &serverConfig{StorageBackend: "postgres", SQLDSN: "postgres://ca@db/ca"}
+		pgReserved, err := caOwnedPaths(pg, "/var/lib/openvox-ca", "")
+		Expect(err).NotTo(HaveOccurred())
+		for _, r := range pgReserved {
+			Expect(r.Setting).NotTo(Equal("sql_dsn"))
+		}
+
+		// An in-memory SQLite database is not a file either.
+		mem := &serverConfig{StorageBackend: "sqlite", SQLDSN: ":memory:"}
+		memReserved, err := caOwnedPaths(mem, "/var/lib/openvox-ca", "")
+		Expect(err).NotTo(HaveOccurred())
+		for _, r := range memReserved {
+			Expect(r.Setting).NotTo(Equal("sql_dsn"))
+		}
+	})
+
 	It("reserves the CA's own key and certificate wherever they are configured", func() {
 		cfg := &serverConfig{}
 		cfg.CAKeyFile = "/var/secrets/ca_key.pem"
 		cfg.CACertFile = "/var/secrets/ca_crt.pem"
 
-		reserved, err := caOwnedPaths(cfg, "/var/lib/openvox-ca")
+		reserved, err := caOwnedPaths(cfg, "/var/lib/openvox-ca", "")
 		Expect(err).NotTo(HaveOccurred())
 
 		cfgCerts := certstore.Config{{
@@ -214,7 +324,7 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 			CRLFile: "/etc/anchors/partner-crl.pem",
 		}}
 
-		reserved, err := caOwnedPaths(cfg, "/var/lib/openvox-ca")
+		reserved, err := caOwnedPaths(cfg, "/var/lib/openvox-ca", "")
 		Expect(err).NotTo(HaveOccurred())
 
 		store := func(key string) certstore.Config {

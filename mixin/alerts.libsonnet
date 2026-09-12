@@ -692,11 +692,37 @@
             // honest across two CAs scraped into one Prometheus, which share no
             // store at all.
             //
-            // A revoked certificate still emits its leaf series, so this stays
-            // silent for an entry whose certificate was revoked and is awaiting
-            // reissue. That is deliberate: the next reconcile pass replaces it,
-            // and alerting inside one interval would fire on the mechanism
-            // working.
+            // `state!="revoked"` on the right-hand side, which the other
+            // leaf-expiry rules also carry but for a different reason.
+            //
+            // The first version left it off, so that an entry whose certificate
+            // had just been revoked and was awaiting reissue stayed silent
+            // inside one reconcile interval. That reasoning was wrong about
+            // what it was silencing. A store write that fails does not leave
+            // the certificate alone: ReconcileManaged revokes the certificate
+            // it has just issued and puts the predecessor back, precisely
+            // because nothing ever saw the new key. So the RBAC refusal, the
+            // unadoptable Secret and the missing directory -- the three causes
+            // this rule's own annotation sends an operator to check -- each
+            // leave a revoked series behind, and a revoked series was enough to
+            // cancel the rule. It could never fire for the failures it
+            // describes.
+            //
+            // With the matcher, the two cases separate properly. An entry with
+            // a live certificate keeps its signed series whatever else it has,
+            // because `max without (serial, state)` collapses every serial for
+            // that subject: a revoked predecessor beside a signed current one
+            // still matches, so an ordinary renewal and an ordinary delayed
+            // supersession stay silent. What fires is a subject whose *only*
+            // certificates are revoked, which is a component with nothing it
+            // can present, and a first issuance that never succeeded at all --
+            // the same outcome, reached two ways.
+            //
+            // A failure with a live predecessor is still silent, and that is
+            // intended: the component has a working certificate, the CA logs
+            // the failure every pass, and the expiry alerts take over as the
+            // predecessor ages. This rule is about having nothing, not about
+            // the reconcile loop being unhappy.
             //
             // It does not cover a crashlooping CA and must not be read as
             // doing so -- that is PuppetCAExporterDown's job. What it covers is
@@ -722,7 +748,8 @@
                 puppetca_managed_certificate_configured{%(selector)s}
                   unless
                 max without (serial, state) (
-                  puppetca_leaf_certificate_not_after_timestamp_seconds{%(selector)s}
+                  puppetca_leaf_certificate_not_after_timestamp_seconds{%(selector)s,
+                    state!="revoked"}
                 )
               )
               and on(instance) puppetca_collector_scrape_success{%(selector)s} == 1

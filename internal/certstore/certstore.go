@@ -418,11 +418,15 @@ func (e *Entry) spec() (ca.CertSpec, error) {
 	if err != nil {
 		return ca.CertSpec{}, err
 	}
+	emails, err := e.emails()
+	if err != nil {
+		return ca.CertSpec{}, err
+	}
 	return ca.CertSpec{
 		Subject:        e.Certname,
 		DNSNames:       e.Names,
 		IPAddresses:    ips,
-		EmailAddresses: e.EmailAddresses,
+		EmailAddresses: emails,
 		URIs:           uris,
 		ExtKeyUsage:    usages,
 		TTL:            e.TTL.AsDuration(),
@@ -467,6 +471,36 @@ func (e *Entry) ipAddresses() ([]net.IP, error) {
 // that is not absolute names nothing a verifier can compare against. An
 // operator who meant a DNS name and wrote it here should be told, not given a
 // certificate carrying it as a URI.
+// emails trims each rfc822Name and refuses one that is not an address.
+//
+// The other three name types each get a startup refusal -- an IP that does not
+// parse, a URI with no scheme, a DNS name the CA's own grammar rejects -- and
+// this one was passed through verbatim, so a stray space or a bare word reached
+// the certificate and an operator found out from whatever failed to verify it.
+//
+// Deliberately shallow: an address is required to have a local part and a
+// domain and no spaces, and nothing further. Full RFC 5322 validation refuses
+// addresses that work and accepts ones nobody wants, and a certificate's
+// rfc822Name is matched byte for byte by whatever consumes it -- so the useful
+// check is that the operator has written an address at all, not that a parser
+// approves of its shape.
+func (e *Entry) emails() ([]string, error) {
+	if len(e.EmailAddresses) == 0 {
+		return nil, nil
+	}
+	out := make([]string, 0, len(e.EmailAddresses))
+	for _, raw := range e.EmailAddresses {
+		text := strings.TrimSpace(raw)
+		at := strings.LastIndexByte(text, '@')
+		if text == "" || at <= 0 || at == len(text)-1 || strings.ContainsAny(text, " \t") {
+			return nil, fmt.Errorf("%q is not an email address; an rfc822Name "+
+				"alternative name is local@domain", raw)
+		}
+		out = append(out, text)
+	}
+	return out, nil
+}
+
 func (e *Entry) uris() ([]*url.URL, error) {
 	if len(e.URIs) == 0 {
 		return nil, nil

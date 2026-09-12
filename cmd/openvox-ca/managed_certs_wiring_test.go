@@ -82,7 +82,7 @@ managed_certs:
 
 	It("reaches the CA", func() {
 		myCA := newCA()
-		Expect(attachManagedCerts(myCA, loadCfg(twoEntries), specCADir, stubCACerts{})).To(Succeed())
+		Expect(attachManagedCerts(myCA, loadCfg(twoEntries), specCADir, specConfigPath, stubCACerts{})).To(Succeed())
 
 		Expect(myCA.ManagedCerts).To(HaveLen(2))
 		Expect(myCA.ManagedCerts[0].Spec.Subject).To(Equal("puppetserver.openvox.svc.cluster.local"))
@@ -102,7 +102,7 @@ managed_certs:
 		Expect(myCA.ManagedCerts).To(BeEmpty(), "precondition: a bare CA manages nothing")
 		Expect(jobNamesForCA(cfg, myCA)).NotTo(ContainElement(jobManagedCerts))
 
-		Expect(attachManagedCerts(myCA, cfg, specCADir, stubCACerts{})).To(Succeed())
+		Expect(attachManagedCerts(myCA, cfg, specCADir, specConfigPath, stubCACerts{})).To(Succeed())
 		Expect(jobNamesForCA(cfg, myCA)).To(ContainElement(jobManagedCerts))
 	})
 
@@ -112,7 +112,7 @@ managed_certs:
 	It("leaves the CA alone when nothing is configured", func() {
 		myCA := newCA()
 		Expect(attachManagedCerts(myCA, loadCfg("hostname: ca.example.com\n"),
-			specCADir, stubCACerts{})).To(Succeed())
+			specCADir, specConfigPath, stubCACerts{})).To(Succeed())
 
 		Expect(myCA.ManagedCerts).To(BeEmpty())
 		Expect(jobNamesForCA(loadCfg("hostname: ca.example.com\n"), myCA)).
@@ -172,7 +172,7 @@ managed_certs:
   - certname: a.example.com
     names: [a]
     store: {files: {cert: /srv/a.pem, key: /srv/a-key.pem}}
-`), specCADir, stubCACerts{})
+`), specCADir, specConfigPath, stubCACerts{})
 
 		Expect(err).To(MatchError(ContainSubstring("renew_before must be positive")))
 		Expect(myCA.ManagedCerts).To(BeEmpty(),

@@ -706,6 +706,15 @@ post-install notes say so, and say what to create by hand.
 > the CA's own key. The chart refuses to bind this Role to the namespace's
 > default ServiceAccount for the same reason — it carries `get`, so every pod in
 > the namespace could read those keys.
+>
+> **`create` reaches further than the Secrets it is for.** It cannot be narrowed
+> by `resourceNames`, so it permits creating *any* Secret in those namespaces —
+> including one of type `kubernetes.io/service-account-token` annotated for a
+> ServiceAccount there, which the token controller then fills in. The Role is
+> therefore bounded by its namespaces rather than by the names in its `get` and
+> `patch` rules: put managed certificates in namespaces the CA is already
+> trusted in, or pre-create every Secret, set `managedCerts.rbac.create: false`
+> and bind a Role with `get` and `patch` alone.
 
 ## Running under an external root
 

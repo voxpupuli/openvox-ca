@@ -1199,6 +1199,15 @@ One Kubernetes Secret per certificate, in the component's own namespace,
 carrying `tls.crt`, `tls.key` and `ca.crt`, and typed `kubernetes.io/tls` so it
 can be mounted or referenced by anything that understands a TLS Secret.
 
+> **The RBAC a Secret store needs is wider than the Secret.** `create` cannot
+> be narrowed by `resourceNames` — an object has no name at admission time — so
+> permission to create the Secret is permission to create any Secret in its
+> namespace, including a `kubernetes.io/service-account-token` for any
+> ServiceAccount there. Keep managed certificates in namespaces the CA is
+> already trusted in. Where that is not acceptable, pre-create each Secret and
+> grant `get` and `patch` alone, which are narrowed by name; the CA adopts what
+> it finds if you set `adopt_existing`, and never needs `create` again.
+>
 > **A Secret store makes in-cluster credentials a startup requirement.** One
 > entry using `store.secret` and the CA refuses to start anywhere it cannot
 > build a Kubernetes client — outside a pod, or with no ServiceAccount token
@@ -1308,6 +1317,16 @@ from a genuine one; it is logged each pass, and
 ships a commented `ReadWritePaths=` line for a migrated `cadir`; this is the
 same mechanism for a different directory.
 
+**Two entries may share a chain file, but nothing else.** `cert` and `key` are
+exclusive: two entries writing one certificate or key file would each read the
+other's material, find it failing their own spec, and reissue on every pass, for
+ever. `ca` is not, because every entry writes the same CA chain from the same
+source and no entry reads it back to decide anything — a shared
+`/etc/openvox/ca.pem` is the ordinary way to lay several components out on one
+host. What is refused is the cross pair, in either direction: a chain written
+over another entry's certificate or key, or a certificate or key written over
+another entry's chain. Within one entry, all three paths must differ.
+
 **The CA's own paths are refused at startup.** A file store rewrites its files
 on every issuance, so an entry pointed at the CA's own directory would destroy
 the key that signed every certificate this CA has issued — which no backup of
@@ -1325,6 +1344,8 @@ the certificates can undo. The server refuses to start when a `cert`, `key` or
 | `puppet_server_file` | the admin allow list |
 | `autosign_config` | the autosign file or executable |
 | `client_ca[].file`, `client_ca[].crl_file` | each foreign trust domain's anchors and CRLs, named after its entry |
+| `sql_dsn` | the SQLite database — the inventory, the signed certificates and the CRL — when `storage_backend: sqlite`. A server-backed dialect names no file, and neither does an in-memory database, so neither is reserved |
+| the `--config` file | the configuration the server was started with, which a store writing over would not break until the next restart |
 
 The comparison is lexical, on the cleaned path, so it does not need any of these
 to exist yet — and a directory whose name merely starts with the `cadir`'s, such
@@ -1343,8 +1364,12 @@ is loud and fixable by re-copying the file from wherever it was provisioned —
 a different class from the CA key, which is not reconstructible from anything.
 That list is not prose: `cmd/openvox-ca/reserved_paths_test.go` walks the
 configuration and fails if a path-shaped setting is neither reserved nor
-exempted there with a reason, so the two cannot drift apart. Directory
-permissions remain what actually confines the store.
+exempted there with a reason. It checks the other two directions as well — an
+exemption naming a setting the sweep never reaches, and a setting reserved in a
+spelling the sweep cannot see, both fail — because the first version of that
+sweep matched four key suffixes and so was blind to `sql_dsn`, `tls_cert` and
+`tls_key` while claiming to cover everything. Directory permissions remain what
+actually confines the store.
 
 ### Watching managed certificates
 

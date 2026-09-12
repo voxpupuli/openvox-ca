@@ -28,6 +28,7 @@ import (
 	"github.com/voxpupuli/openvox-ca/internal/certstore"
 	"github.com/voxpupuli/openvox-ca/internal/k8sclient"
 	"github.com/voxpupuli/openvox-ca/internal/k8sexport"
+	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
 
 // buildManagedCerts turns the `managed_certs` block into the entries the
@@ -56,7 +57,8 @@ import (
 // runtime*. That is routine, is logged per entry, and self-heals on the next
 // pass. The distinction is between a configuration that can never work and a
 // pass that did not work this time.
-func buildManagedCerts(cfg *serverConfig, absCADir string, caCerts certstore.CACertSource) ([]ca.ManagedCert, error) {
+func buildManagedCerts(cfg *serverConfig, absCADir, configPath string,
+	caCerts certstore.CACertSource) ([]ca.ManagedCert, error) {
 	if !cfg.ManagedCerts.Enabled() {
 		return nil, nil
 	}
@@ -72,7 +74,7 @@ func buildManagedCerts(cfg *serverConfig, absCADir string, caCerts certstore.CAC
 	); err != nil {
 		return nil, fmt.Errorf("invalid managed_certs config: %w", err)
 	}
-	reserved, err := caOwnedPaths(cfg, absCADir)
+	reserved, err := caOwnedPaths(cfg, absCADir, configPath)
 	if err != nil {
 		return nil, err
 	}
@@ -117,9 +119,9 @@ func buildManagedCerts(cfg *serverConfig, absCADir string, caCerts certstore.CAC
 // Every other spec sets that field by hand, so the one line that sets it in
 // production was deletable with the suite green -- the same gap applyCAConfig
 // and its wiring spec exist to close for ca_signing_concurrency.
-func attachManagedCerts(myCA *ca.CA, cfg *serverConfig, absCADir string,
+func attachManagedCerts(myCA *ca.CA, cfg *serverConfig, absCADir, configPath string,
 	caCerts certstore.CACertSource) error {
-	managed, err := buildManagedCerts(cfg, absCADir, caCerts)
+	managed, err := buildManagedCerts(cfg, absCADir, configPath, caCerts)
 	if err != nil {
 		return err
 	}
@@ -164,9 +166,17 @@ func exportSecretTargets(cfg k8sexport.Config) [][2]string {
 // and they live in the embedded StorageConfig rather than beside the settings
 // above. The first version of this function enumerated only serverConfig's own
 // fields and so omitted them, which left the one path the check exists to
-// protect unprotected while the documentation said otherwise. reservedSettings
-// in the spec file now measures the class instead: every path-shaped
-// configuration key is either here or carries a recorded reason for not being.
+// protect unprotected while the documentation said otherwise. The sweep in
+// cmd/openvox-ca/reserved_paths_test.go measures the class instead: every
+// path-shaped configuration key is either reserved here or carries its reason
+// in that file's notReserved map.
+//
+// sql_dsn is the second entry that lesson bought. For the SQLite backend the
+// DSN names a file holding the inventory, the signed certificates and the CRL,
+// and it is neither spelled like a path nor stored like one -- so the first
+// version of the sweep could not see it and the first version of this list did
+// not carry it. The path is extracted with storage.SQLiteFilePath, the same
+// function the backend itself uses, rather than by a second parser here.
 //
 // tls_cert and tls_key are on the list on purpose. Making the CA's own serving
 // certificate a managed one is openvox-ca#326 and is a different mechanism from
@@ -178,7 +188,7 @@ func exportSecretTargets(cfg k8sexport.Config) [][2]string {
 // server itself resolves it, because a relative path in either place means the
 // same thing -- and an unresolvable one is reported rather than dropped, since a
 // dropped entry is a gap that looks like a passing check.
-func caOwnedPaths(cfg *serverConfig, absCADir string) ([]certstore.ReservedPath, error) {
+func caOwnedPaths(cfg *serverConfig, absCADir, configPath string) ([]certstore.ReservedPath, error) {
 	out := []certstore.ReservedPath{{Setting: "cadir", Path: absCADir, Tree: true}}
 	named := []certstore.ReservedPath{
 		{Setting: "tls_cert", Path: cfg.TLSCert},
@@ -196,6 +206,22 @@ func caOwnedPaths(cfg *serverConfig, absCADir string) ([]certstore.ReservedPath,
 	// certificate written over an anchor would be trusted as an issuer, and one
 	// written over a CRL bundle would silently stop revocation checking for
 	// that domain.
+	// The SQLite database, when that is the backend. Only for sqlite: every
+	// other dialect's DSN names a server rather than a file, and an in-memory
+	// database has no file at all, both of which SQLiteFilePath reports by
+	// returning false.
+	if strings.EqualFold(strings.TrimSpace(cfg.StorageBackend), "sqlite") {
+		if path, ok := storage.SQLiteFilePath(cfg.SQLDSN); ok {
+			named = append(named, certstore.ReservedPath{Setting: "sql_dsn", Path: path})
+		}
+	}
+	// The configuration file the server was started with, which is not a
+	// config key at all -- it is the flag that produced the rest of them. A
+	// store writing a PEM over it does not take effect until the next restart,
+	// which is exactly the kind of fault that is found much later.
+	if configPath != "" {
+		named = append(named, certstore.ReservedPath{Setting: "--config", Path: configPath})
+	}
 	for i := range cfg.ClientCA {
 		e := &cfg.ClientCA[i]
 		named = append(named,
