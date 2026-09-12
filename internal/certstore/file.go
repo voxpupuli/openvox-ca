@@ -31,10 +31,20 @@ import (
 // File modes for the material a file store writes.
 //
 // The key is readable only by the user running the CA, and the certificate and
-// chain are world-readable because they are public. A component running as
-// another user reads the key through group ownership or an ACL on the
-// directory, which is a decision for whoever lays that directory out -- see
-// [FileStore.Save] for why this store will not create it.
+// chain are world-readable because they are public.
+//
+// SECURITY: 0600 means the file store serves a component running as the same
+// user as the CA, and only that. Neither group ownership nor a directory ACL
+// reaches it -- the group bits are zero, and storage.AtomicWriteFile chmods the
+// file to this mode before the rename, which sets an ACL's mask from those same
+// zero bits. A chown or chmod applied by hand is discarded at the next renewal,
+// because the file is replaced by a new inode rather than rewritten.
+//
+// A component running as a different user needs a mode or ownership setting
+// this store does not have. That is a real limit rather than an oversight, and
+// it is stated here and in docs/configuration.md so it is found before a
+// deployment depends on it.
+// NIST 800-53: AC-6 (Least Privilege), SC-12 (Cryptographic Key Management)
 const (
 	keyFileMode  fs.FileMode = 0o600
 	certFileMode fs.FileMode = 0o644

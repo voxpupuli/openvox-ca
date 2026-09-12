@@ -171,6 +171,12 @@ var _ = Describe("FileStore", func() {
 	// not have been written either.
 	Describe("the order the pair is written in", func() {
 		It("has the key and chain on disk by the time the certificate is written", func() {
+			// Root ignores directory permissions, so this spec's mechanism for
+			// making the certificate write fail does not work as root. The
+			// neighbouring internal/ca specs guard the same way.
+			if os.Geteuid() == 0 {
+				Skip("root ignores directory permissions")
+			}
 			certDir := filepath.Join(dir, "readonly")
 			Expect(os.Mkdir(certDir, 0o500)).To(Succeed())
 			DeferCleanup(func() { _ = os.Chmod(certDir, 0o700) })

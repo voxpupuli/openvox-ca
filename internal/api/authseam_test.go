@@ -21,6 +21,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -102,58 +103,68 @@ var exemptPackages = map[string]string{
 }
 
 // caImporters returns every package directory under internal/ and cmd/ whose
-// non-test source imports internal/ca, relative to this directory.
+// non-test source imports internal/ca, at any depth, relative to this
+// directory.
 //
 // Measured rather than listed, which is the whole point: an enumeration is what
 // misses a new importer, and a new importer of internal/ca is precisely the
 // event this gate has to notice.
 func caImporters() []string {
 	GinkgoHelper()
+	seen := map[string]bool{}
 	var found []string
+	// Walked to any depth rather than enumerated two levels down. The earlier
+	// version stopped one directory below internal/ and cmd/, which was tuned
+	// to today's tree -- and a sweep whose own reach is an enumeration fails
+	// exactly the way the list it audits would.
 	for _, root := range []string{"..", "../../cmd"} {
-		entries, err := os.ReadDir(root)
+		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if !d.IsDir() {
+				return nil
+			}
+			switch d.Name() {
+			case "testdata", "vendor", ".git":
+				return filepath.SkipDir
+			}
+			if importsCA(path) && !seen[path] {
+				seen[path] = true
+				found = append(found, path)
+			}
+			return nil
+		})
+		// A root that cannot be walked is a sweep that did not run, not a tree
+		// with no importers in it.
 		Expect(err).NotTo(HaveOccurred(), root)
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
-			}
-			// One level of nesting, for internal/signer/openbao.
-			dirs := []string{filepath.Join(root, entry.Name())}
-			if subs, err := os.ReadDir(dirs[0]); err == nil {
-				for _, sub := range subs {
-					if sub.IsDir() {
-						dirs = append(dirs, filepath.Join(dirs[0], sub.Name()))
-					}
-				}
-			}
-			for _, dir := range dirs {
-				if importsCA(dir) {
-					found = append(found, dir)
-				}
-			}
-		}
 	}
 	return found
 }
 
 // importsCA reports whether any non-test file in dir imports internal/ca.
+//
+// Every failure here is fatal rather than absorbed. A directory that cannot be
+// read, or a file that will not parse, would otherwise read as "does not import
+// internal/ca" -- which silently removes a package from the set this gate
+// requires a decision for, and is the one outcome a guard must never produce
+// quietly.
 func importsCA(dir string) bool {
 	GinkgoHelper()
 	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false
-	}
+	Expect(err).NotTo(HaveOccurred(), dir)
 	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		file, err := parser.ParseFile(token.NewFileSet(), filepath.Join(dir, name), nil, parser.ImportsOnly)
-		if err != nil {
-			continue
-		}
+		path := filepath.Join(dir, name)
+		file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
+		Expect(err).NotTo(HaveOccurred(), path)
 		for _, imp := range file.Imports {
-			if p, err := strconv.Unquote(imp.Path.Value); err == nil && p == caImportPath {
+			p, err := strconv.Unquote(imp.Path.Value)
+			Expect(err).NotTo(HaveOccurred(), path)
+			if p == caImportPath {
 				return true
 			}
 		}

@@ -82,6 +82,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -95,16 +96,25 @@ import (
 // second distribution mechanism.
 //
 // Satisfied by *storage.StorageService, but kept as a one-method interface so
-// this package does not depend on the storage layer and is trivial to fake.
+// a store depends on the chain rather than on the CA's whole backing store, and
+// so it is trivial to fake. Note this package does still import
+// internal/storage, for AtomicWriteFile: one implementation of an atomic write
+// rather than two is the right call, and the narrow interface here is about the
+// CA's material, not about the package graph.
 type CACertSource interface {
 	GetCACert(ctx context.Context) ([]byte, error)
 }
 
 // Deps are the things a store needs that configuration cannot supply.
 type Deps struct {
-	// CACerts reads the CA certificate chain. Required whenever any entry
-	// writes one, which is every Secret store and every file store that
-	// configures a `ca` path.
+	// CACerts reads the CA certificate chain. Required whenever any managed
+	// certificate is configured -- [Config.Build] refuses a nil value even for
+	// a file-only configuration that writes no chain, because a caller that had
+	// to predict which entries would need one would be re-deriving what the
+	// entries already say.
+	//
+	// That is deliberately unlike Client below, which is genuinely optional and
+	// has a predicate to say so.
 	CACerts CACertSource
 
 	// Client is the Kubernetes clientset the Secret stores use. It may be nil
@@ -333,20 +343,6 @@ func (c Config) NeedsDefaultNamespace() bool {
 		}
 	}
 	return false
-}
-
-// SecretTargets reports every (namespace, name) a Secret store writes to, with
-// namespaces left empty where the entry relies on the pod's own. Used to check
-// managed certificates against the kubernetes_export targets; see
-// [Config.CheckExportOverlap].
-func (c Config) SecretTargets() [][2]string {
-	var out [][2]string
-	for i := range c {
-		if s := c[i].Store.Secret; s != nil {
-			out = append(out, [2]string{s.Namespace, s.Name})
-		}
-	}
-	return out
 }
 
 // usageByName maps the configured spelling of an extended key usage to its
@@ -583,9 +579,20 @@ func (s *SecretConfig) validate(where string, secrets map[[2]string]int, idx int
 }
 
 func (f *FilesConfig) validate(where string, paths map[string]int, idx int) error {
-	f.Cert = strings.TrimSpace(f.Cert)
-	f.Key = strings.TrimSpace(f.Key)
-	f.CA = strings.TrimSpace(f.CA)
+	// Cleaned, not merely trimmed, and cleaned in place so the writes use the
+	// same spelling the duplicate check did. Two spellings of one path --
+	// `/a/b/c.pem` and `/a//b/c.pem`, or one routed through `..` -- are two keys
+	// in the map below and would both validate, which is the reissue loop that
+	// check exists to prevent: each entry's Load reads the other's certificate,
+	// finds it failing its own spec, and replaces it, every pass, for ever.
+	//
+	// filepath.Clean is lexical, so a symlinked directory still reaches this as
+	// two distinct paths. Resolving those would mean touching the filesystem at
+	// startup for paths that need not exist yet, which is a worse trade than the
+	// remaining gap.
+	f.Cert = cleanPath(f.Cert)
+	f.Key = cleanPath(f.Key)
+	f.CA = cleanPath(f.CA)
 	if f.Cert == "" || f.Key == "" {
 		return fmt.Errorf("%s: store.files needs both `cert` and `key`", where)
 	}
@@ -614,6 +621,16 @@ func (f *FilesConfig) validate(where string, paths map[string]int, idx int) erro
 	return nil
 }
 
+// cleanPath trims and lexically normalises a configured path, leaving an empty
+// one empty so the required-field checks still see it as absent.
+func cleanPath(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
+	}
+	return filepath.Clean(p)
+}
+
 // nsOrPod renders a namespace for a message, saying what an empty one means
 // rather than printing nothing.
 func nsOrPod(ns string) string {
@@ -634,31 +651,54 @@ func nsOrPod(ns string) string {
 // managedFields flap, which is the kind of fault that is found months later.
 //
 // Refused here, at startup, because both lists are in the same file and the
-// overlap is a typo rather than a decision. Namespaces are compared as
-// configured; an entry that omits one and an export target that spells out the
-// same namespace are not caught, which is the same limit the duplicate check
-// has and for the same reason.
+// overlap is a typo rather than a decision.
+//
+// The comparison is on the Secret's name first, and then on whether the two
+// namespaces can name the same one -- see namespacesMayCollide, which treats an
+// omission on either side as possibly matching, because both features resolve an
+// omitted namespace to the CA pod's own.
 func (c Config) CheckExportOverlap(exportTargets [][2]string) error {
 	if len(exportTargets) == 0 || !c.Enabled() {
 		return nil
 	}
-	targets := make(map[[2]string]bool, len(exportTargets))
-	for _, t := range exportTargets {
-		targets[t] = true
-	}
 	for i := range c {
 		s := c[i].Store.Secret
-		if s == nil || !targets[[2]string{s.Namespace, s.Name}] {
+		if s == nil {
 			continue
 		}
-		return fmt.Errorf("managed_certs[%d] (%s) stores its certificate in Secret %s/%s, "+
-			"which is also a kubernetes_export target: both write ca.crt, so they would "+
-			"take the key from each other on every pass. Give the managed certificate a "+
-			"Secret of its own, or drop the export target -- a managed certificate's "+
-			"Secret already carries the CA chain",
-			i, c[i].Certname, nsOrPod(s.Namespace), s.Name)
+		for _, t := range exportTargets {
+			if t[1] != s.Name || !namespacesMayCollide(t[0], s.Namespace) {
+				continue
+			}
+			return fmt.Errorf("managed_certs[%d] (%s) stores its certificate in Secret %s/%s, "+
+				"which is also a kubernetes_export target in %s: both write ca.crt, so they "+
+				"would take the key from each other on every pass. Give the managed "+
+				"certificate a Secret of its own, or drop the export target -- a managed "+
+				"certificate's Secret already carries the CA chain",
+				i, c[i].Certname, nsOrPod(s.Namespace), s.Name, nsOrPod(t[0]))
+		}
 	}
 	return nil
+}
+
+// namespacesMayCollide reports whether two configured namespaces can name the
+// same one at runtime, for a Secret whose name already matches on both sides.
+//
+// Both features resolve an omitted namespace to the CA pod's own, which is not
+// known here -- this runs before any Kubernetes client exists, deliberately, so
+// that a configuration error is refused without needing a cluster to refuse it.
+// So an omission on either side is treated as possibly-the-other, and the pair
+// is refused.
+//
+// That over-refuses in one case: an entry omitting its namespace, an export
+// target naming a different one, and a pod in a third. The alternative is to
+// resolve the pod's namespace first, which would move this check after client
+// construction and make it unreachable on any host without a ServiceAccount
+// mount -- including every test. Refusing is also the safe direction: the cost
+// is spelling out a namespace, and the cost of a miss is two managers rewriting
+// one Secret on every pass, for ever, with nothing looking broken.
+func namespacesMayCollide(a, b string) bool {
+	return a == b || a == "" || b == ""
 }
 
 // Build turns a validated configuration into the entries internal/ca's

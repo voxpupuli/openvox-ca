@@ -653,6 +653,11 @@
               description: 'The Puppet CA on {{ $labels.instance }} has {{ $labels.kind }}/{{ $labels.name }} in namespace {{ $labels.namespace }} configured for export but has not attempted a single apply in %(k8sExportNotRunningFor)s. The exported object holds whatever it held before, and PuppetCAKubernetesExportFailing cannot report on a target with no apply results. Check the CA logs for the Kubernetes export job starting, and for errors initialising the in-cluster client.' % { k8sExportNotRunningFor: $._config.k8sExportNotRunningFor },
             },
           },
+        ],
+      },
+      {
+        name: 'openvox-ca-managed-certificates',
+        rules: [
           {
             alert: 'PuppetCAManagedCertificateNeverIssued',
             // A configured managed certificate that has never produced a

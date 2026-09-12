@@ -142,7 +142,11 @@ managed_certs:
     store: {secret: {name: a-tls, namespace: openvox}}
 `)
 		_, err := buildManagedCerts(cfg, stubCACerts{})
-		Expect(err).To(MatchError(ContainSubstring("inside a pod")))
+		// Anchored to a string only k8sclient.InClusterClientset produces.
+		// "inside a pod" and "Secret store" both appear in certstore.Build's
+		// own refusal too, so asserting those alone would pass even if the
+		// whole client-construction branch were removed.
+		Expect(err).To(MatchError(ContainSubstring("loading in-cluster Kubernetes config")))
 		Expect(err).To(MatchError(ContainSubstring("Secret store")))
 	})
 })
@@ -179,6 +183,11 @@ var _ = Describe("saying when a managed certificate is an admin credential", fun
 		out := captureLogs(slog.LevelWarn, func() { warnIfManagedCertIsAdmin(cfg, managed) })
 		Expect(out).To(ContainSubstring("CA admin credential"))
 		Expect(out).To(ContainSubstring("puppetserver.example.com"))
+		// The two warnings are alternatives, not a pair. Without this the
+		// `continue` separating them can be deleted and both fire for one
+		// entry, telling an operator in consecutive lines that a certificate
+		// both is and is not an admin credential.
+		Expect(out).NotTo(ContainSubstring("does not carry clientAuth"))
 	})
 
 	It("says nothing about a certname nobody listed", func() {
@@ -186,7 +195,7 @@ var _ = Describe("saying when a managed certificate is an admin credential", fun
 		managed := []ca.ManagedCert{{Spec: ca.CertSpec{Subject: "puppetserver.example.com"}}}
 
 		out := captureLogs(slog.LevelWarn, func() { warnIfManagedCertIsAdmin(cfg, managed) })
-		Expect(out).NotTo(ContainSubstring("admin credential"))
+		Expect(out).To(BeEmpty(), "an unlisted certname warrants no warning at all")
 	})
 
 	// The listing grants authority the certificate cannot use, which is
@@ -200,6 +209,7 @@ var _ = Describe("saying when a managed certificate is an admin credential", fun
 
 		out := captureLogs(slog.LevelWarn, func() { warnIfManagedCertIsAdmin(cfg, managed) })
 		Expect(out).To(ContainSubstring("does not carry clientAuth"))
+		Expect(out).NotTo(ContainSubstring("CA admin credential"))
 	})
 
 	// An unset usage list means the serverAuth+clientAuth pair every other
@@ -214,5 +224,38 @@ var _ = Describe("saying when a managed certificate is an admin credential", fun
 		Expect(carriesClientAuth(ca.CertSpec{
 			ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		})).To(BeFalse())
+	})
+
+	// Through buildManagedCerts rather than by calling the function directly,
+	// which is what pins the call site, its ordering after Build, and the
+	// subject actually reaching the warning. Delete the call from
+	// buildManagedCerts and every spec above stays green.
+	//
+	// The certname is listed in puppet_server_file rather than puppet_server,
+	// so this also pins that the allow list comes from buildAdminAllowList: a
+	// hand-rolled comma split of puppet_server would lose every administrator
+	// named in the file, silently.
+	It("warns from startup, for a certname listed only in puppet_server_file", func() {
+		dir := GinkgoT().TempDir()
+		cnFile := filepath.Join(dir, "puppet-server")
+		Expect(os.WriteFile(cnFile, []byte("puppetserver.example.com\n"), 0o600)).To(Succeed())
+
+		cfg := writeServerConfig(`
+puppet_server_file: ` + cnFile + `
+managed_certs:
+  - certname: puppetserver.example.com
+    names: [puppetserver.example.com]
+    renew_before: 720h
+    store: {files: {cert: /c.pem, key: /k.pem}}
+`)
+		var managed []ca.ManagedCert
+		out := captureLogs(slog.LevelWarn, func() {
+			var err error
+			managed, err = buildManagedCerts(cfg, stubCACerts{})
+			Expect(err).NotTo(HaveOccurred())
+		})
+		Expect(managed).To(HaveLen(1))
+		Expect(out).To(ContainSubstring("CA admin credential"))
+		Expect(out).To(ContainSubstring("puppetserver.example.com"))
 	})
 })

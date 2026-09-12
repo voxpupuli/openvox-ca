@@ -308,6 +308,26 @@ tests:
               summary: "A managed certificate has never been issued."
               description: "The Puppet CA on ca-1:9140 has puppetserver.openvox.svc.cluster.local configured in managed_certs but no certificate for it exists after 1h. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else's material, or a directory that does not exist."
 
+  # The rule's one deliberate deviation from its neighbours, which nothing else
+  # pins. All three leaf-expiry rules carry state!="revoked"; this one does not,
+  # and its comment says why -- a revoked certificate awaiting reissue is the
+  # mechanism working, and the next pass replaces it. Adding state!="revoked"
+  # here "for consistency" would page for every normal revoke-then-reissue, and
+  # the four cases above would all stay green.
+  - interval: 1m
+    name: a managed certificate awaiting reissue after revocation is silent
+    input_series:
+      - series: 'puppetca_managed_certificate_configured{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local"}'
+        values: "1+0x90"
+      - series: 'puppetca_leaf_certificate_not_after_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local",serial="0a1b",state="revoked"}'
+        values: "9999999999+0x90"
+      - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+        values: "1+0x90"
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: PuppetCAManagedCertificateNeverIssued
+        exp_alerts: []
+
   # A CA not using the feature. The configured series is published from the
   # configuration, so its absence means exactly one thing: no managed
   # certificate is configured. This is the guard against closing the gap the

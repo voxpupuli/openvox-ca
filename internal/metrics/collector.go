@@ -435,6 +435,30 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.crlChainRemoved, prometheus.CounterValue,
 		float64(c.ca.CRLChainRemoved()))
 
+	// Above the gather's error return, with the other series that read no
+	// storage. This one reads configuration only, and its whole purpose is to
+	// make an absence mean exactly one thing -- no managed certificate is
+	// configured. Emitting it after the return would give absence a second
+	// meaning, "the last gather failed", which is the ambiguity crlChainLastRead
+	// above is placed here to avoid. It would also reset
+	// PuppetCAManagedCertificateNeverIssued's `for` clock on every storage blip,
+	// suppressing the alert during exactly the outages that also stop issuance.
+	//
+	// ManagedCerts is written once during startup, before the listener binds and
+	// before this collector is ever scraped, and never mutated afterwards -- so
+	// reading it here needs no lock.
+	//
+	// Deliberately general: one label, the subject, and nothing about where the
+	// certificate is stored. The mechanism's entries carry a Load and a Save and
+	// cannot say which store is behind them, and that is the right shape anyway
+	// -- a second consumer of the mechanism with a different store (#326, the
+	// CA's own serving certificate) needs this series to mean the same thing for
+	// it as it does for a Secret.
+	for i := range c.ca.ManagedCerts {
+		ch <- prometheus.MustNewConstMetric(c.managedCertConfigured, prometheus.GaugeValue, 1,
+			c.ca.ManagedCerts[i].Spec.Subject)
+	}
+
 	if err != nil {
 		slog.Warn("Prometheus CA metrics scrape failed", "error", err)
 		ch <- prometheus.MustNewConstMetric(c.scrapeSuccess, prometheus.GaugeValue, 0)
@@ -484,22 +508,6 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.leafStateCount, prometheus.GaugeValue, float64(count), state)
 	}
 
-	// Emitted here rather than gathered into the snapshot: this reads
-	// configuration and touches no storage, so it cannot fail and has nothing
-	// to time out. ManagedCerts is written once during startup, before the
-	// listener binds and before this collector is ever scraped, and never
-	// mutated afterwards.
-	//
-	// Deliberately general: one label, the subject, and nothing about where the
-	// certificate is stored. The mechanism's entries carry a Load and a Save
-	// and cannot say which store is behind them, and that is the right shape
-	// anyway -- a second consumer of the mechanism with a different store
-	// (#326, the CA's own serving certificate) needs this series to mean the
-	// same thing for it as it does for a Secret.
-	for i := range c.ca.ManagedCerts {
-		ch <- prometheus.MustNewConstMetric(c.managedCertConfigured, prometheus.GaugeValue, 1,
-			c.ca.ManagedCerts[i].Spec.Subject)
-	}
 }
 
 // leafCert is one row of the per-certificate snapshot.

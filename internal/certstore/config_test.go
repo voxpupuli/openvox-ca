@@ -18,6 +18,7 @@
 package certstore_test
 
 import (
+	"context"
 	"crypto/x509"
 	"net"
 	"time"
@@ -26,6 +27,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"go.yaml.in/yaml/v3"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/voxpupuli/openvox-ca/internal/ca"
@@ -457,6 +459,24 @@ managed_certs:
 			Expect(err).To(MatchError(ContainSubstring("absolute path")))
 		})
 
+		// Cleaned before comparison, so a second spelling of the same path is
+		// the same path. Without that both entries validate and then replace
+		// each other's certificate on every pass, for ever.
+		It("refuses two entries writing one file under different spellings", func() {
+			err := decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {files: {cert: /etc/ssl/cert.pem, key: /k1.pem}}
+  - certname: b.example.com
+    names: [b]
+    renew_before: 720h
+    store: {files: {cert: /etc/ssl/../ssl//cert.pem, key: /k2.pem}}
+`).Validate()
+			Expect(err).To(MatchError(ContainSubstring("/etc/ssl/cert.pem")))
+		})
+
 		It("refuses two entries writing one file", func() {
 			err := decode(`
 managed_certs:
@@ -510,6 +530,44 @@ managed_certs:
 			})
 			Expect(err).To(MatchError(ContainSubstring("could not be resolved")))
 		})
+
+		// The other half of that branch. The spec above pins the failure to
+		// resolve a namespace; this pins the resolution itself, which decides
+		// whose namespace a component's private key is written into. Asserted
+		// by writing through the built store rather than by reading the config
+		// back, so the namespace has to survive all the way to the apply.
+		It("writes into the CA pod's namespace when an entry omits one", func() {
+			cfg := decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {secret: {name: a-tls}}
+`)
+			Expect(cfg.Validate()).To(Succeed())
+			client := fake.NewClientset()
+			managed, err := cfg.Build(certstore.Deps{
+				CACerts:          stubCA{pem: []byte("CA")},
+				Client:           client,
+				DefaultNamespace: "ca-system",
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(managed[0].Save(context.Background(), []byte("CERT"), []byte("KEY"))).To(Succeed())
+
+			sec, err := client.CoreV1().Secrets("ca-system").
+				Get(context.Background(), "a-tls", metav1.GetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(sec.Data).To(HaveKeyWithValue("tls.crt", []byte("CERT")))
+		})
+
+		// The third of Build's entry guards. Its two siblings are covered
+		// above; without this one the assertion depth across them is uneven,
+		// and a file-only deployment is the case a caller is likeliest to
+		// build a nil CACerts for.
+		It("says so when no CA certificate source is supplied", func() {
+			_, err := decode(minimal).Build(certstore.Deps{Client: fake.NewClientset()})
+			Expect(err).To(MatchError(ContainSubstring("CA certificate chain")))
+		})
 	})
 
 	// Both features write ca.crt under different field managers, and the
@@ -525,6 +583,35 @@ managed_certs:
 
 		It("allows an export target that is a different Secret", func() {
 			Expect(decode(minimal).CheckExportOverlap([][2]string{{"openvox", "ca-trust"}})).To(Succeed())
+		})
+
+		// The collision the check used to miss, and the ordinary shape rather
+		// than an exotic one: the export's own documentation shows `namespace`
+		// as optional, so one side spelling it out and the other omitting it is
+		// what an operator actually writes. Both resolve to the pod's namespace
+		// and both then apply ca.crt to the same object, for ever.
+		It("refuses a collision where the managed entry omits the namespace", func() {
+			cfg := decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {secret: {name: shared-tls}}
+`)
+			err := cfg.CheckExportOverlap([][2]string{{"ca-system", "shared-tls"}})
+			Expect(err).To(MatchError(ContainSubstring("shared-tls")))
+		})
+
+		It("refuses it the other way round too, with the export target omitting one", func() {
+			cfg := decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {secret: {name: shared-tls, namespace: ca-system}}
+`)
+			err := cfg.CheckExportOverlap([][2]string{{"", "shared-tls"}})
+			Expect(err).To(MatchError(ContainSubstring("shared-tls")))
 		})
 
 		It("has nothing to say about a file store", func() {

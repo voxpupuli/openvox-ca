@@ -26,8 +26,11 @@ serves plain HTTP at `/metrics`, regardless of the API's TLS configuration. In
 the default isolated-process mode it runs inside the frontend process (the
 signer process has no network exposure).
 
-> **Security:** the leaf-certificate metrics expose node hostnames (certificate
-> subjects) as label values. Bind the exporter to loopback or a trusted
+> **Security:** the certificate metrics expose node hostnames (certificate
+> subjects) as label values. That includes
+> `puppetca_managed_certificate_configured`, whose subjects come from
+> configuration — so it names a component the CA is *meant* to issue for even
+> before any certificate exists. Bind the exporter to loopback or a trusted
 > management network — e.g. `127.0.0.1:9140` scraped via a node exporter sidecar,
 > or a dedicated interface protected by a network policy — rather than a public
 > address.
@@ -448,6 +451,9 @@ puppetca_managed_certificate_configured
 max without (serial, state) (puppetca_leaf_certificate_not_after_timestamp_seconds)
 ```
 
+The mixin ships this as `PuppetCAManagedCertificateNeverIssued`, modulo its
+target selector and a `for` of `managedCertNeverIssuedFor` (1 hour).
+
 `max without (serial, state)` rather than `on (subject)`: it collapses the
 leaf series' per-certificate labels while keeping every target label the
 deployment attached, so the two sides match per scrape target instead of across
@@ -603,7 +609,8 @@ rolled back, one removed — plus a file that has never been read at all),
 [client trust domains](#client-trust-domains) whose revocation material has gone
 unusable or stale (`PuppetCAClientCRLUnusable`, `PuppetCAClientCRLRefusals` and
 `PuppetCAClientCRLStale`, and only where `client_ca` is configured), and
-Kubernetes export failures, with all thresholds configurable. It does **not**
+Kubernetes export failures, managed certificates that were never issued, with
+all thresholds configurable. It does **not**
 alert on the fleet-relative `puppetca_ocsp_index_serials` comparison — that one
 is left to the operator, since it needs a `by (job)` aggregation to avoid
 fanning in across unrelated CAs and the condition it catches is not fail-open.

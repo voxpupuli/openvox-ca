@@ -71,9 +71,16 @@ commonAnnotations: {}
 #     # entry needs a store: a Kubernetes Secret or a local file pair, never
 #     # inferred. The Secret holding OpenVox Server's key is a CA admin
 #     # credential; see docs/configuration.md before enabling this.
+#     #
+#     # `names` is the subjectAltName list and is used verbatim -- the certname
+#     # is NOT added for you -- so list every name anything will connect by,
+#     # including the certname itself.
 #     managed_certs:
 #       - certname: puppetserver.openvox.svc.cluster.local
-#         names: [puppetserver, puppetserver.openvox.svc]
+#         names:
+#           - puppetserver
+#           - puppetserver.openvox.svc
+#           - puppetserver.openvox.svc.cluster.local
 #         renew_before: 720h
 #         store:
 #           secret: {name: puppetserver-tls, namespace: openvox}
@@ -95,6 +102,10 @@ config: {}
 #     `httpGet.scheme` explicitly if your config.yaml sets no_tls_required.
 #   * Export RBAC cannot narrow `patch` to your target names, so it grants it
 #     in full, and the ServiceAccount token is mounted unconditionally.
+#   * No managed-certificate Role is rendered at all — the chart can see neither
+#     that `managed_certs` exists nor what its Secrets are called — so a
+#     `store.secret` entry is refused by RBAC at runtime while readiness stays
+#     green. Create that Role yourself.
 #
 # Two values keep working and must be kept in step with your own config.yaml by
 # hand, because they shape the pod rather than the config file:
@@ -333,12 +344,17 @@ kubernetesExport:
 # configured under `config`, not here; see docs/configuration.md.
 managedCerts:
   rbac:
-    # Create the Role/RoleBinding granting get, patch and create on the Secrets
-    # that config.managed_certs names -- one pair per namespace those Secrets
-    # live in, taken from the entries themselves. Nothing is rendered when no
-    # managed certificate uses a Secret store, or when the chart cannot read
-    # the configuration (existingConfigMap, args, or a --config in extraArgs);
-    # manage the Role yourself in that case.
+    # Create the Role/RoleBinding for config.managed_certs -- one pair per
+    # namespace those Secrets live in, taken from the entries themselves.
+    #
+    # get and patch are narrowed by resourceNames to the Secrets named. create
+    # is NOT, and cannot be: an object has no name at admission time, so the
+    # grant is create-any-Secret in each of those namespaces. Pre-create the
+    # Secrets and the apply becomes a plain patch, which works without it.
+    #
+    # Nothing is rendered when no managed certificate uses a Secret store, or
+    # when the chart cannot read the configuration (existingConfigMap, args, or
+    # a --config in extraArgs); manage the Role yourself in that case.
     create: true
 
 # -- Workload ------------------------------------------------------------------

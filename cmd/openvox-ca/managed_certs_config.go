@@ -32,13 +32,23 @@ import (
 // buildManagedCerts turns the `managed_certs` block into the entries the
 // reconcile loop walks, or returns nil when none is configured.
 //
-// Fail-fast, like the storage and kubernetes_export blocks: every failure here
-// is a configuration failure rather than a transient one. A certname the CA's
+// Fail-fast, like the storage block: every failure reachable here is a
+// configuration failure rather than a transient one. A certname the CA's
 // grammar refuses, a renewal window that can never open, a Secret store on a CA
 // that is not running in a pod -- none of those gets better by waiting, and
-// nothing else supplies the certificates an operator configured. A CA that came
-// up serving while quietly issuing none of them would be discovered when the
-// component it was for failed to start.
+// nothing else supplies the certificates an operator configured. Building the
+// client makes no network call, so an API-server outage alone does not refuse
+// startup; what does is credentials that are absent rather than unreachable.
+//
+// This is where managed certificates diverge from kubernetes_export, and the
+// divergence is deliberate rather than an oversight. An export whose client
+// cannot be built is logged and the CA carries on serving, because an export is
+// auxiliary -- a stale published copy of a certificate the CA still serves over
+// HTTP. A managed certificate is load-bearing for the component that needs it,
+// and a CA that came up serving while quietly issuing none of them would be
+// discovered when that component failed to start. So one entry with a Secret
+// store makes in-cluster credentials a startup requirement for the whole
+// process, which docs/configuration.md states where an operator will meet it.
 //
 // Note what is deliberately not fatal: a store that cannot be written *at
 // runtime*. That is routine, is logged per entry, and self-heals on the next
@@ -51,7 +61,13 @@ func buildManagedCerts(cfg *serverConfig, caCerts certstore.CACertSource) ([]ca.
 	if err := cfg.ManagedCerts.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid managed_certs config: %w", err)
 	}
-	if err := cfg.ManagedCerts.CheckExportOverlap(exportSecretTargets(cfg.KubernetesExport)); err != nil {
+	// Before any client is built, so a configuration error is refused without
+	// needing a cluster to refuse it -- which also keeps it reachable from a
+	// test. See CheckExportOverlap for how an omitted namespace is handled
+	// without resolving one.
+	if err := cfg.ManagedCerts.CheckExportOverlap(
+		exportSecretTargets(cfg.KubernetesExport),
+	); err != nil {
 		return nil, fmt.Errorf("invalid managed_certs config: %w", err)
 	}
 
@@ -91,6 +107,10 @@ func buildManagedCerts(cfg *serverConfig, caCerts certstore.CACertSource) ([]ca.
 // is matched case-insensitively because this runs before the export config's
 // own Validate normalises it, and an operator who wrote `kind: secret` means
 // the same thing.
+//
+// Namespaces are passed through as written. CheckExportOverlap knows that an
+// omission on either side may resolve to the pod's own namespace and treats the
+// pair as colliding, which is what lets this run before any client exists.
 func exportSecretTargets(cfg k8sexport.Config) [][2]string {
 	var out [][2]string
 	for i := range cfg.Targets {

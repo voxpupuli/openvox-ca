@@ -916,8 +916,10 @@ stops presenting the old one. The default is set for the harder case.
 24 hours is chosen to comfortably exceed the interval on which a fleet notices a
 renewal, while staying short enough that a replaced credential is not a standing
 one. The same window is what the CA's own serving-certificate work settled on
-for the same question asked about a different subject; that work is not in this
-release, so there is no companion setting to compare against yet.
+for the same question asked about a different subject. `managed_certs` now
+supplies one: an entry's `revoke_after` is this same window asked about a
+component certificate, and it defaults to this setting. See
+[managed certificates](#managed-certificates).
 
 > **Upgrading.** This changes behaviour without any config change. Before this
 > setting existed, every renewal revoked its predecessor before returning; now
@@ -1028,7 +1030,7 @@ it will issue is exactly the set an administrator wrote in this file.
 ```yaml
 managed_certs:
   - certname: puppetserver.openvox.svc.cluster.local
-    names: [puppetserver, puppetserver.openvox.svc]
+    names: [puppetserver, puppetserver.openvox.svc, puppetserver.openvox.svc.cluster.local]
     ttl: 2160h
     renew_before: 720h
     revoke_after: 24h
@@ -1075,9 +1077,16 @@ carry on.
 | `key_algo` / `key_size` | no | `leaf_key_algo` / `leaf_key_size`, then the built-in |
 | `reuse_key` | no | `false` — re-key on every renewal |
 
-Every optional key **inherits the CA-wide setting** rather than resetting to a
-built-in, so raising `leaf_validity_days` lengthens a managed certificate that
-did not set its own `ttl`.
+`ttl`, `revoke_after` and the key settings **inherit the CA-wide setting** when
+unset rather than resetting to a built-in, so raising `leaf_validity_days`
+lengthens a managed certificate that did not set its own `ttl`. (`usages` and
+`reuse_key` have no CA-wide counterpart; unset means the built-in.)
+
+**`key_algo` and `key_size` inherit as a pair.** Setting either one stops the
+other inheriting: the unset half falls to the algorithm's own built-in — RSA
+4096, or ECDSA P-256 — rather than to `leaf_key_size`. So on a CA configured
+`leaf_key_algo: ecdsa` with `leaf_key_size: 384`, an entry writing `key_algo:
+ecdsa` alone gets P-256, not P-384. Write both or neither.
 
 Durations are written in Go's syntax — `2160h` for ninety days, `720h` for
 thirty, `24h`, `90m`. That differs from the `_sec` integers elsewhere in this
@@ -1123,6 +1132,17 @@ That is why at least one name is required. With no promotion and no names, the
 certificate would carry no `subjectAltName` extension at all — and RFC 2818
 clients ignore the Common Name, so it would be refused for every name including
 its own while looking perfectly well-formed.
+
+**`renew_before` is an upper bound, not the window itself.** The window actually
+in force is the smaller of what you wrote and half the certificate's forward
+lifetime — its validity less `leaf_backdate_sec`. The floor exists because
+issuance caps a leaf at the CA certificate's *remaining* life, so a window that
+sits comfortably inside the configured `ttl` grows larger than the certificate's
+real one as the CA certificate ages, and without the clamp every pass would
+reissue. In an ordinary deployment it never binds: a 30-day window on a 90-day
+certificate is nowhere near the 45-day floor. It binds when you write a very
+wide window, and again for every entry once the CA certificate is inside one
+`ttl` of its own expiry.
 
 **`revoke_after` tells zero from unset.** `revoke_after: 0` means revoke the
 predecessor inside the reconcile pass, with no overlap at all; omitting the key
@@ -1247,8 +1267,15 @@ quietly worked around:
   The certificate is renamed last, so a component watching it for a renewal
   fires on a pair that is already complete.
 
-The key is written `0600` and the certificate and chain `0644`. **The directory
-must already exist**; the CA will not create it. One of these files is a private
+The key is written `0600`, and the certificate and chain `0644`. **So the file
+store serves a component running as the same user as the CA, and only that.**
+Neither group ownership nor a directory ACL reaches a `0600` file — the group
+bits are zero, and the atomic write chmods to that mode before the rename, which
+also collapses an ACL's mask. A `chown` applied by hand is discarded at the next
+renewal, because the file is replaced rather than rewritten. A component running
+as a different user needs a mode or ownership setting this store does not have.
+
+**The directory must already exist**; the CA will not create it. One of these files is a private
 key, and the safe guess and the useful one are not the same — `0700` locks out
 the very component the certificate is for, and anything wider exposes the key by
 default — so the choice stays with whoever lays the deployment out.

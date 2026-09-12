@@ -261,6 +261,31 @@ var _ = Describe("SecretStore", func() {
 			Expect(get().Data).To(HaveKeyWithValue("tls.crt", []byte("CERT-2")))
 		})
 
+		// The second half of the ownership test, which the specs above leave to
+		// prose. A managedFields entry under our own manager name but a
+		// non-Apply operation is somebody running `kubectl --field-manager`,
+		// not this CA writing -- so it must not count as ours. Without this the
+		// Operation clause can be deleted and every other spec stays green,
+		// because they discriminate on the manager name alone.
+		It("does not treat a non-Apply entry under our own manager name as ours", func() {
+			Expect(applyAs("flux", false, map[string][]byte{
+				"tls.crt": []byte("THEIRS"),
+			}, nil)).To(Succeed())
+
+			sec, err := client.CoreV1().Secrets(ns).Get(ctx, name, metav1.GetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			sec.ManagedFields = append(sec.ManagedFields, metav1.ManagedFieldsEntry{
+				Manager:   "openvox-ca-managed-certs",
+				Operation: metav1.ManagedFieldsOperationUpdate,
+			})
+			Expect(client.Tracker().Update(
+				corev1.SchemeGroupVersion.WithResource("secrets"), sec, ns)).To(Succeed())
+
+			err = newStore(certstore.SecretConfig{}).Save(ctx, []byte("OURS"), []byte("OURS-KEY"))
+			Expect(err).To(MatchError(ContainSubstring("adopt_existing")),
+				"an Update entry under our name is not this CA having written the Secret")
+		})
+
 		It("reverts a hand-edited value rather than preserving it", func() {
 			s := newStore(certstore.SecretConfig{})
 			Expect(s.Save(ctx, []byte("CERT"), []byte("KEY"))).To(Succeed())

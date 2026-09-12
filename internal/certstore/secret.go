@@ -49,7 +49,7 @@ const (
 const secretType = corev1.SecretTypeTLS
 
 // managedCertFieldManager is the server-side apply field manager managed
-// certificates write under. Not named managedCertFieldManager, which gosec's G101
+// certificates write under. Not named secretFieldManager, which gosec's G101
 // heuristic reads as a credential on the strength of the word "secret" -- a
 // rename is a better answer than a suppression, since this is a manager name
 // and nothing about it is secret.
@@ -74,9 +74,15 @@ const (
 // Load and Save both run inside the entry's distributed subject lock, so a call
 // that hangs holds that lock against every replica until the lock's own
 // deadline expires. The in-cluster clientset carries no request timeout of its
-// own, so without this a black-holed connection would do exactly that. Well
-// inside internal/ca's LockTimeout, so a stuck call is reported as this entry's
-// failure for this pass rather than as a lost lock.
+// own, so without this a black-holed connection would do exactly that.
+//
+// It bounds each call, not the pass. A reconcile that issues makes three of
+// them -- Load's get, Save's own get, and the apply -- inside one LockTimeout
+// budget, so the aggregate is capped by the caller rather than by this
+// constant, and a slow-but-not-dead API server surfaces as that closure's
+// deadline rather than as a per-call timeout. Either way the entry fails for
+// this pass and the next one retries; the distinction is what an operator
+// reads in the error.
 const secretAPITimeout = 30 * time.Second
 
 // SecretStore keeps one certificate and its key in a Kubernetes Secret,

@@ -2261,11 +2261,15 @@ config:
       renew_before: 720h
       store: {secret: {name: a-tls, namespace: openvox}}
 `,
-			wants: []string{"kind: Deployment"},
+			// Still needs the token: the CA will talk to the API server whether
+			// or not this chart created the Role for it. Asserted rather than
+			// only stated -- re-keying needsAPIAccess on managedCertRBACRendered
+			// would leave every other assertion here green while the pod lost
+			// the projected token and failed to reach the API server with
+			// readiness green.
+			wants: []string{"kind: Deployment", "automountServiceAccountToken: true"},
 			notWants: []string{
 				"name: openvox-ca-managed-certs",
-				// Still needs the token: the CA will talk to the API server
-				// whether or not this chart created the Role for it.
 				"kind: Role\n",
 			},
 		},
@@ -2298,11 +2302,90 @@ config:
 			name:  "an unreadable config renders no managed-certificate Role, and says so",
 			sets:  []string{tls, "existingConfigMap=my-config", "serviceAccount.create=true"},
 			notes: true,
+			// The entry is what makes this case able to fail. Without it the
+			// list is empty, managedCertRBACRendered is false through its
+			// emptiness conjunct whatever configFileKnown says, and the
+			// notWants holds for a reason unrelated to the guard under test --
+			// delete the guard and the case still passes. `config` is merged
+			// whatever existingConfigMap says, so the Role would render.
+			valuesYAML: `
+config:
+  managed_certs:
+    - certname: a.example.com
+      names: [a]
+      renew_before: 720h
+      store: {secret: {name: a-tls, namespace: openvox}}
+`,
 			wants: []string{
 				"no Role was created for managed certificates",
-				"narrowed by resourceNames",
+				// The remedy has to be a rule split, not one rule carrying
+				// create alongside resourceNames -- that combination never
+				// authorises a create, so an operator following it lands back
+				// in the failure this NOTE is warning about.
+				"cannot be narrowed",
+				"(existingConfigMap)",
 			},
 			notWants: []string{"name: openvox-ca-managed-certs"},
+		},
+		{
+			// The other route into configFileKnown false, so the NOTE's cause
+			// parenthetical is pinned on both arms rather than one.
+			name:  "a --config in extraArgs is the other way the config goes unreadable",
+			sets:  []string{tls, "extraArgs[0]=--config=/other.yaml", "serviceAccount.create=true"},
+			notes: true,
+			valuesYAML: `
+config:
+  managed_certs:
+    - certname: a.example.com
+      names: [a]
+      renew_before: 720h
+      store: {secret: {name: a-tls, namespace: openvox}}
+`,
+			wants: []string{
+				"no Role was created for managed certificates",
+				"(args, or a --config in",
+			},
+			notWants: []string{"name: openvox-ca-managed-certs", "(existingConfigMap)"},
+		},
+		{
+			// HIGH-value case: every other render case configures exactly one
+			// entry, so the per-namespace narrowing -- the filter in
+			// managedCertRules, the uniq in managedCertNamespaces, and the
+			// default-namespace resolution -- has no witness that can fail.
+			// Drop the filter and a single-entry render is byte-identical,
+			// while a Role in one namespace would carry another namespace's
+			// Secret name and grant get/patch on it.
+			name: "two Secrets in two namespaces render two Roles, each narrowed to its own",
+			sets: []string{tls, "serviceAccount.create=true"},
+			valuesYAML: `
+config:
+  managed_certs:
+    - certname: a.example.com
+      names: [a]
+      renew_before: 720h
+      store: {secret: {name: a-tls, namespace: openvox}}
+    - certname: b.example.com
+      names: [b]
+      renew_before: 720h
+      store: {secret: {name: b-tls}}
+`,
+			wants: []string{
+				// The entry that names a namespace, and the one that does not
+				// and so resolves to the release namespace.
+				"  namespace: openvox\n",
+				"      - a-tls",
+				"      - b-tls",
+				// The binding's subject is the CA's own namespace, not the
+				// Role's -- a binding that used $ns would be a silent, total
+				// RBAC failure in every namespace but one.
+				"  - kind: ServiceAccount\n    name: openvox-ca\n    namespace: default",
+			},
+			// The assertion that actually catches a dropped filter. Both names
+			// appearing somewhere is true either way -- there are two Roles --
+			// so what has to be excluded is the two names appearing in ONE
+			// resourceNames list, which is what a Role carrying another
+			// namespace's Secret looks like.
+			notWants: []string{"      - a-tls\n      - b-tls"},
 		},
 		{
 			// SECURITY: whoever can read the Secret holding OpenVox Server's
@@ -2322,6 +2405,26 @@ config:
       store: {secret: {name: puppetserver-tls, namespace: openvox}}
 `,
 			wants: []string{"CA admin credential"},
+		},
+		{
+			// The new apiAccessReason arm. Without a case, removing it makes an
+			// install with managed certificates and restricted egress print
+			// "(OpenBao Kubernetes auth)" as the reason -- an actively wrong
+			// answer, and the drift the neighbouring arm cases exist to catch.
+			name: "the egress NOTE names managed certificates as the reason it needs the API",
+			sets: []string{tls, "serviceAccount.create=true",
+				"networkPolicy.enabled=true", "networkPolicy.egress.enabled=true"},
+			notes: true,
+			valuesYAML: `
+config:
+  managed_certs:
+    - certname: a.example.com
+      names: [a]
+      renew_before: 720h
+      store: {secret: {name: a-tls, namespace: openvox}}
+`,
+			wants:    []string{"(managed certificates stored in Secrets)"},
+			notWants: []string{"(OpenBao Kubernetes auth)", "(Kubernetes export)"},
 		},
 		{
 			name:     "rbac.scope: ClusterRole selects the cluster-scoped kinds",

@@ -788,6 +788,40 @@ var _ = Describe("Collector", func() {
 			Expect(g.findByLabels("puppetca_leaf_certificate_not_after_timestamp_seconds",
 				map[string]string{"subject": "never-issued.example.com"})).To(BeNil())
 		})
+
+		// The placement, not merely the emission. The series is published from
+		// configuration and reads no storage, so a failed gather must not take
+		// it with it: absence has to keep meaning exactly one thing, that no
+		// managed certificate is configured. Emitted below the error return it
+		// would also reset PuppetCAManagedCertificateNeverIssued's `for` clock
+		// on every storage blip, suppressing the alert during precisely the
+		// outages that stop issuance.
+		//
+		// This is one line away from being lost, which is why it has a spec of
+		// its own rather than being left to the ordering in the file.
+		It("keeps publishing the configured series when the storage gather fails", func() {
+			myCA.ManagedCerts = []ca.ManagedCert{
+				{Spec: ca.CertSpec{Subject: "never-issued.example.com"}},
+			}
+
+			// Replace the directory ListCerts enumerates with a plain file, so
+			// the listing returns a real error rather than an empty set.
+			signedDir := filepath.Join(store.CADir(), "signed")
+			Expect(os.RemoveAll(signedDir)).To(Succeed())
+			Expect(os.WriteFile(signedDir, []byte("not a directory"), 0o600)).To(Succeed())
+
+			g := gather(metrics.NewCollector(myCA))
+			Expect(gaugeValue(g.findByLabels("puppetca_collector_scrape_success", nil))).To(Equal(0.0),
+				"precondition: the gather must actually have failed")
+			Expect(g.findByLabels("puppetca_leaf_certificate_not_after_timestamp_seconds", nil)).To(BeNil(),
+				"precondition: the storage-derived series drop out")
+
+			configured := g.findByLabels("puppetca_managed_certificate_configured",
+				map[string]string{"subject": "never-issued.example.com"})
+			Expect(configured).NotTo(BeNil(),
+				"the configured series must survive a failed gather, or its absence means two things")
+			Expect(gaugeValue(configured)).To(Equal(1.0))
+		})
 	})
 
 	It("excludes cleaned (deleted) certificates from the live set", func() {

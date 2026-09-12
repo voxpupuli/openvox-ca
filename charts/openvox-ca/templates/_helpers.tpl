@@ -440,10 +440,13 @@ the namespace; a periodic get per certificate is enough for a handful of them.
 For comparison, cert-manager's controller ClusterRole takes get, list, watch,
 create, update, delete and patch on secrets cluster-wide with no resourceNames
 at all. This stays the tighter grant.
+
+Call with (dict "root" $ "namespace" <ns>), matching the chart's other
+dict-taking helpers.
 */}}
 {{- define "openvox-ca.managedCertRules" -}}
 {{- $names := list -}}
-{{- range (fromJsonArray (include "openvox-ca.managedCertSecrets" .context)) -}}
+{{- range (fromJsonArray (include "openvox-ca.managedCertSecrets" .root)) -}}
 {{- if eq .namespace $.namespace -}}
 {{- $names = append $names .name -}}
 {{- end -}}
@@ -455,11 +458,23 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["create"]
+  {{- if $names }}
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "patch"]
     resourceNames:
       {{- toYaml ($names | uniq | sortAlpha) | nindent 6 }}
+  {{- end }}
+  {{- /*
+    The guard is not decoration. RBAC reads an absent resourceNames list as
+    EVERY resource, and toYaml of an empty list renders `[]`, which the
+    authoriser treats the same way -- so an empty list here would grant get and
+    patch on every Secret in the namespace, including the CA's own. No caller
+    can reach this with no names today (managedCertRBACRendered refuses an
+    empty list), but this is the callee half of that coupling, and the export's
+    equivalent helper carries the same guard for the same reason after one side
+    of a coupling moved.
+  */}}
 {{- end -}}
 
 {{/*
@@ -1070,16 +1085,20 @@ NOTE: the chart cannot read the configuration{{ if .Values.existingConfigMap }} 
 extraArgs){{ end }}, so no Role was created for managed certificates. If your
 config.yaml has a managed_certs entry with a Secret store, openvox-ca will be
 refused by RBAC when it tries to write that Secret — while readiness stays
-green. Create a Role yourself granting get, patch and create on secrets,
-narrowed by resourceNames to the Secrets it names, in each of their namespaces.
+green. Create a Role yourself, in each of those namespaces, with two rules: one
+granting create on secrets, which cannot be narrowed because an object has no
+name at admission time, and a second granting get and patch narrowed by
+resourceNames to the Secrets it names.
 {{- end }}
 {{- if eq (include "openvox-ca.managedCertRBACRendered" .) "true" }}
 
-WARNING: openvox-ca is configured to issue certificates into Secrets, and can
-read and overwrite every Secret those entries name. A component certificate for
-a certname listed in puppetServers is a CA admin credential, because that
-listing is what grants administrative access — so treat those Secrets and their
-namespaces with the care you would give the CA's own key.
+WARNING: openvox-ca is configured to issue certificates into Secrets. It can
+read and overwrite every Secret those entries name, and — because a Secret has
+no name at admission time, so `create` cannot be narrowed — it can also create
+any Secret that does not yet exist in each of those namespaces. A component
+certificate for a certname listed in puppetServers is a CA admin credential,
+because that listing is what grants administrative access — so treat those
+Secrets and their namespaces with the care you would give the CA's own key.
 {{- end }}
 {{- if and .Values.metrics.enabled (not .Values.networkPolicy.enabled) }}
 

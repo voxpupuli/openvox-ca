@@ -92,6 +92,11 @@ alerting rules for the openvox-ca exporter. It alerts on:
 - **Kubernetes export** targets whose applies keep failing, and targets that are
   configured but never attempted at all (only when the
   [Kubernetes export](../docs/kubernetes-export.md) feature is in use).
+- **Managed certificates** that are configured but have never been issued at all
+  (only when [`managed_certs`](../docs/configuration.md#managed-certificates) is
+  in use). It covers an entry whose store has never accepted a write, not one
+  that is failing to renew — once a certificate exists, the leaf expiry alerts
+  above cover it with no new series.
 
 All thresholds and the target selector live in [`config.libsonnet`](config.libsonnet)
 and can be overridden without editing the rules.
@@ -193,6 +198,7 @@ jsonnet -J vendor -m . mixin.jsonnet
 | `ocspIndexSyncFor` | `15m` | `for:` debounce for the OCSP-index-reload-failure alert. Longer than `crlSyncFor` because an `unknown` is not fail-open. Note `increase()` over the window stays true for the whole window after one failure, so this delays the page rather than filtering a transient. |
 | `crlLagFor` | `10m` | How long a replica may keep enforcing a CRL behind the stored one before it is paged on. Raise it if you have raised `crl_sync_interval_sec`. |
 | `k8sExportNotRunningFor` | `30m` | How long a configured export target may go with no apply attempt at all before alerting. Only has to outlast a slow start: the counters reset on restart and the startup export runs immediately. |
+| `managedCertNeverIssuedFor` | `1h` | How long a configured managed certificate may go without ever being issued before alerting. Deliberately longer than one reconcile interval: every remedy is manual, and a certificate nothing has yet is not an emergency in the first hour of an install. |
 | `k8sExportFailingFor` | `15m` | How long a target's most recent apply may stay failed before alerting. Keep it above the CA's export retry interval, a compile-time constant of two minutes: below that, every blip the retry would have cleared by itself pages. It cannot reach a target that fails once and succeeds on retry every cycle — see [metrics](../docs/metrics.md) for the query that can. |
 | `supersedeWindow` | `1h` | Window over which delayed-revocation failures are counted (the metric is a restart-resetting counter). |
 | `supersedeFor` | `30m` | `for:` debounce for the delayed-revocation-failure alert. Longer than the CRL ones because the sweep retries on its own interval; raise it if you have raised `superseded_cert_sweep_interval_sec`. |
