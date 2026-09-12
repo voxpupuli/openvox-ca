@@ -100,7 +100,7 @@ jobs:
           # gate above never sees them disagree; major bumps are off. It needs
           # no '# renovate:' annotation the way ci.yml's legs do — this is an
           # azure/setup-helm input, which Renovate attributes on its own.
-          version: v3.21.4
+          version: v3.22.0
 
       # Packaging goes through the same mage target CI runs, so the step CI
       # claims to exercise is the step that actually runs here.
