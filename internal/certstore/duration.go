@@ -64,7 +64,3 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 // called Duration on a type called Duration cannot also satisfy fmt.Stringer
 // without reading as a mistake at every call site.
 func (d Duration) AsDuration() time.Duration { return time.Duration(d) }
-
-// String renders the value the way it would be written in configuration, so an
-// error quoting a resolved duration matches the key that set it.
-func (d Duration) String() string { return time.Duration(d).String() }

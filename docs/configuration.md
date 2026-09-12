@@ -1290,6 +1290,24 @@ decision for whoever lays the deployment out rather than one this store should
 guess — and since the component shares the CA's user, the question is which
 *other* users can reach it, which only the operator knows.
 
+**Under the shipped systemd unit it must also be writable, which takes one
+line.** The unit sets `ProtectSystem=strict`, so the whole filesystem is
+read-only to the CA except its `StateDirectory` — `/var/lib/puppet-ca` — and
+that directory is the `cadir`, which a store may not write to. A file store
+therefore needs its directory named in `ReadWritePaths=`:
+
+```ini
+# /etc/systemd/system/openvox-ca.service.d/managed-certs.conf
+[Service]
+ReadWritePaths=/etc/openvox/components
+```
+
+Without it the write fails with a permission error the CA cannot distinguish
+from a genuine one; it is logged each pass, and
+`PuppetCAManagedCertificateNeverIssued` fires an hour later. The unit already
+ships a commented `ReadWritePaths=` line for a migrated `cadir`; this is the
+same mechanism for a different directory.
+
 **The CA's own paths are refused at startup.** A file store rewrites its files
 on every issuance, so an entry pointed at the CA's own directory would destroy
 the key that signed every certificate this CA has issued — which no backup of
@@ -1299,12 +1317,14 @@ the certificates can undo. The server refuses to start when a `cert`, `key` or
 | Setting | What is reserved |
 | --- | --- |
 | `cadir` | the whole tree: the CA key and certificate, the CRL, and the filesystem and SQLite backends' state |
+| `ca_cert_file`, `ca_key_file` | the CA's own certificate and private key, wherever a local-file override puts them |
 | `tls_cert`, `tls_key` | the pair the CA presents on its own listener |
 | `ca_key_passphrase_file` | what unlocks the CA key |
 | `crl_chain_file` | the upstream CRL bundle the CA re-reads and republishes |
 | `logfile` | where the CA writes its log |
 | `puppet_server_file` | the admin allow list |
 | `autosign_config` | the autosign file or executable |
+| `client_ca[].file`, `client_ca[].crl_file` | each foreign trust domain's anchors and CRLs, named after its entry |
 
 The comparison is lexical, on the cleaned path, so it does not need any of these
 to exist yet — and a directory whose name merely starts with the `cadir`'s, such
@@ -1312,10 +1332,30 @@ as `/var/lib/openvox-ca-components` beside a `cadir` of `/var/lib/openvox-ca`,
 is a different directory and is allowed.
 
 This is a guard against a typo, not a sandbox. The store writes as the CA's user
-and can reach anything that user can; the list above is the CA's own state, and
-does not extend to the credential files of a storage backend or a key provider
-(an OpenBao token file, a backend's client TLS key). Directory permissions are
-what keep a managed certificate out of somewhere it should not be.
+and can reach anything that user can; the list above is the material that cannot
+be replaced if it is overwritten.
+
+What it deliberately does not cover is the *replaceable* credentials: the client
+TLS material a storage backend or key provider uses (`etcd_tls_*`, `redis_tls_*`,
+`sql_tls_*`, `openbao.tls_*`), and the OpenBao token and AppRole files.
+Overwriting one of those breaks this CA's connection to its own backend, which
+is loud and fixable by re-copying the file from wherever it was provisioned —
+a different class from the CA key, which is not reconstructible from anything.
+That list is not prose: `cmd/openvox-ca/reserved_paths_test.go` walks the
+configuration and fails if a path-shaped setting is neither reserved nor
+exempted there with a reason, so the two cannot drift apart. Directory
+permissions remain what actually confines the store.
+
+### Watching managed certificates
+
+Each configured entry publishes `puppetca_managed_certificate_configured`,
+labelled with its `subject`, whether or not a certificate for it exists yet —
+that is the point, since there is no series at all for a certificate that was
+never issued. The shipped mixin turns it into
+`PuppetCAManagedCertificateNeverIssued`, which fires when an entry has had no
+certificate for `managedCertNeverIssuedFor` (1h by default). Once a certificate
+does exist it has an inventory row like any other, so the ordinary expiry alerts
+cover it and nothing new is needed. See [metrics & monitoring](metrics.md).
 
 ### The certificate that administers this CA
 

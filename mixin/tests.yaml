@@ -1,5 +1,5 @@
 # promtool rule tests for the CRL-propagation, upstream-chain,
-# Kubernetes-export and delayed-supersession alerts.
+# Kubernetes-export, delayed-supersession and managed-certificate alerts.
 #
 # Run with `mage test:mixin` from the repository root, which renders the mixin
 # to the path below and then runs both promtool checks over it.
@@ -26,6 +26,13 @@
 #   * PuppetCASupersedeFailing, where what needs pinning is the debounce: it is
 #     deliberately slower than its neighbours because the sweep retries on its
 #     own interval, so a case asserts it is quiet at 20m and firing at 40m.
+#   * PuppetCAManagedCertificateNeverIssued, whose two sides come from different
+#     places -- the configured series from the in-process configuration, the
+#     leaf series from storage -- so they disagree whenever a gather fails. The
+#     cases pin that it fires for a certificate that never appears, stays quiet
+#     for one that exists, keeps the target labels so one replica's certificate
+#     cannot satisfy another's entry, stays quiet for a revoked certificate
+#     awaiting reissue, and stays quiet during a storage outage.
 #
 # The firing behaviour is the contract here; the annotation prose is not, so
 # repeating it below is a maintenance cost rather than an assertion worth

@@ -507,7 +507,6 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	for state, count := range stateCounts {
 		ch <- prometheus.MustNewConstMetric(c.leafStateCount, prometheus.GaugeValue, float64(count), state)
 	}
-
 }
 
 // leafCert is one row of the per-certificate snapshot.

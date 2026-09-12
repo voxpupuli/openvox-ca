@@ -170,7 +170,7 @@ creates the RBAC for the ones kept in a Secret. See
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `managedCerts.rbac.create` | `true` | Create the Role and binding for `config.managed_certs` — one pair per namespace those Secrets live in, derived from the entries rather than from values. `get` and `patch` are narrowed by `resourceNames`; `create` cannot be. Nothing is rendered when no entry uses a Secret store, or when the chart cannot read the configuration. |
+| `managedCerts.rbac.create` | `true` | Create the Role and binding for `config.managed_certs` — one pair per namespace those Secrets live in, derived from the entries rather than from values, so each of those namespaces must already exist at install time. `get` and `patch` are narrowed by `resourceNames`; `create` cannot be. Nothing is rendered when no entry uses a Secret store, or when the chart cannot read the configuration. |
 
 ### Workload
 

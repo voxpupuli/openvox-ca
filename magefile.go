@@ -2220,11 +2220,55 @@ config:
 				"namespace: openvox",
 				"- puppetserver-tls",
 				`verbs: ["get", "patch"]`,
+				// The unnarrowable half of the grant, which the export's
+				// equivalent rule has pinned since it was written. Without it
+				// the create rule could be dropped and the CA would fail to
+				// create a Secret that does not exist yet -- the first-install
+				// case, and the one nothing else here covers.
+				`verbs: ["create"]`,
 				"automountServiceAccountToken: true",
 			},
 			// get is what separates this Role from the export's, and it must
 			// not have arrived cluster-wide.
 			notWants: []string{"kind: ClusterRole"},
+		},
+		{
+			// The commonAnnotations branch of the new Role and RoleBinding,
+			// which nothing rendered: no case in this file sets
+			// commonAnnotations at all, so both `with` blocks could be deleted
+			// and every other managed-certificate case would stay green. An
+			// operator who annotates a release for policy or cost attribution
+			// expects those annotations on every object the release owns, and
+			// RBAC is where an audit tool looks first.
+			//
+			// Anchored to what follows each annotations block, because the
+			// bare annotation is not evidence: commonAnnotations lands on
+			// every object the release owns, so asserting the line alone
+			// passed with both `with` blocks deleted. That was demonstrated by
+			// mutation, not guessed. `rules:` belongs to the Role and
+			// `roleRef:` to the RoleBinding, so the pair pins both branches
+			// separately without needing an occurrence count this harness does
+			// not have.
+			name: "commonAnnotations reach the managed-certificate RBAC",
+			sets: []string{tls, "serviceAccount.create=true"},
+			valuesYAML: `
+commonAnnotations:
+  example.com/owner: platform
+config:
+  managed_certs:
+    - certname: puppetserver.openvox.svc.cluster.local
+      names: [puppetserver]
+      renew_before: 720h
+      store:
+        secret:
+          name: puppetserver-tls
+          namespace: openvox
+`,
+			wants: []string{
+				"name: openvox-ca-managed-certs",
+				"  annotations:\n    example.com/owner: platform\nrules:",
+				"  annotations:\n    example.com/owner: platform\nroleRef:",
+			},
 		},
 		{
 			// The systemd shape. A file store talks to nothing, so it must

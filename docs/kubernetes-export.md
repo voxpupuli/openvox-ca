@@ -204,7 +204,13 @@ resources to the minimum above.
 
 - The export is **auxiliary**: if the Kubernetes client cannot be constructed
   (e.g. openvox-ca is not running in a cluster, or the namespace cannot be
-  resolved), the error is logged and the CA continues serving normally.
+  resolved), the error is logged and the CA continues serving normally. **This
+  is true of the export alone.** A
+  [managed certificate](configuration.md#managed-certificates) with a
+  `store.secret` makes the same failure fatal at startup, because a component
+  is waiting on a certificate that would never be issued — so a CA configured
+  for both exports and Secret-stored managed certificates refuses to start
+  where it cannot build a client, rather than logging and carrying on.
 - A failure applying one target is logged and does not prevent the other targets
   from being applied.
 - A cert or CRL that cannot be read from storage fails only the targets that

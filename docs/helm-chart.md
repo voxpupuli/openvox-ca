@@ -674,6 +674,18 @@ entry's Secret lives in, granting `get` and `patch` narrowed by `resourceNames`
 plus an unnarrowable `create`. That is a separate Role from the export's,
 because the export needs neither `get` nor those namespaces.
 
+**Those namespaces must already exist.** They come out of `config.managed_certs`
+rather than from a values key, so the chart has no list to create them from and
+does not try; an install naming a namespace that does not exist fails on the
+Role. Create them first, or point the entries at namespaces the release already
+owns.
+
+A `files` store needs something from the chart too, though not RBAC: the pod
+runs with `readOnlyRootFilesystem: true`, so the directory a file store writes
+to must be a writable volume you mount yourself through `extraVolumes` and
+`extraVolumeMounts`. In Kubernetes a Secret store is almost always the better
+fit — it needs no volume, and something else in the cluster can consume it.
+
 ```yaml
 managedCerts:
   rbac:

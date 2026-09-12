@@ -242,11 +242,25 @@ func warnIfManagedCertIsAdmin(cfg *serverConfig, managed []ca.ManagedCert) {
 	// comma-splitting merge here would be a second answer to "who is an
 	// administrator", and the one that drifted would be this one.
 	//
-	// A failure is not reported here. buildAuthConfig calls the same function a
-	// moment later and fails the startup with it, so saying it twice would only
-	// make the first mention look like the cause.
+	// The failure is not fatal here, and on the TLS path it is not even
+	// reported: buildAuthConfig calls the same function a moment later and
+	// fails the startup with it, so saying it twice would make the first
+	// mention look like the cause. But buildAuthConfig runs only when
+	// tls_cert and tls_key are both set, so on a plain-HTTP CA nothing else
+	// reads this file and the error would vanish entirely -- taking with it
+	// the admin-credential warning that is the whole point of this function.
+	// So it is logged exactly where it would otherwise be silent.
 	admins, err := buildAdminAllowList(cfg.PuppetServer, cfg.PuppetServerFile)
-	if err != nil || len(admins) == 0 {
+	if err != nil {
+		if cfg.TLSCert == "" || cfg.TLSKey == "" {
+			slog.Warn("Could not read the admin allow list, so managed certificates were not "+
+				"checked against it. A managed certificate whose certname is listed in "+
+				"puppet_server is a CA admin credential and would not have been reported",
+				"error", err)
+		}
+		return
+	}
+	if len(admins) == 0 {
 		return
 	}
 	for i := range managed {

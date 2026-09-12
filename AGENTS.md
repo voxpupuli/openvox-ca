@@ -181,15 +181,23 @@ Conventions:
   `docs/api.md#authorization-tiers` publishes the tier assignment to operators,
   so update it when a change moves a route between tiers — it is a tier table,
   not this matrix, and most cells here have no counterpart there.
-- `internal/api/authseam_test.go` is the second structural gate in that package.
-  It parses `internal/api`'s own non-test files and fails if any of them names
-  `AuthGrant`, `PpCliAuth`, `GenerateOptions` or `GenerateWithOptions` — the
-  in-process seam for minting a `pp_cli_auth` credential, which the CSR path
-  deliberately strips so that no request can ask for one. If it fires, revisit
-  the security argument in `internal/ca/authgrant.go` before touching the gate.
-  Renaming any of those identifiers breaks the compile-time bindings at the top
-  of that file: update the bindings and the `forbidden` map together, and do not
-  delete either to restore the build.
+- `internal/api/authseam_test.go` is the second structural gate in that package,
+  and it no longer covers only that package. It parses the non-test files of
+  every package in `guardedPackages` — `internal/api` and `internal/certstore`
+  today — and fails if any of them names `AuthGrant`, `PpCliAuth`,
+  `GenerateOptions` or `GenerateWithOptions`: the in-process seam for minting a
+  `pp_cli_auth` credential, which the CSR path deliberately strips so that no
+  request can ask for one. If it fires, revisit the security argument in
+  `internal/ca/authgrant.go` before touching the gate. Renaming any of those
+  identifiers breaks the compile-time bindings at the top of that file: update
+  the bindings and the `forbidden` map together, and do not delete either to
+  restore the build.
+
+  A package that imports `internal/ca` must be in `guardedPackages` or in
+  `exemptPackages` with a reason, and a sweep in the same file fails if it is in
+  neither — an enumeration nobody re-derives is how a gate like this goes
+  quietly green. Adding an issuance surface means adding it to one of those two
+  lists, not leaving it out of both.
 
 ### Integration suites (build-tagged)
 
