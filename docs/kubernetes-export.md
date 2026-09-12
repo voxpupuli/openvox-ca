@@ -29,7 +29,10 @@ co-exist with other managers of the same object. Apply uses `force`, so fields
 owned by the exporter are reclaimed if something else overwrites them.
 
 Every managed object carries the label `app.kubernetes.io/managed-by:
-openvox-ca` so you can find and select the objects openvox-ca owns:
+openvox-ca` so you can find the objects openvox-ca owns. **It does not
+distinguish them from a [managed certificate](configuration.md#managed-certificates)
+Secret**, which carries the same label and holds a component's only private key
+— so this is a safe selector to list with and not to delete with:
 
 ```sh
 kubectl get secret,configmap -A -l app.kubernetes.io/managed-by=openvox-ca

@@ -2358,12 +2358,6 @@ config:
 			// the first, so the openvox Role has to carry both names and the
 			// notWants below can only hold because the filter kept b-tls out.
 			//
-			// The `\n  namespace: default` want is anchored to a line start on
-			// purpose. Written unanchored it also matches the RoleBinding's
-			// `    namespace: default` subject, which is indented four -- so it
-			// held whether or not the default-namespace resolution ran, and the
-			// mutation survived.
-			//
 			// What this case still does NOT witness is the `uniq` in
 			// managedCertNamespaces: dropping it renders openvox's Role twice,
 			// and the two documents are byte-identical, so no substring
@@ -2388,12 +2382,13 @@ config:
 `,
 			wants: []string{
 				// The entry that names a namespace, and the one that does not
-				// and so resolves to the release namespace. The second is
-				// anchored, so an unresolved empty namespace fails here.
-				// Anchored to the managed-certs object's own name. A bare
-				// "namespace: default" matches the ServiceAccount, the
-				// ConfigMap and everything else in the release namespace, so
-				// it held whether or not the default-namespace resolution ran.
+				// and so resolves to the release namespace.
+				// Anchored to the managed-certs object's own name, which took
+				// three attempts to get right. Unanchored, "namespace: default"
+				// matches the RoleBinding's subject at indent four; anchored
+				// only to a line start it matches the ServiceAccount, the
+				// ConfigMap and everything else in the release namespace. Both
+				// held whether or not the default-namespace resolution ran.
 				"  name: openvox-ca-managed-certs\n  namespace: openvox\n",
 				"  name: openvox-ca-managed-certs\n  namespace: default\n",
 				"      - a-tls",

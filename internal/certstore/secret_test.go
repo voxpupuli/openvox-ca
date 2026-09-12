@@ -152,6 +152,25 @@ var _ = Describe("SecretStore", func() {
 			Expect(sec.Type).To(Equal(corev1.SecretTypeTLS))
 		})
 
+		// The pin for managedCertFieldManagerName. These specs are an external
+		// package, so that constant is a second spelling of production's and
+		// cannot be compared with it directly -- but the name a Save actually
+		// applies under can be, and this is the only spec that reads it from a
+		// Secret nothing else seeded. Were the two to drift, every fixture
+		// seeded under the spec constant would name a manager the store never
+		// uses, and the ownership specs would go green while asserting nothing.
+		It("applies under the field manager the specs seed fixtures for", func() {
+			Expect(newStore(certstore.SecretConfig{}).Save(ctx, []byte("CERT"), []byte("KEY"))).To(Succeed())
+
+			var managers []string
+			for _, f := range get().ManagedFields {
+				if f.Operation == metav1.ManagedFieldsOperationApply {
+					managers = append(managers, f.Manager)
+				}
+			}
+			Expect(managers).To(ConsistOf(managedCertFieldManagerName))
+		})
+
 		It("merges configured labels and annotations with the mandatory managed-by label", func() {
 			Expect(newStore(certstore.SecretConfig{
 				Labels:      map[string]string{"app": "puppetserver"},
@@ -279,6 +298,7 @@ var _ = Describe("SecretStore", func() {
 
 			sec, err := client.CoreV1().Secrets(ns).Get(ctx, name, metav1.GetOptions{})
 			Expect(err).NotTo(HaveOccurred())
+
 			// APIVersion and FieldsType are load-bearing, not decoration: the
 			// field-managed tracker refuses to decode an entry missing either,
 			// and on a decode failure it discards the whole incoming list and

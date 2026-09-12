@@ -1290,6 +1290,33 @@ decision for whoever lays the deployment out rather than one this store should
 guess — and since the component shares the CA's user, the question is which
 *other* users can reach it, which only the operator knows.
 
+**The CA's own paths are refused at startup.** A file store rewrites its files
+on every issuance, so an entry pointed at the CA's own directory would destroy
+the key that signed every certificate this CA has issued — which no backup of
+the certificates can undo. The server refuses to start when a `cert`, `key` or
+`ca` path is any of:
+
+| Setting | What is reserved |
+| --- | --- |
+| `cadir` | the whole tree: the CA key and certificate, the CRL, and the filesystem and SQLite backends' state |
+| `tls_cert`, `tls_key` | the pair the CA presents on its own listener |
+| `ca_key_passphrase_file` | what unlocks the CA key |
+| `crl_chain_file` | the upstream CRL bundle the CA re-reads and republishes |
+| `logfile` | where the CA writes its log |
+| `puppet_server_file` | the admin allow list |
+| `autosign_config` | the autosign file or executable |
+
+The comparison is lexical, on the cleaned path, so it does not need any of these
+to exist yet — and a directory whose name merely starts with the `cadir`'s, such
+as `/var/lib/openvox-ca-components` beside a `cadir` of `/var/lib/openvox-ca`,
+is a different directory and is allowed.
+
+This is a guard against a typo, not a sandbox. The store writes as the CA's user
+and can reach anything that user can; the list above is the CA's own state, and
+does not extend to the credential files of a storage backend or a key provider
+(an OpenBao token file, a backend's client TLS key). Directory permissions are
+what keep a managed certificate out of somewhere it should not be.
+
 ### The certificate that administers this CA
 
 > **SECURITY.** Admin access to this CA is granted by listing a certname in

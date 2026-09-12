@@ -21,6 +21,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 
 	"github.com/voxpupuli/openvox-ca/internal/ca"
@@ -55,20 +56,27 @@ import (
 // runtime*. That is routine, is logged per entry, and self-heals on the next
 // pass. The distinction is between a configuration that can never work and a
 // pass that did not work this time.
-func buildManagedCerts(cfg *serverConfig, caCerts certstore.CACertSource) ([]ca.ManagedCert, error) {
+func buildManagedCerts(cfg *serverConfig, absCADir string, caCerts certstore.CACertSource) ([]ca.ManagedCert, error) {
 	if !cfg.ManagedCerts.Enabled() {
 		return nil, nil
 	}
 	if err := cfg.ManagedCerts.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid managed_certs config: %w", err)
 	}
-	// Before any client is built, so a configuration error is refused without
-	// needing a cluster to refuse it -- which also keeps it reachable from a
-	// test. See CheckExportOverlap for how an omitted namespace is handled
-	// without resolving one.
+	// Both cross-block checks run before any client is built, so a
+	// configuration error is refused without needing a cluster to refuse it --
+	// which also keeps them reachable from a test. See CheckExportOverlap for
+	// how an omitted namespace is handled without resolving one.
 	if err := cfg.ManagedCerts.CheckExportOverlap(
 		exportSecretTargets(cfg.KubernetesExport),
 	); err != nil {
+		return nil, fmt.Errorf("invalid managed_certs config: %w", err)
+	}
+	reserved, err := caOwnedPaths(cfg, absCADir)
+	if err != nil {
+		return nil, err
+	}
+	if err := cfg.ManagedCerts.CheckReservedPaths(reserved); err != nil {
 		return nil, fmt.Errorf("invalid managed_certs config: %w", err)
 	}
 
@@ -121,6 +129,49 @@ func exportSecretTargets(cfg k8sexport.Config) [][2]string {
 		}
 	}
 	return out
+}
+
+// caOwnedPaths lists the filesystem locations this CA keeps its own state in,
+// for CheckReservedPaths.
+//
+// cadir is a whole tree: it holds the CA key and certificate, the CRL, and the
+// filesystem and SQLite backends' state, and the names inside it are the CA's
+// to choose rather than an operator's to predict. The rest are single files the
+// server reads or writes under a configured name.
+//
+// tls_cert and tls_key are on the list on purpose. Making the CA's own serving
+// certificate a managed one is openvox-ca#326 and is a different mechanism from
+// this; until it exists, an entry pointed at that pair would have the reconcile
+// loop overwrite the certificate the CA is presenting on a listener it does not
+// reload.
+//
+// Each is resolved against the process's working directory the same way the
+// server itself resolves it, because a relative path in either place means the
+// same thing -- and an unresolvable one is reported rather than dropped, since a
+// dropped entry is a gap that looks like a passing check.
+func caOwnedPaths(cfg *serverConfig, absCADir string) ([]certstore.ReservedPath, error) {
+	out := []certstore.ReservedPath{{Setting: "cadir", Path: absCADir, Tree: true}}
+	for _, r := range []certstore.ReservedPath{
+		{Setting: "tls_cert", Path: cfg.TLSCert},
+		{Setting: "tls_key", Path: cfg.TLSKey},
+		{Setting: "ca_key_passphrase_file", Path: cfg.CAKeyPassphraseFile},
+		{Setting: "crl_chain_file", Path: cfg.CRLChainFile},
+		{Setting: "logfile", Path: cfg.LogFile},
+		{Setting: "puppet_server_file", Path: cfg.PuppetServerFile},
+		{Setting: "autosign_config", Path: cfg.AutosignConfig},
+	} {
+		if strings.TrimSpace(r.Path) == "" {
+			continue
+		}
+		abs, err := filepath.Abs(strings.TrimSpace(r.Path))
+		if err != nil {
+			return nil, fmt.Errorf("resolving %s for the managed_certs path check: %w",
+				r.Setting, err)
+		}
+		r.Path = abs
+		out = append(out, r)
+	}
+	return out, nil
 }
 
 // warnIfManagedCertIsAdmin says so when a managed certificate's certname is

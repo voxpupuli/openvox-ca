@@ -200,7 +200,7 @@ type Entry struct {
 	// Required, and must be positive: a window of zero renews the certificate
 	// only once it has already expired, which is not a renewal loop.
 	//
-	// It is an upper bound rather than the window itself. The mechanism floors
+	// It is an upper bound rather than the window itself. The mechanism caps
 	// the effective window at half the certificate's forward lifetime, so a
 	// window wider than the certificate can honour cannot produce a reissue
 	// loop as the CA certificate ages.
@@ -495,7 +495,7 @@ func (e *Entry) uris() ([]*url.URL, error) {
 // as configuration rather than discovered as a certificate that never appears.
 func (c Config) Validate() error {
 	subjects := make(map[string]int, len(c))
-	secrets := make(map[[2]string]int, len(c))
+	var secrets []secretRef
 	paths := make(map[string]int, len(c)*2)
 
 	for i := range c {
@@ -529,7 +529,7 @@ func (c Config) Validate() error {
 		}
 		subjects[e.Certname] = i
 
-		if err := e.Store.validate(where, secrets, paths, i); err != nil {
+		if err := e.Store.validate(where, &secrets, paths, i); err != nil {
 			return err
 		}
 	}
@@ -538,7 +538,7 @@ func (c Config) Validate() error {
 
 // validate checks an entry's store block, recording what it claims so a later
 // entry cannot claim the same object.
-func (s *StoreConfig) validate(where string, secrets map[[2]string]int, paths map[string]int, idx int) error {
+func (s *StoreConfig) validate(where string, secrets *[]secretRef, paths map[string]int, idx int) error {
 	switch {
 	case s.Secret == nil && s.Files == nil:
 		return fmt.Errorf("%s: store must name where the certificate lives: "+
@@ -556,7 +556,7 @@ func (s *StoreConfig) validate(where string, secrets map[[2]string]int, paths ma
 	}
 }
 
-func (s *SecretConfig) validate(where string, secrets map[[2]string]int, idx int) error {
+func (s *SecretConfig) validate(where string, secrets *[]secretRef, idx int) error {
 	s.Name = strings.TrimSpace(s.Name)
 	s.Namespace = strings.TrimSpace(s.Namespace)
 	if s.Name == "" {
@@ -574,18 +574,41 @@ func (s *SecretConfig) validate(where string, secrets map[[2]string]int, idx int
 	// certificate and key on every pass, for ever, exactly as this message
 	// says -- and for a certname in puppet_server, that is a CA admin
 	// credential being reissued and its predecessor revoked each time.
-	for prevKey, prev := range secrets {
-		if prevKey[1] == s.Name && namespacesMayCollide(prevKey[0], s.Namespace) {
-			return fmt.Errorf("%s: Secret %s/%s is already the store for managed_certs[%d]; "+
-				"two certificates in one Secret would each remove the other's keys, because "+
-				"omitting a previously-owned key deletes it. An omitted namespace resolves to "+
-				"the CA pod's own, so it is treated as possibly naming the same Secret; spell "+
-				"both namespaces out if they genuinely differ",
-				where, nsOrPod(s.Namespace), s.Name, prev)
+	//
+	// Scanned in index order rather than over the map. More than one earlier
+	// entry can collide with this one -- two spelled-out namespaces do not
+	// collide with each other, but a third entry omitting its namespace
+	// collides with both -- and a map range would name whichever the runtime
+	// reached first, so the same file would blame a different entry on each
+	// restart.
+	for _, prev := range *secrets {
+		if prev.name != s.Name || !namespacesMayCollide(prev.namespace, s.Namespace) {
+			continue
 		}
+		msg := "%s: Secret %s/%s is already the store for managed_certs[%d]; " +
+			"two certificates in one Secret would each remove the other's keys, because " +
+			"omitting a previously-owned key deletes it"
+		if prev.namespace == "" || s.Namespace == "" {
+			// Only where a namespace was actually omitted. Saying this about
+			// two entries that both spell one out describes a mistake the
+			// operator did not make, and offers a remedy they have already
+			// applied.
+			msg += ". An omitted namespace resolves to the CA pod's own, so it is treated " +
+				"as possibly naming the same Secret; spell both namespaces out if they " +
+				"genuinely differ"
+		}
+		return fmt.Errorf(msg, where, nsOrPod(s.Namespace), s.Name, prev.idx)
 	}
-	secrets[[2]string{s.Namespace, s.Name}] = idx
+	*secrets = append(*secrets, secretRef{namespace: s.Namespace, name: s.Name, idx: idx})
 	return nil
+}
+
+// secretRef is one Secret a managed certificate claims, kept in configuration
+// order so a refusal always names the earliest entry it collides with.
+type secretRef struct {
+	namespace string
+	name      string
+	idx       int
 }
 
 func (f *FilesConfig) validate(where string, paths map[string]int, idx int) error {
@@ -699,6 +722,110 @@ func (c Config) CheckExportOverlap(exportTargets [][2]string) error {
 		}
 	}
 	return nil
+}
+
+// ReservedPath is one filesystem location the CA itself owns, for
+// CheckReservedPaths. Tree marks a directory whose whole subtree is reserved
+// rather than a single file. Setting names the configuration key it came from,
+// so a refusal can say which one.
+//
+// Path must already be absolute. The caller resolves it, because what a
+// relative path resolves against is the CA process's own working directory --
+// which this package has no business consulting.
+type ReservedPath struct {
+	Setting string
+	Path    string
+	Tree    bool
+}
+
+// CheckReservedPaths refuses a configuration in which a managed certificate's
+// file store writes over something the CA itself owns.
+//
+// A file store overwrites its cert, key and ca files on every issuance. Pointed
+// at the CA's own directory that destroys the CA key, its certificate, the CRL
+// and the backend's state -- irrecoverably, since the private key that signed
+// every outstanding certificate is not reconstructible. Pointed at the serving
+// pair it replaces the certificate the CA presents with one issued for a
+// component. Neither is a configuration anyone means, and both are one plausible
+// typo away for an operator laying out paths alongside the CA's own.
+//
+// SECURITY: this is a typo backstop over the CA's own state, and deliberately
+// not a sandbox. The store writes as the CA's user and can reach anything that
+// user can; nothing here confines it. The list is what the caller passes, which
+// is the paths in the server's own configuration block -- it does not enumerate
+// the credential files of the storage backends or the CA key providers (an
+// OpenBao token file, a backend's client TLS key), which are numerous and grow
+// with every backend. Directory permissions, not this check, are what keep a
+// managed certificate out of somewhere it should not be.
+//
+// NIST 800-53: CM-6 (Configuration Settings), SC-28 (Protection of Information
+// at Rest)
+func (c Config) CheckReservedPaths(reserved []ReservedPath) error {
+	if len(reserved) == 0 || !c.Enabled() {
+		return nil
+	}
+	for i := range c {
+		f := c[i].Store.Files
+		if f == nil {
+			continue
+		}
+		// Cleaned again rather than trusting Validate to have run first. This
+		// is exported and the two are independent calls, so a caller that
+		// reached here without validating still gets a comparison on the same
+		// spelling the writes will use.
+		for _, p := range []struct{ field, path string }{
+			{"cert", cleanPath(f.Cert)}, {"key", cleanPath(f.Key)}, {"ca", cleanPath(f.CA)},
+		} {
+			if p.path == "" {
+				continue
+			}
+			for _, r := range reserved {
+				root := cleanPath(r.Path)
+				if root == "" {
+					continue
+				}
+				if !filepath.IsAbs(root) {
+					// Loudly rather than silently. A relative reserved path can
+					// never equal an absolute store path, so skipping it would
+					// leave a gap that looks exactly like a passing check.
+					return fmt.Errorf("cannot compare managed_certs file stores against %s %q: "+
+						"it is not an absolute path", r.Setting, r.Path)
+				}
+				if !reservedCovers(root, r.Tree, p.path) {
+					continue
+				}
+				scope := "is"
+				if r.Tree {
+					scope = "is inside"
+				}
+				return fmt.Errorf("managed_certs[%d] (%s) stores its %s at %q, which %s %s (%s): "+
+					"a managed certificate's file store is overwritten on every issuance, and "+
+					"these are the CA's own files. Give the certificate a path of its own",
+					i, c[i].Certname, p.field, p.path, scope, r.Setting, root)
+			}
+		}
+	}
+	return nil
+}
+
+// reservedCovers reports whether a reserved path covers a store path: equality
+// for a file, and containment for a tree.
+//
+// The separator is appended before the prefix test so that a cadir of
+// /var/lib/openvox-ca does not reserve /var/lib/openvox-ca-components, which
+// shares its prefix and is a different directory. A root of "/" needs no such
+// suffix, and appending one would give "//", which prefixes nothing cleaned.
+func reservedCovers(root string, tree bool, path string) bool {
+	if path == root {
+		return true
+	}
+	if !tree {
+		return false
+	}
+	if root == string(filepath.Separator) {
+		return strings.HasPrefix(path, root)
+	}
+	return strings.HasPrefix(path, root+string(filepath.Separator))
 }
 
 // namespacesMayCollide reports whether two configured namespaces can name the

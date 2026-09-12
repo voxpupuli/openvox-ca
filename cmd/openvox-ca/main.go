@@ -818,7 +818,7 @@ func newRootCmd() *cobra.Command {
 			// the reasons buildManagedCerts gives. Serve only: the offline
 			// commands sign one certificate and exit, so a renewal loop has
 			// nothing to do there.
-			managedCerts, err := buildManagedCerts(cfg, store)
+			managedCerts, err := buildManagedCerts(cfg, absCADir, store)
 			if err != nil {
 				return err
 			}

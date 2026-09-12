@@ -661,6 +661,86 @@ managed_certs:
 		})
 	})
 
+	// A file store rewrites its files on every issuance, so pointed at the CA's
+	// own it destroys the key that signed every outstanding certificate. The
+	// comparison is lexical on purpose: these paths need not exist yet.
+	Describe("the overlap with the CA's own paths", func() {
+		files := func(cert, key string) certstore.Config {
+			return decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {files: {cert: ` + cert + `, key: ` + key + `}}
+`)
+		}
+		cadir := certstore.ReservedPath{Setting: "cadir", Path: "/var/lib/openvox-ca", Tree: true}
+
+		It("refuses a path inside a reserved tree", func() {
+			err := files("/var/lib/openvox-ca/ca/a.pem", "/etc/a-key.pem").
+				CheckReservedPaths([]certstore.ReservedPath{cadir})
+			Expect(err).To(MatchError(ContainSubstring("is inside cadir")))
+			Expect(err).To(MatchError(ContainSubstring("/var/lib/openvox-ca/ca/a.pem")))
+		})
+
+		It("refuses the reserved directory itself", func() {
+			err := files("/var/lib/openvox-ca", "/etc/a-key.pem").
+				CheckReservedPaths([]certstore.ReservedPath{cadir})
+			Expect(err).To(MatchError(ContainSubstring("cadir")))
+		})
+
+		// A directory boundary, not a string one. Without the separator in the
+		// prefix test every sibling starting with the same characters would be
+		// refused, and the spec above would pass for that reason instead.
+		It("allows a sibling whose name starts with the reserved tree's", func() {
+			Expect(files("/var/lib/openvox-ca-components/a.pem", "/var/lib/openvox-ca-components/a-key.pem").
+				CheckReservedPaths([]certstore.ReservedPath{cadir})).To(Succeed())
+		})
+
+		It("refuses a reserved file only on equality", func() {
+			reserved := []certstore.ReservedPath{{Setting: "tls_key", Path: "/etc/ca/serving-key.pem"}}
+			Expect(files("/etc/ca/a.pem", "/etc/ca/serving-key.pem").
+				CheckReservedPaths(reserved)).To(MatchError(ContainSubstring("is tls_key")))
+			// The same directory, which a file entry must not reserve.
+			Expect(files("/etc/ca/a.pem", "/etc/ca/a-key.pem").
+				CheckReservedPaths(reserved)).To(Succeed())
+		})
+
+		// Every spelling of one path is one path. The store writes the cleaned
+		// form, so the check compares the cleaned form too.
+		It("sees through a path spelled with .. and doubled separators", func() {
+			err := files("/var/lib//openvox-ca/x/../ca/a.pem", "/etc/a-key.pem").
+				CheckReservedPaths([]certstore.ReservedPath{cadir})
+			Expect(err).To(MatchError(ContainSubstring("is inside cadir")))
+		})
+
+		It("checks the ca file as well as the pair", func() {
+			cfg := decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {files: {cert: /etc/a.pem, key: /etc/a-key.pem, ca: /var/lib/openvox-ca/ca/ca_crt.pem}}
+`)
+			Expect(cfg.CheckReservedPaths([]certstore.ReservedPath{cadir})).
+				To(MatchError(ContainSubstring("its ca at")))
+		})
+
+		It("has nothing to say about a Secret store", func() {
+			Expect(decode(minimal).CheckReservedPaths([]certstore.ReservedPath{cadir})).To(Succeed())
+		})
+
+		// Loudly rather than silently: a relative reserved path can never equal
+		// an absolute store path, so skipping it would leave a gap that looks
+		// exactly like a passing check.
+		It("refuses to compare against a reserved path that is not absolute", func() {
+			err := files("/etc/a.pem", "/etc/a-key.pem").
+				CheckReservedPaths([]certstore.ReservedPath{{Setting: "logfile", Path: "var/log/ca.log"}})
+			Expect(err).To(MatchError(ContainSubstring("not an absolute path")))
+			Expect(err).To(MatchError(ContainSubstring("logfile")))
+		})
+	})
+
 	Describe("the subject the mechanism is handed", func() {
 		It("passes the certname and names through verbatim", func() {
 			managed := build(decode(minimal))

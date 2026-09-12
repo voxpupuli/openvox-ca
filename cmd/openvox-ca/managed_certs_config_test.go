@@ -31,6 +31,11 @@ import (
 	"github.com/voxpupuli/openvox-ca/internal/k8sexport"
 )
 
+// specCADir is the cadir these specs run the server under. It is not a real
+// directory: caOwnedPaths only compares it, and the path check is lexical on
+// purpose so that it works on a configuration whose files do not exist yet.
+const specCADir = "/var/lib/openvox-ca-spec"
+
 // stubCACerts stands in for the storage service, which is the only thing a
 // store needs from the CA at build time.
 type stubCACerts struct{}
@@ -54,7 +59,7 @@ var _ = Describe("managed_certs, as the server reads it", func() {
 	It("is dormant when nothing is configured", func() {
 		cfg := writeServerConfig("hostname: ca.example.com\n")
 
-		managed, err := buildManagedCerts(cfg, stubCACerts{})
+		managed, err := buildManagedCerts(cfg, specCADir, stubCACerts{})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(managed).To(BeEmpty())
 	})
@@ -74,7 +79,7 @@ managed_certs:
 `)
 		Expect(cfg.ManagedCerts).To(HaveLen(1))
 
-		managed, err := buildManagedCerts(cfg, stubCACerts{})
+		managed, err := buildManagedCerts(cfg, specCADir, stubCACerts{})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(managed).To(HaveLen(1))
 		Expect(managed[0].Spec.Subject).To(Equal("puppetserver.openvox.svc.cluster.local"))
@@ -95,7 +100,7 @@ managed_certs:
     names: [a]
     store: {files: {cert: /c.pem, key: /k.pem}}
 `)
-		_, err := buildManagedCerts(cfg, stubCACerts{})
+		_, err := buildManagedCerts(cfg, specCADir, stubCACerts{})
 		Expect(err).To(MatchError(ContainSubstring("invalid managed_certs config")))
 		Expect(err).To(MatchError(ContainSubstring("renew_before must be positive")))
 	})
@@ -113,8 +118,65 @@ managed_certs:
     renew_before: 720h
     store: {secret: {name: puppetserver-tls, namespace: openvox}}
 `)
-		_, err := buildManagedCerts(cfg, stubCACerts{})
+		_, err := buildManagedCerts(cfg, specCADir, stubCACerts{})
 		Expect(err).To(MatchError(ContainSubstring("kubernetes_export target")))
+	})
+
+	// The file-store sibling of the export-overlap refusal above: the entry
+	// names a path the CA itself owns, and issuance would overwrite it.
+	It("refuses a file store inside the cadir", func() {
+		cfg := writeServerConfig(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store:
+      files:
+        cert: /var/lib/openvox-ca-spec/ca/ca_crt.pem
+        key: /var/lib/openvox-ca-spec/ca/ca_key.pem
+`)
+		_, err := buildManagedCerts(cfg, specCADir, stubCACerts{})
+		Expect(err).To(MatchError(ContainSubstring("invalid managed_certs config")))
+		Expect(err).To(MatchError(ContainSubstring("is inside cadir")))
+		// The cert is checked before the key, so the first path reported is
+		// the certificate -- which pins that the whole entry is scanned rather
+		// than only its key.
+		Expect(err).To(MatchError(ContainSubstring("/var/lib/openvox-ca-spec/ca/ca_crt.pem")))
+	})
+
+	It("refuses a file store that is the CA's own serving key", func() {
+		cfg := writeServerConfig(`
+tls_key: /etc/openvox-ca/serving-key.pem
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store:
+      files:
+        cert: /etc/openvox-ca/a.pem
+        key: /etc/openvox-ca/serving-key.pem
+`)
+		_, err := buildManagedCerts(cfg, specCADir, stubCACerts{})
+		Expect(err).To(MatchError(ContainSubstring("is tls_key")))
+	})
+
+	// The cadir prefix is a directory boundary, not a string one. Without the
+	// separator this path would read as being inside specCADir and the spec
+	// above would pass for a reason that also refuses this legitimate one.
+	It("allows a sibling directory sharing the cadir's prefix", func() {
+		cfg := writeServerConfig(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store:
+      files:
+        cert: /var/lib/openvox-ca-spec-components/a.pem
+        key: /var/lib/openvox-ca-spec-components/a-key.pem
+`)
+		managed, err := buildManagedCerts(cfg, specCADir, stubCACerts{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(managed).To(HaveLen(1))
 	})
 
 	// A file-only configuration is the systemd shape, and must not need a
@@ -128,7 +190,7 @@ managed_certs:
     renew_before: 720h
     store: {files: {cert: /c.pem, key: /k.pem}}
 `)
-		managed, err := buildManagedCerts(cfg, stubCACerts{})
+		managed, err := buildManagedCerts(cfg, specCADir, stubCACerts{})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(managed).To(HaveLen(1))
 	})
@@ -141,7 +203,7 @@ managed_certs:
     renew_before: 720h
     store: {secret: {name: a-tls, namespace: openvox}}
 `)
-		_, err := buildManagedCerts(cfg, stubCACerts{})
+		_, err := buildManagedCerts(cfg, specCADir, stubCACerts{})
 		// Anchored to a string only k8sclient.InClusterClientset produces.
 		// "inside a pod" and "Secret store" both appear in certstore.Build's
 		// own refusal too, so asserting those alone would pass even if the
@@ -251,7 +313,7 @@ managed_certs:
 		var managed []ca.ManagedCert
 		out := captureLogs(slog.LevelWarn, func() {
 			var err error
-			managed, err = buildManagedCerts(cfg, stubCACerts{})
+			managed, err = buildManagedCerts(cfg, specCADir, stubCACerts{})
 			Expect(err).NotTo(HaveOccurred())
 		})
 		Expect(managed).To(HaveLen(1))

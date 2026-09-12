@@ -642,8 +642,8 @@ release namespace is always included. Every namespace you export into needs a
 binding. `rbac.scope: ClusterRole` grants it cluster-wide instead, which is
 worth it only if you export into many namespaces.
 
-The chart mounts the ServiceAccount token automatically when this (or OpenBao's
-Kubernetes auth) is enabled, and leaves it unmounted otherwise. These are the
+The chart mounts the ServiceAccount token automatically when the pod needs the
+Kubernetes API, and leaves it unmounted otherwise. These are the
 inputs it counts as enabled — some because it can see the setting, the rest
 because it cannot see far enough to rule it out:
 
@@ -661,7 +661,7 @@ because it cannot see far enough to rule it out:
 
 `automountServiceAccountToken` forces the decision either way.
 
-### Managed certificates
+## Managed certificates
 
 `config.managed_certs` makes openvox-ca issue and renew certificates for OpenVox
 components — see [managed certificates](configuration.md#managed-certificates)

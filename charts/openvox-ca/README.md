@@ -166,9 +166,9 @@ tested floor rather than a ceiling; naming them here would go stale on its own.
 
 The certificates themselves live under `config.managed_certs`; this block only
 creates the RBAC for the ones kept in a Secret. See
-[managed certificates](../docs/configuration.md#managed-certificates).
+[managed certificates](https://github.com/voxpupuli/openvox-ca/blob/main/docs/configuration.md#managed-certificates).
 
-| Value | Default | Notes |
+| Key | Default | Description |
 | --- | --- | --- |
 | `managedCerts.rbac.create` | `true` | Create the Role and binding for `config.managed_certs` — one pair per namespace those Secrets live in, derived from the entries rather than from values. `get` and `patch` are narrowed by `resourceNames`; `create` cannot be. Nothing is rendered when no entry uses a Secret store, or when the chart cannot read the configuration. |
 

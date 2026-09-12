@@ -381,12 +381,12 @@ func (r issueReason) String() string {
 // enough -- the configuration never changes, the CA certificate's remaining
 // life does.
 //
-// The floor is half the certificate's own forward lifetime, derived from the
+// The cap is half the certificate's own forward lifetime, derived from the
 // certificate in hand rather than from configuration, so no setting can defeat
 // it. It guarantees the loop makes progress: every issuance serves at least
 // half the life it was actually granted before its successor is due. In an
 // ordinary deployment it is invisible -- a 30-day window on a 90-day
-// certificate is nowhere near the 45-day floor -- which is the property to
+// certificate is nowhere near the 45-day cap -- which is the property to
 // want. It only binds when the alternative is a reissue loop.
 //
 // Forward lifetime, not NotAfter-NotBefore: issueLeafLocked backdates
