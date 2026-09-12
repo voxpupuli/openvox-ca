@@ -27,6 +27,9 @@
 package main
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 
@@ -114,6 +117,52 @@ managed_certs:
 		Expect(myCA.ManagedCerts).To(BeEmpty())
 		Expect(jobNamesForCA(loadCfg("hostname: ca.example.com\n"), myCA)).
 			NotTo(ContainElement(jobManagedCerts))
+	})
+
+	// The call site, which the specs above do not reach.
+	//
+	// They drive attachManagedCerts directly, so all of them stay green if the
+	// serve command simply stops calling it -- which was demonstrated by
+	// mutation, not assumed: dropping the call from main.go left every spec in
+	// this file passing. A behavioural spec would have to start the server,
+	// bind its listeners and reach a running reconcile pass, which is what the
+	// compose integration suite does and a unit spec should not.
+	//
+	// So this reads the source instead. It is a weaker guarantee than
+	// behaviour -- it pins that the call is written, not that it runs -- but it
+	// closes the hole the mutation found, and it fails for the one edit that
+	// silently disables the whole feature. The same technique as
+	// internal/api/authseam_test.go, which parses the tree to decide what
+	// imports what.
+	It("is called by the serve command", func() {
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, "main.go", nil, 0)
+		Expect(err).NotTo(HaveOccurred())
+
+		var called bool
+		var funcsSeen int
+		ast.Inspect(file, func(n ast.Node) bool {
+			if _, ok := n.(*ast.FuncLit); ok {
+				funcsSeen++
+			}
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "attachManagedCerts" {
+				called = true
+			}
+			return true
+		})
+
+		// The parse must have found something to judge. A file that failed to
+		// yield any function literal would agree with every claim below.
+		Expect(funcsSeen).To(BeNumerically(">", 0),
+			"precondition: main.go parsed but contains no function literals")
+		Expect(called).To(BeTrue(),
+			"main.go does not call attachManagedCerts, so no configured managed "+
+				"certificate would ever be issued, and every other spec in this "+
+				"file would still pass")
 	})
 
 	It("refuses to start when the configuration could never issue", func() {

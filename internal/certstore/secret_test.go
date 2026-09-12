@@ -25,6 +25,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	accorev1 "k8s.io/client-go/applyconfigurations/core/v1"
@@ -246,6 +247,30 @@ var _ = Describe("SecretStore", func() {
 			Expect(err).To(MatchError(ContainSubstring("delete the Secret")))
 
 			Expect(get().Data).To(HaveKeyWithValue("tls.crt", []byte("THEIRS-CERT")))
+		})
+
+		// The other arm of the same branch, which nothing pinned. Only a
+		// conflict means somebody else owns the material; every other apply
+		// failure is reported as itself. Without this spec the IsConflict test
+		// can be dropped and an RBAC refusal would reach the operator as
+		// "already holds material this CA does not own", advising
+		// adopt_existing -- a remedy that cannot work, because the CA is not
+		// permitted to write the Secret at all.
+		It("reports a refused apply as itself, not as an adoption problem", func() {
+			client.PrependReactor("patch", "secrets",
+				func(ktesting.Action) (bool, runtime.Object, error) {
+					return true, nil, apierrors.NewForbidden(
+						corev1.Resource("secrets"), name,
+						errors.New(`secrets "`+name+`" is forbidden: User `+
+							`"system:serviceaccount:openvox:openvox-ca" cannot patch `+
+							`resource "secrets" in API group "" in the namespace "`+ns+`"`))
+				})
+
+			err := newStore(certstore.SecretConfig{}).Save(ctx, []byte("CERT"), []byte("KEY"))
+			Expect(err).To(MatchError(ContainSubstring("is forbidden")))
+			Expect(err).To(MatchError(ContainSubstring(ns + "/" + name)))
+			Expect(err).NotTo(MatchError(ContainSubstring("adopt_existing")),
+				"a permission failure must not be reported as somebody else's material")
 		})
 
 		It("takes it when adopt_existing is set", func() {

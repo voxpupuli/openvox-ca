@@ -483,6 +483,82 @@ managed_certs:
 `).Validate()).To(Succeed())
 		})
 
+		// The within-entry message, which was unreachable until the check was
+		// moved ahead of the shared-path map. Registered first, `cert` matched
+		// `key` in that map and the refusal told an operator their entry
+		// collided with itself, naming its own index.
+		It("says the paths must differ when one entry points cert and key at one file", func() {
+			err := decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {files: {cert: /etc/a.pem, key: /etc/a.pem}}
+`).Validate()
+			Expect(err).To(MatchError(ContainSubstring("must differ from one another")))
+			Expect(err).NotTo(MatchError(ContainSubstring("already used by managed_certs[0]")),
+				"an entry must never be reported as colliding with itself")
+		})
+
+		It("says the same when the chain file is also the certificate", func() {
+			Expect(decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {files: {cert: /etc/a.pem, key: /etc/a-key.pem, ca: /etc/a.pem}}
+`).Validate()).To(MatchError(ContainSubstring("must differ from one another")))
+		})
+
+		// The ordinary way to lay several components out on one host. Every
+		// entry writes the same CA chain from the same source, and no entry
+		// reads it back to decide whether to reissue, so there is no loop to
+		// prevent -- refusing this bought nothing and made the common case
+		// awkward.
+		It("allows two entries to share one CA chain file", func() {
+			Expect(decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {files: {cert: /etc/a.pem, key: /etc/a-key.pem, ca: /etc/openvox/ca.pem}}
+  - certname: b.example.com
+    names: [b]
+    renew_before: 720h
+    store: {files: {cert: /etc/b.pem, key: /etc/b-key.pem, ca: /etc/openvox/ca.pem}}
+`).Validate()).To(Succeed())
+		})
+
+		// The collision that survives, in both directions: a chain written over
+		// another entry's material is the loop the map exists for.
+		It("refuses a chain file that is another entry's certificate", func() {
+			Expect(decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {files: {cert: /etc/a.pem, key: /etc/a-key.pem}}
+  - certname: b.example.com
+    names: [b]
+    renew_before: 720h
+    store: {files: {cert: /etc/b.pem, key: /etc/b-key.pem, ca: /etc/a.pem}}
+`).Validate()).To(MatchError(ContainSubstring("is the certificate or key of managed_certs[0]")))
+		})
+
+		It("refuses a certificate that is an earlier entry's chain file", func() {
+			Expect(decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {files: {cert: /etc/a.pem, key: /etc/a-key.pem, ca: /etc/shared-ca.pem}}
+  - certname: b.example.com
+    names: [b]
+    renew_before: 720h
+    store: {files: {cert: /etc/shared-ca.pem, key: /etc/b-key.pem}}
+`).Validate()).To(MatchError(ContainSubstring("is the CA chain file of managed_certs[0]")))
+		})
+
 		It("refuses a relative path, which resolves differently in each way of running the CA", func() {
 			err := decode(`
 managed_certs:

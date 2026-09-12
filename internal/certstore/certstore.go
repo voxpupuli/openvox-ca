@@ -496,7 +496,7 @@ func (e *Entry) uris() ([]*url.URL, error) {
 func (c Config) Validate() error {
 	subjects := make(map[string]int, len(c))
 	var secrets []secretRef
-	paths := make(map[string]int, len(c)*2)
+	paths := newFilePaths()
 
 	for i := range c {
 		e := &c[i]
@@ -538,7 +538,7 @@ func (c Config) Validate() error {
 
 // validate checks an entry's store block, recording what it claims so a later
 // entry cannot claim the same object.
-func (s *StoreConfig) validate(where string, secrets *[]secretRef, paths map[string]int, idx int) error {
+func (s *StoreConfig) validate(where string, secrets *[]secretRef, paths filePaths, idx int) error {
 	switch {
 	case s.Secret == nil && s.Files == nil:
 		return fmt.Errorf("%s: store must name where the certificate lives: "+
@@ -611,7 +611,7 @@ type secretRef struct {
 	idx       int
 }
 
-func (f *FilesConfig) validate(where string, paths map[string]int, idx int) error {
+func (f *FilesConfig) validate(where string, paths filePaths, idx int) error {
 	// Cleaned, not merely trimmed, and cleaned in place so the writes use the
 	// same spelling the duplicate check did. Two spellings of one path --
 	// `/a/b/c.pem` and `/a//b/c.pem`, or one routed through `..` -- are two keys
@@ -629,29 +629,77 @@ func (f *FilesConfig) validate(where string, paths map[string]int, idx int) erro
 	if f.Cert == "" || f.Key == "" {
 		return fmt.Errorf("%s: store.files needs both `cert` and `key`", where)
 	}
-	for _, p := range []struct{ field, path string }{
-		{"cert", f.Cert}, {"key", f.Key}, {"ca", f.CA},
-	} {
-		if p.path == "" {
-			continue
-		}
-		// Absolute, because the server's working directory is not something an
-		// operator configures and a relative path would resolve differently
-		// under systemd, in a container, and when run by hand.
-		if !strings.HasPrefix(p.path, "/") {
-			return fmt.Errorf("%s: store.files.%s must be an absolute path (got %q)",
-				where, p.field, p.path)
-		}
-		if prev, dup := paths[p.path]; dup {
-			return fmt.Errorf("%s: store.files.%s %q is already used by managed_certs[%d]",
-				where, p.field, p.path, prev)
-		}
-		paths[p.path] = idx
-	}
+	// Within the entry first, and before anything is registered below. Written
+	// the other way round -- which it was -- this check is unreachable: `cert`
+	// goes into the shared map, `key` then matches it, and an operator who
+	// pointed both at one path was told their entry collides with itself.
 	if f.Cert == f.Key || (f.CA != "" && (f.CA == f.Cert || f.CA == f.Key)) {
 		return fmt.Errorf("%s: store.files paths must differ from one another", where)
 	}
+	// Absolute, because the server's working directory is not something an
+	// operator configures and a relative path would resolve differently under
+	// systemd, in a container, and when run by hand.
+	for _, p := range []struct{ field, path string }{
+		{"cert", f.Cert}, {"key", f.Key}, {"ca", f.CA},
+	} {
+		if p.path != "" && !strings.HasPrefix(p.path, "/") {
+			return fmt.Errorf("%s: store.files.%s must be an absolute path (got %q)",
+				where, p.field, p.path)
+		}
+	}
+	// Across entries, where the two fields are governed by different rules.
+	//
+	// `cert` and `key` are exclusive: two entries writing one certificate or
+	// key file each read the other's material, find it failing their own spec,
+	// and reissue -- for ever, on every pass.
+	//
+	// `ca` is shared on purpose. Every entry writes the same CA chain, byte for
+	// byte, from the same source, and no entry reads the chain file back to
+	// decide whether to reissue, so the loop cannot start there. A shared
+	// /etc/openvox/ca.pem is the ordinary way to lay several components out on
+	// one host, and refusing it bought nothing.
+	//
+	// What is still refused is the cross pair, in both directions: a chain
+	// written over another entry's certificate or key, or a certificate or key
+	// written over another entry's chain. Both are the loop, with the chain
+	// write standing in for one side of it.
+	for _, p := range []struct{ field, path string }{{"cert", f.Cert}, {"key", f.Key}} {
+		if prev, dup := paths.material[p.path]; dup {
+			return fmt.Errorf("%s: store.files.%s %q is already used by managed_certs[%d]: "+
+				"two entries writing one certificate or key file would each replace the "+
+				"other's material on every pass", where, p.field, p.path, prev)
+		}
+		if prev, dup := paths.chain[p.path]; dup {
+			return fmt.Errorf("%s: store.files.%s %q is the CA chain file of "+
+				"managed_certs[%d], which is rewritten on every pass of that entry",
+				where, p.field, p.path, prev)
+		}
+		paths.material[p.path] = idx
+	}
+	if f.CA != "" {
+		if prev, dup := paths.material[f.CA]; dup && prev != idx {
+			return fmt.Errorf("%s: store.files.ca %q is the certificate or key of "+
+				"managed_certs[%d]: the chain written there would replace that entry's "+
+				"material on every pass", where, f.CA, prev)
+		}
+		if _, seen := paths.chain[f.CA]; !seen {
+			paths.chain[f.CA] = idx
+		}
+	}
 	return nil
+}
+
+// filePaths is what a file store's paths are checked against: every `cert` and
+// `key` claimed so far, which no second entry may claim, and every `ca` chain
+// file, which any number of entries may share but which must not be some other
+// entry's material.
+type filePaths struct {
+	material map[string]int
+	chain    map[string]int
+}
+
+func newFilePaths() filePaths {
+	return filePaths{material: map[string]int{}, chain: map[string]int{}}
 }
 
 // cleanPath trims and lexically normalises a configured path, leaving an empty

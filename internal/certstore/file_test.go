@@ -133,6 +133,26 @@ var _ = Describe("FileStore", func() {
 			Expect(cfg.Key).NotTo(BeAnExistingFile())
 		})
 
+		// The refusal an erroring chain read does not reach. A source that
+		// returns no error and no bytes is a different failure from one that
+		// errors, and the SecretStore twin of this guard has had a spec since
+		// it was written -- an asymmetry that left this one deletable with the
+		// suite green.
+		It("refuses an empty CA chain, leaving what was there", func() {
+			Expect(os.WriteFile(cfg.CA, []byte("PREVIOUS-CHAIN"), 0o644)).To(Succeed())
+			src = stubCA{pem: []byte{}}
+
+			err := store().Save(ctx, []byte("CERT"), []byte("KEY"))
+			Expect(err).To(MatchError(ContainSubstring("empty CA certificate chain")))
+			Expect(err).To(MatchError(ContainSubstring(cfg.CA)))
+
+			// The read happens before anything is written, so the previous
+			// chain stands and no half-written pair is left behind.
+			Expect(os.ReadFile(cfg.CA)).To(Equal([]byte("PREVIOUS-CHAIN")))
+			Expect(cfg.Cert).NotTo(BeAnExistingFile())
+			Expect(cfg.Key).NotTo(BeAnExistingFile())
+		})
+
 		It("replaces material already at those paths", func() {
 			Expect(os.WriteFile(cfg.Cert, []byte("OLD"), 0o644)).To(Succeed())
 			Expect(os.WriteFile(cfg.Key, []byte("OLD-KEY"), 0o600)).To(Succeed())
