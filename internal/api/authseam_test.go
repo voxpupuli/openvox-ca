@@ -220,10 +220,13 @@ func importsCA(dir string) bool {
 // indirect dependency today) or a Go toolchain at test time. That scope is a
 // judgement, not a proof, and the list is what makes the judgement reviewable:
 // a new importer of internal/ca is covered when somebody adds it here, and not
-// before. internal/metrics also imports internal/ca, holds a *ca.CA and serves
-// HTTP, and is still out of the list because it exposes only a Prometheus
-// collector with no issuance surface -- if that ever changes it belongs in
-// guardedPackages rather than being trusted as-is.
+// before.
+//
+// Every importer that is NOT guarded carries its reason in exemptPackages, and
+// this comment deliberately does not restate any of them. It used to restate
+// internal/metrics' -- a package that imports internal/ca, holds a *ca.CA and
+// serves HTTP -- which put one judgement in two places that nothing keeps in
+// step. The exemption is the record; the sweep below requires it to exist.
 //
 // NIST 800-53: AC-6 (Least Privilege), CM-7 (Least Functionality)
 var _ = Describe("The authorisation-grant seam", func() {
