@@ -157,6 +157,16 @@
     // wedged export job sit unreported for hours.
     k8sExportNotRunningFor: '30m',
 
+    // A configured managed certificate that has never been issued at all. The
+    // reconcile loop runs once at startup and then every
+    // managed_cert_interval_sec (15 minutes by default), so this only has to
+    // outlast a slow start plus one interval -- but it is deliberately longer
+    // than that, because the remedies for the failures it reports (fixing
+    // RBAC, adopting or deleting a Secret, creating a directory) are all
+    // manual, and a certificate nothing has yet is not an emergency in the
+    // first hour of an install.
+    managedCertNeverIssuedFor: '1h',
+
     // 'for' durations applied to the expiry alerts to debounce flapping at the
     // threshold boundary.
     expiryFor: '1h',

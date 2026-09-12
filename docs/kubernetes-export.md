@@ -29,7 +29,10 @@ co-exist with other managers of the same object. Apply uses `force`, so fields
 owned by the exporter are reclaimed if something else overwrites them.
 
 Every managed object carries the label `app.kubernetes.io/managed-by:
-openvox-ca` so you can find and select the objects openvox-ca owns:
+openvox-ca` so you can find the objects openvox-ca owns. **It does not
+distinguish them from a [managed certificate](configuration.md#managed-certificates)
+Secret**, which carries the same label and holds a component's only private key
+— so this is a safe selector to list with and not to delete with:
 
 ```sh
 kubectl get secret,configmap -A -l app.kubernetes.io/managed-by=openvox-ca
@@ -266,4 +269,10 @@ to initialise client` line in the CA log, which names the actual error.
 - In-cluster ServiceAccount authentication only (no external kubeconfig).
 - PEM encoding only (no DER).
 - Objects are not deleted when a target is removed from the config; delete them
-  manually (they carry the `app.kubernetes.io/managed-by=openvox-ca` label).
+  manually. They carry the `app.kubernetes.io/managed-by=openvox-ca` label — but
+  **that label alone is not a safe delete selector**: a
+  [managed certificate](configuration.md#managed-certificates) Secret carries
+  the identical label and holds a component's only private key. Name the
+  exported objects, or give them a label of your own under
+  `metadata.labels` and select on that. See
+  [uninstalling](helm-chart.md#uninstalling).

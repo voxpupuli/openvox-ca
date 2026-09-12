@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/voxpupuli/openvox-ca/internal/certstore"
 	"github.com/voxpupuli/openvox-ca/internal/config"
 	"github.com/voxpupuli/openvox-ca/internal/k8sexport"
 	"go.yaml.in/yaml/v3"
@@ -267,6 +268,24 @@ type serverConfig struct {
 	// configured. File-only: the nested target list, labels, and annotations are
 	// impractical to express as flags/env. Validated at startup.
 	KubernetesExport k8sexport.Config `yaml:"kubernetes_export"`
+
+	// ManagedCerts optionally issues and renews certificates for OpenVox
+	// components into Kubernetes Secrets or local files, so that bringing up
+	// OpenVox Server, OpenVoxDB and OpenVoxView needs no hand-issued
+	// certificates and no hand-renewal later. Disabled when the list is empty.
+	//
+	// File-only, and for a stronger reason than kubernetes_export's: an entry
+	// is a nested structure with a list of names and a choice of store, which
+	// no flag or environment variable can express without inventing a second
+	// syntax for it. Validated at startup, where a mistyped certname or an
+	// impossible renewal window is refused as configuration rather than
+	// discovered as a certificate that never appears.
+	//
+	// SECURITY: a managed certificate for a certname listed in puppet_server is
+	// an admin credential, because it carries clientAuth and that listing is
+	// what grants authority. See internal/certstore's package documentation.
+	// NIST 800-53: AC-6 (Least Privilege)
+	ManagedCerts certstore.Config `yaml:"managed_certs"`
 
 	// Storage backend selection and parameters. Embedded inline so the YAML
 	// keys (storage_backend, etcd_*, redis_*, sql_*, ca_cert_file, ca_key_file)

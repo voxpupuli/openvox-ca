@@ -381,12 +381,12 @@ func (r issueReason) String() string {
 // enough -- the configuration never changes, the CA certificate's remaining
 // life does.
 //
-// The floor is half the certificate's own forward lifetime, derived from the
+// The cap is half the certificate's own forward lifetime, derived from the
 // certificate in hand rather than from configuration, so no setting can defeat
 // it. It guarantees the loop makes progress: every issuance serves at least
 // half the life it was actually granted before its successor is due. In an
 // ordinary deployment it is invisible -- a 30-day window on a 90-day
-// certificate is nowhere near the 45-day floor -- which is the property to
+// certificate is nowhere near the 45-day cap -- which is the property to
 // want. It only binds when the alternative is a reissue loop.
 //
 // Forward lifetime, not NotAfter-NotBefore: issueLeafLocked backdates
@@ -746,14 +746,18 @@ func (c *CA) reconcileManagedCert(ctx context.Context, m ManagedCert, now time.T
 // gets the serial and the remedy instead. The certificate is not lost: it keeps
 // its inventory row, and `openvox-ca-ctl revoke --serial` addresses it.
 //
-// The check is one-directional, and deliberately so for now. Renew and
-// AutoRenew also end in issueLeafLocked's unconditional SaveCert, so the holder
-// of a displaced certificate can renew and take cert/<subject> back -- leaving
-// the *managed* certificate reachable only by serial, with no warning, because
-// neither renewal path consults c.ManagedCerts. Making it symmetric means
-// teaching the renewal paths about a mechanism nothing configures yet, so it is
-// recorded here rather than built: #243 must not inherit the asymmetry as
-// settled.
+// The check is one-directional, and deliberately so. Renew and AutoRenew also
+// end in issueLeafLocked's unconditional SaveCert, so the holder of a displaced
+// certificate can renew and take cert/<subject> back -- leaving the *managed*
+// certificate reachable only by serial, with no warning, because neither
+// renewal path consults c.ManagedCerts.
+//
+// That asymmetry is known and unaddressed rather than unnoticed. Closing it
+// means teaching both renewal paths about the managed set, which is a change to
+// every issuance path in service of a case an operator reaches only by giving a
+// managed certificate a certname something else already renews -- and the
+// displacement itself is already reported, with the serial and the remedy. It
+// is recorded here so the next reader can weigh it rather than rediscover it.
 //
 // The caller must hold subject's lock and must NOT hold c.mu: IsRevokedSerial
 // takes c.mu.RLock, which is not reentrant. Named for the lock it runs under
