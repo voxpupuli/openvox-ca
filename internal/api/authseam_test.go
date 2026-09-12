@@ -94,17 +94,30 @@ var exemptPackages = map[string]string{
 	"../metrics": "exposes only a Prometheus collector, with no issuance surface. " +
 		"If that changes it belongs in guardedPackages rather than here",
 	"../signer/openbao": "signs with a CA key it holds; it issues nothing and serves nothing",
-	"../../cmd/openvox-ca": "the server binary, which assembles the CA. It reaches no " +
-		"grant constructor, but it is not guarded because it is the composition root " +
-		"and a rule about it would be a rule about the whole binary",
-	"../../cmd/openvox-ca-ctl": "the operator CLI, which is the ONE caller that may mint " +
-		"an admin credential -- `generate --allow-authorization-extensions` is exactly " +
-		"the operator-at-a-terminal case the gate exists to confine this to",
+	// These two reasons were written the wrong way round, and the mistake is
+	// worth leaving a mark: an exemption is only as good as the fact it rests
+	// on, and both of these rested on a false one while reading as settled.
+	"../../cmd/openvox-ca": "the server binary, and the ONE caller that mints an admin " +
+		"credential: `openvox-ca generate --pp-cli-auth` reaches ca.PpCliAuth() and " +
+		"ca.GenerateOptions in cmd/openvox-ca/generate.go. That is exactly the " +
+		"operator-at-a-terminal case the gate exists to confine minting to -- an " +
+		"offline subcommand run by a person, not a path any request can reach -- so " +
+		"it is exempt on that ground rather than on reaching nothing. It is also the " +
+		"composition root, where a rule about the package would be a rule about the " +
+		"whole binary",
+	"../../cmd/openvox-ca-ctl": "the operator CLI, which reaches no grant constructor " +
+		"at all: it imports internal/ca for its types and talks to a running CA over " +
+		"HTTP. It is exempt because there is nothing here to confine",
 }
 
-// caImporters returns every package directory under internal/ and cmd/ whose
-// non-test source imports internal/ca, at any depth, relative to this
-// directory.
+// caImporters returns every package directory in the module whose non-test
+// source imports internal/ca, at any depth, relative to this directory.
+//
+// The whole module, not internal/ and cmd/: two earlier versions narrowed it and
+// the comment in the body says what that cost. Dot directories are skipped as a
+// class, which matters here because .claude holds this repository's sibling
+// worktrees and walking into those would sweep other branches' source as though
+// it were this one's.
 //
 // Measured rather than listed, which is the whole point: an enumeration is what
 // misses a new importer, and a new importer of internal/ca is precisely the
@@ -121,7 +134,8 @@ func caImporters() []string {
 	// swept by neither, so it needed no recorded decision and the gate stayed
 	// green while the surface grew. A sweep whose own reach is an enumeration
 	// fails exactly the way the list it audits would.
-	for _, root := range []string{"../.."} {
+	const root = "../.." // the module root
+	{
 		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err

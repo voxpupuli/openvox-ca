@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/voxpupuli/openvox-ca/internal/k8sclient"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -61,13 +62,6 @@ const secretType = corev1.SecretTypeTLS
 // anyway -- see Config.CheckExportOverlap -- and this is the second line of
 // that defence rather than a substitute for it.
 const managedCertFieldManager = "openvox-ca-managed-certs"
-
-// The managed-by label marks every Secret this package maintains. It matches
-// the exporter's, so one selector finds everything openvox-ca owns.
-const (
-	managedByLabelKey   = "app.kubernetes.io/managed-by"
-	managedByLabelValue = "openvox-ca"
-)
 
 // secretAPITimeout bounds a single call to the API server.
 //
@@ -250,13 +244,14 @@ func (s *SecretStore) Save(ctx context.Context, certPEM, keyPEM []byte) error {
 
 // labels merges the configured labels with the mandatory managed-by label,
 // which always wins so ownership cannot be masked by configuration.
+//
+// The same label the exporter applies, from internal/k8sclient rather than from
+// a copy here: docs/kubernetes-export.md tells operators one selector finds
+// every object this CA owns, and that is a claim across both features. Two
+// copies asserting in comments that they matched is what made it a claim
+// nothing enforced.
 func (s *SecretStore) labels() map[string]string {
-	labels := make(map[string]string, len(s.cfg.Labels)+1)
-	for k, v := range s.cfg.Labels {
-		labels[k] = v
-	}
-	labels[managedByLabelKey] = managedByLabelValue
-	return labels
+	return k8sclient.WithManagedByLabel(s.cfg.Labels)
 }
 
 // ownedByUs reports whether sec carries an apply entry for this field manager,

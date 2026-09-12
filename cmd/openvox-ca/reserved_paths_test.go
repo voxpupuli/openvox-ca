@@ -77,6 +77,14 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 		"openbao.approle_secret_id_file": "key-provider credential, replaceable",
 		"openbao.token_file":             "key-provider credential, replaceable",
 		"openbao.kubernetes_jwt_file":    "projected by the kubelet, not ours to protect",
+
+		// Data keys inside an exported Secret or ConfigMap -- `ca.crt`,
+		// `crl.pem` -- rather than paths on any filesystem. They are swept
+		// because the predicate matches "key" deliberately: the cost of a key
+		// it should not match is this line, and the cost of a path it misses
+		// is the defect the whole sweep exists to catch.
+		"kubernetes_export.targets[].cert_key": "a data key inside the exported object",
+		"kubernetes_export.targets[].crl_key":  "a data key inside the exported object",
 	}
 
 	// pathShaped decides which YAML keys name a filesystem location.
@@ -110,10 +118,23 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 	}
 
 	// sweep walks serverConfig the way the decoder reads it -- following inline
-	// embeds transparently, and descending into a named block under its own
-	// key -- and yields every string-typed setting as (qualified name, field).
-	// Both directions of this spec use it, so neither can judge a set of keys
-	// the other never saw.
+	// embeds transparently, descending into a named block under its own key,
+	// and into the element type of a list block under `key[]` -- and yields
+	// every string-typed setting as (qualified name, field). Both directions of
+	// this spec use it, so neither can judge a set of keys the other never saw.
+	//
+	// The list case is here because client_ca is one: each entry carries `file`
+	// and `crl_file`, which caOwnedPaths reserves per entry, and a walk that
+	// stopped at struct fields could not see either. It yielded a sweep that
+	// silently excluded a whole shape of configuration while the third spec
+	// below claimed to check everything reserved.
+	//
+	// A list is walked through a fresh element rather than through the values
+	// in the configuration: what is being audited is the *type* -- which path
+	// settings an entry can have -- not how many entries someone configured.
+	// Yielded fields therefore belong to that scratch element and are settable
+	// without touching the caller's config, which is why the fixtures below set
+	// list entries explicitly.
 	var sweep func(sv reflect.Value, prefix string, yield func(string, reflect.Value))
 	sweep = func(sv reflect.Value, prefix string, yield func(string, reflect.Value)) {
 		t := sv.Type()
@@ -130,6 +151,10 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 			switch f.Type.Kind() {
 			case reflect.Struct:
 				sweep(sv.Field(i), prefix+name+".", yield)
+			case reflect.Slice:
+				if f.Type.Elem().Kind() == reflect.Struct {
+					sweep(reflect.New(f.Type.Elem()).Elem(), prefix+name+"[].", yield)
+				}
 			case reflect.String:
 				yield(prefix+name, sv.Field(i))
 			}
@@ -147,6 +172,24 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 		return out
 	}
 
+	// listKey maps a reserved setting's name back to the key the sweep yields:
+	// `client_ca[2].crl_file (partner)` is the second entry's `crl_file`, and
+	// the sweep knows that field as `client_ca[].crl_file`. The index and the
+	// entry name are in the reserved name on purpose -- a refusal has to say
+	// which entry -- so the translation belongs here rather than in the check.
+	listKey := func(setting string) string {
+		open := strings.IndexByte(setting, '[')
+		closing := strings.IndexByte(setting, ']')
+		if open < 0 || closing < open {
+			return setting
+		}
+		name := setting[:open] + "[]" + setting[closing+1:]
+		if i := strings.Index(name, " ("); i >= 0 {
+			name = name[:i]
+		}
+		return name
+	}
+
 	It("reserves every path-shaped setting, or records why not", func() {
 		// Every path-shaped setting given a value, so caOwnedPaths cannot skip
 		// one as empty. The values are never read from disk: the check is
@@ -161,6 +204,14 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 		}
 		cfg.StorageBackend = "sqlite"
 		cfg.SQLDSN = "file:/spec/sql_dsn"
+		// One foreign trust domain, because its anchors are reserved per entry
+		// and the sweep yields them from the element type: with no entry
+		// configured there is nothing for those keys to match.
+		cfg.ClientCA = []config.ClientCA{{
+			Name:    "spec",
+			File:    "/spec/client_ca/file",
+			CRLFile: "/spec/client_ca/crl_file",
+		}}
 
 		// The sweep must have found something to judge, and specifically the
 		// setting whose omission this spec exists for. A reflection walk that
@@ -172,6 +223,9 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 		Expect(fields).To(HaveKey("openbao.token_file"),
 			"precondition: the sweep must descend into named blocks, or every "+
 				"exemption naming one is unchecked")
+		Expect(fields).To(HaveKey("client_ca[].file"),
+			"precondition: the sweep must descend into list blocks, or a path "+
+				"setting inside one needs no recorded decision")
 
 		reserved, err := caOwnedPaths(cfg, "/spec/cadir", "/spec/config.yaml")
 		Expect(err).NotTo(HaveOccurred())
@@ -181,9 +235,14 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 			got[r.Setting] = true
 		}
 
+		reservedKeys := map[string]bool{}
+		for k := range got {
+			reservedKeys[listKey(k)] = true
+		}
+
 		var missing []string
 		for key := range fields {
-			if got[key] {
+			if reservedKeys[key] {
 				continue
 			}
 			if _, exempt := notReserved[key]; exempt {
@@ -220,10 +279,15 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 	// so.
 	//
 	// Settings that are not configuration keys are exempt by construction:
-	// cadir is a flag with its own resolution, --config is the flag that
-	// produces the file, and a client_ca entry is named after its position in
-	// a list. Each is named here rather than pattern-matched, so a new one has
-	// to be added deliberately.
+	// cadir is a flag with its own resolution, and --config is the flag that
+	// produces the file. Each is named here rather than pattern-matched, so a
+	// new one has to be added deliberately.
+	//
+	// A client_ca entry is reserved under `client_ca[0].file (partner)`, which
+	// names the entry and its position so a refusal says which one -- so it is
+	// mapped back to the swept key `client_ca[].file` rather than skipped. It
+	// used to be skipped, which meant the one shape of configuration the sweep
+	// could not reach was also the one this spec agreed not to look at.
 	It("sweeps every setting caOwnedPaths reserves", func() {
 		notKeys := map[string]bool{"cadir": true, "--config": true}
 
@@ -243,10 +307,10 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 
 		swept := pathKeys(cfg)
 		for _, r := range reserved {
-			if notKeys[r.Setting] || strings.HasPrefix(r.Setting, "client_ca[") {
+			if notKeys[r.Setting] {
 				continue
 			}
-			Expect(swept).To(HaveKey(r.Setting),
+			Expect(swept).To(HaveKey(listKey(r.Setting)),
 				"caOwnedPaths reserves %q, but the sweep does not yield it, so "+
 					"nothing checks that it stays reserved", r.Setting)
 		}

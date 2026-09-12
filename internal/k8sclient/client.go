@@ -35,6 +35,37 @@ import (
 
 // NamespaceFile is the standard in-cluster path holding the pod's own
 // namespace, mounted from its ServiceAccount.
+// The managed-by label marks every object openvox-ca maintains in a cluster,
+// whichever feature wrote it: a kubernetes_export target, or the Secret a
+// managed certificate lives in. One selector therefore finds everything this CA
+// owns, which is what docs/kubernetes-export.md tells operators to rely on.
+//
+// It lives here, in the package both features already depend on for their
+// client, because that claim is a contract between them rather than a fact
+// about either. Both packages held their own copy of this pair and a merge
+// helper to go with it, each asserting in a comment that it matched the other,
+// with nothing making it so: changing one value would have left the other
+// behind and quietly broken the selector the documentation promises.
+const (
+	ManagedByLabelKey   = "app.kubernetes.io/managed-by"
+	ManagedByLabelValue = "openvox-ca"
+)
+
+// WithManagedByLabel returns configured with the managed-by label added.
+//
+// The label always wins, so ownership cannot be masked by an operator setting
+// the same key -- a selector that skipped an object this CA is overwriting
+// would be worse than no selector. The input is never modified: callers hold
+// configuration that outlives the call and is read again on the next pass.
+func WithManagedByLabel(configured map[string]string) map[string]string {
+	labels := make(map[string]string, len(configured)+1)
+	for k, v := range configured {
+		labels[k] = v
+	}
+	labels[ManagedByLabelKey] = ManagedByLabelValue
+	return labels
+}
+
 const NamespaceFile = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 
 // InClusterClientset builds a Kubernetes clientset from the in-cluster
