@@ -609,7 +609,7 @@ rolled back, one removed — plus a file that has never been read at all),
 [client trust domains](#client-trust-domains) whose revocation material has gone
 unusable or stale (`PuppetCAClientCRLUnusable`, `PuppetCAClientCRLRefusals` and
 `PuppetCAClientCRLStale`, and only where `client_ca` is configured), and
-Kubernetes export failures, and managed certificates that were never issued —
+Kubernetes export failures and managed certificates that were never issued —
 all with configurable thresholds. It does **not**
 alert on the fleet-relative `puppetca_ocsp_index_serials` comparison — that one
 is left to the operator, since it needs a `by (job)` aggregation to avoid

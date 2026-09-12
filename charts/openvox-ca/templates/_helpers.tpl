@@ -427,11 +427,21 @@ Three verbs, and the split between them is the whole of the design:
     decide whether a replacement is due, and reads the object's managedFields
     to tell an adoption from drift.
   * patch is narrowed. It is the server-side apply that writes the material.
-  * create cannot be narrowed, because an object has no name at admission
-    time. It is kept rather than dropped: a pre-created Secret makes the apply
-    a plain patch and works without it, but requiring N Secrets to exist first
+  * create cannot be narrowed. resourceNames is documented as having no effect
+    on create -- "this does not apply to create requests, because the object
+    name is not known at authorization time" (Kubernetes RBAC reference,
+    "Referring to resources"). An apply to a Secret that does not exist yet is
+    authorised as create, so narrowing it would refuse the first install; a
+    grant with resourceNames on create is not a tighter grant, it is one that
+    never permits the request at all.
+
+    It is kept rather than dropped: a pre-created Secret makes the apply a
+    plain patch and works without it, but requiring N Secrets to exist first
     stops the CA being installable without this chart, and it is what makes
-    "delete the Secret" a working remedy for a refused adoption.
+    "delete the Secret" a working remedy for a refused adoption. An operator
+    who does pre-create every Secret can drop this Role and bind a narrower
+    one of their own -- managedCerts.rbac.create: false leaves the RBAC
+    entirely to them.
 
 list and watch are deliberately absent. Neither can be narrowed by
 resourceNames, so an informer would need broad read access to every Secret in

@@ -37,7 +37,7 @@ import (
 // puppetca_leaf_certificate_not_after_timestamp_seconds covers its expiry and
 // the shipped expiry alerts cover it with no new series.
 //
-// One outcome that reasoning does not reach: an entry that has never issued at
+// The outcome that reasoning does not reach: an entry that has never issued at
 // all -- a store that never accepts a write. There is no series for a
 // certificate that does not exist, so no PromQL comparison can match its
 // absence; the Kubernetes exporter has the same hole and closes it with a
@@ -46,6 +46,17 @@ import (
 // series per configured entry, so that an entry which has never issued is a
 // value rather than an absence. PuppetCAManagedCertificateNeverIssued in
 // mixin/alerts.libsonnet is the rule.
+//
+// It is not the only gap, and the other one is left open deliberately. An entry
+// whose certificate was revoked and whose reissue then keeps failing still has
+// a leaf series -- a revoked certificate emits one -- so the never-issued rule
+// stays silent, and the expiry alerts do not fire until the certificate nears
+// its NotAfter. Between those two the component is presenting a revoked
+// certificate and nothing pages. Closing it needs a series this mechanism does
+// not publish: a per-entry reconcile-failure counter, which is the shape the
+// exporter's puppetca_kubernetes_export_last_error_timestamp_seconds takes.
+// That is worth doing and is not in #243; the reconcile failure is logged every
+// pass in the meantime.
 //
 // That series is deliberately general -- one label, the subject, and nothing
 // about the store -- so that the CA's own serving certificate (#326) can use it

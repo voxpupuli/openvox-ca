@@ -677,10 +677,20 @@
             // `max without (serial, state)` rather than `unless on (subject)`.
             // Both collapse the leaf series' per-certificate labels, but
             // `on (subject)` also discards every target label, so one replica's
-            // certificate would satisfy another replica's entry -- and a
-            // replica whose configuration differs from its siblings' is exactly
-            // the case worth catching. `without` keeps whatever labels the
-            // deployment attached, so the two sides match per scrape target.
+            // series would satisfy another replica's entry. `without` keeps
+            // whatever labels the deployment attached, so the two sides match
+            // per scrape target.
+            //
+            // Replicas of one CA share a backing store, so they see the same
+            // certificates and the difference this preserves is not a missing
+            // certificate on one of them. What it catches is a difference in
+            // *configuration*: managed_certs is per-process, so a half-applied
+            // rollout -- a new entry live on one replica and not yet on its
+            // siblings -- leaves the configured series on one target only. With
+            // `on (subject)` a certificate reported by any replica would cancel
+            // it, and the rollout would look complete. It also keeps the alert
+            // honest across two CAs scraped into one Prometheus, which share no
+            // store at all.
             //
             // A revoked certificate still emits its leaf series, so this stays
             // silent for an entry whose certificate was revoked and is awaiting

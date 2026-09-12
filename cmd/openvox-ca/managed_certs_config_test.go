@@ -183,6 +183,12 @@ managed_certs:
 	// cluster. This suite does not run in one, so the spec is the assertion:
 	// if the gate were wrong, building the client would fail here.
 	It("needs no cluster for a file-only configuration", func() {
+		// Set for the same reason as below: with these unset, a file-only
+		// configuration must still not reach for a client. If the gate broke,
+		// this fails here rather than depending on where the suite runs.
+		GinkgoT().Setenv("KUBERNETES_SERVICE_HOST", "")
+		GinkgoT().Setenv("KUBERNETES_SERVICE_PORT", "")
+
 		cfg := writeServerConfig(`
 managed_certs:
   - certname: a.example.com
@@ -196,6 +202,15 @@ managed_certs:
 	})
 
 	It("says which setting is at fault when a Secret store is configured outside a cluster", func() {
+		// Stated rather than assumed. "Outside a cluster" is what
+		// KUBERNETES_SERVICE_HOST and _PORT being unset means to client-go, and
+		// this spec inherited that from the environment it happened to run in.
+		// A suite run inside a pod -- which this repository's own compose and
+		// Kubernetes jobs are -- would have those set, and the spec would then
+		// pass or fail on something other than what it names.
+		GinkgoT().Setenv("KUBERNETES_SERVICE_HOST", "")
+		GinkgoT().Setenv("KUBERNETES_SERVICE_PORT", "")
+
 		cfg := writeServerConfig(`
 managed_certs:
   - certname: a.example.com

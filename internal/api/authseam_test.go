@@ -113,11 +113,15 @@ func caImporters() []string {
 	GinkgoHelper()
 	seen := map[string]bool{}
 	var found []string
-	// Walked to any depth rather than enumerated two levels down. The earlier
-	// version stopped one directory below internal/ and cmd/, which was tuned
-	// to today's tree -- and a sweep whose own reach is an enumeration fails
-	// exactly the way the list it audits would.
-	for _, root := range []string{"..", "../../cmd"} {
+	// The module root, walked to any depth. Two earlier versions narrowed this
+	// and both were tuned to the tree as it stood: the first stopped one
+	// directory below internal/ and cmd/, the second walked those two subtrees
+	// in full but no others. A package importing internal/ca from anywhere
+	// else -- a new top-level directory, a tools package, an example -- was
+	// swept by neither, so it needed no recorded decision and the gate stayed
+	// green while the surface grew. A sweep whose own reach is an enumeration
+	// fails exactly the way the list it audits would.
+	for _, root := range []string{"../.."} {
 		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
@@ -125,8 +129,16 @@ func caImporters() []string {
 			if !d.IsDir() {
 				return nil
 			}
+			// Dot directories are skipped as a class rather than by name:
+			// .git, .github, and -- the one that matters here -- .claude,
+			// which holds this repository's sibling worktrees. Walking into
+			// those would sweep other branches' source as though it were this
+			// one's, and report importers that do not exist on this branch.
+			if name := d.Name(); name != "." && name != ".." && strings.HasPrefix(name, ".") {
+				return filepath.SkipDir
+			}
 			switch d.Name() {
-			case "testdata", "vendor", ".git":
+			case "testdata", "vendor", "node_modules":
 				return filepath.SkipDir
 			}
 			if importsCA(path) && !seen[path] {
@@ -501,20 +513,32 @@ func check(c *x509.Certificate) bool { return hasPpCliAuth(c) && ca.OIDPpCliAuth
 	// recorded history of it. The sweep does not decide anything: it requires a
 	// decision to have been recorded, in one list or the other.
 	//
-	// "." is this package, which the walk reaches by its own directory rather
-	// than by the relative path the sweep produces; it is translated so the two
-	// spellings of the same package do not read as an unguarded importer.
+	// Both sides are reduced to one spelling before they are compared. The
+	// lists are written relative to this package, because that is where a
+	// contributor reads them; the sweep walks from the module root and yields
+	// paths relative to that. Left alone, "." and "../../internal/api" are the
+	// same package under two names, and the sweep would report this very
+	// package as unguarded.
+	modulePath := func(dir string) string {
+		if rel, err := filepath.Rel("../..", filepath.Join("../../internal/api", dir)); err == nil {
+			return filepath.Clean(rel)
+		}
+		return filepath.Clean(dir)
+	}
 	It("has a recorded decision for every package that imports internal/ca", func() {
 		known := map[string]bool{}
 		for _, dir := range guardedPackages {
-			if dir == "." {
-				dir = "../api"
-			}
-			known[filepath.Clean(dir)] = true
+			known[modulePath(dir)] = true
 		}
 		for dir := range exemptPackages {
-			known[filepath.Clean(dir)] = true
+			known[modulePath(dir)] = true
 		}
+
+		// The translation must actually reach this package, whose own entry is
+		// "." -- if it did not, every swept path would look unknown and the
+		// failure below would name the wrong defect.
+		Expect(known).To(HaveKey("internal/api"),
+			"precondition: guardedPackages' own entry must normalise to internal/api")
 
 		importers := caImporters()
 		Expect(importers).NotTo(BeEmpty(),
@@ -522,7 +546,9 @@ func check(c *x509.Certificate) bool { return hasPpCliAuth(c) && ca.OIDPpCliAuth
 				"and a sweep that finds nothing agrees with every list")
 
 		for _, dir := range importers {
-			Expect(known).To(HaveKey(filepath.Clean(dir)), strings.Join([]string{
+			rel, err := filepath.Rel("../..", dir)
+			Expect(err).NotTo(HaveOccurred(), dir)
+			Expect(known).To(HaveKey(filepath.Clean(rel)), strings.Join([]string{
 				dir + " imports " + caImportPath + " and is in neither guardedPackages nor exemptPackages.",
 				"That is a decision nobody has recorded, not a test to silence.",
 				"If the package offers a surface something other than an operator at a",
