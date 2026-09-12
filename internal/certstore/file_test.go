@@ -167,6 +167,25 @@ var _ = Describe("FileStore", func() {
 		// guess and the useful one are not the same: 0700 locks out the very
 		// component the certificate is for, and anything wider exposes the key
 		// by default. So the store names the directory instead.
+		// The other arm of the same check: the path exists and is not a
+		// directory, which is what a mistyped store path usually produces --
+		// `cert: /etc/openvox/ca.pem/cert.pem` where ca.pem is a file. Without
+		// this the branch could be deleted and the refusal above would still
+		// pass, reporting a missing directory for a path that is present.
+		It("fails when the directory is a file, and says which it is", func() {
+			notADir := filepath.Join(dir, "is-a-file")
+			Expect(os.WriteFile(notADir, []byte("PEM"), 0o644)).To(Succeed())
+			cfg = certstore.FilesConfig{
+				Cert: filepath.Join(notADir, "cert.pem"),
+				Key:  filepath.Join(dir, "key.pem"),
+			}
+
+			err := store().Save(ctx, []byte("CERT"), []byte("KEY"))
+			Expect(err).To(MatchError(ContainSubstring("is not a directory")))
+			Expect(err).To(MatchError(ContainSubstring(notADir)))
+			Expect(cfg.Key).NotTo(BeAnExistingFile())
+		})
+
 		It("fails naming the directory, before writing anything", func() {
 			missing := filepath.Join(dir, "does-not-exist")
 			cfg = certstore.FilesConfig{

@@ -711,7 +711,14 @@ func (f *FilesConfig) validate(where string, paths filePaths, idx int) error {
 		paths.material[p.path] = idx
 	}
 	if f.CA != "" {
-		if prev, dup := paths.material[f.CA]; dup && prev != idx {
+		// No `prev != idx` guard: this entry's own cert and key went into the
+		// map a few lines above, but the within-entry check at the top of this
+		// function has already refused an entry whose `ca` equals either of
+		// them. So a hit here is always another entry's, and a guard against
+		// self-matching would be a condition no input can reach -- which is
+		// worse than no guard, because it implies a case a reader will look
+		// for and not find.
+		if prev, dup := paths.material[f.CA]; dup {
 			return fmt.Errorf("%s: store.files.ca %q is the certificate or key of "+
 				"managed_certs[%d]: the chain written there would replace that entry's "+
 				"material on every pass", where, f.CA, prev)

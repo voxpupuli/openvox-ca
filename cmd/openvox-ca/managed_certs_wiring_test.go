@@ -139,18 +139,52 @@ managed_certs:
 		file, err := parser.ParseFile(fset, "main.go", nil, 0)
 		Expect(err).NotTo(HaveOccurred())
 
-		var called bool
+		var called, checked bool
 		var funcsSeen int
 		ast.Inspect(file, func(n ast.Node) bool {
 			if _, ok := n.(*ast.FuncLit); ok {
 				funcsSeen++
 			}
-			call, ok := n.(*ast.CallExpr)
+			// The shape that both calls it and acts on what it returns:
+			//
+			//	if err := attachManagedCerts(...); err != nil { ... }
+			//
+			// Checked rather than just counted, because the call being
+			// present says nothing about the refusal being honoured. Dropping
+			// the `if` -- writing `_ = attachManagedCerts(...)` -- leaves a CA
+			// that starts happily with a configuration it has just decided can
+			// never issue, which is the opposite of the fail-fast this
+			// function's own doc comment promises.
+			stmt, ok := n.(*ast.IfStmt)
 			if !ok {
 				return true
 			}
-			if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "attachManagedCerts" {
-				called = true
+			assign, ok := stmt.Init.(*ast.AssignStmt)
+			if !ok || len(assign.Rhs) != 1 {
+				return true
+			}
+			call, ok := assign.Rhs[0].(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			id, ok := call.Fun.(*ast.Ident)
+			if !ok || id.Name != "attachManagedCerts" {
+				return true
+			}
+			called = true
+
+			// The condition compares the assigned name against nil. Anything
+			// else -- a different variable, a comparison to something other
+			// than nil -- is not this error being checked.
+			bin, ok := stmt.Cond.(*ast.BinaryExpr)
+			if !ok || bin.Op != token.NEQ {
+				return true
+			}
+			lhs, lok := bin.X.(*ast.Ident)
+			rhs, rok := bin.Y.(*ast.Ident)
+			assigned, aok := assign.Lhs[len(assign.Lhs)-1].(*ast.Ident)
+			if lok && rok && aok && rhs.Name == "nil" && lhs.Name == assigned.Name {
+				checked = true
 			}
 			return true
 		})
@@ -163,6 +197,10 @@ managed_certs:
 			"main.go does not call attachManagedCerts, so no configured managed "+
 				"certificate would ever be issued, and every other spec in this "+
 				"file would still pass")
+		Expect(checked).To(BeTrue(),
+			"main.go calls attachManagedCerts without checking the error it "+
+				"returns, so a configuration that can never issue would start "+
+				"the server instead of refusing it")
 	})
 
 	It("refuses to start when the configuration could never issue", func() {

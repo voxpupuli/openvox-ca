@@ -84,7 +84,7 @@ func buildManagedCerts(cfg *serverConfig, absCADir, configPath string,
 
 	deps := certstore.Deps{CACerts: caCerts}
 	if cfg.ManagedCerts.NeedsKubernetes() {
-		client, err := k8sclient.InClusterClientset("a managed certificate's Kubernetes Secret store")
+		client, err := inClusterClientset("a managed certificate's Kubernetes Secret store")
 		if err != nil {
 			return nil, err
 		}
@@ -93,7 +93,7 @@ func buildManagedCerts(cfg *serverConfig, absCADir, configPath string,
 		// spells out every namespace is not held up by an unreadable
 		// ServiceAccount mount -- the same rule the exporter follows.
 		if cfg.ManagedCerts.NeedsDefaultNamespace() {
-			ns, err := k8sclient.PodNamespace()
+			ns, err := podNamespace()
 			if err != nil {
 				return nil, fmt.Errorf("resolving the namespace for a managed certificate "+
 					"whose store does not name one: %w", err)
@@ -128,6 +128,20 @@ func attachManagedCerts(myCA *ca.CA, cfg *serverConfig, absCADir, configPath str
 	myCA.ManagedCerts = managed
 	return nil
 }
+
+// The two cluster lookups, as variables so a spec can drive their failure
+// paths.
+//
+// Both are fatal at startup and both produce a message an operator has to act
+// on -- one says the CA is not in a pod, the other that it cannot read its own
+// ServiceAccount namespace -- and neither was reachable from a unit spec,
+// because the only way to fail them is to run outside a cluster, which is also
+// the only way the rest of the suite runs. The seam is the smallest thing that
+// makes the *messages* testable; it is never reassigned outside a test.
+var (
+	inClusterClientset = k8sclient.InClusterClientset
+	podNamespace       = k8sclient.PodNamespace
+)
 
 // exportSecretTargets lists the (namespace, name) of every Secret the
 // Kubernetes exporter writes, for the overlap check.

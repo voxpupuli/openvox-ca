@@ -1362,6 +1362,9 @@ TLS material a storage backend or key provider uses (`etcd_tls_*`, `redis_tls_*`
 Overwriting one of those breaks this CA's connection to its own backend, which
 is loud and fixable by re-copying the file from wherever it was provisioned —
 a different class from the CA key, which is not reconstructible from anything.
+`openbao.kubernetes_jwt_file` is excluded for a different reason again: the
+kubelet projects it, so it is not the CA's to protect and replacing it is a pod
+restart.
 That list is not prose: `cmd/openvox-ca/reserved_paths_test.go` walks the
 configuration and fails if a path-shaped setting is neither reserved nor
 exempted there with a reason. It checks the other two directions as well — an

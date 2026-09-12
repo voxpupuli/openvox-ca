@@ -20,12 +20,16 @@ package main
 import (
 	"context"
 	"crypto/x509"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/k8sexport"
@@ -252,12 +256,113 @@ var _ = Describe("the export targets a managed certificate is checked against", 
 	})
 })
 
+// Both cluster lookups are fatal at startup, and each produces a message an
+// operator has to act on. Neither was reachable from a spec before the seam:
+// the only way to fail them is to run outside a cluster, which is also the only
+// way this suite runs -- so the messages were unasserted precisely because the
+// failure was ambient rather than arranged.
+var _ = Describe("the cluster lookups a Secret store needs", func() {
+	const secretStore = `
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {secret: {name: a-tls}}
+`
+
+	It("says which setting needs the namespace it could not resolve", func() {
+		// The client builds; only the namespace lookup fails. Without the
+		// seam this arm is unreachable, because a CA that cannot build a
+		// client never gets here.
+		restoreClient := inClusterClientset
+		restoreNS := podNamespace
+		DeferCleanup(func() { inClusterClientset, podNamespace = restoreClient, restoreNS })
+		inClusterClientset = func(string) (kubernetes.Interface, error) {
+			return fake.NewClientset(), nil
+		}
+		podNamespace = func() (string, error) {
+			return "", errors.New("open /var/run/secrets/.../namespace: no such file")
+		}
+
+		_, err := buildManagedCerts(writeServerConfig(secretStore), specCADir,
+			specConfigPath, stubCACerts{})
+		Expect(err).To(MatchError(ContainSubstring("resolving the namespace")))
+		Expect(err).To(MatchError(ContainSubstring("does not name one")))
+		Expect(err).To(MatchError(ContainSubstring("no such file")))
+	})
+
+	// The namespace is resolved only when something relies on it, so a
+	// configuration that spells every namespace out is not held up by an
+	// unreadable ServiceAccount mount. The mutation this catches is dropping
+	// the NeedsDefaultNamespace gate.
+	It("does not resolve a namespace nothing needs", func() {
+		restoreClient := inClusterClientset
+		restoreNS := podNamespace
+		DeferCleanup(func() { inClusterClientset, podNamespace = restoreClient, restoreNS })
+		inClusterClientset = func(string) (kubernetes.Interface, error) {
+			return fake.NewClientset(), nil
+		}
+		called := false
+		podNamespace = func() (string, error) {
+			called = true
+			return "", errors.New("must not be consulted")
+		}
+
+		managed, err := buildManagedCerts(writeServerConfig(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {secret: {name: a-tls, namespace: openvox}}
+`), specCADir, specConfigPath, stubCACerts{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(managed).To(HaveLen(1))
+		Expect(called).To(BeFalse(), "the pod namespace was resolved for a store that names its own")
+	})
+})
+
 var _ = Describe("saying when a managed certificate is an admin credential", func() {
 	// SECURITY: a certname listed in puppet_server is an administrator, and
 	// clientAuth is what lets the certificate be presented. The two together
 	// are an admin credential, so the store holding that key is one -- which is
 	// the intended configuration for OpenVox Server, and exactly why it is
 	// said out loud rather than left to be inferred.
+	// The failure arm, whose whole behaviour is a decision about who reports
+	// it. buildAdminAllowList failing means the allow list is unknown, so this
+	// function cannot tell whether any managed certificate is an admin
+	// credential -- and the warning that would have said so is the one thing
+	// this function exists to produce.
+	Describe("when the admin allow list cannot be read", func() {
+		badCfg := func() *serverConfig {
+			return &serverConfig{
+				PuppetServerFile: filepath.Join(GinkgoT().TempDir(), "does-not-exist"),
+			}
+		}
+		managed := []ca.ManagedCert{{Spec: ca.CertSpec{Subject: "puppetserver.example.com"}}}
+
+		It("says so when nothing else will, on the plain-HTTP path", func() {
+			out := captureLogs(slog.LevelWarn, func() {
+				warnIfManagedCertIsAdmin(badCfg(), managed)
+			})
+			Expect(out).To(ContainSubstring("Could not read the admin allow list"))
+			Expect(out).To(ContainSubstring("CA admin credential"))
+		})
+
+		// buildAuthConfig calls the same function a moment later and fails the
+		// startup with it, but only when TLS is configured -- it is inside the
+		// `if cfg.TLSCert != "" && cfg.TLSKey != ""` branch in main.go. Saying
+		// it here too would make the first mention look like the cause.
+		It("stays silent when buildAuthConfig will report it", func() {
+			cfg := badCfg()
+			cfg.TLSCert = "/etc/openvox-ca/tls.pem"
+			cfg.TLSKey = "/etc/openvox-ca/tls-key.pem"
+
+			Expect(captureLogs(slog.LevelWarn, func() {
+				warnIfManagedCertIsAdmin(cfg, managed)
+			})).To(BeEmpty())
+		})
+	})
+
 	It("warns when the certname is listed in puppet_server", func() {
 		cfg := &serverConfig{PuppetServer: "puppetserver.example.com, other.example.com"}
 		managed := []ca.ManagedCert{{Spec: ca.CertSpec{Subject: "puppetserver.example.com"}}}

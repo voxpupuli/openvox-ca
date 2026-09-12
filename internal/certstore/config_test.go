@@ -819,6 +819,23 @@ managed_certs:
 				CheckReservedPaths([]certstore.ReservedPath{cadir})).To(Succeed())
 		})
 
+		// The arm that exists because "/" + separator is "//", which prefixes
+		// nothing a cleaned path can be. Nobody reserves the root in a sane
+		// configuration, but the branch is there to be correct rather than to
+		// be used -- and an untested branch that can never be reached by the
+		// other specs is one a refactor can quietly invert.
+		It("treats a reserved root as covering everything under it", func() {
+			root := []certstore.ReservedPath{{Setting: "root", Path: "/", Tree: true}}
+			err := files("/etc/a.pem", "/etc/a-key.pem").CheckReservedPaths(root)
+			Expect(err).To(MatchError(ContainSubstring("is inside root")))
+			Expect(err).To(MatchError(ContainSubstring("/etc/a.pem")))
+
+			// And the root itself, which takes the equality arm rather than
+			// the prefix one.
+			Expect(files("/", "/etc/a-key.pem").CheckReservedPaths(root)).
+				To(MatchError(ContainSubstring("is inside root")))
+		})
+
 		It("refuses a reserved file only on equality", func() {
 			reserved := []certstore.ReservedPath{{Setting: "tls_key", Path: "/etc/ca/serving-key.pem"}}
 			Expect(files("/etc/ca/a.pem", "/etc/ca/serving-key.pem").
