@@ -167,7 +167,8 @@ tested floor rather than a ceiling; naming them here would go stale on its own.
 The certificates themselves live under `config.managed_certs` and
 `config.serving_cert`; this block only creates the RBAC for the ones kept in a
 Secret. See
-[managed certificates](https://github.com/voxpupuli/openvox-ca/blob/main/docs/configuration.md#managed-certificates).
+[managed certificates](https://github.com/voxpupuli/openvox-ca/blob/main/docs/configuration.md#managed-certificates)
+and [the CA's own serving certificate](https://github.com/voxpupuli/openvox-ca/blob/main/docs/configuration.md#the-cas-own-serving-certificate).
 
 | Key | Default | Description |
 | --- | --- | --- |

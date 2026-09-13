@@ -429,9 +429,9 @@ with no issued certificate), `signed`, or `revoked`.
 ### Managed certificates
 
 Only present when [`managed_certs`](configuration.md#managed-certificates) or
-[`serving_cert`](configuration.md#the-cas-own-serving-certificate) is
-configured. One series per entry, whatever store it uses, published from the
-configuration rather than from anything that has happened.
+[`serving_cert`](configuration.md#the-cas-own-serving-certificate) is configured.
+One series per entry, whatever store it uses, published from the configuration
+rather than from anything that has happened.
 
 The CA's own serving certificate is one such entry, labelled with the CA's own
 certname, because it renews on the same loop through the same mechanism. So a

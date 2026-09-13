@@ -352,10 +352,11 @@ kubernetesExport:
     namespaces: []
 
 # -- Managed certificates ------------------------------------------------------
-# Kubernetes wiring for `config.managed_certs` and `config.serving_cert`, the
-# certificates openvox-ca
-# issues and renews for OpenVox components. The certificates themselves are
-# configured under `config`, not here; see docs/configuration.md.
+
+# Kubernetes wiring for `config.managed_certs` and `config.serving_cert` -- the
+# certificates openvox-ca issues and renews for OpenVox components, and the one
+# its own listener presents. The certificates themselves are configured under
+# `config`, not here; see docs/configuration.md.
 managedCerts:
   rbac:
     # Create the Role/RoleBinding for config.managed_certs and
