@@ -285,6 +285,22 @@ func (h *servingCertHolder) install(certPEM, keyPEM []byte) error {
 			"problems", strings.Join(problems, "; "))
 	}
 
+	// certReloader's second check, carried across so the two listener sources
+	// really do report the same problems. servingCertProblems deliberately
+	// excludes basicConstraints -- a CA leaf verifies and serves perfectly well,
+	// so what is wrong with it is custodial rather than protocol -- and this CA
+	// never issues itself one. It reaches here the way any foreign material
+	// does: the Load wrapper installs whatever the store holds, which is how a
+	// peer's renewal arrives and equally how anything pre-seeded into the store
+	// does. The reconcile pass reissues over it, so the exposure is transient
+	// unless that also fails, which is exactly when someone wants to be told.
+	if cert.Leaf.IsCA {
+		slog.Warn("The serving material in the store is a CA certificate; serving from it "+
+			"puts a signing key on the network-facing listener. The CA will replace it on "+
+			"the next reconcile pass",
+			"store", h.describe, "subject", cert.Leaf.Subject.CommonName)
+	}
+
 	now := time.Now()
 	switch {
 	case now.After(cert.Leaf.NotAfter):
