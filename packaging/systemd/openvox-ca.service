@@ -59,8 +59,14 @@ RestartSec=5s
 # that, Init may spend two internal/ca LockTimeout budgets in sequence waiting
 # on another replica — hmac-key on a cold start, then bootstrap — so this must
 # clear 2 x LockTimeout with room for the key generation on top.
-# cmd/openvox-ca/launcher_test.go asserts that floor; charts/openvox-ca gives
-# Init the same 300s through its startupProbe.
+# cmd/openvox-ca/launcher_test.go asserts that floor.
+#
+# The Helm chart does NOT hold to it, and never did. Its startupProbe gives
+# Init 30 x 2s = 60s, and charts/openvox-ca/values.yaml records why: 60s does
+# not cover the same worst case, that is deliberate, and the maintainer ruled
+# on it rather than raising the number. Two deployment shapes, two budgets --
+# read values.yaml before reconciling them, because the gap is the decision
+# and not an oversight.
 TimeoutStartSec=300s
 
 # Must exceed the drain budget (shutdown_timeout_sec, 25s by default) plus the
