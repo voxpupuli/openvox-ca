@@ -700,7 +700,6 @@ that cannot abort.
 {{- end -}}
 
 {{/*
-Whether config.serving_cert keeps its certificate in a Kubernetes Secret.{{/*
 Whether config.serving_cert keeps its certificate in a Kubernetes Secret.
 
 Distinct from openvox-ca.managedCertSecrets, which answers for both blocks at
@@ -711,7 +710,6 @@ apart.
 */}}
 {{- define "openvox-ca.servingCertUsesSecret" -}}
 {{- if eq (include "openvox-ca.servingCertConfigured" .) "true" -}}
-{{- $config := include "openvox-ca.config" . | fromYaml -}}
 {{- $store := include "openvox-ca.servingCertStore" . | fromJson -}}
 {{- if dig "secret" "name" "" $store -}}
 true

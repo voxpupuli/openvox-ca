@@ -286,6 +286,20 @@ func (r *configReloader) reload() error {
 	return err
 }
 
+// reloadingStatus says what this reload will actually re-read, for the status
+// text systemd shows while `systemctl reload` runs.
+//
+// A self-provisioning CA has no keypair to re-read: certs is nil because the
+// reconcile loop owns that certificate, and announcing "Reloading TLS material"
+// there invites the belief that a reload rotated it. This is the one place an
+// operator running the command looks.
+func (r *configReloader) reloadingStatus() string {
+	if r.certs == nil {
+		return "Reloading the admin allow list"
+	}
+	return "Reloading TLS material and the admin allow list"
+}
+
 // diffAllowList reports which CNs the replacement adds and which it withdraws,
 // each sorted so the log line is stable and diffable.
 func diffAllowList(old, new map[string]bool) (added, removed []string) {
@@ -352,7 +366,7 @@ func runReloadWatcher(ctx context.Context, hupCh <-chan os.Signal, n *sdnotify.N
 			return
 		case <-hupCh:
 			slog.Info("Reloading configuration (SIGHUP)")
-			n.Reloading("Reloading TLS material and the admin allow list")
+			n.Reloading(r.reloadingStatus())
 
 			if err := r.reload(); err != nil {
 				slog.Error("Configuration reload failed; keeping the previous configuration", "error", err)

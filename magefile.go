@@ -3587,6 +3587,27 @@ config:
 			wantErr:    "will refuse to start",
 		},
 		{
+			// `key` alone, because fail aborts at the first offending field and
+			// `cert` is first in the loop -- so every other failing case is
+			// decided on `cert` and this element could be deleted with the
+			// chart suite green. The chain file has its own case below for the
+			// same reason.
+			name: "a serving_cert key file inside the cadir",
+			valuesYAML: `
+config:
+  cadir: /var/lib/puppet-ca/ca
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      files:
+        cert: /var/lib/puppet-ca/tls.crt
+        key: /var/lib/puppet-ca/ca/tls.key
+`,
+			wantErr: "inside the cadir",
+		},
+		{
 			// The chain file gets the cadir rule too, and no case put the
 			// failing path anywhere but `cert` -- so dropping `key` or `ca`
 			// from the loop rendered cleanly and refused at startup instead.

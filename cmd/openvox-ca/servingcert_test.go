@@ -880,6 +880,38 @@ var _ = Describe("serving_cert colliding with managed_certs", func() {
 		Expect(err).NotTo(HaveOccurred())
 	})
 
+	It("allows two differently named Secrets in one namespace", func() {
+		// The must-not-refuse twin for the name arm of the guard. The certname
+		// and chain-file guards each have one; this one did not, so widening
+		// the condition to ignore the Secret name -- refusing every deployment
+		// whose serving and component Secrets differ, which is all of them --
+		// left the whole suite green.
+		restoreClient, restoreNS := inClusterClientset, podNamespace
+		DeferCleanup(func() { inClusterClientset, podNamespace = restoreClient, restoreNS })
+		inClusterClientset = func(string) (kubernetes.Interface, error) {
+			return fake.NewClientset(), nil
+		}
+		podNamespace = func() (string, error) { return "openvox", nil }
+
+		cfg := &serverConfig{
+			ServingCert: &certstore.Entry{
+				Certname: "ca.test", Names: []string{"ca.test"},
+				RenewBefore: certstore.Duration(720 * time.Hour),
+				Store: certstore.StoreConfig{Secret: &certstore.SecretConfig{
+					Name: "openvox-ca-serving-tls", Namespace: "openvox"}},
+			},
+			ManagedCerts: certstore.Config{{
+				Certname: "component.test", Names: []string{"component.test"},
+				RenewBefore: certstore.Duration(720 * time.Hour),
+				Store: certstore.StoreConfig{Secret: &certstore.SecretConfig{
+					Name: "puppetserver-tls", Namespace: "openvox"}},
+			}},
+		}
+
+		_, err := buildServingCert(cfg, GinkgoT().TempDir(), "", stubCACerts{})
+		Expect(err).NotTo(HaveOccurred())
+	})
+
 	It("allows one Secret name in two spelled-out namespaces", func() {
 		// The case the conservative arm must not swallow: two namespaces that
 		// genuinely differ, both written down, so nothing has to be guessed.
@@ -1501,5 +1533,59 @@ var _ = Describe("the serving holder's cannot-serve warning", func() {
 		Expect(logs).To(ContainSubstring("cannot serve TLS"))
 		Expect(logs).To(ContainSubstring("no subjectAltName"))
 		Expect(logs).To(ContainSubstring("does not include serverAuth"))
+	})
+})
+
+// The two diagnostics added so the serving path reports what certReloader does.
+var _ = Describe("the serving holder's custody warning", func() {
+	It("says so when the store holds a CA certificate", func() {
+		// servingCertProblems deliberately does not report this -- a CA leaf
+		// verifies and serves perfectly well, so the fault is custodial rather
+		// than protocol -- which is why certReloader warns separately and why
+		// this path has to as well, or the two listener sources disagree about
+		// a signing key on the network-facing listener.
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		Expect(err).NotTo(HaveOccurred())
+		tmpl := &x509.Certificate{
+			SerialNumber:          big.NewInt(3),
+			Subject:               pkix.Name{CommonName: "ca.test"},
+			DNSNames:              []string{"ca.test"},
+			NotBefore:             time.Now().Add(-time.Hour),
+			NotAfter:              time.Now().Add(24 * time.Hour),
+			KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+			ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+			IsCA:                  true,
+			BasicConstraintsValid: true,
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+		Expect(err).NotTo(HaveOccurred())
+		keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+		Expect(err).NotTo(HaveOccurred())
+
+		h := &servingCertHolder{describe: "Secret openvox/ca-tls"}
+		logs := captureLogs(slog.LevelWarn, func() {
+			Expect(h.install(
+				pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+				pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}),
+			)).To(Succeed())
+		})
+		Expect(logs).To(ContainSubstring("is a CA certificate"))
+		Expect(logs).To(ContainSubstring("Secret openvox/ca-tls"))
+		// And not the cannot-serve warning: this certificate serves fine, which
+		// is the whole reason the two checks are separate.
+		Expect(logs).NotTo(ContainSubstring("cannot serve TLS"))
+	})
+})
+
+// The reload status text, which must not announce work this path does not do.
+var _ = Describe("the SIGHUP status text", func() {
+	It("names only the allow list when the CA provisions its own certificate", func() {
+		Expect((&configReloader{certs: nil}).reloadingStatus()).
+			To(Equal("Reloading the admin allow list"))
+	})
+
+	It("names the TLS material when an operator supplied the keypair", func() {
+		Expect((&configReloader{certs: &certReloader{}}).reloadingStatus()).
+			To(ContainSubstring("TLS material"))
 	})
 })
