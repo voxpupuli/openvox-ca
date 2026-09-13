@@ -204,8 +204,10 @@ func (c *certReloader) GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, e
 // pretending otherwise would be worse than requiring a restart. See
 // docs/systemd.md for the operator-facing description.
 type configReloader struct {
-	// certs is the TLS keypair holder, or nil when the server is running
-	// without TLS and there is nothing to rotate.
+	// certs is the operator-supplied TLS keypair holder, or nil when there is
+	// nothing for a reload to rotate: no TLS at all, or a self-provisioned
+	// serving certificate, whose renewal the reconcile loop owns and which has
+	// no configured path to re-read.
 	certs *certReloader
 
 	// auth is the live authorization config whose admin allow list is

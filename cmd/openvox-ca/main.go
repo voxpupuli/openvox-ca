@@ -824,7 +824,7 @@ func newRootCmd() *cobra.Command {
 
 			// The CA's own serving certificate, when it issues its own. Built
 			// here so that a configuration error is refused before anything
-			// binds, and appended to the same reconcile set so it renews on the
+			// binds, and put into the same reconcile set so it renews on the
 			// same loop a component certificate does -- the renewal is
 			// identical, and only the startup and listener halves are not.
 			serving, err := buildServingCert(cfg, absCADir, resolved, store)
@@ -832,7 +832,16 @@ func newRootCmd() *cobra.Command {
 				return err
 			}
 			if serving != nil {
-				myCA.ManagedCerts = append(myCA.ManagedCerts, serving.entry)
+				// FIRST in the set, not last, and that ordering is load-bearing
+				// rather than cosmetic. ReconcileManaged walks the slice in
+				// order, and provisionServingCert bounds the whole startup pass
+				// with one budget -- so an entry placed after the component
+				// certificates can have that budget spent before it gets a
+				// turn, leaving the store empty and the startup fatal because
+				// of some other certificate whose own failure is meant to be
+				// routine. What must exist before the listener binds is this
+				// one, so it goes first and the rest take what is left.
+				myCA.ManagedCerts = append([]ca.ManagedCert{serving.entry}, myCA.ManagedCerts...)
 			}
 
 			// SECURITY: In frontend mode, use the remote signer: the CA private
@@ -942,9 +951,13 @@ func newRootCmd() *cobra.Command {
 				}()
 			}
 
-			// certs holds the server's TLS keypair, or stays nil without TLS.
-			// It is reachable by the reload handler below so a renewed server
-			// certificate can be picked up without a restart.
+			// certs holds the operator-supplied TLS keypair, and stays nil in
+			// two cases that are no longer the same: no TLS at all, and TLS
+			// from a self-provisioned serving certificate, which the reconcile
+			// loop owns. It is reachable by the reload handler below so a
+			// renewed server certificate can be picked up without a restart --
+			// which is also why the second case leaves it nil, since there is
+			// no configured path for SIGHUP to re-read.
 			var certs *certReloader
 			if tlsConfigured {
 				// Exactly one source, because the two are mutually exclusive:

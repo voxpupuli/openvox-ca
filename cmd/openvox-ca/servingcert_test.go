@@ -810,6 +810,17 @@ var _ = Describe("serving_cert colliding with managed_certs", func() {
 	It("allows one Secret name in two spelled-out namespaces", func() {
 		// The case the conservative arm must not swallow: two namespaces that
 		// genuinely differ, both written down, so nothing has to be guessed.
+		//
+		// The cluster is stubbed so this asserts unconditionally. Written the
+		// other way -- asserting only that the error, if any, was not the
+		// collision one -- it passed both when the check was reached and when
+		// nothing reached it, which is no assertion at all.
+		restoreClient, restoreNS := inClusterClientset, podNamespace
+		DeferCleanup(func() { inClusterClientset, podNamespace = restoreClient, restoreNS })
+		inClusterClientset = func(string) (kubernetes.Interface, error) {
+			return fake.NewClientset(), nil
+		}
+		podNamespace = func() (string, error) { return "ca-system", nil }
 		cfg := &serverConfig{
 			ServingCert: &certstore.Entry{
 				Certname: "ca.test", Names: []string{"ca.test"},
@@ -825,12 +836,8 @@ var _ = Describe("serving_cert colliding with managed_certs", func() {
 			}},
 		}
 
-		// Refused for needing a cluster client rather than for colliding, which
-		// is what proves the collision check passed.
 		_, err := buildServingCert(cfg, GinkgoT().TempDir(), "", stubCACerts{})
-		if err != nil {
-			Expect(err).NotTo(MatchError(ContainSubstring("both store their material")))
-		}
+		Expect(err).NotTo(HaveOccurred())
 	})
 })
 
@@ -1061,3 +1068,161 @@ func (refusingStore) Load(context.Context) ([]byte, []byte, error) {
 	return nil, nil, errors.New("refusing to read")
 }
 func (refusingStore) Save(context.Context, []byte, []byte) error { return nil }
+
+// The arms of the startup path that the specs above reach only incidentally:
+// the swallowed install failure, the bound on the pass, the ephemeral-store
+// line, and the no-op that keeps a real renewal legible.
+var _ = Describe("the serving certificate's startup and renewal reporting", func() {
+	It("keeps serving and says so when the store holds material it cannot present", func() {
+		// The only place in this file where an error is deliberately not
+		// propagated: returning it would stop the very pass that replaces the
+		// material. It is the arm that carries another replica's renewal, so a
+		// silent version of it leaves this replica presenting the previous
+		// certificate until it expires with nothing in the log.
+		sc := newServingCert(garbageStore{}, ca.CertSpec{Subject: "ca.test"})
+
+		var certPEM, keyPEM []byte
+		var err error
+		logs := captureLogs(slog.LevelWarn, func() {
+			certPEM, keyPEM, err = sc.entry.Load(context.Background())
+		})
+
+		Expect(err).NotTo(HaveOccurred(), "the repairing pass must not be stopped")
+		Expect(certPEM).NotTo(BeEmpty(), "the material must still reach the decision")
+		Expect(keyPEM).NotTo(BeEmpty())
+		Expect(sc.ownError()).To(HaveOccurred())
+		Expect(logs).To(ContainSubstring("cannot be presented by the listener"))
+		Expect(logs).To(ContainSubstring("the garbage store"))
+	})
+
+	It("bounds the whole startup pass with one lock budget, not one per entry", func() {
+		// internal/ca budgets each entry separately, so an unbounded pass over
+		// N entries can spend N x LockTimeout before the listener binds --
+		// inside a window the chart budgets at 60s in total.
+		//
+		// The property that tells the two apart is not how long the pass takes
+		// but whether the entries SHARE a deadline. Under one budget every
+		// entry sees the same instant, because context.WithTimeout keeps the
+		// earlier of the two; without it each entry's deadline is its own start
+		// plus LockTimeout, so they drift apart by however long the previous
+		// entries took. The first probe therefore delays deliberately: with the
+		// bound the two deadlines stay identical, and without it they differ by
+		// that delay.
+		myCA, store := newRefresherTestCA()
+		myCA.LeafKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+
+		const delay = 80 * time.Millisecond
+		var deadlines []time.Time
+		probe := func(subject string, wait time.Duration) ca.ManagedCert {
+			return ca.ManagedCert{
+				Spec: ca.CertSpec{
+					Subject: subject, DNSNames: []string{subject},
+					RenewBefore: 720 * time.Hour,
+				},
+				Load: func(ctx context.Context) ([]byte, []byte, error) {
+					if d, ok := ctx.Deadline(); ok {
+						deadlines = append(deadlines, d)
+					}
+					time.Sleep(wait)
+					// Declining keeps the probe from issuing anything; the
+					// deadline is all this spec wants from it.
+					return nil, nil, errors.New("probe entry declines")
+				},
+				Save: func(context.Context, []byte, []byte) error { return nil },
+			}
+		}
+
+		sc, err := buildServingCert(cfgWithServingFiles(GinkgoT().TempDir()),
+			GinkgoT().TempDir(), "", store)
+		Expect(err).NotTo(HaveOccurred())
+		myCA.ManagedCerts = []ca.ManagedCert{sc.entry, probe("a.test", delay), probe("b.test", 0)}
+
+		Expect(provisionServingCert(context.Background(), myCA, sc)).To(Succeed())
+
+		Expect(deadlines).To(HaveLen(2),
+			"precondition: both probe entries must have been reconciled and seen a deadline")
+		Expect(deadlines[1]).To(BeTemporally("~", deadlines[0], delay/4),
+			"the startup pass gives each entry its own budget instead of sharing one, so a "+
+				"deployment with more component certificates gets a longer startup")
+	})
+})
+
+// garbageStore returns material that reads cleanly and is not a keypair.
+type garbageStore struct{}
+
+func (garbageStore) String() string { return "the garbage store" }
+func (garbageStore) Load(context.Context) ([]byte, []byte, error) {
+	return []byte("not a certificate"), []byte("nor a key"), nil
+}
+func (garbageStore) Save(context.Context, []byte, []byte) error { return nil }
+
+// cfgWithServingFiles is a self-provisioning configuration writing into dir.
+func cfgWithServingFiles(dir string) *serverConfig {
+	return &serverConfig{
+		Hostname: "ca.test",
+		ServingCert: &certstore.Entry{
+			Certname: "ca.test", Names: []string{"ca.test"},
+			RenewBefore: certstore.Duration(720 * time.Hour),
+			KeyAlgo:     "ecdsa", KeySize: 256,
+			Store: certstore.StoreConfig{Files: &certstore.FilesConfig{
+				Cert: filepath.Join(dir, "tls.crt"), Key: filepath.Join(dir, "tls.key")}},
+		},
+	}
+}
+
+// The two log lines that are promises rather than incidentals: the one
+// docs/configuration.md says makes an ephemeral store visible, and the
+// suppression that keeps a real renewal legible.
+var _ = Describe("what the serving certificate reports at startup and on renewal", func() {
+	It("says it issued into an empty store, which is what makes an ephemeral one visible", func() {
+		// A store that loses its material every restart issues a fresh
+		// certificate each time and supersedes the previous one, accumulating
+		// CRL entries for certificates nothing presented. That is a legitimate
+		// choice; this line is what stops it being an accident, and
+		// docs/configuration.md publishes it as such.
+		dir := GinkgoT().TempDir()
+		myCA, store := newRefresherTestCA()
+		myCA.LeafKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+
+		sc, err := buildServingCert(cfgWithServingFiles(dir), GinkgoT().TempDir(), "", store)
+		Expect(err).NotTo(HaveOccurred())
+		myCA.ManagedCerts = []ca.ManagedCert{sc.entry}
+
+		logs := captureLogs(slog.LevelInfo, func() {
+			Expect(provisionServingCert(context.Background(), myCA, sc)).To(Succeed())
+		})
+		Expect(logs).To(ContainSubstring("store held none"))
+
+		// And it does not repeat on a restart against a store that kept its
+		// material, or the line would say nothing about which case this is.
+		sc2, err := buildServingCert(cfgWithServingFiles(dir), GinkgoT().TempDir(), "", store)
+		Expect(err).NotTo(HaveOccurred())
+		myCA.ManagedCerts = []ca.ManagedCert{sc2.entry}
+
+		again := captureLogs(slog.LevelInfo, func() {
+			Expect(provisionServingCert(context.Background(), myCA, sc2)).To(Succeed())
+		})
+		Expect(again).NotTo(ContainSubstring("store held none"))
+	})
+
+	It("reports a renewal once, not on every pass that reloads the same material", func() {
+		// Load installs on every reconcile pass, so without the unchanged-material
+		// check the listener would report an installation every interval and the
+		// line announcing a real renewal would be worthless.
+		myCA, store := newRefresherTestCA()
+		myCA.LeafKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		sc, err := buildServingCert(cfgWithServingFiles(GinkgoT().TempDir()),
+			GinkgoT().TempDir(), "", store)
+		Expect(err).NotTo(HaveOccurred())
+		myCA.ManagedCerts = []ca.ManagedCert{sc.entry}
+		Expect(provisionServingCert(context.Background(), myCA, sc)).To(Succeed())
+
+		certPEM, keyPEM, err := sc.store.Load(context.Background())
+		Expect(err).NotTo(HaveOccurred())
+
+		first := captureLogs(slog.LevelInfo, func() {
+			Expect(sc.holder.install(certPEM, keyPEM)).To(Succeed())
+		})
+		Expect(first).To(BeEmpty(), "the material is unchanged, so nothing should be reported")
+	})
+})

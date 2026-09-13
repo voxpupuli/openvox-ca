@@ -597,19 +597,22 @@ easy to get wrong:
   presents its own projected ServiceAccount token, which it reads from a mounted
   file, and OpenBao performs the `TokenReview` itself — so the API server is
   OpenBao's peer here, not the CA's. Egress to the API is needed for
-  [Kubernetes export](#kubernetes-export) and for
-  [managed certificates](#managed-certificates) kept in a Secret, both of which
-  really do call it. Listing it unconditionally opens a hole the deployment does
-  not use.
-- **A managed certificate in a Secret needs that egress; one in local files does
-  not.** The distinction is the same one the token-mount table above draws, and
-  getting it wrong fails quietly: the reconcile pass cannot write, logs it per
-  entry, and retries — so readiness stays green and the certificate simply never
-  appears.
+  [Kubernetes export](#kubernetes-export), for
+  [managed certificates](#managed-certificates) kept in a Secret, and for
+  [the CA's own serving certificate](configuration.md#the-cas-own-serving-certificate)
+  kept in one, all of which really do call it. Listing it unconditionally opens
+  a hole the deployment does not use.
+- **A certificate in a Secret needs that egress; one in local files does not.**
+  The distinction is the same one the token-mount table above draws. Getting it
+  wrong for a managed certificate fails quietly: the reconcile pass cannot
+  write, logs it per entry, and retries — so readiness stays green and the
+  certificate simply never appears. Getting it wrong for the serving
+  certificate does not fail quietly at all: the CA cannot read the Secret
+  holding the certificate its listener presents, so it refuses to start.
 
 So the list is: your storage backend, OpenBao if the key lives there, anything
-your sidecars fetch, and the Kubernetes API if you export or keep a managed
-certificate in a Secret.
+your sidecars fetch, and the Kubernetes API if you export, or keep a managed
+certificate or the CA's own serving certificate in a Secret.
 
 ## Kubernetes export
 
@@ -686,10 +689,10 @@ cannot write is retried on the next pass, while the serving certificate is what
 the listener presents, so the CA does not start without it.
 
 **Those namespaces must already exist.** They come out of `config.managed_certs`
-and `config.serving_cert` rather than from a values key, so the chart has no list to create them from and
-does not try; an install naming a namespace that does not exist fails on the
-Role. Create them first, or point the entries at namespaces the release already
-owns.
+and `config.serving_cert` rather than from a values key, so the chart has no
+list to create them from and does not try; an install naming a namespace that
+does not exist fails on the Role. Create them first, or point the entries at
+namespaces the release already owns.
 
 A `files` store needs something from the chart too, though not RBAC: the pod
 runs with `readOnlyRootFilesystem: true`, so the directory a file store writes

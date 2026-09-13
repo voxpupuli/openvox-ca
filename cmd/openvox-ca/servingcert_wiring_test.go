@@ -97,10 +97,18 @@ var _ = Describe("the serve command's serving-certificate wiring", func() {
 				"instead of refusing to start")
 	})
 
-	It("appends the serving entry to the reconcile set", func() {
-		// The quietest of the three edits, and the one with the longest fuse:
-		// the certificate is issued at startup and then never renewed.
-		var appended bool
+	It("puts the serving entry into the reconcile set, ahead of the rest", func() {
+		// Two claims, and the ordering is not cosmetic. ReconcileManaged walks
+		// the slice in order and provisionServingCert bounds the whole startup
+		// pass with one budget, so an entry placed after the component
+		// certificates can have that budget spent before it gets a turn --
+		// leaving the store empty and the startup fatal because of some other
+		// certificate whose own failure is meant to be routine.
+		//
+		// Dropping the statement entirely is the quieter edit and the one with
+		// the longer fuse: the certificate is issued once at startup and then
+		// never renewed.
+		var present, first bool
 		ast.Inspect(file, func(n ast.Node) bool {
 			assign, ok := n.(*ast.AssignStmt)
 			if !ok || len(assign.Rhs) != 1 {
@@ -114,23 +122,29 @@ var _ = Describe("the serve command's serving-certificate wiring", func() {
 			if !ok {
 				return true
 			}
-			id, ok := call.Fun.(*ast.Ident)
-			if !ok || id.Name != "append" {
+			if id, ok := call.Fun.(*ast.Ident); !ok || id.Name != "append" {
 				return true
 			}
-			// The appended value must be the serving entry rather than
-			// anything else appended to that field.
-			for _, arg := range call.Args[1:] {
-				if s, ok := arg.(*ast.SelectorExpr); ok && s.Sel.Name == "entry" {
-					appended = true
-				}
+			if !mentionsServingEntry(call) {
+				return true
+			}
+			present = true
+			// Ahead of the rest means the serving entry is in the literal being
+			// appended TO, and the existing slice is what follows -- the
+			// prepend shape, not the append one.
+			if lit, ok := call.Args[0].(*ast.CompositeLit); ok && mentionsServingEntry(lit) {
+				first = true
 			}
 			return true
 		})
-		Expect(appended).To(BeTrue(),
-			"main.go does not append the serving entry to ca.CA.ManagedCerts, so the "+
+		Expect(present).To(BeTrue(),
+			"main.go does not put the serving entry into ca.CA.ManagedCerts, so the "+
 				"certificate is issued once at startup and never renewed -- the reconcile "+
 				"loop never walks it, and the listener's certificate expires one TTL later")
+		Expect(first).To(BeTrue(),
+			"main.go appends the serving entry after the component certificates instead of "+
+				"prepending it, so the startup pass can spend its whole budget on their "+
+				"stores before reaching the one the listener needs")
 	})
 
 	// The predicate's call sites, which servingcert_test.go's own spec cannot
@@ -275,4 +289,20 @@ func mentionsTLSField(expr ast.Expr, field string) bool {
 	}
 	sel, ok := bin.X.(*ast.SelectorExpr)
 	return ok && sel.Sel.Name == field
+}
+
+// mentionsServingEntry reports whether the node's subtree names `serving.entry`.
+func mentionsServingEntry(n ast.Node) bool {
+	var found bool
+	ast.Inspect(n, func(x ast.Node) bool {
+		sel, ok := x.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "entry" {
+			return true
+		}
+		if id, ok := sel.X.(*ast.Ident); ok && id.Name == "serving" {
+			found = true
+		}
+		return true
+	})
+	return found
 }

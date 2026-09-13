@@ -31,7 +31,9 @@ owned by the exporter are reclaimed if something else overwrites them.
 Every managed object carries the label `app.kubernetes.io/managed-by:
 openvox-ca` so you can find the objects openvox-ca owns. **It does not
 distinguish them from a [managed certificate](configuration.md#managed-certificates)
-Secret, nor from [the CA's own serving certificate](configuration.md#the-cas-own-serving-certificate)'s**, which carry the
+Secret, nor from [the CA's own serving
+certificate](configuration.md#the-cas-own-serving-certificate)'s**, which carry
+the
 same label and hold a component's only private key, or the key the CA's own
 listener presents — so this is a safe selector to list with and not to delete
 with:
@@ -210,7 +212,9 @@ resources to the minimum above.
   is true of the export alone.** A
   [managed certificate](configuration.md#managed-certificates) with a
   `store.secret` makes the same failure fatal at startup, because a component
-  is waiting on a certificate that would never be issued — and so does [the CA's own serving certificate](configuration.md#the-cas-own-serving-certificate) with one, for a
+  is waiting on a certificate that would never be issued — and so does [the CA's
+  own serving certificate](configuration.md#the-cas-own-serving-certificate)
+  with one, for a
   stronger reason still: the CA has no certificate to present. So a CA
   configured for exports alongside either of those refuses to start where it
   cannot build a client, rather than logging and carrying on.
@@ -280,7 +284,10 @@ to initialise client` line in the CA log, which names the actual error.
 - Objects are not deleted when a target is removed from the config; delete them
   manually. They carry the `app.kubernetes.io/managed-by=openvox-ca` label — but
   **that label alone is not a safe delete selector**: a
-  [managed certificate](configuration.md#managed-certificates) Secret, or [the CA's own serving certificate](configuration.md#the-cas-own-serving-certificate)'s, carries the identical label
+  [managed certificate](configuration.md#managed-certificates) Secret, or [the
+  CA's own serving
+  certificate](configuration.md#the-cas-own-serving-certificate)'s, carries the
+  identical label
   and holds a component's only private key, or the CA's own serving key. Name the
   exported objects, or give them a label of your own under
   `metadata.labels` and select on that. See
