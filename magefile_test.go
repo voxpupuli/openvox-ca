@@ -5723,6 +5723,45 @@ var _ = Describe("first-boot's puppet.conf certname tier", func() {
 		return firstBootResult{ok: true, output: string(out)}
 	}
 
+	// The precedence the resolve() comment in the sibling block asserts, put to
+	// the test. Neither block could: this one stubs hostname to fail on every
+	// call, and that one points puppet.conf at a file that does not exist, so
+	// no spec ever had BOTH tiers able to answer at once. The ordering was
+	// documented in a comment and nowhere else.
+	//
+	// It matters on exactly the host these packages advertise. An agent-enrolled
+	// machine has a certname in puppet.conf AND a resolvable FQDN, and they need
+	// not agree: taking the hostname would mint under a name the estate does not
+	// know this host by, and the credential the agent already holds would not
+	// match what the CA serves.
+	It("prefers puppet.conf's certname over a usable hostname", func() {
+		Expect(os.WriteFile(puppetConf,
+			[]byte("[main]\ncertname = from-puppet-conf.example.com\n"), 0o644)).To(Succeed())
+		// A hostname stub that answers, and answers differently. Overwrites the
+		// always-fail stub this block's BeforeEach installs.
+		Expect(os.WriteFile(filepath.Join(stubBin, "hostname"),
+			[]byte("#!/bin/sh\nprintf '%s\\n' from-hostname.example.com\n"), 0o755)).To(Succeed())
+
+		r := resolve()
+		Expect(r.ok).To(BeTrue())
+		Expect(strings.TrimSpace(lastLine(r.output))).To(Equal("from-puppet-conf.example.com"),
+			"the hostname tier answered over puppet.conf, reversing the documented order")
+	})
+
+	// And the other half of the same claim: the hostname tiers are still
+	// reached when puppet.conf has nothing to say. Without this, the spec above
+	// is satisfied by a resolver that ignores the hostname entirely.
+	It("falls through to the hostname when puppet.conf names no certname", func() {
+		Expect(os.WriteFile(puppetConf, []byte("[main]\nserver = ca.example.com\n"), 0o644)).
+			To(Succeed())
+		Expect(os.WriteFile(filepath.Join(stubBin, "hostname"),
+			[]byte("#!/bin/sh\nprintf '%s\\n' from-hostname.example.com\n"), 0o755)).To(Succeed())
+
+		r := resolve()
+		Expect(r.ok).To(BeTrue())
+		Expect(strings.TrimSpace(lastLine(r.output))).To(Equal("from-hostname.example.com"))
+	})
+
 	It("takes certname from puppet.conf when there is no explicit answer", func() {
 		Expect(os.WriteFile(puppetConf,
 			[]byte("[main]\ncertname = agent.example.com\nserver = puppet\n"), 0o644)).To(Succeed())
