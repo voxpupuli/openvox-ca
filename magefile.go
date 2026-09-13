@@ -2205,6 +2205,11 @@ func (Chart) Test() error {
 			// probes to HTTP against an HTTPS listener.
 			name: "a self-provisioned serving certificate is TLS on its own",
 			sets: []string{"serviceAccount.create=true"},
+			// Under persistence.mountPath, because that is the only writable
+			// path in the pod: readOnlyRootFilesystem defaults to true, and an
+			// unwritable serving store is fatal rather than retried. The first
+			// version of this case used /srv, which is the shape the chart now
+			// refuses -- a shipped example nobody could install.
 			valuesYAML: `
 config:
   serving_cert:
@@ -2212,7 +2217,9 @@ config:
     names: [ca.example.com]
     renew_before: 720h
     store:
-      files: {cert: /srv/tls.crt, key: /srv/tls.key}
+      files:
+        cert: /var/lib/puppet-ca/serving/tls.crt
+        key: /var/lib/puppet-ca/serving/tls.key
 `,
 			wants: []string{"kind: Deployment", "scheme: HTTPS"},
 			// A file store needs no API access at all, which is the systemd
@@ -3312,6 +3319,70 @@ config:
 		{
 			name:    "config.cadir pointing outside the mounted volume",
 			sets:    []string{tls, "config.cadir=/srv/ca"},
+			wantErr: "outside the volume mounted at",
+		},
+		{
+			// The chart itself produces this one: openvox-ca.config writes
+			// tls_cert/tls_key from tls.existingSecret, so the pair renders a
+			// config.yaml the server refuses and the pod CrashLoopBackOffs.
+			name: "config.serving_cert alongside tls.existingSecret",
+			sets: []string{tls},
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      secret: {name: ca-tls}
+`,
+			wantErr: "also supplies one",
+		},
+		{
+			// The same refusal by the direct route, which tls.existingSecret is
+			// only one way to reach.
+			name: "config.serving_cert alongside an explicit config.tls_cert",
+			sets: []string{"config.tls_cert=/etc/tls.crt", "config.tls_key=/etc/tls.key"},
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      secret: {name: ca-tls}
+`,
+			wantErr: "config.tls_cert",
+		},
+		{
+			// And by the environment, which outranks the config file and which
+			// tlsConfigured already knows how to read.
+			name: "config.serving_cert alongside PUPPET_CA_TLS_CERT in env",
+			sets: []string{"env.PUPPET_CA_TLS_CERT=/etc/tls.crt"},
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      secret: {name: ca-tls}
+`,
+			wantErr: "PUPPET_CA_TLS_CERT",
+		},
+		{
+			// Fatal rather than retried, which is what distinguishes it from a
+			// managed certificate's file store landing somewhere unwritable.
+			name: "a serving_cert file store outside the mounted volume",
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      files: {cert: /srv/tls.crt, key: /srv/tls.key}
+`,
 			wantErr: "outside the volume mounted at",
 		},
 		{

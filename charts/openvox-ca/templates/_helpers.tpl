@@ -322,9 +322,15 @@ false
 {{- end -}}
 
 {{/*
-The Secrets `config.managed_certs` stores certificates in, as a JSON list of
-{namespace, name} objects, or "unknown" when the chart cannot read the
-configuration.
+The Secrets `config.managed_certs` and `config.serving_cert` store certificates
+in, as a JSON list of {namespace, name} objects, or "unknown" when the chart
+cannot read the configuration.
+
+Two blocks rather than one, because they need the same grant for the same
+reason: the serving certificate is the CA's own, but its store is read and
+written exactly as a component's is. What differs is the cost of a refusal --
+a component certificate is retried on the next pass, while the serving one is
+what the listener presents, so the CA does not start without it.
 
 Only entries whose store is a Secret: a managed certificate may equally keep
 its material in local files, which needs no Kubernetes access at all. Which one
@@ -374,8 +380,9 @@ unknown
 {{- end -}}
 
 {{/*
-Whether any managed certificate stores its material in a Kubernetes Secret, and
-so whether the pod needs to talk to the API server for one.
+Whether any managed certificate, or the CA's own serving certificate, stores its
+material in a Kubernetes Secret -- and so whether the pod needs to talk to the
+API server for one.
 
 False for a file-only configuration, which is the systemd shape and must not be
 given a projected token it has no use for. "unknown" from managedCertSecrets is
@@ -774,6 +781,56 @@ CrashLoopBackOff or a Service that silently routes nowhere.
 {{- if and $cfgCadir (ne $cfgCadir $mount) (not (hasPrefix (printf "%s/" $mount) $cfgCadir)) -}}
 {{- fail (printf "config.cadir is %q, which is outside the volume mounted at %q, and the root filesystem is read-only by default so the CA could not write there. Point cadir inside the mount, or set persistence.mountPath to a parent of it." $cfgCadir $mount) -}}
 {{- end -}}
+{{/*
+  serving_cert makes the CA issue the certificate its own listener presents, and
+  the server refuses to start when it is set alongside tls_cert or tls_key --
+  they are two answers to which certificate the listener presents, and
+  self-provisioning never writes to the paths those name.
+
+  The chart is what produces the refused combination: openvox-ca.config writes
+  tls_cert and tls_key from tls.existingSecret, so `tls.existingSecret` plus
+  `config.serving_cert` renders a config.yaml the server rejects. Without this
+  the install succeeds, the pod CrashLoopBackOffs, and on an upgrade the rollout
+  wedges with the old ReplicaSet still serving.
+
+  Every route to those two keys is checked, not just the values one, because
+  each reaches the same server-side refusal: the tls block, a direct config
+  override, and the environment variables that outrank the file.
+*/ -}}
+{{- if hasKey $config "serving_cert" -}}
+{{- $conflict := "" -}}
+{{- if .Values.tls.existingSecret -}}{{- $conflict = "tls.existingSecret" -}}
+{{- else if dig "tls_cert" "" $config -}}{{- $conflict = "config.tls_cert" -}}
+{{- else if dig "tls_key" "" $config -}}{{- $conflict = "config.tls_key" -}}
+{{- end -}}
+{{- range $name, $value := .Values.env -}}
+{{- if and (or (eq $name "PUPPET_CA_TLS_CERT") (eq $name "PUPPET_CA_TLS_KEY")) $value -}}
+{{- $conflict = printf "env.%s" $name -}}
+{{- end -}}
+{{- end -}}
+{{- range .Values.extraEnv -}}
+{{- if and (or (eq .name "PUPPET_CA_TLS_CERT") (eq .name "PUPPET_CA_TLS_KEY")) (or .value (hasKey . "valueFrom")) -}}
+{{- $conflict = printf "extraEnv %s" .name -}}
+{{- end -}}
+{{- end -}}
+{{- if $conflict -}}
+{{- fail (printf "config.serving_cert makes the CA issue and renew the certificate its own listener presents, but %s also supplies one — and openvox-ca refuses to start with both, because they are two answers to which certificate the listener presents. Self-provisioning never writes to the paths tls_cert/tls_key name, so it cannot take them over. Remove %s to let the CA issue its own, or drop config.serving_cert to keep supplying one." $conflict $conflict) -}}
+{{- end -}}
+{{/*
+  A serving_cert file store must land somewhere the CA can actually write.
+  readOnlyRootFilesystem defaults to true and the data volume at
+  persistence.mountPath is the only writable path in the pod, so a pair outside
+  it cannot be written. Unlike a managed_certs file store, whose write failure
+  is logged and retried, this one is fatal: the CA refuses to start.
+*/ -}}
+{{- $files := dig "serving_cert" "store" "files" dict $config -}}
+{{- range $field := list "cert" "key" "ca" -}}
+{{- $path := dig $field "" $files | toString | trimSuffix "/" -}}
+{{- if and $path (ne $path $mount) (not (hasPrefix (printf "%s/" $mount) $path)) -}}
+{{- fail (printf "config.serving_cert.store.files.%s is %q, which is outside the volume mounted at %q, and the root filesystem is read-only by default so the CA could not write there. Unlike a managed certificate, an unwritable serving store is fatal: the CA refuses to start rather than retrying. Point it inside the mount, set persistence.mountPath to a parent of it, or use a Secret store instead." $field $path $mount) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- $listen := dig "metrics_listen" "" $config -}}
 {{- if and $listen (not .Values.metrics.enabled) -}}
 {{- /*
@@ -1134,7 +1191,10 @@ NOTE: the chart cannot read the configuration{{ if .Values.existingConfigMap }} 
 extraArgs){{ end }}, so no Role was created for managed certificates. If your
 config.yaml has a managed_certs entry with a Secret store, openvox-ca will be
 refused by RBAC when it tries to write that Secret — while readiness stays
-green. Create a Role yourself, in each of those namespaces, with two rules: one
+green. If it has a serving_cert with a Secret store, the consequence is the
+opposite and worse: that Secret holds the certificate the CA's own listener
+presents, so the refusal is fatal and the pod never starts at all.
+Create a Role yourself, in each of those namespaces, with two rules: one
 granting create on secrets, which cannot be narrowed because an object has no
 name at admission time, and a second granting get and patch narrowed by
 resourceNames to the Secrets it names.

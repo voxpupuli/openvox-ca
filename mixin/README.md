@@ -93,8 +93,9 @@ alerting rules for the openvox-ca exporter. It alerts on:
   configured but never attempted at all (only when the
   [Kubernetes export](../docs/kubernetes-export.md) feature is in use).
 - **Managed certificates** that are configured but have never been issued at all
-  (only when [`managed_certs`](../docs/configuration.md#managed-certificates) is
-  in use). It covers an entry whose store has never accepted a write, not one
+  (only when [`managed_certs`](../docs/configuration.md#managed-certificates) or
+  [`serving_cert`](../docs/configuration.md#the-cas-own-serving-certificate) is
+  in use; the CA's own serving certificate is one such entry). It covers an entry whose store has never accepted a write, not one
   that is failing to renew — once a certificate exists, the leaf expiry alerts
   above cover it with no new series.
 

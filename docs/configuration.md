@@ -168,7 +168,8 @@ leaf_backdate_sec: 0                   # 0 = built-in default (5m)
 
 # How often the managed-certificate reconcile loop runs. A managed certificate is
 # a named leaf the CA issues and renews on a loop; see "Managed certificates"
-# below. Nothing runs when `managed_certs` is empty.
+# below. The CA's own serving certificate renews on the same loop, so this also
+# applies to `serving_cert`. Nothing runs when both are absent.
 managed_cert_interval_sec: 0           # 0 = built-in default (15m)
 
 # Certificates this CA issues and renews for OpenVox components, each into a
@@ -184,7 +185,7 @@ managed_certs: []
 #   names: [ca.example.com]
 #   renew_before: 720h
 #   store:
-#     files: {cert: /var/lib/openvox-ca/serving/tls.crt, key: /var/lib/openvox-ca/serving/tls.key}
+#     files: {cert: /var/lib/puppet-ca/serving/tls.crt, key: /var/lib/puppet-ca/serving/tls.key}
 ```
 
 ## Environment variables
@@ -290,6 +291,12 @@ Boolean env vars accept any value accepted by `strconv.ParseBool`: `1`, `t`, `tr
 
 ## Serving certificate
 
+> The CA can also issue and renew this certificate itself, which removes the
+> bootstrap below entirely — see [The CA's own serving
+> certificate](#the-cas-own-serving-certificate). That is the only option when
+> the CA key is held at a provider, and it is mutually exclusive with the pair
+> described here.
+
 `tls_cert` and `tls_key` name a **serving certificate issued by this CA**, not
 the CA's own `ca_crt.pem` and `ca_key.pem`. The CA certificate exists to sign
 other certificates, not to identify a server: its `keyUsage` is
@@ -393,7 +400,8 @@ and point `tls_cert` at that before starting.
 > name gets. Use `openvox-ca-ctl clean --certname` first to reissue.
 
 While TLS is off, the whole admin API is unauthenticated: the authorisation
-middleware is only installed when `tls_cert` and `tls_key` are both set. So
+middleware is only installed when TLS is configured — `tls_cert` and `tls_key`,
+their environment equivalents, or [`serving_cert`](#the-cas-own-serving-certificate). So
 `--host 127.0.0.1` is not decoration — treat it as required, and keep the
 window short. On an ordinary configuration the server would refuse to serve
 plain HTTP off loopback anyway, so forgetting it fails safe. On one carrying
@@ -1348,6 +1356,7 @@ the certificates can undo. The server refuses to start when a `cert`, `key` or
 | `cadir` | the whole tree: the CA key and certificate, the CRL, and the filesystem and SQLite backends' state |
 | `ca_cert_file`, `ca_key_file` | the CA's own certificate and private key, wherever a local-file override puts them |
 | `tls_cert`, `tls_key` | the pair the CA presents on its own listener |
+| `serving_cert.store.files.cert`, `.key`, `.ca` | the pair the CA issues for its own listener, when it self-provisions into files. Reserved only while `serving_cert` uses a file store |
 | `ca_key_passphrase_file` | what unlocks the CA key |
 | `crl_chain_file` | the upstream CRL bundle the CA re-reads and republishes |
 | `logfile` | where the CA writes its log |
@@ -1467,10 +1476,21 @@ serving_cert:
   renew_before: 720h
   store:
     files:
-      cert: /var/lib/openvox-ca/serving/tls.crt
-      key: /var/lib/openvox-ca/serving/tls.key
-      ca: /var/lib/openvox-ca/serving/ca.crt
+      cert: /var/lib/puppet-ca/serving/tls.crt
+      key: /var/lib/puppet-ca/serving/tls.key
+      ca: /var/lib/puppet-ca/serving/ca.crt
 ```
+
+> **The directory must be writable by the CA, and here that is a startup
+> requirement rather than a retry.** The shipped systemd unit sets
+> `ProtectSystem=strict` with `StateDirectory=puppet-ca`, so anything outside
+> `/var/lib/puppet-ca` needs a `ReadWritePaths` drop-in — see [the store](#the-store),
+> which describes the same constraint for a component certificate. The
+> difference is the consequence: a component certificate whose directory is
+> unwritable is logged and retried on the next pass, while an unwritable serving
+> store means the CA refuses to start. Under the Helm chart the equivalent is
+> `persistence.mountPath`, and the chart refuses at install time a file store
+> outside it.
 
 **Every key is the one a `managed_certs` entry takes**, with the same meanings
 and the same inheritance — `certname`, `names`, `ip_addresses`,

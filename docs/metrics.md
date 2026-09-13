@@ -165,7 +165,9 @@ query, and `puppetca_crl_sync_failures_total` for why it is stuck.
 > remainder.
 >
 > Two of those writers are managed certificates', and they move only on a
-> deployment that configures `managed_certs`. They are named regardless,
+> deployment that configures `managed_certs` or `serving_cert` -- the CA's own
+> serving certificate is a managed certificate to this mechanism, and moves them
+> the same way. They are named regardless,
 > because the enumeration claims completeness and a claim that is true only of
 > the paths a particular deployment reaches is a claim the next change will
 > read as false.
@@ -426,9 +428,15 @@ with no issued certificate), `signed`, or `revoked`.
 
 ### Managed certificates
 
-Only present when [`managed_certs`](configuration.md#managed-certificates) is
+Only present when [`managed_certs`](configuration.md#managed-certificates) or
+[`serving_cert`](configuration.md#the-cas-own-serving-certificate) is
 configured. One series per entry, whatever store it uses, published from the
 configuration rather than from anything that has happened.
+
+The CA's own serving certificate is one such entry, labelled with the CA's own
+certname, because it renews on the same loop through the same mechanism. So a
+deployment that configures no component certificates at all still publishes one
+series, and `PuppetCAManagedCertificateNeverIssued` covers it.
 
 | Metric | Labels | Description |
 | --- | --- | --- |

@@ -1,0 +1,278 @@
+// Copyright (C) 2026 Chris Boot
+// Copyright (C) 2026 Vox Pupuli and contributors
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along
+// with this program; if not, write to the Free Software Foundation, Inc.,
+// 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+
+package main
+
+import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+)
+
+// The serve command's serving-certificate wiring.
+//
+// servingcert_test.go drives buildServingCert and provisionServingCert
+// directly, and its `provision` helper does the append into ca.CA.ManagedCerts
+// itself -- so it reproduces main.go rather than exercising it, and every spec
+// in it stays green when the serve command stops doing any of those things.
+// That was demonstrated by mutation rather than assumed.
+//
+// The three edits that hole differs on are not equally loud, which is why each
+// is pinned separately:
+//
+//   - Drop the append and the certificate is issued once at startup and then
+//     never renewed: the reconcile loop never walks it, and the failure surfaces
+//     as an expired listener certificate one TTL later.
+//   - Drop the provisionServingCert call and startup succeeds with an empty
+//     holder, so every handshake fails with "no serving certificate has been
+//     issued yet" while CI stays green.
+//   - Revert one of the TLS predicate's call sites to tls_cert/tls_key and a
+//     self-provisioned CA comes up serving HTTPS with no client-authentication
+//     middleware at all.
+//
+// The same technique as managed_certs_wiring_test.go, which exists because the
+// identical mutation was found against attachManagedCerts, and as
+// internal/api/authseam_test.go. It is a weaker guarantee than behaviour -- it
+// pins that the calls are written, not that they run -- but a behavioural spec
+// would have to start the server and bind its listeners, which is the compose
+// integration suite's job.
+var _ = Describe("the serve command's serving-certificate wiring", func() {
+	var file *ast.File
+
+	BeforeEach(func() {
+		fset := token.NewFileSet()
+		var err error
+		file, err = parser.ParseFile(fset, "main.go", nil, 0)
+		Expect(err).NotTo(HaveOccurred())
+
+		// The parse must have found something to judge. A file that yielded no
+		// function literals would agree with every claim below.
+		var funcsSeen int
+		ast.Inspect(file, func(n ast.Node) bool {
+			if _, ok := n.(*ast.FuncLit); ok {
+				funcsSeen++
+			}
+			return true
+		})
+		Expect(funcsSeen).To(BeNumerically(">", 0),
+			"precondition: main.go parsed but contains no function literals")
+	})
+
+	It("calls buildServingCert and honours its refusal", func() {
+		called, checked := callWithCheckedError(file, "buildServingCert")
+		Expect(called).To(BeTrue(),
+			"main.go does not call buildServingCert, so serving_cert would be "+
+				"inert and every spec in servingcert_test.go would still pass")
+		Expect(checked).To(BeTrue(),
+			"main.go calls buildServingCert without checking its error, so a "+
+				"configuration it has just refused -- serving_cert alongside "+
+				"tls_cert, or a certificate that cannot serve -- would start the server")
+	})
+
+	It("calls provisionServingCert and honours its refusal", func() {
+		called, checked := callWithCheckedError(file, "provisionServingCert")
+		Expect(called).To(BeTrue(),
+			"main.go does not call provisionServingCert, so the listener would bind "+
+				"with an empty holder and fail every handshake")
+		Expect(checked).To(BeTrue(),
+			"main.go calls provisionServingCert without checking its error, so an "+
+				"unreadable serving store would bind a listener with nothing to present "+
+				"instead of refusing to start")
+	})
+
+	It("appends the serving entry to the reconcile set", func() {
+		// The quietest of the three edits, and the one with the longest fuse:
+		// the certificate is issued at startup and then never renewed.
+		var appended bool
+		ast.Inspect(file, func(n ast.Node) bool {
+			assign, ok := n.(*ast.AssignStmt)
+			if !ok || len(assign.Rhs) != 1 {
+				return true
+			}
+			sel, ok := assign.Lhs[0].(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "ManagedCerts" {
+				return true
+			}
+			call, ok := assign.Rhs[0].(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			id, ok := call.Fun.(*ast.Ident)
+			if !ok || id.Name != "append" {
+				return true
+			}
+			// The appended value must be the serving entry rather than
+			// anything else appended to that field.
+			for _, arg := range call.Args[1:] {
+				if s, ok := arg.(*ast.SelectorExpr); ok && s.Sel.Name == "entry" {
+					appended = true
+				}
+			}
+			return true
+		})
+		Expect(appended).To(BeTrue(),
+			"main.go does not append the serving entry to ca.CA.ManagedCerts, so the "+
+				"certificate is issued once at startup and never renewed -- the reconcile "+
+				"loop never walks it, and the listener's certificate expires one TTL later")
+	})
+
+	// The predicate's call sites, which servingcert_test.go's own spec cannot
+	// reach: it asserts what tlsEnabled returns, not that anything reads it.
+	//
+	// Five sites read it, and the mTLS one is the reason this is a spec rather
+	// than a comment: a residual `cfg.TLSCert != "" && cfg.TLSKey != ""` there
+	// leaves a self-provisioned CA serving HTTPS with no client authentication,
+	// which is a security regression that nothing else in the suite notices.
+	It("reads the TLS predicate rather than tls_cert/tls_key directly", func() {
+		var predicateReads, rawReads int
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if ok {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "tlsEnabled" {
+					predicateReads++
+				}
+				return true
+			}
+			// `cfg.TLSCert != "" && cfg.TLSKey != ""`, in any order.
+			bin, ok := n.(*ast.BinaryExpr)
+			if !ok || bin.Op != token.LAND {
+				return true
+			}
+			if mentionsTLSField(bin.X, "TLSCert") && mentionsTLSField(bin.Y, "TLSKey") {
+				rawReads++
+			}
+			if mentionsTLSField(bin.X, "TLSKey") && mentionsTLSField(bin.Y, "TLSCert") {
+				rawReads++
+			}
+			return true
+		})
+
+		Expect(predicateReads).To(BeNumerically(">", 0),
+			"main.go never calls cfg.tlsEnabled(), so nothing in the serve command "+
+				"knows a self-provisioned CA serves TLS")
+		Expect(rawReads).To(Equal(0),
+			"main.go still tests cfg.TLSCert and cfg.TLSKey together instead of "+
+				"cfg.tlsEnabled(); a self-provisioned CA satisfies tlsEnabled but not "+
+				"that pair, so whichever site this is would be skipped -- and on the "+
+				"mTLS middleware that means HTTPS with no client authentication")
+	})
+})
+
+// callWithCheckedError reports whether file calls name and acts on the error
+// it returns.
+//
+// Two shapes, because the two call sites take different ones and neither is
+// more correct:
+//
+//	if err := provisionServingCert(...); err != nil { ... }
+//	serving, err := buildServingCert(...)
+//	if err != nil { ... }
+//
+// The second is forced wherever the call also returns a value the caller keeps,
+// so a guard matching only the first would fail on correct code -- which is how
+// this spec first behaved, and a guard that fails on correct code gets widened
+// until it matches nothing.
+//
+// Checked rather than merely counted, because the call being present says
+// nothing about its error being honoured: writing `_ = name(...)` leaves a CA
+// that starts happily with a configuration it has just decided cannot work.
+func callWithCheckedError(file *ast.File, name string) (called, checked bool) {
+	// The if-init form.
+	ast.Inspect(file, func(n ast.Node) bool {
+		stmt, ok := n.(*ast.IfStmt)
+		if !ok {
+			return true
+		}
+		assign, ok := stmt.Init.(*ast.AssignStmt)
+		if !ok || !callsFunc(assign, name) {
+			return true
+		}
+		called = true
+		if condChecksAssignedError(stmt.Cond, assign) {
+			checked = true
+		}
+		return true
+	})
+
+	// The assign-then-if form: the call, and the very next statement testing
+	// the error it assigned. Adjacency is required on purpose -- a check
+	// several statements later has let intervening code run on a value the
+	// call may not have produced.
+	ast.Inspect(file, func(n ast.Node) bool {
+		block, ok := n.(*ast.BlockStmt)
+		if !ok {
+			return true
+		}
+		for i := 0; i+1 < len(block.List); i++ {
+			assign, ok := block.List[i].(*ast.AssignStmt)
+			if !ok || !callsFunc(assign, name) {
+				continue
+			}
+			called = true
+			next, ok := block.List[i+1].(*ast.IfStmt)
+			if !ok || next.Init != nil {
+				continue
+			}
+			if condChecksAssignedError(next.Cond, assign) {
+				checked = true
+			}
+		}
+		return true
+	})
+	return called, checked
+}
+
+// callsFunc reports whether assign's sole right-hand side is a call to name.
+func callsFunc(assign *ast.AssignStmt, name string) bool {
+	if len(assign.Rhs) != 1 {
+		return false
+	}
+	call, ok := assign.Rhs[0].(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	id, ok := call.Fun.(*ast.Ident)
+	return ok && id.Name == name
+}
+
+// condChecksAssignedError reports whether cond is `<err> != nil` for the last
+// name assign binds -- which is the error, by Go convention. Comparing against
+// the assigned name rather than the literal "err" is what stops a check of some
+// other error in scope counting as this one.
+func condChecksAssignedError(cond ast.Expr, assign *ast.AssignStmt) bool {
+	bin, ok := cond.(*ast.BinaryExpr)
+	if !ok || bin.Op != token.NEQ {
+		return false
+	}
+	lhs, lok := bin.X.(*ast.Ident)
+	rhs, rok := bin.Y.(*ast.Ident)
+	assigned, aok := assign.Lhs[len(assign.Lhs)-1].(*ast.Ident)
+	return lok && rok && aok && rhs.Name == "nil" && lhs.Name == assigned.Name
+}
+
+// mentionsTLSField reports whether expr is `<something>.<field> != ""`.
+func mentionsTLSField(expr ast.Expr, field string) bool {
+	bin, ok := expr.(*ast.BinaryExpr)
+	if !ok || bin.Op != token.NEQ {
+		return false
+	}
+	sel, ok := bin.X.(*ast.SelectorExpr)
+	return ok && sel.Sel.Name == field
+}

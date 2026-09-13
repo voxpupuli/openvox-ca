@@ -497,8 +497,11 @@ certificate.
 > replicas](configuration.md#revocation-across-replicas).
 
 In plain HTTP mode (no TLS), all endpoints are accessible without authentication:
-the authorisation middleware is only installed when `--tls-cert`/`--tls-key`
-(`tls_cert`/`tls_key` in the config file) are both set.
+the authorisation middleware is only installed when TLS is configured — by
+`--tls-cert`/`--tls-key` (`tls_cert`/`tls_key` in the config file), by the
+`PUPPET_CA_TLS_CERT`/`PUPPET_CA_TLS_KEY` environment variables, or by
+[`serving_cert`](configuration.md#the-cas-own-serving-certificate), where the CA
+issues its own.
 
 > **Note:** `GET /certificate_status/{subject}` is **admin-only**, matching Puppet Server's shipped `auth.conf`, which grants `certificate_status` and `certificate_statuses` to `pp_cli_auth` only. An ordinary agent certificate is refused with 403. Use `--allow-public-status` to make it public instead, for environments where bootstrapping agents need to poll status before obtaining a client certificate — note that this removes authentication from the route entirely rather than relaxing it to any client. The response exposes state, fingerprint, serial number, and authorization extensions. If tooling of yours read statuses with an agent certificate, see [Authorisation parity](migrating-from-puppet-server.md#authorisation-parity) for the ways to restore it and what each one grants.
 
