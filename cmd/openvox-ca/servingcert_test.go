@@ -812,33 +812,48 @@ var _ = Describe("serving_cert colliding with managed_certs", func() {
 		Entry("both omit their namespace", "", "", true),
 	)
 
-	It("refuses a chain file that is a component's certificate or key", func() {
-		// The one file pairing nothing else catches: caOwnedPaths reserves the
-		// serving cert and key, but leaves the chain file unreserved so two
-		// entries may share one. That exemption is about chain-to-chain
-		// sharing; chain-over-material is a loop, and the serving issuance
-		// would overwrite the component's certificate with the CA chain on
-		// every pass.
-		cfg := &serverConfig{
-			ServingCert: &certstore.Entry{
-				Certname: "ca.test", Names: []string{"ca.test"},
-				RenewBefore: certstore.Duration(720 * time.Hour),
-				Store: certstore.StoreConfig{Files: &certstore.FilesConfig{
-					Cert: "/srv/serving/tls.crt", Key: "/srv/serving/tls.key",
-					CA: "/srv/comp/tls.crt"}},
-			},
-			ManagedCerts: certstore.Config{{
-				Certname: "component.test", Names: []string{"component.test"},
-				RenewBefore: certstore.Duration(720 * time.Hour),
-				Store: certstore.StoreConfig{Files: &certstore.FilesConfig{
-					Cert: "/srv/comp/tls.crt", Key: "/srv/comp/tls.key"}},
-			}},
-		}
+	DescribeTable("refuses a chain file that is a component's material",
+		func(componentField string) {
+			// The one file pairing nothing else catches: caOwnedPaths reserves
+			// the serving cert and key, but leaves the chain file unreserved so
+			// two entries may share one. That exemption is about chain-to-chain
+			// sharing; chain-over-material is a loop, and the serving issuance
+			// would overwrite the component's material with the CA chain on
+			// every pass.
+			//
+			// A table over both arms because the guard is a loop over both, and
+			// a single spec pinning only `cert` let the `key` element be
+			// deleted with the suite green -- which is the arm where the file
+			// overwritten is a private key.
+			comp := &certstore.FilesConfig{Cert: "/srv/comp/tls.crt", Key: "/srv/comp/tls.key"}
+			chain := comp.Cert
+			if componentField == "key" {
+				chain = comp.Key
+			}
+			cfg := &serverConfig{
+				ServingCert: &certstore.Entry{
+					Certname: "ca.test", Names: []string{"ca.test"},
+					RenewBefore: certstore.Duration(720 * time.Hour),
+					Store: certstore.StoreConfig{Files: &certstore.FilesConfig{
+						Cert: "/srv/serving/tls.crt", Key: "/srv/serving/tls.key",
+						CA: chain}},
+				},
+				ManagedCerts: certstore.Config{{
+					Certname: "component.test", Names: []string{"component.test"},
+					RenewBefore: certstore.Duration(720 * time.Hour),
+					Store:       certstore.StoreConfig{Files: comp},
+				}},
+			}
 
-		_, err := buildServingCert(cfg, GinkgoT().TempDir(), "", stubCACerts{})
-		Expect(err).To(MatchError(ContainSubstring("writes its CA chain")))
-		Expect(err).To(MatchError(ContainSubstring("managed_certs[0] (component.test)")))
-	})
+			_, err := buildServingCert(cfg, GinkgoT().TempDir(), "", stubCACerts{})
+			Expect(err).To(MatchError(ContainSubstring("writes its CA chain")))
+			Expect(err).To(MatchError(ContainSubstring("managed_certs[0] (component.test)")))
+			Expect(err).To(MatchError(ContainSubstring("store.files." + componentField)))
+		},
+		Entry("over the component's certificate", "cert"),
+		// The worse of the two: the file overwritten is a private key.
+		Entry("over the component's private key", "key"),
+	)
 
 	It("still allows two entries to share one chain file", func() {
 		// The layout the exemption exists for, and the thing the check above

@@ -372,7 +372,7 @@ unknown
   fatal for that certificate rather than retried.
 */}}
 {{- $serving := dict -}}
-{{- if include "openvox-ca.servingCertConfigured" . -}}
+{{- if eq (include "openvox-ca.servingCertConfigured" .) "true" -}}
 {{- $serving = dig "serving_cert" "store" "secret" dict $config -}}
 {{- end -}}
 {{- with (dig "name" "" $serving) -}}
@@ -669,6 +669,8 @@ operator could act on.
 {{- $config := include "openvox-ca.config" . | fromYaml -}}
 {{- if and (hasKey $config "serving_cert") (kindIs "map" (index $config "serving_cert")) -}}
 true
+{{- else -}}
+false
 {{- end -}}
 {{- end -}}
 
@@ -699,7 +701,7 @@ true
   error rather than as an absence; a chart that read it as "off" would refuse
   the install for having no certificate and hide the real message.
 */}}
-{{- if include "openvox-ca.servingCertConfigured" . -}}
+{{- if eq (include "openvox-ca.servingCertConfigured" .) "true" -}}
 true
 {{- else -}}
 {{- $cert := dig "tls_cert" "" $config -}}
@@ -830,7 +832,7 @@ CrashLoopBackOff or a Service that silently routes nowhere.
   wholesale, so the chart cannot see what is in it, which is the same reason
   configFullyKnown gates this whole helper.
 */ -}}
-{{- if include "openvox-ca.servingCertConfigured" . -}}
+{{- if eq (include "openvox-ca.servingCertConfigured" .) "true" -}}
 {{- $conflict := "" -}}
 {{- if .Values.tls.existingSecret -}}{{- $conflict = "tls.existingSecret" -}}
 {{- else if dig "tls_cert" "" $config -}}{{- $conflict = "config.tls_cert" -}}
@@ -1245,6 +1247,15 @@ Moving the targets into kubernetesExport.targets will not help while the config
 stays unreadable — drop kubernetesExport.rbac.create and manage the Role yourself
 with an explicit resourceNames list.
 {{- end }}
+{{- end }}
+{{- if and (not .Values.managedCerts.rbac.create) (eq (include "openvox-ca.servingCertConfigured" .) "true") (fromJsonArray (include "openvox-ca.managedCertSecrets" .)) }}
+
+NOTE: managedCerts.rbac.create is false, so no Role was created — and
+config.serving_cert keeps its certificate in a Secret. openvox-ca will be
+refused get/create/patch on that Secret and will NOT START: it holds the
+certificate the listener presents, so the failure is fatal rather than the
+retried-and-green one a managed certificate gets. Create the Role yourself
+before the pod rolls, or move the serving certificate to a file store.
 {{- end }}
 {{- if and .Values.managedCerts.rbac.create (eq (include "openvox-ca.configFileKnown" .) "false") }}
 

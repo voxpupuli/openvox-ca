@@ -2259,6 +2259,53 @@ config:
 			},
 		},
 		{
+			// The other route to no Role: an operator who manages it themselves.
+			// For a managed certificate that is retried-and-green; for the
+			// serving certificate the CA does not start, and nothing said so.
+			name:  "managedCerts.rbac.create false with a serving Secret warns that the CA will not start",
+			sets:  []string{"serviceAccount.create=true", "managedCerts.rbac.create=false"},
+			notes: true,
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      secret: {name: openvox-ca-serving-tls}
+`,
+			wants:    []string{"will NOT START"},
+			notWants: []string{"kind: Role\n"},
+		},
+		{
+			// The serving Secret's own namespace, which every other case omits
+			// -- so `dig "namespace" "" $serving` was always empty and always
+			// fell through to the release namespace. Replacing that whole
+			// expression with the release namespace rendered identically under
+			// the entire suite, while a deployment whose serving Secret lives
+			// elsewhere would get its Role in the wrong namespace, be refused
+			// by RBAC, and not start at all.
+			name: "a serving certificate names its own namespace for the Role",
+			sets: []string{"serviceAccount.create=true"},
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      secret: {name: openvox-ca-serving-tls, namespace: ca-tls-ns}
+`,
+			// Anchored to the Role's own metadata, not to the bare namespace
+			// string: the rendered ConfigMap embeds the operator's config.yaml,
+			// which contains `namespace: ca-tls-ns` verbatim, so the loose form
+			// passed with the namespace expression mutated away entirely.
+			wants: []string{
+				"  name: openvox-ca-managed-certs\n  namespace: ca-tls-ns\n",
+				"- openvox-ca-serving-tls",
+			},
+		},
+		{
 			// The serving certificate is a second source of Secret targets, and
 			// the Role must cover it. Without this the CA is refused by RBAC
 			// when it reads or writes the Secret holding the certificate its
@@ -3408,6 +3455,22 @@ config:
 		{
 			// And by the environment, which outranks the config file and which
 			// tlsConfigured already knows how to read.
+			name: "config.serving_cert alongside PUPPET_CA_TLS_KEY in env",
+			sets: []string{"env.PUPPET_CA_TLS_KEY=/etc/tls.key"},
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      secret: {name: ca-tls}
+`,
+			wantErr: "PUPPET_CA_TLS_KEY",
+		},
+		{
+			// Both names in the env arm, because each is an independent route
+			// to the same refusal and the `or` had a case for only one of them.
 			name: "config.serving_cert alongside PUPPET_CA_TLS_CERT in env",
 			sets: []string{"env.PUPPET_CA_TLS_CERT=/etc/tls.crt"},
 			valuesYAML: `

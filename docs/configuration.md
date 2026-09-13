@@ -186,8 +186,8 @@ managed_certs: []
 #   renew_before: 720h
 #   store:
 #     files:
-#       cert: /var/lib/puppet-ca/serving/tls.crt
-#       key: /var/lib/puppet-ca/serving/tls.key
+#       cert: /var/lib/puppet-ca/tls.crt
+#       key: /var/lib/puppet-ca/tls.key
 ```
 
 ## Environment variables
@@ -1473,6 +1473,10 @@ openbao` or an external signer has that deadlock, whether it runs as a systemd
 unit or in a pod.
 
 ```yaml
+# Narrowed so the serving pair can sit beside it: the CA reserves the whole
+# cadir subtree against every file store, its own included.
+cadir: /var/lib/puppet-ca/ca
+
 serving_cert:
   certname: ca.example.com
   names: [ca.example.com, puppet]
@@ -1480,21 +1484,34 @@ serving_cert:
   renew_before: 720h
   store:
     files:
-      cert: /var/lib/puppet-ca/serving/tls.crt
-      key: /var/lib/puppet-ca/serving/tls.key
-      ca: /var/lib/puppet-ca/serving/ca.crt
+      cert: /var/lib/puppet-ca/tls.crt
+      key: /var/lib/puppet-ca/tls.key
+      ca: /var/lib/puppet-ca/ca.crt
 ```
 
-> **The directory must be writable by the CA, and here that is a startup
-> requirement rather than a retry.** The shipped systemd unit sets
-> `ProtectSystem=strict` with `StateDirectory=puppet-ca`, so anything outside
-> `/var/lib/puppet-ca` needs a `ReadWritePaths` drop-in — see [the store](#the-store),
-> which describes the same constraint for a component certificate. The
-> difference is the consequence: a component certificate whose directory is
-> unwritable is logged and retried on the next pass, while an unwritable serving
-> store means the CA refuses to start. Under the Helm chart the equivalent is
-> `persistence.mountPath`, and the chart refuses at install time a file store
-> outside it.
+> **Three rules decide where the pair can go, and here breaking any of them
+> stops the CA starting rather than being retried.**
+>
+> 1. **Writable by the CA.** The shipped systemd unit sets
+>    `ProtectSystem=strict` with `StateDirectory=puppet-ca`, so anything outside
+>    `/var/lib/puppet-ca` needs a `ReadWritePaths` drop-in — see
+>    [the store](#the-store), which describes the same constraint for a
+>    component certificate.
+> 2. **Outside the `cadir`.** The CA reserves that whole subtree against every
+>    file store, its own included. The example above therefore assumes the
+>    default `cadir` has been narrowed — `cadir: /var/lib/puppet-ca/ca` — with
+>    the pair at the `StateDirectory` root beside it.
+> 3. **In a directory that already exists.** The store will not create one, and
+>    `StateDirectory` creates only the top level. A `serving/` subdirectory is
+>    the obvious layout and it is the one that fails: the CA starts, writes, and
+>    exits.
+>
+> The difference from a component certificate is the consequence throughout: an
+> unwritable component store is logged and retried on the next pass, while an
+> unwritable serving store means the CA refuses to start. Under the Helm chart
+> the equivalent of rule 1 is `persistence.mountPath`, and the chart refuses all
+> three at install time — which is why its own examples narrow `config.cadir`
+> and keep the pair at the mount root.
 
 **Every key is the one a `managed_certs` entry takes**, with the same meanings
 and the same inheritance — `certname`, `names`, `ip_addresses`,

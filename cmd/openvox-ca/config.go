@@ -638,11 +638,15 @@ const maxLeafBackdateSec = 30 * 24 * 60 * 60
 // keypair at tls_cert/tls_key, or a serving certificate the CA issues and
 // renews for itself. buildServingCert refuses the combination.
 //
-// One predicate rather than the condition written out at each site, because
-// there are five of them -- the plain-HTTP refusal, the mTLS auth config, the
-// listener's TLS config, ServeTLS, and the status line -- and a self-provisioned
-// CA that satisfied four of the five would come up serving HTTPS with no client
-// authentication, or bind plain HTTP having refused to.
+// One predicate rather than the condition written out at each site, and the
+// property rather than a count of them: every site that decides whether the
+// listener speaks TLS reads this, including the plain-HTTP refusal, the mTLS
+// auth config, the listener's TLS config, ServeTLS and the status line. A
+// self-provisioned CA that satisfied some of them and not others would come up
+// serving HTTPS with no client authentication, or bind plain HTTP having
+// refused to. cmd/openvox-ca/servingcert_wiring_test.go holds the call sites to
+// their measured number, which is what a count in this comment would drift
+// from.
 func (c *serverConfig) tlsEnabled() bool {
 	return (c.TLSCert != "" && c.TLSKey != "") || c.ServingCert != nil
 }
