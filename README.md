@@ -58,11 +58,12 @@ wire-compatible with your existing Puppet/OpenVox fleet.
 - **The CA's own serving certificate (opt-in):** `serving_cert` makes the CA
   issue and renew the certificate its own listener presents, into a Kubernetes
   Secret or a local file pair, instead of being handed one through `tls_cert` /
-  `tls_key` — the two are mutually exclusive. It is the only route to TLS when
-  the CA key is held at a provider, where nothing else can issue that
-  certificate: cert-manager cannot act as a CA issuer without the key, and
+  `tls_key` — the two are mutually exclusive. It is the only way to get that
+  certificate issued *and renewed unattended* once the CA key is held at a
+  provider: cert-manager cannot act as a CA issuer without the key, and
   `openvox-ca-ctl generate` needs an admin certificate that does not exist until
-  the CA is already serving. See [the CA's own serving
+  the CA is already serving. The offline `openvox-ca generate` can still mint
+  one by hand on the CA host, and then you own the renewal. See [the CA's own serving
   certificate](docs/configuration.md#the-cas-own-serving-certificate).
 - **Kubernetes export (opt-in):** publish the CA certificate and/or CRL into any number of Kubernetes Secrets and ConfigMaps via in-cluster server-side apply, with configurable names, namespaces, data keys, labels, annotations, Secret `type`, and how much of the chain to publish (`cert_scope`/`crl_scope`, which publish the whole stored chain by default — set them to `self` on a target whose consumer wants this CA's block alone); CRL-bearing objects are refreshed whenever the CRL changes. See [Kubernetes export](docs/kubernetes-export.md)
 - **Helm chart:** an OCI-published chart, versioned in lockstep with the server, covering dual-stack Services, TLS-passthrough Ingress and Gateway API routes, an opt-in ServiceMonitor and network policies; it derives the RBAC for managed certificates kept in Secrets from the server's own configuration; and the server's settings pass straight through to its config file, so the whole configuration reference is reachable. See [deploying with Helm](docs/helm-chart.md)

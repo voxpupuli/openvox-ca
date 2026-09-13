@@ -88,7 +88,7 @@ Connections in flight keep the certificate they negotiated with; the next TLS ha
 
 Everything else — the listen address, the storage backend, CA key custody, CA properties, and which autosign configuration is in use — needs a restart. Those are bound to state established at startup, and re-reading them behind your back would be worse than telling you to restart. (The autosign allowlist or script, and the OpenBao AppRole credential files, are read live on every use and need neither a reload nor a restart.)
 
-A CA that issues its own serving certificate — [`serving_cert`](configuration.md#the-cas-own-serving-certificate), which is the only route to TLS when the CA key is held at a provider — needs no reload for it either. The reconcile loop renews the certificate and installs it on the listener, so `systemctl reload` is a no-op for that certificate and the row above applies only to an operator-supplied `tls_cert` / `tls_key` pair. The two are mutually exclusive.
+A CA that issues its own serving certificate — [`serving_cert`](configuration.md#the-cas-own-serving-certificate), which is the only way to have that certificate renewed unattended once the CA key is held at a provider — needs no reload for it either. The reconcile loop renews the certificate and installs it on the listener, so `systemctl reload` is a no-op for that certificate and the row above applies only to an operator-supplied `tls_cert` / `tls_key` pair. The two are mutually exclusive.
 
 A reload that fails (a half-written certificate, a deleted allow-list file) leaves the previous configuration in place and the CA serving. The failure is logged and stays in the status text until a reload succeeds:
 

@@ -45,7 +45,12 @@ RestartSec=5s
 # on another replica — hmac-key on a cold start, then bootstrap — so this must
 # clear 2 x LockTimeout with room for the key generation on top. A CA using
 # serving_cert spends up to one further LockTimeout issuing its own serving
-# certificate before the listener binds; 300s still clears all three.
+# certificate before the listener binds, so the lock-wait term is three rather
+# than two -- plus the store read that follows the pass, which is outside its
+# budget by design. Whether 300s clears the whole pre-listen path is a separate
+# question this comment does not answer: the path installs budgets that are not
+# derived from LockTimeout at all, and openvox-ca#287's neighbourhood is where
+# that is being settled.
 # cmd/openvox-ca/launcher_test.go asserts that floor; charts/openvox-ca gives
 # Init the same 300s through its startupProbe.
 TimeoutStartSec=300s

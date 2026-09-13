@@ -36,8 +36,13 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/certstore"
@@ -1337,3 +1342,112 @@ func (emptyStore) Load(context.Context) ([]byte, []byte, error) {
 	return nil, nil, nil
 }
 func (emptyStore) Save(context.Context, []byte, []byte) error { return nil }
+
+// The Secret store driven all the way through, which no spec above does: the
+// configuration half is covered with a fake client, and the fatal half with a
+// file store, but their composition is not -- and the Secret store is the
+// deployment the feature exists for.
+var _ = Describe("provisioning the serving certificate into a Secret", func() {
+	var (
+		ctx    context.Context
+		myCA   *ca.CA
+		store  *storage.StorageService
+		client *fake.Clientset
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		myCA, store = newRefresherTestCA()
+		myCA.LeafKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		client = fake.NewClientset()
+
+		restoreClient, restoreNS := inClusterClientset, podNamespace
+		DeferCleanup(func() { inClusterClientset, podNamespace = restoreClient, restoreNS })
+		inClusterClientset = func(string) (kubernetes.Interface, error) { return client, nil }
+		podNamespace = func() (string, error) { return "openvox", nil }
+	})
+
+	secretCfg := func() *serverConfig {
+		return &serverConfig{
+			Hostname: "ca.test",
+			ServingCert: &certstore.Entry{
+				Certname: "ca.test", Names: []string{"ca.test"},
+				RenewBefore: certstore.Duration(720 * time.Hour),
+				KeyAlgo:     "ecdsa", KeySize: 256,
+				Store: certstore.StoreConfig{Secret: &certstore.SecretConfig{
+					Name: "openvox-ca-serving-tls"}},
+			},
+		}
+	}
+
+	It("issues into the Secret and presents what it wrote", func() {
+		sc, err := buildServingCert(secretCfg(), GinkgoT().TempDir(), "", store)
+		Expect(err).NotTo(HaveOccurred())
+		myCA.ManagedCerts = []ca.ManagedCert{sc.entry}
+
+		Expect(provisionServingCert(ctx, myCA, sc)).To(Succeed())
+
+		// The listener has something, and it is what the Secret holds rather
+		// than anything this spec placed there.
+		held, err := sc.holder.GetCertificate(&tls.ClientHelloInfo{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(held.Leaf.Subject.CommonName).To(Equal("ca.test"))
+
+		sec, err := client.CoreV1().Secrets("openvox").
+			Get(ctx, "openvox-ca-serving-tls", metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sec.Data).To(HaveKey("tls.crt"))
+		Expect(sec.Data).To(HaveKey("tls.key"))
+		Expect(sec.Data).To(HaveKey("ca.crt"))
+		Expect(serialOf(sec.Data["tls.crt"])).To(Equal(held.Leaf.SerialNumber.String()))
+	})
+
+	It("is fatal when RBAC refuses the Secret, and names it", func() {
+		// The claim the chart's NOTES and the documentation both make about a
+		// serving Secret: a refusal is fatal and the pod never starts. Nothing
+		// pinned it, because every fatal spec used a file store.
+		client.PrependReactor("get", "secrets",
+			func(k8stesting.Action) (bool, runtime.Object, error) {
+				return true, nil, apierrors.NewForbidden(
+					schema.GroupResource{Resource: "secrets"}, "openvox-ca-serving-tls",
+					errors.New("no RBAC grant"))
+			})
+
+		sc, err := buildServingCert(secretCfg(), GinkgoT().TempDir(), "", store)
+		Expect(err).NotTo(HaveOccurred())
+		myCA.ManagedCerts = []ca.ManagedCert{sc.entry}
+
+		err = provisionServingCert(ctx, myCA, sc)
+		Expect(err).To(HaveOccurred())
+		// Three things, and the first is the one this wrapper owns. The store
+		// names itself in its own error, so asserting only the Secret name
+		// passes whether or not the startup path says anything at all -- which
+		// it did when this spec was first written, and the mutation that
+		// stripped this clause survived it.
+		Expect(err.Error()).To(ContainSubstring("the listener has nothing to present"))
+		Expect(err.Error()).To(ContainSubstring("Secret openvox/openvox-ca-serving-tls"))
+		Expect(err.Error()).To(ContainSubstring("no RBAC grant"))
+	})
+})
+
+// The third fatal arm: material that reads cleanly and cannot be presented.
+var _ = Describe("a serving store holding material the listener cannot use", func() {
+	It("refuses to start rather than binding with an empty holder", func() {
+		// Reachable when a store holds a corrupt or foreign keypair and the
+		// reissue that would replace it also fails. The Load wrapper swallows
+		// its own install failure by design, so this is the only thing left
+		// that stops the listener binding with nothing to present.
+		myCA, _ := newRefresherTestCA()
+		sc := newServingCert(garbageStore{}, ca.CertSpec{
+			Subject: "ca.test", DNSNames: []string{"ca.test"},
+			RenewBefore: 720 * time.Hour,
+		})
+		// No entry in the set, so the pass writes nothing and the garbage
+		// survives to be judged.
+		myCA.ManagedCerts = nil
+
+		err := provisionServingCert(context.Background(), myCA, sc)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("cannot be presented by the listener"))
+	})
+})
