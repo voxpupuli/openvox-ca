@@ -731,6 +731,144 @@ managed_certs:
 	// exporter forces every apply. Sharing a Secret would churn the object for
 	// ever without anything looking broken, which is the kind of fault found
 	// months later.
+	// The second consumer's half of the seam. Every refusal this package makes
+	// names the block the entry came from, and until openvox-ca#326 there was
+	// only one block, so the name was written into eleven messages. A serving
+	// certificate validated through the same grammar was therefore reported
+	// under `managed_certs[0]` -- a block its configuration need not contain --
+	// and a collision between the two blocks rendered both sides identically,
+	// so the message could not say which of them to change.
+	Describe("entries that came from another configuration block", func() {
+		servingCert := certstore.Block{Name: "serving_cert", Single: true}
+
+		single := func(body string) certstore.Config {
+			return decode(`
+managed_certs:
+  - certname: ca.example.com
+` + body)
+		}
+
+		It("names that block, with no index, in an entry's own refusal", func() {
+			err := single(`    names: [ca]
+    store: {files: {cert: /c.pem, key: /k.pem}}
+`).ValidateIn(servingCert)
+
+			Expect(err).To(MatchError(ContainSubstring("serving_cert (ca.example.com)")))
+			Expect(err).To(MatchError(ContainSubstring("renew_before must be positive")))
+			// The whole point: an operator with no managed_certs block at all
+			// must not be sent to look for one.
+			Expect(err).NotTo(MatchError(ContainSubstring("managed_certs")))
+		})
+
+		It("names it in a store refusal too, which is a different message path", func() {
+			err := single(`    names: [ca]
+    renew_before: 720h
+`).ValidateIn(servingCert)
+
+			Expect(err).To(MatchError(ContainSubstring("serving_cert (ca.example.com)")))
+			Expect(err).To(MatchError(ContainSubstring("store must name where")))
+			Expect(err).NotTo(MatchError(ContainSubstring("managed_certs")))
+		})
+
+		It("names it in a reserved-path collision, on the side it owns", func() {
+			err := single(`    names: [ca]
+    renew_before: 720h
+    store: {files: {cert: /var/lib/openvox-ca/ca.pem, key: /k.pem}}
+`).CheckReservedPathsIn(servingCert, []certstore.ReservedPath{
+				{Setting: "cadir", Path: "/var/lib/openvox-ca", Tree: true},
+			})
+
+			// Both sides are now distinguishable: the entry is the serving
+			// certificate, the thing it collides with is cadir.
+			Expect(err).To(MatchError(ContainSubstring("serving_cert (ca.example.com) stores its cert")))
+			Expect(err).To(MatchError(ContainSubstring("is inside cadir")))
+			Expect(err).NotTo(MatchError(ContainSubstring("managed_certs")))
+		})
+
+		It("names it in an export overlap", func() {
+			err := single(`    names: [ca]
+    renew_before: 720h
+    store: {secret: {name: ca-tls, namespace: openvox}}
+`).CheckExportOverlapIn(servingCert, [][2]string{{"openvox", "ca-tls"}})
+
+			Expect(err).To(MatchError(ContainSubstring("serving_cert (ca.example.com)")))
+			Expect(err).NotTo(MatchError(ContainSubstring("managed_certs")))
+		})
+
+		It("names it in a build failure", func() {
+			cfg := single(`    names: [ca]
+    renew_before: 720h
+    store: {secret: {name: ca-tls}}
+`)
+			_, err := cfg.BuildIn(servingCert, certstore.Deps{
+				CACerts: stubCA{pem: []byte("CA")}, Client: fake.NewClientset(),
+			})
+			Expect(err).To(MatchError(ContainSubstring("serving_cert (ca.example.com)")))
+			Expect(err).To(MatchError(ContainSubstring("no namespace for Secret")))
+			Expect(err).NotTo(MatchError(ContainSubstring("managed_certs")))
+		})
+
+		// A multi-entry block keeps its index, and the cross-reference between
+		// two entries is labelled too -- that one used to be a bare
+		// `managed_certs[0]` inside a message whose subject was another block.
+		It("keeps the index for a block that is a list, on both sides", func() {
+			err := decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {files: {cert: /shared.pem, key: /a-key.pem}}
+  - certname: b.example.com
+    names: [b]
+    renew_before: 720h
+    store: {files: {cert: /shared.pem, key: /b-key.pem}}
+`).ValidateIn(certstore.Block{Name: "component_certs"})
+
+			Expect(err).To(MatchError(ContainSubstring("component_certs[1] (b.example.com)")))
+			Expect(err).To(MatchError(ContainSubstring("already used by component_certs[0]")))
+			Expect(err).NotTo(MatchError(ContainSubstring("managed_certs")))
+		})
+
+		// The certname cross-reference, which is a different message from the
+		// path one above and was the site a mutation found unpinned: two
+		// entries sharing a certname, where the refusal has to name the other
+		// entry as well as this one.
+		It("names the block on both sides of a duplicate certname", func() {
+			err := decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {files: {cert: /a.pem, key: /a-key.pem}}
+  - certname: a.example.com
+    names: [a2]
+    renew_before: 720h
+    store: {files: {cert: /b.pem, key: /b-key.pem}}
+`).ValidateIn(certstore.Block{Name: "component_certs"})
+
+			Expect(err).To(MatchError(ContainSubstring("component_certs[1] (a.example.com)")))
+			Expect(err).To(MatchError(ContainSubstring("already used by component_certs[0]")))
+			Expect(err).NotTo(MatchError(ContainSubstring("managed_certs")))
+		})
+
+		// The zero Block is managed_certs, so a caller that passes nothing gets
+		// exactly what Validate has always produced. Without this, the default
+		// could drift to an empty prefix and every existing message would lose
+		// its block name with nothing to say so.
+		It("defaults to managed_certs, which is what Validate does", func() {
+			body := `    names: [a]
+    store: {files: {cert: /c.pem, key: /k.pem}}
+`
+			direct := single(body).Validate()
+			viaZero := single(body).ValidateIn(certstore.Block{})
+
+			Expect(direct).To(HaveOccurred())
+			Expect(viaZero).To(HaveOccurred())
+			Expect(viaZero.Error()).To(Equal(direct.Error()))
+			Expect(direct.Error()).To(ContainSubstring("managed_certs[0] (ca.example.com)"))
+		})
+	})
+
 	Describe("the overlap with kubernetes_export", func() {
 		It("refuses a Secret that is also an export target", func() {
 			err := decode(minimal).CheckExportOverlap([][2]string{{"openvox", "puppetserver-tls"}})
