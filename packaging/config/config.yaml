@@ -20,10 +20,12 @@
 # that omitted this would install a service that cannot start at all.
 #
 # /etc/puppetlabs/puppet/ssl/ca is the Clojure CA's own layout, so a CA
-# migrated from OpenVox/Puppet Server is already here. It is also the one
-# writable path openvox-ca.service grants under ProtectSystem=strict -- change
-# this and the unit's ReadWritePaths= has to move with it, or the CA will not
-# be able to write.
+# migrated from OpenVox/Puppet Server is already here. It is also the writable
+# path the units grant under ProtectSystem=strict -- change this and
+# ReadWritePaths= has to move with it in BOTH openvox-ca.service and
+# openvox-ca-first-boot.service, or the CA will not be able to write. Both,
+# because both write here: the service serves from this directory and the
+# provisioning oneshot creates it.
 cadir: /etc/puppetlabs/puppet/ssl/ca
 
 # The certificate and key the server presents.

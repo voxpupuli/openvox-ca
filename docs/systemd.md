@@ -44,7 +44,7 @@ openvox-ca does not assume either is installed. The packages create the account 
 
 **What sharing the account costs, stated plainly.** On a host that also runs OpenVox Server, the CA's private key is now readable by Server's own uid — the two are the same account. Anything running as `puppet` can read the key that signs every certificate in the estate, so a compromise of Server is a compromise of the CA on that host, without a privilege boundary in between.
 
-It runs the other way too, and less obviously: **installing the package gives `/etc/puppetlabs/puppet/ssl` and `ssl/ca` to `puppet:puppet` even where an agent created that tree as root.** Write permission on a directory is what governs unlink and rename of the entries in it, so on such a host anything running as `puppet` — a compromised OpenVox Server included — can replace `crl.pem` or move `certs/` aside and substitute its own, and those are the trust anchors a root-running agent reads.
+It runs the other way too, and less obviously: **installing the package gives `/etc/puppetlabs/puppet/ssl`, `ssl/ca`, and whichever of `ssl/certs`, `ssl/private_keys` and `ssl/public_keys` already exist, to `puppet:puppet` — even where an agent created that tree as root.** On exactly the co-existence host this section is about, all five exist, and `private_keys/` is among them. Write permission on a directory is what governs unlink and rename of the entries in it, so on such a host anything running as `puppet` — a compromised OpenVox Server included — can replace `crl.pem` or move `certs/` aside and substitute its own, and those are the trust anchors a root-running agent reads.
 
 That is the price of fitting the layout Server already establishes, and it is worth knowing rather than discovering. Two things reduce it. [Encrypting the CA key at rest](ca-key-security.md) means the file alone is not enough. Better, a CA that matters should not share a host with the server it issues for — a dedicated CA host has no `puppet` account but its own, and the question does not arise.
 
@@ -200,9 +200,14 @@ $ systemd-analyze security openvox-ca.service
 **Where the packages come from, first.** They are not published as release assets yet — `release.yml` has no packaging job, and adding one is [#266](https://github.com/voxpupuli/openvox-ca/pull/266). Until it lands, build them from a checkout:
 
 ```console
-$ mage build:dist          # or build:distVariant per architecture
+$ mage build:dist          # or build:distVariant for EACH packaged architecture
 $ mage build:packages      # reads those tarballs; builds no binaries
 ```
+
+`build:packages` builds the packages for every variant marked packaged, so it
+needs both `linux_amd64` and `linux_arm64` tarballs present and refuses if
+either is missing. `build:dist` produces both in one command, along with the
+two FIPS tarballs the packages do not use.
 
 They land in `dist/`, one `.deb` and one `.rpm` per non-FIPS architecture. A FIPS deployment uses the `_fips` tarball and the unit it ships; the packages carry the pure-Go build only.
 
@@ -226,7 +231,7 @@ Every step it takes is guarded on absence, so it **adopts rather than replaces**
 
 1. Create the `certs/`, `private_keys/` and `public_keys/` directories under `/etc/puppetlabs/puppet/ssl` if they are absent.
 2. Bootstrap a CA in `/etc/puppetlabs/puppet/ssl/ca` unless one is already there.
-3. Adopt this host's node certificate if `certs/$NAME.pem` and `private_keys/$NAME.pem` both exist; otherwise mint one.
+3. Adopt this host's node certificate if `certs/$NAME.pem` and `private_keys/$NAME.pem` both exist **and the CA was already there before this run**; otherwise mint one. A credential that is already present when this run has just created the CA did not come from that CA, so adopting it would serve a certificate no agent's new trust anchor verifies — provisioning stops instead, and says which two ways out there are.
 4. Create `certs/ca.pem` and `crl.pem` in the ssl tree as symlinks pointing into the CA directory (`../ca/ca_crt.pem` and `ca/ca_crl.pem`), as Puppet's own layout does, if nothing is there already.
 5. Link the serving credential the shipped configuration names — `certs/openvox-ca-server.pem` and `private_keys/openvox-ca-server.pem` — to the certificate step 3 produced.
 
@@ -245,7 +250,11 @@ copy — it takes the private key, the inventory and the CRL, and the service ma
 be running against it, which is why provisioning refuses rather than attempting
 the move itself.
 
-Step 3 is the one that can stop rather than warn, and it does so in two cases. If **one half of a credential** is present — a certificate with no key, or the reverse — it refuses to guess and says which file to move aside. If the binary has **no `generate` subcommand** it stops too, because a build that cannot mint leaves the service with no certificate to serve and `openvox-ca` refuses to start without TLS on a non-loopback address; failing here names the cause, where failing at the service would only report that TLS is not configured. In both cases the CA itself is bootstrapped and intact, and the message says so.
+Step 3 is the one that can stop rather than warn, and it does so in three cases. If **one half of a credential** is present — a certificate with no key, or the reverse — it refuses to guess and says which file to move aside. If the binary has **no `generate` subcommand** it stops too, because a build that cannot mint leaves the service with no certificate to serve and `openvox-ca` refuses to start without TLS on a non-loopback address; failing here names the cause, where failing at the service would only report that TLS is not configured.
+
+The third is the one that bites a host you are adding a CA to rather than building from nothing: **a complete credential for `$NAME` already exists, but this run created the CA**. That is the ordinary state of a machine already enrolled with an estate's CA — an agent certificate under `certs/`, signed by a CA elsewhere, and no local CA directory. Serving it from a CA that did not issue it would fail verification for every client, so provisioning stops and offers the choice it cannot make for you: point `cadir` at the estate's existing CA (and `ReadWritePaths=` in both units with it), or move the credential aside and let this new CA mint its own.
+
+In all three cases the CA itself is bootstrapped and intact, and the message says so.
 
 `$NAME` is resolved first-usable-wins: `OPENVOX_CA_CERTNAME` from a systemd drop-in, then `certname` from `/etc/puppetlabs/puppet/puppet.conf`, then `hostname -f` if it is dotted and not a localhost form, then the short hostname, then `localhost`. Every source is also checked against an allow-list of characters that cannot express a path, because the name is joined to one.
 
@@ -259,7 +268,9 @@ It re-runs after the CA directory is wiped **on the next boot, or on an explicit
 
 **The mint step prints a warning, and on a first boot it is expected.** `openvox-ca generate` reports that the `filesystem` backend coordinates no writes across processes and says to stop the server before running it. That is the right warning in general and it is why this unit is ordered `Before=openvox-ca.service`: at the moment it runs there is no server to stop. Seeing it in `journalctl -u openvox-ca-first-boot` after a first boot is not a fault. Seeing it after starting the oneshot by hand on a **running** CA is — stop the service first.
 
-**Installing also takes ownership of two directories.** The postinstall gives `/etc/puppetlabs/puppet/ssl` and `/etc/puppetlabs/puppet/ssl/ca` to `puppet:puppet` — not recursively, so their contents are left alone, and not following symlinks. On a host where openvox-agent created that tree as root, those two directories change owner when this package is installed. See [why `puppet`](#why-puppet-and-not-a-private-account) for what sharing the account costs.
+**Installing also takes ownership of some directories.** The postinstall gives `puppet:puppet` the ssl root `/etc/puppetlabs/puppet/ssl` and the CA directory `ssl/ca`, both of which the package ships, plus each of `ssl/certs`, `ssl/private_keys` and `ssl/public_keys` that **already exists** — it creates none of the three. Never recursively, so their contents are left alone, and never following symlinks.
+
+On a host where openvox-agent created that tree as root, that is five directories changing owner, `private_keys/` included. Write permission on a directory governs unlink and rename of the entries in it, so this is the same cost the [why `puppet`](#why-puppet-and-not-a-private-account) section spells out, applied to the directory holding an agent's or Server's own keys. It is deliberate — provisioning writes this host's node certificate, the CA alias and the serving credential into those three directories, and refuses to start if it cannot — but it is worth knowing rather than discovering.
 
 ### The packages listen on 8141
 
@@ -289,9 +300,32 @@ The one file an upgrade will not overwrite is `/etc/puppet-ca/config.yaml`: it i
 
 ### One instance per CA directory
 
-The packages configure the `filesystem` storage backend, which coordinates no writes between hosts and cannot append to its inventory atomically. **Exactly one `openvox-ca` may run against a given CA directory.** Running two — on one host or two — can leave an integrity record covering a state that never existed, after which the server refuses to start.
+The packages configure the `filesystem` storage backend, and first-boot provisioning **supports that backend only** — see [configuring another backend](#configuring-another-backend) below. It coordinates no writes between hosts and cannot append to its inventory atomically. **Exactly one `openvox-ca` may run against a given CA directory.** Running two — on one host or two — can leave an integrity record covering a state that never existed, after which the server refuses to start.
 
 That is also why provisioning is ordered before the service rather than beside it: the oneshot writes to storage directly, and doing so while a server is running would make it the second writer. Only a backend that reports distributed locking may run more than one instance; see [configuring the server](configuration.md).
+
+### Configuring another backend
+
+[The storage backends](storage-backends.md) are configured in the same `/etc/puppet-ca/config.yaml` the packages ship, so its examples apply to a packaged install — **except that provisioning refuses to run against any of them.** `openvox-ca-ctl setup` is filesystem-only, while `openvox-ca generate` mints through whatever backend the configuration names, so bootstrapping here would write one CA to disk while the service reads another from the store, and then point `certs/ca.pem` — where every agent on this host reads the CA certificate — at the wrong one.
+
+Because `openvox-ca-first-boot.service` is `RequiredBy=openvox-ca.service`, that refusal stops the service as well. Moving a packaged install to another backend therefore means provisioning the CA yourself:
+
+```console
+# systemctl disable --now openvox-ca-first-boot
+# openvox-ca-ctl setup            # against your configured backend
+```
+
+and supplying the credential the shipped configuration names — `certs/openvox-ca-server.pem` and `private_keys/openvox-ca-server.pem` — or pointing `tls_cert` and `tls_key` at your own. Leaving the oneshot enabled blocks the service at the next boot.
+
+Every spelling of the filesystem backend that `openvox-ca` itself accepts — `filesystem`, `file`, `fs`, `disk`, `local` — is accepted here too, in any case.
+
+### The first-boot enable, and making a disable stick
+
+Installing the package enables `openvox-ca-first-boot.service`. That is symlink work on disk only: the unit has no `WantedBy=multi-user.target`, so nothing is provisioned by the install or by the next reboot, and it still runs at nothing but the first `systemctl start openvox-ca`.
+
+The enable happens **once**, and the package records that it happened at `/var/lib/openvox-ca/first-boot-enabled`. So a later `systemctl disable openvox-ca-first-boot` is not undone by the next upgrade — the marker is what tells the upgrade its enable is already done. Removing the package deletes the marker and the directory, so a subsequent reinstall enables again.
+
+That directory is the only state the packages keep outside `/etc`. If the postinstall cannot write the marker it says so and carries on, and creating the file by hand is enough to make a disable stick.
 
 ## Verifying
 

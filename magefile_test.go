@@ -1411,18 +1411,6 @@ var _ = Describe("the packaged variant set", func() {
 		}
 	})
 
-	DescribeTable("names the variants that are packaged today",
-		func(name string) {
-			all := map[string]bool{}
-			for _, v := range distVariants() {
-				all[v.name] = true
-			}
-			Expect(all).To(HaveKey(name))
-		},
-		Entry("linux_amd64", "linux_amd64"),
-		Entry("linux_arm64", "linux_arm64"),
-	)
-
 	It("names the formats in the order release.yml's counts assume", func() {
 		Expect(packageFormats).To(Equal([]string{"deb", "rpm"}))
 	})
@@ -1622,6 +1610,88 @@ var _ = Describe("verifyNodeTTL", func() {
 	})
 })
 
+var _ = Describe("verifyBackendAliases", func() {
+	// The guard that keeps first-boot's FILESYSTEM_BACKEND_ALIASES in step with
+	// ParseBackendKind. Driven over content through the seam for verifyNodeTTL's
+	// reason: a guard exercised only against today's tree cannot tell working
+	// from vacuous.
+	const goodGo = "\tcase \"\", \"filesystem\", \"file\", \"fs\", \"disk\", \"local\":\n" +
+		"\t\treturn BackendFilesystem, nil\n"
+	const goodShell = "FILESYSTEM_BACKEND_ALIASES=\"filesystem file fs disk local\"\n"
+
+	It("passes against the repository as it stands", func() {
+		Expect(verifyBackendAliases()).To(Succeed())
+	})
+
+	It("accepts the two lists when they name the same spellings", func() {
+		Expect(verifyBackendAliasesIn([]byte(goodShell), []byte(goodGo))).To(Succeed())
+	})
+
+	// Order is not meaning: the guard compares sets, so a reordered list is
+	// still the same list. Without this, a maintainer tidying either file
+	// alphabetically would get a failure that says nothing is wrong.
+	It("does not care what order either list is written in", func() {
+		Expect(verifyBackendAliasesIn(
+			[]byte("FILESYSTEM_BACKEND_ALIASES=\"local disk fs file filesystem\"\n"),
+			[]byte(goodGo))).To(Succeed())
+	})
+
+	// The direction that actually happened: the shell list was narrower, so a
+	// host the server considers a filesystem deployment would not start.
+	It("refuses a spelling the server accepts and provisioning does not", func() {
+		err := verifyBackendAliasesIn(
+			[]byte("FILESYSTEM_BACKEND_ALIASES=\"filesystem file fs disk\"\n"), []byte(goodGo))
+		Expect(err).To(MatchError(And(
+			ContainSubstring("local"),
+			ContainSubstring("RequiredBy=openvox-ca.service"),
+			ContainSubstring(firstBootScriptPath),
+		)))
+	})
+
+	// And the other direction, which is the more dangerous one: provisioning
+	// would bootstrap a filesystem CA for a backend the server reads elsewhere.
+	It("refuses a spelling provisioning accepts and the server does not", func() {
+		err := verifyBackendAliasesIn(
+			[]byte("FILESYSTEM_BACKEND_ALIASES=\"filesystem file fs disk local etcd\"\n"),
+			[]byte(goodGo))
+		Expect(err).To(MatchError(And(
+			ContainSubstring("etcd"),
+			ContainSubstring("the server will not read it from"),
+			ContainSubstring(storageSpecPath),
+		)))
+	})
+
+	// A guard that cannot read its input must say so rather than pass -- both
+	// halves, for the reason verifyNodeTTL states.
+	It("refuses when the shell list can no longer be found", func() {
+		err := verifyBackendAliasesIn([]byte("ALIASES=$(compute)\n"), []byte(goodGo))
+		Expect(err).To(MatchError(And(
+			ContainSubstring("no longer sets FILESYSTEM_BACKEND_ALIASES"),
+			ContainSubstring(firstBootScriptPath),
+		)))
+	})
+
+	It("refuses when the Go case arm can no longer be found", func() {
+		err := verifyBackendAliasesIn([]byte(goodShell),
+			[]byte("\tcase filesystemAliases:\n\t\treturn BackendFilesystem, nil\n"))
+		Expect(err).To(MatchError(And(
+			ContainSubstring("no longer spells the filesystem arm"),
+			ContainSubstring("update the pattern rather than deleting the check"),
+		)))
+	})
+
+	// The floor. ParseBackendKind's arm always carries the empty string for
+	// "unset means filesystem", which this guard skips -- so an arm that were
+	// ONLY the empty string would parse to an empty set, and an empty set
+	// matches every shell list vacuously.
+	It("refuses when the Go arm parses to no spellings at all", func() {
+		err := verifyBackendAliasesIn([]byte(goodShell),
+			[]byte("\tcase \"\":\n\t\treturn BackendFilesystem, nil\n"))
+		Expect(err).To(MatchError(
+			ContainSubstring("parsed to no spellings at all")))
+	})
+})
+
 var _ = Describe("verifyMageTargets", func() {
 	// Against the repository's real magefile and workflows, which is what
 	// `mage dev:check` runs.
@@ -1648,16 +1718,29 @@ jobs:
     steps:
       - run: mage build:packages
 `)
+		// The floor inside verifyMageTargetsIn refuses a set too small to be
+		// the real .github/workflows, so every fixture below supplies two.
+		// This one names no mage target, so it adds nothing to what these
+		// specs assert beyond clearing that floor.
+		quietWorkflow := []byte(`
+jobs:
+  lint:
+    steps:
+      - run: echo hello
+`)
+		with := func(name string, body []byte) map[string][]byte {
+			return map[string][]byte{name: body, "quiet.yml": quietWorkflow}
+		}
 
 		It("accepts a magefile and a workflow in agreement", func() {
-			Expect(verifyMageTargetsIn(goodMage, map[string][]byte{"release.yml": goodWorkflow})).To(Succeed())
+			Expect(verifyMageTargetsIn(goodMage, with("release.yml", goodWorkflow))).To(Succeed())
 		})
 
 		// The deliverable: release.yml's packaging job calls this by name,
 		// and nothing in Go would notice it going away.
 		It("rejects a magefile that has lost build:packages, naming the target", func() {
 			without := bytes.Replace(goodMage, []byte("func (Build) Packages() error { return nil }\n"), nil, 1)
-			err := verifyMageTargetsIn(without, map[string][]byte{"release.yml": goodWorkflow})
+			err := verifyMageTargetsIn(without, with("release.yml", goodWorkflow))
 			Expect(err).To(MatchError(ContainSubstring(`mage target "build:packages" does not exist`)))
 		})
 
@@ -1669,7 +1752,7 @@ jobs:
       - run: mage build:packages
       - run: mage build:invented
 `)
-			err := verifyMageTargetsIn(goodMage, map[string][]byte{"release.yml": bad})
+			err := verifyMageTargetsIn(goodMage, with("release.yml", bad))
 			Expect(err).To(MatchError(And(
 				ContainSubstring("release.yml runs `mage build:invented`"),
 				ContainSubstring("not a target magefile.go defines"))))
@@ -1683,7 +1766,7 @@ jobs:
 
 func main() {}
 `)
-			err := verifyMageTargetsIn(src, map[string][]byte{"release.yml": goodWorkflow})
+			err := verifyMageTargetsIn(src, with("release.yml", goodWorkflow))
 			Expect(err).To(MatchError(ContainSubstring("build:dist was not among them")))
 		})
 
@@ -1700,11 +1783,28 @@ jobs:
     steps:
       - uses: ./.github/actions/build-packages
 `)
-			err := verifyMageTargetsIn(goodMage, map[string][]byte{"release.yml": bad})
+			err := verifyMageTargetsIn(goodMage, with("release.yml", bad))
 			Expect(err).To(MatchError(And(
 				ContainSubstring("mentions `mage `"),
 				ContainSubstring("no-op"))))
 		})
+
+		// The floor on the workflow SET, which used to sit beside the glob in
+		// verifyMageTargets and so could not be reached from here at all: it
+		// only ever ran against the real .github/workflows, and deleting it
+		// changed nothing any spec could observe. It is the check that stops
+		// the per-workflow loop below passing by having nothing to iterate.
+		DescribeTable("refuses a workflow set too small to be the real directory",
+			func(workflows map[string][]byte) {
+				err := verifyMageTargetsIn(goodMage, workflows)
+				Expect(err).To(MatchError(And(
+					ContainSubstring("too few to be the real"),
+					ContainSubstring(".github/workflows"),
+				)))
+			},
+			Entry("none at all", map[string][]byte{}),
+			Entry("one", map[string][]byte{"release.yml": goodWorkflow}),
+		)
 
 		It("does not fire that floor on a workflow that never mentions mage", func() {
 			quiet := []byte(`
@@ -1713,7 +1813,7 @@ jobs:
     steps:
       - run: echo hello
 `)
-			Expect(verifyMageTargetsIn(goodMage, map[string][]byte{"release.yml": quiet})).To(Succeed())
+			Expect(verifyMageTargetsIn(goodMage, with("release.yml", quiet))).To(Succeed())
 		})
 	})
 })
@@ -1892,6 +1992,14 @@ var _ = Describe("packaging helpers", func() {
 		// named and broken only at run time -- the same hazard the Typeflag
 		// guard refuses outright.
 		It("refuses an entry larger than the extraction bound", func() {
+			// Lowered for the duration of this spec. The property under test is
+			// "refuse rather than truncate", which does not depend on how large
+			// the bound is -- and at the shipped 2GB the fixture alone cost more
+			// wall-clock than the rest of the suite put together.
+			restore := maxExtractedFileBytes
+			maxExtractedFileBytes = 64 << 10
+			DeferCleanup(func() { maxExtractedFileBytes = restore })
+
 			archive := filepath.Join(GinkgoT().TempDir(), "big.tar.gz")
 			f, err := os.Create(archive)
 			Expect(err).NotTo(HaveOccurred())
@@ -1899,7 +2007,7 @@ var _ = Describe("packaging helpers", func() {
 			tw := tar.NewWriter(gz)
 
 			// One byte past the bound, declared and delivered.
-			const size = int64(maxExtractedFileBytes) + 1
+			size := maxExtractedFileBytes + 1
 			Expect(tw.WriteHeader(&tar.Header{
 				Name: "openvox-ca", Typeflag: tar.TypeReg, Mode: 0o755, Size: size,
 			})).To(Succeed())
@@ -1964,6 +2072,16 @@ func readAr(path string) ([]arEntry, error) {
 			return nil, fmt.Errorf("bad ar member size at %d: %w", off, err)
 		}
 		start := off + 60
+		// Negative as well as over-long. strconv.Atoi accepts a leading minus,
+		// and the over-run check alone passes a negative straight through to
+		// raw[start : start+size], where high < low is a panic rather than the
+		// error this function is written to return. No attack path -- these
+		// archives are built moments earlier by this same suite -- but a
+		// panicking reader reports a corrupt fixture as a crash in the test
+		// harness, which is the slowest possible way to learn it.
+		if size < 0 {
+			return nil, fmt.Errorf("ar member %q declares a negative size (%d)", name, size)
+		}
 		if start+size > len(raw) {
 			return nil, fmt.Errorf("ar member %q runs past end of file", name)
 		}
@@ -2093,6 +2211,155 @@ func debPayload(path string) (map[string]int64, map[string]string, error) {
 	return modes, contents, nil
 }
 
+var _ = Describe("readAr", func() {
+	// The .deb reader this suite uses. Its guards matter because a fixture
+	// this suite built moments earlier is the only thing it ever reads: a
+	// reader that panics reports a corrupt fixture as a crash in the harness
+	// rather than as a failed assertion with a path in it.
+	arWith := func(size string) string {
+		// One member header: 16-byte name, 32 bytes of metadata, 10-byte size,
+		// then the two-byte terminator. Sizes are left-justified and padded.
+		hdr := fmt.Sprintf("%-16s%-12s%-6s%-6s%-8s%-10s%2s",
+			"debian-binary/", "0", "0", "0", "100644", size, "`\n")
+		Expect(hdr).To(HaveLen(60), "the fixture header is not an ar header")
+		return "!<arch>\n" + hdr
+	}
+
+	write := func(body string) string {
+		path := filepath.Join(GinkgoT().TempDir(), "fixture.ar")
+		Expect(os.WriteFile(path, []byte(body), 0o644)).To(Succeed())
+		return path
+	}
+
+	It("refuses a negative member size rather than panicking", func() {
+		// strconv.Atoi accepts a leading minus, and the over-run check alone
+		// passes it straight through to raw[start : start+size], where
+		// high < low panics.
+		_, err := readAr(write(arWith("-1")))
+		Expect(err).To(MatchError(ContainSubstring("negative size")))
+	})
+
+	It("refuses a member that runs past the end of the file", func() {
+		_, err := readAr(write(arWith("9999")))
+		Expect(err).To(MatchError(ContainSubstring("runs past end of file")))
+	})
+
+	It("refuses a file that is not an ar archive at all", func() {
+		_, err := readAr(write("not an archive\n"))
+		Expect(err).To(MatchError(ContainSubstring("is not an ar archive")))
+	})
+})
+
+var _ = Describe("the tarball contract build:dist writes and build:packages reads", func() {
+	// Two sides have to agree on this, and each used to carry its own copy --
+	// the same []string and the same format string, four sites between them.
+	// A rename on one side gives a packaging run that cannot find the archive
+	// it is meant to unpack.
+	It("names the archive the same way wherever it is built", func() {
+		Expect(distArchiveName("1.2.3", "linux_amd64")).
+			To(Equal("openvox-ca_1.2.3_linux_amd64.tar.gz"))
+	})
+
+	It("puts both binaries in every tarball", func() {
+		Expect(distBinaries()).To(ConsistOf("openvox-ca", "openvox-ca-ctl"))
+	})
+
+	// The file list is derived from the binary list rather than restated, the
+	// same way packageExtensions derives from packageFormats -- and it adds
+	// the unit, which is the part a caller must not have to remember.
+	It("derives the archive file list from the binary list, plus the unit", func() {
+		var names []string
+		var modes []int64
+		for _, e := range distArchiveFiles([]string{"a", "b"}) {
+			names = append(names, e.name)
+			modes = append(modes, int64(e.mode))
+		}
+		Expect(names).To(Equal([]string{"a", "b", distUnitFile}))
+		Expect(modes).To(Equal([]int64{0o755, 0o755, 0o644}),
+			"the binaries must be executable and the unit must not be")
+	})
+})
+
+var _ = Describe("the shipped configuration file's keys", func() {
+	// Every key the packages ship must be one openvox-ca actually reads.
+	//
+	// Nothing enforced that. loadServerConfig calls a plain yaml.Unmarshal --
+	// no KnownFields, no UnmarshalStrict -- so an unrecognised key is silently
+	// ignored, and the assertions elsewhere in this file check the shipped
+	// file against literal regexps, i.e. against another copy of the same
+	// spelling. A typo in packaging/config/config.yaml would therefore ship a
+	// configuration file that looks right, parses without complaint, and
+	// leaves the setting at its built-in default: `cadir` misspelt puts the CA
+	// somewhere other than where the unit's ReadWritePaths= grants, and the
+	// service fails to start with nothing pointing at the file.
+	//
+	// Derived from both files rather than pinned as a list, for the reason
+	// verifyNodeTTL gives: a hard-coded set has to be edited whenever the
+	// shipped file legitimately gains a key.
+	It("names only keys the server reads", func() {
+		shipped, err := os.ReadFile("packaging/config/config.yaml")
+		Expect(err).NotTo(HaveOccurred())
+		src, err := os.ReadFile("cmd/openvox-ca/config.go")
+		Expect(err).NotTo(HaveOccurred())
+
+		tags := map[string]bool{}
+		for _, m := range regexp.MustCompile(`yaml:"([a-z0-9_]+)"`).FindAllSubmatch(src, -1) {
+			tags[string(m[1])] = true
+		}
+		// The floor: an empty tag set would make every key below pass.
+		Expect(len(tags)).To(BeNumerically(">", 10),
+			"parsed %d yaml tags from cmd/openvox-ca/config.go, which is too few to be the real "+
+				"struct; the pattern is wrong rather than the file", len(tags))
+
+		var keys []string
+		for _, m := range regexp.MustCompile(`(?m)^([a-z0-9_]+):`).FindAllSubmatch(shipped, -1) {
+			keys = append(keys, string(m[1]))
+		}
+		// And the other floor: a shipped file that parsed to no keys would
+		// assert nothing at all.
+		Expect(keys).NotTo(BeEmpty(),
+			"no top-level key parsed out of packaging/config/config.yaml")
+
+		for _, k := range keys {
+			Expect(tags).To(HaveKey(k),
+				"packaging/config/config.yaml sets %q, which openvox-ca does not read: "+
+					"yaml.Unmarshal ignores it silently, so the setting stays at its default", k)
+		}
+	})
+})
+
+var _ = Describe("gitListFiles", func() {
+	// The GIT_* strip is the one guard this changeset added that nothing
+	// exercised. git exports GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE and
+	// GIT_OBJECT_DIRECTORY to the hooks it runs, and they OUTRANK `-C` -- so a
+	// `mage build:packages` invoked from inside a hook would enumerate the
+	// documentation of whichever repository the hook belonged to, silently.
+	// magefile_chart_test.go pins the same strip for its own fixture helper
+	// and says why; this pins the shipped one.
+	It("ignores an ambient GIT_DIR that would outrank -C", func() {
+		repo := GinkgoT().TempDir()
+		git := func(args ...string) { gitIn(repo, args...) }
+		git("init", "--quiet")
+		git("config", "user.email", "spec@example.com")
+		git("config", "user.name", "Spec")
+		Expect(os.WriteFile(filepath.Join(repo, "TRACKED.md"), []byte("x\n"), 0o644)).To(Succeed())
+		git("add", "TRACKED.md")
+		git("commit", "--quiet", "-m", "fixture")
+
+		// A DIFFERENT repository, pointed at by the environment.
+		other := GinkgoT().TempDir()
+		gitIn(other, "init", "--quiet")
+
+		GinkgoT().Setenv("GIT_DIR", filepath.Join(other, ".git"))
+		GinkgoT().Setenv("GIT_WORK_TREE", other)
+
+		out, err := gitListFiles([]string{"-C", repo, "ls-files", "--", "TRACKED.md"})
+		Expect(err).NotTo(HaveOccurred(),
+			"the ambient GIT_DIR reached git, so -C did not decide which repository was read")
+		Expect(strings.TrimSpace(out)).To(Equal("TRACKED.md"))
+	})
+})
+
 var _ = Describe("checkPackagingInputs", func() {
 	// Both branches stop a release that publishes nothing while exiting 0, so
 	// each error message is asserted rather than just the fact of an error: a
@@ -2176,6 +2443,21 @@ var _ = Describe("buildVariantPackages", func() {
 			Entry("the provisioning oneshot", "/usr/lib/systemd/system/openvox-ca-first-boot.service", int64(0o644)),
 			Entry("the provisioning script", "/usr/libexec/openvox-ca/first-boot", int64(0o755)),
 			Entry("the sysusers declaration", "/usr/lib/sysusers.d/openvox-ca.conf", int64(0o644)),
+		)
+
+		// Which binary, not merely that a binary is there. The payload table
+		// above asserts names and modes, and both binaries used to carry the
+		// same fixture body -- so swapping the two `dst:` entries in
+		// packaging/nfpm.yaml, shipping the server as the operator CLI, passed
+		// every assertion in this file.
+		DescribeTable("installs the right binary at each path",
+			func(path, name string) {
+				Expect(contents).To(HaveKey(path))
+				Expect(contents[path]).To(Equal(distBinaryBody(name)),
+					"%s does not hold %s", path, name)
+			},
+			Entry("the server binary", "/usr/bin/openvox-ca", "openvox-ca"),
+			Entry("the operator CLI", "/usr/bin/openvox-ca-ctl", "openvox-ca-ctl"),
 		)
 
 		// The tarball in the fixture carries the unit rendered for
@@ -2478,12 +2760,44 @@ var _ = Describe("stageDocTree", func() {
 		}
 	})
 
-	// The third branch of stampStagedFile: unset (no-op) and valid (stamp)
-	// are both exercised by the reproducibility spec, and a malformed value
-	// was not. It must degrade to "unstamped" rather than fail the build --
-	// nfpm is lenient about the same variable, and a build that died on a
-	// malformed SOURCE_DATE_EPOCH would be stricter than the tool whose
-	// behaviour it is mirroring.
+	// The unset case. The comment here used to claim the reproducibility spec
+	// covered it; it does not -- that spec's helper calls
+	// GinkgoT().Setenv("SOURCE_DATE_EPOCH", epoch) on every invocation, so it
+	// never reaches the `epoch == ""` early return, and the malformed table
+	// below exits through ParseInt instead.
+	//
+	// What this pins is the CONTRACT -- an unset epoch must leave the mtime
+	// alone -- and not the branch. Unset and malformed are behaviourally
+	// identical in stampStagedFile: both return nil without calling Chtimes,
+	// so deleting the `epoch == ""` early return changes nothing observable
+	// and this spec stays green. That is a property of the function, not a
+	// gap in the spec; the contract is still worth holding, because a future
+	// change that made an unset epoch stamp from the clock would break
+	// reproducibility silently, and this would catch it.
+	It("leaves the mtime alone when SOURCE_DATE_EPOCH is not set", func() {
+		// Setenv registers a cleanup that restores the previous value, so
+		// unsetting through it is safe even when the developer's environment
+		// or an outer spec had one set.
+		GinkgoT().Setenv("SOURCE_DATE_EPOCH", "")
+		Expect(os.Unsetenv("SOURCE_DATE_EPOCH")).To(Succeed())
+
+		staged := filepath.Join(GinkgoT().TempDir(), "doc.md")
+		Expect(os.WriteFile(staged, []byte("x\n"), 0o644)).To(Succeed())
+		before, err := os.Stat(staged)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(stampStagedFile(staged)).To(Succeed())
+
+		after, err := os.Stat(staged)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(after.ModTime()).To(Equal(before.ModTime()),
+			"an unset epoch stamped the file anyway")
+	})
+
+	// The malformed branch. It must degrade to "unstamped" rather than fail
+	// the build -- nfpm is lenient about the same variable, and a build that
+	// died on a malformed SOURCE_DATE_EPOCH would be stricter than the tool
+	// whose behaviour it is mirroring.
 	DescribeTable("leaves the mtime alone when SOURCE_DATE_EPOCH cannot be parsed",
 		func(epoch string) {
 			GinkgoT().Setenv("SOURCE_DATE_EPOCH", epoch)
@@ -2597,6 +2911,46 @@ var _ = Describe("stageDocTree", func() {
 				"the umask reached the staged file, so the package's docs depend on the build host")
 		})
 
+		// The directories, which the spec above does not reach. os.MkdirAll is
+		// masked exactly as os.WriteFile is, and nfpm takes a tree entry's mode
+		// from disk, so under 0077 this shipped a /usr/share/doc/openvox-ca
+		// that non-root cannot open -- with every FILE inside it correctly
+		// 0644. Asserting the file alone could not see it, and did not.
+		//
+		// Every directory, including the staging root: nfpm walks the tree from
+		// there, so a masked root is a masked /usr/share/doc/openvox-ca.
+		It("stages every directory 0755 even under a umask that would mask it", func() {
+			old := syscall.Umask(0o077)
+			DeferCleanup(func() { syscall.Umask(old) })
+
+			dest := GinkgoT().TempDir()
+			Expect(stageDocTreeFrom(repo, dest)).To(Succeed())
+
+			var checked int
+			Expect(filepath.WalkDir(dest, func(path string, d os.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if !d.IsDir() {
+					return nil
+				}
+				checked++
+				info, statErr := d.Info()
+				if statErr != nil {
+					return statErr
+				}
+				Expect(info.Mode().Perm()).To(Equal(os.FileMode(0o755)),
+					"%s carries the build host's umask, so the packaged documentation "+
+						"directory is unreadable to non-root on this machine and not on another",
+					path)
+				return nil
+			})).To(Succeed())
+			// The fixture has docs/, so there is more than the root to check --
+			// a walk that found only the root would assert almost nothing.
+			Expect(checked).To(BeNumerically(">=", 2),
+				"the fixture staged no subdirectory, so this spec did not test what it claims")
+		})
+
 		It("stages every file 0644 regardless of the source mode", func() {
 			dest := GinkgoT().TempDir()
 			Expect(stageDocTreeFrom(repo, dest)).To(Succeed())
@@ -2674,9 +3028,10 @@ var _ = Describe("Build.Unit", func() {
 	Describe("writeRenderedUnit", func() {
 		It("writes a unit rendered for the bindir it was given", func() {
 			dir := GinkgoT().TempDir()
-			out, err := writeRenderedUnit(dir, "/opt/openvox/bin")
+			out, trimmed, err := writeRenderedUnit(dir, "/opt/openvox/bin")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(out).To(Equal(filepath.Join(dir, distUnitFile)))
+			Expect(trimmed).To(Equal("/opt/openvox/bin"))
 
 			body, err := os.ReadFile(out)
 			Expect(err).NotTo(HaveOccurred())
@@ -2686,18 +3041,26 @@ var _ = Describe("Build.Unit", func() {
 
 		It("trims a trailing slash rather than doubling it", func() {
 			dir := GinkgoT().TempDir()
-			out, err := writeRenderedUnit(dir, "/opt/openvox/bin/")
+			out, trimmed, err := writeRenderedUnit(dir, "/opt/openvox/bin/")
 			Expect(err).NotTo(HaveOccurred())
 
 			body, err := os.ReadFile(out)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(string(body)).To(ContainSubstring("ExecStart=/opt/openvox/bin/openvox-ca"))
 			Expect(string(body)).NotTo(ContainSubstring("//openvox-ca"))
+
+			// The rendered unit was never the half that was wrong. Build.Unit
+			// trimmed the raw argument a SECOND time for the line it prints,
+			// so the defect the PR reports fixing -- "ExecStart=/opt/bin//..."
+			// in the message, over a correctly rendered file -- lived entirely
+			// in that duplicate. This is the returned value the message now
+			// uses, and the regression anchor for it.
+			Expect(trimmed).To(Equal("/opt/openvox/bin"))
 		})
 
 		It("creates the destination directory when it is not there", func() {
 			dir := filepath.Join(GinkgoT().TempDir(), "nested", "dist")
-			_, err := writeRenderedUnit(dir, packageUnitBindir)
+			_, _, err := writeRenderedUnit(dir, packageUnitBindir)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(filepath.Join(dir, distUnitFile)).To(BeAnExistingFile())
 		})
@@ -2748,20 +3111,19 @@ const firstBootScript = "packaging/scripts/first-boot"
 // sourcing it outright would run provisioning. Instead everything up to the
 // "-- Run --" banner is taken, which is definitions only.
 func runFirstBootFunc(expr string) (bool, error) {
-	src, err := os.ReadFile(firstBootScript)
+	// firstBootDefs owns the banner split. This function used to carry its own
+	// copy of it, so the contract with the shipped script -- that everything
+	// above "# -- Run ---" can be sourced without provisioning anything -- was
+	// stated twice and could drift in one place only.
+	defs, err := firstBootDefs()
 	if err != nil {
 		return false, err
 	}
-	const banner = "# -- Run ---"
-	i := bytes.Index(src, []byte(banner))
-	if i < 0 {
-		return false, fmt.Errorf("%s has no %q banner, so the definitions cannot be separated from "+
-			"the code that runs provisioning", firstBootScript, banner)
-	}
 
-	script := string(src[:i]) + "\n" + expr + "\n"
+	script := defs + "\n" + expr + "\n"
 	cmd := exec.Command("sh", "-c", script)
 	cmd.Env = append(os.Environ(), "OPENVOX_CA_SSLDIR=/nonexistent", "OPENVOX_CA_BINDIR=/nonexistent")
+	cmd.Env = append(cmd.Env, firstBootHostPins()...)
 	if err := cmd.Run(); err != nil {
 		var exit *exec.ExitError
 		if errors.As(err, &exit) {
@@ -2821,6 +3183,57 @@ var _ = Describe("first-boot's certname allow-list", func() {
 		Entry("a real name", "ca.example.com", false),
 	)
 })
+
+// rpmContents expands an rpm's payload to a scratch directory and returns the
+// body of every regular file in it, keyed by installed path.
+//
+// rpmPayload above reads the HEADER -- modes, ownership, the config and
+// noreplace flags -- and discards the payload bytes entirely. So the rpm block
+// asserted no file content at all, while claiming "everything asserted of the
+// deb is asserted here too": the deb opens the unit and the configuration file
+// and checks what is in them, and the rpm had no counterpart for either. A
+// package that installed the tarball's own unit, or the wrong binary under
+// each name, satisfied every rpm assertion in this file.
+func rpmContents(path string) (map[string]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	r, err := rpmutils.ReadRpm(f)
+	if err != nil {
+		return nil, err
+	}
+	dest := GinkgoT().TempDir()
+	if err := r.ExpandPayload(dest); err != nil {
+		return nil, err
+	}
+
+	out := map[string]string{}
+	err = filepath.WalkDir(dest, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		body, readErr := os.ReadFile(p)
+		if readErr != nil {
+			return readErr
+		}
+		rel, relErr := filepath.Rel(dest, p)
+		if relErr != nil {
+			return relErr
+		}
+		out["/"+filepath.ToSlash(rel)] = string(body)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
 
 // rpmFile is one entry of an rpm's payload, with the metadata that decides how
 // it is installed.
@@ -2925,8 +3338,9 @@ var _ = Describe("the rpm's payload", func() {
 	// each, and only the deb's was ever opened. Everything asserted of the deb
 	// is asserted here too.
 	var (
-		distDir string
-		files   map[string]rpmFile
+		distDir  string
+		files    map[string]rpmFile
+		contents map[string]string
 	)
 	const ver = "9.9.9"
 
@@ -2944,6 +3358,8 @@ var _ = Describe("the rpm's payload", func() {
 		Expect(err).NotTo(HaveOccurred())
 		files, err = rpmPayload(filepath.Join(distDir, "openvox-ca-9.9.9-1.x86_64.rpm"))
 		Expect(err).NotTo(HaveOccurred())
+		contents, err = rpmContents(filepath.Join(distDir, "openvox-ca-9.9.9-1.x86_64.rpm"))
+		Expect(err).NotTo(HaveOccurred())
 	})
 
 	DescribeTable("installs the payload entry",
@@ -2959,6 +3375,37 @@ var _ = Describe("the rpm's payload", func() {
 		Entry("the sysusers declaration", "/usr/lib/sysusers.d/openvox-ca.conf", 0o644),
 		Entry("the configuration file", "/etc/puppet-ca/config.yaml", 0o640),
 	)
+
+	// The rpm's counterparts to the deb's content assertions, which is what
+	// makes this block's opening claim true. See rpmContents.
+	It("ships the unit rendered for /usr/bin, not the tarball's copy", func() {
+		unit := contents["/usr/lib/systemd/system/openvox-ca.service"]
+		Expect(unit).To(ContainSubstring("ExecStart=" + packageUnitBindir + "/openvox-ca"))
+		Expect(unit).NotTo(ContainSubstring("ExecStart=" + tarballUnitBindir + "/openvox-ca"))
+		Expect(unit).NotTo(ContainSubstring(unitBindirPlaceholder))
+	})
+
+	DescribeTable("installs the right binary at each path",
+		func(path, name string) {
+			Expect(contents).To(HaveKey(path))
+			Expect(contents[path]).To(Equal(distBinaryBody(name)),
+				"%s does not hold %s", path, name)
+		},
+		Entry("the server binary", "/usr/bin/openvox-ca", "openvox-ca"),
+		Entry("the operator CLI", "/usr/bin/openvox-ca-ctl", "openvox-ca-ctl"),
+	)
+
+	It("ships the configuration file the packages set up", func() {
+		cfg := contents["/etc/puppet-ca/config.yaml"]
+		Expect(cfg).To(ContainSubstring("cadir:"))
+		Expect(cfg).To(ContainSubstring("port:"))
+	})
+
+	It("carries the documentation tree with its repository layout", func() {
+		Expect(contents).To(HaveKey("/usr/share/doc/openvox-ca/LICENSE"))
+		Expect(contents).To(HaveKey("/usr/share/doc/openvox-ca/README.md"))
+		Expect(contents).To(HaveKey("/usr/share/doc/openvox-ca/docs/systemd.md"))
+	})
 
 	// The claim the PR body previously made by citing nfpm's source rather
 	// than by inspecting a built package. An rpm that installed the config
@@ -3046,6 +3493,25 @@ func firstBootDefs() (string, error) {
 	return string(src[:i]), nil
 }
 
+// firstBootHostPins neutralises every variable first-boot reads from the
+// environment that would otherwise let the developer's own machine decide what
+// a spec asserts.
+//
+// The PUPPET_CA_* three are the ones that matter and the ones that are easiest
+// to miss: first-boot honours them because the SERVER honours them, so a
+// maintainer who happens to export PUPPET_CA_STORAGE_BACKEND=redis in their
+// shell would watch the backend-refusal specs fail against a script that is
+// behaving exactly as designed. Empty rather than absent, because every read
+// site uses ${VAR:-...} and treats empty as unset.
+func firstBootHostPins() []string {
+	GinkgoHelper()
+	return []string{
+		"PUPPET_CA_CONFIG=",
+		"PUPPET_CA_CADIR=",
+		"PUPPET_CA_STORAGE_BACKEND=",
+	}
+}
+
 // firstBootResult is what a spec gets back from driving the script.
 type firstBootResult struct {
 	ok     bool
@@ -3069,6 +3535,7 @@ func runFirstBootIn(sslDir, binDir, expr string, extraEnv ...string) (firstBootR
 		// the host here too.
 		"OPENVOX_CA_CONFIG="+filepath.Join(GinkgoT().TempDir(), "no-config.yaml"),
 	)
+	cmd.Env = append(cmd.Env, firstBootHostPins()...)
 	cmd.Env = append(cmd.Env, extraEnv...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -3171,14 +3638,18 @@ var _ = Describe("the provisioning oneshot's unit", func() {
 		Expect(directives).To(HaveKeyWithValue("RemainAfterExit", []string{"yes"}))
 	})
 
-	// The script is packaged at this path and invoked from nowhere else, so
-	// the two have to agree; nothing else would notice a rename.
+	// The unit's ExecStart and the path the package installs the script to have
+	// to agree, and this is the unit half of that.
+	//
+	// The other half is asserted against BUILT PACKAGES -- both payload tables
+	// carry an entry for /usr/libexec/openvox-ca/first-boot -- so a rename in
+	// packaging/nfpm.yaml fails there. This spec used to add a substring grep
+	// of nfpm.yaml on the claim that "nothing else would notice a rename",
+	// which those two tables falsify; and a grep of the configuration source
+	// is the thing this file states a rule against anyway.
 	It("runs the provisioning script at the path the package installs it to", func() {
-		Expect(directives).To(HaveKeyWithValue("ExecStart", []string{"/usr/libexec/openvox-ca/first-boot"}))
-
-		nfpm, err := os.ReadFile("packaging/nfpm.yaml")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(string(nfpm)).To(ContainSubstring("dst: /usr/libexec/openvox-ca/first-boot"))
+		Expect(directives).To(HaveKeyWithValue("ExecStart",
+			[]string{"/usr/libexec/openvox-ca/first-boot"}))
 	})
 
 	// It links certs/ca.pem and crl.pem above the CA directory, so it needs
@@ -3767,11 +4238,22 @@ var _ = Describe("the packages' maintainer scripts", func() {
 
 	// try-restart, not restart: a CA the operator has deliberately left
 	// stopped must stay stopped across an upgrade.
+	//
+	// Driven, not grepped. This used to read packaging/scripts/postinstall and
+	// assert substrings over its text, which this file states a rule against
+	// twice -- and it had no need to: the table above already runs the upgrade
+	// path and captures the systemctl arguments, so the distinction between
+	// `try-restart` and `restart` is observable in the call log.
 	It("uses try-restart so a stopped CA is not started by an upgrade", func() {
-		src, err := os.ReadFile("packaging/scripts/postinstall")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(string(src)).To(ContainSubstring("systemctl try-restart openvox-ca.service"))
-		Expect(string(src)).NotTo(MatchRegexp(`(?m)^\s*systemctl restart openvox-ca\.service`),
+		_, calls := run("packaging/scripts/postinstall", "configure", "1.0.0")
+
+		var restarts []string
+		for _, line := range strings.Split(calls, "\n") {
+			if strings.HasPrefix(line, "systemctl ") && strings.Contains(line, "restart") {
+				restarts = append(restarts, line)
+			}
+		}
+		Expect(restarts).To(ConsistOf("systemctl try-restart openvox-ca.service"),
 			"a plain restart would start a CA the operator chose to leave stopped")
 	})
 
@@ -3885,6 +4367,22 @@ esac
 		Expect(os.WriteFile(filepath.Join(stubBin, "hostname"), []byte(body), 0o755)).To(Succeed())
 	}
 
+	// stubHostnameNoShort writes a `hostname` with no -s support: the flag
+	// exits non-zero and the bare invocation answers. That is the host tier 3's
+	// `hostname -s || hostname` fallback exists for, and stubHostname cannot
+	// express it -- there, -s and the bare form succeed or fail together, so
+	// the fallback arm was never taken by any entry.
+	stubHostnameNoShort := func(bare string) {
+		body := fmt.Sprintf(`#!/bin/sh
+case "${1:-}" in
+-f) exit 1 ;;
+-s) exit 1 ;;
+*)  printf '%%s\n' %s ;;
+esac
+`, shellQuote(bare))
+		Expect(os.WriteFile(filepath.Join(stubBin, "hostname"), []byte(body), 0o755)).To(Succeed())
+	}
+
 	resolve := func() firstBootResult {
 		defs, err := firstBootDefs()
 		Expect(err).NotTo(HaveOccurred())
@@ -3944,6 +4442,44 @@ esac
 		r := resolve()
 		Expect(r.ok).To(BeTrue())
 		Expect(strings.TrimSpace(lastLine(r.output))).To(Equal("localhost"))
+	})
+
+	// Tier 3 on a host whose hostname(1) has no -s. The bare call typically
+	// answers with the FQDN, and that is what makes this worth a spec: the
+	// result is a usable dotted name delivered by the tier that warns the
+	// operator they have none.
+	It("uses the bare hostname when -s is unsupported", func() {
+		stubHostnameNoShort("ca.example.com")
+		r := resolve()
+		Expect(r.ok).To(BeTrue())
+		Expect(strings.TrimSpace(lastLine(r.output))).To(Equal("ca.example.com"))
+	})
+
+	// is_safe_certname is called on all four tiers, but every entry above feeds
+	// it a safe name, so deleting the call from tiers 2 and 3 left the suite
+	// green. Both sources are attacker-influenced in a way their shape hides:
+	// `hostname -f` is whatever reverse DNS answers.
+	//
+	// Asserting the RESOLVED NAME, not just the warning text: a spec that
+	// checked only for a warning would pass against a run that warned and then
+	// used the unsafe name anyway.
+	It("refuses an unsafe hostname -f rather than joining it to a path", func() {
+		stubHostname("../../../etc/evil.example.com", "ca")
+		r := resolve()
+		Expect(r.ok).To(BeTrue())
+		// It has a dot and is not a localhost form, so tier 2 accepts its
+		// SHAPE; only the allow-list rejects it. Falling through to the short
+		// hostname is the correct outcome.
+		Expect(strings.TrimSpace(lastLine(r.output))).To(Equal("ca"))
+		Expect(r.output).NotTo(ContainSubstring(".."))
+	})
+
+	It("refuses an unsafe short hostname and falls through to localhost", func() {
+		stubHostname("", "../../evil")
+		r := resolve()
+		Expect(r.ok).To(BeTrue())
+		Expect(strings.TrimSpace(lastLine(r.output))).To(Equal("localhost"))
+		Expect(r.output).NotTo(ContainSubstring(".."))
 	})
 
 	// Tier 4: nothing usable at all.
@@ -4089,6 +4625,7 @@ func runFirstBootScript(sslDir, binDir, certname string, extraEnv ...string) fir
 		// OPENVOX_CA_PUPPET_CONF and OPENVOX_CA_LEGACY_CADIR are pinned.
 		"OPENVOX_CA_CONFIG="+filepath.Join(GinkgoT().TempDir(), "no-config.yaml"),
 	)
+	cmd.Env = append(cmd.Env, firstBootHostPins()...)
 	cmd.Env = append(cmd.Env, extraEnv...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -4101,8 +4638,13 @@ func runFirstBootScript(sslDir, binDir, certname string, extraEnv ...string) fir
 	return firstBootResult{ok: true, output: string(out)}
 }
 
-// stubCA writes an openvox-ca-ctl whose `setup` bootstraps a cadir, and an
-// openvox-ca whose `generate` writes the cert and key it is told to.
+// distBinaryBody is the fixture body for one staged binary. Distinct per name,
+// so a payload entry can be checked for being the RIGHT binary and not merely a
+// binary; see stageDistTarball.
+func distBinaryBody(name string) string {
+	return "#!/bin/true\n# " + name + "\n"
+}
+
 // stageDistTarball writes the tarball `mage build:dist` would have left for one
 // variant: both binaries, and the unit rendered for the TARBALL prefix.
 //
@@ -4115,20 +4657,28 @@ func runFirstBootScript(sslDir, binDir, certname string, extraEnv ...string) fir
 func stageDistTarball(distDir, ver string, variant distVariantSpec) {
 	GinkgoHelper()
 	src := GinkgoT().TempDir()
-	for _, name := range []string{"openvox-ca", "openvox-ca-ctl"} {
-		Expect(os.WriteFile(filepath.Join(src, name), []byte("#!/bin/true\n"), 0o755)).To(Succeed())
+	for _, name := range distBinaries() {
+		// Distinct bodies, not one shared "#!/bin/true". With both binaries
+		// byte-identical, every payload assertion over them was satisfied by a
+		// package that had installed either one under either name -- so
+		// swapping the two `dst:` entries in packaging/nfpm.yaml, which would
+		// ship a server binary as the operator CLI, was undetectable.
+		Expect(os.WriteFile(filepath.Join(src, name),
+			[]byte(distBinaryBody(name)), 0o755)).To(Succeed())
 	}
 	unit, err := renderUnit(tarballUnitBindir)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(os.WriteFile(filepath.Join(src, distUnitFile), unit, 0o644)).To(Succeed())
-	archive := filepath.Join(distDir, fmt.Sprintf("openvox-ca_%s_%s.tar.gz", ver, variant.name))
-	Expect(createTarGz(archive, src, distArchiveFiles([]string{"openvox-ca", "openvox-ca-ctl"}))).To(Succeed())
+	archive := filepath.Join(distDir, distArchiveName(ver, variant.name))
+	Expect(createTarGz(archive, src, distArchiveFiles(distBinaries()))).To(Succeed())
 }
 
 // stubCALog is where stubCA's two stubs record their argument lists, so a spec
 // can assert what provisioning actually passed them.
 func stubCALog(binDir string) string { return filepath.Join(binDir, "ca-calls.log") }
 
+// stubCA writes an openvox-ca-ctl whose `setup` bootstraps a cadir, and an
+// openvox-ca whose `generate` writes the cert and key it is told to.
 func stubCA(binDir string) {
 	ctl := `#!/bin/sh
 echo "openvox-ca-ctl $*" >> "$(dirname "$0")/ca-calls.log"
@@ -4265,6 +4815,52 @@ var _ = Describe("first-boot's provisioning steps", func() {
 				"a second CA was bootstrapped at the shipped default")
 		})
 
+		// The CA moving is only half of it. certs/ca.pem is where every agent on
+		// this host reads the CA certificate, and its target used to be the
+		// literal ../ca/ca_crt.pem whatever cadir said -- so on a relocated
+		// cadir the alias pointed into an empty $SSLDIR/ca (a dangling link
+		// that becomes valid and WRONG as soon as anything writes a CA there)
+		// or, on the takeover host these packages advertise, at the Puppet
+		// Server CA already sitting there.
+		It("points the trust-anchor aliases at the cadir, not at the default", func() {
+			moved := filepath.Join(sslDir, "myca")
+			Expect(os.WriteFile(cfg, []byte("cadir: "+moved+"\n"), 0o644)).To(Succeed())
+
+			r := runFirstBootScript(sslDir, binDir, "ca.example.com", withCfg())
+			Expect(r.ok).To(BeTrue(), "provisioning failed: %s", r.output)
+
+			target, err := os.Readlink(filepath.Join(sslDir, "certs", "ca.pem"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(target).To(Equal("../myca/ca_crt.pem"))
+			crl, err := os.Readlink(filepath.Join(sslDir, "crl.pem"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(crl).To(Equal("myca/ca_crl.pem"))
+
+			// Resolving, not just spelled correctly: a relative target that
+			// does not land on the CA is the defect this spec exists for.
+			body, err := os.ReadFile(filepath.Join(sslDir, "certs", "ca.pem"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(body).NotTo(BeEmpty(), "certs/ca.pem does not resolve to the CA certificate")
+		})
+
+		// A cadir outside the ssl tree has no meaningful relative form, so the
+		// aliases go absolute rather than silently wrong.
+		It("links absolutely when the cadir is outside the ssl tree", func() {
+			moved := filepath.Join(GinkgoT().TempDir(), "outside")
+			Expect(os.MkdirAll(moved, 0o755)).To(Succeed())
+			Expect(os.WriteFile(cfg, []byte("cadir: "+moved+"\n"), 0o644)).To(Succeed())
+
+			r := runFirstBootScript(sslDir, binDir, "ca.example.com", withCfg())
+			Expect(r.ok).To(BeTrue(), "provisioning failed: %s", r.output)
+
+			target, err := os.Readlink(filepath.Join(sslDir, "certs", "ca.pem"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(target).To(Equal(filepath.Join(moved, "ca_crt.pem")))
+			body, err := os.ReadFile(filepath.Join(sslDir, "certs", "ca.pem"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(body).NotTo(BeEmpty(), "certs/ca.pem does not resolve to the CA certificate")
+		})
+
 		// No file, or no cadir in it, must still give the shipped default --
 		// the overwhelmingly common case.
 		It("falls back to the shipped default when the configuration says nothing", func() {
@@ -4307,6 +4903,172 @@ var _ = Describe("first-boot's provisioning steps", func() {
 			r := runFirstBootScript(sslDir, binDir, "ca.example.com", withCfg())
 			Expect(r.ok).To(BeTrue(), "provisioning failed: %s", r.output)
 			Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).To(BeAnExistingFile())
+		})
+
+		// read_config_value is the decline rule on its own, driven one input at
+		// a time. The block above can only observe the reader through what
+		// provisioning did afterwards, which cannot distinguish "read the value
+		// and it happened to be the default" from "declined, and fell back".
+		//
+		// The two halves of this table are not symmetric in consequence. A form
+		// wrongly DECLINED falls back to the shipped default, which is visible
+		// and recoverable. A form wrongly READ hands provisioning a value the
+		// server does not agree with, which is the two-CA split the script
+		// exists to prevent -- and `cadir: >` used to do exactly that, coming
+		// back as the literal string ">".
+		DescribeTable("reads a value, or declines it, one raw line at a time",
+			func(raw, want string) {
+				r, err := runFirstBootIn(sslDir, binDir,
+					"read_config_value "+shellQuote(raw))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(r.ok).To(BeTrue(), "the reader exited non-zero: %s", r.output)
+				Expect(strings.TrimRight(r.output, "\n")).To(Equal(want))
+			},
+			// Read.
+			Entry("a plain scalar", "/var/lib/puppet-ca", "/var/lib/puppet-ca"),
+			Entry("an inline comment, which is ordinary YAML",
+				"/srv/ca  # moved off the default", "/srv/ca"),
+			Entry("the comment form docs/storage-backends.md prints",
+				`redis                   # or "valkey"`, "redis"),
+			Entry("a double-quoted value", `"/srv/ca"`, "/srv/ca"),
+			Entry("a single-quoted value", "'/srv/ca'", "/srv/ca"),
+			Entry("a '#' inside the value, which opens no comment",
+				"/srv/ca#1", "/srv/ca#1"),
+			// Declined.
+			Entry("a folded block indicator", ">", ""),
+			Entry("a literal block indicator", "|", ""),
+			Entry("an alias", "*anchor", ""),
+			Entry("an anchor", "&a /srv/ca", ""),
+			Entry("a flow collection", "[/a, /b]", ""),
+			Entry("a value that is only a comment", "# nothing here", ""),
+			Entry("a value quoted at one end only", `"/srv/ca`, ""),
+			Entry("nothing at all", "", ""),
+		)
+
+		// Declining is only safe because the callers can tell the two apart.
+		// Before this, both read an empty answer as "absent" and fell back, so
+		// a cadir the operator really did write -- and that this reader could
+		// not parse -- silently provisioned at the shipped default instead.
+		It("refuses rather than defaulting when cadir is set but unreadable", func() {
+			Expect(os.WriteFile(cfg, []byte("cadir: >\n"), 0o644)).To(Succeed())
+
+			r := runFirstBootScript(sslDir, binDir, "ca.example.com", withCfg())
+			Expect(r.ok).To(BeFalse(), "provisioning should have refused: %s", r.output)
+			Expect(r.output).To(And(
+				ContainSubstring("sets cadir, but not in a form this script can read"),
+				ContainSubstring("cadir: >"),
+			), "the refusal does not quote the line it could not read")
+			Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).NotTo(BeAnExistingFile(),
+				"a CA was bootstrapped at the shipped default despite the unreadable cadir")
+		})
+
+		It("refuses rather than defaulting when storage_backend is set but unreadable", func() {
+			Expect(os.WriteFile(cfg, []byte("storage_backend: |\n"), 0o644)).To(Succeed())
+
+			r := runFirstBootScript(sslDir, binDir, "ca.example.com", withCfg())
+			Expect(r.ok).To(BeFalse(), "provisioning should have refused: %s", r.output)
+			Expect(r.output).To(ContainSubstring("sets storage_backend, but not in a form"))
+			Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).NotTo(BeAnExistingFile())
+		})
+
+		// The refusal must still fire for a backend named with a trailing
+		// comment -- the form the documentation prints. This is the HIGH the
+		// councils converged on: the reader declined the line, the guard read
+		// the decline as "unset", and ${backend:-filesystem} let it through.
+		It("still refuses another backend when the line carries a comment", func() {
+			Expect(os.WriteFile(cfg,
+				[]byte("storage_backend: etcd   # our cluster\n"), 0o644)).To(Succeed())
+
+			r := runFirstBootScript(sslDir, binDir, "ca.example.com", withCfg())
+			Expect(r.ok).To(BeFalse(), "provisioning should have refused: %s", r.output)
+			Expect(r.output).To(ContainSubstring("only supports"))
+			Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).NotTo(BeAnExistingFile())
+		})
+
+		// And the cadir half of the same defect: a relocated cadir written with
+		// a trailing comment used to be provisioned at the shipped default.
+		It("bootstraps into a cadir whose line carries a comment", func() {
+			moved := filepath.Join(GinkgoT().TempDir(), "elsewhere")
+			Expect(os.MkdirAll(moved, 0o755)).To(Succeed())
+			Expect(os.WriteFile(cfg,
+				[]byte("cadir: "+moved+"   # moved for our SAN storage\n"), 0o644)).To(Succeed())
+
+			r := runFirstBootScript(sslDir, binDir, "ca.example.com", withCfg())
+			Expect(r.ok).To(BeTrue(), "provisioning failed: %s", r.output)
+			Expect(filepath.Join(moved, "ca_crt.pem")).To(BeAnExistingFile())
+			Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).NotTo(BeAnExistingFile(),
+				"a second CA was bootstrapped at the shipped default")
+		})
+
+		// openvox-ca accepts several spellings of the filesystem backend. The
+		// shell used to match "filesystem" alone, so an operator who wrote a
+		// supported alias got a refusal asserting the opposite -- and, because
+		// the oneshot is RequiredBy=, a service that would not start.
+		DescribeTable("accepts every spelling of filesystem the server accepts",
+			func(spelling string) {
+				Expect(os.WriteFile(cfg,
+					[]byte("storage_backend: "+spelling+"\n"), 0o644)).To(Succeed())
+
+				r := runFirstBootScript(sslDir, binDir, "ca.example.com", withCfg())
+				Expect(r.ok).To(BeTrue(), "provisioning refused %q: %s", spelling, r.output)
+				Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).To(BeAnExistingFile())
+			},
+			Entry("filesystem", "filesystem"),
+			Entry("file", "file"),
+			Entry("fs", "fs"),
+			Entry("disk", "disk"),
+			Entry("local", "local"),
+			Entry("mixed case, which the server lowercases", "FileSystem"),
+			Entry("surrounding whitespace", "  filesystem  "),
+		)
+
+		// The environment layer. The server resolves file -> environment ->
+		// flag, and the packaged unit passes no --config precisely so a drop-in
+		// can set PUPPET_CA_CONFIG. Provisioning that read only its own test
+		// seam would check a file nothing else uses.
+		It("resolves the config file from PUPPET_CA_CONFIG", func() {
+			moved := filepath.Join(GinkgoT().TempDir(), "from-env")
+			Expect(os.MkdirAll(moved, 0o755)).To(Succeed())
+			envCfg := filepath.Join(GinkgoT().TempDir(), "env-config.yaml")
+			Expect(os.WriteFile(envCfg, []byte("cadir: "+moved+"\n"), 0o644)).To(Succeed())
+
+			// OPENVOX_CA_CONFIG is deliberately NOT set here: this asserts the
+			// variable the binary reads, not the test seam that shadows it.
+			r := runFirstBootScript(sslDir, binDir, "ca.example.com",
+				"OPENVOX_CA_CONFIG=", "PUPPET_CA_CONFIG="+envCfg)
+			Expect(r.ok).To(BeTrue(), "provisioning failed: %s", r.output)
+			Expect(filepath.Join(moved, "ca_crt.pem")).To(BeAnExistingFile(),
+				"the drop-in's config file was not the one provisioning read")
+		})
+
+		It("lets PUPPET_CA_CADIR override the file, as it does for the server", func() {
+			fromEnv := filepath.Join(GinkgoT().TempDir(), "env-cadir")
+			fromFile := filepath.Join(GinkgoT().TempDir(), "file-cadir")
+			Expect(os.MkdirAll(fromEnv, 0o755)).To(Succeed())
+			Expect(os.MkdirAll(fromFile, 0o755)).To(Succeed())
+			Expect(os.WriteFile(cfg, []byte("cadir: "+fromFile+"\n"), 0o644)).To(Succeed())
+
+			r := runFirstBootScript(sslDir, binDir, "ca.example.com",
+				withCfg(), "PUPPET_CA_CADIR="+fromEnv)
+			Expect(r.ok).To(BeTrue(), "provisioning failed: %s", r.output)
+			Expect(filepath.Join(fromEnv, "ca_crt.pem")).To(BeAnExistingFile(),
+				"the environment did not override the file, so the service and "+
+					"provisioning would disagree about where the CA lives")
+			Expect(filepath.Join(fromFile, "ca_crt.pem")).NotTo(BeAnExistingFile())
+		})
+
+		It("refuses when PUPPET_CA_STORAGE_BACKEND names another backend", func() {
+			// The file says nothing, so only the environment can make this
+			// refuse -- which is the whole point: a drop-in that moves the
+			// service to etcd must not leave provisioning bootstrapping a
+			// filesystem CA beside it.
+			Expect(os.WriteFile(cfg, []byte("port: 8141\n"), 0o644)).To(Succeed())
+
+			r := runFirstBootScript(sslDir, binDir, "ca.example.com",
+				withCfg(), "PUPPET_CA_STORAGE_BACKEND=etcd")
+			Expect(r.ok).To(BeFalse(), "provisioning should have refused: %s", r.output)
+			Expect(r.output).To(ContainSubstring("only supports"))
+			Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).NotTo(BeAnExistingFile())
 		})
 	})
 
@@ -4743,18 +5505,89 @@ var _ = Describe("postinstall's ownership and permission hardening", func() {
 		// assertion below pass whatever the script does. It is not stubbed to
 		// exit 0 either: that would make the marker appear written when it was
 		// not, which the sibling block's specs then contradict.
+		//
+		// It delegates by absolute path because PATH is stubBin alone, so a
+		// bare `mkdir` here would re-enter this stub for ever. The path is
+		// resolved from the host at fixture-build time rather than hard-coded
+		// to /bin/mkdir, which is not one of the paths POSIX guarantees and is
+		// not where every distribution puts it.
+		realMkdir, lookErr := exec.LookPath("mkdir")
+		Expect(lookErr).NotTo(HaveOccurred(), "no mkdir on PATH to delegate to")
 		Expect(os.WriteFile(filepath.Join(stubBin, "mkdir"),
-			[]byte(fmt.Sprintf("#!/bin/sh\necho \"mkdir $*\" >> %s\nexec /bin/mkdir \"$@\"\n", log)),
+			[]byte(fmt.Sprintf("#!/bin/sh\necho \"mkdir $*\" >> %s\nexec %s \"$@\"\n", log, realMkdir)),
 			0o755)).To(Succeed())
 		Expect(os.MkdirAll(filepath.Join(sslDir, "ca"), 0o755)).To(Succeed())
 	})
 
+	// chownedPaths returns the paths of the single chown the postinstall makes
+	// over the ssl tree, as a set.
+	//
+	// Parsed rather than substring-matched. The assertion here used to be
+	// ContainSubstring("chown --no-dereference puppet:puppet " + sslDir), which
+	// is a PREFIX of the logged line: every path the script appends begins with
+	// sslDir, so that assertion passed for the full list, for the list with
+	// $SSLDIR/ca dropped, and for a run that handed over nothing but the root.
+	// It could not fail on the thing it was written to pin.
+	chownedPaths := func(calls string) []string {
+		GinkgoHelper()
+		const prefix = "chown --no-dereference puppet:puppet "
+		for _, line := range strings.Split(calls, "\n") {
+			if strings.HasPrefix(line, prefix) {
+				return strings.Fields(strings.TrimPrefix(line, prefix))
+			}
+		}
+		Fail("the postinstall logged no chown of the ssl tree:\n" + calls)
+		return nil
+	}
+
 	It("hands the ssl tree to puppet without following symlinks", func() {
 		_, calls := run("configure")
-		Expect(calls).To(ContainSubstring("chown --no-dereference puppet:puppet " + sslDir))
+		// The two the package itself ships, and nothing else: this fixture
+		// creates no certs/, private_keys/ or public_keys/, and the script
+		// must not create them either.
+		Expect(chownedPaths(calls)).To(ConsistOf(sslDir, filepath.Join(sslDir, "ca")))
 		// --no-dereference is the point: this runs as root over a directory
 		// `puppet` can write, so a planted symlink would otherwise redirect it.
 		Expect(calls).NotTo(MatchRegexp(`(?m)^chown puppet:puppet`))
+	})
+
+	// The co-existence host the package advertises: openvox-agent got here
+	// first, as root, and created the three subdirectories. They are not
+	// packaged, ensure_ssl_tree leaves an existing directory exactly as it
+	// finds it, and `puppet` cannot write in a root-owned one -- so if the
+	// postinstall does not hand them over, provisioning dies at its last step
+	// on a bare "ln: Permission denied".
+	//
+	// Nothing reached this loop before: the fixture never created the three, so
+	// `[ -d ... ]` was false on every run and ssl_dirs was always the base pair.
+	It("also hands over the agent's subdirectories where they already exist", func() {
+		for _, d := range []string{"certs", "private_keys", "public_keys"} {
+			Expect(os.MkdirAll(filepath.Join(sslDir, d), 0o755)).To(Succeed())
+		}
+
+		_, calls := run("configure")
+		Expect(chownedPaths(calls)).To(ConsistOf(
+			sslDir,
+			filepath.Join(sslDir, "ca"),
+			filepath.Join(sslDir, "certs"),
+			filepath.Join(sslDir, "private_keys"),
+			filepath.Join(sslDir, "public_keys"),
+		))
+	})
+
+	// Absent means skipped, not created. Creating one here would pre-empt the
+	// modes ensure_ssl_tree chooses for it.
+	It("takes only the subdirectories that already exist, and creates none", func() {
+		Expect(os.MkdirAll(filepath.Join(sslDir, "private_keys"), 0o750)).To(Succeed())
+
+		_, calls := run("configure")
+		Expect(chownedPaths(calls)).To(ConsistOf(
+			sslDir,
+			filepath.Join(sslDir, "ca"),
+			filepath.Join(sslDir, "private_keys"),
+		))
+		Expect(filepath.Join(sslDir, "certs")).NotTo(BeADirectory())
+		Expect(filepath.Join(sslDir, "public_keys")).NotTo(BeADirectory())
 	})
 
 	It("gives the configuration file to root:puppet at 0640", func() {

@@ -1159,11 +1159,44 @@ var automergeActionRE = regexp.MustCompile(`(?i)auto-?merge`)
 // down outside this repository had silently stopped working.
 var requiredMageTargets = []string{"build:packages", "build:unit"}
 
-// The two files verifyNodeTTL compares. Named rather than inlined so the
-// error messages can point at them and a rename breaks the build here.
+// distBinaries is what every release tarball contains, and distArchiveName is
+// what one is called.
+//
+// Stated once because two sides depend on agreeing: build:dist writes the
+// tarball and build:packages reads it back, and they had a copy each -- the
+// same []string and the same format string, four sites between them. A rename
+// on one side produces a packaging run that cannot find the archive it is
+// meant to unpack, which is the failure these two functions exist to make
+// impossible for the FILE LIST (distArchiveFiles) and did not for the name.
+//
+// The same reasoning as packageExtensions deriving from packageFormats, and as
+// distVariantSpec.packaged being a field rather than a second list.
+func distBinaries() []string { return []string{"openvox-ca", "openvox-ca-ctl"} }
+
+func distArchiveName(ver, variant string) string {
+	return fmt.Sprintf("openvox-ca_%s_%s.tar.gz", ver, variant)
+}
+
+// Why each entry is here, since the comment above argues the case for only one
+// of them:
+//
+//   - build:packages is called by release.yml once #266 lands, and by the
+//     recipes in README.md, CONTRIBUTING.md and docs/systemd.md.
+//   - build:unit is called by no workflow. It is named by CONTRIBUTING.md:48,
+//     AGENTS.md:20 and docs/systemd.md:16 as the way to get an installable unit
+//     for a from-source install -- three documents that would go on saying so
+//     after a rename, which is the same failure mode in a slower medium.
+//
+// The guard treats both alike: a target named outside Go, whether by a workflow
+// or by a document, is a caller this repository cannot see.
+
+// The files the cross-language guards below compare. Named rather than
+// inlined so the error messages can point at them and a rename breaks the
+// build here.
 const (
 	firstBootScriptPath = "packaging/scripts/first-boot"
 	caSigningPath       = "internal/ca/signing.go"
+	storageSpecPath     = "internal/storage/spec.go"
 )
 
 // nodeTTLRE and certValidityRE read the two copies of the leaf lifetime.
@@ -1174,6 +1207,16 @@ const (
 var (
 	nodeTTLRE      = regexp.MustCompile(`(?m)^NODE_TTL=([0-9]+)h$`)
 	certValidityRE = regexp.MustCompile(`(?m)certValidity\s*=\s*([0-9]+)\s*\*\s*([0-9]+)\s*\*\s*([0-9]+)\s*\*\s*time\.Hour`)
+
+	// The two copies of "which spellings mean the filesystem backend".
+	//
+	// The shell one is a space-separated list; the Go one is the case arm of
+	// ParseBackendKind that returns BackendFilesystem, read as the quoted
+	// strings between `case` and `:`. Matched rather than evaluated for the
+	// same reason certValidityRE is.
+	shellBackendAliasesRE = regexp.MustCompile(`(?m)^FILESYSTEM_BACKEND_ALIASES="([^"]*)"$`)
+	goBackendAliasesRE    = regexp.MustCompile(`(?m)^\tcase ((?:"[^"]*", )*"[^"]*"):\n\t\treturn BackendFilesystem, nil$`)
+	goQuotedStringRE      = regexp.MustCompile(`"([^"]*)"`)
 )
 
 // verifyNodeTTL asserts that first-boot's NODE_TTL is the CA's own leaf
@@ -1191,6 +1234,96 @@ var (
 // not notice the other. This derives both sides and compares them, so a
 // deliberate policy change passes as soon as both files agree and needs no
 // edit here at all.
+// verifyBackendAliases asserts that first-boot accepts exactly the spellings
+// of the filesystem backend that openvox-ca itself accepts.
+//
+// Provisioning re-implements, in shell, a classification the product already
+// owns. The copy started out narrower than the original -- it matched
+// "filesystem" and nothing else -- so a config saying `storage_backend: local`
+// was a perfectly ordinary filesystem deployment to the server and a hard
+// refusal to the oneshot. Because that oneshot is RequiredBy=openvox-ca.service,
+// the refusal stopped the service too: a correctly configured host that would
+// not boot.
+//
+// Comparing the sets rather than pinning today's list, for verifyNodeTTL's
+// reason: a spec asserting five literal spellings has to be edited whenever
+// ParseBackendKind legitimately gains one, which is exactly the moment someone
+// edits one side and not the other.
+func verifyBackendAliases() error {
+	script, err := os.ReadFile(firstBootScriptPath)
+	if err != nil {
+		return err
+	}
+	spec, err := os.ReadFile(storageSpecPath)
+	if err != nil {
+		return err
+	}
+	return verifyBackendAliasesIn(script, spec)
+}
+
+func verifyBackendAliasesIn(script, spec []byte) error {
+	m := shellBackendAliasesRE.FindSubmatch(script)
+	if m == nil {
+		return fmt.Errorf("%s no longer sets FILESYSTEM_BACKEND_ALIASES=\"...\", so the spellings "+
+			"provisioning accepts can no longer be compared with the ones openvox-ca accepts",
+			firstBootScriptPath)
+	}
+	shell := map[string]bool{}
+	for _, a := range strings.Fields(string(m[1])) {
+		shell[a] = true
+	}
+
+	g := goBackendAliasesRE.FindSubmatch(spec)
+	if g == nil {
+		return fmt.Errorf("%s no longer spells the filesystem arm of ParseBackendKind as a single "+
+			"`case \"a\", \"b\":` line returning BackendFilesystem, so this check cannot read it; "+
+			"update the pattern rather than deleting the check", storageSpecPath)
+	}
+	goAliases := map[string]bool{}
+	for _, q := range goQuotedStringRE.FindAllSubmatch(g[1], -1) {
+		// The empty string is ParseBackendKind's "unset means filesystem" case,
+		// not a spelling an operator can write. first-boot handles unset with
+		// its own ${backend:-filesystem} default, so it is not expected here.
+		if len(q[1]) == 0 {
+			continue
+		}
+		goAliases[string(q[1])] = true
+	}
+	if len(goAliases) == 0 {
+		return fmt.Errorf("%s: the filesystem arm of ParseBackendKind parsed to no spellings at all, "+
+			"which would make this check pass for any shell list", storageSpecPath)
+	}
+
+	var missing, extra []string
+	for a := range goAliases {
+		if !shell[a] {
+			missing = append(missing, a)
+		}
+	}
+	for a := range shell {
+		if !goAliases[a] {
+			extra = append(extra, a)
+		}
+	}
+	slices.Sort(missing)
+	slices.Sort(extra)
+
+	if len(missing) > 0 {
+		return fmt.Errorf("openvox-ca accepts %v as the filesystem backend but %s does not, so a host "+
+			"configured that way is a filesystem deployment to the server and a hard refusal to "+
+			"provisioning -- and because the oneshot is RequiredBy=openvox-ca.service, the service "+
+			"will not start either. Add them to FILESYSTEM_BACKEND_ALIASES",
+			missing, firstBootScriptPath)
+	}
+	if len(extra) > 0 {
+		return fmt.Errorf("%s accepts %v as the filesystem backend but openvox-ca (%s "+
+			"ParseBackendKind) does not, so provisioning would bootstrap a filesystem CA for a "+
+			"backend the server will not read it from. Remove them from "+
+			"FILESYSTEM_BACKEND_ALIASES", firstBootScriptPath, extra, storageSpecPath)
+	}
+	return nil
+}
+
 func verifyNodeTTL() error {
 	script, err := os.ReadFile(firstBootScriptPath)
 	if err != nil {
@@ -1271,14 +1404,6 @@ func verifyMageTargets() error {
 		paths = append(paths, matched...)
 	}
 	slices.Sort(paths)
-	// The floor over the glob itself. A pattern that stopped matching -- the
-	// directory moved, this run started somewhere else -- would hand
-	// verifyMageTargetsIn an empty map, and every per-workflow check below
-	// would pass by having nothing to look at.
-	if len(paths) < 2 {
-		return fmt.Errorf("found %d workflow files under .github/workflows, which is too few to be "+
-			"the real directory; the glob is wrong rather than the repository", len(paths))
-	}
 	workflows := map[string][]byte{}
 	for _, path := range paths {
 		src, err := os.ReadFile(path)
@@ -1297,6 +1422,21 @@ func verifyMageTargetsIn(mageSrc []byte, workflows map[string][]byte) error {
 	targets, err := mageTargetNames(mageSrc)
 	if err != nil {
 		return fmt.Errorf("parsing magefile.go: %w", err)
+	}
+
+	// The floor over the workflow set. A glob that stopped matching -- the
+	// directory moved, this run started somewhere else -- hands this function
+	// an empty map, and the per-workflow loop below then runs zero times and
+	// reports every workflow consistent by having none to look at.
+	//
+	// Inside the seam rather than beside the glob, which is where it used to
+	// be. There it could only ever run against the real .github/workflows, so
+	// no spec could reach it and deleting it changed nothing any test could
+	// see -- the one check standing between this guard and passing vacuously
+	// was itself the only unguarded thing here.
+	if len(workflows) < 2 {
+		return fmt.Errorf("given %d workflow files, which is too few to be the real "+
+			".github/workflows; the glob is wrong rather than the repository", len(workflows))
 	}
 
 	// The floor. Every check below is a membership test against this set, so
@@ -1672,8 +1812,8 @@ func distArchiveFiles(bins []string) []archiveEntry {
 // SHA-256 checksum. The artefact is named openvox-ca_VER_NAME.tar.gz and
 // contains both binaries plus the systemd unit.
 func buildDistVariant(distDir, ver string, v distVariantSpec) (string, error) {
-	bins := []string{"openvox-ca", "openvox-ca-ctl"}
-	archive := filepath.Join(distDir, fmt.Sprintf("openvox-ca_%s_%s.tar.gz", ver, v.name))
+	bins := distBinaries()
+	archive := filepath.Join(distDir, distArchiveName(ver, v.name))
 
 	tmpDir, err := os.MkdirTemp("", "openvox-ca-dist-*")
 	if err != nil {
@@ -1759,7 +1899,7 @@ func (Build) Dist() error {
 
 	var checksums strings.Builder
 	for i, v := range variants {
-		fmt.Fprintf(&checksums, "%s  openvox-ca_%s_%s.tar.gz\n", sums[i], ver, v.name)
+		fmt.Fprintf(&checksums, "%s  %s\n", sums[i], distArchiveName(ver, v.name))
 	}
 	return os.WriteFile(
 		filepath.Join(distDir, "checksums.txt"),
@@ -1791,7 +1931,7 @@ func (Build) DistVariant(name string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("%s  openvox-ca_%s_%s.tar.gz\n", sum, ver, v.name)
+		fmt.Printf("%s  %s\n", sum, distArchiveName(ver, v.name))
 		return nil
 	}
 
@@ -1816,11 +1956,14 @@ func (Build) Unit(bindir string) error {
 		return fmt.Errorf("bindir %q is not an absolute path (try %s or %s)",
 			bindir, tarballUnitBindir, packageUnitBindir)
 	}
-	out, err := writeRenderedUnit("dist", bindir)
+	out, trimmed, err := writeRenderedUnit("dist", bindir)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Wrote %s (ExecStart=%s/openvox-ca)\n", out, strings.TrimSuffix(bindir, "/"))
+	// The trimmed value writeRenderedUnit actually rendered with, not a second
+	// trim of the raw argument. Two independent trims are two things to get
+	// right, and the message is the half nothing was asserting.
+	fmt.Printf("Wrote %s (ExecStart=%s/openvox-ca)\n", out, trimmed)
 	return nil
 }
 
@@ -1829,24 +1972,31 @@ func (Build) Unit(bindir string) error {
 // and the trailing-slash handling against a temporary directory: a test that
 // wrote into the repository's own dist/ would leave a file behind and would
 // differ depending on whether a build had run first.
-func writeRenderedUnit(distDir, bindir string) (string, error) {
+// It returns the path written AND the bindir it rendered with, which is the
+// argument with any trailing slash removed. Returning it is what makes the trim
+// happen once: Build.Unit used to trim the raw argument a second time for its
+// own message, so the comment below ("everything uses the trimmed value --
+// including the message Build.Unit prints") was false, and the message was the
+// copy nothing asserted.
+func writeRenderedUnit(distDir, bindir string) (string, string, error) {
 	// Trimmed once, and everything below uses the trimmed value -- including
-	// the message Build.Unit prints. Printing the argument instead reported
-	// "ExecStart=/opt/bin//openvox-ca" for a bindir given with a trailing
-	// slash, describing a unit that had been rendered correctly.
+	// the message Build.Unit prints, which receives it as the second return.
+	// Printing the argument instead reported "ExecStart=/opt/bin//openvox-ca"
+	// for a bindir given with a trailing slash, describing a unit that had been
+	// rendered correctly.
 	bindir = strings.TrimSuffix(bindir, "/")
 	unit, err := renderUnit(bindir)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if err := os.MkdirAll(distDir, 0755); err != nil {
-		return "", err
+		return "", "", err
 	}
 	out := filepath.Join(distDir, distUnitFile)
 	if err := os.WriteFile(out, unit, 0644); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return out, nil
+	return out, bindir, nil
 }
 
 // Packages builds the .deb and .rpm for every packaged variant from the
@@ -1937,8 +2087,8 @@ func checkPackagingInputs(variants []distVariantSpec, formats []string) error {
 // one package per format.
 func buildVariantPackages(distDir, ver string, v distVariantSpec) ([]string, error) {
 	var written []string
-	bins := []string{"openvox-ca", "openvox-ca-ctl"}
-	archive := filepath.Join(distDir, fmt.Sprintf("openvox-ca_%s_%s.tar.gz", ver, v.name))
+	bins := distBinaries()
+	archive := filepath.Join(distDir, distArchiveName(ver, v.name))
 	if _, err := os.Stat(archive); err != nil {
 		return nil, fmt.Errorf("%s is not in %s, and this target does not build binaries: "+
 			"run `mage build:dist` for every variant, or `mage build:distVariant %s` for this one, first",
@@ -2022,7 +2172,16 @@ func buildVariantPackages(distDir, ver string, v distVariantSpec) ([]string, err
 			return nil, fmt.Errorf("building %s for %s: %w", format, v.name, err)
 		}
 		if err := f.Close(); err != nil {
-			return nil, err
+			// The same treatment as the Package failure above, for the same
+			// reason. Close is where a buffered write is actually flushed, so
+			// ENOSPC, EIO and NFS write-back errors surface HERE and nowhere
+			// earlier -- which makes this the branch most likely to leave the
+			// "half-written package" the comment above refuses to tolerate:
+			// plausibly sized, matching the *.deb/*.rpm glob a release step
+			// uses, and failing at install. Wrapped like every other error on
+			// this path so the operator learns which format and which variant.
+			os.Remove(out)
+			return nil, fmt.Errorf("writing %s for %s: %w", format, v.name, err)
 		}
 		fmt.Printf("Wrote %s\n", out)
 		written = append(written, out)
@@ -2161,7 +2320,9 @@ func stageDocTreeFrom(repoRoot, dest string) error {
 			return err
 		}
 	}
-	return nil
+	// Every directory MkdirAll created above still carries the build host's
+	// umask; the files do not. See chmodStagedDirs.
+	return chmodStagedDirs(dest)
 }
 
 // stampStagedFile pins a staged file's modification time to SOURCE_DATE_EPOCH,
@@ -2289,14 +2450,58 @@ func copyStagedFile(src, dst string) error {
 	// under 0027 writes 0640 and the promise fails silently. Chmod is not
 	// masked. Same shape as stampStagedFile correcting the mtime nfpm would
 	// otherwise take from the clock.
+	//
+	// The DIRECTORIES this file lands in need the same correction, and get it
+	// from chmodStagedDirs once the tree is complete rather than here: see
+	// there for why a per-file walk upwards is the wrong shape.
 	return os.Chmod(dst, 0644)
+}
+
+// chmodStagedDirs sets every directory under root, and root itself, to 0755.
+//
+// The other half of copyStagedFile's promise, and the half that was missed.
+// os.MkdirAll's permission argument is masked by the process umask exactly as
+// os.WriteFile's is, so under umask 0027 the staged tree's directories came out
+// 0750 and under 0077 they came out 0700. Those modes reach the package:
+// packaging/nfpm.yaml declares the documentation tree as a `type: tree` with no
+// file_info block, and nfpm's tree walk takes each entry's mode from disk. The
+// result is a package whose /usr/share/doc/openvox-ca is unreadable to non-root
+// -- the documentation the package exists to ship -- on one build host and not
+// on another, from one commit.
+//
+// Declaring file_info.mode on the tree entry would NOT fix it: nfpm applies a
+// tree's declared mode to files and directories alike, so one value cannot
+// serve both 0755 directories and 0644 files.
+//
+// Done as one pass over the finished tree rather than inside copyStagedFile,
+// because a parent directory is created once and written into many times: a
+// per-file fix would have to walk upwards and decide where to stop, and the
+// staging root is the only correct answer to that. Walking down from it says
+// so directly.
+func chmodStagedDirs(root string) error {
+	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		return os.Chmod(path, 0755)
+	})
 }
 
 // maxExtractedFileBytes caps a single entry unpacked from a release tarball.
 // The binaries are around 100MB; 2GB leaves room for growth by an order of
 // magnitude while still bounding what a malformed or hostile archive can write
 // to a build host.
-const maxExtractedFileBytes = 2 << 30
+//
+// A var rather than a const so the spec that drives the refusal can lower it,
+// the way the packageExtensions spec already substitutes packageFormats.
+// Nothing outside the tests assigns to it. As a const it forced that spec to
+// compress, decompress and write 2GB+1 on every `mage test:magefile` -- on
+// every developer machine and every CI run -- to establish a property that has
+// nothing to do with the bound's magnitude.
+var maxExtractedFileBytes int64 = 2 << 30
 
 // extractTarGz extracts the named entries of a .tar.gz into destDir, and fails
 // if any of them is missing. Only the names asked for are written, and any
@@ -5252,6 +5457,10 @@ func (Dev) Check() error {
 	}
 	fmt.Println("Checking the provisioning TTL against the CA's own default...")
 	if err := verifyNodeTTL(); err != nil {
+		return err
+	}
+	fmt.Println("Checking the provisioning backend aliases against the CA's own...")
+	if err := verifyBackendAliases(); err != nil {
 		return err
 	}
 	// Vet the two packages with non-Linux build-tagged files. Every CI check

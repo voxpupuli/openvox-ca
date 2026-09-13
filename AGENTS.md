@@ -366,19 +366,34 @@ layout and the one path the hardened unit grants under `ProtectSystem=strict`
 (see [docs/systemd.md](docs/systemd.md)). Neither of those is a rename, so
 neither breaches this contract.
 
-One deliberate exception. The packages record whether they have enabled their
-provisioning oneshot under **`/var/lib/openvox-ca`** -- the only path holding
-STATE that is spelled the new way. (Program and documentation paths are a
-different matter and are not covered by this contract at all: the packages
-install `/usr/bin/openvox-ca`, `/usr/libexec/openvox-ca`,
-`/usr/lib/sysusers.d/openvox-ca.conf` and `/usr/share/doc/openvox-ca`, none of
-which was ever spelled `puppet-ca` and none of which a drop-in has to match.) (`packaging/scripts/postinstall`). It is not a
-rebrand of `/var/lib/puppet-ca` but a different directory for a different
-thing — packaging bookkeeping that never existed in Puppet Server, so there is
-nothing to be a drop-in for. It must not be moved under `/var/lib/puppet-ca`,
-which is a cadir on hosts that have one there already — it is the Helm
-chart's `persistence.mountPath` default; a marker file
-dropped inside somebody's CA directory is the confusion this avoids.
+**The rule this contract actually states** is narrower than "nothing is spelled
+`openvox-ca`". It is: *nothing that Puppet Server named is renamed.* A path a
+drop-in has to match keeps its `puppet-ca` or `puppetlabs` spelling. A path that
+never existed in Puppet Server has nothing to be a drop-in for, and may use the
+new spelling.
+
+The packages introduce several of the latter, and none of them breaches the
+contract:
+
+- **`/var/lib/openvox-ca/first-boot-enabled`** — whether the postinstall has
+  already enabled the provisioning oneshot (`packaging/scripts/postinstall`).
+  Packaging bookkeeping; Puppet Server had no equivalent.
+- **`/etc/puppetlabs/puppet/ssl/openvox-ca-certname-unresolved`** — the marker
+  provisioning leaves when it could not resolve a usable certname
+  (`packaging/scripts/first-boot`).
+- **`certs/openvox-ca-server.pem`** and
+  **`private_keys/openvox-ca-server.pem`** — the serving credential the shipped
+  configuration names. Aliases this project maintains, in a directory Puppet
+  Server owns, under a name Puppet Server never used — which is exactly why the
+  name is safe to take.
+- Program and documentation paths are not covered by this contract at all:
+  `/usr/bin/openvox-ca`, `/usr/libexec/openvox-ca`,
+  `/usr/lib/sysusers.d/openvox-ca.conf` and `/usr/share/doc/openvox-ca`.
+
+`/var/lib/openvox-ca` must not be moved under `/var/lib/puppet-ca`, which is a
+cadir on hosts that have one there already — it is the Helm chart's
+`persistence.mountPath` default; a marker file dropped inside somebody's CA
+directory is the confusion this avoids.
 
 ## Helm chart
 

@@ -101,12 +101,20 @@ See [running under systemd](docs/systemd.md) for the rest of a VM install.
 
 A `.deb` and an `.rpm` per architecture install the binaries, a unit rendered
 for `/usr/bin`, a working `/etc/puppet-ca/config.yaml`, and a `Type=oneshot`
-that provisions the CA the first time you start the service — so a package
-install is `install`, then `systemctl enable --now openvox-ca`, with no
-configuration to write first. They create the `puppet` service account and use
-the OpenVox/Puppet layout (`/etc/puppetlabs/puppet/ssl`), so they coexist with
-an openvox-agent or OpenVox Server on the same host; that is also why they
-listen on **8141** rather than 8140, which Server binds itself.
+that provisions the CA the first time you start the service — so on a host with
+no CA of its own, a package install is `install`, then `systemctl enable --now
+openvox-ca`, with no configuration to write first. They create the `puppet`
+service account and use the OpenVox/Puppet layout
+(`/etc/puppetlabs/puppet/ssl`), so they coexist with an openvox-agent or
+OpenVox Server on the same host; that is also why they listen on **8141**
+rather than 8140, which Server binds itself.
+
+**A host already enrolled against another CA has one choice to make first.** If
+this machine holds an agent certificate signed elsewhere, provisioning stops
+rather than serve it from a CA that did not issue it, and asks which CA this
+service should serve — see [installing from a
+package](docs/systemd.md#installing-from-a-package). Sharing the account and
+the layout is not the same as having no decision to make.
 
 **They are not published as release assets yet.** Adding the packaging job to
 the release workflow is
@@ -114,14 +122,17 @@ the release workflow is
 them from a checkout with:
 
 ```console
-$ mage build:distVariant linux_amd64    # or linux_arm64
+$ mage build:distVariant linux_amd64
+$ mage build:distVariant linux_arm64
 $ mage build:packages
 ```
 
-`build:dist` also works, but it builds all four release tarballs including the
-two FIPS ones, which need a cgo cross toolchain the packages never use. The
-packaging step reads whichever variant tarballs are in `dist/` and writes the
-`.deb` and `.rpm` beside them. The packages carry the pure-Go
+**Both**, not either: `build:packages` builds the packages for every variant
+marked packaged, and refuses if any of their tarballs is missing rather than
+writing a partial set. `build:dist` also works and is one command, but it
+builds all four release tarballs including the two FIPS ones, which need a cgo
+cross toolchain the packages never use. The packaging step writes the `.deb`
+and `.rpm` beside the tarballs it read. The packages carry the pure-Go
 build only — a FIPS deployment uses the `_fips` tarball.
 
 See [installing from a package](docs/systemd.md#installing-from-a-package) for

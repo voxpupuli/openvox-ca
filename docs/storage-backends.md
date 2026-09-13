@@ -606,7 +606,7 @@ single-node, not a clustering option.
 ```yaml
 # /etc/puppet-ca/config.yaml
 storage_backend: sqlite
-cadir: /etc/puppetlabs/puppet/ssl/ca      # still needed for per-subject keys
+cadir: /etc/puppetlabs/puppet/ssl/ca     # still needed for per-subject keys
 # the SQLite database file path / URI
 sql_dsn: "file:/etc/puppetlabs/puppet/ssl/ca/ca.db"
 
@@ -648,7 +648,7 @@ can share it. `postgres`, `postgresql` and `pg` are accepted as aliases.
 ```yaml
 # /etc/puppet-ca/config.yaml
 storage_backend: postgres
-cadir: /etc/puppetlabs/puppet/ssl/ca      # still needed for per-subject keys
+cadir: /etc/puppetlabs/puppet/ssl/ca     # still needed for per-subject keys
 sql_dsn: "postgres://puppetca:secret@db.example.com:5432/puppetca?sslmode=require"
 
 sql_request_timeout_sec: 10              # per-operation timeout (default 10)
@@ -684,7 +684,7 @@ replicas can share it. `mysql` and `mariadb` are accepted as aliases.
 ```yaml
 # /etc/puppet-ca/config.yaml
 storage_backend: mysql                   # or "mariadb"
-cadir: /etc/puppetlabs/puppet/ssl/ca      # still needed for per-subject keys
+cadir: /etc/puppetlabs/puppet/ssl/ca     # still needed for per-subject keys
 sql_dsn: "puppetca:secret@tcp(db.example.com:3306)/puppetca"
 
 sql_request_timeout_sec: 10              # per-operation timeout (default 10)

@@ -23,6 +23,10 @@
 
 set -eu
 
+warn() { echo "openvox-ca first-boot: WARNING: $*" >&2; }
+info() { echo "openvox-ca first-boot: $*" >&2; }
+fail() { echo "openvox-ca first-boot: ERROR: $*" >&2; exit 1; }
+
 # The two roots. Both are overridable from the environment so this script can
 # be exercised against a scratch directory -- and it is: magefile_test.go's
 # "first-boot's certname allow-list" specs run the functions below directly,
@@ -33,25 +37,77 @@ SSLDIR="${OPENVOX_CA_SSLDIR:-/etc/puppetlabs/puppet/ssl}"
 
 # The configuration file the SERVER reads. Provisioning has to resolve the same
 # one, because everything it creates is only useful where openvox-ca will look
-# for it.
-CONFIG="${OPENVOX_CA_CONFIG:-/etc/puppet-ca/config.yaml}"
+# for it -- so it resolves it the way the binary does, not just the way this
+# script's own test seam does. `openvox-ca` reads PUPPET_CA_CONFIG
+# (resolveConfigFile in cmd/openvox-ca/main.go, and generate's own call), the
+# packaged unit deliberately passes no --config so that a drop-in setting
+# PUPPET_CA_CONFIG still works, and packaging/config/config.yaml advertises
+# exactly that. Honouring only OPENVOX_CA_CONFIG would let such a drop-in point
+# the service at one file while provisioning read another -- and then every
+# guard below would have checked a file nothing else uses.
+CONFIG="${OPENVOX_CA_CONFIG:-${PUPPET_CA_CONFIG:-/etc/puppet-ca/config.yaml}}"
 
 # read_config_key prints the value of a top-level scalar key from $CONFIG, or
-# nothing if the file, the key or a usable value is absent.
+# nothing if the file, the key or a readable value is absent.
 #
 # Deliberately not a YAML parser. It reads the two keys provisioning cannot
 # proceed without agreeing on, both of which the shipped file writes as plain
-# unquoted scalars at column 0. Anything it cannot read confidently -- a
-# quoted, folded, anchored or nested value -- it declines to read at all, and
-# every caller below treats "no answer" as a reason to stop or to fall back,
-# never as a licence to guess. A wrong answer here would be worse than none:
-# it would point provisioning at a directory the service does not use.
+# scalars at column 0. Anything it cannot read confidently -- a folded or
+# literal block, an anchor, an alias, a flow collection -- it declines to read
+# at all. No caller treats a decline as a licence to guess: config_key_set
+# below separates "the operator never wrote this key, so use the shipped
+# default" from "the operator wrote it and this reader cannot parse it, so
+# stop". A wrong answer here would be worse than none, because it would point
+# provisioning at a directory the service does not use.
+#
+# An inline comment is NOT an ambiguity, and used to be treated as one. It is
+# ordinary YAML, the server's own parser reads straight through it, and
+# docs/storage-backends.md hands operators lines that carry one -- so it is
+# stripped rather than declined. Declining it was worse than cosmetic: both
+# callers below read the empty answer as "key absent" and fell back, so a
+# perfectly ordinary `storage_backend: redis  # or valkey` silently defeated
+# the guard that exists to refuse exactly that configuration.
 read_config_key() {
 	key=$1
 	[ -f "$CONFIG" ] || return 0
-	sed -n "s/^${key}:[[:space:]]*\\([^[:space:]#][^#]*\\)[[:space:]]*$/\\1/p" "$CONFIG" |
-		sed -e 's/[[:space:]]*$//' -e "s/^['\"]//" -e "s/['\"]$//" |
-		grep -v '[][{}&*]' | tail -n 1
+	read_config_value "$(sed -n "s/^${key}:[[:space:]]*\\(.*\\)\$/\\1/p" "$CONFIG" | tail -n 1)"
+}
+
+# read_config_value turns one raw post-colon remainder into a value, printing
+# nothing for a form this reader declines. Split out from read_config_key so
+# the decline rules can be driven directly, one input at a time.
+read_config_value() {
+	# Strip an inline comment. YAML opens one only after whitespace (or at the
+	# start of the value), so a '#' inside a value survives, and a value that
+	# is nothing but a comment reduces to empty and is declined below.
+	value=$(printf '%s\n' "$1" | sed -e 's/[[:space:]]#.*$//' -e 's/^#.*$//' -e 's/[[:space:]]*$//')
+	# One MATCHED pair of surrounding quotes, removed together. The previous
+	# form stripped each end independently, so a value quoted at one end only
+	# came back silently altered rather than declined.
+	value=$(printf '%s\n' "$value" | sed -e "s/^'\\(.*\\)'\$/\\1/" -e 's/^"\(.*\)"$/\1/')
+	case $value in
+	# Empty, a block-scalar indicator, or anything carrying a flow-collection
+	# or anchor character. The two leading-indicator cases are the ones the old
+	# exclusion set missed: it filtered []{}&* anywhere in the value but never
+	# looked for a leading '>' or '|', so `cadir: >` came back as the literal
+	# string ">". Being non-empty, that defeated the caller's fallback outright
+	# and pointed provisioning at a directory named ">".
+	"" | [\>\|]* | *[][{}\&\*]*) return 0 ;;
+	# A quote left over after the matched-pair strip above means the value was
+	# quoted at one end only. That is not valid YAML, so the server will not
+	# read this file at all, and any value taken from it here would be a guess
+	# about a configuration nothing else can load.
+	\'* | *\' | \"* | *\") return 0 ;;
+	esac
+	printf '%s\n' "$value"
+}
+
+# config_key_set reports whether KEY appears in $CONFIG at all, whatever
+# read_config_key made of its value. Keeping the two questions apart is what
+# lets a decline mean something: see read_config_key's comment above.
+config_key_set() {
+	[ -f "$CONFIG" ] || return 1
+	grep -q "^$1:" "$CONFIG"
 }
 
 # Where the CA lives. $SSLDIR/ca is the shipped default and the fallback, but
@@ -59,8 +115,30 @@ read_config_key() {
 # so), and if they do, the service reads there while provisioning would
 # otherwise still write here -- bootstrapping a second CA and pointing the
 # serving credential at a leaf no agent's trust anchor verifies.
-CADIR="$(read_config_key cadir)"
-[ -n "$CADIR" ] || CADIR="$SSLDIR/ca"
+#
+# PUPPET_CA_CADIR is read first because the server reads it first: config.go
+# lets it override whatever the file said. A drop-in that moves the cadir for
+# openvox-ca.service and not for this one is precisely the two-CA split the
+# paragraph above is about, so provisioning has to see the same layers.
+CADIR="${PUPPET_CA_CADIR:-$(read_config_key cadir)}"
+if [ -z "$CADIR" ]; then
+	# "Absent" and "present but unreadable" are different answers and only one
+	# of them permits the default. Falling back on a cadir the operator DID
+	# write and this reader could not parse would provision into a directory
+	# they did not choose, while the server reads the one they did -- so stop,
+	# and name the line, rather than guess.
+	if config_key_set cadir; then
+		fail "$CONFIG sets cadir, but not in a form this script can read:
+
+    $(grep -n '^cadir:' "$CONFIG" | head -n 1)
+
+Provisioning has to agree with the server about where the CA lives, and it will not guess. Write
+the value as a plain or quoted scalar on one line -- cadir: /var/lib/puppet-ca -- and start again:
+
+    systemctl restart openvox-ca-first-boot"
+	fi
+	CADIR="$SSLDIR/ca"
+fi
 
 # A cadir location openvox-ca CAs are commonly found at: it is the Helm chart's
 # persistence.mountPath default, it is what the StateDirectory=puppet-ca on
@@ -106,10 +184,6 @@ SERVING_KEY="$SSLDIR/private_keys/openvox-ca-server.pem"
 # estate -- it is what `hostname -s` returns for ca.example.com, so tier 3
 # reaches this without anyone typing it.
 RESERVED_CERTNAMES="ca openvox-ca-server"
-
-warn() { echo "openvox-ca first-boot: WARNING: $*" >&2; }
-info() { echo "openvox-ca first-boot: $*" >&2; }
-fail() { echo "openvox-ca first-boot: ERROR: $*" >&2; exit 1; }
 
 # -- The certificate name ----------------------------------------------------
 
@@ -318,11 +392,39 @@ Only the directories change owner; nothing inside them is touched."
 #
 # So this refuses, in the same spirit as the legacy-cadir block below: the
 # packages default to `filesystem` and provisioning supports exactly that.
+# The spellings openvox-ca itself accepts for the filesystem backend, from
+# ParseBackendKind in internal/storage/spec.go. Refusing one the server accepts
+# would stop a service that is configured perfectly well -- and because the
+# oneshot is RequiredBy=openvox-ca.service, refusing it stops the service too.
+# `mage dev:check` compares this list against the Go one (verifyBackendAliases),
+# so the copy cannot quietly fall behind the original.
+FILESYSTEM_BACKEND_ALIASES="filesystem file fs disk local"
+
 require_filesystem_backend() {
-	backend="$(read_config_key storage_backend)"
-	case "${backend:-filesystem}" in
-	filesystem) return 0 ;;
-	esac
+	# PUPPET_CA_STORAGE_BACKEND overrides the file for the server
+	# (cmd/openvox-ca/config.go), so it overrides it here. A guard that read
+	# only the file would pass on a host whose service runs against etcd.
+	backend="${PUPPET_CA_STORAGE_BACKEND:-$(read_config_key storage_backend)}"
+	if [ -z "$backend" ] && config_key_set storage_backend; then
+		fail "$CONFIG sets storage_backend, but not in a form this script can read:
+
+    $(grep -n '^storage_backend:' "$CONFIG" | head -n 1)
+
+Provisioning only supports the filesystem backend and will not assume this line names it. Write the
+value as a plain or quoted scalar on one line, or disable provisioning and bootstrap by hand:
+
+    systemctl disable --now openvox-ca-first-boot"
+	fi
+	want=$(printf '%s\n' "${backend:-filesystem}" | tr '[:upper:]' '[:lower:]')
+	for alias in $FILESYSTEM_BACKEND_ALIASES; do
+		# An explicit `if`, not `[ ... ] && return 0`: under `set -e` a failing
+		# test as the non-final element of an AND-OR list leaves the list's own
+		# status non-zero, and shells disagree about whether that is fatal. A
+		# guard whose safe path depends on that is not a guard.
+		if [ "$want" = "$alias" ]; then
+			return 0
+		fi
+	done
 	fail "$CONFIG sets storage_backend: $backend, and first-boot provisioning only supports
 \"filesystem\". Bootstrapping here would write a CA to $CADIR while the server reads its own from
 the $backend store, leaving two CAs and nothing to say which one agents should trust.
@@ -330,7 +432,9 @@ the $backend store, leaving two CAs and nothing to say which one agents should t
 Provision that CA yourself, then start the service:
 
   systemctl disable --now openvox-ca-first-boot
-  openvox-ca-ctl setup   # against your configured backend, per docs/storage-backends.md
+  openvox-ca-ctl setup   # against your configured backend, per
+                         # /usr/share/doc/openvox-ca/docs/storage-backends.md, which this
+                         # package installs
 
 and supply the credential the shipped configuration names -- $SSLDIR/certs/openvox-ca-server.pem
 and $SSLDIR/private_keys/openvox-ca-server.pem -- or point tls_cert and tls_key at your own."
@@ -366,9 +470,11 @@ is which.
 
 Choose one, then run 'systemctl restart openvox-ca-first-boot':
 
-  Keep the existing CA where it is -- set cadir to $LEGACY_CADIR in
-  /etc/puppet-ca/config.yaml, and change ReadWritePaths= in openvox-ca.service to match, since
-  that is the only path the unit can write to.
+  Keep the existing CA where it is -- set cadir to $LEGACY_CADIR in $CONFIG, and change
+  ReadWritePaths= to match in BOTH openvox-ca.service and openvox-ca-first-boot.service. Both,
+  because both write there: the service serves from the CA directory and this oneshot creates it,
+  and each unit runs under ProtectSystem=strict with only its own ReadWritePaths= writable. Widening
+  the service alone leaves provisioning failing on a read-only filesystem the next time it mints.
 
   Or move it -- stop openvox-ca, move $LEGACY_CADIR to $CADIR with its ownership intact
   ('mv $LEGACY_CADIR/* $CADIR/' as root, then 'chown -R puppet:puppet $CADIR'), and leave the
@@ -438,9 +544,9 @@ by this run -- so that certificate was issued by a different CA and this one can
 That usually means this host already belongs to another CA, which is the estate's real one. Pick
 the CA this service should be:
 
-  Use the existing CA -- point cadir in $CONFIG at it (and ReadWritePaths= in
-  openvox-ca.service to match), delete the CA this run just created at $CADIR, then
-  'systemctl restart openvox-ca-first-boot'.
+  Use the existing CA -- point cadir in $CONFIG at it, change ReadWritePaths= to match in both
+  openvox-ca.service and openvox-ca-first-boot.service, delete the CA this run just created at
+  $CADIR, then 'systemctl restart openvox-ca-first-boot'.
 
   Or run a new, separate CA here -- move $cert and $key aside, and provisioning will mint this
   host a certificate from the CA in $CADIR.
@@ -477,8 +583,35 @@ openvox-ca-first-boot', or supply the credential out of band as $cert and $key."
 #    the CA directory -- puppet's own layout, so an agent on this host finds
 #    them where it expects and they cannot go stale.
 link_ca_material() {
-	link_if_absent "$SSLDIR/certs/ca.pem" "../ca/ca_crt.pem"
-	link_if_absent "$SSLDIR/crl.pem" "ca/ca_crl.pem"
+	# Both aliases point INTO the CA directory, so they have to follow it when
+	# the operator moves cadir -- which packaging/config/config.yaml invites.
+	# They used to be the literals ../ca/ca_crt.pem and ca/ca_crl.pem, correct
+	# only for the shipped default. With a relocated cadir they pointed at
+	# $SSLDIR/ca instead: either a dangling link that would silently become
+	# valid and WRONG the moment anything wrote a CA there, or -- on the
+	# takeover host these packages advertise -- the Puppet Server CA already
+	# sitting there, while the service serves the one in the moved directory.
+	# certs/ca.pem is where every agent on this host reads the CA certificate,
+	# so either way agents would verify against a CA that did not issue what
+	# the service presents, with nothing logged.
+	case "$CADIR" in
+	"$SSLDIR"/*)
+		# Inside the ssl tree: keep the relative form, which is puppet's own
+		# layout and leaves the tree movable as a unit. $SSLDIR/certs/ca.pem
+		# resolves its target against $SSLDIR/certs, hence the leading "..";
+		# $SSLDIR/crl.pem resolves against $SSLDIR, and so has none.
+		rel=${CADIR#"$SSLDIR"/}
+		link_if_absent "$SSLDIR/certs/ca.pem" "../$rel/ca_crt.pem"
+		link_if_absent "$SSLDIR/crl.pem" "$rel/ca_crl.pem"
+		;;
+	*)
+		# Outside it, no relative form is meaningful. An absolute target is
+		# still correct, and still breaks visibly rather than silently if the
+		# CA moves again.
+		link_if_absent "$SSLDIR/certs/ca.pem" "$CADIR/ca_crt.pem"
+		link_if_absent "$SSLDIR/crl.pem" "$CADIR/ca_crl.pem"
+		;;
+	esac
 }
 
 # 5. The server's own keypair, under the stable names the packaged

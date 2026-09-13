@@ -140,6 +140,20 @@ if [ -d "$SSLDIR" ]; then
 	# change hands, and whatever an agent or Server has put inside them is
 	# left alone. A path that is absent is skipped rather than created --
 	# creating one here would pre-empt the modes ensure_ssl_tree chooses.
+	#
+	# What that grants, stated rather than implied. "Contents are left alone"
+	# is true of the FILES and not of the capability: write permission on a
+	# directory governs unlink and rename of the entries in it, so after this
+	# the `puppet` account can replace anything inside private_keys/ and
+	# certs/ -- including certs/ca.pem, where every agent on this host reads
+	# the CA certificate -- whatever the 0600 modes on those files say. On the
+	# co-existence host that is an agent's own key directory.
+	#
+	# It is done anyway, and deliberately: openvox-server's own postinst
+	# chowns this tree the same way, an attacker who holds the `puppet` account
+	# already holds the CA key in the cadir, and the alternative is a service
+	# that cannot start. docs/systemd.md states the same thing for operators
+	# rather than leaving it here.
 	ssl_dirs="$SSLDIR $SSLDIR/ca"
 	for d in certs private_keys public_keys; do
 		[ -d "$SSLDIR/$d" ] && ssl_dirs="$ssl_dirs $SSLDIR/$d"
