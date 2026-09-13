@@ -2205,13 +2205,23 @@ func (Chart) Test() error {
 			// probes to HTTP against an HTTPS listener.
 			name: "a self-provisioned serving certificate is TLS on its own",
 			sets: []string{"serviceAccount.create=true"},
-			// Under persistence.mountPath, because that is the only writable
-			// path in the pod: readOnlyRootFilesystem defaults to true, and an
-			// unwritable serving store is fatal rather than retried. The first
-			// version of this case used /srv, which is the shape the chart now
-			// refuses -- a shipped example nobody could install.
+			// The only file-store layout that both installs and starts, which
+			// took two goes to get right. It must be under
+			// persistence.mountPath, because readOnlyRootFilesystem defaults to
+			// true and that is the one writable path -- and it must be outside
+			// the cadir, because the server reserves that subtree against every
+			// file store. The chart sets cadir TO the mount by default, so
+			// those two collide until cadir is narrowed, which is what this
+			// case demonstrates.
+			//
+			// The first version used /srv, which the chart refuses: a shipped
+			// example nobody could install. The second moved it under the mount
+			// and left cadir alone, which renders and then refuses at startup:
+			// an example nobody could start. Both were caught by review rather
+			// than by this case, because its assertions are render-only.
 			valuesYAML: `
 config:
+  cadir: /var/lib/puppet-ca/ca
   serving_cert:
     certname: ca.example.com
     names: [ca.example.com]
@@ -2581,7 +2591,28 @@ config:
       renew_before: 720h
       store: {secret: {name: a-tls, namespace: openvox}}
 `,
-			wants:    []string{"(managed certificates stored in Secrets)"},
+			wants:    []string{"(managed or serving certificates stored in Secrets)"},
+			notWants: []string{"(OpenBao Kubernetes auth)", "(Kubernetes export)"},
+		},
+		{
+			// The same reason reached by the other source. serving_cert is a
+			// second block that puts a certificate in a Secret, so the reason
+			// the token was mounted has to cover it -- naming only
+			// managed_certs would send an operator looking for a block their
+			// configuration does not have.
+			name: "the egress NOTE covers a serving certificate in a Secret too",
+			sets: []string{"serviceAccount.create=true",
+				"networkPolicy.enabled=true", "networkPolicy.egress.enabled=true"},
+			notes: true,
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store: {secret: {name: openvox-ca-serving-tls}}
+`,
+			wants:    []string{"(managed or serving certificates stored in Secrets)"},
 			notWants: []string{"(OpenBao Kubernetes auth)", "(Kubernetes export)"},
 		},
 		{
@@ -3369,6 +3400,76 @@ config:
       secret: {name: ca-tls}
 `,
 			wantErr: "PUPPET_CA_TLS_CERT",
+		},
+		{
+			// The trap the chart's own default creates: cadir is the mount, so
+			// the advice "put it under the mount" lands the pair inside the
+			// cadir, which the server refuses at startup. Rendering it would be
+			// a clean install and a CrashLoopBackOff.
+			name: "a serving_cert file store inside the cadir",
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      files: {cert: /var/lib/puppet-ca/serving/tls.crt, key: /var/lib/puppet-ca/serving/tls.key}
+`,
+			wantErr: "inside the cadir",
+		},
+		{
+			// The extraEnv arm of the conflict scan, which reads .name/.value
+			// off a list rather than a map and is the most fragile of the four
+			// routes to the same refusal.
+			name: "config.serving_cert alongside PUPPET_CA_TLS_CERT in extraEnv",
+			sets: []string{"extraEnv[0].name=PUPPET_CA_TLS_CERT", "extraEnv[0].value=/run/tls/tls.crt"},
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      secret: {name: ca-tls}
+`,
+			wantErr: "extraEnv",
+		},
+		{
+			// And its valueFrom spelling, which the chart cannot read and so
+			// must assume supplies a certificate.
+			name: "config.serving_cert alongside an extraEnv valueFrom for the TLS key",
+			sets: []string{
+				"extraEnv[0].name=PUPPET_CA_TLS_KEY",
+				"extraEnv[0].valueFrom.secretKeyRef.name=tls",
+				"extraEnv[0].valueFrom.secretKeyRef.key=path",
+			},
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      secret: {name: ca-tls}
+`,
+			wantErr: "extraEnv",
+		},
+		{
+			// tls_key alone: it does not enable TLS by itself, but it still
+			// names a path self-provisioning must never be read as writing to.
+			name: "config.serving_cert alongside config.tls_key alone",
+			sets: []string{"config.tls_key=/etc/tls.key"},
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      secret: {name: ca-tls}
+`,
+			wantErr: "config.tls_key",
 		},
 		{
 			// Fatal rather than retried, which is what distinguishes it from a

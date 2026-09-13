@@ -1356,7 +1356,7 @@ the certificates can undo. The server refuses to start when a `cert`, `key` or
 | `cadir` | the whole tree: the CA key and certificate, the CRL, and the filesystem and SQLite backends' state |
 | `ca_cert_file`, `ca_key_file` | the CA's own certificate and private key, wherever a local-file override puts them |
 | `tls_cert`, `tls_key` | the pair the CA presents on its own listener |
-| `serving_cert.store.files.cert`, `.key`, `.ca` | the pair the CA issues for its own listener, when it self-provisions into files. Reserved only while `serving_cert` uses a file store |
+| `serving_cert.store.files.cert`, `.key` | the pair the CA issues for its own listener, when it self-provisions into files. Reserved only while `serving_cert` uses a file store. Its `ca` chain file is deliberately **not** reserved, for the same reason two managed entries may share one: every entry writes the same chain from the same source and none reads it back, so a shared chain file is the ordinary shared-host layout |
 | `ca_key_passphrase_file` | what unlocks the CA key |
 | `crl_chain_file` | the upstream CRL bundle the CA re-reads and republishes |
 | `logfile` | where the CA writes its log |
@@ -1422,7 +1422,7 @@ cover it and nothing new is needed. See [metrics & monitoring](metrics.md).
 > **Said once, at startup.** A SIGHUP that adds a certname to
 > `puppet_server_file` can create this condition at runtime, and the warning
 > does not repeat — the added CN in the `Reloaded admin allow list` line is the
-> signal to check against `managed_certs`.
+> signal to check against `managed_certs` and `serving_cert`.
 >
 > The listing is what grants the authority; `clientAuth` is what lets it be
 > presented. Neither alone is an admin credential, and narrowing an entry to
@@ -1577,6 +1577,12 @@ way that is hard to read — the listener works, and something else fails later.
 > an admin credential**: whoever can read that file pair or that Secret can
 > administer this CA. The CA says so once at startup. Set `usages:
 > [serverAuth]` if this CA's own name should not be an administrator.
+>
+> **Said once, at startup**, like the equivalent warning for a component
+> certificate. A `SIGHUP` that adds this CA's own certname to
+> `puppet_server_file` creates the condition at runtime and nothing repeats the
+> warning, so the added CN in the `Reloaded admin allow list` line is the signal
+> to check against `serving_cert` as well as `managed_certs`.
 
 Narrowing takes effect at the next reconcile pass rather than at natural expiry,
 because the CA treats a usage mismatch as grounds to reissue — the setting
@@ -1736,8 +1742,11 @@ be read or holds a CRL that does not parse — so a stale path left behind on
 anchor bundle beside it already fails closed, and a server that starts here
 would reject every client of the domain while its readiness probe reported
 healthy. The check runs where the trust set is assembled, which is when TLS is
-configured; with no `tls_cert` and `tls_key` there is no client authentication
-to set up and `client_ca` is not consulted at all.
+configured; with no TLS at all — no `tls_cert`/`tls_key`, no environment
+equivalents and no [`serving_cert`](#the-cas-own-serving-certificate) — there is
+no client authentication to set up and `client_ca` is not consulted. A
+self-provisioning CA does consult it, and does refuse to start on an unreadable
+`crl_file`, exactly as one given a keypair does.
 
 Every CRL in `crl_file` is signature-verified against an anchor in the same
 entry before it is used, and each is bound to the anchor whose key signed it.

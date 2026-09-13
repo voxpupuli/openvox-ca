@@ -541,7 +541,7 @@ chart cannot see far enough to rule anything out.
 {{- if eq (include "openvox-ca.exportConfigured" .) "true" -}}
 Kubernetes export
 {{- else if and (eq (include "openvox-ca.configFileKnown" .) "true") (eq (include "openvox-ca.managedCertsNeedAPI" .) "true") -}}
-managed certificates stored in Secrets
+managed or serving certificates stored in Secrets
 {{- else if eq (include "openvox-ca.configFullyKnown" .) "true" -}}
 {{- if eq (include "openvox-ca.needsAPIAccess" .) "true" -}}
 OpenBao Kubernetes auth
@@ -793,9 +793,13 @@ CrashLoopBackOff or a Service that silently routes nowhere.
   the install succeeds, the pod CrashLoopBackOffs, and on an upgrade the rollout
   wedges with the old ReplicaSet still serving.
 
-  Every route to those two keys is checked, not just the values one, because
+  Every route to those two keys that the chart can read is checked, because
   each reaches the same server-side refusal: the tls block, a direct config
-  override, and the environment variables that outrank the file.
+  override, the environment variables that outrank the file, and extraArgs,
+  which is appended to the argv the chart builds and so outranks all of them.
+  `args` is the one route left out, and deliberately -- it replaces the argv
+  wholesale, so the chart cannot see what is in it, which is the same reason
+  configFullyKnown gates this whole helper.
 */ -}}
 {{- if hasKey $config "serving_cert" -}}
 {{- $conflict := "" -}}
@@ -813,21 +817,49 @@ CrashLoopBackOff or a Service that silently routes nowhere.
 {{- $conflict = printf "extraEnv %s" .name -}}
 {{- end -}}
 {{- end -}}
+{{- range .Values.extraArgs -}}
+{{- $arg := . | toString -}}
+{{- if or (hasPrefix "--tls-cert" $arg) (hasPrefix "--tls-key" $arg) -}}
+{{- $conflict = printf "extraArgs %s" $arg -}}
+{{- end -}}
+{{- end -}}
 {{- if $conflict -}}
 {{- fail (printf "config.serving_cert makes the CA issue and renew the certificate its own listener presents, but %s also supplies one — and openvox-ca refuses to start with both, because they are two answers to which certificate the listener presents. Self-provisioning never writes to the paths tls_cert/tls_key name, so it cannot take them over. Remove %s to let the CA issue its own, or drop config.serving_cert to keep supplying one." $conflict $conflict) -}}
 {{- end -}}
 {{/*
-  A serving_cert file store must land somewhere the CA can actually write.
-  readOnlyRootFilesystem defaults to true and the data volume at
-  persistence.mountPath is the only writable path in the pod, so a pair outside
-  it cannot be written. Unlike a managed_certs file store, whose write failure
-  is logged and retried, this one is fatal: the CA refuses to start.
+  A serving_cert file store has to satisfy two constraints at once, and under
+  this chart's defaults they collide -- which is why both are checked here
+  rather than left to be discovered.
+
+  It must be somewhere the CA can write: readOnlyRootFilesystem defaults to
+  true, so the data volume at persistence.mountPath is the only writable path
+  in the pod. And it must be outside the cadir, because the server reserves
+  that whole subtree against every file store -- a store overwrites its paths
+  on every issuance, and pointed at the CA's own directory that destroys the
+  CA key.
+
+  The collision is that this chart sets cadir TO the mount (see
+  openvox-ca.config above), so out of the box there is no path that satisfies
+  both: outside the mount is unwritable, inside it is inside the cadir. Making
+  a file store work therefore means narrowing cadir to a subdirectory first.
+  Refusing here with that remedy is the whole point -- an operator who is told
+  only "point it inside the mount" follows the advice and gets a pod that
+  starts, refuses at startup, and CrashLoopBackOffs.
+
+  Unlike a managed_certs file store, whose write failure is logged and retried,
+  this one is fatal.
 */ -}}
 {{- $files := dig "serving_cert" "store" "files" dict $config -}}
+{{- $cadir := dig "cadir" "" $config | toString | trimSuffix "/" -}}
 {{- range $field := list "cert" "key" "ca" -}}
 {{- $path := dig $field "" $files | toString | trimSuffix "/" -}}
-{{- if and $path (ne $path $mount) (not (hasPrefix (printf "%s/" $mount) $path)) -}}
-{{- fail (printf "config.serving_cert.store.files.%s is %q, which is outside the volume mounted at %q, and the root filesystem is read-only by default so the CA could not write there. Unlike a managed certificate, an unwritable serving store is fatal: the CA refuses to start rather than retrying. Point it inside the mount, set persistence.mountPath to a parent of it, or use a Secret store instead." $field $path $mount) -}}
+{{- if $path -}}
+{{- if and (ne $path $mount) (not (hasPrefix (printf "%s/" $mount) $path)) -}}
+{{- fail (printf "config.serving_cert.store.files.%s is %q, which is outside the volume mounted at %q, and the root filesystem is read-only by default so the CA could not write there. Unlike a managed certificate, an unwritable serving store is fatal: the CA refuses to start rather than retrying. Use a Secret store, which is the better fit in Kubernetes and needs no volume — or put the pair under the mount and set config.cadir to a different subdirectory of it, since the CA also refuses a store inside its cadir." $field $path $mount) -}}
+{{- end -}}
+{{- if and $cadir (or (eq $path $cadir) (hasPrefix (printf "%s/" $cadir) $path)) -}}
+{{- fail (printf "config.serving_cert.store.files.%s is %q, which is inside the cadir (%q) — and openvox-ca refuses any file store there, because a store overwrites its paths on every issuance and those are the CA's own files. By default this chart sets cadir to persistence.mountPath (%q), which is also the only writable path in the pod, so a file store needs config.cadir narrowed to a subdirectory (for example %q/ca) with the serving pair kept elsewhere under the mount. A Secret store avoids the question entirely and is the better fit in Kubernetes." $field $path $cadir $mount $mount) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -1204,8 +1236,9 @@ resourceNames to the Secrets it names.
 WARNING: openvox-ca is configured to issue certificates into Secrets. It can
 read and overwrite every Secret those entries name, and — because a Secret has
 no name at admission time, so `create` cannot be narrowed — it can also create
-any Secret that does not yet exist in each of those namespaces. A component
-certificate for a certname listed in puppetServers is a CA admin credential,
+any Secret that does not yet exist in each of those namespaces. A certificate
+for a certname listed in puppetServers — a component's, or the CA's own serving
+certificate — is a CA admin credential,
 because that listing is what grants administrative access — so treat those
 Secrets and their namespaces with the care you would give the CA's own key.
 {{- end }}

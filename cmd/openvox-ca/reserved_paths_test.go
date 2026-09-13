@@ -91,7 +91,15 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 		// have every entry refuse itself. The direction that matters is
 		// covered: caOwnedPaths reserves what the CA owns, and
 		// CheckReservedPaths refuses an entry that lands on any of it.
-		"managed_certs[].store.files.ca":   "the entry's own store, checked against this list rather than on it",
+		"managed_certs[].store.files.ca": "the entry's own store, checked against this list rather than on it",
+		// Deliberately not reserved, unlike the serving cert and key beside it.
+		// Every entry writes the same CA chain from the same source and no
+		// entry reads it back to decide anything, so a shared chain file is the
+		// ordinary way to lay several components out on one host -- which
+		// docs/configuration.md states, and which reserving this would refuse
+		// on exactly the shared-host deployment serving_cert documents. The
+		// cross pair that would be a loop is refused inside internal/certstore.
+		"serving_cert.store.files.ca":      "chain files are shareable by design; see the shared-chain rule",
 		"managed_certs[].store.files.cert": "the entry's own store, checked against this list rather than on it",
 		"managed_certs[].store.files.key":  "the entry's own store, checked against this list rather than on it",
 	}

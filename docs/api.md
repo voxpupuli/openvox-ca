@@ -369,7 +369,7 @@ Response body: `{"status":"ok"}` (200) or `{"status":"not_ready"}` (503).
 
 ## Authorization tiers
 
-When mTLS is enabled (both `--tls-cert` and `--tls-key` set), each endpoint requires a minimum client certificate tier:
+When mTLS is enabled — TLS configured by any route: `--tls-cert`/`--tls-key`, their environment equivalents, or [`serving_cert`](configuration.md#the-cas-own-serving-certificate) — each endpoint requires a minimum client certificate tier:
 
 | Tier | Required client cert | Endpoints |
 | --- | --- | --- |

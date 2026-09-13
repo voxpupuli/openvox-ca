@@ -231,11 +231,20 @@ func caOwnedPaths(cfg *serverConfig, absCADir, configPath string) ([]certstore.R
 	// pair. Named with the servingCertPathSetting prefix so that the serving
 	// entry's own check can take them out again rather than refuse the entry
 	// for colliding with itself.
+	//
+	// The cert and the key only. The chain file is deliberately NOT reserved,
+	// for the reason internal/certstore already gives about chain files
+	// generally: every entry writes the same CA chain from the same source and
+	// no entry reads it back to decide anything, so a shared /etc/openvox/ca.pem
+	// is the ordinary way to lay several components out on one host -- which is
+	// exactly the shared-host deployment serving_cert documents. Reserving it
+	// would refuse that layout at startup, and the cross pair that would be a
+	// loop -- a chain written over another entry's material, or material over a
+	// chain -- is already refused inside internal/certstore.
 	if f := servingCertFiles(cfg); f != nil {
 		named = append(named,
 			certstore.ReservedPath{Setting: servingCertPathSetting + "cert", Path: f.Cert},
 			certstore.ReservedPath{Setting: servingCertPathSetting + "key", Path: f.Key},
-			certstore.ReservedPath{Setting: servingCertPathSetting + "ca", Path: f.CA},
 		)
 	}
 	// The SQLite database, when that is the backend. Only for sqlite: every
