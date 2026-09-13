@@ -2198,6 +2198,18 @@ func (Chart) Test() error {
 			notWants: []string{"kind: Role\n"},
 		},
 		{
+			// A half-written store block, which is the state an operator is in
+			// part way through typing it. sprig's dig walks intermediates with
+			// an unchecked type assertion, so this used to abort the whole
+			// render with an interface-conversion error rather than any message
+			// anyone could act on. It must render and leave the refusal to the
+			// server, which names the missing store.
+			name:       "a serving_cert with an empty store block still renders",
+			sets:       []string{"serviceAccount.create=true"},
+			valuesYAML: "config:\n  serving_cert:\n    certname: ca.example.com\n    names: [ca.example.com]\n    renew_before: 720h\n    store:\n",
+			wants:      []string{"kind: Deployment", "scheme: HTTPS"},
+		},
+		{
 			// An empty block is still TLS, deliberately: the server refuses it
 			// with a message naming the missing store, and a chart that read it
 			// as "off" would refuse the install first for having no certificate
@@ -2257,6 +2269,31 @@ config:
 			notWants: []string{
 				"kind: Role\n", "scheme: HTTP\n", "automountServiceAccountToken: true",
 			},
+		},
+		{
+			// The mixed shape the first version of that NOTE got wrong: it was
+			// gated on the combined managedCertSecrets list, so a component's
+			// Secret satisfied it and the operator was told the CA would not
+			// start when the serving material never touches the API at all.
+			name:  "a serving file store with a managed Secret does not claim the CA will not start",
+			sets:  []string{"serviceAccount.create=true", "managedCerts.rbac.create=false"},
+			notes: true,
+			valuesYAML: `
+config:
+  cadir: /var/lib/puppet-ca/ca
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      files: {cert: /var/lib/puppet-ca/tls.crt, key: /var/lib/puppet-ca/tls.key}
+  managed_certs:
+    - certname: c.example.com
+      names: [c]
+      renew_before: 720h
+      store: {secret: {name: c-tls}}
+`,
+			notWants: []string{"will NOT START"},
 		},
 		{
 			// The other route to no Role: an operator who manages it themselves.

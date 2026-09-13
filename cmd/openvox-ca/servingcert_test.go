@@ -1466,3 +1466,40 @@ var _ = Describe("a serving store holding material the listener cannot use", fun
 		Expect(err.Error()).To(ContainSubstring("cannot be presented by the listener"))
 	})
 })
+
+// The last diagnostic in install() without a spec: the one that fires when the
+// CA has issued itself a certificate its own clients would reject.
+var _ = Describe("the serving holder's cannot-serve warning", func() {
+	It("says so when the material cannot authenticate this server", func() {
+		// buildServingCert refuses the one configuration that would produce
+		// this -- a usages list without serverAuth -- so reaching it means
+		// something upstream is wrong, which is exactly why the line exists and
+		// why deleting it should not be silent.
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		Expect(err).NotTo(HaveOccurred())
+		tmpl := &x509.Certificate{
+			SerialNumber: big.NewInt(2),
+			Subject:      pkix.Name{CommonName: "ca.test"},
+			// No SAN at all, and an extendedKeyUsage that excludes serverAuth:
+			// two of the three problems servingCertProblems reports.
+			NotBefore:   time.Now().Add(-time.Hour),
+			NotAfter:    time.Now().Add(24 * time.Hour),
+			KeyUsage:    x509.KeyUsageDigitalSignature,
+			ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+		Expect(err).NotTo(HaveOccurred())
+		keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+		Expect(err).NotTo(HaveOccurred())
+		certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+		keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+
+		h := &servingCertHolder{describe: "the file pair at /srv/tls.crt"}
+		logs := captureLogs(slog.LevelWarn, func() {
+			Expect(h.install(certPEM, keyPEM)).To(Succeed())
+		})
+		Expect(logs).To(ContainSubstring("cannot serve TLS"))
+		Expect(logs).To(ContainSubstring("no subjectAltName"))
+		Expect(logs).To(ContainSubstring("does not include serverAuth"))
+	})
+})
