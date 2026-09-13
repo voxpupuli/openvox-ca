@@ -2198,6 +2198,87 @@ func (Chart) Test() error {
 			notWants: []string{"kind: Role\n"},
 		},
 		{
+			// The CA's own serving certificate is TLS, and it is the one way to
+			// get TLS with neither tls_cert nor tls_key set -- the server
+			// refuses that combination. A chart that did not know it would
+			// `fail` this install for having no certificate, and would set the
+			// probes to HTTP against an HTTPS listener.
+			name: "a self-provisioned serving certificate is TLS on its own",
+			sets: []string{"serviceAccount.create=true"},
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      files: {cert: /srv/tls.crt, key: /srv/tls.key}
+`,
+			wants: []string{"kind: Deployment", "scheme: HTTPS"},
+			// A file store needs no API access at all, which is the systemd
+			// shape: no Role, and no token the CA has no use for.
+			notWants: []string{
+				"kind: Role\n", "scheme: HTTP\n", "automountServiceAccountToken: true",
+			},
+		},
+		{
+			// The serving certificate is a second source of Secret targets, and
+			// the Role must cover it. Without this the CA is refused by RBAC
+			// when it reads or writes the Secret holding the certificate its
+			// own listener presents -- which is fatal for that certificate
+			// rather than retried on the next pass.
+			name: "a serving certificate in a Secret renders the narrowed Role",
+			sets: []string{"serviceAccount.create=true"},
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      secret:
+        name: openvox-ca-serving-tls
+`,
+			wants: []string{
+				"name: openvox-ca-managed-certs",
+				"- openvox-ca-serving-tls",
+				`verbs: ["get", "patch"]`,
+				"automountServiceAccountToken: true",
+			},
+			notWants: []string{"kind: ClusterRole"},
+		},
+		{
+			// Both blocks at once, into one Role in one namespace. They are
+			// separate configuration and the same grant, so a render that
+			// emitted the Role twice, or dropped one of the two names, would
+			// be wrong in a way neither single-block case can see.
+			name: "serving_cert and managed_certs share one Role when they share a namespace",
+			sets: []string{"serviceAccount.create=true"},
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      secret: {name: openvox-ca-serving-tls}
+  managed_certs:
+    - certname: puppetserver.example.com
+      names: [puppetserver]
+      renew_before: 720h
+      store:
+        secret: {name: puppetserver-tls}
+`,
+			// Anchored as one contiguous resourceNames list rather than as two
+			// separate substrings, which is the stronger claim and the one that
+			// matters: both names resolve to the release namespace, so they
+			// belong to *one* rule in one Role. Two Roles, or two rules, would
+			// satisfy a pair of independent substring assertions.
+			wants: []string{
+				"    resourceNames:\n      - openvox-ca-serving-tls\n      - puppetserver-tls\n",
+			},
+		},
+		{
 			// A managed certificate's Role comes from the configuration, not
 			// from values: the entry names its own Secret and namespace,
 			// because a component's Secret lives with the component rather

@@ -175,6 +175,16 @@ managed_cert_interval_sec: 0           # 0 = built-in default (15m)
 # Kubernetes Secret or a local file pair. See "Managed certificates" below —
 # including what it means for the store holding OpenVox Server's key.
 managed_certs: []
+
+# The certificate the CA's own listener presents, issued and renewed by the CA
+# itself instead of being supplied through tls_cert/tls_key. Absent by default,
+# and mutually exclusive with that pair. See "The CA's own serving certificate".
+# serving_cert:
+#   certname: ca.example.com
+#   names: [ca.example.com]
+#   renew_before: 720h
+#   store:
+#     files: {cert: /var/lib/openvox-ca/serving/tls.crt, key: /var/lib/openvox-ca/serving/tls.key}
 ```
 
 ## Environment variables
@@ -1435,6 +1445,157 @@ who missed that line finds it as a second row under one certname:
 ```
 openvox-ca-ctl revoke --serial <hex>
 ```
+
+## The CA's own serving certificate
+
+`serving_cert` makes the CA issue and renew the certificate its own listener
+presents, instead of being handed one through `tls_cert` / `tls_key`.
+
+It exists because the CA cannot otherwise issue that certificate at all. That is
+fine when cert-manager or an operator supplies one, and impossible when the CA
+key is held at a provider: cert-manager cannot act as a CA issuer without the
+key, and `openvox-ca-ctl generate` needs an admin certificate that does not
+exist until the CA is already serving. A deployment with `ca_key_provider:
+openbao` or an external signer has that deadlock, whether it runs as a systemd
+unit or in a pod.
+
+```yaml
+serving_cert:
+  certname: ca.example.com
+  names: [ca.example.com, puppet]
+  ttl: 2160h
+  renew_before: 720h
+  store:
+    files:
+      cert: /var/lib/openvox-ca/serving/tls.crt
+      key: /var/lib/openvox-ca/serving/tls.key
+      ca: /var/lib/openvox-ca/serving/ca.crt
+```
+
+**Every key is the one a `managed_certs` entry takes**, with the same meanings
+and the same inheritance — `certname`, `names`, `ip_addresses`,
+`email_addresses`, `uris`, `usages`, `ttl`, `renew_before`, `revoke_after`,
+`key_algo` / `key_size`, `reuse_key`, and the same `store` block with its
+`secret` and `files` flavours. See [The certificate](#the-certificate) and [The
+store](#the-store); nothing there is spelled differently here.
+
+`serving_cert` holds exactly one certificate rather than a list, because the CA
+has one listener, so its refusals name `serving_cert` with no index.
+
+### Either store, chosen explicitly
+
+The CA runs as a systemd unit or in a container, and *that* — not where the
+components it serves run — decides where its own serving material belongs. A
+systemd deployment wants a local `cert` / `key` pair; a pod wants a Secret.
+
+Both work, and the choice is configuration rather than something the CA infers.
+A CA that guessed it was in Kubernetes would surprise anybody running it in a
+container for their own reasons, so there is no arrangement of these keys that
+leaves it to guess: exactly one of `store.secret` and `store.files` is set.
+
+> **A file store on an ephemeral container filesystem is a trap.** The material
+> is lost at every restart, so the CA issues a fresh serving certificate each
+> time and supersedes the previous one — accumulating CRL entries for
+> certificates nothing ever presented. That is a legitimate choice, and it
+> should be a choice: put the file pair on a volume that survives a restart, or
+> use a Secret store. The CA logs a line whenever it issues into a store that
+> held nothing, which is what makes the accident visible.
+
+### It is renewed without a restart
+
+The listener consults a holder on every handshake, so a renewal takes effect
+with no listener rebuild and no restart. A connection already established keeps
+the certificate it negotiated with; the next handshake gets the new one.
+
+Renewal is the ordinary reconcile pass — the same loop, on the same
+`managed_cert_interval_sec` timer, making the same decision. A renewal performed
+by another replica is picked up the same way: the pass reads the store, finds
+the peer's certificate current, and installs it.
+
+`SIGHUP` does nothing for this certificate, and needs to do nothing: there is no
+configured path to re-read it from, and the reconcile loop already owns when it
+changes. `tls_cert` / `tls_key` keep their SIGHUP behaviour unchanged.
+
+### Startup failure is fatal, unlike a component certificate's
+
+A `managed_certs` entry whose store is unreachable is logged and retried on the
+next pass, because a component certificate that appears a quarter of an hour
+late is a delay rather than an outage. The serving certificate is not like that:
+the listener has nothing to present, so the CA refuses to come up rather than
+binding and failing every handshake.
+
+The message says which store failed and why, because the two stores fail
+differently — a missing directory or an unreadable file is one thing; an
+unreachable API server, a missing RBAC grant, or a service account without `get`
+on that Secret is another.
+
+What is **not** fatal is a renewal that did not happen. If the store holds a
+usable certificate the CA can still serve, a failed pass leaves it in place and
+the loop retries; refusing to start there would turn a recoverable failure into
+an outage.
+
+### It is a client credential by default
+
+The serving certificate takes `serverAuth` **and** `clientAuth` — the pair every
+certificate this CA issues — and an operator who knows they do not need the
+second can set `usages: [serverAuth]`.
+
+That is the opposite of the least-privilege instinct, and deliberate. Running
+`openvox-ca` and OpenVox Server on one host sharing one serving certificate is a
+normal deployment: the CA needs `serverAuth`, the Server needs `clientAuth`
+because it talks to OpenVoxDB, and `openvox-ca-ctl` and the `puppetserver` CLI
+authenticate with it. A `serverAuth`-only default would break that setup in a
+way that is hard to read — the listener works, and something else fails later.
+
+> **SECURITY.** `clientAuth` is what lets a certificate be *presented* as a
+> client; listing a certname in `puppet_server` is what grants it administrative
+> authority. Only the two together make an admin credential, and the listing is
+> the deliberate act — a `clientAuth` certificate for a name nobody has listed
+> authenticates as nobody in particular.
+>
+> So **adding the CA's own certname to `puppet_server` makes its serving store
+> an admin credential**: whoever can read that file pair or that Secret can
+> administer this CA. The CA says so once at startup. Set `usages:
+> [serverAuth]` if this CA's own name should not be an administrator.
+
+Narrowing takes effect at the next reconcile pass rather than at natural expiry,
+because the CA treats a usage mismatch as grounds to reissue — the setting
+cannot be quietly decorative.
+
+**Narrowing away `serverAuth` is refused at startup.** `usages: [clientAuth]`
+would produce a certificate the listener presents quite happily and every client
+that verifies it rejects, which is a failure that surfaces somewhere else
+entirely.
+
+### Mutually exclusive with `tls_cert` / `tls_key`
+
+Setting `serving_cert` alongside either of those is refused at startup.
+
+Self-provisioning never writes to the paths they name, and cannot be made to:
+the issuance decision reissues whenever the stored certificate is not this CA's,
+so aiming it at an operator-supplied path would clobber a certificate from
+another CA. Those two paths are also reserved against `managed_certs`, and so is
+the serving store's own file pair — a component certificate written over the one
+the CA is presenting would replace the listener's certificate, and then the two
+would replace each other on every pass for ever.
+
+Enabling `serving_cert` enables TLS on its own. A CA with neither it nor
+`tls_cert` / `tls_key` is still refused on a non-loopback address unless
+`no_tls_required` is set.
+
+### What this deliberately does not do
+
+- **It never stores the serving key in the backing store.** That store holds
+  exactly one private key, the CA's own, and only under `ca_key_provider: file`.
+  A cluster-wide serving pair also forced replicas to converge on a union of
+  every replica's names, with a dedicated lock; a per-replica store of its own
+  removes all three premises.
+- **There is no option to encrypt the serving key.** `crypto/tls` accepts any
+  PEM block whose type ends `" PRIVATE KEY"`, so an `ENCRYPTED PRIVATE KEY`
+  block passes its type check and then fails to parse — fatally, since a
+  serving-certificate failure at startup is. If an encrypted key reaches the
+  store by some other route, the CA says so rather than reporting a parse error
+  that mentions nothing about encryption.
 
 ## Trusting client certificates from another CA
 

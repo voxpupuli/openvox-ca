@@ -85,6 +85,15 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 		// is the defect the whole sweep exists to catch.
 		"kubernetes_export.targets[].cert_key": "a data key inside the exported object",
 		"kubernetes_export.targets[].crl_key":  "a data key inside the exported object",
+
+		// A managed certificate's own store. These are the paths being checked
+		// *against* the CA's own, not paths the CA owns -- reserving them would
+		// have every entry refuse itself. The direction that matters is
+		// covered: caOwnedPaths reserves what the CA owns, and
+		// CheckReservedPaths refuses an entry that lands on any of it.
+		"managed_certs[].store.files.ca":   "the entry's own store, checked against this list rather than on it",
+		"managed_certs[].store.files.cert": "the entry's own store, checked against this list rather than on it",
+		"managed_certs[].store.files.key":  "the entry's own store, checked against this list rather than on it",
 	}
 
 	// pathShaped decides which YAML keys name a filesystem location.
@@ -108,7 +117,7 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 		// ending is its leaf's ending -- and a version of this that did so was
 		// removed when a mutation proved no spec could tell the two apart.
 		for _, suffix := range []string{
-			"file", "dir", "path", "_config", "dsn", "cert", "key", "keyfile",
+			"file", "dir", "path", "_config", "dsn", "cert", "key", "keyfile", "ca",
 		} {
 			if strings.HasSuffix(key, suffix) {
 				return true
@@ -151,6 +160,27 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 			switch f.Type.Kind() {
 			case reflect.Struct:
 				sweep(sv.Field(i), prefix+name+".", yield)
+			case reflect.Pointer:
+				if f.Type.Elem().Kind() != reflect.Struct {
+					continue
+				}
+				// Through the real pointee when there is one, so a fixture that
+				// sets the block gets its fields written and caOwnedPaths sees
+				// the values; through a fresh one when it is nil, so the *type*
+				// is audited whether or not any fixture configures it.
+				//
+				// A nil block whose fields are therefore unsettable behaves
+				// exactly like a list element, and for the same reason: what is
+				// audited is which path settings the shape can have, not how
+				// many someone configured. serving_cert is the case that needs
+				// the non-nil arm -- its file store is reserved by caOwnedPaths
+				// only when it is configured, so a sweep that always used a
+				// scratch value would report it as unreserved.
+				target := sv.Field(i)
+				if target.IsNil() {
+					target = reflect.New(f.Type.Elem())
+				}
+				sweep(target.Elem(), prefix+name+".", yield)
 			case reflect.Slice:
 				if f.Type.Elem().Kind() == reflect.Struct {
 					sweep(reflect.New(f.Type.Elem()).Elem(), prefix+name+"[].", yield)
@@ -212,6 +242,18 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 			File:    "/spec/client_ca/file",
 			CRLFile: "/spec/client_ca/crl_file",
 		}}
+		// The CA's own serving certificate, configured into a file store,
+		// because caOwnedPaths reserves those three paths only when it is. Set
+		// before the fields are filled in below, so the sweep descends into
+		// this block rather than a scratch copy of it.
+		cfg.ServingCert = &certstore.Entry{
+			Store: certstore.StoreConfig{Files: &certstore.FilesConfig{}},
+		}
+		for key, fv := range pathKeys(cfg) {
+			if strings.HasPrefix(key, "serving_cert.") {
+				fv.SetString("/spec/" + strings.ReplaceAll(key, ".", "/"))
+			}
+		}
 
 		// The sweep must have found something to judge, and specifically the
 		// setting whose omission this spec exists for. A reflection walk that
@@ -226,6 +268,9 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 		Expect(fields).To(HaveKey("client_ca[].file"),
 			"precondition: the sweep must descend into list blocks, or a path "+
 				"setting inside one needs no recorded decision")
+		Expect(fields).To(HaveKey("serving_cert.store.files.cert"),
+			"precondition: the sweep must descend into pointer blocks, or the "+
+				"CA's own serving pair needs no recorded decision")
 
 		reserved, err := caOwnedPaths(cfg, "/spec/cadir", "/spec/config.yaml")
 		Expect(err).NotTo(HaveOccurred())
@@ -300,6 +345,13 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 		cfg.ClientCA = []config.ClientCA{{
 			Name: "partner", File: "/spec/anchor.pem", CRLFile: "/spec/anchor-crl.pem",
 		}}
+		cfg.ServingCert = &certstore.Entry{
+			Store: certstore.StoreConfig{Files: &certstore.FilesConfig{
+				Cert: "/spec/serving/tls.crt",
+				Key:  "/spec/serving/tls.key",
+				CA:   "/spec/serving/ca.crt",
+			}},
+		}
 
 		reserved, err := caOwnedPaths(cfg, "/spec/cadir", "/spec/config.yaml")
 		Expect(err).NotTo(HaveOccurred())

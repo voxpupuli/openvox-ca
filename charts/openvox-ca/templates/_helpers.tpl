@@ -357,6 +357,18 @@ unknown
 {{- $secrets = append $secrets (dict "namespace" (default $namespace (dig "namespace" "" $secret)) "name" .) -}}
 {{- end -}}
 {{- end -}}
+{{/*
+  And the CA's own serving certificate, which is a second source of the same
+  thing: one entry, the same store block, the same two flavours. It needs the
+  same grant for the same reason, and a Role that covered managed_certs alone
+  would leave a self-provisioning CA unable to read or write the Secret holding
+  the certificate its listener presents -- refused by RBAC at startup, which is
+  fatal for that certificate rather than retried.
+*/}}
+{{- $serving := dig "serving_cert" "store" "secret" dict $config -}}
+{{- with (dig "name" "" $serving) -}}
+{{- $secrets = append $secrets (dict "namespace" (default $namespace (dig "namespace" "" $serving)) "name" .) -}}
+{{- end -}}
 {{- $secrets | toJson -}}
 {{- end -}}
 {{- end -}}
@@ -476,7 +488,8 @@ dict-taking helpers.
 rules:
   # create cannot be restricted by resourceNames -- the object has no name yet
   # at admission time -- but get and patch can, so reading and overwriting an
-  # *existing* Secret is held to the ones config.managed_certs names.
+  # *existing* Secret is held to the ones config.managed_certs and
+  # config.serving_cert name.
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["create"]
@@ -626,10 +639,12 @@ false
 {{/*
 Whether the server will serve HTTPS.
 
-It does so exactly when a certificate and a key are both configured — on any
-layer. The config file is the one the chart renders; environment variables
-outrank it, so PUPPET_CA_TLS_CERT/KEY set through env or extraEnv count too,
-and are how someone feeds the certificate paths in from a Secret.
+It does so when a certificate and a key are both configured — on any layer —
+or when the CA issues its own. The config file is the one the chart renders;
+environment variables outrank it, so PUPPET_CA_TLS_CERT/KEY set through env or
+extraEnv count too, and are how someone feeds the certificate paths in from a
+Secret. config.serving_cert is the third way, and is mutually exclusive with
+the other two: the server refuses to start with both.
 
 When the configuration is not fully known this answers "true": HTTPS is the
 normal case, and it is the answer that neither blocks a correct install nor
@@ -640,6 +655,17 @@ makes the probes fail on one.
 true
 {{- else -}}
 {{- $config := include "openvox-ca.config" . | fromYaml -}}
+{{/*
+  A self-provisioned serving certificate is TLS too, and is the one way to get
+  it with neither tls_cert nor tls_key set -- the server refuses that
+  combination. Answered first, and on the block's presence rather than its
+  contents, because the server treats an empty serving_cert as a configuration
+  error rather than as an absence; a chart that read it as "off" would refuse
+  the install for having no certificate and hide the real message.
+*/}}
+{{- if hasKey $config "serving_cert" -}}
+true
+{{- else -}}
 {{- $cert := dig "tls_cert" "" $config -}}
 {{- $key := dig "tls_key" "" $config -}}
 {{/*
@@ -678,6 +704,7 @@ true
 true
 {{- else -}}
 false
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -790,7 +817,7 @@ CrashLoopBackOff or a Service that silently routes nowhere.
 {{- $host := dig "host" "" $config | toString -}}
 {{- $loopback := or (hasPrefix "127." $host) (eq $host "localhost") -}}
 {{- if and (ne (include "openvox-ca.tlsConfigured" .) "true") (not (dig "no_tls_required" false $config)) (not $loopback) -}}
-{{- fail (printf "openvox-ca will refuse to start: no server TLS certificate is configured and the listen address (%s) is not loopback, which the server rejects as vulnerable to certificate injection.\n\nSet one of:\n  tls.existingSecret       a kubernetes.io/tls Secret holding the server certificate (recommended; Puppet agents require HTTPS)\n  config.tls_cert/tls_key  paths to a certificate you mount yourself\n  env/extraEnv             PUPPET_CA_TLS_CERT and PUPPET_CA_TLS_KEY, to feed those paths in from a Secret\n  config.no_tls_required   true, only behind a trusted TLS proxy that re-originates TLS\n  listen.host              127.0.0.1 or localhost, for a sidecar-only deployment" $host) -}}
+{{- fail (printf "openvox-ca will refuse to start: no server TLS certificate is configured and the listen address (%s) is not loopback, which the server rejects as vulnerable to certificate injection.\n\nSet one of:\n  tls.existingSecret       a kubernetes.io/tls Secret holding the server certificate (recommended; Puppet agents require HTTPS)\n  config.tls_cert/tls_key  paths to a certificate you mount yourself\n  config.serving_cert      let the CA issue and renew its own, into a Secret or a file pair\n  env/extraEnv             PUPPET_CA_TLS_CERT and PUPPET_CA_TLS_KEY, to feed those paths in from a Secret\n  config.no_tls_required   true, only behind a trusted TLS proxy that re-originates TLS\n  listen.host              127.0.0.1 or localhost, for a sidecar-only deployment" $host) -}}
 {{- end -}}
 {{- end -}}
 

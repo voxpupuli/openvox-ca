@@ -84,6 +84,16 @@ commonAnnotations: {}
 #         renew_before: 720h
 #         store:
 #           secret: {name: puppetserver-tls, namespace: openvox}
+#     # The certificate the CA's own listener presents, issued and renewed by
+#     # the CA itself. Absent by default, and mutually exclusive with
+#     # tls.existingSecret and config.tls_cert/tls_key -- setting it IS how this
+#     # deployment gets TLS. Same keys and same store block as an entry above.
+#     serving_cert:
+#       certname: ca.example.com
+#       names: [ca.example.com]
+#       renew_before: 720h
+#       store:
+#         secret: {name: openvox-ca-serving-tls}
 config: {}
 
 # Use a ConfigMap you manage yourself instead of one rendered from `config`.
