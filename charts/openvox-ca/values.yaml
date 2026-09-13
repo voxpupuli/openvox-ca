@@ -183,7 +183,14 @@ autosign:
 
 # -- TLS and CA material -------------------------------------------------------
 
-# Server TLS certificate for the HTTPS listener. Typically a kubernetes.io/tls
+# Server TLS certificate for the HTTPS listener, supplied by you.
+#
+# config.serving_cert is the alternative: the CA issues and renews this
+# certificate itself, which removes the renewal problem described below
+# entirely — no signal, no restart. The two are mutually exclusive and the
+# chart refuses them together at install time.
+#
+# Typically a kubernetes.io/tls
 # Secret issued by cert-manager. When set, the Secret is mounted read-only and
 # tls_cert/tls_key are pointed at it.
 #

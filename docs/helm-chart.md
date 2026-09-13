@@ -175,7 +175,7 @@ The alternatives, in the same message:
 | Setting | When |
 | --- | --- |
 | `config.tls_cert` / `config.tls_key` | A certificate you mount yourself, via `extraVolumes` |
-| `config.serving_cert` | The CA issues and renews its own, into a Secret or a file pair. The way out of the bootstrap deadlock when the CA key is held at a provider, and the only route that also renews it unattended. Mutually exclusive with every route that sets `tls_cert`/`tls_key` — the two rows around this one, and `tls.existingSecret` — and the chart refuses the combination at install time. A file store must live under `persistence.mountPath`, outside `config.cadir` and at the mount root — all three checked at install time; see [Managed certificates](#managed-certificates) |
+| `config.serving_cert` | The CA issues and renews its own, into a Secret or a file pair. The way out of the bootstrap deadlock when the CA key is held at a provider, and the only route that also renews it unattended. Mutually exclusive with every route that sets `tls_cert`/`tls_key` — the two rows around this one, and `tls.existingSecret` — and the chart refuses the combination at install time. A file store must live under `persistence.mountPath` and outside `config.cadir` (both refused at install), in a directory that already exists (discovered at startup, and fatal) — see [Managed certificates](#managed-certificates) |
 | `env` / `extraEnv` — `PUPPET_CA_TLS_CERT` and `PUPPET_CA_TLS_KEY` | The paths come from a Secret at runtime. Environment variables outrank the config file, and the chart counts them |
 | `config.no_tls_required: true` | Only behind a proxy that terminates TLS and re-originates it to the pod. Client certificates do not survive that, so mTLS-authenticated endpoints become unreachable |
 | `listen.host: 127.0.0.1` or `localhost` | A sidecar-only deployment. Those two spellings and nothing else: the server tests `net.ParseIP(host).IsLoopback()`, which rejects the bracketed `[::1]`, and it builds its listen address as `host + ":" + port`, which turns a bare `::1` into the unparseable `::1:8140` |
@@ -423,7 +423,8 @@ The annotation is controller-specific: HAProxy uses
 `nginx.ingress.kubernetes.io/ssl-passthrough` (and needs the controller started
 with `--enable-ssl-passthrough`). Note that `ingress.tls` is *not* how you
 serve TLS here — the serving certificate openvox-ca presents does that, from
-the `tls` Secret or from `config.tls_cert`/`config.tls_key`. Only set it if
+the `tls` Secret, from `config.tls_cert`/`config.tls_key`, or from
+`config.serving_cert` where the CA issues its own. Only set it if
 your controller needs a certificate for SNI routing.
 
 If you deliberately terminate TLS at the edge, set `config.no_tls_required:
@@ -702,15 +703,22 @@ fit — it needs no volume, and something else in the cluster can consume it.
 
 **That paragraph is about `config.managed_certs` only.** A
 `config.serving_cert` file store is checked at install time and has to satisfy
-three rules the chart enforces: under `persistence.mountPath`, because that is
-the volume it can see; outside `config.cadir`, which the CA reserves against
-every file store; and at the mount root, because only the mount point is
-guaranteed to exist on a fresh volume and the CA will not create a directory.
-The chart sets `cadir` to the mount by default, so the first two collide until
-`config.cadir` is narrowed — `config.cadir: /var/lib/puppet-ca/ca` with the pair
-at `/var/lib/puppet-ca/tls.crt`. Unlike a managed certificate, whose write
-failure is logged and retried, an unwritable serving store stops the CA
-starting, which is why these are refused at install rather than discovered.
+three rules — and the chart can enforce only the first two.
+
+1. **Under `persistence.mountPath`**, which is the volume it can see. Refused at
+   install.
+2. **Outside `config.cadir`**, which the CA reserves against every file store.
+   Refused at install. The chart sets `cadir` to the mount by default, so the
+   first two collide until `config.cadir` is narrowed.
+3. **In a directory that already exists**, because the CA will not create one.
+   The chart cannot check this — it does not know whether an `initContainer` of
+   yours creates the directory — so it is discovered at startup, and there it is
+   fatal rather than retried.
+
+The layout that satisfies all three with no `initContainer` is
+`config.cadir: /var/lib/puppet-ca/ca` with the pair at the mount root,
+`/var/lib/puppet-ca/tls.crt`, since only the mount point is guaranteed to exist
+on a fresh volume. A subdirectory works too if something creates it first.
 
 ```yaml
 managedCerts:

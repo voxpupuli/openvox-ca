@@ -97,6 +97,61 @@ var _ = Describe("the serve command's serving-certificate wiring", func() {
 				"instead of refusing to start")
 	})
 
+	// Position, not only presence. The call sits between myCA.Init and the
+	// listener setup, and both directions of moving it are silent in CI:
+	// above Init, ReconcileManaged returns ErrNotInitialized for every entry
+	// and every self-provisioning deployment refuses to start; below ServeTLS,
+	// the listener binds with an empty holder and every handshake fails with
+	// "no serving certificate has been issued yet" -- which is the failure the
+	// presence spec above says it exists to prevent.
+	It("provisions after the CA is initialised and before the listener serves", func() {
+		// Offsets rather than statement indices, because the three calls are
+		// not siblings in one block: Init and provisionServingCert are, but
+		// ServeTLS is nested inside the serve-mode branch. Source position is
+		// the one ordering that holds across all three.
+		// The FIRST occurrence of each. myCA.Init is called twice in main.go --
+		// once by the serve command and once by an offline subcommand further
+		// down -- and taking the last match put Init after the provisioning
+		// call and failed this spec against correct code. The serve command is
+		// the first of the two, and provisionServingCert and ServeTLS appear
+		// only there, so first-match is the comparison that means what this
+		// spec claims.
+		pos := func(name string) int {
+			at := 0
+			ast.Inspect(file, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				var got string
+				switch fn := call.Fun.(type) {
+				case *ast.Ident:
+					got = fn.Name
+				case *ast.SelectorExpr:
+					got = fn.Sel.Name
+				}
+				if got == name && at == 0 {
+					at = int(call.Pos())
+				}
+				return true
+			})
+			return at
+		}
+
+		init, provision, serve := pos("Init"), pos("provisionServingCert"), pos("ServeTLS")
+		Expect(init).To(BeNumerically(">", 0), "precondition: main.go must call myCA.Init")
+		Expect(provision).To(BeNumerically(">", 0), "precondition: main.go must call provisionServingCert")
+		Expect(serve).To(BeNumerically(">", 0), "precondition: main.go must call ServeTLS")
+
+		Expect(provision).To(BeNumerically(">", init),
+			"main.go provisions the serving certificate before the CA is initialised, so "+
+				"every entry's reconcile returns ErrNotInitialized and a self-provisioning "+
+				"CA refuses to start")
+		Expect(provision).To(BeNumerically("<", serve),
+			"main.go provisions the serving certificate after the listener is serving, so "+
+				"the listener binds with an empty holder and every handshake fails")
+	})
+
 	It("puts the serving entry into the reconcile set, ahead of the rest", func() {
 		// Two claims, and the ordering is not cosmetic. ReconcileManaged walks
 		// the slice in order and provisionServingCert bounds the whole startup

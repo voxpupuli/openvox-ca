@@ -1120,8 +1120,11 @@ mean either unit.
 **`certname` goes through the CA's ordinary name grammar**, so a bad name is
 refused at startup rather than discovered at issuance, and each name occupies
 the ordinary inventory slot for that subject. A component certificate and an
-agent certificate therefore cannot share a certname, and neither can two
-managed certificates.
+agent certificate therefore cannot share a certname, neither can two managed
+certificates, and neither can a managed certificate and
+[`serving_cert`](#the-cas-own-serving-certificate) — all three are refused at
+startup, because two entries for one subject would replace each other's
+certificate on every pass.
 
 **A certificate can be named four ways**, and at least one name of some kind is
 required. `names` carries the DNS entries, and `ip_addresses`,
@@ -1287,10 +1290,12 @@ Kubernetes.
 | `ca` | no chain is written |
 
 This exists for a reason rather than as a fallback. A CA using an external
-signer or `ca_key_provider: openbao` cannot mint its own serving certificate,
-because `openvox-ca-ctl generate` needs an admin certificate that does not exist
-until the CA is already serving — and that applies to a systemd unit as much as
-to a pod.
+signer or `ca_key_provider: openbao` cannot mint its own serving certificate
+*through `openvox-ca-ctl generate`*, which needs an admin certificate that does
+not exist until the CA is already serving — and that applies to a systemd unit
+as much as to a pod. [The CA's own serving
+certificate](#the-cas-own-serving-certificate) is the route that does work
+there, and it uses this same store.
 
 Two things a file store cannot do that a Secret store can, stated rather than
 quietly worked around:
@@ -1360,7 +1365,7 @@ the certificates can undo. The server refuses to start when a `cert`, `key` or
 | `cadir` | the whole tree: the CA key and certificate, the CRL, and the filesystem and SQLite backends' state |
 | `ca_cert_file`, `ca_key_file` | the CA's own certificate and private key, wherever a local-file override puts them |
 | `tls_cert`, `tls_key` | the pair the CA presents on its own listener |
-| `serving_cert.store.files.cert`, `.key` | the pair the CA issues for its own listener, when it self-provisions into files. Reserved only while `serving_cert` uses a file store. Its `ca` chain file is deliberately **not** reserved, for the same reason two managed entries may share one: every entry writes the same chain from the same source and none reads it back, so a shared chain file is the ordinary shared-host layout |
+| `serving_cert.store.files.cert`, `.key` | the pair the CA issues for its own listener, when it self-provisions into files. Reserved only while `serving_cert` uses a file store. Its `ca` chain file is deliberately **not** reserved, for the same reason two managed entries may share one: every entry writes the same chain from the same source and none reads it back, so a shared chain file is the ordinary shared-host layout. Sharing it with a `managed_certs` entry's own `ca` is allowed; pointing it at that entry's `cert` or `key` is refused at startup, because the chain would overwrite the component's material on every issuance |
 | `ca_key_passphrase_file` | what unlocks the CA key |
 | `crl_chain_file` | the upstream CRL bundle the CA re-reads and republishes |
 | `logfile` | where the CA writes its log |
@@ -1509,9 +1514,12 @@ serving_cert:
 > The difference from a component certificate is the consequence throughout: an
 > unwritable component store is logged and retried on the next pass, while an
 > unwritable serving store means the CA refuses to start. Under the Helm chart
-> the equivalent of rule 1 is `persistence.mountPath`, and the chart refuses all
-> three at install time — which is why its own examples narrow `config.cadir`
-> and keep the pair at the mount root.
+> the equivalent of rule 1 is `persistence.mountPath`. The chart refuses rules 1
+> and 2 at install time; it cannot check rule 3, because it does not know
+> whether an `initContainer` of yours creates the directory, so that one is
+> discovered at startup like it is here. Its own examples narrow `config.cadir`
+> and keep the pair at the mount root, which satisfies all three with nothing
+> extra to create.
 
 **Every key is the one a `managed_certs` entry takes**, with the same meanings
 and the same inheritance — `certname`, `names`, `ip_addresses`,
@@ -1613,6 +1621,26 @@ cannot be quietly decorative.
 would produce a certificate the listener presents quite happily and every client
 that verifies it rejects, which is a failure that surfaces somewhere else
 entirely.
+
+### It may not collide with a managed certificate
+
+`serving_cert` and `managed_certs` feed one reconcile set, so three collisions
+are refused at startup rather than discovered as two certificates replacing each
+other for ever:
+
+- **The same certname.** There is one inventory slot per subject.
+- **The same Secret.** Every managed certificate applies under one field
+  manager, so neither write ever raises a conflict and the two would overwrite
+  each other's material on every pass. An omitted namespace resolves to the CA
+  pod's own, which is not known before a Kubernetes client exists — so a pair
+  that omits it on either side is refused rather than risked, and the message
+  says so. Spell both namespaces out if they genuinely differ.
+- **A chain file over material.** Sharing `store.files.ca` with a managed
+  entry's own `ca` is the ordinary shared-host layout and is allowed; pointing
+  it at that entry's `cert` or `key` is not.
+
+The file pair itself needs no rule here: `serving_cert.store.files.cert` and
+`.key` are reserved against `managed_certs` like the CA's own files.
 
 ### Mutually exclusive with `tls_cert` / `tls_key`
 

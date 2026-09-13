@@ -373,7 +373,7 @@ unknown
 */}}
 {{- $serving := dict -}}
 {{- if eq (include "openvox-ca.servingCertConfigured" .) "true" -}}
-{{- $serving = dig "serving_cert" "store" "secret" dict $config -}}
+{{- $serving = dig "secret" dict (include "openvox-ca.servingCertStore" . | fromJson) -}}
 {{- end -}}
 {{- with (dig "name" "" $serving) -}}
 {{- $secrets = append $secrets (dict "namespace" (default $namespace (dig "namespace" "" $serving)) "name" .) -}}
@@ -675,6 +675,55 @@ false
 {{- end -}}
 
 {{/*
+config.serving_cert's `store` block as a map, or an empty map when it is absent,
+null, or not a map.
+
+sprig's dig walks intermediates with an unchecked type assertion, so
+`dig "serving_cert" "store" "files" dict $config` aborts the whole render with
+"interface conversion: interface {} is nil, not map[string]interface {}" when
+`store:` is written with nothing under it -- which is the state an operator is
+in half way through typing the block. servingCertConfigured was added for
+exactly that hazard one level up and guarded only the top-level key; this is the
+same guard for the level below, so every serving_cert dig goes through one place
+that cannot abort.
+*/}}
+{{- define "openvox-ca.servingCertStore" -}}
+{{- $config := include "openvox-ca.config" . | fromYaml -}}
+{{- $store := dict -}}
+{{- if eq (include "openvox-ca.servingCertConfigured" .) "true" -}}
+{{- $block := index $config "serving_cert" -}}
+{{- if and (hasKey $block "store") (kindIs "map" (index $block "store")) -}}
+{{- $store = index $block "store" -}}
+{{- end -}}
+{{- end -}}
+{{- $store | toJson -}}
+{{- end -}}
+
+{{/*
+Whether config.serving_cert keeps its certificate in a Kubernetes Secret.{{/*
+Whether config.serving_cert keeps its certificate in a Kubernetes Secret.
+
+Distinct from openvox-ca.managedCertSecrets, which answers for both blocks at
+once. Anything whose consequence is specific to the serving certificate has to
+ask this instead: a NOTE saying the CA will not start is true of a serving
+Secret and false of a component one, and the combined list cannot tell them
+apart.
+*/}}
+{{- define "openvox-ca.servingCertUsesSecret" -}}
+{{- if eq (include "openvox-ca.servingCertConfigured" .) "true" -}}
+{{- $config := include "openvox-ca.config" . | fromYaml -}}
+{{- $store := include "openvox-ca.servingCertStore" . | fromJson -}}
+{{- if dig "secret" "name" "" $store -}}
+true
+{{- else -}}
+false
+{{- end -}}
+{{- else -}}
+false
+{{- end -}}
+{{- end -}}
+
+{{/*
 Whether the server will serve HTTPS.
 
 It does so when a certificate and a key are both configured — on any layer —
@@ -880,7 +929,7 @@ CrashLoopBackOff or a Service that silently routes nowhere.
   Unlike a managed_certs file store, whose write failure is logged and retried,
   this one is fatal.
 */ -}}
-{{- $files := dig "serving_cert" "store" "files" dict $config -}}
+{{- $files := dig "files" dict (include "openvox-ca.servingCertStore" . | fromJson) -}}
 {{- $cadir := dig "cadir" "" $config | toString | trimSuffix "/" -}}
 {{- range $field := list "cert" "key" "ca" -}}
 {{- $path := dig $field "" $files | toString | trimSuffix "/" -}}
@@ -1248,7 +1297,7 @@ stays unreadable — drop kubernetesExport.rbac.create and manage the Role yours
 with an explicit resourceNames list.
 {{- end }}
 {{- end }}
-{{- if and (not .Values.managedCerts.rbac.create) (eq (include "openvox-ca.servingCertConfigured" .) "true") (fromJsonArray (include "openvox-ca.managedCertSecrets" .)) }}
+{{- if and (not .Values.managedCerts.rbac.create) (eq (include "openvox-ca.servingCertUsesSecret" .) "true") }}
 
 NOTE: managedCerts.rbac.create is false, so no Role was created — and
 config.serving_cert keeps its certificate in a Secret. openvox-ca will be
