@@ -84,8 +84,8 @@ openvox-ca has a large configuration surface, and the chart deliberately does
   half of a feature (mount the Secret, open the port, create the RBAC) *and*
   set the config keys pointing at whatever they mounted. `managedCerts` is the
   one exception: it creates RBAC and sets nothing, because the certificates it
-  grants access to are declared under `config.managed_certs` rather than in
-  values.
+  grants access to are declared under `config.managed_certs` and
+  `config.serving_cert` rather than in values.
 - **`config` always wins**, with three exceptions. The two are deep-merged with
   your `config` on top — except `port`, `cadir` and `metrics_listen`, which also
   shape a Kubernetes object (the container port and Service, the volume mount,
@@ -175,6 +175,7 @@ The alternatives, in the same message:
 | Setting | When |
 | --- | --- |
 | `config.tls_cert` / `config.tls_key` | A certificate you mount yourself, via `extraVolumes` |
+| `config.serving_cert` | The CA issues and renews its own, into a Secret or a file pair. The way out of the bootstrap deadlock when the CA key is held at a provider, since nothing else can issue that certificate. Mutually exclusive with the two above and with `tls.existingSecret`, all of which set them |
 | `env` / `extraEnv` — `PUPPET_CA_TLS_CERT` and `PUPPET_CA_TLS_KEY` | The paths come from a Secret at runtime. Environment variables outrank the config file, and the chart counts them |
 | `config.no_tls_required: true` | Only behind a proxy that terminates TLS and re-originates it to the pod. Client certificates do not survive that, so mTLS-authenticated endpoints become unreachable |
 | `listen.host: 127.0.0.1` or `localhost` | A sidecar-only deployment. Those two spellings and nothing else: the server tests `net.ParseIP(host).IsLoopback()`, which rejects the bracketed `[::1]`, and it builds its listen address as `host + ":" + port`, which turns a bare `::1` into the unparseable `::1:8140` |
@@ -651,6 +652,7 @@ because it cannot see far enough to rule it out:
 | --- | --- |
 | `kubernetesExport.enabled`, or `config.kubernetes_export.targets` | Export is configured, so the exporter needs the API |
 | `config.managed_certs` with a `store.secret` | A managed certificate is kept in a Secret, so the CA reads and writes it. A file store needs nothing and mounts nothing |
+| `config.serving_cert` with a `store.secret` | The CA's own serving certificate is kept in a Secret, read and written the same way |
 | `config.openbao.auth_method: kubernetes` | The key provider authenticates with the pod's own token |
 | `PUPPET_CA_OPENBAO_AUTH_METHOD: kubernetes` in `env` or `extraEnv` | Environment variables outrank the config file, so the chart reads those two values too. An empty value is ignored, as the server ignores it |
 | `--openbao-auth-method=kubernetes` in `extraArgs` | Arguments outrank both, and `extraArgs` is appended to the argv the chart builds, so it is readable |
@@ -673,6 +675,15 @@ rather than repeated in values: one Role and RoleBinding per namespace some
 entry's Secret lives in, granting `get` and `patch` narrowed by `resourceNames`
 plus an unnarrowable `create`. That is a separate Role from the export's,
 because the export needs neither `get` nor those namespaces.
+
+**`config.serving_cert` feeds the same Role.** The CA's own serving certificate
+is a second source of Secret targets — see [the CA's own serving
+certificate](configuration.md#the-cas-own-serving-certificate) — and it needs
+the same grant for the same reason, so its Secret joins the list rather than
+getting a Role of its own. Two entries whose Secrets share a namespace share one
+Role. The difference is what a refusal costs: a component certificate the CA
+cannot write is retried on the next pass, while the serving certificate is what
+the listener presents, so the CA does not start without it.
 
 **Those namespaces must already exist.** They come out of `config.managed_certs`
 rather than from a values key, so the chart has no list to create them from and
@@ -1279,7 +1290,8 @@ $ kubectl get secret,configmap -A -l app.kubernetes.io/managed-by=openvox-ca
 > is uninstalled nothing reissues them. By this page's own reckoning the OpenVox
 > Server one is a CA admin credential.
 
-Delete by namespace, and exclude anything `config.managed_certs` names — either
+Delete by namespace, and exclude anything `config.managed_certs` or
+`config.serving_cert` names — either
 by naming the exported objects explicitly, or by giving the export targets a
 label of your own under `kubernetesExport.targets[].metadata.labels` and
 selecting on that:
