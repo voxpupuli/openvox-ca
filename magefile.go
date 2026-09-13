@@ -3456,6 +3456,39 @@ config:
 			wantErr: "extraEnv",
 		},
 		{
+			// The highest-precedence route of the six, and the last one without
+			// a case. extraArgs is appended to the argv the chart builds, so it
+			// outranks the file and the environment both.
+			name: "config.serving_cert alongside --tls-cert in extraArgs",
+			sets: []string{"extraArgs[0]=--tls-cert=/etc/tls.crt"},
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      secret: {name: ca-tls}
+`,
+			wantErr: "extraArgs",
+		},
+		{
+			// The separated spelling, which is what makes the prefix match
+			// rather than an equality match the right test.
+			name: "config.serving_cert alongside a separated --tls-key in extraArgs",
+			sets: []string{"extraArgs[0]=--tls-key", "extraArgs[1]=/etc/tls.key"},
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      secret: {name: ca-tls}
+`,
+			wantErr: "extraArgs",
+		},
+		{
 			// tls_key alone: it does not enable TLS by itself, but it still
 			// names a path self-provisioning must never be read as writing to.
 			name: "config.serving_cert alongside config.tls_key alone",

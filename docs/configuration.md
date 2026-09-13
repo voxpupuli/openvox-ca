@@ -185,7 +185,8 @@ managed_certs: []
 #   names: [ca.example.com]
 #   renew_before: 720h
 #   store:
-#     files: {cert: /var/lib/puppet-ca/serving/tls.crt, key: /var/lib/puppet-ca/serving/tls.key}
+#     files: {cert: /var/lib/puppet-ca/serving/tls.crt, key:
+/var/lib/puppet-ca/serving/tls.key}
 ```
 
 ## Environment variables
@@ -2204,6 +2205,15 @@ Withdrawing admin access has a second caveat: a certificate carrying the `pp_cli
 Everything else — the listen address, the storage backend, CA key custody, CA properties, which autosign configuration is in use, and every `client_ca` field except `crl_file` — requires a restart.
 
 Two file-backed inputs are consulted live, with no signal needed at all: the autosign allowlist or executable is read on every CSR, and the OpenBao AppRole `role_id`/`secret_id` files are read on every login (see [OpenBao Transit-engine CA key](openbao-transit.md)). Editing those takes effect on the next request; only the settings naming them are fixed at startup.
+
+**A self-provisioned serving certificate is the third thing that changes without
+a restart, and it needs no signal either.** With
+[`serving_cert`](#the-cas-own-serving-certificate) the certificate is renewed by
+the reconcile loop and installed on the listener from there, so `SIGHUP` is a
+no-op for it and the table above does not apply — `tls_cert` / `tls_key` keep
+their reload behaviour unchanged, and the two are mutually exclusive.
+Connections in flight keep the certificate they negotiated with, exactly as on a
+reload.
 
 A reload that fails (an unreadable keypair, a missing allow-list file) is logged and leaves the previous configuration in place; the server keeps serving. Each input is applied independently, so a broken allow list does not block a certificate rotation.
 

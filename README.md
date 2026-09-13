@@ -298,7 +298,8 @@ temporary server is stopped you can start again with the TLS flags. [Serving
 certificate](docs/configuration.md#serving-certificate) has the full procedure,
 including the other storage backends and running it under systemd.
 
-When `--tls-cert` and `--tls-key` are both set, the server:
+When TLS is configured — `--tls-cert` and `--tls-key`, their environment
+equivalents, or `serving_cert` — the server:
 
 1. Presents those certs to connecting clients
 2. Requests (but does not require) a client certificate from every connection,

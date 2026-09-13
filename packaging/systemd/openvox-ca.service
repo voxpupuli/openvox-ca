@@ -43,7 +43,9 @@ RestartSec=5s
 # entropy-starved machine; the status text says what it is waiting on. Before
 # that, Init may spend two internal/ca LockTimeout budgets in sequence waiting
 # on another replica — hmac-key on a cold start, then bootstrap — so this must
-# clear 2 x LockTimeout with room for the key generation on top.
+# clear 2 x LockTimeout with room for the key generation on top. A CA using
+# serving_cert spends up to one further LockTimeout issuing its own serving
+# certificate before the listener binds; 300s still clears all three.
 # cmd/openvox-ca/launcher_test.go asserts that floor; charts/openvox-ca gives
 # Init the same 300s through its startupProbe.
 TimeoutStartSec=300s

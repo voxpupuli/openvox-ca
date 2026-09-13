@@ -147,6 +147,78 @@ var _ = Describe("the serve command's serving-certificate wiring", func() {
 				"stores before reaching the one the listener needs")
 	})
 
+	// The edit that actually points the listener at the holder, and the one
+	// whose failure is loudest in production and quietest in CI.
+	//
+	// servingcert_test.go drives the holder directly and its handshake spec
+	// builds its own tls.Config, so nothing observes which callback main.go
+	// installs. Restoring `GetCertificate: certs.GetCertificate` compiles, and
+	// certs is nil for a self-provisioned CA -- so the listener binds and every
+	// handshake panics dereferencing it, with the whole suite green. Verified
+	// by mutation rather than assumed.
+	It("gives the listener the certificate source it selected", func() {
+		var bound string
+		ast.Inspect(file, func(n ast.Node) bool {
+			assign, ok := n.(*ast.AssignStmt)
+			if !ok || len(assign.Rhs) != 1 || len(assign.Lhs) != 1 {
+				return true
+			}
+			call, ok := assign.Rhs[0].(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "getCertificate" {
+				return true
+			}
+			if id, ok := sel.X.(*ast.Ident); ok && id.Name == "serving" {
+				if lhs, ok := assign.Lhs[0].(*ast.Ident); ok {
+					bound = lhs.Name
+				}
+			}
+			return true
+		})
+		Expect(bound).NotTo(BeEmpty(),
+			"main.go never calls serving.getCertificate(), so the listener cannot be "+
+				"reading the self-provisioned holder")
+
+		// And that name, rather than anything else, is what tls.Config gets.
+		var installed bool
+		ast.Inspect(file, func(n ast.Node) bool {
+			lit, ok := n.(*ast.CompositeLit)
+			if !ok {
+				return true
+			}
+			sel, ok := lit.Type.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Config" {
+				return true
+			}
+			if pkg, ok := sel.X.(*ast.Ident); !ok || pkg.Name != "tls" {
+				return true
+			}
+			for _, elt := range lit.Elts {
+				kv, ok := elt.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				if key, ok := kv.Key.(*ast.Ident); !ok || key.Name != "GetCertificate" {
+					continue
+				}
+				// An Ident equal to the bound name. A SelectorExpr here --
+				// certs.GetCertificate -- is the mutation this exists to catch,
+				// and it is nil whenever the CA self-provisions.
+				if v, ok := kv.Value.(*ast.Ident); ok && v.Name == bound {
+					installed = true
+				}
+			}
+			return true
+		})
+		Expect(installed).To(BeTrue(),
+			"main.go builds its tls.Config with a GetCertificate that is not the source it "+
+				"selected, so a self-provisioned CA binds a listener backed by a nil "+
+				"certReloader and panics on the first handshake")
+	})
+
 	// The predicate's call sites, which servingcert_test.go's own spec cannot
 	// reach: it asserts what tlsEnabled returns, not that anything reads it.
 	//

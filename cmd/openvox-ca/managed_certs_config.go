@@ -222,11 +222,6 @@ func caOwnedPaths(cfg *serverConfig, absCADir, configPath string) ([]certstore.R
 		{Setting: "puppet_server_file", Path: cfg.PuppetServerFile},
 		{Setting: "autosign_config", Path: cfg.AutosignConfig},
 	}
-	// One entry per configured foreign trust domain, named after the entry so a
-	// refusal says which. These are read on every client handshake: a
-	// certificate written over an anchor would be trusted as an issuer, and one
-	// written over a CRL bundle would silently stop revocation checking for
-	// that domain.
 	// The CA's own serving certificate, when it is self-provisioned into a file
 	// pair. Named with the servingCertPathSetting prefix so that the serving
 	// entry's own check can take them out again rather than refuse the entry
@@ -238,9 +233,12 @@ func caOwnedPaths(cfg *serverConfig, absCADir, configPath string) ([]certstore.R
 	// no entry reads it back to decide anything, so a shared /etc/openvox/ca.pem
 	// is the ordinary way to lay several components out on one host -- which is
 	// exactly the shared-host deployment serving_cert documents. Reserving it
-	// would refuse that layout at startup, and the cross pair that would be a
-	// loop -- a chain written over another entry's material, or material over a
-	// chain -- is already refused inside internal/certstore.
+	// would refuse that layout at startup.
+	//
+	// internal/certstore refuses the cross pair -- a chain written over another
+	// entry's material -- but only within one block, and serving_cert and
+	// managed_certs are two. servingChainCollision closes that gap; this
+	// exemption is not relying on a check that does not run.
 	if f := servingCertFiles(cfg); f != nil {
 		named = append(named,
 			certstore.ReservedPath{Setting: servingCertPathSetting + "cert", Path: f.Cert},
@@ -263,6 +261,11 @@ func caOwnedPaths(cfg *serverConfig, absCADir, configPath string) ([]certstore.R
 	if configPath != "" {
 		named = append(named, certstore.ReservedPath{Setting: "--config", Path: configPath})
 	}
+	// One entry per configured foreign trust domain, named after the entry so a
+	// refusal says which. These are read on every client handshake: a
+	// certificate written over an anchor would be trusted as an issuer, and one
+	// written over a CRL bundle would silently stop revocation checking for
+	// that domain.
 	for i := range cfg.ClientCA {
 		e := &cfg.ClientCA[i]
 		named = append(named,
