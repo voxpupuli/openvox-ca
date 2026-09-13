@@ -2198,6 +2198,18 @@ func (Chart) Test() error {
 			notWants: []string{"kind: Role\n"},
 		},
 		{
+			// An empty block is still TLS, deliberately: the server refuses it
+			// with a message naming the missing store, and a chart that read it
+			// as "off" would refuse the install first for having no certificate
+			// and hide that. The counterpart to the null-value reject case,
+			// which must fall through to the ordinary refusal instead.
+			name:       "an empty serving_cert block still counts as TLS",
+			sets:       []string{"serviceAccount.create=true"},
+			valuesYAML: "config:\n  serving_cert: {}\n",
+			wants:      []string{"kind: Deployment", "scheme: HTTPS"},
+			notWants:   []string{"scheme: HTTP\n"},
+		},
+		{
 			// The CA's own serving certificate is TLS, and it is the one way to
 			// get TLS with neither tls_cert nor tls_key set -- the server
 			// refuses that combination. A chart that did not know it would
@@ -2206,19 +2218,27 @@ func (Chart) Test() error {
 			name: "a self-provisioned serving certificate is TLS on its own",
 			sets: []string{"serviceAccount.create=true"},
 			// The only file-store layout that both installs and starts, which
-			// took two goes to get right. It must be under
-			// persistence.mountPath, because readOnlyRootFilesystem defaults to
-			// true and that is the one writable path -- and it must be outside
-			// the cadir, because the server reserves that subtree against every
-			// file store. The chart sets cadir TO the mount by default, so
-			// those two collide until cadir is narrowed, which is what this
-			// case demonstrates.
+			// took three goes to get right, so the constraints are worth
+			// stating in full:
 			//
-			// The first version used /srv, which the chart refuses: a shipped
-			// example nobody could install. The second moved it under the mount
-			// and left cadir alone, which renders and then refuses at startup:
-			// an example nobody could start. Both were caught by review rather
-			// than by this case, because its assertions are render-only.
+			//   * under persistence.mountPath, because readOnlyRootFilesystem
+			//     defaults to true and that is the one writable path;
+			//   * outside the cadir, which the server reserves against every
+			//     file store -- and the chart sets cadir TO the mount, so that
+			//     has to be narrowed before any file store fits;
+			//   * in a directory that already exists, because the store refuses
+			//     to create one and an unwritable serving store is fatal. Only
+			//     the mount point itself is guaranteed to exist on a fresh
+			//     volume, so the pair sits at its root. The cadir may be a
+			//     subdirectory because CA.Init creates that one.
+			//
+			// Version one used /srv: refused at install. Version two moved it
+			// under the mount and left cadir alone: rendered, then refused at
+			// startup. Version three narrowed cadir but put the pair in a
+			// serving/ subdirectory nothing creates: rendered, started, and
+			// died on the first write. Each was caught by review rather than
+			// here, because these assertions are render-only -- which is the
+			// standing limitation of a chart case, not a gap to close.
 			valuesYAML: `
 config:
   cadir: /var/lib/puppet-ca/ca
@@ -2228,8 +2248,8 @@ config:
     renew_before: 720h
     store:
       files:
-        cert: /var/lib/puppet-ca/serving/tls.crt
-        key: /var/lib/puppet-ca/serving/tls.key
+        cert: /var/lib/puppet-ca/tls.crt
+        key: /var/lib/puppet-ca/tls.key
 `,
 			wants: []string{"kind: Deployment", "scheme: HTTPS"},
 			// A file store needs no API access at all, which is the systemd
@@ -3454,6 +3474,37 @@ config:
       secret: {name: ca-tls}
 `,
 			wantErr: "extraEnv",
+		},
+		{
+			// A key written with no value is not a configured block, and the
+			// server reads it as the feature being off. Before the nil guard
+			// the chart read it as TLS, skipped its own no-certificate refusal
+			// and set the probes to HTTPS -- and `dig` aborted the render with
+			// an interface-conversion error rather than any message an operator
+			// could act on.
+			name:       "a serving_cert key with no value falls through to the TLS refusal",
+			valuesYAML: "config:\n  serving_cert:\n",
+			wantErr:    "will refuse to start",
+		},
+		{
+			// The chain file gets the cadir rule too, and no case put the
+			// failing path anywhere but `cert` -- so dropping `key` or `ca`
+			// from the loop rendered cleanly and refused at startup instead.
+			name: "a serving_cert chain file inside the cadir",
+			valuesYAML: `
+config:
+  cadir: /var/lib/puppet-ca/ca
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      files:
+        cert: /var/lib/puppet-ca/tls.crt
+        key: /var/lib/puppet-ca/tls.key
+        ca: /var/lib/puppet-ca/ca/chain.pem
+`,
+			wantErr: "inside the cadir",
 		},
 		{
 			// The highest-precedence route of the six, and the last one without

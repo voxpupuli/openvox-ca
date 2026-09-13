@@ -185,8 +185,9 @@ managed_certs: []
 #   names: [ca.example.com]
 #   renew_before: 720h
 #   store:
-#     files: {cert: /var/lib/puppet-ca/serving/tls.crt, key:
-/var/lib/puppet-ca/serving/tls.key}
+#     files:
+#       cert: /var/lib/puppet-ca/serving/tls.crt
+#       key: /var/lib/puppet-ca/serving/tls.key
 ```
 
 ## Environment variables
@@ -294,8 +295,10 @@ Boolean env vars accept any value accepted by `strconv.ParseBool`: `1`, `t`, `tr
 
 > The CA can also issue and renew this certificate itself, which removes the
 > bootstrap below entirely — see [The CA's own serving
-> certificate](#the-cas-own-serving-certificate). That is the only option when
-> the CA key is held at a provider, and it is mutually exclusive with the pair
+> certificate](#the-cas-own-serving-certificate). Once the CA key is held at a
+> provider that is the only way to get this certificate renewed unattended —
+> the offline [`openvox-ca generate`](operator-cli.md) can still mint one by
+> hand, but nothing then renews it — and it is mutually exclusive with the pair
 > described here.
 
 `tls_cert` and `tls_key` name a **serving certificate issued by this CA**, not

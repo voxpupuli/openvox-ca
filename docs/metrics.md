@@ -505,7 +505,7 @@ its own answer rather than being masked by theirs.
 
 This says nothing about *where* a certificate is stored, deliberately. A
 managed certificate may live in a Kubernetes Secret or in local files, and the
-CA's own serving certificate will be a third case with different failure
+CA's own serving certificate is a third case with different failure
 semantics again — a series shaped around Secrets would be one those could not
 use.
 

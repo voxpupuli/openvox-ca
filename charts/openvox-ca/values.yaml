@@ -526,7 +526,11 @@ readinessProbe:
 #
 # config.serving_cert adds a third term the ruling above did not weigh, because
 # it did not exist then: the CA issues its own serving certificate after Init
-# and before the listener binds, bounded at one further LockTimeout. A healthy
+# and before the listener binds. That is one further LockTimeout for the
+# reconcile pass, plus the store read that decides whether startup succeeds --
+# deliberately outside the pass's budget, since a pass that spent the lot would
+# otherwise leave the read no time at all, and for a Secret store that read is
+# bounded at certstore's own 30s API timeout. A healthy
 # start spends none of it -- the stores are read and found current in
 # milliseconds -- but a slow or unreachable Secret store can spend the lot. Raise
 # failureThreshold when self-provisioning against a remote key provider or a

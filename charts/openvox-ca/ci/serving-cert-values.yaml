@@ -2,12 +2,14 @@
 # Kubernetes Secret.
 #
 # This is the deployment `serving_cert` exists for: the CA key is held at a
-# provider, so the CA cannot mint its own serving certificate the usual way --
+# provider, so nothing else issues and renews this certificate unattended --
 # cert-manager cannot act as a CA issuer without the key, and
 # `openvox-ca-ctl generate` needs an admin certificate that does not exist until
-# the CA is already serving.
+# the CA is already serving. The offline `openvox-ca generate` could mint one by
+# hand on the node, which is exactly the manual renewal a pod should not need.
 #
-# Three chart branches at once, and each is one the other fixtures cannot reach:
+# Two chart branches the other fixtures cannot reach, and one rendered pairing
+# worth shipping for what the server does with it:
 #
 #   * `tlsConfigured` answering true from `serving_cert` alone. There is no
 #     `tls:` block here and no `config.tls_cert`, deliberately -- the server
@@ -16,9 +18,12 @@
 #     certificate, and sets the probes to HTTP against an HTTPS listener.
 #   * the managed-certificate Role covering the serving Secret as well as the
 #     component ones, in one rule when they share a namespace.
-#   * the admin-credential NOTES warning reaching the CA's own certname:
-#     puppetServers lists it, which is the shared-host deployment the
-#     clientAuth-by-default decision exists to keep working.
+#   * puppetServers naming the serving certname itself, which is the shared-host
+#     deployment the clientAuth-by-default decision exists to keep working. Note
+#     this reaches no chart branch the managed-certs fixture does not: the NOTES
+#     warning is gated on the Role being rendered and says nothing conditional
+#     about puppetServers. What it exercises is the rendered pairing the server
+#     then acts on in warnIfServingCertIsAdmin, which the chart cannot see.
 #
 # `usages` is deliberately unset, so the certificate takes the
 # serverAuth+clientAuth pair every certificate this CA issues. That is what

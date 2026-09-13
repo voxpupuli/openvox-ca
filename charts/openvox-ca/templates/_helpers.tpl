@@ -371,7 +371,10 @@ unknown
   the certificate its listener presents -- refused by RBAC at startup, which is
   fatal for that certificate rather than retried.
 */}}
-{{- $serving := dig "serving_cert" "store" "secret" dict $config -}}
+{{- $serving := dict -}}
+{{- if include "openvox-ca.servingCertConfigured" . -}}
+{{- $serving = dig "serving_cert" "store" "secret" dict $config -}}
+{{- end -}}
 {{- with (dig "name" "" $serving) -}}
 {{- $secrets = append $secrets (dict "namespace" (default $namespace (dig "namespace" "" $serving)) "name" .) -}}
 {{- end -}}
@@ -644,6 +647,32 @@ false
 {{- end -}}
 
 {{/*
+Whether config.serving_cert names a block at all.
+
+Present-and-a-map, not merely present. The two spellings mean different things
+to the server and the chart has to agree with it:
+
+  * `serving_cert: {}` decodes to a non-nil *certstore.Entry naming no store,
+    which the server refuses with a message saying so. The chart must call that
+    TLS, or it refuses the install first for having no certificate and the
+    operator never sees the real reason.
+  * `serving_cert:` with no value decodes to a nil pointer, and the server reads
+    that as the feature being off. The chart must agree, or it reports TLS
+    configured, skips its own no-certificate refusal, sets the probes to HTTPS,
+    and the pod dies on the plain-HTTP refusal instead.
+
+Testing `hasKey` alone got the second case wrong, and `dig` on the nil value
+aborted the render with an interface-conversion error rather than any message an
+operator could act on.
+*/}}
+{{- define "openvox-ca.servingCertConfigured" -}}
+{{- $config := include "openvox-ca.config" . | fromYaml -}}
+{{- if and (hasKey $config "serving_cert") (kindIs "map" (index $config "serving_cert")) -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/*
 Whether the server will serve HTTPS.
 
 It does so when a certificate and a key are both configured — on any layer —
@@ -670,7 +699,7 @@ true
   error rather than as an absence; a chart that read it as "off" would refuse
   the install for having no certificate and hide the real message.
 */}}
-{{- if hasKey $config "serving_cert" -}}
+{{- if include "openvox-ca.servingCertConfigured" . -}}
 true
 {{- else -}}
 {{- $cert := dig "tls_cert" "" $config -}}
@@ -801,7 +830,7 @@ CrashLoopBackOff or a Service that silently routes nowhere.
   wholesale, so the chart cannot see what is in it, which is the same reason
   configFullyKnown gates this whole helper.
 */ -}}
-{{- if hasKey $config "serving_cert" -}}
+{{- if include "openvox-ca.servingCertConfigured" . -}}
 {{- $conflict := "" -}}
 {{- if .Values.tls.existingSecret -}}{{- $conflict = "tls.existingSecret" -}}
 {{- else if dig "tls_cert" "" $config -}}{{- $conflict = "config.tls_cert" -}}
@@ -855,10 +884,10 @@ CrashLoopBackOff or a Service that silently routes nowhere.
 {{- $path := dig $field "" $files | toString | trimSuffix "/" -}}
 {{- if $path -}}
 {{- if and (ne $path $mount) (not (hasPrefix (printf "%s/" $mount) $path)) -}}
-{{- fail (printf "config.serving_cert.store.files.%s is %q, which is outside the volume mounted at %q, and the root filesystem is read-only by default so the CA could not write there. Unlike a managed certificate, an unwritable serving store is fatal: the CA refuses to start rather than retrying. Use a Secret store, which is the better fit in Kubernetes and needs no volume — or put the pair under the mount and set config.cadir to a different subdirectory of it, since the CA also refuses a store inside its cadir." $field $path $mount) -}}
+{{- fail (printf "config.serving_cert.store.files.%s is %q, which is outside the volume mounted at %q, and the root filesystem is read-only by default so the CA could not write there — unless you mounted that path yourself through extraVolumes, which this check cannot see. Unlike a managed certificate, an unwritable serving store is fatal: the CA refuses to start rather than retrying. Use a Secret store, which is the better fit in Kubernetes and needs no volume — or put the pair at the mount root and set config.cadir to a subdirectory of it, since the CA also refuses a store inside its cadir and will not create a directory of its own." $field $path $mount) -}}
 {{- end -}}
 {{- if and $cadir (or (eq $path $cadir) (hasPrefix (printf "%s/" $cadir) $path)) -}}
-{{- fail (printf "config.serving_cert.store.files.%s is %q, which is inside the cadir (%q) — and openvox-ca refuses any file store there, because a store overwrites its paths on every issuance and those are the CA's own files. By default this chart sets cadir to persistence.mountPath (%q), which is also the only writable path in the pod, so a file store needs config.cadir narrowed to a subdirectory (for example %q/ca) with the serving pair kept elsewhere under the mount. A Secret store avoids the question entirely and is the better fit in Kubernetes." $field $path $cadir $mount $mount) -}}
+{{- fail (printf "config.serving_cert.store.files.%s is %q, which is inside the cadir (%q) — and openvox-ca refuses any file store there, because a store overwrites its paths on every issuance and those are the CA's own files. By default this chart sets cadir to persistence.mountPath (%q), which is also the only writable path in the pod, so a file store needs config.cadir narrowed (for example %q/ca) and the pair kept at the mount root (%q/tls.crt, %q/tls.key) — the root rather than a subdirectory, because the CA will not create one and an unwritable serving store stops it starting. A Secret store avoids all of this and is the better fit in Kubernetes." $field $path $cadir $mount $mount $mount $mount) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

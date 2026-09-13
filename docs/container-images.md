@@ -82,8 +82,8 @@ about this at startup; see [serving
 certificate](configuration.md#serving-certificate). Before any agent talks to
 this CA, either let the CA issue its own with
 [`serving_cert`](configuration.md#the-cas-own-serving-certificate) — which
-removes this bootstrap entirely, and is the only option when the CA key is held
-at a provider — or issue one with `openvox-ca-ctl generate` and
+removes this bootstrap entirely and renews the certificate unattended, which
+nothing else does once the CA key is held at a provider — or issue one with `openvox-ca-ctl generate` and
 point `--tls-cert`/`--tls-key` at that. The same goes for the rest of a
 production deployment — mTLS, an alternative storage backend, autosigning: pass the
 relevant flags, or mount a config file and set `--config`. See [configuring the

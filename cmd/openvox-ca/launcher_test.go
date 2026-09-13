@@ -862,14 +862,24 @@ var _ = Describe("The shipped systemd unit", func() {
 		start, err := time.ParseDuration(unit["TimeoutStartSec"])
 		Expect(err).NotTo(HaveOccurred())
 
-		// Two of internal/ca's lock budgets, not one. Init spends the first on
-		// the inventory-HMAC step (EnsureHMACKey's `hmac-key` lock on a cold
+		// Three of internal/ca's lock budgets, not one. Init spends the first
+		// on the inventory-HMAC step (EnsureHMACKey's `hmac-key` lock on a cold
 		// start, plus verification) and the second on `bootstrap`; they are
 		// separate context.WithTimeout calls in sequence, not one shared
-		// budget. A contended cold start against a shared backend is also
-		// exactly when a CA key has to be generated, so both terms land
-		// together and the floor has to clear the pair.
-		Expect(start).To(BeNumerically(">", 2*ca.LockTimeout),
-			"TimeoutStartSec must outlast both of Init's sequential lock budgets with room for key generation")
+		// budget. A CA using serving_cert spends a third issuing its own
+		// serving certificate, between Init and the listener bind. A contended
+		// cold start against a shared backend is also exactly when a CA key has
+		// to be generated, so the terms land together and the floor has to
+		// clear all of them.
+		//
+		// This floor is what the unit's own comment cites, so the two have to
+		// say the same thing: it was raised from two when the serving
+		// certificate added the third term. It bounds the lock waits only --
+		// whether TimeoutStartSec clears the whole pre-listen path is a
+		// separate question, since that path installs budgets not derived from
+		// LockTimeout at all.
+		Expect(start).To(BeNumerically(">", 3*ca.LockTimeout),
+			"TimeoutStartSec must outlast Init's two sequential lock budgets and the "+
+				"serving-certificate pass, with room for key generation")
 	})
 })
