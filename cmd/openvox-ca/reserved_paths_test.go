@@ -114,7 +114,9 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 		// ordinary way to lay several components out on one host -- which
 		// docs/configuration.md states, and which reserving this would refuse
 		// on exactly the shared-host deployment serving_cert documents. The
-		// cross pair that would be a loop is refused inside internal/certstore.
+		// cross pair it would otherwise leave open -- this chain written over a
+		// component's material -- is refused by servingChainCollision, because
+		// internal/certstore only refuses it within one block.
 		"serving_cert.store.files.ca": "chain files are shareable by design; see the shared-chain rule",
 	}
 

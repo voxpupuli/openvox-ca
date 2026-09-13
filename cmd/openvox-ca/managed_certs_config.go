@@ -255,9 +255,12 @@ func caOwnedPaths(cfg *serverConfig, absCADir, configPath string) ([]certstore.R
 	// no entry reads it back to decide anything, so a shared /etc/openvox/ca.pem
 	// is the ordinary way to lay several components out on one host -- which is
 	// exactly the shared-host deployment serving_cert documents. Reserving it
-	// would refuse that layout at startup, and the cross pair that would be a
-	// loop -- a chain written over another entry's material, or material over a
-	// chain -- is already refused inside internal/certstore.
+	// would refuse that layout at startup.
+	//
+	// internal/certstore refuses the cross pair -- a chain written over another
+	// entry's material -- but only within one block, and serving_cert and
+	// managed_certs are two. servingChainCollision closes that gap; this
+	// exemption is not relying on a check that does not run.
 	if f := servingCertFiles(cfg); f != nil {
 		named = append(named,
 			certstore.ReservedPath{Setting: servingCertPathSetting + "cert", Path: f.Cert},

@@ -807,6 +807,59 @@ var _ = Describe("serving_cert colliding with managed_certs", func() {
 		Entry("both omit their namespace", "", "", true),
 	)
 
+	It("refuses a chain file that is a component's certificate or key", func() {
+		// The one file pairing nothing else catches: caOwnedPaths reserves the
+		// serving cert and key, but leaves the chain file unreserved so two
+		// entries may share one. That exemption is about chain-to-chain
+		// sharing; chain-over-material is a loop, and the serving issuance
+		// would overwrite the component's certificate with the CA chain on
+		// every pass.
+		cfg := &serverConfig{
+			ServingCert: &certstore.Entry{
+				Certname: "ca.test", Names: []string{"ca.test"},
+				RenewBefore: certstore.Duration(720 * time.Hour),
+				Store: certstore.StoreConfig{Files: &certstore.FilesConfig{
+					Cert: "/srv/serving/tls.crt", Key: "/srv/serving/tls.key",
+					CA: "/srv/comp/tls.crt"}},
+			},
+			ManagedCerts: certstore.Config{{
+				Certname: "component.test", Names: []string{"component.test"},
+				RenewBefore: certstore.Duration(720 * time.Hour),
+				Store: certstore.StoreConfig{Files: &certstore.FilesConfig{
+					Cert: "/srv/comp/tls.crt", Key: "/srv/comp/tls.key"}},
+			}},
+		}
+
+		_, err := buildServingCert(cfg, GinkgoT().TempDir(), "", stubCACerts{})
+		Expect(err).To(MatchError(ContainSubstring("writes its CA chain")))
+		Expect(err).To(MatchError(ContainSubstring("managed_certs[0] (component.test)")))
+	})
+
+	It("still allows two entries to share one chain file", func() {
+		// The layout the exemption exists for, and the thing the check above
+		// must not break: every entry writes the same chain from the same
+		// source, and none reads it back.
+		cfg := &serverConfig{
+			ServingCert: &certstore.Entry{
+				Certname: "ca.test", Names: []string{"ca.test"},
+				RenewBefore: certstore.Duration(720 * time.Hour),
+				Store: certstore.StoreConfig{Files: &certstore.FilesConfig{
+					Cert: "/srv/serving/tls.crt", Key: "/srv/serving/tls.key",
+					CA: "/etc/openvox/ca.pem"}},
+			},
+			ManagedCerts: certstore.Config{{
+				Certname: "component.test", Names: []string{"component.test"},
+				RenewBefore: certstore.Duration(720 * time.Hour),
+				Store: certstore.StoreConfig{Files: &certstore.FilesConfig{
+					Cert: "/srv/comp/tls.crt", Key: "/srv/comp/tls.key",
+					CA: "/etc/openvox/ca.pem"}},
+			}},
+		}
+
+		_, err := buildServingCert(cfg, GinkgoT().TempDir(), "", stubCACerts{})
+		Expect(err).NotTo(HaveOccurred())
+	})
+
 	It("allows one Secret name in two spelled-out namespaces", func() {
 		// The case the conservative arm must not swallow: two namespaces that
 		// genuinely differ, both written down, so nothing has to be guessed.
@@ -1095,10 +1148,13 @@ var _ = Describe("the serving certificate's startup and renewal reporting", func
 		Expect(logs).To(ContainSubstring("the garbage store"))
 	})
 
-	It("bounds the whole startup pass with one lock budget, not one per entry", func() {
-		// internal/ca budgets each entry separately, so an unbounded pass over
-		// N entries can spend N x LockTimeout before the listener binds --
-		// inside a window the chart budgets at 60s in total.
+	It("bounds the whole startup pass with one budget, not one per entry", func() {
+		// internal/ca budgets each entry separately, so an unbounded pass costs
+		// the sum of them before the listener binds -- inside a window the
+		// chart budgets at 60s in total. Not through lock contention, which
+		// cannot happen between entries because each locks on its own subject,
+		// but through the stores: one unreachable API server costs every
+		// Secret-store entry its own 30s API timeout, in sequence.
 		//
 		// The property that tells the two apart is not how long the pass takes
 		// but whether the entries SHARE a deadline. Under one budget every
@@ -1226,3 +1282,58 @@ var _ = Describe("what the serving certificate reports at startup and on renewal
 		Expect(first).To(BeEmpty(), "the material is unchanged, so nothing should be reported")
 	})
 })
+
+// The two fallback arms nothing else reaches.
+var _ = Describe("the serving certificate's fallback reporting", func() {
+	It("points at the reconcile warning when the store was never touched", func() {
+		// whyNothingWasIssued's second arm, taken when the entry failed before
+		// its store was consulted at all -- a subject lock timing out, or the
+		// CA reporting itself uninitialised. The store is empty and this
+		// entry's own wrappers recorded nothing, so the fatal message has no
+		// cause of its own to give and must say where to look instead of
+		// inventing one.
+		sc := newServingCert(emptyStore{}, ca.CertSpec{Subject: "ca.test"})
+		Expect(sc.ownError()).NotTo(HaveOccurred(), "precondition: nothing recorded")
+
+		err := whyNothingWasIssued(sc)
+		Expect(err).To(MatchError(ContainSubstring("Managed certificate not reconciled")))
+		Expect(err).To(MatchError(ContainSubstring("neither wrote nor failed")))
+	})
+
+	It("stays silent about admin credentials when the allow list cannot be read", func() {
+		// The arm that returns without warning. Its stated reason is that
+		// buildAuthConfig reports the same failure fatally a moment later, and
+		// that self-provisioning always means TLS is on -- a claim about
+		// tlsEnabled that nothing else checks. Without this spec the whole
+		// admin warning could vanish behind an unreadable file with nothing
+		// failing.
+		cfg := &serverConfig{
+			PuppetServerFile: filepath.Join(GinkgoT().TempDir(), "absent"),
+			ServingCert: &certstore.Entry{
+				Certname: "ca.test", Names: []string{"ca.test"},
+				RenewBefore: certstore.Duration(720 * time.Hour),
+				Store: certstore.StoreConfig{Files: &certstore.FilesConfig{
+					Cert: "/srv/serving/tls.crt", Key: "/srv/serving/tls.key"}},
+			},
+		}
+		Expect(cfg.tlsEnabled()).To(BeTrue(),
+			"precondition: the silence is justified by TLS being on, so it must be")
+
+		logs := captureLogs(slog.LevelWarn, func() {
+			_, err := buildServingCert(cfg, GinkgoT().TempDir(), "", stubCACerts{})
+			Expect(err).NotTo(HaveOccurred(),
+				"an unreadable allow list is buildAuthConfig's to refuse, not this")
+		})
+		Expect(logs).NotTo(ContainSubstring("admin credential"))
+	})
+})
+
+// emptyStore reads and writes nothing, for the arm where the store is never
+// reached at all.
+type emptyStore struct{}
+
+func (emptyStore) String() string { return "the empty store" }
+func (emptyStore) Load(context.Context) ([]byte, []byte, error) {
+	return nil, nil, nil
+}
+func (emptyStore) Save(context.Context, []byte, []byte) error { return nil }

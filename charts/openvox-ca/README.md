@@ -107,7 +107,7 @@ tested floor rather than a ceiling; naming them here would go stale on its own.
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `tls.existingSecret` | `""` | Secret holding the server certificate; sets `tls_cert`/`tls_key`. The server re-reads the keypair on `SIGHUP`, but nothing sends one, so a renewal needs a signal (`kubectl exec <pod> -- kill -HUP 1`) or a restart — see [the guide](https://github.com/voxpupuli/openvox-ca/blob/main/docs/helm-chart.md) |
+| `tls.existingSecret` | `""` | Secret holding the server certificate; sets `tls_cert`/`tls_key`. The server re-reads the keypair on `SIGHUP`, but nothing sends one, so a renewal needs a signal (`kubectl exec <pod> -- kill -HUP 1`) or a restart. Mutually exclusive with `config.serving_cert`, which the chart refuses at install time — see [the guide](https://github.com/voxpupuli/openvox-ca/blob/main/docs/helm-chart.md) |
 | `tls.certKey` / `tls.keyKey` | `tls.crt` / `tls.key` | Data keys within that Secret |
 | `tls.mountPath` | `/run/secrets/openvox-ca-tls` | |
 | `ca.existingSecret` | `""` | Secret holding the CA certificate and key; sets `ca_cert_file`/`ca_key_file`. Under a provider that holds the key (`config.ca_key_provider: openbao`) clear the latter with `config.ca_key_file: ""` |
@@ -192,7 +192,7 @@ Secret. See
 | `deploymentAnnotations` | `{}` | Annotations on the Deployment rather than the pods |
 | `podSecurityContext` | non-root uid/gid 1000, `fsGroup` 1000, `RuntimeDefault` | |
 | `securityContext` | no privilege escalation, read-only rootfs, all capabilities dropped | |
-| `livenessProbe` / `readinessProbe` / `startupProbe` | probes on `/healthz/*` | Set `enabled: false` to drop one; other keys are the probe spec. `httpGet.scheme` defaults to HTTPS or HTTP to match whether the server has a certificate. `startupProbe.failureThreshold x periodSeconds` is the entire budget `CA.Init` gets, since the probe path is not served until it returns. The default 60s does not cover Init's worst case (two `internal/ca.LockTimeout` waits plus CA key generation); raise it if you run several replicas against a fresh shared backend, where both locks can be contended |
+| `livenessProbe` / `readinessProbe` / `startupProbe` | probes on `/healthz/*` | Set `enabled: false` to drop one; other keys are the probe spec. `httpGet.scheme` defaults to HTTPS or HTTP to match whether the server has a certificate. `startupProbe.failureThreshold x periodSeconds` is the entire budget the CA gets before the probe path is served. The default 60s does not cover `CA.Init`'s worst case (two `internal/ca.LockTimeout` waits plus CA key generation); raise it if you run several replicas against a fresh shared backend, where both locks can be contended. **With `config.serving_cert` the window also has to cover issuing that certificate**, which runs after Init and before the listener binds and is bounded at one further `LockTimeout` — so raise it when self-provisioning, particularly against a remote key provider or a Secret store |
 | `lifecycle` | `{}` | |
 | `terminationGracePeriodSeconds` | `30` | Must exceed `shutdown_timeout_sec` by ≥ 3s |
 | `nodeSelector` / `tolerations` / `affinity` | `{}` / `[]` / `{}` | |

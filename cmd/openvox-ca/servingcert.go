@@ -623,20 +623,43 @@ func provisionServingCert(ctx context.Context, myCA *ca.CA, s *servingCert) erro
 		return nil
 	}
 
-	// Bounded as a whole, which the pass is not on its own. internal/ca gives
-	// each entry its own ca.LockTimeout budget, so a pass over N entries can
-	// spend N x 60s here -- and this runs before the listener binds, inside the
-	// window a Kubernetes startupProbe and systemd's TimeoutStartSec are both
-	// measuring. Those budgets were derived for CA.Init alone and do not have
-	// that much room, so an unbounded pass lets a component certificate's slow
-	// store stop the CA ever becoming ready.
+	// Bounded as a whole, which the pass is not on its own: internal/ca gives
+	// each entry its own budget, so the pass costs the sum of them. This runs
+	// before the listener binds, inside the window a Kubernetes startupProbe
+	// and systemd's TimeoutStartSec are both measuring, and both were derived
+	// for CA.Init alone.
 	//
-	// One budget for the whole step, rather than one per entry. A deployment
-	// that configures more component certificates does not thereby get a longer
-	// startup; the entries that did not get a turn are reconciled by the
-	// background loop a moment later, which is where they belong. What must
-	// happen before the listener binds is this certificate, and the load below
-	// is what decides whether it did.
+	// What actually reaches that sum is worth stating precisely, because the
+	// obvious answer is wrong. It is NOT lock contention: each entry locks on
+	// subjectLockName(subject), so two entries take two different locks and
+	// cannot block one another -- reaching the sum that way would need N
+	// separate peers each stalled on a different subject, which is contrived.
+	// What reaches it with a single fault is the stores. A Secret store bounds
+	// each API call at 30s, so three component certificates behind an API
+	// server that BLACKHOLES packets is ninety seconds against a chart budget
+	// of sixty. The drop matters: a network policy that refuses the connection
+	// fails in milliseconds and none of this materialises, so anyone testing
+	// this has to drop rather than reject or they will conclude the bound is
+	// unnecessary.
+	//
+	// Three things follow that are easy to get wrong:
+	//
+	//   - A healthy pass does not spend this budget. Every entry reads its
+	//     store, finds the certificate current and returns, so the common start
+	//     is milliseconds and the bound is insurance. It binds only when a
+	//     store is slow, which is exactly when a cap is wanted.
+	//   - Ordering fixes starvation, not latency. The serving entry being first
+	//     guarantees it a turn; it does not make the pass return sooner, since
+	//     ReconcileManaged walks the rest before it returns. That is accepted
+	//     rather than overlooked: returning as soon as this entry succeeded
+	//     would need a single-entry reconcile, which internal/ca does not
+	//     expose, and narrowing c.ManagedCerts around the call to fake one
+	//     would mutate shared state to express a call shape the callee should
+	//     offer. The request is with #322 instead.
+	//   - The background loop's own immediate pass is therefore not redundant.
+	//     It is what reconciles anything this bounded pass did not reach, a
+	//     moment later and off the startup path. A component certificate read
+	//     twice on a healthy start is the price of that safety net.
 	provisionCtx, cancel := context.WithTimeout(ctx, ca.LockTimeout)
 	defer cancel()
 	if _, err := myCA.ReconcileManaged(provisionCtx); err != nil {
@@ -725,9 +748,14 @@ func (s *servingCert) getCertificate() func(*tls.ClientHelloInfo) (*tls.Certific
 // feature documents is exactly where an operator would write one certname in
 // both blocks.
 //
-// The file-store direction of the same hazard needs nothing here: caOwnedPaths
-// reserves the serving trio, so CheckReservedPaths already refuses a
-// managed_certs entry that lands on any of it, in both directions.
+// The file-store direction is covered in three of its four pairings by
+// caOwnedPaths, which reserves the serving cert and key -- so a managed entry
+// whose cert, key or chain lands on either is refused. The fourth is not, and
+// is closed below: the serving entry's own chain file is deliberately NOT
+// reserved, because a shared chain is the ordinary layout, and that exemption
+// leaves a managed entry's cert or key free to collide with it. An earlier
+// version of this comment claimed internal/certstore already refused that pair;
+// it does, but only within one block, and these are two blocks.
 //
 // Written here rather than in internal/certstore because that package has no
 // notion of two blocks feeding one reconcile set -- Config.ValidateIn takes one
@@ -749,6 +777,9 @@ func checkManagedCertOverlap(cfg *serverConfig) error {
 				e.Certname, i)
 		}
 		if err := servingSecretCollision(e, m, i); err != nil {
+			return err
+		}
+		if err := servingChainCollision(e, m, i); err != nil {
 			return err
 		}
 	}
@@ -792,4 +823,41 @@ func nsOrPodNamespace(ns string) string {
 		return "<the CA pod's namespace>"
 	}
 	return ns
+}
+
+// servingChainCollision reports a managed certificate whose certificate or key
+// file is the serving certificate's chain file.
+//
+// The one file pairing nothing else refuses. caOwnedPaths reserves the serving
+// cert and key, so every pairing involving those is caught; the serving chain
+// file is left unreserved on purpose, because every entry writes the same chain
+// from the same source and sharing one is the ordinary way to lay several
+// components out on a host. That exemption is about chain-to-chain sharing, and
+// it accidentally permits chain-over-material too.
+//
+// The consequence is not cosmetic. A file store writes key, then chain, then
+// certificate, so each serving issuance would overwrite the component's
+// certificate -- or its private key -- with the CA chain. The component entry
+// reads its store back, finds material failing its own spec, and reissues; the
+// two then take turns for ever, a CRL entry per pass.
+//
+// Chain against chain is left alone, which is the sharing this exists to
+// preserve.
+func servingChainCollision(e, m *certstore.Entry, idx int) error {
+	ef, mf := e.Store.Files, m.Store.Files
+	if ef == nil || mf == nil || ef.CA == "" {
+		return nil
+	}
+	for _, p := range []struct{ field, path string }{{"cert", mf.Cert}, {"key", mf.Key}} {
+		if p.path != ef.CA {
+			continue
+		}
+		return fmt.Errorf("serving_cert (%s) writes its CA chain to %q, which is "+
+			"managed_certs[%d] (%s) store.files.%s: every issuance of the serving "+
+			"certificate would overwrite that component's %s with the chain, and the "+
+			"component would reissue over it on the next pass, for ever. Give one of them "+
+			"a path of its own -- two entries may share a chain file, but nothing else",
+			e.Certname, ef.CA, idx, m.Certname, p.field, p.field)
+	}
+	return nil
 }
