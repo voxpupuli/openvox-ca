@@ -19,9 +19,16 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
+	"log/slog"
+	"math/big"
 	"net"
 	"os"
 	"path/filepath"
@@ -29,6 +36,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/certstore"
@@ -452,25 +461,48 @@ var _ = Describe("The CA's own serving certificate", func() {
 			})
 		})
 
-		It("does not refuse to start when the store holds usable material a failed pass left", func() {
+		It("does not refuse to start when a failed pass left usable material behind", func() {
 			// The asymmetry that makes this fail-fast rather than brittle. A
 			// renewal that did not happen is not an outage: the certificate in
 			// the store is still one the CA can serve while the loop retries,
 			// and refusing to bind would turn a recoverable failure into one.
+			//
+			// The first version of this spec did not reach that arm at all. It
+			// made the directory read-only and provisioned again, but the
+			// certificate from the first start was still current, so the
+			// decision never issued, Save was never called, and nothing failed
+			// -- it asserted the ordinary restart case while claiming to assert
+			// this one. Mutating provisionServingCert to return the pass error
+			// instead of logging it left it green.
+			//
+			// So the pass is made to fail for a reason that does not depend on
+			// who the test runs as: revoking forces a reissue, and the entry's
+			// chain file is pointed at a directory that does not exist, which
+			// FileStore.Save refuses before it writes anything. A read-only
+			// directory would have been inert under a root-run container.
 			sc, err := provision(filesEntry())
 			Expect(err).NotTo(HaveOccurred())
 			before, err := sc.holder.GetCertificate(&tls.ClientHelloInfo{})
 			Expect(err).NotTo(HaveOccurred())
 
-			// A second start against the same store, with writes now failing.
-			// The material from the first start is still there and still good.
-			Expect(os.Chmod(servingDir, 0o500)).To(Succeed())
-			DeferCleanup(func() { _ = os.Chmod(servingDir, 0o700) })
+			Expect(myCA.Revoke(ctx, "ca.test")).To(Succeed())
 
+			doomed := filesEntry()
+			doomed.Store.Files.CA = filepath.Join(servingDir, "absent", "ca.crt")
 			myCA.ManagedCerts = nil
-			sc2, err := provision(filesEntry())
+			sc2, err := provision(doomed)
 			Expect(err).NotTo(HaveOccurred(), "a readable store must not be fatal")
 
+			// The precondition, asserted rather than assumed: this entry's own
+			// Save really did fail on this pass. Without this the spec silently
+			// degrades back into a restart test the moment the fixture stops
+			// forcing a reissue.
+			Expect(sc2.ownError()).To(HaveOccurred(),
+				"precondition: the reconcile pass must have failed against this store")
+			Expect(sc2.ownError().Error()).To(ContainSubstring("does not exist"))
+
+			// And the material the failed pass left behind is what the listener
+			// still presents.
 			after, err := sc2.holder.GetCertificate(&tls.ClientHelloInfo{})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(after.Leaf.SerialNumber.String()).To(Equal(before.Leaf.SerialNumber.String()))
@@ -574,3 +606,458 @@ func serialOf(certPEM []byte) string {
 	Expect(err).NotTo(HaveOccurred())
 	return cert.SerialNumber.String()
 }
+
+// The Secret store, which no spec above reaches: filesEntry is the only entry
+// constructor there, so NeedsKubernetes is false throughout and the whole
+// Kubernetes arm of servingCertDeps returns at its first branch.
+//
+// That is the deployment this feature was built for -- ci/serving-cert-values.yaml
+// calls itself "the deployment serving_cert exists for" and uses a Secret -- and
+// a defect in it is not a delayed certificate but a CA that cannot bind. The
+// same seam managed_certs_config_test.go uses makes both arms reachable.
+var _ = Describe("the CA's own serving certificate in a Kubernetes Secret", func() {
+	const secretStore = `
+serving_cert:
+  certname: ca.example.com
+  names: [ca.example.com]
+  renew_before: 720h
+  store: {secret: {name: openvox-ca-serving-tls}}
+`
+
+	// stubCluster points both lookups at fakes and restores them afterwards.
+	stubCluster := func(client func(string) (kubernetes.Interface, error), ns func() (string, error)) {
+		GinkgoHelper()
+		restoreClient, restoreNS := inClusterClientset, podNamespace
+		DeferCleanup(func() { inClusterClientset, podNamespace = restoreClient, restoreNS })
+		inClusterClientset, podNamespace = client, ns
+	}
+
+	It("names the CA's own serving certificate when no cluster client can be built", func() {
+		// The label matters: an operator reading this has both a managed_certs
+		// block and a serving_cert block to check, and the message is what says
+		// which one made in-cluster credentials a startup requirement.
+		stubCluster(
+			func(what string) (kubernetes.Interface, error) {
+				return nil, errors.New("not in a pod (" + what + ")")
+			},
+			func() (string, error) { return "openvox", nil },
+		)
+
+		_, err := buildServingCert(writeServerConfig(secretStore), specCADir,
+			specConfigPath, stubCACerts{})
+		Expect(err).To(MatchError(ContainSubstring("the CA's own serving certificate")))
+	})
+
+	It("says which setting needs the namespace it could not resolve", func() {
+		stubCluster(
+			func(string) (kubernetes.Interface, error) { return fake.NewClientset(), nil },
+			func() (string, error) {
+				return "", errors.New("open /var/run/secrets/.../namespace: no such file")
+			},
+		)
+
+		_, err := buildServingCert(writeServerConfig(secretStore), specCADir,
+			specConfigPath, stubCACerts{})
+		Expect(err).To(MatchError(ContainSubstring("resolving the namespace for the CA's own")))
+		Expect(err).To(MatchError(ContainSubstring("no such file")))
+	})
+
+	It("does not resolve a namespace the store spells out", func() {
+		// The mutation this catches is dropping the NeedsDefaultNamespace gate:
+		// a configuration naming its own namespace must not be held up by an
+		// unreadable ServiceAccount mount.
+		stubCluster(
+			func(string) (kubernetes.Interface, error) { return fake.NewClientset(), nil },
+			func() (string, error) {
+				Fail("podNamespace must not be called when the store names its namespace")
+				return "", nil
+			},
+		)
+
+		sc, err := buildServingCert(writeServerConfig(`
+serving_cert:
+  certname: ca.example.com
+  names: [ca.example.com]
+  renew_before: 720h
+  store: {secret: {name: openvox-ca-serving-tls, namespace: openvox}}
+`), specCADir, specConfigPath, stubCACerts{})
+		Expect(err).NotTo(HaveOccurred())
+		// The store names itself for the fatal message, and the namespace it
+		// names is the configured one.
+		Expect(sc.store.String()).To(Equal("Secret openvox/openvox-ca-serving-tls"))
+	})
+
+	It("builds the store in the CA pod's namespace when the entry omits one", func() {
+		stubCluster(
+			func(string) (kubernetes.Interface, error) { return fake.NewClientset(), nil },
+			func() (string, error) { return "ca-system", nil },
+		)
+
+		sc, err := buildServingCert(writeServerConfig(secretStore), specCADir,
+			specConfigPath, stubCACerts{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sc.store.String()).To(Equal("Secret ca-system/openvox-ca-serving-tls"))
+	})
+
+	It("refuses a Secret the Kubernetes exporter also writes", func() {
+		// Only reachable with a Secret store, so no spec above can cover it.
+		// Both write ca.crt, so they would take the key from each other on
+		// every pass.
+		stubCluster(
+			func(string) (kubernetes.Interface, error) { return fake.NewClientset(), nil },
+			func() (string, error) { return "openvox", nil },
+		)
+
+		_, err := buildServingCert(writeServerConfig(`
+kubernetes_export:
+  targets:
+    - kind: Secret
+      metadata: {name: openvox-ca-serving-tls, namespace: openvox}
+      cert_key: ca.crt
+serving_cert:
+  certname: ca.example.com
+  names: [ca.example.com]
+  renew_before: 720h
+  store: {secret: {name: openvox-ca-serving-tls, namespace: openvox}}
+`), specCADir, specConfigPath, stubCACerts{})
+		Expect(err).To(MatchError(ContainSubstring("serving_cert")))
+		Expect(err).To(MatchError(ContainSubstring("kubernetes_export")))
+	})
+})
+
+// Collisions between the two blocks that feed one reconcile set.
+//
+// serving_cert and managed_certs are validated in separate calls, so
+// internal/certstore's own duplicate-certname and duplicate-Secret checks never
+// see the pair -- each is built per call, over one slice. main.go then appends
+// the serving entry to the same ca.CA.ManagedCerts slice, and internal/ca
+// de-duplicates nothing.
+var _ = Describe("serving_cert colliding with managed_certs", func() {
+	entry := func(certname, cert, key string) *certstore.Entry {
+		return &certstore.Entry{
+			Certname: certname, Names: []string{certname},
+			RenewBefore: certstore.Duration(720 * time.Hour),
+			Store:       certstore.StoreConfig{Files: &certstore.FilesConfig{Cert: cert, Key: key}},
+		}
+	}
+
+	It("refuses a shared certname", func() {
+		// One inventory slot per subject: each pass would find the other's
+		// certificate failing its own spec and replace it, for ever, and the
+		// certificate being replaced is the one the listener presents.
+		cfg := &serverConfig{
+			ServingCert:  entry("shared.test", "/srv/serving/tls.crt", "/srv/serving/tls.key"),
+			ManagedCerts: certstore.Config{*entry("shared.test", "/srv/comp/tls.crt", "/srv/comp/tls.key")},
+		}
+
+		_, err := buildServingCert(cfg, GinkgoT().TempDir(), "", stubCACerts{})
+		Expect(err).To(MatchError(ContainSubstring("serving_cert (shared.test)")))
+		Expect(err).To(MatchError(ContainSubstring("managed_certs[0]")))
+		Expect(err).To(MatchError(ContainSubstring("one inventory slot")))
+	})
+
+	It("allows two different certnames", func() {
+		// The guard must not refuse the ordinary configuration, which is the
+		// one an operator running components alongside a self-provisioning CA
+		// actually writes.
+		cfg := &serverConfig{
+			ServingCert:  entry("ca.test", "/srv/serving/tls.crt", "/srv/serving/tls.key"),
+			ManagedCerts: certstore.Config{*entry("component.test", "/srv/comp/tls.crt", "/srv/comp/tls.key")},
+		}
+
+		_, err := buildServingCert(cfg, GinkgoT().TempDir(), "", stubCACerts{})
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	DescribeTable("refuses a shared Secret",
+		func(servingNS, managedNS string, wantOmissionNote bool) {
+			// One field manager across every managed certificate, so neither
+			// apply ever raises a conflict and the two overwrite each other's
+			// material on every pass.
+			cfg := &serverConfig{
+				ServingCert: &certstore.Entry{
+					Certname: "ca.test", Names: []string{"ca.test"},
+					RenewBefore: certstore.Duration(720 * time.Hour),
+					Store: certstore.StoreConfig{Secret: &certstore.SecretConfig{
+						Name: "shared-tls", Namespace: servingNS}},
+				},
+				ManagedCerts: certstore.Config{{
+					Certname: "component.test", Names: []string{"component.test"},
+					RenewBefore: certstore.Duration(720 * time.Hour),
+					Store: certstore.StoreConfig{Secret: &certstore.SecretConfig{
+						Name: "shared-tls", Namespace: managedNS}},
+				}},
+			}
+
+			_, err := buildServingCert(cfg, GinkgoT().TempDir(), "", stubCACerts{})
+			Expect(err).To(MatchError(ContainSubstring("shared-tls")))
+			Expect(err).To(MatchError(ContainSubstring("serving_cert (ca.test)")))
+			if wantOmissionNote {
+				Expect(err).To(MatchError(ContainSubstring("omitted namespace")))
+			} else {
+				Expect(err).NotTo(MatchError(ContainSubstring("omitted namespace")))
+			}
+		},
+		Entry("both spelled out and equal", "openvox", "openvox", false),
+		// An omission on either side resolves to the CA pod's own namespace,
+		// which is not known before a client exists -- so the pair is refused
+		// rather than risked, and the message says why.
+		Entry("the serving entry omits its namespace", "", "openvox", true),
+		Entry("the managed entry omits its namespace", "openvox", "", true),
+		Entry("both omit their namespace", "", "", true),
+	)
+
+	It("allows one Secret name in two spelled-out namespaces", func() {
+		// The case the conservative arm must not swallow: two namespaces that
+		// genuinely differ, both written down, so nothing has to be guessed.
+		cfg := &serverConfig{
+			ServingCert: &certstore.Entry{
+				Certname: "ca.test", Names: []string{"ca.test"},
+				RenewBefore: certstore.Duration(720 * time.Hour),
+				Store: certstore.StoreConfig{Secret: &certstore.SecretConfig{
+					Name: "tls", Namespace: "ca-system"}},
+			},
+			ManagedCerts: certstore.Config{{
+				Certname: "component.test", Names: []string{"component.test"},
+				RenewBefore: certstore.Duration(720 * time.Hour),
+				Store: certstore.StoreConfig{Secret: &certstore.SecretConfig{
+					Name: "tls", Namespace: "openvox"}},
+			}},
+		}
+
+		// Refused for needing a cluster client rather than for colliding, which
+		// is what proves the collision check passed.
+		_, err := buildServingCert(cfg, GinkgoT().TempDir(), "", stubCACerts{})
+		if err != nil {
+			Expect(err).NotTo(MatchError(ContainSubstring("both store their material")))
+		}
+	})
+})
+
+// The admin-credential warning.
+//
+// This is the stated mitigation for a deliberate decision -- the serving
+// certificate carries clientAuth by default, so the CA's own certname in
+// puppet_server makes its store an admin credential -- and docs/configuration.md
+// promises an operator that "The CA says so once at startup". Its managed_certs
+// twin carries six specs including one that pins its call site; this had none,
+// so deleting the call left the promise unkept with the suite green.
+var _ = Describe("the serving certificate's admin-credential warning", func() {
+	build := func(cfg *serverConfig) {
+		GinkgoHelper()
+		_, err := buildServingCert(cfg, GinkgoT().TempDir(), "", stubCACerts{})
+		Expect(err).NotTo(HaveOccurred())
+	}
+
+	cfgFor := func(puppetServer string, usages []string) *serverConfig {
+		return &serverConfig{
+			PuppetServer: puppetServer,
+			ServingCert: &certstore.Entry{
+				Certname: "ca.test", Names: []string{"ca.test"}, Usages: usages,
+				RenewBefore: certstore.Duration(720 * time.Hour),
+				Store: certstore.StoreConfig{Files: &certstore.FilesConfig{
+					Cert: "/srv/serving/tls.crt", Key: "/srv/serving/tls.key"}},
+			},
+		}
+	}
+
+	It("warns when the CA's own certname is listed and the certificate can be presented", func() {
+		// Reached through buildServingCert rather than by calling the function
+		// directly, so the call site is pinned too: deleting it fails this.
+		logs := captureLogs(slog.LevelWarn, func() { build(cfgFor("ca.test", nil)) })
+		Expect(logs).To(ContainSubstring("admin credential"))
+		Expect(logs).To(ContainSubstring("ca.test"))
+	})
+
+	It("stays silent for a certname nobody listed", func() {
+		// clientAuth alone grants nothing: a certificate for a name no one has
+		// listed authenticates as nobody in particular.
+		logs := captureLogs(slog.LevelWarn, func() { build(cfgFor("someone.else", nil)) })
+		Expect(logs).NotTo(ContainSubstring("admin credential"))
+	})
+
+	It("stays silent when the certificate is narrowed out of being a client", func() {
+		// The listing still grants authority, but the certificate cannot be
+		// presented as a client, so the pair is not a credential.
+		logs := captureLogs(slog.LevelWarn, func() {
+			build(cfgFor("ca.test", []string{"serverAuth"}))
+		})
+		Expect(logs).NotTo(ContainSubstring("admin credential"))
+	})
+
+	It("stays silent when nothing is listed at all", func() {
+		logs := captureLogs(slog.LevelWarn, func() { build(cfgFor("", nil)) })
+		Expect(logs).NotTo(ContainSubstring("admin credential"))
+	})
+})
+
+// The YAML shape, which every other spec bypasses by building the entry as a Go
+// struct. Nothing else verifies that the block documented in
+// docs/configuration.md decodes at all: a renamed or mistyped tag would
+// silently disable the feature with the whole suite green.
+var _ = Describe("decoding a serving_cert block", func() {
+	It("decodes the shape the documentation publishes", func() {
+		cfg, err := loadServerConfig(writeTempConfig(`
+hostname: ca.example.com
+serving_cert:
+  certname: ca.example.com
+  names: [ca.example.com, puppet]
+  ttl: 2160h
+  renew_before: 720h
+  revoke_after: 24h
+  usages: [serverAuth]
+  key_algo: ecdsa
+  key_size: 256
+  reuse_key: true
+  store:
+    files:
+      cert: /var/lib/puppet-ca/serving/tls.crt
+      key: /var/lib/puppet-ca/serving/tls.key
+      ca: /var/lib/puppet-ca/serving/ca.crt
+`))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.ServingCert).NotTo(BeNil())
+		Expect(cfg.ServingCert.Certname).To(Equal("ca.example.com"))
+		Expect(cfg.ServingCert.Names).To(ConsistOf("ca.example.com", "puppet"))
+		Expect(cfg.ServingCert.TTL.AsDuration()).To(Equal(2160 * time.Hour))
+		Expect(cfg.ServingCert.RenewBefore.AsDuration()).To(Equal(720 * time.Hour))
+		Expect(cfg.ServingCert.RevokeAfter).NotTo(BeNil())
+		Expect(cfg.ServingCert.RevokeAfter.AsDuration()).To(Equal(24 * time.Hour))
+		Expect(cfg.ServingCert.Usages).To(ConsistOf("serverAuth"))
+		Expect(cfg.ServingCert.ReuseKey).To(BeTrue())
+		Expect(cfg.ServingCert.Store.Files).NotTo(BeNil())
+		Expect(cfg.ServingCert.Store.Files.Cert).To(Equal("/var/lib/puppet-ca/serving/tls.crt"))
+	})
+
+	It("decodes the Secret flavour", func() {
+		cfg, err := loadServerConfig(writeTempConfig(`
+serving_cert:
+  certname: ca.example.com
+  names: [ca.example.com]
+  renew_before: 720h
+  store:
+    secret: {name: openvox-ca-serving-tls, namespace: openvox}
+`))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.ServingCert.Store.Secret).NotTo(BeNil())
+		Expect(cfg.ServingCert.Store.Secret.Name).To(Equal("openvox-ca-serving-tls"))
+		Expect(cfg.ServingCert.Store.Files).To(BeNil())
+	})
+
+	It("leaves the block nil when it is absent, so the feature is off", func() {
+		cfg, err := loadServerConfig(writeTempConfig("hostname: ca.example.com\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.ServingCert).To(BeNil())
+		Expect(cfg.tlsEnabled()).To(BeFalse())
+	})
+
+	It("treats an empty block as a configuration error rather than a no-op", func() {
+		// The reason the field is a pointer. `serving_cert: {}` decodes to a
+		// non-nil entry naming no store, which buildServingCert then refuses --
+		// a value type could not tell that from the block being absent, and the
+		// operator would get a CA quietly serving no TLS.
+		cfg, err := loadServerConfig(writeTempConfig("serving_cert: {}\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.ServingCert).NotTo(BeNil())
+		Expect(cfg.tlsEnabled()).To(BeTrue())
+
+		_, buildErr := buildServingCert(cfg, GinkgoT().TempDir(), "", stubCACerts{})
+		Expect(buildErr).To(MatchError(ContainSubstring("serving_cert")))
+	})
+})
+
+// The holder's remaining branches: the second clause of encryptedKeyHint, the
+// two validity warnings, and the Save-side install failure.
+var _ = Describe("the serving certificate holder's diagnostics", func() {
+	// selfSigned mints a keypair with the given validity window, for the arms
+	// that need a certificate the CA would never issue.
+	selfSigned := func(notBefore, notAfter time.Time) (certPEM, keyPEM []byte) {
+		GinkgoHelper()
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		Expect(err).NotTo(HaveOccurred())
+		tmpl := &x509.Certificate{
+			SerialNumber: big.NewInt(1),
+			Subject:      pkix.Name{CommonName: "ca.test"},
+			DNSNames:     []string{"ca.test"},
+			NotBefore:    notBefore,
+			NotAfter:     notAfter,
+			KeyUsage:     x509.KeyUsageDigitalSignature,
+			ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+		Expect(err).NotTo(HaveOccurred())
+		keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+		Expect(err).NotTo(HaveOccurred())
+		return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+			pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+	}
+
+	It("names the encrypted-key case for a legacy DEK-Info block too", func() {
+		// The older and still common shape: an "RSA PRIVATE KEY" block whose
+		// headers carry the encryption. The type check alone does not see it,
+		// which is why encryptedKeyHint tests the headers as well -- and that
+		// clause could be deleted with only the newer spelling covered.
+		legacy := pem.EncodeToMemory(&pem.Block{
+			Type:    "RSA PRIVATE KEY",
+			Headers: map[string]string{"Proc-Type": "4,ENCRYPTED", "DEK-Info": "AES-256-CBC,00"},
+			Bytes:   []byte("ciphertext"),
+		})
+		h := &servingCertHolder{describe: "Secret openvox/ca-tls"}
+		err := h.install([]byte("irrelevant"), legacy)
+		Expect(err).To(MatchError(ContainSubstring("must be unencrypted")))
+	})
+
+	It("warns when the material it is given has already expired", func() {
+		certPEM, keyPEM := selfSigned(time.Now().Add(-48*time.Hour), time.Now().Add(-24*time.Hour))
+		h := &servingCertHolder{describe: "the file pair at /srv/tls.crt"}
+		logs := captureLogs(slog.LevelWarn, func() {
+			Expect(h.install(certPEM, keyPEM)).To(Succeed())
+		})
+		Expect(logs).To(ContainSubstring("already expired"))
+	})
+
+	It("warns when the material it is given is not valid yet", func() {
+		certPEM, keyPEM := selfSigned(time.Now().Add(24*time.Hour), time.Now().Add(48*time.Hour))
+		h := &servingCertHolder{describe: "the file pair at /srv/tls.crt"}
+		logs := captureLogs(slog.LevelWarn, func() {
+			Expect(h.install(certPEM, keyPEM)).To(Succeed())
+		})
+		Expect(logs).To(ContainSubstring("not valid yet"))
+	})
+
+	It("fails the reconcile pass when material it just wrote cannot be presented", func() {
+		// The Save wrapper's own arm. Material this CA just issued that will
+		// not form a keypair is a defect rather than a transient fault, so it
+		// must not pass for a successful pass -- the store already holds it,
+		// and the next pass would find it current and never mention it again.
+		sc := newServingCert(acceptingStore{}, ca.CertSpec{Subject: "ca.test"})
+		err := sc.entry.Save(context.Background(), []byte("not a certificate"), []byte("nor a key"))
+		Expect(err).To(MatchError(ContainSubstring("cannot be presented by the listener")))
+	})
+
+	It("reports a store that cannot be read, and keeps what it has", func() {
+		// The Load wrapper's error arm, which returns rather than installing.
+		sc := newServingCert(refusingStore{}, ca.CertSpec{Subject: "ca.test"})
+		_, _, err := sc.entry.Load(context.Background())
+		Expect(err).To(MatchError(ContainSubstring("refusing")))
+		Expect(sc.ownError()).To(HaveOccurred())
+	})
+})
+
+// acceptingStore takes any write and holds nothing, for the Save-side arm.
+type acceptingStore struct{}
+
+func (acceptingStore) String() string { return "the accepting store" }
+func (acceptingStore) Load(context.Context) ([]byte, []byte, error) {
+	return nil, nil, nil
+}
+func (acceptingStore) Save(context.Context, []byte, []byte) error { return nil }
+
+// refusingStore fails every read, for the Load-side arm.
+type refusingStore struct{}
+
+func (refusingStore) String() string { return "the refusing store" }
+func (refusingStore) Load(context.Context) ([]byte, []byte, error) {
+	return nil, nil, errors.New("refusing to read")
+}
+func (refusingStore) Save(context.Context, []byte, []byte) error { return nil }

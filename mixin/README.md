@@ -94,7 +94,9 @@ alerting rules for the openvox-ca exporter. It alerts on:
   [Kubernetes export](../docs/kubernetes-export.md) feature is in use).
 - **Managed certificates** with no usable certificate — never issued at all, or
   holding only revoked ones (only when
-  [`managed_certs`](../docs/configuration.md#managed-certificates) is in use).
+  [`managed_certs`](../docs/configuration.md#managed-certificates) or
+  [`serving_cert`](../docs/configuration.md#the-cas-own-serving-certificate) is
+  in use; the CA's own serving certificate is one such entry).
   It covers an entry whose store has never accepted a write, and an entry whose
   live certificate was revoked and not yet reissued; both leave the component
   with nothing to present, which is why they page under one name. It does not

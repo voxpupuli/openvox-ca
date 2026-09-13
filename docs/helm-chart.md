@@ -175,7 +175,7 @@ The alternatives, in the same message:
 | Setting | When |
 | --- | --- |
 | `config.tls_cert` / `config.tls_key` | A certificate you mount yourself, via `extraVolumes` |
-| `config.serving_cert` | The CA issues and renews its own, into a Secret or a file pair. The way out of the bootstrap deadlock when the CA key is held at a provider, since nothing else can issue that certificate. Mutually exclusive with the two above and with `tls.existingSecret`, all of which set them |
+| `config.serving_cert` | The CA issues and renews its own, into a Secret or a file pair. The way out of the bootstrap deadlock when the CA key is held at a provider, since nothing else can issue that certificate. Mutually exclusive with every route that sets `tls_cert`/`tls_key` — the two rows around this one, and `tls.existingSecret` — and the chart refuses the combination at install time. A file store must live under `persistence.mountPath`, which the chart also checks |
 | `env` / `extraEnv` — `PUPPET_CA_TLS_CERT` and `PUPPET_CA_TLS_KEY` | The paths come from a Secret at runtime. Environment variables outrank the config file, and the chart counts them |
 | `config.no_tls_required: true` | Only behind a proxy that terminates TLS and re-originates it to the pod. Client certificates do not survive that, so mTLS-authenticated endpoints become unreachable |
 | `listen.host: 127.0.0.1` or `localhost` | A sidecar-only deployment. Those two spellings and nothing else: the server tests `net.ParseIP(host).IsLoopback()`, which rejects the bracketed `[::1]`, and it builds its listen address as `host + ":" + port`, which turns a bare `::1` into the unparseable `::1:8140` |
@@ -686,7 +686,7 @@ cannot write is retried on the next pass, while the serving certificate is what
 the listener presents, so the CA does not start without it.
 
 **Those namespaces must already exist.** They come out of `config.managed_certs`
-rather than from a values key, so the chart has no list to create them from and
+and `config.serving_cert` rather than from a values key, so the chart has no list to create them from and
 does not try; an install naming a namespace that does not exist fails on the
 Role. Create them first, or point the entries at namespaces the release already
 owns.

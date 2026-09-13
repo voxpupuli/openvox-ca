@@ -158,6 +158,16 @@ func newServingCert(store servingCertStore, spec ca.CertSpec) *servingCert {
 				// which is the one thing that repairs this.
 				if err := s.holder.install(certPEM, keyPEM); err != nil {
 					s.record(err)
+					// Logged as well as recorded. lastErr is read once, at
+					// startup, and only when the store came back empty -- so
+					// after the listener is up nothing else would ever mention
+					// this. It is the arm that carries another replica's
+					// renewal, which is the one case where unusable material
+					// leaves this replica presenting the previous certificate
+					// with no other signal until it expires.
+					slog.Warn("The serving material in the store cannot be presented by the "+
+						"listener; continuing with the certificate already installed",
+						"store", store, "subject", spec.Subject, "error", err)
 				}
 			}
 			return certPEM, keyPEM, nil
@@ -393,6 +403,10 @@ func buildServingCert(cfg *serverConfig, absCADir, configPath string,
 		exportSecretTargets(cfg.KubernetesExport)); err != nil {
 		return nil, err
 	}
+	// And against managed_certs, which nothing else compares this entry with.
+	if err := checkManagedCertOverlap(cfg); err != nil {
+		return nil, err
+	}
 
 	deps, err := servingCertDeps(one, caCerts)
 	if err != nil {
@@ -609,7 +623,23 @@ func provisionServingCert(ctx context.Context, myCA *ca.CA, s *servingCert) erro
 		return nil
 	}
 
-	if _, err := myCA.ReconcileManaged(ctx); err != nil {
+	// Bounded as a whole, which the pass is not on its own. internal/ca gives
+	// each entry its own ca.LockTimeout budget, so a pass over N entries can
+	// spend N x 60s here -- and this runs before the listener binds, inside the
+	// window a Kubernetes startupProbe and systemd's TimeoutStartSec are both
+	// measuring. Those budgets were derived for CA.Init alone and do not have
+	// that much room, so an unbounded pass lets a component certificate's slow
+	// store stop the CA ever becoming ready.
+	//
+	// One budget for the whole step, rather than one per entry. A deployment
+	// that configures more component certificates does not thereby get a longer
+	// startup; the entries that did not get a turn are reconciled by the
+	// background loop a moment later, which is where they belong. What must
+	// happen before the listener binds is this certificate, and the load below
+	// is what decides whether it did.
+	provisionCtx, cancel := context.WithTimeout(ctx, ca.LockTimeout)
+	defer cancel()
+	if _, err := myCA.ReconcileManaged(provisionCtx); err != nil {
 		// Logged, not returned. It may belong to another entry entirely, and
 		// the question that decides is asked below.
 		slog.Debug("The startup reconcile pass reported a failure; "+
@@ -671,4 +701,95 @@ func (s *servingCert) getCertificate() func(*tls.ClientHelloInfo) (*tls.Certific
 		return nil
 	}
 	return s.holder.GetCertificate
+}
+
+// checkManagedCertOverlap refuses a serving certificate that collides with a
+// managed one on its certname or on its Secret.
+//
+// internal/certstore refuses both collisions *within* a block: two entries
+// sharing a certname "would replace each other on every pass" because there is
+// one inventory slot per subject, and two entries sharing a Secret "would each
+// remove the other's keys" because every managed certificate applies under one
+// field manager, so neither apply ever raises a conflict. Both checks are built
+// per call, over one slice. serving_cert and managed_certs are validated in
+// separate calls and only meet afterwards, when main.go appends the serving
+// entry to the same ca.ManagedCerts slice -- so neither check sees the pair,
+// and internal/ca de-duplicates nothing.
+//
+// The victim of either collision is the certificate the listener presents. Both
+// entries reconcile the same subject, each pass finds the other's certificate
+// failing its own spec, and the two supersede each other for ever: the CA ends
+// up presenting a certificate its own CRL revokes, the CRL grows an entry every
+// interval, and where that certname is listed in puppet_server the credential
+// being churned is a CA admin credential. The shared-host deployment this
+// feature documents is exactly where an operator would write one certname in
+// both blocks.
+//
+// The file-store direction of the same hazard needs nothing here: caOwnedPaths
+// reserves the serving trio, so CheckReservedPaths already refuses a
+// managed_certs entry that lands on any of it, in both directions.
+//
+// Written here rather than in internal/certstore because that package has no
+// notion of two blocks feeding one reconcile set -- Config.ValidateIn takes one
+// block at a time. If a third consumer of the mechanism ever appears, this
+// belongs there instead of being copied a second time.
+func checkManagedCertOverlap(cfg *serverConfig) error {
+	e := cfg.ServingCert
+	if e == nil {
+		return nil
+	}
+	for i := range cfg.ManagedCerts {
+		m := &cfg.ManagedCerts[i]
+		if m.Certname == e.Certname {
+			return fmt.Errorf("serving_cert (%s) and managed_certs[%d] name the same "+
+				"certname: they share one inventory slot, so each pass would find the "+
+				"other's certificate failing its own spec and replace it, for ever -- and "+
+				"the certificate being replaced is the one this CA's listener presents. "+
+				"Give the component certificate a certname of its own",
+				e.Certname, i)
+		}
+		if err := servingSecretCollision(e, m, i); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// servingSecretCollision reports a managed certificate whose Secret store may
+// name the same Secret as the serving certificate's.
+//
+// Compared on the name first and then on whether the two namespaces can name
+// the same one, which is how internal/certstore compares its own pairs and for
+// the same reason: an omitted namespace resolves to the CA pod's own, which is
+// not known here because this runs before any Kubernetes client exists. So an
+// omission on either side is treated as possibly-the-other and the pair is
+// refused. That over-refuses only where the two genuinely differ and one was
+// left blank, which costs an operator one spelled-out namespace.
+func servingSecretCollision(e, m *certstore.Entry, idx int) error {
+	es, ms := e.Store.Secret, m.Store.Secret
+	if es == nil || ms == nil || es.Name != ms.Name {
+		return nil
+	}
+	if es.Namespace != ms.Namespace && es.Namespace != "" && ms.Namespace != "" {
+		return nil
+	}
+	msg := "serving_cert (%s) and managed_certs[%d] (%s) both store their material in " +
+		"Secret %s/%s: every managed certificate applies under one field manager, so " +
+		"neither write ever raises a conflict and the two would overwrite each other's " +
+		"certificate and key on every pass -- including the one this CA's listener " +
+		"presents. Give one of them a Secret of its own"
+	if es.Namespace == "" || ms.Namespace == "" {
+		msg += ". An omitted namespace resolves to the CA pod's own, so it is treated as " +
+			"possibly naming the same Secret; spell both namespaces out if they genuinely differ"
+	}
+	return fmt.Errorf(msg, e.Certname, idx, m.Certname, nsOrPodNamespace(es.Namespace), es.Name)
+}
+
+// nsOrPodNamespace renders a namespace for a message, saying what an empty one
+// means rather than printing nothing.
+func nsOrPodNamespace(ns string) string {
+	if ns == "" {
+		return "<the CA pod's namespace>"
+	}
+	return ns
 }

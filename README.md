@@ -271,8 +271,9 @@ kill $PCA_PID; wait $PCA_PID 2>/dev/null
 ```
 
 **While that server is up its whole admin API is unauthenticated** — the
-authorisation middleware is only installed when `tls_cert` and `tls_key` are
-both set, and that includes `POST /generate/<subject>`, which hands back a
+authorisation middleware is only installed when TLS is configured — `tls_cert`
+and `tls_key`, their environment equivalents, or `serving_cert` — and that
+includes `POST /generate/<subject>`, which hands back a
 signed certificate and its private key. `--host 127.0.0.1` is required rather
 than advisable, and the `kill` above is part of the procedure, not tidying.
 

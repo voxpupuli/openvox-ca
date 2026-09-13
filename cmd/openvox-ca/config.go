@@ -293,9 +293,11 @@ type serverConfig struct {
 	// `tls_key`. Nil disables it, which is the default.
 	//
 	// A *certstore.Entry rather than a type of its own, deliberately: the
-	// certificate the CA serves is described by exactly the same seven fields a
-	// component's is, lives in one of exactly the same two stores, and inherits
-	// the same CA-wide defaults. A second spelling of that block would be a
+	// certificate the CA serves is described by the same fields a component's
+	// is, lives in one of exactly the same two stores, and inherits the same
+	// CA-wide defaults. Deliberately not a count -- an earlier version said
+	// "seven", which was the size of ca.CertSpec rather than of this block and
+	// was wrong the day it was written. A second spelling of that block would be a
 	// second thing to keep in step with it, and the first divergence would be
 	// silent.
 	//
