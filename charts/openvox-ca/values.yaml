@@ -65,6 +65,8 @@ commonAnnotations: {}
 #     crl_validity_days: 90
 #     crl_url: https://ca.example.com/puppet-ca/v1/certificate_revocation_list/ca
 #     enable_expired_cert_cleanup: true
+#     leaf_backdate_sec: 300   # clock-skew tolerance on every leaf; assumes synchronised clocks
+#     managed_cert_interval_sec: 900   # how often managed certificates are reconciled
 config: {}
 
 # Use a ConfigMap you manage yourself instead of one rendered from `config`.

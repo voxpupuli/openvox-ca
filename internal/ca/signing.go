@@ -47,7 +47,35 @@ const (
 	certValidity = 5 * 365 * 24 * time.Hour
 	// CRLValidity is the default validity window written into every CRL.
 	CRLValidity = 30 * 24 * time.Hour
+	// defaultLeafBackdate is how far before the moment of issuance a leaf's
+	// NotBefore is set when the CA does not say otherwise, so a verifier whose
+	// clock is behind ours still accepts a certificate we have just signed.
+	//
+	// Five minutes is the tolerance, not a margin for a broken fleet: a client
+	// whose clock is further out than this rejects a certificate the CA signed
+	// a moment ago as not yet valid, and will keep doing so until its clock is
+	// fixed. The knob exists for a fleet that cannot run NTP; the default
+	// assumes it can.
+	//
+	// It is a default rather than a constant because a second place depends on
+	// the value: issueDecision derives a certificate's forward lifetime -- the
+	// span it was actually issued to serve -- as NotAfter - NotBefore - the
+	// backdate, and that arithmetic is what clamps the renew-before window.
+	defaultLeafBackdate = 5 * time.Minute
 )
+
+// leafBackdate returns how far this CA backdates a leaf's NotBefore.
+//
+// Zero (the CA struct's zero value) means defaultLeafBackdate; a negative
+// setting is refused at startup, so a caller that reaches here with one is a
+// CA built in code rather than from configuration, and gets the default rather
+// than a certificate that is not valid until the future.
+func (c *CA) leafBackdate() time.Duration {
+	if c.LeafBackdate > 0 {
+		return c.LeafBackdate
+	}
+	return defaultLeafBackdate
+}
 
 // CRLValidityDuration returns the CA's configured CRL validity period.
 // When CRLValidityDays is zero the package-level CRLValidity default is used.
@@ -606,7 +634,7 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 		}
 	}
 
-	certPEM, err := c.issueLeafLocked(ctx, subject, csr.Subject, csr.PublicKey, subjectAltNames{DNSNames: dnsNames}, extraExtensions, ttl)
+	certPEM, err := c.issueLeafLocked(ctx, subject, csr.Subject, csr.PublicKey, subjectAltNames{DNSNames: dnsNames}, extraExtensions, nil, ttl)
 	if err != nil {
 		return nil, err
 	}
@@ -630,17 +658,40 @@ type subjectAltNames struct {
 	URIs           []*url.URL
 }
 
+// defaultLeafExtKeyUsage returns the extended key usages a leaf carries when
+// its caller names none.
+//
+// A fresh slice each call, deliberately: it is written into an
+// x509.Certificate template that callers are free to amend, and a shared
+// package-level slice would let one issuance's amendment reach the next.
+func defaultLeafExtKeyUsage() []x509.ExtKeyUsage {
+	return []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}
+}
+
 // issueLeafLocked builds, signs, and persists a leaf certificate for subject
-// from the given public key, SANs, and extra (Puppet OID) extensions, then
-// appends the inventory entry and updates the in-memory serial index.
-// ttl=0 means use the default certValidity. c.mu must be held by the caller.
+// from the given public key, SANs, extended key usages, and extra (Puppet OID)
+// extensions, then appends the inventory entry and updates the in-memory serial
+// index. ttl=0 means use the default certValidity. c.mu must be held by the
+// caller.
+//
+// eku=nil means the serverAuth+clientAuth pair every certificate this CA issues,
+// which is what all four callers pass unless something asked otherwise. It is a
+// parameter so that a managed certificate CAN be narrower: clientAuth is what
+// makes a certificate usable as a CA client, so a deployment that knows its
+// certificate only ever answers handshakes can withhold it. Which certificates
+// want that is the configuring caller's decision, not this function's.
+//
+// Making the usage a parameter of the shared tail rather than a second signing
+// path keeps the key-strength policy, the serial allocation and the inventory
+// append in one place.
 //
 // This is the tail shared by signWithDuration (inputs come from a submitted
 // CSR, after CSR-specific validation), AutoRenew (inputs come from an
-// already-issued certificate's public key, with no CSR involved at all), and
+// already-issued certificate's public key, with no CSR involved at all),
 // GenerateWithOptions (inputs come from a key this CA just generated, with no
-// client involved at all).
-func (c *CA) issueLeafLocked(ctx context.Context, subject string, subjectName pkix.Name, pubKey any, sans subjectAltNames, extraExtensions []pkix.Extension, ttl time.Duration) ([]byte, error) {
+// client involved at all), and issueManagedUnderSubjectLock (inputs come from server
+// configuration, with no client involved at all).
+func (c *CA) issueLeafLocked(ctx context.Context, subject string, subjectName pkix.Name, pubKey any, sans subjectAltNames, extraExtensions []pkix.Extension, eku []x509.ExtKeyUsage, ttl time.Duration) ([]byte, error) {
 	// Defensive: a nil CACert here means the caller skipped Init() (or it
 	// failed). Without this guard the c.CACert.NotAfter dereference below
 	// would panic the entire frontend.
@@ -695,14 +746,21 @@ func (c *CA) issueLeafLocked(ctx context.Context, subject string, subjectName pk
 	}
 	subjectKeyID := sha1.Sum(pubKeyDER)
 
+	// Resolved here rather than at each call site so an omitted argument cannot
+	// mean "no extended key usage at all", which in X.509 means *unrestricted*
+	// -- the opposite of what a caller passing nothing intends.
+	if len(eku) == 0 {
+		eku = defaultLeafExtKeyUsage()
+	}
+
 	template := &x509.Certificate{
 		SerialNumber: serialInt,
 		Subject:      subjectName,
-		NotBefore:    now.Add(-24 * time.Hour),
+		NotBefore:    now.Add(-c.leafBackdate()),
 		NotAfter:     now.Add(validity),
 
 		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		ExtKeyUsage: eku,
 
 		BasicConstraintsValid: true,
 		IsCA:                  false,
@@ -1467,7 +1525,7 @@ func (c *CA) AutoRenew(ctx context.Context, presentedCert *x509.Certificate) ([]
 				EmailAddresses: presentedCert.EmailAddresses,
 				URIs:           presentedCert.URIs,
 			}
-			return c.issueLeafLocked(ctx, subject, presentedCert.Subject, presentedCert.PublicKey, sans, extraExtensions, 0)
+			return c.issueLeafLocked(ctx, subject, presentedCert.Subject, presentedCert.PublicKey, sans, extraExtensions, nil, 0)
 		}()
 		if err != nil {
 			return err
