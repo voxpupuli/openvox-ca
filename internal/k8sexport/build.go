@@ -20,28 +20,20 @@ package k8sexport
 import (
 	"encoding/pem"
 
+	"github.com/voxpupuli/openvox-ca/internal/k8sclient"
 	corev1 "k8s.io/api/core/v1"
 	accorev1 "k8s.io/client-go/applyconfigurations/core/v1"
 )
 
-// The managed-by label marks every object this exporter maintains so operators
-// can identify and select resources owned by openvox-ca. It is always present
-// and takes precedence over any operator-supplied value for the same key.
-const (
-	managedByLabelKey   = "app.kubernetes.io/managed-by"
-	managedByLabelValue = "openvox-ca"
-)
-
 // labelsFor merges the target's configured labels with the mandatory
-// managed-by label. The managed-by label always wins so ownership cannot be
-// accidentally masked by configuration.
+// managed-by label, which marks every object this exporter maintains so
+// operators can identify and select resources owned by openvox-ca.
+//
+// The label itself lives in internal/k8sclient because the managed-certificate
+// stores apply the same one, and a selector finding "everything openvox-ca
+// owns" is a claim that spans both.
 func (t *Target) labelsFor() map[string]string {
-	labels := make(map[string]string, len(t.Metadata.Labels)+1)
-	for k, v := range t.Metadata.Labels {
-		labels[k] = v
-	}
-	labels[managedByLabelKey] = managedByLabelValue
-	return labels
+	return k8sclient.WithManagedByLabel(t.Metadata.Labels)
 }
 
 // pemBlocks splits a PEM blob into its individual blocks of the given type,
