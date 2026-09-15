@@ -495,7 +495,8 @@ func newCleanCmd() *cobra.Command {
 }
 
 func newGenerateCmd() *cobra.Command {
-	var certname, outDir, dns string
+	var certname, outDir string
+	var dnsNames []string
 	cmd := &cobra.Command{
 		Use:          "generate",
 		Short:        "Generate a server-side key+cert pair",
@@ -507,8 +508,20 @@ func newGenerateCmd() *cobra.Command {
 			}
 
 			path := "/puppet-ca/v1/generate/" + certname
-			if dns != "" {
-				path += "?dns=" + strings.ReplaceAll(dns, ",", "&dns=")
+			// url.Values rather than substituting "&dns=" for every comma in
+			// the raw flag value. That substitution could not tell a separator
+			// between names from one inside a name, so a single --dns carrying
+			// an "&" split into two SANs; Encode() percent-escapes each name
+			// instead, and one flag stays one name. Only "dns" goes in here, so
+			// Encode()'s key sort cannot reorder the list -- it preserves the
+			// order of values within a key, which is the order the operator
+			// typed and the order the server adds them to the SAN set.
+			if len(dnsNames) > 0 {
+				q := url.Values{}
+				for _, name := range dnsNames {
+					q.Add("dns", name)
+				}
+				path += "?" + q.Encode()
 			}
 
 			code, body, err := c.post(path, nil)
@@ -544,7 +557,14 @@ func newGenerateCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&certname, "certname", "", "Subject name to generate")
 	cmd.Flags().StringVar(&outDir, "out-dir", ".", "Directory to save the private key file")
-	cmd.Flags().StringVar(&dns, "dns", "", "Comma-separated DNS alt names")
+	// StringSliceVar, matching "openvox-ca generate" exactly: same flag name,
+	// same subcommand name, same arity. As a scalar this was last-wins, so
+	// "--dns a.example.com --dns b.example.com" was accepted and issued a
+	// certificate carrying only the second name -- an ambiguous request
+	// answered with a wrong artefact rather than with a refusal. The help text
+	// is the sibling's word for word, because the two being readable side by
+	// side is the point.
+	cmd.Flags().StringSliceVar(&dnsNames, "dns", nil, "DNS alt names (repeatable, or comma-separated)")
 	_ = cmd.MarkFlagRequired("certname")
 	return cmd
 }
@@ -644,6 +664,24 @@ func newSetupCmd() *cobra.Command {
 			}
 			defer func() { _ = instanceLock.Unlock() }()
 
+			// Init either bootstraps a new CA or loads one that is already
+			// there, and reports which only to the log. Ask the store first, so
+			// the success line below can say which of the two happened.
+			//
+			// The check is not racy here even though it is two operations:
+			// setup addresses a local directory through the filesystem backend,
+			// which has no distributed locking and so admits exactly one
+			// instance, and the instance lock taken above is held across both.
+			// Nothing can put a CA in the cadir in the gap. Given that, a
+			// successful Init with a certificate already present loaded it --
+			// Init's fast path -- and a successful Init with none bootstrapped
+			// one, because every other combination (cert without key, key
+			// without cert) is refused rather than returning nil.
+			existingCA, err := store.HasCACert(cmd.Context())
+			if err != nil {
+				return fmt.Errorf("checking for an existing CA in %s: %w", absDir, err)
+			}
+
 			myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, hostname)
 			myCA.EncryptCAKey = encryptKey
 			myCA.KeyPassphrase = ca.KeyPassphraseConfig{
@@ -652,7 +690,24 @@ func newSetupCmd() *cobra.Command {
 			if err := myCA.Init(cmd.Context()); err != nil {
 				return err
 			}
-			fmt.Printf("CA initialized in %s (CN: Puppet CA: %s)\n", absDir, hostname)
+
+			// The subject in force, read back off the certificate, rather than
+			// one assembled from --hostname. On the load path --hostname has no
+			// effect at all -- the CN is fixed when a CA is bootstrapped, once
+			// and permanently -- so echoing it named a CA that existed nowhere,
+			// and did so on stdout while the truthful log line went to stderr.
+			//
+			// %q because on that path this value comes off a certificate found
+			// in the cadir rather than from anything this process chose, which
+			// is exactly the case AGENTS.md's escaping rule covers: a control
+			// character in a subject would otherwise write its own line of
+			// operator-facing output.
+			subject := myCA.CACert.Subject.CommonName
+			if existingCA {
+				fmt.Printf("Existing CA found in %s (CN: %q)\n", absDir, subject)
+			} else {
+				fmt.Printf("CA initialized in %s (CN: %q)\n", absDir, subject)
+			}
 			return nil
 		},
 	}

@@ -60,7 +60,9 @@ query-filters:
   #     straight to stderr by the CLI with no escaping, and its key comes from
   #     source directory names, so that call site formats with %q rather than
   #     %s, as do openvox-ca-ctl's import summary, its checkHTTP error body
-  #     and its sign --all list -- every value the server chooses. Each is
+  #     and its sign --all list -- every value the server chooses -- and its
+  #     setup CN line, which reports a subject read back off whatever
+  #     certificate is in the cadir rather than one this process chose. Each is
   #     pinned by a spec in cmd/openvox-ca-ctl -- as is list's table, which an
   #     earlier version of this file exempted on a column-alignment rationale
   #     that turned out to be false. Deliberately left unquoted, for two

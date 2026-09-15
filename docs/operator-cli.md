@@ -145,12 +145,31 @@ openvox-ca-ctl reissue-crl
 openvox-ca-ctl generate --certname agent.example.com
 openvox-ca-ctl generate --certname agent.example.com --dns alt.example.com --out-dir /etc/ssl
 
+# --dns is repeatable as well as comma-separated, and the two forms may be
+# mixed. These two are the same request, and take the same arity as `openvox-ca
+# generate --dns` (below) -- the same flag on the same subcommand name in the
+# other binary.
+openvox-ca-ctl generate --certname agent.example.com --dns a.example.com,b.example.com
+openvox-ca-ctl generate --certname agent.example.com --dns a.example.com --dns b.example.com
+
 # Import a certificate issued outside this CA's normal flow (e.g. migrated
 # from a legacy CA sharing this CA's key)
 openvox-ca-ctl import-cert --certname legacy-node.example.com --cert-file legacy-node_cert.pem
 
 # Bootstrap a new CA offline (no server required)
 openvox-ca-ctl setup --cadir /etc/puppetlabs/puppet/ssl --hostname puppet.example.com
+
+# A cadir that already holds a CA is loaded, not re-bootstrapped, and the run
+# reports which happened:
+#
+#   CA initialized in <cadir> (CN: "Puppet CA: puppet.example.com")
+#   Existing CA found in <cadir> (CN: "Puppet CA: whatever-it-was")
+#
+# On the second, --hostname has no effect: the CN is fixed when a CA is
+# bootstrapped, once and permanently (see the `hostname` setting in
+# configuration.md), so the CN reported is the one on the certificate found
+# there and not the one asked for. Pointing setup at the wrong --cadir
+# therefore names the CA that is really in it.
 
 # Import an external CA cert/key offline
 openvox-ca-ctl import \
