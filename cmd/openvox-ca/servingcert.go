@@ -59,6 +59,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -864,8 +865,22 @@ func servingChainCollision(e, m *certstore.Entry, idx int) error {
 	if ef == nil || mf == nil || ef.CA == "" {
 		return nil
 	}
+	// Cleaned here rather than trusting the two blocks to have been validated
+	// first, which is the same call internal/certstore makes for the same
+	// reason: this comparison and buildManagedCerts are independent, and in the
+	// serve command the managed block happens to be validated first only
+	// because of the order two lines of main.go sit in. Relying on that makes
+	// the guard silently weaker for any other caller -- `/srv/a/./b.pem` and
+	// `/srv/a/b.pem` are one file and two strings.
+	//
+	// Lexical only, like every path comparison in this tree: a symlinked
+	// directory still arrives as two distinct paths. internal/certstore states
+	// why -- resolving them means touching the filesystem at startup for paths
+	// that need not exist yet -- and this guard inherits that trade rather than
+	// taking a different one.
+	chain := filepath.Clean(strings.TrimSpace(ef.CA))
 	for _, p := range []struct{ field, path string }{{"cert", mf.Cert}, {"key", mf.Key}} {
-		if p.path != ef.CA {
+		if filepath.Clean(strings.TrimSpace(p.path)) != chain {
 			continue
 		}
 		return fmt.Errorf("serving_cert (%s) writes its CA chain to %q, which is "+

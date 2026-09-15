@@ -1314,9 +1314,13 @@ var _ = Describe("what the serving certificate reports at startup and on renewal
 	})
 
 	It("reports a renewal once, not on every pass that reloads the same material", func() {
-		// Load installs on every reconcile pass, so without the unchanged-material
-		// check the listener would report an installation every interval and the
-		// line announcing a real renewal would be worthless.
+		// Two halves, and the first version asserted only the second. Load
+		// installs on every reconcile pass, so without the unchanged-material
+		// check the listener would report an installation every interval and
+		// the line announcing a real renewal would be worthless -- but a
+		// version of install() that never logged at all would also satisfy
+		// "logs nothing on a reload". So this pins both: the line fires when
+		// the material actually changes, and not when it does not.
 		myCA, store := newRefresherTestCA()
 		myCA.LeafKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
 		sc, err := buildServingCert(cfgWithServingFiles(GinkgoT().TempDir()),
@@ -1328,10 +1332,19 @@ var _ = Describe("what the serving certificate reports at startup and on renewal
 		certPEM, keyPEM, err := sc.store.Load(context.Background())
 		Expect(err).NotTo(HaveOccurred())
 
-		first := captureLogs(slog.LevelInfo, func() {
+		same := captureLogs(slog.LevelInfo, func() {
 			Expect(sc.holder.install(certPEM, keyPEM)).To(Succeed())
 		})
-		Expect(first).To(BeEmpty(), "the material is unchanged, so nothing should be reported")
+		Expect(same).To(BeEmpty(), "the material is unchanged, so nothing should be reported")
+
+		// And the half that was missing: a genuine change is reported. Without
+		// this, deleting the log line entirely leaves the assertion above green.
+		peerCert, peerKey := reissueInto(context.Background(), myCA, "ca.test")
+		changed := captureLogs(slog.LevelInfo, func() {
+			Expect(sc.holder.install(peerCert, peerKey)).To(Succeed())
+		})
+		Expect(changed).To(ContainSubstring("Serving certificate installed on the listener"))
+		Expect(changed).To(ContainSubstring(serialOf(peerCert)))
 	})
 })
 
@@ -1589,3 +1602,43 @@ var _ = Describe("the SIGHUP status text", func() {
 			To(ContainSubstring("TLS material"))
 	})
 })
+
+// The chain guard compares files, not the strings that name them.
+var _ = DescribeTable("the chain-collision guard normalises before comparing",
+	func(servingCA, managedCert string, wantRefused bool) {
+		// The guard must not depend on managed_certs having been validated
+		// first: that ordering holds in the serve command by accident of two
+		// lines' positions, and nothing states it. So this drives
+		// buildServingCert alone, with the managed side never cleaned.
+		cfg := &serverConfig{
+			Hostname: "ca.test",
+			ServingCert: &certstore.Entry{
+				Certname: "ca.test", Names: []string{"ca.test"},
+				RenewBefore: certstore.Duration(720 * time.Hour),
+				Store: certstore.StoreConfig{Files: &certstore.FilesConfig{
+					Cert: "/srv/serving/tls.crt", Key: "/srv/serving/tls.key",
+					CA: servingCA}},
+			},
+			ManagedCerts: certstore.Config{{
+				Certname: "component.test", Names: []string{"component.test"},
+				RenewBefore: certstore.Duration(720 * time.Hour),
+				Store: certstore.StoreConfig{Files: &certstore.FilesConfig{
+					Cert: managedCert, Key: "/srv/comp/tls.key"}},
+			}},
+		}
+
+		_, err := buildServingCert(cfg, GinkgoT().TempDir(), "", stubCACerts{})
+		if wantRefused {
+			Expect(err).To(MatchError(ContainSubstring("writes its CA chain")))
+		} else {
+			Expect(err).NotTo(HaveOccurred())
+		}
+	},
+	Entry("the same spelling", "/srv/comp/tls.crt", "/srv/comp/tls.crt", true),
+	Entry("a doubled separator", "/srv/comp//tls.crt", "/srv/comp/tls.crt", true),
+	Entry("a dot segment", "/srv/comp/./tls.crt", "/srv/comp/tls.crt", true),
+	Entry("a parent traversal", "/srv/x/../comp/tls.crt", "/srv/comp/tls.crt", true),
+	Entry("surrounding space", " /srv/comp/tls.crt ", "/srv/comp/tls.crt", true),
+	// The neighbour it must not refuse: a genuinely different file.
+	Entry("two different files", "/etc/openvox/ca.pem", "/srv/comp/tls.crt", false),
+)
