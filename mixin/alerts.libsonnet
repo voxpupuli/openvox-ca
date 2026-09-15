@@ -760,7 +760,7 @@
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
               summary: 'A managed certificate has never been issued.',
-              description: 'The Puppet CA on {{ $labels.instance }} has {{ $labels.subject }} configured in managed_certs but no certificate for it exists after %(managedCertNeverIssuedFor)s. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else\'s material, or a directory that does not exist.' % { managedCertNeverIssuedFor: $._config.managedCertNeverIssuedFor },
+              description: 'The Puppet CA on {{ $labels.instance }} has {{ $labels.subject }} configured in managed_certs or serving_cert but no certificate for it exists after %(managedCertNeverIssuedFor)s. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else\'s material, or a directory that does not exist. If the subject is the CA\'s own certname it came from serving_cert, and the CA would not have started at all had it never been issued -- so this is a certificate that existed and was revoked, not one that never appeared.' % { managedCertNeverIssuedFor: $._config.managedCertNeverIssuedFor },
             },
           },
         ],

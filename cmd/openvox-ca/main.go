@@ -679,10 +679,10 @@ func newRootCmd() *cobra.Command {
 			//   (b) the bind address is loopback-only, or
 			//   (c) the operator explicitly opts out with --no-tls-required.
 			// NIST 800-53: SC-8 (Transmission Confidentiality and Integrity), SC-23 (Session Authenticity)
-			tlsConfigured := cfg.TLSCert != "" && cfg.TLSKey != ""
+			tlsConfigured := cfg.tlsEnabled()
 			if !tlsConfigured {
 				if !isLoopback(cfg.Host) && !cfg.NoTLSRequired {
-					return errors.New("refusing to start: plain HTTP on a non-loopback address is vulnerable to certificate injection; enable TLS (--tls-cert/--tls-key), restrict to loopback (--host 127.0.0.1), or set --no-tls-required")
+					return errors.New("refusing to start: plain HTTP on a non-loopback address is vulnerable to certificate injection; enable TLS (--tls-cert/--tls-key, or a self-provisioned serving_cert), restrict to loopback (--host 127.0.0.1), or set --no-tls-required")
 				}
 				if cfg.NoTLSRequired && !isLoopback(cfg.Host) {
 					slog.Warn("TLS is not configured on a non-loopback address; " +
@@ -822,6 +822,28 @@ func newRootCmd() *cobra.Command {
 				return err
 			}
 
+			// The CA's own serving certificate, when it issues its own. Built
+			// here so that a configuration error is refused before anything
+			// binds, and put into the same reconcile set so it renews on the
+			// same loop a component certificate does -- the renewal is
+			// identical, and only the startup and listener halves are not.
+			serving, err := buildServingCert(cfg, absCADir, resolved, store)
+			if err != nil {
+				return err
+			}
+			if serving != nil {
+				// FIRST in the set, not last, and that ordering is load-bearing
+				// rather than cosmetic. ReconcileManaged walks the slice in
+				// order, and provisionServingCert bounds the whole startup pass
+				// with one budget -- so an entry placed after the component
+				// certificates can have that budget spent before it gets a
+				// turn, leaving the store empty and the startup fatal because
+				// of some other certificate whose own failure is meant to be
+				// routine. What must exist before the listener binds is this
+				// one, so it goes first and the rest take what is left.
+				myCA.ManagedCerts = append([]ca.ManagedCert{serving.entry}, myCA.ManagedCerts...)
+			}
+
 			// SECURITY: In frontend mode, use the remote signer: the CA private
 			// key is never loaded into this process's address space.
 			// NIST 800-53: SC-3 (Security Function Isolation)
@@ -838,6 +860,17 @@ func newRootCmd() *cobra.Command {
 			notifier.Status("Initialising the CA")
 			if err := myCA.Init(ctx); err != nil {
 				return fmt.Errorf("failed to initialise CA: %w", err)
+			}
+
+			// Before anything binds, and fatal. A serving store that is absent
+			// or unreadable leaves the listener with nothing to present, which
+			// is the one way a managed certificate's routine self-healing
+			// failure is not routine here.
+			if serving != nil {
+				notifier.Status("Issuing the CA's own serving certificate")
+				if err := provisionServingCert(ctx, myCA, serving); err != nil {
+					return err
+				}
 			}
 
 			// SECURITY: Warn if any private key files have overly permissive modes.
@@ -861,8 +894,10 @@ func newRootCmd() *cobra.Command {
 			srv.PlainHTTP = !tlsConfigured && !isLoopback(cfg.Host) && !cfg.NoTLSRequired
 			srv.PuppetDateTimeFormat = cfg.PuppetDateTimeFormat
 
-			// Wire mTLS auth middleware when TLS is configured.
-			if cfg.TLSCert != "" && cfg.TLSKey != "" {
+			// Wire mTLS auth middleware when TLS is configured -- through the
+			// same predicate the listener uses, so a self-provisioned CA
+			// cannot come up serving HTTPS with no client authentication.
+			if tlsConfigured {
 				// Every trust domain this CA will accept a client from: its own
 				// first, then each client_ca entry. buildAuthConfig owns the
 				// assembly so that what the middleware trusts is decided in one
@@ -916,14 +951,28 @@ func newRootCmd() *cobra.Command {
 				}()
 			}
 
-			// certs holds the server's TLS keypair, or stays nil without TLS.
-			// It is reachable by the reload handler below so a renewed server
-			// certificate can be picked up without a restart.
+			// certs holds the operator-supplied TLS keypair, and stays nil in
+			// two cases that are no longer the same: no TLS at all, and TLS
+			// from a self-provisioned serving certificate, which the reconcile
+			// loop owns. It is reachable by the reload handler below so a
+			// renewed server certificate can be picked up without a restart --
+			// which is also why the second case leaves it nil, since there is
+			// no configured path for SIGHUP to re-read.
 			var certs *certReloader
-			if cfg.TLSCert != "" && cfg.TLSKey != "" {
-				certs, err = newCertReloader(cfg.TLSCert, cfg.TLSKey)
-				if err != nil {
-					return err
+			if tlsConfigured {
+				// Exactly one source, because the two are mutually exclusive:
+				// the operator-supplied pair, re-read on SIGHUP, or the
+				// self-provisioned holder the reconcile loop updates. certs
+				// stays nil for the second, which is what leaves SIGHUP with
+				// nothing to re-read -- correct, since there is no configured
+				// path to re-read it from.
+				getCertificate := serving.getCertificate()
+				if getCertificate == nil {
+					certs, err = newCertReloader(cfg.TLSCert, cfg.TLSKey)
+					if err != nil {
+						return err
+					}
+					getCertificate = certs.GetCertificate
 				}
 
 				caCertPEM, err := myCA.Storage.GetCACert(ctx)
@@ -944,13 +993,17 @@ func newRootCmd() *cobra.Command {
 				// NIST 800-53: SC-8 (Transmission Confidentiality and Integrity),
 				//              SC-23 (Session Authenticity), IA-3 (Device Identification)
 				server.TLSConfig = &tls.Config{
-					GetCertificate: certs.GetCertificate,
+					GetCertificate: getCertificate,
 					ClientCAs:      caPool,
 					ClientAuth:     tls.RequestClientCert,
 					MinVersion:     tls.VersionTLS12,
 				}
 
-				slog.Info("TLS enabled", "cert", cfg.TLSCert)
+				if serving != nil {
+					slog.Info("TLS enabled", "serving_cert", serving.store.String())
+				} else {
+					slog.Info("TLS enabled", "cert", cfg.TLSCert)
+				}
 			}
 
 			// Foreign client CRLs reload on their own timer, gated on client_ca
@@ -1063,7 +1116,7 @@ func newRootCmd() *cobra.Command {
 			go runReloadWatcher(ctx, hupCh, notifier, reloader, status)
 
 			var serveErr error
-			if cfg.TLSCert != "" && cfg.TLSKey != "" {
+			if tlsConfigured {
 				serveErr = server.ServeTLS(ln, "", "")
 			} else {
 				serveErr = server.Serve(ln)

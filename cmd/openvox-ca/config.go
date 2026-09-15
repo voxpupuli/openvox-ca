@@ -287,6 +287,34 @@ type serverConfig struct {
 	// NIST 800-53: AC-6 (Least Privilege)
 	ManagedCerts certstore.Config `yaml:"managed_certs"`
 
+	// ServingCert optionally makes the CA issue and renew the certificate its
+	// own listener presents, instead of being handed one through `tls_cert` /
+	// `tls_key`. Nil disables it, which is the default.
+	//
+	// A *certstore.Entry rather than a type of its own, deliberately: the
+	// certificate the CA serves is described by the same fields a component's
+	// is, lives in one of exactly the same two stores, and inherits the same
+	// CA-wide defaults. Deliberately not a count of those fields: a number here
+	// would drift the next time one is added. A second spelling of that block would be a
+	// second thing to keep in step with it, and the first divergence would be
+	// silent.
+	//
+	// What is not shared is the failure semantics, and that is this caller's
+	// half rather than the store's: the material must be readable before the
+	// listener binds and its absence is fatal, where a component store's
+	// absence is routine and self-heals on the next pass. See servingcert.go.
+	//
+	// A pointer so that `serving_cert: {}` is a configuration error -- a block
+	// naming no store -- rather than a silent no-op.
+	//
+	// SECURITY: the serving certificate carries clientAuth by default, like
+	// every other certificate this CA issues, so adding the CA's own certname
+	// to puppet_server makes it an admin credential. That combination is a
+	// normal shared-host deployment rather than a mistake, and it is reported
+	// at startup rather than left to be inferred.
+	// NIST 800-53: AC-6 (Least Privilege)
+	ServingCert *certstore.Entry `yaml:"serving_cert"`
+
 	// Storage backend selection and parameters. Embedded inline so the YAML
 	// keys (storage_backend, etcd_*, redis_*, sql_*, ca_cert_file, ca_key_file)
 	// remain at the top level. Shared with the operator CLI's migrate command
@@ -603,6 +631,25 @@ const defaultLeafBackdate = 5 * time.Minute
 // and comfortably below the point at which the seconds-to-nanoseconds multiply
 // overflows int64.
 const maxLeafBackdateSec = 30 * 24 * 60 * 60
+
+// tlsEnabled reports whether the API listener serves HTTPS.
+//
+// Two ways to get there and they are mutually exclusive: an operator-supplied
+// keypair at tls_cert/tls_key, or a serving certificate the CA issues and
+// renews for itself. buildServingCert refuses the combination.
+//
+// One predicate rather than the condition written out at each site, and the
+// property rather than a count of them: every site that decides whether the
+// listener speaks TLS reads this, including the plain-HTTP refusal, the mTLS
+// auth config, the listener's TLS config, ServeTLS and the status line. A
+// self-provisioned CA that satisfied some of them and not others would come up
+// serving HTTPS with no client authentication, or bind plain HTTP having
+// refused to. cmd/openvox-ca/servingcert_wiring_test.go holds the call sites to
+// their measured number, which is what a count in this comment would drift
+// from.
+func (c *serverConfig) tlsEnabled() bool {
+	return (c.TLSCert != "" && c.TLSKey != "") || c.ServingCert != nil
+}
 
 // maxManagedCertIntervalSec is the ceiling on managed_cert_interval_sec, for
 // the reason maxLeafBackdateSec exists and one more: a value that wraps the

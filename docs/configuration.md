@@ -168,13 +168,26 @@ leaf_backdate_sec: 0                   # 0 = built-in default (5m)
 
 # How often the managed-certificate reconcile loop runs. A managed certificate is
 # a named leaf the CA issues and renews on a loop; see "Managed certificates"
-# below. Nothing runs when `managed_certs` is empty.
+# below. The CA's own serving certificate renews on the same loop, so this also
+# applies to `serving_cert`. Nothing runs when both are absent.
 managed_cert_interval_sec: 0           # 0 = built-in default (15m)
 
 # Certificates this CA issues and renews for OpenVox components, each into a
 # Kubernetes Secret or a local file pair. See "Managed certificates" below —
 # including what it means for the store holding OpenVox Server's key.
 managed_certs: []
+
+# The certificate the CA's own listener presents, issued and renewed by the CA
+# itself instead of being supplied through tls_cert/tls_key. Absent by default,
+# and mutually exclusive with that pair. See "The CA's own serving certificate".
+# serving_cert:
+#   certname: ca.example.com
+#   names: [ca.example.com]
+#   renew_before: 720h
+#   store:
+#     files:
+#       cert: /var/lib/puppet-ca/tls.crt
+#       key: /var/lib/puppet-ca/tls.key
 ```
 
 ## Environment variables
@@ -280,6 +293,14 @@ Boolean env vars accept any value accepted by `strconv.ParseBool`: `1`, `t`, `tr
 
 ## Serving certificate
 
+> The CA can also issue and renew this certificate itself, which removes the
+> bootstrap below entirely — see [The CA's own serving
+> certificate](#the-cas-own-serving-certificate). Once the CA key is held at a
+> provider that is the only way to get this certificate renewed unattended —
+> the offline [`openvox-ca generate`](operator-cli.md) can still mint one by
+> hand, but nothing then renews it — and it is mutually exclusive with the pair
+> described here.
+
 `tls_cert` and `tls_key` name a **serving certificate issued by this CA**, not
 the CA's own `ca_crt.pem` and `ca_key.pem`. The CA certificate exists to sign
 other certificates, not to identify a server: its `keyUsage` is
@@ -383,7 +404,8 @@ and point `tls_cert` at that before starting.
 > name gets. Use `openvox-ca-ctl clean --certname` first to reissue.
 
 While TLS is off, the whole admin API is unauthenticated: the authorisation
-middleware is only installed when `tls_cert` and `tls_key` are both set. So
+middleware is only installed when TLS is configured — `tls_cert` and `tls_key`,
+their environment equivalents, or [`serving_cert`](#the-cas-own-serving-certificate). So
 `--host 127.0.0.1` is not decoration — treat it as required, and keep the
 window short. On an ordinary configuration the server would refuse to serve
 plain HTTP off loopback anyway, so forgetting it fails safe. On one carrying
@@ -1098,8 +1120,11 @@ mean either unit.
 **`certname` goes through the CA's ordinary name grammar**, so a bad name is
 refused at startup rather than discovered at issuance, and each name occupies
 the ordinary inventory slot for that subject. A component certificate and an
-agent certificate therefore cannot share a certname, and neither can two
-managed certificates.
+agent certificate therefore cannot share a certname, neither can two managed
+certificates, and neither can a managed certificate and
+[`serving_cert`](#the-cas-own-serving-certificate) — all three are refused at
+startup, because two entries for one subject would replace each other's
+certificate on every pass.
 
 **A certificate can be named four ways**, and at least one name of some kind is
 required. `names` carries the DNS entries, and `ip_addresses`,
@@ -1265,10 +1290,12 @@ Kubernetes.
 | `ca` | no chain is written |
 
 This exists for a reason rather than as a fallback. A CA using an external
-signer or `ca_key_provider: openbao` cannot mint its own serving certificate,
-because `openvox-ca-ctl generate` needs an admin certificate that does not exist
-until the CA is already serving — and that applies to a systemd unit as much as
-to a pod.
+signer or `ca_key_provider: openbao` cannot mint its own serving certificate
+*through `openvox-ca-ctl generate`*, which needs an admin certificate that does
+not exist until the CA is already serving — and that applies to a systemd unit
+as much as to a pod. [The CA's own serving
+certificate](#the-cas-own-serving-certificate) is the route that does work
+there, and it uses this same store.
 
 Two things a file store cannot do that a Secret store can, stated rather than
 quietly worked around:
@@ -1338,6 +1365,7 @@ the certificates can undo. The server refuses to start when a `cert`, `key` or
 | `cadir` | the whole tree: the CA key and certificate, the CRL, and the filesystem and SQLite backends' state |
 | `ca_cert_file`, `ca_key_file` | the CA's own certificate and private key, wherever a local-file override puts them |
 | `tls_cert`, `tls_key` | the pair the CA presents on its own listener |
+| `serving_cert.store.files.cert`, `.key` | the pair the CA issues for its own listener, when it self-provisions into files. Reserved only while `serving_cert` uses a file store. Its `ca` chain file is deliberately **not** reserved, for the same reason two managed entries may share one: every entry writes the same chain from the same source and none reads it back, so a shared chain file is the ordinary shared-host layout. Sharing it with a `managed_certs` entry's own `ca` is allowed; pointing it at that entry's `cert` or `key` is refused at startup, because the chain would overwrite the component's material on every issuance |
 | `ca_key_passphrase_file` | what unlocks the CA key |
 | `crl_chain_file` | the upstream CRL bundle the CA re-reads and republishes |
 | `logfile` | where the CA writes its log |
@@ -1403,7 +1431,7 @@ cover it and nothing new is needed. See [metrics & monitoring](metrics.md).
 > **Said once, at startup.** A SIGHUP that adds a certname to
 > `puppet_server_file` can create this condition at runtime, and the warning
 > does not repeat — the added CN in the `Reloaded admin allow list` line is the
-> signal to check against `managed_certs`.
+> signal to check against `managed_certs` and `serving_cert`.
 >
 > The listing is what grants the authority; `clientAuth` is what lets it be
 > presented. Neither alone is an admin credential, and narrowing an entry to
@@ -1435,6 +1463,214 @@ who missed that line finds it as a second row under one certname:
 ```
 openvox-ca-ctl revoke --serial <hex>
 ```
+
+## The CA's own serving certificate
+
+`serving_cert` makes the CA issue and renew the certificate its own listener
+presents, instead of being handed one through `tls_cert` / `tls_key`.
+
+It exists because the CA cannot otherwise issue that certificate at all. That is
+fine when cert-manager or an operator supplies one, and impossible when the CA
+key is held at a provider: cert-manager cannot act as a CA issuer without the
+key, and `openvox-ca-ctl generate` needs an admin certificate that does not
+exist until the CA is already serving. A deployment with `ca_key_provider:
+openbao` or an external signer has that deadlock, whether it runs as a systemd
+unit or in a pod.
+
+```yaml
+# Narrowed so the serving pair can sit beside it: the CA reserves the whole
+# cadir subtree against every file store, its own included.
+cadir: /var/lib/puppet-ca/ca
+
+serving_cert:
+  certname: ca.example.com
+  names: [ca.example.com, puppet]
+  ttl: 2160h
+  renew_before: 720h
+  store:
+    files:
+      cert: /var/lib/puppet-ca/tls.crt
+      key: /var/lib/puppet-ca/tls.key
+      ca: /var/lib/puppet-ca/ca.crt
+```
+
+> **Three rules decide where the pair can go, and here breaking any of them
+> stops the CA starting rather than being retried.**
+>
+> 1. **Writable by the CA.** The shipped systemd unit sets
+>    `ProtectSystem=strict` with `StateDirectory=puppet-ca`, so anything outside
+>    `/var/lib/puppet-ca` needs a `ReadWritePaths` drop-in — see
+>    [the store](#the-store), which describes the same constraint for a
+>    component certificate.
+> 2. **Outside the `cadir`.** The CA reserves that whole subtree against every
+>    file store, its own included. The example above therefore assumes the
+>    default `cadir` has been narrowed — `cadir: /var/lib/puppet-ca/ca` — with
+>    the pair at the `StateDirectory` root beside it.
+> 3. **In a directory that already exists.** The store will not create one, and
+>    `StateDirectory` creates only the top level. A `serving/` subdirectory is
+>    the obvious layout and it is the one that fails: the CA starts, writes, and
+>    exits.
+>
+> The difference from a component certificate is the consequence throughout: an
+> unwritable component store is logged and retried on the next pass, while an
+> unwritable serving store means the CA refuses to start. Under the Helm chart
+> the equivalent of rule 1 is `persistence.mountPath`. The chart refuses rules 1
+> and 2 at install time; it cannot check rule 3, because it does not know
+> whether an `initContainer` of yours creates the directory, so that one is
+> discovered at startup like it is here. Its own examples narrow `config.cadir`
+> and keep the pair at the mount root, which satisfies all three with nothing
+> extra to create.
+
+**Every key is the one a `managed_certs` entry takes**, with the same meanings
+and the same inheritance — `certname`, `names`, `ip_addresses`,
+`email_addresses`, `uris`, `usages`, `ttl`, `renew_before`, `revoke_after`,
+`key_algo` / `key_size`, `reuse_key`, and the same `store` block with its
+`secret` and `files` flavours. See [The certificate](#the-certificate) and [The
+store](#the-store); nothing there is spelled differently here.
+
+`serving_cert` holds exactly one certificate rather than a list, because the CA
+has one listener, so its refusals name `serving_cert` with no index.
+
+### Either store, chosen explicitly
+
+The CA runs as a systemd unit or in a container, and *that* — not where the
+components it serves run — decides where its own serving material belongs. A
+systemd deployment wants a local `cert` / `key` pair; a pod wants a Secret.
+
+Both work, and the choice is configuration rather than something the CA infers.
+A CA that guessed it was in Kubernetes would surprise anybody running it in a
+container for their own reasons, so there is no arrangement of these keys that
+leaves it to guess: exactly one of `store.secret` and `store.files` is set.
+
+> **A file store on an ephemeral container filesystem is a trap.** The material
+> is lost at every restart, so the CA issues a fresh serving certificate each
+> time and supersedes the previous one — accumulating CRL entries for
+> certificates nothing ever presented. That is a legitimate choice, and it
+> should be a choice: put the file pair on a volume that survives a restart, or
+> use a Secret store. The CA logs a line whenever it issues into a store that
+> held nothing, which is what makes the accident visible.
+
+### It is renewed without a restart
+
+The listener consults a holder on every handshake, so a renewal takes effect
+with no listener rebuild and no restart. A connection already established keeps
+the certificate it negotiated with; the next handshake gets the new one.
+
+Renewal is the ordinary reconcile pass — the same loop, on the same
+`managed_cert_interval_sec` timer, making the same decision. A renewal performed
+by another replica is picked up the same way: the pass reads the store, finds
+the peer's certificate current, and installs it.
+
+`SIGHUP` does nothing for this certificate, and needs to do nothing: there is no
+configured path to re-read it from, and the reconcile loop already owns when it
+changes. `tls_cert` / `tls_key` keep their SIGHUP behaviour unchanged.
+
+### Startup failure is fatal, unlike a component certificate's
+
+A `managed_certs` entry whose store is unreachable is logged and retried on the
+next pass, because a component certificate that appears a quarter of an hour
+late is a delay rather than an outage. The serving certificate is not like that:
+the listener has nothing to present, so the CA refuses to come up rather than
+binding and failing every handshake.
+
+The message says which store failed and why, because the two stores fail
+differently — a missing directory or an unreadable file is one thing; an
+unreachable API server, a missing RBAC grant, or a service account without `get`
+on that Secret is another.
+
+What is **not** fatal is a renewal that did not happen. If the store holds a
+usable certificate the CA can still serve, a failed pass leaves it in place and
+the loop retries; refusing to start there would turn a recoverable failure into
+an outage.
+
+### It is a client credential by default
+
+The serving certificate takes `serverAuth` **and** `clientAuth` — the pair every
+certificate this CA issues — and an operator who knows they do not need the
+second can set `usages: [serverAuth]`.
+
+That is the opposite of the least-privilege instinct, and deliberate. Running
+`openvox-ca` and OpenVox Server on one host sharing one serving certificate is a
+normal deployment: the CA needs `serverAuth`, the Server needs `clientAuth`
+because it talks to OpenVoxDB, and `openvox-ca-ctl` and the `puppetserver` CLI
+authenticate with it. A `serverAuth`-only default would break that setup in a
+way that is hard to read — the listener works, and something else fails later.
+
+> **SECURITY.** `clientAuth` is what lets a certificate be *presented* as a
+> client; listing a certname in `puppet_server` is what grants it administrative
+> authority. Only the two together make an admin credential, and the listing is
+> the deliberate act — a `clientAuth` certificate for a name nobody has listed
+> authenticates as nobody in particular.
+>
+> So **adding the CA's own certname to `puppet_server` makes its serving store
+> an admin credential**: whoever can read that file pair or that Secret can
+> administer this CA. The CA says so once at startup. Set `usages:
+> [serverAuth]` if this CA's own name should not be an administrator.
+>
+> **Said once, at startup**, like the equivalent warning for a component
+> certificate. A `SIGHUP` that adds this CA's own certname to
+> `puppet_server_file` creates the condition at runtime and nothing repeats the
+> warning, so the added CN in the `Reloaded admin allow list` line is the signal
+> to check against `serving_cert` as well as `managed_certs`.
+
+Narrowing takes effect at the next reconcile pass rather than at natural expiry,
+because the CA treats a usage mismatch as grounds to reissue — the setting
+cannot be quietly decorative.
+
+**Narrowing away `serverAuth` is refused at startup.** `usages: [clientAuth]`
+would produce a certificate the listener presents quite happily and every client
+that verifies it rejects, which is a failure that surfaces somewhere else
+entirely.
+
+### It may not collide with a managed certificate
+
+`serving_cert` and `managed_certs` feed one reconcile set, so three collisions
+are refused at startup rather than discovered as two certificates replacing each
+other for ever:
+
+- **The same certname.** There is one inventory slot per subject.
+- **The same Secret.** Every managed certificate applies under one field
+  manager, so neither write ever raises a conflict and the two would overwrite
+  each other's material on every pass. An omitted namespace resolves to the CA
+  pod's own, which is not known before a Kubernetes client exists — so a pair
+  that omits it on either side is refused rather than risked, and the message
+  says so. Spell both namespaces out if they genuinely differ.
+- **A chain file over material.** Sharing `store.files.ca` with a managed
+  entry's own `ca` is the ordinary shared-host layout and is allowed; pointing
+  it at that entry's `cert` or `key` is not.
+
+The file pair itself needs no rule here: `serving_cert.store.files.cert` and
+`.key` are reserved against `managed_certs` like the CA's own files.
+
+### Mutually exclusive with `tls_cert` / `tls_key`
+
+Setting `serving_cert` alongside either of those is refused at startup.
+
+Self-provisioning never writes to the paths they name, and cannot be made to:
+the issuance decision reissues whenever the stored certificate is not this CA's,
+so aiming it at an operator-supplied path would clobber a certificate from
+another CA. Those two paths are also reserved against `managed_certs`, and so is
+the serving store's own file pair — a component certificate written over the one
+the CA is presenting would replace the listener's certificate, and then the two
+would replace each other on every pass for ever.
+
+Enabling `serving_cert` enables TLS on its own. A CA with neither it nor
+`tls_cert` / `tls_key` is still refused on a non-loopback address unless
+`no_tls_required` is set.
+
+### What this deliberately does not do
+
+- **It never stores the serving key in the backing store.** That store holds
+  exactly one private key, the CA's own, and only under `ca_key_provider: file`.
+  A cluster-wide serving pair also forced replicas to converge on a union of
+  every replica's names, with a dedicated lock; a per-replica store of its own
+  removes all three premises.
+- **There is no option to encrypt the serving key.** `crypto/tls` accepts any
+  PEM block whose type ends `" PRIVATE KEY"`, so an `ENCRYPTED PRIVATE KEY`
+  block passes its type check and then fails to parse — fatally, since a
+  serving-certificate failure at startup is. If an encrypted key reaches the
+  store by some other route, the CA says so rather than reporting a parse error
+  that mentions nothing about encryption.
 
 ## Trusting client certificates from another CA
 
@@ -1555,8 +1791,11 @@ be read or holds a CRL that does not parse — so a stale path left behind on
 anchor bundle beside it already fails closed, and a server that starts here
 would reject every client of the domain while its readiness probe reported
 healthy. The check runs where the trust set is assembled, which is when TLS is
-configured; with no `tls_cert` and `tls_key` there is no client authentication
-to set up and `client_ca` is not consulted at all.
+configured; with no TLS at all — no `tls_cert`/`tls_key`, no environment
+equivalents and no [`serving_cert`](#the-cas-own-serving-certificate) — there is
+no client authentication to set up and `client_ca` is not consulted. A
+self-provisioning CA does consult it, and does refuse to start on an unreadable
+`crl_file`, exactly as one given a keypair does.
 
 Every CRL in `crl_file` is signature-verified against an anchor in the same
 entry before it is used, and each is bound to the anchor whose key signed it.
@@ -2014,6 +2253,15 @@ Withdrawing admin access has a second caveat: a certificate carrying the `pp_cli
 Everything else — the listen address, the storage backend, CA key custody, CA properties, which autosign configuration is in use, and every `client_ca` field except `crl_file` — requires a restart.
 
 Two file-backed inputs are consulted live, with no signal needed at all: the autosign allowlist or executable is read on every CSR, and the OpenBao AppRole `role_id`/`secret_id` files are read on every login (see [OpenBao Transit-engine CA key](openbao-transit.md)). Editing those takes effect on the next request; only the settings naming them are fixed at startup.
+
+**A self-provisioned serving certificate is the third thing that changes without
+a restart, and it needs no signal either.** With
+[`serving_cert`](#the-cas-own-serving-certificate) the certificate is renewed by
+the reconcile loop and installed on the listener from there, so `SIGHUP` is a
+no-op for it and the table above does not apply — `tls_cert` / `tls_key` keep
+their reload behaviour unchanged, and the two are mutually exclusive.
+Connections in flight keep the certificate they negotiated with, exactly as on a
+reload.
 
 A reload that fails (an unreadable keypair, a missing allow-list file) is logged and leaves the previous configuration in place; the server keeps serving. Each input is applied independently, so a broken allow list does not block a certificate rotation.
 

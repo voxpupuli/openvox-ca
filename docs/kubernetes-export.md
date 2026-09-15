@@ -31,8 +31,12 @@ owned by the exporter are reclaimed if something else overwrites them.
 Every managed object carries the label `app.kubernetes.io/managed-by:
 openvox-ca` so you can find the objects openvox-ca owns. **It does not
 distinguish them from a [managed certificate](configuration.md#managed-certificates)
-Secret**, which carries the same label and holds a component's only private key
-— so this is a safe selector to list with and not to delete with:
+Secret, nor from the Secret holding [the CA's own serving
+certificate](configuration.md#the-cas-own-serving-certificate)**. Both carry the
+same label, and both hold a private key nothing else has a copy of — a
+component's, or the one this CA's listener presents. So this is a safe selector
+to list with and not to delete
+with:
 
 ```sh
 kubectl get secret,configmap -A -l app.kubernetes.io/managed-by=openvox-ca
@@ -208,9 +212,11 @@ resources to the minimum above.
   is true of the export alone.** A
   [managed certificate](configuration.md#managed-certificates) with a
   `store.secret` makes the same failure fatal at startup, because a component
-  is waiting on a certificate that would never be issued — so a CA configured
-  for both exports and Secret-stored managed certificates refuses to start
-  where it cannot build a client, rather than logging and carrying on.
+  is waiting on a certificate that would never be issued — and so does [the CA's
+  own serving certificate](configuration.md#the-cas-own-serving-certificate),
+  for a stronger reason still: the CA has no certificate to present. So a CA
+  configured for exports alongside either of those refuses to start where it
+  cannot build a client, rather than logging and carrying on.
 - A failure applying one target is logged and does not prevent the other targets
   from being applied.
 - A cert or CRL that cannot be read from storage fails only the targets that
@@ -277,8 +283,10 @@ to initialise client` line in the CA log, which names the actual error.
 - Objects are not deleted when a target is removed from the config; delete them
   manually. They carry the `app.kubernetes.io/managed-by=openvox-ca` label — but
   **that label alone is not a safe delete selector**: a
-  [managed certificate](configuration.md#managed-certificates) Secret carries
-  the identical label and holds a component's only private key. Name the
+  [managed certificate](configuration.md#managed-certificates) Secret, and the
+  one holding [the CA's own serving
+  certificate](configuration.md#the-cas-own-serving-certificate), each carry the
+  identical label and hold a private key nothing else has a copy of. Name the
   exported objects, or give them a label of your own under
   `metadata.labels` and select on that. See
   [uninstalling](helm-chart.md#uninstalling).

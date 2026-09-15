@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -32,6 +33,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/certstore"
 	"github.com/voxpupuli/openvox-ca/internal/k8sexport"
 )
 
@@ -350,12 +352,32 @@ var _ = Describe("saying when a managed certificate is an admin credential", fun
 
 		// buildAuthConfig calls the same function a moment later and fails the
 		// startup with it, but only when TLS is configured -- it is inside the
-		// `if cfg.TLSCert != "" && cfg.TLSKey != ""` branch in main.go. Saying
-		// it here too would make the first mention look like the cause.
+		// `if tlsConfigured` branch in main.go. Saying it here too would make
+		// the first mention look like the cause.
 		It("stays silent when buildAuthConfig will report it", func() {
 			cfg := badCfg()
 			cfg.TLSCert = "/etc/openvox-ca/tls.pem"
 			cfg.TLSKey = "/etc/openvox-ca/tls-key.pem"
+
+			Expect(captureLogs(slog.LevelWarn, func() {
+				warnIfManagedCertIsAdmin(cfg, managed)
+			})).To(BeEmpty())
+		})
+
+		// The arm the serving certificate added. A self-provisioned CA serves
+		// TLS with neither tls_cert nor tls_key set, so testing that pair
+		// directly -- which this gate used to do -- would report the unreadable
+		// allow list here as well as fatally a moment later, and the first
+		// mention would look like the cause.
+		It("stays silent for a self-provisioned CA, which also reaches buildAuthConfig", func() {
+			cfg := badCfg()
+			cfg.ServingCert = &certstore.Entry{
+				Certname: "ca.example.com", Names: []string{"ca.example.com"},
+				RenewBefore: certstore.Duration(720 * time.Hour),
+				Store: certstore.StoreConfig{Files: &certstore.FilesConfig{
+					Cert: "/srv/serving/tls.crt", Key: "/srv/serving/tls.key"}},
+			}
+			Expect(cfg.tlsEnabled()).To(BeTrue(), "precondition: this CA serves TLS")
 
 			Expect(captureLogs(slog.LevelWarn, func() {
 				warnIfManagedCertIsAdmin(cfg, managed)
