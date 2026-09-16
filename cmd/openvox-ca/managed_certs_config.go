@@ -215,11 +215,6 @@ func caOwnedPaths(cfg *serverConfig, absCADir, configPath string) ([]certstore.R
 		{Setting: "puppet_server_file", Path: cfg.PuppetServerFile},
 		{Setting: "autosign_config", Path: cfg.AutosignConfig},
 	}
-	// One entry per configured foreign trust domain, named after the entry so a
-	// refusal says which. These are read on every client handshake: a
-	// certificate written over an anchor would be trusted as an issuer, and one
-	// written over a CRL bundle would silently stop revocation checking for
-	// that domain.
 	// The SQLite database, when that is the backend. Only for sqlite: every
 	// other dialect's DSN names a server rather than a file, and an in-memory
 	// database has no file at all, both of which SQLiteFilePath reports by
@@ -236,6 +231,11 @@ func caOwnedPaths(cfg *serverConfig, absCADir, configPath string) ([]certstore.R
 	if configPath != "" {
 		named = append(named, certstore.ReservedPath{Setting: "--config", Path: configPath})
 	}
+	// One entry per configured foreign trust domain, named after the entry so a
+	// refusal says which. These are read on every client handshake: a
+	// certificate written over an anchor would be trusted as an issuer, and one
+	// written over a CRL bundle would silently stop revocation checking for
+	// that domain.
 	for i := range cfg.ClientCA {
 		e := &cfg.ClientCA[i]
 		named = append(named,

@@ -339,6 +339,8 @@ kubernetesExport:
     # ClusterRole.
     namespaces: []
 
+# -- Managed certificates ------------------------------------------------------
+
 # Kubernetes wiring for `config.managed_certs`, the certificates openvox-ca
 # issues and renews for OpenVox components. The certificates themselves are
 # configured under `config`, not here; see docs/configuration.md.

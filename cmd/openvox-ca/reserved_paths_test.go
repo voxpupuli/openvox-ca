@@ -85,6 +85,21 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 		// is the defect the whole sweep exists to catch.
 		"kubernetes_export.targets[].cert_key": "a data key inside the exported object",
 		"kubernetes_export.targets[].crl_key":  "a data key inside the exported object",
+
+		// The managed certificate's OWN store paths, which are the subject of
+		// this check rather than members of the reserved set: CheckReservedPaths
+		// compares these against everything above. Reserving one would refuse
+		// every configuration that used it.
+		//
+		// They were invisible until the sweep learned to follow pointers --
+		// store.files is the only pointer-to-struct field that carries paths --
+		// so the guard read as exhaustive while the three settings the whole
+		// check is about were outside it. An exemption is the right answer
+		// rather than a traversal that skips them, because "not reserved,
+		// deliberately" is a decision a reader should be able to find.
+		"managed_certs[].store.files.cert": "the certificate's own store path, which is what the check compares against",
+		"managed_certs[].store.files.key":  "the certificate's own store path, which is what the check compares against",
+		"managed_certs[].store.files.ca":   "the certificate's own chain path, which is what the check compares against",
 	}
 
 	// pathShaped decides which YAML keys name a filesystem location.
@@ -108,7 +123,7 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 		// ending is its leaf's ending -- and a version of this that did so was
 		// removed when a mutation proved no spec could tell the two apart.
 		for _, suffix := range []string{
-			"file", "dir", "path", "_config", "dsn", "cert", "key", "keyfile",
+			"file", "dir", "path", "_config", "dsn", "cert", "key", "keyfile", "ca",
 		} {
 			if strings.HasSuffix(key, suffix) {
 				return true
@@ -151,6 +166,17 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 			switch f.Type.Kind() {
 			case reflect.Struct:
 				sweep(sv.Field(i), prefix+name+".", yield)
+			case reflect.Pointer:
+				// A nil pointer has no fields to walk, so the element type is
+				// instantiated the same way a list's is. Skipping pointers
+				// silently is what hid managed_certs[].store.files.cert and
+				// .key: the sweep read as exhaustive over "every path-shaped
+				// setting" while never descending into store.secret or
+				// store.files, which are the only pointer-to-struct fields in
+				// the whole configuration -- measured, not assumed.
+				if f.Type.Elem().Kind() == reflect.Struct {
+					sweep(reflect.New(f.Type.Elem()).Elem(), prefix+name+".", yield)
+				}
 			case reflect.Slice:
 				if f.Type.Elem().Kind() == reflect.Struct {
 					sweep(reflect.New(f.Type.Elem()).Elem(), prefix+name+"[].", yield)
@@ -226,6 +252,9 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 		Expect(fields).To(HaveKey("client_ca[].file"),
 			"precondition: the sweep must descend into list blocks, or a path "+
 				"setting inside one needs no recorded decision")
+		Expect(fields).To(HaveKey("managed_certs[].store.files.cert"),
+			"precondition: the sweep must follow pointer-to-struct fields, or "+
+				"the store paths this whole check is about are outside it")
 
 		reserved, err := caOwnedPaths(cfg, "/spec/cadir", "/spec/config.yaml")
 		Expect(err).NotTo(HaveOccurred())

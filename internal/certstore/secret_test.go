@@ -401,5 +401,51 @@ var _ = Describe("SecretStore", func() {
 			Expect(sec.Labels).To(HaveKeyWithValue("app", "puppetserver"))
 			Expect(sec.Labels).To(HaveKeyWithValue("app.kubernetes.io/managed-by", "openvox-ca"))
 		})
+
+		// The same guarantee for annotations, which had none -- and the reason
+		// it needs stating rather than assuming.
+		//
+		// Labels and annotations are applied differently: labels always go
+		// through s.labels(), which carries the mandatory managed-by entry and
+		// so is never empty, while annotations are attached only when the
+		// entry configures some. That asymmetry looks like it should break
+		// removal, and it does not: omitting a field from an apply
+		// configuration relinquishes ownership of it exactly as sending a
+		// narrower map does, so both arms remove. Asserted here rather than
+		// reasoned about, because the reasoning goes the other way as easily.
+		It("removes only the annotation it stopped setting", func() {
+			cfg := certstore.SecretConfig{Annotations: map[string]string{
+				"owner": "platform", "ticket": "OPS-1",
+			}}
+			Expect(newStore(cfg).Save(ctx, []byte("CERT"), []byte("KEY"))).To(Succeed())
+			Expect(get().Annotations).To(HaveKeyWithValue("ticket", "OPS-1"))
+
+			cfg.Annotations = map[string]string{"owner": "platform"}
+			Expect(newStore(cfg).Save(ctx, []byte("CERT"), []byte("KEY"))).To(Succeed())
+
+			sec := get()
+			Expect(sec.Annotations).NotTo(HaveKey("ticket"))
+			Expect(sec.Annotations).To(HaveKeyWithValue("owner", "platform"))
+		})
+
+		// The arm the `len(...) > 0` guard makes different from the label path:
+		// every annotation removed at once, so the field is not sent at all.
+		// Nothing else exercises it, and it is the case where "omitted" and
+		// "empty" could plausibly have parted company.
+		It("removes every annotation when the entry stops configuring any", func() {
+			cfg := certstore.SecretConfig{Annotations: map[string]string{"owner": "platform"}}
+			Expect(newStore(cfg).Save(ctx, []byte("CERT"), []byte("KEY"))).To(Succeed())
+			Expect(get().Annotations).To(HaveKeyWithValue("owner", "platform"))
+
+			cfg.Annotations = nil
+			Expect(newStore(cfg).Save(ctx, []byte("CERT"), []byte("KEY"))).To(Succeed())
+
+			sec := get()
+			Expect(sec.Annotations).To(BeEmpty())
+			// The labels are untouched by an annotation change, including the
+			// mandatory one -- a removal that reached across would be worse
+			// than one that did not happen.
+			Expect(sec.Labels).To(HaveKeyWithValue("app.kubernetes.io/managed-by", "openvox-ca"))
+		})
 	})
 })

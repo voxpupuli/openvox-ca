@@ -1387,7 +1387,7 @@ cover it and nothing new is needed. See [metrics & monitoring](metrics.md).
 
 ### The certificate that administers this CA
 
-> **SECURITY.** Admin access to this CA is granted by listing a certname in
+> **Warning:** admin access to this CA is granted by listing a certname in
 > `puppet_server`, and a component certificate carries `clientAuth` because it
 > is a CA client. So **a managed certificate whose certname is listed in
 > `puppet_server` is a CA admin credential, and its store holds that

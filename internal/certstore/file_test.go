@@ -159,6 +159,15 @@ var _ = Describe("FileStore", func() {
 
 			Expect(store().Save(ctx, []byte("NEW"), []byte("NEW-KEY"))).To(Succeed())
 			Expect(os.ReadFile(cfg.Cert)).To(Equal([]byte("NEW")))
+			// The key too, which this spec set up and then did not check. A
+			// certificate replaced beside a stale key is the one outcome that
+			// fails every handshake while looking like a successful write, and
+			// it is the half a "replaces material" claim most needs to cover.
+			Expect(os.ReadFile(cfg.Key)).To(Equal([]byte("NEW-KEY")))
+			// And the mode, because replacement goes through a rename: a key
+			// that arrived 0644 because the replacement path skipped the chmod
+			// would pass every content assertion here.
+			Expect(modeOf(cfg.Key)).To(Equal(os.FileMode(0o600)))
 		})
 	})
 

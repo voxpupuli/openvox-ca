@@ -378,6 +378,34 @@ managed_certs:
 		// The fourth name type, which was the only one passed through
 		// verbatim: a stray space or a bare word reached the certificate and
 		// the operator found out from whatever failed to verify it.
+		// The arm of Duration.UnmarshalYAML that a malformed duration does not
+		// reach: a node that is not a scalar at all. `renew_before: [720h]` is
+		// what an operator writes by pasting a list where a value goes, and it
+		// takes the Decode branch rather than the ParseDuration one -- which is
+		// also the branch carrying the line number, since yaml.v3 does not
+		// decorate an error returned from a custom unmarshaller.
+		It("refuses a duration that is not a scalar, and says where", func() {
+			err := decodeErr(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: [720h]
+    store: {files: {cert: /c.pem, key: /k.pem}}
+`)
+			Expect(err).To(MatchError(ContainSubstring("must be a scalar")))
+			Expect(err).To(MatchError(ContainSubstring("720h")))
+			// The line of the offending node, which is the whole reason this
+			// arm formats one: without it the operator is told a duration is
+			// wrong somewhere in a list of entries.
+			//
+			// Anchored to the line number IMMEDIATELY BEFORE this arm's own
+			// words. A bare `line \d+` passes without the formatting at all,
+			// because the wrapped yaml.v3 error carries its own line -- proved
+			// by mutation: dropping "line %d:" from the arm left that
+			// assertion green.
+			Expect(err).To(MatchError(MatchRegexp(`line \d+: a duration must be a scalar`)))
+		})
+
 		It("refuses an email address that is not one", func() {
 			for _, bad := range []string{"puppetserver", "@example.com", "ca@", "ca@ example.com"} {
 				err := decode(`
@@ -866,6 +894,29 @@ managed_certs:
 			Expect(viaZero).To(HaveOccurred())
 			Expect(viaZero.Error()).To(Equal(direct.Error()))
 			Expect(direct.Error()).To(ContainSubstring("managed_certs[0] (ca.example.com)"))
+		})
+	})
+
+	// Build re-derives each entry's spec and has its own refusal for a bad one.
+	// Every existing spec reaches that code through Validate, which refuses
+	// first -- so Build's branch is only ever exercised on entries Validate has
+	// already approved, and the message it formats is unasserted. A caller that
+	// skipped Validate (the two are independent exported calls) would get it.
+	Describe("Build's own refusal, reached without Validate", func() {
+		It("names the entry when a spec cannot be built", func() {
+			// A usage Validate would have refused, handed straight to Build.
+			cfg := decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    usages: [codeSigning]
+    store: {files: {cert: /c.pem, key: /k.pem}}
+`)
+			_, err := cfg.Build(certstore.Deps{CACerts: stubCA{pem: []byte("CA")}})
+
+			Expect(err).To(MatchError(ContainSubstring("managed_certs[0] (a.example.com)")))
+			Expect(err).To(MatchError(ContainSubstring("codeSigning")))
 		})
 	})
 
