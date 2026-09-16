@@ -237,6 +237,45 @@ func preflightInstanceLock(ctx context.Context, cfg *serverConfig) error {
 	return ul.Unlock()
 }
 
+// preflightKeyPermissions opens the store, judges the permissions of everything
+// holding key material, and refuses if any of it is readable by every local
+// account.
+//
+// It runs in the parent, before the role dispatch, for two reasons that both
+// have to hold:
+//
+//   - **Before anything writes a key.** On the default topology the signer
+//     child is what bootstraps the CA, so a check placed after CA.Init would
+//     mint a fresh private key into an already world-accessible store and only
+//     then decline to serve it. The exposure would have happened on disk before
+//     the refusal was printed.
+//   - **Where there is still somewhere to print.** `--daemon` discards the
+//     child's stderr, so a refusal raised past the fork reaches nobody: the
+//     operator is told "started in background", gets exit 0, and watches the
+//     CA never come up. Same reasoning as preflightInstanceLock above, and the
+//     same remedy.
+//
+// The store is opened and closed again; the children open it for themselves.
+//
+// ca_key_passphrase_file is handed in because nothing in the store knows it
+// exists: it is a secret the operator names in the server's configuration, and
+// it unlocks the encrypted CA key, so world access to it is the same finding as
+// world access to the key.
+//
+// The findings come back with the error so the caller can log them once a logger
+// exists. Nothing is logged here: at this point in startup the default handler is
+// still Go's own, so a record emitted now would miss a configured logfile.
+func preflightKeyPermissions(ctx context.Context, cfg *serverConfig) ([]storage.KeyPermWarning, error) {
+	rt, err := resolveRuntime(ctx, cfg, false)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rt.Close() }()
+
+	warnings := rt.Store.CheckKeyPermissions(cfg.CAKeyPassphraseFile)
+	return warnings, refuseOnKeyPermissions(warnings, cfg.InsecureAllowWorldReadableKeys)
+}
+
 // holdInstanceLock takes the store's instance lock and ties its release to rt,
 // for callers that already hold a runtime.
 //

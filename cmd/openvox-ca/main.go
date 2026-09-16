@@ -38,6 +38,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"strings"
 	"syscall"
 	"time"
 
@@ -130,6 +131,196 @@ func setupLogger(cfg *serverConfig) (*os.File, error) {
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, opts)))
 	return nil, nil
+}
+
+// refuseOnKeyPermissions decides whether the CA may start, given what
+// StorageService.CheckKeyPermissions found. It logs nothing: it runs in the
+// parent before the role dispatch and before the fork, which is before any
+// logger is installed, so anything it emitted would bypass a configured
+// logfile. The returned error reaches the operator through cobra, on the
+// terminal, which is where a refusal belongs.
+//
+// World access is refused. A CA private key that every local account can read
+// is one to treat as exposed, and starting anyway would serve from it. A path
+// whose permissions could not be read at all is refused too, and separately: it
+// is not the same condition and does not have the same remedy.
+//
+// Group access never refuses. It is the mode the store is created with, so a
+// correct deployment has it -- under a Kubernetes fsGroup, and on a plain
+// systemd install where the umask leaves it. logKeyPermissions reports it once
+// the logger exists.
+//
+// insecureAllow turns the world-access refusal into a warning, the way the
+// no-TLS opt-out does for plain HTTP on a non-loopback address. It does not
+// cover an unreadable path: that is not a risk the operator can have weighed,
+// because nobody knows what the mode is.
+func refuseOnKeyPermissions(warnings []storage.KeyPermWarning, insecureAllow bool) error {
+	var worldAccessible, unreadable []storage.KeyPermWarning
+	for _, w := range warnings {
+		switch {
+		case w.Unreadable:
+			unreadable = append(unreadable, w)
+		case w.WorldAccessible():
+			worldAccessible = append(worldAccessible, w)
+		}
+	}
+
+	// Every unjudgeable path, for the reason the world-accessible branch below
+	// gives for its own list: the causes here are independent -- a private/
+	// directory the CA cannot read on one mount, a database directory it cannot
+	// search on another -- so naming one would have the operator fix it, restart,
+	// and be refused again by the next.
+	if len(unreadable) > 0 {
+		return fmt.Errorf("the permissions of CA key material could not be read (%s); "+
+			"refusing to start -- check that each path exists and that the user running "+
+			"openvox-ca can reach it through every parent directory",
+			keyPermErrors(unreadable))
+	}
+
+	if len(worldAccessible) == 0 || insecureAllow {
+		return nil
+	}
+
+	// Every world-accessible path, not just the first. SQLite keeps the key in
+	// four files whose modes move together, so naming one would have the operator
+	// fix it, restart, and be refused again by the next.
+	return fmt.Errorf("CA key material is world-accessible and readable by every local account (%s); "+
+		"refusing to start -- fix with: chmod o-rwx -- %s, or set "+
+		"insecure_allow_world_readable_keys to start anyway. A key that has been "+
+		"world-readable should be treated as exposed and rotated",
+		keyPermPaths(worldAccessible), strings.Join(keyPermPathList(worldAccessible), " "))
+}
+
+// logKeyPermissions reports what the check found, once a logger is installed so
+// the records reach a configured logfile in its format. Called on the path that
+// has one; the refusal above is what runs earlier, where printing is the point
+// rather than logging.
+func logKeyPermissions(warnings []storage.KeyPermWarning, insecureAllow bool) {
+	var worldAccessible, groupAccessible, ownerOnly []storage.KeyPermWarning
+	for _, w := range warnings {
+		switch {
+		case w.Unreadable:
+			slog.Warn("Could not check the permissions of a file holding key material",
+				"path", w.Path, "error", w.Err)
+		case w.WorldAccessible():
+			worldAccessible = append(worldAccessible, w)
+		case w.Mode&0o070 != 0:
+			groupAccessible = append(groupAccessible, w)
+		default:
+			// Everything else is a finding only because CheckKeyPermissions
+			// reports anything wider than 0600, and 0700 is wider than 0600
+			// without granting anybody anything. Reached by a key restored from
+			// an archive or a filesystem that does not carry Unix modes.
+			ownerOnly = append(ownerOnly, w)
+		}
+	}
+
+	// Group access is reported once, at Info, listing the files rather than one
+	// record each. It is the expected state on a store that creates it that way,
+	// and a warning on every start of a correct deployment is one nobody reads.
+	//
+	// What the record must not do is name a cause. Group access is created by
+	// openvox-ca only on the SQLite backend, whose database is created 0660 and
+	// whose sidecars inherit that; on the default filesystem backend everything
+	// under private/ is written 0600, so group access there came from the
+	// deployment -- a Kubernetes fsGroup ORing it into the volume, or somebody's
+	// chmod. An earlier version of this record said "which is the default", which
+	// told an operator that a 0640 CA key in a filesystem cadir was the CA's own
+	// doing when the CA would never have created it.
+	if len(groupAccessible) > 0 {
+		slog.Info("Key material is accessible to its group",
+			"paths", keyPermPathsCapped(groupAccessible),
+			"count", len(groupAccessible),
+			"note", "created that way on the SQLite backend and under a Kubernetes fsGroup; "+
+				"on the filesystem backend openvox-ca writes 0600, so group access there came "+
+				"from the deployment. A real exposure only if that group has members other than the CA")
+	}
+
+	if len(ownerOnly) > 0 {
+		slog.Info("Key material has permission bits beyond 0600 but grants no group or world access",
+			"paths", keyPermPathsCapped(ownerOnly),
+			"count", len(ownerOnly))
+	}
+
+	// Only reachable with the opt-out set; without it the refusal already stopped
+	// startup.
+	if len(worldAccessible) > 0 && insecureAllow {
+		slog.Warn("INSECURE: KEY MATERIAL IS WORLD-ACCESSIBLE AND THE CA WAS TOLD TO START ANYWAY. "+
+			"EVERY LOCAL ACCOUNT CAN READ THESE FILES. TREAT THE CA PRIVATE KEY AS COMPROMISED "+
+			"AND ROTATE IT.",
+			"paths", keyPermPaths(worldAccessible),
+			"remedy", "chmod o-rwx -- "+strings.Join(keyPermPathList(worldAccessible), " "))
+	}
+}
+
+// keyPermPaths renders findings for an operator: each path with the mode that
+// made it a finding, so the message says what is wrong as well as where.
+func keyPermPaths(warnings []storage.KeyPermWarning) string {
+	parts := make([]string, 0, len(warnings))
+	for _, w := range warnings {
+		parts = append(parts, fmt.Sprintf("%s (mode %s)", w.Path, w.Mode))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// keyPermPathsCapped is keyPermPaths for a record that repeats on every start.
+// The finding set is not bounded by the backend: every per-subject key under
+// private/ is judged, and a CA that retains keys for a few thousand subjects has
+// a few thousand findings on every start under a Kubernetes fsGroup. Unbounded,
+// that is a several-hundred-kilobyte log line each time, which a pipeline with a
+// field cap truncates -- discarding the tail of the very enumeration the record
+// exists to carry.
+//
+// The refusal is deliberately not capped: it happens once, it is what the
+// operator acts on, and a remedy missing half its paths is one that leaves the
+// CA refusing after the restart.
+func keyPermPathsCapped(warnings []storage.KeyPermWarning) string {
+	const limit = 10
+	if len(warnings) <= limit {
+		return keyPermPaths(warnings)
+	}
+	return fmt.Sprintf("%s, and %d more", keyPermPaths(warnings[:limit]), len(warnings)-limit)
+}
+
+// keyPermErrors renders the unjudgeable findings: each path with the error that
+// stopped us reading its mode, since the error is the whole diagnosis.
+func keyPermErrors(warnings []storage.KeyPermWarning) string {
+	parts := make([]string, 0, len(warnings))
+	for _, w := range warnings {
+		parts = append(parts, fmt.Sprintf("%s: %v", w.Path, w.Err))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// keyPermPathList renders the paths shell-quoted, for pasting into the suggested
+// chmod.
+//
+// Quoted because this change is itself what makes a space-containing path
+// reachable: the SQLite DSN parser decodes percent-escapes, so "file:ca%20b.db"
+// is a database called "ca b.db", and an unquoted remedy for it would be a
+// command that chmods two files that do not exist.
+func keyPermPathList(warnings []storage.KeyPermWarning) []string {
+	paths := make([]string, 0, len(warnings))
+	for _, w := range warnings {
+		paths = append(paths, shellQuote(w.Path))
+	}
+	return paths
+}
+
+// shellQuote wraps s so a POSIX shell sees exactly one word. Single quotes take
+// everything literally; an embedded single quote is closed, escaped and
+// reopened, which is the only sequence that works inside them.
+//
+// The test is an allowlist of characters that are ordinary in every shell,
+// rather than a list of metacharacters to escape from. A denylist fails open:
+// the one metacharacter nobody thought of reaches the operator's shell
+// unquoted, and this string is written to be pasted into one.
+func shellQuote(s string) string {
+	const shellSafe = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/:@%+=-"
+	if s != "" && strings.Trim(s, shellSafe) == "" {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // buildBackendSpec derives a storage.BackendSpec from the server config. The
@@ -366,6 +557,7 @@ func newRootCmd() *cobra.Command {
 		caSigningConcurrency    int
 		configFile              string
 		encryptCAKey            bool
+		insecureAllowWorldKeys  bool
 		caKeyPassphraseFile     string
 		singleProcess           bool
 		storageBackend          string
@@ -488,6 +680,9 @@ func newRootCmd() *cobra.Command {
 			if cmd.Flags().Changed("encrypt-ca-key") {
 				cfg.EncryptCAKey = encryptCAKey
 			}
+			if cmd.Flags().Changed("insecure-allow-world-readable-keys") {
+				cfg.InsecureAllowWorldReadableKeys = insecureAllowWorldKeys
+			}
 			if cmd.Flags().Changed("ca-key-passphrase-file") {
 				cfg.CAKeyPassphraseFile = caKeyPassphraseFile
 			}
@@ -564,6 +759,11 @@ func newRootCmd() *cobra.Command {
 				if err := preflightInstanceLock(ctx, cfg); err != nil {
 					return err
 				}
+				// Same reasoning for key-material permissions: a refusal raised
+				// past the fork is discarded with the child's stderr.
+				if _, err := preflightKeyPermissions(ctx, cfg); err != nil {
+					return err
+				}
 
 				exe, err := os.Executable()
 				if err != nil {
@@ -577,7 +777,7 @@ func newRootCmd() *cobra.Command {
 				if err := c.Start(); err != nil {
 					return fmt.Errorf("failed to start daemon: %w", err)
 				}
-				fmt.Printf("Puppet CA started in background (PID: %d)\n", c.Process.Pid)
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Puppet CA started in background (PID: %d)\n", c.Process.Pid)
 				return nil
 			}
 
@@ -632,9 +832,25 @@ func newRootCmd() *cobra.Command {
 				}()
 			}
 
+			// --- Key material must not be readable by every local account ---
+			// Before CA.Init, because on the default topology it is the signer
+			// child that bootstraps the CA: a later check would write a fresh
+			// private key into an already world-accessible store and refuse
+			// afterwards.
+			//
+			// For every role, not only the launcher. A role process started by
+			// hand is a topology the documentation describes, and it is the one
+			// that holds the key; inheriting the parent's verdict across an
+			// execve is not something a child can do, so each checks for itself.
+			// NIST 800-53: SC-12 (Cryptographic Key Establishment and Management)
+			keyPermWarnings, err := preflightKeyPermissions(ctx, cfg)
+			if err != nil {
+				return err
+			}
+
 			// Signer mode: load key, serve signing requests on socketpair, exit.
 			if role == "signer" {
-				return runSignerMode(ctx, cfg, absCADir)
+				return runSignerMode(ctx, cfg, absCADir, keyPermWarnings)
 			}
 
 			// Launcher mode (default): spawn isolated signer + frontend children.
@@ -650,6 +866,10 @@ func newRootCmd() *cobra.Command {
 					return err
 				}
 				defer closeLog()
+				// Now that a logger exists, say what the preflight found. The
+				// refusal has already happened above, on the terminal; this is
+				// the part that belongs in the operator's logfile.
+				logKeyPermissions(keyPermWarnings, cfg.InsecureAllowWorldReadableKeys)
 				return runLauncher(cfg, notifier, hupCh)
 			}
 
@@ -665,6 +885,7 @@ func newRootCmd() *cobra.Command {
 				return err
 			}
 			defer closeLog()
+			logKeyPermissions(keyPermWarnings, cfg.InsecureAllowWorldReadableKeys)
 
 			slog.Info("Starting Puppet CA",
 				"cadir", absCADir,
@@ -829,17 +1050,6 @@ func newRootCmd() *cobra.Command {
 			notifier.Status("Initialising the CA")
 			if err := myCA.Init(ctx); err != nil {
 				return fmt.Errorf("failed to initialise CA: %w", err)
-			}
-
-			// SECURITY: Warn if any private key files have overly permissive modes.
-			// The server does not modify existing file permissions; operators should
-			// fix these manually (e.g. chmod 0640 or stricter).
-			// NIST 800-53: SC-12 (Cryptographic Key Establishment and Management)
-			if warnings := store.CheckKeyPermissions(); len(warnings) > 0 {
-				for _, w := range warnings {
-					slog.Warn("Private key file has overly permissive mode",
-						"path", w.Path, "mode", w.Mode.String(), "expected", "0600 or stricter")
-				}
 			}
 
 			// --- HTTP(S) Server ---
@@ -1091,6 +1301,8 @@ func newRootCmd() *cobra.Command {
 	f.IntVar(&csrRateLimit, "csr-rate-limit", -1, "Max CSR submissions per IP per minute on the public PUT /certificate_request endpoint (0 disables; unset uses the default of 60)")
 	f.IntVar(&caSigningConcurrency, "ca-signing-concurrency", -1, "Max concurrent CA-key signatures across issuance, CRL re-signing and the OCSP responder (0 disables the bound; unset uses max(4, GOMAXPROCS)). Lower it to a remote signer's capacity")
 	f.BoolVar(&encryptCAKey, "encrypt-ca-key", false, "Encrypt the CA private key at rest (AES-256-GCM + Argon2id); a passphrase is auto-generated if not provided")
+	f.BoolVar(&insecureAllowWorldKeys, "insecure-allow-world-readable-keys", false,
+		"Start even when CA key material is readable by every local account, warning loudly instead of refusing. Treat the key as compromised if you need this")
 	f.StringVar(&caKeyPassphraseFile, "ca-key-passphrase-file", "", "Path to file containing the CA key passphrase (first line used)")
 	f.BoolVar(&singleProcess, "single-process", false, "Disable CA key isolation (run signer and frontend in a single process)")
 	f.StringVar(&storageBackend, "storage-backend", "", "Storage backend: 'filesystem' (default), 'etcd', 'redis' (alias 'valkey'), 'sqlite', 'postgres', or 'mysql' (alias 'mariadb')")
@@ -1209,7 +1421,8 @@ func ignoreReloadSignal() {
 // IMPORTANT: The signer calls Init() which handles bootstrapping. The PSK
 // handshake in signer.Serve() happens AFTER Init completes, so the frontend
 // can safely read the CA cert from disk once the handshake succeeds.
-func runSignerMode(ctx context.Context, cfg *serverConfig, absCADir string) error {
+func runSignerMode(ctx context.Context, cfg *serverConfig, absCADir string,
+	keyPermWarnings []storage.KeyPermWarning) error {
 	logFile, err := setupLogger(cfg)
 	if err != nil {
 		// Signer: fall back to stderr if log file fails.
@@ -1219,6 +1432,13 @@ func runSignerMode(ctx context.Context, cfg *serverConfig, absCADir string) erro
 	if logFile != nil {
 		defer closeRoleLog(logFile)()
 	}
+
+	// Say what the preflight found, now that a logger exists. The signer is the
+	// process that loads the CA private key, and it is startable on its own --
+	// a topology the preflight's own comment names as supported. Reporting only
+	// from the launcher and the frontend left a hand-started signer silent about
+	// a store it had just judged, including the shouting one under the opt-out.
+	logKeyPermissions(keyPermWarnings, cfg.InsecureAllowWorldReadableKeys)
 
 	ignoreReloadSignal()
 

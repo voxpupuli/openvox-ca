@@ -29,6 +29,7 @@ certificate with no running server.
 | `--crl-url` | `""` | CRL distribution point URL to embed in issued certificates |
 | `--metrics-listen` | `""` | Address for the Prometheus exporter (e.g. `127.0.0.1:9140`); empty disables it. See [metrics & monitoring](metrics.md) |
 | `--encrypt-ca-key` | `false` | Encrypt the CA private key at rest (AES-256-GCM + Argon2id). See [CA key security](ca-key-security.md) |
+| `--insecure-allow-world-readable-keys` | `false` | Start even when CA key material is readable by every local account, warning loudly instead of refusing. Treat the key as compromised if you need this |
 | `--ca-key-passphrase-file` | `""` | Path to file containing the CA key passphrase (first line used) |
 | `--csr-rate-limit` | `60` | Max CSR submissions per IP per minute on the public `PUT /certificate_request` endpoint (0 disables) |
 | `--ca-signing-concurrency` | `max(4, GOMAXPROCS)` | Max concurrent CA-key signatures across issuance, CRL re-signing and the OCSP responder (0 disables the bound) |
@@ -146,6 +147,7 @@ expired_cert_retention_sec: 0            # grace period after a cert's NotAfter 
 expired_cert_cleanup_interval_sec: 0     # how often to run; 0 = built-in default (24h)
 # CA key encryption at rest.
 encrypt_ca_key: false           # encrypt the CA private key (AES-256-GCM + Argon2id)
+insecure_allow_world_readable_keys: false  # start even if key material is world-readable (refuses by default)
 ca_key_passphrase_file: ""      # path to passphrase file; auto-generated if omitted
 # Date/time format in JSON responses.
 puppet_datetime_format: false   # use Puppet CA style "2006-01-02T15:04:05MST" instead of RFC 3339
@@ -187,6 +189,7 @@ Environment variables mirror the CLI flags:
 | `--csr-rate-limit` | `PUPPET_CA_CSR_RATE_LIMIT` |
 | `--ca-signing-concurrency` | `PUPPET_CA_SIGNING_CONCURRENCY` |
 | `--encrypt-ca-key` | `PUPPET_CA_ENCRYPT_CA_KEY` |
+| `--insecure-allow-world-readable-keys` | `PUPPET_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS` |
 | `--ca-key-passphrase-file` | `PUPPET_CA_KEY_PASSPHRASE_FILE` |
 | `--storage-backend` | `PUPPET_CA_STORAGE_BACKEND` |
 | `--etcd-endpoints` | `PUPPET_CA_ETCD_ENDPOINTS` |
@@ -1425,7 +1428,29 @@ store the same logical state elsewhere.
 | CRL file | `0600` |
 | Pending-supersession list | `0600` |
 | Lock files under `locks/` | `0600` |
-| Public data (certs, CSRs, inventory) | `0644` |
+| Public data (certs, CSRs) | `0644` |
+| Inventory | `0600` |
+
+Blob modes — the private keys, the CRL, the supersession list, the inventory
+and the public data — are set on each file as it is created and your umask
+cannot widen them. The inventory is `0600` because it names every certificate
+the CA has issued.
+Directories and the lock files under `locks/` are created at the modes above and
+a tighter umask narrows them further.
+
+`openvox-ca` never changes the mode of a file it did not create, so anything
+already on disk stays as you have it — but a private key readable by every local
+account makes the server refuse to start. See [storage
+backends](storage-backends.md#filesystem-backend-default).
+
+The table describes `--cadir`. Every backend still keeps server-generated
+per-subject keys in `<cadir>/private/`, so the `Directories` and `Private keys`
+rows bind whichever one you run. The remaining rows describe the filesystem
+backend: on SQLite the CA key, the CRL, the pending-supersession list and the
+public data are rows in the database instead, and the same-host lock files sit
+in `.<database>.locks/` beside it. The database and its `-wal`, `-shm` and
+`-journal` sidecars are created without world access and otherwise follow your
+umask — see [storage backends](storage-backends.md#sqlite-backend).
 
 The user running `openvox-ca` must own (or have write access to) `--cadir` —
 and so must anything else that touches the store. `openvox-ca-ctl` and the

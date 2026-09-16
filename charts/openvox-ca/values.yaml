@@ -65,6 +65,7 @@ commonAnnotations: {}
 #     crl_validity_days: 90
 #     crl_url: https://ca.example.com/puppet-ca/v1/certificate_revocation_list/ca
 #     enable_expired_cert_cleanup: true
+#     insecure_allow_world_readable_keys: false  # true starts anyway on world-readable keys
 config: {}
 
 # Use a ConfigMap you manage yourself instead of one rendered from `config`.

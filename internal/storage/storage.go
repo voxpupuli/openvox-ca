@@ -1066,34 +1066,109 @@ func (s *StorageService) SavePrivateKey(ctx context.Context, subject string, pem
 	return os.WriteFile(s.PrivateKeyPath(subject), pemData, FilePermPrivate)
 }
 
-// CheckKeyPermissions reports private key files whose permissions are more
-// permissive than expected (0600). Scans the local private-key directory,
-// which for the filesystem backend also contains the CA key.
-func (s *StorageService) CheckKeyPermissions() []KeyPermWarning {
-	if s.localPrivateKeyDir == "" {
-		return nil
-	}
-	entries, err := os.ReadDir(s.localPrivateKeyDir)
-	if err != nil {
-		return nil
-	}
+// CheckKeyPermissions reports files holding key material whose permissions are
+// more permissive than expected (0600). Three sources: every file in the local
+// private-key directory, which for the filesystem backend also contains the CA
+// key; any files the backend itself declares through KeyFileLister — the SQLite
+// database and its sidecars, which hold the CA key as a blob; and any extra
+// paths the caller names, for secrets it configures that the store knows
+// nothing about.
+//
+// The private-key directory is judged whole rather than by filename. It is the
+// directory the CA keeps its secrets in, so its contents are secret by
+// construction: as well as the per-subject "<subject>_key.pem" keys it holds
+// the inventory-integrity HMAC key and, under encrypt_ca_key, the
+// auto-generated CA key passphrase — neither of which ends in "_key.pem". A
+// suffix test exempted both from a refusal whose whole subject is key material.
+//
+// This reports; it does not correct. Nothing in openvox-ca changes the mode of a
+// file it did not create, so a finding here is a condition the operator has to
+// resolve, and the caller decides whether it is fatal. Use
+// KeyPermWarning.WorldAccessible to tell the two severities apart: group access
+// is expected under a Kubernetes fsGroup, world access is not expected anywhere.
+func (s *StorageService) CheckKeyPermissions(extra ...string) []KeyPermWarning {
 	var warnings []KeyPermWarning
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), "_key.pem") {
-			continue
+
+	unreadable := func(path string, err error) {
+		// The mode could not be established, which is not the same fact as "the
+		// mode is fine". Recorded as a finding so the caller refuses rather than
+		// serving key material nobody checked.
+		warnings = append(warnings, KeyPermWarning{Path: path, Unreadable: true, Err: err})
+	}
+
+	check := func(path string) {
+		info, err := os.Lstat(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			// Most of these paths are optional -- the sidecars exist only while
+			// the database is open, and private/ is empty on a first bootstrap.
+			return
 		}
-		info, err := e.Info()
 		if err != nil {
-			continue
+			unreadable(path, err)
+			return
 		}
-		perm := info.Mode().Perm()
-		if perm&^os.FileMode(FilePermPrivate) != 0 {
-			warnings = append(warnings, KeyPermWarning{
-				Path: filepath.Join(s.localPrivateKeyDir, e.Name()),
-				Mode: perm,
-			})
+
+		// A symlink is followed, and the target is what gets judged. The mode
+		// that matters is the one on the file the CA will actually read, and a
+		// key reached through a link is the normal shape in more than one
+		// deployment: a Kubernetes Secret volume projects every entry as a
+		// symlink into a timestamped directory, and certificate tooling keeps a
+		// stable name pointing at a rotating one. Judging the link itself would
+		// silently skip all of them -- a symlink's own mode is 0777 on Linux and
+		// means nothing.
+		if info.Mode()&os.ModeSymlink != 0 {
+			info, err = os.Stat(path)
+			if errors.Is(err, fs.ErrNotExist) {
+				// A dangling link where key material is expected: nothing to
+				// judge, and nothing has been written through it either.
+				return
+			}
+			if err != nil {
+				unreadable(path, err)
+				return
+			}
+		}
+
+		if !info.Mode().IsRegular() {
+			return
+		}
+		if perm := info.Mode().Perm(); perm&^os.FileMode(FilePermPrivate) != 0 {
+			warnings = append(warnings, KeyPermWarning{Path: path, Mode: perm})
 		}
 	}
+
+	if s.localPrivateKeyDir != "" {
+		entries, err := os.ReadDir(s.localPrivateKeyDir)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			// No private/ yet: a first bootstrap, nothing to judge.
+		case err != nil:
+			unreadable(s.localPrivateKeyDir, err)
+		default:
+			for _, e := range entries {
+				if e.IsDir() {
+					continue
+				}
+				check(filepath.Join(s.localPrivateKeyDir, e.Name()))
+			}
+		}
+	}
+
+	if l, ok := s.backend.(KeyFileLister); ok {
+		for _, p := range l.KeyFilePaths() {
+			check(p)
+		}
+	}
+
+	// Caller-supplied paths last: a secret named in the server's configuration
+	// rather than written by the store, such as an operator-supplied
+	// ca_key_passphrase_file. Nothing here knows those paths exist.
+	for _, p := range extra {
+		if p != "" {
+			check(p)
+		}
+	}
+
 	return warnings
 }
 
