@@ -26,8 +26,11 @@ serves plain HTTP at `/metrics`, regardless of the API's TLS configuration. In
 the default isolated-process mode it runs inside the frontend process (the
 signer process has no network exposure).
 
-> **Security:** the leaf-certificate metrics expose node hostnames (certificate
-> subjects) as label values. Bind the exporter to loopback or a trusted
+> **Security:** the certificate metrics expose node hostnames (certificate
+> subjects) as label values. That includes
+> `puppetca_managed_certificate_configured`, whose subjects come from
+> configuration — so it names a component the CA is *meant* to issue for even
+> before any certificate exists. Bind the exporter to loopback or a trusted
 > management network — e.g. `127.0.0.1:9140` scraped via a node exporter sidecar,
 > or a dedicated interface protected by a network policy — rather than a public
 > address.
@@ -161,11 +164,11 @@ query, and `puppetca_crl_sync_failures_total` for why it is stuck.
 > enumeration above is now every writer, with nothing falling into an unnamed
 > remainder.
 >
-> Two of those writers are managed certificates', and neither can move a counter
-> on any deployment today: nothing configures a managed certificate yet, so the
-> mechanism is dormant. They are named anyway, because the enumeration claims
-> completeness and a claim that is true only of the paths an operator can
-> currently reach is a claim the next change will read as false.
+> Two of those writers are managed certificates', and they move only on a
+> deployment that configures `managed_certs`. They are named regardless,
+> because the enumeration claims completeness and a claim that is true only of
+> the paths a particular deployment reaches is a claim the next change will
+> read as false.
 >
 > The read half of that is `readStoredCRL`'s doing: it increments before
 > returning, on every path that calls it.
@@ -421,6 +424,100 @@ with no issued certificate), `signed`, or `revoked`.
 > To alert on expiry while ignoring revoked certs, filter on `state!="revoked"`,
 > as the mixin does.
 
+### Managed certificates
+
+Only present when [`managed_certs`](configuration.md#managed-certificates) is
+configured. One series per entry, whatever store it uses, published from the
+configuration rather than from anything that has happened.
+
+| Metric | Labels | Description |
+| --- | --- | --- |
+| `puppetca_managed_certificate_configured` | `subject` | Constant `1`, one per configured entry. |
+
+**A constant is the point.** The reconcile loop's outcomes are otherwise
+ordinary certificate facts: a managed certificate is a certificate with an
+inventory row, so once one exists the leaf series above cover its expiry and
+the shipped expiry alerts cover it with no new series at all. The outcome that
+reasoning cannot reach is an entry that has *never* issued — a store that never
+accepted a write — because there is no series for a certificate that does not
+exist, and no PromQL comparison matches an absence.
+
+Publishing the configuration turns that absence into a value something can be
+tested against:
+
+```promql
+(
+  puppetca_managed_certificate_configured
+    unless
+  max without (serial, state) (
+    puppetca_leaf_certificate_not_after_timestamp_seconds{state!="revoked"}
+  )
+)
+and on(instance) puppetca_collector_scrape_success == 1
+```
+
+The mixin ships this as `PuppetCAManagedCertificateNeverIssued`, modulo its
+target selector and a `for` of `managedCertNeverIssuedFor` (1 hour).
+
+The two qualifiers are not decoration, and each was added after the rule was
+found to be wrong without it:
+
+- `and on(instance) ... scrape_success == 1`, because the two sides come from
+  different places. The configured series is built from the CA's own
+  configuration and is published even when the gather fails; the leaf series are
+  read from storage and vanish together. Without the qualifier a storage outage
+  matches every configured entry, healthy ones included, an hour into an outage
+  `PuppetCAScrapeFailing` is already paging for.
+- `state!="revoked"`, because a failed store write does not leave the new
+  certificate in place: the CA revokes what it has just issued and restores the
+  predecessor. On a first issuance there is no predecessor, so the subject is
+  left holding one revoked certificate — and a revoked certificate still emits
+  its leaf series, which silenced the rule for precisely the RBAC refusal and
+  unadoptable-Secret failures its description tells you to go and check. An
+  ordinary revoke-then-reissue is unaffected: `max without (serial, state)`
+  collapses every serial for the subject, so a signed certificate beside a
+  revoked predecessor still satisfies the entry.
+
+**What this still does not cover.** An entry that has issued before, whose
+reissue then keeps failing, is not silent because of this rule: the CA restores
+the predecessor after a failed store write, so a signed certificate remains and
+the component keeps working. The failure is logged every pass, and the ordinary
+expiry alerts take over as that predecessor ages — but there is no series that
+says "this entry's last reconcile failed", so between those two there is a
+window where only the logs show it. Closing that needs a per-entry
+reconcile-failure series, of the shape
+`puppetca_kubernetes_export_last_error_timestamp_seconds` takes for the
+exporter; it is not in this release.
+
+`max without (serial, state)` rather than `on (subject)`: it collapses the
+leaf series' per-certificate labels while keeping every target label the
+deployment attached, so the two sides match per scrape target instead of across
+all of them. A replica whose configuration differs from its siblings' is then
+its own answer rather than being masked by theirs.
+
+This says nothing about *where* a certificate is stored, deliberately. A
+managed certificate may live in a Kubernetes Secret or in local files, and the
+CA's own serving certificate will be a third case with different failure
+semantics again — a series shaped around Secrets would be one those could not
+use.
+
+**Displacement is not a gap here, though it reads like one.** When a managed
+issuance replaces a certificate the CA already held for that name, the
+*subject's* expiry series continues uninterrupted: the leaf series are built by
+walking the CA's certificates per subject, and the new certificate is at that
+subject with an inventory row like any other. What stops being exported is the
+*displaced* certificate's own series — and that is the wanted behaviour, not a
+loss. An expiry alert for a certificate an operator deliberately replaced is
+noise; it is supposed to expire.
+
+What displacement does leave is not a metrics problem. The displaced
+certificate stays valid and is no longer what `revoke --certname` resolves to,
+so retiring it early needs its serial. The CA logs that serial at the time,
+with the remedy, and the certificate keeps its own inventory row — so an
+operator who missed the line finds it as a second row under one subject. Grep
+for `is replacing a different certificate stored for its name` and retire what
+it names with `openvox-ca-ctl revoke --serial`.
+
 ### Kubernetes export
 
 Only present when [Kubernetes export](kubernetes-export.md) targets are
@@ -547,7 +644,8 @@ rolled back, one removed — plus a file that has never been read at all),
 [client trust domains](#client-trust-domains) whose revocation material has gone
 unusable or stale (`PuppetCAClientCRLUnusable`, `PuppetCAClientCRLRefusals` and
 `PuppetCAClientCRLStale`, and only where `client_ca` is configured), and
-Kubernetes export failures, with all thresholds configurable. It does **not**
+Kubernetes export failures and managed certificates that were never issued —
+all with configurable thresholds. It does **not**
 alert on the fleet-relative `puppetca_ocsp_index_serials` comparison — that one
 is left to the operator, since it needs a `by (job)` aggregation to avoid
 fanning in across unrelated CAs and the condition it catches is not fail-open.

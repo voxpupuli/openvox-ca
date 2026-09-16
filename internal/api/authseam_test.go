@@ -21,6 +21,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -50,9 +51,152 @@ var (
 	_ = (*ca.CA).GenerateWithOptions
 )
 
-// caImportPath is the package the gate guards. Matched by path so an aliased
-// import cannot walk past the qualified rules.
+// caImportPath is the package whose identifiers the gate forbids. Matched by
+// path so an aliased import cannot walk past the qualified rules.
 const caImportPath = "github.com/voxpupuli/openvox-ca/internal/ca"
+
+// guardedPackages are the directories the gate walks, relative to this one.
+//
+// The gate began as a rule about internal/api alone, and it is not one any
+// more: what it enforces is that an admin credential is minted only by an
+// operator at a terminal, and that claim is about a set of packages rather than
+// about one. Each entry here is a package that imports internal/ca and offers a
+// surface something other than an operator can reach.
+//
+//   - "." is internal/api itself, the HTTP surface. A handler that constructed
+//     a grant would put the escalation back exactly where the CSR filter exists
+//     to prevent it.
+//   - "../certstore" is the component-certificate stores added by #243. It is a
+//     new issuance surface importing internal/ca, and a managed certificate for
+//     a certname listed in puppet_server is already an admin credential by that
+//     listing -- which is the mechanism, and needs no extension. pp_cli_auth on
+//     a managed certificate was considered and rejected, and this is what holds
+//     that decision in place rather than leaving it to memory.
+//
+// Adding a directory is how this gate grows. It is deliberately a list and not
+// a glob: a package arrives here because somebody decided it was reachable, and
+// a glob would enrol packages nobody had thought about, which is the opposite
+// of the property wanted.
+//
+// A list is also the failure mode this repository keeps paying for -- working
+// from an enumeration misses sites -- so the list is not trusted on its own.
+// The spec below sweeps every package that imports internal/ca and requires
+// each to be either guarded or in exemptPackages, which turns "somebody
+// remembered" into "somebody decided".
+var guardedPackages = []string{".", "../certstore"}
+
+// exemptPackages are the other importers of internal/ca, each with the reason
+// it is not guarded. Being here is a decision, not an oversight; the sweep
+// below fails on an importer that is in neither list.
+//
+// Paths are relative to this directory, matching guardedPackages.
+var exemptPackages = map[string]string{
+	"../metrics": "exposes only a Prometheus collector, with no issuance surface. " +
+		"If that changes it belongs in guardedPackages rather than here",
+	"../signer/openbao": "signs with a CA key it holds; it issues nothing and serves nothing",
+	// These two reasons were written the wrong way round, and the mistake is
+	// worth leaving a mark: an exemption is only as good as the fact it rests
+	// on, and both of these rested on a false one while reading as settled.
+	"../../cmd/openvox-ca": "the server binary, and the ONE caller that mints an admin " +
+		"credential: `openvox-ca generate --pp-cli-auth` reaches ca.PpCliAuth() and " +
+		"ca.GenerateOptions in cmd/openvox-ca/generate.go. That is exactly the " +
+		"operator-at-a-terminal case the gate exists to confine minting to -- an " +
+		"offline subcommand run by a person, not a path any request can reach -- so " +
+		"it is exempt on that ground rather than on reaching nothing. It is also the " +
+		"composition root, where a rule about the package would be a rule about the " +
+		"whole binary",
+	"../../cmd/openvox-ca-ctl": "the operator CLI, which reaches no grant constructor " +
+		"at all: it imports internal/ca for its types and talks to a running CA over " +
+		"HTTP. It is exempt because there is nothing here to confine",
+}
+
+// caImporters returns every package directory in the module whose non-test
+// source imports internal/ca, at any depth, relative to this directory.
+//
+// The whole module, not internal/ and cmd/: two earlier versions narrowed it and
+// the comment in the body says what that cost. Dot directories are skipped as a
+// class, which matters here because .claude holds this repository's sibling
+// worktrees and walking into those would sweep other branches' source as though
+// it were this one's.
+//
+// Measured rather than listed, which is the whole point: an enumeration is what
+// misses a new importer, and a new importer of internal/ca is precisely the
+// event this gate has to notice.
+func caImporters() []string {
+	GinkgoHelper()
+	seen := map[string]bool{}
+	var found []string
+	// The module root, walked to any depth. Two earlier versions narrowed this
+	// and both were tuned to the tree as it stood: the first stopped one
+	// directory below internal/ and cmd/, the second walked those two subtrees
+	// in full but no others. A package importing internal/ca from anywhere
+	// else -- a new top-level directory, a tools package, an example -- was
+	// swept by neither, so it needed no recorded decision and the gate stayed
+	// green while the surface grew. A sweep whose own reach is an enumeration
+	// fails exactly the way the list it audits would.
+	const root = "../.." // the module root
+	{
+		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if !d.IsDir() {
+				return nil
+			}
+			// Dot directories are skipped as a class rather than by name:
+			// .git, .github, and -- the one that matters here -- .claude,
+			// which holds this repository's sibling worktrees. Walking into
+			// those would sweep other branches' source as though it were this
+			// one's, and report importers that do not exist on this branch.
+			if name := d.Name(); name != "." && name != ".." && strings.HasPrefix(name, ".") {
+				return filepath.SkipDir
+			}
+			switch d.Name() {
+			case "testdata", "vendor", "node_modules":
+				return filepath.SkipDir
+			}
+			if importsCA(path) && !seen[path] {
+				seen[path] = true
+				found = append(found, path)
+			}
+			return nil
+		})
+		// A root that cannot be walked is a sweep that did not run, not a tree
+		// with no importers in it.
+		Expect(err).NotTo(HaveOccurred(), root)
+	}
+	return found
+}
+
+// importsCA reports whether any non-test file in dir imports internal/ca.
+//
+// Every failure here is fatal rather than absorbed. A directory that cannot be
+// read, or a file that will not parse, would otherwise read as "does not import
+// internal/ca" -- which silently removes a package from the set this gate
+// requires a decision for, and is the one outcome a guard must never produce
+// quietly.
+func importsCA(dir string) bool {
+	GinkgoHelper()
+	entries, err := os.ReadDir(dir)
+	Expect(err).NotTo(HaveOccurred(), dir)
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
+		Expect(err).NotTo(HaveOccurred(), path)
+		for _, imp := range file.Imports {
+			p, err := strconv.Unquote(imp.Path.Value)
+			Expect(err).NotTo(HaveOccurred(), path)
+			if p == caImportPath {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // SECURITY: the CSR signing path strips Puppet authorisation-arc OIDs from
 // submitted requests, so no agent can ask for pp_cli_auth. ca.AuthGrant is the
@@ -71,13 +215,18 @@ const caImportPath = "github.com/voxpupuli/openvox-ca/internal/ca"
 // PpCliAuth and GenerateWithOptions are exported and this package already
 // imports internal/ca. Three lines in a handler would be enough.
 //
-// Scoped to this package's own files on purpose. Walking the transitive import
-// graph would need golang.org/x/tools (an indirect dependency today) or a Go
-// toolchain at test time. That scope is a judgement, not a proof: internal/metrics
-// also imports internal/ca, holds a *ca.CA and serves HTTP, so it is an importer
-// this gate does not cover. It is considered out of reach because it exposes
-// only a Prometheus collector with no issuance surface -- if that ever changes,
-// this gate needs to grow rather than be trusted as-is.
+// Scoped to an enumerated list of packages on purpose -- see guardedPackages.
+// Walking the transitive import graph would need golang.org/x/tools (an
+// indirect dependency today) or a Go toolchain at test time. That scope is a
+// judgement, not a proof, and the list is what makes the judgement reviewable:
+// a new importer of internal/ca is covered when somebody adds it here, and not
+// before.
+//
+// Every importer that is NOT guarded carries its reason in exemptPackages, and
+// this comment deliberately does not restate any of them. It used to restate
+// internal/metrics' -- a package that imports internal/ca, holds a *ca.CA and
+// serves HTTP -- which put one judgement in two places that nothing keeps in
+// step. The exemption is the record; the sweep below requires it to exist.
 //
 // NIST 800-53: AC-6 (Least Privilege), CM-7 (Least Functionality)
 var _ = Describe("The authorisation-grant seam", func() {
@@ -318,33 +467,112 @@ func check(c *x509.Certificate) bool { return hasPpCliAuth(c) && ca.OIDPpCliAuth
 `, false, ""),
 	)
 
-	It("is not reachable from any handler in this package", func() {
-		fset := token.NewFileSet()
-		entries, err := os.ReadDir(".")
-		Expect(err).NotTo(HaveOccurred())
+	// One spec per guarded package rather than one loop inside a single spec,
+	// so that a package whose walk stops working is named in the failure. A
+	// loop would report "the gate is not working" without saying for which
+	// package, and the likeliest cause -- a directory renamed out from under
+	// guardedPackages -- is precisely the one that needs naming.
+	//
+	// The entries are generated from guardedPackages rather than written out,
+	// so adding a package to that list cannot be half-done: there is no second
+	// place to remember to update.
+	tableArgs := []any{
+		func(dir string) {
+			fset := token.NewFileSet()
+			entries, err := os.ReadDir(dir)
+			Expect(err).NotTo(HaveOccurred(),
+				"guardedPackages names %s, which cannot be read. If that package moved or "+
+					"was renamed, follow it -- do not delete the entry, or its issuance "+
+					"surface stops being guarded silently", dir)
 
-		var checked int
-		for _, entry := range entries {
-			name := entry.Name()
-			if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-				continue
+			var checked int
+			for _, entry := range entries {
+				name := entry.Name()
+				if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+					continue
+				}
+				checked++
+
+				path := filepath.Join(dir, name)
+				file, err := parser.ParseFile(fset, path, nil, 0)
+				Expect(err).NotTo(HaveOccurred(), path)
+
+				for _, ref := range forbiddenRefs(fset, file) {
+					refName := strings.SplitN(ref, "@", 2)[0]
+					Fail(strings.Join([]string{
+						strings.SplitN(ref, "@", 2)[1] + " references " + refName,
+						"Reason it is forbidden: " + forbidden[refName] + ".",
+						"If this is deliberate, the security argument in internal/ca/authgrant.go",
+						"has to be revisited first -- not this test.",
+					}, "\n"))
+				}
 			}
-			checked++
 
-			file, err := parser.ParseFile(fset, filepath.Join(".", name), nil, 0)
-			Expect(err).NotTo(HaveOccurred(), name)
+			// Per package, not once for the walk as a whole. A single count
+			// across every directory is satisfied by this package alone, so a
+			// sibling that had been emptied, renamed, or spelled wrongly would
+			// contribute nothing and the gate would still pass -- green because
+			// it examined the one package that was never the question.
+			Expect(checked).To(BeNumerically(">", 0),
+				"no non-test source files were examined in %s; this package is not being guarded", dir)
+		},
+	}
+	for _, dir := range guardedPackages {
+		tableArgs = append(tableArgs, Entry(dir, dir))
+	}
+	DescribeTable("is not reachable from any of the guarded packages", tableArgs...)
 
-			for _, ref := range forbiddenRefs(fset, file) {
-				refName := strings.SplitN(ref, "@", 2)[0]
-				Fail(strings.Join([]string{
-					strings.SplitN(ref, "@", 2)[1] + " references " + refName,
-					"Reason it is forbidden: " + forbidden[refName] + ".",
-					"If this is deliberate, the security argument in internal/ca/authgrant.go",
-					"has to be revisited first -- not this test.",
-				}, "\n"))
-			}
+	// What makes guardedPackages authoritative rather than remembered.
+	//
+	// Without this, adding a package that imports internal/ca and forgetting
+	// this file leaves the new package unguarded and every spec above green --
+	// which is exactly how an enumeration fails, and this repository has a
+	// recorded history of it. The sweep does not decide anything: it requires a
+	// decision to have been recorded, in one list or the other.
+	//
+	// Both sides are reduced to one spelling before they are compared. The
+	// lists are written relative to this package, because that is where a
+	// contributor reads them; the sweep walks from the module root and yields
+	// paths relative to that. Left alone, "." and "../../internal/api" are the
+	// same package under two names, and the sweep would report this very
+	// package as unguarded.
+	modulePath := func(dir string) string {
+		if rel, err := filepath.Rel("../..", filepath.Join("../../internal/api", dir)); err == nil {
+			return filepath.Clean(rel)
+		}
+		return filepath.Clean(dir)
+	}
+	It("has a recorded decision for every package that imports internal/ca", func() {
+		known := map[string]bool{}
+		for _, dir := range guardedPackages {
+			known[modulePath(dir)] = true
+		}
+		for dir := range exemptPackages {
+			known[modulePath(dir)] = true
 		}
 
-		Expect(checked).To(BeNumerically(">", 0), "no source files were examined; the walk is not working")
+		// The translation must actually reach this package, whose own entry is
+		// "." -- if it did not, every swept path would look unknown and the
+		// failure below would name the wrong defect.
+		Expect(known).To(HaveKey("internal/api"),
+			"precondition: guardedPackages' own entry must normalise to internal/api")
+
+		importers := caImporters()
+		Expect(importers).NotTo(BeEmpty(),
+			"no importer of internal/ca was found at all; the sweep is not working, "+
+				"and a sweep that finds nothing agrees with every list")
+
+		for _, dir := range importers {
+			rel, err := filepath.Rel("../..", dir)
+			Expect(err).NotTo(HaveOccurred(), dir)
+			Expect(known).To(HaveKey(filepath.Clean(rel)), strings.Join([]string{
+				dir + " imports " + caImportPath + " and is in neither guardedPackages nor exemptPackages.",
+				"That is a decision nobody has recorded, not a test to silence.",
+				"If the package offers a surface something other than an operator at a",
+				"terminal can reach, add it to guardedPackages. If it does not, add it to",
+				"exemptPackages with the reason -- which is what makes the next reader able",
+				"to check the judgement rather than inherit it.",
+			}, "\n"))
+		}
 	})
 })
