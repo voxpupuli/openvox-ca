@@ -3825,53 +3825,76 @@ var _ = Describe("first-boot's node-certificate step", func() {
 	})
 
 	Describe("ensure_node_certificate", func() {
-		// The takeover case: the CA in $CADIR predates this run, so it is the
-		// CA that issued this credential and re-minting would replace a
-		// working certificate for nothing.
-		It("adopts an existing pair without minting, on a takeover", func() {
+		// recordIssued puts a certificate in the CA's own store, which is what
+		// issuing one does: the filesystem backend keeps it at
+		// <cadir>/signed/<name>.pem. This is the state the guard reads, and it
+		// is placed here by the same route the real binary places it rather
+		// than by setting a variable the guard happens to consult -- the
+		// previous version of these specs assigned `ca_existed` by hand, which
+		// left the code that COMPUTES it undriven and is why a fail-open on the
+		// second run survived them.
+		recordIssued := func(body string) {
+			GinkgoHelper()
+			signed := filepath.Join(sslDir, "ca", "signed")
+			Expect(os.MkdirAll(signed, 0o755)).To(Succeed())
+			Expect(os.WriteFile(filepath.Join(signed, "ca.example.com.pem"),
+				[]byte(body), 0o644)).To(Succeed())
+		}
+
+		// The takeover case: the CA in $CADIR issued this credential, so
+		// re-minting would replace a working certificate for nothing.
+		It("adopts an existing pair the CA in cadir issued", func() {
 			stubOpenvoxCA(binDir, true)
 			writePair(true, true)
+			recordIssued("cert")
 			r, err := runFirstBootIn(sslDir, binDir,
-				`ca_existed=yes; NAME=ca.example.com; ensure_node_certificate`)
+				`NAME=ca.example.com; CADIR=$SSLDIR/ca; ensure_node_certificate`)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(r.ok).To(BeTrue())
+			Expect(r.ok).To(BeTrue(), "the CA's own credential was refused: %s", r.output)
 			Expect(r.output).To(ContainSubstring("adopting the existing certificate"))
 		})
 
 		// And the case that is not a takeover at all. A Server compile master
 		// already has an openvox-agent credential signed by the estate's
-		// remote CA and no local cadir: adopting it would make the CA this run
-		// just created serve a certificate it did not issue, and every client
-		// that verifies would reject the handshake.
-		It("refuses to adopt a credential the CA it just created did not issue", func() {
-			stubOpenvoxCA(binDir, true)
-			writePair(true, true)
-			r, err := runFirstBootIn(sslDir, binDir,
-				`ca_existed=no; NAME=ca.example.com; ensure_node_certificate`)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(r.ok).To(BeFalse(), "provisioning should have refused: %s", r.output)
-			Expect(r.output).To(And(
-				ContainSubstring("was created\nby this run"),
-				ContainSubstring("issued by a different CA"),
-			))
-			// Both routes out have to be offered: an operator told only to
-			// move the credential aside would strand a host that should be
-			// joining the estate's existing CA.
-			Expect(r.output).To(And(
-				ContainSubstring("Use the existing CA"),
-				ContainSubstring("Or run a new, separate CA here"),
-			))
-		})
-
-		// An unset ca_existed must be fatal rather than silently adopting:
-		// `set -u` is what makes a future caller that forgets it fail loudly.
-		It("refuses to run at all when ca_existed was never established", func() {
-			stubOpenvoxCA(binDir, true)
-			writePair(true, true)
-			r, err := runFirstBootIn(sslDir, binDir, `NAME=ca.example.com; ensure_node_certificate`)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(r.ok).To(BeFalse(), "an unset ca_existed must not adopt by default")
-		})
+		// remote CA: adopting it would make this CA serve a certificate it did
+		// not issue, and every client that verifies would reject the handshake.
+		DescribeTable("refuses to adopt a credential this CA has no record of issuing",
+			func(setup func()) {
+				stubOpenvoxCA(binDir, true)
+				writePair(true, true)
+				setup()
+				r, err := runFirstBootIn(sslDir, binDir,
+					`NAME=ca.example.com; CADIR=$SSLDIR/ca; ensure_node_certificate`)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(r.ok).To(BeFalse(), "provisioning should have refused: %s", r.output)
+				Expect(r.output).To(And(
+					ContainSubstring("has no\nrecord of issuing it"),
+					ContainSubstring("issued by a different CA"),
+				))
+				// Both routes out have to be offered: an operator told only to
+				// move the credential aside would strand a host that should be
+				// joining the estate's existing CA.
+				Expect(r.output).To(And(
+					ContainSubstring("Use the existing CA"),
+					ContainSubstring("Or run a new, separate CA here"),
+				))
+			},
+			// The compile-master shape: the CA has issued nothing at all.
+			Entry("the store has no signed directory", func() {}),
+			// It has issued for OTHER names, but not this one.
+			Entry("the store holds no certificate for this name", func() {
+				signed := filepath.Join(sslDir, "ca", "signed")
+				Expect(os.MkdirAll(signed, 0o755)).To(Succeed())
+				Expect(os.WriteFile(filepath.Join(signed, "other.example.com.pem"),
+					[]byte("cert"), 0o644)).To(Succeed())
+			}),
+			// The name matches and the CONTENT does not -- the case a
+			// filename-only check would wave through. An agent certname is the
+			// host's FQDN, so a collision here is ordinary rather than exotic.
+			Entry("the recorded certificate is a different one", func() {
+				recordIssued("A-DIFFERENT-CERT")
+			}),
+		)
 
 		// Half a credential is the case where guessing is worse than stopping:
 		// minting over a key whose certificate is missing, or vice versa,
@@ -4701,13 +4724,30 @@ case "${1:-}" in
 generate) ;;
 *) exit 0 ;;
 esac
-certout=""; keyout=""; prev=""
+certout=""; keyout=""; cadir=""; certname=""; prev=""
 for a in "$@"; do
-  case "$prev" in --cert-out) certout=$a ;; --key-out) keyout=$a ;; esac
+  case "$prev" in
+    --cert-out) certout=$a ;;
+    --key-out) keyout=$a ;;
+    --cadir) cadir=$a ;;
+    --certname) certname=$a ;;
+  esac
   prev=$a
 done
 [ -n "$certout" ] && printf 'NODE-CERT\n' > "$certout"
 [ -n "$keyout" ]  && { printf 'NODE-KEY\n' > "$keyout"; chmod 0600 "$keyout"; }
+# Issuing RECORDS the certificate in the CA's own store. The filesystem
+# backend keeps it at <cadir>/signed/<subject>.pem -- certPrefix in
+# internal/storage/filesystem.go -- and first-boot now reads exactly that to
+# decide whether this CA issued a credential it is being asked to adopt.
+#
+# A stub that minted without recording made the CA look as though it had
+# issued nothing, ever. That is not a simplification of the real binary, it is
+# a contradiction of it, and it would have made the adoption path untestable.
+if [ -n "$cadir" ] && [ -n "$certname" ] && [ -n "$certout" ]; then
+  mkdir -p "$cadir/signed"
+  cat "$certout" > "$cadir/signed/$certname.pem"
+fi
 exit 0
 `
 	Expect(os.WriteFile(filepath.Join(binDir, "openvox-ca-ctl"), []byte(ctl), 0o755)).To(Succeed())
@@ -4723,6 +4763,71 @@ var _ = Describe("first-boot's provisioning steps", func() {
 		// The package ships these two; the script refuses without them.
 		Expect(os.MkdirAll(filepath.Join(sslDir, "ca"), 0o755)).To(Succeed())
 		stubCA(binDir)
+	})
+
+	// The whole script, run twice against one tree. Every spec on the
+	// foreign-credential guard set `ca_existed` by hand and called
+	// ensure_node_certificate directly, so none of them drove the code that
+	// COMPUTES it -- and that is where the guard failed.
+	//
+	// The retry is the ordinary operator action, not an exotic one: the oneshot
+	// is RequiredBy=openvox-ca.service, so the service does not start until it
+	// succeeds, and every other remedy the script prints ends with
+	// `systemctl restart openvox-ca-first-boot`.
+	Describe("a host that already holds a credential from another CA", func() {
+		const certname = "agent.example.com"
+
+		BeforeEach(func() {
+			// What a Server compile master looks like: an openvox-agent
+			// credential signed by the estate's remote CA, and no local CA.
+			for dir, mode := range map[string]os.FileMode{
+				"certs": 0o755, "private_keys": 0o750,
+			} {
+				Expect(os.MkdirAll(filepath.Join(sslDir, dir), mode)).To(Succeed())
+			}
+			Expect(os.WriteFile(filepath.Join(sslDir, "certs", certname+".pem"),
+				[]byte("SOMEBODY-ELSES-CERT\n"), 0o644)).To(Succeed())
+			Expect(os.WriteFile(filepath.Join(sslDir, "private_keys", certname+".pem"),
+				[]byte("SOMEBODY-ELSES-KEY\n"), 0o600)).To(Succeed())
+		})
+
+		It("refuses on the first run, and on every run after it", func() {
+			first := runFirstBootScript(sslDir, binDir, certname)
+			Expect(first.ok).To(BeFalse(), "the first run should have refused: %s", first.output)
+			Expect(first.output).To(ContainSubstring("issued by a different CA"))
+
+			// Nothing has changed on disk that resolves the conflict, so the
+			// answer must not change either. It did: the first run created the
+			// CA, so the second run observed one already present, read that as
+			// a takeover and adopted the foreign credential -- linking
+			// tls_cert at a certificate this CA did not issue, with the service
+			// reporting success and every verifying client rejecting it.
+			second := runFirstBootScript(sslDir, binDir, certname)
+			Expect(second.ok).To(BeFalse(),
+				"the retry adopted what the first run refused: %s", second.output)
+			Expect(second.output).To(ContainSubstring("issued by a different CA"))
+			Expect(second.output).NotTo(ContainSubstring("adopting the existing certificate"))
+
+			// The consequence, asserted directly rather than via the message:
+			// nothing may point the serving credential at the foreign pair.
+			Expect(filepath.Join(sslDir, "certs", "openvox-ca-server.pem")).
+				NotTo(BeAnExistingFile(), "the serving credential was linked despite the refusal")
+		})
+
+		// And the refusal must not be reached by refusing everything: a
+		// credential this CA DID issue is still adopted on a later run.
+		It("still adopts a credential the CA in cadir issued", func() {
+			// Remove the foreign pair and let a first run mint properly.
+			Expect(os.Remove(filepath.Join(sslDir, "certs", certname+".pem"))).To(Succeed())
+			Expect(os.Remove(filepath.Join(sslDir, "private_keys", certname+".pem"))).To(Succeed())
+
+			first := runFirstBootScript(sslDir, binDir, certname)
+			Expect(first.ok).To(BeTrue(), "provisioning failed: %s", first.output)
+
+			second := runFirstBootScript(sslDir, binDir, certname)
+			Expect(second.ok).To(BeTrue(), "the re-run refused its own CA's credential: %s", second.output)
+			Expect(second.output).To(ContainSubstring("adopting the existing certificate"))
+		})
 	})
 
 	Describe("a first boot on an empty tree", func() {

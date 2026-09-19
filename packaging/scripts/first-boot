@@ -520,6 +520,32 @@ has_generate_subcommand() {
 #    feature -- an older binary on PATH, or a partial upgrade -- which is a
 #    state a package cannot prevent and which produces exactly the same
 #    unusable install.
+# ca_issued_this_credential reports whether the CA now in $CADIR issued the
+# certificate at $1 for $NAME.
+#
+# The filesystem backend keeps every certificate it issues at
+# $CADIR/signed/<name>.pem (internal/storage/filesystem.go), so the CA's own
+# records answer this directly. That matters because the question has to be
+# answerable the SAME WAY on every run.
+#
+# It replaces "did the CA exist when this run started", which was a proxy for
+# the same thing and failed open on the second run: the first run bootstrapped
+# the CA before the guard fired, so every later run observed a CA already
+# present, read that as a takeover, and adopted the very credential the first
+# run refused. A plain `systemctl restart openvox-ca-first-boot` -- which every
+# other remedy in this script ends with -- was enough to defeat it.
+#
+# Compared by content, not just by name: a host whose agent certname matches a
+# name this CA has also issued for would otherwise pass on the filename alone.
+# PEM is text, so a shell comparison suffices and pulls in neither `cmp` nor
+# `diff` -- and `diff` is precisely the binary a minimal base image dropped out
+# from under this project once already.
+ca_issued_this_credential() {
+	issued="$CADIR/signed/$NAME.pem"
+	[ -f "$issued" ] || return 1
+	[ "$(cat "$issued")" = "$(cat "$1")" ]
+}
+
 ensure_node_certificate() {
 	cert="$SSLDIR/certs/$NAME.pem"
 	key="$SSLDIR/private_keys/$NAME.pem"
@@ -529,17 +555,17 @@ ensure_node_certificate() {
 		# credential is the one in $CADIR, and re-minting would needlessly
 		# replace a working certificate.
 		#
-		# It is wrong when THIS run created the CA. A Server compile master is
-		# exactly the host a package lands on: /etc/puppetlabs/puppet/ssl is
-		# already puppet:puppet and already holds an openvox-agent credential
-		# signed by the estate's REMOTE CA, with no local cadir. Adopting it
-		# would make a brand-new CA serve a certificate it did not issue, and
-		# link_serving_credential would point tls_cert/tls_key straight at it.
-		# Nothing downstream would notice: the server starts, and every client
-		# that verifies rejects the handshake.
-		if [ "$ca_existed" = no ]; then
-			fail "found an existing credential for \"$NAME\" ($cert), but the CA in $CADIR was created
-by this run -- so that certificate was issued by a different CA and this one cannot serve it.
+		# It is wrong when this CA did not issue the credential. A Server
+		# compile master is exactly the host a package lands on:
+		# /etc/puppetlabs/puppet/ssl is already puppet:puppet and already holds
+		# an openvox-agent credential signed by the estate's REMOTE CA, with no
+		# local cadir. Adopting it would make this CA serve a certificate it
+		# did not issue, and link_serving_credential would point tls_cert and
+		# tls_key straight at it. Nothing downstream would notice: the server
+		# starts, and every client that verifies rejects the handshake.
+		if ! ca_issued_this_credential "$cert"; then
+			fail "found an existing credential for \"$NAME\" ($cert), but the CA in $CADIR has no
+record of issuing it -- so it was issued by a different CA and this one cannot serve it.
 
 That usually means this host already belongs to another CA, which is the estate's real one. Pick
 the CA this service should be:
