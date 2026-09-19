@@ -344,6 +344,18 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), http.StatusConflict)
 				return
 			}
+			// A subject the inventory has no entry for is an absent resource,
+			// not a conflict with the CA's state: 404, matching the signed arm
+			// above, the by-serial revoke's ErrSerialUnknown, and Puppet
+			// Server. Deliberately not "a subject this CA never issued" —
+			// Clean reaches the same sentinel with a certificate in storage,
+			// and so does a lost inventory, which api_test.go covers. Tested
+			// via the sentinel rather than fs.ErrNotExist, which every backend
+			// also returns for an absent blob — a missing CRL must stay 409.
+			if errors.Is(err, ca.ErrSubjectUnknown) {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
 			http.Error(w, "conflict", http.StatusConflict)
 			return
 		}

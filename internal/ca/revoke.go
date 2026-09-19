@@ -121,6 +121,30 @@ func (c *CA) Revoke(ctx context.Context, subject string) error {
 	})
 }
 
+// ErrSubjectUnknown is returned by Revoke for a subject the inventory has no
+// entry for.
+//
+// The by-subject counterpart to ErrSerialUnknown, and a sentinel for the same
+// reason: absence has to be distinguishable from failure at the API boundary,
+// which answers it 404 rather than 409. It cannot be left to the caller to
+// recognise fs.ErrNotExist, because every Backend.Get wraps that when a key is
+// absent, so a missing CRL blob reaches the same caller carrying the same
+// error — and a CA that has lost its CRL must not report the subject as
+// unknown. This value is the one place that distinction is recorded.
+//
+// Worded for what was observed rather than for what it usually implies. The
+// common case is a subject that was never issued, but Clean reaches this same
+// branch through revokeLocked with a certificate in storage (see the hasCert
+// arm in signing.go), and emits this text into an operator warning about
+// deleting that certificate. "No certificate has been issued" would be false
+// there. A blob backend can reach it without an issuance history too, when the
+// inventory has gone missing along with its integrity MAC: that is
+// indistinguishable here from an absent entry in a readable inventory. (With
+// the MAC still present the missing blob fails verification instead and leaves
+// by a different, counted branch, so it is the pair going together that lands
+// here.) So the message does not claim an issuance history the CA cannot see.
+var ErrSubjectUnknown = errors.New("no inventory entry for this subject")
+
 // revokeLocked performs the actual CRL read-modify-write. The cluster CRL
 // lock and c.mu must both be held by the caller.
 func (c *CA) revokeLocked(ctx context.Context, subject string) error {
@@ -144,9 +168,11 @@ func (c *CA) revokeLocked(ctx context.Context, subject string) error {
 		// signal -- since the read goes through ReadInventory; the structured
 		// backends (SQL, etcd, redis) answer from an indexed lookup, which
 		// verifies nothing, so there the counted cases are connection and query
-		// failures. An *absent* inventory on a blob backend
-		// reaches fs.ErrNotExist and is classed as never-issued, so it is not
-		// counted either. It matters
+		// failures. An *absent* inventory reaches fs.ErrNotExist, and is
+		// returned as ErrSubjectUnknown rather than counted, only under the
+		// conditions ErrSubjectUnknown's godoc sets out; on a blob backend with
+		// the integrity MAC still present the read fails verification instead
+		// and is counted by the sentence above. It matters
 		// because Clean swallows this error and deletes anyway, so without the
 		// increment a clean silently became delete-without-revoke with one WARN
 		// line and a flat counter, leaving the alert the mixin ships unable to
@@ -154,9 +180,50 @@ func (c *CA) revokeLocked(ctx context.Context, subject string) error {
 		// otherwise page someone.
 		// Both the blob and the SQL inventory report a missing subject by
 		// wrapping fs.ErrNotExist, so one check covers every backend.
-		if !errors.Is(err, fs.ErrNotExist) {
-			c.crlUpdateFailures.Add(1)
+		//
+		// Converted to ErrSubjectUnknown here rather than passed through,
+		// exactly as revokeSerialCheckedLocked does with ErrSerialUnknown.
+		// What this frame knows, and no caller downstream can recover, is
+		// *which read* produced the fs.ErrNotExist: the inventory lookup above,
+		// rather than one of the CRL reads that follow. Both wrap the same
+		// sentinel, so an errors.Is further out would conflate a subject the
+		// inventory does not list with a CA that has lost its CRL. It does not
+		// distinguish an absent entry from an absent inventory — see
+		// ErrSubjectUnknown's godoc, which is why the message does not claim
+		// one. The counter split is unchanged: a subject the inventory does not
+		// list is not a CRL update failure, so this arm still does not
+		// increment.
+		if errors.Is(err, fs.ErrNotExist) {
+			// Log the cause rather than wrap it: the returned value reaches an
+			// HTTP response body, and the underlying error names a storage
+			// path. The security reason applies to the response, not to the
+			// log, so the cause is logged here instead of being lost -- before
+			// this sentinel existed it travelled inside the returned error and
+			// reached the WARN both callers already emit (the handler's "Revoke
+			// failed" and Clean's "deleting the certificate anyway"). This arm
+			// moves no counter and now answers 404, so without a default-level
+			// line a lost inventory would be invisible in production: every
+			// revoke would report the subject absent and nothing would say why.
+			//
+			// Info, not Warn, and the level is the whole argument. Verbosity 0
+			// maps to LevelInfo, so this is in production logs either way; what
+			// Warn would add is a second WARN for every mistyped certname,
+			// beside the one each caller already emits, for a client error the
+			// API now answers 404. What the line adds over the caller's is the
+			// cause, and that is worth something only on a blob backend: there
+			// a lost inventory is a real *fs.PathError naming the file, while
+			// an unlisted subject is synthesised by latestSerialFromBlob and
+			// names no path. The structured backends answer from an index that
+			// verifies nothing and synthesise *fs.PathError for both, with Path
+			// set to the subject, so the two states are indistinguishable there
+			// -- which is also why the level cannot be chosen per case, since
+			// errors.As sees the same type either way. docs/api.md says as much
+			// to operators, and sends them to the certificate index instead.
+			slog.Info("No inventory entry for subject; revocation cannot proceed",
+				"subject", subject, "error", err)
+			return fmt.Errorf("%w: %s", ErrSubjectUnknown, subject)
 		}
+		c.crlUpdateFailures.Add(1)
 		return fmt.Errorf("could not find certificate for subject %s: %w", subject, err)
 	}
 

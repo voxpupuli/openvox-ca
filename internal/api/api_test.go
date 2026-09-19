@@ -1403,9 +1403,142 @@ var _ = Describe("API Workflow", func() {
 	})
 
 	Context("PUT /certificate_status revoke when no cert exists", func() {
-		It("should return 409 when revoking a subject that was never signed", func() {
+		// 404, matching the signed arm of this same handler immediately above
+		// and the by-serial revoke's ErrSerialUnknown. A subject the CA never
+		// issued is an absent resource, not a conflict with the CA's state.
+		It("should return 404 when revoking a subject that was never signed", func() {
 			body, _ := json.Marshal(api.PutStatusBody{DesiredState: "revoked"})
 			req := httptest.NewRequest("PUT", "/certificate_status/never-signed-node", bytes.NewReader(body))
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusNotFound))
+			// Assert the body too, for the reason the by-serial spec gives:
+			// ServeMux answers 404 for any path it has no pattern for, so a
+			// status-only assertion would survive this route being deleted.
+			//
+			// Two assertions, deliberately. The sentinel one proves this 404
+			// came from the ErrSubjectUnknown arm rather than from the mux, but
+			// it cannot detect the sentinel being reworded -- expectation and
+			// actual are both derived from it, so it would follow the message
+			// anywhere, including to one that tells an operator nothing (and an
+			// empty sentinel would satisfy it vacuously). The literal is what
+			// pins the operator-visible text, matching the by-serial specs.
+			Expect(rr.Body.String()).To(ContainSubstring(ca.ErrSubjectUnknown.Error()))
+			Expect(rr.Body.String()).To(ContainSubstring("no inventory entry"))
+			Expect(rr.Body.String()).To(ContainSubstring("never-signed-node"))
+		})
+
+		// The same 404, deliberately, for a subject the CA has heard of. A
+		// pending CSR is not a certificate and puts nothing in the inventory,
+		// so revoke finds exactly what it finds for a name nobody has ever
+		// sent: nothing to revoke. The sameness is the point of pinning it.
+		//
+		// It is also the case a later change is most likely to get wrong,
+		// because the two arms of this handler disagree about the same subject
+		// on purpose: `signed` SIGNS a pending CSR (204), while `revoked`
+		// answers 404 for it. Anyone reading "there is a CSR here, so the
+		// subject is not unknown" into the revoke arm turns this into a 409 and
+		// breaks parity with the never-heard-of case, with nothing else to
+		// catch it.
+		It("should return the same 404 when the subject has only a pending CSR", func() {
+			subject := "requested-only-node"
+			csrPEM, err := testutil.GenerateCSR(subject)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = myCA.SaveRequest(context.Background(), subject, csrPEM)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Precondition: the CSR really is queued, so this spec is not
+			// silently re-testing the never-signed case above.
+			status := httptest.NewRecorder()
+			mux.ServeHTTP(status, httptest.NewRequest("GET", "/certificate_status/"+subject, nil))
+			Expect(status.Code).To(Equal(http.StatusOK))
+			Expect(status.Body.String()).To(ContainSubstring("requested"))
+
+			body, _ := json.Marshal(api.PutStatusBody{DesiredState: "revoked"})
+			req := httptest.NewRequest("PUT", "/certificate_status/"+subject, bytes.NewReader(body))
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+
+			Expect(rr.Code).To(Equal(http.StatusNotFound),
+				"a queued request is not a certificate; revoke has nothing to retire")
+			Expect(rr.Body.String()).To(ContainSubstring(ca.ErrSubjectUnknown.Error()))
+			Expect(rr.Body.String()).To(ContainSubstring(subject))
+		})
+
+		// The leak guard belongs here rather than beside the spec above, and the
+		// difference is the whole point: for a subject that was simply never
+		// listed, the backends synthesise the not-exist themselves and the cause
+		// names no path, so wrapping it there would leak nothing and an
+		// assertion there would pass whatever the code did. A lost inventory is
+		// the case where the cause is a real *fs.PathError, so it is the only
+		// place the invariant can actually be tested.
+		It("does not leak the storage path into the 404 body when the inventory is lost", func() {
+			subject := "inventory-lost-node"
+			csrPEM, err := testutil.GenerateCSR(subject)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = myCA.SaveRequest(context.Background(), subject, csrPEM)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = myCA.Sign(context.Background(), subject)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Both files: with the integrity MAC left behind the missing blob
+			// fails verification instead, which is a different, counted branch
+			// answering 409 -- and this spec would then pass without ever
+			// reaching the arm it exists to guard.
+			inv := myCA.Storage.InventoryPath()
+			Expect(os.Remove(inv)).To(Succeed())
+			Expect(os.Remove(filepath.Join(filepath.Dir(inv), ".inventory.hmac"))).To(Succeed())
+
+			body, _ := json.Marshal(api.PutStatusBody{DesiredState: "revoked"})
+			req := httptest.NewRequest("PUT", "/certificate_status/"+subject, bytes.NewReader(body))
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+
+			Expect(rr.Code).To(Equal(http.StatusNotFound),
+				"a lost inventory reaches the same sentinel, so it answers 404 too")
+			// Prove the 404 came from the sentinel arm before asserting
+			// anything about its body. ServeMux answers "404 page not found"
+			// for a path it has no pattern for, and that body contains no
+			// tmpDir either -- so without this, the guard below would pass with
+			// the route deleted and the arm never reached.
+			Expect(rr.Body.String()).To(ContainSubstring(ca.ErrSubjectUnknown.Error()))
+			// The other half of what the docs publish about this state: it is
+			// uncounted here, exactly as it is for a subject that was never
+			// listed. This variant reaches the branch through the HMAC
+			// baseline re-initialisation, which the CA-layer spec does not
+			// traverse.
+			Expect(myCA.CRLUpdateFailures()).To(BeNumerically("==", 0),
+				"a lost inventory is not a CRL-update failure, as docs/api.md states")
+			// The invariant the whole design rests on. The sentinel is returned
+			// unwrapped so this cause -- which names a filesystem path -- stays
+			// in the log; restoring the natural-looking wrap
+			// fmt.Errorf("%w: %s: %w", ErrSubjectUnknown, subject, err) serves
+			// that path to any admin-tier caller, and only this assertion
+			// notices. The by-serial specs pin theirs the same way.
+			Expect(rr.Body.String()).NotTo(ContainSubstring(tmpDir),
+				"a CA-side cause may name storage paths; it must stay in the log")
+		})
+
+		// The twin of the above, and the reason the fix cannot simply test for
+		// fs.ErrNotExist at the handler. Every Backend.Get wraps os.ErrNotExist
+		// when a key is absent (storage.Backend's documented contract), so a
+		// missing CRL blob reaches this handler carrying the same
+		// fs.ErrNotExist as an unknown subject does. Answering 404 here would
+		// tell an operator their node is unknown when its certificate is
+		// present and it is the CA that has lost its CRL.
+		It("should still return 409 when the subject exists but the CRL is unreadable", func() {
+			subject := "crl-gone-node"
+			csrPEM, err := testutil.GenerateCSR(subject)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = myCA.SaveRequest(context.Background(), subject, csrPEM)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = myCA.Sign(context.Background(), subject)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(os.Remove(myCA.Storage.CRLPath())).To(Succeed())
+
+			body, _ := json.Marshal(api.PutStatusBody{DesiredState: "revoked"})
+			req := httptest.NewRequest("PUT", "/certificate_status/"+subject, bytes.NewReader(body))
 			rr := httptest.NewRecorder()
 			mux.ServeHTTP(rr, req)
 			Expect(rr.Code).To(Equal(http.StatusConflict))
