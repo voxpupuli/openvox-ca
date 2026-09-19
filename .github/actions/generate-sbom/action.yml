@@ -23,7 +23,7 @@ runs:
       id: syft
       uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
       with:
-        syft-version: v1.51.1
+        syft-version: v1.52.0
 
     - name: Generate SBOMs (${{ inputs.variant }})
       shell: bash
