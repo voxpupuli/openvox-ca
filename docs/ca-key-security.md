@@ -127,6 +127,24 @@ behaviour".
 By default, the CA private key is stored as unencrypted PEM at `<cadir>/private/ca_key.pem`.
 Enable `--encrypt-ca-key` to encrypt the key at rest using AES-256-GCM with an Argon2id-derived key.
 
+That path is the filesystem backend's. On the other backends the key is a blob
+in the store instead — unless `ca_key_file` pins it to a local file. The
+encryption below is applied before the key reaches the store, so it protects it
+on every backend; failing that, what protects it at rest is whatever protects
+the store itself. For SQLite that is the mode of the database file and its
+sidecars; see [storage backends](storage-backends.md#sqlite-backend).
+
+One caveat on every backend but the filesystem one, whether or not
+`ca_key_file` is set: the auto-generated passphrase file described below does
+not land under your configured `cadir`. The passphrase resolver is given a base
+directory by the backend, and only the filesystem backend supplies one, so on
+the others the file is written to `private/.ca_key_passphrase` relative to the
+process working directory — whatever `cadir` is set to, and it is still set,
+since per-subject keys live there. This is tracked as
+[#375](https://github.com/voxpupuli/openvox-ca/issues/375). Set an explicit
+passphrase source rather than relying on the generated one; the path is logged
+when the passphrase is first generated, and not on later starts.
+
 ### How it works
 
 - The private key is marshalled to PKCS#8 DER, then encrypted with AES-256-GCM.
@@ -139,8 +157,23 @@ Enable `--encrypt-ca-key` to encrypt the key at rest using AES-256-GCM with an A
 1. **`--ca-key-passphrase-file`:** reads the first line of the specified file.
 2. **`PUPPET_CA_KEY_PASSPHRASE`** environment variable: avoids CLI `/proc/cmdline` exposure.
 3. **Auto-generated:** if no passphrase source is configured, a cryptographically random
-   passphrase is generated and saved to `<cadir>/private/.ca_key_passphrase` (mode `0600`).
-   The path is logged at startup so operators know where it is.
+   passphrase is generated and saved to `<cadir>/private/.ca_key_passphrase` (mode
+   `0600`) on the filesystem backend, or to `private/.ca_key_passphrase` relative
+   to the process working directory on every other backend — see the caveat
+   above. The path is logged when the passphrase is generated, and not on later
+   starts.
+
+A passphrase file **you configure** — `ca_key_passphrase_file` — readable by
+every local account makes the server **refuse to start**, whichever backend you
+run: it unlocks the encrypted key, so world access to it is world access to the
+key. The auto-generated file is covered only on the filesystem backend, where it
+sits under `<cadir>/private/` and is judged with everything else there; on the
+other backends it lands outside any directory openvox-ca scans, which is the
+same defect as the caveat above and is tracked in the same issue. Group access
+is reported and does not stop the CA.
+`insecure_allow_world_readable_keys` downgrades the refusal to a loud warning.
+The check and its remedy are described in full under [the filesystem
+backend](storage-backends.md#filesystem-backend-default).
 
 ### Example usage
 

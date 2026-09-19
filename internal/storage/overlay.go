@@ -195,6 +195,22 @@ func (o *OverlayBackend) BaseDir() string {
 	return ""
 }
 
+// KeyFilePaths implements KeyFileLister by delegating, plus the CA key override
+// if there is one. collectOverrides populates only KeyCACert and KeyCAKey, and
+// of those only the key is material worth checking — ca_key_file is a local file
+// the operator pointed the CA key at, which is exactly what this check is for.
+// The base's own files still hold whatever was not overridden.
+func (o *OverlayBackend) KeyFilePaths() []string {
+	var paths []string
+	if l, ok := o.base.(KeyFileLister); ok {
+		paths = append(paths, l.KeyFilePaths()...)
+	}
+	if p, ok := o.overrides[KeyCAKey]; ok {
+		paths = append(paths, p)
+	}
+	return paths
+}
+
 // Unwrap returns the wrapped base backend, letting capability checks that
 // don't have their own OverlayBackend forwarding method (e.g. InventoryStore)
 // see through the wrapper to the concrete backend beneath it. Overriding only

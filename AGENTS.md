@@ -269,6 +269,38 @@ the inventory, in-memory caches) must follow
   pairs by lock name rather than (store, name), so that path is out of its scope
   by design — locking.md carries it in prose and the table must not gain it.
 
+## File permissions: create narrow, never correct
+
+**A file that can contain key material is never created with world access, and
+openvox-ca never changes the mode of a file it did not create.**
+
+Two halves, and both matter:
+
+- **Creation.** Anything holding key material is created with no world bits and
+  otherwise follows the operator's umask, which can only narrow it further. The
+  private-key writes pass `FilePermPrivate` (0600) explicitly; the SQLite
+  database is created by `createSQLiteDatabase` with `O_EXCL` at
+  `sqliteFilePermCreate` (0660) before the driver opens it, because SQLite fixes
+  the `-wal`/`-shm`/`-journal` modes from the database at creation and never
+  revisits them. `AtomicWriteFile` and `AppendLine` set the mode on the
+  descriptor so the umask cannot widen or narrow what the blob kind names.
+- **Never correcting.** No `chmod` of an existing file, no `chown`, ever. Group
+  access is legitimate — a Kubernetes `fsGroup` ORs it back into the volume at
+  every mount, and on an arbitrary-uid platform it is how a pod reaches a store
+  a previous pod created — and `chmod(2)` needs ownership, so tightening would
+  fail EPERM exactly there. An earlier revision of #351 held a chmod primitive
+  and every defect five review rounds found existed because of it.
+
+What replaces correction is a check: `StorageService.CheckKeyPermissions` judges
+every file under the local private-key directory, every path a backend declares
+through the optional `KeyFileLister` capability, and any path the caller names.
+World access refuses startup; group access is reported and tolerated; a path
+whose mode cannot be read refuses separately, and the
+`insecure_allow_world_readable_keys` opt-out deliberately does not cover it.
+
+A new writer of key material owes an explicit mode. A new check does not owe a
+chmod.
+
 ## Logging: `log/slog` only
 
 **Non-test code logs through `log/slog`.** This is a hard convention — do not
