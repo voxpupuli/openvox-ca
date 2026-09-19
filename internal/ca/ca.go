@@ -231,12 +231,12 @@ type CA struct {
 	// Empty (the zero value) means the mechanism is entirely dormant -- no
 	// goroutine, no storage key, no behaviour change of any kind.
 	//
-	// Nothing in the tree sets this yet: the mechanism has no instance, and the
-	// two that will supply one -- the CA's own serving certificate, and the
-	// component certificates of #243 -- each bring their own store and their
-	// own configuration. It is set before the server starts its background
-	// jobs; ReconcileManaged reads the slice on every pass and does not expect
-	// it to change underneath it.
+	// The server sets this from `managed_certs` at startup, in
+	// attachManagedCerts, before it starts its background jobs -- and whether
+	// it is empty is what decides that the reconcile job runs at all. The CA's
+	// own serving certificate (#326) will be the second instance and brings its
+	// own store. ReconcileManaged reads the slice on every pass and does not
+	// expect it to change underneath it.
 	//
 	// Note that a managed certificate's predecessor is retired according to
 	// SupersedeAfter, whose zero value revokes immediately -- so a CA that

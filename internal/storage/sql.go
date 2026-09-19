@@ -760,18 +760,24 @@ func (b *SQLBackend) AcquireInstanceLock() (Unlocker, error) {
 // maintains itself. Reports false for an in-memory database, which is private
 // to the process that opened it and so has nothing to exclude.
 func sqliteLockDir(dsn string) (string, bool) {
-	path, ok := sqliteFilePath(dsn)
+	path, ok := SQLiteFilePath(dsn)
 	if !ok {
 		return "", false
 	}
 	return filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+".locks"), true
 }
 
-// sqliteFilePath extracts the database file path from a SQLite DSN, which the
+// SQLiteFilePath extracts the database file path from a SQLite DSN, which the
 // driver accepts either as a bare path ("/var/lib/puppet-ca/ca.db") or as a
 // "file:" URI, both optionally carrying query parameters. Reports false when
 // the DSN names no file on disk.
-func sqliteFilePath(dsn string) (string, bool) {
+//
+// Exported because the managed-certificate path check needs the same answer:
+// that database holds the inventory, the signed certificates and the CRL, so a
+// file store pointed at it would overwrite the CA's own state. Two
+// implementations of "which file does this DSN name" would be two answers, and
+// the one that drifted would be the one guarding against that.
+func SQLiteFilePath(dsn string) (string, bool) {
 	path, query := dsn, ""
 	if strings.HasPrefix(path, "file:") {
 		u, err := url.Parse(path)

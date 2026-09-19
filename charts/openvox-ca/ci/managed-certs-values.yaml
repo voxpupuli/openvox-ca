@@ -1,0 +1,87 @@
+# Certificates openvox-ca issues and renews for OpenVox components, in both
+# stores: a Kubernetes Secret and a local file pair.
+#
+# The RBAC branch this exercises is rendered from the configuration rather than
+# from values, so the fixture is mostly a `config` block. It carries three
+# entries on purpose:
+#
+#   * one Secret in a namespace of its own, which is the ordinary shape -- a
+#     component's Secret lives with the component, not with the CA;
+#   * one Secret with no namespace, which resolves to the release namespace and
+#     so proves the two Roles are rendered separately rather than merged;
+#   * one file store, which needs no Role at all and must not add a name to
+#     either of them.
+#
+# puppetServers lists the first certname, which makes that Secret a CA admin
+# credential -- the intended configuration for OpenVox Server, and the case the
+# NOTES warning exists for.
+
+tls:
+  existingSecret: openvox-ca-server-tls
+
+serviceAccount:
+  create: true
+
+puppetServers:
+  - puppetserver.openvox.svc.cluster.local
+
+config:
+  managed_cert_interval_sec: 900
+  managed_certs:
+    - certname: puppetserver.openvox.svc.cluster.local
+      names:
+        - puppetserver
+        - puppetserver.openvox.svc
+        - puppetserver.openvox.svc.cluster.local
+      ttl: 2160h
+      renew_before: 720h
+      revoke_after: 24h
+      store:
+        secret:
+          name: puppetserver-tls
+          namespace: openvox
+          labels:
+            app.kubernetes.io/part-of: openvox
+          adopt_existing: false
+
+    - certname: puppetdb.pki.svc.cluster.local
+      names:
+        - puppetdb
+        - puppetdb.pki.svc.cluster.local
+      renew_before: 240h
+      # No overlap at all: the predecessor is revoked inside the reconcile
+      # pass. Zero is a value here, not an absence -- unset would inherit the
+      # CA's superseded_cert_revoke_after_sec instead.
+      revoke_after: 0
+      key_algo: ecdsa
+      key_size: 256
+      usages:
+        - serverAuth
+        - clientAuth
+      store:
+        secret:
+          name: puppetdb-tls
+
+    - certname: openvoxview.example.com
+      names:
+        - openvoxview.example.com
+      # The other three subjectAltName types, on the entry that needs no Role,
+      # so the chart's own branch is exercised by the shape that contributes
+      # nothing to it.
+      ip_addresses:
+        - 10.0.0.42
+      email_addresses:
+        - openvox@example.com
+      uris:
+        - spiffe://example.com/ns/openvox/sa/openvoxview
+      renew_before: 720h
+      usages:
+        - serverAuth
+      # The key is the identity here: pin it rather than re-keying, which is
+      # what a TLSA record or an SPKI pin needs.
+      reuse_key: true
+      store:
+        files:
+          cert: /etc/openvox/ssl/openvoxview-cert.pem
+          key: /etc/openvox/ssl/openvoxview-key.pem
+          ca: /etc/openvox/ssl/ca.pem
