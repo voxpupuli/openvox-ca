@@ -164,14 +164,29 @@ func (c *CA) refuseIfSuperseded(ctx context.Context, presentedCert *x509.Certifi
 // both modes acquire the CRL lock themselves, keeping the documented
 // subject → crl → c.mu order.
 func (c *CA) supersedeReplaced(ctx context.Context, subject, oldSerial string) error {
-	if c.SupersedeAfter <= 0 {
+	return c.supersedeReplacedAfter(ctx, subject, oldSerial, c.SupersedeAfter)
+}
+
+// supersedeReplacedAfter is supersedeReplaced with the window supplied rather
+// than read from the CA.
+//
+// The renewal paths have one window for the whole deployment, which is what
+// SupersedeAfter is. A managed certificate can carry its own: the overlap a
+// relying party needs to pick up a replacement is a property of what depends on
+// that certificate, and two managed certificates need not agree about it.
+//
+// Same contract as supersedeReplaced in every other respect, including that
+// `after <= 0` revokes inline rather than recording anything.
+func (c *CA) supersedeReplacedAfter(ctx context.Context, subject, oldSerial string,
+	after time.Duration) error {
+	if after <= 0 {
 		return c.Storage.WithLock(ctx, lockNameCRL, func() error {
 			c.mu.Lock()
 			defer c.mu.Unlock()
 			return c.revokeSerialLocked(ctx, oldSerial)
 		})
 	}
-	return c.recordSuperseded(ctx, subject, oldSerial, c.SupersedeAfter)
+	return c.recordSuperseded(ctx, subject, oldSerial, after)
 }
 
 // recordSuperseded appends one entry to the pending-revocation list.

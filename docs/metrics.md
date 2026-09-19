@@ -122,10 +122,11 @@ query, and `puppetca_crl_sync_failures_total` for why it is stuck.
 > `DELETE /certificate_status` (`puppet cert clean`) and the best-effort
 > revocation of a superseded certificate on renewal, which on a busy fleet is
 > the likeliest source of a rising count: grep for `Renew:` /
-> `AutoRenew: failed to retire replaced certificate` alongside the `Clean:`
-> warnings. Both *renewal* warnings name the serial, and the certificate they
-> left valid is one revoking by subject cannot reach: the replacement is what
-> makes it a renewal, so `revoke --certname` would retire that instead. That is
+> `AutoRenew:` / `ReconcileManaged: failed to retire replaced certificate`
+> alongside the `Clean:` warnings. All three *renewal* warnings name the serial,
+> and the certificate they left valid is one revoking by subject cannot reach:
+> the replacement is what makes it a renewal, so `revoke --certname` would
+> retire that instead. That is
 > specific to a failure on the *immediate* path — nothing recorded the
 > predecessor, so nothing but its serial addresses it. Where
 > [`superseded_cert_revoke_after_sec`](configuration.md#delayed-supersession)
@@ -146,9 +147,10 @@ query, and `puppetca_crl_sync_failures_total` for why it is stuck.
 > itself rather than through the helper (a failure there is not the file's
 > fault, so it does not touch `puppetca_crl_chain_refresh_failures_total`). The
 > revoke step inside `Clean` and `GenerateWithOptions`, the retire step inside
-> `Renew` and `AutoRenew` — whether it revokes inline or defers to the superseded
-> sweep — the sweep itself (`ReconcileSuperseded`), and `ImportCA`, are not
-> counted on that arm at all.
+> `Renew`, `AutoRenew` and `ReconcileManaged` — whether it revokes inline or
+> defers to the superseded sweep — the sweep itself (`ReconcileSuperseded`),
+> `ReconcileManaged`'s immediate revoke of a certificate whose store write
+> failed after signing, and `ImportCA`, are not counted on that arm at all.
 >
 > The line between the two is whether the revocation is one an operator asked
 > for. A contended lock during `Clean`'s best-effort revoke is not a revocation
@@ -158,6 +160,12 @@ query, and `puppetca_crl_sync_failures_total` for why it is stuck.
 > of the counted set when the rest were converted, and a review caught it; the
 > enumeration above is now every writer, with nothing falling into an unnamed
 > remainder.
+>
+> Two of those writers are managed certificates', and neither can move a counter
+> on any deployment today: nothing configures a managed certificate yet, so the
+> mechanism is dormant. They are named anyway, because the enumeration claims
+> completeness and a claim that is true only of the paths an operator can
+> currently reach is a claim the next change will read as false.
 >
 > The read half of that is `readStoredCRL`'s doing: it increments before
 > returning, on every path that calls it.

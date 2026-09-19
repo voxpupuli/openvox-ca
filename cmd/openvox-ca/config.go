@@ -243,6 +243,25 @@ type serverConfig struct {
 	// superseded_cert_revoke_after_sec.
 	SupersededCertSweepIntervalSec int `yaml:"superseded_cert_sweep_interval_sec"`
 
+	// LeafBackdateSec is how far before the moment of issuance a leaf
+	// certificate's NotBefore is set, so a verifier whose clock is behind this
+	// one still accepts a certificate just signed; 0 = built-in default (5m).
+	//
+	// It is a clock-skew tolerance, not a margin for a broken fleet: an agent
+	// further out than this rejects a certificate the CA signed a moment ago as
+	// not yet valid, and keeps rejecting it until its clock is fixed. Raise it
+	// only where NTP cannot be relied on. It applies to every leaf this CA
+	// issues -- from a CSR, generated, renewed or managed -- and not to the
+	// CA's own certificate, which is backdated a fixed 24 hours at bootstrap.
+	LeafBackdateSec int `yaml:"leaf_backdate_sec"`
+
+	// ManagedCertIntervalSec is how often the managed-certificate reconcile
+	// loop walks its configured set; 0 = built-in default (15m). It only has to
+	// be short relative to the renew-before windows in force, and short enough
+	// that a store deleted out from under the CA is repaired while somebody is
+	// still looking.
+	ManagedCertIntervalSec int `yaml:"managed_cert_interval_sec"`
+
 	// KubernetesExport optionally publishes the CA certificate and/or CRL into
 	// one or more Kubernetes Secrets and ConfigMaps. Disabled when no targets are
 	// configured. File-only: the nested target list, labels, and annotations are
@@ -303,6 +322,39 @@ func loadServerConfig(configFile string) (*serverConfig, error) {
 	}
 
 	applyServerEnv(cfg)
+
+	// A negative backdate would issue certificates that are not valid until the
+	// future -- every one of them refused by every verifier until the clock
+	// catches up, across the whole fleet, with nothing in the CA's own logs
+	// saying why. Refused here rather than clamped, so the operator learns
+	// about the typo at startup instead of from their agents.
+	if cfg.LeafBackdateSec < 0 {
+		return nil, fmt.Errorf("leaf_backdate_sec must not be negative (got %d): "+
+			"a negative backdate issues certificates that are not yet valid",
+			cfg.LeafBackdateSec)
+	}
+	// Bounded above as well as below. The setting is a clock-skew tolerance, so
+	// no real fleet needs days of it, and the check that matters is not the
+	// absurd value an operator would notice: `time.Duration(n) * time.Second`
+	// multiplies by a billion in int64 nanoseconds, so a mistyped extra few
+	// zeroes wraps, and a wrapped product that lands positive passes every
+	// `> 0` guard downstream and reaches issuance as a nonsense backdate.
+	// A ceiling refuses both the absurd value and the wrap.
+	if cfg.LeafBackdateSec > maxLeafBackdateSec {
+		return nil, fmt.Errorf("leaf_backdate_sec must not exceed %d seconds (30 days, got %d): "+
+			"it is a clock-skew tolerance, and a certificate valid that far before it was "+
+			"issued is not one", maxLeafBackdateSec, cfg.LeafBackdateSec)
+	}
+	// Bounded for the same overflow reason as the backdate, and one further
+	// one: a wrapped product that lands non-positive reaches time.NewTicker,
+	// which panics -- inside a background goroutine, where nothing recovers, so
+	// a mistyped interval takes the server down rather than being refused.
+	if cfg.ManagedCertIntervalSec > maxManagedCertIntervalSec {
+		return nil, fmt.Errorf("managed_cert_interval_sec must not exceed %d seconds "+
+			"(30 days, got %d): a reconcile loop that wakes less often than that is not "+
+			"keeping anything alive", maxManagedCertIntervalSec, cfg.ManagedCertIntervalSec)
+	}
+
 	return cfg, nil
 }
 
@@ -520,6 +572,51 @@ func (c *serverConfig) supersededCertRevokeAfter() time.Duration {
 		return time.Duration(c.SupersededCertRevokeAfterSec) * time.Second
 	}
 	return defaultSupersededCertRevokeAfter
+}
+
+// defaultLeafBackdate mirrors internal/ca's own default. Resolved here so a
+// zero setting and an absent one reach the CA as the same value, rather than
+// the CA defaulting one and this package defaulting the other.
+const defaultLeafBackdate = 5 * time.Minute
+
+// maxLeafBackdateSec is the ceiling loadServerConfig enforces on
+// leaf_backdate_sec. Thirty days is far beyond any real clock-skew tolerance
+// and comfortably below the point at which the seconds-to-nanoseconds multiply
+// overflows int64.
+const maxLeafBackdateSec = 30 * 24 * 60 * 60
+
+// maxManagedCertIntervalSec is the ceiling on managed_cert_interval_sec, for
+// the reason maxLeafBackdateSec exists and one more: a value that wraps the
+// seconds-to-nanoseconds multiply into a non-positive duration reaches
+// time.NewTicker, which panics rather than erroring.
+const maxManagedCertIntervalSec = 30 * 24 * 60 * 60
+
+// leafBackdate resolves how far leaf certificates are backdated, falling back
+// to defaultLeafBackdate when unset.
+//
+// Negative is refused at validation rather than clamped here: a negative
+// backdate means "not valid until the future", which is never what an operator
+// means, and silently substituting the default would hide the typo.
+func (c *serverConfig) leafBackdate() time.Duration {
+	if c.LeafBackdateSec > 0 {
+		return time.Duration(c.LeafBackdateSec) * time.Second
+	}
+	return defaultLeafBackdate
+}
+
+// defaultManagedCertInterval is how often the managed-certificate reconcile
+// loop wakes when no interval is configured. Fifteen minutes matches the
+// superseded sweep, the neighbouring job with the same shape and the same
+// tolerance for being a little late.
+const defaultManagedCertInterval = 15 * time.Minute
+
+// managedCertInterval resolves how often the managed-certificate reconcile
+// loop runs, falling back to defaultManagedCertInterval when unset.
+func (c *serverConfig) managedCertInterval() time.Duration {
+	if c.ManagedCertIntervalSec > 0 {
+		return time.Duration(c.ManagedCertIntervalSec) * time.Second
+	}
+	return defaultManagedCertInterval
 }
 
 // supersededCertSweepInterval resolves how often the delayed-supersession sweep
@@ -773,6 +870,19 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("PUPPET_CA_SUPERSEDED_CERT_SWEEP_INTERVAL_SEC"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.SupersededCertSweepIntervalSec = n
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_LEAF_BACKDATE_SEC"); v != "" {
+		// Not gated on n > 0, unlike the intervals above: a negative value has
+		// to reach validation to be refused, and swallowing it here would leave
+		// the operator with the default and no error.
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.LeafBackdateSec = n
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_MANAGED_CERT_INTERVAL_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.ManagedCertIntervalSec = n
 		}
 	}
 	if v := os.Getenv("PUPPET_CA_KEY_PASSPHRASE_FILE"); v != "" {
