@@ -1411,7 +1411,12 @@ var _ = Describe("the packaged variant set", func() {
 		}
 	})
 
-	It("names the formats in the order release.yml's counts assume", func() {
+	// release.yml carries no packaging counts on this branch -- that arrives
+	// with #266 -- so naming it here cited a dependant that does not exist. The
+	// order is still load-bearing: packaging/nfpm.yaml's `packagers:` key is
+	// the list this must not drift from, and magefile.go derives the packaged
+	// extensions from it.
+	It("names the formats in the order packaging/nfpm.yaml assumes", func() {
 		Expect(packageFormats).To(Equal([]string{"deb", "rpm"}))
 	})
 
@@ -1918,6 +1923,40 @@ var _ = Describe("packaging helpers", func() {
 	})
 
 	Describe("extractTarGz", func() {
+
+		// The path-traversal guard, which used to live in a second top-level
+		// Describe of the same name 1150 lines away. One function described in
+		// two places reads as two functions to anyone scanning the file, and
+		// the distance is what made that easy to do twice.
+		// The guard refuses an entry whose name is not a plain filename. The
+		// archives this reads are ones the build just wrote, so reaching it needs
+		// an archive built to reach it -- which is the point: a check only present
+		// for trusted input is a check absent when it is needed.
+		It("refuses an entry that is not a plain filename", func() {
+			dir := GinkgoT().TempDir()
+			archive := filepath.Join(dir, "evil.tar.gz")
+
+			f, err := os.Create(archive)
+			Expect(err).NotTo(HaveOccurred())
+			gz := gzip.NewWriter(f)
+			tw := tar.NewWriter(gz)
+			body := []byte("owned")
+			Expect(tw.WriteHeader(&tar.Header{
+				Name: "../../openvox-ca", Mode: 0o755, Size: int64(len(body)), Typeflag: tar.TypeReg,
+			})).To(Succeed())
+			_, err = tw.Write(body)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(tw.Close()).To(Succeed())
+			Expect(gz.Close()).To(Succeed())
+			Expect(f.Close()).To(Succeed())
+
+			dest := GinkgoT().TempDir()
+			err = extractTarGz(archive, dest, []string{"../../openvox-ca"})
+			Expect(err).To(MatchError(ContainSubstring("is not a plain filename")))
+
+			// And nothing was written outside the destination.
+			Expect(filepath.Join(filepath.Dir(dest), "openvox-ca")).NotTo(BeAnExistingFile())
+		})
 		var archive string
 
 		BeforeEach(func() {
@@ -2522,7 +2561,7 @@ var _ = Describe("buildVariantPackages", func() {
 		// each other rather than each against a literal.
 		It("names serving paths that the provisioning script links", func() {
 			cfg := contents["/etc/puppet-ca/config.yaml"]
-			script, err := os.ReadFile(firstBootScript)
+			script, err := os.ReadFile(firstBootScriptPath)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Compared on the part below the ssl root, because that is the
@@ -2865,6 +2904,31 @@ var _ = Describe("stageDocTree", func() {
 			git("commit", "--quiet", "-m", "fixture")
 		})
 
+		// gitListFiles' error path, and the message stageDocTreeFrom wraps it
+		// in. Neither was driven: every fixture here is a real checkout, so
+		// `git ls-files` always succeeded and the whole branch was dead to the
+		// suite.
+		//
+		// It matters because of WHO hits it. Packaging enumerates the
+		// documentation from git, so the failure lands on anyone building from
+		// an unpacked source archive rather than a clone -- a distribution
+		// packager, most likely -- and the bare git error ("not a git
+		// repository") explains nothing about why a packaging step wanted one.
+		// The wrapper exists to say that, so it is worth pinning that it does.
+		It("explains itself when the source tree is not a git checkout", func() {
+			notARepo := GinkgoT().TempDir()
+			err := stageDocTreeFrom(notARepo, GinkgoT().TempDir())
+			Expect(err).To(HaveOccurred(), "a directory with no .git staged cleanly")
+			Expect(err).To(MatchError(And(
+				ContainSubstring("listing tracked documentation"),
+				ContainSubstring("needs a git checkout"),
+			)), "the wrapper did not explain why a packaging step wanted git")
+			// git's own stderr is carried through rather than swallowed: it
+			// names the actual fault, and a wrapper that replaced it would
+			// leave the reader guessing between "no git" and "no repository".
+			Expect(err.Error()).To(ContainSubstring("repository"))
+		})
+
 		It("stages tracked files only, not an untracked draft under docs/", func() {
 			draft := filepath.Join(repo, "docs", "draft.md")
 			Expect(os.WriteFile(draft, []byte("not for packaging\n"), 0o644)).To(Succeed())
@@ -3067,43 +3131,6 @@ var _ = Describe("Build.Unit", func() {
 	})
 })
 
-var _ = Describe("extractTarGz", func() {
-	// The guard refuses an entry whose name is not a plain filename. The
-	// archives this reads are ones the build just wrote, so reaching it needs
-	// an archive built to reach it -- which is the point: a check only present
-	// for trusted input is a check absent when it is needed.
-	It("refuses an entry that is not a plain filename", func() {
-		dir := GinkgoT().TempDir()
-		archive := filepath.Join(dir, "evil.tar.gz")
-
-		f, err := os.Create(archive)
-		Expect(err).NotTo(HaveOccurred())
-		gz := gzip.NewWriter(f)
-		tw := tar.NewWriter(gz)
-		body := []byte("owned")
-		Expect(tw.WriteHeader(&tar.Header{
-			Name: "../../openvox-ca", Mode: 0o755, Size: int64(len(body)), Typeflag: tar.TypeReg,
-		})).To(Succeed())
-		_, err = tw.Write(body)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(tw.Close()).To(Succeed())
-		Expect(gz.Close()).To(Succeed())
-		Expect(f.Close()).To(Succeed())
-
-		dest := GinkgoT().TempDir()
-		err = extractTarGz(archive, dest, []string{"../../openvox-ca"})
-		Expect(err).To(MatchError(ContainSubstring("is not a plain filename")))
-
-		// And nothing was written outside the destination.
-		Expect(filepath.Join(filepath.Dir(dest), "openvox-ca")).NotTo(BeAnExistingFile())
-	})
-})
-
-// firstBootScript is the provisioning script as installed. The specs below run
-// its own functions rather than a copy of them: the shell is the artefact, and
-// a Go reimplementation of an allow-list would be testing the wrong thing.
-const firstBootScript = "packaging/scripts/first-boot"
-
 // runFirstBootFunc sources the script far enough to define its functions, then
 // evaluates one shell expression against them.
 //
@@ -3247,11 +3274,19 @@ type rpmFile struct {
 
 // rpmPayload returns an rpm's installed files by path.
 //
-// The deb has a hand-written ar/tar reader above because its container is two
-// formats deep and both are in the standard library. The rpm's is neither, so
-// this uses the reader nfpm already depends on rather than a second
-// hand-rolled header parser -- the risk in parsing an rpm header by hand is
-// getting it subtly wrong and asserting against the mistake.
+// The deb reader above is hand-written; this one is not, and the reason is
+// not the one this comment used to give. It claimed both of the deb's formats
+// were in the standard library: `archive/tar` is, `ar` is not, and an ar
+// reader is in the module graph already -- github.com/blakesmith/ar, nfpm's
+// own indirect dependency.
+//
+// The real reason is the cost of promoting it. Using it here would make an
+// indirect dependency direct for test use only, which changes what the module
+// declares it depends on; an ar header is six fixed-width text fields and a
+// magic string, so hand-writing it is cheap and total. An rpm header is
+// neither, so this uses the reader nfpm already depends on rather than a
+// second hand-rolled parser -- the risk in parsing one by hand is getting it
+// subtly wrong and asserting against the mistake.
 func rpmPayload(path string) (map[string]rpmFile, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -3395,11 +3430,25 @@ var _ = Describe("the rpm's payload", func() {
 		Entry("the operator CLI", "/usr/bin/openvox-ca-ctl", "openvox-ca-ctl"),
 	)
 
-	It("ships the configuration file the packages set up", func() {
-		cfg := contents["/etc/puppet-ca/config.yaml"]
-		Expect(cfg).To(ContainSubstring("cadir:"))
-		Expect(cfg).To(ContainSubstring("port:"))
-	})
+	// The deb's assertions, not weaker ones. `ContainSubstring("port:")` passes
+	// for a file carrying `port: 8140` -- the single regression the shipped
+	// configuration exists to prevent, on the format dnf installs beside
+	// OpenVox Server, which binds 8140 itself. This block claims everything
+	// asserted of the deb is asserted here too, so it has to be the same
+	// assertion and not the same subject.
+	DescribeTable("sets the settings a packaged install cannot start without",
+		func(pattern string) {
+			Expect(contents["/etc/puppet-ca/config.yaml"]).To(MatchRegexp(pattern))
+		},
+		// 8141, not the binary's built-in 8140: a package is what gets
+		// installed alongside Server.
+		Entry("port", `(?m)^port: 8141$`),
+		// No built-in default: "cadir is required".
+		Entry("cadir", `(?m)^cadir: /etc/puppetlabs/puppet/ssl/ca$`),
+		// Without these the server refuses plain HTTP on 0.0.0.0.
+		Entry("tls_cert", `(?m)^tls_cert: /etc/puppetlabs/puppet/ssl/certs/openvox-ca-server\.pem$`),
+		Entry("tls_key", `(?m)^tls_key: /etc/puppetlabs/puppet/ssl/private_keys/openvox-ca-server\.pem$`),
+	)
 
 	It("carries the documentation tree with its repository layout", func() {
 		Expect(contents).To(HaveKey("/usr/share/doc/openvox-ca/LICENSE"))
@@ -3430,13 +3479,26 @@ var _ = Describe("the rpm's payload", func() {
 		Expect(files["/etc/puppet-ca/config.yaml"].group).To(Equal("puppet"))
 	})
 
-	It("carries the documentation tree and the ssl directories", func() {
+	It("carries the documentation tree", func() {
 		Expect(files).To(HaveKey("/usr/share/doc/openvox-ca/LICENSE"))
 		Expect(files).To(HaveKey("/usr/share/doc/openvox-ca/README.md"))
 		Expect(files).To(HaveKey("/usr/share/doc/openvox-ca/docs/systemd.md"))
-		Expect(files).To(HaveKey("/etc/puppetlabs/puppet/ssl"))
-		Expect(files).To(HaveKey("/etc/puppetlabs/puppet/ssl/ca"))
 	})
+
+	// The modes, not just the paths -- the deb asserts these and the rpm
+	// asserted only HaveKey, despite rpmFile already carrying the mode. 0771
+	// lets an agent's group traverse the ssl root without listing it; 0770
+	// keeps the CA directory to its owner and group. Existence alone is the
+	// same weakness that let a regular file stand in for the certs/ca.pem
+	// symlink.
+	DescribeTable("ships the ssl directories at the modes the layout needs",
+		func(path string, mode int) {
+			Expect(files).To(HaveKey(path))
+			Expect(files[path].mode).To(Equal(mode), "mode of %s", path)
+		},
+		Entry("the ssl root", "/etc/puppetlabs/puppet/ssl", 0o771),
+		Entry("the CA directory", "/etc/puppetlabs/puppet/ssl/ca", 0o770),
+	)
 
 	// The rpm half of what "the deb's control archive" asserts. Scriptlets are
 	// header tags rather than payload entries, so an rpm can carry every file
@@ -3480,7 +3542,7 @@ var _ = Describe("the rpm's payload", func() {
 // above the "-- Run --" banner -- so a spec can call one function without
 // running provisioning.
 func firstBootDefs() (string, error) {
-	src, err := os.ReadFile(firstBootScript)
+	src, err := os.ReadFile(firstBootScriptPath)
 	if err != nil {
 		return "", err
 	}
@@ -3488,7 +3550,7 @@ func firstBootDefs() (string, error) {
 	i := bytes.Index(src, []byte(banner))
 	if i < 0 {
 		return "", fmt.Errorf("%s has no %q banner, so the definitions cannot be separated from the "+
-			"code that runs provisioning", firstBootScript, banner)
+			"code that runs provisioning", firstBootScriptPath, banner)
 	}
 	return string(src[:i]), nil
 }
@@ -4664,7 +4726,7 @@ var _ = Describe("Build.Packages", func() {
 // credential it is asked for. What is under test is the script's own
 // behaviour, which is what the packages ship and what no CI leg installs.
 func runFirstBootScript(sslDir, binDir, certname string, extraEnv ...string) firstBootResult {
-	cmd := exec.Command("sh", firstBootScript)
+	cmd := exec.Command("sh", firstBootScriptPath)
 	cmd.Env = append(os.Environ(),
 		"OPENVOX_CA_SSLDIR="+sslDir,
 		"OPENVOX_CA_BINDIR="+binDir,

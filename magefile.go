@@ -1600,10 +1600,14 @@ var mageInvocationRE = regexp.MustCompile(`(?m)(?:^|[^\w.-])mage\s+([^\s;&|)]+)`
 // lowercased, skipping the ones no static reading can resolve.
 //
 // It reads the parsed run: steps rather than the file, and drops comment lines
-// inside them. This file carries long explanatory comments that name the very
-// targets the check looks for -- including, elsewhere, `mage build:packages`
-// itself -- so a raw byte search over the source would be satisfied by prose
-// describing a step instead of by the step.
+// inside them. A WORKFLOW file carries explanatory comments that name the very
+// targets this check looks for -- .github/workflows/ci.yml:59 and :579 both
+// write `mage dev:check` inside one -- so a raw byte search over the source
+// would be satisfied by prose describing a step instead of by the step.
+//
+// The citation matters: the previous version of this comment said "this file",
+// meaning magefile.go, which is not what the function reads. A justification
+// the next reader cannot check is one they have to take on trust.
 func workflowMageTargets(src []byte) ([]string, error) {
 	var doc struct {
 		Jobs map[string]struct {
