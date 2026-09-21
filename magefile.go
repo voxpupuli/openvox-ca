@@ -1189,6 +1189,20 @@ func distArchiveName(ver, variant string) string {
 //
 // The guard treats both alike: a target named outside Go, whether by a workflow
 // or by a document, is a caller this repository cannot see.
+//
+// What this list is NOT is "every target named in a document". Plenty are --
+// release:prepare, build:all, build:fips, chart:lint, dev:lint, dev:clean --
+// and they are deliberately absent. The entries here are the ones whose loss
+// breaks a release or a shipped install recipe silently: build:packages
+// because a release publishes no packages and exits 0, build:unit because a
+// from-source install is left with no unit and a documented command that
+// simply is not there.
+//
+// Stating that narrowly matters because the rule a reader infers from a list
+// is the rule they will maintain it by. "Everything a document mentions" would
+// make this guard a documentation linter, fail on every prose example, and be
+// abandoned; "the ones whose loss is silent" is the rule it actually
+// implements.
 
 // The files the cross-language guards below compare. Named rather than
 // inlined so the error messages can point at them and a rename breaks the
@@ -1219,21 +1233,6 @@ var (
 	goQuotedStringRE      = regexp.MustCompile(`"([^"]*)"`)
 )
 
-// verifyNodeTTL asserts that first-boot's NODE_TTL is the CA's own leaf
-// default, which its comment says it deliberately matches.
-//
-// Two copies of one policy in two languages, and nothing but a human
-// remembering kept them together. The drift is silent in the worst way: node
-// certificates minted by provisioning would expire on a different schedule
-// from every certificate the running CA issues, and nothing surfaces that
-// until one expires unexpectedly, potentially years later.
-//
-// A guard rather than a spec asserting today's value, because a spec that
-// hard-codes 43800h has to be edited whenever the policy legitimately changes
-// -- which is exactly the moment someone would edit it to match one side and
-// not notice the other. This derives both sides and compares them, so a
-// deliberate policy change passes as soon as both files agree and needs no
-// edit here at all.
 // verifyBackendAliases asserts that first-boot accepts exactly the spellings
 // of the filesystem backend that openvox-ca itself accepts.
 //
@@ -1324,6 +1323,21 @@ func verifyBackendAliasesIn(script, spec []byte) error {
 	return nil
 }
 
+// verifyNodeTTL asserts that first-boot's NODE_TTL is the CA's own leaf
+// default, which its comment says it deliberately matches.
+//
+// Two copies of one policy in two languages, and nothing but a human
+// remembering kept them together. The drift is silent in the worst way: node
+// certificates minted by provisioning would expire on a different schedule
+// from every certificate the running CA issues, and nothing surfaces that
+// until one expires unexpectedly, potentially years later.
+//
+// A guard rather than a spec asserting today's value, because a spec that
+// hard-codes 43800h has to be edited whenever the policy legitimately changes
+// -- which is exactly the moment someone would edit it to match one side and
+// not notice the other. This derives both sides and compares them, so a
+// deliberate policy change passes as soon as both files agree and needs no
+// edit here at all.
 func verifyNodeTTL() error {
 	script, err := os.ReadFile(firstBootScriptPath)
 	if err != nil {

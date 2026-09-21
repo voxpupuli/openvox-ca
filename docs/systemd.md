@@ -200,14 +200,18 @@ $ systemd-analyze security openvox-ca.service
 **Where the packages come from, first.** They are not published as release assets yet — `release.yml` has no packaging job, and adding one is [#266](https://github.com/voxpupuli/openvox-ca/pull/266). Until it lands, build them from a checkout:
 
 ```console
-$ mage build:dist          # or build:distVariant for EACH packaged architecture
+$ mage build:distVariant linux_amd64
+$ mage build:distVariant linux_arm64
 $ mage build:packages      # reads those tarballs; builds no binaries
 ```
 
-`build:packages` builds the packages for every variant marked packaged, so it
-needs both `linux_amd64` and `linux_arm64` tarballs present and refuses if
-either is missing. `build:dist` produces both in one command, along with the
-two FIPS tarballs the packages do not use.
+Both variants, because `build:packages` builds the packages for every variant
+marked packaged and refuses if any of their tarballs is missing rather than
+writing a partial set.
+
+`mage build:dist` produces both in one command and also works — but it builds
+all four release tarballs including the two FIPS ones, which need a cgo cross
+toolchain the packages never use. That is why the per-variant pair leads here.
 
 They land in `dist/`, one `.deb` and one `.rpm` per non-FIPS architecture. A FIPS deployment uses the `_fips` tarball and the unit it ships; the packages carry the pure-Go build only.
 
@@ -311,8 +315,8 @@ That is also why provisioning is ordered before the service rather than beside i
 Because `openvox-ca-first-boot.service` is `RequiredBy=openvox-ca.service`, that refusal stops the service as well. Moving a packaged install to another backend therefore means provisioning the CA yourself:
 
 ```console
-# systemctl disable --now openvox-ca-first-boot
-# openvox-ca-ctl setup            # against your configured backend
+$ sudo systemctl disable --now openvox-ca-first-boot
+$ sudo openvox-ca-ctl setup       # against your configured backend
 ```
 
 and supplying the credential the shipped configuration names — `certs/openvox-ca-server.pem` and `private_keys/openvox-ca-server.pem` — or pointing `tls_cert` and `tls_key` at your own. Leaving the oneshot enabled blocks the service at the next boot.

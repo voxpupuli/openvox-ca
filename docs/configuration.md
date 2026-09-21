@@ -301,9 +301,12 @@ hand.
 `generate` needs a running server, so the first serving certificate is issued
 against this CA started temporarily on loopback with TLS switched off. **Stop
 the service first if one is running.** That is not just courtesy on
-`filesystem` and `sqlite`: those permit exactly one instance, and the second
-process is refused the store rather than allowed to corrupt it — so with the
-service up, the command below fails outright. Then:
+`filesystem` and `sqlite`: those permit exactly one instance. The store lock
+will normally refuse the second process rather than let it corrupt anything, so
+with the service up the command below usually fails outright — but that is a
+backstop and not a guarantee, and [what the lock cannot
+do](storage-backends.md#what-the-lock-cannot-do-and-why-the-rule-matters-more-than-it-does)
+says where it does not hold. Stop the service rather than rely on it. Then:
 
 ```bash
 # Your configured cadir. The CA writes the serving key under it, and pointing

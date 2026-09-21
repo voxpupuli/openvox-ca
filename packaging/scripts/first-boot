@@ -69,7 +69,14 @@ CONFIG="${OPENVOX_CA_CONFIG:-${PUPPET_CA_CONFIG:-/etc/puppet-ca/config.yaml}}"
 # the guard that exists to refuse exactly that configuration.
 read_config_key() {
 	key=$1
-	[ -f "$CONFIG" ] || return 0
+	# -r, not -f. `[ -f ]` needs only stat; sed below needs read. A config the
+	# service account cannot read would otherwise answer "key absent" for every
+	# key, which both callers treat as a licence to use the shipped default --
+	# the exact fail-open this reader's decline rules exist to prevent.
+	# require_readable_config stops the run before either caller gets here, so
+	# reaching this line with an unreadable file means the file changed under
+	# us mid-run; declining is still the right answer.
+	[ -r "$CONFIG" ] || return 0
 	read_config_value "$(sed -n "s/^${key}:[[:space:]]*\\(.*\\)\$/\\1/p" "$CONFIG" | tail -n 1)"
 }
 
@@ -106,8 +113,44 @@ read_config_value() {
 # read_config_key made of its value. Keeping the two questions apart is what
 # lets a decline mean something: see read_config_key's comment above.
 config_key_set() {
-	[ -f "$CONFIG" ] || return 1
+	# -r for read_config_key's reason: grep needs read permission, and an
+	# unreadable file must not report every key as absent.
+	[ -r "$CONFIG" ] || return 1
 	grep -q "^$1:" "$CONFIG"
+}
+
+# require_readable_config stops the run when $CONFIG exists but this account
+# cannot read it.
+#
+# Without this the two states are indistinguishable downstream: "no config
+# file, so use the shipped defaults" is correct and ordinary, while "a config
+# file I cannot read" means every value in it is invisible and every guard that
+# consults it passes on a default the operator did not choose. On a host whose
+# config names another storage backend that is the two-CA split
+# require_filesystem_backend exists to refuse.
+#
+# It is not hypothetical: the unit passes no environment, but this script
+# honours PUPPET_CA_CONFIG so a drop-in can redirect it, and nothing chowns a
+# file named that way. The postinstall also declines to chmod $CONFIG when it
+# is a symlink, and treats a failed chown or chmod as a warning.
+#
+# Worth stopping rather than warning because the damage outlives the mistake:
+# the oneshot is RemainAfterExit=yes, so once it has "succeeded" it does not
+# re-run when the operator fixes the mode, and $SSLDIR/certs/ca.pem is left
+# naming a CA the server never uses.
+require_readable_config() {
+	if [ -e "$CONFIG" ] && [ ! -r "$CONFIG" ]; then
+		fail "$CONFIG exists but is not readable by $(id -un).
+
+Provisioning reads cadir and storage_backend from it, and every guard that consults it would
+otherwise see an empty file and fall back on the shipped defaults -- which is how a host
+configured for another CA, or another storage backend, gets a second CA it never asked for.
+
+Fix the ownership or the mode, then start again:
+
+    chown root:puppet $CONFIG && chmod 0640 $CONFIG
+    systemctl restart openvox-ca-first-boot"
+	fi
 }
 
 # Where the CA lives. $SSLDIR/ca is the shipped default and the fallback, but
@@ -362,17 +405,36 @@ ensure_ssl_tree() {
 	# `test -w` answers for the account this process is actually running as,
 	# which is the question that matters and not one the mode bits answer on
 	# their own.
-	for d in certs private_keys public_keys; do
-		[ -w "$SSLDIR/$d" ] && continue
-		fail "$SSLDIR/$d is not writable by $(id -un). Provisioning creates this host's node
-certificate, the CA alias and the serving credential inside these directories, so it cannot
-continue.
+	# The set checked here is the set provisioning WRITES INTO, which is not
+	# the same as the set it creates:
+	#
+	#   $SSLDIR             crl.pem (link_ca_material) and the
+	#                       unresolved-certname marker (write_unresolved_marker)
+	#   $SSLDIR/certs       $NAME.pem, ca.pem, openvox-ca-server.pem
+	#   $SSLDIR/private_keys $NAME.pem, openvox-ca-server.pem
+	#
+	# public_keys is created above because it is part of puppet's layout, and
+	# is deliberately NOT checked: nothing this script writes lands there, and
+	# because `fail` exits 1 and the oneshot is RequiredBy=openvox-ca.service, a
+	# root-owned public_keys/ would hard-stop the CA over a directory nothing
+	# touches. $SSLDIR itself was the other half of the same mismatch -- it was
+	# not checked, and a non-writable one reaches exactly the bare
+	# "ln: Permission denied" this gate exists to pre-empt.
+	#
+	# An empty entry is $SSLDIR itself; ${d:+/}$d keeps the path from ending in
+	# a stray slash so the message names the directory the operator will look at.
+	for d in "" certs private_keys; do
+		target="$SSLDIR${d:+/}$d"
+		[ -w "$target" ] && continue
+		fail "$target is not writable by $(id -un). Provisioning creates this host's node
+certificate, the CA alias, the CRL alias and the serving credential inside these directories, so
+it cannot continue.
 
 This normally means the directory was created by something else -- openvox-agent runs as root and
 creates no account -- and the package left it alone rather than take ownership of a tree it does
 not own. Hand it over, then start again:
 
-    chown puppet:puppet $SSLDIR/certs $SSLDIR/private_keys $SSLDIR/public_keys
+    chown puppet:puppet $SSLDIR $SSLDIR/certs $SSLDIR/private_keys
     systemctl restart openvox-ca-first-boot
 
 Only the directories change owner; nothing inside them is touched."
@@ -721,6 +783,11 @@ write_unresolved_marker() {
 for bin in "$OPENVOX_CA" "$OPENVOX_CA_CTL"; do
 	[ -x "$bin" ] || fail "$bin is missing or not executable; the openvox-ca package is incomplete."
 done
+
+# Before any guard consults it. CADIR was resolved at load time from a file
+# this may find unreadable, so the check has to come before the steps act on
+# that value, and its message has to name the file rather than the symptom.
+require_readable_config
 
 NAME="$(resolve_certname)"
 

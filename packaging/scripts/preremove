@@ -42,11 +42,27 @@ rm -f "$STATEDIR/first-boot-enabled" 2>/dev/null || :
 # point of choosing rmdir, not a limitation of it.
 rmdir "$STATEDIR" 2>/dev/null || :
 
+# The disable and the stop are separated for the reason the postinstall
+# separates the enable from everything else: `systemctl disable` is ordinary
+# on-disk work -- it removes symlinks under /etc/systemd/system -- and succeeds
+# in a chroot, a debootstrap or mmdebstrap target, a container image build, or
+# any install into a mounted root. `--now` is what needs a running systemd,
+# because stopping a unit requires something to stop it.
+#
+# Keeping both behind the runtime guard made the removal asymmetric with the
+# install on exactly the hosts the postinstall reasoning enumerates: the
+# install wrote /etc/systemd/system/openvox-ca.service.requires/, and the
+# removal left it there, so the symlink outlived the unit file it pointed at.
+# docs/systemd.md says removing the package leaves the units "stopped and
+# disabled"; on those hosts only the first half was true.
+systemctl --no-reload disable openvox-ca.service >/dev/null 2>&1 || :
+systemctl --no-reload disable openvox-ca-first-boot.service >/dev/null 2>&1 || :
+
 if [ -d "$SYSTEMD_RUNTIME" ]; then
-	systemctl --no-reload disable --now openvox-ca.service >/dev/null 2>&1 || :
-	# --now on the oneshot too. RemainAfterExit=yes leaves it "active
-	# (exited)" after a successful run, so a plain disable removes the symlink
-	# and leaves the unit active with no unit file behind it -- which systemd
-	# then reports as "not-found" for as long as the machine stays up.
-	systemctl --no-reload disable --now openvox-ca-first-boot.service >/dev/null 2>&1 || :
+	systemctl --no-reload stop openvox-ca.service >/dev/null 2>&1 || :
+	# The oneshot is stopped too. RemainAfterExit=yes leaves it "active
+	# (exited)" after a successful run, so removing its unit file while it is
+	# still active leaves systemd reporting "not-found" for as long as the
+	# machine stays up.
+	systemctl --no-reload stop openvox-ca-first-boot.service >/dev/null 2>&1 || :
 fi

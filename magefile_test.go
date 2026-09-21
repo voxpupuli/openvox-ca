@@ -4032,17 +4032,22 @@ var _ = Describe("the packages' maintainer scripts", func() {
 			r, calls := run("packaging/scripts/preremove", arg)
 			Expect(r.ok).To(BeTrue(), "preremove %q exited non-zero: %s", arg, r.output)
 			if shouldAct {
-				// The exact lines, not a substring of each: `--now` is the one
-				// flag this script argues for in its own comments, and
-				// ContainSubstring("openvox-ca.service") cannot tell
-				// `disable --now` from a plain `disable`. A plain disable
-				// removes the symlink and leaves the oneshot active with no
-				// unit file behind it, which systemd then reports as
-				// "not-found" until the machine reboots.
+				// The exact lines, not a substring of each: substrings cannot
+				// tell a disable from a stop, and the split between them is
+				// the whole point of this block.
+				//
+				// Disable first and unconditionally -- it is on-disk symlink
+				// work that succeeds with no systemd running -- then stop,
+				// which is the half that needs one. Keeping both behind the
+				// runtime guard left the install's
+				// openvox-ca.service.requires/ symlink in place on a chroot or
+				// image build, outliving the unit file it pointed at.
 				Expect(strings.Split(strings.TrimSpace(calls), "\n")).To(Equal([]string{
-					"systemctl --no-reload disable --now openvox-ca.service",
-					"systemctl --no-reload disable --now openvox-ca-first-boot.service",
-				}), "preremove %q did not disable --now both units, in order", arg)
+					"systemctl --no-reload disable openvox-ca.service",
+					"systemctl --no-reload disable openvox-ca-first-boot.service",
+					"systemctl --no-reload stop openvox-ca.service",
+					"systemctl --no-reload stop openvox-ca-first-boot.service",
+				}), "preremove %q did not disable then stop both units, in order", arg)
 			} else {
 				Expect(calls).To(BeEmpty(),
 					"preremove %q must not touch the units: stopping the service on an upgrade is an "+
@@ -4345,6 +4350,37 @@ var _ = Describe("the packages' maintainer scripts", func() {
 
 	// daemon-reload needs a running systemd, so on a host without one the
 	// script must do nothing rather than fail the removal.
+	// The asymmetry that survived because nothing drove this state: the
+	// postinstall deliberately enables OUTSIDE the running-systemd guard,
+	// because writing a symlink under /etc/systemd/system is ordinary on-disk
+	// work that succeeds in a chroot, an image build or an install into a
+	// mounted root. preremove kept both its disable and its stop behind that
+	// guard, so on exactly those hosts the install's
+	// openvox-ca.service.requires/ symlink outlived the unit file it pointed
+	// at -- and docs/systemd.md says a removal leaves the units "stopped and
+	// disabled".
+	It("still disables both units where systemd is not running", func() {
+		absent := filepath.Join(GinkgoT().TempDir(), "no-such-runtime")
+		cmd := exec.Command("/bin/sh", "packaging/scripts/preremove", "remove")
+		cmd.Env = append(os.Environ(),
+			"PATH="+stubBin,
+			"OPENVOX_CA_SYSTEMD_RUNTIME="+absent,
+			"OPENVOX_CA_STATEDIR="+stateDir,
+		)
+		out, err := cmd.CombinedOutput()
+		Expect(err).NotTo(HaveOccurred(), "preremove failed: %s", out)
+
+		calls, readErr := os.ReadFile(log)
+		Expect(readErr).NotTo(HaveOccurred(), "preremove called nothing at all")
+		// The disables happen; the stops do not, because there is nothing
+		// running to stop and `systemctl stop` against a dead system is the
+		// call this guard exists to avoid.
+		Expect(strings.Split(strings.TrimSpace(string(calls)), "\n")).To(Equal([]string{
+			"systemctl --no-reload disable openvox-ca.service",
+			"systemctl --no-reload disable openvox-ca-first-boot.service",
+		}), "the removal did not undo the install's enable on a host with no systemd running")
+	})
+
 	It("postremove does nothing at all where systemd is not running", func() {
 		absent := filepath.Join(GinkgoT().TempDir(), "no-such-runtime")
 		cmd := exec.Command("/bin/sh", "packaging/scripts/postremove", "remove")
@@ -5010,6 +5046,48 @@ var _ = Describe("first-boot's provisioning steps", func() {
 			Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).To(BeAnExistingFile())
 		})
 
+		// An unreadable config is not an absent one, and the two used to be
+		// indistinguishable: `[ -f ]` needs only stat while grep and sed need
+		// read, so a file this account cannot open answered "key absent" for
+		// every key and both guards fell back on the shipped defaults.
+		//
+		// Skipped as root, where every file is readable and the branch cannot
+		// be reached -- the same reason the unwritable-subdirectory block
+		// skips.
+		It("refuses when the configuration file cannot be read", func() {
+			if os.Geteuid() == 0 {
+				Skip("running as root: every file is readable, so the guard cannot fire")
+			}
+			// A config that would change both guarded decisions if it were
+			// read, so a run that proceeds is provably running on defaults the
+			// operator did not choose.
+			Expect(os.WriteFile(cfg,
+				[]byte("cadir: /srv/real-ca\nstorage_backend: etcd\n"), 0o644)).To(Succeed())
+			Expect(os.Chmod(cfg, 0o000)).To(Succeed())
+			DeferCleanup(func() { _ = os.Chmod(cfg, 0o644) })
+
+			r := runFirstBootScript(sslDir, binDir, "ca.example.com", withCfg())
+			Expect(r.ok).To(BeFalse(), "an unreadable config must stop the run: %s", r.output)
+			Expect(r.output).To(And(
+				ContainSubstring("is not readable by"),
+				ContainSubstring(cfg),
+			), "the refusal does not name the file it could not read")
+			// And it stopped before acting on the defaults it would otherwise
+			// have used: no CA at the shipped location.
+			Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).NotTo(BeAnExistingFile())
+		})
+
+		// An ABSENT config is ordinary and must still provision on defaults --
+		// otherwise the fix above would have turned the common case into a
+		// failure.
+		It("provisions normally when there is no configuration file at all", func() {
+			missing := filepath.Join(GinkgoT().TempDir(), "absent.yaml")
+			r := runFirstBootScript(sslDir, binDir, "ca.example.com",
+				"OPENVOX_CA_CONFIG="+missing)
+			Expect(r.ok).To(BeTrue(), "provisioning failed: %s", r.output)
+			Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).To(BeAnExistingFile())
+		})
+
 		// read_config_value is the decline rule on its own, driven one input at
 		// a time. The block above can only observe the reader through what
 		// provisioning did afterwards, which cannot distinguish "read the value
@@ -5354,8 +5432,23 @@ var _ = Describe("first-boot's provisioning steps", func() {
 			func(dir string) {
 				// Present but not writable -- exactly what an agent-created
 				// tree looks like to the `puppet` account.
+				//
+				// The ssl root needs its subdirectories in place first. They
+				// are created before the writability gate runs, so with the
+				// root read-only and the subdirectories absent the run would
+				// die in `mkdir` with a bare error instead of reaching the
+				// gate -- which would make this entry pass for the wrong
+				// reason. MkdirAll is also a no-op on a directory that already
+				// exists, so the root's mode has to be set with Chmod rather
+				// than passed to MkdirAll.
 				path := filepath.Join(sslDir, dir)
-				Expect(os.MkdirAll(path, 0o555)).To(Succeed())
+				if dir == "" {
+					for _, sub := range []string{"certs", "private_keys", "public_keys"} {
+						Expect(os.MkdirAll(filepath.Join(sslDir, sub), 0o755)).To(Succeed())
+					}
+				}
+				Expect(os.MkdirAll(path, 0o755)).To(Succeed())
+				Expect(os.Chmod(path, 0o555)).To(Succeed())
 				DeferCleanup(func() { _ = os.Chmod(path, 0o755) })
 
 				r := runFirstBootScript(sslDir, binDir, "ca.example.com")
@@ -5368,10 +5461,30 @@ var _ = Describe("first-boot's provisioning steps", func() {
 				// It must stop before minting anything, not part way through.
 				Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).NotTo(BeAnExistingFile())
 			},
+			// The ssl root itself: link_ca_material writes crl.pem there and
+			// write_unresolved_marker writes the marker there, so a
+			// non-writable $SSLDIR reaches the bare "ln: Permission denied"
+			// this gate exists to pre-empt. It was not checked.
+			Entry("the ssl root itself", ""),
 			Entry("certs", "certs"),
 			Entry("private_keys", "private_keys"),
-			Entry("public_keys", "public_keys"),
 		)
+
+		// public_keys is part of puppet's layout and this script creates it,
+		// but writes nothing into it. Because `fail` exits 1 and the oneshot is
+		// RequiredBy=openvox-ca.service, gating on it would hard-stop the CA
+		// over a directory nothing touches -- so provisioning must succeed with
+		// it read-only.
+		It("does not gate on public_keys, which nothing writes into", func() {
+			path := filepath.Join(sslDir, "public_keys")
+			Expect(os.MkdirAll(path, 0o555)).To(Succeed())
+			DeferCleanup(func() { _ = os.Chmod(path, 0o755) })
+
+			r := runFirstBootScript(sslDir, binDir, "ca.example.com")
+			Expect(r.ok).To(BeTrue(),
+				"a read-only public_keys stopped a run that never writes there: %s", r.output)
+			Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).To(BeAnExistingFile())
+		})
 	})
 
 	// Both guards below exist to turn a confusing downstream failure into a
@@ -5644,6 +5757,100 @@ var _ = Describe("postinstall's ownership and permission hardening", func() {
 		Fail("the postinstall logged no chown of the ssl tree:\n" + calls)
 		return nil
 	}
+
+	// The sysusers declaration and the useradd fallback must create the SAME
+	// account, or a host without systemd-sysusers gets a different one and the
+	// units fail to start against a User= that does not exist.
+	//
+	// Driven, not grepped. The previous version read packaging/scripts/postinstall
+	// as text and asserted `ContainSubstring("--home-dir " + home)` plus a
+	// regexp over its indentation -- a source-text assertion, which this file
+	// states a rule against four times, and one that would pass on a
+	// commented-out useradd.
+	It("creates the same account by useradd as the sysusers file declares", func() {
+		// No systemd-sysusers, which is the only way the fallback is reached,
+		// and a getent that reports the account missing (the stub exits 2).
+		Expect(os.Remove(filepath.Join(stubBin, "systemd-sysusers"))).To(Succeed())
+
+		_, calls := run("configure")
+
+		var useradd []string
+		for _, line := range strings.Split(calls, "\n") {
+			if strings.HasPrefix(line, "useradd ") {
+				useradd = strings.Fields(line)
+			}
+		}
+		Expect(useradd).NotTo(BeEmpty(), "the fallback never ran useradd:\n"+calls)
+
+		arg := func(flag string) string {
+			GinkgoHelper()
+			for i, f := range useradd {
+				if f == flag && i+1 < len(useradd) {
+					return useradd[i+1]
+				}
+			}
+			Fail("useradd carried no " + flag + ": " + strings.Join(useradd, " "))
+			return ""
+		}
+
+		body, err := os.ReadFile("packaging/sysusers/openvox-ca.conf")
+		Expect(err).NotTo(HaveOccurred())
+		var declared []string
+		for _, line := range strings.Split(string(body), "\n") {
+			if strings.HasPrefix(line, "u ") {
+				declared = strings.Fields(line)
+			}
+		}
+		Expect(len(declared)).To(BeNumerically(">=", 6),
+			"the u line should be: u name id GECOS home shell")
+
+		// home and shell are taken from the end: the GECOS is quoted and
+		// contains spaces, so positional indexing from the left is wrong.
+		Expect(arg("--home-dir")).To(Equal(declared[len(declared)-2]))
+		Expect(arg("--shell")).To(Equal(declared[len(declared)-1]))
+		Expect(useradd[len(useradd)-1]).To(Equal(declared[1]),
+			"useradd created a different account name from the sysusers declaration")
+	})
+
+	// Three of the script's eight `|| warn` branches had no spec while the
+	// other five each got one. Each is a decision to report and continue rather
+	// than abort, and an unexercised one is a branch that could `exit 1` under
+	// `set -e` without anything noticing.
+	// The config-file branches are guarded on `[ -f "$CONFIG" ]`, and the
+	// fixture names a path without creating it -- so without this the branch
+	// never runs. Worth stating because the first draft of the owner entry
+	// PASSED that way: "could not give" also opens the ssl-tree chown warning,
+	// so the assertion matched a different branch entirely and reported
+	// coverage it did not have. Every expectation below now carries $CONFIG.
+	writeConfig := func() {
+		GinkgoHelper()
+		Expect(os.WriteFile(configPath, []byte("port: 8141\n"), 0o644)).To(Succeed())
+	}
+
+	DescribeTable("reports and continues when a non-fatal step fails",
+		func(stub string, extraArgs []string, needsConfig bool, want func() string) {
+			if needsConfig {
+				writeConfig()
+			}
+			Expect(os.WriteFile(filepath.Join(stubBin, stub),
+				[]byte("#!/bin/sh\nexit 1\n"), 0o755)).To(Succeed())
+
+			r, _ := run(append([]string{"configure"}, extraArgs...)...)
+			Expect(r.ok).To(BeTrue(), "a failed %s must not fail the install: %s", stub, r.output)
+			Expect(r.output).To(ContainSubstring(want()))
+		},
+		// The upgrade restart: the binary on disk is already the new one, so a
+		// failure here leaves the old image serving with nothing saying so.
+		Entry("the upgrade restart cannot be attempted", "systemctl",
+			[]string{"1.0.0"}, false, func() string { return "executing the previous binary" }),
+		// The configuration file holds credentials at 0640; a failure to set
+		// that is worth saying out loud.
+		Entry("the configuration mode cannot be set", "chmod",
+			nil, true, func() string { return "could not set mode 0640 on " + configPath }),
+		// And its ownership, for the same reason.
+		Entry("the configuration owner cannot be set", "chown",
+			nil, true, func() string { return "could not give " + configPath + " to root:puppet" }),
+	)
 
 	It("hands the ssl tree to puppet without following symlinks", func() {
 		_, calls := run("configure")
