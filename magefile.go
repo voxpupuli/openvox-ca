@@ -2210,6 +2210,43 @@ func (Chart) Test() error {
 			wants:      []string{"kind: Deployment", "scheme: HTTPS"},
 		},
 		{
+			// One level down from the case above, and the same hazard: `dig`
+			// asserts its last argument is a map with no recovery, so a
+			// `secret:` holding anything but a map aborted the render with
+			// Go's interface-conversion panic. Two callers read it -- the RBAC
+			// Secret list and the not-starting NOTE -- so both had to be routed
+			// through one guarded helper rather than patched where it showed.
+			//
+			// Null is the half-typed block. The server names the real problem;
+			// the chart's job is to get far enough to let it.
+			name:       "a serving_cert whose store.secret is null still renders",
+			sets:       []string{"serviceAccount.create=true"},
+			valuesYAML: "config:\n  serving_cert:\n    certname: ca.example.com\n    names: [ca.example.com]\n    renew_before: 720h\n    store:\n      secret:\n",
+			wants:      []string{"kind: Deployment", "scheme: HTTPS"},
+		},
+		{
+			// The other shape an operator reaches for: that `secret` takes the
+			// name directly. A scalar fails the same type assertion a null
+			// does, and must degrade to "not a Secret store" rather than abort.
+			name:       "a serving_cert whose store.secret is a bare name still renders",
+			sets:       []string{"serviceAccount.create=true"},
+			valuesYAML: "config:\n  serving_cert:\n    certname: ca.example.com\n    names: [ca.example.com]\n    renew_before: 720h\n    store:\n      secret: my-serving-cert\n",
+			wants:      []string{"kind: Deployment", "scheme: HTTPS"},
+		},
+		{
+			// extraArgs is the highest-precedence route to a certificate -- a
+			// flag beats the config file and the environment both -- and
+			// tlsConfigured did not scan it while the serving_cert conflict
+			// check did. The two answered differently for one input: the probe
+			// went out as HTTP against an HTTPS listener, and the install was
+			// refused for having no certificate that the other helper could see.
+			name:       "tls_cert supplied only through extraArgs counts as TLS",
+			sets:       []string{"serviceAccount.create=true"},
+			valuesYAML: "extraArgs:\n  - --tls-cert=/tls/tls.crt\n  - --tls-key=/tls/tls.key\n",
+			wants:      []string{"kind: Deployment", "scheme: HTTPS"},
+			notWants:   []string{"scheme: HTTP\n"},
+		},
+		{
 			// An empty block is still TLS, deliberately: the server refuses it
 			// with a message naming the missing store, and a chart that read it
 			// as "off" would refuse the install first for having no certificate
@@ -2313,6 +2350,36 @@ config:
 `,
 			wants:    []string{"will NOT START"},
 			notWants: []string{"kind: Role\n"},
+		},
+		{
+			// The OTHER route to the same fatal outcome, and the one whose
+			// sentence nothing asserted. The case above is rbac.create=false
+			// with a readable config; this is rbac.create left true while the
+			// chart cannot read the config at all, so it cannot know a
+			// serving_cert exists and renders no Role for it.
+			//
+			// Both branches end with the pod not starting, and they are worth
+			// separating because the NOTE has to say different things: there
+			// the operator turned the Role off, here the chart never saw the
+			// certificate. The managed-certificate half of this same NOTE is
+			// retried-and-green, which is exactly the contrast the sentence
+			// draws -- so asserting only "no Role was created" would pass with
+			// the serving half deleted.
+			name:  "an unreadable config warns that a serving Secret stops the pod starting",
+			sets:  []string{tls, "existingConfigMap=my-config", "serviceAccount.create=true"},
+			notes: true,
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store: {secret: {name: openvox-ca-serving-tls}}
+`,
+			wants: []string{
+				"opposite and worse",
+				"the pod never starts at all",
+			},
 		},
 		{
 			// The serving Secret's own namespace, which every other case omits

@@ -99,8 +99,8 @@ var _ = Describe("the serve command's serving-certificate wiring", func() {
 
 	// Position, not only presence. The call sits between myCA.Init and the
 	// listener setup, and both directions of moving it are silent in CI:
-	// above Init, ReconcileManaged returns ErrNotInitialized for every entry
-	// and every self-provisioning deployment refuses to start; below ServeTLS,
+	// above Init, the reconcile returns ErrNotInitialized and every
+	// self-provisioning deployment refuses to start; below ServeTLS,
 	// the listener binds with an empty holder and every handshake fails with
 	// "no serving certificate has been issued yet" -- which is the failure the
 	// presence spec above says it exists to prevent.
@@ -145,7 +145,7 @@ var _ = Describe("the serve command's serving-certificate wiring", func() {
 
 		Expect(provision).To(BeNumerically(">", init),
 			"main.go provisions the serving certificate before the CA is initialised, so "+
-				"every entry's reconcile returns ErrNotInitialized and a self-provisioning "+
+				"the reconcile returns ErrNotInitialized and a self-provisioning "+
 				"CA refuses to start")
 		Expect(provision).To(BeNumerically("<", serve),
 			"main.go provisions the serving certificate after the listener is serving, so "+
@@ -153,16 +153,24 @@ var _ = Describe("the serve command's serving-certificate wiring", func() {
 	})
 
 	It("puts the serving entry into the reconcile set, ahead of the rest", func() {
-		// Two claims, and the ordering is not cosmetic. ReconcileManaged walks
-		// the slice in order and provisionServingCert bounds the whole startup
-		// pass with one budget, so an entry placed after the component
-		// certificates can have that budget spent before it gets a turn --
-		// leaving the store empty and the startup fatal because of some other
-		// certificate whose own failure is meant to be routine.
+		// Two claims, and they now carry very different weights -- which is the
+		// reason to keep them in one spec rather than to let the weaker one
+		// quietly inherit the stronger one's justification.
 		//
-		// Dropping the statement entirely is the quieter edit and the one with
-		// the longer fuse: the certificate is issued once at startup and then
-		// never renewed.
+		// Membership is load-bearing. Dropping the statement entirely is the
+		// quieter edit and the one with the longer fuse: the certificate is
+		// issued once at startup and then never renewed, because the reconcile
+		// loop never walks it, and the listener's certificate expires one TTL
+		// later.
+		//
+		// Ordering is a latency preference. It WAS load-bearing, while
+		// provisionServingCert reconciled the whole set under one budget; it
+		// calls ReconcileManagedCert for this entry alone now, so startup no
+		// longer depends on the position. What remains is the background loop,
+		// which walks in order, so going first keeps a due renewal off the back
+		// of a slow component store. Asserted because it is a deliberate choice
+		// someone could tidy away, not because reversing it breaks startup --
+		// and this spec must not claim that it does.
 		var present, first bool
 		ast.Inspect(file, func(n ast.Node) bool {
 			assign, ok := n.(*ast.AssignStmt)
@@ -198,8 +206,10 @@ var _ = Describe("the serve command's serving-certificate wiring", func() {
 				"loop never walks it, and the listener's certificate expires one TTL later")
 		Expect(first).To(BeTrue(),
 			"main.go appends the serving entry after the component certificates instead of "+
-				"prepending it, so the startup pass can spend its whole budget on their "+
-				"stores before reaching the one the listener needs")
+				"prepending it, so the background loop reaches the certificate the listener "+
+				"is presenting only after every component store -- a renewal due for it "+
+				"waits behind stores that may be slow. Startup is unaffected: "+
+				"provisionServingCert reconciles this entry by name")
 	})
 
 	// The edit that actually points the listener at the holder, and the one
@@ -211,6 +221,54 @@ var _ = Describe("the serve command's serving-certificate wiring", func() {
 	// certs is nil for a self-provisioned CA -- so the listener binds and every
 	// handshake panics dereferencing it, with the whole suite green. Verified
 	// by mutation rather than assumed.
+	It("names the certificate's source in the TLS-enabled log line", func() {
+		// Both arms, because the line is what tells an operator WHERE the
+		// certificate the listener is presenting came from, and the two
+		// sources want different follow-up: `cert` is a path they set and can
+		// look at, `serving_cert` is a store the CA writes itself and a path
+		// on disk may not even exist for it.
+		//
+		// Collapsing the branch to one arm is the mutation this catches, and
+		// it is invisible everywhere else: the server starts, the handshake
+		// works, and only the log is wrong. Asserted structurally because
+		// reaching the line behaviourally means starting the serve command and
+		// binding its listeners, which is the compose suite's job.
+		var servingArm, operatorArm bool
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok || len(call.Args) < 2 {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Info" {
+				return true
+			}
+			msg, ok := call.Args[0].(*ast.BasicLit)
+			if !ok || msg.Value != `"TLS enabled"` {
+				return true
+			}
+			key, ok := call.Args[1].(*ast.BasicLit)
+			if !ok {
+				return true
+			}
+			switch key.Value {
+			case `"serving_cert"`:
+				servingArm = true
+			case `"cert"`:
+				operatorArm = true
+			}
+			return true
+		})
+
+		Expect(servingArm).To(BeTrue(),
+			`main.go's "TLS enabled" line has no serving_cert arm, so a self-provisioned `+
+				`CA reports its certificate as though an operator had supplied a path -- `+
+				`and the path it names is empty, because tls_cert is unset`)
+		Expect(operatorArm).To(BeTrue(),
+			`main.go's "TLS enabled" line has no cert arm, so an operator who supplied `+
+				`tls_cert is no longer told which file the listener is presenting`)
+	})
+
 	It("gives the listener the certificate source it selected", func() {
 		var bound string
 		ast.Inspect(file, func(n ast.Node) bool {
@@ -460,3 +518,77 @@ func mentionsServingEntry(n ast.Node) bool {
 	})
 	return found
 }
+
+// The pre-bind reconcile's shape, which is a startup-latency property and so
+// invisible to every spec that only checks the certificate arrives.
+//
+// Both calls provision the serving certificate correctly. ReconcileManaged
+// walks the configured set and ReconcileManagedCert walks one entry, so on a
+// deployment with no component certificates they are indistinguishable -- and
+// servingcert_test.go configures none, which is why the whole suite stayed
+// green while this branch called the full walk.
+//
+// What separates them is what a deployment WITH component certificates pays
+// before net.Listen. internal/ca gives each entry its own budget, and a Secret
+// store bounds each API call at 30s, so the full walk charges startup one
+// blackholed store per configured certificate while the listener waits for a
+// certificate that is already in hand. #322 exported the single-entry call to
+// remove exactly that multiplier.
+//
+// Pinned structurally rather than behaviourally because the behavioural
+// version has to make a component store hang: a store that REFUSES fails in
+// milliseconds and both shapes pass, so the fixture would have to blackhole
+// packets and then measure a duration, which is a flaky spec pinning a
+// latency. The call written in the source is the honest thing to assert.
+var _ = Describe("the pre-bind reconcile's scope", func() {
+	var file *ast.File
+
+	BeforeEach(func() {
+		fset := token.NewFileSet()
+		var err error
+		file, err = parser.ParseFile(fset, "servingcert.go", nil, 0)
+		Expect(err).NotTo(HaveOccurred())
+
+		var funcsSeen int
+		ast.Inspect(file, func(n ast.Node) bool {
+			if _, ok := n.(*ast.FuncDecl); ok {
+				funcsSeen++
+			}
+			return true
+		})
+		Expect(funcsSeen).To(BeNumerically(">", 0),
+			"precondition: servingcert.go parsed but contains no function declarations")
+	})
+
+	It("reconciles the serving entry alone, not the configured set", func() {
+		// Selector names only. The receiver is a *ca.CA either way, so the
+		// method name is the whole difference between the two shapes.
+		var single, full bool
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			switch sel.Sel.Name {
+			case "ReconcileManagedCert":
+				single = true
+			case "ReconcileManaged":
+				full = true
+			}
+			return true
+		})
+
+		Expect(single).To(BeTrue(),
+			"servingcert.go does not call ReconcileManagedCert, so the certificate the "+
+				"listener needs is not reconciled by name before it binds")
+		Expect(full).To(BeFalse(),
+			"servingcert.go calls ReconcileManaged, which walks every configured entry "+
+				"before net.Listen -- so a deployment's component certificates are charged "+
+				"to the startup probe's window for a certificate that is already in hand. "+
+				"Call ReconcileManagedCert with the serving entry instead")
+	})
+})

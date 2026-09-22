@@ -589,8 +589,7 @@ enableServiceLinks: false
 # Kubernetes export (from either `kubernetesExport.enabled` or
 # `config.kubernetes_export.targets`), a managed certificate in a Secret (from
 # `config.managed_certs` or `config.serving_cert` with a `store.secret`; a file
-# store needs nothing), or
-# OpenBao Kubernetes auth (from
+# store needs nothing), or OpenBao Kubernetes auth (from
 # `config.openbao.auth_method`, PUPPET_CA_OPENBAO_AUTH_METHOD in `env` or
 # `extraEnv`, or `--openbao-auth-method` in `extraArgs`) — and also whenever the
 # chart cannot see the whole configuration, because `existingConfigMap`, `args`,

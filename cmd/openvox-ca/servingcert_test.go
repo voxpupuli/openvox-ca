@@ -248,6 +248,50 @@ var _ = Describe("The CA's own serving certificate", func() {
 				Expect(err.Error()).To(ContainSubstring("managed_certs[0] (component.test)"))
 				Expect(err.Error()).To(ContainSubstring(servingCertPathSetting + "cert"))
 			})
+
+			It("names the colliding entry's own index, not the first", func() {
+				// Every other collision spec in this file puts the offender
+				// first, so all of them pass against an index that is not
+				// computed at all -- a hardcoded 0, or a counter that never
+				// advances, is indistinguishable from correct attribution
+				// until some entry other than the first is the one at fault.
+				//
+				// The index is the actionable half of the message. An operator
+				// with a dozen entries is being told which one to edit, and an
+				// error that always says the first sends them to a certificate
+				// that is not the problem.
+				e := filesEntry()
+				cfg := cfgWith(e)
+				cfg.ManagedCerts = certstore.Config{
+					{
+						// Unrelated, and valid: its own paths, colliding with
+						// nothing. It exists only to occupy index 0.
+						Certname:    "innocent.test",
+						Names:       []string{"innocent.test"},
+						RenewBefore: certstore.Duration(720 * time.Hour),
+						Store: certstore.StoreConfig{Files: &certstore.FilesConfig{
+							Cert: filepath.Join(servingDir, "innocent.pem"),
+							Key:  filepath.Join(servingDir, "innocent.key"),
+						}},
+					},
+					{
+						Certname:    "guilty.test",
+						Names:       []string{"guilty.test"},
+						RenewBefore: certstore.Duration(720 * time.Hour),
+						Store: certstore.StoreConfig{Files: &certstore.FilesConfig{
+							Cert: e.Store.Files.Cert,
+							Key:  filepath.Join(servingDir, "guilty.key"),
+						}},
+					},
+				}
+
+				err := attachManagedCerts(&ca.CA{}, cfg, GinkgoT().TempDir(), "", stubCACerts{})
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("managed_certs[1] (guilty.test)"))
+				Expect(err.Error()).NotTo(ContainSubstring("innocent.test"),
+					"the refusal names an entry that collides with nothing, so an operator "+
+						"is sent to edit the wrong certificate")
+			})
 		})
 	})
 
@@ -543,6 +587,17 @@ var _ = Describe("The CA's own serving certificate", func() {
 			h := &servingCertHolder{describe: "Secret openvox/ca-tls"}
 			_, err := h.GetCertificate(&tls.ClientHelloInfo{})
 			Expect(err).To(HaveOccurred())
+			// The message as well as the failure. This is the error an operator
+			// meets at a failed handshake with no other context, so a bare
+			// HaveOccurred passes for any reason at all -- including one that
+			// says nothing about the certificate never having been issued.
+			//
+			// It deliberately does NOT name the store, unlike every other
+			// message in this file. GetCertificate is documented unreachable,
+			// because provisionServingCert refuses to start the server until
+			// something is installed, so this is the arm that fires only if
+			// that guarantee has already broken; there is no store to blame.
+			Expect(err.Error()).To(ContainSubstring("no serving certificate has been issued yet"))
 		})
 	})
 })
@@ -1200,40 +1255,40 @@ var _ = Describe("the serving certificate's startup and renewal reporting", func
 		Expect(logs).To(ContainSubstring("the garbage store"))
 	})
 
-	It("bounds the whole startup pass with one budget, not one per entry", func() {
-		// internal/ca budgets each entry separately, so an unbounded pass costs
-		// the sum of them before the listener binds -- inside a window the
-		// chart budgets at 60s in total. Not through lock contention, which
-		// cannot happen between entries because each locks on its own subject,
-		// but through the stores: one unreachable API server costs every
-		// Secret-store entry its own 30s API timeout, in sequence.
+	It("reconciles only the serving entry before the listener binds, under a budget", func() {
+		// Two properties, and the first replaced an earlier spec rather than
+		// joining it, which is worth recording because the earlier one was
+		// correct when written.
 		//
-		// The property that tells the two apart is not how long the pass takes
-		// but whether the entries SHARE a deadline. Under one budget every
-		// entry sees the same instant, because context.WithTimeout keeps the
-		// earlier of the two; without it each entry's deadline is its own start
-		// plus LockTimeout, so they drift apart by however long the previous
-		// entries took. The first probe therefore delays deliberately: with the
-		// bound the two deadlines stay identical, and without it they differ by
-		// that delay.
+		// This pass used to reconcile the configured set, and that spec pinned
+		// the thing which mattered then: that the entries SHARED one deadline,
+		// so a deployment's startup did not grow by 30s of Secret-store
+		// timeout per component certificate. #322 exported a single-entry
+		// reconcile, so the component entries are no longer reached at all and
+		// the sharing question is moot -- the multiplier is gone rather than
+		// bounded.
+		//
+		// What replaces it is the stronger claim: the probes' Load must never
+		// run. A spec that still measured shared deadlines would now assert a
+		// property of code that does not execute, and its precondition would
+		// be the only thing failing.
+		//
+		// The budget is still asserted, on the one entry that does run. One
+		// unreachable API server costs this store its own 30s, and a subject
+		// lock held by a peer costs LockTimeout; the cap is what keeps either
+		// from outliving the probe window the chart budgets at 60s.
 		myCA, store := newRefresherTestCA()
 		myCA.LeafKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
 
-		const delay = 80 * time.Millisecond
-		var deadlines []time.Time
-		probe := func(subject string, wait time.Duration) ca.ManagedCert {
+		var probed []string
+		probe := func(subject string) ca.ManagedCert {
 			return ca.ManagedCert{
 				Spec: ca.CertSpec{
 					Subject: subject, DNSNames: []string{subject},
 					RenewBefore: 720 * time.Hour,
 				},
-				Load: func(ctx context.Context) ([]byte, []byte, error) {
-					if d, ok := ctx.Deadline(); ok {
-						deadlines = append(deadlines, d)
-					}
-					time.Sleep(wait)
-					// Declining keeps the probe from issuing anything; the
-					// deadline is all this spec wants from it.
+				Load: func(context.Context) ([]byte, []byte, error) {
+					probed = append(probed, subject)
 					return nil, nil, errors.New("probe entry declines")
 				},
 				Save: func(context.Context, []byte, []byte) error { return nil },
@@ -1243,15 +1298,40 @@ var _ = Describe("the serving certificate's startup and renewal reporting", func
 		sc, err := buildServingCert(cfgWithServingFiles(GinkgoT().TempDir()),
 			GinkgoT().TempDir(), "", store)
 		Expect(err).NotTo(HaveOccurred())
-		myCA.ManagedCerts = []ca.ManagedCert{sc.entry, probe("a.test", delay), probe("b.test", 0)}
 
+		// The serving entry's own Load is wrapped here rather than replaced, so
+		// the deadline is observed on the path that actually runs. Wrapping
+		// after buildServingCert is deliberate: it keeps the holder-installing
+		// wrapper newServingCert built, which the provisioning below depends on.
+		inner := sc.entry.Load
+		var servingDeadline time.Time
+		var servingLoads int
+		sc.entry.Load = func(ctx context.Context) ([]byte, []byte, error) {
+			servingLoads++
+			if d, ok := ctx.Deadline(); ok {
+				servingDeadline = d
+			}
+			return inner(ctx)
+		}
+		myCA.ManagedCerts = []ca.ManagedCert{sc.entry, probe("a.test"), probe("b.test")}
+
+		start := time.Now()
 		Expect(provisionServingCert(context.Background(), myCA, sc)).To(Succeed())
 
-		Expect(deadlines).To(HaveLen(2),
-			"precondition: both probe entries must have been reconciled and seen a deadline")
-		Expect(deadlines[1]).To(BeTemporally("~", deadlines[0], delay/4),
-			"the startup pass gives each entry its own budget instead of sharing one, so a "+
-				"deployment with more component certificates gets a longer startup")
+		Expect(servingLoads).To(BeNumerically(">", 0),
+			"precondition: the serving entry must have been reconciled at all, or this "+
+				"spec would pass against a pass that reconciles nothing")
+		Expect(probed).To(BeEmpty(),
+			"the pre-bind pass reconciled the component entries as well as the serving "+
+				"one, so every configured certificate's store is consulted before "+
+				"net.Listen -- one unreachable API server costs each of them 30s in "+
+				"sequence, against a startup probe the chart budgets at 60s")
+		Expect(servingDeadline).NotTo(BeZero(),
+			"the pre-bind reconcile runs without a deadline, so a slow store or a subject "+
+				"lock held by a peer can outlive the startup probe window entirely")
+		Expect(servingDeadline).To(BeTemporally("~", start.Add(ca.LockTimeout), time.Second),
+			"the pre-bind reconcile's budget is not ca.LockTimeout, so the cap no longer "+
+				"matches the window the chart and systemd were sized against")
 	})
 })
 

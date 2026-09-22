@@ -297,7 +297,7 @@ Boolean env vars accept any value accepted by `strconv.ParseBool`: `1`, `t`, `tr
 > bootstrap below entirely — see [The CA's own serving
 > certificate](#the-cas-own-serving-certificate). Once the CA key is held at a
 > provider that is the only way to get this certificate renewed unattended —
-> the offline [`openvox-ca generate`](operator-cli.md) can still mint one by
+> the offline [`openvox-ca generate`](operator-cli.md#generate-minting-a-certificate-offline) can still mint one by
 > hand, but nothing then renews it — and it is mutually exclusive with the pair
 > described here.
 

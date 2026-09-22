@@ -104,11 +104,18 @@ type servingCert struct {
 
 	// lastErr is the most recent failure of this entry's own Load or Save.
 	//
-	// The reconcile pass reports only its first error across every entry, so a
-	// component certificate's broken Secret and this certificate's missing
-	// directory are indistinguishable in what it returns. Recording our own
-	// failure as it happens is what lets the startup check say *why* the
-	// serving store produced nothing, rather than only that it did.
+	// The startup pass reconciles this entry by name, so what it returns is
+	// already this certificate's -- but it still does not say which side of the
+	// entry failed, and a pass that returns nil says nothing at all about why
+	// the store is empty. Recording our own failure as it happens is what lets
+	// the startup check say *why* the serving store produced nothing, rather
+	// than only that it did.
+	//
+	// The background loop is the other reader of this entry, and it does walk
+	// the configured set: there a failure is reported as one error across every
+	// entry, so a component certificate's broken Secret and this certificate's
+	// missing directory are indistinguishable in what ReconcileManaged returns.
+	// This field is per-entry and unaffected by which caller ran.
 	//
 	// Read exactly once, by provisionServingCert, and only when the store came
 	// back empty. It is not a health signal and nothing should treat it as one:
@@ -621,69 +628,62 @@ func warnIfServingCertIsAdmin(cfg *serverConfig, spec ca.CertSpec) {
 //   - A pass that succeeded but left nothing readable is fatal, whatever it
 //     returned.
 //
-// # Why the pass reconciles every entry and not only this one
+// # Why the pass reconciles this entry alone
 //
-// internal/ca reconciles the configured set; it exposes no single-entry call,
-// because #242's mechanism was shaped when the set had one kind of member. The
-// cost is that a component certificate's store is also consulted before the
-// listener binds, which is bounded -- entries are independent, a failure is
-// logged and left for the next pass -- and only paid by a deployment that
-// configured self-provisioning at all.
+// Because the listener depends on exactly one certificate, and every other
+// entry consulted before net.Listen is latency charged to a startup budget
+// that was derived for CA.Init alone. ReconcileManagedCert reconciles the one
+// entry that gates startup; the rest are left to the background loop's own
+// first pass, a moment later and off the startup path.
 //
-// What it does not cost is attribution, which is the part that would have
-// mattered: ReconcileManaged reports one error across every entry, so this
-// entry's own Load and Save are wrapped to record their failures as they
-// happen. That is what lets a fatal message say the directory does not exist,
-// rather than that no certificate appeared.
+// Attribution still does not come free from the callee: a single-entry call
+// reports that entry's error, but not which side of it failed. This entry's
+// own Load and Save are therefore still wrapped to record their failures as
+// they happen, which is what lets a fatal message say the directory does not
+// exist rather than that no certificate appeared.
 func provisionServingCert(ctx context.Context, myCA *ca.CA, s *servingCert) error {
 	if s == nil {
 		return nil
 	}
 
-	// Bounded as a whole, which the pass is not on its own: internal/ca gives
-	// each entry its own budget, so the pass costs the sum of them. This runs
-	// before the listener binds, inside the window a Kubernetes startupProbe
-	// and systemd's TimeoutStartSec are both measuring, and both were derived
-	// for CA.Init alone.
+	// Bounded, and bounded around one entry rather than the configured set.
+	// This runs before the listener binds, inside the window a Kubernetes
+	// startupProbe and systemd's TimeoutStartSec are both measuring, and both
+	// were derived for CA.Init alone.
 	//
-	// What actually reaches that sum is worth stating precisely, because the
-	// obvious answer is wrong. It is NOT lock contention: each entry locks on
-	// subjectLockName(subject), so two entries take two different locks and
-	// cannot block one another -- reaching the sum that way would need N
-	// separate peers each stalled on a different subject, which is contrived.
-	// What reaches it with a single fault is the stores. A Secret store bounds
-	// each API call at 30s, so three component certificates behind an API
-	// server that BLACKHOLES packets is ninety seconds against a chart budget
-	// of sixty. The drop matters: a network policy that refuses the connection
-	// fails in milliseconds and none of this materialises, so anyone testing
-	// this has to drop rather than reject or they will conclude the bound is
-	// unnecessary.
+	// The number of certificates a deployment configures no longer enters that
+	// window. It used to: reconciling the whole set charged startup one budget
+	// per entry, and a Secret store bounds each API call at 30s, so three
+	// component certificates behind an API server that BLACKHOLES packets was
+	// ninety seconds against a chart budget of sixty. Reconciling only the
+	// entry the listener depends on removes the multiplier, which is what
+	// ReconcileManagedCert exists for.
 	//
-	// Three things follow that are easy to get wrong:
+	// The explicit cap stays, because one entry is not free either -- the same
+	// blackhole costs this store its own 30s, and a subject lock held by a peer
+	// costs LockTimeout. The cap is what keeps either from outliving a probe.
 	//
-	//   - A healthy pass does not spend this budget. Every entry reads its
-	//     store, finds the certificate current and returns, so the common start
-	//     is milliseconds and the bound is insurance. It binds only when a
-	//     store is slow, which is exactly when a cap is wanted.
-	//   - Ordering fixes starvation, not latency. The serving entry being first
-	//     guarantees it a turn; it does not make the pass return sooner, since
-	//     ReconcileManaged walks the rest before it returns. That is accepted
-	//     rather than overlooked: returning as soon as this entry succeeded
-	//     would need a single-entry reconcile, which internal/ca does not
-	//     expose, and narrowing c.ManagedCerts around the call to fake one
-	//     would mutate shared state to express a call shape the callee should
-	//     offer. The request is with #322 instead.
-	//   - The background loop's own immediate pass is therefore not redundant.
-	//     It is what reconciles anything this bounded pass did not reach, a
-	//     moment later and off the startup path. A component certificate read
-	//     twice on a healthy start is the price of that safety net.
+	// Two things follow that are easy to get wrong:
+	//
+	//   - A healthy pass does not spend this budget. The entry reads its store,
+	//     finds the certificate current and returns, so the common start is
+	//     milliseconds and the bound is insurance. It binds only when the store
+	//     is slow, which is exactly when a cap is wanted.
+	//   - The background loop's own immediate pass is not redundant. It is what
+	//     reconciles every OTHER entry, a moment later and off the startup
+	//     path, and it re-reads this one finding it current. One redundant read
+	//     per healthy start is the price of keeping the component certificates
+	//     out of the listener's critical path.
 	provisionCtx, cancel := context.WithTimeout(ctx, ca.LockTimeout)
 	defer cancel()
-	if _, err := myCA.ReconcileManaged(provisionCtx); err != nil {
-		// Logged, not returned. It may belong to another entry entirely, and
-		// the question that decides is asked below.
-		slog.Debug("The startup reconcile pass reported a failure; "+
-			"whether it was the serving certificate's is decided by the load below",
+	if _, err := myCA.ReconcileManagedCert(provisionCtx, s.entry); err != nil {
+		// Logged, not returned. The error is now unambiguously this entry's --
+		// a single-entry call cannot report someone else's -- but it still does
+		// not decide, because a pass that failed can leave usable material
+		// behind and one that succeeded can leave none. The store is asked
+		// below, and that answer is the one the listener depends on.
+		slog.Debug("The startup reconcile of the CA's serving certificate reported a "+
+			"failure; whether the listener can still start is decided by the load below",
 			"error", err)
 	}
 

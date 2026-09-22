@@ -832,15 +832,24 @@ func newRootCmd() *cobra.Command {
 				return err
 			}
 			if serving != nil {
-				// FIRST in the set, not last, and that ordering is load-bearing
-				// rather than cosmetic. ReconcileManaged walks the slice in
-				// order, and provisionServingCert bounds the whole startup pass
-				// with one budget -- so an entry placed after the component
-				// certificates can have that budget spent before it gets a
-				// turn, leaving the store empty and the startup fatal because
-				// of some other certificate whose own failure is meant to be
-				// routine. What must exist before the listener binds is this
-				// one, so it goes first and the rest take what is left.
+				// First in the set. This is a preference now, not a guarantee,
+				// and the distinction is worth keeping straight because it used
+				// to be the other way round.
+				//
+				// It was load-bearing while provisionServingCert reconciled the
+				// whole set under one budget: an entry placed after the
+				// component certificates could have that budget spent before it
+				// got a turn, and the startup died over someone else's routine
+				// failure. It reconciles this entry alone now, so startup no
+				// longer depends on where the entry sits.
+				//
+				// What ordering still buys is the background loop, which walks
+				// the slice in order and runs its first pass immediately. Going
+				// first means a renewal due for the certificate the listener is
+				// presenting is not queued behind a slow component store. That
+				// is a latency preference and costs nothing -- a delayed
+				// renewal is not an outage, because the certificate being
+				// renewed is still valid.
 				myCA.ManagedCerts = append([]ca.ManagedCert{serving.entry}, myCA.ManagedCerts...)
 			}
 

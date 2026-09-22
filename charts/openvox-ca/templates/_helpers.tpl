@@ -373,7 +373,7 @@ unknown
 */}}
 {{- $serving := dict -}}
 {{- if eq (include "openvox-ca.servingCertConfigured" .) "true" -}}
-{{- $serving = dig "secret" dict (include "openvox-ca.servingCertStore" . | fromJson) -}}
+{{- $serving = include "openvox-ca.servingCertSecret" . | fromJson -}}
 {{- end -}}
 {{- with (dig "name" "" $serving) -}}
 {{- $secrets = append $secrets (dict "namespace" (default $namespace (dig "namespace" "" $serving)) "name" .) -}}
@@ -711,6 +711,41 @@ that cannot abort.
 {{- end -}}
 
 {{/*
+config.serving_cert.store.secret as a map, or an empty one.
+
+The same guard servingCertStore applies to `store`, one level down, and for the
+same reason: sprig's `dig` asserts its last argument is a map with no recovery,
+so a `secret:` key holding anything but a map aborts the whole render with Go's
+raw "interface conversion" panic instead of this chart's own fail() messages.
+
+The shapes that reach it are ordinary operator mistakes, not abuse. `secret:`
+with nothing after it is YAML null -- the half-way-through-typing-the-block
+shape servingCertConfigured already exists to survive one level up -- and
+`secret: my-cert` is the reasonable guess that it takes a name directly. Both
+now degrade to "not a Secret store", which is the answer every caller here can
+already handle.
+
+Two mechanisms here stop the panic and only one is obvious, which is worth
+saying because a mutation test finds the non-obvious one first. Routing both
+callers through this helper means they receive a value that has been through
+toJson/fromJson, and that round-trip alone normalises a null into something
+`dig` tolerates -- so deleting the kindIs test below leaves the chart rendering
+correctly and the suite green. It is kept for the scalar case and because
+"secret must be a map to be read as one" is the actual rule; the round-trip is
+an accident of how the value is passed, not a guarantee anyone should rely on.
+Assert this helper's behaviour by reverting BOTH callers to a direct
+`dig "secret" ...` on servingCertStore, which is the shape that panicked.
+*/}}
+{{- define "openvox-ca.servingCertSecret" -}}
+{{- $store := include "openvox-ca.servingCertStore" . | fromJson -}}
+{{- $secret := dict -}}
+{{- if and (hasKey $store "secret") (kindIs "map" (index $store "secret")) -}}
+{{- $secret = index $store "secret" -}}
+{{- end -}}
+{{- $secret | toJson -}}
+{{- end -}}
+
+{{/*
 Whether config.serving_cert keeps its certificate in a Kubernetes Secret.
 
 Distinct from openvox-ca.managedCertSecrets, which answers for both blocks at
@@ -721,8 +756,8 @@ apart.
 */}}
 {{- define "openvox-ca.servingCertUsesSecret" -}}
 {{- if eq (include "openvox-ca.servingCertConfigured" .) "true" -}}
-{{- $store := include "openvox-ca.servingCertStore" . | fromJson -}}
-{{- if dig "secret" "name" "" $store -}}
+{{- $secret := include "openvox-ca.servingCertSecret" . | fromJson -}}
+{{- if dig "name" "" $secret -}}
 true
 {{- else -}}
 false
@@ -795,6 +830,27 @@ true
 {{- if and (eq .name "PUPPET_CA_TLS_KEY") .value }}{{ $key = .value }}{{ end -}}
 {{- if and (eq .name "PUPPET_CA_TLS_CERT") (hasKey . "valueFrom") }}{{ $cert = "set" }}{{ end -}}
 {{- if and (eq .name "PUPPET_CA_TLS_KEY") (hasKey . "valueFrom") }}{{ $key = "set" }}{{ end -}}
+{{- end -}}
+{{/*
+  The last route, and the one that outranks every other: a flag on the command
+  line beats the config file and the environment both. Scanned here as well as
+  in validate's serving_cert conflict check, because the two answer the same
+  underlying question -- is a certificate supplied -- and a route known to one
+  and not the other is how they drift.
+
+  Leaving it out was not hypothetical. An operator supplying the pair only
+  through extraArgs got probeScheme HTTP against an HTTPS listener, the
+  plaintext-TLS NOTES warning, and an install-time refusal saying no
+  certificate is configured, while the conflict check saw the same flags and
+  called the certificate present.
+
+  hasPrefix rather than equality, matching the conflict check: the flag may be
+  written `--tls-cert=/path` or as two arguments, and both name the same route.
+*/}}
+{{- range .Values.extraArgs -}}
+{{- $arg := . | toString -}}
+{{- if hasPrefix "--tls-cert" $arg }}{{ $cert = "set" }}{{ end -}}
+{{- if hasPrefix "--tls-key" $arg }}{{ $key = "set" }}{{ end -}}
 {{- end -}}
 {{- if and $cert $key -}}
 true
