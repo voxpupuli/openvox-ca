@@ -2057,6 +2057,15 @@ func buildPackagesInto(distDir string) error {
 	if err := checkPackagingInputs(variants, packageFormats); err != nil {
 		return err
 	}
+	// Every variant's tarball, before ANY package is written. Without this the
+	// loop below writes linux_amd64's .deb and .rpm, then fails on
+	// linux_arm64's missing tarball -- leaving a partial set in dist/ while
+	// three documents promised it would not. The command exited non-zero
+	// either way, so "it refuses" was true and "it writes no partial set" was
+	// not; this makes the second true as well.
+	if err := checkVariantTarballs(distDir, ver, variants); err != nil {
+		return err
+	}
 
 	var written []string
 	for _, v := range variants {
@@ -2103,10 +2112,53 @@ func checkPackagingInputs(variants []distVariantSpec, formats []string) error {
 // buildVariantPackages unpacks one variant's tarball into a staging directory,
 // adds the files that are in the packages but not in the tarball, and writes
 // one package per format.
+// checkVariantTarballs reports every packaged variant whose release tarball is
+// absent from distDir, before the caller writes anything.
+//
+// EVERY one, not the first. Reporting a single missing variant sends the
+// operator to build it and run again, only to be told about the next -- and
+// with two packaged variants that is the difference between one round trip and
+// two. The same reason packagedDistVariants is derived rather than listed: a
+// message that makes the reader discover the set one item at a time is a
+// message that will be wrong about the set.
+//
+// This does not make build:packages atomic in general. A write that fails
+// part-way through for its own reasons -- a full disk, an nfpm error -- still
+// leaves whatever earlier variants produced, and buildVariantPackages removes
+// only the file it was itself writing. What it does is close the one case the
+// documentation actually promises about, which is a tarball that was never
+// built.
+func checkVariantTarballs(distDir, ver string, variants []distVariantSpec) error {
+	var missing []string
+	for _, v := range variants {
+		archive := filepath.Join(distDir, distArchiveName(ver, v.name))
+		if _, err := os.Stat(archive); err != nil {
+			missing = append(missing, v.name)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+
+	var build strings.Builder
+	for _, name := range missing {
+		fmt.Fprintf(&build, "\n    mage build:distVariant %s", name)
+	}
+	return fmt.Errorf("no tarball in %s for %s, and this target does not build binaries. "+
+		"Nothing has been written. Build them and run again:%s\n\nor `mage build:dist` for all of "+
+		"them at once, which also builds the two FIPS tarballs the packages do not use",
+		distDir, strings.Join(missing, " and "), build.String())
+}
+
 func buildVariantPackages(distDir, ver string, v distVariantSpec) ([]string, error) {
 	var written []string
 	bins := distBinaries()
 	archive := filepath.Join(distDir, distArchiveName(ver, v.name))
+	// Kept although checkVariantTarballs has already checked every variant:
+	// this function is a seam that specs call directly with one variant, and a
+	// seam that trusts its caller to have validated is a seam that reports a
+	// missing file as some later confusion. The pre-flight is what makes the
+	// no-partial-set promise true; this is what makes this function safe alone.
 	if _, err := os.Stat(archive); err != nil {
 		return nil, fmt.Errorf("%s is not in %s, and this target does not build binaries: "+
 			"run `mage build:dist` for every variant, or `mage build:distVariant %s` for this one, first",

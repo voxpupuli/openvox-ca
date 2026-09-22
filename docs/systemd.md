@@ -206,8 +206,8 @@ $ mage build:packages      # reads those tarballs; builds no binaries
 ```
 
 Both variants, because `build:packages` builds the packages for every variant
-marked packaged and refuses if any of their tarballs is missing rather than
-writing a partial set.
+marked packaged. It checks all of their tarballs before writing anything, so a
+missing one fails with nothing in `dist/` rather than leaving a partial set.
 
 `mage build:dist` produces both in one command and also works — but it builds
 all four release tarballs including the two FIPS ones, which need a cgo cross

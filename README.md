@@ -128,8 +128,9 @@ $ mage build:packages
 ```
 
 **Both**, not either: `build:packages` builds the packages for every variant
-marked packaged, and refuses if any of their tarballs is missing rather than
-writing a partial set. `build:dist` also works and is one command, but it
+marked packaged. It checks every one of their tarballs **before writing
+anything**, so a missing tarball fails the run with nothing in `dist/` rather
+than leaving the variants it got to first. `build:dist` also works and is one command, but it
 builds all four release tarballs including the two FIPS ones, which need a cgo
 cross toolchain the packages never use. The packaging step writes the `.deb`
 and `.rpm` beside the tarballs it read. The packages carry the pure-Go

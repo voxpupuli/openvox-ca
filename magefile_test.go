@@ -2423,6 +2423,93 @@ var _ = Describe("checkPackagingInputs", func() {
 	})
 })
 
+var _ = Describe("the no-partial-set promise", func() {
+	// Three documents say build:packages "refuses if any of their tarballs is
+	// missing rather than writing a partial set". Before the pre-flight that
+	// was half true: the run exited non-zero, so it refused, and it had
+	// already written the earlier variant's packages on the way out.
+	//
+	// The fixture is the asymmetric case, which is the only one that can tell
+	// the two apart -- with both tarballs missing the loop fails on the first
+	// variant and writes nothing either way, so a spec built that way passes
+	// against the defect.
+	// The real version, because buildPackagesInto derives it rather than
+	// taking it: a fixture naming tarballs anything else would stage files the
+	// target never looks for, and every spec below would "pass" on a dist/ the
+	// code considers empty.
+	var ver string
+
+	BeforeEach(func() {
+		var err error
+		ver, err = releaseVersion()
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	It("writes nothing when a later variant's tarball is missing", func() {
+		distDir := GinkgoT().TempDir()
+		all := packagedDistVariants()
+		Expect(len(all)).To(BeNumerically(">=", 2),
+			"one packaged variant cannot express a partial set, so this spec would assert nothing")
+
+		// Everything the loop needs except the LAST variant's tarball.
+		for _, v := range all[:len(all)-1] {
+			stageDistTarball(distDir, ver, v)
+		}
+		missing := all[len(all)-1]
+
+		err := buildPackagesInto(distDir)
+		Expect(err).To(HaveOccurred(), "a missing tarball must fail the run")
+		Expect(err).To(MatchError(And(
+			ContainSubstring(missing.name),
+			ContainSubstring("Nothing has been written"),
+		)))
+
+		// The promise itself: no package of any variant reached dist/.
+		entries, readErr := os.ReadDir(distDir)
+		Expect(readErr).NotTo(HaveOccurred())
+		var packages []string
+		for _, e := range entries {
+			for _, ext := range packageExtensions() {
+				if strings.HasSuffix(e.Name(), ext) {
+					packages = append(packages, e.Name())
+				}
+			}
+		}
+		Expect(packages).To(BeEmpty(),
+			"a partial set was written for the variants that came before the missing one")
+	})
+
+	// And the message names EVERY missing variant, not the first: with two
+	// packaged variants, naming one sends the operator round twice.
+	It("names every missing variant, not just the first", func() {
+		distDir := GinkgoT().TempDir()
+		err := buildPackagesInto(distDir)
+		Expect(err).To(HaveOccurred())
+		for _, v := range packagedDistVariants() {
+			Expect(err).To(MatchError(ContainSubstring(v.name)),
+				"the error did not mention %s", v.name)
+		}
+	})
+
+	// The success path still works, so the pre-flight has not simply become a
+	// refusal that happens to make the assertions above pass.
+	It("builds every variant when all their tarballs are present", func() {
+		distDir := GinkgoT().TempDir()
+		for _, v := range packagedDistVariants() {
+			stageDistTarball(distDir, ver, v)
+		}
+		Expect(buildPackagesInto(distDir)).To(Succeed())
+
+		for _, v := range packagedDistVariants() {
+			for _, ext := range packageExtensions() {
+				matches, globErr := filepath.Glob(filepath.Join(distDir, "*"+ext))
+				Expect(globErr).NotTo(HaveOccurred())
+				Expect(matches).NotTo(BeEmpty(), "no %s written for %s", ext, v.name)
+			}
+		}
+	})
+})
+
 var _ = Describe("buildVariantPackages", func() {
 	// End to end over the real nfpm configuration: stages a tarball the way
 	// build:dist writes one, then builds both formats from it. No compilation

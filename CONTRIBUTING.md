@@ -58,8 +58,8 @@ mage build:packages
 channel: tarballs get `/usr/local/bin`, packages get `/usr/bin`.
 `build:packages` builds no binaries — it reads the tarballs `build:dist` or
 `build:distVariant` left in `dist/` and writes the packages beside them. It
-needs every packaged variant's tarball present and refuses otherwise, rather
-than writing a partial set.
+checks every packaged variant's tarball before writing anything, so a missing
+one fails the run with nothing written and names all of them at once.
 
 ### FIPS build (Linux/amd64)
 
