@@ -2223,6 +2223,12 @@ func (Chart) Test() error {
 			sets:       []string{"serviceAccount.create=true"},
 			valuesYAML: "config:\n  serving_cert:\n    certname: ca.example.com\n    names: [ca.example.com]\n    renew_before: 720h\n    store:\n      secret:\n",
 			wants:      []string{"kind: Deployment", "scheme: HTTPS"},
+			// The degradation itself, not merely that the render survived.
+			// "Not a Secret store" is an RBAC claim: servingCertSecret feeds
+			// the Role's resourceNames and the will-NOT-START NOTE, so a
+			// regression reading the bare string as a Secret name again would
+			// render a Role naming nothing while this case stayed green.
+			notWants: []string{"kind: Role\n"},
 		},
 		{
 			// The other shape an operator reaches for: that `secret` takes the
@@ -2232,6 +2238,12 @@ func (Chart) Test() error {
 			sets:       []string{"serviceAccount.create=true"},
 			valuesYAML: "config:\n  serving_cert:\n    certname: ca.example.com\n    names: [ca.example.com]\n    renew_before: 720h\n    store:\n      secret: my-serving-cert\n",
 			wants:      []string{"kind: Deployment", "scheme: HTTPS"},
+			// The degradation itself, not merely that the render survived.
+			// "Not a Secret store" is an RBAC claim: servingCertSecret feeds
+			// the Role's resourceNames and the will-NOT-START NOTE, so a
+			// regression reading the bare string as a Secret name again would
+			// render a Role naming nothing while this case stayed green.
+			notWants: []string{"kind: Role\n"},
 		},
 		{
 			// extraArgs is the highest-precedence route to a certificate -- a

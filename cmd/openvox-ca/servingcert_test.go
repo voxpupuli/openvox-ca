@@ -1428,6 +1428,57 @@ var _ = Describe("what the serving certificate reports at startup and on renewal
 	})
 })
 
+// The one-line decision that points the listener at a source.
+var _ = Describe("the listener's certificate source", func() {
+	It("is this serving certificate's holder when the CA self-provisions", func() {
+		// getCertificate's non-nil arm. The nil arm is covered in the
+		// configuration block above; this is the one whose failure is silent
+		// in a way that one's is not. Returning nil here leaves
+		// tls.Config.GetCertificate nil, and crypto/tls falls back to
+		// Certificates -- which main.go does not set for a self-provisioned CA
+		// -- so the listener binds and fails every handshake instead of
+		// refusing to start.
+		//
+		// Asserted by behaviour, not by comparing function values: Go will not
+		// compare funcs, and pointer equality on a method value is an
+		// implementation detail rather than the claim. Installing material
+		// through the holder and then asking the RETURNED callback for it is
+		// what proves the callback is bound to this holder -- which is what a
+		// renewal depends on.
+		myCA, store := newRefresherTestCA()
+		myCA.LeafKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+
+		sc, err := buildServingCert(cfgWithServingFiles(GinkgoT().TempDir()),
+			GinkgoT().TempDir(), "", store)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sc).NotTo(BeNil())
+
+		get := sc.getCertificate()
+		Expect(get).NotTo(BeNil(),
+			"a self-provisioning CA handed the listener no certificate source, so "+
+				"tls.Config.GetCertificate is nil and every handshake fails")
+
+		myCA.ManagedCerts = []ca.ManagedCert{sc.entry}
+		Expect(provisionServingCert(context.Background(), myCA, sc)).To(Succeed())
+
+		got, err := get(&tls.ClientHelloInfo{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got).NotTo(BeNil())
+
+		// The binding itself: a renewal installed on THIS holder must be what
+		// the listener's callback subsequently serves.
+		peerCert, peerKey := reissueInto(context.Background(), myCA, "ca.test")
+		Expect(sc.holder.install(peerCert, peerKey)).To(Succeed())
+
+		after, err := get(&tls.ClientHelloInfo{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(serialOf(peerCert)).To(Equal(serialOf(pem.EncodeToMemory(
+			&pem.Block{Type: "CERTIFICATE", Bytes: after.Certificate[0]}))),
+			"the listener's callback is not bound to this serving certificate's holder, "+
+				"so a renewal reaches the store and never reaches the listener")
+	})
+})
+
 // The two fallback arms nothing else reaches.
 var _ = Describe("the serving certificate's fallback reporting", func() {
 	It("points at the reconcile warning when the store was never touched", func() {

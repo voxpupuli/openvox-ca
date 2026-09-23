@@ -220,7 +220,7 @@ PUPPET_CA_OPENBAO_AUTH_METHOD through a ConfigMap or Secret named in `envFrom`
 
 It can read `env`, `extraEnv` and `extraArgs`, though, and each of those carries
 the same setting — so all three are scanned here, the way
-openvox-ca.tlsConfigured scans env/extraEnv for PUPPET_CA_TLS_CERT/KEY. Without
+openvox-ca.tlsSources scans them for PUPPET_CA_TLS_CERT/KEY. Without
 that, `config.ca_key_provider: openbao` plus any of
 `env.PUPPET_CA_OPENBAO_AUTH_METHOD: kubernetes`, the same variable in
 `extraEnv`, or `extraArgs: [--openbao-auth-method=kubernetes]` would leave the
@@ -770,17 +770,90 @@ false
 {{/*
 Whether the server will serve HTTPS.
 
-It does so when a certificate and a key are both configured — on any layer —
-or when the CA issues its own. The config file is the one the chart renders;
-environment variables outrank it, so PUPPET_CA_TLS_CERT/KEY set through env or
-extraEnv count too, and are how someone feeds the certificate paths in from a
-Secret. config.serving_cert is the third way, and is mutually exclusive with
-the other two: the server refuses to start with both.
+It does so when a certificate and a key are BOTH configured — on any layer —
+or when the CA issues its own. Which layers supply them is openvox-ca.tlsSources'
+question, not this one's; this helper only insists on both halves, because the
+server refuses tls_cert without tls_key and a chart calling one half
+"configured" would set HTTPS probes against a listener that never binds.
+config.serving_cert is the third way, and is mutually exclusive with the other
+two: the server refuses to start with both.
 
 When the configuration is not fully known this answers "true": HTTPS is the
 normal case, and it is the answer that neither blocks a correct install nor
 makes the probes fail on one.
 */}}
+{{/*
+Where the server's TLS certificate and key come from, as {"cert": <source>, "key": <source>} JSON.
+
+Each value is the NAME of the highest-precedence route supplying that half, or
+empty when nothing supplies it. The precedence is the server's own, lowest
+first: the config file, then PUPPET_CA_TLS_CERT/KEY in env or extraEnv which
+outrank the file, then --tls-cert/--tls-key in extraArgs, which the chart
+appends to the argv it builds and which therefore outrank everything.
+`tls.existingSecret` is reported under its own name rather than as
+config.tls_cert, because it sets those keys and an operator told to remove
+"config.tls_cert" would not find it in their values.
+
+This exists because the rule had two copies and they disagreed. tlsConfigured
+scanned the config, env and extraEnv; validate's serving_cert conflict check
+scanned those plus extraArgs. An operator supplying the pair only as flags got
+an HTTP probe against an HTTPS listener and an install refused for having no
+certificate the other copy could plainly see.
+
+`args` is deliberately not scanned: it replaces the argv wholesale, so the
+chart cannot see what is in it. That is the same reason configFullyKnown gates
+the callers rather than this helper.
+
+**The two callers ask different questions of this and must keep doing so.**
+tlsConfigured needs BOTH halves, because the server refuses tls_cert without
+tls_key and a chart that called one half "configured" would set HTTPS probes
+against a listener that never binds. validate's conflict check needs EITHER
+half, because either one alongside serving_cert is the contradiction it
+refuses. Collapsing them onto one non-emptiness test reintroduces the first
+bug; that was tried and `tls_cert` alone stopped being refused at install.
+*/}}
+{{- define "openvox-ca.tlsSources" -}}
+{{- $config := include "openvox-ca.config" . | fromYaml -}}
+{{- $cert := "" -}}
+{{- $key := "" -}}
+{{- if dig "tls_cert" "" $config }}{{ $cert = "config.tls_cert" }}{{ end -}}
+{{- if dig "tls_key" "" $config }}{{ $key = "config.tls_key" }}{{ end -}}
+{{- if .Values.tls.existingSecret -}}
+{{- if $cert }}{{ $cert = "tls.existingSecret" }}{{ end -}}
+{{- if $key }}{{ $key = "tls.existingSecret" }}{{ end -}}
+{{- end -}}
+{{/*
+  Non-empty only, following the server's own precedence: applyServerEnv assigns
+  from PUPPET_CA_* only when the variable is non-empty (cmd/openvox-ca/config.go),
+  so an empty one leaves whatever the config file said. Assigning
+  unconditionally let `env: {PUPPET_CA_TLS_CERT: ""}` clear a certificate the
+  config had set, and the TLS precondition then refused a perfectly good install.
+*/}}
+{{- range $name, $value := .Values.env -}}
+{{- if and (eq $name "PUPPET_CA_TLS_CERT") $value }}{{ $cert = "env.PUPPET_CA_TLS_CERT" }}{{ end -}}
+{{- if and (eq $name "PUPPET_CA_TLS_KEY") $value }}{{ $key = "env.PUPPET_CA_TLS_KEY" }}{{ end -}}
+{{- end -}}
+{{/*
+  A valueFrom reference counts because the chart cannot read it and assuming
+  TLS is the fail-open direction. Tested on valueFrom's PRESENCE rather than
+  value's absence: `extraEnv: [{name: PUPPET_CA_TLS_CERT}]` also has no value
+  key, but Kubernetes renders it as the empty string, which the server
+  discards -- an absence test counted that as configured and suppressed the
+  TLS precondition, the plaintext NOTES warning and the HTTPS probe scheme for
+  a pod with no certificate at all.
+*/}}
+{{- range .Values.extraEnv -}}
+{{- if and (eq .name "PUPPET_CA_TLS_CERT") (or .value (hasKey . "valueFrom")) }}{{ $cert = "extraEnv PUPPET_CA_TLS_CERT" }}{{ end -}}
+{{- if and (eq .name "PUPPET_CA_TLS_KEY") (or .value (hasKey . "valueFrom")) }}{{ $key = "extraEnv PUPPET_CA_TLS_KEY" }}{{ end -}}
+{{- end -}}
+{{- range .Values.extraArgs -}}
+{{- $arg := . | toString -}}
+{{- if hasPrefix "--tls-cert" $arg }}{{ $cert = printf "extraArgs %s" $arg }}{{ end -}}
+{{- if hasPrefix "--tls-key" $arg }}{{ $key = printf "extraArgs %s" $arg }}{{ end -}}
+{{- end -}}
+{{- dict "cert" $cert "key" $key | toJson -}}
+{{- end -}}
+
 {{- define "openvox-ca.tlsConfigured" -}}
 {{- if ne (include "openvox-ca.configFullyKnown" .) "true" -}}
 true
@@ -797,61 +870,9 @@ true
 {{- if eq (include "openvox-ca.servingCertConfigured" .) "true" -}}
 true
 {{- else -}}
-{{- $cert := dig "tls_cert" "" $config -}}
-{{- $key := dig "tls_key" "" $config -}}
-{{/*
-  Non-empty only, following the server's own precedence: applyServerEnv assigns
-  from PUPPET_CA_* only when the variable is non-empty
-  (cmd/openvox-ca/config.go), so an empty one leaves whatever the config file
-  said. Assigning unconditionally let `env: {PUPPET_CA_TLS_CERT: ""}` clear a
-  certificate the config had set, and the TLS precondition then refused a
-  perfectly good install for having no certificate. needsAPIAccess already
-  guards its identical scan this way.
-*/}}
-{{- range $name, $value := .Values.env -}}
-{{- if and (eq $name "PUPPET_CA_TLS_CERT") $value }}{{ $cert = $value }}{{ end -}}
-{{- if and (eq $name "PUPPET_CA_TLS_KEY") $value }}{{ $key = $value }}{{ end -}}
-{{- end -}}
-{{/*
-  Same two branches needsAPIAccess uses, for the same reason: a readable
-  non-empty value counts, and a valueFrom reference counts because the chart
-  cannot read it and assuming TLS is the fail-open direction. Everything else
-  counts for nothing, because the server ignores an empty variable.
-
-  Tested on valueFrom's presence rather than value's absence. An entry naming
-  neither — `extraEnv: [{name: PUPPET_CA_TLS_CERT}]` — also has no value key,
-  but Kubernetes renders it as the empty string, which the server discards; an
-  absence test counted it as configured and so suppressed the TLS precondition,
-  the plaintext NOTES warning and the HTTP probe scheme for a pod with no
-  certificate at all.
-*/}}
-{{- range .Values.extraEnv -}}
-{{- if and (eq .name "PUPPET_CA_TLS_CERT") .value }}{{ $cert = .value }}{{ end -}}
-{{- if and (eq .name "PUPPET_CA_TLS_KEY") .value }}{{ $key = .value }}{{ end -}}
-{{- if and (eq .name "PUPPET_CA_TLS_CERT") (hasKey . "valueFrom") }}{{ $cert = "set" }}{{ end -}}
-{{- if and (eq .name "PUPPET_CA_TLS_KEY") (hasKey . "valueFrom") }}{{ $key = "set" }}{{ end -}}
-{{- end -}}
-{{/*
-  The last route, and the one that outranks every other: a flag on the command
-  line beats the config file and the environment both. Scanned here as well as
-  in validate's serving_cert conflict check, because the two answer the same
-  underlying question -- is a certificate supplied -- and a route known to one
-  and not the other is how they drift.
-
-  Leaving it out was not hypothetical. An operator supplying the pair only
-  through extraArgs got probeScheme HTTP against an HTTPS listener, the
-  plaintext-TLS NOTES warning, and an install-time refusal saying no
-  certificate is configured, while the conflict check saw the same flags and
-  called the certificate present.
-
-  hasPrefix rather than equality, matching the conflict check: the flag may be
-  written `--tls-cert=/path` or as two arguments, and both name the same route.
-*/}}
-{{- range .Values.extraArgs -}}
-{{- $arg := . | toString -}}
-{{- if hasPrefix "--tls-cert" $arg }}{{ $cert = "set" }}{{ end -}}
-{{- if hasPrefix "--tls-key" $arg }}{{ $key = "set" }}{{ end -}}
-{{- end -}}
+{{- $src := include "openvox-ca.tlsSources" . | fromJson -}}
+{{- $cert := dig "cert" "" $src -}}
+{{- $key := dig "key" "" $src -}}
 {{- if and $cert $key -}}
 true
 {{- else -}}
@@ -947,27 +968,14 @@ CrashLoopBackOff or a Service that silently routes nowhere.
   configFullyKnown gates this whole helper.
 */ -}}
 {{- if eq (include "openvox-ca.servingCertConfigured" .) "true" -}}
-{{- $conflict := "" -}}
-{{- if .Values.tls.existingSecret -}}{{- $conflict = "tls.existingSecret" -}}
-{{- else if dig "tls_cert" "" $config -}}{{- $conflict = "config.tls_cert" -}}
-{{- else if dig "tls_key" "" $config -}}{{- $conflict = "config.tls_key" -}}
-{{- end -}}
-{{- range $name, $value := .Values.env -}}
-{{- if and (or (eq $name "PUPPET_CA_TLS_CERT") (eq $name "PUPPET_CA_TLS_KEY")) $value -}}
-{{- $conflict = printf "env.%s" $name -}}
-{{- end -}}
-{{- end -}}
-{{- range .Values.extraEnv -}}
-{{- if and (or (eq .name "PUPPET_CA_TLS_CERT") (eq .name "PUPPET_CA_TLS_KEY")) (or .value (hasKey . "valueFrom")) -}}
-{{- $conflict = printf "extraEnv %s" .name -}}
-{{- end -}}
-{{- end -}}
-{{- range .Values.extraArgs -}}
-{{- $arg := . | toString -}}
-{{- if or (hasPrefix "--tls-cert" $arg) (hasPrefix "--tls-key" $arg) -}}
-{{- $conflict = printf "extraArgs %s" $arg -}}
-{{- end -}}
-{{- end -}}
+{{/*
+  Either half is the contradiction, unlike tlsConfigured which needs both: one
+  of the pair alongside serving_cert is already two answers to which
+  certificate the listener presents, and the server refuses it.
+*/}}
+{{- $src := include "openvox-ca.tlsSources" . | fromJson -}}
+{{- $conflict := dig "cert" "" $src -}}
+{{- if not $conflict }}{{ $conflict = dig "key" "" $src }}{{ end -}}
 {{- if $conflict -}}
 {{- fail (printf "config.serving_cert makes the CA issue and renew the certificate its own listener presents, but %s also supplies one — and openvox-ca refuses to start with both, because they are two answers to which certificate the listener presents. Self-provisioning never writes to the paths tls_cert/tls_key name, so it cannot take them over. Remove %s to let the CA issue its own, or drop config.serving_cert to keep supplying one." $conflict $conflict) -}}
 {{- end -}}

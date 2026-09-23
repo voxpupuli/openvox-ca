@@ -70,6 +70,14 @@ Group=puppet-ca
 # A managed certificate with a `files` store writes outside cadir by
 # definition, so its directory needs naming here too. See "managed
 # certificates" in docs/configuration.md.
+#
+# The CA's own serving certificate -- `serving_cert` -- needs the same naming
+# when it uses a `files` store, and the consequence of forgetting differs. A
+# managed certificate that cannot be written is logged and retried on the next
+# pass; the serving certificate is what the listener presents, so an unwritable
+# store is fatal and the CA refuses to start. It must also sit outside cadir,
+# which the CA reserves against every file store. See "the CA's own serving
+# certificate" in docs/configuration.md.
 StateDirectory=puppet-ca
 StateDirectoryMode=0750
 #ReadWritePaths=/etc/puppetlabs/puppet/ssl/ca

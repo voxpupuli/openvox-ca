@@ -1468,6 +1468,15 @@ certificate for `managedCertNeverIssuedFor` (1h by default). Once a certificate
 does exist it has an inventory row like any other, so the ordinary expiry alerts
 cover it and nothing new is needed. See [metrics & monitoring](metrics.md).
 
+A [`serving_cert`](#the-cas-own-serving-certificate) entry is one of the
+configured entries this metric and that alert cover, labelled with the CA's own
+certname, and it reads differently from the others. The CA refuses to start
+until its own certificate exists, so this entry firing does not mean the
+certificate never appeared — it means one that existed has gone, which is
+revocation rather than a store the reconcile pass cannot write. The alert's own
+description says so, and it is the difference between looking at RBAC and
+looking at the CRL.
+
 ### The certificate that administers this CA
 
 > **Warning:** admin access to this CA is granted by listing a certname in
