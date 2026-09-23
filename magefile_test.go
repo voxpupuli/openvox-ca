@@ -3174,6 +3174,60 @@ var _ = Describe("Build.Unit", func() {
 			ContainSubstring(packageUnitBindir))))
 	})
 
+	// Build.Unit's own success path, through the seam it delegates to.
+	//
+	// The block below pins what writeRenderedUnit RETURNS. That is the data,
+	// and it is not the same thing as the message consuming it: reverting this
+	// Fprintf to print the raw `bindir` -- which is exactly the defect this PR
+	// reports fixing -- left every spec in this file green, because nothing
+	// observed the print at all.
+	Describe("buildUnitInto", func() {
+		// THE TRAILING SLASH IS THE TEST. With "/opt/openvox/bin" the fixed and
+		// the unfixed code print the identical line, so a fixture without it
+		// asserts nothing and would pass against the bug. With it, the fixed
+		// code prints ".../bin/openvox-ca" and the unfixed ".../bin//openvox-ca".
+		It("prints the trimmed bindir, not the argument it was given", func() {
+			var out bytes.Buffer
+			dir := GinkgoT().TempDir()
+
+			Expect(buildUnitInto(&out, dir, "/opt/openvox/bin/")).To(Succeed())
+
+			Expect(out.String()).To(ContainSubstring("ExecStart=/opt/openvox/bin/openvox-ca"))
+			Expect(out.String()).NotTo(ContainSubstring("//openvox-ca"),
+				"the message was built from the raw argument rather than the rendered value")
+			// And it names the file it wrote, which is the other half of a
+			// message whose whole job is to tell the operator what happened.
+			Expect(out.String()).To(ContainSubstring(filepath.Join(dir, distUnitFile)))
+		})
+
+		// The unit on disk was always correct; it is the message that was
+		// wrong. Asserting both together is what stops a future fix to one
+		// being mistaken for a fix to the other.
+		It("writes the unit as well as reporting it", func() {
+			var out bytes.Buffer
+			dir := GinkgoT().TempDir()
+
+			Expect(buildUnitInto(&out, dir, "/opt/openvox/bin/")).To(Succeed())
+
+			body, err := os.ReadFile(filepath.Join(dir, distUnitFile))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(body)).To(ContainSubstring("ExecStart=/opt/openvox/bin/openvox-ca"))
+			Expect(string(body)).NotTo(ContainSubstring("//openvox-ca"))
+		})
+
+		// The refusal reaches the seam too, and prints nothing when it fires:
+		// a message about a unit that was not written is worse than silence.
+		It("refuses a relative bindir without writing or printing", func() {
+			var out bytes.Buffer
+			dir := GinkgoT().TempDir()
+
+			Expect(buildUnitInto(&out, dir, "usr/bin")).To(MatchError(
+				ContainSubstring("is not an absolute path")))
+			Expect(out.String()).To(BeEmpty(), "it reported writing a unit it refused to write")
+			Expect(filepath.Join(dir, distUnitFile)).NotTo(BeAnExistingFile())
+		})
+	})
+
 	// The success path goes through writeRenderedUnit against a temporary
 	// directory, so no spec writes into the repository's own dist/.
 	Describe("writeRenderedUnit", func() {

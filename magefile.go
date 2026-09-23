@@ -1970,18 +1970,39 @@ func (Build) DistVariant(name string) error {
 // ExecStart names the wrong prefix fails at start with a message about the
 // binary rather than about the prefix, and the guess is not worth that.
 func (Build) Unit(bindir string) error {
+	return buildUnitInto(os.Stdout, "dist", bindir)
+}
+
+// buildUnitInto is Build.Unit against a caller-supplied directory and writer,
+// the same shape as buildPackagesInto.
+//
+// Both parameters exist for the same reason and neither is decoration. The
+// directory keeps a spec out of the repository's own dist/. The writer is what
+// makes the MESSAGE assertable, and the message is where the defect this
+// function is supposed to have fixed actually lived: Build.Unit used to trim
+// the trailing slash a second time for its own Printf, so it reported
+// "ExecStart=/opt/bin//openvox-ca" over a unit file that had been rendered
+// correctly.
+//
+// Returning the trimmed value from writeRenderedUnit fixed that, and the spec
+// covering it asserted the returned string -- which pins the data and not its
+// consumption. Reverting this line to print the raw `bindir` would have left
+// every test in the suite green. A writer the caller supplies is what closes
+// that, because the only way to observe a print is to be given the thing it
+// prints to.
+func buildUnitInto(out io.Writer, distDir, bindir string) error {
 	if !strings.HasPrefix(bindir, "/") {
 		return fmt.Errorf("bindir %q is not an absolute path (try %s or %s)",
 			bindir, tarballUnitBindir, packageUnitBindir)
 	}
-	out, trimmed, err := writeRenderedUnit("dist", bindir)
+	path, trimmed, err := writeRenderedUnit(distDir, bindir)
 	if err != nil {
 		return err
 	}
 	// The trimmed value writeRenderedUnit actually rendered with, not a second
 	// trim of the raw argument. Two independent trims are two things to get
 	// right, and the message is the half nothing was asserting.
-	fmt.Printf("Wrote %s (ExecStart=%s/openvox-ca)\n", out, trimmed)
+	fmt.Fprintf(out, "Wrote %s (ExecStart=%s/openvox-ca)\n", path, trimmed)
 	return nil
 }
 
