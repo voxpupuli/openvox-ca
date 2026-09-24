@@ -287,7 +287,11 @@ var _ = Describe("StorageService", func() {
 
 		It("reports files with group-readable permissions (0640)", func() {
 			keyPath := store.PrivateKeyPath("loose-node")
-			Expect(os.WriteFile(keyPath, []byte("fake"), 0640)).To(Succeed())
+			// Seeded then chmodded: os.WriteFile's mode is masked by the umask,
+			// so at 0077 this would land at 0600 and the spec would fail for a
+			// reason that is not its subject.
+			Expect(os.WriteFile(keyPath, []byte("fake"), storage.FilePermPrivate)).To(Succeed())
+			Expect(os.Chmod(keyPath, 0640)).To(Succeed())
 			warnings := store.CheckKeyPermissions()
 			Expect(warnings).To(HaveLen(1))
 			Expect(warnings[0].Path).To(Equal(keyPath))
@@ -296,19 +300,52 @@ var _ = Describe("StorageService", func() {
 
 		It("reports files with world-readable permissions (0644)", func() {
 			keyPath := store.PrivateKeyPath("wide-open")
-			Expect(os.WriteFile(keyPath, []byte("fake"), 0644)).To(Succeed())
+			Expect(os.WriteFile(keyPath, []byte("fake"), storage.FilePermPrivate)).To(Succeed())
+			Expect(os.Chmod(keyPath, 0644)).To(Succeed())
 			warnings := store.CheckKeyPermissions()
 			Expect(warnings).To(HaveLen(1))
 			Expect(warnings[0].Path).To(Equal(keyPath))
 			Expect(warnings[0].Mode).To(Equal(os.FileMode(0644)))
 		})
 
-		It("only checks files ending in _key.pem", func() {
-			// A loose-perm file that doesn't match the _key.pem pattern should be ignored.
-			Expect(os.WriteFile(filepath.Join(store.CADir(), "private", "other.pem"), []byte("x"), 0644)).To(Succeed())
+		// The directory is judged whole, not by filename. Two of the secrets kept
+		// here have never ended in _key.pem -- the inventory-integrity HMAC key
+		// (private/.inventory_hmac_key) and, under encrypt_ca_key, the generated
+		// passphrase (private/.ca_key_passphrase) -- so a suffix test exempted
+		// both from a refusal whose whole subject is key material. A
+		// world-readable HMAC key lets any local account forge inventory MACs.
+		It("checks every file in the private directory, not just _key.pem", func() {
+			hmacPath := filepath.Join(store.CADir(), "private", ".inventory_hmac_key")
+			Expect(os.WriteFile(hmacPath, []byte("x"), storage.FilePermPrivate)).To(Succeed())
+			Expect(os.Chmod(hmacPath, 0644)).To(Succeed(), "past any umask")
 			Expect(os.WriteFile(store.PrivateKeyPath("good-node"), []byte("fake"), storage.FilePermPrivate)).To(Succeed())
+
 			warnings := store.CheckKeyPermissions()
-			Expect(warnings).To(BeEmpty())
+
+			Expect(warnings).To(HaveLen(1), "the HMAC key is a secret in the secrets directory")
+			Expect(warnings[0].Path).To(Equal(hmacPath))
+			Expect(warnings[0].WorldAccessible()).To(BeTrue())
+		})
+
+		// A secret the store knows nothing about, named by the caller: the
+		// server passes ca_key_passphrase_file, which unlocks the encrypted CA
+		// key and so carries the key's own exposure.
+		It("checks a path the caller names as well", func() {
+			passPath := filepath.Join(GinkgoT().TempDir(), "passphrase")
+			Expect(os.WriteFile(passPath, []byte("hunter2"), storage.FilePermPrivate)).To(Succeed())
+			Expect(os.Chmod(passPath, 0644)).To(Succeed(), "past any umask")
+
+			Expect(store.CheckKeyPermissions()).To(BeEmpty(), "not reached unless named")
+
+			warnings := store.CheckKeyPermissions(passPath)
+
+			Expect(warnings).To(HaveLen(1), "the caller-supplied secret")
+			Expect(warnings[0].Path).To(Equal(passPath))
+			Expect(warnings[0].WorldAccessible()).To(BeTrue())
+		})
+
+		It("ignores an empty caller-supplied path", func() {
+			Expect(store.CheckKeyPermissions("")).To(BeEmpty(), "ca_key_passphrase_file unset")
 		})
 
 		It("returns warnings only for loose files in a mixed set", func() {

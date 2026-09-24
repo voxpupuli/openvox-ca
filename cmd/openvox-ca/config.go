@@ -187,6 +187,12 @@ type serverConfig struct {
 	EncryptCAKey        bool   `yaml:"encrypt_ca_key"`         // encrypt the CA private key at rest (AES-256-GCM + Argon2id)
 	CAKeyPassphraseFile string `yaml:"ca_key_passphrase_file"` // path to file containing the CA key passphrase
 
+	// InsecureAllowWorldReadableKeys downgrades the startup refusal on
+	// world-accessible key material to a warning. Named for what it is: an
+	// operator reaching for this should see what they are turning off in the
+	// key itself.
+	InsecureAllowWorldReadableKeys bool `yaml:"insecure_allow_world_readable_keys"`
+
 	// PromoteCNToSAN adds the CN as a DNS SAN when the CSR has no SANs (default: true).
 	PromoteCNToSAN bool `yaml:"promote_cn_to_san"`
 	// AllowSubjectAltNames lets a submitted CSR request Subject Alternative
@@ -730,6 +736,11 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("PUPPET_CA_ENCRYPT_CA_KEY"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.EncryptCAKey = b
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.InsecureAllowWorldReadableKeys = b
 		}
 	}
 	if v := os.Getenv("PUPPET_CA_PROMOTE_CN_TO_SAN"); v != "" {

@@ -810,6 +810,12 @@ var _ = Describe("applyServerEnv each variable", func() {
 		},
 		Entry("CADIR", "PUPPET_CA_CADIR", "/some/dir",
 			func(c *serverConfig) bool { return c.CADir == "/some/dir" }, "CADir"),
+		// true is the distinguishing value: false is the zero value, so an entry
+		// asserting false would pass with the variable unread or the field
+		// misnamed.
+		Entry("INSECURE_ALLOW_WORLD_READABLE_KEYS", "PUPPET_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS", "true",
+			func(c *serverConfig) bool { return c.InsecureAllowWorldReadableKeys },
+			"InsecureAllowWorldReadableKeys"),
 		Entry("CLIENT_REVOCATION_POLICY", "PUPPET_CA_CLIENT_REVOCATION_POLICY", "check",
 			func(c *serverConfig) bool { return c.ClientRevocationPolicy == "check" }, "ClientRevocationPolicy"),
 		Entry("CLIENT_CRL_REFRESH_INTERVAL_SEC", "PUPPET_CA_CLIENT_CRL_REFRESH_INTERVAL_SEC", "300",
@@ -1135,6 +1141,74 @@ var _ = Describe("crlChainRefreshInterval", func() {
 })
 
 // --- allow_subject_alt_names wiring ---
+
+// --- insecure_allow_world_readable_keys wiring ---
+
+var _ = Describe("insecure_allow_world_readable_keys wiring", func() {
+	// Published on three routes -- flag, YAML key, environment variable -- and
+	// only the environment one was exercised. Its failure mode is silent and
+	// falls on exactly one person: the operator whose store is world-readable,
+	// who reaches for the documented escape hatch precisely because they cannot
+	// start the CA without it. A yaml tag typo or a lost Changed() branch leaves
+	// them refused again with nothing to say why. The chart offers only the YAML
+	// route, since it writes `config:` verbatim.
+	BeforeEach(func() { clearServerEnv() })
+
+	It("is false by default", func() {
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.InsecureAllowWorldReadableKeys).To(BeFalse())
+	})
+
+	It("is read from the config file", func() {
+		path := writeTempConfig("insecure_allow_world_readable_keys: true\n")
+		cfg, err := loadServerConfig(path)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.InsecureAllowWorldReadableKeys).To(BeTrue())
+	})
+
+	It("is read from the environment, which outranks the file", func() {
+		path := writeTempConfig("insecure_allow_world_readable_keys: false\n")
+		setEnv("PUPPET_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS", "true")
+		cfg, err := loadServerConfig(path)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.InsecureAllowWorldReadableKeys).To(BeTrue())
+	})
+
+	// The flag route, as far as it can honestly be driven. Execute is not an
+	// option -- the success path of this option is a running server -- and the
+	// variable the RunE overlay copies into cfg is local to newRootCmd, so
+	// nothing outside can read it.
+	//
+	// What this pins: the flag exists under its documented name, it is a
+	// boolean, and setting it registers as Changed, which is the condition the
+	// overlay branch tests. What it does NOT pin is the branch itself: deleting
+	// `if cmd.Flags().Changed("insecure-allow-world-readable-keys")` leaves this
+	// green. Closing that needs the overlay lifted out of RunE, which is a
+	// change to sixty-odd sibling branches and not this PR's to make.
+	It("is read from the flag, which outranks both", func() {
+		path := writeTempConfig("insecure_allow_world_readable_keys: false\n")
+
+		cmd := newRootCmd()
+		Expect(cmd.ParseFlags([]string{
+			"--config", path,
+			"--insecure-allow-world-readable-keys",
+		})).To(Succeed(), "parse the flag")
+
+		f := cmd.Flags().Lookup("insecure-allow-world-readable-keys")
+		Expect(f).NotTo(BeNil(), "the flag must exist under the documented name")
+		Expect(f.Changed).To(BeTrue(), "and register as set, which is what the overlay tests")
+		Expect(f.Value.String()).To(Equal("true"))
+	})
+
+	// The direction a wiring defect hides in: every assertion above is about
+	// true, so a loader that ignored the file entirely would still pass them.
+	It("stays false when the file says false", func() {
+		cfg, err := loadServerConfig(writeTempConfig("insecure_allow_world_readable_keys: false\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.InsecureAllowWorldReadableKeys).To(BeFalse())
+	})
+})
 
 var _ = Describe("allow_subject_alt_names wiring", func() {
 	// File-and-environment only, no CLI flag, and its failure mode is silent in
