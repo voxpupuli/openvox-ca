@@ -232,6 +232,33 @@ func (s *StorageService) AcquireInstanceLock(ctx context.Context, opts ...Instan
 	}
 }
 
+// LockIsEnforced reports whether u is a lock that actually excludes another
+// instance, as opposed to one of the no-ops AcquireInstanceLock returns when it
+// has nothing to enforce.
+//
+// It exists because those two are indistinguishable to a caller: both arrive as
+// a nil error and a usable Unlocker, and the only notice of the difference is an
+// slog warning, which an offline subcommand has usually just repointed at the
+// server's logfile. A caller whose correctness depends on being alone — the
+// inventory rebuild, whose head is computed from a snapshot — needs to be able
+// to ask.
+func LockIsEnforced(u Unlocker) bool {
+	el, ok := u.(enforcingUnlocker)
+	return ok && el.enforcesInstance()
+}
+
+// enforcingUnlocker is implemented by an Unlocker that really does exclude a
+// second instance. Asserting this positively rather than testing "is not the
+// no-op" is the whole point: the negative form answered "enforced" for every
+// type it had not been told about -- a future no-op variant, a pointer form, a
+// wrapper placed over a no-op -- and the direction of that mistake is to
+// convert "cannot be shown to be quiet" into "proceed", on the one command
+// whose correctness depends on the store being quiet. An unrecognised Unlocker
+// now reads as unenforced, which is the safe answer.
+type enforcingUnlocker interface {
+	enforcesInstance() bool
+}
+
 // InstanceLockOption adjusts one AcquireInstanceLock call.
 type InstanceLockOption func(*instanceLockConfig)
 
@@ -270,6 +297,23 @@ func WithKnownDistributedLocking(distributed bool) InstanceLockOption {
 type noopUnlocker struct{}
 
 func (noopUnlocker) Unlock() error { return nil }
+
+// instanceUnlocker is the store-instance lock specifically, as opposed to any
+// other flock this package hands out. Only this type answers the enforcement
+// question positively, so the predicate keys on which lock was taken rather
+// than on how it happens to be implemented.
+type instanceUnlocker struct {
+	Unlocker
+}
+
+// enforcesInstance is true: this is the store-instance flock, and an flock(2)
+// really does exclude a second process on this host.
+func (instanceUnlocker) enforcesInstance() bool { return true }
+
+// enforcesInstance is false: a no-op excludes nobody. Stated explicitly rather
+// than left to a type assertion elsewhere, so a new no-op variant has to answer
+// the question rather than inherit the wrong answer by default.
+func (noopUnlocker) enforcesInstance() bool { return false }
 
 // acquireInstance takes the store-wide lock without waiting, and records who
 // took it so a later refusal can say.
@@ -338,7 +382,12 @@ func (l *fileLocks) acquireInstance() (Unlocker, error) {
 			"lock_file", path, "error", err)
 	}
 
-	return &fileUnlocker{f: f, local: local, path: path}, nil
+	// Wrapped so the unlocker carries its identity, not merely its type. A
+	// bare *fileUnlocker is what every NAMED lock returns too -- crl,
+	// bootstrap, subject:<name> -- and holding one of those says nothing about
+	// being the only instance. LockIsEnforced answered true for a crl lock
+	// before this wrapper existed.
+	return instanceUnlocker{Unlocker: &fileUnlocker{f: f, local: local, path: path}}, nil
 }
 
 // writeHolder is indirected through a variable so a spec can drive the

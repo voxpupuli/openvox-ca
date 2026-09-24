@@ -82,6 +82,21 @@ func (b *RecordingBackend) AcquireInstanceLock() (storage.Unlocker, error) {
 	return &recordingUnlocker{backend: b, wrapped: ul}, nil
 }
 
+// NOTE: recordingUnlocker does not forward storage's unexported
+// enforcesInstance predicate, so storage.LockIsEnforced answers false for a
+// RecordingBackend even when the wrapped lock is a real flock. That is the
+// fail-closed direction and harmless for the ordering this type exists to
+// record, but it means RecordingBackend must NOT be used in specs that assert
+// on holdInstanceLock's `enforced` return: such a spec would see the
+// unenforceable-lock refusal and be "fixed" by passing --replicas-stopped,
+// quietly retiring the gate it was meant to pin.
+// NOTE: the non-forwarding below is deliberate and is pinned by
+// TestRecordingBackendIsNotLockEnforcementFaithful in this package. It became
+// load-bearing once storage.LockIsEnforced started keying on which lock was
+// taken: a future maintainer "fixing" the wrapper to forward would make
+// RecordingBackend read as enforced, and a spec written against it would then
+// see a refusal and be repaired by passing --replicas-stopped, quietly
+// retiring the gate.
 type recordingUnlocker struct {
 	backend *RecordingBackend
 	wrapped storage.Unlocker

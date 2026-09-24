@@ -572,3 +572,51 @@ func (c *countingLocker) calls() int {
 	defer c.mu.Unlock()
 	return c.n
 }
+
+var _ = Describe("LockIsEnforced", func() {
+	// The predicate is the sole input to rebuild-inventory-hmac's refusal, and
+	// it must fail closed: an Unlocker it does not recognise has to read as
+	// unenforced, because the cost of the other direction is proceeding on a
+	// store nothing proved was quiet.
+	It("is false for the no-op AcquireInstanceLock hands back", func() {
+		Expect(LockIsEnforced(noopUnlocker{})).To(BeFalse())
+	})
+
+	It("is false for an unrecognised Unlocker rather than assuming enforcement", func() {
+		Expect(LockIsEnforced(strangeUnlocker{})).To(BeFalse(),
+			"an Unlocker this predicate has not been told about must not read as a real lock")
+	})
+
+	It("is false for a named lock, which excludes nobody from the store", func() {
+		// This used to assert the opposite, on a bare &fileUnlocker{}. That is
+		// the type EVERY named lock hands back -- crl, bootstrap,
+		// subject:<name> -- so the predicate answered "this store is held by
+		// exactly one instance" for a lock that says nothing of the kind. The
+		// spec passed because it asked the same type-level question the
+		// implementation did.
+		l := newFileLocks(GinkgoT().TempDir())
+		ul, err := l.acquire(context.Background(), "crl")
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _ = ul.Unlock() })
+
+		Expect(LockIsEnforced(ul)).To(BeFalse(),
+			"holding the crl lock says nothing about being the only instance")
+	})
+
+	It("is true for the store-instance lock", func() {
+		// The other side, or the predicate could satisfy every spec above by
+		// answering false to everything.
+		l := newFileLocks(GinkgoT().TempDir())
+		ul, err := l.acquireInstance()
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _ = ul.Unlock() })
+
+		Expect(LockIsEnforced(ul)).To(BeTrue())
+	})
+})
+
+// strangeUnlocker is an Unlocker from outside this package's knowledge — a
+// wrapper, or a no-op variant added later.
+type strangeUnlocker struct{}
+
+func (strangeUnlocker) Unlock() error { return nil }
