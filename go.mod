@@ -24,7 +24,7 @@ require (
 	github.com/uptrace/bun/dialect/sqlitedialect v1.2.18
 	github.com/uptrace/bun/driver/pgdriver v1.2.18
 	github.com/uptrace/bun/driver/sqliteshim v1.2.18
-	go.etcd.io/etcd/api/v3 v3.7.1
+	go.etcd.io/etcd/api/v3 v3.7.2
 	go.etcd.io/etcd/client/v3 v3.7.1
 	go.etcd.io/etcd/server/v3 v3.7.1
 	go.yaml.in/yaml/v3 v3.0.5
