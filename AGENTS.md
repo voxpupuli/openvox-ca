@@ -366,11 +366,23 @@ layout and the one path the hardened unit grants under `ProtectSystem=strict`
 (see [docs/systemd.md](docs/systemd.md)). Neither of those is a rename, so
 neither breaches this contract.
 
-**The rule this contract actually states** is narrower than "nothing is spelled
-`openvox-ca`". It is: *nothing that Puppet Server named is renamed.* A path a
-drop-in has to match keeps its `puppet-ca` or `puppetlabs` spelling. A path that
-never existed in Puppet Server has nothing to be a drop-in for, and may use the
-new spelling.
+**The rule this contract states** is narrower than "nothing is spelled
+`openvox-ca`", but wider than "nothing Puppet Server named". It is: *nothing
+already shipped under a `puppet-ca`, `puppetlabs`, `PUPPET_CA_` or `puppetca_`
+name is renamed — whether this project inherited that name or established it.
+Only a path new to this project may use the `openvox-ca` spelling.*
+
+An earlier draft of this paragraph said "nothing that Puppet Server named is
+renamed", and that was wrong in the direction that matters. Most of the list
+above is not a Puppet Server name: `/etc/puppet-ca` and `/var/lib/puppet-ca`
+are this project's own (Puppet Server keeps its CA under `/etc/puppetlabs`), and
+so are the `PUPPET_CA_` environment prefix and the `puppetca_` metric
+namespace. Read literally, that draft permitted renaming exactly what the list
+forbids — in the file LLM contributors follow, which makes it the text most
+likely to be quoted later to justify a rebrand.
+
+**Where the two disagree, the list wins.** A summary exists to be quicker to
+read than the list, not to be the authority over it.
 
 The packages introduce several of the latter, and none of them breaches the
 contract:

@@ -1411,12 +1411,20 @@ var _ = Describe("the packaged variant set", func() {
 		}
 	})
 
-	// release.yml carries no packaging counts on this branch -- that arrives
-	// with #266 -- so naming it here cited a dependant that does not exist. The
-	// order is still load-bearing: packaging/nfpm.yaml's `packagers:` key is
-	// the list this must not drift from, and magefile.go derives the packaged
-	// extensions from it.
-	It("names the formats in the order packaging/nfpm.yaml assumes", func() {
+	// Two wrong citations in a row, so this one names no external dependant at
+	// all. It first cited release.yml's packaging counts, which arrive with
+	// #266 and are not on this branch; correcting that, it cited a
+	// `packagers:` key in packaging/nfpm.yaml, which does not exist ANYWHERE
+	// and whose absence is the design -- magefile.go's own comment on
+	// packageFormats says it drives nfpm "rather than from a slice of its own
+	// or from a `packagers:` key in packaging/nfpm.yaml", because a second
+	// list is the drift it exists to prevent. A maintainer following that
+	// comment would have created the very thing it warned against.
+	//
+	// What the order is actually load-bearing FOR is inside this file: the
+	// no-partial-set spec relies on deb being first, so a swap there would
+	// silently change which format the partial-set case exercises.
+	It("names the formats in the order the packaging specs assume", func() {
 		Expect(packageFormats).To(Equal([]string{"deb", "rpm"}))
 	})
 
