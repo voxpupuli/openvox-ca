@@ -40,9 +40,16 @@ cadir: /etc/puppetlabs/puppet/ssl/ca
 # first-boot provisioning mints is named for the host
 # (certs/<certname>.pem), which no file shipped in a package can know; the
 # oneshot links these two paths to it once it does. So this file names a fixed
-# path and provisioning points that path at the right file -- which is also
-# what makes re-minting under a corrected name a matter of relinking rather
-# than editing configuration.
+# path and provisioning points that path at the right file, which is why
+# re-minting under a corrected name needs no edit to THIS file.
+#
+# It does need the old links removed. Provisioning creates a link only when
+# nothing is already at the path, and it deliberately does not judge whether an
+# existing one is its own -- a dangling alias may equally be an operator's,
+# pointing at a certificate they are about to install. So after deleting
+# certs/<old>.pem and private_keys/<old>.pem, delete these two aliases as well
+# and restart the oneshot; it relinks them to the new name. The tier-3 warning
+# and the unresolved-certname marker both say so.
 #
 # Point them elsewhere and provisioning leaves them alone: like every other
 # step, the link is only made when nothing is already there.

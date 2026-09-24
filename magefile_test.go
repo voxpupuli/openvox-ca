@@ -6114,6 +6114,34 @@ var _ = Describe("postinstall's ownership and permission hardening", func() {
 			"useradd created a different account name from the sysusers declaration")
 	})
 
+	// The ssl-tree chown's own failure, isolated from the configuration
+	// file's.
+	//
+	// Both warnings open with "could not give", and that overlap already bit
+	// once: an entry in the table below asserted `ContainSubstring("could not
+	// give")` for the CONFIG chown and passed on this branch's message
+	// instead, reporting coverage it did not have. The stub here fails chown
+	// ONLY for the ssl tree, so the two branches cannot stand in for each
+	// other, and the assertion names $SSLDIR.
+	It("reports a failed ssl-tree chown without failing the install", func() {
+		// Fails for the ssl root, succeeds for anything else -- so the config
+		// chown further down still works and cannot supply the message.
+		Expect(os.WriteFile(filepath.Join(stubBin, "chown"),
+			[]byte("#!/bin/sh\nfor a in \"$@\"; do\n  case \"$a\" in "+sslDir+") exit 1 ;; esac\ndone\n"+
+				"echo \"chown $*\" >> "+log+"\nexit 0\n"), 0o755)).To(Succeed())
+		Expect(os.WriteFile(configPath, []byte("port: 8141\n"), 0o644)).To(Succeed())
+
+		r, _ := run("configure")
+		Expect(r.ok).To(BeTrue(), "a failed ssl-tree chown must not fail the install: %s", r.output)
+		Expect(r.output).To(And(
+			ContainSubstring("could not give "+sslDir+" to puppet:puppet"),
+			ContainSubstring("systemctl restart openvox-ca-first-boot"),
+		), "the warning did not name the ssl tree or the remedy")
+		// And it is this branch, not the configuration one.
+		Expect(r.output).NotTo(ContainSubstring("could not give "+configPath),
+			"the configuration chown failed too, so the two branches are not isolated")
+	})
+
 	// Three of the script's eight `|| warn` branches had no spec while the
 	// other five each got one. Each is a decision to report and continue rather
 	// than abort, and an unexercised one is a branch that could `exit 1` under
