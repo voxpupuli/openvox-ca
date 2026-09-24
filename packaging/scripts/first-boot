@@ -669,6 +669,28 @@ ensure_node_certificate() {
 		# tls_key straight at it. Nothing downstream would notice: the server
 		# starts, and every client that verifies rejects the handshake.
 		if ! ca_issued_this_credential "$cert"; then
+			# Whether to tell the operator to delete the CA in $CADIR depends on
+			# whether THIS run created it, for the reason write_unresolved_marker
+			# is gated on the same variable: on a takeover, or a CA moved in by
+			# hand whose signed/ lacks this host, that CA predates the run and
+			# may be the only copy. An instruction to delete it is an instruction
+			# to destroy a working CA.
+			#
+			# Defaulting to "existed" when unset is deliberate. The destructive
+			# advice is given only when this run positively knows it created the
+			# CA; a caller that never computed ca_existed gets the safe wording.
+			if [ "${ca_existed:-yes}" = no ]; then
+				discard="delete the CA this run just created at
+  $CADIR, then"
+			else
+				discard="then"
+				predates="
+
+  The CA in $CADIR was already there before this run, so this run did not create it and
+  cannot tell whether anything still depends on it. Decide that separately before removing it.
+  If $CADIR/signed/ is empty it has issued nothing -- which is what an earlier run of this
+  script leaves behind when it refused as this one has."
+			fi
 			fail "found an existing credential for \"$NAME\" ($cert), but the CA in $CADIR has no
 record of issuing it -- so it was issued by a different CA and this one cannot serve it.
 
@@ -676,8 +698,8 @@ That usually means this host already belongs to another CA, which is the estate'
 the CA this service should be:
 
   Use the existing CA -- point cadir in $CONFIG at it, change ReadWritePaths= to match in both
-  openvox-ca.service and openvox-ca-first-boot.service, delete the CA this run just created at
-  $CADIR, then 'systemctl restart openvox-ca-first-boot'.
+  openvox-ca.service and openvox-ca-first-boot.service, $discard
+  'systemctl restart openvox-ca-first-boot'.${predates:-}
 
   Or run a new, separate CA here -- move $cert and $key aside, and provisioning will mint this
   host a certificate from the CA in $CADIR.

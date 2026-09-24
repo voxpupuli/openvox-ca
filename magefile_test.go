@@ -3926,19 +3926,23 @@ func firstBootHostPins() []string {
 		// They live here rather than in the runners because the runners had a
 		// copy each and the copies drifted: runFirstBootScript pinned two of
 		// the three while its comment claimed all three, runFirstBootIn pinned
-		// one, and runFirstBootFunc pinned none.
+		// one, runFirstBootFunc none, and four runners built inside individual
+		// specs none either.
 		//
-		// What that cost, stated precisely rather than dramatically: nothing
-		// yet. runFirstBootScript's specs pass a non-empty certname, which
-		// short-circuits puppet_conf_certname before it reads puppet.conf, and
-		// runFirstBootFunc's two specs call is_safe_certname and
-		// is_localhost_name, neither of which opens a file. So no spec on this
-		// branch reads a host path. The defect is that three runners disagreed
-		// about which paths were isolated while a comment asserted they
-		// agreed -- a spec that passed "" for the certname, or that drove any
-		// config reader through runFirstBootFunc, would have read the host and
-		// the comment would have said it could not. One list, three callers,
-		// no drift.
+		// That was a live read of the host, not a latent one -- and it is easy
+		// to argue otherwise, which is how an earlier version of this comment
+		// came to say "nothing yet". Which function a spec CALLS does not
+		// matter: sourcing the definitions resolves CADIR from $CONFIG at the
+		// top level, and fails outright on a cadir it cannot read. So every
+		// runner that sourced them read /etc/puppet-ca/config.yaml whenever
+		// one existed, and on a host whose file sets cadir in a form the
+		// reader refuses, every one of those specs would have failed for a
+		// reason in the machine rather than the code. Ask what the source
+		// does when loaded, not only what the spec invokes.
+		//
+		// Every runner now takes this list -- first, in the in-spec ones, so a
+		// setting the spec makes itself (a puppet.conf it built) still wins.
+		// One list, every caller, no drift.
 		"OPENVOX_CA_CONFIG=" + filepath.Join(pin, "no-config.yaml"),
 		"OPENVOX_CA_LEGACY_CADIR=" + filepath.Join(pin, "no-legacy-cadir"),
 		"OPENVOX_CA_PUPPET_CONF=" + filepath.Join(pin, "no-puppet.conf"),
@@ -4875,7 +4879,7 @@ esac
 		defs, err := firstBootDefs()
 		Expect(err).NotTo(HaveOccurred())
 		cmd := exec.Command("sh", "-c", defs+"\nresolve_certname\n")
-		cmd.Env = append(os.Environ(),
+		cmd.Env = append(append(os.Environ(), firstBootHostPins()...),
 			"OPENVOX_CA_SSLDIR="+sslDir,
 			"OPENVOX_CA_BINDIR="+binDir,
 			// puppet.conf is the tier above the hostname tiers, and it
@@ -4989,7 +4993,7 @@ esac
 			defs, err := firstBootDefs()
 			Expect(err).NotTo(HaveOccurred())
 			cmd := exec.Command("sh", "-c", defs+"\nNAME=localhost\nwrite_unresolved_marker\n")
-			cmd.Env = append(os.Environ(),
+			cmd.Env = append(append(os.Environ(), firstBootHostPins()...),
 				"OPENVOX_CA_SSLDIR="+sslDir,
 				"OPENVOX_CA_BINDIR="+binDir,
 			)
@@ -5016,7 +5020,7 @@ esac
 			defs, err := firstBootDefs()
 			Expect(err).NotTo(HaveOccurred())
 			cmd := exec.Command("sh", "-c", defs+"\nNAME=localhost\nwrite_unresolved_marker\n")
-			cmd.Env = append(os.Environ(),
+			cmd.Env = append(append(os.Environ(), firstBootHostPins()...),
 				"OPENVOX_CA_SSLDIR="+sslDir,
 				"OPENVOX_CA_BINDIR="+binDir,
 			)
@@ -5039,6 +5043,29 @@ esac
 			))
 			// And it must say why the rest is off limits.
 			Expect(text).To(ContainSubstring("belongs to something this package did not install"))
+		})
+
+		// The fallback when the marker cannot be written. A directory at the
+		// marker's path makes the redirect fail deterministically, and does so
+		// as root too -- a read-only parent would not, since root ignores the
+		// mode. The run must not fail over it: the CA is already provisioned,
+		// and what the operator needs is the warning, which is then the only
+		// place the problem is recorded.
+		It("warns rather than failing when the marker cannot be written", func() {
+			Expect(os.MkdirAll(filepath.Join(sslDir, "openvox-ca-certname-unresolved"), 0o755)).To(Succeed())
+			defs, err := firstBootDefs()
+			Expect(err).NotTo(HaveOccurred())
+			cmd := exec.Command("sh", "-c", defs+"\nNAME=localhost\nwrite_unresolved_marker\n")
+			cmd.Env = append(append(os.Environ(), firstBootHostPins()...),
+				"OPENVOX_CA_SSLDIR="+sslDir,
+				"OPENVOX_CA_BINDIR="+binDir,
+			)
+			out, err := cmd.CombinedOutput()
+			Expect(err).NotTo(HaveOccurred(), "a marker that cannot be written failed the run: %s", out)
+			Expect(string(out)).To(And(
+				ContainSubstring("WARNING: could not write "+filepath.Join(sslDir, "openvox-ca-certname-unresolved")),
+				ContainSubstring("no agent can use"),
+			))
 		})
 	})
 })
@@ -5267,6 +5294,42 @@ var _ = Describe("first-boot's provisioning steps", func() {
 			// nothing may point the serving credential at the foreign pair.
 			Expect(filepath.Join(sslDir, "certs", "openvox-ca-server.pem")).
 				NotTo(BeAnExistingFile(), "the serving credential was linked despite the refusal")
+		})
+
+		// What the refusal tells the operator to delete, which depends on the
+		// ca_existed the script COMPUTES before ensure_ca. Driven through the
+		// whole script rather than by setting the variable, which is the
+		// shortcut these specs already paid for once.
+		It("offers to delete the CA only when this run created it", func() {
+			first := runFirstBootScript(sslDir, binDir, certname)
+			Expect(first.ok).To(BeFalse(), "the first run should have refused: %s", first.output)
+			Expect(first.output).To(ContainSubstring("delete the CA this run just created"))
+			Expect(first.output).NotTo(ContainSubstring("was already there before this run"))
+		})
+
+		// The case the finding named: a working CA whose store lacks this
+		// host's certificate. Telling that operator to delete it is telling
+		// them to destroy a CA this run did not create.
+		It("does not tell the operator to delete a CA that predates the run", func() {
+			// A real CA first, with a credential it issued...
+			Expect(os.Remove(filepath.Join(sslDir, "certs", certname+".pem"))).To(Succeed())
+			Expect(os.Remove(filepath.Join(sslDir, "private_keys", certname+".pem"))).To(Succeed())
+			first := runFirstBootScript(sslDir, binDir, certname)
+			Expect(first.ok).To(BeTrue(), "provisioning failed: %s", first.output)
+
+			// ...then that credential replaced by one it did not issue.
+			Expect(os.WriteFile(filepath.Join(sslDir, "certs", certname+".pem"),
+				[]byte("SOMEBODY-ELSES-CERT\n"), 0o644)).To(Succeed())
+			Expect(os.WriteFile(filepath.Join(sslDir, "private_keys", certname+".pem"),
+				[]byte("SOMEBODY-ELSES-KEY\n"), 0o600)).To(Succeed())
+
+			second := runFirstBootScript(sslDir, binDir, certname)
+			Expect(second.ok).To(BeFalse(), "a foreign credential was adopted: %s", second.output)
+			Expect(second.output).To(ContainSubstring("issued by a different CA"),
+				"refused for some other reason, so this spec is not testing the remedy")
+			Expect(second.output).NotTo(ContainSubstring("delete the CA this run just created"),
+				"the remedy tells the operator to destroy a CA this run did not create")
+			Expect(second.output).To(ContainSubstring("was already there before this run"))
 		})
 
 		// And the refusal must not be reached by refusing everything: a
@@ -6512,7 +6575,7 @@ var _ = Describe("first-boot's puppet.conf certname tier", func() {
 		defs, err := firstBootDefs()
 		Expect(err).NotTo(HaveOccurred())
 		cmd := exec.Command("sh", "-c", defs+"\nresolve_certname\n")
-		cmd.Env = append(os.Environ(),
+		cmd.Env = append(append(os.Environ(), firstBootHostPins()...),
 			"OPENVOX_CA_SSLDIR="+sslDir,
 			"OPENVOX_CA_BINDIR="+binDir,
 			"OPENVOX_CA_PUPPET_CONF="+puppetConf,
