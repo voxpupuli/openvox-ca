@@ -226,6 +226,39 @@ type CA struct {
 	// AutoRenew retires its predecessor at all; this decides when.
 	SupersedeAfter time.Duration
 
+	// ManagedCerts are the named leaves this CA keeps alive: it issues each
+	// one, renews it on a loop, and supersedes its predecessor with a delay.
+	// Empty (the zero value) means the mechanism is entirely dormant -- no
+	// goroutine, no storage key, no behaviour change of any kind.
+	//
+	// Nothing in the tree sets this yet: the mechanism has no instance, and the
+	// two that will supply one -- the CA's own serving certificate, and the
+	// component certificates of #243 -- each bring their own store and their
+	// own configuration. It is set before the server starts its background
+	// jobs; ReconcileManaged reads the slice on every pass and does not expect
+	// it to change underneath it.
+	//
+	// Note that a managed certificate's predecessor is retired according to
+	// SupersedeAfter, whose zero value revokes immediately -- so a CA that
+	// reconciles managed certificates without setting it retires each one
+	// inline, with no overlap for relying parties.
+	ManagedCerts []ManagedCert
+
+	// LeafBackdate is how far before the moment of issuance a leaf
+	// certificate's NotBefore is set, so a verifier whose clock is behind this
+	// one still accepts a certificate just signed. Zero uses the built-in
+	// default (5 minutes).
+	//
+	// It is a tolerance for clock skew, not a margin for a broken fleet: a
+	// client further out than this refuses a certificate the CA signed a moment
+	// ago as not yet valid, and keeps refusing until its clock is fixed. Raise
+	// it only for a fleet that cannot run NTP.
+	//
+	// It applies to every leaf this CA issues -- from a CSR, generated, renewed
+	// or managed -- not only to managed ones. It does NOT reach the CA's own
+	// certificate, which bootstrapCA backdates a fixed 24 hours.
+	LeafBackdate time.Duration
+
 	// ExternalSigner, when non-nil, is used instead of loading the CA private
 	// key from disk. This enables key isolation: the private key lives in a
 	// separate process and signing requests are proxied over IPC.

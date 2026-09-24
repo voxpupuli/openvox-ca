@@ -444,6 +444,59 @@ var _ = Describe("CA AutoRenew", func() {
 		Expect(renewed.URIs).To(Equal(original.URIs))
 	})
 
+	It("carries a narrow extended key usage forward instead of widening it", func() {
+		// Renewal must not hand back more authority than it was given. Before
+		// this was carried forward, AutoRenew passed a nil EKU and
+		// issueLeafLocked applied its serverAuth+clientAuth default, so a
+		// clientAuth-only certificate came back also able to serve TLS — same
+		// key, same subject, more authority, and nothing in the exchange saying
+		// it had widened.
+		//
+		// clientAuth-only is the reachable case, which is why the spec uses it:
+		// attribute() verifies every client certificate against
+		// ExtKeyUsageClientAuth, so a serverAuth-only certificate never reaches
+		// this path at all, while a clientAuth-only one reaches it normally.
+		now := time.Now().UTC()
+		original := mintLeaf(2048, &x509.Certificate{
+			Subject:     pkix.Name{CommonName: "narrow-eku-node"},
+			NotBefore:   now.Add(-24 * time.Hour),
+			NotAfter:    now.Add(365 * 24 * time.Hour),
+			DNSNames:    []string{"narrow-eku-node"},
+			ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		})
+
+		renewedPEM, err := myCA.AutoRenew(ctx, original)
+		Expect(err).NotTo(HaveOccurred())
+		renewed := parseCertPEM(renewedPEM)
+
+		Expect(renewed.ExtKeyUsage).To(ConsistOf(x509.ExtKeyUsageClientAuth))
+		Expect(renewed.ExtKeyUsage).NotTo(ContainElement(x509.ExtKeyUsageServerAuth),
+			"auto-renewal must not add an extended key usage the certificate was not issued with")
+	})
+
+	It("still applies the default extended key usage when the certificate carries none", func() {
+		// Empty means unrestricted, and every agent issued before this CA set
+		// an EKU carries none. Narrowing those on renewal would break them, so
+		// an absent EKU must keep taking the default pair rather than becoming
+		// an empty list.
+		now := time.Now().UTC()
+		original := mintLeaf(2048, &x509.Certificate{
+			Subject:   pkix.Name{CommonName: "no-eku-node"},
+			NotBefore: now.Add(-24 * time.Hour),
+			NotAfter:  now.Add(365 * 24 * time.Hour),
+			DNSNames:  []string{"no-eku-node"},
+		})
+		Expect(original.ExtKeyUsage).To(BeEmpty(),
+			"this spec only proves anything if the presented certificate really carries no EKU")
+
+		renewedPEM, err := myCA.AutoRenew(ctx, original)
+		Expect(err).NotTo(HaveOccurred())
+		renewed := parseCertPEM(renewedPEM)
+
+		Expect(renewed.ExtKeyUsage).To(ConsistOf(
+			x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth))
+	})
+
 	It("auto-renews a certificate that has no CSR in storage, e.g. after migration import", func() {
 		original := seedCertWithoutCSR("migrated-node")
 		Expect(store.HasCSR(ctx, "migrated-node")).To(BeFalse(),
