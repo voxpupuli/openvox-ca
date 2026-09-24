@@ -2991,6 +2991,43 @@ var _ = Describe("stageDocTree", func() {
 			git("commit", "--quiet", "-m", "fixture")
 		})
 
+		// A tracked symlink under docs/ must not become a copy of whatever it
+		// points at. `git ls-files` lists a symlink (mode 120000) exactly like
+		// any other path, and os.ReadFile follows it -- so before the Lstat
+		// guard this staged the LINK TARGET, and the target can be outside the
+		// checkout entirely.
+		//
+		// The fixture points at a file outside repoRoot on purpose: a link to a
+		// sibling inside the tree would be copied into a package that was going
+		// to contain that content anyway, so it cannot distinguish a guard from
+		// its absence. The escape is the thing being refused.
+		It("refuses a tracked symlink rather than copying what it points at", func() {
+			secret := filepath.Join(GinkgoT().TempDir(), "build-host-secret")
+			Expect(os.WriteFile(secret, []byte("NOT-FOR-A-PACKAGE\n"), 0o600)).To(Succeed())
+
+			link := filepath.Join(repo, "docs", "innocent.md")
+			Expect(os.Symlink(secret, link)).To(Succeed())
+			gitIn(repo, "add", "--", "docs/innocent.md")
+			gitIn(repo, "commit", "--quiet", "-m", "a symlink that looks like a document")
+
+			// The premise: git must consider this tracked AND a symlink, or the
+			// spec proves nothing about the path the guard is on.
+			Expect(gitIn(repo, "ls-files", "-s", "--", "docs/innocent.md")).
+				To(HavePrefix("120000"), "the fixture is not a tracked symlink")
+
+			dest := GinkgoT().TempDir()
+			err := stageDocTreeFrom(repo, dest)
+			Expect(err).To(HaveOccurred(), "the symlink was staged")
+			Expect(err).To(MatchError(And(
+				ContainSubstring("symbolic link"),
+				ContainSubstring("from the build host"),
+			)))
+
+			// And nothing of the target reached the staging tree.
+			staged := filepath.Join(dest, "docs", "innocent.md")
+			Expect(staged).NotTo(BeAnExistingFile())
+		})
+
 		// gitListFiles' error path, and the message stageDocTreeFrom wraps it
 		// in. Neither was driven: every fixture here is a real checkout, so
 		// `git ls-files` always succeeded and the whole branch was dead to the
@@ -5249,6 +5286,60 @@ var _ = Describe("first-boot's provisioning steps", func() {
 			Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).To(BeAnExistingFile())
 		})
 
+		// The presence test is deliberately WIDER than the reader, so the pair
+		// fails closed. yaml.v3 accepts spellings the reader's `^key:` anchor
+		// does not; for each of those the reader returns empty, and a matching
+		// presence test would report the key absent -- which every caller reads
+		// as "use the shipped default". That is the fail-open the whole block
+		// exists to prevent, reached through a perfectly valid config file.
+		DescribeTable("refuses a relocated cadir however the operator spelled the key",
+			func(line string) {
+				Expect(os.WriteFile(cfg, []byte(line+"\n"), 0o644)).To(Succeed())
+
+				r := runFirstBootScript(sslDir, binDir, "ca.example.com", withCfg())
+				Expect(r.ok).To(BeFalse(),
+					"provisioning used the shipped default for a key the server reads: %s", r.output)
+				Expect(r.output).To(ContainSubstring("not in a form this script can read"))
+				// The consequence, not just the message: no CA at the default.
+				Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).NotTo(BeAnExistingFile())
+			},
+			// Each of these is read by yaml.v3 and was invisible to the guard.
+			// The VALUE is one the reader declines, so the only thing deciding
+			// the outcome is whether the key registered as present at all.
+			Entry("a double-quoted key", `"cadir": >`),
+			Entry("a single-quoted key", `'cadir': >`),
+			Entry("a space before the colon", `cadir : >`),
+			Entry("leading whitespace", `  cadir: >`),
+		)
+
+		// And the structures no line-wise reader can interpret. A flow mapping
+		// or a merge key can set either key provisioning depends on, and
+		// nothing here can tell whether it does -- so the file is refused
+		// rather than read as "neither key is present".
+		DescribeTable("refuses a file whose top-level structure it cannot read",
+			func(body string) {
+				Expect(os.WriteFile(cfg, []byte(body+"\n"), 0o644)).To(Succeed())
+
+				r := runFirstBootScript(sslDir, binDir, "ca.example.com", withCfg())
+				Expect(r.ok).To(BeFalse(), "an unreadable structure was read as an empty file: %s", r.output)
+				Expect(r.output).To(ContainSubstring("flow mapping or a merge key"))
+				Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).NotTo(BeAnExistingFile())
+			},
+			Entry("a flow mapping at column 0", "{cadir: /srv/ca, port: 8141}"),
+			Entry("a merge key", "<<: *base"),
+		)
+
+		// The ordinary file must still provision, or the two refusals above
+		// would have been bought by breaking the common case.
+		It("still provisions from a plain configuration file", func() {
+			Expect(os.WriteFile(cfg, []byte("port: 8141\nnote: braces {like this} are fine\n"),
+				0o644)).To(Succeed())
+
+			r := runFirstBootScript(sslDir, binDir, "ca.example.com", withCfg())
+			Expect(r.ok).To(BeTrue(), "provisioning failed: %s", r.output)
+			Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).To(BeAnExistingFile())
+		})
+
 		// An unreadable config is not an absent one, and the two used to be
 		// indistinguishable: `[ -f ]` needs only stat while grep and sed need
 		// read, so a file this account cannot open answered "key absent" for
@@ -6067,42 +6158,36 @@ var _ = Describe("postinstall's ownership and permission hardening", func() {
 	})
 
 	// The co-existence host the package advertises: openvox-agent got here
-	// first, as root, and created the three subdirectories. They are not
-	// packaged, ensure_ssl_tree leaves an existing directory exactly as it
-	// finds it, and `puppet` cannot write in a root-owned one -- so if the
-	// postinstall does not hand them over, provisioning dies at its last step
-	// on a bare "ln: Permission denied".
+	// first, as root, and created certs/, private_keys/ and public_keys/.
 	//
-	// Nothing reached this loop before: the fixture never created the three, so
-	// `[ -d ... ]` was false on every run and ssl_dirs was always the base pair.
-	It("also hands over the agent's subdirectories where they already exist", func() {
+	// The install used to take all three. It no longer does, and this spec is
+	// the inversion of the one that used to assert it did. Write permission on
+	// a directory governs unlink and rename of the entries inside it, so taking
+	// certs/ handed the `puppet` account the ability to replace certs/ca.pem --
+	// the trust anchor a root-running agent verifies against.
+	//
+	// It also bought nothing. On exactly this host ensure_node_certificate
+	// refuses to adopt a credential this CA did not issue, so provisioning
+	// stops regardless; the widening enabled a step that does not run. Where
+	// provisioning CAN proceed, first-boot creates these directories itself.
+	It("leaves the agent's own directories alone", func() {
 		for _, d := range []string{"certs", "private_keys", "public_keys"} {
 			Expect(os.MkdirAll(filepath.Join(sslDir, d), 0o755)).To(Succeed())
 		}
 
 		_, calls := run("configure")
-		Expect(chownedPaths(calls)).To(ConsistOf(
-			sslDir,
-			filepath.Join(sslDir, "ca"),
-			filepath.Join(sslDir, "certs"),
-			filepath.Join(sslDir, "private_keys"),
-			filepath.Join(sslDir, "public_keys"),
-		))
+		Expect(chownedPaths(calls)).To(ConsistOf(sslDir, filepath.Join(sslDir, "ca")),
+			"the install took a directory it did not create")
 	})
 
-	// Absent means skipped, not created. Creating one here would pre-empt the
-	// modes ensure_ssl_tree chooses for it.
-	It("takes only the subdirectories that already exist, and creates none", func() {
-		Expect(os.MkdirAll(filepath.Join(sslDir, "private_keys"), 0o750)).To(Succeed())
-
+	// And it does not create them either, so the modes ensure_ssl_tree chooses
+	// are still ensure_ssl_tree's to choose.
+	It("creates none of the agent's directories", func() {
 		_, calls := run("configure")
-		Expect(chownedPaths(calls)).To(ConsistOf(
-			sslDir,
-			filepath.Join(sslDir, "ca"),
-			filepath.Join(sslDir, "private_keys"),
-		))
-		Expect(filepath.Join(sslDir, "certs")).NotTo(BeADirectory())
-		Expect(filepath.Join(sslDir, "public_keys")).NotTo(BeADirectory())
+		Expect(chownedPaths(calls)).To(ConsistOf(sslDir, filepath.Join(sslDir, "ca")))
+		for _, d := range []string{"certs", "private_keys", "public_keys"} {
+			Expect(filepath.Join(sslDir, d)).NotTo(BeADirectory())
+		}
 	})
 
 	It("gives the configuration file to root:puppet at 0640", func() {

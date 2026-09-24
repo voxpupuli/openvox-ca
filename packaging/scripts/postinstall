@@ -154,10 +154,29 @@ if [ -d "$SSLDIR" ]; then
 	# already holds the CA key in the cadir, and the alternative is a service
 	# that cannot start. docs/systemd.md states the same thing for operators
 	# rather than leaving it here.
+	# ONLY what this package ships. certs/, private_keys/ and public_keys/ are
+	# deliberately not taken, and that is a change from what this script used
+	# to do.
+	#
+	# The grant was justified by two claims, and neither survives on the host
+	# it was written for. On an agent-only machine there is no openvox-server
+	# whose postinst chowns the tree the same way, and the local CA key gives
+	# an attacker no leverage over an agent enrolled with the estate's REMOTE
+	# CA. What write access to certs/ does give them is the trust anchor:
+	# replacing certs/ca.pem lets a rogue master serve catalogues to a root
+	# agent.
+	#
+	# And it bought nothing even on its own terms. On exactly that host
+	# ensure_node_certificate now refuses to adopt a credential this CA did not
+	# issue, so provisioning stops regardless -- the widening happened at
+	# install time to enable a step that does not run. Where provisioning CAN
+	# proceed, first-boot creates these directories itself and owns them.
+	#
+	# A host that genuinely wants them handed over gets told so, by name, with
+	# the exact chown to run: see ensure_ssl_tree's writability check. That is
+	# the operator's decision to take, at a moment they are looking at it, and
+	# not a package's to take silently as root.
 	ssl_dirs="$SSLDIR $SSLDIR/ca"
-	for d in certs private_keys public_keys; do
-		[ -d "$SSLDIR/$d" ] && ssl_dirs="$ssl_dirs $SSLDIR/$d"
-	done
 
 	# shellcheck disable=SC2086 # deliberately word-split: the list is built
 	# from literals above, never from operator input.

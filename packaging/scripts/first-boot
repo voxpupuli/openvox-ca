@@ -116,7 +116,37 @@ config_key_set() {
 	# -r for read_config_key's reason: grep needs read permission, and an
 	# unreadable file must not report every key as absent.
 	[ -r "$CONFIG" ] || return 1
-	grep -q "^$1:" "$CONFIG"
+	# DELIBERATELY WIDER than read_config_key's pattern, so the pair fails
+	# closed rather than open.
+	#
+	# The server parses this file with yaml.v3, which accepts spellings the
+	# reader's `^key:` anchor does not: a quoted key ("cadir": /x), whitespace
+	# before the colon (cadir : /x), and single quotes. For any of those the
+	# reader returns empty AND a matching presence test would report the key
+	# absent -- which every caller reads as "the operator never wrote this, use
+	# the shipped default". That is the fail-open the whole block exists to
+	# prevent, reached through a valid config file.
+	#
+	# Making presence the broader question inverts it: the reader still
+	# declines what it cannot parse, and the caller now learns the key IS there
+	# and stops with the line quoted, instead of guessing.
+	grep -qE "^[[:space:]]*['\"]?$1['\"]?[[:space:]]*:" "$CONFIG"
+}
+
+# config_has_unreadable_structure reports whether $CONFIG contains a top-level
+# construct this reader cannot interpret at all.
+#
+# A flow mapping at column 0 ({cadir: /x, port: 8141}) or a merge key (<<:
+# *base) can set either of the keys provisioning depends on, and no line-wise
+# pattern can tell whether it does. Absent this, such a file reads as "neither
+# key is present" and both guards fall through to defaults -- the same
+# fail-open as above, arrived at from the other direction.
+#
+# Refusing is the only honest answer: the file is valid YAML that the server
+# will read and this script cannot.
+config_has_unreadable_structure() {
+	[ -r "$CONFIG" ] || return 1
+	grep -qE '^[[:space:]]*(\{|<<[[:space:]]*:)' "$CONFIG"
 }
 
 # require_readable_config stops the run when $CONFIG exists but this account
@@ -139,6 +169,18 @@ config_key_set() {
 # re-run when the operator fixes the mode, and $SSLDIR/certs/ca.pem is left
 # naming a CA the server never uses.
 require_readable_config() {
+	if [ -r "$CONFIG" ] && config_has_unreadable_structure; then
+		fail "$CONFIG uses a flow mapping or a merge key at the top level, which this script cannot
+read:
+
+    $(grep -nE '^[[:space:]]*(\{|<<[[:space:]]*:)' "$CONFIG" | head -n 1)
+
+openvox-ca reads it perfectly well, so the two would disagree about cadir and storage_backend --
+and provisioning guesses the shipped defaults when it cannot tell. Write those two keys as plain
+top-level entries, or provision the CA yourself and disable the oneshot:
+
+    systemctl disable --now openvox-ca-first-boot"
+	fi
 	if [ -e "$CONFIG" ] && [ ! -r "$CONFIG" ]; then
 		fail "$CONFIG exists but is not readable by $(id -un).
 
@@ -339,8 +381,9 @@ Names may contain only letters, digits, dots, dashes and underscores, and may no
 		warn "this host has no fully qualified domain name; the CA will be issued as \"$name\"."
 		warn "Agents configured with a dotted server name will not accept it. To re-mint under the"
 		warn "right name: set the name in /etc/puppetlabs/puppet/puppet.conf or in a drop-in for"
-		warn "openvox-ca-first-boot.service, remove $SSLDIR/certs/$name.pem and"
-		warn "$SSLDIR/private_keys/$name.pem, then 'systemctl restart openvox-ca-first-boot'."
+		warn "openvox-ca-first-boot.service, remove $SSLDIR/certs/$name.pem,"
+		warn "$SSLDIR/private_keys/$name.pem and the two serving-credential links"
+		warn "$SERVING_CERT and $SERVING_KEY, then 'systemctl restart openvox-ca-first-boot'."
 		echo "$name"
 		return 0
 	fi

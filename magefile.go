@@ -2520,7 +2520,52 @@ func checkDocTreeFloor(paths []string) error {
 // Mode 0644 unconditionally: everything staged this way is documentation, and
 // reading it back off the working tree would let a developer's umask decide
 // what the package installs.
+// stagedFileKind names a non-regular file for the refusal above, so the message
+// reads as what the path is rather than as an octal mode.
+func stagedFileKind(m os.FileMode) string {
+	switch {
+	case m&os.ModeSymlink != 0:
+		return "symbolic link"
+	case m.IsDir():
+		return "directory"
+	case m&os.ModeDevice != 0:
+		return "device node"
+	case m&os.ModeNamedPipe != 0:
+		return "named pipe"
+	case m&os.ModeSocket != 0:
+		return "socket"
+	default:
+		return m.Type().String()
+	}
+}
+
 func copyStagedFile(src, dst string) error {
+	// Lstat before reading, and refuse anything that is not a regular file.
+	//
+	// os.ReadFile follows symlinks, and the path list reaching here comes from
+	// `git ls-files`, which lists a tracked symlink (git mode 120000) exactly
+	// like any other path. So a symlink committed under docs/ would copy
+	// whatever it points AT into the staged tree -- a credentials file on the
+	// build host, or /proc/self/environ, which in the release job holds that
+	// job's environment -- and it would land as an ordinary 0644 file inside
+	// /usr/share/doc/openvox-ca in every published .deb and .rpm.
+	//
+	// It is also close to invisible in review: a symlink appears in a diff as a
+	// one-line path, not as the content it will pull in.
+	//
+	// extractTarGz already refuses a non-regular entry for this reason. This is
+	// the same guard on the other path into a package, and the asymmetry
+	// between them was the gap.
+	info, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is a %s, not a regular file: refusing to stage it, because copying "+
+			"through it would put a file from the build host into the package",
+			src, stagedFileKind(info.Mode()))
+	}
+
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return err
 	}
