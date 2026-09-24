@@ -198,6 +198,13 @@ ca_server = openvox-ca.example.com
 ca_port   = 8140
 ```
 
+**On a packaged install that is 8141, not 8140.** The `.deb` and `.rpm` ship a
+configuration file setting `port: 8141`, because a package is what gets
+installed beside OpenVox Server and Server binds 8140 itself. Release tarballs
+and container images ship no configuration file and stay on 8140. Set `ca_port`
+to whichever the CA you are migrating onto actually serves — see [installing
+from a package](systemd.md#the-packages-listen-on-8141).
+
 ## Step 7: Start openvox-ca
 
 First, generate a TLS server certificate for openvox-ca itself:
@@ -251,9 +258,17 @@ new CA without any reconfiguration.
 
 For a permanent installation, run it as a service rather than from a shell —
 see [running under systemd](systemd.md), which ships a hardened unit. One thing
-to watch for a migrated CA: `cadir` here is under `/etc/puppetlabs`, and the
-unit's `ProtectSystem=strict` makes that read-only until you uncomment its
-`ReadWritePaths=` line and point it at your `cadir`.
+to watch for a migrated CA: the unit's `ProtectSystem=strict` makes the whole
+filesystem read-only apart from the one path its `ReadWritePaths=` grants,
+which is `/etc/puppetlabs/puppet/ssl/ca`. A `cadir` anywhere else needs that
+line changed to match — the two must always name the same place.
+
+**On a packaged install that is two units, not one.** The packages add
+`openvox-ca-first-boot.service`, which provisions the CA and therefore writes
+into `cadir` as well, under its own `ProtectSystem=strict`. Both units'
+`ReadWritePaths=` have to name the moved directory, or provisioning fails on a
+read-only filesystem the next time it mints. See [installing from a
+package](systemd.md#installing-from-a-package).
 
 ## Step 8: Verify
 
