@@ -1159,24 +1159,6 @@ var automergeActionRE = regexp.MustCompile(`(?i)auto-?merge`)
 // down outside this repository had silently stopped working.
 var requiredMageTargets = []string{"build:packages", "build:unit"}
 
-// distBinaries is what every release tarball contains, and distArchiveName is
-// what one is called.
-//
-// Stated once because two sides depend on agreeing: build:dist writes the
-// tarball and build:packages reads it back, and they had a copy each -- the
-// same []string and the same format string, four sites between them. A rename
-// on one side produces a packaging run that cannot find the archive it is
-// meant to unpack, which is the failure these two functions exist to make
-// impossible for the FILE LIST (distArchiveFiles) and did not for the name.
-//
-// The same reasoning as packageExtensions deriving from packageFormats, and as
-// distVariantSpec.packaged being a field rather than a second list.
-func distBinaries() []string { return []string{"openvox-ca", "openvox-ca-ctl"} }
-
-func distArchiveName(ver, variant string) string {
-	return fmt.Sprintf("openvox-ca_%s_%s.tar.gz", ver, variant)
-}
-
 // Why each entry is here, since the comment above argues the case for only one
 // of them:
 //
@@ -1203,6 +1185,24 @@ func distArchiveName(ver, variant string) string {
 // make this guard a documentation linter, fail on every prose example, and be
 // abandoned; "the ones whose loss is silent" is the rule it actually
 // implements.
+
+// distBinaries is what every release tarball contains, and distArchiveName is
+// what one is called.
+//
+// Stated once because two sides depend on agreeing: build:dist writes the
+// tarball and build:packages reads it back, and they had a copy each -- the
+// same []string and the same format string, four sites between them. A rename
+// on one side produces a packaging run that cannot find the archive it is
+// meant to unpack, which is the failure these two functions exist to make
+// impossible for the FILE LIST (distArchiveFiles) and did not for the name.
+//
+// The same reasoning as packageExtensions deriving from packageFormats, and as
+// distVariantSpec.packaged being a field rather than a second list.
+func distBinaries() []string { return []string{"openvox-ca", "openvox-ca-ctl"} }
+
+func distArchiveName(ver, variant string) string {
+	return fmt.Sprintf("openvox-ca_%s_%s.tar.gz", ver, variant)
+}
 
 // The files the cross-language guards below compare. Named rather than
 // inlined so the error messages can point at them and a rename breaks the
@@ -1387,6 +1387,103 @@ func verifyNodeTTLIn(script, signing []byte) error {
 			"node certificate minted at first boot should expire when one issued by the running CA "+
 			"would. Change both, or change the comment that says they match",
 			shellHours, firstBootScriptPath, goHours, caSigningPath)
+	}
+	return nil
+}
+
+// ciGateJob is the fan-in job branch protection names, and ciGateExempt are
+// the jobs that must NOT be among its dependencies.
+//
+// The gate cannot depend on itself, and it must not depend on automerge: that
+// job runs `gh pr merge` after the gate goes green, so requiring it would be a
+// cycle in intent even where the graph allows it.
+const ciGateJob = "ci"
+
+var ciGateExempt = []string{"ci", "automerge"}
+
+// verifyCIGate checks that every job in ci.yml is a dependency of the fan-in
+// job, so that branch protection naming one check really does cover all of
+// them.
+//
+// Written because the omission is silent, and because it was made here:
+// the shellcheck job below went in without its `needs:` entry first time.
+// That produces a workflow that runs the lint,
+// reports it red on the PR, and still reports "CI success" green -- and green
+// is the state the merge button reads. A required check that does not require
+// something is worse than not having it: the job is visibly running, so the
+// gap looks like coverage.
+//
+// The comment above the fan-in job already says it exists so "branch
+// protection only has to name one required check, instead of every matrix leg
+// above". That sentence is only true while this holds, and nothing was
+// checking it.
+func verifyCIGate() error {
+	src, err := os.ReadFile(filepath.Join(".github", "workflows", "ci.yml"))
+	if err != nil {
+		return fmt.Errorf("reading ci.yml: %w", err)
+	}
+	return verifyCIGateIn(src)
+}
+
+func verifyCIGateIn(src []byte) error {
+	var doc struct {
+		Jobs map[string]struct {
+			Needs []string `yaml:"needs"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(src, &doc); err != nil {
+		return fmt.Errorf("parsing ci.yml: %w", err)
+	}
+
+	gate, ok := doc.Jobs[ciGateJob]
+	if !ok {
+		return fmt.Errorf("ci.yml has no %q job, which is the fan-in check branch "+
+			"protection names; either it was renamed (update ciGateJob) or the gate is gone", ciGateJob)
+	}
+
+	// The floor. Every check below is a set operation over doc.Jobs, so a
+	// parse that yielded one job -- a restructured file, a `jobs:` key that
+	// moved -- would find nothing missing and report full coverage. Two is
+	// the smallest count that cannot be the gate alone.
+	if len(doc.Jobs) < 2 {
+		return fmt.Errorf("parsed %d jobs from ci.yml, which cannot be right: the comparison "+
+			"below is a set difference and would pass vacuously", len(doc.Jobs))
+	}
+
+	needed := map[string]bool{}
+	for _, n := range gate.Needs {
+		needed[n] = true
+	}
+
+	var missing []string
+	for name := range doc.Jobs {
+		if slices.Contains(ciGateExempt, name) || needed[name] {
+			continue
+		}
+		missing = append(missing, name)
+	}
+	slices.Sort(missing)
+	if len(missing) > 0 {
+		return fmt.Errorf("ci.yml job(s) %s are not in the %q job's needs:, so a failure in them "+
+			"leaves the one required check green -- add them to needs:, or to ciGateExempt if "+
+			"they genuinely must not gate a merge",
+			strings.Join(missing, ", "), ciGateJob)
+	}
+
+	// And the other direction: a needs: entry naming a job that no longer
+	// exists. GitHub fails the run outright for this, so it is not silent --
+	// but it fails every CI run on the branch that introduces it, and saying
+	// so here costs one command instead of one round trip.
+	var unknown []string
+	for _, n := range gate.Needs {
+		if _, ok := doc.Jobs[n]; !ok {
+			unknown = append(unknown, n)
+		}
+	}
+	slices.Sort(unknown)
+	if len(unknown) > 0 {
+		return fmt.Errorf("the %q job needs: %s, which ci.yml does not define",
+			ciGateJob, strings.Join(unknown, ", "))
 	}
 	return nil
 }
@@ -2130,9 +2227,6 @@ func checkPackagingInputs(variants []distVariantSpec, formats []string) error {
 	return nil
 }
 
-// buildVariantPackages unpacks one variant's tarball into a staging directory,
-// adds the files that are in the packages but not in the tarball, and writes
-// one package per format.
 // checkVariantTarballs reports every packaged variant whose release tarball is
 // absent from distDir, before the caller writes anything.
 //
@@ -2171,6 +2265,9 @@ func checkVariantTarballs(distDir, ver string, variants []distVariantSpec) error
 		distDir, strings.Join(missing, " and "), build.String())
 }
 
+// buildVariantPackages unpacks one variant's tarball into a staging directory,
+// adds the files that are in the packages but not in the tarball, and writes
+// one package per format.
 func buildVariantPackages(distDir, ver string, v distVariantSpec) ([]string, error) {
 	var written []string
 	bins := distBinaries()
@@ -5577,6 +5674,10 @@ func (Dev) Check() error {
 	}
 	fmt.Println("Checking mage targets named outside Go...")
 	if err := verifyMageTargets(); err != nil {
+		return err
+	}
+	fmt.Println("Checking every CI job gates the one required check...")
+	if err := verifyCIGate(); err != nil {
 		return err
 	}
 	fmt.Println("Checking the auto-merge label exclusion...")

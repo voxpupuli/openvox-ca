@@ -189,7 +189,7 @@ See [configuration](configuration.md#memory-budget).
 
 ## Hardening
 
-The shipped unit runs the CA as the `puppet` user with `ProtectSystem=strict`, an empty capability set (the API's port 8140 and the exporter's 9140 are both unprivileged), and a `@system-service` syscall filter. `RestrictAddressFamilies` includes `AF_UNIX`, which is needed for both the notification socket and the launcher's socketpair to the isolated signer.
+The shipped unit runs the CA as the `puppet` user with `ProtectSystem=strict`, an empty capability set (the API port — 8140 by default, 8141 in the packages — and the exporter's 9140 are all unprivileged), and a `@system-service` syscall filter. `RestrictAddressFamilies` includes `AF_UNIX`, which is needed for both the notification socket and the launcher's socketpair to the isolated signer.
 
 `LimitCORE=0` is deliberate and worth keeping: the signer holds the decrypted CA private key in memory for its whole life, so a core dump would write that key to `/var/lib/systemd/coredump` — undoing [key encryption at rest](ca-key-security.md) for anything that ships crash dumps off the host.
 

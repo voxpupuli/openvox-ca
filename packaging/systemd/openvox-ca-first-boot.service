@@ -78,8 +78,11 @@ LockPersonality=yes
 # the unit stops -- the UID, not this unit's processes. That was harmless while
 # the service ran as a private `puppet-ca` account. It is not once the account
 # is `puppet`, which is shared with openvox-agent and openvox-server by design
-# (see above), because a co-located CA and Server is exactly the deployment
-# that sharing exists for.
+# -- openvox-ca.service argues that case where it sets User=, and
+# docs/systemd.md states it for operators -- because a co-located CA and Server
+# is exactly the deployment that sharing exists for. The `User=puppet` above in
+# THIS file only says the oneshot matches the service; it does not make the
+# argument, so do not read the reference as pointing at it.
 #
 # It is dropped rather than justified, because it protects nothing here.
 # openvox-ca creates no System V or POSIX IPC object at all: its only IPC is

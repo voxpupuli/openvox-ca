@@ -1514,6 +1514,29 @@ func Standalone() error { return nil }
 		Expect(err).NotTo(HaveOccurred())
 		Expect(targets).To(ConsistOf("build:packages", "standalone"))
 	})
+
+	// The refusal, which every comparable guard in this file has a spec for
+	// and this one did not. It matters more than it looks: the only
+	// alternative to erroring is returning an empty target list, and an empty
+	// list makes every membership test in verifyMageTargetsIn pass. A parse
+	// failure that went unreported would not fail the guard -- it would make
+	// the guard agree with anything.
+	It("refuses a magefile it cannot parse rather than reporting no targets", func() {
+		_, err := mageTargetNames([]byte("package main\n\nfunc (\n"))
+		Expect(err).To(HaveOccurred())
+	})
+
+	// And the wrapping the caller puts on it, so the message says which file
+	// failed. Asserted through verifyMageTargetsIn because that is where a
+	// reader meets the error. Two workflows, because the workflow-count floor
+	// rejects fewer before the magefile is ever parsed.
+	It("names magefile.go when the caller reports the parse failure", func() {
+		err := verifyMageTargetsIn([]byte("package main\n\nfunc (\n"), map[string][]byte{
+			"a.yml": []byte("jobs:\n  x:\n    steps:\n      - run: mage dev:check\n"),
+			"b.yml": []byte("jobs:\n  y:\n    steps:\n      - run: echo hello\n"),
+		})
+		Expect(err).To(MatchError(ContainSubstring("parsing magefile.go:")))
+	})
 })
 
 var _ = Describe("workflowMageTargets", func() {
@@ -1568,6 +1591,124 @@ jobs:
 		// The target of the third is resolvable even though its argument is
 		// not; the first two name no target at all.
 		Expect(workflowMageTargets(src)).To(ConsistOf("build:distvariant"))
+	})
+
+	// The unmarshal refusal. Same reasoning as mageTargetNames' parse refusal,
+	// and the consequence is the mirror image: here an unreported failure
+	// yields no invocations for that workflow, so the cross-check silently
+	// stops looking at the file rather than reporting it consistent by
+	// mistake. The tripwire further down catches the subset of that where the
+	// file still says "mage" somewhere -- it does not catch this, because a
+	// file that will not unmarshal never reaches it.
+	It("refuses a workflow whose YAML does not unmarshal", func() {
+		_, err := workflowMageTargets([]byte("jobs: not-a-mapping\n"))
+		Expect(err).To(HaveOccurred())
+	})
+
+	// And the caller's wrapping, which has to name the offending file: the
+	// error surfaces from a loop over every workflow, so without the name an
+	// operator is told the parse failed and not where.
+	It("names the workflow when the caller reports the unmarshal failure", func() {
+		good := []byte("package main\n\n" +
+			"import \"github.com/magefile/mage/mg\"\n\n" +
+			"type Build mg.Namespace\n\n" +
+			"func (Build) Dist() error     { return nil }\n" +
+			"func (Build) Packages() error { return nil }\n" +
+			"func (Build) Unit() error     { return nil }\n")
+		err := verifyMageTargetsIn(good, map[string][]byte{
+			"broken.yml": []byte("jobs: not-a-mapping\n"),
+			"quiet.yml":  []byte("jobs:\n  y:\n    steps:\n      - run: echo hello\n"),
+		})
+		Expect(err).To(MatchError(ContainSubstring("broken.yml: yaml:")))
+	})
+})
+
+var _ = Describe("verifyCIGate", func() {
+	// Driven over content rather than only against .github/workflows/ci.yml,
+	// for the usual reason: a guard exercised only on a passing tree cannot
+	// tell working from vacuous.
+	full := []byte(`
+jobs:
+  check:
+    runs-on: ubuntu-latest
+  shellcheck:
+    runs-on: ubuntu-latest
+  ci:
+    needs:
+      - check
+      - shellcheck
+  automerge:
+    runs-on: ubuntu-latest
+`)
+
+	It("accepts a gate that depends on every job but the exempt ones", func() {
+		Expect(verifyCIGateIn(full)).To(Succeed())
+	})
+
+	// The case this guard exists for, and the one that actually happened on
+	// this branch: a new lint job that runs, reports red, and leaves the
+	// required check green.
+	It("rejects a job the gate does not depend on, naming it", func() {
+		bad := []byte(`
+jobs:
+  check:
+    runs-on: ubuntu-latest
+  shellcheck:
+    runs-on: ubuntu-latest
+  ci:
+    needs:
+      - check
+`)
+		Expect(verifyCIGateIn(bad)).To(MatchError(And(
+			ContainSubstring("shellcheck"),
+			ContainSubstring("leaves the one required check green"))))
+	})
+
+	// automerge must stay out: it runs after the gate is green, so gating on
+	// it would be a cycle in intent. Pinned so that "every job" is never
+	// simplified into including it.
+	It("does not require the gate to depend on automerge", func() {
+		Expect(verifyCIGateIn(full)).To(Succeed())
+		Expect(ciGateExempt).To(ContainElements("ci", "automerge"))
+	})
+
+	It("rejects a needs: entry that names no job", func() {
+		bad := []byte(`
+jobs:
+  check:
+    runs-on: ubuntu-latest
+  other:
+    runs-on: ubuntu-latest
+  ci:
+    needs:
+      - check
+      - other
+      - departed
+`)
+		Expect(verifyCIGateIn(bad)).To(MatchError(ContainSubstring("departed")))
+	})
+
+	It("rejects a workflow with no gate job at all", func() {
+		bad := []byte("jobs:\n  check:\n    runs-on: ubuntu-latest\n  other:\n    runs-on: ubuntu-latest\n")
+		Expect(verifyCIGateIn(bad)).To(MatchError(ContainSubstring(`has no "ci" job`)))
+	})
+
+	// The floor. The check is a set difference over the parsed jobs, so a
+	// parse that returned just the gate would find nothing missing and report
+	// every job covered.
+	It("refuses a parse that yielded too few jobs to be ci.yml", func() {
+		Expect(verifyCIGateIn([]byte("jobs:\n  ci:\n    needs: []\n"))).To(
+			MatchError(ContainSubstring("would pass vacuously")))
+	})
+
+	It("refuses a workflow it cannot parse rather than reporting full coverage", func() {
+		Expect(verifyCIGateIn([]byte("jobs: not-a-mapping\n"))).To(
+			MatchError(ContainSubstring("parsing ci.yml:")))
+	})
+
+	// And the real file, which is what dev:check runs.
+	It("passes against the repository's own ci.yml", func() {
+		Expect(verifyCIGate()).To(Succeed())
 	})
 })
 
@@ -1749,8 +1890,16 @@ jobs:
 			Expect(verifyMageTargetsIn(goodMage, with("release.yml", goodWorkflow))).To(Succeed())
 		})
 
-		// The deliverable: release.yml's packaging job calls this by name,
-		// and nothing in Go would notice it going away.
+		// The deliverable, and the wording has to survive either merge order.
+		// release.yml does not call build:packages on this branch -- it calls
+		// build:distVariant, and the job that packages arrives with #266. So the
+		// claim here is not "a workflow names this target today"; it is that the
+		// target is named as a STRING outside Go, which is already true of
+		// docs/development/releasing.md and becomes true of release.yml when
+		// #266 lands. Either way nothing in Go would notice it going away, which
+		// is why requiredMageTargets carries it rather than the workflow scan
+		// below: the scan can only see callers that exist. The comment above
+		// requiredMageTargets states the same thing from the other side.
 		It("rejects a magefile that has lost build:packages, naming the target", func() {
 			without := bytes.Replace(goodMage, []byte("func (Build) Packages() error { return nil }\n"), nil, 1)
 			err := verifyMageTargetsIn(without, with("release.yml", goodWorkflow))
@@ -3753,10 +3902,46 @@ func firstBootDefs() (string, error) {
 // site uses ${VAR:-...} and treats empty as unset.
 func firstBootHostPins() []string {
 	GinkgoHelper()
+	pin := GinkgoT().TempDir()
 	return []string{
+		// Cleared, not redirected: these are the server's own environment
+		// overrides, and a spec that wants one sets it in extraEnv.
 		"PUPPET_CA_CONFIG=",
 		"PUPPET_CA_CADIR=",
 		"PUPPET_CA_STORAGE_BACKEND=",
+
+		// Redirected, not cleared. Each of these three names a path the
+		// script falls back to when the variable is unset, and all three
+		// defaults are REAL paths on a developer's machine or a host with a
+		// packaged CA:
+		//
+		//   OPENVOX_CA_CONFIG       /etc/puppet-ca/config.yaml
+		//   OPENVOX_CA_LEGACY_CADIR /var/lib/puppet-ca
+		//   OPENVOX_CA_PUPPET_CONF  /etc/puppetlabs/puppet/puppet.conf
+		//
+		// Clearing them would therefore hand the script the host's own files,
+		// which is the opposite of isolation, so each points into an empty
+		// temporary directory instead.
+		//
+		// They live here rather than in the runners because the runners had a
+		// copy each and the copies drifted: runFirstBootScript pinned two of
+		// the three while its comment claimed all three, runFirstBootIn pinned
+		// one, and runFirstBootFunc pinned none.
+		//
+		// What that cost, stated precisely rather than dramatically: nothing
+		// yet. runFirstBootScript's specs pass a non-empty certname, which
+		// short-circuits puppet_conf_certname before it reads puppet.conf, and
+		// runFirstBootFunc's two specs call is_safe_certname and
+		// is_localhost_name, neither of which opens a file. So no spec on this
+		// branch reads a host path. The defect is that three runners disagreed
+		// about which paths were isolated while a comment asserted they
+		// agreed -- a spec that passed "" for the certname, or that drove any
+		// config reader through runFirstBootFunc, would have read the host and
+		// the comment would have said it could not. One list, three callers,
+		// no drift.
+		"OPENVOX_CA_CONFIG=" + filepath.Join(pin, "no-config.yaml"),
+		"OPENVOX_CA_LEGACY_CADIR=" + filepath.Join(pin, "no-legacy-cadir"),
+		"OPENVOX_CA_PUPPET_CONF=" + filepath.Join(pin, "no-puppet.conf"),
 	}
 }
 
@@ -3778,10 +3963,6 @@ func runFirstBootIn(sslDir, binDir, expr string, extraEnv ...string) (firstBootR
 	cmd.Env = append(os.Environ(),
 		"OPENVOX_CA_SSLDIR="+sslDir,
 		"OPENVOX_CA_BINDIR="+binDir,
-		// See runFirstBootScript: the config file first-boot reads defaults to
-		// a real path on a host with a packaged CA, so it is pinned away from
-		// the host here too.
-		"OPENVOX_CA_CONFIG="+filepath.Join(GinkgoT().TempDir(), "no-config.yaml"),
 	)
 	cmd.Env = append(cmd.Env, firstBootHostPins()...)
 	cmd.Env = append(cmd.Env, extraEnv...)
@@ -4917,21 +5098,11 @@ func runFirstBootScript(sslDir, binDir, certname string, extraEnv ...string) fir
 		"OPENVOX_CA_SSLDIR="+sslDir,
 		"OPENVOX_CA_BINDIR="+binDir,
 		"OPENVOX_CA_CERTNAME="+certname,
-		// The legacy cadir defaults to /var/lib/puppet-ca, a real path on any
-		// machine running a chart deployment or a hand-built install -- a
-		// developer's laptop included. Left unset, a CA there would make every spec below
-		// refuse instead of provisioning, and the failure would look like a
-		// defect in the script rather than in the fixture. Specs that want the
-		// guard point this at a directory they built.
-		"OPENVOX_CA_LEGACY_CADIR="+filepath.Join(GinkgoT().TempDir(), "no-legacy-cadir"),
-		// first-boot now resolves `cadir` and `storage_backend` from the
-		// server's own configuration file, which defaults to
-		// /etc/puppet-ca/config.yaml -- a real path on any machine with a
-		// packaged CA installed. Pinned at a path that does not exist so
-		// these specs read the fixture and never the host, the same way
-		// OPENVOX_CA_PUPPET_CONF and OPENVOX_CA_LEGACY_CADIR are pinned.
-		"OPENVOX_CA_CONFIG="+filepath.Join(GinkgoT().TempDir(), "no-config.yaml"),
 	)
+	// The host-path pins -- config.yaml, the legacy cadir and puppet.conf --
+	// come from firstBootHostPins, which every runner shares. A spec that
+	// wants one of them pointed somewhere real passes it in extraEnv below,
+	// which is appended afterwards and therefore wins.
 	cmd.Env = append(cmd.Env, firstBootHostPins()...)
 	cmd.Env = append(cmd.Env, extraEnv...)
 	out, err := cmd.CombinedOutput()
