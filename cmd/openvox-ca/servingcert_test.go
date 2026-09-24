@@ -44,6 +44,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
+	"github.com/voxpupuli/openvox-ca/internal/api"
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/certstore"
 	"github.com/voxpupuli/openvox-ca/internal/storage"
@@ -671,7 +672,8 @@ func serialOf(certPEM []byte) string {
 // constructor there, so NeedsKubernetes is false throughout and the whole
 // Kubernetes arm of servingCertDeps returns at its first branch.
 //
-// That is the deployment this feature was built for -- ci/serving-cert-values.yaml
+// That is the deployment this feature was built for -- the chart's
+// charts/openvox-ca/ci/serving-cert-values.yaml fixture
 // calls itself "the deployment serving_cert exists for" and uses a Secret -- and
 // a defect in it is not a delayed certificate but a CA that cannot bind. The
 // same seam managed_certs_config_test.go uses makes both arms reachable.
@@ -1722,14 +1724,30 @@ var _ = Describe("the serving holder's custody warning", func() {
 })
 
 // The reload status text, which must not announce work this path does not do.
+//
+// All three reachable states, because the first version tested `certs` alone
+// and that is correct for exactly two of them. reload() re-reads the allow list
+// only when `auth` is non-nil, and main.go sets `auth` only inside the
+// TLS-configured branch -- so a plain-HTTP CA has neither field and the status
+// announced a reload of an allow list nothing was going to read.
+//
+// The fourth combination, certs without auth, is unreachable: certs is non-nil
+// only when tls_cert/tls_key are set, which configures TLS and therefore sets
+// auth. It is not asserted, because a spec pinning an unreachable state pins
+// the reachability analysis rather than the behaviour.
 var _ = Describe("the SIGHUP status text", func() {
+	It("announces nothing to reload on a plain-HTTP CA", func() {
+		Expect((&configReloader{certs: nil, auth: nil}).reloadingStatus()).
+			To(Equal("Reloading nothing (no TLS material and no admin allow list configured)"))
+	})
+
 	It("names only the allow list when the CA provisions its own certificate", func() {
-		Expect((&configReloader{certs: nil}).reloadingStatus()).
+		Expect((&configReloader{certs: nil, auth: &api.AuthConfig{}}).reloadingStatus()).
 			To(Equal("Reloading the admin allow list"))
 	})
 
 	It("names the TLS material when an operator supplied the keypair", func() {
-		Expect((&configReloader{certs: &certReloader{}}).reloadingStatus()).
+		Expect((&configReloader{certs: &certReloader{}, auth: &api.AuthConfig{}}).reloadingStatus()).
 			To(ContainSubstring("TLS material"))
 	})
 })

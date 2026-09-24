@@ -1472,10 +1472,12 @@ A [`serving_cert`](#the-cas-own-serving-certificate) entry is one of the
 configured entries this metric and that alert cover, labelled with the CA's own
 certname, and it reads differently from the others. The CA refuses to start
 until its own certificate exists, so this entry firing does not mean the
-certificate never appeared — it means one that existed has gone, which is
-revocation rather than a store the reconcile pass cannot write. The alert's own
-description says so, and it is the difference between looking at RBAC and
-looking at the CRL.
+certificate never appeared — it means one that existed no longer has a live
+inventory row. The rule detects the absence of a non-revoked row rather than a
+revocation as such, so revocation is the likeliest cause and not the only one:
+check the CRL first, then whether the inventory row is readable at all. For a
+component certificate the same alert usually means the opposite — a store the
+reconcile pass cannot write — which is where to look instead.
 
 ### The certificate that administers this CA
 

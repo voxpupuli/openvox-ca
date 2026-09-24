@@ -534,8 +534,8 @@ readinessProbe:
 # shared store, where both locks can actually be contended. The steady-state
 # start takes neither. For comparison, packaging/systemd/openvox-ca.service
 # gives Init 300s through TimeoutStartSec, and cmd/openvox-ca/launcher_test.go
-# holds that to 2 x LockTimeout; the chart is deliberately not held to the same
-# floor.
+# holds that to 3 x LockTimeout — raised from two when serving_cert added the
+# third term below; the chart is deliberately not held to the same floor.
 #
 # config.serving_cert adds a third term the ruling above did not weigh, because
 # it did not exist then: the CA issues its own serving certificate after Init

@@ -249,8 +249,9 @@ true
   and the chart cannot see which method it names. Tested on valueFrom's
   presence, so neither an explicit `value: ""` nor an entry naming no source at
   all is mistaken for one — the server ignores an empty variable either way,
-  which is the precedence stated above. tlsConfigured's scan discriminates
-  identically.
+  which is the precedence stated above. tlsSources discriminates identically for
+  PUPPET_CA_TLS_CERT/KEY — that scan moved out of tlsConfigured when the rule
+  needed one home.
 */}}
 {{- if and (eq .name "PUPPET_CA_OPENBAO_AUTH_METHOD") (hasKey . "valueFrom") }}{{ $authMethod = "kubernetes" }}{{ end -}}
 {{- end -}}

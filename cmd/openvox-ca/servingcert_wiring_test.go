@@ -212,15 +212,6 @@ var _ = Describe("the serve command's serving-certificate wiring", func() {
 				"provisionServingCert reconciles this entry by name")
 	})
 
-	// The edit that actually points the listener at the holder, and the one
-	// whose failure is loudest in production and quietest in CI.
-	//
-	// servingcert_test.go drives the holder directly and its handshake spec
-	// builds its own tls.Config, so nothing observes which callback main.go
-	// installs. Restoring `GetCertificate: certs.GetCertificate` compiles, and
-	// certs is nil for a self-provisioned CA -- so the listener binds and every
-	// handshake panics dereferencing it, with the whole suite green. Verified
-	// by mutation rather than assumed.
 	It("names the certificate's source in the TLS-enabled log line", func() {
 		// Both arms, because the line is what tells an operator WHERE the
 		// certificate the listener is presenting came from, and the two
@@ -269,6 +260,15 @@ var _ = Describe("the serve command's serving-certificate wiring", func() {
 				`tls_cert is no longer told which file the listener is presenting`)
 	})
 
+	// The edit that actually points the listener at the holder, and the one
+	// whose failure is loudest in production and quietest in CI.
+	//
+	// servingcert_test.go drives the holder directly and its handshake spec
+	// builds its own tls.Config, so nothing observes which callback main.go
+	// installs. Restoring `GetCertificate: certs.GetCertificate` compiles, and
+	// certs is nil for a self-provisioned CA -- so the listener binds and every
+	// handshake panics dereferencing it, with the whole suite green. Verified
+	// by mutation rather than assumed.
 	It("gives the listener the certificate source it selected", func() {
 		var bound string
 		ast.Inspect(file, func(n ast.Node) bool {

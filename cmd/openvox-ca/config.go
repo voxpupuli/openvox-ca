@@ -295,10 +295,8 @@ type serverConfig struct {
 	// A *certstore.Entry rather than a type of its own, deliberately: the
 	// certificate the CA serves is described by the same fields a component's
 	// is, lives in one of exactly the same two stores, and inherits the same
-	// CA-wide defaults. Deliberately not a count of those fields: a number here
-	// would drift the next time one is added. A second spelling of that block would be a
-	// second thing to keep in step with it, and the first divergence would be
-	// silent.
+	// CA-wide defaults. A second spelling of that block would be a second thing
+	// to keep in step with it, and the first divergence would be silent.
 	//
 	// What is not shared is the failure semantics, and that is this caller's
 	// half rather than the store's: the material must be readable before the

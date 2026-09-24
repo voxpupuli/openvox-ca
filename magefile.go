@@ -3789,6 +3789,49 @@ config:
 			wantErr: "outside the volume mounted at",
 		},
 		{
+			// One field at a time, because the case above moves cert and key
+			// together and so proves neither independently: a check that
+			// inspected only `cert` would refuse it and pass. The store writes
+			// all three paths on every issuance, so each needs its own
+			// boundary or one of them silently escapes the volume.
+			//
+			// cadir is narrowed here so the valid fields can sit at the mount
+			// root. Under the chart's default cadir IS the mount, and the
+			// server reserves that subtree against every file store -- which
+			// is why the cases above reach for /srv for both fields rather
+			// than isolating one.
+			name: "a serving_cert file store whose key alone escapes the volume",
+			valuesYAML: `
+config:
+  cadir: /var/lib/puppet-ca/ca
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      files: {cert: /var/lib/puppet-ca/tls.crt, key: /srv/tls.key, ca: /var/lib/puppet-ca/ca.pem}
+`,
+			wantErr: "outside the volume mounted at",
+		},
+		{
+			// And the chain file, which is the one an operator is likeliest to
+			// point somewhere shared -- /etc/openvox/ca.pem is the ordinary
+			// layout the docs describe. Shareable is not the same as writable
+			// from this pod, and it is written on every issuance like the pair.
+			name: "a serving_cert file store whose chain alone escapes the volume",
+			valuesYAML: `
+config:
+  cadir: /var/lib/puppet-ca/ca
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      files: {cert: /var/lib/puppet-ca/tls.crt, key: /var/lib/puppet-ca/tls.key, ca: /srv/ca.pem}
+`,
+			wantErr: "outside the volume mounted at",
+		},
+		{
 			// The same shape without a PVC: the volume is an emptyDir but it is
 			// still mounted at mountPath, and the root filesystem is still
 			// read-only, so gating the check on persistence.enabled let the

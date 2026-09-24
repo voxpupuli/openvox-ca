@@ -293,11 +293,29 @@ func (r *configReloader) reload() error {
 // reconcile loop owns that certificate, and announcing "Reloading TLS material"
 // there invites the belief that a reload rotated it. This is the one place an
 // operator running the command looks.
+//
+// Both fields, not just certs. reload() re-reads the allow list only when auth
+// is non-nil, and auth is set only when TLS is configured (main.go wires the
+// middleware inside that branch) -- so a plain-HTTP CA has neither, and
+// reporting "Reloading the admin allow list" there names work that does not
+// happen. Testing certs alone was right for the two TLS states and wrong for
+// the third, which is the state nothing else reports on.
+//
+// Three states are reachable, not four: certs is non-nil only when
+// tls_cert/tls_key are set, which is itself a way of configuring TLS, so auth
+// is non-nil whenever certs is. The certs-without-auth arm is therefore
+// unreachable and deliberately not spelled out -- if it ever becomes
+// reachable, the default below names TLS material, which is the safe half to
+// over-report.
 func (r *configReloader) reloadingStatus() string {
-	if r.certs == nil {
+	switch {
+	case r.certs == nil && r.auth == nil:
+		return "Reloading nothing (no TLS material and no admin allow list configured)"
+	case r.certs == nil:
 		return "Reloading the admin allow list"
+	default:
+		return "Reloading TLS material and the admin allow list"
 	}
-	return "Reloading TLS material and the admin allow list"
 }
 
 // diffAllowList reports which CNs the replacement adds and which it withdraws,
