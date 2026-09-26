@@ -655,6 +655,116 @@
           },
         ],
       },
+      {
+        name: 'openvox-ca-managed-certificates',
+        rules: [
+          {
+            alert: 'PuppetCAManagedCertificateNeverIssued',
+            // A configured managed certificate that has never produced a
+            // certificate at all -- a store that has never accepted a write.
+            //
+            // Everything else about a managed certificate is an ordinary
+            // certificate fact. Once one exists it has an inventory row and the
+            // leaf series cover its expiry, so the shipped expiry alerts cover
+            // it with nothing new. This is the one outcome that reasoning
+            // cannot reach, and for the same structural reason
+            // PuppetCAKubernetesExportNotRunning exists: there is no series for
+            // a certificate that does not exist, and no PromQL comparison
+            // matches an absence. The answer has to come from the CA, which
+            // publishes its configuration so that "nothing has happened" is a
+            // value.
+            //
+            // `max without (serial, state)` rather than `unless on (subject)`.
+            // Both collapse the leaf series' per-certificate labels, but
+            // `on (subject)` also discards every target label, so one replica's
+            // series would satisfy another replica's entry. `without` keeps
+            // whatever labels the deployment attached, so the two sides match
+            // per scrape target.
+            //
+            // Replicas of one CA share a backing store, so they see the same
+            // certificates and the difference this preserves is not a missing
+            // certificate on one of them. What it catches is a difference in
+            // *configuration*: managed_certs is per-process, so a half-applied
+            // rollout -- a new entry live on one replica and not yet on its
+            // siblings -- leaves the configured series on one target only. With
+            // `on (subject)` a certificate reported by any replica would cancel
+            // it, and the rollout would look complete. It also keeps the alert
+            // honest across two CAs scraped into one Prometheus, which share no
+            // store at all.
+            //
+            // `state!="revoked"` on the right-hand side, which the other
+            // leaf-expiry rules also carry but for a different reason.
+            //
+            // The first version left it off, so that an entry whose certificate
+            // had just been revoked and was awaiting reissue stayed silent
+            // inside one reconcile interval. That reasoning was wrong about
+            // what it was silencing. A store write that fails does not leave
+            // the certificate alone: ReconcileManaged revokes the certificate
+            // it has just issued and puts the predecessor back, precisely
+            // because nothing ever saw the new key. So the RBAC refusal, the
+            // unadoptable Secret and the missing directory -- the three causes
+            // this rule's own annotation sends an operator to check -- each
+            // leave a revoked series behind, and a revoked series was enough to
+            // cancel the rule. It could never fire for the failures it
+            // describes.
+            //
+            // With the matcher, the two cases separate properly. An entry with
+            // a live certificate keeps its signed series whatever else it has,
+            // because `max without (serial, state)` collapses every serial for
+            // that subject: a revoked predecessor beside a signed current one
+            // still matches, so an ordinary renewal and an ordinary delayed
+            // supersession stay silent. What fires is a subject whose *only*
+            // certificates are revoked, which is a component with nothing it
+            // can present, and a first issuance that never succeeded at all --
+            // the same outcome, reached two ways.
+            //
+            // A failure with a live predecessor is still silent, and that is
+            // intended: the component has a working certificate, the CA logs
+            // the failure every pass, and the expiry alerts take over as the
+            // predecessor ages. This rule is about having nothing, not about
+            // the reconcile loop being unhappy.
+            //
+            // It does not cover a crashlooping CA and must not be read as
+            // doing so -- that is PuppetCAExporterDown's job. What it covers is
+            // a CA that stays up, scrapes cleanly and reports readiness while
+            // a certificate something else is waiting for never appears.
+            //
+            // Qualified on a successful scrape, the same way PuppetCACRLStale
+            // is and for the same reason. The two sides of the `unless` come
+            // from different places: the configured series is built from the
+            // in-process configuration and is published even when the gather
+            // fails, deliberately, so that a CA which cannot reach storage
+            // still reports what it is meant to be keeping alive. The leaf
+            // series are read from storage and all vanish together. So during a
+            // storage outage the left side stands and the right side is empty,
+            // and without this qualifier every configured entry would match --
+            // healthy ones included -- an hour into an outage that
+            // PuppetCAScrapeFailing has already been paging for. One cause
+            // should not raise two alerts, and the second one here would name
+            // the wrong remedy: it would send an operator to check RBAC and
+            // store permissions for certificates that exist and are fine.
+            expr: |||
+              (
+                puppetca_managed_certificate_configured{%(selector)s}
+                  unless
+                max without (serial, state) (
+                  puppetca_leaf_certificate_not_after_timestamp_seconds{%(selector)s,
+                    state!="revoked"}
+                )
+              )
+              and on(instance) puppetca_collector_scrape_success{%(selector)s} == 1
+            ||| % {
+              selector: $._config.puppetCASelector,
+            },
+            'for': $._config.managedCertNeverIssuedFor,
+            labels: { severity: 'warning' } + $._config.alertLabels,
+            annotations: {
+              summary: 'A managed certificate has never been issued.',
+              description: 'The Puppet CA on {{ $labels.instance }} has {{ $labels.subject }} configured in managed_certs but no certificate for it exists after %(managedCertNeverIssuedFor)s. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else\'s material, or a directory that does not exist.' % { managedCertNeverIssuedFor: $._config.managedCertNeverIssuedFor },
+            },
+          },
+        ],
+      },
     ],
   },
 }

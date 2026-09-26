@@ -26,6 +26,8 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/voxpupuli/openvox-ca/internal/k8sclient"
 )
 
 // applyTimeout bounds a single server-side apply. The exporter runs on the
@@ -91,7 +93,7 @@ func InitTargetMetrics(cfg Config, m *Metrics) {
 // resolving the default namespace from the pod's ServiceAccount mount. cfg must
 // already have been validated. m may be nil to disable instrumentation.
 func NewInCluster(cfg Config, src MaterialSource, m *Metrics) (*Exporter, error) {
-	client, err := newInClusterClientset()
+	client, err := k8sclient.InClusterClientset("kubernetes_export")
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +101,7 @@ func NewInCluster(cfg Config, src MaterialSource, m *Metrics) (*Exporter, error)
 	// missing namespace file should not block export.
 	var defaultNS string
 	if cfg.needsDefaultNamespace() {
-		ns, err := podNamespace()
+		ns, err := k8sclient.PodNamespace()
 		if err != nil {
 			return nil, fmt.Errorf("resolving default namespace for a target without an explicit namespace: %w", err)
 		}
