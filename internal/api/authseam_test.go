@@ -124,6 +124,26 @@ var exemptPackages = map[string]string{
 // event this gate has to notice.
 func caImporters() []string {
 	GinkgoHelper()
+	return caImportersIn("../..") // the module root
+}
+
+// caImportersIn is caImporters against a caller-supplied root, so the skip
+// branches below can be driven against a tree built for the purpose.
+//
+// A seam rather than a fixture inside the real tree: the directories these
+// branches exist to skip are `.claude` (sibling worktrees), `testdata`,
+// `vendor` and `node_modules`, and planting a Go file that imports internal/ca
+// inside any of them to prove the skip works would mean committing a decoy that
+// every other tool in the repository also has to ignore.
+//
+// Worth stating why a test is needed at all, since a run in a worktree suggests
+// otherwise: `.claude/worktrees` is EMPTY in a worktree checkout and holds every
+// sibling branch's full source in the main checkout. So the dot-directory skip
+// changes nothing here and is load-bearing there, which is the worst shape for a
+// guard -- it would have gone on passing in the place it is usually run and
+// started reporting other branches' packages in the place it is not.
+func caImportersIn(root string) []string {
+	GinkgoHelper()
 	seen := map[string]bool{}
 	var found []string
 	// The module root, walked to any depth. Two earlier versions narrowed this
@@ -134,7 +154,6 @@ func caImporters() []string {
 	// swept by neither, so it needed no recorded decision and the gate stayed
 	// green while the surface grew. A sweep whose own reach is an enumeration
 	// fails exactly the way the list it audits would.
-	const root = "../.." // the module root
 	{
 		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
@@ -562,6 +581,36 @@ func check(c *x509.Certificate) bool { return hasPpCliAuth(c) && ca.OIDPpCliAuth
 			"no importer of internal/ca was found at all; the sweep is not working, "+
 				"and a sweep that finds nothing agrees with every list")
 
+		// Both directions, because one of them is the gate and the other is the
+		// sweep. The loop below checks importers ⊆ known: it catches a NEW
+		// importer nobody has ruled on, which is what this gate is for. It says
+		// nothing about known ⊆ importers -- a walk that silently stopped
+		// finding a real importer would shrink the set being audited, every
+		// remaining entry would still be known, and the gate would pass while
+		// covering less. That is the failure that hides itself, so it is
+		// asserted separately.
+		//
+		// Every entry in both lists is there because it imports internal/ca, so
+		// one that the sweep no longer reports means either the walk broke or
+		// the list is stale. Both want a human, and the message says which to
+		// check first.
+		swept := map[string]bool{}
+		for _, dir := range importers {
+			if rel, err := filepath.Rel("../..", dir); err == nil {
+				swept[filepath.Clean(rel)] = true
+			}
+		}
+		for want := range known {
+			Expect(swept).To(HaveKey(want), strings.Join([]string{
+				want + " is listed in guardedPackages or exemptPackages, but the sweep no",
+				"longer reports it as importing " + caImportPath + ".",
+				"Either the walk has stopped reaching it -- in which case the set this gate",
+				"audits has shrunk and every surviving entry still looks accounted for --",
+				"or the package genuinely stopped importing internal/ca and its entry is",
+				"stale. Check the walk first: a sweep that finds less agrees with more.",
+			}, "\n"))
+		}
+
 		for _, dir := range importers {
 			rel, err := filepath.Rel("../..", dir)
 			Expect(err).NotTo(HaveOccurred(), dir)
@@ -575,4 +624,86 @@ func check(c *x509.Certificate) bool { return hasPpCliAuth(c) && ca.OIDPpCliAuth
 			}, "\n"))
 		}
 	})
+
+	// The skips, driven against a tree built for them. Each of these
+	// directories holds a file that imports internal/ca, so a sweep that
+	// descended would report it -- which is exactly what the branches prevent
+	// and what nothing previously checked.
+	//
+	// `.hidden` stands for `.claude`: in the main checkout that directory holds
+	// every sibling worktree's full source, so without the dot-directory skip
+	// this gate would report other branches' packages as importers of this one
+	// and demand a recorded decision for each. In a worktree checkout it is
+	// empty, so the branch changes nothing there -- passing in the place the
+	// suite usually runs and failing in the place it does not.
+	DescribeTable("does not sweep directories it skips as a class",
+		func(dir string) {
+			root := GinkgoT().TempDir()
+			// A real importer outside the skipped directory, so the sweep is
+			// known to be working in this fixture. Without it a broken walk
+			// would report nothing and the assertion below would hold for the
+			// wrong reason.
+			writeImporter(filepath.Join(root, "real"))
+			writeImporter(filepath.Join(root, dir))
+
+			found := caImportersIn(root)
+
+			Expect(found).To(ConsistOf(filepath.Join(root, "real")),
+				"the sweep must find the ordinary package and nothing inside %q", dir)
+		},
+		Entry("a dot directory, as .claude is", ".hidden"),
+		Entry("testdata", "testdata"),
+		Entry("vendor", "vendor"),
+		Entry("node_modules", "node_modules"),
+	)
+
+	// importsCA's documented contract is that every failure is fatal rather
+	// than absorbed, because a directory it cannot read or a file it cannot
+	// parse would otherwise read as "does not import internal/ca" -- silently
+	// removing a package from the set this gate requires a decision for. That
+	// is the one outcome the doc comment says a guard must never produce
+	// quietly, and nothing exercised it.
+	//
+	// InterceptGomegaFailures rather than a direct call: importsCA reports
+	// through Expect, so its failure would fail THIS spec. Intercepting turns
+	// "the helper fails loudly" into an assertable value.
+	Describe("importsCA's fail-loud contract", func() {
+		It("fails rather than reporting a file it cannot parse as a non-importer", func() {
+			dir := GinkgoT().TempDir()
+			// Broken INSIDE the import block, deliberately. importsCA parses
+			// with parser.ImportsOnly, which stops after the imports -- so a
+			// file with a valid package clause and rubbish after it parses
+			// cleanly, and a fixture relying on trailing garbage proves
+			// nothing. That was this spec's first fixture, and it failed here
+			// rather than passing vacuously.
+			Expect(os.WriteFile(filepath.Join(dir, "broken.go"),
+				[]byte("package p\n\nimport (\n\t\"unterminated\n"), 0o600)).To(Succeed())
+
+			failures := InterceptGomegaFailures(func() { importsCA(dir) })
+
+			Expect(failures).NotTo(BeEmpty(),
+				"an unparseable .go file must fail the sweep, not be read as "+
+					"'this package does not import internal/ca'")
+			Expect(strings.Join(failures, "\n")).To(ContainSubstring("broken.go"),
+				"the failure must name the file, or an operator cannot find it")
+		})
+
+		It("fails rather than reporting a directory it cannot read as a non-importer", func() {
+			absent := filepath.Join(GinkgoT().TempDir(), "does-not-exist")
+
+			failures := InterceptGomegaFailures(func() { importsCA(absent) })
+
+			Expect(failures).NotTo(BeEmpty(),
+				"an unreadable directory must fail the sweep rather than reading as empty")
+		})
+	})
 })
+
+// writeImporter creates dir and puts one non-test Go file in it that imports
+// internal/ca, which is the only property caImportersIn tests for.
+func writeImporter(dir string) {
+	GinkgoHelper()
+	Expect(os.MkdirAll(dir, 0o750)).To(Succeed())
+	body := "package p\n\nimport _ \"" + caImportPath + "\"\n"
+	Expect(os.WriteFile(filepath.Join(dir, "p.go"), []byte(body), 0o600)).To(Succeed())
+}
