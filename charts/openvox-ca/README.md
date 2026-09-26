@@ -40,7 +40,7 @@ mirror it key by key. Instead:
   side of a feature — mount the Secret, open the port, create the RBAC — *and*
   set the config keys that point at what they mounted. `managedCerts` is the one
   exception: it creates RBAC and sets nothing, because the certificates are
-  declared under `config.managed_certs`.
+  declared under `config.managed_certs` and `config.serving_cert`.
 - **`config` always wins.** The two are deep-merged with your `config` on top,
   so you can override anything a convenience block computed — with three
   exceptions the install refuses rather than lets diverge, because they also
@@ -107,7 +107,7 @@ tested floor rather than a ceiling; naming them here would go stale on its own.
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `tls.existingSecret` | `""` | Secret holding the server certificate; sets `tls_cert`/`tls_key`. The server re-reads the keypair on `SIGHUP`, but nothing sends one, so a renewal needs a signal (`kubectl exec <pod> -- kill -HUP 1`) or a restart — see [the guide](https://github.com/voxpupuli/openvox-ca/blob/main/docs/helm-chart.md) |
+| `tls.existingSecret` | `""` | Secret holding the server certificate; sets `tls_cert`/`tls_key`. The server re-reads the keypair on `SIGHUP`, but nothing sends one, so a renewal needs a signal (`kubectl exec <pod> -- kill -HUP 1`) or a restart. Mutually exclusive with `config.serving_cert`, which the chart refuses at install time — see [the guide](https://github.com/voxpupuli/openvox-ca/blob/main/docs/helm-chart.md) |
 | `tls.certKey` / `tls.keyKey` | `tls.crt` / `tls.key` | Data keys within that Secret |
 | `tls.mountPath` | `/run/secrets/openvox-ca-tls` | |
 | `ca.existingSecret` | `""` | Secret holding the CA certificate and key; sets `ca_cert_file`/`ca_key_file`. Under a provider that holds the key (`config.ca_key_provider: openbao`) clear the latter with `config.ca_key_file: ""` |
@@ -164,13 +164,15 @@ tested floor rather than a ceiling; naming them here would go stale on its own.
 
 ### Managed certificates
 
-The certificates themselves live under `config.managed_certs`; this block only
-creates the RBAC for the ones kept in a Secret. See
-[managed certificates](https://github.com/voxpupuli/openvox-ca/blob/main/docs/configuration.md#managed-certificates).
+The certificates themselves live under `config.managed_certs` and
+`config.serving_cert`; this block only creates the RBAC for the ones kept in a
+Secret. See
+[managed certificates](https://github.com/voxpupuli/openvox-ca/blob/main/docs/configuration.md#managed-certificates)
+and [the CA's own serving certificate](https://github.com/voxpupuli/openvox-ca/blob/main/docs/configuration.md#the-cas-own-serving-certificate).
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `managedCerts.rbac.create` | `true` | Create the Role and binding for `config.managed_certs` — one pair per namespace those Secrets live in, derived from the entries rather than from values, so each of those namespaces must already exist at install time. `get` and `patch` are narrowed by `resourceNames`; `create` cannot be. Nothing is rendered when no entry uses a Secret store, or when the chart cannot read the configuration |
+| `managedCerts.rbac.create` | `true` | Create the Role and binding for `config.managed_certs` and `config.serving_cert` — one pair per namespace those Secrets live in, derived from the entries rather than from values, so each of those namespaces must already exist at install time. `get` and `patch` are narrowed by `resourceNames`; `create` cannot be. Nothing is rendered when no entry uses a Secret store, or when the chart cannot read the configuration |
 
 ### Workload
 
@@ -191,7 +193,7 @@ creates the RBAC for the ones kept in a Secret. See
 | `deploymentAnnotations` | `{}` | Annotations on the Deployment rather than the pods |
 | `podSecurityContext` | non-root uid/gid 1000, `fsGroup` 1000, `RuntimeDefault` | |
 | `securityContext` | no privilege escalation, read-only rootfs, all capabilities dropped | |
-| `livenessProbe` / `readinessProbe` / `startupProbe` | probes on `/healthz/*` | Set `enabled: false` to drop one; other keys are the probe spec. `httpGet.scheme` defaults to HTTPS or HTTP to match whether the server has a certificate. `startupProbe.failureThreshold x periodSeconds` is the entire budget `CA.Init` gets, since the probe path is not served until it returns. The default 60s does not cover Init's worst case (two `internal/ca.LockTimeout` waits plus CA key generation); raise it if you run several replicas against a fresh shared backend, where both locks can be contended |
+| `livenessProbe` / `readinessProbe` / `startupProbe` | probes on `/healthz/*` | Set `enabled: false` to drop one; other keys are the probe spec. `httpGet.scheme` defaults to HTTPS or HTTP to match whether the server has a certificate. `startupProbe.failureThreshold x periodSeconds` is the entire budget the CA gets before the probe path is served. The default 60s does not cover `CA.Init`'s worst case (two `internal/ca.LockTimeout` waits plus CA key generation); raise it if you run several replicas against a fresh shared backend, where both locks can be contended. **With `config.serving_cert` the window also has to cover issuing that certificate**, which runs after Init and before the listener binds and is bounded at one further `LockTimeout` plus the store read that follows it (up to 30s for a Secret store) — so raise it when self-provisioning, particularly against a remote key provider or a Secret store |
 | `lifecycle` | `{}` | |
 | `terminationGracePeriodSeconds` | `30` | Must exceed `shutdown_timeout_sec` by ≥ 3s |
 | `nodeSelector` / `tolerations` / `affinity` | `{}` / `[]` / `{}` | |
@@ -199,7 +201,7 @@ creates the RBAC for the ones kept in a Secret. See
 | `priorityClassName` / `runtimeClassName` / `schedulerName` | `""` | |
 | `dnsPolicy` / `dnsConfig` / `hostAliases` | `""` / `{}` / `[]` | |
 | `enableServiceLinks` | `false` | |
-| `automountServiceAccountToken` | `null` | `null` mounts the token when the pod needs the API — Kubernetes export (`kubernetesExport.enabled` or `config.kubernetes_export.targets`), a managed certificate in a Secret (`config.managed_certs` with a `store.secret`), or OpenBao Kubernetes auth (`config.openbao.auth_method`, `PUPPET_CA_OPENBAO_AUTH_METHOD` in `env`/`extraEnv`, or `--openbao-auth-method=kubernetes` in `extraArgs`) — and whenever the chart cannot tell: `existingConfigMap`, `args`, `envFrom`, an `extraEnv` `valueFrom` for that variable, or a bare `--openbao-auth-method` in `extraArgs`. See [the guide](https://github.com/voxpupuli/openvox-ca/blob/main/docs/helm-chart.md) for the full table |
+| `automountServiceAccountToken` | `null` | `null` mounts the token when the pod needs the API — Kubernetes export (`kubernetesExport.enabled` or `config.kubernetes_export.targets`), a managed certificate or the CA's own serving certificate in a Secret (`config.managed_certs` or `config.serving_cert` with a `store.secret`), or OpenBao Kubernetes auth (`config.openbao.auth_method`, `PUPPET_CA_OPENBAO_AUTH_METHOD` in `env`/`extraEnv`, or `--openbao-auth-method=kubernetes` in `extraArgs`) — and whenever the chart cannot tell: `existingConfigMap`, `args`, `envFrom`, an `extraEnv` `valueFrom` for that variable, or a bare `--openbao-auth-method` in `extraArgs`. See [the guide](https://github.com/voxpupuli/openvox-ca/blob/main/docs/helm-chart.md) for the full table |
 | `initContainers` / `extraContainers` | `[]` | Templated, so they can reference `.Values` |
 | `extraVolumes` | `[]` | Templated |
 | `extraVolumeMounts` | `[]` | Passed through as written |

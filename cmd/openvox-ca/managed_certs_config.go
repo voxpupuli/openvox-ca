@@ -192,11 +192,18 @@ func exportSecretTargets(cfg k8sexport.Config) [][2]string {
 // not carry it. The path is extracted with storage.SQLiteFilePath, the same
 // function the backend itself uses, rather than by a second parser here.
 //
-// tls_cert and tls_key are on the list on purpose. Making the CA's own serving
-// certificate a managed one is openvox-ca#326 and is a different mechanism from
-// this; until it exists, an entry pointed at that pair would have the reconcile
-// loop overwrite the certificate the CA is presenting on a listener it does not
-// reload.
+// tls_cert and tls_key are on the list on purpose: an entry pointed at that pair
+// would have the reconcile loop overwrite the certificate the CA is presenting
+// on a listener it does not reload.
+//
+// serving_cert's own file store is on it for the same reason and a stronger
+// one. That pair IS the certificate the CA presents, self-provisioned rather
+// than operator-supplied, so a managed_certs entry writing over it replaces the
+// listener's certificate with one issued for a component -- and, because the
+// serving entry reads its store back to decide whether to reissue, the two
+// would then replace each other on every pass for ever. The serving entry is
+// excluded from this list when it is itself the thing being checked; see
+// withoutServingCertPaths.
 //
 // Each is resolved against the process's working directory the same way the
 // server itself resolves it, because a relative path in either place means the
@@ -214,6 +221,29 @@ func caOwnedPaths(cfg *serverConfig, absCADir, configPath string) ([]certstore.R
 		{Setting: "logfile", Path: cfg.LogFile},
 		{Setting: "puppet_server_file", Path: cfg.PuppetServerFile},
 		{Setting: "autosign_config", Path: cfg.AutosignConfig},
+	}
+	// The CA's own serving certificate, when it is self-provisioned into a file
+	// pair. Named with the servingCertPathSetting prefix so that the serving
+	// entry's own check can take them out again rather than refuse the entry
+	// for colliding with itself.
+	//
+	// The cert and the key only. The chain file is deliberately NOT reserved,
+	// for the reason internal/certstore already gives about chain files
+	// generally: every entry writes the same CA chain from the same source and
+	// no entry reads it back to decide anything, so a shared /etc/openvox/ca.pem
+	// is the ordinary way to lay several components out on one host -- which is
+	// exactly the shared-host deployment serving_cert documents. Reserving it
+	// would refuse that layout at startup.
+	//
+	// internal/certstore refuses the cross pair -- a chain written over another
+	// entry's material -- but only within one block, and serving_cert and
+	// managed_certs are two. servingChainCollision closes that gap; this
+	// exemption is not relying on a check that does not run.
+	if f := servingCertFiles(cfg); f != nil {
+		named = append(named,
+			certstore.ReservedPath{Setting: servingCertPathSetting + "cert", Path: f.Cert},
+			certstore.ReservedPath{Setting: servingCertPathSetting + "key", Path: f.Key},
+		)
 	}
 	// The SQLite database, when that is the backend. Only for sqlite: every
 	// other dialect's DSN names a server rather than a file, and an in-memory
@@ -296,14 +326,18 @@ func warnIfManagedCertIsAdmin(cfg *serverConfig, managed []ca.ManagedCert) {
 	// The failure is not fatal here, and on the TLS path it is not even
 	// reported: buildAuthConfig calls the same function a moment later and
 	// fails the startup with it, so saying it twice would make the first
-	// mention look like the cause. But buildAuthConfig runs only when
-	// tls_cert and tls_key are both set, so on a plain-HTTP CA nothing else
-	// reads this file and the error would vanish entirely -- taking with it
-	// the admin-credential warning that is the whole point of this function.
-	// So it is logged exactly where it would otherwise be silent.
+	// mention look like the cause. But buildAuthConfig runs only when TLS is
+	// enabled, so on a plain-HTTP CA nothing else reads this file and the error
+	// would vanish entirely -- taking with it the admin-credential warning that
+	// is the whole point of this function. So it is logged exactly where it
+	// would otherwise be silent.
+	//
+	// Through cfg.tlsEnabled rather than tls_cert/tls_key directly: a
+	// self-provisioned CA serves TLS with neither set, and testing those two
+	// would report the error here as well as fatally a moment later.
 	admins, err := buildAdminAllowList(cfg.PuppetServer, cfg.PuppetServerFile)
 	if err != nil {
-		if cfg.TLSCert == "" || cfg.TLSKey == "" {
+		if !cfg.tlsEnabled() {
 			slog.Warn("Could not read the admin allow list, so managed certificates were not "+
 				"checked against it. A managed certificate whose certname is listed in "+
 				"puppet_server is a CA admin credential and would not have been reported",
@@ -349,4 +383,13 @@ func carriesClientAuth(spec ca.CertSpec) bool {
 		}
 	}
 	return false
+}
+
+// servingCertFiles returns the CA's own serving-certificate file store, or nil
+// when self-provisioning is off or uses a Kubernetes Secret.
+func servingCertFiles(cfg *serverConfig) *certstore.FilesConfig {
+	if cfg.ServingCert == nil {
+		return nil
+	}
+	return cfg.ServingCert.Store.Files
 }

@@ -100,6 +100,16 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 		"managed_certs[].store.files.cert": "the certificate's own store path, which is what the check compares against",
 		"managed_certs[].store.files.key":  "the certificate's own store path, which is what the check compares against",
 		"managed_certs[].store.files.ca":   "the certificate's own chain path, which is what the check compares against",
+		// Deliberately not reserved, unlike the serving cert and key beside it.
+		// Every entry writes the same CA chain from the same source and no
+		// entry reads it back to decide anything, so a shared chain file is the
+		// ordinary way to lay several components out on one host -- which
+		// docs/configuration.md states, and which reserving this would refuse
+		// on exactly the shared-host deployment serving_cert documents. The
+		// cross pair it would otherwise leave open -- this chain written over a
+		// component's material -- is refused by servingChainCollision, because
+		// internal/certstore only refuses it within one block.
+		"serving_cert.store.files.ca": "chain files are shareable by design; see the shared-chain rule",
 	}
 
 	// pathShaped decides which YAML keys name a filesystem location.
@@ -167,16 +177,26 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 			case reflect.Struct:
 				sweep(sv.Field(i), prefix+name+".", yield)
 			case reflect.Pointer:
-				// A nil pointer has no fields to walk, so the element type is
-				// instantiated the same way a list's is. Skipping pointers
-				// silently is what hid managed_certs[].store.files.cert and
-				// .key: the sweep read as exhaustive over "every path-shaped
-				// setting" while never descending into store.secret or
-				// store.files, which are the only pointer-to-struct fields in
-				// the whole configuration -- measured, not assumed.
-				if f.Type.Elem().Kind() == reflect.Struct {
-					sweep(reflect.New(f.Type.Elem()).Elem(), prefix+name+".", yield)
+				if f.Type.Elem().Kind() != reflect.Struct {
+					continue
 				}
+				// Through the real pointee when there is one, so a fixture that
+				// sets the block gets its fields written and caOwnedPaths sees
+				// the values; through a fresh one when it is nil, so the *type*
+				// is audited whether or not any fixture configures it.
+				//
+				// A nil block whose fields are therefore unsettable behaves
+				// exactly like a list element, and for the same reason: what is
+				// audited is which path settings the shape can have, not how
+				// many someone configured. serving_cert is the case that needs
+				// the non-nil arm -- its file store is reserved by caOwnedPaths
+				// only when it is configured, so a sweep that always used a
+				// scratch value would report it as unreserved.
+				target := sv.Field(i)
+				if target.IsNil() {
+					target = reflect.New(f.Type.Elem())
+				}
+				sweep(target.Elem(), prefix+name+".", yield)
 			case reflect.Slice:
 				if f.Type.Elem().Kind() == reflect.Struct {
 					sweep(reflect.New(f.Type.Elem()).Elem(), prefix+name+"[].", yield)
@@ -238,6 +258,18 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 			File:    "/spec/client_ca/file",
 			CRLFile: "/spec/client_ca/crl_file",
 		}}
+		// The CA's own serving certificate, configured into a file store,
+		// because caOwnedPaths reserves those three paths only when it is. Set
+		// before the fields are filled in below, so the sweep descends into
+		// this block rather than a scratch copy of it.
+		cfg.ServingCert = &certstore.Entry{
+			Store: certstore.StoreConfig{Files: &certstore.FilesConfig{}},
+		}
+		for key, fv := range pathKeys(cfg) {
+			if strings.HasPrefix(key, "serving_cert.") {
+				fv.SetString("/spec/" + strings.ReplaceAll(key, ".", "/"))
+			}
+		}
 
 		// The sweep must have found something to judge, and specifically the
 		// setting whose omission this spec exists for. A reflection walk that
@@ -255,6 +287,9 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 		Expect(fields).To(HaveKey("managed_certs[].store.files.cert"),
 			"precondition: the sweep must follow pointer-to-struct fields, or "+
 				"the store paths this whole check is about are outside it")
+		Expect(fields).To(HaveKey("serving_cert.store.files.cert"),
+			"precondition: the sweep must descend into pointer blocks, or the "+
+				"CA's own serving pair needs no recorded decision")
 
 		reserved, err := caOwnedPaths(cfg, "/spec/cadir", "/spec/config.yaml")
 		Expect(err).NotTo(HaveOccurred())
@@ -329,6 +364,13 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 		cfg.ClientCA = []config.ClientCA{{
 			Name: "partner", File: "/spec/anchor.pem", CRLFile: "/spec/anchor-crl.pem",
 		}}
+		cfg.ServingCert = &certstore.Entry{
+			Store: certstore.StoreConfig{Files: &certstore.FilesConfig{
+				Cert: "/spec/serving/tls.crt",
+				Key:  "/spec/serving/tls.key",
+				CA:   "/spec/serving/ca.crt",
+			}},
+		}
 
 		reserved, err := caOwnedPaths(cfg, "/spec/cadir", "/spec/config.yaml")
 		Expect(err).NotTo(HaveOccurred())

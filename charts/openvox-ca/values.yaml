@@ -84,6 +84,16 @@ commonAnnotations: {}
 #         renew_before: 720h
 #         store:
 #           secret: {name: puppetserver-tls, namespace: openvox}
+#     # The certificate the CA's own listener presents, issued and renewed by
+#     # the CA itself. Absent by default, and mutually exclusive with
+#     # tls.existingSecret and config.tls_cert/tls_key -- setting it IS how this
+#     # deployment gets TLS. Same keys and same store block as an entry above.
+#     serving_cert:
+#       certname: ca.example.com
+#       names: [ca.example.com]
+#       renew_before: 720h
+#       store:
+#         secret: {name: openvox-ca-serving-tls}
 config: {}
 
 # Use a ConfigMap you manage yourself instead of one rendered from `config`.
@@ -103,9 +113,11 @@ config: {}
 #   * Export RBAC cannot narrow `patch` to your target names, so it grants it
 #     in full, and the ServiceAccount token is mounted unconditionally.
 #   * No managed-certificate Role is rendered at all — the chart can see neither
-#     that `managed_certs` exists nor what its Secrets are called — so a
-#     `store.secret` entry is refused by RBAC at runtime while readiness stays
-#     green. Create that Role yourself.
+#     that `managed_certs` or `serving_cert` exists nor what their Secrets are
+#     called — so a `store.secret` entry is refused by RBAC at runtime while
+#     readiness stays green. For `serving_cert` the consequence is worse and
+#     the opposite: that Secret holds the certificate the listener presents,
+#     so the CA does not start at all. Create that Role yourself.
 #
 # Two values keep working and must be kept in step with your own config.yaml by
 # hand, because they shape the pod rather than the config file:
@@ -171,7 +183,14 @@ autosign:
 
 # -- TLS and CA material -------------------------------------------------------
 
-# Server TLS certificate for the HTTPS listener. Typically a kubernetes.io/tls
+# Server TLS certificate for the HTTPS listener, supplied by you.
+#
+# config.serving_cert is the alternative: the CA issues and renews this
+# certificate itself, which removes the renewal problem described below
+# entirely — no signal, no restart. The two are mutually exclusive and the
+# chart refuses them together at install time.
+#
+# Typically a kubernetes.io/tls
 # Secret issued by cert-manager. When set, the Secret is mounted read-only and
 # tls_cert/tls_key are pointed at it.
 #
@@ -341,12 +360,14 @@ kubernetesExport:
 
 # -- Managed certificates ------------------------------------------------------
 
-# Kubernetes wiring for `config.managed_certs`, the certificates openvox-ca
-# issues and renews for OpenVox components. The certificates themselves are
-# configured under `config`, not here; see docs/configuration.md.
+# Kubernetes wiring for `config.managed_certs` and `config.serving_cert` -- the
+# certificates openvox-ca issues and renews for OpenVox components, and the one
+# its own listener presents. The certificates themselves are configured under
+# `config`, not here; see docs/configuration.md.
 managedCerts:
   rbac:
-    # Create the Role/RoleBinding for config.managed_certs -- one pair per
+    # Create the Role/RoleBinding for config.managed_certs and
+    # config.serving_cert -- one pair per
     # namespace those Secrets live in, taken from the entries themselves.
     #
     # get and patch are narrowed by resourceNames to the Secrets named. create
@@ -509,8 +530,21 @@ readinessProbe:
 # shared store, where both locks can actually be contended. The steady-state
 # start takes neither. For comparison, packaging/systemd/openvox-ca.service
 # gives Init 300s through TimeoutStartSec, and cmd/openvox-ca/launcher_test.go
-# holds that to 2 x LockTimeout; the chart is deliberately not held to the same
-# floor.
+# holds that to 3 x LockTimeout — raised from two when serving_cert added the
+# third term below; the chart is deliberately not held to the same floor.
+#
+# config.serving_cert adds a third term the ruling above did not weigh, because
+# it did not exist then: the CA issues its own serving certificate after Init
+# and before the listener binds. That is one further LockTimeout for the
+# reconcile pass, plus the store read that decides whether startup succeeds --
+# deliberately outside the pass's budget, since a pass that spent the lot would
+# otherwise leave the read no time at all, and for a Secret store that read is
+# bounded at certstore's own 30s API timeout. A healthy
+# start spends none of it -- the stores are read and found current in
+# milliseconds -- but a slow or unreachable Secret store can spend the lot. Raise
+# failureThreshold when self-provisioning against a remote key provider or a
+# Secret store. Whether the default should move for everyone is a question for
+# the maintainer rather than a change to make in passing.
 startupProbe:
   enabled: true
   failureThreshold: 30
@@ -550,8 +584,8 @@ enableServiceLinks: false
 # null lets the chart decide: mounted when the pod needs the Kubernetes API —
 # Kubernetes export (from either `kubernetesExport.enabled` or
 # `config.kubernetes_export.targets`), a managed certificate in a Secret (from
-# `config.managed_certs` with a `store.secret`; a file store needs nothing), or
-# OpenBao Kubernetes auth (from
+# `config.managed_certs` or `config.serving_cert` with a `store.secret`; a file
+# store needs nothing), or OpenBao Kubernetes auth (from
 # `config.openbao.auth_method`, PUPPET_CA_OPENBAO_AUTH_METHOD in `env` or
 # `extraEnv`, or `--openbao-auth-method` in `extraArgs`) — and also whenever the
 # chart cannot see the whole configuration, because `existingConfigMap`, `args`,

@@ -273,7 +273,7 @@ tests:
               subject: puppetserver.openvox.svc.cluster.local
             exp_annotations:
               summary: "A managed certificate has never been issued."
-              description: "The Puppet CA on ca-1:9140 has puppetserver.openvox.svc.cluster.local configured in managed_certs but no certificate for it exists after 1h. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else's material, or a directory that does not exist."
+              description: "The Puppet CA on ca-1:9140 has puppetserver.openvox.svc.cluster.local configured in managed_certs or serving_cert but no certificate for it exists after 1h. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else's material, or a directory that does not exist. If the subject is the CA's own certname it came from serving_cert, and the CA would not have started at all had it never been issued -- so a certificate that existed no longer has a live inventory row. The rule fires on the absence of a non-revoked row, so revocation is the likeliest cause but not the only one -- check the CRL first, then the inventory itself."
 
   # The steady state, and the case that stops the rule being a permanent page
   # for every deployment that uses the feature. The leaf series carries serial
@@ -322,7 +322,7 @@ tests:
               subject: puppetserver.openvox.svc.cluster.local
             exp_annotations:
               summary: "A managed certificate has never been issued."
-              description: "The Puppet CA on ca-1:9140 has puppetserver.openvox.svc.cluster.local configured in managed_certs but no certificate for it exists after 1h. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else's material, or a directory that does not exist."
+              description: "The Puppet CA on ca-1:9140 has puppetserver.openvox.svc.cluster.local configured in managed_certs or serving_cert but no certificate for it exists after 1h. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else's material, or a directory that does not exist. If the subject is the CA's own certname it came from serving_cert, and the CA would not have started at all had it never been issued -- so a certificate that existed no longer has a live inventory row. The rule fires on the absence of a non-revoked row, so revocation is the likeliest cause but not the only one -- check the CRL first, then the inventory itself."
 
   # An ordinary revoke-then-reissue, which must stay silent. The predecessor is
   # revoked and the replacement is signed, both under the same subject, so
@@ -383,7 +383,7 @@ tests:
               subject: puppetserver.openvox.svc.cluster.local
             exp_annotations:
               summary: "A managed certificate has never been issued."
-              description: "The Puppet CA on ca-1:9140 has puppetserver.openvox.svc.cluster.local configured in managed_certs but no certificate for it exists after 1h. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else's material, or a directory that does not exist."
+              description: "The Puppet CA on ca-1:9140 has puppetserver.openvox.svc.cluster.local configured in managed_certs or serving_cert but no certificate for it exists after 1h. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else's material, or a directory that does not exist. If the subject is the CA's own certname it came from serving_cert, and the CA would not have started at all had it never been issued -- so a certificate that existed no longer has a live inventory row. The rule fires on the absence of a non-revoked row, so revocation is the likeliest cause but not the only one -- check the CRL first, then the inventory itself."
 
   # Two entries on one target, one issued and one not, which pins that the
   # `unless` matches per subject rather than across the whole vector. Nothing
@@ -412,7 +412,7 @@ tests:
               subject: puppetdb.openvox.svc.cluster.local
             exp_annotations:
               summary: "A managed certificate has never been issued."
-              description: "The Puppet CA on ca-1:9140 has puppetdb.openvox.svc.cluster.local configured in managed_certs but no certificate for it exists after 1h. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else's material, or a directory that does not exist."
+              description: "The Puppet CA on ca-1:9140 has puppetdb.openvox.svc.cluster.local configured in managed_certs or serving_cert but no certificate for it exists after 1h. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else's material, or a directory that does not exist. If the subject is the CA's own certname it came from serving_cert, and the CA would not have started at all had it never been issued -- so a certificate that existed no longer has a live inventory row. The rule fires on the absence of a non-revoked row, so revocation is the likeliest cause but not the only one -- check the CRL first, then the inventory itself."
 
   # The one shape the rule's own two sides disagree about, and the reason the
   # expression is qualified on a successful scrape.

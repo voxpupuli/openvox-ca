@@ -220,7 +220,7 @@ PUPPET_CA_OPENBAO_AUTH_METHOD through a ConfigMap or Secret named in `envFrom`
 
 It can read `env`, `extraEnv` and `extraArgs`, though, and each of those carries
 the same setting — so all three are scanned here, the way
-openvox-ca.tlsConfigured scans env/extraEnv for PUPPET_CA_TLS_CERT/KEY. Without
+openvox-ca.tlsSources scans them for PUPPET_CA_TLS_CERT/KEY. Without
 that, `config.ca_key_provider: openbao` plus any of
 `env.PUPPET_CA_OPENBAO_AUTH_METHOD: kubernetes`, the same variable in
 `extraEnv`, or `extraArgs: [--openbao-auth-method=kubernetes]` would leave the
@@ -249,8 +249,9 @@ true
   and the chart cannot see which method it names. Tested on valueFrom's
   presence, so neither an explicit `value: ""` nor an entry naming no source at
   all is mistaken for one — the server ignores an empty variable either way,
-  which is the precedence stated above. tlsConfigured's scan discriminates
-  identically.
+  which is the precedence stated above. tlsSources discriminates identically for
+  PUPPET_CA_TLS_CERT/KEY — that scan moved out of tlsConfigured when the rule
+  needed one home.
 */}}
 {{- if and (eq .name "PUPPET_CA_OPENBAO_AUTH_METHOD") (hasKey . "valueFrom") }}{{ $authMethod = "kubernetes" }}{{ end -}}
 {{- end -}}
@@ -322,9 +323,15 @@ false
 {{- end -}}
 
 {{/*
-The Secrets `config.managed_certs` stores certificates in, as a JSON list of
-{namespace, name} objects, or "unknown" when the chart cannot read the
-configuration.
+The Secrets `config.managed_certs` and `config.serving_cert` store certificates
+in, as a JSON list of {namespace, name} objects, or "unknown" when the chart
+cannot read the configuration.
+
+Two blocks rather than one, because they need the same grant for the same
+reason: the serving certificate is the CA's own, but its store is read and
+written exactly as a component's is. What differs is the cost of a refusal --
+a component certificate is retried on the next pass, while the serving one is
+what the listener presents, so the CA does not start without it.
 
 Only entries whose store is a Secret: a managed certificate may equally keep
 its material in local files, which needs no Kubernetes access at all. Which one
@@ -357,13 +364,29 @@ unknown
 {{- $secrets = append $secrets (dict "namespace" (default $namespace (dig "namespace" "" $secret)) "name" .) -}}
 {{- end -}}
 {{- end -}}
+{{/*
+  And the CA's own serving certificate, which is a second source of the same
+  thing: one entry, the same store block, the same two flavours. It needs the
+  same grant for the same reason, and a Role that covered managed_certs alone
+  would leave a self-provisioning CA unable to read or write the Secret holding
+  the certificate its listener presents -- refused by RBAC at startup, which is
+  fatal for that certificate rather than retried.
+*/}}
+{{- $serving := dict -}}
+{{- if eq (include "openvox-ca.servingCertConfigured" .) "true" -}}
+{{- $serving = include "openvox-ca.servingCertSecret" . | fromJson -}}
+{{- end -}}
+{{- with (dig "name" "" $serving) -}}
+{{- $secrets = append $secrets (dict "namespace" (default $namespace (dig "namespace" "" $serving)) "name" .) -}}
+{{- end -}}
 {{- $secrets | toJson -}}
 {{- end -}}
 {{- end -}}
 
 {{/*
-Whether any managed certificate stores its material in a Kubernetes Secret, and
-so whether the pod needs to talk to the API server for one.
+Whether any managed certificate, or the CA's own serving certificate, stores its
+material in a Kubernetes Secret -- and so whether the pod needs to talk to the
+API server for one.
 
 False for a file-only configuration, which is the systemd shape and must not be
 given a projected token it has no use for. "unknown" from managedCertSecrets is
@@ -495,7 +518,8 @@ dict-taking helpers.
 rules:
   # create cannot be restricted by resourceNames -- the object has no name yet
   # at admission time -- but get and patch can, so reading and overwriting an
-  # *existing* Secret is held to the ones config.managed_certs names.
+  # *existing* Secret is held to the ones config.managed_certs and
+  # config.serving_cert name.
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["create"]
@@ -540,7 +564,7 @@ chart cannot see far enough to rule anything out.
 {{- if eq (include "openvox-ca.exportConfigured" .) "true" -}}
 Kubernetes export
 {{- else if and (eq (include "openvox-ca.configFileKnown" .) "true") (eq (include "openvox-ca.managedCertsNeedAPI" .) "true") -}}
-managed certificates stored in Secrets
+managed or serving certificates stored in Secrets
 {{- else if eq (include "openvox-ca.configFullyKnown" .) "true" -}}
 {{- if eq (include "openvox-ca.needsAPIAccess" .) "true" -}}
 OpenBao Kubernetes auth
@@ -643,60 +667,226 @@ false
 {{- end -}}
 
 {{/*
+Whether config.serving_cert names a block at all.
+
+Present-and-a-map, not merely present. The two spellings mean different things
+to the server and the chart has to agree with it:
+
+  * `serving_cert: {}` decodes to a non-nil *certstore.Entry naming no store,
+    which the server refuses with a message saying so. The chart must call that
+    TLS, or it refuses the install first for having no certificate and the
+    operator never sees the real reason.
+  * `serving_cert:` with no value decodes to a nil pointer, and the server reads
+    that as the feature being off. The chart must agree, or it reports TLS
+    configured, skips its own no-certificate refusal, sets the probes to HTTPS,
+    and the pod dies on the plain-HTTP refusal instead.
+
+Testing `hasKey` alone got the second case wrong, and `dig` on the nil value
+aborted the render with an interface-conversion error rather than any message an
+operator could act on.
+*/}}
+{{- define "openvox-ca.servingCertConfigured" -}}
+{{- $config := include "openvox-ca.config" . | fromYaml -}}
+{{- if and (hasKey $config "serving_cert") (kindIs "map" (index $config "serving_cert")) -}}
+true
+{{- else -}}
+false
+{{- end -}}
+{{- end -}}
+
+{{/*
+config.serving_cert's `store` block as a map, or an empty map when it is absent,
+null, or not a map.
+
+sprig's dig walks intermediates with an unchecked type assertion, so
+`dig "serving_cert" "store" "files" dict $config` aborts the whole render with
+"interface conversion: interface {} is nil, not map[string]interface {}" when
+`store:` is written with nothing under it -- which is the state an operator is
+in half way through typing the block. servingCertConfigured was added for
+exactly that hazard one level up and guarded only the top-level key; this is the
+same guard for the level below, so every serving_cert dig goes through one place
+that cannot abort.
+*/}}
+{{- define "openvox-ca.servingCertStore" -}}
+{{- $config := include "openvox-ca.config" . | fromYaml -}}
+{{- $store := dict -}}
+{{- if eq (include "openvox-ca.servingCertConfigured" .) "true" -}}
+{{- $block := index $config "serving_cert" -}}
+{{- if and (hasKey $block "store") (kindIs "map" (index $block "store")) -}}
+{{- $store = index $block "store" -}}
+{{- end -}}
+{{- end -}}
+{{- $store | toJson -}}
+{{- end -}}
+
+{{/*
+config.serving_cert.store.secret as a map, or an empty one.
+
+The same guard servingCertStore applies to `store`, one level down, and for the
+same reason: sprig's `dig` asserts its last argument is a map with no recovery,
+so a `secret:` key holding anything but a map aborts the whole render with Go's
+raw "interface conversion" panic instead of this chart's own fail() messages.
+
+The shapes that reach it are ordinary operator mistakes, not abuse. `secret:`
+with nothing after it is YAML null -- the half-way-through-typing-the-block
+shape servingCertConfigured already exists to survive one level up -- and
+`secret: my-cert` is the reasonable guess that it takes a name directly. Both
+now degrade to "not a Secret store", which is the answer every caller here can
+already handle.
+
+Two mechanisms here stop the panic and only one is obvious, which is worth
+saying because a mutation test finds the non-obvious one first. Routing both
+callers through this helper means they receive a value that has been through
+toJson/fromJson, and that round-trip alone normalises a null into something
+`dig` tolerates -- so deleting the kindIs test below leaves the chart rendering
+correctly and the suite green. It is kept for the scalar case and because
+"secret must be a map to be read as one" is the actual rule; the round-trip is
+an accident of how the value is passed, not a guarantee anyone should rely on.
+Assert this helper's behaviour by reverting BOTH callers to a direct
+`dig "secret" ...` on servingCertStore, which is the shape that panicked.
+*/}}
+{{- define "openvox-ca.servingCertSecret" -}}
+{{- $store := include "openvox-ca.servingCertStore" . | fromJson -}}
+{{- $secret := dict -}}
+{{- if and (hasKey $store "secret") (kindIs "map" (index $store "secret")) -}}
+{{- $secret = index $store "secret" -}}
+{{- end -}}
+{{- $secret | toJson -}}
+{{- end -}}
+
+{{/*
+Whether config.serving_cert keeps its certificate in a Kubernetes Secret.
+
+Distinct from openvox-ca.managedCertSecrets, which answers for both blocks at
+once. Anything whose consequence is specific to the serving certificate has to
+ask this instead: a NOTE saying the CA will not start is true of a serving
+Secret and false of a component one, and the combined list cannot tell them
+apart.
+*/}}
+{{- define "openvox-ca.servingCertUsesSecret" -}}
+{{- if eq (include "openvox-ca.servingCertConfigured" .) "true" -}}
+{{- $secret := include "openvox-ca.servingCertSecret" . | fromJson -}}
+{{- if dig "name" "" $secret -}}
+true
+{{- else -}}
+false
+{{- end -}}
+{{- else -}}
+false
+{{- end -}}
+{{- end -}}
+
+{{/*
 Whether the server will serve HTTPS.
 
-It does so exactly when a certificate and a key are both configured — on any
-layer. The config file is the one the chart renders; environment variables
-outrank it, so PUPPET_CA_TLS_CERT/KEY set through env or extraEnv count too,
-and are how someone feeds the certificate paths in from a Secret.
+It does so when a certificate and a key are BOTH configured — on any layer —
+or when the CA issues its own. Which layers supply them is openvox-ca.tlsSources'
+question, not this one's; this helper only insists on both halves, because the
+server refuses tls_cert without tls_key and a chart calling one half
+"configured" would set HTTPS probes against a listener that never binds.
+config.serving_cert is the third way, and is mutually exclusive with the other
+two: the server refuses to start with both.
 
 When the configuration is not fully known this answers "true": HTTPS is the
 normal case, and it is the answer that neither blocks a correct install nor
 makes the probes fail on one.
 */}}
+{{/*
+Where the server's TLS certificate and key come from, as {"cert": <source>, "key": <source>} JSON.
+
+Each value is the NAME of the highest-precedence route supplying that half, or
+empty when nothing supplies it. The precedence is the server's own, lowest
+first: the config file, then PUPPET_CA_TLS_CERT/KEY in env or extraEnv which
+outrank the file, then --tls-cert/--tls-key in extraArgs, which the chart
+appends to the argv it builds and which therefore outrank everything.
+`tls.existingSecret` is reported under its own name rather than as
+config.tls_cert, because it sets those keys and an operator told to remove
+"config.tls_cert" would not find it in their values.
+
+This exists because the rule had two copies and they disagreed. tlsConfigured
+scanned the config, env and extraEnv; validate's serving_cert conflict check
+scanned those plus extraArgs. An operator supplying the pair only as flags got
+an HTTP probe against an HTTPS listener and an install refused for having no
+certificate the other copy could plainly see.
+
+`args` is deliberately not scanned: it replaces the argv wholesale, so the
+chart cannot see what is in it. That is the same reason configFullyKnown gates
+the callers rather than this helper.
+
+**The two callers ask different questions of this and must keep doing so.**
+tlsConfigured needs BOTH halves, because the server refuses tls_cert without
+tls_key and a chart that called one half "configured" would set HTTPS probes
+against a listener that never binds. validate's conflict check needs EITHER
+half, because either one alongside serving_cert is the contradiction it
+refuses. Collapsing them onto one non-emptiness test reintroduces the first
+bug; that was tried and `tls_cert` alone stopped being refused at install.
+*/}}
+{{- define "openvox-ca.tlsSources" -}}
+{{- $config := include "openvox-ca.config" . | fromYaml -}}
+{{- $cert := "" -}}
+{{- $key := "" -}}
+{{- if dig "tls_cert" "" $config }}{{ $cert = "config.tls_cert" }}{{ end -}}
+{{- if dig "tls_key" "" $config }}{{ $key = "config.tls_key" }}{{ end -}}
+{{- if .Values.tls.existingSecret -}}
+{{- if $cert }}{{ $cert = "tls.existingSecret" }}{{ end -}}
+{{- if $key }}{{ $key = "tls.existingSecret" }}{{ end -}}
+{{- end -}}
+{{/*
+  Non-empty only, following the server's own precedence: applyServerEnv assigns
+  from PUPPET_CA_* only when the variable is non-empty (cmd/openvox-ca/config.go),
+  so an empty one leaves whatever the config file said. Assigning
+  unconditionally let `env: {PUPPET_CA_TLS_CERT: ""}` clear a certificate the
+  config had set, and the TLS precondition then refused a perfectly good install.
+*/}}
+{{- range $name, $value := .Values.env -}}
+{{- if and (eq $name "PUPPET_CA_TLS_CERT") $value }}{{ $cert = "env.PUPPET_CA_TLS_CERT" }}{{ end -}}
+{{- if and (eq $name "PUPPET_CA_TLS_KEY") $value }}{{ $key = "env.PUPPET_CA_TLS_KEY" }}{{ end -}}
+{{- end -}}
+{{/*
+  A valueFrom reference counts because the chart cannot read it and assuming
+  TLS is the fail-open direction. Tested on valueFrom's PRESENCE rather than
+  value's absence: `extraEnv: [{name: PUPPET_CA_TLS_CERT}]` also has no value
+  key, but Kubernetes renders it as the empty string, which the server
+  discards -- an absence test counted that as configured and suppressed the
+  TLS precondition, the plaintext NOTES warning and the HTTPS probe scheme for
+  a pod with no certificate at all.
+*/}}
+{{- range .Values.extraEnv -}}
+{{- if and (eq .name "PUPPET_CA_TLS_CERT") (or .value (hasKey . "valueFrom")) }}{{ $cert = "extraEnv PUPPET_CA_TLS_CERT" }}{{ end -}}
+{{- if and (eq .name "PUPPET_CA_TLS_KEY") (or .value (hasKey . "valueFrom")) }}{{ $key = "extraEnv PUPPET_CA_TLS_KEY" }}{{ end -}}
+{{- end -}}
+{{- range .Values.extraArgs -}}
+{{- $arg := . | toString -}}
+{{- if hasPrefix "--tls-cert" $arg }}{{ $cert = printf "extraArgs %s" $arg }}{{ end -}}
+{{- if hasPrefix "--tls-key" $arg }}{{ $key = printf "extraArgs %s" $arg }}{{ end -}}
+{{- end -}}
+{{- dict "cert" $cert "key" $key | toJson -}}
+{{- end -}}
+
 {{- define "openvox-ca.tlsConfigured" -}}
 {{- if ne (include "openvox-ca.configFullyKnown" .) "true" -}}
 true
 {{- else -}}
 {{- $config := include "openvox-ca.config" . | fromYaml -}}
-{{- $cert := dig "tls_cert" "" $config -}}
-{{- $key := dig "tls_key" "" $config -}}
 {{/*
-  Non-empty only, following the server's own precedence: applyServerEnv assigns
-  from PUPPET_CA_* only when the variable is non-empty
-  (cmd/openvox-ca/config.go), so an empty one leaves whatever the config file
-  said. Assigning unconditionally let `env: {PUPPET_CA_TLS_CERT: ""}` clear a
-  certificate the config had set, and the TLS precondition then refused a
-  perfectly good install for having no certificate. needsAPIAccess already
-  guards its identical scan this way.
+  A self-provisioned serving certificate is TLS too, and is the one way to get
+  it with neither tls_cert nor tls_key set -- the server refuses that
+  combination. Answered first, and on the block's presence rather than its
+  contents, because the server treats an empty serving_cert as a configuration
+  error rather than as an absence; a chart that read it as "off" would refuse
+  the install for having no certificate and hide the real message.
 */}}
-{{- range $name, $value := .Values.env -}}
-{{- if and (eq $name "PUPPET_CA_TLS_CERT") $value }}{{ $cert = $value }}{{ end -}}
-{{- if and (eq $name "PUPPET_CA_TLS_KEY") $value }}{{ $key = $value }}{{ end -}}
-{{- end -}}
-{{/*
-  Same two branches needsAPIAccess uses, for the same reason: a readable
-  non-empty value counts, and a valueFrom reference counts because the chart
-  cannot read it and assuming TLS is the fail-open direction. Everything else
-  counts for nothing, because the server ignores an empty variable.
-
-  Tested on valueFrom's presence rather than value's absence. An entry naming
-  neither — `extraEnv: [{name: PUPPET_CA_TLS_CERT}]` — also has no value key,
-  but Kubernetes renders it as the empty string, which the server discards; an
-  absence test counted it as configured and so suppressed the TLS precondition,
-  the plaintext NOTES warning and the HTTP probe scheme for a pod with no
-  certificate at all.
-*/}}
-{{- range .Values.extraEnv -}}
-{{- if and (eq .name "PUPPET_CA_TLS_CERT") .value }}{{ $cert = .value }}{{ end -}}
-{{- if and (eq .name "PUPPET_CA_TLS_KEY") .value }}{{ $key = .value }}{{ end -}}
-{{- if and (eq .name "PUPPET_CA_TLS_CERT") (hasKey . "valueFrom") }}{{ $cert = "set" }}{{ end -}}
-{{- if and (eq .name "PUPPET_CA_TLS_KEY") (hasKey . "valueFrom") }}{{ $key = "set" }}{{ end -}}
-{{- end -}}
+{{- if eq (include "openvox-ca.servingCertConfigured" .) "true" -}}
+true
+{{- else -}}
+{{- $src := include "openvox-ca.tlsSources" . | fromJson -}}
+{{- $cert := dig "cert" "" $src -}}
+{{- $key := dig "key" "" $src -}}
 {{- if and $cert $key -}}
 true
 {{- else -}}
 false
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -766,6 +956,75 @@ CrashLoopBackOff or a Service that silently routes nowhere.
 {{- if and $cfgCadir (ne $cfgCadir $mount) (not (hasPrefix (printf "%s/" $mount) $cfgCadir)) -}}
 {{- fail (printf "config.cadir is %q, which is outside the volume mounted at %q, and the root filesystem is read-only by default so the CA could not write there. Point cadir inside the mount, or set persistence.mountPath to a parent of it." $cfgCadir $mount) -}}
 {{- end -}}
+{{/*
+  serving_cert makes the CA issue the certificate its own listener presents, and
+  the server refuses to start when it is set alongside tls_cert or tls_key --
+  they are two answers to which certificate the listener presents, and
+  self-provisioning never writes to the paths those name.
+
+  The chart is what produces the refused combination: openvox-ca.config writes
+  tls_cert and tls_key from tls.existingSecret, so `tls.existingSecret` plus
+  `config.serving_cert` renders a config.yaml the server rejects. Without this
+  the install succeeds, the pod CrashLoopBackOffs, and on an upgrade the rollout
+  wedges with the old ReplicaSet still serving.
+
+  Every route to those two keys that the chart can read is checked, because
+  each reaches the same server-side refusal: the tls block, a direct config
+  override, the environment variables that outrank the file, and extraArgs,
+  which is appended to the argv the chart builds and so outranks all of them.
+  `args` is the one route left out, and deliberately -- it replaces the argv
+  wholesale, so the chart cannot see what is in it, which is the same reason
+  configFullyKnown gates this whole helper.
+*/ -}}
+{{- if eq (include "openvox-ca.servingCertConfigured" .) "true" -}}
+{{/*
+  Either half is the contradiction, unlike tlsConfigured which needs both: one
+  of the pair alongside serving_cert is already two answers to which
+  certificate the listener presents, and the server refuses it.
+*/}}
+{{- $src := include "openvox-ca.tlsSources" . | fromJson -}}
+{{- $conflict := dig "cert" "" $src -}}
+{{- if not $conflict }}{{ $conflict = dig "key" "" $src }}{{ end -}}
+{{- if $conflict -}}
+{{- fail (printf "config.serving_cert makes the CA issue and renew the certificate its own listener presents, but %s also supplies one — and openvox-ca refuses to start with both, because they are two answers to which certificate the listener presents. Self-provisioning never writes to the paths tls_cert/tls_key name, so it cannot take them over. Remove %s to let the CA issue its own, or drop config.serving_cert to keep supplying one." $conflict $conflict) -}}
+{{- end -}}
+{{/*
+  A serving_cert file store has to satisfy two constraints at once, and under
+  this chart's defaults they collide -- which is why both are checked here
+  rather than left to be discovered.
+
+  It must be somewhere the CA can write: readOnlyRootFilesystem defaults to
+  true, so the data volume at persistence.mountPath is the only writable path
+  in the pod. And it must be outside the cadir, because the server reserves
+  that whole subtree against every file store -- a store overwrites its paths
+  on every issuance, and pointed at the CA's own directory that destroys the
+  CA key.
+
+  The collision is that this chart sets cadir TO the mount (see
+  openvox-ca.config above), so out of the box there is no path that satisfies
+  both: outside the mount is unwritable, inside it is inside the cadir. Making
+  a file store work therefore means narrowing cadir to a subdirectory first.
+  Refusing here with that remedy is the whole point -- an operator who is told
+  only "point it inside the mount" follows the advice and gets a pod that
+  starts, refuses at startup, and CrashLoopBackOffs.
+
+  Unlike a managed_certs file store, whose write failure is logged and retried,
+  this one is fatal.
+*/ -}}
+{{- $files := dig "files" dict (include "openvox-ca.servingCertStore" . | fromJson) -}}
+{{- $cadir := dig "cadir" "" $config | toString | trimSuffix "/" -}}
+{{- range $field := list "cert" "key" "ca" -}}
+{{- $path := dig $field "" $files | toString | trimSuffix "/" -}}
+{{- if $path -}}
+{{- if and (ne $path $mount) (not (hasPrefix (printf "%s/" $mount) $path)) -}}
+{{- fail (printf "config.serving_cert.store.files.%s is %q, which is outside the volume mounted at %q, and the root filesystem is read-only by default so the CA could not write there — unless you mounted that path yourself through extraVolumes, which this check cannot see. Unlike a managed certificate, an unwritable serving store is fatal: the CA refuses to start rather than retrying. Use a Secret store, which is the better fit in Kubernetes and needs no volume — or put the pair at the mount root and set config.cadir to a subdirectory of it, since the CA also refuses a store inside its cadir and will not create a directory of its own." $field $path $mount) -}}
+{{- end -}}
+{{- if and $cadir (or (eq $path $cadir) (hasPrefix (printf "%s/" $cadir) $path)) -}}
+{{- fail (printf "config.serving_cert.store.files.%s is %q, which is inside the cadir (%q) — and openvox-ca refuses any file store there, because a store overwrites its paths on every issuance and those are the CA's own files. By default this chart sets cadir to persistence.mountPath (%q), which is also the only writable path in the pod, so a file store needs config.cadir narrowed (for example %q/ca) and the pair kept at the mount root (%q/tls.crt, %q/tls.key) — the root rather than a subdirectory, because the CA will not create one and an unwritable serving store stops it starting. A Secret store avoids all of this and is the better fit in Kubernetes." $field $path $cadir $mount $mount $mount $mount) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- $listen := dig "metrics_listen" "" $config -}}
 {{- if and $listen (not .Values.metrics.enabled) -}}
 {{- /*
@@ -809,7 +1068,7 @@ CrashLoopBackOff or a Service that silently routes nowhere.
 {{- $host := dig "host" "" $config | toString -}}
 {{- $loopback := or (hasPrefix "127." $host) (eq $host "localhost") -}}
 {{- if and (ne (include "openvox-ca.tlsConfigured" .) "true") (not (dig "no_tls_required" false $config)) (not $loopback) -}}
-{{- fail (printf "openvox-ca will refuse to start: no server TLS certificate is configured and the listen address (%s) is not loopback, which the server rejects as vulnerable to certificate injection.\n\nSet one of:\n  tls.existingSecret       a kubernetes.io/tls Secret holding the server certificate (recommended; Puppet agents require HTTPS)\n  config.tls_cert/tls_key  paths to a certificate you mount yourself\n  env/extraEnv             PUPPET_CA_TLS_CERT and PUPPET_CA_TLS_KEY, to feed those paths in from a Secret\n  config.no_tls_required   true, only behind a trusted TLS proxy that re-originates TLS\n  listen.host              127.0.0.1 or localhost, for a sidecar-only deployment" $host) -}}
+{{- fail (printf "openvox-ca will refuse to start: no server TLS certificate is configured and the listen address (%s) is not loopback, which the server rejects as vulnerable to certificate injection.\n\nSet one of:\n  tls.existingSecret       a kubernetes.io/tls Secret holding the server certificate (recommended; Puppet agents require HTTPS)\n  config.tls_cert/tls_key  paths to a certificate you mount yourself\n  config.serving_cert      let the CA issue and renew its own, into a Secret or a file pair\n  env/extraEnv             PUPPET_CA_TLS_CERT and PUPPET_CA_TLS_KEY, to feed those paths in from a Secret\n  config.no_tls_required   true, only behind a trusted TLS proxy that re-originates TLS\n  listen.host              127.0.0.1 or localhost, for a sidecar-only deployment" $host) -}}
 {{- end -}}
 {{- end -}}
 
@@ -1120,13 +1379,25 @@ stays unreadable — drop kubernetesExport.rbac.create and manage the Role yours
 with an explicit resourceNames list.
 {{- end }}
 {{- end }}
+{{- if and (not .Values.managedCerts.rbac.create) (eq (include "openvox-ca.servingCertUsesSecret" .) "true") }}
+
+NOTE: managedCerts.rbac.create is false, so no Role was created — and
+config.serving_cert keeps its certificate in a Secret. openvox-ca will be
+refused get/create/patch on that Secret and will NOT START: it holds the
+certificate the listener presents, so the failure is fatal rather than the
+retried-and-green one a managed certificate gets. Create the Role yourself
+before the pod rolls, or move the serving certificate to a file store.
+{{- end }}
 {{- if and .Values.managedCerts.rbac.create (eq (include "openvox-ca.configFileKnown" .) "false") }}
 
 NOTE: the chart cannot read the configuration{{ if .Values.existingConfigMap }} (existingConfigMap){{ else }} (args, or a --config in
 extraArgs){{ end }}, so no Role was created for managed certificates. If your
 config.yaml has a managed_certs entry with a Secret store, openvox-ca will be
 refused by RBAC when it tries to write that Secret — while readiness stays
-green. Create a Role yourself, in each of those namespaces, with two rules: one
+green. If it has a serving_cert with a Secret store, the consequence is the
+opposite and worse: that Secret holds the certificate the CA's own listener
+presents, so the refusal is fatal and the pod never starts at all.
+Create a Role yourself, in each of those namespaces, with two rules: one
 granting create on secrets, which cannot be narrowed because an object has no
 name at admission time, and a second granting get and patch narrowed by
 resourceNames to the Secrets it names.
@@ -1136,8 +1407,9 @@ resourceNames to the Secrets it names.
 WARNING: openvox-ca is configured to issue certificates into Secrets. It can
 read and overwrite every Secret those entries name, and — because a Secret has
 no name at admission time, so `create` cannot be narrowed — it can also create
-any Secret that does not yet exist in each of those namespaces. A component
-certificate for a certname listed in puppetServers is a CA admin credential,
+any Secret that does not yet exist in each of those namespaces. A certificate
+for a certname listed in puppetServers — a component's, or the CA's own serving
+certificate — is a CA admin credential,
 because that listing is what grants administrative access — so treat those
 Secrets and their namespaces with the care you would give the CA's own key.
 {{- end }}

@@ -2462,6 +2462,287 @@ func (Chart) Test() error {
 			notWants: []string{"kind: Role\n"},
 		},
 		{
+			// A half-written store block, which is the state an operator is in
+			// part way through typing it. sprig's dig walks intermediates with
+			// an unchecked type assertion, so this used to abort the whole
+			// render with an interface-conversion error rather than any message
+			// anyone could act on. It must render and leave the refusal to the
+			// server, which names the missing store.
+			name:       "a serving_cert with an empty store block still renders",
+			sets:       []string{"serviceAccount.create=true"},
+			valuesYAML: "config:\n  serving_cert:\n    certname: ca.example.com\n    names: [ca.example.com]\n    renew_before: 720h\n    store:\n",
+			wants:      []string{"kind: Deployment", "scheme: HTTPS"},
+		},
+		{
+			// One level down from the case above, and the same hazard: `dig`
+			// asserts its last argument is a map with no recovery, so a
+			// `secret:` holding anything but a map aborted the render with
+			// Go's interface-conversion panic. Two callers read it -- the RBAC
+			// Secret list and the not-starting NOTE -- so both had to be routed
+			// through one guarded helper rather than patched where it showed.
+			//
+			// Null is the half-typed block. The server names the real problem;
+			// the chart's job is to get far enough to let it.
+			name:       "a serving_cert whose store.secret is null still renders",
+			sets:       []string{"serviceAccount.create=true"},
+			valuesYAML: "config:\n  serving_cert:\n    certname: ca.example.com\n    names: [ca.example.com]\n    renew_before: 720h\n    store:\n      secret:\n",
+			wants:      []string{"kind: Deployment", "scheme: HTTPS"},
+			// The degradation itself, not merely that the render survived.
+			// "Not a Secret store" is an RBAC claim: servingCertSecret feeds
+			// the Role's resourceNames and the will-NOT-START NOTE, so a
+			// regression reading the bare string as a Secret name again would
+			// render a Role naming nothing while this case stayed green.
+			notWants: []string{"kind: Role\n"},
+		},
+		{
+			// The other shape an operator reaches for: that `secret` takes the
+			// name directly. A scalar fails the same type assertion a null
+			// does, and must degrade to "not a Secret store" rather than abort.
+			name:       "a serving_cert whose store.secret is a bare name still renders",
+			sets:       []string{"serviceAccount.create=true"},
+			valuesYAML: "config:\n  serving_cert:\n    certname: ca.example.com\n    names: [ca.example.com]\n    renew_before: 720h\n    store:\n      secret: my-serving-cert\n",
+			wants:      []string{"kind: Deployment", "scheme: HTTPS"},
+			// The degradation itself, not merely that the render survived.
+			// "Not a Secret store" is an RBAC claim: servingCertSecret feeds
+			// the Role's resourceNames and the will-NOT-START NOTE, so a
+			// regression reading the bare string as a Secret name again would
+			// render a Role naming nothing while this case stayed green.
+			notWants: []string{"kind: Role\n"},
+		},
+		{
+			// extraArgs is the highest-precedence route to a certificate -- a
+			// flag beats the config file and the environment both -- and
+			// tlsConfigured did not scan it while the serving_cert conflict
+			// check did. The two answered differently for one input: the probe
+			// went out as HTTP against an HTTPS listener, and the install was
+			// refused for having no certificate that the other helper could see.
+			name:       "tls_cert supplied only through extraArgs counts as TLS",
+			sets:       []string{"serviceAccount.create=true"},
+			valuesYAML: "extraArgs:\n  - --tls-cert=/tls/tls.crt\n  - --tls-key=/tls/tls.key\n",
+			wants:      []string{"kind: Deployment", "scheme: HTTPS"},
+			notWants:   []string{"scheme: HTTP\n"},
+		},
+		{
+			// An empty block is still TLS, deliberately: the server refuses it
+			// with a message naming the missing store, and a chart that read it
+			// as "off" would refuse the install first for having no certificate
+			// and hide that. The counterpart to the null-value reject case,
+			// which must fall through to the ordinary refusal instead.
+			name:       "an empty serving_cert block still counts as TLS",
+			sets:       []string{"serviceAccount.create=true"},
+			valuesYAML: "config:\n  serving_cert: {}\n",
+			wants:      []string{"kind: Deployment", "scheme: HTTPS"},
+			notWants:   []string{"scheme: HTTP\n"},
+		},
+		{
+			// The CA's own serving certificate is TLS, and it is the one way to
+			// get TLS with neither tls_cert nor tls_key set -- the server
+			// refuses that combination. A chart that did not know it would
+			// `fail` this install for having no certificate, and would set the
+			// probes to HTTP against an HTTPS listener.
+			name: "a self-provisioned serving certificate is TLS on its own",
+			sets: []string{"serviceAccount.create=true"},
+			// The only file-store layout that both installs and starts, which
+			// took three goes to get right, so the constraints are worth
+			// stating in full:
+			//
+			//   * under persistence.mountPath, because readOnlyRootFilesystem
+			//     defaults to true and that is the one writable path;
+			//   * outside the cadir, which the server reserves against every
+			//     file store -- and the chart sets cadir TO the mount, so that
+			//     has to be narrowed before any file store fits;
+			//   * in a directory that already exists, because the store refuses
+			//     to create one and an unwritable serving store is fatal. Only
+			//     the mount point itself is guaranteed to exist on a fresh
+			//     volume, so the pair sits at its root. The cadir may be a
+			//     subdirectory because CA.Init creates that one.
+			//
+			// Version one used /srv: refused at install. Version two moved it
+			// under the mount and left cadir alone: rendered, then refused at
+			// startup. Version three narrowed cadir but put the pair in a
+			// serving/ subdirectory nothing creates: rendered, started, and
+			// died on the first write. Each was caught by review rather than
+			// here, because these assertions are render-only -- which is the
+			// standing limitation of a chart case, not a gap to close.
+			valuesYAML: `
+config:
+  cadir: /var/lib/puppet-ca/ca
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      files:
+        cert: /var/lib/puppet-ca/tls.crt
+        key: /var/lib/puppet-ca/tls.key
+`,
+			wants: []string{"kind: Deployment", "scheme: HTTPS"},
+			// A file store needs no API access at all, which is the systemd
+			// shape: no Role, and no token the CA has no use for.
+			notWants: []string{
+				"kind: Role\n", "scheme: HTTP\n", "automountServiceAccountToken: true",
+			},
+		},
+		{
+			// The mixed shape the first version of that NOTE got wrong: it was
+			// gated on the combined managedCertSecrets list, so a component's
+			// Secret satisfied it and the operator was told the CA would not
+			// start when the serving material never touches the API at all.
+			name:  "a serving file store with a managed Secret does not claim the CA will not start",
+			sets:  []string{"serviceAccount.create=true", "managedCerts.rbac.create=false"},
+			notes: true,
+			valuesYAML: `
+config:
+  cadir: /var/lib/puppet-ca/ca
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      files: {cert: /var/lib/puppet-ca/tls.crt, key: /var/lib/puppet-ca/tls.key}
+  managed_certs:
+    - certname: c.example.com
+      names: [c]
+      renew_before: 720h
+      store: {secret: {name: c-tls}}
+`,
+			notWants: []string{"will NOT START"},
+		},
+		{
+			// The other route to no Role: an operator who manages it themselves.
+			// For a managed certificate that is retried-and-green; for the
+			// serving certificate the CA does not start, and nothing said so.
+			name:  "managedCerts.rbac.create false with a serving Secret warns that the CA will not start",
+			sets:  []string{"serviceAccount.create=true", "managedCerts.rbac.create=false"},
+			notes: true,
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      secret: {name: openvox-ca-serving-tls}
+`,
+			wants:    []string{"will NOT START"},
+			notWants: []string{"kind: Role\n"},
+		},
+		{
+			// The OTHER route to the same fatal outcome, and the one whose
+			// sentence nothing asserted. The case above is rbac.create=false
+			// with a readable config; this is rbac.create left true while the
+			// chart cannot read the config at all, so it cannot know a
+			// serving_cert exists and renders no Role for it.
+			//
+			// Both branches end with the pod not starting, and they are worth
+			// separating because the NOTE has to say different things: there
+			// the operator turned the Role off, here the chart never saw the
+			// certificate. The managed-certificate half of this same NOTE is
+			// retried-and-green, which is exactly the contrast the sentence
+			// draws -- so asserting only "no Role was created" would pass with
+			// the serving half deleted.
+			name:  "an unreadable config warns that a serving Secret stops the pod starting",
+			sets:  []string{tls, "existingConfigMap=my-config", "serviceAccount.create=true"},
+			notes: true,
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store: {secret: {name: openvox-ca-serving-tls}}
+`,
+			wants: []string{
+				"opposite and worse",
+				"the pod never starts at all",
+			},
+		},
+		{
+			// The serving Secret's own namespace, which every other case omits
+			// -- so `dig "namespace" "" $serving` was always empty and always
+			// fell through to the release namespace. Replacing that whole
+			// expression with the release namespace rendered identically under
+			// the entire suite, while a deployment whose serving Secret lives
+			// elsewhere would get its Role in the wrong namespace, be refused
+			// by RBAC, and not start at all.
+			name: "a serving certificate names its own namespace for the Role",
+			sets: []string{"serviceAccount.create=true"},
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      secret: {name: openvox-ca-serving-tls, namespace: ca-tls-ns}
+`,
+			// Anchored to the Role's own metadata, not to the bare namespace
+			// string: the rendered ConfigMap embeds the operator's config.yaml,
+			// which contains `namespace: ca-tls-ns` verbatim, so the loose form
+			// passed with the namespace expression mutated away entirely.
+			wants: []string{
+				"  name: openvox-ca-managed-certs\n  namespace: ca-tls-ns\n",
+				"- openvox-ca-serving-tls",
+			},
+		},
+		{
+			// The serving certificate is a second source of Secret targets, and
+			// the Role must cover it. Without this the CA is refused by RBAC
+			// when it reads or writes the Secret holding the certificate its
+			// own listener presents -- which is fatal for that certificate
+			// rather than retried on the next pass.
+			name: "a serving certificate in a Secret renders the narrowed Role",
+			sets: []string{"serviceAccount.create=true"},
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      secret:
+        name: openvox-ca-serving-tls
+`,
+			wants: []string{
+				"name: openvox-ca-managed-certs",
+				"- openvox-ca-serving-tls",
+				`verbs: ["get", "patch"]`,
+				"automountServiceAccountToken: true",
+			},
+			notWants: []string{"kind: ClusterRole"},
+		},
+		{
+			// Both blocks at once, into one Role in one namespace. They are
+			// separate configuration and the same grant, so a render that
+			// emitted the Role twice, or dropped one of the two names, would
+			// be wrong in a way neither single-block case can see.
+			name: "serving_cert and managed_certs share one Role when they share a namespace",
+			sets: []string{"serviceAccount.create=true"},
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      secret: {name: openvox-ca-serving-tls}
+  managed_certs:
+    - certname: puppetserver.example.com
+      names: [puppetserver]
+      renew_before: 720h
+      store:
+        secret: {name: puppetserver-tls}
+`,
+			// Anchored as one contiguous resourceNames list rather than as two
+			// separate substrings, which is the stronger claim and the one that
+			// matters: both names resolve to the release namespace, so they
+			// belong to *one* rule in one Role. Two Roles, or two rules, would
+			// satisfy a pair of independent substring assertions.
+			wants: []string{
+				"    resourceNames:\n      - openvox-ca-serving-tls\n      - puppetserver-tls\n",
+			},
+		},
+		{
 			// A managed certificate's Role comes from the configuration, not
 			// from values: the entry names its own Secret and namespace,
 			// because a component's Secret lives with the component rather
@@ -2757,7 +3038,28 @@ config:
       renew_before: 720h
       store: {secret: {name: a-tls, namespace: openvox}}
 `,
-			wants:    []string{"(managed certificates stored in Secrets)"},
+			wants:    []string{"(managed or serving certificates stored in Secrets)"},
+			notWants: []string{"(OpenBao Kubernetes auth)", "(Kubernetes export)"},
+		},
+		{
+			// The same reason reached by the other source. serving_cert is a
+			// second block that puts a certificate in a Secret, so the reason
+			// the token was mounted has to cover it -- naming only
+			// managed_certs would send an operator looking for a block their
+			// configuration does not have.
+			name: "the egress NOTE covers a serving certificate in a Secret too",
+			sets: []string{"serviceAccount.create=true",
+				"networkPolicy.enabled=true", "networkPolicy.egress.enabled=true"},
+			notes: true,
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store: {secret: {name: openvox-ca-serving-tls}}
+`,
+			wants:    []string{"(managed or serving certificates stored in Secrets)"},
 			notWants: []string{"(OpenBao Kubernetes auth)", "(Kubernetes export)"},
 		},
 		{
@@ -3504,6 +3806,284 @@ config:
 		{
 			name:    "config.cadir pointing outside the mounted volume",
 			sets:    []string{tls, "config.cadir=/srv/ca"},
+			wantErr: "outside the volume mounted at",
+		},
+		{
+			// The chart itself produces this one: openvox-ca.config writes
+			// tls_cert/tls_key from tls.existingSecret, so the pair renders a
+			// config.yaml the server refuses and the pod CrashLoopBackOffs.
+			name: "config.serving_cert alongside tls.existingSecret",
+			sets: []string{tls},
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      secret: {name: ca-tls}
+`,
+			wantErr: "also supplies one",
+		},
+		{
+			// The same refusal by the direct route, which tls.existingSecret is
+			// only one way to reach.
+			name: "config.serving_cert alongside an explicit config.tls_cert",
+			sets: []string{"config.tls_cert=/etc/tls.crt", "config.tls_key=/etc/tls.key"},
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      secret: {name: ca-tls}
+`,
+			wantErr: "config.tls_cert",
+		},
+		{
+			// And by the environment, which outranks the config file and which
+			// tlsConfigured already knows how to read.
+			name: "config.serving_cert alongside PUPPET_CA_TLS_KEY in env",
+			sets: []string{"env.PUPPET_CA_TLS_KEY=/etc/tls.key"},
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      secret: {name: ca-tls}
+`,
+			wantErr: "PUPPET_CA_TLS_KEY",
+		},
+		{
+			// Both names in the env arm, because each is an independent route
+			// to the same refusal and the `or` had a case for only one of them.
+			name: "config.serving_cert alongside PUPPET_CA_TLS_CERT in env",
+			sets: []string{"env.PUPPET_CA_TLS_CERT=/etc/tls.crt"},
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      secret: {name: ca-tls}
+`,
+			wantErr: "PUPPET_CA_TLS_CERT",
+		},
+		{
+			// The trap the chart's own default creates: cadir is the mount, so
+			// the advice "put it under the mount" lands the pair inside the
+			// cadir, which the server refuses at startup. Rendering it would be
+			// a clean install and a CrashLoopBackOff.
+			name: "a serving_cert file store inside the cadir",
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      files: {cert: /var/lib/puppet-ca/serving/tls.crt, key: /var/lib/puppet-ca/serving/tls.key}
+`,
+			wantErr: "inside the cadir",
+		},
+		{
+			// The extraEnv arm of the conflict scan, which reads .name/.value
+			// off a list rather than a map and is the most fragile of the four
+			// routes to the same refusal.
+			name: "config.serving_cert alongside PUPPET_CA_TLS_CERT in extraEnv",
+			sets: []string{"extraEnv[0].name=PUPPET_CA_TLS_CERT", "extraEnv[0].value=/run/tls/tls.crt"},
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      secret: {name: ca-tls}
+`,
+			wantErr: "extraEnv",
+		},
+		{
+			// And its valueFrom spelling, which the chart cannot read and so
+			// must assume supplies a certificate.
+			name: "config.serving_cert alongside an extraEnv valueFrom for the TLS key",
+			sets: []string{
+				"extraEnv[0].name=PUPPET_CA_TLS_KEY",
+				"extraEnv[0].valueFrom.secretKeyRef.name=tls",
+				"extraEnv[0].valueFrom.secretKeyRef.key=path",
+			},
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      secret: {name: ca-tls}
+`,
+			wantErr: "extraEnv",
+		},
+		{
+			// A key written with no value is not a configured block, and the
+			// server reads it as the feature being off. Before the nil guard
+			// the chart read it as TLS, skipped its own no-certificate refusal
+			// and set the probes to HTTPS -- and `dig` aborted the render with
+			// an interface-conversion error rather than any message an operator
+			// could act on.
+			name:       "a serving_cert key with no value falls through to the TLS refusal",
+			valuesYAML: "config:\n  serving_cert:\n",
+			wantErr:    "will refuse to start",
+		},
+		{
+			// `key` alone, because fail aborts at the first offending field and
+			// `cert` is first in the loop -- so every other failing case is
+			// decided on `cert` and this element could be deleted with the
+			// chart suite green. The chain file has its own case below for the
+			// same reason.
+			name: "a serving_cert key file inside the cadir",
+			valuesYAML: `
+config:
+  cadir: /var/lib/puppet-ca/ca
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      files:
+        cert: /var/lib/puppet-ca/tls.crt
+        key: /var/lib/puppet-ca/ca/tls.key
+`,
+			wantErr: "inside the cadir",
+		},
+		{
+			// The chain file gets the cadir rule too, and no case put the
+			// failing path anywhere but `cert` -- so dropping `key` or `ca`
+			// from the loop rendered cleanly and refused at startup instead.
+			name: "a serving_cert chain file inside the cadir",
+			valuesYAML: `
+config:
+  cadir: /var/lib/puppet-ca/ca
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      files:
+        cert: /var/lib/puppet-ca/tls.crt
+        key: /var/lib/puppet-ca/tls.key
+        ca: /var/lib/puppet-ca/ca/chain.pem
+`,
+			wantErr: "inside the cadir",
+		},
+		{
+			// The highest-precedence route of the six, and the last one without
+			// a case. extraArgs is appended to the argv the chart builds, so it
+			// outranks the file and the environment both.
+			name: "config.serving_cert alongside --tls-cert in extraArgs",
+			sets: []string{"extraArgs[0]=--tls-cert=/etc/tls.crt"},
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      secret: {name: ca-tls}
+`,
+			wantErr: "extraArgs",
+		},
+		{
+			// The separated spelling, which is what makes the prefix match
+			// rather than an equality match the right test.
+			name: "config.serving_cert alongside a separated --tls-key in extraArgs",
+			sets: []string{"extraArgs[0]=--tls-key", "extraArgs[1]=/etc/tls.key"},
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      secret: {name: ca-tls}
+`,
+			wantErr: "extraArgs",
+		},
+		{
+			// tls_key alone: it does not enable TLS by itself, but it still
+			// names a path self-provisioning must never be read as writing to.
+			name: "config.serving_cert alongside config.tls_key alone",
+			sets: []string{"config.tls_key=/etc/tls.key"},
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      secret: {name: ca-tls}
+`,
+			wantErr: "config.tls_key",
+		},
+		{
+			// Fatal rather than retried, which is what distinguishes it from a
+			// managed certificate's file store landing somewhere unwritable.
+			name: "a serving_cert file store outside the mounted volume",
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      files: {cert: /srv/tls.crt, key: /srv/tls.key}
+`,
+			wantErr: "outside the volume mounted at",
+		},
+		{
+			// One field at a time, because the case above moves cert and key
+			// together and so proves neither independently: a check that
+			// inspected only `cert` would refuse it and pass. The store writes
+			// all three paths on every issuance, so each needs its own
+			// boundary or one of them silently escapes the volume.
+			//
+			// cadir is narrowed here so the valid fields can sit at the mount
+			// root. Under the chart's default cadir IS the mount, and the
+			// server reserves that subtree against every file store -- which
+			// is why the cases above reach for /srv for both fields rather
+			// than isolating one.
+			name: "a serving_cert file store whose key alone escapes the volume",
+			valuesYAML: `
+config:
+  cadir: /var/lib/puppet-ca/ca
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      files: {cert: /var/lib/puppet-ca/tls.crt, key: /srv/tls.key, ca: /var/lib/puppet-ca/ca.pem}
+`,
+			wantErr: "outside the volume mounted at",
+		},
+		{
+			// And the chain file, which is the one an operator is likeliest to
+			// point somewhere shared -- /etc/openvox/ca.pem is the ordinary
+			// layout the docs describe. Shareable is not the same as writable
+			// from this pod, and it is written on every issuance like the pair.
+			name: "a serving_cert file store whose chain alone escapes the volume",
+			valuesYAML: `
+config:
+  cadir: /var/lib/puppet-ca/ca
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      files: {cert: /var/lib/puppet-ca/tls.crt, key: /var/lib/puppet-ca/tls.key, ca: /srv/ca.pem}
+`,
 			wantErr: "outside the volume mounted at",
 		},
 		{

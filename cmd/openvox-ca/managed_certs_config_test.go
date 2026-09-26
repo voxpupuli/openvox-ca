@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -32,6 +33,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/certstore"
 	"github.com/voxpupuli/openvox-ca/internal/k8sexport"
 )
 
@@ -359,8 +361,8 @@ var _ = Describe("saying when a managed certificate is an admin credential", fun
 
 		// buildAuthConfig calls the same function a moment later and fails the
 		// startup with it, but only when TLS is configured -- it is inside the
-		// `if cfg.TLSCert != "" && cfg.TLSKey != ""` branch in main.go. Saying
-		// it here too would make the first mention look like the cause.
+		// `if tlsConfigured` branch in main.go. Saying it here too would make
+		// the first mention look like the cause.
 		It("stays silent when buildAuthConfig will report it", func() {
 			cfg := badCfg()
 			cfg.TLSCert = "/etc/openvox-ca/tls.pem"
@@ -372,13 +374,19 @@ var _ = Describe("saying when a managed certificate is an admin credential", fun
 		})
 
 		// The half-configured pair, which is the only thing that distinguishes
-		// the gate from its own inversion. The condition is
+		// the gate from its own inversion. The condition reads
 		//
-		//	if cfg.TLSCert == "" || cfg.TLSKey == ""
+		//	if !cfg.tlsEnabled()
 		//
-		// and the two specs above pin only the ends of it: both empty warns,
-		// both set stays silent. Those two agree under `&&` as well, so
-		// swapping the operator leaves them both green while silencing every
+		// which expands to
+		//
+		//	(TLSCert == "" || TLSKey == "") && ServingCert == nil
+		//
+		// so the `||` this table exists for is still in there, now conjoined
+		// with the serving-certificate arm the spec below covers. The two
+		// specs above pin only the ends of it: both empty warns, both set
+		// stays silent. Those two agree under `&&` as well, so swapping the
+		// operator leaves them both green while silencing every
 		// half-configured CA -- which is precisely the configuration that gets
 		// no second report, because buildAuthConfig runs only when BOTH are
 		// set. Suppressing the warning there loses it altogether.
@@ -386,6 +394,12 @@ var _ = Describe("saying when a managed certificate is an admin credential", fun
 		// Hence one entry per combination rather than one for "half": with
 		// `||` a single missing half is enough, and a gate that tested only
 		// TLSCert would pass a table that never varied TLSKey alone.
+		//
+		// The quoted condition was `cfg.TLSCert == "" || cfg.TLSKey == ""`
+		// until serving_cert arrived and this branch widened the gate. Every
+		// entry below still holds unchanged, because each one leaves
+		// ServingCert nil -- but the comment named a line that no longer
+		// exists, which is the quiet half of that change.
 		DescribeTable("warns whenever TLS is not fully configured",
 			func(cert, key string, wantWarning bool) {
 				cfg := badCfg()
@@ -409,6 +423,26 @@ var _ = Describe("saying when a managed certificate is an admin credential", fun
 			Entry("only the key set", "", "/etc/openvox-ca/tls-key.pem", true),
 			Entry("both set", "/etc/openvox-ca/tls.pem", "/etc/openvox-ca/tls-key.pem", false),
 		)
+
+		// The arm the serving certificate added. A self-provisioned CA serves
+		// TLS with neither tls_cert nor tls_key set, so testing that pair
+		// directly -- which this gate used to do -- would report the unreadable
+		// allow list here as well as fatally a moment later, and the first
+		// mention would look like the cause.
+		It("stays silent for a self-provisioned CA, which also reaches buildAuthConfig", func() {
+			cfg := badCfg()
+			cfg.ServingCert = &certstore.Entry{
+				Certname: "ca.example.com", Names: []string{"ca.example.com"},
+				RenewBefore: certstore.Duration(720 * time.Hour),
+				Store: certstore.StoreConfig{Files: &certstore.FilesConfig{
+					Cert: "/srv/serving/tls.crt", Key: "/srv/serving/tls.key"}},
+			}
+			Expect(cfg.tlsEnabled()).To(BeTrue(), "precondition: this CA serves TLS")
+
+			Expect(captureLogs(slog.LevelWarn, func() {
+				warnIfManagedCertIsAdmin(cfg, managed)
+			})).To(BeEmpty())
+		})
 	})
 
 	It("warns when the certname is listed in puppet_server", func() {

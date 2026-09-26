@@ -43,7 +43,32 @@ RestartSec=5s
 # entropy-starved machine; the status text says what it is waiting on. Before
 # that, Init may spend two internal/ca LockTimeout budgets in sequence waiting
 # on another replica — hmac-key on a cold start, then bootstrap — so this must
-# clear 2 x LockTimeout with room for the key generation on top.
+# clear those with room for the key generation on top. A CA using
+# serving_cert spends up to one further LockTimeout issuing its own serving
+# certificate before the listener binds, so the lock-wait term is three rather
+# than two -- plus the store read that follows the pass, which is outside its
+# budget by design.
+#
+# Worst case, quantified rather than left open, because an operator installing
+# this file is entitled to know whether it covers them:
+#
+#   Init, hmac-key on a cold start        60s   (LockTimeout)
+#   Init, bootstrap                       60s   (LockTimeout)
+#   serving_cert's pre-bind reconcile     60s   (LockTimeout)
+#   the store read that decides startup   30s   (certstore's Secret API
+#                                               timeout; a file store is
+#                                               effectively instant)
+#   ----------------------------------------
+#   bounded total                        210s
+#
+# leaving 90s of the 300s for key generation, which is the one term with no
+# bound of its own. That headroom was 180s before serving_cert existed, so the
+# feature halves it -- still ample for the ECDSA and RSA-2048 defaults, and the
+# figure to revisit first if an RSA-4096 CA on an entropy-starved host ever
+# trips TimeoutStartSec.
+#
+# Every lock term assumes an actual contending replica; a single-instance start
+# spends none of them and reaches the listener in milliseconds.
 # cmd/openvox-ca/launcher_test.go asserts that floor; charts/openvox-ca gives
 # Init the same 300s through its startupProbe.
 TimeoutStartSec=300s
@@ -63,6 +88,20 @@ Group=puppet-ca
 # A managed certificate with a `files` store writes outside cadir by
 # definition, so its directory needs naming here too. See "managed
 # certificates" in docs/configuration.md.
+#
+# The CA's own serving certificate -- `serving_cert` -- needs the same naming
+# when its `files` store is OUTSIDE StateDirectory, and not otherwise: a pair
+# under /var/lib/puppet-ca is already writable and needs nothing here. What
+# differs is the consequence of getting it wrong. A managed certificate that
+# cannot be written is logged and retried on the next pass; the serving
+# certificate is what the listener presents, so an unwritable store is fatal
+# and the CA refuses to start.
+#
+# Wherever it lives it must sit outside cadir, which the CA reserves against
+# every file store -- so on a default install, where cadir IS this directory,
+# the pair goes somewhere else and does need naming here. See "the CA's own
+# serving certificate" in docs/configuration.md and the Hardening section of
+# docs/systemd.md, which states the same rule.
 StateDirectory=puppet-ca
 StateDirectoryMode=0750
 #ReadWritePaths=/etc/puppetlabs/puppet/ssl/ca
