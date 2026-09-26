@@ -9,7 +9,7 @@ require (
 	github.com/google/go-containerregistry v0.22.1
 	github.com/magefile/mage v1.17.2
 	github.com/onsi/ginkgo/v2 v2.33.0
-	github.com/onsi/gomega v1.43.1
+	github.com/onsi/gomega v1.44.0
 	github.com/openbao/openbao/api/auth/approle/v2 v2.7.0
 	github.com/openbao/openbao/api/auth/kubernetes/v2 v2.7.0
 	github.com/openbao/openbao/api/v2 v2.7.0
