@@ -112,8 +112,14 @@ mechanism, key layouts and transaction/retry detail lives in
 | Redis/Valkey | `SET NX PX` with a per-acquisition random token; a heartbeat goroutine extends the TTL while held; unlock is a Lua compare-token-and-delete | Key expires within the TTL, lock releases |
 | PostgreSQL | `pg_advisory_lock` (session-level) on a dedicated pooled connection | Only when the server reaps the session — no TTL (see below) |
 | MySQL/MariaDB | `GET_LOCK` on a dedicated connection, polled with a 1 s server-side wait so context cancellation is honoured | Only when the server reaps the session — no TTL (see below) |
-| SQLite, filesystem | No cross-node lock — `ErrDistributedLockingUnsupported` / no `Locker`. Same-host only: an exclusive `flock(2)` per lock name, under `<cadir>/locks/` or a `.<db>.locks/` directory beside the SQLite file. These are also the backends the store-wide `store-instance` lock applies to, in the same directories, since they are the ones that support a single running instance | Kernel releases the lock when the descriptor closes or the holder dies — no stale lock, no TTL |
+| SQLite, filesystem | No cross-node lock — `ErrDistributedLockingUnsupported` / no `Locker`. Same-host only: an exclusive `flock(2)` per lock name, under `<cadir>/locks/` or a `.<db>.locks/` directory beside the SQLite file (beside the *resolved* file: a DSN that reaches the database through a symlink locks at the target, so every spelling of one database shares one lock directory). These are also the backends the store-wide `store-instance` lock applies to, in the same directories, since they are the ones that support a single running instance | Kernel releases the lock when the descriptor closes or the holder dies — no stale lock, no TTL |
 | Overlay | Delegates to the base backend's `Locker`, then to its `SameHostLocker`; reports unsupported when the base has neither | as base |
+
+The resolution is why one database cannot be locked twice — and it moved: a
+store whose DSN traverses a symlink locked beside the spelling before, and locks
+beside the target now, so a mixed-version pair on one host does not exclude each
+other until both are upgraded. The old directory is left behind and can be
+removed once nothing on the old version remains.
 
 The same-host lock is the one entry in that table with nothing to recover.
 `flock(2)` is held by an open file description, so the kernel drops it when the

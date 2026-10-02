@@ -815,6 +815,10 @@ var _ = Describe("Same-host locking", func() {
 			},
 			Entry("bare absolute path", "/var/lib/puppet-ca/ca.db", "/var/lib/puppet-ca/ca.db", true),
 			Entry("bare relative path", "ca.db", "ca.db", true),
+			// The driver opens a file: URI with SQLITE_OPEN_URI and decodes %HH
+			// itself, so this has to decode too or the permission fix protects a
+			// name nobody opens.
+			Entry("file URI, relative and percent-encoded", "file:ca%20b.db", "ca b.db", true),
 			Entry("bare path with parameters", "/var/lib/ca.db?_txlock=immediate", "/var/lib/ca.db", true),
 			Entry("file URI, absolute", "file:/var/lib/ca.db", "/var/lib/ca.db", true),
 			Entry("file URI, absolute with empty authority", "file:///var/lib/ca.db", "/var/lib/ca.db", true),
