@@ -769,21 +769,6 @@ false
 {{- end -}}
 
 {{/*
-Whether the server will serve HTTPS.
-
-It does so when a certificate and a key are BOTH configured — on any layer —
-or when the CA issues its own. Which layers supply them is openvox-ca.tlsSources'
-question, not this one's; this helper only insists on both halves, because the
-server refuses tls_cert without tls_key and a chart calling one half
-"configured" would set HTTPS probes against a listener that never binds.
-config.serving_cert is the third way, and is mutually exclusive with the other
-two: the server refuses to start with both.
-
-When the configuration is not fully known this answers "true": HTTPS is the
-normal case, and it is the answer that neither blocks a correct install nor
-makes the probes fail on one.
-*/}}
-{{/*
 Where the server's TLS certificate and key come from, as {"cert": <source>, "key": <source>} JSON.
 
 Each value is the NAME of the highest-precedence route supplying that half, or
@@ -855,11 +840,25 @@ bug; that was tried and `tls_cert` alone stopped being refused at install.
 {{- dict "cert" $cert "key" $key | toJson -}}
 {{- end -}}
 
+{{/*
+Whether the server will serve HTTPS.
+
+It does so when a certificate and a key are BOTH configured — on any layer —
+or when the CA issues its own. Which layers supply them is openvox-ca.tlsSources'
+question, not this one's; this helper only insists on both halves, because the
+server refuses tls_cert without tls_key and a chart calling one half
+"configured" would set HTTPS probes against a listener that never binds.
+config.serving_cert is the third way, and is mutually exclusive with the other
+two: the server refuses to start with both.
+
+When the configuration is not fully known this answers "true": HTTPS is the
+normal case, and it is the answer that neither blocks a correct install nor
+makes the probes fail on one.
+*/}}
 {{- define "openvox-ca.tlsConfigured" -}}
 {{- if ne (include "openvox-ca.configFullyKnown" .) "true" -}}
 true
 {{- else -}}
-{{- $config := include "openvox-ca.config" . | fromYaml -}}
 {{/*
   A self-provisioned serving certificate is TLS too, and is the one way to get
   it with neither tls_cert nor tls_key set -- the server refuses that

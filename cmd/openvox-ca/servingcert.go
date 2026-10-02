@@ -507,6 +507,19 @@ func buildServingCert1(one certstore.Config, deps certstore.Deps) (ca.CertSpec, 
 		if ns == "" {
 			ns = deps.DefaultNamespace
 		}
+		if ns == "" {
+			// Unreachable, and stated rather than assumed: BuildIn above
+			// applies the same fallback and refuses the entry when both are
+			// empty, so this cannot be reached while that call precedes this
+			// block. That ordering is the only thing making it safe, and
+			// nothing else in this function says so -- an edit that moved the
+			// store construction above BuildIn, or stopped checking its error,
+			// would hand a SecretStore an empty namespace and the operator an
+			// API error instead of the message certstore already writes.
+			return ca.CertSpec{}, nil, fmt.Errorf(
+				"serving_cert (%s): no namespace for Secret %q, and the CA pod's own "+
+					"could not be resolved", e.Certname, e.Store.Secret.Name)
+		}
 		store = certstore.NewSecretStore(deps.Client, *e.Store.Secret, ns, deps.CACerts)
 	} else {
 		store = certstore.NewFileStore(*e.Store.Files, deps.CACerts)
@@ -676,15 +689,23 @@ func provisionServingCert(ctx context.Context, myCA *ca.CA, s *servingCert) erro
 	//     out of the listener's critical path.
 	provisionCtx, cancel := context.WithTimeout(ctx, ca.LockTimeout)
 	defer cancel()
+	var reconcileErr error
 	if _, err := myCA.ReconcileManagedCert(provisionCtx, s.entry); err != nil {
-		// Logged, not returned. The error is now unambiguously this entry's --
-		// a single-entry call cannot report someone else's -- but it still does
-		// not decide, because a pass that failed can leave usable material
-		// behind and one that succeeded can leave none. The store is asked
-		// below, and that answer is the one the listener depends on.
-		slog.Debug("The startup reconcile of the CA's serving certificate reported a "+
-			"failure; whether the listener can still start is decided by the load below",
-			"error", err)
+		reconcileErr = err
+		// Kept as well as logged, which it was not before: the store decides
+		// whether startup proceeds, but when it decides against us this is the
+		// only account of why, and discarding it left the fatal message with
+		// nothing to say.
+		//
+		// Warn rather than Debug. This arm is not reached on a healthy start,
+		// and it is reached on one that SUCCEEDS -- a pass that failed can
+		// still leave usable material behind, and then nothing is fatal and
+		// nothing else mentions that the CA could not renew its own
+		// certificate. At Debug that start is silent. ReconcileManaged logs
+		// its loop's failures at Warn for the same reason; this path lost that
+		// when it stopped going through the loop.
+		slog.Warn("The CA's own serving certificate was not reconciled at startup",
+			"subject", s.entry.Spec.Subject, "store", s.store.String(), "error", err)
 	}
 
 	certPEM, keyPEM, err := s.store.Load(ctx)
@@ -694,7 +715,7 @@ func provisionServingCert(ctx context.Context, myCA *ca.CA, s *servingCert) erro
 	}
 	if len(certPEM) == 0 || len(keyPEM) == 0 {
 		return fmt.Errorf("the CA's serving certificate was not issued into %s, so the "+
-			"listener has nothing to present: %w", s.store, whyNothingWasIssued(s))
+			"listener has nothing to present: %w", s.store, whyNothingWasIssued(s, reconcileErr))
 	}
 	if err := s.holder.install(certPEM, keyPEM); err != nil {
 		return fmt.Errorf("the CA's serving certificate cannot be presented by the "+
@@ -718,16 +739,33 @@ func provisionServingCert(ctx context.Context, myCA *ca.CA, s *servingCert) erro
 
 // whyNothingWasIssued explains an empty serving store as specifically as the
 // pass allows, for the fatal message.
-func whyNothingWasIssued(s *servingCert) error {
+//
+// Three arms, most specific first. reconcileErr is what the pre-bind
+// ReconcileManagedCert returned, or nil.
+//
+// The middle arm used to say "see the Managed certificate not reconciled
+// warning logged above", which was true while this path called
+// ReconcileManaged: that function logs the warning from inside its loop.
+// ReconcileManagedCert does not, so once the pre-bind pass was narrowed to one
+// entry the message directed the operator to a line nothing writes, and the
+// error explaining the failure was discarded at the call site. Carrying the
+// error here is strictly better than restoring the log line -- the cause ends
+// up in the fatal message the operator is already reading, rather than in a
+// second place they have to go and find.
+func whyNothingWasIssued(s *servingCert, reconcileErr error) error {
 	if err := s.ownError(); err != nil {
 		return err
 	}
-	// Reachable when the entry failed before its store was touched at all --
-	// the subject lock timing out, or the CA reporting itself uninitialised.
-	// The pass logs the reason as a warning against the subject; this says
-	// where to look rather than inventing a cause.
-	return errors.New("the reconcile pass neither wrote nor failed against the store; " +
-		"see the \"Managed certificate not reconciled\" warning logged above for this certname")
+	if reconcileErr != nil {
+		// The entry failed before its store was touched at all -- a subject
+		// lock timing out, or the CA reporting itself uninitialised. Nothing
+		// was recorded against the store because nothing reached it.
+		return fmt.Errorf("the reconcile pass failed before it wrote to the store: %w", reconcileErr)
+	}
+	// Both silent: the pass reported success and wrote nothing. There is no
+	// cause to name and none to point at, so say exactly that rather than
+	// inventing one.
+	return errors.New("the reconcile pass neither wrote to the store nor reported a failure")
 }
 
 // getCertificate returns the listener's certificate source, or nil when the CA

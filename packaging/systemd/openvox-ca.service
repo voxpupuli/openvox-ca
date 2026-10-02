@@ -63,14 +63,26 @@ RestartSec=5s
 #
 # leaving 90s of the 300s for key generation, which is the one term with no
 # bound of its own. That headroom was 180s before serving_cert existed, so the
-# feature halves it -- still ample for the ECDSA and RSA-2048 defaults, and the
-# figure to revisit first if an RSA-4096 CA on an entropy-starved host ever
-# trips TimeoutStartSec.
+# feature halves it.
+#
+# Note which key that is. ca_key_algo defaults to RSA and ca_key_size to 4096,
+# so generating a 4096-bit key inside that 90s is the DEFAULT path, not an
+# exotic one -- on an entropy-starved host it is the term most likely to trip
+# TimeoutStartSec, and the first figure to raise. An earlier revision of this
+# comment called RSA-4096 the edge case and named RSA-2048 as a default; both
+# were wrong, and the mistake made the normal configuration sound like the
+# safe one.
 #
 # Every lock term assumes an actual contending replica; a single-instance start
 # spends none of them and reaches the listener in milliseconds.
-# cmd/openvox-ca/launcher_test.go asserts that floor; charts/openvox-ca gives
-# Init the same 300s through its startupProbe.
+#
+# cmd/openvox-ca/launcher_test.go asserts that floor. charts/openvox-ca does
+# NOT give Init the same budget: its startupProbe allows failureThreshold 30 x
+# periodSeconds 2 = 60s, which does not cover even the 210s of bounded terms
+# above. That is deliberate and documented in the chart's own values.yaml,
+# which tells an operator to raise failureThreshold when self-provisioning
+# against a remote key provider or a slow store -- but it is 60s, not 300s,
+# and an earlier revision of this line said otherwise.
 TimeoutStartSec=300s
 
 # Must exceed the drain budget (shutdown_timeout_sec, 25s by default) plus the

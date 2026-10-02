@@ -2259,6 +2259,35 @@ func (Chart) Test() error {
 			notWants:   []string{"scheme: HTTP\n"},
 		},
 		{
+			// The must-not-refuse twin for the conflict scan. Every other case
+			// around it asserts that a second certificate source IS detected;
+			// none asserted that a non-source is not. The server discards an
+			// empty PUPPET_CA_* variable, and Kubernetes renders a sourceless
+			// extraEnv entry as the empty string, so neither supplies a
+			// certificate -- but both are the shape the scan looks at, and a
+			// scan testing presence rather than a usable value would refuse
+			// this install for a second source that is not there.
+			//
+			// tlsSources guards both already, for the reasons its comment
+			// gives. This is the case that fails if either guard is dropped.
+			name: "empty and sourceless TLS variables are not a second certificate source",
+			sets: []string{
+				"serviceAccount.create=true",
+				"env.PUPPET_CA_TLS_CERT=",
+				"extraEnv[0].name=PUPPET_CA_TLS_KEY",
+			},
+			valuesYAML: `
+config:
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store: {secret: {name: openvox-ca-serving-tls}}
+`,
+			wants:    []string{"kind: Deployment", "scheme: HTTPS"},
+			notWants: []string{"scheme: HTTP\n"},
+		},
+		{
 			// An empty block is still TLS, deliberately: the server refuses it
 			// with a message naming the missing store, and a chart that read it
 			// as "off" would refuse the install first for having no certificate
@@ -3568,7 +3597,7 @@ config:
     store:
       secret: {name: ca-tls}
 `,
-			wantErr: "also supplies one",
+			wantErr: "but tls.existingSecret also supplies one",
 		},
 		{
 			// The same refusal by the direct route, which tls.existingSecret is

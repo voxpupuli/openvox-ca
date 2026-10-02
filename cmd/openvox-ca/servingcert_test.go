@@ -108,9 +108,15 @@ var _ = Describe("The CA's own serving certificate", func() {
 		})
 
 		It("enables TLS on its own, with neither tls_cert nor tls_key set", func() {
-			// The predicate five sites read. A self-provisioned CA that
-			// satisfied some of them would come up serving HTTPS with no client
-			// authentication, or refuse to bind having enabled TLS.
+			// The predicate every TLS decision in main.go reads. A
+			// self-provisioned CA that satisfied some of them would come up
+			// serving HTTPS with no client authentication, or refuse to bind
+			// having enabled TLS.
+			//
+			// No count here, deliberately: cfg.tlsEnabled's own doc comment
+			// gives the reason, and servingcert_wiring_test.go holds the sites
+			// to their measured number so that the number lives in one place
+			// that fails when it moves.
 			Expect(cfgWith(filesEntry()).tlsEnabled()).To(BeTrue())
 		})
 
@@ -584,6 +590,45 @@ var _ = Describe("The CA's own serving certificate", func() {
 			Expect(err.Error()).To(ContainSubstring("must be unencrypted"))
 		})
 
+		It("does not blame encryption for an ordinary keypair mismatch", func() {
+			// The negative half, and without it encryptedKeyHint could return
+			// its sentence unconditionally and the spec above would still
+			// pass. The hint is a diagnosis, so it has to be wrong to offer
+			// when the key is not encrypted at all -- an operator told to
+			// decrypt a key that is already plaintext goes looking for a
+			// passphrase that does not exist.
+			//
+			// A well-formed PKCS#8 key that simply is not this certificate's,
+			// which is the ordinary way to get here: two files copied from
+			// different places.
+			key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			Expect(err).NotTo(HaveOccurred())
+			other, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			Expect(err).NotTo(HaveOccurred())
+
+			tmpl := &x509.Certificate{
+				SerialNumber: big.NewInt(1),
+				Subject:      pkix.Name{CommonName: "ca.test"},
+				NotBefore:    time.Now().Add(-time.Hour),
+				NotAfter:     time.Now().Add(time.Hour),
+			}
+			der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+			Expect(err).NotTo(HaveOccurred())
+			certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+
+			// The OTHER key, so the pair genuinely does not match.
+			der8, err := x509.MarshalPKCS8PrivateKey(other)
+			Expect(err).NotTo(HaveOccurred())
+			keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der8})
+
+			h := &servingCertHolder{describe: "Secret openvox/ca-tls"}
+			err = h.install(certPEM, keyPEM)
+			Expect(err).To(HaveOccurred(), "precondition: the pair must not match")
+			Expect(err.Error()).NotTo(ContainSubstring("must be unencrypted"),
+				"the key is plaintext, so blaming encryption sends the operator "+
+					"looking for a passphrase that does not exist")
+		})
+
 		It("reports no certificate before one has been issued", func() {
 			h := &servingCertHolder{describe: "Secret openvox/ca-tls"}
 			_, err := h.GetCertificate(&tls.ClientHelloInfo{})
@@ -685,14 +730,6 @@ serving_cert:
   renew_before: 720h
   store: {secret: {name: openvox-ca-serving-tls}}
 `
-
-	// stubCluster points both lookups at fakes and restores them afterwards.
-	stubCluster := func(client func(string) (kubernetes.Interface, error), ns func() (string, error)) {
-		GinkgoHelper()
-		restoreClient, restoreNS := inClusterClientset, podNamespace
-		DeferCleanup(func() { inClusterClientset, podNamespace = restoreClient, restoreNS })
-		inClusterClientset, podNamespace = client, ns
-	}
 
 	It("names the CA's own serving certificate when no cluster client can be built", func() {
 		// The label matters: an operator reading this has both a managed_certs
@@ -816,6 +853,34 @@ var _ = Describe("serving_cert colliding with managed_certs", func() {
 		Expect(err).To(MatchError(ContainSubstring("serving_cert (shared.test)")))
 		Expect(err).To(MatchError(ContainSubstring("managed_certs[0]")))
 		Expect(err).To(MatchError(ContainSubstring("one inventory slot")))
+	})
+
+	It("names the colliding managed entry's own index, not the first", func() {
+		// Every other spec for this guard puts the single managed entry at
+		// index 0, so all of them pass against an index that is never
+		// computed. The same gap was found and closed in the reserved-path
+		// guard earlier in this file; checkManagedCertOverlap is a separate
+		// check with its own loop and kept the gap.
+		//
+		// The index is the actionable half: an operator with several
+		// components is being told which entry to rename.
+		cfg := &serverConfig{
+			ServingCert: entry("ca.test", "/srv/serving/tls.crt", "/srv/serving/tls.key"),
+			ManagedCerts: certstore.Config{
+				*entry("innocent.test", "/srv/a/tls.crt", "/srv/a/tls.key"),
+				*entry("ca.test", "/srv/b/tls.crt", "/srv/b/tls.key"),
+			},
+		}
+
+		_, err := buildServingCert(cfg, GinkgoT().TempDir(), "", stubCACerts{})
+		// This guard's message names the index without parenthesising the
+		// certname, unlike the reserved-path guard above. Asserted in the
+		// form it actually emits -- the first draft of this spec borrowed the
+		// other guard's format and failed against correct code.
+		Expect(err).To(MatchError(ContainSubstring("managed_certs[1] name the same certname")))
+		Expect(err).NotTo(MatchError(ContainSubstring("innocent.test")),
+			"the refusal names an entry that collides with nothing, sending the "+
+				"operator to rename the wrong certificate")
 	})
 
 	It("allows two different certnames", func() {
@@ -943,12 +1008,12 @@ var _ = Describe("serving_cert colliding with managed_certs", func() {
 		// the condition to ignore the Secret name -- refusing every deployment
 		// whose serving and component Secrets differ, which is all of them --
 		// left the whole suite green.
-		restoreClient, restoreNS := inClusterClientset, podNamespace
-		DeferCleanup(func() { inClusterClientset, podNamespace = restoreClient, restoreNS })
-		inClusterClientset = func(string) (kubernetes.Interface, error) {
-			return fake.NewClientset(), nil
-		}
-		podNamespace = func() (string, error) { return "openvox", nil }
+		stubCluster(
+			func(string) (kubernetes.Interface, error) {
+				return fake.NewClientset(), nil
+			},
+			func() (string, error) { return "openvox", nil },
+		)
 
 		cfg := &serverConfig{
 			ServingCert: &certstore.Entry{
@@ -977,12 +1042,12 @@ var _ = Describe("serving_cert colliding with managed_certs", func() {
 		// other way -- asserting only that the error, if any, was not the
 		// collision one -- it passed both when the check was reached and when
 		// nothing reached it, which is no assertion at all.
-		restoreClient, restoreNS := inClusterClientset, podNamespace
-		DeferCleanup(func() { inClusterClientset, podNamespace = restoreClient, restoreNS })
-		inClusterClientset = func(string) (kubernetes.Interface, error) {
-			return fake.NewClientset(), nil
-		}
-		podNamespace = func() (string, error) { return "ca-system", nil }
+		stubCluster(
+			func(string) (kubernetes.Interface, error) {
+				return fake.NewClientset(), nil
+			},
+			func() (string, error) { return "ca-system", nil },
+		)
 		cfg := &serverConfig{
 			ServingCert: &certstore.Entry{
 				Certname: "ca.test", Names: []string{"ca.test"},
@@ -1483,29 +1548,69 @@ var _ = Describe("the listener's certificate source", func() {
 
 // The two fallback arms nothing else reaches.
 var _ = Describe("the serving certificate's fallback reporting", func() {
-	It("points at the reconcile warning when the store was never touched", func() {
-		// whyNothingWasIssued's second arm, taken when the entry failed before
+	It("carries the reconcile error when the store was never touched", func() {
+		// whyNothingWasIssued's middle arm, taken when the entry failed before
 		// its store was consulted at all -- a subject lock timing out, or the
 		// CA reporting itself uninitialised. The store is empty and this
-		// entry's own wrappers recorded nothing, so the fatal message has no
-		// cause of its own to give and must say where to look instead of
-		// inventing one.
+		// entry's own wrappers recorded nothing, so the pass's own error is
+		// the only account of why and must reach the fatal message.
+		//
+		// This spec previously asserted the opposite and was correct to: the
+		// message said "see the Managed certificate not reconciled warning
+		// logged above", which ReconcileManaged does write from inside its
+		// loop. Narrowing the pre-bind pass to ReconcileManagedCert made that
+		// false without touching this file -- the single-entry call logs
+		// nothing -- so the message pointed at a line that is never written
+		// and the error itself was dropped at the call site.
 		sc := newServingCert(emptyStore{}, ca.CertSpec{Subject: "ca.test"})
 		Expect(sc.ownError()).NotTo(HaveOccurred(), "precondition: nothing recorded")
 
-		err := whyNothingWasIssued(sc)
-		Expect(err).To(MatchError(ContainSubstring("Managed certificate not reconciled")))
-		Expect(err).To(MatchError(ContainSubstring("neither wrote nor failed")))
+		err := whyNothingWasIssued(sc, errors.New("subject lock timed out"))
+		Expect(err).To(MatchError(ContainSubstring("subject lock timed out")),
+			"the pass's own error is the only account of this failure, and the fatal "+
+				"message is the one place the operator reads")
+		Expect(err).To(MatchError(ContainSubstring("failed before it wrote to the store")))
+		Expect(err).NotTo(MatchError(ContainSubstring("Managed certificate not reconciled")),
+			"that warning is emitted by ReconcileManaged's loop, which the pre-bind "+
+				"pass no longer calls, so directing the operator to it sends them to "+
+				"a log line nothing writes")
+	})
+
+	It("says so plainly when the pass neither wrote nor failed", func() {
+		// The third arm, and the one with genuinely nothing to report: the
+		// pass returned success and the store is still empty. Asserted
+		// separately because the arm above would otherwise be the only
+		// coverage, and a whyNothingWasIssued that ignored its nil case and
+		// always claimed a reconcile failure would pass it.
+		sc := newServingCert(emptyStore{}, ca.CertSpec{Subject: "ca.test"})
+
+		err := whyNothingWasIssued(sc, nil)
+		Expect(err).To(MatchError(ContainSubstring("neither wrote to the store nor reported a failure")))
+		Expect(err).NotTo(MatchError(ContainSubstring("failed before it wrote")),
+			"nothing failed, so claiming a failure invents a cause")
 	})
 
 	It("stays silent about admin credentials when the allow list cannot be read", func() {
-		// The arm that returns without warning. Its stated reason is that
-		// buildAuthConfig reports the same failure fatally a moment later, and
-		// that self-provisioning always means TLS is on -- a claim about
-		// tlsEnabled that nothing else checks. Without this spec the whole
-		// admin warning could vanish behind an unreadable file with nothing
-		// failing.
+		// What this guards, stated narrowly because the obvious stronger
+		// claim is not one it can make: buildServingCert neither errors nor
+		// warns when the allow list cannot be read, and tlsEnabled is true for
+		// a self-provisioned CA, which is the premise the silence rests on.
+		//
+		// It does NOT guard the early-return arm itself. Deleting that arm
+		// leaves the warning silent anyway -- the allow list failed to load,
+		// so admins is nil and there is nothing to warn about -- which means
+		// no assertion on absence here can distinguish the two. An earlier
+		// version of this comment claimed "without this spec the whole admin
+		// warning could vanish with nothing failing", and that was a claim
+		// about coverage the spec does not have. The warning's live path is
+		// covered by the DescribeTable above, which varies tls_cert/tls_key
+		// and asserts the warning appears.
+		//
+		// PuppetServer is set so the fixture is a configuration where an admin
+		// warning would be meaningful at all; without it the silence is
+		// doubly overdetermined and the spec reads as stronger than it is.
 		cfg := &serverConfig{
+			PuppetServer:     "ca.test",
 			PuppetServerFile: filepath.Join(GinkgoT().TempDir(), "absent"),
 			ServingCert: &certstore.Entry{
 				Certname: "ca.test", Names: []string{"ca.test"},
@@ -1554,10 +1659,10 @@ var _ = Describe("provisioning the serving certificate into a Secret", func() {
 		myCA.LeafKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
 		client = fake.NewClientset()
 
-		restoreClient, restoreNS := inClusterClientset, podNamespace
-		DeferCleanup(func() { inClusterClientset, podNamespace = restoreClient, restoreNS })
-		inClusterClientset = func(string) (kubernetes.Interface, error) { return client, nil }
-		podNamespace = func() (string, error) { return "openvox", nil }
+		stubCluster(
+			func(string) (kubernetes.Interface, error) { return client, nil },
+			func() (string, error) { return "openvox", nil },
+		)
 	})
 
 	secretCfg := func() *serverConfig {
@@ -1791,3 +1896,19 @@ var _ = DescribeTable("the chain-collision guard normalises before comparing",
 	// The neighbour it must not refuse: a genuinely different file.
 	Entry("two different files", "/etc/openvox/ca.pem", "/srv/comp/tls.crt", false),
 )
+
+// stubCluster points both in-cluster lookups at fakes for one spec and restores
+// them afterwards.
+//
+// File scope rather than a closure in one Describe: three other specs were
+// open-coding the same save/restore pair, which is the shape where one of them
+// eventually forgets the DeferCleanup and leaks a fake clientset into whatever
+// runs next. Taking both functions as arguments keeps the unusual cases --
+// a client that cannot be built, a namespace that cannot be resolved --
+// expressible without a second helper.
+func stubCluster(client func(string) (kubernetes.Interface, error), ns func() (string, error)) {
+	GinkgoHelper()
+	restoreClient, restoreNS := inClusterClientset, podNamespace
+	DeferCleanup(func() { inClusterClientset, podNamespace = restoreClient, restoreNS })
+	inClusterClientset, podNamespace = client, ns
+}

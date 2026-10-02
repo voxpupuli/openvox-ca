@@ -335,10 +335,15 @@ var _ = Describe("the serve command's serving-certificate wiring", func() {
 	// The predicate's call sites, which servingcert_test.go's own spec cannot
 	// reach: it asserts what tlsEnabled returns, not that anything reads it.
 	//
-	// Five sites read it, and the mTLS one is the reason this is a spec rather
-	// than a comment: a residual `cfg.TLSCert != "" && cfg.TLSKey != ""` there
-	// leaves a self-provisioned CA serving HTTPS with no client authentication,
-	// which is a security regression that nothing else in the suite notices.
+	// The mTLS site is why this is a spec rather than a comment: a residual
+	// `cfg.TLSCert != "" && cfg.TLSKey != ""` there leaves a self-provisioned
+	// CA serving HTTPS with no client authentication, which is a security
+	// regression that nothing else in the suite notices.
+	//
+	// The number of sites is asserted below and stated nowhere else. It was
+	// written into this comment as "five" while the assertion said eight and
+	// cfg.tlsEnabled's doc enumerated five decisions -- three numbers for one
+	// fact, which is the drift that doc comment explicitly declines to invite.
 	It("reads the TLS predicate rather than tls_cert/tls_key directly", func() {
 		var predicateReads, rawReads int
 		ast.Inspect(file, func(n ast.Node) bool {
@@ -524,9 +529,7 @@ func mentionsServingEntry(n ast.Node) bool {
 //
 // Both calls provision the serving certificate correctly. ReconcileManaged
 // walks the configured set and ReconcileManagedCert walks one entry, so on a
-// deployment with no component certificates they are indistinguishable -- and
-// servingcert_test.go configures none, which is why the whole suite stayed
-// green while this branch called the full walk.
+// deployment with no component certificates they are indistinguishable.
 //
 // What separates them is what a deployment WITH component certificates pays
 // before net.Listen. internal/ca gives each entry its own budget, and a Secret
@@ -535,11 +538,25 @@ func mentionsServingEntry(n ast.Node) bool {
 // certificate that is already in hand. #322 exported the single-entry call to
 // remove exactly that multiplier.
 //
-// Pinned structurally rather than behaviourally because the behavioural
-// version has to make a component store hang: a store that REFUSES fails in
-// milliseconds and both shapes pass, so the fixture would have to blackhole
-// packets and then measure a duration, which is a flaky spec pinning a
-// latency. The call written in the source is the honest thing to assert.
+// THE PROPERTY IS CARRIED BEHAVIOURALLY, in servingcert_test.go's "reconciles
+// only the serving entry before the listener binds, under a budget". That spec
+// configures two probe entries whose Load records being called and then
+// declines, and asserts the recorder stays empty. A full walk calls them; the
+// single-entry call does not. No timing is involved.
+//
+// An earlier revision of this comment said a behavioural check was impossible
+// -- that a refusing store "fails in milliseconds and both shapes pass", so a
+// fixture would have to blackhole packets and measure a duration. That was
+// wrong, and wrong about a spec written in the same change: the discriminator
+// is WHETHER Load was called, not how long it took. The mistake came from
+// thinking about the latency the defect causes rather than about the call it
+// makes.
+//
+// This structural pin is kept as a cheap second line of defence, with a narrow
+// job of its own: it forbids ReconcileManaged ANYWHERE in servingcert.go, so a
+// future caller added outside provisionServingCert is caught without needing
+// its own fixture. That is wider than the behavioural spec, deliberately, and
+// it is the only reason to keep both.
 var _ = Describe("the pre-bind reconcile's scope", func() {
 	var file *ast.File
 
