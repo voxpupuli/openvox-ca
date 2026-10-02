@@ -1403,12 +1403,226 @@ var _ = Describe("API Workflow", func() {
 	})
 
 	Context("PUT /certificate_status revoke when no cert exists", func() {
-		It("should return 409 when revoking a subject that was never signed", func() {
+		// 404, matching the signed arm of this same handler immediately above
+		// and the by-serial revoke's ErrSerialUnknown. A subject the CA never
+		// issued is an absent resource, not a conflict with the CA's state.
+		It("should return 404 when revoking a subject that was never signed", func() {
 			body, _ := json.Marshal(api.PutStatusBody{DesiredState: "revoked"})
 			req := httptest.NewRequest("PUT", "/certificate_status/never-signed-node", bytes.NewReader(body))
 			rr := httptest.NewRecorder()
 			mux.ServeHTTP(rr, req)
+			Expect(rr.Code).To(Equal(http.StatusNotFound))
+			// Assert the body too, for the reason the by-serial spec gives:
+			// ServeMux answers 404 for any path it has no pattern for, so a
+			// status-only assertion would survive this route being deleted.
+			//
+			// Two assertions, deliberately. The sentinel one proves this 404
+			// came from the ErrSubjectUnknown arm rather than from the mux, but
+			// it cannot detect the sentinel being reworded -- expectation and
+			// actual are both derived from it, so it would follow the message
+			// anywhere, including to one that tells an operator nothing (and an
+			// empty sentinel would satisfy it vacuously). The literal is what
+			// pins the operator-visible text, matching the by-serial specs.
+			Expect(rr.Body.String()).To(ContainSubstring(ca.ErrSubjectUnknown.Error()))
+			Expect(rr.Body.String()).To(ContainSubstring("no inventory entry"))
+			Expect(rr.Body.String()).To(ContainSubstring("never-signed-node"))
+		})
+
+		// NOT the same as the never-heard-of case. Upstream splits them on
+		// whether a request exists, not on anything about the certificate:
+		// Puppet Server's certificate_status resource answers 404 when neither
+		// a signed certificate nor a CSR is present, and 409 when a CSR is
+		// present without a signed certificate. puppetserver-ca-cli turns that
+		// into two messages and two exit codes, 1 and 24. See issue #358.
+		//
+		// The tempting mistake is to treat them alike, because a queued request
+		// is not a certificate and puts nothing in the inventory, so revoke
+		// finds the same absence either way. That is internally consistent and
+		// it is the wrong axis: the HTTP contract is matched to Puppet Server
+		// rather than to our own symmetry.
+		It("should return 409, not 404, when the subject has only a pending CSR", func() {
+			subject := "requested-only-node"
+			csrPEM, err := testutil.GenerateCSR(subject)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = myCA.SaveRequest(context.Background(), subject, csrPEM)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Precondition: the CSR really is queued, so this spec is not
+			// silently re-testing the never-signed case above.
+			status := httptest.NewRecorder()
+			mux.ServeHTTP(status, httptest.NewRequest("GET", "/certificate_status/"+subject, nil))
+			Expect(status.Code).To(Equal(http.StatusOK))
+			Expect(status.Body.String()).To(ContainSubstring("requested"))
+
+			body, _ := json.Marshal(api.PutStatusBody{DesiredState: "revoked"})
+			req := httptest.NewRequest("PUT", "/certificate_status/"+subject, bytes.NewReader(body))
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+
+			Expect(rr.Code).To(Equal(http.StatusConflict),
+				"upstream reserves 409 for an unsigned CSR; puppetserver-ca-cli exits 24 on it")
+			Expect(rr.Body.String()).To(ContainSubstring("unsigned csr"),
+				"the body has to say which 409 this is; three other arms answer 409 too")
+			Expect(rr.Body.String()).To(ContainSubstring(subject))
+			// And NOT the unknown-subject sentinel. Asserting only the status
+			// would let the two collapse again as long as both answered 409 --
+			// which is precisely the state #358 was filed about.
+			Expect(rr.Body.String()).NotTo(ContainSubstring(ca.ErrSubjectUnknown.Error()),
+				"a queued request is not an unknown subject; that conflation is the defect")
+		})
+
+		// The third outcome, and the one with no safe guess. The 404/409 split
+		// is decided by whether a request exists, so when that read FAILS --
+		// rather than reporting absence -- neither answer is available: 404
+		// would assert the subject is unknown and 409 would assert a queued
+		// request, and nothing has established either. 503 is this API's
+		// documented answer for a read the CA could not complete, and it is
+		// what upstream's csr-exists? would effectively do rather than
+		// resolving to absent.
+		//
+		// A directory where the CSR file belongs produces EISDIR, which is a
+		// real read failure and specifically NOT fs.ErrNotExist -- the
+		// distinction the branch turns on.
+		It("should return 503 when it cannot tell whether a request exists", func() {
+			subject := "unreadable-csr-node"
+			csrPath := filepath.Join(myCA.Storage.CSRDir(), subject+".pem")
+			Expect(os.MkdirAll(csrPath, 0o755)).To(Succeed())
+
+			body, _ := json.Marshal(api.PutStatusBody{DesiredState: "revoked"})
+			req := httptest.NewRequest("PUT", "/certificate_status/"+subject, bytes.NewReader(body))
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+
+			Expect(rr.Code).To(Equal(http.StatusServiceUnavailable),
+				"neither 404 nor 409 is measured here, so neither may be asserted")
+			Expect(rr.Body.String()).NotTo(ContainSubstring(ca.ErrSubjectUnknown.Error()),
+				"a read that failed is not a subject the inventory does not list")
+			Expect(rr.Body.String()).NotTo(ContainSubstring("unsigned csr"),
+				"nor is it a queued request; that is the thing we could not determine")
+			// The cause names a storage path, so it must stay in the log.
+			Expect(rr.Body.String()).NotTo(ContainSubstring(tmpDir))
+		})
+
+		// The two cases are only useful if they are told apart, and the defect
+		// issue #358 records is a failure to do that -- both answering one
+		// status. Asserting each case alone cannot catch a collapse, because
+		// either spec passes whichever way the pair is merged; asserting that
+		// the pair differs is what does.
+		It("distinguishes an unknown subject from a subject with only a pending CSR", func() {
+			queued := "queued-node"
+			csrPEM, err := testutil.GenerateCSR(queued)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = myCA.SaveRequest(context.Background(), queued, csrPEM)
+			Expect(err).NotTo(HaveOccurred())
+
+			revoke := func(subject string) *httptest.ResponseRecorder {
+				body, _ := json.Marshal(api.PutStatusBody{DesiredState: "revoked"})
+				rr := httptest.NewRecorder()
+				mux.ServeHTTP(rr, httptest.NewRequest(
+					"PUT", "/certificate_status/"+subject, bytes.NewReader(body)))
+				return rr
+			}
+
+			unknown := revoke("no-such-node-at-all")
+			pending := revoke(queued)
+
+			Expect(unknown.Code).NotTo(Equal(pending.Code),
+				"upstream gives these different statuses and puppetserver-ca-cli "+
+					"branches on the difference, printing different messages and "+
+					"exiting 1 versus 24")
+			Expect(unknown.Code).To(Equal(http.StatusNotFound))
+			Expect(pending.Code).To(Equal(http.StatusConflict))
+		})
+
+		// The leak guard belongs here rather than beside the spec above, and the
+		// difference is the whole point: for a subject that was simply never
+		// listed, the backends synthesise the not-exist themselves and the cause
+		// names no path, so wrapping it there would leak nothing and an
+		// assertion there would pass whatever the code did. A lost inventory is
+		// the case where the cause is a real *fs.PathError, so it is the only
+		// place the invariant can actually be tested.
+		It("does not leak the storage path into the 404 body when the inventory is lost", func() {
+			subject := "inventory-lost-node"
+			csrPEM, err := testutil.GenerateCSR(subject)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = myCA.SaveRequest(context.Background(), subject, csrPEM)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = myCA.Sign(context.Background(), subject)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Both files: with the integrity MAC left behind the missing blob
+			// fails verification instead, which is a different, counted branch
+			// answering 409 -- and this spec would then pass without ever
+			// reaching the arm it exists to guard.
+			inv := myCA.Storage.InventoryPath()
+			Expect(os.Remove(inv)).To(Succeed())
+			Expect(os.Remove(filepath.Join(filepath.Dir(inv), ".inventory.hmac"))).To(Succeed())
+
+			body, _ := json.Marshal(api.PutStatusBody{DesiredState: "revoked"})
+			req := httptest.NewRequest("PUT", "/certificate_status/"+subject, bytes.NewReader(body))
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+
+			Expect(rr.Code).To(Equal(http.StatusNotFound),
+				"a lost inventory reaches the same sentinel, so it answers 404 too")
+			// Prove the 404 came from the sentinel arm before asserting
+			// anything about its body. ServeMux answers "404 page not found"
+			// for a path it has no pattern for, and that body contains no
+			// tmpDir either -- so without this, the guard below would pass with
+			// the route deleted and the arm never reached.
+			Expect(rr.Body.String()).To(ContainSubstring(ca.ErrSubjectUnknown.Error()))
+			// The other half of what the docs publish about this state: it is
+			// uncounted here, exactly as it is for a subject that was never
+			// listed. This variant reaches the branch through the HMAC
+			// baseline re-initialisation, which the CA-layer spec does not
+			// traverse.
+			Expect(myCA.CRLUpdateFailures()).To(BeNumerically("==", 0),
+				"a lost inventory is not a CRL-update failure, as docs/api.md states")
+			// The invariant the whole design rests on. The sentinel is returned
+			// unwrapped so this cause -- which names a filesystem path -- stays
+			// in the log; restoring the natural-looking wrap
+			// fmt.Errorf("%w: %s: %w", ErrSubjectUnknown, subject, err) serves
+			// that path to any admin-tier caller, and only this assertion
+			// notices. The by-serial specs pin theirs the same way.
+			Expect(rr.Body.String()).NotTo(ContainSubstring(tmpDir),
+				"a CA-side cause may name storage paths; it must stay in the log")
+		})
+
+		// The twin of the above, and the reason the fix cannot simply test for
+		// fs.ErrNotExist at the handler. Every Backend.Get wraps os.ErrNotExist
+		// when a key is absent (storage.Backend's documented contract), so a
+		// missing CRL blob reaches this handler carrying the same
+		// fs.ErrNotExist as an unknown subject does. Answering 404 here would
+		// tell an operator their node is unknown when its certificate is
+		// present and it is the CA that has lost its CRL.
+		It("should still return 409 when the subject exists but the CRL is unreadable", func() {
+			subject := "crl-gone-node"
+			csrPEM, err := testutil.GenerateCSR(subject)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = myCA.SaveRequest(context.Background(), subject, csrPEM)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = myCA.Sign(context.Background(), subject)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(os.Remove(myCA.Storage.CRLPath())).To(Succeed())
+
+			body, _ := json.Marshal(api.PutStatusBody{DesiredState: "revoked"})
+			req := httptest.NewRequest("PUT", "/certificate_status/"+subject, bytes.NewReader(body))
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
 			Expect(rr.Code).To(Equal(http.StatusConflict))
+			// Assert which 409 this is, not merely that it is one. Three arms
+			// of this handler can answer 409 and two of them carry a sentinel's
+			// message; only the generic fall-through writes a bare "conflict".
+			// Without this, misrouting a missing CRL through the
+			// ErrForeignStoredCRL arm -- a plausible mistake, since that arm
+			// also concerns a CRL this CA cannot use -- would leave the spec
+			// green while changing what an operator is told to do about it.
+			Expect(rr.Body.String()).To(ContainSubstring("conflict"))
+			Expect(rr.Body.String()).NotTo(ContainSubstring(ca.ErrForeignStoredCRL.Error()),
+				"a CRL that is absent is not a CRL signed by another CA; the remedies differ")
+			Expect(rr.Body.String()).NotTo(ContainSubstring(ca.ErrSubjectUnknown.Error()),
+				"and emphatically not an unknown subject, which is the conflation #358 is about")
 		})
 	})
 

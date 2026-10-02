@@ -169,8 +169,13 @@ query, and `puppetca_crl_sync_failures_total` for why it is stuck.
 > at the CRL lock beneath it, which *is* counted, by the rule above — *unless*
 > another process on the same host was holding it, the one case where they too
 > refuse at acquisition), a revocation whose subject or serial was simply **not
-> present** in the inventory — a read that *failed* is counted, per above (though `PUT
-> /certificate_status` also answers its caller `409` in both cases), and a
+> present** in the inventory — a read that *failed* is counted, per above (on
+> `PUT /certificate_status` those two are told apart by the status code: no
+> inventory entry answers `404`, a failed inventory read answers `409`. The
+> by-serial route also answers `404` for a serial no entry carries, but a
+> failed *inventory* read there is a `503`; an unreadable stored *certificate*
+> on that route is a `409` and is likewise uncounted — see its
+> [response table](api.md#revocation-by-serial)), and a
 > malformed serial met by the cleanup job.
 >
 > A CRL the *exporter* cannot read is a different matter, and is invisible here

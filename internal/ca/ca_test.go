@@ -18,6 +18,7 @@
 package ca_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -28,9 +29,12 @@ import (
 	"encoding/asn1"
 	"encoding/pem"
 	"errors"
+	"io/fs"
+	"log/slog"
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -572,13 +576,119 @@ var _ = Describe("CA Revocation", func() {
 	})
 
 	It("returns an error when revoking a subject with no inventory entry", func() {
-		Expect(myCA.Revoke(context.Background(), "never-signed")).To(HaveOccurred())
+		// Capture the log too: docs/api.md tells operators to separate a
+		// mistyped certname from a lost inventory by whether this record's
+		// error attribute names a storage path. The lost-inventory half is
+		// pinned in crlchain_test.go; this is the other half, and without it a
+		// well-meant change that added the inventory path to the not-found
+		// error for debuggability would void the documented procedure with
+		// nothing going red.
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+		defer slog.SetDefault(orig)
+
+		// Pinned to the sentinel, not merely to "an error": ErrSubjectUnknown
+		// is what the API layer turns into a 404, so an opaque assertion here
+		// would let the status code regress without a red test.
+		Expect(myCA.Revoke(context.Background(), "never-signed")).
+			To(MatchError(ca.ErrSubjectUnknown))
+
+		var line string
+		for _, l := range strings.Split(buf.String(), "\n") {
+			if strings.Contains(l, "No inventory entry for subject") {
+				line = l
+				break
+			}
+		}
+		// Positive first, so the absence assertion below cannot pass simply
+		// because the line stopped being emitted.
+		Expect(line).To(ContainSubstring("never-signed"),
+			"the record must name the subject it could not find")
+		Expect(line).NotTo(ContainSubstring(store.InventoryPath()),
+			"an unlisted subject must not name a storage path; that absence is what docs/api.md tells operators to read")
+		// Pin the level in both directions. The capture filter already catches
+		// a demotion, since the record would not be emitted at all -- but a
+		// promotion to Warn would pass silently while falsifying docs/api.md's
+		// "at info level" and the reason revokeLocked gives for choosing Info:
+		// a second WARN for every mistyped certname, beside the one each caller
+		// already emits.
+		Expect(line).To(ContainSubstring("level=INFO"),
+			"a mistyped certname must not add a second WARN beside the caller's")
 		// Not counted. The CRL-update counter drives the mixin's alert, and a
 		// typo'd certname is an operator mistake, not a CA fault -- so the
-		// exclusion for a never-issued subject is pinned here, beside the error
-		// that identifies it.
+		// exclusion for a subject the inventory does not list is pinned here,
+		// beside the error that reports it. Keyed on the inventory rather than
+		// on issuance history: ErrSubjectUnknown does not claim the latter, and
+		// a lost inventory -- on a blob backend, one lost along with its
+		// integrity MAC -- reaches the same uncounted arm with a certificate
+		// still in storage.
+		//
+		// "By itself" is load-bearing: a 404 CAN carry a count, because the
+		// superseded-predecessor retirement runs before this lookup and counts
+		// its own failures. This fixture has no predecessors, so what is pinned
+		// here is that the not-found arm adds nothing of its own.
 		Expect(myCA.CRLUpdateFailures()).To(BeNumerically("==", 0),
-			"a subject that was never issued must not raise the CRL-failure alert")
+			"the not-found arm must not raise the CRL-failure alert by itself")
+	})
+
+	It("counts an inventory that fails verification, unlike one that simply lacks the subject", func() {
+		// The by-subject twin of the by-serial spec in revokeserial_test.go,
+		// and the assertion three other specs quietly depend on. Each of them
+		// removes .inventory.hmac alongside the inventory precisely to AVOID
+		// this branch, and each says so in a comment -- but nothing asserted
+		// what the branch they are avoiding actually does. Collapse the split
+		// and all three stay green while their stated reasons become false, and
+		// so does docs/api.md's claim that a lost inventory with its MAC intact
+		// is a counted 409 rather than the 404.
+		//
+		// It matters beyond bookkeeping: a tamper signal answered as an
+		// uncounted "no inventory entry" would report a forged inventory as an
+		// unknown node and leave PuppetCACRLUpdateFailing silent.
+		csrPEM, err := testutil.GenerateCSR("tampered-node")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = myCA.SaveRequest(context.Background(), "tampered-node", csrPEM)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = myCA.Sign(context.Background(), "tampered-node")
+		Expect(err).NotTo(HaveOccurred())
+
+		// The inventory only. Leaving the MAC behind is the whole point: the
+		// recomputed MAC is taken over an empty blob and cannot match, so the
+		// read fails verification rather than reporting absence.
+		Expect(os.Remove(store.InventoryPath())).To(Succeed())
+
+		err = myCA.Revoke(context.Background(), "tampered-node")
+		Expect(err).To(MatchError(storage.ErrInventoryTampered))
+		Expect(err).NotTo(MatchError(ca.ErrSubjectUnknown),
+			"a failed verification is not a subject the inventory does not list")
+		Expect(myCA.CRLUpdateFailures()).To(BeNumerically("==", 1),
+			"a revocation that could not be recorded must raise the alert")
+	})
+
+	It("does not report an unreadable CRL as an unknown subject", func() {
+		// The twin of the spec above, and the one that keeps the API layer's
+		// 404 honest. Backend.Get wraps fs.ErrNotExist for any absent key, so
+		// a missing CRL blob reaches Revoke carrying the same fs.ErrNotExist an
+		// absent inventory entry does. Asserting both halves here -- the
+		// premise (fs.ErrNotExist is present) and the discrimination
+		// (ErrSubjectUnknown is not) -- is what stops the two collapsing back
+		// into one branch: the API spec can only see the resulting status code,
+		// which is also the revoked arm's unconditional fall-through.
+		csrPEM, err := testutil.GenerateCSR("crl-missing-node")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = myCA.SaveRequest(context.Background(), "crl-missing-node", csrPEM)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = myCA.Sign(context.Background(), "crl-missing-node")
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(os.Remove(store.CRLPath())).To(Succeed())
+
+		err = myCA.Revoke(context.Background(), "crl-missing-node")
+		Expect(err).To(HaveOccurred())
+		Expect(err).To(MatchError(fs.ErrNotExist),
+			"the premise: an absent CRL blob still reaches the caller as fs.ErrNotExist")
+		Expect(err).NotTo(MatchError(ca.ErrSubjectUnknown),
+			"a CA that has lost its CRL must not report the subject as unknown")
 	})
 
 	It("counts a CRL-update failure when a revocation cannot amend the CRL", func() {
@@ -609,8 +719,10 @@ var _ = Describe("CA Revocation", func() {
 		// a merely queued revocation can raise the mixin's alert. The whole
 		// claim turns on a spent deadline not being fs.ErrNotExist, which is
 		// the one branch of revokeLocked's split nothing else exercises -- the
-		// two specs above pin never-issued (uncounted) and a corrupt CRL
-		// (counted). An expired context reproduces it without the wait.
+		// no-inventory-entry spec in this Describe pins the uncounted side and
+		// the corrupt-CRL spec pins the counted one, and the unreadable-CRL
+		// twin between them fails after that split rather than at it. An
+		// expired context reproduces it without the wait.
 		csrPEM, err := testutil.GenerateCSR("revoke-deadline-node")
 		Expect(err).NotTo(HaveOccurred())
 		_, err = myCA.SaveRequest(context.Background(), "revoke-deadline-node", csrPEM)

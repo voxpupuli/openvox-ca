@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"path/filepath"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -648,6 +649,48 @@ var _ = Describe("Delayed supersession", func() {
 					"followed it could not complete; partial containment beats none")
 			Expect(pending()).To(BeEmpty(),
 				"and it must leave the list, having actually been revoked")
+		})
+
+		It("can answer the unknown-subject sentinel with the counter already moved", func() {
+			// docs/api.md tells operators that neither status code on
+			// PUT /certificate_status is a statement about
+			// puppetca_crl_update_failures_total, in either direction. The 409
+			// half is the lock refusal, documented above. This is the other
+			// half, and it is the one a reader would doubt: a 404 that DID move
+			// the counter, because the superseded-predecessor retirement runs
+			// before the lookup that produces the sentinel.
+			//
+			// Nothing pinned it. The ordering spec above reaches this branch
+			// through a backend whose inventory Get fails with a generic error,
+			// which is counted and answers 409 -- not the sentinel arm. The
+			// sentinel specs in ca_test.go have no predecessors and say so.
+			// Between them the combination went untested, so reordering the
+			// retirement after the lookup would leave this documented sentence
+			// false with nothing red.
+			myCA.SupersedeAfter = time.Hour
+			original := issue("node-counted-404")
+			_, err := myCA.AutoRenew(ctx, original)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pending()).To(HaveLen(1), "precondition: a predecessor is inside its window")
+
+			// The predecessor's retirement fails and is counted: an unparseable
+			// CRL makes every revocation fail, as the spec below relies on too.
+			Expect(store.UpdateCRL(ctx, []byte("not a valid CRL"))).To(Succeed())
+			// The subject's own lookup then reaches fs.ErrNotExist rather than
+			// failing verification -- the MAC has to go with the inventory, or
+			// this lands on the counted ErrInventoryTampered branch instead and
+			// the spec would pass while testing the wrong thing.
+			Expect(os.Remove(store.InventoryPath())).To(Succeed())
+			Expect(os.Remove(filepath.Join(
+				filepath.Dir(store.InventoryPath()), ".inventory.hmac"))).To(Succeed())
+
+			before := myCA.CRLUpdateFailures()
+			err = myCA.Revoke(ctx, "node-counted-404")
+			Expect(err).To(MatchError(ca.ErrSubjectUnknown),
+				"this is the error the API layer answers 404")
+			Expect(myCA.CRLUpdateFailures()).To(BeNumerically(">", before),
+				"and the counter moved on the way out, which is why the docs tell "+
+					"operators not to infer it from the status code")
 		})
 
 		It("keeps a predecessor on the list when its revocation fails", func() {
