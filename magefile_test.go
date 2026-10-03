@@ -30,6 +30,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -2774,6 +2775,18 @@ var _ = Describe("buildVariantPackages", func() {
 			Entry("the CA directory", "/etc/puppetlabs/puppet/ssl/ca", int64(0o770)),
 		)
 
+		// Both root in the deb's archive. The rpm declares the CA directory
+		// puppet-owned because rpm re-applies the owner on upgrade; dpkg does
+		// not, so the postinstall's one chown is enough here, and the deb does
+		// not depend on how dpkg would resolve an owner name at unpack.
+		It("ships both ssl directories root-owned, for the postinstall to hand over", func() {
+			owners, err := debOwners(filepath.Join(distDir, "openvox-ca_9.9.9-1_amd64.deb"))
+			Expect(err).NotTo(HaveOccurred())
+			for _, path := range []string{"/etc/puppetlabs/puppet/ssl", "/etc/puppetlabs/puppet/ssl/ca"} {
+				Expect(owners).To(HaveKeyWithValue(path, "root:root"), "owner of %s", path)
+			}
+		})
+
 		// The packaged default that the binary's own default gets wrong: a
 		// package is what gets installed beside OpenVox Server, and Server
 		// binds 8140.
@@ -2869,6 +2882,17 @@ var _ = Describe("buildVariantPackages", func() {
 			Entry("prerm", "prerm", "packaging/scripts/preremove"),
 			Entry("postrm", "postrm", "packaging/scripts/postremove"),
 		)
+
+		// The rpm's preinstall exists for an rpm behaviour dpkg does not
+		// share: dpkg leaves an existing directory's owner alone on upgrade
+		// (measured on Debian stable), so the deb has no window in which the
+		// running CA loses its cadir. Shipping the script here too would run
+		// account creation before unpack for no benefit, so it is asserted
+		// absent -- nfpm merges `overrides.rpm.scripts` per field, and a
+		// misplaced key would put it in both.
+		It("carries no preinst, which only the rpm needs", func() {
+			Expect(control).NotTo(HaveKey("preinst"))
+		})
 
 		// `hostname` above all. first-boot resolves this host's certificate
 		// name through `hostname -f` and `hostname -s`, and /usr/bin/hostname
@@ -3667,6 +3691,7 @@ func rpmScriptlets(path string) (map[string]string, error) {
 	}
 	out := map[string]string{}
 	for name, tag := range map[string]int{
+		"prein":  rpmutils.PREIN,
 		"postin": rpmutils.POSTIN,
 		"preun":  rpmutils.PREUN,
 		"postun": rpmutils.POSTUN,
@@ -3866,11 +3891,36 @@ var _ = Describe("the rpm's payload", func() {
 				Expect(scriptlets[tag]).To(Equal(string(want)),
 					"the %s scriptlet is not the script at %s", tag, src)
 			},
+			Entry("%pre", "prein", "packaging/scripts/preinstall"),
 			Entry("%post", "postin", "packaging/scripts/postinstall"),
 			Entry("%preun", "preun", "packaging/scripts/preremove"),
 			Entry("%postun", "postun", "packaging/scripts/postremove"),
 		)
 	})
+
+	// The CA directory is declared puppet-owned in the rpm, and nothing else
+	// under the ssl tree is.
+	//
+	// rpm re-applies a packaged directory's owner on every upgrade. Packaged
+	// root-owned, the cadir was root:root from each upgrade's unpack until
+	// %post chowned it back, while the running CA -- deliberately not stopped
+	// by an upgrade -- runs as `puppet` and could not write to it. That was
+	// measured on Rocky 9 with throwaway packages: an upgrade's unpack alone
+	// (--noscripts) left a root-declared directory root:root and a
+	// puppet-declared one puppet:puppet.
+	//
+	// The ssl root stays root: declaring it puppet-owned would hand `puppet`
+	// an agent's trust anchor at unpack, unconditionally, which is exactly
+	// what the postinstall now declines to do.
+	DescribeTable("declares the owner rpm will re-apply on every upgrade",
+		func(path, owner string) {
+			Expect(files).To(HaveKey(path))
+			Expect(files[path].owner).To(Equal(owner), "owner of %s", path)
+			Expect(files[path].group).To(Equal(owner), "group of %s", path)
+		},
+		Entry("the CA directory, which the running service writes", "/etc/puppetlabs/puppet/ssl/ca", "puppet"),
+		Entry("the ssl root, which may hold an agent's trust anchor", "/etc/puppetlabs/puppet/ssl", "root"),
+	)
 })
 
 // firstBootDefs returns the provisioning script's definitions -- everything
@@ -5994,6 +6044,12 @@ var _ = Describe("first-boot's provisioning steps", func() {
 					ContainSubstring("chown puppet:puppet"),
 					ContainSubstring("systemctl restart openvox-ca-first-boot"),
 				))
+				// And what that chown grants. The package declined to take
+				// this tree because owning a directory is owning the right to
+				// replace what is in it, so the remedy it hands the operator
+				// has to say so rather than "only the directories change".
+				Expect(r.output).To(ContainSubstring(filepath.Join(sslDir, "certs", "ca.pem")),
+					"the remedy does not say that the chown hands over the agent's trust anchor")
 				// It must stop before minting anything, not part way through.
 				Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).NotTo(BeAnExistingFile())
 			},
@@ -6005,6 +6061,23 @@ var _ = Describe("first-boot's provisioning steps", func() {
 			Entry("certs", "certs"),
 			Entry("private_keys", "private_keys"),
 		)
+
+		// The ssl root read-only with NOTHING created in it yet -- the state the
+		// postinstall now leaves when the root holds something it does not own
+		// but the agent has not made certs/ yet. The mkdirs used to run before
+		// any check, so this died on a bare "mkdir: Permission denied". The
+		// entry above cannot see that: it creates the subdirectories first, on
+		// purpose, to reach the later gate.
+		It("refuses a read-only ssl root before creating anything in it", func() {
+			Expect(os.Chmod(sslDir, 0o555)).To(Succeed())
+			DeferCleanup(func() { _ = os.Chmod(sslDir, 0o755) })
+
+			r := runFirstBootScript(sslDir, binDir, "ca.example.com")
+			Expect(r.ok).To(BeFalse(), "provisioning should have refused: %s", r.output)
+			Expect(r.output).To(ContainSubstring(sslDir+" is not writable"),
+				"it died somewhere other than the guidance")
+			Expect(r.output).NotTo(ContainSubstring("Permission denied"))
+		})
 
 		// public_keys is part of puppet's layout and this script creates it,
 		// but writes nothing into it. Because `fail` exits 1 and the oneshot is
@@ -6191,7 +6264,7 @@ var _ = Describe("postinstall's ownership and permission hardening", func() {
 	// so a spec had no way in without a container. The seam makes the
 	// hardening itself assertable -- --no-dereference, the symlink refusal, and
 	// mode 0640 on a file that will hold credentials.
-	var stubBin, log, sslDir, configPath, systemdRuntime, stateDir string
+	var stubBin, log, sslDir, configPath, systemdRuntime, stateDir, sslOwner string
 
 	run := func(args ...string) (firstBootResult, string) {
 		// /bin/sh by absolute path, because PATH below deliberately holds
@@ -6213,6 +6286,7 @@ var _ = Describe("postinstall's ownership and permission hardening", func() {
 			"OPENVOX_CA_SSLDIR="+sslDir,
 			"OPENVOX_CA_CONFIG="+configPath,
 			"OPENVOX_CA_STATEDIR="+stateDir,
+			"OPENVOX_CA_SSL_OWNER="+sslOwner,
 		)
 		out, err := cmd.CombinedOutput()
 		res := firstBootResult{ok: true, output: string(out)}
@@ -6271,6 +6345,21 @@ var _ = Describe("postinstall's ownership and permission hardening", func() {
 			[]byte(fmt.Sprintf("#!/bin/sh\necho \"mkdir $*\" >> %s\nexec %s \"$@\"\n", log, realMkdir)),
 			0o755)).To(Succeed())
 		Expect(os.MkdirAll(filepath.Join(sslDir, "ca"), 0o755)).To(Succeed())
+
+		// find delegates too, for the reason mkdir does: the ssl-root check
+		// asks the real filesystem who owns what, and a stub answering for it
+		// would test the stub. The owner it compares against defaults to the
+		// account running this suite, so every fixture entry counts as
+		// `puppet`'s -- the state of this CA's own host -- and a spec that
+		// wants a foreign entry names some other account.
+		realFind, lookErr := exec.LookPath("find")
+		Expect(lookErr).NotTo(HaveOccurred(), "no find on PATH to delegate to")
+		Expect(os.WriteFile(filepath.Join(stubBin, "find"),
+			[]byte(fmt.Sprintf("#!/bin/sh\necho \"find $*\" >> %s\nexec %s \"$@\"\n", log, realFind)),
+			0o755)).To(Succeed())
+		me, userErr := user.Current()
+		Expect(userErr).NotTo(HaveOccurred())
+		sslOwner = me.Username
 	})
 
 	// chownedPaths returns the paths of the single chown the postinstall makes
@@ -6303,49 +6392,104 @@ var _ = Describe("postinstall's ownership and permission hardening", func() {
 	// regexp over its indentation -- a source-text assertion, which this file
 	// states a rule against four times, and one that would pass on a
 	// commented-out useradd.
-	It("creates the same account by useradd as the sysusers file declares", func() {
-		// No systemd-sysusers, which is the only way the fallback is reached,
-		// and a getent that reports the account missing (the stub exits 2).
-		Expect(os.Remove(filepath.Join(stubBin, "systemd-sysusers"))).To(Succeed())
-
-		_, calls := run("configure")
-
-		var useradd []string
-		for _, line := range strings.Split(calls, "\n") {
-			if strings.HasPrefix(line, "useradd ") {
-				useradd = strings.Fields(line)
-			}
+	//
+	// Two scripts create it by useradd now: the postinstall's fallback, and
+	// the rpm's preinstall, which runs before the sysusers file is on disk.
+	// Both are held to the declaration, so neither can drift from it alone.
+	runPreinstall := func(args ...string) (firstBootResult, string) {
+		cmd := exec.Command("/bin/sh", append([]string{"packaging/scripts/preinstall"}, args...)...)
+		cmd.Env = append(os.Environ(), "PATH="+stubBin)
+		out, err := cmd.CombinedOutput()
+		res := firstBootResult{ok: err == nil, output: string(out)}
+		if err != nil {
+			var exit *exec.ExitError
+			Expect(errors.As(err, &exit)).To(BeTrue(), "preinstall did not run: %v", err)
 		}
-		Expect(useradd).NotTo(BeEmpty(), "the fallback never ran useradd:\n"+calls)
+		calls, readErr := os.ReadFile(log)
+		if readErr != nil {
+			calls = nil
+		}
+		return res, string(calls)
+	}
 
-		arg := func(flag string) string {
-			GinkgoHelper()
-			for i, f := range useradd {
-				if f == flag && i+1 < len(useradd) {
-					return useradd[i+1]
+	DescribeTable("creates the same account by useradd as the sysusers file declares",
+		func(runScript func() string) {
+			calls := runScript()
+
+			var useradd []string
+			for _, line := range strings.Split(calls, "\n") {
+				if strings.HasPrefix(line, "useradd ") {
+					useradd = strings.Fields(line)
 				}
 			}
-			Fail("useradd carried no " + flag + ": " + strings.Join(useradd, " "))
-			return ""
-		}
+			Expect(useradd).NotTo(BeEmpty(), "the fallback never ran useradd:\n"+calls)
 
-		body, err := os.ReadFile("packaging/sysusers/openvox-ca.conf")
-		Expect(err).NotTo(HaveOccurred())
-		var declared []string
-		for _, line := range strings.Split(string(body), "\n") {
-			if strings.HasPrefix(line, "u ") {
-				declared = strings.Fields(line)
+			arg := func(flag string) string {
+				GinkgoHelper()
+				for i, f := range useradd {
+					if f == flag && i+1 < len(useradd) {
+						return useradd[i+1]
+					}
+				}
+				Fail("useradd carried no " + flag + ": " + strings.Join(useradd, " "))
+				return ""
 			}
-		}
-		Expect(len(declared)).To(BeNumerically(">=", 6),
-			"the u line should be: u name id GECOS home shell")
 
-		// home and shell are taken from the end: the GECOS is quoted and
-		// contains spaces, so positional indexing from the left is wrong.
-		Expect(arg("--home-dir")).To(Equal(declared[len(declared)-2]))
-		Expect(arg("--shell")).To(Equal(declared[len(declared)-1]))
-		Expect(useradd[len(useradd)-1]).To(Equal(declared[1]),
-			"useradd created a different account name from the sysusers declaration")
+			body, err := os.ReadFile("packaging/sysusers/openvox-ca.conf")
+			Expect(err).NotTo(HaveOccurred())
+			var declared []string
+			for _, line := range strings.Split(string(body), "\n") {
+				if strings.HasPrefix(line, "u ") {
+					declared = strings.Fields(line)
+				}
+			}
+			Expect(len(declared)).To(BeNumerically(">=", 6),
+				"the u line should be: u name id GECOS home shell")
+
+			// home and shell are taken from the end: the GECOS is quoted and
+			// contains spaces, so positional indexing from the left is wrong.
+			Expect(arg("--home-dir")).To(Equal(declared[len(declared)-2]))
+			Expect(arg("--shell")).To(Equal(declared[len(declared)-1]))
+			Expect(useradd[len(useradd)-1]).To(Equal(declared[1]),
+				"useradd created a different account name from the sysusers declaration")
+		},
+		// No systemd-sysusers, which is the only way the fallback is reached,
+		// and a getent that reports the account missing (the stub exits 2).
+		Entry("the postinstall's fallback", func() string {
+			Expect(os.Remove(filepath.Join(stubBin, "systemd-sysusers"))).To(Succeed())
+			_, calls := run("configure")
+			return calls
+		}),
+		Entry("the rpm's preinstall", func() string {
+			_, calls := runPreinstall("1")
+			return calls
+		}),
+	)
+
+	// A non-zero %pre aborts the whole rpm install, which is far worse than
+	// the window the preinstall exists to close -- and nfpm cannot declare
+	// Requires(pre), so groupadd and useradd may be absent or may fail. The
+	// postinstall creates the account and chowns the directory as before in
+	// that case, so the preinstall must say so and carry on.
+	It("does not fail the install when the preinstall cannot create the account", func() {
+		for _, name := range []string{"groupadd", "useradd"} {
+			Expect(os.WriteFile(filepath.Join(stubBin, name),
+				[]byte("#!/bin/sh\nexit 1\n"), 0o755)).To(Succeed())
+		}
+		r, _ := runPreinstall("1")
+		Expect(r.ok).To(BeTrue(), "a failed account creation aborted the rpm install: %s", r.output)
+		Expect(r.output).To(ContainSubstring("the postinstall will try again"))
+	})
+
+	// And it leaves an account that is already there alone, which is the
+	// upgrade and the OpenVox-Server-got-here-first case.
+	It("creates nothing when the account already exists", func() {
+		Expect(os.WriteFile(filepath.Join(stubBin, "getent"),
+			[]byte(fmt.Sprintf("#!/bin/sh\necho \"getent $*\" >> %s\nexit 0\n", log)), 0o755)).To(Succeed())
+		r, calls := runPreinstall("2")
+		Expect(r.ok).To(BeTrue(), r.output)
+		Expect(calls).NotTo(ContainSubstring("groupadd"))
+		Expect(calls).NotTo(ContainSubstring("useradd"))
 	})
 
 	// The ssl-tree chown's own failure, isolated from the configuration
@@ -6368,7 +6512,7 @@ var _ = Describe("postinstall's ownership and permission hardening", func() {
 		r, _ := run("configure")
 		Expect(r.ok).To(BeTrue(), "a failed ssl-tree chown must not fail the install: %s", r.output)
 		Expect(r.output).To(And(
-			ContainSubstring("could not give "+sslDir+" to puppet:puppet"),
+			ContainSubstring("could not give "+sslDir+" "+filepath.Join(sslDir, "ca")+" to puppet:puppet"),
 			ContainSubstring("systemctl restart openvox-ca-first-boot"),
 		), "the warning did not name the ssl tree or the remedy")
 		// And it is this branch, not the configuration one.
@@ -6430,24 +6574,61 @@ var _ = Describe("postinstall's ownership and permission hardening", func() {
 	// The co-existence host the package advertises: openvox-agent got here
 	// first, as root, and created certs/, private_keys/ and public_keys/.
 	//
-	// The install used to take all three. It no longer does, and this spec is
-	// the inversion of the one that used to assert it did. Write permission on
-	// a directory governs unlink and rename of the entries inside it, so taking
-	// certs/ handed the `puppet` account the ability to replace certs/ca.pem --
-	// the trust anchor a root-running agent verifies against.
+	// The install used to take all three, and then -- after that was narrowed
+	// -- still took the ssl root above them. The second is the same grant one
+	// level up: rename(2) within a directory needs write permission on the
+	// directory alone, so `puppet` owning the ssl root could move the agent's
+	// certs/ aside and plant its own certs/ca.pem. That was reproduced on Linux
+	// as a real `puppet` user against a root-owned certs/, not inferred.
 	//
-	// It also bought nothing. On exactly this host ensure_node_certificate
-	// refuses to adopt a credential this CA did not issue, so provisioning
-	// stops regardless; the widening enabled a step that does not run. Where
-	// provisioning CAN proceed, first-boot creates these directories itself.
-	It("leaves the agent's own directories alone", func() {
+	// So the root is taken only when everything in it is already `puppet`'s.
+	// Here the fixture's directories belong to the account running the suite,
+	// and the check is pointed at a different one, so they read as foreign.
+	It("leaves the ssl root alone when something else's directories are in it", func() {
 		for _, d := range []string{"certs", "private_keys", "public_keys"} {
 			Expect(os.MkdirAll(filepath.Join(sslDir, d), 0o755)).To(Succeed())
 		}
+		sslOwner = "nobody"
 
-		_, calls := run("configure")
-		Expect(chownedPaths(calls)).To(ConsistOf(sslDir, filepath.Join(sslDir, "ca")),
-			"the install took a directory it did not create")
+		r, calls := run("configure")
+		Expect(r.ok).To(BeTrue(), "leaving the root alone must not fail the install: %s", r.output)
+		Expect(chownedPaths(calls)).To(ConsistOf(filepath.Join(sslDir, "ca")),
+			"the install took the ssl root over another account's directories")
+		Expect(r.output).To(And(
+			ContainSubstring("leaving "+sslDir+" as it is"),
+			ContainSubstring("certs/ca.pem"),
+		), "the operator was not told why the root was left, or what owning it would grant")
+	})
+
+	// The other half of the same test, and the case that keeps this CA's own
+	// host working. Everything first-boot creates belongs to `puppet`, so on
+	// a host where it has already run the root is still taken -- which is
+	// what puts it back after an rpm upgrade re-applies the packaged
+	// root:root. Without this a CA would stop provisioning after its first
+	// rpm upgrade and the next reboot.
+	It("takes the ssl root when everything in it is already puppet's", func() {
+		for _, d := range []string{"certs", "private_keys"} {
+			Expect(os.MkdirAll(filepath.Join(sslDir, d), 0o755)).To(Succeed())
+		}
+		Expect(os.Symlink("ca/ca_crl.pem", filepath.Join(sslDir, "crl.pem"))).To(Succeed())
+
+		r, calls := run("configure")
+		Expect(chownedPaths(calls)).To(ConsistOf(sslDir, filepath.Join(sslDir, "ca")))
+		Expect(r.output).NotTo(ContainSubstring("leaving " + sslDir))
+	})
+
+	// A question the check cannot answer is not a yes. An account the system
+	// does not know -- the case where the block above failed to create it --
+	// makes find fail, and the root must then be left rather than taken.
+	It("leaves the ssl root alone when it cannot tell who owns what is in it", func() {
+		Expect(os.MkdirAll(filepath.Join(sslDir, "certs"), 0o755)).To(Succeed())
+		sslOwner = "openvox-ca-no-such-account"
+
+		r, calls := run("configure")
+		Expect(r.ok).To(BeTrue(), "an unanswerable check must not fail the install: %s", r.output)
+		Expect(chownedPaths(calls)).To(ConsistOf(filepath.Join(sslDir, "ca")),
+			"the root was taken on a check that failed")
+		Expect(r.output).To(ContainSubstring("could not check who owns the entries in " + sslDir))
 	})
 
 	// And it does not create them either, so the modes ensure_ssl_tree chooses

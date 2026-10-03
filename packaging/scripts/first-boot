@@ -426,6 +426,15 @@ ensure_ssl_tree() {
 	# fail outright under `set -e` and abort provisioning that had nothing left
 	# to do. A directory that is already there is left exactly as it is.
 	[ -d "$SSLDIR" ] || fail "$SSLDIR does not exist; the package should have created it"
+
+	# The ssl root first, before anything is created in it. The postinstall
+	# leaves it root-owned on a host where something else -- an agent running
+	# as root -- already keeps files there, and the mkdirs below would then die
+	# on a bare "mkdir: Permission denied" before the check further down could
+	# say why. The loop at the end repeats it, harmlessly, so the full set
+	# provisioning writes into is still stated in one place.
+	[ -w "$SSLDIR" ] || refuse_unwritable "$SSLDIR"
+
 	for d in certs public_keys; do
 		if [ ! -d "$SSLDIR/$d" ]; then
 			info "creating $SSLDIR/$d"
@@ -468,20 +477,40 @@ ensure_ssl_tree() {
 	# a stray slash so the message names the directory the operator will look at.
 	for d in "" certs private_keys; do
 		target="$SSLDIR${d:+/}$d"
-		[ -w "$target" ] && continue
-		fail "$target is not writable by $(id -un). Provisioning creates this host's node
-certificate, the CA alias, the CRL alias and the serving credential inside these directories, so
-it cannot continue.
+		[ -w "$target" ] || refuse_unwritable "$target"
+	done
+}
 
-This normally means the directory was created by something else -- openvox-agent runs as root and
+# refuse_unwritable stops provisioning over a directory in the ssl tree this
+# account cannot write, with the chown that would fix it -- and what that chown
+# grants, because the package declined to take it for exactly that reason.
+#
+# "Only the directories change owner" used to be the whole of the caveat, and it
+# is true of the files and false of the capability: owning a directory is owning
+# the right to rename what is in it. On a host whose agent runs as root, giving
+# `puppet` the ssl root lets it move certs/ aside and supply its own
+# certs/ca.pem, which that agent then trusts. The operator should hear that
+# before running the command, not discover it afterwards.
+refuse_unwritable() {
+	fail "$1 is not writable by $(id -un). Provisioning creates this host's node certificate, the
+CA alias, the CRL alias and the serving credential inside the ssl tree, so it cannot continue.
+
+This normally means the directory belongs to something else -- openvox-agent runs as root and
 creates no account -- and the package left it alone rather than take ownership of a tree it does
-not own. Hand it over, then start again:
+not own. Two ways forward:
+
+  Hand the tree to \`puppet\`, then start again:
 
     chown puppet:puppet $SSLDIR $SSLDIR/certs $SSLDIR/private_keys
     systemctl restart openvox-ca-first-boot
 
-Only the directories change owner; nothing inside them is touched."
-	done
+  Only the directories change owner, but owning them is owning the right to replace what is in
+  them -- including $SSLDIR/certs/ca.pem, the CA certificate a root-running agent on this host
+  trusts. Anything running as \`puppet\` could then choose which CA that agent believes in. Do this
+  only where that agent is meant to trust THIS CA, or where there is no agent.
+
+  Or keep the CA off the agent's tree: a CA that matters is better on a host of its own, which is
+  what docs/systemd.md recommends."
 }
 
 # 2. The CA itself, unless one is already there. ca_crt.pem is the filesystem

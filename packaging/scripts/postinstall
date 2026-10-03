@@ -21,6 +21,14 @@ set -eu
 SSLDIR="${OPENVOX_CA_SSLDIR:-/etc/puppetlabs/puppet/ssl}"
 CONFIG="${OPENVOX_CA_CONFIG:-/etc/puppet-ca/config.yaml}"
 
+# The account the ssl-root check below compares owners against. Overridable for
+# the same reason and with the same caveat as the two above: a spec runs as an
+# ordinary user and cannot create files owned by `puppet`, so without it the
+# branch that decides whether the ssl root is ours to take is reachable only in
+# a container. It changes what the check COMPARES, never what is chowned --
+# the chown below names puppet:puppet literally.
+SSL_OWNER="${OPENVOX_CA_SSL_OWNER:-puppet}"
+
 # Records that this package has enabled the provisioning oneshot at least once.
 # See the enable block at the foot of this file for why the alternative --
 # inferring it from dpkg's $2 -- gets a remove-then-reinstall wrong.
@@ -109,80 +117,71 @@ else
 	fi
 fi
 
-# Everything the package ships that the service must reach is packaged
-# root-owned, because at the moment dpkg or rpm unpacks it the `puppet` account
-# does not exist yet -- it is created above, in this script. rpm notices and
-# falls back to root:root with a warning; dpkg simply writes what it was told.
-# Either way the owner has to be set here, after the account exists.
+# The two directories the package ships under the ssl tree are handed to
+# `puppet` here, because at the moment dpkg unpacks them the account may not
+# exist yet -- it is created above, in this script. (The rpm creates it earlier,
+# in its preinstall, and declares the CA directory puppet-owned in the package
+# itself; see packaging/nfpm.yaml. On the rpm this is a fallback.)
 #
-# --no-dereference, and it matters: $SSLDIR is writable by `puppet`, this runs
-# as root, and a symlink planted at one of these paths would otherwise have
-# chown follow it and change the owner of whatever it points at.
+# --no-dereference: this runs as root over directories `puppet` may be able to
+# write, and a symlink planted at one of these paths would otherwise have chown
+# follow it and change the owner of whatever it points at.
 #
 # Not recursive: an existing tree may hold an agent's or a server's files, and
 # this package is not entitled to reassign those.
 if [ -d "$SSLDIR" ]; then
-	# The ssl root and the CA directory, plus the three subdirectories
-	# provisioning writes INTO rather than merely under.
+	# The CA directory, always. It is the one path the service writes, and the
+	# only thing in it is the CA's own.
+	ssl_dirs="$SSLDIR/ca"
+
+	# The ssl root, only when everything already in it is `puppet`'s.
 	#
-	# The first two are shipped by the package, so they exist and are
-	# root-owned by construction. The other three are not packaged: on a fresh
-	# host first-boot creates them itself and owns them, but on the
-	# co-existence case this package advertises -- a host already running
-	# openvox-agent, which creates no account and runs as root -- they are
-	# already there, root-owned, 0755 and 0750. `puppet` cannot create a file
-	# in any of them, and ensure_ssl_tree deliberately leaves a directory that
-	# already exists exactly as it is, so nothing else corrects them either.
-	# Provisioning then dies on a bare `ln: Permission denied` at the last
-	# step, with none of the guidance every other failure here carries.
+	# Owning a directory is owning the right to rename what is in it, and
+	# rename(2) within one parent checks write permission on the PARENT only.
+	# So `puppet` owning $SSLDIR can move a root-owned certs/ aside, create its
+	# own, and plant certs/ca.pem -- the trust anchor a root-running agent
+	# verifies against -- without ever being able to write inside the original.
+	# That was demonstrated, not inferred: as `puppet`, writing certs/ca.pem is
+	# refused, and `mv certs certs.old && mkdir certs` then succeeds. Leaving
+	# certs/ itself alone protects nothing while its parent changes hands.
 	#
-	# Still --no-dereference and still not recursive: only these directories
-	# change hands, and whatever an agent or Server has put inside them is
-	# left alone. A path that is absent is skipped rather than created --
-	# creating one here would pre-empt the modes ensure_ssl_tree chooses.
+	# Hence the test: anything in the ssl root that `puppet` does not already
+	# own belongs to something else -- on the host that matters, an agent that
+	# runs as root -- and the root is left as it is. The cases that pass:
 	#
-	# What that grants, stated rather than implied. "Contents are left alone"
-	# is true of the FILES and not of the capability: write permission on a
-	# directory governs unlink and rename of the entries in it, so after this
-	# the `puppet` account can replace anything inside private_keys/ and
-	# certs/ -- including certs/ca.pem, where every agent on this host reads
-	# the CA certificate -- whatever the 0600 modes on those files say. On the
-	# co-existence host that is an agent's own key directory.
+	#   a fresh host       nothing there but ca/, so nothing to protect
+	#   this CA's own host first-boot runs as `puppet`, so all it made is ours;
+	#                      this is also what restores the root after an rpm
+	#                      upgrade, which re-applies the packaged root:root
+	#   OpenVox Server     its postinst already gave the whole tree to `puppet`
 	#
-	# It is done anyway, and deliberately: openvox-server's own postinst
-	# chowns this tree the same way, an attacker who holds the `puppet` account
-	# already holds the CA key in the cadir, and the alternative is a service
-	# that cannot start. docs/systemd.md states the same thing for operators
-	# rather than leaving it here.
-	# ONLY what this package ships. certs/, private_keys/ and public_keys/ are
-	# deliberately not taken, and that is a change from what this script used
-	# to do.
+	# Where it is left alone, provisioning stops at ensure_ssl_tree's
+	# writability check and names the chown to run -- the operator's decision,
+	# taken knowing what it grants, and not a package's to take as root.
 	#
-	# The grant was justified by two claims, and neither survives on the host
-	# it was written for. On an agent-only machine there is no openvox-server
-	# whose postinst chowns the tree the same way, and the local CA key gives
-	# an attacker no leverage over an agent enrolled with the estate's REMOTE
-	# CA. What write access to certs/ does give them is the trust anchor:
-	# replacing certs/ca.pem lets a rogue master serve catalogues to a root
-	# agent.
-	#
-	# And it bought nothing even on its own terms. On exactly that host
-	# ensure_node_certificate now refuses to adopt a credential this CA did not
-	# issue, so provisioning stops regardless -- the widening happened at
-	# install time to enable a step that does not run. Where provisioning CAN
-	# proceed, first-boot creates these directories itself and owns them.
-	#
-	# A host that genuinely wants them handed over gets told so, by name, with
-	# the exact chown to run: see ensure_ssl_tree's writability check. That is
-	# the operator's decision to take, at a moment they are looking at it, and
-	# not a package's to take silently as root.
-	ssl_dirs="$SSLDIR $SSLDIR/ca"
+	# A find that fails -- the account does not exist because the block above
+	# could not create it, say -- counts as "not ours". The check fails closed:
+	# an unanswered question is not a yes.
+	if foreign=$(find "$SSLDIR" -mindepth 1 -maxdepth 1 ! -name ca ! -user "$SSL_OWNER" -print 2>/dev/null); then
+		if [ -z "$foreign" ]; then
+			ssl_dirs="$SSLDIR $ssl_dirs"
+		else
+			warn "leaving $SSLDIR as it is: it holds entries that \`puppet\` does not own" \
+				"($(printf '%s\n' "$foreign" | head -n 3 | tr '\n' ' ' | sed 's/ $//')), so something else -- most" \
+				"likely openvox-agent -- uses it. Owning it would let \`puppet\` replace certs/ca.pem." \
+				"Provisioning will stop and say what to do if it needs to write there."
+		fi
+	else
+		warn "could not check who owns the entries in $SSLDIR, so leaving it as it is." \
+			"Provisioning will stop and say what to do if it needs to write there."
+	fi
 
 	# shellcheck disable=SC2086 # deliberately word-split: the list is built
 	# from literals above, never from operator input.
 	chown --no-dereference puppet:puppet $ssl_dirs || warn \
-		"could not give $SSLDIR to puppet:puppet. Provisioning runs as \`puppet\` and will not be" \
-		"able to write there; fix the ownership and run 'systemctl restart openvox-ca-first-boot'."
+		"could not give $ssl_dirs to puppet:puppet. The service and provisioning both run as" \
+		"\`puppet\` and will not be able to write there; fix the ownership and run" \
+		"'systemctl restart openvox-ca-first-boot'."
 fi
 
 # The configuration file is 0640 and can hold credentials, so the service must

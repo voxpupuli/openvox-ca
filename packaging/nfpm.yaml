@@ -1,9 +1,11 @@
 # nfpm configuration for the openvox-ca deb and rpm.
 #
-# ONE configuration for both formats, with `overrides:` for the one thing that
-# genuinely differs: the dependency naming, where the same tools have different
-# package names on Debian and on EL. It is not parameterised by format anywhere
-# else, and it should not become so.
+# ONE configuration for both formats, with per-format entries for the two
+# things that genuinely differ: the dependency naming, where the same tools have
+# different package names on Debian and on EL; and the CA directory's packaged
+# owner, because rpm re-applies a directory's owner on every upgrade and dpkg
+# does not (see the ssl-tree entries below). It is not parameterised by format
+# anywhere else, and it should not become so.
 #
 # The configuration file IS in this package (see the config|noreplace entry
 # below), which is a change from openvox-ca#250's original payload. That issue
@@ -123,17 +125,46 @@ contents:
 
   # The ssl tree ships as directories so systemd has something to bind-mount:
   # ReadWritePaths= fails the unit outright when its path does not exist, and
-  # both units name a path under here. They are packaged root-owned and handed
-  # to `puppet` by the postinstall, because at the moment these are unpacked
-  # the account does not exist yet.
+  # both units name a path under here.
+  #
+  # The ssl root is packaged root-owned on both formats, and stays that way
+  # unless the postinstall finds nothing in it that `puppet` does not already
+  # own. On a host where an agent keeps its files there, owning the root would
+  # let `puppet` rename the agent's certs/ aside and supply its own
+  # certs/ca.pem -- see the postinstall.
   - dst: /etc/puppetlabs/puppet/ssl
     type: dir
     file_info:
       mode: 0771
+
+  # The CA directory differs by format, and only in its owner.
+  #
+  # rpm re-applies a packaged directory's owner and mode on every install AND
+  # upgrade. Packaged root-owned, the cadir became root:root at each upgrade's
+  # unpack and stayed so until %post -- while the running CA, which an upgrade
+  # does not stop, runs as `puppet` and could not write its own store. So the
+  # rpm declares it puppet-owned, and its preinstall creates the account before
+  # unpack so the name resolves.
+  #
+  # dpkg leaves an existing directory's owner alone on upgrade, so the deb has
+  # no such window; it keeps the directory root-owned in the archive and the
+  # postinstall chowns it once, after creating the account. Declaring `puppet`
+  # there would gain nothing and would depend on how dpkg resolves an owner
+  # name the archive carries, which this package has no need to rely on.
+  #
+  # Both behaviours were measured against real rpm and dpkg, not inferred.
   - dst: /etc/puppetlabs/puppet/ssl/ca
     type: dir
+    packager: deb
     file_info:
       mode: 0770
+  - dst: /etc/puppetlabs/puppet/ssl/ca
+    type: dir
+    packager: rpm
+    file_info:
+      mode: 0770
+      owner: puppet
+      group: puppet
 
   # LICENSE, README and docs/, with the repository's own layout preserved, so a
   # link between two documents still resolves once installed.
@@ -161,6 +192,11 @@ overrides:
       # provisioning would mint a CA under `localhost` that no agent can use.
       - hostname
   rpm:
+    # Creates the `puppet` account before unpack, so the CA directory above
+    # resolves to its declared owner. rpm-only for the reason given there; see
+    # the script for why it never fails the install.
+    scripts:
+      preinstall: packaging/scripts/preinstall
     depends:
       - systemd
       # The same fallback's tools; on rpm distributions they are here.
