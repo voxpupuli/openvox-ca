@@ -3393,11 +3393,12 @@ func (Chart) Package() error {
 // unitTestExcludes lists packages omitted from the unit-test run. Keep this set
 // as small as possible: every entry is a package that runs NO coverage in CI.
 //
-//	internal/testutil — test helpers only, exercised transitively by the
-//	                     packages that import them.
-var unitTestExcludes = map[string]bool{
-	"github.com/voxpupuli/openvox-ca/internal/testutil": true,
-}
+// Currently empty. internal/testutil was here as "test helpers only, exercised
+// transitively by the packages that import them" — true until it gained a test
+// of its own, pinning that RecordingBackend is deliberately NOT faithful to
+// storage's lock-enforcement predicate. Excluded, that test was dead code by
+// AGENTS.md's own standard, so the entry went rather than the test.
+var unitTestExcludes = map[string]bool{}
 
 // unitTestPackages discovers the packages to unit-test via `go list ./...`
 // rather than a hand-maintained list, then drops the explicit excludes above.
