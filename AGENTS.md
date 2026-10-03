@@ -16,6 +16,8 @@ Task. Invoke targets with `go run mage.go <Target>` or the `mage` binary:
 | `mage build:all` | Build `openvox-ca` and `openvox-ca-ctl` binaries |
 | `mage build:dist` | Cross-compile all release tarballs (and `checksums.txt`) to `dist/` |
 | `mage build:distVariant <name>` | Build one release tarball variant (e.g. `linux_arm64_fips`) into `dist/` |
+| `mage build:packages` | Build the `.deb` and `.rpm` from the tarballs already in `dist/` (builds no binaries) |
+| `mage build:unit <bindir>` | Render the systemd unit template for a bindir into `dist/` |
 | `mage release:prepare <version>` | Open the version-bump PR that must precede a release tag — see [releasing](docs/development/releasing.md) |
 | `mage test:unit` | Run the unit suite (all packages, coverage to `coverage.out`), under `-race` — needs cgo and a C compiler |
 | `mage test:magefile` | Run the magefile's own build-tagged suite (invisible to `go test ./...`) |
@@ -350,7 +352,60 @@ not** be rebranded:
 - HTTP route prefix `/puppet-ca/v1`
 - Environment-variable prefix `PUPPET_CA_` (and `PUPPET_CA_CTL_` for the CLI)
 - Prometheus metric namespace `puppetca_`
-- Storage key prefixes / default paths (`puppet-ca`, `/etc/puppet-ca`, `/var/lib/puppet-ca`)
+- Storage key prefixes and the config-file location (`puppet-ca`, `/etc/puppet-ca`)
+- The `puppet-ca` spelling itself, wherever a path uses it — `/var/lib/puppet-ca`
+  included
+
+**This is a contract about names, not about which path is the default.** A
+default may move; the spelling may not be rebranded to `openvox-ca`.
+`/var/lib/puppet-ca` is the case where the two are easy to confuse: it is still
+a supported `--cadir`, and it remains the Helm chart's `persistence.mountPath`
+default — but it is no longer what the packages or the systemd unit default to.
+Those default to `/etc/puppetlabs/puppet/ssl/ca`, which is the Clojure CA's own
+layout and the one path the hardened unit grants under `ProtectSystem=strict`
+(see [docs/systemd.md](docs/systemd.md)). Neither of those is a rename, so
+neither breaches this contract.
+
+**The rule this contract states** is narrower than "nothing is spelled
+`openvox-ca`", but wider than "nothing Puppet Server named". It is: *nothing
+already shipped under a `puppet-ca`, `puppetlabs`, `PUPPET_CA_` or `puppetca_`
+name is renamed — whether this project inherited that name or established it.
+Only a path new to this project may use the `openvox-ca` spelling.*
+
+An earlier draft of this paragraph said "nothing that Puppet Server named is
+renamed", and that was wrong in the direction that matters. Most of the list
+above is not a Puppet Server name: `/etc/puppet-ca` and `/var/lib/puppet-ca`
+are this project's own (Puppet Server keeps its CA under `/etc/puppetlabs`), and
+so are the `PUPPET_CA_` environment prefix and the `puppetca_` metric
+namespace. Read literally, that draft permitted renaming exactly what the list
+forbids — in the file LLM contributors follow, which makes it the text most
+likely to be quoted later to justify a rebrand.
+
+**Where the two disagree, the list wins.** A summary exists to be quicker to
+read than the list, not to be the authority over it.
+
+The packages introduce several of the latter, and none of them breaches the
+contract:
+
+- **`/var/lib/openvox-ca/first-boot-enabled`** — whether the postinstall has
+  already enabled the provisioning oneshot (`packaging/scripts/postinstall`).
+  Packaging bookkeeping; Puppet Server had no equivalent.
+- **`/etc/puppetlabs/puppet/ssl/openvox-ca-certname-unresolved`** — the marker
+  provisioning leaves when it could not resolve a usable certname
+  (`packaging/scripts/first-boot`).
+- **`certs/openvox-ca-server.pem`** and
+  **`private_keys/openvox-ca-server.pem`** — the serving credential the shipped
+  configuration names. Aliases this project maintains, in a directory Puppet
+  Server owns, under a name Puppet Server never used — which is exactly why the
+  name is safe to take.
+- Program and documentation paths are not covered by this contract at all:
+  `/usr/bin/openvox-ca`, `/usr/libexec/openvox-ca`,
+  `/usr/lib/sysusers.d/openvox-ca.conf` and `/usr/share/doc/openvox-ca`.
+
+`/var/lib/openvox-ca` must not be moved under `/var/lib/puppet-ca`, which is a
+cadir on hosts that have one there already — it is the Helm chart's
+`persistence.mountPath` default; a marker file dropped inside somebody's CA
+directory is the confusion this avoids.
 
 ## Helm chart
 

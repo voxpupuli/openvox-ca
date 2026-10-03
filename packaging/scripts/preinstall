@@ -1,0 +1,54 @@
+#!/bin/sh
+#
+# rpm-only preinstall: create the `puppet` account before the payload is
+# unpacked, so the CA directory the rpm declares puppet-owned is unpacked with
+# that owner rather than handed over afterwards.
+#
+# Why the rpm needs this and the deb does not. rpm re-applies a packaged
+# directory's owner and mode on EVERY install and upgrade. With the CA
+# directory packaged root-owned, each `dnf update` made it root:root at unpack
+# and left it so until %post chowned it back -- and the running CA, which an
+# upgrade deliberately does not stop, runs as `puppet` and could not write its
+# own cadir in that window. dpkg leaves an existing directory's owner alone on
+# upgrade, so the deb has no such window and keeps the postinstall chown alone.
+# Both were measured against real rpm and dpkg rather than inferred.
+#
+# The account has to exist before unpack for the declared owner to resolve:
+# rpm looks the name up as it writes the directory, and falls back to root,
+# with a warning, for a name it does not know.
+#
+# Best effort, and it never fails. A non-zero %pre aborts the whole install,
+# which is a far worse outcome than the one this prevents -- and nfpm cannot
+# declare Requires(pre), so the tools below are not guaranteed to be present
+# yet in a transaction that installs them alongside this package. If this
+# cannot create the account, rpm unpacks the directory as root exactly as it
+# did before this script existed, and the postinstall creates the account and
+# chowns it. So the worst case is the previous behaviour, not a new failure.
+#
+# groupadd/useradd rather than systemd-sysusers: the sysusers declaration is in
+# the payload, which is not on disk yet. The arguments match
+# packaging/sysusers/openvox-ca.conf and the postinstall's own fallback, and
+# magefile_test.go asserts all three create the same account.
+
+set -u
+
+warn() {
+	echo "openvox-ca: WARNING: $*" >&2
+}
+
+# rpm passes 1 on install and 2 on upgrade; both want the account to exist,
+# and both branches below leave an existing one alone.
+if ! getent group puppet >/dev/null 2>&1; then
+	groupadd --system puppet || warn "could not create the \`puppet\` group before unpacking;" \
+		"the postinstall will try again."
+fi
+if ! getent passwd puppet >/dev/null 2>&1; then
+	useradd --system --gid puppet \
+		--home-dir /etc/puppetlabs/puppet \
+		--shell /usr/sbin/nologin \
+		--comment "OpenVox Certificate Authority" \
+		puppet || warn "could not create the \`puppet\` account before unpacking; the" \
+		"postinstall will try again."
+fi
+
+exit 0
