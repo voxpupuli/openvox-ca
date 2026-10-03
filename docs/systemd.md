@@ -88,6 +88,8 @@ Connections in flight keep the certificate they negotiated with; the next TLS ha
 
 Everything else — the listen address, the storage backend, CA key custody, CA properties, and which autosign configuration is in use — needs a restart. Those are bound to state established at startup, and re-reading them behind your back would be worse than telling you to restart. (The autosign allowlist or script, and the OpenBao AppRole credential files, are read live on every use and need neither a reload nor a restart.)
 
+A CA that issues its own serving certificate — [`serving_cert`](configuration.md#the-cas-own-serving-certificate), which is the only way to have that certificate renewed unattended once the CA key is held at a provider — needs no reload for it either. The reconcile loop renews the certificate and installs it on the listener, so `systemctl reload` is a no-op for that certificate and the row above applies only to an operator-supplied `tls_cert` / `tls_key` pair. The two are mutually exclusive.
+
 A reload that fails (a half-written certificate, a deleted allow-list file) leaves the previous configuration in place and the CA serving. The failure is logged and stays in the status text until a reload succeeds:
 
 ```text
@@ -170,6 +172,8 @@ The shipped unit runs the CA as a dedicated `puppet-ca` user with `ProtectSystem
 `LimitCORE=0` is deliberate and worth keeping: the signer holds the decrypted CA private key in memory for its whole life, so a core dump would write that key to `/var/lib/systemd/coredump` — undoing [key encryption at rest](ca-key-security.md) for anything that ships crash dumps off the host.
 
 `ProtectSystem=strict` is the directive most likely to bite: see [installing the unit](#installing-the-unit) for the `cadir` / `ReadWritePaths=` choice it forces. The same applies to `--logfile`, though logging to stderr and letting journald handle it is simpler.
+
+It applies a third time, and there the consequence is worse. A [`serving_cert`](configuration.md#the-cas-own-serving-certificate) file store outside the unit's `StateDirectory` needs the same `ReadWritePaths=` drop-in, and an unwritable serving store is **fatal** — the CA refuses to start rather than logging and retrying, because the listener has nothing to present. It must also sit outside the `cadir`, which the CA reserves against every file store. A managed certificate in the same position is merely retried on the next pass.
 
 Check your changes with:
 

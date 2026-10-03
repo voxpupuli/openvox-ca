@@ -716,7 +716,20 @@ var _ = Describe("Reload watcher", func() {
 		Expect(os.WriteFile(cnFile, []byte("compile-2.example.com\n"), 0600)).To(Succeed())
 		Expect(syscall.Kill(os.Getpid(), syscall.SIGHUP)).To(Succeed())
 
-		Eventually(rec.msgs).Should(Receive(HavePrefix("RELOADING=1")))
+		// The STATUS payload, not just the RELOADING prefix. The watcher was
+		// changed to send r.reloadingStatus() instead of a hardcoded string,
+		// and the three outcomes of that function are covered directly in
+		// servingcert_test.go -- but nothing asserted the call site, so
+		// reverting it to any fixed string left every spec green while systemd
+		// announced a TLS rotation that a self-provisioning CA never performs.
+		//
+		// This reloader has auth set and certs nil, which is the
+		// self-provisioned shape, so the allow-list-only text is the correct
+		// one here.
+		Eventually(rec.msgs).Should(Receive(And(
+			HavePrefix("RELOADING=1"),
+			ContainSubstring("STATUS=Reloading the admin allow list"),
+		)))
 		Eventually(rec.msgs).Should(Receive(Equal("READY=1\nSTATUS=serving\n")))
 		Expect(auth.IsOwnAdminCN("compile-2.example.com")).To(BeTrue())
 		Expect(auth.IsOwnAdminCN("compile-1.example.com")).To(BeFalse())

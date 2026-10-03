@@ -84,8 +84,8 @@ openvox-ca has a large configuration surface, and the chart deliberately does
   half of a feature (mount the Secret, open the port, create the RBAC) *and*
   set the config keys pointing at whatever they mounted. `managedCerts` is the
   one exception: it creates RBAC and sets nothing, because the certificates it
-  grants access to are declared under `config.managed_certs` rather than in
-  values.
+  grants access to are declared under `config.managed_certs` and
+  `config.serving_cert` rather than in values.
 - **`config` always wins**, with three exceptions. The two are deep-merged with
   your `config` on top — except `port`, `cadir` and `metrics_listen`, which also
   shape a Kubernetes object (the container port and Service, the volume mount,
@@ -175,6 +175,7 @@ The alternatives, in the same message:
 | Setting | When |
 | --- | --- |
 | `config.tls_cert` / `config.tls_key` | A certificate you mount yourself, via `extraVolumes` |
+| `config.serving_cert` | The CA issues and renews its own, into a Secret or a file pair. The way out of the bootstrap deadlock when the CA key is held at a provider, and the only route that also renews it unattended. Mutually exclusive with every route that sets `tls_cert`/`tls_key` — the two rows around this one, and `tls.existingSecret` — and the chart refuses the combination at install time. A file store must live under `persistence.mountPath` and outside `config.cadir` (both refused at install), in a directory that already exists (discovered at startup, and fatal) — see [Managed certificates](#managed-certificates) |
 | `env` / `extraEnv` — `PUPPET_CA_TLS_CERT` and `PUPPET_CA_TLS_KEY` | The paths come from a Secret at runtime. Environment variables outrank the config file, and the chart counts them |
 | `config.no_tls_required: true` | Only behind a proxy that terminates TLS and re-originates it to the pod. Client certificates do not survive that, so mTLS-authenticated endpoints become unreachable |
 | `listen.host: 127.0.0.1` or `localhost` | A sidecar-only deployment. Those two spellings and nothing else: the server tests `net.ParseIP(host).IsLoopback()`, which rejects the bracketed `[::1]`, and it builds its listen address as `host + ":" + port`, which turns a bare `::1` into the unparseable `::1:8140` |
@@ -191,7 +192,7 @@ than refusing an install it cannot judge. In those modes
 the probes assume HTTPS, and it is on you to set `httpGet.scheme` if the server
 is actually serving cleartext.
 
-**A renewed certificate needs a signal or a restart — nothing sends one.**
+**A renewed `tls.existingSecret` certificate needs a signal or a restart — nothing sends one.** (A `config.serving_cert` certificate needs neither: the reconcile loop installs it on the listener itself. See [the CA's own serving certificate](configuration.md#the-cas-own-serving-certificate).)
 openvox-ca re-reads the keypair on `SIGHUP` and serves it to new handshakes
 without dropping connections in flight (see
 [reloading configuration](configuration.md#reloading-configuration)), and the
@@ -422,7 +423,8 @@ The annotation is controller-specific: HAProxy uses
 `nginx.ingress.kubernetes.io/ssl-passthrough` (and needs the controller started
 with `--enable-ssl-passthrough`). Note that `ingress.tls` is *not* how you
 serve TLS here — the serving certificate openvox-ca presents does that, from
-the `tls` Secret or from `config.tls_cert`/`config.tls_key`. Only set it if
+the `tls` Secret, from `config.tls_cert`/`config.tls_key`, or from
+`config.serving_cert` where the CA issues its own. Only set it if
 your controller needs a certificate for SNI routing.
 
 If you deliberately terminate TLS at the edge, set `config.no_tls_required:
@@ -596,19 +598,22 @@ easy to get wrong:
   presents its own projected ServiceAccount token, which it reads from a mounted
   file, and OpenBao performs the `TokenReview` itself — so the API server is
   OpenBao's peer here, not the CA's. Egress to the API is needed for
-  [Kubernetes export](#kubernetes-export) and for
-  [managed certificates](#managed-certificates) kept in a Secret, both of which
-  really do call it. Listing it unconditionally opens a hole the deployment does
-  not use.
-- **A managed certificate in a Secret needs that egress; one in local files does
-  not.** The distinction is the same one the token-mount table above draws, and
-  getting it wrong fails quietly: the reconcile pass cannot write, logs it per
-  entry, and retries — so readiness stays green and the certificate simply never
-  appears.
+  [Kubernetes export](#kubernetes-export), for
+  [managed certificates](#managed-certificates) kept in a Secret, and for
+  [the CA's own serving certificate](configuration.md#the-cas-own-serving-certificate)
+  kept in one, all of which really do call it. Listing it unconditionally opens
+  a hole the deployment does not use.
+- **A certificate in a Secret needs that egress; one in local files does not.**
+  The distinction is the same one the token-mount table above draws. Getting it
+  wrong for a managed certificate fails quietly: the reconcile pass cannot
+  write, logs it per entry, and retries — so readiness stays green and the
+  certificate simply never appears. Getting it wrong for the serving
+  certificate does not fail quietly at all: the CA cannot read the Secret
+  holding the certificate its listener presents, so it refuses to start.
 
 So the list is: your storage backend, OpenBao if the key lives there, anything
-your sidecars fetch, and the Kubernetes API if you export or keep a managed
-certificate in a Secret.
+your sidecars fetch, and the Kubernetes API if you export, or keep a managed
+certificate or the CA's own serving certificate in a Secret.
 
 ## Kubernetes export
 
@@ -651,6 +656,7 @@ because it cannot see far enough to rule it out:
 | --- | --- |
 | `kubernetesExport.enabled`, or `config.kubernetes_export.targets` | Export is configured, so the exporter needs the API |
 | `config.managed_certs` with a `store.secret` | A managed certificate is kept in a Secret, so the CA reads and writes it. A file store needs nothing and mounts nothing |
+| `config.serving_cert` with a `store.secret` | The CA's own serving certificate is kept in a Secret, read and written the same way |
 | `config.openbao.auth_method: kubernetes` | The key provider authenticates with the pod's own token |
 | `PUPPET_CA_OPENBAO_AUTH_METHOD: kubernetes` in `env` or `extraEnv` | Environment variables outrank the config file, so the chart reads those two values too. An empty value is ignored, as the server ignores it |
 | `--openbao-auth-method=kubernetes` in `extraArgs` | Arguments outrank both, and `extraArgs` is appended to the argv the chart builds, so it is readable |
@@ -674,17 +680,45 @@ entry's Secret lives in, granting `get` and `patch` narrowed by `resourceNames`
 plus an unnarrowable `create`. That is a separate Role from the export's,
 because the export needs neither `get` nor those namespaces.
 
+**`config.serving_cert` feeds the same Role.** The CA's own serving certificate
+is a second source of Secret targets — see [the CA's own serving
+certificate](configuration.md#the-cas-own-serving-certificate) — and it needs
+the same grant for the same reason, so its Secret joins the list rather than
+getting a Role of its own. Two entries whose Secrets share a namespace share one
+Role. The difference is what a refusal costs: a component certificate the CA
+cannot write is retried on the next pass, while the serving certificate is what
+the listener presents, so the CA does not start without it.
+
 **Those namespaces must already exist.** They come out of `config.managed_certs`
-rather than from a values key, so the chart has no list to create them from and
-does not try; an install naming a namespace that does not exist fails on the
-Role. Create them first, or point the entries at namespaces the release already
-owns.
+and `config.serving_cert` rather than from a values key, so the chart has no
+list to create them from and does not try; an install naming a namespace that
+does not exist fails on the Role. Create them first, or point the entries at
+namespaces the release already owns.
 
 A `files` store needs something from the chart too, though not RBAC: the pod
 runs with `readOnlyRootFilesystem: true`, so the directory a file store writes
 to must be a writable volume you mount yourself through `extraVolumes` and
 `extraVolumeMounts`. In Kubernetes a Secret store is almost always the better
 fit — it needs no volume, and something else in the cluster can consume it.
+
+**That paragraph is about `config.managed_certs` only.** A
+`config.serving_cert` file store is checked at install time and has to satisfy
+three rules — and the chart can enforce only the first two.
+
+1. **Under `persistence.mountPath`**, which is the volume it can see. Refused at
+   install.
+2. **Outside `config.cadir`**, which the CA reserves against every file store.
+   Refused at install. The chart sets `cadir` to the mount by default, so the
+   first two collide until `config.cadir` is narrowed.
+3. **In a directory that already exists**, because the CA will not create one.
+   The chart cannot check this — it does not know whether an `initContainer` of
+   yours creates the directory — so it is discovered at startup, and there it is
+   fatal rather than retried.
+
+The layout that satisfies all three with no `initContainer` is
+`config.cadir: /var/lib/puppet-ca/ca` with the pair at the mount root,
+`/var/lib/puppet-ca/tls.crt`, since only the mount point is guaranteed to exist
+on a fresh volume. A subdirectory works too if something creates it first.
 
 ```yaml
 managedCerts:
@@ -1279,7 +1313,8 @@ $ kubectl get secret,configmap -A -l app.kubernetes.io/managed-by=openvox-ca
 > is uninstalled nothing reissues them. By this page's own reckoning the OpenVox
 > Server one is a CA admin credential.
 
-Delete by namespace, and exclude anything `config.managed_certs` names — either
+Delete by namespace, and exclude anything `config.managed_certs` or
+`config.serving_cert` names — either
 by naming the exported objects explicitly, or by giving the export targets a
 label of your own under `kubernetesExport.targets[].metadata.labels` and
 selecting on that:

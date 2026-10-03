@@ -200,7 +200,11 @@ ca_port   = 8140
 
 ## Step 7: Start openvox-ca
 
-First, generate a TLS server certificate for openvox-ca itself:
+First, generate a TLS server certificate for openvox-ca itself. Nothing renews
+this one — for a permanent installation, [the CA's own serving
+certificate](configuration.md#the-cas-own-serving-certificate) issues and
+renews it instead, and is the only route that does so unattended once the CA
+key is held at a provider.
 
 ```bash
 openvox-ca generate \

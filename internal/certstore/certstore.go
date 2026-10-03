@@ -155,7 +155,7 @@ type Entry struct {
 	// discovered at issuance.
 	//
 	// Each name occupies the ordinary inventory slot for that subject. Two
-	// managed certificates sharing one is refused by Validate; a managed
+	// managed certificates sharing one is refused by ValidateIn; a managed
 	// certificate and an *agent* sharing one is not, and cannot be -- an agent
 	// enrols whenever it likes, long after this configuration was read. They
 	// contend for the one slot and the later issuance displaces the earlier,
@@ -557,22 +557,59 @@ func (e *Entry) uris() ([]*url.URL, error) {
 	return out, nil
 }
 
-// managedCertAt labels one entry by its index in the block: `managed_certs[2]`.
+// Block is the configuration block a set of entries came from, for diagnostics.
 //
 // Every refusal this package produces names the entry it is about, and the name
-// has to be the one the operator can search their own file for.
-func managedCertAt(i int) string {
-	return fmt.Sprintf("managed_certs[%d]", i)
+// has to be the one the operator can search their own file for. `managed_certs`
+// was the only block when this was written, so the label was written into
+// eleven messages -- which meant the second consumer's entries were reported
+// under a block its configuration may not even contain, and a collision between
+// two blocks rendered both sides under the same name and so could not say which
+// one to change.
+//
+// The zero Block is the managed_certs block, so Validate, Build and the two
+// cross-checks behave exactly as they always have and every message an operator
+// sees today is unchanged. A second consumer passes its own.
+type Block struct {
+	// Name is the block's key in the configuration file: "managed_certs",
+	// "serving_cert". Empty means managed_certs.
+	Name string
+
+	// Single suppresses the index. A block holding exactly one certificate is
+	// not a list, and `serving_cert[0]` would misname it as precisely as
+	// `managed_certs[0]` does.
+	Single bool
 }
 
-// managedCertWhere is managedCertAt plus the certname, which is what an operator
-// actually recognises. The bare form is for an entry whose certname is empty or
-// is itself what was refused.
-func managedCertWhere(i int, certname string) string {
-	if certname == "" {
-		return managedCertAt(i)
+// managedCertsBlock is the default, and the only one before openvox-ca#326.
+var managedCertsBlock = Block{Name: "managed_certs"}
+
+// name is the block's key, defaulting to managed_certs for the zero value so a
+// caller that passes nothing gets the behaviour this package has always had.
+func (b Block) name() string {
+	if b.Name == "" {
+		return managedCertsBlock.Name
 	}
-	return fmt.Sprintf("%s (%s)", managedCertAt(i), certname)
+	return b.Name
+}
+
+// at labels one entry: `managed_certs[2]`, or `serving_cert` for a block that
+// holds a single certificate.
+func (b Block) at(i int) string {
+	if b.Single {
+		return b.name()
+	}
+	return fmt.Sprintf("%s[%d]", b.name(), i)
+}
+
+// withCertname is at() plus the certname, which is what an operator actually
+// recognises. The bare form is for an entry whose certname is empty or is
+// itself what was refused.
+func (b Block) withCertname(i int, certname string) string {
+	if certname == "" {
+		return b.at(i)
+	}
+	return fmt.Sprintf("%s (%s)", b.at(i), certname)
 }
 
 // Validate checks every entry and returns an error describing the first problem,
@@ -581,14 +618,18 @@ func managedCertWhere(i int, certname string) string {
 // Called once at startup, before anything touches storage. A mistyped certname,
 // an impossible renewal window or a store that names neither flavour is refused
 // as configuration rather than discovered as a certificate that never appears.
-func (c Config) Validate() error {
+func (c Config) Validate() error { return c.ValidateIn(managedCertsBlock) }
+
+// ValidateIn is Validate for entries that came from another configuration
+// block, so that its refusals name that block rather than managed_certs.
+func (c Config) ValidateIn(block Block) error {
 	subjects := make(map[string]int, len(c))
 	var secrets []secretRef
 	paths := newFilePaths()
 
 	for i := range c {
 		e := &c[i]
-		where := managedCertWhere(i, e.Certname)
+		where := block.withCertname(i, e.Certname)
 
 		spec, err := e.spec()
 		if err != nil {
@@ -610,11 +651,11 @@ func (c Config) Validate() error {
 			return fmt.Errorf("%s: certname %q is already used by %s; "+
 				"each managed certificate needs a certname of its own, because they share "+
 				"one inventory slot and would replace each other on every pass",
-				where, e.Certname, managedCertAt(prev))
+				where, e.Certname, block.at(prev))
 		}
 		subjects[e.Certname] = i
 
-		if err := e.Store.validate(where, &secrets, paths, i); err != nil {
+		if err := e.Store.validate(block, where, &secrets, paths, i); err != nil {
 			return err
 		}
 	}
@@ -623,7 +664,7 @@ func (c Config) Validate() error {
 
 // validate checks an entry's store block, recording what it claims so a later
 // entry cannot claim the same object.
-func (s *StoreConfig) validate(where string, secrets *[]secretRef,
+func (s *StoreConfig) validate(block Block, where string, secrets *[]secretRef,
 	paths filePaths, idx int) error {
 	switch {
 	case s.Secret == nil && s.Files == nil:
@@ -636,13 +677,13 @@ func (s *StoreConfig) validate(where string, secrets *[]secretRef,
 		return fmt.Errorf("%s: store names both `secret` and `files`; "+
 			"a certificate lives in exactly one place", where)
 	case s.Secret != nil:
-		return s.Secret.validate(where, secrets, idx)
+		return s.Secret.validate(block, where, secrets, idx)
 	default:
-		return s.Files.validate(where, paths, idx)
+		return s.Files.validate(block, where, paths, idx)
 	}
 }
 
-func (s *SecretConfig) validate(where string, secrets *[]secretRef, idx int) error {
+func (s *SecretConfig) validate(block Block, where string, secrets *[]secretRef, idx int) error {
 	s.Name = strings.TrimSpace(s.Name)
 	s.Namespace = strings.TrimSpace(s.Namespace)
 	if s.Name == "" {
@@ -683,7 +724,7 @@ func (s *SecretConfig) validate(where string, secrets *[]secretRef, idx int) err
 				"as possibly naming the same Secret; spell both namespaces out if they " +
 				"genuinely differ"
 		}
-		return fmt.Errorf(msg, where, nsOrPod(s.Namespace), s.Name, managedCertAt(prev.idx))
+		return fmt.Errorf(msg, where, nsOrPod(s.Namespace), s.Name, block.at(prev.idx))
 	}
 	*secrets = append(*secrets, secretRef{namespace: s.Namespace, name: s.Name, idx: idx})
 	return nil
@@ -697,7 +738,7 @@ type secretRef struct {
 	idx       int
 }
 
-func (f *FilesConfig) validate(where string, paths filePaths, idx int) error {
+func (f *FilesConfig) validate(block Block, where string, paths filePaths, idx int) error {
 	// Cleaned, not merely trimmed, and cleaned in place so the writes use the
 	// same spelling the duplicate check did. Two spellings of one path --
 	// `/a/b/c.pem` and `/a//b/c.pem`, or one routed through `..` -- are two keys
@@ -753,12 +794,12 @@ func (f *FilesConfig) validate(where string, paths filePaths, idx int) error {
 		if prev, dup := paths.material[p.path]; dup {
 			return fmt.Errorf("%s: store.files.%s %q is already used by %s: "+
 				"two entries writing one certificate or key file would each replace the "+
-				"other's material on every pass", where, p.field, p.path, managedCertAt(prev))
+				"other's material on every pass", where, p.field, p.path, block.at(prev))
 		}
 		if prev, dup := paths.chain[p.path]; dup {
 			return fmt.Errorf("%s: store.files.%s %q is the CA chain file of "+
 				"%s, which is rewritten on every pass of that entry",
-				where, p.field, p.path, managedCertAt(prev))
+				where, p.field, p.path, block.at(prev))
 		}
 		paths.material[p.path] = idx
 	}
@@ -773,7 +814,7 @@ func (f *FilesConfig) validate(where string, paths filePaths, idx int) error {
 		if prev, dup := paths.material[f.CA]; dup {
 			return fmt.Errorf("%s: store.files.ca %q is the certificate or key of "+
 				"%s: the chain written there would replace that entry's "+
-				"material on every pass", where, f.CA, managedCertAt(prev))
+				"material on every pass", where, f.CA, block.at(prev))
 		}
 		if _, seen := paths.chain[f.CA]; !seen {
 			paths.chain[f.CA] = idx
@@ -832,6 +873,11 @@ func nsOrPod(ns string) string {
 // omission on either side as possibly matching, because both features resolve an
 // omitted namespace to the CA pod's own.
 func (c Config) CheckExportOverlap(exportTargets [][2]string) error {
+	return c.CheckExportOverlapIn(managedCertsBlock, exportTargets)
+}
+
+// CheckExportOverlapIn is CheckExportOverlap for entries from another block.
+func (c Config) CheckExportOverlapIn(block Block, exportTargets [][2]string) error {
 	if len(exportTargets) == 0 || !c.Enabled() {
 		return nil
 	}
@@ -859,7 +905,7 @@ func (c Config) CheckExportOverlap(exportTargets [][2]string) error {
 			return fmt.Errorf("%s stores its certificate in Secret %s/%s, "+
 				"which is also a kubernetes_export target in %s: both write ca.crt, so they "+
 				"would take the key from each other on every pass. %s",
-				managedCertWhere(i, c[i].Certname), nsOrPod(s.Namespace), s.Name,
+				block.withCertname(i, c[i].Certname), nsOrPod(s.Namespace), s.Name,
 				nsOrPod(t[0]), remedy)
 		}
 	}
@@ -903,6 +949,11 @@ type ReservedPath struct {
 // NIST 800-53: CM-6 (Configuration Settings), SC-28 (Protection of Information
 // at Rest)
 func (c Config) CheckReservedPaths(reserved []ReservedPath) error {
+	return c.CheckReservedPathsIn(managedCertsBlock, reserved)
+}
+
+// CheckReservedPathsIn is CheckReservedPaths for entries from another block.
+func (c Config) CheckReservedPathsIn(block Block, reserved []ReservedPath) error {
 	if len(reserved) == 0 || !c.Enabled() {
 		return nil
 	}
@@ -931,7 +982,7 @@ func (c Config) CheckReservedPaths(reserved []ReservedPath) error {
 					// never equal an absolute store path, so skipping it would
 					// leave a gap that looks exactly like a passing check.
 					return fmt.Errorf("cannot compare %s file stores against %s %q: "+
-						"it is not an absolute path", "managed_certs", r.Setting, r.Path)
+						"it is not an absolute path", block.name(), r.Setting, r.Path)
 				}
 				if !reservedCovers(root, r.Tree, p.path) {
 					continue
@@ -940,10 +991,15 @@ func (c Config) CheckReservedPaths(reserved []ReservedPath) error {
 				if r.Tree {
 					scope = "is inside"
 				}
+				// Block-neutral wording. These two messages hardcoded
+				// `managed_certs` and "a managed certificate" inside a function
+				// that takes a Block, so a serving_cert entry was refused under
+				// the name of a block its configuration need not contain --
+				// which is the exact failure the Block type was added to stop.
 				return fmt.Errorf("%s stores its %s at %q, which %s %s (%s): "+
-					"a managed certificate's file store is overwritten on every issuance, and "+
+					"this file store is overwritten on every issuance, and "+
 					"these are the CA's own files. Give the certificate a path of its own",
-					managedCertWhere(i, c[i].Certname), p.field, p.path, scope,
+					block.withCertname(i, c[i].Certname), p.field, p.path, scope,
 					r.Setting, root)
 			}
 		}
@@ -1005,6 +1061,11 @@ func namespacesMayCollide(a, b string) bool {
 // [SecretStore] and [FileStore] as concrete types and keeps no interface
 // spanning them.
 func (c Config) Build(deps Deps) ([]ca.ManagedCert, error) {
+	return c.BuildIn(managedCertsBlock, deps)
+}
+
+// BuildIn is Build for entries from another configuration block.
+func (c Config) BuildIn(block Block, deps Deps) ([]ca.ManagedCert, error) {
 	if !c.Enabled() {
 		return nil, nil
 	}
@@ -1021,7 +1082,7 @@ func (c Config) Build(deps Deps) ([]ca.ManagedCert, error) {
 		e := &c[i]
 		spec, err := e.spec()
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", managedCertWhere(i, e.Certname), err)
+			return nil, fmt.Errorf("%s: %w", block.withCertname(i, e.Certname), err)
 		}
 
 		// The two methods, taken individually rather than through a value that
@@ -1044,7 +1105,7 @@ func (c Config) Build(deps Deps) ([]ca.ManagedCert, error) {
 			if ns == "" {
 				return nil, fmt.Errorf("%s: no namespace for Secret %q, "+
 					"and the CA pod's own could not be resolved",
-					managedCertWhere(i, e.Certname), e.Store.Secret.Name)
+					block.withCertname(i, e.Certname), e.Store.Secret.Name)
 			}
 			store := NewSecretStore(deps.Client, *e.Store.Secret, ns, deps.CACerts)
 			load, save = store.Load, store.Save
@@ -1057,12 +1118,13 @@ func (c Config) Build(deps Deps) ([]ca.ManagedCert, error) {
 			// first. But the previous shape made `files` the default rather
 			// than a case, so a caller that skipped validation dereferenced a
 			// nil *FileStoreConfig here -- a panic whose stack names this
-			// package and not the entry that caused it. A caller skipping a
-			// documented precondition should get a message that names the
+			// package and not the entry that caused it. A second consumer
+			// calling BuildIn is exactly how a documented precondition gets
+			// missed, so the cost of missing it is a message that names the
 			// entry.
 			return nil, fmt.Errorf("%s: store names neither `secret` nor `files`; "+
 				"Validate must be called before Build",
-				managedCertWhere(i, e.Certname))
+				block.withCertname(i, e.Certname))
 		}
 
 		out = append(out, ca.ManagedCert{
