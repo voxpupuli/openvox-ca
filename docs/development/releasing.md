@@ -300,12 +300,22 @@ Three things worth knowing that belong here rather than there:
   between publishing and signing. After signing, each workflow asserts that the
   tags it published still resolve to the digest it signed, which converts a lost
   race into a red build rather than a silently unsigned tag.
-- **The `.rpm` carries no rpm header signature.** `dnf` with `gpgcheck=1`
-  verifies a signature *inside* the package, and there is not one; what the
-  packages carry is the Sigstore bundle over `checksums.txt`, which `dnf` does
-  not know how to check. `apt` is unaffected — it verifies the repository
-  index, not the individual `.deb`, and Debian's own archive does not sign
-  `.deb` files either. Signing rpm headers is
+- **Neither package carries a signature its own package manager checks.** The
+  `.rpm` has no rpm header signature, so `dnf` with `gpgcheck=1` finds nothing
+  inside the package to verify. The `.deb` is in the same position for a
+  different reason: `apt` verifies a repository's `InRelease` index rather than
+  individual `.deb` files, and these packages are **release assets, not a
+  repository** — so `apt install ./openvox-ca_X_amd64.deb` or `dpkg -i` does no
+  signature check at all. Index verification starts applying only once these
+  packages are served from a signed apt repository, which does not exist yet —
+  publishing them anywhere is
+  [#257](https://github.com/voxpupuli/openvox-ca/issues/257), and signing an
+  index is not in its scope.
+
+  What both carry instead is the Sigstore bundle over `checksums.txt`, and
+  neither package manager can read it, so **verifying the bundle is the only
+  provenance check available for a downloaded package** — do it before
+  installing either format. Signing rpm headers is
   [#256](https://github.com/voxpupuli/openvox-ca/issues/256), deferred on the
   question of whose key: an rpm signed with a key nobody publishes is
   verification theatre.
@@ -636,5 +646,5 @@ release](#verifying-a-release).)
 | --- | --- |
 | **`helm verify` has nothing to check.** | The chart is signed with cosign and carries SLSA provenance like everything else, but it is packaged without `helm package --sign`, so there is no `.prov` file for `helm push` to upload. Helm's own provenance mechanism is PGP: it wants a long-lived keyring, which is the thing Sigstore's short-lived certificates exist to avoid. Anyone whose tooling asserts specifically on `helm verify`, rather than on a cosign signature, is not served. |
 | **Packaging is not implemented, so no tag can be cut.** | `mage build:packages` is [#250](https://github.com/voxpupuli/openvox-ca/issues/250), implemented by [#282](https://github.com/voxpupuli/openvox-ca/pull/282), and is not on `main` yet, so the Release workflow's packaging job fails and no release is published — while *Container images* and *Helm chart*, which trigger on the same tag and do not depend on Release, publish anyway. This is the one gap here that blocks releasing outright rather than degrading it. See [Before you tag](#before-you-tag). |
-| **`dnf` with `gpgcheck=1` has nothing to check either.** | The same gap in a second ecosystem, and for the same reason. The `.rpm` carries no rpm header signature, so a `gpgcheck=1` repository rejects it; what it carries instead is the Sigstore bundle over `checksums.txt`, which `dnf` cannot read. `apt` is unaffected, because it verifies the repository index rather than the individual `.deb`, as Debian's own archive does. Signing rpm headers is [#256](https://github.com/voxpupuli/openvox-ca/issues/256), deferred on the question of whose key. See [verifying a release](#verifying-a-release). |
+| **No package manager checks a signature on either format.** | The same gap in a second ecosystem, and it covers both packages rather than only the `.rpm`. The `.rpm` carries no rpm header signature, so a `gpgcheck=1` repository rejects it. The `.deb` is unverified too, for a different reason: `apt` checks a repository's `InRelease` index, and a release asset is not served from a repository — `apt install ./file.deb` and `dpkg -i` check nothing. Both carry the Sigstore bundle over `checksums.txt`, which neither tool can read, so that bundle is the only provenance check a downloader has. Signing rpm headers is [#256](https://github.com/voxpupuli/openvox-ca/issues/256). Nothing tracks a signed apt repository; [#257](https://github.com/voxpupuli/openvox-ca/issues/257) publishes the packages to a bucket but does not sign an index. See [verifying a release](#verifying-a-release). |
 | **Nothing verifies what is inside a package.** | Tarballs are unpacked and their binaries executed by `verify-dist-artifact` before they are attested. The packages have no counterpart, so a well-formed package with the wrong contents is checksummed, attested and published, and the first person to find out runs `apt install`. The install-and-verify legs that close it are [#254](https://github.com/voxpupuli/openvox-ca/issues/254); until then the [rehearsal checklist](#rehearsing-on-your-own-fork) asks a maintainer to open one by hand. |

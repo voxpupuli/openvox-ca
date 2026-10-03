@@ -185,20 +185,17 @@ var _ = Describe("distVariants", func() {
 })
 
 var _ = Describe("packagedDistVariants", func() {
-	It("returns exactly the variants distVariants marks packaged", func() {
-		var want []string
-		for _, v := range distVariants() {
-			if v.packaged {
-				want = append(want, v.name)
-			}
-		}
+	// Asserted against a literal, not against a second copy of the function's
+	// own filter. Building `want` with the same "range distVariants(), keep
+	// .packaged" loop could only fail if the two copies diverged, and a bug
+	// common to both -- the filter inverted, say -- would pass.
+	It("returns exactly the two packaged variants, by name", func() {
 		var got []string
 		for _, v := range packagedDistVariants() {
 			Expect(v.packaged).To(BeTrue(), "returned an unpackaged variant")
 			got = append(got, v.name)
 		}
-		Expect(got).To(Equal(want))
-		Expect(got).To(HaveLen(2))
+		Expect(got).To(Equal([]string{"linux_amd64", "linux_arm64"}))
 	})
 })
 
@@ -936,6 +933,130 @@ jobs:
 	})
 })
 
+var _ = Describe("verifyReleaseJobConfinement", func() {
+	// Against the real workflow: this is the check that the release job as it
+	// actually stands runs no repository code.
+	It("finds the real release job confined", func() {
+		Expect(verifyReleaseJobConfinement()).To(Succeed())
+	})
+
+	// A purpose-built release job rather than the variant-list fixture. This
+	// guard reads only that job, so its own fixture keeps these specs
+	// independent of the packaging fixtures -- and it was folded into
+	// verifyDistVariants before, which is how a failure about the signing
+	// identity came to be reported under "Checking release variant lists".
+	good := []byte(`
+jobs:
+  package:
+    steps:
+      - run: mage build:packages
+  release:
+    steps:
+      - uses: actions/download-artifact@0000000000000000000000000000000000000000
+      - run: |
+          sha256sum -- *.tar.gz *.deb *.rpm > checksums.txt
+      - uses: actions/attest@0000000000000000000000000000000000000000
+      - run: |
+          gh release create "${args[@]}" dist/checksums.txt
+`)
+
+	It("accepts a release job that runs no repository code", func() {
+		Expect(verifyReleaseJobConfinementIn(good)).To(Succeed())
+	})
+
+	// The regex is deliberately broad over targets, so the shapes it must
+	// catch are more than the bare `mage build:x` the first spec covered. A
+	// change to the boundary class that stopped matching a mid-line or
+	// flag-bearing invocation would otherwise pass the suite.
+	DescribeTable("refuses any mage invocation in the signing job",
+		func(line string) {
+			bad := bytes.Replace(good, []byte("          sha256sum -- "),
+				[]byte("          "+line+"\n          sha256sum -- "), 1)
+			Expect(bad).NotTo(Equal(good), "the fixture must actually have changed")
+			Expect(verifyReleaseJobConfinementIn(bad)).To(MatchError(
+				And(ContainSubstring("release job runs mage"), ContainSubstring("id-token: write"))))
+		},
+		Entry("bare target", "mage build:packages"),
+		Entry("mid-line after &&", "cd dist && mage build:dist"),
+		Entry("with a flag", "mage -v build:dist"),
+		Entry("in a command substitution", `targets="$(mage -l)"`),
+		Entry("absolute path", "/usr/local/bin/mage build:dist"),
+	)
+
+	// Both edges of the boundary class. "mage " is a substring of "image " and
+	// "damage "; and `go run mage.go` is the documented way to invoke a target
+	// without the binary, which is not what this guard is about -- it refuses
+	// repository code, and `go run` in that job would be caught by the same
+	// rule under a different name if anyone added it.
+	DescribeTable("does not mistake English or a dotted name for an invocation",
+		func(line string) {
+			ok := bytes.Replace(good, []byte("          sha256sum -- "),
+				[]byte("          "+line+"\n          sha256sum -- "), 1)
+			Expect(ok).NotTo(Equal(good))
+			Expect(verifyReleaseJobConfinementIn(ok)).To(Succeed())
+		},
+		Entry("image", `echo "the image digest is pinned"`),
+		Entry("damage", `echo "no damage done"`),
+		Entry("homage", `echo "homage to the previous release"`),
+		Entry("a dotted name", "echo mage.go"),
+	)
+
+	// Shell is one of two ways repository code enters a job, and the other is
+	// the one release.yml already reaches for three times. A guard reading
+	// only `run:` cannot see `uses: ./...`, so moving packaging behind a local
+	// composite action -- the more idiomatic refactor here than inlining mage
+	// -- would walk straight past it into the job holding id-token: write.
+	It("refuses a local action", func() {
+		bad := bytes.Replace(good, []byte("  release:\n    steps:\n"),
+			[]byte("  release:\n    steps:\n      - uses: ./.github/actions/build-packages\n"), 1)
+		Expect(verifyReleaseJobConfinementIn(bad)).To(MatchError(
+			And(ContainSubstring("local action"), ContainSubstring("id-token: write"))))
+	})
+
+	// Refused one step further back: a checkout is what puts the code on disk
+	// for a local action to run.
+	It("refuses a checkout", func() {
+		bad := bytes.Replace(good, []byte("  release:\n    steps:\n"),
+			[]byte("  release:\n    steps:\n      - uses: actions/checkout@0000000000000000000000000000000000000000\n"), 1)
+		Expect(verifyReleaseJobConfinementIn(bad)).To(MatchError(
+			ContainSubstring("checks the repository out")))
+	})
+
+	It("accepts third-party actions pinned by SHA, which is what the job is built from", func() {
+		Expect(verifyReleaseJobConfinementIn(good)).To(Succeed())
+	})
+})
+
+var _ = Describe("workflowStepUses", func() {
+	// Its error branches are unreachable through its only production caller,
+	// which reaches workflowRunScripts first -- so they are asserted here or
+	// they are asserted nowhere.
+	src := []byte(`
+jobs:
+  release:
+    steps:
+      - uses: actions/checkout@abc
+      - run: echo no uses on this one
+      - uses: ./.github/actions/local
+`)
+
+	It("returns the uses entries in order, skipping run-only steps", func() {
+		Expect(workflowStepUses(src, "release")).To(Equal([]string{
+			"actions/checkout@abc", "./.github/actions/local",
+		}))
+	})
+
+	It("names the job it could not find", func() {
+		_, err := workflowStepUses(src, "nope")
+		Expect(err).To(MatchError(ContainSubstring(`job "nope" not found`)))
+	})
+
+	It("reports malformed YAML rather than returning an empty list", func() {
+		_, err := workflowStepUses([]byte("jobs: [this is not a map\n"), "release")
+		Expect(err).To(HaveOccurred())
+	})
+})
+
 var _ = Describe("verifyDistVariants", func() {
 	// Runs against the repository's real workflow files: this is the
 	// cross-check that keeps ci.yml, release.yml, and distVariants() from
@@ -1320,50 +1441,6 @@ jobs:
 				[]byte("          # if [ \"$tarballs\" -ne 4 ]; then\n          if [ \"$tarballs\" -ne 3 ]; then"), 1)
 			Expect(verifyDistVariantsIn(goodCI, badRel, goodSBOM)).To(MatchError(
 				ContainSubstring("expects 3 tarballs")))
-		})
-
-		// Relocating packaging into the release job satisfies every other
-		// check here -- the sites, parity, the set and the counts all still
-		// hold, and the tag would publish a correct set of artefacts. What
-		// changes is that the magefile and its dependency tree execute beside
-		// id-token: write. A reviewer reading a diff that deletes one job and
-		// adds one step has to notice what those permissions mean; this does
-		// not require them to.
-		It("refuses to let packaging move into the job that holds the signing identity", func() {
-			badRel := bytes.Replace(goodRel, []byte("      - run: mage build:packages\n"), nil, 1)
-			badRel = bytes.Replace(badRel, []byte("  release:\n    steps:\n"),
-				[]byte("  release:\n    steps:\n      - run: mage build:packages\n"), 1)
-			Expect(verifyDistVariantsIn(goodCI, badRel, goodSBOM)).To(MatchError(
-				And(ContainSubstring("release job runs mage"), ContainSubstring("id-token: write"))))
-		})
-
-		// Shell is one of two ways repository code enters a job, and the
-		// other is the one release.yml already reaches for three times. A
-		// guard reading only `run:` cannot see `uses: ./...`, so moving
-		// packaging behind a local composite action -- the more idiomatic
-		// refactor here than inlining mage -- would have walked straight past
-		// it into the job holding id-token: write.
-		It("refuses a local action in the job that holds the signing identity", func() {
-			badRel := bytes.Replace(goodRel, []byte("  release:\n    steps:\n"),
-				[]byte("  release:\n    steps:\n      - uses: ./.github/actions/build-packages\n"), 1)
-			Expect(verifyDistVariantsIn(goodCI, badRel, goodSBOM)).To(MatchError(
-				And(ContainSubstring("local action"), ContainSubstring("id-token: write"))))
-		})
-
-		It("refuses a checkout in the job that holds the signing identity", func() {
-			badRel := bytes.Replace(goodRel, []byte("  release:\n    steps:\n"),
-				[]byte("  release:\n    steps:\n      - uses: actions/checkout@0000000000000000000000000000000000000000\n"), 1)
-			Expect(verifyDistVariantsIn(goodCI, badRel, goodSBOM)).To(MatchError(
-				ContainSubstring("checks the repository out")))
-		})
-
-		// "mage " is a substring of "image ". The gate is deliberately broad
-		// over mage targets, and must not be broad over English.
-		It("does not mistake the word image for a mage invocation", func() {
-			ok := bytes.Replace(goodRel, []byte("          sha256sum -- "),
-				[]byte("          echo \"the image digest is pinned\"\n          sha256sum -- "), 1)
-			Expect(ok).NotTo(Equal(goodRel))
-			Expect(verifyDistVariantsIn(goodCI, ok, goodSBOM)).To(Succeed())
 		})
 
 		It("is not satisfied by a comment mentioning the package build command", func() {

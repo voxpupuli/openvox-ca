@@ -166,9 +166,11 @@ $ cosign verify-blob-attestation openvox-ca_${VERSION}_linux_amd64.tar.gz \
 ```
 
 The bundle covers every file listed in `checksums.txt` — each tarball, each SBOM and
-each `.deb`/`.rpm` — so the same bundle verifies any of them. Note what that does *not*
-include: the `.rpm` carries no rpm header signature, so `dnf` with `gpgcheck=1` has
-nothing of its own to check. Verify the package with the bundle above before installing it.
+each `.deb`/`.rpm` — so the same bundle verifies any of them. **Neither the `.deb` nor the
+`.rpm` carries a signature that `apt`, `dpkg` or `dnf` checks when you install it from a
+downloaded file** — `apt` verifies a repository index, and a release asset is not a
+repository. So for packages the bundle is the only provenance check available: verify it
+before installing either format.
 
 Container images and the Helm chart are both attested and signed. Because images are
 also built for pull requests, whose certificates name `refs/pull/N/merge`, pin the

@@ -300,7 +300,7 @@ func workflowRunScripts(src []byte, job string) (string, error) {
 			}
 			scripts++
 			for _, line := range strings.Split(step.Run, "\n") {
-				if strings.HasPrefix(strings.TrimSpace(line), "#") {
+				if isCommentLine(line) {
 					continue
 				}
 				b.WriteString(line)
@@ -382,6 +382,21 @@ const sbomFormatsPerVariant = 2
 // release.yml's build job matrix, release.yml's checksum-step shell loop and
 // its tarball-, SBOM- and package-count literals, and the generate-sbom
 // action's output format count.
+//
+// It also enforces two things that are not copies of a list, and they are
+// named here because a reader who stops at the paragraph above will not expect
+// them. First, an absolute floor: the sites where an omission is silent -- the
+// checksums.txt operand list and the gh release create asset list -- must name
+// every published extension, because every check above is a comparison between
+// copies and is satisfied by dropping a whole set from one site. Second, that
+// some step runs distPackageBuildCommand at all, so the package counts are not
+// guarding a workflow that has stopped building packages.
+//
+// The release job's confinement -- no mage, no local action, no checkout -- was
+// once checked here too and is now verifyReleaseJobConfinement, with its own
+// banner in Dev.Check. It is a security property rather than a list property,
+// and reporting it under "Checking release variant lists..." pointed the reader
+// at the wrong file.
 func verifyDistVariants() error {
 	ciSrc, err := os.ReadFile(filepath.Join(".github", "workflows", "ci.yml"))
 	if err != nil {
@@ -619,15 +634,41 @@ func verifyDistVariantsIn(ciSrc, relSrc, sbomSrc []byte) error {
 			"not move into", distPackageBuildCommand)
 	}
 
-	// And it must not have moved into the release job. That job holds
-	// contents: write, id-token: write and attestations: write, and carries no
-	// checkout precisely so that repository code never runs beside the
-	// signing identity -- the property the workflow's header comment and the
-	// package job's comment both assert. Nothing else in the repository
-	// enforces it: there is no actionlint or zizmor here, and a reviewer
-	// reading a diff that deletes one job and adds one step to another has to
-	// notice what those permissions mean.
-	//
+	return nil
+}
+
+// verifyReleaseJobConfinement asserts that release.yml's `release` job runs no
+// repository code. It is the one job granted contents: write, id-token: write
+// and attestations: write, so anything executing there does so beside the
+// identity that mints Sigstore certificates for this repository, and it carries
+// no checkout deliberately.
+//
+// This is a security property and not a variant-list property, which is why it
+// is its own guard with its own banner in Dev.Check rather than a branch of
+// verifyDistVariants -- a failure about the signing identity reported under
+// "Checking release variant lists..." sends the reader to the wrong file.
+// verifyAutomergeLabelExclusion and verifyWorkflowBaseScoping are the models.
+//
+// Nothing else in the repository enforces it: there is no actionlint or zizmor
+// here, and a reviewer reading a diff that deletes one job and adds one step to
+// another has to notice what those permissions mean.
+func verifyReleaseJobConfinement() error {
+	relSrc, err := os.ReadFile(filepath.Join(".github", "workflows", "release.yml"))
+	if err != nil {
+		return err
+	}
+	return verifyReleaseJobConfinementIn(relSrc)
+}
+
+// verifyReleaseJobConfinementIn is verifyReleaseJobConfinement over
+// caller-supplied workflow contents, split out so the refusal branches are
+// testable without touching the real workflow.
+func verifyReleaseJobConfinementIn(relSrc []byte) error {
+	relScript, err := workflowRunScripts(relSrc, "release")
+	if err != nil {
+		return fmt.Errorf("release.yml: %w", err)
+	}
+
 	// Checked as "no mage at all" rather than "not this target". The release
 	// job runs cp, ls, find, sha256sum and gh; any mage invocation there is
 	// repository code, whichever target it names, and the narrower check would
@@ -647,8 +688,7 @@ func verifyDistVariantsIn(ciSrc, relSrc, sbomSrc []byte) error {
 	// natural way someone would move packaging into this job -- and a check
 	// that reads only `run:` cannot see it. A checkout is refused for the same
 	// reason one step further back: it is what puts the code on disk for a
-	// local action to run, and the header comment's claim is that this job
-	// carries none.
+	// local action to run.
 	//
 	// Third-party actions pinned by SHA are not repository code and are what
 	// this job is built from, so only `./` references and checkout are named.
@@ -849,6 +889,23 @@ func globbedExtensionsIn(src []byte) []string {
 	return out
 }
 
+// isCommentLine reports whether a line is a whole-line comment -- its first
+// non-space character is `#`.
+//
+// One implementation shared by both strippers (workflowRunScripts over a
+// step's shell, withoutCommentLines over the whole file), because they had the
+// same rule written twice and only one of them documented its limit. Closing
+// that limit in one copy would have left the other keeping it, with nothing
+// pointing at the second.
+//
+// KNOWN LIMIT, stated once here rather than once per copy: this catches
+// whole-line comments, not a trailing `# ...` after code. That form does not
+// occur in the workflows these read, and catching it means knowing where each
+// line's shell ends, which is more machinery than the failure deserves.
+func isCommentLine(line string) bool {
+	return strings.HasPrefix(strings.TrimSpace(line), "#")
+}
+
 // withoutCommentLines drops every line whose first non-space character is `#`.
 //
 // Applied before counting mentions because release.yml is heavily commented and
@@ -870,7 +927,7 @@ func withoutCommentLines(src []byte) []byte {
 	lines := bytes.Split(src, []byte("\n"))
 	kept := make([][]byte, 0, len(lines))
 	for _, line := range lines {
-		if bytes.HasPrefix(bytes.TrimSpace(line), []byte("#")) {
+		if isCommentLine(string(line)) {
 			continue
 		}
 		kept = append(kept, line)
