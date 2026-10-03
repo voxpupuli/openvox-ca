@@ -37,11 +37,35 @@ import (
 // puppetca_leaf_certificate_not_after_timestamp_seconds covers its expiry and
 // the shipped expiry alerts cover it with no new series.
 //
-// One outcome that reasoning does not reach: an entry that has never issued at
+// The outcome that reasoning does not reach: an entry that has never issued at
 // all -- a store that never accepts a write. There is no series for a
 // certificate that does not exist, so no PromQL comparison can match its
 // absence; the Kubernetes exporter has the same hole and closes it with a
-// dedicated "not running" rule. The managed mechanism needs the equivalent.
+// dedicated "not running" rule. The managed mechanism needs the equivalent, and
+// now has it: the CA publishes puppetca_managed_certificate_configured, one
+// series per configured entry, so that an entry which has never issued is a
+// value rather than an absence. PuppetCAManagedCertificateNeverIssued in
+// mixin/alerts.libsonnet is the rule.
+//
+// It is not the only gap, and the other one is left open deliberately: an entry
+// that has issued before, whose reissue then keeps failing. That one is not
+// silent for want of a series. A failed store write revokes the certificate it
+// has just signed and puts the predecessor back, precisely because nothing ever
+// saw the new key -- so a signed series remains, the component keeps working,
+// and the never-issued rule is right to stay quiet. The expiry alerts take over
+// as that predecessor ages. What is missing between the failure and that point
+// is any series saying "this entry's last reconcile failed". Closing it needs
+// one this mechanism does not publish: a per-entry reconcile-failure counter,
+// which is the shape the exporter's
+// puppetca_k8s_export_last_error_timestamp_seconds takes. That is worth doing
+// and is not in #243; in the meantime the failure is in the logs, once and then
+// as withholding notices carrying retry_in, which is what docs/metrics.md tells
+// an operator to grep for.
+//
+// puppetca_managed_certificate_configured is deliberately general -- one label,
+// the subject, and nothing about the store -- so that the CA's own serving
+// certificate (#326) can use it for a store with quite different failure
+// semantics.
 //
 // Displacement is NOT a second such outcome, though it reads like one. When a
 // managed issuance replaces a certificate the CA already held for that name,
@@ -60,24 +84,6 @@ import (
 // inventory row under one subject. That is a discoverability wrinkle in a
 // situation the operator configured and was warned about, which is why it gets
 // a log line rather than a series.
-//
-// A never-issued metric is not added here because nothing configures a
-// managed certificate yet: a
-// counter would be permanently zero on every deployment, and docs/metrics.md
-// would gain a row nothing can move. It belongs with the first instance, which
-// is also the first change that can say what a useful value looks like. See
-// #243.
-//
-// managed_cert_interval_sec ships now despite being just as dormant, and the
-// asymmetry is deliberate. A metric is read by something that draws conclusions
-// from it: a permanently zero series is indistinguishable from a healthy one, so
-// shipping it early trains an operator to believe a failure mode is covered when
-// nothing can move the number. A setting is read by the operator, who sets it
-// and gets exactly what it says -- the interval really does govern this loop's
-// period; the loop simply has nothing to iterate over yet. It also has to exist
-// before the first instance rather than with it, since the change that adds an
-// instance would otherwise have to add the knob that paces it in the same
-// breath. Dormant-and-honest differs from dormant-and-reassuring.
 //
 // A timer, deliberately, and not the Kubernetes exporter's CRLUpdated() channel:
 // that channel fires on revocation, and renewal is driven by the clock. A CA

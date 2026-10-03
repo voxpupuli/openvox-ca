@@ -807,7 +807,7 @@ var _ = Describe("Same-host locking", func() {
 
 		DescribeTable("derives the database path from a DSN",
 			func(dsn, wantPath string, wantOK bool) {
-				got, ok := sqliteFilePath(dsn)
+				got, ok := SQLiteFilePath(dsn)
 				Expect(ok).To(Equal(wantOK), "dsn %q", dsn)
 				if wantOK {
 					Expect(got).To(Equal(wantPath), "dsn %q", dsn)

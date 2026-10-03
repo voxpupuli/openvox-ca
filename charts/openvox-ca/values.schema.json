@@ -184,6 +184,20 @@
       }
     },
 
+    "managedCerts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "rbac": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "create": { "type": "boolean" }
+          }
+        }
+      }
+    },
+
     "replicaCount": { "type": "integer", "minimum": 0 },
     "strategy": { "type": "object" },
     "revisionHistoryLimit": { "type": "integer", "minimum": 0 },

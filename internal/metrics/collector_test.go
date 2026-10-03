@@ -751,6 +751,79 @@ var _ = Describe("Collector", func() {
 			map[string]string{"state": "requested"}))).To(Equal(1.0))
 	})
 
+	// The series exists so that an entry which has never issued is a value
+	// rather than an absence, which is the one managed-certificate outcome no
+	// comparison over the leaf series can express.
+	Describe("managed certificates", func() {
+		It("publishes nothing when none is configured", func() {
+			g := gather(metrics.NewCollector(myCA))
+
+			Expect(g.findByLabels("puppetca_managed_certificate_configured", nil)).To(BeNil())
+		})
+
+		It("publishes one series per configured entry, whether or not it has issued", func() {
+			myCA.ManagedCerts = []ca.ManagedCert{
+				{Spec: ca.CertSpec{Subject: "issued.example.com"}},
+				{Spec: ca.CertSpec{Subject: "never-issued.example.com"}},
+			}
+			signCert("issued.example.com")
+
+			g := gather(metrics.NewCollector(myCA))
+
+			Expect(g.findByLabels("puppetca_managed_certificate_configured",
+				map[string]string{"subject": "issued.example.com"})).NotTo(BeNil())
+			// The one that matters: configured, no certificate, still a series.
+			never := g.findByLabels("puppetca_managed_certificate_configured",
+				map[string]string{"subject": "never-issued.example.com"})
+			Expect(never).NotTo(BeNil())
+			Expect(gaugeValue(never)).To(Equal(1.0))
+
+			// And the other half of what PuppetCAManagedCertificateNeverIssued
+			// subtracts, so the alert's two sides are both pinned here: the
+			// entry that issued has a leaf series and the one that did not has
+			// none. Without this the rule could be satisfied by a leaf series
+			// that never appears for anything.
+			Expect(g.findByLabels("puppetca_leaf_certificate_not_after_timestamp_seconds",
+				map[string]string{"subject": "issued.example.com"})).NotTo(BeNil())
+			Expect(g.findByLabels("puppetca_leaf_certificate_not_after_timestamp_seconds",
+				map[string]string{"subject": "never-issued.example.com"})).To(BeNil())
+		})
+
+		// The placement, not merely the emission. The series is published from
+		// configuration and reads no storage, so a failed gather must not take
+		// it with it: absence has to keep meaning exactly one thing, that no
+		// managed certificate is configured. Emitted below the error return it
+		// would also reset PuppetCAManagedCertificateNeverIssued's `for` clock
+		// on every storage blip, suppressing the alert during precisely the
+		// outages that stop issuance.
+		//
+		// This is one line away from being lost, which is why it has a spec of
+		// its own rather than being left to the ordering in the file.
+		It("keeps publishing the configured series when the storage gather fails", func() {
+			myCA.ManagedCerts = []ca.ManagedCert{
+				{Spec: ca.CertSpec{Subject: "never-issued.example.com"}},
+			}
+
+			// Replace the directory ListCerts enumerates with a plain file, so
+			// the listing returns a real error rather than an empty set.
+			signedDir := filepath.Join(store.CADir(), "signed")
+			Expect(os.RemoveAll(signedDir)).To(Succeed())
+			Expect(os.WriteFile(signedDir, []byte("not a directory"), 0o600)).To(Succeed())
+
+			g := gather(metrics.NewCollector(myCA))
+			Expect(gaugeValue(g.findByLabels("puppetca_collector_scrape_success", nil))).To(Equal(0.0),
+				"precondition: the gather must actually have failed")
+			Expect(g.findByLabels("puppetca_leaf_certificate_not_after_timestamp_seconds", nil)).To(BeNil(),
+				"precondition: the storage-derived series drop out")
+
+			configured := g.findByLabels("puppetca_managed_certificate_configured",
+				map[string]string{"subject": "never-issued.example.com"})
+			Expect(configured).NotTo(BeNil(),
+				"the configured series must survive a failed gather, or its absence means two things")
+			Expect(gaugeValue(configured)).To(Equal(1.0))
+		})
+	})
+
 	It("excludes cleaned (deleted) certificates from the live set", func() {
 		signCert("keep-node")
 		signCert("clean-node")
