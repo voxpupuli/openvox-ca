@@ -684,21 +684,11 @@ func leafCarriesUsages(leaf *x509.Certificate, want CertSpec) bool {
 	return slices.Equal(got, wanted)
 }
 
-// reconcileOneManagedCert reconciles ONE entry: load, decide, and issue if the
+// ReconcileManagedCert reconciles ONE entry: load, decide, and issue if the
 // decision says so. It reports whether it issued.
 //
-// Unexported. The single-entry form matters because a caller can need one
-// certificate and not the rest, and paying for the rest is not free -- but no
-// caller inside this package needs it beyond ReconcileManaged's own loop, and
-// nothing outside the package configures a managed certificate yet. The
-// exported seam belongs with the first consumer that has a use for it, which
-// the maintainer has placed on #344 alongside its serving-certificate
-// provisioning; exporting it from here first would have published an API on
-// the strength of a caller that lives on another branch.
-//
-// The cost argument the export rested on is unchanged and still the reason this
-// function exists separately from the loop. Each entry's work is bounded by its
-// own
+// Exported because a caller can need one certificate and not the rest, and
+// paying for the rest is not free. Each entry's work is bounded by its own
 // LockTimeout, so a full ReconcileManaged over N entries can take up to N of
 // those budgets — and a caller that needs a certificate before it can do
 // something else, such as bind a listener, would spend that whole time waiting
@@ -727,7 +717,7 @@ func leafCarriesUsages(leaf *x509.Certificate, want CertSpec) bool {
 // entry's spec is validated, the work is serialised on that subject's cluster
 // lock, and a replica that loses the race reads what the winner wrote and does
 // nothing. The caller must NOT hold c.mu.
-func (c *CA) reconcileOneManagedCert(ctx context.Context, m ManagedCert) (bool, error) {
+func (c *CA) ReconcileManagedCert(ctx context.Context, m ManagedCert) (bool, error) {
 	return c.reconcileManagedCert(ctx, m, time.Now().UTC())
 }
 
@@ -756,7 +746,7 @@ func (c *CA) ReconcileManaged(ctx context.Context) (int, error) {
 	issued := 0
 	var firstErr error
 	for _, m := range c.ManagedCerts {
-		did, err := c.reconcileOneManagedCert(ctx, m)
+		did, err := c.ReconcileManagedCert(ctx, m)
 		if err != nil {
 			slog.Warn("Managed certificate not reconciled",
 				"subject", m.Spec.Subject, "error", err)
@@ -842,12 +832,11 @@ func (c *CA) skipForSaveBackoff(subject string, now time.Time) (time.Duration, b
 	f, ok := c.saveBackoff.failures[subject]
 	if !ok || f.count <= 1 {
 		// One failure is free. A transient refusal should not withhold the next
-		// pass: the single-entry form exists so a caller can get one
-		// certificate before it does something that depends on it, such as
-		// binding a listener, and making that caller wait out an interval
-		// because of a single blip would be surprising. Backoff begins at the
-		// second CONSECUTIVE failure, which is the first evidence that the
-		// store is not merely having a moment.
+		// pass, and ReconcileManagedCert is exported precisely so a caller can
+		// get one certificate before it binds a listener -- making that caller
+		// wait out an interval because of a single blip would be surprising.
+		// Backoff begins at the second CONSECUTIVE failure, which is the first
+		// evidence that the store is not merely having a moment.
 		return 0, false
 	}
 	wait := managedSaveBackoffBase << (f.count - 2)
