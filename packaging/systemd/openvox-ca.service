@@ -91,7 +91,11 @@ Group=puppet
 # into the tree above this one. The long-running service never needs to write
 # there, so it does not get to.
 #
-# Point cadir somewhere else and this line has to move with it.
+# Point cadir somewhere else and the new directory has to be writable too --
+# granted with a drop-in (`systemctl edit openvox-ca`, then [Service] and
+# ReadWritePaths=<cadir>), not by editing this line. A packaged install replaces
+# this file on every upgrade, and the edit would go with it. ReadWritePaths= in
+# a drop-in adds to this one rather than replacing it.
 ReadWritePaths=/etc/puppetlabs/puppet/ssl/ca
 
 # Hardening. The CA holds a private key that signs every certificate in the

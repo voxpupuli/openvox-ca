@@ -21,11 +21,21 @@
 #
 # /etc/puppetlabs/puppet/ssl/ca is the Clojure CA's own layout, so a CA
 # migrated from OpenVox/Puppet Server is already here. It is also the writable
-# path the units grant under ProtectSystem=strict -- change this and
-# ReadWritePaths= has to move with it in BOTH openvox-ca.service and
+# path the units grant under ProtectSystem=strict -- change this and the new
+# directory has to be made writable for BOTH openvox-ca.service and
 # openvox-ca-first-boot.service, or the CA will not be able to write. Both,
 # because both write here: the service serves from this directory and the
 # provisioning oneshot creates it.
+#
+# Do that with a drop-in, never by editing the unit files: they are replaced on
+# every package upgrade, and an edit there is silently undone, after which the
+# upgraded CA restarts unable to write its own store.
+#
+#   systemctl edit openvox-ca             # [Service]
+#   systemctl edit openvox-ca-first-boot  # ReadWritePaths=<the new cadir>
+#
+# ReadWritePaths= adds to the shipped one rather than replacing it, so nothing
+# else needs restating. docs/systemd.md has the full recipe.
 cadir: /etc/puppetlabs/puppet/ssl/ca
 
 # The certificate and key the server presents.

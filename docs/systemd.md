@@ -34,7 +34,27 @@ The configuration file is yours to write — it is not in the tarball — and [c
 
 The unit as rendered for a tarball expects the binary at `/usr/local/bin/openvox-ca` (the packages' copy names `/usr/bin`) and its configuration at `/etc/puppet-ca/config.yaml`. See [configuring the server](configuration.md).
 
-**Set `cadir` to `/etc/puppetlabs/puppet/ssl/ca`**, which is the one writable path the unit grants (`ReadWritePaths=`), or the CA will not be able to write: `ProtectSystem=strict` makes the rest of the filesystem read-only, and a filesystem-backend CA has to write a signed certificate, a serial and a CRL. It is also the Clojure CA's own layout, so a CA migrated from OpenVox/Puppet Server is already there. To use a different directory, change `ReadWritePaths=` to match — the two must always name the same place.
+**Set `cadir` to `/etc/puppetlabs/puppet/ssl/ca`**, which is the one writable path the unit grants (`ReadWritePaths=`), or the CA will not be able to write: `ProtectSystem=strict` makes the rest of the filesystem read-only, and a filesystem-backend CA has to write a signed certificate, a serial and a CRL. It is also the Clojure CA's own layout, so a CA migrated from OpenVox/Puppet Server is already there. To use a different directory, make it writable too — see [using a different CA directory](#using-a-different-ca-directory).
+
+### Using a different CA directory
+
+`cadir` and the writable paths the units grant must always cover the same place. Grant a new one with a **drop-in**, not by editing a unit file:
+
+```console
+$ sudo systemctl edit openvox-ca
+$ sudo systemctl edit openvox-ca-first-boot   # packaged installs only
+```
+
+and in each, add:
+
+```ini
+[Service]
+ReadWritePaths=/var/lib/puppet-ca
+```
+
+A drop-in survives an upgrade; an edit does not. The packages install their units under `/usr/lib/systemd/system`, and every package upgrade replaces those files — so an edited `ReadWritePaths=` is reverted, the upgrade restarts the running CA, and it comes back unable to write its own store, with the upgrade itself reporting success. The same applies to a tarball's unit the next time you install a newer one over it. `ReadWritePaths=` in a drop-in adds to the unit's own rather than replacing it, so nothing else needs restating.
+
+On a packaged install it is **both** units: the provisioning oneshot writes into `cadir` as well, under its own `ProtectSystem=strict`.
 
 ### Why `puppet` and not a private account
 
@@ -255,8 +275,9 @@ That path is where an `openvox-ca` CA commonly lives — it is the Helm chart's
 so provisioning checks it before creating anything. Finding a CA there and none
 in `/etc/puppetlabs/puppet/ssl/ca`, it stops and says so, rather than
 bootstrapping a second CA that every agent already enrolled against the first
-would distrust. The message gives both ways out: point `cadir` and
-`ReadWritePaths=` at the existing directory, or move the CA to the shipped one.
+would distrust. The message gives both ways out: point `cadir` at the existing
+directory and [grant it to both units](#using-a-different-ca-directory), or move
+the CA to the shipped one.
 Which is right depends on what you set `cadir` to, and moving a CA is not a
 copy — it takes the private key, the inventory and the CRL, and the service may
 be running against it, which is why provisioning refuses rather than attempting
@@ -264,7 +285,7 @@ the move itself.
 
 Step 3 is the one that can stop rather than warn, and it does so in three cases. If **one half of a credential** is present — a certificate with no key, or the reverse — it refuses to guess and says which file to move aside. If the binary has **no `generate` subcommand** it stops too, because a build that cannot mint leaves the service with no certificate to serve and `openvox-ca` refuses to start without TLS on a non-loopback address; failing here names the cause, where failing at the service would only report that TLS is not configured.
 
-The third is the one that bites a host you are adding a CA to rather than building from nothing: **a complete credential for `$NAME` already exists, but this run created the CA**. That is the ordinary state of a machine already enrolled with an estate's CA — an agent certificate under `certs/`, signed by a CA elsewhere, and no local CA directory. Serving it from a CA that did not issue it would fail verification for every client, so provisioning stops and offers the choice it cannot make for you: point `cadir` at the estate's existing CA (and `ReadWritePaths=` in both units with it), or move the credential aside and let this new CA mint its own.
+The third is the one that bites a host you are adding a CA to rather than building from nothing: **a complete credential for `$NAME` already exists, but this run created the CA**. That is the ordinary state of a machine already enrolled with an estate's CA — an agent certificate under `certs/`, signed by a CA elsewhere, and no local CA directory. Serving it from a CA that did not issue it would fail verification for every client, so provisioning stops and offers the choice it cannot make for you: point `cadir` at the estate's existing CA (and [grant that directory to both units](#using-a-different-ca-directory)), or move the credential aside and let this new CA mint its own.
 
 In all three cases the CA itself is bootstrapped and intact, and the message says so.
 

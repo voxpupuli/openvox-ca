@@ -5355,6 +5355,13 @@ var _ = Describe("first-boot's provisioning steps", func() {
 			Expect(first.ok).To(BeFalse(), "the first run should have refused: %s", first.output)
 			Expect(first.output).To(ContainSubstring("delete the CA this run just created"))
 			Expect(first.output).NotTo(ContainSubstring("was already there before this run"))
+			// "Use the existing CA" means granting its directory, which the
+			// remedy must do with drop-ins for the reason the legacy-cadir
+			// refusal does: an edited unit file does not survive an upgrade.
+			Expect(first.output).To(And(
+				ContainSubstring("systemctl edit openvox-ca "),
+				ContainSubstring("systemctl edit openvox-ca-first-boot"),
+			), "the remedy does not grant the existing CA's directory through drop-ins")
 		})
 
 		// The case the finding named: a working CA whose store lacks this
@@ -5592,6 +5599,12 @@ var _ = Describe("first-boot's provisioning steps", func() {
 				Expect(r.ok).To(BeFalse(),
 					"provisioning used the shipped default for a key the server reads: %s", r.output)
 				Expect(r.output).To(ContainSubstring("not in a form this script can read"))
+				// And it quotes the line it refused. The refusal used to build
+				// that quote with `grep -n '^cadir:'` -- the narrow spelling the
+				// presence test exists to see past -- so for every entry below
+				// the operator was shown a blank where the line should be.
+				Expect(r.output).To(ContainSubstring("1:"+line),
+					"the refusal does not quote the line it could not read")
 				// The consequence, not just the message: no CA at the default.
 				Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).NotTo(BeAnExistingFile())
 			},
@@ -5602,6 +5615,30 @@ var _ = Describe("first-boot's provisioning steps", func() {
 			Entry("a single-quoted key", `'cadir': >`),
 			Entry("a space before the colon", `cadir : >`),
 			Entry("leading whitespace", `  cadir: >`),
+		)
+
+		// The same for storage_backend, which is the other caller of the wide
+		// presence test and had no spec for any of these spellings. A quoted
+		// key is one the narrow reader cannot see, so the backend reads as
+		// unset; only the presence test stands between that and bootstrapping
+		// a filesystem CA beside a server configured for etcd.
+		DescribeTable("refuses a storage_backend it cannot read however the key is spelled",
+			func(line string) {
+				Expect(os.WriteFile(cfg, []byte(line+"\n"), 0o644)).To(Succeed())
+
+				r := runFirstBootScript(sslDir, binDir, "ca.example.com", withCfg())
+				Expect(r.ok).To(BeFalse(),
+					"provisioning assumed the filesystem backend for a key the server reads: %s", r.output)
+				Expect(r.output).To(And(
+					ContainSubstring("sets storage_backend, but not in a form this script can read"),
+					ContainSubstring("1:"+line),
+				), "the refusal did not name the key or quote the line")
+				Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).NotTo(BeAnExistingFile())
+			},
+			Entry("a double-quoted key", `"storage_backend": etcd`),
+			Entry("a single-quoted key", `'storage_backend': etcd`),
+			Entry("a space before the colon", `storage_backend : etcd`),
+			Entry("leading whitespace", `  storage_backend: etcd`),
 		)
 
 		// And the structures no line-wise reader can interpret. A flow mapping
@@ -5963,6 +6000,15 @@ var _ = Describe("first-boot's provisioning steps", func() {
 				ContainSubstring("Keep the existing CA where it is"),
 				ContainSubstring("Or move it"),
 			))
+			// And keeping it is granted with a drop-in, for BOTH units, never
+			// by editing them: the packages install the units as plain files
+			// under /usr/lib/systemd/system, so the next upgrade reverts an
+			// edit and restarts the CA unable to write its own store.
+			Expect(r.output).To(And(
+				ContainSubstring("systemctl edit openvox-ca "),
+				ContainSubstring("systemctl edit openvox-ca-first-boot"),
+				ContainSubstring("ReadWritePaths="+legacy),
+			), "the remedy does not grant the kept directory through a drop-in for both units")
 			// And it must stop before creating anything of its own.
 			Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).NotTo(BeAnExistingFile())
 		})

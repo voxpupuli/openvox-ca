@@ -260,15 +260,16 @@ For a permanent installation, run it as a service rather than from a shell —
 see [running under systemd](systemd.md), which ships a hardened unit. One thing
 to watch for a migrated CA: the unit's `ProtectSystem=strict` makes the whole
 filesystem read-only apart from the one path its `ReadWritePaths=` grants,
-which is `/etc/puppetlabs/puppet/ssl/ca`. A `cadir` anywhere else needs that
-line changed to match — the two must always name the same place.
+which is `/etc/puppetlabs/puppet/ssl/ca`. A `cadir` anywhere else has to be
+granted as well — with a drop-in, since an edit to the unit file is undone by
+the next upgrade. See [using a different CA
+directory](systemd.md#using-a-different-ca-directory).
 
 **On a packaged install that is two units, not one.** The packages add
 `openvox-ca-first-boot.service`, which provisions the CA and therefore writes
-into `cadir` as well, under its own `ProtectSystem=strict`. Both units'
-`ReadWritePaths=` have to name the moved directory, or provisioning fails on a
-read-only filesystem the next time it mints. See [installing from a
-package](systemd.md#installing-from-a-package).
+into `cadir` as well, under its own `ProtectSystem=strict`. Both units need the
+moved directory granted, or provisioning fails on a read-only filesystem the
+next time it mints.
 
 ## Step 8: Verify
 
