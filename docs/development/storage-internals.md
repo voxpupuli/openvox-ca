@@ -38,6 +38,7 @@ itself, which nothing else would write again.
 ```text
 <cadir>/
 ├── ca_crt.pem                      (KeyCACert)
+├── ca_key.pem                      (KeyCAKey)          0600
 ├── ca_pub.pem                      (KeyCAPubKey)
 ├── ca_crl.pem                      (KeyCRL)
 ├── serial                          (KeySerial)
@@ -45,7 +46,6 @@ itself, which nothing else would write again.
 ├── .inventory.hmac                 (KeyInventoryHMAC)
 ├── superseded.json                 (KeySuperseded)     0600
 ├── private/
-│   ├── ca_key.pem                  (KeyCAKey)          0600
 │   ├── .inventory_hmac_key         (KeyHMACKey)        0600
 │   └── <subject>_key.pem           server-gen keys     0600
 ├── requests/
@@ -55,6 +55,15 @@ itself, which nothing else would write again.
 └── locks/
     └── <sha256(name)>.lock         not a logical key   0600
 ```
+
+`ca_key` is the one key whose path is resolved rather than fixed. It is
+`ca_key.pem`, where OpenVox Server keeps it, unless only `private/ca_key.pem`
+exists, in which case that file is read and written in place. The location is
+decided from the files' existence alone (`caKeyLocation` in
+`internal/storage/filesystem.go`), so `Exists` and the startup permission check
+never read the key, which the frontend process must not hold. Both present with
+different contents is `ErrCAKeyConflict` from `Get`, `Put` and `Delete`, the
+operations that handle the key itself (`checkCAKeyConflict`).
 
 `locks/` is the exception to the mapping above: its files are not blobs and have
 no logical key, so `Get`/`Put`/`List`/`Migrate` never touch them. They are the

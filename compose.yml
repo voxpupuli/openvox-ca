@@ -42,7 +42,7 @@ services:
       - --cadir=/data
       - --hostname=puppet.example.com
       - --tls-cert=/data/ca_crt.pem
-      - --tls-key=/data/private/ca_key.pem
+      - --tls-key=/data/ca_key.pem
     # NOTE: autosign is off by default. Only add --autosign-config=true in
     # dev/test environments: it lets any CSR submitter obtain a signed
     # certificate without operator review.

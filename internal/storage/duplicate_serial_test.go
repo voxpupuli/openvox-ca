@@ -61,7 +61,7 @@ var _ = Describe("AppendInventory duplicate serial rejection", func() {
 
 		inv, err := svc.ReadInventory(ctx)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(string(inv)).To(Equal("0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1\n"),
+		Expect(string(inv)).To(Equal("0x0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /CN=node1\n"),
 			"the duplicate line must not have been appended")
 	})
 

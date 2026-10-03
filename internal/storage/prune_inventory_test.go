@@ -42,9 +42,10 @@ func newFilesystemInventoryService() *StorageService {
 }
 
 // keepNotSerial returns a predicate that keeps every entry except the one with
-// the given serial.
+// the given serial, compared numerically: the filesystem backend reads its
+// zero-padded fixture serials normalised, the structured backends as stored.
 func keepNotSerial(serial string) func(InventoryEntry) bool {
-	return func(e InventoryEntry) bool { return e.Serial != serial }
+	return func(e InventoryEntry) bool { return inventorySerial(e.Serial) != inventorySerial(serial) }
 }
 
 // failHMACPutBackend wraps a blob backend and, when armed, fails writes to
@@ -92,7 +93,13 @@ var _ = Describe("PruneInventory", func() {
 				removed, err := svc.PruneInventory(ctx, keepNotSerial("0002"))
 				Expect(err).NotTo(HaveOccurred(), "PruneInventory")
 				Expect(removed).To(HaveLen(1), "want one entry serial 0002 subject node2")
-				Expect(removed[0].Serial).To(Equal("0002"), "want one entry serial 0002 subject node2")
+				// The filesystem backend reads its serials normalised; the
+				// structured backends hand back what they stored.
+				wantSerial := "0002"
+				if name == "filesystem" {
+					wantSerial = "2"
+				}
+				Expect(removed[0].Serial).To(Equal(wantSerial), "want one entry serial 0002 subject node2")
 				Expect(removed[0].Subject).To(Equal("node2"), "want one entry serial 0002 subject node2")
 
 				// ReadInventory verifies the integrity head before returning, so a
@@ -101,6 +108,11 @@ var _ = Describe("PruneInventory", func() {
 				Expect(err).NotTo(HaveOccurred(), "ReadInventory after prune (head not rewritten?)")
 				want := "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1\n" +
 					"0003 2024-01-03T00:00:00UTC 2029-01-03T00:00:00UTC /node1\n"
+				if name == "filesystem" {
+					// The filesystem backend wrote OpenVox Server's format.
+					want = "0x0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /CN=node1\n" +
+						"0x0003 2024-01-03T00:00:00UTC 2029-01-03T00:00:00UTC /CN=node1\n"
+				}
 				Expect(got).To(Equal([]byte(want)), "inventory after prune")
 
 				// A subsequent append must extend the rewritten chain cleanly.
@@ -134,13 +146,48 @@ var _ = Describe("PruneInventory", func() {
 				Expect(err).To(MatchError(ContainSubstring("updating inventory HMAC after prune")),
 					"the head-write failure must surface")
 				Expect(removed).To(HaveLen(1), "the durably removed entry must be returned with the error")
-				Expect(removed[0].Serial).To(Equal("0002"))
+				Expect(removed[0].Serial).To(Equal("2"))
 
 				// The honest aftermath: the rewrite is durable, the head lags
 				// it, and the next verified read reports the mismatch.
 				_, err = svc.ReadInventory(ctx)
 				Expect(err).To(MatchError(ErrInventoryTampered),
 					"the stale head must surface as a verification failure, not silently")
+			})
+
+			It("writes every surviving filesystem line back byte for byte", func() {
+				if name != "filesystem" {
+					Skip("blob-fallback path only")
+				}
+				// A filesystem inventory is shared with OpenVox Server, so it
+				// holds lines in OpenVox Server's format beside openvox-ca's,
+				// including OpenVox Server's own CA certificate, whose subject
+				// has spaces in it. Re-rendering a survivor through the
+				// canonical line truncated that subject to "/CN=Puppet", and a
+				// line that does not parse was dropped outright. Neither is
+				// this CA's to rewrite.
+				ctx := context.Background()
+				svc := New(GinkgoT().TempDir())
+				Expect(svc.EnsureDirs(ctx)).To(Succeed())
+				caLine := "0x0001 2026-01-01T00:00:00UTC 2041-01-01T00:00:00UTC /CN=Puppet CA: puppet.example.com\n"
+				ovsLine := "0x0002 2026-01-02T00:00:00UTC 2031-01-02T00:00:00UTC /CN=agent.example.com\n"
+				expired := "0x0003 2020-01-01T00:00:00UTC 2021-01-01T00:00:00UTC /CN=gone.example.com\n"
+				oursLine := "9F3C 2026-01-03T00:00:00UTC 2031-01-03T00:00:00UTC /node1\n"
+				junk := "half a line\n"
+				Expect(svc.Backend().Put(ctx, KeyInventory,
+					[]byte(caLine+ovsLine+expired+junk+oursLine), BlobPrivate)).To(Succeed())
+				Expect(svc.InitHMAC(ctx)).To(Succeed())
+
+				removed, err := svc.PruneInventory(ctx, func(e InventoryEntry) bool {
+					return e.NotAfter != "2021-01-01T00:00:00UTC"
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(removed).To(HaveLen(1))
+				Expect(removed[0].NotAfter).To(Equal("2021-01-01T00:00:00UTC"))
+
+				got, err := svc.ReadInventory(ctx)
+				Expect(err).NotTo(HaveOccurred(), "the head must be rewritten over the verbatim survivors")
+				Expect(string(got)).To(Equal(caLine + ovsLine + junk + oursLine))
 			})
 
 			It("no match leaves inventory and head untouched", func() {

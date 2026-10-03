@@ -302,7 +302,8 @@ var _ = Describe("CA RevokeSerial", func() {
 			Entry("empty", ""),
 			Entry("whitespace only", "  "),
 			Entry("non-hex letters", "zzz"),
-			Entry("0x prefix", "0x1234"),
+			Entry("a bare 0x", "0x"),
+			Entry("two 0x prefixes", "0x0x1234"),
 			Entry("negative", "-1"),
 			Entry("embedded space", "12 34"),
 		)
@@ -323,6 +324,10 @@ var _ = Describe("CA RevokeSerial", func() {
 			Entry("lowercase", strings.ToLower),
 			Entry("zero-padded", func(s string) string { return "0000" + s }),
 			Entry("surrounded by whitespace", func(s string) string { return "  " + s + "\n" }),
+			// As the filesystem inventory writes it, so a serial copied from
+			// inventory.txt works as it is.
+			Entry("0x-prefixed, as inventory.txt writes it", func(s string) string { return "0x" + s }),
+			Entry("0X-prefixed", func(s string) string { return "0X" + s }),
 		)
 
 		It("is idempotent: a second revocation adds no second entry", func() {

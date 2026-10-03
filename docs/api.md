@@ -51,7 +51,8 @@ A revocation takes the per-subject lock that signing and [renewal](#certificate-
 > In this state the `WARN` line names the serial. A revocation that failed
 > *before* the CRL was reached — a lock it could not take, or a subject the
 > inventory could not resolve — does not, and the serial has to come from the
-> inventory instead.
+> inventory instead. On the filesystem backend the inventory writes it with a
+> `0x` prefix, which this API accepts as it is.
 
 `GET` response:
 
@@ -90,7 +91,8 @@ revoke that failed, or a supersession the CA could not write down.
 `puppetca_supersede_failures_total` is what tells you one exists. `PUT /certificate_status_by_serial/{serial}` names the
 certificate instead of the subject, so it can reach that one.
 
-The serial is hexadecimal, in any case and with or without leading zeros; it is
+The serial is hexadecimal, in any case, with or without leading zeros and with
+or without one `0x` prefix (as the filesystem inventory writes it); it is
 matched against the inventory in canonical form — uppercase and unpadded, which
 is how `openvox-ca` logs it. `openssl x509 -noout -serial` prints the same digits
 zero-padded to whole bytes, a rendering this route accepts unchanged.

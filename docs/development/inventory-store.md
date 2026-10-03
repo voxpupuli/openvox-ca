@@ -9,6 +9,12 @@ Puppet-style `inventory.txt`, with one line per issued certificate:
 SERIAL NOT_BEFORE NOT_AFTER /SUBJECT
 ```
 
+On the filesystem backend that file is OpenVox Server's own, so lines are
+written in its format (`0x0002 ... /CN=agent`) and read in either that or the
+canonical one (`2 ... /agent`). The structured backends store the canonical
+form, and their hash chain is folded over it; `openvox-ca-ctl migrate` converts
+between the two.
+
 It is addressed by the logical key `inventory` and manipulated through a handful
 of `StorageService` methods (`AppendInventory`, `ReadInventory`,
 `TouchInventory`, `HasInventory`). Integrity is provided by an HMAC-SHA256 over
@@ -124,9 +130,11 @@ mac_i = HMAC-SHA256(key, mac_{i-1} ‖ canonical(entry_i))      mac_{-1} = ∅
 head  = mac_n
 ```
 
-- `canonical(entry)` is the exact `SERIAL NB NA /SUBJECT\n` line the signing
-  path already writes, so the chain is trivially reproducible and independent of
-  any backend's row encoding.
+- `canonical(entry)` is the canonical `SERIAL NB NA /SUBJECT\n` line the
+  issuance paths build (`FormatInventoryLine`), so the chain is trivially
+  reproducible and independent of any backend's row encoding. The filesystem
+  backend no longer writes that form to disk: its `inventory.txt` is OpenVox
+  Server's and takes OpenVox Server's format.
 - The **head** (`mac_n`) is stored under the existing `inventory_hmac` blob row
   — no new logical key, and `VerifyInventoryHMAC`/`UpdateInventoryHMAC` keep
   their shape. The key still lives in `StorageService` (`s.hmacKey`); the
@@ -144,12 +152,16 @@ locally-held key threat model.
 
 ### Migration
 
-`Migrate` copies blobs opaquely via `Backend.Get`/`Put` keyed by logical key. To
-keep filesystem ⇄ SQL migrations working without teaching the migrator about
-inventory internals, a structured backend serves the `inventory` logical key
-through a **render/parse shim**:
+`Migrate` copies blobs via `Backend.Get`/`Put` keyed by logical key, opaquely
+except for one: when exactly one end is structured it converts the `inventory`
+blob, from the filesystem's OpenVox Server form to the canonical form
+(`canonicaliseBlobInventory`) or back (`openVoxBlobInventory`). Between two
+structured backends, or two filesystem ones, it stays opaque. A structured
+backend serves the `inventory` logical key through a **render/parse shim**:
 
-- `Get(KeyInventory)` renders the rows back to byte-identical `inventory.txt`.
+- `Get(KeyInventory)` renders the rows back as canonical `inventory.txt` lines,
+  byte-identical to what a structured backend was given; a filesystem round
+  trip comes back in OpenVox Server's format.
 - `Put(KeyInventory, data)` parses the text and replaces the table contents
   (also covers the empty `Put` from `TouchInventory`).
 - `Exists(KeyInventory)` reports whether the inventory has been seeded.

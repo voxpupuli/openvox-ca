@@ -36,6 +36,14 @@ var sampleInventoryLines = []string{
 	"0003 2024-01-03T00:00:00UTC 2029-01-03T00:00:00UTC /node1",
 }
 
+// migratedSampleInventory is sampleInventoryLines as a structured backend holds
+// them after a migration off the filesystem backend, which is the conversion
+// step that normalises each line to the canonical form: the fixture's
+// zero-padded serials lose their padding there.
+const migratedSampleInventory = "1 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1\n" +
+	"2 2024-01-02T00:00:00UTC 2029-01-02T00:00:00UTC /node2\n" +
+	"3 2024-01-03T00:00:00UTC 2029-01-03T00:00:00UTC /node1\n"
+
 // newInventoryService returns a StorageService over a fresh SQLite backend with
 // the inventory touched, integrity initialised, and sampleInventoryLines
 // appended. The backend is returned so tests can tamper with rows directly.
@@ -288,7 +296,7 @@ var _ = Describe("InventoryMigrationRoundTrip", func() {
 		for _, line := range sampleInventoryLines {
 			Expect(src.AppendInventory(ctx, line)).NotTo(HaveOccurred(), "AppendInventory")
 		}
-		srcText, err := src.ReadInventory(ctx)
+		_, err := src.ReadInventory(ctx)
 		Expect(err).NotTo(HaveOccurred(), "ReadInventory(src)")
 
 		// Migrate filesystem → sqlite.
@@ -298,18 +306,22 @@ var _ = Describe("InventoryMigrationRoundTrip", func() {
 		// Integrity must verify on the structured destination.
 		Expect(sqlite.InitHMAC(ctx)).NotTo(HaveOccurred(), "sqlite integrity after migrate")
 		got, _ := sqlite.ReadInventory(ctx)
-		Expect(got).To(Equal(srcText), "sqlite inventory")
+		Expect(string(got)).To(Equal(migratedSampleInventory), "sqlite inventory")
 		s, err := sqlite.LatestSerialForSubject(ctx, "node1")
 		Expect(err).NotTo(HaveOccurred(), "sqlite LatestSerialForSubject(node1)")
-		Expect(s).To(Equal("0003"), "sqlite LatestSerialForSubject(node1)")
+		Expect(s).To(Equal("3"), "sqlite LatestSerialForSubject(node1)")
 
 		// Migrate sqlite → a second filesystem CA.
 		dst := New(GinkgoT().TempDir())
 		_, err = MigrateService(ctx, sqlite, dst, MigrateOptions{})
 		Expect(err).NotTo(HaveOccurred(), "MigrateService sqlite→fs")
 		Expect(dst.InitHMAC(ctx)).NotTo(HaveOccurred(), "fs integrity after round-trip")
+		// Back on the filesystem, it is in OpenVox Server's format.
 		got, _ = dst.ReadInventory(ctx)
-		Expect(got).To(Equal(srcText), "round-tripped inventory")
+		Expect(string(got)).To(Equal(
+			"0x0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /CN=node1\n"+
+				"0x0002 2024-01-02T00:00:00UTC 2029-01-02T00:00:00UTC /CN=node2\n"+
+				"0x0003 2024-01-03T00:00:00UTC 2029-01-03T00:00:00UTC /CN=node1\n"), "round-tripped inventory")
 	})
 })
 
@@ -372,14 +384,12 @@ var _ = Describe("InventoryMigrationRoundTripOverlayDestination", func() {
 		// verifyInventoryHMACLocked), and LatestSerialForSubject takes its own
 		// indexed-lookup unwrap site. Together they confirm the inventory is served
 		// correctly through the wrapper, not merely that InitHMAC did not error.
-		srcText, err := src.ReadInventory(ctx)
-		Expect(err).NotTo(HaveOccurred(), "ReadInventory(src)")
 		got, err := server.ReadInventory(ctx)
 		Expect(err).NotTo(HaveOccurred(), "ReadInventory through overlay")
-		Expect(got).To(Equal(srcText), "inventory read back through overlay")
+		Expect(string(got)).To(Equal(migratedSampleInventory), "inventory read back through overlay")
 
 		serial, err := server.LatestSerialForSubject(ctx, "node1")
 		Expect(err).NotTo(HaveOccurred(), "LatestSerialForSubject(node1) through overlay")
-		Expect(serial).To(Equal("0003"), "latest serial for node1 through overlay")
+		Expect(serial).To(Equal("3"), "latest serial for node1 through overlay")
 	})
 })

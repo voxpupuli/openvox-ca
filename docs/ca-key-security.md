@@ -124,7 +124,7 @@ behaviour".
 
 ## CA key encryption at rest
 
-By default, the CA private key is stored as unencrypted PEM at `<cadir>/private/ca_key.pem`.
+By default, the CA private key is stored as unencrypted PEM at `<cadir>/ca_key.pem` (or `<cadir>/private/ca_key.pem`, if that is where an existing cadir keeps it).
 Enable `--encrypt-ca-key` to encrypt the key at rest using AES-256-GCM with an Argon2id-derived key.
 
 ### How it works

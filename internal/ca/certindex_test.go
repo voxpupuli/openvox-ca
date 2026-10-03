@@ -335,8 +335,9 @@ var _ = Describe("CA certificate index", func() {
 			// Equality, not a substring: the inventory line is a byte-compatibility
 			// contract with Puppet's inventory.txt, so "the projection is ignored"
 			// must mean nothing extra was written -- a substring would pass just as
-			// happily if a fingerprint were appended.
-			Expect(string(data)).To(Equal(line + "\n"))
+			// happily if a fingerprint were appended. The line is in OpenVox
+			// Server's format, which is what the filesystem backend writes.
+			Expect(string(data)).To(Equal("0x00AA 2026-01-01T00:00:00UTC 2036-01-01T00:00:00UTC /CN=node1\n"))
 
 			_, ok, err := blobStore.CertStatuses(ctx, "")
 			Expect(err).NotTo(HaveOccurred())

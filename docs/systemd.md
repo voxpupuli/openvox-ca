@@ -30,7 +30,7 @@ The configuration file is yours to write — it is not in the tarball — and [c
 
 The unit expects the binary at `/usr/local/bin/openvox-ca` and its configuration at `/etc/puppet-ca/config.yaml`. See [configuring the server](configuration.md).
 
-**Set `cadir` to `/var/lib/puppet-ca`** (the `StateDirectory=` the unit creates), or the CA will not be able to write: `ProtectSystem=strict` makes the rest of the filesystem read-only. To keep an existing directory instead — a CA migrated from OpenVox/Puppet Server usually lives in `/etc/puppetlabs/puppet/ssl/ca` — uncomment the `ReadWritePaths=` line in the unit and point it there.
+**Set `cadir` to `/var/lib/puppet-ca`** (the `StateDirectory=` the unit creates), or the CA will not be able to write: `ProtectSystem=strict` makes the rest of the filesystem read-only. To keep an existing directory instead — a CA migrated from OpenVox/Puppet Server usually lives in `/etc/puppetlabs/puppet/ssl/ca` — uncomment the `ReadWritePaths=` line in the unit and point it there. If OpenVox Server's CA may take that directory back, openvox-ca must also run as OpenVox Server's user; see [sharing the cadir with OpenVox Server](storage-backends.md#sharing-the-cadir-with-openvox-server).
 
 ### The two settings you must not drop
 
@@ -165,7 +165,7 @@ See [configuration](configuration.md#memory-budget).
 
 ## Hardening
 
-The shipped unit runs the CA as a dedicated `puppet-ca` user with `ProtectSystem=strict`, an empty capability set (the API's port 8140 and the exporter's 9140 are both unprivileged), and a `@system-service` syscall filter. `RestrictAddressFamilies` includes `AF_UNIX`, which is needed for both the notification socket and the launcher's socketpair to the isolated signer.
+The shipped unit runs the CA as a dedicated `puppet-ca` user (unless overridden to [share a cadir with OpenVox Server](storage-backends.md#sharing-the-cadir-with-openvox-server), which gives that up) with `ProtectSystem=strict`, an empty capability set (the API's port 8140 and the exporter's 9140 are both unprivileged), and a `@system-service` syscall filter. `RestrictAddressFamilies` includes `AF_UNIX`, which is needed for both the notification socket and the launcher's socketpair to the isolated signer.
 
 `LimitCORE=0` is deliberate and worth keeping: the signer holds the decrypted CA private key in memory for its whole life, so a core dump would write that key to `/var/lib/systemd/coredump` — undoing [key encryption at rest](ca-key-security.md) for anything that ships crash dumps off the host.
 

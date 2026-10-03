@@ -358,12 +358,13 @@ ok_contains "the command's stderr reaches the dump" \
 FAKE_COMPOSE_STDERR=''
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Both harnesses, not just one
+# Every harness, not just one
 # ═════════════════════════════════════════════════════════════════════════════
 # Issue #281 existed in two copies and a fix to one would have left the other.
-# These check the fix reached both call sites, and that neither kept a private
-# tail-only dump alongside the shared one.
-for _harness in test/backends/redis-stack.sh test/puppet/puppet-stack.sh; do
+# These check the fix reached every call site, the round trip's included, and
+# that none kept a private tail-only dump alongside the shared one.
+for _harness in test/backends/redis-stack.sh test/puppet/puppet-stack.sh \
+        test/roundtrip/roundtrip.sh; do
     if grep -q 'failure_log_dump' "$_here/../$_harness"; then
         pass "$_harness dumps through the shared helper"
     else

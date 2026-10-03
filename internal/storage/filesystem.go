@@ -19,6 +19,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -50,11 +51,11 @@ const fsLockDir = "locks"
 
 // fsLayout maps logical keys to paths relative to the backend's baseDir.
 // Keys of the form "csr/<subject>" and "cert/<subject>" are handled
-// explicitly in pathFor.
+// explicitly in pathFor, as is KeyCAKey, which caKeyLocation resolves (a fresh
+// cadir gets fsCAKeyPath).
 var fsLayout = map[string]string{
 	KeyCACert:        "ca_crt.pem",
 	KeyCAPubKey:      "ca_pub.pem",
-	KeyCAKey:         "private/ca_key.pem",
 	KeyCRL:           "ca_crl.pem",
 	KeySerial:        "serial",
 	KeyInventory:     "inventory.txt",
@@ -63,9 +64,32 @@ var fsLayout = map[string]string{
 	KeySuperseded:    "superseded.json",
 }
 
+// fsCAKeyPath is where OpenVox Server keeps its CA key, and so where this
+// backend keeps it: a cadir handed back to OpenVox Server has to have the key
+// where it looks. fsLegacyCAKeyPath is where this backend kept it before, and a
+// cadir with the key only there goes on using it there. See caKeyLocation.
+const (
+	fsCAKeyPath       = "ca_key.pem"
+	fsLegacyCAKeyPath = "private/ca_key.pem"
+)
+
+// ErrCAKeyConflict is returned for every CA key operation on a cadir holding
+// both ca_key.pem and private/ca_key.pem with different contents. Either could
+// be the key this CA signs with, and picking one would sign with a key the
+// operator may not have meant, or hand OpenVox Server one this CA never used.
+var ErrCAKeyConflict = errors.New("two different CA keys in the cadir")
+
+// ErrCAKeyLinkBroken is returned for a CA key file that is a symlink leading
+// nowhere. It deliberately does not wrap fs.ErrNotExist: callers read that as
+// "no key here" (migrate skips the key, Init takes the no-key branches), and a
+// link where the key belongs is a key that is meant to be there.
+var ErrCAKeyLinkBroken = errors.New("the CA key file is a link that leads nowhere")
+
 // FilesystemBackend stores blobs as files under a single base directory.
-// It is the default Backend implementation and preserves the exact on-disk
-// layout used by earlier versions of openvox-ca.
+// It is the default Backend implementation. It keeps OpenVox Server's own CA
+// directory layout and inventory line format, and reads a cadir an earlier
+// version of openvox-ca wrote (the key in private/, canonical inventory lines)
+// in place, without rearranging it.
 type FilesystemBackend struct {
 	baseDir  string
 	appendMu sync.Mutex // serialises AppendLine across the backend
@@ -117,9 +141,98 @@ func (b *FilesystemBackend) Path(key string) string {
 	return p
 }
 
+// caKeyFiler is implemented by a backend that keeps the CA key in a local file
+// outside the private-key directory CheckKeyPermissions scans.
+type caKeyFiler interface {
+	CAKeyFile() string
+}
+
+// CAKeyFile returns the path of the CA key file this backend would read, or ""
+// when there is none or it cannot be resolved. It never reads the key: see
+// caKeyLocation.
+func (b *FilesystemBackend) CAKeyFile() string {
+	p, err := b.caKeyLocation()
+	if err != nil {
+		return ""
+	}
+	if _, err := os.Stat(p); err != nil {
+		return ""
+	}
+	return p
+}
+
+// caKeyLocation resolves where the CA key is: ca_key.pem, OpenVox Server's
+// location, unless only private/ca_key.pem exists, which is where a cadir this
+// backend created before it moved keeps it. The key is read and written where it
+// is found rather than moved, so neither kind of cadir is rearranged by starting
+// on it, and a fresh one gets OpenVox Server's layout.
+//
+// SECURITY: it decides from the files' existence alone and never reads either.
+// Exists, ModTime, Path and CAKeyFile resolve through it, and those are reached
+// by the network-facing frontend (its startup permission check, Init's
+// bootstrap checks), which by design never has the CA key in its address space
+// (docs/ca-key-security.md). Whether two copies agree is checked only by
+// checkCAKeyConflict, from the operations that handle the key itself.
+// NIST 800-53: SC-3 (Security Function Isolation)
+func (b *FilesystemBackend) caKeyLocation() (string, error) {
+	top := filepath.Join(b.baseDir, fsCAKeyPath)
+	legacy := filepath.Join(b.baseDir, fsLegacyCAKeyPath)
+	// Lstat: a dangling ca_key.pem link is a key that is meant to be there,
+	// and must fail on use rather than fall through to the private/ copy.
+	_, err := os.Lstat(top)
+	if err == nil {
+		return top, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return "", err
+	}
+	_, err = os.Lstat(legacy)
+	if err == nil {
+		return legacy, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return "", err
+	}
+	return top, nil
+}
+
+// checkCAKeyConflict refuses a cadir holding both ca_key.pem and
+// private/ca_key.pem with different contents: either could be the key this CA
+// signs with, and picking one would sign with a key the operator may not have
+// meant, or hand OpenVox Server one this CA never used. Identical copies are
+// accepted. The error names both paths, and the operator decides.
+//
+// It reads both files, so only Get, Put and Delete call it: they handle the key
+// itself, and run only in the processes allowed to hold it (the signer, a
+// single-process server, the operator CLI). A file that exists but cannot be
+// read is an error here, never treated as absent, so it cannot hand an
+// operation the other copy instead.
+func (b *FilesystemBackend) checkCAKeyConflict() error {
+	top := filepath.Join(b.baseDir, fsCAKeyPath)
+	legacy := filepath.Join(b.baseDir, fsLegacyCAKeyPath)
+	topData, present, err := readCAKeyCopy(top)
+	if err != nil || !present {
+		return err
+	}
+	defer clear(topData)
+	legacyData, present, err := readCAKeyCopy(legacy)
+	if err != nil || !present {
+		return err
+	}
+	defer clear(legacyData)
+	if !bytes.Equal(topData, legacyData) {
+		return fmt.Errorf("%w: %s and %s differ; remove the one that is not this CA's key",
+			ErrCAKeyConflict, top, legacy)
+	}
+	return nil
+}
+
 func (b *FilesystemBackend) pathFor(key string) (string, error) {
 	if err := validateKey(key); err != nil {
 		return "", err
+	}
+	if key == KeyCAKey {
+		return b.caKeyLocation()
 	}
 	if rel, ok := fsLayout[key]; ok {
 		return filepath.Join(b.baseDir, rel), nil
@@ -178,6 +291,19 @@ func (b *FilesystemBackend) Get(ctx context.Context, key string) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
+	if key == KeyCAKey {
+		if err := b.checkCAKeyConflict(); err != nil {
+			return nil, err
+		}
+		data, present, err := readCAKeyCopy(p)
+		if err != nil {
+			return nil, err
+		}
+		if !present {
+			return nil, &fs.PathError{Op: "open", Path: p, Err: fs.ErrNotExist}
+		}
+		return data, nil
+	}
 	return os.ReadFile(p)
 }
 
@@ -188,6 +314,11 @@ func (b *FilesystemBackend) Put(ctx context.Context, key string, data []byte, ki
 	p, err := b.pathFor(key)
 	if err != nil {
 		return err
+	}
+	if key == KeyCAKey {
+		if err := b.removeLegacyCAKeyCopy(p); err != nil {
+			return err
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(p), DirPerm); err != nil {
 		return err
@@ -203,7 +334,53 @@ func (b *FilesystemBackend) Delete(ctx context.Context, key string) error {
 	if err != nil {
 		return err
 	}
+	if key == KeyCAKey {
+		if err := b.removeLegacyCAKeyCopy(p); err != nil {
+			return err
+		}
+	}
 	return os.Remove(p)
+}
+
+// readCAKeyCopy reads one copy of the CA key, reporting it absent only when
+// nothing at all is at p. A link there that leads nowhere is an error, as
+// caKeyLocation treats it: read as absent, it would pass the conflict check and
+// let a write or a delete remove the other copy, which may be the only key.
+func readCAKeyCopy(p string) (data []byte, present bool, err error) {
+	if _, err := os.Lstat(p); errors.Is(err, fs.ErrNotExist) {
+		return nil, false, nil
+	} else if err != nil {
+		return nil, false, err
+	}
+	data, err = os.ReadFile(p)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, true, fmt.Errorf("%w: %s", ErrCAKeyLinkBroken, p)
+	}
+	if err != nil {
+		return nil, true, err
+	}
+	return data, true, nil
+}
+
+// removeLegacyCAKeyCopy prepares a write or a delete of the CA key at p. It
+// refuses two different keys (checkCAKeyConflict); otherwise, when p is the
+// top-level file, any private/ copy holds the same bytes, and it goes first.
+// Left behind, it would either differ from the key just written, so every
+// later read refuses, or be found again after a delete. Removing it before
+// touching p means a failure at either step leaves no half-changed pair: the
+// top-level file still holds the key it held.
+func (b *FilesystemBackend) removeLegacyCAKeyCopy(p string) error {
+	if err := b.checkCAKeyConflict(); err != nil {
+		return err
+	}
+	legacy := filepath.Join(b.baseDir, fsLegacyCAKeyPath)
+	if legacy == p {
+		return nil
+	}
+	if err := os.Remove(legacy); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func (b *FilesystemBackend) Exists(ctx context.Context, key string) (bool, error) {
@@ -219,6 +396,13 @@ func (b *FilesystemBackend) Exists(ctx context.Context, key string) (bool, error
 		return true, nil
 	}
 	if errors.Is(err, fs.ErrNotExist) {
+		if key == KeyCAKey {
+			// Stat follows a link; a CA key link that leads nowhere is not
+			// an absent key (see ErrCAKeyLinkBroken).
+			if _, lerr := os.Lstat(p); lerr == nil {
+				return false, fmt.Errorf("%w: %s", ErrCAKeyLinkBroken, p)
+			}
+		}
 		return false, nil
 	}
 	return false, err

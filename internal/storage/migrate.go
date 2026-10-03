@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"strings"
 )
 
 // migratableSingleton pairs a fixed (non-enumerable) blob key with the
@@ -160,8 +161,16 @@ func Migrate(ctx context.Context, src, dst Backend, opts MigrateOptions) (Migrat
 		logf = func(string, ...any) {}
 	}
 
+	// Whether each end keeps the inventory as structured records or as the
+	// whole blob; copyKey converts the inventory when they differ.
+	_, srcStructured := asInventoryStore(src)
+	_, dstStructured := asInventoryStore(dst)
+
 	// copyKey copies one blob; a key absent in the source is skipped (not an
-	// error) so partially-populated CAs migrate cleanly.
+	// error) so partially-populated CAs migrate cleanly. The inventory is the
+	// one blob it converts: from the filesystem's OpenVox Server form to the
+	// structured backends' canonical form (canonicaliseBlobInventory), or the
+	// other way (openVoxBlobInventory).
 	copyKey := func(key string, kind BlobKind) (bool, error) {
 		data, err := src.Get(ctx, key)
 		if err != nil {
@@ -169,6 +178,12 @@ func Migrate(ctx context.Context, src, dst Backend, opts MigrateOptions) (Migrat
 				return false, nil
 			}
 			return false, fmt.Errorf("reading %q from source: %w", key, err)
+		}
+		if key == KeyInventory && !srcStructured && dstStructured {
+			data = canonicaliseBlobInventory(data)
+		}
+		if key == KeyInventory && srcStructured && !dstStructured {
+			data = openVoxBlobInventory(data)
 		}
 		if err := dst.Put(ctx, key, data, kind); err != nil {
 			return false, fmt.Errorf("writing %q to destination: %w", key, err)
@@ -224,4 +239,51 @@ func Migrate(ctx context.Context, src, dst Backend, opts MigrateOptions) (Migrat
 	}
 
 	return report, nil
+}
+
+// canonicaliseBlobInventory rewrites a whole-blob inventory into the canonical
+// lines a structured backend stores, for a migration out of the filesystem
+// backend. That inventory may hold OpenVox Server's lines ("0x0002 ...
+// /CN=agent") beside this CA's ("2 ... /agent"), and the structured backends
+// key their rows, their indexes and their hash chain on this CA's form, so each
+// line is read the way the filesystem backend reads it (parseBlobInventoryEntry)
+// and rendered canonically. A line that does not parse is passed through
+// unchanged, for the destination to refuse as loudly as it always has.
+//
+// This is the conversion step, and it is the only one: the filesystem backend
+// itself never rewrites a line, and a migration between two structured backends
+// copies their already-canonical rendering as it is. openVoxBlobInventory is the
+// same step in the other direction.
+func canonicaliseBlobInventory(data []byte) []byte {
+	var buf strings.Builder
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if e, ok := parseBlobInventoryEntry(line); ok {
+			line = canonicalInventoryLine(e)
+		}
+		buf.WriteString(line)
+		buf.WriteByte('\n')
+	}
+	return []byte(buf.String())
+}
+
+// openVoxBlobInventory renders a structured backend's canonical inventory as
+// OpenVox Server writes its own, for a migration onto the filesystem backend,
+// so that the cadir it produces can be handed to OpenVox Server like any other.
+// Lines go through openVoxInventoryLine, the one place that format is produced.
+func openVoxBlobInventory(data []byte) []byte {
+	var buf strings.Builder
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if e, ok := parseInventoryEntry(line); ok {
+			line = openVoxInventoryLine(e, line)
+		}
+		buf.WriteString(line)
+		buf.WriteByte('\n')
+	}
+	return []byte(buf.String())
 }
