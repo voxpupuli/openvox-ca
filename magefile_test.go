@@ -1713,6 +1713,99 @@ jobs:
 	})
 })
 
+var _ = Describe("verifyShellcheckCoverage", func() {
+	// Driven over content, both files, like verifyCIGate. The fixtures are
+	// the smallest shapes the real files take: scriptlets at the top level and
+	// under overrides.rpm, and first-boot shipped as a content src.
+	ci := func(files ...string) []byte {
+		return []byte("jobs:\n  shellcheck:\n    steps:\n      - run: |\n          shellcheck -s sh \\\n            " +
+			strings.Join(files, " \\\n            ") + "\n")
+	}
+	nfpmSrc := []byte(`
+contents:
+  - src: packaging/scripts/first-boot
+    dst: /usr/libexec/openvox-ca/first-boot
+  - src: packaging/config/config.yaml
+    dst: /etc/puppet-ca/config.yaml
+scripts:
+  postinstall: packaging/scripts/postinstall
+  preremove: packaging/scripts/preremove
+overrides:
+  rpm:
+    scripts:
+      preinstall: packaging/scripts/preinstall
+`)
+	all := []string{
+		"packaging/scripts/first-boot", "packaging/scripts/preinstall",
+		"packaging/scripts/postinstall", "packaging/scripts/preremove",
+	}
+
+	It("accepts a job that lints exactly what the packages ship", func() {
+		Expect(verifyShellcheckCoverageIn(ci(all...), nfpmSrc)).To(Succeed())
+	})
+
+	// The case that actually happened: a per-format scriptlet added under
+	// overrides, and the job not told. A guard reading only the top-level
+	// `scripts:` block would pass it.
+	DescribeTable("rejects a shipped script the job does not lint, naming it",
+		func(drop string) {
+			var files []string
+			for _, f := range all {
+				if f != drop {
+					files = append(files, f)
+				}
+			}
+			Expect(verifyShellcheckCoverageIn(ci(files...), nfpmSrc)).To(MatchError(And(
+				ContainSubstring(drop), ContainSubstring("does not lint it"))))
+		},
+		Entry("a per-format scriptlet under overrides", "packaging/scripts/preinstall"),
+		Entry("a top-level scriptlet", "packaging/scripts/postinstall"),
+		Entry("a script shipped as a file rather than a scriptlet", "packaging/scripts/first-boot"),
+	)
+
+	It("rejects a job entry the packages no longer ship, naming it", func() {
+		err := verifyShellcheckCoverageIn(ci(append(all, "packaging/scripts/postremove")...), nfpmSrc)
+		Expect(err).To(MatchError(And(
+			ContainSubstring("packaging/scripts/postremove"), ContainSubstring("does not ship"))))
+	})
+
+	// A comment in the run: block that names a script is not a lint of it.
+	It("does not count a script named only in a comment", func() {
+		src := []byte("jobs:\n  shellcheck:\n    steps:\n      - run: |\n" +
+			"          # packaging/scripts/preinstall is covered elsewhere\n" +
+			"          shellcheck -s sh packaging/scripts/first-boot packaging/scripts/postinstall packaging/scripts/preremove\n")
+		Expect(verifyShellcheckCoverageIn(src, nfpmSrc)).To(MatchError(ContainSubstring("packaging/scripts/preinstall")))
+	})
+
+	It("rejects a workflow with no shellcheck job", func() {
+		Expect(verifyShellcheckCoverageIn([]byte("jobs:\n  check:\n    steps: []\n"), nfpmSrc)).To(
+			MatchError(ContainSubstring(`has no "shellcheck" job`)))
+	})
+
+	// The floors. Both comparisons are set differences, so two parses that
+	// each found nothing would agree perfectly.
+	It("refuses an nfpm.yaml in which it found too few scripts", func() {
+		Expect(verifyShellcheckCoverageIn(ci(all...), []byte("scripts:\n  postinstall: packaging/scripts/postinstall\n"))).To(
+			MatchError(ContainSubstring("the parse is wrong rather than the packaging")))
+	})
+	It("refuses a job in which it found too few script paths", func() {
+		Expect(verifyShellcheckCoverageIn(ci("packaging/scripts/first-boot"), nfpmSrc)).To(
+			MatchError(ContainSubstring("the parse is wrong rather than the job")))
+	})
+
+	DescribeTable("refuses a file it cannot parse rather than reporting agreement",
+		func(ciSrc, pkgSrc []byte, want string) {
+			Expect(verifyShellcheckCoverageIn(ciSrc, pkgSrc)).To(MatchError(ContainSubstring(want)))
+		},
+		Entry("ci.yml", []byte("jobs: not-a-mapping\n"), nfpmSrc, "parsing ci.yml:"),
+		Entry("nfpm.yaml", ci(all...), []byte("scripts: not-a-mapping\n"), "parsing packaging/nfpm.yaml:"),
+	)
+
+	It("passes against the repository's own ci.yml and nfpm.yaml", func() {
+		Expect(verifyShellcheckCoverage()).To(Succeed())
+	})
+})
+
 var _ = Describe("verifyNodeTTL", func() {
 	// The guard that keeps first-boot's NODE_TTL and internal/ca's certValidity
 	// from drifting. Driven over content through verifyNodeTTLIn, because a

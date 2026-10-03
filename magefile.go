@@ -1405,8 +1405,9 @@ var ciGateExempt = []string{"ci", "automerge"}
 // job, so that branch protection naming one check really does cover all of
 // them.
 //
-// Written because the omission is silent, and because it was made here:
-// the shellcheck job below went in without its `needs:` entry first time.
+// Written because the omission is silent, and because it was made here: the
+// shellcheck job in .github/workflows/ci.yml went in without its `needs:` entry
+// first time.
 // That produces a workflow that runs the lint,
 // reports it red on the PR, and still reports "CI success" green -- and green
 // is the state the merge button reads. A required check that does not require
@@ -1693,18 +1694,154 @@ func mageTargetNames(src []byte) ([]string, error) {
 // that mentions a container image.
 var mageInvocationRE = regexp.MustCompile(`(?m)(?:^|[^\w.-])mage\s+([^\s;&|)]+)`)
 
+// shellcheckJob is the ci.yml job that lints the packages' maintainer scripts,
+// and packagedScriptsDir is where those scripts live.
+const (
+	shellcheckJob      = "shellcheck"
+	packagedScriptsDir = "packaging/scripts/"
+)
+
+// packagedScriptRE finds a path under packaging/scripts/ in a run: step.
+var packagedScriptRE = regexp.MustCompile(`packaging/scripts/[A-Za-z0-9_.-]+`)
+
+// verifyShellcheckCoverage checks that the shellcheck job lints exactly the
+// scripts the packages ship.
+//
+// The job names its files by hand, deliberately: a glob that stopped matching
+// would lint nothing and pass. But a hand-written list has its own silent
+// failure, and it happened on this branch within a commit: a preinstall was
+// added to nfpm.yaml, and nothing would have said that the job did not lint
+// it. So the list is held to nfpm.yaml -- every `scripts:` value, top-level
+// and per format under `overrides:`, and every content `src:` under
+// packaging/scripts/ (first-boot ships as a file, not as a scriptlet).
+//
+// Both directions. A shipped script missing from the job is unlinted; a job
+// entry that ships nowhere is a stale name that will fail the job outright
+// once the file goes, or lint a file the packages no longer carry.
+func verifyShellcheckCoverage() error {
+	ci, err := os.ReadFile(filepath.Join(".github", "workflows", "ci.yml"))
+	if err != nil {
+		return fmt.Errorf("reading ci.yml: %w", err)
+	}
+	nfpmSrc, err := os.ReadFile(filepath.Join("packaging", "nfpm.yaml"))
+	if err != nil {
+		return fmt.Errorf("reading packaging/nfpm.yaml: %w", err)
+	}
+	return verifyShellcheckCoverageIn(ci, nfpmSrc)
+}
+
+func verifyShellcheckCoverageIn(ci, nfpmSrc []byte) error {
+	var wf struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				Run string `yaml:"run"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(ci, &wf); err != nil {
+		return fmt.Errorf("parsing ci.yml: %w", err)
+	}
+	job, ok := wf.Jobs[shellcheckJob]
+	if !ok {
+		return fmt.Errorf("ci.yml has no %q job, so nothing lints the packages' maintainer scripts; "+
+			"if it was renamed, update shellcheckJob", shellcheckJob)
+	}
+	linted := map[string]bool{}
+	for _, step := range job.Steps {
+		for _, line := range strings.Split(step.Run, "\n") {
+			// Comment lines inside a block scalar are shell text to the YAML
+			// parser, and a comment naming a script is not a lint of it.
+			if strings.HasPrefix(strings.TrimSpace(line), "#") {
+				continue
+			}
+			for _, m := range packagedScriptRE.FindAllString(line, -1) {
+				linted[m] = true
+			}
+		}
+	}
+
+	var pkg struct {
+		Scripts   map[string]string `yaml:"scripts"`
+		Overrides map[string]struct {
+			Scripts map[string]string `yaml:"scripts"`
+		} `yaml:"overrides"`
+		Contents []struct {
+			Src string `yaml:"src"`
+		} `yaml:"contents"`
+	}
+	if err := yaml.Unmarshal(nfpmSrc, &pkg); err != nil {
+		return fmt.Errorf("parsing packaging/nfpm.yaml: %w", err)
+	}
+	shipped := map[string]bool{}
+	add := func(path string) {
+		if strings.HasPrefix(path, packagedScriptsDir) {
+			shipped[path] = true
+		}
+	}
+	for _, path := range pkg.Scripts {
+		add(path)
+	}
+	for _, o := range pkg.Overrides {
+		for _, path := range o.Scripts {
+			add(path)
+		}
+	}
+	for _, c := range pkg.Contents {
+		add(c.Src)
+	}
+
+	// The floor, on both sides. Each check below is a set difference, so a
+	// parse that found nothing -- a renamed key, a step moved into an action
+	// -- would report the two empty sets as agreeing. The packages ship more
+	// than one script today, and the job lints more than one.
+	if len(shipped) < 2 {
+		return fmt.Errorf("found %d maintainer script(s) under %s in packaging/nfpm.yaml, which "+
+			"cannot be right; the parse is wrong rather than the packaging", len(shipped), packagedScriptsDir)
+	}
+	if len(linted) < 2 {
+		return fmt.Errorf("found %d script path(s) in ci.yml's %q job, which cannot be right; "+
+			"the parse is wrong rather than the job", len(linted), shellcheckJob)
+	}
+
+	var missing, extra []string
+	for path := range shipped {
+		if !linted[path] {
+			missing = append(missing, path)
+		}
+	}
+	for path := range linted {
+		if !shipped[path] {
+			extra = append(extra, path)
+		}
+	}
+	slices.Sort(missing)
+	slices.Sort(extra)
+	if len(missing) > 0 {
+		return fmt.Errorf("the packages ship %s, but ci.yml's %q job does not lint it -- add it to "+
+			"the job's file list", strings.Join(missing, ", "), shellcheckJob)
+	}
+	if len(extra) > 0 {
+		return fmt.Errorf("ci.yml's %q job lints %s, which packaging/nfpm.yaml does not ship -- "+
+			"remove it from the job, or package it", shellcheckJob, strings.Join(extra, ", "))
+	}
+	return nil
+}
+
 // workflowMageTargets returns the mage targets a workflow's run: steps invoke,
 // lowercased, skipping the ones no static reading can resolve.
 //
 // It reads the parsed run: steps rather than the file, and drops comment lines
 // inside them. A WORKFLOW file carries explanatory comments that name the very
-// targets this check looks for -- .github/workflows/ci.yml:59 and :579 both
-// write `mage dev:check` inside one -- so a raw byte search over the source
+// targets this check looks for -- in .github/workflows/ci.yml, the hadolint
+// job's header and the automerge job's `if:` both write `mage dev:check`
+// inside one -- so a raw byte search over the source
 // would be satisfied by prose describing a step instead of by the step.
 //
 // The citation matters: the previous version of this comment said "this file",
-// meaning magefile.go, which is not what the function reads. A justification
-// the next reader cannot check is one they have to take on trust.
+// meaning magefile.go, which is not what the function reads, and the one after
+// it cited line numbers that the next edit above them moved. A justification
+// the next reader cannot check is one they have to take on trust, so it names
+// the comments by where they sit rather than by line.
 func workflowMageTargets(src []byte) ([]string, error) {
 	var doc struct {
 		Jobs map[string]struct {
@@ -5678,6 +5815,10 @@ func (Dev) Check() error {
 	}
 	fmt.Println("Checking every CI job gates the one required check...")
 	if err := verifyCIGate(); err != nil {
+		return err
+	}
+	fmt.Println("Checking shellcheck lints every maintainer script the packages ship...")
+	if err := verifyShellcheckCoverage(); err != nil {
 		return err
 	}
 	fmt.Println("Checking the auto-merge label exclusion...")
