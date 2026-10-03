@@ -124,16 +124,20 @@ jobs:
           path: dist
           pattern: dist-*
           merge-multiple: true
-      - name: Build packages
-        # THIS TARGET DOES NOT EXIST YET. It is #250, implemented by PR #282,
-        # and until #282 merges this step fails with mage's "unknown target"
-        # and nothing in the log says why -- hence this line. The PR number is
-        # the one that matters here because the thing being waited on is a
-        # merge; elsewhere in this file #250 is named instead, because there
-        # the subject is whose work it is rather than when it lands. See the
-        # "Packages" section of docs/development/releasing.md before pushing a
-        # v* tag.
+      - name: Pin the build timestamp
+        # nfpm stamps every entry it generates from SOURCE_DATE_EPOCH, and
+        # stageDocTree stamps the staged documentation tree with it, so with it
+        # set a rebuild of the same inputs is byte-identical and a published
+        # checksum keeps its meaning. With it unset the packages carry this
+        # run's clock and no two builds agree -- build:packages warns and
+        # continues rather than failing, so setting it is the caller's job, and
+        # this job is the caller.
         #
+        # The tagged commit's own committer date rather than `date +%s`: it is a
+        # property of what is being built, not of when the runner happened to
+        # start, so re-running the same tag reproduces the same packages.
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
+      - name: Build packages
         # The contract with `mage build:packages`: it reads the variant
         # tarballs already in dist/ and writes one package per format for each
         # packaged variant into the same directory. Nothing in this workflow
@@ -146,12 +150,18 @@ jobs:
         # the exact binaries it is about to publish, and the packages have no
         # counterpart. A package that is well formed but wrong -- a binary at
         # the wrong path, a missing unit, the wrong mode -- passes the count
-        # gate, is checksummed, is attested and is published. Closing it means
-        # asserting an install layout, which is #250's to define and #254's to
-        # exercise in CI; a check written here first would be asserting a
-        # payload that does not exist yet. Until then the rehearsal checklist
-        # in docs/development/releasing.md asks a maintainer to open one by
-        # hand, which is a worse guarantee honestly labelled.
+        # gate, is checksummed, is attested and is published.
+        #
+        # The reason for not closing it here has changed, so it is restated
+        # rather than left reading as though it had not. It used to be that a
+        # payload check would assert an install layout that did not exist; the
+        # payload is now on the base, so such a check is writable. What remains
+        # is that it belongs with the install-and-verify legs in #254, which
+        # exercise a package by installing it rather than by inspecting a
+        # tarball-shaped view of it, and that doing it here would duplicate
+        # them. Until #254 lands, the rehearsal checklist in
+        # docs/development/releasing.md asks a maintainer to open one by hand,
+        # which is a worse guarantee honestly labelled.
         run: mage build:packages
       - name: Upload packages
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

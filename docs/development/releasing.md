@@ -130,13 +130,6 @@ chart can never name an image that does not exist.
 
 ## Before you tag
 
-> **Blocked until [#282](https://github.com/voxpupuli/openvox-ca/pull/282)
-> merges.** `mage build:packages` does not exist yet, so the Release workflow
-> fails at its packaging job while *Container images* and *Helm chart* publish
-> regardless — including the mutable `latest` tags. Check that `mage
-> build:packages` runs before you go any further; the reasoning and the
-> recovery are under [Packages](#packages).
-
 1. **Land the version bump.** Run:
 
    ```console
@@ -645,6 +638,5 @@ release](#verifying-a-release).)
 | Gap | Impact |
 | --- | --- |
 | **`helm verify` has nothing to check.** | The chart is signed with cosign and carries SLSA provenance like everything else, but it is packaged without `helm package --sign`, so there is no `.prov` file for `helm push` to upload. Helm's own provenance mechanism is PGP: it wants a long-lived keyring, which is the thing Sigstore's short-lived certificates exist to avoid. Anyone whose tooling asserts specifically on `helm verify`, rather than on a cosign signature, is not served. |
-| **Packaging is not implemented, so no tag can be cut.** | `mage build:packages` is [#250](https://github.com/voxpupuli/openvox-ca/issues/250), implemented by [#282](https://github.com/voxpupuli/openvox-ca/pull/282), and is not on `main` yet, so the Release workflow's packaging job fails and no release is published — while *Container images* and *Helm chart*, which trigger on the same tag and do not depend on Release, publish anyway. This is the one gap here that blocks releasing outright rather than degrading it. See [Before you tag](#before-you-tag). |
 | **No package manager checks a signature on either format.** | The same gap in a second ecosystem, and it covers both packages rather than only the `.rpm`. The `.rpm` carries no rpm header signature, so a `gpgcheck=1` repository rejects it. The `.deb` is unverified too, for a different reason: `apt` checks a repository's `InRelease` index, and a release asset is not served from a repository — `apt install ./file.deb` and `dpkg -i` check nothing. Both carry the Sigstore bundle over `checksums.txt`, which neither tool can read, so that bundle is the only provenance check a downloader has. Signing rpm headers is [#256](https://github.com/voxpupuli/openvox-ca/issues/256). Nothing tracks a signed apt repository; [#257](https://github.com/voxpupuli/openvox-ca/issues/257) publishes the packages to a bucket but does not sign an index. See [verifying a release](#verifying-a-release). |
 | **Nothing verifies what is inside a package.** | Tarballs are unpacked and their binaries executed by `verify-dist-artifact` before they are attested. The packages have no counterpart, so a well-formed package with the wrong contents is checksummed, attested and published, and the first person to find out runs `apt install`. The install-and-verify legs that close it are [#254](https://github.com/voxpupuli/openvox-ca/issues/254); until then the [rehearsal checklist](#rehearsing-on-your-own-fork) asks a maintainer to open one by hand. |
