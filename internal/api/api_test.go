@@ -1255,8 +1255,9 @@ var _ = Describe("API Workflow", func() {
 			Expect(block).NotTo(BeNil())
 			cert, err := x509.ParseCertificate(block.Bytes)
 			Expect(err).NotTo(HaveOccurred())
-			// Should expire around 1 hour from now (with 24h backdating, 1h into the future).
-			// NotAfter should be < 2 hours from now, not 5 years.
+			// Should expire around 1 hour from now. NotAfter should be < 2 hours
+			// from now, not 5 years. (The NotBefore backdate does not move
+			// NotAfter, so the bound is about the ttl alone.)
 			Expect(cert.NotAfter).To(BeTemporally("<", time.Now().Add(2*time.Hour)))
 		})
 	})

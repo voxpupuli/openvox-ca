@@ -498,7 +498,8 @@ _not_after_epoch=$(date -d "$_not_after" +%s 2>/dev/null) || true
 _now_epoch=$(date +%s)
 _delta=$(( _not_after_epoch - _now_epoch ))
 
-# cert_ttl=7200s + 24h backdating; NotAfter should be ~7200s from now.
+# cert_ttl=7200s; NotAfter should be ~7200s from now (the NotBefore backdate
+# does not move NotAfter).
 # Generous check: < 28800 (8 hours) rules out the default 5-year validity.
 [ "$_delta" -lt 28800 ] \
     && pass "cert_ttl=7200 cert expires in < 8 hours (custom TTL applied)" \

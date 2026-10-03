@@ -57,9 +57,10 @@ import (
 var _ = Describe("The issuance seam", func() {
 	// Why each caller is allowed to be here.
 	expected := map[string]string{
-		"signWithDuration":    "the gated path: calls checkSubjectAltNames before it issues anything",
-		"GenerateWithOptions": "offline and admin-only minting; names come from an operator's flags or an admin-tier query parameter, never from an agent's CSR",
-		"AutoRenew":           "carries the presented certificate's own SANs forward and reads none from a request, so there is nothing for the gate to judge",
+		"signWithDuration":             "the gated path: calls checkSubjectAltNames before it issues anything",
+		"GenerateWithOptions":          "offline and admin-only minting; names come from an operator's flags or an admin-tier query parameter, never from an agent's CSR",
+		"AutoRenew":                    "carries the presented certificate's own SANs forward and reads none from a request, so there is nothing for the gate to judge",
+		"issueManagedUnderSubjectLock": "managed certificates take their names from server configuration, fixed before the process serves anything; no request reaches this path, so there is nothing for the gate to judge",
 	}
 
 	It("has exactly the callers whose exemption has been argued", func() {
