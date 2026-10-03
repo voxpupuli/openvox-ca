@@ -1412,19 +1412,16 @@ var _ = Describe("the packaged variant set", func() {
 		}
 	})
 
-	// Two wrong citations in a row, so this one names no external dependant at
-	// all. It first cited release.yml's packaging counts, which arrive with
-	// #266 and are not on this branch; correcting that, it cited a
-	// `packagers:` key in packaging/nfpm.yaml, which does not exist ANYWHERE
-	// and whose absence is the design -- magefile.go's own comment on
-	// packageFormats says it drives nfpm "rather than from a slice of its own
-	// or from a `packagers:` key in packaging/nfpm.yaml", because a second
-	// list is the drift it exists to prevent. A maintainer following that
-	// comment would have created the very thing it warned against.
+	// What the order is load-bearing for is one spec in this file:
+	// buildVariantPackages' "names the format and the variant, and writes no
+	// other package", under "when the output file cannot be written". It
+	// blocks the .deb's output path and asserts no .rpm was written, which is
+	// only a test of stopping early while deb comes first. Swap the order and
+	// that spec would quietly start testing a different case.
 	//
-	// What the order is actually load-bearing FOR is inside this file: the
-	// no-partial-set spec relies on deb being first, so a swap there would
-	// silently change which format the partial-set case exercises.
+	// It is not a mirror of anything in packaging/nfpm.yaml: nfpm.yaml has no
+	// format list, by design -- packageFormats is the single one, and nfpm is
+	// driven from it.
 	It("names the formats in the order the packaging specs assume", func() {
 		Expect(packageFormats).To(Equal([]string{"deb", "rpm"}))
 	})
@@ -1646,9 +1643,8 @@ jobs:
 		Expect(verifyCIGateIn(full)).To(Succeed())
 	})
 
-	// The case this guard exists for, and the one that actually happened on
-	// this branch: a new lint job that runs, reports red, and leaves the
-	// required check green.
+	// The case this guard exists for, and one that has already happened: a new
+	// lint job that runs, reports red, and leaves the required check green.
 	It("rejects a job the gate does not depend on, naming it", func() {
 		bad := []byte(`
 jobs:
@@ -1711,6 +1707,30 @@ jobs:
 	It("passes against the repository's own ci.yml", func() {
 		Expect(verifyCIGate()).To(Succeed())
 	})
+})
+
+var _ = Describe("sourceDateEpochWarning", func() {
+	// The build carries on with a malformed SOURCE_DATE_EPOCH, as nfpm does;
+	// what it must not do is carry on in silence, because the release job
+	// exports this variable and the packages then quietly stop reproducing.
+	DescribeTable("warns only about a value that is set and unparseable",
+		func(epoch string, warns bool) {
+			w := sourceDateEpochWarning(epoch)
+			if !warns {
+				Expect(w).To(BeEmpty())
+				return
+			}
+			Expect(w).To(And(
+				ContainSubstring(fmt.Sprintf("%q", epoch)),
+				ContainSubstring("NOT reproducible"),
+			))
+		},
+		Entry("unset", "", false),
+		Entry("an integer", "1700000000", false),
+		Entry("an ISO date", "2026-10-03", true),
+		Entry("a trailing newline", "1700000000\n", true),
+		Entry("a unit suffix", "1700000000s", true),
+	)
 })
 
 var _ = Describe("verifyShellcheckCoverage", func() {
@@ -1984,13 +2004,11 @@ jobs:
 			Expect(verifyMageTargetsIn(goodMage, with("release.yml", goodWorkflow))).To(Succeed())
 		})
 
-		// The deliverable, and the wording has to survive either merge order.
-		// release.yml does not call build:packages on this branch -- it calls
-		// build:distVariant, and the job that packages arrives with #266. So the
-		// claim here is not "a workflow names this target today"; it is that the
-		// target is named as a STRING outside Go, which is already true of
-		// docs/development/releasing.md and becomes true of release.yml when
-		// #266 lands. Either way nothing in Go would notice it going away, which
+		// The deliverable. The claim is not that a workflow names this target
+		// -- release.yml's packaging job is #266's, and lands after this -- but
+		// that the target is named as a STRING outside Go, as
+		// docs/development/releasing.md already does. Either way nothing in Go
+		// would notice it going away, which
 		// is why requiredMageTargets carries it rather than the workflow scan
 		// below: the scan can only see callers that exist. The comment above
 		// requiredMageTargets states the same thing from the other side.
@@ -2183,31 +2201,44 @@ var _ = Describe("packaging helpers", func() {
 		// archives this reads are ones the build just wrote, so reaching it needs
 		// an archive built to reach it -- which is the point: a check only present
 		// for trusted input is a check absent when it is needed.
-		It("refuses an entry that is not a plain filename", func() {
-			dir := GinkgoT().TempDir()
-			archive := filepath.Join(dir, "evil.tar.gz")
+		//
+		// `want` holds only PLAIN names, and that is what makes this a test
+		// of the ordering. The plain-filename check used to sit behind the
+		// allowlist, so a hostile entry not in `want` was skipped before the
+		// guard ever saw it -- and the spec that appeared to cover it passed
+		// the traversing name in `want`, the one setup in which the order
+		// does not matter. With only plain names wanted, a guard moved back
+		// behind the allowlist lets each entry below through unrefused.
+		DescribeTable("refuses an entry that is not a plain filename, even one it was not asked for",
+			func(name string) {
+				dir := GinkgoT().TempDir()
+				archive := filepath.Join(dir, "evil.tar.gz")
 
-			f, err := os.Create(archive)
-			Expect(err).NotTo(HaveOccurred())
-			gz := gzip.NewWriter(f)
-			tw := tar.NewWriter(gz)
-			body := []byte("owned")
-			Expect(tw.WriteHeader(&tar.Header{
-				Name: "../../openvox-ca", Mode: 0o755, Size: int64(len(body)), Typeflag: tar.TypeReg,
-			})).To(Succeed())
-			_, err = tw.Write(body)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(tw.Close()).To(Succeed())
-			Expect(gz.Close()).To(Succeed())
-			Expect(f.Close()).To(Succeed())
+				f, err := os.Create(archive)
+				Expect(err).NotTo(HaveOccurred())
+				gz := gzip.NewWriter(f)
+				tw := tar.NewWriter(gz)
+				body := []byte("owned")
+				Expect(tw.WriteHeader(&tar.Header{
+					Name: name, Mode: 0o755, Size: int64(len(body)), Typeflag: tar.TypeReg,
+				})).To(Succeed())
+				_, err = tw.Write(body)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(tw.Close()).To(Succeed())
+				Expect(gz.Close()).To(Succeed())
+				Expect(f.Close()).To(Succeed())
 
-			dest := GinkgoT().TempDir()
-			err = extractTarGz(archive, dest, []string{"../../openvox-ca"})
-			Expect(err).To(MatchError(ContainSubstring("is not a plain filename")))
+				dest := GinkgoT().TempDir()
+				err = extractTarGz(archive, dest, []string{"openvox-ca"})
+				Expect(err).To(MatchError(ContainSubstring("is not a plain filename")))
 
-			// And nothing was written outside the destination.
-			Expect(filepath.Join(filepath.Dir(dest), "openvox-ca")).NotTo(BeAnExistingFile())
-		})
+				// And nothing was written outside the destination.
+				Expect(filepath.Join(filepath.Dir(dest), "openvox-ca")).NotTo(BeAnExistingFile())
+			},
+			Entry("a traversing name", "../../openvox-ca"),
+			Entry("an absolute name", "/openvox-ca"),
+			Entry("a name in a subdirectory", "sub/openvox-ca"),
+		)
 		var archive string
 
 		BeforeEach(func() {
@@ -2742,23 +2773,12 @@ var _ = Describe("the no-partial-set promise", func() {
 		}
 	})
 
-	// The success path still works, so the pre-flight has not simply become a
-	// refusal that happens to make the assertions above pass.
-	It("builds every variant when all their tarballs are present", func() {
-		distDir := GinkgoT().TempDir()
-		for _, v := range packagedDistVariants() {
-			stageDistTarball(distDir, ver, v)
-		}
-		Expect(buildPackagesInto(distDir)).To(Succeed())
-
-		for _, v := range packagedDistVariants() {
-			for _, ext := range packageExtensions() {
-				matches, globErr := filepath.Glob(filepath.Join(distDir, "*"+ext))
-				Expect(globErr).NotTo(HaveOccurred())
-				Expect(matches).NotTo(BeEmpty(), "no %s written for %s", ext, v.name)
-			}
-		}
-	})
+	// That the pre-flight has not simply become a refusal which happens to
+	// make the assertions above pass is buildPackagesInto's own spec, "builds
+	// every packaged variant's formats and accepts the result": same fixture,
+	// and it counts one package per format per variant. A loop here used to
+	// claim the same, but its glob never depended on the variant it named, so
+	// one package of each format satisfied it for every variant.
 })
 
 var _ = Describe("buildVariantPackages", func() {
@@ -2889,11 +2909,10 @@ var _ = Describe("buildVariantPackages", func() {
 			Expect(modes["/etc/puppet-ca/config.yaml"]).To(Equal(int64(0o640)))
 		})
 
-		// Every setting the server refuses to start without. Each of these was
-		// missing at some point in this branch's life and each produced the
-		// same symptom -- a package that installs cleanly and whose service
-		// then exits -- so they are asserted by name rather than by the file
-		// merely being present.
+		// Every setting the server refuses to start without. Missing any one of
+		// them produces the same symptom -- a package that installs cleanly
+		// and whose service then exits -- so they are asserted by name rather
+		// than by the file merely being present.
 		DescribeTable("sets the settings a packaged install cannot start without",
 			func(pattern string) {
 				Expect(contents["/etc/puppet-ca/config.yaml"]).To(MatchRegexp(pattern))
@@ -3302,6 +3321,28 @@ var _ = Describe("stageDocTree", func() {
 			Expect(staged).NotTo(BeAnExistingFile())
 		})
 
+		// The refusal's wording for every kind of non-regular file, not only
+		// the symlink above. The refusal itself is one !IsRegular() check, so
+		// what is untested otherwise is only what the message calls the path
+		// -- but the directory case is the plausible one: the ls-files
+		// enumeration lists a submodule under docs/ as a single path, and
+		// Lstat on it reports a directory. Named in octal it would explain
+		// nothing.
+		DescribeTable("names each kind of non-regular file in words",
+			func(mode os.FileMode, want string) {
+				Expect(stagedFileKind(mode)).To(Equal(want))
+			},
+			Entry("a symbolic link", os.ModeSymlink, "symbolic link"),
+			Entry("a directory, as a tracked submodule appears", os.ModeDir|0o755, "directory"),
+			Entry("a device node", os.ModeDevice, "device node"),
+			Entry("a character device", os.ModeDevice|os.ModeCharDevice, "device node"),
+			Entry("a named pipe", os.ModeNamedPipe, "named pipe"),
+			Entry("a socket", os.ModeSocket, "socket"),
+			// Anything else falls through to Go's own rendering of the type
+			// bits rather than to an empty string or a mode number.
+			Entry("an irregular file", os.ModeIrregular, os.ModeIrregular.String()),
+		)
+
 		// gitListFiles' error path, and the message stageDocTreeFrom wraps it
 		// in. Neither was driven: every fixture here is a real checkout, so
 		// `git ls-files` always succeeded and the whole branch was dead to the
@@ -3489,9 +3530,9 @@ var _ = Describe("Build.Unit", func() {
 	//
 	// The block below pins what writeRenderedUnit RETURNS. That is the data,
 	// and it is not the same thing as the message consuming it: reverting this
-	// Fprintf to print the raw `bindir` -- which is exactly the defect this PR
-	// reports fixing -- left every spec in this file green, because nothing
-	// observed the print at all.
+	// Fprintf to print the raw `bindir` -- a doubled slash in the printed
+	// ExecStart, over a correctly rendered file -- once left every spec in
+	// this file green, because nothing observed the print at all.
 	Describe("buildUnitInto", func() {
 		// THE TRAILING SLASH IS THE TEST. With "/opt/openvox/bin" the fixed and
 		// the unfixed code print the identical line, so a fixture without it
@@ -3567,8 +3608,8 @@ var _ = Describe("Build.Unit", func() {
 
 			// The rendered unit was never the half that was wrong. Build.Unit
 			// trimmed the raw argument a SECOND time for the line it prints,
-			// so the defect the PR reports fixing -- "ExecStart=/opt/bin//..."
-			// in the message, over a correctly rendered file -- lived entirely
+			// so the defect -- "ExecStart=/opt/bin//..." in the message, over a
+			// correctly rendered file -- lived entirely
 			// in that duplicate. This is the returned value the message now
 			// uses, and the regression anchor for it.
 			Expect(trimmed).To(Equal("/opt/openvox/bin"))
@@ -3909,9 +3950,9 @@ var _ = Describe("the rpm's payload", func() {
 		Expect(contents).To(HaveKey("/usr/share/doc/openvox-ca/docs/systemd.md"))
 	})
 
-	// The claim the PR body previously made by citing nfpm's source rather
-	// than by inspecting a built package. An rpm that installed the config
-	// without noreplace would overwrite an operator's edits on every update.
+	// Asserted against a built package rather than inferred from nfpm's
+	// source. An rpm that installed the config without noreplace would
+	// overwrite an operator's edits on every update.
 	It("marks the configuration file %config(noreplace)", func() {
 		cfg := files["/etc/puppet-ca/config.yaml"]
 		Expect(cfg.config).To(BeTrue(), "config.yaml is not marked %%config")

@@ -2307,6 +2307,9 @@ func buildPackagesInto(distDir string) error {
 	if err != nil {
 		return err
 	}
+	if w := sourceDateEpochWarning(os.Getenv("SOURCE_DATE_EPOCH")); w != "" {
+		fmt.Fprintln(os.Stderr, w)
+	}
 
 	variants := packagedDistVariants()
 	if err := checkPackagingInputs(variants, packageFormats); err != nil {
@@ -2650,6 +2653,28 @@ func stageDocTreeFrom(repoRoot, dest string) error {
 	return chmodStagedDirs(dest)
 }
 
+// sourceDateEpochWarning returns what to tell the operator about a
+// SOURCE_DATE_EPOCH that is set but cannot be parsed, or "" when there is
+// nothing to say.
+//
+// The build does not fail over it -- nfpm ignores a malformed value and falls
+// back to the current time, and stampStagedFile follows the same rule so the
+// two halves of one package agree -- but nothing said so. A release job that
+// exported an ISO date, or a value with a trailing newline, got packages that
+// were silently not reproducible, discovered only when a rebuild's checksums
+// disagreed. Said once per run, by buildPackagesInto, rather than once per
+// staged file.
+func sourceDateEpochWarning(epoch string) string {
+	if epoch == "" {
+		return ""
+	}
+	if _, err := strconv.ParseInt(epoch, 10, 64); err == nil {
+		return ""
+	}
+	return fmt.Sprintf("warning: SOURCE_DATE_EPOCH=%q is not an integer number of seconds, so nfpm "+
+		"and the documentation staging both ignore it: these packages are NOT reproducible", epoch)
+}
+
 // stampStagedFile pins a staged file's modification time to SOURCE_DATE_EPOCH,
 // and does nothing when that is unset.
 //
@@ -2754,25 +2779,6 @@ func checkDocTreeFloor(paths []string) error {
 // Mode 0644 unconditionally: everything staged this way is documentation, and
 // reading it back off the working tree would let a developer's umask decide
 // what the package installs.
-// stagedFileKind names a non-regular file for the refusal above, so the message
-// reads as what the path is rather than as an octal mode.
-func stagedFileKind(m os.FileMode) string {
-	switch {
-	case m&os.ModeSymlink != 0:
-		return "symbolic link"
-	case m.IsDir():
-		return "directory"
-	case m&os.ModeDevice != 0:
-		return "device node"
-	case m&os.ModeNamedPipe != 0:
-		return "named pipe"
-	case m&os.ModeSocket != 0:
-		return "socket"
-	default:
-		return m.Type().String()
-	}
-}
-
 func copyStagedFile(src, dst string) error {
 	// Lstat before reading, and refuse anything that is not a regular file.
 	//
@@ -2825,6 +2831,25 @@ func copyStagedFile(src, dst string) error {
 	// from chmodStagedDirs once the tree is complete rather than here: see
 	// there for why a per-file walk upwards is the wrong shape.
 	return os.Chmod(dst, 0644)
+}
+
+// stagedFileKind names a non-regular file for copyStagedFile's refusal, so the
+// message reads as what the path is rather than as an octal mode.
+func stagedFileKind(m os.FileMode) string {
+	switch {
+	case m&os.ModeSymlink != 0:
+		return "symbolic link"
+	case m.IsDir():
+		return "directory"
+	case m&os.ModeDevice != 0:
+		return "device node"
+	case m&os.ModeNamedPipe != 0:
+		return "named pipe"
+	case m&os.ModeSocket != 0:
+		return "socket"
+	default:
+		return m.Type().String()
+	}
 }
 
 // chmodStagedDirs sets every directory under root, and root itself, to 0755.

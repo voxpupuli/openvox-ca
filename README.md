@@ -116,29 +116,11 @@ service should serve — see [installing from a
 package](docs/systemd.md#installing-from-a-package). Sharing the account and
 the layout is not the same as having no decision to make.
 
-**They are not published as release assets yet.** Adding the packaging job to
-the release workflow is
-[#266](https://github.com/voxpupuli/openvox-ca/pull/266); until it lands, build
-them from a checkout with:
-
-```console
-$ mage build:distVariant linux_amd64
-$ mage build:distVariant linux_arm64
-$ mage build:packages
-```
-
-**Both**, not either: `build:packages` builds the packages for every variant
-marked packaged. It checks every one of their tarballs **before writing
-anything**, so a missing tarball fails the run with nothing in `dist/` rather
-than leaving the variants it got to first. `build:dist` also works and is one command, but it
-builds all four release tarballs including the two FIPS ones, which need a cgo
-cross toolchain the packages never use. The packaging step writes the `.deb`
-and `.rpm` beside the tarballs it read. The packages carry the pure-Go
-build only — a FIPS deployment uses the `_fips` tarball.
-
-See [installing from a package](docs/systemd.md#installing-from-a-package) for
-what provisioning does, what an uninstall deliberately leaves behind, and the
-cost of sharing the `puppet` account.
+**They are not published as release assets yet**, so for now they are built
+from a checkout. [Installing from a
+package](docs/systemd.md#installing-from-a-package) has the commands, and what
+provisioning does, what an uninstall deliberately leaves behind, and the cost of
+sharing the `puppet` account.
 
 ### Verifying what you downloaded
 

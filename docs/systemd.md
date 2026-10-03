@@ -18,8 +18,8 @@ The copy in the repository, [`packaging/systemd/openvox-ca.service`](../packagin
 Download, verify and extract a tarball as the README describes, then, from the extracted directory:
 
 ```console
-$ sudo groupadd --system puppet
-$ sudo useradd --system --gid puppet --home-dir /etc/puppetlabs/puppet --shell /usr/sbin/nologin puppet
+$ getent group puppet >/dev/null || sudo groupadd --system puppet
+$ getent passwd puppet >/dev/null || sudo useradd --system --gid puppet --home-dir /etc/puppetlabs/puppet --shell /usr/sbin/nologin puppet
 $ sudo install -m 0755 openvox-ca openvox-ca-ctl /usr/local/bin/
 $ sudo install -m 0644 openvox-ca.service /etc/systemd/system/
 $ sudo install -d -m 0755 /etc/puppet-ca
@@ -29,6 +29,8 @@ $ sudo install -d -o puppet -g puppet -m 0770 /etc/puppetlabs/puppet/ssl/ca
 $ sudo systemctl daemon-reload
 $ sudo systemctl enable --now openvox-ca.service
 ```
+
+The first two lines create the `puppet` account only where it does not exist yet, so they are safe on a host where OpenVox Server — or an earlier run of this recipe — already created it.
 
 The configuration file is yours to write — it is not in the tarball — and [configuring the server](configuration.md#config-file) has a worked example. Make it **0640 root:puppet**, because it can hold credentials — `etcd_password`, or an inline OpenBao `role_id` — and the service only needs to read it. The server auto-detects that path, so the unit passes no `--config` and `PUPPET_CA_CONFIG` still works in a drop-in.
 
