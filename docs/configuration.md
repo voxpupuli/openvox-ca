@@ -1398,7 +1398,7 @@ differently, all deliberately:
 | Value | `serial_number` |
 | --- | --- |
 | `number` (default) | The full serial as a JSON number, e.g. `211659643165621965746051058369188784120`. This is what OpenVox Server sends. |
-| `hex` | A JSON string of uppercase hex bytes separated by colons, e.g. `"9F:3C:2A:1B:4D:5E:6F:70:81:92:A3:B4:C5:D6:E7:F8"`, as `openssl x509 -noout -text` prints the serial. |
+| `hex` | A JSON string of uppercase hex bytes separated by colons, e.g. `"9F:3C:2A:1B:4D:5E:6F:70:81:92:A3:B4:C5:D6:E7:F8"`: the digits `openssl x509 -noout -serial` prints, with a colon between bytes. |
 
 The default exists for compatibility, not legibility: openvox-ca's serials are
 random 128-bit values, which read poorly as decimal integers and lose precision
