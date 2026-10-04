@@ -1013,23 +1013,26 @@ var _ = Describe("API Workflow", func() {
 				Expect(block).NotTo(BeNil())
 				key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
 				Expect(err).NotTo(HaveOccurred())
-				later, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+				// The appended CRL is due sooner, so only "the last" can pick
+				// it: "the first" and "the latest" both keep block 0's date.
+				last, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
 					Number:     big.NewInt(1 << 20),
 					ThisUpdate: chain[0].ThisUpdate,
-					NextUpdate: chain[0].NextUpdate.Add(48 * time.Hour),
+					NextUpdate: chain[0].NextUpdate.Add(-48 * time.Hour),
 				}, bundle[0], key)
 				Expect(err).NotTo(HaveOccurred())
-				Expect(store.UpdateCRL(ctx, append(crlPEM, pemOf("X509 CRL", later)...))).To(Succeed())
+				Expect(store.UpdateCRL(ctx, append(crlPEM, pemOf("X509 CRL", last)...))).To(Succeed())
 
 				resp, _ := expirations()
 				Expect(resp.CACrl.NextUpdate).To(Equal(format(chain[0].NextUpdate)))
-				Expect(resp.CRLs).To(HaveKeyWithValue(ownCN, format(chain[0].NextUpdate.Add(48*time.Hour))))
+				Expect(resp.CRLs).To(HaveKeyWithValue(ownCN, format(chain[0].NextUpdate.Add(-48*time.Hour))))
 			})
 
 			It("keeps the last of two CA certificates that share a CN", func() {
 				key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 				Expect(err).NotTo(HaveOccurred())
-				notAfter := bundle[0].NotAfter.Add(48 * time.Hour).Truncate(time.Second)
+				// Expires sooner than the original, so only "the last" picks it.
+				notAfter := bundle[0].NotAfter.Add(-48 * time.Hour).Truncate(time.Second)
 				template := &x509.Certificate{
 					SerialNumber: big.NewInt(7),
 					Subject:      pkix.Name{CommonName: ownCN},
