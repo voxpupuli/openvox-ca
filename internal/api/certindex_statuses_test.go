@@ -162,11 +162,19 @@ var _ = Describe("Certificate statuses via the certificate index", func() {
 		Expect(got.AuthorizationExtensions).To(BeEmpty())
 		Expect(got.AuthorizationExtensions).NotTo(BeNil())
 		Expect(got.SerialNumber).NotTo(BeNil())
-		Expect(*got.SerialNumber).To(Equal(cert.SerialNumber.Text(10)))
+		Expect(got.SerialNumber.Cmp(cert.SerialNumber)).To(BeZero())
 		Expect(got.NotBefore).NotTo(BeNil())
 		Expect(*got.NotBefore).To(Equal(cert.NotBefore.UTC().Format(time.RFC3339)))
 		Expect(got.NotAfter).NotTo(BeNil())
 		Expect(*got.NotAfter).To(Equal(cert.NotAfter.UTC().Format(time.RFC3339)))
+	})
+
+	It("encodes an indexed serial as a JSON number by default", func() {
+		submitAndSign("idx-serial", generateCSRWithSANs("idx-serial", []string{"idx-serial"}))
+		cert := storedCert(ctx, store, "idx-serial")
+
+		Expect(rawStatusSerials(mux, "/certificate_statuses/any")).To(
+			HaveKeyWithValue("idx-serial", cert.SerialNumber.String()))
 	})
 
 	It("partitions signed, revoked, and requested across the state filters", func() {
@@ -286,7 +294,7 @@ var _ = Describe("Certificate statuses via the certificate index", func() {
 		Expect(got.State).To(Equal("signed"))
 		Expect(got.Fingerprint).To(Equal(ca.SHA256ColonFingerprint(block.Bytes)))
 		Expect(got.SerialNumber).NotTo(BeNil())
-		Expect(*got.SerialNumber).To(Equal(cert.SerialNumber.Text(10)),
+		Expect(got.SerialNumber.Cmp(cert.SerialNumber)).To(BeZero(),
 			"the serial must be the PEM's, not the projection-less row's")
 		Expect(got.DNSAltNames).To(Equal([]string{"idx-legacy"}))
 	})

@@ -237,11 +237,11 @@ type CertStatusResponse struct {
 	// Always present, empty map when none exist.
 	AuthorizationExtensions map[string]string `json:"authorization_extensions"`
 	// Populated when signed or revoked.
-	// SerialNumber is a decimal string to preserve the full 128-bit value
-	// without loss; int64 would silently truncate random CA/B-Forum serials.
-	SerialNumber *string `json:"serial_number,omitempty"`
-	NotBefore    *string `json:"not_before,omitempty"`
-	NotAfter     *string `json:"not_after,omitempty"`
+	// SerialNumber is the full serial. *big.Int encodes as a bare JSON number
+	// at full precision, which is how OpenVox Server sends it.
+	SerialNumber *big.Int `json:"serial_number,omitempty"`
+	NotBefore    *string  `json:"not_before,omitempty"`
+	NotAfter     *string  `json:"not_after,omitempty"`
 }
 
 func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
@@ -1005,7 +1005,6 @@ func certStatusFromCert(subject string, certPEM []byte, state string, timeFmt st
 		}
 	}
 	fp := fingerprint(certPEM)
-	serial := cert.SerialNumber.Text(10) // decimal string; preserves full 128-bit value
 	nb := cert.NotBefore.UTC().Format(timeFmt)
 	na := cert.NotAfter.UTC().Format(timeFmt)
 	dnsNames := noNilSlice(cert.DNSNames)
@@ -1017,7 +1016,7 @@ func certStatusFromCert(subject string, certPEM []byte, state string, timeFmt st
 		DNSAltNames:             dnsNames,
 		SubjectAltNames:         dnsNames,
 		AuthorizationExtensions: authExtensions(cert.Extensions),
-		SerialNumber:            &serial,
+		SerialNumber:            cert.SerialNumber,
 		NotBefore:               &nb,
 		NotAfter:                &na,
 	}
@@ -1067,7 +1066,6 @@ func certStatusFromRecord(rec storage.CertRecord, timeFmt string) (CertStatusRes
 		return CertStatusResponse{}, false
 	}
 
-	serial := serialInt.Text(10) // decimal string; preserves full 128-bit value
 	nbs := nb.UTC().Format(timeFmt)
 	nas := na.UTC().Format(timeFmt)
 	dnsNames := noNilSlice(rec.DNSAltNames)
@@ -1083,7 +1081,7 @@ func certStatusFromRecord(rec storage.CertRecord, timeFmt string) (CertStatusRes
 		DNSAltNames:             dnsNames,
 		SubjectAltNames:         dnsNames,
 		AuthorizationExtensions: authExts,
-		SerialNumber:            &serial,
+		SerialNumber:            serialInt,
 		NotBefore:               &nbs,
 		NotAfter:                &nas,
 	}, true

@@ -64,13 +64,13 @@ A revocation takes the per-subject lock that signing and [renewal](#certificate-
   "dns_alt_names": ["agent.example.com"],
   "subject_alt_names": ["agent.example.com"],
   "authorization_extensions": {},
-  "serial_number": 7329847239485029341,
+  "serial_number": 211659643165621965746051058369188784120,
   "not_before": "2025-01-01T00:00:00Z",
   "not_after": "2030-01-01T00:00:00Z"
 }
 ```
 
-> **Note:** `serial_number` is the low 64 bits of the certificate's cryptographically random 128-bit serial, returned as a signed int64 for API compatibility. It is omitted for certificates in the `requested` state.
+> **Note:** `serial_number` is the certificate's full serial, a random 128-bit value, as a bare JSON number. That is how OpenVox Server sends it. It is omitted for certificates in the `requested` state. The number is exact in the response, but a parser that reads every JSON number as a double — JavaScript's `JSON.parse`, or `jq` before 1.7 — rounds a value this large. Where you need the exact serial, use a parser that keeps the digits (`jq` 1.7 or later does), or read it from the certificate itself.
 
 ### Revocation by serial
 
@@ -342,7 +342,7 @@ Response:
 { "subject": "legacy-node.example.com", "serial": "1A2B3C4D5E6F", "not_before": "2020-01-01T00:00:00Z", "not_after": "2025-01-01T00:00:00Z", "imported": true }
 ```
 
-`serial` is uppercase hex (matching the inventory/CRL/OCSP convention), unlike the decimal `serial_number` field in certificate status responses (which is decimal only to preserve the full 128-bit value without int64 truncation — a constraint that doesn't apply to this string field).
+`serial` is uppercase hex without separators, matching the inventory/CRL/OCSP convention. It is not the `serial_number` field of certificate status responses, which is a JSON number by default, as OpenVox Server sends it.
 
 ## OCSP
 
