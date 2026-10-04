@@ -49,11 +49,11 @@ var _ = DescribeTable("certStatusFromRecord rejects a record it cannot describe"
 		}
 		// The fixture itself must be acceptable, or every entry below passes for
 		// the wrong reason.
-		_, ok := certStatusFromRecord(rec, time.RFC3339)
+		_, ok := certStatusFromRecord(rec, time.RFC3339, SerialNumberAsNumber)
 		Expect(ok).To(BeTrue(), "the unmutated fixture must be answerable")
 
 		mutate(&rec)
-		_, ok = certStatusFromRecord(rec, time.RFC3339)
+		_, ok = certStatusFromRecord(rec, time.RFC3339, SerialNumberAsNumber)
 		Expect(ok).To(BeFalse())
 	},
 	Entry("no projection at all", func(r *storage.CertRecord) { r.Fingerprint = "" }),
@@ -78,7 +78,7 @@ var _ = Describe("certStatusFromRecord on a complete record", func() {
 			},
 			State: storage.CertStateRevoked,
 		}
-		got, ok := certStatusFromRecord(rec, time.RFC3339)
+		got, ok := certStatusFromRecord(rec, time.RFC3339, SerialNumberAsNumber)
 		Expect(ok).To(BeTrue())
 		Expect(got.Name).To(Equal("node1.example.com"))
 		Expect(got.State).To(Equal(storage.CertStateRevoked))
@@ -99,7 +99,7 @@ var _ = Describe("certStatusFromRecord on a complete record", func() {
 			CertProjection: storage.CertProjection{Fingerprint: "SHA256:AA"},
 			State:          storage.CertStateSigned,
 		}
-		got, ok := certStatusFromRecord(rec, time.RFC3339)
+		got, ok := certStatusFromRecord(rec, time.RFC3339, SerialNumberAsNumber)
 		Expect(ok).To(BeTrue())
 		Expect(got.DNSAltNames).NotTo(BeNil())
 		Expect(got.AuthorizationExtensions).NotTo(BeNil())

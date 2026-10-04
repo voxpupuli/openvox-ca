@@ -26,6 +26,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/voxpupuli/openvox-ca/internal/api"
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
@@ -162,6 +163,11 @@ var _ = Describe("loadServerConfig built-in defaults", func() {
 		// auto-renewal unless explicitly disabled. Guard the literal so a
 		// regression flipping it to false cannot pass silently.
 		Expect(cfg.RevokeOnAutoRenew).To(BeTrue(), "RevokeOnAutoRenew = false; want true (secure default)")
+		// Compatibility default: status responses carry serial_number as the
+		// JSON number OpenVox Server sends, unless an operator opts out.
+		serialFmt, err := api.ParseSerialNumberFormat(cfg.SerialNumberFormat)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(serialFmt).To(Equal(api.SerialNumberAsNumber))
 	})
 })
 
@@ -535,6 +541,7 @@ leaf_validity_days: 1825
 memory_reserve_launcher: 16Mi
 memory_reserve_signer: 64Mi
 memory_budget_percent: 75
+serial_number_format: hex
 `
 		cfgFile := writeTempConfig(content)
 
@@ -588,6 +595,7 @@ memory_budget_percent: 75
 			{"CAPathLength", cfg.CAPathLength, 1},
 			{"CAValidityDays", cfg.CAValidityDays, 3650},
 			{"LeafValidityDays", cfg.LeafValidityDays, 1825},
+			{"SerialNumberFormat", cfg.SerialNumberFormat, "hex"},
 		}
 		for _, c := range checks {
 			Expect(c.got).To(Equal(c.want), "%s = %v; want %v", c.field, c.got, c.want)
@@ -903,6 +911,8 @@ var _ = Describe("applyServerEnv each variable", func() {
 		// var flips it to true. A typo in the key leaves it false and fails.
 		Entry("ALLOW_SUBJECT_ALT_NAMES", "PUPPET_CA_ALLOW_SUBJECT_ALT_NAMES", "true",
 			func(c *serverConfig) bool { return c.AllowSubjectAltNames }, "AllowSubjectAltNames"),
+		Entry("SERIAL_NUMBER_FORMAT", "PUPPET_CA_SERIAL_NUMBER_FORMAT", "hex",
+			func(c *serverConfig) bool { return c.SerialNumberFormat == "hex" }, "SerialNumberFormat"),
 		// Distinct values, because these two are adjacent ints with adjacent
 		// names: swapping the destinations would turn a 12-hour overlap window
 		// into a 12-hour sweep interval on a 90-second delay, and both would

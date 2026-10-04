@@ -806,6 +806,13 @@ func newRootCmd() *cobra.Command {
 
 			slog.Debug("Autosign config", "mode", asCfg.Mode, "path", asCfg.FileOrPath)
 
+			// Checked here rather than where the server is built, so a typo
+			// refuses before the CA initialises instead of after.
+			serialFmt, err := api.ParseSerialNumberFormat(cfg.SerialNumberFormat)
+			if err != nil {
+				return fmt.Errorf("invalid serial_number_format: %w", err)
+			}
+
 			// --- CA Initialisation ---
 			myCA := ca.New(store, asCfg, cfg.Hostname)
 			if err := applyCAConfig(myCA, cfg); err != nil {
@@ -851,6 +858,7 @@ func newRootCmd() *cobra.Command {
 			srv.SignBatchLimit = 50 // Default max batch size for sign operations
 			srv.PlainHTTP = !tlsConfigured && !isLoopback(cfg.Host) && !cfg.NoTLSRequired
 			srv.PuppetDateTimeFormat = cfg.PuppetDateTimeFormat
+			srv.SerialNumberFormat = serialFmt
 
 			// Wire mTLS auth middleware when TLS is configured.
 			if cfg.TLSCert != "" && cfg.TLSKey != "" {

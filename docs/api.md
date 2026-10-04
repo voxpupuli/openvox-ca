@@ -71,6 +71,8 @@ A revocation takes the per-subject lock that signing and [renewal](#certificate-
 ```
 
 > **Note:** `serial_number` is the certificate's full serial, a random 128-bit value, as a bare JSON number. That is how OpenVox Server sends it. It is omitted for certificates in the `requested` state. The number is exact in the response, but a parser that reads every JSON number as a double — JavaScript's `JSON.parse`, or `jq` before 1.7 — rounds a value this large. Where you need the exact serial, use a parser that keeps the digits (`jq` 1.7 or later does), or read it from the certificate itself.
+>
+> With [`serial_number_format: hex`](configuration.md#serial-number-format) the server sends it instead as a string of uppercase hex bytes separated by colons, `"9F:3C:2A:1B:4D:5E:6F:70:81:92:A3:B4:C5:D6:E7:F8"` for the serial above. These are the bytes `openssl x509 -noout -text` prints on its Serial Number line, in upper case: padded to whole bytes, with no `00` sign byte when the top bit is set. That setting changes the field's JSON type from number to string, so it deliberately departs from OpenVox Server's API, and a client that reads `serial_number` as a number breaks against it. [Revocation by serial](#revocation-by-serial) takes the same digits without the colons.
 
 ### Revocation by serial
 

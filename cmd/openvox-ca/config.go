@@ -200,6 +200,11 @@ type serverConfig struct {
 	// PuppetDateTimeFormat formats JSON date/time fields using the original Puppet CA
 	// style ("2006-01-02T15:04:05MST") instead of RFC 3339 (default: false).
 	PuppetDateTimeFormat bool `yaml:"puppet_datetime_format"`
+	// SerialNumberFormat selects how certificate status responses encode
+	// serial_number: "number" (the default, OpenVox Server's JSON number) or
+	// "hex" (an uppercase colon-separated string, as openssl prints it).
+	// "hex" changes the field's JSON type, so it departs from OpenVox Server.
+	SerialNumberFormat string `yaml:"serial_number_format"`
 	// RevokeOnAutoRenew revokes the certificate replaced by the empty-body
 	// (no-CSR) /certificate_renewal auto-renewal path once its successor is
 	// signed and stored, so only the newest serial per subject stays valid
@@ -746,6 +751,9 @@ func applyServerEnv(cfg *serverConfig) {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.PuppetDateTimeFormat = b
 		}
+	}
+	if v := os.Getenv("PUPPET_CA_SERIAL_NUMBER_FORMAT"); v != "" {
+		cfg.SerialNumberFormat = v
 	}
 	if v := os.Getenv("PUPPET_CA_REVOKE_ON_AUTO_RENEW"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {

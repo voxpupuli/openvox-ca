@@ -149,6 +149,8 @@ encrypt_ca_key: false           # encrypt the CA private key (AES-256-GCM + Argo
 ca_key_passphrase_file: ""      # path to passphrase file; auto-generated if omitted
 # Date/time format in JSON responses.
 puppet_datetime_format: false   # use Puppet CA style "2006-01-02T15:04:05MST" instead of RFC 3339
+# serial_number in certificate status responses. See "Serial number format" below.
+serial_number_format: number    # "hex" = colon-separated hex string; departs from OpenVox Server's API
 # Certificate auto-renewal (empty-body POST /certificate_renewal).
 revoke_on_auto_renew: true      # false matches OpenVox Server's Clojure CA (no revocation on auto-renewal)
 # Delayed supersession. A renewal records the certificate it replaced and a sweep
@@ -248,6 +250,7 @@ The CA key passphrase can also be provided via `PUPPET_CA_KEY_PASSPHRASE` (env v
 | `etcd_tls_cert_file` | `PUPPET_CA_ETCD_TLS_CERT_FILE` |
 | `etcd_tls_key_file` | `PUPPET_CA_ETCD_TLS_KEY_FILE` |
 | `puppet_datetime_format` | `PUPPET_CA_PUPPET_DATETIME_FORMAT` |
+| `serial_number_format` | `PUPPET_CA_SERIAL_NUMBER_FORMAT` |
 | `revoke_on_auto_renew` | `PUPPET_CA_REVOKE_ON_AUTO_RENEW` |
 | `superseded_cert_revoke_after_sec` | `PUPPET_CA_SUPERSEDED_CERT_REVOKE_AFTER_SEC` |
 | `superseded_cert_sweep_interval_sec` | `PUPPET_CA_SUPERSEDED_CERT_SWEEP_INTERVAL_SEC` |
@@ -1386,6 +1389,28 @@ differently, all deliberately:
   administrator who could already mint anything, not from an enrolling agent.
   That is the distinction the exemption rests on: who supplies the names, not
   whether the path is offline.
+
+## Serial number format
+
+`serial_number_format` decides how `GET /certificate_status/{subject}` and
+`GET /certificate_statuses/*` encode `serial_number`.
+
+| Value | `serial_number` |
+| --- | --- |
+| `number` (default) | The full serial as a JSON number, e.g. `211659643165621965746051058369188784120`. This is what OpenVox Server sends. |
+| `hex` | A JSON string of uppercase hex bytes separated by colons, e.g. `"9F:3C:2A:1B:4D:5E:6F:70:81:92:A3:B4:C5:D6:E7:F8"`, as `openssl x509 -noout -text` prints the serial. |
+
+The default exists for compatibility, not legibility: openvox-ca's serials are
+random 128-bit values, which read poorly as decimal integers and lose precision
+in any client that parses JSON numbers as doubles. `hex` is easier to read and
+compare against `openssl` output, and the colons make it plain that the value is
+not a decimal integer.
+
+`hex` is a deliberate departure from the OpenVox Server API. It changes the
+field's JSON type from number to string, so a client written against OpenVox
+Server that reads `serial_number` as a number breaks. Set it only when every
+client of the status endpoints is yours. Any other value refuses at startup.
+See [the status response](api.md#certificate-status) for the exact rendering.
 
 ## Directory layout (filesystem backend)
 

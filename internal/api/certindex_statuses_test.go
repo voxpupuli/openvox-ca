@@ -177,6 +177,16 @@ var _ = Describe("Certificate statuses via the certificate index", func() {
 			HaveKeyWithValue("idx-serial", cert.SerialNumber.String()))
 	})
 
+	It("encodes an indexed serial as colon-separated hex when the server opts in", func() {
+		submitAndSign("idx-hex", generateCSRWithSANs("idx-hex", []string{"idx-hex"}))
+		cert := storedCert(ctx, store, "idx-hex")
+
+		srv := api.New(myCA)
+		srv.SerialNumberFormat = api.SerialNumberAsHex
+		Expect(rawStatusSerials(srv.Routes(), "/certificate_statuses/any")).To(
+			HaveKeyWithValue("idx-hex", `"`+wantColonHex(cert.SerialNumber)+`"`))
+	})
+
 	It("partitions signed, revoked, and requested across the state filters", func() {
 		submitAndSign("idx-signed", generateCSRWithSANs("idx-signed", []string{"idx-signed"}))
 		submitAndSign("idx-revoked", generateCSRWithSANs("idx-revoked", []string{"idx-revoked"}))

@@ -31,6 +31,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/big"
 	"net/http"
@@ -1539,16 +1540,48 @@ var _ = Describe("API Workflow", func() {
 			Entry("small", big.NewInt(10), "10"),
 		)
 
-		It("is omitted for a certificate request", func() {
-			submitOnly("serial-pending-node")
+		DescribeTable("is omitted for a certificate request",
+			func(format api.SerialNumberFormat) {
+				server.SerialNumberFormat = format
+				mux = server.Routes()
+				submitOnly("serial-pending-node")
 
-			for _, path := range []string{"/certificate_status/serial-pending-node", "/certificate_statuses/any"} {
-				rr := httptest.NewRecorder()
-				mux.ServeHTTP(rr, httptest.NewRequest("GET", path, nil))
-				Expect(rr.Code).To(Equal(http.StatusOK), path)
-				Expect(rr.Body.String()).To(ContainSubstring(`"serial-pending-node"`), path)
-				Expect(rr.Body.String()).NotTo(ContainSubstring(`"serial_number"`), path)
-			}
+				for _, path := range []string{"/certificate_status/serial-pending-node", "/certificate_statuses/any"} {
+					rr := httptest.NewRecorder()
+					mux.ServeHTTP(rr, httptest.NewRequest("GET", path, nil))
+					Expect(rr.Code).To(Equal(http.StatusOK), path)
+					Expect(rr.Body.String()).To(ContainSubstring(`"serial-pending-node"`), path)
+					Expect(rr.Body.String()).NotTo(ContainSubstring(`"serial_number"`), path)
+				}
+			},
+			Entry("by default", api.SerialNumberFormat("")),
+			Entry("in hex mode", api.SerialNumberAsHex),
+		)
+
+		Context("when the server opts into colon-separated hex", func() {
+			BeforeEach(func() {
+				server.SerialNumberFormat = api.SerialNumberAsHex
+				mux = server.Routes()
+			})
+
+			It("encodes a signed certificate's serial as a hex string on both routes", func() {
+				cert := submitAndSign("serial-hex-node")
+				want := `"` + wantColonHex(cert.SerialNumber) + `"`
+				Expect(rawStatusSerials(mux, "/certificate_status/serial-hex-node")).To(
+					Equal(map[string]string{"serial-hex-node": want}))
+				Expect(rawStatusSerials(mux, "/certificate_statuses/any")).To(
+					HaveKeyWithValue("serial-hex-node", want))
+			})
+
+			DescribeTable("renders the bytes openssl prints",
+				func(serial *big.Int, want string) {
+					storeWithSerial("serial-chosen-node", serial)
+					Expect(rawStatusSerials(mux, "/certificate_status/serial-chosen-node")).To(
+						Equal(map[string]string{"serial-chosen-node": `"` + want + `"`}))
+				},
+				Entry("top bit set: no DER sign byte", topBitSerial(), "9F:3C:2A:1B:4D:5E:6F:70:81:92:A3:B4:C5:D6:E7:F8"),
+				Entry("small: padded to a whole byte", big.NewInt(10), "0A"),
+			)
 		})
 	})
 
@@ -2251,6 +2284,21 @@ func rawStatusSerials(h http.Handler, path string) map[string]string {
 		}
 	}
 	return out
+}
+
+// wantColonHex derives the expected hex serial from %X, independently of the
+// byte-wise encoder under test: pad to a whole byte, then a colon after every
+// second digit.
+func wantColonHex(n *big.Int) string {
+	digits := fmt.Sprintf("%X", n)
+	if len(digits)%2 == 1 {
+		digits = "0" + digits
+	}
+	pairs := make([]string, 0, len(digits)/2)
+	for i := 0; i < len(digits); i += 2 {
+		pairs = append(pairs, digits[i:i+2])
+	}
+	return strings.Join(pairs, ":")
 }
 
 // topBitSerial is a 128-bit serial with its top bit set, which DER encodes
