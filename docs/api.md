@@ -61,14 +61,16 @@ A revocation takes the per-subject lock that signing and [renewal](#certificate-
   "state": "signed",
   "fingerprint": "AA:BB:...",
   "fingerprints": { "SHA256": "AA:BB:...", "default": "AA:BB:..." },
-  "dns_alt_names": ["agent.example.com"],
-  "subject_alt_names": ["agent.example.com"],
+  "dns_alt_names": ["DNS:agent.example.com"],
+  "subject_alt_names": ["DNS:agent.example.com"],
   "authorization_extensions": {},
   "serial_number": 211659643165621965746051058369188784120,
   "not_before": "2025-01-01T00:00:00Z",
   "not_after": "2030-01-01T00:00:00Z"
 }
 ```
+
+Fingerprints are uppercase hex pairs and each SAN carries its `DNS:` prefix, as OpenVox Server renders them.
 
 > **Note:** `serial_number` is the certificate's full serial, a random 128-bit value, as a bare JSON number. That is how OpenVox Server sends it. It is omitted for certificates in the `requested` state. The number is exact in the response, but a parser that reads every JSON number as a double — JavaScript's `JSON.parse`, or `jq` before 1.7 — rounds a value this large. Where you need the exact serial, use a parser that keeps the digits (`jq` 1.7 or later does), or read it from the certificate itself.
 >
@@ -296,7 +298,7 @@ was actually revoked — see [Authorization tiers](#authorization-tiers).
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/expirations` | CA cert and CRL expiry dates. The CRL date is **this CA's own CRL (block 0) only** — imported ancestor CRLs are not reflected, so an ancestor can be past its `nextUpdate` while this reports a comfortable date. See [metrics](metrics.md#crl) |
+| `GET` | `/expirations` | CA certificate and CRL expiry dates. `ca-certs` maps the subject CN of every certificate in the CA bundle to its `notAfter`, and `crls` maps the issuer CN of every CRL in the published chain to its `nextUpdate`, as OpenVox Server does; a CN that appears twice keeps the last. `ca_certificate.expiration` and `ca_crl.next_update` are openvox-ca's own: the latter is **this CA's own CRL (block 0) only**, so an ancestor can be past its `nextUpdate` while it reports a comfortable date. Read `crls` for the whole chain, or see [metrics](metrics.md#crl) |
 
 ## Server-side key generation
 

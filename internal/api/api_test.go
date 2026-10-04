@@ -905,6 +905,18 @@ var _ = Describe("API Workflow", func() {
 			Expect(resp.CACrl.NextUpdate).NotTo(BeEmpty())
 		})
 
+		It("keys the CA certificate and CRL by CN, as OpenVox Server does", func() {
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, httptest.NewRequest("GET", "/expirations", nil))
+			Expect(rr.Code).To(Equal(http.StatusOK))
+
+			var resp api.ExpirationsResponse
+			Expect(json.Unmarshal(rr.Body.Bytes(), &resp)).To(Succeed())
+			cn := myCA.CACert.Subject.CommonName
+			Expect(resp.CACerts).To(Equal(map[string]string{cn: resp.CACertificate.Expiration}))
+			Expect(resp.CRLs).To(Equal(map[string]string{cn: resp.CACrl.NextUpdate}))
+		})
+
 		It("should return 503 when the CA is not yet initialised", func() {
 			// Construct a fresh server whose CA has no cert loaded. Without
 			// the readiness guard, the handler would dereference a nil

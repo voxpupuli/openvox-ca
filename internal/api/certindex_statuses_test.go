@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -152,14 +153,17 @@ var _ = Describe("Certificate statuses via the certificate index", func() {
 		Expect(block).NotTo(BeNil())
 		cert, err := x509.ParseCertificate(block.Bytes)
 		Expect(err).NotTo(HaveOccurred())
-		wantFP := ca.SHA256ColonFingerprint(block.Bytes)
+		// Rendered as OpenVox Server renders them: the fingerprint in upper
+		// case, each DNS SAN prefixed.
+		wantFP := strings.ToUpper(ca.SHA256ColonFingerprint(block.Bytes))
+		wantSANs := []string{"DNS:idx-node.example.com", "DNS:idx-node.alt.example.com"}
 
 		Expect(got.Name).To(Equal("idx-node"))
 		Expect(got.State).To(Equal("signed"))
 		Expect(got.Fingerprint).To(Equal(wantFP))
 		Expect(got.Fingerprints).To(Equal(map[string]string{"SHA256": wantFP, "default": wantFP}))
-		Expect(got.DNSAltNames).To(Equal(sans))
-		Expect(got.SubjectAltNames).To(Equal(sans))
+		Expect(got.DNSAltNames).To(Equal(wantSANs))
+		Expect(got.SubjectAltNames).To(Equal(wantSANs))
 		Expect(got.AuthorizationExtensions).To(BeEmpty())
 		Expect(got.AuthorizationExtensions).NotTo(BeNil())
 		Expect(got.SerialNumber).NotTo(BeNil())
@@ -325,11 +329,11 @@ var _ = Describe("Certificate statuses via the certificate index", func() {
 
 		Expect(got.Name).To(Equal("idx-legacy"))
 		Expect(got.State).To(Equal("signed"))
-		Expect(got.Fingerprint).To(Equal(ca.SHA256ColonFingerprint(block.Bytes)))
+		Expect(got.Fingerprint).To(Equal(strings.ToUpper(ca.SHA256ColonFingerprint(block.Bytes))))
 		Expect(got.SerialNumber).NotTo(BeNil())
 		Expect(got.SerialNumber.Cmp(cert.SerialNumber)).To(BeZero(),
 			"the serial must be the PEM's, not the projection-less row's")
-		Expect(got.DNSAltNames).To(Equal([]string{"idx-legacy"}))
+		Expect(got.DNSAltNames).To(Equal([]string{"DNS:idx-legacy"}))
 	})
 
 	It("derives the fallback state from the certificate actually served, not the mismatched row", func() {
@@ -557,6 +561,6 @@ var _ = Describe("Certificate statuses via the certificate index", func() {
 		submitAndSign("idx-plain", generateCSRWithSANs("idx-plain", nil))
 		statuses := getStatuses("")
 		Expect(statuses).To(HaveLen(1))
-		Expect(statuses[0].DNSAltNames).To(Equal([]string{"idx-plain"}))
+		Expect(statuses[0].DNSAltNames).To(Equal([]string{"DNS:idx-plain"}))
 	})
 })

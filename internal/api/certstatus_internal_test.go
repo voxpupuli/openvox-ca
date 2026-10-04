@@ -85,7 +85,7 @@ var _ = Describe("certStatusFromRecord on a complete record", func() {
 		Expect(got.State).To(Equal(storage.CertStateRevoked))
 		Expect(got.SerialNumber).NotTo(BeNil())
 		Expect(got.SerialNumber.Int64()).To(Equal(int64(255)), "hex ff, parsed as the number it names")
-		Expect(got.DNSAltNames).To(Equal([]string{"node1.example.com"}))
+		Expect(got.DNSAltNames).To(Equal([]string{"DNS:node1.example.com"}))
 		Expect(got.AuthorizationExtensions).To(Equal(map[string]string{"pp_auth_role": "webserver"}))
 	})
 
