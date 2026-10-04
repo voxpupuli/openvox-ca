@@ -933,6 +933,120 @@ var _ = Describe("API Workflow", func() {
 			}))
 		})
 
+		Context("when the CA bundle or the CRL chain is damaged", func() {
+			// The contract's store holds a two-certificate bundle and a two-CRL
+			// chain, so a fallback reads differently from success.
+			var (
+				backend *getFaultBackend
+				store   *storage.StorageService
+				handler http.Handler
+				bundle  []*x509.Certificate
+				ownCN   string
+			)
+			ctx := context.Background()
+			format := func(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05MST") }
+			expirations := func() (api.ExpirationsResponse, string) {
+				rr := httptest.NewRecorder()
+				handler.ServeHTTP(rr, httptest.NewRequest("GET", "/expirations", nil))
+				Expect(rr.Code).To(Equal(http.StatusOK))
+				var resp api.ExpirationsResponse
+				Expect(json.Unmarshal(rr.Body.Bytes(), &resp)).To(Succeed())
+				return resp, rr.Body.String()
+			}
+			pemOf := func(typ string, der []byte) []byte { return pem.EncodeToMemory(&pem.Block{Type: typ, Bytes: der}) }
+
+			BeforeEach(func() {
+				dir := GinkgoT().TempDir()
+				backend = &getFaultBackend{Backend: storage.NewFilesystemBackend(dir), fail: map[string]bool{}}
+				store = storage.NewWithBackend(backend, filepath.Join(dir, "private"))
+				handler = seedContractStore(store).Routes()
+
+				bundlePEM, err := store.GetCACert(ctx)
+				Expect(err).NotTo(HaveOccurred())
+				bundle, err = ca.ParseCABundle(bundlePEM)
+				Expect(err).NotTo(HaveOccurred())
+				ownCN = bundle[0].Subject.CommonName
+
+				resp, _ := expirations()
+				Expect(resp.CACerts).To(HaveLen(2), "a one-certificate bundle would read the same as the fallback")
+				Expect(resp.CRLs).To(HaveLen(2), "a one-CRL chain would read the same as the fallback")
+			})
+
+			It("lists this CA alone in ca-certs when the bundle cannot be read", func() {
+				backend.fail[storage.KeyCACert] = true
+				resp, _ := expirations()
+				Expect(resp.CACerts).To(Equal(map[string]string{ownCN: resp.CACertificate.Expiration}))
+			})
+
+			It("lists this CA alone in ca-certs when a certificate in the bundle does not parse", func() {
+				bundlePEM, err := store.GetCACert(ctx)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(store.SaveCACert(ctx, append(bundlePEM, pemOf("CERTIFICATE", []byte("not DER"))...))).To(Succeed())
+				resp, _ := expirations()
+				Expect(resp.CACerts).To(Equal(map[string]string{ownCN: resp.CACertificate.Expiration}))
+			})
+
+			It("reports no CRL when the chain cannot be read", func() {
+				backend.fail[storage.KeyCRL] = true
+				resp, body := expirations()
+				Expect(resp.CACrl.NextUpdate).To(BeEmpty())
+				Expect(body).To(ContainSubstring(`"crls":{}`))
+			})
+
+			It("reports no CRL, not block 0's, when any CRL in the chain does not parse", func() {
+				crlPEM, err := store.GetCRL(ctx)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(store.UpdateCRL(ctx, append(crlPEM, pemOf("X509 CRL", []byte("not DER"))...))).To(Succeed())
+				resp, body := expirations()
+				Expect(resp.CACrl.NextUpdate).To(BeEmpty())
+				Expect(body).To(ContainSubstring(`"crls":{}`))
+			})
+
+			It("keeps the last of two CRLs that share an issuer CN", func() {
+				crlPEM, err := store.GetCRL(ctx)
+				Expect(err).NotTo(HaveOccurred())
+				chain, err := ca.DecodeCRLChain(crlPEM)
+				Expect(err).NotTo(HaveOccurred())
+				keyPEM, err := store.GetCAKey(ctx)
+				Expect(err).NotTo(HaveOccurred())
+				block, _ := pem.Decode(keyPEM)
+				Expect(block).NotTo(BeNil())
+				key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+				Expect(err).NotTo(HaveOccurred())
+				later, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+					Number:     big.NewInt(1 << 20),
+					ThisUpdate: chain[0].ThisUpdate,
+					NextUpdate: chain[0].NextUpdate.Add(48 * time.Hour),
+				}, bundle[0], key)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(store.UpdateCRL(ctx, append(crlPEM, pemOf("X509 CRL", later)...))).To(Succeed())
+
+				resp, _ := expirations()
+				Expect(resp.CACrl.NextUpdate).To(Equal(format(chain[0].NextUpdate)))
+				Expect(resp.CRLs).To(HaveKeyWithValue(ownCN, format(chain[0].NextUpdate.Add(48*time.Hour))))
+			})
+
+			It("keeps the last of two CA certificates that share a CN", func() {
+				key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+				Expect(err).NotTo(HaveOccurred())
+				notAfter := bundle[0].NotAfter.Add(48 * time.Hour).Truncate(time.Second)
+				template := &x509.Certificate{
+					SerialNumber: big.NewInt(7),
+					Subject:      pkix.Name{CommonName: ownCN},
+					NotBefore:    bundle[0].NotBefore,
+					NotAfter:     notAfter,
+				}
+				der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+				Expect(err).NotTo(HaveOccurred())
+				bundlePEM, err := store.GetCACert(ctx)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(store.SaveCACert(ctx, append(bundlePEM, pemOf("CERTIFICATE", der)...))).To(Succeed())
+
+				resp, _ := expirations()
+				Expect(resp.CACerts).To(HaveKeyWithValue(ownCN, format(notAfter)))
+			})
+		})
+
 		It("keys the CA certificate and CRL by CN, as OpenVox Server does", func() {
 			rr := httptest.NewRecorder()
 			mux.ServeHTTP(rr, httptest.NewRequest("GET", "/expirations", nil))
@@ -2293,6 +2407,20 @@ func (b *deleteFaultBackend) Delete(ctx context.Context, key string) error {
 		return b.err
 	}
 	return b.Backend.Delete(ctx, key)
+}
+
+// getFaultBackend fails every Get of a key in fail, which a spec fills once
+// the CA has loaded what it needs.
+type getFaultBackend struct {
+	storage.Backend
+	fail map[string]bool
+}
+
+func (b *getFaultBackend) Get(ctx context.Context, key string) ([]byte, error) {
+	if b.fail[key] {
+		return nil, errors.New("backend unavailable")
+	}
+	return b.Backend.Get(ctx, key)
 }
 
 // rawStatusSerials GETs a status route and returns each entry's serial_number
