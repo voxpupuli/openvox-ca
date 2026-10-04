@@ -1253,11 +1253,13 @@ var _ = Describe("serial_number_format at startup", func() {
 	})
 
 	// The empty cadir is the evidence for "before anything starts": the
-	// instance lock, the store and the CA would all leave files in it. The
-	// check runs before role dispatch and the --daemon fork, so what holds
-	// for --single-process holds for every topology. --single-process is not
-	// a shortcut: without it a regression starts the launcher, which forks
-	// this test binary, whose copies run this spec again without bound.
+	// instance lock, the store and the CA would all leave files in it. Role
+	// dispatch comes after all three, so this also pins the check ahead of
+	// the launcher. --single-process is not a shortcut: without it a
+	// regression starts the launcher, which forks this test binary, whose
+	// copies run this spec again without bound. The --daemon fork is pinned
+	// separately, in instancelock_test.go, where a held store makes that
+	// spec safe to run against a regression.
 	It("refuses an unknown value through the command an operator runs, before anything starts", func() {
 		cmd := newRootCmd()
 		cmd.SetOut(GinkgoWriter)
@@ -1276,13 +1278,20 @@ var _ = Describe("serial_number_format at startup", func() {
 	})
 })
 
-var _ = DescribeTable("applyResponseFormats hands the server its response settings",
-	func(cfg serverConfig, serialFmt api.SerialNumberFormat) {
+var _ = DescribeTable("applyResponseFormats hands the server the response settings in its config",
+	func(cfg serverConfig, want api.SerialNumberFormat) {
 		srv := &api.Server{}
-		applyResponseFormats(srv, &cfg, serialFmt)
+		Expect(applyResponseFormats(srv, &cfg)).To(Succeed())
 		Expect(srv.PuppetDateTimeFormat).To(Equal(cfg.PuppetDateTimeFormat))
-		Expect(srv.SerialNumberFormat).To(Equal(serialFmt))
+		Expect(srv.SerialNumberFormat).To(Equal(want))
 	},
 	Entry("the defaults", serverConfig{}, api.SerialNumberAsNumber),
-	Entry("both opted in", serverConfig{PuppetDateTimeFormat: true}, api.SerialNumberAsHex),
+	Entry("both opted in", serverConfig{PuppetDateTimeFormat: true, SerialNumberFormat: "hex"}, api.SerialNumberAsHex),
+	Entry("hex, written loosely", serverConfig{SerialNumberFormat: " HEX "}, api.SerialNumberAsHex),
 )
+
+var _ = It("applyResponseFormats refuses an unknown serial_number_format rather than defaulting", func() {
+	srv := &api.Server{}
+	Expect(applyResponseFormats(srv, &serverConfig{SerialNumberFormat: "hexx"})).To(
+		MatchError(ContainSubstring("invalid serial_number_format")))
+})

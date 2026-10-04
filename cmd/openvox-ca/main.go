@@ -268,13 +268,30 @@ func resolveCSRRateLimit(configured int) int {
 	return configured
 }
 
-// applyResponseFormats hands srv the settings that shape response bodies. It
-// is a function of its own so that a spec can pin the wiring from
-// configuration to server, which would otherwise sit inline in the server
-// start-up where nothing can reach it.
-func applyResponseFormats(srv *api.Server, cfg *serverConfig, serialFmt api.SerialNumberFormat) {
+// serialNumberFormat parses cfg's serial_number_format, naming the key in the
+// error an operator sees.
+func serialNumberFormat(cfg *serverConfig) (api.SerialNumberFormat, error) {
+	f, err := api.ParseSerialNumberFormat(cfg.SerialNumberFormat)
+	if err != nil {
+		return "", fmt.Errorf("invalid serial_number_format: %w", err)
+	}
+	return f, nil
+}
+
+// applyResponseFormats hands srv the settings in cfg that shape response
+// bodies. It is a function of its own so that a spec can pin the whole join
+// from configuration to server, which would otherwise sit inline in the
+// server start-up where nothing can reach it. The start-up validation has
+// already refused a bad serial_number_format, so its error here is a
+// backstop.
+func applyResponseFormats(srv *api.Server, cfg *serverConfig) error {
+	serialFmt, err := serialNumberFormat(cfg)
+	if err != nil {
+		return err
+	}
 	srv.PuppetDateTimeFormat = cfg.PuppetDateTimeFormat
 	srv.SerialNumberFormat = serialFmt
+	return nil
 }
 
 // minSigningConcurrency is the floor under the built-in CA signing bound.
@@ -541,9 +558,8 @@ func newRootCmd() *cobra.Command {
 			// Only the frontend uses it, but it is checked here, before role
 			// dispatch and the --daemon fork, so that a typo refuses where the
 			// operator sees it and before the signer initialises the CA.
-			serialFmt, err := api.ParseSerialNumberFormat(cfg.SerialNumberFormat)
-			if err != nil {
-				return fmt.Errorf("invalid serial_number_format: %w", err)
+			if _, err := serialNumberFormat(cfg); err != nil {
+				return err
 			}
 
 			absCADir, err := filepath.Abs(cfg.CADir)
@@ -866,7 +882,9 @@ func newRootCmd() *cobra.Command {
 			srv.CSRRateLimit = resolveCSRRateLimit(cfg.CSRRateLimit)
 			srv.SignBatchLimit = 50 // Default max batch size for sign operations
 			srv.PlainHTTP = !tlsConfigured && !isLoopback(cfg.Host) && !cfg.NoTLSRequired
-			applyResponseFormats(srv, cfg, serialFmt)
+			if err := applyResponseFormats(srv, cfg); err != nil {
+				return err
+			}
 
 			// Wire mTLS auth middleware when TLS is configured.
 			if cfg.TLSCert != "" && cfg.TLSKey != "" {
