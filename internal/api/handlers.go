@@ -1367,35 +1367,32 @@ func (s *Server) handleGetExpirations(w http.ResponseWriter, r *http.Request) {
 	}
 	certExp := s.CA.CACert.NotAfter.UTC().Format(s.timeFormat())
 
+	// Both documents are read with the parsers the CA uses for them, so this
+	// route cannot disagree with the CA about what they hold. A read that
+	// fails leaves the maps short, and says so in the log.
 	caCerts := map[string]string{s.CA.CACert.Subject.CommonName: certExp}
-	if bundlePEM, err := s.CA.Storage.GetCACert(r.Context()); err == nil {
-		for rest := bundlePEM; ; {
-			var block *pem.Block
-			if block, rest = pem.Decode(rest); block == nil {
-				break
-			}
-			if cert, err := x509.ParseCertificate(block.Bytes); err == nil {
-				caCerts[cert.Subject.CommonName] = cert.NotAfter.UTC().Format(s.timeFormat())
-			}
+	if bundlePEM, err := s.CA.Storage.GetCACert(r.Context()); err != nil {
+		slog.Warn("expirations: reading the CA bundle failed; ca-certs lists this CA alone", "error", err)
+	} else if bundle, err := ca.ParseCABundle(bundlePEM); err != nil {
+		slog.Warn("expirations: parsing the CA bundle failed; ca-certs lists this CA alone", "error", err)
+	} else {
+		for _, cert := range bundle {
+			caCerts[cert.Subject.CommonName] = cert.NotAfter.UTC().Format(s.timeFormat())
 		}
 	}
 
-	// The first CRL in the published chain is the CA's own; the rest are
-	// ancestors' (see CA.CRLChainFile).
+	// The first CRL in the published chain is the CA's own, and the only one
+	// ca_crl reports; the rest are ancestors' (see CA.CRLChainFile).
 	crlNextUpdate := ""
 	crls := map[string]string{}
-	if crlPEM, err := s.CA.Storage.GetCRL(r.Context()); err == nil {
-		for rest := crlPEM; ; {
-			var block *pem.Block
-			if block, rest = pem.Decode(rest); block == nil {
-				break
-			}
-			crl, err := x509.ParseRevocationList(block.Bytes)
-			if err != nil {
-				continue
-			}
+	if crlPEM, err := s.CA.Storage.GetCRL(r.Context()); err != nil {
+		slog.Warn("expirations: reading the CRL failed; ca_crl and crls are empty", "error", err)
+	} else if chain, err := ca.DecodeCRLChain(crlPEM); err != nil {
+		slog.Warn("expirations: parsing the CRL chain failed; ca_crl and crls are empty", "error", err)
+	} else {
+		for i, crl := range chain {
 			nextUpdate := crl.NextUpdate.UTC().Format(s.timeFormat())
-			if crlNextUpdate == "" {
+			if i == 0 {
 				crlNextUpdate = nextUpdate
 			}
 			crls[crl.Issuer.CommonName] = nextUpdate

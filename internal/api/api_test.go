@@ -905,6 +905,34 @@ var _ = Describe("API Workflow", func() {
 			Expect(resp.CACrl.NextUpdate).NotTo(BeEmpty())
 		})
 
+		It("reports this CA's own CRL as ca_crl, and every CRL in a chain under crls", func() {
+			// The contract's store is OpenVox Server's: an intermediate CA whose
+			// published CRL chain carries its root's CRL second.
+			srv := seedContractCA(GinkgoT().TempDir())
+			crlPEM, err := os.ReadFile(filepath.Join(contractDir, "cadir", "ca_crl.pem"))
+			Expect(err).NotTo(HaveOccurred())
+			chain, err := ca.DecodeCRLChain(crlPEM)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(chain).To(HaveLen(2))
+			Expect(chain[0].NextUpdate).NotTo(Equal(chain[1].NextUpdate),
+				"the two CRLs must differ, or this spec cannot tell which one ca_crl reports")
+
+			rr := httptest.NewRecorder()
+			srv.Routes().ServeHTTP(rr, httptest.NewRequest("GET", "/expirations", nil))
+			Expect(rr.Code).To(Equal(http.StatusOK))
+			var resp api.ExpirationsResponse
+			Expect(json.Unmarshal(rr.Body.Bytes(), &resp)).To(Succeed())
+
+			format := func(c *x509.RevocationList) string {
+				return c.NextUpdate.UTC().Format("2006-01-02T15:04:05MST")
+			}
+			Expect(resp.CACrl.NextUpdate).To(Equal(format(chain[0])))
+			Expect(resp.CRLs).To(Equal(map[string]string{
+				chain[0].Issuer.CommonName: format(chain[0]),
+				chain[1].Issuer.CommonName: format(chain[1]),
+			}))
+		})
+
 		It("keys the CA certificate and CRL by CN, as OpenVox Server does", func() {
 			rr := httptest.NewRecorder()
 			mux.ServeHTTP(rr, httptest.NewRequest("GET", "/expirations", nil))

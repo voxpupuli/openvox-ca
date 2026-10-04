@@ -65,6 +65,12 @@ func (c *CA) ownsCRL(crl *x509.RevocationList) bool {
 	return crlSignedBy(c.CACert, crl)
 }
 
+// DecodeCRLChain is decodeCRLChain for readers outside this package, such as
+// the API's /expirations, so that the published chain has one parser.
+func DecodeCRLChain(blob []byte) ([]*x509.RevocationList, error) {
+	return decodeCRLChain(blob)
+}
+
 // decodeCRLChain splits a stored CRL blob into its constituent revocation
 // lists, preserving order.
 //
