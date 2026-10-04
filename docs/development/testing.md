@@ -385,12 +385,14 @@ OpenVox Server source it came from, and how much of the response is binding:
 `cadir/` is the store that server held when it answered, its CA bundle, key,
 CRL chain, certificates and CSRs, and each spec loads it into a fresh
 openvox-ca, so values derived from a certificate can be compared exactly.
-Each spec can start from that one snapshot because every mutation OpenVox
-Server accepts acts on a subject no other fixture reads. A mutation it refuses
-may reuse a read subject, since it leaves the store as it was, so keep such a
-request refused. The one exception is `/sign/all`, which signs every pending
-CSR, read ones included: it is recorded last and bound by type only, because
-its answer is to a later state than the snapshot. The CA key is a throwaway,
+Each spec can start from that one snapshot because every recorded answer is
+to the snapshot state, which holds for two reasons: the recorder records every
+read before any mutation, and no subject is touched by two mutations OpenVox
+Server accepts. A mutation it refuses changes nothing, so it may share a
+subject; keep such a request refused. The one exception is `/sign/all`, which
+signs every pending CSR, including the one an earlier fixture submitted: it is
+recorded last and bound by type only, because its answer is to a later state
+than the snapshot. The CA key is a throwaway,
 generated inside a disposable container for the recording and committed so the
 specs can sign with it; nothing should trust it.
 

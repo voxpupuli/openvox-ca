@@ -25,9 +25,11 @@
 // contract spec can give openvox-ca the same CA and certificates and compare
 // certificate-derived values exactly.
 //
-// CI never runs this; it reads the committed fixtures. Re-record when the
-// image test/compose-migration.yml pins moves (the contract spec fails until
-// you do), or before the recorded CA expires:
+// CI never runs this; it reads the committed fixtures, and nothing in CI
+// notices when the image test/compose-migration.yml pins moves. Re-record when
+// that pin moves to a new OpenVox Server release, after rechecking the line
+// ranges cases() cites and moving citedTag, or when the contract spec reports
+// that the recorded CA is within 180 days of expiry:
 //
 //	go run ./test/contract/record
 //
@@ -151,6 +153,15 @@ func releaseTag(image string) string {
 	return tag
 }
 
+// checkCitedRelease refuses an image built from a release other than the one
+// the line ranges in cases() were checked against.
+func checkCitedRelease(image string) error {
+	if tag := releaseTag(image); tag != citedTag {
+		return fmt.Errorf("%s is built from OpenVox Server %s, but the source lines cases() cites were checked against %s: recheck each range against %s, then move citedTag", image, tag, citedTag, tag)
+	}
+	return nil
+}
+
 // checkReplaceable refuses an out that exists and is not a contract this
 // recorder wrote, since a successful run replaces it wholesale.
 func checkReplaceable(out string) error {
@@ -180,8 +191,8 @@ func run(out, compose string, keep bool) error {
 	if err != nil {
 		return err
 	}
-	if tag := releaseTag(image); tag != citedTag {
-		return fmt.Errorf("%s is built from OpenVox Server %s, but the source lines cases() cites were checked against %s: recheck each range against %s, then move citedTag", image, tag, citedTag, tag)
+	if err := checkCitedRelease(image); err != nil {
+		return err
 	}
 	slog.Info("recording from", "image", image)
 
@@ -289,19 +300,22 @@ ruby -e '
 
 	// State that has to come from upstream itself: a revocation, so the CRL
 	// carrying it is one OpenVox Server wrote.
-	if _, err := do(ctx, admin, request{Method: "PUT", Path: "/puppet-ca/v1/certificate_status/corner-revoked",
-		ContentType: "application/json", Body: `{"desired_state":"revoked"}`}); err != nil {
+	// A refusal would leave corner-revoked signed, and status-revoked
+	// recording a certificate that is not.
+	revoked, err := do(ctx, admin, request{Method: "PUT", Path: "/puppet-ca/v1/certificate_status/corner-revoked",
+		ContentType: "application/json", Body: `{"desired_state":"revoked"}`})
+	if err != nil {
 		return err
+	}
+	if revoked.Status/100 != 2 {
+		return fmt.Errorf("revoking corner-revoked: OpenVox Server answered %d", revoked.Status)
 	}
 
-	// The contract is written to a sibling of out and swapped in only once
-	// every case has been recorded, so a failed run leaves the last good
+	// The contract is written to a new sibling of out and swapped in only
+	// once every case has been recorded, so a failed run leaves the last good
 	// contract in place rather than half of a new one.
-	staging := filepath.Clean(out) + ".recording"
-	if err := os.RemoveAll(staging); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(staging, 0o750); err != nil {
+	staging, err := os.MkdirTemp(filepath.Dir(filepath.Clean(out)), filepath.Base(out)+".recording-*")
+	if err != nil {
 		return err
 	}
 	defer func() { _ = os.RemoveAll(staging) }()
@@ -355,10 +369,34 @@ ruby -e '
 	if err := root.Close(); err != nil {
 		return err
 	}
-	if err := os.RemoveAll(out); err != nil {
+	return swapIn(staging, out)
+}
+
+// swapIn replaces out with staging. The old contract is moved aside, not
+// deleted, until the new one is in place, so a failure part-way through puts
+// it back, or says where it is if even that fails.
+func swapIn(staging, out string) error {
+	old := ""
+	if _, err := os.Lstat(out); err == nil {
+		old = staging + ".old"
+		if err := os.Rename(out, old); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	return os.Rename(staging, out)
+	if err := os.Rename(staging, out); err != nil {
+		if old != "" {
+			if rerr := os.Rename(old, out); rerr != nil {
+				return fmt.Errorf("%w; the previous contract is at %s", err, old)
+			}
+		}
+		return err
+	}
+	if old != "" {
+		return os.RemoveAll(old)
+	}
+	return nil
 }
 
 // --- docker ------------------------------------------------------------------
@@ -815,8 +853,8 @@ type fixture struct {
 	Description string   `json:"description"`
 	Sources     []string `json:"sources"`
 	Recorded    string   `json:"recorded_from"`
-	// Image is the exact image recorded from. The contract spec fails when
-	// it differs from test/compose-migration.yml's pin.
+	// Image is the exact image recorded from, as provenance only: the
+	// contract spec does not compare it with test/compose-migration.yml's pin.
 	Image string `json:"image"`
 	// Compare is how much of the response the contract binds: "exact" for
 	// every value, "types" for JSON types only, "none" for status and
@@ -878,14 +916,15 @@ func writeFixture(out *os.Root, f fixture) error {
 	return writeFile(out, filepath.Join("fixtures", f.Name+".json"), append(b, '\n'))
 }
 
-// cases lists every recorded request, reads before mutations, so that every
-// response is the answer to the snapshot state. That holds because every
-// mutation upstream accepts acts on a subject no other fixture reads. A
-// mutation upstream refuses (signing without a CSR, an unknown state, a CSR
-// over a live certificate, anything aimed at no-such-node) may reuse a read
-// subject, since it leaves the store as it was; keep it refused. /sign/all
-// acts on every pending CSR, read ones and new-csr included, so its answer is
-// to a later state than the snapshot: it is last, and bound by type only.
+// cases lists every recorded request. Each spec replays one against the
+// snapshot, so every response must be the answer to the snapshot state, which
+// holds for two reasons: every read is recorded before any mutation, and no
+// subject is touched by two mutations upstream accepts. A mutation upstream
+// refuses (signing without a CSR, an unknown state, a CSR over a live
+// certificate, anything aimed at no-such-node) changes nothing, so it may
+// share a subject; keep it refused. /sign/all acts on every pending CSR,
+// new-csr included, so its answer is to a later state than the snapshot: it
+// is last, and bound by type only.
 func cases() []fixture {
 	const (
 		ovc = "src/clj/puppetlabs/services/ca/certificate_authority_core.clj"
