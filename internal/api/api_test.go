@@ -942,6 +942,7 @@ var _ = Describe("API Workflow", func() {
 				handler http.Handler
 				bundle  []*x509.Certificate
 				ownCN   string
+				logBuf  *bytes.Buffer
 			)
 			ctx := context.Background()
 			format := func(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05MST") }
@@ -970,12 +971,19 @@ var _ = Describe("API Workflow", func() {
 				resp, _ := expirations()
 				Expect(resp.CACerts).To(HaveLen(2), "a one-certificate bundle would read the same as the fallback")
 				Expect(resp.CRLs).To(HaveLen(2), "a one-CRL chain would read the same as the fallback")
+
+				// docs/api.md promises each fallback is logged.
+				logBuf = &bytes.Buffer{}
+				orig := slog.Default()
+				slog.SetDefault(slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+				DeferCleanup(func() { slog.SetDefault(orig) })
 			})
 
 			It("lists this CA alone in ca-certs when the bundle cannot be read", func() {
 				backend.fail[storage.KeyCACert] = true
 				resp, _ := expirations()
 				Expect(resp.CACerts).To(Equal(map[string]string{ownCN: resp.CACertificate.Expiration}))
+				Expect(logBuf.String()).To(ContainSubstring("expirations: reading the CA bundle failed"))
 			})
 
 			It("lists this CA alone in ca-certs when a certificate in the bundle does not parse", func() {
@@ -984,6 +992,7 @@ var _ = Describe("API Workflow", func() {
 				Expect(store.SaveCACert(ctx, append(bundlePEM, pemOf("CERTIFICATE", []byte("not DER"))...))).To(Succeed())
 				resp, _ := expirations()
 				Expect(resp.CACerts).To(Equal(map[string]string{ownCN: resp.CACertificate.Expiration}))
+				Expect(logBuf.String()).To(ContainSubstring("expirations: parsing the CA bundle failed"))
 			})
 
 			It("reports no CRL when the chain cannot be read", func() {
@@ -991,6 +1000,7 @@ var _ = Describe("API Workflow", func() {
 				resp, body := expirations()
 				Expect(resp.CACrl.NextUpdate).To(BeEmpty())
 				Expect(body).To(ContainSubstring(`"crls":{}`))
+				Expect(logBuf.String()).To(ContainSubstring("expirations: reading the CRL failed"))
 			})
 
 			It("reports no CRL, not block 0's, when any CRL in the chain does not parse", func() {
@@ -1000,6 +1010,7 @@ var _ = Describe("API Workflow", func() {
 				resp, body := expirations()
 				Expect(resp.CACrl.NextUpdate).To(BeEmpty())
 				Expect(body).To(ContainSubstring(`"crls":{}`))
+				Expect(logBuf.String()).To(ContainSubstring("expirations: parsing the CRL chain failed"))
 			})
 
 			It("keeps the last of two CRLs that share an issuer CN", func() {
