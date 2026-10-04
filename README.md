@@ -31,7 +31,7 @@ wire-compatible with your existing Puppet/OpenVox fleet.
 
 ## Features
 
-- **Full Puppet CA API compatibility:** all 13 endpoints used by agents and OpenVox Server. See the [HTTP API reference](docs/api.md)
+- **Puppet CA API compatibility:** all 13 endpoints used by agents and OpenVox Server, checked against responses recorded from OpenVox Server itself. The few remaining differences are listed in the [HTTP API reference](docs/api.md#differences-from-openvox-server)
 - **Pluggable storage:** filesystem (default; drop-in compatible with the OpenVox/Puppet Server CA layout), SQLite (single database file), or PostgreSQL / MySQL (MariaDB) / etcd / Redis (Valkey) for HA clusters; CA cert/key can be pinned to local files independently. See the [storage backends guide](docs/storage-backends.md)
 - **Pluggable CA key custody:** keep the CA private key as a local file (default) or delegate it entirely to an OpenBao Transit secrets engine key, which never leaves OpenBao — works identically on a VM (AppRole/token) or in Kubernetes (native ServiceAccount auth, no sidecar). See [OpenBao Transit-engine CA key](docs/openbao-transit.md)
 - **Autosigning:** `true`, glob-pattern file, or executable plugin modes
@@ -304,7 +304,7 @@ The complete flag, environment-variable, and config-file reference is in
 | Guide | What it covers |
 | --- | --- |
 | [Configuring the server](docs/configuration.md) | Every flag, environment variable, config-file key; the serving certificate; autosigning; directory layout; the memory budget; graceful shutdown; reloading configuration; trusting client certificates from another CA |
-| [HTTP API reference](docs/api.md) | All endpoints, authorization tiers, and admin credential resolution |
+| [HTTP API reference](docs/api.md) | All endpoints, authorization tiers, admin credential resolution, and where openvox-ca differs from OpenVox Server |
 | [Operator CLI (`openvox-ca-ctl`)](docs/operator-cli.md) | The `openvox-ca-ctl` command reference, and the offline `openvox-ca` subcommands (`csr`, `import-ca-cert`, `generate`) that run against the server's own configuration |
 | [Storage backends](docs/storage-backends.md) | filesystem, SQLite, PostgreSQL, MySQL, etcd, Redis/Valkey; migrating between them |
 | [CA key security](docs/ca-key-security.md) | Process isolation and the signer handshake, key encryption at rest, key-custody options, PKCS#11 plans, destructive-op monitoring, and where the inventory-integrity key lives |
