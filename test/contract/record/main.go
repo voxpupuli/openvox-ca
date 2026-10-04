@@ -56,22 +56,32 @@ import (
 	"math/big"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
 const (
 	// composeFile pins the OpenVox Server image that the migration suite
 	// runs and this contract is recorded from. It is the only pin: the
-	// recorder reads it, every fixture records it, and the contract spec
-	// fails when the two disagree.
+	// recorder reads it, and every fixture records the image it came from.
 	composeFile = "test/compose-migration.yml"
 	imagePrefix = "ghcr.io/openvoxproject/openvoxserver:"
+
+	// citedTag is the OpenVox Server release the line ranges in cases() were
+	// checked against. The recorder refuses an image built from another
+	// release, so a fixture never cites lines nobody has read at its tag:
+	// recheck every range in cases() against the new tag, then move this.
+	citedTag = "8.14.1"
+
+	// contractHeader opens the README the recorder writes, and marks a
+	// directory as a contract it may replace.
+	contractHeader = "# Puppet CA API contract\n"
 
 	// farFuture is an If-Modified-Since date no store can be modified
 	// after, so a not-modified fixture cannot expire.
@@ -86,8 +96,7 @@ const (
 
 // readme is written beside the contract, where a secret scanner or a reader
 // will find cadir/ca_key.pem.
-const readme = `# Puppet CA API contract
-
+const readme = contractHeader + `
 Recorded from OpenVox Server by ` + "`go run ./test/contract/record`" + `; see
 docs/development/testing.md#the-puppet-ca-api-contract. Do not edit anything
 here by hand: re-record instead.
@@ -109,7 +118,7 @@ var (
 )
 
 func main() {
-	out := flag.String("out", "internal/api/testdata/contract", "directory to write the contract into")
+	out := flag.String("out", "internal/api/testdata/contract", "directory to write the contract into; an existing contract there is replaced wholesale")
 	compose := flag.String("compose", composeFile, "compose file pinning the OpenVox Server image to record from")
 	keep := flag.Bool("keep", false, "leave the OpenVox Server container running")
 	flag.Parse()
@@ -134,22 +143,45 @@ func pinnedImage(path string) (string, error) {
 	return "", fmt.Errorf("%s pins no %s image", path, imagePrefix)
 }
 
-// sourceRef names the OpenVox Server source the fixtures cite: the release
-// tag the image was built from, its tag up to the first "-" (8.14.1-main is
-// built from 8.14.1).
-func sourceRef(image string) string {
+// releaseTag is the OpenVox Server release an image was built from: its tag
+// up to the first "-" (8.14.1-main is built from 8.14.1).
+func releaseTag(image string) string {
 	tag, _, _ := strings.Cut(strings.TrimPrefix(image, imagePrefix), "@")
 	tag, _, _ = strings.Cut(tag, "-")
-	return "OpenVoxProject/openvox-server@" + tag
+	return tag
+}
+
+// checkReplaceable refuses an out that exists and is not a contract this
+// recorder wrote, since a successful run replaces it wholesale.
+func checkReplaceable(out string) error {
+	if _, err := os.Lstat(out); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	b, err := os.ReadFile(filepath.Join(out, "README.md"))
+	if err != nil || !strings.HasPrefix(string(b), contractHeader) {
+		return fmt.Errorf("%s exists and is not a recorded contract; the recorder replaces its -out directory wholesale, so name a new or contract directory", out)
+	}
+	return nil
 }
 
 func run(out, compose string, keep bool) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	// Interrupting a recording cancels it rather than killing the process,
+	// so the deferred clean-ups still remove the container and the staging
+	// directory.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()
 
+	if err := checkReplaceable(out); err != nil {
+		return err
+	}
 	image, err := pinnedImage(compose)
 	if err != nil {
 		return err
+	}
+	if tag := releaseTag(image); tag != citedTag {
+		return fmt.Errorf("%s is built from OpenVox Server %s, but the source lines cases() cites were checked against %s: recheck each range against %s, then move citedTag", image, tag, citedTag, tag)
 	}
 	slog.Info("recording from", "image", image)
 
@@ -312,7 +344,7 @@ ruby -e '
 			return fmt.Errorf("%s: %w", c.Name, err)
 		}
 		c.Response = resp
-		c.Recorded = sourceRef(image)
+		c.Recorded = "OpenVoxProject/openvox-server@" + citedTag
 		c.Image = image
 		if err := writeFixture(root, c); err != nil {
 			return err
@@ -389,8 +421,15 @@ type authority struct {
 	roots *x509.CertPool
 }
 
+// loadCA reads the CA the server bootstrapped from a copy of its cadir,
+// through a Root and regular files only, as snapshot does.
 func loadCA(dir string) (*authority, error) {
-	certPEM, err := os.ReadFile(filepath.Join(dir, "ca_crt.pem"))
+	src, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = src.Close() }()
+	certPEM, err := readRegular(src, "ca_crt.pem")
 	if err != nil {
 		return nil, err
 	}
@@ -410,7 +449,7 @@ func loadCA(dir string) (*authority, error) {
 	if len(chain) == 0 {
 		return nil, errors.New("ca_crt.pem holds no certificate")
 	}
-	keyPEM, err := os.ReadFile(filepath.Join(dir, "ca_key.pem"))
+	keyPEM, err := readRegular(src, "ca_key.pem")
 	if err != nil {
 		return nil, err
 	}
@@ -508,6 +547,36 @@ func utf8Ext(oid asn1.ObjectIdentifier, value string) pkix.Extension {
 	return pkix.Extension{Id: oid, Value: v}
 }
 
+// GeneralName tags (RFC 5280 4.2.1.6) for the SANs sanExt writes.
+const (
+	sanEmail = 1
+	sanDNS   = 2
+	sanURI   = 6
+	sanIP    = 7
+)
+
+var oidSubjectAltName = asn1.ObjectIdentifier{2, 5, 29, 17}
+
+// sanEntry is one GeneralName: its tag and its content octets, written
+// exactly as given.
+type sanEntry struct {
+	tag   int
+	value []byte
+}
+
+// sanExt builds a subjectAltName extension holding entries in order.
+func sanExt(entries ...sanEntry) pkix.Extension {
+	names := make([]asn1.RawValue, len(entries))
+	for i, e := range entries {
+		names[i] = asn1.RawValue{Class: asn1.ClassContextSpecific, Tag: e.tag, Bytes: e.value}
+	}
+	v, err := asn1.Marshal(names)
+	if err != nil {
+		panic(err)
+	}
+	return pkix.Extension{Id: oidSubjectAltName, Value: v}
+}
+
 // --- the corner cases --------------------------------------------------------
 
 type fixtureSet struct {
@@ -540,14 +609,32 @@ func newFixtureSet(ca *authority) (*fixtureSet, error) {
 	}); err != nil {
 		return nil, err
 	}
-	// IP SANs of every shape, interleaved with DNS, plus SAN types both
-	// implementations ignore.
+	// IPv4 and IPv6 SANs interleaved with DNS, plus SAN types both
+	// implementations ignore. The extension is built by hand because
+	// crypto/x509 writes its SANs grouped by type.
 	if err := add(&x509.Certificate{
-		Subject:        pkix.Name{CommonName: "corner-ip"},
-		DNSNames:       []string{"corner-ip", "ip.example.com"},
-		IPAddresses:    []net.IP{net.ParseIP("192.0.2.10"), net.ParseIP("2001:db8::1"), net.ParseIP("::ffff:192.0.2.11").To16()},
-		EmailAddresses: []string{"ops@example.com"},
-		URIs:           []*url.URL{{Scheme: "spiffe", Host: "example.com", Path: "/node"}},
+		Subject: pkix.Name{CommonName: "corner-ip"},
+		ExtraExtensions: []pkix.Extension{sanExt(
+			sanEntry{sanDNS, []byte("corner-ip")},
+			sanEntry{sanIP, net.ParseIP("192.0.2.10").To4()},
+			sanEntry{sanDNS, []byte("ip.example.com")},
+			sanEntry{sanIP, net.ParseIP("2001:db8::1")},
+			sanEntry{sanEmail, []byte("ops@example.com")},
+			sanEntry{sanURI, []byte("spiffe://example.com/node")},
+		)},
+	}); err != nil {
+		return nil, err
+	}
+	// An IPv4-mapped IPv6 SAN, 16 bytes on the wire. crypto/x509 would write
+	// it as 4, and refuses to parse it as 16, so openvox-ca cannot read this
+	// certificate at all; it has a subject of its own so that corner-ip still
+	// shows how parseable IP SANs render.
+	if err := add(&x509.Certificate{
+		Subject: pkix.Name{CommonName: "corner-mapped"},
+		ExtraExtensions: []pkix.Extension{sanExt(
+			sanEntry{sanDNS, []byte("corner-mapped")},
+			sanEntry{sanIP, net.ParseIP("::ffff:192.0.2.11").To16()},
+		)},
 	}); err != nil {
 		return nil, err
 	}
@@ -642,9 +729,9 @@ func (fx *fixtureSet) inject(ctx context.Context, container, tmp string) error {
 
 // snapshot writes the server's store as the contract spec loads it: the CA
 // bundle, key and CRL chain, and every certificate and CSR. The container is
-// not trusted on either side: reads go through a Root on the copy and accept
-// regular files only, so a symlink in the container cannot pull in anything
-// from the host, and writes go through out.
+// not trusted on either side: reads go through readRegular, so a symlink in
+// the container cannot pull in anything from the host, and writes go through
+// out.
 func snapshot(ctx context.Context, container, tmp string, out *os.Root) error {
 	raw := filepath.Join(tmp, "snapshot")
 	if err := docker(ctx, "cp", container+":"+cadirPath, raw); err != nil {
@@ -667,14 +754,7 @@ func snapshot(ctx context.Context, container, tmp string, out *os.Root) error {
 		}
 	}
 	for _, name := range names {
-		info, err := src.Lstat(name)
-		if err != nil {
-			return err
-		}
-		if !info.Mode().IsRegular() {
-			return fmt.Errorf("%s in the container's cadir is not a regular file", name)
-		}
-		b, err := src.ReadFile(name)
+		b, err := readRegular(src, name)
 		if err != nil {
 			return err
 		}
@@ -683,6 +763,20 @@ func snapshot(ctx context.Context, container, tmp string, out *os.Root) error {
 		}
 	}
 	return nil
+}
+
+// readRegular reads name from a copy of the container's cadir, refusing
+// anything but a regular file: docker cp carries a symlink over as one, and
+// the container is not trusted to name a host path.
+func readRegular(src *os.Root, name string) ([]byte, error) {
+	info, err := src.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s in the container's cadir is not a regular file", name)
+	}
+	return src.ReadFile(name)
 }
 
 func writeFile(out *os.Root, name string, b []byte) error {
@@ -784,10 +878,14 @@ func writeFixture(out *os.Root, f fixture) error {
 	return writeFile(out, filepath.Join("fixtures", f.Name+".json"), append(b, '\n'))
 }
 
-// cases lists every recorded request, reads before mutations: each mutation
-// works on a subject no other fixture reads, so every response is the answer
-// to the snapshot state. /sign/all, which acts on every pending CSR, is
-// last and bound by type only.
+// cases lists every recorded request, reads before mutations, so that every
+// response is the answer to the snapshot state. That holds because every
+// mutation upstream accepts acts on a subject no other fixture reads. A
+// mutation upstream refuses (signing without a CSR, an unknown state, a CSR
+// over a live certificate, anything aimed at no-such-node) may reuse a read
+// subject, since it leaves the store as it was; keep it refused. /sign/all
+// acts on every pending CSR, read ones and new-csr included, so its answer is
+// to a later state than the snapshot: it is last, and bound by type only.
 func cases() []fixture {
 	const (
 		ovc = "src/clj/puppetlabs/services/ca/certificate_authority_core.clj"
@@ -806,7 +904,8 @@ func cases() []fixture {
 
 	fs := []fixture{
 		{Name: "status-signed-dns", Description: "status of a certificate with mixed-case DNS SANs, auth extensions and a top-bit-set serial", Sources: status, Compare: "exact", Request: get(v1 + "/certificate_status/corner-dns")},
-		{Name: "status-signed-ip", Description: "status of a certificate with IPv4, IPv6 and mapped IP SANs and ignored SAN types", Sources: status, Compare: "exact", Request: get(v1 + "/certificate_status/corner-ip")},
+		{Name: "status-signed-ip", Description: "status of a certificate with IPv4 and IPv6 SANs interleaved with DNS, and ignored SAN types", Sources: status, Compare: "exact", Request: get(v1 + "/certificate_status/corner-ip")},
+		{Name: "status-signed-mapped", Description: "status of a certificate with an IPv4-mapped IPv6 SAN, which Go's x509 refuses to parse", Sources: status, Compare: "exact", Request: get(v1 + "/certificate_status/corner-mapped")},
 		{Name: "status-signed-nosan", Description: "status of a certificate with no SAN extension and a small serial", Sources: status, Compare: "exact", Request: get(v1 + "/certificate_status/corner-nosan")},
 		{Name: "status-signed-ext", Description: "status of a certificate whose auth extensions the implementations key or render differently", Sources: status, Compare: "exact", Request: get(v1 + "/certificate_status/corner-ext")},
 		{Name: "status-revoked", Description: "status of a revoked certificate", Sources: status, Compare: "exact", Request: get(v1 + "/certificate_status/corner-revoked")},
@@ -843,7 +942,7 @@ func cases() []fixture {
 		{Name: "unknown-route", Description: "a path no route serves", Sources: []string{ovc + ":597"}, Compare: "status", Request: get(v1 + "/no-such-route")},
 		{Name: "certificate-renewal-no-client-cert", Description: "auto-renewal with no client certificate", Sources: []string{ovc + ":303-339"}, Compare: "none", Request: request{Method: "POST", Path: v1 + "/certificate_renewal", Client: "anonymous"}},
 
-		// Mutations, each on a subject of its own.
+		// Mutations: each one upstream accepts is on a subject of its own.
 		{Name: "status-put-sign", Description: "signing a pending CSR", Sources: []string{ovc + ":423-542"}, Compare: "none", Request: putJSON(v1+"/certificate_status/sign-me", `{"desired_state":"signed"}`)},
 		{Name: "status-put-revoke", Description: "revoking a signed certificate", Sources: []string{ovc + ":423-542"}, Compare: "none", Request: putJSON(v1+"/certificate_status/revoke-me", `{"desired_state":"revoked"}`)},
 		{Name: "status-put-revoke-unknown", Description: "revoking a subject the CA has never seen", Sources: []string{ovc + ":475-487"}, Compare: "none", Request: putJSON(v1+"/certificate_status/no-such-node", `{"desired_state":"revoked"}`)},

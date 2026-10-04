@@ -1,6 +1,6 @@
 {
   "name": "status-signed-ip",
-  "description": "status of a certificate with IPv4, IPv6 and mapped IP SANs and ignored SAN types",
+  "description": "status of a certificate with IPv4 and IPv6 SANs interleaved with DNS, and ignored SAN types",
   "sources": [
     "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:423-542",
     "src/clj/puppetlabs/puppetserver/certificate_authority.clj:177-200",
@@ -34,20 +34,19 @@
       "subject_alt_names": [
         "IP:192.0.2.10",
         "IP:2001:db8:0:0:0:0:0:1",
-        "IP:192.0.2.11",
         "DNS:corner-ip",
         "DNS:ip.example.com"
       ],
-      "not_before": "2026-10-04T13:19:09UTC",
+      "not_before": "2026-10-04T13:50:04UTC",
       "fingerprints": {
-        "SHA1": "73:5F:31:2E:31:E5:51:A0:D9:B7:00:7D:A2:52:F2:C3:12:E7:D3:62",
-        "SHA256": "A3:48:59:32:F0:FA:1E:E0:30:C4:B7:03:5A:EE:33:2E:8E:FF:62:D2:7F:B3:65:89:2A:9C:F3:D1:D1:74:4C:8B",
-        "SHA512": "F4:7B:4F:7C:60:79:68:E3:C7:7D:0C:CE:2E:EE:8C:E6:3D:5E:A2:72:04:20:71:76:BC:E0:47:0D:0D:E3:0F:5B:B4:BC:88:2F:4C:49:DF:B7:77:C2:A6:31:2D:92:ED:F6:9E:E6:A6:59:4E:C0:00:CB:2A:D2:A6:D3:4B:66:FB:C8",
-        "default": "A3:48:59:32:F0:FA:1E:E0:30:C4:B7:03:5A:EE:33:2E:8E:FF:62:D2:7F:B3:65:89:2A:9C:F3:D1:D1:74:4C:8B"
+        "SHA1": "32:3B:43:93:F3:54:2C:24:5D:4B:C8:83:0E:B8:70:9E:49:DF:A9:2B",
+        "SHA256": "FC:D4:B6:AD:53:BA:EB:C6:FF:D1:2B:EE:9D:FE:94:7E:0F:60:09:61:38:E2:80:0C:7B:B3:10:8F:69:49:13:A5",
+        "SHA512": "FD:C5:AA:DB:70:9E:47:F1:A5:84:43:E6:EE:1B:0F:64:75:3B:62:79:9A:76:3A:E5:4B:48:9E:3E:9F:62:62:09:74:78:76:23:E8:FA:18:B5:3A:7F:15:F1:64:0E:BB:A5:CA:9E:72:6F:71:64:27:A1:7C:9E:95:7A:AC:3F:B4:C3",
+        "default": "FC:D4:B6:AD:53:BA:EB:C6:FF:D1:2B:EE:9D:FE:94:7E:0F:60:09:61:38:E2:80:0C:7B:B3:10:8F:69:49:13:A5"
       },
-      "not_after": "2031-10-04T14:19:09UTC",
-      "serial_number": 123250506377384866387459852423544157659,
-      "fingerprint": "A3:48:59:32:F0:FA:1E:E0:30:C4:B7:03:5A:EE:33:2E:8E:FF:62:D2:7F:B3:65:89:2A:9C:F3:D1:D1:74:4C:8B"
+      "not_after": "2031-10-04T14:50:04UTC",
+      "serial_number": 109265721321722739451146547874209779640,
+      "fingerprint": "FC:D4:B6:AD:53:BA:EB:C6:FF:D1:2B:EE:9D:FE:94:7E:0F:60:09:61:38:E2:80:0C:7B:B3:10:8F:69:49:13:A5"
     }
   }
 }

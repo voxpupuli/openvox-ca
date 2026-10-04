@@ -1,6 +1,6 @@
 {
-  "name": "status-revoked",
-  "description": "status of a revoked certificate",
+  "name": "status-signed-mapped",
+  "description": "status of a certificate with an IPv4-mapped IPv6 SAN, which Go's x509 refuses to parse",
   "sources": [
     "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:423-542",
     "src/clj/puppetlabs/puppetserver/certificate_authority.clj:177-200",
@@ -12,7 +12,7 @@
   "compare": "exact",
   "request": {
     "method": "GET",
-    "path": "/puppet-ca/v1/certificate_status/corner-revoked",
+    "path": "/puppet-ca/v1/certificate_status/corner-mapped",
     "client": "admin"
   },
   "response": {
@@ -24,25 +24,26 @@
       "X-Puppet-Version": "8.27.0"
     },
     "json": {
-      "name": "corner-revoked",
+      "name": "corner-mapped",
       "dns_alt_names": [
-        "DNS:corner-revoked"
+        "DNS:corner-mapped"
       ],
-      "state": "revoked",
+      "state": "signed",
       "authorization_extensions": {},
       "subject_alt_names": [
-        "DNS:corner-revoked"
+        "IP:192.0.2.11",
+        "DNS:corner-mapped"
       ],
       "not_before": "2026-10-04T13:50:04UTC",
       "fingerprints": {
-        "SHA1": "66:70:B9:72:C9:B6:D8:B2:16:3D:1D:64:7D:DF:E2:1D:7C:3F:3C:9D",
-        "SHA256": "05:CD:38:82:5B:84:1B:12:15:AF:9E:10:3E:EF:98:E1:55:35:17:B9:4C:B2:7B:DF:0B:35:43:37:D1:4A:88:50",
-        "SHA512": "22:E1:C1:3D:33:47:5F:3C:73:06:38:4A:C9:4B:87:80:BE:1B:C7:A9:80:27:F6:00:47:49:9F:0D:6D:86:4B:CB:1D:AB:F6:C9:2A:4E:EF:11:F7:D7:6B:92:78:C5:9B:2D:53:B8:2C:F8:88:C4:B7:51:CC:76:9D:3C:F7:BD:21:EB",
-        "default": "05:CD:38:82:5B:84:1B:12:15:AF:9E:10:3E:EF:98:E1:55:35:17:B9:4C:B2:7B:DF:0B:35:43:37:D1:4A:88:50"
+        "SHA1": "64:36:18:BF:BB:4E:F0:E8:97:BD:A5:77:D5:65:E9:D0:F8:96:E8:9B",
+        "SHA256": "A4:09:F7:38:E2:8A:61:56:48:4D:20:CC:AF:52:E8:3F:51:E4:2C:72:93:9C:8D:A0:B8:CA:88:60:35:CA:67:64",
+        "SHA512": "D4:27:DC:F9:DE:86:FA:62:26:9F:B2:16:23:5E:51:09:B2:21:7F:82:A7:45:7E:4B:04:62:CC:00:9B:F2:8F:9D:5D:62:2E:86:14:E6:B4:FA:75:78:84:97:38:C8:7E:51:E0:AF:A7:10:8B:26:56:35:4D:3C:18:4D:1F:F0:3C:89",
+        "default": "A4:09:F7:38:E2:8A:61:56:48:4D:20:CC:AF:52:E8:3F:51:E4:2C:72:93:9C:8D:A0:B8:CA:88:60:35:CA:67:64"
       },
       "not_after": "2031-10-04T14:50:04UTC",
-      "serial_number": 54773482969472593194897779396751030556,
-      "fingerprint": "05:CD:38:82:5B:84:1B:12:15:AF:9E:10:3E:EF:98:E1:55:35:17:B9:4C:B2:7B:DF:0B:35:43:37:D1:4A:88:50"
+      "serial_number": 148921522484759786256982199575090607575,
+      "fingerprint": "A4:09:F7:38:E2:8A:61:56:48:4D:20:CC:AF:52:E8:3F:51:E4:2C:72:93:9C:8D:A0:B8:CA:88:60:35:CA:67:64"
     }
   }
 }

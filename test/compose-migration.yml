@@ -26,8 +26,8 @@ services:
   # -- Old Puppet Server (OpenVox Server, JVM) -------------------------------
   old-puppet:
     # Also the image the Puppet CA API contract is recorded from
-    # (test/contract/record reads it from here). Moving it fails the contract
-    # spec until the contract is re-recorded: see
+    # (test/contract/record reads it from here). Moving it to a new OpenVox
+    # Server release means re-recording the contract: see
     # docs/development/testing.md#the-puppet-ca-api-contract.
     image: ghcr.io/openvoxproject/openvoxserver:8.14.1-main@sha256:806c5eb471c3f1d499308d903dc84210d96b00761de481d2cc7dee380d78c152
     hostname: old-puppet

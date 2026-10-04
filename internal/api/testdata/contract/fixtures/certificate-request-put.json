@@ -11,7 +11,7 @@
     "method": "PUT",
     "path": "/puppet-ca/v1/certificate_request/new-csr",
     "content_type": "text/plain",
-    "body": "-----BEGIN CERTIFICATE REQUEST-----\nMIHLMHQCAQAwEjEQMA4GA1UEAxMHbmV3LWNzcjBZMBMGByqGSM49AgEGCCqGSM49\nAwEHA0IABIhQbd/86qOMc8mINcEthwGGj+kEcDueZS3uib6f52cX5eyJcNZjGPUv\nCbxG8tRBGMn7pUE2NcRacFPyxnfVf22gADAKBggqhkjOPQQDAgNHADBEAiB3FhCz\nS6lonsePbxHPCkJYbBWSLp704ZFM8ih3mTI5IAIgY8nn8qbMFNFeBQAXETnG8pOr\n+uhsw44WJOpfe+S+Cio=\n-----END CERTIFICATE REQUEST-----\n",
+    "body": "-----BEGIN CERTIFICATE REQUEST-----\nMIHMMHQCAQAwEjEQMA4GA1UEAxMHbmV3LWNzcjBZMBMGByqGSM49AgEGCCqGSM49\nAwEHA0IABBFKg2qkhMUOHTljhWU/oQF8nqcjWAEeO+e3tIDj/0ygB11DyibecL6i\nI/12smSFxWs9Ah7OVMjKlQz4QCS2mUKgADAKBggqhkjOPQQDAgNIADBFAiEA4hDp\nzbhr+2KLvlbOShs8iVSE8XhP6Bd++Sh5EJ2ofngCIEO3FawAZsyzZLt2QgFeVe0n\nRT+YOKiM9+ju3IdgI9kG\n-----END CERTIFICATE REQUEST-----\n",
     "client": "admin"
   },
   "response": {

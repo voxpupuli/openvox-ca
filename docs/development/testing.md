@@ -384,9 +384,13 @@ OpenVox Server source it came from, and how much of the response is binding:
 
 `cadir/` is the store that server held when it answered, its CA bundle, key,
 CRL chain, certificates and CSRs, and each spec loads it into a fresh
-openvox-ca, so values derived from a certificate can be compared exactly. Every
-mutation in the set acts on a subject no other fixture reads, which is what
-lets each spec start from that one snapshot. The CA key is a throwaway,
+openvox-ca, so values derived from a certificate can be compared exactly.
+Each spec can start from that one snapshot because every mutation OpenVox
+Server accepts acts on a subject no other fixture reads. A mutation it refuses
+may reuse a read subject, since it leaves the store as it was, so keep such a
+request refused. The one exception is `/sign/all`, which signs every pending
+CSR, read ones included: it is recorded last and bound by type only, because
+its answer is to a later state than the snapshot. The CA key is a throwaway,
 generated inside a disposable container for the recording and committed so the
 specs can sign with it; nothing should trust it.
 
@@ -412,17 +416,23 @@ go run ./test/contract/record
 It needs Docker and network access. It starts the OpenVox Server image that
 `test/compose-migration.yml` pins, signs the corner-case certificates with the
 CA that server bootstraps, records every fixture, and replaces
-`testdata/contract/` only once the whole recording has succeeded. The CA is
-new on every run, so every fixture and certificate changes. Review the diff for
-changed shapes rather than values, and expect exceptions to need their
-`$[name=…]` paths revisited only when a fixture is added or renamed.
+`testdata/contract/` only once the whole recording has succeeded; an
+interrupted run removes its container and its partial recording. It replaces
+its `-out` directory wholesale, so it refuses one that exists and holds no
+contract. The CA is new on every run, so every fixture and certificate
+changes. Review the diff for changed shapes rather than values, and expect
+exceptions to need their `$[name=…]` paths revisited only when a fixture is
+added or renamed.
 
-Two specs force a re-record rather than leaving it to memory:
+Re-record when the pin moves to a new OpenVox Server release. Nothing in CI
+forces it: a fixture records the image it came from as provenance only, so a
+Renovate bump, digest or tag, never fails the suite on its own. The fixtures
+cite the upstream source lines behind each response, checked against one
+release, `citedTag` in the recorder, which refuses an image built from any
+other. Moving to a new release therefore means rechecking each line range in
+`cases()` against its tag, then moving `citedTag`, then re-recording.
 
-- every fixture must name the image `test/compose-migration.yml` pins, so
-  moving that pin (Renovate does) fails the suite until the contract is
-  re-recorded from the new image;
-- every certificate and CRL in `cadir/` must stay valid for another 180 days.
-  The recording's CA and certificates last five years, so this fires about
-  four and a half years after the last recording, while their status is still
-  what the fixtures say.
+One spec does force a re-record: every certificate and CRL in `cadir/` must
+stay valid for another 180 days. The recording's CA and certificates last five
+years, so this fires about four and a half years after the last recording,
+while their status is still what the fixtures say.

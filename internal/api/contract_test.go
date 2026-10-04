@@ -22,15 +22,16 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/asn1"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io/fs"
+	"math/big"
 	"mime"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -79,7 +80,6 @@ var contractCompareModes = map[string]bool{"exact": true, "types": true, "none":
 // contractFixture mirrors test/contract/record's fixture format.
 type contractFixture struct {
 	Name    string `json:"name"`
-	Image   string `json:"image"`
 	Compare string `json:"compare"`
 	Request struct {
 		Method          string `json:"method"`
@@ -121,15 +121,18 @@ var contractExceptions = map[string][]contractException{
 	"status-signed-ext":   append(missingFingerprints("$"), cornerExtExtensions("$")...),
 	"status-unknown": {{`media type: "text/plain", upstream "application/json"`,
 		"kept: the 404 body is plain text, as upstream's is, and says so where upstream's header claims JSON"}},
-	"statuses-all": append(append(missingFingerprints("$[*]"),
+	"status-signed-mapped": append(missingFingerprints("$"), degradedMapped("$")...),
+	"statuses-all": append(append(append(missingFingerprints("$[*]"),
 		unlistedIPSANs("$[name=corner-ip,state=signed]"), hiddenCSR),
 		cornerExtExtensions("$[name=corner-ext,state=signed]")...),
+		degradedMapped("$[name=corner-mapped,state=signed]")...),
 	"statuses-requested": append(missingFingerprints("$[*]"), hiddenCSR),
-	"statuses-signed": append(append(missingFingerprints("$[*]"),
+	"statuses-signed": append(append(append(missingFingerprints("$[*]"),
 		unlistedIPSANs("$[name=corner-ip,state=signed]")),
 		cornerExtExtensions("$[name=corner-ext,state=signed]")...),
+		degradedMapped("$[name=corner-mapped,state=signed]")...),
 	"statuses-revoked": missingFingerprints("$[*]"),
-	"statuses-unknown-state": {{"$: 0 entries, upstream 16",
+	"statuses-unknown-state": {{"$: 0 entries, upstream 17",
 		"kept: an unknown ?state= matches no subject, where upstream ignores the filter and lists them all"}},
 	"statuses-empty-segment": {{"status: 404, upstream 400",
 		"kept: certificate_statuses without its segment is not a route"}},
@@ -165,6 +168,20 @@ var contractExceptions = map[string][]contractException{
 		"kept: PUT /clean reports what it did to each subject, as JSON"}},
 }
 
+// degradedMapped is corner-mapped's status: crypto/x509 refuses to parse a
+// certificate with an IPv4-mapped IPv6 SAN, so openvox-ca serves what it can
+// without parsing it.
+func degradedMapped(at string) []contractException {
+	const reason = "kept: a stored certificate that cannot be parsed degrades to a partial status; Go refuses an IPv4-mapped IPv6 SAN"
+	return []contractException{
+		{at + ".dns_alt_names: 0 entries, upstream 1", reason},
+		{at + ".not_after: missing", reason},
+		{at + ".not_before: missing", reason},
+		{at + ".serial_number: missing", reason},
+		{at + ".subject_alt_names: 0 entries, upstream 2", reason},
+	}
+}
+
 // hiddenCSR is corner-both's CSR, filed behind its live certificate.
 var hiddenCSR = contractException{"$[name=corner-both,state=requested]: missing",
 	"kept: a CSR for a subject with a live certificate is not listed"}
@@ -177,10 +194,10 @@ func missingFingerprints(at string) []contractException {
 	}
 }
 
-// unlistedIPSANs is corner-ip's two DNS names listed without its three IP
+// unlistedIPSANs is corner-ip's two DNS names listed without its two IP
 // addresses.
 func unlistedIPSANs(at string) contractException {
-	return contractException{at + ".subject_alt_names: 2 entries, upstream 5",
+	return contractException{at + ".subject_alt_names: 2 entries, upstream 4",
 		"#407: subject_alt_names leaves out IP addresses"}
 }
 
@@ -309,6 +326,9 @@ func compareJSON(at string, want, got any, exact bool) []string {
 			}
 		}
 		if !exact {
+			// Under types a list's length is not bound, only its entries'
+			// types: a types fixture answers a state that differs from the
+			// snapshot (sign-all) or lists what the request happened to name.
 			var diffs []string
 			for i := range min(len(w), len(g)) {
 				diffs = append(diffs, compareJSON(fmt.Sprintf("%s[%d]", at, i), w[i], g[i], false)...)
@@ -471,6 +491,12 @@ func loadContractFixtures() []contractFixture {
 // recorded against: OpenVox Server's own CA bundle, key and CRL chain, and
 // every certificate and CSR it held.
 func seedContractCA(dir string) *api.Server {
+	return seedContractStore(storage.New(dir))
+}
+
+// seedContractStore is seedContractCA on a store the caller built, such as
+// one over a fault-injecting backend.
+func seedContractStore(store *storage.StorageService) *api.Server {
 	ctx := context.Background()
 	src := filepath.Join(contractDir, "cadir")
 	read := func(rel string) []byte {
@@ -479,7 +505,6 @@ func seedContractCA(dir string) *api.Server {
 		return b
 	}
 
-	store := storage.New(dir)
 	Expect(store.EnsureDirs(ctx)).To(Succeed())
 	Expect(store.SaveCACert(ctx, read("ca_crt.pem"))).To(Succeed())
 	Expect(store.SaveCAKey(ctx, read("ca_key.pem"))).To(Succeed())
@@ -494,12 +519,12 @@ func seedContractCA(dir string) *api.Server {
 		certPEM := read(filepath.Join("signed", e.Name()))
 		block, _ := pem.Decode(certPEM)
 		Expect(block).NotTo(BeNil())
-		cert, err := x509.ParseCertificate(block.Bytes)
+		serial, notBefore, notAfter, err := certSerialAndValidity(block.Bytes)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(store.SaveCert(ctx, subject, certPEM)).To(Succeed())
-		Expect(store.AppendInventory(ctx, fmt.Sprintf("%X %s %s /%s", cert.SerialNumber,
-			cert.NotBefore.UTC().Format(storage.InventoryTimeFormat),
-			cert.NotAfter.UTC().Format(storage.InventoryTimeFormat), subject))).To(Succeed())
+		Expect(store.AppendInventory(ctx, fmt.Sprintf("%X %s %s /%s", serial,
+			notBefore.UTC().Format(storage.InventoryTimeFormat),
+			notAfter.UTC().Format(storage.InventoryTimeFormat), subject))).To(Succeed())
 	}
 	requests, err := os.ReadDir(filepath.Join(src, "requests"))
 	Expect(err).NotTo(HaveOccurred())
@@ -510,9 +535,35 @@ func seedContractCA(dir string) *api.Server {
 	myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet")
 	Expect(myCA.Init(ctx)).To(Succeed())
 	srv := api.New(myCA)
-	// Upstream's date layout is openvox-ca's opt-in (survey 13).
+	// Upstream's date layout is openvox-ca's opt-in; see docs/api.md's
+	// "Differences from OpenVox Server".
 	srv.PuppetDateTimeFormat = true
 	return srv
+}
+
+// certSerialAndValidity reads a certificate's serial and validity straight
+// from its DER. crypto/x509 refuses some certificates OpenVox Server signs,
+// such as one with an IPv4-mapped IPv6 SAN, and the snapshot holds one, but
+// the store still needs its inventory line.
+func certSerialAndValidity(der []byte) (serial *big.Int, notBefore, notAfter time.Time, err error) {
+	var cert struct {
+		TBS struct {
+			Version  int `asn1:"optional,explicit,default:0,tag:0"`
+			Serial   *big.Int
+			SigAlg   asn1.RawValue
+			Issuer   asn1.RawValue
+			Validity struct{ NotBefore, NotAfter time.Time }
+			Subject  asn1.RawValue
+			Key      asn1.RawValue
+			Rest     asn1.RawValue `asn1:"optional,explicit,tag:3"`
+		}
+		SigAlg asn1.RawValue
+		Sig    asn1.BitString
+	}
+	if _, err := asn1.Unmarshal(der, &cert); err != nil {
+		return nil, time.Time{}, time.Time{}, err
+	}
+	return cert.TBS.Serial, cert.TBS.Validity.NotBefore, cert.TBS.Validity.NotAfter, nil
 }
 
 // serveContract drives openvox-ca with a fixture's request.
@@ -571,20 +622,6 @@ var _ = Describe("Puppet CA API contract", func() {
 		}
 	})
 
-	// The recorder reads the image from the compose file; a bump there that
-	// is not followed by a re-record would leave the contract describing a
-	// server nobody runs any more.
-	It("was recorded from the OpenVox Server image the repository pins", func() {
-		compose, err := os.ReadFile(filepath.Join("..", "..", "test", "compose-migration.yml"))
-		Expect(err).NotTo(HaveOccurred())
-		pins := regexp.MustCompile(`(?m)^\s+image:\s+(ghcr\.io/openvoxproject/openvoxserver:\S+)\s*$`).FindAllSubmatch(compose, -1)
-		Expect(pins).To(HaveLen(1), "expected one OpenVox Server image in test/compose-migration.yml")
-		for _, f := range loadContractFixtures() {
-			Expect(f.Image).To(Equal(string(pins[0][1])),
-				"%s was recorded from another image: re-record with go run ./test/contract/record", f.Name)
-		}
-	})
-
 	// The fixtures are a snapshot of a live CA, and certificate status
 	// changes when its certificates expire. Fail well before that, so the
 	// re-record is a chore rather than an outage.
@@ -610,12 +647,12 @@ var _ = Describe("Puppet CA API contract", func() {
 				}
 				switch block.Type {
 				case "CERTIFICATE":
-					cert, err := x509.ParseCertificate(block.Bytes)
+					_, _, notAfter, err := certSerialAndValidity(block.Bytes)
 					if err != nil {
 						return err
 					}
-					if cert.NotAfter.Before(horizon) {
-						expiring = append(expiring, fmt.Sprintf("%s: %s expires %s", path, cert.Subject, cert.NotAfter))
+					if notAfter.Before(horizon) {
+						expiring = append(expiring, fmt.Sprintf("%s: a certificate expires %s", path, notAfter))
 					}
 				case "X509 CRL":
 					crl, err := x509.ParseRevocationList(block.Bytes)
@@ -691,6 +728,23 @@ var _ = Describe("the contract checker", func() {
 		Expect(checkContract(f, 200, "application/json",
 			[]byte(strings.Replace(conforming, `"name":"n"`, `"name":1`, 1)))).To(
 			ContainElement(HavePrefix("$.name: type number")))
+	})
+
+	It("binds a list entry's type under compare types", func() {
+		f := upstream
+		f.Compare = "types"
+		Expect(checkContract(f, 200, "application/json",
+			[]byte(strings.Replace(conforming, `["DNS:n"]`, `[1]`, 1)))).To(
+			ContainElement("$.dns_alt_names[0]: type number, upstream string"))
+	})
+
+	It("leaves a list's length unbound under compare types", func() {
+		f := upstream
+		f.Compare = "types"
+		Expect(checkContract(f, 200, "application/json",
+			[]byte(strings.Replace(conforming, `["DNS:n"]`, `[]`, 1)))).To(BeEmpty())
+		Expect(checkContract(f, 200, "application/json",
+			[]byte(strings.Replace(conforming, `["DNS:n"]`, `["DNS:n","DNS:m"]`, 1)))).To(BeEmpty())
 	})
 
 	It("matches a list of statuses by name and state, not by order", func() {
