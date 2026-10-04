@@ -177,15 +177,29 @@ var _ = Describe("Certificate statuses via the certificate index", func() {
 			HaveKeyWithValue("idx-serial", cert.SerialNumber.String()))
 	})
 
-	It("encodes an indexed serial as colon-separated hex when the server opts in", func() {
-		submitAndSign("idx-hex", generateCSRWithSANs("idx-hex", []string{"idx-hex"}))
-		cert := storedCert(ctx, store, "idx-hex")
+	// Each of the index path's three ways of building a status carries the
+	// format separately, so each needs its own entry.
+	DescribeTable("encodes the serial as colon-separated hex when the server opts in",
+		func(damage func(subject string)) {
+			submitAndSign("idx-hex", generateCSRWithSANs("idx-hex", []string{"idx-hex"}))
+			damage("idx-hex")
+			cert := storedCert(ctx, store, "idx-hex")
 
-		srv := api.New(myCA)
-		srv.SerialNumberFormat = api.SerialNumberAsHex
-		Expect(rawStatusSerials(srv.Routes(), "/certificate_statuses/any")).To(
-			HaveKeyWithValue("idx-hex", `"`+wantColonHex(cert.SerialNumber)+`"`))
-	})
+			srv := api.New(myCA)
+			srv.SerialNumberFormat = api.SerialNumberAsHex
+			Expect(rawStatusSerials(srv.Routes(), "/certificate_statuses/any")).To(
+				HaveKeyWithValue("idx-hex", `"`+wantColonHex(cert.SerialNumber)+`"`))
+		},
+		Entry("from the index row", func(string) {}),
+		Entry("from the stored PEM, for a projection-less row", func(subject string) {
+			Expect(store.AppendInventory(ctx,
+				"0FFF 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /"+subject)).To(Succeed())
+		}),
+		Entry("from the stored PEM, for a certificate with no row at all", func(string) {
+			_, err := store.PruneInventory(ctx, func(storage.InventoryEntry) bool { return false })
+			Expect(err).NotTo(HaveOccurred())
+		}),
+	)
 
 	It("partitions signed, revoked, and requested across the state filters", func() {
 		submitAndSign("idx-signed", generateCSRWithSANs("idx-signed", []string{"idx-signed"}))
