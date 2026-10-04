@@ -320,9 +320,15 @@ func compareJSON(at string, want, got any, exact bool) []string {
 		return diffs
 	case []any:
 		g := got.([]any)
-		if keyed, ok := keyByNameState(w); ok {
-			if gk, ok := keyByNameState(g); ok {
-				return compareKeyed(at, keyed, gk, exact)
+		if keyed, _, ok := keyByNameState(w); ok {
+			if gk, repeated, ok := keyByNameState(g); ok {
+				// Keying by name and state would hide an entry listed twice,
+				// which is never a right answer, so say so.
+				diffs := compareKeyed(at, keyed, gk, exact)
+				for _, k := range repeated {
+					diffs = append(diffs, fmt.Sprintf("%s[%s]: listed more than once", at, k))
+				}
+				return diffs
 			}
 		}
 		if !exact {
@@ -353,25 +359,30 @@ func compareJSON(at string, want, got any, exact bool) []string {
 
 // keyByNameState indexes a certificate_statuses-style list by name and state,
 // the pair that identifies an entry: upstream lists a subject twice when it
-// holds both a certificate and a CSR.
-func keyByNameState(list []any) (map[string]any, bool) {
+// holds both a certificate and a CSR. repeated lists the keys that appear more
+// than once, in order.
+func keyByNameState(list []any) (keyed map[string]any, repeated []string, ok bool) {
 	if len(list) == 0 {
-		return nil, false
+		return nil, nil, false
 	}
-	out := map[string]any{}
+	keyed = map[string]any{}
 	for _, e := range list {
 		m, ok := e.(map[string]any)
 		if !ok {
-			return nil, false
+			return nil, nil, false
 		}
 		name, ok1 := m["name"].(string)
 		state, ok2 := m["state"].(string)
 		if !ok1 || !ok2 {
-			return nil, false
+			return nil, nil, false
 		}
-		out[fmt.Sprintf("name=%s,state=%s", name, state)] = m
+		k := fmt.Sprintf("name=%s,state=%s", name, state)
+		if _, seen := keyed[k]; seen {
+			repeated = append(repeated, k)
+		}
+		keyed[k] = m
 	}
-	return out, true
+	return keyed, repeated, true
 }
 
 func compareKeyed(at string, want, got map[string]any, exact bool) []string {
@@ -755,6 +766,22 @@ var _ = Describe("the contract checker", func() {
 		Expect(checkContract(f, 200, "application/json",
 			[]byte(`[{"name":"b","state":"signed"},{"name":"a","state":"signed"}]`))).To(
 			ConsistOf("$[name=a,state=requested]: missing"))
+	})
+
+	It("reports a status upstream does not list", func() {
+		f := contractFixture{Compare: "exact", Response: contractResponse{Status: 200, ContentType: "application/json",
+			JSON: json.RawMessage(`[{"name":"a","state":"signed"}]`)}}
+		Expect(checkContract(f, 200, "application/json",
+			[]byte(`[{"name":"a","state":"signed"},{"name":"c","state":"signed"}]`))).To(
+			ConsistOf("$[name=c,state=signed]: not in upstream"))
+	})
+
+	It("reports a status listed twice, which keying by name and state would hide", func() {
+		f := contractFixture{Compare: "exact", Response: contractResponse{Status: 200, ContentType: "application/json",
+			JSON: json.RawMessage(`[{"name":"a","state":"signed"},{"name":"b","state":"signed"}]`)}}
+		Expect(checkContract(f, 200, "application/json",
+			[]byte(`[{"name":"a","state":"signed"},{"name":"b","state":"signed"},{"name":"a","state":"signed"}]`))).To(
+			ConsistOf("$[name=a,state=signed]: listed more than once"))
 	})
 
 	It("ignores the media type of an empty upstream body", func() {
