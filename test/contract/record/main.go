@@ -440,7 +440,16 @@ func waitReady(ctx context.Context, container, addr string) error {
 				return nil
 			}
 		}
-		if state, err := dockerOutput(ctx, "inspect", "-f", "{{.State.Running}}", container); err != nil || strings.TrimSpace(state) != "true" {
+		// A timeout or an interrupt cancels ctx, which fails the probe and the
+		// inspect alike; report that, rather than a container that stopped.
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("OpenVox Server did not become ready: %w", err)
+		}
+		state, err := dockerOutput(ctx, "inspect", "-f", "{{.State.Running}}", container)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("OpenVox Server did not become ready: %w", ctxErr)
+		}
+		if err != nil || strings.TrimSpace(state) != "true" {
 			return fmt.Errorf("OpenVox Server container stopped before it was ready; see docker logs %s (run with -keep to keep it)", container)
 		}
 		select {
@@ -501,13 +510,17 @@ func loadCA(dir string) (*authority, error) {
 			return nil, fmt.Errorf("parsing ca_key.pem: %w", err)
 		}
 	}
+	signer, ok := key.(crypto.Signer)
+	if !ok {
+		return nil, fmt.Errorf("ca_key.pem holds a %T, which cannot sign", key)
+	}
 	// The whole bundle is trusted, because the server presents its leaf
 	// without the intermediate that issued it.
 	roots := x509.NewCertPool()
 	for _, c := range chain {
 		roots.AddCert(c)
 	}
-	return &authority{chain: chain, key: key.(crypto.Signer), roots: roots}, nil
+	return &authority{chain: chain, key: signer, roots: roots}, nil
 }
 
 // issued is a certificate (or CSR) this recorder made, with its key.
@@ -780,7 +793,12 @@ func snapshot(ctx context.Context, container, tmp string, out *os.Root) error {
 		return err
 	}
 	defer func() { _ = src.Close() }()
+	return copyCadir(src, out)
+}
 
+// copyCadir copies the store's files from src, a copy of the container's
+// cadir, into out's cadir/, through readRegular.
+func copyCadir(src, out *os.Root) error {
 	names := []string{"ca_crt.pem", "ca_key.pem", "ca_crl.pem"}
 	for _, dir := range []string{"signed", "requests"} {
 		entries, err := fs.ReadDir(src.FS(), dir)
@@ -963,6 +981,8 @@ func cases() []fixture {
 		{Name: "certificate-request-get", Description: "a pending CSR", Sources: []string{ovc + ":82-88"}, Compare: "exact", Request: get(v1 + "/certificate_request/corner-pending")},
 		{Name: "certificate-request-get-unknown", Description: "a CSR the CA does not hold", Sources: []string{ovc + ":82-88"}, Compare: "none", Request: get(v1 + "/certificate_request/no-such-node")},
 		{Name: "crl-get", Description: "the CRL", Sources: []string{ovc + ":104-132"}, Compare: "exact", Request: get(v1 + "/certificate_revocation_list/ca")},
+		{Name: "crl-get-not-modified", Description: "the CRL, not modified since an If-Modified-Since HTTP date", Sources: []string{ovc + ":42-66", ovc + ":104-132"}, Compare: "none",
+			Request: request{Method: "GET", Path: v1 + "/certificate_revocation_list/ca", IfModifiedSince: farFuture, Client: "admin"}},
 		{Name: "expirations", Description: "expiry dates of the CA certificates and CRLs", Sources: []string{ovc + ":166-172", ova + ":2288-2318"}, Compare: "exact", Request: get(v1 + "/expirations")},
 
 		// Requests that change nothing upstream, chosen for the differences
@@ -987,6 +1007,10 @@ func cases() []fixture {
 		{Name: "status-put-revoke-unknown", Description: "revoking a subject the CA has never seen", Sources: []string{ovc + ":475-487"}, Compare: "none", Request: putJSON(v1+"/certificate_status/no-such-node", `{"desired_state":"revoked"}`)},
 		{Name: "status-put-sign-without-csr", Description: "signing a subject that holds a certificate but no CSR", Sources: []string{ovc + ":440-444"}, Compare: "none", Request: putJSON(v1+"/certificate_status/corner-nosan", `{"desired_state":"signed"}`)},
 		{Name: "status-put-bad-state", Description: "an unknown desired_state", Sources: []string{ovc + ":494-514"}, Compare: "none", Request: putJSON(v1+"/certificate_status/corner-pending", `{"desired_state":"bogus"}`)},
+		// corner-pending's CSR asks for DNS SANs, which neither CA signs by
+		// default: two refusals, so the subject stays pending for the rest.
+		{Name: "status-put-sign-refused", Description: "signing a CSR the CA refuses, for its subject alternative names", Sources: []string{ovc + ":423-542"}, Compare: "none", Request: putJSON(v1+"/certificate_status/corner-pending", `{"desired_state":"signed"}`)},
+		{Name: "sign-refused", Description: "signing named CSRs the CA refuses, for their subject alternative names", Sources: []string{ovc + ":275-291", ova + ":2485-2527"}, Compare: "exact", Request: postJSON(v1+"/sign", `{"certnames":["corner-pending"]}`)},
 		{Name: "status-delete", Description: "deleting a signed certificate", Sources: []string{ovc + ":450-465", ova + ":2252-2260"}, Compare: "none", Request: request{Method: "DELETE", Path: v1 + "/certificate_status/delete-me", Client: "admin"}},
 		// The two CSR submissions' bodies are generated: see run.
 		{Name: "certificate-request-put", Description: "submitting a new CSR", Sources: []string{ovc + ":90-102"}, Compare: "none", Request: request{Method: "PUT", Path: v1 + "/certificate_request/new-csr", ContentType: "text/plain", Client: "admin"}},

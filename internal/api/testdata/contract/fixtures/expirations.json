@@ -23,12 +23,12 @@
     },
     "json": {
       "ca-certs": {
-        "Puppet CA generated on puppet at 2026-10-04 14:49:54 +0000": "2031-10-03T14:49:55UTC",
-        "Puppet Root CA: 553e11abd9b64d": "2031-10-03T14:49:54UTC"
+        "Puppet CA generated on puppet at 2026-10-04 15:39:51 +0000": "2031-10-03T15:39:52UTC",
+        "Puppet Root CA: 926c3eb280050a": "2031-10-03T15:39:52UTC"
       },
       "crls": {
-        "Puppet CA generated on puppet at 2026-10-04 14:49:54 +0000": "2031-10-03T14:50:04UTC",
-        "Puppet Root CA: 553e11abd9b64d": "2031-10-03T14:49:54UTC"
+        "Puppet CA generated on puppet at 2026-10-04 15:39:51 +0000": "2031-10-03T15:40:01UTC",
+        "Puppet Root CA: 926c3eb280050a": "2031-10-03T15:39:52UTC"
       }
     }
   }

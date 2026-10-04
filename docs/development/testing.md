@@ -407,7 +407,10 @@ both in the same commit.
 Never hand-edit anything under `testdata/contract/`. A fixture is a record of
 what OpenVox Server said, and an edited one is a claim about OpenVox Server
 that nobody observed; the next re-record discards it anyway. Change the
-recorder instead.
+recorder instead. The recorder's own suite (`test/contract/record`, run by
+`mage test:unit`) fails when the fixtures stop matching its `cases()`: an
+edited compare mode or request, a case that was never recorded, or a fixture
+no case produces.
 
 ### Re-recording
 

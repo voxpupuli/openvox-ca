@@ -18,16 +18,266 @@
 package main
 
 import (
+	"context"
+	"crypto/ecdh"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"math/big"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
 // The recorder needs Docker to run, so CI never does; these specs pin the
-// refusals that keep a hand-run recording from damaging anything, which need
-// no container.
+// refusals that keep a hand-run recording from damaging anything, and the
+// rules that shape every fixture, none of which need a container.
+
+// contractFixtures is the committed contract, relative to this package.
+const contractFixtures = "../../../internal/api/testdata/contract/fixtures"
+
+// generatedBodies are the cases whose request body run fills in, a CSR made
+// fresh for each recording.
+var generatedBodies = map[string]bool{"certificate-request-put": true, "certificate-request-put-existing-cert": true}
+
+// fixtureDrift reports every way the fixtures in dir differ from cases():
+// a fixture no case records, a case with no fixture, and a fixture whose
+// request or compare mode is not its case's. A difference means the contract
+// was edited by hand or not re-recorded after cases() changed.
+func fixtureDrift(dir string) []string {
+	var drift []string
+	want := map[string]fixture{}
+	for _, c := range cases() {
+		want[c.Name] = c
+	}
+	paths, err := filepath.Glob(filepath.Join(dir, "*.json"))
+	Expect(err).NotTo(HaveOccurred())
+	seen := map[string]bool{}
+	for _, p := range paths {
+		b, err := os.ReadFile(p)
+		Expect(err).NotTo(HaveOccurred())
+		var got fixture
+		Expect(json.Unmarshal(b, &got)).To(Succeed(), p)
+		seen[got.Name] = true
+		c, ok := want[got.Name]
+		if !ok {
+			drift = append(drift, got.Name+": no case records it")
+			continue
+		}
+		if got.Compare != c.Compare {
+			drift = append(drift, fmt.Sprintf("%s: compare %q, case %q", got.Name, got.Compare, c.Compare))
+		}
+		if got.Description != c.Description || !reflect.DeepEqual(got.Sources, c.Sources) {
+			drift = append(drift, got.Name+": description or sources differ from the case")
+		}
+		gr, cr := got.Request, c.Request
+		if generatedBodies[c.Name] {
+			gr.Body, cr.Body = "", ""
+		}
+		if gr != cr {
+			drift = append(drift, fmt.Sprintf("%s: request %+v, case %+v", got.Name, gr, cr))
+		}
+	}
+	for name := range want {
+		if !seen[name] {
+			drift = append(drift, name+": not recorded")
+		}
+	}
+	sort.Strings(drift)
+	return drift
+}
+
+var _ = Describe("the committed contract", func() {
+	It("is what cases() records, untouched by hand", func() {
+		Expect(fixtureDrift(contractFixtures)).To(BeEmpty(), "re-record: go run ./test/contract/record")
+	})
+
+	It("is reported when a fixture's compare mode is edited", func() {
+		dir := GinkgoT().TempDir()
+		paths, err := filepath.Glob(filepath.Join(contractFixtures, "*.json"))
+		Expect(err).NotTo(HaveOccurred())
+		for _, p := range paths {
+			b, err := os.ReadFile(p)
+			Expect(err).NotTo(HaveOccurred())
+			if filepath.Base(p) == "status-signed-dns.json" {
+				var f map[string]any
+				Expect(json.Unmarshal(b, &f)).To(Succeed())
+				f["compare"] = "none"
+				b, err = json.Marshal(f)
+				Expect(err).NotTo(HaveOccurred())
+			}
+			Expect(os.WriteFile(filepath.Join(dir, filepath.Base(p)), b, 0o600)).To(Succeed())
+		}
+		Expect(os.Remove(filepath.Join(dir, "crl-get.json"))).To(Succeed())
+		Expect(fixtureDrift(dir)).To(ConsistOf(
+			`status-signed-dns: compare "none", case "exact"`,
+			"crl-get: not recorded",
+		))
+	})
+})
+
+var _ = Describe("loadCA", func() {
+	var dir string
+
+	// writeCA writes a self-signed CA and its key, as keyPEM renders it.
+	writeCA := func(keyPEM func(*rsa.PrivateKey) []byte) {
+		key, err := rsa.GenerateKey(rand.Reader, 2048)
+		Expect(err).NotTo(HaveOccurred())
+		tmpl := &x509.Certificate{
+			SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "Test CA"},
+			NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+			IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign,
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(os.WriteFile(filepath.Join(dir, "ca_crt.pem"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600)).To(Succeed())
+		if keyPEM != nil {
+			Expect(os.WriteFile(filepath.Join(dir, "ca_key.pem"), keyPEM(key), 0o600)).To(Succeed())
+		}
+	}
+	pkcs1 := func(k *rsa.PrivateKey) []byte {
+		return pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(k)})
+	}
+
+	BeforeEach(func() {
+		dir = GinkgoT().TempDir()
+	})
+
+	It("loads an RSA CA whose key is PKCS#1, as OpenVox Server writes it", func() {
+		writeCA(pkcs1)
+		a, err := loadCA(dir)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(a.chain).To(HaveLen(1))
+		Expect(a.chain[0].Subject.CommonName).To(Equal("Test CA"))
+	})
+
+	It("refuses a key that is a symlink, which could name a host file", func() {
+		writeCA(nil)
+		host := filepath.Join(GinkgoT().TempDir(), "key.pem")
+		Expect(os.WriteFile(host, []byte("key"), 0o600)).To(Succeed())
+		Expect(os.Symlink(host, filepath.Join(dir, "ca_key.pem"))).To(Succeed())
+		_, err := loadCA(dir)
+		Expect(err).To(MatchError(ContainSubstring("not a regular file")))
+	})
+
+	It("refuses a bundle with no certificate", func() {
+		writeCA(pkcs1)
+		Expect(os.WriteFile(filepath.Join(dir, "ca_crt.pem"), nil, 0o600)).To(Succeed())
+		_, err := loadCA(dir)
+		Expect(err).To(MatchError(ContainSubstring("holds no certificate")))
+	})
+
+	It("refuses a key that cannot sign, rather than panicking", func() {
+		writeCA(func(*rsa.PrivateKey) []byte {
+			k, err := ecdh.X25519().GenerateKey(rand.Reader)
+			Expect(err).NotTo(HaveOccurred())
+			der, err := x509.MarshalPKCS8PrivateKey(k)
+			Expect(err).NotTo(HaveOccurred())
+			return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+		})
+		_, err := loadCA(dir)
+		Expect(err).To(MatchError(ContainSubstring("cannot sign")))
+	})
+})
+
+var _ = Describe("copyCadir", func() {
+	var src, out *os.Root
+	var srcDir, outDir string
+
+	BeforeEach(func() {
+		srcDir, outDir = GinkgoT().TempDir(), GinkgoT().TempDir()
+		for _, name := range []string{"ca_crt.pem", "ca_key.pem", "ca_crl.pem", "signed/a.pem", "requests/b.pem"} {
+			Expect(os.MkdirAll(filepath.Dir(filepath.Join(srcDir, name)), 0o750)).To(Succeed())
+			Expect(os.WriteFile(filepath.Join(srcDir, name), []byte(name), 0o600)).To(Succeed())
+		}
+		var err error
+		src, err = os.OpenRoot(srcDir)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(src.Close)
+		out, err = os.OpenRoot(outDir)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(out.Close)
+	})
+
+	It("copies the store's files into cadir/", func() {
+		Expect(copyCadir(src, out)).To(Succeed())
+		Expect(os.ReadFile(filepath.Join(outDir, "cadir", "signed", "a.pem"))).To(Equal([]byte("signed/a.pem")))
+		Expect(os.ReadFile(filepath.Join(outDir, "cadir", "requests", "b.pem"))).To(Equal([]byte("requests/b.pem")))
+	})
+
+	It("refuses a certificate that is a symlink, rather than copying its target into the contract", func() {
+		host := filepath.Join(GinkgoT().TempDir(), "host.pem")
+		Expect(os.WriteFile(host, []byte("host"), 0o600)).To(Succeed())
+		Expect(os.Symlink(host, filepath.Join(srcDir, "signed", "c.pem"))).To(Succeed())
+		Expect(copyCadir(src, out)).To(MatchError(ContainSubstring("not a regular file")))
+		Expect(filepath.Join(outDir, "cadir", "signed", "c.pem")).NotTo(BeAnExistingFile())
+	})
+})
+
+var _ = Describe("do", func() {
+	var client *http.Client
+
+	BeforeEach(func() {
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/json":
+				w.Header().Set("Content-Type", "application/json;charset=utf-8")
+				_, _ = w.Write([]byte(`{"a":1}`))
+			case "/broken-json":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte("Resource not found."))
+			default:
+				w.Header().Set("Content-Type", "text/plain")
+				_, _ = w.Write([]byte("PEM\n"))
+			}
+		}))
+		DeferCleanup(srv.Close)
+		// do addresses the server by serverName, as the recorder's client
+		// does: dial the test server whatever the name, and verify its
+		// certificate under the name it was issued for.
+		t := srv.Client().Transport.(*http.Transport).Clone()
+		t.TLSClientConfig.ServerName = "example.com"
+		t.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, srv.Listener.Addr().String())
+		}
+		client = &http.Client{Transport: t}
+	})
+
+	It("records a JSON body as JSON, and every header but Date", func() {
+		resp, err := do(context.Background(), client, request{Method: "GET", Path: "/json"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.JSON).To(MatchJSON(`{"a":1}`))
+		Expect(resp.Text).To(BeNil())
+		Expect(resp.Headers).To(HaveKey("Content-Type"))
+		Expect(resp.Headers).NotTo(HaveKey("Date"))
+	})
+
+	It("records a body labelled JSON that is not JSON as text, as it came", func() {
+		resp, err := do(context.Background(), client, request{Method: "GET", Path: "/broken-json"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.JSON).To(BeNil())
+		Expect(resp.Text).To(HaveValue(Equal("Resource not found.")))
+	})
+
+	It("records any other body as text", func() {
+		resp, err := do(context.Background(), client, request{Method: "GET", Path: "/text"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.JSON).To(BeNil())
+		Expect(resp.Text).To(HaveValue(Equal("PEM\n")))
+	})
+})
 
 var _ = Describe("checkReplaceable", func() {
 	var dir string

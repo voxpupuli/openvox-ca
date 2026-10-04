@@ -205,11 +205,13 @@ Conventions:
   under `internal/api/testdata/contract/`. Never hand-edit that directory;
   change `test/contract/record` and re-record, as
   [docs/development/testing.md](docs/development/testing.md#the-puppet-ca-api-contract)
-  describes. A change that alters a response either matches OpenVox Server or
-  adds an exception, with its reason, to `contractExceptions` — and a bullet to
-  `docs/api.md#differences-from-openvox-server` in the same commit. Fixing a
-  difference fails the suite until its exception is removed, which is the
-  point; remove the bullet with it.
+  describes (the recorder's own suite fails when the fixtures no longer match
+  its `cases()`). A change that alters a response either matches OpenVox Server
+  or adds an exception, with its reason, to `contractExceptions` — and
+  describes it in `docs/api.md#differences-from-openvox-server` in the same
+  commit. Fixing a difference fails the suite until its exception is removed,
+  which is the point; amend that section in the same commit. One bullet there
+  can cover several exceptions, so remove it only when none is left.
 
 ### Integration suites (build-tagged)
 

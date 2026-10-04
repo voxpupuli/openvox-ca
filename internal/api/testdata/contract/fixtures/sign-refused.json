@@ -1,21 +1,22 @@
 {
-  "name": "sign-non-list",
-  "description": "signing with certnames that is not a list",
+  "name": "sign-refused",
+  "description": "signing named CSRs the CA refuses, for their subject alternative names",
   "sources": [
-    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:275-291"
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:275-291",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:2485-2527"
   ],
   "recorded_from": "OpenVoxProject/openvox-server@8.14.1",
   "image": "ghcr.io/openvoxproject/openvoxserver:8.14.1-main@sha256:806c5eb471c3f1d499308d903dc84210d96b00761de481d2cc7dee380d78c152",
-  "compare": "types",
+  "compare": "exact",
   "request": {
     "method": "POST",
     "path": "/puppet-ca/v1/sign",
     "content_type": "application/json",
-    "body": "{\"certnames\":\"sign2-me\"}",
+    "body": "{\"certnames\":[\"corner-pending\"]}",
     "client": "admin"
   },
   "response": {
-    "status": 422,
+    "status": 200,
     "content_type": "application/json",
     "headers": {
       "Content-Type": "application/json",
@@ -23,9 +24,11 @@
       "X-Puppet-Version": "8.27.0"
     },
     "json": {
-      "kind": "schema-violation",
-      "submitted": "sign2-me",
-      "error": "schema.utils.ValidationError@71772ce6"
+      "signed": [],
+      "no-csr": [],
+      "signing-errors": [
+        "corner-pending"
+      ]
     }
   }
 }

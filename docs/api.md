@@ -536,7 +536,7 @@ The routes OpenVox Server also serves are checked against responses recorded fro
 - Values derived from the certificate, such as fingerprints, SANs, serial numbers and dates, must match exactly, which pins their formatting too.
 - `authorization_extensions` must list exactly the same extensions: its keys are data, so an extra one is a difference rather than an added field.
 
-Not part of the contract: error-body wording, response headers other than `Content-Type`, the order of `certificate_statuses`, and the body of a request no route serves. Nor is who may reach a route: the fixtures are recorded with OpenVox Server's `auth.conf` opened up, so that each request reaches the CA, and openvox-ca's own authorisation is checked separately (see [Authorization tiers](#authorization-tiers)).
+Not part of the contract: error-body wording, response headers other than `Content-Type`, the order of `certificate_statuses`, and the body and media type of a request no route serves. Nor is who may reach a route: the fixtures are recorded with OpenVox Server's `auth.conf` opened up, so that each request reaches the CA, and openvox-ca's own authorisation is checked separately (see [Authorization tiers](#authorization-tiers)).
 
 Where openvox-ca still differs, the spec carries an exception for each difference.
 
