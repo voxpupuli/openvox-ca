@@ -73,7 +73,8 @@ var _ = Describe("certStatusFromRecord on a complete record", func() {
 				NotAfter:  "2036-01-01T00:00:00UTC",
 			},
 			CertProjection: storage.CertProjection{
-				Fingerprint:    "SHA256:AA:BB",
+				// Stored lower case, as SHA256ColonFingerprint writes it.
+				Fingerprint:    "aa:bb",
 				DNSAltNames:    []string{"node1.example.com"},
 				AuthExtensions: map[string]string{"pp_auth_role": "webserver"},
 			},
@@ -87,6 +88,8 @@ var _ = Describe("certStatusFromRecord on a complete record", func() {
 		Expect(got.SerialNumber.Int64()).To(Equal(int64(255)), "hex ff, parsed as the number it names")
 		Expect(got.DNSAltNames).To(Equal([]string{"DNS:node1.example.com"}))
 		Expect(got.AuthorizationExtensions).To(Equal(map[string]string{"pp_auth_role": "webserver"}))
+		Expect(got.Fingerprint).To(Equal("AA:BB"), "upper-cased on the way out")
+		Expect(got.Fingerprints).To(Equal(map[string]string{"SHA256": "AA:BB", "default": "AA:BB"}))
 	})
 
 	// Driven here rather than through the handler, which falls back to the

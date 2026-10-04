@@ -298,7 +298,7 @@ was actually revoked — see [Authorization tiers](#authorization-tiers).
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/expirations` | CA certificate and CRL expiry dates. `ca-certs` maps the subject CN of every certificate in the CA bundle to its `notAfter`, and `crls` maps the issuer CN of every CRL in the published chain to its `nextUpdate`, as OpenVox Server does; a CN that appears twice keeps the last. `ca_certificate.expiration` and `ca_crl.next_update` are openvox-ca's own: the latter is **this CA's own CRL (block 0) only**, so an ancestor can be past its `nextUpdate` while it reports a comfortable date. Read `crls` for the whole chain, or see [metrics](metrics.md#crl) |
+| `GET` | `/expirations` | CA certificate and CRL expiry dates. `ca-certs` maps the subject CN of every certificate in the CA bundle to its `notAfter`, and `crls` maps the issuer CN of every CRL in the published chain to its `nextUpdate`, as OpenVox Server does; a CN that appears twice keeps the last. `ca_certificate.expiration` and `ca_crl.next_update` are openvox-ca's own: the latter is **this CA's own CRL (block 0) only**, so an ancestor can be past its `nextUpdate` while it reports a comfortable date. Read `crls` for the whole chain, or see [metrics](metrics.md#crl). The route still answers `200` when it cannot read them: if the CA bundle cannot be read or parsed, `ca-certs` lists this CA alone, and if the CRL chain cannot be read or any CRL in it fails to parse, `crls` is `{}` and `ca_crl.next_update` is empty. Each failure is logged; alert on the metrics rather than on an empty map |
 
 ## Server-side key generation
 
