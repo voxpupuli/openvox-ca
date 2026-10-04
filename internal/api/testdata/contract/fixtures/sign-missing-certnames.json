@@ -1,0 +1,25 @@
+{
+  "name": "sign-missing-certnames",
+  "description": "signing with no certnames key",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:275-291"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1 (b24bf7f5f488)",
+  "compare": "exact",
+  "request": {
+    "method": "POST",
+    "path": "/puppet-ca/v1/sign",
+    "content_type": "application/json",
+    "body": "{}",
+    "client": "admin"
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/json",
+    "json": {
+      "signed": [],
+      "no-csr": [],
+      "signing-errors": []
+    }
+  }
+}

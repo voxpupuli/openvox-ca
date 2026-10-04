@@ -1,0 +1,19 @@
+{
+  "name": "certificate-request-get",
+  "description": "a pending CSR",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:82-88"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1 (b24bf7f5f488)",
+  "compare": "exact",
+  "request": {
+    "method": "GET",
+    "path": "/puppet-ca/v1/certificate_request/corner-pending",
+    "client": "admin"
+  },
+  "response": {
+    "status": 200,
+    "content_type": "text/plain",
+    "text": "-----BEGIN CERTIFICATE REQUEST-----\nMIIBFTCBvAIBADAZMRcwFQYDVQQDEw5jb3JuZXItcGVuZGluZzBZMBMGByqGSM49\nAgEGCCqGSM49AwEHA0IABJ7tQRiKsblSU1JRY9RcCoUiYqps5lPGiCZM3GuaV8DZ\nE2PG9kydDFLu3MYPqwm4SUUVm+oOlXFUH6xAc9eQ0fmgQTA/BgkqhkiG9w0BCQ4x\nMjAwMC4GA1UdEQQnMCWCDmNvcm5lci1wZW5kaW5nghNQZW5kaW5nLkV4YW1wbGUu\nQ09NMAoGCCqGSM49BAMCA0gAMEUCIQDzBVkroRS8K30/2YeFSu5TocG/La0q4/OU\nC18LtAAUGwIgAY1SMhYB4Og3Sk/Bk3pU1kdtHC/xV2ymH+Ay8q/F5So=\n-----END CERTIFICATE REQUEST-----\n"
+  }
+}

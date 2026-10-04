@@ -1,0 +1,22 @@
+{
+  "name": "status-unknown",
+  "description": "status of a subject the CA has never seen",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:423-542",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:177-200",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:491-526",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:2010-2066"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1 (b24bf7f5f488)",
+  "compare": "none",
+  "request": {
+    "method": "GET",
+    "path": "/puppet-ca/v1/certificate_status/no-such-node",
+    "client": "admin"
+  },
+  "response": {
+    "status": 404,
+    "content_type": "application/json;charset=utf-8",
+    "text": "Resource not found."
+  }
+}

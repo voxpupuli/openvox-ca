@@ -1,0 +1,20 @@
+{
+  "name": "certificate-get-not-modified",
+  "description": "a certificate not modified since the If-Modified-Since date",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:42-80"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1 (b24bf7f5f488)",
+  "compare": "none",
+  "request": {
+    "method": "GET",
+    "path": "/puppet-ca/v1/certificate/corner-dns",
+    "if_modified_since": "Mon, 04 Oct 2027 13:43:52 GMT",
+    "client": "admin"
+  },
+  "response": {
+    "status": 304,
+    "content_type": "text/plain",
+    "text": ""
+  }
+}

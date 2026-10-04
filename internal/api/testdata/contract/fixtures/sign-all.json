@@ -1,0 +1,31 @@
+{
+  "name": "sign-all",
+  "description": "signing every pending CSR",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:293-301",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:2485-2527"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1 (b24bf7f5f488)",
+  "compare": "types",
+  "request": {
+    "method": "POST",
+    "path": "/puppet-ca/v1/sign/all",
+    "content_type": "application/json",
+    "body": "{}",
+    "client": "admin"
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/json",
+    "json": {
+      "signed": [
+        "corner-both",
+        "new-csr"
+      ],
+      "no-csr": [],
+      "signing-errors": [
+        "corner-pending"
+      ]
+    }
+  }
+}

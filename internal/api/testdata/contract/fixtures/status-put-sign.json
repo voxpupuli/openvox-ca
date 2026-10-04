@@ -1,0 +1,21 @@
+{
+  "name": "status-put-sign",
+  "description": "signing a pending CSR",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:423-542"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1 (b24bf7f5f488)",
+  "compare": "none",
+  "request": {
+    "method": "PUT",
+    "path": "/puppet-ca/v1/certificate_status/sign-me",
+    "content_type": "application/json",
+    "body": "{\"desired_state\":\"signed\"}",
+    "client": "admin"
+  },
+  "response": {
+    "status": 204,
+    "content_type": "text/plain",
+    "text": ""
+  }
+}

@@ -363,3 +363,39 @@ exactly once, `test/compose-migration.yml` declares no `restart:` policy, and
 so there is one attempt for a tail to reach. The distinction that matters when
 reading any of these dumps is whether the service restart-loops, not whether
 the code that dumps it happens to call `tail`.
+
+## The Puppet CA API contract
+
+`internal/api/contract_test.go` checks openvox-ca's `/puppet-ca/v1` responses
+against responses recorded from a real OpenVox Server, kept under
+`internal/api/testdata/contract/`. It runs in `mage test:unit` and reads only
+committed files; nothing in CI starts OpenVox Server. The rule it enforces, and
+the differences it knows about, are in [the API reference](../api.md#differences-from-openvox-server).
+
+Each fixture under `fixtures/` is one route and outcome: the request, the
+response OpenVox Server gave, the OpenVox Server source it cites, and how much
+of the body is binding (`exact`, `types` or `none`). `cadir/` is the store that
+server held when it answered, its CA bundle, key, CRL chain, certificates and
+CSRs, and each spec loads it into a fresh openvox-ca, so values derived from a
+certificate can be compared exactly. Every mutation in the set acts on a
+subject no other fixture reads, which is what lets each spec start from that
+one snapshot.
+
+An exception names a difference that openvox-ca still has and why: an issue,
+or a ruling to keep its own behaviour. A difference without one fails the
+spec, and so does an exception that no longer matches anything, so fixing a
+difference fails until its exception is removed.
+
+To re-record, for example when the OpenVox Server image moves:
+
+```shell
+go run ./test/contract/record
+```
+
+It needs Docker and network access. It starts the image that
+`test/compose-migration.yml` pins (move the two together), signs the
+corner-case certificates with the CA that server bootstraps, records every
+fixture, and rewrites `testdata/contract/` from scratch. The CA is new on every
+run, so every fixture and certificate changes. Review the diff for changed
+shapes rather than values, and expect exceptions to need their `$[name=…]`
+paths revisited only when a fixture is added or renamed.

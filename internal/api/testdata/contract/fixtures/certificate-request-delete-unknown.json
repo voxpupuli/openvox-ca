@@ -1,0 +1,20 @@
+{
+  "name": "certificate-request-delete-unknown",
+  "description": "deleting a CSR the CA does not hold",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:154-164",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:1645-1665"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1 (b24bf7f5f488)",
+  "compare": "none",
+  "request": {
+    "method": "DELETE",
+    "path": "/puppet-ca/v1/certificate_request/no-such-node",
+    "client": "admin"
+  },
+  "response": {
+    "status": 404,
+    "content_type": "text/plain",
+    "text": "No certificate request for no-such-node at expected path /etc/puppetlabs/puppetserver/ca/requests/no-such-node.pem"
+  }
+}

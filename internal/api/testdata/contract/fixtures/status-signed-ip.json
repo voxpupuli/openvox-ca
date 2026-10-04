@@ -1,0 +1,47 @@
+{
+  "name": "status-signed-ip",
+  "description": "status of a certificate with IPv4, IPv6 and mapped IP SANs and ignored SAN types",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:423-542",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:177-200",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:491-526",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:2010-2066"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1 (b24bf7f5f488)",
+  "compare": "exact",
+  "request": {
+    "method": "GET",
+    "path": "/puppet-ca/v1/certificate_status/corner-ip",
+    "client": "admin"
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/json;charset=utf-8",
+    "json": {
+      "name": "corner-ip",
+      "dns_alt_names": [
+        "DNS:corner-ip",
+        "DNS:ip.example.com"
+      ],
+      "state": "signed",
+      "authorization_extensions": {},
+      "subject_alt_names": [
+        "IP:192.0.2.10",
+        "IP:2001:db8:0:0:0:0:0:1",
+        "IP:192.0.2.11",
+        "DNS:corner-ip",
+        "DNS:ip.example.com"
+      ],
+      "not_before": "2026-10-04T12:43:52UTC",
+      "fingerprints": {
+        "SHA1": "83:1A:72:11:78:33:48:11:FB:20:46:BC:6A:18:C8:34:76:C3:17:0F",
+        "SHA256": "1A:D9:F8:6A:66:47:92:E4:02:A9:B6:59:68:D3:E7:3E:14:36:89:9B:AA:F9:FD:68:02:9D:98:5E:B5:34:A9:16",
+        "SHA512": "C2:96:5B:F3:28:64:C9:5F:78:10:CA:92:E8:95:1A:D3:63:BE:95:E2:39:F5:4C:95:F3:B4:59:FC:6A:11:9A:B9:F5:05:A9:EA:B5:C3:91:BA:72:9B:DC:33:B5:3C:2C:1A:CE:BE:4F:41:EC:84:34:F9:CE:51:D8:28:B2:7F:71:59",
+        "default": "1A:D9:F8:6A:66:47:92:E4:02:A9:B6:59:68:D3:E7:3E:14:36:89:9B:AA:F9:FD:68:02:9D:98:5E:B5:34:A9:16"
+      },
+      "not_after": "2031-10-04T13:43:52UTC",
+      "serial_number": 64556477195864682429381747588163992594,
+      "fingerprint": "1A:D9:F8:6A:66:47:92:E4:02:A9:B6:59:68:D3:E7:3E:14:36:89:9B:AA:F9:FD:68:02:9D:98:5E:B5:34:A9:16"
+    }
+  }
+}

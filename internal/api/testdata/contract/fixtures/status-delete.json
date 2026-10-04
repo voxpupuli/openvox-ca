@@ -1,0 +1,20 @@
+{
+  "name": "status-delete",
+  "description": "deleting a signed certificate",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:450-465",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:2252-2260"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1 (b24bf7f5f488)",
+  "compare": "none",
+  "request": {
+    "method": "DELETE",
+    "path": "/puppet-ca/v1/certificate_status/delete-me",
+    "client": "admin"
+  },
+  "response": {
+    "status": 204,
+    "content_type": "application/json;charset=utf-8",
+    "text": ""
+  }
+}

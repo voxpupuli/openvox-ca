@@ -1,0 +1,42 @@
+{
+  "name": "status-cert-and-csr",
+  "description": "status of a subject with both a certificate and a pending CSR: the certificate wins",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:423-542",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:177-200",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:491-526",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:2010-2066"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1 (b24bf7f5f488)",
+  "compare": "exact",
+  "request": {
+    "method": "GET",
+    "path": "/puppet-ca/v1/certificate_status/corner-both",
+    "client": "admin"
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/json;charset=utf-8",
+    "json": {
+      "name": "corner-both",
+      "dns_alt_names": [
+        "DNS:corner-both"
+      ],
+      "state": "signed",
+      "authorization_extensions": {},
+      "subject_alt_names": [
+        "DNS:corner-both"
+      ],
+      "not_before": "2026-10-04T12:43:52UTC",
+      "fingerprints": {
+        "SHA1": "59:69:34:66:E5:76:C5:59:4E:BE:5A:38:84:35:8F:E2:E3:9F:9B:AC",
+        "SHA256": "F6:D7:36:B6:A8:1A:EF:60:D3:B2:78:77:6F:2E:F1:72:9C:E4:D4:AD:CE:F4:4E:1A:4F:66:BB:6E:DB:14:BF:21",
+        "SHA512": "40:21:49:08:B6:FA:B5:43:84:FE:26:55:0F:BD:42:DB:C6:70:E5:CD:B8:CD:56:AF:14:A5:C0:2D:D2:1D:D7:B9:9D:A3:BD:D4:86:2C:7E:BA:B5:48:F8:C5:D5:68:27:55:A5:DA:18:7E:3D:38:B2:CD:74:30:FF:40:1E:1E:5A:92",
+        "default": "F6:D7:36:B6:A8:1A:EF:60:D3:B2:78:77:6F:2E:F1:72:9C:E4:D4:AD:CE:F4:4E:1A:4F:66:BB:6E:DB:14:BF:21"
+      },
+      "not_after": "2031-10-04T13:43:52UTC",
+      "serial_number": 116995029837263153846844306443107539822,
+      "fingerprint": "F6:D7:36:B6:A8:1A:EF:60:D3:B2:78:77:6F:2E:F1:72:9C:E4:D4:AD:CE:F4:4E:1A:4F:66:BB:6E:DB:14:BF:21"
+    }
+  }
+}

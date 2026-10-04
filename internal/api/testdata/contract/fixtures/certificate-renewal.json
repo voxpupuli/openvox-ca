@@ -1,0 +1,19 @@
+{
+  "name": "certificate-renewal",
+  "description": "auto-renewing the presented certificate",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:303-339"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1 (b24bf7f5f488)",
+  "compare": "none",
+  "request": {
+    "method": "POST",
+    "path": "/puppet-ca/v1/certificate_renewal",
+    "client": "renewer"
+  },
+  "response": {
+    "status": 200,
+    "content_type": "text/plain",
+    "text": "-----BEGIN CERTIFICATE-----\nMIIDwjCCAaqgAwIBAgIBBDANBgkqhkiG9w0BAQsFADBFMUMwQQYDVQQDDDpQdXBw\nZXQgQ0EgZ2VuZXJhdGVkIG9uIHB1cHBldCBhdCAyMDI2LTEwLTA0IDEzOjQzOjQy\nICswMDAwMB4XDTI2MTAwMzEzNDM1MloXDTI2MTIwMzEzNDM1MlowEzERMA8GA1UE\nAwwIcmVuZXctbWUwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARmcfXmUVdiL8GT\ncH3QXSsbHGZIMq9dNHb2aTgdR5IRQ/VCOeoIJ8Uni9AfVZDZ8b2FAuoSi+Ku8h3F\nt1KW0lwio4G5MIG2MB0GA1UdDgQWBBSfM/jXPTp8noPXYMlAHu593FZrPjBRBgNV\nHSMESjBIgBQ7n+jugDyLx3tIr5aB+2Db6O848KEtpCswKTEnMCUGA1UEAwweUHVw\ncGV0IFJvb3QgQ0E6IGY0Yzk4YWQ0MGU5YzkwggECMB0GA1UdJQQWMBQGCCsGAQUF\nBwMBBggrBgEFBQcDAjATBgNVHREEDDAKgghyZW5ldy1tZTAOBgNVHQ8BAf8EBAMC\nB4AwDQYJKoZIhvcNAQELBQADggIBAF3/lnzsobWUMvfin/i5oROJDql39MSrR30Y\n1stTKQkwYnQP+Ly+vjzYh2uzwuzgM8ZsB15wrckVL+qZ4KOP8oRzf6cgn3vbj6jx\ngM3R1210o1RuwpYbVEjE4lf8ZjwSNs20yVq0c7LhkxfEja49uGHW6e+O62pgc13w\nCOVkrUvFj0wvumEgjfpPvS5rNyDdXBsPRAzz19b6KCW2Oy87LlM6qLhQC2RtpTGJ\nKHjACkT2GCOVQgHuNuxPZ+4xFzUUxng71mcf4qr6WIZg79jdfIrkx61PXLXk7z14\ntPF1GI0oH6ZPbzrZJwINghABiQgdy4virhK8PggNXWtc0fLJI1yREkHqZK1EwOuA\nNm58EsXLtowW034Z6A4DV8bGk0wkuuS59PDrc8AG9rb/iDwF4LNKpEFpNqzjl//H\njQbmkYIRxDmgtmW9YMu0mDJmo4rsOsy9/+6D6K4xUvONIfDqIzQP7B2lhfrQDNKU\nIf/V9G7fnH73QXcMIYE57/QdO3w4JymkdUw1gAonrJyEYn4p5L1MZWjwyoZIc7l5\nt++p78SHrVBb22LRzqGQLR7ZWNc6HPrtgPcWEAWXlh4Hny2b48kOI3vyQEOJiGtf\n/MMuZeF+N7ab1tdgfOTYmrQ5pBO5nY2g67SUjCAuWnzbuqIi+FHeoY4nM+uxLk4z\ns0qlglT9\n-----END CERTIFICATE-----\n"
+  }
+}

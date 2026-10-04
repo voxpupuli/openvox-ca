@@ -1,0 +1,22 @@
+{
+  "name": "certificate-request-put-existing-cert",
+  "description": "submitting a CSR for a subject that already holds a certificate",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:90-102",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:1717-1739"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1 (b24bf7f5f488)",
+  "compare": "none",
+  "request": {
+    "method": "PUT",
+    "path": "/puppet-ca/v1/certificate_request/corner-nosan",
+    "content_type": "text/plain",
+    "body": "-----BEGIN CERTIFICATE REQUEST-----\nMIHRMHkCAQAwFzEVMBMGA1UEAxMMY29ybmVyLW5vc2FuMFkwEwYHKoZIzj0CAQYI\nKoZIzj0DAQcDQgAEj/zaOeGG1OP7ElFxBySydqaCWEpUVwID/7wi3LVetV4ldMOG\nGKQ40sdoXfDfXmPQv5avY/u7CylhknJraEyfzKAAMAoGCCqGSM49BAMCA0gAMEUC\nIHJXGgWzIU3HTvVAxYtKmWNtnISGldeYRDJPFTmx56izAiEA9Szy1oqTLTSptIgl\nWgHBS2+EduqU117Xfe1yXNg45sE=\n-----END CERTIFICATE REQUEST-----\n",
+    "client": "admin"
+  },
+  "response": {
+    "status": 400,
+    "content_type": "text/plain;charset=utf-8",
+    "text": "corner-nosan already has a signed certificate; ignoring certificate request"
+  }
+}

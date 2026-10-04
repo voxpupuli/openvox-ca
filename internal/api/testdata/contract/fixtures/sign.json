@@ -1,0 +1,30 @@
+{
+  "name": "sign",
+  "description": "signing named CSRs",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:275-291",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:2485-2527"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1 (b24bf7f5f488)",
+  "compare": "exact",
+  "request": {
+    "method": "POST",
+    "path": "/puppet-ca/v1/sign",
+    "content_type": "application/json",
+    "body": "{\"certnames\":[\"sign2-me\",\"no-such-node\"]}",
+    "client": "admin"
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/json",
+    "json": {
+      "signed": [
+        "sign2-me"
+      ],
+      "no-csr": [
+        "no-such-node"
+      ],
+      "signing-errors": []
+    }
+  }
+}

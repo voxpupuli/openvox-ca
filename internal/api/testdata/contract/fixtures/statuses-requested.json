@@ -1,0 +1,97 @@
+{
+  "name": "statuses-requested",
+  "description": "pending CSRs only",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:544-561",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:2068-2096"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1 (b24bf7f5f488)",
+  "compare": "exact",
+  "request": {
+    "method": "GET",
+    "path": "/puppet-ca/v1/certificate_statuses/any?state=requested",
+    "client": "admin"
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/json;charset=utf-8",
+    "json": [
+      {
+        "name": "sign2-me",
+        "state": "requested",
+        "dns_alt_names": [],
+        "subject_alt_names": [],
+        "authorization_extensions": {},
+        "fingerprint": "82:3A:38:B5:03:86:00:B7:AE:87:EB:71:43:D0:FF:0A:1F:D0:FD:6F:A1:21:08:D4:DE:A4:85:04:85:FA:D1:88",
+        "fingerprints": {
+          "SHA1": "DE:78:DD:24:67:77:B1:21:BD:9B:5B:A0:1F:8E:2D:8B:C4:5D:A6:D5",
+          "SHA256": "82:3A:38:B5:03:86:00:B7:AE:87:EB:71:43:D0:FF:0A:1F:D0:FD:6F:A1:21:08:D4:DE:A4:85:04:85:FA:D1:88",
+          "SHA512": "39:3A:E6:C0:F2:EE:2E:EF:40:BB:08:A1:DC:A0:E4:4C:36:39:C0:4C:DE:A3:0C:A5:56:CA:D3:87:0A:3E:4B:79:B6:67:26:E3:E2:80:EE:74:82:08:B1:AC:5A:A5:BA:65:3E:3B:B2:B3:C0:5B:C3:51:A6:AD:FE:D2:38:2E:F0:99",
+          "default": "82:3A:38:B5:03:86:00:B7:AE:87:EB:71:43:D0:FF:0A:1F:D0:FD:6F:A1:21:08:D4:DE:A4:85:04:85:FA:D1:88"
+        }
+      },
+      {
+        "name": "corner-both",
+        "state": "requested",
+        "dns_alt_names": [],
+        "subject_alt_names": [],
+        "authorization_extensions": {},
+        "fingerprint": "BC:84:19:18:3B:98:CF:D4:99:FC:84:E9:36:70:73:D3:CF:C5:38:88:9C:0F:49:4C:67:91:89:E0:10:5F:34:62",
+        "fingerprints": {
+          "SHA1": "58:55:41:3A:B0:9B:37:8B:DE:D6:3D:FC:CE:7C:7F:D2:E4:72:ED:19",
+          "SHA256": "BC:84:19:18:3B:98:CF:D4:99:FC:84:E9:36:70:73:D3:CF:C5:38:88:9C:0F:49:4C:67:91:89:E0:10:5F:34:62",
+          "SHA512": "43:02:31:69:35:7D:95:63:F7:E8:AC:D8:D8:61:FC:BA:37:67:CC:1F:F9:65:0F:37:5A:B6:22:FF:0E:AE:72:62:38:9D:63:8E:8E:1C:83:35:4E:74:BF:5D:3F:B5:9E:BF:6E:68:9E:12:2D:EF:81:61:78:DF:DF:DB:40:E1:EA:B3",
+          "default": "BC:84:19:18:3B:98:CF:D4:99:FC:84:E9:36:70:73:D3:CF:C5:38:88:9C:0F:49:4C:67:91:89:E0:10:5F:34:62"
+        }
+      },
+      {
+        "name": "delete-me-csr",
+        "state": "requested",
+        "dns_alt_names": [],
+        "subject_alt_names": [],
+        "authorization_extensions": {},
+        "fingerprint": "F2:95:56:A8:21:BC:B6:8D:07:11:F3:12:B2:59:B3:2C:7A:55:C2:E1:19:A5:51:DA:CF:61:A5:28:F3:B0:F2:90",
+        "fingerprints": {
+          "SHA1": "F2:81:9F:68:59:A2:46:5F:A6:50:F5:11:40:C0:6E:6D:20:0F:AF:8A",
+          "SHA256": "F2:95:56:A8:21:BC:B6:8D:07:11:F3:12:B2:59:B3:2C:7A:55:C2:E1:19:A5:51:DA:CF:61:A5:28:F3:B0:F2:90",
+          "SHA512": "C6:D7:61:EC:6E:70:EA:DF:84:15:6F:52:03:C3:59:B9:3C:DA:33:12:45:82:48:E8:DE:E2:78:B1:CD:D2:84:EF:04:B9:80:DF:AA:3F:31:89:01:D9:83:07:D0:68:43:12:58:C6:D8:7F:5F:40:F6:9D:2B:EC:E2:47:9D:18:B2:AF",
+          "default": "F2:95:56:A8:21:BC:B6:8D:07:11:F3:12:B2:59:B3:2C:7A:55:C2:E1:19:A5:51:DA:CF:61:A5:28:F3:B0:F2:90"
+        }
+      },
+      {
+        "name": "sign-me",
+        "state": "requested",
+        "dns_alt_names": [],
+        "subject_alt_names": [],
+        "authorization_extensions": {},
+        "fingerprint": "75:F6:32:A3:70:5A:5C:39:EC:80:D0:30:E3:C7:50:9A:4C:A5:6B:B0:DA:C9:75:DE:EE:15:09:79:55:8D:B5:41",
+        "fingerprints": {
+          "SHA1": "9F:1E:0B:36:27:17:C5:A3:C5:17:85:68:56:8C:AB:DD:96:C7:23:D6",
+          "SHA256": "75:F6:32:A3:70:5A:5C:39:EC:80:D0:30:E3:C7:50:9A:4C:A5:6B:B0:DA:C9:75:DE:EE:15:09:79:55:8D:B5:41",
+          "SHA512": "5A:43:AD:74:72:B2:81:5E:85:08:51:9B:CE:AA:6C:47:5E:50:EA:C3:3C:6C:0E:7D:55:00:1F:35:2C:14:86:34:39:9B:66:B1:D9:CB:B2:8F:A8:C4:07:01:C2:46:98:AF:17:06:69:1C:96:57:C2:CA:3D:3D:EC:24:D4:5F:9E:8A",
+          "default": "75:F6:32:A3:70:5A:5C:39:EC:80:D0:30:E3:C7:50:9A:4C:A5:6B:B0:DA:C9:75:DE:EE:15:09:79:55:8D:B5:41"
+        }
+      },
+      {
+        "name": "corner-pending",
+        "state": "requested",
+        "dns_alt_names": [
+          "DNS:corner-pending",
+          "DNS:Pending.Example.COM"
+        ],
+        "subject_alt_names": [
+          "DNS:corner-pending",
+          "DNS:Pending.Example.COM"
+        ],
+        "authorization_extensions": {},
+        "fingerprint": "92:98:62:CD:DE:4E:94:7A:C1:09:47:BF:A4:37:85:7A:81:B8:3A:EF:01:6A:75:1B:94:98:95:88:07:AF:C7:CD",
+        "fingerprints": {
+          "SHA1": "DD:3F:DC:07:07:91:54:C9:C0:5F:8C:93:65:00:B2:69:89:C1:A7:7D",
+          "SHA256": "92:98:62:CD:DE:4E:94:7A:C1:09:47:BF:A4:37:85:7A:81:B8:3A:EF:01:6A:75:1B:94:98:95:88:07:AF:C7:CD",
+          "SHA512": "8A:C7:4C:CC:CE:FD:B0:CD:A1:A3:99:21:64:9A:FA:F8:0B:09:20:78:C0:A7:46:48:CC:33:98:45:A2:72:B6:61:69:77:47:82:66:E8:B4:33:91:69:91:AA:A2:41:25:E9:BD:68:2D:3B:6C:5C:DD:EE:83:75:FD:3C:AE:96:4C:24",
+          "default": "92:98:62:CD:DE:4E:94:7A:C1:09:47:BF:A4:37:85:7A:81:B8:3A:EF:01:6A:75:1B:94:98:95:88:07:AF:C7:CD"
+        }
+      }
+    ]
+  }
+}

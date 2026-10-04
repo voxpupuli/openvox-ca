@@ -1,0 +1,38 @@
+{
+  "name": "status-signed-nosan",
+  "description": "status of a certificate with no SAN extension and a small serial",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:423-542",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:177-200",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:491-526",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:2010-2066"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1 (b24bf7f5f488)",
+  "compare": "exact",
+  "request": {
+    "method": "GET",
+    "path": "/puppet-ca/v1/certificate_status/corner-nosan",
+    "client": "admin"
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/json;charset=utf-8",
+    "json": {
+      "name": "corner-nosan",
+      "dns_alt_names": [],
+      "state": "signed",
+      "authorization_extensions": {},
+      "subject_alt_names": [],
+      "not_before": "2026-10-04T12:43:52UTC",
+      "fingerprints": {
+        "SHA1": "2D:2F:D8:F8:AD:06:2F:AD:D8:6D:57:CD:F4:B7:41:0C:56:59:3A:C8",
+        "SHA256": "9A:75:7C:A0:D3:7A:11:53:67:7F:A9:AC:C7:B1:E2:DA:1C:19:46:BC:2A:29:14:D4:CE:26:87:B4:BA:C1:62:57",
+        "SHA512": "66:F8:E0:A5:23:04:91:94:E4:B9:DB:42:2F:CB:ED:1C:33:19:A8:06:9D:A4:50:51:E9:DD:CE:36:8E:5F:77:F1:70:56:EC:AD:88:08:63:8A:59:2D:6B:2D:7B:DD:0B:6F:93:9C:8D:18:80:A0:CB:26:0D:C5:36:FC:1D:E8:DE:E6",
+        "default": "9A:75:7C:A0:D3:7A:11:53:67:7F:A9:AC:C7:B1:E2:DA:1C:19:46:BC:2A:29:14:D4:CE:26:87:B4:BA:C1:62:57"
+      },
+      "not_after": "2031-10-04T13:43:52UTC",
+      "serial_number": 32343,
+      "fingerprint": "9A:75:7C:A0:D3:7A:11:53:67:7F:A9:AC:C7:B1:E2:DA:1C:19:46:BC:2A:29:14:D4:CE:26:87:B4:BA:C1:62:57"
+    }
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "name": "status-revoked",
+  "description": "status of a revoked certificate",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:423-542",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:177-200",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:491-526",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:2010-2066"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1 (b24bf7f5f488)",
+  "compare": "exact",
+  "request": {
+    "method": "GET",
+    "path": "/puppet-ca/v1/certificate_status/corner-revoked",
+    "client": "admin"
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/json;charset=utf-8",
+    "json": {
+      "name": "corner-revoked",
+      "dns_alt_names": [
+        "DNS:corner-revoked"
+      ],
+      "state": "revoked",
+      "authorization_extensions": {},
+      "subject_alt_names": [
+        "DNS:corner-revoked"
+      ],
+      "not_before": "2026-10-04T12:43:52UTC",
+      "fingerprints": {
+        "SHA1": "DB:CF:A7:3F:E1:D3:F1:37:56:42:D7:E6:1C:A0:43:0D:1E:AE:1F:40",
+        "SHA256": "54:89:4A:8C:34:51:A8:D7:E0:A5:A4:2F:D0:36:0D:A1:0E:A2:EE:BE:4C:72:23:9D:86:D4:FB:D5:93:A6:A4:60",
+        "SHA512": "E1:DC:CE:4B:D0:1B:C0:23:96:C7:0A:E7:97:39:A3:DF:1E:3C:FD:29:B5:96:F2:71:C1:C2:03:7A:C9:0D:D2:90:16:A3:2A:0B:95:1A:DF:DD:09:DB:84:2B:B3:BA:58:A9:5E:85:2A:AE:AB:8A:BC:91:70:87:DC:02:AE:3A:D8:F4",
+        "default": "54:89:4A:8C:34:51:A8:D7:E0:A5:A4:2F:D0:36:0D:A1:0E:A2:EE:BE:4C:72:23:9D:86:D4:FB:D5:93:A6:A4:60"
+      },
+      "not_after": "2031-10-04T13:43:52UTC",
+      "serial_number": 59509847470710749760148969475322107191,
+      "fingerprint": "54:89:4A:8C:34:51:A8:D7:E0:A5:A4:2F:D0:36:0D:A1:0E:A2:EE:BE:4C:72:23:9D:86:D4:FB:D5:93:A6:A4:60"
+    }
+  }
+}

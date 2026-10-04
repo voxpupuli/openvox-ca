@@ -1,0 +1,21 @@
+{
+  "name": "status-put-bad-state",
+  "description": "an unknown desired_state",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:494-514"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1 (b24bf7f5f488)",
+  "compare": "none",
+  "request": {
+    "method": "PUT",
+    "path": "/puppet-ca/v1/certificate_status/corner-pending",
+    "content_type": "application/json",
+    "body": "{\"desired_state\":\"bogus\"}",
+    "client": "admin"
+  },
+  "response": {
+    "status": 400,
+    "content_type": "text/plain;charset=utf-8",
+    "text": "State bogus invalid; Must specify desired state of 'signed' or 'revoked' for host corner-pending."
+  }
+}

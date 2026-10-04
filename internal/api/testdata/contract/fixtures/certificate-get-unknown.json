@@ -1,0 +1,19 @@
+{
+  "name": "certificate-get-unknown",
+  "description": "a certificate the CA does not hold",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:68-80"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1 (b24bf7f5f488)",
+  "compare": "none",
+  "request": {
+    "method": "GET",
+    "path": "/puppet-ca/v1/certificate/no-such-node",
+    "client": "admin"
+  },
+  "response": {
+    "status": 404,
+    "content_type": "text/plain",
+    "text": "Could not find certificate no-such-node"
+  }
+}

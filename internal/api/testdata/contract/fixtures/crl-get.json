@@ -1,0 +1,19 @@
+{
+  "name": "crl-get",
+  "description": "the CRL",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:104-132"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1 (b24bf7f5f488)",
+  "compare": "exact",
+  "request": {
+    "method": "GET",
+    "path": "/puppet-ca/v1/certificate_revocation_list/ca",
+    "client": "admin"
+  },
+  "response": {
+    "status": 200,
+    "content_type": "text/plain",
+    "text": "-----BEGIN X509 CRL-----\nMIIC8jCB2wIBATANBgkqhkiG9w0BAQsFADBFMUMwQQYDVQQDDDpQdXBwZXQgQ0Eg\nZ2VuZXJhdGVkIG9uIHB1cHBldCBhdCAyMDI2LTEwLTA0IDEzOjQzOjQyICswMDAw\nFw0yNjEwMDQxMzQzNTFaFw0zMTEwMDMxMzQzNTJaMDEwLwIQLMUuAlMvwzxkV7Cy\nU/NVNxcNMjYxMDA0MTM0MzUyWjAMMAoGA1UdFQQDCgEBoC8wLTAKBgNVHRQEAwIB\nATAfBgNVHSMEGDAWgBQ7n+jugDyLx3tIr5aB+2Db6O848DANBgkqhkiG9w0BAQsF\nAAOCAgEAlHxH3BeqcsxxOH1T+llXKMBv/7/p0gMqqdTtZFeLAiOSizmJX4Hb+HQW\n/Iw17lkx4P7Kgh5ZUn+eVkW3el4HW9F1dZU9uqoI3BqjetGEIjEEP2iYtZucNo3i\nWVek9ACMnhKZ4kDeU6QGrxmoGk77zmrZnrQ0z9rSuHk9ck8oQPiTkmdzgRbUgzxd\nNzJTjX8w+AB6whH8xVBqf23y49NWq4cn654+kkrSyR9/267sK2/T/nTcI+dgyDts\nJA4AoaiHo06rv6MnbuxYkR17qhGtPGUPcN8Sx1A+gsm8ZB0H1KBSQZd4n5kDoX2k\nNBTWHZGOJxGs2rcgaV9hB5+VMwLRRdPrbkuoekM6fN1zksUZq3psFMC630/b3zqO\nZKeVAq+Dzl8uEYLEd0F6IBFwLluPp0q+4iZ+bQQtledp/Lkfcm2RGMzgrAI5Bsy0\n2sACxzpqcqbaav2eLdrAqvcvYejYRQjQEL++Wad1swa7MJ3oi8qudwHiDWvSBTYf\nE7KwyHEH0S29NJDQb2Vn/c5KFw7+8tXA7csMvgyJyjgTq1zrGNov3STrbz+az1b1\nVUwLLRpsRyvjf+L4OuntmRj+N/aP3/BCU3iATZa1+T2zVphheS2qwsY3lRtdiVA9\nMx1gmXLbqkOhcpwY4eac56g45w9E/RKPG+OG4dIm94FsU+k5KUg=\n-----END X509 CRL-----\n-----BEGIN X509 CRL-----\nMIICozCBjAIBATANBgkqhkiG9w0BAQsFADApMScwJQYDVQQDDB5QdXBwZXQgUm9v\ndCBDQTogZjRjOThhZDQwZTljOTAXDTI2MTAwMzEzNDM0M1oXDTMxMTAwMzEzNDM0\nM1qgLzAtMB8GA1UdIwQYMBaAFF6M6p5gBfwjZiUooPrSybPrzkUKMAoGA1UdFAQD\nAgEAMA0GCSqGSIb3DQEBCwUAA4ICAQCARcD+QWBcyJdrNIliwXGLGgjk8CiJx1xL\n3K5xkPiXS4dHXBe0KXuAlV0rm8CSNlvS5GKQIdFFEdNYIbIIfVQSHgUMz3k8r7dq\n+Pl7Q7o9OC947VE0JnYNDTOgsxmyj4qbSzU+1KUBGjWEqSkMaRkXO78j4WTKkIJT\nPDRg+Ge34oQMjhdIUzN19gDSfHx2Be9XVXHMgjoNYysXLafdVpH8lMoCLZOe12J0\niOF1YCeT49F1pwowRNmRehmYTndKlrPTjIC5FVZ0qsbCYeqY0qCOVwILsqfXydc6\nPTT4jFpt8auljTyXnEoob4zwTSqSURM5vUNvqB2GtVTCriN78KXGIa3rvBuF7zMm\n07Ong63I22XCQK0rrEU/lA+2nyKn1M/+bl4OyGAc4/uXfjVeQ3tfTbAwsFCBa69W\ngu7Srhx42ABnNaDimZF/ID1USGFaKTRG1Cg185iqdV0gGEn2Q3xK+57qc3n8qSek\nQESMBH+ZQ6tGQN1xLEpk1HRZkVh+WFPlZlTmqWlSK/2uaY043EnrovgmLkkvQD3A\nQ+nwOdeVrhpVSEuZ4HNnERp3P2tL+D2T93zg5W/CqPeZ5nr0oWHd8QRIEzf0RS/y\n/RJwXj/qteLMk9YYO7oaHxV+DSrRKuEOnd7X+I6lE0Sndo7klWwoVC5ci+e8vLBs\n6r4RiAL4ZA==\n-----END X509 CRL-----\n"
+  }
+}
