@@ -1,0 +1,752 @@
+// Copyright (C) 2026 Chris Boot
+// Copyright (C) 2026 Vox Pupuli and contributors
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along
+// with this program; if not, write to the Free Software Foundation, Inc.,
+// 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+
+// Command record regenerates the Puppet CA API contract in
+// internal/api/testdata/contract from a real OpenVox Server.
+//
+// It starts the pinned OpenVox Server image, signs a set of corner-case
+// certificates with the CA that server bootstraps, puts them and some CSRs in
+// its store, drives one request per route and outcome, and writes each
+// response as a fixture. The cadir it leaves behind is snapshotted too, so the
+// contract spec can give openvox-ca the same CA and certificates and compare
+// certificate-derived values exactly.
+//
+// CI never runs this; it reads the committed fixtures. Re-record when the
+// pinned image moves:
+//
+//	go run ./test/contract/record
+//
+// It needs docker and network access to pull the image.
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"log/slog"
+	"math/big"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+const (
+	// image is the OpenVox Server the contract is recorded from. It is the
+	// image test/compose-migration.yml pins; move them together.
+	image = "ghcr.io/openvoxproject/openvoxserver:8.14.1-main@sha256:806c5eb471c3f1d499308d903dc84210d96b00761de481d2cc7dee380d78c152"
+	// sourceRef names the OpenVox Server source the fixtures cite: the tag
+	// the image was built from.
+	sourceRef = "OpenVoxProject/openvox-server@8.14.1 (b24bf7f5f488)"
+
+	serverName   = "puppet"
+	cadirPath    = "/etc/puppetlabs/puppetserver/ca"
+	caConfPath   = "/etc/puppetlabs/puppetserver/conf.d/ca.conf"
+	authConfPath = "/etc/puppetlabs/puppetserver/conf.d/auth.conf"
+)
+
+// Puppet authorisation-arc OIDs used by the corner-case certificates.
+var (
+	oidPpAuthorization = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 3, 1}
+	oidPpAuthAutoRenew = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 3, 2}
+	oidPpAuthRole      = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 3, 13}
+	oidPpCliAuth       = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 3, 39}
+	oidAuthArc         = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 3}
+	oidAuthUnknown     = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 3, 99}
+	oidAuthLegacyRaw   = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 3, 98}
+)
+
+func main() {
+	out := flag.String("out", "internal/api/testdata/contract", "directory to write the contract into")
+	keep := flag.Bool("keep", false, "leave the OpenVox Server container running")
+	flag.Parse()
+
+	if err := run(*out, *keep); err != nil {
+		slog.Error("recording the contract failed", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run(out string, keep bool) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+
+	name := fmt.Sprintf("openvox-ca-contract-%d", os.Getpid())
+	if err := docker(ctx, "create", "--name", name, "--hostname", serverName,
+		"-e", "AUTOSIGN=false",
+		"-e", "OPENVOXSERVER_HOSTNAME="+serverName,
+		"-e", "USE_OPENVOXDB=false",
+		"-e", "OPENVOX_STORECONFIGS=false",
+		"-e", "OPENVOX_REPORTS=log",
+		"-e", "OPENVOXSERVER_JAVA_ARGS=-Xms512m -Xmx512m",
+		"-p", "127.0.0.1::8140",
+		image); err != nil {
+		return err
+	}
+	if !keep {
+		defer func() { _ = docker(context.Background(), "rm", "-f", name) }()
+	}
+
+	// Two settings differ from the image's defaults, both so that a handler
+	// is reached rather than a gate in front of it:
+	//   - auto-renewal is off by default (the route answers 404); openvox-ca
+	//     always serves it, so the contract records what a served renewal
+	//     returns.
+	//   - the shipped auth.conf allows only GET and PUT on
+	//     certificate_request, so a DELETE is refused before the handler.
+	//     Who may reach a route is the authorisation baseline's business,
+	//     not this contract's.
+	// The image's own entrypoint scripts edit these files as the
+	// unprivileged server user, and rewrite auth.conf as JSON on the way,
+	// so this edits them as parsed HOCON from a script that runs after them.
+	tmp, err := os.MkdirTemp("", "openvox-ca-contract")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(tmp) }()
+	script := filepath.Join(tmp, "91-contract.sh")
+	contents := []byte(`#!/bin/bash
+set -e
+hocon -f ` + caConfPath + ` set certificate-authority.allow-auto-renewal true
+ruby -e '
+  require "hocon"; require "json"
+  f = ARGV[0]
+  conf = Hocon.load(f)
+  rule = conf["authorization"]["rules"].find { |r| r["match-request"]["path"] == "/puppet-ca/v1/certificate_request" }
+  abort "no certificate_request rule in #{f}" unless rule
+  rule["match-request"]["method"] = %w[get put delete]
+  File.write(f, JSON.pretty_generate(conf))
+' ` + authConfPath + `
+`)
+	if err := os.WriteFile(script, contents, 0o755); err != nil { //nolint:gosec // G306: the image runs entrypoint scripts, which must be executable
+		return err
+	}
+	if err := docker(ctx, "cp", script, name+":/container-entrypoint.d/91-contract.sh"); err != nil {
+		return err
+	}
+	if err := docker(ctx, "start", name); err != nil {
+		return err
+	}
+
+	portOut, err := dockerOutput(ctx, "port", name, "8140/tcp")
+	if err != nil {
+		return err
+	}
+	addr := strings.TrimSpace(strings.Split(portOut, "\n")[0])
+	if err := waitReady(ctx, name, addr); err != nil {
+		return err
+	}
+	slog.Info("OpenVox Server ready", "addr", addr)
+
+	bootstrap := filepath.Join(tmp, "bootstrap")
+	if err := docker(ctx, "cp", name+":"+cadirPath, bootstrap); err != nil {
+		return err
+	}
+	ca, err := loadCA(bootstrap)
+	if err != nil {
+		return err
+	}
+
+	fx, err := newFixtureSet(ca)
+	if err != nil {
+		return err
+	}
+	if err := fx.inject(ctx, name, tmp); err != nil {
+		return err
+	}
+
+	admin, err := ca.client(fx.admin, addr)
+	if err != nil {
+		return err
+	}
+	renewer, err := ca.client(fx.renewer, addr)
+	if err != nil {
+		return err
+	}
+
+	// State that has to come from upstream itself: a revocation, so the CRL
+	// carrying it is one OpenVox Server wrote.
+	if _, err := do(ctx, admin, request{Method: "PUT", Path: "/puppet-ca/v1/certificate_status/corner-revoked",
+		ContentType: "application/json", Body: `{"desired_state":"revoked"}`}); err != nil {
+		return err
+	}
+
+	// Snapshot the store before any recorded request changes it: every
+	// fixture is a response to exactly this state.
+	if err := os.RemoveAll(out); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(out, 0o750); err != nil {
+		return err
+	}
+	// Every write goes through a Root on the output directory, so nothing
+	// a fixture or the container names can land outside it.
+	root, err := os.OpenRoot(out)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	if err := snapshot(ctx, name, tmp, root, fx.renewer); err != nil {
+		return err
+	}
+
+	csrBodies := map[string]issued{}
+	for _, cn := range []string{"new-csr", "corner-nosan"} {
+		csr, err := newCSR(cn, nil)
+		if err != nil {
+			return err
+		}
+		csrBodies[cn] = csr
+	}
+
+	clients := map[string]*http.Client{"admin": admin, "renewer": renewer}
+	for _, c := range cases() {
+		switch c.Name {
+		case "certificate-request-put":
+			c.Request.Body = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrBodies["new-csr"].der}))
+		case "certificate-request-put-existing-cert":
+			c.Request.Body = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrBodies["corner-nosan"].der}))
+		}
+		resp, err := do(ctx, clients[c.Request.Client], c.Request)
+		if err != nil {
+			return fmt.Errorf("%s: %w", c.Name, err)
+		}
+		c.Response = resp
+		c.Recorded = sourceRef
+		if err := writeFixture(root, c); err != nil {
+			return err
+		}
+		slog.Info("recorded", "fixture", c.Name, "status", resp.Status, "content_type", resp.ContentType)
+	}
+	return nil
+}
+
+// --- docker ------------------------------------------------------------------
+
+func docker(ctx context.Context, args ...string) error {
+	cmd := exec.CommandContext(ctx, "docker", args...) //nolint:gosec // G204: the arguments are this program's own, not input
+	cmd.Stdout = io.Discard
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("docker %s: %w", args[0], err)
+	}
+	return nil
+}
+
+func dockerOutput(ctx context.Context, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "docker", args...) //nolint:gosec // G204: the arguments are this program's own, not input
+	cmd.Stderr = os.Stderr
+	b, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("docker %s: %w", args[0], err)
+	}
+	return string(b), nil
+}
+
+func waitReady(ctx context.Context, container, addr string) error {
+	probe := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{
+			// The status probe runs before the CA can be read back, so there
+			// is nothing to verify against yet; it carries no credentials
+			// and reads one word.
+			InsecureSkipVerify: true, //nolint:gosec // G402: readiness probe of a local test container
+		}},
+	}
+	for {
+		resp, err := probe.Get("https://" + addr + "/status/v1/simple")
+		if err == nil {
+			b, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if strings.TrimSpace(string(b)) == "running" {
+				return nil
+			}
+		}
+		if state, err := dockerOutput(ctx, "inspect", "-f", "{{.State.Running}}", container); err != nil || strings.TrimSpace(state) != "true" {
+			return fmt.Errorf("OpenVox Server container stopped before it was ready; see docker logs %s (run with -keep to keep it)", container)
+		}
+		select {
+		case <-ctx.Done():
+			return errors.New("OpenVox Server did not become ready")
+		case <-time.After(3 * time.Second):
+		}
+	}
+}
+
+// --- the CA --------------------------------------------------------------
+
+type authority struct {
+	chain []*x509.Certificate // the issuing CA first, as ca_crt.pem orders it
+	key   crypto.Signer
+	roots *x509.CertPool
+}
+
+func loadCA(dir string) (*authority, error) {
+	certPEM, err := os.ReadFile(filepath.Join(dir, "ca_crt.pem"))
+	if err != nil {
+		return nil, err
+	}
+	var chain []*x509.Certificate
+	for rest := certPEM; ; {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		c, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, err
+		}
+		chain = append(chain, c)
+	}
+	if len(chain) == 0 {
+		return nil, errors.New("ca_crt.pem holds no certificate")
+	}
+	keyPEM, err := os.ReadFile(filepath.Join(dir, "ca_key.pem"))
+	if err != nil {
+		return nil, err
+	}
+	block, _ := pem.Decode(keyPEM)
+	if block == nil {
+		return nil, errors.New("ca_key.pem holds no key")
+	}
+	var key any
+	if key, err = x509.ParsePKCS8PrivateKey(block.Bytes); err != nil {
+		if key, err = x509.ParsePKCS1PrivateKey(block.Bytes); err != nil {
+			return nil, fmt.Errorf("parsing ca_key.pem: %w", err)
+		}
+	}
+	// The whole bundle is trusted, because the server presents its leaf
+	// without the intermediate that issued it.
+	roots := x509.NewCertPool()
+	for _, c := range chain {
+		roots.AddCert(c)
+	}
+	return &authority{chain: chain, key: key.(crypto.Signer), roots: roots}, nil
+}
+
+// issued is a certificate (or CSR) this recorder made, with its key.
+type issued struct {
+	name string
+	key  *ecdsa.PrivateKey
+	der  []byte
+}
+
+func (a *authority) issue(t *x509.Certificate) (issued, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return issued{}, err
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	if t.SerialNumber == nil {
+		if t.SerialNumber, err = rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 127)); err != nil {
+			return issued{}, err
+		}
+	}
+	t.NotBefore = now.Add(-time.Hour)
+	t.NotAfter = now.AddDate(5, 0, 0)
+	t.KeyUsage = x509.KeyUsageDigitalSignature
+	t.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}
+	der, err := x509.CreateCertificate(rand.Reader, t, a.chain[0], &key.PublicKey, a.key)
+	if err != nil {
+		return issued{}, err
+	}
+	return issued{name: t.Subject.CommonName, key: key, der: der}, nil
+}
+
+func (a *authority) client(id issued, addr string) (*http.Client, error) {
+	cert := tls.Certificate{Certificate: [][]byte{id.der}, PrivateKey: id.key}
+	return &http.Client{
+		Timeout: 60 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				Certificates: []tls.Certificate{cert},
+				RootCAs:      a.roots,
+				ServerName:   serverName,
+				MinVersion:   tls.VersionTLS12,
+			},
+			DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, network, addr)
+			},
+		},
+	}, nil
+}
+
+func newCSR(cn string, dns []string) (issued, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return issued{}, err
+	}
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject:  pkix.Name{CommonName: cn},
+		DNSNames: dns,
+	}, key)
+	if err != nil {
+		return issued{}, err
+	}
+	return issued{name: cn, key: key, der: der}, nil
+}
+
+func utf8Ext(oid asn1.ObjectIdentifier, value string) pkix.Extension {
+	v, err := asn1.MarshalWithParams(value, "utf8")
+	if err != nil {
+		panic(err)
+	}
+	return pkix.Extension{Id: oid, Value: v}
+}
+
+// --- the corner cases --------------------------------------------------------
+
+type fixtureSet struct {
+	certs   []issued
+	csrs    []issued
+	admin   issued
+	renewer issued
+}
+
+func newFixtureSet(ca *authority) (*fixtureSet, error) {
+	fx := &fixtureSet{}
+	add := func(t *x509.Certificate) error {
+		c, err := ca.issue(t)
+		fx.certs = append(fx.certs, c)
+		return err
+	}
+
+	// Mixed-case DNS SANs in a chosen order, known and unknown auth
+	// extensions, and a 128-bit serial with its top bit set.
+	topBit, _ := new(big.Int).SetString("9F3C2A1B4D5E6F708192A3B4C5D6E7F8", 16)
+	if err := add(&x509.Certificate{
+		SerialNumber: topBit,
+		Subject:      pkix.Name{CommonName: "corner-dns"},
+		DNSNames:     []string{"corner-dns", "Corner-DNS.Example.COM", "alt.example.com"},
+		ExtraExtensions: []pkix.Extension{
+			utf8Ext(oidPpAuthRole, "webserver"),
+			utf8Ext(oidPpAuthorization, "true"),
+			utf8Ext(oidAuthUnknown, "custom"),
+		},
+	}); err != nil {
+		return nil, err
+	}
+	// IP SANs of every shape, interleaved with DNS, plus SAN types both
+	// implementations ignore.
+	if err := add(&x509.Certificate{
+		Subject:        pkix.Name{CommonName: "corner-ip"},
+		DNSNames:       []string{"corner-ip", "ip.example.com"},
+		IPAddresses:    []net.IP{net.ParseIP("192.0.2.10"), net.ParseIP("2001:db8::1"), net.ParseIP("::ffff:192.0.2.11").To16()},
+		EmailAddresses: []string{"ops@example.com"},
+		URIs:           []*url.URL{{Scheme: "spiffe", Host: "example.com", Path: "/node"}},
+	}); err != nil {
+		return nil, err
+	}
+	// No SAN extension at all, and a small serial.
+	if err := add(&x509.Certificate{
+		SerialNumber: big.NewInt(0x7E57),
+		Subject:      pkix.Name{CommonName: "corner-nosan"},
+	}); err != nil {
+		return nil, err
+	}
+	// Auth extensions the two implementations key or render differently.
+	if err := add(&x509.Certificate{
+		Subject:  pkix.Name{CommonName: "corner-ext"},
+		DNSNames: []string{"corner-ext"},
+		ExtraExtensions: []pkix.Extension{
+			utf8Ext(oidPpCliAuth, "true"),
+			utf8Ext(oidPpAuthAutoRenew, "true"),
+			utf8Ext(oidAuthArc, "arc"),
+			{Id: oidAuthLegacyRaw, Value: []byte("legacy")},
+		},
+	}); err != nil {
+		return nil, err
+	}
+	for _, cn := range []string{"corner-revoked", "corner-both", "revoke-me", "delete-me", "clean-me"} {
+		if err := add(&x509.Certificate{Subject: pkix.Name{CommonName: cn}, DNSNames: []string{cn}}); err != nil {
+			return nil, err
+		}
+	}
+
+	for _, c := range []struct {
+		cn  string
+		dns []string
+	}{
+		{"corner-pending", []string{"corner-pending", "Pending.Example.COM"}},
+		{"corner-both", nil},
+		{"sign-me", nil},
+		{"sign2-me", nil},
+		{"delete-me-csr", nil},
+	} {
+		csr, err := newCSR(c.cn, c.dns)
+		if err != nil {
+			return nil, err
+		}
+		fx.csrs = append(fx.csrs, csr)
+	}
+
+	var err error
+	if fx.admin, err = ca.issue(&x509.Certificate{
+		Subject:         pkix.Name{CommonName: "contract-admin"},
+		ExtraExtensions: []pkix.Extension{utf8Ext(oidPpCliAuth, "true")},
+	}); err != nil {
+		return nil, err
+	}
+	if fx.renewer, err = ca.issue(&x509.Certificate{
+		Subject:  pkix.Name{CommonName: "renew-me"},
+		DNSNames: []string{"renew-me"},
+	}); err != nil {
+		return nil, err
+	}
+	fx.certs = append(fx.certs, fx.renewer)
+	return fx, nil
+}
+
+// inject copies the certificates and CSRs into the running server's store.
+// They go in as files rather than through the API: upstream would refuse a
+// CSR for a subject that already holds a certificate, and has no way to
+// accept a certificate it did not sign.
+func (fx *fixtureSet) inject(ctx context.Context, container, tmp string) error {
+	for dir, items := range map[string][]issued{"signed": fx.certs, "requests": fx.csrs} {
+		local := filepath.Join(tmp, "inject", dir)
+		if err := os.MkdirAll(local, 0o750); err != nil {
+			return err
+		}
+		blockType := "CERTIFICATE"
+		if dir == "requests" {
+			blockType = "CERTIFICATE REQUEST"
+		}
+		for _, it := range items {
+			p := pem.EncodeToMemory(&pem.Block{Type: blockType, Bytes: it.der})
+			if err := os.WriteFile(filepath.Join(local, it.name+".pem"), p, 0o600); err != nil {
+				return err
+			}
+		}
+		if err := docker(ctx, "cp", local+"/.", container+":"+cadirPath+"/"+dir+"/"); err != nil {
+			return err
+		}
+	}
+	// docker cp leaves the files owned by root; the server must be able to
+	// replace them (a renewal rewrites the certificate it renews).
+	return docker(ctx, "exec", "-u", "0", container, "chown", "-R", "puppet:root", cadirPath+"/signed", cadirPath+"/requests")
+}
+
+// snapshot writes the server's store, as the contract spec will load it, and
+// the renewal client's key.
+func snapshot(ctx context.Context, container, tmp string, out *os.Root, renewer issued) error {
+	raw := filepath.Join(tmp, "snapshot")
+	if err := docker(ctx, "cp", container+":"+cadirPath, raw); err != nil {
+		return err
+	}
+	for _, f := range []string{"ca_crt.pem", "ca_key.pem", "ca_crl.pem", "inventory.txt"} {
+		if err := copyFile(out, filepath.Join(raw, f), filepath.Join("cadir", f)); err != nil {
+			return err
+		}
+	}
+	for _, dir := range []string{"signed", "requests"} {
+		entries, err := os.ReadDir(filepath.Join(raw, dir))
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			if err := copyFile(out, filepath.Join(raw, dir, e.Name()), filepath.Join("cadir", dir, e.Name())); err != nil {
+				return err
+			}
+		}
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(renewer.key)
+	if err != nil {
+		return err
+	}
+	return writeFile(out, filepath.Join("keys", "renew-me.pem"),
+		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))
+}
+
+func copyFile(out *os.Root, src, dst string) error {
+	b, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return writeFile(out, dst, b)
+}
+
+func writeFile(out *os.Root, name string, b []byte) error {
+	if err := out.MkdirAll(filepath.Dir(name), 0o750); err != nil {
+		return err
+	}
+	return out.WriteFile(name, b, 0o600)
+}
+
+// --- recording ---------------------------------------------------------------
+
+type request struct {
+	Method          string `json:"method"`
+	Path            string `json:"path"`
+	ContentType     string `json:"content_type,omitempty"`
+	Body            string `json:"body,omitempty"`
+	IfModifiedSince string `json:"if_modified_since,omitempty"`
+	// Client names the identity the request is made with: "admin" holds
+	// pp_cli_auth, "renewer" is renew-me's own certificate.
+	Client string `json:"client"`
+}
+
+type response struct {
+	Status      int             `json:"status"`
+	ContentType string          `json:"content_type,omitempty"`
+	JSON        json.RawMessage `json:"json,omitempty"`
+	Text        *string         `json:"text,omitempty"`
+}
+
+type fixture struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Sources     []string `json:"sources"`
+	Recorded    string   `json:"recorded_from"`
+	// Compare is how much of the body the contract binds: "exact" for
+	// every value, "types" for JSON types only, "none" for status and
+	// media type only.
+	Compare  string   `json:"compare"`
+	Request  request  `json:"request"`
+	Response response `json:"response"`
+}
+
+func do(ctx context.Context, c *http.Client, r request) (response, error) {
+	var body io.Reader
+	if r.Body != "" {
+		body = strings.NewReader(r.Body)
+	}
+	req, err := http.NewRequestWithContext(ctx, r.Method, "https://"+serverName+r.Path, body)
+	if err != nil {
+		return response{}, err
+	}
+	if r.ContentType != "" {
+		req.Header.Set("Content-Type", r.ContentType)
+	}
+	if r.IfModifiedSince != "" {
+		req.Header.Set("If-Modified-Since", r.IfModifiedSince)
+	}
+	req.Header.Set("Accept", "application/json, text/plain")
+	resp, err := c.Do(req)
+	if err != nil {
+		return response{}, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return response{}, err
+	}
+	out := response{Status: resp.StatusCode, ContentType: resp.Header.Get("Content-Type")}
+	if strings.HasPrefix(out.ContentType, "application/json") && json.Valid(b) {
+		var buf bytes.Buffer
+		if err := json.Indent(&buf, b, "", "  "); err != nil {
+			return response{}, err
+		}
+		out.JSON = buf.Bytes()
+	} else {
+		s := string(b)
+		out.Text = &s
+	}
+	return out, nil
+}
+
+func writeFixture(out *os.Root, f fixture) error {
+	b, err := json.MarshalIndent(f, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeFile(out, filepath.Join("fixtures", f.Name+".json"), append(b, '\n'))
+}
+
+// cases lists every recorded request, reads before mutations: each mutation
+// works on a subject no other fixture reads, so every response is the answer
+// to the snapshot state. /sign/all, which acts on every pending CSR, is
+// last and bound by type only.
+func cases() []fixture {
+	const (
+		ovc = "src/clj/puppetlabs/services/ca/certificate_authority_core.clj"
+		ova = "src/clj/puppetlabs/puppetserver/certificate_authority.clj"
+	)
+	status := []string{ovc + ":423-542", ova + ":177-200", ova + ":491-526", ova + ":2010-2066"}
+	statuses := []string{ovc + ":544-561", ova + ":2068-2096"}
+	get := func(path string) request { return request{Method: "GET", Path: path, Client: "admin"} }
+	putJSON := func(path, body string) request {
+		return request{Method: "PUT", Path: path, ContentType: "application/json", Body: body, Client: "admin"}
+	}
+	postJSON := func(path, body string) request {
+		return request{Method: "POST", Path: path, ContentType: "application/json", Body: body, Client: "admin"}
+	}
+	const v1 = "/puppet-ca/v1"
+	future := time.Now().UTC().AddDate(1, 0, 0).Format(http.TimeFormat)
+
+	fs := []fixture{
+		{Name: "status-signed-dns", Description: "status of a certificate with mixed-case DNS SANs, auth extensions and a top-bit-set serial", Sources: status, Compare: "exact", Request: get(v1 + "/certificate_status/corner-dns")},
+		{Name: "status-signed-ip", Description: "status of a certificate with IPv4, IPv6 and mapped IP SANs and ignored SAN types", Sources: status, Compare: "exact", Request: get(v1 + "/certificate_status/corner-ip")},
+		{Name: "status-signed-nosan", Description: "status of a certificate with no SAN extension and a small serial", Sources: status, Compare: "exact", Request: get(v1 + "/certificate_status/corner-nosan")},
+		{Name: "status-signed-ext", Description: "status of a certificate whose auth extensions the implementations key or render differently", Sources: status, Compare: "exact", Request: get(v1 + "/certificate_status/corner-ext")},
+		{Name: "status-revoked", Description: "status of a revoked certificate", Sources: status, Compare: "exact", Request: get(v1 + "/certificate_status/corner-revoked")},
+		{Name: "status-requested", Description: "status of a pending CSR with DNS SANs", Sources: status, Compare: "exact", Request: get(v1 + "/certificate_status/corner-pending")},
+		{Name: "status-cert-and-csr", Description: "status of a subject with both a certificate and a pending CSR: the certificate wins", Sources: status, Compare: "exact", Request: get(v1 + "/certificate_status/corner-both")},
+		{Name: "status-unknown", Description: "status of a subject the CA has never seen", Sources: status, Compare: "none", Request: get(v1 + "/certificate_status/no-such-node")},
+		{Name: "statuses-all", Description: "every certificate and CSR", Sources: statuses, Compare: "exact", Request: get(v1 + "/certificate_statuses/any")},
+		{Name: "statuses-requested", Description: "pending CSRs only", Sources: statuses, Compare: "exact", Request: get(v1 + "/certificate_statuses/any?state=requested")},
+		{Name: "statuses-signed", Description: "signed certificates only", Sources: statuses, Compare: "exact", Request: get(v1 + "/certificate_statuses/any?state=signed")},
+		{Name: "statuses-revoked", Description: "revoked certificates only", Sources: statuses, Compare: "exact", Request: get(v1 + "/certificate_statuses/any?state=revoked")},
+		{Name: "certificate-get", Description: "a signed certificate", Sources: []string{ovc + ":68-80", ova + ":1501-1513"}, Compare: "exact", Request: get(v1 + "/certificate/corner-dns")},
+		{Name: "certificate-get-ca", Description: "the CA certificate bundle", Sources: []string{ovc + ":68-80", ova + ":1501-1513"}, Compare: "exact", Request: get(v1 + "/certificate/ca")},
+		{Name: "certificate-get-unknown", Description: "a certificate the CA does not hold", Sources: []string{ovc + ":68-80"}, Compare: "none", Request: get(v1 + "/certificate/no-such-node")},
+		{Name: "certificate-get-not-modified", Description: "a certificate not modified since the If-Modified-Since date", Sources: []string{ovc + ":42-80"}, Compare: "none",
+			Request: request{Method: "GET", Path: v1 + "/certificate/corner-dns", IfModifiedSince: future, Client: "admin"}},
+		{Name: "certificate-request-get", Description: "a pending CSR", Sources: []string{ovc + ":82-88"}, Compare: "exact", Request: get(v1 + "/certificate_request/corner-pending")},
+		{Name: "certificate-request-get-unknown", Description: "a CSR the CA does not hold", Sources: []string{ovc + ":82-88"}, Compare: "none", Request: get(v1 + "/certificate_request/no-such-node")},
+		{Name: "crl-get", Description: "the CRL", Sources: []string{ovc + ":104-132"}, Compare: "exact", Request: get(v1 + "/certificate_revocation_list/ca")},
+		{Name: "expirations", Description: "expiry dates of the CA certificates and CRLs", Sources: []string{ovc + ":166-172", ova + ":2288-2318"}, Compare: "exact", Request: get(v1 + "/expirations")},
+
+		// Mutations, each on a subject of its own.
+		{Name: "status-put-sign", Description: "signing a pending CSR", Sources: []string{ovc + ":423-542"}, Compare: "none", Request: putJSON(v1+"/certificate_status/sign-me", `{"desired_state":"signed"}`)},
+		{Name: "status-put-revoke", Description: "revoking a signed certificate", Sources: []string{ovc + ":423-542"}, Compare: "none", Request: putJSON(v1+"/certificate_status/revoke-me", `{"desired_state":"revoked"}`)},
+		{Name: "status-put-revoke-unknown", Description: "revoking a subject the CA has never seen", Sources: []string{ovc + ":475-487"}, Compare: "none", Request: putJSON(v1+"/certificate_status/no-such-node", `{"desired_state":"revoked"}`)},
+		{Name: "status-put-sign-without-csr", Description: "signing a subject that holds a certificate but no CSR", Sources: []string{ovc + ":440-444"}, Compare: "none", Request: putJSON(v1+"/certificate_status/corner-nosan", `{"desired_state":"signed"}`)},
+		{Name: "status-put-bad-state", Description: "an unknown desired_state", Sources: []string{ovc + ":494-514"}, Compare: "none", Request: putJSON(v1+"/certificate_status/corner-pending", `{"desired_state":"bogus"}`)},
+		{Name: "status-delete", Description: "deleting a signed certificate", Sources: []string{ovc + ":450-465", ova + ":2252-2260"}, Compare: "none", Request: request{Method: "DELETE", Path: v1 + "/certificate_status/delete-me", Client: "admin"}},
+		// The two CSR submissions' bodies are generated: see run.
+		{Name: "certificate-request-put", Description: "submitting a new CSR", Sources: []string{ovc + ":90-102"}, Compare: "none", Request: request{Method: "PUT", Path: v1 + "/certificate_request/new-csr", ContentType: "text/plain", Client: "admin"}},
+		{Name: "certificate-request-put-existing-cert", Description: "submitting a CSR for a subject that already holds a certificate", Sources: []string{ovc + ":90-102", ova + ":1717-1739"}, Compare: "none", Request: request{Method: "PUT", Path: v1 + "/certificate_request/corner-nosan", ContentType: "text/plain", Client: "admin"}},
+		{Name: "certificate-request-delete", Description: "deleting a pending CSR", Sources: []string{ovc + ":154-164", ova + ":1645-1665"}, Compare: "none", Request: request{Method: "DELETE", Path: v1 + "/certificate_request/delete-me-csr", Client: "admin"}},
+		{Name: "certificate-request-delete-unknown", Description: "deleting a CSR the CA does not hold", Sources: []string{ovc + ":154-164", ova + ":1645-1665"}, Compare: "none", Request: request{Method: "DELETE", Path: v1 + "/certificate_request/no-such-node", Client: "admin"}},
+		{Name: "sign", Description: "signing named CSRs", Sources: []string{ovc + ":275-291", ova + ":2485-2527"}, Compare: "exact", Request: postJSON(v1+"/sign", `{"certnames":["sign2-me","no-such-node"]}`)},
+		{Name: "sign-empty", Description: "signing an empty list", Sources: []string{ovc + ":275-291"}, Compare: "exact", Request: postJSON(v1+"/sign", `{"certnames":[]}`)},
+		{Name: "sign-missing-certnames", Description: "signing with no certnames key", Sources: []string{ovc + ":275-291"}, Compare: "exact", Request: postJSON(v1+"/sign", `{}`)},
+		{Name: "sign-non-list", Description: "signing with certnames that is not a list", Sources: []string{ovc + ":275-291"}, Compare: "types", Request: postJSON(v1+"/sign", `{"certnames":"sign2-me"}`)},
+		{Name: "clean", Description: "cleaning a certificate", Sources: []string{ovc + ":187-223", ova + ":2262-2268"}, Compare: "none", Request: putJSON(v1+"/clean", `{"certnames":["clean-me"]}`)},
+		{Name: "certificate-renewal", Description: "auto-renewing the presented certificate", Sources: []string{ovc + ":303-339"}, Compare: "none", Request: request{Method: "POST", Path: v1 + "/certificate_renewal", Client: "renewer"}},
+		{Name: "sign-all", Description: "signing every pending CSR", Sources: []string{ovc + ":293-301", ova + ":2485-2527"}, Compare: "types", Request: postJSON(v1+"/sign/all", `{}`)},
+	}
+	return fs
+}
