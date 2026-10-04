@@ -1278,20 +1278,22 @@ var _ = Describe("serial_number_format at startup", func() {
 	})
 })
 
-var _ = DescribeTable("applyResponseFormats hands the server the response settings in its config",
-	func(cfg serverConfig, want api.SerialNumberFormat) {
-		srv := &api.Server{}
-		Expect(applyResponseFormats(srv, &cfg)).To(Succeed())
-		Expect(srv.PuppetDateTimeFormat).To(Equal(cfg.PuppetDateTimeFormat))
-		Expect(srv.SerialNumberFormat).To(Equal(want))
-	},
-	Entry("the defaults", serverConfig{}, api.SerialNumberAsNumber),
-	Entry("both opted in", serverConfig{PuppetDateTimeFormat: true, SerialNumberFormat: "hex"}, api.SerialNumberAsHex),
-	Entry("hex, written loosely", serverConfig{SerialNumberFormat: " HEX "}, api.SerialNumberAsHex),
-)
+var _ = Describe("applyResponseFormats", func() {
+	DescribeTable("hands the server the response settings in its config",
+		func(cfg serverConfig, want api.SerialNumberFormat) {
+			srv := &api.Server{}
+			Expect(applyResponseFormats(srv, &cfg)).To(Succeed())
+			Expect(srv.PuppetDateTimeFormat).To(Equal(cfg.PuppetDateTimeFormat))
+			Expect(srv.SerialNumberFormat).To(Equal(want))
+		},
+		Entry("the defaults", serverConfig{}, api.SerialNumberAsNumber),
+		Entry("both opted in", serverConfig{PuppetDateTimeFormat: true, SerialNumberFormat: "hex"}, api.SerialNumberAsHex),
+		Entry("hex, written loosely", serverConfig{SerialNumberFormat: " HEX "}, api.SerialNumberAsHex),
+	)
 
-var _ = It("applyResponseFormats refuses an unknown serial_number_format rather than defaulting", func() {
-	srv := &api.Server{}
-	Expect(applyResponseFormats(srv, &serverConfig{SerialNumberFormat: "hexx"})).To(
-		MatchError(ContainSubstring("invalid serial_number_format")))
+	It("refuses an unknown serial_number_format rather than defaulting", func() {
+		srv := &api.Server{}
+		Expect(applyResponseFormats(srv, &serverConfig{SerialNumberFormat: "hexx"})).To(
+			MatchError(ContainSubstring("invalid serial_number_format")))
+	})
 })
