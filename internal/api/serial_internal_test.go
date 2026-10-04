@@ -74,6 +74,9 @@ var _ = Describe("CertSerial encoding", func() {
 		Entry("small, top bit set: still no sign byte", big.NewInt(0x80), "80"),
 		Entry("two bytes", big.NewInt(0x1234), "12:34"),
 		Entry("zero", big.NewInt(0), "00"),
+		// Reachable from an index row: its serial is parsed with SetString,
+		// which accepts a sign.
+		Entry("negative: keeps its sign", big.NewInt(-0x1234), "-12:34"),
 	)
 
 	It("keeps a value's own digits rather than sharing the caller's big.Int", func() {
