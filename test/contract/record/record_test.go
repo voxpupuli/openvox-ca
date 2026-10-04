@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -100,31 +101,79 @@ func fixtureDrift(dir string) []string {
 }
 
 var _ = Describe("the committed contract", func() {
-	It("is what cases() records, untouched by hand", func() {
+	// It binds the fixtures' names, compare modes, descriptions, sources and
+	// requests; a hand-edited response is beyond it, and only a re-record
+	// shows one up.
+	It("records every case in cases(), with its request and compare mode", func() {
 		Expect(fixtureDrift(contractFixtures)).To(BeEmpty(), "re-record: go run ./test/contract/record")
 	})
 
-	It("is reported when a fixture's compare mode is edited", func() {
-		dir := GinkgoT().TempDir()
-		paths, err := filepath.Glob(filepath.Join(contractFixtures, "*.json"))
-		Expect(err).NotTo(HaveOccurred())
-		for _, p := range paths {
-			b, err := os.ReadFile(p)
+	// Each entry edits one fixture in a copy of the contract and expects the
+	// one drift line that edit causes.
+	DescribeTable("reports a contract that has drifted from cases()",
+		func(edit func(dir string), want string) {
+			dir := GinkgoT().TempDir()
+			paths, err := filepath.Glob(filepath.Join(contractFixtures, "*.json"))
 			Expect(err).NotTo(HaveOccurred())
-			if filepath.Base(p) == "status-signed-dns.json" {
-				var f map[string]any
-				Expect(json.Unmarshal(b, &f)).To(Succeed())
-				f["compare"] = "none"
-				b, err = json.Marshal(f)
+			for _, p := range paths {
+				b, err := os.ReadFile(p)
 				Expect(err).NotTo(HaveOccurred())
+				Expect(os.WriteFile(filepath.Join(dir, filepath.Base(p)), b, 0o600)).To(Succeed())
 			}
-			Expect(os.WriteFile(filepath.Join(dir, filepath.Base(p)), b, 0o600)).To(Succeed())
-		}
-		Expect(os.Remove(filepath.Join(dir, "crl-get.json"))).To(Succeed())
-		Expect(fixtureDrift(dir)).To(ConsistOf(
-			`status-signed-dns: compare "none", case "exact"`,
-			"crl-get: not recorded",
-		))
+			edit(dir)
+			Expect(fixtureDrift(dir)).To(ConsistOf(HavePrefix(want)))
+		},
+		Entry("an edited compare mode", editFixture("status-signed-dns", func(f map[string]any) { f["compare"] = "none" }),
+			`status-signed-dns: compare "none", case "exact"`),
+		Entry("an edited request", editFixture("crl-get", func(f map[string]any) {
+			f["request"].(map[string]any)["path"] = "/puppet-ca/v1/certificate_revocation_list/other"
+		}), "crl-get: request "),
+		Entry("an edited description", editFixture("sign", func(f map[string]any) { f["description"] = "something else" }),
+			"sign: description or sources differ from the case"),
+		Entry("edited sources", editFixture("clean", func(f map[string]any) { f["sources"] = []string{"elsewhere.clj:1-2"} }),
+			"clean: description or sources differ from the case"),
+		Entry("a fixture no case records", func(dir string) {
+			editFixture("crl-get", func(f map[string]any) { f["name"] = "orphan" })(dir)
+			b, err := os.ReadFile(filepath.Join(dir, "crl-get.json"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(os.WriteFile(filepath.Join(dir, "orphan.json"), b, 0o600)).To(Succeed())
+			Expect(os.WriteFile(filepath.Join(dir, "crl-get.json"), mustRead(filepath.Join(contractFixtures, "crl-get.json")), 0o600)).To(Succeed())
+		}, "orphan: no case records it"),
+		Entry("a case never recorded", func(dir string) {
+			Expect(os.Remove(filepath.Join(dir, "crl-get.json"))).To(Succeed())
+		}, "crl-get: not recorded"),
+	)
+})
+
+// editFixture rewrites one fixture in dir through edit.
+func editFixture(name string, edit func(map[string]any)) func(dir string) {
+	return func(dir string) {
+		p := filepath.Join(dir, name+".json")
+		var f map[string]any
+		Expect(json.Unmarshal(mustRead(p), &f)).To(Succeed())
+		edit(f)
+		b, err := json.Marshal(f)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(os.WriteFile(p, b, 0o600)).To(Succeed())
+	}
+}
+
+func mustRead(p string) []byte {
+	b, err := os.ReadFile(p)
+	Expect(err).NotTo(HaveOccurred())
+	return b
+}
+
+var _ = Describe("waitReady", func() {
+	It("reports a cancelled wait as not ready, not as a container that stopped", func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		// Nothing listens on port 1, so the probe fails, and the cancelled
+		// context is seen before docker would be asked anything.
+		err := waitReady(ctx, "no-such-container", "127.0.0.1:1")
+		Expect(err).To(MatchError(context.Canceled))
+		Expect(err).To(MatchError(ContainSubstring("did not become ready")))
+		Expect(err.Error()).NotTo(ContainSubstring("stopped"))
 	})
 })
 
@@ -238,6 +287,15 @@ var _ = Describe("do", func() {
 			case "/broken-json":
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte("Resource not found."))
+			case "/echo":
+				// Hands back what do sent, as headers do records.
+				w.Header().Set("X-Seen-Method", r.Method)
+				w.Header().Set("X-Seen-Accept", r.Header.Get("Accept"))
+				w.Header().Set("X-Seen-Content-Type", r.Header.Get("Content-Type"))
+				w.Header().Set("X-Seen-If-Modified-Since", r.Header.Get("If-Modified-Since"))
+				body, _ := io.ReadAll(r.Body)
+				w.Header().Set("X-Seen-Body", string(body))
+				w.WriteHeader(http.StatusConflict)
 			default:
 				w.Header().Set("Content-Type", "text/plain")
 				_, _ = w.Write([]byte("PEM\n"))
@@ -276,6 +334,24 @@ var _ = Describe("do", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(resp.JSON).To(BeNil())
 		Expect(resp.Text).To(HaveValue(Equal("PEM\n")))
+	})
+
+	It("sends the request as the case describes it, and records the status", func() {
+		resp, err := do(context.Background(), client, request{Method: "PUT", Path: "/echo",
+			ContentType: "text/plain", Body: "not a CSR", IfModifiedSince: farFuture, Accept: "text/pson"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.Status).To(Equal(http.StatusConflict))
+		Expect(resp.Headers).To(HaveKeyWithValue("X-Seen-Method", "PUT"))
+		Expect(resp.Headers).To(HaveKeyWithValue("X-Seen-Content-Type", "text/plain"))
+		Expect(resp.Headers).To(HaveKeyWithValue("X-Seen-Body", "not a CSR"))
+		Expect(resp.Headers).To(HaveKeyWithValue("X-Seen-If-Modified-Since", farFuture))
+		Expect(resp.Headers).To(HaveKeyWithValue("X-Seen-Accept", "text/pson"))
+	})
+
+	It("asks for JSON or text when the case names no Accept", func() {
+		resp, err := do(context.Background(), client, request{Method: "GET", Path: "/echo"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.Headers).To(HaveKeyWithValue("X-Seen-Accept", "application/json, text/plain"))
 	})
 })
 

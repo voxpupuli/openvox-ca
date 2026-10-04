@@ -208,7 +208,9 @@ func run(out, compose string, keep bool) error {
 		image); err != nil {
 		return err
 	}
-	if !keep {
+	if keep {
+		defer slog.Info("container kept", "name", name, "remove", "docker rm -f "+name)
+	} else {
 		defer func() { _ = docker(context.Background(), "rm", "-f", name) }()
 	}
 
@@ -275,7 +277,7 @@ ruby -e '
 	if err := waitReady(ctx, name, addr); err != nil {
 		return err
 	}
-	slog.Info("OpenVox Server ready", "addr", addr)
+	slog.Info("OpenVox Server ready", "container", name, "addr", addr)
 
 	bootstrap := filepath.Join(tmp, "bootstrap")
 	if err := docker(ctx, "cp", name+":"+cadirPath, bootstrap); err != nil {
@@ -575,14 +577,15 @@ func (a *authority) client(id *issued, addr string) *http.Client {
 	}
 }
 
-func newCSR(cn string, dns []string) (issued, error) {
+func newCSR(cn string, dns []string, exts ...pkix.Extension) (issued, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return issued{}, err
 	}
 	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
-		Subject:  pkix.Name{CommonName: cn},
-		DNSNames: dns,
+		Subject:         pkix.Name{CommonName: cn},
+		DNSNames:        dns,
+		ExtraExtensions: exts,
 	}, key)
 	if err != nil {
 		return issued{}, err
@@ -716,16 +719,20 @@ func newFixtureSet(ca *authority) (*fixtureSet, error) {
 	}
 
 	for _, c := range []struct {
-		cn  string
-		dns []string
+		cn   string
+		dns  []string
+		exts []pkix.Extension
 	}{
-		{"corner-pending", []string{"corner-pending", "Pending.Example.COM"}},
-		{"corner-both", nil},
-		{"sign-me", nil},
-		{"sign2-me", nil},
-		{"delete-me-csr", nil},
+		{"corner-pending", []string{"corner-pending", "Pending.Example.COM"}, nil},
+		// Asks for an authorisation extension, which OpenVox Server refuses
+		// to sign by default and openvox-ca strips.
+		{"corner-authext", nil, []pkix.Extension{utf8Ext(oidPpCliAuth, "true")}},
+		{"corner-both", nil, nil},
+		{"sign-me", nil, nil},
+		{"sign2-me", nil, nil},
+		{"delete-me-csr", nil, nil},
 	} {
-		csr, err := newCSR(c.cn, c.dns)
+		csr, err := newCSR(c.cn, c.dns, c.exts...)
 		if err != nil {
 			return nil, err
 		}
@@ -850,6 +857,8 @@ type request struct {
 	ContentType     string `json:"content_type,omitempty"`
 	Body            string `json:"body,omitempty"`
 	IfModifiedSince string `json:"if_modified_since,omitempty"`
+	// Accept is the Accept header; when empty, do asks for JSON or text.
+	Accept string `json:"accept,omitempty"`
 	// Client names the identity the request is made with: "admin" holds
 	// pp_cli_auth, "renewer" is renew-me's own certificate, and
 	// "anonymous" presents no client certificate.
@@ -897,7 +906,11 @@ func do(ctx context.Context, c *http.Client, r request) (response, error) {
 	if r.IfModifiedSince != "" {
 		req.Header.Set("If-Modified-Since", r.IfModifiedSince)
 	}
-	req.Header.Set("Accept", "application/json, text/plain")
+	accept := r.Accept
+	if accept == "" {
+		accept = "application/json, text/plain"
+	}
+	req.Header.Set("Accept", accept)
 	resp, err := c.Do(req)
 	if err != nil {
 		return response{}, err
@@ -968,6 +981,8 @@ func cases() []fixture {
 		{Name: "status-revoked", Description: "status of a revoked certificate", Sources: status, Compare: "exact", Request: get(v1 + "/certificate_status/corner-revoked")},
 		{Name: "status-requested", Description: "status of a pending CSR with DNS SANs", Sources: status, Compare: "exact", Request: get(v1 + "/certificate_status/corner-pending")},
 		{Name: "status-cert-and-csr", Description: "status of a subject with both a certificate and a pending CSR: the certificate wins", Sources: status, Compare: "exact", Request: get(v1 + "/certificate_status/corner-both")},
+		{Name: "status-get-pson", Description: "status of a certificate, asking for pson", Sources: status, Compare: "none",
+			Request: request{Method: "GET", Path: v1 + "/certificate_status/corner-dns", Accept: "text/pson", Client: "admin"}},
 		{Name: "status-unknown", Description: "status of a subject the CA has never seen", Sources: status, Compare: "none", Request: get(v1 + "/certificate_status/no-such-node")},
 		{Name: "statuses-all", Description: "every certificate and CSR", Sources: statuses, Compare: "exact", Request: get(v1 + "/certificate_statuses/any")},
 		{Name: "statuses-requested", Description: "pending CSRs only", Sources: statuses, Compare: "exact", Request: get(v1 + "/certificate_statuses/any?state=requested")},
@@ -1010,6 +1025,9 @@ func cases() []fixture {
 		// corner-pending's CSR asks for DNS SANs, which neither CA signs by
 		// default: two refusals, so the subject stays pending for the rest.
 		{Name: "status-put-sign-refused", Description: "signing a CSR the CA refuses, for its subject alternative names", Sources: []string{ovc + ":423-542"}, Compare: "none", Request: putJSON(v1+"/certificate_status/corner-pending", `{"desired_state":"signed"}`)},
+		{Name: "status-put-not-json", Description: "a status change whose body is labelled text/plain", Sources: []string{ovc + ":423-542"}, Compare: "none",
+			Request: request{Method: "PUT", Path: v1 + "/certificate_status/corner-pending", ContentType: "text/plain", Body: `{"desired_state":"bogus"}`, Client: "admin"}},
+		{Name: "status-put-sign-authext", Description: "signing a CSR that asks for an authorisation extension", Sources: []string{ovc + ":423-542"}, Compare: "none", Request: putJSON(v1+"/certificate_status/corner-authext", `{"desired_state":"signed"}`)},
 		{Name: "sign-refused", Description: "signing named CSRs the CA refuses, for their subject alternative names", Sources: []string{ovc + ":275-291", ova + ":2485-2527"}, Compare: "exact", Request: postJSON(v1+"/sign", `{"certnames":["corner-pending"]}`)},
 		{Name: "status-delete", Description: "deleting a signed certificate", Sources: []string{ovc + ":450-465", ova + ":2252-2260"}, Compare: "none", Request: request{Method: "DELETE", Path: v1 + "/certificate_status/delete-me", Client: "admin"}},
 		// The two CSR submissions' bodies are generated: see run.

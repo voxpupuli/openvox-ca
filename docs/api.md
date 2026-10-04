@@ -552,7 +552,7 @@ Tracked as defects, each with an issue:
 - `GET /certificate/{subject}` ignores `If-Modified-Since` ([#414](https://github.com/voxpupuli/openvox-ca/issues/414)).
 - Revoking a subject the CA has never seen answers `409` rather than `404` ([#358](https://github.com/voxpupuli/openvox-ca/issues/358)).
 
-Deliberate, and kept. Each has a fixture that records it, except where marked *not recorded*: those need a server state, a setting or a client the recording does not set up, and are known only from OpenVox Server's source.
+Deliberate, and kept. Each has a fixture that records it, except where marked *not recorded*: those are known only from OpenVox Server's source, mostly because they need a server state or setting the recording does not set up.
 
 - `PUT /clean` answers JSON (`cleaned`, `not-found`, `clean-errors`) rather than a sentence. It also removes CSRs, and ignores `async` (*not recorded*).
 - `GET /certificate_statuses` returns `[]` for an unknown `state`, and lists a subject holding both a certificate and a pending CSR once (the certificate).
@@ -560,7 +560,9 @@ Deliberate, and kept. Each has a fixture that records it, except where marked *n
 - An authorisation-extension value that is not a DER string renders as hex.
 - A stored certificate openvox-ca cannot parse is reported in part: its status omits the SANs, serial number and validity dates rather than failing. Go refuses, for one, a certificate whose SAN holds an IPv4-mapped IPv6 address, which OpenVox Server signs and reports in full. Such a certificate can still be revoked, but its holder cannot complete TLS to openvox-ca, so it cannot use auto-renewal.
 - An unparseable CSR answers `400` rather than `500`.
+- A CSR asking for authorisation extensions is signed with them stripped (`204`), where OpenVox Server refuses it (`409`).
+- Responses are JSON only: a request asking for pson gets JSON.
 - `POST /certificate_renewal` without a client certificate answers `403` rather than `400`.
 - The CRL is served at `/certificate_revocation_list/ca` only. An empty `certificate_statuses` segment answers `404` and an invalid subject `400`, where OpenVox Server answers `400` and `404`. A method a route does not serve answers `405`. An `If-Modified-Since` that is not an HTTP date, which names the day of the week, is ignored.
 - Dates are RFC 3339 by default; `puppet_datetime_format: true` gives OpenVox Server's layout, and the contract is checked under that setting.
-- *Not recorded:* a missing CRL answers `404` and a storage failure `503`, where OpenVox Server answers `500`; responses are JSON only, without pson, and request content types are not checked; a CSR carrying authorisation extensions has them stripped rather than being refused; `POST /certificate_renewal` is always served (OpenVox Server's default is off) and a CSR body re-keys; `DELETE /certificate_status/{subject}` revokes before it deletes; `cert_ttl` of zero or less means the default validity.
+- *Not recorded:* a missing CRL answers `404` and a storage failure `503`, where OpenVox Server answers `500`; `POST /certificate_renewal` is always served (OpenVox Server's default is off) and a CSR body re-keys; `DELETE /certificate_status/{subject}` revokes before it deletes; `cert_ttl` of zero or less means the default validity.

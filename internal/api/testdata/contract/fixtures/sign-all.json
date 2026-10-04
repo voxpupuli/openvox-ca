@@ -30,6 +30,7 @@
       ],
       "no-csr": [],
       "signing-errors": [
+        "corner-authext",
         "corner-pending"
       ]
     }

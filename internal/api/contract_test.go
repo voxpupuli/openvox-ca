@@ -33,6 +33,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -77,6 +78,20 @@ const contractDir = "testdata/contract"
 // test/contract/record's fixture type.
 var contractCompareModes = map[string]bool{"exact": true, "types": true, "none": true, "status": true}
 
+// contractClients are the identities serveContract knows how to replay:
+// "renewer" presents renew-me's certificate, and the others present none,
+// since openvox-ca's own authorisation is not part of the contract.
+var contractClients = map[string]bool{"admin": true, "anonymous": true, "renewer": true}
+
+// contractRequestFields are the request fields serveContract replays. The
+// recorder's request type is a separate copy, so a field it gains has to be
+// added here too, or it would be dropped and openvox-ca asked something
+// OpenVox Server was not.
+var contractRequestFields = map[string]bool{
+	"method": true, "path": true, "content_type": true, "body": true,
+	"if_modified_since": true, "accept": true, "client": true,
+}
+
 // contractFixture mirrors test/contract/record's fixture format.
 type contractFixture struct {
 	Name    string `json:"name"`
@@ -87,6 +102,7 @@ type contractFixture struct {
 		ContentType     string `json:"content_type"`
 		Body            string `json:"body"`
 		IfModifiedSince string `json:"if_modified_since"`
+		Accept          string `json:"accept"`
 		Client          string `json:"client"`
 	} `json:"request"`
 	Response contractResponse `json:"response"`
@@ -132,7 +148,7 @@ var contractExceptions = map[string][]contractException{
 		cornerExtExtensions("$[name=corner-ext,state=signed]")...),
 		degradedMapped("$[name=corner-mapped,state=signed]")...),
 	"statuses-revoked": missingFingerprints("$[*]"),
-	"statuses-unknown-state": {{"$: 0 entries, upstream 17",
+	"statuses-unknown-state": {{"$: 0 entries, upstream 18",
 		"kept: an unknown ?state= matches no subject, where upstream ignores the filter and lists them all"}},
 	"statuses-empty-segment": {{"status: 404, upstream 400",
 		"kept: certificate_statuses without its segment is not a route"}},
@@ -166,6 +182,10 @@ var contractExceptions = map[string][]contractException{
 		"#412: POST /sign with a certnames that is not a list answers 400"}},
 	"clean": {{`media type: "application/json", upstream "text/plain"`,
 		"kept: PUT /clean reports what it did to each subject, as JSON"}},
+	"status-get-pson": {{`media type: "application/json", upstream "text/pson"`,
+		"kept: responses are JSON only; pson is not offered"}},
+	"status-put-sign-authext": {{"status: 204, upstream 409",
+		"kept: a CSR asking for authorisation extensions is signed with them stripped, rather than refused"}},
 }
 
 // degradedMapped is corner-mapped's status: crypto/x509 refuses to parse a
@@ -412,7 +432,16 @@ func field(at, k string) string {
 	return at + "." + k
 }
 
+// lastField is the key at the end of a path field wrote, quoted or not, or ""
+// when the path ends in a list entry.
 func lastField(at string) string {
+	if strings.HasSuffix(at, `"]`) {
+		if i := strings.LastIndex(at, `["`); i >= 0 {
+			if k, err := strconv.Unquote(at[i+1 : len(at)-1]); err == nil {
+				return k
+			}
+		}
+	}
 	i := strings.LastIndexAny(at, ".]")
 	if i < 0 || at[i] == ']' {
 		return ""
@@ -471,6 +500,27 @@ func exceptionMatches(exception, diff string) bool {
 
 // --- the openvox-ca under test ---------------------------------------------
 
+// checkReplayable refuses a fixture whose request names a client or carries a
+// field that serveContract does not replay.
+func checkReplayable(fixture []byte) error {
+	var raw struct {
+		Request map[string]json.RawMessage `json:"request"`
+	}
+	if err := json.Unmarshal(fixture, &raw); err != nil {
+		return err
+	}
+	for _, k := range sortedKeys(raw.Request) {
+		if !contractRequestFields[k] {
+			return fmt.Errorf("request field %q is not replayed", k)
+		}
+	}
+	var client string
+	if err := json.Unmarshal(raw.Request["client"], &client); err != nil || !contractClients[client] {
+		return fmt.Errorf("request client %s is not one serveContract replays", raw.Request["client"])
+	}
+	return nil
+}
+
 // loadContractFixtures runs while the spec tree is built, where Gomega cannot,
 // so a fixture that will not load panics instead.
 func loadContractFixtures() []contractFixture {
@@ -492,6 +542,11 @@ func loadContractFixtures() []contractFixture {
 		// comparison, binding less than whoever wrote it intended.
 		if !contractCompareModes[f.Compare] {
 			panic(fmt.Sprintf("%s: unknown compare mode %q", p, f.Compare))
+		}
+		// For the same reason, a client or a request field the replay does
+		// not know would replay a different request from the one recorded.
+		if err := checkReplayable(b); err != nil {
+			panic(fmt.Sprintf("%s: %v", p, err))
 		}
 		fixtures = append(fixtures, f)
 	}
@@ -591,6 +646,9 @@ func serveContract(srv *api.Server, f contractFixture) *httptest.ResponseRecorde
 	}
 	if f.Request.IfModifiedSince != "" {
 		req.Header.Set("If-Modified-Since", f.Request.IfModifiedSince)
+	}
+	if f.Request.Accept != "" {
+		req.Header.Set("Accept", f.Request.Accept)
 	}
 	if f.Request.Client == "renewer" {
 		certPEM, err := os.ReadFile(filepath.Join(contractDir, "cadir", "signed", "renew-me.pem"))
@@ -803,6 +861,30 @@ var _ = Describe("the contract checker", func() {
 		Expect(unexplained).To(BeEmpty())
 		Expect(stale).To(ConsistOf("status: 404, upstream 200 (gone)"))
 	})
+
+	DescribeTable("refuses a fixture the replay would not ask as recorded",
+		func(request, want string) {
+			Expect(checkReplayable([]byte(`{"request":` + request + `}`))).To(MatchError(ContainSubstring(want)))
+		},
+		Entry("a client serveContract does not know", `{"method":"GET","path":"/x","client":"agent"}`, `client "agent"`),
+		Entry("no client at all", `{"method":"GET","path":"/x"}`, "client"),
+		Entry("a request field serveContract does not replay", `{"method":"GET","path":"/x","client":"admin","cookie":"c"}`, `"cookie"`),
+	)
+
+	It("accepts a fixture with every field and client it does replay", func() {
+		Expect(checkReplayable([]byte(`{"request":{"method":"PUT","path":"/x","content_type":"text/plain","body":"b",
+			"if_modified_since":"d","accept":"a","client":"renewer"}}`))).To(Succeed())
+	})
+
+	DescribeTable("finds the key at the end of a path, quoted or not",
+		func(at, want string) {
+			Expect(lastField(at)).To(Equal(want))
+		},
+		Entry("a plain key", "$.a.authorization_extensions", "authorization_extensions"),
+		Entry("a key field quoted for its hyphen", `$["ca-certs"]`, "ca-certs"),
+		Entry("a key field quoted for its dot", `$.x["1.3.6.1"]`, "1.3.6.1"),
+		Entry("a list entry", "$[name=a,state=signed]", ""),
+	)
 
 	It("matches an exception exactly, not as a prefix", func() {
 		Expect(exceptionMatches("status: 404, upstream 200", "status: 404, upstream 200")).To(BeTrue())
