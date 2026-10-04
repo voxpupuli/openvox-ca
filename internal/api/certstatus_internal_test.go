@@ -18,6 +18,7 @@
 package api
 
 import (
+	"encoding/json"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -87,6 +88,29 @@ var _ = Describe("certStatusFromRecord on a complete record", func() {
 		Expect(got.DNSAltNames).To(Equal([]string{"node1.example.com"}))
 		Expect(got.AuthorizationExtensions).To(Equal(map[string]string{"pp_auth_role": "webserver"}))
 	})
+
+	// Driven here rather than through the handler, which falls back to the
+	// stored PEM whenever this function rejects a row: an HTTP spec cannot
+	// tell which of the two encoded the serial.
+	DescribeTable("encodes the serial in the format it is given",
+		func(format SerialNumberFormat, want string) {
+			rec := storage.CertRecord{
+				InventoryEntry: storage.InventoryEntry{
+					Subject: "node1", Serial: "ff",
+					NotBefore: "2026-01-01T00:00:00UTC", NotAfter: "2036-01-01T00:00:00UTC",
+				},
+				CertProjection: storage.CertProjection{Fingerprint: "SHA256:AA"},
+				State:          storage.CertStateSigned,
+			}
+			got, ok := certStatusFromRecord(rec, time.RFC3339, format)
+			Expect(ok).To(BeTrue())
+			out, err := json.Marshal(got.SerialNumber)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(out)).To(Equal(want))
+		},
+		Entry("as a number by default", SerialNumberAsNumber, `255`),
+		Entry("as colon-separated hex when opted in", SerialNumberAsHex, `"FF"`),
+	)
 
 	It("substitutes empty collections rather than nulls", func() {
 		// The response is JSON-encoded straight to an agent, and a null where a
