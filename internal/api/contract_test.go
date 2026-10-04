@@ -25,12 +25,15 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io/fs"
 	"mime"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -58,14 +61,25 @@ import (
 //   - extra fields are allowed, except in authorization_extensions, whose
 //     keys are data: an extension upstream does not list is a difference.
 //
-// Error-body wording, full Content-Type headers and the order of
-// certificate_statuses are recorded but not enforced.
+// Error-body wording, the response headers other than the media type, and
+// the order of certificate_statuses are recorded but not enforced, as is
+// the media type of a request no route serves. Who may reach a route is the
+// authorisation baseline's business (authbaseline_test.go), so the fixtures
+// are recorded past upstream's authorisation and replayed without ours.
+//
+// Every exception below has a counterpart in docs/api.md's "Differences from
+// OpenVox Server"; add or remove both in the same commit.
 
 const contractDir = "testdata/contract"
+
+// contractCompareModes is how much of a response a fixture can bind; see
+// test/contract/record's fixture type.
+var contractCompareModes = map[string]bool{"exact": true, "types": true, "none": true, "status": true}
 
 // contractFixture mirrors test/contract/record's fixture format.
 type contractFixture struct {
 	Name    string `json:"name"`
+	Image   string `json:"image"`
 	Compare string `json:"compare"`
 	Request struct {
 		Method          string `json:"method"`
@@ -91,63 +105,97 @@ type contractResponse struct {
 // differences must all be covered, and every exception must still cover
 // one, so fixing a difference forces its exception out.
 type contractException struct {
-	// Prefix matches the start of a difference as checkContract reports it.
-	Prefix string
+	// Diff is a difference exactly as checkContract reports it, except that
+	// "[*]" stands for any one list entry.
+	Diff   string
 	Reason string
 }
 
 var contractExceptions = map[string][]contractException{
-	"status-signed-dns":   {fingerprintsSHA1SHA512("$")},
-	"status-signed-nosan": {fingerprintsSHA1SHA512("$")},
-	"status-revoked":      {fingerprintsSHA1SHA512("$")},
-	"status-requested":    {fingerprintsSHA1SHA512("$")},
-	"status-cert-and-csr": {fingerprintsSHA1SHA512("$")},
-	"status-signed-ip": {
-		fingerprintsSHA1SHA512("$"),
-		{"$.subject_alt_names", "#407: IP SANs are not listed"},
-	},
-	"status-signed-ext": {
-		fingerprintsSHA1SHA512("$"),
-		{`$.authorization_extensions["1.3.6.1.4.1.34380.1.3.2"]: missing`, "#408: keyed pp_auth_auto_renew, upstream keys it by OID"},
-		{`$.authorization_extensions.pp_auth_auto_renew: not in upstream`, "#408: keyed pp_auth_auto_renew, upstream keys it by OID"},
-		{`$.authorization_extensions["1.3.6.1.4.1.34380.1.3"]: not in upstream`, "#409: the bare auth arc OID is listed"},
-		{`$.authorization_extensions["1.3.6.1.4.1.34380.1.3.98"]: value`, "kept: a non-DER value renders as hex (survey 16)"},
-	},
-	"status-unknown": {{"media type", "kept: the 404 is text/plain where upstream's header says JSON (survey 44)"}},
-	"statuses-all": {
-		fingerprintsSHA1SHA512("$[*]"),
-		{`$[name=corner-ip,state=signed].subject_alt_names`, "#407: IP SANs are not listed"},
-		{`$[name=corner-ext,state=signed].authorization_extensions["1.3.6.1.4.1.34380.1.3.2"]: missing`, "#408"},
-		{`$[name=corner-ext,state=signed].authorization_extensions.pp_auth_auto_renew: not in upstream`, "#408"},
-		{`$[name=corner-ext,state=signed].authorization_extensions["1.3.6.1.4.1.34380.1.3"]: not in upstream`, "#409"},
-		{`$[name=corner-ext,state=signed].authorization_extensions["1.3.6.1.4.1.34380.1.3.98"]: value`, "kept (survey 16)"},
-		{`$[name=corner-both,state=requested]: missing`, "kept: a CSR behind a live certificate is not listed (survey 6)"},
-	},
-	"statuses-requested": {
-		fingerprintsSHA1SHA512("$[*]"),
-		{`$[name=corner-both,state=requested]: missing`, "kept (survey 6)"},
-	},
-	"statuses-signed": {
-		fingerprintsSHA1SHA512("$[*]"),
-		{`$[name=corner-ip,state=signed].subject_alt_names`, "#407"},
-		{`$[name=corner-ext,state=signed].authorization_extensions["1.3.6.1.4.1.34380.1.3.2"]: missing`, "#408"},
-		{`$[name=corner-ext,state=signed].authorization_extensions.pp_auth_auto_renew: not in upstream`, "#408"},
-		{`$[name=corner-ext,state=signed].authorization_extensions["1.3.6.1.4.1.34380.1.3"]: not in upstream`, "#409"},
-		{`$[name=corner-ext,state=signed].authorization_extensions["1.3.6.1.4.1.34380.1.3.98"]: value`, "kept (survey 16)"},
-	},
-	"statuses-revoked":                      {fingerprintsSHA1SHA512("$[*]")},
-	"certificate-get-not-modified":          {{"status", "#414: If-Modified-Since is not honoured"}},
-	"status-put-revoke-unknown":             {{"status", "#358 (PR #372): revoking an unknown subject answers 409"}},
-	"status-put-sign-without-csr":           {{"status", "#411: signing without a CSR answers 404"}},
-	"certificate-request-put-existing-cert": {{"status", "#410: a CSR over a live certificate is accepted"}},
-	"sign-empty":                            {{"status", "#412: an empty certnames answers 400"}},
-	"sign-missing-certnames":                {{"status", "#412: a missing certnames answers 400"}},
-	"sign-non-list":                         {{"status", "#412: a non-list certnames answers 400"}},
-	"clean":                                 {{"media type", "kept: PUT /clean answers JSON (survey 2)"}},
+	"status-signed-dns":   missingFingerprints("$"),
+	"status-signed-nosan": missingFingerprints("$"),
+	"status-revoked":      missingFingerprints("$"),
+	"status-requested":    missingFingerprints("$"),
+	"status-cert-and-csr": missingFingerprints("$"),
+	"status-signed-ip":    append(missingFingerprints("$"), unlistedIPSANs("$")),
+	"status-signed-ext":   append(missingFingerprints("$"), cornerExtExtensions("$")...),
+	"status-unknown": {{`media type: "text/plain", upstream "application/json"`,
+		"kept: the 404 body is plain text, as upstream's is, and says so where upstream's header claims JSON"}},
+	"statuses-all": append(append(missingFingerprints("$[*]"),
+		unlistedIPSANs("$[name=corner-ip,state=signed]"), hiddenCSR),
+		cornerExtExtensions("$[name=corner-ext,state=signed]")...),
+	"statuses-requested": append(missingFingerprints("$[*]"), hiddenCSR),
+	"statuses-signed": append(append(missingFingerprints("$[*]"),
+		unlistedIPSANs("$[name=corner-ip,state=signed]")),
+		cornerExtExtensions("$[name=corner-ext,state=signed]")...),
+	"statuses-revoked": missingFingerprints("$[*]"),
+	"statuses-unknown-state": {{"$: 0 entries, upstream 16",
+		"kept: an unknown ?state= matches no subject, where upstream ignores the filter and lists them all"}},
+	"statuses-empty-segment": {{"status: 404, upstream 400",
+		"kept: certificate_statuses without its segment is not a route"}},
+	"status-invalid-subject": {{"status: 400, upstream 404",
+		"kept: a subject that is not a valid certname is the client's error"}},
+	"status-put-revoke-unknown": {{"status: 409, upstream 404",
+		"#358 (PR #372): revoking a subject the CA never signed answers 409"}},
+	"status-put-sign-without-csr": {{"status: 404, upstream 409",
+		"#411: signing a subject with no CSR answers 404"}},
+	"certificate-get-not-modified": {{"status: 200, upstream 304",
+		"#414: GET /certificate ignores If-Modified-Since"}},
+	"certificate-request-put-existing-cert": {{"status: 200, upstream 400",
+		"#410: a CSR for a subject with a live certificate is accepted"}},
+	"certificate-request-put-unparseable": {{"status: 400, upstream 500",
+		"kept: a body that is not a CSR is the client's error, where upstream fails with an exception"}},
+	"certificate-wrong-method": {{"status: 405, upstream 404",
+		"kept: a method the route does not serve answers 405 Method Not Allowed"}},
+	"certificate-renewal-no-client-cert": {{"status: 403, upstream 400",
+		"kept: a renewal with no client certificate is refused as unauthorised"}},
+	"crl-get-other-segment": {{"status: 404, upstream 200",
+		"kept: the CRL is served only at certificate_revocation_list/ca, the path agents ask for"}},
+	"crl-get-not-modified-no-weekday": {{"status: 200, upstream 304",
+		"kept: an If-Modified-Since that is not an HTTP date, which names the weekday, is ignored and the CRL served in full"}},
+	"crl-put-rejected": {{"status: 404, upstream 400",
+		"#413: PUT /certificate_revocation_list (CRL upload) is not implemented"}},
+	"sign-empty": {{"status: 400, upstream 200",
+		"#412: POST /sign with an empty certnames answers 400"}},
+	"sign-missing-certnames": {{"status: 400, upstream 200",
+		"#412: POST /sign without certnames answers 400"}},
+	"sign-non-list": {{"status: 400, upstream 422",
+		"#412: POST /sign with a certnames that is not a list answers 400"}},
+	"clean": {{`media type: "application/json", upstream "text/plain"`,
+		"kept: PUT /clean reports what it did to each subject, as JSON"}},
 }
 
-func fingerprintsSHA1SHA512(at string) contractException {
-	return contractException{at + ".fingerprints", "#406: fingerprints lacks SHA1 and SHA512"}
+// hiddenCSR is corner-both's CSR, filed behind its live certificate.
+var hiddenCSR = contractException{"$[name=corner-both,state=requested]: missing",
+	"kept: a CSR for a subject with a live certificate is not listed"}
+
+func missingFingerprints(at string) []contractException {
+	const reason = "#406: fingerprints has SHA256 and default only"
+	return []contractException{
+		{at + ".fingerprints.SHA1: missing", reason},
+		{at + ".fingerprints.SHA512: missing", reason},
+	}
+}
+
+// unlistedIPSANs is corner-ip's two DNS names listed without its three IP
+// addresses.
+func unlistedIPSANs(at string) contractException {
+	return contractException{at + ".subject_alt_names: 2 entries, upstream 5",
+		"#407: subject_alt_names leaves out IP addresses"}
+}
+
+// cornerExtExtensions are the differences in corner-ext's authorisation
+// extensions.
+func cornerExtExtensions(at string) []contractException {
+	const autoRenew = "#408: pp_auth_auto_renew is keyed by name, where upstream keys it by OID"
+	return []contractException{
+		{at + `.authorization_extensions["1.3.6.1.4.1.34380.1.3.2"]: missing`, autoRenew},
+		{at + ".authorization_extensions.pp_auth_auto_renew: not in upstream", autoRenew},
+		{at + `.authorization_extensions["1.3.6.1.4.1.34380.1.3"]: not in upstream`,
+			"#409: an extension with the authorisation arc's own OID is listed"},
+		{at + `.authorization_extensions["1.3.6.1.4.1.34380.1.3.98"]: value 6c6567616379, upstream legacy`,
+			"kept: a value that is not a DER string renders as hex"},
+	}
 }
 
 // --- the checker ---------------------------------------------------------------
@@ -159,6 +207,9 @@ func checkContract(f contractFixture, status int, contentType string, body []byt
 	// compared with upstream's; report that alone.
 	if status != f.Response.Status {
 		return []string{fmt.Sprintf("status: %d, upstream %d", status, f.Response.Status)}
+	}
+	if f.Compare == "status" {
+		return nil
 	}
 	var diffs []string
 	upstreamHasBody := len(f.Response.JSON) > 0 || (f.Response.Text != nil && *f.Response.Text != "")
@@ -347,31 +398,44 @@ func sortedKeys[V any](m map[string]V) []string {
 	return keys
 }
 
-// covered reports whether diff is allowed by one of exceptions, and records
-// which exceptions were used.
-func covered(diff string, exceptions []contractException, used map[int]bool) bool {
-	for i, e := range exceptions {
-		if exceptionMatches(e.Prefix, diff) {
-			used[i] = true
-			return true
+// judge splits a fixture's differences against its exceptions: unexplained
+// are differences no exception covers, and stale are exceptions that cover
+// no difference. Both must be empty.
+func judge(diffs []string, exceptions []contractException) (unexplained, stale []string) {
+	used := map[int]bool{}
+	for _, d := range diffs {
+		matched := false
+		for i, e := range exceptions {
+			if exceptionMatches(e.Diff, d) {
+				used[i] = true
+				matched = true
+			}
+		}
+		if !matched {
+			unexplained = append(unexplained, d)
 		}
 	}
-	return false
+	for i, e := range exceptions {
+		if !used[i] {
+			stale = append(stale, e.Diff+" ("+e.Reason+")")
+		}
+	}
+	return unexplained, stale
 }
 
-// exceptionMatches matches a difference by prefix. "[*]" in the prefix
-// stands for any one list entry.
-func exceptionMatches(prefix, diff string) bool {
-	head, tail, wildcard := strings.Cut(prefix, "[*]")
+// exceptionMatches matches a difference exactly, except that "[*]" in the
+// exception stands for any one list entry.
+func exceptionMatches(exception, diff string) bool {
+	head, tail, wildcard := strings.Cut(exception, "[*]")
 	if !wildcard {
-		return strings.HasPrefix(diff, prefix)
+		return diff == exception
 	}
 	if !strings.HasPrefix(diff, head+"[") {
 		return false
 	}
 	rest := diff[len(head)+1:]
 	end := strings.Index(rest, "]")
-	return end >= 0 && strings.HasPrefix(rest[end+1:], tail)
+	return end >= 0 && rest[end+1:] == tail
 }
 
 // --- the openvox-ca under test ---------------------------------------------
@@ -383,7 +447,7 @@ func loadContractFixtures() []contractFixture {
 	if err != nil || len(paths) == 0 {
 		panic(fmt.Sprintf("no contract fixtures in %s (run go run ./test/contract/record): %v", contractDir, err))
 	}
-	var fs []contractFixture
+	var fixtures []contractFixture
 	for _, p := range paths {
 		b, err := os.ReadFile(p)
 		if err != nil {
@@ -393,9 +457,14 @@ func loadContractFixtures() []contractFixture {
 		if err := json.Unmarshal(b, &f); err != nil {
 			panic(fmt.Sprintf("%s: %v", p, err))
 		}
-		fs = append(fs, f)
+		// An unknown mode would fall through checkContract as a loose
+		// comparison, binding less than whoever wrote it intended.
+		if !contractCompareModes[f.Compare] {
+			panic(fmt.Sprintf("%s: unknown compare mode %q", p, f.Compare))
+		}
+		fixtures = append(fixtures, f)
 	}
-	return fs
+	return fixtures
 }
 
 // seedContractCA gives a fresh openvox-ca the store the fixtures were
@@ -483,23 +552,10 @@ var _ = Describe("Puppet CA API contract", func() {
 			rr := serveContract(srv, f)
 			diffs := checkContract(f, rr.Code, rr.Header().Get("Content-Type"), rr.Body.Bytes())
 
-			exceptions := contractExceptions[f.Name]
-			used := map[int]bool{}
-			var unexplained []string
-			for _, d := range diffs {
-				if !covered(d, exceptions, used) {
-					unexplained = append(unexplained, d)
-				}
-			}
+			GinkgoWriter.Printf("differences: %q\n", diffs)
+			unexplained, stale := judge(diffs, contractExceptions[f.Name])
 			Expect(unexplained).To(BeEmpty(),
 				"differences from OpenVox Server with no exception; body:\n%s", rr.Body.String())
-
-			var stale []string
-			for i, e := range exceptions {
-				if !used[i] {
-					stale = append(stale, e.Prefix+" ("+e.Reason+")")
-				}
-			}
 			Expect(stale).To(BeEmpty(),
 				"exceptions that no longer match a difference; remove them")
 		})
@@ -513,6 +569,66 @@ var _ = Describe("Puppet CA API contract", func() {
 		for name := range contractExceptions {
 			Expect(names).To(HaveKey(name))
 		}
+	})
+
+	// The recorder reads the image from the compose file; a bump there that
+	// is not followed by a re-record would leave the contract describing a
+	// server nobody runs any more.
+	It("was recorded from the OpenVox Server image the repository pins", func() {
+		compose, err := os.ReadFile(filepath.Join("..", "..", "test", "compose-migration.yml"))
+		Expect(err).NotTo(HaveOccurred())
+		pins := regexp.MustCompile(`(?m)^\s+image:\s+(ghcr\.io/openvoxproject/openvoxserver:\S+)\s*$`).FindAllSubmatch(compose, -1)
+		Expect(pins).To(HaveLen(1), "expected one OpenVox Server image in test/compose-migration.yml")
+		for _, f := range loadContractFixtures() {
+			Expect(f.Image).To(Equal(string(pins[0][1])),
+				"%s was recorded from another image: re-record with go run ./test/contract/record", f.Name)
+		}
+	})
+
+	// The fixtures are a snapshot of a live CA, and certificate status
+	// changes when its certificates expire. Fail well before that, so the
+	// re-record is a chore rather than an outage.
+	It("holds certificates and CRLs that stay valid for another 180 days", func() {
+		horizon := time.Now().AddDate(0, 0, 180)
+		var expiring []string
+		root, err := os.OpenRoot(filepath.Join(contractDir, "cadir"))
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(root.Close)
+		Expect(fs.WalkDir(root.FS(), ".", func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || path == "ca_key.pem" {
+				return err
+			}
+			rest, err := fs.ReadFile(root.FS(), path)
+			if err != nil {
+				return err
+			}
+			for {
+				var block *pem.Block
+				block, rest = pem.Decode(rest)
+				if block == nil {
+					return nil
+				}
+				switch block.Type {
+				case "CERTIFICATE":
+					cert, err := x509.ParseCertificate(block.Bytes)
+					if err != nil {
+						return err
+					}
+					if cert.NotAfter.Before(horizon) {
+						expiring = append(expiring, fmt.Sprintf("%s: %s expires %s", path, cert.Subject, cert.NotAfter))
+					}
+				case "X509 CRL":
+					crl, err := x509.ParseRevocationList(block.Bytes)
+					if err != nil {
+						return err
+					}
+					if crl.NextUpdate.Before(horizon) {
+						expiring = append(expiring, fmt.Sprintf("%s: CRL from %s is due %s", path, crl.Issuer, crl.NextUpdate))
+					}
+				}
+			}
+		})).To(Succeed())
+		Expect(expiring).To(BeEmpty(), "re-record the contract: go run ./test/contract/record")
 	})
 })
 
@@ -593,8 +709,28 @@ var _ = Describe("the contract checker", func() {
 		Expect(checkContract(f, 204, "", nil)).To(BeEmpty())
 	})
 
+	It("reports a difference no exception covers", func() {
+		unexplained, stale := judge([]string{"status: 404, upstream 200", "$.name: missing"},
+			[]contractException{{"status: 404, upstream 200", "r"}})
+		Expect(unexplained).To(ConsistOf("$.name: missing"))
+		Expect(stale).To(BeEmpty())
+	})
+
+	It("reports an exception that covers no difference", func() {
+		unexplained, stale := judge([]string{"$.name: missing"},
+			[]contractException{{"$.name: missing", "r"}, {"status: 404, upstream 200", "gone"}})
+		Expect(unexplained).To(BeEmpty())
+		Expect(stale).To(ConsistOf("status: 404, upstream 200 (gone)"))
+	})
+
+	It("matches an exception exactly, not as a prefix", func() {
+		Expect(exceptionMatches("status: 404, upstream 200", "status: 404, upstream 200")).To(BeTrue())
+		Expect(exceptionMatches("status: 404", "status: 404, upstream 200")).To(BeFalse())
+	})
+
 	It("matches an exception's [*] against any one list entry", func() {
-		Expect(exceptionMatches("$[*].fingerprints", "$[name=a,state=signed].fingerprints.SHA1: missing")).To(BeTrue())
-		Expect(exceptionMatches("$[*].fingerprints", "$[name=a,state=signed].dns_alt_names[0]: value")).To(BeFalse())
+		Expect(exceptionMatches("$[*].fingerprints.SHA1: missing", "$[name=a,state=signed].fingerprints.SHA1: missing")).To(BeTrue())
+		Expect(exceptionMatches("$[*].fingerprints", "$[name=a,state=signed].fingerprints.SHA1: missing")).To(BeFalse())
+		Expect(exceptionMatches("$[*].fingerprints.SHA1: missing", "$[name=a,state=signed].dns_alt_names[0]: value")).To(BeFalse())
 	})
 })

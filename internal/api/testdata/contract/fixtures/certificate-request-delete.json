@@ -5,7 +5,8 @@
     "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:154-164",
     "src/clj/puppetlabs/puppetserver/certificate_authority.clj:1645-1665"
   ],
-  "recorded_from": "OpenVoxProject/openvox-server@8.14.1 (b24bf7f5f488)",
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1",
+  "image": "ghcr.io/openvoxproject/openvoxserver:8.14.1-main@sha256:806c5eb471c3f1d499308d903dc84210d96b00761de481d2cc7dee380d78c152",
   "compare": "none",
   "request": {
     "method": "DELETE",
@@ -14,6 +15,9 @@
   },
   "response": {
     "status": 204,
+    "headers": {
+      "X-Puppet-Version": "8.27.0"
+    },
     "text": ""
   }
 }

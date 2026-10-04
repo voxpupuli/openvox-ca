@@ -5,7 +5,8 @@
     "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:166-172",
     "src/clj/puppetlabs/puppetserver/certificate_authority.clj:2288-2318"
   ],
-  "recorded_from": "OpenVoxProject/openvox-server@8.14.1 (b24bf7f5f488)",
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1",
+  "image": "ghcr.io/openvoxproject/openvoxserver:8.14.1-main@sha256:806c5eb471c3f1d499308d903dc84210d96b00761de481d2cc7dee380d78c152",
   "compare": "exact",
   "request": {
     "method": "GET",
@@ -15,14 +16,19 @@
   "response": {
     "status": 200,
     "content_type": "application/json",
+    "headers": {
+      "Content-Type": "application/json",
+      "Vary": "Accept-Encoding",
+      "X-Puppet-Version": "8.27.0"
+    },
     "json": {
       "ca-certs": {
-        "Puppet CA generated on puppet at 2026-10-04 13:43:42 +0000": "2031-10-03T13:43:44UTC",
-        "Puppet Root CA: f4c98ad40e9c90": "2031-10-03T13:43:43UTC"
+        "Puppet CA generated on puppet at 2026-10-04 14:18:59 +0000": "2031-10-03T14:19:00UTC",
+        "Puppet Root CA: da811ccfbfeab7": "2031-10-03T14:19:00UTC"
       },
       "crls": {
-        "Puppet CA generated on puppet at 2026-10-04 13:43:42 +0000": "2031-10-03T13:43:52UTC",
-        "Puppet Root CA: f4c98ad40e9c90": "2031-10-03T13:43:43UTC"
+        "Puppet CA generated on puppet at 2026-10-04 14:18:59 +0000": "2031-10-03T14:19:09UTC",
+        "Puppet Root CA: da811ccfbfeab7": "2031-10-03T14:19:00UTC"
       }
     }
   }

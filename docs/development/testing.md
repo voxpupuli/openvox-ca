@@ -373,29 +373,56 @@ committed files; nothing in CI starts OpenVox Server. The rule it enforces, and
 the differences it knows about, are in [the API reference](../api.md#differences-from-openvox-server).
 
 Each fixture under `fixtures/` is one route and outcome: the request, the
-response OpenVox Server gave, the OpenVox Server source it cites, and how much
-of the body is binding (`exact`, `types` or `none`). `cadir/` is the store that
-server held when it answered, its CA bundle, key, CRL chain, certificates and
-CSRs, and each spec loads it into a fresh openvox-ca, so values derived from a
-certificate can be compared exactly. Every mutation in the set acts on a
-subject no other fixture reads, which is what lets each spec start from that
-one snapshot.
+response OpenVox Server gave (headers included, for reference), the image and
+OpenVox Server source it came from, and how much of the response is binding:
 
-An exception names a difference that openvox-ca still has and why: an issue,
-or a ruling to keep its own behaviour. A difference without one fails the
-spec, and so does an exception that no longer matches anything, so fixing a
-difference fails until its exception is removed.
+- `exact`: the status, media type, and every value upstream sent;
+- `types`: the status, media type, and every field's presence and JSON type;
+- `none`: the status and media type;
+- `status`: the status alone, for a request no route serves, whose body is
+  the HTTP server's rather than the CA's.
 
-To re-record, for example when the OpenVox Server image moves:
+`cadir/` is the store that server held when it answered, its CA bundle, key,
+CRL chain, certificates and CSRs, and each spec loads it into a fresh
+openvox-ca, so values derived from a certificate can be compared exactly. Every
+mutation in the set acts on a subject no other fixture reads, which is what
+lets each spec start from that one snapshot. The CA key is a throwaway,
+generated inside a disposable container for the recording and committed so the
+specs can sign with it; nothing should trust it.
+
+An exception names a difference that openvox-ca still has, exactly as the
+checker reports it, and why: an issue, or a ruling to keep its own behaviour.
+A difference without one fails the spec, and so does an exception that no
+longer matches anything, so fixing a difference fails until its exception is
+removed. Each exception has a counterpart in
+[the API reference](../api.md#differences-from-openvox-server); add or remove
+both in the same commit.
+
+Never hand-edit anything under `testdata/contract/`. A fixture is a record of
+what OpenVox Server said, and an edited one is a claim about OpenVox Server
+that nobody observed; the next re-record discards it anyway. Change the
+recorder instead.
+
+### Re-recording
 
 ```shell
 go run ./test/contract/record
 ```
 
-It needs Docker and network access. It starts the image that
-`test/compose-migration.yml` pins (move the two together), signs the
-corner-case certificates with the CA that server bootstraps, records every
-fixture, and rewrites `testdata/contract/` from scratch. The CA is new on every
-run, so every fixture and certificate changes. Review the diff for changed
-shapes rather than values, and expect exceptions to need their `$[name=…]`
-paths revisited only when a fixture is added or renamed.
+It needs Docker and network access. It starts the OpenVox Server image that
+`test/compose-migration.yml` pins, signs the corner-case certificates with the
+CA that server bootstraps, records every fixture, and replaces
+`testdata/contract/` only once the whole recording has succeeded. The CA is
+new on every run, so every fixture and certificate changes. Review the diff for
+changed shapes rather than values, and expect exceptions to need their
+`$[name=…]` paths revisited only when a fixture is added or renamed.
+
+Two specs force a re-record rather than leaving it to memory:
+
+- every fixture must name the image `test/compose-migration.yml` pins, so
+  moving that pin (Renovate does) fails the suite until the contract is
+  re-recorded from the new image;
+- every certificate and CRL in `cadir/` must stay valid for another 180 days.
+  The recording's CA and certificates last five years, so this fires about
+  four and a half years after the last recording, while their status is still
+  what the fixtures say.

@@ -1,25 +1,25 @@
 {
-  "name": "certificate-get-unknown",
-  "description": "a certificate the CA does not hold",
+  "name": "certificate-wrong-method",
+  "description": "a method the route does not serve",
   "sources": [
-    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:68-80"
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:574-597"
   ],
   "recorded_from": "OpenVoxProject/openvox-server@8.14.1",
   "image": "ghcr.io/openvoxproject/openvoxserver:8.14.1-main@sha256:806c5eb471c3f1d499308d903dc84210d96b00761de481d2cc7dee380d78c152",
-  "compare": "none",
+  "compare": "status",
   "request": {
-    "method": "GET",
-    "path": "/puppet-ca/v1/certificate/no-such-node",
+    "method": "POST",
+    "path": "/puppet-ca/v1/certificate/corner-dns",
     "client": "admin"
   },
   "response": {
     "status": 404,
-    "content_type": "text/plain",
+    "content_type": "text/html;charset=utf-8",
     "headers": {
-      "Content-Type": "text/plain",
+      "Content-Type": "text/html;charset=utf-8",
       "Vary": "Accept-Encoding",
       "X-Puppet-Version": "8.27.0"
     },
-    "text": "Could not find certificate no-such-node"
+    "text": "Not Found"
   }
 }

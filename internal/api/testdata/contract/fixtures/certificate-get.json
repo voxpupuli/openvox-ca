@@ -5,7 +5,8 @@
     "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:68-80",
     "src/clj/puppetlabs/puppetserver/certificate_authority.clj:1501-1513"
   ],
-  "recorded_from": "OpenVoxProject/openvox-server@8.14.1 (b24bf7f5f488)",
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1",
+  "image": "ghcr.io/openvoxproject/openvoxserver:8.14.1-main@sha256:806c5eb471c3f1d499308d903dc84210d96b00761de481d2cc7dee380d78c152",
   "compare": "exact",
   "request": {
     "method": "GET",
@@ -15,6 +16,11 @@
   "response": {
     "status": 200,
     "content_type": "text/plain",
-    "text": "-----BEGIN CERTIFICATE-----\nMIID+jCCAeKgAwIBAgIRAJ88KhtNXm9wgZKjtMXW5/gwDQYJKoZIhvcNAQELBQAw\nRTFDMEEGA1UEAww6UHVwcGV0IENBIGdlbmVyYXRlZCBvbiBwdXBwZXQgYXQgMjAy\nNi0xMC0wNCAxMzo0Mzo0MiArMDAwMDAeFw0yNjEwMDQxMjQzNTJaFw0zMTEwMDQx\nMzQzNTJaMBUxEzARBgNVBAMTCmNvcm5lci1kbnMwWTATBgcqhkjOPQIBBggqhkjO\nPQMBBwNCAARMwy3wGKnbxhu4+cwK8x/zlp1y/vyb9tVjxDwolZ7IZxVbEVJcSYbf\nOxyrOyds6+F1csh9z204Q4XbY5SCCjcZo4HfMIHcMA4GA1UdDwEB/wQEAwIHgDAd\nBgNVHSUEFjAUBggrBgEFBQcDAQYIKwYBBQUHAwIwHwYDVR0jBBgwFoAUO5/o7oA8\ni8d7SK+Wgftg2+jvOPAwPgYDVR0RBDcwNYIKY29ybmVyLWRuc4IWQ29ybmVyLURO\nUy5FeGFtcGxlLkNPTYIPYWx0LmV4YW1wbGUuY29tMBoGCysGAQQBgoxMAQMNBAsM\nCXdlYnNlcnZlcjAVBgsrBgEEAYKMTAEDAQQGDAR0cnVlMBcGCysGAQQBgoxMAQNj\nBAgMBmN1c3RvbTANBgkqhkiG9w0BAQsFAAOCAgEAVm/kF6ZSxljQxW8qiB9hg+9o\nLTcucVJc4VYweCQNwI9hbYWYc9y2KWLvF9v4RPfXwRtfe5sMVgay5mi346LR4m0r\nVf7GgG8pxPMEWGLCTXE9ar9PcxFsNcRtiWWsYTv9LExGEXZHQ2BWynnXPtd8OyuQ\nubMCso7x2upE4SqRzTMYs+isSyeckFGVv5HmLqJl64JA+nEotcAw1AD0MG21nsaL\nGbfkfmiLawRH62fu9LzG9A2regQC7c/NmfgRoNwIL1ZTRJKqOWmTvDkX6hNA9Vx3\nCodwMYQKDt7BZsXRqZ+49RV8nD/JIcwCfI3BQHqXeDq7J+5V372yOhaxoPr0VlV3\nxPpjUcBre3b3zV0yXophqNPa1gKqZjkpigAStKvM+y9eOSejRfOAHsrlZuUyj80N\nINnF8/S8DE6xK91HvC2CnAvNm//izw+UC3BN3mWJw+zxTYFlLISSOw0YkoKS4Di9\neMoAjkSG5CuoOw8Y2/BfPnEdgEfKL48GYpaoWGXGxlFjW48qV40xjR1ANY6ybt3B\nyubaER7JWIdasrkbh4+XZlJwdOV0tA0rnERvf3jEaq4G5NVeQ5eXcsQ29Ox9fw8O\nBPHDm9ZIp4OG8Rl1dbz7LB/oh7mFlLqrI7v58kKCt+GhLkMEHeS0rPPWahOUEZL2\nlIkRE5yF/Q+lJM7t+U8=\n-----END CERTIFICATE-----\n"
+    "headers": {
+      "Content-Type": "text/plain",
+      "Vary": "Accept-Encoding",
+      "X-Puppet-Version": "8.27.0"
+    },
+    "text": "-----BEGIN CERTIFICATE-----\nMIID+jCCAeKgAwIBAgIRAJ88KhtNXm9wgZKjtMXW5/gwDQYJKoZIhvcNAQELBQAw\nRTFDMEEGA1UEAww6UHVwcGV0IENBIGdlbmVyYXRlZCBvbiBwdXBwZXQgYXQgMjAy\nNi0xMC0wNCAxNDoxODo1OSArMDAwMDAeFw0yNjEwMDQxMzE5MDlaFw0zMTEwMDQx\nNDE5MDlaMBUxEzARBgNVBAMTCmNvcm5lci1kbnMwWTATBgcqhkjOPQIBBggqhkjO\nPQMBBwNCAAR7crrHM3upaPQ+08xYVdkU/CdMbyBnVQfLDtoNIohdJxGicTSTjtQk\ndrW/VohPBwU4ORy4qOfWPvM8CWGRay5To4HfMIHcMA4GA1UdDwEB/wQEAwIHgDAd\nBgNVHSUEFjAUBggrBgEFBQcDAQYIKwYBBQUHAwIwHwYDVR0jBBgwFoAUNWKR4VlY\nW/8St/kP2z7mcwR3I5owPgYDVR0RBDcwNYIKY29ybmVyLWRuc4IWQ29ybmVyLURO\nUy5FeGFtcGxlLkNPTYIPYWx0LmV4YW1wbGUuY29tMBoGCysGAQQBgoxMAQMNBAsM\nCXdlYnNlcnZlcjAVBgsrBgEEAYKMTAEDAQQGDAR0cnVlMBcGCysGAQQBgoxMAQNj\nBAgMBmN1c3RvbTANBgkqhkiG9w0BAQsFAAOCAgEAVGyiSfgSg0PVquPy3wwnPyG5\nu7snVJQdvIkzZ92TIMuetZHX0oiWTATaKtS6Apt6hI+zKVeCocFyfhy+U4mXPbYF\nuvXDFqgqbjSs1pSFHgBl4ag3d2h1uetmoQUR455XHbGay2OYwUJUTqxlXeVloxuT\nFmNzrCM8E8DjqM18yrKOnVed7n//a3dmDTWTWumvg+DQHh6zlUp2KrqR/Xfg57d9\ngYNNbak7g9GbGHwG8kPL/AGcceiMgij2OHFda4xJ06Pru070Ktq6+AfqtqvNpk0r\nl2rK8OE6xfE6J2UhJaqTnhENVZClMqK7W3ChJOi8JW+hZCQGM0iHGwC1XJtcC8ST\n09qJxju5ImTKF+Yt8NQUPnJzkBsJQlJ0FsxO6EqLI8T9TMzLkqNqYI84zjmw9a7p\nAoiXmNS2edyxQRUJk6tBhl4VG1DF50+MupeYTwFKI0tp3jzkjxPEJUe4N8EiZ7Ax\nWdSa72zLPVX2SPciauqx/sDYKUNbZVOY+YZVvrZYaGaUSGHmyv5Cc5QGIgpopXmh\nnp0dooZS5qNhnG9dgEPu2B6uB708OlWfZ69kOuj6ICklsG6Q5djLdZ5ac31EUqD9\n+FAXB0wEmZ5mogS4p9K1a+K/YcITCpHFzWFe6z9c71cHtHPVBR1io0PAd3Pt7Io2\nOENCJQ2uUeIiARAF/CA=\n-----END CERTIFICATE-----\n"
   }
 }

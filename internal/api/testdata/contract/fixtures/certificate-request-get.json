@@ -4,7 +4,8 @@
   "sources": [
     "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:82-88"
   ],
-  "recorded_from": "OpenVoxProject/openvox-server@8.14.1 (b24bf7f5f488)",
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1",
+  "image": "ghcr.io/openvoxproject/openvoxserver:8.14.1-main@sha256:806c5eb471c3f1d499308d903dc84210d96b00761de481d2cc7dee380d78c152",
   "compare": "exact",
   "request": {
     "method": "GET",
@@ -14,6 +15,11 @@
   "response": {
     "status": 200,
     "content_type": "text/plain",
-    "text": "-----BEGIN CERTIFICATE REQUEST-----\nMIIBFTCBvAIBADAZMRcwFQYDVQQDEw5jb3JuZXItcGVuZGluZzBZMBMGByqGSM49\nAgEGCCqGSM49AwEHA0IABJ7tQRiKsblSU1JRY9RcCoUiYqps5lPGiCZM3GuaV8DZ\nE2PG9kydDFLu3MYPqwm4SUUVm+oOlXFUH6xAc9eQ0fmgQTA/BgkqhkiG9w0BCQ4x\nMjAwMC4GA1UdEQQnMCWCDmNvcm5lci1wZW5kaW5nghNQZW5kaW5nLkV4YW1wbGUu\nQ09NMAoGCCqGSM49BAMCA0gAMEUCIQDzBVkroRS8K30/2YeFSu5TocG/La0q4/OU\nC18LtAAUGwIgAY1SMhYB4Og3Sk/Bk3pU1kdtHC/xV2ymH+Ay8q/F5So=\n-----END CERTIFICATE REQUEST-----\n"
+    "headers": {
+      "Content-Type": "text/plain",
+      "Vary": "Accept-Encoding",
+      "X-Puppet-Version": "8.27.0"
+    },
+    "text": "-----BEGIN CERTIFICATE REQUEST-----\nMIIBFTCBvAIBADAZMRcwFQYDVQQDEw5jb3JuZXItcGVuZGluZzBZMBMGByqGSM49\nAgEGCCqGSM49AwEHA0IABJQEG0xiCQeUvto+B2iIMy4m5ALsgo4GiePViyl368WM\n3W6YMBr8Mpzv2/wKhShxUgq8gE+HwwxaFr1bXb+6KFSgQTA/BgkqhkiG9w0BCQ4x\nMjAwMC4GA1UdEQQnMCWCDmNvcm5lci1wZW5kaW5nghNQZW5kaW5nLkV4YW1wbGUu\nQ09NMAoGCCqGSM49BAMCA0gAMEUCIQCPIXjOBBeGVIJVbXeh3psidDurR/I69FVn\nCbls00IHBAIgCLx7ymEdZ9ug4y7wFTA97eqGdP0/UpB5sR74ZBc/vSg=\n-----END CERTIFICATE REQUEST-----\n"
   }
 }

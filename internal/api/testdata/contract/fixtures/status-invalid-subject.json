@@ -1,6 +1,6 @@
 {
-  "name": "status-unknown",
-  "description": "status of a subject the CA has never seen",
+  "name": "status-invalid-subject",
+  "description": "status of a subject that is not a valid certname",
   "sources": [
     "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:423-542",
     "src/clj/puppetlabs/puppetserver/certificate_authority.clj:177-200",
@@ -12,7 +12,7 @@
   "compare": "none",
   "request": {
     "method": "GET",
-    "path": "/puppet-ca/v1/certificate_status/no-such-node",
+    "path": "/puppet-ca/v1/certificate_status/Not_A.Valid..Certname",
     "client": "admin"
   },
   "response": {

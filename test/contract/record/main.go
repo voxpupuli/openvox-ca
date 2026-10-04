@@ -26,7 +26,8 @@
 // certificate-derived values exactly.
 //
 // CI never runs this; it reads the committed fixtures. Re-record when the
-// pinned image moves:
+// image test/compose-migration.yml pins moves (the contract spec fails until
+// you do), or before the recorded CA expires:
 //
 //	go run ./test/contract/record
 //
@@ -50,6 +51,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"math/big"
 	"net"
@@ -57,24 +59,43 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
 )
 
 const (
-	// image is the OpenVox Server the contract is recorded from. It is the
-	// image test/compose-migration.yml pins; move them together.
-	image = "ghcr.io/openvoxproject/openvoxserver:8.14.1-main@sha256:806c5eb471c3f1d499308d903dc84210d96b00761de481d2cc7dee380d78c152"
-	// sourceRef names the OpenVox Server source the fixtures cite: the tag
-	// the image was built from.
-	sourceRef = "OpenVoxProject/openvox-server@8.14.1 (b24bf7f5f488)"
+	// composeFile pins the OpenVox Server image that the migration suite
+	// runs and this contract is recorded from. It is the only pin: the
+	// recorder reads it, every fixture records it, and the contract spec
+	// fails when the two disagree.
+	composeFile = "test/compose-migration.yml"
+	imagePrefix = "ghcr.io/openvoxproject/openvoxserver:"
+
+	// farFuture is an If-Modified-Since date no store can be modified
+	// after, so a not-modified fixture cannot expire.
+	farFuture          = "Fri, 31 Dec 9999 23:59:59 GMT"
+	farFutureNoWeekday = "31 Dec 9999 23:59:59 GMT"
 
 	serverName   = "puppet"
 	cadirPath    = "/etc/puppetlabs/puppetserver/ca"
 	caConfPath   = "/etc/puppetlabs/puppetserver/conf.d/ca.conf"
 	authConfPath = "/etc/puppetlabs/puppetserver/conf.d/auth.conf"
 )
+
+// readme is written beside the contract, where a secret scanner or a reader
+// will find cadir/ca_key.pem.
+const readme = `# Puppet CA API contract
+
+Recorded from OpenVox Server by ` + "`go run ./test/contract/record`" + `; see
+docs/development/testing.md#the-puppet-ca-api-contract. Do not edit anything
+here by hand: re-record instead.
+
+` + "`cadir/ca_key.pem`" + ` and the CA it signs for are throwaways, generated
+inside a disposable container for this recording and committed so the specs can
+use them. Nothing should trust them.
+`
 
 // Puppet authorisation-arc OIDs used by the corner-case certificates.
 var (
@@ -89,18 +110,48 @@ var (
 
 func main() {
 	out := flag.String("out", "internal/api/testdata/contract", "directory to write the contract into")
+	compose := flag.String("compose", composeFile, "compose file pinning the OpenVox Server image to record from")
 	keep := flag.Bool("keep", false, "leave the OpenVox Server container running")
 	flag.Parse()
 
-	if err := run(*out, *keep); err != nil {
+	if err := run(*out, *compose, *keep); err != nil {
 		slog.Error("recording the contract failed", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(out string, keep bool) error {
+// pinnedImage reads the OpenVox Server image a compose file pins.
+func pinnedImage(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	for line := range strings.SplitSeq(string(b), "\n") {
+		if ref, ok := strings.CutPrefix(strings.TrimSpace(line), "image: "); ok && strings.HasPrefix(ref, imagePrefix) {
+			return ref, nil
+		}
+	}
+	return "", fmt.Errorf("%s pins no %s image", path, imagePrefix)
+}
+
+// sourceRef names the OpenVox Server source the fixtures cite: the release
+// tag the image was built from, its tag up to the first "-" (8.14.1-main is
+// built from 8.14.1).
+func sourceRef(image string) string {
+	tag, _, _ := strings.Cut(strings.TrimPrefix(image, imagePrefix), "@")
+	tag, _, _ = strings.Cut(tag, "-")
+	return "OpenVoxProject/openvox-server@" + tag
+}
+
+func run(out, compose string, keep bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
+
+	image, err := pinnedImage(compose)
+	if err != nil {
+		return err
+	}
+	slog.Info("recording from", "image", image)
 
 	name := fmt.Sprintf("openvox-ca-contract-%d", os.Getpid())
 	if err := docker(ctx, "create", "--name", name, "--hostname", serverName,
@@ -124,9 +175,13 @@ func run(out string, keep bool) error {
 	//     always serves it, so the contract records what a served renewal
 	//     returns.
 	//   - the shipped auth.conf allows only GET and PUT on
-	//     certificate_request, so a DELETE is refused before the handler.
-	//     Who may reach a route is the authorisation baseline's business,
-	//     not this contract's.
+	//     certificate_request, so a DELETE is refused before the handler,
+	//     and its closing deny-all answers 403 for anything no rule names:
+	//     a method or route the CA does not serve. A rule ahead of the
+	//     deny-all lets every /puppet-ca/v1 request through to the CA, and
+	//     the renewal rule admits a client without a certificate, so those
+	//     record the CA's own answer. Who may reach a route is the
+	//     authorisation baseline's business, not this contract's.
 	// The image's own entrypoint scripts edit these files as the
 	// unprivileged server user, and rewrite auth.conf as JSON on the way,
 	// so this edits them as parsed HOCON from a script that runs after them.
@@ -146,6 +201,16 @@ ruby -e '
   rule = conf["authorization"]["rules"].find { |r| r["match-request"]["path"] == "/puppet-ca/v1/certificate_request" }
   abort "no certificate_request rule in #{f}" unless rule
   rule["match-request"]["method"] = %w[get put delete]
+  renewal = conf["authorization"]["rules"].find { |r| r["match-request"]["path"] == "/puppet-ca/v1/certificate_renewal" }
+  abort "no certificate_renewal rule in #{f}" unless renewal
+  renewal.delete("allow")
+  renewal["allow-unauthenticated"] = true
+  conf["authorization"]["rules"] << {
+    "match-request" => {"path" => "^/puppet-ca/v1/", "type" => "regex"},
+    "allow-unauthenticated" => true,
+    "sort-order" => 998,
+    "name" => "openvox-ca contract: reach the CA",
+  }
   File.write(f, JSON.pretty_generate(conf))
 ' ` + authConfPath + `
 `)
@@ -186,14 +251,9 @@ ruby -e '
 		return err
 	}
 
-	admin, err := ca.client(fx.admin, addr)
-	if err != nil {
-		return err
-	}
-	renewer, err := ca.client(fx.renewer, addr)
-	if err != nil {
-		return err
-	}
+	admin := ca.client(&fx.admin, addr)
+	renewer := ca.client(&fx.renewer, addr)
+	anonymous := ca.client(nil, addr)
 
 	// State that has to come from upstream itself: a revocation, so the CRL
 	// carrying it is one OpenVox Server wrote.
@@ -202,22 +262,31 @@ ruby -e '
 		return err
 	}
 
-	// Snapshot the store before any recorded request changes it: every
-	// fixture is a response to exactly this state.
-	if err := os.RemoveAll(out); err != nil {
+	// The contract is written to a sibling of out and swapped in only once
+	// every case has been recorded, so a failed run leaves the last good
+	// contract in place rather than half of a new one.
+	staging := filepath.Clean(out) + ".recording"
+	if err := os.RemoveAll(staging); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(out, 0o750); err != nil {
+	if err := os.MkdirAll(staging, 0o750); err != nil {
 		return err
 	}
-	// Every write goes through a Root on the output directory, so nothing
+	defer func() { _ = os.RemoveAll(staging) }()
+	// Every write goes through a Root on the staging directory, so nothing
 	// a fixture or the container names can land outside it.
-	root, err := os.OpenRoot(out)
+	root, err := os.OpenRoot(staging)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = root.Close() }()
-	if err := snapshot(ctx, name, tmp, root, fx.renewer); err != nil {
+
+	// Snapshot the store before any recorded request changes it: every
+	// fixture is a response to exactly this state.
+	if err := snapshot(ctx, name, tmp, root); err != nil {
+		return err
+	}
+	if err := root.WriteFile("README.md", []byte(readme), 0o600); err != nil {
 		return err
 	}
 
@@ -230,7 +299,7 @@ ruby -e '
 		csrBodies[cn] = csr
 	}
 
-	clients := map[string]*http.Client{"admin": admin, "renewer": renewer}
+	clients := map[string]*http.Client{"admin": admin, "renewer": renewer, "anonymous": anonymous}
 	for _, c := range cases() {
 		switch c.Name {
 		case "certificate-request-put":
@@ -243,13 +312,21 @@ ruby -e '
 			return fmt.Errorf("%s: %w", c.Name, err)
 		}
 		c.Response = resp
-		c.Recorded = sourceRef
+		c.Recorded = sourceRef(image)
+		c.Image = image
 		if err := writeFixture(root, c); err != nil {
 			return err
 		}
 		slog.Info("recorded", "fixture", c.Name, "status", resp.Status, "content_type", resp.ContentType)
 	}
-	return nil
+
+	if err := root.Close(); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(out); err != nil {
+		return err
+	}
+	return os.Rename(staging, out)
 }
 
 // --- docker ------------------------------------------------------------------
@@ -385,13 +462,18 @@ func (a *authority) issue(t *x509.Certificate) (issued, error) {
 	return issued{name: t.Subject.CommonName, key: key, der: der}, nil
 }
 
-func (a *authority) client(id issued, addr string) (*http.Client, error) {
-	cert := tls.Certificate{Certificate: [][]byte{id.der}, PrivateKey: id.key}
+// client returns an HTTP client for the server at addr that presents id, or
+// no client certificate at all when id is nil.
+func (a *authority) client(id *issued, addr string) *http.Client {
+	var certs []tls.Certificate
+	if id != nil {
+		certs = []tls.Certificate{{Certificate: [][]byte{id.der}, PrivateKey: id.key}}
+	}
 	return &http.Client{
 		Timeout: 60 * time.Second,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
-				Certificates: []tls.Certificate{cert},
+				Certificates: certs,
 				RootCAs:      a.roots,
 				ServerName:   serverName,
 				MinVersion:   tls.VersionTLS12,
@@ -400,7 +482,7 @@ func (a *authority) client(id issued, addr string) (*http.Client, error) {
 				return (&net.Dialer{}).DialContext(ctx, network, addr)
 			},
 		},
-	}, nil
+	}
 }
 
 func newCSR(cn string, dns []string) (issued, error) {
@@ -558,43 +640,49 @@ func (fx *fixtureSet) inject(ctx context.Context, container, tmp string) error {
 	return docker(ctx, "exec", "-u", "0", container, "chown", "-R", "puppet:root", cadirPath+"/signed", cadirPath+"/requests")
 }
 
-// snapshot writes the server's store, as the contract spec will load it, and
-// the renewal client's key.
-func snapshot(ctx context.Context, container, tmp string, out *os.Root, renewer issued) error {
+// snapshot writes the server's store as the contract spec loads it: the CA
+// bundle, key and CRL chain, and every certificate and CSR. The container is
+// not trusted on either side: reads go through a Root on the copy and accept
+// regular files only, so a symlink in the container cannot pull in anything
+// from the host, and writes go through out.
+func snapshot(ctx context.Context, container, tmp string, out *os.Root) error {
 	raw := filepath.Join(tmp, "snapshot")
 	if err := docker(ctx, "cp", container+":"+cadirPath, raw); err != nil {
 		return err
 	}
-	for _, f := range []string{"ca_crt.pem", "ca_key.pem", "ca_crl.pem", "inventory.txt"} {
-		if err := copyFile(out, filepath.Join(raw, f), filepath.Join("cadir", f)); err != nil {
-			return err
-		}
+	src, err := os.OpenRoot(raw)
+	if err != nil {
+		return err
 	}
+	defer func() { _ = src.Close() }()
+
+	names := []string{"ca_crt.pem", "ca_key.pem", "ca_crl.pem"}
 	for _, dir := range []string{"signed", "requests"} {
-		entries, err := os.ReadDir(filepath.Join(raw, dir))
+		entries, err := fs.ReadDir(src.FS(), dir)
 		if err != nil {
 			return err
 		}
 		for _, e := range entries {
-			if err := copyFile(out, filepath.Join(raw, dir, e.Name()), filepath.Join("cadir", dir, e.Name())); err != nil {
-				return err
-			}
+			names = append(names, path.Join(dir, e.Name()))
 		}
 	}
-	keyDER, err := x509.MarshalPKCS8PrivateKey(renewer.key)
-	if err != nil {
-		return err
+	for _, name := range names {
+		info, err := src.Lstat(name)
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("%s in the container's cadir is not a regular file", name)
+		}
+		b, err := src.ReadFile(name)
+		if err != nil {
+			return err
+		}
+		if err := writeFile(out, path.Join("cadir", name), b); err != nil {
+			return err
+		}
 	}
-	return writeFile(out, filepath.Join("keys", "renew-me.pem"),
-		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))
-}
-
-func copyFile(out *os.Root, src, dst string) error {
-	b, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	return writeFile(out, dst, b)
+	return nil
 }
 
 func writeFile(out *os.Root, name string, b []byte) error {
@@ -613,15 +701,19 @@ type request struct {
 	Body            string `json:"body,omitempty"`
 	IfModifiedSince string `json:"if_modified_since,omitempty"`
 	// Client names the identity the request is made with: "admin" holds
-	// pp_cli_auth, "renewer" is renew-me's own certificate.
+	// pp_cli_auth, "renewer" is renew-me's own certificate, and
+	// "anonymous" presents no client certificate.
 	Client string `json:"client"`
 }
 
 type response struct {
-	Status      int             `json:"status"`
-	ContentType string          `json:"content_type,omitempty"`
-	JSON        json.RawMessage `json:"json,omitempty"`
-	Text        *string         `json:"text,omitempty"`
+	Status      int    `json:"status"`
+	ContentType string `json:"content_type,omitempty"`
+	// Headers is every response header but Date, recorded for reference;
+	// the contract spec binds none of them beyond the media type.
+	Headers map[string]string `json:"headers,omitempty"`
+	JSON    json.RawMessage   `json:"json,omitempty"`
+	Text    *string           `json:"text,omitempty"`
 }
 
 type fixture struct {
@@ -629,9 +721,12 @@ type fixture struct {
 	Description string   `json:"description"`
 	Sources     []string `json:"sources"`
 	Recorded    string   `json:"recorded_from"`
-	// Compare is how much of the body the contract binds: "exact" for
+	// Image is the exact image recorded from. The contract spec fails when
+	// it differs from test/compose-migration.yml's pin.
+	Image string `json:"image"`
+	// Compare is how much of the response the contract binds: "exact" for
 	// every value, "types" for JSON types only, "none" for status and
-	// media type only.
+	// media type only, and "status" for the status alone.
 	Compare  string   `json:"compare"`
 	Request  request  `json:"request"`
 	Response response `json:"response"`
@@ -662,7 +757,12 @@ func do(ctx context.Context, c *http.Client, r request) (response, error) {
 	if err != nil {
 		return response{}, err
 	}
-	out := response{Status: resp.StatusCode, ContentType: resp.Header.Get("Content-Type")}
+	out := response{Status: resp.StatusCode, ContentType: resp.Header.Get("Content-Type"), Headers: map[string]string{}}
+	for k, v := range resp.Header {
+		if k != "Date" {
+			out.Headers[k] = strings.Join(v, ", ")
+		}
+	}
 	if strings.HasPrefix(out.ContentType, "application/json") && json.Valid(b) {
 		var buf bytes.Buffer
 		if err := json.Indent(&buf, b, "", "  "); err != nil {
@@ -703,7 +803,6 @@ func cases() []fixture {
 		return request{Method: "POST", Path: path, ContentType: "application/json", Body: body, Client: "admin"}
 	}
 	const v1 = "/puppet-ca/v1"
-	future := time.Now().UTC().AddDate(1, 0, 0).Format(http.TimeFormat)
 
 	fs := []fixture{
 		{Name: "status-signed-dns", Description: "status of a certificate with mixed-case DNS SANs, auth extensions and a top-bit-set serial", Sources: status, Compare: "exact", Request: get(v1 + "/certificate_status/corner-dns")},
@@ -722,11 +821,27 @@ func cases() []fixture {
 		{Name: "certificate-get-ca", Description: "the CA certificate bundle", Sources: []string{ovc + ":68-80", ova + ":1501-1513"}, Compare: "exact", Request: get(v1 + "/certificate/ca")},
 		{Name: "certificate-get-unknown", Description: "a certificate the CA does not hold", Sources: []string{ovc + ":68-80"}, Compare: "none", Request: get(v1 + "/certificate/no-such-node")},
 		{Name: "certificate-get-not-modified", Description: "a certificate not modified since the If-Modified-Since date", Sources: []string{ovc + ":42-80"}, Compare: "none",
-			Request: request{Method: "GET", Path: v1 + "/certificate/corner-dns", IfModifiedSince: future, Client: "admin"}},
+			Request: request{Method: "GET", Path: v1 + "/certificate/corner-dns", IfModifiedSince: farFuture, Client: "admin"}},
 		{Name: "certificate-request-get", Description: "a pending CSR", Sources: []string{ovc + ":82-88"}, Compare: "exact", Request: get(v1 + "/certificate_request/corner-pending")},
 		{Name: "certificate-request-get-unknown", Description: "a CSR the CA does not hold", Sources: []string{ovc + ":82-88"}, Compare: "none", Request: get(v1 + "/certificate_request/no-such-node")},
 		{Name: "crl-get", Description: "the CRL", Sources: []string{ovc + ":104-132"}, Compare: "exact", Request: get(v1 + "/certificate_revocation_list/ca")},
 		{Name: "expirations", Description: "expiry dates of the CA certificates and CRLs", Sources: []string{ovc + ":166-172", ova + ":2288-2318"}, Compare: "exact", Request: get(v1 + "/expirations")},
+
+		// Requests that change nothing upstream, chosen for the differences
+		// openvox-ca keeps or has yet to fix, so that each is pinned.
+		{Name: "statuses-unknown-state", Description: "statuses with a state filter that names no state", Sources: statuses, Compare: "exact", Request: get(v1 + "/certificate_statuses/any?state=bogus")},
+		{Name: "statuses-empty-segment", Description: "statuses with no path segment after the route", Sources: []string{ovc + ":571-573"}, Compare: "none", Request: get(v1 + "/certificate_statuses/")},
+		{Name: "status-invalid-subject", Description: "status of a subject that is not a valid certname", Sources: status, Compare: "none", Request: get(v1 + "/certificate_status/Not_A.Valid..Certname")},
+		{Name: "crl-get-other-segment", Description: "the CRL, at a segment other than ca", Sources: []string{ovc + ":583-584", ovc + ":104-132"}, Compare: "exact", Request: get(v1 + "/certificate_revocation_list/other")},
+		{Name: "crl-get-not-modified-no-weekday", Description: "the CRL with an If-Modified-Since date that has no day of the week", Sources: []string{ovc + ":42-66", ovc + ":104-132"}, Compare: "none",
+			Request: request{Method: "GET", Path: v1 + "/certificate_revocation_list/ca", IfModifiedSince: farFutureNoWeekday, Client: "admin"}},
+		{Name: "crl-put-rejected", Description: "uploading a body that holds no CRL", Sources: []string{ovc + ":134-152", ovc + ":585-586", ova + ":1843-1949"}, Compare: "none",
+			Request: request{Method: "PUT", Path: v1 + "/certificate_revocation_list", ContentType: "text/plain", Body: "not a CRL\n", Client: "admin"}},
+		{Name: "certificate-request-put-unparseable", Description: "submitting a body that is not a CSR", Sources: []string{ovc + ":90-102"}, Compare: "none",
+			Request: request{Method: "PUT", Path: v1 + "/certificate_request/not-a-csr", ContentType: "text/plain", Body: "not a CSR\n", Client: "admin"}},
+		{Name: "certificate-wrong-method", Description: "a method the route does not serve", Sources: []string{ovc + ":574-597"}, Compare: "status", Request: request{Method: "POST", Path: v1 + "/certificate/corner-dns", Client: "admin"}},
+		{Name: "unknown-route", Description: "a path no route serves", Sources: []string{ovc + ":597"}, Compare: "status", Request: get(v1 + "/no-such-route")},
+		{Name: "certificate-renewal-no-client-cert", Description: "auto-renewal with no client certificate", Sources: []string{ovc + ":303-339"}, Compare: "none", Request: request{Method: "POST", Path: v1 + "/certificate_renewal", Client: "anonymous"}},
 
 		// Mutations, each on a subject of its own.
 		{Name: "status-put-sign", Description: "signing a pending CSR", Sources: []string{ovc + ":423-542"}, Compare: "none", Request: putJSON(v1+"/certificate_status/sign-me", `{"desired_state":"signed"}`)},

@@ -1,6 +1,6 @@
 {
-  "name": "statuses-all",
-  "description": "every certificate and CSR",
+  "name": "statuses-unknown-state",
+  "description": "statuses with a state filter that names no state",
   "sources": [
     "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:544-561",
     "src/clj/puppetlabs/puppetserver/certificate_authority.clj:2068-2096"
@@ -10,7 +10,7 @@
   "compare": "exact",
   "request": {
     "method": "GET",
-    "path": "/puppet-ca/v1/certificate_statuses/any",
+    "path": "/puppet-ca/v1/certificate_statuses/any?state=bogus",
     "client": "admin"
   },
   "response": {

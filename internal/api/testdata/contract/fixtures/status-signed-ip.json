@@ -7,7 +7,8 @@
     "src/clj/puppetlabs/puppetserver/certificate_authority.clj:491-526",
     "src/clj/puppetlabs/puppetserver/certificate_authority.clj:2010-2066"
   ],
-  "recorded_from": "OpenVoxProject/openvox-server@8.14.1 (b24bf7f5f488)",
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1",
+  "image": "ghcr.io/openvoxproject/openvoxserver:8.14.1-main@sha256:806c5eb471c3f1d499308d903dc84210d96b00761de481d2cc7dee380d78c152",
   "compare": "exact",
   "request": {
     "method": "GET",
@@ -17,6 +18,11 @@
   "response": {
     "status": 200,
     "content_type": "application/json;charset=utf-8",
+    "headers": {
+      "Content-Type": "application/json;charset=utf-8",
+      "Vary": "Accept",
+      "X-Puppet-Version": "8.27.0"
+    },
     "json": {
       "name": "corner-ip",
       "dns_alt_names": [
@@ -32,16 +38,16 @@
         "DNS:corner-ip",
         "DNS:ip.example.com"
       ],
-      "not_before": "2026-10-04T12:43:52UTC",
+      "not_before": "2026-10-04T13:19:09UTC",
       "fingerprints": {
-        "SHA1": "83:1A:72:11:78:33:48:11:FB:20:46:BC:6A:18:C8:34:76:C3:17:0F",
-        "SHA256": "1A:D9:F8:6A:66:47:92:E4:02:A9:B6:59:68:D3:E7:3E:14:36:89:9B:AA:F9:FD:68:02:9D:98:5E:B5:34:A9:16",
-        "SHA512": "C2:96:5B:F3:28:64:C9:5F:78:10:CA:92:E8:95:1A:D3:63:BE:95:E2:39:F5:4C:95:F3:B4:59:FC:6A:11:9A:B9:F5:05:A9:EA:B5:C3:91:BA:72:9B:DC:33:B5:3C:2C:1A:CE:BE:4F:41:EC:84:34:F9:CE:51:D8:28:B2:7F:71:59",
-        "default": "1A:D9:F8:6A:66:47:92:E4:02:A9:B6:59:68:D3:E7:3E:14:36:89:9B:AA:F9:FD:68:02:9D:98:5E:B5:34:A9:16"
+        "SHA1": "73:5F:31:2E:31:E5:51:A0:D9:B7:00:7D:A2:52:F2:C3:12:E7:D3:62",
+        "SHA256": "A3:48:59:32:F0:FA:1E:E0:30:C4:B7:03:5A:EE:33:2E:8E:FF:62:D2:7F:B3:65:89:2A:9C:F3:D1:D1:74:4C:8B",
+        "SHA512": "F4:7B:4F:7C:60:79:68:E3:C7:7D:0C:CE:2E:EE:8C:E6:3D:5E:A2:72:04:20:71:76:BC:E0:47:0D:0D:E3:0F:5B:B4:BC:88:2F:4C:49:DF:B7:77:C2:A6:31:2D:92:ED:F6:9E:E6:A6:59:4E:C0:00:CB:2A:D2:A6:D3:4B:66:FB:C8",
+        "default": "A3:48:59:32:F0:FA:1E:E0:30:C4:B7:03:5A:EE:33:2E:8E:FF:62:D2:7F:B3:65:89:2A:9C:F3:D1:D1:74:4C:8B"
       },
-      "not_after": "2031-10-04T13:43:52UTC",
-      "serial_number": 64556477195864682429381747588163992594,
-      "fingerprint": "1A:D9:F8:6A:66:47:92:E4:02:A9:B6:59:68:D3:E7:3E:14:36:89:9B:AA:F9:FD:68:02:9D:98:5E:B5:34:A9:16"
+      "not_after": "2031-10-04T14:19:09UTC",
+      "serial_number": 123250506377384866387459852423544157659,
+      "fingerprint": "A3:48:59:32:F0:FA:1E:E0:30:C4:B7:03:5A:EE:33:2E:8E:FF:62:D2:7F:B3:65:89:2A:9C:F3:D1:D1:74:4C:8B"
     }
   }
 }

@@ -4,18 +4,23 @@
   "sources": [
     "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:90-102"
   ],
-  "recorded_from": "OpenVoxProject/openvox-server@8.14.1 (b24bf7f5f488)",
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1",
+  "image": "ghcr.io/openvoxproject/openvoxserver:8.14.1-main@sha256:806c5eb471c3f1d499308d903dc84210d96b00761de481d2cc7dee380d78c152",
   "compare": "none",
   "request": {
     "method": "PUT",
     "path": "/puppet-ca/v1/certificate_request/new-csr",
     "content_type": "text/plain",
-    "body": "-----BEGIN CERTIFICATE REQUEST-----\nMIHMMHQCAQAwEjEQMA4GA1UEAxMHbmV3LWNzcjBZMBMGByqGSM49AgEGCCqGSM49\nAwEHA0IABI/Ie26shlo72no55PtYhnIvYTHrWs+97sTn1WldVkUmafu4+IabNb5t\nHgDBkfzuOXP1KdAl+oH7MLg0A3RgXZOgADAKBggqhkjOPQQDAgNIADBFAiAfsIvH\n3CQF8RQoEVnmfiVp5vrnn4EWc2hxgZu5mCJBhgIhAKPd7kCCBFBORh6MvN/XwaJY\nVsJQ7GrNnVZd/YQ8pvwA\n-----END CERTIFICATE REQUEST-----\n",
+    "body": "-----BEGIN CERTIFICATE REQUEST-----\nMIHLMHQCAQAwEjEQMA4GA1UEAxMHbmV3LWNzcjBZMBMGByqGSM49AgEGCCqGSM49\nAwEHA0IABIhQbd/86qOMc8mINcEthwGGj+kEcDueZS3uib6f52cX5eyJcNZjGPUv\nCbxG8tRBGMn7pUE2NcRacFPyxnfVf22gADAKBggqhkjOPQQDAgNHADBEAiB3FhCz\nS6lonsePbxHPCkJYbBWSLp704ZFM8ih3mTI5IAIgY8nn8qbMFNFeBQAXETnG8pOr\n+uhsw44WJOpfe+S+Cio=\n-----END CERTIFICATE REQUEST-----\n",
     "client": "admin"
   },
   "response": {
     "status": 200,
     "content_type": "text/plain",
+    "headers": {
+      "Content-Type": "text/plain",
+      "X-Puppet-Version": "8.27.0"
+    },
     "text": ""
   }
 }

@@ -1,7 +1,8 @@
 {
-  "name": "crl-get",
-  "description": "the CRL",
+  "name": "crl-get-other-segment",
+  "description": "the CRL, at a segment other than ca",
   "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:583-584",
     "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:104-132"
   ],
   "recorded_from": "OpenVoxProject/openvox-server@8.14.1",
@@ -9,7 +10,7 @@
   "compare": "exact",
   "request": {
     "method": "GET",
-    "path": "/puppet-ca/v1/certificate_revocation_list/ca",
+    "path": "/puppet-ca/v1/certificate_revocation_list/other",
     "client": "admin"
   },
   "response": {

@@ -7,7 +7,8 @@
     "src/clj/puppetlabs/puppetserver/certificate_authority.clj:491-526",
     "src/clj/puppetlabs/puppetserver/certificate_authority.clj:2010-2066"
   ],
-  "recorded_from": "OpenVoxProject/openvox-server@8.14.1 (b24bf7f5f488)",
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1",
+  "image": "ghcr.io/openvoxproject/openvoxserver:8.14.1-main@sha256:806c5eb471c3f1d499308d903dc84210d96b00761de481d2cc7dee380d78c152",
   "compare": "exact",
   "request": {
     "method": "GET",
@@ -17,22 +18,27 @@
   "response": {
     "status": 200,
     "content_type": "application/json;charset=utf-8",
+    "headers": {
+      "Content-Type": "application/json;charset=utf-8",
+      "Vary": "Accept",
+      "X-Puppet-Version": "8.27.0"
+    },
     "json": {
       "name": "corner-nosan",
       "dns_alt_names": [],
       "state": "signed",
       "authorization_extensions": {},
       "subject_alt_names": [],
-      "not_before": "2026-10-04T12:43:52UTC",
+      "not_before": "2026-10-04T13:19:09UTC",
       "fingerprints": {
-        "SHA1": "2D:2F:D8:F8:AD:06:2F:AD:D8:6D:57:CD:F4:B7:41:0C:56:59:3A:C8",
-        "SHA256": "9A:75:7C:A0:D3:7A:11:53:67:7F:A9:AC:C7:B1:E2:DA:1C:19:46:BC:2A:29:14:D4:CE:26:87:B4:BA:C1:62:57",
-        "SHA512": "66:F8:E0:A5:23:04:91:94:E4:B9:DB:42:2F:CB:ED:1C:33:19:A8:06:9D:A4:50:51:E9:DD:CE:36:8E:5F:77:F1:70:56:EC:AD:88:08:63:8A:59:2D:6B:2D:7B:DD:0B:6F:93:9C:8D:18:80:A0:CB:26:0D:C5:36:FC:1D:E8:DE:E6",
-        "default": "9A:75:7C:A0:D3:7A:11:53:67:7F:A9:AC:C7:B1:E2:DA:1C:19:46:BC:2A:29:14:D4:CE:26:87:B4:BA:C1:62:57"
+        "SHA1": "17:9A:88:19:14:0F:22:8F:12:54:49:14:62:03:10:6D:BF:22:D5:EB",
+        "SHA256": "A4:73:29:B1:0A:4E:70:BD:8B:29:E8:E8:0C:19:80:72:91:E7:B5:C4:E1:81:A9:53:86:B0:16:51:C4:9B:57:EF",
+        "SHA512": "F4:5A:E5:38:42:1A:EC:21:76:46:7D:91:1B:0F:4F:92:9F:04:B4:71:55:98:08:62:4D:15:1D:53:48:4C:13:69:70:95:2B:99:B1:AA:8A:A0:A8:69:70:48:E3:56:51:82:D0:CE:5B:29:CF:B4:A4:88:55:D4:19:17:9B:D2:7F:19",
+        "default": "A4:73:29:B1:0A:4E:70:BD:8B:29:E8:E8:0C:19:80:72:91:E7:B5:C4:E1:81:A9:53:86:B0:16:51:C4:9B:57:EF"
       },
-      "not_after": "2031-10-04T13:43:52UTC",
+      "not_after": "2031-10-04T14:19:09UTC",
       "serial_number": 32343,
-      "fingerprint": "9A:75:7C:A0:D3:7A:11:53:67:7F:A9:AC:C7:B1:E2:DA:1C:19:46:BC:2A:29:14:D4:CE:26:87:B4:BA:C1:62:57"
+      "fingerprint": "A4:73:29:B1:0A:4E:70:BD:8B:29:E8:E8:0C:19:80:72:91:E7:B5:C4:E1:81:A9:53:86:B0:16:51:C4:9B:57:EF"
     }
   }
 }
