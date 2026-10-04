@@ -18,6 +18,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1238,3 +1239,58 @@ var _ = Describe("crl_chain_file wiring", func() {
 		Expect(myCA.CRLChainFile).To(Equal("/etc/puppet-ca/upstream-crls.pem"))
 	})
 })
+
+// --- serial_number_format: from configuration to the server ---
+
+var _ = Describe("serial_number_format at startup", func() {
+	var caDir string
+
+	BeforeEach(func() {
+		// Pinned to an empty file so a host config cannot influence the run.
+		setEnv("PUPPET_CA_CONFIG", writeTempConfig(""))
+		clearServerEnv()
+		setEnv("PUPPET_CA_SERIAL_NUMBER_FORMAT", "hexx")
+		caDir = GinkgoT().TempDir()
+	})
+
+	// The empty cadir is the evidence for "before anything starts": in the
+	// default topology the signer child would have initialised a CA in it.
+	It("refuses an unknown value through the command an operator runs, before anything starts", func() {
+		cmd := newRootCmd()
+		cmd.SetOut(GinkgoWriter)
+		cmd.SetErr(GinkgoWriter)
+		cmd.SetArgs([]string{"--cadir", caDir, "--host", "127.0.0.1", "--port", "0"})
+
+		// Bounded, because a regression here starts the launcher, which runs
+		// until stopped: a hang would report nothing.
+		done := make(chan error, 1)
+		go func() { done <- cmd.Execute() }()
+
+		var err error
+		Eventually(done, "30s").Should(Receive(&err), "the refusal must come before the launcher forks")
+		Expect(err).To(MatchError(ContainSubstring(`invalid serial_number_format: unknown serial number format "hexx"`)))
+		Expect(os.ReadDir(caDir)).To(BeEmpty(), "nothing may be initialised before the refusal")
+	})
+
+	It("refuses under --daemon instead of reporting a background start", func() {
+		cmd := newRootCmd()
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(GinkgoWriter)
+		cmd.SetArgs([]string{"--cadir", caDir, "--host", "127.0.0.1", "--port", "0", "--daemon"})
+
+		Expect(cmd.Execute()).To(MatchError(ContainSubstring("invalid serial_number_format")))
+		Expect(out.String()).NotTo(ContainSubstring("started in background"))
+	})
+})
+
+var _ = DescribeTable("applyResponseFormats hands the server its response settings",
+	func(cfg serverConfig, serialFmt api.SerialNumberFormat) {
+		srv := &api.Server{}
+		applyResponseFormats(srv, &cfg, serialFmt)
+		Expect(srv.PuppetDateTimeFormat).To(Equal(cfg.PuppetDateTimeFormat))
+		Expect(srv.SerialNumberFormat).To(Equal(serialFmt))
+	},
+	Entry("the defaults", serverConfig{}, api.SerialNumberAsNumber),
+	Entry("both opted in", serverConfig{PuppetDateTimeFormat: true}, api.SerialNumberAsHex),
+)
