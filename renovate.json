@@ -167,6 +167,27 @@
         "golang"
       ],
       "groupName": "Go toolchain"
+    },
+    {
+      "description": "bun's core module and its dialect and driver modules are one release: every submodule is tagged at the core's version, and each one that imports the core (all but driver/sqliteshim) requires exactly that version and replaces it with the in-tree copy (replace github.com/uptrace/bun => ../..), so it is only ever built against the core at the same commit. Taken one at a time they skew — bun v1.3.0 beside mysqldialect v1.2.18 fails every package that links the SQL backend, at init (#418–#423). config:best-practices does not group them: group:monorepos has no bun entry. The bare name is listed because the glob alone does not match the core module",
+      "matchDatasources": [
+        "go"
+      ],
+      "matchPackageNames": [
+        "github.com/uptrace/bun",
+        "github.com/uptrace/bun/**"
+      ],
+      "groupName": "bun monorepo"
+    },
+    {
+      "description": "etcd's api, client and server modules are one release: they share a version, and the client and server require their siblings at exactly that version and replace them with the in-tree copies. Split, the server PR drags the client along through MVS, which autocloses the client's own PR (#389, #152, #108), while the api moves in a separate merge (#388 before #390), so main briefly holds a mix the etcd project never tagged together. config:best-practices does not group them: group:monorepos has no etcd entry. go.etcd.io/raft and go.etcd.io/bbolt are separate repositories on their own version lines, so the match stops at go.etcd.io/etcd/",
+      "matchDatasources": [
+        "go"
+      ],
+      "matchPackageNames": [
+        "go.etcd.io/etcd/**"
+      ],
+      "groupName": "etcd monorepo"
     }
   ]
 }
