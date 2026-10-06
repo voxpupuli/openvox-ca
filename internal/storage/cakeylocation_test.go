@@ -95,6 +95,15 @@ var _ = Describe("Filesystem CA key location", func() {
 			Expect(os.ReadFile(legacy)).To(Equal([]byte("new-key")))
 			Expect(top).NotTo(BeAnExistingFile())
 		})
+
+		It("deletes it there, and leaves no key behind", func() {
+			Expect(store.Backend().Delete(ctx, storage.KeyCAKey)).To(Succeed())
+			Expect(legacy).NotTo(BeAnExistingFile())
+			Expect(top).NotTo(BeAnExistingFile())
+			Expect(store.HasCAKey(ctx)).To(BeFalse())
+			_, err := store.GetCAKey(ctx)
+			Expect(err).To(MatchError(fs.ErrNotExist))
+		})
 	})
 
 	Context("when both locations hold the same key", func() {
@@ -234,6 +243,18 @@ var _ = Describe("Filesystem CA key location", func() {
 		It("says a key exists", func() {
 			Expect(store.HasCAKey(ctx)).To(BeTrue())
 		})
+	})
+
+	// Several specs here skip as root, which reads, removes and searches
+	// whatever the modes say; the ones above are the only check that the
+	// frontend never reads the key. A skip is quiet, so on CI, where they have
+	// to run, a root user fails instead.
+	It("runs as a non-root user on CI, where the specs that skip for root must run", func() {
+		if os.Getenv("CI") == "" {
+			Skip("only CI promises a non-root user")
+		}
+		Expect(os.Geteuid()).NotTo(BeZero(),
+			"running as root skips the specs that pin the key is never read")
 	})
 
 	Context("when ca_key.pem is a link that leads nowhere", func() {
