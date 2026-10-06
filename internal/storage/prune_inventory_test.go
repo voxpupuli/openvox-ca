@@ -20,6 +20,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -42,10 +43,13 @@ func newFilesystemInventoryService() *StorageService {
 }
 
 // keepNotSerial returns a predicate that keeps every entry except the one with
-// the given serial, compared numerically: the filesystem backend reads its
-// zero-padded fixture serials normalised, the structured backends as stored.
+// the given zero-padded serial. The filesystem backend reads its serials
+// normalised and the structured backends as stored, so it matches either form.
+// The comparison is literal, so a fault in the normalisation under test
+// cannot also make this predicate agree with it.
 func keepNotSerial(serial string) func(InventoryEntry) bool {
-	return func(e InventoryEntry) bool { return inventorySerial(e.Serial) != inventorySerial(serial) }
+	bare := strings.TrimLeft(serial, "0")
+	return func(e InventoryEntry) bool { return e.Serial != serial && e.Serial != bare }
 }
 
 // failHMACPutBackend wraps a blob backend and, when armed, fails writes to
@@ -70,20 +74,44 @@ func (b *failHMACPutBackend) Put(ctx context.Context, key string, data []byte, k
 // HMAC/hash chain — still succeeds; a stale head would surface as
 // ErrInventoryTampered.
 var _ = Describe("PruneInventory", func() {
-	backends := map[string]func() *StorageService{
-		"sqlite": func() *StorageService {
-			svc, _ := newInventoryService()
-			return svc
+	// Each backend's own contract for pruning serial 0002 from the sample:
+	// the structured backends hand back the serial and lines as stored, while
+	// the filesystem backend reads its serials normalised and has written
+	// every line in OpenVox Server's format.
+	backends := map[string]struct {
+		mk            func() *StorageService
+		removedSerial string
+		afterPrune    string
+	}{
+		"sqlite": {
+			mk: func() *StorageService {
+				svc, _ := newInventoryService()
+				return svc
+			},
+			removedSerial: "0002",
+			afterPrune: "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1\n" +
+				"0003 2024-01-03T00:00:00UTC 2029-01-03T00:00:00UTC /node1\n",
 		},
-		"filesystem": newFilesystemInventoryService,
-		"redis": func() *StorageService {
-			svc, _, _, stop := newRedisInventoryService()
-			DeferCleanup(stop)
-			return svc
+		"filesystem": {
+			mk:            newFilesystemInventoryService,
+			removedSerial: "2",
+			afterPrune: "0x0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /CN=node1\n" +
+				"0x0003 2024-01-03T00:00:00UTC 2029-01-03T00:00:00UTC /CN=node1\n",
+		},
+		"redis": {
+			mk: func() *StorageService {
+				svc, _, _, stop := newRedisInventoryService()
+				DeferCleanup(stop)
+				return svc
+			},
+			removedSerial: "0002",
+			afterPrune: "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1\n" +
+				"0003 2024-01-03T00:00:00UTC 2029-01-03T00:00:00UTC /node1\n",
 		},
 	}
 
-	for name, mk := range backends {
+	for name, b := range backends {
+		mk := b.mk
 		Context(name, func() {
 			It("removes matching entries and rewrites the integrity head", func() {
 				ctx := context.Background()
@@ -93,27 +121,14 @@ var _ = Describe("PruneInventory", func() {
 				removed, err := svc.PruneInventory(ctx, keepNotSerial("0002"))
 				Expect(err).NotTo(HaveOccurred(), "PruneInventory")
 				Expect(removed).To(HaveLen(1), "want one entry serial 0002 subject node2")
-				// The filesystem backend reads its serials normalised; the
-				// structured backends hand back what they stored.
-				wantSerial := "0002"
-				if name == "filesystem" {
-					wantSerial = "2"
-				}
-				Expect(removed[0].Serial).To(Equal(wantSerial), "want one entry serial 0002 subject node2")
+				Expect(removed[0].Serial).To(Equal(b.removedSerial), "want one entry serial 0002 subject node2")
 				Expect(removed[0].Subject).To(Equal("node2"), "want one entry serial 0002 subject node2")
 
 				// ReadInventory verifies the integrity head before returning, so a
 				// successful read proves the chain/HMAC was rewritten for the survivors.
 				got, err := svc.ReadInventory(ctx)
 				Expect(err).NotTo(HaveOccurred(), "ReadInventory after prune (head not rewritten?)")
-				want := "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1\n" +
-					"0003 2024-01-03T00:00:00UTC 2029-01-03T00:00:00UTC /node1\n"
-				if name == "filesystem" {
-					// The filesystem backend wrote OpenVox Server's format.
-					want = "0x0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /CN=node1\n" +
-						"0x0003 2024-01-03T00:00:00UTC 2029-01-03T00:00:00UTC /CN=node1\n"
-				}
-				Expect(got).To(Equal([]byte(want)), "inventory after prune")
+				Expect(got).To(Equal([]byte(b.afterPrune)), "inventory after prune")
 
 				// A subsequent append must extend the rewritten chain cleanly.
 				Expect(svc.AppendInventory(ctx, "0004 2024-01-04T00:00:00UTC 2029-01-04T00:00:00UTC /node3")).NotTo(HaveOccurred(), "AppendInventory after prune")
