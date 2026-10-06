@@ -1335,8 +1335,10 @@ func (s *StorageService) inventoryScheme() string {
 // canonicalInventoryLine each have one. Those keep the primitives from
 // diverging; this keeps the *composition* from diverging, which
 // InventoryIntegrityReport made possible by folding from its own single read
-// rather than paying for a second one. A change to the fold order, a
-// domain-separation prefix, or the branch predicate now has one site.
+// rather than paying for a second one. A change to the fold order or a
+// domain-separation prefix now has one site. The branch predicate does not:
+// `chained` arrives as a parameter, and callers each evaluate
+// asInventoryStore(s.backend) for themselves.
 func foldInventoryHead(key []byte, entries []InventoryEntry, blob []byte, chained bool) []byte {
 	if !chained {
 		return wholeBlobInventoryMAC(key, blob)
@@ -1617,17 +1619,16 @@ func (s *StorageService) InventoryIntegrityReport(ctx context.Context) (Inventor
 		// empty presence marker, so it cannot false-positive here.
 		// Fail closed. This detection is the only thing standing between a
 		// legacy store and a rebuild that would write an empty chain head over
-		// the whole-blob value that is its sole baseline, so "could not read the
-		// blob" must not resolve to "not legacy" -- that is the answer that lets
-		// the destructive path proceed. An absent blob is a real answer (there
-		// is nothing to be undecomposed from); anything else is not.
-		// readInventoryForHMAC turns an absent blob into empty bytes rather
-		// than fs.ErrNotExist, so "no blob at all" arrives here as a nil error
-		// and no parseable entries -- a genuinely empty structured inventory,
-		// which is not legacy. Any error it does return is a store that could
-		// not be read, and that must not resolve to "not legacy": that is the
-		// answer which lets the rebuild write an empty chain head over the
-		// whole-blob value that is a legacy store's only baseline.
+		// the whole-blob value that is its sole baseline, so a store that could
+		// not be read must not resolve to "not legacy" -- that is the answer
+		// which lets the destructive path proceed.
+		//
+		// An absent blob is a real answer rather than a failure: there is
+		// nothing to be undecomposed from. readInventoryForHMAC turns it into
+		// empty bytes rather than fs.ErrNotExist, so "no blob at all" arrives
+		// here as a nil error and no parseable entries -- a genuinely empty
+		// structured inventory, which is not legacy. Any error it does return
+		// is the unreadable case above.
 		legacy, err := s.readInventoryForHMAC(ctx)
 		if err != nil {
 			return rep, fmt.Errorf("reading the inventory blob to detect a legacy store: %w", err)

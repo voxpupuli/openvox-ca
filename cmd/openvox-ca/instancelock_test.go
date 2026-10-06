@@ -201,7 +201,16 @@ var _ = Describe("the store instance lock", func() {
 			rec := testutil.NewRecordingBackend(GinkgoT().TempDir())
 			rt := newRuntime(rec)
 
-			Expect(func() error { _, e := holdInstanceLock(ctx, rt); return e }()).To(Succeed())
+			// The value is captured rather than thrown away through a
+			// closure, but deliberately NOT asserted here: recordingUnlocker
+			// does not forward storage's enforcesInstance predicate, so
+			// `enforced` is false for a RecordingBackend however real the
+			// underlying flock is. Asserting it on this fixture would pin the
+			// fixture's artefact as though it were the store's behaviour --
+			// which is what the NOTE in internal/testutil/storelock.go warns
+			// about. The spec below asserts it on a backend that can answer.
+			_, err := holdInstanceLock(ctx, rt)
+			Expect(err).To(Succeed())
 			Expect(rec.Events()).To(BeEmpty(), "nothing is given back before Close")
 
 			Expect(rt.Close()).To(Succeed())
@@ -216,14 +225,39 @@ var _ = Describe("the store instance lock", func() {
 			rec := testutil.NewRecordingBackend(cadir)
 			rt := newRuntime(rec)
 
-			_, err := holdInstanceLock(ctx, rt)
+			enforced, err := holdInstanceLock(ctx, rt)
 			var locked *storage.StoreLockedError
 			Expect(errors.As(err, &locked)).To(BeTrue())
+			Expect(enforced).To(BeFalse(),
+				"a lock that was refused enforces nothing, whatever the backend could have done")
 
 			// No release was registered, so Close must still close the backend
 			// exactly once and must not try to unlock a lock never taken.
 			Expect(rt.Close()).To(Succeed())
 			Expect(rec.Events()).To(Equal([]string{"close"}))
+		})
+
+		It("reports the lock as enforced on a backend that really does exclude a second instance", func() {
+			// Where `enforced` can actually be asserted. The two specs above
+			// run on RecordingBackend, which cannot answer this question by
+			// construction, so without a real backend here nothing in this
+			// package would fail if the enforcement wiring were lost -- every
+			// run would read as unenforced and the single-instance refusal on
+			// rebuild-inventory-hmac would quietly need --replicas-stopped.
+			//
+			// This is also the guard that makes the fixture trap visible where
+			// it bites: a spec author who writes against RecordingBackend and
+			// sees false has this sibling, on the same helper, showing true.
+			cadir := GinkgoT().TempDir()
+			rt := &caRuntime{Store: storage.NewWithBackend(
+				storage.NewFilesystemBackend(cadir), filepath.Join(cadir, "private"))}
+
+			enforced, err := holdInstanceLock(ctx, rt)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { _ = rt.Close() })
+
+			Expect(enforced).To(BeTrue(),
+				"the filesystem backend takes a real store-wide flock, so the caller may trust the quiescence it implies")
 		})
 	})
 

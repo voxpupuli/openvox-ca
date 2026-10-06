@@ -502,3 +502,37 @@ var _ = Describe("the integrity-mismatch warning", func() {
 		})
 	})
 })
+
+var _ = Describe("HMACKeyState.String", func() {
+	// These four strings are operator-facing: they are the "HMAC key:" line of
+	// rebuild-inventory-hmac's report, and docs/operator-cli.md quotes them.
+	// The report specs compare the enum values and never render them, so a
+	// swapped case or a typo here would pass every one of them.
+	DescribeTable("names the state for the operator",
+		func(s HMACKeyState, want string) {
+			Expect(s.String()).To(Equal(want))
+		},
+		Entry("the zero value, which means nothing has been read yet", HMACKeyUnknown, "unknown"),
+		Entry("usable", HMACKeyUsable, "usable"),
+		Entry("absent", HMACKeyAbsent, "absent"),
+		Entry("wrong length", HMACKeyWrongLength, "wrong-length"),
+		// A state added to the enum but not to String renders as "unknown"
+		// rather than a Go-syntax default like "%!s(storage.HMACKeyState=4)",
+		// which would reach an operator's terminal verbatim.
+		Entry("a value outside the enum", HMACKeyState(99), "unknown"),
+	)
+
+	It("gives each defined state a distinct name", func() {
+		// Without this, String could satisfy every row above and still be
+		// written so that two states collapse onto one word -- the report
+		// would then describe "no key at all" and "a key no rebuild can
+		// reproduce" identically, which are different operator decisions.
+		seen := map[string]HMACKeyState{}
+		for _, s := range []HMACKeyState{HMACKeyUnknown, HMACKeyUsable, HMACKeyAbsent, HMACKeyWrongLength} {
+			name := s.String()
+			prev, dup := seen[name]
+			Expect(dup).To(BeFalse(), "states %d and %d both render as %q", prev, s, name)
+			seen[name] = s
+		}
+	})
+})

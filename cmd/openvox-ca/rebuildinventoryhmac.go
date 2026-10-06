@@ -343,10 +343,9 @@ is the safe way to inspect a CA that will not start.`,
 			// approved.
 			//
 			// rep.ComputedHead is the digest of the reported state, so the two
-			// agreeing is exactly the claim "nothing changed in between". Only
-			// checked when the key was usable: a wrong-length key is replaced
-			// by the rebuild, so the reported head was computed under a key
-			// that no longer exists and could not match.
+			// agreeing is exactly the claim "nothing changed in between". That
+			// comparison needs a usable key; the switch below says what stands
+			// in for it when there was not one.
 			//
 			// This detects rather than prevents -- the write has happened by
 			// now -- but the operator is told plainly that the value covers

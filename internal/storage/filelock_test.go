@@ -77,8 +77,8 @@ var _ = Describe("Same-host locking", func() {
 	// It matters that it is well under ten minutes. sqlMigrationTimeout is
 	// exactly ten minutes, and so is go test's default binary timeout, which
 	// nothing here overrides -- magefile.go passes no -timeout anywhere. This
-	// file is untagged, and unitTestExcludes holds only internal/testutil, so
-	// every job that builds the package runs it: test:unit as well as the four
+	// file is untagged, and unitTestExcludes is empty, so every job that
+	// builds the package runs it: test:unit as well as the four
 	// backend targets, five in all, plus the pre-push hook's `go test -race
 	// ./...`. Left unbounded, a regression in lock *release* would therefore
 	// race those two deadlines and most likely surface as "panic: test timed

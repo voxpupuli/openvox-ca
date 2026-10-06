@@ -150,6 +150,31 @@ func (b *appendingBackend) Get(ctx context.Context, key string) ([]byte, error) 
 	return data, nil
 }
 
+// tearingBackend is appendingBackend's other half: what arrives after the
+// report is a fragment rather than an entry, which is what a torn write leaves.
+// Entries therefore does not move and only UnparseableLines does, so this is
+// the one fixture that can fail the unparseable half of the unusable-key
+// comparison. appendingBackend cannot: a well-formed line moves both counts,
+// and the Entries clause alone satisfies the assertion.
+type tearingBackend struct {
+	storage.Backend
+	reads int
+}
+
+func (b *tearingBackend) Get(ctx context.Context, key string) ([]byte, error) {
+	data, err := b.Backend.Get(ctx, key)
+	if key != storage.KeyInventory || err != nil {
+		return data, err
+	}
+	b.reads++
+	if b.reads > 1 {
+		// Fewer than four fields, so parseInventoryEntry rejects it and it
+		// lands in UnparseableLines instead of Entries.
+		data = append(data, []byte("TORN-AFTER-THE-REPORT\n")...)
+	}
+	return data, nil
+}
+
 // failReportBackend fails the read InventoryIntegrityReport makes for the stored
 // integrity value, with an error that is not fs.ErrNotExist — an unreadable
 // store rather than an absent baseline.
@@ -1068,6 +1093,28 @@ var _ = Describe("openvox-ca rebuild-inventory-hmac", func() {
 				"an unusable key is no licence to sign over content the operator never saw")
 		})
 
+		It("refuses on a torn fragment appended after the report, under an unusable key", func() {
+			// The same arm, reached by its other clause. With no usable key the
+			// binding compares two counts, and the spec above moves only
+			// Entries -- so deleting the UnparseableLines clause left the suite
+			// green. A fragment moves only that count, which is also the more
+			// likely accident of the two: a torn write rather than a writer
+			// appending a well-formed line.
+			writeLoggingConfig()
+			Expect(os.WriteFile(filepath.Join(caDir, "private/.inventory_hmac_key"),
+				[]byte("far too short"), 0o600)).To(Succeed())
+			breakInventoryIntegrity(caDir)
+
+			store := storeOver(caDir, func(b storage.Backend) storage.Backend {
+				return &tearingBackend{Backend: b}
+			})
+
+			_, err := runRebuildOver(store, "--yes-re-bless", "--replicas-stopped")
+
+			Expect(err).To(MatchError(ContainSubstring("changed after it was reported")),
+				"content the whole-blob MAC covers but the entry count never described is still unseen content")
+		})
+
 		It("records the mutation when the rebuild itself fails mid-write", func() {
 			// The wrong-length-key state makes RebuildInventoryHMAC two writes:
 			// the key is replaced, then the head. A failure between them is a
@@ -1172,5 +1219,57 @@ var _ = Describe("openvox-ca rebuild-inventory-hmac", func() {
 			Expect(err).To(MatchError(ContainSubstring("no inventory HMAC key is stored")))
 			Expect(err).To(MatchError(ContainSubstring("starting the server will establish a baseline")))
 		})
+	})
+})
+
+var _ = Describe("openvox-ca rebuild-inventory-hmac, before it can reach a store", func() {
+	// The two bare `return err` sites at the top of RunE. Both are plain
+	// propagation and the helpers behind them have their own suites, so the
+	// point here is not the error text: it is that neither failure leaves the
+	// operator with a report. A command that printed integrity findings and
+	// then failed to open the store would be read as a report of the store.
+	var caDir string
+
+	BeforeEach(func() {
+		caDir = GinkgoT().TempDir()
+		bootstrapCAInDir(caDir, "puppet.example.com")
+		clearServerEnv()
+	})
+
+	It("surfaces a runtime-resolution failure and reports no integrity findings", func() {
+		writeLoggingConfig()
+		sentinel := errors.New("backend unreachable: dial tcp 127.0.0.1:2379")
+
+		cmd := newRebuildInventoryHMACCmdWith(
+			func(context.Context, *serverConfig) (*caRuntime, error) { return nil, sentinel })
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&bytes.Buffer{})
+		cmd.SetArgs([]string{"--cadir", caDir, "--yes-re-bless"})
+
+		err := cmd.Execute()
+
+		Expect(err).To(MatchError(sentinel),
+			"the resolution failure must surface unwrapped enough to be recognised")
+		Expect(out.String()).NotTo(ContainSubstring("Inventory integrity"),
+			"nothing was read, so nothing may be reported about it")
+		Expect(out.String()).NotTo(ContainSubstring("HMAC key:"))
+		// What it SHOULD still have printed: the resolved config header is
+		// deliberately emitted before resolveRuntime, because that failure
+		// names no file. Asserting it keeps this spec from passing merely
+		// because the command produced no output at all.
+		Expect(out.String()).To(ContainSubstring("Using config file:"),
+			"the header that tells the operator which configuration produced the failure")
+	})
+
+	It("surfaces an unreadable configuration without reporting anything", func() {
+		bad := filepath.Join(GinkgoT().TempDir(), "broken.yaml")
+		Expect(os.WriteFile(bad, []byte("ca_key_algo: [this is not a string\n"), 0o644)).To(Succeed())
+		setEnv("PUPPET_CA_CONFIG", bad)
+
+		stdout, _, err := runRebuild("--yes-re-bless")
+
+		Expect(err).To(HaveOccurred(), "an unparseable configuration must not be treated as defaults")
+		Expect(stdout).NotTo(ContainSubstring("Inventory integrity"))
 	})
 })

@@ -613,6 +613,54 @@ var _ = Describe("LockIsEnforced", func() {
 
 		Expect(LockIsEnforced(ul)).To(BeTrue())
 	})
+
+	// Every spec above hands the predicate an Unlocker built here. None of them
+	// reaches AcquireInstanceLock, which is the only way the command ever
+	// obtains one -- so between them they fix the predicate's behaviour per
+	// type while saying nothing about the wiring that chooses the type. A
+	// backend wrapper that replaced the unlocker would leave all of them green
+	// and make every real run read as unenforced, retiring the single-instance
+	// refusal on a destructive repair. It fails safe, which is why this is
+	// worth specs rather than alarm, but it would fail silently.
+	Describe("through AcquireInstanceLock, as the command reaches it", func() {
+		ctx := context.Background()
+		svc := func(b Backend) *StorageService {
+			return NewWithBackend(b, filepath.Join(GinkgoT().TempDir(), "private"))
+		}
+		enforcedFor := func(b Backend) bool {
+			ul, err := svc(b).AcquireInstanceLock(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { _ = ul.Unlock() })
+			return LockIsEnforced(ul)
+		}
+
+		It("is true for the filesystem backend, which really does exclude a second instance", func() {
+			Expect(enforcedFor(NewFilesystemBackend(GinkgoT().TempDir()))).To(BeTrue())
+		})
+
+		It("is true through an overlay, which delegates the lock to its base", func() {
+			// The wrapper case the note above is about: the overlay forwards
+			// AcquireInstanceLock to its base, so the lock it returns is the
+			// base's and excludes just as much. Were the forwarding to go, the
+			// overlay would answer false here while nothing else changed.
+			ov, _, _, _ := overlayTestSetup()
+			Expect(enforcedFor(ov)).To(BeTrue())
+		})
+
+		It("is false for a backend with distributed locking, which may run many instances", func() {
+			// bothLocker embeds the concrete filesystem backend, so it could
+			// take the store-wide flock; the capability gate is what stops it.
+			// The predicate must report that nothing was excluded, since on
+			// this backend nothing was.
+			b := &bothLocker{FilesystemBackend: NewFilesystemBackend(GinkgoT().TempDir())}
+			Expect(enforcedFor(b)).To(BeFalse())
+		})
+
+		It("is false for a backend that offers no store-wide lock at all", func() {
+			b := plainBackend{Backend: NewFilesystemBackend(GinkgoT().TempDir())}
+			Expect(enforcedFor(b)).To(BeFalse())
+		})
+	})
 })
 
 // strangeUnlocker is an Unlocker from outside this package's knowledge — a
