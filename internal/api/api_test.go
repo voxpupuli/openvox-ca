@@ -564,6 +564,23 @@ var _ = Describe("API Workflow", func() {
 			mux.ServeHTTP(rr, req)
 			Expect(rr.Code).To(Equal(http.StatusBadRequest))
 		})
+
+		It("should return 400 for invalid subject on PUT /certificate_request/{subject}", func() {
+			// A well-formed CSR, so only the subject can be refused.
+			csrPEM, err := testutil.GenerateCSR("valid-node")
+			Expect(err).NotTo(HaveOccurred())
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, httptest.NewRequest("PUT", "/certificate_request/a..b", bytes.NewReader(csrPEM)))
+			Expect(rr.Code).To(Equal(http.StatusBadRequest))
+			Expect(rr.Body.String()).To(ContainSubstring("invalid subject"))
+		})
+
+		It("should return 400 for invalid subject on DELETE /certificate_status/{subject}", func() {
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, httptest.NewRequest("DELETE", "/certificate_status/a..b", nil))
+			Expect(rr.Code).To(Equal(http.StatusBadRequest))
+			Expect(rr.Body.String()).To(ContainSubstring("invalid subject"))
+		})
 	})
 
 	Context("DELETE /certificate_request/{subject}", func() {
@@ -1074,6 +1091,9 @@ var _ = Describe("API Workflow", func() {
 		})
 
 		It("keys the CA certificate and CRL by CN, as OpenVox Server does", func() {
+			// The other specs here read OpenVox Server's store. This one reads
+			// a CA openvox-ca bootstrapped itself, with one certificate and one
+			// CRL, which is how most stores will look.
 			rr := httptest.NewRecorder()
 			mux.ServeHTTP(rr, httptest.NewRequest("GET", "/expirations", nil))
 			Expect(rr.Code).To(Equal(http.StatusOK))

@@ -634,13 +634,7 @@ func certSerialAndValidity(der []byte) (serial *big.Int, notBefore, notAfter tim
 
 // serveContract drives openvox-ca with a fixture's request.
 func serveContract(srv *api.Server, f contractFixture) *httptest.ResponseRecorder {
-	var body *strings.Reader
-	if f.Request.Body != "" {
-		body = strings.NewReader(f.Request.Body)
-	} else {
-		body = strings.NewReader("")
-	}
-	req := httptest.NewRequest(f.Request.Method, f.Request.Path, body)
+	req := httptest.NewRequest(f.Request.Method, f.Request.Path, strings.NewReader(f.Request.Body))
 	if f.Request.ContentType != "" {
 		req.Header.Set("Content-Type", f.Request.ContentType)
 	}
