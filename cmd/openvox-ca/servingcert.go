@@ -781,6 +781,25 @@ func (s *servingCert) getCertificate() func(*tls.ClientHelloInfo) (*tls.Certific
 	return s.holder.GetCertificate
 }
 
+// servingCertLogAttr names where the listener's certificate came from, as the
+// key and value for the "TLS enabled" line.
+//
+// A function rather than two inline slog calls because the two sources want
+// different follow-up and the line is the only thing that says which: `cert` is
+// a path the operator set and can look at, `serving_cert` is a store the CA
+// writes itself, for which a path on disk may not exist at all.
+//
+// Extracted so this is testable by calling it. It was previously pinned by
+// parsing main.go for the two string literals, which asserted the right
+// property through the wrong surface: that spec broke on any reformatting of
+// the call and could not check what the value actually was.
+func servingCertLogAttr(serving *servingCert, cfg *serverConfig) (key, value string) {
+	if serving != nil {
+		return "serving_cert", serving.store.String()
+	}
+	return "cert", cfg.TLSCert
+}
+
 // checkManagedCertOverlap refuses a serving certificate that collides with a
 // managed one on its certname or on its Secret.
 //

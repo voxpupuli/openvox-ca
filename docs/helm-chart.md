@@ -720,6 +720,15 @@ The layout that satisfies all three with no `initContainer` is
 `/var/lib/puppet-ca/tls.crt`, since only the mount point is guaranteed to exist
 on a fresh volume. A subdirectory works too if something creates it first.
 
+**On an existing release this is a migration, not a settings change.** Narrowing
+`config.cadir` points the CA at a directory that does not hold the CA tree, and
+it refuses to start rather than issuing from an empty one. Either stop the CA
+and move the tree into the new `cadir` on the volume before changing the
+setting, or leave `cadir` alone and put the pair in another directory under
+`persistence.mountPath` that something creates — rule 3 still applies to it. The
+same caveat, with the non-Kubernetes wording, is under [the CA's own serving
+certificate](configuration.md#the-cas-own-serving-certificate).
+
 ```yaml
 managedCerts:
   rbac:

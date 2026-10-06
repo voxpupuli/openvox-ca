@@ -271,6 +271,37 @@ tests:
               summary: "A managed certificate has never been issued, or holds only revoked ones."
               description: "The Puppet CA on ca-1:9140 has puppetserver.openvox.svc.cluster.local configured in managed_certs or serving_cert but no usable certificate for it after 1h: either none was ever issued, or every certificate it has is revoked. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else's material, or a directory that does not exist. If the subject is the CA's own certname it came from serving_cert, and the CA would not have started at all had it never been issued -- so a certificate that existed no longer has a live inventory row. The rule fires on the absence of a non-revoked row, so revocation is the likeliest cause but not the only one -- check the CRL first, then the inventory itself."
 
+  # The serving_cert subject, which the description spends two sentences on and
+  # no case executed. Every other case here uses a component certname, so the
+  # branch an operator actually meets -- "this is the CA's OWN certificate" --
+  # was prose with no worked example behind it.
+  #
+  # Same series shape as the component case above: the CA refuses to start
+  # without its own certificate, so in practice the row existed and went,
+  # which is what the description now says rather than claiming revocation.
+  - interval: 1m
+    name: the CA's own serving certificate with no live inventory row
+    input_series:
+      - series: 'puppetca_managed_certificate_configured{job="openvox-ca",instance="ca-1:9140",subject="ca.example.com"}'
+        values: "1+0x90"
+      - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+        values: "1+0x90"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: PuppetCAManagedCertificateNeverIssued
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: PuppetCAManagedCertificateNeverIssued
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              instance: ca-1:9140
+              subject: ca.example.com
+            exp_annotations:
+              summary: "A managed certificate has never been issued, or holds only revoked ones."
+              description: "The Puppet CA on ca-1:9140 has ca.example.com configured in managed_certs or serving_cert but no usable certificate for it after 1h: either none was ever issued, or every certificate it has is revoked. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else's material, or a directory that does not exist. If the subject is the CA's own certname it came from serving_cert, and the CA would not have started at all had it never been issued -- so a certificate that existed no longer has a live inventory row. The rule fires on the absence of a non-revoked row, so revocation is the likeliest cause but not the only one -- check the CRL first, then the inventory itself."
+
   # The steady state, and the case that stops the rule being a permanent page
   # for every deployment that uses the feature. The leaf series carries serial
   # and state labels the configured series does not, so a rule that tried to

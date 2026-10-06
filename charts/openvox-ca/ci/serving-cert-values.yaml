@@ -8,22 +8,24 @@
 # the CA is already serving. The offline `openvox-ca generate` could mint one by
 # hand on the node, which is exactly the manual renewal a pod should not need.
 #
-# Two chart branches the other fixtures cannot reach, and one rendered pairing
-# worth shipping for what the server does with it:
+# What this fixture is for, now that Chart.Test covers the branches it used to
+# claim: kubeconform validation of the combined `serving_cert` plus
+# `managed_certs` render. `chart:lint` and `chart:validate` run every fixture
+# here against the Kubernetes schemas, and this is the only one that renders
+# both blocks together with a shared-namespace Role.
 #
-#   * `tlsConfigured` answering true from `serving_cert` alone. There is no
-#     `tls:` block here and no `config.tls_cert`, deliberately -- the server
-#     refuses that combination, so this is the only shape in which the branch
-#     can be exercised. Without it the chart refuses the install for having no
-#     certificate, and sets the probes to HTTP against an HTTPS listener.
-#   * the managed-certificate Role covering the serving Secret as well as the
-#     component ones, in one rule when they share a namespace.
-#   * puppetServers naming the serving certname itself, which is the shared-host
-#     deployment the clientAuth-by-default decision exists to keep working. Note
-#     this reaches no chart branch the managed-certs fixture does not: the NOTES
-#     warning is gated on the Role being rendered and says nothing conditional
-#     about puppetServers. What it exercises is the rendered pairing the server
-#     then acts on in warnIfServingCertIsAdmin, which the chart cannot see.
+# The branch assertions live in `mage chart:test`, not here, and asserting them
+# twice in two forms is how the two drift. It covers `tlsConfigured` answering
+# true from `serving_cert` alone, the Role covering the serving Secret as well
+# as the component ones, and the refusals around them -- read those cases for
+# what the chart decides.
+#
+# What this fixture alone still carries is the rendered PAIRING the server then
+# acts on: `puppetServers` naming the serving certname, which is the shared-host
+# deployment the clientAuth-by-default decision exists to keep working. No chart
+# branch turns on it -- the NOTES warning is gated on the Role being rendered --
+# so there is nothing for chart:test to assert, and what makes it worth shipping
+# is that warnIfServingCertIsAdmin acts on it at runtime.
 #
 # `usages` is deliberately unset, so the certificate takes the
 # serverAuth+clientAuth pair every certificate this CA issues. That is what

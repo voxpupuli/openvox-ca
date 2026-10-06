@@ -1560,6 +1560,27 @@ serving_cert:
       ca: /var/lib/puppet-ca/ca.crt
 ```
 
+> **Changing `cadir` on a CA that already exists moves where the CA looks for
+> its own key and certificate.** The example above is written for a fresh
+> install. On an existing deployment, narrowing `cadir` from
+> `/var/lib/puppet-ca` to `/var/lib/puppet-ca/ca` points the CA at a directory
+> that does not contain the CA tree, and it will refuse to start rather than
+> issue from an empty one. Two ways round it:
+>
+> - **Move the tree.** Stop the CA, `mv` the contents of the old `cadir` into
+>   the new one, then change the setting. Nothing rewrites paths inside the
+>   inventory, so the move must be complete before the CA starts again.
+> - **Leave `cadir` alone** and put the serving pair somewhere outside it
+>   instead — any directory the CA can write that is not under `cadir`. Under
+>   systemd that means a `ReadWritePaths=` drop-in naming it, because
+>   `ProtectSystem=strict` makes `StateDirectory` the only writable path; see
+>   [systemd](systemd.md). In Kubernetes it must still be under
+>   `persistence.mountPath`, which the chart refuses at install time if it is
+>   not; see [the Helm chart](helm-chart.md).
+>
+> The second needs no downtime and is the safer choice on a CA that is already
+> issuing.
+
 > **Three rules decide where the pair can go, and here breaking any of them
 > stops the CA starting rather than being retried.**
 >

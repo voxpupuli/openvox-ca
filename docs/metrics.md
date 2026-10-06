@@ -165,7 +165,7 @@ query, and `puppetca_crl_sync_failures_total` for why it is stuck.
 > remainder.
 >
 > Two of those writers are managed certificates', and they move only on a
-> deployment that configures `managed_certs` or `serving_cert` -- the CA's own
+> deployment that configures `managed_certs` or `serving_cert` — the CA's own
 > serving certificate is a managed certificate to this mechanism, and moves them
 > the same way. They are named regardless,
 > because the enumeration claims completeness and a claim that is true only of

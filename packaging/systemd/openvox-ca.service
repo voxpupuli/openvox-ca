@@ -111,9 +111,16 @@ Group=puppet-ca
 #
 # Wherever it lives it must sit outside cadir, which the CA reserves against
 # every file store -- so on a default install, where cadir IS this directory,
-# the pair goes somewhere else and does need naming here. See "the CA's own
-# serving certificate" in docs/configuration.md and the Hardening section of
-# docs/systemd.md, which states the same rule.
+# the pair goes somewhere else and does need naming here.
+#
+# There is a second layout that needs no drop-in at all, and the docs recommend
+# it for a fresh install: narrow cadir to a subdirectory -- for example
+# /var/lib/puppet-ca/ca -- and keep the serving pair at the StateDirectory root.
+# Both are then writable and both are outside each other. On a CA that already
+# exists, changing cadir moves where the CA looks for its own key and
+# certificate, so that is a migration rather than a setting change; see "the
+# CA's own serving certificate" in docs/configuration.md. The Hardening section
+# of docs/systemd.md states the same rules.
 StateDirectory=puppet-ca
 StateDirectoryMode=0750
 #ReadWritePaths=/etc/puppetlabs/puppet/ssl/ca

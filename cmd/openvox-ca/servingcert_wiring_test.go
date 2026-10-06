@@ -49,10 +49,26 @@ import (
 //
 // The same technique as managed_certs_wiring_test.go, which exists because the
 // identical mutation was found against attachManagedCerts, and as
-// internal/api/authseam_test.go. It is a weaker guarantee than behaviour -- it
-// pins that the calls are written, not that they run -- but a behavioural spec
-// would have to start the server and bind its listeners, which is the compose
-// integration suite's job.
+// internal/api/authseam_test.go.
+//
+// What this is and is not, stated precisely, because an earlier version of this
+// comment deferred the behavioural half to "the compose integration suite's
+// job" and that suite does not mention serving_cert at all -- a deferral to
+// coverage that does not exist reads as coverage.
+//
+// The holder half IS behavioural, in this package: servingcert_test.go binds a
+// real listener on 127.0.0.1:0, completes a TLS handshake, and asserts the
+// serial changes after the reconcile loop reissues. So "the listener presents
+// the certificate, and a renewal reaches it" is tested for real.
+//
+// What these AST specs cover is narrower and genuinely untested elsewhere:
+// that MAIN.GO wires that holder up. The handshake spec builds its own
+// tls.Config, so it would pass unchanged if the serve command stopped calling
+// buildServingCert, stopped provisioning, or pointed GetCertificate at the
+// operator-supplied reloader instead. Nothing anywhere starts the serve command
+// end to end with serving_cert and checks that an admin endpoint still refuses
+// a client with no certificate -- that gap is real and is recorded in the
+// disposition rather than papered over here.
 var _ = Describe("the serve command's serving-certificate wiring", func() {
 	var file *ast.File
 
@@ -210,54 +226,6 @@ var _ = Describe("the serve command's serving-certificate wiring", func() {
 				"is presenting only after every component store -- a renewal due for it "+
 				"waits behind stores that may be slow. Startup is unaffected: "+
 				"provisionServingCert reconciles this entry by name")
-	})
-
-	It("names the certificate's source in the TLS-enabled log line", func() {
-		// Both arms, because the line is what tells an operator WHERE the
-		// certificate the listener is presenting came from, and the two
-		// sources want different follow-up: `cert` is a path they set and can
-		// look at, `serving_cert` is a store the CA writes itself and a path
-		// on disk may not even exist for it.
-		//
-		// Collapsing the branch to one arm is the mutation this catches, and
-		// it is invisible everywhere else: the server starts, the handshake
-		// works, and only the log is wrong. Asserted structurally because
-		// reaching the line behaviourally means starting the serve command and
-		// binding its listeners, which is the compose suite's job.
-		var servingArm, operatorArm bool
-		ast.Inspect(file, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok || len(call.Args) < 2 {
-				return true
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "Info" {
-				return true
-			}
-			msg, ok := call.Args[0].(*ast.BasicLit)
-			if !ok || msg.Value != `"TLS enabled"` {
-				return true
-			}
-			key, ok := call.Args[1].(*ast.BasicLit)
-			if !ok {
-				return true
-			}
-			switch key.Value {
-			case `"serving_cert"`:
-				servingArm = true
-			case `"cert"`:
-				operatorArm = true
-			}
-			return true
-		})
-
-		Expect(servingArm).To(BeTrue(),
-			`main.go's "TLS enabled" line has no serving_cert arm, so a self-provisioned `+
-				`CA reports its certificate as though an operator had supplied a path -- `+
-				`and the path it names is empty, because tls_cert is unset`)
-		Expect(operatorArm).To(BeTrue(),
-			`main.go's "TLS enabled" line has no cert arm, so an operator who supplied `+
-				`tls_cert is no longer told which file the listener is presenting`)
 	})
 
 	// The edit that actually points the listener at the holder, and the one

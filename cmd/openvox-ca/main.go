@@ -675,7 +675,9 @@ func newRootCmd() *cobra.Command {
 			// SECURITY: TLS enforcement: plain HTTP over a non-loopback
 			// interface lets any on-path host inject forged certificates.
 			// Refuse to start unless:
-			//   (a) TLS is configured (--tls-cert + --tls-key), or
+			//   (a) TLS is configured — either --tls-cert with --tls-key, or a
+			//       self-provisioned config.serving_cert, which is TLS with
+			//       neither of those set — or
 			//   (b) the bind address is loopback-only, or
 			//   (c) the operator explicitly opts out with --no-tls-required.
 			// NIST 800-53: SC-8 (Transmission Confidentiality and Integrity), SC-23 (Session Authenticity)
@@ -1008,11 +1010,8 @@ func newRootCmd() *cobra.Command {
 					MinVersion:     tls.VersionTLS12,
 				}
 
-				if serving != nil {
-					slog.Info("TLS enabled", "serving_cert", serving.store.String())
-				} else {
-					slog.Info("TLS enabled", "cert", cfg.TLSCert)
-				}
+				k, v := servingCertLogAttr(serving, cfg)
+				slog.Info("TLS enabled", k, v)
 			}
 
 			// Foreign client CRLs reload on their own timer, gated on client_ca

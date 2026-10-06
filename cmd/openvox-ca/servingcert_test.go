@@ -350,6 +350,17 @@ var _ = Describe("The CA's own serving certificate", func() {
 			cert, err := sc.holder.GetCertificate(&tls.ClientHelloInfo{})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(cert.Leaf.IsCA).To(BeFalse(), "the listener must not present a signing key")
+
+			// "this CA signed" was the spec's name and not one of its
+			// assertions. Everything below it held for a self-signed
+			// certificate, or for one signed by any other issuer, so the one
+			// property the name promises was the one nothing checked.
+			Expect(cert.Leaf.CheckSignatureFrom(myCA.CACert)).To(Succeed(),
+				"the listener presents a certificate this CA did not sign, so every client "+
+					"verifying against the CA bundle rejects it while the handshake itself "+
+					"succeeds")
+			Expect(cert.Leaf.Issuer.CommonName).To(Equal(myCA.CACert.Subject.CommonName))
+
 			// The checks reload.go applies to an operator-supplied keypair. A
 			// certificate this CA issued for itself must pass all of them, or
 			// the holder's warning fires on every install.
@@ -487,6 +498,13 @@ var _ = Describe("The CA's own serving certificate", func() {
 				// reports one error across every entry and cannot attribute it.
 				Expect(err.Error()).To(ContainSubstring("does not exist"))
 				Expect(err.Error()).To(ContainSubstring(missing))
+				// And it says WHICH store, and what the consequence is. These
+				// two came from a separate spec built on this same fixture --
+				// "Startup failure looks different per store, and the message
+				// must say which" -- which was a second construction of an
+				// identical state rather than a second case.
+				Expect(err.Error()).To(ContainSubstring("the file pair at"))
+				Expect(err.Error()).To(ContainSubstring("the listener has nothing to present"))
 			})
 
 			It("is fatal when the store cannot be read, and names the store", func() {
@@ -502,19 +520,6 @@ var _ = Describe("The CA's own serving certificate", func() {
 				Expect(err.Error()).To(ContainSubstring("the file pair at " + e.Store.Files.Cert))
 			})
 
-			It("says which store failed, not merely that a certificate is missing", func() {
-				// "Startup failure looks different per store, and the message
-				// must say which." A message that named neither the store nor
-				// the reason would satisfy every other spec here.
-				e := filesEntry()
-				e.Store.Files.Cert = filepath.Join(servingDir, "absent", "tls.crt")
-				e.Store.Files.Key = filepath.Join(servingDir, "absent", "tls.key")
-
-				_, err := provision(e)
-				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(ContainSubstring("the file pair at"))
-				Expect(err.Error()).To(ContainSubstring("the listener has nothing to present"))
-			})
 		})
 
 		It("does not refuse to start when a failed pass left usable material behind", func() {
@@ -656,16 +661,25 @@ var _ = Describe("The CA's own serving certificate", func() {
 // issued it is a per-spec temporary one.
 func handshakeSerial(addr string) string {
 	GinkgoHelper()
-	conn, err := tls.Dial("tcp", addr, &tls.Config{
+	// Bounded. An unreachable or wedged listener otherwise hangs here until the
+	// test binary's own timeout, which arrives as an unattributed panic naming
+	// no spec -- the failure mode is indistinguishable from a deadlock
+	// elsewhere in the package.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	d := &tls.Dialer{Config: &tls.Config{
 		// Skipping verification is the point: the assertion is which
 		// certificate the listener chose, and the CA that issued it is a
 		// per-spec temporary one no root store knows about.
 		InsecureSkipVerify: true,
 		MinVersion:         tls.VersionTLS12,
-	})
+	}}
+	nc, err := d.DialContext(ctx, "tcp", addr)
 	Expect(err).NotTo(HaveOccurred())
-	defer func() { _ = conn.Close() }()
+	defer func() { _ = nc.Close() }()
 
+	conn, ok := nc.(*tls.Conn)
+	Expect(ok).To(BeTrue(), "tls.Dialer must yield a *tls.Conn")
 	certs := conn.ConnectionState().PeerCertificates
 	Expect(certs).NotTo(BeEmpty())
 	return certs[0].SerialNumber.String()
@@ -1161,6 +1175,16 @@ serving_cert:
 		Expect(cfg.ServingCert.ReuseKey).To(BeTrue())
 		Expect(cfg.ServingCert.Store.Files).NotTo(BeNil())
 		Expect(cfg.ServingCert.Store.Files.Cert).To(Equal("/var/lib/puppet-ca/serving/tls.crt"))
+		// The four tags the fixture sets and this spec did not check. The spec
+		// claims to decode "the shape the documentation publishes", so a tag
+		// present in the fixture and absent from the assertions is a tag the
+		// claim covers and the spec does not -- key_algo and key_size decide
+		// what key is generated, and the other two store paths are written on
+		// every issuance.
+		Expect(cfg.ServingCert.KeyAlgo).To(Equal("ecdsa"))
+		Expect(cfg.ServingCert.KeySize).To(Equal(256))
+		Expect(cfg.ServingCert.Store.Files.Key).To(Equal("/var/lib/puppet-ca/serving/tls.key"))
+		Expect(cfg.ServingCert.Store.Files.CA).To(Equal("/var/lib/puppet-ca/serving/ca.crt"))
 	})
 
 	It("decodes the Secret flavour", func() {
@@ -1384,6 +1408,7 @@ var _ = Describe("the serving certificate's startup and renewal reporting", func
 
 		start := time.Now()
 		Expect(provisionServingCert(context.Background(), myCA, sc)).To(Succeed())
+		end := time.Now()
 
 		Expect(servingLoads).To(BeNumerically(">", 0),
 			"precondition: the serving entry must have been reconciled at all, or this "+
@@ -1396,8 +1421,18 @@ var _ = Describe("the serving certificate's startup and renewal reporting", func
 		Expect(servingDeadline).NotTo(BeZero(),
 			"the pre-bind reconcile runs without a deadline, so a slow store or a subject "+
 				"lock held by a peer can outlive the startup probe window entirely")
-		Expect(servingDeadline).To(BeTemporally("~", start.Add(ca.LockTimeout), time.Second),
-			"the pre-bind reconcile's budget is not ca.LockTimeout, so the cap no longer "+
+		// A range bracketed by two measured instants, rather than one instant
+		// with a tolerance. The deadline is set when the reconcile begins, at
+		// some unmeasured moment between `start` and `end`, so it must lie in
+		// [start+LockTimeout, end+LockTimeout]. A fixed tolerance around
+		// start+LockTimeout fails on a loaded runner for a reason that has
+		// nothing to do with the budget -- and the first version of this
+		// assertion had the inequality the wrong way round, failing by
+		// nanoseconds against two timestamps that printed identically.
+		Expect(servingDeadline).To(BeTemporally(">=", start.Add(ca.LockTimeout)),
+			"the pre-bind reconcile's budget is shorter than ca.LockTimeout")
+		Expect(servingDeadline).To(BeTemporally("<=", end.Add(ca.LockTimeout)),
+			"the pre-bind reconcile's budget exceeds ca.LockTimeout, so the cap no longer "+
 				"matches the window the chart and systemd were sized against")
 	})
 })
@@ -1492,6 +1527,30 @@ var _ = Describe("what the serving certificate reports at startup and on renewal
 		})
 		Expect(changed).To(ContainSubstring("Serving certificate installed on the listener"))
 		Expect(changed).To(ContainSubstring(serialOf(peerCert)))
+	})
+})
+
+// Which source the "TLS enabled" line names -- the only thing telling an
+// operator where the certificate they are serving came from.
+//
+// Called rather than parsed. This was previously pinned by walking main.go's AST
+// for the two string literals, which checked that both arms were WRITTEN and
+// could not check what either produced, and would break on reformatting the
+// call. Extracting servingCertLogAttr made the property reachable directly.
+var _ = Describe("the TLS-enabled log attribute", func() {
+	It("names the serving store when the CA provisions its own", func() {
+		sc := newServingCert(emptyStore{}, ca.CertSpec{Subject: "ca.test"})
+		k, v := servingCertLogAttr(sc, &serverConfig{TLSCert: "/should/not/be/used"})
+		Expect(k).To(Equal("serving_cert"))
+		Expect(v).To(Equal(emptyStore{}.String()),
+			"the line names a path from tls_cert while the certificate came from the "+
+				"serving store, sending the operator to a file that may not exist")
+	})
+
+	It("names the operator's path when they supplied the keypair", func() {
+		k, v := servingCertLogAttr(nil, &serverConfig{TLSCert: "/etc/tls/tls.crt"})
+		Expect(k).To(Equal("cert"))
+		Expect(v).To(Equal("/etc/tls/tls.crt"))
 	})
 })
 
@@ -1603,8 +1662,10 @@ var _ = Describe("the serving certificate's fallback reporting", func() {
 		// version of this comment claimed "without this spec the whole admin
 		// warning could vanish with nothing failing", and that was a claim
 		// about coverage the spec does not have. The warning's live path is
-		// covered by the DescribeTable above, which varies tls_cert/tls_key
-		// and asserts the warning appears.
+		// covered by the admin-credential warning specs above, which vary
+		// puppetServer and the entry's usages and assert the warning appears.
+		// (An earlier version of this sentence named a DescribeTable; the
+		// live-path coverage here is a set of Its, not a table.)
 		//
 		// PuppetServer is set so the fixture is a configuration where an admin
 		// warning would be meaningful at all; without it the silence is
@@ -1628,6 +1689,15 @@ var _ = Describe("the serving certificate's fallback reporting", func() {
 				"an unreadable allow list is buildAuthConfig's to refuse, not this")
 		})
 		Expect(logs).NotTo(ContainSubstring("admin credential"))
+		// The whole capture, not just that one phrase. A substring check passes
+		// for any OTHER warning too, so it could not tell "returned early and
+		// said nothing" from "said something else instead" -- and the early
+		// return is the arm this spec is named after. Empty is the only
+		// assertion that distinguishes them.
+		Expect(logs).To(BeEmpty(),
+			"buildServingCert warned about something when the allow list could not be "+
+				"read, and this path's whole justification is that it stays silent and "+
+				"lets buildAuthConfig report the failure fatally a moment later")
 	})
 })
 

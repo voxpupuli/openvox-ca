@@ -1119,6 +1119,49 @@ managed_certs:
 			Expect(err).NotTo(MatchError(ContainSubstring("managed_certs")))
 		})
 
+		// The two remaining cross-reference messages. The pair above cover the
+		// "already used by" form; these are separate sentences in separate
+		// branches, and both named the other entry with a bare index inside a
+		// message whose subject was a different block.
+		It("names the block when a chain file is another entry's material", func() {
+			err := decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {files: {cert: /a.pem, key: /a-key.pem}}
+  - certname: b.example.com
+    names: [b]
+    renew_before: 720h
+    store: {files: {cert: /b.pem, key: /b-key.pem, ca: /a.pem}}
+`).ValidateIn(certstore.Block{Name: "component_certs"})
+
+			Expect(err).To(MatchError(ContainSubstring("is the certificate or key of component_certs[0]")))
+			Expect(err).NotTo(MatchError(ContainSubstring("managed_certs")),
+				"the refusal names managed_certs for a block that is not managed_certs, "+
+					"so an operator is sent to a configuration section they do not have")
+		})
+
+		It("names the block when two entries share a chain file", func() {
+			// The mirror branch: this entry's cert or key landing on another
+			// entry's CHAIN file, rather than the other way round. Separate
+			// message, separate label.
+			err := decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {files: {cert: /a.pem, key: /a-key.pem, ca: /chain.pem}}
+  - certname: b.example.com
+    names: [b]
+    renew_before: 720h
+    store: {files: {cert: /chain.pem, key: /b-key.pem}}
+`).ValidateIn(certstore.Block{Name: "component_certs"})
+
+			Expect(err).To(MatchError(ContainSubstring("is the CA chain file of component_certs[0]")))
+			Expect(err).NotTo(MatchError(ContainSubstring("managed_certs")))
+		})
+
 		// The zero Block is managed_certs, so a caller that passes nothing gets
 		// exactly what Validate has always produced. Without this, the default
 		// could drift to an empty prefix and every existing message would lose

@@ -3771,6 +3771,28 @@ config:
 			wantErr: "extraArgs",
 		},
 		{
+			// Half a keypair is not a certificate. tlsSources tracks cert and
+			// key separately and tlsConfigured insists on both, so a lone flag
+			// must leave TLS unconfigured and the install refused -- the same
+			// answer config.tls_cert alone gets.
+			//
+			// Nothing asserted this for the extraArgs route. The conflict cases
+			// above all pair a lone flag with serving_cert, where the refusal
+			// comes from the CONFLICT rather than from the half-configured
+			// pair, so a tlsSources that set both halves from either flag would
+			// have passed every one of them.
+			name:    "a lone --tls-cert in extraArgs does not configure TLS",
+			sets:    []string{"extraArgs[0]=--tls-cert=/tls/tls.crt"},
+			wantErr: "refuse to start",
+		},
+		{
+			// The mirror, because a scan that read only --tls-cert would pass
+			// the case above while leaving the key half unexamined.
+			name:    "a lone --tls-key in extraArgs does not configure TLS",
+			sets:    []string{"extraArgs[0]=--tls-key=/tls/tls.key"},
+			wantErr: "refuse to start",
+		},
+		{
 			// The separated spelling, which is what makes the prefix match
 			// rather than an equality match the right test.
 			name: "config.serving_cert alongside a separated --tls-key in extraArgs",
