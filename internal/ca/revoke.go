@@ -222,9 +222,14 @@ func (c *CA) revokeLocked(ctx context.Context, subject string, unknownCause *err
 		// out for post-lock logging (see logUnknownSubjectCause) where the
 		// by-serial arm discards it, even though a lost inventory reaches that
 		// arm too and the same invisibility argument applies there. That is a
-		// real asymmetry, not a deliberate one: it belongs with the filed class
-		// of unconditional logging under the CA's locks, and the twin should
-		// gain the same treatment when that is done rather than this arm
+		// real asymmetry, not a deliberate one, and it is NOT yet tracked: no
+		// issue exists for it at the time of writing, so this comment defers to
+		// nothing and says so rather than implying otherwise. The class is
+		// unconditional logging under the CA's cluster-wide locks, which also
+		// covers retireSupersededForSubjectLocked's four records,
+		// markCertRevokedIndex, crl.go's superseded-CRL warning and Clean's own
+		// three; filing it is a tracker decision and not this PR's to make. The
+		// twin should gain this treatment when that lands, rather than this arm
 		// losing it.
 		// What this frame knows, and no caller downstream can recover, is
 		// *which read* produced the fs.ErrNotExist: the inventory lookup above,

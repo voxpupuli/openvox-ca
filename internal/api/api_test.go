@@ -1503,36 +1503,16 @@ var _ = Describe("API Workflow", func() {
 			Expect(rr.Body.String()).NotTo(ContainSubstring(tmpDir))
 		})
 
-		// The two cases are only useful if they are told apart, and the defect
-		// issue #358 records is a failure to do that -- both answering one
-		// status. Asserting each case alone cannot catch a collapse, because
-		// either spec passes whichever way the pair is merged; asserting that
-		// the pair differs is what does.
-		It("distinguishes an unknown subject from a subject with only a pending CSR", func() {
-			queued := "queued-node"
-			csrPEM, err := testutil.GenerateCSR(queued)
-			Expect(err).NotTo(HaveOccurred())
-			_, err = myCA.SaveRequest(context.Background(), queued, csrPEM)
-			Expect(err).NotTo(HaveOccurred())
-
-			revoke := func(subject string) *httptest.ResponseRecorder {
-				body, _ := json.Marshal(api.PutStatusBody{DesiredState: "revoked"})
-				rr := httptest.NewRecorder()
-				mux.ServeHTTP(rr, httptest.NewRequest(
-					"PUT", "/certificate_status/"+subject, bytes.NewReader(body)))
-				return rr
-			}
-
-			unknown := revoke("no-such-node-at-all")
-			pending := revoke(queued)
-
-			Expect(unknown.Code).NotTo(Equal(pending.Code),
-				"upstream gives these different statuses and puppetserver-ca-cli "+
-					"branches on the difference, printing different messages and "+
-					"exiting 1 versus 24")
-			Expect(unknown.Code).To(Equal(http.StatusNotFound))
-			Expect(pending.Code).To(Equal(http.StatusConflict))
-		})
+		// No pair-comparison spec here, deliberately. One existed and was
+		// removed: the three specs above each pin an EXACT status, so any
+		// collapse of the 404 and the 409 into one answer, in either direction,
+		// necessarily reddens one of them. A spec asserting only that the two
+		// differ can therefore never fail alone, and the argument it carried --
+		// that each case alone cannot catch a collapse -- was false, because
+		// that argument holds only where the individual assertions are relative
+		// rather than exact. Verified by collapsing the arm each way: the
+		// unsigned-CSR spec catches 404-for-both and the never-signed spec
+		// catches 409-for-both.
 
 		// The leak guard belongs here rather than beside the spec above, and the
 		// difference is the whole point: for a subject that was simply never
