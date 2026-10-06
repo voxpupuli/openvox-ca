@@ -320,6 +320,33 @@ var _ = Describe("waitReady", func() {
 		Expect(err).To(MatchError(ContainSubstring("did not become ready")))
 		Expect(err.Error()).NotTo(ContainSubstring("stopped"))
 	})
+
+	It("returns once the server reports itself running", func() {
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/status/v1/simple" {
+				_, _ = w.Write([]byte("running\n"))
+			}
+		}))
+		DeferCleanup(srv.Close)
+		// docker is unreachable, so asking after the container would fail.
+		GinkgoT().Setenv("PATH", GinkgoT().TempDir())
+		Expect(waitReady(context.Background(), "no-such-container", srv.Listener.Addr().String())).To(Succeed())
+	})
+
+	It("reports a container that stopped before the server was ready", func() {
+		// The stub docker is the whole PATH, so this is the only docker the
+		// spec can reach, and it runs nothing but shell builtins.
+		bin := GinkgoT().TempDir()
+		seen := filepath.Join(GinkgoT().TempDir(), "args")
+		Expect(os.WriteFile(filepath.Join(bin, "docker"),
+			[]byte("#!/bin/sh\necho \"$@\" > '"+seen+"'\necho false\n"), 0o700)).To(Succeed())
+		GinkgoT().Setenv("PATH", bin)
+		// Nothing listens on port 1, so the probe fails and docker is asked.
+		err := waitReady(context.Background(), "openvox-recording", "127.0.0.1:1")
+		Expect(err).To(MatchError(ContainSubstring("container stopped before it was ready")))
+		Expect(err).To(MatchError(ContainSubstring("docker logs openvox-recording")))
+		Expect(os.ReadFile(seen)).To(Equal([]byte("inspect -f {{.State.Running}} openvox-recording\n")))
+	})
 })
 
 var _ = Describe("loadCA", func() {
@@ -355,6 +382,72 @@ var _ = Describe("loadCA", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(a.chain).To(HaveLen(1))
 		Expect(a.chain[0].Subject.CommonName).To(Equal("Test CA"))
+	})
+
+	It("loads a key that is PKCS#8", func() {
+		writeCA(func(k *rsa.PrivateKey) []byte {
+			der, err := x509.MarshalPKCS8PrivateKey(k)
+			Expect(err).NotTo(HaveOccurred())
+			return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+		})
+		a, err := loadCA(dir)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(a.key.Public()).To(Equal(a.chain[0].PublicKey))
+	})
+
+	It("refuses a key file that holds no PEM block", func() {
+		writeCA(func(*rsa.PrivateKey) []byte { return []byte("not a key\n") })
+		_, err := loadCA(dir)
+		Expect(err).To(MatchError(ContainSubstring("holds no key")))
+	})
+
+	It("keeps an intermediate's bundle in order, and trusts the CA that issues the server's leaf", func() {
+		// OpenVox Server's own layout: ca_crt.pem is the intermediate that
+		// signs, then the root that issued it.
+		newCA := func(cn string, parent *x509.Certificate, parentKey *rsa.PrivateKey) (*x509.Certificate, *rsa.PrivateKey) {
+			key, err := rsa.GenerateKey(rand.Reader, 2048)
+			Expect(err).NotTo(HaveOccurred())
+			tmpl := &x509.Certificate{
+				SerialNumber: big.NewInt(int64(len(cn))), Subject: pkix.Name{CommonName: cn},
+				NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+				IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign,
+			}
+			if parent == nil {
+				parent, parentKey = tmpl, key
+			}
+			der, err := x509.CreateCertificate(rand.Reader, tmpl, parent, &key.PublicKey, parentKey)
+			Expect(err).NotTo(HaveOccurred())
+			c, err := x509.ParseCertificate(der)
+			Expect(err).NotTo(HaveOccurred())
+			return c, key
+		}
+		root, rootKey := newCA("Test Root", nil, nil)
+		inter, interKey := newCA("Test Intermediate", root, rootKey)
+		bundle := append(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: inter.Raw}),
+			pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: root.Raw})...)
+		Expect(os.WriteFile(filepath.Join(dir, "ca_crt.pem"), bundle, 0o600)).To(Succeed())
+		Expect(os.WriteFile(filepath.Join(dir, "ca_key.pem"), pkcs1(interKey), 0o600)).To(Succeed())
+
+		a, err := loadCA(dir)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(a.chain).To(HaveLen(2))
+		Expect(a.chain[0].Subject.CommonName).To(Equal("Test Intermediate"), "issue signs with chain[0]")
+		Expect(a.chain[1].Subject.CommonName).To(Equal("Test Root"))
+
+		// The server presents its leaf alone, so a pool holding only the
+		// root could not verify it.
+		leafKey, err := rsa.GenerateKey(rand.Reader, 2048)
+		Expect(err).NotTo(HaveOccurred())
+		leafDER, err := x509.CreateCertificate(rand.Reader, &x509.Certificate{
+			SerialNumber: big.NewInt(99), Subject: pkix.Name{CommonName: "server"}, DNSNames: []string{"server"},
+			NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+			ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		}, inter, &leafKey.PublicKey, interKey)
+		Expect(err).NotTo(HaveOccurred())
+		leaf, err := x509.ParseCertificate(leafDER)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = leaf.Verify(x509.VerifyOptions{Roots: a.roots, DNSName: "server"})
+		Expect(err).NotTo(HaveOccurred())
 	})
 
 	It("refuses a key that is a symlink, which could name a host file", func() {
@@ -417,6 +510,17 @@ var _ = Describe("copyCadir", func() {
 		Expect(os.Symlink(host, filepath.Join(srcDir, "signed", "c.pem"))).To(Succeed())
 		Expect(copyCadir(src, out)).To(MatchError(ContainSubstring("not a regular file")))
 		Expect(filepath.Join(outDir, "cadir", "signed", "c.pem")).NotTo(BeAnExistingFile())
+	})
+
+	It("refuses a signed/ that is a symlink, rather than listing a host directory", func() {
+		// readRegular does not see this one: the directory is listed through
+		// the Root, which refuses a symlink that leaves it.
+		host := GinkgoT().TempDir()
+		Expect(os.WriteFile(filepath.Join(host, "host.pem"), []byte("host"), 0o600)).To(Succeed())
+		Expect(os.RemoveAll(filepath.Join(srcDir, "signed"))).To(Succeed())
+		Expect(os.Symlink(host, filepath.Join(srcDir, "signed"))).To(Succeed())
+		Expect(copyCadir(src, out)).NotTo(Succeed())
+		Expect(filepath.Join(outDir, "cadir", "signed", "host.pem")).NotTo(BeAnExistingFile())
 	})
 })
 

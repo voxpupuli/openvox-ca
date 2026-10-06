@@ -389,6 +389,9 @@ func swapIn(staging, out string) error {
 	}
 	if err := os.Rename(staging, out); err != nil {
 		if old != "" {
+			// No spec reaches this branch: it needs two renames in one
+			// directory to fail after a third succeeded, which nothing
+			// portable can arrange.
 			if rerr := os.Rename(old, out); rerr != nil {
 				return fmt.Errorf("%w; the previous contract is at %s", err, old)
 			}
