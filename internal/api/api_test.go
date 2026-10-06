@@ -1013,6 +1013,18 @@ var _ = Describe("API Workflow", func() {
 				Expect(logBuf.String()).To(ContainSubstring("expirations: parsing the CRL chain failed"))
 			})
 
+			It("reports no CRL when the CRL file holds no CRL block", func() {
+				// DecodeCRLChain skips other block types without error, so
+				// this reads as a chain of none rather than a parse failure.
+				bundlePEM, err := store.GetCACert(ctx)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(store.UpdateCRL(ctx, bundlePEM)).To(Succeed())
+				resp, body := expirations()
+				Expect(resp.CACrl.NextUpdate).To(BeEmpty())
+				Expect(body).To(ContainSubstring(`"crls":{}`))
+				Expect(logBuf.String()).To(ContainSubstring("expirations: the CRL file holds no CRL"))
+			})
+
 			It("keeps the last of two CRLs that share an issuer CN", func() {
 				crlPEM, err := store.GetCRL(ctx)
 				Expect(err).NotTo(HaveOccurred())

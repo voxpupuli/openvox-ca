@@ -1389,6 +1389,10 @@ func (s *Server) handleGetExpirations(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("expirations: reading the CRL failed; ca_crl and crls are empty", "error", err)
 	} else if chain, err := ca.DecodeCRLChain(crlPEM); err != nil {
 		slog.Warn("expirations: parsing the CRL chain failed; ca_crl and crls are empty", "error", err)
+	} else if len(chain) == 0 {
+		// DecodeCRLChain skips blocks of other types, so a file holding no
+		// CRL decodes cleanly to nothing.
+		slog.Warn("expirations: the CRL file holds no CRL; ca_crl and crls are empty")
 	} else {
 		for i, crl := range chain {
 			nextUpdate := crl.NextUpdate.UTC().Format(s.timeFormat())
