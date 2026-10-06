@@ -33,9 +33,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -100,6 +102,87 @@ func fixtureDrift(dir string) []string {
 	return drift
 }
 
+// recordedCases is cases(), in order, each with the response the committed
+// contract recorded for it.
+func recordedCases() []fixture {
+	fs := cases()
+	for i, c := range fs {
+		var got fixture
+		Expect(json.Unmarshal(mustRead(filepath.Join(contractFixtures, c.Name+".json")), &got)).To(Succeed(), c.Name)
+		fs[i].Response = got.Response
+	}
+	return fs
+}
+
+// clientSubjects names the subject a client's own certificate is for, which
+// is what auto-renewal changes.
+var clientSubjects = map[string]string{"renewer": "renew-me"}
+
+// changedSubjects lists the subjects a request changes, if upstream accepts
+// it, or reports false when it cannot tell.
+func changedSubjects(r request) ([]string, bool) {
+	const v1 = "/puppet-ca/v1"
+	switch {
+	case strings.HasPrefix(r.Path, v1+"/certificate_status/"), strings.HasPrefix(r.Path, v1+"/certificate_request/"):
+		return []string{path.Base(r.Path)}, true
+	case r.Path == v1+"/sign", r.Path == v1+"/clean":
+		var body struct {
+			Certnames []string `json:"certnames"`
+		}
+		// A body whose certnames is not a list names no subject.
+		_ = json.Unmarshal([]byte(r.Body), &body)
+		return body.Certnames, true
+	case r.Path == v1+"/certificate_renewal":
+		s, ok := clientSubjects[r.Client]
+		return []string{s}, ok
+	}
+	return nil, false
+}
+
+// snapshotViolations reports every way fs, cases with their recorded
+// responses, breaks the rule cases() states: no read after a mutation
+// upstream accepts, no subject changed by two of them, and /sign/all last.
+// A non-GET answered 2xx counts as accepted. That over-counts (POST /sign
+// answers 200 while refusing every name in it), so the rule is held tighter
+// than it needs to be, never looser.
+func snapshotViolations(fs []fixture) []string {
+	var out []string
+	changedBy := map[string]string{}
+	firstChange := ""
+	for i, f := range fs {
+		if strings.HasSuffix(f.Request.Path, "/sign/all") {
+			if i != len(fs)-1 {
+				out = append(out, f.Name+": acts on every pending CSR, so it must be last")
+			}
+			continue
+		}
+		if f.Request.Method == http.MethodGet {
+			if firstChange != "" {
+				out = append(out, fmt.Sprintf("%s: reads after %s changed the store", f.Name, firstChange))
+			}
+			continue
+		}
+		if f.Response.Status < 200 || f.Response.Status > 299 {
+			continue
+		}
+		if firstChange == "" {
+			firstChange = f.Name
+		}
+		subjects, ok := changedSubjects(f.Request)
+		if !ok {
+			out = append(out, f.Name+": cannot tell which subjects it changes; teach changedSubjects")
+			continue
+		}
+		for _, s := range subjects {
+			if prev, dup := changedBy[s]; dup {
+				out = append(out, fmt.Sprintf("%s: changes %s, which %s already changed", f.Name, s, prev))
+			}
+			changedBy[s] = f.Name
+		}
+	}
+	return out
+}
+
 var _ = Describe("the committed contract", func() {
 	// It binds the fixtures' names, compare modes, descriptions, sources and
 	// requests; a hand-edited response is beyond it, and only a re-record
@@ -143,7 +226,69 @@ var _ = Describe("the committed contract", func() {
 			Expect(os.Remove(filepath.Join(dir, "crl-get.json"))).To(Succeed())
 		}, "crl-get: not recorded"),
 	)
+
+	// Every response is replayed against the snapshot taken before the first
+	// case, so each must have been an answer to that state.
+	It("orders cases() so that every recorded response answers the snapshot", func() {
+		Expect(snapshotViolations(recordedCases())).To(BeEmpty())
+	})
+
+	// Each entry edits the recorded cases and expects the one violation that
+	// edit causes.
+	DescribeTable("reports a case order that would record a later state than the snapshot",
+		func(edit func([]fixture) []fixture, want string) {
+			Expect(snapshotViolations(edit(recordedCases()))).To(Equal([]string{want}))
+		},
+		Entry("/sign/all before another case", func(fs []fixture) []fixture {
+			n := len(fs)
+			fs[n-2], fs[n-1] = fs[n-1], fs[n-2]
+			return fs
+		}, "sign-all: acts on every pending CSR, so it must be last"),
+		Entry("a read after an accepted mutation", func(fs []fixture) []fixture {
+			read := fs[0]
+			read.Name = "late-read"
+			return insertBefore(fs, "status-delete", read)
+		}, "late-read: reads after status-put-sign changed the store"),
+		Entry("a second accepted mutation on one subject", func(fs []fixture) []fixture {
+			again := fixtureNamed(fs, "status-put-revoke")
+			again.Name = "revoke-again"
+			return insertBefore(fs, "sign-all", again)
+		}, "revoke-again: changes revoke-me, which status-put-revoke already changed"),
+		Entry("an accepted mutation whose subjects it cannot tell", func(fs []fixture) []fixture {
+			mystery := fixtureNamed(fs, "clean")
+			mystery.Name, mystery.Request.Path = "mystery", "/puppet-ca/v1/mystery"
+			return insertBefore(fs, "sign-all", mystery)
+		}, "mystery: cannot tell which subjects it changes; teach changedSubjects"),
+	)
+
+	It("lets a refused mutation share a subject, since it changes nothing", func() {
+		fs := recordedCases()
+		refused := fixtureNamed(fs, "status-put-revoke")
+		refused.Name, refused.Response.Status = "refused-revoke", http.StatusConflict
+		Expect(snapshotViolations(insertBefore(fs, "sign-all", refused))).To(BeEmpty())
+	})
 })
+
+func fixtureNamed(fs []fixture, name string) fixture {
+	for _, f := range fs {
+		if f.Name == name {
+			return f
+		}
+	}
+	Fail("no case named " + name)
+	return fixture{}
+}
+
+// insertBefore returns fs with f inserted before the case named name.
+func insertBefore(fs []fixture, name string, f fixture) []fixture {
+	for i, c := range fs {
+		if c.Name == name {
+			return append(fs[:i:i], append([]fixture{f}, fs[i:]...)...)
+		}
+	}
+	Fail("no case named " + name)
+	return nil
+}
 
 // editFixture rewrites one fixture in dir through edit.
 func editFixture(name string, edit func(map[string]any)) func(dir string) {
