@@ -18,7 +18,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"strconv"
 	"sync"
 	"time"
@@ -104,6 +106,12 @@ var _ = Describe("The managed-certificate reconcile job", func() {
 		c.ManagedCerts = []ca.ManagedCert{managed("managed.test")}
 
 		ctx, cancel := context.WithCancel(context.Background())
+		// Deferred, not called at the end: a failing Eventually below would
+		// otherwise return without cancelling, leaking a goroutine that keeps
+		// incrementing the shared counter into whichever spec runs next. The
+		// counter is reset per spec, which does not help against a writer that
+		// outlives the spec that started it.
+		DeferCleanup(cancel)
 		done := make(chan struct{})
 		go func() {
 			defer GinkgoRecover()
@@ -128,6 +136,12 @@ var _ = Describe("The managed-certificate reconcile job", func() {
 		c.ManagedCerts = []ca.ManagedCert{managed("managed.test")}
 
 		ctx, cancel := context.WithCancel(context.Background())
+		// Deferred, not called at the end: a failing Eventually below would
+		// otherwise return without cancelling, leaking a goroutine that keeps
+		// incrementing the shared counter into whichever spec runs next. The
+		// counter is reset per spec, which does not help against a writer that
+		// outlives the spec that started it.
+		DeferCleanup(cancel)
 		done := make(chan struct{})
 		go func() {
 			defer GinkgoRecover()
@@ -147,37 +161,57 @@ var _ = Describe("The managed-certificate reconcile job", func() {
 		Eventually(done, 5*time.Second).Should(BeClosed())
 	})
 
-	It("keeps going when an entry fails, and reports what it managed", func() {
-		// Entries are independent: one unreachable store must not stop every
-		// other managed certificate from renewing, and must not stop the loop.
-		//
-		// The surviving entry's store SUCCEEDS here, deliberately. With both
-		// entries rigged to fail the pass cannot issue anything, so an assertion
-		// that `issued` is zero holds under every mutation of the loop -- it
-		// cannot tell "stopped after the first failure" from "continued, and the
-		// second also failed". Letting the second succeed is what makes the
-		// count falsifiable, and it is the only spec that constructs the
-		// mixed outcome ReconcileManaged documents: a non-zero issued count
-		// returned alongside an error.
-		c := fastCA()
-		failing := managed("broken.test")
-		failing.Load = func(context.Context) ([]byte, []byte, error) {
-			return nil, nil, context.DeadlineExceeded
-		}
-		working := managed("managed.test")
-		working.Save = func(context.Context, []byte, []byte) error { return nil }
-		c.ManagedCerts = []ca.ManagedCert{failing, working}
+	// reconcileManagedOnce's three arms. This is the cmd layer's own behaviour --
+	// how a pass's outcome is reported -- and the only part of the loop that is
+	// not already pinned in internal/ca.
+	//
+	// The spec that used to sit here drove c.ReconcileManaged directly and
+	// asserted the issued count and the keep-going contract. Those are
+	// internal/ca's, and "ReconcileManaged over several entries" in
+	// managedcert_reconcile_test.go now pins them against the real decision
+	// path, including the mixed outcome of a non-zero count alongside an error.
+	// Re-testing them from here asserted the same thing one layer further from
+	// the code, which is how a package ends up with coverage that moves when an
+	// unrelated layer is refactored.
+	DescribeTable("reports a pass at the level its outcome deserves",
+		func(rig func(*ca.CA), wantLevel, wantText string) {
+			c := fastCA()
+			rig(c)
 
-		issued, err := c.ReconcileManaged(context.Background())
-		Expect(err).To(HaveOccurred(), "the failure must be reported, not swallowed")
-		Expect(issued).To(Equal(1),
-			"the entry after the failing one must still have been issued, and counted")
+			buf := &bytes.Buffer{}
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{
+				Level: slog.LevelDebug,
+			})))
+			DeferCleanup(func() { slog.SetDefault(prev) })
 
-		mu.Lock()
-		defer mu.Unlock()
-		Expect(loads).To(Equal(1),
-			"the entry after the failing one must still have been attempted")
-	})
+			reconcileManagedOnce(context.Background(), c)
+
+			Expect(buf.String()).To(ContainSubstring("level=" + wantLevel))
+			Expect(buf.String()).To(ContainSubstring(wantText))
+		},
+		Entry("a failing entry is a warning, carrying what still got issued",
+			func(c *ca.CA) {
+				failing := managed("broken.test")
+				failing.Load = func(context.Context) ([]byte, []byte, error) {
+					return nil, nil, context.DeadlineExceeded
+				}
+				working := managed("managed.test")
+				working.Save = func(context.Context, []byte, []byte) error { return nil }
+				c.ManagedCerts = []ca.ManagedCert{failing, working}
+			},
+			"WARN", "Managed-certificate reconcile pass had failures"),
+		Entry("an issuance is info",
+			func(c *ca.CA) {
+				working := managed("managed.test")
+				working.Save = func(context.Context, []byte, []byte) error { return nil }
+				c.ManagedCerts = []ca.ManagedCert{working}
+			},
+			"INFO", "Managed certificates issued"),
+		Entry("nothing due is debug, not silence",
+			func(c *ca.CA) { c.ManagedCerts = nil },
+			"DEBUG", "nothing due"),
+	)
 })
 
 var _ = Describe("The leaf backdate and reconcile interval settings", func() {

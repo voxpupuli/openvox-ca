@@ -404,13 +404,21 @@ var _ = Describe("A managed-certificate spec", func() {
 	})
 
 	It("refuses a certname the CA's own grammar would refuse", func() {
+		// The specific error, not merely "not Succeed": a bare NotTo(Succeed())
+		// passes for ANY failure, so it would still pass if the subject reached
+		// the certificate unchecked and the spec tripped over something else
+		// entirely. The neighbouring refusals already assert their text.
 		spec.Subject = "../escape"
-		Expect(spec.Validate()).NotTo(Succeed())
+		Expect(spec.Validate()).To(MatchError(ContainSubstring(
+			`invalid subject name "../escape"`)))
+		Expect(spec.Validate()).To(MatchError(ContainSubstring("path traversal")))
 	})
 
 	It("refuses a DNS name that is not a hostname", func() {
 		spec.DNSNames = []string{"not a hostname"}
-		Expect(spec.Validate()).NotTo(Succeed())
+		Expect(spec.Validate()).To(MatchError(ContainSubstring(
+			`invalid DNS alt name "not a hostname"`)))
+		Expect(spec.Validate()).To(MatchError(ContainSubstring("must be a valid hostname")))
 	})
 
 	It("refuses a renew window of zero", func() {
@@ -446,17 +454,48 @@ var _ = Describe("A managed-certificate spec", func() {
 			ContainSubstring("at least one subject alternative name is required")))
 	})
 
-	It("refuses more non-DNS names than the DNS cap allows", func() {
-		// The DNS names are bounded by validateDNSAltNames; nothing downstream
-		// bounds the other three, and the count is what reaches the certificate.
-		many := make([]net.IP, maxDNSAltNames+1)
+	It("accepts exactly the non-DNS cap", func() {
+		// The boundary itself. One past it was the only case covered, and a
+		// value that far out cannot tell `>` from `>=` -- an accidental `>=`
+		// would refuse the documented maximum, which is a number an operator
+		// can read and set.
+		many := make([]net.IP, maxDNSAltNames)
 		for i := range many {
 			many[i] = net.ParseIP("192.0.2.1")
 		}
 		spec.IPAddresses = many
-		Expect(spec.Validate()).To(MatchError(
-			ContainSubstring("too many non-DNS alternative names")))
+		Expect(spec.Validate()).To(Succeed(),
+			"the cap is a permitted count, not the first refused one")
 	})
+
+	// Each slice's contribution to the sum, split rather than piled into one.
+	// The check adds three lengths, so a mutation dropping any one addend still
+	// passes a fixture that fills only IPAddresses.
+	DescribeTable("refuses more non-DNS names than the cap allows, counting all three kinds",
+		func(ips, emails, uris int) {
+			spec.IPAddresses = nil
+			spec.EmailAddresses = nil
+			spec.URIs = nil
+			for range ips {
+				spec.IPAddresses = append(spec.IPAddresses, net.ParseIP("192.0.2.1"))
+			}
+			for range emails {
+				spec.EmailAddresses = append(spec.EmailAddresses, "a@example.com")
+			}
+			for range uris {
+				u, err := url.Parse("spiffe://example.com/a")
+				Expect(err).NotTo(HaveOccurred())
+				spec.URIs = append(spec.URIs, u)
+			}
+			Expect(spec.Validate()).To(MatchError(
+				ContainSubstring("too many non-DNS alternative names")))
+		},
+		Entry("all IP addresses", maxDNSAltNames+1, 0, 0),
+		Entry("all email addresses", 0, maxDNSAltNames+1, 0),
+		Entry("all URIs", 0, 0, maxDNSAltNames+1),
+		Entry("split across the three, one past the cap in total",
+			maxDNSAltNames/3+1, maxDNSAltNames/3+1, maxDNSAltNames/3+1),
+	)
 
 	It("refuses a nil URI entry", func() {
 		// A nil *url.URL would be dereferenced in leafCarriesNames and in

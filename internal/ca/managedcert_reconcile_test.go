@@ -1694,28 +1694,39 @@ var _ = Describe("Four replicas reconciling one managed certificate", func() {
 		return storage.NewWithBackend(backend, filepath.Join(storeDir, "private"))
 	}
 
+	// replicaOutcome is what one replica's pass returned. Collected rather than
+	// discarded: a save count of one is also what you get if the winner issues
+	// and the other three ERROR, which under a shared lock must not happen --
+	// a loser is supposed to read the winner's certificate and report (false,
+	// nil). Counting certificates cannot tell those apart.
+	type replicaOutcome struct {
+		issued bool
+		err    error
+	}
+
 	// raceFourWays runs one reconcile pass on each replica, all released at
 	// once, and returns how many issuances reached the store.
-	raceFourWays := func(replicas []*CA) int {
+	raceFourWays := func(replicas []*CA) (int, []replicaOutcome) {
 		entry := ManagedCert{Spec: spec, Load: fake.load, Save: fake.save}
 		start := make(chan struct{})
 		var wg sync.WaitGroup
+		var outMu sync.Mutex
+		outcomes := make([]replicaOutcome, 0, len(replicas))
 		for _, c := range replicas {
 			wg.Add(1)
 			go func() {
 				defer GinkgoRecover()
 				defer wg.Done()
 				<-start
-				// Errors are not asserted on: a replica that loses the race and
-				// then finds the winner's certificate current returns no error,
-				// but one whose lock acquisition times out legitimately does.
-				// What this spec is about is how many certificates exist.
-				_, _ = c.reconcileManagedCert(ctx, entry, time.Now().UTC())
+				issued, err := c.reconcileManagedCert(ctx, entry, time.Now().UTC())
+				outMu.Lock()
+				outcomes = append(outcomes, replicaOutcome{issued: issued, err: err})
+				outMu.Unlock()
 			}()
 		}
 		close(start)
 		wg.Wait()
-		return fake.saveCount()
+		return fake.saveCount(), outcomes
 	}
 
 	BeforeEach(func() {
@@ -1737,9 +1748,25 @@ var _ = Describe("Four replicas reconciling one managed certificate", func() {
 		svc := serviceOverStore()
 		replicas := []*CA{replicaOn(svc), replicaOn(svc), replicaOn(svc), replicaOn(svc)}
 
-		Expect(raceFourWays(replicas)).To(Equal(1),
+		saves, outcomes := raceFourWays(replicas)
+		Expect(saves).To(Equal(1),
 			"the subject lock must serialise the four, so the three that follow the winner "+
 				"load its certificate and find it current")
+
+		// Exactly one winner, and three clean losers. This is the half the save
+		// count cannot see: three replicas erroring would also leave one
+		// certificate, and would mean the lock serialised them into failure
+		// rather than into agreement.
+		Expect(outcomes).To(HaveLen(4))
+		issuedCount := 0
+		for _, o := range outcomes {
+			Expect(o.err).NotTo(HaveOccurred(),
+				"under a shared lock a loser reads the winner's certificate and reports no error")
+			if o.issued {
+				issuedCount++
+			}
+		}
+		Expect(issuedCount).To(Equal(1), "exactly one replica may report an issuance")
 
 		serials, err := inventorySerialsFor(ctx, svc, subject)
 		Expect(err).NotTo(HaveOccurred())
@@ -1756,7 +1783,11 @@ var _ = Describe("Four replicas reconciling one managed certificate", func() {
 			replicaOn(serviceOverStore()), replicaOn(serviceOverStore()),
 		}
 
-		Expect(raceFourWays(replicas)).To(BeNumerically(">", 1),
+		// Outcomes deliberately ignored here: with no shared lock a replica can
+		// legitimately fail, and what this spec establishes is only that the
+		// harness can observe more than one issuance.
+		saves, _ := raceFourWays(replicas)
+		Expect(saves).To(BeNumerically(">", 1),
 			"with nothing serialising them the four replicas must each issue; if this passes "+
 				"with one issuance the harness cannot observe the failure the spec above rules out")
 	})

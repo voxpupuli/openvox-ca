@@ -400,6 +400,56 @@ var _ = Describe("CA AutoRenew", func() {
 			"auto-renewal must extend validity, not just mint a new serial")
 	})
 
+	It("backdates a CSR-signed leaf by the CA's configured backdate", func() {
+		// The narrowing from a hardcoded 24h to a configurable 5m default
+		// reaches every issuance path, and only two of them were pinned:
+		// generate and the managed reconcile. If signWithDuration kept a
+		// hardcoded 24h, or lost the backdate entirely, nothing failed.
+		//
+		// A deliberately non-default value, so this pins the WIRING rather than
+		// the default. It fails three ways: a dropped backdate puts NotBefore at
+		// roughly now, a hardcoded 24h puts it a day early, and substituting
+		// DefaultLeafBackdate puts it five minutes early.
+		myCA.LeafBackdate = 7 * time.Minute
+
+		csrPEM, _ := buildCSR("backdate-csr-node")
+		_, err := myCA.SaveRequest(ctx, "backdate-csr-node", csrPEM)
+		Expect(err).NotTo(HaveOccurred())
+		before := time.Now().UTC()
+		certPEM, err := myCA.Sign(ctx, "backdate-csr-node")
+		Expect(err).NotTo(HaveOccurred())
+		cert := parseCertPEM(certPEM)
+
+		Expect(cert.NotBefore).To(BeTemporally("<=", before.Add(-7*time.Minute)),
+			"the configured backdate must reach the CSR-signing path")
+		Expect(cert.NotBefore).To(BeTemporally(">", before.Add(-7*time.Minute-2*time.Minute)),
+			"and must not exceed it; a hardcoded 24h or a wider default would land here")
+	})
+
+	It("backdates an auto-renewed leaf by the CA's configured backdate", func() {
+		// The same for the path real agents use by default. AutoRenew reaches
+		// issueLeafLocked through its own call, so a regression there is
+		// invisible to the CSR spec above.
+		myCA.LeafBackdate = 7 * time.Minute
+
+		csrPEM, _ := buildCSR("backdate-renew-node")
+		_, err := myCA.SaveRequest(ctx, "backdate-renew-node", csrPEM)
+		Expect(err).NotTo(HaveOccurred())
+		firstPEM, err := myCA.Sign(ctx, "backdate-renew-node")
+		Expect(err).NotTo(HaveOccurred())
+		original := parseCertPEM(firstPEM)
+
+		before := time.Now().UTC()
+		renewedPEM, err := myCA.AutoRenew(ctx, original)
+		Expect(err).NotTo(HaveOccurred())
+		renewed := parseCertPEM(renewedPEM)
+
+		Expect(renewed.NotBefore).To(BeTemporally("<=", before.Add(-7*time.Minute)),
+			"the configured backdate must reach the auto-renewal path")
+		Expect(renewed.NotBefore).To(BeTemporally(">", before.Add(-7*time.Minute-2*time.Minute)),
+			"and must not exceed it")
+	})
+
 	It("carries the original certificate's DNS SANs forward unchanged", func() {
 		// A CSR-issued openvox-ca cert carries only DNS SANs, so this asserts
 		// DNSNames; the IP/email/URI SAN types are covered by the next spec.
