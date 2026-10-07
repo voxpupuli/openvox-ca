@@ -229,9 +229,17 @@ var _ = Describe("FileStore", func() {
 		// the first branch to the generic one.
 		//
 		// ENOTDIR rather than a mode-0000 parent, deliberately: an
-		// unreadable-directory fixture passes as root, and CI runs containers
-		// as root, so that version of this spec would quietly stop testing
-		// anything in the one place it most needs to run.
+		// unreadable-directory fixture passes as root, so that version of this
+		// spec stops testing anything for whoever runs the suite as root --
+		// in a container, or from a root shell. This fixture holds whatever
+		// the uid.
+		//
+		// It does NOT hold because "CI runs as root". That is what this comment
+		// used to say and it is false: `mage test:unit` runs in exactly one
+		// job, ci.yml's `unit`, which is a plain ubuntu-latest runner with no
+		// `container:` key anywhere in the workflow, and its own log shows
+		// HOME=/home/runner rather than /root. The uid-independence is worth
+		// having for the local case; CI was never the reason.
 		It("reports a stat failure that is neither absent nor a file", func() {
 			blocker := filepath.Join(dir, "blocker")
 			Expect(os.WriteFile(blocker, []byte("PEM"), 0o644)).To(Succeed())
@@ -366,23 +374,29 @@ var _ = Describe("FileStore", func() {
 				"the message has to say why the mode matters, not just that it is wrong")
 		})
 
-		// The same probe, reached without depending on uid -- which is the only
-		// way it is covered where it matters. Both specs above skip as root and
-		// CI runs containers as root, so in CI they asserted nothing: the probe
-		// could have been deleted and the suite would have stayed green. That is
-		// the whole point of a guard against a renewal that strands a key, so it
-		// cannot be the half of the matrix nothing runs.
+		// The same probe, reached without depending on uid. The two specs above
+		// skip when euid is 0, so for anyone running this suite as root -- in a
+		// container, or from a root shell -- the probe was unexercised and could
+		// have been deleted with a green run. This spec is what holds there.
+		//
+		// Narrower than it first looks, and the first version of this comment
+		// claimed more: it said CI runs as root and that the probe therefore had
+		// no CI coverage at all. That was false. `mage test:unit` runs in one
+		// job, ci.yml's `unit`, on a plain ubuntu-latest runner with no
+		// `container:` key in the workflow, and that job's log shows
+		// HOME=/home/runner, not /root -- so the two specs above do run in CI
+		// and always did. What this spec adds is the root case, not the CI case.
 		//
 		// procfs refuses to create a file in /proc whatever the uid. That is not
-		// a mount option that a privileged container could undo, it is what the
+		// a mount option a privileged container could undo, it is what the
 		// filesystem does -- measured as root in a Linux container: Stat says
 		// /proc is a directory, os.CreateTemp there fails, and the same call in
 		// /tmp succeeds, so the refusal is the directory rather than a probe
 		// that always fails.
 		//
-		// Linux only, because /proc is. Between this spec and the two above,
-		// every platform this suite runs on reaches the probe: a non-root
-		// developer by directory mode, CI by procfs.
+		// Linux only, because /proc is. Between this spec and the two above the
+		// probe is reached whatever the uid: by directory mode when not root,
+		// by procfs when root.
 		It("refuses a directory the filesystem will not create files in, whatever the uid", func() {
 			if runtime.GOOS != "linux" {
 				Skip("/proc is Linux's; the mode-based specs above cover this platform")
