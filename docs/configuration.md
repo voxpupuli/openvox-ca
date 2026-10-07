@@ -1391,6 +1391,7 @@ the certificates can undo. The server refuses to start when a `cert`, `key` or
 | `puppet_server_file` | the admin allow list |
 | `autosign_config` | the autosign file or executable |
 | `client_ca[].file`, `client_ca[].crl_file` | each foreign trust domain's anchors and CRLs, named after its entry |
+| `etcd_tls_ca_file`, `redis_tls_ca_file`, `sql_tls_ca_file`, `openbao.tls_ca_file` | each backend or key-provider connection's trust anchor. Reserved for a different reason from the rest of this table: a certificate written over one of these is *trusted as an issuer*, so from then on any certificate this CA signs for the backend's hostname is accepted for it. The connection keeps working, which is what makes it worth refusing |
 | `sql_dsn` | the SQLite database — the inventory, the signed certificates and the CRL — when `storage_backend: sqlite`. A server-backed dialect names no file, and neither does an in-memory database, so neither is reserved |
 | the `--config` file | the configuration the server was started with, which a store writing over would not break until the next restart |
 
@@ -1404,11 +1405,20 @@ and can reach anything that user can; the list above is the material that cannot
 be replaced if it is overwritten.
 
 What it deliberately does not cover is the *replaceable* credentials: the client
-TLS material a storage backend or key provider uses (`etcd_tls_*`, `redis_tls_*`,
-`sql_tls_*`, `openbao.tls_*`), and the OpenBao token and AppRole files.
+TLS material a storage backend or key provider presents (`etcd_tls_cert_file`,
+`etcd_tls_key_file`, and the `redis_tls_`, `sql_tls_` and `openbao.tls_`
+equivalents), and `openbao.token_file`, `openbao.approle_role_id_file` and
+`openbao.approle_secret_id_file`.
 Overwriting one of those breaks this CA's connection to its own backend, which
 is loud and fixable by re-copying the file from wherever it was provisioned —
 a different class from the CA key, which is not reconstructible from anything.
+
+Note where that line falls, because it is not the `*_tls_*` prefix: the
+**anchor** of each of those connections *is* reserved, in the table above, while
+the **certificate and key** beside it are not. The anchor decides who this CA
+will believe, so a store writing over it widens trust while the connection keeps
+working. The client pair only proves who this CA is, and losing it stops the
+connection outright.
 `openbao.kubernetes_jwt_file` is excluded for a different reason again: the
 kubelet projects it, so it is not the CA's to protect and replacing it is a pod
 restart.

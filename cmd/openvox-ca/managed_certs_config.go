@@ -236,24 +236,6 @@ func caOwnedPaths(cfg *serverConfig, absCADir, configPath string) ([]certstore.R
 		{Setting: "redis_tls_ca_file", Path: cfg.RedisTLSCAFile},
 		{Setting: "sql_tls_ca_file", Path: cfg.SQLTLSCAFile},
 		{Setting: "openbao.tls_ca_file", Path: cfg.OpenBao.TLSCAFile},
-		// The trust anchors for the backend and key-provider connections, for
-		// the same reason client_ca[].file is reserved below: a certificate
-		// written over an anchor is trusted as an issuer.
-		//
-		// These four were exempt, with the other backend TLS material, on the
-		// ground that overwriting one "breaks this CA's connection to its own
-		// backend, which is loud and recoverable". That is true of the client
-		// certificate and key -- the connection fails and the file is
-		// re-copyable -- and false of the CA bundle. Writing this CA's own chain
-		// over it is SILENT whenever the backend's serving certificate was
-		// issued by this CA, which is an ordinary arrangement in an OpenVox
-		// estate: the connection keeps verifying, and from then on the backend
-		// link is anchored to this CA, so any certificate this CA issues for the
-		// backend's hostname is accepted for it.
-		//
-		// So the exemption and the client_ca reservation were applying opposite
-		// rules to the same kind of file. The client certificate and key stay
-		// exempt, where that reason does hold.
 	}
 	// The SQLite database, when that is the backend. Only for sqlite: every
 	// other dialect's DSN names a server rather than a file, and an in-memory
