@@ -22,6 +22,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -171,7 +172,17 @@ var _ = Describe("FileStore", func() {
 
 		It("replaces material already at those paths", func() {
 			Expect(os.WriteFile(cfg.Cert, []byte("OLD"), 0o644)).To(Succeed())
-			Expect(os.WriteFile(cfg.Key, []byte("OLD-KEY"), 0o600)).To(Succeed())
+			// Seeded WIDE, and chmod'd explicitly past the umask, so the mode
+			// assertion below can only pass if the replacement path narrows it.
+			// This fixture used to write the old key at 0600 -- the mode it then
+			// asserted -- so a replacement that preserved the old file's bits,
+			// or skipped the chmod and inherited them, satisfied it. The spec
+			// was placing the state it was there to check.
+			Expect(os.WriteFile(cfg.Key, []byte("OLD-KEY"), 0o644)).To(Succeed())
+			Expect(os.Chmod(cfg.Key, 0o644)).To(Succeed())
+			Expect(modeOf(cfg.Key)).To(Equal(os.FileMode(0o644)),
+				"precondition: the old key must start wider than 0600, or the "+
+					"assertion after Save proves nothing")
 
 			Expect(store().Save(ctx, []byte("NEW"), []byte("NEW-KEY"))).To(Succeed())
 			Expect(os.ReadFile(cfg.Cert)).To(Equal([]byte("NEW")))
@@ -353,6 +364,46 @@ var _ = Describe("FileStore", func() {
 			Expect(err).To(MatchError(ContainSubstring(certDir)))
 			Expect(err).To(MatchError(ContainSubstring("private key")),
 				"the message has to say why the mode matters, not just that it is wrong")
+		})
+
+		// The same probe, reached without depending on uid -- which is the only
+		// way it is covered where it matters. Both specs above skip as root and
+		// CI runs containers as root, so in CI they asserted nothing: the probe
+		// could have been deleted and the suite would have stayed green. That is
+		// the whole point of a guard against a renewal that strands a key, so it
+		// cannot be the half of the matrix nothing runs.
+		//
+		// procfs refuses to create a file in /proc whatever the uid. That is not
+		// a mount option that a privileged container could undo, it is what the
+		// filesystem does -- measured as root in a Linux container: Stat says
+		// /proc is a directory, os.CreateTemp there fails, and the same call in
+		// /tmp succeeds, so the refusal is the directory rather than a probe
+		// that always fails.
+		//
+		// Linux only, because /proc is. Between this spec and the two above,
+		// every platform this suite runs on reaches the probe: a non-root
+		// developer by directory mode, CI by procfs.
+		It("refuses a directory the filesystem will not create files in, whatever the uid", func() {
+			if runtime.GOOS != "linux" {
+				Skip("/proc is Linux's; the mode-based specs above cover this platform")
+			}
+
+			cfg = certstore.FilesConfig{
+				Cert: "/proc/cert.pem",
+				Key:  filepath.Join(dir, "key.pem"),
+			}
+
+			err := store().Save(ctx, []byte("CERT"), []byte("KEY"))
+
+			Expect(err).To(MatchError(ContainSubstring("not writable by this process")))
+			Expect(err).To(MatchError(ContainSubstring("/proc")))
+
+			// And nothing was written on the way to finding out. checkDir runs
+			// over every path before the first write, so the key must not exist
+			// -- the ordering that made the unwritable-directory case a defect.
+			_, statErr := os.Stat(cfg.Key)
+			Expect(os.IsNotExist(statErr)).To(BeTrue(),
+				"the pre-flight must refuse before anything is written, not after the key")
 		})
 	})
 })
