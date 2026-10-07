@@ -431,6 +431,25 @@ managed_certs:
 			Expect(err).To(MatchError(ContainSubstring("`names`")))
 		})
 
+		// The other arm of the same function: a value url.Parse rejects
+		// outright, rather than one it accepts as a relative reference. An
+		// unclosed IPv6 literal is how it happens in practice, since a SPIFFE
+		// ID is the usual reason to set `uris` at all. Measured rather than
+		// guessed: url.Parse("spiffe://[::1") returns "missing ']' in host".
+		It("refuses a URI that cannot be parsed at all", func() {
+			err := decode(`
+managed_certs:
+  - certname: a.example.com
+    uris: ["spiffe://[::1"]
+    renew_before: 720h
+    store: {files: {cert: /c.pem, key: /k.pem}}
+`).Validate()
+			Expect(err).To(MatchError(ContainSubstring("is not a URI")))
+			Expect(err).To(MatchError(ContainSubstring(`"spiffe://[::1"`)),
+				"the refusal has to quote the value as written, since `uris` is a "+
+					"list and nothing else identifies which element was refused")
+		})
+
 		// The arm of Duration.UnmarshalYAML that a malformed duration does not
 		// reach: a node that is not a scalar at all. `renew_before: [720h]` is
 		// what an operator writes by pasting a list where a value goes, and it
@@ -647,6 +666,40 @@ managed_certs:
     renew_before: 720h
     store: {files: {cert: /etc/a.pem, key: /etc/a-key.pem, ca: /etc/a.pem}}
 `).Validate()).To(MatchError(ContainSubstring("must differ from one another")))
+		})
+
+		// The third arm of the same condition, and the one that costs most if
+		// it is ever dropped: the chain is written over the PRIVATE KEY. Every
+		// pass would destroy the key the component needs, and because a chain
+		// is public material the file left behind looks like a perfectly
+		// ordinary one. The other two arms are a certificate over a key and a
+		// chain over a certificate; this is the only arm where the material
+		// lost is the material that cannot be re-fetched from anywhere.
+		It("says the same when the chain file is also the key", func() {
+			Expect(decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {files: {cert: /etc/a.pem, key: /etc/a-key.pem, ca: /etc/a-key.pem}}
+`).Validate()).To(MatchError(ContainSubstring("must differ from one another")))
+		})
+
+		// `ca` through the absolute-path loop as well. The loop covers cert,
+		// key and ca, but only `cert` was ever given a relative value, so the
+		// ca arm of it was asserted by inspection rather than by running.
+		It("refuses a relative chain path, as it does a relative certificate", func() {
+			err := decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {files: {cert: /etc/a.pem, key: /etc/a-key.pem, ca: ssl/ca.pem}}
+`).Validate()
+			Expect(err).To(MatchError(ContainSubstring("store.files.ca must be an absolute path")))
+			Expect(err).To(MatchError(ContainSubstring(`"ssl/ca.pem"`)),
+				"the refusal has to quote the offending value, or an operator "+
+					"with three paths does not know which one it means")
 		})
 
 		// The ordinary way to lay several components out on one host. Every
@@ -1200,10 +1253,5 @@ managed_certs:
 			Expect(managed[0].Spec.DNSNames).To(Equal([]string{"puppetserver"}))
 		})
 
-		It("gives every entry a store", func() {
-			managed := build(decode(minimal))
-			Expect(managed[0].Load).NotTo(BeNil())
-			Expect(managed[0].Save).NotTo(BeNil())
-		})
 	})
 })

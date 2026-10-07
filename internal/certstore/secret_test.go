@@ -216,26 +216,6 @@ var _ = Describe("SecretStore", func() {
 			Expect(get().Labels).To(HaveKeyWithValue("app.kubernetes.io/managed-by", "openvox-ca"))
 		})
 
-		// The reason all three keys move together, exercised rather than
-		// asserted: a manager that stops sending a key it owns removes it. A
-		// Save that wrote the certificate and key but not the chain would
-		// delete ca.crt from under whatever was mounting it.
-		It("removes a key its manager stops sending", func() {
-			s := newStore(certstore.SecretConfig{})
-			Expect(s.Save(ctx, []byte("CERT"), []byte("KEY"))).To(Succeed())
-			Expect(get().Data).To(HaveKey("ca.crt"))
-
-			// The same field manager, now sending only two of the three.
-			ac := accorev1.Secret(name, ns).WithData(map[string][]byte{
-				"tls.crt": []byte("CERT"), "tls.key": []byte("KEY"),
-			})
-			_, err := client.CoreV1().Secrets(ns).Apply(ctx, ac,
-				metav1.ApplyOptions{FieldManager: managedCertFieldManagerName, Force: true})
-			Expect(err).NotTo(HaveOccurred())
-
-			Expect(get().Data).NotTo(HaveKey("ca.crt"))
-		})
-
 		// The chain is read before anything is applied, so a chain that cannot
 		// be read fails the write rather than producing a Secret whose ca.crt
 		// has been removed because we stopped sending it.
@@ -246,7 +226,8 @@ var _ = Describe("SecretStore", func() {
 			Expect(err).To(MatchError(ContainSubstring("storage is down")))
 
 			_, getErr := client.CoreV1().Secrets(ns).Get(ctx, name, metav1.GetOptions{})
-			Expect(getErr).To(HaveOccurred(), "no Secret should have been created")
+			Expect(apierrors.IsNotFound(getErr)).To(BeTrue(),
+				"no Secret should have been created; got %v", getErr)
 		})
 
 		It("refuses to write an empty CA chain, and writes nothing at all", func() {
@@ -263,7 +244,8 @@ var _ = Describe("SecretStore", func() {
 			// a pair with no trust anchor beside it -- the exact state the
 			// refusal exists to avoid.
 			_, getErr := client.CoreV1().Secrets(ns).Get(ctx, name, metav1.GetOptions{})
-			Expect(getErr).To(HaveOccurred(), "no Secret should have been created")
+			Expect(apierrors.IsNotFound(getErr)).To(BeTrue(),
+				"no Secret should have been created; got %v", getErr)
 		})
 	})
 

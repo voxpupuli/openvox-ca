@@ -140,11 +140,7 @@ managed_certs:
 		Expect(err).NotTo(HaveOccurred())
 
 		var called, checked, propagated bool
-		var funcsSeen int
 		ast.Inspect(file, func(n ast.Node) bool {
-			if _, ok := n.(*ast.FuncLit); ok {
-				funcsSeen++
-			}
 			// The shape that both calls it and acts on what it returns:
 			//
 			//	if err := attachManagedCerts(...); err != nil { ... }
@@ -221,10 +217,16 @@ managed_certs:
 			return true
 		})
 
-		// The parse must have found something to judge. A file that failed to
-		// yield any function literal would agree with every claim below.
-		Expect(funcsSeen).To(BeNumerically(">", 0),
-			"precondition: main.go parsed but contains no function literals")
+		// No precondition on how much of the file was walked, deliberately.
+		// There was one here, counting function literals, and it could not
+		// fail: main.go is full of cobra closures, so it was satisfied by the
+		// parse succeeding -- which the error check above already establishes.
+		//
+		// Nor would a better counter earn its place. The three assertions below
+		// are each BeTrue on something the walk has to FIND, so a walk that
+		// examined nothing, or stopped early, fails them rather than passing
+		// vacuously. A precondition is worth having where the real assertions
+		// could be satisfied by an empty search; these cannot be.
 		Expect(called).To(BeTrue(),
 			"main.go does not call attachManagedCerts, so no configured managed "+
 				"certificate would ever be issued, and every other spec in this "+

@@ -468,6 +468,20 @@ var _ = Describe("saying when a managed certificate is an admin credential", fun
 		})).To(BeFalse())
 	})
 
+	// The third outcome: a list that spells clientAuth out. Both positions,
+	// because the loop returns on a match and a check written to look only at
+	// the first or the last element would pass one order and fail the other.
+	DescribeTable("counts an entry that asks for clientAuth explicitly",
+		func(usages []x509.ExtKeyUsage) {
+			Expect(carriesClientAuth(ca.CertSpec{ExtKeyUsage: usages})).To(BeTrue())
+		},
+		Entry("on its own", []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}),
+		Entry("after serverAuth", []x509.ExtKeyUsage{
+			x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}),
+		Entry("before serverAuth", []x509.ExtKeyUsage{
+			x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}),
+	)
+
 	// Through buildManagedCerts rather than by calling the function directly,
 	// which is what pins the call site, its ordering after Build, and the
 	// subject actually reaching the warning. Delete the call from
