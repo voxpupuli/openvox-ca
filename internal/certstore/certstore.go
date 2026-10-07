@@ -1056,7 +1056,7 @@ func (c Config) Build(deps Deps) ([]ca.ManagedCert, error) {
 			// neither flavour, and this function's doc comment says to call it
 			// first. But the previous shape made `files` the default rather
 			// than a case, so a caller that skipped validation dereferenced a
-			// nil *FileStoreConfig here -- a panic whose stack names this
+			// nil *FilesConfig here -- a panic whose stack names this
 			// package and not the entry that caused it. A caller skipping a
 			// documented precondition should get a message that names the
 			// entry.

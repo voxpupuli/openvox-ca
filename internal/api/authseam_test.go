@@ -507,15 +507,6 @@ func check(c *x509.Certificate) bool { return hasPpCliAuth(c) && ca.OIDPpCliAuth
 `, false, ""),
 	)
 
-	// One spec per guarded package rather than one loop inside a single spec,
-	// so that a package whose walk stops working is named in the failure. A
-	// loop would report "the gate is not working" without saying for which
-	// package, and the likeliest cause -- a directory renamed out from under
-	// guardedPackages -- is precisely the one that needs naming.
-	//
-	// The entries are generated from guardedPackages rather than written out,
-	// so adding a package to that list cannot be half-done: there is no second
-	// place to remember to update.
 	// scanForbidden parses every non-test .go file in dir and reports the
 	// forbidden identifiers they reference, with the number of files it
 	// examined. Shared by the two tables below so they cannot drift into
@@ -543,6 +534,15 @@ func check(c *x509.Certificate) bool { return hasPpCliAuth(c) && ca.OIDPpCliAuth
 		return refs, checked, nil
 	}
 
+	// One spec per guarded package rather than one loop inside a single spec,
+	// so that a package whose walk stops working is named in the failure. A
+	// loop would report "the gate is not working" without saying for which
+	// package, and the likeliest cause -- a directory renamed out from under
+	// guardedPackages -- is precisely the one that needs naming.
+	//
+	// The entries are generated from guardedPackages rather than written out,
+	// so adding a package to that list cannot be half-done: there is no second
+	// place to remember to update.
 	tableArgs := []any{
 		func(dir string) {
 			refs, checked, err := scanForbidden(dir)
