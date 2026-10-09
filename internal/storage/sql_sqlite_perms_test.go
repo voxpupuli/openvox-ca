@@ -40,11 +40,12 @@ import (
 //
 // The invariant these specs pin is narrow and deliberate: **no world bits, ever,
 // on a file openvox-ca creates**. It is not "0600". Group access is permitted
-// because a Kubernetes fsGroup ORs it back into the volume at every mount and an
-// arbitrary-uid platform needs it to reach a store it did not create; forcing
-// 0600 would fight both and protect nothing, since the pod's own group is not a
-// third party. What group access cannot be is world access, and that is what is
-// asserted here.
+// because a platform that assigns an arbitrary uid per start needs the next
+// process to be able to read what the previous one created, and nothing
+// re-widens it since this package never chmods a file it did not create. The
+// reason is not fsGroup: a kubelet ORs group access in at every mount whatever
+// the creation mode was, so there 0600 would do just as well. What group access
+// cannot be is world access, and that is what is asserted here.
 //
 // The modes are written as literals rather than as sqliteFilePermCreate. Asserting
 // the constant would compare the code against itself; these assert the guarantee
@@ -156,10 +157,12 @@ var _ = Describe("SQLiteFilePermissions", func() {
 	})
 
 	// The other half of the policy, and the reason this is not simply 0600: group
-	// access survives. A Kubernetes fsGroup reapplies it at every mount, and on an
-	// arbitrary-uid platform it is how the CA reaches a database created by a
-	// previous pod under a different uid. Taking it away would break those
-	// deployments to protect against the pod's own group.
+	// access survives. On an arbitrary-uid platform it is how the CA reaches a
+	// database an earlier start created under a different uid, with the gid
+	// stable and nothing to re-widen the mode afterwards. Taking it away would
+	// break that deployment to protect against the pod's own group. (Not
+	// fsGroup, which re-applies group access regardless of how the file was
+	// created -- see sqliteFilePermCreate.)
 	It("leaves group access in place when the umask permits it", func() {
 		old := syscall.Umask(umaskLooser)
 		DeferCleanup(func() { syscall.Umask(old) })
@@ -404,12 +407,38 @@ var _ = Describe("SQLiteFilePermissions", func() {
 			t, err := resolveSQLiteTarget("file:ca%20b.db")
 			Expect(err).NotTo(HaveOccurred())
 
-			dsn := sqliteDriverDSN(t)
-
-			Expect(dsn).To(HavePrefix("file:"), "still a URI")
-			Expect(dsn).NotTo(HavePrefix("file://"), "a relative path is not an authority")
-			Expect(dsn).To(ContainSubstring("ca%20b.db"), "and the space stays escaped")
+			// The whole string, not a substring: the prefix and the escaping
+			// are the two things that can be wrong, and a ContainSubstring on
+			// the escaped name alone passed whatever surrounded it.
+			Expect(sqliteDriverDSN(t)).To(Equal("file:ca%20b.db"),
+				"opaque, and the space still escaped")
 		})
+
+		// The absolute URI carrying a character that has to be re-escaped. This
+		// is where the rewrite could diverge from the file the driver opens:
+		// sqliteFilePath decodes the path, and sqliteDriverDSN escapes it again
+		// with EscapedPath, so a name the two disagree about means the database
+		// is created at one path and opened at another -- issue #351 by the
+		// route this whole function exists to close. The only absolute-URI spec
+		// used a name with nothing escapable in it.
+		DescribeTable("round-trips an absolute file: URI through the resolved path",
+			func(name, escaped string) {
+				dir, err := filepath.EvalSymlinks(GinkgoT().TempDir())
+				Expect(err).NotTo(HaveOccurred(), "resolve the fixture directory")
+				real := filepath.Join(dir, name)
+				Expect(os.WriteFile(real, nil, 0o600)).To(Succeed(), "seed the database")
+
+				t, err := resolveSQLiteTarget("file://" + dir + "/" + escaped)
+				Expect(err).NotTo(HaveOccurred(), "resolveSQLiteTarget")
+				Expect(t.path).To(Equal(real), "the DSN decoded to the real filename")
+
+				Expect(sqliteDriverDSN(t)).To(Equal("file://"+dir+"/"+escaped),
+					"and re-escaped to a DSN naming that same file")
+			},
+			Entry("a space", "ca b.db", "ca%20b.db"),
+			Entry("a percent sign", "ca%db", "ca%25db"),
+			Entry("a hash", "ca#db", "ca%23db"),
+		)
 
 		It("leaves a bare path bare, which needs no escaping", func() {
 			dir, err := filepath.EvalSymlinks(GinkgoT().TempDir())
@@ -426,11 +455,34 @@ var _ = Describe("SQLiteFilePermissions", func() {
 				"the driver takes these bytes literally, so the space is not escaped")
 		})
 
-		It("hands an in-memory DSN through untouched", func() {
-			t, err := resolveSQLiteTarget(":memory:")
-			Expect(err).NotTo(HaveOccurred())
+		// Not "returns t.dsn", which is what the implementation says and would
+		// pass against any passthrough. What matters is that an in-memory DSN
+		// reaches the driver able to open an in-memory database, and that
+		// nothing was created on disk for it.
+		It("hands an in-memory DSN through in a form the driver still accepts", func() {
+			dir := GinkgoT().TempDir()
+			b, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: ":memory:"})
+			Expect(err).NotTo(HaveOccurred(), "NewSQLBackend")
+			DeferCleanup(func() { _ = b.Close() })
+			Expect(b.EnsureReady(context.Background())).To(Succeed(),
+				"the DSN the driver got still names an in-memory database")
 
-			Expect(sqliteDriverDSN(t)).To(Equal(":memory:"), "nothing to resolve")
+			Expect(b.KeyFilePaths()).To(BeEmpty(), "no file to judge")
+			entries, rerr := os.ReadDir(dir)
+			Expect(rerr).NotTo(HaveOccurred())
+			Expect(entries).To(BeEmpty(), "and nothing was created on disk")
+
+			// And the exact string, which a review asked be dropped as
+			// restating the implementation. Measured: it is the only assertion
+			// here that discriminates. SQLite accepts an empty DSN as well, and
+			// a private temporary database satisfies every behavioural check
+			// above -- EnsureReady succeeds, no key files, nothing in dir -- so
+			// returning "" instead of the operator's DSN survived both
+			// assertions above. The behavioural half proves it is usable; this
+			// half is what proves it is the DSN that was asked for.
+			t, terr := resolveSQLiteTarget(":memory:")
+			Expect(terr).NotTo(HaveOccurred())
+			Expect(sqliteDriverDSN(t)).To(Equal(":memory:"), "handed over as written")
 		})
 	})
 
@@ -603,15 +655,27 @@ var _ = Describe("SQLiteFilePermissions", func() {
 			Expect(err).NotTo(HaveOccurred(), "NewSQLBackend")
 			DeferCleanup(func() { _ = b.Close() })
 
-			Expect(buf.String()).To(ContainSubstring("stranded"), "the warning")
-			Expect(buf.String()).To(ContainSubstring(legacy), "where the old lock directory is")
+			// The data, not the prose. Four substring assertions on one record
+			// meant a reword of the operator advice failed the spec while no
+			// behaviour had regressed, and none of them would fail if the
+			// record named the wrong directory in the right words. What matters
+			// is which directory is named and that the mtime is carried -- the
+			// doc gives the mtime as what separates a live holder from an
+			// upgrade's leftovers, so omitting it sends the operator to stat a
+			// path this already stat'd.
+			Expect(buf.String()).To(ContainSubstring("stranded="+legacy),
+				"the attribute naming the directory left behind")
+			inUse, ok := lockDirOf("file:" + link)
+			Expect(ok).To(BeTrue(), "the directory this version locks in")
+			Expect(buf.String()).To(ContainSubstring("in_use="+inUse),
+				"and the one this version actually locks in")
+			Expect(buf.String()).To(MatchRegexp(`stranded_modified=\S`),
+				"carrying the mtime, not an empty attribute")
+
+			// One pin for the advice, because an operator-facing remedy that
+			// silently disappears is its own regression.
 			Expect(buf.String()).To(ContainSubstring("upgrade openvox-ca and openvox-ca-ctl together"),
 				"what the operator has to do about it")
-			// The doc names the mtime as what separates a live holder from an
-			// upgrade's leftovers, so the record has to carry it rather than
-			// send the operator to stat a path this already stat'd.
-			Expect(buf.String()).To(ContainSubstring("stranded_modified="),
-				"the signal its own reasoning depends on")
 		})
 
 		// A symlinked *parent* is the case the identity check exists for: the two

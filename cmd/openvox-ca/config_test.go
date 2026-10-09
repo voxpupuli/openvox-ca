@@ -1189,7 +1189,7 @@ var _ = Describe("insecure_allow_world_readable_keys wiring", func() {
 	// --daemon" drives the whole command with --insecure-allow-world-readable-keys
 	// and asserts the INSECURE notice, which is only reached if the overlay
 	// copied the flag into cfg -- so deleting the Changed branch fails there.
-	It("is read from the flag, which outranks both", func() {
+	It("registers the flag under its documented name and type", func() {
 		path := writeTempConfig("insecure_allow_world_readable_keys: false\n")
 
 		cmd := newRootCmd()
@@ -1204,13 +1204,12 @@ var _ = Describe("insecure_allow_world_readable_keys wiring", func() {
 		Expect(f.Value.String()).To(Equal("true"))
 	})
 
-	// The direction a wiring defect hides in: every assertion above is about
-	// true, so a loader that ignored the file entirely would still pass them.
-	It("stays false when the file says false", func() {
-		cfg, err := loadServerConfig(writeTempConfig("insecure_allow_world_readable_keys: false\n"))
-		Expect(err).NotTo(HaveOccurred())
-		Expect(cfg.InsecureAllowWorldReadableKeys).To(BeFalse())
-	})
+	// There was a "stays false when the file says false" spec here, removed as
+	// a duplicate: "is false by default" already asserts the same field is
+	// false after loading a config, and the only difference was whether the key
+	// was absent or present-and-false. Neither distinguishes a loader that
+	// ignores the file, which is what it claimed to catch -- the environment and
+	// flag specs above are what pin precedence.
 })
 
 var _ = Describe("allow_subject_alt_names wiring", func() {

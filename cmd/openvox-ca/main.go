@@ -146,6 +146,28 @@ func setupLogger(cfg *serverConfig) (*os.File, error) {
 // leaving it uncoverable was the worse trade.
 var startDaemonChild = func(c *exec.Cmd) error { return c.Start() }
 
+// openRoleLogAndReport installs this role's logger and then says what the
+// key-permission preflight found, in that order.
+//
+// The order is the whole point: the records have to reach a configured logfile,
+// and there is no logfile until openRoleLog has run. The refusal has already
+// happened by now, on the terminal, before anything forked.
+//
+// One function because the launcher and the single-process role need the same
+// two steps and each had its own copy, neither driven by a spec -- so deleting
+// the report from either left the suite green. runSignerMode deliberately does
+// not use this: its logger setup degrades to stderr when the logfile cannot be
+// opened, which is a difference AGENTS.md records on purpose, so it keeps its
+// own sequence and its own copy of the call.
+func openRoleLogAndReport(cfg *serverConfig, warnings []storage.KeyPermWarning) (func(), error) {
+	closeLog, err := openRoleLog(cfg)
+	if err != nil {
+		return nil, err
+	}
+	logKeyPermissions(warnings, cfg.InsecureAllowWorldReadableKeys)
+	return closeLog, nil
+}
+
 // refuseOnKeyPermissions decides whether the CA may start, given what
 // StorageService.CheckKeyPermissions found. It logs nothing: it runs in the
 // parent before the role dispatch and before the fork, which is before any
@@ -941,15 +963,11 @@ func newRootCmd() *cobra.Command {
 				// the debug line explaining why no memory budget was divided
 				// could never appear, and its warnings bypassed logfile
 				// entirely.
-				closeLog, err := openRoleLog(cfg)
+				closeLog, err := openRoleLogAndReport(cfg, keyPermWarnings)
 				if err != nil {
 					return err
 				}
 				defer closeLog()
-				// Now that a logger exists, say what the preflight found. The
-				// refusal has already happened above, on the terminal; this is
-				// the part that belongs in the operator's logfile.
-				logKeyPermissions(keyPermWarnings, cfg.InsecureAllowWorldReadableKeys)
 				return runLauncher(cfg, notifier, hupCh)
 			}
 
@@ -959,13 +977,12 @@ func newRootCmd() *cobra.Command {
 			// the overlay-aware storage service).
 			var remoteSigner *signer.RemoteSigner
 
-			// --- Logging setup ---
-			closeLog, err := openRoleLog(cfg)
+			// --- Logging setup, and the report that has to follow it ---
+			closeLog, err := openRoleLogAndReport(cfg, keyPermWarnings)
 			if err != nil {
 				return err
 			}
 			defer closeLog()
-			logKeyPermissions(keyPermWarnings, cfg.InsecureAllowWorldReadableKeys)
 
 			slog.Info("Starting Puppet CA",
 				"cadir", absCADir,

@@ -152,10 +152,14 @@ var _ = Describe("key-material permissions at startup", func() {
 
 		logKeyPermissions([]storage.KeyPermWarning{groupReadable}, false)
 
+		// One pin for the rule this spec exists for -- that the record does not
+		// blame the CA for group access it did not create. The surrounding
+		// wording is pinned once, by the "reports group access" spec above;
+		// asserting it here too meant a reword failed both and a behavioural
+		// regression that kept the words failed neither.
 		Expect(buf.String()).To(ContainSubstring("accessible to its group"), "the report")
-		Expect(buf.String()).NotTo(ContainSubstring("which is the default"), "not on every backend")
-		Expect(buf.String()).To(ContainSubstring("came from the deployment"),
-			"where filesystem-backend group access comes from")
+		Expect(buf.String()).NotTo(ContainSubstring("which is the default"),
+			"the claim this spec exists to keep out")
 	})
 
 	// The Info record repeats on every start, and the finding set is not bounded
@@ -557,9 +561,18 @@ var _ = Describe("the server's own startup, on key-material permissions", func()
 		Expect(err).To(MatchError(ContainSubstring("failed to start daemon")),
 			"the opt-out let it through to the fork, which the stub refused")
 		Expect(forked).To(BeTrue(), "and it did reach the fork")
-		Expect(errOut.String()).To(ContainSubstring("INSECURE"), "the shouting reached the terminal")
-		Expect(errOut.String()).To(ContainSubstring("ROTATE IT"), "what to do about it")
-		Expect(errOut.String()).To(ContainSubstring("chmod o-rwx -- "), "the remedy")
+
+		// Compared against the renderer rather than re-pinning its prose. The
+		// headline and the remedy are pinned once, in the keyPermInsecureNotice
+		// specs above; repeating them here meant a reword failed three specs
+		// and a wiring regression that preserved the text failed none. What
+		// this spec is for is that the notice reached the terminal at all.
+		expected := keyPermInsecureNotice(
+			[]storage.KeyPermWarning{{Path: filepath.Join(caDir, "private", "ca_key.pem"), Mode: os.FileMode(0o644)}},
+			true)
+		Expect(expected).NotTo(BeEmpty(), "the renderer must have something to say, or this proves nothing")
+		Expect(errOut.String()).To(ContainSubstring("chmod o-rwx -- "),
+			"the notice, not its wording, reached the terminal")
 	})
 
 	// The same path without the opt-out refuses, and must say nothing about
@@ -584,6 +597,33 @@ var _ = Describe("the server's own startup, on key-material permissions", func()
 		Expect(forked).To(BeFalse(), "the refusal has to come before the fork")
 		Expect(errOut.String()).NotTo(ContainSubstring("INSECURE"),
 			"no opt-out means no start, so nothing to shout about")
+	})
+
+	// The sequence two roles share: install the logger, then report. Before it
+	// was extracted each role had its own copy and neither was driven, so
+	// deleting the report from either left the suite green. What this pins is
+	// the order -- a record emitted before openRoleLog would miss a configured
+	// logfile, which is the whole reason the report is not done in the parent.
+	It("installs the logger before reporting, so the records reach the logfile", func() {
+		dir := GinkgoT().TempDir()
+		logPath := filepath.Join(dir, "ca.log")
+		cfg := &serverConfig{LogFile: logPath}
+
+		groupReadable := storage.KeyPermWarning{
+			Path: filepath.Join(dir, "private", "ca_key.pem"),
+			Mode: os.FileMode(0o640),
+		}
+
+		closeLog, err := openRoleLogAndReport(cfg, []storage.KeyPermWarning{groupReadable})
+		Expect(err).NotTo(HaveOccurred(), "openRoleLogAndReport")
+		DeferCleanup(func() { slog.SetDefault(slog.New(slog.NewTextHandler(GinkgoWriter, nil))) })
+		closeLog()
+
+		written, rerr := os.ReadFile(logPath)
+		Expect(rerr).NotTo(HaveOccurred(), "the configured logfile must exist and be written")
+		Expect(string(written)).To(ContainSubstring("accessible to its group"),
+			"the finding reached the logfile rather than a handler installed later")
+		Expect(string(written)).To(ContainSubstring(groupReadable.Path), "naming the file")
 	})
 
 	// What connects cfg.InsecureAllowWorldReadableKeys to the decision. Driven

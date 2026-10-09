@@ -681,12 +681,12 @@ Your umask still applies and can narrow it further: `0022` gives `0640`, `0077`
 gives `0600`. What it cannot do is widen it, so the database is never created
 world-readable however the process is launched.
 
-Group access is deliberately allowed. Under Kubernetes the kubelet ORs group
-access back into the volume at every mount when `fsGroup` is set, which the chart
-sets by default, and on a platform that assigns an arbitrary uid per namespace —
-OpenShift — group access is how the CA reaches a database a previous pod created
-under a different uid. Removing it would break those deployments to protect
-against the pod's own group, which is not a third party.
+Group access is deliberately allowed, and for one reason: on a platform that
+assigns an arbitrary uid per namespace — OpenShift — the gid is stable while the
+uid is not, so group access is how the CA reaches a database an earlier start
+created. Nothing re-widens it afterwards, because `openvox-ca` never changes the
+mode of a file it did not create. Removing it would break that deployment to
+protect against the pod's own group, which is not a third party.
 
 **`openvox-ca` never changes the mode of a file it did not create.** Not the
 database, not the sidecars, not the directory holding them. A store whose
@@ -710,9 +710,9 @@ the condition instead of uncovering the next one on the following start. A key
 every local account could read is one to treat as exposed, so the fix is `chmod
 o-rwx` **and** deciding whether to rotate the CA key.
 
-Group access is reported once at `Info`, listing the files, and does not stop the
-CA. It is the mode the store is created with, so a correct deployment has it —
-under an `fsGroup`, and on a plain systemd install alike. Where that group has
+Group access is reported at `Info`, listing the files, and does not stop the CA.
+On this backend it is the mode the store is created with, so a correct deployment
+has it whether or not Kubernetes is involved. Where that group has
 members other than the CA it is worth acting on, but that is not something the
 server can tell from the inside, which is why it does not shout.
 

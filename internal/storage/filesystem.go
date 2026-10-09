@@ -294,6 +294,14 @@ func (b *FilesystemBackend) AppendLine(ctx context.Context, key string, data []b
 	f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_EXCL|os.O_WRONLY, permFor(kind))
 	switch {
 	case err == nil:
+		// Non-fatal, and deliberately unspecced: this is fchmod on a descriptor
+		// this process created and therefore owns, so it cannot fail for the
+		// reasons a path-based chmod can -- no ownership problem, no missing
+		// search permission, no race with a rename. What is left is a read-only
+		// filesystem, which would have failed the O_CREATE above first. A spec
+		// would have to place the failure rather than drive it, which pins the
+		// fixture rather than the code. If it ever does fail, the content is
+		// what matters and the mode is already no wider than the umask allowed.
 		if cerr := f.Chmod(permFor(kind)); cerr != nil {
 			slog.Debug("Could not set the mode on a newly created blob",
 				"path", p, "mode", permFor(kind).String(), "error", cerr)

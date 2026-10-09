@@ -1009,9 +1009,11 @@ func sqliteDriverDSN(t sqliteTarget) string {
 //
 // sqliteFilePermCreate keeps the world bits out and leaves the rest to the
 // operator's umask, which can only narrow it further. Group access is
-// deliberately permitted: a Kubernetes fsGroup ORs it back into the volume at
-// every mount, and on an arbitrary-uid platform such as OpenShift it is how the
-// CA reaches a database it did not create.
+// deliberately permitted, for the reason given at the constant and for no
+// other: a platform that assigns an arbitrary uid per start, where the gid is
+// stable, needs the database this process creates to be readable by the next
+// process -- the same CA under a different uid. Not fsGroup, which re-applies
+// group access at mount time whatever the file was created as.
 //
 // Nothing here modifies a file that already exists — no chmod, no chown. An
 // existing database keeps whatever mode it has, and world access on it is
