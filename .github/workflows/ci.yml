@@ -90,6 +90,64 @@ jobs:
       - name: Run markdownlint-cli2
         run: npx --yes markdownlint-cli2@0.23.1
 
+  # -- Shell lint (shellcheck) -------------------------------------------------
+  # Lints the package maintainer scripts. They are the one part of this
+  # repository with no Go in it at all, so nothing above sees them: `mage
+  # dev:check` is a Go gate, and golangci-lint does not read shell.
+  #
+  # The immediate reason is a suppression. postinstall carries a `# shellcheck
+  # disable=SC2086` directive over a deliberate word-split, and until this job
+  # existed that directive addressed a linter that never ran -- an exemption
+  # from nothing, which reads to the next author as though the rule had been
+  # considered and waived. This makes it a checked exception.
+  #
+  # -s sh, not the shebang: these run as dpkg and rpm maintainer scripts under
+  # whatever /bin/sh the target distribution has -- dash on Debian, bash in
+  # POSIX mode on EL, busybox ash in a container -- so they are linted as POSIX
+  # sh rather than as the bash that happens to be on the runner. The specs
+  # drive them through one `sh`; this checks them against the dialect.
+  #
+  # Pinned, version and digest together, the way promtool is below. The
+  # runner image ships a shellcheck too, but it moves with the image: a newer
+  # one with new checks would fail this job on a PR that never touched
+  # packaging/scripts/, and because the CI success job needs this one, that
+  # would block every merge. A pinned version also means the command in
+  # CONTRIBUTING.md reproduces this job exactly. SHELLCHECK_SHA256 is GitHub's
+  # recorded digest for the release asset; bump both together.
+  #
+  # Files are listed rather than globbed: a glob that stopped matching would
+  # pass silently, which is the failure mode a lint job can least afford. The
+  # list is held to what packaging/nfpm.yaml ships by `mage dev:check`
+  # (verifyShellcheckCoverage), so a new maintainer script cannot be packaged
+  # unlinted.
+  shellcheck:
+    name: Shell lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install shellcheck
+        env:
+          SHELLCHECK_VERSION: v0.11.0
+          SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          set -euo pipefail
+          dir="shellcheck-${SHELLCHECK_VERSION}"
+          curl -fsSL -o shellcheck.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/${dir}.linux.x86_64.tar.xz"
+          echo "${SHELLCHECK_SHA256}  shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf shellcheck.tar.xz "${dir}/shellcheck"
+          sudo install -m 0755 "${dir}/shellcheck" /usr/local/bin/shellcheck
+          rm -rf shellcheck.tar.xz "${dir}"
+      - name: Run shellcheck over the maintainer scripts
+        run: |
+          shellcheck --version
+          shellcheck -s sh \
+            packaging/scripts/first-boot \
+            packaging/scripts/preinstall \
+            packaging/scripts/postinstall \
+            packaging/scripts/preremove \
+            packaging/scripts/postremove
+
   # -- Monitoring mixin --------------------------------------------------------
   # The mixin ships Prometheus alerting rules and no Go code, so nothing in the
   # unit suite would catch a malformed selector substitution, or an expression
@@ -539,6 +597,7 @@ jobs:
       - check
       - hadolint
       - markdownlint
+      - shellcheck
       - mixin
       - chart
       - unit
