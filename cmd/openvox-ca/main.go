@@ -234,6 +234,7 @@ func applyCAConfig(myCA *ca.CA, cfg *serverConfig) error {
 	myCA.AllowSubjectAltNames = cfg.AllowSubjectAltNames
 	myCA.RevokeOnAutoRenew = cfg.RevokeOnAutoRenew
 	myCA.SupersedeAfter = cfg.supersededCertRevokeAfter()
+	myCA.LeafBackdate = cfg.leafBackdate()
 	myCA.SigningConcurrency = resolveSigningConcurrency(cfg.CASigningConcurrency)
 	myCA.KeyPassphrase = ca.KeyPassphraseConfig{
 		PassphraseFile: cfg.CAKeyPassphraseFile,

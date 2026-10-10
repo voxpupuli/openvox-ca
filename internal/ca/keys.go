@@ -125,6 +125,23 @@ func validatePublicKey(pub crypto.PublicKey) error {
 	}
 }
 
+// leafKeyConfig resolves the algorithm and size this CA generates leaf keys
+// with: the configured LeafKeyConfig, or DefaultLeafKeyConfig when it says
+// nothing.
+//
+// One definition, because there were briefly two. The managed path tested
+// Algo-or-Size while this one tested Algo alone, and they disagreed about
+// `leaf_key_size: 4096` with no `leaf_key_algo` -- accepted by the server's own
+// config validation, and yielding RSA 2048 down one path and RSA 4096 down the
+// other on a single CA. A defaulting rule with two copies is a rule that has
+// already drifted.
+func (c *CA) leafKeyConfig() KeyConfig {
+	if c.LeafKeyConfig.Algo != "" || c.LeafKeyConfig.Size != 0 {
+		return c.LeafKeyConfig
+	}
+	return DefaultLeafKeyConfig
+}
+
 // generateKey creates a fresh private key according to cfg.
 // RSA with Size 0 defaults to 4096 bits; ECDSA with Size 0 defaults to P-256.
 func generateKey(cfg KeyConfig) (crypto.Signer, error) {

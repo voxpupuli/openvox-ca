@@ -400,6 +400,56 @@ var _ = Describe("CA AutoRenew", func() {
 			"auto-renewal must extend validity, not just mint a new serial")
 	})
 
+	It("backdates a CSR-signed leaf by the CA's configured backdate", func() {
+		// The narrowing from a hardcoded 24h to a configurable 5m default
+		// reaches every issuance path, and only two of them were pinned:
+		// generate and the managed reconcile. If signWithDuration kept a
+		// hardcoded 24h, or lost the backdate entirely, nothing failed.
+		//
+		// A deliberately non-default value, so this pins the WIRING rather than
+		// the default. It fails three ways: a dropped backdate puts NotBefore at
+		// roughly now, a hardcoded 24h puts it a day early, and substituting
+		// DefaultLeafBackdate puts it five minutes early.
+		myCA.LeafBackdate = 7 * time.Minute
+
+		csrPEM, _ := buildCSR("backdate-csr-node")
+		_, err := myCA.SaveRequest(ctx, "backdate-csr-node", csrPEM)
+		Expect(err).NotTo(HaveOccurred())
+		before := time.Now().UTC()
+		certPEM, err := myCA.Sign(ctx, "backdate-csr-node")
+		Expect(err).NotTo(HaveOccurred())
+		cert := parseCertPEM(certPEM)
+
+		Expect(cert.NotBefore).To(BeTemporally("<=", before.Add(-7*time.Minute)),
+			"the configured backdate must reach the CSR-signing path")
+		Expect(cert.NotBefore).To(BeTemporally(">", before.Add(-7*time.Minute-2*time.Minute)),
+			"and must not exceed it; a hardcoded 24h or a wider default would land here")
+	})
+
+	It("backdates an auto-renewed leaf by the CA's configured backdate", func() {
+		// The same for the path real agents use by default. AutoRenew reaches
+		// issueLeafLocked through its own call, so a regression there is
+		// invisible to the CSR spec above.
+		myCA.LeafBackdate = 7 * time.Minute
+
+		csrPEM, _ := buildCSR("backdate-renew-node")
+		_, err := myCA.SaveRequest(ctx, "backdate-renew-node", csrPEM)
+		Expect(err).NotTo(HaveOccurred())
+		firstPEM, err := myCA.Sign(ctx, "backdate-renew-node")
+		Expect(err).NotTo(HaveOccurred())
+		original := parseCertPEM(firstPEM)
+
+		before := time.Now().UTC()
+		renewedPEM, err := myCA.AutoRenew(ctx, original)
+		Expect(err).NotTo(HaveOccurred())
+		renewed := parseCertPEM(renewedPEM)
+
+		Expect(renewed.NotBefore).To(BeTemporally("<=", before.Add(-7*time.Minute)),
+			"the configured backdate must reach the auto-renewal path")
+		Expect(renewed.NotBefore).To(BeTemporally(">", before.Add(-7*time.Minute-2*time.Minute)),
+			"and must not exceed it")
+	})
+
 	It("carries the original certificate's DNS SANs forward unchanged", func() {
 		// A CSR-issued openvox-ca cert carries only DNS SANs, so this asserts
 		// DNSNames; the IP/email/URI SAN types are covered by the next spec.
@@ -442,6 +492,59 @@ var _ = Describe("CA AutoRenew", func() {
 		Expect(renewed.IPAddresses).To(Equal(original.IPAddresses))
 		Expect(renewed.EmailAddresses).To(Equal(original.EmailAddresses))
 		Expect(renewed.URIs).To(Equal(original.URIs))
+	})
+
+	It("carries a narrow extended key usage forward instead of widening it", func() {
+		// Renewal must not hand back more authority than it was given. Before
+		// this was carried forward, AutoRenew passed a nil EKU and
+		// issueLeafLocked applied its serverAuth+clientAuth default, so a
+		// clientAuth-only certificate came back also able to serve TLS — same
+		// key, same subject, more authority, and nothing in the exchange saying
+		// it had widened.
+		//
+		// clientAuth-only is the reachable case, which is why the spec uses it:
+		// attribute() verifies every client certificate against
+		// ExtKeyUsageClientAuth, so a serverAuth-only certificate never reaches
+		// this path at all, while a clientAuth-only one reaches it normally.
+		now := time.Now().UTC()
+		original := mintLeaf(2048, &x509.Certificate{
+			Subject:     pkix.Name{CommonName: "narrow-eku-node"},
+			NotBefore:   now.Add(-24 * time.Hour),
+			NotAfter:    now.Add(365 * 24 * time.Hour),
+			DNSNames:    []string{"narrow-eku-node"},
+			ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		})
+
+		renewedPEM, err := myCA.AutoRenew(ctx, original)
+		Expect(err).NotTo(HaveOccurred())
+		renewed := parseCertPEM(renewedPEM)
+
+		Expect(renewed.ExtKeyUsage).To(ConsistOf(x509.ExtKeyUsageClientAuth))
+		Expect(renewed.ExtKeyUsage).NotTo(ContainElement(x509.ExtKeyUsageServerAuth),
+			"auto-renewal must not add an extended key usage the certificate was not issued with")
+	})
+
+	It("still applies the default extended key usage when the certificate carries none", func() {
+		// Empty means unrestricted, and every agent issued before this CA set
+		// an EKU carries none. Narrowing those on renewal would break them, so
+		// an absent EKU must keep taking the default pair rather than becoming
+		// an empty list.
+		now := time.Now().UTC()
+		original := mintLeaf(2048, &x509.Certificate{
+			Subject:   pkix.Name{CommonName: "no-eku-node"},
+			NotBefore: now.Add(-24 * time.Hour),
+			NotAfter:  now.Add(365 * 24 * time.Hour),
+			DNSNames:  []string{"no-eku-node"},
+		})
+		Expect(original.ExtKeyUsage).To(BeEmpty(),
+			"this spec only proves anything if the presented certificate really carries no EKU")
+
+		renewedPEM, err := myCA.AutoRenew(ctx, original)
+		Expect(err).NotTo(HaveOccurred())
+		renewed := parseCertPEM(renewedPEM)
+
+		Expect(renewed.ExtKeyUsage).To(ConsistOf(
+			x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth))
 	})
 
 	It("auto-renews a certificate that has no CSR in storage, e.g. after migration import", func() {
