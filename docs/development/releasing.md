@@ -25,15 +25,17 @@ fails the gate instead of shipping mislabelled artefacts.
 | `openvox-ca_X.Y.Z_linux_amd64_fips.tar.gz` | `mage build:distVariant` (`GOEXPERIMENT=boringcrypto`) | GitHub release assets |
 | `openvox-ca_X.Y.Z_linux_arm64_fips.tar.gz` | `mage build:distVariant` (`GOEXPERIMENT=boringcrypto`) | GitHub release assets |
 | `openvox-ca_X.Y.Z_<variant>.spdx.json` / `.cdx.json` | Syft, via [`generate-sbom`](../../.github/actions/generate-sbom/action.yml) (one pair per variant) | GitHub release assets |
-| `checksums.txt` (SHA-256, covers the tarballs and the SBOMs) | Release workflow (`sha256sum` aggregate step) | GitHub release assets |
+| `openvox-ca_X.Y.Z_<arch>.deb` (one per non-FIPS variant) | `mage build:packages` (Release workflow, packaging job) | GitHub release assets |
+| `openvox-ca-X.Y.Z-<release>.<arch>.rpm` (one per non-FIPS variant) | `mage build:packages` (Release workflow, packaging job) | GitHub release assets |
+| `checksums.txt` (SHA-256, covers the tarballs, the SBOMs and the packages) | Release workflow (`sha256sum` aggregate step) | GitHub release assets |
 | `provenance.sigstore.json` | `actions/attest`, over every line of `checksums.txt` | GitHub release assets |
 | GitHub release + auto-generated notes | `gh release create --generate-notes` | Releases page |
 | `ghcr.io/voxpupuli/openvox-ca:{X.Y.Z,X.Y,latest}` | *Container images* workflow | GHCR |
 | `…:{X.Y.Z,X.Y,latest}-alpine` | *Container images* workflow | GHCR |
 | `ghcr.io/voxpupuli/openvox-ca-charts/openvox-ca:X.Y.Z` | *Helm chart* workflow | GHCR (OCI, separate package) |
 
-Every tarball and SBOM above, plus each published image and the chart, carries
-SLSA v1.0 build provenance signed through Sigstore; the images and the chart are
+Every tarball, SBOM and package above, plus each published image and the chart,
+carries SLSA v1.0 build provenance signed through Sigstore; the images and the chart are
 additionally signed with `cosign sign`. `checksums.txt` is not itself an
 attestation subject — its lines *are* the signed subject list, so it is
 authenticated by the bundle rather than alongside it — and
@@ -44,18 +46,49 @@ Each tarball contains both binaries, `openvox-ca` and `openvox-ca-ctl` (mode
 0755), and the systemd unit `openvox-ca.service` (mode 0644) — see [running
 under systemd](../systemd.md). Only Linux is built: there are no macOS or
 Windows release artefacts. To build the same four tarballs (plus a
-tarballs-only `checksums.txt`) locally in one go, run `mage build:dist`; the
-SBOMs and the provenance bundle are produced by the release workflow, not
-locally.
+tarballs-only `checksums.txt`) locally in one go, run `mage build:dist`. Once
+[#282](https://github.com/voxpupuli/openvox-ca/pull/282) merges,
+`mage build:packages` will build the packages from those tarballs the same way
+— it is an ordinary local target, not a workflow-only step. The SBOMs and the
+provenance bundle are the two things that will still not build locally: they
+are produced by the release workflow only.
 
-**Packages are not in that table yet.** `mage build:packages` reads the
-variant tarballs already in `dist/` and writes one `.deb` and one `.rpm` per
-packaged variant beside them; it builds no binaries, and the FIPS variants are
-not packaged (see `packaged` on `distVariantSpec`). Adding the job that
-publishes them is [#266](https://github.com/voxpupuli/openvox-ca/pull/266),
-so today they are a local build only.
+### Packages
 
-When that job lands it should export `SOURCE_DATE_EPOCH`. nfpm stamps every
+The `.deb` and `.rpm` are built from the tarballs, not from a separate compile:
+the binaries inside `openvox-ca_X.Y.Z_amd64.deb` are byte-for-byte the ones
+inside `openvox-ca_X.Y.Z_linux_amd64.tar.gz`. What follows from that:
+
+- **No package-specific SBOM.** The variant's existing SPDX and CycloneDX pair
+  already describes the package's contents. The cost is a mapping step: a
+  consumer holding only `openvox-ca-X.Y.Z-1.x86_64.rpm` has to know that
+  `x86_64` is the `linux_amd64` variant before it can find the matching
+  `openvox-ca_X.Y.Z_linux_amd64.spdx.json`. The rpm and deb architecture
+  spellings are the ones each format uses natively — `x86_64`/`aarch64` for
+  rpm, `amd64`/`arm64` for deb — and neither is the variant name.
+- **The packages are attested with no extra step.** They are listed in
+  `checksums.txt`, and the attestation's subjects are exactly that file's
+  lines, so they acquire the same SLSA provenance the tarballs have.
+- **The exact filenames are nfpm's, and #250 fixes them.** The shapes above are
+  the conventional ones each format uses, but the rpm `release` field (the
+  `-1`) and any epoch are nfpm configuration, so treat the worked examples here
+  as illustrative until #282 has merged. Nothing in the repository checks them:
+  `verifyDistVariants` reads the workflows, not this file, and even there it
+  matches only globbed extensions by design — so a filename written in prose
+  cannot satisfy a guard by being written down.
+- **`packageFormats` in `magefile.go` is the list of formats, and #250 must
+  build from it.** `verifyDistVariants` holds `release.yml`'s package counts
+  and globs to that variable, but it cannot see the packaging code, so nothing
+  stops an implementation of `mage build:packages` carrying a second list of
+  its own — which is the drift the `packaged` field was made a field to avoid.
+  Whoever implements #250 should read the formats from `packageFormats`.
+- **The FIPS variants are not packaged.** An operator under a FIPS obligation
+  installs into a controlled estate rather than from a repository, so
+  `linux_amd64_fips` and `linux_arm64_fips` ship as tarballs only. This is
+  recorded as `packaged` on `distVariantSpec` in `magefile.go`, and
+  `verifyDistVariants` holds `release.yml`'s package counts to it.
+
+The packaging job must export `SOURCE_DATE_EPOCH`. nfpm stamps every
 entry it generates from that variable, and `stageDocTree` stamps the
 documentation tree with it too, so with it set a rebuild of the same inputs is
 byte-identical and a published checksum keeps its meaning; with it unset the
@@ -77,7 +110,7 @@ chart can never name an image that does not exist.
 
 | Workflow | File | What it does on a `v*` tag |
 | --- | --- | --- |
-| **Release** | [`release.yml`](../../.github/workflows/release.yml) | Verifies the tag equals `"v" +` the `internal/version` constant, builds each variant on a runner native to its architecture (`mage build:distVariant`, no cross toolchain), verifies each built artefact (binaries execute, FIPS variants carry boringcrypto build info), generates each variant's SBOM pair, then aggregates the lot, generates `checksums.txt`, attests provenance over everything it lists, and runs `gh release create` |
+| **Release** | [`release.yml`](../../.github/workflows/release.yml) | Verifies the tag equals `"v" +` the `internal/version` constant, builds each variant on a runner native to its architecture (`mage build:distVariant`, no cross toolchain), verifies each built artefact (binaries execute, FIPS variants carry boringcrypto build info), generates each variant's SBOM pair, packages the non-FIPS variants as `.deb` and `.rpm` on a single runner, then aggregates the lot, generates `checksums.txt`, attests provenance over everything it lists, and runs `gh release create` |
 | **Container images** | [`container-images.yml`](../../.github/workflows/container-images.yml) | After the same verify gate, builds both image variants on native amd64 and arm64 runners, attests provenance and an SBOM pair per architecture, publishes multi-arch manifests, then attests and `cosign sign`s each published index. See [publishing container images](publishing-images.md) |
 | **Helm chart** | [`helm-chart.yml`](../../.github/workflows/helm-chart.yml) | After the same verify gate, packages `charts/openvox-ca`, waits for the tag's alpine image to appear, pushes the chart to `ghcr.io/voxpupuli/openvox-ca-charts` as an OCI artefact, attests and signs it against the digest the push reported, then pulls it back to prove the reference resolves |
 
@@ -90,7 +123,10 @@ chart can never name an image that does not exist.
 > `main`. Tagging an unprepared, unmerged, or red commit fails the gate instead
 > of publishing. (The artefact builds themselves are also exercised on every PR
 > by CI's per-variant *Release artefact build* jobs, and the chart by its
-> *Helm chart* job.)
+> *Helm chart* job. **The packaging step is the exception**: nothing runs
+> `mage build:packages` on a pull request, so a green CI run says nothing
+> about it, and a packaging defect would first appear on a tag. Adding that
+> leg is [#254](https://github.com/voxpupuli/openvox-ca/issues/254).)
 
 ## Before you tag
 
@@ -229,8 +265,8 @@ This opens a small "Bump version to 0.10.0-dev" PR; merge it.
 
 ## Verifying a release
 
-Every artefact published from a `v*` tag — each tarball, each SBOM, each image
-and the chart — carries SLSA v1.0 build provenance, signed through Sigstore's
+Every artefact published from a `v*` tag — each tarball, each SBOM, each
+package, each image and the chart — carries SLSA v1.0 build provenance, signed through Sigstore's
 public-good instance with a short-lived certificate. There is
 no signing key held anywhere: the identity in the certificate is the workflow
 that produced the artefact, which is what a verifier should be checking anyway.
@@ -238,12 +274,13 @@ that produced the artefact, which is what a verifier should be checking anyway.
 | Artefact | Provenance | SBOM | `cosign sign` signature |
 | --- | --- | --- | --- |
 | Release tarballs | `provenance.sigstore.json`, one bundle over every line of `checksums.txt` | Published as assets, both formats | — (the bundle is the signature) |
+| Release packages (`.deb`, `.rpm`) | The same bundle — they are lines of `checksums.txt` too | — (the variant tarball's pair describes the same binaries) | — (the bundle is the signature; rpm header signing is a separate question, see below) |
 | Container images, per architecture | Registry attestation on the digest | Registry attestation, both formats | Yes — written by the index's `--recursive` signing, not a separate call |
 | Container image indexes | Registry attestation on the index digest | — (per-architecture SBOMs are the meaningful ones) | Yes, `--recursive` over the index and its children |
 | Helm chart | Registry attestation on the pushed digest | — (no dependencies, nothing to catalogue) | Yes |
 
 The reader-facing commands are in the [README](../../README.md#verifying-what-you-downloaded).
-Two things worth knowing that belong here rather than there:
+Three things worth knowing that belong here rather than there:
 
 - **Verify against a digest, or against a pinned identity — not a bare tag.**
   Images are built for pull requests too, and those runs mint certificates whose
@@ -256,6 +293,25 @@ Two things worth knowing that belong here rather than there:
   between publishing and signing. After signing, each workflow asserts that the
   tags it published still resolve to the digest it signed, which converts a lost
   race into a red build rather than a silently unsigned tag.
+- **Neither package carries a signature its own package manager checks.** The
+  `.rpm` has no rpm header signature, so `dnf` with `gpgcheck=1` finds nothing
+  inside the package to verify. The `.deb` is in the same position for a
+  different reason: `apt` verifies a repository's `InRelease` index rather than
+  individual `.deb` files, and these packages are **release assets, not a
+  repository** — so `apt install ./openvox-ca_X_amd64.deb` or `dpkg -i` does no
+  signature check at all. Index verification starts applying only once these
+  packages are served from a signed apt repository, which does not exist yet —
+  publishing them anywhere is
+  [#257](https://github.com/voxpupuli/openvox-ca/issues/257), and signing an
+  index is not in its scope.
+
+  What both carry instead is the Sigstore bundle over `checksums.txt`, and
+  neither package manager can read it, so **verifying the bundle is the only
+  provenance check available for a downloaded package** — do it before
+  installing either format. Signing rpm headers is
+  [#256](https://github.com/voxpupuli/openvox-ca/issues/256), deferred on the
+  question of whose key: an rpm signed with a key nobody publishes is
+  verification theatre.
 
 ## Release notes
 
@@ -391,7 +447,36 @@ $ docker run --rm ghcr.io/<you>/<fork>:0.9.0-test1 --version
 
 Worth checking specifically:
 
-- All four tarballs are present and the checksums verify.
+- All four tarballs are present, and one `.deb` and one `.rpm` for each of the
+  two non-FIPS variants. Run `sha256sum -c` **without** `--ignore-missing`, so
+  that a file listed in `checksums.txt` and absent from the download is a
+  failure rather than a silent skip — that is the check, rather than a count
+  to compare against a number written here, which would be one more
+  hand-maintained copy of a quantity `verifyDistVariants` already owns:
+
+  ```console
+  $ sha256sum -c checksums.txt
+  $ ls -1 *.deb *.rpm
+  ```
+
+- **Open one package of each format.** Nothing in the pipeline does: the
+  tarballs are unpacked and executed by `verify-dist-artifact` before they are
+  attested, and the packages have no counterpart, so a well-formed package
+  with the wrong contents would be checksummed, attested and published. Until
+  [#254](https://github.com/voxpupuli/openvox-ca/issues/254) adds
+  install-and-verify legs, this is the only place anyone looks inside one:
+
+  ```console
+  $ dpkg-deb -c openvox-ca_*_amd64.deb
+  $ rpm -qlp openvox-ca-*.x86_64.rpm
+  ```
+
+  Both binaries should be present and executable, the systemd unit should be
+  there, and the version in the filename should be the rehearsal version. Note
+  that nfpm rewrites a pre-release version for both formats — `0.9.0-test1`
+  becomes `0.9.0~test1`, which sorts *before* `0.9.0` as it should — so the
+  package filenames will not match the tarballs' character for character.
+
 - Each tarball contains both `openvox-ca` and `openvox-ca-ctl`, and both
   report the rehearsal version (with commit metadata) via `--version`.
 - Each tarball also contains `openvox-ca.service`, and `tar tvzf` shows it as
@@ -553,3 +638,5 @@ release](#verifying-a-release).)
 | Gap | Impact |
 | --- | --- |
 | **`helm verify` has nothing to check.** | The chart is signed with cosign and carries SLSA provenance like everything else, but it is packaged without `helm package --sign`, so there is no `.prov` file for `helm push` to upload. Helm's own provenance mechanism is PGP: it wants a long-lived keyring, which is the thing Sigstore's short-lived certificates exist to avoid. Anyone whose tooling asserts specifically on `helm verify`, rather than on a cosign signature, is not served. |
+| **No package manager checks a signature on either format.** | The same gap in a second ecosystem, and it covers both packages rather than only the `.rpm`. The `.rpm` carries no rpm header signature, so a `gpgcheck=1` repository rejects it. The `.deb` is unverified too, for a different reason: `apt` checks a repository's `InRelease` index, and a release asset is not served from a repository — `apt install ./file.deb` and `dpkg -i` check nothing. Both carry the Sigstore bundle over `checksums.txt`, which neither tool can read, so that bundle is the only provenance check a downloader has. Signing rpm headers is [#256](https://github.com/voxpupuli/openvox-ca/issues/256). Nothing tracks a signed apt repository; [#257](https://github.com/voxpupuli/openvox-ca/issues/257) publishes the packages to a bucket but does not sign an index. See [verifying a release](#verifying-a-release). |
+| **Nothing verifies what is inside a package.** | Tarballs are unpacked and their binaries executed by `verify-dist-artifact` before they are attested. The packages have no counterpart, so a well-formed package with the wrong contents is checksummed, attested and published, and the first person to find out runs `apt install`. The install-and-verify legs that close it are [#254](https://github.com/voxpupuli/openvox-ca/issues/254); until then the [rehearsal checklist](#rehearsing-on-your-own-fork) asks a maintainer to open one by hand. |
