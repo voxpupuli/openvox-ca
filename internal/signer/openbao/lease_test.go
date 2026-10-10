@@ -206,6 +206,13 @@ func (f *lifecycleFake) refuseLoginsFromNow() {
 	f.refuseLogins = true
 }
 
+// acceptLoginsFromNow undoes refuseLoginsFromNow.
+func (f *lifecycleFake) acceptLoginsFromNow() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.refuseLogins = false
+}
+
 // issueBatchTokens makes every later login issue a batch token.
 func (f *lifecycleFake) issueBatchTokens() {
 	f.mu.Lock()
@@ -547,6 +554,30 @@ var _ = Describe("OpenBao token lifecycle", func() {
 				Entry("when the re-login succeeds", false, 3),
 				Entry("when the re-login fails", true, 2),
 			)
+		})
+
+		Context("when a failed re-login is followed by a successful one", func() {
+			It("stops reporting the old login failure when it throttles", func() {
+				fake.refuseEverySign()
+				tm := start(openbao.AuthAppRole)
+				signer := load(tm)
+
+				fake.refuseLoginsFromNow()
+				openbao.ExpireReauthThrottleForTest(tm)
+				_, err := signer.Sign(nil, digest, crypto.SHA256)
+				Expect(err).To(MatchError(ContainSubstring("invalid credentials")), "the re-login should have failed")
+
+				fake.acceptLoginsFromNow()
+				openbao.ExpireReauthThrottleForTest(tm)
+				_, err = signer.Sign(nil, digest, crypto.SHA256)
+				Expect(err).NotTo(MatchError(openbao.ErrReauthThrottled), "the re-login should have gone ahead")
+				Expect(fake.loginCount()).To(Equal(3))
+
+				_, err = signer.Sign(nil, digest, crypto.SHA256)
+
+				Expect(err).To(MatchError(openbao.ErrReauthThrottled))
+				Expect(err.Error()).NotTo(ContainSubstring("invalid credentials"), "a login that has since succeeded is not why this was throttled")
+			})
 		})
 
 		Context("after a request-path re-login", func() {
