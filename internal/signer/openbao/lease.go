@@ -19,6 +19,7 @@ package openbao
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -40,7 +41,18 @@ const reauthRetryInterval = 5 * time.Second
 // re-authenticates on a steady cadence instead of busy-looping requests at
 // OpenBao. A healthy token renews for far longer than this, so the throttle
 // only ever engages when a watcher keeps ending immediately.
+//
+// It is also the minimum spacing between a request-path Reauth and the
+// previous login attempt of any kind. A persistent 403 — a policy that no
+// longer grants Transit access, say — is not cured by logging in again, and
+// without this every signing attempt would become a fresh login against
+// OpenBao and a fresh entry in its audit log.
 const minReauthInterval = 30 * time.Second
+
+// ErrReauthThrottled is returned (wrapped) by Reauth when the previous login
+// attempt was less than minReauthInterval ago. The request that saw the 403
+// fails with it rather than waiting the interval out.
+var ErrReauthThrottled = errors.New("OpenBao re-authentication throttled")
 
 // TokenManager owns an OpenBao client's token lifecycle: it logs in once at
 // construction, then runs a background goroutine that proactively renews the
@@ -69,6 +81,10 @@ type TokenManager struct {
 
 	mu      sync.Mutex // serialises login/watcher swaps
 	watcher *api.LifetimeWatcher
+	// lastLogin is when the most recent login attempt started, successful or
+	// not; Reauth refuses to start another within minReauthInterval of it.
+	// Guarded by mu.
+	lastLogin time.Time
 
 	doneCh chan struct{} // closed once the background loop has exited
 }
@@ -103,6 +119,7 @@ func NewTokenManager(ctx context.Context, cfg Config) (*TokenManager, error) {
 
 	loginCtx, loginCancel := context.WithTimeout(tmCtx, tm.loginTimeout)
 	defer loginCancel()
+	tm.lastLogin = time.Now()
 	secret, err := tm.login(loginCtx)
 	if err != nil {
 		cancel()
@@ -189,7 +206,9 @@ func newLoginFunc(client *api.Client, cfg Config) (func(ctx context.Context) (*a
 // starts it once, then keeps selecting on RenewCh (proactive renewals, which
 // don't change the underlying watcher) until DoneCh fires (renewal ended for
 // any reason), at which point it re-authenticates and loops to start a fresh
-// watcher around the new secret. Exits when Close cancels tm.ctx.
+// watcher around the new secret — unless a request-path Reauth has already
+// done so, in which case it starts that watcher instead of logging in again.
+// Exits when Close cancels tm.ctx.
 func (tm *TokenManager) run() {
 	defer close(tm.doneCh)
 	var lastWatch time.Time
@@ -214,6 +233,19 @@ func (tm *TokenManager) run() {
 
 		if !tm.watchOne(watcher) {
 			return
+		}
+
+		// A request-path Reauth stops the watcher it replaces, which is what
+		// ended this one. It has already logged in and left a fresh watcher in
+		// tm.watcher, so start that rather than logging in a second time — and
+		// start it now: the throttle above guards against a watcher that ends
+		// on its own, and Reauth is throttled already.
+		tm.mu.Lock()
+		swapped := tm.watcher != watcher
+		tm.mu.Unlock()
+		if swapped {
+			lastWatch = time.Time{}
+			continue
 		}
 
 		attempts := 0
@@ -289,10 +321,15 @@ func (tm *TokenManager) watchOne(watcher *api.LifetimeWatcher) bool {
 func (tm *TokenManager) reauthAndRewatch(ctx context.Context) error {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
+	return tm.reauthLocked(ctx)
+}
 
+// reauthLocked is reauthAndRewatch's body; the caller holds tm.mu.
+func (tm *TokenManager) reauthLocked(ctx context.Context) error {
 	loginCtx, cancel := context.WithTimeout(ctx, tm.loginTimeout)
 	defer cancel()
 
+	tm.lastLogin = time.Now()
 	secret, err := tm.login(loginCtx)
 	if err != nil {
 		return err
@@ -309,17 +346,37 @@ func (tm *TokenManager) reauthAndRewatch(ctx context.Context) error {
 	return nil
 }
 
-// Reauth forces an immediate re-authentication, bypassing the proactive
-// renewal schedule. Callers use this when a Transit request itself fails
-// with 403 (token revoked out-of-band, clock skew causing early expiry,
-// etc.) so the CA recovers within a single retried request rather than
-// waiting for the background watcher to notice on its own schedule.
+// Reauth re-authenticates ahead of the proactive renewal schedule. Callers use
+// this when a Transit request fails with 403 (token revoked out-of-band, clock
+// skew causing early expiry, etc.) so the CA recovers within a single retried
+// request rather than waiting for the background watcher to notice.
+//
+// rejected is the token the failed request was sent with. If the client
+// already holds a different one, another request or the background loop has
+// re-authenticated since, and Reauth returns nil without logging in so the
+// caller simply retries — which is what keeps a burst of concurrent 403s to a
+// single login.
+//
+// Otherwise it logs in, unless the previous login attempt of any kind started
+// less than minReauthInterval ago. Then it returns an error wrapping
+// ErrReauthThrottled straight away rather than waiting: a token that was
+// minted moments ago and is already refused points at policy, not at the
+// token, and another login would not help.
 //
 // Note this races with (and may duplicate work done by) run()'s own
-// re-authentication if both trigger around the same time; reauthAndRewatch's
-// lock makes that safe, just occasionally redundant.
-func (tm *TokenManager) Reauth(ctx context.Context) error {
-	return tm.reauthAndRewatch(ctx)
+// re-authentication if both trigger around the same time; tm.mu makes that
+// safe, just occasionally redundant.
+func (tm *TokenManager) Reauth(ctx context.Context, rejected string) error {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.client.Token() != rejected {
+		return nil
+	}
+	if since := time.Since(tm.lastLogin); since < minReauthInterval {
+		return fmt.Errorf("%w: the previous login attempt was %s ago, and the minimum interval is %s",
+			ErrReauthThrottled, since.Round(time.Second), minReauthInterval)
+	}
+	return tm.reauthLocked(ctx)
 }
 
 // Client returns the managed OpenBao client. Its token is kept current by

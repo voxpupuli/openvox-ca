@@ -467,7 +467,9 @@ func TestKubernetesAuth_RereadsJWTOnEveryLogin(t *testing.T) {
 	if err := os.WriteFile(jwtFile, []byte("jwt-v2"), 0o600); err != nil {
 		t.Fatalf("rotating jwt file: %v", err)
 	}
-	if err := tm.Reauth(ctx); err != nil {
+	// Past the request-path throttle, as a 403 arriving later would be.
+	openbao.ExpireReauthThrottleForTest(tm)
+	if err := tm.Reauth(ctx, tm.Client().Token()); err != nil {
 		t.Fatalf("Reauth: %v", err)
 	}
 
@@ -524,6 +526,9 @@ func TestSign_ReactiveReauthOn403(t *testing.T) {
 	if err := os.WriteFile(tokenFile, []byte("token-v2"), 0o600); err != nil {
 		t.Fatalf("rotating token file: %v", err)
 	}
+	// The revocation comes later than the request-path throttle allows; the
+	// initial login was moments ago.
+	openbao.ExpireReauthThrottleForTest(tm)
 
 	digest := sha256.Sum256([]byte("recovers after revocation"))
 	sig, err := signer.Sign(nil, digest[:], crypto.SHA256)
@@ -840,7 +845,7 @@ func signTestServer(t *testing.T, signHandler http.HandlerFunc) *httptest.Server
 	return httptest.NewServer(mux)
 }
 
-func signTestSigner(t *testing.T, srv *httptest.Server) crypto.Signer {
+func signTestSigner(t *testing.T, srv *httptest.Server) (crypto.Signer, *openbao.TokenManager) {
 	t.Helper()
 	cfg := openbao.Config{
 		Addr:                srv.URL,
@@ -858,7 +863,7 @@ func signTestSigner(t *testing.T, srv *httptest.Server) crypto.Signer {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	return signer
+	return signer, tm
 }
 
 func TestSign_EmptyResponseSurfacesError(t *testing.T) {
@@ -868,7 +873,7 @@ func TestSign_EmptyResponseSurfacesError(t *testing.T) {
 	})
 	defer srv.Close()
 
-	signer := signTestSigner(t, srv)
+	signer, _ := signTestSigner(t, srv)
 	digest := sha256.Sum256([]byte("x"))
 	if _, err := signer.Sign(nil, digest[:], crypto.SHA256); err == nil {
 		t.Fatalf("Sign returned no error for a signatureless response")
@@ -911,7 +916,9 @@ func TestSign_ReauthFailureSurfacesError(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	signer := signTestSigner(t, srv)
+	signer, tm := signTestSigner(t, srv)
+	// Past the request-path throttle, or Reauth would decline without trying.
+	openbao.ExpireReauthThrottleForTest(tm)
 	digest := sha256.Sum256([]byte("x"))
 	if _, err := signer.Sign(nil, digest[:], crypto.SHA256); err == nil {
 		t.Fatalf("Sign returned no error when both sign and re-auth failed")

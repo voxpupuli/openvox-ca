@@ -476,6 +476,14 @@ request that hits a `403` triggers the same re-authentication immediately,
 rather than waiting for the background renewal check, so a revoked token is
 recovered from within a single retried request.
 
+That request-path re-authentication is rate-limited: it only logs in if the
+previous login attempt was at least 30 seconds ago. Inside that window the
+request fails with its `403` and an error saying re-authentication was
+throttled, rather than waiting. This stops a `403` that a new login cannot
+cure, such as a policy that no longer grants Transit access, from turning every
+signing attempt into a login against OpenBao and an entry in its audit log.
+Concurrent requests refused with the same token cause one login between them.
+
 The projected ServiceAccount JWT is read from disk on every login attempt
 rather than cached across the process lifetime: Kubernetes bound
 ServiceAccount tokens are short-lived (default 1 hour) and kubelet rewrites
@@ -567,7 +575,9 @@ local-key custody, where the CA can sign with no external dependency at all.
   its `max_ttl`; `openvox-ca` re-authenticates and retries automatically, so
   transient `403`s that recover are expected. Persistent `403`s point at a
   policy/role problem or a `secret_id`/token that can no longer be renewed at
-  the source.
+  the source. While one persists, most issuance errors say re-authentication
+  was throttled: `openvox-ca` logs in again at most once every 30 seconds for
+  a `403`. See [token lifecycle](#token-lifecycle).
 - **What to monitor.** Because OpenBao availability is now on the CA's
   critical path, alert on OpenBao reachability/health from the CA hosts and on
   certificate-issuance error rates. Watch OCSP request rates too, if `/ocsp` is
