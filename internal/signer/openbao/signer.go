@@ -66,9 +66,10 @@ func (s *Signer) Public() crypto.PublicKey {
 
 // Sign proxies the signing operation to OpenBao Transit. rand is ignored;
 // randomness is provided by OpenBao. On a 403 (token revoked out-of-band,
-// clock skew, etc.) it forces a re-authentication via the TokenManager and
-// retries once before surfacing the error — the CA recovers within a single
-// retried request rather than waiting for the background renewal loop.
+// clock skew, etc.) it re-authenticates via the TokenManager and retries once
+// before surfacing the error — the CA recovers within a single retried request
+// rather than waiting for the background renewal loop. That re-authentication
+// is rate-limited; see withReauth.
 //
 // crypto.Signer.Sign carries no context, so each network op — the Transit
 // sign round trip plus any reactive re-authentication and single retry, which
@@ -95,17 +96,24 @@ func (s *Signer) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) ([]byt
 }
 
 // withReauth runs op; if it fails with a 403 (token revoked out-of-band,
-// clock skew causing early expiry, etc.) it forces an immediate
-// re-authentication via the TokenManager and retries op once, so the CA
-// recovers within a single request rather than waiting for the background
-// renewal loop to notice. Non-403 errors, and the outcome of the retry, are
-// returned unchanged.
+// clock skew causing early expiry, etc.) it asks the TokenManager to
+// re-authenticate and retries op once, so the CA recovers within a single
+// request rather than waiting for the background renewal loop to notice.
+// Non-403 errors, and the outcome of the retry, are returned unchanged.
+//
+// Reauth is rate-limited (see TokenManager.Reauth). When it declines, the
+// request fails with its 403 and an error saying re-authentication was
+// throttled, without a retry.
 func (s *Signer) withReauth(ctx context.Context, op func() error) error {
+	sentWith := s.tm.Client().Token()
 	err := op()
 	if err == nil || !isPermissionDenied(err) {
 		return err
 	}
-	if reauthErr := s.tm.Reauth(ctx); reauthErr != nil {
+	if reauthErr := s.tm.Reauth(ctx, sentWith); reauthErr != nil {
+		if errors.Is(reauthErr, ErrReauthThrottled) {
+			return fmt.Errorf("request failed (%w) and was not retried: %w", err, reauthErr)
+		}
 		return fmt.Errorf("request failed (%w) and re-authentication failed: %w", err, reauthErr)
 	}
 	return op()

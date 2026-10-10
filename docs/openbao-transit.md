@@ -83,7 +83,9 @@ EOF
 ```
 
 This is the minimum `openvox-ca` needs at steady state: sign with the key,
-and read its public component. It deliberately excludes `create`, so this
+and read its public component. It works alongside OpenBao's built-in `default`
+policy, which lets the token renew and revoke itself; see
+[token lifecycle](#token-lifecycle). It deliberately excludes `create`, so this
 policy alone cannot be used to provision the key — see "Convenience" below
 if you want that instead.
 
@@ -476,6 +478,30 @@ request that hits a `403` triggers the same re-authentication immediately,
 rather than waiting for the background renewal check, so a revoked token is
 recovered from within a single retried request.
 
+That request-path re-authentication is rate-limited: it only logs in if the
+previous login attempt was at least 30 seconds ago. Inside that window the
+request fails with its `403` and an error saying re-authentication was
+throttled, rather than waiting. This stops a `403` that a new login cannot
+cure, such as a policy that no longer grants Transit access, from turning every
+signing attempt into a login against OpenBao and an entry in its audit log.
+Concurrent requests refused with the same token cause one login between them.
+
+On shutdown, `openvox-ca` revokes the token it currently holds, if it logged in
+for it with AppRole or Kubernetes auth, so a stopped or replaced process does
+not leave that token usable for the rest of its TTL. Tokens replaced earlier by
+a re-login are not revoked; they expire with their own TTL. Revocation uses
+`auth/token/revoke-self`, and renewal uses `auth/token/renew-self`, both of
+which OpenBao's built-in `default` policy grants. If your role sets
+`token_no_default_policy`, grant `update` on both paths in the role's policy.
+Without `renew-self` the token is never renewed, and `openvox-ca` logs in again
+about once per token TTL; without `revoke-self` the token stays valid until it
+expires. A revocation that fails or takes more
+than 2 seconds is logged as a warning and does not delay shutdown further. A
+token read from `openbao.token_file` is never revoked: it belongs to whoever
+issued it, and may be shared with other processes. Nor is a batch token, from a
+role that sets `token_type=batch`: OpenBao cannot revoke one, so it is left to
+expire.
+
 The projected ServiceAccount JWT is read from disk on every login attempt
 rather than cached across the process lifetime: Kubernetes bound
 ServiceAccount tokens are short-lived (default 1 hour) and kubelet rewrites
@@ -567,7 +593,9 @@ local-key custody, where the CA can sign with no external dependency at all.
   its `max_ttl`; `openvox-ca` re-authenticates and retries automatically, so
   transient `403`s that recover are expected. Persistent `403`s point at a
   policy/role problem or a `secret_id`/token that can no longer be renewed at
-  the source.
+  the source. While one persists, most issuance errors say re-authentication
+  was throttled: `openvox-ca` logs in again at most once every 30 seconds for
+  a `403`. See [token lifecycle](#token-lifecycle).
 - **What to monitor.** Because OpenBao availability is now on the CA's
   critical path, alert on OpenBao reachability/health from the CA hosts and on
   certificate-issuance error rates. Watch OCSP request rates too, if `/ocsp` is

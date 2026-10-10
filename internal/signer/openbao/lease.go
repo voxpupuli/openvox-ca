@@ -19,6 +19,7 @@ package openbao
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -34,28 +35,58 @@ import (
 const reauthRetryInterval = 5 * time.Second
 
 // minReauthInterval is the minimum spacing between successive background
-// watcher (re)starts. It bounds the pathological case where a token's
+// watcher (re)starts, other than starting a watcher a request-path Reauth has
+// just built (see run). It bounds the pathological case where a token's
 // LifetimeWatcher ends the instant it starts — e.g. a non-renewable token
 // with no expiry (TTL 0), which has nothing to wait for — so run()
 // re-authenticates on a steady cadence instead of busy-looping requests at
 // OpenBao. A healthy token renews for far longer than this, so the throttle
 // only ever engages when a watcher keeps ending immediately.
+//
+// It is also the minimum spacing between a request-path Reauth and the
+// previous login attempt of any kind. A persistent 403 — a policy that no
+// longer grants Transit access, say — is not cured by logging in again, and
+// without this every signing attempt would become a fresh login against
+// OpenBao and a fresh entry in its audit log.
 const minReauthInterval = 30 * time.Second
+
+// revokeTimeout bounds Close's best-effort revocation of a token this process
+// minted. It is deliberately much shorter than the launcher's 5-second budget
+// for a surviving child, so an unreachable OpenBao cannot spend that budget on
+// the revocation. It bounds the revocation alone: Close first waits for any
+// request-path re-login already in flight, which loginTimeout bounds.
+const revokeTimeout = 2 * time.Second
+
+// ErrReauthThrottled is returned (wrapped) by Reauth when the previous login
+// attempt was less than minReauthInterval ago. The request that saw the 403
+// fails with it rather than waiting the interval out.
+var ErrReauthThrottled = errors.New("OpenBao re-authentication throttled")
+
+// errTokenManagerClosed is returned by Reauth after Close. Logging in then
+// would mint a token that nothing will ever revoke.
+var errTokenManagerClosed = errors.New("OpenBao token manager is closed")
 
 // TokenManager owns an OpenBao client's token lifecycle: it logs in once at
 // construction, then runs a background goroutine that proactively renews the
 // token via the SDK's LifetimeWatcher and, when renewal ends (expiry,
 // revocation, hitting max_ttl, or a persistent error), immediately
-// re-authenticates from source credentials rather than giving up. Sign/Public
-// callers can also force an immediate re-authentication via Reauth when a
-// request fails with 403, so a token revoked out-of-band is recovered from
-// without waiting for the watcher to notice.
+// re-authenticates from source credentials rather than giving up. Sign can
+// also ask for a re-authentication ahead of schedule via Reauth when a request
+// fails with 403 (rate-limited; see Reauth), so a token revoked out-of-band is
+// recovered from without waiting for the watcher to notice.
 //
 // This is the piece that specifically avoids the failure mode of reading an
 // OpenBao token once at startup and never refreshing or re-deriving it.
 type TokenManager struct {
 	client *api.Client
 	login  func(ctx context.Context) (*api.Secret, error)
+
+	// ownsToken reports whether login mints the token (AppRole, Kubernetes),
+	// as opposed to adopting one the operator supplied (token file). Only a
+	// minted token is this process's to revoke: an operator's token may be
+	// shared with other processes or replicas, and revoking it at shutdown
+	// would cut every one of them off.
+	ownsToken bool
 
 	// loginTimeout bounds a single login/renew round trip (and, via
 	// Signer.Sign, a single Transit sign round trip). Captured from
@@ -69,6 +100,22 @@ type TokenManager struct {
 
 	mu      sync.Mutex // serialises login/watcher swaps
 	watcher *api.LifetimeWatcher
+	// lastLogin is when the most recent login attempt started, successful or
+	// not; Reauth refuses to start another within minReauthInterval of it.
+	// Guarded by mu.
+	lastLogin time.Time
+	// lastLoginErr is how that attempt failed, or nil if it succeeded. A
+	// throttled Reauth reports it, because while the source credential is
+	// bad every request is throttled by the background loop's own retries,
+	// and the throttle alone would hide why. Guarded by mu.
+	lastLoginErr error
+	// revocable reports whether the current token can be revoked. OpenBao
+	// gives every service token an accessor and never a batch token, and
+	// refuses revoke-self for a batch token, so Close does not try one.
+	// Guarded by mu.
+	revocable bool
+	// closed is set by Close, under mu, before it revokes the token.
+	closed bool
 
 	doneCh chan struct{} // closed once the background loop has exited
 }
@@ -86,7 +133,7 @@ func NewTokenManager(ctx context.Context, cfg Config) (*TokenManager, error) {
 		return nil, err
 	}
 
-	loginFn, err := newLoginFunc(client, cfg)
+	loginFn, ownsToken, err := newLoginFunc(client, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -95,6 +142,7 @@ func NewTokenManager(ctx context.Context, cfg Config) (*TokenManager, error) {
 	tm := &TokenManager{
 		client:       client,
 		login:        loginFn,
+		ownsToken:    ownsToken,
 		loginTimeout: cfg.loginTimeout(),
 		ctx:          tmCtx,
 		cancel:       cancel,
@@ -103,11 +151,13 @@ func NewTokenManager(ctx context.Context, cfg Config) (*TokenManager, error) {
 
 	loginCtx, loginCancel := context.WithTimeout(tmCtx, tm.loginTimeout)
 	defer loginCancel()
+	tm.lastLogin = time.Now()
 	secret, err := tm.login(loginCtx)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("initial OpenBao login failed: %w", err)
 	}
+	tm.revocable = hasAccessor(secret)
 
 	watcher, err := client.NewLifetimeWatcher(&api.LifetimeWatcherInput{Secret: secret})
 	if err != nil {
@@ -120,13 +170,17 @@ func NewTokenManager(ctx context.Context, cfg Config) (*TokenManager, error) {
 	return tm, nil
 }
 
-// newLoginFunc returns the auth-method-specific login step. AppRole and
-// Kubernetes go through a fresh AuthMethod (see authMethodFactory) and
-// client.Auth().Login, which also sets the client's token on success. Token
-// auth has no /login exchange: it reads the token file directly, sets it on
-// the client, and looks itself up to obtain lease/renewable metadata for the
-// LifetimeWatcher.
-func newLoginFunc(client *api.Client, cfg Config) (func(ctx context.Context) (*api.Secret, error), error) {
+// newLoginFunc returns the auth-method-specific login step, and whether the
+// tokens it yields are minted by this process (see TokenManager.ownsToken).
+// AppRole and Kubernetes go through a fresh AuthMethod (see
+// authMethodFactory) and client.Auth().Login, which also sets the client's
+// token on success. Token auth has no /login exchange: it reads the token
+// file directly, sets it on the client, and looks itself up to obtain
+// lease/renewable metadata for the LifetimeWatcher.
+//
+// Each case states ownership explicitly, so a method added later has to
+// decide rather than inherit revocation by default.
+func newLoginFunc(client *api.Client, cfg Config) (func(ctx context.Context) (*api.Secret, error), bool, error) {
 	switch cfg.AuthMethod {
 	case AuthToken:
 		tokenFile := cfg.TokenFile
@@ -163,11 +217,11 @@ func newLoginFunc(client *api.Client, cfg Config) (func(ctx context.Context) (*a
 					Renewable:     renewable,
 				},
 			}, nil
-		}, nil
+		}, false, nil
 	case AuthAppRole, AuthKubernetes:
 		factory, err := newAuthMethodFactory(cfg)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		return func(ctx context.Context) (*api.Secret, error) {
 			method, err := factory()
@@ -179,9 +233,9 @@ func newLoginFunc(client *api.Client, cfg Config) (func(ctx context.Context) (*a
 				return nil, fmt.Errorf("logging in to OpenBao: %w", err)
 			}
 			return secret, nil
-		}, nil
+		}, true, nil
 	default:
-		return nil, fmt.Errorf("unknown openbao.auth_method %q", cfg.AuthMethod)
+		return nil, false, fmt.Errorf("unknown openbao.auth_method %q", cfg.AuthMethod)
 	}
 }
 
@@ -189,14 +243,18 @@ func newLoginFunc(client *api.Client, cfg Config) (func(ctx context.Context) (*a
 // starts it once, then keeps selecting on RenewCh (proactive renewals, which
 // don't change the underlying watcher) until DoneCh fires (renewal ended for
 // any reason), at which point it re-authenticates and loops to start a fresh
-// watcher around the new secret. Exits when Close cancels tm.ctx.
+// watcher around the new secret — unless a request-path Reauth has already
+// done so, in which case it starts that watcher instead of logging in again.
+// Exits when Close cancels tm.ctx.
 func (tm *TokenManager) run() {
 	defer close(tm.doneCh)
 	var lastWatch time.Time
 	for {
 		// Never (re)start a watcher more often than minReauthInterval, so a
 		// watcher that ends immediately (see minReauthInterval) throttles into
-		// a steady re-auth cadence rather than a busy loop.
+		// a steady re-auth cadence rather than a busy loop. The one exception
+		// is a watcher a request-path Reauth swapped in, which starts at once;
+		// Reauth's own throttle bounds how often that can happen.
 		if !lastWatch.IsZero() {
 			if wait := minReauthInterval - time.Since(lastWatch); wait > 0 {
 				if !sleepOrDone(tm.ctx, wait) {
@@ -212,8 +270,28 @@ func (tm *TokenManager) run() {
 
 		go watcher.Start()
 
-		if !tm.watchOne(watcher) {
+		ended, doneErr := tm.watchOne(watcher)
+		if !ended {
 			return
+		}
+
+		// A request-path Reauth stops the watcher it replaces, which is what
+		// ended this one. It has already logged in and left a fresh watcher in
+		// tm.watcher, so start that rather than logging in a second time — and
+		// start it now: the throttle above guards against a watcher that ends
+		// on its own, and Reauth is throttled already.
+		tm.mu.Lock()
+		swapped := tm.watcher != watcher
+		tm.mu.Unlock()
+		if swapped {
+			slog.Debug("OpenBao token replaced by a request-path re-login, renewing the new one")
+			lastWatch = time.Time{}
+			continue
+		}
+		if doneErr != nil {
+			slog.Warn("OpenBao token renewal ended, re-authenticating", "error", doneErr)
+		} else {
+			slog.Info("OpenBao token renewal window closed, re-authenticating")
 		}
 
 		attempts := 0
@@ -260,24 +338,20 @@ func sleepOrDone(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// watchOne selects on watcher's channels until either DoneCh fires (returns
-// true: caller should re-authenticate and start a new watcher) or tm.ctx is
-// cancelled (returns false: caller should exit).
-func (tm *TokenManager) watchOne(watcher *api.LifetimeWatcher) bool {
+// watchOne selects on watcher's channels until either DoneCh fires (ended is
+// true, and doneErr is whatever the watcher ended with) or tm.ctx is cancelled
+// (ended is false: the caller should exit). It leaves logging the end to run,
+// which alone knows whether a request-path Reauth caused it.
+func (tm *TokenManager) watchOne(watcher *api.LifetimeWatcher) (ended bool, doneErr error) {
 	for {
 		select {
 		case <-tm.ctx.Done():
 			watcher.Stop()
-			return false
+			return false, nil
 		case renewal := <-watcher.RenewCh():
 			slog.Debug("OpenBao token renewed", "lease_duration", renewal.Secret.LeaseDuration)
 		case err := <-watcher.DoneCh():
-			if err != nil {
-				slog.Warn("OpenBao token renewal ended, re-authenticating", "error", err)
-			} else {
-				slog.Info("OpenBao token renewal window closed, re-authenticating")
-			}
-			return true
+			return true, err
 		}
 	}
 }
@@ -289,14 +363,21 @@ func (tm *TokenManager) watchOne(watcher *api.LifetimeWatcher) bool {
 func (tm *TokenManager) reauthAndRewatch(ctx context.Context) error {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
+	return tm.reauthLocked(ctx)
+}
 
+// reauthLocked is reauthAndRewatch's body; the caller holds tm.mu.
+func (tm *TokenManager) reauthLocked(ctx context.Context) error {
 	loginCtx, cancel := context.WithTimeout(ctx, tm.loginTimeout)
 	defer cancel()
 
+	tm.lastLogin = time.Now()
 	secret, err := tm.login(loginCtx)
+	tm.lastLoginErr = err
 	if err != nil {
 		return err
 	}
+	tm.revocable = hasAccessor(secret)
 
 	if tm.watcher != nil {
 		tm.watcher.Stop()
@@ -309,17 +390,45 @@ func (tm *TokenManager) reauthAndRewatch(ctx context.Context) error {
 	return nil
 }
 
-// Reauth forces an immediate re-authentication, bypassing the proactive
-// renewal schedule. Callers use this when a Transit request itself fails
-// with 403 (token revoked out-of-band, clock skew causing early expiry,
-// etc.) so the CA recovers within a single retried request rather than
-// waiting for the background watcher to notice on its own schedule.
+// Reauth re-authenticates ahead of the proactive renewal schedule. Callers use
+// this when a Transit request fails with 403 (token revoked out-of-band, clock
+// skew causing early expiry, etc.) so the CA recovers within a single retried
+// request rather than waiting for the background watcher to notice.
+//
+// rejected is the token the failed request was sent with. If the client
+// already holds a different one, another request or the background loop has
+// re-authenticated since, and Reauth returns nil without logging in so the
+// caller simply retries — which is what keeps a burst of concurrent 403s to a
+// single login.
+//
+// Otherwise it logs in, unless the previous login attempt of any kind started
+// less than minReauthInterval ago. Then it returns an error wrapping
+// ErrReauthThrottled straight away rather than waiting: a token that was
+// minted moments ago and is already refused points at policy, not at the
+// token, and another login would not help.
 //
 // Note this races with (and may duplicate work done by) run()'s own
-// re-authentication if both trigger around the same time; reauthAndRewatch's
-// lock makes that safe, just occasionally redundant.
-func (tm *TokenManager) Reauth(ctx context.Context) error {
-	return tm.reauthAndRewatch(ctx)
+// re-authentication if both trigger around the same time; tm.mu makes that
+// safe, just occasionally redundant.
+func (tm *TokenManager) Reauth(ctx context.Context, rejected string) error {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.closed {
+		return errTokenManagerClosed
+	}
+	if tm.client.Token() != rejected {
+		return nil
+	}
+	if since := time.Since(tm.lastLogin); since < minReauthInterval {
+		if tm.lastLoginErr != nil {
+			return fmt.Errorf("%w: the previous login attempt, %s ago, failed, and the minimum interval is %s: %w",
+				ErrReauthThrottled, since.Round(time.Second), minReauthInterval, tm.lastLoginErr)
+		}
+		return fmt.Errorf("%w: the previous login attempt was %s ago, and the minimum interval is %s",
+			ErrReauthThrottled, since.Round(time.Second), minReauthInterval)
+	}
+	slog.Info("OpenBao refused a request with 403, re-authenticating")
+	return tm.reauthLocked(ctx)
 }
 
 // Client returns the managed OpenBao client. Its token is kept current by
@@ -328,10 +437,53 @@ func (tm *TokenManager) Client() *api.Client {
 	return tm.client
 }
 
-// Close stops the background renewal loop and the current watcher, and
-// waits for the loop to exit.
+// Close stops the background renewal loop and the current watcher, waits for
+// the loop to exit, and then revokes the current token if this process minted
+// it (see ownsToken), so a stopped or rolled process does not leave that token
+// live for the rest of its TTL. A token an earlier re-login replaced is not
+// revoked here; it expires with its own TTL.
+//
+// Revocation is best effort. It is bounded by revokeTimeout, and a failure is
+// logged at WARN rather than returned: nothing a caller does at shutdown would
+// act on it, and an unreachable OpenBao must not hold up exit. It needs the
+// token's policies to permit auth/token/revoke-self, which OpenBao's built-in
+// default policy does.
+//
+// Close holds tm.mu while it revokes and marks the manager closed first, so a
+// Reauth in flight finishes before the revoke (and its token is the one
+// revoked), and a Reauth after it refuses rather than minting a token nothing
+// would revoke. Calling Close again does nothing.
 func (tm *TokenManager) Close() error {
 	tm.cancel()
 	<-tm.doneCh
+
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.closed {
+		return nil
+	}
+	tm.closed = true
+	if !tm.ownsToken {
+		return nil
+	}
+	if !tm.revocable {
+		slog.Debug("Not revoking the OpenBao token at shutdown: it is a batch token, which OpenBao cannot revoke, so it expires with its TTL")
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), revokeTimeout)
+	defer cancel()
+	if err := tm.client.Auth().Token().RevokeSelfWithContext(ctx, ""); err != nil {
+		slog.Warn("Failed to revoke the OpenBao token at shutdown; it stays valid until its TTL expires",
+			"error", err)
+		return nil
+	}
+	slog.Info("Revoked the OpenBao token at shutdown")
 	return nil
+}
+
+// hasAccessor reports whether a login secret carries a token accessor, which
+// OpenBao issues for every service token and never for a batch token.
+func hasAccessor(secret *api.Secret) bool {
+	return secret != nil && secret.Auth != nil && secret.Auth.Accessor != ""
 }
