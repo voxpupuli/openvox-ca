@@ -107,7 +107,13 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          cache: true
+          # Cold, for the reason release.yml's build job is: a restored
+          # ~/.cache/go-build is not checksum-verified the way the module
+          # cache is, so anything able to write a cache entry on main could
+          # be linked into the mage binary that packages the chart this job
+          # then signs. The price is compiling mage and the magefile from
+          # source on every run, main included.
+          cache: false
       - name: Install Mage
         run: go install github.com/magefile/mage@v1.17.2
 

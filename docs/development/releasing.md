@@ -531,8 +531,9 @@ can work around at release time. Some are worth closing before 1.0; others are
 accepted trade-offs, recorded here so that the limitation is not a surprise
 rather than because anyone intends to fix them. (Two entries that stood here
 previously — unsigned artefacts, and tag builds restoring Go caches saved on
-`main` — were closed together; see [verifying a
-release](#verifying-a-release).)
+`main` — are closed: the first with [signing and
+provenance](#verifying-a-release), the second by building the binaries and
+packaging the chart without restoring a Go cache.)
 
 | Gap | Impact |
 | --- | --- |
