@@ -575,6 +575,19 @@ var _ = Describe("OCSP Responder", func() {
 			Expect(respDER).To(BeNil())
 		})
 
+		// A nonced request skips the cache and always signs, so the check must
+		// not live on the cache path alone.
+		It("refuses another issuer's nonced request", func() {
+			_, foreignCrtPEM, _, err := testutil.GenerateTestCAECDSA()
+			Expect(err).NotTo(HaveOccurred())
+			reqDER, err := testutil.BuildOCSPRequestWithNonce(leaf, decodeCert(foreignCrtPEM), []byte("0123456789abcdef"))
+			Expect(err).NotTo(HaveOccurred())
+
+			respDER, err := myCA.OCSPResponse(context.Background(), reqDER)
+			Expect(err).To(MatchError(ca.ErrNotAuthoritative))
+			Expect(respDER).To(BeNil())
+		})
+
 		// The response's CertID carries the request's hash, so a pre-signed
 		// answer to a SHA-1 request is no answer to a SHA-256 one.
 		It("does not serve a request the cached answer to a different hash", func() {
@@ -592,7 +605,7 @@ var _ = Describe("OCSP Responder", func() {
 		// Eviction is by serial. A pre-signed good left behind under one hash
 		// would vouch for a revoked certificate to every client using it.
 		It("evicts every hash's cached answer when the certificate is revoked", func() {
-			hashes := []crypto.Hash{crypto.SHA1, crypto.SHA256}
+			hashes := []crypto.Hash{crypto.SHA1, crypto.SHA256, crypto.SHA384, crypto.SHA512}
 			for _, hash := range hashes {
 				primeCache(requestFor(myCA.CACert, hash))
 			}

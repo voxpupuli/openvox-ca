@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"slices"
 	"time"
 
 	"golang.org/x/crypto/ocsp"
@@ -66,6 +67,40 @@ const OCSPValidity = 4 * time.Hour
 type ocspCacheEntry struct {
 	der       []byte
 	expiresAt time.Time
+}
+
+// ocspCacheKey names a pre-signed response by serial and by the hash the
+// request used: the response's CertID carries that hash, so an answer to a
+// SHA-1 request is no answer to a SHA-256 one.
+//
+// Flat rather than a map per serial. The usual fleet asks with one hash, and a
+// nested map would allocate a whole map group per cached serial for it.
+type ocspCacheKey struct {
+	serial string
+	hash   crypto.Hash
+}
+
+// ocspCacheHashes is every request hash whose answer may be cached, and so
+// every hash evictOCSPLocked has to drop. It is the set ocsp.ParseRequest
+// accepts today. A hash added to that later is answered but never cached until
+// it is added here too, which costs a signature per request rather than
+// leaving an entry eviction cannot see.
+var ocspCacheHashes = [...]crypto.Hash{crypto.SHA1, crypto.SHA256, crypto.SHA384, crypto.SHA512}
+
+// ocspCacheableHash reports whether an answer to a request hashed with h may
+// be cached; see ocspCacheHashes.
+func ocspCacheableHash(h crypto.Hash) bool {
+	return slices.Contains(ocspCacheHashes[:], h)
+}
+
+// evictOCSPLocked drops every pre-signed response for serial, whichever hash
+// it was asked with. Every eviction goes through here, so the list it walks
+// and the guard on the cache write cannot drift apart. c.mu must be held by
+// the caller.
+func (c *CA) evictOCSPLocked(serial string) {
+	for _, h := range ocspCacheHashes {
+		delete(c.ocspCache, ocspCacheKey{serial: serial, hash: h})
+	}
 }
 
 // oidNonce is the OCSP nonce extension OID (RFC 8954 §2).
@@ -191,7 +226,7 @@ func (c *CA) unindexSerialLocked(serial string) {
 // later should only have to be added here. c.mu must be held by the caller.
 func (c *CA) dropSerialLocked(serial string) {
 	delete(c.serialIndex, serial)
-	delete(c.ocspCache, serial)
+	c.evictOCSPLocked(serial)
 	// Every removal counts, whoever made it. A reconcile whose storage read
 	// predates this one must not re-add what just left, and this is the one
 	// place all removals pass through — which is why the counter lives here
@@ -284,21 +319,41 @@ func (c *CA) AnswerOCSP(ctx context.Context, reqDER []byte) (OCSPAnswer, error) 
 	// lookup, a request naming another issuer would still be handed the
 	// pre-signed answer for whatever this CA holds under that serial. Two short
 	// hashes do not make the read lock worth splitting.
-	c.mu.RLock()
-	caCert, caKey := c.CACert, c.CAKey
-	if err := checkOCSPIssuer(req, caCert); err != nil {
-		c.mu.RUnlock()
+	//
+	// The closure is there for its deferred unlock (docs/development/locking.md
+	// rule 4). The check hashes with an algorithm an unauthenticated caller
+	// picks, and a panic in it — a nil CACert, or crypto/sha1 under
+	// GODEBUG=fips140=only — must cost that one connection, not leave c.mu
+	// read-held for every writer to queue behind.
+	cacheKey := ocspCacheKey{serial: serialHex, hash: req.HashAlgorithm}
+	var (
+		caCert      *x509.Certificate
+		caKey       crypto.Signer
+		known       bool
+		crlSnapshot *x509.RevocationList
+	)
+	hit, err := func() (*OCSPAnswer, error) {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+		caCert, caKey = c.CACert, c.CAKey
+		if err := checkOCSPIssuer(req, caCert); err != nil {
+			return nil, err
+		}
+		if !hasNonce {
+			if entry, ok := c.ocspCache[cacheKey]; ok && time.Now().Before(entry.expiresAt) {
+				return &OCSPAnswer{DER: bytes.Clone(entry.der), MaxAge: time.Until(entry.expiresAt)}, nil
+			}
+		}
+		_, known = c.serialIndex[serialHex]
+		crlSnapshot = c.cachedCRL
+		return nil, nil
+	}()
+	if err != nil {
 		return OCSPAnswer{}, fmt.Errorf("OCSP request for serial %s (%v): %w", serialHex, req.HashAlgorithm, err)
 	}
-	if !hasNonce {
-		if entry, ok := c.ocspCache[serialHex][req.HashAlgorithm]; ok && time.Now().Before(entry.expiresAt) {
-			c.mu.RUnlock()
-			return OCSPAnswer{DER: bytes.Clone(entry.der), MaxAge: time.Until(entry.expiresAt)}, nil
-		}
+	if hit != nil {
+		return *hit, nil
 	}
-	_, known := c.serialIndex[serialHex]
-	crlSnapshot := c.cachedCRL
-	c.mu.RUnlock()
 
 	// From here until the cache write, no CA lock is held. That is the whole of
 	// #197: ocsp.CreateResponse below performs a signature, and under an
@@ -441,7 +496,7 @@ func (c *CA) AnswerOCSP(ctx context.Context, reqDER []byte) (OCSPAnswer, error) 
 	//   - The cache key is the requested serial, which is chosen by an
 	//     unauthenticated caller. Every other status can only be reached for a
 	//     serial this CA issued, so the cache is bounded by the inventory (times
-	//     the four request hashes ocsp.ParseRequest accepts);
+	//     the four hashes in ocspCacheHashes);
 	//     caching unknowns would let anyone who can reach /ocsp grow the map
 	//     without limit, an entry (and a signed response) per made-up serial.
 	//
@@ -500,7 +555,7 @@ func (c *CA) AnswerOCSP(ctx context.Context, reqDER []byte) (OCSPAnswer, error) 
 	// a counter only because it genuinely cannot re-check its own predicate — it
 	// cannot tell "pruned elsewhere" from "issued here since I read".
 	var cached bool
-	if !hasNonce && template.Status != ocsp.Unknown {
+	if !hasNonce && template.Status != ocsp.Unknown && ocspCacheableHash(req.HashAlgorithm) {
 		c.mu.Lock()
 		_, stillKnown := c.serialIndex[serialHex]
 		// statusErr is kept in the condition below rather than handled: it can
@@ -518,12 +573,7 @@ func (c *CA) AnswerOCSP(ctx context.Context, reqDER []byte) (OCSPAnswer, error) 
 		// seam cut into a cache-write guard.
 		stillStatus, stillRevokedAt, statusErr := decideOCSPStatus(c.cachedCRL, req.SerialNumber, stillKnown)
 		if statusErr == nil && stillStatus == template.Status && stillRevokedAt.Equal(template.RevokedAt) {
-			byHash := c.ocspCache[serialHex]
-			if byHash == nil {
-				byHash = make(map[crypto.Hash]ocspCacheEntry, 1)
-				c.ocspCache[serialHex] = byHash
-			}
-			byHash[req.HashAlgorithm] = ocspCacheEntry{
+			c.ocspCache[cacheKey] = ocspCacheEntry{
 				der:       bytes.Clone(respDER),
 				expiresAt: now.Add(OCSPValidity),
 			}

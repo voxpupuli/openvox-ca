@@ -180,10 +180,11 @@ var _ = Describe("serial index epoch guard", func() {
 	It("drops the cached OCSP response alongside the serial it removes", func() {
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		c.ocspCache["AA"] = map[crypto.Hash]ocspCacheEntry{crypto.SHA1: {der: []byte("pre-signed good")}}
+		c.ocspCache[ocspCacheKey{serial: "AA", hash: crypto.SHA1}] = ocspCacheEntry{der: []byte("pre-signed good")}
+		c.ocspCache[ocspCacheKey{serial: "AA", hash: crypto.SHA512}] = ocspCacheEntry{der: []byte("pre-signed good")}
 
 		c.reconcileSerialIndexLocked(map[string]string{}, c.serialIndexEpoch, c.serialIndexRemovalEpoch)
 
-		Expect(c.ocspCache).NotTo(HaveKey("AA"))
+		Expect(c.ocspCache).To(BeEmpty(), "every hash's entry must go with the serial")
 	})
 })

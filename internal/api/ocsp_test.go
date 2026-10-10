@@ -268,7 +268,8 @@ var _ = Describe("OCSP HTTP Handler", func() {
 
 		out := buf.String()
 		Expect(out).To(ContainSubstring(`level=DEBUG msg="OCSP request names an issuer this CA does not answer for"`))
-		Expect(out).To(ContainSubstring("client_ip="))
+		// httptest.NewRequest's RemoteAddr is 192.0.2.1:1234.
+		Expect(out).To(ContainSubstring("client_ip=192.0.2.1"))
 		Expect(out).To(ContainSubstring(strings.ToUpper(cert.SerialNumber.Text(16))))
 		Expect(out).NotTo(ContainSubstring("level=WARN"))
 	})

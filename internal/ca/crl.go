@@ -194,7 +194,7 @@ func (c *CA) invalidateOCSPForNewlyRevokedLocked(previous, current *x509.Revocat
 	for _, entry := range current.RevokedCertificateEntries {
 		key := serialHexStr(entry.SerialNumber)
 		if _, seen := was[key]; !seen {
-			delete(c.ocspCache, key)
+			c.evictOCSPLocked(key)
 		}
 	}
 }
