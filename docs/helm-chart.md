@@ -277,7 +277,8 @@ state is external there is nothing left to serialise on. `podDisruptionBudget` a
 
 The default memory limit is 128Mi, and it is a hard cap. The server's footprint
 grows with the size of the fleet: it keeps a serial index and a cache of
-pre-signed OCSP responses, one entry per known certificate, pruned only on
+pre-signed OCSP responses, one entry per known certificate for each hash
+algorithm OCSP clients ask with (at most four, and usually one), pruned only on
 revocation or expired-certificate cleanup. Crossing the limit is an OOMKill, and
 with the Recreate strategy that persistence-enabled installs default to, that
 is CA downtime. Raise `resources.limits.memory` before a growing inventory

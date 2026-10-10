@@ -282,13 +282,13 @@ func (c *CA) AnswerOCSP(ctx context.Context, reqDER []byte) (OCSPAnswer, error) 
 	// The issuer check comes first, inside the same lock, because the cache key
 	// is the serial and the request hash, not the issuer. Checked after the
 	// lookup, a request naming another issuer would still be handed the
-	// pre-signed answer for whatever this CA holds under that serial. Two short hashes do not make the read lock worth
-	// splitting.
+	// pre-signed answer for whatever this CA holds under that serial. Two short
+	// hashes do not make the read lock worth splitting.
 	c.mu.RLock()
 	caCert, caKey := c.CACert, c.CAKey
 	if err := checkOCSPIssuer(req, caCert); err != nil {
 		c.mu.RUnlock()
-		return OCSPAnswer{}, err
+		return OCSPAnswer{}, fmt.Errorf("OCSP request for serial %s (%v): %w", serialHex, req.HashAlgorithm, err)
 	}
 	if !hasNonce {
 		if entry, ok := c.ocspCache[serialHex][req.HashAlgorithm]; ok && time.Now().Before(entry.expiresAt) {

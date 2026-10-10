@@ -488,6 +488,24 @@ var _ = Describe("OCSP Responder", func() {
 			return reqDER
 		}
 
+		// primeCache answers reqDER twice and proves the second came from the
+		// cache. Comparing the DER alone cannot: the suite key is RSA, whose
+		// PKCS#1 v1.5 signatures are deterministic, and the response times are
+		// encoded to the second, so two fresh signatures a moment apart are
+		// byte-identical. A hit is told apart by its MaxAge, which counts down
+		// from the stored expiry, where a fresh answer carries the full window.
+		primeCache := func(reqDER []byte) []byte {
+			GinkgoHelper()
+			first, err := myCA.AnswerOCSP(context.Background(), reqDER)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(first.MaxAge).To(Equal(ca.OCSPValidity), "the first answer must be freshly signed and stored")
+			second, err := myCA.AnswerOCSP(context.Background(), reqDER)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(second.MaxAge).To(BeNumerically("<", first.MaxAge), "the second answer must be a cache hit")
+			Expect(second.DER).To(Equal(first.DER))
+			return first.DER
+		}
+
 		BeforeEach(func() {
 			csrPEM, err := testutil.GenerateCSR("ocsp-issuer-node")
 			Expect(err).NotTo(HaveOccurred())
@@ -542,15 +560,11 @@ var _ = Describe("OCSP Responder", func() {
 			Expect(err).To(MatchError(ca.ErrNotAuthoritative))
 		})
 
-		// The cache is keyed by serial alone, so a check made after the lookup
-		// would hand a foreign issuer's request this CA's pre-signed answer.
+		// The cache is keyed by serial and request hash, not by issuer, so a
+		// check made after the lookup would hand a foreign issuer's request this
+		// CA's pre-signed answer.
 		It("refuses another issuer's request even when this serial's answer is cached", func() {
-			own := requestFor(myCA.CACert, crypto.SHA1)
-			first, err := myCA.OCSPResponse(context.Background(), own)
-			Expect(err).NotTo(HaveOccurred())
-			second, err := myCA.OCSPResponse(context.Background(), own)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(second).To(Equal(first), "the matching answer must be cached before the foreign request")
+			primeCache(requestFor(myCA.CACert, crypto.SHA1))
 
 			_, foreignCrtPEM, _, err := testutil.GenerateTestCAECDSA()
 			Expect(err).NotTo(HaveOccurred())
@@ -564,19 +578,15 @@ var _ = Describe("OCSP Responder", func() {
 		// The response's CertID carries the request's hash, so a pre-signed
 		// answer to a SHA-1 request is no answer to a SHA-256 one.
 		It("does not serve a request the cached answer to a different hash", func() {
-			_, err := myCA.OCSPResponse(context.Background(), requestFor(myCA.CACert, crypto.SHA1))
-			Expect(err).NotTo(HaveOccurred())
+			primeCache(requestFor(myCA.CACert, crypto.SHA1))
 
-			sha256Req := requestFor(myCA.CACert, crypto.SHA256)
-			respDER, err := myCA.OCSPResponse(context.Background(), sha256Req)
-			Expect(err).NotTo(HaveOccurred())
+			// primeCache's first call asserts a fresh signature, so the SHA-256
+			// request cannot have been served the SHA-1 entry; its second asserts
+			// the SHA-256 answer is then cached in its own right.
+			respDER := primeCache(requestFor(myCA.CACert, crypto.SHA256))
 			resp, err := xocsp.ParseResponse(respDER, myCA.CACert)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(resp.IssuerHash).To(Equal(crypto.SHA256))
-
-			again, err := myCA.OCSPResponse(context.Background(), sha256Req)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(again).To(Equal(respDER), "the SHA-256 answer must be cached in its own right")
 		})
 
 		// Eviction is by serial. A pre-signed good left behind under one hash
@@ -584,11 +594,7 @@ var _ = Describe("OCSP Responder", func() {
 		It("evicts every hash's cached answer when the certificate is revoked", func() {
 			hashes := []crypto.Hash{crypto.SHA1, crypto.SHA256}
 			for _, hash := range hashes {
-				first, err := myCA.OCSPResponse(context.Background(), requestFor(myCA.CACert, hash))
-				Expect(err).NotTo(HaveOccurred())
-				second, err := myCA.OCSPResponse(context.Background(), requestFor(myCA.CACert, hash))
-				Expect(err).NotTo(HaveOccurred())
-				Expect(second).To(Equal(first), "%v's good must be cached before the revocation", hash)
+				primeCache(requestFor(myCA.CACert, hash))
 			}
 
 			Expect(myCA.Revoke(context.Background(), "ocsp-issuer-node")).To(Succeed())
@@ -618,6 +624,41 @@ var _ = Describe("OCSP Responder", func() {
 			Expect(errors.Is(err, ca.ErrNotAuthoritative)).To(BeFalse())
 			Expect(errors.Is(err, ca.ErrInternal)).To(BeFalse())
 		})
+	})
+
+	// An imported chain's ancestors are other CAs. The responder answers for
+	// the certificate this CA signs with, which is the first in the bundle, and
+	// not for the root above it.
+	It("answers for an imported intermediate but not for the root above it", func() {
+		ctx := context.Background()
+		chain, err := testutil.GenerateTestChain("unused.example.com")
+		Expect(err).NotTo(HaveOccurred())
+		store := storage.New(GinkgoT().TempDir())
+		Expect(ca.ImportCA(ctx, store, chain.Bundle, chain.InterKeyPEM, nil)).To(Succeed())
+		imported := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		Expect(imported.Init(ctx)).To(Succeed())
+		Expect(imported.CACert.Subject.CommonName).To(Equal("Test Intermediate CA"))
+
+		csrPEM, err := testutil.GenerateCSR("ocsp-chain-node")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = imported.SaveRequest(ctx, "ocsp-chain-node", csrPEM)
+		Expect(err).NotTo(HaveOccurred())
+		certPEM, err := imported.Sign(ctx, "ocsp-chain-node")
+		Expect(err).NotTo(HaveOccurred())
+		leaf := decodeCert(certPEM)
+
+		viaIntermediate, err := xocsp.CreateRequest(leaf, imported.CACert, nil)
+		Expect(err).NotTo(HaveOccurred())
+		respDER, err := imported.OCSPResponse(ctx, viaIntermediate)
+		Expect(err).NotTo(HaveOccurred())
+		resp, err := xocsp.ParseResponse(respDER, imported.CACert)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.Status).To(Equal(xocsp.Good))
+
+		viaRoot, err := xocsp.CreateRequest(leaf, chain.RootCert, nil)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = imported.OCSPResponse(ctx, viaRoot)
+		Expect(err).To(MatchError(ca.ErrNotAuthoritative))
 	})
 
 	// --- Error handling ---

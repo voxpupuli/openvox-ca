@@ -92,6 +92,13 @@ func (s *Server) handleOCSP(w http.ResponseWriter, r *http.Request) {
 			// are asking it.
 			slog.Debug("OCSP response shed: CA signing concurrency limit reached",
 				"client_ip", clientIP(r))
+		case http.StatusForbidden:
+			// Debug for the shed's reason: the caller decides how often this
+			// fires. The client is already told — its `unauthorized` is where a
+			// misconfigured -issuer surfaces — so this line only adds which
+			// client sent it, and the error carries the serial and hash.
+			slog.Debug("OCSP request names an issuer this CA does not answer for",
+				"error", err, "client_ip", clientIP(r))
 		default:
 			slog.Warn("OCSP request error", "error", err)
 		}

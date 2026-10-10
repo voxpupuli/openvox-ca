@@ -369,7 +369,8 @@ envFrom: []
 
 # 128Mi is a hard cap, and the server's footprint grows with the size of the
 # fleet: it holds a serial index and a cache of pre-signed OCSP responses, one
-# entry per known certificate, pruned only on revocation or expired-cert
+# entry per known certificate for each hash algorithm OCSP clients ask with (at
+# most four, and usually one), pruned only on revocation or expired-cert
 # cleanup. Raise the limit before a growing inventory reaches it — crossing it
 # is an OOMKill, and with the Recreate strategy a persistence-enabled
 # install derives, that is CA downtime.

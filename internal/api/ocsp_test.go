@@ -27,6 +27,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -226,22 +227,50 @@ var _ = Describe("OCSP HTTP Handler", func() {
 
 	// --- Another issuer ---
 
-	It("answers another issuer's request with 403 unauthorized", func() {
-		cert := signCert(myCA, "foreign-issuer-ocsp-node")
+	// foreignIssuerRequest builds a request for a certificate this CA issued,
+	// but naming a freshly generated CA as its issuer.
+	foreignIssuerRequest := func(cert *x509.Certificate) []byte {
+		GinkgoHelper()
 		_, foreignCrtPEM, _, err := testutil.GenerateTestCAECDSA()
 		Expect(err).NotTo(HaveOccurred())
 		block, _ := pem.Decode(foreignCrtPEM)
 		foreign, err := x509.ParseCertificate(block.Bytes)
 		Expect(err).NotTo(HaveOccurred())
+		return ocspReqDER(cert, foreign)
+	}
 
-		reqDER := ocspReqDER(cert, foreign)
-		req := httptest.NewRequest(http.MethodPost, "/ocsp", bytes.NewReader(reqDER))
+	It("answers another issuer's request with 403 unauthorized", func() {
+		cert := signCert(myCA, "foreign-issuer-ocsp-node")
+		req := httptest.NewRequest(http.MethodPost, "/ocsp", bytes.NewReader(foreignIssuerRequest(cert)))
 		rr := httptest.NewRecorder()
 		mux.ServeHTTP(rr, req)
 
 		Expect(rr.Code).To(Equal(http.StatusForbidden))
 		Expect(rr.Header().Get("Content-Type")).To(Equal("application/ocsp-response"))
 		Expect(rr.Body.Bytes()).To(Equal(xocsp.UnauthorizedErrorResponse))
+	})
+
+	// The caller decides how often this fires, so it stays below Warn, as the
+	// shed does; but at Debug it names enough to find the misconfigured client.
+	It("logs another issuer's request at Debug, naming the client and the serial", func() {
+		cert := signCert(myCA, "foreign-issuer-log-node")
+		reqDER := foreignIssuerRequest(cert)
+
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		DeferCleanup(func() { slog.SetDefault(orig) })
+
+		req := httptest.NewRequest(http.MethodPost, "/ocsp", bytes.NewReader(reqDER))
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, req)
+		Expect(rr.Code).To(Equal(http.StatusForbidden))
+
+		out := buf.String()
+		Expect(out).To(ContainSubstring(`level=DEBUG msg="OCSP request names an issuer this CA does not answer for"`))
+		Expect(out).To(ContainSubstring("client_ip="))
+		Expect(out).To(ContainSubstring(strings.ToUpper(cert.SerialNumber.Text(16))))
+		Expect(out).NotTo(ContainSubstring("level=WARN"))
 	})
 
 	// --- Bad request ---
