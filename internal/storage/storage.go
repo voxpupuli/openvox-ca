@@ -296,10 +296,12 @@ func (s *StorageService) InitHMAC(ctx context.Context) error {
 var ErrDuplicateSerial = errors.New("serial number already exists in inventory")
 
 // AppendInventory adds entry (a single inventory.txt line, without a trailing
-// newline) to the inventory. On backends that implement InventoryStore the
-// entry is stored as a structured record and the integrity head is advanced by
-// a hash chain in O(1); otherwise the line is appended to the KeyInventory blob
-// and the whole-blob HMAC is recomputed. Returns ErrDuplicateSerial (wrapped)
+// newline) to the inventory. entry must be in the canonical form that
+// FormatInventoryLine builds; anything else is refused, even if it parses. On
+// backends that implement InventoryStore the entry is stored as a structured
+// record and the integrity head is advanced by a hash chain in O(1); otherwise
+// the line is appended to the KeyInventory blob and the whole-blob HMAC is
+// recomputed. Returns ErrDuplicateSerial (wrapped)
 // if the entry's serial is already present anywhere in the inventory.
 func (s *StorageService) AppendInventory(ctx context.Context, entry string) error {
 	return s.AppendInventoryRecord(ctx, entry, nil)
@@ -319,6 +321,20 @@ func (s *StorageService) AppendInventoryRecord(ctx context.Context, entry string
 	if !ok {
 		return fmt.Errorf("malformed inventory entry %q", entry)
 	}
+	// parseInventoryEntry is lenient: it splits on any run of whitespace and
+	// ignores fields past the fourth, so extra spaces, a trailing field or an
+	// embedded newline all parse. Structured backends store only the parsed
+	// fields, and every verification chains canonicalInventoryLine of them, so
+	// anything else would be chained here in one form and verified in another,
+	// and reported as tampering on the next read. The text that parsing would
+	// discard (a trailing field, or a whole second entry after a newline) would
+	// be lost without a trace. Refuse it at write time instead, on every backend,
+	// so a caller that builds lines without FormatInventoryLine fails here
+	// rather than at the next startup.
+	canonical := canonicalInventoryLine(parsed)
+	if entry != canonical {
+		return fmt.Errorf("non-canonical inventory entry %q (canonical form %q)", entry, canonical)
+	}
 
 	if store, ok := asInventoryStore(s.backend); ok {
 		rec := CertRecord{InventoryEntry: parsed, State: CertStateSigned}
@@ -328,7 +344,10 @@ func (s *StorageService) AppendInventoryRecord(ctx context.Context, entry string
 		var newHead func(prev []byte) []byte
 		if s.hmacKey != nil {
 			key := s.hmacKey
-			newHead = func(prev []byte) []byte { return chainInventoryMAC(key, prev, entry) }
+			// The same function of the same record that verification and
+			// rebuild chain (computeInventoryHMAC, InventoryEntries,
+			// PruneInventory), not the caller's string.
+			newHead = func(prev []byte) []byte { return chainInventoryMAC(key, prev, canonical) }
 		}
 		if err := store.AppendEntry(ctx, rec, newHead); err != nil {
 			// The etcd and redis backends already wrap ErrDuplicateSerial
