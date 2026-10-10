@@ -223,6 +223,27 @@ func checkHTTP(code int, body []byte, method, path string) error {
 	return fmt.Errorf("HTTP %d on %s %s: %q", code, method, path, strings.TrimSpace(string(body)))
 }
 
+// certnamePath appends certname to route as a single path segment, refusing a
+// certname the server would refuse anyway. Every request path that carries a
+// certname goes through here, so a new subcommand cannot forget either half.
+//
+// ca.ValidateSubject is the check the server applies, so this refuses exactly
+// what the server would, only before anything is sent: a "/" or ".." would
+// otherwise reach the server's router, which cleans the path and redirects the
+// request to a different route rather than to the server's own validation. It
+// also guards generate's key file name, which is built from the same certname.
+// Today every name it accepts is made of unreserved characters, so the escape
+// is the identity; it is here so that a wider subject syntax still yields one
+// segment rather than a different route. The one name it passes that the
+// router still redirects is ".", which ValidateSubject accepts on the server
+// too; it is left to the server's answer rather than refused here alone.
+func certnamePath(route, certname string) (string, error) {
+	if err := ca.ValidateSubject(certname); err != nil {
+		return "", fmt.Errorf("--certname: %w", err)
+	}
+	return route + url.PathEscape(certname), nil
+}
+
 func printTable(rows [][2]string) {
 	w := 0
 	for _, r := range rows {
@@ -329,6 +350,8 @@ func newSignCmd() *cobra.Command {
 					// Quoting per element rather than the joined string keeps
 					// the separator meaningful -- "a", "b" rather than "a, b",
 					// which would read as a single name containing a comma.
+					// Printing is all that happens to them: none reaches a
+					// request path or a file name, so none needs certnamePath.
 					quoted := make([]string, len(result.Signed))
 					for i, name := range result.Signed {
 						quoted[i] = strconv.Quote(name)
@@ -342,7 +365,10 @@ func newSignCmd() *cobra.Command {
 				return fmt.Errorf("--certname or --all is required")
 			}
 
-			path := "/puppet-ca/v1/certificate_status/" + certname
+			path, err := certnamePath("/puppet-ca/v1/certificate_status/", certname)
+			if err != nil {
+				return err
+			}
 			body, _ := json.Marshal(map[string]string{"desired_state": "signed"})
 			code, respBody, err := c.put(path, body)
 			if err != nil {
@@ -412,7 +438,9 @@ what you meant.`,
 				body, _ = json.Marshal(map[string]any{"desired_state": "revoked", "force": force})
 				subject = "serial " + serial
 			} else {
-				path = "/puppet-ca/v1/certificate_status/" + certname
+				if path, err = certnamePath("/puppet-ca/v1/certificate_status/", certname); err != nil {
+					return err
+				}
 				body, _ = json.Marshal(map[string]string{"desired_state": "revoked"})
 				subject = certname
 			}
@@ -477,7 +505,10 @@ func newCleanCmd() *cobra.Command {
 				return err
 			}
 
-			path := "/puppet-ca/v1/certificate_status/" + certname
+			path, err := certnamePath("/puppet-ca/v1/certificate_status/", certname)
+			if err != nil {
+				return err
+			}
 			code, respBody, err := c.delete(path)
 			if err != nil {
 				return err
@@ -507,7 +538,10 @@ func newGenerateCmd() *cobra.Command {
 				return err
 			}
 
-			path := "/puppet-ca/v1/generate/" + certname
+			path, err := certnamePath("/puppet-ca/v1/generate/", certname)
+			if err != nil {
+				return err
+			}
 			// url.Values rather than substituting "&dns=" for every comma in
 			// the raw flag value. That substitution could not tell a separator
 			// between names from one inside a name, so a single --dns carrying
@@ -592,7 +626,10 @@ func newImportCertCmd() *cobra.Command {
 				return err
 			}
 
-			path := "/puppet-ca/v1/certificate/" + certname
+			path, err := certnamePath("/puppet-ca/v1/certificate/", certname)
+			if err != nil {
+				return err
+			}
 			code, body, err := c.put(path, certPEM)
 			if err != nil {
 				return err
