@@ -89,9 +89,14 @@ type lifecycleFake struct {
 	revoke  revokeMode
 	unblock chan struct{} // closed to free a revokeHang handler
 
+	// shortLived makes logins issue a non-renewable token with a 1-second
+	// lease, whose watcher ends on its own almost at once.
+	shortLived bool
+
 	// refuseLogins makes every login fail; holdLogins makes each one wait
-	// until releaseLogins is called. Both are set through their methods,
-	// because the server is already running by the time a spec sets them.
+	// until releaseLogins is called. These, like every switch on the fake,
+	// are set through its methods, because the server is already running by
+	// the time a spec sets them.
 	refuseLogins bool
 	holdLogins   bool
 	loginRelease chan struct{}
@@ -148,6 +153,27 @@ func (f *lifecycleFake) refuseSignsWith(tok string) {
 	f.refuseSign[tok] = true
 }
 
+// refuseEverySign makes Transit sign answer 403 for every token from now on.
+func (f *lifecycleFake) refuseEverySign() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.refuseAllSigns = true
+}
+
+// answerRevocations sets how revoke-self is answered from now on.
+func (f *lifecycleFake) answerRevocations(mode revokeMode) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.revoke = mode
+}
+
+// issueShortLivedTokens makes every later login issue a short-lived token.
+func (f *lifecycleFake) issueShortLivedTokens() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.shortLived = true
+}
+
 // holdRefusedSigns makes refused signs wait until n of them are outstanding.
 func (f *lifecycleFake) holdRefusedSigns(n int) {
 	f.mu.Lock()
@@ -192,9 +218,13 @@ func (f *lifecycleFake) login(w http.ResponseWriter) {
 	f.nextToken++
 	tok := fmt.Sprintf("minted-%d", f.nextToken)
 	f.valid[tok] = true
+	lease, renewable := 3600, true
+	if f.shortLived {
+		lease, renewable = 1, false
+	}
 	f.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"auth": map[string]interface{}{"client_token": tok, "lease_duration": 3600, "renewable": true},
+		"auth": map[string]interface{}{"client_token": tok, "lease_duration": lease, "renewable": renewable},
 	})
 }
 
@@ -391,7 +421,7 @@ var _ = Describe("OpenBao token lifecycle", func() {
 	Describe("re-authentication after a 403 from Transit", func() {
 		Context("when the previous login was less than the minimum interval ago", func() {
 			It("fails with the 403 and a throttling error, without logging in again", func() {
-				fake.refuseAllSigns = true
+				fake.refuseEverySign()
 				signer := load(start(openbao.AuthAppRole))
 				Expect(fake.loginCount()).To(Equal(1))
 
@@ -450,7 +480,7 @@ var _ = Describe("OpenBao token lifecycle", func() {
 		Context("when the 403 persists after a re-login", func() {
 			DescribeTable("throttles the next 403 rather than logging in again",
 				func(refuseRelogin bool, wantSigns int) {
-					fake.refuseAllSigns = true
+					fake.refuseEverySign()
 					tm := start(openbao.AuthAppRole)
 					signer := load(tm)
 					if refuseRelogin {
@@ -504,6 +534,23 @@ var _ = Describe("OpenBao token lifecycle", func() {
 		})
 	})
 
+	Describe("background re-authentication", func() {
+		Context("when a watcher ends on its own", func() {
+			It("logs that renewal ended and logs in again from the background loop", func() {
+				logs := captureLogs()
+				fake.issueShortLivedTokens()
+				start(openbao.AuthAppRole)
+
+				// The twin of "after a request-path re-login" above: a watcher
+				// that was not replaced must still lead to a fresh login, and
+				// say why.
+				Eventually(fake.loginCount).WithTimeout(5 * time.Second).Should(Equal(2))
+				Expect(string(logs.Contents())).To(ContainSubstring(`msg="OpenBao token renewal window closed, re-authenticating"`))
+				Expect(string(logs.Contents())).NotTo(ContainSubstring(`msg="OpenBao refused a request with 403, re-authenticating"`))
+			})
+		})
+	})
+
 	Describe("Close", func() {
 		DescribeTable("revokes a token this process logged in for",
 			func(method openbao.AuthMethodKind) {
@@ -535,7 +582,7 @@ var _ = Describe("OpenBao token lifecycle", func() {
 		Context("when OpenBao refuses the revocation", func() {
 			It("still succeeds, and warns without logging the token", func() {
 				logs := captureLogs()
-				fake.revoke = revokeRefuse
+				fake.answerRevocations(revokeRefuse)
 				tm := start(openbao.AuthAppRole)
 				minted := tm.Client().Token()
 
@@ -549,7 +596,7 @@ var _ = Describe("OpenBao token lifecycle", func() {
 
 		Context("when OpenBao does not answer the revocation", func() {
 			It("gives up within about 2 seconds and still succeeds", func() {
-				fake.revoke = revokeHang
+				fake.answerRevocations(revokeHang)
 				tm := start(openbao.AuthAppRole)
 
 				began := time.Now()
