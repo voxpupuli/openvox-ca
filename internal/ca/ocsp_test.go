@@ -509,7 +509,9 @@ var _ = Describe("OCSP Responder", func() {
 
 		// Each of these fails if the responder hashes with a fixed algorithm
 		// rather than the request's, or over the whole SubjectPublicKeyInfo
-		// rather than the subjectPublicKey value.
+		// rather than the subjectPublicKey value — or if it answers in a
+		// different algorithm from the one it was asked in, which leaves a
+		// client that matches on the whole CertID (OpenSSL) with no status.
 		DescribeTable("honours the hash algorithm the request used",
 			func(hash crypto.Hash) {
 				respDER, err := myCA.OCSPResponse(context.Background(), requestFor(myCA.CACert, hash))
@@ -518,6 +520,7 @@ var _ = Describe("OCSP Responder", func() {
 				resp, err := xocsp.ParseResponse(respDER, myCA.CACert)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(resp.Status).To(Equal(xocsp.Good))
+				Expect(resp.IssuerHash).To(Equal(hash), "the response must name the certificate in the request's hash")
 			},
 			Entry("SHA-1", crypto.SHA1),
 			Entry("SHA-256", crypto.SHA256),
@@ -556,6 +559,47 @@ var _ = Describe("OCSP Responder", func() {
 			respDER, err := myCA.OCSPResponse(context.Background(), foreign)
 			Expect(err).To(MatchError(ca.ErrNotAuthoritative))
 			Expect(respDER).To(BeNil())
+		})
+
+		// The response's CertID carries the request's hash, so a pre-signed
+		// answer to a SHA-1 request is no answer to a SHA-256 one.
+		It("does not serve a request the cached answer to a different hash", func() {
+			_, err := myCA.OCSPResponse(context.Background(), requestFor(myCA.CACert, crypto.SHA1))
+			Expect(err).NotTo(HaveOccurred())
+
+			sha256Req := requestFor(myCA.CACert, crypto.SHA256)
+			respDER, err := myCA.OCSPResponse(context.Background(), sha256Req)
+			Expect(err).NotTo(HaveOccurred())
+			resp, err := xocsp.ParseResponse(respDER, myCA.CACert)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.IssuerHash).To(Equal(crypto.SHA256))
+
+			again, err := myCA.OCSPResponse(context.Background(), sha256Req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(again).To(Equal(respDER), "the SHA-256 answer must be cached in its own right")
+		})
+
+		// Eviction is by serial. A pre-signed good left behind under one hash
+		// would vouch for a revoked certificate to every client using it.
+		It("evicts every hash's cached answer when the certificate is revoked", func() {
+			hashes := []crypto.Hash{crypto.SHA1, crypto.SHA256}
+			for _, hash := range hashes {
+				first, err := myCA.OCSPResponse(context.Background(), requestFor(myCA.CACert, hash))
+				Expect(err).NotTo(HaveOccurred())
+				second, err := myCA.OCSPResponse(context.Background(), requestFor(myCA.CACert, hash))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(second).To(Equal(first), "%v's good must be cached before the revocation", hash)
+			}
+
+			Expect(myCA.Revoke(context.Background(), "ocsp-issuer-node")).To(Succeed())
+
+			for _, hash := range hashes {
+				respDER, err := myCA.OCSPResponse(context.Background(), requestFor(myCA.CACert, hash))
+				Expect(err).NotTo(HaveOccurred())
+				resp, err := xocsp.ParseResponse(respDER, myCA.CACert)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resp.Status).To(Equal(xocsp.Revoked), "the %v answer", hash)
+			}
 		})
 
 		// A hash outside x/crypto's table cannot be evaluated, which is not the
