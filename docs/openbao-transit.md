@@ -498,7 +498,9 @@ about once per token TTL; without `revoke-self` the token stays valid until it
 expires. A revocation that fails or takes more
 than 2 seconds is logged as a warning and does not delay shutdown further. A
 token read from `openbao.token_file` is never revoked: it belongs to whoever
-issued it, and may be shared with other processes.
+issued it, and may be shared with other processes. Nor is a batch token, from a
+role that sets `token_type=batch`: OpenBao cannot revoke one, so it is left to
+expire.
 
 The projected ServiceAccount JWT is read from disk on every login attempt
 rather than cached across the process lifetime: Kubernetes bound

@@ -109,6 +109,11 @@ type TokenManager struct {
 	// bad every request is throttled by the background loop's own retries,
 	// and the throttle alone would hide why. Guarded by mu.
 	lastLoginErr error
+	// revocable reports whether the current token can be revoked. OpenBao
+	// gives every service token an accessor and never a batch token, and
+	// refuses revoke-self for a batch token, so Close does not try one.
+	// Guarded by mu.
+	revocable bool
 	// closed is set by Close, under mu, before it revokes the token.
 	closed bool
 
@@ -152,6 +157,7 @@ func NewTokenManager(ctx context.Context, cfg Config) (*TokenManager, error) {
 		cancel()
 		return nil, fmt.Errorf("initial OpenBao login failed: %w", err)
 	}
+	tm.revocable = hasAccessor(secret)
 
 	watcher, err := client.NewLifetimeWatcher(&api.LifetimeWatcherInput{Secret: secret})
 	if err != nil {
@@ -371,6 +377,7 @@ func (tm *TokenManager) reauthLocked(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	tm.revocable = hasAccessor(secret)
 
 	if tm.watcher != nil {
 		tm.watcher.Stop()
@@ -459,6 +466,10 @@ func (tm *TokenManager) Close() error {
 	if !tm.ownsToken {
 		return nil
 	}
+	if !tm.revocable {
+		slog.Debug("Not revoking the OpenBao token at shutdown: it is a batch token, which OpenBao cannot revoke, so it expires with its TTL")
+		return nil
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), revokeTimeout)
 	defer cancel()
@@ -469,4 +480,10 @@ func (tm *TokenManager) Close() error {
 	}
 	slog.Info("Revoked the OpenBao token at shutdown")
 	return nil
+}
+
+// hasAccessor reports whether a login secret carries a token accessor, which
+// OpenBao issues for every service token and never for a batch token.
+func hasAccessor(secret *api.Secret) bool {
+	return secret != nil && secret.Auth != nil && secret.Auth.Accessor != ""
 }

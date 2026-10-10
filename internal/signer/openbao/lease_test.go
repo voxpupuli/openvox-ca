@@ -96,6 +96,9 @@ type lifecycleFake struct {
 	shortLived     bool
 	shortRenewable bool
 
+	// batch makes logins issue batch tokens, which carry no accessor.
+	batch bool
+
 	// slowRenewalRefusals makes renew-self wait longer than a short lease
 	// before refusing, so the watcher gives up with an error.
 	slowRenewalRefusals bool
@@ -203,6 +206,13 @@ func (f *lifecycleFake) refuseLoginsFromNow() {
 	f.refuseLogins = true
 }
 
+// issueBatchTokens makes every later login issue a batch token.
+func (f *lifecycleFake) issueBatchTokens() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.batch = true
+}
+
 // holdLoginsFromNow makes every later login wait for releaseLogins.
 func (f *lifecycleFake) holdLoginsFromNow() {
 	f.mu.Lock()
@@ -237,9 +247,15 @@ func (f *lifecycleFake) login(w http.ResponseWriter) {
 	if f.shortLived {
 		lease, renewable = 1, f.shortRenewable
 	}
+	accessor := "accessor-" + tok
+	if f.batch {
+		accessor = ""
+	}
 	f.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"auth": map[string]interface{}{"client_token": tok, "lease_duration": lease, "renewable": renewable},
+		"auth": map[string]interface{}{
+			"client_token": tok, "accessor": accessor, "lease_duration": lease, "renewable": renewable,
+		},
 	})
 }
 
@@ -618,6 +634,17 @@ var _ = Describe("OpenBao token lifecycle", func() {
 
 			Expect(fake.revokedTokens()).To(BeEmpty())
 			Expect(fake.isValid(operatorToken)).To(BeTrue())
+		})
+
+		It("does not try to revoke a batch token, which OpenBao cannot revoke", func() {
+			logs := captureLogs()
+			fake.issueBatchTokens()
+			tm := start(openbao.AuthAppRole)
+
+			Expect(tm.Close()).To(Succeed())
+
+			Expect(fake.revokedTokens()).To(BeEmpty())
+			Expect(string(logs.Contents())).NotTo(ContainSubstring("level=WARN"))
 		})
 
 		Context("when OpenBao refuses the revocation", func() {
