@@ -200,6 +200,10 @@ openvox-ca-ctl import \
 # CA's key is held by a provider rather than a file, there is no --private-key
 # to pass: use `openvox-ca import-ca-cert` instead (below).
 #
+# The CA key must be RSA or ECDSA, as it must for import-ca-cert. Any other type
+# (Ed25519, say) is refused here and at startup, because the isolated signer
+# will not make the signatures it needs; see ca-key-security.md.
+#
 # --crl-chain must contain only X509 CRL blocks. Every one is parsed, and only
 # the parsed CRLs are stored -- so a file with a certificate or a key
 # concatenated into it is refused, for the same reason the certificate bundle

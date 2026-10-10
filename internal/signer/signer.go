@@ -70,8 +70,53 @@ type Service struct {
 	key crypto.Signer
 }
 
-// Sign performs a cryptographic signing operation using the isolated CA key.
+// ErrSignRequestRefused is returned when a request asks for a signature the CA
+// never makes. It reaches the frontend only as text, since net/rpc carries
+// errors as strings; errors.Is works on it inside the signer process alone.
+var ErrSignRequestRefused = errors.New("signing request refused")
+
+// checkSignRequest refuses any request that is not a digest under one of the
+// hashes the CA's own signatures use.
+//
+// The signer split exists to limit what a compromised frontend can get out of
+// the key, so the RPC must not be a general-purpose signing oracle. Without
+// this, crypto.Hash(0) on an RSA key is a raw PKCS#1 v1.5 signature over
+// whatever bytes the caller chose.
+//
+// The list is every hash the CA signs with, and nothing else. No template sets
+// a SignatureAlgorithm, so crypto/x509 (certificates and CRLs) and
+// x/crypto/ocsp (OCSP responses) choose by key: SHA-256 for every RSA key, and
+// SHA-256, SHA-384 and SHA-512 for ECDSA P-256, P-384 and P-521. Nothing signs
+// with RSA-PSS, and SHA-1 appears only in key identifiers, which are hashed and
+// never signed. internal/ca refuses any other CA key type at load, which is
+// what keeps this list complete; the OpenBao signer allows the same three
+// (transitHashAlgorithm).
+//
+// A digest of the wrong length is refused too. An RSA key would refuse it
+// anyway, but an ECDSA key ignores the hash function it is told and signs bytes
+// of any length, so without this check the hash would be a label rather than a
+// constraint.
+func checkSignRequest(req *SignRequest) error {
+	switch req.HashFunc {
+	case crypto.SHA256, crypto.SHA384, crypto.SHA512:
+	default:
+		return fmt.Errorf("%w: hash function %v is not one the CA signs with", ErrSignRequestRefused, req.HashFunc)
+	}
+	if got, want := len(req.Digest), req.HashFunc.Size(); got != want {
+		return fmt.Errorf("%w: a %v digest is %d bytes, not %d", ErrSignRequestRefused, req.HashFunc, want, got)
+	}
+	return nil
+}
+
+// Sign performs a cryptographic signing operation using the isolated CA key,
+// after checkSignRequest has accepted the request.
 func (s *Service) Sign(req *SignRequest, resp *SignResponse) error {
+	if err := checkSignRequest(req); err != nil {
+		// The frontend never builds such a request itself, so one arriving
+		// here means a frontend that is broken or no longer ours.
+		slog.Warn("Refused a signing request", "error", err)
+		return err
+	}
 	sig, err := s.key.Sign(rand.Reader, req.Digest, req.HashFunc)
 	if err != nil {
 		return fmt.Errorf("signing failed: %w", err)

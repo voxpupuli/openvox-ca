@@ -412,6 +412,12 @@ func (c *CA) loadCA(ctx context.Context) error {
 		return err
 	}
 
+	// The certificate's key rather than c.CAKey's, so the frontend checks it
+	// too: its ExternalSigner reports the certificate's key as its own.
+	if err := checkCAKeyType(cert.PublicKey); err != nil {
+		return err
+	}
+
 	// Verify that the loaded key matches the certificate's public key.
 	// Skip when using an external signer; the signer process verifies this,
 	// and the RemoteSigner's Public() is derived from the cert anyway.

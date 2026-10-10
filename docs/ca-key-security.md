@@ -36,6 +36,17 @@ domain-separation labels per direction. A process that somehow obtained a leaked
 socketpair descriptor can impersonate neither side, and a child whose fd 4 is not
 the launcher's pipe refuses to start rather than proceeding unauthenticated.
 
+**The signer signs only what the CA itself would.** A request must name SHA-256,
+SHA-384 or SHA-512 and carry a digest of that hash's length; anything else is
+refused and logged as a warning. Those three are every hash the CA signs with:
+SHA-256 for any RSA key, and SHA-256, SHA-384 or SHA-512 for ECDSA P-256, P-384
+or P-521. The check exists so that a compromised frontend, which can authenticate
+to the signer, gets a CA that issues certificates rather than a general-purpose
+signing oracle. Without it, an RSA key would sign arbitrary bytes with no hash at
+all. It is also why a CA key must be RSA or ECDSA: an Ed25519 key signs with no
+hash, so it is refused at startup and at import, rather than failing every
+signature in this topology alone.
+
 > **The pre-shared key travels over a pipe, not the environment.** A process's
 > exec-time environment stays readable at `/proc/<pid>/environ` for its whole
 > lifetime — `os.Unsetenv` only mutates the process's own copy — and is captured

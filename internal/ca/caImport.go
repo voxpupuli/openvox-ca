@@ -131,6 +131,9 @@ func ImportCACertificate(ctx context.Context, store *storage.StorageService, cer
 	if err := AssertSignerMatchesCert(certs[0], signer); err != nil {
 		return false, err
 	}
+	if err := checkCAKeyType(certs[0].PublicKey); err != nil {
+		return false, err
+	}
 
 	lockCtx, cancel := context.WithTimeout(ctx, LockTimeout)
 	defer cancel()
@@ -195,6 +198,9 @@ func importCAMaterial(ctx context.Context, store *storage.StorageService, certBu
 
 	// --- SECURITY: prove the signer holds the key this certificate binds ---
 	if err := AssertSignerMatchesCert(caCert, signer); err != nil {
+		return err
+	}
+	if err := checkCAKeyType(caCert.PublicKey); err != nil {
 		return err
 	}
 
