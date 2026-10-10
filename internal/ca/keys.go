@@ -108,8 +108,9 @@ var ErrCAKeyType = errors.New("unsupported CA key type")
 // included. Such a key signs with crypto.Hash(0), which the isolated signer
 // refuses (see checkSignRequest in internal/signer), and x/crypto/ocsp signs
 // with RSA and ECDSA alone. So a CA holding one would issue under
-// --single-process and fail every signature in the default topology. Refusing
-// it here makes that a single error at startup or import, in every topology.
+// --single-process and fail every signature in the default topology. loadCA
+// and ValidateCABundleOrder call this, which makes that a single error at
+// startup or import, in every topology.
 //
 // Only the type is checked. Size and curve are left as they are: every RSA key
 // signs with SHA-256 and every curve crypto/x509 accepts with SHA-256 or

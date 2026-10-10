@@ -36,16 +36,26 @@ domain-separation labels per direction. A process that somehow obtained a leaked
 socketpair descriptor can impersonate neither side, and a child whose fd 4 is not
 the launcher's pipe refuses to start rather than proceeding unauthenticated.
 
-**The signer signs only what the CA itself would.** A request must name SHA-256,
-SHA-384 or SHA-512 and carry a digest of that hash's length; anything else is
-refused and logged as a warning. Those three are every hash the CA signs with:
-SHA-256 for any RSA key, and SHA-256, SHA-384 or SHA-512 for ECDSA P-256, P-384
-or P-521. The check exists so that a compromised frontend, which can authenticate
-to the signer, gets a CA that issues certificates rather than a general-purpose
-signing oracle. Without it, an RSA key would sign arbitrary bytes with no hash at
-all. It is also why a CA key must be RSA or ECDSA: an Ed25519 key signs with no
-hash, so it is refused at startup and at import, rather than failing every
-signature in this topology alone.
+**The signer makes only the kinds of signature the CA makes.** A request must
+name SHA-256, SHA-384 or SHA-512 and carry a digest of that hash's length;
+anything else is refused and logged as a warning. Those three are every hash the
+CA signs with: SHA-256 for any RSA key, and SHA-256, SHA-384 or SHA-512 for
+ECDSA P-256, P-384 or P-521. This takes away what a compromised frontend could
+otherwise get from an RSA key: a raw signature over arbitrary bytes, with no
+hash at all, or a signature under a legacy hash such as SHA-1.
+
+It does not stop a compromised frontend from obtaining CA signatures. The signer
+sees a digest, not the certificate, CRL or OCSP response it was computed over,
+so a frontend that has passed the handshake can still have the CA sign anything
+it builds itself, a certificate the CSR path would refuse included. For an ECDSA
+key the check constrains only the digest's length. What keeping the key out of
+the frontend buys is that the key itself cannot be copied out: an attacker can
+sign only while they hold the frontend, although anything signed in that time
+stays valid until it is revoked or expires.
+
+The CA key must therefore be RSA or ECDSA. An Ed25519 key signs with no hash,
+which this signer refuses, so such a key is refused at startup and at import in
+every topology rather than failing every signature in this one alone.
 
 > **The pre-shared key travels over a pipe, not the environment.** A process's
 > exec-time environment stays readable at `/proc/<pid>/environ` for its whole

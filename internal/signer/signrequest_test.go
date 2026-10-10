@@ -18,6 +18,7 @@
 package signer
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/ecdsa"
@@ -29,6 +30,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/rpc"
 	"os"
@@ -130,6 +132,22 @@ var _ = Describe("Signer request checks", func() {
 		Expect(err).To(MatchError(ErrSignRequestRefused))
 		Expect(err.Error()).To(ContainSubstring("a SHA-256 digest is 32 bytes, not 48"))
 		Expect(resp.Signature).To(BeNil())
+	})
+
+	It("logs a refusal as a warning in the signer's own log", func() {
+		// The refusal goes back to the frontend, which by this threat model
+		// may be the party making it. The warning is what the operator sees.
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		DeferCleanup(slog.SetDefault, orig)
+
+		err := (&Service{key: rsaKey}).Sign(&SignRequest{Digest: []byte("arbitrary bytes"), HashFunc: 0}, &SignResponse{})
+		Expect(err).To(MatchError(ErrSignRequestRefused))
+
+		Expect(buf.String()).To(ContainSubstring("level=WARN"))
+		Expect(buf.String()).To(ContainSubstring(`msg="Refused a signing request"`))
+		Expect(buf.String()).To(ContainSubstring("hash function unknown hash value 0 is not one the CA signs with"))
 	})
 
 	It("reports a refusal to the frontend across the RPC", func() {

@@ -75,27 +75,35 @@ type Service struct {
 // errors as strings; errors.Is works on it inside the signer process alone.
 var ErrSignRequestRefused = errors.New("signing request refused")
 
-// checkSignRequest refuses any request that is not a digest under one of the
-// hashes the CA's own signatures use.
+// checkSignRequest refuses any request that is not a digest of the right
+// length under SHA-256, SHA-384 or SHA-512.
 //
 // The signer split exists to limit what a compromised frontend can get out of
-// the key, so the RPC must not be a general-purpose signing oracle. Without
-// this, crypto.Hash(0) on an RSA key is a raw PKCS#1 v1.5 signature over
-// whatever bytes the caller chose.
+// the key. This narrows the RPC to the signature schemes the CA uses; it does
+// not narrow what is signed. Without it, crypto.Hash(0) on an RSA key is a raw
+// PKCS#1 v1.5 signature over whatever bytes the caller chose, and a legacy hash
+// such as SHA-1 is a signature the CA never makes. With it, the frontend can
+// still have any digest of an allowed length signed: the signer sees a digest,
+// not the certificate, CRL or OCSP response it came from, so a compromised
+// frontend can still obtain CA signatures over structures it built itself. An
+// ECDSA signature binds no hash identifier at all, so for an ECDSA key the
+// check constrains only the digest length.
 //
 // The list is every hash the CA signs with, and nothing else. No template sets
 // a SignatureAlgorithm, so crypto/x509 (certificates and CRLs) and
 // x/crypto/ocsp (OCSP responses) choose by key: SHA-256 for every RSA key, and
-// SHA-256, SHA-384 and SHA-512 for ECDSA P-256, P-384 and P-521. Nothing signs
-// with RSA-PSS, and SHA-1 appears only in key identifiers, which are hashed and
-// never signed. internal/ca refuses any other CA key type at load and import,
-// which is what keeps this list complete; the OpenBao signer allows the same
-// three (transitHashAlgorithm).
+// SHA-256, SHA-384 and SHA-512 for ECDSA P-256, P-384 and P-521. The list is
+// not narrowed per key, so an RSA key would also sign a SHA-384 or SHA-512
+// digest. Nothing signs with RSA-PSS, and SHA-1 appears only in key
+// identifiers, which are hashed and never signed. internal/ca refuses any
+// other CA key type at load and import, which is what keeps this list
+// complete; the OpenBao signer allows the same three (transitHashAlgorithm).
 //
 // A digest of the wrong length is refused too. The RSA and ECDSA signers in
 // crypto check that themselves today, but this is the trust boundary, so it
 // does not rest on what whichever key is behind it happens to enforce. The hash
-// is checked first because Hash.Size panics on a hash that is not linked in.
+// is checked first because Hash.Size panics on a value outside the range of
+// known hashes, crypto.Hash(0) included.
 func checkSignRequest(req *SignRequest) error {
 	switch req.HashFunc {
 	case crypto.SHA256, crypto.SHA384, crypto.SHA512:

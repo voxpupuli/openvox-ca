@@ -21,9 +21,11 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha1"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -231,6 +233,33 @@ var _ = Describe("openvox-ca import-ca-cert", func() {
 		Expect(err).To(MatchError(ContainSubstring("does not match the certificate's public key")))
 
 		// And nothing was written: a file that exists reads as success.
+		_, statErr := os.Stat(validated)
+		Expect(os.IsNotExist(statErr)).To(BeTrue())
+	})
+
+	It("refuses a certificate for an Ed25519 CA key under --out", func() {
+		// The key-type rule is one of the checks --out promises to share with a
+		// real import. Without it, --out passes a bundle that every replica
+		// then refuses at startup.
+		_, key, err := ed25519.GenerateKey(rand.Reader)
+		Expect(err).NotTo(HaveOccurred())
+		pkcs8, err := x509.MarshalPKCS8PrivateKey(key)
+		Expect(err).NotTo(HaveOccurred())
+		store := storage.New(caDir)
+		Expect(store.EnsureDirs(context.Background())).To(Succeed())
+		Expect(store.SaveCAKey(context.Background(),
+			pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8}))).To(Succeed())
+
+		csrDER, err := x509.CreateCertificateRequest(rand.Reader,
+			&x509.CertificateRequest{Subject: pkix.Name{CommonName: "Puppet CA: puppet.example.com"}}, key)
+		Expect(err).NotTo(HaveOccurred())
+		csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
+		Expect(os.WriteFile(bundle, signCSRAsParent(csrPEM, chain.RootCert, chain.RootKey, chain.RootPEM), 0o644)).To(Succeed())
+
+		validated := filepath.Join(caDir, "validated.pem")
+		_, err = runImport("--cadir", caDir, "--cert-bundle", bundle, "--out", validated)
+		Expect(err).To(MatchError(ca.ErrCAKeyType))
+
 		_, statErr := os.Stat(validated)
 		Expect(os.IsNotExist(statErr)).To(BeTrue())
 	})

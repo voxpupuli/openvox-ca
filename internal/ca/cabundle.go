@@ -177,6 +177,14 @@ func ValidateCABundleOrder(certs []*x509.Certificate) error {
 		}
 	}
 
+	// The same argument for the key the certificate binds: one this CA cannot
+	// sign with installs cleanly too. See checkCAKeyType. It is checked here
+	// rather than at each import's write so that import-ca-cert --out, which
+	// validates and writes nothing, refuses it as well.
+	if err := checkCAKeyType(certs[0].PublicKey); err != nil {
+		return fmt.Errorf("first certificate in bundle (%q): %w", certs[0].Subject.CommonName, err)
+	}
+
 	if ku := certs[0].KeyUsage; ku != 0 {
 		if ku&x509.KeyUsageCertSign == 0 {
 			return fmt.Errorf("first certificate in bundle (%q) has a KeyUsage extension without keyCertSign, "+

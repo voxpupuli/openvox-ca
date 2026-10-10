@@ -197,9 +197,6 @@ func importCAMaterial(ctx context.Context, store *storage.StorageService, certBu
 	if err := AssertSignerMatchesCert(caCert, signer); err != nil {
 		return err
 	}
-	if err := checkCAKeyType(caCert.PublicKey); err != nil {
-		return err
-	}
 
 	// --- Ensure directories exist ---
 	if err := store.EnsureDirs(ctx); err != nil {
