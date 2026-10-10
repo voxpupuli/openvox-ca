@@ -76,11 +76,14 @@ var _ = Describe("AppendInventory canonical form", func() {
 
 			DescribeTable("refuses an entry that parses but is not canonical, and leaves the inventory verifiable",
 				func(entry string) {
-					// Every case must parse: an unparseable entry is refused by
-					// the older malformed-entry check, which would make this
-					// spec pass for the wrong reason.
-					_, ok := parseInventoryEntry(entry)
+					// Every case must parse, and must not already be canonical
+					// under the grammar in force: an unparseable entry is
+					// refused by the older malformed-entry check, and a
+					// canonical one is not a case at all. Either would let
+					// this spec pass, or fail, for the wrong reason.
+					parsed, ok := parseInventoryEntry(entry)
 					Expect(ok).To(BeTrue(), "fixture must parse, or it does not exercise the canonical check")
+					Expect(canonicalInventoryLine(parsed)).NotTo(Equal(entry), "fixture must not be canonical")
 
 					err := svc.AppendInventory(ctx, entry)
 					Expect(err).To(MatchError(ContainSubstring("non-canonical inventory entry")))
@@ -93,9 +96,6 @@ var _ = Describe("AppendInventory canonical form", func() {
 					inv, err := svc.ReadInventory(ctx)
 					Expect(err).NotTo(HaveOccurred(), "the inventory must still verify after a refused append")
 					Expect(inv).To(Equal(invPre))
-					exists, err := svc.SerialExists(ctx, "0009")
-					Expect(err).NotTo(HaveOccurred())
-					Expect(exists).To(BeFalse(), "a refused entry's serial must not be recorded")
 				},
 				Entry("a doubled space between fields",
 					"0009  2024-01-09T00:00:00UTC 2029-01-09T00:00:00UTC /node9"),
@@ -105,8 +105,10 @@ var _ = Describe("AppendInventory canonical form", func() {
 					" "+canonical),
 				Entry("trailing whitespace",
 					canonical+" "),
+				// Tab-separated, so that no subject grammar can read it as
+				// part of the subject and make the line canonical.
 				Entry("a trailing field",
-					canonical+" extra"),
+					canonical+"\textra"),
 				Entry("a trailing newline",
 					canonical+"\n"),
 				Entry("an embedded newline carrying a second entry",
@@ -116,14 +118,15 @@ var _ = Describe("AppendInventory canonical form", func() {
 			)
 
 			It("accepts a canonical entry and still verifies", func() {
-				Expect(svc.AppendInventory(ctx, canonical)).To(Succeed())
-				_, err := svc.ReadInventory(ctx)
-				Expect(err).NotTo(HaveOccurred(), "the inventory must verify after a canonical append")
-				// Asserted through the serial rather than the rendered bytes,
-				// which are the blob backend's own format to choose.
-				exists, err := svc.SerialExists(ctx, "0009")
+				before, err := svc.InventoryEntries(ctx)
 				Expect(err).NotTo(HaveOccurred())
-				Expect(exists).To(BeTrue())
+				Expect(svc.AppendInventory(ctx, canonical)).To(Succeed())
+				// InventoryEntries verifies before returning. Counted rather
+				// than compared, because the rendered bytes and the serial's
+				// form are the blob backend's own to choose.
+				after, err := svc.InventoryEntries(ctx)
+				Expect(err).NotTo(HaveOccurred(), "the inventory must verify after a canonical append")
+				Expect(after).To(HaveLen(len(before) + 1))
 			})
 
 			// A guard on what the fix must preserve rather than a spec for
