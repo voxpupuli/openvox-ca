@@ -572,3 +572,99 @@ func (c *countingLocker) calls() int {
 	defer c.mu.Unlock()
 	return c.n
 }
+
+var _ = Describe("LockIsEnforced", func() {
+	// The predicate is the sole input to rebuild-inventory-hmac's refusal, and
+	// it must fail closed: an Unlocker it does not recognise has to read as
+	// unenforced, because the cost of the other direction is proceeding on a
+	// store nothing proved was quiet.
+	It("is false for the no-op AcquireInstanceLock hands back", func() {
+		Expect(LockIsEnforced(noopUnlocker{})).To(BeFalse())
+	})
+
+	It("is false for an unrecognised Unlocker rather than assuming enforcement", func() {
+		Expect(LockIsEnforced(strangeUnlocker{})).To(BeFalse(),
+			"an Unlocker this predicate has not been told about must not read as a real lock")
+	})
+
+	It("is false for a named lock, which excludes nobody from the store", func() {
+		// This used to assert the opposite, on a bare &fileUnlocker{}. That is
+		// the type EVERY named lock hands back -- crl, bootstrap,
+		// subject:<name> -- so the predicate answered "this store is held by
+		// exactly one instance" for a lock that says nothing of the kind. The
+		// spec passed because it asked the same type-level question the
+		// implementation did.
+		l := newFileLocks(GinkgoT().TempDir())
+		ul, err := l.acquire(context.Background(), "crl")
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _ = ul.Unlock() })
+
+		Expect(LockIsEnforced(ul)).To(BeFalse(),
+			"holding the crl lock says nothing about being the only instance")
+	})
+
+	It("is true for the store-instance lock", func() {
+		// The other side, or the predicate could satisfy every spec above by
+		// answering false to everything.
+		l := newFileLocks(GinkgoT().TempDir())
+		ul, err := l.acquireInstance()
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _ = ul.Unlock() })
+
+		Expect(LockIsEnforced(ul)).To(BeTrue())
+	})
+
+	// Every spec above hands the predicate an Unlocker built here. None of them
+	// reaches AcquireInstanceLock, which is the only way the command ever
+	// obtains one -- so between them they fix the predicate's behaviour per
+	// type while saying nothing about the wiring that chooses the type. A
+	// backend wrapper that replaced the unlocker would leave all of them green
+	// and make every real run read as unenforced, retiring the single-instance
+	// refusal on a destructive repair. It fails safe, which is why this is
+	// worth specs rather than alarm, but it would fail silently.
+	Describe("through AcquireInstanceLock, as the command reaches it", func() {
+		ctx := context.Background()
+		svc := func(b Backend) *StorageService {
+			return NewWithBackend(b, filepath.Join(GinkgoT().TempDir(), "private"))
+		}
+		enforcedFor := func(b Backend) bool {
+			ul, err := svc(b).AcquireInstanceLock(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { _ = ul.Unlock() })
+			return LockIsEnforced(ul)
+		}
+
+		It("is true for the filesystem backend, which really does exclude a second instance", func() {
+			Expect(enforcedFor(NewFilesystemBackend(GinkgoT().TempDir()))).To(BeTrue())
+		})
+
+		It("is true through an overlay, which delegates the lock to its base", func() {
+			// The wrapper case the note above is about: the overlay forwards
+			// AcquireInstanceLock to its base, so the lock it returns is the
+			// base's and excludes just as much. Were the forwarding to go, the
+			// overlay would answer false here while nothing else changed.
+			ov, _, _, _ := overlayTestSetup()
+			Expect(enforcedFor(ov)).To(BeTrue())
+		})
+
+		It("is false for a backend with distributed locking, which may run many instances", func() {
+			// bothLocker embeds the concrete filesystem backend, so it could
+			// take the store-wide flock; the capability gate is what stops it.
+			// The predicate must report that nothing was excluded, since on
+			// this backend nothing was.
+			b := &bothLocker{FilesystemBackend: NewFilesystemBackend(GinkgoT().TempDir())}
+			Expect(enforcedFor(b)).To(BeFalse())
+		})
+
+		It("is false for a backend that offers no store-wide lock at all", func() {
+			b := plainBackend{Backend: NewFilesystemBackend(GinkgoT().TempDir())}
+			Expect(enforcedFor(b)).To(BeFalse())
+		})
+	})
+})
+
+// strangeUnlocker is an Unlocker from outside this package's knowledge — a
+// wrapper, or a no-op variant added later.
+type strangeUnlocker struct{}
+
+func (strangeUnlocker) Unlock() error { return nil }

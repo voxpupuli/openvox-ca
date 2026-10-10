@@ -82,6 +82,23 @@ func (b *RecordingBackend) AcquireInstanceLock() (storage.Unlocker, error) {
 	return &recordingUnlocker{backend: b, wrapped: ul}, nil
 }
 
+// NOTE: recordingUnlocker deliberately does NOT forward storage's unexported
+// enforcesInstance predicate, so storage.LockIsEnforced is false for a
+// RecordingBackend even when the wrapped lock is a real flock. That is the
+// fail-closed direction and harmless for the ordering this type records, but it
+// means specs asserting on holdInstanceLock's `enforced` return must not be
+// written against RecordingBackend: such a spec would meet the
+// unenforceable-lock refusal and be "repaired" by passing --replicas-stopped,
+// quietly retiring the gate it was meant to pin.
+//
+// Nothing in this package pins that: a test whose subject is a fixture's
+// deliberate non-feature can only fail when someone adds the forwarding on
+// purpose, and it cost a plain testing.T function in a package AGENTS.md wants
+// Ginkgo-only. The guard lives where the mistake would actually be made
+// instead -- cmd/openvox-ca/instancelock_test.go asserts `enforced` is true on
+// a real FilesystemBackend, so a spec author who sees false here has a
+// sibling, on the same helper, showing what a backend that can answer looks
+// like. If the forwarding is ever added deliberately, update this note.
 type recordingUnlocker struct {
 	backend *RecordingBackend
 	wrapped storage.Unlocker

@@ -161,6 +161,33 @@ recomputes the destination's integrity head from its entries
 (`RebuildInventoryHMAC`). This resolves the otherwise-spurious
 `ErrInventoryTampered` that copying a foreign `inventory_hmac` would cause.
 
+`RebuildInventoryHMAC` is no longer reached only from a migration: the offline
+[`openvox-ca rebuild-inventory-hmac`](../operator-cli.md#rebuild-inventory-hmac-re-asserting-inventory-integrity)
+calls it too, as the supported repair for a CA whose stored integrity value has
+stopped verifying. Note what that command
+re-asserts rather than verifies, and why it cannot say *which* entry diverged —
+one head is persisted, not one per entry.
+
+`InventoryIntegrityReport` is the read side of that command, and the reason it
+exists is that every ordinary read path is fail-closed: `ReadInventory` and
+`InventoryEntries` return `ErrInventoryTampered` on a mismatch, which is correct
+for serving and useless for diagnosis. It reports the scheme, the entry count,
+the stored and computed heads, the HMAC key's state and any blob content the
+entry count does not describe — without verifying, and without writing. It reads
+the key through `loadHMACKey` rather than `EnsureHMACKey` deliberately: the
+latter regenerates a wrong-length key, which is itself one of the ways an
+inventory stops verifying, and a report must not perform the act it exists to
+describe.
+
+It also carries `LegacyUndecomposed`, which is set when a structured backend
+reports no rows while its blob key still holds parseable entries — an etcd or
+redis store upgraded from a pre-decomposition release and not yet started. That
+state is reachable only from an offline caller, because decomposition runs from
+`EnsureReady` and the report is deliberately reached without it. The detection
+fails closed: a blob that cannot be read is an error rather than a "not legacy",
+since that answer is the one that would let a rebuild write an empty hash chain
+over the store's only baseline.
+
 ### The certificate index (`CertIndex`)
 
 The inventory table doubles as a **certificate index**: alongside the four

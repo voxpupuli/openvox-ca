@@ -1111,6 +1111,7 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newCSRCmd())
 	cmd.AddCommand(newImportCACertCmd())
 	cmd.AddCommand(newGenerateCmd())
+	cmd.AddCommand(newRebuildInventoryHMACCmd())
 
 	return cmd
 }
