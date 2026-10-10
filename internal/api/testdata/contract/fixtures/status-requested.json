@@ -1,0 +1,47 @@
+{
+  "name": "status-requested",
+  "description": "status of a pending CSR with DNS SANs",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:423-542",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:177-200",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:491-526",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:2010-2066"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1",
+  "image": "ghcr.io/openvoxproject/openvoxserver:8.14.1-main@sha256:806c5eb471c3f1d499308d903dc84210d96b00761de481d2cc7dee380d78c152",
+  "compare": "exact",
+  "request": {
+    "method": "GET",
+    "path": "/puppet-ca/v1/certificate_status/corner-pending",
+    "client": "admin"
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/json;charset=utf-8",
+    "headers": {
+      "Content-Type": "application/json;charset=utf-8",
+      "Vary": "Accept",
+      "X-Puppet-Version": "8.27.0"
+    },
+    "json": {
+      "name": "corner-pending",
+      "state": "requested",
+      "dns_alt_names": [
+        "DNS:corner-pending",
+        "DNS:Pending.Example.COM"
+      ],
+      "subject_alt_names": [
+        "DNS:corner-pending",
+        "DNS:Pending.Example.COM"
+      ],
+      "authorization_extensions": {},
+      "fingerprint": "CD:4B:31:CD:95:A8:AC:E1:B4:EC:D8:3F:A6:16:A9:EC:3B:66:6A:43:03:BD:D6:61:DF:63:CE:A6:47:93:73:B4",
+      "fingerprints": {
+        "SHA1": "0C:BC:53:40:BF:27:52:CD:CF:F2:02:08:15:91:71:41:5B:0E:36:12",
+        "SHA256": "CD:4B:31:CD:95:A8:AC:E1:B4:EC:D8:3F:A6:16:A9:EC:3B:66:6A:43:03:BD:D6:61:DF:63:CE:A6:47:93:73:B4",
+        "SHA512": "F4:7D:3F:70:58:C1:A3:DF:06:50:8A:C8:D8:3E:06:E8:A4:21:EF:26:BB:7A:22:A1:86:8D:17:E2:94:71:4F:4E:8B:59:5A:00:65:43:DD:0A:76:44:5E:49:33:7E:1F:34:25:79:24:E3:A4:14:7E:80:53:46:EF:60:4A:B8:46:29",
+        "default": "CD:4B:31:CD:95:A8:AC:E1:B4:EC:D8:3F:A6:16:A9:EC:3B:66:6A:43:03:BD:D6:61:DF:63:CE:A6:47:93:73:B4"
+      }
+    }
+  }
+}

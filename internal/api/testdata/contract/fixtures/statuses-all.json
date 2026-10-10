@@ -1,0 +1,388 @@
+{
+  "name": "statuses-all",
+  "description": "every certificate and CSR",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:544-561",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:2068-2096"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1",
+  "image": "ghcr.io/openvoxproject/openvoxserver:8.14.1-main@sha256:806c5eb471c3f1d499308d903dc84210d96b00761de481d2cc7dee380d78c152",
+  "compare": "exact",
+  "request": {
+    "method": "GET",
+    "path": "/puppet-ca/v1/certificate_statuses/any",
+    "client": "admin"
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/json;charset=utf-8",
+    "headers": {
+      "Content-Type": "application/json;charset=utf-8",
+      "Vary": "Accept",
+      "X-Puppet-Version": "8.27.0"
+    },
+    "json": [
+      {
+        "name": "sign2-me",
+        "state": "requested",
+        "dns_alt_names": [],
+        "subject_alt_names": [],
+        "authorization_extensions": {},
+        "fingerprint": "F0:C2:78:9A:BB:07:B3:8D:B5:52:0B:68:99:89:EC:33:A6:E7:BF:64:C3:1F:5D:9D:4B:A7:4A:C5:AC:04:B8:37",
+        "fingerprints": {
+          "SHA1": "C9:5F:34:C6:DA:92:F0:71:6A:5D:03:D8:21:9B:8B:08:07:69:AE:AF",
+          "SHA256": "F0:C2:78:9A:BB:07:B3:8D:B5:52:0B:68:99:89:EC:33:A6:E7:BF:64:C3:1F:5D:9D:4B:A7:4A:C5:AC:04:B8:37",
+          "SHA512": "41:AD:41:1A:F6:7B:59:B8:72:8F:63:7D:B0:43:61:A6:26:90:75:86:C0:79:D4:EA:EF:97:82:CC:2B:E8:D2:86:80:97:FD:36:07:CB:1B:A6:CA:D2:0F:4E:4B:7D:BE:80:FA:34:A4:5D:30:8F:1C:1F:E5:1A:B7:1C:19:78:85:B9",
+          "default": "F0:C2:78:9A:BB:07:B3:8D:B5:52:0B:68:99:89:EC:33:A6:E7:BF:64:C3:1F:5D:9D:4B:A7:4A:C5:AC:04:B8:37"
+        }
+      },
+      {
+        "name": "corner-both",
+        "state": "requested",
+        "dns_alt_names": [],
+        "subject_alt_names": [],
+        "authorization_extensions": {},
+        "fingerprint": "53:A8:66:D4:24:BD:1F:87:B3:B6:45:06:0E:06:B1:AB:CF:1D:19:3B:21:1D:F0:42:67:9C:EE:F3:E2:F0:CB:F5",
+        "fingerprints": {
+          "SHA1": "9D:AE:E5:E0:E8:15:49:4A:28:E5:97:3D:B8:FD:4D:40:05:80:6D:F2",
+          "SHA256": "53:A8:66:D4:24:BD:1F:87:B3:B6:45:06:0E:06:B1:AB:CF:1D:19:3B:21:1D:F0:42:67:9C:EE:F3:E2:F0:CB:F5",
+          "SHA512": "A5:88:2C:B8:25:25:81:23:C6:F6:D1:3C:6C:0D:78:53:74:76:4D:1F:1C:03:9E:5C:A1:C0:DA:C0:F7:F5:19:B9:2A:D1:50:CD:3A:FB:68:3D:66:2C:9B:C2:3C:B0:6B:C5:43:79:CA:EB:BF:EC:B2:C3:1F:60:98:F3:E2:9E:FD:8D",
+          "default": "53:A8:66:D4:24:BD:1F:87:B3:B6:45:06:0E:06:B1:AB:CF:1D:19:3B:21:1D:F0:42:67:9C:EE:F3:E2:F0:CB:F5"
+        }
+      },
+      {
+        "name": "delete-me-csr",
+        "state": "requested",
+        "dns_alt_names": [],
+        "subject_alt_names": [],
+        "authorization_extensions": {},
+        "fingerprint": "44:17:34:8E:C0:1A:E5:91:B3:88:5B:69:87:AF:58:F4:62:6B:04:8B:CE:02:BB:B0:8F:50:68:63:4A:89:CF:34",
+        "fingerprints": {
+          "SHA1": "3C:B5:D0:10:60:E8:00:09:34:69:3E:86:CC:09:D4:43:71:8D:F0:C1",
+          "SHA256": "44:17:34:8E:C0:1A:E5:91:B3:88:5B:69:87:AF:58:F4:62:6B:04:8B:CE:02:BB:B0:8F:50:68:63:4A:89:CF:34",
+          "SHA512": "36:C5:88:E5:9D:9C:FC:49:88:3F:C6:86:30:4C:33:30:C5:62:99:89:D4:4F:A4:02:F1:D0:8B:A2:19:51:90:0A:22:D5:36:88:23:DC:62:AD:BC:D9:18:67:0E:2C:1C:6C:FE:83:4F:7C:6B:CE:3D:59:27:D7:41:6D:16:47:51:2B",
+          "default": "44:17:34:8E:C0:1A:E5:91:B3:88:5B:69:87:AF:58:F4:62:6B:04:8B:CE:02:BB:B0:8F:50:68:63:4A:89:CF:34"
+        }
+      },
+      {
+        "name": "corner-authext",
+        "state": "requested",
+        "dns_alt_names": [],
+        "subject_alt_names": [],
+        "authorization_extensions": {
+          "pp_cli_auth": "true"
+        },
+        "fingerprint": "A1:56:1D:95:FC:D7:55:4B:A1:2D:ED:99:EF:66:C1:70:B0:9F:AF:8A:34:B2:61:11:A5:40:92:49:9A:04:74:79",
+        "fingerprints": {
+          "SHA1": "41:AE:1F:47:9F:99:A7:13:24:2E:43:59:62:7B:B2:FA:59:3E:8D:3F",
+          "SHA256": "A1:56:1D:95:FC:D7:55:4B:A1:2D:ED:99:EF:66:C1:70:B0:9F:AF:8A:34:B2:61:11:A5:40:92:49:9A:04:74:79",
+          "SHA512": "44:5D:A9:23:0C:ED:8F:24:7B:FC:32:F3:F7:0E:18:68:9F:A1:BC:EB:5A:0F:96:A8:C0:53:12:0F:D6:38:5A:FB:31:CD:1B:22:55:76:AA:95:7A:59:36:39:6B:A1:90:DA:2A:51:7D:2A:5C:73:49:1A:21:92:32:71:4A:2E:F1:BE",
+          "default": "A1:56:1D:95:FC:D7:55:4B:A1:2D:ED:99:EF:66:C1:70:B0:9F:AF:8A:34:B2:61:11:A5:40:92:49:9A:04:74:79"
+        }
+      },
+      {
+        "name": "sign-me",
+        "state": "requested",
+        "dns_alt_names": [],
+        "subject_alt_names": [],
+        "authorization_extensions": {},
+        "fingerprint": "FC:50:AC:2B:FD:8E:72:B4:D4:0F:DE:5A:E6:21:39:C5:C6:44:E1:A8:85:64:D6:62:90:0C:25:B0:C2:F3:F3:52",
+        "fingerprints": {
+          "SHA1": "F7:4E:59:53:1C:70:3A:3E:54:AD:AD:52:05:67:2F:E7:B9:E9:DD:0A",
+          "SHA256": "FC:50:AC:2B:FD:8E:72:B4:D4:0F:DE:5A:E6:21:39:C5:C6:44:E1:A8:85:64:D6:62:90:0C:25:B0:C2:F3:F3:52",
+          "SHA512": "BB:A7:17:C8:B7:58:88:2C:C7:21:B5:00:AC:89:4C:76:AC:C3:9D:E9:85:AA:DE:40:99:9D:62:8E:ED:EA:94:F4:5E:2A:10:F8:1E:14:C8:51:55:E1:3E:F7:04:66:CC:F7:D9:4B:58:28:2D:C0:ED:A5:54:B1:EB:90:1D:A4:FB:81",
+          "default": "FC:50:AC:2B:FD:8E:72:B4:D4:0F:DE:5A:E6:21:39:C5:C6:44:E1:A8:85:64:D6:62:90:0C:25:B0:C2:F3:F3:52"
+        }
+      },
+      {
+        "name": "corner-pending",
+        "state": "requested",
+        "dns_alt_names": [
+          "DNS:corner-pending",
+          "DNS:Pending.Example.COM"
+        ],
+        "subject_alt_names": [
+          "DNS:corner-pending",
+          "DNS:Pending.Example.COM"
+        ],
+        "authorization_extensions": {},
+        "fingerprint": "CD:4B:31:CD:95:A8:AC:E1:B4:EC:D8:3F:A6:16:A9:EC:3B:66:6A:43:03:BD:D6:61:DF:63:CE:A6:47:93:73:B4",
+        "fingerprints": {
+          "SHA1": "0C:BC:53:40:BF:27:52:CD:CF:F2:02:08:15:91:71:41:5B:0E:36:12",
+          "SHA256": "CD:4B:31:CD:95:A8:AC:E1:B4:EC:D8:3F:A6:16:A9:EC:3B:66:6A:43:03:BD:D6:61:DF:63:CE:A6:47:93:73:B4",
+          "SHA512": "F4:7D:3F:70:58:C1:A3:DF:06:50:8A:C8:D8:3E:06:E8:A4:21:EF:26:BB:7A:22:A1:86:8D:17:E2:94:71:4F:4E:8B:59:5A:00:65:43:DD:0A:76:44:5E:49:33:7E:1F:34:25:79:24:E3:A4:14:7E:80:53:46:EF:60:4A:B8:46:29",
+          "default": "CD:4B:31:CD:95:A8:AC:E1:B4:EC:D8:3F:A6:16:A9:EC:3B:66:6A:43:03:BD:D6:61:DF:63:CE:A6:47:93:73:B4"
+        }
+      },
+      {
+        "name": "corner-nosan",
+        "dns_alt_names": [],
+        "state": "signed",
+        "authorization_extensions": {},
+        "subject_alt_names": [],
+        "not_before": "2026-10-04T14:59:00UTC",
+        "fingerprints": {
+          "SHA1": "58:BF:A3:15:E5:27:0D:8F:8F:5D:54:2E:AA:92:69:E2:CC:6B:BE:C4",
+          "SHA256": "8B:15:A4:20:53:23:ED:08:12:67:C5:FF:FD:35:BC:40:35:67:A6:8A:5B:42:68:94:3E:5B:72:83:FB:06:23:DD",
+          "SHA512": "EF:2B:7A:63:EC:3A:05:BB:2B:E4:CD:0E:EB:8D:46:00:0E:21:BD:0E:EF:B0:CF:0F:1E:0E:18:D9:64:56:6A:C4:7F:4E:D9:DE:38:FB:0F:5E:CA:EE:98:3C:02:6B:2C:71:C0:73:4F:55:39:55:BF:74:18:8B:F2:AB:BF:C3:8C:61",
+          "default": "8B:15:A4:20:53:23:ED:08:12:67:C5:FF:FD:35:BC:40:35:67:A6:8A:5B:42:68:94:3E:5B:72:83:FB:06:23:DD"
+        },
+        "not_after": "2031-10-04T15:59:00UTC",
+        "serial_number": 32343,
+        "fingerprint": "8B:15:A4:20:53:23:ED:08:12:67:C5:FF:FD:35:BC:40:35:67:A6:8A:5B:42:68:94:3E:5B:72:83:FB:06:23:DD"
+      },
+      {
+        "name": "corner-revoked",
+        "dns_alt_names": [
+          "DNS:corner-revoked"
+        ],
+        "state": "revoked",
+        "authorization_extensions": {},
+        "subject_alt_names": [
+          "DNS:corner-revoked"
+        ],
+        "not_before": "2026-10-04T14:59:00UTC",
+        "fingerprints": {
+          "SHA1": "B2:3B:59:1F:34:32:AD:E6:AC:0B:79:D2:C1:59:6B:CB:E3:5C:BB:D0",
+          "SHA256": "7A:EC:CD:02:DC:EA:92:B7:66:7E:C6:19:CA:C6:C6:05:BA:DE:AF:DD:6A:53:C6:7C:E3:CB:47:26:40:19:FD:2C",
+          "SHA512": "CB:62:1E:B9:95:B4:14:97:8E:1D:6E:C6:90:13:FB:29:0D:2B:7C:64:14:B5:7C:AF:2E:14:0F:1D:4F:AD:5D:2F:A1:83:F2:44:61:E3:63:AB:67:AD:4C:6E:2C:4F:BE:1D:FA:97:57:31:4F:29:16:0B:F5:8A:F1:47:F2:D5:AB:FC",
+          "default": "7A:EC:CD:02:DC:EA:92:B7:66:7E:C6:19:CA:C6:C6:05:BA:DE:AF:DD:6A:53:C6:7C:E3:CB:47:26:40:19:FD:2C"
+        },
+        "not_after": "2031-10-04T15:59:00UTC",
+        "serial_number": 21170659518128181738698300407367681148,
+        "fingerprint": "7A:EC:CD:02:DC:EA:92:B7:66:7E:C6:19:CA:C6:C6:05:BA:DE:AF:DD:6A:53:C6:7C:E3:CB:47:26:40:19:FD:2C"
+      },
+      {
+        "name": "corner-dns",
+        "dns_alt_names": [
+          "DNS:corner-dns",
+          "DNS:Corner-DNS.Example.COM",
+          "DNS:alt.example.com"
+        ],
+        "state": "signed",
+        "authorization_extensions": {
+          "pp_auth_role": "webserver",
+          "pp_authorization": "true",
+          "1.3.6.1.4.1.34380.1.3.99": "custom"
+        },
+        "subject_alt_names": [
+          "DNS:corner-dns",
+          "DNS:Corner-DNS.Example.COM",
+          "DNS:alt.example.com"
+        ],
+        "not_before": "2026-10-04T14:59:00UTC",
+        "fingerprints": {
+          "SHA1": "84:65:43:8C:52:AB:89:EF:CF:F5:4C:0C:D0:D2:23:2B:0F:2C:28:C8",
+          "SHA256": "44:14:3F:A3:6A:08:5F:B5:04:50:9C:DB:92:A7:44:EE:94:B9:4A:77:00:AC:6E:8C:4D:43:9D:96:82:3F:21:86",
+          "SHA512": "67:44:63:3E:B1:6F:C4:5D:2A:A9:AB:56:55:1C:96:83:F0:65:4B:52:6E:1F:35:84:9E:3D:73:9F:6A:C6:E0:05:D6:71:64:68:AE:8B:AF:C6:9D:55:0F:DD:B9:4E:37:1C:54:78:0F:AE:5A:0B:91:B3:AA:F7:8E:6D:8E:01:3C:04",
+          "default": "44:14:3F:A3:6A:08:5F:B5:04:50:9C:DB:92:A7:44:EE:94:B9:4A:77:00:AC:6E:8C:4D:43:9D:96:82:3F:21:86"
+        },
+        "not_after": "2031-10-04T15:59:00UTC",
+        "serial_number": 211659643165621965746051058369188784120,
+        "fingerprint": "44:14:3F:A3:6A:08:5F:B5:04:50:9C:DB:92:A7:44:EE:94:B9:4A:77:00:AC:6E:8C:4D:43:9D:96:82:3F:21:86"
+      },
+      {
+        "name": "corner-both",
+        "dns_alt_names": [
+          "DNS:corner-both"
+        ],
+        "state": "signed",
+        "authorization_extensions": {},
+        "subject_alt_names": [
+          "DNS:corner-both"
+        ],
+        "not_before": "2026-10-04T14:59:00UTC",
+        "fingerprints": {
+          "SHA1": "BF:28:FA:F6:AF:F0:87:BD:E6:AB:05:C0:CC:75:79:97:74:E6:95:BE",
+          "SHA256": "1A:D3:28:E5:83:93:C9:23:22:2D:EE:B0:33:F6:47:D0:35:9B:DE:0B:E9:12:E4:CC:A5:74:90:A3:3E:00:EA:F7",
+          "SHA512": "9F:66:F5:DF:16:DD:EC:91:5B:73:F1:C1:76:E4:1B:64:63:39:D0:06:C4:A0:70:C8:5F:7C:D9:89:0C:6D:D8:B0:A0:60:5E:22:F4:49:16:FD:29:72:A5:2D:48:CD:41:46:57:A2:43:DD:FE:7E:9C:B8:36:99:8F:80:0A:F9:59:7A",
+          "default": "1A:D3:28:E5:83:93:C9:23:22:2D:EE:B0:33:F6:47:D0:35:9B:DE:0B:E9:12:E4:CC:A5:74:90:A3:3E:00:EA:F7"
+        },
+        "not_after": "2031-10-04T15:59:00UTC",
+        "serial_number": 74065539245744058712908460334436066891,
+        "fingerprint": "1A:D3:28:E5:83:93:C9:23:22:2D:EE:B0:33:F6:47:D0:35:9B:DE:0B:E9:12:E4:CC:A5:74:90:A3:3E:00:EA:F7"
+      },
+      {
+        "name": "revoke-me",
+        "dns_alt_names": [
+          "DNS:revoke-me"
+        ],
+        "state": "signed",
+        "authorization_extensions": {},
+        "subject_alt_names": [
+          "DNS:revoke-me"
+        ],
+        "not_before": "2026-10-04T14:59:00UTC",
+        "fingerprints": {
+          "SHA1": "18:78:93:CE:DE:8B:47:15:CE:27:7E:48:B2:CA:CA:AC:1F:BC:20:62",
+          "SHA256": "63:1B:2B:D1:0F:E5:3B:D3:1B:C3:8B:5D:FF:6B:78:FD:42:23:20:2A:F8:EF:C6:3D:99:43:7E:F2:CB:D8:2C:9D",
+          "SHA512": "77:DF:E4:13:8F:7C:9B:F9:80:1A:DA:9C:0A:63:0B:C8:11:BF:5B:46:D0:36:74:2C:28:58:46:EF:26:90:B0:19:B0:64:86:E3:A1:55:F9:A3:C5:50:55:39:04:4F:0C:77:5B:64:A2:49:B0:EC:8F:B4:43:CF:CC:89:91:D6:9A:0C",
+          "default": "63:1B:2B:D1:0F:E5:3B:D3:1B:C3:8B:5D:FF:6B:78:FD:42:23:20:2A:F8:EF:C6:3D:99:43:7E:F2:CB:D8:2C:9D"
+        },
+        "not_after": "2031-10-04T15:59:00UTC",
+        "serial_number": 167130423941206096628116583666317282669,
+        "fingerprint": "63:1B:2B:D1:0F:E5:3B:D3:1B:C3:8B:5D:FF:6B:78:FD:42:23:20:2A:F8:EF:C6:3D:99:43:7E:F2:CB:D8:2C:9D"
+      },
+      {
+        "name": "clean-me",
+        "dns_alt_names": [
+          "DNS:clean-me"
+        ],
+        "state": "signed",
+        "authorization_extensions": {},
+        "subject_alt_names": [
+          "DNS:clean-me"
+        ],
+        "not_before": "2026-10-04T14:59:00UTC",
+        "fingerprints": {
+          "SHA1": "9A:60:57:EA:D9:BE:02:23:C7:E7:F2:C8:E2:6D:97:CD:8D:C7:FE:BD",
+          "SHA256": "F9:17:98:63:74:41:39:F3:A7:EF:F3:9F:09:71:AC:7C:FB:16:3C:FD:98:16:F4:56:D6:0B:D3:A4:07:52:18:1A",
+          "SHA512": "3E:D0:D8:2C:5A:31:4D:3F:05:67:55:E5:BE:AF:BE:51:12:CB:DD:B7:37:EA:32:9D:37:EE:E9:37:28:B6:FA:0A:CD:18:93:CB:E7:84:05:CE:D3:5A:E7:37:F7:4B:8E:CF:55:EC:8A:36:B1:57:7C:88:0C:97:96:3D:FC:1A:76:2C",
+          "default": "F9:17:98:63:74:41:39:F3:A7:EF:F3:9F:09:71:AC:7C:FB:16:3C:FD:98:16:F4:56:D6:0B:D3:A4:07:52:18:1A"
+        },
+        "not_after": "2031-10-04T15:59:00UTC",
+        "serial_number": 5544272041856203156242247341095764779,
+        "fingerprint": "F9:17:98:63:74:41:39:F3:A7:EF:F3:9F:09:71:AC:7C:FB:16:3C:FD:98:16:F4:56:D6:0B:D3:A4:07:52:18:1A"
+      },
+      {
+        "name": "renew-me",
+        "dns_alt_names": [
+          "DNS:renew-me"
+        ],
+        "state": "signed",
+        "authorization_extensions": {},
+        "subject_alt_names": [
+          "DNS:renew-me"
+        ],
+        "not_before": "2026-10-04T14:59:00UTC",
+        "fingerprints": {
+          "SHA1": "CF:4D:A6:AC:11:3E:11:81:76:04:2C:91:67:11:11:D2:8C:62:12:0D",
+          "SHA256": "BF:FB:D2:41:3F:72:BD:6A:B0:17:FC:51:8C:07:5E:61:C5:AF:EF:B6:5D:F3:7F:78:88:55:80:3F:58:EA:20:1C",
+          "SHA512": "C3:FE:21:28:D3:61:CD:31:CC:5C:13:50:8F:05:1F:98:60:97:1E:04:6D:24:34:37:4F:99:FC:D8:5A:74:D2:A0:49:57:3D:27:3B:29:31:CE:70:8A:01:92:50:46:E2:D2:AC:75:CB:07:97:B8:3B:EB:AF:E7:8E:30:90:24:36:E4",
+          "default": "BF:FB:D2:41:3F:72:BD:6A:B0:17:FC:51:8C:07:5E:61:C5:AF:EF:B6:5D:F3:7F:78:88:55:80:3F:58:EA:20:1C"
+        },
+        "not_after": "2031-10-04T15:59:00UTC",
+        "serial_number": 119913858973990759928081716932149127138,
+        "fingerprint": "BF:FB:D2:41:3F:72:BD:6A:B0:17:FC:51:8C:07:5E:61:C5:AF:EF:B6:5D:F3:7F:78:88:55:80:3F:58:EA:20:1C"
+      },
+      {
+        "name": "puppet",
+        "dns_alt_names": [
+          "DNS:puppet",
+          "DNS:puppet"
+        ],
+        "state": "signed",
+        "authorization_extensions": {
+          "pp_cli_auth": "true"
+        },
+        "subject_alt_names": [
+          "DNS:puppet",
+          "DNS:puppet"
+        ],
+        "not_before": "2026-10-03T15:58:50UTC",
+        "fingerprints": {
+          "SHA1": "78:2B:FA:AF:AA:D2:3B:2C:BD:53:1E:05:C9:8F:3D:FE:54:5C:CE:72",
+          "SHA256": "81:69:7E:EF:63:6B:03:F0:E2:20:6F:B1:E4:1F:1B:E9:D9:F2:11:22:48:85:AD:1C:36:E5:DA:8F:02:2E:2C:8D",
+          "SHA512": "8A:E8:27:B9:E6:38:B4:26:45:C4:F8:1E:E0:90:D1:C9:E3:93:C3:80:58:1C:F3:4E:B2:0E:C8:FD:D9:A8:FA:6B:15:8A:78:63:A3:59:75:2B:19:29:80:19:F0:44:A2:07:E3:B3:1E:1C:08:E3:A4:81:02:4B:C0:F9:FC:87:7E:A9",
+          "default": "81:69:7E:EF:63:6B:03:F0:E2:20:6F:B1:E4:1F:1B:E9:D9:F2:11:22:48:85:AD:1C:36:E5:DA:8F:02:2E:2C:8D"
+        },
+        "not_after": "2031-10-03T15:58:51UTC",
+        "serial_number": 1,
+        "fingerprint": "81:69:7E:EF:63:6B:03:F0:E2:20:6F:B1:E4:1F:1B:E9:D9:F2:11:22:48:85:AD:1C:36:E5:DA:8F:02:2E:2C:8D"
+      },
+      {
+        "name": "corner-ip",
+        "dns_alt_names": [
+          "DNS:corner-ip",
+          "DNS:ip.example.com"
+        ],
+        "state": "signed",
+        "authorization_extensions": {},
+        "subject_alt_names": [
+          "IP:192.0.2.10",
+          "IP:2001:db8:0:0:0:0:0:1",
+          "DNS:corner-ip",
+          "DNS:ip.example.com"
+        ],
+        "not_before": "2026-10-04T14:59:00UTC",
+        "fingerprints": {
+          "SHA1": "7A:83:37:DB:88:E0:6E:FC:23:F1:14:52:A2:8B:CA:B2:31:FE:87:3D",
+          "SHA256": "89:2A:EC:4B:D9:10:38:BF:B2:5D:F6:84:42:60:CA:A3:57:CE:4F:29:38:B7:48:3A:88:EA:A4:D0:85:94:BC:EB",
+          "SHA512": "16:F8:C0:0D:B5:31:EA:3C:24:89:7B:18:40:06:E0:7A:78:81:40:52:9C:54:61:04:23:93:E3:73:22:EF:9D:3A:A0:84:C1:F2:FD:3C:4A:B5:2E:3C:56:B9:68:17:9C:70:46:82:9D:8A:79:A0:93:76:5D:F5:9D:12:E0:ED:21:0B",
+          "default": "89:2A:EC:4B:D9:10:38:BF:B2:5D:F6:84:42:60:CA:A3:57:CE:4F:29:38:B7:48:3A:88:EA:A4:D0:85:94:BC:EB"
+        },
+        "not_after": "2031-10-04T15:59:00UTC",
+        "serial_number": 101443618399496591543457618568630766675,
+        "fingerprint": "89:2A:EC:4B:D9:10:38:BF:B2:5D:F6:84:42:60:CA:A3:57:CE:4F:29:38:B7:48:3A:88:EA:A4:D0:85:94:BC:EB"
+      },
+      {
+        "name": "corner-mapped",
+        "dns_alt_names": [
+          "DNS:corner-mapped"
+        ],
+        "state": "signed",
+        "authorization_extensions": {},
+        "subject_alt_names": [
+          "IP:192.0.2.11",
+          "DNS:corner-mapped"
+        ],
+        "not_before": "2026-10-04T14:59:00UTC",
+        "fingerprints": {
+          "SHA1": "A0:37:56:0F:FB:B0:B7:F2:75:32:38:B2:0E:8B:07:6E:0E:96:44:6E",
+          "SHA256": "A9:30:67:0B:12:84:B7:DA:D4:14:8A:9C:22:7D:A1:F4:26:CC:B9:66:69:85:BB:97:BD:D2:9D:A7:B0:94:05:80",
+          "SHA512": "93:A1:0D:C4:32:77:86:16:10:BA:DC:CE:8D:B9:45:DB:AC:17:C2:47:B9:37:C6:32:8E:EC:F9:49:FC:67:F6:71:B8:1F:47:67:BF:17:D6:1F:03:5C:A8:93:0A:60:83:26:FF:57:E6:8B:0E:FB:D1:86:5C:EF:67:03:F3:A0:17:7C",
+          "default": "A9:30:67:0B:12:84:B7:DA:D4:14:8A:9C:22:7D:A1:F4:26:CC:B9:66:69:85:BB:97:BD:D2:9D:A7:B0:94:05:80"
+        },
+        "not_after": "2031-10-04T15:59:00UTC",
+        "serial_number": 18136831605300072762596117399969775079,
+        "fingerprint": "A9:30:67:0B:12:84:B7:DA:D4:14:8A:9C:22:7D:A1:F4:26:CC:B9:66:69:85:BB:97:BD:D2:9D:A7:B0:94:05:80"
+      },
+      {
+        "name": "delete-me",
+        "dns_alt_names": [
+          "DNS:delete-me"
+        ],
+        "state": "signed",
+        "authorization_extensions": {},
+        "subject_alt_names": [
+          "DNS:delete-me"
+        ],
+        "not_before": "2026-10-04T14:59:00UTC",
+        "fingerprints": {
+          "SHA1": "62:54:00:E9:44:16:FA:C6:91:32:DB:97:5F:3F:8F:6F:F1:AC:FB:6D",
+          "SHA256": "78:8D:B2:DF:7D:07:2F:A2:6E:38:4B:6B:9C:11:01:78:D9:2A:42:61:2D:32:19:DB:81:ED:E6:FC:40:67:4D:74",
+          "SHA512": "DB:4C:9D:E4:7E:30:A6:8C:53:A1:BF:F5:04:AA:29:BF:67:B9:EE:08:6E:F7:49:B7:0F:26:43:F6:95:C7:AB:C7:E6:DC:EC:D8:CD:35:A7:26:45:C9:62:36:C9:A6:95:08:C6:D1:46:35:56:73:07:F2:B6:50:5F:ED:59:2A:EC:D1",
+          "default": "78:8D:B2:DF:7D:07:2F:A2:6E:38:4B:6B:9C:11:01:78:D9:2A:42:61:2D:32:19:DB:81:ED:E6:FC:40:67:4D:74"
+        },
+        "not_after": "2031-10-04T15:59:00UTC",
+        "serial_number": 98398550207647098589162013720611260846,
+        "fingerprint": "78:8D:B2:DF:7D:07:2F:A2:6E:38:4B:6B:9C:11:01:78:D9:2A:42:61:2D:32:19:DB:81:ED:E6:FC:40:67:4D:74"
+      },
+      {
+        "name": "corner-ext",
+        "dns_alt_names": [
+          "DNS:corner-ext"
+        ],
+        "state": "signed",
+        "authorization_extensions": {
+          "pp_cli_auth": "true",
+          "1.3.6.1.4.1.34380.1.3.2": "true",
+          "1.3.6.1.4.1.34380.1.3.98": "legacy"
+        },
+        "subject_alt_names": [
+          "DNS:corner-ext"
+        ],
+        "not_before": "2026-10-04T14:59:00UTC",
+        "fingerprints": {
+          "SHA1": "12:90:64:39:B6:CB:15:15:9A:A8:D2:6A:ED:DB:FF:87:45:C6:BB:8B",
+          "SHA256": "18:AB:37:D5:DB:D4:04:75:23:0E:D4:0A:E8:E3:FB:F9:A1:13:F0:88:55:F4:BE:35:0D:8F:59:0E:53:9F:1E:68",
+          "SHA512": "7C:74:FA:CB:7B:5E:79:77:C1:D3:F5:A8:CD:40:43:50:39:D5:2D:A1:6E:F9:03:FE:0C:80:2B:3B:5B:28:D8:A0:94:C8:EB:01:EE:92:DA:F6:9F:EA:E9:7A:D2:4C:35:F4:52:D2:B5:2B:CE:92:B1:0F:16:4A:76:38:55:17:C3:A5",
+          "default": "18:AB:37:D5:DB:D4:04:75:23:0E:D4:0A:E8:E3:FB:F9:A1:13:F0:88:55:F4:BE:35:0D:8F:59:0E:53:9F:1E:68"
+        },
+        "not_after": "2031-10-04T15:59:00UTC",
+        "serial_number": 109117444832565856934713066264583771687,
+        "fingerprint": "18:AB:37:D5:DB:D4:04:75:23:0E:D4:0A:E8:E3:FB:F9:A1:13:F0:88:55:F4:BE:35:0D:8F:59:0E:53:9F:1E:68"
+      }
+    ]
+  }
+}

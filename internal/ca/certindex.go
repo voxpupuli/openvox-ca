@@ -32,9 +32,11 @@ import (
 )
 
 // SHA256ColonFingerprint renders the SHA-256 digest of der as colon-separated
-// hex pairs, the form Puppet displays certificate fingerprints in. It is the
-// single producer of the fingerprint stored in the certificate index and
-// emitted by the status API, so the two can never disagree on format.
+// lower-case hex pairs. It is the single producer of the fingerprint stored in
+// the certificate index and emitted by the status API, so the two never
+// disagree on the digest; the API upper-cases it on the way out, as OpenVox
+// Server sends it (see api.responseFingerprint), so stored rows need no
+// rewrite.
 func SHA256ColonFingerprint(der []byte) string {
 	sum := sha256.Sum256(der)
 	raw := hex.EncodeToString(sum[:])

@@ -966,22 +966,31 @@ func authExtensions(exts []pkix.Extension) map[string]string {
 // fingerprint renders the SHA-256 fingerprint of a PEM-encoded certificate or
 // CSR as Puppet's colon-separated hex pairs, or "" when data is not PEM. The
 // digest formatting is shared with the certificate index projection (see
-// ca.SHA256ColonFingerprint).
+// ca.SHA256ColonFingerprint); the case is the response's, see
+// responseFingerprint.
 func fingerprint(data []byte) string {
 	block, _ := pem.Decode(data)
 	if block == nil {
 		return ""
 	}
-	return ca.SHA256ColonFingerprint(block.Bytes)
+	return responseFingerprint(ca.SHA256ColonFingerprint(block.Bytes))
 }
 
-// noNilSlice returns s unchanged when non-nil, or an empty non-nil slice.
-// This ensures dns_alt_names serialises as [] rather than null in JSON.
-func noNilSlice(s []string) []string {
-	if s == nil {
-		return []string{}
+// responseFingerprint renders a colon-separated fingerprint in upper case, as
+// OpenVox Server sends it. It is applied when a response is built, so index
+// rows that store the lower-case form need no rewrite.
+func responseFingerprint(fp string) string {
+	return strings.ToUpper(fp)
+}
+
+// dnsAltNames renders DNS SANs as OpenVox Server does: each prefixed "DNS:",
+// in certificate order, and [] rather than null when there are none.
+func dnsAltNames(names []string) []string {
+	out := make([]string, len(names))
+	for i, n := range names {
+		out[i] = "DNS:" + n
 	}
-	return s
+	return out
 }
 
 // timeFormat returns the time layout string to use for JSON date/time fields.
@@ -1011,7 +1020,7 @@ func certStatusFromCert(subject string, certPEM []byte, state string, timeFmt st
 	fp := fingerprint(certPEM)
 	nb := cert.NotBefore.UTC().Format(timeFmt)
 	na := cert.NotAfter.UTC().Format(timeFmt)
-	dnsNames := noNilSlice(cert.DNSNames)
+	dnsNames := dnsAltNames(cert.DNSNames)
 	return CertStatusResponse{
 		Name:                    subject,
 		State:                   state,
@@ -1072,16 +1081,17 @@ func certStatusFromRecord(rec storage.CertRecord, timeFmt string, serialFmt Seri
 
 	nbs := nb.UTC().Format(timeFmt)
 	nas := na.UTC().Format(timeFmt)
-	dnsNames := noNilSlice(rec.DNSAltNames)
+	dnsNames := dnsAltNames(rec.DNSAltNames)
 	authExts := rec.AuthExtensions
 	if authExts == nil {
 		authExts = map[string]string{}
 	}
+	fp := responseFingerprint(rec.Fingerprint)
 	return CertStatusResponse{
 		Name:                    rec.Subject,
 		State:                   rec.State,
-		Fingerprint:             rec.Fingerprint,
-		Fingerprints:            map[string]string{"SHA256": rec.Fingerprint, "default": rec.Fingerprint},
+		Fingerprint:             fp,
+		Fingerprints:            map[string]string{"SHA256": fp, "default": fp},
 		DNSAltNames:             dnsNames,
 		SubjectAltNames:         dnsNames,
 		AuthorizationExtensions: authExts,
@@ -1107,7 +1117,7 @@ func certStatusFromCSR(subject string, csrPEM []byte) CertStatusResponse {
 			AuthorizationExtensions: map[string]string{},
 		}
 	}
-	dnsNames := noNilSlice(csr.DNSNames)
+	dnsNames := dnsAltNames(csr.DNSNames)
 	return CertStatusResponse{
 		Name:                    subject,
 		State:                   "requested",
@@ -1328,6 +1338,12 @@ func (s *Server) handleGetStatuses(w http.ResponseWriter, r *http.Request) {
 // --- Expirations ---
 
 type ExpirationsResponse struct {
+	// CACerts and CRLs are OpenVox Server's shape: every certificate in the
+	// CA bundle keyed by its subject CN, and every CRL in the published
+	// chain keyed by its issuer CN. A CN that appears twice keeps the last.
+	CACerts map[string]string `json:"ca-certs"`
+	CRLs    map[string]string `json:"crls"`
+	// CACrl and CACertificate are openvox-ca's own, kept as additions.
 	CACrl         CRLExpiration  `json:"ca_crl"`
 	CACertificate CertExpiration `json:"ca_certificate"`
 }
@@ -1351,16 +1367,45 @@ func (s *Server) handleGetExpirations(w http.ResponseWriter, r *http.Request) {
 	}
 	certExp := s.CA.CACert.NotAfter.UTC().Format(s.timeFormat())
 
+	// Both documents are read with the parsers the CA uses for them, so this
+	// route cannot disagree with the CA about what they hold. A read that
+	// fails leaves the maps short, and says so in the log.
+	caCerts := map[string]string{s.CA.CACert.Subject.CommonName: certExp}
+	if bundlePEM, err := s.CA.Storage.GetCACert(r.Context()); err != nil {
+		slog.Warn("expirations: reading the CA bundle failed; ca-certs lists this CA alone", "error", err)
+	} else if bundle, err := ca.ParseCABundle(bundlePEM); err != nil {
+		slog.Warn("expirations: parsing the CA bundle failed; ca-certs lists this CA alone", "error", err)
+	} else {
+		for _, cert := range bundle {
+			caCerts[cert.Subject.CommonName] = cert.NotAfter.UTC().Format(s.timeFormat())
+		}
+	}
+
+	// The first CRL in the published chain is the CA's own, and the only one
+	// ca_crl reports; the rest are ancestors' (see CA.CRLChainFile).
 	crlNextUpdate := ""
-	if crlPEM, err := s.CA.Storage.GetCRL(r.Context()); err == nil {
-		if block, _ := pem.Decode(crlPEM); block != nil {
-			if crl, err := x509.ParseRevocationList(block.Bytes); err == nil {
-				crlNextUpdate = crl.NextUpdate.UTC().Format(s.timeFormat())
+	crls := map[string]string{}
+	if crlPEM, err := s.CA.Storage.GetCRL(r.Context()); err != nil {
+		slog.Warn("expirations: reading the CRL failed; ca_crl and crls are empty", "error", err)
+	} else if chain, err := ca.DecodeCRLChain(crlPEM); err != nil {
+		slog.Warn("expirations: parsing the CRL chain failed; ca_crl and crls are empty", "error", err)
+	} else if len(chain) == 0 {
+		// DecodeCRLChain skips blocks of other types, so a file holding no
+		// CRL decodes cleanly to nothing.
+		slog.Warn("expirations: the CRL file holds no CRL; ca_crl and crls are empty")
+	} else {
+		for i, crl := range chain {
+			nextUpdate := crl.NextUpdate.UTC().Format(s.timeFormat())
+			if i == 0 {
+				crlNextUpdate = nextUpdate
 			}
+			crls[crl.Issuer.CommonName] = nextUpdate
 		}
 	}
 
 	resp := ExpirationsResponse{
+		CACerts:       caCerts,
+		CRLs:          crls,
 		CACrl:         CRLExpiration{NextUpdate: crlNextUpdate},
 		CACertificate: CertExpiration{Expiration: certExp},
 	}

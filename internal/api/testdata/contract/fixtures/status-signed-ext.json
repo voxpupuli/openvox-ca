@@ -1,0 +1,52 @@
+{
+  "name": "status-signed-ext",
+  "description": "status of a certificate whose auth extensions the implementations key or render differently",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:423-542",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:177-200",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:491-526",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:2010-2066"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1",
+  "image": "ghcr.io/openvoxproject/openvoxserver:8.14.1-main@sha256:806c5eb471c3f1d499308d903dc84210d96b00761de481d2cc7dee380d78c152",
+  "compare": "exact",
+  "request": {
+    "method": "GET",
+    "path": "/puppet-ca/v1/certificate_status/corner-ext",
+    "client": "admin"
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/json;charset=utf-8",
+    "headers": {
+      "Content-Type": "application/json;charset=utf-8",
+      "Vary": "Accept",
+      "X-Puppet-Version": "8.27.0"
+    },
+    "json": {
+      "name": "corner-ext",
+      "dns_alt_names": [
+        "DNS:corner-ext"
+      ],
+      "state": "signed",
+      "authorization_extensions": {
+        "pp_cli_auth": "true",
+        "1.3.6.1.4.1.34380.1.3.2": "true",
+        "1.3.6.1.4.1.34380.1.3.98": "legacy"
+      },
+      "subject_alt_names": [
+        "DNS:corner-ext"
+      ],
+      "not_before": "2026-10-04T14:59:00UTC",
+      "fingerprints": {
+        "SHA1": "12:90:64:39:B6:CB:15:15:9A:A8:D2:6A:ED:DB:FF:87:45:C6:BB:8B",
+        "SHA256": "18:AB:37:D5:DB:D4:04:75:23:0E:D4:0A:E8:E3:FB:F9:A1:13:F0:88:55:F4:BE:35:0D:8F:59:0E:53:9F:1E:68",
+        "SHA512": "7C:74:FA:CB:7B:5E:79:77:C1:D3:F5:A8:CD:40:43:50:39:D5:2D:A1:6E:F9:03:FE:0C:80:2B:3B:5B:28:D8:A0:94:C8:EB:01:EE:92:DA:F6:9F:EA:E9:7A:D2:4C:35:F4:52:D2:B5:2B:CE:92:B1:0F:16:4A:76:38:55:17:C3:A5",
+        "default": "18:AB:37:D5:DB:D4:04:75:23:0E:D4:0A:E8:E3:FB:F9:A1:13:F0:88:55:F4:BE:35:0D:8F:59:0E:53:9F:1E:68"
+      },
+      "not_after": "2031-10-04T15:59:00UTC",
+      "serial_number": 109117444832565856934713066264583771687,
+      "fingerprint": "18:AB:37:D5:DB:D4:04:75:23:0E:D4:0A:E8:E3:FB:F9:A1:13:F0:88:55:F4:BE:35:0D:8F:59:0E:53:9F:1E:68"
+    }
+  }
+}

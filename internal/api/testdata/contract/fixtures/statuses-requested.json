@@ -1,0 +1,119 @@
+{
+  "name": "statuses-requested",
+  "description": "pending CSRs only",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:544-561",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:2068-2096"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1",
+  "image": "ghcr.io/openvoxproject/openvoxserver:8.14.1-main@sha256:806c5eb471c3f1d499308d903dc84210d96b00761de481d2cc7dee380d78c152",
+  "compare": "exact",
+  "request": {
+    "method": "GET",
+    "path": "/puppet-ca/v1/certificate_statuses/any?state=requested",
+    "client": "admin"
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/json;charset=utf-8",
+    "headers": {
+      "Content-Type": "application/json;charset=utf-8",
+      "Vary": "Accept",
+      "X-Puppet-Version": "8.27.0"
+    },
+    "json": [
+      {
+        "name": "sign2-me",
+        "state": "requested",
+        "dns_alt_names": [],
+        "subject_alt_names": [],
+        "authorization_extensions": {},
+        "fingerprint": "F0:C2:78:9A:BB:07:B3:8D:B5:52:0B:68:99:89:EC:33:A6:E7:BF:64:C3:1F:5D:9D:4B:A7:4A:C5:AC:04:B8:37",
+        "fingerprints": {
+          "SHA1": "C9:5F:34:C6:DA:92:F0:71:6A:5D:03:D8:21:9B:8B:08:07:69:AE:AF",
+          "SHA256": "F0:C2:78:9A:BB:07:B3:8D:B5:52:0B:68:99:89:EC:33:A6:E7:BF:64:C3:1F:5D:9D:4B:A7:4A:C5:AC:04:B8:37",
+          "SHA512": "41:AD:41:1A:F6:7B:59:B8:72:8F:63:7D:B0:43:61:A6:26:90:75:86:C0:79:D4:EA:EF:97:82:CC:2B:E8:D2:86:80:97:FD:36:07:CB:1B:A6:CA:D2:0F:4E:4B:7D:BE:80:FA:34:A4:5D:30:8F:1C:1F:E5:1A:B7:1C:19:78:85:B9",
+          "default": "F0:C2:78:9A:BB:07:B3:8D:B5:52:0B:68:99:89:EC:33:A6:E7:BF:64:C3:1F:5D:9D:4B:A7:4A:C5:AC:04:B8:37"
+        }
+      },
+      {
+        "name": "corner-both",
+        "state": "requested",
+        "dns_alt_names": [],
+        "subject_alt_names": [],
+        "authorization_extensions": {},
+        "fingerprint": "53:A8:66:D4:24:BD:1F:87:B3:B6:45:06:0E:06:B1:AB:CF:1D:19:3B:21:1D:F0:42:67:9C:EE:F3:E2:F0:CB:F5",
+        "fingerprints": {
+          "SHA1": "9D:AE:E5:E0:E8:15:49:4A:28:E5:97:3D:B8:FD:4D:40:05:80:6D:F2",
+          "SHA256": "53:A8:66:D4:24:BD:1F:87:B3:B6:45:06:0E:06:B1:AB:CF:1D:19:3B:21:1D:F0:42:67:9C:EE:F3:E2:F0:CB:F5",
+          "SHA512": "A5:88:2C:B8:25:25:81:23:C6:F6:D1:3C:6C:0D:78:53:74:76:4D:1F:1C:03:9E:5C:A1:C0:DA:C0:F7:F5:19:B9:2A:D1:50:CD:3A:FB:68:3D:66:2C:9B:C2:3C:B0:6B:C5:43:79:CA:EB:BF:EC:B2:C3:1F:60:98:F3:E2:9E:FD:8D",
+          "default": "53:A8:66:D4:24:BD:1F:87:B3:B6:45:06:0E:06:B1:AB:CF:1D:19:3B:21:1D:F0:42:67:9C:EE:F3:E2:F0:CB:F5"
+        }
+      },
+      {
+        "name": "delete-me-csr",
+        "state": "requested",
+        "dns_alt_names": [],
+        "subject_alt_names": [],
+        "authorization_extensions": {},
+        "fingerprint": "44:17:34:8E:C0:1A:E5:91:B3:88:5B:69:87:AF:58:F4:62:6B:04:8B:CE:02:BB:B0:8F:50:68:63:4A:89:CF:34",
+        "fingerprints": {
+          "SHA1": "3C:B5:D0:10:60:E8:00:09:34:69:3E:86:CC:09:D4:43:71:8D:F0:C1",
+          "SHA256": "44:17:34:8E:C0:1A:E5:91:B3:88:5B:69:87:AF:58:F4:62:6B:04:8B:CE:02:BB:B0:8F:50:68:63:4A:89:CF:34",
+          "SHA512": "36:C5:88:E5:9D:9C:FC:49:88:3F:C6:86:30:4C:33:30:C5:62:99:89:D4:4F:A4:02:F1:D0:8B:A2:19:51:90:0A:22:D5:36:88:23:DC:62:AD:BC:D9:18:67:0E:2C:1C:6C:FE:83:4F:7C:6B:CE:3D:59:27:D7:41:6D:16:47:51:2B",
+          "default": "44:17:34:8E:C0:1A:E5:91:B3:88:5B:69:87:AF:58:F4:62:6B:04:8B:CE:02:BB:B0:8F:50:68:63:4A:89:CF:34"
+        }
+      },
+      {
+        "name": "corner-authext",
+        "state": "requested",
+        "dns_alt_names": [],
+        "subject_alt_names": [],
+        "authorization_extensions": {
+          "pp_cli_auth": "true"
+        },
+        "fingerprint": "A1:56:1D:95:FC:D7:55:4B:A1:2D:ED:99:EF:66:C1:70:B0:9F:AF:8A:34:B2:61:11:A5:40:92:49:9A:04:74:79",
+        "fingerprints": {
+          "SHA1": "41:AE:1F:47:9F:99:A7:13:24:2E:43:59:62:7B:B2:FA:59:3E:8D:3F",
+          "SHA256": "A1:56:1D:95:FC:D7:55:4B:A1:2D:ED:99:EF:66:C1:70:B0:9F:AF:8A:34:B2:61:11:A5:40:92:49:9A:04:74:79",
+          "SHA512": "44:5D:A9:23:0C:ED:8F:24:7B:FC:32:F3:F7:0E:18:68:9F:A1:BC:EB:5A:0F:96:A8:C0:53:12:0F:D6:38:5A:FB:31:CD:1B:22:55:76:AA:95:7A:59:36:39:6B:A1:90:DA:2A:51:7D:2A:5C:73:49:1A:21:92:32:71:4A:2E:F1:BE",
+          "default": "A1:56:1D:95:FC:D7:55:4B:A1:2D:ED:99:EF:66:C1:70:B0:9F:AF:8A:34:B2:61:11:A5:40:92:49:9A:04:74:79"
+        }
+      },
+      {
+        "name": "sign-me",
+        "state": "requested",
+        "dns_alt_names": [],
+        "subject_alt_names": [],
+        "authorization_extensions": {},
+        "fingerprint": "FC:50:AC:2B:FD:8E:72:B4:D4:0F:DE:5A:E6:21:39:C5:C6:44:E1:A8:85:64:D6:62:90:0C:25:B0:C2:F3:F3:52",
+        "fingerprints": {
+          "SHA1": "F7:4E:59:53:1C:70:3A:3E:54:AD:AD:52:05:67:2F:E7:B9:E9:DD:0A",
+          "SHA256": "FC:50:AC:2B:FD:8E:72:B4:D4:0F:DE:5A:E6:21:39:C5:C6:44:E1:A8:85:64:D6:62:90:0C:25:B0:C2:F3:F3:52",
+          "SHA512": "BB:A7:17:C8:B7:58:88:2C:C7:21:B5:00:AC:89:4C:76:AC:C3:9D:E9:85:AA:DE:40:99:9D:62:8E:ED:EA:94:F4:5E:2A:10:F8:1E:14:C8:51:55:E1:3E:F7:04:66:CC:F7:D9:4B:58:28:2D:C0:ED:A5:54:B1:EB:90:1D:A4:FB:81",
+          "default": "FC:50:AC:2B:FD:8E:72:B4:D4:0F:DE:5A:E6:21:39:C5:C6:44:E1:A8:85:64:D6:62:90:0C:25:B0:C2:F3:F3:52"
+        }
+      },
+      {
+        "name": "corner-pending",
+        "state": "requested",
+        "dns_alt_names": [
+          "DNS:corner-pending",
+          "DNS:Pending.Example.COM"
+        ],
+        "subject_alt_names": [
+          "DNS:corner-pending",
+          "DNS:Pending.Example.COM"
+        ],
+        "authorization_extensions": {},
+        "fingerprint": "CD:4B:31:CD:95:A8:AC:E1:B4:EC:D8:3F:A6:16:A9:EC:3B:66:6A:43:03:BD:D6:61:DF:63:CE:A6:47:93:73:B4",
+        "fingerprints": {
+          "SHA1": "0C:BC:53:40:BF:27:52:CD:CF:F2:02:08:15:91:71:41:5B:0E:36:12",
+          "SHA256": "CD:4B:31:CD:95:A8:AC:E1:B4:EC:D8:3F:A6:16:A9:EC:3B:66:6A:43:03:BD:D6:61:DF:63:CE:A6:47:93:73:B4",
+          "SHA512": "F4:7D:3F:70:58:C1:A3:DF:06:50:8A:C8:D8:3E:06:E8:A4:21:EF:26:BB:7A:22:A1:86:8D:17:E2:94:71:4F:4E:8B:59:5A:00:65:43:DD:0A:76:44:5E:49:33:7E:1F:34:25:79:24:E3:A4:14:7E:80:53:46:EF:60:4A:B8:46:29",
+          "default": "CD:4B:31:CD:95:A8:AC:E1:B4:EC:D8:3F:A6:16:A9:EC:3B:66:6A:43:03:BD:D6:61:DF:63:CE:A6:47:93:73:B4"
+        }
+      }
+    ]
+  }
+}

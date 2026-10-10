@@ -521,7 +521,8 @@ assert_json_field "$_san_body" '"subject_alt_names"' \
     "Status response includes subject_alt_names field"
 
 # CN promotion is on by default: plain CSR should have the CN added as a DNS SAN.
-grep -qF "\"${_SAN}\"" <<< "$_san_body" \
+# Anchored to the field: subject_alt_names carries the same entry.
+grep -qF "\"dns_alt_names\":[\"DNS:${_SAN}\"" <<< "$_san_body" \
     && pass "dns_alt_names contains promoted CN for plain cert" \
     || fail "dns_alt_names contains promoted CN for plain cert" "body: $_san_body"
 grep -qF '"dns_alt_names":[]' <<< "$_san_body" \

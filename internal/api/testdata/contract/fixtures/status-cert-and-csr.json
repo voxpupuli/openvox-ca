@@ -1,0 +1,48 @@
+{
+  "name": "status-cert-and-csr",
+  "description": "status of a subject with both a certificate and a pending CSR: the certificate wins",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:423-542",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:177-200",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:491-526",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:2010-2066"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1",
+  "image": "ghcr.io/openvoxproject/openvoxserver:8.14.1-main@sha256:806c5eb471c3f1d499308d903dc84210d96b00761de481d2cc7dee380d78c152",
+  "compare": "exact",
+  "request": {
+    "method": "GET",
+    "path": "/puppet-ca/v1/certificate_status/corner-both",
+    "client": "admin"
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/json;charset=utf-8",
+    "headers": {
+      "Content-Type": "application/json;charset=utf-8",
+      "Vary": "Accept",
+      "X-Puppet-Version": "8.27.0"
+    },
+    "json": {
+      "name": "corner-both",
+      "dns_alt_names": [
+        "DNS:corner-both"
+      ],
+      "state": "signed",
+      "authorization_extensions": {},
+      "subject_alt_names": [
+        "DNS:corner-both"
+      ],
+      "not_before": "2026-10-04T14:59:00UTC",
+      "fingerprints": {
+        "SHA1": "BF:28:FA:F6:AF:F0:87:BD:E6:AB:05:C0:CC:75:79:97:74:E6:95:BE",
+        "SHA256": "1A:D3:28:E5:83:93:C9:23:22:2D:EE:B0:33:F6:47:D0:35:9B:DE:0B:E9:12:E4:CC:A5:74:90:A3:3E:00:EA:F7",
+        "SHA512": "9F:66:F5:DF:16:DD:EC:91:5B:73:F1:C1:76:E4:1B:64:63:39:D0:06:C4:A0:70:C8:5F:7C:D9:89:0C:6D:D8:B0:A0:60:5E:22:F4:49:16:FD:29:72:A5:2D:48:CD:41:46:57:A2:43:DD:FE:7E:9C:B8:36:99:8F:80:0A:F9:59:7A",
+        "default": "1A:D3:28:E5:83:93:C9:23:22:2D:EE:B0:33:F6:47:D0:35:9B:DE:0B:E9:12:E4:CC:A5:74:90:A3:3E:00:EA:F7"
+      },
+      "not_after": "2031-10-04T15:59:00UTC",
+      "serial_number": 74065539245744058712908460334436066891,
+      "fingerprint": "1A:D3:28:E5:83:93:C9:23:22:2D:EE:B0:33:F6:47:D0:35:9B:DE:0B:E9:12:E4:CC:A5:74:90:A3:3E:00:EA:F7"
+    }
+  }
+}

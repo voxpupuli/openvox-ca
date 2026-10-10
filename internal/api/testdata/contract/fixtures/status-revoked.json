@@ -1,0 +1,48 @@
+{
+  "name": "status-revoked",
+  "description": "status of a revoked certificate",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:423-542",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:177-200",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:491-526",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:2010-2066"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1",
+  "image": "ghcr.io/openvoxproject/openvoxserver:8.14.1-main@sha256:806c5eb471c3f1d499308d903dc84210d96b00761de481d2cc7dee380d78c152",
+  "compare": "exact",
+  "request": {
+    "method": "GET",
+    "path": "/puppet-ca/v1/certificate_status/corner-revoked",
+    "client": "admin"
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/json;charset=utf-8",
+    "headers": {
+      "Content-Type": "application/json;charset=utf-8",
+      "Vary": "Accept",
+      "X-Puppet-Version": "8.27.0"
+    },
+    "json": {
+      "name": "corner-revoked",
+      "dns_alt_names": [
+        "DNS:corner-revoked"
+      ],
+      "state": "revoked",
+      "authorization_extensions": {},
+      "subject_alt_names": [
+        "DNS:corner-revoked"
+      ],
+      "not_before": "2026-10-04T14:59:00UTC",
+      "fingerprints": {
+        "SHA1": "B2:3B:59:1F:34:32:AD:E6:AC:0B:79:D2:C1:59:6B:CB:E3:5C:BB:D0",
+        "SHA256": "7A:EC:CD:02:DC:EA:92:B7:66:7E:C6:19:CA:C6:C6:05:BA:DE:AF:DD:6A:53:C6:7C:E3:CB:47:26:40:19:FD:2C",
+        "SHA512": "CB:62:1E:B9:95:B4:14:97:8E:1D:6E:C6:90:13:FB:29:0D:2B:7C:64:14:B5:7C:AF:2E:14:0F:1D:4F:AD:5D:2F:A1:83:F2:44:61:E3:63:AB:67:AD:4C:6E:2C:4F:BE:1D:FA:97:57:31:4F:29:16:0B:F5:8A:F1:47:F2:D5:AB:FC",
+        "default": "7A:EC:CD:02:DC:EA:92:B7:66:7E:C6:19:CA:C6:C6:05:BA:DE:AF:DD:6A:53:C6:7C:E3:CB:47:26:40:19:FD:2C"
+      },
+      "not_after": "2031-10-04T15:59:00UTC",
+      "serial_number": 21170659518128181738698300407367681148,
+      "fingerprint": "7A:EC:CD:02:DC:EA:92:B7:66:7E:C6:19:CA:C6:C6:05:BA:DE:AF:DD:6A:53:C6:7C:E3:CB:47:26:40:19:FD:2C"
+    }
+  }
+}

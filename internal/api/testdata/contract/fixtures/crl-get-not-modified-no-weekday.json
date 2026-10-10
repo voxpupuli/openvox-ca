@@ -1,0 +1,28 @@
+{
+  "name": "crl-get-not-modified-no-weekday",
+  "description": "the CRL with an If-Modified-Since date that has no day of the week",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:42-66",
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:104-132"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1",
+  "image": "ghcr.io/openvoxproject/openvoxserver:8.14.1-main@sha256:806c5eb471c3f1d499308d903dc84210d96b00761de481d2cc7dee380d78c152",
+  "compare": "none",
+  "request": {
+    "method": "GET",
+    "path": "/puppet-ca/v1/certificate_revocation_list/ca",
+    "if_modified_since": "31 Dec 9999 23:59:59 GMT",
+    "client": "admin"
+  },
+  "response": {
+    "status": 304,
+    "content_type": "text/plain",
+    "headers": {
+      "Content-Length": "0",
+      "Content-Type": "text/plain",
+      "Vary": "Accept-Encoding",
+      "X-Puppet-Version": "8.27.0"
+    },
+    "text": ""
+  }
+}

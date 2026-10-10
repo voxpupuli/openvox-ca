@@ -363,3 +363,81 @@ exactly once, `test/compose-migration.yml` declares no `restart:` policy, and
 so there is one attempt for a tail to reach. The distinction that matters when
 reading any of these dumps is whether the service restart-loops, not whether
 the code that dumps it happens to call `tail`.
+
+## The Puppet CA API contract
+
+`internal/api/contract_test.go` checks openvox-ca's `/puppet-ca/v1` responses
+against responses recorded from a real OpenVox Server, kept under
+`internal/api/testdata/contract/`. It runs in `mage test:unit` and reads only
+committed files; nothing in CI starts OpenVox Server. The rule it enforces, and
+the differences it knows about, are in [the API reference](../api.md#differences-from-openvox-server).
+
+Each fixture under `fixtures/` is one route and outcome: the request, the
+response OpenVox Server gave (headers included, for reference), the image and
+OpenVox Server source it came from, and how much of the response is binding:
+
+- `exact`: the status, media type, and every value upstream sent;
+- `types`: the status, media type, and every field's presence and JSON type;
+- `none`: the status and media type;
+- `status`: the status alone, for a request no route serves, whose body is
+  the HTTP server's rather than the CA's.
+
+`cadir/` is the store that server held when it answered, its CA bundle, key,
+CRL chain, certificates and CSRs, and each spec loads it into a fresh
+openvox-ca, so values derived from a certificate can be compared exactly.
+Each spec can start from that one snapshot because every recorded answer is
+to the snapshot state, which holds for two reasons: the recorder records every
+read before any mutation, and no subject is touched by two mutations OpenVox
+Server accepts. A mutation it refuses changes nothing, so it may share a
+subject; keep such a request refused. The one exception is `/sign/all`, which
+signs every pending CSR, including the one an earlier fixture submitted: it is
+recorded last and bound by type only, because its answer is to a later state
+than the snapshot. The CA key is a throwaway,
+generated inside a disposable container for the recording and committed so the
+specs can sign with it; nothing should trust it.
+
+An exception names a difference that openvox-ca still has, exactly as the
+checker reports it, and why: an issue, or a ruling to keep its own behaviour.
+A difference without one fails the spec, and so does an exception that no
+longer matches anything, so fixing a difference fails until its exception is
+removed. Each exception has a counterpart in
+[the API reference](../api.md#differences-from-openvox-server); add or remove
+both in the same commit.
+
+Never hand-edit anything under `testdata/contract/`. A fixture is a record of
+what OpenVox Server said, and an edited one is a claim about OpenVox Server
+that nobody observed; the next re-record discards it anyway. Change the
+recorder instead. The recorder's own suite (`test/contract/record`, run by
+`mage test:unit`) fails when the fixtures stop matching its `cases()`: an
+edited compare mode or request, a case that was never recorded, or a fixture
+no case produces.
+
+### Re-recording
+
+```shell
+go run ./test/contract/record
+```
+
+It needs Docker and network access. It starts the OpenVox Server image that
+`test/compose-migration.yml` pins, signs the corner-case certificates with the
+CA that server bootstraps, records every fixture, and replaces
+`testdata/contract/` only once the whole recording has succeeded; an
+interrupted run removes its container and its partial recording. It replaces
+its `-out` directory wholesale, so it refuses one that exists and holds no
+contract. The CA is new on every run, so every fixture and certificate
+changes. Review the diff for changed shapes rather than values, and expect
+exceptions to need their `$[name=…]` paths revisited only when a fixture is
+added or renamed.
+
+Re-record when the pin moves to a new OpenVox Server release. Nothing in CI
+forces it: a fixture records the image it came from as provenance only, so a
+Renovate bump, digest or tag, never fails the suite on its own. The fixtures
+cite the upstream source lines behind each response, checked against one
+release, `citedTag` in the recorder, which refuses an image built from any
+other. Moving to a new release therefore means rechecking each line range in
+`cases()` against its tag, then moving `citedTag`, then re-recording.
+
+One spec does force a re-record: every certificate and CRL in `cadir/` must
+stay valid for another 180 days. The recording's CA and certificates last five
+years, so this fires about four and a half years after the last recording,
+while their status is still what the fixtures say.

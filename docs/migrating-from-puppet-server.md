@@ -673,7 +673,9 @@ importing is a prerequisite for revoking here, not an alternative to it.
 
 openvox-ca does not accept `puppet cert` command syntax directly. Use
 `openvox-ca-ctl` instead (see the CLI command mapping table above). The HTTP
-API is fully compatible; only the CLI tool name and flag syntax differ.
+API is the one agents already use, with the differences listed in
+[Differences from OpenVox Server](api.md#differences-from-openvox-server); what
+changes is the CLI tool name and its flag syntax.
 
 ### Agent configuration
 

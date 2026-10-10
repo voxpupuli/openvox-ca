@@ -1,0 +1,26 @@
+{
+  "name": "certificate-get",
+  "description": "a signed certificate",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:68-80",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:1501-1513"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1",
+  "image": "ghcr.io/openvoxproject/openvoxserver:8.14.1-main@sha256:806c5eb471c3f1d499308d903dc84210d96b00761de481d2cc7dee380d78c152",
+  "compare": "exact",
+  "request": {
+    "method": "GET",
+    "path": "/puppet-ca/v1/certificate/corner-dns",
+    "client": "admin"
+  },
+  "response": {
+    "status": 200,
+    "content_type": "text/plain",
+    "headers": {
+      "Content-Type": "text/plain",
+      "Vary": "Accept-Encoding",
+      "X-Puppet-Version": "8.27.0"
+    },
+    "text": "-----BEGIN CERTIFICATE-----\nMIID+jCCAeKgAwIBAgIRAJ88KhtNXm9wgZKjtMXW5/gwDQYJKoZIhvcNAQELBQAw\nRTFDMEEGA1UEAww6UHVwcGV0IENBIGdlbmVyYXRlZCBvbiBwdXBwZXQgYXQgMjAy\nNi0xMC0wNCAxNTo1ODo1MCArMDAwMDAeFw0yNjEwMDQxNDU5MDBaFw0zMTEwMDQx\nNTU5MDBaMBUxEzARBgNVBAMTCmNvcm5lci1kbnMwWTATBgcqhkjOPQIBBggqhkjO\nPQMBBwNCAARbgBvjRIomf/fV35MnB5pns2JJcRDQ3nYLFzj/ds+2DBDlbSESE+GF\nauUan620E4U6RpEbXc/o/IGPzx+w3b0Eo4HfMIHcMA4GA1UdDwEB/wQEAwIHgDAd\nBgNVHSUEFjAUBggrBgEFBQcDAQYIKwYBBQUHAwIwHwYDVR0jBBgwFoAUgZJTDR24\nrcVXl7vBHsGSnGSTBkAwPgYDVR0RBDcwNYIKY29ybmVyLWRuc4IWQ29ybmVyLURO\nUy5FeGFtcGxlLkNPTYIPYWx0LmV4YW1wbGUuY29tMBoGCysGAQQBgoxMAQMNBAsM\nCXdlYnNlcnZlcjAVBgsrBgEEAYKMTAEDAQQGDAR0cnVlMBcGCysGAQQBgoxMAQNj\nBAgMBmN1c3RvbTANBgkqhkiG9w0BAQsFAAOCAgEAcadgS+3r8aX1i2wlLo7yKozW\nCzTwl6fmt2kY6wx3DNWH4Yh6EtbApIeTHp1LugejFlDQjiNiV2FApZEBB33/AjHn\n3ngmdoOvATNaMZyIbaT0xBSy4znbEmTfkFLePCVhgGkF3VmUBJ9u0Rj8V39vfAHv\nB79ROTZEkhTzMyzxajL8kh1aAV7Eh4jubjCEGClZYqOQkCDcGRQDyHDPcjFrGY+I\nhV6v+zt4YmDnNu/19aANCMSbSlPEPMO09OHLhTQMnVWlZT2xIR3E8NyWh9eFfpkK\nEFj/BPbOCqxtvyO1JyOVW46ySFV2ynbCDwqkvKm+nqrJ/NMSwiFHEIXUHBXZiMtQ\nedd+HgmXL3CjvUYuk6Vn+st1+upr1SXJKOEgLAfB/1V+92Z3JGp+5Cg9k7wr2X5H\nLS4wNC73r3YvdLIkEipXeMRRPwIZ48YaeVYg6NTRjtx/x5dFZEM0uPgqZjzAHSly\ns5VEKQbbtlvBy6SsbevEBzdcX7bahTeWr/rgyyXa1laCFj1lkLmsBzlbIL/mjcuO\nipAr8mvcHr+6dzyMjnNCn8UKR2tzF5LVqTC66D/UL1CBO1ui4zaKIFIkCE4YI9H+\nVdLnoLVg18tOdB+hBjpscnqg8ttYS1UgYTwcC4DIKl3aJKBu6Lh+gjhamxgegl+N\nHtOOMf7ZtGjPCxrGiEY=\n-----END CERTIFICATE-----\n"
+  }
+}

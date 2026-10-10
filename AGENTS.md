@@ -200,6 +200,18 @@ Conventions:
   Renaming any of those identifiers breaks the compile-time bindings at the top
   of that file: update the bindings and the `forbidden` map together, and do not
   delete either to restore the build.
+- `internal/api/contract_test.go` is the third: the Puppet CA API contract,
+  which checks openvox-ca's responses against ones recorded from OpenVox Server
+  under `internal/api/testdata/contract/`. Never hand-edit that directory;
+  change `test/contract/record` and re-record, as
+  [docs/development/testing.md](docs/development/testing.md#the-puppet-ca-api-contract)
+  describes (the recorder's own suite fails when the fixtures no longer match
+  its `cases()`). A change that alters a response either matches OpenVox Server
+  or adds an exception, with its reason, to `contractExceptions` — and
+  describes it in `docs/api.md#differences-from-openvox-server` in the same
+  commit. Fixing a difference fails the suite until its exception is removed,
+  which is the point; amend that section in the same commit. One bullet there
+  can cover several exceptions, so remove it only when none is left.
 
 ### Integration suites (build-tagged)
 

@@ -1,0 +1,49 @@
+{
+  "name": "status-signed-mapped",
+  "description": "status of a certificate with an IPv4-mapped IPv6 SAN, which Go's x509 refuses to parse",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:423-542",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:177-200",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:491-526",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:2010-2066"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1",
+  "image": "ghcr.io/openvoxproject/openvoxserver:8.14.1-main@sha256:806c5eb471c3f1d499308d903dc84210d96b00761de481d2cc7dee380d78c152",
+  "compare": "exact",
+  "request": {
+    "method": "GET",
+    "path": "/puppet-ca/v1/certificate_status/corner-mapped",
+    "client": "admin"
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/json;charset=utf-8",
+    "headers": {
+      "Content-Type": "application/json;charset=utf-8",
+      "Vary": "Accept",
+      "X-Puppet-Version": "8.27.0"
+    },
+    "json": {
+      "name": "corner-mapped",
+      "dns_alt_names": [
+        "DNS:corner-mapped"
+      ],
+      "state": "signed",
+      "authorization_extensions": {},
+      "subject_alt_names": [
+        "IP:192.0.2.11",
+        "DNS:corner-mapped"
+      ],
+      "not_before": "2026-10-04T14:59:00UTC",
+      "fingerprints": {
+        "SHA1": "A0:37:56:0F:FB:B0:B7:F2:75:32:38:B2:0E:8B:07:6E:0E:96:44:6E",
+        "SHA256": "A9:30:67:0B:12:84:B7:DA:D4:14:8A:9C:22:7D:A1:F4:26:CC:B9:66:69:85:BB:97:BD:D2:9D:A7:B0:94:05:80",
+        "SHA512": "93:A1:0D:C4:32:77:86:16:10:BA:DC:CE:8D:B9:45:DB:AC:17:C2:47:B9:37:C6:32:8E:EC:F9:49:FC:67:F6:71:B8:1F:47:67:BF:17:D6:1F:03:5C:A8:93:0A:60:83:26:FF:57:E6:8B:0E:FB:D1:86:5C:EF:67:03:F3:A0:17:7C",
+        "default": "A9:30:67:0B:12:84:B7:DA:D4:14:8A:9C:22:7D:A1:F4:26:CC:B9:66:69:85:BB:97:BD:D2:9D:A7:B0:94:05:80"
+      },
+      "not_after": "2031-10-04T15:59:00UTC",
+      "serial_number": 18136831605300072762596117399969775079,
+      "fingerprint": "A9:30:67:0B:12:84:B7:DA:D4:14:8A:9C:22:7D:A1:F4:26:CC:B9:66:69:85:BB:97:BD:D2:9D:A7:B0:94:05:80"
+    }
+  }
+}

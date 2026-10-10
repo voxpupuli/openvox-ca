@@ -1,0 +1,28 @@
+{
+  "name": "crl-put-rejected",
+  "description": "uploading a body that holds no CRL",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:134-152",
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:585-586",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:1843-1949"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1",
+  "image": "ghcr.io/openvoxproject/openvoxserver:8.14.1-main@sha256:806c5eb471c3f1d499308d903dc84210d96b00761de481d2cc7dee380d78c152",
+  "compare": "none",
+  "request": {
+    "method": "PUT",
+    "path": "/puppet-ca/v1/certificate_revocation_list",
+    "content_type": "text/plain",
+    "body": "not a CRL\n",
+    "client": "admin"
+  },
+  "response": {
+    "status": 400,
+    "content_type": "text/plain;charset=utf-8",
+    "headers": {
+      "Content-Type": "text/plain;charset=utf-8",
+      "X-Puppet-Version": "8.27.0"
+    },
+    "text": "No valid CRLs submitted."
+  }
+}
