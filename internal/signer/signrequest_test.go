@@ -85,9 +85,9 @@ func verifySignature(pub crypto.PublicKey, h crypto.Hash, digest, sig []byte) er
 }
 
 // The first two refusals below are requests the key would otherwise have
-// signed: an RSA key signs SHA-1 and crypto.Hash(0) without complaint. The
-// third the key would refuse on its own, so that spec asserts the signer's own
-// error rather than any error at all.
+// signed: an RSA key signs SHA-1 and crypto.Hash(0) without complaint. The key
+// would refuse the two wrong-length digests on its own, so those specs assert
+// the signer's own error rather than any error at all.
 var _ = Describe("Signer request checks", func() {
 	var (
 		rsaKey *rsa.PrivateKey
@@ -108,7 +108,7 @@ var _ = Describe("Signer request checks", func() {
 		resp := &SignResponse{}
 		err := (&Service{key: rsaKey}).Sign(&SignRequest{Digest: digest[:], HashFunc: crypto.SHA1}, resp)
 
-		Expect(err).To(MatchError(ErrSignRequestRefused))
+		Expect(err).To(MatchError(errSignRequestRefused))
 		Expect(err.Error()).To(ContainSubstring("hash function SHA-1 is not one the CA signs with"))
 		Expect(resp.Signature).To(BeNil())
 	})
@@ -117,19 +117,19 @@ var _ = Describe("Signer request checks", func() {
 		resp := &SignResponse{}
 		err := (&Service{key: rsaKey}).Sign(&SignRequest{Digest: []byte("arbitrary bytes"), HashFunc: 0}, resp)
 
-		Expect(err).To(MatchError(ErrSignRequestRefused))
+		Expect(err).To(MatchError(errSignRequestRefused))
 		Expect(err.Error()).To(ContainSubstring("hash function unknown hash value 0 is not one the CA signs with"))
 		Expect(resp.Signature).To(BeNil())
 	})
 
-	It("refuses a digest whose length does not match its hash function", func() {
+	It("refuses a digest longer than its hash function's", func() {
 		// Labelled SHA-256 but 48 bytes long, as a SHA-384 digest is.
 		digest := digestOf(crypto.SHA384, []byte("mislabelled"))
 
 		resp := &SignResponse{}
 		err := (&Service{key: ecKey}).Sign(&SignRequest{Digest: digest, HashFunc: crypto.SHA256}, resp)
 
-		Expect(err).To(MatchError(ErrSignRequestRefused))
+		Expect(err).To(MatchError(errSignRequestRefused))
 		Expect(err.Error()).To(ContainSubstring("a SHA-256 digest is 32 bytes, not 48"))
 		Expect(resp.Signature).To(BeNil())
 	})
@@ -143,11 +143,23 @@ var _ = Describe("Signer request checks", func() {
 		DeferCleanup(slog.SetDefault, orig)
 
 		err := (&Service{key: rsaKey}).Sign(&SignRequest{Digest: []byte("arbitrary bytes"), HashFunc: 0}, &SignResponse{})
-		Expect(err).To(MatchError(ErrSignRequestRefused))
+		Expect(err).To(MatchError(errSignRequestRefused))
 
 		Expect(buf.String()).To(ContainSubstring("level=WARN"))
 		Expect(buf.String()).To(ContainSubstring(`msg="Refused a signing request"`))
 		Expect(buf.String()).To(ContainSubstring("hash function unknown hash value 0 is not one the CA signs with"))
+	})
+
+	It("refuses a digest shorter than its hash function's", func() {
+		// The other direction: a SHA-1-sized digest passed off as SHA-256.
+		digest := digestOf(crypto.SHA1, []byte("mislabelled"))
+
+		resp := &SignResponse{}
+		err := (&Service{key: ecKey}).Sign(&SignRequest{Digest: digest, HashFunc: crypto.SHA256}, resp)
+
+		Expect(err).To(MatchError(errSignRequestRefused))
+		Expect(err.Error()).To(ContainSubstring("a SHA-256 digest is 32 bytes, not 20"))
+		Expect(resp.Signature).To(BeNil())
 	})
 
 	It("reports a refusal to the frontend across the RPC", func() {

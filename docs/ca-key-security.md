@@ -38,7 +38,11 @@ the launcher's pipe refuses to start rather than proceeding unauthenticated.
 
 **The signer makes only the kinds of signature the CA makes.** A request must
 name SHA-256, SHA-384 or SHA-512 and carry a digest of that hash's length;
-anything else is refused and logged as a warning. Those three are every hash the
+anything else is refused, and the signer logs a warning,
+`msg="Refused a signing request"`, naming the reason. The frontend never builds
+such a request itself, so one in the log means a frontend that is broken or no
+longer yours; see [Monitoring destructive operations](#monitoring-destructive-operations).
+Those three are every hash the
 CA signs with: SHA-256 for any RSA key, and SHA-256, SHA-384 or SHA-512 for
 ECDSA P-256, P-384 or P-521. This takes away what a compromised frontend could
 otherwise get from an RSA key: a raw signature over arbitrary bytes, with no
@@ -54,8 +58,8 @@ sign only while they hold the frontend, although anything signed in that time
 stays valid until it is revoked or expires.
 
 The CA key must therefore be RSA or ECDSA. An Ed25519 key signs with no hash,
-which this signer refuses, so such a key is refused at startup and at import in
-every topology rather than failing every signature in this one alone.
+which this signer refuses, so such a key is refused at startup, at import and by
+`csr` in every topology, rather than failing every signature in this one alone.
 
 > **The pre-shared key travels over a pipe, not the environment.** A process's
 > exec-time environment stays readable at `/proc/<pid>/environ` for its whole
@@ -305,6 +309,10 @@ operators to potentially anomalous administrative activity. Operators should:
   keeps the Puppet-compatible format and says nothing about the grant. It is
   the counterpart to the alert above: this one fires when the privilege is
   handed out, that one when it is used destructively
+- Create alerts on `"Refused a signing request"` from the signer process. The
+  frontend only ever asks for the signatures the CA makes, so a refusal means
+  the frontend is broken or has been compromised; see
+  [Process isolation](#process-isolation)
 - Investigate any alerts promptly. A burst of revocations may indicate a
   compromised admin certificate or an operational error
 - Consider whether the allow list that granted the client should be tightened

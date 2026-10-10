@@ -70,10 +70,11 @@ type Service struct {
 	key crypto.Signer
 }
 
-// ErrSignRequestRefused is returned when a request asks for a signature the CA
-// never makes. It reaches the frontend only as text, since net/rpc carries
-// errors as strings; errors.Is works on it inside the signer process alone.
-var ErrSignRequestRefused = errors.New("signing request refused")
+// errSignRequestRefused is returned when a request asks for a signature the CA
+// never makes. It is unexported because it cannot leave the signer process as
+// itself: net/rpc carries errors as strings, so the frontend receives only the
+// text and errors.Is against it could never match there.
+var errSignRequestRefused = errors.New("signing request refused")
 
 // checkSignRequest refuses any request that is not a digest of the right
 // length under SHA-256, SHA-384 or SHA-512.
@@ -108,10 +109,10 @@ func checkSignRequest(req *SignRequest) error {
 	switch req.HashFunc {
 	case crypto.SHA256, crypto.SHA384, crypto.SHA512:
 	default:
-		return fmt.Errorf("%w: hash function %v is not one the CA signs with", ErrSignRequestRefused, req.HashFunc)
+		return fmt.Errorf("%w: hash function %v is not one the CA signs with", errSignRequestRefused, req.HashFunc)
 	}
 	if got, want := len(req.Digest), req.HashFunc.Size(); got != want {
-		return fmt.Errorf("%w: a %v digest is %d bytes, not %d", ErrSignRequestRefused, req.HashFunc, want, got)
+		return fmt.Errorf("%w: a %v digest is %d bytes, not %d", errSignRequestRefused, req.HashFunc, want, got)
 	}
 	return nil
 }
