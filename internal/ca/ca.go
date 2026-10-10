@@ -276,10 +276,13 @@ type CA struct {
 	// the same seam destructiveOpTracker's now() provides in internal/api.
 	signWait time.Duration
 
-	serialIndex map[string]string         // uppercase hex serial (no leading zeros) → subject; protected by mu
-	ocspCache   map[string]ocspCacheEntry // same key; protected by mu
-	cachedCRL   *x509.RevocationList      // in-memory CRL for auth checks; protected by mu
-	mu          sync.RWMutex
+	serialIndex map[string]string // uppercase hex serial (no leading zeros) → subject; protected by mu
+	// ocspCache is keyed by the same serial and the hash the request used (see
+	// ocspCacheKey). Evict through evictOCSPLocked, which drops every hash's
+	// entry for a serial. Protected by mu.
+	ocspCache map[ocspCacheKey]ocspCacheEntry
+	cachedCRL *x509.RevocationList // in-memory CRL for auth checks; protected by mu
+	mu        sync.RWMutex
 
 	// serialIndexEpoch counts in-process mutations of serialIndex (issuance and
 	// cleanup, via indexSerialLocked/unindexSerialLocked). SyncSerialIndex
@@ -487,7 +490,7 @@ func New(s *storage.StorageService, autosignCfg AutosignConfig, hostname string)
 		// itself anything it likes. See the field's comment.
 		RevokeOnAutoRenew: true, // on by default; only the newest serial should be valid
 		serialIndex:       make(map[string]string),
-		ocspCache:         make(map[string]ocspCacheEntry),
+		ocspCache:         make(map[ocspCacheKey]ocspCacheEntry),
 		crlNotify:         make(chan struct{}, 1),
 	}
 }

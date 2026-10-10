@@ -18,11 +18,14 @@
 package ca_test
 
 import (
+	"bytes"
 	"context"
+	"crypto"
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/asn1"
 	"encoding/pem"
+	"errors"
 	"os"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -458,6 +461,233 @@ var _ = Describe("OCSP Responder", func() {
 			}
 		}
 		Expect(found).To(BeTrue(), "valid nonce should be echoed in OCSP response")
+	})
+
+	// --- Issuer check (RFC 6960 §2.3) ---
+
+	Context("when checking the issuer a request names", func() {
+		var leaf *x509.Certificate
+
+		// requestFor builds a request for leaf as issuer would name it, hashed
+		// with hash — through x/crypto's own CreateRequest, so the hashes the
+		// responder recomputes are cross-checked against an independent client.
+		requestFor := func(issuer *x509.Certificate, hash crypto.Hash) []byte {
+			reqDER, err := xocsp.CreateRequest(leaf, issuer, &xocsp.RequestOptions{Hash: hash})
+			Expect(err).NotTo(HaveOccurred())
+			return reqDER
+		}
+
+		// tampered re-encodes a request for this CA with one field altered, so a
+		// spec can move exactly one of the two hashes and nothing else.
+		tampered := func(alter func(*xocsp.Request)) []byte {
+			req, err := xocsp.ParseRequest(requestFor(myCA.CACert, crypto.SHA1))
+			Expect(err).NotTo(HaveOccurred())
+			alter(req)
+			reqDER, err := req.Marshal()
+			Expect(err).NotTo(HaveOccurred())
+			return reqDER
+		}
+
+		// primeCache answers reqDER twice and proves the second came from the
+		// cache. Comparing the DER alone cannot: the suite key is RSA, whose
+		// PKCS#1 v1.5 signatures are deterministic, and the response times are
+		// encoded to the second, so two fresh signatures a moment apart are
+		// byte-identical. A hit is told apart by its MaxAge, which counts down
+		// from the stored expiry, where a fresh answer carries the full window.
+		primeCache := func(reqDER []byte) []byte {
+			GinkgoHelper()
+			first, err := myCA.AnswerOCSP(context.Background(), reqDER)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(first.MaxAge).To(Equal(ca.OCSPValidity), "the first answer must be freshly signed and stored")
+			second, err := myCA.AnswerOCSP(context.Background(), reqDER)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(second.MaxAge).To(BeNumerically("<", first.MaxAge), "the second answer must be a cache hit")
+			Expect(second.DER).To(Equal(first.DER))
+			return first.DER
+		}
+
+		BeforeEach(func() {
+			csrPEM, err := testutil.GenerateCSR("ocsp-issuer-node")
+			Expect(err).NotTo(HaveOccurred())
+			_, err = myCA.SaveRequest(context.Background(), "ocsp-issuer-node", csrPEM)
+			Expect(err).NotTo(HaveOccurred())
+			certPEM, err := myCA.Sign(context.Background(), "ocsp-issuer-node")
+			Expect(err).NotTo(HaveOccurred())
+			leaf = decodeCert(certPEM)
+		})
+
+		It("answers a request that names this CA", func() {
+			respDER, err := myCA.OCSPResponse(context.Background(), requestFor(myCA.CACert, crypto.SHA1))
+			Expect(err).NotTo(HaveOccurred())
+
+			resp, err := xocsp.ParseResponse(respDER, myCA.CACert)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Status).To(Equal(xocsp.Good))
+		})
+
+		// Each of these fails if the responder hashes with a fixed algorithm
+		// rather than the request's, or over the whole SubjectPublicKeyInfo
+		// rather than the subjectPublicKey value — or if it answers in a
+		// different algorithm from the one it was asked in, which leaves a
+		// client that matches on the whole CertID (OpenSSL) with no status.
+		DescribeTable("honours the hash algorithm the request used",
+			func(hash crypto.Hash) {
+				respDER, err := myCA.OCSPResponse(context.Background(), requestFor(myCA.CACert, hash))
+				Expect(err).NotTo(HaveOccurred())
+
+				resp, err := xocsp.ParseResponse(respDER, myCA.CACert)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resp.Status).To(Equal(xocsp.Good))
+				Expect(resp.IssuerHash).To(Equal(hash), "the response must name the certificate in the request's hash")
+			},
+			Entry("SHA-1", crypto.SHA1),
+			Entry("SHA-256", crypto.SHA256),
+			Entry("SHA-384", crypto.SHA384),
+			Entry("SHA-512", crypto.SHA512),
+		)
+
+		It("refuses a request whose issuer name hash is not this CA's", func() {
+			reqDER := tampered(func(r *xocsp.Request) { r.IssuerNameHash[0] ^= 0xFF })
+
+			_, err := myCA.OCSPResponse(context.Background(), reqDER)
+			Expect(err).To(MatchError(ca.ErrNotAuthoritative))
+		})
+
+		It("refuses a request whose issuer key hash is not this CA's", func() {
+			reqDER := tampered(func(r *xocsp.Request) { r.IssuerKeyHash[0] ^= 0xFF })
+
+			_, err := myCA.OCSPResponse(context.Background(), reqDER)
+			Expect(err).To(MatchError(ca.ErrNotAuthoritative))
+		})
+
+		// The cache is keyed by serial and request hash, not by issuer, so a
+		// check made after the lookup would hand a foreign issuer's request this
+		// CA's pre-signed answer.
+		It("refuses another issuer's request even when this serial's answer is cached", func() {
+			primeCache(requestFor(myCA.CACert, crypto.SHA1))
+
+			_, foreignCrtPEM, _, err := testutil.GenerateTestCAECDSA()
+			Expect(err).NotTo(HaveOccurred())
+			foreign := requestFor(decodeCert(foreignCrtPEM), crypto.SHA1)
+
+			respDER, err := myCA.OCSPResponse(context.Background(), foreign)
+			Expect(err).To(MatchError(ca.ErrNotAuthoritative))
+			Expect(respDER).To(BeNil())
+		})
+
+		// docs/api.md promises the refusal whatever the serial. A serial this CA
+		// never issued would otherwise be answered unknown, and signed, on
+		// behalf of a CA this responder does not speak for.
+		It("refuses another issuer's request for a serial this CA never issued", func() {
+			_, strangerPEM, _, err := testutil.GenerateTestCAECDSA()
+			Expect(err).NotTo(HaveOccurred())
+			_, foreignCrtPEM, _, err := testutil.GenerateTestCAECDSA()
+			Expect(err).NotTo(HaveOccurred())
+			reqDER, err := xocsp.CreateRequest(decodeCert(strangerPEM), decodeCert(foreignCrtPEM), nil)
+			Expect(err).NotTo(HaveOccurred())
+
+			respDER, err := myCA.OCSPResponse(context.Background(), reqDER)
+			Expect(err).To(MatchError(ca.ErrNotAuthoritative))
+			Expect(respDER).To(BeNil())
+		})
+
+		// A nonced request skips the cache and always signs, so the check must
+		// not live on the cache path alone.
+		It("refuses another issuer's nonced request", func() {
+			_, foreignCrtPEM, _, err := testutil.GenerateTestCAECDSA()
+			Expect(err).NotTo(HaveOccurred())
+			reqDER, err := testutil.BuildOCSPRequestWithNonce(leaf, decodeCert(foreignCrtPEM), []byte("0123456789abcdef"))
+			Expect(err).NotTo(HaveOccurred())
+
+			respDER, err := myCA.OCSPResponse(context.Background(), reqDER)
+			Expect(err).To(MatchError(ca.ErrNotAuthoritative))
+			Expect(respDER).To(BeNil())
+		})
+
+		// The response's CertID carries the request's hash, so a pre-signed
+		// answer to a SHA-1 request is no answer to a SHA-256 one.
+		It("does not serve a request the cached answer to a different hash", func() {
+			primeCache(requestFor(myCA.CACert, crypto.SHA1))
+
+			// primeCache's first call asserts a fresh signature, so the SHA-256
+			// request cannot have been served the SHA-1 entry; its second asserts
+			// the SHA-256 answer is then cached in its own right.
+			respDER := primeCache(requestFor(myCA.CACert, crypto.SHA256))
+			resp, err := xocsp.ParseResponse(respDER, myCA.CACert)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.IssuerHash).To(Equal(crypto.SHA256))
+		})
+
+		// Eviction is by serial. A pre-signed good left behind under one hash
+		// would vouch for a revoked certificate to every client using it.
+		It("evicts every hash's cached answer when the certificate is revoked", func() {
+			hashes := []crypto.Hash{crypto.SHA1, crypto.SHA256, crypto.SHA384, crypto.SHA512}
+			for _, hash := range hashes {
+				primeCache(requestFor(myCA.CACert, hash))
+			}
+
+			Expect(myCA.Revoke(context.Background(), "ocsp-issuer-node")).To(Succeed())
+
+			for _, hash := range hashes {
+				respDER, err := myCA.OCSPResponse(context.Background(), requestFor(myCA.CACert, hash))
+				Expect(err).NotTo(HaveOccurred())
+				resp, err := xocsp.ParseResponse(respDER, myCA.CACert)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resp.Status).To(Equal(xocsp.Revoked), "the %v answer", hash)
+			}
+		})
+
+		// A hash outside x/crypto's table cannot be evaluated, which is not the
+		// same claim as "not mine": it stays a malformed request, refused by the
+		// parser before the issuer check is reached. SHA3-256's OID is swapped in
+		// for SHA-256's, which is the same length, so the DER stays well formed.
+		It("treats a request hash it cannot compute as malformed, not as another issuer's", func() {
+			sha256OID := []byte{0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01}
+			sha3OID := []byte{0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x08}
+			own := requestFor(myCA.CACert, crypto.SHA256)
+			Expect(bytes.Count(own, sha256OID)).To(Equal(1))
+			reqDER := bytes.Replace(own, sha256OID, sha3OID, 1)
+
+			_, err := myCA.OCSPResponse(context.Background(), reqDER)
+			Expect(err).To(MatchError(ContainSubstring("unknown hash function")))
+			Expect(errors.Is(err, ca.ErrNotAuthoritative)).To(BeFalse())
+			Expect(errors.Is(err, ca.ErrInternal)).To(BeFalse())
+		})
+	})
+
+	// An imported chain's ancestors are other CAs. The responder answers for
+	// the certificate this CA signs with, which is the first in the bundle, and
+	// not for the root above it.
+	It("answers for an imported intermediate but not for the root above it", func() {
+		ctx := context.Background()
+		chain, err := testutil.GenerateTestChain("unused.example.com")
+		Expect(err).NotTo(HaveOccurred())
+		store := storage.New(GinkgoT().TempDir())
+		Expect(ca.ImportCA(ctx, store, chain.Bundle, chain.InterKeyPEM, nil)).To(Succeed())
+		imported := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		Expect(imported.Init(ctx)).To(Succeed())
+		Expect(imported.CACert.Subject.CommonName).To(Equal("Test Intermediate CA"))
+
+		csrPEM, err := testutil.GenerateCSR("ocsp-chain-node")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = imported.SaveRequest(ctx, "ocsp-chain-node", csrPEM)
+		Expect(err).NotTo(HaveOccurred())
+		certPEM, err := imported.Sign(ctx, "ocsp-chain-node")
+		Expect(err).NotTo(HaveOccurred())
+		leaf := decodeCert(certPEM)
+
+		viaIntermediate, err := xocsp.CreateRequest(leaf, imported.CACert, nil)
+		Expect(err).NotTo(HaveOccurred())
+		respDER, err := imported.OCSPResponse(ctx, viaIntermediate)
+		Expect(err).NotTo(HaveOccurred())
+		resp, err := xocsp.ParseResponse(respDER, imported.CACert)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.Status).To(Equal(xocsp.Good))
+
+		viaRoot, err := xocsp.CreateRequest(leaf, chain.RootCert, nil)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = imported.OCSPResponse(ctx, viaRoot)
+		Expect(err).To(MatchError(ca.ErrNotAuthoritative))
 	})
 
 	// --- Error handling ---

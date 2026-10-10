@@ -20,6 +20,7 @@ package ca
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
@@ -27,6 +28,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"slices"
 	"time"
 
 	"golang.org/x/crypto/ocsp"
@@ -43,6 +45,15 @@ import (
 // the one an external signer makes reachable under load.
 var ErrInternal = errors.New("internal CA error")
 
+// ErrNotAuthoritative marks an OCSP request whose CertID names an issuer other
+// than this CA: its IssuerNameHash or IssuerKeyHash does not match CACert. The
+// HTTP handler answers it with RFC 6960 `unauthorized`, which is how §2.3 has a
+// responder decline to speak for a certificate it is not authoritative for.
+//
+// It is not ErrInternal and not a malformed request. The request was well
+// formed and nothing failed here; it was simply addressed to someone else.
+var ErrNotAuthoritative = errors.New("OCSP request names an issuer this CA is not authoritative for")
+
 // OCSPValidity is the NextUpdate window written into a definite OCSP response —
 // a good or a revoked. Those are pre-signed and cached for this duration, and a
 // GET carries a matching Cache-Control: max-age for downstream HTTP caches.
@@ -56,6 +67,40 @@ const OCSPValidity = 4 * time.Hour
 type ocspCacheEntry struct {
 	der       []byte
 	expiresAt time.Time
+}
+
+// ocspCacheKey names a pre-signed response by serial and by the hash the
+// request used: the response's CertID carries that hash, so an answer to a
+// SHA-1 request is no answer to a SHA-256 one.
+//
+// Flat rather than a map per serial. The usual fleet asks with one hash, and a
+// nested map would allocate a whole map group per cached serial for it.
+type ocspCacheKey struct {
+	serial string
+	hash   crypto.Hash
+}
+
+// ocspCacheHashes is every request hash whose answer may be cached, and so
+// every hash evictOCSPLocked has to drop. It is the set ocsp.ParseRequest
+// accepts today. A hash added to that later is answered but never cached until
+// it is added here too, which costs a signature per request rather than
+// leaving an entry eviction cannot see.
+var ocspCacheHashes = [...]crypto.Hash{crypto.SHA1, crypto.SHA256, crypto.SHA384, crypto.SHA512}
+
+// ocspCacheableHash reports whether an answer to a request hashed with h may
+// be cached; see ocspCacheHashes.
+func ocspCacheableHash(h crypto.Hash) bool {
+	return slices.Contains(ocspCacheHashes[:], h)
+}
+
+// evictOCSPLocked drops every pre-signed response for serial, whichever hash
+// it was asked with. Every eviction goes through here, so the list it walks
+// and the guard on the cache write cannot drift apart. c.mu must be held by
+// the caller.
+func (c *CA) evictOCSPLocked(serial string) {
+	for _, h := range ocspCacheHashes {
+		delete(c.ocspCache, ocspCacheKey{serial: serial, hash: h})
+	}
 }
 
 // oidNonce is the OCSP nonce extension OID (RFC 8954 §2).
@@ -181,7 +226,7 @@ func (c *CA) unindexSerialLocked(serial string) {
 // later should only have to be added here. c.mu must be held by the caller.
 func (c *CA) dropSerialLocked(serial string) {
 	delete(c.serialIndex, serial)
-	delete(c.ocspCache, serial)
+	c.evictOCSPLocked(serial)
 	// Every removal counts, whoever made it. A reconcile whose storage read
 	// predates this one must not re-add what just left, and this is the one
 	// place all removals pass through — which is why the counter lives here
@@ -192,8 +237,9 @@ func (c *CA) dropSerialLocked(serial string) {
 // OCSPResponse builds a DER-encoded OCSPResponse for the given DER-encoded
 // OCSPRequest. The CA key signs the response directly (RFC 6960 §2.6).
 //
-// Responses are cached by serial for OCSPValidity; the cache is bypassed when
-// a nonce is present in the request (RFC 8954). The caller must NOT hold c.mu.
+// Responses are cached by serial and request hash for OCSPValidity; the cache
+// is bypassed when a nonce is present in the request (RFC 8954). The caller
+// must NOT hold c.mu.
 //
 // Callers that hand the answer to an HTTP cache want AnswerOCSP instead, which
 // carries how long it may be reused. This form is kept because most callers —
@@ -267,17 +313,47 @@ func (c *CA) AnswerOCSP(ctx context.Context, reqDER []byte) (OCSPAnswer, error) 
 	// Cache returns must be defensive copies: the cached slice is shared
 	// across concurrent readers, and the HTTP layer should never observe
 	// a buffer that another goroutine could mutate.
-	c.mu.RLock()
-	if !hasNonce {
-		if entry, ok := c.ocspCache[serialHex]; ok && time.Now().Before(entry.expiresAt) {
-			c.mu.RUnlock()
-			return OCSPAnswer{DER: bytes.Clone(entry.der), MaxAge: time.Until(entry.expiresAt)}, nil
+	//
+	// The issuer check comes first, inside the same lock, because the cache key
+	// is the serial and the request hash, not the issuer. Checked after the
+	// lookup, a request naming another issuer would still be handed the
+	// pre-signed answer for whatever this CA holds under that serial. Two short
+	// hashes do not make the read lock worth splitting.
+	//
+	// The closure is there for its deferred unlock (docs/development/locking.md
+	// rule 4). The check hashes with an algorithm an unauthenticated caller
+	// picks, and a panic in it — a nil CACert, or crypto/sha1 under
+	// GODEBUG=fips140=only — must cost that one connection, not leave c.mu
+	// read-held for every writer to queue behind.
+	cacheKey := ocspCacheKey{serial: serialHex, hash: req.HashAlgorithm}
+	var (
+		caCert      *x509.Certificate
+		caKey       crypto.Signer
+		known       bool
+		crlSnapshot *x509.RevocationList
+	)
+	hit, isHit, err := func() (OCSPAnswer, bool, error) {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+		caCert, caKey = c.CACert, c.CAKey
+		if err := checkOCSPIssuer(req, caCert); err != nil {
+			return OCSPAnswer{}, false, err
 		}
+		if !hasNonce {
+			if entry, ok := c.ocspCache[cacheKey]; ok && time.Now().Before(entry.expiresAt) {
+				return OCSPAnswer{DER: bytes.Clone(entry.der), MaxAge: time.Until(entry.expiresAt)}, true, nil
+			}
+		}
+		_, known = c.serialIndex[serialHex]
+		crlSnapshot = c.cachedCRL
+		return OCSPAnswer{}, false, nil
+	}()
+	if err != nil {
+		return OCSPAnswer{}, fmt.Errorf("OCSP request for serial %s (%v): %w", serialHex, req.HashAlgorithm, err)
 	}
-	_, known := c.serialIndex[serialHex]
-	crlSnapshot := c.cachedCRL
-	caCert, caKey := c.CACert, c.CAKey
-	c.mu.RUnlock()
+	if isHit {
+		return hit, nil
+	}
 
 	// From here until the cache write, no CA lock is held. That is the whole of
 	// #197: ocsp.CreateResponse below performs a signature, and under an
@@ -308,8 +384,13 @@ func (c *CA) AnswerOCSP(ctx context.Context, reqDER []byte) (OCSPAnswer, error) 
 	//     a value, and staleness in it is handled at the cache write, which
 	//     re-reads the map under the write lock rather than trusting this.
 	now := time.Now().UTC()
+	// IssuerHash echoes the request's algorithm into the response's CertID.
+	// Left unset, x/crypto/ocsp writes SHA-1 whatever was asked, and a client
+	// that matches the response to its request on the whole CertID — OpenSSL
+	// does, hash algorithm included — finds no status in it at all.
 	template := ocsp.Response{
 		SerialNumber: req.SerialNumber,
+		IssuerHash:   req.HashAlgorithm,
 		ThisUpdate:   now,
 	}
 
@@ -412,11 +493,13 @@ func (c *CA) AnswerOCSP(ctx context.Context, reqDER []byte) (OCSPAnswer, error) 
 	//     past the point the index learned better. Leaving it uncached is what
 	//     makes an index refresh take effect on the next request rather than on
 	//     the next restart.
-	//   - The cache key is the requested serial, which is chosen by an
-	//     unauthenticated caller. Every other status can only be reached for a
-	//     serial this CA issued, so the cache is bounded by the inventory;
-	//     caching unknowns would let anyone who can reach /ocsp grow the map
-	//     without limit, an entry (and a signed response) per made-up serial.
+	//   - The cache key is the requested serial and hash, both chosen by an
+	//     unauthenticated caller. The hash is one of the four in
+	//     ocspCacheHashes, and every other status can only be reached for a
+	//     serial this CA issued, so the cache is bounded by the inventory times
+	//     four; caching unknowns would let anyone who can reach /ocsp grow the
+	//     map without limit, an entry (and a signed response) per made-up
+	//     serial.
 	//
 	// It costs no DoS protection to leave out, and the reason is on this path
 	// rather than another one. The cache never bounded how much signing an
@@ -473,7 +556,7 @@ func (c *CA) AnswerOCSP(ctx context.Context, reqDER []byte) (OCSPAnswer, error) 
 	// a counter only because it genuinely cannot re-check its own predicate — it
 	// cannot tell "pruned elsewhere" from "issued here since I read".
 	var cached bool
-	if !hasNonce && template.Status != ocsp.Unknown {
+	if !hasNonce && template.Status != ocsp.Unknown && ocspCacheableHash(req.HashAlgorithm) {
 		c.mu.Lock()
 		_, stillKnown := c.serialIndex[serialHex]
 		// statusErr is kept in the condition below rather than handled: it can
@@ -491,7 +574,7 @@ func (c *CA) AnswerOCSP(ctx context.Context, reqDER []byte) (OCSPAnswer, error) 
 		// seam cut into a cache-write guard.
 		stillStatus, stillRevokedAt, statusErr := decideOCSPStatus(c.cachedCRL, req.SerialNumber, stillKnown)
 		if statusErr == nil && stillStatus == template.Status && stillRevokedAt.Equal(template.RevokedAt) {
-			c.ocspCache[serialHex] = ocspCacheEntry{
+			c.ocspCache[cacheKey] = ocspCacheEntry{
 				der:       bytes.Clone(respDER),
 				expiresAt: now.Add(OCSPValidity),
 			}
@@ -594,6 +677,54 @@ func decideOCSPStatus(crl *x509.RevocationList, serial *big.Int, known bool) (in
 		}
 	}
 	return ocsp.Good, time.Time{}, nil
+}
+
+// checkOCSPIssuer reports whether req's CertID names issuer, by recomputing
+// both hashes the way the client did (RFC 6960 §4.1.1) and comparing them. It
+// returns ErrNotAuthoritative on a mismatch.
+//
+// The hash is the request's own. SHA-1 is what most clients send, but nothing
+// obliges them to, and a responder that assumed it would refuse every SHA-256
+// request as a stranger's. The key hash is over the *value* of the issuer's
+// subjectPublicKey BIT STRING, not the whole SubjectPublicKeyInfo; hashing the
+// latter is the easy mistake, and it would refuse every legitimate request.
+//
+// A hash this binary cannot compute is reported as a plain error, which the
+// handler answers with `malformedRequest`: the request is in a form this
+// responder cannot evaluate, which is not the same claim as "not mine". In
+// practice ocsp.ParseRequest has already refused it — it accepts only SHA-1
+// and the SHA-2 family, and x/crypto/ocsp links all four in itself — so the
+// Available check is there to keep a future addition to that table from
+// becoming a panic on an unauthenticated endpoint.
+//
+// Only the one certificate is checked because it is the only one this CA issues
+// under. An imported chain's ancestors are other CAs, whose certificates this
+// responder has no business vouching for, and a renewed CA certificate with the
+// same subject and key produces the same two hashes anyway.
+func checkOCSPIssuer(req *ocsp.Request, issuer *x509.Certificate) error {
+	if !req.HashAlgorithm.Available() {
+		return fmt.Errorf("OCSP request hash algorithm %v is not available", req.HashAlgorithm)
+	}
+
+	var spki struct {
+		Algorithm pkix.AlgorithmIdentifier
+		PublicKey asn1.BitString
+	}
+	if _, err := asn1.Unmarshal(issuer.RawSubjectPublicKeyInfo, &spki); err != nil {
+		return fmt.Errorf("%w: parsing the CA public key: %w", ErrInternal, err)
+	}
+
+	h := req.HashAlgorithm.New()
+	h.Write(issuer.RawSubject)
+	if !bytes.Equal(h.Sum(nil), req.IssuerNameHash) {
+		return ErrNotAuthoritative
+	}
+	h.Reset()
+	h.Write(spki.PublicKey.RightAlign())
+	if !bytes.Equal(h.Sum(nil), req.IssuerKeyHash) {
+		return ErrNotAuthoritative
+	}
+	return nil
 }
 
 // buildAIAExtension constructs the DER-encoded value of an Authority Information

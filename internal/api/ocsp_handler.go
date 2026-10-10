@@ -92,6 +92,13 @@ func (s *Server) handleOCSP(w http.ResponseWriter, r *http.Request) {
 			// are asking it.
 			slog.Debug("OCSP response shed: CA signing concurrency limit reached",
 				"client_ip", clientIP(r))
+		case http.StatusForbidden:
+			// Debug for the shed's reason: the caller decides how often this
+			// fires. The client is already told — its `unauthorized` is where a
+			// misconfigured -issuer surfaces — so this line only adds which
+			// client sent it, and the error carries the serial and hash.
+			slog.Debug("OCSP request names an issuer this CA does not answer for",
+				"error", err, "client_ip", clientIP(r))
 		default:
 			slog.Warn("OCSP request error", "error", err)
 		}
@@ -137,11 +144,15 @@ func (s *Server) handleOCSP(w http.ResponseWriter, r *http.Request) {
 // concurrent signing is a separate claim, and belongs where it can be shown:
 // internal/ca/signboundrace_test.go.)
 //
-// The three cases say genuinely different things to a verifier:
+// The four cases say genuinely different things to a verifier:
 //
 //   - tryLater: the responder is at the concurrency its operator configured for
 //     the deployment's signer. Nothing is broken and the request was well
 //     formed; come back (RFC 6960 §2.3).
+//   - unauthorized: the request was well formed but names another issuer, so
+//     this responder is not authoritative for it (RFC 6960 §2.3). 403 rather
+//     than 404, which would also fit: a 404 is heuristically cacheable by a
+//     shared proxy, and nothing here has decided that answer may be stored.
 //   - internalError: a server fault. A verifier may retry, and an operator has
 //     something to fix.
 //   - malformedRequest: the request itself was bad, and retrying it unchanged
@@ -151,6 +162,8 @@ func ocspErrorResponse(err error) (int, []byte) {
 	switch {
 	case errors.Is(err, ca.ErrSigningBusy):
 		return http.StatusServiceUnavailable, xocsp.TryLaterErrorResponse
+	case errors.Is(err, ca.ErrNotAuthoritative):
+		return http.StatusForbidden, xocsp.UnauthorizedErrorResponse
 	case errors.Is(err, ca.ErrInternal):
 		return http.StatusInternalServerError, xocsp.InternalErrorErrorResponse
 	default:

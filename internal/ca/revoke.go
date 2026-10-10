@@ -402,7 +402,7 @@ func (c *CA) revokeSerialLocked(ctx context.Context, serialStr string) error {
 	// Invalidate the cached OCSP response for this serial so the next query
 	// returns the correct Revoked status instead of a stale Good response.
 	// Use the same normalised key as the OCSP index (uppercase hex, no padding).
-	delete(c.ocspCache, serialHexStr(serialInt))
+	c.evictOCSPLocked(serialHexStr(serialInt))
 
 	return nil
 }

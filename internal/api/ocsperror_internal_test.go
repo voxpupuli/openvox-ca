@@ -46,6 +46,13 @@ var _ = Describe("OCSP error classification", func() {
 		Entry("a wrapped shed is still tryLater",
 			fmt.Errorf("answering: %w", ca.ErrSigningBusy),
 			http.StatusServiceUnavailable, xocsp.TryLaterErrorResponse),
+		// A request for another issuer's certificate was well formed and
+		// nothing failed; this responder is just not the one to ask.
+		Entry("another issuer's request becomes unauthorized",
+			ca.ErrNotAuthoritative, http.StatusForbidden, xocsp.UnauthorizedErrorResponse),
+		Entry("a wrapped issuer mismatch is still unauthorized",
+			fmt.Errorf("answering: %w", ca.ErrNotAuthoritative),
+			http.StatusForbidden, xocsp.UnauthorizedErrorResponse),
 		Entry("a server fault becomes internalError",
 			ca.ErrInternal, http.StatusInternalServerError, xocsp.InternalErrorErrorResponse),
 		Entry("a wrapped server fault is still internalError",
@@ -62,5 +69,12 @@ var _ = Describe("OCSP error classification", func() {
 	It("keeps a shed distinct from an internal error", func() {
 		Expect(errors.Is(ca.ErrSigningBusy, ca.ErrInternal)).To(BeFalse())
 		Expect(errors.Is(ca.ErrInternal, ca.ErrSigningBusy)).To(BeFalse())
+	})
+
+	// Likewise for an issuer mismatch: matching ErrInternal would invite the
+	// retry a misaddressed request can never satisfy.
+	It("keeps an issuer mismatch distinct from the other two", func() {
+		Expect(errors.Is(ca.ErrNotAuthoritative, ca.ErrInternal)).To(BeFalse())
+		Expect(errors.Is(ca.ErrNotAuthoritative, ca.ErrSigningBusy)).To(BeFalse())
 	})
 })
