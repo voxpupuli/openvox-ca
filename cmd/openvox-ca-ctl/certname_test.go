@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"syscall"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -37,7 +38,8 @@ import (
 // server's router cleans the path and redirects, and the client followed the
 // redirect to a different route. The key file name could leave --out-dir only
 // once the server had answered 2xx for such a name, which needs a broken or
-// hostile server. What the CLI owns is that neither can happen.
+// hostile server. What the CLI owns is that neither can happen, and that
+// generate never writes its key through a symlink.
 //
 // There is no spec for a valid certname arriving percent-escaped, because none
 // can be written: every name ca.ValidateSubject accepts is made of unreserved
@@ -162,4 +164,204 @@ var _ = Describe("certname in request and file paths", func() {
 		Entry("generate", "generate", "POST", "/puppet-ca/v1/generate/"),
 		Entry("import-cert", "import-cert", "PUT", "/puppet-ca/v1/certificate/"),
 	)
+
+	Describe("generate's private key file", func() {
+		const certname = "node1.example.com"
+		var keyPath, target string
+
+		BeforeEach(func() {
+			keyPath = filepath.Join(outDir, certname+"_key.pem")
+			target = filepath.Join(GinkgoT().TempDir(), "elsewhere.pem")
+		})
+
+		// What the symlink specs share: the key went nowhere, and the link is
+		// as it was.
+		notThroughLink := func() {
+			GinkgoHelper()
+			_, statErr := os.Lstat(target)
+			Expect(statErr).To(MatchError(os.ErrNotExist),
+				"the key must not land wherever the symlink points")
+			fi, err := os.Lstat(keyPath)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fi.Mode()&os.ModeSymlink).NotTo(BeZero(), "the symlink is left as it was")
+		}
+
+		It("creates the key file at 0600, holding the key the server returned", func() {
+			Expect(run("generate", certname)).To(Succeed())
+
+			fi, err := os.Stat(keyPath)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fi.Mode().Perm()).To(Equal(os.FileMode(0o600)))
+			Expect(os.ReadFile(keyPath)).To(Equal([]byte("KEY")))
+		})
+
+		It("overwrites an existing key file and narrows its mode to 0600", func() {
+			// Overwriting is the documented case, not an accident: the
+			// serving-certificate procedure points --out-dir at the server's
+			// own key directory. The mode is the part that used to go wrong,
+			// because os.WriteFile keeps an existing file's permissions. The
+			// old contents are longer than the new key, so a write that did
+			// not truncate would leave their tail behind.
+			Expect(os.WriteFile(keyPath, []byte("OLD KEY MATERIAL"), 0o644)).To(Succeed())
+			// Chmod as well: os.WriteFile's mode is filtered by the umask, and
+			// under 077 the seed would already be 0600.
+			Expect(os.Chmod(keyPath, 0o644)).To(Succeed())
+
+			Expect(run("generate", certname)).To(Succeed())
+
+			fi, err := os.Stat(keyPath)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fi.Mode().Perm()).To(Equal(os.FileMode(0o600)),
+				"a key must not inherit a world-readable mode from the file it replaced")
+			Expect(os.ReadFile(keyPath)).To(Equal([]byte("KEY")))
+		})
+
+		It("refuses a symlink at the key path before asking the server for a key", func() {
+			Expect(os.Symlink(target, keyPath)).To(Succeed())
+
+			err := run("generate", certname)
+
+			Expect(err).To(MatchError(ContainSubstring("symbolic link")))
+			Expect(hits).To(BeZero(),
+				"the server must not issue a certificate whose key the CLI will not write")
+			notThroughLink()
+		})
+
+		It("refuses a symlink planted at the key path while the request is in flight", func() {
+			// After the pre-flight check and before the write: the gap only
+			// O_NOFOLLOW on the open itself can close.
+			onRequest = func() {
+				defer GinkgoRecover()
+				Expect(os.Symlink(target, keyPath)).To(Succeed())
+			}
+
+			err := run("generate", certname)
+
+			Expect(err).To(MatchError(ContainSubstring("failed to save private key")))
+			Expect(err).To(MatchError(ContainSubstring("run clean --certname")),
+				"a failure after issuance must say how to recover from it")
+			Expect(hits).To(Equal(1))
+			notThroughLink()
+		})
+
+		// runBounded runs generate against a FIFO at the key path. A write
+		// that reaches a FIFO with no reader blocks in open for ever, so a
+		// regression must fail here within its own bound rather than hang the
+		// suite. Should the open block, the cleanup's reader releases it, so
+		// the specs that follow are not wedged either.
+		runBounded := func() error {
+			GinkgoHelper()
+			DeferCleanup(func() {
+				if r, err := os.OpenFile(keyPath, os.O_RDONLY|syscall.O_NONBLOCK, 0); err == nil {
+					_ = r.Close()
+				}
+			})
+			done := make(chan error, 1)
+			go func() {
+				defer GinkgoRecover()
+				done <- run("generate", certname)
+			}()
+			var err error
+			Eventually(done, "5s").Should(Receive(&err), "generate hung opening a FIFO")
+			return err
+		}
+
+		It("refuses a FIFO at the key path before asking the server for a key", func() {
+			Expect(syscall.Mkfifo(keyPath, 0o600)).To(Succeed())
+
+			err := runBounded()
+
+			Expect(err).To(MatchError(ContainSubstring("not a regular file")))
+			Expect(hits).To(BeZero())
+		})
+
+		It("refuses a FIFO planted at the key path while the request is in flight", func() {
+			// The gap O_NONBLOCK closes.
+			onRequest = func() {
+				defer GinkgoRecover()
+				Expect(syscall.Mkfifo(keyPath, 0o600)).To(Succeed())
+			}
+
+			err := runBounded()
+
+			Expect(err).To(MatchError(ContainSubstring("failed to save private key")))
+			Expect(hits).To(Equal(1))
+		})
+
+		It("does not write the key into a FIFO that someone is reading", func() {
+			// With a reader attached the open succeeds even with O_NONBLOCK.
+			// What stops the key reaching whoever holds the other end is then
+			// platform-dependent below this layer: Linux refuses to truncate a
+			// FIFO, darwin does not. The regular-file check on the opened
+			// descriptor refuses on both, and the error asserted here is its
+			// own, so it is that check this spec pins.
+			var reader *os.File
+			onRequest = func() {
+				defer GinkgoRecover()
+				Expect(syscall.Mkfifo(keyPath, 0o600)).To(Succeed())
+				var err error
+				reader, err = os.OpenFile(keyPath, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			err := run("generate", certname)
+			Expect(reader).NotTo(BeNil())
+			DeferCleanup(reader.Close)
+
+			Expect(err).To(MatchError(ContainSubstring("not a regular file")))
+			buf := make([]byte, 16)
+			n, _ := reader.Read(buf)
+			Expect(buf[:n]).To(BeEmpty(), "the key reached the FIFO's reader")
+		})
+
+		It("refuses a missing --out-dir before asking the server for a key", func() {
+			outDir = filepath.Join(outDir, "missing")
+
+			err := run("generate", certname)
+
+			Expect(err).To(MatchError(ContainSubstring("--out-dir")))
+			Expect(err).To(MatchError(ContainSubstring("nothing was sent to the server")))
+			Expect(hits).To(BeZero(),
+				"a path the key cannot be written to must not cost an issued certificate")
+		})
+
+		It("follows a symlinked --out-dir to the directory it names", func() {
+			// The directory is the operator's own choice, so only a link at
+			// the key path itself is refused.
+			link := filepath.Join(GinkgoT().TempDir(), "out-link")
+			Expect(os.Symlink(outDir, link)).To(Succeed())
+			outDir = link
+
+			Expect(run("generate", certname)).To(Succeed())
+
+			Expect(os.ReadFile(keyPath)).To(Equal([]byte("KEY")),
+				"the key lands in the directory the link names")
+		})
+
+		It("refuses an --out-dir that is not a directory before asking the server for a key", func() {
+			outDir = filepath.Join(outDir, "file")
+			Expect(os.WriteFile(outDir, nil, 0o600)).To(Succeed())
+
+			err := run("generate", certname)
+
+			Expect(err).To(MatchError(ContainSubstring("is not a directory")))
+			Expect(hits).To(BeZero())
+		})
+
+		It("refuses a key path it cannot inspect before asking the server for a key", func() {
+			// An --out-dir without search permission: the Lstat fails with
+			// EACCES rather than ENOENT, and the write would fail the same way
+			// once the certificate had been issued.
+			if os.Geteuid() == 0 {
+				Skip("root bypasses directory permissions")
+			}
+			Expect(os.Chmod(outDir, 0o600)).To(Succeed())
+			DeferCleanup(os.Chmod, outDir, os.FileMode(0o700))
+
+			err := run("generate", certname)
+
+			Expect(err).To(MatchError(ContainSubstring("checking private key path")))
+			Expect(hits).To(BeZero())
+		})
+	})
 })
