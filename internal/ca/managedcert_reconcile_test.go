@@ -1016,7 +1016,7 @@ var _ = Describe("Reconciling a managed certificate", func() {
 	It("refuses an entry whose spec would not validate, without touching the store", func() {
 		entry.Spec.RenewBefore = 0
 		issued, err := reconcile()
-		Expect(err).To(MatchError(ContainSubstring("RenewBefore must be positive")))
+		Expect(err).To(MatchError(ContainSubstring("renew_before must be positive")))
 		Expect(issued).To(BeFalse())
 		Expect(fake.saveCount()).To(BeZero())
 	})

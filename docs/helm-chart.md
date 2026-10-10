@@ -82,7 +82,10 @@ openvox-ca has a large configuration surface, and the chart deliberately does
 - **Convenience blocks** — `tls`, `ca`, `caKeyPassphrase`, `puppetServers`,
   `autosign`, `metrics`, `kubernetesExport`, `persistence` — do the Kubernetes
   half of a feature (mount the Secret, open the port, create the RBAC) *and*
-  set the config keys pointing at whatever they mounted.
+  set the config keys pointing at whatever they mounted. `managedCerts` is the
+  one exception: it creates RBAC and sets nothing, because the certificates it
+  grants access to are declared under `config.managed_certs` rather than in
+  values.
 - **`config` always wins**, with three exceptions. The two are deep-merged with
   your `config` on top — except `port`, `cadir` and `metrics_listen`, which also
   shape a Kubernetes object (the container port and Service, the volume mount,
@@ -593,11 +596,19 @@ easy to get wrong:
   presents its own projected ServiceAccount token, which it reads from a mounted
   file, and OpenBao performs the `TokenReview` itself — so the API server is
   OpenBao's peer here, not the CA's. Egress to the API is needed for
-  [Kubernetes export](#kubernetes-export), which really does call it. Listing it
-  unconditionally opens a hole the deployment does not use.
+  [Kubernetes export](#kubernetes-export) and for
+  [managed certificates](#managed-certificates) kept in a Secret, both of which
+  really do call it. Listing it unconditionally opens a hole the deployment does
+  not use.
+- **A managed certificate in a Secret needs that egress; one in local files does
+  not.** The distinction is the same one the token-mount table above draws, and
+  getting it wrong fails quietly: the reconcile pass cannot write, logs it per
+  entry, and retries — so readiness stays green and the certificate simply never
+  appears.
 
 So the list is: your storage backend, OpenBao if the key lives there, anything
-your sidecars fetch, and the Kubernetes API only if you export.
+your sidecars fetch, and the Kubernetes API if you export or keep a managed
+certificate in a Secret.
 
 ## Kubernetes export
 
@@ -631,14 +642,15 @@ release namespace is always included. Every namespace you export into needs a
 binding. `rbac.scope: ClusterRole` grants it cluster-wide instead, which is
 worth it only if you export into many namespaces.
 
-The chart mounts the ServiceAccount token automatically when this (or OpenBao's
-Kubernetes auth) is enabled, and leaves it unmounted otherwise. These are the
+The chart mounts the ServiceAccount token automatically when the pod needs the
+Kubernetes API, and leaves it unmounted otherwise. These are the
 inputs it counts as enabled — some because it can see the setting, the rest
 because it cannot see far enough to rule it out:
 
 | Input | Why it mounts |
 | --- | --- |
 | `kubernetesExport.enabled`, or `config.kubernetes_export.targets` | Export is configured, so the exporter needs the API |
+| `config.managed_certs` with a `store.secret` | A managed certificate is kept in a Secret, so the CA reads and writes it. A file store needs nothing and mounts nothing |
 | `config.openbao.auth_method: kubernetes` | The key provider authenticates with the pod's own token |
 | `PUPPET_CA_OPENBAO_AUTH_METHOD: kubernetes` in `env` or `extraEnv` | Environment variables outrank the config file, so the chart reads those two values too. An empty value is ignored, as the server ignores it |
 | `--openbao-auth-method=kubernetes` in `extraArgs` | Arguments outrank both, and `extraArgs` is appended to the argv the chart builds, so it is readable |
@@ -648,6 +660,61 @@ because it cannot see far enough to rule it out:
 | A `--config` in `extraArgs` | The chart renders its own `--config` and appends `extraArgs` after it, so a second one wins and the server reads a file the chart never saw |
 
 `automountServiceAccountToken` forces the decision either way.
+
+## Managed certificates
+
+`config.managed_certs` makes openvox-ca issue and renew certificates for OpenVox
+components — see [managed certificates](configuration.md#managed-certificates)
+for the entries themselves, which are server configuration rather than chart
+values.
+
+The chart's only part in it is the RBAC, and it is derived from those entries
+rather than repeated in values: one Role and RoleBinding per namespace some
+entry's Secret lives in, granting `get` and `patch` narrowed by `resourceNames`
+plus an unnarrowable `create`. That is a separate Role from the export's,
+because the export needs neither `get` nor those namespaces.
+
+**Those namespaces must already exist.** They come out of `config.managed_certs`
+rather than from a values key, so the chart has no list to create them from and
+does not try; an install naming a namespace that does not exist fails on the
+Role. Create them first, or point the entries at namespaces the release already
+owns.
+
+A `files` store needs something from the chart too, though not RBAC: the pod
+runs with `readOnlyRootFilesystem: true`, so the directory a file store writes
+to must be a writable volume you mount yourself through `extraVolumes` and
+`extraVolumeMounts`. In Kubernetes a Secret store is almost always the better
+fit — it needs no volume, and something else in the cluster can consume it.
+
+```yaml
+managedCerts:
+  rbac:
+    create: true
+```
+
+Nothing is rendered when no entry uses a Secret store — a file store talks to
+nothing — or when the chart cannot read the configuration. Under
+`existingConfigMap`, `args`, or a `--config` in `extraArgs` the chart knows
+neither that a managed certificate exists nor what its Secret is called, and
+unlike the export there is no chart value that would tell it, so it creates
+nothing rather than granting `get` and `patch` on every Secret in scope. The
+post-install notes say so, and say what to create by hand.
+
+> **The Secret holding OpenVox Server's key is a CA admin credential**, because
+> its certname is listed in `puppetServers` and a component certificate carries
+> `clientAuth`. Give that Secret's namespace and RBAC the care you would give
+> the CA's own key. The chart refuses to bind this Role to the namespace's
+> default ServiceAccount for the same reason — it carries `get`, so every pod in
+> the namespace could read those keys.
+>
+> **`create` reaches further than the Secrets it is for.** It cannot be narrowed
+> by `resourceNames`, so it permits creating *any* Secret in those namespaces —
+> including one of type `kubernetes.io/service-account-token` annotated for a
+> ServiceAccount there, which the token controller then fills in. The Role is
+> therefore bounded by its namespaces rather than by the names in its `get` and
+> `patch` rules: put managed certificates in namespaces the CA is already
+> trusted in, or pre-create every Secret, set `managedCerts.rbac.create: false`
+> and bind a Role with `get` and `patch` alone.
 
 ## Running under an external root
 
@@ -1197,15 +1264,31 @@ Objects created by [Kubernetes export](kubernetes-export.md) also survive —
 openvox-ca does not delete what it exported. They carry
 `app.kubernetes.io/managed-by=openvox-ca` — and *only* that: the exporter sets no
 per-release label, so the selector cannot tell one CA's exports from another's.
-Find them cluster-wide, but delete by namespace:
+Find them cluster-wide:
 
 ```console
 $ kubectl get secret,configmap -A -l app.kubernetes.io/managed-by=openvox-ca
-$ kubectl delete secret,configmap --namespace puppet \
-    -l app.kubernetes.io/managed-by=openvox-ca
 ```
 
-If you run more than one openvox-ca and export into shared namespaces, add a
-label of your own under `kubernetesExport.targets[].metadata.labels` and select
-on that as well — otherwise a cluster-wide delete takes the other CA's
-certificate and CRL with it.
+> **Read that listing before deleting anything from it.** A
+> [managed certificate](#managed-certificates) carries the same label by design,
+> so the selector also matches Secrets holding **component private keys** — and
+> a `store.secret` that omits its namespace lives in the release namespace,
+> alongside the exported copies. Those are not republished copies of the CA
+> certificate: they are the only copy of that component's key, and once the CA
+> is uninstalled nothing reissues them. By this page's own reckoning the OpenVox
+> Server one is a CA admin credential.
+
+Delete by namespace, and exclude anything `config.managed_certs` names — either
+by naming the exported objects explicitly, or by giving the export targets a
+label of your own under `kubernetesExport.targets[].metadata.labels` and
+selecting on that:
+
+```console
+$ kubectl delete secret,configmap --namespace puppet \
+    -l app.kubernetes.io/managed-by=openvox-ca,example.com/openvox-ca-export=true
+```
+
+That extra label is worth setting anyway if you run more than one openvox-ca and
+export into shared namespaces — otherwise a cluster-wide delete takes the other
+CA's certificate and CRL with it, as well as every component certificate.

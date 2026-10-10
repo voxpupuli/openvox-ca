@@ -38,7 +38,9 @@ mirror it key by key. Instead:
 - **Convenience blocks** (`tls`, `ca`, `caKeyPassphrase`, `puppetServers`,
   `autosign`, `metrics`, `kubernetesExport`, `persistence`) do the Kubernetes
   side of a feature — mount the Secret, open the port, create the RBAC — *and*
-  set the config keys that point at what they mounted.
+  set the config keys that point at what they mounted. `managedCerts` is the one
+  exception: it creates RBAC and sets nothing, because the certificates are
+  declared under `config.managed_certs`.
 - **`config` always wins.** The two are deep-merged with your `config` on top,
   so you can override anything a convenience block computed — with three
   exceptions the install refuses rather than lets diverge, because they also
@@ -160,6 +162,16 @@ tested floor rather than a ceiling; naming them here would go stale on its own.
 | `kubernetesExport.rbac.scope` | `Role` | `Role` or `ClusterRole` |
 | `kubernetesExport.rbac.namespaces` | `[]` | Extra namespaces to bind the Role into |
 
+### Managed certificates
+
+The certificates themselves live under `config.managed_certs`; this block only
+creates the RBAC for the ones kept in a Secret. See
+[managed certificates](https://github.com/voxpupuli/openvox-ca/blob/main/docs/configuration.md#managed-certificates).
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `managedCerts.rbac.create` | `true` | Create the Role and binding for `config.managed_certs` — one pair per namespace those Secrets live in, derived from the entries rather than from values, so each of those namespaces must already exist at install time. `get` and `patch` are narrowed by `resourceNames`; `create` cannot be. Nothing is rendered when no entry uses a Secret store, or when the chart cannot read the configuration |
+
 ### Workload
 
 | Key | Default | Description |
@@ -187,12 +199,12 @@ tested floor rather than a ceiling; naming them here would go stale on its own.
 | `priorityClassName` / `runtimeClassName` / `schedulerName` | `""` | |
 | `dnsPolicy` / `dnsConfig` / `hostAliases` | `""` / `{}` / `[]` | |
 | `enableServiceLinks` | `false` | |
-| `automountServiceAccountToken` | `null` | `null` mounts the token when the pod needs the API — Kubernetes export (`kubernetesExport.enabled` or `config.kubernetes_export.targets`), or OpenBao Kubernetes auth (`config.openbao.auth_method`, `PUPPET_CA_OPENBAO_AUTH_METHOD` in `env`/`extraEnv`, or `--openbao-auth-method=kubernetes` in `extraArgs`) — and whenever the chart cannot tell: `existingConfigMap`, `args`, `envFrom`, an `extraEnv` `valueFrom` for that variable, or a bare `--openbao-auth-method` in `extraArgs`. See [the guide](https://github.com/voxpupuli/openvox-ca/blob/main/docs/helm-chart.md) for the full table |
+| `automountServiceAccountToken` | `null` | `null` mounts the token when the pod needs the API — Kubernetes export (`kubernetesExport.enabled` or `config.kubernetes_export.targets`), a managed certificate in a Secret (`config.managed_certs` with a `store.secret`), or OpenBao Kubernetes auth (`config.openbao.auth_method`, `PUPPET_CA_OPENBAO_AUTH_METHOD` in `env`/`extraEnv`, or `--openbao-auth-method=kubernetes` in `extraArgs`) — and whenever the chart cannot tell: `existingConfigMap`, `args`, `envFrom`, an `extraEnv` `valueFrom` for that variable, or a bare `--openbao-auth-method` in `extraArgs`. See [the guide](https://github.com/voxpupuli/openvox-ca/blob/main/docs/helm-chart.md) for the full table |
 | `initContainers` / `extraContainers` | `[]` | Templated, so they can reference `.Values` |
 | `extraVolumes` | `[]` | Templated |
 | `extraVolumeMounts` | `[]` | Passed through as written |
 | `serviceAccount.create` | `true` | |
-| `serviceAccount.name` | `""` | Required when `create` is false and `kubernetesExport.rbac.create` is on — the chart refuses to bind the export Role to the namespace's `default` account |
+| `serviceAccount.name` | `""` | Required when `create` is false and `kubernetesExport.rbac.create` or `managedCerts.rbac.create` is on — the chart refuses to bind either Role to the namespace's `default` account |
 | `serviceAccount.annotations` / `.labels` | `{}` | |
 
 ### Service
@@ -249,7 +261,7 @@ certificate, so the controller **must** pass TLS through untouched.
 | `networkPolicy.apiAccess` | `any` | `any` (agents live anywhere), `namespace`, or `none` |
 | `networkPolicy.metricsNamespaces` | `[monitoring]` | Namespaces allowed to scrape the exporter |
 | `networkPolicy.egress.enabled` | `false` | Adds an Egress policy; DNS is always allowed |
-| `networkPolicy.egress.rules` | `[]` | Everything the **pod** reaches, sidecars included: your storage backend, OpenBao if the key lives there, anything `initContainers`/`extraContainers` fetch, and the API server only when `kubernetesExport` is in use (OpenBao's kubernetes auth needs no API egress). DNS is always allowed |
+| `networkPolicy.egress.rules` | `[]` | Everything the **pod** reaches, sidecars included: your storage backend, OpenBao if the key lives there, anything `initContainers`/`extraContainers` fetch, and the API server when `kubernetesExport` is in use or a managed certificate uses a Secret store (OpenBao's kubernetes auth needs no API egress). DNS is always allowed |
 | `networkPolicy.extraIngress` | `[]` | |
 
 ### Availability

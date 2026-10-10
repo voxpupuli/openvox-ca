@@ -425,7 +425,7 @@ var _ = Describe("A managed-certificate spec", func() {
 		// Zero is not "renew at expiry" -- it is a renewal loop that only ever
 		// acts on a certificate that has already stopped working.
 		spec.RenewBefore = 0
-		Expect(spec.Validate()).To(MatchError(ContainSubstring("RenewBefore must be positive")))
+		Expect(spec.Validate()).To(MatchError(ContainSubstring("renew_before must be positive")))
 	})
 
 	It("accepts a spec named only by IP", func() {
@@ -529,7 +529,11 @@ var _ = Describe("A managed-certificate spec", func() {
 		// Zero is meaningful (revoke inline); negative is not.
 		neg := -time.Hour
 		spec.SupersedeAfter = &neg
-		Expect(spec.Validate()).To(MatchError(ContainSubstring("must not be negative")))
+		// The YAML key, not the bare phrase: "must not be negative" is also in
+		// the ttl message, so the loose substring passed whether this arm named
+		// revoke_after or the Go field behind it. The key is the part an
+		// operator reads in their own configuration.
+		Expect(spec.Validate()).To(MatchError(ContainSubstring("revoke_after must not be negative")))
 	})
 
 	It("refuses a negative ttl", func() {
@@ -537,7 +541,7 @@ var _ = Describe("A managed-certificate spec", func() {
 		// discard it and substitute the CA default, so without this arm a
 		// mistyped lifetime becomes a five-year certificate with no complaint.
 		spec.TTL = -time.Hour
-		Expect(spec.Validate()).To(MatchError(ContainSubstring("TTL must not be negative")))
+		Expect(spec.Validate()).To(MatchError(ContainSubstring("ttl must not be negative")))
 	})
 
 	It("allows a ttl of zero, which inherits the CA's configured leaf lifetime", func() {
