@@ -871,7 +871,9 @@ func TestSign_EmptyResponseSurfacesError(t *testing.T) {
 	srv := signTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]interface{}{"data": map[string]interface{}{}})
 	})
-	defer srv.Close()
+	// A cleanup rather than a defer, so it runs after signTestSigner's: the
+	// token manager revokes its token on Close, and needs the server for it.
+	t.Cleanup(srv.Close)
 
 	signer, _ := signTestSigner(t, srv)
 	digest := sha256.Sum256([]byte("x"))
@@ -914,7 +916,9 @@ func TestSign_ReauthFailureSurfacesError(t *testing.T) {
 		writeError(w, http.StatusForbidden, "permission denied")
 	})
 	srv := httptest.NewServer(mux)
-	defer srv.Close()
+	// A cleanup rather than a defer, so it runs after signTestSigner's: the
+	// token manager revokes its token on Close, and needs the server for it.
+	t.Cleanup(srv.Close)
 
 	signer, tm := signTestSigner(t, srv)
 	// Past the request-path throttle, or Reauth would decline without trying.

@@ -49,10 +49,20 @@ const reauthRetryInterval = 5 * time.Second
 // OpenBao and a fresh entry in its audit log.
 const minReauthInterval = 30 * time.Second
 
+// revokeTimeout bounds Close's best-effort revocation of a token this process
+// minted. It is deliberately much shorter than the launcher's 5-second budget
+// for a surviving child, so an unreachable OpenBao can delay exit by no more
+// than this.
+const revokeTimeout = 2 * time.Second
+
 // ErrReauthThrottled is returned (wrapped) by Reauth when the previous login
 // attempt was less than minReauthInterval ago. The request that saw the 403
 // fails with it rather than waiting the interval out.
 var ErrReauthThrottled = errors.New("OpenBao re-authentication throttled")
+
+// errTokenManagerClosed is returned by Reauth after Close. Logging in then
+// would mint a token that nothing will ever revoke.
+var errTokenManagerClosed = errors.New("OpenBao token manager is closed")
 
 // TokenManager owns an OpenBao client's token lifecycle: it logs in once at
 // construction, then runs a background goroutine that proactively renews the
@@ -68,6 +78,13 @@ var ErrReauthThrottled = errors.New("OpenBao re-authentication throttled")
 type TokenManager struct {
 	client *api.Client
 	login  func(ctx context.Context) (*api.Secret, error)
+
+	// ownsToken reports whether login mints the token (AppRole, Kubernetes),
+	// as opposed to adopting one the operator supplied (token file). Only a
+	// minted token is this process's to revoke: an operator's token may be
+	// shared with other processes or replicas, and revoking it at shutdown
+	// would cut every one of them off.
+	ownsToken bool
 
 	// loginTimeout bounds a single login/renew round trip (and, via
 	// Signer.Sign, a single Transit sign round trip). Captured from
@@ -85,6 +102,8 @@ type TokenManager struct {
 	// not; Reauth refuses to start another within minReauthInterval of it.
 	// Guarded by mu.
 	lastLogin time.Time
+	// closed is set by Close, under mu, before it revokes the token.
+	closed bool
 
 	doneCh chan struct{} // closed once the background loop has exited
 }
@@ -102,7 +121,7 @@ func NewTokenManager(ctx context.Context, cfg Config) (*TokenManager, error) {
 		return nil, err
 	}
 
-	loginFn, err := newLoginFunc(client, cfg)
+	loginFn, ownsToken, err := newLoginFunc(client, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -111,6 +130,7 @@ func NewTokenManager(ctx context.Context, cfg Config) (*TokenManager, error) {
 	tm := &TokenManager{
 		client:       client,
 		login:        loginFn,
+		ownsToken:    ownsToken,
 		loginTimeout: cfg.loginTimeout(),
 		ctx:          tmCtx,
 		cancel:       cancel,
@@ -137,13 +157,17 @@ func NewTokenManager(ctx context.Context, cfg Config) (*TokenManager, error) {
 	return tm, nil
 }
 
-// newLoginFunc returns the auth-method-specific login step. AppRole and
-// Kubernetes go through a fresh AuthMethod (see authMethodFactory) and
-// client.Auth().Login, which also sets the client's token on success. Token
-// auth has no /login exchange: it reads the token file directly, sets it on
-// the client, and looks itself up to obtain lease/renewable metadata for the
-// LifetimeWatcher.
-func newLoginFunc(client *api.Client, cfg Config) (func(ctx context.Context) (*api.Secret, error), error) {
+// newLoginFunc returns the auth-method-specific login step, and whether the
+// tokens it yields are minted by this process (see TokenManager.ownsToken).
+// AppRole and Kubernetes go through a fresh AuthMethod (see
+// authMethodFactory) and client.Auth().Login, which also sets the client's
+// token on success. Token auth has no /login exchange: it reads the token
+// file directly, sets it on the client, and looks itself up to obtain
+// lease/renewable metadata for the LifetimeWatcher.
+//
+// Each case states ownership explicitly, so a method added later has to
+// decide rather than inherit revocation by default.
+func newLoginFunc(client *api.Client, cfg Config) (func(ctx context.Context) (*api.Secret, error), bool, error) {
 	switch cfg.AuthMethod {
 	case AuthToken:
 		tokenFile := cfg.TokenFile
@@ -180,11 +204,11 @@ func newLoginFunc(client *api.Client, cfg Config) (func(ctx context.Context) (*a
 					Renewable:     renewable,
 				},
 			}, nil
-		}, nil
+		}, false, nil
 	case AuthAppRole, AuthKubernetes:
 		factory, err := newAuthMethodFactory(cfg)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		return func(ctx context.Context) (*api.Secret, error) {
 			method, err := factory()
@@ -196,9 +220,9 @@ func newLoginFunc(client *api.Client, cfg Config) (func(ctx context.Context) (*a
 				return nil, fmt.Errorf("logging in to OpenBao: %w", err)
 			}
 			return secret, nil
-		}, nil
+		}, true, nil
 	default:
-		return nil, fmt.Errorf("unknown openbao.auth_method %q", cfg.AuthMethod)
+		return nil, false, fmt.Errorf("unknown openbao.auth_method %q", cfg.AuthMethod)
 	}
 }
 
@@ -369,6 +393,9 @@ func (tm *TokenManager) reauthLocked(ctx context.Context) error {
 func (tm *TokenManager) Reauth(ctx context.Context, rejected string) error {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
+	if tm.closed {
+		return errTokenManagerClosed
+	}
 	if tm.client.Token() != rejected {
 		return nil
 	}
@@ -385,10 +412,42 @@ func (tm *TokenManager) Client() *api.Client {
 	return tm.client
 }
 
-// Close stops the background renewal loop and the current watcher, and
-// waits for the loop to exit.
+// Close stops the background renewal loop and the current watcher, waits for
+// the loop to exit, and then revokes the current token if this process minted
+// it (see ownsToken), so a stopped or rolled process leaves no live token
+// behind for the rest of its TTL.
+//
+// Revocation is best effort. It is bounded by revokeTimeout, and a failure is
+// logged at WARN rather than returned: nothing a caller does at shutdown would
+// act on it, and an unreachable OpenBao must not hold up exit. It needs the
+// token's policies to permit auth/token/revoke-self, which OpenBao's built-in
+// default policy does.
+//
+// Close holds tm.mu while it revokes and marks the manager closed first, so a
+// Reauth in flight finishes before the revoke (and its token is the one
+// revoked), and a Reauth after it refuses rather than minting a token nothing
+// would revoke. Calling Close again does nothing.
 func (tm *TokenManager) Close() error {
 	tm.cancel()
 	<-tm.doneCh
+
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.closed {
+		return nil
+	}
+	tm.closed = true
+	if !tm.ownsToken {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), revokeTimeout)
+	defer cancel()
+	if err := tm.client.Auth().Token().RevokeSelfWithContext(ctx, ""); err != nil {
+		slog.Warn("Failed to revoke the OpenBao token at shutdown; it stays valid until its TTL expires",
+			"error", err)
+		return nil
+	}
+	slog.Info("Revoked the OpenBao token at shutdown")
 	return nil
 }

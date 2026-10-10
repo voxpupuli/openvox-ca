@@ -484,6 +484,16 @@ cure, such as a policy that no longer grants Transit access, from turning every
 signing attempt into a login against OpenBao and an entry in its audit log.
 Concurrent requests refused with the same token cause one login between them.
 
+On shutdown, `openvox-ca` revokes the token it logged in for with AppRole or
+Kubernetes auth, so a stopped or replaced process does not leave a usable token
+behind for the rest of its TTL. This uses `auth/token/revoke-self`, which
+OpenBao's built-in `default` policy grants; if your role sets
+`token_no_default_policy`, grant `update` on that path in the role's policy, or
+the token stays valid until it expires. A revocation that fails or takes more
+than 2 seconds is logged as a warning and does not delay shutdown further. A
+token read from `openbao.token_file` is never revoked: it belongs to whoever
+issued it, and may be shared with other processes.
+
 The projected ServiceAccount JWT is read from disk on every login attempt
 rather than cached across the process lifetime: Kubernetes bound
 ServiceAccount tokens are short-lived (default 1 hour) and kubelet rewrites

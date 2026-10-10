@@ -30,6 +30,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -39,9 +40,19 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/onsi/gomega/gbytes"
 	"github.com/openbao/openbao/api/v2"
 
 	"github.com/voxpupuli/openvox-ca/internal/signer/openbao"
+)
+
+// revokeMode selects how lifecycleFake answers auth/token/revoke-self.
+type revokeMode int
+
+const (
+	revokeAccept revokeMode = iota
+	revokeRefuse
+	revokeHang
 )
 
 // operatorToken is the token a token_file holds in these specs: one this
@@ -61,6 +72,7 @@ type lifecycleFake struct {
 	logins    int
 	signs     int
 	renewed   []string
+	revoked   []string
 
 	// refuseSign lists tokens Transit sign answers 403 for, whatever their
 	// validity elsewhere; refuseAllSigns refuses every token, as a policy that
@@ -73,6 +85,9 @@ type lifecycleFake struct {
 	holdRefused int
 	refusedIn   int
 	released    chan struct{}
+
+	revoke  revokeMode
+	unblock chan struct{} // closed to free a revokeHang handler
 }
 
 func newLifecycleFake() *lifecycleFake {
@@ -83,6 +98,7 @@ func newLifecycleFake() *lifecycleFake {
 		valid:      map[string]bool{operatorToken: true},
 		refuseSign: map[string]bool{},
 		released:   make(chan struct{}),
+		unblock:    make(chan struct{}),
 	}
 }
 
@@ -102,6 +118,12 @@ func (f *lifecycleFake) renewedTokens() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.renewed...)
+}
+
+func (f *lifecycleFake) revokedTokens() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.revoked...)
 }
 
 func (f *lifecycleFake) isValid(tok string) bool {
@@ -177,6 +199,27 @@ func (f *lifecycleFake) server() *httptest.Server {
 			"auth": map[string]interface{}{"client_token": tok, "lease_duration": 3600, "renewable": true},
 		})
 	})
+	mux.HandleFunc("/v1/auth/token/revoke-self", func(w http.ResponseWriter, r *http.Request) {
+		tok := r.Header.Get("X-Vault-Token")
+		f.mu.Lock()
+		f.revoked = append(f.revoked, tok)
+		mode := f.revoke
+		if mode == revokeAccept {
+			delete(f.valid, tok)
+		}
+		f.mu.Unlock()
+		switch mode {
+		case revokeAccept:
+			w.WriteHeader(http.StatusNoContent)
+		case revokeRefuse:
+			writeError(w, http.StatusForbidden, "permission denied")
+		case revokeHang:
+			select {
+			case <-f.unblock:
+			case <-r.Context().Done():
+			}
+		}
+	})
 	mux.HandleFunc("/v1/transit/keys/mykey", func(w http.ResponseWriter, _ *http.Request) {
 		der, err := x509.MarshalPKIXPublicKey(f.key.Public())
 		if err != nil {
@@ -244,7 +287,12 @@ var _ = Describe("OpenBao token lifecycle", func() {
 	BeforeEach(func() {
 		fake = newLifecycleFake()
 		srv = fake.server()
-		DeferCleanup(srv.Close)
+		// Registered before any TokenManager's Close, so it runs after them:
+		// a hung revoke handler is freed before the server waits for it.
+		DeferCleanup(func() {
+			close(fake.unblock)
+			srv.Close()
+		})
 		sum := sha256.Sum256([]byte("openvox-ca token lifecycle"))
 		digest = sum[:]
 	})
@@ -358,6 +406,79 @@ var _ = Describe("OpenBao token lifecycle", func() {
 				Eventually(fake.renewedTokens).WithTimeout(5 * time.Second).Should(ContainElement(second))
 				Expect(fake.loginCount()).To(Equal(2))
 			})
+		})
+	})
+
+	Describe("Close", func() {
+		DescribeTable("revokes a token this process logged in for",
+			func(method openbao.AuthMethodKind) {
+				tm := start(method)
+				minted := tm.Client().Token()
+
+				Expect(tm.Close()).To(Succeed())
+
+				Expect(fake.revokedTokens()).To(ConsistOf(minted))
+				Expect(fake.isValid(minted)).To(BeFalse())
+			},
+			Entry("AppRole", openbao.AuthAppRole),
+			Entry("Kubernetes", openbao.AuthKubernetes),
+		)
+
+		It("does not revoke an operator-supplied token from a token file", func() {
+			tm := start(openbao.AuthToken)
+			Expect(tm.Client().Token()).To(Equal(operatorToken))
+
+			Expect(tm.Close()).To(Succeed())
+
+			Expect(fake.revokedTokens()).To(BeEmpty())
+			Expect(fake.isValid(operatorToken)).To(BeTrue())
+		})
+
+		Context("when OpenBao refuses the revocation", func() {
+			var logs *gbytes.Buffer
+
+			BeforeEach(func() {
+				logs = gbytes.NewBuffer()
+				previous := slog.Default()
+				slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+				DeferCleanup(slog.SetDefault, previous)
+			})
+
+			It("still succeeds, and warns without logging the token", func() {
+				fake.revoke = revokeRefuse
+				tm := start(openbao.AuthAppRole)
+				minted := tm.Client().Token()
+
+				Expect(tm.Close()).To(Succeed())
+
+				Expect(fake.revokedTokens()).To(ConsistOf(minted), "the revocation should have been attempted")
+				Expect(string(logs.Contents())).To(MatchRegexp(`level=WARN msg="Failed to revoke the OpenBao token`))
+				Expect(string(logs.Contents())).NotTo(ContainSubstring(minted))
+			})
+		})
+
+		Context("when OpenBao does not answer the revocation", func() {
+			It("gives up within the revoke timeout and still succeeds", func() {
+				fake.revoke = revokeHang
+				tm := start(openbao.AuthAppRole)
+
+				began := time.Now()
+				Expect(tm.Close()).To(Succeed())
+
+				Expect(fake.revokedTokens()).To(HaveLen(1), "the revocation should have been attempted")
+				Expect(time.Since(began)).To(BeNumerically("<", openbao.RevokeTimeoutForTest+time.Second))
+			})
+		})
+
+		It("refuses a later re-authentication rather than minting a token nothing would revoke", func() {
+			tm := start(openbao.AuthAppRole)
+			minted := tm.Client().Token()
+			Expect(tm.Close()).To(Succeed())
+			openbao.ExpireReauthThrottleForTest(tm)
+
+			Expect(tm.Reauth(context.Background(), minted)).NotTo(Succeed())
+
+			Expect(fake.loginCount()).To(Equal(1))
 		})
 	})
 })
