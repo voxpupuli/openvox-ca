@@ -97,6 +97,33 @@ func ValidateKeyConfig(cfg KeyConfig) error {
 	return nil
 }
 
+// ErrCAKeyType is wrapped by checkCAKeyType when the CA's own key is of a type
+// openvox-ca does not sign with.
+var ErrCAKeyType = errors.New("unsupported CA key type")
+
+// checkCAKeyType refuses a CA key that is neither RSA nor ECDSA.
+//
+// ca_key_algo can only create those two, but a PKCS#8 key placed in the cadir or
+// imported alongside a certificate can be anything crypto/x509 parses, Ed25519
+// included. Such a key signs with crypto.Hash(0), which the isolated signer
+// refuses (see checkSignRequest in internal/signer), and x/crypto/ocsp signs
+// with RSA and ECDSA alone. So a CA holding one would issue under
+// --single-process and fail every signature in the default topology. loadCA,
+// ValidateCABundleOrder and BuildCSR call this, which makes that a single error
+// at startup, at import or before a parent is asked to sign, in every topology.
+//
+// Only the type is checked. Size and curve are left as they are: every RSA key
+// signs with SHA-256 and every curve crypto/x509 accepts with SHA-256 or
+// longer, all of which the signer allows.
+func checkCAKeyType(pub crypto.PublicKey) error {
+	switch pub.(type) {
+	case *rsa.PublicKey, *ecdsa.PublicKey:
+		return nil
+	default:
+		return fmt.Errorf("%w: the CA key is %T, and openvox-ca signs only with RSA or ECDSA keys", ErrCAKeyType, pub)
+	}
+}
+
 // validatePublicKey enforces the CA's key-strength policy on a client-submitted
 // public key, mirroring ValidateKeyConfig (which governs server-side key
 // generation): RSA keys must be at least 2048 bits, and ECDSA keys must use an

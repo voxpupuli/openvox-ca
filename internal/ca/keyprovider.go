@@ -256,6 +256,11 @@ func (c *CA) BuildCSR(ctx context.Context, hostname string, create bool) ([]byte
 	if err != nil {
 		return nil, err
 	}
+	// Here as well as at import: a parent's signature over a key this CA
+	// cannot sign with is wasted, and import would refuse what it signed.
+	if err := checkCAKeyType(key.Public()); err != nil {
+		return nil, err
+	}
 
 	// RawSubject preserves the established DN exactly. Re-encoding via
 	// pkix.Name would emit Go's fixed attribute order and silently drop any

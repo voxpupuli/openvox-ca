@@ -22,6 +22,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
@@ -330,6 +331,24 @@ var _ = Describe("openvox-ca csr", func() {
 		_, err := runCSR("--cadir", caDir, "--hostname", "puppet.example.com", "--create-key", "--out", outPath)
 		Expect(err).To(MatchError(ContainSubstring("creating a temporary file beside")))
 		Expect(outPath).NotTo(BeAnExistingFile())
+	})
+
+	It("refuses to request a certificate for an Ed25519 CA key", func() {
+		// ca_key_algo cannot create one, but a key placed in storage by hand
+		// can be anything. Refusing here, before the parent signs, is the
+		// point: import-ca-cert would refuse whatever the parent sent back.
+		_, key, err := ed25519.GenerateKey(rand.Reader)
+		Expect(err).NotTo(HaveOccurred())
+		pkcs8, err := x509.MarshalPKCS8PrivateKey(key)
+		Expect(err).NotTo(HaveOccurred())
+		store := storage.New(caDir)
+		Expect(store.EnsureDirs(context.Background())).To(Succeed())
+		Expect(store.SaveCAKey(context.Background(),
+			pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8}))).To(Succeed())
+
+		out, err := runCSR("--cadir", caDir, "--hostname", "puppet.example.com")
+		Expect(err).To(MatchError(ca.ErrCAKeyType))
+		Expect(out).To(BeEmpty())
 	})
 
 	It("does not clobber an established key when --create-key is passed again", func() {
