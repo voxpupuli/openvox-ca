@@ -931,7 +931,7 @@ managed_certs:
 		// reads the object back; the file side was asserted only as "Load and
 		// Save are not nil", which a closure over the wrong FilesConfig
 		// satisfies just as well. Both stores are reached through one switch in
-		// Build, so an arm that built the right kind of store around the
+		// BuildIn, so an arm that built the right kind of store around the
 		// wrong configuration would show up here and nowhere else.
 		//
 		// The key's mode is part of it: this store is the only copy of a
@@ -973,6 +973,213 @@ managed_certs:
 		})
 	})
 
+	// The second consumer's half of the seam. Every refusal this package makes
+	// names the block the entry came from, and until openvox-ca#326 there was
+	// only one block, so the name was written into eleven messages. A serving
+	// certificate validated through the same grammar was therefore reported
+	// under `managed_certs[0]` -- a block its configuration need not contain --
+	// and a collision between the two blocks rendered both sides identically,
+	// so the message could not say which of them to change.
+	Describe("entries that came from another configuration block", func() {
+		servingCert := certstore.Block{Name: "serving_cert", Single: true}
+
+		single := func(body string) certstore.Config {
+			return decode(`
+managed_certs:
+  - certname: ca.example.com
+` + body)
+		}
+
+		It("names that block, with no index, in an entry's own refusal", func() {
+			err := single(`    names: [ca]
+    store: {files: {cert: /c.pem, key: /k.pem}}
+`).ValidateIn(servingCert)
+
+			Expect(err).To(MatchError(ContainSubstring("serving_cert (ca.example.com)")))
+			Expect(err).To(MatchError(ContainSubstring("renew_before must be positive")))
+			// The whole point: an operator with no managed_certs block at all
+			// must not be sent to look for one.
+			Expect(err).NotTo(MatchError(ContainSubstring("managed_certs")))
+		})
+
+		It("names it in a store refusal too, which is a different message path", func() {
+			err := single(`    names: [ca]
+    renew_before: 720h
+`).ValidateIn(servingCert)
+
+			Expect(err).To(MatchError(ContainSubstring("serving_cert (ca.example.com)")))
+			Expect(err).To(MatchError(ContainSubstring("store must name where")))
+			Expect(err).NotTo(MatchError(ContainSubstring("managed_certs")))
+		})
+
+		It("names it in a reserved-path collision, on the side it owns", func() {
+			err := single(`    names: [ca]
+    renew_before: 720h
+    store: {files: {cert: /var/lib/openvox-ca/ca.pem, key: /k.pem}}
+`).CheckReservedPathsIn(servingCert, []certstore.ReservedPath{
+				{Setting: "cadir", Path: "/var/lib/openvox-ca", Tree: true},
+			})
+
+			// Both sides are now distinguishable: the entry is the serving
+			// certificate, the thing it collides with is cadir.
+			Expect(err).To(MatchError(ContainSubstring("serving_cert (ca.example.com) stores its cert")))
+			Expect(err).To(MatchError(ContainSubstring("is inside cadir")))
+			Expect(err).NotTo(MatchError(ContainSubstring("managed_certs")))
+			// The prose as well as the key. This assertion used to check only
+			// the underscored block name, and the body of the same message said
+			// "a managed certificate's file store is overwritten on every
+			// issuance" -- the identical defect in a spelling the matcher could
+			// not see. A second consumer was told its serving certificate was a
+			// managed certificate, and the guard against exactly that passed.
+			Expect(err).NotTo(MatchError(ContainSubstring("managed certificate")),
+				"the message must not call a serving certificate a managed one")
+		})
+
+		// The other arm of the same function, which nothing drove: a reserved
+		// path that is not absolute is refused rather than skipped, because a
+		// relative one can never equal an absolute store path and skipping it
+		// would leave a gap that looks like a passing check. Its message named
+		// `managed_certs` outright.
+		It("names the block when a reserved path cannot be compared", func() {
+			err := single(`    names: [ca]
+    renew_before: 720h
+    store: {files: {cert: /var/lib/openvox-ca/ca.pem, key: /k.pem}}
+`).CheckReservedPathsIn(servingCert, []certstore.ReservedPath{
+				{Setting: "cadir", Path: "relative/cadir", Tree: true},
+			})
+
+			Expect(err).To(MatchError(ContainSubstring("not an absolute path")))
+			Expect(err).To(MatchError(ContainSubstring("serving_cert file stores")))
+			Expect(err).NotTo(MatchError(ContainSubstring("managed_certs")))
+		})
+
+		It("names it in an export overlap", func() {
+			err := single(`    names: [ca]
+    renew_before: 720h
+    store: {secret: {name: ca-tls, namespace: openvox}}
+`).CheckExportOverlapIn(servingCert, [][2]string{{"openvox", "ca-tls"}})
+
+			Expect(err).To(MatchError(ContainSubstring("serving_cert (ca.example.com)")))
+			Expect(err).NotTo(MatchError(ContainSubstring("managed_certs")))
+		})
+
+		It("names it in a build failure", func() {
+			cfg := single(`    names: [ca]
+    renew_before: 720h
+    store: {secret: {name: ca-tls}}
+`)
+			_, err := cfg.BuildIn(servingCert, certstore.Deps{
+				CACerts: stubCA{pem: []byte("CA")}, Client: fake.NewClientset(),
+			})
+			Expect(err).To(MatchError(ContainSubstring("serving_cert (ca.example.com)")))
+			Expect(err).To(MatchError(ContainSubstring("no namespace for Secret")))
+			Expect(err).NotTo(MatchError(ContainSubstring("managed_certs")))
+		})
+
+		// A multi-entry block keeps its index, and the cross-reference between
+		// two entries is labelled too -- that one used to be a bare
+		// `managed_certs[0]` inside a message whose subject was another block.
+		It("keeps the index for a block that is a list, on both sides", func() {
+			err := decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {files: {cert: /shared.pem, key: /a-key.pem}}
+  - certname: b.example.com
+    names: [b]
+    renew_before: 720h
+    store: {files: {cert: /shared.pem, key: /b-key.pem}}
+`).ValidateIn(certstore.Block{Name: "component_certs"})
+
+			Expect(err).To(MatchError(ContainSubstring("component_certs[1] (b.example.com)")))
+			Expect(err).To(MatchError(ContainSubstring("already used by component_certs[0]")))
+			Expect(err).NotTo(MatchError(ContainSubstring("managed_certs")))
+		})
+
+		// The certname cross-reference, which is a different message from the
+		// path one above and was the site a mutation found unpinned: two
+		// entries sharing a certname, where the refusal has to name the other
+		// entry as well as this one.
+		It("names the block on both sides of a duplicate certname", func() {
+			err := decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {files: {cert: /a.pem, key: /a-key.pem}}
+  - certname: a.example.com
+    names: [a2]
+    renew_before: 720h
+    store: {files: {cert: /b.pem, key: /b-key.pem}}
+`).ValidateIn(certstore.Block{Name: "component_certs"})
+
+			Expect(err).To(MatchError(ContainSubstring("component_certs[1] (a.example.com)")))
+			Expect(err).To(MatchError(ContainSubstring("already used by component_certs[0]")))
+			Expect(err).NotTo(MatchError(ContainSubstring("managed_certs")))
+		})
+
+		// The two remaining cross-reference messages. The pair above cover the
+		// "already used by" form; these are separate sentences in separate
+		// branches, and both named the other entry with a bare index inside a
+		// message whose subject was a different block.
+		It("names the block when a chain file is another entry's material", func() {
+			err := decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {files: {cert: /a.pem, key: /a-key.pem}}
+  - certname: b.example.com
+    names: [b]
+    renew_before: 720h
+    store: {files: {cert: /b.pem, key: /b-key.pem, ca: /a.pem}}
+`).ValidateIn(certstore.Block{Name: "component_certs"})
+
+			Expect(err).To(MatchError(ContainSubstring("is the certificate or key of component_certs[0]")))
+			Expect(err).NotTo(MatchError(ContainSubstring("managed_certs")),
+				"the refusal names managed_certs for a block that is not managed_certs, "+
+					"so an operator is sent to a configuration section they do not have")
+		})
+
+		It("names the block when two entries share a chain file", func() {
+			// The mirror branch: this entry's cert or key landing on another
+			// entry's CHAIN file, rather than the other way round. Separate
+			// message, separate label.
+			err := decode(`
+managed_certs:
+  - certname: a.example.com
+    names: [a]
+    renew_before: 720h
+    store: {files: {cert: /a.pem, key: /a-key.pem, ca: /chain.pem}}
+  - certname: b.example.com
+    names: [b]
+    renew_before: 720h
+    store: {files: {cert: /chain.pem, key: /b-key.pem}}
+`).ValidateIn(certstore.Block{Name: "component_certs"})
+
+			Expect(err).To(MatchError(ContainSubstring("is the CA chain file of component_certs[0]")))
+			Expect(err).NotTo(MatchError(ContainSubstring("managed_certs")))
+		})
+
+		// The zero Block is managed_certs, so a caller that passes nothing gets
+		// exactly what Validate has always produced. Without this, the default
+		// could drift to an empty prefix and every existing message would lose
+		// its block name with nothing to say so.
+		It("defaults to managed_certs, which is what Validate does", func() {
+			body := `    names: [a]
+    store: {files: {cert: /c.pem, key: /k.pem}}
+`
+			direct := single(body).Validate()
+			viaZero := single(body).ValidateIn(certstore.Block{})
+
+			Expect(direct).To(HaveOccurred())
+			Expect(viaZero).To(HaveOccurred())
+			Expect(viaZero.Error()).To(Equal(direct.Error()))
+			Expect(direct.Error()).To(ContainSubstring("managed_certs[0] (ca.example.com)"))
+		})
+	})
+
 	// Build re-derives each entry's spec and has its own refusal for a bad one.
 	// Every existing spec reaches that code through Validate, which refuses
 	// first -- so Build's branch is only ever exercised on entries Validate has
@@ -1001,8 +1208,8 @@ managed_certs:
 		// panicked. Validate refuses that entry, and Build's doc comment says
 		// to call Validate first -- but the failure mode for skipping it
 		// should name the entry, not produce a stack inside this package. A
-		// caller that skips a documented precondition is how it gets missed in
-		// the first place.
+		// second consumer calling BuildIn is how such a precondition gets
+		// missed in the first place.
 		It("names the entry when the store names neither flavour", func() {
 			cfg := decode(`
 managed_certs:

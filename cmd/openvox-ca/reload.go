@@ -204,8 +204,10 @@ func (c *certReloader) GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, e
 // pretending otherwise would be worse than requiring a restart. See
 // docs/systemd.md for the operator-facing description.
 type configReloader struct {
-	// certs is the TLS keypair holder, or nil when the server is running
-	// without TLS and there is nothing to rotate.
+	// certs is the operator-supplied TLS keypair holder, or nil when there is
+	// nothing for a reload to rotate: no TLS at all, or a self-provisioned
+	// serving certificate, whose renewal the reconcile loop owns and which has
+	// no configured path to re-read.
 	certs *certReloader
 
 	// auth is the live authorization config whose admin allow list is
@@ -284,6 +286,38 @@ func (r *configReloader) reload() error {
 	return err
 }
 
+// reloadingStatus says what this reload will actually re-read, for the status
+// text systemd shows while `systemctl reload` runs.
+//
+// A self-provisioning CA has no keypair to re-read: certs is nil because the
+// reconcile loop owns that certificate, and announcing "Reloading TLS material"
+// there invites the belief that a reload rotated it. This is the one place an
+// operator running the command looks.
+//
+// Both fields, not just certs. reload() re-reads the allow list only when auth
+// is non-nil, and auth is set only when TLS is configured (main.go wires the
+// middleware inside that branch) -- so a plain-HTTP CA has neither, and
+// reporting "Reloading the admin allow list" there names work that does not
+// happen. Testing certs alone was right for the two TLS states and wrong for
+// the third, which is the state nothing else reports on.
+//
+// Three states are reachable, not four: certs is non-nil only when
+// tls_cert/tls_key are set, which is itself a way of configuring TLS, so auth
+// is non-nil whenever certs is. The certs-without-auth arm is therefore
+// unreachable and deliberately not spelled out -- if it ever becomes
+// reachable, the default below names TLS material, which is the safe half to
+// over-report.
+func (r *configReloader) reloadingStatus() string {
+	switch {
+	case r.certs == nil && r.auth == nil:
+		return "Reloading nothing (no TLS material and no admin allow list configured)"
+	case r.certs == nil:
+		return "Reloading the admin allow list"
+	default:
+		return "Reloading TLS material and the admin allow list"
+	}
+}
+
 // diffAllowList reports which CNs the replacement adds and which it withdraws,
 // each sorted so the log line is stable and diffable.
 func diffAllowList(old, new map[string]bool) (added, removed []string) {
@@ -350,7 +384,7 @@ func runReloadWatcher(ctx context.Context, hupCh <-chan os.Signal, n *sdnotify.N
 			return
 		case <-hupCh:
 			slog.Info("Reloading configuration (SIGHUP)")
-			n.Reloading("Reloading TLS material and the admin allow list")
+			n.Reloading(r.reloadingStatus())
 
 			if err := r.reload(); err != nil {
 				slog.Error("Configuration reload failed; keeping the previous configuration", "error", err)

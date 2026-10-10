@@ -1027,7 +1027,7 @@ var _ = Describe("Reconciling a managed certificate", func() {
 		// matters is a certificate that gates a listener binding. It must behave
 		// exactly as a pass inside ReconcileManaged, so this asserts the whole
 		// contract and not merely that it compiles.
-		issued, err := myCA.reconcileOneManagedCert(ctx, entry)
+		issued, err := myCA.ReconcileManagedCert(ctx, entry)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(issued).To(BeTrue())
 		Expect(fake.stored().Subject.CommonName).To(Equal(subject))
@@ -1036,7 +1036,7 @@ var _ = Describe("Reconciling a managed certificate", func() {
 
 		// And it is idempotent in the same way: a second call finds the
 		// certificate current rather than issuing again.
-		issued, err = myCA.reconcileOneManagedCert(ctx, entry)
+		issued, err = myCA.ReconcileManagedCert(ctx, entry)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(issued).To(BeFalse())
 	})
@@ -1047,7 +1047,7 @@ var _ = Describe("Reconciling a managed certificate", func() {
 		bad := entry
 		bad.Spec.DNSNames = nil
 		bad.Spec.IPAddresses = nil
-		issued, err := myCA.reconcileOneManagedCert(ctx, bad)
+		issued, err := myCA.ReconcileManagedCert(ctx, bad)
 		Expect(err).To(MatchError(
 			ContainSubstring("at least one subject alternative name is required")))
 		Expect(issued).To(BeFalse())
@@ -1796,7 +1796,7 @@ var _ = Describe("Four replicas reconciling one managed certificate", func() {
 var _ = Describe("ReconcileManaged over several entries", func() {
 	// The plural entry point, which is what the server's background loop
 	// actually calls -- reconcileManagedOnce calls ReconcileManaged, not
-	// reconcileOneManagedCert. Everything above exercises one entry at a time, so
+	// ReconcileManagedCert. Everything above exercises one entry at a time, so
 	// the contract this loop exists to provide went unexercised: "Entries are
 	// independent. One that fails is logged, counted as a failure, and left for
 	// the next pass; the rest still run. A single unreachable store must not

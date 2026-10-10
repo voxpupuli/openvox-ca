@@ -55,6 +55,7 @@ wire-compatible with your existing Puppet/OpenVox fleet.
 - **Health probes:** `/healthz/live`, `/healthz/ready`, and `/healthz/startup` endpoints for Kubernetes-style liveness/readiness checks
 - **Prometheus exporter:** optional `/metrics` listener (`--metrics-listen`) exposing Go runtime/process and HTTP metrics plus CA certificate, CRL, and per–leaf-certificate expiry and issuance-status series; ships with a [Jsonnet alerting mixin](mixin/). See [metrics & monitoring](docs/metrics.md)
 - **Managed certificates (opt-in):** `managed_certs` names certificates this CA issues and renews on behalf of OpenVox components, writing each into a Kubernetes Secret or a local file pair and superseding its predecessor with an overlap window. Nothing submits a CSR: the configuration is the request, and the CA keeps each name alive for as long as it is configured. A certname listed in `puppet_server` makes that certificate a CA admin credential, which the CA says at startup. See [managed certificates](docs/configuration.md#managed-certificates)
+- **The CA's own serving certificate (opt-in):** `serving_cert` makes the CA issue and renew the certificate its own listener presents, into a Kubernetes Secret or a local file pair, instead of being handed one through `tls_cert` / `tls_key` — the two are mutually exclusive. It is the only way to have that certificate renewed unattended once the CA key is held at a provider, where cert-manager cannot act as a CA issuer without the key and `openvox-ca-ctl generate` needs an admin certificate that does not exist until the CA is already serving. See [the CA's own serving certificate](docs/configuration.md#the-cas-own-serving-certificate)
 - **Kubernetes export (opt-in):** publish the CA certificate and/or CRL into any number of Kubernetes Secrets and ConfigMaps via in-cluster server-side apply, with configurable names, namespaces, data keys, labels, annotations, Secret `type`, and how much of the chain to publish (`cert_scope`/`crl_scope`, which publish the whole stored chain by default — set them to `self` on a target whose consumer wants this CA's block alone); CRL-bearing objects are refreshed whenever the CRL changes. See [Kubernetes export](docs/kubernetes-export.md)
 - **Helm chart:** an OCI-published chart, versioned in lockstep with the server, covering dual-stack Services, TLS-passthrough Ingress and Gateway API routes, an opt-in ServiceMonitor and network policies; it derives the RBAC for managed certificates kept in Secrets from the server's own configuration; and the server's settings pass straight through to its config file, so the whole configuration reference is reachable. See [deploying with Helm](docs/helm-chart.md)
 - **Graceful shutdown:** `SIGTERM`/`SIGINT` drains in-flight requests with a configurable window (25s default) before exiting; deferred storage and signer cleanup always runs
@@ -271,8 +272,9 @@ kill $PCA_PID; wait $PCA_PID 2>/dev/null
 ```
 
 **While that server is up its whole admin API is unauthenticated** — the
-authorisation middleware is only installed when `tls_cert` and `tls_key` are
-both set, and that includes `POST /generate/<subject>`, which hands back a
+authorisation middleware is only installed when TLS is configured — `tls_cert`
+and `tls_key`, their environment equivalents, or `serving_cert` — and that
+includes `POST /generate/<subject>`, which hands back a
 signed certificate and its private key. `--host 127.0.0.1` is required rather
 than advisable, and the `kill` above is part of the procedure, not tidying.
 
@@ -288,7 +290,8 @@ temporary server is stopped you can start again with the TLS flags. [Serving
 certificate](docs/configuration.md#serving-certificate) has the full procedure,
 including the other storage backends and running it under systemd.
 
-When `--tls-cert` and `--tls-key` are both set, the server:
+When TLS is configured — `--tls-cert` and `--tls-key`, their environment
+equivalents, or `serving_cert` — the server:
 
 1. Presents those certs to connecting clients
 2. Requests (but does not require) a client certificate from every connection,
@@ -304,7 +307,7 @@ The complete flag, environment-variable, and config-file reference is in
 
 | Guide | What it covers |
 | --- | --- |
-| [Configuring the server](docs/configuration.md) | Every flag, environment variable, config-file key; the serving certificate; autosigning; directory layout; the memory budget; graceful shutdown; reloading configuration; trusting client certificates from another CA |
+| [Configuring the server](docs/configuration.md) | Every flag, environment variable, config-file key; the serving certificate, supplied or issued by the CA itself; autosigning; directory layout; the memory budget; graceful shutdown; reloading configuration; trusting client certificates from another CA |
 | [HTTP API reference](docs/api.md) | All endpoints, authorization tiers, and admin credential resolution |
 | [Operator CLI (`openvox-ca-ctl`)](docs/operator-cli.md) | The `openvox-ca-ctl` command reference, and the offline `openvox-ca` subcommands (`csr`, `import-ca-cert`, `generate`) that run against the server's own configuration |
 | [Storage backends](docs/storage-backends.md) | filesystem, SQLite, PostgreSQL, MySQL, etcd, Redis/Valkey; migrating between them |

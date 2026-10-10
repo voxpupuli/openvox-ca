@@ -1,0 +1,70 @@
+# The CA issuing and renewing the certificate its own listener presents, into a
+# Kubernetes Secret.
+#
+# This is the deployment `serving_cert` exists for: the CA key is held at a
+# provider, so nothing else issues and renews this certificate unattended --
+# cert-manager cannot act as a CA issuer without the key, and
+# `openvox-ca-ctl generate` needs an admin certificate that does not exist until
+# the CA is already serving. The offline `openvox-ca generate` could mint one by
+# hand on the node, which is exactly the manual renewal a pod should not need.
+#
+# What this fixture is for, now that Chart.Test covers the branches it used to
+# claim: kubeconform validation of the combined `serving_cert` plus
+# `managed_certs` render. `chart:lint` and `chart:validate` run every fixture
+# here against the Kubernetes schemas, and this is the only one that renders
+# both blocks together with a shared-namespace Role.
+#
+# The branch assertions live in `mage chart:test`, not here, and asserting them
+# twice in two forms is how the two drift. It covers `tlsConfigured` answering
+# true from `serving_cert` alone, the Role covering the serving Secret as well
+# as the component ones, and the refusals around them -- read those cases for
+# what the chart decides.
+#
+# What this fixture alone still carries is the rendered PAIRING the server then
+# acts on: `puppetServers` naming the serving certname, which is the shared-host
+# deployment the clientAuth-by-default decision exists to keep working. No chart
+# branch turns on it -- the NOTES warning is gated on the Role being rendered --
+# so there is nothing for chart:test to assert, and what makes it worth shipping
+# is that warnIfServingCertIsAdmin acts on it at runtime.
+#
+# `usages` is deliberately unset, so the certificate takes the
+# serverAuth+clientAuth pair every certificate this CA issues. That is what
+# makes the listing below an admin credential rather than an inert entry.
+
+serviceAccount:
+  create: true
+
+puppetServers:
+  - ca.openvox.svc.cluster.local
+
+config:
+  ca_key_provider: openbao
+  managed_cert_interval_sec: 900
+
+  serving_cert:
+    certname: ca.openvox.svc.cluster.local
+    # Used verbatim: the certname is NOT promoted into the SAN list, so every
+    # name an agent might connect by is spelled out here, including the
+    # certname itself.
+    names:
+      - ca
+      - ca.openvox.svc
+      - ca.openvox.svc.cluster.local
+    ttl: 2160h
+    renew_before: 720h
+    store:
+      secret:
+        name: openvox-ca-serving-tls
+
+  # A component certificate alongside it, in the same namespace, so the fixture
+  # covers both sources of Secret targets landing in one Role rather than each
+  # rendering one of its own.
+  managed_certs:
+    - certname: puppetserver.openvox.svc.cluster.local
+      names:
+        - puppetserver
+        - puppetserver.openvox.svc.cluster.local
+      renew_before: 720h
+      store:
+        secret:
+          name: puppetserver-tls
