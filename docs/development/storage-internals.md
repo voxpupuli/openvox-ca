@@ -303,7 +303,14 @@ Lock names, holders, and ordering are documented in
   same-host `flock`, exactly as the filesystem backend does. The lock files live
   in a hidden `.<database>.locks/` directory beside the database, alongside the
   `-wal` and `-shm` files SQLite maintains itself; the database file is never
-  flocked, because SQLite locks that. A lock *table* was rejected rather than
+  flocked, because SQLite locks that. Beside the *resolved* database: the
+  backend decodes the DSN's percent-escapes and follows symlinks once
+  (`resolveSQLitePath`), and the sidecar names, the lock directory and the paths
+  the permission check judges all derive from that one path, so every spelling
+  of one database shares one lock directory. The backend also creates the
+  database file itself, with `O_EXCL` at `sqliteFilePermCreate`, before the
+  driver opens it — so its mode, and through SQLite the sidecars', is chosen
+  rather than inherited from the umask. A lock *table* was rejected rather than
   merely not chosen: the pool is pinned to one connection, so a `BEGIN
   IMMEDIATE` held for the duration of the critical section would own the only
   connection the work inside it needs. The backend also appends

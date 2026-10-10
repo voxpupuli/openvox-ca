@@ -106,11 +106,50 @@ func validateKey(key string) error {
 	return nil
 }
 
-// KeyPermWarning describes a stored blob whose on-disk permissions are
-// looser than expected. Only the filesystem backend produces warnings.
+// KeyPermWarning describes a file holding key material whose on-disk
+// permissions are looser than expected.
 type KeyPermWarning struct {
 	Path string
 	Mode os.FileMode
+
+	// Unreadable marks a path whose permissions could not be established at all
+	// -- an unreadable parent directory, an I/O error, a symlink whose target
+	// cannot be resolved. Mode is meaningless when this is set.
+	//
+	// It is a distinct state rather than a pessimistic Mode because the two need
+	// different things said about them: "world-accessible, chmod o-rwx" is a
+	// remedy, and printing it for a path that is actually 0000 sends the
+	// operator to run a command that changes nothing and leaves the next start
+	// refusing identically.
+	Unreadable bool
+
+	// Err is why the path could not be judged, for the operator to act on. Set
+	// only when Unreadable is.
+	Err error
+}
+
+// WorldAccessible reports whether the mode grants any access to users outside
+// the owner and the group. That is the distinction the server acts on: world
+// access means every local account can read the CA private key and is refused,
+// while group access is tolerated because it is what a Kubernetes fsGroup
+// reapplies at every mount and how an arbitrary-uid platform reaches a store it
+// did not create.
+func (w KeyPermWarning) WorldAccessible() bool {
+	// An unjudgeable path counts as world-accessible so that callers refuse by
+	// default: a permission this process cannot read is not one it may assume is
+	// safe. Callers that can say something better about it check Unreadable.
+	return w.Unreadable || w.Mode&0o007 != 0
+}
+
+// KeyFileLister is an optional capability for backends that keep key material
+// in files of their own, outside the local private-key directory
+// StorageService already scans. The SQLite backend implements it: its database
+// holds the CA key as a blob, and the sidecars beside it hold page images of
+// the same rows.
+type KeyFileLister interface {
+	// KeyFilePaths returns the files that may contain key material. Paths that
+	// do not exist are permitted and ignored by the caller.
+	KeyFilePaths() []string
 }
 
 // Backend is the pluggable storage abstraction that StorageService delegates
