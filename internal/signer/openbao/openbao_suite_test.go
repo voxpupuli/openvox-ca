@@ -24,6 +24,8 @@ import (
 	. "github.com/onsi/gomega"
 )
 
+// The package's older tests are plain testing functions and run alongside
+// this; new specs are Ginkgo, as AGENTS.md requires.
 func TestOpenbao(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "OpenBao Suite")
