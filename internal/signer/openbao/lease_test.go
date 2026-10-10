@@ -88,17 +88,26 @@ type lifecycleFake struct {
 
 	revoke  revokeMode
 	unblock chan struct{} // closed to free a revokeHang handler
+
+	// refuseLogins makes every login fail; holdLogins makes each one wait
+	// until releaseLogins is called. Both are set through their methods,
+	// because the server is already running by the time a spec sets them.
+	refuseLogins bool
+	holdLogins   bool
+	loginRelease chan struct{}
+	releaseOnce  sync.Once
 }
 
 func newLifecycleFake() *lifecycleFake {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	Expect(err).NotTo(HaveOccurred())
 	return &lifecycleFake{
-		key:        key,
-		valid:      map[string]bool{operatorToken: true},
-		refuseSign: map[string]bool{},
-		released:   make(chan struct{}),
-		unblock:    make(chan struct{}),
+		key:          key,
+		valid:        map[string]bool{operatorToken: true},
+		refuseSign:   map[string]bool{},
+		released:     make(chan struct{}),
+		unblock:      make(chan struct{}),
+		loginRelease: make(chan struct{}),
 	}
 }
 
@@ -139,9 +148,40 @@ func (f *lifecycleFake) refuseSignsWith(tok string) {
 	f.refuseSign[tok] = true
 }
 
+// refuseLoginsFromNow makes every later login fail with 403.
+func (f *lifecycleFake) refuseLoginsFromNow() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.refuseLogins = true
+}
+
+// holdLoginsFromNow makes every later login wait for releaseLogins.
+func (f *lifecycleFake) holdLoginsFromNow() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.holdLogins = true
+}
+
+func (f *lifecycleFake) releaseLogins() {
+	f.releaseOnce.Do(func() { close(f.loginRelease) })
+}
+
 func (f *lifecycleFake) login(w http.ResponseWriter) {
 	f.mu.Lock()
 	f.logins++
+	refuse, hold := f.refuseLogins, f.holdLogins
+	f.mu.Unlock()
+	if hold {
+		select {
+		case <-f.loginRelease:
+		case <-time.After(5 * time.Second):
+		}
+	}
+	if refuse {
+		writeError(w, http.StatusForbidden, "invalid credentials")
+		return
+	}
+	f.mu.Lock()
 	f.nextToken++
 	tok := fmt.Sprintf("minted-%d", f.nextToken)
 	f.valid[tok] = true
@@ -288,9 +328,11 @@ var _ = Describe("OpenBao token lifecycle", func() {
 		fake = newLifecycleFake()
 		srv = fake.server()
 		// Registered before any TokenManager's Close, so it runs after them:
-		// a hung revoke handler is freed before the server waits for it.
+		// a hung revoke or login handler is freed before the server waits for
+		// it.
 		DeferCleanup(func() {
 			close(fake.unblock)
+			fake.releaseLogins()
 			srv.Close()
 		})
 		sum := sha256.Sum256([]byte("openvox-ca token lifecycle"))
@@ -388,6 +430,35 @@ var _ = Describe("OpenBao token lifecycle", func() {
 			})
 		})
 
+		Context("when the 403 persists after a re-login", func() {
+			DescribeTable("throttles the next 403 rather than logging in again",
+				func(refuseRelogin bool, wantSigns int) {
+					fake.refuseAllSigns = true
+					tm := start(openbao.AuthAppRole)
+					signer := load(tm)
+					if refuseRelogin {
+						fake.refuseLoginsFromNow()
+					}
+					openbao.ExpireReauthThrottleForTest(tm)
+
+					_, err := signer.Sign(nil, digest, crypto.SHA256)
+					Expect(err).To(HaveOccurred())
+					Expect(err).NotTo(MatchError(openbao.ErrReauthThrottled), "the first 403 past the interval should try to log in")
+					Expect(fake.loginCount()).To(Equal(2))
+
+					_, err = signer.Sign(nil, digest, crypto.SHA256)
+
+					Expect(err).To(MatchError(openbao.ErrReauthThrottled))
+					Expect(fake.loginCount()).To(Equal(2), "the re-login attempt, successful or not, starts a new interval")
+					Expect(fake.signCount()).To(Equal(wantSigns))
+				},
+				// A successful re-login retries the sign once; a failed one does
+				// not, so the second Sign is the third or the second request.
+				Entry("when the re-login succeeds", false, 3),
+				Entry("when the re-login fails", true, 2),
+			)
+		})
+
 		Context("after a request-path re-login", func() {
 			It("starts renewing the new token without the background loop logging in again", func() {
 				tm := start(openbao.AuthAppRole)
@@ -419,6 +490,9 @@ var _ = Describe("OpenBao token lifecycle", func() {
 
 				Expect(fake.revokedTokens()).To(ConsistOf(minted))
 				Expect(fake.isValid(minted)).To(BeFalse())
+
+				Expect(tm.Close()).To(Succeed())
+				Expect(fake.revokedTokens()).To(ConsistOf(minted), "a second Close should not revoke again")
 			},
 			Entry("AppRole", openbao.AuthAppRole),
 			Entry("Kubernetes", openbao.AuthKubernetes),
@@ -468,6 +542,30 @@ var _ = Describe("OpenBao token lifecycle", func() {
 				Expect(fake.revokedTokens()).To(HaveLen(1), "the revocation should have been attempted")
 				Expect(time.Since(began)).To(BeNumerically("<", openbao.RevokeTimeoutForTest+time.Second))
 			})
+		})
+
+		It("waits for a re-login in flight, then revokes the token that re-login minted", func() {
+			tm := start(openbao.AuthAppRole)
+			first := tm.Client().Token()
+			fake.holdLoginsFromNow()
+			openbao.ExpireReauthThrottleForTest(tm)
+
+			reauthed := make(chan error, 1)
+			go func() { reauthed <- tm.Reauth(context.Background(), first) }()
+			Eventually(fake.loginCount).Should(Equal(2), "the re-login should be held at the server")
+
+			closed := make(chan error, 1)
+			go func() { closed <- tm.Close() }()
+			Consistently(closed).WithTimeout(200*time.Millisecond).ShouldNot(Receive(), "Close should wait for the re-login")
+
+			fake.releaseLogins()
+			Eventually(reauthed).Should(Receive(BeNil()))
+			Eventually(closed).Should(Receive(BeNil()))
+
+			second := tm.Client().Token()
+			Expect(second).NotTo(Equal(first))
+			Expect(fake.revokedTokens()).To(ConsistOf(second))
+			Expect(fake.isValid(first)).To(BeTrue(), "the replaced token is not this Close's to revoke")
 		})
 
 		It("refuses a later re-authentication rather than minting a token nothing would revoke", func() {
