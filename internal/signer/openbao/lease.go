@@ -35,7 +35,8 @@ import (
 const reauthRetryInterval = 5 * time.Second
 
 // minReauthInterval is the minimum spacing between successive background
-// watcher (re)starts. It bounds the pathological case where a token's
+// watcher (re)starts, other than starting a watcher a request-path Reauth has
+// just built (see run). It bounds the pathological case where a token's
 // LifetimeWatcher ends the instant it starts — e.g. a non-renewable token
 // with no expiry (TTL 0), which has nothing to wait for — so run()
 // re-authenticates on a steady cadence instead of busy-looping requests at
@@ -239,7 +240,9 @@ func (tm *TokenManager) run() {
 	for {
 		// Never (re)start a watcher more often than minReauthInterval, so a
 		// watcher that ends immediately (see minReauthInterval) throttles into
-		// a steady re-auth cadence rather than a busy loop.
+		// a steady re-auth cadence rather than a busy loop. The one exception
+		// is a watcher a request-path Reauth swapped in, which starts at once;
+		// Reauth's own throttle bounds how often that can happen.
 		if !lastWatch.IsZero() {
 			if wait := minReauthInterval - time.Since(lastWatch); wait > 0 {
 				if !sleepOrDone(tm.ctx, wait) {
@@ -414,8 +417,9 @@ func (tm *TokenManager) Client() *api.Client {
 
 // Close stops the background renewal loop and the current watcher, waits for
 // the loop to exit, and then revokes the current token if this process minted
-// it (see ownsToken), so a stopped or rolled process leaves no live token
-// behind for the rest of its TTL.
+// it (see ownsToken), so a stopped or rolled process does not leave that token
+// live for the rest of its TTL. A token an earlier re-login replaced is not
+// revoked here; it expires with its own TTL.
 //
 // Revocation is best effort. It is bounded by revokeTimeout, and a failure is
 // logged at WARN rather than returned: nothing a caller does at shutdown would

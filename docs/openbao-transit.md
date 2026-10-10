@@ -83,7 +83,9 @@ EOF
 ```
 
 This is the minimum `openvox-ca` needs at steady state: sign with the key,
-and read its public component. It deliberately excludes `create`, so this
+and read its public component. It works alongside OpenBao's built-in `default`
+policy, which lets the token renew and revoke itself; see
+[token lifecycle](#token-lifecycle). It deliberately excludes `create`, so this
 policy alone cannot be used to provision the key — see "Convenience" below
 if you want that instead.
 
@@ -484,12 +486,16 @@ cure, such as a policy that no longer grants Transit access, from turning every
 signing attempt into a login against OpenBao and an entry in its audit log.
 Concurrent requests refused with the same token cause one login between them.
 
-On shutdown, `openvox-ca` revokes the token it logged in for with AppRole or
-Kubernetes auth, so a stopped or replaced process does not leave a usable token
-behind for the rest of its TTL. This uses `auth/token/revoke-self`, which
-OpenBao's built-in `default` policy grants; if your role sets
-`token_no_default_policy`, grant `update` on that path in the role's policy, or
-the token stays valid until it expires. A revocation that fails or takes more
+On shutdown, `openvox-ca` revokes the token it currently holds, if it logged in
+for it with AppRole or Kubernetes auth, so a stopped or replaced process does
+not leave that token usable for the rest of its TTL. Tokens replaced earlier by
+a re-login are not revoked; they expire with their own TTL. Revocation uses
+`auth/token/revoke-self`, and renewal uses `auth/token/renew-self`, both of
+which OpenBao's built-in `default` policy grants. If your role sets
+`token_no_default_policy`, grant `update` on both paths in the role's policy.
+Without `renew-self` the token is never renewed, and `openvox-ca` logs in again
+about once per token TTL; without `revoke-self` the token stays valid until it
+expires. A revocation that fails or takes more
 than 2 seconds is logged as a warning and does not delay shutdown further. A
 token read from `openbao.token_file` is never revoked: it belongs to whoever
 issued it, and may be shared with other processes.
