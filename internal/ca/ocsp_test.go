@@ -575,6 +575,22 @@ var _ = Describe("OCSP Responder", func() {
 			Expect(respDER).To(BeNil())
 		})
 
+		// docs/api.md promises the refusal whatever the serial. A serial this CA
+		// never issued would otherwise be answered unknown, and signed, on
+		// behalf of a CA this responder does not speak for.
+		It("refuses another issuer's request for a serial this CA never issued", func() {
+			_, strangerPEM, _, err := testutil.GenerateTestCAECDSA()
+			Expect(err).NotTo(HaveOccurred())
+			_, foreignCrtPEM, _, err := testutil.GenerateTestCAECDSA()
+			Expect(err).NotTo(HaveOccurred())
+			reqDER, err := xocsp.CreateRequest(decodeCert(strangerPEM), decodeCert(foreignCrtPEM), nil)
+			Expect(err).NotTo(HaveOccurred())
+
+			respDER, err := myCA.OCSPResponse(context.Background(), reqDER)
+			Expect(err).To(MatchError(ca.ErrNotAuthoritative))
+			Expect(respDER).To(BeNil())
+		})
+
 		// A nonced request skips the cache and always signs, so the check must
 		// not live on the cache path alone.
 		It("refuses another issuer's nonced request", func() {

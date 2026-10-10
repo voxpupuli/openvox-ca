@@ -493,12 +493,13 @@ func (c *CA) AnswerOCSP(ctx context.Context, reqDER []byte) (OCSPAnswer, error) 
 	//     past the point the index learned better. Leaving it uncached is what
 	//     makes an index refresh take effect on the next request rather than on
 	//     the next restart.
-	//   - The cache key is the requested serial, which is chosen by an
-	//     unauthenticated caller. Every other status can only be reached for a
-	//     serial this CA issued, so the cache is bounded by the inventory (times
-	//     the four hashes in ocspCacheHashes);
-	//     caching unknowns would let anyone who can reach /ocsp grow the map
-	//     without limit, an entry (and a signed response) per made-up serial.
+	//   - The cache key is the requested serial and hash, both chosen by an
+	//     unauthenticated caller. The hash is one of the four in
+	//     ocspCacheHashes, and every other status can only be reached for a
+	//     serial this CA issued, so the cache is bounded by the inventory times
+	//     four; caching unknowns would let anyone who can reach /ocsp grow the
+	//     map without limit, an entry (and a signed response) per made-up
+	//     serial.
 	//
 	// It costs no DoS protection to leave out, and the reason is on this path
 	// rather than another one. The cache never bounded how much signing an
