@@ -289,7 +289,7 @@ jobs:
           # setup-go's cache is keyed only on go.sum, and that key is claimed
           # by whichever job saves it first — none of whose build caches
           # match this variant's build configuration. Use a per-variant cache
-          # below instead, shared with release.yml.
+          # below instead, which no release build restores.
           cache: false
       - name: Go caches (${{ matrix.variant }})
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
