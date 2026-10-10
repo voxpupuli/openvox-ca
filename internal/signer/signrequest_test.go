@@ -194,6 +194,43 @@ var _ = Describe("Signer request checks", func() {
 	)
 })
 
+// everyHashEntry is one Entry per crypto.Hash value Go defines, and one past
+// the end. The sampled refusals above cannot tell an allow-list from a
+// deny-list of the values they happen to name; this can, so widening the list
+// by one hash fails a named entry. MD5SHA1 is the one that matters most: an RSA
+// key signs it with no DigestInfo prefix, which is nearly the raw signature
+// this check exists to refuse.
+func everyHashEntry() []TableEntry {
+	entries := []TableEntry{}
+	for h := crypto.Hash(0); h <= crypto.MLDSAMu+1; h++ {
+		allowed := h == crypto.SHA256 || h == crypto.SHA384 || h == crypto.SHA512
+		entries = append(entries, Entry(h.String(), h, allowed))
+	}
+	return entries
+}
+
+var _ = DescribeTable("Signer request checks accept exactly SHA-256, SHA-384 and SHA-512",
+	func(h crypto.Hash, allowed bool) {
+		// A digest of the right length wherever the hash has one, so a refusal
+		// can only be the hash's. Built from Size rather than by hashing,
+		// because several of these have no implementation to hash with.
+		digest := make([]byte, 32)
+		if h > 0 && h <= crypto.MLDSAMu {
+			digest = make([]byte, h.Size())
+		}
+
+		err := checkSignRequest(&SignRequest{Digest: digest, HashFunc: h})
+
+		if allowed {
+			Expect(err).NotTo(HaveOccurred())
+		} else {
+			Expect(err).To(MatchError(errSignRequestRefused))
+			Expect(err.Error()).To(ContainSubstring("is not one the CA signs with"))
+		}
+	},
+	everyHashEntry(),
+)
+
 // countingSigner counts the signatures its key makes, so a spec can tell that
 // an operation really signed through the isolated signer rather than somewhere
 // else.

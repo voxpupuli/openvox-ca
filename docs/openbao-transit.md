@@ -144,7 +144,11 @@ copied blindly.
 Then configure `openvox-ca` with `openbao.key_name: openvox-ca` (and the
 matching `ca_key_algo`/`ca_key_size` if you want `openvox-ca-ctl setup`'s
 offline bootstrap to describe the same algorithm — the key's actual type is
-whatever you created in OpenBao). This keeps the running server's OpenBao
+whatever you created in OpenBao). That type must be RSA or ECDSA (`rsa-2048`,
+`rsa-3072`, `rsa-4096`, `ecdsa-p256`, `ecdsa-p384` or `ecdsa-p521`). An
+`ed25519` key signs with no hash, which openvox-ca never asks for, so
+`openvox-ca csr`, `import-ca-cert` and startup all refuse it; see
+[CA key security](ca-key-security.md#process-isolation). This keeps the running server's OpenBao
 policy scoped to `sign` and `read` on that one key — it never needs
 `create`/`import` rights.
 
