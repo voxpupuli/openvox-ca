@@ -491,6 +491,89 @@ var _ = Describe("CRL chain read failures", func() {
 			"the WARN line must name the serial; it is what the recovery command needs")
 	})
 
+	It("still deletes a certificate when the inventory has lost its entry, and does not call it never-issued", func() {
+		// The other caller of revokeLocked's no-inventory-entry branch, and the
+		// scenario ErrSubjectUnknown's godoc invokes to justify its wording:
+		// Clean reaches that branch only inside its hasCert arm, so the
+		// certificate IS in storage and only the inventory entry is gone. The
+		// sentinel therefore must not say the subject was never issued -- the
+		// warning below is printed about deleting that very certificate.
+		//
+		// It also pins the cause reaching WARN. This arm moves no counter and
+		// answers 404 at the API, so if the underlying storage error were
+		// demoted below the default verbosity a lost inventory would be
+		// invisible: every revoke would report the subject absent, and nothing
+		// would say why.
+		ctx := context.Background()
+		store := storage.New(GinkgoT().TempDir())
+
+		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		myCA.LeafKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+		Expect(myCA.Init(ctx)).To(Succeed())
+		_, err := myCA.Generate(ctx, "orphaned.example.com", nil)
+		Expect(err).NotTo(HaveOccurred())
+
+		// Lose the inventory, keeping the certificate. Clean's hasCert check
+		// then passes while the serial lookup beneath it finds nothing.
+		//
+		// The stored MAC has to go with it, and that is not incidental: with
+		// the MAC left behind, the missing blob fails integrity verification
+		// instead and returns ErrInventoryTampered, which is a different branch
+		// -- counted, and a 409 at the API. Removing only the inventory would
+		// leave this spec exercising that branch while appearing to cover this
+		// one. Both absent is the state a partial restore of the store
+		// produces, and it is the one that reaches fs.ErrNotExist here.
+		Expect(os.Remove(store.InventoryPath())).To(Succeed())
+		Expect(os.Remove(filepath.Join(filepath.Dir(store.InventoryPath()), ".inventory.hmac"))).To(Succeed())
+
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+		defer slog.SetDefault(orig)
+
+		Expect(myCA.Clean(ctx, "orphaned.example.com")).To(Succeed(),
+			"a revocation that cannot find its serial must not leave the certificate in place")
+
+		_, err = store.GetCert(ctx, "orphaned.example.com")
+		Expect(err).To(HaveOccurred(), "the certificate must be gone from storage")
+
+		// Isolate the record before asserting on it. Clean's own warning embeds
+		// the returned error, so a buffer-wide check for the message text --
+		// or for the absence of "has been issued" -- passes whether or not the
+		// line under test was emitted at all. Only the storage path
+		// distinguishes the two records, so scope to the one that should carry
+		// it and the assertions test what their messages claim.
+		var line string
+		for _, l := range strings.Split(buf.String(), "\n") {
+			if strings.Contains(l, "No inventory entry for subject") {
+				line = l
+				break
+			}
+		}
+		Expect(line).NotTo(BeEmpty(),
+			"revokeLocked must log the cause at or above the shipped default verbosity")
+
+		Expect(line).To(ContainSubstring(store.InventoryPath()),
+			"the cause is the only thing separating a lost inventory from a typo'd certname")
+		// As in the CA-layer twin: the capture filter catches a demotion, this
+		// catches a promotion, and docs/api.md names the level to operators.
+		Expect(line).To(ContainSubstring("level=INFO"),
+			"the level is part of what the documented diagnostic promises")
+
+		// Clean's own warning must stay truthful too -- it is the one an
+		// operator actually reads about a certificate that was deleted while
+		// still valid, and it renders the sentinel verbatim.
+		Expect(buf.String()).To(ContainSubstring("stays a valid credential until it expires"))
+		Expect(buf.String()).NotTo(ContainSubstring("has been issued"))
+
+		// The counter this arm is documented to leave flat. Clean swallows the
+		// revoke failure, so nothing else here would notice the not-found arm
+		// starting to count -- and docs/api.md publishes that it does not.
+		Expect(myCA.CRLUpdateFailures()).To(BeNumerically("==", 0),
+			"a revocation that found no inventory entry is not a CRL-update failure")
+	})
+
 	It("reads the stored blob once per re-sign, not once per purpose", func() {
 		// The re-sign needs two things from storage — the number and entries to
 		// carry forward, and the ancestor blocks to preserve — and used to fetch
