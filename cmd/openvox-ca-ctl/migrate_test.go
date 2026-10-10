@@ -75,7 +75,7 @@ var _ = Describe("migrate command", func() {
 		cmd.SetArgs([]string{"--source-config", srcCfg, "--dest-config", dstCfg})
 		Expect(cmd.Execute()).To(Succeed(), "migrate")
 
-		for _, rel := range []string{"ca_crt.pem", filepath.Join("private", "ca_key.pem"), "serial", filepath.Join("requests", "node1.pem")} {
+		for _, rel := range []string{"ca_crt.pem", "ca_key.pem", "serial", filepath.Join("requests", "node1.pem")} {
 			_, err := os.Stat(filepath.Join(dstDir, rel))
 			Expect(err).NotTo(HaveOccurred(), "expected %s in destination", rel)
 		}

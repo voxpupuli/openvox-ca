@@ -51,10 +51,10 @@ var _ = Describe("cleanupExpiredOnce", func() {
 		ctx := context.Background()
 
 		seedExpiredInventoryEntry(store, "expired-node")
-		Expect(inventoryHas(store, "/expired-node")).To(BeTrue(), "precondition: expired-node should be in the inventory")
+		Expect(inventoryHas(store, "/CN=expired-node")).To(BeTrue(), "precondition: expired-node should be in the inventory")
 
 		cleanupExpiredOnce(ctx, c, time.Hour)
-		Expect(inventoryHas(store, "/expired-node")).To(BeFalse(), "expired-node should have been removed from the inventory")
+		Expect(inventoryHas(store, "/CN=expired-node")).To(BeFalse(), "expired-node should have been removed from the inventory")
 	})
 })
 
@@ -64,6 +64,7 @@ var _ = Describe("runCertCleaner", func() {
 	It("prunes at startup and returns after context cancellation", func() {
 		c, store := newRefresherTestCA()
 		seedExpiredInventoryEntry(store, "expired-node")
+		Expect(inventoryHas(store, "/CN=expired-node")).To(BeTrue(), "precondition: expired-node should be in the inventory")
 
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
@@ -74,7 +75,7 @@ var _ = Describe("runCertCleaner", func() {
 
 		// The startup pass should prune the expired entry before we cancel; poll.
 		Eventually(func() bool {
-			return inventoryHas(store, "/expired-node")
+			return inventoryHas(store, "/CN=expired-node")
 		}).WithTimeout(2*time.Second).WithPolling(10*time.Millisecond).
 			Should(BeFalse(), "startup cleanup did not run within 2s")
 

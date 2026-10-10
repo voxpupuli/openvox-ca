@@ -351,27 +351,32 @@ func (s *StorageService) AppendInventoryRecord(ctx context.Context, entry string
 	if err != nil {
 		return err
 	}
+	want := inventorySerial(parsed.Serial)
 	for _, line := range strings.Split(string(data), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		if e, ok := parseInventoryEntry(line); ok && e.Serial == parsed.Serial {
+		if e, ok := parseBlobInventoryEntry(line); ok && e.Serial == want {
 			return fmt.Errorf("%w: %s", ErrDuplicateSerial, parsed.Serial)
 		}
 	}
 
-	if err := s.backend.AppendLine(ctx, KeyInventory, []byte(entry+"\n"), BlobPrivate); err != nil {
+	// The whole-blob inventory is OpenVox Server's inventory.txt, which a
+	// rollback hands back to it, so the line goes in in its format rather than
+	// this CA's canonical one.
+	line := openVoxInventoryLine(parsed, entry)
+	if err := s.backend.AppendLine(ctx, KeyInventory, []byte(line+"\n"), BlobPrivate); err != nil {
 		return err
 	}
 
 	if s.hmacKey != nil {
 		// AppendLine is a literal byte-append, so the stored blob is now exactly
-		// data + entry + "\n". Hash that reconstruction directly instead of
+		// data + line + "\n". Hash that reconstruction directly instead of
 		// re-reading the blob (which computeInventoryHMAC would do), keeping the
 		// value byte-identical to a fresh whole-blob recompute.
-		newBlob := make([]byte, 0, len(data)+len(entry)+1)
+		newBlob := make([]byte, 0, len(data)+len(line)+1)
 		newBlob = append(newBlob, data...)
-		newBlob = append(newBlob, entry...)
+		newBlob = append(newBlob, line...)
 		newBlob = append(newBlob, '\n')
 		if err := s.backend.Put(ctx, KeyInventoryHMAC, wholeBlobInventoryMAC(s.hmacKey, newBlob), BlobPrivate); err != nil {
 			// The line is already durably appended, but the stored HMAC now
@@ -422,7 +427,8 @@ func (s *StorageService) SerialExists(ctx context.Context, serial string) (bool,
 //
 // Unlike SerialExists, the comparison is on the *normalised* value (uppercase
 // hex, no leading zeros) rather than the stored string. SerialExists can insist
-// on an exact match because both sides are written by this CA in one format; a
+// on an exact match because both sides are written by this CA in one format (a
+// blob inventory's lines, OpenVox Server's included, are normalised as read); a
 // serial reaching this method was typed by an operator, who may reasonably
 // write it in the lowercase, zero-padded or colon-free form some other tool
 // printed. Normalising here is also what lets a modern random serial and a
@@ -516,12 +522,20 @@ var ErrMalformedSerial = errors.New("malformed serial")
 // canonical form this CA stores and logs: uppercase hex, no leading zeros, and
 // no separators. It rejects anything that is not a non-negative hexadecimal
 // integer, so it doubles as the input validator for operator-supplied serials.
+// One leading "0x" or "0X" is accepted: OpenVox Server writes its inventory
+// serials that way, and the filesystem backend now does too, so it is the form
+// an operator copying a serial from inventory.txt will have.
 //
 // It is the storage-layer twin of the ca package's serialHexStr, which
 // canonicalises a *big.Int that has already been parsed; this one starts from
 // text.
 func NormaliseSerial(serial string) (string, error) {
 	trimmed := strings.TrimSpace(serial)
+	if rest, ok := strings.CutPrefix(trimmed, "0x"); ok {
+		trimmed = rest
+	} else if rest, ok := strings.CutPrefix(trimmed, "0X"); ok {
+		trimmed = rest
+	}
 	n, ok := new(big.Int).SetString(trimmed, 16)
 	if trimmed == "" || !ok || n.Sign() < 0 {
 		return "", fmt.Errorf("%w: %q is not a hexadecimal serial number", ErrMalformedSerial, serial)
@@ -692,7 +706,7 @@ func parseInventoryBlobCounting(data []byte) (entries []InventoryEntry, unparsea
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		if e, ok := parseInventoryEntry(line); ok {
+		if e, ok := parseBlobInventoryEntry(line); ok {
 			entries = append(entries, e)
 			continue
 		}
@@ -754,28 +768,29 @@ func (s *StorageService) PruneInventory(ctx context.Context, keep func(Inventory
 	// recompute the whole-blob HMAC. This matches their (non-atomic) append path
 	// and is correct for the single-node filesystem backend, the only blob
 	// backend without distributed appends.
-	entries, err := s.inventoryEntriesLocked(ctx)
+	//
+	// Every line that survives is written back byte for byte, never re-rendered.
+	// A filesystem inventory is shared with OpenVox Server, which a rollback
+	// hands the same directory to, and its lines are in OpenVox Server's own
+	// format: reformatting them would make them unreadable to it. Lines that do
+	// not parse are kept for the same reason; deciding they are not entries is
+	// this reader's view, not the file's.
+	data, err := s.readInventoryForHMAC(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	kept := make([]InventoryEntry, 0, len(entries))
+	var buf strings.Builder
 	var removed []InventoryEntry
-	for _, e := range entries {
-		if keep(e) {
-			kept = append(kept, e)
-		} else {
+	for _, line := range strings.SplitAfter(string(data), "\n") {
+		if e, ok := parseBlobInventoryEntry(line); ok && !keep(e) {
 			removed = append(removed, e)
+			continue
 		}
+		buf.WriteString(line)
 	}
 	if len(removed) == 0 {
 		return nil, nil
-	}
-
-	var buf strings.Builder
-	for _, e := range kept {
-		buf.WriteString(canonicalInventoryLine(e))
-		buf.WriteByte('\n')
 	}
 	if err := s.backend.Put(ctx, KeyInventory, []byte(buf.String()), BlobPrivate); err != nil {
 		return nil, fmt.Errorf("rewriting inventory: %w", err)
@@ -1076,17 +1091,25 @@ func (s *StorageService) SavePrivateKey(ctx context.Context, subject string, pem
 }
 
 // CheckKeyPermissions reports private key files whose permissions are more
-// permissive than expected (0600). Scans the local private-key directory,
-// which for the filesystem backend also contains the CA key.
+// permissive than expected (0600). Scans the local private-key directory, and
+// the filesystem backend's CA key, which lives at the top of the cadir unless
+// the cadir predates that and keeps it in private/ (see caKeyFiler).
 func (s *StorageService) CheckKeyPermissions() []KeyPermWarning {
 	if s.localPrivateKeyDir == "" {
 		return nil
 	}
+	var warnings []KeyPermWarning
+	if f, ok := s.backend.(caKeyFiler); ok {
+		if p := f.CAKeyFile(); p != "" && filepath.Dir(p) != filepath.Clean(s.localPrivateKeyDir) {
+			if info, err := os.Stat(p); err == nil && info.Mode().Perm()&^os.FileMode(FilePermPrivate) != 0 {
+				warnings = append(warnings, KeyPermWarning{Path: p, Mode: info.Mode().Perm()})
+			}
+		}
+	}
 	entries, err := os.ReadDir(s.localPrivateKeyDir)
 	if err != nil {
-		return nil
+		return warnings
 	}
-	var warnings []KeyPermWarning
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), "_key.pem") {
 			continue
@@ -1364,7 +1387,7 @@ func wholeBlobInventoryMAC(key, blob []byte) []byte {
 //
 //	mac_i = HMAC-SHA256(key, mac_{i-1} ‖ line_i)
 //
-// where line_i is the canonical inventory.txt line (no trailing newline) and
+// where line_i is the canonical inventory line (no trailing newline) and
 // prev is the previous head (nil/empty for the first entry).
 func chainInventoryMAC(key, prev []byte, line string) []byte {
 	mac := hmac.New(sha256.New, key)
@@ -1379,18 +1402,21 @@ func chainInventoryMAC(key, prev []byte, line string) []byte {
 // UTC time records its wall-clock digits and parsing yields them back as UTC.
 const InventoryTimeFormat = "2006-01-02T15:04:05UTC"
 
-// canonicalInventoryLine renders e to its inventory.txt line (without the
-// trailing newline). It is the single source of truth for the on-disk blob
-// format and the input to the integrity hash chain, so the two cannot drift.
+// canonicalInventoryLine renders e to its canonical inventory line (without the
+// trailing newline): the form issuance builds through FormatInventoryLine, the
+// structured backends store and render, and their integrity hash chain is
+// folded over, so those cannot drift. The filesystem backend's inventory.txt is
+// OpenVox Server's file and is written in its format by openVoxInventoryLine.
 func canonicalInventoryLine(e InventoryEntry) string {
 	return fmt.Sprintf("%s %s %s /%s", e.Serial, e.NotBefore, e.NotAfter, e.Subject)
 }
 
-// FormatInventoryLine builds the canonical inventory.txt line (without the
-// trailing newline) from the semantic fields, formatting the timestamps in UTC
-// via InventoryTimeFormat. Issuance paths (signing, import) must construct
-// inventory lines through this single constructor so they cannot drift from the
-// reader/writer/HMAC format owned by canonicalInventoryLine.
+// FormatInventoryLine builds the canonical inventory line (without the trailing
+// newline) from the semantic fields, formatting the timestamps in UTC via
+// InventoryTimeFormat. Issuance paths (signing, import) must construct
+// inventory lines through this single constructor so they cannot drift from
+// canonicalInventoryLine, which the structured backends store and chain over.
+// The filesystem's inventory.txt is written from it by openVoxInventoryLine.
 func FormatInventoryLine(serial string, notBefore, notAfter time.Time, subject string) string {
 	return canonicalInventoryLine(InventoryEntry{
 		Serial:    serial,
@@ -1403,6 +1429,11 @@ func FormatInventoryLine(serial string, notBefore, notAfter time.Time, subject s
 // parseInventoryEntry parses a single inventory.txt line into an InventoryEntry.
 // The format is "SERIAL NOT_BEFORE NOT_AFTER /SUBJECT"; the leading "/" on the
 // subject is stripped. Returns ok=false for blank or malformed lines.
+//
+// The subject is the rest of the line rather than the fourth field. This CA
+// never writes a subject with a space in it, but OpenVox Server records its own
+// CA certificate as "/CN=Puppet CA: <host>", and taking one field truncated
+// that to "CN=Puppet" wherever such a line was parsed.
 func parseInventoryEntry(line string) (InventoryEntry, bool) {
 	fields := strings.Fields(line)
 	if len(fields) < 4 {
@@ -1412,8 +1443,85 @@ func parseInventoryEntry(line string) (InventoryEntry, bool) {
 		Serial:    fields[0],
 		NotBefore: fields[1],
 		NotAfter:  fields[2],
-		Subject:   strings.TrimPrefix(fields[3], "/"),
+		Subject:   strings.TrimPrefix(strings.Join(fields[3:], " "), "/"),
 	}, true
+}
+
+// parseBlobInventoryEntry is parseInventoryEntry for the whole-blob inventory,
+// which on the filesystem backend is OpenVox Server's own inventory.txt. Every
+// reader of the blob form parses through it; the structured backends keep
+// parseInventoryEntry, and what they store is unaffected.
+//
+// The file may hold OpenVox Server's lines and this CA's side by side: OpenVox
+// Server writes "0x0002 ... /CN=agent.example.com" where this CA writes
+// "2 ... /agent.example.com". The serial and subject are normalised to this
+// CA's form (see inventorySerial and inventorySubject), so that every reader
+// compares the two spellings of one certificate as equal rather than as
+// different strings. The line itself is never rewritten; this only decides how
+// it is read.
+func parseBlobInventoryEntry(line string) (InventoryEntry, bool) {
+	e, ok := parseInventoryEntry(line)
+	if !ok {
+		return InventoryEntry{}, false
+	}
+	e.Serial = inventorySerial(e.Serial)
+	e.Subject = inventorySubject(e.Subject)
+	return e, true
+}
+
+// openVoxInventoryLine renders e as OpenVox Server's own writer does
+// (write-cert-to-inventory-unlocked! in its certificate_authority.clj): the
+// serial as "0x" and upper-case hex zero-padded to four digits, and the subject
+// as "/" and its X.500 name, "/CN=<certname>" for a certname. It is the single
+// place that format is produced, and it is used only for the whole-blob
+// inventory, which on the filesystem backend is the file OpenVox Server reads.
+// The structured backends store canonicalInventoryLine's form, which their hash
+// chain is computed over.
+//
+// parseBlobInventoryEntry reads the result back as e. A serial that is not
+// hexadecimal cannot be rendered, and raw, the line as the caller gave it, is
+// returned instead: nothing this CA issues has one, so that is only ever a line
+// written deliberately, and it is stored as written, as it always was.
+func openVoxInventoryLine(e InventoryEntry, raw string) string {
+	n, ok := new(big.Int).SetString(inventorySerial(e.Serial), 16)
+	if !ok {
+		return raw
+	}
+	subject := e.Subject
+	if !strings.Contains(subject, "=") {
+		// A certname. A subject already in X.500 form, such as OpenVox
+		// Server's own CA certificate carried through a store and back, is
+		// written as it is.
+		subject = "CN=" + subject
+	}
+	return fmt.Sprintf("0x%04X %s %s /%s", n, e.NotBefore, e.NotAfter, subject)
+}
+
+// inventorySerial normalises a blob inventory serial to NormaliseSerial's
+// canonical form, which is also serialHexStr's in the ca package, so that
+// OpenVox Server's "0x0002" and a zero-padded "0002" both read as "2" and
+// compare numerically. A serial that is not hexadecimal is returned unchanged,
+// so the readers that already report malformed serials still see, and report,
+// the original text.
+func inventorySerial(raw string) string {
+	if n, err := NormaliseSerial(raw); err == nil {
+		return n
+	}
+	return raw
+}
+
+// inventorySubject reduces a blob inventory subject (its leading "/" already
+// stripped) that is a distinguished name holding a single common name to that
+// name: OpenVox Server's "/CN=agent.example.com" reads as "agent.example.com",
+// this CA's own subject. A multi-component name, in either the X.500 form
+// ("CN=a,O=b") or the slash-separated form older Puppet CAs wrote ("CN=a/O=b"
+// once stripped), and a common name with a space in it (OpenVox Server's CA
+// certificate) are not certnames, so they are left whole and never match one.
+func inventorySubject(subject string) string {
+	if cn, ok := strings.CutPrefix(subject, "CN="); ok && cn != "" && !strings.ContainsAny(cn, ",+=/\\ ") {
+		return cn
+	}
+	return subject
 }
 
 // latestSerialFromBlob scans a rendered inventory blob and returns the serial
@@ -1425,7 +1533,7 @@ func latestSerialFromBlob(data []byte, subject string) (string, error) {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		e, ok := parseInventoryEntry(line)
+		e, ok := parseBlobInventoryEntry(line)
 		if !ok {
 			badLines++
 			continue

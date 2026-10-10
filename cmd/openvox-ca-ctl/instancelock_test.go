@@ -97,7 +97,7 @@ var _ = Describe("openvox-ca-ctl and the store instance lock", func() {
 		cmd.SetArgs([]string{
 			"import", "--cadir", target,
 			"--cert-bundle", filepath.Join(caDir, "ca_crt.pem"),
-			"--private-key", filepath.Join(caDir, "private", "ca_key.pem"),
+			"--private-key", filepath.Join(caDir, "ca_key.pem"),
 		})
 
 		refusal(cmd.Execute())

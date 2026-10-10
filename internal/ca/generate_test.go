@@ -473,7 +473,7 @@ var _ = Describe("CA Generate", func() {
 			// operator -- a serial consumed and a certificate the CA lists.
 			inv, err := storage.NewWithBackend(two, priv).ReadInventory(ctx)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(strings.Count(string(inv), "/replica-node")).To(Equal(1),
+			Expect(strings.Count(string(inv), "/CN=replica-node")).To(Equal(1),
 				"exactly one inventory row for the subject:\n%s", inv)
 
 			Expect(two.names()).To(ContainElement("subject:replica-node"),
@@ -743,7 +743,7 @@ var _ = Describe("CA GenerateWithOptions", func() {
 
 			inv, err := store.ReadInventory(ctx)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(string(inv)).To(ContainSubstring("/tracked-node"))
+			Expect(string(inv)).To(ContainSubstring("/CN=tracked-node"))
 
 			// serialIndex is not directly observable; OCSP is where it shows.
 			req, err := testutil.BuildOCSPRequest(cert, myCA.CACert)

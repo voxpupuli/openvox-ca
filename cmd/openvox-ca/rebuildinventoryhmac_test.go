@@ -410,7 +410,7 @@ var _ = Describe("openvox-ca rebuild-inventory-hmac", func() {
 
 			entries, err := storage.New(caDir).InventoryEntries(context.Background())
 			Expect(err).NotTo(HaveOccurred(), "the rebuilt value must let the inventory be read")
-			Expect(entries).To(ContainElement(HaveField("Subject", "CN=ghost.example.com")),
+			Expect(entries).To(ContainElement(HaveField("Subject", "ghost.example.com")),
 				"the out-of-band entry must still be there and now be covered")
 			Expect(entries).To(ContainElement(HaveField("Subject", "web01.example.com")),
 				"and the entry that was already there must survive the rebuild")

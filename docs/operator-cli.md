@@ -135,7 +135,8 @@ openvox-ca-ctl revoke --serial 472C95FAA0DAE424BD7E911E26066010 --force
 # while no replacement has been issued for that name, and `revoke --serial
 # <hex>` (above) is what is needed once one has. The WARN line names the serial
 # only when the revocation got as far as the CRL; otherwise take it from the
-# inventory. See docs/api.md for which is which.
+# inventory (the 0x the filesystem inventory writes before it is accepted). See
+# docs/api.md for which is which.
 openvox-ca-ctl clean --certname agent.example.com
 
 # Re-sign the CRL with a fresh validity window (preserves all revocations)
@@ -708,7 +709,8 @@ get wrong:
 3. **Check the inventory for other live serials for that name.** With
    `revoke_on_auto_renew: false`, or after a renewal whose best-effort revoke
    failed, more than one can be valid. Step 1 retires only the newest; retire
-   each of the others with `openvox-ca-ctl revoke --serial <serial>`, which
+   each of the others with `openvox-ca-ctl revoke --serial <serial>` (as the
+   inventory writes it, `0x` prefix and all, or as bare hex), which
    needs `--force` where the serial is still the certificate stored for its
    subject. Step 2 applies to each of them: a revocation is not honoured by a
    replica until it reloads.
@@ -841,6 +843,37 @@ Read the warning in the command's own output before using it. Rebuilding does
 not verify or repair the inventory — it re-asserts integrity over whatever the
 inventory now contains, so any tampering present is signed over and becomes
 valid. Establish why verification failed first.
+
+One cause is expected rather than suspicious: OpenVox Server's CA having run on
+the same cadir, on the filesystem backend. OpenVox Server appends a line to
+`inventory.txt` for every certificate it signs and knows nothing of
+`.inventory.hmac`, so once it has signed anything on the directory openvox-ca
+will not start until the value is rebuilt. Revoking and cleaning on OpenVox
+Server do not touch the inventory, so they alone do not cause this. Rebuilding
+is the one preparation step for returning to openvox-ca:
+
+1. Stop OpenVox Server's CA, so nothing appends while you read.
+2. Run the report and check what changed. openvox-ca never rewrites a line and
+   OpenVox Server only appends, so if you kept a copy of `inventory.txt` when
+   you stopped openvox-ca, it must be a byte prefix of the current file
+   (`cmp -n "$(stat -c %s saved.txt)" saved.txt inventory.txt`), and the lines
+   after it must account for the certificates OpenVox Server signed while it
+   held the directory, and nothing else. The value covers the whole file, not
+   the lines after the copy: without a copy, the earlier lines cannot be
+   checked this way, so compare them with the step-1 backup of the migration
+   guide or accept them as a stated risk.
+3. Run it again with `--yes-re-bless`, then start openvox-ca.
+
+Run both as the user OpenVox Server and openvox-ca share
+(`sudo -u puppet openvox-ca rebuild-inventory-hmac …`), not as root and not as
+`puppet-ca`. The rebuild does no `chown`, as described below, so a file it
+writes as anyone else is one the server cannot read. `puppet` must be in the
+`puppet-ca` group to read the server's configuration, which the [migration
+guide's step 3](migrating-from-puppet-server.md#step-3-run-openvox-ca-as-the-directorys-owner)
+sets up.
+
+Nothing else in the directory needs changing: openvox-ca reads OpenVox Server's
+inventory lines as they are.
 
 With no flags it reports and changes nothing, which is the safe way to inspect
 a CA that will not start.

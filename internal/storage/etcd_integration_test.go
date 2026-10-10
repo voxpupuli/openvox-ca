@@ -1745,14 +1745,12 @@ var _ = Describe("EtcdMigrateFromFilesystem", func() {
 		// decomposed entries; a whole-blob HMAC left behind would fail here.
 		Expect(dst.InitHMAC(ctx)).To(Succeed(), "InitHMAC on destination")
 
-		srcInv, err := src.ReadInventory(ctx)
-		Expect(err).NotTo(HaveOccurred())
 		dstInv, err := dst.ReadInventory(ctx)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(dstInv).To(Equal(srcInv), "migrated inventory must render identically")
+		Expect(string(dstInv)).To(Equal(migratedSampleInventory), "migrated inventory must render in canonical form")
 
 		serial, err := dst.LatestSerialForSubject(ctx, "node1")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(serial).To(Equal("0003"), "the subject index must be built during import")
+		Expect(serial).To(Equal("3"), "the subject index must be built during import")
 	})
 })

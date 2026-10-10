@@ -187,6 +187,20 @@ func (o *OverlayBackend) Path(key string) string {
 	return ""
 }
 
+// CAKeyFile forwards to the base backend's, so that CheckKeyPermissions still
+// finds a filesystem CA key when only other keys (ca_cert_file, say) are
+// overridden. An overridden CA key is not reported: it is the configured file,
+// not one the cadir holds.
+func (o *OverlayBackend) CAKeyFile() string {
+	if _, ok := o.overrides[KeyCAKey]; ok {
+		return ""
+	}
+	if f, ok := o.base.(caKeyFiler); ok {
+		return f.CAKeyFile()
+	}
+	return ""
+}
+
 // BaseDir implements PathProvider by delegating; overlay has no single root.
 func (o *OverlayBackend) BaseDir() string {
 	if pp, ok := o.base.(PathProvider); ok {

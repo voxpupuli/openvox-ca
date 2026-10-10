@@ -66,7 +66,7 @@ $ docker run -d --name openvox-ca \
     -v openvox-ca-data:/data \
     ghcr.io/voxpupuli/openvox-ca:latest \
     --cadir=/data --hostname=puppet.example.com \
-    --tls-cert=/data/ca_crt.pem --tls-key=/data/private/ca_key.pem
+    --tls-cert=/data/ca_crt.pem --tls-key=/data/ca_key.pem
 ```
 
 On first run this bootstraps a new CA under `/data` and serves HTTPS on port

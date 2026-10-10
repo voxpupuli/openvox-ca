@@ -3,14 +3,17 @@
 #
 # Sourced by test/backends/redis-stack.sh and test/puppet/puppet-stack.sh,
 # both of which need a failing service's own account of what went wrong before
-# teardown makes it unrecoverable.
+# teardown makes it unrecoverable, and by test/roundtrip/roundtrip.sh. That one
+# restarts its services deliberately, once per phase, so for it the "start
+# attempt" this file counts is a phase, and its failure is in the tail.
 #
-# Sourced, where those two harnesses deliberately keep independent *copies* of
+# Sourced, where the harnesses deliberately keep independent *copies* of
 # their engine detection, argument parsing and TAP helpers: each of those is
 # coupled to its own harness's state, and this is not. The one thing that did
 # couple the dump helper to its harness -- the `_COMPOSE` array naming the
 # compose command and its -f file -- is passed in as an argument here instead.
-# Keeping it copied was what let issue #281 be true of both harnesses at once.
+# Keeping it copied was what let issue #281 be true of both of the original two
+# harnesses at once.
 #
 # What it is for (issue #281). The harnesses used to dump a *tail* of the log.
 # `compose logs --tail` returns the NEWEST lines, and the services that matter
@@ -27,7 +30,7 @@
 # restarting, whose reason really is at the end.
 
 # -- How much of each container's log to replay when the run fails ---------
-# One pair of knobs for every dump site in both harnesses, deliberately: when
+# One pair of knobs for every dump site in every harness, deliberately: when
 # the readiness abort dumped the timed-out service at its own shallower depth,
 # the culprit ended up with the least log of anything in the run.
 #

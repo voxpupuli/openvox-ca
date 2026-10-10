@@ -253,9 +253,9 @@ _import_tree=$(find "$NEW_CA_DIR" -maxdepth 2 2>&1 | diag_oneline)
 [ -f "$NEW_CA_DIR/ca_crt.pem" ] \
     && pass "Import: CA cert at ca_crt.pem" \
     || fail "Import: CA cert at ca_crt.pem" "$NEW_CA_DIR holds: $_import_tree"
-[ -f "$NEW_CA_DIR/private/ca_key.pem" ] \
-    && pass "Import: CA key at private/ca_key.pem" \
-    || fail "Import: CA key at private/ca_key.pem" "$NEW_CA_DIR holds: $_import_tree"
+[ -f "$NEW_CA_DIR/ca_key.pem" ] \
+    && pass "Import: CA key at ca_key.pem" \
+    || fail "Import: CA key at ca_key.pem" "$NEW_CA_DIR holds: $_import_tree"
 [ -f "$NEW_CA_DIR/ca_crl.pem" ] \
     && pass "Import: CRL at ca_crl.pem" \
     || fail "Import: CRL at ca_crl.pem" "$NEW_CA_DIR holds: $_import_tree"
@@ -276,38 +276,30 @@ _new_signed_count=$(find "$NEW_CA_DIR/signed" -name '*.pem' -type f 2>/dev/null 
     || fail "Import: copied signed certs" \
             "count=$_new_signed_count; cp said: $(printf '%s' "$_cp_out" | diag_oneline)"
 
-# 3e: Rebuild inventory from copied certs.
-# openvox-ca's inventory format: SERIAL NOT_BEFORE NOT_AFTER /SUBJECT
-# Dates must be in Go's 2006-01-02T15:04:05UTC format (no spaces).
-_inv_skipped=''
+# 3e: Copy the inventory as it is.
+#
+# openvox-ca reads OpenVox Server's inventory lines ("0x0002 ... /CN=agent") in
+# place, so the file is carried over untouched rather than rebuilt from
+# signed/. A rebuild lost the history of revoked and expired entries, and wrote
+# lines in a format OpenVox Server's own reader does not resolve.
+_cp_inv_out=$(cp "$OLD_CA_DIR/inventory.txt" "$NEW_CA_DIR/inventory.txt" 2>&1) || true
+assert_files_identical "Import: inventory copied as it is" \
+    "$OLD_CA_DIR/inventory.txt" "$NEW_CA_DIR/inventory.txt" \
+    "cp said: $(printf '%s' "$_cp_inv_out" | diag_oneline)"
+
+# Every copied cert must have a line: Phase 6 revokes the agent by name, and
+# the name is resolved from these lines, not from signed/.
+_inv_missing=''
 for _cert in "$NEW_CA_DIR/signed/"*.pem; do
     [ -f "$_cert" ] || continue
     _subj=$(basename "$_cert" .pem)
-    _ser=$(openssl x509 -noout -serial -in "$_cert" 2>/dev/null | cut -d= -f2) \
-        || { _inv_skipped="${_inv_skipped} ${_subj}(serial)"; continue; }
-    _nb=$(date -u -d "$(openssl x509 -noout -startdate -in "$_cert" 2>/dev/null | sed 's/notBefore=//')" \
-        '+%Y-%m-%dT%H:%M:%SUTC' 2>/dev/null) \
-        || { _inv_skipped="${_inv_skipped} ${_subj}(notBefore)"; continue; }
-    _na=$(date -u -d "$(openssl x509 -noout -enddate -in "$_cert" 2>/dev/null | sed 's/notAfter=//')" \
-        '+%Y-%m-%dT%H:%M:%SUTC' 2>/dev/null) \
-        || { _inv_skipped="${_inv_skipped} ${_subj}(notAfter)"; continue; }
-    echo "$_ser $_nb $_na /$_subj" >> "$NEW_CA_DIR/inventory.txt"
+    grep -q " /CN=${_subj}\$" "$NEW_CA_DIR/inventory.txt" \
+        || _inv_missing="${_inv_missing} ${_subj}"
 done
-_inv_lines=$(wc -l < "$NEW_CA_DIR/inventory.txt" 2>/dev/null) || _inv_lines=0
-[ "$_inv_lines" -gt 0 ] \
-    && pass "Import: inventory rebuilt with $_inv_lines entries" \
-    || fail "Import: inventory rebuilt" \
-            "lines=$_inv_lines from $_new_signed_count certs; skipped:${_inv_skipped:- none}"
-
-# A cert silently dropped from the inventory is the kind of partial migration
-# Phase 5's spot checks can pass over: 5f takes the first cert in signed/, and
-# 5g greps only for the agent. So this is an assertion, not the TAP comment it
-# started as -- a comment on a green run is a comment nobody reads, and
-# "inventory rebuilt with 1 entries" from ten certs would otherwise pass.
-[ -z "$_inv_skipped" ] \
-    && pass "Import: every copied cert made it into the inventory" \
-    || fail "Import: every copied cert made it into the inventory" \
-            "skipped:${_inv_skipped}"
+[ -z "$_inv_missing" ] \
+    && pass "Import: every copied cert has an inventory line" \
+    || fail "Import: every copied cert has an inventory line" \
+            "missing:${_inv_missing}; inventory: $(diag_oneline < "$NEW_CA_DIR/inventory.txt")"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Phase 4 -- Start openvox-ca with imported material
@@ -539,6 +531,15 @@ http_ok "BEGIN CERTIFICATE" \
     && pass "New CA: fresh cert still accessible after migration cleanup" \
     || fail "New CA: fresh cert still accessible after migration cleanup" \
             "subject=${_NEW_AGENT} $_HTTP_INFO"
+
+# 6i: OpenVox Server's lines are still there, byte for byte, ahead of whatever
+# openvox-ca appended -- including the migrated agent's, which Phase 6 revoked
+# and cleaned. openvox-ca appends; it does not rewrite.
+head -c "$(wc -c < "$OLD_CA_DIR/inventory.txt")" "$NEW_CA_DIR/inventory.txt" \
+    > "$WORK_DIR/inventory.prefix" 2>/dev/null
+assert_files_identical "New CA: OpenVox Server's inventory lines are untouched" \
+    "$OLD_CA_DIR/inventory.txt" "$WORK_DIR/inventory.prefix" \
+    "old: $(diag_oneline < "$OLD_CA_DIR/inventory.txt") new: $(diag_oneline < "$NEW_CA_DIR/inventory.txt")"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Results

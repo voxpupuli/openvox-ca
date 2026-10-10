@@ -13,12 +13,13 @@
 # because the suites call them too -- heavily; this file is an additional
 # consumer, not the reason any of them is listed.
 #
-# Two further suites, test/puppet/puppet-stack.sh and
-# test/backends/redis-stack.sh, run on the HOST and reach into the same image
-# with `compose exec`. They do not source this file — a fresh shell started by
-# `compose exec` inherits neither the contract nor the handler below — so the
-# commands they exec are declared here but asserted only when one of the two
-# in-container suites runs. `sh` is in the contract for their sake.
+# Three further suites, test/puppet/puppet-stack.sh,
+# test/backends/redis-stack.sh and test/roundtrip/roundtrip.sh, run on the HOST
+# and reach into the same image with `compose exec`. They do not source this
+# file — a fresh shell started by `compose exec` inherits neither the contract
+# nor the handler below — so the commands they exec are declared here but
+# asserted only when one of the two in-container suites runs. `sh` is in the
+# contract for their sake.
 #
 # Why this exists
 # ---------------
@@ -49,7 +50,7 @@
 
 # Every external command the in-container suites invoke. Derived by extracting
 # command-position tokens from the six in-container scripts named above, and the
-# two host-side suites that exec into the image, then resolving each
+# three host-side suites that exec into the image, then resolving each
 # against the built image, then discarding the ones that turned out to be prose
 # rather than calls. The product binaries (openvox-ca, openvox-ca-ctl) are
 # COPYed in by the Dockerfile rather than installed, and are checked separately.

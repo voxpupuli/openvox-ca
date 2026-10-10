@@ -341,7 +341,7 @@ var _ = Describe("MigrateRoundTripsLocalFileLayout", func() {
 		Expect(err).NotTo(HaveOccurred(), "Migrate")
 
 		// Spot-check a couple of well-known on-disk paths.
-		for _, rel := range []string{"ca_crt.pem", filepath.Join("private", "ca_key.pem"), filepath.Join("requests", "web01.pem")} {
+		for _, rel := range []string{"ca_crt.pem", "ca_key.pem", filepath.Join("requests", "web01.pem")} {
 			_, err := os.Stat(filepath.Join(dstDir, rel))
 			Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("expected %s on disk", rel))
 		}

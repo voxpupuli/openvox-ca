@@ -47,7 +47,9 @@ var _ = Describe("StorageService SubjectForSerial", func() {
 		// "00FF" is deliberately zero-padded, as an inventory written by an
 		// older version with sequential serials would be; "0A" is not. Nothing
 		// here goes through the CA, so both sides of the comparison are as
-		// varied as a real inventory's are.
+		// varied as a real inventory's are. The subjects are in OpenVox
+		// Server's "/CN=" form, which a filesystem inventory reads as the
+		// bare certname.
 		Expect(store.AppendInventory(ctx,
 			"0A 2026-01-01T00:00:00UTC 2027-01-01T00:00:00UTC /CN=first")).To(Succeed())
 		Expect(store.AppendInventory(ctx,
@@ -79,7 +81,7 @@ var _ = Describe("StorageService SubjectForSerial", func() {
 		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
 		defer slog.SetDefault(orig)
 
-		Expect(store.SubjectForSerial(ctx, "1B")).To(Equal("CN=third"))
+		Expect(store.SubjectForSerial(ctx, "1B")).To(Equal("third"))
 
 		Expect(strings.Count(buf.String(), "unparseable serials")).To(Equal(1))
 		Expect(buf.String()).To(ContainSubstring("count=2"))
@@ -109,13 +111,14 @@ var _ = Describe("StorageService SubjectForSerial", func() {
 		func(query, subject string) {
 			Expect(store.SubjectForSerial(ctx, query)).To(Equal(subject))
 		},
-		Entry("query and entry both canonical", "0A", "CN=first"),
-		Entry("query lowercase, entry uppercase", "0a", "CN=first"),
-		Entry("query padded, entry unpadded", "0000000A", "CN=first"),
-		Entry("query unpadded, entry padded", "FF", "CN=second"),
-		Entry("query lowercase, entry padded uppercase", "ff", "CN=second"),
-		Entry("query uppercase, entry lowercase", "1B", "CN=third"),
-		Entry("query surrounded by whitespace", "  0A\n", "CN=first"),
+		Entry("query and entry both canonical", "0A", "first"),
+		Entry("query lowercase, entry uppercase", "0a", "first"),
+		Entry("query padded, entry unpadded", "0000000A", "first"),
+		Entry("query unpadded, entry padded", "FF", "second"),
+		Entry("query lowercase, entry padded uppercase", "ff", "second"),
+		Entry("query uppercase, entry lowercase", "1B", "third"),
+		Entry("query surrounded by whitespace", "  0A\n", "first"),
+		Entry("query 0x-prefixed, as inventory.txt writes it", "0x000A", "first"),
 	)
 
 	It("wraps fs.ErrNotExist for a serial no entry carries", func() {
@@ -151,6 +154,9 @@ var _ = Describe("StorageService SubjectForSerial", func() {
 		Entry("explicit plus", "+1A"),
 		Entry("very large", strings.Repeat("F", 256)),
 		Entry("zero", "0"),
+		Entry("0x-prefixed, as inventory.txt writes it", "0x000A"),
+		Entry("0X-prefixed, lowercase digits", "0X000a"),
+		Entry("0x-prefixed, with an explicit plus", "0x+1A"),
 		// strings.TrimSpace is Unicode-aware, so these are accepted and
 		// canonicalised rather than rejected. They matter more than the ASCII
 		// entries above: U+2028 and U+2029 are line breaks to a JSON- or
@@ -175,9 +181,25 @@ var _ = Describe("StorageService SubjectForSerial", func() {
 		Entry("non-hex letters", "nope"),
 		Entry("interior newline", "0A\nforged"),
 		Entry("interior U+2028", "0A\u2028forged"),
-		Entry("0x prefix", "0x1A"),
+		Entry("a bare 0x", "0x"),
 		Entry("negative", "-1A"),
 		Entry("empty", ""),
+		Entry("0x-prefixed, negative", "0x-1A"),
+		Entry("0x then a space", "0x 0A"),
+		Entry("0x then a newline", "0x\n0A"),
+	)
+
+	// The prefix is stripped once and the rest parsed as any other serial, so
+	// a sign after it means what it means without one: "+1A" is accepted
+	// (above), and so is "0x+1A".
+	DescribeTable("canonicalises a 0x-prefixed serial as it would the bare one",
+		func(in, want string) {
+			Expect(storage.NormaliseSerial(in)).To(Equal(want))
+		},
+		Entry("0x, zero-padded", "0x000A", "A"),
+		Entry("0X, lowercase digits", "0X000a", "A"),
+		Entry("0x and an explicit plus", "0x+1A", "1A"),
+		Entry("0x and a 128-bit serial", "0x1a2b3c4d5e6f708192a3b4c5d6e7f801", "1A2B3C4D5E6F708192A3B4C5D6E7F801"),
 	)
 
 	DescribeTable("rejects input that is not a hexadecimal serial",
@@ -188,7 +210,7 @@ var _ = Describe("StorageService SubjectForSerial", func() {
 		Entry("empty", ""),
 		Entry("whitespace only", "   "),
 		Entry("non-hex letters", "nope"),
-		Entry("0x prefix", "0x0A"),
+		Entry("two 0x prefixes", "0x0x0A"),
 		Entry("negative", "-1"),
 		Entry("embedded space", "0 A"),
 	)

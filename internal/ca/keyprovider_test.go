@@ -598,7 +598,7 @@ var _ = Describe("Init when CA material is half present", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		// The key is lost: an unmounted volume, a failed restore, a deleted file.
-		Expect(os.Remove(filepath.Join(dir, "private", "ca_key.pem"))).To(Succeed())
+		Expect(os.Remove(filepath.Join(dir, "ca_key.pem"))).To(Succeed())
 
 		restarted := ca.New(store, asCfg, "puppet.test")
 		restarted.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}

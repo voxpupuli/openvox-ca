@@ -16,7 +16,10 @@
 Server), written in Go. It speaks the same HTTP API that OpenVox and Puppet
 agents — and the `puppetserver ca` / `puppet ssl` tooling — already use, and
 reads and writes a certificate store compatible with the existing Puppet CA
-directory layout. Existing agents keep working without reconfiguration.
+directory layout, so it can start on OpenVox Server's own CA directory as it
+stands. Agents keep their certificates; whether they need `ca_server` changed
+depends on where the CA runs (see [agent
+configuration](docs/migrating-from-puppet-server.md#agent-configuration)).
 
 Run it instead of OpenVox Server's built-in (Clojure) CA when you want a small,
 self-contained CA process that scales out across replicas, keeps its key in

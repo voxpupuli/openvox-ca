@@ -90,9 +90,12 @@ mage test:puppet
 
 `test:puppet` uses `test/compose-puppet.yml`, a five-service stack that validates end-to-end catalog compilation, PuppetDB reporting, exported resources, and CRL revocation using a real OpenVox 8 agent and WEBrick puppet master. The CA runs with genuine TLS (a cert with CN=openvox-ca signed by the CA itself); all inter-service traffic verifies it.
 
-`test:migration` uses `test/compose-migration.yml`, which starts a real OpenVox Server (`voxpupuli/puppetserver:latest`) to create a genuine Puppet CA, then imports its CA material into openvox-ca using `openvox-ca-ctl import` and verifies the full migration path: old certs are fetchable, new certs can be signed, migrated certs can be revoked and cleaned.
+`test:migration` uses `test/compose-migration.yml`, which starts a real OpenVox Server (the pinned `ghcr.io/openvoxproject/openvoxserver` image the compose file names) to create a genuine Puppet CA, then imports its CA material into openvox-ca using `openvox-ca-ctl import` and verifies the full migration path: old certs are fetchable, new certs can be signed, migrated certs can be revoked and cleaned.
 
-Every assertion in that suite reports why it failed, and every HTTP request
+It then runs a second suite, `test/roundtrip/roundtrip.sh` on `test/compose-roundtrip.yml`, even when the first fails, and reports both. That one hands a single cadir between OpenVox Server's CA and openvox-ca four times, from the host: OpenVox Server creates the CA, openvox-ca starts on it with no import, OpenVox Server starts on what openvox-ca left, and openvox-ca returns after `rebuild-inventory-hmac --yes-re-bless`, which it must refuse to start without. Each phase issues certificates and revokes and cleans by name ones the other issued, and checks that `inventory.txt` only grew, in OpenVox Server's format. openvox-ca runs as OpenVox Server's uid, as [sharing the cadir](../storage-backends.md#sharing-the-cadir-with-openvox-server) requires. Each phase's inventory snapshot is kept under `.test-output/roundtrip/`.
+
+Every assertion in the import-path suite (`test/migration/migration-test.sh`)
+reports why it failed, and every HTTP request
 goes through `test/migration/http-helpers.sh` so that curl's exit status, the
 HTTP status code, the byte count and curl's own error text survive into the TAP
 diagnostic. That is not decoration: the suite runs unattended against
@@ -249,9 +252,9 @@ its commands leaves the check blind; adding a command without its package fails
 the preflight; adding one without bumping the count fails the size check. Six scripts run in the image —
 `test/integration-compose.sh`, `test/migration/migration-test.sh`, the
 `test/migration/http-helpers.sh` it sources, the two
-`docker/puppet/ca-entrypoint*.sh`, and `test/fixture-commands.sh` itself — and two
-more, `test/puppet/puppet-stack.sh` and `test/backends/redis-stack.sh`, reach into
-it from the host with `compose exec`.
+`docker/puppet/ca-entrypoint*.sh`, and `test/fixture-commands.sh` itself — and three
+more, `test/puppet/puppet-stack.sh`, `test/backends/redis-stack.sh` and
+`test/roundtrip/roundtrip.sh`, reach into it from the host with `compose exec`.
 
 A `Bail out!` naming an absent command means one of two things: the package was
 never declared, or the base image dropped it. The second is not hypothetical —
@@ -342,15 +345,18 @@ immediately.
 
 Both harnesses dump through one shared helper, `test/failure-log.sh`, which
 takes the compose command as an argument rather than reading either one's
-`_COMPOSE` array. `mage test:failureLogHelpers` is its regression suite: it
+`_COMPOSE` array. `test/roundtrip/roundtrip.sh` uses it too, for its `ovs` and
+`ovca` services. That suite stops and starts both on purpose, once per phase,
+so there "start attempt" counts phases rather than failed retries: the first
+attempt is a healthy phase-1 or phase-2 boot, and the failure is in the tail. `mage test:failureLogHelpers` is its regression suite: it
 needs bash and no container runtime, runs on the host in under a second, and
 CI runs it in the unit job rather than inside any one compose suite. It runs
 *alongside* those suites, not ahead of them: it does not gate them, because a
 broken dump cannot change whether a compose suite passes — only what that
 suite prints when it fails.
 
-`test:migration` dumps on failure too, but what it dumps is not a container
-log. Its old Puppet Server is a compose service whose output already reaches
+`test:migration`'s import-path suite dumps on failure too, but what it dumps is
+not a container log. Its old Puppet Server is a compose service whose output already reaches
 CI by stream interleaving; the openvox-ca *under test* is a background process
 inside the test-runner container, so nothing streams it. Its stdout and stderr
 go to a file, and the suite replays the tail to stderr from its `EXIT` trap

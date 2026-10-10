@@ -54,7 +54,7 @@ var _ = Describe("StorageService", func() {
 		It("returns paths rooted in baseDir", func() {
 			Expect(store.CADir()).To(Equal(tmpDir))
 			Expect(store.CACertPath()).To(Equal(filepath.Join(tmpDir, "ca_crt.pem")))
-			Expect(store.CAKeyPath()).To(Equal(filepath.Join(tmpDir, "private", "ca_key.pem")))
+			Expect(store.CAKeyPath()).To(Equal(filepath.Join(tmpDir, "ca_key.pem")))
 			Expect(store.CAPubKeyPath()).To(Equal(filepath.Join(tmpDir, "ca_pub.pem")))
 			Expect(store.CRLPath()).To(Equal(filepath.Join(tmpDir, "ca_crl.pem")))
 			Expect(store.InventoryPath()).To(Equal(filepath.Join(tmpDir, "inventory.txt")))
@@ -110,8 +110,8 @@ var _ = Describe("StorageService", func() {
 
 			data, err := store.ReadInventory(context.Background())
 			Expect(err).NotTo(HaveOccurred())
-			Expect(string(data)).To(ContainSubstring("/node1"))
-			Expect(string(data)).To(ContainSubstring("/node2"))
+			Expect(string(data)).To(ContainSubstring("/CN=node1"))
+			Expect(string(data)).To(ContainSubstring("/CN=node2"))
 		})
 
 		It("ReadInventory returns an error when inventory file is missing", func() {
@@ -419,8 +419,8 @@ var _ = Describe("StorageService", func() {
 
 				data, err := store.ReadInventory(context.Background())
 				Expect(err).NotTo(HaveOccurred())
-				Expect(string(data)).To(ContainSubstring("/node1"))
-				Expect(string(data)).To(ContainSubstring("/node2"))
+				Expect(string(data)).To(ContainSubstring("/CN=node1"))
+				Expect(string(data)).To(ContainSubstring("/CN=node2"))
 			})
 		})
 

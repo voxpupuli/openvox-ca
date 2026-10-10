@@ -1,0 +1,67 @@
+# Round-trip test: one cadir, handed between OpenVox Server and openvox-ca.
+#
+# Topology
+# --------
+#   ovs   - OpenVox Server (JVM) with its built-in CA, on the shared cadir.
+#   ovca  - openvox-ca, on the same cadir at the same path, running as the
+#           user OpenVox Server runs as (docs/storage-backends.md, "Sharing
+#           the cadir with OpenVox Server").
+#
+# Never both at once: test/roundtrip/roundtrip.sh starts and stops them in
+# turn on the host and reaches in with `compose exec`, because the test is
+# the hand-over itself -- one stopping, the other starting on what it left.
+#
+# Usage (from project root):
+#   mage test:migration       # runs this after the import-path suite
+#   bash test/roundtrip/roundtrip.sh
+
+name: openvox-ca-roundtrip
+
+services:
+
+  ovs:
+    image: ghcr.io/openvoxproject/openvoxserver:8.14.1-main@sha256:806c5eb471c3f1d499308d903dc84210d96b00761de481d2cc7dee380d78c152
+    hostname: puppet
+    environment:
+      OPENVOXSERVER_HOSTNAME: puppet
+      AUTOSIGN: "true"
+      OPENVOXSERVER_JAVA_ARGS: "-Xms512m -Xmx512m"
+      OPENVOX_STORECONFIGS: "false"
+      USE_OPENVOXDB: "false"
+    volumes:
+      # As in compose-migration.yml: the image runs as puppet:root and
+      # pre-creates this directory 2770, so a fresh named volume inherits
+      # that on first mount.
+      - cadir:/etc/puppetlabs/puppetserver/ca:U
+    healthcheck:
+      test: ["CMD-SHELL",
+             "curl -sfk https://localhost:8140/status/v1/simple 2>/dev/null | grep -q running"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 60s
+
+  ovca:
+    build:
+      context: ..
+      dockerfile: test/Dockerfile.run
+    image: openvox-ca-integ:latest
+    # OpenVox Server's own uid and gid in the image above. Sharing a cadir
+    # means one user for both: each creates its files private to itself.
+    user: "64604:0"
+    volumes:
+      - cadir:/etc/puppetlabs/puppetserver/ca
+    command:
+      - --cadir=/etc/puppetlabs/puppetserver/ca
+      - --host=127.0.0.1
+      - --port=8140
+      - --no-tls-required
+      - --autosign-config=true
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8140/healthz/ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+volumes:
+  cadir:

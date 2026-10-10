@@ -184,7 +184,7 @@ var _ = Describe("openvox-ca generate", func() {
 			// here is that the refusal happens before Init's side effects, so
 			// the cadir is left byte-identical rather than merely un-bootstrapped.
 			bootstrapCAInDir(caDir, "puppet.example.com")
-			Expect(os.Remove(filepath.Join(caDir, "private", "ca_key.pem"))).To(Succeed())
+			Expect(os.Remove(filepath.Join(caDir, "ca_key.pem"))).To(Succeed())
 			before := hashTree(caDir)
 
 			_, _, err := runGenerate("--cadir", caDir, "--certname", "web01",
