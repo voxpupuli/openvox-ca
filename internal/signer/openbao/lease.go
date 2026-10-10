@@ -52,8 +52,9 @@ const minReauthInterval = 30 * time.Second
 
 // revokeTimeout bounds Close's best-effort revocation of a token this process
 // minted. It is deliberately much shorter than the launcher's 5-second budget
-// for a surviving child, so an unreachable OpenBao can delay exit by no more
-// than this.
+// for a surviving child, so an unreachable OpenBao cannot spend that budget on
+// the revocation. It bounds the revocation alone: Close first waits for any
+// request-path re-login already in flight, which loginTimeout bounds.
 const revokeTimeout = 2 * time.Second
 
 // ErrReauthThrottled is returned (wrapped) by Reauth when the previous login
