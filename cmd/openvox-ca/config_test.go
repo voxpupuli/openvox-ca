@@ -26,6 +26,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/voxpupuli/openvox-ca/internal/api"
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
@@ -162,6 +163,11 @@ var _ = Describe("loadServerConfig built-in defaults", func() {
 		// auto-renewal unless explicitly disabled. Guard the literal so a
 		// regression flipping it to false cannot pass silently.
 		Expect(cfg.RevokeOnAutoRenew).To(BeTrue(), "RevokeOnAutoRenew = false; want true (secure default)")
+		// Compatibility default: status responses carry serial_number as the
+		// JSON number OpenVox Server sends, unless an operator opts out.
+		serialFmt, err := api.ParseSerialNumberFormat(cfg.SerialNumberFormat)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(serialFmt).To(Equal(api.SerialNumberAsNumber))
 	})
 })
 
@@ -535,6 +541,7 @@ leaf_validity_days: 1825
 memory_reserve_launcher: 16Mi
 memory_reserve_signer: 64Mi
 memory_budget_percent: 75
+serial_number_format: hex
 `
 		cfgFile := writeTempConfig(content)
 
@@ -588,6 +595,7 @@ memory_budget_percent: 75
 			{"CAPathLength", cfg.CAPathLength, 1},
 			{"CAValidityDays", cfg.CAValidityDays, 3650},
 			{"LeafValidityDays", cfg.LeafValidityDays, 1825},
+			{"SerialNumberFormat", cfg.SerialNumberFormat, "hex"},
 		}
 		for _, c := range checks {
 			Expect(c.got).To(Equal(c.want), "%s = %v; want %v", c.field, c.got, c.want)
@@ -903,6 +911,8 @@ var _ = Describe("applyServerEnv each variable", func() {
 		// var flips it to true. A typo in the key leaves it false and fails.
 		Entry("ALLOW_SUBJECT_ALT_NAMES", "PUPPET_CA_ALLOW_SUBJECT_ALT_NAMES", "true",
 			func(c *serverConfig) bool { return c.AllowSubjectAltNames }, "AllowSubjectAltNames"),
+		Entry("SERIAL_NUMBER_FORMAT", "PUPPET_CA_SERIAL_NUMBER_FORMAT", "hex",
+			func(c *serverConfig) bool { return c.SerialNumberFormat == "hex" }, "SerialNumberFormat"),
 		// Distinct values, because these two are adjacent ints with adjacent
 		// names: swapping the destinations would turn a 12-hour overlap window
 		// into a 12-hour sweep interval on a 90-second delay, and both would
@@ -1226,5 +1236,64 @@ var _ = Describe("crl_chain_file wiring", func() {
 		myCA := ca.New(storage.New(GinkgoT().TempDir()), ca.AutosignConfig{Mode: "off"}, "puppet.test")
 		Expect(applyCAConfig(myCA, cfg)).To(Succeed())
 		Expect(myCA.CRLChainFile).To(Equal("/etc/puppet-ca/upstream-crls.pem"))
+	})
+})
+
+// --- serial_number_format: from configuration to the server ---
+
+var _ = Describe("serial_number_format at startup", func() {
+	var caDir string
+
+	BeforeEach(func() {
+		// Pinned to an empty file so a host config cannot influence the run.
+		setEnv("PUPPET_CA_CONFIG", writeTempConfig(""))
+		clearServerEnv()
+		setEnv("PUPPET_CA_SERIAL_NUMBER_FORMAT", "hexx")
+		caDir = GinkgoT().TempDir()
+	})
+
+	// The empty cadir is the evidence for "before anything starts": the
+	// instance lock, the store and the CA would all leave files in it. Role
+	// dispatch comes after all three, so this also pins the check ahead of
+	// the launcher. --single-process is not a shortcut: without it a
+	// regression starts the launcher, which forks this test binary, whose
+	// copies run this spec again without bound. The --daemon fork is pinned
+	// separately, in instancelock_test.go, where a held store makes that
+	// spec safe to run against a regression.
+	It("refuses an unknown value through the command an operator runs, before anything starts", func() {
+		cmd := newRootCmd()
+		cmd.SetOut(GinkgoWriter)
+		cmd.SetErr(GinkgoWriter)
+		cmd.SetArgs([]string{"--cadir", caDir, "--host", "127.0.0.1", "--port", "0", "--single-process"})
+
+		// Bounded, because a regression here starts a server, which runs
+		// until stopped: a hang would report nothing.
+		done := make(chan error, 1)
+		go func() { done <- cmd.Execute() }()
+
+		var err error
+		Eventually(done, "30s").Should(Receive(&err), "the refusal must come before the server starts")
+		Expect(err).To(MatchError(ContainSubstring(`invalid serial_number_format: unknown serial number format "hexx"`)))
+		Expect(os.ReadDir(caDir)).To(BeEmpty(), "nothing may be initialised before the refusal")
+	})
+})
+
+var _ = Describe("applyResponseFormats", func() {
+	DescribeTable("hands the server the response settings in its config",
+		func(cfg serverConfig, want api.SerialNumberFormat) {
+			srv := &api.Server{}
+			Expect(applyResponseFormats(srv, &cfg)).To(Succeed())
+			Expect(srv.PuppetDateTimeFormat).To(Equal(cfg.PuppetDateTimeFormat))
+			Expect(srv.SerialNumberFormat).To(Equal(want))
+		},
+		Entry("the defaults", serverConfig{}, api.SerialNumberAsNumber),
+		Entry("both opted in", serverConfig{PuppetDateTimeFormat: true, SerialNumberFormat: "hex"}, api.SerialNumberAsHex),
+		Entry("hex, written loosely", serverConfig{SerialNumberFormat: " HEX "}, api.SerialNumberAsHex),
+	)
+
+	It("refuses an unknown serial_number_format rather than defaulting", func() {
+		srv := &api.Server{}
+		Expect(applyResponseFormats(srv, &serverConfig{SerialNumberFormat: "hexx"})).To(
+			MatchError(ContainSubstring("invalid serial_number_format")))
 	})
 })

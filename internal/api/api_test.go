@@ -31,6 +31,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/big"
 	"net/http"
@@ -1460,41 +1461,127 @@ var _ = Describe("API Workflow", func() {
 		})
 	})
 
-	Context("serial_number in status response is a full decimal string", func() {
-		It("should return serial_number as a non-empty decimal string without truncation", func() {
-			subject := "serial-node"
+	// The filesystem store has no certificate index, so certificate_statuses
+	// here walks the stored PEMs; certindex_statuses_test.go drives the
+	// indexed path.
+	Context("serial_number in status responses", func() {
+		submitAndSign := func(subject string) *x509.Certificate {
 			csrPEM, err := testutil.GenerateCSR(subject)
 			Expect(err).NotTo(HaveOccurred())
-
-			// Submit CSR and sign it.
-			mux.ServeHTTP(httptest.NewRecorder(),
-				httptest.NewRequest("PUT", "/certificate_request/"+subject, bytes.NewReader(csrPEM)))
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, httptest.NewRequest("PUT", "/certificate_request/"+subject, bytes.NewReader(csrPEM)))
+			Expect(rr.Code).To(Equal(http.StatusOK))
 			body, _ := json.Marshal(api.PutStatusBody{DesiredState: "signed"})
-			mux.ServeHTTP(httptest.NewRecorder(),
-				httptest.NewRequest("PUT", "/certificate_status/"+subject, bytes.NewReader(body)))
+			rr = httptest.NewRecorder()
+			mux.ServeHTTP(rr, httptest.NewRequest("PUT", "/certificate_status/"+subject, bytes.NewReader(body)))
+			Expect(rr.Code).To(Equal(http.StatusNoContent))
+			return storedCert(context.Background(), myCA.Storage, subject)
+		}
 
-			// Fetch the signed cert and parse its serial for comparison.
-			certRR := httptest.NewRecorder()
-			mux.ServeHTTP(certRR, httptest.NewRequest("GET", "/certificate/"+subject, nil))
-			Expect(certRR.Code).To(Equal(http.StatusOK))
-			block, _ := pem.Decode(certRR.Body.Bytes())
-			Expect(block).NotTo(BeNil())
-			cert, err := x509.ParseCertificate(block.Bytes)
+		// storeWithSerial writes a certificate this CA signed with a chosen
+		// serial straight into the store, so the encoding can be pinned on
+		// serials the random generator produces too rarely to rely on.
+		storeWithSerial := func(subject string, serial *big.Int) {
+			caBlock, _ := pem.Decode(cachedCrtPEM)
+			caCert, err := x509.ParseCertificate(caBlock.Bytes)
 			Expect(err).NotTo(HaveOccurred())
-			expectedSerial := cert.SerialNumber.Text(10)
+			keyBlock, _ := pem.Decode(cachedKeyPEM)
+			caKey, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
+			Expect(err).NotTo(HaveOccurred())
+			leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			Expect(err).NotTo(HaveOccurred())
+			der, err := x509.CreateCertificate(rand.Reader, &x509.Certificate{
+				SerialNumber: serial,
+				Subject:      pkix.Name{CommonName: subject},
+				NotBefore:    time.Now().Add(-time.Hour),
+				NotAfter:     time.Now().Add(time.Hour),
+			}, caCert, &leafKey.PublicKey, caKey)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(myCA.Storage.SaveCert(context.Background(), subject,
+				pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))).To(Succeed())
+		}
 
-			// Fetch status and confirm serial_number matches exactly.
-			statusRR := httptest.NewRecorder()
-			mux.ServeHTTP(statusRR, httptest.NewRequest("GET", "/certificate_status/"+subject, nil))
-			Expect(statusRR.Code).To(Equal(http.StatusOK))
+		submitOnly := func(subject string) {
+			csrPEM, err := testutil.GenerateCSR(subject)
+			Expect(err).NotTo(HaveOccurred())
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, httptest.NewRequest("PUT", "/certificate_request/"+subject, bytes.NewReader(csrPEM)))
+			Expect(rr.Code).To(Equal(http.StatusOK))
+		}
 
+		It("is the full serial as a JSON number by default, as OpenVox Server sends it", func() {
+			cert := submitAndSign("serial-node")
+			Expect(rawStatusSerials(mux, "/certificate_status/serial-node")).To(
+				Equal(map[string]string{"serial-node": cert.SerialNumber.String()}))
+			Expect(rawStatusSerials(mux, "/certificate_statuses/any")).To(
+				HaveKeyWithValue("serial-node", cert.SerialNumber.String()))
+		})
+
+		It("decodes into CertStatusResponse as the certificate's serial", func() {
+			cert := submitAndSign("serial-decode-node")
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, httptest.NewRequest("GET", "/certificate_status/serial-decode-node", nil))
+			Expect(rr.Code).To(Equal(http.StatusOK))
 			var resp api.CertStatusResponse
-			Expect(json.Unmarshal(statusRR.Body.Bytes(), &resp)).To(Succeed())
+			Expect(json.Unmarshal(rr.Body.Bytes(), &resp)).To(Succeed())
 			Expect(resp.SerialNumber).NotTo(BeNil())
-			// Must be a pure decimal string.
-			Expect(*resp.SerialNumber).To(MatchRegexp(`^[0-9]+$`))
-			// Must be the full, un-truncated value.
-			Expect(*resp.SerialNumber).To(Equal(expectedSerial))
+			Expect(resp.SerialNumber.Cmp(cert.SerialNumber)).To(BeZero())
+		})
+
+		DescribeTable("is every digit of the serial, however large",
+			func(serial *big.Int, want string) {
+				storeWithSerial("serial-chosen-node", serial)
+				Expect(rawStatusSerials(mux, "/certificate_status/serial-chosen-node")).To(
+					Equal(map[string]string{"serial-chosen-node": want}))
+			},
+			// Past 2^64, where an int64 truncates, and past 2^53, where a
+			// float64 rounds.
+			Entry("128 bits, top bit set", topBitSerial(), "211659643165621965746051058369188784120"),
+			Entry("small", big.NewInt(10), "10"),
+		)
+
+		DescribeTable("is omitted for a certificate request",
+			func(format api.SerialNumberFormat) {
+				server.SerialNumberFormat = format
+				mux = server.Routes()
+				submitOnly("serial-pending-node")
+
+				for _, path := range []string{"/certificate_status/serial-pending-node", "/certificate_statuses/any"} {
+					rr := httptest.NewRecorder()
+					mux.ServeHTTP(rr, httptest.NewRequest("GET", path, nil))
+					Expect(rr.Code).To(Equal(http.StatusOK), path)
+					Expect(rr.Body.String()).To(ContainSubstring(`"serial-pending-node"`), path)
+					Expect(rr.Body.String()).NotTo(ContainSubstring(`"serial_number"`), path)
+				}
+			},
+			Entry("by default", api.SerialNumberFormat("")),
+			Entry("in hex mode", api.SerialNumberAsHex),
+		)
+
+		Context("when the server opts into colon-separated hex", func() {
+			BeforeEach(func() {
+				server.SerialNumberFormat = api.SerialNumberAsHex
+				mux = server.Routes()
+			})
+
+			It("encodes a signed certificate's serial as a hex string on both routes", func() {
+				cert := submitAndSign("serial-hex-node")
+				want := `"` + wantColonHex(cert.SerialNumber) + `"`
+				Expect(rawStatusSerials(mux, "/certificate_status/serial-hex-node")).To(
+					Equal(map[string]string{"serial-hex-node": want}))
+				Expect(rawStatusSerials(mux, "/certificate_statuses/any")).To(
+					HaveKeyWithValue("serial-hex-node", want))
+			})
+
+			DescribeTable("renders the bytes openssl prints",
+				func(serial *big.Int, want string) {
+					storeWithSerial("serial-chosen-node", serial)
+					Expect(rawStatusSerials(mux, "/certificate_status/serial-chosen-node")).To(
+						Equal(map[string]string{"serial-chosen-node": `"` + want + `"`}))
+				},
+				Entry("top bit set: no DER sign byte", topBitSerial(), "9F:3C:2A:1B:4D:5E:6F:70:81:92:A3:B4:C5:D6:E7:F8"),
+				Entry("small: padded to a whole byte", big.NewInt(10), "0A"),
+			)
 		})
 	})
 
@@ -2166,4 +2253,70 @@ func (b *deleteFaultBackend) Delete(ctx context.Context, key string) error {
 		return b.err
 	}
 	return b.Backend.Delete(ctx, key)
+}
+
+// rawStatusSerials GETs a status route and returns each entry's serial_number
+// exactly as it was encoded, keyed by name, so a spec sees the JSON type and
+// every digit rather than whatever a decoder made of them. An entry without a
+// serial_number is left out. path may name the single-subject route or the
+// list route.
+func rawStatusSerials(h http.Handler, path string) map[string]string {
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", path, nil))
+	Expect(rr.Code).To(Equal(http.StatusOK), path)
+
+	body := bytes.TrimSpace(rr.Body.Bytes())
+	var entries []map[string]json.RawMessage
+	if len(body) > 0 && body[0] == '[' {
+		Expect(json.Unmarshal(body, &entries)).To(Succeed())
+	} else {
+		var one map[string]json.RawMessage
+		Expect(json.Unmarshal(body, &one)).To(Succeed())
+		entries = append(entries, one)
+	}
+
+	out := map[string]string{}
+	for _, e := range entries {
+		var name string
+		Expect(json.Unmarshal(e["name"], &name)).To(Succeed())
+		if raw, ok := e["serial_number"]; ok {
+			out[name] = string(raw)
+		}
+	}
+	return out
+}
+
+// wantColonHex derives the expected hex serial from %X, independently of the
+// byte-wise encoder under test: pad to a whole byte, then a colon after every
+// second digit.
+func wantColonHex(n *big.Int) string {
+	digits := fmt.Sprintf("%X", n)
+	if len(digits)%2 == 1 {
+		digits = "0" + digits
+	}
+	pairs := make([]string, 0, len(digits)/2)
+	for i := 0; i < len(digits); i += 2 {
+		pairs = append(pairs, digits[i:i+2])
+	}
+	return strings.Join(pairs, ":")
+}
+
+// topBitSerial is a 128-bit serial with its top bit set, which DER encodes
+// with a leading 00 sign byte: 0x9F3C2A1B4D5E6F708192A3B4C5D6E7F8.
+func topBitSerial() *big.Int {
+	return new(big.Int).SetBytes([]byte{
+		0x9F, 0x3C, 0x2A, 0x1B, 0x4D, 0x5E, 0x6F, 0x70,
+		0x81, 0x92, 0xA3, 0xB4, 0xC5, 0xD6, 0xE7, 0xF8,
+	})
+}
+
+// storedCert parses the certificate the store holds for subject.
+func storedCert(ctx context.Context, store *storage.StorageService, subject string) *x509.Certificate {
+	certPEM, err := store.GetCert(ctx, subject)
+	Expect(err).NotTo(HaveOccurred())
+	block, _ := pem.Decode(certPEM)
+	Expect(block).NotTo(BeNil())
+	cert, err := x509.ParseCertificate(block.Bytes)
+	Expect(err).NotTo(HaveOccurred())
+	return cert
 }

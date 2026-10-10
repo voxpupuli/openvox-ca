@@ -285,6 +285,28 @@ var _ = Describe("the store instance lock", func() {
 			Expect(out.String()).NotTo(ContainSubstring("started in background"),
 				"reporting a background start for a process that was refused is the failure")
 		})
+
+		It("refuses a bad serial_number_format under --daemon before the fork", func() {
+			// The same silent child, for a configuration typo. The held store
+			// is what makes this safe to run against a regression: were the
+			// check moved past the fork, the pre-flight above would refuse
+			// first, naming the lock rather than the setting, and nothing
+			// would be forked.
+			setEnv("PUPPET_CA_CONFIG", writeTempConfig(""))
+			clearServerEnv()
+			setEnv("PUPPET_CA_SERIAL_NUMBER_FORMAT", "hexx")
+			caDir := GinkgoT().TempDir()
+			bootstrapCAInDir(caDir, "puppet.example.com")
+			holdStore(caDir)
+
+			cmd := newRootCmd()
+			cmd.SetOut(GinkgoWriter)
+			cmd.SetErr(GinkgoWriter)
+			cmd.SetArgs([]string{"--cadir", caDir, "--host", "127.0.0.1", "--port", "0", "--daemon"})
+
+			Expect(cmd.Execute()).To(MatchError(ContainSubstring("invalid serial_number_format")),
+				"the setting must be refused before the daemon pre-flight, let alone the fork")
+		})
 	})
 
 	Describe("the capability hint generate passes on", func() {

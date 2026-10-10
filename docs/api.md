@@ -64,13 +64,15 @@ A revocation takes the per-subject lock that signing and [renewal](#certificate-
   "dns_alt_names": ["agent.example.com"],
   "subject_alt_names": ["agent.example.com"],
   "authorization_extensions": {},
-  "serial_number": 7329847239485029341,
+  "serial_number": 211659643165621965746051058369188784120,
   "not_before": "2025-01-01T00:00:00Z",
   "not_after": "2030-01-01T00:00:00Z"
 }
 ```
 
-> **Note:** `serial_number` is the low 64 bits of the certificate's cryptographically random 128-bit serial, returned as a signed int64 for API compatibility. It is omitted for certificates in the `requested` state.
+> **Note:** `serial_number` is the certificate's full serial, a random 128-bit value, as a bare JSON number. That is how OpenVox Server sends it. It is omitted for certificates in the `requested` state. The number is exact in the response, but a parser that reads every JSON number as a double — JavaScript's `JSON.parse`, or `jq` before 1.7 — rounds a value this large. Where you need the exact serial, use a parser that keeps the digits (`jq` 1.7 or later does), or read it from the certificate itself.
+>
+> With [`serial_number_format: hex`](configuration.md#serial-number-format) the server sends it instead as a string of uppercase hex bytes separated by colons, `"9F:3C:2A:1B:4D:5E:6F:70:81:92:A3:B4:C5:D6:E7:F8"` for the serial above. These are the digits `openssl x509 -noout -serial` prints, with a colon between bytes: padded to whole bytes, with no `00` sign byte when the top bit is set. For a serial longer than 8 bytes, which includes every serial openvox-ca issues, `openssl x509 -noout -text` prints the same bytes in lower case; for a shorter one, such as a certificate imported from a CA with sequential serials, it prints the serial in decimal instead (`10 (0xa)` where this field says `"0A"`). That setting changes the field's JSON type from number to string, so it deliberately departs from OpenVox Server's API, and a client that reads `serial_number` as a number breaks against it. [Revocation by serial](#revocation-by-serial) takes the same digits without the colons.
 
 ### Revocation by serial
 
@@ -342,7 +344,7 @@ Response:
 { "subject": "legacy-node.example.com", "serial": "1A2B3C4D5E6F", "not_before": "2020-01-01T00:00:00Z", "not_after": "2025-01-01T00:00:00Z", "imported": true }
 ```
 
-`serial` is uppercase hex (matching the inventory/CRL/OCSP convention), unlike the decimal `serial_number` field in certificate status responses (which is decimal only to preserve the full 128-bit value without int64 truncation — a constraint that doesn't apply to this string field).
+`serial` is uppercase hex without separators, matching the inventory/CRL/OCSP convention. It is not the `serial_number` field of certificate status responses, which is a JSON number by default, as OpenVox Server sends it.
 
 ## OCSP
 

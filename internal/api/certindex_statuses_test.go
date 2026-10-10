@@ -34,6 +34,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/onsi/gomega/types"
 	"github.com/voxpupuli/openvox-ca/internal/api"
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/storage"
@@ -162,12 +163,52 @@ var _ = Describe("Certificate statuses via the certificate index", func() {
 		Expect(got.AuthorizationExtensions).To(BeEmpty())
 		Expect(got.AuthorizationExtensions).NotTo(BeNil())
 		Expect(got.SerialNumber).NotTo(BeNil())
-		Expect(*got.SerialNumber).To(Equal(cert.SerialNumber.Text(10)))
+		Expect(got.SerialNumber.Cmp(cert.SerialNumber)).To(BeZero())
 		Expect(got.NotBefore).NotTo(BeNil())
 		Expect(*got.NotBefore).To(Equal(cert.NotBefore.UTC().Format(time.RFC3339)))
 		Expect(got.NotAfter).NotTo(BeNil())
 		Expect(*got.NotAfter).To(Equal(cert.NotAfter.UTC().Format(time.RFC3339)))
 	})
+
+	It("encodes an indexed serial as a JSON number by default", func() {
+		submitAndSign("idx-serial", generateCSRWithSANs("idx-serial", []string{"idx-serial"}))
+		cert := storedCert(ctx, store, "idx-serial")
+
+		Expect(rawStatusSerials(mux, "/certificate_statuses/any")).To(
+			HaveKeyWithValue("idx-serial", cert.SerialNumber.String()))
+	})
+
+	// Each of the index path's three ways of building a status carries the
+	// format separately, so each needs its own entry, and each entry checks
+	// that the index now serves the row that sends it down its branch: an
+	// entry whose damage did not take would pass through the first branch.
+	DescribeTable("encodes the serial as colon-separated hex when the server opts in",
+		func(damage func(subject string), served types.GomegaMatcher) {
+			submitAndSign("idx-hex", generateCSRWithSANs("idx-hex", []string{"idx-hex"}))
+			damage("idx-hex")
+			cert := storedCert(ctx, store, "idx-hex")
+
+			recs, indexed, err := store.CertStatuses(ctx, "")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(indexed).To(BeTrue())
+			Expect(recs).To(served, "the index must serve the row this entry is named for")
+
+			srv := api.New(myCA)
+			srv.SerialNumberFormat = api.SerialNumberAsHex
+			Expect(rawStatusSerials(srv.Routes(), "/certificate_statuses/any")).To(
+				HaveKeyWithValue("idx-hex", `"`+wantColonHex(cert.SerialNumber)+`"`))
+		},
+		Entry("from the index row", func(string) {},
+			ConsistOf(HaveField("Fingerprint", Not(BeEmpty())))),
+		Entry("from the stored PEM, for a projection-less row", func(subject string) {
+			Expect(store.AppendInventory(ctx,
+				"0FFF 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /"+subject)).To(Succeed())
+		}, ConsistOf(HaveField("Fingerprint", BeEmpty()))),
+		Entry("from the stored PEM, for a certificate with no row at all", func(string) {
+			_, err := store.PruneInventory(ctx, func(storage.InventoryEntry) bool { return false })
+			Expect(err).NotTo(HaveOccurred())
+		}, BeEmpty()),
+	)
 
 	It("partitions signed, revoked, and requested across the state filters", func() {
 		submitAndSign("idx-signed", generateCSRWithSANs("idx-signed", []string{"idx-signed"}))
@@ -286,7 +327,7 @@ var _ = Describe("Certificate statuses via the certificate index", func() {
 		Expect(got.State).To(Equal("signed"))
 		Expect(got.Fingerprint).To(Equal(ca.SHA256ColonFingerprint(block.Bytes)))
 		Expect(got.SerialNumber).NotTo(BeNil())
-		Expect(*got.SerialNumber).To(Equal(cert.SerialNumber.Text(10)),
+		Expect(got.SerialNumber.Cmp(cert.SerialNumber)).To(BeZero(),
 			"the serial must be the PEM's, not the projection-less row's")
 		Expect(got.DNSAltNames).To(Equal([]string{"idx-legacy"}))
 	})

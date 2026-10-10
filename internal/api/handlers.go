@@ -159,6 +159,10 @@ type Server struct {
 	// Puppet CA style ("2006-01-02T15:04:05MST") instead of RFC 3339. Useful
 	// when integrating with tooling that expects exact Puppet Server output.
 	PuppetDateTimeFormat bool
+	// SerialNumberFormat selects how status responses encode serial_number.
+	// The zero value is OpenVox Server's JSON number; SerialNumberAsHex trades
+	// that compatibility for a colon-separated hex string.
+	SerialNumberFormat SerialNumberFormat
 
 	csrLimiter     *ipRateLimiter
 	destructiveOps *destructiveOpTracker
@@ -237,11 +241,11 @@ type CertStatusResponse struct {
 	// Always present, empty map when none exist.
 	AuthorizationExtensions map[string]string `json:"authorization_extensions"`
 	// Populated when signed or revoked.
-	// SerialNumber is a decimal string to preserve the full 128-bit value
-	// without loss; int64 would silently truncate random CA/B-Forum serials.
-	SerialNumber *string `json:"serial_number,omitempty"`
-	NotBefore    *string `json:"not_before,omitempty"`
-	NotAfter     *string `json:"not_after,omitempty"`
+	// SerialNumber is the full serial, a JSON number as OpenVox Server sends
+	// it unless the server opts into SerialNumberAsHex.
+	SerialNumber *CertSerial `json:"serial_number,omitempty"`
+	NotBefore    *string     `json:"not_before,omitempty"`
+	NotAfter     *string     `json:"not_after,omitempty"`
 }
 
 func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
@@ -260,7 +264,7 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 			state = "revoked"
 		}
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(certStatusFromCert(subject, certPEM, state, s.timeFormat())); err != nil {
+		if err := json.NewEncoder(w).Encode(certStatusFromCert(subject, certPEM, state, s.timeFormat(), s.SerialNumberFormat)); err != nil {
 			slog.Warn("encode response failed", "error", err)
 		}
 		return
@@ -989,7 +993,7 @@ func (s *Server) timeFormat() string {
 }
 
 // certStatusFromCert builds a CertStatusResponse from a signed or revoked certificate.
-func certStatusFromCert(subject string, certPEM []byte, state string, timeFmt string) CertStatusResponse {
+func certStatusFromCert(subject string, certPEM []byte, state string, timeFmt string, serialFmt SerialNumberFormat) CertStatusResponse {
 	cert, err := parseCert(certPEM)
 	if err != nil {
 		slog.Warn("Failed to parse cert for status response", "subject", subject, "error", err)
@@ -1005,7 +1009,6 @@ func certStatusFromCert(subject string, certPEM []byte, state string, timeFmt st
 		}
 	}
 	fp := fingerprint(certPEM)
-	serial := cert.SerialNumber.Text(10) // decimal string; preserves full 128-bit value
 	nb := cert.NotBefore.UTC().Format(timeFmt)
 	na := cert.NotAfter.UTC().Format(timeFmt)
 	dnsNames := noNilSlice(cert.DNSNames)
@@ -1017,7 +1020,7 @@ func certStatusFromCert(subject string, certPEM []byte, state string, timeFmt st
 		DNSAltNames:             dnsNames,
 		SubjectAltNames:         dnsNames,
 		AuthorizationExtensions: authExtensions(cert.Extensions),
-		SerialNumber:            &serial,
+		SerialNumber:            newCertSerial(cert.SerialNumber, serialFmt),
 		NotBefore:               &nb,
 		NotAfter:                &na,
 	}
@@ -1050,7 +1053,7 @@ func certSerialIs(cert *x509.Certificate, serial string) bool {
 // stand alone — its display projection was never populated (legacy inventory
 // import) or a canonical field does not parse — and the caller should fall
 // back to the PEM path for that subject.
-func certStatusFromRecord(rec storage.CertRecord, timeFmt string) (CertStatusResponse, bool) {
+func certStatusFromRecord(rec storage.CertRecord, timeFmt string, serialFmt SerialNumberFormat) (CertStatusResponse, bool) {
 	if rec.Fingerprint == "" {
 		return CertStatusResponse{}, false
 	}
@@ -1067,7 +1070,6 @@ func certStatusFromRecord(rec storage.CertRecord, timeFmt string) (CertStatusRes
 		return CertStatusResponse{}, false
 	}
 
-	serial := serialInt.Text(10) // decimal string; preserves full 128-bit value
 	nbs := nb.UTC().Format(timeFmt)
 	nas := na.UTC().Format(timeFmt)
 	dnsNames := noNilSlice(rec.DNSAltNames)
@@ -1083,7 +1085,7 @@ func certStatusFromRecord(rec storage.CertRecord, timeFmt string) (CertStatusRes
 		DNSAltNames:             dnsNames,
 		SubjectAltNames:         dnsNames,
 		AuthorizationExtensions: authExts,
-		SerialNumber:            &serial,
+		SerialNumber:            newCertSerial(serialInt, serialFmt),
 		NotBefore:               &nbs,
 		NotAfter:                &nas,
 	}, true
@@ -1187,7 +1189,7 @@ func (s *Server) handleGetStatuses(w http.ResponseWriter, r *http.Request) {
 					state = storage.CertStateRevoked
 				}
 			}
-			resp, ok := certStatusFromRecord(rec, s.timeFormat())
+			resp, ok := certStatusFromRecord(rec, s.timeFormat(), s.SerialNumberFormat)
 			if ok {
 				resp.State = state
 			} else {
@@ -1220,7 +1222,7 @@ func (s *Server) handleGetStatuses(w http.ResponseWriter, r *http.Request) {
 						"answering from the stored certificate",
 						"subject", rec.Subject, "index_serial", rec.Serial)
 				}
-				resp = certStatusFromCert(rec.Subject, certPEM, state, s.timeFormat())
+				resp = certStatusFromCert(rec.Subject, certPEM, state, s.timeFormat(), s.SerialNumberFormat)
 			}
 			// The filter runs against the state the response actually carries,
 			// which the fallback above may have re-derived — filtering on the
@@ -1269,7 +1271,7 @@ func (s *Server) handleGetStatuses(w http.ResponseWriter, r *http.Request) {
 			if stateFilter != "" && state != stateFilter {
 				continue
 			}
-			statuses = append(statuses, certStatusFromCert(subject, certPEM, state, s.timeFormat()))
+			statuses = append(statuses, certStatusFromCert(subject, certPEM, state, s.timeFormat(), s.SerialNumberFormat))
 		}
 	} else {
 		certs, err := s.CA.Storage.ListCerts(r.Context())
@@ -1293,7 +1295,7 @@ func (s *Server) handleGetStatuses(w http.ResponseWriter, r *http.Request) {
 			if stateFilter != "" && state != stateFilter {
 				continue
 			}
-			statuses = append(statuses, certStatusFromCert(subject, certPEM, state, s.timeFormat()))
+			statuses = append(statuses, certStatusFromCert(subject, certPEM, state, s.timeFormat(), s.SerialNumberFormat))
 		}
 	}
 
