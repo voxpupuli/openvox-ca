@@ -345,8 +345,10 @@ back up and what to protect. `openvox-ca-ctl` saves its own copy into
 it lands on the file the CA just wrote, with the same contents, instead of
 leaving a second private key somewhere else. That is also why `CADIR` has to
 match the `cadir` the server is actually using — `openvox-ca-ctl` does not
-create the directory, and it writes the key only after the certificate has been
-issued, so a wrong path fails late and needs `clean --certname` before a retry.
+create the directory. It checks that the directory exists before it asks for a
+certificate, so a missing one fails without issuing anything. A directory it
+cannot write to is found only afterwards: the certificate has then been issued,
+and the error says to run `clean --certname` before trying again.
 Left at its default, `--out-dir` writes into the current working directory.
 
 Only the certificate depends on the backend. It is printed on stdout, and with

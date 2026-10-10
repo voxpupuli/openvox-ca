@@ -27,8 +27,10 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -36,6 +38,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -223,6 +226,27 @@ func checkHTTP(code int, body []byte, method, path string) error {
 	return fmt.Errorf("HTTP %d on %s %s: %q", code, method, path, strings.TrimSpace(string(body)))
 }
 
+// certnamePath appends certname to route as a single path segment, refusing a
+// certname the server would refuse anyway. Every request path that carries a
+// certname goes through here, so a new subcommand cannot forget either half.
+//
+// ca.ValidateSubject is the check the server applies, so this refuses exactly
+// what the server would, only before anything is sent: a "/" or ".." would
+// otherwise reach the server's router, which cleans the path and redirects the
+// request to a different route rather than to the server's own validation. It
+// also guards generate's key file name, which is built from the same certname.
+// Today every name it accepts is made of unreserved characters, so the escape
+// is the identity; it is here so that a wider subject syntax still yields one
+// segment rather than a different route. The one name it passes that the
+// router still redirects is ".", which ValidateSubject accepts on the server
+// too; it is left to the server's answer rather than refused here alone.
+func certnamePath(route, certname string) (string, error) {
+	if err := ca.ValidateSubject(certname); err != nil {
+		return "", fmt.Errorf("--certname: %w", err)
+	}
+	return route + url.PathEscape(certname), nil
+}
+
 func printTable(rows [][2]string) {
 	w := 0
 	for _, r := range rows {
@@ -329,6 +353,8 @@ func newSignCmd() *cobra.Command {
 					// Quoting per element rather than the joined string keeps
 					// the separator meaningful -- "a", "b" rather than "a, b",
 					// which would read as a single name containing a comma.
+					// Printing is all that happens to them: none reaches a
+					// request path or a file name, so none needs certnamePath.
 					quoted := make([]string, len(result.Signed))
 					for i, name := range result.Signed {
 						quoted[i] = strconv.Quote(name)
@@ -342,7 +368,10 @@ func newSignCmd() *cobra.Command {
 				return fmt.Errorf("--certname or --all is required")
 			}
 
-			path := "/puppet-ca/v1/certificate_status/" + certname
+			path, err := certnamePath("/puppet-ca/v1/certificate_status/", certname)
+			if err != nil {
+				return err
+			}
 			body, _ := json.Marshal(map[string]string{"desired_state": "signed"})
 			code, respBody, err := c.put(path, body)
 			if err != nil {
@@ -412,7 +441,9 @@ what you meant.`,
 				body, _ = json.Marshal(map[string]any{"desired_state": "revoked", "force": force})
 				subject = "serial " + serial
 			} else {
-				path = "/puppet-ca/v1/certificate_status/" + certname
+				if path, err = certnamePath("/puppet-ca/v1/certificate_status/", certname); err != nil {
+					return err
+				}
 				body, _ = json.Marshal(map[string]string{"desired_state": "revoked"})
 				subject = certname
 			}
@@ -477,7 +508,10 @@ func newCleanCmd() *cobra.Command {
 				return err
 			}
 
-			path := "/puppet-ca/v1/certificate_status/" + certname
+			path, err := certnamePath("/puppet-ca/v1/certificate_status/", certname)
+			if err != nil {
+				return err
+			}
 			code, respBody, err := c.delete(path)
 			if err != nil {
 				return err
@@ -507,7 +541,10 @@ func newGenerateCmd() *cobra.Command {
 				return err
 			}
 
-			path := "/puppet-ca/v1/generate/" + certname
+			path, err := certnamePath("/puppet-ca/v1/generate/", certname)
+			if err != nil {
+				return err
+			}
 			// url.Values rather than substituting "&dns=" for every comma in
 			// the raw flag value. That substitution could not tell a separator
 			// between names from one inside a name, so a single --dns carrying
@@ -522,6 +559,13 @@ func newGenerateCmd() *cobra.Command {
 					q.Add("dns", name)
 				}
 				path += "?" + q.Encode()
+			}
+
+			// certnamePath has validated certname by now, so the key path
+			// cannot leave --out-dir.
+			keyPath := filepath.Join(outDir, certname+"_key.pem")
+			if err := checkKeyPath(outDir, keyPath); err != nil {
+				return err
 			}
 
 			code, body, err := c.post(path, nil)
@@ -540,9 +584,9 @@ func newGenerateCmd() *cobra.Command {
 				return fmt.Errorf("could not parse response: %w", err)
 			}
 
-			keyPath := filepath.Join(outDir, certname+"_key.pem")
-			if err := os.WriteFile(keyPath, []byte(result.PrivateKey), 0600); err != nil {
-				return fmt.Errorf("failed to save private key to %s: %w", keyPath, err)
+			if err := writeKeyFile(keyPath, result.PrivateKey); err != nil {
+				return fmt.Errorf("failed to save private key to %s: %w (the certificate was issued; "+
+					"run clean --certname before generating it again)", keyPath, err)
 			}
 			fmt.Fprintf(os.Stderr, "Private key saved to %s\n", keyPath)
 			// NOT quoted, deliberately, and not an oversight: this is the PEM
@@ -569,6 +613,85 @@ func newGenerateCmd() *cobra.Command {
 	return cmd
 }
 
+// checkKeyPath refuses, before generate asks the server for anything, the key
+// paths it would otherwise discover only once a certificate had been issued: a
+// --out-dir that is not a directory, anything at the key path other than a
+// regular file, and a key path it cannot even look at.
+func checkKeyPath(outDir, keyPath string) error {
+	fi, err := os.Stat(outDir)
+	if err != nil {
+		return fmt.Errorf("--out-dir: %w; nothing was sent to the server", err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("--out-dir %s is not a directory; nothing was sent to the server", outDir)
+	}
+	fi, err = os.Lstat(keyPath)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil
+	case err != nil:
+		return fmt.Errorf("checking private key path: %w; nothing was sent to the server", err)
+	case fi.Mode()&fs.ModeSymlink != 0:
+		return fmt.Errorf("private key path %s is a symbolic link, and generate does not write through one; "+
+			"nothing was sent to the server. Remove the link or choose another --out-dir", keyPath)
+	case !fi.Mode().IsRegular():
+		return fmt.Errorf("private key path %s exists and is not a regular file; "+
+			"nothing was sent to the server. Remove it or choose another --out-dir", keyPath)
+	}
+	return nil
+}
+
+// writeKeyFile writes generate's private key to path at mode 0600.
+//
+// An existing regular file is overwritten, deliberately: the documented
+// serving-certificate procedure points --out-dir at <cadir>/private, where the
+// server has just written its own copy of the same key, and a reissue finds the
+// copy the previous one left there.
+//
+// It writes in place rather than through storage.AtomicWriteFile, for two
+// reasons. A rename would give that file a new owner, and the server reads it
+// back as its tls_key, so a CLI run as root would lock a non-root server out
+// of its own key. And a rename replaces a symlink planted at path, where this
+// refuses one: O_NOFOLLOW closes the gap between checkKeyPath and the open,
+// and O_NONBLOCK turns a FIFO with no reader into an error rather than a hang.
+// A symlinked --out-dir is still followed, since that directory is the
+// operator's own choice.
+//
+// The mode is narrowed before the old contents are discarded: fchmod needs
+// ownership where the open needs only write access, so truncating first could
+// empty a file this then fails to secure.
+func writeKeyFile(path, keyPEM string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|syscall.O_NOFOLLOW|syscall.O_NONBLOCK,
+		storage.FilePermPrivate)
+	if err != nil {
+		return err
+	}
+	fail := func(err error) error {
+		_ = f.Close()
+		return err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		return fail(err)
+	}
+	if !fi.Mode().IsRegular() {
+		return fail(fmt.Errorf("%s is not a regular file", path))
+	}
+	if err := f.Chmod(storage.FilePermPrivate); err != nil {
+		return fail(err)
+	}
+	if err := f.Truncate(0); err != nil {
+		return fail(err)
+	}
+	if _, err := f.WriteString(keyPEM); err != nil {
+		return fail(err)
+	}
+	if err := f.Sync(); err != nil {
+		return fail(err)
+	}
+	return f.Close()
+}
+
 // newImportCertCmd registers openvox-ca-ctl's "import-cert" subcommand,
 // which imports a certificate issued OUTSIDE this CA's normal signing flow
 // (e.g. migrated from a legacy CA sharing this CA's key) into the running
@@ -592,7 +715,10 @@ func newImportCertCmd() *cobra.Command {
 				return err
 			}
 
-			path := "/puppet-ca/v1/certificate/" + certname
+			path, err := certnamePath("/puppet-ca/v1/certificate/", certname)
+			if err != nil {
+				return err
+			}
 			code, body, err := c.put(path, certPEM)
 			if err != nil {
 				return err
