@@ -148,6 +148,13 @@ func (f *lifecycleFake) refuseSignsWith(tok string) {
 	f.refuseSign[tok] = true
 }
 
+// holdRefusedSigns makes refused signs wait until n of them are outstanding.
+func (f *lifecycleFake) holdRefusedSigns(n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.holdRefused = n
+}
+
 // refuseLoginsFromNow makes every later login fail with 403.
 func (f *lifecycleFake) refuseLoginsFromNow() {
 	f.mu.Lock()
@@ -420,7 +427,7 @@ var _ = Describe("OpenBao token lifecycle", func() {
 				tm := start(openbao.AuthAppRole)
 				signer := load(tm)
 				fake.refuseSignsWith(tm.Client().Token())
-				fake.holdRefused = n
+				fake.holdRefusedSigns(n)
 				openbao.ExpireReauthThrottleForTest(tm)
 
 				errs := make([]error, n)
@@ -541,7 +548,7 @@ var _ = Describe("OpenBao token lifecycle", func() {
 		})
 
 		Context("when OpenBao does not answer the revocation", func() {
-			It("gives up within the revoke timeout and still succeeds", func() {
+			It("gives up within about 2 seconds and still succeeds", func() {
 				fake.revoke = revokeHang
 				tm := start(openbao.AuthAppRole)
 
@@ -549,7 +556,11 @@ var _ = Describe("OpenBao token lifecycle", func() {
 				Expect(tm.Close()).To(Succeed())
 
 				Expect(fake.revokedTokens()).To(HaveLen(1), "the revocation should have been attempted")
-				Expect(time.Since(began)).To(BeNumerically("<", openbao.RevokeTimeoutForTest+time.Second))
+				// A literal, not revokeTimeout: the docs promise a revocation
+				// gives up after 2 seconds, well inside the launcher's 5-second
+				// budget for a surviving child, and raising the constant past
+				// that has to fail here.
+				Expect(time.Since(began)).To(BeNumerically("<", 3*time.Second))
 			})
 		})
 

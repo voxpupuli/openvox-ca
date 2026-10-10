@@ -31,7 +31,3 @@ func ExpireReauthThrottleForTest(tm *TokenManager) {
 	defer tm.mu.Unlock()
 	tm.lastLogin = time.Now().Add(-minReauthInterval - time.Second)
 }
-
-// RevokeTimeoutForTest exposes revokeTimeout, so a spec can bound how long
-// Close may take against an OpenBao that never answers.
-const RevokeTimeoutForTest = revokeTimeout
