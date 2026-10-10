@@ -82,10 +82,10 @@ func verifySignature(pub crypto.PublicKey, h crypto.Hash, digest, sig []byte) er
 	}
 }
 
-// Each refusal below is something the key would otherwise have signed. That
-// is what makes them specs of the check rather than of the key: an RSA key
-// signs SHA-1 and crypto.Hash(0) without complaint, and an ECDSA key ignores the
-// hash it is told and signs bytes of any length.
+// The first two refusals below are requests the key would otherwise have
+// signed: an RSA key signs SHA-1 and crypto.Hash(0) without complaint. The
+// third the key would refuse on its own, so that spec asserts the signer's own
+// error rather than any error at all.
 var _ = Describe("Signer request checks", func() {
 	var (
 		rsaKey *rsa.PrivateKey

@@ -131,9 +131,6 @@ func ImportCACertificate(ctx context.Context, store *storage.StorageService, cer
 	if err := AssertSignerMatchesCert(certs[0], signer); err != nil {
 		return false, err
 	}
-	if err := checkCAKeyType(certs[0].PublicKey); err != nil {
-		return false, err
-	}
 
 	lockCtx, cancel := context.WithTimeout(ctx, LockTimeout)
 	defer cancel()

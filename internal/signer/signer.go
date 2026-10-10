@@ -88,14 +88,14 @@ var ErrSignRequestRefused = errors.New("signing request refused")
 // x/crypto/ocsp (OCSP responses) choose by key: SHA-256 for every RSA key, and
 // SHA-256, SHA-384 and SHA-512 for ECDSA P-256, P-384 and P-521. Nothing signs
 // with RSA-PSS, and SHA-1 appears only in key identifiers, which are hashed and
-// never signed. internal/ca refuses any other CA key type at load, which is
-// what keeps this list complete; the OpenBao signer allows the same three
-// (transitHashAlgorithm).
+// never signed. internal/ca refuses any other CA key type at load and import,
+// which is what keeps this list complete; the OpenBao signer allows the same
+// three (transitHashAlgorithm).
 //
-// A digest of the wrong length is refused too. An RSA key would refuse it
-// anyway, but an ECDSA key ignores the hash function it is told and signs bytes
-// of any length, so without this check the hash would be a label rather than a
-// constraint.
+// A digest of the wrong length is refused too. The RSA and ECDSA signers in
+// crypto check that themselves today, but this is the trust boundary, so it
+// does not rest on what whichever key is behind it happens to enforce. The hash
+// is checked first because Hash.Size panics on a hash that is not linked in.
 func checkSignRequest(req *SignRequest) error {
 	switch req.HashFunc {
 	case crypto.SHA256, crypto.SHA384, crypto.SHA512:
