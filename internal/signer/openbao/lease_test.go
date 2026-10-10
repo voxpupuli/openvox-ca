@@ -35,6 +35,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -498,6 +499,10 @@ var _ = Describe("OpenBao token lifecycle", func() {
 					Expect(err).To(MatchError(openbao.ErrReauthThrottled))
 					Expect(fake.loginCount()).To(Equal(2), "the re-login attempt, successful or not, starts a new interval")
 					Expect(fake.signCount()).To(Equal(wantSigns))
+					// While the credential is bad, the throttle has to say
+					// why the last login failed, or every issuance error would
+					// read as a policy problem.
+					Expect(strings.Contains(err.Error(), "invalid credentials")).To(Equal(refuseRelogin))
 				},
 				// A successful re-login retries the sign once; a failed one does
 				// not, so the second Sign is the third or the second request.

@@ -104,6 +104,11 @@ type TokenManager struct {
 	// not; Reauth refuses to start another within minReauthInterval of it.
 	// Guarded by mu.
 	lastLogin time.Time
+	// lastLoginErr is how that attempt failed, or nil if it succeeded. A
+	// throttled Reauth reports it, because while the source credential is
+	// bad every request is throttled by the background loop's own retries,
+	// and the throttle alone would hide why. Guarded by mu.
+	lastLoginErr error
 	// closed is set by Close, under mu, before it revokes the token.
 	closed bool
 
@@ -362,6 +367,7 @@ func (tm *TokenManager) reauthLocked(ctx context.Context) error {
 
 	tm.lastLogin = time.Now()
 	secret, err := tm.login(loginCtx)
+	tm.lastLoginErr = err
 	if err != nil {
 		return err
 	}
@@ -407,6 +413,10 @@ func (tm *TokenManager) Reauth(ctx context.Context, rejected string) error {
 		return nil
 	}
 	if since := time.Since(tm.lastLogin); since < minReauthInterval {
+		if tm.lastLoginErr != nil {
+			return fmt.Errorf("%w: the previous login attempt, %s ago, failed, and the minimum interval is %s: %w",
+				ErrReauthThrottled, since.Round(time.Second), minReauthInterval, tm.lastLoginErr)
+		}
 		return fmt.Errorf("%w: the previous login attempt was %s ago, and the minimum interval is %s",
 			ErrReauthThrottled, since.Round(time.Second), minReauthInterval)
 	}
