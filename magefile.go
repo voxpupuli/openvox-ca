@@ -429,16 +429,22 @@ func sbomExtensionsIn(src []byte) []string {
 
 // signingReviewLabel is the label Renovate applies to a bump of the release
 // signing surface -- cosign, Syft, actions/attest and the actions that install
-// them (see renovate.json). ci.yml's auto-merge job must refuse to merge a PR
-// carrying it.
+// them (see renovate.json). ci.yml's auto-merge job must not arm auto-merge on
+// a PR carrying it.
 //
 // The exposure is created by this feature, not inherited: before signing
 // existed there was no cosign in any workflow for a bump to touch. But ci.yml
-// auto-merges any green Renovate PR on author alone, and ci.yml does not run
-// cosign at all -- signing happens in container-images.yml's merge job and in
-// helm-chart.yml, and helm-chart.yml has no pull_request trigger. So a bump
-// that changed signing behaviour would go green on a PR and first misbehave on
-// a tag, which is the worst place to find out.
+// arms auto-merge on any green Renovate PR on author alone, and ci.yml does
+// not run cosign at all -- signing happens in container-images.yml's merge job
+// and in helm-chart.yml, and helm-chart.yml has no pull_request trigger. So a
+// bump that changed signing behaviour would go green on a PR and first
+// misbehave on a tag, which is the worst place to find out.
+//
+// What the label buys is a second deliberate step, not the review itself. The
+// default branch's ruleset requires an approving review for every merge, but
+// once auto-merge is armed that approval is the merge: it lands the moment it
+// is given. Without auto-merge, approving a signing bump leaves it open until
+// someone merges it on purpose.
 const signingReviewLabel = "review-signing-path"
 
 // automergeRequiredClauses are the expressions an auto-merging job's condition
@@ -450,7 +456,8 @@ const signingReviewLabel = "review-signing-path"
 // "!contains(" is satisfied by a condition that inverts the meaning: flip this
 // clause to `contains(...)` while any unrelated `!contains(...)` sits
 // elsewhere in the expression -- a WIP-label check, say -- and every fragment
-// is still present while the job merges signing bumps and nothing else.
+// is still present while the job arms auto-merge on signing bumps and nothing
+// else.
 // Verified: that mutation passed the earlier fragment-based version of this
 // guard. A single keystroke and a plausible neighbouring clause is not a
 // remote failure mode.
@@ -488,10 +495,12 @@ func stripSpace(s string) string {
 	return strings.Join(strings.Fields(s), "")
 }
 
-// verifyAutomergeLabelExclusion asserts that every job in ci.yml which merges
-// pull requests refuses ones labelled signingReviewLabel. Without it the label
+// verifyAutomergeLabelExclusion asserts that every job in ci.yml which runs
+// `gh pr merge` excludes pull requests labelled signingReviewLabel from its
+// condition, so it does not arm auto-merge on them. Without it the label
 // is decoration: renovate.json can apply it, but nothing reads it, and
-// Renovate's own automerge setting does not govern this merge -- ci.yml does.
+// Renovate's own automerge setting does not govern whether auto-merge is
+// armed -- ci.yml does.
 func verifyAutomergeLabelExclusion() error {
 	src, err := os.ReadFile(filepath.Join(".github", "workflows", "ci.yml"))
 	if err != nil {
@@ -536,8 +545,8 @@ func verifyAutomergeLabelExclusionIn(name string, src []byte) error {
 			}
 		}
 		if len(missing) > 0 {
-			return fmt.Errorf("%s job %q merges pull requests but its 'if:' never consults %q; "+
-				"a Renovate bump to the release signing surface would merge unattended, and no PR check runs cosign",
+			return fmt.Errorf("%s job %q runs `gh pr merge` but its 'if:' never consults %q; "+
+				"approving a Renovate bump to the release signing surface would merge it on the spot, and no PR check runs cosign",
 				name, job, missing)
 		}
 	}
@@ -552,7 +561,8 @@ func verifyAutomergeLabelExclusionIn(name string, src []byte) error {
 	// still green. The loud failure is a one-line fix made deliberately at the
 	// moment auto-merge is removed -- which is also the moment renovate.json's
 	// label becomes dead config and wants removing anyway. The quiet one is a
-	// signing bump merging unattended months later.
+	// signing bump merged by its approval months later, with nobody having
+	// chosen to merge it.
 	if merging == 0 {
 		return fmt.Errorf("%s: no job runs `gh pr merge`, so the auto-merge label exclusion is unverified; "+
 			"if auto-merge was removed, drop this guard and %q from renovate.json; if it moved or now merges "+
@@ -890,10 +900,12 @@ func nolintlintCarveOut(golangciSrc []byte) (bool, error) {
 //
 // The carve-out is temporary and its removal condition is a golangci-lint
 // release carrying a fixed gosec. Nothing else would notice that moment: the
-// pin is owned by a renovate custom manager, and the auto-merge job merges
-// renovate pull requests that are not labelled review-signing-path, which
-// golangci-lint is not. So the exact event that makes the carve-out removable
-// is a merge nobody reads. This guard is what turns that into a red check.
+// pin is owned by a renovate custom manager, and the auto-merge job arms
+// auto-merge on renovate pull requests that are not labelled
+// review-signing-path, which golangci-lint is not. So the exact event that
+// makes the carve-out removable is a routine approval of a green bot PR, with
+// nothing on it to say the carve-out has outlived its reason. This guard is
+// what turns that into a red check.
 func verifyNolintlintCarveOut() error {
 	golangciSrc, err := os.ReadFile(".golangci.yml")
 	if err != nil {

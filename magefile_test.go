@@ -763,7 +763,7 @@ jobs:
 		})
 
 		// Dropping the '!' does not weaken the exclusion, it reverses it: the
-		// job would then merge signing bumps unattended and nothing else. A
+		// job would then arm auto-merge on signing bumps and nothing else. A
 		// guard that passes the exact inversion of what it checks for is not
 		// worth having, which is why the negation is a required clause and
 		// not left to "consults, not constrains".

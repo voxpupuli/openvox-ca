@@ -562,22 +562,33 @@ jobs:
   # -- Auto-merge bot PRs -------------------------------------------------------
   # Holds contents: write / pull-requests: write and runs `gh pr merge`, so it
   # is pinned to a default-branch base. The repository's "Main" ruleset -- the
-  # required reviews, status checks and code scanning that make an unattended
-  # merge safe -- applies to ~DEFAULT_BRANCH only, so enabling auto-merge on a
-  # PR targeting any other branch would merge it under no ruleset at all. The
-  # workflow's pull_request trigger is deliberately unfiltered by base (see the
-  # top of this file), which is what makes the condition load-bearing rather
-  # than a restatement of the trigger.
+  # required reviews, status checks and code scanning that gate every merge,
+  # auto-merged or not -- applies to ~DEFAULT_BRANCH only, so enabling
+  # auto-merge on a PR targeting any other branch would merge it under no
+  # ruleset at all. The workflow's pull_request trigger is deliberately
+  # unfiltered by base (see the top of this file), which is what makes the
+  # condition load-bearing rather than a restatement of the trigger.
   automerge:
     name: Enable auto-merge
     # The label exclusion is not decoration: renovate.json applies
     # 'review-signing-path' to bumps of the release signing surface (cosign,
     # Syft, actions/attest), and nothing in this workflow runs cosign — signing
     # happens in container-images.yml's merge job and in helm-chart.yml, which
-    # has no pull_request trigger at all. Without this clause a bump that
-    # changed signing behaviour would go green here, merge unattended, and
-    # first misbehave on a tag. `mage dev:check` enforces the clause
-    # (verifyAutomergeLabelExclusion), so it cannot be tidied away.
+    # has no pull_request trigger at all, so a bump that changed signing
+    # behaviour would go green here and first misbehave on a tag. The
+    # ruleset's required review gates every merge either way; what this
+    # clause changes is what that review does. Once this job has armed
+    # auto-merge, approving the PR merges it on the spot. On a labelled PR it
+    # is not armed, so a signing bump needs a separate, deliberate merge after
+    # its approval. That rests on timing this file does not control: the
+    # clause reads the labels in the payload of the event that started the
+    # run, there is no `labeled` trigger to re-check them, and nothing disarms
+    # auto-merge once armed. So it holds only while the `opened` payload
+    # already carries Renovate's label. It has on every signing bump so far,
+    # even though Renovate adds the label in a separate call about a second
+    # after creating the PR; that second is the whole margin.
+    # `mage dev:check` enforces the clause (verifyAutomergeLabelExclusion),
+    # so it cannot be tidied away.
     if: >-
       github.event_name == 'pull_request'
       && github.event.pull_request.base.ref == github.event.repository.default_branch
