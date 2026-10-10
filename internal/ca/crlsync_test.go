@@ -19,6 +19,7 @@ package ca_test
 
 import (
 	"context"
+	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -307,29 +308,45 @@ var _ = Describe("SyncCRLCache", func() {
 		// Which is a staleness of its own, but not this one — the concern here
 		// is a signed Good response outliving the CRL that contradicts it.
 		replica := attachReplica(tmpDir)
-		reqDER, err := testutil.BuildOCSPRequest(cert, replica.CACert)
-		Expect(err).NotTo(HaveOccurred())
 
-		// Prime the replica's OCSP cache with a signed Good response. Its
-		// NextUpdate is hours out, so without invalidation it would outlive the
-		// CRL reload.
-		respDER, err := replica.OCSPResponse(ctx, reqDER)
-		Expect(err).NotTo(HaveOccurred())
-		resp, err := xocsp.ParseResponse(respDER, replica.CACert)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(resp.Status).To(Equal(xocsp.Good))
+		// The cache holds one answer per request hash, and this is the one
+		// path that installs a CRL without Revoke's own eviction alongside it,
+		// so every hash is primed here: a Good left under any one of them would
+		// be served for OCSPValidity.
+		hashes := []crypto.Hash{crypto.SHA1, crypto.SHA256, crypto.SHA384, crypto.SHA512}
+		requests := make(map[crypto.Hash][]byte, len(hashes))
+		for _, hash := range hashes {
+			reqDER, err := xocsp.CreateRequest(cert, replica.CACert, &xocsp.RequestOptions{Hash: hash})
+			Expect(err).NotTo(HaveOccurred())
+			requests[hash] = reqDER
+
+			// Prime the replica's OCSP cache with a signed Good response. Its
+			// NextUpdate is hours out, so without invalidation it would outlive
+			// the CRL reload. The second answer's shorter MaxAge proves it was
+			// served from the cache rather than signed again.
+			first, err := replica.AnswerOCSP(ctx, reqDER)
+			Expect(err).NotTo(HaveOccurred())
+			resp, err := xocsp.ParseResponse(first.DER, replica.CACert)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Status).To(Equal(xocsp.Good))
+			second, err := replica.AnswerOCSP(ctx, reqDER)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(second.MaxAge).To(BeNumerically("<", first.MaxAge), "%v's Good must be cached", hash)
+		}
 
 		Expect(signer.Revoke(ctx, "crlsync-ocsp-node")).To(Succeed())
 		updated, err := replica.SyncCRLCache(ctx)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(updated).To(BeTrue())
 
-		respDER, err = replica.OCSPResponse(ctx, reqDER)
-		Expect(err).NotTo(HaveOccurred())
-		resp, err = xocsp.ParseResponse(respDER, replica.CACert)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(resp.Status).To(Equal(xocsp.Revoked),
-			"the pre-signed Good response must be dropped when the CRL that contradicts it is installed")
+		for _, hash := range hashes {
+			respDER, err := replica.OCSPResponse(ctx, requests[hash])
+			Expect(err).NotTo(HaveOccurred())
+			resp, err := xocsp.ParseResponse(respDER, replica.CACert)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Status).To(Equal(xocsp.Revoked),
+				"the pre-signed %v Good response must be dropped when the CRL that contradicts it is installed", hash)
+		}
 	})
 
 	It("refuses to renew a certificate revoked on another replica", func() {

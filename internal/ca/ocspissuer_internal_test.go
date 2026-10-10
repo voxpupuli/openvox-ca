@@ -58,6 +58,17 @@ var _ = Describe("OCSP issuer check internals", func() {
 		Expect(errors.Is(err, ErrInternal)).To(BeFalse())
 	})
 
+	// Constant-true today, because ocspCacheHashes matches what x/crypto parses.
+	// It exists for the day x/crypto accepts another hash: an answer cached
+	// under a hash evictOCSPLocked does not walk would outlive a revocation.
+	It("caches only hashes eviction walks", func() {
+		for _, h := range ocspCacheHashes {
+			Expect(ocspCacheableHash(h)).To(BeTrue(), "%v", h)
+		}
+		Expect(ocspCacheableHash(crypto.SHA3_256)).To(BeFalse())
+		Expect(ocspCacheableHash(crypto.MD5)).To(BeFalse())
+	})
+
 	// The check hashes with whatever algorithm the caller chose, under c.mu.
 	// A panic there must not leave the lock held. A CA with no certificate
 	// makes the check panic without touching any process-global state.

@@ -332,27 +332,27 @@ func (c *CA) AnswerOCSP(ctx context.Context, reqDER []byte) (OCSPAnswer, error) 
 		known       bool
 		crlSnapshot *x509.RevocationList
 	)
-	hit, err := func() (*OCSPAnswer, error) {
+	hit, isHit, err := func() (OCSPAnswer, bool, error) {
 		c.mu.RLock()
 		defer c.mu.RUnlock()
 		caCert, caKey = c.CACert, c.CAKey
 		if err := checkOCSPIssuer(req, caCert); err != nil {
-			return nil, err
+			return OCSPAnswer{}, false, err
 		}
 		if !hasNonce {
 			if entry, ok := c.ocspCache[cacheKey]; ok && time.Now().Before(entry.expiresAt) {
-				return &OCSPAnswer{DER: bytes.Clone(entry.der), MaxAge: time.Until(entry.expiresAt)}, nil
+				return OCSPAnswer{DER: bytes.Clone(entry.der), MaxAge: time.Until(entry.expiresAt)}, true, nil
 			}
 		}
 		_, known = c.serialIndex[serialHex]
 		crlSnapshot = c.cachedCRL
-		return nil, nil
+		return OCSPAnswer{}, false, nil
 	}()
 	if err != nil {
 		return OCSPAnswer{}, fmt.Errorf("OCSP request for serial %s (%v): %w", serialHex, req.HashAlgorithm, err)
 	}
-	if hit != nil {
-		return *hit, nil
+	if isHit {
+		return hit, nil
 	}
 
 	// From here until the cache write, no CA lock is held. That is the whole of
