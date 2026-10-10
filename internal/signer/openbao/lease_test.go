@@ -367,6 +367,16 @@ var _ = Describe("OpenBao token lifecycle", func() {
 		return signer
 	}
 
+	// captureLogs sends the default logger to a buffer for the rest of the
+	// spec, at Debug so nothing a spec looks for is filtered out.
+	captureLogs := func() *gbytes.Buffer {
+		logs := gbytes.NewBuffer()
+		previous := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		DeferCleanup(slog.SetDefault, previous)
+		return logs
+	}
+
 	verifies := func(signer crypto.Signer, sig []byte) bool {
 		return ecdsa.VerifyASN1(signer.Public().(*ecdsa.PublicKey), digest, sig)
 	}
@@ -461,6 +471,7 @@ var _ = Describe("OpenBao token lifecycle", func() {
 
 		Context("after a request-path re-login", func() {
 			It("starts renewing the new token without the background loop logging in again", func() {
+				logs := captureLogs()
 				tm := start(openbao.AuthAppRole)
 				signer := load(tm)
 				first := tm.Client().Token()
@@ -476,6 +487,12 @@ var _ = Describe("OpenBao token lifecycle", func() {
 				// token being renewed is the sign that its watcher is running.
 				Eventually(fake.renewedTokens).WithTimeout(5 * time.Second).Should(ContainElement(second))
 				Expect(fake.loginCount()).To(Equal(2))
+
+				// The log has to say why the CA logged in, so it can be matched
+				// against OpenBao's audit log, and must not claim a renewal
+				// ended when the request path replaced the token.
+				Expect(string(logs.Contents())).To(ContainSubstring(`msg="OpenBao refused a request with 403, re-authenticating"`))
+				Expect(string(logs.Contents())).NotTo(ContainSubstring("renewal window closed"))
 			})
 		})
 	})
@@ -509,16 +526,8 @@ var _ = Describe("OpenBao token lifecycle", func() {
 		})
 
 		Context("when OpenBao refuses the revocation", func() {
-			var logs *gbytes.Buffer
-
-			BeforeEach(func() {
-				logs = gbytes.NewBuffer()
-				previous := slog.Default()
-				slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
-				DeferCleanup(slog.SetDefault, previous)
-			})
-
 			It("still succeeds, and warns without logging the token", func() {
+				logs := captureLogs()
 				fake.revoke = revokeRefuse
 				tm := start(openbao.AuthAppRole)
 				minted := tm.Client().Token()

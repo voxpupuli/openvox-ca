@@ -69,10 +69,10 @@ var errTokenManagerClosed = errors.New("OpenBao token manager is closed")
 // construction, then runs a background goroutine that proactively renews the
 // token via the SDK's LifetimeWatcher and, when renewal ends (expiry,
 // revocation, hitting max_ttl, or a persistent error), immediately
-// re-authenticates from source credentials rather than giving up. Sign/Public
-// callers can also force an immediate re-authentication via Reauth when a
-// request fails with 403, so a token revoked out-of-band is recovered from
-// without waiting for the watcher to notice.
+// re-authenticates from source credentials rather than giving up. Sign can
+// also ask for a re-authentication ahead of schedule via Reauth when a request
+// fails with 403 (rate-limited; see Reauth), so a token revoked out-of-band is
+// recovered from without waiting for the watcher to notice.
 //
 // This is the piece that specifically avoids the failure mode of reading an
 // OpenBao token once at startup and never refreshing or re-deriving it.
@@ -258,7 +258,8 @@ func (tm *TokenManager) run() {
 
 		go watcher.Start()
 
-		if !tm.watchOne(watcher) {
+		ended, doneErr := tm.watchOne(watcher)
+		if !ended {
 			return
 		}
 
@@ -271,8 +272,14 @@ func (tm *TokenManager) run() {
 		swapped := tm.watcher != watcher
 		tm.mu.Unlock()
 		if swapped {
+			slog.Debug("OpenBao token replaced by a request-path re-login, renewing the new one")
 			lastWatch = time.Time{}
 			continue
+		}
+		if doneErr != nil {
+			slog.Warn("OpenBao token renewal ended, re-authenticating", "error", doneErr)
+		} else {
+			slog.Info("OpenBao token renewal window closed, re-authenticating")
 		}
 
 		attempts := 0
@@ -319,24 +326,20 @@ func sleepOrDone(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// watchOne selects on watcher's channels until either DoneCh fires (returns
-// true: caller should re-authenticate and start a new watcher) or tm.ctx is
-// cancelled (returns false: caller should exit).
-func (tm *TokenManager) watchOne(watcher *api.LifetimeWatcher) bool {
+// watchOne selects on watcher's channels until either DoneCh fires (ended is
+// true, and doneErr is whatever the watcher ended with) or tm.ctx is cancelled
+// (ended is false: the caller should exit). It leaves logging the end to run,
+// which alone knows whether a request-path Reauth caused it.
+func (tm *TokenManager) watchOne(watcher *api.LifetimeWatcher) (ended bool, doneErr error) {
 	for {
 		select {
 		case <-tm.ctx.Done():
 			watcher.Stop()
-			return false
+			return false, nil
 		case renewal := <-watcher.RenewCh():
 			slog.Debug("OpenBao token renewed", "lease_duration", renewal.Secret.LeaseDuration)
 		case err := <-watcher.DoneCh():
-			if err != nil {
-				slog.Warn("OpenBao token renewal ended, re-authenticating", "error", err)
-			} else {
-				slog.Info("OpenBao token renewal window closed, re-authenticating")
-			}
-			return true
+			return true, err
 		}
 	}
 }
@@ -406,6 +409,7 @@ func (tm *TokenManager) Reauth(ctx context.Context, rejected string) error {
 		return fmt.Errorf("%w: the previous login attempt was %s ago, and the minimum interval is %s",
 			ErrReauthThrottled, since.Round(time.Second), minReauthInterval)
 	}
+	slog.Info("OpenBao refused a request with 403, re-authenticating")
 	return tm.reauthLocked(ctx)
 }
 
