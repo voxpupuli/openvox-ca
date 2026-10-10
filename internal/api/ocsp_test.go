@@ -224,6 +224,26 @@ var _ = Describe("OCSP HTTP Handler", func() {
 		Expect(resp.Status).To(Equal(xocsp.Unknown))
 	})
 
+	// --- Another issuer ---
+
+	It("answers another issuer's request with 403 unauthorized", func() {
+		cert := signCert(myCA, "foreign-issuer-ocsp-node")
+		_, foreignCrtPEM, _, err := testutil.GenerateTestCAECDSA()
+		Expect(err).NotTo(HaveOccurred())
+		block, _ := pem.Decode(foreignCrtPEM)
+		foreign, err := x509.ParseCertificate(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+
+		reqDER := ocspReqDER(cert, foreign)
+		req := httptest.NewRequest(http.MethodPost, "/ocsp", bytes.NewReader(reqDER))
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, req)
+
+		Expect(rr.Code).To(Equal(http.StatusForbidden))
+		Expect(rr.Header().Get("Content-Type")).To(Equal("application/ocsp-response"))
+		Expect(rr.Body.Bytes()).To(Equal(xocsp.UnauthorizedErrorResponse))
+	})
+
 	// --- Bad request ---
 
 	It("returns 400 for an unparseable POST body", func() {

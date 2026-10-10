@@ -43,6 +43,15 @@ import (
 // the one an external signer makes reachable under load.
 var ErrInternal = errors.New("internal CA error")
 
+// ErrNotAuthoritative marks an OCSP request whose CertID names an issuer other
+// than this CA: its IssuerNameHash or IssuerKeyHash does not match CACert. The
+// HTTP handler answers it with RFC 6960 `unauthorized`, which is how §2.3 has a
+// responder decline to speak for a certificate it is not authoritative for.
+//
+// It is not ErrInternal and not a malformed request. The request was well
+// formed and nothing failed here; it was simply addressed to someone else.
+var ErrNotAuthoritative = errors.New("OCSP request names an issuer this CA is not authoritative for")
+
 // OCSPValidity is the NextUpdate window written into a definite OCSP response —
 // a good or a revoked. Those are pre-signed and cached for this duration, and a
 // GET carries a matching Cache-Control: max-age for downstream HTTP caches.
@@ -267,7 +276,18 @@ func (c *CA) AnswerOCSP(ctx context.Context, reqDER []byte) (OCSPAnswer, error) 
 	// Cache returns must be defensive copies: the cached slice is shared
 	// across concurrent readers, and the HTTP layer should never observe
 	// a buffer that another goroutine could mutate.
+	//
+	// The issuer check comes first, inside the same lock, because the cache is
+	// keyed by serial alone. Checked after the lookup, a request naming another
+	// issuer would still be handed the pre-signed answer for whatever this CA
+	// holds under that serial. Two short hashes do not make the read lock worth
+	// splitting.
 	c.mu.RLock()
+	caCert, caKey := c.CACert, c.CAKey
+	if err := checkOCSPIssuer(req, caCert); err != nil {
+		c.mu.RUnlock()
+		return OCSPAnswer{}, err
+	}
 	if !hasNonce {
 		if entry, ok := c.ocspCache[serialHex]; ok && time.Now().Before(entry.expiresAt) {
 			c.mu.RUnlock()
@@ -276,7 +296,6 @@ func (c *CA) AnswerOCSP(ctx context.Context, reqDER []byte) (OCSPAnswer, error) 
 	}
 	_, known := c.serialIndex[serialHex]
 	crlSnapshot := c.cachedCRL
-	caCert, caKey := c.CACert, c.CAKey
 	c.mu.RUnlock()
 
 	// From here until the cache write, no CA lock is held. That is the whole of
@@ -594,6 +613,54 @@ func decideOCSPStatus(crl *x509.RevocationList, serial *big.Int, known bool) (in
 		}
 	}
 	return ocsp.Good, time.Time{}, nil
+}
+
+// checkOCSPIssuer reports whether req's CertID names issuer, by recomputing
+// both hashes the way the client did (RFC 6960 §4.1.1) and comparing them. It
+// returns ErrNotAuthoritative on a mismatch.
+//
+// The hash is the request's own. SHA-1 is what most clients send, but nothing
+// obliges them to, and a responder that assumed it would refuse every SHA-256
+// request as a stranger's. The key hash is over the *value* of the issuer's
+// subjectPublicKey BIT STRING, not the whole SubjectPublicKeyInfo; hashing the
+// latter is the easy mistake, and it would refuse every legitimate request.
+//
+// A hash this binary cannot compute is reported as a plain error, which the
+// handler answers with `malformedRequest`: the request is in a form this
+// responder cannot evaluate, which is not the same claim as "not mine". In
+// practice ocsp.ParseRequest has already refused it — it accepts only SHA-1
+// and the SHA-2 family, and x/crypto/ocsp links all four in itself — so the
+// Available check is there to keep a future addition to that table from
+// becoming a panic on an unauthenticated endpoint.
+//
+// Only the one certificate is checked because it is the only one this CA issues
+// under. An imported chain's ancestors are other CAs, whose certificates this
+// responder has no business vouching for, and a renewed CA certificate with the
+// same subject and key produces the same two hashes anyway.
+func checkOCSPIssuer(req *ocsp.Request, issuer *x509.Certificate) error {
+	if !req.HashAlgorithm.Available() {
+		return fmt.Errorf("OCSP request hash algorithm %v is not available", req.HashAlgorithm)
+	}
+
+	var spki struct {
+		Algorithm pkix.AlgorithmIdentifier
+		PublicKey asn1.BitString
+	}
+	if _, err := asn1.Unmarshal(issuer.RawSubjectPublicKeyInfo, &spki); err != nil {
+		return fmt.Errorf("%w: parsing the CA public key: %w", ErrInternal, err)
+	}
+
+	h := req.HashAlgorithm.New()
+	h.Write(issuer.RawSubject)
+	if !bytes.Equal(h.Sum(nil), req.IssuerNameHash) {
+		return ErrNotAuthoritative
+	}
+	h.Reset()
+	h.Write(spki.PublicKey.RightAlign())
+	if !bytes.Equal(h.Sum(nil), req.IssuerKeyHash) {
+		return ErrNotAuthoritative
+	}
+	return nil
 }
 
 // buildAIAExtension constructs the DER-encoded value of an Authority Information
