@@ -90,9 +90,15 @@ type lifecycleFake struct {
 	revoke  revokeMode
 	unblock chan struct{} // closed to free a revokeHang handler
 
-	// shortLived makes logins issue a non-renewable token with a 1-second
-	// lease, whose watcher ends on its own almost at once.
-	shortLived bool
+	// shortLived makes logins issue a token with a 1-second lease, renewable
+	// or not as shortRenewable says. A non-renewable one's watcher ends on its
+	// own almost at once.
+	shortLived     bool
+	shortRenewable bool
+
+	// slowRenewalRefusals makes renew-self wait longer than a short lease
+	// before refusing, so the watcher gives up with an error.
+	slowRenewalRefusals bool
 
 	// refuseLogins makes every login fail; holdLogins makes each one wait
 	// until releaseLogins is called. These, like every switch on the fake,
@@ -169,10 +175,18 @@ func (f *lifecycleFake) answerRevocations(mode revokeMode) {
 }
 
 // issueShortLivedTokens makes every later login issue a short-lived token.
-func (f *lifecycleFake) issueShortLivedTokens() {
+func (f *lifecycleFake) issueShortLivedTokens(renewable bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.shortLived = true
+	f.shortLived, f.shortRenewable = true, renewable
+}
+
+// refuseRenewalsSlowly makes every later renew-self outlast a short lease and
+// then fail with 403.
+func (f *lifecycleFake) refuseRenewalsSlowly() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.slowRenewalRefusals = true
 }
 
 // holdRefusedSigns makes refused signs wait until n of them are outstanding.
@@ -221,7 +235,7 @@ func (f *lifecycleFake) login(w http.ResponseWriter) {
 	f.valid[tok] = true
 	lease, renewable := 3600, true
 	if f.shortLived {
-		lease, renewable = 1, false
+		lease, renewable = 1, f.shortRenewable
 	}
 	f.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -267,8 +281,16 @@ func (f *lifecycleFake) server() *httptest.Server {
 		tok := r.Header.Get("X-Vault-Token")
 		f.mu.Lock()
 		f.renewed = append(f.renewed, tok)
-		ok := f.valid[tok]
+		ok, slow := f.valid[tok], f.slowRenewalRefusals
 		f.mu.Unlock()
+		if slow {
+			select {
+			case <-time.After(1500 * time.Millisecond):
+			case <-r.Context().Done():
+			}
+			writeError(w, http.StatusForbidden, "permission denied")
+			return
+		}
 		if !ok {
 			writeError(w, http.StatusForbidden, "permission denied")
 			return
@@ -541,9 +563,9 @@ var _ = Describe("OpenBao token lifecycle", func() {
 
 	Describe("background re-authentication", func() {
 		Context("when a watcher ends on its own", func() {
-			It("logs that renewal ended and logs in again from the background loop", func() {
+			It("logs that the renewal window closed and logs in again from the background loop", func() {
 				logs := captureLogs()
-				fake.issueShortLivedTokens()
+				fake.issueShortLivedTokens(false)
 				start(openbao.AuthAppRole)
 
 				// The twin of "after a request-path re-login" above: a watcher
@@ -552,6 +574,20 @@ var _ = Describe("OpenBao token lifecycle", func() {
 				Eventually(fake.loginCount).WithTimeout(5 * time.Second).Should(Equal(2))
 				Expect(string(logs.Contents())).To(ContainSubstring(`msg="OpenBao token renewal window closed, re-authenticating"`))
 				Expect(string(logs.Contents())).NotTo(ContainSubstring(`msg="OpenBao refused a request with 403, re-authenticating"`))
+			})
+		})
+
+		Context("when a watcher ends because renewal failed", func() {
+			It("warns with the renewal error and logs in again from the background loop", func() {
+				logs := captureLogs()
+				fake.issueShortLivedTokens(true)
+				fake.refuseRenewalsSlowly()
+				start(openbao.AuthAppRole)
+
+				// The watcher gives up with an error only once a failed
+				// renewal has outlasted the lease, hence the slow refusal.
+				Eventually(fake.loginCount).WithTimeout(5 * time.Second).Should(Equal(2))
+				Expect(string(logs.Contents())).To(MatchRegexp(`level=WARN msg="OpenBao token renewal ended, re-authenticating" error=.*permission denied`))
 			})
 		})
 	})
