@@ -965,6 +965,16 @@ func (s *Server) handlePostGenerate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid subject", http.StatusBadRequest)
 		return
 	}
+	// 400, like the invalid-subject arm above rather than the 409 that
+	// ErrCertExists gets below: the caller chose the subject, and no state of
+	// the CA would let the request succeed, so it is the request that is
+	// wrong. Refused before Generate so no key is generated for it. The
+	// message is fixed text naming only the caller's own subject.
+	if err := ca.CheckKeySubject(subject); err != nil {
+		slog.Warn("Generate refused: reserved subject", "subject", subject, "client", clientOf(r))
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	slog.Debug("POST generate", "subject", subject, "client", clientOf(r))
 
 	// Optional DNS alt names from query params (?dns=a&dns=b).

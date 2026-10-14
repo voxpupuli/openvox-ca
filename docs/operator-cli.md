@@ -498,6 +498,12 @@ certificate and no key, the command stops. A mistyped `--cadir` would otherwise
 mint a brand-new CA and issue under it, leaving you with certificates nothing in
 your fleet trusts and no obvious sign of why.
 
+**It refuses the certname `ca`**, with or without `--key-out`, before opening
+the storage. Without `--key-out` the key would go to `private/ca_key.pem`, which
+is where a cadir created by an earlier openvox-ca keeps the CA key itself.
+`POST /generate/ca` and a managed certificate named `ca` are refused for the
+same reason. Submitting a CSR for `ca` is still accepted.
+
 #### Where the private key goes
 
 `--key-out` writes the key to a path you choose, at mode 0600, and keeps no copy.

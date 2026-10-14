@@ -143,6 +143,13 @@ before a server exists.`,
 			// Checked before resolveRuntime so nothing is opened -- and no
 			// authenticated session to a key provider established -- for a run
 			// that cannot succeed.
+			//
+			// GenerateWithOptions refuses "ca" as well; this is the same
+			// check, made before the store is opened rather than after the
+			// instance lock is taken.
+			if err := ca.CheckKeySubject(certname); err != nil {
+				return fmt.Errorf("--certname: %w", err)
+			}
 			if ppCliAuth && cfg.NoPpCliAuth {
 				return fmt.Errorf("this CA is configured with no_pp_cli_auth, so a pp_cli_auth " +
 					"certificate would grant nothing. Add the certname to the admin allow list " +
