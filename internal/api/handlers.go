@@ -968,8 +968,10 @@ func (s *Server) handlePostGenerate(w http.ResponseWriter, r *http.Request) {
 	// 400, like the invalid-subject arm above rather than the 409 that
 	// ErrCertExists gets below: the caller chose the subject, and no state of
 	// the CA would let the request succeed, so it is the request that is
-	// wrong. Refused before Generate so no key is generated for it. The
-	// message is fixed text naming only the caller's own subject.
+	// wrong. GenerateWithOptions refuses "ca" before generating a key either
+	// way; checking here is what answers 400 rather than the 500 its error
+	// would reach below. The message is fixed text naming only the caller's
+	// own subject.
 	if err := ca.CheckKeySubject(subject); err != nil {
 		slog.Warn("Generate refused: reserved subject", "subject", subject, "client", clientOf(r))
 		http.Error(w, err.Error(), http.StatusBadRequest)

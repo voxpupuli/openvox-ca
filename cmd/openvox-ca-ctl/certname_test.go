@@ -202,13 +202,6 @@ var _ = Describe("certname in request and file paths", func() {
 			Expect(os.ReadFile(keyPath)).To(Equal([]byte("KEY")))
 		})
 
-		// One property of writeKeyFile has no spec: that it narrows the mode
-		// before it truncates, so a failed fchmod leaves the old contents
-		// rather than an emptied file. Reaching that branch needs an fchmod
-		// that fails on a file the open could write, which means a file owned
-		// by another user. An unprivileged process cannot create one, and a
-		// root one cannot make fchmod fail, so the ordering is pinned by
-		// writeKeyFile's comment and by review rather than here.
 		It("writes no key file when the server refuses the request", func() {
 			// The server refuses the subject "ca" this way (#495), and
 			// docs/operator-cli.md promises the operator that nothing is
@@ -222,6 +215,13 @@ var _ = Describe("certname in request and file paths", func() {
 			emptyDir(outDir)
 		})
 
+		// One property of writeKeyFile has no spec: that it narrows the mode
+		// before it truncates, so a failed fchmod leaves the old contents
+		// rather than an emptied file. Reaching that branch needs an fchmod
+		// that fails on a file the open could write, which means a file owned
+		// by another user. An unprivileged process cannot create one, and a
+		// root one cannot make fchmod fail, so the ordering is pinned by
+		// writeKeyFile's comment and by review rather than here.
 		It("overwrites an existing key file and narrows its mode to 0600", func() {
 			// Overwriting is the documented case, not an accident: the
 			// serving-certificate procedure points --out-dir at the server's
