@@ -84,7 +84,7 @@ is the safe way to inspect a CA that will not start.`,
 			ctx := cmd.Context()
 			out := cmd.OutOrStdout()
 
-			resolvedCfgFile := resolveConfigFile(configFile, "OPENVOX_CA_CONFIG", defaultConfigFile)
+			resolvedCfgFile := resolveConfigFile(configFile, configEnvVar, defaultConfigFile)
 			cfg, err := loadServerConfig(resolvedCfgFile)
 			if err != nil {
 				return err

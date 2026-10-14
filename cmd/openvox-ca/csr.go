@@ -75,7 +75,7 @@ identically whether the key is a local PEM file or lives in OpenBao Transit.`,
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			resolvedCfgFile := resolveConfigFile(configFile, "OPENVOX_CA_CONFIG", defaultConfigFile)
+			resolvedCfgFile := resolveConfigFile(configFile, configEnvVar, defaultConfigFile)
 			cfg, err := loadServerConfig(resolvedCfgFile)
 			if err != nil {
 				return err

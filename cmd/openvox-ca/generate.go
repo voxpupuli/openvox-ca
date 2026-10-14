@@ -110,7 +110,7 @@ before a server exists.`,
 			ctx := cmd.Context()
 			out := cmd.ErrOrStderr()
 
-			resolvedCfgFile := resolveConfigFile(configFile, "OPENVOX_CA_CONFIG", defaultConfigFile)
+			resolvedCfgFile := resolveConfigFile(configFile, configEnvVar, defaultConfigFile)
 			cfg, err := loadServerConfig(resolvedCfgFile)
 			if err != nil {
 				return err

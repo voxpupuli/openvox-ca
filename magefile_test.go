@@ -8395,6 +8395,30 @@ var _ = Describe("the packaged configuration path", func() {
 		Expect(count).To(Equal(1), "%s appears %d times in cmd/openvox-ca; every other use should name defaultConfigFile", literal, count)
 	})
 
+	// The same floor for the variable that overrides it. Specs pin and clear
+	// the variable through configEnvVar; a subcommand that spelt the name out
+	// again would survive a rename of it with every such pin left guarding a
+	// name the server no longer reads.
+	It("names its environment variable once in the server's source, as configEnvVar", func() {
+		src, err := os.ReadFile(filepath.Join("cmd", "openvox-ca", "config.go"))
+		Expect(err).NotTo(HaveOccurred())
+		m := regexp.MustCompile(`(?m)^const configEnvVar = ("[A-Z0-9_]+")$`).FindAllStringSubmatch(string(src), -1)
+		Expect(m).To(HaveLen(1), "cmd/openvox-ca/config.go must declare configEnvVar exactly once")
+		literal := m[0][1]
+		files, err := filepath.Glob(filepath.Join("cmd", "openvox-ca", "*.go"))
+		Expect(err).NotTo(HaveOccurred())
+		count := 0
+		for _, f := range files {
+			if strings.HasSuffix(f, "_test.go") {
+				continue
+			}
+			src, err := os.ReadFile(f)
+			Expect(err).NotTo(HaveOccurred())
+			count += strings.Count(string(src), literal)
+		}
+		Expect(count).To(Equal(1), "%s appears %d times in cmd/openvox-ca; every other use should name configEnvVar", literal, count)
+	})
+
 	It("is where the packages install config.yaml", func() {
 		src, err := os.ReadFile(filepath.Join("packaging", "nfpm.yaml"))
 		Expect(err).NotTo(HaveOccurred())

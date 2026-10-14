@@ -82,7 +82,7 @@ for deployments where the CA certificate is mounted read-only from outside
 				return fmt.Errorf("reading --cert-bundle: %w", err)
 			}
 
-			resolvedCfgFile := resolveConfigFile(configFile, "OPENVOX_CA_CONFIG", defaultConfigFile)
+			resolvedCfgFile := resolveConfigFile(configFile, configEnvVar, defaultConfigFile)
 			cfg, err := loadServerConfig(resolvedCfgFile)
 			if err != nil {
 				return err

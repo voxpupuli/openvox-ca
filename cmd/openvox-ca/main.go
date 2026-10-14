@@ -759,7 +759,7 @@ func newRootCmd() *cobra.Command {
 			notifier.Status("Loading configuration")
 
 			// --- Config loading (file → env → CLI flags) ---
-			resolved := resolveConfigFile(configFile, "OPENVOX_CA_CONFIG", defaultConfigFile)
+			resolved := resolveConfigFile(configFile, configEnvVar, defaultConfigFile)
 			cfg, err := loadServerConfig(resolved)
 			if err != nil {
 				return err
