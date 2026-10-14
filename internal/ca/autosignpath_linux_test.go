@@ -50,11 +50,7 @@ func mountPoints() (all map[string]bool, visible []visibleMount) {
 	data, err := os.ReadFile("/proc/self/mountinfo")
 	Expect(err).NotTo(HaveOccurred())
 
-	type entry struct {
-		point    string
-		readOnly bool
-	}
-	var entries []entry
+	var entries []visibleMount
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
 		sep := slices.Index(fields, "-")
@@ -67,7 +63,7 @@ func mountPoints() (all map[string]bool, visible []visibleMount) {
 		}
 		ro := slices.Contains(strings.Split(fields[5], ","), "ro") ||
 			slices.Contains(strings.Split(fields[sep+3], ","), "ro")
-		entries = append(entries, entry{point, ro})
+		entries = append(entries, visibleMount{point, ro})
 	}
 
 	all = map[string]bool{}
@@ -82,7 +78,7 @@ func mountPoints() (all map[string]bool, visible []visibleMount) {
 			}
 		}
 		if fi, err := os.Lstat(e.point); !hidden && err == nil && fi.IsDir() {
-			visible = append(visible, visibleMount{e.point, e.readOnly})
+			visible = append(visible, e)
 		}
 	}
 	return all, visible
