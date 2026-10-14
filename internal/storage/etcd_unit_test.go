@@ -111,6 +111,11 @@ var _ = Describe("EtcdPhysicalKey", func() {
 		Entry(nil, "unknown", "", true),
 		Entry(nil, "../evil", "", true),
 		Entry(nil, CSRKey("../evil"), "", true),
+		Entry(nil, CSRKey("a/b"), "", true),
+		Entry(nil, CertKey("a/b"), "", true),
+		Entry(nil, CSRKey("a\nb"), "", true),
+		Entry(nil, CertKey("a\x7fb"), "", true),
+		Entry(nil, CSRKey(""), "", true),
 	)
 })
 

@@ -537,7 +537,7 @@ var _ = Describe("RedisBackend", func() {
 	})
 
 	// RedisPhysicalKey pins the logical→physical key layout (mirrors
-	// EtcdPhysicalKey) and the "../empty-segment rejection contract. The
+	// EtcdPhysicalKey) and the validateKey rejection contract. The
 	// prefix uses ":" as the Redis separator.
 	Describe("RedisPhysicalKey", func() {
 		b := &RedisBackend{prefix: "puppet-ca"}
@@ -566,6 +566,11 @@ var _ = Describe("RedisBackend", func() {
 			Entry(nil, "unknown", "", true),
 			Entry(nil, "../evil", "", true),
 			Entry(nil, CSRKey("../evil"), "", true),
+			Entry(nil, CSRKey("a/b"), "", true),
+			Entry(nil, CertKey("a/b"), "", true),
+			Entry(nil, CSRKey("a\nb"), "", true),
+			Entry(nil, CertKey("a\x7fb"), "", true),
+			Entry(nil, CSRKey(""), "", true),
 		)
 	})
 
