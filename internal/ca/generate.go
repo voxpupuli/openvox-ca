@@ -163,6 +163,12 @@ func (c *CA) GenerateWithOptions(ctx context.Context, subject string, opts Gener
 	if err := ValidateSubject(subject); err != nil {
 		return nil, err
 	}
+	// Refused whether or not the key is retained: with EmitKey the caller
+	// still writes a key for "ca" somewhere, and every path that generates one
+	// refuses the same subject. See ErrReservedSubject.
+	if err := CheckKeySubject(subject); err != nil {
+		return nil, err
+	}
 
 	// Validate DNS alt names: must be valid hostnames, bounded count and length.
 	if err := validateDNSAltNames(opts.DNSAltNames); err != nil {
