@@ -130,8 +130,9 @@ var _ = Describe("validateKey", func() {
 // Each backend runs validateKey on its own, at the point it turns a logical
 // key into a physical one; these pin that every method taking a key reaches
 // it, backend by backend. The etcd and Redis backends funnel every method
-// through physicalKey, whose tables (etcd_unit_test.go, redis_test.go) carry
-// the same keys.
+// through physicalKey, whose tables (etcd_unit_test.go, redis_test.go) refuse
+// the same unsafe keys as the filesystem table below; a key added to one
+// belongs in all three.
 var _ = Describe("FilesystemBackend refusing an unsafe key", func() {
 	var (
 		ctx context.Context
