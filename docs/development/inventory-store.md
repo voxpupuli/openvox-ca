@@ -673,8 +673,9 @@ recorded so the control is not credited with more than it does.
    not closed: an attacker who also empties the inventory and deletes the CRL
    gets the `Info` line, and the value is re-baselined either way. The `Warn` is
    also expected once without any tampering — on the first start after adopting
-   a cadir from OpenVox Server, after migrating from a store that never had a
-   value, and after an etcd or Redis legacy inventory is decomposed (below).
+   a cadir from OpenVox Server, after `openvox-ca-ctl import` (which writes a
+   CRL but no value), after migrating from a store that never had a value, and
+   after an etcd or Redis legacy inventory is decomposed (below).
 
    Which verifier gets there first matters. `verifyInventoryHMACLocked` — reached
    from `CA.Init`, `ReadInventory`, `SubjectForSerial` and the prune path — is
@@ -706,12 +707,13 @@ recorded so the control is not credited with more than it does.
    scheme — it is the rebuild the opening of this section says recovery
    requires, and it cannot tell a repair from a laundering. A source with no
    HMAC key and no value at all is copied without the flag, with a warning, so
-   deleting both from a store that had them is still a way through; it at least
-   leaves the destination warning on its first start. It is a cutover rather
-   than an in-place repair: the
-   destination must be a different store (a store cannot be migrated onto
-   itself), one that already holds a CA is refused without `--force`, and the CA
-   must then be served from the destination. Because it only ever reads the
+   deleting both from a store that had them is still a way through. It at least
+   leaves the destination warning on its first start, unless `--force` copies it
+   into a store that already has a key: the rebuild then uses that key at once,
+   and the warning `migrate` prints is the only trace. It is a cutover rather
+   than an in-place repair: the destination must be a different store (a store
+   cannot be migrated onto itself), one that already holds a CA is refused
+   without `--force`, and the CA must then be served from the destination. Because it only ever reads the
    source, the mismatched pair survives in the store you migrated away from, so
    a cutover does not destroy the evidence — decommissioning or re-forcing into
    that store afterwards is what does. Note that migrating into a scratch
@@ -895,7 +897,9 @@ rather than resolved, and this document does not change the mechanism.
    knowing before relying on any of it. Asserted: both arms of the absent-value
    behaviour — the re-baseline by `storage_test.go`'s "initializes HMAC baseline
    when no HMAC file exists yet", and its `Info` or `Warn` on each branch, on
-   both schemes, by `inventory_baseline_test.go`; the non-writing compare by
+   both schemes, by `inventory_baseline_test.go` (and across a real `CA.Init`,
+   the ordering that classification rests on, by `internal/ca`'s
+   `inventorybaseline_test.go`); the non-writing compare by
    `sql_inventory_test.go`'s "accepts a missing stored value without writing
    one" — the backend gate on the resync tick, the periodic path's not failing
    closed, both halves of the ordering gap reporting their failure rather than

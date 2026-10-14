@@ -168,12 +168,16 @@ local filesystem under cadir, never in a storage backend.`,
 				return err
 			}
 
-			// Unconditional, unlike the per-blob lines: the destination's
-			// integrity value was rebuilt over an inventory nothing verified,
-			// and this is the only place that is said.
+			// Unconditional, unlike the per-blob lines: whatever integrity value
+			// the destination holds over this inventory will vouch for something
+			// nothing verified, and this is the only place that is said. Worded
+			// for both cases: the value is written now when the destination has
+			// an HMAC key, and otherwise by the server's first start, which
+			// mints the key (see MigrateReport.UnverifiedSource).
 			if report.UnverifiedSource != "" {
 				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: the source inventory was not verified: %s. "+
-					"The destination's integrity value now vouches for it as copied.\n", report.UnverifiedSource)
+					"The destination's integrity value, written now or at the server's first start, "+
+					"will vouch for it as copied.\n", report.UnverifiedSource)
 			}
 
 			fmt.Printf("Migration complete: %d CA/state blob(s), %d CSR(s), %d signed cert(s) copied (%d total)\n",

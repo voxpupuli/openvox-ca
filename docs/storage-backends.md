@@ -324,7 +324,9 @@ Server looks for the key at the top of the cadir, so it cannot take that
 directory as it stands.
 
 - **To start openvox-ca on OpenVox Server's cadir**, stop OpenVox Server's CA
-  and point `cadir` at the directory. There is no import step.
+  and point `cadir` at the directory. There is no import step. The first start
+  logs `No inventory HMAC found on an established CA` at `WARN`, once, as it
+  establishes the integrity value over an inventory nothing has verified.
 - **To go back to OpenVox Server**, stop openvox-ca (and disable its unit, or
   it starts again at the next boot) and start OpenVox Server's CA on the same
   directory. Nothing in it needs changing first. Keep a copy of `inventory.txt`

@@ -224,7 +224,9 @@ var _ = Describe("migrate command", func() {
 			Expect(migrate("--allow-unverified-source")).To(Succeed())
 
 			Expect(stderr.String()).To(ContainSubstring("Warning: the source inventory was not verified: " +
-				"the inventory does not match its stored integrity value"))
+				"the inventory does not match its stored integrity value (scheme whole-blob-hmac), so it may " +
+				"have been altered. The destination's integrity value, written now or at the server's first " +
+				"start, will vouch for it as copied.\n"))
 			Expect(filepath.Join(dstDir, "ca_crt.pem")).To(BeAnExistingFile())
 		})
 
@@ -234,7 +236,9 @@ var _ = Describe("migrate command", func() {
 			Expect(migrate()).To(Succeed())
 
 			Expect(stderr.String()).To(ContainSubstring("Warning: the source inventory was not verified: " +
-				"the source never recorded an inventory integrity value"))
+				"the source never recorded an inventory integrity value (no HMAC key and no value are " +
+				"stored), so there was nothing to verify it against. The destination's integrity value, " +
+				"written now or at the server's first start, will vouch for it as copied.\n"))
 		})
 
 		It("says nothing about integrity when the source verifies", func() {

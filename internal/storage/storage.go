@@ -1984,9 +1984,10 @@ func (s *StorageService) verifyInventoryHMACLocked(ctx context.Context, hmacKey 
 // whose inventory stays empty because the CA's own certificate is never
 // recorded in it. Any other missing value logs at Warn: either it was removed,
 // or this store was produced by something that never wrote one (a cadir
-// adopted from OpenVox Server, a migration from such a store, or the one start
-// after an etcd or Redis legacy inventory is decomposed), and the new value
-// vouches for an inventory nothing verified.
+// adopted from OpenVox Server, one written by openvox-ca-ctl import, a
+// migration from such a store, or the one start after an etcd or Redis legacy
+// inventory is decomposed), and the new value vouches for an inventory nothing
+// verified.
 //
 // The state is read from the store rather than passed in, because the store is
 // what an attacker who deletes the value has also to leave looking new.
@@ -2024,9 +2025,9 @@ func (s *StorageService) baselineInventoryHMACLocked(ctx context.Context, hmacKe
 			"the inventory as it stands, without verifying it",
 			"scheme", s.inventoryScheme(), "inventory_empty", len(entries) == 0 && len(blob) == 0,
 			"crl_present", hasCRL,
-			"expected_once_after", "adopting a cadir from OpenVox Server, migrating from a store with no "+
-				"integrity value, or decomposing a legacy etcd/Redis inventory; otherwise the value was "+
-				"removed and the inventory may have been altered")
+			"expected_once_after", "adopting a cadir from OpenVox Server, importing a CA with openvox-ca-ctl "+
+				"import, migrating from a store with no integrity value, or decomposing a legacy etcd/Redis "+
+				"inventory; otherwise the value was removed and the inventory may have been altered")
 	}
 	return s.backend.Put(ctx, KeyInventoryHMAC, foldInventoryHead(hmacKey, entries, blob, chained), BlobPrivate)
 }

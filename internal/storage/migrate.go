@@ -77,10 +77,13 @@ type MigrateReport struct {
 	// UnverifiedSource is set by MigrateService when it copied a source
 	// inventory it could not verify, and says why: either the source never
 	// recorded an integrity value, or AllowUnverifiedSource let a failure
-	// through. Empty when the source verified. The destination's integrity
-	// value is rebuilt over the copy either way, so a caller should show this
-	// to the operator: it is the only record that the new value vouches for
-	// an inventory nothing checked.
+	// through. Empty when the source verified. Whichever it is, the
+	// destination's integrity value will vouch for the copy: MigrateService
+	// rebuilds it when the destination holds an HMAC key (copied from the
+	// source, or already there under Force), and otherwise the server's first
+	// start writes it, at Warn. A caller should show this to the operator: it
+	// is the only record that the value vouches for an inventory nothing
+	// checked.
 	UnverifiedSource string
 }
 

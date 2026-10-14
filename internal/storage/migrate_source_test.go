@@ -20,6 +20,8 @@ package storage
 import (
 	"bytes"
 	"context"
+	"errors"
+	"log/slog"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -38,7 +40,8 @@ var _ = Describe("MigrateService source verification", func() {
 	}
 
 	// expectDestinationUntouched asserts that a refused migration copied
-	// nothing: the check runs before the destination is even locked.
+	// nothing. That the destination is not even locked is pinned separately,
+	// by "refuses before it locks the destination".
 	expectDestinationUntouched := func(dst *StorageService) {
 		for _, key := range []string{KeyInventory, KeyInventoryHMAC, KeyHMACKey} {
 			exists, err := dst.Backend().Exists(ctx, key)
@@ -155,6 +158,44 @@ var _ = Describe("MigrateService source verification", func() {
 			"undecomposed legacy inventory"),
 	)
 
+	It("refuses before it locks the destination", func() {
+		// The check runs under the source's lock and ahead of the
+		// destination's, so a refusal never waits on, or holds, a lock on the
+		// store it was not going to write.
+		srcB := &lockingBackend{FilesystemBackend: NewFilesystemBackend(GinkgoT().TempDir())}
+		seedCA(srcB) // placeholder integrity blobs: a wrong-length key, so it cannot verify
+		dstB := &lockingBackend{FilesystemBackend: NewFilesystemBackend(GinkgoT().TempDir())}
+		src := NewWithBackend(srcB, GinkgoT().TempDir())
+		dst := NewWithBackend(dstB, GinkgoT().TempDir())
+
+		_, err := MigrateService(ctx, src, dst, MigrateOptions{})
+
+		Expect(err).To(MatchError(ErrSourceUnverified))
+		Expect(srcB.acquired).To(Equal([]string{migrateLockName}))
+		Expect(srcB.released).To(Equal(1))
+		Expect(dstB.acquired).To(BeEmpty(), "a refused migration locked its destination")
+	})
+
+	It("refuses, with the cause, when the source's integrity cannot be read", func() {
+		// The partial report returned alongside the error would otherwise be
+		// taken at face value. Here it is the most permissive state there is:
+		// no key, and no value read, which is the never-recorded pass-through.
+		// So a verifier that ignored the error would migrate without the
+		// override, not merely give the wrong reason.
+		src := verifiedFilesystem()
+		Expect(src.backend.Delete(ctx, KeyHMACKey)).To(Succeed())
+		boom := errors.New("backend unreachable")
+		src.backend = failGetBackend{Backend: src.backend, key: KeyInventoryHMAC, err: boom}
+		dst := newDst()
+
+		_, err := MigrateService(ctx, src, dst, MigrateOptions{})
+
+		Expect(err).To(MatchError(boom))
+		Expect(err.Error()).To(ContainSubstring("checking the source inventory's integrity"))
+		Expect(err).NotTo(MatchError(ErrSourceUnverified))
+		expectDestinationUntouched(dst)
+	})
+
 	It("lets a mismatch through when told to, and says so", func() {
 		src := verifiedFilesystem()
 		tamperBlob(src)
@@ -189,5 +230,43 @@ var _ = Describe("MigrateService source verification", func() {
 		exists, err := dst.Backend().Exists(ctx, KeyCACert)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(exists).To(BeTrue(), "the migration must have run")
+
+		// No key came across, so nothing could be rebuilt: the destination
+		// holds no value until a server starts against it...
+		exists, err = dst.Backend().Exists(ctx, KeyInventoryHMAC)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(exists).To(BeFalse(), "a value was written with no key to compute it under")
+
+		// ...and that start warns, which is the residual signal the threat
+		// model credits for a source whose key and value were both deleted.
+		logs := &bytes.Buffer{}
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+		DeferCleanup(func() { slog.SetDefault(orig) })
+		Expect(dst.InitHMAC(ctx)).To(Succeed())
+		Expect(logs.String()).To(ContainSubstring(`level=WARN msg="No inventory HMAC found on an established CA`))
+	})
+
+	It("rebuilds a never-recorded source's value at once under --force into a destination with a key", func() {
+		// The limit of that residual signal: a destination that already has a
+		// key gets a value now, over the copy, and its next start is silent.
+		// The migrate-time warning is then the only trace.
+		src := New(GinkgoT().TempDir())
+		Expect(src.EnsureDirs(ctx)).To(Succeed())
+		Expect(src.SaveCACert(ctx, []byte("ca-cert-pem"))).To(Succeed())
+		Expect(src.backend.Put(ctx, KeyInventory, []byte(
+			"0x0002 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /CN=agent\n"), BlobPrivate)).To(Succeed())
+		dst := verifiedFilesystem()
+
+		report, err := MigrateService(ctx, src, dst, MigrateOptions{Force: true})
+
+		Expect(err).NotTo(HaveOccurred())
+		Expect(report.UnverifiedSource).To(ContainSubstring("never recorded an inventory integrity value"))
+		rep, err := dst.InventoryIntegrityReport(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(rep.Verifies).To(BeTrue(), "the destination's own key must have been used to rebuild over the copy")
+		inv, err := dst.ReadInventory(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(inv)).To(ContainSubstring("/CN=agent"))
 	})
 })

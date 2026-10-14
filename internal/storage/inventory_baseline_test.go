@@ -20,11 +20,26 @@ package storage
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
+
+// failExistsBackend fails Exists for one key with a non-ErrNotExist error.
+type failExistsBackend struct {
+	Backend
+	key string
+	err error
+}
+
+func (b failExistsBackend) Exists(ctx context.Context, key string) (bool, error) {
+	if key == b.key {
+		return false, b.err
+	}
+	return b.Backend.Exists(ctx, key)
+}
 
 // The re-baseline on a missing integrity value is the cheapest bypass the
 // inventory MAC has, so how loudly it happens is the operator's only signal
@@ -132,5 +147,41 @@ var _ = Describe("Establishing an inventory baseline when none is stored", func(
 		},
 		Entry("whole-blob scheme (filesystem)", freshFilesystem),
 		Entry("hash-chain scheme (SQLite)", freshSQLite),
+	)
+
+	// Each read the decision rests on fails closed: verification returns the
+	// cause and writes no value. Were the CRL check's error ignored instead,
+	// an established CA would be classed as new and log at Info, which is the
+	// signal this level exists to give.
+	DescribeTable("fails, writing nothing, when it cannot read what decides the level",
+		func(fresh func() *StorageService, wrap func(Backend, error) Backend, cause string) {
+			svc := fresh()
+			key, err := svc.EnsureHMACKey(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			raw := svc.backend
+			boom := errors.New("backend unreachable")
+			svc.backend = wrap(raw, boom)
+
+			err = svc.VerifyInventoryHMAC(ctx, key)
+
+			Expect(err).To(MatchError(boom))
+			Expect(err.Error()).To(ContainSubstring(cause))
+			exists, err := raw.Exists(ctx, KeyInventoryHMAC)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(exists).To(BeFalse(), "a baseline was written over a store that could not be read")
+			Expect(logs.String()).NotTo(ContainSubstring("No inventory HMAC found"),
+				"a level was decided without the read it rests on: %s", logs.String())
+		},
+		Entry("the CRL check", freshFilesystem,
+			func(b Backend, err error) Backend { return failExistsBackend{Backend: b, key: KeyCRL, err: err} },
+			"checking for a CRL before establishing the inventory baseline"),
+		Entry("the inventory blob read (whole-blob scheme)", freshFilesystem,
+			func(b Backend, err error) Backend { return failGetBackend{Backend: b, key: KeyInventory, err: err} },
+			"computing inventory HMAC"),
+		Entry("the inventory rows read (hash-chain scheme)", freshFilesystem,
+			// Outer type, so asInventoryStore sees a structured backend whose
+			// row read fails (see inventory_report_test.go).
+			func(b Backend, err error) Backend { return failEntriesBackend{Backend: b, err: err} },
+			"computing inventory HMAC"),
 	)
 })
