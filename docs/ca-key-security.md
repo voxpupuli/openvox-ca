@@ -287,7 +287,11 @@ copies the stored key byte for byte. Three options remain:
    every certificate the old CA signed has to be reissued.
 
 None of these reaches copies already taken: a backup, snapshot or replica made
-while the key was plaintext still holds a usable CA key.
+while the key was plaintext still holds a usable CA key. Nor does deleting the
+key reach the store's own history on every backend: etcd keeps earlier
+revisions until it is compacted, a Redis append-only file keeps the write until
+it is rewritten, and a database can keep a deleted row's bytes in its log and
+free pages until they are reused.
 
 Loading handles both encrypted and unencrypted PEM files, deciding from the PEM
 itself rather than from the setting. An encrypted key therefore needs its

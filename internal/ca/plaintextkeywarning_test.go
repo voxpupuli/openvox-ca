@@ -28,6 +28,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -97,8 +98,6 @@ var _ = Describe("Plaintext CA key under encrypt_ca_key", func() {
 		Expect(warnings()).To(HaveLen(1))
 		Expect(warnings()[0]).To(ContainSubstring("level=WARN"))
 		Expect(warnings()[0]).To(ContainSubstring("key=" + store.CAKeyPath()))
-		Expect(warnings()[0]).To(ContainSubstring(`Backward compatibility\" in docs/ca-key-security.md`),
-			"the warning names no remedy itself; the section it points at does")
 
 		// The warning says the key is not re-encrypted; hold it to that.
 		after, err := store.GetCAKey(context.Background())
@@ -158,13 +157,26 @@ var _ = Describe("Plaintext CA key under encrypt_ca_key", func() {
 		Expect(warnings()).To(BeEmpty())
 	})
 
-	// The warning sends the operator to a section by name, and nothing else
-	// ties the two together: renaming the heading would leave every such log
-	// line pointing at nothing.
+	// The warning names no remedy itself: it sends the operator to a section
+	// of the documentation by name. Both the section and the file are read
+	// out of the logged line rather than restated here, so renaming the
+	// heading fails this spec until the warning is changed to match, and a
+	// warning that stops pointing anywhere fails it too.
 	It("points at a documentation section that exists", func() {
-		doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "ca-key-security.md"))
+		bootstrap(false, ca.KeyPassphraseConfig{})
+		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.EncryptCAKey = true
+		Expect(myCA.Init(context.Background())).To(Succeed())
+		Expect(warnings()).To(HaveLen(1))
+
+		// slog's text handler escapes the quotes around the section name.
+		pointer := regexp.MustCompile(`see \\"([^"\\]+)\\" in (docs/[\w.-]+\.md)`).
+			FindStringSubmatch(warnings()[0])
+		Expect(pointer).NotTo(BeNil(), "the warning must name a section and a file")
+
+		doc, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(pointer[2])))
 		Expect(err).NotTo(HaveOccurred())
-		Expect(string(doc)).To(ContainSubstring("\n### Backward compatibility\n"))
+		Expect(string(doc)).To(ContainSubstring("\n### " + pointer[1] + "\n"))
 	})
 
 	It("does not warn when the setting is off", func() {
