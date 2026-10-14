@@ -416,9 +416,10 @@ reconciles what two processes would each hold in memory (see
 > writes whatever `--private-key` holds, and offers no encryption flags. Under
 > `encrypt_ca_key` the stored key is an `ENCRYPTED PRIVATE KEY` block that
 > `import` cannot parse, so feeding it back fails — and feeding the original
-> plaintext key instead succeeds while silently replacing the encrypted at-rest
-> key with a plaintext one, because key loading accepts both forms and nothing
-> warns. Under `ca_key_provider: openbao` there is no exportable key at all, so
+> plaintext key instead succeeds while replacing the encrypted at-rest key with
+> a plaintext one, because key loading accepts both forms. `import` itself says
+> nothing; the only sign is the warning the server logs at its next start that
+> the stored key is not encrypted. Under `ca_key_provider: openbao` there is no exportable key at all, so
 > re-import is unavailable outright. For both,
 > [`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain) is not an
 > alternative to re-import but the only ancestor-refresh mechanism there is: it

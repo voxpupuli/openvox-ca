@@ -62,12 +62,13 @@ var _ = Describe("Plaintext CA key under encrypt_ca_key", func() {
 
 	// bootstrap creates a CA in tmpDir and discards what it logged, so a spec
 	// sees only what the load under test says.
-	bootstrap := func(encrypt bool, pp ca.KeyPassphraseConfig) {
+	bootstrap := func(encrypt bool, pp ca.KeyPassphraseConfig) *ca.CA {
 		first := ca.New(storage.New(tmpDir), ca.AutosignConfig{Mode: "off"}, "puppet.test")
 		first.EncryptCAKey = encrypt
 		first.KeyPassphrase = pp
 		Expect(first.Init(context.Background())).To(Succeed())
 		logBuf.Reset()
+		return first
 	}
 
 	BeforeEach(func() {
@@ -112,11 +113,47 @@ var _ = Describe("Plaintext CA key under encrypt_ca_key", func() {
 
 		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
 		myCA.EncryptCAKey = true
-		// A key without a certificate is refused rather than bootstrapped
-		// over; the refusal is what makes Init take the slow path at all.
-		Expect(myCA.Init(context.Background())).NotTo(Succeed())
+		// The fast path's load fails for want of a certificate, which sends
+		// Init down the slow path to load the key again. This refusal comes
+		// only after that second load, so matching it -- rather than any
+		// error -- is what shows both loads ran.
+		Expect(myCA.Init(context.Background())).To(MatchError(ContainSubstring(
+			"a CA key already exists in storage but the CA certificate is missing")))
 
 		Expect(warnings()).To(HaveLen(1))
+	})
+
+	// The key's path is an attribute only where the backend has one. A
+	// database backend stores a blob, and key="" would read as a misconfigured
+	// path rather than as no path at all.
+	It("names no key path when the backend has none", func() {
+		pathless := storage.NewWithBackend(pathlessBackend{storage.NewFilesystemBackend(tmpDir)},
+			filepath.Join(tmpDir, "private"))
+		Expect(pathless.CAKeyPath()).To(BeEmpty(), "the fixture must not expose a path")
+		first := ca.New(pathless, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		Expect(first.Init(context.Background())).To(Succeed())
+		logBuf.Reset()
+
+		myCA := ca.New(pathless, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		myCA.EncryptCAKey = true
+		Expect(myCA.Init(context.Background())).To(Succeed())
+
+		Expect(warnings()).To(HaveLen(1))
+		Expect(warnings()[0]).NotTo(ContainSubstring("key="))
+	})
+
+	// The frontend signs through the signer process and never reads the key,
+	// though it has the same setting and the same store. One start, one
+	// warning, and it is the signer's.
+	It("does not warn from a frontend, whose key is behind an external signer", func() {
+		signerCA := bootstrap(false, ca.KeyPassphraseConfig{})
+
+		frontend := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		frontend.EncryptCAKey = true
+		frontend.ExternalSigner = signerCA.CAKey
+		Expect(frontend.Init(context.Background())).To(Succeed())
+
+		Expect(warnings()).To(BeEmpty())
 	})
 
 	It("does not warn when the setting is off", func() {
@@ -166,3 +203,7 @@ var _ = Describe("Plaintext CA key under encrypt_ca_key", func() {
 		Expect(warnings()).To(BeEmpty())
 	})
 })
+
+// pathlessBackend hides the filesystem backend's PathProvider, so the store
+// reports no file paths, as a database backend does.
+type pathlessBackend struct{ storage.Backend }

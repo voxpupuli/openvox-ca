@@ -268,6 +268,13 @@ plaintext logs a warning saying so, once per start, from the process that loads
 the key. A key held by OpenBao Transit is not in the store, so it never
 triggers one.
 
+There is no way yet to encrypt an existing key in place. `openvox-ca-ctl
+import` writes the plaintext key it is given exactly as given, and `migrate`
+copies the stored key byte for byte. Two options remain: keep the plaintext key
+and unset `encrypt_ca_key`, which stops the warning and changes nothing else,
+or bootstrap a new CA with the setting on, which creates its key encrypted but
+means reissuing every certificate the old CA signed.
+
 Loading handles both encrypted and unencrypted PEM files, deciding from the PEM
 itself rather than from the setting. An encrypted key therefore needs its
 passphrase whether or not `encrypt_ca_key` is still set, and the server says so
