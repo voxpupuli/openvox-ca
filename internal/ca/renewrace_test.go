@@ -30,6 +30,8 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
+	"fmt"
 	"math/big"
 	"path/filepath"
 	"sync"
@@ -225,8 +227,24 @@ var _ = Describe("A revocation racing a renewal", func() {
 			// pre-lock gate ran, and the gate would refuse it without ever
 			// waiting: a pass that exercises nothing here, and a failure below
 			// although the code is correct (#483).
-			Eventually(reached).Should(BeClosed(),
-				"the renewal must reach the subject lock without being refused first")
+			//
+			// A renewal that returns instead never reached the lock, and ends
+			// the wait at once with what it returned: a refusal by the gate is
+			// one reason, but a bad CSR or a subject check would look the same
+			// to a bare timeout.
+			Eventually(func() error {
+				select {
+				case <-reached:
+					return nil
+				case err := <-renewed:
+					return StopTrying(fmt.Sprintf(
+						"the renewal returned (%v) before it reached the subject lock", err))
+				default:
+					return errors.New("not yet")
+				}
+			}).Should(Succeed(),
+				"the renewal never began acquiring the subject lock: WithLock may no longer "+
+					"reach AcquireSameHostLock on this backend, which is what announces it")
 
 			// The revocation lands mid-wait, through a replica with its own lock
 			// namespace: Revoke takes the per-subject lock now, so one sharing
