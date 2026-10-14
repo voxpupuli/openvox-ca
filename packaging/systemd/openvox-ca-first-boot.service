@@ -62,13 +62,8 @@ PrivateDevices=yes
 ProtectSystem=strict
 ProtectHome=yes
 ProtectProc=invisible
-# openvox-ca.service explains ProcSubset=, MemoryDenyWriteExecute= and UMask=.
-# Two things differ here. This unit opens no listener, so the backlog the
-# service gives up does not arise. And the provisioning script's sed, mkdir,
-# ln and other coreutils read /proc/filesystems, which this hides: libselinux
-# looks there for selinuxfs, and provisioning completes without it (measured
-# on Debian 13 and CentOS Stream 10).
-ProcSubset=pid
+# openvox-ca.service explains MemoryDenyWriteExecute= and UMask= below, and
+# why ProcSubset=pid is left off.
 ProtectClock=yes
 ProtectHostname=yes
 ProtectKernelLogs=yes

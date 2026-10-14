@@ -157,19 +157,12 @@ PrivateDevices=yes
 ProtectSystem=strict
 ProtectHome=yes
 ProtectProc=invisible
-# Only process directories are mounted under /proc, so the system-wide entries
-# -- /proc/sys, meminfo, modules and the rest -- are hidden as well as other
-# processes. Everything openvox-ca reads there is its own: /proc/self/cgroup
-# for the memory budget, the same file and mountinfo for Go's CPU limit, auxv,
-# and exe, which the launcher re-executes to start the signer and the frontend.
-#
-# One read is lost, and it changes something. Go sizes a listener's backlog
-# from /proc/sys/net/core/somaxconn and, without it, falls back to 128 -- so a
-# net.core.somaxconn raised on this host no longer reaches the API or exporter
-# socket. That is accepted rather than worked around: the server accepts in a
-# tight loop and does the TLS handshake afterwards, so the queue fills only
-# while the process is stalled, and an agent refused there retries.
-ProcSubset=pid
+# Left off, because hiding the system-wide part of /proc costs two things.
+# Without /proc/sys/net/core/somaxconn, Go gives every listener a backlog of
+# 128 rather than the host's setting (4096 by default). And the exporter's
+# process_start_time_seconds needs the boot time from /proc/stat, so that
+# series disappears without an error.
+#ProcSubset=pid
 ProtectClock=yes
 ProtectHostname=yes
 ProtectKernelLogs=yes
@@ -185,12 +178,13 @@ LockPersonality=yes
 # -- the FIPS build, which links glibc and BoringCrypto, included.
 MemoryDenyWriteExecute=yes
 # Group and world bits are masked from the mode anything is created with.
-# openvox-ca gives every file an explicit mode with no world bits, and most
-# get theirs set after creation, where a umask does not reach. So what this
-# narrows today is the CA directory and its subdirectories, 0750 to 0700, and
-# an SQLite store and its sidecars, 0660 to 0600 -- group access that this
-# account, whose uid does not change between starts, has no use for. It is
-# here for the code path that creates something wider than it should.
+# Most files openvox-ca writes get their mode set after creation, where a
+# umask does not reach, so what this narrows today is the directories it
+# creates under the CA directory, 0750 to 0700, and an SQLite store and its
+# sidecars, 0660 to 0600 -- group access that this account, whose uid does
+# not change between starts, has no use for. The CA directory itself exists
+# before the service starts and keeps its mode. This is here for the code
+# path that creates something wider than it should.
 UMask=0077
 # RemoveIPC= is deliberately absent, and must stay absent.
 #
