@@ -7,11 +7,11 @@ authenticating. Use it only for the anonymous endpoints (CRL, OCSP, health), or
 with config.no_tls_required set behind a trusted proxy. For a general-purpose
 Puppet CA route, use gateway.tlsRoute instead.
 */}}
-apiVersion: {{ .Values.gateway.httpRoute.apiVersion }}
+apiVersion: {{ .Values.gateway.httpRoute.apiVersion | quote }}
 kind: HTTPRoute
 metadata:
-  name: {{ include "openvox-ca.fullname" . }}
-  namespace: {{ include "openvox-ca.namespace" . }}
+  name: {{ include "openvox-ca.fullname" . | quote }}
+  namespace: {{ include "openvox-ca.namespace" . | quote }}
   labels:
     {{- include "openvox-ca.labels" . | nindent 4 }}
     {{- with .Values.gateway.httpRoute.labels }}
@@ -44,7 +44,7 @@ spec:
             type: PathPrefix
             value: /
       backendRefs:
-        - name: {{ include "openvox-ca.fullname" . }}
+        - name: {{ include "openvox-ca.fullname" . | quote }}
           port: {{ $port }}
     {{- end }}
 {{- end }}

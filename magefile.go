@@ -5017,7 +5017,7 @@ func chartConfigChecksum(sets ...string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("rendering the comparison config: %w\n%s", err, out)
 	}
-	m := regexp.MustCompile(`checksum/config: ([0-9a-f]{64})`).FindStringSubmatch(out)
+	m := regexp.MustCompile(`checksum/config: "([0-9a-f]{64})"`).FindStringSubmatch(out)
 	if m == nil {
 		return "", fmt.Errorf("no checksum/config annotation in the comparison render")
 	}
@@ -5289,19 +5289,19 @@ func (Chart) Test() error {
 		{
 			name:  "an unset tag resolves to the Alpine variant of the appVersion",
 			sets:  []string{tls, "image.tag=", "image.digest="},
-			wants: []string{"image: ghcr.io/voxpupuli/openvox-ca:" + defaultTag},
+			wants: []string{"image: \"ghcr.io/voxpupuli/openvox-ca:" + defaultTag + "\""},
 		},
 		{
 			name: "an explicit tag is used verbatim, selecting the CentOS variant",
 			sets: []string{tls, "image.tag=0.9.0"},
 			// The whole point of the rule: no suffix is appended.
-			wants:    []string{"image: ghcr.io/voxpupuli/openvox-ca:0.9.0"},
+			wants:    []string{"image: \"ghcr.io/voxpupuli/openvox-ca:0.9.0\""},
 			notWants: []string{"0.9.0-alpine"},
 		},
 		{
 			name:     "a digest wins over a tag",
 			sets:     []string{tls, "image.tag=0.9.0", "image.digest=sha256:" + strings.Repeat("a", 64)},
-			wants:    []string{"image: ghcr.io/voxpupuli/openvox-ca@sha256:" + strings.Repeat("a", 64)},
+			wants:    []string{"image: \"ghcr.io/voxpupuli/openvox-ca@sha256:" + strings.Repeat("a", 64) + "\""},
 			notWants: []string{":0.9.0"},
 		},
 		{
@@ -5684,7 +5684,7 @@ config:
 			// which contains `namespace: ca-tls-ns` verbatim, so the loose form
 			// passed with the namespace expression mutated away entirely.
 			wants: []string{
-				"  name: openvox-ca-managed-certs\n  namespace: ca-tls-ns\n",
+				"  name: \"openvox-ca-managed-certs\"\n  namespace: \"ca-tls-ns\"\n",
 				"- openvox-ca-serving-tls",
 			},
 		},
@@ -5707,7 +5707,7 @@ config:
         name: openvox-ca-serving-tls
 `,
 			wants: []string{
-				"name: openvox-ca-managed-certs",
+				"name: \"openvox-ca-managed-certs\"",
 				"- openvox-ca-serving-tls",
 				`verbs: ["get", "patch"]`,
 				"automountServiceAccountToken: true",
@@ -5764,7 +5764,7 @@ config:
           namespace: openvox
 `,
 			wants: []string{
-				"name: openvox-ca-managed-certs",
+				"name: \"openvox-ca-managed-certs\"",
 				"namespace: openvox",
 				"- puppetserver-tls",
 				`verbs: ["get", "patch"]`,
@@ -5820,7 +5820,7 @@ config:
           namespace: openvox
 `,
 			wants: []string{
-				"name: openvox-ca-managed-certs",
+				"name: \"openvox-ca-managed-certs\"",
 				"  annotations:\n    example.com/owner: platform\nrules:",
 				"  annotations:\n    example.com/owner: platform\nroleRef:",
 			},
@@ -5868,7 +5868,7 @@ config:
 			// readiness green.
 			wants: []string{"kind: Deployment", "automountServiceAccountToken: true"},
 			notWants: []string{
-				"name: openvox-ca-managed-certs",
+				"name: \"openvox-ca-managed-certs\"",
 				"kind: Role\n",
 			},
 		},
@@ -5888,7 +5888,7 @@ config:
       store: {secret: {name: a-tls, namespace: openvox}}
 `,
 			wants:    []string{"kind: Deployment"},
-			notWants: []string{"name: openvox-ca-managed-certs"},
+			notWants: []string{"name: \"openvox-ca-managed-certs\""},
 		},
 		{
 			// The chart cannot read a config it does not render, so it knows
@@ -5937,7 +5937,7 @@ config:
 				// on any rewording, with no regression to show for it.
 				"managedCerts.rbac.create: false",
 			},
-			notWants: []string{"name: openvox-ca-managed-certs"},
+			notWants: []string{"name: \"openvox-ca-managed-certs\""},
 		},
 		{
 			// The other route into configFileKnown false, so the NOTE's cause
@@ -5961,7 +5961,7 @@ config:
 				// rewording of it failed twice.
 				"(args, or a --config in",
 			},
-			notWants: []string{"name: openvox-ca-managed-certs", "(existingConfigMap)"},
+			notWants: []string{"name: \"openvox-ca-managed-certs\"", "(existingConfigMap)"},
 		},
 		{
 			// Every other render case configures exactly one entry, so the
@@ -6005,15 +6005,15 @@ config:
 				// only to a line start it matches the ServiceAccount, the
 				// ConfigMap and everything else in the release namespace. Both
 				// held whether or not the default-namespace resolution ran.
-				"  name: openvox-ca-managed-certs\n  namespace: openvox\n",
-				"  name: openvox-ca-managed-certs\n  namespace: default\n",
+				"  name: \"openvox-ca-managed-certs\"\n  namespace: \"openvox\"\n",
+				"  name: \"openvox-ca-managed-certs\"\n  namespace: \"default\"\n",
 				"      - a-tls",
 				"      - b-tls",
 				"      - c-tls",
 				// The binding's subject is the CA's own namespace, not the
 				// Role's -- a binding that used $ns would be a silent, total
 				// RBAC failure in every namespace but one.
-				"  - kind: ServiceAccount\n    name: openvox-ca\n    namespace: default",
+				"  - kind: ServiceAccount\n    name: \"openvox-ca\"\n    namespace: \"default\"",
 			},
 			// The assertion that actually catches a dropped filter. Both names
 			// appearing somewhere is true either way -- there are two Roles --
@@ -6119,8 +6119,8 @@ config:
 			sets: []string{tls},
 			// Anchored to the pod template: serviceaccount.yaml emits the same
 			// key at column 0 unconditionally, so a bare want cannot fail.
-			wants:    []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: false"},
-			notWants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
+			wants:    []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: false"},
+			notWants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: true"},
 		},
 		{
 			// An unreadable config mounts the token. Asserted against
@@ -6129,12 +6129,12 @@ config:
 			// reached from here. See the note on managedCertsNeedAPI.
 			name:  "an unreadable config mounts the token, because a Secret store may exist",
 			sets:  []string{tls, "existingConfigMap=my-config"},
-			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
+			wants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: true"},
 		},
 		{
 			name:  "OpenBao Kubernetes auth mounts the token too",
 			sets:  []string{tls, "config.ca_key_provider=openbao", "config.openbao.auth_method=kubernetes"},
-			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
+			wants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: true"},
 		},
 		{
 			name: "export targets set through config alone still mount the token",
@@ -6142,7 +6142,7 @@ config:
 			// kubernetesExport.enabled says, so the token decision has to read
 			// the merged config rather than the chart's own flag.
 			sets:  []string{tls, "config.kubernetes_export.targets[0].kind=Secret", "config.kubernetes_export.targets[0].metadata.name=trust", "config.kubernetes_export.targets[0].cert=true"},
-			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
+			wants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: true"},
 		},
 		{
 			name: "a config the chart cannot read mounts the token conservatively",
@@ -6150,7 +6150,7 @@ config:
 			// costs nothing, a missing one fails the export or the key provider
 			// while readiness stays green.
 			sets:  []string{"existingConfigMap=mine"},
-			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
+			wants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: true"},
 		},
 		{
 			name: "a config change rolls the pods",
@@ -6174,9 +6174,9 @@ config:
 			// exists to catch.
 			sets: []string{tls, "ca.existingSecret=ca-material", "caKeyPassphrase.existingSecret=ca-passphrase"},
 			wants: []string{
-				"secretName: openvox-ca-tls\n            defaultMode: 0600",
-				"secretName: ca-material\n            defaultMode: 0600",
-				"secretName: ca-passphrase\n            defaultMode: 0600",
+				"secretName: \"openvox-ca-tls\"\n            defaultMode: 0600",
+				"secretName: \"ca-material\"\n            defaultMode: 0600",
+				"secretName: \"ca-passphrase\"\n            defaultMode: 0600",
 			},
 		},
 		{
@@ -6221,7 +6221,7 @@ config:
 			// The accepted half of the backendPort guard. Ingress references
 			// the Service port by name...
 			sets:  []string{tls, "metrics.enabled=true", "ingress.enabled=true", "ingress.backendPort=metrics"},
-			wants: []string{"port:\n                  name: metrics"},
+			wants: []string{"port:\n                  name: \"metrics\""},
 		},
 		{
 			name: "a TLSRoute routed to the metrics port numbers it",
@@ -6233,7 +6233,7 @@ config:
 			// the route had regressed to the https port.
 			sets: []string{tls, "metrics.enabled=true", "gateway.tlsRoute.enabled=true", "gateway.tlsRoute.backendPort=metrics"},
 			wants: []string{
-				"- backendRefs:\n        - name: openvox-ca\n          port: 9140",
+				"- backendRefs:\n        - name: \"openvox-ca\"\n          port: 9140",
 			},
 		},
 		{
@@ -6242,7 +6242,7 @@ config:
 			// rather than that either number appears somewhere.
 			sets: []string{tls, "metrics.enabled=true", "gateway.tlsRoute.enabled=true"},
 			wants: []string{
-				"- backendRefs:\n        - name: openvox-ca\n          port: 443",
+				"- backendRefs:\n        - name: \"openvox-ca\"\n          port: 443",
 			},
 		},
 		{
@@ -6385,6 +6385,83 @@ config:
 			wants: []string{"leaf-certificate series carry node hostnames"},
 		},
 		{
+			// Every string the chart interpolates into a manifest is quoted, so
+			// a value YAML 1.1 reads as another type stays a string: Kubernetes
+			// decodes manifests with that schema, where on, yes and true are
+			// booleans and a leading zero makes an octal integer. Unquoted,
+			// each of these renders a manifest the API server refuses, or a
+			// label that matches nothing.
+			//
+			// The values reach every template except extra-objects.yaml, which
+			// renders the operator's own manifests, with rbac.yaml at its Role
+			// scope. The notWants refuse an unquoted rendering of any of them
+			// anywhere, which is what pins all of the sites rather than one of
+			// each: against the templates before quoting, this render held 40.
+			name: "interpolated strings are quoted so YAML cannot retype them",
+			valuesYAML: `
+fullnameOverride: "0123"
+namespaceOverride: "0124"
+env:
+  "on": "1"
+tls:
+  existingSecret: "0126"
+config:
+  storage_backend: postgres
+  managed_certs:
+    - certname: a.example.com
+      names: [a]
+      renew_before: 720h
+      store: {secret: {name: a-tls, namespace: "0125"}}
+autoscaling:
+  enabled: true
+podDisruptionBudget:
+  enabled: true
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    namespace: "0127"
+networkPolicy:
+  enabled: true
+  metricsNamespaces: ["yes"]
+kubernetesExport:
+  enabled: true
+  targets:
+    - kind: Secret
+      metadata: {name: trust}
+      cert: true
+ingress:
+  enabled: true
+  className: "true"
+  hosts:
+    - host: ca.example.com
+      paths:
+        - path: /
+gateway:
+  tlsRoute:
+    enabled: true
+  httpRoute:
+    enabled: true
+`,
+			wants: []string{
+				"  name: \"0123\"\n",
+				"  namespace: \"0124\"\n",
+				"  namespace: \"0125\"\n",
+				"secretName: \"0126\"\n",
+				"  namespace: \"0127\"\n",
+				"      - \"0124\"\n",
+				"- name: \"on\"\n",
+				"kubernetes.io/metadata.name: \"yes\"\n",
+				"ingressClassName: \"true\"\n",
+				"app.kubernetes.io/instance: \"openvox-ca\"\n",
+				"- path: \"/\"\n",
+			},
+			// Numeric sentinels only: on, yes and true each have a single
+			// site, pinned above, while ": true" also matches every real
+			// boolean in the render.
+			notWants: []string{": 0123\n", ": 0124\n", ": 0125\n", ": 0126\n", ": 0127\n", "- 0124\n"},
+		},
+		{
 			// A DNS rule with no `to:` admits port 53 to every destination,
 			// which made DNS a way out of the cluster. The peer is asserted
 			// with the ports above it, so a `to:` landing on another rule
@@ -6488,13 +6565,13 @@ networkPolicy:
 			// is not an uncertainty case — it must be detected outright, the way
 			// tlsConfigured detects OPENVOX_CA_TLS_CERT there.
 			sets:  []string{tls, "config.ca_key_provider=openbao", "env.OPENVOX_CA_OPENBAO_AUTH_METHOD=kubernetes"},
-			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
+			wants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: true"},
 		},
 		{
 			name:     "a non-Kubernetes auth method through env does not",
 			sets:     []string{tls, "config.ca_key_provider=openbao", "env.OPENVOX_CA_OPENBAO_AUTH_METHOD=approle"},
-			wants:    []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: false"},
-			notWants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
+			wants:    []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: false"},
+			notWants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: true"},
 		},
 		{
 			name: "an auth method supplied through extraEnv with a readable value mounts the token",
@@ -6502,13 +6579,13 @@ networkPolicy:
 			// arm below: only that one is reached by `not .value`.
 			sets: []string{tls, "config.ca_key_provider=openbao",
 				"extraEnv[0].name=OPENVOX_CA_OPENBAO_AUTH_METHOD", "extraEnv[0].value=kubernetes"},
-			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
+			wants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: true"},
 		},
 		{
 			name: "a non-Kubernetes auth method through extraEnv does not",
 			sets: []string{tls, "config.ca_key_provider=openbao",
 				"extraEnv[0].name=OPENVOX_CA_OPENBAO_AUTH_METHOD", "extraEnv[0].value=approle"},
-			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: false"},
+			wants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: false"},
 		},
 		{
 			name: "an auth method passed through extraArgs mounts the token",
@@ -6520,13 +6597,13 @@ networkPolicy:
 			// block dropped from the deployment, the token line alone would still
 			// render, and the chart would be deciding from a flag the container
 			// never receives.
-			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true",
+			wants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: true",
 				"- --openbao-auth-method=kubernetes"},
 		},
 		{
 			name:  "a non-Kubernetes auth method through extraArgs does not",
 			sets:  []string{tls, "config.ca_key_provider=openbao", "extraArgs[0]=--openbao-auth-method=approle"},
-			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: false"},
+			wants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: false"},
 		},
 		{
 			name: "a bare auth-method flag in extraArgs mounts the token",
@@ -6536,7 +6613,7 @@ networkPolicy:
 			// and mount a token that case asserts stays unmounted.
 			sets: []string{tls, "config.ca_key_provider=openbao",
 				"extraArgs[0]=--openbao-auth-method", "extraArgs[1]=kubernetes"},
-			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
+			wants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: true"},
 		},
 		{
 			name: "a --config in extraArgs makes the whole configuration unknown",
@@ -6546,12 +6623,12 @@ networkPolicy:
 			// chart's own config there would withhold it from a pod whose real
 			// config configures export or Kubernetes auth.
 			sets:  []string{tls, "extraArgs[0]=--config=/mnt/other/config.yaml"},
-			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
+			wants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: true"},
 		},
 		{
 			name:  "the separated --config spelling counts too",
 			sets:  []string{tls, "extraArgs[0]=--config", "extraArgs[1]=/mnt/other/config.yaml"},
-			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
+			wants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: true"},
 		},
 		{
 			name: "export configured only through config still gets a Role",
@@ -6569,7 +6646,7 @@ networkPolicy:
 			// correctly configured pod.
 			sets: []string{tls, "config.ca_key_provider=openbao", "config.openbao.auth_method=kubernetes",
 				"env.OPENVOX_CA_OPENBAO_AUTH_METHOD="},
-			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
+			wants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: true"},
 		},
 		{
 			name:  "the egress NOTE names export even when the wider config is unknown",
@@ -6597,7 +6674,7 @@ networkPolicy:
 			sets: []string{tls, "config.ca_key_provider=openbao",
 				"extraEnv[0].name=OPENVOX_CA_OPENBAO_AUTH_METHOD",
 				"extraEnv[0].valueFrom.secretKeyRef.name=openbao", "extraEnv[0].valueFrom.secretKeyRef.key=method"},
-			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
+			wants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: true"},
 		},
 		{
 			name: "a lowercase export target kind passes through as written",
@@ -6670,7 +6747,7 @@ networkPolicy:
 			// mounts the volume where nothing looks.
 			name:     "a pinned persistence.mountPath moves the mount and the derived cadir",
 			sets:     []string{tls, "persistence.mountPath=/var/lib/puppet-ca"},
-			wants:    []string{"mountPath: /var/lib/puppet-ca\n", "cadir: /var/lib/puppet-ca\n"},
+			wants:    []string{"mountPath: \"/var/lib/puppet-ca\"\n", "cadir: /var/lib/puppet-ca\n"},
 			notWants: []string{"/var/lib/openvox-ca"},
 		},
 		{
@@ -6690,7 +6767,7 @@ config:
         cert: /var/lib/puppet-ca/tls.crt
         key: /var/lib/puppet-ca/tls.key
 `,
-			wants:    []string{"mountPath: /var/lib/puppet-ca\n", "cadir: /var/lib/puppet-ca/ca"},
+			wants:    []string{"mountPath: \"/var/lib/puppet-ca\"\n", "cadir: /var/lib/puppet-ca/ca"},
 			notWants: []string{"/var/lib/openvox-ca"},
 		},
 		{
@@ -6711,7 +6788,7 @@ config:
 		{
 			name:     "an externally managed ConfigMap cannot be checksummed",
 			sets:     []string{tls, "existingConfigMap=mine"},
-			wants:    []string{"name: mine"},
+			wants:    []string{"name: \"mine\""},
 			notWants: []string{"checksum/config:"},
 		},
 		{
@@ -6995,7 +7072,7 @@ config:
 			// control is the volume naming the operator's ConfigMap.
 			name:     "a credential in config is not refused when existingConfigMap replaces the ConfigMap",
 			sets:     []string{"existingConfigMap=mine", "config.redis_password=HUNTER2"},
-			wants:    []string{"name: mine"},
+			wants:    []string{"name: \"mine\""},
 			notWants: []string{"HUNTER2"},
 		},
 	}
@@ -7943,7 +8020,7 @@ config:
 	} {
 		name := fmt.Sprintf("appVersion %s resolves to %s", tc.appVersion, tc.wantTag)
 		out, err := renderWithAppVersion(tc.appVersion, []string{tls})
-		want := "image: ghcr.io/voxpupuli/openvox-ca:" + tc.wantTag
+		want := "image: \"ghcr.io/voxpupuli/openvox-ca:" + tc.wantTag + "\""
 		switch {
 		case err != nil:
 			fmt.Printf("FAIL  %s\n      render failed: %v\n", name, err)

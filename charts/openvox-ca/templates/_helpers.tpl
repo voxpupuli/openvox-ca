@@ -32,17 +32,17 @@ not doubled up, so `helm install openvox-ca` yields "openvox-ca" rather than
 {{- end -}}
 
 {{- define "openvox-ca.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "openvox-ca.name" . }}
-app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/name: {{ include "openvox-ca.name" . | quote }}
+app.kubernetes.io/instance: {{ .Release.Name | quote }}
 {{- end -}}
 
 {{- define "openvox-ca.labels" -}}
-helm.sh/chart: {{ include "openvox-ca.chart" . }}
+helm.sh/chart: {{ include "openvox-ca.chart" . | quote }}
 {{ include "openvox-ca.selectorLabels" . }}
 {{- if .Chart.AppVersion }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
-app.kubernetes.io/managed-by: {{ .Release.Service }}
+app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
 app.kubernetes.io/component: certificate-authority
 app.kubernetes.io/part-of: openvox
 {{- with .Values.commonLabels }}

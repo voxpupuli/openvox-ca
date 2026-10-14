@@ -2,8 +2,8 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "openvox-ca.fullname" . }}
-  namespace: {{ include "openvox-ca.namespace" . }}
+  name: {{ include "openvox-ca.fullname" . | quote }}
+  namespace: {{ include "openvox-ca.namespace" . | quote }}
   labels:
     {{- include "openvox-ca.labels" . | nindent 4 }}
   {{- with .Values.commonAnnotations }}
@@ -54,7 +54,7 @@ spec:
         {{- range .Values.networkPolicy.metricsNamespaces }}
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: {{ . }}
+              kubernetes.io/metadata.name: {{ . | quote }}
         {{- end }}
       ports:
         - port: metrics
