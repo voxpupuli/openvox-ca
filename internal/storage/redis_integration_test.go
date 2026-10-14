@@ -114,6 +114,18 @@ var _ = Describe("RedisIntegrationListCSR", func() {
 	})
 })
 
+// The miniredis spec in redisglob_test.go runs the same assertions; this one
+// holds them against a real server's glob matcher, which is the one whose
+// escaping rules redisGlobEscape has to agree with.
+var _ = Describe("RedisIntegrationListGlobPrefix", func() {
+	It("scans only its own prefix's keys when the prefix holds glob characters", func() {
+		addr := redisAddrFromEnv()
+		cli := redis.NewClient(&redis.Options{Addr: addr})
+		DeferCleanup(cli.Close)
+		expectListScansOnlyItsOwnPrefix(cli, fmt.Sprintf("openvox-ca-test:glob:%d:", time.Now().UnixNano()))
+	})
+})
+
 var _ = Describe("RedisIntegrationAppendLineConcurrent", func() {
 	// Since the inventory decomposition (issue #139) this exercises
 	// appendInventoryLines against a real server's Lua, not the blob append

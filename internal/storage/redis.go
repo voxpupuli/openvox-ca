@@ -428,7 +428,11 @@ func (b *RedisBackend) List(ctx context.Context, prefix string) ([]string, error
 		return nil, fmt.Errorf("unsupported list prefix %q", prefix)
 	}
 	physPrefix := b.prefix + ":" + subDir
-	match := physPrefix + "*"
+	// Escaped, because KeyPrefix is operator-supplied and SCAN's MATCH is a
+	// glob: a prefix containing "*", "?" or "[" would otherwise also match
+	// other prefixes' keys. The loop below would still discard those, but only
+	// after SCAN had returned them, so each one cost a round of work here.
+	match := redisGlobEscape(physPrefix) + "*"
 
 	var (
 		out    []string
@@ -461,6 +465,25 @@ func (b *RedisBackend) List(ctx context.Context, prefix string) ([]string, error
 		cursor = next
 	}
 	return out, nil
+}
+
+// redisGlobEscape escapes s so that a Redis glob (SCAN MATCH, KEYS) matches it
+// literally. Redis's matcher treats "*", "?", "[" and the backslash as
+// special; "]" is escaped too, which is harmless outside a character class and
+// keeps the rule simple to check.
+func redisGlobEscape(s string) string {
+	var buf strings.Builder
+	buf.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; c {
+		case '*', '?', '[', ']', '\\':
+			buf.WriteByte('\\')
+			buf.WriteByte(c)
+		default:
+			buf.WriteByte(c)
+		}
+	}
+	return buf.String()
 }
 
 // AppendLine atomically appends data to key. Concurrent appends from this
