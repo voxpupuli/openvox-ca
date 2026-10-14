@@ -84,7 +84,7 @@ is the safe way to inspect a CA that will not start.`,
 			ctx := cmd.Context()
 			out := cmd.OutOrStdout()
 
-			resolvedCfgFile := resolveConfigFile(configFile, "OPENVOX_CA_CONFIG", "/etc/openvox-ca/config.yaml")
+			resolvedCfgFile := resolveConfigFile(configFile, "OPENVOX_CA_CONFIG", defaultConfigFile)
 			cfg, err := loadServerConfig(resolvedCfgFile)
 			if err != nil {
 				return err
@@ -416,7 +416,7 @@ is the safe way to inspect a CA that will not start.`,
 	// --help disagree with itself across the family. No shorthand, for the same
 	// reason: none of the three siblings has one, nor does openvox-ca-ctl's own
 	// --config.
-	f.StringVar(&configFile, "config", "", "Path to YAML config file (default: /etc/openvox-ca/config.yaml if it exists)")
+	f.StringVar(&configFile, "config", "", "Path to YAML config file (default: "+defaultConfigFile+" if it exists)")
 	f.StringVar(&caDir, "cadir", "", "CA storage directory (overrides the config file)")
 	// Named from storage.RebuildConfirmFlag, which also builds the repair hint
 	// on the integrity-mismatch log lines: one definition, so the flag an

@@ -8354,3 +8354,76 @@ jobs:
 		Expect(err).To(MatchError(ContainSubstring(`does not need job "build"`)))
 	})
 })
+
+// The packaged service finds its configuration only because four things name
+// the same file: the server's built-in default (cmd/openvox-ca's
+// defaultConfigFile, used by every subcommand that resolves a config), the
+// path the packages install config.yaml to, and the default first-boot and
+// postinstall fall back to. The unit passes no --config, so a disagreement
+// leaves the service starting on built-in defaults, or provisioning checking a
+// file nothing reads -- with every other suite green, because each of the four
+// is otherwise pinned only by a literal of its own.
+//
+// Read as text rather than run, so nothing here touches the host's real /etc.
+var _ = Describe("the packaged configuration path", func() {
+	var want string
+
+	BeforeEach(func() {
+		src, err := os.ReadFile(filepath.Join("cmd", "openvox-ca", "config.go"))
+		Expect(err).NotTo(HaveOccurred())
+		m := regexp.MustCompile(`(?m)^const defaultConfigFile = "([^"]+)"$`).FindAllStringSubmatch(string(src), -1)
+		Expect(m).To(HaveLen(1), "cmd/openvox-ca/config.go must declare defaultConfigFile exactly once")
+		want = m[0][1]
+		Expect(want).To(HavePrefix("/"), "defaultConfigFile is not an absolute path")
+	})
+
+	// A floor as well as an equality: a new subcommand that spelt the path out
+	// again would agree today and drift tomorrow, unseen by the checks below.
+	It("is spelt out once in the server's source, as defaultConfigFile", func() {
+		files, err := filepath.Glob(filepath.Join("cmd", "openvox-ca", "*.go"))
+		Expect(err).NotTo(HaveOccurred())
+		literal := strconv.Quote(want)
+		count := 0
+		for _, f := range files {
+			if strings.HasSuffix(f, "_test.go") {
+				continue
+			}
+			src, err := os.ReadFile(f)
+			Expect(err).NotTo(HaveOccurred())
+			count += strings.Count(string(src), literal)
+		}
+		Expect(count).To(Equal(1), "%s appears %d times in cmd/openvox-ca; every other use should name defaultConfigFile", literal, count)
+	})
+
+	It("is where the packages install config.yaml", func() {
+		src, err := os.ReadFile(filepath.Join("packaging", "nfpm.yaml"))
+		Expect(err).NotTo(HaveOccurred())
+		var pkg struct {
+			Contents []struct {
+				Src  string `yaml:"src"`
+				Dst  string `yaml:"dst"`
+				Type string `yaml:"type"`
+			} `yaml:"contents"`
+		}
+		Expect(yaml.Unmarshal(src, &pkg)).To(Succeed())
+		var dsts []string
+		for _, c := range pkg.Contents {
+			if c.Src == "packaging/config/config.yaml" {
+				dsts = append(dsts, c.Dst)
+			}
+		}
+		Expect(dsts).To(Equal([]string{want}), "packaging/nfpm.yaml must install packaging/config/config.yaml once, at %s", want)
+	})
+
+	DescribeTable("is the default the maintainer scripts fall back to",
+		func(script string) {
+			src, err := os.ReadFile(filepath.Join("packaging", "scripts", script))
+			Expect(err).NotTo(HaveOccurred())
+			m := regexp.MustCompile(`(?m)^CONFIG="[^"\n]*:-(/[^}"\n]+)\}+"$`).FindAllStringSubmatch(string(src), -1)
+			Expect(m).To(HaveLen(1), "%s must set CONFIG from the environment with a default exactly once", script)
+			Expect(m[0][1]).To(Equal(want), "%s falls back to a different configuration file from the server", script)
+		},
+		Entry("first-boot", "first-boot"),
+		Entry("postinstall", "postinstall"),
+	)
+})
