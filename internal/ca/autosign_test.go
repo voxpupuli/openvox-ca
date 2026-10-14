@@ -183,12 +183,18 @@ var _ = Describe("CheckAutosign", func() {
 			// script crashed or is misconfigured rather than a deliberate policy
 			// deny. Behaviour must stay fail-closed (deny, no error), but a
 			// warning should be emitted to aid the operator.
+			script := writeScript("#!/bin/sh\nexit 127\n")
 			ok, err := ca.CheckAutosign(
-				ca.AutosignConfig{Mode: "executable", FileOrPath: writeScript("#!/bin/sh\nexit 127\n")},
+				ca.AutosignConfig{Mode: "executable", FileOrPath: script},
 				csr, csrPEM)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(ok).To(BeFalse())
 			Expect(buf.String()).To(ContainSubstring("misconfigured"))
+			// The file that ran, which a ConfigMap update can change under an
+			// unchanged configured path.
+			real, err := filepath.EvalSymlinks(script)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(buf.String()).To(ContainSubstring("realpath=" + real))
 		})
 
 		It("passes the subject CN as argv[1]", func() {

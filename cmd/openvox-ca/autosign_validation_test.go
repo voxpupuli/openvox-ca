@@ -314,6 +314,11 @@ var _ = Describe("the autosign executable check at startup", func() {
 		exe := autosignFixture(0o775, 0o755)
 		logfile := filepath.Join(GinkgoT().TempDir(), "ca.log")
 
+		// --logfile makes the server point the process-wide slog default at
+		// that file, and nothing puts it back. Registered first so that it
+		// runs last, after the server has stopped.
+		DeferCleanup(slog.SetDefault, slog.Default())
+
 		runCtx, cancel := context.WithCancel(ctx)
 		done := make(chan error, 1)
 		go func() {

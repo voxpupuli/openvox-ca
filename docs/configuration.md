@@ -2218,7 +2218,12 @@ At startup a failure refuses to start, naming every entry at fault and what is
 wrong with it. Under `--daemon` the refusal comes before the fork, so it reaches
 the terminal. Before each run a failure refuses to run the executable: the CSR
 is saved but not signed, the agent gets a `500`, and the CA logs an `ERROR`
-naming the entries. The executable that runs is the file that was checked, so
+naming the entries. Fixing the path does not sign those requests: while one is
+pending, the agent's resubmission is refused as a
+[duplicate](#duplicate-certificate-requests) before autosigning is reached.
+Review them with `openvox-ca-ctl list` and sign or clean each one by certname.
+Do not reach for `sign --all`, which would also sign requests the plugin would
+have denied. The executable that runs is the file that was checked, so
 repointing a symlink — including the `..data` swap the kubelet makes when a
 ConfigMap changes — takes effect on the next CSR, after the new target is
 checked. A CSR that arrives in the moment of that swap, after its file was

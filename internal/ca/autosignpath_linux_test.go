@@ -141,3 +141,26 @@ var _ = Describe("readOnlyMountRoot on Linux", func() {
 		Skip("no read-only mount with an ordinary subdirectory is visible to this process")
 	})
 })
+
+// The two exemptions from the writable test are for directories. Only Linux
+// lets an unprivileged owner set the sticky bit on a regular file (macOS
+// refuses with EFTYPE), so the spec that pins it lives here.
+var _ = Describe("ResolveAutosignExecutable on Linux", func() {
+	It("does not exempt a sticky file from the writable test", func() {
+		dir, err := filepath.EvalSymlinks(GinkgoT().TempDir())
+		Expect(err).NotTo(HaveOccurred())
+		script := filepath.Join(dir, "autosign")
+		Expect(os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o700)).To(Succeed())
+		Expect(os.Chmod(script, os.ModeSticky|0o777)).To(Succeed())
+		fi, err := os.Lstat(script)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fi.Mode()&os.ModeSticky).NotTo(BeZero(), "the fixture must really be sticky")
+
+		_, findings, err := ResolveAutosignExecutable(script)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(findings).To(ConsistOf(SatisfyAll(
+			HaveField("Path", script),
+			HaveField("Reason", "group- and world-writable"),
+		)))
+	})
+})

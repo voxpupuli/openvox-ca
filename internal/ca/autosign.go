@@ -180,7 +180,7 @@ func runAutosignExecutable(cfg AutosignConfig, resolved string, timeout time.Dur
 			// semantics are unchanged.
 			if code := exitErr.ExitCode(); code >= 126 {
 				slog.Warn("Autosign executable exited with a crash/not-executable code; the script may be misconfigured (treating as deny)",
-					"path", cfg.FileOrPath, "common_name", commonName, "exit_code", code)
+					"path", cfg.FileOrPath, "realpath", resolved, "common_name", commonName, "exit_code", code)
 			}
 			return false, nil
 		}

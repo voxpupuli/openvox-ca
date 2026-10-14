@@ -15,7 +15,7 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-// Unix-only: these judge unix ownership and mode bits, and make a FIFO.
+// Unix-only: these judge unix ownership and mode bits.
 
 //go:build unix
 
@@ -163,9 +163,10 @@ var _ = Describe("ResolveAutosignExecutable platform judgements", func() {
 			)))
 		})
 
-		// The exemption is for directories, as ruled; a writable script is
-		// refused wherever it lives, and a ConfigMap's defaultMode can say 0555.
-		It("does not exempt the file itself", func() {
+		// A writable script is refused wherever it lives, and a ConfigMap's
+		// defaultMode can say 0555. That the exemptions are for directories
+		// at all is pinned with a sticky script, in autosignpath_linux_test.go.
+		It("still judges a file inside the volume", func() {
 			kubeletVolume(sub)
 			Expect(os.Chmod(script, 0o777)).To(Succeed())
 
@@ -287,6 +288,34 @@ var _ = Describe("checkAutosignExecutable when the judged file vanishes", func()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(ok).To(BeTrue(), "the replacement, which exits 0, is what ran")
 		Expect(calls).To(Equal(2))
+	})
+
+	// The retry judges the new generation before running it, like the first
+	// attempt: a replacement somebody else could have written is refused, and
+	// never runs.
+	It("judges the new file before running it", func() {
+		old := volume("old", 1)
+		marker := filepath.Join(dir, "ran")
+		unsafeGen := filepath.Join(dir, "unsafe")
+		Expect(os.Mkdir(unsafeGen, 0o700)).To(Succeed())
+		Expect(os.Chmod(unsafeGen, 0o755)).To(Succeed())
+		replacement := filepath.Join(unsafeGen, "autosign")
+		Expect(os.WriteFile(replacement, []byte("#!/bin/sh\ntouch '"+marker+"'\nexit 0\n"), 0o700)).To(Succeed())
+		Expect(os.Chmod(replacement, 0o775)).To(Succeed())
+		Expect(os.Symlink(old, link)).To(Succeed())
+		calls := 0
+		beforeExec(func() {
+			calls++
+			Expect(os.Remove(link)).To(Succeed())
+			Expect(os.Symlink(replacement, link)).To(Succeed())
+			Expect(os.RemoveAll(filepath.Dir(old))).To(Succeed())
+		})
+
+		ok, err := checkAutosignExecutable(AutosignConfig{FileOrPath: link}, "node.example.com", nil)
+		Expect(err).To(MatchError(ContainSubstring("group-writable")))
+		Expect(ok).To(BeFalse())
+		Expect(calls).To(Equal(1), "the second judgement refuses before anything runs")
+		Expect(marker).NotTo(BeAnExistingFile(), "the unsafe replacement must not have run")
 	})
 
 	// One retry, not a loop: a second swap in the same gap is an error even
