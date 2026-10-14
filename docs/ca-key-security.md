@@ -100,8 +100,7 @@ key and code running in the frontend. Both children run as the same user, and
 the frontend opens the same store as the signer, with the same credentials, to
 serve requests. The stored key (`private/ca_key.pem` on the filesystem backend,
 the `ca_key` blob on the others) is readable to it, and so is anything else that
-user can read: a passphrase file, the auto-generated passphrase, and the
-signer's environment.
+user can read: a passphrase file and the signer's environment.
 
 Two things change that:
 
@@ -215,13 +214,11 @@ There are two sources, and you must configure one:
    [process isolation](#process-isolation).
 
 With `encrypt_ca_key` set and neither configured, the server **refuses to
-start**. It does not generate a passphrase for you.
-
-It used to, writing a random one to `<cadir>/private/.ca_key_passphrase` — beside
-the key it protects. That made the guarantee at the top of this page false for
-the default configuration: encryption at rest is protection against a copied
-backup, disk image or snapshot, and a copy of the cadir carried the ciphertext
-and the passphrase together. Anyone holding the copy held both halves.
+start**. It does not generate a passphrase for you, because one it generated
+would have to live beside the key it protects. Encryption at rest is protection
+against a copied backup, disk image or snapshot, and a copy of the cadir would
+then carry the ciphertext and the passphrase together: anyone holding the copy
+would hold both halves.
 
 A passphrase file readable by every local account makes the server **refuse to
 start** as well, whichever backend you run: it unlocks the encrypted key, so
