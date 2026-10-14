@@ -76,8 +76,9 @@ var _ = Describe("Plaintext CA key under encrypt_ca_key", func() {
 		tmpDir = GinkgoT().TempDir()
 		store = storage.New(tmpDir)
 		// None of these specs may resolve a passphrase from the environment by
-		// accident.
-		GinkgoT().Setenv("PUPPET_CA_KEY_PASSPHRASE", "")
+		// accident. The name comes from the constant the resolver reads, so
+		// that renaming the variable cannot leave this clearing the old one.
+		GinkgoT().Setenv(ca.DefaultPassphraseEnvVar, "")
 
 		logBuf = &bytes.Buffer{}
 		orig := slog.Default()
