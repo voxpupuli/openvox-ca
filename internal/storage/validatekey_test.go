@@ -200,3 +200,35 @@ var _ = Describe("SQLBackend refusing an unsafe key", func() {
 		Entry("Get with a control character", opGet, CertKey("a\x00b")),
 	)
 })
+
+var _ = Describe("SavePrivateKey refusing an unsafe subject", func() {
+	// Private keys bypass the backend, so validateKey never sees their path;
+	// SavePrivateKey checks the subject itself. Like the backends', this is
+	// defence in depth: every caller has run ca.ValidateSubject first.
+	DescribeTable("refuses, and writes nothing anywhere",
+		func(subject, reason string) {
+			dir := GinkgoT().TempDir()
+			store := New(dir)
+			Expect(store.EnsureDirs(context.Background())).To(Succeed())
+			before := treeOf(dir)
+
+			err := store.SavePrivateKey(context.Background(), subject, []byte("key"))
+			Expect(err).To(MatchError(ContainSubstring("invalid private key subject")))
+			Expect(err).To(MatchError(ContainSubstring(reason)))
+			Expect(treeOf(dir)).To(Equal(before))
+		},
+		Entry("an empty subject", "", "empty name"),
+		Entry("traversal out of the key directory", "../escape", "contains '..'"),
+		Entry("a '/', which would need a subdirectory", "a/b", "contains '/'"),
+		Entry("a newline", "a\nb", "control character U+000A"),
+		Entry("a DEL", "a\x7fb", "control character U+007F"),
+	)
+
+	It("still writes a subject containing a space", func() {
+		dir := GinkgoT().TempDir()
+		store := New(dir)
+		Expect(store.EnsureDirs(context.Background())).To(Succeed())
+		Expect(store.SavePrivateKey(context.Background(), "puppet ca host", []byte("key"))).To(Succeed())
+		Expect(os.ReadFile(store.PrivateKeyPath("puppet ca host"))).To(Equal([]byte("key")))
+	})
+})
