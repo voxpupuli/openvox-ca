@@ -340,6 +340,23 @@ managed_certs:
 `, "path traversal"),
 		)
 
+		It("refuses the certname \"ca\", naming the entry and the remedy", func() {
+			// No key for "ca" is generated on any path, because the one
+			// written to private/ would be the CA's own (#495). A managed
+			// certificate's key goes to its own store, but "ca" is refused
+			// here too, at configuration load rather than on the first pass.
+			err := decode(`
+managed_certs:
+  - certname: ca
+    names: [ca.example.com]
+    renew_before: 720h
+    store: {files: {cert: /c.pem, key: /k.pem}}
+`).Validate()
+			Expect(err).To(MatchError(ca.ErrReservedSubject))
+			Expect(err).To(MatchError(HavePrefix("managed_certs[0] (ca): ")))
+			Expect(err).To(MatchError(ContainSubstring("Choose another certname")))
+		})
+
 		// One inventory slot per subject: two entries for one certname
 		// serialise on the same lock and each pass finds the other's
 		// certificate failing its own spec, for ever.
