@@ -654,7 +654,7 @@ var _ = Describe("Delayed supersession", func() {
 		It("can answer the unknown-subject sentinel with the counter already moved", func() {
 			// docs/api.md tells operators that neither status code on
 			// PUT /certificate_status is a statement about
-			// puppetca_crl_update_failures_total, in either direction. The 409
+			// openvoxca_crl_update_failures_total, in either direction. The 409
 			// half is the lock refusal, documented above. This is the other
 			// half, and it is the one a reader would doubt: a 404 that DID move
 			// the counter, because the superseded-predecessor retirement runs
@@ -808,7 +808,7 @@ var _ = Describe("Delayed supersession", func() {
 					"must prune it")
 			Expect(myCA.SupersedeFailures()).To(Equal(before),
 				"a pass that left nothing unrevoked is not a failure, and counting it as one "+
-					"would fire PuppetCASupersedeFailing on every healthy sweep")
+					"would fire OpenVoxCASupersedeFailing on every healthy sweep")
 		})
 	})
 

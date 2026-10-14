@@ -91,7 +91,7 @@ autoscaling:
     - type: Pods
       pods:
         metric:
-          name: puppetca_http_requests_in_flight
+          name: openvoxca_http_requests_in_flight
         target:
           type: AverageValue
           averageValue: "10"

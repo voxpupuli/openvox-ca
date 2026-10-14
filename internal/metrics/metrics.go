@@ -43,10 +43,10 @@ type Exporter struct {
 //
 //   - the standard Go runtime collector (go_*),
 //   - the process collector (process_*),
-//   - build-info (puppetca_build_info via the version collector is omitted; the
+//   - build-info (openvoxca_build_info via the version collector is omitted; the
 //     Go collector already exposes go_info),
-//   - the CA/CRL/leaf certificate collector (puppetca_*), and
-//   - HTTP server request metrics (puppetca_http_*), applied to whatever handler
+//   - the CA/CRL/leaf certificate collector (openvoxca_*), and
+//   - HTTP server request metrics (openvoxca_http_*), applied to whatever handler
 //     is wrapped with InstrumentHandler.
 //
 // Together these cover both the "usual" Go web-application metrics and the
@@ -104,7 +104,7 @@ func (e *Exporter) Handler() http.Handler {
 }
 
 // InstrumentHandler wraps next so that every request it serves is counted and
-// timed into the puppetca_http_* metrics. Only the request method and response
+// timed into the openvoxca_http_* metrics. Only the request method and response
 // status code are used as labels — never the URL path — because Puppet CA paths
 // embed per-node subjects (e.g. /certificate_status/<hostname>) and would
 // otherwise explode metric cardinality.
@@ -148,7 +148,7 @@ func (e *Exporter) newServer(addr string, timeouts httpserver.Timeouts) *http.Se
 	// endpoint when probed by a human or a liveness check.
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write([]byte("Puppet CA metrics exporter\nSee /metrics\n"))
+		_, _ = w.Write([]byte("OpenVox CA metrics exporter\nSee /metrics\n"))
 	})
 	return httpserver.New(addr, mux, timeouts)
 }

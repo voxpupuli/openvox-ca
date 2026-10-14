@@ -373,7 +373,7 @@ type CA struct {
 	// elsewhere since the last successful pass — not a revocation bypass, but a
 	// verifier that hard-fails on `unknown` sees one replica reject what the
 	// others accept. Exposed via the metrics exporter
-	// (puppetca_ocsp_index_sync_failures_total) for alerting.
+	// (openvoxca_ocsp_index_sync_failures_total) for alerting.
 	serialIndexSyncFailures atomic.Uint64
 
 	// crlUpdateFailures counts failures to amend the CRL: a CRL that could not
@@ -393,7 +393,7 @@ type CA struct {
 	// it so the primary operation still succeeds. Either way a rising count
 	// means the CRL is not being maintained and, for revocations, that a
 	// superseded certificate may still be a valid credential. Exposed via the
-	// metrics exporter (puppetca_crl_update_failures_total) for alerting.
+	// metrics exporter (openvoxca_crl_update_failures_total) for alerting.
 	crlUpdateFailures atomic.Uint64
 
 	// crlSyncFailures counts failures to refresh the in-memory CRL from storage
@@ -403,7 +403,7 @@ type CA struct {
 	// some other replica made. While it rises, this process is deciding
 	// revocation from a CRL that may predate a revocation elsewhere in the
 	// fleet, so a certificate revoked there may still be admitted here. Exposed
-	// via the metrics exporter (puppetca_crl_sync_failures_total) for alerting.
+	// via the metrics exporter (openvoxca_crl_sync_failures_total) for alerting.
 	crlSyncFailures atomic.Uint64
 
 	// supersedeFailures counts failures to schedule or carry out a delayed
@@ -416,7 +416,7 @@ type CA struct {
 	// touched. While it rises, a certificate that a renewal replaced may still
 	// be a valid credential, and on a lost entry nothing else records that it
 	// should not be. Exposed via the metrics exporter
-	// (puppetca_supersede_failures_total) for alerting.
+	// (openvoxca_supersede_failures_total) for alerting.
 	supersedeFailures atomic.Uint64
 
 	// Four counters, because their remedies differ: crlChainFailures points at
@@ -487,9 +487,9 @@ type CA struct {
 	// incomplete bundle moves both, discarded for the copy the file carries and
 	// removed for the copy already published.
 	//
-	// Surfaced as puppetca_crl_chain_refresh_failures_total,
-	// puppetca_crl_chain_discarded_total, puppetca_crl_chain_regressed_total and
-	// puppetca_crl_chain_removed_total.
+	// Surfaced as openvoxca_crl_chain_refresh_failures_total,
+	// openvoxca_crl_chain_discarded_total, openvoxca_crl_chain_regressed_total and
+	// openvoxca_crl_chain_removed_total.
 	crlChainFailures  atomic.Uint64
 	crlChainDiscarded atomic.Uint64
 	crlChainRegressed atomic.Uint64
@@ -509,7 +509,7 @@ type CA struct {
 	// forever, so the stamp advances every cycle exactly as it does on a healthy
 	// file; the two are indistinguishable here. What catches a frozen mount is
 	// the upstream CRL's own nextUpdate marching towards expiry --
-	// PuppetCAUpstreamCRLExpiringSoon firing on a CA that has crl_chain_file
+	// OpenVoxCAUpstreamCRLExpiringSoon firing on a CA that has crl_chain_file
 	// configured *is* the subPath signature.
 	crlChainLastRead atomic.Int64
 
@@ -528,7 +528,7 @@ type CA struct {
 	// signal that distinguishes "this deployment never approaches its limit"
 	// from "this deployment is refusing revocation-status answers continuously",
 	// and those want very different responses from an operator. Exposed via the
-	// metrics exporter (puppetca_ca_signing_shed_total) for alerting.
+	// metrics exporter (openvoxca_ca_signing_shed_total) for alerting.
 	signingShed atomic.Uint64
 
 	// crlNotify carries a coalesced signal each time the CRL is re-signed (see
@@ -560,7 +560,7 @@ func New(s *storage.StorageService, autosignCfg AutosignConfig, hostname string)
 // write (across the revoke-by-subject, revoke-by-serial, cleanup, reissue and
 // refresh paths). A rising
 // value means the CRL is not being maintained; the metrics exporter surfaces
-// it as puppetca_crl_update_failures_total.
+// it as openvoxca_crl_update_failures_total.
 func (c *CA) CRLUpdateFailures() uint64 {
 	return c.crlUpdateFailures.Load()
 }
@@ -570,7 +570,7 @@ func (c *CA) CRLUpdateFailures() uint64 {
 // replica's revocation checks are answering from a CRL that may be behind the
 // stored one, so a certificate revoked on another replica may still be
 // accepted here; the metrics exporter surfaces it as
-// puppetca_crl_sync_failures_total.
+// openvoxca_crl_sync_failures_total.
 func (c *CA) CRLSyncFailures() uint64 {
 	return c.crlSyncFailures.Load()
 }
@@ -579,7 +579,7 @@ func (c *CA) CRLSyncFailures() uint64 {
 // its OCSP serial index from the inventory (see SyncSerialIndex). A rising
 // value means this replica's OCSP responder is answering `unknown` for
 // certificates issued elsewhere since the last successful pass; the metrics
-// exporter surfaces it as puppetca_ocsp_index_sync_failures_total.
+// exporter surfaces it as openvoxca_ocsp_index_sync_failures_total.
 func (c *CA) SerialIndexSyncFailures() uint64 {
 	return c.serialIndexSyncFailures.Load()
 }
@@ -587,7 +587,7 @@ func (c *CA) SerialIndexSyncFailures() uint64 {
 // SerialIndexSize returns how many serials this replica's OCSP responder
 // recognises. A serial it does not hold is answered `unknown` before the CRL is
 // consulted, so this is the size of what the responder will speak about at all;
-// the metrics exporter surfaces it as puppetca_ocsp_index_serials, and specs
+// the metrics exporter surfaces it as openvoxca_ocsp_index_serials, and specs
 // use it to assert a sync pass landed without reaching into unexported state.
 func (c *CA) SerialIndexSize() int {
 	c.mu.RLock()
@@ -605,18 +605,18 @@ func (c *CA) SerialIndexSize() int {
 // this comment used to say "refresh passes" alone, which undersold it by the
 // larger half.
 //
-// Surfaced as puppetca_crl_chain_refresh_failures_total.
+// Surfaced as openvoxca_crl_chain_refresh_failures_total.
 func (c *CA) CRLChainFailures() uint64 { return c.crlChainFailures.Load() }
 
 // CRLChainDiscarded returns how many CRLs have been dropped from
 // crl_chain_file because no certificate in the CA bundle signed them. Surfaced
-// as puppetca_crl_chain_discarded_total; a rising value means the published
+// as openvoxca_crl_chain_discarded_total; a rising value means the published
 // chain is smaller than the operator's file says it should be.
 func (c *CA) CRLChainDiscarded() uint64 { return c.crlChainDiscarded.Load() }
 
 // CRLChainRegressed returns how many CRLs in crl_chain_file have been passed
 // over because the published chain already carried a newer one from the same
-// ancestor. Surfaced as puppetca_crl_chain_regressed_total; a rising value means
+// ancestor. Surfaced as openvoxca_crl_chain_regressed_total; a rising value means
 // the file is stale, rolled back or replayed, and points at whatever writes it
 // rather than at the CA bundle.
 func (c *CA) CRLChainRegressed() uint64 { return c.crlChainRegressed.Load() }
@@ -624,7 +624,7 @@ func (c *CA) CRLChainRegressed() uint64 { return c.crlChainRegressed.Load() }
 // CRLChainRemoved returns how many ancestors have had their published CRL
 // dropped from the chain, whether because crl_chain_file stopped listing them or
 // because their certificate left the CA bundle. Surfaced as
-// puppetca_crl_chain_removed_total; the removal is honoured because the file is
+// openvoxca_crl_chain_removed_total; the removal is honoured because the file is
 // authoritative, but it cannot be undone here, so a rising value wants checking
 // against whether the operator meant it -- and the log line says which of the
 // two causes fired, because the remedies differ.

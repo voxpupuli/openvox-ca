@@ -1324,7 +1324,7 @@ func newRootCmd() *cobra.Command {
 			// The exporter owns a private registry holding the Go/process
 			// collectors, the CA/CRL/leaf certificate collector, and the HTTP
 			// request metrics. When enabled, the API handler is instrumented so
-			// puppetca_http_* counts requests to the Puppet API, while /metrics is
+			// openvoxca_http_* counts requests to the Puppet API, while /metrics is
 			// served on a separate listener (see metricsServer below).
 			handler := srv.Routes()
 			var exporter *metrics.Exporter
@@ -1413,7 +1413,7 @@ func newRootCmd() *cobra.Command {
 				if exporter != nil {
 					crlMetrics = newClientCRLMetrics(exporter.Registry())
 				}
-				// Publish puppetca_client_crl_usable before serving. The sets
+				// Publish openvoxca_client_crl_usable before serving. The sets
 				// themselves are already installed by buildTrustDomains, so this
 				// is not about the first request -- it is that `== 0` cannot fire
 				// on a series that does not exist, so a domain whose CRLs are

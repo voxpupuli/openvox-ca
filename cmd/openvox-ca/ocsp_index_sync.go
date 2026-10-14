@@ -66,7 +66,7 @@ func runOCSPIndexSync(ctx context.Context, c *ca.CA, interval time.Duration) {
 // syncOCSPIndexOnce runs a single pass, logging the outcome. Errors are logged
 // and swallowed so a transient storage failure does not stop the job; the next
 // tick retries, and CA.SyncSerialIndex has already counted the failure into
-// puppetca_ocsp_index_sync_failures_total for anyone alerting on a replica that
+// openvoxca_ocsp_index_sync_failures_total for anyone alerting on a replica that
 // stays behind.
 //
 // The pass itself logs at info when it changes the index, so this reports only

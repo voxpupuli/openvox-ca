@@ -84,7 +84,7 @@ func (s *Server) handleOCSP(w http.ResponseWriter, r *http.Request) {
 			// log flood and amplifying exactly the load the bound exists to
 			// shed.
 			//
-			// Nothing is lost by dropping it: puppetca_ca_signing_shed_total
+			// Nothing is lost by dropping it: openvoxca_ca_signing_shed_total
 			// counts every one of these, and the metric is already what the
 			// docs tell operators to alert on. This line only adds which caller
 			// provoked it, which is a debugging question rather than a

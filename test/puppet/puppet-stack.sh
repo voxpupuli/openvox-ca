@@ -728,17 +728,17 @@ fi
 # Redis stack (test/backends/redis-stack.sh runs this same script), where there
 # is no superseded.json to read.
 _pending=$(curl -sf "$CA_METRICS_URL" 2>/dev/null \
-    | awk '$1 == "puppetca_supersede_pending" { print $2 }') || true
+    | awk '$1 == "openvoxca_supersede_pending" { print $2 }') || true
 [[ -n "$_pending" ]] \
-    && pass "exporter publishes puppetca_supersede_pending" \
-    || fail "exporter publishes puppetca_supersede_pending" "gauge absent from ${CA_METRICS_URL}"
+    && pass "exporter publishes openvoxca_supersede_pending" \
+    || fail "exporter publishes openvoxca_supersede_pending" "gauge absent from ${CA_METRICS_URL}"
 # awk prints the Prometheus float verbatim ("1" or "1.0"); compare numerically
 # so either form counts, and refuse an empty value rather than letting the
 # arithmetic treat it as zero.
 [[ -n "$_pending" ]] && awk -v v="$_pending" 'BEGIN { exit !(v >= 1) }' \
     && pass "the superseded certificate is recorded for delayed revocation" \
     || fail "the superseded certificate is recorded for delayed revocation" \
-        "puppetca_supersede_pending is '${_pending:-<absent>}'; the renewal left nothing on the pending list"
+        "openvoxca_supersede_pending is '${_pending:-<absent>}'; the renewal left nothing on the pending list"
 
 # The renewed cert must still work for a normal agent run (still trusted,
 # same private key on disk as before the renewal). Match Group 3's depth:

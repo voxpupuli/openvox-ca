@@ -771,7 +771,7 @@ type UpstreamCRLStatus struct {
 // freshness metric.
 //
 // Deliberately separate from the existing unlabelled
-// puppetca_crl_next_update_timestamp_seconds, which keeps meaning exactly what
+// openvoxca_crl_next_update_timestamp_seconds, which keeps meaning exactly what
 // it means today: *this CA's own* CRL. Adding an issuer label to that series
 // would multiply it and make the two shipped expiry alerts fire for upstream
 // CRLs this CA cannot reissue — a real page with a wrong runbook, since the
@@ -784,7 +784,7 @@ type UpstreamCRLStatus struct {
 // only the DN to label with, so two statuses for one DN would be two samples
 // with identical label sets. prometheus.Registry.Gather rejects the second and
 // records an error on every scrape, leaving the shadowed ancestor with no expiry
-// series at all and PuppetCAUpstreamCRLExpired unable to fire for it. Reporting
+// series at all and OpenVoxCAUpstreamCRLExpired unable to fire for it. Reporting
 // the nearest deadline collapses them without hiding anything: the alert exists
 // to catch the ancestor closest to lapsing, and that is the one it now reports.
 //

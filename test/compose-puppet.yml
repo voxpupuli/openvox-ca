@@ -40,7 +40,7 @@ services:
       - ../docker/puppet/ca-entrypoint.sh:/etc/puppet-ca/entrypoint.sh:ro,z
       - ca-data:/data
     # The Prometheus exporter is off by default because it reveals certificate
-    # subjects. It is on here so the stack can assert on puppetca_supersede_pending:
+    # subjects. It is on here so the stack can assert on openvoxca_supersede_pending:
     # with superseded_cert_revoke_after_sec defaulting to 24h, a renewal's
     # predecessor is deliberately absent from the CRL, and that gauge is the only
     # backend-agnostic evidence the supersession was *recorded* rather than

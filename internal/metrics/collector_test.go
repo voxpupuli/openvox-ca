@@ -97,7 +97,7 @@ func (g gathered) findByLabels(name string, want map[string]string) *dto.Metric 
 // match loop never runs, so it returns the first series whatever its labels.
 // That reads as coverage while asserting only the family name — and the one
 // property this file most needs to hold is that
-// puppetca_crl_next_update_timestamp_seconds stays a single unlabelled series,
+// openvoxca_crl_next_update_timestamp_seconds stays a single unlabelled series,
 // because adding an {issuer} label to it would multiply the two shipped expiry
 // alerts across CRLs this CA cannot reissue.
 func (g gathered) findUnlabelled(name string) *dto.Metric {
@@ -190,52 +190,52 @@ var _ = Describe("Collector", func() {
 	It("reports CA certificate and CRL metrics", func() {
 		g := gather(metrics.NewCollector(myCA))
 
-		Expect(gaugeValue(g.findByLabels("puppetca_collector_scrape_success", nil))).To(Equal(1.0))
-		Expect(gaugeValue(g.findByLabels("puppetca_ca_ready", nil))).To(Equal(1.0))
+		Expect(gaugeValue(g.findByLabels("openvoxca_collector_scrape_success", nil))).To(Equal(1.0))
+		Expect(gaugeValue(g.findByLabels("openvoxca_ca_ready", nil))).To(Equal(1.0))
 
-		caInfo := g.findByLabels("puppetca_ca_certificate_info", nil)
+		caInfo := g.findByLabels("openvoxca_ca_certificate_info", nil)
 		Expect(caInfo).NotTo(BeNil())
 		Expect(labelsOf(caInfo)).To(HaveKeyWithValue("common_name", ContainSubstring("Puppet CA")))
 		Expect(gaugeValue(caInfo)).To(Equal(1.0))
 
-		notAfter := g.findByLabels("puppetca_ca_certificate_not_after_timestamp_seconds", nil)
+		notAfter := g.findByLabels("openvoxca_ca_certificate_not_after_timestamp_seconds", nil)
 		Expect(notAfter).NotTo(BeNil())
 		Expect(gaugeValue(notAfter)).To(BeNumerically(">", gaugeValue(
-			g.findByLabels("puppetca_ca_certificate_not_before_timestamp_seconds", nil))))
+			g.findByLabels("openvoxca_ca_certificate_not_before_timestamp_seconds", nil))))
 
 		// A freshly bootstrapped CA has published an (empty) CRL.
 		//
 		// Asserted as unlabelled deliberately: this series means *this CA's
 		// own* CRL, and the upstream entries get their own labelled series so
 		// the shipped expiry alerts keep their meaning and cardinality.
-		Expect(g.findUnlabelled("puppetca_crl_next_update_timestamp_seconds")).NotTo(BeNil())
-		Expect(gaugeValue(g.findByLabels("puppetca_crl_revoked_certificates", nil))).To(Equal(0.0))
+		Expect(g.findUnlabelled("openvoxca_crl_next_update_timestamp_seconds")).NotTo(BeNil())
+		Expect(gaugeValue(g.findByLabels("openvoxca_crl_revoked_certificates", nil))).To(Equal(0.0))
 
 		// The CRL-update failure counter is always exported, starting at zero
 		// on a CA that has performed no failed CRL amendments.
-		crlUpdateFailures := g.findByLabels("puppetca_crl_update_failures_total", nil)
+		crlUpdateFailures := g.findByLabels("openvoxca_crl_update_failures_total", nil)
 		Expect(crlUpdateFailures).NotTo(BeNil())
 		Expect(counterValue(crlUpdateFailures)).To(Equal(0.0))
 
 		// Likewise the CRL-sync failure counter, which is what tells an operator
 		// this replica may be enforcing an out-of-date revocation list.
-		crlSyncFailures := g.findByLabels("puppetca_crl_sync_failures_total", nil)
+		crlSyncFailures := g.findByLabels("openvoxca_crl_sync_failures_total", nil)
 		Expect(crlSyncFailures).NotTo(BeNil())
 		Expect(counterValue(crlSyncFailures)).To(Equal(0.0))
 
 		// The OCSP index series are per-process in the same way, and are how an
 		// operator spots a replica calling valid certificates unknown.
-		ocspFailures := g.findByLabels("puppetca_ocsp_index_sync_failures_total", nil)
+		ocspFailures := g.findByLabels("openvoxca_ocsp_index_sync_failures_total", nil)
 		Expect(ocspFailures).NotTo(BeNil())
 		Expect(counterValue(ocspFailures)).To(Equal(0.0))
-		Expect(gaugeValue(g.findByLabels("puppetca_ocsp_index_serials", nil))).To(Equal(0.0),
+		Expect(gaugeValue(g.findByLabels("openvoxca_ocsp_index_serials", nil))).To(Equal(0.0),
 			"a freshly bootstrapped CA has issued nothing")
 
 		// The cached CRL number is the copy this replica decides revocation
 		// from; on a replica that is up to date it equals the stored one.
-		cached := g.findByLabels("puppetca_crl_cached_number", nil)
+		cached := g.findByLabels("openvoxca_crl_cached_number", nil)
 		Expect(cached).NotTo(BeNil())
-		Expect(gaugeValue(cached)).To(Equal(gaugeValue(g.findByLabels("puppetca_crl_number", nil))))
+		Expect(gaugeValue(cached)).To(Equal(gaugeValue(g.findByLabels("openvoxca_crl_number", nil))))
 	})
 
 	It("reports a cached CRL number behind the stored one on a replica that has not synced", func() {
@@ -248,8 +248,8 @@ var _ = Describe("Collector", func() {
 		Expect(myCA.Revoke(ctx, "divergent-node")).To(Succeed())
 
 		g := gather(metrics.NewCollector(peer))
-		stored := gaugeValue(g.findByLabels("puppetca_crl_number", nil))
-		cached := gaugeValue(g.findByLabels("puppetca_crl_cached_number", nil))
+		stored := gaugeValue(g.findByLabels("openvoxca_crl_number", nil))
+		cached := gaugeValue(g.findByLabels("openvoxca_crl_cached_number", nil))
 		Expect(cached).To(BeNumerically("<", stored),
 			"the gap the alert fires on must be visible in the metrics")
 
@@ -258,7 +258,7 @@ var _ = Describe("Collector", func() {
 		Expect(updated).To(BeTrue())
 
 		g = gather(metrics.NewCollector(peer))
-		Expect(gaugeValue(g.findByLabels("puppetca_crl_cached_number", nil))).To(Equal(stored))
+		Expect(gaugeValue(g.findByLabels("openvoxca_crl_cached_number", nil))).To(Equal(stored))
 	})
 
 	It("reports an OCSP index behind the fleet, and the failure count when it cannot catch up", func() {
@@ -272,18 +272,18 @@ var _ = Describe("Collector", func() {
 		signCert("signed-after-the-peer-started")
 
 		g := gather(metrics.NewCollector(peer))
-		behind := gaugeValue(g.findByLabels("puppetca_ocsp_index_serials", nil))
+		behind := gaugeValue(g.findByLabels("openvoxca_ocsp_index_serials", nil))
 		Expect(gaugeValue(gather(metrics.NewCollector(myCA)).
-			findByLabels("puppetca_ocsp_index_serials", nil))).
+			findByLabels("openvoxca_ocsp_index_serials", nil))).
 			To(BeNumerically(">", behind),
 				"the gap the fleet-relative query fires on must be visible in the metrics")
 
 		_, err := peer.SyncSerialIndex(ctx)
 		Expect(err).NotTo(HaveOccurred())
 		g = gather(metrics.NewCollector(peer))
-		Expect(gaugeValue(g.findByLabels("puppetca_ocsp_index_serials", nil))).
+		Expect(gaugeValue(g.findByLabels("openvoxca_ocsp_index_serials", nil))).
 			To(Equal(gaugeValue(gather(metrics.NewCollector(myCA)).
-				findByLabels("puppetca_ocsp_index_serials", nil))),
+				findByLabels("openvoxca_ocsp_index_serials", nil))),
 				"after a sync the two replicas must agree")
 
 		// Now make the read fail. Asserting the value rather than its presence
@@ -295,11 +295,11 @@ var _ = Describe("Collector", func() {
 		Expect(err).To(HaveOccurred())
 
 		g = gather(metrics.NewCollector(peer))
-		Expect(counterValue(g.findByLabels("puppetca_ocsp_index_sync_failures_total", nil))).
+		Expect(counterValue(g.findByLabels("openvoxca_ocsp_index_sync_failures_total", nil))).
 			To(Equal(float64(peer.SerialIndexSyncFailures())))
-		Expect(counterValue(g.findByLabels("puppetca_ocsp_index_sync_failures_total", nil))).
+		Expect(counterValue(g.findByLabels("openvoxca_ocsp_index_sync_failures_total", nil))).
 			To(BeNumerically(">", 0))
-		Expect(counterValue(g.findByLabels("puppetca_crl_sync_failures_total", nil))).
+		Expect(counterValue(g.findByLabels("openvoxca_crl_sync_failures_total", nil))).
 			To(Equal(0.0), "an unreadable inventory is not an unreadable CRL")
 	})
 
@@ -316,11 +316,11 @@ var _ = Describe("Collector", func() {
 		// failure counters start at zero and are otherwise only ever observed
 		// there, so transposing their descriptors would go unnoticed.
 		g := gather(metrics.NewCollector(peer))
-		Expect(counterValue(g.findByLabels("puppetca_crl_sync_failures_total", nil))).
+		Expect(counterValue(g.findByLabels("openvoxca_crl_sync_failures_total", nil))).
 			To(Equal(float64(peer.CRLSyncFailures())))
-		Expect(counterValue(g.findByLabels("puppetca_crl_sync_failures_total", nil))).
+		Expect(counterValue(g.findByLabels("openvoxca_crl_sync_failures_total", nil))).
 			To(BeNumerically(">", 0))
-		Expect(counterValue(g.findByLabels("puppetca_crl_update_failures_total", nil))).
+		Expect(counterValue(g.findByLabels("openvoxca_crl_update_failures_total", nil))).
 			To(Equal(0.0), "a failed reload is not a failed amendment")
 	})
 
@@ -331,9 +331,16 @@ var _ = Describe("Collector", func() {
 	// watch.
 	It("reports the delayed-supersession series", func() {
 		g := gather(metrics.NewCollector(myCA))
-		Expect(counterValue(g.findByLabels("puppetca_supersede_failures_total", nil))).
+		// The failure counter is only ever observed at zero here, and the
+		// getters behind counterValue read zero from a missing family and from a
+		// gauge alike, so its presence and its type are what pin the series the
+		// mixin alerts on.
+		supersedeFailures := g.findByLabels("openvoxca_supersede_failures_total", nil)
+		Expect(supersedeFailures).NotTo(BeNil())
+		Expect(supersedeFailures.GetCounter()).NotTo(BeNil(), "supersede_failures_total must be a counter")
+		Expect(counterValue(supersedeFailures)).
 			To(Equal(0.0), "a CA that has recorded nothing has lost nothing")
-		Expect(gaugeValue(g.findByLabels("puppetca_supersede_pending", nil))).
+		Expect(gaugeValue(g.findByLabels("openvoxca_supersede_pending", nil))).
 			To(Equal(0.0), "an absent list is a genuine zero, and must be reported as one")
 
 		// One certificate inside its overlap window is one credential this CA
@@ -351,10 +358,10 @@ var _ = Describe("Collector", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		g = gather(metrics.NewCollector(myCA))
-		Expect(gaugeValue(g.findByLabels("puppetca_supersede_pending", nil))).To(Equal(1.0))
-		Expect(counterValue(g.findByLabels("puppetca_supersede_failures_total", nil))).
+		Expect(gaugeValue(g.findByLabels("openvoxca_supersede_pending", nil))).To(Equal(1.0))
+		Expect(counterValue(g.findByLabels("openvoxca_supersede_failures_total", nil))).
 			To(Equal(0.0), "a recorded supersession is not a failure")
-		Expect(counterValue(g.findByLabels("puppetca_crl_update_failures_total", nil))).
+		Expect(counterValue(g.findByLabels("openvoxca_crl_update_failures_total", nil))).
 			To(Equal(0.0), "a deferred revocation is not a failed CRL amendment")
 	})
 
@@ -372,10 +379,10 @@ var _ = Describe("Collector", func() {
 		Expect(failing.Init(ctx)).To(Succeed())
 
 		g := gather(metrics.NewCollector(failing))
-		Expect(g.findByLabels("puppetca_supersede_pending", nil)).To(BeNil(),
+		Expect(g.findByLabels("openvoxca_supersede_pending", nil)).To(BeNil(),
 			"an unreadable list must omit the gauge rather than report a healthy zero")
 		// The rest of the scrape is unaffected: this is one auxiliary series.
-		Expect(gaugeValue(g.findByLabels("puppetca_collector_scrape_success", nil))).To(Equal(1.0))
+		Expect(gaugeValue(g.findByLabels("openvoxca_collector_scrape_success", nil))).To(Equal(1.0))
 	})
 
 	// The whole reason these two are emitted ahead of the gather's error return
@@ -386,7 +393,7 @@ var _ = Describe("Collector", func() {
 		signCert("gather-failure-node")
 
 		before := gather(metrics.NewCollector(myCA))
-		cachedBefore := gaugeValue(before.findByLabels("puppetca_crl_cached_number", nil))
+		cachedBefore := gaugeValue(before.findByLabels("openvoxca_crl_cached_number", nil))
 
 		// Replace the directory ListCerts enumerates with a plain file, so the
 		// listing returns a real error rather than an empty set.
@@ -395,14 +402,14 @@ var _ = Describe("Collector", func() {
 		Expect(os.WriteFile(signedDir, []byte("not a directory"), 0o600)).To(Succeed())
 
 		g := gather(metrics.NewCollector(myCA))
-		Expect(gaugeValue(g.findByLabels("puppetca_collector_scrape_success", nil))).To(Equal(0.0),
+		Expect(gaugeValue(g.findByLabels("openvoxca_collector_scrape_success", nil))).To(Equal(0.0),
 			"precondition: the gather must actually have failed")
-		Expect(g.findByLabels("puppetca_crl_number", nil)).To(BeNil(),
+		Expect(g.findByLabels("openvoxca_crl_number", nil)).To(BeNil(),
 			"precondition: the storage-derived series drop out")
 
-		Expect(counterValue(g.findByLabels("puppetca_crl_sync_failures_total", nil))).
+		Expect(counterValue(g.findByLabels("openvoxca_crl_sync_failures_total", nil))).
 			To(Equal(float64(myCA.CRLSyncFailures())))
-		cached := g.findByLabels("puppetca_crl_cached_number", nil)
+		cached := g.findByLabels("openvoxca_crl_cached_number", nil)
 		Expect(cached).NotTo(BeNil(), "the cached CRL number must survive a failed gather")
 		Expect(gaugeValue(cached)).To(Equal(cachedBefore))
 	})
@@ -414,31 +421,31 @@ var _ = Describe("Collector", func() {
 		uninitialised := ca.New(storage.New(GinkgoT().TempDir()), ca.AutosignConfig{Mode: "off"}, "puppet.test")
 
 		g := gather(metrics.NewCollector(uninitialised))
-		Expect(g.findByLabels("puppetca_crl_cached_number", nil)).To(BeNil())
-		Expect(gaugeValue(g.findByLabels("puppetca_ca_ready", nil))).To(Equal(0.0))
+		Expect(g.findByLabels("openvoxca_crl_cached_number", nil)).To(BeNil())
+		Expect(gaugeValue(g.findByLabels("openvoxca_ca_ready", nil))).To(Equal(0.0))
 	})
 
 	It("drops the CRL gauges and still reports a successful scrape when the CRL is unreadable", func() {
 		// The degradation docs/metrics.md warns about: a CRL the exporter
 		// cannot parse takes the four CRL gauges out of the output without
 		// failing the scrape, so an expiry alert comparing
-		// puppetca_crl_next_update_timestamp_seconds against time() matches
+		// openvoxca_crl_next_update_timestamp_seconds against time() matches
 		// nothing rather than firing. That is why the note tells operators to
 		// pair it with a presence check.
 		Expect(store.UpdateCRL(ctx, []byte("not a valid CRL"))).To(Succeed())
 
 		g := gather(metrics.NewCollector(myCA))
 
-		Expect(gaugeValue(g.findByLabels("puppetca_collector_scrape_success", nil))).To(Equal(1.0))
+		Expect(gaugeValue(g.findByLabels("openvoxca_collector_scrape_success", nil))).To(Equal(1.0))
 		for _, name := range []string{
-			"puppetca_crl_number",
-			"puppetca_crl_this_update_timestamp_seconds",
-			"puppetca_crl_next_update_timestamp_seconds",
-			"puppetca_crl_revoked_certificates",
+			"openvoxca_crl_number",
+			"openvoxca_crl_this_update_timestamp_seconds",
+			"openvoxca_crl_next_update_timestamp_seconds",
+			"openvoxca_crl_revoked_certificates",
 		} {
 			Expect(g.findByLabels(name, nil)).To(BeNil(), "%s must be absent, not stale", name)
 		}
-		Expect(g.findByLabels("puppetca_crl_update_failures_total", nil)).NotTo(BeNil(),
+		Expect(g.findByLabels("openvoxca_crl_update_failures_total", nil)).NotTo(BeNil(),
 			"the failure counter is exported regardless")
 	})
 
@@ -447,7 +454,7 @@ var _ = Describe("Collector", func() {
 		// self-signed root has no upstream, so nothing labelled appears and
 		// the shipped expiry alerts see exactly the one series they always saw.
 		g := gather(metrics.NewCollector(myCA))
-		Expect(g["puppetca_crl_chain_next_update_timestamp_seconds"]).To(BeNil())
+		Expect(g["openvoxca_crl_chain_next_update_timestamp_seconds"]).To(BeNil())
 	})
 
 	// All four chain counters must be exported on a CA that has never configured
@@ -467,10 +474,10 @@ var _ = Describe("Collector", func() {
 
 		g := gather(metrics.NewCollector(myCA))
 		for _, name := range []string{
-			"puppetca_crl_chain_refresh_failures_total",
-			"puppetca_crl_chain_discarded_total",
-			"puppetca_crl_chain_regressed_total",
-			"puppetca_crl_chain_removed_total",
+			"openvoxca_crl_chain_refresh_failures_total",
+			"openvoxca_crl_chain_discarded_total",
+			"openvoxca_crl_chain_regressed_total",
+			"openvoxca_crl_chain_removed_total",
 		} {
 			Expect(g[name]).NotTo(BeNil(), "%s must be exported even when unconfigured", name)
 			Expect(counterValue(g.findByLabels(name, nil))).To(Equal(0.0),
@@ -481,14 +488,14 @@ var _ = Describe("Collector", func() {
 	It("exports both chain counters by name, and at their value", func() {
 		// Neither name appeared in any spec. Deleting either MustNewConstMetric
 		// line, or renaming either series, left the suite green -- while
-		// PuppetCAUpstreamCRLDiscarded and PuppetCAUpstreamCRLRefreshFailing
+		// OpenVoxCAUpstreamCRLDiscarded and OpenVoxCAUpstreamCRLRefreshFailing
 		// route on exactly those names, and docs/metrics.md calls the discard
 		// counter "the only signal that the published chain is smaller than the
 		// file says".
 		g := gather(metrics.NewCollector(myCA))
-		Expect(counterValue(g.findByLabels("puppetca_crl_chain_refresh_failures_total", nil))).
+		Expect(counterValue(g.findByLabels("openvoxca_crl_chain_refresh_failures_total", nil))).
 			To(Equal(0.0))
-		Expect(counterValue(g.findByLabels("puppetca_crl_chain_discarded_total", nil))).
+		Expect(counterValue(g.findByLabels("openvoxca_crl_chain_discarded_total", nil))).
 			To(Equal(0.0))
 
 		// Driven through the real paths, and to distinct values so a
@@ -510,9 +517,9 @@ var _ = Describe("Collector", func() {
 		}
 
 		g = gather(metrics.NewCollector(myCA))
-		Expect(counterValue(g.findByLabels("puppetca_crl_chain_discarded_total", nil))).
+		Expect(counterValue(g.findByLabels("openvoxca_crl_chain_discarded_total", nil))).
 			To(Equal(1.0))
-		Expect(counterValue(g.findByLabels("puppetca_crl_chain_refresh_failures_total", nil))).
+		Expect(counterValue(g.findByLabels("openvoxca_crl_chain_refresh_failures_total", nil))).
 			To(Equal(2.0))
 	})
 
@@ -529,7 +536,7 @@ var _ = Describe("Collector", func() {
 		// -- absent() could not be put in an alert without firing on every
 		// instance in the fleet that never configured a chain file.
 		g := gather(metrics.NewCollector(myCA))
-		Expect(g["puppetca_crl_chain_last_read_timestamp_seconds"]).To(BeNil(),
+		Expect(g["openvoxca_crl_chain_last_read_timestamp_seconds"]).To(BeNil(),
 			"no crl_chain_file: the series must not exist")
 
 		// Configured, pointing at a path that never mounted. This is the state
@@ -539,7 +546,7 @@ var _ = Describe("Collector", func() {
 		myCA.CRLChainFile = filepath.Join(GinkgoT().TempDir(), "never-mounted.pem")
 		Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
 		g = gather(metrics.NewCollector(myCA))
-		Expect(gaugeValue(g.findUnlabelled("puppetca_crl_chain_last_read_timestamp_seconds"))).
+		Expect(gaugeValue(g.findUnlabelled("openvoxca_crl_chain_last_read_timestamp_seconds"))).
 			To(Equal(0.0), "configured but never opened must be reported, and as zero")
 
 		path := filepath.Join(GinkgoT().TempDir(), "empty.pem")
@@ -551,7 +558,7 @@ var _ = Describe("Collector", func() {
 		// as seconds since the epoch, and a UnixMilli stamp would make every
 		// staleness expression written against it silently never fire.
 		g = gather(metrics.NewCollector(myCA))
-		Expect(gaugeValue(g.findUnlabelled("puppetca_crl_chain_last_read_timestamp_seconds"))).
+		Expect(gaugeValue(g.findUnlabelled("openvoxca_crl_chain_last_read_timestamp_seconds"))).
 			To(BeNumerically("~", float64(time.Now().Unix()), 5),
 				"an empty file is still a file we read")
 	})
@@ -578,7 +585,7 @@ var _ = Describe("Collector", func() {
 		Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
 
 		healthy := gather(metrics.NewCollector(myCA))
-		Expect(healthy).To(HaveKey("puppetca_crl_chain_next_update_timestamp_seconds"),
+		Expect(healthy).To(HaveKey("openvoxca_crl_chain_next_update_timestamp_seconds"),
 			"precondition: the gauge this failure costs must exist first")
 
 		// Now a block that decodes as PEM and fails to parse as a CRL, appended
@@ -591,16 +598,16 @@ var _ = Describe("Collector", func() {
 			To(Succeed())
 
 		g := gather(metrics.NewCollector(myCA))
-		Expect(g.findByLabels("puppetca_crl_number", nil)).NotTo(BeNil(),
+		Expect(g.findByLabels("openvoxca_crl_number", nil)).NotTo(BeNil(),
 			"a chain it cannot read must not cost the CA's own CRL series")
-		Expect(g.findByLabels("puppetca_ca_certificate_not_after_timestamp_seconds", nil)).NotTo(BeNil())
-		Expect(g).NotTo(HaveKey("puppetca_crl_chain_next_update_timestamp_seconds"),
+		Expect(g.findByLabels("openvoxca_ca_certificate_not_after_timestamp_seconds", nil)).NotTo(BeNil())
+		Expect(g).NotTo(HaveKey("openvoxca_crl_chain_next_update_timestamp_seconds"),
 			"the per-issuer gauge is the one thing the failure costs")
 	})
 
 	It("exports the removal counter by name, and at its value", func() {
 		// The only one of the four chain counters never gathered in a spec, and
-		// the worst to leave uncovered: PuppetCAUpstreamCRLRemoved routes on this
+		// the worst to leave uncovered: OpenVoxCAUpstreamCRLRemoved routes on this
 		// name, and the condition behind it is invisible from every other angle
 		// -- the ancestor's own expiry series simply stops being produced, and a
 		// vanished series fires nothing.
@@ -617,7 +624,7 @@ var _ = Describe("Collector", func() {
 		Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
 
 		g := gather(metrics.NewCollector(myCA))
-		Expect(counterValue(g.findByLabels("puppetca_crl_chain_removed_total", nil))).
+		Expect(counterValue(g.findByLabels("openvoxca_crl_chain_removed_total", nil))).
 			To(Equal(0.0))
 
 		// The file stops listing it. Honoured, unrecoverable, and counted.
@@ -633,7 +640,7 @@ var _ = Describe("Collector", func() {
 		// made one lost ancestor read as 2, so only the publishing read counts;
 		// see upstreamPass in internal/ca/crlchainfile.go. A `>= 1` assertion
 		// here would have passed throughout and pinned nothing.
-		Expect(counterValue(g.findByLabels("puppetca_crl_chain_removed_total", nil))).
+		Expect(counterValue(g.findByLabels("openvoxca_crl_chain_removed_total", nil))).
 			To(Equal(1.0),
 				"once for one ancestor: only the publishing read counts")
 
@@ -643,9 +650,9 @@ var _ = Describe("Collector", func() {
 		// would still hold on the first gather.
 		Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
 		g = gather(metrics.NewCollector(myCA))
-		Expect(counterValue(g.findByLabels("puppetca_crl_chain_removed_total", nil))).
+		Expect(counterValue(g.findByLabels("openvoxca_crl_chain_removed_total", nil))).
 			To(Equal(1.0), "a removal is counted while it happens, not on every pass after it")
-		Expect(counterValue(g.findByLabels("puppetca_crl_chain_discarded_total", nil))).
+		Expect(counterValue(g.findByLabels("openvoxca_crl_chain_discarded_total", nil))).
 			To(Equal(0.0), "an ancestor the file omits is not a CRL the bundle refused")
 	})
 
@@ -653,11 +660,11 @@ var _ = Describe("Collector", func() {
 		// The two share nothing but the word "dropped": a discard means the CA
 		// bundle is incomplete, a regression means the file is stale. They had
 		// one counter between them, so a rolled-back mirror fired
-		// PuppetCAUpstreamCRLDiscarded, whose runbook says to check that the
+		// OpenVoxCAUpstreamCRLDiscarded, whose runbook says to check that the
 		// bundle is complete -- which it is, since a signature-invalid CRL never
 		// reaches the comparison.
 		g := gather(metrics.NewCollector(myCA))
-		Expect(counterValue(g.findByLabels("puppetca_crl_chain_regressed_total", nil))).
+		Expect(counterValue(g.findByLabels("openvoxca_crl_chain_regressed_total", nil))).
 			To(Equal(0.0))
 
 		upstream, upsKey := upstreamCAWithKeyFixture("Rollback CA")
@@ -678,16 +685,16 @@ var _ = Describe("Collector", func() {
 		Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
 
 		g = gather(metrics.NewCollector(myCA))
-		Expect(counterValue(g.findByLabels("puppetca_crl_chain_regressed_total", nil))).
+		Expect(counterValue(g.findByLabels("openvoxca_crl_chain_regressed_total", nil))).
 			To(Equal(1.0))
-		Expect(counterValue(g.findByLabels("puppetca_crl_chain_discarded_total", nil))).
+		Expect(counterValue(g.findByLabels("openvoxca_crl_chain_discarded_total", nil))).
 			To(Equal(0.0), "a rollback must not move the counter whose runbook blames the bundle")
 	})
 
 	It("reports one labelled upstream CRL series per ancestor in the published chain", func() {
 		// The new series had no coverage at all: not its name, not its label,
 		// not its value. A rename would have stopped the mixin's
-		// PuppetCAUpstreamCRLExpired firing with the suite green.
+		// OpenVoxCAUpstreamCRLExpired firing with the suite green.
 		upstream, upsCRL := upstreamCRLFixture("Upstream Root CA")
 		Expect(upstream).NotTo(BeNil())
 		ours, err := store.GetCRL(ctx)
@@ -696,18 +703,18 @@ var _ = Describe("Collector", func() {
 
 		g := gather(metrics.NewCollector(myCA))
 
-		chain := g.findByLabels("puppetca_crl_chain_next_update_timestamp_seconds",
+		chain := g.findByLabels("openvoxca_crl_chain_next_update_timestamp_seconds",
 			map[string]string{"issuer": "CN=Upstream Root CA"})
 		Expect(chain).NotTo(BeNil(), "no series for the upstream issuer")
 		// The value, not merely its sign: both ThisUpdate and NextUpdate are
 		// large positive timestamps, so "> 0" passes with the fields
-		// transposed -- which would make PuppetCAUpstreamCRLExpired a
+		// transposed -- which would make OpenVoxCAUpstreamCRLExpired a
 		// permanent, unclearable critical page.
 		Expect(gaugeValue(chain)).To(BeNumerically("~", float64(upstreamCRLNextUpdate(upsCRL).Unix()), 1))
 
 		// And our own series stays unlabelled and single, which is the whole
 		// point of not relabelling it.
-		Expect(g.findUnlabelled("puppetca_crl_next_update_timestamp_seconds")).NotTo(BeNil())
+		Expect(g.findUnlabelled("openvoxca_crl_next_update_timestamp_seconds")).NotTo(BeNil())
 	})
 
 	It("reports per-leaf metrics with issuance state", func() {
@@ -718,36 +725,36 @@ var _ = Describe("Collector", func() {
 
 		g := gather(metrics.NewCollector(myCA))
 
-		signed := g.findByLabels("puppetca_leaf_certificate_info", map[string]string{"subject": "signed-node"})
+		signed := g.findByLabels("openvoxca_leaf_certificate_info", map[string]string{"subject": "signed-node"})
 		Expect(signed).NotTo(BeNil())
 		Expect(labelsOf(signed)).To(HaveKeyWithValue("state", "signed"))
 		Expect(labelsOf(signed)["serial"]).NotTo(BeEmpty())
 
-		revoked := g.findByLabels("puppetca_leaf_certificate_info", map[string]string{"subject": "revoked-node"})
+		revoked := g.findByLabels("openvoxca_leaf_certificate_info", map[string]string{"subject": "revoked-node"})
 		Expect(revoked).NotTo(BeNil())
 		Expect(labelsOf(revoked)).To(HaveKeyWithValue("state", "revoked"))
 
-		pending := g.findByLabels("puppetca_leaf_certificate_info", map[string]string{"subject": "pending-node"})
+		pending := g.findByLabels("openvoxca_leaf_certificate_info", map[string]string{"subject": "pending-node"})
 		Expect(pending).NotTo(BeNil())
 		Expect(labelsOf(pending)).To(HaveKeyWithValue("state", "requested"))
 		Expect(labelsOf(pending)["serial"]).To(BeEmpty())
 
 		// Pending requests carry no issued certificate, so they have no expiry series.
-		Expect(g.findByLabels("puppetca_leaf_certificate_not_after_timestamp_seconds",
+		Expect(g.findByLabels("openvoxca_leaf_certificate_not_after_timestamp_seconds",
 			map[string]string{"subject": "pending-node"})).To(BeNil())
 		// Signed certs do.
-		Expect(g.findByLabels("puppetca_leaf_certificate_not_after_timestamp_seconds",
+		Expect(g.findByLabels("openvoxca_leaf_certificate_not_after_timestamp_seconds",
 			map[string]string{"subject": "signed-node"})).NotTo(BeNil())
 
 		// The CRL now lists exactly the one revoked serial.
-		Expect(gaugeValue(g.findByLabels("puppetca_crl_revoked_certificates", nil))).To(Equal(1.0))
+		Expect(gaugeValue(g.findByLabels("openvoxca_crl_revoked_certificates", nil))).To(Equal(1.0))
 
 		// Aggregate per-state counts.
-		Expect(gaugeValue(g.findByLabels("puppetca_leaf_certificates",
+		Expect(gaugeValue(g.findByLabels("openvoxca_leaf_certificates",
 			map[string]string{"state": "signed"}))).To(Equal(1.0))
-		Expect(gaugeValue(g.findByLabels("puppetca_leaf_certificates",
+		Expect(gaugeValue(g.findByLabels("openvoxca_leaf_certificates",
 			map[string]string{"state": "revoked"}))).To(Equal(1.0))
-		Expect(gaugeValue(g.findByLabels("puppetca_leaf_certificates",
+		Expect(gaugeValue(g.findByLabels("openvoxca_leaf_certificates",
 			map[string]string{"state": "requested"}))).To(Equal(1.0))
 	})
 
@@ -758,7 +765,7 @@ var _ = Describe("Collector", func() {
 		It("publishes nothing when none is configured", func() {
 			g := gather(metrics.NewCollector(myCA))
 
-			Expect(g.findByLabels("puppetca_managed_certificate_configured", nil)).To(BeNil())
+			Expect(g.findByLabels("openvoxca_managed_certificate_configured", nil)).To(BeNil())
 		})
 
 		It("publishes one series per configured entry, whether or not it has issued", func() {
@@ -770,22 +777,22 @@ var _ = Describe("Collector", func() {
 
 			g := gather(metrics.NewCollector(myCA))
 
-			Expect(g.findByLabels("puppetca_managed_certificate_configured",
+			Expect(g.findByLabels("openvoxca_managed_certificate_configured",
 				map[string]string{"subject": "issued.example.com"})).NotTo(BeNil())
 			// The one that matters: configured, no certificate, still a series.
-			never := g.findByLabels("puppetca_managed_certificate_configured",
+			never := g.findByLabels("openvoxca_managed_certificate_configured",
 				map[string]string{"subject": "never-issued.example.com"})
 			Expect(never).NotTo(BeNil())
 			Expect(gaugeValue(never)).To(Equal(1.0))
 
-			// And the other half of what PuppetCAManagedCertificateNeverIssued
+			// And the other half of what OpenVoxCAManagedCertificateNeverIssued
 			// subtracts, so the alert's two sides are both pinned here: the
 			// entry that issued has a leaf series and the one that did not has
 			// none. Without this the rule could be satisfied by a leaf series
 			// that never appears for anything.
-			Expect(g.findByLabels("puppetca_leaf_certificate_not_after_timestamp_seconds",
+			Expect(g.findByLabels("openvoxca_leaf_certificate_not_after_timestamp_seconds",
 				map[string]string{"subject": "issued.example.com"})).NotTo(BeNil())
-			Expect(g.findByLabels("puppetca_leaf_certificate_not_after_timestamp_seconds",
+			Expect(g.findByLabels("openvoxca_leaf_certificate_not_after_timestamp_seconds",
 				map[string]string{"subject": "never-issued.example.com"})).To(BeNil())
 		})
 
@@ -793,7 +800,7 @@ var _ = Describe("Collector", func() {
 		// configuration and reads no storage, so a failed gather must not take
 		// it with it: absence has to keep meaning exactly one thing, that no
 		// managed certificate is configured. Emitted below the error return it
-		// would also reset PuppetCAManagedCertificateNeverIssued's `for` clock
+		// would also reset OpenVoxCAManagedCertificateNeverIssued's `for` clock
 		// on every storage blip, suppressing the alert during precisely the
 		// outages that stop issuance.
 		//
@@ -811,12 +818,12 @@ var _ = Describe("Collector", func() {
 			Expect(os.WriteFile(signedDir, []byte("not a directory"), 0o600)).To(Succeed())
 
 			g := gather(metrics.NewCollector(myCA))
-			Expect(gaugeValue(g.findByLabels("puppetca_collector_scrape_success", nil))).To(Equal(0.0),
+			Expect(gaugeValue(g.findByLabels("openvoxca_collector_scrape_success", nil))).To(Equal(0.0),
 				"precondition: the gather must actually have failed")
-			Expect(g.findByLabels("puppetca_leaf_certificate_not_after_timestamp_seconds", nil)).To(BeNil(),
+			Expect(g.findByLabels("openvoxca_leaf_certificate_not_after_timestamp_seconds", nil)).To(BeNil(),
 				"precondition: the storage-derived series drop out")
 
-			configured := g.findByLabels("puppetca_managed_certificate_configured",
+			configured := g.findByLabels("openvoxca_managed_certificate_configured",
 				map[string]string{"subject": "never-issued.example.com"})
 			Expect(configured).NotTo(BeNil(),
 				"the configured series must survive a failed gather, or its absence means two things")
@@ -831,9 +838,9 @@ var _ = Describe("Collector", func() {
 
 		g := gather(metrics.NewCollector(myCA))
 
-		Expect(g.findByLabels("puppetca_leaf_certificate_info",
+		Expect(g.findByLabels("openvoxca_leaf_certificate_info",
 			map[string]string{"subject": "keep-node"})).NotTo(BeNil())
-		Expect(g.findByLabels("puppetca_leaf_certificate_info",
+		Expect(g.findByLabels("openvoxca_leaf_certificate_info",
 			map[string]string{"subject": "clean-node"})).To(BeNil())
 	})
 
@@ -847,8 +854,8 @@ var _ = Describe("Collector", func() {
 			names[mf.GetName()] = true
 		}
 		Expect(names).To(HaveKey("go_goroutines"))
-		Expect(names).To(HaveKey("puppetca_ca_certificate_info"))
-		Expect(names).To(HaveKey("puppetca_http_requests_in_flight"))
+		Expect(names).To(HaveKey("openvoxca_ca_certificate_info"))
+		Expect(names).To(HaveKey("openvoxca_http_requests_in_flight"))
 	})
 })
 

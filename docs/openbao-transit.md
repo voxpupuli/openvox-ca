@@ -645,7 +645,7 @@ failure and throughput profile; plan for it:
   This matters most on `/ocsp`, which is unauthenticated and signs on a cache
   miss: it is the one path where a caller you did not authorise decides how many
   Transit requests you make. Requests over the limit are refused with RFC 6960
-  `tryLater` and counted in `puppetca_ca_signing_shed_total`.
+  `tryLater` and counted in `openvoxca_ca_signing_shed_total`.
 
 In short, `ca_key_provider: openbao` makes OpenBao's availability and HA a
 hard dependency of CA availability. This is the intended trade-off — the key
@@ -681,9 +681,9 @@ local-key custody, where the CA can sign with no external dependency at all.
   reachable by untrusted clients: those signatures hit the same backend and are
   not serialised, so they can crowd out issuance without issuance itself
   looking abnormal until it starts failing. Three CA-side metrics cover exactly
-  this: `puppetca_ca_signing_in_flight` against `puppetca_ca_signing_limit`
+  this: `openvoxca_ca_signing_in_flight` against `openvoxca_ca_signing_limit`
   shows how close the shared bound is to saturation, and
-  `puppetca_ca_signing_shed_total` rising means OCSP requests are being refused
+  `openvoxca_ca_signing_shed_total` rising means OCSP requests are being refused
   at it. Sustained shedding while Transit has capacity to spare means
   `ca_signing_concurrency` is set below what this deployment needs. Watch the
   OpenBao side too — the CA metrics show contention for the bound, not the

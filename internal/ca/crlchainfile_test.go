@@ -525,7 +525,7 @@ var _ = Describe("crl_chain_file", func() {
 		// published. The metric has only the DN to label with, so two statuses
 		// for one DN would be two samples with identical label sets: Gather
 		// drops the second and errors on every scrape, leaving that ancestor
-		// with no expiry series and PuppetCAUpstreamCRLExpired unable to fire
+		// with no expiry series and OpenVoxCAUpstreamCRLExpired unable to fire
 		// for it. One status per DN, carrying the nearest deadline, is what the
 		// alert needs -- and asserting the *earlier* of the two is what stops a
 		// "keep the first one seen" implementation passing.
@@ -1263,7 +1263,7 @@ var _ = Describe("crl_chain_file: size and duplicates", func() {
 		// crlChainFailures had one increment site, inside RefreshCRLChainFile.
 		// An unreadable file fails every revocation through crlChainLocked, and
 		// that moved nothing -- so the alert carrying the right remedy could not
-		// fire until the next hourly pass, while PuppetCACRLUpdateFailing sent
+		// fire until the next hourly pass, while OpenVoxCACRLUpdateFailing sent
 		// the responder to check storage instead. The same shape monotonicUpstream
 		// was moved to the chokepoint to fix, one artefact over.
 		trustUpstream()

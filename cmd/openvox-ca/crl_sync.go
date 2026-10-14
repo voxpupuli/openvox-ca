@@ -71,7 +71,7 @@ func runCRLSync(ctx context.Context, c *ca.CA, interval time.Duration) {
 // syncCRLOnce runs a single sync, logging the outcome. Errors are logged and
 // swallowed so a transient storage failure does not stop the job; the next tick
 // retries, and CA.SyncCRLCache has already counted the failure into
-// puppetca_crl_sync_failures_total for anyone alerting on a replica that stays
+// openvoxca_crl_sync_failures_total for anyone alerting on a replica that stays
 // behind.
 //
 // The reload itself logs at info when it installs a newer CRL, so this reports

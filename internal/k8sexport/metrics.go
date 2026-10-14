@@ -19,12 +19,14 @@ package k8sexport
 
 import (
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/voxpupuli/openvox-ca/internal/constants"
 )
 
-// metricsNamespace matches the namespace used by internal/metrics so the
-// export series appear alongside the other puppetca_* metrics.
+// metricsNamespace is the namespace internal/metrics registers under, so the
+// export series appear alongside the other openvoxca_* metrics.
 const (
-	metricsNamespace = "puppetca"
+	metricsNamespace = constants.MetricsNamespace
 	metricsSubsystem = "k8s_export"
 )
 
@@ -70,7 +72,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 // Prometheus does not export a child that has never been touched, so a target
 // nothing has ever recorded against is an absent series -- and no PromQL
 // comparison matches an absence. Publishing these at zero is what lets
-// PuppetCAKubernetesExportNotRunning tell a configured target that has never
+// OpenVoxCAKubernetesExportNotRunning tell a configured target that has never
 // been attempted from one that is not configured at all; see that rule in
 // mixin/alerts.libsonnet for the argument in full.
 //

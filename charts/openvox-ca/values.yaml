@@ -328,7 +328,7 @@ metrics:
     # `job="openvox-ca"` selector, which matches only a release whose Service is
     # named openvox-ca. There is no default that satisfies both a fixed selector
     # and per-release distinctness — they are contradictory — so the selector is
-    # the end that moves: set the mixin's puppetCASelector to match your
+    # the end that moves: set the mixin's openvoxCASelector to match your
     # deployment. See docs/helm-chart.md, "Monitoring".
     jobLabel: ""
     targetLabels: []

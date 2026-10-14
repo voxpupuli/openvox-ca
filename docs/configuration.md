@@ -557,7 +557,7 @@ Three things the window does not cover, all worth knowing before you rely on it:
   best-effort: if it fails, the check falls back to the CRL already in memory
   rather than refusing every renewal in the fleet over a transient backend
   error. Such a renewal is bounded by the ordinary propagation window instead of
-  by the read-through check. `puppetca_crl_sync_failures_total` is what tells
+  by the read-through check. `openvoxca_crl_sync_failures_total` is what tells
   you it happened.
 
 The read is one small blob, takes no cluster lock, and writes nothing, so it
@@ -570,15 +570,15 @@ revocations reach it.
 `filesystem` and `sqlite` are single-node, so the sync has nothing to find and
 the setting does not matter there.
 
-To confirm propagation, compare `puppetca_crl_cached_number` (per replica)
-against `puppetca_crl_number` (from storage) — see
+To confirm propagation, compare `openvoxca_crl_cached_number` (per replica)
+against `openvoxca_crl_number` (from storage) — see
 [metrics](metrics.md#watching-revocation-propagate).
 
 Restarting a replica also reloads its CRL. The sync installs only a CRL this CA
 signed, picking out the newest such block wherever it sits in the stored chain —
 the same selection the startup loader and the re-sign paths make. A stored chain
 carrying nothing of ours leaves the replica on the CRL it already holds and
-raises `puppetca_crl_sync_failures_total`; startup warns about the same
+raises `openvoxca_crl_sync_failures_total`; startup warns about the same
 condition and the re-sign paths refuse it outright. See
 [storage backends](storage-backends.md) for how that state is reached and
 repaired.
@@ -625,9 +625,9 @@ race, having nothing to fetch.
 Nothing rescues that window:
 
 - **No counter moves.** An absent file is not a failure, so
-  `puppetca_crl_chain_refresh_failures_total` stays flat. The one signal is
-  `puppetca_crl_chain_last_read_timestamp_seconds` reading `0`, which
-  `PuppetCAUpstreamCRLNeverRead` alerts on — after the shipped mixin's
+  `openvoxca_crl_chain_refresh_failures_total` stays flat. The one signal is
+  `openvoxca_crl_chain_last_read_timestamp_seconds` reading `0`, which
+  `OpenVoxCAUpstreamCRLNeverRead` alerts on — after the shipped mixin's
   `for: 15m`. At the default hourly interval that is a quarter of an hour of
   failing agents before anything fires; at a fifteen-minute interval the outage
   ends about when the alert would have. Neither arrives in time to be a warning.
@@ -668,7 +668,7 @@ look:
 | **empty**, or nothing but whitespace | this CA's own CRL only | An empty file *is* a statement. This is how you say "publish nothing extra". It is also what a failed `cat >` leaves behind, so it is logged at `ERROR` — see the note on atomic writes below. |
 | **unparseable** | the chain already published, unchanged | The refresh fails and is counted. Note this also blocks **revocation** until the file is fixed: refusing to publish half a chain is deliberate, but it does couple CRL amendment to a file refreshed outside openvox-ca. |
 | **truncated, or not a CRL bundle** | the chain already published, unchanged | Refused, not read as an empty declaration. A file that does not end on a PEM block boundary, or that decodes to no CRL at all — a block cut mid-write, DER, a certificate bundle, an HTML error page — is a read that failed, not the operator asking for an empty chain. Only an empty file means that. Leading and interleaved commentary is fine; see below. |
-| **carrying a CRL older than the one published** | the newer, already-published CRL for that ancestor; everything else from the file | Not a failure and **not** a block on revocation: the published chain is correct, so the older CRL is simply passed over and counted by `puppetca_crl_chain_regressed_total`. |
+| **carrying a CRL older than the one published** | the newer, already-published CRL for that ancestor; everything else from the file | Not a failure and **not** a block on revocation: the published chain is correct, so the older CRL is simply passed over and counted by `openvoxca_crl_chain_regressed_total`. |
 | **present but unreadable** (permissions, or a directory mounted at the path) | the chain already published, unchanged | The refresh fails and is counted, and revocation is blocked as for **unparseable**. A Secret projected `0400` root-owned against an unprivileged container is the usual cause. |
 | **larger than 4 MiB** | the chain already published, unchanged | Refused rather than truncated: a half-read PEM blob would silently drop CRLs. A real chain is a handful of CRLs. |
 | **holding more than 64 CRLs** | the chain already published, unchanged | Refused. The byte bound does not cover this: one ancestor with a long revocation list is legitimately large, while many small CRLs are what cost, since each one's signer is resolved by trial verification against the whole CA bundle while the CRL lock is held. A chain is one CRL per ancestor, so more than a couple of dozen means a directory concatenated by accident or a file appended to instead of replaced. |
@@ -679,9 +679,9 @@ look:
 > (`AutoRenew: failed to retire replaced certificate`) and the renewal is allowed
 > to stand, with no retry. So a chain file that is unreadable at that moment does
 > not block the renewal — it skips that one revocation permanently, and the
-> superseded certificate stays valid until it expires. `puppetca_crl_update_failures_total`
+> superseded certificate stays valid until it expires. `openvoxca_crl_update_failures_total`
 > counts it. Grep for that message alongside a rising
-> `puppetca_crl_chain_refresh_failures_total`: the warning names the serial, and
+> `openvoxca_crl_chain_refresh_failures_total`: the warning names the serial, and
 > revoking by subject will not reach it — the replacement is what makes it a
 > renewal, so `revoke --certname` retires that instead. Retire it with
 > `openvox-ca-ctl revoke --serial <hex>` if the window mattered.
@@ -714,12 +714,12 @@ In Kubernetes, mount the file from **its own volume, not with `subPath`**. A
 `subPath`-mounted ConfigMap or Secret never receives updates, so the file reads
 successfully forever and never changes — the feature becomes a silent no-op.
 No metric distinguishes that from a healthy file:
-`puppetca_crl_chain_last_read_timestamp_seconds` advances on every read either
+`openvoxca_crl_chain_last_read_timestamp_seconds` advances on every read either
 way, because the read genuinely succeeds — it is the content that is frozen.
-What catches it is the consequence — `PuppetCAUpstreamCRLExpiringSoon` firing on a CA that
+What catches it is the consequence — `OpenVoxCAUpstreamCRLExpiringSoon` firing on a CA that
 *has* `crl_chain_file` configured is the `subPath` signature.
-`puppetca_crl_chain_last_read_timestamp_seconds` does detect the different case
-of a file never opened at all: it reads `0`, and `PuppetCAUpstreamCRLNeverRead`
+`openvoxca_crl_chain_last_read_timestamp_seconds` does detect the different case
+of a file never opened at all: it reads `0`, and `OpenVoxCAUpstreamCRLNeverRead`
 alerts on it.
 
 If one ancestor appears more than once — which is what a CronJob that appends
@@ -732,7 +732,7 @@ not by issuer name, so a shared root that issued two sub-CAs with the same
 distinguished name still gets both their CRLs published.
 
 **An ancestor that disappears from the file is dropped**, and counted by
-`puppetca_crl_chain_removed_total`. The file is authoritative, so this is the
+`openvoxca_crl_chain_removed_total`. The file is authoritative, so this is the
 documented way to stop publishing an ancestor — but it is also what a `cat`
 glob that matched one file fewer produces, and it cannot be undone here. The
 same counter covers a second way an ancestor disappears: its certificate leaving
@@ -742,7 +742,7 @@ at `ERROR` naming the issuer, and the message says which happened.
 
 **An ancestor's CRL can never move backwards.** A CRL in the file that is older
 than the one already published for the same ancestor is passed over and the
-published one kept, counted by `puppetca_crl_chain_regressed_total`. Ancestors
+published one kept, counted by `openvoxca_crl_chain_regressed_total`. Ancestors
 are matched by which certificate signed their CRL, and ordered by CRL number, or
 by `thisUpdate` where there is none.
 
@@ -767,8 +767,8 @@ importing the *complete* chain, up to and including the root, is what makes the
 root's own CRL publishable. `openvox-ca-ctl import` does not currently enforce
 completeness — a partial chain is accepted, and the CRLs whose issuers are
 missing from it are then discarded on every refresh. That is visible rather than
-silent: `puppetca_crl_chain_discarded_total` counts it and the shipped mixin
-alerts on it as `PuppetCAUpstreamCRLDiscarded`.
+silent: `openvoxca_crl_chain_discarded_total` counts it and the shipped mixin
+alerts on it as `OpenVoxCAUpstreamCRLDiscarded`.
 
 A CRL this CA issued is ignored if found in the file — its own is always rebuilt
 from the inventory, and a stale copy must not be able to supersede live
@@ -780,23 +780,23 @@ increase) and is the price of having one write path rather than a second,
 subtler one.
 
 Per-issuer freshness is reported as
-`puppetca_crl_chain_next_update_timestamp_seconds{issuer}`, deliberately
-separate from `puppetca_crl_next_update_timestamp_seconds`, which continues to
+`openvoxca_crl_chain_next_update_timestamp_seconds{issuer}`, deliberately
+separate from `openvoxca_crl_next_update_timestamp_seconds`, which continues to
 mean *this CA's own* CRL. An expiring upstream CRL is fixed at the parent CA,
 not here, so it gets its own alert with its own runbook — see the
 [mixin](../mixin/). Four counters cover what would otherwise be one warning per
 cycle in the log, and they are separate because their remedies are:
-`puppetca_crl_chain_refresh_failures_total` for a file that could not be read or
-parsed (fix the file or its mount); `puppetca_crl_chain_discarded_total` for a
+`openvoxca_crl_chain_refresh_failures_total` for a file that could not be read or
+parsed (fix the file or its mount); `openvoxca_crl_chain_discarded_total` for a
 CRL dropped because nothing in the bundle signed it (complete the CA bundle) —
 the one case where the published chain silently *shrinks*;
-`puppetca_crl_chain_regressed_total` for a CRL older than the one already
+`openvoxca_crl_chain_regressed_total` for a CRL older than the one already
 published (fix whatever refreshes the file); and
-`puppetca_crl_chain_removed_total` for an ancestor that has disappeared from the
+`openvoxca_crl_chain_removed_total` for an ancestor that has disappeared from the
 file altogether (restore it, or accept the removal) — or whose certificate has
 left the CA bundle, so its published CRL can no longer be attributed to anyone
 (re-import the bundle). A fifth series,
-`puppetca_crl_chain_last_read_timestamp_seconds`, reads `0` where the file is
+`openvoxca_crl_chain_last_read_timestamp_seconds`, reads `0` where the file is
 configured but has never been opened.
 
 > **Rolling upgrades.** A replica running a build from before chain preservation
@@ -845,7 +845,7 @@ What that window does and does not mean:
   answer on the very next request that reaches this replica.
 - **The pass also removes.** A serial another replica's expired-certificate
   cleanup has pruned leaves this index on the next pass, taking its cached
-  response with it, so `puppetca_ocsp_index_serials` tracks the inventory
+  response with it, so `openvoxca_ocsp_index_serials` tracks the inventory
   downward as well as upward.
 - **`filesystem` and `sqlite` are single-node**, so the job has nothing to find
   there and is not started at all: the index stays as it was built at startup,
@@ -870,8 +870,8 @@ it prunes rows for certificates that expired more than
 index build) has to read. Worth turning on before the inventory is large rather
 than after.
 
-Watch `puppetca_ocsp_index_serials` across replicas to confirm they agree, and
-`puppetca_ocsp_index_sync_failures_total` for a replica that cannot catch up. A
+Watch `openvoxca_ocsp_index_serials` across replicas to confirm they agree, and
+`openvoxca_ocsp_index_sync_failures_total` for a replica that cannot catch up. A
 replica reading *above* its peers is not a fault: a pass that overlaps a local
 issuance defers its removals to the next one, so a busy replica can hold pruned
 serials a little longer.
@@ -935,9 +935,9 @@ that key, so size it against your replica count.
 
 Three metrics (see [metrics.md](metrics.md)):
 
-- `puppetca_ca_signing_in_flight` — signatures in flight now.
-- `puppetca_ca_signing_limit` — the configured ceiling; `0` means unbounded.
-- `puppetca_ca_signing_shed_total` — OCSP responses refused with `tryLater`.
+- `openvoxca_ca_signing_in_flight` — signatures in flight now.
+- `openvoxca_ca_signing_limit` — the configured ceiling; `0` means unbounded.
+- `openvoxca_ca_signing_shed_total` — OCSP responses refused with `tryLater`.
 
 Sustained shedding while the signer has capacity to spare means the limit is
 too low. Shedding under an unauthenticated flood is the bound doing its job.
@@ -1003,7 +1003,7 @@ component certificate, and it defaults to this setting. See
 > which is an explicit choice and not the same as leaving it unset. You will
 > also see a new `superseded.json` in the cadir, a
 > `Starting superseded-certificate revocation sweep` line in the logs at
-> startup, and `puppetca_supersede_pending` rising and falling.
+> startup, and `openvoxca_supersede_pending` rising and falling.
 
 **The window is a deliberate weakening, and because it is the default it is one
 you inherit rather than choose.** For its whole length the replaced certificate
@@ -1060,7 +1060,7 @@ Some things worth knowing before you rely on it:
   the sweep used to handle worst: a large backlog coming due at once, after a
   fleet-wide outage or a passphrase rotation. A pass that cannot amend the CRL
   fails as a whole — it leaves every entry it attempted on the list, raises
-  `puppetca_supersede_failures_total`, and the next pass retries them
+  `openvoxca_supersede_failures_total`, and the next pass retries them
   together.
 - **Revoking a subject retires its pending predecessor too.** `revoke --certname`
   and `DELETE /certificate_status` retire the subject's current certificate
@@ -1084,8 +1084,8 @@ Some things worth knowing before you rely on it:
 - **Safe on every replica.** The list rewrite and the revocations it drives run
   under the shared cluster CRL lock, so only the first replica to take it
   revokes and the others find the list already drained. No leader election.
-- **Watch `puppetca_supersede_pending`** for how many certificates are inside
-  their window right now, and `puppetca_supersede_failures_total` for
+- **Watch `openvoxca_supersede_pending`** for how many certificates are inside
+  their window right now, and `openvoxca_supersede_failures_total` for
   supersessions that were lost or could not be carried out — see
   [metrics](metrics.md#delayed-supersession). A pending count that does not fall
   means the sweep is not completing.
@@ -1432,7 +1432,7 @@ Name the directory the entries actually write to — the example above uses
 `/etc/openvox/ssl` — and run `systemctl daemon-reload` before restarting, or the
 drop-in is not read. Without it the write fails with a permission error the CA
 cannot distinguish from a genuine one; it is logged each pass, and
-`PuppetCAManagedCertificateNeverIssued` fires an hour later. The unit already
+`OpenVoxCAManagedCertificateNeverIssued` fires an hour later. The unit already
 grants the CA directory with `ReadWritePaths=`; a drop-in adds another
 directory the same way.
 
@@ -1512,11 +1512,11 @@ actually confines the store.
 
 ### Watching managed certificates
 
-Each configured entry publishes `puppetca_managed_certificate_configured`,
+Each configured entry publishes `openvoxca_managed_certificate_configured`,
 labelled with its `subject`, whether or not a certificate for it exists yet —
 that is the point, since there is no series at all for a certificate that was
 never issued. The shipped mixin turns it into
-`PuppetCAManagedCertificateNeverIssued`, which fires when an entry has had no
+`OpenVoxCAManagedCertificateNeverIssued`, which fires when an entry has had no
 certificate for `managedCertNeverIssuedFor` (1h by default). Once a certificate
 does exist it has an inventory row like any other, so the ordinary expiry alerts
 cover it and nothing new is needed. See [metrics & monitoring](metrics.md).
@@ -1856,9 +1856,9 @@ natural mistake, since "the CA bundle" usually means the whole chain.
 
 Each entry's **`name` is required and must be unique**; startup refuses a
 duplicate. It is not decorative: it is the `client_ca` label on every metric
-series for the entry — `puppetca_client_crl_usable`,
-`puppetca_client_crl_refusals_total` and
-`puppetca_client_crl_last_reload_timestamp_seconds` — and the `client_ca` field
+series for the entry — `openvoxca_client_crl_usable`,
+`openvoxca_client_crl_refusals_total` and
+`openvoxca_client_crl_last_reload_timestamp_seconds` — and the `client_ca` field
 on every log line about it. Two entries sharing a name would make both
 ambiguous, which is why it is refused rather than warned about. Choose something
 an operator will recognise in an alert.
@@ -2008,7 +2008,7 @@ would let a clock difference re-admit revoked clients, which is the outcome the
 whole setting exists to prevent.
 
 If the difference is larger than the tolerance the effect is loud rather than
-silent: that issuer loses coverage, `puppetca_client_crl_usable` goes to 0 for
+silent: that issuer loses coverage, `openvoxca_client_crl_usable` goes to 0 for
 the entry, and under `require` its clients are rejected while their revocations
 go on being honoured. Fix the clock on whichever side is wrong — that is a
 genuine fault, not something to tune the tolerance around.
@@ -2024,7 +2024,7 @@ installed CRLs go on being served, but once they pass their own `nextUpdate`
 they stop counting as current, and under `require` every client of that issuer
 is then rejected. So a refusal that does not clear by the next publication is
 an incident, not a nuisance — which is what
-`puppetca_client_crl_last_reload_timestamp_seconds` going stale is for.
+`openvoxca_client_crl_last_reload_timestamp_seconds` going stale is for.
 
 Every refusal is logged with the `client_ca` entry; the three that compare
 against the installed set also name the anchors concerned, while a read failure
@@ -2045,10 +2045,10 @@ re-admit everything revoked since the base was signed. So a partial CRL can deny
 a client and can never, on its own, satisfy `require`. If every CRL in an entry's file is partial, the
 result is a set covering nothing — and what happens next depends on when it
 arrives. At **startup** that is the entry's only set, so under `require` the
-domain refuses its clients and `puppetca_client_crl_usable` is 0 for it. On a
+domain refuses its clients and `openvoxca_client_crl_usable` is 0 for it. On a
 **reload** it is refused like any other narrowing candidate, the previous CRLs
 stay in use, and the visible signal is instead
-`puppetca_client_crl_last_reload_timestamp_seconds` going stale while the log
+`openvoxca_client_crl_last_reload_timestamp_seconds` going stale while the log
 records the discard and the refusal.
 
 The anchors themselves deliberately do not reload: re-reading them would mean
@@ -2075,9 +2075,9 @@ client, issue it a leaf from the anchor instead.
 > The server warns at startup when any anchor has no currently valid CRL, but it
 > **cannot** warn about this case: the root is an anchor and its own CRL does
 > verify and is kept, so the entry looks covered from the outside. Nor can
-> `puppetca_client_crl_usable` see it — that gauge only reports whether the entry
+> `openvoxca_client_crl_usable` see it — that gauge only reports whether the entry
 > holds *anything* current, which it does. What reports it is
-> `puppetca_client_crl_refusals_total`, which counts clients actually turned
+> `openvoxca_client_crl_refusals_total`, which counts clients actually turned
 > away for want of a CRL, because by then the missing issuer is a fact rather
 > than a guess. Anchor on the issuing CA
 > and the problem does not arise: the chain is then `[leaf, anchor]` and the only
@@ -2117,13 +2117,13 @@ client of a domain, where a half-applied CRL reload costs at most a stale
 revocation. To rotate an anchor, add the new one as a second `client_ca` entry,
 roll the fleet, then remove the old entry and roll again.
 
-`puppetca_client_crl_usable{client_ca}` reports whether a domain holds any
+`openvoxca_client_crl_usable{client_ca}` reports whether a domain holds any
 currently valid revocation material, and is published **only under `require`** —
 `crl_file` is optional under `check` and `skip`, so a domain without CRLs is
 correct there and a 0 would alert on a healthy server. It does not report
-partial coverage; `puppetca_client_crl_refusals_total{client_ca}` counts clients
+partial coverage; `openvoxca_client_crl_refusals_total{client_ca}` counts clients
 actually refused for want of a CRL, and
-`puppetca_client_crl_last_reload_timestamp_seconds{client_ca}` goes stale when
+`openvoxca_client_crl_last_reload_timestamp_seconds{client_ca}` goes stale when
 `crl_file` has stopped being applied. **Alert on all three**: under `require` a `0` rejects every client
 of that issuer, and the first symptom is otherwise an agent-side 403.
 
@@ -2302,8 +2302,8 @@ certificate request (allow_duplicate_certs)`, with `subject`, `state` and the
   While the certificate is there, the request queued beside it does not show:
   `GET /certificate_status/{subject}`, `GET /certificate_statuses` and every
   form of `openvox-ca-ctl list` report the certificate and its fingerprint, not
-  the request's, and `puppetca_leaf_certificate_info{state="requested"}` does
-  not count it, so the `PuppetCACertificateRequestPending` alert does not fire
+  the request's, and `openvoxca_leaf_certificate_info{state="requested"}` does
+  not count it, so the `OpenVoxCACertificateRequestPending` alert does not fire
   for it. `openvox-ca-ctl sign --all` (`POST /sign/all`) signs it all the
   same. Read the request itself with `GET /certificate_request/{subject}` and
   check it before signing it by name.

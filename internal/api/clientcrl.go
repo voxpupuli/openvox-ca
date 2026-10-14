@@ -263,7 +263,7 @@ func notYetIssued(crl *x509.RevocationList, now time.Time) bool {
 // It is also the safe one. Reading an absent nextUpdate as "never expires"
 // handed `require` a snapshot that satisfies it for ever: the issuer's later
 // revocations stay invisible, the policy decays to `skip` with no moment at
-// which it decayed, and puppetca_client_crl_usable reports 1 indefinitely, so
+// which it decayed, and openvoxca_client_crl_usable reports 1 indefinitely, so
 // the alert cannot fire. That is exactly the decay the expiry rule exists to
 // prevent, arriving through the one CRL shape it did not cover.
 func currentAt(crl *x509.RevocationList, now time.Time) bool {
@@ -283,7 +283,7 @@ func (s *ClientCRLSet) Discarded() []string {
 }
 
 // Usable reports whether this entry holds any current revocation material at
-// all. Drives puppetca_client_crl_usable.
+// all. Drives openvoxca_client_crl_usable.
 //
 // Deliberately *any*, not *every*, and the reasoning is worth keeping because
 // both readings have been shipped and both were wrong in their own direction.

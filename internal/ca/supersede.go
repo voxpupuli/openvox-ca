@@ -92,7 +92,7 @@ var ErrCertSuperseded = fmt.Errorf("%w: superseded and awaiting revocation", Err
 // copy to fall back on, and admitting a renewal here is the one decision that
 // cannot be walked back later. The cost is that a store whose superseded key
 // alone is unreadable refuses renewals while the rest of the CA keeps serving;
-// that is loud (counted into supersedeFailures, so PuppetCASupersedeFailing
+// that is loud (counted into supersedeFailures, so OpenVoxCASupersedeFailing
 // fires) and the remedy is in docs/storage-backends.md. An *absent* list is not
 // a failure — it is the steady state of every CA that has never enabled a
 // window, and it is the common case this stays cheap for.
@@ -653,7 +653,7 @@ func (c *CA) drainDueLocked(ctx context.Context, due []supersededEntry) drainOut
 		// Every affected identity is named, not just counted. These
 		// certificates are still valid credentials past the window their
 		// supersession granted them, so "which ones" is the question
-		// PuppetCASupersedeFailing sends an operator to the log to answer, and
+		// OpenVoxCASupersedeFailing sends an operator to the log to answer, and
 		// that alert's runbook closes by telling them to retire what the sweep
 		// will not with `openvox-ca-ctl revoke --serial <hex>` — which needs a
 		// serial this line has to carry. The per-entry loop named each one as
@@ -800,7 +800,7 @@ func (c *CA) PendingSupersessions(ctx context.Context) (int, error) {
 // sweep that left an entry unrevoked or discarded one it never could revoke. A
 // rising value means a certificate a renewal replaced may still be a valid
 // credential; the metrics exporter surfaces it as
-// puppetca_supersede_failures_total.
+// openvoxca_supersede_failures_total.
 func (c *CA) SupersedeFailures() uint64 {
 	return c.supersedeFailures.Load()
 }

@@ -312,7 +312,7 @@ func orderCRLChain(crls []*x509.RevocationList, cert *x509.Certificate) ([]*x509
 // importing a chain they know is stale is a legitimate intermediate step.
 // Duplicate copies are only detectable here -- import writes through
 // Storage.UpdateCRL and never reaches dedupeCRLs. Expiry is no longer: the
-// per-issuer gauge and PuppetCAUpstreamCRLExpired cover it from the stored
+// per-issuer gauge and OpenVoxCAUpstreamCRLExpired cover it from the stored
 // blob, so this warning is an earlier signal rather than the only one.
 //
 // Called once on the final chain about to be written, rather than from
