@@ -260,11 +260,24 @@ var _ = Describe("openvox-ca generate", func() {
 		})
 
 		It("is refused before the store is opened", func() {
-			// No CA here, so anything that opened the store first would
-			// refuse for that instead; GenerateWithOptions's own check is too
-			// late to answer this one.
+			// resolveRuntime refuses this key provider before it opens the
+			// store, so the reserved-subject refusal is the answer only if it
+			// runs ahead of resolveRuntime. An empty cadir alone would not
+			// show that: resolveRuntime accepts one, and only assertCAUsable,
+			// after it, refuses.
+			cfgPath := filepath.Join(GinkgoT().TempDir(), "badprovider.yaml")
+			Expect(os.WriteFile(cfgPath, []byte(
+				"ca_key_algo: ecdsa\nca_key_size: 256\nca_key_provider: nonesuch\n"), 0o644)).To(Succeed())
+			setEnv("PUPPET_CA_CONFIG", cfgPath)
+
 			_, _, err := runGenerate("--cadir", caDir, "--certname", "ca", "--ttl", "1h")
 			Expect(err).To(MatchError(ca.ErrReservedSubject))
+
+			// The same configuration under another certname reaches
+			// resolveRuntime and is refused there, so the fixture is not
+			// refused by something earlier than both.
+			_, _, err = runGenerate("--cadir", caDir, "--certname", "web01", "--ttl", "1h")
+			Expect(err).To(MatchError(ContainSubstring(`unknown ca_key_provider "nonesuch"`)))
 		})
 	})
 
