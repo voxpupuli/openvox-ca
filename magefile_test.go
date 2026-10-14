@@ -4733,13 +4733,12 @@ func firstBootHostPins() []string {
 		"OPENVOX_CA_CADIR=",
 		"OPENVOX_CA_STORAGE_BACKEND=",
 
-		// Redirected, not cleared. Each of these three names a path the
-		// script falls back to when the variable is unset, and all three
+		// Redirected, not cleared. Each of these two names a path the
+		// script falls back to when the variable is unset, and both
 		// defaults are REAL paths on a developer's machine or a host with a
 		// packaged CA:
 		//
 		//   OPENVOX_CA_CONFIG       /etc/puppet-ca/config.yaml
-		//   OPENVOX_CA_LEGACY_CADIR /var/lib/puppet-ca
 		//   OPENVOX_CA_PUPPET_CONF  /etc/puppetlabs/puppet/puppet.conf
 		//
 		// Clearing them would therefore hand the script the host's own files,
@@ -4747,10 +4746,10 @@ func firstBootHostPins() []string {
 		// temporary directory instead.
 		//
 		// They live here rather than in the runners because the runners had a
-		// copy each and the copies drifted: runFirstBootScript pinned two of
-		// the three while its comment claimed all three, runFirstBootIn pinned
-		// one, runFirstBootFunc none, and four runners built inside individual
-		// specs none either.
+		// copy each and the copies drifted: when there were three such pins,
+		// runFirstBootScript pinned two of them while its comment claimed all
+		// three, runFirstBootIn pinned one, runFirstBootFunc none, and four
+		// runners built inside individual specs none either.
 		//
 		// That was a live read of the host, not a latent one -- and it is easy
 		// to argue otherwise, which is how an earlier version of this comment
@@ -4767,7 +4766,6 @@ func firstBootHostPins() []string {
 		// setting the spec makes itself (a puppet.conf it built) still wins.
 		// One list, every caller, no drift.
 		"OPENVOX_CA_CONFIG=" + filepath.Join(pin, "no-config.yaml"),
-		"OPENVOX_CA_LEGACY_CADIR=" + filepath.Join(pin, "no-legacy-cadir"),
 		"OPENVOX_CA_PUPPET_CONF=" + filepath.Join(pin, "no-puppet.conf"),
 	}
 }
@@ -5996,7 +5994,7 @@ func runFirstBootScript(sslDir, binDir, certname string, extraEnv ...string) fir
 		"OPENVOX_CA_BINDIR="+binDir,
 		"OPENVOX_CA_CERTNAME="+certname,
 	)
-	// The host-path pins -- config.yaml, the legacy cadir and puppet.conf --
+	// The host-path pins -- config.yaml and puppet.conf --
 	// come from firstBootHostPins, which every runner shares. A spec that
 	// wants one of them pointed somewhere real passes it in extraEnv below,
 	// which is appended afterwards and therefore wins.
@@ -6176,8 +6174,8 @@ var _ = Describe("first-boot's provisioning steps", func() {
 			Expect(first.output).To(ContainSubstring("delete the CA this run just created"))
 			Expect(first.output).NotTo(ContainSubstring("was already there before this run"))
 			// "Use the existing CA" means granting its directory, which the
-			// remedy must do with drop-ins for the reason the legacy-cadir
-			// refusal does: an edited unit file does not survive an upgrade.
+			// remedy must do with drop-ins: an edited unit file does not
+			// survive an upgrade.
 			Expect(first.output).To(And(
 				ContainSubstring("systemctl edit openvox-ca "),
 				ContainSubstring("systemctl edit openvox-ca-first-boot"),
@@ -6766,77 +6764,6 @@ var _ = Describe("first-boot's provisioning steps", func() {
 			ContainSubstring("--certname resolved.example.com"),
 			ContainSubstring("--cadir "+filepath.Join(sslDir, "ca")),
 		))
-	})
-
-	// The default cadir moved this release. A host that followed the old
-	// advice has a real CA the new default cannot see, and bootstrapping over
-	// it would mint a second one that every already-enrolled agent distrusts
-	// -- silently, since both CAs then exist and nothing says which is live.
-	Describe("a CA left at the previous default location", func() {
-		var sslDir, binDir, legacy string
-
-		BeforeEach(func() {
-			sslDir = GinkgoT().TempDir()
-			binDir = GinkgoT().TempDir()
-			legacy = GinkgoT().TempDir()
-			Expect(os.MkdirAll(filepath.Join(sslDir, "ca"), 0o755)).To(Succeed())
-			stubCA(binDir)
-		})
-
-		withLegacy := func() string { return "OPENVOX_CA_LEGACY_CADIR=" + legacy }
-
-		It("refuses to bootstrap a second CA, and says how to resolve it", func() {
-			Expect(os.WriteFile(filepath.Join(legacy, "ca_crt.pem"),
-				[]byte("OLD-CA\n"), 0o644)).To(Succeed())
-
-			r := runFirstBootScript(sslDir, binDir, "ca.example.com", withLegacy())
-			Expect(r.ok).To(BeFalse(), "provisioning should have refused: %s", r.output)
-			Expect(r.output).To(And(
-				ContainSubstring("found an existing CA in "+legacy),
-				ContainSubstring("second CA"),
-			))
-			// Both routes out have to be in the message: an operator who is
-			// told only to move it will move a CA the service is using.
-			Expect(r.output).To(And(
-				ContainSubstring("Keep the existing CA where it is"),
-				ContainSubstring("Or move it"),
-			))
-			// And keeping it is granted with a drop-in, for BOTH units, never
-			// by editing them: the packages install the units as plain files
-			// under /usr/lib/systemd/system, so the next upgrade reverts an
-			// edit and restarts the CA unable to write its own store.
-			Expect(r.output).To(And(
-				ContainSubstring("systemctl edit openvox-ca "),
-				ContainSubstring("systemctl edit openvox-ca-first-boot"),
-				ContainSubstring("ReadWritePaths="+legacy),
-			), "the remedy does not grant the kept directory through a drop-in for both units")
-			// And it must stop before creating anything of its own.
-			Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).NotTo(BeAnExistingFile())
-		})
-
-		// The guard is about bootstrapping, not about the old directory
-		// existing. A host that already migrated has both, and must provision
-		// normally rather than be refused for ever.
-		It("provisions normally when the new location already has a CA", func() {
-			Expect(os.WriteFile(filepath.Join(legacy, "ca_crt.pem"),
-				[]byte("OLD-CA\n"), 0o644)).To(Succeed())
-			Expect(os.WriteFile(filepath.Join(sslDir, "ca", "ca_crt.pem"),
-				[]byte("CA-CERT\n"), 0o644)).To(Succeed())
-			Expect(os.WriteFile(filepath.Join(sslDir, "ca", "ca_crl.pem"),
-				[]byte("CA-CRL\n"), 0o644)).To(Succeed())
-
-			r := runFirstBootScript(sslDir, binDir, "ca.example.com", withLegacy())
-			Expect(r.ok).To(BeTrue(), "provisioning failed: %s", r.output)
-			Expect(r.output).To(ContainSubstring("leaving it alone"))
-		})
-
-		// An empty directory at the old path is not a CA. Refusing on its mere
-		// existence would strand anyone who tidied up but left the directory.
-		It("bootstraps normally when the old directory holds no CA", func() {
-			r := runFirstBootScript(sslDir, binDir, "ca.example.com", withLegacy())
-			Expect(r.ok).To(BeTrue(), "provisioning failed: %s", r.output)
-			Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).To(BeAnExistingFile())
-		})
 	})
 
 	// The co-existence case the shared `puppet` account exists for: a host

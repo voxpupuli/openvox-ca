@@ -279,20 +279,6 @@ Every step it takes is guarded on absence, so it **adopts rather than replaces**
 
 Step 5 is what makes the service able to start at all: it binds `0.0.0.0` and refuses plain HTTP on a non-loopback address, so it needs `tls_cert` and `tls_key`. Those name fixed paths because a file shipped in a package cannot know this host's certificate name, and provisioning points them at the credential it just adopted or minted. Re-minting under a corrected name is then a matter of replacing those two links rather than editing configuration. Like every other step it is guarded on absence, so pointing `tls_cert` at your own certificate keeps it.
 
-**Step 2 stops rather than bootstrap if it finds a CA at `/var/lib/puppet-ca`.**
-That path is where an `openvox-ca` CA commonly lives — it is the Helm chart's
-`persistence.mountPath` default, and a common choice for a hand-built install —
-so provisioning checks it before creating anything. Finding a CA there and none
-in `/etc/puppetlabs/puppet/ssl/ca`, it stops and says so, rather than
-bootstrapping a second CA that every agent already enrolled against the first
-would distrust. The message gives both ways out: point `cadir` at the existing
-directory and [grant it to both units](#using-a-different-ca-directory), or move
-the CA to the shipped one.
-Which is right depends on what you set `cadir` to, and moving a CA is not a
-copy — it takes the private key, the inventory and the CRL, and the service may
-be running against it, which is why provisioning refuses rather than attempting
-the move itself.
-
 Step 3 is the one that can stop rather than warn, and it does so in three cases. If **one half of a credential** is present — a certificate with no key, or the reverse — it refuses to guess and says which file to move aside. If the binary has **no `generate` subcommand** it stops too, because a build that cannot mint leaves the service with no certificate to serve and `openvox-ca` refuses to start without TLS on a non-loopback address; failing here names the cause, where failing at the service would only report that TLS is not configured.
 
 The third is the one that bites a host you are adding a CA to rather than building from nothing: **a complete credential for `$NAME` already exists, but this run created the CA**. That is the ordinary state of a machine already enrolled with an estate's CA — an agent certificate under `certs/`, signed by a CA elsewhere, and no local CA directory. Serving it from a CA that did not issue it would fail verification for every client, so provisioning stops and offers the choice it cannot make for you: point `cadir` at the estate's existing CA (and [grant that directory to both units](#using-a-different-ca-directory)), or move the credential aside and let this new CA mint its own.
