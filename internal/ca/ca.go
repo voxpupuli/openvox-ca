@@ -536,6 +536,12 @@ type CA struct {
 	// burst of revocations collapses to a single pending notification and an
 	// absent consumer never blocks signing. Consume it via CRLUpdated().
 	crlNotify chan struct{}
+
+	// plaintextKeyWarning makes loadCAKeyFromDisk's warning about a plaintext
+	// key under EncryptCAKey once per CA rather than once per load: Init loads
+	// the key a second time, inside the bootstrap lock, when its first attempt
+	// fails for want of a certificate.
+	plaintextKeyWarning sync.Once
 }
 
 func New(s *storage.StorageService, autosignCfg AutosignConfig, hostname string) *CA {

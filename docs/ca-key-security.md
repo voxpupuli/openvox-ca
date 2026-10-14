@@ -264,7 +264,10 @@ openvox-ca-ctl setup --cadir /var/lib/puppet-ca --encrypt-ca-key \
 
 Existing CAs with unencrypted keys continue to work without changes, and
 `--encrypt-ca-key` affects new CA bootstraps only: it does not re-encrypt a key
-that already exists.
+that already exists. A CA started with `encrypt_ca_key` set whose stored key is
+plaintext logs a warning saying so, once per start, from the process that loads
+the key. A key held by OpenBao Transit is not in the store, so it never
+triggers one.
 
 Loading handles both encrypted and unencrypted PEM files, deciding from the PEM
 itself rather than from the setting. An encrypted key therefore needs its
