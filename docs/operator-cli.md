@@ -233,7 +233,8 @@ openvox-ca-ctl import \
 # Migrate an entire CA between storage backends offline (any pair of backends:
 # filesystem, sqlite, postgres, mysql, etcd, redis/valkey). Each backend is
 # described by a normal openvox-ca config file. Refuses a non-empty destination
-# unless --force.
+# unless --force, and a source whose inventory does not verify against its
+# integrity value unless --allow-unverified-source.
 openvox-ca-ctl migrate \
   --source-config /etc/puppet-ca/filesystem.yaml \
   --dest-config   /etc/puppet-ca/postgres.yaml
@@ -557,7 +558,8 @@ issue one. Without an atomic inventory append — `filesystem` alone — the
 integrity record is recomputed from a snapshot, so an interleaved append leaves
 an HMAC covering a state that never existed, after which the server refuses to
 start. Recovery was a cutover: `migrate` rebuilds the integrity value on the
-destination, so it needs a second store. There is now an in-place repair as
+destination, so it needs a second store, and it now refuses such a source unless
+given `--allow-unverified-source`. There is an in-place repair as
 well — see
 [`rebuild-inventory-hmac`](#rebuild-inventory-hmac-re-asserting-inventory-integrity),
 which re-asserts integrity over the inventory as it stands rather than repairing

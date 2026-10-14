@@ -69,7 +69,7 @@ func (c migrateFileConfig) backendSpec() (storage.BackendSpec, error) {
 
 func newMigrateCmd() *cobra.Command {
 	var sourceConfig, destConfig string
-	var force bool
+	var force, allowUnverified bool
 	cmd := &cobra.Command{
 		Use:   "migrate",
 		Short: "Copy all CA data from one storage backend to another (offline)",
@@ -85,6 +85,14 @@ this can import a filesystem CA into a database, move data between databases
 
 By default migrate refuses to write into a destination that already holds a CA
 certificate; pass --force to overwrite it.
+
+The source inventory is verified against its stored integrity value before
+anything is copied, because the destination's value is rebuilt over the copy
+and would vouch for whatever it holds. A source that does not verify is
+refused: 'openvox-ca rebuild-inventory-hmac', run against the source's
+configuration, reports its state. Pass --allow-unverified-source to migrate it
+as it stands. A source that never recorded an integrity value at all, such as a
+cadir written by OpenVox Server, is migrated with a warning.
 
 The server must not be running against either backend during migration.
 
@@ -148,7 +156,8 @@ local filesystem under cadir, never in a storage backend.`,
 			defer releaseDst()
 
 			report, err := storage.MigrateService(cmd.Context(), srcSvc, dstSvc, storage.MigrateOptions{
-				Force: force,
+				Force:                 force,
+				AllowUnverifiedSource: allowUnverified,
 				Logf: func(format string, a ...any) {
 					if globalVerbose {
 						fmt.Fprintf(os.Stderr, format+"\n", a...)
@@ -159,6 +168,14 @@ local filesystem under cadir, never in a storage backend.`,
 				return err
 			}
 
+			// Unconditional, unlike the per-blob lines: the destination's
+			// integrity value was rebuilt over an inventory nothing verified,
+			// and this is the only place that is said.
+			if report.UnverifiedSource != "" {
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: the source inventory was not verified: %s. "+
+					"The destination's integrity value now vouches for it as copied.\n", report.UnverifiedSource)
+			}
+
 			fmt.Printf("Migration complete: %d CA/state blob(s), %d CSR(s), %d signed cert(s) copied (%d total)\n",
 				report.Singletons, report.CSRs, report.Certs, report.Total())
 			return nil
@@ -167,6 +184,8 @@ local filesystem under cadir, never in a storage backend.`,
 	cmd.Flags().StringVar(&sourceConfig, "source-config", "", "Path to openvox-ca config file describing the SOURCE backend")
 	cmd.Flags().StringVar(&destConfig, "dest-config", "", "Path to openvox-ca config file describing the DESTINATION backend")
 	cmd.Flags().BoolVar(&force, "force", false, "Overwrite an existing CA in the destination backend")
+	cmd.Flags().BoolVar(&allowUnverified, storage.AllowUnverifiedSourceFlag, false,
+		"Migrate a source whose inventory does not verify against its integrity value")
 	_ = cmd.MarkFlagRequired("source-config")
 	_ = cmd.MarkFlagRequired("dest-config")
 	return cmd

@@ -405,10 +405,12 @@ instance lock enforces the same thing, and the command refuses on its own while
 a server holds the store. See
 [`rebuild-inventory-hmac`](../operator-cli.md#rebuild-inventory-hmac-re-asserting-inventory-integrity).
 
-The older route still works and remains the fallback: `openvox-ca-ctl migrate`
-from the affected backend into a fresh destination (the migration rewrites the
-head under the correct scheme; a store cannot be migrated onto itself), then
-serve from that destination. It is a whole-store copy and a reconfiguration
+The older route still works and remains the fallback: `openvox-ca-ctl migrate
+--allow-unverified-source` from the affected backend into a fresh destination
+(the migration rewrites the head under the correct scheme; a store cannot be
+migrated onto itself), then serve from that destination. The flag is needed
+because the source's stored value does not verify, which `migrate` otherwise
+refuses. It is a whole-store copy and a reconfiguration
 where the rebuild is one command.
 
 This affects pre-release builds only; deployments created after the fix are

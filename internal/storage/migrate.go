@@ -60,6 +60,12 @@ type MigrateOptions struct {
 
 	// Logf, when non-nil, receives one human-readable line per copied blob.
 	Logf func(format string, args ...any)
+
+	// AllowUnverifiedSource lets MigrateService copy a source whose inventory
+	// does not verify against its stored integrity value, rather than refusing
+	// with ErrSourceUnverified. Migrate itself never verifies, so it ignores
+	// this.
+	AllowUnverifiedSource bool
 }
 
 // MigrateReport summarises what a Migrate run copied.
@@ -67,6 +73,15 @@ type MigrateReport struct {
 	Singletons int // fixed CA/operational blobs copied
 	CSRs       int // pending certificate requests copied
 	Certs      int // signed certificates copied
+
+	// UnverifiedSource is set by MigrateService when it copied a source
+	// inventory it could not verify, and says why: either the source never
+	// recorded an integrity value, or AllowUnverifiedSource let a failure
+	// through. Empty when the source verified. The destination's integrity
+	// value is rebuilt over the copy either way, so a caller should show this
+	// to the operator: it is the only record that the new value vouches for
+	// an inventory nothing checked.
+	UnverifiedSource string
 }
 
 // Total returns the total number of blobs copied.
@@ -75,6 +90,17 @@ func (r MigrateReport) Total() int { return r.Singletons + r.CSRs + r.Certs }
 // ErrDestinationNotEmpty is returned by Migrate when the destination backend
 // already holds a CA certificate and MigrateOptions.Force is false.
 var ErrDestinationNotEmpty = errors.New("destination backend already contains a CA certificate (use --force to overwrite)")
+
+// ErrSourceUnverified is returned by MigrateService when the source inventory
+// does not verify against its stored integrity value and
+// MigrateOptions.AllowUnverifiedSource is false.
+var ErrSourceUnverified = errors.New("refusing to migrate a source inventory that does not verify")
+
+// AllowUnverifiedSourceFlag is the openvox-ca-ctl migrate flag that sets
+// MigrateOptions.AllowUnverifiedSource. Defined here because the refusal names
+// it, and consumed by the command rather than spelled twice, for the same
+// reason as RebuildConfirmFlag.
+const AllowUnverifiedSourceFlag = "allow-unverified-source"
 
 // migrateLockName is the distributed-lock name MigrateService holds on both
 // backends for the duration of a copy. It deliberately matches the CA
@@ -110,12 +136,23 @@ const migrateLockName = "bootstrap"
 // A source this process cannot write to is fine: the same-host lock reports
 // itself unsupported rather than failing there, since a store nothing can write
 // to has no writer to exclude, and a migration only reads its source.
+//
+// The source inventory is verified first, under the source's lock and before
+// the destination is touched, because the destination's integrity value is
+// rebuilt over whatever was copied: without the check, a migration would turn
+// a tampered inventory into one that verifies. See verifyMigrationSource for
+// what refuses and what does not.
 func MigrateService(ctx context.Context, src, dst *StorageService, opts MigrateOptions) (MigrateReport, error) {
 	var report MigrateReport
 	err := src.WithLock(ctx, migrateLockName, func() error {
+		unverified, err := verifyMigrationSource(ctx, src, opts.AllowUnverifiedSource)
+		if err != nil {
+			return err
+		}
 		return dst.WithLock(ctx, migrateLockName, func() error {
 			r, e := Migrate(ctx, src.Backend(), dst.Backend(), opts)
 			report = r
+			report.UnverifiedSource = unverified
 			if e != nil {
 				return e
 			}
@@ -127,6 +164,60 @@ func MigrateService(ctx context.Context, src, dst *StorageService, opts MigrateO
 		})
 	})
 	return report, err
+}
+
+// verifyMigrationSource judges the source inventory's integrity before a
+// migration copies it. It returns an empty reason when the inventory verifies.
+// Otherwise it returns ErrSourceUnverified, naming the reason, unless allow is
+// set, in which case it returns the reason for the caller to report.
+//
+// One state is let through without allow: a store with no HMAC key and no
+// integrity value, which never initialised integrity at all (a cadir written
+// by OpenVox Server, or a store no server has started against). There is
+// nothing to verify it against, and the reason is still returned so the
+// operator is told. Every other failure refuses, including a key with no value
+// and a value with no key: deleting the value is the cheapest bypass of the
+// check, so absence alone is not taken as innocence while a key says
+// integrity was once recorded.
+//
+// It reads through InventoryIntegrityReport, which reports on every backend
+// and scheme and writes nothing — a migration never writes its source.
+func verifyMigrationSource(ctx context.Context, src *StorageService, allow bool) (string, error) {
+	rep, err := src.InventoryIntegrityReport(ctx)
+	if err != nil {
+		return "", fmt.Errorf("checking the source inventory's integrity: %w", err)
+	}
+
+	var reason string
+	switch {
+	case rep.LegacyUndecomposed:
+		// Checked first: the report's other fields describe the empty
+		// decomposed rows, not the legacy blob that holds the inventory.
+		reason = "the source still holds an undecomposed legacy inventory, which is verified only " +
+			"when a server starts against it"
+	case rep.KeyState == HMACKeyAbsent && rep.StoredHead == nil:
+		return "the source never recorded an inventory integrity value (no HMAC key and no value " +
+			"are stored), so there was nothing to verify it against", nil
+	case rep.KeyState == HMACKeyAbsent:
+		reason = "an inventory integrity value is stored but no HMAC key, so nothing can reproduce it"
+	case rep.KeyState == HMACKeyWrongLength:
+		reason = "the stored inventory HMAC key is the wrong length, so no stored value can be reproduced"
+	case rep.StoredHead == nil:
+		reason = "no inventory integrity value is stored, although an HMAC key is"
+	case !rep.Verifies:
+		reason = "the inventory does not match its stored integrity value (scheme " + rep.Scheme +
+			"), so it may have been altered"
+	default:
+		return "", nil
+	}
+
+	if allow {
+		return reason, nil
+	}
+	return "", fmt.Errorf("%w: %s. Run 'openvox-ca rebuild-inventory-hmac' against the source's "+
+		"configuration to see its state and what to do about it, or pass --%s to migrate it as it "+
+		"stands, which makes the destination vouch for it", ErrSourceUnverified, reason,
+		AllowUnverifiedSourceFlag)
 }
 
 // Migrate copies every blob held by src into dst, preserving each blob's

@@ -271,7 +271,10 @@ var _ = Describe("MigrateServiceLocksBothBackends", func() {
 		src := NewWithBackend(srcB, GinkgoT().TempDir())
 		dst := NewWithBackend(dstB, GinkgoT().TempDir())
 
-		report, err := MigrateService(ctx, src, dst, MigrateOptions{})
+		// seedCA's inventory value and key are placeholders that cannot
+		// verify, and the wrong-length key is what this spec needs (below), so
+		// the source check is overridden: it is the locking under test here.
+		report, err := MigrateService(ctx, src, dst, MigrateOptions{AllowUnverifiedSource: true})
 		Expect(err).NotTo(HaveOccurred(), "MigrateService")
 		Expect(report.Total()).To(Equal(len(want)), "Total")
 
@@ -321,7 +324,9 @@ var _ = Describe("MigrateServiceWithoutLocker", func() {
 		src := NewWithBackend(srcB, GinkgoT().TempDir())
 		dst := NewWithBackend(dstB, GinkgoT().TempDir())
 
-		report, err := MigrateService(ctx, src, dst, MigrateOptions{})
+		// Overridden for the same reason as the spec above: seedCA's
+		// integrity blobs are placeholders.
+		report, err := MigrateService(ctx, src, dst, MigrateOptions{AllowUnverifiedSource: true})
 		Expect(err).NotTo(HaveOccurred(), "MigrateService")
 		Expect(report.Total()).To(Equal(len(want)), "Total")
 	})

@@ -173,6 +173,17 @@ recomputes the destination's integrity head from its entries
 (`RebuildInventoryHMAC`). This resolves the otherwise-spurious
 `ErrInventoryTampered` that copying a foreign `inventory_hmac` would cause.
 
+Because that rebuild vouches for whatever was copied, `MigrateService` first
+verifies the source, under the source's lock and before it locks or writes the
+destination (`verifyMigrationSource`). It reads through
+`InventoryIntegrityReport`, so the check works on every backend and scheme and
+writes nothing to the source. Any state other than "verifies" is refused with
+`ErrSourceUnverified` unless `MigrateOptions.AllowUnverifiedSource` is set, with
+one exception: a source with no HMAC key and no stored value never initialised
+integrity, so there is nothing to verify, and it is copied without the
+override. Both of those outcomes are reported in `MigrateReport.UnverifiedSource`,
+which `openvox-ca-ctl migrate` prints as a warning.
+
 `RebuildInventoryHMAC` is no longer reached only from a migration: the offline
 [`openvox-ca rebuild-inventory-hmac`](../operator-cli.md#rebuild-inventory-hmac-re-asserting-inventory-integrity)
 calls it too, as the supported repair for a CA whose stored integrity value has
@@ -687,12 +698,17 @@ recorded so the control is not credited with more than it does.
    row keeps failing every subsequent check.
 
    A third path is a supported operator command rather than an attack.
-   `MigrateService` copies through the raw backend without verifying the source,
-   then calls `RebuildInventoryHMAC` on the destination unconditionally, so
-   `openvox-ca-ctl migrate` recomputes the integrity value over whatever was
-   copied. That clears a mismatch on **either** scheme — it is the rebuild the
-   opening of this section says recovery requires, and it cannot tell a repair
-   from a laundering. It is a cutover rather than an in-place repair: the
+   `MigrateService` calls `RebuildInventoryHMAC` on the destination after the
+   copy, so `openvox-ca-ctl migrate` recomputes the integrity value over
+   whatever was copied. It verifies the source first and refuses one that does
+   not verify, so this path now needs the operator to say
+   `--allow-unverified-source`; with it, it clears a mismatch on **either**
+   scheme — it is the rebuild the opening of this section says recovery
+   requires, and it cannot tell a repair from a laundering. A source with no
+   HMAC key and no value at all is copied without the flag, with a warning, so
+   deleting both from a store that had them is still a way through; it at least
+   leaves the destination warning on its first start. It is a cutover rather
+   than an in-place repair: the
    destination must be a different store (a store cannot be migrated onto
    itself), one that already holds a CA is refused without `--force`, and the CA
    must then be served from the destination. Because it only ever reads the
@@ -903,7 +919,8 @@ rather than resolved, and this document does not change the mechanism.
    false. Nor is the by-subject half of the CRL-counter claim: nothing pins
    that `LatestSerialForSubject` verifies on a blob backend, so a refactor
    giving it an unverified fast path would leave that paragraph half wrong.
-   Also unasserted: the migration laundering above, the
+   The migration's source check is asserted by `migrate_source_test.go`, one
+   spec per refusal and per state it lets through. Also unasserted: the
    level of the non-writing compare's message, and the `scheme` attribute on the
    mismatch warning. A change to any of these would leave this section quietly
    wrong rather than failing a build.
