@@ -757,6 +757,32 @@ networkPolicy:
             protocol: TCP
 ```
 
+**No `apiAccess` mode admits agents outside the cluster.** `any` matches every
+pod in every namespace, and a connection from a VM or another cluster does not
+come from a pod, so the policy drops it: the agents time out, and the CA logs
+nothing because nothing reaches it. Admit them with an `ipBlock`:
+
+```yaml
+networkPolicy:
+  enabled: true
+  extraIngress:
+    - from:
+        - ipBlock:
+            cidr: 192.0.2.0/24   # the agents' network
+      ports:
+        - port: https
+          protocol: TCP
+```
+
+The block has to cover the address the pod sees, and that depends on how the
+connection arrives. Through a LoadBalancer or NodePort Service with
+`service.externalTrafficPolicy: Local` it is the agent's own. With the default,
+`Cluster`, it is usually the address of whichever node forwarded it, so the block
+has to cover the nodes. Through a TLS-passthrough Ingress or Gateway it comes
+from the controller's pods, which `apiAccess: any` admits already and
+`namespace` does not, unless the controller runs in this namespace. The same
+holds for a Prometheus outside the cluster, with `port: metrics`.
+
 Turning egress on means you must enumerate everything **the pod** talks to. DNS
 to the cluster's resolvers is always allowed; everything else is yours to list.
 Four things about that are easy to get wrong:
