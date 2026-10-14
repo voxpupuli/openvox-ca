@@ -344,10 +344,17 @@ func (l *fileLocks) acquireInstance() (Unlocker, error) {
 		local.Unlock()
 		return nil, l.unwritableStore(err, "creating same-host lock directory "+l.dir)
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, lockFilePerm)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|lockOpenFlags, lockFilePerm)
 	if err != nil {
 		local.Unlock()
 		return nil, l.inaccessibleLockFile(err, path)
+	}
+	// Before anything is locked or written: writeHolder truncates this file,
+	// so it must be a lock file and not another name for something else.
+	if err := verifyLockFile(f, path); err != nil {
+		_ = f.Close()
+		local.Unlock()
+		return nil, err
 	}
 
 	locked, lockErr := tryLock(f)
@@ -421,7 +428,8 @@ func writeInstanceHolder(f *os.File) error {
 //
 // The command name is the binary's, never its arguments: a command line can
 // carry a passphrase file path or another operational detail, and this record
-// lands in a 0600 file that an error message then prints. The pid, host and
+// lands in a lock file the store's group may read (lockFilePerm, 0660 less the
+// umask) and that an error message then prints. The pid, host and
 // start time are enough to find the process, which is all the reader needs.
 func instanceHolderRecord() string {
 	name := "openvox-ca"

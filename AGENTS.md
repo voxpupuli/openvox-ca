@@ -330,8 +330,10 @@ Two halves, and both matter:
   Since [#493](https://github.com/voxpupuli/openvox-ca/issues/493) they are
   `lockFilePerm` (0660) in a `lockDirPerm` (0770) directory, ceilings the umask
   narrows like the database's, and `sql_sqlite_perms_test.go` pins the two
-  together. Even now it holds only for SQLite, and only under a umask that
-  keeps group write. The claim that the data files' group bit was enough was
+  together. Even now it holds only for SQLite, only under a umask that keeps
+  group write, and not for server-side key generation, which writes into a
+  `private/` directory created without group write. The claim that the data
+  files' group bit was enough was
   in this section, in `internal/storage/sql.go`, in `backend.go`, in
   `filesystem.go`, in `docs/storage-backends.md` and twice in
   `internal/storage/sql_sqlite_perms_test.go`, and was wrong in all seven —

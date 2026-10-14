@@ -339,6 +339,18 @@ var _ = Describe("Same-host locking", func() {
 			expectRetryable(b, "bootstrap")
 		})
 
+		It("fails EnsureReady when the lock directory cannot be created", func() {
+			// EnsureReady creates the lock directory through the lock set, not
+			// in its loop over the data directories, so the error comes back
+			// from a statement of its own; this pins that it is returned rather
+			// than dropped. Same stand-in as the spec above: a plain file where
+			// the directory belongs.
+			dir := GinkgoT().TempDir()
+			Expect(os.WriteFile(filepath.Join(dir, fsLockDir), []byte("not a directory"), 0600)).To(Succeed())
+
+			Expect(NewFilesystemBackend(dir).EnsureReady(ctx)).NotTo(Succeed())
+		})
+
 		DescribeTable("reports the capability absent on a read-only filesystem",
 			// EROFS degrades at *both* call sites, and the reasoning differs
 			// from the permission case beside it: EROFS says nothing about

@@ -63,22 +63,27 @@ const (
 	// that subject is signed, so a uid that can only reopen the files already
 	// there still cannot sign a new node.
 	//
-	// Under the default 0022 umask they come out 0640 and 0750, which a second
-	// uid can neither open read-write nor create in -- the same umask leaves
-	// the SQLite database 0640 and so unwritable by it too. An arbitrary-uid
-	// deployment therefore also needs a umask that keeps group write, 0002 or
-	// 0007; under systemd's UMask=0077 they are owner-only, as before.
+	// Under a 0022 umask -- the usual default, and systemd's for a unit that
+	// sets no UMask -- they come out 0640 and 0750: the group can read the
+	// store-instance lock's holder record, but cannot open a lock read-write
+	// or create, replace or remove one. The same umask leaves the SQLite
+	// database 0640 and so unwritable by a second uid too, so an arbitrary-uid
+	// deployment also needs a umask that keeps group write, 0002 or 0007.
+	// Under a UMask of 0077 both are owner-only.
 	//
-	// The exposure is smaller than the database's: a lock file holds nothing
-	// but, for the store-instance lock, the holder's pid, host and start time.
-	// What group write on the directory adds is that a member of the group can
-	// unlink a lock file, which fileUnlocker below explains defeats the lock
-	// for anyone waiting on it. On SQLite that member can already write the
-	// database, since one umask decides both modes. On the filesystem backend
-	// it cannot -- its data directories are DirPerm, which has no group write
-	// -- so there, under a group-write umask, this is a real if small
-	// widening: the group can break the locks without being able to write the
-	// data they protect.
+	// What the group gains is smaller than what the database already gives
+	// it. A lock file holds nothing but, for the store-instance lock, the
+	// holder's pid, host and start time. Group write on the directory, under a
+	// umask that keeps it, means a member of the group can put something else
+	// at a lock file's name: a link, which lockOpenFlags and verifyLockFile
+	// refuse so that this process's privileges cannot be carried through it,
+	// or nothing at all, since it can also unlink a lock file -- which
+	// fileUnlocker below explains defeats the lock for anyone waiting on it. On
+	// SQLite that member can already write the database, since one umask
+	// decides both modes. On the filesystem backend it cannot, because its
+	// data directories are DirPerm, which has no group write, so there the
+	// unlink is a real if small widening: the group can break the locks
+	// without being able to write the data they protect.
 	lockFilePerm = 0o660
 	lockDirPerm  = 0o770
 )
@@ -183,10 +188,15 @@ func (l *fileLocks) acquire(ctx context.Context, name string) (Unlocker, error) 
 	// Changing or removing either directive means revisiting all three. See
 	// voxpupuli/openvox-ca#313.
 	//nolint:gosec // G703: filepath.Join of the operator-configured store root and a hex sha256 digest, which cannot contain a separator, so the path cannot leave the lock directory
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, lockFilePerm)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|lockOpenFlags, lockFilePerm)
 	if err != nil {
 		local.Unlock()
 		return nil, l.inaccessibleLockFile(err, path)
+	}
+	if err := verifyLockFile(f, path); err != nil {
+		_ = f.Close()
+		local.Unlock()
+		return nil, err
 	}
 
 	backoff := fileLockRetryInitial
@@ -290,6 +300,11 @@ func (l *fileLocks) unwritableStore(err error, what string) error {
 // nothing about ownership, and a lock directory left behind on a since-remounted
 // store is exactly the read-only snapshot unwritableStore exists for.
 func (l *fileLocks) inaccessibleLockFile(err error, path string) error {
+	if isSymlinkRefusal(err) {
+		return fmt.Errorf("opening same-host lock file %s: %w (it is a symbolic link; openvox-ca only "+
+			"ever creates lock files as plain files, so something else put this here — remove it, and "+
+			"check who can write %s)", path, err, l.dir)
+	}
 	if isReadOnlyFSError(err) {
 		l.warnOnce.Do(func() {
 			slog.Warn("Same-host locking is unavailable: the store is on a read-only filesystem",
@@ -305,6 +320,40 @@ func (l *fileLocks) inaccessibleLockFile(err error, path string) error {
 			"keeps group write, such as 0002)", path, err, obstruction(path, l.dir), os.Geteuid())
 	}
 	return fmt.Errorf("opening same-host lock file %s: %w", path, err)
+}
+
+// verifyLockFile refuses a lock file that is not a plain file with a single
+// link, judged through the descriptor just opened so that what is checked is
+// what will be locked and, for the instance lock, written.
+//
+// The lock directory can be group-writable (lockDirPerm), so a member of the
+// store's group can put something at a lock file's name. lockOpenFlags already
+// refuses a symbolic link; this catches the two things that open succeeds on. A
+// hard link to ca_key.pem would otherwise be truncated and overwritten by the
+// instance lock's holder record, and a FIFO or other special file is not
+// something flock(2) and that record belong on. Both refuse rather than
+// recover, and nothing here modifies what it found: the file belongs to whoever
+// planted it, and the operator is the one to remove it.
+//
+// A platform whose FileInfo carries no link count skips that half of the check
+// rather than refusing every lock; statNlink declines only off Unix, where no
+// lock file is ever opened.
+func verifyLockFile(f *os.File, path string) error {
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("checking same-host lock file %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("same-host lock file %s is not a regular file (%s); openvox-ca only ever "+
+			"creates lock files as plain files, so something else put this here — remove it",
+			path, info.Mode().Type())
+	}
+	if n, ok := statNlink(info); ok && n != 1 {
+		return fmt.Errorf("same-host lock file %s has %d hard links; openvox-ca only ever creates "+
+			"lock files with one, so another name for this file exists — remove the lock file, "+
+			"and find what else it is linked to before trusting that file", path, n)
+	}
+	return nil
 }
 
 // obstruction names whichever of the lock file and its directory this process

@@ -150,9 +150,8 @@ one instance, and the lock catches the case it can.
 ### Running `openvox-ca-ctl` as the service user
 
 - **Run `openvox-ca-ctl` as the user the server runs as**, not under `sudo`.
-  The lock files are group-accessible at most, but a command run as root
-  still leaves a root-owned lock file the service account cannot open in a
-  store it owns, and the
+  The lock files are group-accessible at most, but a command run as root still
+  leaves a root-owned lock file the service account cannot open, and the
   server's next acquisition of that name fails — deliberately and loudly, with
   an error naming the file, its owner and `chown -R`, because the alternative is
   it quietly giving up on locking while the root process believes it holds an
@@ -872,17 +871,22 @@ kubelet ORs group access in at every mount whatever the file was created as, so
 there the creation mode is irrelevant.
 
 It is what lets a platform that assigns the pod a fresh uid per start, such as
-OpenShift, reach a SQLite store a previous uid created, provided the uids share
-a group and the umask keeps group write. The same restart has to reacquire the
-same-host locks, so those are created group-accessible too: the files in
-`.<database>.locks/` at `0660` and the directory at `0770`, narrowed by the
-umask the same way. The directory needs group write because each subject's lock
-is a file of its own, created the first time that subject is signed. Under the
-usual `0022` the database comes out `0640` and the locks `0640` in a `0750`
-directory, which a second uid can neither write nor create in, so on such a
-platform run `openvox-ca` under a umask of `0002` or `0007` from the first
-start. The filesystem backend does not work there whatever the umask, because
-its data directories are created without group write, so it needs a stable uid.
+OpenShift, reach a SQLite database and its locks that a previous uid created,
+provided the uids share a group and the umask keeps group write. The same
+restart has to reacquire the same-host locks, so those are created
+group-accessible too: the files in `.<database>.locks/` at `0660` and the
+directory at `0770`, narrowed by the umask the same way. The directory needs
+group write because each subject's lock is a file of its own, created the first
+time that subject is signed. Under the usual `0022` the database comes out
+`0640` and the locks `0640` in a `0750` directory, which a second uid can
+neither write nor create in, so on such a platform run `openvox-ca` under a
+umask of `0002` or `0007` from the first start.
+
+That covers signing, not everything. Server-side key generation (`/generate`)
+writes the key into `<cadir>/private/` on every backend, and that directory is
+created without group write whatever the umask, so a second uid cannot generate
+keys there; the filesystem backend's data directories are created the same way,
+so it cannot be used there at all. Both need a stable uid.
 
 **`openvox-ca` never changes the mode of a file it did not create.** Not the
 database, not the sidecars, not the directory holding them. A store whose
