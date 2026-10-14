@@ -96,6 +96,10 @@ type StoreLockedError struct {
 	// Holder describes the process holding it, as that process recorded
 	// itself. Empty when the record was missing or unreadable.
 	Holder string
+	// HolderUnverified is set when the lock file was group-writable, so the
+	// record may have been written by any member of the store's group rather
+	// than by the process holding the lock; see lockFilePerm.
+	HolderUnverified bool
 }
 
 func (e *StoreLockedError) Error() string {
@@ -107,11 +111,18 @@ func (e *StoreLockedError) Error() string {
 		// the process.
 		who = "an unidentified process"
 	}
+	caveat := ""
+	if e.HolderUnverified {
+		// Said in the error rather than left to the docs, because this is the
+		// sentence that tells an operator which process to stop.
+		caveat = "; that description is the lock file's own contents, and the store's group can " +
+			"write the file, so confirm the process is openvox-ca before stopping it"
+	}
 	return fmt.Sprintf(
-		"another openvox-ca process is already running against this store: %s (lock file %s). "+
+		"another openvox-ca process is already running against this store: %s (lock file %s%s). "+
 			"This storage backend has no distributed locking, so exactly one instance may run at a time; "+
 			"stop the running one first",
-		who, e.Path)
+		who, e.Path, caveat)
 }
 
 // InstanceLocker is implemented by backends that can hold a store-wide
@@ -375,9 +386,17 @@ func (l *fileLocks) acquireInstance() (Unlocker, error) {
 		// needs no lock of its own: whoever holds it wrote its record before
 		// this process could reach here.
 		holder := readInstanceHolder(f)
+		// Judged on the open descriptor, like verifyLockFile, so the mode is
+		// that of the file the record came from. An unreadable mode counts as
+		// unverified: the caveat costs a sentence, and omitting it wrongly
+		// sends an operator to stop a process somebody else named.
+		unverified := true
+		if info, err := f.Stat(); err == nil {
+			unverified = info.Mode().Perm()&0o020 != 0
+		}
 		_ = f.Close()
 		local.Unlock()
-		return nil, &StoreLockedError{Path: path, Holder: holder}
+		return nil, &StoreLockedError{Path: path, Holder: holder, HolderUnverified: unverified}
 	}
 
 	// Record who we are, for the next process that is refused. Best-effort:

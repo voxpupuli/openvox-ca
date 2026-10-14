@@ -23,6 +23,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -36,12 +37,17 @@ import (
 // two backends share fileLocks, but the filesystem backend has a second path
 // that creates the lock directory, EnsureReady, which SQLite does not.
 //
-// Group access is the point (#493). A platform that gives the pod a fresh uid
-// per start reaches the store through its group, and has to reacquire these
-// locks before it touches any data: the lock files need group read and write,
-// and the directory group write, since a subject never signed before has no
-// lock file yet. The modes are asserted exactly rather than as "no world bits",
-// because 0600 has no world bits either and is the bug.
+// Group access is for SQLite (#493): a platform that gives the pod a fresh uid
+// per start reaches a SQLite store through its group, and has to reacquire
+// these locks before it touches the database, so the lock files need group read
+// and write and the directory group write. That benefit is pinned against the
+// database in sql_sqlite_perms_test.go. The filesystem backend shares fileLocks
+// and so gets the same modes without the benefit: its data is 0600 whatever the
+// umask, so that topology is unsupported there, and these modes are the small
+// widening lockFilePerm describes. They are pinned here all the same, because
+// EnsureReady is a second path that creates the directory and has to agree. The
+// modes are asserted exactly rather than as "no world bits", because 0600 has
+// no world bits either and is the regression this guards against.
 var _ = Describe("Same-host lock file modes", func() {
 	var ctx context.Context
 
@@ -108,6 +114,36 @@ var _ = Describe("Same-host lock file modes", func() {
 		}),
 		Entry("when a named lock creates it", acquireNamed),
 		Entry("when the instance lock creates it", acquireInstance),
+	)
+
+	// The holder record a refused start reports is the lock file's contents.
+	// Where the group can write the file it can write the record, so the
+	// refusal says the process it names is unconfirmed; where it cannot, it
+	// says nothing of the kind, or the caveat would be noise an operator learns
+	// to skip. The umask is set before the first instance creates the file,
+	// since that decides its mode.
+	DescribeTable("says when the holder it reports could have been written by the group",
+		func(umask int, wantCaveat bool) {
+			syscall.Umask(umask)
+			cadir := GinkgoT().TempDir()
+
+			first, err := NewFilesystemBackend(cadir).AcquireInstanceLock()
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { Expect(first.Unlock()).To(Succeed()) })
+
+			_, err = NewFilesystemBackend(cadir).AcquireInstanceLock()
+			var locked *StoreLockedError
+			Expect(errors.As(err, &locked)).To(BeTrue(), "a second instance is refused: %v", err)
+			Expect(locked.HolderUnverified).To(Equal(wantCaveat))
+			if wantCaveat {
+				Expect(err.Error()).To(ContainSubstring("confirm the process is openvox-ca"))
+			} else {
+				Expect(err.Error()).NotTo(ContainSubstring("confirm the process"))
+			}
+		},
+		Entry("group-writable under 0002", 0o002, true),
+		Entry("group read only under 0022", 0o022, false),
+		Entry("owner-only under 0077", 0o077, false),
 	)
 
 	// A store an earlier version created has its lock directory at 0750 and

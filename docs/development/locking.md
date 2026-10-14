@@ -141,7 +141,10 @@ service operators restart and kill. Consequences worth knowing:
   so wherever the umask leaves the files group-readable, 0022 included, a member
   of the group can hold any existing lock and so stop the CA starting or stall
   signing and revocation. Only a umask that removes group read, such as 0077,
-  prevents that. Lock files can be swept while nothing is using the
+  prevents that. Group write on the files lets the group rewrite the
+  store-instance holder record too, so `StoreLockedError` says when the record
+  it reports could have come from the group. Lock files can be swept while
+  nothing is using the
   store; while anything is, sweeping them silently defeats the exclusion.
 - **The directory grows with the fleet.** One file per distinct lock name means
   `bootstrap`, `crl` — and one per subject, since `subject:<name>` is a lock

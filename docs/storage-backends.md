@@ -347,7 +347,10 @@ File permissions are fixed: `0600` for `ca_key.pem`, `inventory.txt`, the
 integrity files and `superseded.json`, and for anything under `private/`;
 `0660` for the lock files under `locks/`, and `0770` for `locks/` itself;
 `0644` for certificates, CSRs, `ca_crt.pem`, `ca_pub.pem`, `ca_crl.pem` and
-`serial`. The CRL is world-readable because it is
+`serial`. Group access to the lock files lets a member of the cadir's group
+hold a lock, and so stop the CA starting or stall signing and revocation;
+a umask of `0077` removes it (see the SQLite section for the detail, which
+applies here too). The CRL is world-readable because it is
 public: it is served without authentication, and OpenVox Server writes it
 `0644` too. The inventory is not, because it names every subject this CA has
 signed. A file openvox-ca rewrites gets its mode, so a cleanup that drops
@@ -904,7 +907,11 @@ Group read on the lock files has a cost of its own. `flock(2)` needs no write
 access, so any member of the group can hold an existing lock, which can stop the
 CA starting or stall signing and revocation. That is true under `0022` as well,
 which leaves the lock files `0640`; only a umask that removes group read, such
-as `0077`, prevents it.
+as `0077`, prevents it. Under the `0002` or `0007` this topology needs, the
+group can also write the store-instance lock's record of who holds it, so when
+the CA refuses to start because another instance holds the store, the error
+says the process it names may not be the real holder: check it before stopping
+it.
 
 **`openvox-ca` never changes the mode of a file it did not create.** Not the
 database, not the sidecars, not the directory holding them. A store whose

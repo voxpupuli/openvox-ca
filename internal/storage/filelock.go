@@ -71,28 +71,33 @@ const (
 	// write, 0002 or 0007. Under a UMask of 0077 both are owner-only, and
 	// nothing below applies.
 	//
-	// What the group gains, whenever the umask leaves it group read:
+	// What a member of the store's group can do with them follows from the
+	// three bits the umask can leave it, so it is listed by bit rather than by
+	// the attacks anyone has thought of:
 	//
-	//   - It can read the store-instance lock's holder record: the pid, host
-	//     and start time of whoever holds the store, and nothing else.
-	//   - It can hold any lock file that exists. flock(2) needs no write
-	//     access, so a member of the group can open a lock read-only and take
-	//     LOCK_EX on it. Held on the store-instance lock, that stops the CA
-	//     starting, with a StoreLockedError naming the last legitimate holder;
-	//     held on crl or a subject lock, it stalls revocation or signing until
-	//     the caller's deadline. This is what group read on these files means,
-	//     not a side effect of how they are opened, and it holds under 0022.
+	//   - Read on a lock file (0022 and anything looser). It can read the
+	//     store-instance lock's holder record: the pid, host and start time of
+	//     whoever holds the store. And it can hold any lock that exists:
+	//     flock(2) needs no write access, so a lock opened read-only takes
+	//     LOCK_EX as well as any. Held on the store-instance lock, that stops
+	//     the CA starting with a StoreLockedError; held on crl or a subject
+	//     lock, it stalls revocation or signing until the caller's deadline.
+	//   - Write on a lock file (0002, 0007). It can also rewrite the holder
+	//     record, so a StoreLockedError can name a process of its choosing.
+	//     acquireInstance checks the file's mode and says so in the error
+	//     whenever the record could have been written by the group.
+	//   - Write on the lock directory (0002, 0007). It can create a lock file
+	//     for a name nobody has locked yet, which is what a second uid needs.
+	//     It can put something else at a lock file's name, a link or a special
+	//     file, which lockOpenFlags and verifyLockFile refuse so that this
+	//     process's privileges cannot be carried through it. And it can unlink
+	//     a lock file, which fileUnlocker below explains defeats the lock for
+	//     anyone waiting on it.
 	//
-	// And whenever the umask also leaves the directory group-writable:
-	//
-	//   - It can put something else at a lock file's name: a link, which
-	//     lockOpenFlags and verifyLockFile refuse so that this process's
-	//     privileges cannot be carried through it.
-	//   - It can unlink a lock file, which fileUnlocker below explains defeats
-	//     the lock for anyone waiting on it.
-	//
-	// So the group can deny service through the locks; it cannot use them to
-	// read or write anything else. On SQLite the same umask gives it the
+	// Search on the directory, which DirPerm already gave the group, adds
+	// nothing. So the group can deny service through the locks and mislead
+	// an operator about who holds one; it cannot use them to read or write
+	// anything but the lock files themselves. On SQLite the same umask gives it the
 	// database, which holds the CA key by default, so the locks add nothing it
 	// lacked. On the filesystem backend its data is 0600 in DirPerm
 	// directories, so there this is a real if small widening: a member of the
@@ -308,7 +313,9 @@ func (l *fileLocks) unwritableStore(err error, what string) error {
 // The other way to get here is a platform that starts each run as a different
 // uid, OpenShift for one, against a store a previous uid created under a umask
 // that took group write away. chown is not available to that process, so the
-// message names the umask as well (#493).
+// message names the umask as well (#493). Only a SQLite store can run that way
+// at all -- the filesystem backend's data is 0600 whatever the umask -- so the
+// message says so rather than offering a remedy that only moves the failure.
 //
 // A read-only filesystem still reports the capability as absent: EROFS says
 // nothing about ownership, and a lock directory left behind on a since-remounted
@@ -330,8 +337,9 @@ func (l *fileLocks) inaccessibleLockFile(err error, path string) error {
 		return fmt.Errorf("opening same-host lock file %s: %w (%s, and this process runs as uid %d; "+
 			"another user — typically a ctl command run under sudo — owns it, so `chown -R` the lock "+
 			"directory back to the user openvox-ca runs as; on a platform that starts each run as a "+
-			"different uid in the store's group, the store must have been created under a umask that "+
-			"keeps group write, such as 0002)", path, err, obstruction(path, l.dir), os.Geteuid())
+			"different uid in the store's group, which only a SQLite store supports, the store must "+
+			"have been created under a umask that keeps group write, such as 0002)",
+			path, err, obstruction(path, l.dir), os.Geteuid())
 	}
 	return fmt.Errorf("opening same-host lock file %s: %w", path, err)
 }

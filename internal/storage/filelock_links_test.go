@@ -23,6 +23,7 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -141,6 +142,22 @@ var _ = Describe("Same-host lock files planted by someone else", func() {
 		},
 		Entry("for a named lock", acquireNamed, "subject:node1.test"),
 		Entry("for the instance lock", acquireInstance, instanceLockName),
+	)
+
+	// The errno O_NOFOLLOW returns differs by platform, and a runner sees only
+	// its own, so the arms the specs above never reach are driven directly.
+	// EFTYPE, NetBSD's, is not declared here and cannot be. The negatives keep
+	// the predicate from passing by answering yes to everything, which would
+	// tell an operator a permission problem was a planted link.
+	DescribeTable("recognises O_NOFOLLOW's refusal on every platform that builds this",
+		func(err error, want bool) {
+			Expect(isSymlinkRefusal(err)).To(Equal(want))
+		},
+		Entry("ELOOP: Linux, darwin, OpenBSD", fmt.Errorf("open x: %w", syscall.ELOOP), true),
+		Entry("EMLINK: FreeBSD, DragonFly", fmt.Errorf("open x: %w", syscall.EMLINK), true),
+		Entry("not EACCES", fmt.Errorf("open x: %w", syscall.EACCES), false),
+		Entry("not ENOENT", fmt.Errorf("open x: %w", syscall.ENOENT), false),
+		Entry("not nil", nil, false),
 	)
 
 	// The complement, so the refusals above cannot be satisfied by refusing
