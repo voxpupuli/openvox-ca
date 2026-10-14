@@ -117,6 +117,8 @@ var _ = Describe("Generating a key for the subject \"ca\"", func() {
 			_, err := myCA.SaveRequest(ctx, "ca", csrPEM)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(store.HasCSR(ctx, "ca")).To(BeTrue())
+			Expect(filepath.Join(dir, "private", "ca_key.pem")).NotTo(BeAnExistingFile())
+			Expect(os.ReadFile(filepath.Join(dir, "ca_key.pem"))).To(Equal(cachedKeyPEM))
 		})
 	})
 })
