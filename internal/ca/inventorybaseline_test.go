@@ -89,6 +89,9 @@ var _ = Describe("Inventory baseline level across CA.Init", func() {
 		// next start would be silent, and if it stopped writing the CRL that
 		// start would log at Info; either way the docs that name it go stale.
 		Expect(ca.ImportCA(ctx, storage.New(dir), cachedCrtPEM, cachedKeyPEM, nil)).To(Succeed())
+		// Judge the start alone: an import that baselined would log this very
+		// WARN itself, and the spec would pass on its line.
+		logs.Reset()
 
 		initCA()
 
