@@ -270,10 +270,24 @@ triggers one.
 
 There is no way yet to encrypt an existing key in place. `openvox-ca-ctl
 import` writes the plaintext key it is given exactly as given, and `migrate`
-copies the stored key byte for byte. Two options remain: keep the plaintext key
-and unset `encrypt_ca_key`, which stops the warning and changes nothing else,
-or bootstrap a new CA with the setting on, which creates its key encrypted but
-means reissuing every certificate the old CA signed.
+copies the stored key byte for byte. Three options remain:
+
+1. Keep the plaintext key and unset `encrypt_ca_key`. That stops the warning
+   and changes nothing else.
+2. Move the key into OpenBao Transit by importing it there (BYOK; see
+   [provisioning the Transit key](openbao-transit.md#provisioning-the-transit-key))
+   and set `ca_key_provider: openbao`. The CA and every certificate it issued
+   are kept: the server checks at startup that the Transit key matches the CA
+   certificate. Then delete the plaintext key from the store. The server no
+   longer reads it, so nothing warns about it either.
+   [Removing an orphaned CA key](storage-backends.md#removing-an-orphaned-ca-key)
+   shows where it lives on each backend; here, unlike there, removing it does
+   not retire the CA, because Transit holds the same key.
+3. Bootstrap a new CA with the setting on. Its key is created encrypted, but
+   every certificate the old CA signed has to be reissued.
+
+None of these reaches copies already taken: a backup, snapshot or replica made
+while the key was plaintext still holds a usable CA key.
 
 Loading handles both encrypted and unencrypted PEM files, deciding from the PEM
 itself rather than from the setting. An encrypted key therefore needs its

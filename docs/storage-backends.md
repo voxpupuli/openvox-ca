@@ -1257,8 +1257,9 @@ Notes:
 > [re-importing a chain](migrating-from-puppet-server.md#refreshing-ancestor-crls)
 > for it, and for the limits. Under `encrypt_ca_key` or
 > `ca_key_provider: openbao` there is **no** fallback: `import` cannot parse an
-> encrypted key, feeding it the plaintext one silently replaces your encrypted
-> key with a plaintext one, and under OpenBao there is no exportable key at all.
+> encrypted key, feeding it the plaintext one replaces your encrypted key with a
+> plaintext one (`import` does not say so; the server warns at its next start),
+> and under OpenBao there is no exportable key at all.
 
 Use `filesystem` for single-node installs or migrating from an OpenVox/Puppet
 Server CA. Use `sqlite` for a single-node install that prefers one database file

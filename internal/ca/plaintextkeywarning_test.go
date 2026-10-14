@@ -97,6 +97,8 @@ var _ = Describe("Plaintext CA key under encrypt_ca_key", func() {
 		Expect(warnings()).To(HaveLen(1))
 		Expect(warnings()[0]).To(ContainSubstring("level=WARN"))
 		Expect(warnings()[0]).To(ContainSubstring("key=" + store.CAKeyPath()))
+		Expect(warnings()[0]).To(ContainSubstring(`Backward compatibility\" in docs/ca-key-security.md`),
+			"the warning names no remedy itself; the section it points at does")
 
 		// The warning says the key is not re-encrypted; hold it to that.
 		after, err := store.GetCAKey(context.Background())
@@ -154,6 +156,15 @@ var _ = Describe("Plaintext CA key under encrypt_ca_key", func() {
 		Expect(frontend.Init(context.Background())).To(Succeed())
 
 		Expect(warnings()).To(BeEmpty())
+	})
+
+	// The warning sends the operator to a section by name, and nothing else
+	// ties the two together: renaming the heading would leave every such log
+	// line pointing at nothing.
+	It("points at a documentation section that exists", func() {
+		doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "ca-key-security.md"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(doc)).To(ContainSubstring("\n### Backward compatibility\n"))
 	})
 
 	It("does not warn when the setting is off", func() {
