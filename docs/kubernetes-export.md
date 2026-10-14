@@ -256,7 +256,7 @@ counted in `openvoxca_k8s_export_applies_total{kind,namespace,name,result}`, and
 per-target `last_success` / `last_error` timestamp gauges record the most
 recent outcomes. Because export failures are only logged, alerting on these
 series is the recommended way to catch a target that persistently fails; the
-[monitoring mixin](../mixin/) ships an `OpenVoxCAKubernetesExportFailing` alert
+[monitoring mixin](https://github.com/voxpupuli/openvox-ca/tree/main/mixin) ships an `OpenVoxCAKubernetesExportFailing` alert
 that fires while a target's most recent apply attempt failed.
 
 That alert matches on the `last_error` gauge, so it can only report on a target
