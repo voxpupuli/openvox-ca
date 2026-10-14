@@ -49,7 +49,7 @@ var _ = Describe("the store instance lock", func() {
 
 	// The specs below drive real root commands, which resolve OPENVOX_CA_CONFIG
 	// and the OPENVOX_CA_* environment. Without a pin, an exported
-	// OPENVOX_CA_STORAGE_BACKEND (or a host /etc/puppet-ca/config.yaml) sends
+	// OPENVOX_CA_STORAGE_BACKEND (or a host /etc/openvox-ca/config.yaml) sends
 	// them at a store the holdStore flock does not cover. It covers every
 	// command-driving spec in this file, not only the newest: the hazard is the
 	// same for csr and import-ca-cert, and counting them here would go stale

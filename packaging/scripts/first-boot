@@ -45,7 +45,7 @@ SSLDIR="${OPENVOX_CA_SSLDIR:-/etc/puppetlabs/puppet/ssl}"
 # whatever points it elsewhere moves the server's file and provisioning's
 # together -- which is what every guard below relies on, since a guard that
 # checked a file nothing else uses would check nothing.
-CONFIG="${OPENVOX_CA_CONFIG:-/etc/puppet-ca/config.yaml}"
+CONFIG="${OPENVOX_CA_CONFIG:-/etc/openvox-ca/config.yaml}"
 
 # read_config_key prints the value of a top-level scalar key from $CONFIG, or
 # nothing if the file, the key or a readable value is absent.
@@ -230,7 +230,7 @@ if [ -z "$CADIR" ]; then
     $(config_key_line cadir)
 
 Provisioning has to agree with the server about where the CA lives, and it will not guess. Write
-the value as a plain or quoted scalar on one line -- cadir: /var/lib/puppet-ca -- and start again:
+the value as a plain or quoted scalar on one line -- cadir: /srv/openvox-ca -- and start again:
 
     systemctl restart openvox-ca-first-boot"
 	fi

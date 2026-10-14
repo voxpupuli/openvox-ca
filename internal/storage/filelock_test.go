@@ -830,7 +830,7 @@ var _ = Describe("Same-host locking", func() {
 					Expect(got).To(Equal(wantPath), "dsn %q", dsn)
 				}
 			},
-			Entry("bare absolute path", "/var/lib/puppet-ca/ca.db", "/var/lib/puppet-ca/ca.db", true),
+			Entry("bare absolute path", "/var/lib/openvox-ca/ca.db", "/var/lib/openvox-ca/ca.db", true),
 			Entry("bare relative path", "ca.db", "ca.db", true),
 			// The driver opens a file: URI with SQLITE_OPEN_URI and decodes %HH
 			// itself, so this has to decode too or the permission fix protects a

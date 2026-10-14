@@ -127,7 +127,7 @@ var _ = Describe("openvox-ca csr", func() {
 
 	BeforeEach(func() {
 		caDir = GinkgoT().TempDir()
-		// Pin to an empty config file so the host's /etc/puppet-ca/config.yaml,
+		// Pin to an empty config file so the host's /etc/openvox-ca/config.yaml,
 		// if it exists, cannot influence the result.
 		// ECDSA P-256, not the RSA-4096 default: these specs create a CA key
 		// on nearly every It, and RSA generation at that size dominates the

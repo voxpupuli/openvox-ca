@@ -1,7 +1,7 @@
 # Default values for the openvox-ca chart.
 #
 # The server's own settings live under `config` below: that block is written
-# verbatim to /etc/puppet-ca/config.yaml, where openvox-ca auto-detects it, so
+# verbatim to /etc/openvox-ca/config.yaml, where openvox-ca auto-detects it, so
 # every key in docs/configuration.md is reachable without the chart needing a
 # value of its own for each one. The blocks below it (tls, ca, puppetServers,
 # metrics, kubernetesExport, …) are conveniences that wire up the Kubernetes
@@ -140,9 +140,9 @@ config: {}
 existingConfigMap: ""
 
 # Where the config ConfigMap is mounted. openvox-ca auto-detects
-# /etc/puppet-ca/config.yaml, and the chart passes --config explicitly, so
+# /etc/openvox-ca/config.yaml, and the chart passes --config explicitly, so
 # this only needs changing in unusual layouts.
-configMount: /etc/puppet-ca
+configMount: /etc/openvox-ca
 
 # Extra files to place alongside config.yaml in the config ConfigMap, keyed by
 # filename. Useful for an autosign allowlist or any file a config key points
@@ -264,7 +264,7 @@ caKeyPassphrase:
 # nothing durable, so set enabled: false to use an emptyDir instead.
 persistence:
   enabled: true
-  mountPath: /var/lib/puppet-ca
+  mountPath: /var/lib/openvox-ca
 
   # Use a PersistentVolumeClaim you created yourself.
   existingClaim: ""

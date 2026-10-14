@@ -116,7 +116,7 @@ See [running under systemd](docs/systemd.md) for the rest of a VM install.
 ### Packages (`.deb`, `.rpm`)
 
 A `.deb` and an `.rpm` per architecture install the binaries, a unit rendered
-for `/usr/bin`, a working `/etc/puppet-ca/config.yaml`, and a `Type=oneshot`
+for `/usr/bin`, a working `/etc/openvox-ca/config.yaml`, and a `Type=oneshot`
 that provisions the CA the first time you start the service — so on a host with
 no CA of its own, a package install is `install`, then `systemctl enable --now
 openvox-ca`, with no configuration to write first. They create the `puppet`
@@ -326,7 +326,7 @@ than advisable, and the `kill` above is part of the procedure, not tidying.
 
 `--server-url` is needed because it defaults to HTTPS while that server speaks
 plain HTTP, and the empty `--tls-cert=`/`--tls-key=` keep the start from
-picking up a `tls_cert` in `/etc/puppet-ca/config.yaml` — which would name the
+picking up a `tls_cert` in `/etc/openvox-ca/config.yaml` — which would name the
 file this step is about to create. `--out-dir` points at the directory the CA
 writes the key to anyway, so no second copy of it is left lying around; omit it
 and one lands in the current directory. The certificate is printed on stdout,

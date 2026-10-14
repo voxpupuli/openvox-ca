@@ -130,9 +130,9 @@ inline `openbao.approle_role_id`), owned by the user `openvox-ca` runs as and
 mode `0600`:
 
 ```bash
-install -o openvox-ca -g openvox-ca -m 0600 /dev/null /etc/puppet-ca/openbao-secret-id
+install -o openvox-ca -g openvox-ca -m 0600 /dev/null /etc/openvox-ca/openbao-secret-id
 bao write -f -field=secret_id auth/approle/role/openvox-ca/secret-id \
-  > /etc/puppet-ca/openbao-secret-id
+  > /etc/openvox-ca/openbao-secret-id
 ```
 
 `openvox-ca` re-reads this file on every login, so rotating the `secret_id`
@@ -204,7 +204,7 @@ openbao:
   key_name: openvox-ca
   auth_method: approle
   approle_role_id: 11111111-2222-3333-4444-555555555555
-  approle_secret_id_file: /etc/puppet-ca/openbao-secret-id
+  approle_secret_id_file: /etc/openvox-ca/openbao-secret-id
 ```
 
 ### Static token file (VM / systemd deployments)
@@ -326,7 +326,7 @@ exactly as the running server does.
 
 ```console
 $ openvox-ca csr --hostname puppet.example.com --create-key --out ca-request.pem
-Using config file: /etc/puppet-ca/config.yaml
+Using config file: /etc/openvox-ca/config.yaml
 Storage backend: postgres; CA key provider: openbao; cadir: /etc/puppetlabs/puppet/ssl/ca
 This CA has a key but no certificate, so the server will refuse to start until
 'openvox-ca import-ca-cert' installs the chain the parent signs.
@@ -429,7 +429,7 @@ them from a one-shot Job carrying the same ServiceAccount, image and mounts as
 the Deployment.
 
 Three details are easy to get wrong. The config must land where the command
-looks for it — `/etc/puppet-ca/config.yaml`, unless you pass `--config` or set
+looks for it — `/etc/openvox-ca/config.yaml`, unless you pass `--config` or set
 `OPENVOX_CA_CONFIG`. Setting `args:` replaces the image's `CMD`, so any `--cadir`
 it supplied is gone and the config file (or a flag) has to provide it. And the
 request has to outlive the pod, so write it somewhere that survives: a
@@ -471,7 +471,7 @@ spec:
           # credential to key creation for good.
           args: ["csr"]
           volumeMounts:
-            - { name: config, mountPath: /etc/puppet-ca }
+            - { name: config, mountPath: /etc/openvox-ca }
             # Only needed on the filesystem backend, which keeps the CA
             # certificate in the cadir: csr reads it from there to reproduce an
             # established subject. It must be the same volume the Deployment

@@ -32,7 +32,7 @@ openvox-ca has a large configuration surface (see
 [docs/configuration.md](https://github.com/voxpupuli/openvox-ca/blob/main/docs/configuration.md)), and the chart does not
 mirror it key by key. Instead:
 
-- **`config`** is written verbatim to `/etc/puppet-ca/config.yaml`, which the
+- **`config`** is written verbatim to `/etc/openvox-ca/config.yaml`, which the
   server reads. Every documented setting — including the nested
   `kubernetes_export` and `openbao` blocks — is valid there, except a backend
   credential, which the install refuses (see `env` below).
@@ -101,7 +101,7 @@ tested floor rather than a ceiling; naming them here would go stale on its own.
 | --- | --- | --- |
 | `config` | `{}` | Written verbatim to `config.yaml`; the full [configuration reference](https://github.com/voxpupuli/openvox-ca/blob/main/docs/configuration.md) applies, but the install is refused if it holds `etcd_password`, `redis_password`, `redis_sentinel_password` or a `sql_dsn` with a password: set those through `extraEnv` from a Secret |
 | `existingConfigMap` | `""` | Use a ConfigMap you manage instead of rendering one. The chart cannot checksum what it did not render, so `configChecksumAnnotation` has no effect and editing that ConfigMap will **not** restart the pods. `config.yaml` is fixed at startup, so roll them yourself. Of this ConfigMap's contents a `SIGHUP` re-reads only the allow-list file, and only if your own config sets `puppet_server_file` at a path in it. `config`, `verbosity`, `listen.host`, `puppetServers`, `autosign`, `extraConfigFiles` and `kubernetesExport.targets` stop being written anywhere in this mode — carry the ones you need into your own ConfigMap, `listen.host` included, or a dual-stack Service will front an IPv4-only socket |
-| `configMount` | `/etc/puppet-ca` | Where the config ConfigMap is mounted |
+| `configMount` | `/etc/openvox-ca` | Where the config ConfigMap is mounted |
 | `extraConfigFiles` | `{}` | Extra `filename: contents` entries placed alongside `config.yaml`. Refused when the chart is rendering that file itself, since yours would take its place: `config.yaml` always, `puppet-server` with `puppetServers`, `autosign.conf` with `autosign.patterns` — none of them under `existingConfigMap`, where the chart renders no ConfigMap and these entries go nowhere. Keys must look like ConfigMap keys (letters, digits, `-`, `_`, `.`) |
 | `listen.host` | `0.0.0.0` | API listen address; use `[::]` for a dual-stack Service |
 | `listen.port` | `8140` | API listen port |
@@ -129,7 +129,7 @@ tested floor rather than a ceiling; naming them here would go stale on its own.
 | Key | Default | Description |
 | --- | --- | --- |
 | `persistence.enabled` | `true` | Back `cadir` with a PersistentVolumeClaim. **Required** for the filesystem and sqlite backends |
-| `persistence.mountPath` | `/var/lib/puppet-ca` | The CA's `cadir` |
+| `persistence.mountPath` | `/var/lib/openvox-ca` | The CA's `cadir` |
 | `persistence.existingClaim` | `""` | Use a PVC you created yourself |
 | `persistence.storageClass` | `""` | |
 | `persistence.accessModes` | `[ReadWriteOnce]` | |

@@ -207,7 +207,7 @@ var _ = Describe("the autosign executable preflight under --daemon", func() {
 	// These drive whole commands, so pin the environment and the config file
 	// the way keyperms_test.go's startup specs do, for the reasons given
 	// there: none of them passes --config, and an ambient OPENVOX_CA_* or a
-	// host /etc/puppet-ca/config.yaml would change what they assert.
+	// host /etc/openvox-ca/config.yaml would change what they assert.
 	BeforeEach(func() {
 		clearServerEnv()
 		empty := filepath.Join(GinkgoT().TempDir(), "empty-config.yaml")
@@ -285,7 +285,7 @@ var _ = Describe("the autosign executable check at startup", func() {
 	// These drive whole commands, so pin the environment and the config file
 	// the way keyperms_test.go's startup specs do, for the reasons given
 	// there: none of them passes --config, and an ambient OPENVOX_CA_* or a
-	// host /etc/puppet-ca/config.yaml would change what they assert.
+	// host /etc/openvox-ca/config.yaml would change what they assert.
 	BeforeEach(func() {
 		clearServerEnv()
 		empty := filepath.Join(GinkgoT().TempDir(), "empty-config.yaml")

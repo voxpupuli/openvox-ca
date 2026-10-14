@@ -35,9 +35,9 @@ services:
     # Override the default ENTRYPOINT with a two-phase bootstrap script that
     # first generates a TLS cert for the "openvox-ca" hostname, then restarts
     # the CA with TLS on all interfaces.
-    entrypoint: ["/bin/bash", "/etc/puppet-ca/entrypoint.sh"]
+    entrypoint: ["/bin/bash", "/etc/openvox-ca/entrypoint.sh"]
     volumes:
-      - ../docker/puppet/ca-entrypoint.sh:/etc/puppet-ca/entrypoint.sh:ro,z
+      - ../docker/puppet/ca-entrypoint.sh:/etc/openvox-ca/entrypoint.sh:ro,z
       - ca-data:/data
     # The Prometheus exporter is off by default because it reveals certificate
     # subjects. It is on here so the stack can assert on openvoxca_supersede_pending:

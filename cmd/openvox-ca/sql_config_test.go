@@ -34,7 +34,7 @@ import (
 var _ = Describe("applyServerEnv SQL settings", func() {
 	It("applies all SQL-related env vars", func() {
 		setEnv("OPENVOX_CA_STORAGE_BACKEND", "sqlite")
-		setEnv("OPENVOX_CA_SQL_DSN", "file:/var/lib/puppet-ca/ca.db")
+		setEnv("OPENVOX_CA_SQL_DSN", "file:/var/lib/openvox-ca/ca.db")
 		setEnv("OPENVOX_CA_SQL_REQUEST_TIMEOUT_SEC", "15")
 		setEnv("OPENVOX_CA_SQL_MAX_OPEN_CONNS", "8")
 		setEnv("OPENVOX_CA_SQL_MAX_IDLE_CONNS", "4")
@@ -45,7 +45,7 @@ var _ = Describe("applyServerEnv SQL settings", func() {
 		applyServerEnv(cfg)
 
 		Expect(cfg.StorageBackend).To(Equal("sqlite"), "StorageBackend = %q, want sqlite", cfg.StorageBackend)
-		Expect(cfg.SQLDSN).To(Equal("file:/var/lib/puppet-ca/ca.db"), "SQLDSN = %q", cfg.SQLDSN)
+		Expect(cfg.SQLDSN).To(Equal("file:/var/lib/openvox-ca/ca.db"), "SQLDSN = %q", cfg.SQLDSN)
 		Expect(cfg.SQLRequestTimeoutSec).To(Equal(15), "SQLRequestTimeoutSec = %d, want 15", cfg.SQLRequestTimeoutSec)
 		Expect(cfg.SQLMaxOpenConns).To(Equal(8), "SQLMaxOpenConns = %d, want 8", cfg.SQLMaxOpenConns)
 		Expect(cfg.SQLMaxIdleConns).To(Equal(4), "SQLMaxIdleConns = %d, want 4", cfg.SQLMaxIdleConns)
@@ -226,7 +226,7 @@ var _ = Describe("--sql-dsn and --sql-dsn-file", func() {
 		BeforeEach(func() {
 			clearServerEnv()
 			caDir = GinkgoT().TempDir()
-			// Pinned so a /etc/puppet-ca/config.yaml on the host cannot
+			// Pinned so a /etc/openvox-ca/config.yaml on the host cannot
 			// supply a DSN of its own.
 			emptyConfig = filepath.Join(GinkgoT().TempDir(), "config.yaml")
 			Expect(os.WriteFile(emptyConfig, nil, 0o600)).To(Succeed())

@@ -77,7 +77,7 @@ handed back.
 
 **This is already satisfied: there is nothing to change.** The shipped
 [systemd unit](systemd.md) runs as `puppet`, and [running under
-systemd](systemd.md) installs `/etc/puppet-ca/config.yaml` `0640 root:puppet`,
+systemd](systemd.md) installs `/etc/openvox-ca/config.yaml` `0640 root:puppet`,
 so both the service and the `sudo -u puppet openvox-ca …` commands later in this
 guide can read it. No drop-in and no group membership is needed.
 
@@ -122,7 +122,7 @@ If you would rather openvox-ca had a directory of its own, import the CA
 material into a new one and copy the rest across as it is:
 
 ```bash
-NEW_CADIR=/etc/puppet-ca/ssl
+NEW_CADIR=/etc/openvox-ca/ssl
 
 openvox-ca-ctl import \
   --cadir       "$NEW_CADIR" \
@@ -677,7 +677,7 @@ integrity record (see
 During the migration itself this costs nothing, because the new CA has not been
 started yet. `--cadir` is spelled out because this
 guide configures the server entirely by flag and never writes
-`/etc/puppet-ca/config.yaml`; where that file does exist, the command reads the
+`/etc/openvox-ca/config.yaml`; where that file does exist, the command reads the
 cadir from it and the flag can be dropped.
 
 This is not merely a shorter recipe than signing with `openssl` by hand. It

@@ -2345,7 +2345,7 @@ contents:
   - src: packaging/scripts/first-boot
     dst: /usr/libexec/openvox-ca/first-boot
   - src: packaging/config/config.yaml
-    dst: /etc/puppet-ca/config.yaml
+    dst: /etc/openvox-ca/config.yaml
 scripts:
   postinstall: packaging/scripts/postinstall
   preremove: packaging/scripts/preremove
@@ -3528,9 +3528,9 @@ var _ = Describe("buildVariantPackages", func() {
 		// package is what gets installed beside OpenVox Server, and Server
 		// binds 8140.
 		It("sets the packaged port in the configuration file, at 0640", func() {
-			Expect(contents).To(HaveKey("/etc/puppet-ca/config.yaml"))
-			Expect(contents["/etc/puppet-ca/config.yaml"]).To(MatchRegexp(`(?m)^port: 8141$`))
-			Expect(modes["/etc/puppet-ca/config.yaml"]).To(Equal(int64(0o640)))
+			Expect(contents).To(HaveKey("/etc/openvox-ca/config.yaml"))
+			Expect(contents["/etc/openvox-ca/config.yaml"]).To(MatchRegexp(`(?m)^port: 8141$`))
+			Expect(modes["/etc/openvox-ca/config.yaml"]).To(Equal(int64(0o640)))
 		})
 
 		// Every setting the server refuses to start without. Missing any one of
@@ -3539,7 +3539,7 @@ var _ = Describe("buildVariantPackages", func() {
 		// than by the file merely being present.
 		DescribeTable("sets the settings a packaged install cannot start without",
 			func(pattern string) {
-				Expect(contents["/etc/puppet-ca/config.yaml"]).To(MatchRegexp(pattern))
+				Expect(contents["/etc/openvox-ca/config.yaml"]).To(MatchRegexp(pattern))
 			},
 			// No built-in default: "cadir is required".
 			Entry("cadir", `(?m)^cadir: /etc/puppetlabs/puppet/ssl/ca$`),
@@ -3553,7 +3553,7 @@ var _ = Describe("buildVariantPackages", func() {
 		// disagree the service starts and exits, so they are checked against
 		// each other rather than each against a literal.
 		It("names serving paths that the provisioning script links", func() {
-			cfg := contents["/etc/puppet-ca/config.yaml"]
+			cfg := contents["/etc/openvox-ca/config.yaml"]
 			script, err := os.ReadFile(firstBootScriptPath)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -3673,7 +3673,7 @@ var _ = Describe("buildVariantPackages", func() {
 					listed = append(listed, line)
 				}
 			}
-			Expect(listed).To(ConsistOf("/etc/puppet-ca/config.yaml"))
+			Expect(listed).To(ConsistOf("/etc/openvox-ca/config.yaml"))
 		})
 	})
 
@@ -3686,7 +3686,7 @@ var _ = Describe("buildVariantPackages", func() {
 		Expect(err).NotTo(HaveOccurred())
 		owners, err := debOwners(filepath.Join(distDir, "openvox-ca_9.9.9-1_amd64.deb"))
 		Expect(err).NotTo(HaveOccurred())
-		Expect(owners).To(HaveKeyWithValue("/etc/puppet-ca/config.yaml", "root:puppet"))
+		Expect(owners).To(HaveKeyWithValue("/etc/openvox-ca/config.yaml", "root:puppet"))
 	})
 
 	// The write side of the build, which nothing reached. Everything else in
@@ -4537,7 +4537,7 @@ var _ = Describe("the rpm's payload", func() {
 		Entry("the provisioning oneshot", "/usr/lib/systemd/system/openvox-ca-first-boot.service", 0o644),
 		Entry("the provisioning script", "/usr/libexec/openvox-ca/first-boot", 0o755),
 		Entry("the sysusers declaration", "/usr/lib/sysusers.d/openvox-ca.conf", 0o644),
-		Entry("the configuration file", "/etc/puppet-ca/config.yaml", 0o640),
+		Entry("the configuration file", "/etc/openvox-ca/config.yaml", 0o640),
 	)
 
 	// The rpm's counterparts to the deb's content assertions, which is what
@@ -4567,7 +4567,7 @@ var _ = Describe("the rpm's payload", func() {
 	// assertion and not the same subject.
 	DescribeTable("sets the settings a packaged install cannot start without",
 		func(pattern string) {
-			Expect(contents["/etc/puppet-ca/config.yaml"]).To(MatchRegexp(pattern))
+			Expect(contents["/etc/openvox-ca/config.yaml"]).To(MatchRegexp(pattern))
 		},
 		// 8141, not the binary's built-in 8140: a package is what gets
 		// installed alongside Server.
@@ -4589,14 +4589,14 @@ var _ = Describe("the rpm's payload", func() {
 	// source. An rpm that installed the config without noreplace would
 	// overwrite an operator's edits on every update.
 	It("marks the configuration file %config(noreplace)", func() {
-		cfg := files["/etc/puppet-ca/config.yaml"]
+		cfg := files["/etc/openvox-ca/config.yaml"]
 		Expect(cfg.config).To(BeTrue(), "config.yaml is not marked %%config")
 		Expect(cfg.noreplace).To(BeTrue(), "config.yaml is %%config but not noreplace")
 	})
 
 	It("marks nothing else as configuration", func() {
 		for path, f := range files {
-			if path == "/etc/puppet-ca/config.yaml" {
+			if path == "/etc/openvox-ca/config.yaml" {
 				continue
 			}
 			Expect(f.config).To(BeFalse(), "%s is marked %%config and should not be", path)
@@ -4604,8 +4604,8 @@ var _ = Describe("the rpm's payload", func() {
 	})
 
 	It("gives the configuration file to root:puppet", func() {
-		Expect(files["/etc/puppet-ca/config.yaml"].owner).To(Equal("root"))
-		Expect(files["/etc/puppet-ca/config.yaml"].group).To(Equal("puppet"))
+		Expect(files["/etc/openvox-ca/config.yaml"].owner).To(Equal("root"))
+		Expect(files["/etc/openvox-ca/config.yaml"].group).To(Equal("puppet"))
 	})
 
 	It("carries the documentation tree", func() {
@@ -4738,7 +4738,7 @@ func firstBootHostPins() []string {
 		// defaults are REAL paths on a developer's machine or a host with a
 		// packaged CA:
 		//
-		//   OPENVOX_CA_CONFIG       /etc/puppet-ca/config.yaml
+		//   OPENVOX_CA_CONFIG       /etc/openvox-ca/config.yaml
 		//   OPENVOX_CA_PUPPET_CONF  /etc/puppetlabs/puppet/puppet.conf
 		//
 		// Clearing them would therefore hand the script the host's own files,
@@ -4756,7 +4756,7 @@ func firstBootHostPins() []string {
 		// came to say "nothing yet". Which function a spec CALLS does not
 		// matter: sourcing the definitions resolves CADIR from $CONFIG at the
 		// top level, and fails outright on a cadir it cannot read. So every
-		// runner that sourced them read /etc/puppet-ca/config.yaml whenever
+		// runner that sourced them read /etc/openvox-ca/config.yaml whenever
 		// one existed, and on a host whose file sets cadir in a form the
 		// reader refuses, every one of those specs would have failed for a
 		// reason in the machine rather than the code. Ask what the source
@@ -6549,7 +6549,7 @@ var _ = Describe("first-boot's provisioning steps", func() {
 				Expect(strings.TrimRight(r.output, "\n")).To(Equal(want))
 			},
 			// Read.
-			Entry("a plain scalar", "/var/lib/puppet-ca", "/var/lib/puppet-ca"),
+			Entry("a plain scalar", "/var/lib/openvox-ca", "/var/lib/openvox-ca"),
 			Entry("an inline comment, which is ordinary YAML",
 				"/srv/ca  # moved off the default", "/srv/ca"),
 			Entry("the comment form docs/storage-backends.md prints",

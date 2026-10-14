@@ -1167,9 +1167,9 @@ serving_cert:
   reuse_key: true
   store:
     files:
-      cert: /var/lib/puppet-ca/serving/tls.crt
-      key: /var/lib/puppet-ca/serving/tls.key
-      ca: /var/lib/puppet-ca/serving/ca.crt
+      cert: /var/lib/openvox-ca/serving/tls.crt
+      key: /var/lib/openvox-ca/serving/tls.key
+      ca: /var/lib/openvox-ca/serving/ca.crt
 `))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cfg.ServingCert).NotTo(BeNil())
@@ -1182,7 +1182,7 @@ serving_cert:
 		Expect(cfg.ServingCert.Usages).To(ConsistOf("serverAuth"))
 		Expect(cfg.ServingCert.ReuseKey).To(BeTrue())
 		Expect(cfg.ServingCert.Store.Files).NotTo(BeNil())
-		Expect(cfg.ServingCert.Store.Files.Cert).To(Equal("/var/lib/puppet-ca/serving/tls.crt"))
+		Expect(cfg.ServingCert.Store.Files.Cert).To(Equal("/var/lib/openvox-ca/serving/tls.crt"))
 		// The four tags the fixture sets and this spec did not check. The spec
 		// claims to decode "the shape the documentation publishes", so a tag
 		// present in the fixture and absent from the assertions is a tag the
@@ -1191,8 +1191,8 @@ serving_cert:
 		// every issuance.
 		Expect(cfg.ServingCert.KeyAlgo).To(Equal("ecdsa"))
 		Expect(cfg.ServingCert.KeySize).To(Equal(256))
-		Expect(cfg.ServingCert.Store.Files.Key).To(Equal("/var/lib/puppet-ca/serving/tls.key"))
-		Expect(cfg.ServingCert.Store.Files.CA).To(Equal("/var/lib/puppet-ca/serving/ca.crt"))
+		Expect(cfg.ServingCert.Store.Files.Key).To(Equal("/var/lib/openvox-ca/serving/tls.key"))
+		Expect(cfg.ServingCert.Store.Files.CA).To(Equal("/var/lib/openvox-ca/serving/ca.crt"))
 	})
 
 	It("decodes the Secret flavour", func() {

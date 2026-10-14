@@ -85,8 +85,8 @@ RUN dnf install -y bash coreutils-single curl diffutils findutils grep \
     useradd -m -u 1000 -g 1000 puppet && \
     { [ "$(id -u puppet):$(id -g puppet)" = "1000:1000" ] || \
         { echo "puppet is $(id -u puppet):$(id -g puppet), not 1000:1000; USER below must match" >&2; exit 1; }; } && \
-    mkdir -p /etc/puppetlabs/puppet/ssl/ca /etc/puppet-ca /data && \
-    chown -R puppet:puppet /etc/puppetlabs/puppet /etc/puppet-ca /data
+    mkdir -p /etc/puppetlabs/puppet/ssl/ca /etc/openvox-ca /data && \
+    chown -R puppet:puppet /etc/puppetlabs/puppet /etc/openvox-ca /data
 
 COPY bin/openvox-ca     /usr/local/bin/openvox-ca
 COPY bin/openvox-ca-ctl /usr/local/bin/openvox-ca-ctl

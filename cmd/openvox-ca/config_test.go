@@ -73,7 +73,7 @@ func clearServerEnv() {
 		}
 		// OPENVOX_CA_CONFIG is the pin, not ambient state: callers set it to a
 		// fixture config immediately before calling this, and clearing it would
-		// send them to the host's /etc/puppet-ca/config.yaml instead.
+		// send them to the host's /etc/openvox-ca/config.yaml instead.
 		if key == "OPENVOX_CA_CONFIG" {
 			continue
 		}
@@ -529,7 +529,7 @@ no_tls_required: true
 tls_cert: /etc/ssl/cert.pem
 tls_key: /etc/ssl/key.pem
 puppet_server: puppet-master
-puppet_server_file: /etc/puppet-ca/servers.txt
+puppet_server_file: /etc/openvox-ca/servers.txt
 no_pp_cli_auth: true
 autosign_config: "true"
 logfile: /var/log/openvox-ca.log
@@ -586,7 +586,7 @@ serial_number_format: hex
 			{"TLSCert", cfg.TLSCert, "/etc/ssl/cert.pem"},
 			{"TLSKey", cfg.TLSKey, "/etc/ssl/key.pem"},
 			{"PuppetServer", cfg.PuppetServer, "puppet-master"},
-			{"PuppetServerFile", cfg.PuppetServerFile, "/etc/puppet-ca/servers.txt"},
+			{"PuppetServerFile", cfg.PuppetServerFile, "/etc/openvox-ca/servers.txt"},
 			{"NoPpCliAuth", cfg.NoPpCliAuth, true},
 			{"AutosignConfig", cfg.AutosignConfig, "true"},
 			{"LogFile", cfg.LogFile, "/var/log/openvox-ca.log"},
@@ -887,8 +887,8 @@ var _ = Describe("applyServerEnv each variable", func() {
 			func(c *serverConfig) bool { return c.TLSKey == "/etc/tls/key.pem" }, "TLSKey"),
 		Entry("PUPPET_SERVER", "OPENVOX_CA_PUPPET_SERVER", "puppet-master",
 			func(c *serverConfig) bool { return c.PuppetServer == "puppet-master" }, "PuppetServer"),
-		Entry("PUPPET_SERVER_FILE", "OPENVOX_CA_PUPPET_SERVER_FILE", "/etc/puppet-ca/servers.txt",
-			func(c *serverConfig) bool { return c.PuppetServerFile == "/etc/puppet-ca/servers.txt" }, "PuppetServerFile"),
+		Entry("PUPPET_SERVER_FILE", "OPENVOX_CA_PUPPET_SERVER_FILE", "/etc/openvox-ca/servers.txt",
+			func(c *serverConfig) bool { return c.PuppetServerFile == "/etc/openvox-ca/servers.txt" }, "PuppetServerFile"),
 		Entry("NO_PP_CLI_AUTH_true", "OPENVOX_CA_NO_PP_CLI_AUTH", "true",
 			func(c *serverConfig) bool { return c.NoPpCliAuth }, "NoPpCliAuth=true"),
 		Entry("NO_TLS_REQUIRED_true", "OPENVOX_CA_NO_TLS_REQUIRED", "true",
@@ -1426,10 +1426,10 @@ var _ = Describe("crl_chain_file wiring", func() {
 	})
 
 	It("is read from the config file", func() {
-		path := writeTempConfig("crl_chain_file: /etc/puppet-ca/upstream-crls.pem\n")
+		path := writeTempConfig("crl_chain_file: /etc/openvox-ca/upstream-crls.pem\n")
 		cfg, err := loadServerConfig(path)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(cfg.CRLChainFile).To(Equal("/etc/puppet-ca/upstream-crls.pem"))
+		Expect(cfg.CRLChainFile).To(Equal("/etc/openvox-ca/upstream-crls.pem"))
 	})
 
 	It("is read from the environment, which outranks the file", func() {
@@ -1441,12 +1441,12 @@ var _ = Describe("crl_chain_file wiring", func() {
 	})
 
 	It("reaches the CA, which is the step whose absence is silent", func() {
-		cfg, err := loadServerConfig(writeTempConfig("crl_chain_file: /etc/puppet-ca/upstream-crls.pem\n"))
+		cfg, err := loadServerConfig(writeTempConfig("crl_chain_file: /etc/openvox-ca/upstream-crls.pem\n"))
 		Expect(err).NotTo(HaveOccurred())
 
 		myCA := ca.New(storage.New(GinkgoT().TempDir()), ca.AutosignConfig{Mode: "off"}, "puppet.test")
 		Expect(applyCAConfig(myCA, cfg)).To(Succeed())
-		Expect(myCA.CRLChainFile).To(Equal("/etc/puppet-ca/upstream-crls.pem"))
+		Expect(myCA.CRLChainFile).To(Equal("/etc/openvox-ca/upstream-crls.pem"))
 	})
 })
 

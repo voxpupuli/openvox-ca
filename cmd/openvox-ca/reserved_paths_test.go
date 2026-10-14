@@ -414,7 +414,7 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 	// the list does not recognise is a gap that looks like a passing check.
 	DescribeTable("reserves the SQLite database under every accepted spelling",
 		func(backend string) {
-			cfg := &serverConfig{StorageBackend: backend, SQLDSN: "file:/var/lib/puppet-ca/ca.db"}
+			cfg := &serverConfig{StorageBackend: backend, SQLDSN: "file:/srv/openvox-ca/ca.db"}
 			reserved, err := caOwnedPaths(cfg, "/var/lib/openvox-ca", "")
 			Expect(err).NotTo(HaveOccurred())
 
@@ -423,7 +423,7 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 				Names:       []string{"a"},
 				RenewBefore: certstore.Duration(720 * time.Hour),
 				Store: certstore.StoreConfig{Files: &certstore.FilesConfig{
-					Cert: "/etc/a.pem", Key: "/var/lib/puppet-ca/ca.db",
+					Cert: "/etc/a.pem", Key: "/srv/openvox-ca/ca.db",
 				}},
 			}}
 			Expect(entry.CheckReservedPaths(reserved)).
@@ -476,7 +476,7 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 	})
 
 	It("reserves the SQLite database, and only when SQLite is the backend", func() {
-		cfg := &serverConfig{StorageBackend: "sqlite", SQLDSN: "file:/var/lib/puppet-ca/ca.db"}
+		cfg := &serverConfig{StorageBackend: "sqlite", SQLDSN: "file:/srv/openvox-ca/ca.db"}
 		reserved, err := caOwnedPaths(cfg, "/var/lib/openvox-ca", "")
 		Expect(err).NotTo(HaveOccurred())
 
@@ -485,7 +485,7 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 			Names:       []string{"a"},
 			RenewBefore: certstore.Duration(720 * time.Hour),
 			Store: certstore.StoreConfig{Files: &certstore.FilesConfig{
-				Cert: "/etc/a.pem", Key: "/var/lib/puppet-ca/ca.db",
+				Cert: "/etc/a.pem", Key: "/srv/openvox-ca/ca.db",
 			}},
 		}}
 		Expect(entry.CheckReservedPaths(reserved)).

@@ -86,7 +86,7 @@ var _ = Describe("the server's own startup, on a missing key passphrase", func()
 	// Same reasoning as the key-permission startup specs: these drive whole
 	// commands, so OPENVOX_CA_* from the developer's environment would change
 	// what they assert without failing them, and an unpinned config file means
-	// a host /etc/puppet-ca/config.yaml decides whether they refuse at all.
+	// a host /etc/openvox-ca/config.yaml decides whether they refuse at all.
 	BeforeEach(func() {
 		clearServerEnv()
 		empty := filepath.Join(GinkgoT().TempDir(), "empty-config.yaml")
