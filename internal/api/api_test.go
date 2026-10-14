@@ -1539,6 +1539,30 @@ var _ = Describe("API Workflow", func() {
 			// is safe; a 500 would report the caller's mistake as a CA fault.
 			Expect(rr.Body.String()).To(ContainSubstring("invalid DNS alt name"))
 		})
+
+		It("should return 400 for the subject \"ca\", writing no key and issuing nothing", func() {
+			// Its key would be written to private/ca_key.pem, the CA key's
+			// legacy location (#495).
+			req := httptest.NewRequest("POST", "/generate/ca", nil)
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+
+			Expect(rr.Code).To(Equal(http.StatusBadRequest))
+			Expect(rr.Body.String()).To(ContainSubstring(ca.ErrReservedSubject.Error()))
+			Expect(os.ReadFile(filepath.Join(tmpDir, "ca_key.pem"))).To(Equal(cachedKeyPEM))
+			Expect(filepath.Join(tmpDir, "private", "ca_key.pem")).NotTo(BeAnExistingFile())
+			Expect(filepath.Join(tmpDir, "signed", "ca.pem")).NotTo(BeAnExistingFile())
+		})
+
+		It("still accepts a CSR for the subject \"ca\", as OpenVox Server does", func() {
+			csrPEM, err := testutil.GenerateCSR("ca")
+			Expect(err).NotTo(HaveOccurred())
+			req := httptest.NewRequest("PUT", "/certificate_request/ca", bytes.NewReader(csrPEM))
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, req)
+
+			Expect(rr.Code).To(Equal(http.StatusOK))
+		})
 	})
 
 	Context("POST /generate/{subject} over plain HTTP", func() {

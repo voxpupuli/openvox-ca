@@ -237,6 +237,37 @@ var _ = Describe("openvox-ca generate", func() {
 		})
 	})
 
+	Describe("the subject \"ca\"", func() {
+		// Its key would be written to private/ca_key.pem, the CA key's
+		// legacy location (#495).
+		It("is refused, leaving the cadir untouched", func() {
+			bootstrapCAInDir(caDir, "puppet.example.com")
+			before := hashTree(caDir)
+
+			_, _, err := runGenerate("--cadir", caDir, "--certname", "ca", "--ttl", "1h")
+			Expect(err).To(MatchError(ca.ErrReservedSubject))
+			Expect(err).To(MatchError(HavePrefix("--certname: ")))
+			Expect(hashTree(caDir)).To(Equal(before))
+		})
+
+		It("is refused with --key-out as well, writing no key", func() {
+			bootstrapCAInDir(caDir, "puppet.example.com")
+
+			_, _, err := runGenerate("--cadir", caDir, "--certname", "ca",
+				"--ttl", "1h", "--key-out", keyPath("ca"))
+			Expect(err).To(MatchError(ca.ErrReservedSubject))
+			Expect(keyPath("ca")).NotTo(BeAnExistingFile())
+		})
+
+		It("is refused before the store is opened", func() {
+			// No CA here, so anything that opened the store first would
+			// refuse for that instead; GenerateWithOptions's own check is too
+			// late to answer this one.
+			_, _, err := runGenerate("--cadir", caDir, "--certname", "ca", "--ttl", "1h")
+			Expect(err).To(MatchError(ca.ErrReservedSubject))
+		})
+	})
+
 	Describe("minting against an existing CA", func() {
 		BeforeEach(func() { bootstrapCAInDir(caDir, "puppet.example.com") })
 
