@@ -82,6 +82,9 @@ var _ = Describe("Same-host lock files planted by someone else", func() {
 		Expect(string(got)).To(Equal(sentinelContent), "the file the planted name reached must be untouched")
 	}
 
+	// why is a clause of openvox-ca's own message, never the OS's: ELOOP's own
+	// text ("too many levels of symbolic links") would otherwise satisfy a
+	// looser match with the explanation removed.
 	expectRefused := func(err error, why string) {
 		GinkgoHelper()
 		Expect(err).To(HaveOccurred(), "a planted lock file must be refused")
@@ -94,7 +97,7 @@ var _ = Describe("Same-host lock files planted by someone else", func() {
 		func(acquire func(*FilesystemBackend) error, name string) {
 			Expect(os.Symlink(sentinel, filepath.Join(locks, fileLockFileName(name)))).To(Succeed())
 
-			expectRefused(acquire(NewFilesystemBackend(cadir)), "symbolic link")
+			expectRefused(acquire(NewFilesystemBackend(cadir)), "it is a symbolic link")
 			expectSentinelIntact()
 		},
 		Entry("for a named lock", acquireNamed, "subject:node1.test"),
@@ -106,7 +109,7 @@ var _ = Describe("Same-host lock files planted by someone else", func() {
 			target := filepath.Join(cadir, "created-through-the-link")
 			Expect(os.Symlink(target, filepath.Join(locks, fileLockFileName(name)))).To(Succeed())
 
-			expectRefused(acquire(NewFilesystemBackend(cadir)), "symbolic link")
+			expectRefused(acquire(NewFilesystemBackend(cadir)), "it is a symbolic link")
 			_, err := os.Lstat(target)
 			Expect(os.IsNotExist(err)).To(BeTrue(), "nothing may be created where the link points")
 		},
