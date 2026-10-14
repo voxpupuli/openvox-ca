@@ -270,8 +270,9 @@ certificate, so the controller **must** pass TLS through untouched.
 | `networkPolicy.enabled` | `false` | |
 | `networkPolicy.apiAccess` | `any` | `any` (agents live anywhere), `namespace`, or `none` |
 | `networkPolicy.metricsNamespaces` | `[monitoring]` | Namespaces allowed to scrape the exporter |
-| `networkPolicy.egress.enabled` | `false` | Adds an Egress policy; DNS is always allowed |
-| `networkPolicy.egress.rules` | `[]` | Everything the **pod** reaches, sidecars included: your storage backend, OpenBao if the key lives there, anything `initContainers`/`extraContainers` fetch, and the API server when `kubernetesExport` is in use or a managed certificate uses a Secret store (OpenBao's kubernetes auth needs no API egress). DNS is always allowed |
+| `networkPolicy.egress.enabled` | `false` | Adds an Egress policy; DNS to `egress.dns.to` is always allowed |
+| `networkPolicy.egress.dns.to` | the `k8s-app: kube-dns` pods in `kube-system` | NetworkPolicy peers that DNS (port 53, UDP and TCP) may reach. Change it when the resolver is elsewhere: a node-local cache, a provider's resolver, `dnsPolicy: Default`, or DNS pods labelled otherwise. An empty list allows any destination |
+| `networkPolicy.egress.rules` | `[]` | Everything the **pod** reaches, sidecars included: your storage backend, OpenBao if the key lives there, anything `initContainers`/`extraContainers` fetch, and the API server when `kubernetesExport` is in use or a managed certificate uses a Secret store (OpenBao's kubernetes auth needs no API egress). DNS is covered by `egress.dns.to` |
 | `networkPolicy.extraIngress` | `[]` | |
 
 ### Availability

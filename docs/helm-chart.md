@@ -758,8 +758,31 @@ networkPolicy:
 ```
 
 Turning egress on means you must enumerate everything **the pod** talks to. DNS
-is always allowed; everything else is yours to list. Two things about that are
-easy to get wrong:
+to the cluster's resolvers is always allowed; everything else is yours to list.
+Four things about that are easy to get wrong:
+
+- **DNS goes only to the resolvers in `egress.dns.to`.** By default that is
+  the pods labelled `k8s-app: kube-dns` in `kube-system`, which is what CoreDNS
+  carries on most distributions. A DNS rule with no destination would let
+  anything the pod can be made to send leave the cluster as queries. If your
+  resolver is elsewhere — a node-local cache, a provider's resolver, the node's
+  own for `dnsPolicy: Default`, or DNS pods labelled differently — list it
+  instead:
+
+  ```yaml
+  networkPolicy:
+    egress:
+      enabled: true
+      dns:
+        to:
+          - ipBlock:
+              cidr: 169.254.20.10/32   # NodeLocal DNSCache
+  ```
+
+  The rule allows port 53, and network plugins generally match it against the
+  DNS pod's own port rather than the Service's, so a resolver listening on
+  another port needs an `egress.rules` entry for that port too. An empty list
+  allows DNS to any destination.
 
 - **The policy governs the whole pod, not the server container.** A
   `NetworkPolicy` selects pods, so every `initContainers` and `extraContainers`

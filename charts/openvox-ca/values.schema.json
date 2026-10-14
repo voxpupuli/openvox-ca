@@ -357,6 +357,13 @@
           "additionalProperties": false,
           "properties": {
             "enabled": { "type": "boolean" },
+            "dns": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "to": { "type": "array" }
+              }
+            },
             "rules": { "type": "array" }
           }
         },

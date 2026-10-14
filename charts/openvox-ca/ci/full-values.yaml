@@ -294,6 +294,11 @@ networkPolicy:
     - observability
   egress:
     enabled: true
+    # A node-local DNS cache instead of the kube-dns pods.
+    dns:
+      to:
+        - ipBlock:
+            cidr: 169.254.20.10/32
     rules:
       - to:
           - podSelector:

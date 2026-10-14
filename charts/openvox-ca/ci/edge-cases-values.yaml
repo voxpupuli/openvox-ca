@@ -80,6 +80,11 @@ podDisruptionBudget:
 networkPolicy:
   enabled: true
   apiAccess: none
+  # DNS to any resolver: an empty list drops the rule's `to:` altogether.
+  egress:
+    enabled: true
+    dns:
+      to: []
   extraIngress:
     - from:
         - namespaceSelector:

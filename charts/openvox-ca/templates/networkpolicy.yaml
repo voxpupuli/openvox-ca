@@ -68,11 +68,21 @@ spec:
   egress:
     # DNS is always needed: the CA resolves its storage backend, OpenBao, and
     # the Kubernetes API by name.
+    {{- /*
+      Only to the resolvers in egress.dns.to, kube-dns by default. A rule with
+      no `to:` admits every destination on port 53, which makes DNS a way out
+      of the cluster for anything the pod can be made to send. An empty or
+      null list still renders no `to:`, deliberately: that is the opt-out.
+    */}}
     - ports:
         - port: 53
           protocol: UDP
         - port: 53
           protocol: TCP
+      {{- with dig "dns" "to" list .Values.networkPolicy.egress }}
+      to:
+        {{- tpl (toYaml .) $ | nindent 8 }}
+      {{- end }}
     {{- with .Values.networkPolicy.egress.rules }}
     {{- tpl (toYaml .) $ | nindent 4 }}
     {{- end }}

@@ -786,8 +786,8 @@ networkPolicy:
   metricsNamespaces:
     - monitoring
 
-  # Egress rules. DNS is always allowed when egress is enabled; everything else
-  # is yours to list. The policy binds the whole POD, so any initContainers or
+  # Egress rules. DNS to the resolvers in `dns.to` is always allowed when egress
+  # is enabled; everything else is yours to list. The policy binds the whole POD, so any initContainers or
   # extraContainers you add are bound by it too and need their own destinations
   # listed. Typically: your storage backend, OpenBao if the key lives there,
   # anything your sidecars fetch, and the Kubernetes API when kubernetesExport
@@ -796,6 +796,20 @@ networkPolicy:
   # since the pod presents a mounted token and OpenBao does the TokenReview.
   egress:
     enabled: false
+    # Where DNS (port 53, UDP and TCP) may go: the cluster DNS pods, matched by
+    # the k8s-app: kube-dns label most distributions put on CoreDNS. Set it to
+    # your resolvers if they are elsewhere, such as an ipBlock for a node-local
+    # cache or a provider's resolver, or for pods running with dnsPolicy:
+    # Default. Each entry is a NetworkPolicy peer, templated like `rules`. An
+    # empty list allows DNS to any destination.
+    dns:
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
     rules: []
     # - to:
     #     - podSelector:

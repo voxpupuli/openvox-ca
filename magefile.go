@@ -6385,6 +6385,72 @@ config:
 			wants: []string{"leaf-certificate series carry node hostnames"},
 		},
 		{
+			// A DNS rule with no `to:` admits port 53 to every destination,
+			// which made DNS a way out of the cluster. The peer is asserted
+			// with the ports above it, so a `to:` landing on another rule
+			// does not satisfy it.
+			name:  "restricted egress sends DNS only to kube-dns by default",
+			sets:  []string{tls, "networkPolicy.enabled=true", "networkPolicy.egress.enabled=true"},
+			wants: []string{"protocol: TCP\n      to:\n        - namespaceSelector:\n            matchLabels:\n              kubernetes.io/metadata.name: kube-system\n          podSelector:\n            matchLabels:\n              k8s-app: kube-dns\n"},
+		},
+		{
+			// The override replaces the default rather than merging with it:
+			// a cluster whose resolver is a node-local cache must not keep a
+			// kube-dns peer it does not use.
+			name: "egress.dns.to replaces the kube-dns peer",
+			sets: []string{tls, "networkPolicy.enabled=true", "networkPolicy.egress.enabled=true",
+				"networkPolicy.egress.dns.to[0].ipBlock.cidr=169.254.20.10/32"},
+			wants:    []string{"protocol: TCP\n      to:\n        - ipBlock:\n            cidr: 169.254.20.10/32\n"},
+			notWants: []string{"k8s-app: kube-dns"},
+		},
+		{
+			// Peers are templated like egress.rules, so one can name the
+			// release's own namespace.
+			name: "egress.dns.to is templated",
+			sets: []string{tls, "networkPolicy.enabled=true", "networkPolicy.egress.enabled=true"},
+			valuesYAML: `
+networkPolicy:
+  egress:
+    dns:
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: "{{ .Release.Namespace }}-dns"
+`,
+			// toYaml single-quotes the string because of its braces, and tpl
+			// leaves the quotes.
+			wants: []string{"kubernetes.io/metadata.name: 'default-dns'"},
+		},
+		{
+			// Chris's ruling for #450: an empty list is the opt-out, and means
+			// what an empty `to:` means to Kubernetes, every destination. The
+			// rule must keep its ports; only the peer goes.
+			name: "an empty egress.dns.to allows DNS to any destination",
+			sets: []string{tls, "networkPolicy.enabled=true", "networkPolicy.egress.enabled=true"},
+			valuesYAML: `
+networkPolicy:
+  egress:
+    dns:
+      to: []
+`,
+			wants:    []string{"- ports:\n        - port: 53\n          protocol: UDP\n        - port: 53\n          protocol: TCP\n"},
+			notWants: []string{"protocol: TCP\n      to:", "k8s-app: kube-dns"},
+		},
+		{
+			// A null deletes the default from the merged values, and reaches
+			// the template as no key at all. It means the same as an empty
+			// list, and must not abort the render on a nil map.
+			name: "a null egress.dns allows DNS to any destination too",
+			sets: []string{tls, "networkPolicy.enabled=true", "networkPolicy.egress.enabled=true"},
+			valuesYAML: `
+networkPolicy:
+  egress:
+    dns: null
+`,
+			wants:    []string{"- port: 53\n          protocol: TCP\n"},
+			notWants: []string{"protocol: TCP\n      to:", "k8s-app: kube-dns"},
+		},
+		{
 			name:  "NOTES warns that restricted egress may not reach the API server",
 			notes: true,
 			// The second consumer of needsAPIAccess, and the one no case
