@@ -82,4 +82,18 @@ var _ = Describe("Inventory baseline level across CA.Init", func() {
 		Expect(logs.String()).To(ContainSubstring("crl_present=true"))
 		Expect(logs.String()).NotTo(ContainSubstring(infoLine))
 	})
+
+	It("warns on the first start after openvox-ca-ctl import", func() {
+		// Documented as an expected cause of the WARN, so pinned: import writes
+		// a CRL and no inventory integrity value. If it ever wrote a value the
+		// next start would be silent, and if it stopped writing the CRL that
+		// start would log at Info; either way the docs that name it go stale.
+		Expect(ca.ImportCA(ctx, storage.New(dir), cachedCrtPEM, cachedKeyPEM, nil)).To(Succeed())
+
+		initCA()
+
+		Expect(logs.String()).To(ContainSubstring(warnLine))
+		Expect(logs.String()).To(ContainSubstring("crl_present=true"))
+		Expect(logs.String()).NotTo(ContainSubstring(infoLine))
+	})
 })

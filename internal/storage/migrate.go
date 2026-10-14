@@ -80,8 +80,8 @@ type MigrateReport struct {
 	// through. Empty when the source verified. Whichever it is, the
 	// destination's integrity value will vouch for the copy: MigrateService
 	// rebuilds it when the destination holds an HMAC key (copied from the
-	// source, or already there under Force), and otherwise the server's first
-	// start writes it, at Warn. A caller should show this to the operator: it
+	// source, or already there, as under Force), and otherwise the server's
+	// first start writes it, at Warn. A caller should show this to the operator: it
 	// is the only record that the value vouches for an inventory nothing
 	// checked.
 	UnverifiedSource string

@@ -708,9 +708,11 @@ recorded so the control is not credited with more than it does.
    requires, and it cannot tell a repair from a laundering. A source with no
    HMAC key and no value at all is copied without the flag, with a warning, so
    deleting both from a store that had them is still a way through. It at least
-   leaves the destination warning on its first start, unless `--force` copies it
-   into a store that already has a key: the rebuild then uses that key at once,
-   and the warning `migrate` prints is the only trace. It is a cutover rather
+   leaves the destination warning on its first start, unless the destination
+   already holds an HMAC key — one a `--force` target had, or one left by a
+   server start that minted it (`CA.Init` does so before it bootstraps) and then
+   failed. The rebuild then uses that key at once, and the warning `migrate`
+   prints is the only trace. It is a cutover rather
    than an in-place repair: the destination must be a different store (a store
    cannot be migrated onto itself), one that already holds a CA is refused
    without `--force`, and the CA must then be served from the destination. Because it only ever reads the

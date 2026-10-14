@@ -1243,7 +1243,10 @@ Notes:
   destination vouch for it. A source that never recorded an integrity value at
   all — no HMAC key and no value, such as a cadir written by OpenVox Server — is
   migrated without the flag, since there is nothing to verify it against. Either
-  way `migrate` prints a warning saying the source was not verified.
+  way `migrate` prints a warning saying the source was not verified. A source
+  with no HMAC key gives the destination none either, unless it already had
+  one, so its first start then logs `No inventory HMAC found on an established
+  CA` at `WARN`, once, as it establishes the value.
 - **Re-runnable.** The copy is idempotent per item; an interrupted run can be
   repeated (with `--force` if a partial CA already landed).
 - Use `--verbose` to log each item as it is copied.

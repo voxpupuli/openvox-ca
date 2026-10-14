@@ -229,6 +229,10 @@ openvox-ca-ctl import \
 # the parsed CRLs are stored -- so a file with a certificate or a key
 # concatenated into it is refused, for the same reason the certificate bundle
 # rejects keys: the result is world-readable and served to every agent.
+#
+# import writes no inventory integrity value, so the server's next start logs
+# "No inventory HMAC found on an established CA" at WARN, once, as it
+# establishes one. That is expected after an import.
 
 # Migrate an entire CA between storage backends offline (any pair of backends:
 # filesystem, sqlite, postgres, mysql, etcd, redis/valkey). Each backend is
