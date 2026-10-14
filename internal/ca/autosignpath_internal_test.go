@@ -297,6 +297,9 @@ var _ = Describe("checkAutosignExecutable when the judged file vanishes", func()
 		calls := 0
 		beforeExec(func() {
 			calls++
+			if calls >= len(gens) {
+				Fail("checkAutosignExecutable retried more than once")
+			}
 			Expect(os.Remove(link)).To(Succeed())
 			Expect(os.Symlink(gens[calls], link)).To(Succeed())
 			Expect(os.RemoveAll(filepath.Dir(gens[calls-1]))).To(Succeed())
