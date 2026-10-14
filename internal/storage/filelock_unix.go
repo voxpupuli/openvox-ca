@@ -119,7 +119,7 @@ func statNlink(info fs.FileInfo) (uint64, bool) {
 // something other than a lock file at a lock file's name, and the open must not
 // carry this process's privileges through it:
 //
-//   - O_NOFOLLOW refuses a symbolic link with ELOOP, rather than opening
+//   - O_NOFOLLOW refuses a symbolic link, rather than opening
 //     whatever it points at read-write. The instance lock truncates and writes
 //     the file it opens, so a followed link aimed at ca_key.pem would destroy the
 //     key; a dangling one would have this process create a file wherever the
@@ -133,6 +133,13 @@ func statNlink(info fs.FileInfo) (uint64, bool) {
 const lockOpenFlags = syscall.O_NOFOLLOW | syscall.O_NONBLOCK
 
 // isSymlinkRefusal reports whether err is O_NOFOLLOW refusing a symbolic link.
+//
+// The errno differs by platform: ELOOP on Linux, darwin and OpenBSD, EMLINK on
+// FreeBSD and DragonFly, EFTYPE on NetBSD (errNoFollowPlatform). This is the
+// set the standard library's os.Root accepts for the same refusal (isNoFollowErr
+// in os/eloop_*.go), less the EINVAL it also accepts on DragonFly, which says
+// too little to name a symbolic link in an error message.
 func isSymlinkRefusal(err error) bool {
-	return errors.Is(err, syscall.ELOOP)
+	return errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.EMLINK) ||
+		errors.Is(err, errNoFollowPlatform)
 }

@@ -137,7 +137,11 @@ service operators restart and kill. Consequences worth knowing:
   ([#493](https://github.com/voxpupuli/openvox-ca/issues/493)). For the same
   reason a lock file is opened with `O_NOFOLLOW` and refused unless it is a
   plain file with one link, so nothing planted at its name can redirect the
-  open. Lock files can be swept while nothing is using the
+  open. Group read is a capability of its own: `flock(2)` needs no write access,
+  so wherever the umask leaves the files group-readable, 0022 included, a member
+  of the group can hold any existing lock and so stop the CA starting or stall
+  signing and revocation. Only a umask that removes group read, such as 0077,
+  prevents that. Lock files can be swept while nothing is using the
   store; while anything is, sweeping them silently defeats the exclusion.
 - **The directory grows with the fleet.** One file per distinct lock name means
   `bootstrap`, `crl` — and one per subject, since `subject:<name>` is a lock

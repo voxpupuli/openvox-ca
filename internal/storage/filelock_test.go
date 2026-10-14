@@ -348,7 +348,8 @@ var _ = Describe("Same-host locking", func() {
 			dir := GinkgoT().TempDir()
 			Expect(os.WriteFile(filepath.Join(dir, fsLockDir), []byte("not a directory"), 0600)).To(Succeed())
 
-			Expect(NewFilesystemBackend(dir).EnsureReady(ctx)).NotTo(Succeed())
+			Expect(NewFilesystemBackend(dir).EnsureReady(ctx)).To(MatchError(syscall.ENOTDIR),
+				"the lock directory's own error, not a failure creating something else")
 		})
 
 		DescribeTable("reports the capability absent on a read-only filesystem",

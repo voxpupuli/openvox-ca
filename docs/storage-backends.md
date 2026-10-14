@@ -139,6 +139,12 @@ unsupported thing is attempted on one host. It cannot do more than that:
   A relative path used from two different working directories, or one store
   reached through two different symlinks, gives two independent locks and no
   mutual exclusion.
+- **A lock file that is not a plain file is refused.** The lock directory can
+  be group-writable (see the SQLite section), so a symbolic link, a hard link or
+  any other special file found at a lock file's name stops the acquisition with
+  an error naming it, and nothing is followed or changed. `openvox-ca` only
+  ever creates lock files as plain files, so remove it by hand and find out who
+  put it there.
 - **Where the store cannot be locked at all** — a filesystem without `flock(2)`,
   a read-only mount — the server logs a warning and starts anyway, because
   refusing over a lock that is unavailable rather than held would take down a CA
@@ -340,8 +346,8 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
 File permissions are fixed: `0600` for `ca_key.pem`, `inventory.txt`, the
 integrity files and `superseded.json`, and for anything under `private/`;
 `0660` for the lock files under `locks/`, and `0770` for `locks/` itself;
-`0644` for certificates, CSRs, `ca_crt.pem`,
-`ca_pub.pem`, `ca_crl.pem` and `serial`. The CRL is world-readable because it is
+`0644` for certificates, CSRs, `ca_crt.pem`, `ca_pub.pem`, `ca_crl.pem` and
+`serial`. The CRL is world-readable because it is
 public: it is served without authentication, and OpenVox Server writes it
 `0644` too. The inventory is not, because it names every subject this CA has
 signed. A file openvox-ca rewrites gets its mode, so a cleanup that drops
@@ -872,7 +878,9 @@ there the creation mode is irrelevant.
 
 It is what lets a platform that assigns the pod a fresh uid per start, such as
 OpenShift, reach a SQLite database and its locks that a previous uid created,
-provided the uids share a group and the umask keeps group write. The same
+provided the uids share a group, the umask keeps group write, and the directory
+holding the database is group-writable too (SQLite creates its sidecars there,
+and `openvox-ca` creates the lock directory there). The same
 restart has to reacquire the same-host locks, so those are created
 group-accessible too: the files in `.<database>.locks/` at `0660` and the
 directory at `0770`, narrowed by the umask the same way. The directory needs
@@ -882,11 +890,21 @@ time that subject is signed. Under the usual `0022` the database comes out
 neither write nor create in, so on such a platform run `openvox-ca` under a
 umask of `0002` or `0007` from the first start.
 
-That covers signing, not everything. Server-side key generation (`/generate`)
-writes the key into `<cadir>/private/` on every backend, and that directory is
-created without group write whatever the umask, so a second uid cannot generate
-keys there; the filesystem backend's data directories are created the same way,
-so it cannot be used there at all. Both need a stable uid.
+That covers the database and its locks, and nothing else. Every private key
+`openvox-ca` writes as a file is created `0600` whatever the umask, in
+directories without group write, so a second uid can neither read one an earlier
+uid wrote nor add its own. On such a platform that rules out a CA key kept in a
+file through `ca_key_file`, server-side key generation (`/generate`, which
+writes into `<cadir>/private/` on every backend), and the filesystem backend
+altogether. Keep the CA key in the database, or run with a stable uid.
+[#523](https://github.com/voxpupuli/openvox-ca/issues/523) tracks server-side
+generation.
+
+Group read on the lock files has a cost of its own. `flock(2)` needs no write
+access, so any member of the group can hold an existing lock, which can stop the
+CA starting or stall signing and revocation. That is true under `0022` as well,
+which leaves the lock files `0640`; only a umask that removes group read, such
+as `0077`, prevents it.
 
 **`openvox-ca` never changes the mode of a file it did not create.** Not the
 database, not the sidecars, not the directory holding them. A store whose

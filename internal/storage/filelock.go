@@ -64,26 +64,40 @@ const (
 	// there still cannot sign a new node.
 	//
 	// Under a 0022 umask -- the usual default, and systemd's for a unit that
-	// sets no UMask -- they come out 0640 and 0750: the group can read the
-	// store-instance lock's holder record, but cannot open a lock read-write
-	// or create, replace or remove one. The same umask leaves the SQLite
-	// database 0640 and so unwritable by a second uid too, so an arbitrary-uid
-	// deployment also needs a umask that keeps group write, 0002 or 0007.
-	// Under a UMask of 0077 both are owner-only.
+	// sets no UMask -- they come out 0640 and 0750: the group cannot open a
+	// lock read-write, nor create, replace or remove one. The same umask
+	// leaves the SQLite database 0640 and so unwritable by a second uid too,
+	// so an arbitrary-uid deployment also needs a umask that keeps group
+	// write, 0002 or 0007. Under a UMask of 0077 both are owner-only, and
+	// nothing below applies.
 	//
-	// What the group gains is smaller than what the database already gives
-	// it. A lock file holds nothing but, for the store-instance lock, the
-	// holder's pid, host and start time. Group write on the directory, under a
-	// umask that keeps it, means a member of the group can put something else
-	// at a lock file's name: a link, which lockOpenFlags and verifyLockFile
-	// refuse so that this process's privileges cannot be carried through it,
-	// or nothing at all, since it can also unlink a lock file -- which
-	// fileUnlocker below explains defeats the lock for anyone waiting on it. On
-	// SQLite that member can already write the database, since one umask
-	// decides both modes. On the filesystem backend it cannot, because its
-	// data directories are DirPerm, which has no group write, so there the
-	// unlink is a real if small widening: the group can break the locks
-	// without being able to write the data they protect.
+	// What the group gains, whenever the umask leaves it group read:
+	//
+	//   - It can read the store-instance lock's holder record: the pid, host
+	//     and start time of whoever holds the store, and nothing else.
+	//   - It can hold any lock file that exists. flock(2) needs no write
+	//     access, so a member of the group can open a lock read-only and take
+	//     LOCK_EX on it. Held on the store-instance lock, that stops the CA
+	//     starting, with a StoreLockedError naming the last legitimate holder;
+	//     held on crl or a subject lock, it stalls revocation or signing until
+	//     the caller's deadline. This is what group read on these files means,
+	//     not a side effect of how they are opened, and it holds under 0022.
+	//
+	// And whenever the umask also leaves the directory group-writable:
+	//
+	//   - It can put something else at a lock file's name: a link, which
+	//     lockOpenFlags and verifyLockFile refuse so that this process's
+	//     privileges cannot be carried through it.
+	//   - It can unlink a lock file, which fileUnlocker below explains defeats
+	//     the lock for anyone waiting on it.
+	//
+	// So the group can deny service through the locks; it cannot use them to
+	// read or write anything else. On SQLite the same umask gives it the
+	// database, which holds the CA key by default, so the locks add nothing it
+	// lacked. On the filesystem backend its data is 0600 in DirPerm
+	// directories, so there this is a real if small widening: a member of the
+	// group can stop the CA without being able to read the data the locks
+	// protect.
 	lockFilePerm = 0o660
 	lockDirPerm  = 0o770
 )
