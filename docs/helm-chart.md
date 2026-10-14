@@ -386,8 +386,11 @@ whose `maxReplicas` is above 1. It judges the backend the server will run with �
 `config.storage_backend`, then `OPENVOX_CA_STORAGE_BACKEND` in `env` or
 `extraEnv`, then `--storage-backend` in `extraArgs` — and when it cannot see
 that (an `existingConfigMap`, `args`, `envFrom`, a `--config` in `extraArgs`,
-the variable fed in from a Secret or ConfigMap, or the flag with its value as a
-separate argument) it installs and warns in the notes instead.
+the variable fed in from a Secret or ConfigMap or through a `$(NAME)` reference,
+or the flag with its value as a separate argument) it installs and warns in the
+notes instead. A backend a `command` wrapper exports is invisible to it as well,
+but reads as the unset default and is refused as filesystem; set
+`config.storage_backend` to match.
 
 To run more than one replica, move the state into a shared backend — see
 [storage backends](storage-backends.md) — and turn persistence off, because
@@ -810,7 +813,7 @@ Four things about that are easy to get wrong:
               cidr: 169.254.20.10/32   # NodeLocal DNSCache
   ```
 
-  The chart refuses `dnsPolicy: Default` while `dns.to` still names the
+  The chart refuses `dnsPolicy: Default` while `dns.to` names only the
   kube-dns pods, since every lookup would then be dropped.
 
   The rule allows port 53, and network plugins generally match it against the

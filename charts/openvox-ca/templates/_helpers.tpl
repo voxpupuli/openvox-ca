@@ -702,16 +702,25 @@ the environment held, so it restores a verdict a Secret-fed variable had
 withheld.
 
 The variable is resolved the way the container gets it before the server reads
-it. env is rendered before extraEnv, and Kubernetes gives a name that appears
+it, as far as the chart can follow. env is rendered before extraEnv, and
+Kubernetes gives a name that appears
 more than once the value of its last entry — so the last entry decides, even
 when it is empty or names no source at all. An empty variable then defers to
 the config file, because the server ignores it. Taking each non-empty value as
 it came instead let a later empty duplicate keep an earlier `postgres`, while
 the pod ran the filesystem default.
 
+The kubelet also expands a $(NAME) reference in an env value or an argument
+from a variable set earlier in the container, which the chart cannot follow: it
+would read "$(BACKEND)" as a name matching no kind and pass a filesystem CA it
+should have refused. So a value carrying "$(" counts as unreadable, the same
+as one fed from a Secret, and the docs recommend that indirection for the DSN,
+so it is not hypothetical.
+
 Nothing comes back when the configuration is not fully known, when extraEnv
-feeds the variable from a Secret or ConfigMap, or when the flag's value is in
-the following element of extraArgs. Callers that refuse an install must treat
+feeds the variable from a Secret or ConfigMap, when the value or the flag
+carries a $(NAME) reference, or when the flag's value is in the following
+element of extraArgs. Callers that refuse an install must treat
 nothing as "cannot judge" and not refuse, since a guard that fires on a
 configuration it cannot read is worse than none.
 */}}
@@ -722,17 +731,17 @@ configuration it cannot read is worse than none.
 {{- $envValue := "" -}}
 {{- $known := true -}}
 {{- range $envName, $value := .Values.env -}}
-{{- if eq $envName "OPENVOX_CA_STORAGE_BACKEND" }}{{ $envValue = $value | default "" | toString }}{{ end -}}
+{{- if eq $envName "OPENVOX_CA_STORAGE_BACKEND" }}{{ $envValue = $value | default "" | toString }}{{ $known = not (contains "$(" $envValue) }}{{ end -}}
 {{- end -}}
 {{- range .Values.extraEnv -}}
 {{- if eq .name "OPENVOX_CA_STORAGE_BACKEND" -}}
-{{- if hasKey . "valueFrom" }}{{ $known = false }}{{ else }}{{ $envValue = .value | default "" | toString }}{{ $known = true }}{{ end -}}
+{{- if hasKey . "valueFrom" }}{{ $known = false }}{{ else }}{{ $envValue = .value | default "" | toString }}{{ $known = not (contains "$(" $envValue) }}{{ end -}}
 {{- end -}}
 {{- end -}}
 {{- if $envValue }}{{ $name = $envValue }}{{ end -}}
 {{- range .Values.extraArgs -}}
 {{- $arg := . | toString -}}
-{{- if hasPrefix "--storage-backend=" $arg }}{{ $name = trimPrefix "--storage-backend=" $arg }}{{ $known = true }}{{ end -}}
+{{- if hasPrefix "--storage-backend=" $arg }}{{ $name = trimPrefix "--storage-backend=" $arg }}{{ $known = not (contains "$(" $name) }}{{ end -}}
 {{- if eq $arg "--storage-backend" }}{{ $known = false }}{{ end -}}
 {{- end -}}
 {{- if $known -}}
@@ -1312,14 +1321,19 @@ CrashLoopBackOff or a Service that silently routes nowhere.
   kube-dns pods drops every lookup the CA makes: the storage backend, OpenBao
   and the export targets all time out, and nothing in the CA's log names the
   policy. The chart holds every value involved, so it refuses rather than
-  renders. Keyed on a kube-dns pod peer still being in dns.to, which is what
-  the default carries; a list the operator has pointed elsewhere passes.
+  renders. Only when every peer in dns.to is the kube-dns pods, which is what
+  the default carries: a list that names anything else as well may reach the
+  node's resolver, and the chart cannot tell an ipBlock that does from one that
+  does not.
 */}}
 {{- if and .Values.networkPolicy.enabled .Values.networkPolicy.egress.enabled (eq (.Values.dnsPolicy | toString) "Default") -}}
-{{- range $peer := dig "dns" "to" list .Values.networkPolicy.egress -}}
-{{- if eq (dig "podSelector" "matchLabels" "k8s-app" "" $peer | toString) "kube-dns" -}}
-{{- fail "dnsPolicy is Default, so the pod resolves names through the node's own resolvers, but networkPolicy.egress.dns.to sends DNS only to the kube-dns pods, which would drop every lookup the CA makes. List the node's resolvers under networkPolicy.egress.dns.to (an ipBlock for each), set it to [] to allow DNS to any destination, or leave dnsPolicy at the cluster default." -}}
+{{- $peers := dig "dns" "to" list .Values.networkPolicy.egress -}}
+{{- $onlyKubeDNS := gt (len $peers) 0 -}}
+{{- range $peer := $peers -}}
+{{- if ne (dig "podSelector" "matchLabels" "k8s-app" "" $peer | toString) "kube-dns" }}{{ $onlyKubeDNS = false }}{{ end -}}
 {{- end -}}
+{{- if $onlyKubeDNS -}}
+{{- fail "dnsPolicy is Default, so the pod resolves names through the node's own resolvers, but networkPolicy.egress.dns.to names only the kube-dns pods, which such a pod never queries, so every lookup the CA makes would be dropped. Replace them under networkPolicy.egress.dns.to with the node's resolvers (an ipBlock for each), set it to [] to allow DNS to any destination, or leave dnsPolicy at the cluster default." -}}
 {{- end -}}
 {{- end -}}
 
@@ -1609,8 +1623,8 @@ WARNING: {{ if .Values.autoscaling.enabled }}autoscaling may run up to {{ $repli
 can see the backend is {{ $backend }}, which supports exactly one running instance.
 The chart cannot see the backend the server will actually use (existingConfigMap,
 args, envFrom, a --config in extraArgs, a backend fed in from a Secret or
-ConfigMap, or a --storage-backend whose value is a separate argument), so it has
-not refused this. If it is filesystem or sqlite, run one replica; use postgres,
+ConfigMap or through a $(NAME) reference, or a --storage-backend whose value is
+a separate argument), so it has not refused this. If it is filesystem or sqlite, run one replica; use postgres,
 mysql, etcd, or redis to run more than one — see
 https://github.com/voxpupuli/openvox-ca/blob/main/docs/storage-backends.md
 {{- end }}

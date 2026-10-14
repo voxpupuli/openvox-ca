@@ -809,7 +809,7 @@ networkPolicy:
     # the k8s-app: kube-dns label most distributions put on CoreDNS. Set it to
     # your resolvers if they are elsewhere, such as an ipBlock for a node-local
     # cache or a provider's resolver, or for pods running with dnsPolicy:
-    # Default (the chart refuses that one while this still names kube-dns).
+    # Default (the chart refuses that one while this names only kube-dns).
     # Each entry is a NetworkPolicy peer, templated like `rules`. An empty list
     # allows DNS to any destination.
     dns:

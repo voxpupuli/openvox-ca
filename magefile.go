@@ -7130,6 +7130,105 @@ config:
 			wants: []string{"dnsPolicy: \"Default\"", "cidr: 10.0.0.2/32"},
 		},
 		{
+			// envFrom is the half of configFullyKnown that configFileKnown
+			// lacks; a Secret named there can carry OPENVOX_CA_STORAGE_BACKEND,
+			// so the chart cannot judge and must not refuse.
+			name:  "several replicas render when envFrom may carry the backend",
+			sets:  []string{tls, "replicaCount=2", "envFrom[0].secretRef.name=ca-env"},
+			wants: []string{"replicas: 2"},
+		},
+		{
+			name:  "NOTES warns about several replicas when envFrom may carry the backend",
+			notes: true,
+			sets:  []string{tls, "replicaCount=2", "envFrom[0].secretRef.name=ca-env"},
+			wants: []string{"WARNING: replicaCount is 2", "cannot see the backend the server will actually use"},
+		},
+		{
+			// args replaces the argv the chart builds, and a --config in
+			// extraArgs points the server at a file the chart never rendered.
+			name:  "several replicas render when args replaces the argv",
+			sets:  []string{tls, "replicaCount=2", "args[0]=--config=/etc/elsewhere/config.yaml"},
+			wants: []string{"replicas: 2"},
+		},
+		{
+			name:  "several replicas render when extraArgs names another config file",
+			sets:  []string{tls, "replicaCount=2", "extraArgs[0]=--config=/etc/elsewhere/config.yaml"},
+			wants: []string{"replicas: 2"},
+		},
+		{
+			// The kubelet expands $(NAME) from a variable set earlier, here
+			// from a Secret, so the chart sees only the reference. Read
+			// literally it matched no kind and silenced both the refusal and
+			// the warning while the pod could run sqlite.
+			name:  "NOTES warns when the backend arrives through a $(NAME) reference",
+			notes: true,
+			sets: []string{tls, "replicaCount=2",
+				"extraEnv[0].name=BACKEND",
+				"extraEnv[0].valueFrom.secretKeyRef.name=backend", "extraEnv[0].valueFrom.secretKeyRef.key=kind",
+				"extraEnv[1].name=OPENVOX_CA_STORAGE_BACKEND", "extraEnv[1].value=$(BACKEND)"},
+			wants: []string{"WARNING: replicaCount is 2", "cannot see the backend the server will actually use"},
+		},
+		{
+			// And through env, whose keys render sorted, so BACKEND is set
+			// before the reference to it and the kubelet expands it.
+			name:  "NOTES warns when an env backend carries a $(NAME) reference",
+			notes: true,
+			sets:  []string{tls, "replicaCount=2", "env.BACKEND=sqlite", "env.OPENVOX_CA_STORAGE_BACKEND=$(BACKEND)"},
+			wants: []string{"WARNING: replicaCount is 2", "cannot see the backend the server will actually use"},
+		},
+		{
+			// The same through the flag, which the kubelet expands in args too.
+			name:  "NOTES warns when the backend flag carries a $(NAME) reference",
+			notes: true,
+			sets: []string{tls, "replicaCount=2",
+				"env.BACKEND=sqlite", "extraArgs[0]=--storage-backend=$(BACKEND)"},
+			wants: []string{"WARNING: replicaCount is 2", "cannot see the backend the server will actually use"},
+		},
+		{
+			// A list naming the node's resolver as well as kube-dns resolves
+			// under dnsPolicy: Default, so it is not refused.
+			name: "dnsPolicy Default renders when DNS egress names kube-dns and the node's resolver",
+			sets: []string{tls, "dnsPolicy=Default", "networkPolicy.enabled=true", "networkPolicy.egress.enabled=true"},
+			valuesYAML: `
+networkPolicy:
+  egress:
+    dns:
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+        - ipBlock:
+            cidr: 10.0.0.2/32
+`,
+			wants: []string{"dnsPolicy: \"Default\"", "cidr: 10.0.0.2/32"},
+		},
+		{
+			// The empty-list remedy the refusal names.
+			name: "dnsPolicy Default renders when DNS egress may go anywhere",
+			sets: []string{tls, "dnsPolicy=Default", "networkPolicy.enabled=true", "networkPolicy.egress.enabled=true"},
+			valuesYAML: `
+networkPolicy:
+  egress:
+    dns:
+      to: []
+`,
+			wants: []string{"dnsPolicy: \"Default\""},
+		},
+		{
+			// No egress policy, so nothing restricts DNS.
+			name:  "dnsPolicy Default renders when egress is not restricted",
+			sets:  []string{tls, "dnsPolicy=Default", "networkPolicy.enabled=true"},
+			wants: []string{"dnsPolicy: \"Default\""},
+		},
+		{
+			name:  "dnsPolicy Default renders with no network policy at all",
+			sets:  []string{tls, "dnsPolicy=Default", "networkPolicy.egress.enabled=true"},
+			wants: []string{"dnsPolicy: \"Default\""},
+		},
+		{
 			// The ceiling is what is refused, so an autoscaler held to one
 			// replica on a filesystem CA is allowed, whatever replicaCount says
 			// (the Deployment omits it under autoscaling).
