@@ -78,6 +78,19 @@ var _ = Describe("readOnlyMountRoot on Linux", func() {
 		Expect(readOnlyMountRoot(roots[0])).To(BeTrue(), "mount point %q", roots[0])
 	})
 
+	// Being a mount root is not enough: the mount has to be read-only.
+	It("does not call the root of a read-write mount read-only", func() {
+		all, _ := mountPoints()
+		for point, ro := range all {
+			if fi, err := os.Lstat(point); ro || err != nil || !fi.IsDir() {
+				continue
+			}
+			Expect(readOnlyMountRoot(point)).To(BeFalse(), "%q is a read-write mount", point)
+			return
+		}
+		Skip("no read-write mount is visible to this process")
+	})
+
 	// The narrowing the exemption depends on: under a read-only root
 	// filesystem, or a service manager's ProtectSystem=strict, every directory
 	// is on a read-only mount, and only the mount's root may be exempt.
