@@ -626,6 +626,22 @@ var _ = Describe("RedisBackend", func() {
 			Expect(buf.String()).To(ContainSubstring(lostMsg))
 		})
 
+		// Not a lost lock, but the same tail of Unlock: a release that fails
+		// outright must still free the process-local mutex -- the property the
+		// redisUnlocker doc promises, so a transient Redis error cannot wedge
+		// later in-process callers -- and must not be reported as a lost lock.
+		It("returns a failed release's error, still frees the local lock, and does not warn", func() {
+			ul, err := b.AcquireLock(context.Background(), "crl")
+			Expect(err).NotTo(HaveOccurred())
+			mr.Close()
+
+			Expect(ul.Unlock()).NotTo(Succeed(), "the release must report that Redis was unreachable")
+			local := b.localLockFor("crl")
+			Expect(local.TryLock()).To(BeTrue(), "the process-local mutex must have been released")
+			local.Unlock()
+			Expect(buf.String()).NotTo(ContainSubstring(lostMsg))
+		})
+
 		It("says nothing when the lock was still held", func() {
 			ul, err := b.AcquireLock(context.Background(), "crl")
 			Expect(err).NotTo(HaveOccurred())
