@@ -195,13 +195,12 @@ var _ = Describe("MigrateLogfReceivesEachCopiedBlob", func() {
 // directory entry names, and migrating a foreign or legacy CA directory is
 // exactly the case where a filename can carry a terminator.
 //
-// Such a key never reaches Logf: the source's validateKey refuses a control
-// character, so the copy stops at it with an error. What this pins is that the
-// error is the only output that key produces, and that the error quotes it --
-// the refusal is the operator-facing line, so it is the one that must not forge
-// a second. migrate.go's logf call keeps its %q as a second layer, which no
-// source key can reach while validateKey stands.
-var _ = Describe("MigrateLogfEscapesTerminatorsInKeys", func() {
+// On a shipped backend such a key never reaches Logf: the source's validateKey
+// refuses a control character, so the copy stops at it with an error. What this
+// pins is that the error is the only output that key produces, and that the
+// error quotes it -- the refusal is the operator-facing line, so it is the one
+// that must not forge a second. The spec below it pins Logf's own %q.
+var _ = Describe("MigrateRefusesTerminatorsInSourceKeys", func() {
 	It("refuses a key carrying terminators, quoting it in the error", func() {
 		ctx := context.Background()
 		srcDir := GinkgoT().TempDir()
@@ -246,6 +245,81 @@ var _ = Describe("MigrateLogfEscapesTerminatorsInKeys", func() {
 		// error that never named the key, so this pins that it did, quoted.
 		Expect(err.Error()).To(ContainSubstring(strconv.Quote(key)),
 			"the error must name the refused key, quoted")
+	})
+})
+
+// keyAdmittingBackend is a FilesystemBackend that also holds one extra CSR
+// under a key validateKey would refuse, and accepts that key on Put. No
+// shipped backend admits such a key, which is exactly why Logf's %q needs a
+// double to be reached at all: it is the layer behind validateKey, and a spec
+// that only drives real backends stops exercising it.
+type keyAdmittingBackend struct {
+	*FilesystemBackend
+	key    string
+	data   []byte // non-nil on the source: served for key and listed under csr/
+	stored bool   // set on the destination when Put receives key
+}
+
+func (b *keyAdmittingBackend) List(ctx context.Context, prefix string) ([]string, error) {
+	keys, err := b.FilesystemBackend.List(ctx, prefix)
+	if err == nil && prefix == csrPrefix && b.data != nil {
+		keys = append(keys, b.key)
+	}
+	return keys, err
+}
+
+func (b *keyAdmittingBackend) Get(ctx context.Context, key string) ([]byte, error) {
+	if key == b.key && b.data != nil {
+		return b.data, nil
+	}
+	return b.FilesystemBackend.Get(ctx, key)
+}
+
+func (b *keyAdmittingBackend) Put(ctx context.Context, key string, data []byte, kind BlobKind) error {
+	if key == b.key {
+		b.stored = true
+		return nil
+	}
+	return b.FilesystemBackend.Put(ctx, key, data, kind)
+}
+
+// SECURITY: pins the %q in migrate.go's logf call, the second layer behind
+// validateKey. The sibling spec above shows a shipped backend refuses the key
+// first; this one admits it on both ends, so that the only thing between a
+// terminator and a forged progress line is the %q.
+var _ = Describe("MigrateLogfEscapesTerminatorsInKeys", func() {
+	It("renders the key with %q so a terminator cannot forge a second line", func() {
+		ctx := context.Background()
+		forged := "evil\r\ncopied \"everything\" (0 bytes)"
+		key := CSRKey(forged)
+
+		srcFS := NewFilesystemBackend(GinkgoT().TempDir())
+		seedCA(srcFS)
+		src := &keyAdmittingBackend{FilesystemBackend: srcFS, key: key, data: []byte("csr")}
+		dst := &keyAdmittingBackend{FilesystemBackend: NewFilesystemBackend(GinkgoT().TempDir()), key: key}
+
+		var calls int
+		var out strings.Builder
+		_, err := Migrate(ctx, src, dst, MigrateOptions{
+			Logf: func(format string, a ...any) {
+				calls++
+				fmt.Fprintf(&out, format+"\n", a...)
+			},
+		})
+		Expect(err).NotTo(HaveOccurred(), "Migrate")
+		Expect(dst.stored).To(BeTrue(), "the forged key must have been copied, or Logf never saw it")
+
+		Expect(strings.Count(out.String(), "\n")).To(Equal(calls),
+			"each Logf call must render as exactly one line; more lines than calls "+
+				"means a key's newline reached the output unescaped:\n%s", out.String())
+		Expect(out.String()).NotTo(ContainSubstring("\r"),
+			"a bare carriage return starts a fresh line on an operator's terminal:\n%s",
+			out.String())
+
+		// Non-vacuity, last: the assertions above hold trivially if the key
+		// never reached Logf, so this pins that it did, in its quoted form.
+		Expect(out.String()).To(ContainSubstring(strconv.Quote(key)),
+			"the forged key must reach Logf, quoted")
 	})
 })
 

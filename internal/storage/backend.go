@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 // ErrDistributedLockingUnsupported signals that a backend advertising the
@@ -121,6 +122,12 @@ func validateKey(key string) error {
 // subdirectory, and on etcd it nests the key where List does not look), and any
 // control character, which has no business in a file name or a log line.
 //
+// A name that is not valid UTF-8 is refused too, before the control-character
+// check rather than by it: ranging over a raw byte such as 0x9B (the 8-bit CSI)
+// yields U+FFFD, which unicode.IsControl does not flag, so the rune loop alone
+// would let a single-byte C1 control through. Upstream certnames are printable
+// ASCII, so no legitimate name is affected.
+//
 // Whitespace is deliberately allowed. Upstream Puppet permits a space in a
 // certname, so an OpenVox Server cadir can hold one, and refusing it here would
 // make that entry unreadable and stop a migration at it. openvox-ca's own entry
@@ -134,6 +141,9 @@ func validateKeyName(name string) error {
 	}
 	if strings.Contains(name, "/") {
 		return errors.New("contains '/'")
+	}
+	if !utf8.ValidString(name) {
+		return errors.New("not valid UTF-8")
 	}
 	for _, r := range name {
 		if unicode.IsControl(r) {

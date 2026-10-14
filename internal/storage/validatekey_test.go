@@ -114,6 +114,12 @@ var _ = Describe("validateKey", func() {
 		Entry("a DEL", CSRKey("a\x7fb"), "control character U+007F"),
 		Entry("a C1 control", CSRKey("a\u0085b"), "control character U+0085"),
 		Entry("a control character in a bare key", "crl\n", "control character U+000A"),
+		// The single-byte forms of C1 controls are not valid UTF-8, and ranging
+		// over them yields U+FFFD, which is not a control character: refused as
+		// invalid UTF-8 instead, or they would pass.
+		Entry("a raw 8-bit CSI byte", CSRKey("a\x9bb"), "not valid UTF-8"),
+		Entry("a raw 8-bit NEL byte", CertKey("a\x85b"), "not valid UTF-8"),
+		Entry("a truncated multi-byte sequence", CSRKey("a\xc2"), "not valid UTF-8"),
 	)
 
 	It("names the whole key, quoted, in the refusal", func() {
@@ -155,6 +161,7 @@ var _ = Describe("FilesystemBackend refusing an unsafe key", func() {
 		Entry("Put with a newline in a subject", opPut, CSRKey("a\nb")),
 		Entry("Put with a DEL in a subject", opPut, CertKey("a\x7fb")),
 		Entry("AppendLine with a carriage return in a subject", opAppendLine, CSRKey("a\rb")),
+		Entry("Put with a raw C1 byte in a subject", opPut, CSRKey("a\x9bb")),
 	)
 
 	// A file a foreign tool left in a subdirectory of requests/ is reachable
@@ -222,6 +229,7 @@ var _ = Describe("SavePrivateKey refusing an unsafe subject", func() {
 		Entry("a '/', which would need a subdirectory", "a/b", "contains '/'"),
 		Entry("a newline", "a\nb", "control character U+000A"),
 		Entry("a DEL", "a\x7fb", "control character U+007F"),
+		Entry("a raw C1 byte", "a\x9bb", "not valid UTF-8"),
 	)
 
 	It("still writes a subject containing a space", func() {
