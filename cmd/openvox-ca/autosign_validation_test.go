@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -236,9 +237,10 @@ var _ = Describe("the autosign executable preflight under --daemon", func() {
 
 // Without --daemon the server process checks for itself before it serves.
 // --single-process keeps the spec in this process: the launcher would fork
-// the test binary.
+// the test binary. The spec context bounds it, because without the check the
+// server would start serving and never return.
 var _ = Describe("the autosign executable check at startup", func() {
-	It("refuses to serve", func() {
+	It("refuses to serve", func(ctx SpecContext) {
 		exe := autosignFixture(0o775, 0o755)
 
 		cmd := newRootCmd()
@@ -248,6 +250,6 @@ var _ = Describe("the autosign executable check at startup", func() {
 			"--cadir", GinkgoT().TempDir(), "--host", "127.0.0.1", "--port", "0", "--single-process",
 			"--autosign-config", exe,
 		})
-		Expect(cmd.Execute()).To(MatchError(ContainSubstring("refusing to start: autosign executable")))
-	})
+		Expect(cmd.ExecuteContext(ctx)).To(MatchError(ContainSubstring("refusing to start: autosign executable")))
+	}, SpecTimeout(30*time.Second))
 })
