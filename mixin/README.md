@@ -109,7 +109,7 @@ and can be overridden without editing the rules.
 ## Enabling the exporter
 
 The alerts assume the openvox-ca Prometheus exporter is enabled and scraped. Start
-the server with `--metrics-listen` (or `PUPPET_CA_METRICS_LISTEN` /
+the server with `--metrics-listen` (or `OPENVOX_CA_METRICS_LISTEN` /
 `metrics_listen:` in the config file):
 
 ```sh

@@ -235,7 +235,7 @@ var _ = Describe("The leaf backdate and reconcile interval settings", func() {
 	})
 
 	It("takes a configured backdate", func() {
-		setEnv("PUPPET_CA_LEAF_BACKDATE_SEC", "3600")
+		setEnv("OPENVOX_CA_LEAF_BACKDATE_SEC", "3600")
 		cfg, err := loadServerConfig("")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cfg.leafBackdate()).To(Equal(time.Hour))
@@ -246,7 +246,7 @@ var _ = Describe("The leaf backdate and reconcile interval settings", func() {
 		// typo they never hear about. A negative backdate issues certificates
 		// that are not yet valid, fleet-wide, with nothing in the CA's logs
 		// saying why -- so it has to fail at startup.
-		setEnv("PUPPET_CA_LEAF_BACKDATE_SEC", "-60")
+		setEnv("OPENVOX_CA_LEAF_BACKDATE_SEC", "-60")
 		_, err := loadServerConfig("")
 		Expect(err).To(MatchError(ContainSubstring("leaf_backdate_sec must not be negative")))
 	})
@@ -255,7 +255,7 @@ var _ = Describe("The leaf backdate and reconcile interval settings", func() {
 		// applyCAConfig is where a setting stops being configuration and starts
 		// being behaviour. Deleting that one line leaves every other spec here
 		// green while an operator's leaf_backdate_sec does nothing at all.
-		setEnv("PUPPET_CA_LEAF_BACKDATE_SEC", "7200")
+		setEnv("OPENVOX_CA_LEAF_BACKDATE_SEC", "7200")
 		cfg, err := loadServerConfig("")
 		Expect(err).NotTo(HaveOccurred())
 
@@ -276,7 +276,7 @@ var _ = Describe("The leaf backdate and reconcile interval settings", func() {
 	})
 
 	It("lets the environment outrank the config file", func() {
-		setEnv("PUPPET_CA_LEAF_BACKDATE_SEC", "900")
+		setEnv("OPENVOX_CA_LEAF_BACKDATE_SEC", "900")
 		cfg, err := loadServerConfig(writeTempConfig("leaf_backdate_sec: 3600\n"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cfg.leafBackdate()).To(Equal(15*time.Minute),
@@ -288,12 +288,12 @@ var _ = Describe("The leaf backdate and reconcile interval settings", func() {
 		// time.Second multiplies by a billion in int64 nanoseconds, so a
 		// mistyped extra few zeroes wraps, and a wrapped product that lands
 		// positive passes every `> 0` guard downstream and reaches issuance.
-		setEnv("PUPPET_CA_LEAF_BACKDATE_SEC", "31536000")
+		setEnv("OPENVOX_CA_LEAF_BACKDATE_SEC", "31536000")
 		_, err := loadServerConfig("")
 		Expect(err).To(MatchError(ContainSubstring("leaf_backdate_sec must not exceed")))
 
 		clearServerEnv()
-		setEnv("PUPPET_CA_LEAF_BACKDATE_SEC", "99999999999")
+		setEnv("OPENVOX_CA_LEAF_BACKDATE_SEC", "99999999999")
 		_, err = loadServerConfig("")
 		Expect(err).To(MatchError(ContainSubstring("leaf_backdate_sec must not exceed")),
 			"a value large enough to wrap the nanosecond multiply must be refused before it can")
@@ -304,12 +304,12 @@ var _ = Describe("The leaf backdate and reconcile interval settings", func() {
 		// wrapped product that lands non-positive reaches time.NewTicker, which
 		// panics inside the reconcile goroutine with nothing to recover it --
 		// a config typo taking the whole server down.
-		setEnv("PUPPET_CA_MANAGED_CERT_INTERVAL_SEC", "31536000")
+		setEnv("OPENVOX_CA_MANAGED_CERT_INTERVAL_SEC", "31536000")
 		_, err := loadServerConfig("")
 		Expect(err).To(MatchError(ContainSubstring("managed_cert_interval_sec must not exceed")))
 
 		clearServerEnv()
-		setEnv("PUPPET_CA_MANAGED_CERT_INTERVAL_SEC", "99999999999")
+		setEnv("OPENVOX_CA_MANAGED_CERT_INTERVAL_SEC", "99999999999")
 		_, err = loadServerConfig("")
 		Expect(err).To(MatchError(ContainSubstring("managed_cert_interval_sec must not exceed")),
 			"a value large enough to wrap the nanosecond multiply must be refused before it can")
@@ -331,7 +331,7 @@ var _ = Describe("The leaf backdate and reconcile interval settings", func() {
 		// this variable on n > 0, or a negative value is discarded there and the
 		// server starts on the default -- the asymmetry the refusal exists to
 		// end, in the one path the refusal cannot see.
-		setEnv("PUPPET_CA_MANAGED_CERT_INTERVAL_SEC", "-1")
+		setEnv("OPENVOX_CA_MANAGED_CERT_INTERVAL_SEC", "-1")
 		_, err := loadServerConfig("")
 		Expect(err).To(MatchError(ContainSubstring("managed_cert_interval_sec must not be negative")))
 	})
@@ -350,26 +350,26 @@ var _ = Describe("The leaf backdate and reconcile interval settings", func() {
 		// `>` and an accidental `>=` reject them identically. Only the exact
 		// value separates the two, and a `>=` would refuse the documented
 		// 30-day maximum -- a limit an operator can read and set.
-		setEnv("PUPPET_CA_LEAF_BACKDATE_SEC", strconv.Itoa(maxLeafBackdateSec))
+		setEnv("OPENVOX_CA_LEAF_BACKDATE_SEC", strconv.Itoa(maxLeafBackdateSec))
 		cfg, err := loadServerConfig("")
 		Expect(err).NotTo(HaveOccurred(), "the ceiling is a permitted value, not the first refused one")
 		Expect(cfg.leafBackdate()).To(Equal(30 * 24 * time.Hour))
 
 		clearServerEnv()
-		setEnv("PUPPET_CA_LEAF_BACKDATE_SEC", strconv.Itoa(maxLeafBackdateSec+1))
+		setEnv("OPENVOX_CA_LEAF_BACKDATE_SEC", strconv.Itoa(maxLeafBackdateSec+1))
 		_, err = loadServerConfig("")
 		Expect(err).To(MatchError(ContainSubstring("leaf_backdate_sec must not exceed")),
 			"one past the ceiling must be the first value refused")
 	})
 
 	It("accepts exactly the reconcile-interval ceiling, and refuses one second more", func() {
-		setEnv("PUPPET_CA_MANAGED_CERT_INTERVAL_SEC", strconv.Itoa(maxManagedCertIntervalSec))
+		setEnv("OPENVOX_CA_MANAGED_CERT_INTERVAL_SEC", strconv.Itoa(maxManagedCertIntervalSec))
 		cfg, err := loadServerConfig("")
 		Expect(err).NotTo(HaveOccurred(), "the ceiling is a permitted value, not the first refused one")
 		Expect(cfg.managedCertInterval()).To(Equal(30 * 24 * time.Hour))
 
 		clearServerEnv()
-		setEnv("PUPPET_CA_MANAGED_CERT_INTERVAL_SEC", strconv.Itoa(maxManagedCertIntervalSec+1))
+		setEnv("OPENVOX_CA_MANAGED_CERT_INTERVAL_SEC", strconv.Itoa(maxManagedCertIntervalSec+1))
 		_, err = loadServerConfig("")
 		Expect(err).To(MatchError(ContainSubstring("managed_cert_interval_sec must not exceed")),
 			"one past the ceiling must be the first value refused")
@@ -385,7 +385,7 @@ var _ = Describe("The leaf backdate and reconcile interval settings", func() {
 		Expect(cfg.managedCertInterval()).To(BeNumerically(">", 0))
 
 		clearServerEnv()
-		setEnv("PUPPET_CA_MANAGED_CERT_INTERVAL_SEC", "60")
+		setEnv("OPENVOX_CA_MANAGED_CERT_INTERVAL_SEC", "60")
 		cfg, err = loadServerConfig("")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cfg.managedCertInterval()).To(Equal(time.Minute))

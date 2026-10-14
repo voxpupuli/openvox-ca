@@ -66,7 +66,7 @@ type KeyPassphraseConfig struct {
 
 // DefaultPassphraseEnvVar is the variable the passphrase is read from when
 // KeyPassphraseConfig.PassphraseEnvVar is empty.
-const DefaultPassphraseEnvVar = "PUPPET_CA_KEY_PASSPHRASE" //nolint:gosec // G101: the name of the variable holding the passphrase, not a passphrase
+const DefaultPassphraseEnvVar = "OPENVOX_CA_KEY_PASSPHRASE" //nolint:gosec // G101: the name of the variable holding the passphrase, not a passphrase
 
 // EnvVar returns the name of the environment variable the passphrase is read
 // from.

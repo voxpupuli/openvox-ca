@@ -82,7 +82,7 @@ for deployments where the CA certificate is mounted read-only from outside
 				return fmt.Errorf("reading --cert-bundle: %w", err)
 			}
 
-			resolvedCfgFile := resolveConfigFile(configFile, "PUPPET_CA_CONFIG", "/etc/puppet-ca/config.yaml")
+			resolvedCfgFile := resolveConfigFile(configFile, "OPENVOX_CA_CONFIG", "/etc/puppet-ca/config.yaml")
 			cfg, err := loadServerConfig(resolvedCfgFile)
 			if err != nil {
 				return err

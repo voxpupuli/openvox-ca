@@ -1305,11 +1305,11 @@ _driver_smoke() {
 
 # -- Driver 1: environment variables ------------------------------------------─
 _DRV_DIR_2=$(mktemp -d)
-PUPPET_CA_CADIR="$_DRV_DIR_2" \
-PUPPET_CA_HOST=127.0.0.1 \
-PUPPET_CA_PORT="$_LOCAL_PORT" \
-PUPPET_CA_AUTOSIGN_CONFIG=true \
-PUPPET_CA_NO_TLS_REQUIRED=1 \
+OPENVOX_CA_CADIR="$_DRV_DIR_2" \
+OPENVOX_CA_HOST=127.0.0.1 \
+OPENVOX_CA_PORT="$_LOCAL_PORT" \
+OPENVOX_CA_AUTOSIGN_CONFIG=true \
+OPENVOX_CA_NO_TLS_REQUIRED=1 \
     openvox-ca >/dev/null 2>&1 &
 _drv_pid_2=$!
 
@@ -1348,9 +1348,9 @@ wait "$_drv_pid_3" 2>/dev/null || true
 rm -rf "$_DRV_DIR_3"
 
 # -- openvox-ca-ctl drivers (shared CA service at $CA_URL) ----------------------
-PUPPET_CA_CTL_SERVER_URL="${CA_URL}" openvox-ca-ctl list >/dev/null 2>&1 \
-    && pass "openvox-ca-ctl env-var driver: PUPPET_CA_CTL_SERVER_URL accepted" \
-    || fail "openvox-ca-ctl env-var driver: PUPPET_CA_CTL_SERVER_URL accepted"
+OPENVOX_CA_CTL_SERVER_URL="${CA_URL}" openvox-ca-ctl list >/dev/null 2>&1 \
+    && pass "openvox-ca-ctl env-var driver: OPENVOX_CA_CTL_SERVER_URL accepted" \
+    || fail "openvox-ca-ctl env-var driver: OPENVOX_CA_CTL_SERVER_URL accepted"
 
 _CTL_CFG="$WORK_DIR/ctl.yaml"
 printf 'server_url: "%s"\n' "${CA_URL}" > "$_CTL_CFG"

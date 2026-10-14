@@ -32,7 +32,7 @@ $ sudo systemctl enable --now openvox-ca.service
 
 The first two lines create the `puppet` account only where it does not exist yet, so they are safe on a host where OpenVox Server — or an earlier run of this recipe — already created it.
 
-The configuration file is yours to write — it is not in the tarball — and [configuring the server](configuration.md#config-file) has a worked example. Make it **0640 root:puppet**, because it can hold credentials — `etcd_password`, `redis_password`, `redis_sentinel_password`, or a `sql_dsn` with a password in it — and the service only needs to read it. The server auto-detects that path, so the unit passes no `--config` and `PUPPET_CA_CONFIG` still works in a drop-in.
+The configuration file is yours to write — it is not in the tarball — and [configuring the server](configuration.md#config-file) has a worked example. Make it **0640 root:puppet**, because it can hold credentials — `etcd_password`, `redis_password`, `redis_sentinel_password`, or a `sql_dsn` with a password in it — and the service only needs to read it. The server auto-detects that path, so the unit passes no `--config` and `OPENVOX_CA_CONFIG` still works in a drop-in.
 
 The unit as rendered for a tarball expects the binary at `/usr/local/bin/openvox-ca` (the packages' copy names `/usr/bin`) and its configuration at `/etc/puppet-ca/config.yaml`. See [configuring the server](configuration.md).
 
@@ -74,7 +74,7 @@ That does not make sharing a host with a root-running agent free. If provisionin
 
 **It is not only the CA key.** Anything the service reads as `puppet` is readable by everything else running as `puppet`: the configuration file and any credentials in it — `etcd_password`, the OpenBao AppRole `role_id` and `secret_id` files — and, on a filesystem backend, the whole cadir.
 
-**Encrypting the CA key at rest does not reduce this.** [Encryption at rest](ca-key-security.md) protects a key that leaves the host — in a backup, a snapshot, a stolen disk — because whoever holds the file does not hold the passphrase. It does nothing against an attacker who *is* the `puppet` uid, because that account reads whatever decrypts the key as readily as the key itself: the server has to read its passphrase unattended in order to sign, so wherever it reads it from — a `ca_key_passphrase_file`, or `PUPPET_CA_KEY_PASSPHRASE` in its environment — that account can read it too.
+**Encrypting the CA key at rest does not reduce this.** [Encryption at rest](ca-key-security.md) protects a key that leaves the host — in a backup, a snapshot, a stolen disk — because whoever holds the file does not hold the passphrase. It does nothing against an attacker who *is* the `puppet` uid, because that account reads whatever decrypts the key as readily as the key itself: the server has to read its passphrase unattended in order to sign, so wherever it reads it from — a `ca_key_passphrase_file`, or `OPENVOX_CA_KEY_PASSPHRASE` in its environment — that account can read it too.
 
 That is the price of fitting the layout Server already establishes, and it is worth knowing rather than discovering. What actually removes it is not sharing the host: a CA that matters should not live beside the server it issues for, and a dedicated CA host has no `puppet` account but its own, so the question does not arise.
 
@@ -327,7 +327,7 @@ The binary's own default is 8140, and the packages ship `/etc/puppet-ca/config.y
 
 The release tarballs are unaffected and stay on 8140 — they ship no configuration file at all.
 
-It is set in the configuration file rather than as `--port` in the unit or `PUPPET_CA_PORT` in the environment, and that is deliberate: the server resolves the port as **file, then environment, then flag**, so a value in either of those would outrank the file and silently ignore an operator who edited it. A default has to sit at the layer an operator can override. Edit the file, and neither `apt upgrade` nor `dnf update` will overwrite you — it is marked as a configuration file in both formats.
+It is set in the configuration file rather than as `--port` in the unit or `OPENVOX_CA_PORT` in the environment, and that is deliberate: the server resolves the port as **file, then environment, then flag**, so a value in either of those would outrank the file and silently ignore an operator who edited it. A default has to sit at the layer an operator can override. Edit the file, and neither `apt upgrade` nor `dnf update` will overwrite you — it is marked as a configuration file in both formats.
 
 ### What removing the package does not do
 

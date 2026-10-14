@@ -531,15 +531,15 @@ environment variables for pointing a suite at a real service:
 go test -tags=etcd_integration ./internal/storage/...
 
 # Redis / Valkey
-PUPPET_CA_TEST_REDIS_ADDR=127.0.0.1:6379 \
+OPENVOX_CA_TEST_REDIS_ADDR=127.0.0.1:6379 \
     go test -tags=redis_integration ./internal/storage/...
 
 # PostgreSQL: a throwaway server and a superuser role (see below)
-PUPPET_CA_TEST_POSTGRES_DSN="postgres://puppetca:puppetca@127.0.0.1:55432/puppetca?sslmode=disable" \
+OPENVOX_CA_TEST_POSTGRES_DSN="postgres://puppetca:puppetca@127.0.0.1:55432/puppetca?sslmode=disable" \
     go test -tags=postgres_integration ./internal/storage/...
 
 # MySQL / MariaDB
-PUPPET_CA_TEST_MYSQL_DSN="user:pass@tcp(127.0.0.1:3306)/db" \
+OPENVOX_CA_TEST_MYSQL_DSN="user:pass@tcp(127.0.0.1:3306)/db" \
     go test -tags=mysql_integration ./internal/storage/...
 ```
 

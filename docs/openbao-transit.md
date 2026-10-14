@@ -168,19 +168,19 @@ manual route above is preferred for production.
 ## Configuration
 
 Every OpenBao-specific setting lives under a top-level `openbao:` YAML key
-(flags and environment variables use an `--openbao-*` / `PUPPET_CA_OPENBAO_*`
+(flags and environment variables use an `--openbao-*` / `OPENVOX_CA_OPENBAO_*`
 prefix instead, since there's no flat-file nesting for those).
 
 | Config key | Environment variable | CLI flag | Description |
 | --- | --- | --- | --- |
-| `ca_key_provider` | `PUPPET_CA_CA_KEY_PROVIDER` | `--ca-key-provider` | `file` (default) or `openbao` |
-| `openbao.addr` | `PUPPET_CA_OPENBAO_ADDR` | `--openbao-addr` | OpenBao server address as a full URI, including scheme and port, e.g. `https://openbao.example.com:8200`. `http://` is also accepted for a plain-HTTP listener in development only — never against a non-loopback or production OpenBao, because the client token and all signing traffic then cross the network in cleartext |
-| `openbao.transit_mount` | `PUPPET_CA_OPENBAO_TRANSIT_MOUNT` | `--openbao-transit-mount` | Transit engine mount path (default `transit`) |
-| `openbao.key_name` | `PUPPET_CA_OPENBAO_KEY_NAME` | `--openbao-key-name` | Name of the Transit key backing the CA's private key |
-| `openbao.tls_ca_file` | `PUPPET_CA_OPENBAO_TLS_CA_FILE` | `--openbao-tls-ca-file` | PEM CA bundle to verify OpenBao's server certificate |
-| `openbao.tls_cert_file` | `PUPPET_CA_OPENBAO_TLS_CERT_FILE` | `--openbao-tls-cert-file` | Client certificate PEM for mTLS to OpenBao |
-| `openbao.tls_key_file` | `PUPPET_CA_OPENBAO_TLS_KEY_FILE` | `--openbao-tls-key-file` | Client private key PEM for mTLS to OpenBao |
-| `openbao.auth_method` | `PUPPET_CA_OPENBAO_AUTH_METHOD` | `--openbao-auth-method` | `approle`, `token`, or `kubernetes` |
+| `ca_key_provider` | `OPENVOX_CA_CA_KEY_PROVIDER` | `--ca-key-provider` | `file` (default) or `openbao` |
+| `openbao.addr` | `OPENVOX_CA_OPENBAO_ADDR` | `--openbao-addr` | OpenBao server address as a full URI, including scheme and port, e.g. `https://openbao.example.com:8200`. `http://` is also accepted for a plain-HTTP listener in development only — never against a non-loopback or production OpenBao, because the client token and all signing traffic then cross the network in cleartext |
+| `openbao.transit_mount` | `OPENVOX_CA_OPENBAO_TRANSIT_MOUNT` | `--openbao-transit-mount` | Transit engine mount path (default `transit`) |
+| `openbao.key_name` | `OPENVOX_CA_OPENBAO_KEY_NAME` | `--openbao-key-name` | Name of the Transit key backing the CA's private key |
+| `openbao.tls_ca_file` | `OPENVOX_CA_OPENBAO_TLS_CA_FILE` | `--openbao-tls-ca-file` | PEM CA bundle to verify OpenBao's server certificate |
+| `openbao.tls_cert_file` | `OPENVOX_CA_OPENBAO_TLS_CERT_FILE` | `--openbao-tls-cert-file` | Client certificate PEM for mTLS to OpenBao |
+| `openbao.tls_key_file` | `OPENVOX_CA_OPENBAO_TLS_KEY_FILE` | `--openbao-tls-key-file` | Client private key PEM for mTLS to OpenBao |
+| `openbao.auth_method` | `OPENVOX_CA_OPENBAO_AUTH_METHOD` | `--openbao-auth-method` | `approle`, `token`, or `kubernetes` |
 
 The OpenBao client library also reads its own `BAO_*` and `VAULT_*`
 environment variables, and several of them override the settings above. See
@@ -192,10 +192,10 @@ environment variables, and several of them override the settings above. See
 
 | Config key | Environment variable | CLI flag | Description |
 | --- | --- | --- | --- |
-| `openbao.approle_mount` | `PUPPET_CA_OPENBAO_APPROLE_MOUNT` | `--openbao-approle-mount` | AppRole mount path (default `approle`) |
-| `openbao.approle_role_id` | `PUPPET_CA_OPENBAO_APPROLE_ROLE_ID` | `--openbao-approle-role-id` | AppRole `role_id` |
-| `openbao.approle_role_id_file` | `PUPPET_CA_OPENBAO_APPROLE_ROLE_ID_FILE` | `--openbao-approle-role-id-file` | Path to a file containing `role_id`, read fresh on every login |
-| `openbao.approle_secret_id_file` | `PUPPET_CA_OPENBAO_APPROLE_SECRET_ID_FILE` | `--openbao-approle-secret-id-file` | Path to a file containing `secret_id`, read fresh on every login |
+| `openbao.approle_mount` | `OPENVOX_CA_OPENBAO_APPROLE_MOUNT` | `--openbao-approle-mount` | AppRole mount path (default `approle`) |
+| `openbao.approle_role_id` | `OPENVOX_CA_OPENBAO_APPROLE_ROLE_ID` | `--openbao-approle-role-id` | AppRole `role_id` |
+| `openbao.approle_role_id_file` | `OPENVOX_CA_OPENBAO_APPROLE_ROLE_ID_FILE` | `--openbao-approle-role-id-file` | Path to a file containing `role_id`, read fresh on every login |
+| `openbao.approle_secret_id_file` | `OPENVOX_CA_OPENBAO_APPROLE_SECRET_ID_FILE` | `--openbao-approle-secret-id-file` | Path to a file containing `secret_id`, read fresh on every login |
 
 ```yaml
 ca_key_provider: openbao
@@ -211,7 +211,7 @@ openbao:
 
 | Config key | Environment variable | CLI flag | Description |
 | --- | --- | --- | --- |
-| `openbao.token_file` | `PUPPET_CA_OPENBAO_TOKEN_FILE` | `--openbao-token-file` | Path to a file containing a pre-issued OpenBao token |
+| `openbao.token_file` | `OPENVOX_CA_OPENBAO_TOKEN_FILE` | `--openbao-token-file` | Path to a file containing a pre-issued OpenBao token |
 
 This file holds a bearer credential that can sign arbitrary certificates as
 the CA, so — like the AppRole `secret_id` file and the encryption passphrase
@@ -230,9 +230,9 @@ revoked.
 
 | Config key | Environment variable | CLI flag | Description |
 | --- | --- | --- | --- |
-| `openbao.kubernetes_mount` | `PUPPET_CA_OPENBAO_KUBERNETES_MOUNT` | `--openbao-kubernetes-mount` | Kubernetes auth mount path (default `kubernetes`) |
-| `openbao.kubernetes_role` | `PUPPET_CA_OPENBAO_KUBERNETES_ROLE` | `--openbao-kubernetes-role` | OpenBao Kubernetes auth role name |
-| `openbao.kubernetes_jwt_file` | `PUPPET_CA_OPENBAO_KUBERNETES_JWT_FILE` | `--openbao-kubernetes-jwt-file` | Path to the projected ServiceAccount token (default: the standard in-cluster path) |
+| `openbao.kubernetes_mount` | `OPENVOX_CA_OPENBAO_KUBERNETES_MOUNT` | `--openbao-kubernetes-mount` | Kubernetes auth mount path (default `kubernetes`) |
+| `openbao.kubernetes_role` | `OPENVOX_CA_OPENBAO_KUBERNETES_ROLE` | `--openbao-kubernetes-role` | OpenBao Kubernetes auth role name |
+| `openbao.kubernetes_jwt_file` | `OPENVOX_CA_OPENBAO_KUBERNETES_JWT_FILE` | `--openbao-kubernetes-jwt-file` | Path to the projected ServiceAccount token (default: the standard in-cluster path) |
 
 ```yaml
 ca_key_provider: openbao
@@ -430,7 +430,7 @@ the Deployment.
 
 Three details are easy to get wrong. The config must land where the command
 looks for it — `/etc/puppet-ca/config.yaml`, unless you pass `--config` or set
-`PUPPET_CA_CONFIG`. Setting `args:` replaces the image's `CMD`, so any `--cadir`
+`OPENVOX_CA_CONFIG`. Setting `args:` replaces the image's `CMD`, so any `--cadir`
 it supplied is gone and the config file (or a flag) has to provide it. And the
 request has to outlive the pod, so write it somewhere that survives: a
 PersistentVolumeClaim, or stdout, which `kubectl logs` can retrieve after the
@@ -737,9 +737,9 @@ it gets the same process isolation a local key would. The frontend process
 is unaffected either way — it talks to the signer the same way whether the
 signer holds a local key or an OpenBao client. The launcher withholds every
 `BAO_*` and `VAULT_*` variable, which the OpenBao client library reads for
-itself, from the frontend. The `PUPPET_CA_OPENBAO_*` settings
+itself, from the frontend. The `OPENVOX_CA_OPENBAO_*` settings
 [above](#configuration) still reach it, because the frontend reads its
-configuration from `PUPPET_CA_*`; the token, secret ID and Kubernetes JWT among
+configuration from `OPENVOX_CA_*`; the token, secret ID and Kubernetes JWT among
 them are file paths, not the credentials themselves.
 
 `--single-process` disables that isolation (as it does for local keys):

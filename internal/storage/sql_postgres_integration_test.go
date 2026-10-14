@@ -37,9 +37,9 @@ import (
 // postgresDSNFromEnv returns the PostgreSQL DSN to use for integration tests,
 // or skips the test if none is configured.
 func postgresDSNFromEnv() string {
-	dsn := os.Getenv("PUPPET_CA_TEST_POSTGRES_DSN")
+	dsn := os.Getenv("OPENVOX_CA_TEST_POSTGRES_DSN")
 	if dsn == "" {
-		Skip("set PUPPET_CA_TEST_POSTGRES_DSN=postgres://user:pass@host:5432/db?sslmode=disable to run postgres integration tests")
+		Skip("set OPENVOX_CA_TEST_POSTGRES_DSN=postgres://user:pass@host:5432/db?sslmode=disable to run postgres integration tests")
 	}
 	return dsn
 }

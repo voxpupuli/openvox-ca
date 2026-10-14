@@ -124,7 +124,7 @@ var _ = Describe("Global flag precedence", func() {
 
 	It("prefers an explicit --insecure over the env var and config file", func() {
 		cfgFile := writeTempCtlConfig("insecure: true\n")
-		setCtlEnv("PUPPET_CA_CTL_INSECURE", "true")
+		setCtlEnv("OPENVOX_CA_CTL_INSECURE", "true")
 
 		runProbe(cfgFile, "--insecure=false")
 
@@ -134,7 +134,7 @@ var _ = Describe("Global flag precedence", func() {
 
 	It("prefers an explicit --ca-cert over the env var and config file", func() {
 		cfgFile := writeTempCtlConfig("ca_cert: /from/file.pem\n")
-		setCtlEnv("PUPPET_CA_CTL_CA_CERT", "/from/env.pem")
+		setCtlEnv("OPENVOX_CA_CTL_CA_CERT", "/from/env.pem")
 
 		runProbe(cfgFile, "--ca-cert", "/from/cli.pem")
 
@@ -147,7 +147,7 @@ var _ = Describe("Global flag precedence", func() {
 	// Changed, so the overlay assigns the empty value instead of skipping it.
 	It("lets an empty --ca-cert clear the config file value", func() {
 		cfgFile := writeTempCtlConfig("ca_cert: /from/file.pem\n")
-		setCtlEnv("PUPPET_CA_CTL_CA_CERT", "/from/env.pem")
+		setCtlEnv("OPENVOX_CA_CTL_CA_CERT", "/from/env.pem")
 
 		runProbe(cfgFile, "--ca-cert=", "--insecure")
 
@@ -167,8 +167,8 @@ var _ = Describe("Global flag precedence", func() {
 	// flag's zero value would clobber the env var and config file below.
 	It("falls back to the env var when the flag is unset", func() {
 		cfgFile := writeTempCtlConfig("insecure: false\nca_cert: /from/file.pem\n")
-		setCtlEnv("PUPPET_CA_CTL_INSECURE", "true")
-		setCtlEnv("PUPPET_CA_CTL_CA_CERT", "/from/env.pem")
+		setCtlEnv("OPENVOX_CA_CTL_INSECURE", "true")
+		setCtlEnv("OPENVOX_CA_CTL_CA_CERT", "/from/env.pem")
 
 		runProbe(cfgFile)
 
@@ -185,10 +185,10 @@ var _ = Describe("Global flag precedence", func() {
 	It("prefers the other explicit flags over the env var and config file", func() {
 		cfgFile := writeTempCtlConfig(
 			"server_url: https://from-file:8140\nclient_cert: /from/file.pem\nclient_key: /from/file-key.pem\nverbose: true\n")
-		setCtlEnv("PUPPET_CA_CTL_SERVER_URL", "https://from-env:8140")
-		setCtlEnv("PUPPET_CA_CTL_CLIENT_CERT", "/from/env.pem")
-		setCtlEnv("PUPPET_CA_CTL_CLIENT_KEY", "/from/env-key.pem")
-		setCtlEnv("PUPPET_CA_CTL_VERBOSE", "true")
+		setCtlEnv("OPENVOX_CA_CTL_SERVER_URL", "https://from-env:8140")
+		setCtlEnv("OPENVOX_CA_CTL_CLIENT_CERT", "/from/env.pem")
+		setCtlEnv("OPENVOX_CA_CTL_CLIENT_KEY", "/from/env-key.pem")
+		setCtlEnv("OPENVOX_CA_CTL_VERBOSE", "true")
 
 		runProbe(cfgFile,
 			"--server-url", "https://from-cli:8140",
@@ -212,12 +212,12 @@ var _ = Describe("Global flag precedence", func() {
 	// covers the false direction end to end.
 	It("lets the env var switch insecure back off over the config file", func() {
 		cfgFile := writeTempCtlConfig("insecure: true\n")
-		setCtlEnv("PUPPET_CA_CTL_INSECURE", "false")
+		setCtlEnv("OPENVOX_CA_CTL_INSECURE", "false")
 
 		runProbe(cfgFile)
 
 		Expect(globalInsecure).To(BeFalse(),
-			"Insecure = true; want PUPPET_CA_CTL_INSECURE=false to beat the config file")
+			"Insecure = true; want OPENVOX_CA_CTL_INSECURE=false to beat the config file")
 	})
 
 	It("falls back to the config file when neither the flag nor the env var is set", func() {

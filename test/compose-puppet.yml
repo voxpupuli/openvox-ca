@@ -47,7 +47,7 @@ services:
     # silently dropped. Checking a file would not work on the Redis stack,
     # which runs this same script against a backend that has no cadir.
     environment:
-      PUPPET_CA_METRICS_LISTEN: ":9140"
+      OPENVOX_CA_METRICS_LISTEN: ":9140"
     expose:
       - "8140"
       - "9140"
@@ -78,8 +78,8 @@ services:
     environment:
       # entrypoint.sh uses PUPPET_FQDN as the cert CN so it is predictable.
       - PUPPET_FQDN=puppet-master
-      - PUPPET_CA_HOST=openvox-ca
-      - PUPPET_CA_PORT=8140
+      - OPENVOX_CA_HOST=openvox-ca
+      - OPENVOX_CA_PORT=8140
       - OPENVOXDB_HOST=openvoxdb
       - OPENVOXDB_PORT=8081
     volumes:
@@ -130,8 +130,8 @@ services:
       OPENVOXSERVER_PORT: "8140"
       CERTNAME: openvoxdb
       # Go CA HTTPS endpoint for cert bootstrap.
-      PUPPET_CA_HOST: openvox-ca
-      PUPPET_CA_PORT: "8140"
+      OPENVOX_CA_HOST: openvox-ca
+      OPENVOX_CA_PORT: "8140"
       OPENVOXDB_POSTGRES_HOSTNAME: postgres
       OPENVOXDB_POSTGRES_PORT: "5432"
       OPENVOXDB_POSTGRES_USER: openvoxdb

@@ -69,7 +69,7 @@ const envDumpDirEnv = "OPENVOX_CA_TEST_ENV_DUMP_DIR"
 
 // launcherStartedEnv is set by the launcher-env child before it calls
 // runLauncher, and refused by it if already set. The children inherit it, so a
-// child that somehow lost PUPPET_CA_ROLE refuses instead of starting a launcher
+// child that somehow lost OPENVOX_CA_ROLE refuses instead of starting a launcher
 // of its own -- each of which would re-exec this test binary in turn.
 const launcherStartedEnv = "OPENVOX_CA_TEST_LAUNCHER_STARTED"
 
@@ -150,8 +150,8 @@ func runPSKChild(role string) int {
 	case "launcher-env":
 		// The launcher and both of its children all land here: spawnChild
 		// re-execs this test binary, and the children inherit pskChildEnv.
-		// PUPPET_CA_ROLE, which spawnChild sets on each child, tells them apart.
-		if role := os.Getenv("PUPPET_CA_ROLE"); role != "" {
+		// OPENVOX_CA_ROLE, which spawnChild sets on each child, tells them apart.
+		if role := os.Getenv("OPENVOX_CA_ROLE"); role != "" {
 			return dumpChildEnv(role)
 		}
 		if os.Getenv(launcherStartedEnv) != "" {
@@ -333,31 +333,31 @@ func capturePSKPipe() func() *os.File {
 var _ = DescribeTable("filterEnv strips exactly the named keys",
 	// Two call sites now -- the launcher's children and the --daemon re-exec --
 	// and no coverage at all. Swapping the key comparison for a prefix match
-	// would strip every PUPPET_CA_* variable from all three children, silently:
+	// would strip every OPENVOX_CA_* variable from all three children, silently:
 	// the CA would come up with none of its configuration and the operator would
 	// have nothing pointing at the cause.
 	func(env []string, keys []string, want []string) {
 		Expect(filterEnv(env, keys...)).To(Equal(want))
 	},
 	Entry("removes a named key and keeps the rest",
-		[]string{"A=1", "PUPPET_CA_ROLE=signer", "B=2"},
-		[]string{"PUPPET_CA_ROLE"},
+		[]string{"A=1", "OPENVOX_CA_ROLE=signer", "B=2"},
+		[]string{"OPENVOX_CA_ROLE"},
 		[]string{"A=1", "B=2"}),
 	Entry("matches the whole key, not a prefix of it",
-		[]string{"PUPPET_CA_ROLE=signer", "PUPPET_CA_ROLE_EXTRA=x"},
-		[]string{"PUPPET_CA_ROLE"},
-		[]string{"PUPPET_CA_ROLE_EXTRA=x"}),
+		[]string{"OPENVOX_CA_ROLE=signer", "OPENVOX_CA_ROLE_EXTRA=x"},
+		[]string{"OPENVOX_CA_ROLE"},
+		[]string{"OPENVOX_CA_ROLE_EXTRA=x"}),
 	Entry("keeps a value containing an equals sign",
-		[]string{"PUPPET_CA_AUTOSIGN=a=b", "PUPPET_CA_DAEMON=1"},
-		[]string{"PUPPET_CA_DAEMON"},
-		[]string{"PUPPET_CA_AUTOSIGN=a=b"}),
+		[]string{"OPENVOX_CA_AUTOSIGN=a=b", "OPENVOX_CA_DAEMON=1"},
+		[]string{"OPENVOX_CA_DAEMON"},
+		[]string{"OPENVOX_CA_AUTOSIGN=a=b"}),
 	Entry("is a no-op when nothing matches",
 		[]string{"A=1"},
-		[]string{"PUPPET_CA_ROLE"},
+		[]string{"OPENVOX_CA_ROLE"},
 		[]string{"A=1"}),
 	Entry("keeps a bare name with no equals sign",
-		[]string{"WEIRD", "PUPPET_CA_ROLE=signer"},
-		[]string{"PUPPET_CA_ROLE"},
+		[]string{"WEIRD", "OPENVOX_CA_ROLE=signer"},
+		[]string{"OPENVOX_CA_ROLE"},
 		[]string{"WEIRD"}),
 )
 
@@ -432,12 +432,12 @@ var _ = Describe("spawnChild and its cleanup", func() {
 			"and so must the PSK pipe's read end")
 
 		// The role and daemon markers the children depend on. Dropping
-		// PUPPET_CA_DAEMON=1 makes each child re-daemonise under --daemon (the
+		// OPENVOX_CA_DAEMON=1 makes each child re-daemonise under --daemon (the
 		// launcher strips the variable from baseEnv but forwards the operator's
 		// own --daemon flag), print "started in background", and exit 0 -- so the
 		// CA never starts, and no other spec notices.
-		Expect(cmd.Env).To(ContainElement("PUPPET_CA_ROLE=signer"))
-		Expect(cmd.Env).To(ContainElement("PUPPET_CA_DAEMON=1"))
+		Expect(cmd.Env).To(ContainElement("OPENVOX_CA_ROLE=signer"))
+		Expect(cmd.Env).To(ContainElement("OPENVOX_CA_DAEMON=1"))
 	})
 
 	It("does not let one child's role overwrite the other's", func() {
@@ -457,8 +457,8 @@ var _ = Describe("spawnChild and its cleanup", func() {
 		// append reallocates and the two children cannot share an array, so the
 		// fixture would prove nothing.
 		shared := filterEnv(
-			[]string{"A=1", "B=2", "PUPPET_CA_ROLE=stale", "PUPPET_CA_DAEMON=stale"},
-			"PUPPET_CA_ROLE", "PUPPET_CA_DAEMON")
+			[]string{"A=1", "B=2", "OPENVOX_CA_ROLE=stale", "OPENVOX_CA_DAEMON=stale"},
+			"OPENVOX_CA_ROLE", "OPENVOX_CA_DAEMON")
 		Expect(cap(shared)-len(shared)).To(Equal(2), "the fixture needs room for both appends")
 
 		first, second, err := signer.Socketpair()
@@ -472,9 +472,9 @@ var _ = Describe("spawnChild and its cleanup", func() {
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(func() { killAndReap(frontendCmd) })
 
-		Expect(signerCmd.Env).To(ContainElement("PUPPET_CA_ROLE=signer"),
+		Expect(signerCmd.Env).To(ContainElement("OPENVOX_CA_ROLE=signer"),
 			"the second spawn must not have rewritten the first child's role")
-		Expect(frontendCmd.Env).To(ContainElement("PUPPET_CA_ROLE=frontend"))
+		Expect(frontendCmd.Env).To(ContainElement("OPENVOX_CA_ROLE=frontend"))
 	})
 
 	It("is safe on a child that was never started", func() {
@@ -824,14 +824,14 @@ var _ = Describe("the environments the launcher builds", func() {
 		"PATH=/usr/bin",
 		"NOTIFY_SOCKET=/run/systemd/notify",
 		"WATCHDOG_USEC=30000000",
-		"PUPPET_CA_CADIR=/var/lib/puppet-ca",
+		"OPENVOX_CA_CADIR=/var/lib/puppet-ca",
 	}
 
 	It("withholds the notification socket from the signer, and nothing else", func() {
 		Expect(signerEnv(base)).To(Equal([]string{
 			"PATH=/usr/bin",
 			"WATCHDOG_USEC=30000000",
-			"PUPPET_CA_CADIR=/var/lib/puppet-ca",
+			"OPENVOX_CA_CADIR=/var/lib/puppet-ca",
 		}))
 	})
 
@@ -839,12 +839,12 @@ var _ = Describe("the environments the launcher builds", func() {
 		// A stale role would make the child adopt a role it was not spawned
 		// for; the socket would make it report readiness for a unit whose main
 		// process has just exited.
-		parent := append([]string{"PUPPET_CA_ROLE=signer", "PUPPET_CA_SIGNER_PSK=stale"}, base...)
+		parent := append([]string{"OPENVOX_CA_ROLE=signer", "OPENVOX_CA_SIGNER_PSK=stale"}, base...)
 
 		Expect(daemonEnv(parent)).To(Equal([]string{
 			"PATH=/usr/bin",
 			"WATCHDOG_USEC=30000000",
-			"PUPPET_CA_CADIR=/var/lib/puppet-ca",
+			"OPENVOX_CA_CADIR=/var/lib/puppet-ca",
 		}))
 	})
 
@@ -900,17 +900,17 @@ var _ = Describe("the environments the launcher builds", func() {
 			Expect(env).NotTo(ContainElement(HavePrefix("VAULT_")))
 		})
 
-		It("keeps everything else, its PUPPET_CA_* configuration included", func() {
+		It("keeps everything else, its OPENVOX_CA_* configuration included", func() {
 			// The guard against the list widening: the frontend reads its own
-			// configuration from PUPPET_CA_*, and keeps the notification socket
+			// configuration from OPENVOX_CA_*, and keeps the notification socket
 			// because it is the one that reports READY=1. The neighbours are the
 			// near misses -- names that extend a withheld one, or carry BAO_ in
 			// the middle -- which a prefix or substring match would also take.
 			kept := append(append([]string(nil), base...),
 				ca.DefaultPassphraseEnvVar+"_FILE=/etc/puppet-ca/passphrase",
 				customVar+"_FILE=/etc/puppet-ca/site-passphrase",
-				"PUPPET_CA_OPENBAO_ADDR=https://openbao.example.com:8200",
-				"PUPPET_CA_OPENBAO_TOKEN_FILE=/run/secrets/openbao-token",
+				"OPENVOX_CA_OPENBAO_ADDR=https://openbao.example.com:8200",
+				"OPENVOX_CA_OPENBAO_TOKEN_FILE=/run/secrets/openbao-token",
 			)
 
 			Expect(frontendEnv(append(append([]string(nil), kept...), secrets...), customVar)).
@@ -968,7 +968,7 @@ var _ = Describe("the environment runLauncher hands each child", func() {
 			ca.DefaultPassphraseEnvVar+"=default-secret",
 			"BAO_TOKEN=bao-token",
 			"VAULT_ADDR=https://openbao.example.com:8200",
-			"PUPPET_CA_CADIR=/var/lib/puppet-ca",
+			"OPENVOX_CA_CADIR=/var/lib/puppet-ca",
 		)
 		cmd.Stdout = &out
 		cmd.Stderr = &out
@@ -996,13 +996,13 @@ var _ = Describe("the environment runLauncher hands each child", func() {
 			"the signer child never reported its environment; launcher output:\n%s", &out)
 
 		frontend := readEnv("frontend")
-		Expect(frontend).To(ContainElements("PUPPET_CA_ROLE=frontend", "PUPPET_CA_CADIR=/var/lib/puppet-ca"))
+		Expect(frontend).To(ContainElements("OPENVOX_CA_ROLE=frontend", "OPENVOX_CA_CADIR=/var/lib/puppet-ca"))
 		Expect(frontend).NotTo(ContainElement(HavePrefix(ca.DefaultPassphraseEnvVar + "=")))
 		Expect(frontend).NotTo(ContainElement(HavePrefix("BAO_")))
 		Expect(frontend).NotTo(ContainElement(HavePrefix("VAULT_")))
 
 		Expect(readEnv("signer")).To(ContainElements(
-			"PUPPET_CA_ROLE=signer",
+			"OPENVOX_CA_ROLE=signer",
 			ca.DefaultPassphraseEnvVar+"=default-secret",
 			"BAO_TOKEN=bao-token",
 			"VAULT_ADDR=https://openbao.example.com:8200",
@@ -1062,7 +1062,7 @@ var _ = Describe("The shipped systemd unit", func() {
 		Expect(watchdog).To(BeNumerically(">=", 2*shortWatchdogWarnBelow))
 	})
 
-	It("does not pin --config, which would disable PUPPET_CA_CONFIG", func() {
+	It("does not pin --config, which would disable OPENVOX_CA_CONFIG", func() {
 		Expect(unit["ExecStart"]).NotTo(ContainSubstring("--config"))
 	})
 

@@ -84,7 +84,7 @@ is the safe way to inspect a CA that will not start.`,
 			ctx := cmd.Context()
 			out := cmd.OutOrStdout()
 
-			resolvedCfgFile := resolveConfigFile(configFile, "PUPPET_CA_CONFIG", "/etc/puppet-ca/config.yaml")
+			resolvedCfgFile := resolveConfigFile(configFile, "OPENVOX_CA_CONFIG", "/etc/puppet-ca/config.yaml")
 			cfg, err := loadServerConfig(resolvedCfgFile)
 			if err != nil {
 				return err

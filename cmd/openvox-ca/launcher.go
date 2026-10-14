@@ -38,7 +38,7 @@ import (
 
 const (
 	// defaultShutdownDrain is the frontend's graceful HTTP-drain budget when the
-	// operator has not set shutdown_timeout_sec / PUPPET_CA_SHUTDOWN_TIMEOUT_SEC.
+	// operator has not set shutdown_timeout_sec / OPENVOX_CA_SHUTDOWN_TIMEOUT_SEC.
 	// 25s is chosen so the launcher's derived hard-kill deadline (drain +
 	// launcherShutdownHeadroom = 28s) stays under Kubernetes' 30s default
 	// terminationGracePeriodSeconds, leaving the platform headroom before it
@@ -126,7 +126,7 @@ func runLauncher(cfg *serverConfig, notify *sdnotify.Notifier, hupCh <-chan os.S
 	notify.Status("Starting the isolated signer and frontend processes")
 
 	// Build base environment: strip role/daemon vars to prevent inheritance
-	// loops. PUPPET_CA_SIGNER_PSK is stripped defensively: the PSK travels
+	// loops. OPENVOX_CA_SIGNER_PSK is stripped defensively: the PSK travels
 	// over a pipe, and a variable by that name must never reach a child.
 	// spawnChild clips this before appending to it, so the two children cannot
 	// share a backing array.
@@ -384,8 +384,8 @@ func signerEnv(baseEnv []string) []string {
 // configurable, a value left in the old variable still does not reach the
 // frontend.
 //
-// A targeted list rather than a PUPPET_CA_* prefix filter: the frontend is this
-// binary re-executed, and reads its own configuration from PUPPET_CA_*, so a
+// A targeted list rather than an OPENVOX_CA_* prefix filter: the frontend is this
+// binary re-executed, and reads its own configuration from OPENVOX_CA_*, so a
 // prefix filter would unconfigure an environment-configured deployment. Every
 // BAO_* and VAULT_* variable goes, because the OpenBao client reads its
 // settings from both families and the frontend needs none of them.
@@ -416,7 +416,7 @@ func frontendEnv(baseEnv []string, passphraseVar string) []string {
 // before handing an environment to a child. One list, because the two call sites
 // spelled it out separately and a fourth variable added to one and missed at the
 // other would reach a child stale, with nothing to notice.
-var internalEnvKeys = []string{"PUPPET_CA_ROLE", "PUPPET_CA_DAEMON", "PUPPET_CA_SIGNER_PSK"}
+var internalEnvKeys = []string{"OPENVOX_CA_ROLE", "OPENVOX_CA_DAEMON", "OPENVOX_CA_SIGNER_PSK"}
 
 // pskPipeFn is the pipe constructor spawnChild uses. A variable so a spec can
 // capture the descriptor the helper creates and assert directly that it was
@@ -456,8 +456,8 @@ func spawnChild(exe string, baseEnv []string, role string, sock *os.File, pskHex
 	// protects, which is how a third caller would have reintroduced it.
 	baseEnv = baseEnv[:len(baseEnv):len(baseEnv)]
 	cmd.Env = append(baseEnv,
-		"PUPPET_CA_ROLE="+role,
-		"PUPPET_CA_DAEMON=1",
+		"OPENVOX_CA_ROLE="+role,
+		"OPENVOX_CA_DAEMON=1",
 	)
 	if memLimit := budget.shareFor(role); memLimit > 0 {
 		// Appended *after* baseEnv, which still carries the operator's

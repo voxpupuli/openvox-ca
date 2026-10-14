@@ -46,16 +46,16 @@ import (
 // bare `go test -tags openbao_integration ./...` without the compose service up).
 func liveOpenBaoConfig(t *testing.T, keyName string) openbao.Config {
 	t.Helper()
-	addr := os.Getenv("PUPPET_CA_TEST_OPENBAO_ADDR")
+	addr := os.Getenv("OPENVOX_CA_TEST_OPENBAO_ADDR")
 	if addr == "" {
-		t.Skip("set PUPPET_CA_TEST_OPENBAO_ADDR (see mage test:backendsOpenBao) to run OpenBao integration tests")
+		t.Skip("set OPENVOX_CA_TEST_OPENBAO_ADDR (see mage test:backendsOpenBao) to run OpenBao integration tests")
 	}
 	return openbao.Config{
 		Addr:                addr,
 		KeyName:             keyName,
 		AuthMethod:          openbao.AuthAppRole,
-		AppRoleRoleID:       os.Getenv("PUPPET_CA_TEST_OPENBAO_ROLE_ID"),
-		AppRoleSecretIDFile: os.Getenv("PUPPET_CA_TEST_OPENBAO_SECRET_ID_FILE"),
+		AppRoleRoleID:       os.Getenv("OPENVOX_CA_TEST_OPENBAO_ROLE_ID"),
+		AppRoleSecretIDFile: os.Getenv("OPENVOX_CA_TEST_OPENBAO_SECRET_ID_FILE"),
 	}
 }
 
@@ -64,7 +64,7 @@ func liveOpenBaoConfig(t *testing.T, keyName string) openbao.Config {
 // needs sign/read capability, mirroring the least-privilege policy this
 // project recommends for a production server).
 func TestLiveSignAndVerify(t *testing.T) {
-	cfg := liveOpenBaoConfig(t, envOrDefault("PUPPET_CA_TEST_OPENBAO_KEY_NAME", "test-key"))
+	cfg := liveOpenBaoConfig(t, envOrDefault("OPENVOX_CA_TEST_OPENBAO_KEY_NAME", "test-key"))
 	ctx := context.Background()
 
 	tm, err := openbao.NewTokenManager(ctx, cfg)
@@ -98,7 +98,7 @@ func TestLiveSignAndVerify(t *testing.T) {
 // on first boot" convenience path (KeyProvider.Generate) against a key name
 // that must not already exist, then confirms a subsequent Load sees it.
 func TestLiveGenerateThenLoad(t *testing.T) {
-	cfg := liveOpenBaoConfig(t, envOrDefault("PUPPET_CA_TEST_OPENBAO_GENERATE_KEY_NAME", "test-generate-key"))
+	cfg := liveOpenBaoConfig(t, envOrDefault("OPENVOX_CA_TEST_OPENBAO_GENERATE_KEY_NAME", "test-generate-key"))
 	ctx := context.Background()
 
 	tm, err := openbao.NewTokenManager(ctx, cfg)

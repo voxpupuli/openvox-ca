@@ -110,7 +110,7 @@ before a server exists.`,
 			ctx := cmd.Context()
 			out := cmd.ErrOrStderr()
 
-			resolvedCfgFile := resolveConfigFile(configFile, "PUPPET_CA_CONFIG", "/etc/puppet-ca/config.yaml")
+			resolvedCfgFile := resolveConfigFile(configFile, "OPENVOX_CA_CONFIG", "/etc/puppet-ca/config.yaml")
 			cfg, err := loadServerConfig(resolvedCfgFile)
 			if err != nil {
 				return err
@@ -135,7 +135,7 @@ before a server exists.`,
 			// building a key provider opens an authenticated session to the key
 			// backend, and the frontend is precisely the role barred from doing
 			// that. Refusing after the session was opened would defeat the point.
-			if role := os.Getenv("PUPPET_CA_ROLE"); !roleMayReachCAKey(role) {
+			if role := os.Getenv("OPENVOX_CA_ROLE"); !roleMayReachCAKey(role) {
 				return fmt.Errorf("this process is running as the %q role, which proxies signing to the "+
 					"isolated signer and cannot reach the CA key. Run this on the signer host instead", role)
 			}
@@ -409,7 +409,7 @@ func assertCAUsable(ctx context.Context, myCA *ca.CA, store *storage.StorageServ
 // is about to be issued.
 //
 // crl_url, ocsp_url and logfile are root-command flags as well as config keys,
-// and this command sees only the config file and PUPPET_CA_* environment. A
+// and this command sees only the config file and OPENVOX_CA_* environment. A
 // server configured entirely by flags -- the shipped container image, the
 // compose topology -- is invisible here, so a certificate could silently be
 // minted with no CRL distribution point while the server's own issuance carries

@@ -64,7 +64,7 @@ All global flags can be set via a YAML config file or environment variables. Pre
 The config file is located by checking, in order:
 
 1. `--config /path/to/ctl.yaml` (explicit flag)
-2. `PUPPET_CA_CTL_CONFIG` environment variable
+2. `OPENVOX_CA_CTL_CONFIG` environment variable
 3. `/etc/puppet-ca/ctl.yaml` (auto-detected if the file exists)
 
 **Example `/etc/puppet-ca/ctl.yaml`:**
@@ -82,12 +82,12 @@ verbose:     false
 
 | Flag | Environment variable |
 | --- | --- |
-| `--server-url` | `PUPPET_CA_CTL_SERVER_URL` |
-| `--ca-cert` | `PUPPET_CA_CTL_CA_CERT` |
-| `--client-cert` | `PUPPET_CA_CTL_CLIENT_CERT` |
-| `--client-key` | `PUPPET_CA_CTL_CLIENT_KEY` |
-| `--insecure` | `PUPPET_CA_CTL_INSECURE` |
-| `--verbose` | `PUPPET_CA_CTL_VERBOSE` |
+| `--server-url` | `OPENVOX_CA_CTL_SERVER_URL` |
+| `--ca-cert` | `OPENVOX_CA_CTL_CA_CERT` |
+| `--client-cert` | `OPENVOX_CA_CTL_CLIENT_CERT` |
+| `--client-key` | `OPENVOX_CA_CTL_CLIENT_KEY` |
+| `--insecure` | `OPENVOX_CA_CTL_INSECURE` |
+| `--verbose` | `OPENVOX_CA_CTL_VERBOSE` |
 
 ## Subcommands
 
@@ -286,7 +286,7 @@ See [running a second process against a live
 store](storage-backends.md#running-a-second-process-against-a-live-store).
 
 All four read the **server's** configuration, not `openvox-ca-ctl`'s: `--config`, or
-`PUPPET_CA_CONFIG`, defaulting to `/etc/puppet-ca/config.yaml`. A working
+`OPENVOX_CA_CONFIG`, defaulting to `/etc/puppet-ca/config.yaml`. A working
 `ctl.yaml` has no effect on them. `--cadir` overrides the configured storage
 directory for a one-off run.
 
@@ -331,7 +331,7 @@ than bootstrap over the key your parent CA is in the middle of signing. This
 holds for every `ca_key_provider`, including the default. Run the two steps
 together, or stop the service while you do.
 
-> **These subcommands read the config file and `PUPPET_CA_*` environment only.**
+> **These subcommands read the config file and `OPENVOX_CA_*` environment only.**
 > The server's storage and key-provider flags (`--storage-backend`, `--sql-dsn`,
 > `--ca-key-provider`, `--openbao-*`, `--encrypt-ca-key`, …) belong to the server
 > command itself and are not available here, so a server configured entirely by
@@ -342,7 +342,7 @@ together, or stop the service while you do.
 > key. All four commands therefore print the config file, storage backend and
 > key provider they resolved before doing anything — check those lines match the
 > server. If your server is configured by flags, mirror the storage and
-> key-provider settings into the config file or `PUPPET_CA_*` environment for
+> key-provider settings into the config file or `OPENVOX_CA_*` environment for
 > these commands.
 >
 > `generate` extends this to the settings that shape or record what it issues:
@@ -359,7 +359,7 @@ together, or stop the service while you do.
 > included — mirror `logfile` before running it.
 >
 > `promote_cn_to_san` needs no mirroring: it has no flag, so the config file and
-> `PUPPET_CA_*` are its only sources — the same two this command reads, and it
+> `OPENVOX_CA_*` are its only sources — the same two this command reads, and it
 > cannot diverge from the server. It is still printed in the pre-flight, because
 > it decides what a run without `--dns` produces.
 >
