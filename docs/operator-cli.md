@@ -1067,7 +1067,8 @@ reporting.
 
 If **no HMAC key is stored and no integrity value is either**, there is nothing
 to rebuild and the command refuses. This CA never initialised integrity;
-starting the server establishes a baseline.
+starting the server establishes a baseline, at `WARN` unless the store is brand
+new (an empty inventory and no CRL).
 
 If **no HMAC key is stored but an integrity value still is**, the command
 refuses differently, and the difference matters: no key can reproduce that
@@ -1084,7 +1085,8 @@ and stops. Nothing has been written that could disagree with the inventory, so
 this is not tampering. Note what happens next, though: the server's next start
 establishes a baseline over the inventory **as it then stands, without verifying
 it**, which is the same act `--yes-re-bless` gates behind an explicit
-acknowledgement. If you are investigating an integrity failure, inspect the
+acknowledgement, and logs `No inventory HMAC found on an established CA` at
+`WARN` as it does. If you are investigating an integrity failure, inspect the
 entries before starting the server.
 
 If the stored key is the **wrong length**, every existing value was computed

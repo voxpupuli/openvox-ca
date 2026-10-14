@@ -648,13 +648,22 @@ recorded so the control is not credited with more than it does.
    protects, behind the same permissions, so an attacker who can write the
    inventory can usually also read the key and recompute a valid MAC.
 
-   The bypass is in fact cheaper than that. `VerifyInventoryHMAC` treats an
-   **absent** `inventory_hmac` as a first run: it logs `No inventory HMAC found;
-   initializing integrity baseline` at `Info` level and computes a fresh value
-   over whatever the inventory currently contains. Tampering with the inventory
-   and unlinking one blob is therefore sufficient — the key need not be read at
-   all, and no restart is strictly needed. Absence is indistinguishable from a
-   first run, so the control's own initialisation path is the bypass.
+   The bypass is in fact cheaper than that. `VerifyInventoryHMAC` meets an
+   **absent** `inventory_hmac` by computing a fresh value over whatever the
+   inventory currently contains. Tampering with the inventory and unlinking one
+   blob is therefore sufficient — the key need not be read at all, and no
+   restart is strictly needed. The value alone cannot tell absence from a first
+   run, so the rest of the store decides how loudly this happens: only an empty
+   inventory with no CRL stored — the state `CA.Init` verifies on its very first
+   start, before it bootstraps or seeds the CA — logs `No inventory HMAC found;
+   initializing integrity baseline` at `Info`. Anything else logs `No inventory
+   HMAC found on an established CA` at `Warn`, a CA that has signed nothing
+   included, since bootstrapping writes the CRL. That makes the bypass visible,
+   not closed: an attacker who also empties the inventory and deletes the CRL
+   gets the `Info` line, and the value is re-baselined either way. The `Warn` is
+   also expected once without any tampering — on the first start after adopting
+   a cadir from OpenVox Server, after migrating from a store that never had a
+   value, and after an etcd or Redis legacy inventory is decomposed (below).
 
    Which verifier gets there first matters. `verifyInventoryHMACLocked` — reached
    from `CA.Init`, `ReadInventory`, `SubjectForSerial` and the prune path — is
@@ -852,13 +861,14 @@ rather than resolved, and this document does not change the mechanism.
 5. **The absent-integrity-blob path** cannot distinguish "never had one" from
    "had one and it is now missing", which on an established CA means a partial
    restore, a deletion, or the absent-value bypass in out-of-scope item 1. The two verifiers
-   report it differently: `verifyInventoryHMACLocked` re-baselines and logs at
-   `Info`, while `compareInventoryMACLocked` logs at `Warn` and writes nothing.
+   report it differently: `verifyInventoryHMACLocked` re-baselines, logging at
+   `Warn` unless the store looks brand new (out-of-scope item 1 has the test),
+   while `compareInventoryMACLocked` logs at `Warn` and writes nothing.
    So on a shared backend, where the resync tick runs, a deleted integrity blob
    produces a repeating warning worth alerting on. The two backends without a
    tick then diverge in opposite directions: on filesystem, if an issuance
    reaches the store before any verifying read, the append silently rewrites the
-   value and there is no record at all, not even the `Info` line; on SQLite the
+   value and there is no record at all, not even the re-baseline line; on SQLite the
    same issuance chains onto the absent predecessor and leaves the permanent
    mismatch described in out-of-scope item 1. That one fails the next start and
    logs the `inventory HMAC mismatch; integrity check failed` warning with
@@ -868,7 +878,8 @@ rather than resolved, and this document does not change the mechanism.
 6. **Some of this is pinned by a spec and some is not**, and the split is worth
    knowing before relying on any of it. Asserted: both arms of the absent-value
    behaviour — the re-baseline by `storage_test.go`'s "initializes HMAC baseline
-   when no HMAC file exists yet", the non-writing compare by
+   when no HMAC file exists yet", and its `Info` or `Warn` on each branch, on
+   both schemes, by `inventory_baseline_test.go`; the non-writing compare by
    `sql_inventory_test.go`'s "accepts a missing stored value without writing
    one" — the backend gate on the resync tick, the periodic path's not failing
    closed, both halves of the ordering gap reporting their failure rather than
@@ -893,6 +904,6 @@ rather than resolved, and this document does not change the mechanism.
    that `LatestSerialForSubject` verifies on a blob backend, so a refactor
    giving it an unverified fast path would leave that paragraph half wrong.
    Also unasserted: the migration laundering above, the
-   `Info`/`Warn` levels of the quoted messages, and the `scheme` attribute on the
+   level of the non-writing compare's message, and the `scheme` attribute on the
    mismatch warning. A change to any of these would leave this section quietly
    wrong rather than failing a build.
