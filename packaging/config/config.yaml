@@ -1,6 +1,6 @@
 # Configuration for a packaged openvox-ca, installed as
 # /etc/puppet-ca/config.yaml -- the path the server auto-detects, which is why
-# the unit passes no --config and PUPPET_CA_CONFIG still works in a drop-in.
+# the unit passes no --config and OPENVOX_CA_CONFIG still works in a drop-in.
 #
 # Yours to edit. Both packages mark it as a configuration file, so neither
 # `apt upgrade` nor `dnf update` will overwrite your changes; an upgrade whose
@@ -79,7 +79,7 @@ tls_key: /etc/puppetlabs/puppet/ssl/private_keys/openvox-ca-server.pem
 # this file rather than each declaring it, so there is one number to change.
 #
 # It is set HERE, in a configuration file, rather than as `--port` in the unit
-# or PUPPET_CA_PORT in the environment, and that is not a stylistic choice.
+# or OPENVOX_CA_PORT in the environment, and that is not a stylistic choice.
 # The server resolves the port as config file, then environment, then flag
 # (cmd/openvox-ca/config.go applyServerEnv, then the Changed("port") override
 # in main.go), so a value in the unit or the environment would beat this file

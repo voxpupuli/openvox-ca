@@ -18,10 +18,10 @@ set -euo pipefail
 CA_DIR=/data
 # Each replica gets its own service-cert subject so they can be addressed
 # individually for direct-replica tests, while sharing the same CA identity
-# (CA cert/key) via the shared Redis backend. PUPPET_CA_HOSTNAME defaults to
+# (CA cert/key) via the shared Redis backend. OPENVOX_CA_HOSTNAME defaults to
 # "openvox-ca" for the single-replica case.
-HOSTNAME_FOR_TLS="${PUPPET_CA_HOSTNAME:-openvox-ca}"
-DNS_ALT_NAMES="${PUPPET_CA_DNS_ALT_NAMES:-${HOSTNAME_FOR_TLS},localhost}"
+HOSTNAME_FOR_TLS="${OPENVOX_CA_HOSTNAME:-openvox-ca}"
+DNS_ALT_NAMES="${OPENVOX_CA_DNS_ALT_NAMES:-${HOSTNAME_FOR_TLS},localhost}"
 TLS_CERT="${CA_DIR}/signed/${HOSTNAME_FOR_TLS}.pem"
 TLS_KEY="${CA_DIR}/private/${HOSTNAME_FOR_TLS}_key.pem"
 
@@ -39,8 +39,8 @@ EOF
 # Authorise sibling CA replicas so they can call admin endpoints on each other
 # during integration tests (e.g. reading certificate_status). Each replica's
 # service cert CN is its own hostname.
-if [ -n "${PUPPET_CA_PEER_HOSTNAMES:-}" ]; then
-    for _peer in $(printf '%s' "${PUPPET_CA_PEER_HOSTNAMES}" | tr ',' ' '); do
+if [ -n "${OPENVOX_CA_PEER_HOSTNAMES:-}" ]; then
+    for _peer in $(printf '%s' "${OPENVOX_CA_PEER_HOSTNAMES}" | tr ',' ' '); do
         printf '%s\n' "$_peer" >> "$SERVERS_FILE"
     done
 fi
@@ -49,8 +49,8 @@ fi
 # The CA's own Redis client retries internally, but waiting here gives a
 # clearer log line and a definite failure mode if the redis container fails
 # to come up at all.
-REDIS_HOST="${PUPPET_CA_REDIS_HOST:-redis}"
-REDIS_PORT="${PUPPET_CA_REDIS_PORT:-6379}"
+REDIS_HOST="${OPENVOX_CA_REDIS_HOST:-redis}"
+REDIS_PORT="${OPENVOX_CA_REDIS_PORT:-6379}"
 echo "Waiting for Redis at ${REDIS_HOST}:${REDIS_PORT}..."
 for _i in $(seq 1 60); do
     if (exec 3<>"/dev/tcp/${REDIS_HOST}/${REDIS_PORT}") 2>/dev/null; then

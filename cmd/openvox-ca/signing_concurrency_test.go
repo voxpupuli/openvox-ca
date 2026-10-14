@@ -93,12 +93,12 @@ var _ = Describe("CA signing-concurrency resolution", func() {
 	})
 
 	Describe("environment layer", func() {
-		It("overlays PUPPET_CA_SIGNING_CONCURRENCY over the file", func() {
+		It("overlays OPENVOX_CA_SIGNING_CONCURRENCY over the file", func() {
 			dir := GinkgoT().TempDir()
 			path := filepath.Join(dir, "openvox-ca.yaml")
 			Expect(os.WriteFile(path, []byte("ca_signing_concurrency: 6\n"), 0o600)).To(Succeed())
 
-			GinkgoT().Setenv("PUPPET_CA_SIGNING_CONCURRENCY", "3")
+			GinkgoT().Setenv("OPENVOX_CA_SIGNING_CONCURRENCY", "3")
 			cfg, err := loadServerConfig(path)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(cfg.CASigningConcurrency).To(Equal(3))

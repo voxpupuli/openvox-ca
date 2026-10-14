@@ -77,13 +77,13 @@ var _ = Describe("CSR rate-limit resolution", func() {
 		var saved func()
 
 		setEnvTemp := func(val string) {
-			prev, had := os.LookupEnv("PUPPET_CA_CSR_RATE_LIMIT")
-			Expect(os.Setenv("PUPPET_CA_CSR_RATE_LIMIT", val)).To(Succeed())
+			prev, had := os.LookupEnv("OPENVOX_CA_CSR_RATE_LIMIT")
+			Expect(os.Setenv("OPENVOX_CA_CSR_RATE_LIMIT", val)).To(Succeed())
 			saved = func() {
 				if had {
-					_ = os.Setenv("PUPPET_CA_CSR_RATE_LIMIT", prev)
+					_ = os.Setenv("OPENVOX_CA_CSR_RATE_LIMIT", prev)
 				} else {
-					_ = os.Unsetenv("PUPPET_CA_CSR_RATE_LIMIT")
+					_ = os.Unsetenv("OPENVOX_CA_CSR_RATE_LIMIT")
 				}
 			}
 			DeferCleanup(func() { saved() })

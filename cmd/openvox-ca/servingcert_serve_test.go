@@ -65,8 +65,8 @@ var _ = Describe("the serve command with a self-provisioned serving certificate"
 	var caDir, servingDir string
 
 	BeforeEach(func() {
-		// Ambient PUPPET_CA_* would outrank the fixture config, so a host with
-		// PUPPET_CA_TLS_CERT exported would test a different command.
+		// Ambient OPENVOX_CA_* would outrank the fixture config, so a host with
+		// OPENVOX_CA_TLS_CERT exported would test a different command.
 		clearServerEnv()
 		caDir = GinkgoT().TempDir()
 		// Outside cadir, which the CA reserves against every file store.

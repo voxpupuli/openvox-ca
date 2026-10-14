@@ -3,7 +3,7 @@
 #
 # Like compose-backends-postgres.yml, this only provides the database the
 # integration tests need (not a full Puppet stack). Bring it up, point
-# PUPPET_CA_TEST_MYSQL_DSN at it, and run:
+# OPENVOX_CA_TEST_MYSQL_DSN at it, and run:
 #
 #   go test -tags mysql_integration ./internal/storage/...
 #

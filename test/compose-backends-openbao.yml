@@ -32,7 +32,7 @@ services:
       # granting it avoids the warning entirely.
       - IPC_LOCK
     ports:
-      # Host 58200 -> container 8200, matching PUPPET_CA_TEST_OPENBAO_ADDR used
+      # Host 58200 -> container 8200, matching OPENVOX_CA_TEST_OPENBAO_ADDR used
       # by the mage target (OpenBao's standard port, "5"-prefixed per the
       # other compose-backends-*.yml files' convention).
       - "58200:8200"

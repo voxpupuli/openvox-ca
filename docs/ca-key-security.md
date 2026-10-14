@@ -70,7 +70,7 @@ which this signer refuses, so such a key is refused at startup, at import and by
 > **Do not run a role process by hand with a descriptor open at fd 3 or fd 4.**
 > The launcher replaces both numbers in the children it spawns, so a descriptor
 > your supervisor or wrapper script leaks is harmless in the default topology. It
-> matters when you set `PUPPET_CA_ROLE` yourself: `execve` preserves every
+> matters when you set `OPENVOX_CA_ROLE` yourself: `execve` preserves every
 > descriptor not marked close-on-exec, so whatever your shell left at fd 4 is what
 > the process finds there. A descriptor that is not a pipe is refused immediately.
 > A *pipe* cannot be told from the launcher's by inspection, so it gets ten
@@ -78,10 +78,10 @@ which this signer refuses, so such a key is refused at startup, at import and by
 > so — and fails at once if it is already at end-of-file or carries anything else.
 
 Because the environment stays readable for the life of the process, the launcher
-also withholds `PUPPET_CA_KEY_PASSPHRASE` from the frontend, along with every
+also withholds `OPENVOX_CA_KEY_PASSPHRASE` from the frontend, along with every
 `BAO_*` and `VAULT_*` variable, which the OpenBao client library reads for itself.
-The signer receives them as before. The rest of the `PUPPET_CA_*` configuration,
-`PUPPET_CA_OPENBAO_*` included, still reaches the frontend, which reads its own
+The signer receives them as before. The rest of the `OPENVOX_CA_*` configuration,
+`OPENVOX_CA_OPENBAO_*` included, still reaches the frontend, which reads its own
 settings from it; the OpenBao credentials among those settings are file paths,
 not the credentials themselves. `--single-process` has no frontend to withhold
 anything from.
@@ -207,7 +207,7 @@ There are two sources, and you must configure one:
 
 1. **`--ca-key-passphrase-file`** / `ca_key_passphrase_file`: reads the first
    line of the specified file.
-2. **`PUPPET_CA_KEY_PASSPHRASE`** environment variable: avoids CLI
+2. **`OPENVOX_CA_KEY_PASSPHRASE`** environment variable: avoids CLI
    `/proc/cmdline` exposure.
    Under the default process split only the signer child receives it; see
    [process isolation](#process-isolation).
@@ -249,11 +249,11 @@ openvox-ca --cadir /var/lib/puppet-ca --encrypt-ca-key \
   --ca-key-passphrase-file /etc/puppet-ca/key-passphrase
 
 # Or via environment variable:
-export PUPPET_CA_KEY_PASSPHRASE="my-secret-passphrase"
+export OPENVOX_CA_KEY_PASSPHRASE="my-secret-passphrase"
 openvox-ca --cadir /var/lib/puppet-ca --encrypt-ca-key
 
 # openvox-ca-ctl setup also supports encryption, and needs a source just the
-# same. It reads PUPPET_CA_KEY_PASSPHRASE from the environment, so the line
+# same. It reads OPENVOX_CA_KEY_PASSPHRASE from the environment, so the line
 # above would carry it; named here instead, because a command copied out of a
 # block should not depend on what came before it:
 openvox-ca-ctl setup --cadir /var/lib/puppet-ca --encrypt-ca-key \

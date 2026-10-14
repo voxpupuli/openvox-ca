@@ -34,16 +34,16 @@ import (
 
 var _ = Describe("OpenBao token lifecycle against a live server", func() {
 	It("revokes the AppRole token it logged in for when closed", func() {
-		addr := os.Getenv("PUPPET_CA_TEST_OPENBAO_ADDR")
+		addr := os.Getenv("OPENVOX_CA_TEST_OPENBAO_ADDR")
 		if addr == "" {
-			Skip("set PUPPET_CA_TEST_OPENBAO_ADDR (see mage test:backendsOpenBao) to run OpenBao integration tests")
+			Skip("set OPENVOX_CA_TEST_OPENBAO_ADDR (see mage test:backendsOpenBao) to run OpenBao integration tests")
 		}
 		tm, err := openbao.NewTokenManager(context.Background(), openbao.Config{
 			Addr:                addr,
-			KeyName:             envOrDefault("PUPPET_CA_TEST_OPENBAO_KEY_NAME", "test-key"),
+			KeyName:             envOrDefault("OPENVOX_CA_TEST_OPENBAO_KEY_NAME", "test-key"),
 			AuthMethod:          openbao.AuthAppRole,
-			AppRoleRoleID:       os.Getenv("PUPPET_CA_TEST_OPENBAO_ROLE_ID"),
-			AppRoleSecretIDFile: os.Getenv("PUPPET_CA_TEST_OPENBAO_SECRET_ID_FILE"),
+			AppRoleRoleID:       os.Getenv("OPENVOX_CA_TEST_OPENBAO_ROLE_ID"),
+			AppRoleSecretIDFile: os.Getenv("OPENVOX_CA_TEST_OPENBAO_SECRET_ID_FILE"),
 		})
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(tm.Close)

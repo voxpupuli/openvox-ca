@@ -27,12 +27,12 @@ import (
 
 // ctlEnvVars is the full list of env vars read by applyCtlEnv.
 var ctlEnvVars = []string{
-	"PUPPET_CA_CTL_SERVER_URL",
-	"PUPPET_CA_CTL_CA_CERT",
-	"PUPPET_CA_CTL_CLIENT_CERT",
-	"PUPPET_CA_CTL_CLIENT_KEY",
-	"PUPPET_CA_CTL_VERBOSE",
-	"PUPPET_CA_CTL_INSECURE",
+	"OPENVOX_CA_CTL_SERVER_URL",
+	"OPENVOX_CA_CTL_CA_CERT",
+	"OPENVOX_CA_CTL_CLIENT_CERT",
+	"OPENVOX_CA_CTL_CLIENT_KEY",
+	"OPENVOX_CA_CTL_VERBOSE",
+	"OPENVOX_CA_CTL_INSECURE",
 }
 
 // setCtlEnv saves the current value of key, sets it to val, and registers a
@@ -49,7 +49,7 @@ func setCtlEnv(key, val string) {
 	})
 }
 
-// clearCtlEnv unsets all PUPPET_CA_CTL_* vars and restores them after the spec.
+// clearCtlEnv unsets all OPENVOX_CA_CTL_* vars and restores them after the spec.
 func clearCtlEnv() {
 	for _, key := range ctlEnvVars {
 		// Empty string is treated as unset by applyCtlEnv; restored via DeferCleanup.
@@ -69,7 +69,7 @@ func writeTempCtlConfig(content string) string {
 // --- resolveConfigFile ---
 
 var _ = Describe("resolveConfigFile", func() {
-	const envKey = "PUPPET_CA_CTL_CONFIG_TEST_RESOLVE"
+	const envKey = "OPENVOX_CA_CTL_CONFIG_TEST_RESOLVE"
 
 	var (
 		dir      string
@@ -199,7 +199,7 @@ verbose: true
 
 		It("prefers the env value over the file value", func() {
 			cfgFile := writeTempCtlConfig("server_url: https://from-file:8140\n")
-			setCtlEnv("PUPPET_CA_CTL_SERVER_URL", "https://from-env:9999")
+			setCtlEnv("OPENVOX_CA_CTL_SERVER_URL", "https://from-env:9999")
 
 			cfg, err := loadCtlConfig(cfgFile)
 			Expect(err).NotTo(HaveOccurred(), "unexpected error")
@@ -236,28 +236,28 @@ var _ = Describe("applyCtlEnv", func() {
 			Expect(check(cfg)).To(BeTrue(),
 				"%s not applied from %s=%s", desc, envKey, envVal)
 		},
-		Entry("SERVER_URL", "PUPPET_CA_CTL_SERVER_URL", "https://myhost:8140",
+		Entry("SERVER_URL", "OPENVOX_CA_CTL_SERVER_URL", "https://myhost:8140",
 			func(c *ctlConfig) bool { return c.ServerURL == "https://myhost:8140" },
 			"ServerURL"),
-		Entry("CA_CERT", "PUPPET_CA_CTL_CA_CERT", "/etc/ssl/ca.pem",
+		Entry("CA_CERT", "OPENVOX_CA_CTL_CA_CERT", "/etc/ssl/ca.pem",
 			func(c *ctlConfig) bool { return c.CACert == "/etc/ssl/ca.pem" },
 			"CACert"),
-		Entry("CLIENT_CERT", "PUPPET_CA_CTL_CLIENT_CERT", "/etc/ssl/cert.pem",
+		Entry("CLIENT_CERT", "OPENVOX_CA_CTL_CLIENT_CERT", "/etc/ssl/cert.pem",
 			func(c *ctlConfig) bool { return c.ClientCert == "/etc/ssl/cert.pem" },
 			"ClientCert"),
-		Entry("CLIENT_KEY", "PUPPET_CA_CTL_CLIENT_KEY", "/etc/ssl/key.pem",
+		Entry("CLIENT_KEY", "OPENVOX_CA_CTL_CLIENT_KEY", "/etc/ssl/key.pem",
 			func(c *ctlConfig) bool { return c.ClientKey == "/etc/ssl/key.pem" },
 			"ClientKey"),
-		Entry("VERBOSE_true", "PUPPET_CA_CTL_VERBOSE", "true",
+		Entry("VERBOSE_true", "OPENVOX_CA_CTL_VERBOSE", "true",
 			func(c *ctlConfig) bool { return c.Verbose },
 			"Verbose=true"),
-		Entry("VERBOSE_1", "PUPPET_CA_CTL_VERBOSE", "1",
+		Entry("VERBOSE_1", "OPENVOX_CA_CTL_VERBOSE", "1",
 			func(c *ctlConfig) bool { return c.Verbose },
 			"Verbose=1"),
-		Entry("INSECURE_true", "PUPPET_CA_CTL_INSECURE", "true",
+		Entry("INSECURE_true", "OPENVOX_CA_CTL_INSECURE", "true",
 			func(c *ctlConfig) bool { return c.Insecure },
 			"Insecure=true"),
-		Entry("INSECURE_1", "PUPPET_CA_CTL_INSECURE", "1",
+		Entry("INSECURE_1", "OPENVOX_CA_CTL_INSECURE", "1",
 			func(c *ctlConfig) bool { return c.Insecure },
 			"Insecure=1"),
 	)
@@ -265,7 +265,7 @@ var _ = Describe("applyCtlEnv", func() {
 	// a malformed VERBOSE value is silently ignored.
 	It("silently ignores a malformed VERBOSE value", func() {
 		clearCtlEnv()
-		setCtlEnv("PUPPET_CA_CTL_VERBOSE", "maybe")
+		setCtlEnv("OPENVOX_CA_CTL_VERBOSE", "maybe")
 
 		cfg := &ctlConfig{}
 		applyCtlEnv(cfg)
@@ -273,10 +273,10 @@ var _ = Describe("applyCtlEnv", func() {
 		Expect(cfg.Verbose).To(BeFalse(), "Verbose changed on bad input: want false")
 	})
 
-	// PUPPET_CA_CTL_INSECURE=false does not set Insecure.
+	// OPENVOX_CA_CTL_INSECURE=false does not set Insecure.
 	It("does not set Insecure when env is 'false'", func() {
 		clearCtlEnv()
-		setCtlEnv("PUPPET_CA_CTL_INSECURE", "false")
+		setCtlEnv("OPENVOX_CA_CTL_INSECURE", "false")
 
 		cfg := &ctlConfig{}
 		applyCtlEnv(cfg)
@@ -287,7 +287,7 @@ var _ = Describe("applyCtlEnv", func() {
 	// a malformed INSECURE value is silently ignored.
 	It("silently ignores a malformed INSECURE value", func() {
 		clearCtlEnv()
-		setCtlEnv("PUPPET_CA_CTL_INSECURE", "maybe")
+		setCtlEnv("OPENVOX_CA_CTL_INSECURE", "maybe")
 
 		cfg := &ctlConfig{}
 		applyCtlEnv(cfg)

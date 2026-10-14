@@ -86,7 +86,7 @@ var _ = Describe("setup subcommand output", func() {
 		// config file and fails the command outright if it cannot be parsed;
 		// on a machine that really runs openvox-ca that resolves to the host's
 		// own /etc/puppet-ca/ctl.yaml. clearCtlEnv does not cover this, because
-		// PUPPET_CA_CTL_CONFIG is deliberately absent from ctlEnvVars -- that
+		// OPENVOX_CA_CTL_CONFIG is deliberately absent from ctlEnvVars -- that
 		// list is the vars applyCtlEnv reads, and the config path is resolved
 		// before them. Only an explicit --config outranks both the environment
 		// variable and the host file.

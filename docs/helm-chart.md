@@ -122,7 +122,7 @@ extraEnv:
       secretKeyRef:
         name: openvox-ca-db
         key: password
-  - name: PUPPET_CA_SQL_DSN
+  - name: OPENVOX_CA_SQL_DSN
     value: postgres://openvox-ca:$(POSTGRES_PASSWORD)@db-rw:5432/openvox-ca?sslmode=verify-full&sslrootcert=/run/secrets/openvox-ca-db-ca/ca.crt
 extraVolumes:
   - name: db-ca
@@ -164,7 +164,7 @@ Reloader annotation described under [TLS](#tls-the-charts-most-important-setting
 restarts them automatically when the mounted Secret changes.
 
 The simplest route for a DSN is to keep all of it in the Secret and set
-`PUPPET_CA_SQL_DSN` itself with `valueFrom.secretKeyRef`. If you splice a
+`OPENVOX_CA_SQL_DSN` itself with `valueFrom.secretKeyRef`. If you splice a
 password in as above, Kubernetes substitutes `$(POSTGRES_PASSWORD)` verbatim,
 so for a URL DSN like this one the Secret must hold the password
 percent-encoded: every character other than a letter, a digit or `-._~`. A
@@ -205,10 +205,10 @@ carries any of these:
 
 | In `config` | Set instead, from a Secret |
 | --- | --- |
-| `etcd_password` | `PUPPET_CA_ETCD_PASSWORD` |
-| `redis_password` | `PUPPET_CA_REDIS_PASSWORD` |
-| `redis_sentinel_password` | `PUPPET_CA_REDIS_SENTINEL_PASSWORD` |
-| `sql_dsn`, when it carries a password | `PUPPET_CA_SQL_DSN` or `sql_dsn_file`, as above |
+| `etcd_password` | `OPENVOX_CA_ETCD_PASSWORD` |
+| `redis_password` | `OPENVOX_CA_REDIS_PASSWORD` |
+| `redis_sentinel_password` | `OPENVOX_CA_REDIS_SENTINEL_PASSWORD` |
+| `sql_dsn`, when it carries a password | `OPENVOX_CA_SQL_DSN` or `sql_dsn_file`, as above |
 
 A `sql_dsn` carries a password when its user part has one
 (`postgres://user:password@…`, `user:password@tcp(…)/…`) or when it has a
@@ -224,7 +224,7 @@ query value, when a port or other colon comes before it; move that one to
 One without a password can stay in `config`. Under a `sqlite` backend, a
 `file:` DSN faces only the `password=` check, since a SQLite path may hold an
 `@`. The chart reads `storage_backend` from `config`, which
-`PUPPET_CA_STORAGE_BACKEND` can override, so any other DSN is still judged as a
+`OPENVOX_CA_STORAGE_BACKEND` can override, so any other DSN is still judged as a
 network one.
 
 With `existingConfigMap` set the chart renders no ConfigMap, so nothing is
@@ -283,7 +283,7 @@ The alternatives, in the same message:
 | --- | --- |
 | `config.tls_cert` / `config.tls_key` | A certificate you mount yourself, via `extraVolumes` |
 | `config.serving_cert` | The CA issues and renews its own, into a Secret or a file pair. The way out of the bootstrap deadlock when the CA key is held at a provider, and the only route that also renews it unattended. Mutually exclusive with every route that sets `tls_cert`/`tls_key` — the two rows around this one, and `tls.existingSecret` — and the chart refuses the combination at install time. A file store must live under `persistence.mountPath` and outside `config.cadir` (both refused at install), in a directory that already exists (discovered at startup, and fatal) — see [Managed certificates](#managed-certificates) |
-| `env` / `extraEnv` — `PUPPET_CA_TLS_CERT` and `PUPPET_CA_TLS_KEY` | The paths come from a Secret at runtime. Environment variables outrank the config file, and the chart counts them |
+| `env` / `extraEnv` — `OPENVOX_CA_TLS_CERT` and `OPENVOX_CA_TLS_KEY` | The paths come from a Secret at runtime. Environment variables outrank the config file, and the chart counts them |
 | `config.no_tls_required: true` | Only behind a proxy that terminates TLS and re-originates it to the pod. Client certificates do not survive that, so mTLS-authenticated endpoints become unreachable |
 | `listen.host: 127.0.0.1` or `localhost` | A sidecar-only deployment. Those two spellings and nothing else: the server tests `net.ParseIP(host).IsLoopback()`, which rejects the bracketed `[::1]`, and it builds its listen address as `host + ":" + port`, which turns a bare `::1` into the unparseable `::1:8140` |
 
@@ -798,7 +798,7 @@ because it cannot see far enough to rule it out:
 | `config.managed_certs` with a `store.secret` | A managed certificate is kept in a Secret, so the CA reads and writes it. A file store needs nothing and mounts nothing |
 | `config.serving_cert` with a `store.secret` | The CA's own serving certificate is kept in a Secret, read and written the same way |
 | `config.openbao.auth_method: kubernetes` | The key provider authenticates with the pod's own token |
-| `PUPPET_CA_OPENBAO_AUTH_METHOD: kubernetes` in `env` or `extraEnv` | Environment variables outrank the config file, so the chart reads those two values too. An empty value is ignored, as the server ignores it |
+| `OPENVOX_CA_OPENBAO_AUTH_METHOD: kubernetes` in `env` or `extraEnv` | Environment variables outrank the config file, so the chart reads those two values too. An empty value is ignored, as the server ignores it |
 | `--openbao-auth-method=kubernetes` in `extraArgs` | Arguments outrank both, and `extraArgs` is appended to the argv the chart builds, so it is readable |
 | An `extraEnv` entry for that variable fed by `valueFrom` | The chart cannot read which method the Secret names, so it assumes the one needing a token |
 | A bare `--openbao-auth-method` in `extraArgs`, with the value in the next element | The chart does not reassemble the separated form, so it assumes the same |
@@ -983,7 +983,7 @@ Two chart facts apply to both:
   only on `helm upgrade` — and both of these files exist precisely to carry
   revocation data that must stay current between upgrades.
 
-`crl_chain_file` can alternatively be fed in as `PUPPET_CA_CRL_CHAIN_FILE`
+`crl_chain_file` can alternatively be fed in as `OPENVOX_CA_CRL_CHAIN_FILE`
 through `env` or `extraEnv`, as can `client_revocation_policy` and
 `client_crl_refresh_interval_sec`. The `client_ca` list itself has no
 environment encoding at all — it is a list of structures, file-only like

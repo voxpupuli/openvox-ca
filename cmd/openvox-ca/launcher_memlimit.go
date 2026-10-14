@@ -106,7 +106,7 @@ const (
 	//
 	// This share does NOT scale with the tree total, so raising the container
 	// limit does not reach the signer. Above roughly that fleet size, raise
-	// PUPPET_CA_MEMORY_RESERVE_SIGNER. Exceeding the share is not fatal --
+	// OPENVOX_CA_MEMORY_RESERVE_SIGNER. Exceeding the share is not fatal --
 	// GOMEMLIMIT is a soft limit, so the signer collects harder during startup
 	// and Init takes longer.
 	defaultSignerReservation = 24 << 20

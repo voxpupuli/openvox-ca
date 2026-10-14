@@ -123,7 +123,7 @@ var _ = Describe("Postgres TLS", Serial, func() {
 		dsn, err = url.Parse(postgresDSNFromEnv())
 		Expect(err).NotTo(HaveOccurred())
 		host = dsn.Hostname()
-		Expect(host).NotTo(BeEmpty(), "PUPPET_CA_TEST_POSTGRES_DSN must name a TCP host for the TLS specs")
+		Expect(host).NotTo(BeEmpty(), "OPENVOX_CA_TEST_POSTGRES_DSN must name a TCP host for the TLS specs")
 
 		trusted = newPGTestCA("openvox-ca test PostgreSQL CA")
 		caFile = filepath.Join(GinkgoT().TempDir(), "pg-ca.pem")

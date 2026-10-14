@@ -476,15 +476,15 @@ var _ = Describe("key-material permissions at startup", func() {
 // and that the config field reaches it. Each of those is a mutation the
 // function-level specs cannot see.
 var _ = Describe("the server's own startup, on key-material permissions", func() {
-	// These drive whole commands, so the loader reads PUPPET_CA_* out of the
-	// developer's own environment unless it is cleared: PUPPET_CA_ROLE or
-	// PUPPET_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS set outside the suite would
+	// These drive whole commands, so the loader reads OPENVOX_CA_* out of the
+	// developer's own environment unless it is cleared: OPENVOX_CA_ROLE or
+	// OPENVOX_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS set outside the suite would
 	// change what these specs assert without failing them.
 	//
 	// clearServerEnv is not enough on its own, and an earlier version of this
-	// comment claimed it was. It deliberately keeps PUPPET_CA_CONFIG, because
+	// comment claimed it was. It deliberately keeps OPENVOX_CA_CONFIG, because
 	// callers use that to pin a fixture -- and none of the commands below passes
-	// --config, so resolveConfigFile falls through to PUPPET_CA_CONFIG and then
+	// --config, so resolveConfigFile falls through to OPENVOX_CA_CONFIG and then
 	// to /etc/puppet-ca/config.yaml. A host with insecure_allow_world_readable_keys
 	// or a non-filesystem storage_backend in that file changes what these
 	// specs do: the refusal specs would start a server and wait out their
@@ -494,7 +494,7 @@ var _ = Describe("the server's own startup, on key-material permissions", func()
 		clearServerEnv()
 		empty := filepath.Join(GinkgoT().TempDir(), "empty-config.yaml")
 		Expect(os.WriteFile(empty, []byte("{}\n"), 0o600)).To(Succeed(), "pin an empty config")
-		GinkgoT().Setenv("PUPPET_CA_CONFIG", empty)
+		GinkgoT().Setenv("OPENVOX_CA_CONFIG", empty)
 	})
 
 	// worldReadableCADir bootstraps a CA and then widens its private key, which
@@ -820,7 +820,7 @@ var _ = Describe("the server's own startup, on key-material permissions", func()
 	DescribeTable("refuses whichever role is started",
 		func(role string) {
 			caDir := worldReadableCADir()
-			GinkgoT().Setenv("PUPPET_CA_ROLE", role)
+			GinkgoT().Setenv("OPENVOX_CA_ROLE", role)
 
 			cmd := newRootCmd()
 			cmd.SetOut(GinkgoWriter)

@@ -140,7 +140,7 @@ func setupLogger(cfg *serverConfig) (*os.File, error) {
 //
 // Nothing else makes that reachable. The child is this same binary re-executed
 // with os.Args, and under `go test` os.Args are the *test* binary's arguments,
-// so a real fork re-runs the whole suite inside itself -- with PUPPET_CA_DAEMON
+// so a real fork re-runs the whole suite inside itself -- with OPENVOX_CA_DAEMON
 // set, which is the one thing that would stop it forking again. The pre-fork
 // sequence is where every refusal an operator can actually see is decided, so
 // leaving it uncoverable was the worse trade.
@@ -760,7 +760,7 @@ func newRootCmd() *cobra.Command {
 			notifier.Status("Loading configuration")
 
 			// --- Config loading (file → env → CLI flags) ---
-			resolved := resolveConfigFile(configFile, "PUPPET_CA_CONFIG", "/etc/puppet-ca/config.yaml")
+			resolved := resolveConfigFile(configFile, "OPENVOX_CA_CONFIG", "/etc/puppet-ca/config.yaml")
 			cfg, err := loadServerConfig(resolved)
 			if err != nil {
 				return err
@@ -872,7 +872,7 @@ func newRootCmd() *cobra.Command {
 			applyOpenBaoFlagOverrides(cmd, cfg, &obFlags)
 			// --- Validation ---
 			if cfg.CADir == "" {
-				return fmt.Errorf("--cadir is required (or set PUPPET_CA_CADIR / cadir in config file)")
+				return fmt.Errorf("--cadir is required (or set OPENVOX_CA_CADIR / cadir in config file)")
 			}
 			if err := cfg.CAKeyProviderConfig.Validate(); err != nil {
 				return err
@@ -891,8 +891,8 @@ func newRootCmd() *cobra.Command {
 
 			// Daemonise only when explicitly requested AND we aren't already the daemon child.
 			// Note: --daemon is intentionally excluded from config file / env var support
-			// because PUPPET_CA_DAEMON is used internally as the fork signal.
-			if daemon && os.Getenv("PUPPET_CA_DAEMON") != "1" {
+			// because OPENVOX_CA_DAEMON is used internally as the fork signal.
+			if daemon && os.Getenv("OPENVOX_CA_DAEMON") != "1" {
 				// The child's stderr is discarded below, so this is the only
 				// place the operator's terminal can see the warning. The child
 				// repeats it into the log it configures.
@@ -947,7 +947,7 @@ func newRootCmd() *cobra.Command {
 					return fmt.Errorf("failed to determine executable: %w", err)
 				}
 				c := exec.Command(exe, os.Args[1:]...) //nolint:gosec // G204: re-execs this same binary (os.Executable) with the operator's own os.Args to daemonize
-				c.Env = append(daemonEnv(os.Environ()), "PUPPET_CA_DAEMON=1")
+				c.Env = append(daemonEnv(os.Environ()), "OPENVOX_CA_DAEMON=1")
 				c.Stdin = nil
 				c.Stdout = nil
 				c.Stderr = nil
@@ -959,7 +959,7 @@ func newRootCmd() *cobra.Command {
 			}
 
 			// --- Role dispatch (key isolation) ---
-			role := os.Getenv("PUPPET_CA_ROLE")
+			role := os.Getenv("OPENVOX_CA_ROLE")
 
 			// SECURITY: an unrecognised role must not fall through. Without this,
 			// a typo -- a stale Environment= line, "fronted", "Frontend" -- skips
@@ -974,7 +974,7 @@ func newRootCmd() *cobra.Command {
 			switch role {
 			case "", "signer", "frontend":
 			default:
-				return fmt.Errorf("unrecognised PUPPET_CA_ROLE %q: expected \"signer\", \"frontend\", or unset", role)
+				return fmt.Errorf("unrecognised OPENVOX_CA_ROLE %q: expected \"signer\", \"frontend\", or unset", role)
 			}
 
 			// --- One running instance, unless the backend can coordinate more ---
@@ -987,7 +987,7 @@ func newRootCmd() *cobra.Command {
 			//
 			// Taken here, before the role dispatch below, because the unit of
 			// exclusion is the *instance* and not the process. With
-			// PUPPET_CA_ROLE unset this is either the launcher, which forks a
+			// OPENVOX_CA_ROLE unset this is either the launcher, which forks a
 			// signer and a frontend that each open the store for themselves, or
 			// the single-process server. Both are one instance. Taking it any
 			// deeper -- in resolveRuntime, the obvious shared place -- would put
@@ -1527,7 +1527,7 @@ func newRootCmd() *cobra.Command {
 
 	f := cmd.Flags()
 	f.StringVar(&configFile, "config", "", "Path to YAML config file (default: /etc/puppet-ca/config.yaml if it exists)")
-	f.StringVar(&caDir, "cadir", "", "Directory for CA storage (or set PUPPET_CA_CADIR)")
+	f.StringVar(&caDir, "cadir", "", "Directory for CA storage (or set OPENVOX_CA_CADIR)")
 	f.StringVar(&autosignVal, "autosign-config", "", "Autosign configuration: 'true', 'false', or path to file/executable")
 	f.StringVar(&host, "host", "0.0.0.0", "Address to listen on")
 	f.IntVar(&port, "port", 8140, "Port to listen on")
@@ -1548,7 +1548,7 @@ func newRootCmd() *cobra.Command {
 	f.StringVar(&metricsListen, "metrics-listen", "", "Address for the Prometheus metrics exporter (e.g. 127.0.0.1:9140 or :9140); empty disables it. Serves /metrics over plain HTTP on a separate listener; restrict to a trusted network as it reveals node hostnames")
 	f.IntVar(&csrRateLimit, "csr-rate-limit", -1, "Max CSR submissions per IP per minute on the public PUT /certificate_request endpoint (0 disables; unset uses the default of 60)")
 	f.IntVar(&caSigningConcurrency, "ca-signing-concurrency", -1, "Max concurrent CA-key signatures across issuance, CRL re-signing and the OCSP responder (0 disables the bound; unset uses max(4, GOMAXPROCS)). Lower it to a remote signer's capacity")
-	f.BoolVar(&encryptCAKey, "encrypt-ca-key", false, "Encrypt the CA private key at rest (AES-256-GCM + Argon2id). Requires a passphrase source: --ca-key-passphrase-file or PUPPET_CA_KEY_PASSPHRASE")
+	f.BoolVar(&encryptCAKey, "encrypt-ca-key", false, "Encrypt the CA private key at rest (AES-256-GCM + Argon2id). Requires a passphrase source: --ca-key-passphrase-file or OPENVOX_CA_KEY_PASSPHRASE")
 	f.BoolVar(&insecureAllowWorldKeys, "insecure-allow-world-readable-keys", false,
 		"Start even when CA key material is readable by every local account, warning loudly instead of refusing. Treat the key as compromised if you need this")
 	f.StringVar(&caKeyPassphraseFile, "ca-key-passphrase-file", "", "Path to file containing the CA key passphrase (first line used)")
@@ -1560,7 +1560,7 @@ func newRootCmd() *cobra.Command {
 	f.StringVar(&redisSentinelMasterName, "redis-sentinel-master-name", "", "Redis Sentinel primary name; set to enable Sentinel-managed failover")
 	f.StringSliceVar(&redisSentinelAddrs, "redis-sentinel-addrs", nil, "Comma-separated Redis Sentinel addresses (e.g. sentinel-0:26379,sentinel-1:26379)")
 	f.StringVar(&redisKeyPrefix, "redis-key-prefix", "", "Redis key namespace for this CA (default: puppet-ca)")
-	f.StringVar(&sqlDSN, "sql-dsn", "", "SQL data source name: a SQLite path ('file:/var/lib/puppet-ca/ca.db') or a PostgreSQL or MySQL connection string (for PostgreSQL over TLS, sslmode=verify-full with sslrootcert). Every local user can read the command line, so give a DSN with a password via --sql-dsn-file, PUPPET_CA_SQL_DSN or sql_dsn in the config file instead")
+	f.StringVar(&sqlDSN, "sql-dsn", "", "SQL data source name: a SQLite path ('file:/var/lib/puppet-ca/ca.db') or a PostgreSQL or MySQL connection string (for PostgreSQL over TLS, sslmode=verify-full with sslrootcert). Every local user can read the command line, so give a DSN with a password via --sql-dsn-file, OPENVOX_CA_SQL_DSN or sql_dsn in the config file instead")
 	f.StringVar(&sqlDSNFile, "sql-dsn-file", "", "Path to a file containing the SQL data source name (first line used), keeping a database password off the command line. Mutually exclusive with --sql-dsn")
 	f.StringVar(&caCertFile, "ca-cert-file", "", "Keep the CA certificate at this local path regardless of storage backend")
 	f.StringVar(&caKeyFile, "ca-key-file", "", "Keep the CA private key at this local path regardless of storage backend")
@@ -1618,7 +1618,7 @@ func warnSQLDSNPasswordOnCommandLine(flags *pflag.FlagSet) {
 		return
 	}
 	slog.Warn("--sql-dsn contains a database password, which any local user can read from the process list; " +
-		"use --sql-dsn-file, PUPPET_CA_SQL_DSN or sql_dsn in the config file instead")
+		"use --sql-dsn-file, OPENVOX_CA_SQL_DSN or sql_dsn in the config file instead")
 }
 
 // registerOpenBaoFlags registers the --ca-key-provider and --openbao-* flags
