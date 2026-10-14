@@ -19,13 +19,25 @@ package ca
 
 import "golang.org/x/sys/unix"
 
-// readOnlyMount reports whether the directory at path is on a filesystem
-// mounted read-only. statfs(2) reports the flags of the mount the path was
-// reached through, so a read-only bind mount -- which is how the kubelet
-// presents a ConfigMap or Secret volume -- counts even when the filesystem
-// beneath it is writable elsewhere. An error is "no": the exemption is never
-// granted on a guess.
-func readOnlyMount(path string) bool {
+// readOnlyMountRoot reports whether the directory at path is the root of a
+// mount that is read-only, which is how the kubelet presents a ConfigMap or
+// Secret volume. Both questions are about the mount as this process sees it:
+// statx(2) says whether path is a mount root, and statfs(2) reports the flags
+// of the mount it was reached through.
+//
+// The mount-root half is what keeps this from exempting everything under a
+// read-only root filesystem, or under a service manager's ProtectSystem=strict,
+// where every directory is read-only here and writable elsewhere. statx only
+// reports mount roots from Linux 5.8, and an older kernel answers "no": the
+// exemption is never granted on a guess, and neither is it granted on an error.
+func readOnlyMountRoot(path string) bool {
+	var stx unix.Statx_t
+	if err := unix.Statx(unix.AT_FDCWD, path, unix.AT_SYMLINK_NOFOLLOW, 0, &stx); err != nil {
+		return false
+	}
+	if stx.Attributes_mask&unix.STATX_ATTR_MOUNT_ROOT == 0 || stx.Attributes&unix.STATX_ATTR_MOUNT_ROOT == 0 {
+		return false
+	}
 	var st unix.Statfs_t
 	if err := unix.Statfs(path, &st); err != nil {
 		return false

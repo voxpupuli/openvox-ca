@@ -2188,10 +2188,23 @@ itself — with the rules of OpenSSH's `StrictModes`:
 3. **Two exemptions from the writable test, for directories only.** A sticky
    directory such as `/tmp` is accepted, because the sticky bit stops other
    users renaming or removing entries they do not own (the entries beneath it
-   are still checked). A directory on a read-only mount is accepted too, because
-   nobody can write through it. Kubernetes needs the second: the kubelet creates
-   the root of a ConfigMap or Secret volume world-writable and mounts it
-   read-only. Ownership is checked in both cases.
+   are still checked). A directory that is itself the root of a read-only mount
+   is accepted too. Kubernetes needs the second: the kubelet creates the root of
+   a ConfigMap or Secret volume world-writable and mounts it read-only.
+   Ownership is checked in both cases.
+
+   The second exemption is limited to the mount's root on purpose. Whether a
+   mount is read-only is a property of the mount as the CA sees it, not of the
+   directory: under the packaged systemd unit's `ProtectSystem=strict`, nearly
+   every directory is read-only to the CA and still writable by host users
+   through their own view of it. Those directories are not mount roots, so they
+   are judged on their mode bits like any other. What the exemption does trust
+   is that nobody but root writes the directory through another mount. That
+   holds for the kubelet's ConfigMap and Secret volumes, and does not hold for
+   an `emptyDir` or host directory that another container or user mounts
+   read-write: keep the plugin in a ConfigMap or Secret. The check needs Linux
+   5.8 or later to recognise a mount root; on an older kernel no directory is
+   exempt, and a ConfigMap-mounted plugin is refused.
 
 At startup a failure refuses to start, naming every entry at fault and what is
 wrong with it. Under `--daemon` the refusal comes before the fork, so it reaches
@@ -2206,11 +2219,13 @@ The executable's SHA-256 is logged at startup for change detection. It is not
 enforced; editing the script takes effect on the next CSR.
 
 `insecure_allow_unsafe_autosign_path` (`--insecure-allow-unsafe-autosign-path`,
-`PUPPET_CA_INSECURE_ALLOW_UNSAFE_AUTOSIGN_PATH`) turns the ownership and
-writable refusals into a startup warning, for both the startup check and the
-check before each run. The path must still lead to a regular file. Use it only
-when the entries it reports are writable by people you would trust to sign
-certificates.
+`PUPPET_CA_INSECURE_ALLOW_UNSAFE_AUTOSIGN_PATH`) stops the ownership and
+writable findings from refusing anything. The CA logs a `WARN` for each one it
+finds at startup (and under `--daemon` prints them to the terminal), and then
+runs the executable regardless. The check before each run still requires the
+path to lead to a regular file, but with the opt-out set it logs nothing about
+an entry that has become unsafe since startup. Use it only when the entries it
+reports are writable by people you would trust to sign certificates.
 
 The allowlist file (a non-executable `--autosign-config` path) is not checked
 this way.

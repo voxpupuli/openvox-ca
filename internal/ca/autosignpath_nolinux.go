@@ -19,7 +19,7 @@
 
 package ca
 
-// readOnlyMount never grants the read-only-mount exemption off Linux. The
-// exemption exists for Kubernetes volumes, and a platform that is not Linux
-// loses nothing by being judged on the mode bits alone.
-func readOnlyMount(string) bool { return false }
+// readOnlyMountRoot never grants the read-only-mount exemption off Linux.
+// The exemption exists for Kubernetes volumes, and a platform that is not
+// Linux loses nothing by being judged on the mode bits alone.
+func readOnlyMountRoot(string) bool { return false }

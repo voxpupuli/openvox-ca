@@ -24,6 +24,7 @@ package ca_test
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"syscall"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -176,6 +177,30 @@ var _ = Describe("ResolveAutosignExecutable", func() {
 			Expect(findings).To(BeEmpty())
 		})
 
+		// Path is built from symlink targets, which the owner of a symlink
+		// chooses; AGENTS.md has such values quoted wherever they reach a
+		// terminal, which the startup refusal does.
+		It("quotes a path, so a newline in a name cannot forge a line", func() {
+			open := mkdirMode(filepath.Join(dir, "evil\nINFO all is well"), 0o777)
+			script := writeExecutable(filepath.Join(open, "autosign"), allowScript, 0o755)
+
+			_, findings, err := ca.ResolveAutosignExecutable(script)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(findings).To(HaveLen(1))
+			Expect(findings[0].String()).NotTo(ContainSubstring("\n"))
+			Expect(ca.FormatAutosignPathFindings(findings)).To(HavePrefix(strconv.Quote(open)))
+		})
+
+		It("quotes a path in the error when it cannot be followed", func() {
+			missing := filepath.Join(dir, "gone\nINFO all is well")
+			Expect(os.Symlink(missing, filepath.Join(dir, "autosign"))).To(Succeed())
+
+			_, _, err := ca.ResolveAutosignExecutable(filepath.Join(dir, "autosign"))
+			Expect(err).To(MatchError(os.ErrNotExist), "quoting must keep the error inspectable")
+			Expect(err.Error()).NotTo(ContainSubstring("\n"))
+			Expect(err.Error()).To(ContainSubstring(strconv.Quote(missing)))
+		})
+
 		It("still judges the file inside a sticky directory", func() {
 			sticky := mkdirMode(filepath.Join(dir, "tmp"), os.ModeSticky|0o777)
 			script := writeExecutable(filepath.Join(sticky, "autosign"), allowScript, 0o757)
@@ -187,9 +212,11 @@ var _ = Describe("ResolveAutosignExecutable", func() {
 	})
 
 	Describe("a path that does not lead to a regular file", func() {
+		// Without its own guard "" would become the working directory and be
+		// refused as a directory, so the message is what proves the guard.
 		It("refuses an empty path", func() {
 			_, _, err := ca.ResolveAutosignExecutable("")
-			Expect(err).To(HaveOccurred())
+			Expect(err).To(MatchError("no autosign executable configured"))
 		})
 
 		It("refuses a path that does not exist", func() {
@@ -209,6 +236,30 @@ var _ = Describe("ResolveAutosignExecutable", func() {
 			_, _, err := ca.ResolveAutosignExecutable(filepath.Join(dir, "a"))
 			Expect(err).To(MatchError(ContainSubstring("more than 40 symlinks")))
 		})
+
+		// The kernel's own limit for a path lookup is 40, so a chain the kernel
+		// would follow is followed here too, and one link more is not.
+		DescribeTable("follows a chain of up to 40 symlinks, and no more",
+			func(links int, ok bool) {
+				script := writeExecutable(filepath.Join(dir, "autosign"), allowScript, 0o755)
+				target := "autosign"
+				for i := range links {
+					name := "link" + strconv.Itoa(i)
+					Expect(os.Symlink(target, filepath.Join(dir, name))).To(Succeed())
+					target = name
+				}
+
+				resolved, _, err := ca.ResolveAutosignExecutable(filepath.Join(dir, target))
+				if ok {
+					Expect(err).NotTo(HaveOccurred())
+					Expect(resolved).To(Equal(script))
+				} else {
+					Expect(err).To(MatchError(ContainSubstring("more than 40 symlinks")))
+				}
+			},
+			Entry("40 links", 40, true),
+			Entry("41 links", 41, false),
+		)
 
 		It("refuses a directory", func() {
 			_, _, err := ca.ResolveAutosignExecutable(dir)
@@ -258,6 +309,20 @@ var _ = Describe("CheckAutosign re-checks the executable before every run", func
 		Expect(os.Remove(link)).To(Succeed())
 		Expect(os.Symlink(allow, link)).To(Succeed())
 		Expect(check(cfg)).To(BeTrue())
+	})
+
+	// The file that runs is the file that was judged: the resolved path is
+	// what is executed, and so what a script sees as $0, not the link the
+	// operator configured.
+	It("executes the resolved file, not the configured symlink", func() {
+		marker := filepath.Join(dir, "argv0")
+		script := writeExecutable(filepath.Join(dir, "autosign"),
+			"#!/bin/sh\nprintf '%s' \"$0\" > '"+marker+"'\nexit 0\n", 0o755)
+		link := filepath.Join(dir, "configured")
+		Expect(os.Symlink(script, link)).To(Succeed())
+
+		Expect(check(ca.AutosignConfig{Mode: "executable", FileOrPath: link})).To(BeTrue())
+		Expect(os.ReadFile(marker)).To(BeEquivalentTo(script))
 	})
 
 	Context("when the path has become replaceable since the last run", func() {

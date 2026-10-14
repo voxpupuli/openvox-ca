@@ -42,7 +42,8 @@ type AutosignConfig struct {
 	// AllowUnsafePath runs the executable even when ResolveAutosignExecutable
 	// reports entries on its path that a third party could replace. Set from
 	// insecure_allow_unsafe_autosign_path; the server warns about each finding
-	// at startup instead.
+	// at startup instead, and the check before each run lets findings through
+	// without logging them -- including ones that appeared after startup.
 	AllowUnsafePath bool
 }
 

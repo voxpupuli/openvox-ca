@@ -20,6 +20,7 @@ package ca
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,8 +39,11 @@ type AutosignPathFinding struct {
 	Reason string      // what is wrong with it, e.g. "group-writable"
 }
 
+// String renders the finding for an operator. The path is quoted: it is built
+// from symlink targets, and the case being reported is one where somebody else
+// may own the symlink and so chose the name, newlines included.
 func (f AutosignPathFinding) String() string {
-	return fmt.Sprintf("%s (%s) is %s", f.Path, f.Mode, f.Reason)
+	return fmt.Sprintf("%q (%s) is %s", f.Path, f.Mode, f.Reason)
 }
 
 // FormatAutosignPathFindings renders findings as one line, for an error or a
@@ -59,9 +63,9 @@ var (
 	// autosignFileOwner returns the uid owning fi, and false where the
 	// platform cannot say.
 	autosignFileOwner = fileOwner
-	// autosignReadOnlyMount reports whether the directory at path sits on a
-	// filesystem mounted read-only.
-	autosignReadOnlyMount = readOnlyMount
+	// autosignReadOnlyMountRoot reports whether the directory at path is the
+	// root of a mount that is read-only.
+	autosignReadOnlyMountRoot = readOnlyMountRoot
 )
 
 // ResolveAutosignExecutable follows path, through every symlink, to the file
@@ -84,18 +88,29 @@ var (
 //     bit stops other users renaming or removing entries they do not own --
 //     and the entries beneath it are still judged. That is what lets a script
 //     live under /tmp.
-//   - A directory on a read-only mount is exempt from the writable test too,
-//     since nobody can write through it. Kubernetes needs this: the kubelet
-//     creates a ConfigMap or Secret volume's root 0777, root-owned and not
-//     sticky, and mounts it read-only. Ownership is still judged.
+//   - A directory that is itself the root of a read-only mount is exempt from
+//     the writable test too. Kubernetes needs this: the kubelet creates a
+//     ConfigMap or Secret volume's root 0777, root-owned and not sticky, and
+//     mounts it read-only into the container. Ownership is still judged.
+//
+// That last exemption is deliberately narrow. Whether a mount is read-only is
+// a property of the mount as this process sees it, not of the directory: a
+// service manager's ProtectSystem=strict makes nearly every directory
+// read-only in the CA's own namespace while every host user can still write
+// it through theirs. Requiring the directory to be the mount's root confines
+// the exemption to the shape the kubelet produces, and away from ordinary
+// directories under a read-only root. What it still trusts is that nobody but
+// root writes that directory through another mount -- true of the kubelet's
+// own backing directory, and not of an emptyDir or host directory that some
+// other container or user mounts read-write.
 //
 // It is called at startup and again before every run, so a symlink repointed
 // after startup -- including the `..data` swap the kubelet makes when a
 // ConfigMap changes -- is followed, and judged, like the original. Executing
 // the path it returns, rather than the configured one, means the file that
-// runs is the file that was judged: between the two, only root or the CA's
-// own user could change any entry on the way, and both can already do
-// anything this check could prevent.
+// runs is the file that was judged: outside that last case, only root or the
+// CA's own user could change any entry between the two, and both can already
+// do anything this check could prevent.
 //
 // Symlink modes are not judged: Linux ignores them. A symlink's owner is.
 func ResolveAutosignExecutable(path string) (string, []AutosignPathFinding, error) {
@@ -109,7 +124,7 @@ func ResolveAutosignExecutable(path string) (string, []AutosignPathFinding, erro
 	if !filepath.IsAbs(abs) {
 		wd, err := os.Getwd()
 		if err != nil {
-			return "", nil, fmt.Errorf("making %s absolute: %w", path, err)
+			return "", nil, fmt.Errorf("making %q absolute: %w", path, err)
 		}
 		abs = wd + string(filepath.Separator) + path
 	}
@@ -133,7 +148,7 @@ func ResolveAutosignExecutable(path string) (string, []AutosignPathFinding, erro
 		if reason == "" {
 			return
 		}
-		if fi.IsDir() && (fi.Mode()&os.ModeSticky != 0 || autosignReadOnlyMount(p)) {
+		if fi.IsDir() && (fi.Mode()&os.ModeSticky != 0 || autosignReadOnlyMountRoot(p)) {
 			return
 		}
 		add(p, fi, reason)
@@ -142,7 +157,7 @@ func ResolveAutosignExecutable(path string) (string, []AutosignPathFinding, erro
 	root := string(filepath.Separator)
 	fi, err := os.Lstat(root)
 	if err != nil {
-		return "", nil, err
+		return "", nil, quotedPathError(err)
 	}
 	judgeOwner(root, fi)
 	judgeWritable(root, fi)
@@ -166,18 +181,18 @@ func ResolveAutosignExecutable(path string) (string, []AutosignPathFinding, erro
 		next := filepath.Join(current, name)
 		fi, err := os.Lstat(next)
 		if err != nil {
-			return "", findings, err
+			return "", findings, quotedPathError(err)
 		}
 		switch {
 		case fi.Mode()&os.ModeSymlink != 0:
 			links++
 			if links > maxAutosignSymlinks {
-				return "", findings, fmt.Errorf("resolving %s: more than %d symlinks", path, maxAutosignSymlinks)
+				return "", findings, fmt.Errorf("resolving %q: more than %d symlinks", path, maxAutosignSymlinks)
 			}
 			judgeOwner(next, fi)
 			target, err := os.Readlink(next)
 			if err != nil {
-				return "", findings, err
+				return "", findings, quotedPathError(err)
 			}
 			if filepath.IsAbs(target) {
 				current = root
@@ -189,24 +204,36 @@ func ResolveAutosignExecutable(path string) (string, []AutosignPathFinding, erro
 			current = next
 		case fi.Mode().IsRegular():
 			if len(pending) > 0 {
-				return "", findings, fmt.Errorf("resolving %s: %s is not a directory", path, next)
+				return "", findings, fmt.Errorf("resolving %q: %q is not a directory", path, next)
 			}
 			judgeOwner(next, fi)
 			judgeWritable(next, fi)
 			current = next
 		default:
-			return "", findings, fmt.Errorf("resolving %s: %s is not a regular file, directory or symlink", path, next)
+			return "", findings, fmt.Errorf("resolving %q: %q is not a regular file, directory or symlink", path, next)
 		}
 	}
 
 	fi, err = os.Lstat(current)
 	if err != nil {
-		return "", findings, err
+		return "", findings, quotedPathError(err)
 	}
 	if !fi.Mode().IsRegular() {
-		return "", findings, fmt.Errorf("%s resolves to %s, which is not a regular file", path, current)
+		return "", findings, fmt.Errorf("%q resolves to %q, which is not a regular file", path, current)
 	}
 	return current, findings, nil
+}
+
+// quotedPathError re-renders an *fs.PathError with its path quoted, for the
+// reason AutosignPathFinding.String quotes one: a path met while following
+// symlinks may have been named by somebody else. The underlying error stays
+// wrapped, so errors.Is(err, fs.ErrNotExist) still answers.
+func quotedPathError(err error) error {
+	var pathErr *fs.PathError
+	if !errors.As(err, &pathErr) {
+		return err
+	}
+	return fmt.Errorf("%s %q: %w", pathErr.Op, pathErr.Path, pathErr.Err)
 }
 
 // splitAutosignPath splits p into its components, dropping the empty ones a

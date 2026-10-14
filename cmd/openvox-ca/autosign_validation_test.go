@@ -19,6 +19,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -174,6 +175,17 @@ var _ = Describe("logAutosignExecutable", func() {
 var _ = Describe("the autosign executable preflight under --daemon", func() {
 	var forked bool
 
+	// These drive whole commands, so pin the environment and the config file
+	// the way keyperms_test.go's startup specs do, for the reasons given
+	// there: none of them passes --config, and an ambient PUPPET_CA_* or a
+	// host /etc/puppet-ca/config.yaml would change what they assert.
+	BeforeEach(func() {
+		clearServerEnv()
+		empty := filepath.Join(GinkgoT().TempDir(), "empty-config.yaml")
+		Expect(os.WriteFile(empty, []byte("{}\n"), 0o600)).To(Succeed(), "pin an empty config")
+		GinkgoT().Setenv("PUPPET_CA_CONFIG", empty)
+	})
+
 	BeforeEach(func() {
 		forked = false
 		orig := startDaemonChild
@@ -240,6 +252,17 @@ var _ = Describe("the autosign executable preflight under --daemon", func() {
 // the test binary. The spec context bounds it, because without the check the
 // server would start serving and never return.
 var _ = Describe("the autosign executable check at startup", func() {
+	// These drive whole commands, so pin the environment and the config file
+	// the way keyperms_test.go's startup specs do, for the reasons given
+	// there: none of them passes --config, and an ambient PUPPET_CA_* or a
+	// host /etc/puppet-ca/config.yaml would change what they assert.
+	BeforeEach(func() {
+		clearServerEnv()
+		empty := filepath.Join(GinkgoT().TempDir(), "empty-config.yaml")
+		Expect(os.WriteFile(empty, []byte("{}\n"), 0o600)).To(Succeed(), "pin an empty config")
+		GinkgoT().Setenv("PUPPET_CA_CONFIG", empty)
+	})
+
 	It("refuses to serve", func(ctx SpecContext) {
 		exe := autosignFixture(0o775, 0o755)
 
@@ -252,4 +275,41 @@ var _ = Describe("the autosign executable check at startup", func() {
 		})
 		Expect(cmd.ExecuteContext(ctx)).To(MatchError(ContainSubstring("refusing to start: autosign executable")))
 	}, SpecTimeout(30*time.Second))
+
+	// Under a service manager there is no --daemon notice, so the startup log
+	// is the only place the opt-out's findings are reported. Driven through
+	// the command, so dropping the call fails here and not only in the
+	// function's own spec. The server is stopped once the record is seen.
+	It("logs what the opt-out let through, and the executable it will run", func(ctx SpecContext) {
+		exe := autosignFixture(0o775, 0o755)
+		logfile := filepath.Join(GinkgoT().TempDir(), "ca.log")
+
+		runCtx, cancel := context.WithCancel(ctx)
+		done := make(chan error, 1)
+		go func() {
+			defer GinkgoRecover()
+			cmd := newRootCmd()
+			cmd.SetOut(GinkgoWriter)
+			cmd.SetErr(GinkgoWriter)
+			cmd.SetArgs([]string{
+				"--cadir", GinkgoT().TempDir(), "--host", "127.0.0.1", "--port", "0", "--single-process",
+				"--logfile", logfile, "--autosign-config", exe, "--insecure-allow-unsafe-autosign-path",
+			})
+			done <- cmd.ExecuteContext(runCtx)
+		}()
+		DeferCleanup(func() {
+			cancel()
+			Eventually(done).WithTimeout(20 * time.Second).Should(Receive())
+		})
+
+		readLog := func() string {
+			data, _ := os.ReadFile(logfile)
+			return string(data)
+		}
+		Eventually(readLog).WithContext(ctx).Should(SatisfyAll(
+			ContainSubstring("INSECURE: insecure_allow_unsafe_autosign_path is set"),
+			ContainSubstring("group-writable"),
+			ContainSubstring("Autosign executable configured"),
+		))
+	}, SpecTimeout(60*time.Second))
 })

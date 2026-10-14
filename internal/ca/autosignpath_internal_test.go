@@ -102,6 +102,16 @@ var _ = Describe("ResolveAutosignExecutable platform judgements", func() {
 			Expect(findings).To(ConsistOf(HaveField("Path", link)))
 		})
 
+		// "/" is judged before the walk starts, and is the one entry no
+		// fixture can create: Lstat("/").Name() is "/".
+		It("judges the root directory too", func() {
+			ownedBy("/", uint32(os.Geteuid())+1, true)
+
+			_, findings, err := ResolveAutosignExecutable(script)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(findings).To(ConsistOf(HaveField("Path", "/")))
+		})
+
 		It("reports an entry whose owner cannot be read", func() {
 			ownedBy("autosign", 0, false)
 
@@ -111,15 +121,17 @@ var _ = Describe("ResolveAutosignExecutable platform judgements", func() {
 		})
 	})
 
-	Describe("a read-only mount", func() {
+	Describe("the root of a read-only mount", func() {
 		readOnly := func(path string) {
-			orig := autosignReadOnlyMount
-			autosignReadOnlyMount = func(p string) bool { return p == path || orig(p) }
-			DeferCleanup(func() { autosignReadOnlyMount = orig })
+			orig := autosignReadOnlyMountRoot
+			autosignReadOnlyMountRoot = func(p string) bool { return p == path || orig(p) }
+			DeferCleanup(func() { autosignReadOnlyMountRoot = orig })
 		}
 
 		// The shape of a Kubernetes ConfigMap or Secret volume: a 0777 root,
-		// not sticky, mounted read-only.
+		// not sticky, mounted read-only. Whether a real directory is such a
+		// root is readOnlyMountRoot's question, pinned in
+		// autosignpath_linux_test.go.
 		It("exempts a world-writable directory from the writable test", func() {
 			Expect(os.Chmod(sub, 0o777)).To(Succeed())
 			readOnly(sub)
@@ -154,13 +166,13 @@ var _ = Describe("ResolveAutosignExecutable platform judgements", func() {
 		})
 	})
 
-	Describe("readOnlyMount", func() {
-		It("does not call a writable temporary directory read-only", func() {
-			Expect(readOnlyMount(dir)).To(BeFalse())
+	Describe("readOnlyMountRoot", func() {
+		It("does not call a writable temporary directory a read-only mount root", func() {
+			Expect(readOnlyMountRoot(dir)).To(BeFalse())
 		})
 
 		It("never grants the exemption for a path it cannot examine", func() {
-			Expect(readOnlyMount(filepath.Join(dir, "missing"))).To(BeFalse())
+			Expect(readOnlyMountRoot(filepath.Join(dir, "missing"))).To(BeFalse())
 		})
 	})
 })

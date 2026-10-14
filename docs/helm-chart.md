@@ -627,7 +627,9 @@ The CA refuses to run a plugin that anyone but root or its own user could
 replace (see [the autosign executable's path](configuration.md#the-autosign-executables-path)).
 A ConfigMap or Secret volume passes as long as the plugin file itself is not
 group- or world-writable: the kubelet owns the volume as root and mounts it
-read-only. Give the file a `defaultMode` (or per-item `mode`) of `0555`, not
+read-only, and the CA accepts the root of a read-only mount (on Linux 5.8 or
+later). An `emptyDir` shared read-write with another container does not get
+that trust. Give the file a `defaultMode` (or per-item `mode`) of `0555`, not
 `0775` or `0777`. A ConfigMap update reaches the CA without a restart, unless
 the plugin is mounted with `subPath`, which the kubelet never updates.
 
