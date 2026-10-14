@@ -129,8 +129,12 @@ service operators restart and kill. Consequences worth knowing:
 - **Lock files are never removed, and deleting one on a live store is
   unsafe** — not merely useless. Unlinking a file another process is blocked on
   lets a third create a fresh inode at that name and take a lock the blocked one
-  is still waiting for, so both then believe they hold it. Empty 0600 files are
-  the cheaper side of that trade. They can be swept while nothing is using the
+  is still waiting for, so both then believe they hold it. Small files, created
+  `0660` in a `0770` directory less the umask, are the cheaper side of that
+  trade. The group write on the directory means a member of the store's group
+  can do this too; it is there so a process running as another uid in that
+  group can create a lock it has never taken
+  ([#493](https://github.com/voxpupuli/openvox-ca/issues/493)). They can be swept while nothing is using the
   store; while anything is, sweeping them silently defeats the exclusion.
 - **The directory grows with the fleet.** One file per distinct lock name means
   `bootstrap`, `crl` — and one per subject, since `subject:<name>` is a lock

@@ -340,11 +340,11 @@ func (l *fileLocks) acquireInstance() (Unlocker, error) {
 	}
 
 	path := filepath.Join(l.dir, fileLockFileName(instanceLockName))
-	if err := os.MkdirAll(l.dir, DirPerm); err != nil {
+	if err := l.makeDir(); err != nil {
 		local.Unlock()
 		return nil, l.unwritableStore(err, "creating same-host lock directory "+l.dir)
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, FilePermPrivate)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, lockFilePerm)
 	if err != nil {
 		local.Unlock()
 		return nil, l.inaccessibleLockFile(err, path)

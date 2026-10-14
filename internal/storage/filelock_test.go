@@ -222,10 +222,12 @@ var _ = Describe("Same-host locking", func() {
 				Expect(e.Name()).To(HaveSuffix(".lock"))
 				Expect(e.Name()).To(HaveLen(64+len(".lock")), "a sha256 hex digest, not the name itself")
 
+				// The exact mode depends on the umask, so it is pinned in
+				// filelock_perms_test.go, which sets one. What holds under any
+				// umask is that the world gets nothing.
 				info, err := e.Info()
 				Expect(err).NotTo(HaveOccurred())
-				Expect(info.Mode().Perm()).To(Equal(os.FileMode(FilePermPrivate)),
-					"docs/storage-backends.md documents these as 0600")
+				Expect(info.Mode().Perm()&0o007).To(BeZero(), "no world access to a lock file")
 			}
 		})
 
@@ -385,6 +387,8 @@ var _ = Describe("Same-host locking", func() {
 				"an unwritable lock directory that already exists is not a read-only store")
 			Expect(err.Error()).To(ContainSubstring("chown"),
 				"the error must tell the operator how to fix it")
+			Expect(err.Error()).To(ContainSubstring("umask that keeps group write"),
+				"and how to avoid it where the uid changes per run and chown is not available (#493)")
 			Expect(err.Error()).To(ContainSubstring("the lock directory "+locks+" is owned by uid"),
 				"and must diagnose the directory, which is the thing to chown here")
 			expectRetryable(b, "bootstrap")

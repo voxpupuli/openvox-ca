@@ -150,8 +150,9 @@ one instance, and the lock catches the case it can.
 ### Running `openvox-ca-ctl` as the service user
 
 - **Run `openvox-ca-ctl` as the user the server runs as**, not under `sudo`.
-  The lock files are `0600` and the directory `0750`, so a command run as root
-  leaves a root-owned lock file in a store the service account owns, and the
+  The lock files are group-accessible at most, but a command run as root
+  still leaves a root-owned lock file the service account cannot open in a
+  store it owns, and the
   server's next acquisition of that name fails — deliberately and loudly, with
   an error naming the file, its owner and `chown -R`, because the alternative is
   it quietly giving up on locking while the root process believes it holds an
@@ -311,7 +312,7 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
 ├── signed/
 │   └── <subject>.pem       issued certificates
 └── locks/
-    └── <hash>.lock         same-host lock files              0600
+    └── <hash>.lock         same-host lock files              0660
 ```
 
 > **`ca_key.pem` is where OpenVox Server keeps its CA key**, so a cadir either
@@ -338,8 +339,9 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
 
 (The directory also holds small internal integrity files; leave them in place.)
 File permissions are fixed: `0600` for `ca_key.pem`, `inventory.txt`, the
-integrity files and `superseded.json`, for anything under `private/` and for
-the lock files under `locks/`; `0644` for certificates, CSRs, `ca_crt.pem`,
+integrity files and `superseded.json`, and for anything under `private/`;
+`0660` for the lock files under `locks/`, and `0770` for `locks/` itself;
+`0644` for certificates, CSRs, `ca_crt.pem`,
 `ca_pub.pem`, `ca_crl.pem` and `serial`. The CRL is world-readable because it is
 public: it is served without authentication, and OpenVox Server writes it
 `0644` too. The inventory is not, because it names every subject this CA has
@@ -865,17 +867,22 @@ will not do, since it never changes the mode of a file it did not create. If you
 do not want it, set a umask: `0077` gives `0600` and nothing in the server
 objects.
 
-Two things that group bit does **not** do, since both have been claimed for it
-here before. It is not what makes a Kubernetes `fsGroup` volume work: the
+That group bit is not what makes a Kubernetes `fsGroup` volume work: the
 kubelet ORs group access in at every mount whatever the file was created as, so
-there the creation mode is irrelevant. And it is not enough to make an
-arbitrary-uid platform work — one assigning the pod a fresh uid per start, such
-as OpenShift. The database would be reachable, but the same restart has to
-reacquire the same-host lock files, and those are created `0600` in a `0750`
-directory, so a new uid fails at the lock before the database mode matters. If
-you run that topology, pin the uid;
-[#493](https://github.com/voxpupuli/openvox-ca/issues/493) tracks what it would
-take to support it.
+there the creation mode is irrelevant.
+
+It is what lets a platform that assigns the pod a fresh uid per start, such as
+OpenShift, reach a SQLite store a previous uid created, provided the uids share
+a group and the umask keeps group write. The same restart has to reacquire the
+same-host locks, so those are created group-accessible too: the files in
+`.<database>.locks/` at `0660` and the directory at `0770`, narrowed by the
+umask the same way. The directory needs group write because each subject's lock
+is a file of its own, created the first time that subject is signed. Under the
+usual `0022` the database comes out `0640` and the locks `0640` in a `0750`
+directory, which a second uid can neither write nor create in, so on such a
+platform run `openvox-ca` under a umask of `0002` or `0007` from the first
+start. The filesystem backend does not work there whatever the umask, because
+its data directories are created without group write, so it needs a stable uid.
 
 **`openvox-ca` never changes the mode of a file it did not create.** Not the
 database, not the sidecars, not the directory holding them. A store whose

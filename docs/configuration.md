@@ -2348,7 +2348,7 @@ See [the status response](api.md#certificate-status) for the exact rendering.
                       the first supersession) — see "Delayed supersession" above
   signed/             Issued certificates
   requests/           Pending CSRs
-  locks/              Same-host lock files (mode 0600; empty but for the store-wide
+  locks/              Same-host lock files (mode 0660; empty but for the store-wide
                       instance lock, which records its holder) — see below
   private/
     {subject}_key.pem       Server-side generated private keys (mode 0600)
@@ -2368,10 +2368,11 @@ store the same logical state elsewhere.
 | Content | Mode |
 | --- | --- |
 | Directories | `0750` |
+| The `locks/` directory | `0770` |
 | Private keys | `0600` |
 | Inventory and its integrity value | `0600` |
 | Pending-supersession list | `0600` |
-| Lock files under `locks/` | `0600` |
+| Lock files under `locks/` | `0660` |
 | Public data (certs, CSRs, CA certificate, CRL) | `0644` |
 
 Blob modes — the private keys, the CRL, the supersession list, the inventory
