@@ -6597,6 +6597,37 @@ config:
 			wants: []string{"kind: Deployment"},
 		},
 		{
+			// docs/helm-chart.md tells a release whose config spells out paths
+			// under another mount point to pin persistence.mountPath to it. The
+			// volume, the cadir derived from it and the containment check all
+			// have to follow the pin, or the documented remedy is refused or
+			// mounts the volume where nothing looks.
+			name:     "a pinned persistence.mountPath moves the mount and the derived cadir",
+			sets:     []string{tls, "persistence.mountPath=/var/lib/puppet-ca"},
+			wants:    []string{"mountPath: /var/lib/puppet-ca\n", "cadir: /var/lib/puppet-ca\n"},
+			notWants: []string{"/var/lib/openvox-ca"},
+		},
+		{
+			// The documented recipe itself: the release's own cadir and serving
+			// pair under the old mount, kept working by the pin alone.
+			name: "config paths under a pinned persistence.mountPath render",
+			sets: []string{"persistence.mountPath=/var/lib/puppet-ca"},
+			valuesYAML: `
+config:
+  cadir: /var/lib/puppet-ca/ca
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      files:
+        cert: /var/lib/puppet-ca/tls.crt
+        key: /var/lib/puppet-ca/tls.key
+`,
+			wants:    []string{"mountPath: /var/lib/puppet-ca\n", "cadir: /var/lib/puppet-ca/ca"},
+			notWants: []string{"/var/lib/openvox-ca"},
+		},
+		{
 			name: "envFrom stops the TLS precondition firing",
 			// envFrom can carry OPENVOX_CA_TLS_CERT/KEY from a Secret the chart
 			// never reads, so the guard has to stand down — with no tls block
@@ -6826,6 +6857,15 @@ config:
 	}
 
 	rejects := []chartRejectCase{
+		{
+			// The must-fail twin of the pinned-mountPath renders: the same
+			// cadir without the pin is outside the volume, which is what the
+			// pin exists to fix. Without this, a template that ignored the pin
+			// and a containment check that ignored the mount would both pass.
+			name:    "a cadir under another mount point is refused without the pin",
+			sets:    []string{tls, "config.cadir=/var/lib/puppet-ca/ca"},
+			wantErr: "outside the volume mounted at \"/var/lib/openvox-ca\"",
+		},
 		{
 			name:    "no TLS on a non-loopback address, which the server refuses to serve",
 			sets:    []string{},
