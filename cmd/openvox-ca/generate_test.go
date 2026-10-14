@@ -256,6 +256,9 @@ var _ = Describe("openvox-ca generate", func() {
 			_, _, err := runGenerate("--cadir", caDir, "--certname", "ca",
 				"--ttl", "1h", "--key-out", keyPath("ca"))
 			Expect(err).To(MatchError(ca.ErrReservedSubject))
+			// Only the preflight adds this prefix; GenerateWithOptions would
+			// refuse too, but after the store is opened.
+			Expect(err).To(MatchError(HavePrefix("--certname: ")))
 			Expect(keyPath("ca")).NotTo(BeAnExistingFile())
 		})
 
