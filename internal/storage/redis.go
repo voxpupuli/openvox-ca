@@ -691,13 +691,29 @@ func (u *redisUnlocker) heartbeat() {
 	}
 }
 
+// Unlock releases the Redis lock if this holder still owns it, then the
+// process-local mutex.
+//
+// A lock that had already been lost -- its TTL ran out, or another holder took
+// it over after a failover -- is still a successful release: there is nothing
+// left to delete, and the unlock script's token check leaves the new holder's
+// lock alone. But it means the critical section may have overlapped another
+// replica's, and the script's 0 is the only sign of that, so it is logged at
+// WARN. The log comes after both releases, so it holds neither lock.
 func (u *redisUnlocker) Unlock() error {
 	u.heartbeatOnce.Do(func() { close(u.stopHeartbeat) })
 	ctx, cancel := context.WithTimeout(context.Background(), u.backend.timeout)
 	defer cancel()
-	_, err := u.backend.unlockScript.Run(ctx, u.backend.client, []string{u.lockKey}, u.token).Result()
+	res, err := u.backend.unlockScript.Run(ctx, u.backend.client, []string{u.lockKey}, u.token).Result()
 	u.local.Unlock()
-	return err
+	if err != nil {
+		return err
+	}
+	if n, ok := res.(int64); ok && n == 0 {
+		slog.Warn("Redis lock was no longer held by this replica when released; its critical section may have overlapped another holder's",
+			"name", u.lockKey)
+	}
+	return nil
 }
 
 // Close releases the underlying Redis client when owned by this backend.
