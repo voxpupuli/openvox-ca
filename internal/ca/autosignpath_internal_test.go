@@ -61,6 +61,18 @@ var _ = Describe("ResolveAutosignExecutable platform judgements", func() {
 		DeferCleanup(func() { autosignFileOwner = orig })
 	}
 
+	// linked makes every entry named name report links hard links.
+	linked := func(name string, links uint64) {
+		orig := autosignFileLinks
+		autosignFileLinks = func(fi os.FileInfo) (uint64, bool) {
+			if fi.Name() == name {
+				return links, true
+			}
+			return orig(fi)
+		}
+		DeferCleanup(func() { autosignFileLinks = orig })
+	}
+
 	Describe("ownership", func() {
 		It("accepts entries owned by root", func() {
 			ownedBy("autosign", 0, true)
@@ -200,7 +212,38 @@ var _ = Describe("ResolveAutosignExecutable platform judgements", func() {
 				Expect(os.Mkdir(filepath.Join(sub, "..data"), 0o755)).To(Succeed())
 				ownedBy("..data", 0, true)
 			}),
+			// A hard link to some other root-owned symlink carries root's
+			// ownership; the kubelet's own ..data never has a second name.
+			Entry("with a root-owned ..data that has a second name", func() {
+				Expect(os.Symlink("elsewhere", filepath.Join(sub, "..data"))).To(Succeed())
+				ownedBy("..data", 0, true)
+				linked("..data", 2)
+			}),
 		)
+
+		// The layout the kubelet's atomic writer really leaves, reached the
+		// way an operator configures it: the plugin's name is a symlink into
+		// ..data, which is a symlink to the current generation's directory.
+		// The walk re-enters the exempt root through it, and passes names
+		// that start with ".." without being "..".
+		It("resolves a plugin through the volume's ..data to its generation", func() {
+			readOnly(sub)
+			gen := filepath.Join(sub, "..2026_10_14_12_00_00.000000000")
+			Expect(os.Mkdir(gen, 0o700)).To(Succeed())
+			Expect(os.Chmod(gen, 0o755)).To(Succeed())
+			plugin := filepath.Join(gen, "plugin")
+			Expect(os.WriteFile(plugin, []byte("#!/bin/sh\nexit 0\n"), 0o700)).To(Succeed())
+			Expect(os.Chmod(plugin, 0o555)).To(Succeed())
+			Expect(os.Symlink(filepath.Base(gen), filepath.Join(sub, "..data"))).To(Succeed())
+			ownedBy("..data", 0, true)
+			Expect(os.Symlink("..data/plugin", filepath.Join(sub, "plugin"))).To(Succeed())
+			Expect(os.Chmod(sub, 0o777)).To(Succeed())
+
+			resolved, findings, err := ResolveAutosignExecutable(filepath.Join(sub, "plugin"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(findings).To(BeEmpty())
+			Expect(resolved).To(Equal(plugin))
+		})
 
 		It("needs the read-only mount root as well as the ..data", func() {
 			Expect(os.Symlink("elsewhere", filepath.Join(sub, "..data"))).To(Succeed())

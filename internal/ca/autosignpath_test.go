@@ -22,6 +22,8 @@
 package ca_test
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -30,6 +32,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/storage"
+	"github.com/voxpupuli/openvox-ca/internal/testutil"
 )
 
 // realTempDir returns a fresh temporary directory by its real path, so that
@@ -370,9 +374,72 @@ var _ = Describe("CheckAutosign re-checks the executable before every run", func
 		})
 	})
 
+	// A script whose #! interpreter is missing fails to exec with the same
+	// ENOENT as a missing script, after the retry has resolved and judged it
+	// again. The error names both paths and the likelier cause.
+	It("names the configured and resolved paths, and the interpreter, when exec fails", func() {
+		script := writeExecutable(filepath.Join(dir, "autosign"), "#!/nonexistent/interpreter\nexit 0\n", 0o755)
+		link := filepath.Join(dir, "configured")
+		Expect(os.Symlink(script, link)).To(Succeed())
+
+		ok, err := check(ca.AutosignConfig{Mode: "executable", FileOrPath: link})
+		Expect(ok).To(BeFalse())
+		Expect(err).To(MatchError(os.ErrNotExist), "still inspectable")
+		Expect(err.Error()).To(ContainSubstring("running autosign executable " + link))
+		Expect(err.Error()).To(ContainSubstring("resolved to " + strconv.Quote(script)))
+		Expect(err.Error()).To(ContainSubstring("the interpreter its #! line names"))
+	})
+
 	It("refuses a configured path that no longer exists", func() {
 		ok, err := check(ca.AutosignConfig{Mode: "executable", FileOrPath: filepath.Join(dir, "gone")})
 		Expect(err).To(MatchError(os.ErrNotExist))
 		Expect(ok).To(BeFalse())
+	})
+})
+
+// Through SaveRequest, which is where an operator meets a refusal: the CSR is
+// saved before autosigning is consulted, so a refused run leaves it pending,
+// and the agent's resubmission is then a duplicate -- which is why the docs
+// tell operators to sign or clean those requests by hand.
+var _ = Describe("SaveRequest when the autosign executable is refused", func() {
+	It("saves the CSR unsigned, and refuses the resubmission as a duplicate", func() {
+		ctx := context.Background()
+		storeDir := GinkgoT().TempDir()
+		store := storage.New(storeDir)
+		Expect(store.EnsureDirs(ctx)).To(Succeed())
+		Expect(store.SaveCAKey(ctx, cachedKeyPEM)).To(Succeed())
+		Expect(store.SaveCACert(ctx, cachedCrtPEM)).To(Succeed())
+		Expect(store.UpdateCRL(ctx, cachedCrlPEM)).To(Succeed())
+		Expect(store.WriteSerial(ctx, "0001")).To(Succeed())
+		Expect(store.TouchInventory(ctx)).To(Succeed())
+
+		plugins := mkdirMode(filepath.Join(realTempDir(), "plugins"), 0o755)
+		marker := filepath.Join(plugins, "ran")
+		script := writeExecutable(filepath.Join(plugins, "autosign"),
+			"#!/bin/sh\ntouch '"+marker+"'\nexit 0\n", 0o775)
+
+		myCA := ca.New(store, ca.AutosignConfig{Mode: "executable", FileOrPath: script}, "puppet.test")
+		Expect(myCA.Init(ctx)).To(Succeed())
+
+		const subject = "refused-node"
+		csrPEM, err := testutil.GenerateCSR(subject)
+		Expect(err).NotTo(HaveOccurred())
+
+		signed, err := myCA.SaveRequest(ctx, subject, csrPEM)
+		Expect(err).To(MatchError(ContainSubstring("refusing to run autosign executable")))
+		Expect(err).To(MatchError(ContainSubstring("group-writable")))
+		Expect(signed).To(BeFalse())
+		Expect(marker).NotTo(BeAnExistingFile(), "the refused plugin must not have run")
+
+		Expect(store.GetCSR(ctx, subject)).To(Equal(csrPEM), "the CSR is saved, pending")
+		_, err = store.GetCert(ctx, subject)
+		Expect(err).To(HaveOccurred(), "and not signed")
+
+		again, err := testutil.GenerateCSR(subject)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = myCA.SaveRequest(ctx, subject, again)
+		var dup *ca.DuplicateCertError
+		Expect(errors.As(err, &dup)).To(BeTrue(), "want a *DuplicateCertError, got %T: %v", err, err)
+		Expect(dup.State).To(Equal(ca.DuplicateRequested))
 	})
 })

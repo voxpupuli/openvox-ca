@@ -184,7 +184,16 @@ func runAutosignExecutable(cfg AutosignConfig, resolved string, timeout time.Dur
 			}
 			return false, nil
 		}
-		return false, err
+		// Named both ways: the configured path is what the operator knows,
+		// and the resolved one may be a kubelet generation directory that
+		// has since gone. A file that is present but whose #! interpreter is
+		// not fails with the same error as a file that is missing, and in a
+		// container image that is the likelier of the two.
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, fmt.Errorf("running autosign executable %s (resolved to %q): it, or the interpreter its #! line names, does not exist: %w",
+				cfg.FileOrPath, resolved, err)
+		}
+		return false, fmt.Errorf("running autosign executable %s (resolved to %q): %w", cfg.FileOrPath, resolved, err)
 	}
 
 	return true, nil

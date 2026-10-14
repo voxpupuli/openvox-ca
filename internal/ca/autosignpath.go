@@ -66,6 +66,9 @@ var (
 	// autosignReadOnlyMountRoot reports whether the directory at path is the
 	// root of a mount that is read-only.
 	autosignReadOnlyMountRoot = readOnlyMountRoot
+	// autosignFileLinks returns fi's hard-link count, and false where the
+	// platform cannot say.
+	autosignFileLinks = fileLinks
 )
 
 // ResolveAutosignExecutable follows path, through every symlink, to the file
@@ -232,12 +235,20 @@ func ResolveAutosignExecutable(path string) (string, []AutosignPathFinding, erro
 // The mount must be read-only and dir its root (autosignReadOnlyMountRoot),
 // and the symlink must be root's, so that nobody else can make an ordinary
 // directory look like a volume by planting one.
+//
+// It must also have exactly one link. The writer creates ..data with
+// symlink(2) and rename(2), so a genuine one never has another name; a
+// hard link to some other root-owned symlink would carry root's ownership
+// with it, and a kernel with fs.protected_hardlinks=0 lets anyone make one.
 func kubeletVolumeRoot(dir string) bool {
 	if !autosignReadOnlyMountRoot(dir) {
 		return false
 	}
 	fi, err := os.Lstat(filepath.Join(dir, "..data"))
 	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		return false
+	}
+	if links, ok := autosignFileLinks(fi); !ok || links != 1 {
 		return false
 	}
 	owner, ok := autosignFileOwner(fi)

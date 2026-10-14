@@ -25,3 +25,7 @@ import "os"
 // autosign executable's path is reported, and the operator has to opt out to
 // run one at all.
 func fileOwner(os.FileInfo) (uint32, bool) { return 0, false }
+
+// fileLinks cannot read a link count on this platform, so no directory is
+// taken for a kubelet volume.
+func fileLinks(os.FileInfo) (uint64, bool) { return 0, false }
