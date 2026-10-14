@@ -816,10 +816,13 @@ Four things about that are easy to get wrong:
   The chart refuses `dnsPolicy: Default` while `dns.to` names only the
   kube-dns pods, since every lookup would then be dropped.
 
-  The rule allows port 53, and network plugins generally match it against the
-  DNS pod's own port rather than the Service's, so a resolver listening on
-  another port needs an `egress.rules` entry for that port too. An empty list
-  allows DNS to any destination.
+  The rule allows port 53, and network plugins generally match it after the
+  DNS Service's address has been translated to a pod's: that is why a pod
+  selector can name CoreDNS at all, and why a resolver listening on another
+  port needs an `egress.rules` entry for that port too. A resolver on the host
+  network, such as a node-local cache or DNS served by the node itself, is not
+  a pod, so no pod selector matches it and it needs an `ipBlock`. An empty
+  list allows DNS to any destination.
 
 - **The policy governs the whole pod, not the server container.** A
   `NetworkPolicy` selects pods, so every `initContainers` and `extraContainers`
