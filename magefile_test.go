@@ -2616,6 +2616,17 @@ var _ = Describe("verifyChartBackendAliases", func() {
 		)))
 	})
 
+	// The template keeps the last `set` for a kind; a union of the two lines
+	// would pass the table below although sqlite3 no longer folds.
+	It("refuses a kind set more than once", func() {
+		err := verifyChartBackendAliasesIn(
+			tpl("{{- $_ := set $kinds \"filesystem\" (list \"\" \"filesystem\" \"fs\") -}}\n"+
+				"{{- $_ := set $kinds \"sqlite\" (list \"sqlite\" \"sqlite3\") -}}\n"+
+				"{{- $_ := set $kinds \"sqlite\" (list \"sqlite\") -}}\n"),
+			[]byte(goodGo))
+		Expect(err).To(MatchError(ContainSubstring("sets the sqlite kind more than once")))
+	})
+
 	// Floors: a side that parses to nothing must refuse, not pass.
 	It("refuses when the template definition can no longer be found", func() {
 		err := verifyChartBackendAliasesIn([]byte("{{- define \"openvox-ca.kind\" -}}{{- end -}}\n\n"), []byte(goodGo))

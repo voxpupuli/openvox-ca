@@ -1300,9 +1300,26 @@ CrashLoopBackOff or a Service that silently routes nowhere.
 {{- $kind := include "openvox-ca.storageBackend" . -}}
 {{- if has $kind (list "filesystem" "sqlite") -}}
 {{- if and .Values.autoscaling.enabled (gt (int .Values.autoscaling.maxReplicas) 1) -}}
-{{- fail (printf "autoscaling.maxReplicas is %d, but the %s storage backend supports exactly one running instance: a second replica crash-loops on the store lock, cannot attach a ReadWriteOnce volume, or on an emptyDir starts a separate CA. Set autoscaling.enabled: false with replicaCount: 1, or move the CA to postgres, mysql, etcd or redis — see https://github.com/voxpupuli/openvox-ca/blob/main/docs/storage-backends.md" (int .Values.autoscaling.maxReplicas) $kind) -}}
+{{- fail (printf "autoscaling.maxReplicas is %d, but the %s storage backend supports exactly one running instance: a second replica crash-loops on the store lock, cannot attach a ReadWriteOnce volume, or on an emptyDir starts a separate CA. Set autoscaling.enabled: false with replicaCount: 1, or move the CA to postgres, mysql, etcd or redis — see https://github.com/voxpupuli/openvox-ca/blob/main/docs/storage-backends.md. The chart reads the backend from config.storage_backend, OPENVOX_CA_STORAGE_BACKEND in env or extraEnv, and --storage-backend in extraArgs, and an unset one is filesystem; if a command wrapper supplies it some other way, set config.storage_backend too." (int .Values.autoscaling.maxReplicas) $kind) -}}
 {{- else if and (not .Values.autoscaling.enabled) (gt (int .Values.replicaCount) 1) -}}
-{{- fail (printf "replicaCount is %d, but the %s storage backend supports exactly one running instance: a second replica crash-loops on the store lock, cannot attach a ReadWriteOnce volume, or on an emptyDir starts a separate CA. Set replicaCount: 1, or move the CA to postgres, mysql, etcd or redis — see https://github.com/voxpupuli/openvox-ca/blob/main/docs/storage-backends.md" (int .Values.replicaCount) $kind) -}}
+{{- fail (printf "replicaCount is %d, but the %s storage backend supports exactly one running instance: a second replica crash-loops on the store lock, cannot attach a ReadWriteOnce volume, or on an emptyDir starts a separate CA. Set replicaCount: 1, or move the CA to postgres, mysql, etcd or redis — see https://github.com/voxpupuli/openvox-ca/blob/main/docs/storage-backends.md. The chart reads the backend from config.storage_backend, OPENVOX_CA_STORAGE_BACKEND in env or extraEnv, and --storage-backend in extraArgs, and an unset one is filesystem; if a command wrapper supplies it some other way, set config.storage_backend too." (int .Values.replicaCount) $kind) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+  With dnsPolicy: Default the pod resolves through the node's own resolvers,
+  not the cluster's, so a restricted egress policy that sends DNS only to the
+  kube-dns pods drops every lookup the CA makes: the storage backend, OpenBao
+  and the export targets all time out, and nothing in the CA's log names the
+  policy. The chart holds every value involved, so it refuses rather than
+  renders. Keyed on a kube-dns pod peer still being in dns.to, which is what
+  the default carries; a list the operator has pointed elsewhere passes.
+*/}}
+{{- if and .Values.networkPolicy.enabled .Values.networkPolicy.egress.enabled (eq (.Values.dnsPolicy | toString) "Default") -}}
+{{- range $peer := dig "dns" "to" list .Values.networkPolicy.egress -}}
+{{- if eq (dig "podSelector" "matchLabels" "k8s-app" "" $peer | toString) "kube-dns" -}}
+{{- fail "dnsPolicy is Default, so the pod resolves names through the node's own resolvers, but networkPolicy.egress.dns.to sends DNS only to the kube-dns pods, which would drop every lookup the CA makes. List the node's resolvers under networkPolicy.egress.dns.to (an ipBlock for each), set it to [] to allow DNS to any destination, or leave dnsPolicy at the cluster default." -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 
@@ -1588,12 +1605,12 @@ persistence.enabled: true, or switch to an external storage backend.
 */}}
 {{- if and (has $backend (list "filesystem" "sqlite")) (gt $replicas 1) }}
 
-WARNING: {{ if .Values.autoscaling.enabled }}autoscaling may run up to {{ $replicas }} replicas{{ else }}replicaCount is {{ $replicas }}{{ end }}, and the config this chart
-renders selects the {{ $backend }} backend, which supports exactly one running
-instance. The chart cannot see the backend the server will actually use
-(existingConfigMap, args, envFrom, a --config in extraArgs, a backend fed in
-from a Secret or ConfigMap, or a --storage-backend whose value is a separate
-argument), so it has not refused this. If it is filesystem or sqlite, run one replica; use postgres,
+WARNING: {{ if .Values.autoscaling.enabled }}autoscaling may run up to {{ $replicas }} replicas{{ else }}replicaCount is {{ $replicas }}{{ end }}, and as far as this chart
+can see the backend is {{ $backend }}, which supports exactly one running instance.
+The chart cannot see the backend the server will actually use (existingConfigMap,
+args, envFrom, a --config in extraArgs, a backend fed in from a Secret or
+ConfigMap, or a --storage-backend whose value is a separate argument), so it has
+not refused this. If it is filesystem or sqlite, run one replica; use postgres,
 mysql, etcd, or redis to run more than one — see
 https://github.com/voxpupuli/openvox-ca/blob/main/docs/storage-backends.md
 {{- end }}

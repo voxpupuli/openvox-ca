@@ -1976,9 +1976,13 @@ func verifyChartBackendAliasesIn(tpl, spec []byte) error {
 	chartKinds := map[string]map[string]bool{}
 	for _, m := range chartBackendKindArmRE.FindAllSubmatch(def[1], -1) {
 		kind := string(m[1])
-		if chartKinds[kind] == nil {
-			chartKinds[kind] = map[string]bool{}
+		// A second `set` for a kind replaces the first in the template, so
+		// merging the two here would pass a table that has lost spellings.
+		if chartKinds[kind] != nil {
+			return fmt.Errorf("%s: openvox-ca.backendKind sets the %s kind more than once, and the "+
+				"template keeps only the last; give each kind one `set $kinds` line", chartHelpersPath, kind)
 		}
+		chartKinds[kind] = map[string]bool{}
 		for _, q := range goQuotedStringRE.FindAllSubmatch(m[2], -1) {
 			chartKinds[kind][string(q[1])] = true
 		}
@@ -6512,6 +6516,7 @@ config:
 			name: "interpolated strings are quoted so YAML cannot retype them",
 			valuesYAML: `
 fullnameOverride: "0123"
+nameOverride: "0133"
 namespaceOverride: "0124"
 priorityClassName: "0128"
 runtimeClassName: "0129"
@@ -6569,6 +6574,7 @@ gateway:
 				"runtimeClassName: \"0129\"\n",
 				"schedulerName: \"0130\"\n",
 				"jobLabel: \"0131\"\n",
+				"app.kubernetes.io/name: \"0133\"\n",
 				"      - \"0124\"\n",
 				"- name: \"on\"\n",
 				"kubernetes.io/metadata.name: \"yes\"\n",
@@ -6580,7 +6586,7 @@ gateway:
 			// site, pinned above, while ": true" also matches every real
 			// boolean in the render.
 			notWants: []string{": 0123\n", ": 0124\n", ": 0125\n", ": 0126\n", ": 0127\n", "- 0124\n",
-				": 0128\n", ": 0129\n", ": 0130\n", ": 0131\n"},
+				": 0128\n", ": 0129\n", ": 0130\n", ": 0131\n", ": 0133\n"},
 		},
 		{
 			// A DNS rule with no `to:` admits port 53 to every destination,
@@ -7019,17 +7025,22 @@ config:
 			name:  "NOTES warns about several replicas under an existingConfigMap",
 			notes: true,
 			sets:  []string{"existingConfigMap=mine", "replicaCount=2"},
-			wants: []string{"replicaCount is 2", "selects the filesystem backend"},
+			wants: []string{"replicaCount is 2", "can see the backend is filesystem"},
 		},
 		{
 			// The warning must not outlive the refusal into configurations the
 			// chart can judge: a replicated external backend is the supported
 			// case, and warning there would teach operators to ignore it.
+			//
+			// The config file is left on the filesystem default and the
+			// environment names etcd, so a warning keyed on the config alone
+			// would fire here. The notWants is the warning's opening, which
+			// stays on one line however the paragraph below it wraps.
 			name:     "NOTES says nothing about replicas on a backend that supports them",
 			notes:    true,
-			sets:     []string{tls, "replicaCount=2", "config.storage_backend=postgres"},
-			wants:    []string{"Storage backend: postgres"},
-			notWants: []string{"supports exactly one running instance"},
+			sets:     []string{tls, "replicaCount=2", "env.OPENVOX_CA_STORAGE_BACKEND=etcd"},
+			wants:    []string{"Storage backend: etcd"},
+			notWants: []string{"WARNING: replicaCount is 2"},
 		},
 		{
 			// The notes read the backend the server will run with, not only
@@ -7108,6 +7119,15 @@ config:
 			notes: true,
 			sets:  []string{tls, "config.storage_backend=valkey"},
 			wants: []string{"Storage backend: redis"},
+		},
+		{
+			// The remedy the dnsPolicy refusal names: pointing dns.to at the
+			// node's resolver is accepted.
+			name: "dnsPolicy Default renders once DNS egress names the node's resolver",
+			sets: []string{tls, "dnsPolicy=Default",
+				"networkPolicy.enabled=true", "networkPolicy.egress.enabled=true",
+				"networkPolicy.egress.dns.to[0].ipBlock.cidr=10.0.0.2/32"},
+			wants: []string{"dnsPolicy: \"Default\"", "cidr: 10.0.0.2/32"},
 		},
 		{
 			// The ceiling is what is refused, so an autoscaler held to one
@@ -7361,9 +7381,11 @@ config:
 		{
 			// minReplicas: 1 is the case a floor-based check let through: the
 			// autoscaler starts at one and scales to the ceiling under load.
+			// The ceiling is two, the boundary: a refusal of three and up
+			// would pass every larger value this suite tries.
 			name:    "an autoscaler that may scale a filesystem CA past one replica",
-			sets:    []string{tls, "autoscaling.enabled=true", "autoscaling.minReplicas=1", "autoscaling.maxReplicas=3"},
-			wantErr: "autoscaling.maxReplicas is 3, but the filesystem storage backend",
+			sets:    []string{tls, "autoscaling.enabled=true", "autoscaling.minReplicas=1", "autoscaling.maxReplicas=2"},
+			wantErr: "autoscaling.maxReplicas is 2, but the filesystem storage backend",
 		},
 		{
 			// The environment outranks the config file in both directions: here
@@ -7448,6 +7470,22 @@ extraEnv:
 			sets:     []string{tls, "autoscaling.enabled=true"},
 			wantErr:  "Set autoscaling.enabled: false with replicaCount: 1",
 			notWants: []string{"Set autoscaling.maxReplicas: 1"},
+		},
+		{
+			// The refusal names where the chart looked, because a backend a
+			// command wrapper exports is invisible to it and reads as the
+			// filesystem default; the remedy is to say so in config.
+			name:    "the replica refusal says where the chart read the backend",
+			sets:    []string{tls, "replicaCount=2"},
+			wantErr: "an unset one is filesystem; if a command wrapper supplies it some other way, set config.storage_backend too",
+		},
+		{
+			// dnsPolicy: Default resolves through the node, and the default
+			// dns.to sends DNS only to kube-dns, so every lookup is dropped.
+			name: "dnsPolicy Default with DNS egress still pointed at kube-dns",
+			sets: []string{tls, "dnsPolicy=Default",
+				"networkPolicy.enabled=true", "networkPolicy.egress.enabled=true"},
+			wantErr: "dnsPolicy is Default, so the pod resolves names through the node's own resolvers",
 		},
 		{
 			// A flag with its value attached settles the backend even when the

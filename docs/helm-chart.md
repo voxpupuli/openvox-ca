@@ -778,7 +778,9 @@ The block has to cover the address the pod sees, and that depends on how the
 connection arrives. Through a LoadBalancer or NodePort Service with
 `service.externalTrafficPolicy: Local` it is the agent's own. With the default,
 `Cluster`, it is usually the address of whichever node forwarded it, so the block
-has to cover the nodes. Through a TLS-passthrough Ingress or Gateway it comes
+has to cover the nodes — and then it admits every client the Service forwards,
+and narrows nothing. Filter the source at the Service instead, with
+`service.loadBalancerSourceRanges`, or use `Local`. Through a TLS-passthrough Ingress or Gateway it comes
 from the controller's pods, which `apiAccess: any` admits already and
 `namespace` does not, unless the controller runs in this namespace. The same
 holds for a Prometheus outside the cluster, with `port: metrics`.
@@ -789,8 +791,11 @@ Four things about that are easy to get wrong:
 
 - **DNS goes only to the resolvers in `egress.dns.to`.** By default that is
   the pods labelled `k8s-app: kube-dns` in `kube-system`, which is what CoreDNS
-  carries on most distributions. A DNS rule with no destination would let
-  anything the pod can be made to send leave the cluster as queries. If your
+  carries on most distributions. A DNS rule with no destination admits any
+  traffic to any host on port 53, and queries straight to a resolver outside
+  the cluster. The default closes both. It does not stop data leaving as
+  queries the cluster's resolver recurses on: that needs a policy on the
+  resolver itself, such as a CoreDNS forward allowlist. If your
   resolver is elsewhere — a node-local cache, a provider's resolver, the node's
   own for `dnsPolicy: Default`, or DNS pods labelled differently — list it
   instead:
@@ -804,6 +809,9 @@ Four things about that are easy to get wrong:
           - ipBlock:
               cidr: 169.254.20.10/32   # NodeLocal DNSCache
   ```
+
+  The chart refuses `dnsPolicy: Default` while `dns.to` still names the
+  kube-dns pods, since every lookup would then be dropped.
 
   The rule allows port 53, and network plugins generally match it against the
   DNS pod's own port rather than the Service's, so a resolver listening on

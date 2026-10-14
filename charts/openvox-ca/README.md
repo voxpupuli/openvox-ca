@@ -284,7 +284,7 @@ certificate, so the controller **must** pass TLS through untouched.
 | `podDisruptionBudget.maxUnavailable` | `""` | `0` is honoured (block every voluntary eviction), not treated as unset |
 | `podDisruptionBudget.unhealthyPodEvictionPolicy` | `""` | Kubernetes 1.27+ |
 | `autoscaling.enabled` | `false` | Requires an external storage backend (the chart refuses a `maxReplicas` above 1 on filesystem or sqlite), and at least one of `targetCPUUtilizationPercentage`, `targetMemoryUtilizationPercentage` or `metrics` — the chart refuses an install with none set |
-| `autoscaling.minReplicas` / `.maxReplicas` | `2` / `6` | |
+| `autoscaling.minReplicas` / `.maxReplicas` | `2` / `6` | The chart refuses a `minReplicas` above `maxReplicas` |
 | `autoscaling.targetCPUUtilizationPercentage` | `80` | |
 | `autoscaling.targetMemoryUtilizationPercentage` | `""` | |
 | `autoscaling.metrics` / `.behavior` | `[]` / `{}` | |

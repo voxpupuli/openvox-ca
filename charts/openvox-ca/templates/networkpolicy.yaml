@@ -70,9 +70,12 @@ spec:
     # the Kubernetes API by name.
     {{- /*
       Only to the resolvers in egress.dns.to, kube-dns by default. A rule with
-      no `to:` admits every destination on port 53, which makes DNS a way out
-      of the cluster for anything the pod can be made to send. An empty or
-      null list still renders no `to:`, deliberately: that is the opt-out.
+      no `to:` admits every destination on port 53: any protocol to any host
+      that listens there, and queries straight to a resolver someone outside
+      runs. This closes those. It does not stop data leaving as queries the
+      cluster's own resolver recurses on; that is the resolver's to control.
+      An empty or null list still renders no `to:`, deliberately: that is the
+      opt-out.
     */}}
     - ports:
         - port: 53
