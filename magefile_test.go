@@ -4834,6 +4834,12 @@ const firstBootUnit = "packaging/systemd/openvox-ca-first-boot.service"
 // occurrence of a key kept: systemd treats a repeated directive as additive
 // for some settings and last-wins for others, and a spec that read only the
 // first would pass for a unit that overrode it two lines later.
+//
+// It parses as systemd does in the two respects a spec can trip over: ';'
+// starts a comment as '#' does, and whitespace around '=' is not part of the
+// key or the value. Without the second, `ProcSubset = pid` -- live to systemd
+// -- would be recorded under "ProcSubset ", and every NotTo(HaveKey) spec here
+// would pass with the directive switched on.
 func unitDirectives(path string) (map[string][]string, error) {
 	body, err := os.ReadFile(path)
 	if err != nil {
@@ -4842,14 +4848,15 @@ func unitDirectives(path string) (map[string][]string, error) {
 	out := map[string][]string{}
 	for _, line := range strings.Split(string(body), "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "[") {
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "[") {
 			continue
 		}
 		k, v, ok := strings.Cut(line, "=")
 		if !ok {
 			continue
 		}
-		out[k] = append(out[k], v)
+		k = strings.TrimSpace(k)
+		out[k] = append(out[k], strings.TrimSpace(v))
 	}
 	return out, nil
 }

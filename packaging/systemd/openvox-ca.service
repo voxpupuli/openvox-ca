@@ -181,8 +181,8 @@ MemoryDenyWriteExecute=yes
 # Most files openvox-ca writes get their mode set after creation, where a
 # umask does not reach, so what this narrows today is the directories it
 # creates under the CA directory, 0750 to 0700, and an SQLite store and its
-# sidecars, 0660 to 0600 -- group access that this account, whose uid does
-# not change between starts, has no use for. The CA directory itself exists
+# sidecars, 0640 under systemd's default umask to 0600 -- group access that
+# this account, whose uid does not change between starts, has no use for. The CA directory itself exists
 # before the service starts and keeps its mode. This is here for the code
 # path that creates something wider than it should.
 UMask=0077
