@@ -1815,6 +1815,14 @@ var (
 	shellBackendAliasesRE = regexp.MustCompile(`(?m)^FILESYSTEM_BACKEND_ALIASES="([^"]*)"$`)
 	goBackendAliasesRE    = regexp.MustCompile(`(?m)^\tcase ((?:"[^"]*", )*"[^"]*"):\n\t\treturn BackendFilesystem, nil$`)
 	goQuotedStringRE      = regexp.MustCompile(`"([^"]*)"`)
+
+	// The chart's copy of the whole of ParseBackendKind, read for
+	// verifyChartBackendAliases: every case arm with the constant it returns,
+	// those constants' values, and the template's kind table.
+	goBackendArmRE        = regexp.MustCompile(`(?m)^\tcase ((?:"[^"]*", )*"[^"]*"):\n\t\treturn (Backend\w+), nil$`)
+	goBackendConstRE      = regexp.MustCompile(`(?m)^\t(Backend\w+)\s+BackendKind = "([^"]*)"$`)
+	chartBackendKindRE    = regexp.MustCompile(`(?s)\{\{- define "openvox-ca\.backendKind" -\}\}(.*?)\{\{- end -\}\}\n\n`)
+	chartBackendKindArmRE = regexp.MustCompile(`set \$kinds "([^"]*)" \(list((?: "[^"]*")*)\)`)
 )
 
 // verifyBackendAliases asserts that first-boot accepts exactly the spellings
@@ -1903,6 +1911,104 @@ func verifyBackendAliasesIn(script, spec []byte) error {
 			"ParseBackendKind) does not, so provisioning would bootstrap a filesystem CA for a "+
 			"backend the server will not read it from. Remove them from "+
 			"FILESYSTEM_BACKEND_ALIASES", firstBootScriptPath, extra, storageSpecPath)
+	}
+	return nil
+}
+
+// chartHelpersPath is the template file holding openvox-ca.backendKind.
+const chartHelpersPath = chartDir + "/templates/_helpers.tpl"
+
+// verifyChartBackendAliases asserts that the Helm chart folds storage_backend
+// spellings onto kinds exactly as ParseBackendKind does, kind for kind.
+//
+// The chart refuses several replicas on the filesystem and sqlite backends,
+// and it can only judge a spelling it knows: openvox-ca.backendKind returns an
+// unrecognised name unchanged, which matches no kind, so a spelling the server
+// gains and the chart lacks installs a multi-replica single-instance CA with
+// no refusal and no warning. verifyBackendAliases already guards first-boot's
+// copy for the same reason; this one compares every arm, not only the
+// filesystem one, because the refusal keys on sqlite too and the DSN check
+// keys on mysql and sqlite. Wired into dev:check.
+func verifyChartBackendAliases() error {
+	tpl, err := os.ReadFile(chartHelpersPath)
+	if err != nil {
+		return err
+	}
+	spec, err := os.ReadFile(storageSpecPath)
+	if err != nil {
+		return err
+	}
+	return verifyChartBackendAliasesIn(tpl, spec)
+}
+
+func verifyChartBackendAliasesIn(tpl, spec []byte) error {
+	consts := map[string]string{}
+	for _, m := range goBackendConstRE.FindAllSubmatch(spec, -1) {
+		consts[string(m[1])] = string(m[2])
+	}
+	goKinds := map[string]map[string]bool{}
+	for _, m := range goBackendArmRE.FindAllSubmatch(spec, -1) {
+		kind, ok := consts[string(m[2])]
+		if !ok {
+			return fmt.Errorf("%s: ParseBackendKind returns %s, whose value this check cannot read; "+
+				"update goBackendConstRE rather than deleting the check", storageSpecPath, m[2])
+		}
+		if goKinds[kind] == nil {
+			goKinds[kind] = map[string]bool{}
+		}
+		for _, q := range goQuotedStringRE.FindAllSubmatch(m[1], -1) {
+			goKinds[kind][string(q[1])] = true
+		}
+	}
+	// A floor for each side: one that parsed to nothing would match the other
+	// vacuously, or report every spelling missing for a reason it cannot name.
+	if len(goKinds) == 0 {
+		return fmt.Errorf("%s: found no `case \"a\", \"b\":` arm of ParseBackendKind returning a "+
+			"Backend constant, so the chart's spellings cannot be compared with the server's; "+
+			"update the pattern rather than deleting the check", storageSpecPath)
+	}
+
+	def := chartBackendKindRE.FindSubmatch(tpl)
+	if def == nil {
+		return fmt.Errorf("%s no longer defines openvox-ca.backendKind in the shape this check "+
+			"reads, so its spellings cannot be compared with ParseBackendKind's", chartHelpersPath)
+	}
+	chartKinds := map[string]map[string]bool{}
+	for _, m := range chartBackendKindArmRE.FindAllSubmatch(def[1], -1) {
+		kind := string(m[1])
+		if chartKinds[kind] == nil {
+			chartKinds[kind] = map[string]bool{}
+		}
+		for _, q := range goQuotedStringRE.FindAllSubmatch(m[2], -1) {
+			chartKinds[kind][string(q[1])] = true
+		}
+	}
+	if len(chartKinds) == 0 {
+		return fmt.Errorf("%s: openvox-ca.backendKind holds no `set $kinds \"kind\" (list ...)` "+
+			"line, so this check cannot read its spellings; update the pattern rather than "+
+			"deleting the check", chartHelpersPath)
+	}
+
+	var problems []string
+	for _, kind := range slices.Sorted(maps.Keys(goKinds)) {
+		for _, a := range slices.Sorted(maps.Keys(goKinds[kind])) {
+			if !chartKinds[kind][a] {
+				problems = append(problems, fmt.Sprintf("%q is %s to openvox-ca but unknown to the chart", a, kind))
+			}
+		}
+	}
+	for _, kind := range slices.Sorted(maps.Keys(chartKinds)) {
+		for _, a := range slices.Sorted(maps.Keys(chartKinds[kind])) {
+			if !goKinds[kind][a] {
+				problems = append(problems, fmt.Sprintf("%q is %s to the chart but not to openvox-ca", a, kind))
+			}
+		}
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("openvox-ca.backendKind (%s) and ParseBackendKind (%s) disagree: %s. "+
+			"A spelling the chart lacks fails open, because the multi-replica refusal and the "+
+			"NOTES warnings match by kind; change both together",
+			chartHelpersPath, storageSpecPath, strings.Join(problems, "; "))
 	}
 	return nil
 }
@@ -5764,8 +5870,9 @@ config:
           namespace: openvox
 `,
 			wants: []string{
-				"name: \"openvox-ca-managed-certs\"",
-				"namespace: openvox",
+				// Anchored to the Role's own name: the ConfigMap echoes the
+				// valuesYAML above, so a bare namespace line matches there.
+				"  name: \"openvox-ca-managed-certs\"\n  namespace: \"openvox\"\n",
 				"- puppetserver-tls",
 				`verbs: ["get", "patch"]`,
 				// The unnarrowable half of the grant, which the export's
@@ -6395,12 +6502,20 @@ config:
 			// The values reach every template except extra-objects.yaml, which
 			// renders the operator's own manifests, with rbac.yaml at its Role
 			// scope. The notWants refuse an unquoted rendering of any of them
-			// anywhere, which is what pins all of the sites rather than one of
-			// each: against the templates before quoting, this render held 40.
+			// anywhere, which is what pins every site a sentinel reaches rather
+			// than one of each: against the templates before quoting, this
+			// render held 45. Sentinels cover the names and free-form strings;
+			// fields held to an enum, a path or a duration are quoted as well
+			// but carry none here, since nothing they accept is retyped. A new
+			// interpolated free-form value owes a sentinel in this case, which
+			// AGENTS.md says too.
 			name: "interpolated strings are quoted so YAML cannot retype them",
 			valuesYAML: `
 fullnameOverride: "0123"
 namespaceOverride: "0124"
+priorityClassName: "0128"
+runtimeClassName: "0129"
+schedulerName: "0130"
 env:
   "on": "1"
 tls:
@@ -6421,6 +6536,7 @@ metrics:
   serviceMonitor:
     enabled: true
     namespace: "0127"
+    jobLabel: "0131"
 networkPolicy:
   enabled: true
   metricsNamespaces: ["yes"]
@@ -6449,6 +6565,10 @@ gateway:
 				"  namespace: \"0125\"\n",
 				"secretName: \"0126\"\n",
 				"  namespace: \"0127\"\n",
+				"priorityClassName: \"0128\"\n",
+				"runtimeClassName: \"0129\"\n",
+				"schedulerName: \"0130\"\n",
+				"jobLabel: \"0131\"\n",
 				"      - \"0124\"\n",
 				"- name: \"on\"\n",
 				"kubernetes.io/metadata.name: \"yes\"\n",
@@ -6459,7 +6579,8 @@ gateway:
 			// Numeric sentinels only: on, yes and true each have a single
 			// site, pinned above, while ": true" also matches every real
 			// boolean in the render.
-			notWants: []string{": 0123\n", ": 0124\n", ": 0125\n", ": 0126\n", ": 0127\n", "- 0124\n"},
+			notWants: []string{": 0123\n", ": 0124\n", ": 0125\n", ": 0126\n", ": 0127\n", "- 0124\n",
+				": 0128\n", ": 0129\n", ": 0130\n", ": 0131\n"},
 		},
 		{
 			// A DNS rule with no `to:` admits port 53 to every destination,
@@ -6499,7 +6620,7 @@ networkPolicy:
 			wants: []string{"kubernetes.io/metadata.name: 'default-dns'"},
 		},
 		{
-			// Chris's ruling for #450: an empty list is the opt-out, and means
+			// An empty list is the opt-out, by the maintainer's decision, and means
 			// what an empty `to:` means to Kubernetes, every destination. The
 			// rule must keep its ports; only the peer goes.
 			name: "an empty egress.dns.to allows DNS to any destination",
@@ -6958,6 +7079,37 @@ config:
 			wants: []string{"replicas: 2"},
 		},
 		{
+			// The server ignores an empty variable, so it defers to the config
+			// file rather than reading as the filesystem default.
+			name:  "several replicas render when an empty env variable leaves the config's backend",
+			sets:  []string{tls, "replicaCount=2", "config.storage_backend=postgres", "env.OPENVOX_CA_STORAGE_BACKEND="},
+			wants: []string{"replicas: 2"},
+		},
+		{
+			// An extraEnv entry with neither value nor source is the empty
+			// string to Kubernetes, and so the same as the case above.
+			name:  "several replicas render when a sourceless extraEnv variable leaves the config's backend",
+			sets:  []string{tls, "replicaCount=2", "config.storage_backend=postgres", "extraEnv[0].name=OPENVOX_CA_STORAGE_BACKEND"},
+			wants: []string{"replicas: 2"},
+		},
+		{
+			// env is rendered before extraEnv and Kubernetes keeps the last
+			// entry of a name, so extraEnv wins.
+			name: "several replicas render when extraEnv overrides an env backend",
+			sets: []string{tls, "replicaCount=2", "env.OPENVOX_CA_STORAGE_BACKEND=sqlite",
+				"extraEnv[0].name=OPENVOX_CA_STORAGE_BACKEND", "extraEnv[0].value=postgres"},
+			wants: []string{"replicas: 2"},
+		},
+		{
+			// The fold itself, made visible: an unrecognised name comes back
+			// unchanged, so this is the one place "valkey" reading as redis
+			// rather than as itself can be told apart.
+			name:  "NOTES names an alias by the kind it folds onto",
+			notes: true,
+			sets:  []string{tls, "config.storage_backend=valkey"},
+			wants: []string{"Storage backend: redis"},
+		},
+		{
 			// The ceiling is what is refused, so an autoscaler held to one
 			// replica on a filesystem CA is allowed, whatever replicaCount says
 			// (the Deployment omits it under autoscaling).
@@ -7226,6 +7378,76 @@ config:
 			name:    "several replicas when an empty backend flag overrides the config",
 			sets:    []string{tls, "replicaCount=2", "config.storage_backend=redis", "extraArgs[0]=--storage-backend="},
 			wantErr: "the filesystem storage backend",
+		},
+		{
+			// The extraEnv literal outranks the config file like env's does.
+			name: "several replicas when an extraEnv value overrides the backend to sqlite",
+			sets: []string{tls, "replicaCount=2", "config.storage_backend=postgres",
+				"extraEnv[0].name=OPENVOX_CA_STORAGE_BACKEND", "extraEnv[0].value=sqlite"},
+			wantErr: "the sqlite storage backend",
+		},
+		{
+			// Kubernetes gives the pod the last entry of a name, here the empty
+			// one, and the server then ignores the variable and runs the
+			// filesystem default. Taking each non-empty value as it came kept
+			// the earlier postgres and passed two replicas of an emptyDir CA.
+			name: "several replicas when an empty extraEnv duplicate discards an env backend",
+			sets: []string{tls, "replicaCount=2", "env.OPENVOX_CA_STORAGE_BACKEND=postgres"},
+			valuesYAML: `
+extraEnv:
+  - name: OPENVOX_CA_STORAGE_BACKEND
+    value: ""
+`,
+			wantErr: "the filesystem storage backend",
+		},
+		{
+			// A later literal replaces a Secret-fed entry of the same name, so
+			// the chart can judge the backend again.
+			name: "several replicas when a literal extraEnv entry follows a Secret-fed one",
+			sets: []string{tls, "replicaCount=2",
+				"extraEnv[0].name=OPENVOX_CA_STORAGE_BACKEND",
+				"extraEnv[0].valueFrom.secretKeyRef.name=backend", "extraEnv[0].valueFrom.secretKeyRef.key=kind",
+				"extraEnv[1].name=OPENVOX_CA_STORAGE_BACKEND", "extraEnv[1].value=sqlite"},
+			wantErr: "the sqlite storage backend",
+		},
+		{
+			// One case per filesystem spelling not reached elsewhere. The
+			// guard keeps the table in step with the server; these make sure
+			// each entry in it is read.
+			name:    "several replicas on the filesystem backend spelled file",
+			sets:    []string{tls, "replicaCount=2", "config.storage_backend=file"},
+			wantErr: "the filesystem storage backend",
+		},
+		{
+			name:    "several replicas on the filesystem backend spelled disk",
+			sets:    []string{tls, "replicaCount=2", "config.storage_backend=disk"},
+			wantErr: "the filesystem storage backend",
+		},
+		{
+			name:    "several replicas on the filesystem backend spelled out",
+			sets:    []string{tls, "replicaCount=2", "config.storage_backend=filesystem"},
+			wantErr: "the filesystem storage backend",
+		},
+		{
+			name:    "several replicas on the filesystem backend spelled fs",
+			sets:    []string{tls, "replicaCount=2", "config.storage_backend=fs"},
+			wantErr: "the filesystem storage backend",
+		},
+		{
+			// The API server refuses this at apply time, after Helm has
+			// created what came before it; lowering maxReplicas alone reaches
+			// it from the defaults.
+			name:    "an autoscaler whose minimum is above its maximum",
+			sets:    []string{tls, "config.storage_backend=postgres", "autoscaling.enabled=true", "autoscaling.maxReplicas=1"},
+			wantErr: "autoscaling.minReplicas is 2 but autoscaling.maxReplicas is 1",
+		},
+		{
+			// The remedy has to be one the chart then accepts: following a
+			// "set maxReplicas: 1" would only have reached the refusal above.
+			name:     "the filesystem autoscaling refusal leads with a remedy that installs",
+			sets:     []string{tls, "autoscaling.enabled=true"},
+			wantErr:  "Set autoscaling.enabled: false with replicaCount: 1",
+			notWants: []string{"Set autoscaling.maxReplicas: 1"},
 		},
 		{
 			// A flag with its value attached settles the backend even when the
@@ -9005,6 +9227,10 @@ func (Dev) Check() error {
 	}
 	fmt.Println("Checking the required-check aggregates...")
 	if err := verifyAggregateJobs(); err != nil {
+		return err
+	}
+	fmt.Println("Checking the chart's backend spellings against the CA's own...")
+	if err := verifyChartBackendAliases(); err != nil {
 		return err
 	}
 	fmt.Println("Checking that every guard claiming dev:check is wired into it...")

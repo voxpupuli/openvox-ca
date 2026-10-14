@@ -385,9 +385,9 @@ chart refuses `replicaCount` above 1 with either of them, and an autoscaler
 whose `maxReplicas` is above 1. It judges the backend the server will run with —
 `config.storage_backend`, then `OPENVOX_CA_STORAGE_BACKEND` in `env` or
 `extraEnv`, then `--storage-backend` in `extraArgs` — and when it cannot see
-that (an `existingConfigMap`, `args`, `envFrom`, the variable fed in from a
-Secret, or the flag with its value as a separate argument) it installs and warns
-in the notes instead.
+that (an `existingConfigMap`, `args`, `envFrom`, a `--config` in `extraArgs`,
+the variable fed in from a Secret or ConfigMap, or the flag with its value as a
+separate argument) it installs and warns in the notes instead.
 
 To run more than one replica, move the state into a shared backend — see
 [storage backends](storage-backends.md) — and turn persistence off, because

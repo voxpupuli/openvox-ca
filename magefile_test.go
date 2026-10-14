@@ -2559,6 +2559,86 @@ var _ = Describe("verifyBackendAliases", func() {
 	})
 })
 
+var _ = Describe("verifyChartBackendAliases", func() {
+	// The guard that keeps the chart's openvox-ca.backendKind table in step
+	// with ParseBackendKind, driven over content through the seam for the
+	// reason verifyBackendAliases states.
+	const goodGo = "\tBackendFilesystem BackendKind = \"filesystem\"\n" +
+		"\tBackendSQLite     BackendKind = \"sqlite\"\n" +
+		"\tcase \"\", \"filesystem\", \"fs\":\n\t\treturn BackendFilesystem, nil\n" +
+		"\tcase \"sqlite\", \"sqlite3\":\n\t\treturn BackendSQLite, nil\n"
+	tpl := func(arms string) []byte {
+		return []byte("{{- define \"openvox-ca.backendKind\" -}}\n" + arms + "{{- $kind -}}\n{{- end -}}\n\n")
+	}
+	goodTpl := tpl("{{- $_ := set $kinds \"filesystem\" (list \"\" \"filesystem\" \"fs\") -}}\n" +
+		"{{- $_ := set $kinds \"sqlite\" (list \"sqlite\" \"sqlite3\") -}}\n")
+
+	It("passes against the repository as it stands", func() {
+		Expect(verifyChartBackendAliases()).To(Succeed())
+	})
+
+	It("accepts the two tables when they fold the same spellings onto the same kinds", func() {
+		Expect(verifyChartBackendAliasesIn(goodTpl, []byte(goodGo))).To(Succeed())
+	})
+
+	// The direction that fails open: the server gains a spelling, the chart
+	// does not, and a multi-replica sqlite CA spelled that way installs
+	// without a refusal.
+	It("refuses a spelling the server accepts and the chart does not", func() {
+		err := verifyChartBackendAliasesIn(
+			tpl("{{- $_ := set $kinds \"filesystem\" (list \"\" \"filesystem\" \"fs\") -}}\n"+
+				"{{- $_ := set $kinds \"sqlite\" (list \"sqlite\") -}}\n"),
+			[]byte(goodGo))
+		Expect(err).To(MatchError(And(
+			ContainSubstring(`"sqlite3" is sqlite to openvox-ca but unknown to the chart`),
+			ContainSubstring("fails open"),
+		)))
+	})
+
+	It("refuses a spelling the chart folds that the server does not accept", func() {
+		err := verifyChartBackendAliasesIn(
+			tpl("{{- $_ := set $kinds \"filesystem\" (list \"\" \"filesystem\" \"fs\" \"disk\") -}}\n"+
+				"{{- $_ := set $kinds \"sqlite\" (list \"sqlite\" \"sqlite3\") -}}\n"),
+			[]byte(goodGo))
+		Expect(err).To(MatchError(ContainSubstring(`"disk" is filesystem to the chart but not to openvox-ca`)))
+	})
+
+	// Same spelling, wrong kind: both sets hold it, so only a per-kind
+	// comparison sees the difference.
+	It("refuses a spelling folded onto a different kind", func() {
+		err := verifyChartBackendAliasesIn(
+			tpl("{{- $_ := set $kinds \"filesystem\" (list \"\" \"filesystem\" \"fs\" \"sqlite3\") -}}\n"+
+				"{{- $_ := set $kinds \"sqlite\" (list \"sqlite\") -}}\n"),
+			[]byte(goodGo))
+		Expect(err).To(MatchError(And(
+			ContainSubstring(`"sqlite3" is sqlite to openvox-ca but unknown to the chart`),
+			ContainSubstring(`"sqlite3" is filesystem to the chart but not to openvox-ca`),
+		)))
+	})
+
+	// Floors: a side that parses to nothing must refuse, not pass.
+	It("refuses when the template definition can no longer be found", func() {
+		err := verifyChartBackendAliasesIn([]byte("{{- define \"openvox-ca.kind\" -}}{{- end -}}\n\n"), []byte(goodGo))
+		Expect(err).To(MatchError(ContainSubstring("no longer defines openvox-ca.backendKind")))
+	})
+
+	It("refuses when the template table parses to no kinds", func() {
+		err := verifyChartBackendAliasesIn(tpl("{{- if has $name (list \"fs\") -}}filesystem{{- end -}}\n"), []byte(goodGo))
+		Expect(err).To(MatchError(ContainSubstring("holds no `set $kinds")))
+	})
+
+	It("refuses when ParseBackendKind's arms can no longer be found", func() {
+		err := verifyChartBackendAliasesIn(goodTpl, []byte("\tswitch kindTable[s] {}\n"))
+		Expect(err).To(MatchError(ContainSubstring("found no `case")))
+	})
+
+	It("refuses when an arm returns a constant whose value it cannot read", func() {
+		err := verifyChartBackendAliasesIn(goodTpl,
+			[]byte("\tcase \"etcd\":\n\t\treturn BackendEtcd, nil\n"))
+		Expect(err).To(MatchError(ContainSubstring("returns BackendEtcd, whose value this check cannot read")))
+	})
+})
+
 var _ = Describe("verifyMageTargets", func() {
 	// Against the repository's real magefile and workflows, which is what
 	// `mage dev:check` runs.

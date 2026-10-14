@@ -268,7 +268,7 @@ certificate, so the controller **must** pass TLS through untouched.
 | Key | Default | Description |
 | --- | --- | --- |
 | `networkPolicy.enabled` | `false` | |
-| `networkPolicy.apiAccess` | `any` | `any` (every pod in the cluster), `namespace`, or `none`. None admits agents outside the cluster: add an `ipBlock` rule to `extraIngress` for them |
+| `networkPolicy.apiAccess` | `any` | `any` (every pod in the cluster), `namespace`, or `none`. No mode admits agents outside the cluster: add an `ipBlock` rule to `extraIngress` for them |
 | `networkPolicy.metricsNamespaces` | `[monitoring]` | Namespaces allowed to scrape the exporter |
 | `networkPolicy.egress.enabled` | `false` | Adds an Egress policy; DNS to `egress.dns.to` is always allowed |
 | `networkPolicy.egress.dns.to` | the `k8s-app: kube-dns` pods in `kube-system` | NetworkPolicy peers that DNS (port 53, UDP and TCP) may reach. Change it when the resolver is elsewhere: a node-local cache, a provider's resolver, `dnsPolicy: Default`, or DNS pods labelled otherwise. An empty list allows any destination |

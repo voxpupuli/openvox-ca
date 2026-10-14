@@ -666,24 +666,28 @@ meaning filesystem, and the aliases folded onto their kind. The NOTES warnings
 used to compare the raw value against "filesystem" and "sqlite", which let
 `fs`, `local` and `sqlite3` past both.
 
+The table lists every kind with every spelling ParseBackendKind accepts for it,
+canonical name included, so that `mage dev:check` can compare the two as sets
+(verifyChartBackendAliases). A spelling missing here would fail open: the
+refusals key on the kind, and an unrecognised name matches none.
+
 A value the server does not recognise comes back trimmed and lowercased, so it
 matches no kind; the server refuses it at startup with a message of its own.
 */}}
 {{- define "openvox-ca.backendKind" -}}
 {{- $name := . | toString | trim | lower -}}
-{{- if has $name (list "" "filesystem" "file" "fs" "disk" "local") -}}
-filesystem
-{{- else if has $name (list "sqlite" "sqlite3") -}}
-sqlite
-{{- else if eq $name "valkey" -}}
-redis
-{{- else if has $name (list "postgres" "postgresql" "pg") -}}
-postgres
-{{- else if eq $name "mariadb" -}}
-mysql
-{{- else -}}
-{{ $name }}
+{{- $kinds := dict -}}
+{{- $_ := set $kinds "filesystem" (list "" "filesystem" "file" "fs" "disk" "local") -}}
+{{- $_ := set $kinds "etcd" (list "etcd") -}}
+{{- $_ := set $kinds "redis" (list "redis" "valkey") -}}
+{{- $_ := set $kinds "sqlite" (list "sqlite" "sqlite3") -}}
+{{- $_ := set $kinds "postgres" (list "postgres" "postgresql" "pg") -}}
+{{- $_ := set $kinds "mysql" (list "mysql" "mariadb") -}}
+{{- $kind := $name -}}
+{{- range $candidate, $spellings := $kinds -}}
+{{- if has $name $spellings }}{{ $kind = $candidate }}{{ end -}}
 {{- end -}}
+{{- $kind -}}
 {{- end -}}
 
 {{/*
@@ -693,10 +697,17 @@ cannot tell.
 The server's precedence, lowest first: the config file, then
 OPENVOX_CA_STORAGE_BACKEND when it is non-empty, then --storage-backend, which
 the chart appends to its argv through extraArgs and which wins whenever it is
-given, even empty. env is rendered before extraEnv, so a name in both takes
-extraEnv's value, and they are scanned in that order. A flag with its value
-attached settles the question whatever the environment held, so it restores a
-verdict a Secret-fed variable had withheld.
+given, even empty. A flag with its value attached settles the question whatever
+the environment held, so it restores a verdict a Secret-fed variable had
+withheld.
+
+The variable is resolved the way the container gets it before the server reads
+it. env is rendered before extraEnv, and Kubernetes gives a name that appears
+more than once the value of its last entry — so the last entry decides, even
+when it is empty or names no source at all. An empty variable then defers to
+the config file, because the server ignores it. Taking each non-empty value as
+it came instead let a later empty duplicate keep an earlier `postgres`, while
+the pod ran the filesystem default.
 
 Nothing comes back when the configuration is not fully known, when extraEnv
 feeds the variable from a Secret or ConfigMap, or when the flag's value is in
@@ -708,15 +719,17 @@ configuration it cannot read is worse than none.
 {{- if eq (include "openvox-ca.configFullyKnown" .) "true" -}}
 {{- $config := include "openvox-ca.config" . | fromYaml -}}
 {{- $name := dig "storage_backend" "" $config | toString -}}
+{{- $envValue := "" -}}
 {{- $known := true -}}
 {{- range $envName, $value := .Values.env -}}
-{{- if and (eq $envName "OPENVOX_CA_STORAGE_BACKEND") $value }}{{ $name = $value | toString }}{{ end -}}
+{{- if eq $envName "OPENVOX_CA_STORAGE_BACKEND" }}{{ $envValue = $value | default "" | toString }}{{ end -}}
 {{- end -}}
 {{- range .Values.extraEnv -}}
 {{- if eq .name "OPENVOX_CA_STORAGE_BACKEND" -}}
-{{- if hasKey . "valueFrom" }}{{ $known = false }}{{ else if .value }}{{ $name = .value | toString }}{{ end -}}
+{{- if hasKey . "valueFrom" }}{{ $known = false }}{{ else }}{{ $envValue = .value | default "" | toString }}{{ $known = true }}{{ end -}}
 {{- end -}}
 {{- end -}}
+{{- if $envValue }}{{ $name = $envValue }}{{ end -}}
 {{- range .Values.extraArgs -}}
 {{- $arg := . | toString -}}
 {{- if hasPrefix "--storage-backend=" $arg }}{{ $name = trimPrefix "--storage-backend=" $arg }}{{ $known = true }}{{ end -}}
@@ -1258,6 +1271,16 @@ CrashLoopBackOff or a Service that silently routes nowhere.
 {{- if not (or .Values.autoscaling.targetCPUUtilizationPercentage .Values.autoscaling.targetMemoryUtilizationPercentage .Values.autoscaling.metrics) -}}
 {{- fail "autoscaling.enabled is set but no metric is configured, so the HorizontalPodAutoscaler would hold the replica count at minReplicas rather than scale. Set autoscaling.targetCPUUtilizationPercentage, targetMemoryUtilizationPercentage, or metrics." -}}
 {{- end -}}
+{{/*
+  The API server refuses an HPA whose minReplicas is above its maxReplicas, at
+  apply time — after Helm has created everything ordered before it, and with
+  Argo CD or Flux as a partial sync. Lowering maxReplicas alone reaches this
+  from the defaults (minReplicas: 2), and the remedy the filesystem refusal
+  below gives used to lead there.
+*/}}
+{{- if gt (int .Values.autoscaling.minReplicas) (int .Values.autoscaling.maxReplicas) -}}
+{{- fail (printf "autoscaling.minReplicas is %d but autoscaling.maxReplicas is %d, and the API server refuses a HorizontalPodAutoscaler whose minimum is above its maximum. Lower minReplicas or raise maxReplicas." (int .Values.autoscaling.minReplicas) (int .Values.autoscaling.maxReplicas)) -}}
+{{- end -}}
 {{- end -}}
 
 {{/*
@@ -1270,14 +1293,14 @@ CrashLoopBackOff or a Service that silently routes nowhere.
   warning, which helm template, Argo CD and Flux never show.
 
   Under autoscaling the bound is maxReplicas, since the autoscaler may scale up
-  to it at any time. Checked only when the chart can see the backend, which
-  openvox-ca.storageBackend reports by returning nothing; the NOTES warning
-  covers the rest.
+  to it at any time. Checked only when the chart can see the backend:
+  openvox-ca.storageBackend returns nothing when it cannot, and the NOTES
+  warning covers those configurations.
 */}}
 {{- $kind := include "openvox-ca.storageBackend" . -}}
 {{- if has $kind (list "filesystem" "sqlite") -}}
 {{- if and .Values.autoscaling.enabled (gt (int .Values.autoscaling.maxReplicas) 1) -}}
-{{- fail (printf "autoscaling.maxReplicas is %d, but the %s storage backend supports exactly one running instance: a second replica crash-loops on the store lock, cannot attach a ReadWriteOnce volume, or on an emptyDir starts a separate CA. Set autoscaling.maxReplicas: 1, or autoscaling.enabled: false with replicaCount: 1, or move the CA to postgres, mysql, etcd or redis — see https://github.com/voxpupuli/openvox-ca/blob/main/docs/storage-backends.md" (int .Values.autoscaling.maxReplicas) $kind) -}}
+{{- fail (printf "autoscaling.maxReplicas is %d, but the %s storage backend supports exactly one running instance: a second replica crash-loops on the store lock, cannot attach a ReadWriteOnce volume, or on an emptyDir starts a separate CA. Set autoscaling.enabled: false with replicaCount: 1, or move the CA to postgres, mysql, etcd or redis — see https://github.com/voxpupuli/openvox-ca/blob/main/docs/storage-backends.md" (int .Values.autoscaling.maxReplicas) $kind) -}}
 {{- else if and (not .Values.autoscaling.enabled) (gt (int .Values.replicaCount) 1) -}}
 {{- fail (printf "replicaCount is %d, but the %s storage backend supports exactly one running instance: a second replica crash-loops on the store lock, cannot attach a ReadWriteOnce volume, or on an emptyDir starts a separate CA. Set replicaCount: 1, or move the CA to postgres, mysql, etcd or redis — see https://github.com/voxpupuli/openvox-ca/blob/main/docs/storage-backends.md" (int .Values.replicaCount) $kind) -}}
 {{- end -}}
@@ -1399,11 +1422,11 @@ Returns "true", or nothing.
 */}}
 {{- define "openvox-ca.dsnHasPassword" -}}
 {{- $dsn := .dsn -}}
-{{- $backend := lower (trim .backend) -}}
+{{- $backend := include "openvox-ca.backendKind" .backend -}}
 {{- $userinfo := "" -}}
-{{- if not (and (has $backend (list "sqlite" "sqlite3")) (hasPrefix "file:" $dsn)) -}}
+{{- if not (and (eq $backend "sqlite") (hasPrefix "file:" $dsn)) -}}
 {{- $rest := $dsn -}}
-{{- if and (not (has $backend (list "mysql" "mariadb"))) (regexMatch "(?i)^(postgres|postgresql|unix)://" $dsn) -}}
+{{- if and (ne $backend "mysql") (regexMatch "(?i)^(postgres|postgresql|unix)://" $dsn) -}}
 {{- $rest = regexReplaceAll "(?s)^[^:]*://" $dsn "" -}}
 {{- end -}}
 {{- if contains "@" $rest -}}
@@ -1568,9 +1591,9 @@ persistence.enabled: true, or switch to an external storage backend.
 WARNING: {{ if .Values.autoscaling.enabled }}autoscaling may run up to {{ $replicas }} replicas{{ else }}replicaCount is {{ $replicas }}{{ end }}, and the config this chart
 renders selects the {{ $backend }} backend, which supports exactly one running
 instance. The chart cannot see the backend the server will actually use
-(existingConfigMap, args, envFrom, a backend fed in from a Secret, or a
---storage-backend whose value is a separate argument), so it has not refused
-this. If it is filesystem or sqlite, run one replica; use postgres,
+(existingConfigMap, args, envFrom, a --config in extraArgs, a backend fed in
+from a Secret or ConfigMap, or a --storage-backend whose value is a separate
+argument), so it has not refused this. If it is filesystem or sqlite, run one replica; use postgres,
 mysql, etcd, or redis to run more than one — see
 https://github.com/voxpupuli/openvox-ca/blob/main/docs/storage-backends.md
 {{- end }}

@@ -17,8 +17,9 @@ fullnameOverride: ca-edge
 # A terminating proxy in front: plain HTTP, so the probes must follow suit.
 #
 # An external backend, because the autoscaler below may run four replicas and
-# the chart refuses that on filesystem or sqlite. Spelled by its alias, so the
-# fixture also proves the refusal folds aliases onto the right kind.
+# the chart refuses that on filesystem or sqlite. Spelled by its alias, which
+# shows an external backend's alias is not mistaken for a single-instance one;
+# the folding itself is asserted in chart:test.
 config:
   no_tls_required: true
   storage_backend: valkey
