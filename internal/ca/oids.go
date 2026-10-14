@@ -44,10 +44,13 @@ var (
 	// CA admin access. OpenVox Server embeds it in its own certificate so the
 	// puppetserver CA CLI can authenticate without being listed by CN.
 	//
-	// Note: the CA copies Puppet-arc OIDs from submitted CSRs when signing
-	// (see signing.go). In production, prefer autosign=executable over
-	// autosign=true so that CSRs carrying this extension are not signed
-	// without operator review.
+	// Note: when signing a CSR the CA copies its Puppet-arc extensions except
+	// those in the authorisation arc (PuppetAuthOIDArc), which it strips, so no
+	// CSR can obtain this extension whatever the autosign mode; see
+	// signWithDuration in signing.go for the reason. It still reaches
+	// certificates in process: AuthGrant (authgrant.go) mints it, and renewal
+	// (reissueLeafLocked in signing.go) carries it forward from the certificate
+	// being renewed, onto a re-key CSR's public key included.
 	//
 	// Source: https://github.com/puppetlabs/puppet/blob/main/lib/puppet/ssl/oids.rb
 	OIDPpCliAuth = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 3, 39}

@@ -11,7 +11,10 @@ guide is the human-friendly entry point; where the two overlap, AGENTS.md wins.
 
 ## Prerequisites
 
-- Go 1.25+ (see [`go.mod`](go.mod) for the exact version)
+- Go at or above the `go` directive in [`go.mod`](go.mod). Under its default
+  `GOTOOLCHAIN=auto` an older Go from 1.21 onwards fetches that toolchain
+  itself; one before 1.21, or a distribution package that sets
+  `GOTOOLCHAIN=local`, fails to build instead
 - git (any supported version — the magefile suite's fixtures isolate themselves
   from your own git config by redirecting `HOME` as well as setting
   `GIT_CONFIG_GLOBAL`, so they do not depend on the 2.32+ variables alone)
