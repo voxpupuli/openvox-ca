@@ -98,8 +98,7 @@ key and code running in the frontend. Both children run as the same user, and
 the frontend opens the same store as the signer, with the same credentials, to
 serve requests. The stored key (`private/ca_key.pem` on the filesystem backend,
 the `ca_key` blob on the others) is readable to it, and so is anything else that
-user can read: a passphrase file, the auto-generated passphrase, and the
-signer's environment.
+user can read: a passphrase file and the signer's environment.
 
 Two things change that:
 
