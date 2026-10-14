@@ -411,12 +411,15 @@ invalid subject or a bad `?dns=` value, and `409 Conflict` when the subject
 already has a certificate.
 
 It refuses the subject `ca` with `400`, before any key is generated. The key it
-writes for a subject goes to `private/<subject>_key.pem` under the cadir, and
+writes for a subject goes to `private/<subject>_key.pem` under the cadir, and on
+the [filesystem backend](storage-backends.md#filesystem-backend-default)
 `private/ca_key.pem` is where a cadir created by an earlier openvox-ca keeps the
 CA key: there it would be overwritten, and in a newer cadir the server would
-refuse to start on two different CA keys. No other route refuses `ca`: a CSR
-for it (`PUT /certificate_request/ca`) is accepted, as OpenVox Server accepts
-it, because a CSR carries the requester's own key and nothing is written to
+refuse to start on two different CA keys. Other backends keep the CA key
+elsewhere, and refuse `ca` all the same, so that the name means one thing
+whatever the backend. No other route refuses `ca`: a CSR for it
+(`PUT /certificate_request/ca`) is accepted, as OpenVox Server accepts it,
+because a CSR carries the requester's own key and nothing is written to
 `private/`.
 
 It cannot issue a certificate carrying `pp_cli_auth` — see

@@ -1173,8 +1173,9 @@ mean either unit.
 refused at startup rather than discovered at issuance, and each name occupies
 the ordinary inventory slot for that subject. The certname `ca` is refused at
 startup as well, here and in `serving_cert`: no path that generates a private
-key accepts it, because `POST /generate/ca` would write that key over the CA's
-own in a cadir created by an earlier openvox-ca. Choose another certname.
+key accepts it, because on the filesystem backend `POST /generate/ca` would
+write that key over the CA's own in a cadir created by an earlier openvox-ca.
+Choose another certname.
 
 **Two managed certificates cannot share a certname**, and neither can a managed
 certificate and [`serving_cert`](#the-cas-own-serving-certificate): both are
