@@ -6737,12 +6737,90 @@ config:
 			wants: []string{"no puppetServers are listed"},
 		},
 		{
-			name:  "NOTES warns about a shared filesystem CA under autoscaling",
+			// Where the chart can see the backend, validate refuses several
+			// replicas outright; the warning is what is left for the
+			// configurations it cannot read. It has to read the autoscaling
+			// ceiling, since that is what the autoscaler may reach.
+			name:  "NOTES warns about several replicas when the backend is out of sight",
 			notes: true,
-			// The replica warning has to read the autoscaling floor, not just
-			// replicaCount.
-			sets:  []string{tls, "autoscaling.enabled=true", "autoscaling.minReplicas=3"},
-			wants: []string{"autoscaling starts at 3 replicas", "not safe to share between replicas"},
+			sets: []string{tls, "autoscaling.enabled=true", "autoscaling.maxReplicas=3",
+				"extraEnv[0].name=OPENVOX_CA_STORAGE_BACKEND",
+				"extraEnv[0].valueFrom.secretKeyRef.name=backend", "extraEnv[0].valueFrom.secretKeyRef.key=kind"},
+			wants: []string{"autoscaling may run up to 3 replicas", "cannot see the backend the server will actually use"},
+		},
+		{
+			// The same warning from the other half of configFullyKnown. The
+			// chart's own config names no backend, so it describes the
+			// filesystem default it would otherwise have rendered.
+			name:  "NOTES warns about several replicas under an existingConfigMap",
+			notes: true,
+			sets:  []string{"existingConfigMap=mine", "replicaCount=2"},
+			wants: []string{"replicaCount is 2", "selects the filesystem backend"},
+		},
+		{
+			// The warning must not outlive the refusal into configurations the
+			// chart can judge: a replicated external backend is the supported
+			// case, and warning there would teach operators to ignore it.
+			name:     "NOTES says nothing about replicas on a backend that supports them",
+			notes:    true,
+			sets:     []string{tls, "replicaCount=2", "config.storage_backend=postgres"},
+			wants:    []string{"Storage backend: postgres"},
+			notWants: []string{"supports exactly one running instance"},
+		},
+		{
+			// The notes read the backend the server will run with, not only
+			// the config file's: the environment outranks it, so a persistence
+			// warning keyed on the file alone warned a postgres deployment
+			// that its CA lived on an emptyDir.
+			name:     "NOTES reads the backend from the environment when it is set there",
+			notes:    true,
+			sets:     []string{tls, "persistence.enabled=false", "env.OPENVOX_CA_STORAGE_BACKEND=postgres"},
+			wants:    []string{"Storage backend: postgres"},
+			notWants: []string{"persistence is disabled"},
+		},
+		{
+			// And it folds aliases, which a comparison against "filesystem"
+			// let past: "fs" is the filesystem backend to the server.
+			name:  "NOTES warns about an emptyDir CA when the backend is spelled by an alias",
+			notes: true,
+			sets:  []string{tls, "persistence.enabled=false", "config.storage_backend=fs"},
+			wants: []string{"Storage backend: filesystem", "persistence is disabled"},
+		},
+		{
+			name:  "several replicas render on an external backend",
+			sets:  []string{tls, "replicaCount=2", "config.storage_backend=pg"},
+			wants: []string{"replicas: 2"},
+		},
+		{
+			// The environment outranks the config file, so a filesystem
+			// default overridden there is not a filesystem CA.
+			name:  "several replicas render when the environment names an external backend",
+			sets:  []string{tls, "replicaCount=2", "env.OPENVOX_CA_STORAGE_BACKEND=etcd"},
+			wants: []string{"replicas: 2"},
+		},
+		{
+			// A backend fed in from a Secret is one the chart cannot read, so it
+			// must not refuse; the NOTES case above pins the warning instead.
+			name: "several replicas render when the backend comes from a Secret",
+			sets: []string{tls, "replicaCount=2",
+				"extraEnv[0].name=OPENVOX_CA_STORAGE_BACKEND",
+				"extraEnv[0].valueFrom.secretKeyRef.name=backend", "extraEnv[0].valueFrom.secretKeyRef.key=kind"},
+			wants: []string{"replicas: 2"},
+		},
+		{
+			// The separated flag leaves its value in the next element, which
+			// the chart does not reassemble, so it is unreadable too.
+			name:  "several replicas render when the backend flag's value is separate",
+			sets:  []string{tls, "replicaCount=2", "extraArgs[0]=--storage-backend", "extraArgs[1]=redis"},
+			wants: []string{"replicas: 2"},
+		},
+		{
+			// The ceiling is what is refused, so an autoscaler held to one
+			// replica on a filesystem CA is allowed, whatever replicaCount says
+			// (the Deployment omits it under autoscaling).
+			name:  "an autoscaler capped at one replica renders on the filesystem backend",
+			sets:  []string{tls, "replicaCount=5", "autoscaling.enabled=true", "autoscaling.minReplicas=1", "autoscaling.maxReplicas=1"},
+			wants: []string{"kind: HorizontalPodAutoscaler", "maxReplicas: 1"},
 		},
 		{
 			name:     "NOTES does not warn about autosign when patterns override the mode",
@@ -6963,6 +7041,58 @@ config:
 			name:    "an autoscaler with no metric to act on",
 			sets:    []string{tls, "autoscaling.enabled=true", "autoscaling.targetCPUUtilizationPercentage="},
 			wantErr: "no metric is configured",
+		},
+		{
+			// A NOTES warning used to be all this got, and helm template, Argo
+			// CD and Flux never show NOTES.
+			name:    "several replicas on the default filesystem backend",
+			sets:    []string{tls, "replicaCount=2"},
+			wantErr: "replicaCount is 2, but the filesystem storage backend supports exactly one running instance",
+		},
+		{
+			name:    "several replicas on the sqlite backend, spelled by its alias",
+			sets:    []string{tls, "replicaCount=3", "config.storage_backend=sqlite3"},
+			wantErr: "replicaCount is 3, but the sqlite storage backend",
+		},
+		{
+			// The server trims and lowercases the name before matching it, so
+			// the chart has to as well or the refusal is one space away from
+			// being bypassed.
+			name:       "several replicas on a filesystem backend spelled with case and padding",
+			sets:       []string{tls, "replicaCount=2"},
+			valuesYAML: "config:\n  storage_backend: \" Local \"\n",
+			wantErr:    "replicaCount is 2, but the filesystem storage backend",
+		},
+		{
+			// minReplicas: 1 is the case a floor-based check let through: the
+			// autoscaler starts at one and scales to the ceiling under load.
+			name:    "an autoscaler that may scale a filesystem CA past one replica",
+			sets:    []string{tls, "autoscaling.enabled=true", "autoscaling.minReplicas=1", "autoscaling.maxReplicas=3"},
+			wantErr: "autoscaling.maxReplicas is 3, but the filesystem storage backend",
+		},
+		{
+			// The environment outranks the config file in both directions: here
+			// it turns an etcd config back into a single-instance CA.
+			name:    "several replicas when the environment overrides the backend to sqlite",
+			sets:    []string{tls, "replicaCount=2", "config.storage_backend=etcd", "env.OPENVOX_CA_STORAGE_BACKEND=sqlite"},
+			wantErr: "the sqlite storage backend",
+		},
+		{
+			// The flag outranks everything, and an empty one is still given:
+			// the server reads it as the filesystem default.
+			name:    "several replicas when an empty backend flag overrides the config",
+			sets:    []string{tls, "replicaCount=2", "config.storage_backend=redis", "extraArgs[0]=--storage-backend="},
+			wantErr: "the filesystem storage backend",
+		},
+		{
+			// A flag with its value attached settles the backend even when the
+			// environment feeds it from a Secret, because the flag wins.
+			name: "several replicas when a backend flag overrides a Secret-fed variable",
+			sets: []string{tls, "replicaCount=2",
+				"extraEnv[0].name=OPENVOX_CA_STORAGE_BACKEND",
+				"extraEnv[0].valueFrom.secretKeyRef.name=backend", "extraEnv[0].valueFrom.secretKeyRef.key=kind",
+				"extraArgs[0]=--storage-backend=sqlite"},
+			wantErr: "the sqlite storage backend",
 		},
 		{
 			name:    "export RBAC bound to the namespace's default ServiceAccount",

@@ -186,7 +186,7 @@ and [the CA's own serving certificate](https://github.com/voxpupuli/openvox-ca/b
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `replicaCount` | `1` | More than one requires an external storage backend |
+| `replicaCount` | `1` | More than one requires an external storage backend; the chart refuses it on filesystem or sqlite |
 | `strategy` | `{}` | Empty follows `persistence.enabled`: Recreate while the cadir is a ReadWriteOnce PVC, RollingUpdate (maxUnavailable 0, maxSurge 1) once the state is external. Set it explicitly to override either way — a map without `type` is refused, because Kubernetes would read it as RollingUpdate |
 | `revisionHistoryLimit` | `10` | |
 | `command` | `[]` | Overrides the container entrypoint |
@@ -282,7 +282,7 @@ certificate, so the controller **must** pass TLS through untouched.
 | `podDisruptionBudget.minAvailable` | `1` | Ignored when `maxUnavailable` is set |
 | `podDisruptionBudget.maxUnavailable` | `""` | `0` is honoured (block every voluntary eviction), not treated as unset |
 | `podDisruptionBudget.unhealthyPodEvictionPolicy` | `""` | Kubernetes 1.27+ |
-| `autoscaling.enabled` | `false` | Requires an external storage backend, and at least one of `targetCPUUtilizationPercentage`, `targetMemoryUtilizationPercentage` or `metrics` — the chart refuses an install with none set |
+| `autoscaling.enabled` | `false` | Requires an external storage backend (the chart refuses a `maxReplicas` above 1 on filesystem or sqlite), and at least one of `targetCPUUtilizationPercentage`, `targetMemoryUtilizationPercentage` or `metrics` — the chart refuses an install with none set |
 | `autoscaling.minReplicas` / `.maxReplicas` | `2` / `6` | |
 | `autoscaling.targetCPUUtilizationPercentage` | `80` | |
 | `autoscaling.targetMemoryUtilizationPercentage` | `""` | |

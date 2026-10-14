@@ -660,6 +660,75 @@ false
 {{- end -}}
 
 {{/*
+The storage backend kind a storage_backend value selects, by the server's own
+spelling rules (storage.ParseBackendKind): case-insensitive, trimmed, empty
+meaning filesystem, and the aliases folded onto their kind. The NOTES warnings
+used to compare the raw value against "filesystem" and "sqlite", which let
+`fs`, `local` and `sqlite3` past both.
+
+A value the server does not recognise comes back trimmed and lowercased, so it
+matches no kind; the server refuses it at startup with a message of its own.
+*/}}
+{{- define "openvox-ca.backendKind" -}}
+{{- $name := . | toString | trim | lower -}}
+{{- if has $name (list "" "filesystem" "file" "fs" "disk" "local") -}}
+filesystem
+{{- else if has $name (list "sqlite" "sqlite3") -}}
+sqlite
+{{- else if eq $name "valkey" -}}
+redis
+{{- else if has $name (list "postgres" "postgresql" "pg") -}}
+postgres
+{{- else if eq $name "mariadb" -}}
+mysql
+{{- else -}}
+{{ $name }}
+{{- end -}}
+{{- end -}}
+
+{{/*
+The storage backend kind the server will run with, or nothing when the chart
+cannot tell.
+
+The server's precedence, lowest first: the config file, then
+OPENVOX_CA_STORAGE_BACKEND when it is non-empty, then --storage-backend, which
+the chart appends to its argv through extraArgs and which wins whenever it is
+given, even empty. env is rendered before extraEnv, so a name in both takes
+extraEnv's value, and they are scanned in that order. A flag with its value
+attached settles the question whatever the environment held, so it restores a
+verdict a Secret-fed variable had withheld.
+
+Nothing comes back when the configuration is not fully known, when extraEnv
+feeds the variable from a Secret or ConfigMap, or when the flag's value is in
+the following element of extraArgs. Callers that refuse an install must treat
+nothing as "cannot judge" and not refuse, since a guard that fires on a
+configuration it cannot read is worse than none.
+*/}}
+{{- define "openvox-ca.storageBackend" -}}
+{{- if eq (include "openvox-ca.configFullyKnown" .) "true" -}}
+{{- $config := include "openvox-ca.config" . | fromYaml -}}
+{{- $name := dig "storage_backend" "" $config | toString -}}
+{{- $known := true -}}
+{{- range $envName, $value := .Values.env -}}
+{{- if and (eq $envName "OPENVOX_CA_STORAGE_BACKEND") $value }}{{ $name = $value | toString }}{{ end -}}
+{{- end -}}
+{{- range .Values.extraEnv -}}
+{{- if eq .name "OPENVOX_CA_STORAGE_BACKEND" -}}
+{{- if hasKey . "valueFrom" }}{{ $known = false }}{{ else if .value }}{{ $name = .value | toString }}{{ end -}}
+{{- end -}}
+{{- end -}}
+{{- range .Values.extraArgs -}}
+{{- $arg := . | toString -}}
+{{- if hasPrefix "--storage-backend=" $arg }}{{ $name = trimPrefix "--storage-backend=" $arg }}{{ $known = true }}{{ end -}}
+{{- if eq $arg "--storage-backend" }}{{ $known = false }}{{ end -}}
+{{- end -}}
+{{- if $known -}}
+{{ include "openvox-ca.backendKind" $name }}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Whether config.serving_cert names a block at all.
 
 Present-and-a-map, not merely present. The two spellings mean different things
@@ -1192,6 +1261,29 @@ CrashLoopBackOff or a Service that silently routes nowhere.
 {{- end -}}
 
 {{/*
+  The filesystem and sqlite backends support exactly one running instance:
+  nothing reconciles the serial index, OCSP cache and cached CRL that each
+  process holds. A second replica either fails on the store-wide instance lock
+  and crash-loops, never starts because the ReadWriteOnce volume is attached to
+  another node, or — on an emptyDir — bootstraps a CA of its own and signs
+  half the fleet's certificates with a different key. This used to be a NOTES
+  warning, which helm template, Argo CD and Flux never show.
+
+  Under autoscaling the bound is maxReplicas, since the autoscaler may scale up
+  to it at any time. Checked only when the chart can see the backend, which
+  openvox-ca.storageBackend reports by returning nothing; the NOTES warning
+  covers the rest.
+*/}}
+{{- $kind := include "openvox-ca.storageBackend" . -}}
+{{- if has $kind (list "filesystem" "sqlite") -}}
+{{- if and .Values.autoscaling.enabled (gt (int .Values.autoscaling.maxReplicas) 1) -}}
+{{- fail (printf "autoscaling.maxReplicas is %d, but the %s storage backend supports exactly one running instance: a second replica crash-loops on the store lock, cannot attach a ReadWriteOnce volume, or on an emptyDir starts a separate CA. Set autoscaling.maxReplicas: 1, or autoscaling.enabled: false with replicaCount: 1, or move the CA to postgres, mysql, etcd or redis — see https://github.com/voxpupuli/openvox-ca/blob/main/docs/storage-backends.md" (int .Values.autoscaling.maxReplicas) $kind) -}}
+{{- else if and (not .Values.autoscaling.enabled) (gt (int .Values.replicaCount) 1) -}}
+{{- fail (printf "replicaCount is %d, but the %s storage backend supports exactly one running instance: a second replica crash-loops on the store lock, cannot attach a ReadWriteOnce volume, or on an emptyDir starts a separate CA. Set replicaCount: 1, or move the CA to postgres, mysql, etcd or redis — see https://github.com/voxpupuli/openvox-ca/blob/main/docs/storage-backends.md" (int .Values.replicaCount) $kind) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
   puppetServers and autosign.patterns are written one per line into the config
   ConfigMap, and extraConfigFiles bodies are indented into it. Anything YAML
   treats as a line break ends the block scalar early and injects a key of its
@@ -1424,9 +1516,16 @@ warnings. They were the operator-facing half of a defect once already.
 {{- $fullName := include "openvox-ca.fullname" . -}}
 {{- $namespace := include "openvox-ca.namespace" . -}}
 {{- $config := include "openvox-ca.config" . | fromYaml -}}
-{{- $backend := dig "storage_backend" "filesystem" $config -}}
+{{- /*
+  The backend the server will run with where the chart can see it, and
+  otherwise the one the chart's own config names: the notes describe the
+  deployment, and an operator with the backend in a Secret still wants the
+  persistence warning about the config they wrote.
+*/ -}}
+{{- $resolvedBackend := include "openvox-ca.storageBackend" . -}}
+{{- $backend := $resolvedBackend | default (include "openvox-ca.backendKind" (dig "storage_backend" "" $config)) -}}
 {{- $tls := eq (include "openvox-ca.tlsConfigured" .) "true" -}}
-{{- $replicas := ternary (int .Values.autoscaling.minReplicas) (int .Values.replicaCount) .Values.autoscaling.enabled -}}
+{{- $replicas := ternary (int .Values.autoscaling.maxReplicas) (int .Values.replicaCount) .Values.autoscaling.enabled -}}
 {{- $autosign := dig "autosign_config" "" $config | toString -}}
 openvox-ca {{ .Chart.AppVersion }} has been deployed as {{ $fullName }} in namespace {{ $namespace }}.
 
@@ -1459,10 +1558,19 @@ that directory is an emptyDir. The CA will be regenerated from scratch on every
 restart and previously issued certificates will stop verifying. Set
 persistence.enabled: true, or switch to an external storage backend.
 {{- end }}
+{{- /*
+  Where the chart can see the backend, openvox-ca.validate has already refused
+  this and the notes never render, so the warning only ever reaches the
+  configurations it cannot judge.
+*/}}
 {{- if and (has $backend (list "filesystem" "sqlite")) (gt $replicas 1) }}
 
-WARNING: {{ if .Values.autoscaling.enabled }}autoscaling starts at {{ $replicas }} replicas{{ else }}replicaCount is {{ $replicas }}{{ end }}, but the
-{{ $backend }} backend is not safe to share between replicas. Use postgres,
+WARNING: {{ if .Values.autoscaling.enabled }}autoscaling may run up to {{ $replicas }} replicas{{ else }}replicaCount is {{ $replicas }}{{ end }}, and the config this chart
+renders selects the {{ $backend }} backend, which supports exactly one running
+instance. The chart cannot see the backend the server will actually use
+(existingConfigMap, args, envFrom, a backend fed in from a Secret, or a
+--storage-backend whose value is a separate argument), so it has not refused
+this. If it is filesystem or sqlite, run one replica; use postgres,
 mysql, etcd, or redis to run more than one — see
 https://github.com/voxpupuli/openvox-ca/blob/main/docs/storage-backends.md
 {{- end }}

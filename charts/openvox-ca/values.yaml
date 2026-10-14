@@ -410,6 +410,8 @@ managedCerts:
 
 # -- Workload ------------------------------------------------------------------
 
+# More than one needs an external storage backend: filesystem and sqlite
+# support exactly one running instance, and the chart refuses more on either.
 replicaCount: 1
 
 # Deployment strategy. Empty follows the reason the default exists rather than
@@ -817,7 +819,8 @@ podDisruptionBudget:
 # At least one metric source is required when enabled: an HPA with nothing to
 # act on holds the replica count at minReplicas while looking like it
 # autoscales, so the chart refuses that combination at install time. Scaling out
-# also needs an external storage backend.
+# also needs an external storage backend: on filesystem or sqlite the chart
+# refuses a maxReplicas above 1.
 autoscaling:
   enabled: false
   minReplicas: 2
