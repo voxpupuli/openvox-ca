@@ -2188,23 +2188,31 @@ itself — with the rules of OpenSSH's `StrictModes`:
 3. **Two exemptions from the writable test, for directories only.** A sticky
    directory such as `/tmp` is accepted, because the sticky bit stops other
    users renaming or removing entries they do not own (the entries beneath it
-   are still checked). A directory that is itself the root of a read-only mount
-   is accepted too. Kubernetes needs the second: the kubelet creates the root of
-   a ConfigMap or Secret volume world-writable and mounts it read-only.
-   Ownership is checked in both cases.
+   are still checked). The root of a Kubernetes ConfigMap, Secret, projected or
+   downward API volume is accepted too: the kubelet creates it world-writable
+   and mounts it read-only. Ownership is checked in both cases.
 
-   The second exemption is limited to the mount's root on purpose. Whether a
-   mount is read-only is a property of the mount as the CA sees it, not of the
-   directory: under the packaged systemd unit's `ProtectSystem=strict`, nearly
-   every directory is read-only to the CA and still writable by host users
-   through their own view of it. Those directories are not mount roots, so they
-   are judged on their mode bits like any other. What the exemption does trust
-   is that nobody but root writes the directory through another mount. That
-   holds for the kubelet's ConfigMap and Secret volumes, and does not hold for
-   an `emptyDir` or host directory that another container or user mounts
-   read-write: keep the plugin in a ConfigMap or Secret. The check needs Linux
-   5.8 or later to recognise a mount root; on an older kernel no directory is
-   exempt, and a ConfigMap-mounted plugin is refused.
+   The CA recognises such a volume as the root of a read-only mount that holds
+   a root-owned `..data` symlink, which the kubelet's atomic writer leaves
+   there. Both halves matter. Whether a mount is read-only is a property of the
+   mount as the CA sees it, not of the directory: under the packaged systemd
+   unit's `ProtectSystem=strict`, every directory, and every separate host
+   mount point, is read-only to the CA while host users can still write it
+   through their own view of it. None of those carries the kubelet's `..data`,
+   so they are judged on their mode bits like any other. What the exemption
+   does trust is that nobody but root writes the volume through another mount.
+   That holds for the kubelet's own volumes, and does not hold for an
+   `emptyDir` or host directory that another container or user mounts
+   read-write: keep the plugin in a ConfigMap or Secret.
+
+   Recognising a mount root needs Linux 5.8 or later. On an older kernel no
+   volume is exempt and a plugin in a ConfigMap directory mount is refused.
+   Mount it with `subPath` into a root-owned directory instead, which keeps the
+   check on, at the cost of a pod restart for every change to the plugin. The opt-out below is the last
+   resort.
+
+A symlink is judged on its owner only. Linux ignores a symlink's mode, which is
+always `rwxrwxrwx`.
 
 At startup a failure refuses to start, naming every entry at fault and what is
 wrong with it. Under `--daemon` the refusal comes before the fork, so it reaches
@@ -2213,7 +2221,9 @@ is saved but not signed, the agent gets a `500`, and the CA logs an `ERROR`
 naming the entries. The executable that runs is the file that was checked, so
 repointing a symlink — including the `..data` swap the kubelet makes when a
 ConfigMap changes — takes effect on the next CSR, after the new target is
-checked.
+checked. A CSR that arrives in the moment of that swap, after its file was
+checked and before it ran, finds the file gone; the CA then resolves, checks and
+runs the new one instead, once.
 
 The executable's SHA-256 is logged at startup for change detection. It is not
 enforced; editing the script takes effect on the next CSR.

@@ -20,6 +20,7 @@ package ca
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -27,43 +28,64 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-// mountPoints reads /proc/self/mountinfo and returns every mount point this
-// process can see, and the read-only directories among them, unescaping the
-// octal escapes it uses for spaces and the like. It is the specs' independent
-// oracle for what readOnlyMountRoot asks the kernel. A later line for the same
-// point is a mount stacked on top of the earlier one and hides it, so the last
-// line for each point decides.
-func mountPoints() (all map[string]bool, readOnly []string) {
+// visibleMount is one mount point from /proc/self/mountinfo, and whether
+// statfs(2) would call it read-only.
+type visibleMount struct {
+	point    string
+	readOnly bool
+}
+
+// mountPoints reads /proc/self/mountinfo and returns, in the order the kernel
+// lists them, the mount points this process can actually reach, with every
+// point it lists in all. It is the specs' independent oracle for what
+// readOnlyMountRoot asks the kernel.
+//
+// Three details keep it honest. A mount is read-only if either its per-mount
+// options or its superblock options say "ro", because statfs ORs the two.
+// A later line for the same point is a mount stacked on top that hides the
+// earlier one, so the last line for a point decides. And a later mount on an
+// ancestor hides everything beneath it, so such a point is left out.
+func mountPoints() (all map[string]bool, visible []visibleMount) {
 	GinkgoHelper()
 	data, err := os.ReadFile("/proc/self/mountinfo")
 	Expect(err).NotTo(HaveOccurred())
-	all = map[string]bool{}
-	var order []string
+
+	type entry struct {
+		point    string
+		readOnly bool
+	}
+	var entries []entry
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) < 6 {
+		sep := slices.Index(fields, "-")
+		if len(fields) < 6 || sep < 6 || len(fields) < sep+4 {
 			continue
 		}
 		point, err := strconv.Unquote(`"` + fields[4] + `"`)
 		if err != nil {
 			continue
 		}
-		if _, seen := all[point]; !seen {
-			order = append(order, point)
-		}
-		all[point] = false
-		for _, opt := range strings.Split(fields[5], ",") {
-			if opt == "ro" {
-				all[point] = true
+		ro := slices.Contains(strings.Split(fields[5], ","), "ro") ||
+			slices.Contains(strings.Split(fields[sep+3], ","), "ro")
+		entries = append(entries, entry{point, ro})
+	}
+
+	all = map[string]bool{}
+	for i, e := range entries {
+		all[e.point] = true
+		hidden := false
+		for _, later := range entries[i+1:] {
+			if later.point == e.point || later.point == "/" ||
+				strings.HasPrefix(e.point, later.point+"/") {
+				hidden = true
+				break
 			}
 		}
-	}
-	for _, point := range order {
-		if fi, err := os.Lstat(point); all[point] && err == nil && fi.IsDir() {
-			readOnly = append(readOnly, point)
+		if fi, err := os.Lstat(e.point); !hidden && err == nil && fi.IsDir() {
+			visible = append(visible, visibleMount{e.point, e.readOnly})
 		}
 	}
-	return all, readOnly
+	return all, visible
 }
 
 // The real kernel answer, which the white-box hook specs stand in for. Where
@@ -71,22 +93,24 @@ func mountPoints() (all map[string]bool, readOnly []string) {
 // so and skips rather than passing on nothing.
 var _ = Describe("readOnlyMountRoot on Linux", func() {
 	It("recognises the root of a read-only mount", func() {
-		_, roots := mountPoints()
-		if len(roots) == 0 {
-			Skip("no read-only mount is visible to this process")
+		_, visible := mountPoints()
+		for _, m := range visible {
+			if m.readOnly {
+				Expect(readOnlyMountRoot(m.point)).To(BeTrue(), "mount point %q", m.point)
+				return
+			}
 		}
-		Expect(readOnlyMountRoot(roots[0])).To(BeTrue(), "mount point %q", roots[0])
+		Skip("no read-only mount is visible to this process")
 	})
 
 	// Being a mount root is not enough: the mount has to be read-only.
 	It("does not call the root of a read-write mount read-only", func() {
-		all, _ := mountPoints()
-		for point, ro := range all {
-			if fi, err := os.Lstat(point); ro || err != nil || !fi.IsDir() {
-				continue
+		_, visible := mountPoints()
+		for _, m := range visible {
+			if !m.readOnly {
+				Expect(readOnlyMountRoot(m.point)).To(BeFalse(), "%q is a read-write mount", m.point)
+				return
 			}
-			Expect(readOnlyMountRoot(point)).To(BeFalse(), "%q is a read-write mount", point)
-			return
 		}
 		Skip("no read-write mount is visible to this process")
 	})
@@ -95,19 +119,22 @@ var _ = Describe("readOnlyMountRoot on Linux", func() {
 	// filesystem, or a service manager's ProtectSystem=strict, every directory
 	// is on a read-only mount, and only the mount's root may be exempt.
 	It("does not extend that to a directory beneath the root", func() {
-		all, roots := mountPoints()
-		for _, root := range roots {
-			entries, err := os.ReadDir(root)
+		all, visible := mountPoints()
+		for _, m := range visible {
+			if !m.readOnly {
+				continue
+			}
+			entries, err := os.ReadDir(m.point)
 			if err != nil {
 				continue
 			}
 			for _, e := range entries {
-				sub := filepath.Join(root, e.Name())
+				sub := filepath.Join(m.point, e.Name())
 				fi, err := os.Lstat(sub)
-				if _, isMount := all[sub]; err != nil || !fi.IsDir() || isMount {
+				if err != nil || !fi.IsDir() || all[sub] {
 					continue // not a directory, or a mount point of its own
 				}
-				Expect(readOnlyMountRoot(sub)).To(BeFalse(), "%q is on read-only %q but is not its root", sub, root)
+				Expect(readOnlyMountRoot(sub)).To(BeFalse(), "%q is on read-only %q but is not its root", sub, m.point)
 				return
 			}
 		}

@@ -25,11 +25,11 @@ import "golang.org/x/sys/unix"
 // statx(2) says whether path is a mount root, and statfs(2) reports the flags
 // of the mount it was reached through.
 //
-// The mount-root half is what keeps this from exempting everything under a
-// read-only root filesystem, or under a service manager's ProtectSystem=strict,
-// where every directory is read-only here and writable elsewhere. statx only
-// reports mount roots from Linux 5.8, and an older kernel answers "no": the
-// exemption is never granted on a guess, and neither is it granted on an error.
+// Being the root of a read-only mount is necessary for the exemption, and not
+// sufficient: under a service manager's ProtectSystem=strict every host mount
+// point is one too. kubeletVolumeRoot asks the rest. statx only reports mount
+// roots from Linux 5.8, and an older kernel answers "no": the exemption is
+// never granted on a guess, and neither is it granted on an error.
 func readOnlyMountRoot(path string) bool {
 	var stx unix.Statx_t
 	if err := unix.Statx(unix.AT_FDCWD, path, unix.AT_SYMLINK_NOFOLLOW, 0, &stx); err != nil {

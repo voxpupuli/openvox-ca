@@ -109,7 +109,9 @@ func autosignInsecureNotice(findings []ca.AutosignPathFinding) string {
 
 // logAutosignExecutable logs the executable the server will run, with a
 // SHA-256 of it for change detection (logged, not enforced), and a warning for
-// each finding the opt-out let through.
+// each finding the opt-out let through. A file that cannot be read for the hash
+// is reported in place of it and does not stop startup: the hash decides
+// nothing, and the check before each run is what decides whether it runs.
 func logAutosignExecutable(path, resolved string, findings []ca.AutosignPathFinding) {
 	for _, f := range findings {
 		slog.Warn("INSECURE: insecure_allow_unsafe_autosign_path is set; the autosign executable could be replaced "+

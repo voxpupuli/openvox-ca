@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -162,9 +163,37 @@ var _ = Describe("logAutosignExecutable", func() {
 
 		logAutosignExecutable(exe, exe, findings)
 		Expect(buf.String()).To(ContainSubstring("level=WARN msg=\"INSECURE: insecure_allow_unsafe_autosign_path is set"))
-		Expect(buf.String()).To(ContainSubstring("path=" + filepath.Dir(exe)))
-		Expect(buf.String()).To(ContainSubstring("problem=\"group- and world-writable\""))
-		Expect(buf.String()).To(ContainSubstring("problem=group-writable"))
+		// Each WARN names its own entry, by its real path, followed by its
+		// mode -- which the INFO record about the executable never does.
+		realDir, err := filepath.EvalSymlinks(filepath.Dir(exe))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(buf.String()).To(ContainSubstring("path=" + realDir + " mode=drwxrwxrwx problem=\"group- and world-writable\""))
+		Expect(buf.String()).To(ContainSubstring("path=" + filepath.Join(realDir, "autosign.sh") + " mode=-rwxrwxr-x problem=group-writable"))
+	})
+
+	// The hash is logged, not enforced, so a file that cannot be read for it
+	// costs the hash and nothing else; the check before each run still
+	// decides whether it runs.
+	It("says why there is no hash when the file cannot be read", func() {
+		exe := autosignFixture(0o755, 0o755)
+		logAutosignExecutable(exe, exe+".missing", nil)
+		Expect(buf.String()).To(ContainSubstring("sha256_error="))
+		Expect(buf.String()).NotTo(ContainSubstring("sha256="))
+	})
+})
+
+var _ = Describe("autosignInsecureNotice", func() {
+	It("has nothing to say when the opt-out let nothing through", func() {
+		Expect(autosignInsecureNotice(nil)).To(BeEmpty())
+	})
+
+	It("names each finding, quoted", func() {
+		notice := autosignInsecureNotice([]ca.AutosignPathFinding{
+			{Path: "/srv/plug\nINFO forged", Mode: os.ModeDir | 0o775, Reason: "group-writable"},
+		})
+		Expect(notice).To(HavePrefix("INSECURE: insecure_allow_unsafe_autosign_path is set"))
+		Expect(notice).To(ContainSubstring(`"/srv/plug\nINFO forged" (drwxrwxr-x) is group-writable`))
+		Expect(notice).NotTo(ContainSubstring("\n"))
 	})
 })
 
@@ -232,9 +261,10 @@ var _ = Describe("the autosign executable preflight under --daemon", func() {
 		Expect(forked).To(BeTrue())
 		real, evalErr := filepath.EvalSymlinks(exe)
 		Expect(evalErr).NotTo(HaveOccurred())
-		Expect(errOut).To(ContainSubstring(autosignInsecureNotice([]ca.AutosignPathFinding{
-			{Path: real, Mode: os.FileMode(0o775), Reason: "group-writable"},
-		})))
+		// Literal text, not the renderer's output: a renderer that returned ""
+		// would otherwise pass as ContainSubstring("").
+		Expect(errOut).To(ContainSubstring("INSECURE: insecure_allow_unsafe_autosign_path is set"))
+		Expect(errOut).To(ContainSubstring(strconv.Quote(real) + " (-rwxrwxr-x) is group-writable"))
 	})
 
 	It("forks without a word for an executable nobody else can change", func() {

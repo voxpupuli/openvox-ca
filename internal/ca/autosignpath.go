@@ -88,21 +88,23 @@ var (
 //     bit stops other users renaming or removing entries they do not own --
 //     and the entries beneath it are still judged. That is what lets a script
 //     live under /tmp.
-//   - A directory that is itself the root of a read-only mount is exempt from
-//     the writable test too. Kubernetes needs this: the kubelet creates a
-//     ConfigMap or Secret volume's root 0777, root-owned and not sticky, and
-//     mounts it read-only into the container. Ownership is still judged.
+//   - A Kubernetes ConfigMap, Secret, projected or downward API volume's root
+//     is exempt from the writable test too: the kubelet creates it 0777,
+//     root-owned and not sticky, and mounts it read-only into the container.
+//     Ownership is still judged. See kubeletVolumeRoot for how it is told
+//     apart.
 //
-// That last exemption is deliberately narrow. Whether a mount is read-only is
-// a property of the mount as this process sees it, not of the directory: a
-// service manager's ProtectSystem=strict makes nearly every directory
-// read-only in the CA's own namespace while every host user can still write
-// it through theirs. Requiring the directory to be the mount's root confines
-// the exemption to the shape the kubelet produces, and away from ordinary
-// directories under a read-only root. What it still trusts is that nobody but
-// root writes that directory through another mount -- true of the kubelet's
-// own backing directory, and not of an emptyDir or host directory that some
-// other container or user mounts read-write.
+// That last exemption is deliberately narrow, because the obvious test for it
+// -- "is this directory on a read-only mount?" -- asks about the mount as this
+// process sees it, not about who can write the directory. A service manager's
+// ProtectSystem=strict makes nearly every directory read-only in the CA's own
+// namespace, and every separate host mount point the root of a read-only
+// mount there, while host users can still write them through their own view.
+// So the exemption also wants the one thing only the kubelet's atomic writer
+// leaves at a volume root: a root-owned ..data symlink. What it still trusts
+// is that nobody but root writes that directory through another mount -- true
+// of the kubelet's own backing directory, and not of an emptyDir or host
+// directory that some other container or user mounts read-write.
 //
 // It is called at startup and again before every run, so a symlink repointed
 // after startup -- including the `..data` swap the kubelet makes when a
@@ -148,7 +150,7 @@ func ResolveAutosignExecutable(path string) (string, []AutosignPathFinding, erro
 		if reason == "" {
 			return
 		}
-		if fi.IsDir() && (fi.Mode()&os.ModeSticky != 0 || autosignReadOnlyMountRoot(p)) {
+		if fi.IsDir() && (fi.Mode()&os.ModeSticky != 0 || kubeletVolumeRoot(p)) {
 			return
 		}
 		add(p, fi, reason)
@@ -222,6 +224,24 @@ func ResolveAutosignExecutable(path string) (string, []AutosignPathFinding, erro
 		return "", findings, fmt.Errorf("%q resolves to %q, which is not a regular file", path, current)
 	}
 	return current, findings, nil
+}
+
+// kubeletVolumeRoot reports whether dir is the root of a volume the kubelet's
+// atomic writer manages: the root of a read-only mount, holding the root-owned
+// ..data symlink through which the writer swaps one set of files for the next.
+// The mount must be read-only and dir its root (autosignReadOnlyMountRoot),
+// and the symlink must be root's, so that nobody else can make an ordinary
+// directory look like a volume by planting one.
+func kubeletVolumeRoot(dir string) bool {
+	if !autosignReadOnlyMountRoot(dir) {
+		return false
+	}
+	fi, err := os.Lstat(filepath.Join(dir, "..data"))
+	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		return false
+	}
+	owner, ok := autosignFileOwner(fi)
+	return ok && owner == 0
 }
 
 // quotedPathError re-renders an *fs.PathError with its path quoted, for the

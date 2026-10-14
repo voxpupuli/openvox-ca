@@ -24,6 +24,7 @@ package ca
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -121,20 +122,28 @@ var _ = Describe("ResolveAutosignExecutable platform judgements", func() {
 		})
 	})
 
-	Describe("the root of a read-only mount", func() {
+	Describe("a kubelet volume root", func() {
 		readOnly := func(path string) {
 			orig := autosignReadOnlyMountRoot
 			autosignReadOnlyMountRoot = func(p string) bool { return p == path || orig(p) }
 			DeferCleanup(func() { autosignReadOnlyMountRoot = orig })
 		}
+		// kubeletVolume dresses dir as the kubelet's atomic writer leaves a
+		// ConfigMap or Secret volume: the root of a read-only mount, holding
+		// a root-owned ..data symlink. Whether a real directory is the root
+		// of a read-only mount is readOnlyMountRoot's question, pinned in
+		// autosignpath_linux_test.go.
+		kubeletVolume := func(dir string) {
+			readOnly(dir)
+			Expect(os.Symlink("..2026_10_14_12_00_00.000000000", filepath.Join(dir, "..data"))).To(Succeed())
+			ownedBy("..data", 0, true)
+		}
 
 		// The shape of a Kubernetes ConfigMap or Secret volume: a 0777 root,
-		// not sticky, mounted read-only. Whether a real directory is such a
-		// root is readOnlyMountRoot's question, pinned in
-		// autosignpath_linux_test.go.
-		It("exempts a world-writable directory from the writable test", func() {
+		// not sticky, mounted read-only.
+		It("exempts its world-writable root from the writable test", func() {
+			kubeletVolume(sub)
 			Expect(os.Chmod(sub, 0o777)).To(Succeed())
-			readOnly(sub)
 
 			_, findings, err := ResolveAutosignExecutable(script)
 			Expect(err).NotTo(HaveOccurred())
@@ -142,8 +151,8 @@ var _ = Describe("ResolveAutosignExecutable platform judgements", func() {
 		})
 
 		It("does not exempt it from the ownership test", func() {
+			kubeletVolume(sub)
 			Expect(os.Chmod(sub, 0o777)).To(Succeed())
-			readOnly(sub)
 			ownedBy("sub", uint32(os.Geteuid())+1, true)
 
 			_, findings, err := ResolveAutosignExecutable(script)
@@ -157,13 +166,64 @@ var _ = Describe("ResolveAutosignExecutable platform judgements", func() {
 		// The exemption is for directories, as ruled; a writable script is
 		// refused wherever it lives, and a ConfigMap's defaultMode can say 0555.
 		It("does not exempt the file itself", func() {
+			kubeletVolume(sub)
 			Expect(os.Chmod(script, 0o777)).To(Succeed())
-			readOnly(script)
 
 			_, findings, err := ResolveAutosignExecutable(script)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(findings).To(ConsistOf(HaveField("Path", script)))
 		})
+
+		// What ProtectSystem=strict makes of every separate host mount point:
+		// the root of a read-only mount, as the CA sees it, that host users
+		// can still write. Without the kubelet's ..data it is judged as usual.
+		DescribeTable("judges the root of a read-only mount that is not one",
+			func(dress func()) {
+				readOnly(sub)
+				dress()
+				Expect(os.Chmod(sub, 0o777)).To(Succeed())
+
+				_, findings, err := ResolveAutosignExecutable(script)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(findings).To(ConsistOf(SatisfyAll(
+					HaveField("Path", sub),
+					HaveField("Reason", "group- and world-writable"),
+				)))
+			},
+			Entry("with no ..data at all", func() {}),
+			Entry("with a ..data somebody else planted", func() {
+				Expect(os.Symlink("elsewhere", filepath.Join(sub, "..data"))).To(Succeed())
+				ownedBy("..data", uint32(os.Geteuid())+1, true)
+			}),
+			Entry("with a ..data that is a directory, not a symlink", func() {
+				Expect(os.Mkdir(filepath.Join(sub, "..data"), 0o755)).To(Succeed())
+				ownedBy("..data", 0, true)
+			}),
+		)
+
+		It("needs the read-only mount root as well as the ..data", func() {
+			Expect(os.Symlink("elsewhere", filepath.Join(sub, "..data"))).To(Succeed())
+			ownedBy("..data", 0, true)
+			Expect(os.Chmod(sub, 0o777)).To(Succeed())
+
+			_, findings, err := ResolveAutosignExecutable(script)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(findings).To(ConsistOf(HaveField("Path", sub)))
+		})
+	})
+
+	// The sticky exemption is from the writable test only: the owner of a
+	// sticky directory can still rename anything in it.
+	It("still judges a sticky directory's owner", func() {
+		Expect(os.Chmod(sub, os.ModeSticky|0o777)).To(Succeed())
+		ownedBy("sub", uint32(os.Geteuid())+1, true)
+
+		_, findings, err := ResolveAutosignExecutable(script)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(findings).To(ConsistOf(SatisfyAll(
+			HaveField("Path", sub),
+			HaveField("Reason", ContainSubstring("owned by uid")),
+		)))
 	})
 
 	Describe("readOnlyMountRoot", func() {
@@ -174,5 +234,77 @@ var _ = Describe("ResolveAutosignExecutable platform judgements", func() {
 		It("never grants the exemption for a path it cannot examine", func() {
 			Expect(readOnlyMountRoot(filepath.Join(dir, "missing"))).To(BeFalse())
 		})
+	})
+})
+
+// White-box, because the gap it covers -- between judging the executable and
+// running it -- is one only the autosignBeforeExec seam can reach.
+var _ = Describe("checkAutosignExecutable when the judged file vanishes", func() {
+	var dir, link string
+
+	BeforeEach(func() {
+		var err error
+		dir, err = filepath.EvalSymlinks(GinkgoT().TempDir())
+		Expect(err).NotTo(HaveOccurred())
+		link = filepath.Join(dir, "autosign")
+	})
+
+	// volume writes a directory holding an autosign script that exits with
+	// code, as one generation of a ConfigMap volume.
+	volume := func(name string, code int) string {
+		gen := filepath.Join(dir, name)
+		Expect(os.Mkdir(gen, 0o700)).To(Succeed())
+		Expect(os.Chmod(gen, 0o755)).To(Succeed())
+		script := filepath.Join(gen, "autosign")
+		Expect(os.WriteFile(script, []byte("#!/bin/sh\nexit "+strconv.Itoa(code)+"\n"), 0o700)).To(Succeed())
+		Expect(os.Chmod(script, 0o755)).To(Succeed())
+		return script
+	}
+
+	beforeExec := func(hook func()) {
+		orig := autosignBeforeExec
+		autosignBeforeExec = hook
+		DeferCleanup(func() { autosignBeforeExec = orig })
+	}
+
+	// What the kubelet does on a ConfigMap update, landing between the check
+	// and the exec: repoint, then delete the old generation.
+	It("resolves, judges and runs the new file once", func() {
+		old := volume("old", 1)
+		replacement := volume("new", 0)
+		Expect(os.Symlink(old, link)).To(Succeed())
+		calls := 0
+		beforeExec(func() {
+			calls++
+			if calls == 1 {
+				Expect(os.Remove(link)).To(Succeed())
+				Expect(os.Symlink(replacement, link)).To(Succeed())
+				Expect(os.RemoveAll(filepath.Dir(old))).To(Succeed())
+			}
+		})
+
+		ok, err := checkAutosignExecutable(AutosignConfig{FileOrPath: link}, "node.example.com", nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(ok).To(BeTrue(), "the replacement, which exits 0, is what ran")
+		Expect(calls).To(Equal(2))
+	})
+
+	// One retry, not a loop: a second swap in the same gap is an error even
+	// though a third generation is sitting there ready to run.
+	It("retries once, not again", func() {
+		gens := []string{volume("first", 0), volume("second", 0), volume("third", 0)}
+		Expect(os.Symlink(gens[0], link)).To(Succeed())
+		calls := 0
+		beforeExec(func() {
+			calls++
+			Expect(os.Remove(link)).To(Succeed())
+			Expect(os.Symlink(gens[calls], link)).To(Succeed())
+			Expect(os.RemoveAll(filepath.Dir(gens[calls-1]))).To(Succeed())
+		})
+
+		ok, err := checkAutosignExecutable(AutosignConfig{FileOrPath: link}, "node.example.com", nil)
+		Expect(err).To(MatchError(os.ErrNotExist))
+		Expect(ok).To(BeFalse())
+		Expect(calls).To(Equal(2))
 	})
 })

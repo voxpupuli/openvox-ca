@@ -1198,11 +1198,11 @@ func newRootCmd() *cobra.Command {
 				slog.Warn("SECURITY: autosign is set to 'true' -- ALL certificate signing requests will be automatically signed without validation. " +
 					"This is dangerous in production. Use an autosign script or file-based allowlist instead.")
 			}
-			// SECURITY: Validate the autosign executable's path at startup:
-			// the file, every symlink to it and every directory on the way
-			// must be owned by root or this uid and not group- or
-			// world-writable. CheckAutosign repeats the check before every
-			// run; this is the startup half, which refuses to serve at all.
+			// SECURITY: Judge the autosign executable's path at startup, by
+			// the rules ca.ResolveAutosignExecutable documents. CheckAutosign
+			// repeats the check before every run; this is the startup half,
+			// which refuses to serve unless insecure_allow_unsafe_autosign_path
+			// turns its findings into warnings.
 			// NIST 800-53: CM-5 (Access Restrictions for Change), SI-7 (Software, Firmware, and Information Integrity)
 			if asCfg.Mode == "executable" {
 				resolved, findings, err := checkAutosignExecutable(asCfg)
@@ -1554,7 +1554,7 @@ func newRootCmd() *cobra.Command {
 	f.BoolVar(&insecureAllowWorldKeys, "insecure-allow-world-readable-keys", false,
 		"Start even when CA key material is readable by every local account, warning loudly instead of refusing. Treat the key as compromised if you need this")
 	f.BoolVar(&insecureAutosignPath, "insecure-allow-unsafe-autosign-path", false,
-		"Run the autosign executable even when someone other than root or the CA's own user could replace it (a file, symlink or directory on its path they own, or that is group- or world-writable), warning instead of refusing")
+		"Run the autosign executable even when someone other than root or the CA's own user could replace it (an entry on its path they own, or a file or directory on it that is group- or world-writable), warning instead of refusing")
 	f.StringVar(&caKeyPassphraseFile, "ca-key-passphrase-file", "", "Path to file containing the CA key passphrase (first line used)")
 	f.BoolVar(&singleProcess, "single-process", false, "Disable CA key isolation (run signer and frontend in a single process)")
 	f.StringVar(&storageBackend, "storage-backend", "", "Storage backend: 'filesystem' (default), 'etcd', 'redis' (alias 'valkey'), 'sqlite', 'postgres', or 'mysql' (alias 'mariadb')")
