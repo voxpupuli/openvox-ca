@@ -21,10 +21,8 @@ package main
 import (
 	"context"
 	"crypto"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -707,6 +705,7 @@ func newRootCmd() *cobra.Command {
 		configFile              string
 		encryptCAKey            bool
 		insecureAllowWorldKeys  bool
+		insecureAutosignPath    bool
 		caKeyPassphraseFile     string
 		singleProcess           bool
 		storageBackend          string
@@ -833,6 +832,9 @@ func newRootCmd() *cobra.Command {
 			if cmd.Flags().Changed("insecure-allow-world-readable-keys") {
 				cfg.InsecureAllowWorldReadableKeys = insecureAllowWorldKeys
 			}
+			if cmd.Flags().Changed("insecure-allow-unsafe-autosign-path") {
+				cfg.InsecureAllowUnsafeAutosignPath = insecureAutosignPath
+			}
 			if cmd.Flags().Changed("ca-key-passphrase-file") {
 				cfg.CAKeyPassphraseFile = caKeyPassphraseFile
 			}
@@ -939,6 +941,16 @@ func newRootCmd() *cobra.Command {
 				// where there is still a terminal.
 				if notice := keyPermInsecureNotice(daemonWarnings,
 					cfg.InsecureAllowWorldReadableKeys); notice != "" {
+					_, _ = fmt.Fprintln(cmd.ErrOrStderr(), notice)
+				}
+				// The autosign executable's path, for the same two reasons: a
+				// refusal past the fork reaches nobody, and so would the
+				// opt-out's warning without a log_file.
+				autosignFindings, err := preflightAutosign(cfg)
+				if err != nil {
+					return err
+				}
+				if notice := autosignInsecureNotice(autosignFindings); notice != "" {
 					_, _ = fmt.Fprintln(cmd.ErrOrStderr(), notice)
 				}
 
@@ -1173,12 +1185,11 @@ func newRootCmd() *cobra.Command {
 			}
 
 			// --- Autosign ---
-			asCfg := ca.AutosignConfig{Mode: "off"}
-			switch cfg.AutosignConfig {
-			case "", "false":
-				// leave as off
-			case "true":
-				asCfg.Mode = "true"
+			asCfg, err := autosignConfigFrom(cfg)
+			if err != nil {
+				return err
+			}
+			if asCfg.Mode == "true" {
 				// SECURITY: Warn that autosign=true bypasses all CSR validation.
 				// Any node that submits a CSR will receive a signed certificate
 				// without any verification. This should only be used in isolated
@@ -1186,28 +1197,19 @@ func newRootCmd() *cobra.Command {
 				// NIST 800-53: IA-5 (Authenticator Management)
 				slog.Warn("SECURITY: autosign is set to 'true' -- ALL certificate signing requests will be automatically signed without validation. " +
 					"This is dangerous in production. Use an autosign script or file-based allowlist instead.")
-			default:
-				info, err := os.Stat(cfg.AutosignConfig)
-				if err != nil {
-					return fmt.Errorf("autosign config invalid (path %s): %w", cfg.AutosignConfig, err)
-				}
-				if info.Mode().IsRegular() {
-					if info.Mode().Perm()&0111 != 0 {
-						asCfg.Mode = "executable"
-					} else {
-						asCfg.Mode = "file"
-					}
-					asCfg.FileOrPath = cfg.AutosignConfig
-				}
 			}
-			// SECURITY: Validate autosign executable integrity at startup.
-			// Refuses to start if the executable is world-writable or not owned
-			// by root/current user. Logs SHA-256 hash for change detection.
+			// SECURITY: Validate the autosign executable's path at startup:
+			// the file, every symlink to it and every directory on the way
+			// must be owned by root or this uid and not group- or
+			// world-writable. CheckAutosign repeats the check before every
+			// run; this is the startup half, which refuses to serve at all.
 			// NIST 800-53: CM-5 (Access Restrictions for Change), SI-7 (Software, Firmware, and Information Integrity)
 			if asCfg.Mode == "executable" {
-				if err := validateAutosignExecutable(asCfg.FileOrPath); err != nil {
-					return fmt.Errorf("autosign executable validation failed (path %s): %w", asCfg.FileOrPath, err)
+				resolved, findings, err := checkAutosignExecutable(asCfg)
+				if err != nil {
+					return err
 				}
+				logAutosignExecutable(asCfg.FileOrPath, resolved, findings)
 			}
 
 			slog.Debug("Autosign config", "mode", asCfg.Mode, "path", asCfg.FileOrPath)
@@ -1551,6 +1553,8 @@ func newRootCmd() *cobra.Command {
 	f.BoolVar(&encryptCAKey, "encrypt-ca-key", false, "Encrypt the CA private key at rest (AES-256-GCM + Argon2id). Requires a passphrase source: --ca-key-passphrase-file or PUPPET_CA_KEY_PASSPHRASE")
 	f.BoolVar(&insecureAllowWorldKeys, "insecure-allow-world-readable-keys", false,
 		"Start even when CA key material is readable by every local account, warning loudly instead of refusing. Treat the key as compromised if you need this")
+	f.BoolVar(&insecureAutosignPath, "insecure-allow-unsafe-autosign-path", false,
+		"Run the autosign executable even when someone other than root or the CA's own user could replace it (a file, symlink or directory on its path they own, or that is group- or world-writable), warning instead of refusing")
 	f.StringVar(&caKeyPassphraseFile, "ca-key-passphrase-file", "", "Path to file containing the CA key passphrase (first line used)")
 	f.BoolVar(&singleProcess, "single-process", false, "Disable CA key isolation (run signer and frontend in a single process)")
 	f.StringVar(&storageBackend, "storage-backend", "", "Storage backend: 'filesystem' (default), 'etcd', 'redis' (alias 'valkey'), 'sqlite', 'postgres', or 'mysql' (alias 'mariadb')")
@@ -1863,53 +1867,4 @@ func warnDuplicateCertsWithAutosign(asCfg ca.AutosignConfig, allowDuplicateCerts
 	slog.Warn("allow_duplicate_certs is on with autosigning enabled: a CSR the autosign policy admits is signed "+
 		"even for a subject that already holds a certificate, and the certificate it replaces is not revoked",
 		"autosign_mode", asCfg.Mode)
-}
-
-// validateAutosignExecutable checks the integrity of an autosign executable:
-//  1. Resolves symlinks to the real path
-//  2. Verifies the file is not world-writable (mode & 0002)
-//  3. Verifies the file is owned by root (uid 0) or the current process user
-//  4. Logs the SHA-256 hash for change detection
-func validateAutosignExecutable(path string) error {
-	realPath, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return fmt.Errorf("resolving symlinks for %s: %w", path, err)
-	}
-	if realPath != path {
-		slog.Info("Autosign executable symlink resolved", "path", path, "realpath", realPath)
-	}
-
-	info, err := os.Stat(realPath)
-	if err != nil {
-		return fmt.Errorf("stat %s: %w", realPath, err)
-	}
-
-	// Check world-writable bit.
-	if info.Mode().Perm()&0002 != 0 {
-		return fmt.Errorf("autosign executable %s is world-writable (mode %s); "+
-			"refusing to start -- fix with: chmod o-w %s", realPath, info.Mode().Perm(), realPath)
-	}
-
-	// Check file ownership: must be owned by root or the current user.
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if ok {
-		currentUID := uint32(os.Getuid()) //nolint:gosec // G115: Linux getuid() returns a valid uid_t that always fits uint32
-		if stat.Uid != 0 && stat.Uid != currentUID {
-			return fmt.Errorf("autosign executable %s is owned by uid %d (expected root or current user uid %d); "+
-				"refusing to start", realPath, stat.Uid, currentUID)
-		}
-	}
-
-	// Compute and log SHA-256 hash.
-	data, err := os.ReadFile(realPath)
-	if err != nil {
-		return fmt.Errorf("reading %s for hash: %w", realPath, err)
-	}
-	hash := sha256.Sum256(data)
-	slog.Info("Autosign executable configured",
-		"path", realPath,
-		"sha256", hex.EncodeToString(hash[:]),
-		"mode", info.Mode().Perm().String(),
-	)
-	return nil
 }

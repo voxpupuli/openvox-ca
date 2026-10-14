@@ -623,6 +623,14 @@ autosign:
 development only, and the chart warns), or a path to an executable policy
 plugin you have mounted via `extraVolumes`.
 
+The CA refuses to run a plugin that anyone but root or its own user could
+replace (see [the autosign executable's path](configuration.md#the-autosign-executables-path)).
+A ConfigMap or Secret volume passes as long as the plugin file itself is not
+group- or world-writable: the kubelet owns the volume as root and mounts it
+read-only. Give the file a `defaultMode` (or per-item `mode`) of `0555`, not
+`0775` or `0777`. A ConfigMap update reaches the CA without a restart, unless
+the plugin is mounted with `subPath`, which the kubelet never updates.
+
 ## Monitoring
 
 The Prometheus exporter is off by default. Enabling it opens a second,

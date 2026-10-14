@@ -39,6 +39,11 @@ type AutosignConfig struct {
 	Mode              string        // "true", "file", "executable" (or "off" implicitly)
 	FileOrPath        string        // Path to autosign.conf or executable
 	ExecutableTimeout time.Duration // 0 → defaultExecutableTimeout
+	// AllowUnsafePath runs the executable even when ResolveAutosignExecutable
+	// reports entries on its path that a third party could replace. Set from
+	// insecure_allow_unsafe_autosign_path; the server warns about each finding
+	// at startup instead.
+	AllowUnsafePath bool
 }
 
 func CheckAutosign(cfg AutosignConfig, csr *x509.CertificateRequest, csrPEM []byte) (bool, error) {
@@ -91,10 +96,26 @@ func checkAutosignExecutable(cfg AutosignConfig, commonName string, csrPEM []byt
 		timeout = defaultExecutableTimeout
 	}
 
+	// SECURITY: Re-resolve and re-judge the path before every run, and run the
+	// file that was judged. The startup check alone left the window this
+	// closes: a file, symlink or directory swapped after startup ran with no
+	// check at all, and whoever can replace the executable decides which
+	// certificates are signed. An unsafe path is an error rather than a deny,
+	// so the operator sees why in the log instead of watching every CSR wait.
+	// NIST 800-53: CM-5 (Access Restrictions for Change), SI-7 (Software, Firmware, and Information Integrity)
+	resolved, findings, err := ResolveAutosignExecutable(cfg.FileOrPath)
+	if err != nil {
+		return false, fmt.Errorf("autosign executable %s: %w", cfg.FileOrPath, err)
+	}
+	if len(findings) > 0 && !cfg.AllowUnsafePath {
+		return false, fmt.Errorf("refusing to run autosign executable %s: %s",
+			cfg.FileOrPath, FormatAutosignPathFindings(findings))
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, cfg.FileOrPath, commonName) //nolint:gosec // G204: operator-configured executable; commonName allowlist-validated by ValidateSubject and passed as a separate argv (no shell)
+	cmd := exec.CommandContext(ctx, resolved, commonName) //nolint:gosec // G204: operator-configured executable, resolved and judged above; commonName allowlist-validated by ValidateSubject and passed as a separate argv (no shell)
 	// SECURITY: Environment sanitization: only allowlisted variables are
 	// passed to the autosign subprocess. Prevents leaking secrets (API keys,
 	// cloud tokens, DB credentials) from the CA process environment to
