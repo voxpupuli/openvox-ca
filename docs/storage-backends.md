@@ -202,13 +202,16 @@ does unless `--key-out` names another file. `openvox-ca` creates that directory
 `0750` and writes each key `0600`, and the umask cannot widen either, so only
 the uid that created `private/` can add a key to it.
 
-On a platform that chooses the uid the CA runs as — OpenShift, for one, draws it
-from a range allotted to the namespace — and may choose a different one from one
-run to the next, sharing only the store's group with the uid before it,
-**server-side key generation needs a stable uid**. The first run creates
-`private/`; once a later run is another uid, every `/generate`, and every
-offline `generate` without `--key-out`, fails on the key write with a permission
-error. Signing never writes to `private/`, so it is not affected by this —
+On a platform that chooses the uid the CA runs as, and may choose a different
+one from one run to the next, sharing only the store's group with the uid before
+it, **server-side key generation needs a stable uid**. OpenShift, for one, draws
+the uid from a range allotted to the namespace, so it can change when a store is
+restored into another namespace or cluster. The first run creates `private/`;
+once a later run is another uid, every `/generate`, and every offline `generate`
+without `--key-out`, fails on the key write with a permission error. That
+failure comes after the certificate is signed: the certificate is deleted
+again, but each failed attempt has used a serial and left an inventory entry.
+Signing never writes to `private/`, so it is not affected by this —
 whether the rest of the store is reachable by a later uid is a question for the
 backend, and [the SQLite backend](#sqlite-backend) says what that one needs.
 Managed certificates do not use `private/` either: each writes its key to its
@@ -227,24 +230,34 @@ Kubernetes `fsGroup` with the default `fsGroupChangePolicy: Always`, the kubelet
 gives the volume to that group and ORs group access in at every mount — read and
 write on files, and read, write, search and the setgid bit on directories — so
 `private/` is group-writable again before the next uid starts. The Helm chart
-sets an `fsGroup` by default. It does not happen with no `fsGroup`, with
+pins the uid (`runAsUser: 1000`) and sets an `fsGroup` by default, so a chart
+install is affected only where both have been overridden. Group access is not
+restored with no `fsGroup`, with
 `fsGroupChangePolicy: OnRootMismatch` (which leaves the volume alone once its
 root matches, so a `private/` created after the first mount keeps `0750`), or on
 a volume whose driver does not apply `fsGroup` at all.
 
 Where it does bite, you have three options:
 
-1. **Pin the uid.** Nothing else is needed.
+1. **Pin the uid.** Nothing else is needed. On a store that is already
+   failing, pin it to the uid that owns `private/` (`stat -c %u
+   <cadir>/private` on Linux).
 2. **Create `private/` yourself before the first start**, with the mode your
-   platform needs — `2770`, owned by the store's group, for instance.
-   `openvox-ca` never changes the mode of a directory that already exists, so it
-   keeps that mode. Each key is still written `0600`, so this lets a later uid
-   add keys, not read earlier ones (see above). It also lets every member of
-   the group add, replace or remove the files in `private/`, though not read
-   them, so do this only where the group is the CA's own. It is no help on the
-   filesystem backend, whose other files a later uid cannot reach anyway — and
-   there `private/` also holds the inventory's integrity key, which group write
-   would let the group replace.
+   platform needs and no world access: `2770`, owned by the store's group, for
+   instance. `openvox-ca` never changes the mode of a directory that already
+   exists, so it keeps that mode, but it does not check it either. A
+   world-writable `private/` starts without a word and lets every local account
+   add, replace or remove the files in it. A store that is already failing can
+   be given the mode the same way, by the uid that owns `private/` or by root;
+   the running uid cannot, since `chmod` needs ownership.
+
+   Each key is still written `0600`, so this lets a later uid add keys, not read
+   earlier ones (see above). It also lets every member of the group add,
+   replace or remove the files in `private/`, though not read them, so do this
+   only where the group is the CA's own. It is no help on the filesystem
+   backend, whose other files a later uid cannot reach anyway — and there
+   `private/` also holds the inventory's integrity key, which group write would
+   let the group replace.
 3. **For the offline command only, use `--key-out`.** It writes the key to the
    file you name and writes none into `private/`. `/generate` has no
    equivalent: it always keeps a copy.
