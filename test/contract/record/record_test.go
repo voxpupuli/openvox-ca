@@ -293,10 +293,14 @@ var _ = Describe("the committed contract", func() {
 	})
 
 	It("records the autosign policy the replay reads, naming one subject exactly", func() {
-		Expect(string(mustRead(filepath.Join(contractFixtures, "..", "autosign.conf")))).To(Equal(autosignConf))
-		Expect(autosignConf).To(MatchRegexp(`\A[a-z0-9.-]+\n\z`), "one line, a certname rather than a glob")
-		put := fixtureNamed(recordedCases(), "certificate-request-put-autosign-ca-true")
-		Expect(autosignConf).To(Equal(path.Base(put.Request.Path)+"\n"), "the subject the autosigned case submits")
+		conf := string(mustRead(filepath.Join(contractFixtures, "..", "autosign.conf")))
+		Expect(conf).To(Equal(autosignConf))
+		Expect(conf).To(MatchRegexp(`\A[a-z0-9.-]+\n\z`), "one line, a certname rather than a glob")
+		// Both sides committed: the policy names the subject the recorded
+		// request was submitted for, whatever the constants say.
+		var put fixture
+		Expect(json.Unmarshal(mustRead(filepath.Join(contractFixtures, "certificate-request-put-autosign-ca-true.json")), &put)).To(Succeed())
+		Expect(conf).To(Equal(path.Base(put.Request.Path)+"\n"), "the subject the autosigned case submits")
 	})
 
 	// The case binds only status and media type, so a re-record that drew a
