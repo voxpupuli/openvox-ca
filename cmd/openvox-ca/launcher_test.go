@@ -824,14 +824,14 @@ var _ = Describe("the environments the launcher builds", func() {
 		"PATH=/usr/bin",
 		"NOTIFY_SOCKET=/run/systemd/notify",
 		"WATCHDOG_USEC=30000000",
-		"PUPPET_CA_CADIR=/var/lib/puppet-ca",
+		"PUPPET_CA_CADIR=/var/lib/openvox-ca",
 	}
 
 	It("withholds the notification socket from the signer, and nothing else", func() {
 		Expect(signerEnv(base)).To(Equal([]string{
 			"PATH=/usr/bin",
 			"WATCHDOG_USEC=30000000",
-			"PUPPET_CA_CADIR=/var/lib/puppet-ca",
+			"PUPPET_CA_CADIR=/var/lib/openvox-ca",
 		}))
 	})
 
@@ -844,7 +844,7 @@ var _ = Describe("the environments the launcher builds", func() {
 		Expect(daemonEnv(parent)).To(Equal([]string{
 			"PATH=/usr/bin",
 			"WATCHDOG_USEC=30000000",
-			"PUPPET_CA_CADIR=/var/lib/puppet-ca",
+			"PUPPET_CA_CADIR=/var/lib/openvox-ca",
 		}))
 	})
 
@@ -907,8 +907,8 @@ var _ = Describe("the environments the launcher builds", func() {
 			// near misses -- names that extend a withheld one, or carry BAO_ in
 			// the middle -- which a prefix or substring match would also take.
 			kept := append(append([]string(nil), base...),
-				ca.DefaultPassphraseEnvVar+"_FILE=/etc/puppet-ca/passphrase",
-				customVar+"_FILE=/etc/puppet-ca/site-passphrase",
+				ca.DefaultPassphraseEnvVar+"_FILE=/etc/openvox-ca/passphrase",
+				customVar+"_FILE=/etc/openvox-ca/site-passphrase",
 				"PUPPET_CA_OPENBAO_ADDR=https://openbao.example.com:8200",
 				"PUPPET_CA_OPENBAO_TOKEN_FILE=/run/secrets/openbao-token",
 			)
@@ -941,7 +941,7 @@ var _ = Describe("the environments the launcher builds", func() {
 		It("is told the passphrase variable the server's configuration reads", func() {
 			// runLauncher names the variable through keyPassphraseConfig, so this
 			// is what ties the launcher's call to the variable the CA resolves.
-			cfg := &serverConfig{CAKeyPassphraseFile: "/etc/puppet-ca/passphrase"}
+			cfg := &serverConfig{CAKeyPassphraseFile: "/etc/openvox-ca/passphrase"}
 			Expect(keyPassphraseConfig(cfg).EnvVar()).To(Equal(ca.DefaultPassphraseEnvVar))
 		})
 	})
@@ -968,7 +968,7 @@ var _ = Describe("the environment runLauncher hands each child", func() {
 			ca.DefaultPassphraseEnvVar+"=default-secret",
 			"BAO_TOKEN=bao-token",
 			"VAULT_ADDR=https://openbao.example.com:8200",
-			"PUPPET_CA_CADIR=/var/lib/puppet-ca",
+			"PUPPET_CA_CADIR=/var/lib/openvox-ca",
 		)
 		cmd.Stdout = &out
 		cmd.Stderr = &out
@@ -996,7 +996,7 @@ var _ = Describe("the environment runLauncher hands each child", func() {
 			"the signer child never reported its environment; launcher output:\n%s", &out)
 
 		frontend := readEnv("frontend")
-		Expect(frontend).To(ContainElements("PUPPET_CA_ROLE=frontend", "PUPPET_CA_CADIR=/var/lib/puppet-ca"))
+		Expect(frontend).To(ContainElements("PUPPET_CA_ROLE=frontend", "PUPPET_CA_CADIR=/var/lib/openvox-ca"))
 		Expect(frontend).NotTo(ContainElement(HavePrefix(ca.DefaultPassphraseEnvVar + "=")))
 		Expect(frontend).NotTo(ContainElement(HavePrefix("BAO_")))
 		Expect(frontend).NotTo(ContainElement(HavePrefix("VAULT_")))

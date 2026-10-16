@@ -5,7 +5,7 @@
 ## Global flags
 
 ```text
---config       ""                       Path to YAML config file (auto-detected at /etc/puppet-ca/ctl.yaml)
+--config       ""                       Path to YAML config file (auto-detected at /etc/openvox-ca/ctl.yaml)
 --server-url   https://localhost:8140   openvox-ca server URL
 --ca-cert      ""                       CA cert PEM for TLS verification (omit to use system trust store)
 --client-cert  ""                       Client certificate PEM for mTLS
@@ -65,9 +65,9 @@ The config file is located by checking, in order:
 
 1. `--config /path/to/ctl.yaml` (explicit flag)
 2. `PUPPET_CA_CTL_CONFIG` environment variable
-3. `/etc/puppet-ca/ctl.yaml` (auto-detected if the file exists)
+3. `/etc/openvox-ca/ctl.yaml` (auto-detected if the file exists)
 
-**Example `/etc/puppet-ca/ctl.yaml`:**
+**Example `/etc/openvox-ca/ctl.yaml`:**
 
 ```yaml
 server_url:  https://openvox-ca.example.com:8140
@@ -235,8 +235,8 @@ openvox-ca-ctl import \
 # described by a normal openvox-ca config file. Refuses a non-empty destination
 # unless --force.
 openvox-ca-ctl migrate \
-  --source-config /etc/puppet-ca/filesystem.yaml \
-  --dest-config   /etc/puppet-ca/postgres.yaml
+  --source-config /etc/openvox-ca/filesystem.yaml \
+  --dest-config   /etc/openvox-ca/postgres.yaml
 ```
 
 `setup`, `import` and `migrate` operate directly on storage, and each requires
@@ -280,7 +280,7 @@ See [running a second process against a live
 store](storage-backends.md#running-a-second-process-against-a-live-store).
 
 All four read the **server's** configuration, not `openvox-ca-ctl`'s: `--config`, or
-`PUPPET_CA_CONFIG`, defaulting to `/etc/puppet-ca/config.yaml`. A working
+`PUPPET_CA_CONFIG`, defaulting to `/etc/openvox-ca/config.yaml`. A working
 `ctl.yaml` has no effect on them. `--cadir` overrides the configured storage
 directory for a one-off run.
 
@@ -926,8 +926,8 @@ asks for `--replicas-stopped` where no lock can prove that it does not.
 
 ```console
 $ openvox-ca rebuild-inventory-hmac
-Using config file: /etc/puppet-ca/config.yaml
-Storage backend: filesystem; CA key provider: file; cadir: /var/lib/puppet-ca
+Using config file: /etc/openvox-ca/config.yaml
+Storage backend: filesystem; CA key provider: file; cadir: /srv/openvox-ca
 No logfile configured: the audit record for this rebuild is terminal-only.
 Backend does not coordinate locks across hosts (atomic inventory append: false), so exactly one
   instance is supported. Rebuilding refuses while a server holds the store, where the
@@ -1023,7 +1023,7 @@ image, ServiceAccount and mounts as the Deployment, with the command replaced.
 Substitute the chart's own names before applying it — that recipe hardcodes an
 `openvox-ca-config` ConfigMap and a cadir under
 `/etc/puppetlabs/puppet/ssl/ca`, while the chart renders those from
-`openvox-ca.fullname` and `persistence.mountPath` (`/var/lib/puppet-ca` by
+`openvox-ca.fullname` and `persistence.mountPath` (`/var/lib/openvox-ca` by
 default), as [the Helm chart guide](helm-chart.md) sets out. Mounting the PVC
 somewhere the configured cadir is not gives this command an empty store, which
 it reports as a CA that never initialised integrity — advice that is false about

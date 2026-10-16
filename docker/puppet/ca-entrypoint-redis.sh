@@ -29,7 +29,7 @@ mkdir -p "$(dirname "${TLS_CERT}")" "$(dirname "${TLS_KEY}")"
 
 # Write the puppet-server admin allow file. Same content as the filesystem
 # variant so the integration test suite is identical aside from the backend.
-SERVERS_FILE=/etc/puppet-ca/servers.txt
+SERVERS_FILE=/etc/openvox-ca/servers.txt
 mkdir -p "$(dirname "$SERVERS_FILE")"
 cat > "$SERVERS_FILE" <<EOF
 # Puppet server CNs allowed CA admin access.

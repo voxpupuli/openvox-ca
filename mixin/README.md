@@ -113,7 +113,7 @@ the server with `--metrics-listen` (or `PUPPET_CA_METRICS_LISTEN` /
 `metrics_listen:` in the config file):
 
 ```sh
-openvox-ca --cadir /var/lib/puppet-ca --metrics-listen 127.0.0.1:9140
+openvox-ca --cadir /srv/openvox-ca --metrics-listen 127.0.0.1:9140
 ```
 
 The exporter serves `/metrics` over plain HTTP on its own listener. It exposes

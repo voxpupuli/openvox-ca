@@ -934,7 +934,7 @@ func newRootCmd() *cobra.Command {
 Global flags may be placed before or after the subcommand name.`,
 		SilenceUsage: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			resolved := resolveConfigFile(globalConfigFile, "PUPPET_CA_CTL_CONFIG", "/etc/puppet-ca/ctl.yaml")
+			resolved := resolveConfigFile(globalConfigFile, "PUPPET_CA_CTL_CONFIG", "/etc/openvox-ca/ctl.yaml")
 			cfg, err := loadCtlConfig(resolved)
 			if err != nil {
 				return err
@@ -977,7 +977,7 @@ Global flags may be placed before or after the subcommand name.`,
 	}
 
 	pf := rootCmd.PersistentFlags()
-	pf.StringVar(&globalConfigFile, "config", "", "Path to YAML config file (default: /etc/puppet-ca/ctl.yaml if it exists)")
+	pf.StringVar(&globalConfigFile, "config", "", "Path to YAML config file (default: /etc/openvox-ca/ctl.yaml if it exists)")
 	pf.StringVar(&globalServerURL, "server-url", "https://localhost:8140", "openvox-ca server URL")
 	pf.StringVar(&globalCACert, "ca-cert", "", "Path to CA cert PEM for TLS verification (omit to use system trust store)")
 	pf.StringVar(&globalClientCert, "client-cert", "", "Path to client certificate PEM for mTLS")

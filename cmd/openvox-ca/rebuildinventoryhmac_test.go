@@ -353,7 +353,7 @@ var _ = Describe("openvox-ca rebuild-inventory-hmac", func() {
 		// Pin the configuration these specs resolve, as csr_test.go,
 		// importcacert_test.go and generate_test.go each do. Every spec here
 		// drives the real root command, so without this an exported
-		// PUPPET_CA_SQL_DSN, or a host /etc/puppet-ca/config.yaml, silently
+		// PUPPET_CA_SQL_DSN, or a host /etc/openvox-ca/config.yaml, silently
 		// points them at a real store instead of --cadir. Most would then fail
 		// loudly, but "refuses when no HMAC key is stored" would not: it deletes
 		// the local key and asserts only an error string, so against a

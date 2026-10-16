@@ -9,7 +9,7 @@ existingConfigMap: openvox-ca-config
 command:
   - /usr/local/bin/openvox-ca
 args:
-  - --config=/etc/puppet-ca/config.yaml
+  - --config=/etc/openvox-ca/config.yaml
   - --verbosity=2
   - --single-process
 

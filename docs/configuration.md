@@ -12,7 +12,7 @@ re-asserting inventory integrity on a CA that will not start.
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `--config` | `""` | Path to YAML config file (auto-detected at `/etc/puppet-ca/config.yaml`) |
+| `--config` | `""` | Path to YAML config file (auto-detected at `/etc/openvox-ca/config.yaml`) |
 | `--cadir` | `""` | CA storage directory (keys, certs, CSRs, CRL); required via flag, env, or config |
 | `--host` | `0.0.0.0` | Listen address |
 | `--port` | `8140` | Listen port |
@@ -64,12 +64,12 @@ The config file is located by checking, in order:
 
 1. `--config /path/to/config.yaml` (explicit flag)
 2. `PUPPET_CA_CONFIG` environment variable
-3. `/etc/puppet-ca/config.yaml` (auto-detected if the file exists)
+3. `/etc/openvox-ca/config.yaml` (auto-detected if the file exists)
 
 ## Config file
 
 **The `.deb` and `.rpm` ship one already.** A packaged install has
-`/etc/puppet-ca/config.yaml` written for it, setting `cadir`, `tls_cert`,
+`/etc/openvox-ca/config.yaml` written for it, setting `cadir`, `tls_cert`,
 `tls_key` and `port: 8141` — enough to start without an edit, and marked as a
 configuration file in both formats so your changes survive upgrades. Everything
 below applies to it; what it sets and why 8141 rather than 8140 is in
@@ -77,7 +77,7 @@ below applies to it; what it sets and why 8141 rather than 8140 is in
 tarballs and container images ship no configuration file at all, so on those
 the settings below are yours to write.
 
-**Example `/etc/puppet-ca/config.yaml`:**
+**Example `/etc/openvox-ca/config.yaml`:**
 
 ```yaml
 cadir: /etc/puppetlabs/puppet/ssl/ca
@@ -208,8 +208,8 @@ managed_certs: []
 #   renew_before: 720h
 #   store:
 #     files:
-#       cert: /var/lib/puppet-ca/tls.crt
-#       key: /var/lib/puppet-ca/tls.key
+#       cert: /srv/openvox-ca/tls.crt
+#       key: /srv/openvox-ca/tls.key
 ```
 
 ## Environment variables
@@ -591,7 +591,7 @@ ancestors' CRLs as well as this CA's own. `crl_chain_file` is how they get
 there:
 
 ```yaml
-crl_chain_file: /etc/puppet-ca/upstream-crls.pem
+crl_chain_file: /etc/openvox-ca/upstream-crls.pem
 ```
 
 It is a PEM bundle of upstream CRLs, re-read by the `crl-chain-refresh`
@@ -1599,7 +1599,7 @@ unit or in a pod.
 ```yaml
 # Narrowed so the serving pair can sit beside it: the CA reserves the whole
 # cadir subtree against every file store, its own included.
-cadir: /var/lib/puppet-ca/ca
+cadir: /var/lib/openvox-ca/ca
 
 serving_cert:
   certname: ca.example.com
@@ -1608,15 +1608,15 @@ serving_cert:
   renew_before: 720h
   store:
     files:
-      cert: /var/lib/puppet-ca/tls.crt
-      key: /var/lib/puppet-ca/tls.key
-      ca: /var/lib/puppet-ca/ca.crt
+      cert: /var/lib/openvox-ca/tls.crt
+      key: /var/lib/openvox-ca/tls.key
+      ca: /var/lib/openvox-ca/ca.crt
 ```
 
 **Changing `cadir` on a CA that already exists moves where the CA looks for its
 own key and certificate.** The example above is written for a fresh install. On
-an existing deployment, narrowing `cadir` from `/var/lib/puppet-ca` to
-`/var/lib/puppet-ca/ca` points the CA at a directory that does not contain the
+an existing deployment, narrowing `cadir` from `/var/lib/openvox-ca` to
+`/var/lib/openvox-ca/ca` points the CA at a directory that does not contain the
 CA tree, and it will refuse to start rather than issue from an empty one. Two
 ways round it:
 
@@ -1643,7 +1643,7 @@ issuing.
 >    describes the same constraint for a component certificate.
 > 2. **Outside the `cadir`.** The CA reserves that whole subtree against every
 >    file store, its own included. The example above therefore narrows
->    `cadir` to `/var/lib/puppet-ca/ca`, with the pair at `/var/lib/puppet-ca`
+>    `cadir` to `/var/lib/openvox-ca/ca`, with the pair at `/var/lib/openvox-ca`
 >    beside it — the layout of the Helm chart's persistent volume.
 > 3. **In a directory that already exists.** The store will not create one, and
 >    nothing creates a subdirectory for it. A `serving/` subdirectory is

@@ -1210,7 +1210,7 @@ func (b *SQLBackend) KeyFilePaths() []string {
 }
 
 // SQLiteFilePath extracts the database file path from a SQLite DSN, which the
-// driver accepts either as a bare path ("/var/lib/puppet-ca/ca.db") or as a
+// driver accepts either as a bare path ("/var/lib/openvox-ca/ca.db") or as a
 // "file:" URI, both optionally carrying query parameters. Reports false when
 // the DSN names no file on disk.
 //
@@ -1319,7 +1319,7 @@ func sqliteDatabasePath(dsn string) (string, bool) {
 // use (it canonicalises the filename before naming its journals), and the
 // same-host lock directory, which is what stops a second process opening the
 // store. Resolving in one place is what keeps those two answers together: a
-// database reached as /var/lib/puppet-ca/ca.db by one process and as its
+// database reached as /var/lib/openvox-ca/ca.db by one process and as its
 // symlink target by another would otherwise take locks in two directories and
 // exclude nobody.
 //

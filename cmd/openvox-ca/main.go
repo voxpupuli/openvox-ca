@@ -760,7 +760,7 @@ func newRootCmd() *cobra.Command {
 			notifier.Status("Loading configuration")
 
 			// --- Config loading (file → env → CLI flags) ---
-			resolved := resolveConfigFile(configFile, "PUPPET_CA_CONFIG", "/etc/puppet-ca/config.yaml")
+			resolved := resolveConfigFile(configFile, configEnvVar, defaultConfigFile)
 			cfg, err := loadServerConfig(resolved)
 			if err != nil {
 				return err
@@ -1526,7 +1526,7 @@ func newRootCmd() *cobra.Command {
 	}
 
 	f := cmd.Flags()
-	f.StringVar(&configFile, "config", "", "Path to YAML config file (default: /etc/puppet-ca/config.yaml if it exists)")
+	f.StringVar(&configFile, "config", "", "Path to YAML config file (default: "+defaultConfigFile+" if it exists)")
 	f.StringVar(&caDir, "cadir", "", "Directory for CA storage (or set PUPPET_CA_CADIR)")
 	f.StringVar(&autosignVal, "autosign-config", "", "Autosign configuration: 'true', 'false', or path to file/executable")
 	f.StringVar(&host, "host", "0.0.0.0", "Address to listen on")
@@ -1560,7 +1560,7 @@ func newRootCmd() *cobra.Command {
 	f.StringVar(&redisSentinelMasterName, "redis-sentinel-master-name", "", "Redis Sentinel primary name; set to enable Sentinel-managed failover")
 	f.StringSliceVar(&redisSentinelAddrs, "redis-sentinel-addrs", nil, "Comma-separated Redis Sentinel addresses (e.g. sentinel-0:26379,sentinel-1:26379)")
 	f.StringVar(&redisKeyPrefix, "redis-key-prefix", "", "Redis key namespace for this CA (default: puppet-ca)")
-	f.StringVar(&sqlDSN, "sql-dsn", "", "SQL data source name: a SQLite path ('file:/var/lib/puppet-ca/ca.db') or a PostgreSQL or MySQL connection string (for PostgreSQL over TLS, sslmode=verify-full with sslrootcert). Every local user can read the command line, so give a DSN with a password via --sql-dsn-file, PUPPET_CA_SQL_DSN or sql_dsn in the config file instead")
+	f.StringVar(&sqlDSN, "sql-dsn", "", "SQL data source name: a SQLite path ('file:/srv/openvox-ca/ca.db') or a PostgreSQL or MySQL connection string (for PostgreSQL over TLS, sslmode=verify-full with sslrootcert). Every local user can read the command line, so give a DSN with a password via --sql-dsn-file, PUPPET_CA_SQL_DSN or sql_dsn in the config file instead")
 	f.StringVar(&sqlDSNFile, "sql-dsn-file", "", "Path to a file containing the SQL data source name (first line used), keeping a database password off the command line. Mutually exclusive with --sql-dsn")
 	f.StringVar(&caCertFile, "ca-cert-file", "", "Keep the CA certificate at this local path regardless of storage backend")
 	f.StringVar(&caKeyFile, "ca-key-file", "", "Keep the CA private key at this local path regardless of storage backend")

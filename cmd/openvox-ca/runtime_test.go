@@ -326,8 +326,8 @@ var _ = Describe("reportResolvedConfig", func() {
 		cfg.CAKeyProvider = "openbao"
 
 		var out bytes.Buffer
-		reportResolvedConfig(&out, "/etc/puppet-ca/config.yaml", cfg)
-		Expect(out.String()).To(ContainSubstring("/etc/puppet-ca/config.yaml"))
+		reportResolvedConfig(&out, "/etc/openvox-ca/config.yaml", cfg)
+		Expect(out.String()).To(ContainSubstring("/etc/openvox-ca/config.yaml"))
 		Expect(out.String()).To(ContainSubstring("postgres"))
 		Expect(out.String()).To(ContainSubstring("openbao"))
 		Expect(out.String()).To(ContainSubstring("/var/lib/ca"))

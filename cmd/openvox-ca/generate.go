@@ -110,7 +110,7 @@ before a server exists.`,
 			ctx := cmd.Context()
 			out := cmd.ErrOrStderr()
 
-			resolvedCfgFile := resolveConfigFile(configFile, "PUPPET_CA_CONFIG", "/etc/puppet-ca/config.yaml")
+			resolvedCfgFile := resolveConfigFile(configFile, configEnvVar, defaultConfigFile)
 			cfg, err := loadServerConfig(resolvedCfgFile)
 			if err != nil {
 				return err
@@ -298,7 +298,7 @@ before a server exists.`,
 	}
 
 	f := cmd.Flags()
-	f.StringVar(&configFile, "config", "", "Path to YAML config file (default: /etc/puppet-ca/config.yaml if it exists)")
+	f.StringVar(&configFile, "config", "", "Path to YAML config file (default: "+defaultConfigFile+" if it exists)")
 	f.StringVar(&caDir, "cadir", "", "CA storage directory (overrides the config file)")
 	f.StringVar(&certname, "certname", "", "Subject name for the certificate")
 	f.StringSliceVar(&dnsNames, "dns", nil, "DNS alt names (repeatable, or comma-separated)")
