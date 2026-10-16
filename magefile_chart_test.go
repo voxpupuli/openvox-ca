@@ -695,12 +695,11 @@ func fixtureEnv() []string {
 // gitIn runs one git command in dir with the fixture environment, and is the
 // only site that execs git directly — the decoy repository's setup and
 // inspection included. The single choke point for the environment itself is
-// fixtureEnv, not this function: the two pushWithEnv methods exec the gate
-// scripts rather than git, so they cannot route through here and have to set
-// cmd.Env for themselves, which leaves them the places where forgetting is
-// still possible. That is how these
-// fixtures came to operate on the real repository, twice. Output is folded into
-// the failure message so a fixture that cannot build says why.
+// fixtureEnv, not this function: runGateScript execs the gate scripts rather
+// than git, so it cannot route through here and has to set cmd.Env for itself,
+// which leaves it the one other place where forgetting is still possible. That
+// is how these fixtures came to operate on the real repository, twice. Output
+// is folded into the failure message so a fixture that cannot build says why.
 func gitIn(dir string, args ...string) string {
 	GinkgoHelper()
 	cmd := exec.Command("git", args...)
@@ -787,7 +786,7 @@ func (r *tagGateRepo) pushAsHook(remoteRef, localSHA string) (string, error) {
 
 func (r *tagGateRepo) pushWithEnv(remoteRef, localSHA string, env []string) (string, error) {
 	GinkgoHelper()
-	return r.pushLineWithEnv(fmt.Sprintf("%s %s %s %s", remoteRef, localSHA, remoteRef, strings.Repeat("0", 40)), env)
+	return r.pushLineWithEnv(fmt.Sprintf("%s %s %s %s", remoteRef, localSHA, remoteRef, noSHA), env)
 }
 
 // pushLine runs the script with a raw stdin line, for lines a refspec's left
@@ -799,17 +798,24 @@ func (r *tagGateRepo) pushLine(line string) (string, error) {
 
 func (r *tagGateRepo) pushLineWithEnv(line string, env []string) (string, error) {
 	GinkgoHelper()
-	script, err := filepath.Abs(filepath.Join(".lefthook", "pre-push", "verify-tags.sh"))
+	return runGateScript("verify-tags.sh", r.dir, env, line+"\n")
+}
+
+// runGateScript runs one of the pre-push gate scripts in dir, with stdin as git
+// would feed it, and is the one site that execs a gate script. The caller
+// chooses the environment, but every caller passes one built from fixtureEnv:
+// the script's own git commands must read the fixture, not whatever repository
+// an inherited GIT_DIR names, which is what made the tag gate's specs assert
+// against the wrong commit.
+func runGateScript(name, dir string, env []string, stdin string) (string, error) {
+	GinkgoHelper()
+	script, err := filepath.Abs(filepath.Join(".lefthook", "pre-push", name))
 	Expect(err).NotTo(HaveOccurred())
 
 	cmd := exec.Command("sh", script)
-	cmd.Dir = r.dir
-	// The caller chooses, but every caller passes an environment built from
-	// fixtureEnv: the script's own `git show` must read the fixture, not whatever
-	// repository an inherited GIT_DIR names, which is what made these specs
-	// assert against the wrong commit.
+	cmd.Dir = dir
 	cmd.Env = env
-	cmd.Stdin = strings.NewReader(line + "\n")
+	cmd.Stdin = strings.NewReader(stdin)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
@@ -1085,7 +1091,7 @@ var _ = Describe("the pre-push tag gate", func() {
 	// word; reading from the right restores the refusal (#528).
 	It("refuses a mismatching tag pushed with a refspec whose left side holds a space", func() {
 		repo := newTagGateRepo("0.8.0", version, version)
-		line := "HEAD^{/Release 1.2.3} " + repo.sha + " refs/tags/v" + version + " " + strings.Repeat("0", 40)
+		line := "HEAD^{/Release 1.2.3} " + repo.sha + " refs/tags/v" + version + " " + noSHA
 		out, err := repo.pushLine(line)
 		Expect(err).To(HaveOccurred(), "the gate skipped the tag instead of refusing it")
 		Expect(out).To(ContainSubstring(`internal/version at the tagged commit says "0.8.0"`))
@@ -1095,7 +1101,7 @@ var _ = Describe("the pre-push tag gate", func() {
 	// the gate refuses it rather than skipping the push without a word.
 	It("refuses a line it cannot read instead of skipping it", func() {
 		repo := newTagGateRepo(version, version, version)
-		line := "HEAD^{/Release 1.2.3} not-a-sha refs/tags/v" + version + " " + strings.Repeat("0", 40)
+		line := "HEAD^{/Release 1.2.3} not-a-sha refs/tags/v" + version + " " + noSHA
 		out, err := repo.pushLine(line)
 		Expect(err).To(HaveOccurred(), "the gate skipped an unreadable line")
 		Expect(out).To(ContainSubstring("could not read the pushed ref"))
@@ -1176,7 +1182,7 @@ var _ = Describe("the pre-push tag gate", func() {
 		// git signals a deletion with an all-zero local sha; there is no commit
 		// to inspect, and refusing one would make a bad tag unremovable.
 		repo := newTagGateRepo("0.8.0", "0.7.0", "0.6.0")
-		out, err := repo.push("refs/tags/v"+version, strings.Repeat("0", 40))
+		out, err := repo.push("refs/tags/v"+version, noSHA)
 		Expect(err).NotTo(HaveOccurred(), out)
 		Expect(out).To(BeEmpty())
 	})
@@ -1291,17 +1297,7 @@ func (r *sigGateRepo) pushAsHook(refs ...string) (string, error) {
 
 func (r *sigGateRepo) pushWithEnv(env []string, refs ...string) (string, error) {
 	GinkgoHelper()
-	script, err := filepath.Abs(filepath.Join(".lefthook", "pre-push", "verify-signatures.sh"))
-	Expect(err).NotTo(HaveOccurred())
-
-	cmd := exec.Command("sh", script)
-	cmd.Dir = r.dir
-	// Built from fixtureEnv by every caller, as in tagGateRepo.pushWithEnv: the
-	// script's own rev-list must read the fixture, not an inherited GIT_DIR.
-	cmd.Env = env
-	cmd.Stdin = strings.NewReader(strings.Join(refs, "\n") + "\n")
-	out, err := cmd.CombinedOutput()
-	return string(out), err
+	return runGateScript("verify-signatures.sh", r.dir, env, strings.Join(refs, "\n")+"\n")
 }
 
 var _ = Describe("the pre-push signature gate", func() {
@@ -1336,7 +1332,57 @@ var _ = Describe("the pre-push signature gate", func() {
 		Expect(out).To(ContainSubstring("ruleset requires a signature GitHub verifies on every commit"))
 		Expect(out).To(ContainSubstring("git rebase --force-rebase --gpg-sign <base>"))
 		Expect(out).To(ContainSubstring("CONTRIBUTING.md"))
+		Expect(out).NotTo(ContainSubstring("tag the re-signed commit"))
 	})
+
+	// The remedy the refusal prescribes: a rebase that re-signs replaces the
+	// pushed commits, so the force-push is not a fast-forward of what the remote
+	// has. The old, unsigned tip is the remote's, and must not count against it.
+	It("lets a re-signed branch replace an unsigned one", func() {
+		base := repo.commit("signed base", true)
+		repo.track(base)
+		old := repo.commit("work", false, base)
+		resigned := repo.commit("work", true, base)
+		out, err := repo.push(ref("refs/heads/topic", resigned, old))
+		Expect(err).NotTo(HaveOccurred(), out)
+		Expect(out).To(BeEmpty())
+
+		// Proof the fixture was read: the same replacement left unsigned is
+		// refused, naming the new commit and not the remote's.
+		still := repo.commit("work again", false, base)
+		out, err = repo.push(ref("refs/heads/topic", still, old))
+		Expect(err).To(HaveOccurred())
+		Expect(out).To(ContainSubstring(repo.short(still) + " work again"))
+		Expect(out).NotTo(ContainSubstring(repo.short(old)))
+	})
+
+	// A ref the gate passes over must not end its reading of stdin: a deletion
+	// or an already-published tag can come ahead of the branch that matters.
+	DescribeTable("still checks the refs after one it passes over",
+		func(skipped func(r *sigGateRepo, base string) string) {
+			base := repo.commit("signed base", true)
+			repo.track(base)
+			bad := repo.commit("unsigned work", false, base)
+			out, err := repo.push(skipped(repo, base), ref("refs/heads/topic", bad, noSHA))
+			Expect(err).To(HaveOccurred(), "the gate stopped reading after the first ref")
+			Expect(out).To(ContainSubstring(repo.short(bad) + " unsigned work"))
+		},
+		Entry("a deletion", func(r *sigGateRepo, base string) string {
+			return ref("refs/heads/old", noSHA, base)
+		}),
+		Entry("a ref that is neither a branch nor a tag", func(r *sigGateRepo, base string) string {
+			return ref("refs/notes/commits", r.commit("unsigned notes", false), noSHA)
+		}),
+		Entry("a tag a remote-tracking ref already reaches", func(r *sigGateRepo, base string) string {
+			return ref("refs/tags/v0.1.0", base, noSHA)
+		}),
+		Entry("a tag on something other than a commit", func(r *sigGateRepo, base string) string {
+			return ref("refs/tags/tree", r.tree, noSHA)
+		}),
+		Entry("a branch with nothing unsigned", func(r *sigGateRepo, base string) string {
+			return ref("refs/heads/clean", r.commit("signed clean", true, base), noSHA)
+		}),
+	)
 
 	It("refuses an unsigned merge commit", func() {
 		base := repo.commit("signed base", true)
@@ -1538,6 +1584,8 @@ var _ = Describe("the pre-push signature gate", func() {
 			out, err := repo.push(ref("refs/tags/v1.0.0", bad, noSHA))
 			Expect(err).To(HaveOccurred())
 			Expect(out).To(ContainSubstring(repo.short(bad) + " unsigned release"))
+			// A rebase leaves the tag where it was, so the fix has to say so.
+			Expect(out).To(ContainSubstring("tag the re-signed commit again ('git tag -f <name> <commit>') for: v1.0.0\n"))
 		})
 
 		It("refuses an annotated tag on a new unsigned commit", func() {
