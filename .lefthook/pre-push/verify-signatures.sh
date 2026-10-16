@@ -1,9 +1,9 @@
 #!/bin/sh
 # Refuse to push a commit that carries no signature. main's ruleset requires a
-# signature GitHub verifies on every commit, and a merge keeps each commit of a
-# pull request as it is, so one unsigned commit makes the whole pull request
-# unmergeable. GitHub only says so once the pull request is open; this says so
-# before the push.
+# signature GitHub verifies on every commit, and merging a pull request with a
+# merge commit lands each of its commits on main as it is, so one unsigned
+# commit blocks that merge. GitHub only says so once the pull request is open;
+# this says so before the push.
 #
 # It checks that a commit is *signed* (has a gpgsig header), not that GitHub
 # will *verify* the signature. Verification here would depend on the local
@@ -21,6 +21,8 @@
 #     than the whole history;
 #   - a tag checks the commit it points at, only if no remote-tracking ref
 #     already reaches it.
+# "Remote-tracking ref" means any remote's, not just the one being pushed to:
+# a commit already fetched from a fork or a pull request is exempt.
 # Every branch counts, since any branch can become a pull request. Other refs
 # (notes, for instance) are left alone. Needs no network.
 
@@ -41,14 +43,19 @@ while read -r _ local_sha remote_ref remote_sha; do
 		;;
 	refs/tags/*)
 		commit=$(git rev-parse --verify --quiet "$local_sha^{commit}") || continue
-		[ -n "$(git rev-list -n 1 "$commit" --not --remotes)" ] || continue
+		if ! new=$(git rev-list -n 1 "$commit" --not --remotes); then
+			echo "Refusing to push $remote_ref: could not tell whether the commit it tags is new."
+			exit 1
+		fi
+		[ -n "$new" ] || continue
 		set -- --no-walk "$commit"
 		;;
 	*) continue ;;
 	esac
 
-	# rev-list rather than log: it is plumbing, so log.showSignature and
-	# log.decorate cannot add lines the parse below would misread. In the raw
+	# rev-list rather than log: it is plumbing, so configuration meant for people
+	# cannot change the lines the parse below reads (color.ui=always, for one,
+	# wraps log's "commit" lines in escape codes even into a pipe). In the raw
 	# format headers start in column 0, their continuation lines with one space
 	# and the message with four, so a message cannot fake a header.
 	if ! raw=$(git rev-list --pretty=raw "$@"); then
@@ -71,7 +78,9 @@ done
 
 echo "Refusing to push: these commits carry no signature."
 printf '%s' "$unsigned" | awk '!seen[$1]++' | while read -r sha subject; do
-	echo "  $(git rev-parse --short "$sha") $subject"
+	# printf, not echo: the subject is someone's commit message, and some
+	# shells' echo interprets backslash escapes in it.
+	printf '  %s %s\n' "$(git rev-parse --short "$sha")" "$subject"
 done
 echo "main's ruleset requires a signature GitHub verifies on every commit, and a merge keeps each commit as it is."
 echo "Fix: set up signing, then 'git rebase --force-rebase --gpg-sign <base>' and push again; see CONTRIBUTING.md, \"Submitting changes\"."

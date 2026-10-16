@@ -1187,6 +1187,17 @@ func newSigGateRepo() *sigGateRepo {
 // message and parents are still two commits.
 func (r *sigGateRepo) commit(message string, signed bool, parents ...string) string {
 	GinkgoHelper()
+	header := ""
+	if signed {
+		header = "gpgsig"
+	}
+	return r.commitWithHeader(message, header, parents...)
+}
+
+// commitWithHeader is commit with the signature header's name chosen by the
+// caller, or no signature at all when header is empty.
+func (r *sigGateRepo) commitWithHeader(message, header string, parents ...string) string {
+	GinkgoHelper()
 	r.n++
 	var b strings.Builder
 	fmt.Fprintf(&b, "tree %s\n", r.tree)
@@ -1195,8 +1206,8 @@ func (r *sigGateRepo) commit(message string, signed bool, parents ...string) str
 	}
 	fmt.Fprintf(&b, "author test <test@example.com> %d +0000\n", 1700000000+r.n)
 	fmt.Fprintf(&b, "committer test <test@example.com> %d +0000\n", 1700000000+r.n)
-	if signed {
-		b.WriteString("gpgsig -----BEGIN SSH SIGNATURE-----\n U1NIU0lHAAAAAQ==\n -----END SSH SIGNATURE-----\n")
+	if header != "" {
+		b.WriteString(header + " -----BEGIN SSH SIGNATURE-----\n U1NIU0lHAAAAAQ==\n -----END SSH SIGNATURE-----\n")
 	}
 	fmt.Fprintf(&b, "\n%s\n", message)
 
@@ -1305,6 +1316,64 @@ var _ = Describe("the pre-push signature gate", func() {
 		Expect(out).NotTo(ContainSubstring("signed right"))
 	})
 
+	// The other half of "merges included": a signed merge whose second parent
+	// brings in an unsigned commit, which a first-parent walk would never see.
+	It("refuses an unsigned commit that a merge brings in", func() {
+		base := repo.commit("signed base", true)
+		repo.track(base)
+		left := repo.commit("signed left", true, base)
+		right := repo.commit("unsigned right", false, base)
+		merge := repo.commit("signed merge", true, left, right)
+		out, err := repo.push(ref("refs/heads/topic", merge, noSHA))
+		Expect(err).To(HaveOccurred())
+		Expect(out).To(ContainSubstring(repo.short(right) + " unsigned right"))
+	})
+
+	// A repository using SHA-256 object names signs with gpgsig-sha256.
+	It("accepts a gpgsig-sha256 signature", func() {
+		ok := repo.commitWithHeader("signed sha256", "gpgsig-sha256")
+		out, err := repo.push(ref("refs/heads/topic", ok, noSHA))
+		Expect(err).NotTo(HaveOccurred(), out)
+		Expect(out).To(BeEmpty())
+	})
+
+	It("does not take a header that merely starts with gpgsig for a signature", func() {
+		bad := repo.commitWithHeader("unsigned work", "gpgsigx")
+		out, err := repo.push(ref("refs/heads/topic", bad, noSHA))
+		Expect(err).To(HaveOccurred())
+		Expect(out).To(ContainSubstring(repo.short(bad) + " unsigned work"))
+	})
+
+	// git log, unlike rev-list, honours color.ui=always even into a pipe, and a
+	// "commit <sha>" line wrapped in escape codes is one the parse does not see
+	// as a commit, so the commit would pass. fixtureEnv hides the user's own
+	// config, so the hazard has to be planted in the repository's.
+	It("is not misled by colour configuration", func() {
+		gitIn(repo.dir, "config", "color.ui", "always")
+		bad := repo.commit("unsigned work", false)
+		out, err := repo.push(ref("refs/heads/topic", bad, noSHA))
+		Expect(err).To(HaveOccurred(), "the gate passed an unsigned commit it could not parse")
+		Expect(out).To(ContainSubstring(repo.short(bad) + " unsigned work"))
+	})
+
+	// The branch that keeps a rev-list failure from reading as an empty list,
+	// which would pass.
+	It("refuses rather than passes when it cannot list a branch's commits", func() {
+		out, err := repo.push(ref("refs/heads/topic", strings.Repeat("2", 40), noSHA))
+		Expect(err).To(HaveOccurred())
+		Expect(out).To(ContainSubstring("Refusing to push refs/heads/topic: could not list the commits it adds."))
+	})
+
+	// The subject is someone's commit message. echo in dash and macOS sh would
+	// read \c in it as "stop output here" and cut the line short.
+	It("prints a subject's backslashes as they are", func() {
+		bad := repo.commit(`unsigned \c work`, false)
+		out, err := repo.push(ref("refs/heads/topic", bad, noSHA))
+		Expect(err).To(HaveOccurred())
+		Expect(out).To(ContainSubstring(repo.short(bad) + ` unsigned \c work` + "\n"))
+		Expect(out).To(ContainSubstring("CONTRIBUTING.md"))
+	})
+
 	// The raw format indents the message by four spaces, which is all that
 	// separates a header from a message line that looks like one.
 	It("is not fooled by a message line that looks like a signature header", func() {
@@ -1360,6 +1429,8 @@ var _ = Describe("the pre-push signature gate", func() {
 		Expect(out).NotTo(ContainSubstring("already on the remote"))
 	})
 
+	// two is first because its findings are a superset of one's: a gate that
+	// kept only the last ref's findings would lose "unsigned two".
 	It("checks every ref on stdin, and names a commit two of them share once", func() {
 		base := repo.commit("signed base", true)
 		repo.track(base)
@@ -1367,8 +1438,8 @@ var _ = Describe("the pre-push signature gate", func() {
 		one := repo.commit("signed one", true, shared)
 		two := repo.commit("unsigned two", false, shared)
 		out, err := repo.push(
-			ref("refs/heads/one", one, noSHA),
 			ref("refs/heads/two", two, noSHA),
+			ref("refs/heads/one", one, noSHA),
 		)
 		Expect(err).To(HaveOccurred())
 		Expect(out).To(ContainSubstring(repo.short(two) + " unsigned two"))
@@ -1413,6 +1484,19 @@ var _ = Describe("the pre-push signature gate", func() {
 			out, err := repo.push(ref("refs/tags/v1.0.0", old, noSHA))
 			Expect(err).NotTo(HaveOccurred(), out)
 			Expect(out).To(BeEmpty())
+		})
+
+		// A remote-tracking ref naming an object this clone lacks makes every
+		// --remotes walk fail. update-ref refuses to write one, so the loose ref
+		// file is written directly.
+		It("refuses rather than passes when it cannot tell whether the tagged commit is new", func() {
+			bad := repo.commit("unsigned release", false)
+			broken := filepath.Join(repo.dir, ".git", "refs", "remotes", "origin", "broken")
+			Expect(os.MkdirAll(filepath.Dir(broken), 0o755)).To(Succeed())
+			Expect(os.WriteFile(broken, []byte(strings.Repeat("3", 40)+"\n"), 0o644)).To(Succeed())
+			out, err := repo.push(ref("refs/tags/v1.0.0", bad, noSHA))
+			Expect(err).To(HaveOccurred(), "the gate skipped the tag instead of refusing it")
+			Expect(out).To(ContainSubstring("Refusing to push refs/tags/v1.0.0: could not tell whether the commit it tags is new."))
 		})
 
 		It("checks the tagged commit only, not its new ancestors", func() {
