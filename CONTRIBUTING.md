@@ -176,11 +176,13 @@ See [`AGENTS.md`](AGENTS.md) for the details. The essentials:
   version does not match the tree, and a refusal of any commit being pushed
   that carries no signature. That last one checks only that a signature is
   there, not that GitHub will verify it, which needs the key on your GitHub
-  account. The two refusals run first, and either one stops the push before
+  account; and on a new branch it skips commits a remote-tracking branch
+  already holds. The two refusals run first, and either one stops the push before
   the tests start. An untidy `go.mod`, a drifted chart pin or a
   markdownlint violation is not among them — those stay with `mage dev:check`,
-  `markdownlint-cli2` and CI. Each hook check stands aside with a SKIP when the
-  tool it drives is absent from `PATH`. On Linux the test run additionally needs a
+  `markdownlint-cli2` and CI. Each hook check that drives a tool stands aside
+  with a SKIP when that tool is absent from `PATH`; the two refusals always
+  run. On Linux the test run additionally needs a
   C compiler, since `-race` requires cgo there, and fails rather than skipping
   without one; macOS builds `-race` without cgo.
 - The pre-push run is a *different environment* from a bare `mage test:magefile`:
