@@ -396,7 +396,7 @@ to the snapshot state, which holds for two reasons: the recorder records every
 read before any mutation, and no subject is touched by two mutations that
 change the store. Most mutations OpenVox Server refuses change nothing, so they
 may share a subject; keep such a request refused. A refused autosigned CSR
-submission does change it: OpenVox Server saves the CSR before it checks
+submission does change the store: OpenVox Server saves the CSR before it checks
 whether it may sign it, so that case keeps its subject to itself. The one
 exception to the snapshot rule is `/sign/all`, which signs every pending CSR,
 including the ones earlier fixtures submitted: it is recorded last and bound
