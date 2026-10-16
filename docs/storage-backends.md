@@ -226,10 +226,13 @@ Reading a key back has the same limit, since each key is `0600`: a later uid
 cannot read one an earlier uid wrote. `openvox-ca` reads none back of its own
 accord, but if `tls_key` names a key in `private/` — where [the
 serving-certificate bootstrap](configuration.md#serving-certificate) leaves the
-server's own — the server reads it at every start, and a later uid cannot. Keep
-that key where a later uid can read it through the store's group, never with
-world access (once it is outside `private/`, nothing checks its mode), or pin
-the uid.
+server's own — the server reads it at every start, and a later uid cannot. Pin
+the uid, or give that key group read and never world access: in place, by the
+uid that owns it or by root, which keeps it under the startup check on
+`private/`; or as a copy outside `private/`, where nothing checks its mode.
+Either has to be redone after every reissue, which writes the key `0600` again.
+Group read lets every member of the group present the server's TLS identity, so
+do it only where the group is the CA's own.
 
 This only bites where nothing restores group access to the volume. Under a
 Kubernetes `fsGroup` with the default `fsGroupChangePolicy: Always`, the kubelet
@@ -258,10 +261,17 @@ Where it does bite, you have three options:
    world-writable `private/` starts without a word and lets every local account
    add, replace or remove the files in it. A store that is already failing can
    be given the mode the same way, by the uid that owns `private/` or by root;
-   the running uid cannot, since `chmod` needs ownership. In a pod the CA
-   creates `private/` on its first start, so do it from an init container that
-   mounts the cadir volume and can write to its root; the Helm chart's
-   `initContainers` value takes one.
+   the running uid cannot, since `chmod` needs ownership.
+
+   In a pod the CA creates `private/` on its first start, so do it from an init
+   container: with the Helm chart, one in `initContainers` that mounts the
+   chart's `data` volume at `persistence.mountPath` (the cadir,
+   `/var/lib/puppet-ca` by default) and can write to its root. It runs on every
+   start, as whatever uid that run is given, so it must create the directory
+   only when it is absent and never `chmod` one that exists:
+   `[ -d /var/lib/puppet-ca/private ] || mkdir -m 2770 /var/lib/puppet-ca/private`.
+   One that changes the mode fails with `EPERM` once the uid changes, and the
+   pod does not start at all.
 
    Each key is still written `0600`, so this lets a later uid add keys, not read
    earlier ones (see above). It also lets every member of the group add,
