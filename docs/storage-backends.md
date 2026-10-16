@@ -324,7 +324,9 @@ Server looks for the key at the top of the cadir, so it cannot take that
 directory as it stands.
 
 - **To start openvox-ca on OpenVox Server's cadir**, stop OpenVox Server's CA
-  and point `cadir` at the directory. There is no import step.
+  and point `cadir` at the directory. There is no import step. The first start
+  logs `No inventory HMAC found on an established CA` at `WARN`, once, as it
+  establishes the integrity value over an inventory nothing has verified.
 - **To go back to OpenVox Server**, stop openvox-ca (and disable its unit, or
   it starts again at the next boot) and start OpenVox Server's CA on the same
   directory. Nothing in it needs changing first. Keep a copy of `inventory.txt`
@@ -1202,9 +1204,8 @@ sql_dsn: file:/etc/puppetlabs/puppet/ssl/ca/ca.db
 
 The migration copies the whole CA — certificate, keys, CRL, serial, the
 inventory (its integrity value is recomputed under the destination's own
-scheme, so tamper detection continues to work there — but a mismatch present
-before the copy does not survive it), every pending CSR and every
-signed certificate. The inventory's lines are converted when exactly one end is
+scheme, so tamper detection continues to work there), every pending CSR and
+every signed certificate. The inventory's lines are converted when exactly one end is
 the filesystem backend: into a database they are read in either form and stored
 in the canonical one, and onto the filesystem they are written in OpenVox
 Server's format, so the result can be [shared with OpenVox
@@ -1228,6 +1229,24 @@ Notes:
   store](#running-a-second-process-against-a-live-store).
 - **Overwrite protection.** `migrate` refuses to write into a destination that
   already holds a CA certificate. Pass `--force` to overwrite it.
+- **The source inventory is verified first.** Because the destination's
+  integrity value is recomputed over whatever is copied, a mismatch present
+  before the copy would not survive it, so `migrate` checks the source against
+  its own stored value before touching the destination. It refuses a source
+  that does not verify: one whose inventory does not match the value, one with
+  an HMAC key but no value or a value but no key, one whose key is the wrong
+  length, and an etcd or Redis store whose legacy inventory has not yet been
+  decomposed. Run [`openvox-ca
+  rebuild-inventory-hmac`](operator-cli.md#rebuild-inventory-hmac-re-asserting-inventory-integrity)
+  with the source's configuration to see its state, or pass
+  `--allow-unverified-source` to migrate it as it stands, which makes the
+  destination vouch for it. A source that never recorded an integrity value at
+  all — no HMAC key and no value, such as a cadir written by OpenVox Server — is
+  migrated without the flag, since there is nothing to verify it against. Either
+  way `migrate` prints a warning saying the source was not verified. A source
+  with no HMAC key gives the destination none either, unless it already had
+  one, so its first start then logs `No inventory HMAC found on an established
+  CA` at `WARN`, once, as it establishes the value.
 - **Re-runnable.** The copy is idempotent per item; an interrupted run can be
   repeated (with `--force` if a partial CA already landed).
 - Use `--verbose` to log each item as it is copied.
