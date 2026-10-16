@@ -195,6 +195,12 @@ type serverConfig struct {
 	// key itself.
 	InsecureAllowWorldReadableKeys bool `yaml:"insecure_allow_world_readable_keys"`
 
+	// InsecureAllowUnsafeAutosignPath runs the autosign executable even when
+	// an entry on its path could be replaced by someone other than root or
+	// the CA's own user, warning instead of refusing. Named, like the key
+	// opt-out above, for what it turns off.
+	InsecureAllowUnsafeAutosignPath bool `yaml:"insecure_allow_unsafe_autosign_path"`
+
 	// PromoteCNToSAN adds the CN as a DNS SAN when the CSR has no SANs (default: true).
 	PromoteCNToSAN bool `yaml:"promote_cn_to_san"`
 	// AllowSubjectAltNames lets a submitted CSR request Subject Alternative
@@ -934,6 +940,11 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("PUPPET_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.InsecureAllowWorldReadableKeys = b
+		}
+	}
+	if v := os.Getenv("PUPPET_CA_INSECURE_ALLOW_UNSAFE_AUTOSIGN_PATH"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.InsecureAllowUnsafeAutosignPath = b
 		}
 	}
 	if v := os.Getenv("PUPPET_CA_PROMOTE_CN_TO_SAN"); v != "" {

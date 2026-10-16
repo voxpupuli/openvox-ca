@@ -74,6 +74,7 @@ commonAnnotations: {}
 #     managed_cert_interval_sec: 900   # reconcile period; dormant until a managed certificate exists
 #     serial_number_format: number   # OpenVox Server's JSON number; "hex" sends a colon-separated string instead
 #     insecure_allow_world_readable_keys: false  # true starts anyway on world-readable keys
+#     insecure_allow_unsafe_autosign_path: false  # true runs an autosign plugin others could replace
 #     # Certificates openvox-ca issues and renews for OpenVox components. Each
 #     # entry needs a store: a Kubernetes Secret or a local file pair, never
 #     # inferred. The Secret holding OpenVox Server's key is a CA admin

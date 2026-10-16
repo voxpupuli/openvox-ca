@@ -22,7 +22,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/x509"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -39,6 +41,12 @@ type AutosignConfig struct {
 	Mode              string        // "true", "file", "executable" (or "off" implicitly)
 	FileOrPath        string        // Path to autosign.conf or executable
 	ExecutableTimeout time.Duration // 0 → defaultExecutableTimeout
+	// AllowUnsafePath runs the executable even when ResolveAutosignExecutable
+	// reports entries on its path that a third party could replace. Set from
+	// insecure_allow_unsafe_autosign_path; the server warns about each finding
+	// at startup instead, and the check before each run lets findings through
+	// without logging them -- including ones that appeared after startup.
+	AllowUnsafePath bool
 }
 
 func CheckAutosign(cfg AutosignConfig, csr *x509.CertificateRequest, csrPEM []byte) (bool, error) {
@@ -85,16 +93,66 @@ func checkAutosignFile(path, commonName string) (bool, error) {
 	return false, scanner.Err()
 }
 
+// autosignBeforeExec runs between judging the executable and running it. It
+// does nothing in production; it is a variable so that a white-box spec can
+// stand in for the kubelet replacing a volume's files in that gap.
+var autosignBeforeExec = func() {}
+
 func checkAutosignExecutable(cfg AutosignConfig, commonName string, csrPEM []byte) (bool, error) {
 	timeout := cfg.ExecutableTimeout
 	if timeout == 0 {
 		timeout = defaultExecutableTimeout
 	}
 
+	// The file judged can vanish before it is run: when a ConfigMap changes,
+	// the kubelet repoints the volume's ..data at a new directory and deletes
+	// the old one, which is where the path just resolved to. Running the
+	// configured path instead would dodge that, but would run a file nobody
+	// judged. So resolve, judge and run once more, and only then give up --
+	// the CSR is already saved, and an error here leaves it for an operator.
+	for attempt := 0; ; attempt++ {
+		resolved, err := judgeAutosignExecutable(cfg)
+		if err != nil {
+			return false, err
+		}
+		autosignBeforeExec()
+		ok, err := runAutosignExecutable(cfg, resolved, timeout, commonName, csrPEM)
+		if attempt == 0 && errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		return ok, err
+	}
+}
+
+// judgeAutosignExecutable resolves the executable's path and judges it,
+// returning the file to run.
+//
+// SECURITY: Re-resolve and re-judge the path before every run, and run the
+// file that was judged. The startup check alone left the window this closes:
+// a file, symlink or directory swapped after startup ran with no check at all,
+// and whoever can replace the executable decides which certificates are
+// signed. An unsafe path is an error rather than a deny, so the operator sees
+// why in the log instead of watching every CSR wait.
+// NIST 800-53: CM-5 (Access Restrictions for Change), SI-7 (Software, Firmware, and Information Integrity)
+func judgeAutosignExecutable(cfg AutosignConfig) (string, error) {
+	resolved, findings, err := ResolveAutosignExecutable(cfg.FileOrPath)
+	if err != nil {
+		return "", fmt.Errorf("autosign executable %s: %w", cfg.FileOrPath, err)
+	}
+	if len(findings) > 0 && !cfg.AllowUnsafePath {
+		return "", fmt.Errorf("refusing to run autosign executable %s: %s",
+			cfg.FileOrPath, FormatAutosignPathFindings(findings))
+	}
+	return resolved, nil
+}
+
+// runAutosignExecutable runs the resolved executable once and interprets its
+// exit status: zero signs, anything else denies.
+func runAutosignExecutable(cfg AutosignConfig, resolved string, timeout time.Duration, commonName string, csrPEM []byte) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, cfg.FileOrPath, commonName) //nolint:gosec // G204: operator-configured executable; commonName allowlist-validated by ValidateSubject and passed as a separate argv (no shell)
+	cmd := exec.CommandContext(ctx, resolved, commonName) //nolint:gosec // G204: operator-configured executable, resolved and judged by judgeAutosignExecutable; commonName allowlist-validated by ValidateSubject and passed as a separate argv (no shell)
 	// SECURITY: Environment sanitization: only allowlisted variables are
 	// passed to the autosign subprocess. Prevents leaking secrets (API keys,
 	// cloud tokens, DB credentials) from the CA process environment to
@@ -122,11 +180,20 @@ func checkAutosignExecutable(cfg AutosignConfig, commonName string, csrPEM []byt
 			// semantics are unchanged.
 			if code := exitErr.ExitCode(); code >= 126 {
 				slog.Warn("Autosign executable exited with a crash/not-executable code; the script may be misconfigured (treating as deny)",
-					"path", cfg.FileOrPath, "common_name", commonName, "exit_code", code)
+					"path", cfg.FileOrPath, "realpath", resolved, "common_name", commonName, "exit_code", code)
 			}
 			return false, nil
 		}
-		return false, err
+		// Named both ways: the configured path is what the operator knows,
+		// and the resolved one may be a kubelet generation directory that
+		// has since gone. A file that is present but whose #! interpreter is
+		// not fails with the same error as a file that is missing, and in a
+		// container image that is the likelier of the two.
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, fmt.Errorf("running autosign executable %s (resolved to %q): it, or the interpreter its #! line names, does not exist: %w",
+				cfg.FileOrPath, resolved, err)
+		}
+		return false, fmt.Errorf("running autosign executable %s (resolved to %q): %w", cfg.FileOrPath, resolved, err)
 	}
 
 	return true, nil

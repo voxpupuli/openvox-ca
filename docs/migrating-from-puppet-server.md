@@ -731,6 +731,17 @@ systemctl start openvox-ca
 Note that step 1 is an admin-authenticated API call and needs a running server —
 importing is a prerequisite for revoking here, not an alternative to it.
 
+### Autosign plugin permissions
+
+openvox-ca refuses to run an autosign plugin that anyone but root or its own
+user could replace. The plugin, every symlink leading to it and every directory
+above it must be owned by root or the CA's user, and the plugin and those
+directories must not be group- or world-writable. The check runs at startup,
+where a failure stops the CA, and again before every run. A plugin carried over
+from an existing deployment, such as one in a group-writable code tree, may
+need tightening before cutover. The rules, their two exemptions and the opt-out
+are in [the autosign executable's path](configuration.md#the-autosign-executables-path).
+
 ### No `puppet cert` compatibility shim
 
 openvox-ca does not accept `puppet cert` command syntax directly. Use
