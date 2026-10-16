@@ -477,6 +477,19 @@ and schema validity is not correctness, so anything a reader has to *trust*
 (tag resolution, merge precedence, which kind a value selects) needs a case in
 `chart:test` as well.
 
+Every string a template interpolates into a manifest goes through `quote`
+(`printf "%s-suffix" $name | quote` for a composed one), because Kubernetes
+decodes YAML 1.1 and an unquoted `on`, `yes` or `0123` arrives as another type.
+Numbers and booleans the API needs typed stay unquoted. A new free-form value
+also owes a sentinel in the `chart:test` case "interpolated strings are quoted
+so YAML cannot retype them", which is the only thing that notices a missed
+`quote`.
+
+`openvox-ca.backendKind` mirrors `storage.ParseBackendKind` spelling for
+spelling, and `mage dev:check` compares the two
+(`verifyChartBackendAliases`). Change both together: a spelling the chart
+lacks fails open, because every refusal keyed on the backend matches by kind.
+
 Preconditions live in one place, the `openvox-ca.validate` helper, and are
 checked from `deployment.yaml`. When a value combination would render something
 a cluster silently mishandles — a route to a port that does not exist, a

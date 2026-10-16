@@ -3,8 +3,8 @@
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: {{ include "openvox-ca.fullname" . }}
-  namespace: {{ default (include "openvox-ca.namespace" .) .Values.metrics.serviceMonitor.namespace }}
+  name: {{ include "openvox-ca.fullname" . | quote }}
+  namespace: {{ default (include "openvox-ca.namespace" .) .Values.metrics.serviceMonitor.namespace | quote }}
   labels:
     {{- include "openvox-ca.labels" . | nindent 4 }}
     {{- with .Values.metrics.serviceMonitor.labels }}
@@ -21,7 +21,7 @@ metadata:
   {{- end }}
 spec:
   {{- with .Values.metrics.serviceMonitor.jobLabel }}
-  jobLabel: {{ . }}
+  jobLabel: {{ . | quote }}
   {{- end }}
   {{- with .Values.metrics.serviceMonitor.targetLabels }}
   targetLabels:
@@ -30,18 +30,18 @@ spec:
   {{- if .Values.metrics.serviceMonitor.namespace }}
   namespaceSelector:
     matchNames:
-      - {{ include "openvox-ca.namespace" . }}
+      - {{ include "openvox-ca.namespace" . | quote }}
   {{- end }}
   selector:
     matchLabels:
       {{- include "openvox-ca.selectorLabels" . | nindent 6 }}
   endpoints:
     - port: metrics
-      scheme: {{ .Values.metrics.serviceMonitor.scheme }}
-      path: {{ .Values.metrics.serviceMonitor.path }}
-      interval: {{ .Values.metrics.serviceMonitor.interval }}
+      scheme: {{ .Values.metrics.serviceMonitor.scheme | quote }}
+      path: {{ .Values.metrics.serviceMonitor.path | quote }}
+      interval: {{ .Values.metrics.serviceMonitor.interval | quote }}
       {{- with .Values.metrics.serviceMonitor.scrapeTimeout }}
-      scrapeTimeout: {{ . }}
+      scrapeTimeout: {{ . | quote }}
       {{- end }}
       {{- if .Values.metrics.serviceMonitor.honorLabels }}
       honorLabels: true
