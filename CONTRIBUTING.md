@@ -175,8 +175,11 @@ See [`AGENTS.md`](AGENTS.md) for the details. The essentials:
   pass.
 - `lefthook install` adds git hooks that cover *part* of the above: pre-commit
   runs gofmt and golangci-lint, and pre-push runs `go test -race ./...`, the
-  build-tagged `go test -tags mage .`, and a refusal of any `v*` tag whose
-  version does not match the tree. An untidy `go.mod`, a drifted chart pin or a
+  build-tagged `go test -tags mage .`, a refusal of any `v*` tag whose
+  version does not match the tree, and a refusal of any commit being pushed
+  that carries no signature. That last one checks only that a signature is
+  there, not that GitHub will verify it, which needs the key on your GitHub
+  account. An untidy `go.mod`, a drifted chart pin or a
   markdownlint violation is not among them — those stay with `mage dev:check`,
   `markdownlint-cli2` and CI. Each hook check stands aside with a SKIP when the
   tool it drives is absent from `PATH`. On Linux the test run additionally needs a

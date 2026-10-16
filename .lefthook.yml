@@ -9,11 +9,13 @@
 # PATH prints a SKIP notice and exits 0 rather than blocking. Two exceptions —
 # on Linux `-race` needs a C compiler and fails rather than skipping without one
 # (macOS builds it without cgo), and the
-# verify-tags.sh script has no tool to be missing, so it always runs. Run the
+# verify-tags.sh and verify-signatures.sh scripts have no tool to be missing,
+# so they always run. Run the
 # same checks manually via `mage dev:check` (lint), `go test -race ./...`, and
 # `mage test:magefile` (the build-tagged magefile suite); the pre-push hook
 # additionally refuses v* tags that do not match internal/version (see
-# .lefthook/pre-push/verify-tags.sh).
+# .lefthook/pre-push/verify-tags.sh), and commits that carry no signature (see
+# .lefthook/pre-push/verify-signatures.sh).
 
 pre-commit:
   parallel: false
@@ -49,6 +51,11 @@ pre-push:
     "verify-tags.sh":
       runner: sh
       use_stdin: true  # git feeds the pushed refs to the pre-push hook on stdin
+    # A script for the same reason: a rebase that only re-signs commits changes
+    # no files, yet pushes commits that need checking.
+    "verify-signatures.sh":
+      runner: sh
+      use_stdin: true
   commands:
     go-test:
       # -race matches the CI gate (mage test:unit): without it the specs that
