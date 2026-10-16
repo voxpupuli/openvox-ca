@@ -156,17 +156,18 @@ See [`AGENTS.md`](AGENTS.md) for the details. The essentials:
   explains *why*. Stage files by name and review `git diff --staged` before
   committing.
 - Every commit in your pull request must carry a signature GitHub verifies
-  (GPG, SSH or S/MIME). `main`'s ruleset requires one on every commit, and a
-  merge keeps each of your commits as it is, so one unsigned commit leaves the
-  pull request unmergeable however green its checks are. Set signing up with
-  GitHub's [Signing commits](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits)
+  (GPG, SSH or S/MIME). `main`'s ruleset requires one on every commit, and
+  merging with a merge commit lands each of your commits on `main` as it is,
+  so one unsigned commit blocks that merge however green the checks are.
+  Set signing up with GitHub's [Signing commits](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits)
   guide, and add the key to your GitHub account as a *signing* key: an SSH key
   added for authentication alone does not count. The pull request's commit
   list marks each one "Verified" once GitHub accepts it. To re-sign a branch
-  you have already pushed unsigned, replay it onto its base and force-push:
+  you have already pushed unsigned, replay it onto its base (`origin/main`,
+  or the branch a stacked pull request targets) and force-push:
 
   ```bash
-  git rebase --force-rebase --gpg-sign origin/main
+  git rebase --force-rebase --gpg-sign <base>
   git push --force-with-lease
   ```
 
