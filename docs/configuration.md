@@ -2379,7 +2379,9 @@ and the public data — are set on each file as it is created and your umask
 cannot widen them. The inventory is `0600` because it names every certificate
 the CA has issued.
 Directories and the lock files under `locks/` are created at the modes above and
-a tighter umask narrows them further.
+a tighter umask narrows them further. The shipped systemd unit sets `UMask=0077`,
+so under it the directories `openvox-ca` creates are `0700`; see
+[systemd](systemd.md#hardening).
 
 `openvox-ca` never changes the mode of a file it did not create, so anything
 already on disk stays as you have it — but a private key readable by every local
