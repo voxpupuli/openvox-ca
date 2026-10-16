@@ -33,6 +33,7 @@ GIT_NO_REPLACE_OBJECTS=1
 export GIT_NO_REPLACE_OBJECTS
 
 unsigned=
+tags=
 while read -r _ local_sha remote_ref remote_sha; do
 	case "$local_sha" in *[!0]*) ;; *) continue ;; esac # skip deletions
 	case "$remote_ref" in
@@ -79,8 +80,10 @@ while read -r _ local_sha remote_ref remote_sha; do
 		echo "Refusing to push $remote_ref: could not read the commits it adds."
 		exit 1
 	fi
-	[ -n "$found" ] && unsigned="$unsigned$found
+	[ -n "$found" ] || continue
+	unsigned="$unsigned$found
 "
+	case "$remote_ref" in refs/tags/*) tags="$tags ${remote_ref#refs/tags/}" ;; esac
 done
 
 [ -z "$unsigned" ] && exit 0
@@ -93,4 +96,8 @@ printf '%s' "$unsigned" | awk '!seen[$1]++' | while read -r sha subject; do
 done
 echo "main's ruleset requires a signature GitHub verifies on every commit, and a merge commit lands each one on main as it is."
 echo "Fix: set up signing, then 'git rebase --force-rebase --gpg-sign <base>' and push again; see CONTRIBUTING.md, \"Submitting changes\"."
+if [ -n "$tags" ]; then
+	# A rebase leaves a tag on the commit it already names.
+	echo "Then tag the re-signed commit again ('git tag -f <name> <commit>') for:$tags"
+fi
 exit 1
