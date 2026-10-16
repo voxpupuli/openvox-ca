@@ -155,6 +155,21 @@ See [`AGENTS.md`](AGENTS.md) for the details. The essentials:
 - Keep commits focused: imperative subject ≤ 72 characters, with a body that
   explains *why*. Stage files by name and review `git diff --staged` before
   committing.
+- Every commit in your pull request must carry a signature GitHub verifies
+  (GPG, SSH or S/MIME). `main`'s ruleset requires one on every commit, and a
+  merge keeps each of your commits as it is, so one unsigned commit leaves the
+  pull request unmergeable however green its checks are. Set signing up with
+  GitHub's [Signing commits](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits)
+  guide, and add the key to your GitHub account as a *signing* key: an SSH key
+  added for authentication alone does not count. The pull request's commit
+  list marks each one "Verified" once GitHub accepts it. To re-sign a branch
+  you have already pushed unsigned, replay it onto its base and force-push:
+
+  ```bash
+  git rebase --force-rebase --gpg-sign origin/main
+  git push --force-with-lease
+  ```
+
 - Make sure `mage dev:check`, `mage test:unit`, `mage test:magefile`,
   `markdownlint-cli2` and, for a change to `packaging/scripts/`, `shellcheck`
   pass.
