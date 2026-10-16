@@ -66,14 +66,14 @@ wire-compatible with your existing Puppet/OpenVox fleet.
 - **Delayed supersession:** a renewal records the certificate it replaced rather than revoking it inside the call, and a background job revokes it once an overlap window elapses (`superseded_cert_revoke_after_sec`, 24h by default) — the overlap a certificate other parties are actively verifying needs in order to be replaced without a gap. The window is a deliberate weakening, so it is bounded at both ends: a superseded certificate cannot renew itself into a fresh one, and revoking a subject retires anything of its own still inside a window. Set `0` to revoke inside the renewal as earlier releases did. Safe across replicas (serialised on the shared CRL lock). See [delayed supersession](docs/configuration.md#delayed-supersession)
 - **OCSP responder:** built-in RFC 6960 OCSP responder; AIA extension embedded in issued certs when `--ocsp-url` is set; in-memory cache with nonce bypass. On the HA backends each replica reloads the set of serials it recognises on a timer (`ocsp_index_sync_interval_sec`, 5m by default), so a certificate signed on one replica is not reported `unknown` by the others. See [OCSP status across replicas](docs/configuration.md#ocsp-status-across-replicas)
 - **Health probes:** `/healthz/live`, `/healthz/ready`, and `/healthz/startup` endpoints for Kubernetes-style liveness/readiness checks
-- **Prometheus exporter:** optional `/metrics` listener (`--metrics-listen`) exposing Go runtime/process and HTTP metrics plus CA certificate, CRL, and per–leaf-certificate expiry and issuance-status series; ships with a [Jsonnet alerting mixin](mixin/). See [metrics & monitoring](docs/metrics.md)
+- **Prometheus exporter:** optional `/metrics` listener (`--metrics-listen`) exposing Go runtime/process and HTTP metrics plus CA certificate, CRL, and per–leaf-certificate expiry and issuance-status series; ships with a [Jsonnet alerting mixin](https://github.com/voxpupuli/openvox-ca/tree/main/mixin). See [metrics & monitoring](docs/metrics.md)
 - **Managed certificates (opt-in):** `managed_certs` names certificates this CA issues and renews on behalf of OpenVox components, writing each into a Kubernetes Secret or a local file pair and superseding its predecessor with an overlap window. Nothing submits a CSR: the configuration is the request, and the CA keeps each name alive for as long as it is configured. A certname listed in `puppet_server` makes that certificate a CA admin credential, which the CA says at startup. See [managed certificates](docs/configuration.md#managed-certificates)
 - **The CA's own serving certificate (opt-in):** `serving_cert` makes the CA issue and renew the certificate its own listener presents, into a Kubernetes Secret or a local file pair, instead of being handed one through `tls_cert` / `tls_key` — the two are mutually exclusive. It is the only way to have that certificate renewed unattended once the CA key is held at a provider, where cert-manager cannot act as a CA issuer without the key and `openvox-ca-ctl generate` needs an admin certificate that does not exist until the CA is already serving. See [the CA's own serving certificate](docs/configuration.md#the-cas-own-serving-certificate)
 - **Kubernetes export (opt-in):** publish the CA certificate and/or CRL into any number of Kubernetes Secrets and ConfigMaps via in-cluster server-side apply, with configurable names, namespaces, data keys, labels, annotations, Secret `type`, and how much of the chain to publish (`cert_scope`/`crl_scope`, which publish the whole stored chain by default — set them to `self` on a target whose consumer wants this CA's block alone); CRL-bearing objects are refreshed whenever the CRL changes. See [Kubernetes export](docs/kubernetes-export.md)
 - **Helm chart:** an OCI-published chart, versioned in lockstep with the server, covering dual-stack Services, TLS-passthrough Ingress and Gateway API routes, an opt-in ServiceMonitor and network policies; it derives the RBAC for managed certificates kept in Secrets from the server's own configuration; and the server's settings pass straight through to its config file, so the whole configuration reference is reachable. See [deploying with Helm](docs/helm-chart.md)
 - **Graceful shutdown:** `SIGTERM`/`SIGINT` drains in-flight requests with a configurable window (25s default) before exiting; deferred storage and signer cleanup always runs
 - **Configuration reload:** `SIGHUP` (or `systemctl reload`) re-reads the TLS keypair and the admin allow list without dropping connections, so renewing the CA's server certificate or decommissioning a compile server needs no restart. See [reloading configuration](docs/configuration.md#reloading-configuration)
-- **systemd integration:** `Type=notify` readiness (`systemctl start` returns once the listener is actually accepting), a live status line covering the listener, CA expiry and CRL freshness, watchdog keep-alives, and `systemctl reload` for TLS certificate renewal and admin allow-list changes; ships a hardened unit, rendered per channel from [one template](packaging/systemd/openvox-ca.service) — installed by the packages, and in every release tarball ready to use. See [running under systemd](docs/systemd.md)
+- **systemd integration:** `Type=notify` readiness (`systemctl start` returns once the listener is actually accepting), a live status line covering the listener, CA expiry and CRL freshness, watchdog keep-alives, and `systemctl reload` for TLS certificate renewal and admin allow-list changes; ships a hardened unit, rendered per channel from [one template](https://github.com/voxpupuli/openvox-ca/blob/main/packaging/systemd/openvox-ca.service) — installed by the packages, and in every release tarball ready to use. See [running under systemd](docs/systemd.md)
 - **FIPS-compatible:** the core CA uses the standard library only (`crypto/x509`, `net/http`); no CGO by default; FIPS build available via `GOEXPERIMENT=boringcrypto` (the optional Kubernetes export and a managed certificate stored in a Secret add the `client-go` dependency)
 - **`openvox-ca-ctl`:** operator CLI matching `puppetserver ca` subcommands. See the [operator CLI reference](docs/operator-cli.md)
 
@@ -89,7 +89,7 @@ $ docker pull ghcr.io/voxpupuli/openvox-ca:latest
 ```
 
 See [container images](docs/container-images.md) for the available tags and a
-`docker run` example, or use the [compose.yml](compose.yml) at the repository
+`docker run` example, or use the [compose.yml](https://github.com/voxpupuli/openvox-ca/blob/main/compose.yml) at the repository
 root for a Docker/Podman Compose deployment.
 
 ### Release tarballs
@@ -241,7 +241,7 @@ $ helm install openvox-ca \
 ```
 
 See [deploying with Helm](docs/helm-chart.md) for the guide and the
-[chart README](charts/openvox-ca/README.md) for the values reference. The chart is
+[chart README](https://github.com/voxpupuli/openvox-ca/blob/main/charts/openvox-ca/README.md) for the values reference. The chart is
 signed and attested like the images:
 
 ```console
@@ -261,7 +261,7 @@ mage build:all      # → bin/openvox-ca and bin/openvox-ca-ctl
 ```
 
 Full build instructions (including the FIPS build) are in
-[`CONTRIBUTING.md`](CONTRIBUTING.md#building).
+[`CONTRIBUTING.md`](https://github.com/voxpupuli/openvox-ca/blob/main/CONTRIBUTING.md#building).
 
 ## Quick start
 
@@ -358,7 +358,7 @@ The complete flag, environment-variable, and config-file reference is in
 | [OpenBao Transit-engine CA key](docs/openbao-transit.md) | Delegating CA key custody to OpenBao |
 | [Deploying with Helm](docs/helm-chart.md) | The `openvox-ca` chart: installation, TLS passthrough, ingress and Gateway API, monitoring |
 | [Kubernetes export](docs/kubernetes-export.md) | Publishing the CA cert/CRL into Secrets and ConfigMaps |
-| [Metrics & monitoring](docs/metrics.md) | The Prometheus exporter and the alerting [mixin](mixin/) |
+| [Metrics & monitoring](docs/metrics.md) | The Prometheus exporter and the alerting [mixin](https://github.com/voxpupuli/openvox-ca/tree/main/mixin) |
 | [Running under systemd](docs/systemd.md) | The `Type=notify` unit, status text, `systemctl reload`, watchdog, hardening, and installing from a package with its first-boot provisioning |
 | [Container images](docs/container-images.md) | Pulling and running the published images |
 | [Migration guide](docs/migrating-from-puppet-server.md) | Replacing an OpenVox/Puppet Server built-in CA |
@@ -408,8 +408,8 @@ Help is offered on a best-effort basis, with no guarantees. The Vox Pupuli
 
 ## Contributing
 
-Contributions are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for how to
-build, test, and submit changes, [`AGENTS.md`](AGENTS.md) for the repository
+Contributions are welcome. See [`CONTRIBUTING.md`](https://github.com/voxpupuli/openvox-ca/blob/main/CONTRIBUTING.md) for how to
+build, test, and submit changes, [`AGENTS.md`](https://github.com/voxpupuli/openvox-ca/blob/main/AGENTS.md) for the repository
 conventions, and the [development documentation](docs/development/) for internal
 design notes and the test suites.
 
