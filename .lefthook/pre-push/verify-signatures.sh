@@ -117,6 +117,6 @@ echo "main's ruleset requires a signature GitHub verifies on every commit, and a
 echo "Fix: set up signing, then 'git rebase --force-rebase --gpg-sign <base>' and push again; see CONTRIBUTING.md, \"Submitting changes\"."
 if [ -n "$tags" ]; then
 	# A rebase leaves a tag on the commit it already names.
-	echo "Then tag the re-signed commit again ('git tag -f <name> <commit>') for:$tags"
+	echo "Then tag the re-signed commit again ('git tag -f <name> <commit>', with -a or -s if it was annotated) for:$tags"
 fi
 exit 1
