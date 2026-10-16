@@ -260,18 +260,20 @@ Where it does bite, you have three options:
    exists, so it keeps that mode, but it does not check it either. A
    world-writable `private/` starts without a word and lets every local account
    add, replace or remove the files in it. A store that is already failing can
-   be given the mode the same way, by the uid that owns `private/` or by root;
+   be given that mode with a one-off `chmod`, run by the uid that owns
+   `private/` or by root (in a pod, a one-off pod or Job running as that uid);
    the running uid cannot, since `chmod` needs ownership.
 
    In a pod the CA creates `private/` on its first start, so do it from an init
    container: with the Helm chart, one in `initContainers` that mounts the
-   chart's `data` volume at `persistence.mountPath` (the cadir,
-   `/var/lib/puppet-ca` by default) and can write to its root. It runs on every
-   start, as whatever uid that run is given, so it must create the directory
-   only when it is absent and never `chmod` one that exists:
-   `[ -d /var/lib/puppet-ca/private ] || mkdir -m 2770 /var/lib/puppet-ca/private`.
-   One that changes the mode fails with `EPERM` once the uid changes, and the
-   pod does not start at all.
+   chart's `data` volume at `persistence.mountPath`. The chart's cadir is that
+   mount point unless `config.cadir` narrows it to a directory below, so the
+   directory to create is `<cadir>/private` for whichever applies, with the
+   cadir itself created first if it does not exist yet. The init container runs
+   on every start, as whatever uid that run is given, so it must create
+   directories only when they are absent and never `chmod` one that exists: one
+   that changes the mode fails with `EPERM` once the uid changes, and the pod
+   does not start at all.
 
    Each key is still written `0600`, so this lets a later uid add keys, not read
    earlier ones (see above). It also lets every member of the group add,
