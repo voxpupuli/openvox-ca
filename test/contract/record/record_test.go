@@ -54,7 +54,10 @@ const contractFixtures = "../../../internal/api/testdata/contract/fixtures"
 
 // generatedBodies are the cases whose request body run fills in, a CSR made
 // fresh for each recording.
-var generatedBodies = map[string]bool{"certificate-request-put": true, "certificate-request-put-existing-cert": true}
+var generatedBodies = map[string]bool{
+	"certificate-request-put": true, "certificate-request-put-existing-cert": true,
+	"certificate-request-put-autosign-ca-true": true,
+}
 
 // fixtureDrift reports every way the fixtures in dir differ from cases():
 // a fixture no case records, a case with no fixture, and a fixture whose
@@ -140,12 +143,20 @@ func changedSubjects(r request) ([]string, bool) {
 	return nil, false
 }
 
+// storesWhenRefused reports whether upstream changes the store for r even
+// when it refuses it: a CSR submitted for autosignSubject is saved before
+// upstream checks whether it may sign it.
+func storesWhenRefused(r request) bool {
+	return r.Method == http.MethodPut && r.Path == "/puppet-ca/v1/certificate_request/"+autosignSubject
+}
+
 // snapshotViolations reports every way fs, cases with their recorded
-// responses, breaks the rule cases() states: no read after a mutation
-// upstream accepts, no subject changed by two of them, and /sign/all last.
-// A non-GET answered 2xx counts as accepted. That over-counts (POST /sign
-// answers 200 while refusing every name in it), so the rule is held tighter
-// than it needs to be, never looser.
+// responses, breaks the rule cases() states: no read after a mutation that
+// changes the store, no subject changed by two of them, and /sign/all last.
+// A non-GET answered 2xx counts as a change, and so does one storesWhenRefused
+// names, whatever its answer. That over-counts (POST /sign answers 200 while
+// refusing every name in it), so the rule is held tighter than it needs to
+// be, never looser.
 func snapshotViolations(fs []fixture) []string {
 	var out []string
 	changedBy := map[string]string{}
@@ -163,7 +174,7 @@ func snapshotViolations(fs []fixture) []string {
 			}
 			continue
 		}
-		if f.Response.Status < 200 || f.Response.Status > 299 {
+		if (f.Response.Status < 200 || f.Response.Status > 299) && !storesWhenRefused(f.Request) {
 			continue
 		}
 		if firstChange == "" {
@@ -267,6 +278,23 @@ var _ = Describe("the committed contract", func() {
 		refused := fixtureNamed(fs, "status-put-revoke")
 		refused.Name, refused.Response.Status = "refused-revoke", http.StatusConflict
 		Expect(snapshotViolations(insertBefore(fs, "sign-all", refused))).To(BeEmpty())
+	})
+
+	// The autosigned submission is refused, and still stores its CSR.
+	It("counts a refused autosigned submission as a change, since upstream saves the CSR first", func() {
+		fs := recordedCases()
+		Expect(fixtureNamed(fs, "certificate-request-put-autosign-ca-true").Response.Status).To(Equal(http.StatusBadRequest))
+		again := fixtureNamed(fs, "status-put-bad-state")
+		again.Name, again.Request.Path = "touch-autosigned", "/puppet-ca/v1/certificate_status/"+autosignSubject
+		again.Response.Status = http.StatusNoContent
+		Expect(snapshotViolations(insertBefore(fs, "sign-all", again))).To(Equal([]string{
+			"touch-autosigned: changes " + autosignSubject + ", which certificate-request-put-autosign-ca-true already changed",
+		}))
+	})
+
+	It("records the autosign policy the replay reads, naming one subject exactly", func() {
+		Expect(string(mustRead(filepath.Join(contractFixtures, "..", "autosign.conf")))).To(Equal(autosignConf))
+		Expect(autosignConf).To(Equal(autosignSubject+"\n"), "one line, the subject itself rather than a glob")
 	})
 })
 

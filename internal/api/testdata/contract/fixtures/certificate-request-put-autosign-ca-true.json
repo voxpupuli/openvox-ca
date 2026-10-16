@@ -1,0 +1,29 @@
+{
+  "name": "certificate-request-put-autosign-ca-true",
+  "description": "submitting a CSR that asks to be a CA for a subject the CA autosigns",
+  "sources": [
+    "src/clj/puppetlabs/services/ca/certificate_authority_core.clj:90-102",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:1140-1160",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:1793-1812",
+    "src/clj/puppetlabs/puppetserver/certificate_authority.clj:2216-2227"
+  ],
+  "recorded_from": "OpenVoxProject/openvox-server@8.14.1",
+  "image": "ghcr.io/openvoxproject/openvoxserver:8.14.1-main@sha256:806c5eb471c3f1d499308d903dc84210d96b00761de481d2cc7dee380d78c152",
+  "compare": "none",
+  "request": {
+    "method": "PUT",
+    "path": "/puppet-ca/v1/certificate_request/autosign-ca-true",
+    "content_type": "text/plain",
+    "body": "-----BEGIN CERTIFICATE REQUEST-----\nMIH3MIGfAgEAMBsxGTAXBgNVBAMTEGF1dG9zaWduLWNhLXRydWUwWTATBgcqhkjO\nPQIBBggqhkjOPQMBBwNCAAQ9PO+NMkuz8DDii7A1AKf7/5PvgoYg2FFf2ce04Hwq\nr01wOwSjB2GJN+JitM+CKCrxkMmpRySYcDoqDrgGsWKIoCIwIAYJKoZIhvcNAQkO\nMRMwETAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0cAMEQCIDOqpt1EmY8G\nF4ljzWzmHTU69UR2HxozWYBeQivuRnEnAiBiBYYNX5MDglP58g0aUXoKuE977iZq\n/aYydyqrSX9TJw==\n-----END CERTIFICATE REQUEST-----\n",
+    "client": "admin"
+  },
+  "response": {
+    "status": 400,
+    "content_type": "text/plain;charset=utf-8",
+    "headers": {
+      "Content-Type": "text/plain;charset=utf-8",
+      "X-Puppet-Version": "8.27.0"
+    },
+    "text": "Found extensions that are not permitted: 2.5.29.19"
+  }
+}

@@ -95,6 +95,15 @@ const (
 	cadirPath    = "/etc/puppetlabs/puppetserver/ca"
 	caConfPath   = "/etc/puppetlabs/puppetserver/conf.d/ca.conf"
 	authConfPath = "/etc/puppetlabs/puppetserver/conf.d/auth.conf"
+
+	// autosignSubject is the one subject OpenVox Server autosigns, so the
+	// contract can record an autosigned submission without changing what any
+	// other fixture means. autosignConf is the autosign.conf naming it,
+	// exactly and not as a glob, written into the container and beside the
+	// contract, where the replay reads it as its own autosign policy.
+	autosignSubject  = "autosign-ca-true"
+	autosignConf     = autosignSubject + "\n"
+	autosignConfPath = "/etc/puppetlabs/puppet/contract-autosign.conf"
 )
 
 // readme is written beside the contract, where a secret scanner or a reader
@@ -107,6 +116,9 @@ here by hand: re-record instead.
 ` + "`cadir/ca_key.pem`" + ` and the CA it signs for are throwaways, generated
 inside a disposable container for this recording and committed so the specs can
 use them. Nothing should trust them.
+
+` + "`autosign.conf`" + ` is the autosign policy the server ran with, and the one the
+specs replay with.
 `
 
 // Puppet authorisation-arc OIDs used by the corner-case certificates.
@@ -199,7 +211,7 @@ func run(out, compose string, keep bool) error {
 
 	name := fmt.Sprintf("openvox-ca-contract-%d", os.Getpid())
 	if err := docker(ctx, "create", "--name", name, "--hostname", serverName,
-		"-e", "AUTOSIGN=false",
+		"-e", "AUTOSIGN="+autosignConfPath,
 		"-e", "OPENVOXSERVER_HOSTNAME="+serverName,
 		"-e", "USE_OPENVOXDB=false",
 		"-e", "OPENVOX_STORECONFIGS=false",
@@ -264,6 +276,15 @@ ruby -e '
 		return err
 	}
 	if err := docker(ctx, "cp", script, name+":/container-entrypoint.d/91-contract.sh"); err != nil {
+		return err
+	}
+	// Not executable: OpenVox Server runs an executable autosign file as a
+	// policy plugin rather than reading it as a list of names.
+	conf := filepath.Join(tmp, "autosign.conf")
+	if err := os.WriteFile(conf, []byte(autosignConf), 0o644); err != nil { //nolint:gosec // G306: the server reads it as its own unprivileged user, and it names one throwaway subject
+		return err
+	}
+	if err := docker(ctx, "cp", conf, name+":"+autosignConfPath); err != nil {
 		return err
 	}
 	if err := docker(ctx, "start", name); err != nil {
@@ -338,6 +359,9 @@ ruby -e '
 	if err := root.WriteFile("README.md", []byte(readme), 0o600); err != nil {
 		return err
 	}
+	if err := root.WriteFile("autosign.conf", []byte(autosignConf), 0o600); err != nil {
+		return err
+	}
 
 	csrBodies := map[string]issued{}
 	for _, cn := range []string{"new-csr", "corner-nosan"} {
@@ -347,6 +371,12 @@ ruby -e '
 		}
 		csrBodies[cn] = csr
 	}
+	// Asks to be a CA, which OpenVox Server refuses to autosign.
+	caTrue, err := newCSR(autosignSubject, nil, basicConstraintsExt(true))
+	if err != nil {
+		return err
+	}
+	csrBodies[autosignSubject] = caTrue
 
 	clients := map[string]*http.Client{"admin": admin, "renewer": renewer, "anonymous": anonymous}
 	for _, c := range cases() {
@@ -355,6 +385,8 @@ ruby -e '
 			c.Request.Body = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrBodies["new-csr"].der}))
 		case "certificate-request-put-existing-cert":
 			c.Request.Body = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrBodies["corner-nosan"].der}))
+		case "certificate-request-put-autosign-ca-true":
+			c.Request.Body = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrBodies[autosignSubject].der}))
 		}
 		resp, err := do(ctx, clients[c.Request.Client], c.Request)
 		if err != nil {
@@ -603,6 +635,20 @@ func utf8Ext(oid asn1.ObjectIdentifier, value string) pkix.Extension {
 		panic(err)
 	}
 	return pkix.Extension{Id: oid, Value: v}
+}
+
+var oidBasicConstraints = asn1.ObjectIdentifier{2, 5, 29, 19}
+
+// basicConstraintsExt builds a critical basicConstraints extension asking for
+// the CA flag isCA.
+func basicConstraintsExt(isCA bool) pkix.Extension {
+	v, err := asn1.Marshal(struct {
+		IsCA bool `asn1:"optional"`
+	}{isCA})
+	if err != nil {
+		panic(err)
+	}
+	return pkix.Extension{Id: oidBasicConstraints, Critical: true, Value: v}
 }
 
 // GeneralName tags (RFC 5280 4.2.1.6) for the SANs sanExt writes.
@@ -954,12 +1000,15 @@ func writeFixture(out *os.Root, f fixture) error {
 // cases lists every recorded request. Each spec replays one against the
 // snapshot, so every response must be the answer to the snapshot state, which
 // holds for two reasons: every read is recorded before any mutation, and no
-// subject is touched by two mutations upstream accepts. A mutation upstream
-// refuses (signing without a CSR, an unknown state, a CSR over a live
-// certificate, anything aimed at no-such-node) changes nothing, so it may
-// share a subject; keep it refused. /sign/all acts on every pending CSR,
-// new-csr included, so its answer is to a later state than the snapshot: it
-// is last, and bound by type only.
+// subject is touched by two mutations that change the store. Most mutations
+// upstream refuses (signing without a CSR, an unknown state, a CSR over a live
+// certificate, anything aimed at no-such-node) change nothing, so they may
+// share a subject; keep them refused. A refused autosigned submission is the
+// exception: upstream stores the CSR before it checks whether it may sign it,
+// so that case counts as a change and keeps autosignSubject to itself.
+// /sign/all acts on every pending CSR, new-csr and autosignSubject's
+// included, so its answer is to a later state than the snapshot: it is last,
+// and bound by type only.
 func cases() []fixture {
 	const (
 		ovc = "src/clj/puppetlabs/services/ca/certificate_authority_core.clj"
@@ -1034,9 +1083,14 @@ func cases() []fixture {
 		{Name: "status-put-sign-authext", Description: "signing a CSR that asks for an authorisation extension", Sources: []string{ovc + ":423-542"}, Compare: "none", Request: putJSON(v1+"/certificate_status/corner-authext", `{"desired_state":"signed"}`)},
 		{Name: "sign-refused", Description: "signing named CSRs the CA refuses, for their subject alternative names", Sources: []string{ovc + ":275-291", ova + ":2485-2527"}, Compare: "exact", Request: postJSON(v1+"/sign", `{"certnames":["corner-pending"]}`)},
 		{Name: "status-delete", Description: "deleting a signed certificate", Sources: []string{ovc + ":450-465", ova + ":2252-2260"}, Compare: "none", Request: request{Method: "DELETE", Path: v1 + "/certificate_status/delete-me", Client: "admin"}},
-		// The two CSR submissions' bodies are generated: see run.
+		// The CSR submissions' bodies are generated: see run.
 		{Name: "certificate-request-put", Description: "submitting a new CSR", Sources: []string{ovc + ":90-102"}, Compare: "none", Request: request{Method: "PUT", Path: v1 + "/certificate_request/new-csr", ContentType: "text/plain", Client: "admin"}},
 		{Name: "certificate-request-put-existing-cert", Description: "submitting a CSR for a subject that already holds a certificate", Sources: []string{ovc + ":90-102", ova + ":1717-1739"}, Compare: "none", Request: request{Method: "PUT", Path: v1 + "/certificate_request/corner-nosan", ContentType: "text/plain", Client: "admin"}},
+		// Upstream saves the CSR, then refuses to autosign it for its
+		// basicConstraints extension; openvox-ca refuses it as CA:TRUE.
+		{Name: "certificate-request-put-autosign-ca-true", Description: "submitting a CSR that asks to be a CA for a subject the CA autosigns",
+			Sources: []string{ovc + ":90-102", ova + ":1140-1160", ova + ":1793-1812", ova + ":2216-2227"}, Compare: "none",
+			Request: request{Method: "PUT", Path: v1 + "/certificate_request/" + autosignSubject, ContentType: "text/plain", Client: "admin"}},
 		{Name: "certificate-request-delete", Description: "deleting a pending CSR", Sources: []string{ovc + ":154-164", ova + ":1645-1665"}, Compare: "none", Request: request{Method: "DELETE", Path: v1 + "/certificate_request/delete-me-csr", Client: "admin"}},
 		{Name: "certificate-request-delete-unknown", Description: "deleting a CSR the CA does not hold", Sources: []string{ovc + ":154-164", ova + ":1645-1665"}, Compare: "none", Request: request{Method: "DELETE", Path: v1 + "/certificate_request/no-such-node", Client: "admin"}},
 		{Name: "sign", Description: "signing named CSRs", Sources: []string{ovc + ":275-291", ova + ":2485-2527"}, Compare: "exact", Request: postJSON(v1+"/sign", `{"certnames":["sign2-me","no-such-node"]}`)},

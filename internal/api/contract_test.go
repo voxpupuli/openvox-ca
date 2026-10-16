@@ -592,7 +592,7 @@ func seedContractStore(store *storage.StorageService) *api.Server {
 		Expect(store.SaveCSR(ctx, strings.TrimSuffix(e.Name(), ".pem"), read(filepath.Join("requests", e.Name())))).To(Succeed())
 	}
 
-	myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet")
+	myCA := ca.New(store, contractAutosign(), "puppet")
 	// The replay runs at the moment the store was recorded, not today: the
 	// recording's CA expires, and a CA past its expiry refuses to issue.
 	snapshotAt := contractSnapshotTime()
@@ -603,6 +603,17 @@ func seedContractStore(store *storage.StorageService) *api.Server {
 	// "Differences from OpenVox Server".
 	srv.PuppetDateTimeFormat = true
 	return srv
+}
+
+// contractAutosign is the autosign policy the fixtures were recorded with:
+// the recorder's autosign.conf, which names one subject, so every other
+// subject's CSR waits for manual signing as it did upstream. A missing file
+// would leave autosign quietly off, so its absence fails the spec instead.
+func contractAutosign() ca.AutosignConfig {
+	conf, err := filepath.Abs(filepath.Join(contractDir, "autosign.conf"))
+	Expect(err).NotTo(HaveOccurred())
+	Expect(conf).To(BeARegularFile())
+	return ca.AutosignConfig{Mode: "file", FileOrPath: conf}
 }
 
 // contractSnapshotTime is when the recorded store's CRL was issued: a moment
