@@ -739,6 +739,32 @@ var _ = Describe("Puppet CA API contract", func() {
 		Expect(checkContract(sign, rr.Code, rr.Header().Get("Content-Type"), rr.Body.Bytes())).To(
 			Equal([]string{fmt.Sprintf("status: %d, upstream %d", http.StatusConflict, sign.Response.Status)}))
 	})
+
+	// seedContractStore autosigns the one subject the recording did, and the
+	// autosigned CA:TRUE submission is refused only because it is autosigned.
+	// This twin shows the policy is what keeps that case passing: the same
+	// request on the same store, with autosign off, is saved and answered 200
+	// rather than refused, so a 400 from another cause (a duplicate request,
+	// say) cannot stand in for it.
+	It("answers the autosigned CA:TRUE submission as upstream did only under the recorded autosign policy", func() {
+		var put contractFixture
+		for _, f := range loadContractFixtures() {
+			if f.Name == "certificate-request-put-autosign-ca-true" {
+				put = f
+			}
+		}
+		Expect(put.Name).To(Equal("certificate-request-put-autosign-ca-true"))
+
+		autosigned := seedContractCA(GinkgoT().TempDir())
+		rr := serveContract(autosigned, put)
+		Expect(checkContract(put, rr.Code, rr.Header().Get("Content-Type"), rr.Body.Bytes())).To(BeEmpty())
+
+		manual := seedContractCA(GinkgoT().TempDir())
+		manual.CA.AutosignConfig = ca.AutosignConfig{Mode: "off"}
+		rr = serveContract(manual, put)
+		Expect(checkContract(put, rr.Code, rr.Header().Get("Content-Type"), rr.Body.Bytes())).To(
+			Equal([]string{"status: 200, upstream 400"}))
+	})
 })
 
 // The checker must be able to fail: a checker that accepted everything would

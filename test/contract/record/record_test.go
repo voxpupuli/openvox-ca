@@ -294,7 +294,18 @@ var _ = Describe("the committed contract", func() {
 
 	It("records the autosign policy the replay reads, naming one subject exactly", func() {
 		Expect(string(mustRead(filepath.Join(contractFixtures, "..", "autosign.conf")))).To(Equal(autosignConf))
-		Expect(autosignConf).To(Equal(autosignSubject+"\n"), "one line, the subject itself rather than a glob")
+		Expect(autosignConf).To(MatchRegexp(`\A[a-z0-9.-]+\n\z`), "one line, a certname rather than a glob")
+		put := fixtureNamed(recordedCases(), "certificate-request-put-autosign-ca-true")
+		Expect(autosignConf).To(Equal(path.Base(put.Request.Path)+"\n"), "the subject the autosigned case submits")
+	})
+
+	// The case binds only status and media type, so a re-record that drew a
+	// 400 for some other reason would replay as a match; the recorded text is
+	// what shows upstream refused the extension.
+	It("records upstream refusing the autosigned CSR for its basicConstraints extension", func() {
+		put := fixtureNamed(recordedCases(), "certificate-request-put-autosign-ca-true")
+		Expect(put.Response.Status).To(Equal(http.StatusBadRequest))
+		Expect(put.Response.Text).To(HaveValue(ContainSubstring("not permitted: 2.5.29.19")))
 	})
 })
 
