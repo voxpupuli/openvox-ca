@@ -30,6 +30,7 @@
       ],
       "no-csr": [],
       "signing-errors": [
+        "autosign-ca-true",
         "corner-authext",
         "corner-pending"
       ]

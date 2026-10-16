@@ -592,7 +592,7 @@ func seedContractStore(store *storage.StorageService) *api.Server {
 		Expect(store.SaveCSR(ctx, strings.TrimSuffix(e.Name(), ".pem"), read(filepath.Join("requests", e.Name())))).To(Succeed())
 	}
 
-	myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet")
+	myCA := ca.New(store, contractAutosign(), "puppet")
 	// The replay runs at the moment the store was recorded, not today: the
 	// recording's CA expires, and a CA past its expiry refuses to issue.
 	snapshotAt := contractSnapshotTime()
@@ -603,6 +603,17 @@ func seedContractStore(store *storage.StorageService) *api.Server {
 	// "Differences from OpenVox Server".
 	srv.PuppetDateTimeFormat = true
 	return srv
+}
+
+// contractAutosign is the autosign policy the fixtures were recorded with:
+// the recorder's autosign.conf, which names one subject, so every other
+// subject's CSR waits for manual signing as it did upstream. A missing file
+// would leave autosign quietly off, so its absence fails the spec instead.
+func contractAutosign() ca.AutosignConfig {
+	conf, err := filepath.Abs(filepath.Join(contractDir, "autosign.conf"))
+	Expect(err).NotTo(HaveOccurred())
+	Expect(conf).To(BeARegularFile())
+	return ca.AutosignConfig{Mode: "file", FileOrPath: conf}
 }
 
 // contractSnapshotTime is when the recorded store's CRL was issued: a moment
@@ -727,6 +738,32 @@ var _ = Describe("Puppet CA API contract", func() {
 		rr = serveContract(late, sign)
 		Expect(checkContract(sign, rr.Code, rr.Header().Get("Content-Type"), rr.Body.Bytes())).To(
 			Equal([]string{fmt.Sprintf("status: %d, upstream %d", http.StatusConflict, sign.Response.Status)}))
+	})
+
+	// seedContractStore autosigns the one subject the recording did, and the
+	// autosigned CA:TRUE submission is refused only because it is autosigned.
+	// This twin shows the policy is what keeps that case passing: the same
+	// request on the same store, with autosign off, is saved and answered 200
+	// rather than refused, so a 400 from another cause (a duplicate request,
+	// say) cannot stand in for it.
+	It("answers the autosigned CA:TRUE submission as upstream did only under the recorded autosign policy", func() {
+		var put contractFixture
+		for _, f := range loadContractFixtures() {
+			if f.Name == "certificate-request-put-autosign-ca-true" {
+				put = f
+			}
+		}
+		Expect(put.Name).To(Equal("certificate-request-put-autosign-ca-true"))
+
+		autosigned := seedContractCA(GinkgoT().TempDir())
+		rr := serveContract(autosigned, put)
+		Expect(checkContract(put, rr.Code, rr.Header().Get("Content-Type"), rr.Body.Bytes())).To(BeEmpty())
+
+		manual := seedContractCA(GinkgoT().TempDir())
+		manual.CA.AutosignConfig = ca.AutosignConfig{Mode: "off"}
+		rr = serveContract(manual, put)
+		Expect(checkContract(put, rr.Code, rr.Header().Get("Content-Type"), rr.Body.Bytes())).To(
+			Equal([]string{"status: 200, upstream 400"}))
 	})
 })
 

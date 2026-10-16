@@ -393,14 +393,22 @@ CRL chain, certificates and CSRs, and each spec loads it into a fresh
 openvox-ca, so values derived from a certificate can be compared exactly.
 Each spec can start from that one snapshot because every recorded answer is
 to the snapshot state, which holds for two reasons: the recorder records every
-read before any mutation, and no subject is touched by two mutations OpenVox
-Server accepts. A mutation it refuses changes nothing, so it may share a
-subject; keep such a request refused. The one exception is `/sign/all`, which
-signs every pending CSR, including the one an earlier fixture submitted: it is
-recorded last and bound by type only, because its answer is to a later state
-than the snapshot. The CA key is a throwaway,
-generated inside a disposable container for the recording and committed so the
-specs can sign with it; nothing should trust it.
+read before any mutation, and no subject is touched by two mutations that
+change the store. Most mutations OpenVox Server refuses change nothing, so they
+may share a subject; keep such a request refused. A refused autosigned CSR
+submission does change the store: OpenVox Server saves the CSR before it checks
+whether it may sign it, so that case keeps its subject to itself. The one
+exception to the snapshot rule is `/sign/all`, which signs every pending CSR,
+including the ones earlier fixtures submitted: it is recorded last and bound
+by type only, because its answer is to a later state than the snapshot. The
+CA key is a throwaway, generated inside a disposable container for the
+recording and committed so the specs can sign with it; nothing should trust
+it.
+
+The recording autosigns exactly one subject, named in the `autosign.conf` the
+recorder writes beside the fixtures, and the replay reads that file as its own
+autosign policy. Every other subject's CSR waits for manual signing on both
+sides.
 
 An exception names a difference that openvox-ca still has, exactly as the
 checker reports it, and why: an issue, or a ruling to keep its own behaviour.

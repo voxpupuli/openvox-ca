@@ -7,3 +7,6 @@ here by hand: re-record instead.
 `cadir/ca_key.pem` and the CA it signs for are throwaways, generated
 inside a disposable container for this recording and committed so the specs can
 use them. Nothing should trust them.
+
+`autosign.conf` is the autosign policy the server ran with, and the one the
+specs replay with.
