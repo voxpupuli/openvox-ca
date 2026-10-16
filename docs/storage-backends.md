@@ -26,6 +26,11 @@ Two things are true regardless of backend:
   (e.g. a mounted secret volume) independent of the chosen backend — see
   [CA cert/key as local files](#ca-certkey-as-local-files).
 
+Because those per-subject keys are local files, generating them on a platform
+that may start the CA as a different uid from one run to the next needs a stable
+uid or some preparation: see [Server-side key generation and the
+uid](#server-side-key-generation-and-the-uid).
+
 In the HA backends (`etcd`, `redis`, `postgres`, `mysql`), any replica can sign,
 revoke, or refresh the CRL, and everything it writes lands in shared storage and
 is immediately visible to the others; `openvox-ca` coordinates the replicas and
@@ -184,6 +189,65 @@ where the entry and its integrity head are written in one step: SQL in one
 transaction, redis in one atomic script, etcd in one transaction. On those
 backends concurrent writers are the supported case, and this whole section is
 moot.
+
+---
+
+## Server-side key generation and the uid
+
+Server-side key generation keeps the key it generates in `<cadir>/private/`,
+whatever the backend. [`POST /generate/{subject}`](api.md#server-side-key-generation)
+always does; the offline
+[`openvox-ca generate`](operator-cli.md#generate-minting-a-certificate-offline)
+does unless `--key-out` names another file. `openvox-ca` creates that directory
+`0750` and writes each key `0600`, and the umask cannot widen either, so only
+the uid that created `private/` can add a key to it.
+
+On a platform that chooses the uid the CA runs as — OpenShift, for one, draws it
+from a range allotted to the namespace — and may choose a different one from one
+run to the next, sharing only the store's group with the uid before it,
+**server-side key generation needs a stable uid**. The first run creates
+`private/`; once a later run is another uid, every `/generate`, and every
+offline `generate` without `--key-out`, fails on the key write with a permission
+error. Signing never writes to `private/`, so it is not affected by this —
+whether the rest of the store is reachable by a later uid is a question for the
+backend, and [the SQLite backend](#sqlite-backend) says what that one needs.
+Managed certificates do not use `private/` either: each writes its key to its
+own store, a Kubernetes Secret or files you name (see [managed
+certificates](configuration.md#managed-certificates)).
+
+Reading a key back has the same limit, since each key is `0600`: a later uid
+cannot read one an earlier uid wrote. `openvox-ca` reads none back of its own
+accord, but if `tls_key` names a key in `private/` — where [the
+serving-certificate bootstrap](configuration.md#serving-certificate) leaves the
+server's own — the server reads it at every start, and a later uid cannot. Keep
+that key somewhere a later uid can read, or pin the uid.
+
+This only bites where nothing restores group access to the volume. Under a
+Kubernetes `fsGroup` with the default `fsGroupChangePolicy: Always`, the kubelet
+gives the volume to that group and ORs group access in at every mount — read and
+write on files, and read, write, search and the setgid bit on directories — so
+`private/` is group-writable again before the next uid starts. The Helm chart
+sets an `fsGroup` by default. It does not happen with no `fsGroup`, with
+`fsGroupChangePolicy: OnRootMismatch` (which leaves the volume alone once its
+root matches, so a `private/` created after the first mount keeps `0750`), or on
+a volume whose driver does not apply `fsGroup` at all.
+
+Where it does bite, you have three options:
+
+1. **Pin the uid.** Nothing else is needed.
+2. **Create `private/` yourself before the first start**, with the mode your
+   platform needs — `2770`, owned by the store's group, for instance.
+   `openvox-ca` never changes the mode of a directory that already exists, so it
+   keeps that mode. Each key is still written `0600`, so this lets a later uid
+   add keys, not read earlier ones (see above). It also lets every member of
+   the group add, replace or remove the files in `private/`, though not read
+   them, so do this only where the group is the CA's own. It is no help on the
+   filesystem backend, whose other files a later uid cannot reach anyway — and
+   there `private/` also holds the inventory's integrity key, which group write
+   would let the group replace.
+3. **For the offline command only, use `--key-out`.** It writes the key to the
+   file you name and writes none into `private/`. `/generate` has no
+   equivalent: it always keeps a copy.
 
 ---
 
