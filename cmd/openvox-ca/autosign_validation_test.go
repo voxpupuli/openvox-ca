@@ -319,6 +319,12 @@ var _ = Describe("the autosign executable check at startup", func() {
 		// runs last, after the server has stopped.
 		DeferCleanup(slog.SetDefault, slog.Default())
 
+		// Made here, not in the goroutine: TempDir registers the directory's
+		// removal as a cleanup, and cleanups run last-registered-first. Made
+		// in the goroutine, its removal could be registered after the cleanup
+		// that stops the server below, and so run first, under a server
+		// still writing to it.
+		cadir := GinkgoT().TempDir()
 		runCtx, cancel := context.WithCancel(ctx)
 		done := make(chan error, 1)
 		go func() {
@@ -327,7 +333,7 @@ var _ = Describe("the autosign executable check at startup", func() {
 			cmd.SetOut(GinkgoWriter)
 			cmd.SetErr(GinkgoWriter)
 			cmd.SetArgs([]string{
-				"--cadir", GinkgoT().TempDir(), "--host", "127.0.0.1", "--port", "0", "--single-process",
+				"--cadir", cadir, "--host", "127.0.0.1", "--port", "0", "--single-process",
 				"--logfile", logfile, "--autosign-config", exe, "--insecure-allow-unsafe-autosign-path",
 			})
 			done <- cmd.ExecuteContext(runCtx)
