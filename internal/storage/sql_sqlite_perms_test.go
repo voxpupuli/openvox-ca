@@ -45,10 +45,11 @@ import (
 // never chmods a file it did not create. The umask narrows it for anyone who
 // does not want it. The reason is not fsGroup -- a kubelet ORs group access in
 // at every mount whatever the creation mode was, so there 0600 would do just as
-// well -- and it is not an arbitrary-uid platform either, which fails at the
-// 0600 same-host lock files whatever the database allows (#493; see the spec
-// on the lock modes below). What group access cannot be is world access, and
-// that is what is asserted here.
+// well -- and it is not on its own an arbitrary-uid platform either, which
+// also has to reacquire the same-host lock files; those are created
+// group-accessible too, so the two agree (#493; see the spec on the lock modes
+// below). What group access cannot be is world access, and that is what is
+// asserted here.
 //
 // The modes are written as literals rather than as sqliteFilePermCreate. Asserting
 // the constant would compare the code against itself; these assert the guarantee
@@ -162,9 +163,9 @@ var _ = Describe("SQLiteFilePermissions", func() {
 	// The other half of the policy, and the reason this is not simply 0600: group
 	// access survives, so a store owned by a Unix group stays reachable by that
 	// group with nothing re-widening the mode afterwards. (Not fsGroup, which
-	// re-applies group access regardless of how the file was created, and not an
-	// arbitrary-uid platform, which the 0600 lock files defeat first -- see
-	// sqliteFilePermCreate and #493.)
+	// re-applies group access regardless of how the file was created, and not
+	// on its own an arbitrary-uid platform, which needs the lock files to agree
+	// -- see sqliteFilePermCreate and #493.)
 	It("leaves group access in place when the umask permits it", func() {
 		old := syscall.Umask(umaskLooser)
 		DeferCleanup(func() { syscall.Umask(old) })
@@ -650,64 +651,60 @@ var _ = Describe("SQLiteFilePermissions", func() {
 			"every derived name built from the one it gave up at")
 	})
 
+	// The group bit on the database is half of what a platform assigning the
+	// pod a fresh uid per start needs: the next uid, in the same group, reaches
+	// the database the previous one created. The other half is a different
+	// file, which is why no assertion about the database could show it: the
+	// same restart has to reacquire the same-host locks, and while those were
+	// owner-only in an owner-only directory a second uid failed there whatever
+	// the database allowed (#493).
+	//
+	// So this pins the two together rather than either alone. Under each umask
+	// the lock files grant the group what the database does, and the lock
+	// directory grants group write exactly when the database does -- the bit a
+	// second uid needs to create the lock for a subject never signed before.
+	// The modes are exact, not merely world-free: a lock file that drifted back
+	// to 0600 is world-free too, and is the bug.
+	DescribeTable("creates its same-host locks with the group access the database has",
+		func(umask int, wantDB, wantLockFile, wantLockDir os.FileMode) {
+			old := syscall.Umask(umask)
+			DeferCleanup(func() { syscall.Umask(old) })
+
+			b := openAt()
+			DeferCleanup(func() { _ = b.Close() })
+
+			// Both kinds of lock: a named one, as WithLock takes, and the
+			// store-instance lock, which is created by a separate open in
+			// instancelock.go and so could drift on its own.
+			unlock, err := b.AcquireSameHostLock(context.Background(), "spec-probe")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(unlock.Unlock()).To(Succeed())
+			unlock, err = b.AcquireInstanceLock()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(unlock.Unlock()).To(Succeed())
+
+			lockDir := sqliteLockDirFor(dbPath)
+			Expect(permOf(dbPath)).To(Equal(wantDB), "database")
+			Expect(permOf(lockDir)).To(Equal(wantLockDir),
+				"lock directory: group write here is what lets another uid create a lock")
+			for _, name := range []string{"spec-probe", instanceLockName} {
+				Expect(permOf(filepath.Join(lockDir, fileLockFileName(name)))).To(Equal(wantLockFile),
+					"lock file for "+name)
+			}
+		},
+		Entry("with nothing masked, the group can reach both", umaskLooser,
+			os.FileMode(0o660), os.FileMode(0o660), os.FileMode(0o770)),
+		Entry("under the usual 0022, the group can write neither", umaskLoose,
+			os.FileMode(0o640), os.FileMode(0o640), os.FileMode(0o750)),
+		Entry("under 0077, neither is the group's at all", umaskTight,
+			os.FileMode(0o600), os.FileMode(0o600), os.FileMode(0o700)),
+	)
+
 	// The upgrade boundary the resolution created. A process on a version that
 	// locked beside the DSN spelling and one on this version do not exclude each
 	// other, and nothing here can prevent that -- the other process is the one
 	// holding the wrong lock. What it can do is say so where an operator will
 	// read it.
-	// The group bit on the database used to be justified by an arbitrary-uid
-	// platform: a fresh uid per start, reaching a database the previous uid
-	// created. That reasoning was wrong, and wrong in a way no assertion about
-	// the database could show, because what defeats it is a different file. The
-	// same restart has to reacquire the same-host locks, and those are owner-only
-	// in an owner-only directory, so a second uid fails there whatever the
-	// database allows.
-	//
-	// This pins the fact the narrowed justification now rests on. If the lock
-	// files ever become group-accessible, this spec fails and the comments at
-	// sqliteFilePermCreate, in AGENTS.md and in docs/storage-backends.md all
-	// become wrong together -- which is the point of pinning it here rather than
-	// trusting five prose copies to be revisited.
-	It("creates its same-host lock files owner-only, which the group bit cannot help", func() {
-		b, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:" + dbPath})
-		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(func() { Expect(b.Close()).To(Succeed()) })
-
-		// Take a lock so the file and its directory exist to be judged.
-		unlock, err := b.AcquireSameHostLock(context.Background(), "spec-probe")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(unlock.Unlock()).To(Succeed())
-
-		lockDir := sqliteLockDirFor(dbPath)
-		entries, err := os.ReadDir(lockDir)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(entries).NotTo(BeEmpty(), "a lock file must exist, or this proves nothing")
-
-		// Group write is the bit that matters for the directory: measured at
-		// 0750, so a group member can traverse and list it but cannot create a
-		// lock file in it. Asserting no group bits at all would be false and
-		// would fail for the wrong reason.
-		di, err := os.Stat(lockDir)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(di.Mode().Perm()&0o020).To(BeZero(),
-			"the lock directory is not group-writable, so another uid cannot create a lock here")
-
-		for _, e := range entries {
-			fi, err := os.Stat(filepath.Join(lockDir, e.Name()))
-			Expect(err).NotTo(HaveOccurred())
-			Expect(fi.Mode().Perm()&0o070).To(BeZero(),
-				"lock file "+e.Name()+" is owner-only, so another uid cannot open it")
-		}
-
-		// And the database beside it *is* group-accessible under this umask, so
-		// the two really do disagree -- which is the whole content of the
-		// finding this spec records.
-		dbi, err := os.Stat(dbPath)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(dbi.Mode().Perm()&0o040).NotTo(BeZero(),
-			"the database is group-readable while its locks are not")
-	})
-
 	Describe("a lock directory stranded beside the DSN's own spelling", func() {
 		captureWarnings := func() *bytes.Buffer {
 			GinkgoHelper()

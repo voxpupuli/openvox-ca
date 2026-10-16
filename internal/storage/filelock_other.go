@@ -57,3 +57,12 @@ func isLockingUnavailableError(_ error) bool { return false }
 // statUID has no portable answer off Unix, so it declines rather than guessing;
 // the caller degrades its diagnostic message accordingly.
 func statUID(_ fs.FileInfo) (uint32, bool) { return 0, false }
+
+// statNlink declines for the same reason statUID does.
+func statNlink(_ fs.FileInfo) (uint64, bool) { return 0, false }
+
+// lockOpenFlags adds nothing: no lock file is ever opened on these platforms.
+const lockOpenFlags = 0
+
+// isSymlinkRefusal is unreachable, as isReadOnlyFSError is.
+func isSymlinkRefusal(_ error) bool { return false }
