@@ -26,6 +26,12 @@
 # Every branch counts, since any branch can become a pull request. Other refs
 # (notes, for instance) are left alone. Needs no network.
 
+# git push sends objects as they are; rev-list would otherwise show a local
+# refs/replace substitute in their place, which could be signed when the commit
+# being pushed is not.
+GIT_NO_REPLACE_OBJECTS=1
+export GIT_NO_REPLACE_OBJECTS
+
 unsigned=
 while read -r _ local_sha remote_ref remote_sha; do
 	case "$local_sha" in *[!0]*) ;; *) continue ;; esac # skip deletions
@@ -62,14 +68,17 @@ while read -r _ local_sha remote_ref remote_sha; do
 		echo "Refusing to push $remote_ref: could not list the commits it adds."
 		exit 1
 	fi
-	found=$(printf '%s\n' "$raw" | awk '
+	if ! found=$(printf '%s\n' "$raw" | awk '
 		function flush() { if (sha != "" && !signed) print sha " " subject }
 		/^commit [0-9a-f]+$/ { flush(); sha = $2; signed = 0; subject = ""; header = 1; next }
 		header && /^$/ { header = 0; next }
 		/^gpgsig(-sha256)? / { signed = 1; next }
 		!header && subject == "" && /^    / { subject = substr($0, 5) }
 		END { flush() }
-	')
+	'); then
+		echo "Refusing to push $remote_ref: could not read the commits it adds."
+		exit 1
+	fi
 	[ -n "$found" ] && unsigned="$unsigned$found
 "
 done
@@ -82,6 +91,6 @@ printf '%s' "$unsigned" | awk '!seen[$1]++' | while read -r sha subject; do
 	# shells' echo interprets backslash escapes in it.
 	printf '  %s %s\n' "$(git rev-parse --short "$sha")" "$subject"
 done
-echo "main's ruleset requires a signature GitHub verifies on every commit, and a merge keeps each commit as it is."
+echo "main's ruleset requires a signature GitHub verifies on every commit, and a merge commit lands each one on main as it is."
 echo "Fix: set up signing, then 'git rebase --force-rebase --gpg-sign <base>' and push again; see CONTRIBUTING.md, \"Submitting changes\"."
 exit 1
