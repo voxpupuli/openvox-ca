@@ -155,6 +155,15 @@ var _ = Describe("The CA's own serving certificate", func() {
 			Expect(err.Error()).NotTo(ContainSubstring("serving_cert["))
 		})
 
+		It("refuses the certname \"ca\", as every path that generates a key does (#495)", func() {
+			e := filesEntry()
+			e.Certname = "ca"
+
+			_, err := build(cfgWith(e))
+			Expect(err).To(MatchError(ca.ErrReservedSubject))
+			Expect(err.Error()).To(HavePrefix("serving_cert (ca):"))
+		})
+
 		It("refuses a store that names neither flavour, and says so as serving_cert", func() {
 			e := filesEntry()
 			e.Store = certstore.StoreConfig{}

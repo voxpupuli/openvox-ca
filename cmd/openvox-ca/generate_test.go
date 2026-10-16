@@ -237,6 +237,53 @@ var _ = Describe("openvox-ca generate", func() {
 		})
 	})
 
+	Describe("the subject \"ca\"", func() {
+		// Its key would be written to private/ca_key.pem, the CA key's
+		// legacy location (#495).
+		It("is refused, leaving the cadir untouched", func() {
+			bootstrapCAInDir(caDir, "puppet.example.com")
+			before := hashTree(caDir)
+
+			_, _, err := runGenerate("--cadir", caDir, "--certname", "ca", "--ttl", "1h")
+			Expect(err).To(MatchError(ca.ErrReservedSubject))
+			Expect(err).To(MatchError(HavePrefix("--certname: ")))
+			Expect(hashTree(caDir)).To(Equal(before))
+		})
+
+		It("is refused with --key-out as well, writing no key", func() {
+			bootstrapCAInDir(caDir, "puppet.example.com")
+
+			_, _, err := runGenerate("--cadir", caDir, "--certname", "ca",
+				"--ttl", "1h", "--key-out", keyPath("ca"))
+			Expect(err).To(MatchError(ca.ErrReservedSubject))
+			// Only the preflight adds this prefix; GenerateWithOptions would
+			// refuse too, but after the store is opened.
+			Expect(err).To(MatchError(HavePrefix("--certname: ")))
+			Expect(keyPath("ca")).NotTo(BeAnExistingFile())
+		})
+
+		It("is refused before the store is opened", func() {
+			// resolveRuntime refuses this key provider before it opens the
+			// store, so the reserved-subject refusal is the answer only if it
+			// runs ahead of resolveRuntime. An empty cadir alone would not
+			// show that: resolveRuntime accepts one, and only assertCAUsable,
+			// after it, refuses.
+			cfgPath := filepath.Join(GinkgoT().TempDir(), "badprovider.yaml")
+			Expect(os.WriteFile(cfgPath, []byte(
+				"ca_key_algo: ecdsa\nca_key_size: 256\nca_key_provider: nonesuch\n"), 0o644)).To(Succeed())
+			setEnv("PUPPET_CA_CONFIG", cfgPath)
+
+			_, _, err := runGenerate("--cadir", caDir, "--certname", "ca", "--ttl", "1h")
+			Expect(err).To(MatchError(ca.ErrReservedSubject))
+
+			// The same configuration under another certname reaches
+			// resolveRuntime and is refused there, so the fixture is not
+			// refused by something earlier than both.
+			_, _, err = runGenerate("--cadir", caDir, "--certname", "web01", "--ttl", "1h")
+			Expect(err).To(MatchError(ContainSubstring(`unknown ca_key_provider "nonesuch"`)))
+		})
+	})
+
 	Describe("minting against an existing CA", func() {
 		BeforeEach(func() { bootstrapCAInDir(caDir, "puppet.example.com") })
 

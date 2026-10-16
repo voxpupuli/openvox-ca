@@ -52,6 +52,7 @@ var _ = Describe("certname in request and file paths", func() {
 		gotMethod  string
 		gotRawPath string
 		onRequest  func()
+		refusal    string
 		srv        *httptest.Server
 		cfg        string
 		outDir     string
@@ -82,11 +83,16 @@ var _ = Describe("certname in request and file paths", func() {
 
 		hits, gotMethod, gotRawPath = 0, "", ""
 		onRequest = nil
+		refusal = ""
 		srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			hits++
 			gotMethod, gotRawPath = r.Method, r.URL.EscapedPath()
 			if onRequest != nil {
 				onRequest()
+			}
+			if refusal != "" {
+				http.Error(w, refusal, http.StatusBadRequest)
+				return
 			}
 			_, _ = w.Write([]byte(okBody))
 		}))
@@ -194,6 +200,19 @@ var _ = Describe("certname in request and file paths", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(fi.Mode().Perm()).To(Equal(os.FileMode(0o600)))
 			Expect(os.ReadFile(keyPath)).To(Equal([]byte("KEY")))
+		})
+
+		It("writes no key file when the server refuses the request", func() {
+			// The server refuses the subject "ca" this way (#495), and
+			// docs/operator-cli.md promises the operator that nothing is
+			// written when it does.
+			refusal = `the subject "ca" is reserved`
+
+			err := run("generate", "ca")
+			Expect(err).To(MatchError(ContainSubstring("HTTP 400")))
+			Expect(err).To(MatchError(ContainSubstring(`is reserved`)))
+			Expect(hits).To(Equal(1), "the request reached the server")
+			emptyDir(outDir)
 		})
 
 		// One property of writeKeyFile has no spec: that it narrows the mode

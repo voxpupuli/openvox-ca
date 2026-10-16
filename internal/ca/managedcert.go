@@ -206,6 +206,9 @@ func (s CertSpec) Validate() error {
 	if err := ValidateSubject(s.Subject); err != nil {
 		return err
 	}
+	if err := CheckKeySubject(s.Subject); err != nil {
+		return fmt.Errorf("managed certificate %s: %w", s.Subject, err)
+	}
 	if len(s.DNSNames)+len(s.IPAddresses)+len(s.EmailAddresses)+len(s.URIs) == 0 {
 		return fmt.Errorf("managed certificate %s: at least one subject alternative name "+
 			"is required -- DNS, IP, email or URI; a certificate with none is refused by "+
