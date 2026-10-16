@@ -330,6 +330,12 @@ Two further consequences follow from the CA terminating its own TLS:
   default `podSecurityContext` already does this — if you replace it wholesale,
   keep `fsGroup` aligned with `runAsUser`/`runAsGroup`.
 
+Replacing `podSecurityContext` so that the platform assigns the uid has a further
+consequence, for server-side key generation rather than TLS: unless group access
+to the volume is restored at every mount, a later uid cannot write keys into
+`<cadir>/private/`. See [server-side key generation and the
+uid](storage-backends.md#server-side-key-generation-and-the-uid).
+
 ## Storage and replicas
 
 The default is the **filesystem** backend on a PersistentVolumeClaim. That is
