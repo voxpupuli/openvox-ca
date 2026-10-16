@@ -227,7 +227,9 @@ cannot read one an earlier uid wrote. `openvox-ca` reads none back of its own
 accord, but if `tls_key` names a key in `private/` — where [the
 serving-certificate bootstrap](configuration.md#serving-certificate) leaves the
 server's own — the server reads it at every start, and a later uid cannot. Keep
-that key somewhere a later uid can read, or pin the uid.
+that key where a later uid can read it through the store's group, never with
+world access (once it is outside `private/`, nothing checks its mode), or pin
+the uid.
 
 This only bites where nothing restores group access to the volume. Under a
 Kubernetes `fsGroup` with the default `fsGroupChangePolicy: Always`, the kubelet
@@ -256,16 +258,20 @@ Where it does bite, you have three options:
    world-writable `private/` starts without a word and lets every local account
    add, replace or remove the files in it. A store that is already failing can
    be given the mode the same way, by the uid that owns `private/` or by root;
-   the running uid cannot, since `chmod` needs ownership.
+   the running uid cannot, since `chmod` needs ownership. In a pod the CA
+   creates `private/` on its first start, so do it from an init container that
+   mounts the cadir volume and can write to its root; the Helm chart's
+   `initContainers` value takes one.
 
    Each key is still written `0600`, so this lets a later uid add keys, not read
    earlier ones (see above). It also lets every member of the group add,
    replace or remove the files in `private/`, though not read them, so do this
-   only where the group is the CA's own. It is no help on the filesystem
-   backend, whose other files a later uid cannot reach anyway — and there
-   `private/` also holds the inventory's integrity key and, in a cadir that
-   keeps it there, the CA key (`private/ca_key.pem`), which group write would
-   let the group replace or remove.
+   only where the group is the CA's own. It is no help on a backend whose other
+   files a later uid cannot reach anyway: the filesystem backend is one, and
+   [the SQLite backend](#sqlite-backend) says what that one needs. On the
+   filesystem backend `private/` also holds the inventory's integrity key and,
+   in a cadir that keeps it there, the CA key (`private/ca_key.pem`), which
+   group write would let the group replace or remove.
 3. **For the offline command only, use `--key-out`.** It writes the key to the
    file you name and writes none into `private/`. `/generate` has no
    equivalent: it always keeps a copy.
