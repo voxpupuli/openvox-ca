@@ -478,8 +478,42 @@ func (c *CA) loadCAKeyFromDisk(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if c.EncryptCAKey {
+		c.plaintextKeyWarning.Do(c.warnPlaintextKey)
+	}
 	c.CAKey = key
 	return nil
+}
+
+// warnPlaintextKey reports a stored CA key held in plaintext while
+// EncryptCAKey is set (#432).
+//
+// That is a key created before the setting was, and nothing re-encrypts it:
+// EncryptCAKey acts only when a key is written. An operator who set it expects
+// the protection docs/ca-key-security.md describes, against a copied backup,
+// disk image or snapshot, and does not have it; without this the only sign is
+// reading the key file.
+//
+// Here, on the branch that has just parsed a plaintext key from the store,
+// because that is the one place the condition is known rather than inferred.
+// Nothing else reaches it: a key at a KeyProvider, or behind the frontend's
+// ExternalSigner, never comes through loadCAKeyFromDisk, so there is no stored
+// key to judge and no warning. The launcher's preflight reads the same PEM,
+// but runs again in the signer child it forks, which would say it twice.
+//
+// The message points at the documentation rather than naming a remedy,
+// because there is no command that encrypts an existing key; the options
+// that do exist are written up there. The key's path is named only where
+// the backend has one: on a database backend without a ca_key_file override
+// it is a blob, and key="" would read as a misconfigured path.
+func (c *CA) warnPlaintextKey() {
+	var args []any
+	if path := c.Storage.CAKeyPath(); path != "" {
+		args = append(args, "key", path)
+	}
+	slog.Warn("encrypt_ca_key is set, but the stored CA key is not encrypted: "+
+		"the setting applies only when a CA key is created and does not re-encrypt an existing one; "+
+		"see \"Backward compatibility\" in docs/ca-key-security.md", args...)
 }
 
 func (c *CA) bootstrapCA(ctx context.Context) error {
