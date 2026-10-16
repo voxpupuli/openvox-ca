@@ -1482,6 +1482,23 @@ var _ = Describe("the pre-push signature gate", func() {
 		Expect(out).To(ContainSubstring("Refusing to push refs/heads/topic: could not list the commits it adds."))
 	})
 
+	// git writes the refspec's left side into the first field verbatim, so
+	// `git push origin 'HEAD^{/unsigned work}:refs/heads/topic'` hands the hook
+	// a local ref with a space in it. Read from the left, the fields shift and
+	// the branch goes unchecked.
+	It("reads a pushed ref whose local name has spaces", func() {
+		bad := repo.commit("unsigned work", false)
+		out, err := repo.push("HEAD^{/unsigned work} " + bad + " refs/heads/topic " + noSHA)
+		Expect(err).To(HaveOccurred(), "the gate misread the line and passed it")
+		Expect(out).To(ContainSubstring(repo.short(bad) + " unsigned work"))
+	})
+
+	It("refuses a line it cannot read rather than skipping it", func() {
+		out, err := repo.push("garbage")
+		Expect(err).To(HaveOccurred())
+		Expect(out).To(ContainSubstring(`Refusing to push: could not read the pushed ref from "garbage".`))
+	})
+
 	// The subject is someone's commit message. echo in dash and macOS sh would
 	// read \c in it as "stop output here" and cut the line short.
 	It("prints a subject's backslashes as they are", func() {
@@ -1523,6 +1540,21 @@ var _ = Describe("the pre-push signature gate", func() {
 			Expect(err).To(HaveOccurred())
 			Expect(out).To(ContainSubstring(repo.short(bad) + " unsigned tip"))
 			Expect(out).NotTo(ContainSubstring("already on the remote"))
+		})
+
+		// Any remote's tracking refs count, not only origin's: a commit fetched
+		// from a fork or a pull request is exempt, by design.
+		It("exempts commits another remote's tracking refs reach", func() {
+			old := repo.commit("unsigned and fetched from a fork", false)
+			gitIn(repo.dir, "update-ref", "refs/remotes/fork/topic", old)
+			tip := repo.commit("signed tip", true, old)
+			out, err := repo.push(ref("refs/heads/topic", tip, noSHA))
+			Expect(err).NotTo(HaveOccurred(), out)
+			Expect(out).To(BeEmpty())
+
+			out, err = repo.push(ref("refs/tags/v1.0.0", old, noSHA))
+			Expect(err).NotTo(HaveOccurred(), out)
+			Expect(out).To(BeEmpty())
 		})
 
 		It("checks every commit when there is no remote-tracking ref at all", func() {
