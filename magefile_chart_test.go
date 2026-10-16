@@ -1460,10 +1460,27 @@ var _ = Describe("the pre-push signature gate", func() {
 		Expect(out).To(ContainSubstring(repo.short(bad) + " unsigned work"))
 	})
 
-	It("refuses a line it cannot read rather than skipping it", func() {
-		out, err := repo.push("garbage")
+	// A sha the gate cannot use would otherwise pass: on a tag line, a
+	// 40-character non-hex sha resolves to no commit and the tag is skipped.
+	DescribeTable("refuses a line it cannot read rather than skipping it",
+		func(line string) {
+			out, err := repo.push(line)
+			Expect(err).To(HaveOccurred())
+			Expect(out).To(ContainSubstring(`Refusing to push: could not read the pushed ref from "` + line + `".`))
+		},
+		Entry("too few fields", "garbage"),
+		Entry("a sha of the right length that is not hex",
+			ref("refs/tags/v1.0.0", strings.Repeat("g", 40), noSHA)),
+	)
+
+	// A SHA-256 repository names objects with 64 hex digits; the line must get
+	// as far as listing the commits, here failing only because the object is
+	// not in this fixture.
+	It("reads a 64-digit sha as a sha", func() {
+		out, err := repo.push(ref("refs/heads/topic", strings.Repeat("2", 64), noSHA))
 		Expect(err).To(HaveOccurred())
-		Expect(out).To(ContainSubstring(`Refusing to push: could not read the pushed ref from "garbage".`))
+		Expect(out).To(ContainSubstring("Refusing to push refs/heads/topic: could not list the commits it adds."))
+		Expect(out).NotTo(ContainSubstring("could not read the pushed ref"))
 	})
 
 	// The subject is someone's commit message. echo in dash and macOS sh would
@@ -1584,7 +1601,7 @@ var _ = Describe("the pre-push signature gate", func() {
 			Expect(err).To(HaveOccurred())
 			Expect(out).To(ContainSubstring(repo.short(bad) + " unsigned release"))
 			// A rebase leaves the tag where it was, so the fix has to say so.
-			Expect(out).To(ContainSubstring("tag the re-signed commit again ('git tag -f <name> <commit>') for: v1.0.0\n"))
+			Expect(out).To(ContainSubstring("tag the re-signed commit again ('git tag -f <name> <commit>', with -a or -s if it was annotated) for: v1.0.0\n"))
 		})
 
 		It("refuses an annotated tag on a new unsigned commit", func() {
