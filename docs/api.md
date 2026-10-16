@@ -415,9 +415,10 @@ It cannot issue a certificate carrying `pp_cli_auth` — see
 Neither is true of [`openvox-ca generate`](operator-cli.md#generate-minting-a-certificate-offline),
 which mints against storage directly.
 
-It keeps a copy of the key in `<cadir>/private/` whatever the storage backend,
-so on a platform that may run the CA as a different uid from one run to the
-next it needs a stable uid: see [server-side key generation and the
+`POST /generate/{subject}` always keeps a copy of the key in `<cadir>/private/`,
+whatever the storage backend, so on a platform that may run the CA as a
+different uid from one run to the next it needs a stable uid: see [server-side
+key generation and the
 uid](storage-backends.md#server-side-key-generation-and-the-uid).
 
 ## Certificate import

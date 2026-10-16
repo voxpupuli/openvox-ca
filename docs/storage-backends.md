@@ -204,12 +204,16 @@ the uid that created `private/` can add a key to it.
 
 On a platform that chooses the uid the CA runs as, and may choose a different
 one from one run to the next, sharing only the store's group with the uid before
-it, **server-side key generation needs a stable uid**. OpenShift, for one, draws
-the uid from a range allotted to the namespace, so it can change when a store is
-restored into another namespace or cluster. The first run creates `private/`;
-once a later run is another uid, every `/generate`, and every offline `generate`
-without `--key-out`, fails on the key write with a permission error. That
-failure comes after the certificate is signed: the certificate is deleted
+it, **server-side key generation needs a stable uid**. OpenShift is one
+example: there the security context constraint a pod runs under decides both its
+uid and its `fsGroup`, so check what yours assigns against the `fsGroup`
+paragraph below. The first run creates `private/`; once a later run is another
+uid, every `/generate`, and every offline `generate` without `--key-out`, fails
+on the key write. The offline command reports the permission error.
+`/generate` answers `500 Internal Server Error`, and the server logs
+`Generate failed` with an error beginning
+`failed to save private key for <subject>`.
+That failure comes after the certificate is signed: the certificate is deleted
 again, but each failed attempt has used a serial and left an inventory entry.
 Signing never writes to `private/`, so it is not affected by this —
 whether the rest of the store is reachable by a later uid is a question for the
@@ -231,17 +235,20 @@ gives the volume to that group and ORs group access in at every mount — read a
 write on files, and read, write, search and the setgid bit on directories — so
 `private/` is group-writable again before the next uid starts. The Helm chart
 pins the uid (`runAsUser: 1000`) and sets an `fsGroup` by default, so a chart
-install is affected only where both have been overridden. Group access is not
-restored with no `fsGroup`, with
+install is affected only where the uid has been unpinned and group access is not
+restored. It is not restored with no `fsGroup`, with
 `fsGroupChangePolicy: OnRootMismatch` (which leaves the volume alone once its
 root matches, so a `private/` created after the first mount keeps `0750`), or on
-a volume whose driver does not apply `fsGroup` at all.
+a volume whose driver does not apply `fsGroup` at all — whatever the chart's own
+values say.
 
 Where it does bite, you have three options:
 
 1. **Pin the uid.** Nothing else is needed. On a store that is already
    failing, pin it to the uid that owns `private/` (`stat -c %u
-   <cadir>/private` on Linux).
+   <cadir>/private` on Linux) — unless that is root, in which case have root
+   give `private/` to the CA's uid, or use option 2, rather than run the CA as
+   root.
 2. **Create `private/` yourself before the first start**, with the mode your
    platform needs and no world access: `2770`, owned by the store's group, for
    instance. `openvox-ca` never changes the mode of a directory that already
@@ -256,8 +263,9 @@ Where it does bite, you have three options:
    replace or remove the files in `private/`, though not read them, so do this
    only where the group is the CA's own. It is no help on the filesystem
    backend, whose other files a later uid cannot reach anyway — and there
-   `private/` also holds the inventory's integrity key, which group write would
-   let the group replace.
+   `private/` also holds the inventory's integrity key and, in a cadir that
+   keeps it there, the CA key (`private/ca_key.pem`), which group write would
+   let the group replace or remove.
 3. **For the offline command only, use `--key-out`.** It writes the key to the
    file you name and writes none into `private/`. `/generate` has no
    equivalent: it always keeps a copy.
