@@ -1004,6 +1004,42 @@ var _ = Describe("fixtureEnv", func() {
 	})
 })
 
+// The regression that made this suite dangerous rather than merely wrong.
+// Run from a pre-push hook, os.Environ() carries the repository being pushed
+// in GIT_DIR and friends; they outrank cmd.Dir, so the fixture committed onto
+// the real branch and the specs then asserted against the real repo. A decoy
+// stands in for the hook's repository.
+//
+// All four variables the fixtureEnv comment names are planted, not just the
+// two that happened to cause the incident. A partial strip is destructive in
+// its own right: with GIT_INDEX_FILE alone leaking, `git add -A` still finds
+// the fixture's own .git, so the fixture builds and the decoy stays empty,
+// but the staged entries are written into the other repository's index —
+// destroying whatever the developer had staged when they ran git push.
+func decoyLeak() {
+	GinkgoHelper()
+	decoy := GinkgoT().TempDir()
+	gitIn(decoy, "init", "--quiet")
+	// A file to stage, so a leak lands a real commit here — the harm as it
+	// actually occurred — rather than failing on an empty index.
+	Expect(os.WriteFile(filepath.Join(decoy, "tracked.txt"), []byte("x\n"), 0o644)).To(Succeed())
+
+	GinkgoT().Setenv("GIT_DIR", filepath.Join(decoy, ".git"))
+	GinkgoT().Setenv("GIT_WORK_TREE", decoy)
+	GinkgoT().Setenv("GIT_INDEX_FILE", filepath.Join(decoy, ".git", "index"))
+	GinkgoT().Setenv("GIT_OBJECT_DIRECTORY", filepath.Join(decoy, ".git", "objects"))
+
+	// Deferred, so the decoy is proven untouched even when an assertion in
+	// the spec body fails first — otherwise the one check that looks at the
+	// actual harm is the one that never runs.
+	DeferCleanup(func() {
+		Expect(gitIn(decoy, "rev-list", "--all", "--count")).To(Equal("0"),
+			"a commit landed in the decoy repository")
+		Expect(gitIn(decoy, "status", "--porcelain")).To(Equal("?? tracked.txt"),
+			"the decoy's index or work tree was written to")
+	})
+}
+
 var _ = Describe("the pre-push tag gate", func() {
 	// Untested shell driving `git show` through sed pipelines is exactly the
 	// kind of thing that fails open. These specs run the real script.
@@ -1062,41 +1098,6 @@ var _ = Describe("the pre-push tag gate", func() {
 		Expect(err).To(HaveOccurred(), "the gate skipped an unreadable line")
 		Expect(out).To(ContainSubstring("could not read the pushed ref"))
 	})
-
-	// The regression that made this suite dangerous rather than merely wrong.
-	// Run from a pre-push hook, os.Environ() carries the repository being pushed
-	// in GIT_DIR and friends; they outrank cmd.Dir, so the fixture committed onto
-	// the real branch and the specs then asserted against the real repo. A decoy
-	// stands in for the hook's repository.
-	//
-	// All four variables the fixtureEnv comment names are planted, not just the
-	// two that happened to cause the incident. A partial strip is destructive in
-	// its own right: with GIT_INDEX_FILE alone leaking, `git add -A` still finds
-	// the fixture's own .git, so the fixture builds and the decoy stays empty,
-	// but the staged entries are written into the other repository's index —
-	// destroying whatever the developer had staged when they ran git push.
-	decoyLeak := func() {
-		decoy := GinkgoT().TempDir()
-		gitIn(decoy, "init", "--quiet")
-		// A file to stage, so a leak lands a real commit here — the harm as it
-		// actually occurred — rather than failing on an empty index.
-		Expect(os.WriteFile(filepath.Join(decoy, "tracked.txt"), []byte("x\n"), 0o644)).To(Succeed())
-
-		GinkgoT().Setenv("GIT_DIR", filepath.Join(decoy, ".git"))
-		GinkgoT().Setenv("GIT_WORK_TREE", decoy)
-		GinkgoT().Setenv("GIT_INDEX_FILE", filepath.Join(decoy, ".git", "index"))
-		GinkgoT().Setenv("GIT_OBJECT_DIRECTORY", filepath.Join(decoy, ".git", "objects"))
-
-		// Deferred, so the decoy is proven untouched even when an assertion in
-		// the spec body fails first — otherwise the one check that looks at the
-		// actual harm is the one that never runs.
-		DeferCleanup(func() {
-			Expect(gitIn(decoy, "rev-list", "--all", "--count")).To(Equal("0"),
-				"a commit landed in the decoy repository")
-			Expect(gitIn(decoy, "status", "--porcelain")).To(Equal("?? tracked.txt"),
-				"the decoy's index or work tree was written to")
-		})
-	}
 
 	It("builds and verifies its fixture in its own repository under a leaked environment", func() {
 		decoyLeak()
@@ -1183,5 +1184,295 @@ var _ = Describe("the pre-push tag gate", func() {
 		out, err := repo.push("refs/tags/nightly", repo.sha)
 		Expect(err).NotTo(HaveOccurred(), out)
 		Expect(out).To(BeEmpty())
+	})
+})
+
+// -- the pre-push signature gate ------------------------------------------------
+
+// sigGateRepo is a throwaway repository whose commits a spec writes one at a
+// time, signed or not. The gate asks only whether a commit carries a gpgsig
+// header, never whether the signature verifies, so a "signed" commit here is a
+// commit object written with a placeholder signature block: no key, no gpg and
+// no ssh-keygen, and the same result on every machine. hash-object writes the
+// object exactly as given, which `git commit` with signing turned off would not.
+type sigGateRepo struct {
+	dir  string
+	tree string
+	n    int
+}
+
+const noSHA = "0000000000000000000000000000000000000000"
+
+func newSigGateRepo() *sigGateRepo {
+	GinkgoHelper()
+	dir := GinkgoT().TempDir()
+	gitIn(dir, "init", "--quiet")
+
+	empty := filepath.Join(GinkgoT().TempDir(), "empty")
+	Expect(os.WriteFile(empty, nil, 0o644)).To(Succeed())
+	tree := gitIn(dir, "hash-object", "-t", "tree", "-w", empty)
+	Expect(tree).To(MatchRegexp("^[0-9a-f]{40}$"), "the fixture did not yield a tree sha")
+
+	return &sigGateRepo{dir: dir, tree: tree}
+}
+
+// commit writes a commit with the given message and parents, signed or not, and
+// returns its sha. Each gets its own timestamp, so two commits with the same
+// message and parents are still two commits.
+func (r *sigGateRepo) commit(message string, signed bool, parents ...string) string {
+	GinkgoHelper()
+	r.n++
+	var b strings.Builder
+	fmt.Fprintf(&b, "tree %s\n", r.tree)
+	for _, p := range parents {
+		fmt.Fprintf(&b, "parent %s\n", p)
+	}
+	fmt.Fprintf(&b, "author test <test@example.com> %d +0000\n", 1700000000+r.n)
+	fmt.Fprintf(&b, "committer test <test@example.com> %d +0000\n", 1700000000+r.n)
+	if signed {
+		b.WriteString("gpgsig -----BEGIN SSH SIGNATURE-----\n U1NIU0lHAAAAAQ==\n -----END SSH SIGNATURE-----\n")
+	}
+	fmt.Fprintf(&b, "\n%s\n", message)
+
+	obj := filepath.Join(GinkgoT().TempDir(), "commit")
+	Expect(os.WriteFile(obj, []byte(b.String()), 0o644)).To(Succeed())
+	// Validated for the same reason as newTagGateRepo's: a stray byte makes this
+	// not a sha, and the gate skipping what it cannot resolve reads as a pass.
+	sha := gitIn(r.dir, "hash-object", "-t", "commit", "-w", obj)
+	Expect(sha).To(MatchRegexp("^[0-9a-f]{40}$"), "the fixture did not yield a commit sha")
+	return sha
+}
+
+// track records sha as a remote-tracking branch, standing in for a commit the
+// remote is already known to have.
+func (r *sigGateRepo) track(sha string) {
+	GinkgoHelper()
+	gitIn(r.dir, "update-ref", "refs/remotes/origin/main", sha)
+}
+
+func (r *sigGateRepo) short(sha string) string {
+	GinkgoHelper()
+	return gitIn(r.dir, "rev-parse", "--short", sha)
+}
+
+// ref is one line of the hook's stdin, as git writes it.
+func ref(remoteRef, localSHA, remoteSHA string) string {
+	return fmt.Sprintf("%s %s %s %s", remoteRef, localSHA, remoteRef, remoteSHA)
+}
+
+// push runs the script with refs on stdin, finding its repository by cwd.
+func (r *sigGateRepo) push(refs ...string) (string, error) {
+	GinkgoHelper()
+	return r.pushWithEnv(fixtureEnv(), refs...)
+}
+
+// pushAsHook runs it as git does, with GIT_DIR and GIT_WORK_TREE naming the
+// repository being pushed; see tagGateRepo.pushAsHook for why both are needed.
+func (r *sigGateRepo) pushAsHook(refs ...string) (string, error) {
+	GinkgoHelper()
+	return r.pushWithEnv(append(fixtureEnv(),
+		"GIT_DIR="+filepath.Join(r.dir, ".git"),
+		"GIT_WORK_TREE="+r.dir,
+	), refs...)
+}
+
+func (r *sigGateRepo) pushWithEnv(env []string, refs ...string) (string, error) {
+	GinkgoHelper()
+	script, err := filepath.Abs(filepath.Join(".lefthook", "pre-push", "verify-signatures.sh"))
+	Expect(err).NotTo(HaveOccurred())
+
+	cmd := exec.Command("sh", script)
+	cmd.Dir = r.dir
+	// Built from fixtureEnv by every caller, as in tagGateRepo.pushWithEnv: the
+	// script's own rev-list must read the fixture, not an inherited GIT_DIR.
+	cmd.Env = env
+	cmd.Stdin = strings.NewReader(strings.Join(refs, "\n") + "\n")
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+var _ = Describe("the pre-push signature gate", func() {
+	var repo *sigGateRepo
+
+	BeforeEach(func() {
+		repo = newSigGateRepo()
+	})
+
+	It("allows a new branch whose commits are all signed", func() {
+		base := repo.commit("signed base", true)
+		tip := repo.commit("signed tip", true, base)
+		out, err := repo.push(ref("refs/heads/topic", tip, noSHA))
+		Expect(err).NotTo(HaveOccurred(), out)
+		Expect(out).To(BeEmpty())
+
+		// Silence is also what a gate that read nothing prints, so prove it read
+		// this fixture: one unsigned commit on top must be refused.
+		bad := repo.commit("unsigned tip", false, tip)
+		out, err = repo.push(ref("refs/heads/topic", bad, noSHA))
+		Expect(err).To(HaveOccurred(), "the gate passed an unsigned commit")
+		Expect(out).To(ContainSubstring(repo.short(bad) + " unsigned tip"))
+	})
+
+	It("refuses an unsigned commit, naming it, the reason and the fix", func() {
+		base := repo.commit("signed base", true)
+		bad := repo.commit("unsigned work\n\nWith a body the report leaves out.", false, base)
+		out, err := repo.push(ref("refs/heads/topic", bad, base))
+		Expect(err).To(HaveOccurred())
+		Expect(out).To(ContainSubstring("  " + repo.short(bad) + " unsigned work\n"))
+		Expect(out).NotTo(ContainSubstring("With a body"))
+		Expect(out).NotTo(ContainSubstring("signed base"))
+		Expect(out).To(ContainSubstring("ruleset requires a signature GitHub verifies on every commit"))
+		Expect(out).To(ContainSubstring("git rebase --force-rebase --gpg-sign <base>"))
+		Expect(out).To(ContainSubstring("CONTRIBUTING.md"))
+	})
+
+	It("refuses an unsigned merge commit", func() {
+		base := repo.commit("signed base", true)
+		repo.track(base)
+		left := repo.commit("signed left", true, base)
+		right := repo.commit("signed right", true, base)
+		merge := repo.commit("unsigned merge", false, left, right)
+		out, err := repo.push(ref("refs/heads/topic", merge, noSHA))
+		Expect(err).To(HaveOccurred())
+		Expect(out).To(ContainSubstring(repo.short(merge) + " unsigned merge"))
+		Expect(out).NotTo(ContainSubstring("signed left"))
+		Expect(out).NotTo(ContainSubstring("signed right"))
+	})
+
+	// The raw format indents the message by four spaces, which is all that
+	// separates a header from a message line that looks like one.
+	It("is not fooled by a message line that looks like a signature header", func() {
+		bad := repo.commit("unsigned work\n\ngpgsig -----BEGIN SSH SIGNATURE-----", false)
+		out, err := repo.push(ref("refs/heads/topic", bad, noSHA))
+		Expect(err).To(HaveOccurred(), "the gate read the message as a header")
+		Expect(out).To(ContainSubstring(repo.short(bad) + " unsigned work"))
+	})
+
+	It("does not re-check commits the remote branch already has", func() {
+		old := repo.commit("unsigned and already pushed", false)
+		tip := repo.commit("signed tip", true, old)
+		out, err := repo.push(ref("refs/heads/topic", tip, old))
+		Expect(err).NotTo(HaveOccurred(), out)
+		Expect(out).To(BeEmpty())
+	})
+
+	Context("on a new branch", func() {
+		It("checks only the commits no remote-tracking ref reaches", func() {
+			old := repo.commit("unsigned and already on the remote", false)
+			repo.track(old)
+			tip := repo.commit("signed tip", true, old)
+			out, err := repo.push(ref("refs/heads/topic", tip, noSHA))
+			Expect(err).NotTo(HaveOccurred(), out)
+			Expect(out).To(BeEmpty())
+
+			bad := repo.commit("unsigned tip", false, tip)
+			out, err = repo.push(ref("refs/heads/topic", bad, noSHA))
+			Expect(err).To(HaveOccurred())
+			Expect(out).To(ContainSubstring(repo.short(bad) + " unsigned tip"))
+			Expect(out).NotTo(ContainSubstring("already on the remote"))
+		})
+
+		It("checks every commit when there is no remote-tracking ref at all", func() {
+			old := repo.commit("unsigned root", false)
+			tip := repo.commit("signed tip", true, old)
+			out, err := repo.push(ref("refs/heads/topic", tip, noSHA))
+			Expect(err).To(HaveOccurred())
+			Expect(out).To(ContainSubstring(repo.short(old) + " unsigned root"))
+		})
+	})
+
+	// git names the remote's old tip whether or not this clone has fetched it.
+	// Without the commit there is no range to take, and the gate falls back to
+	// the new-branch rule rather than skipping the ref.
+	It("falls back to the remote-tracking refs when the old tip is not here", func() {
+		old := repo.commit("unsigned and already on the remote", false)
+		repo.track(old)
+		bad := repo.commit("unsigned tip", false, old)
+		out, err := repo.push(ref("refs/heads/topic", bad, strings.Repeat("1", 40)))
+		Expect(err).To(HaveOccurred(), "the gate skipped a ref whose old tip it could not find")
+		Expect(out).To(ContainSubstring(repo.short(bad) + " unsigned tip"))
+		Expect(out).NotTo(ContainSubstring("already on the remote"))
+	})
+
+	It("checks every ref on stdin, and names a commit two of them share once", func() {
+		base := repo.commit("signed base", true)
+		repo.track(base)
+		shared := repo.commit("unsigned shared", false, base)
+		one := repo.commit("signed one", true, shared)
+		two := repo.commit("unsigned two", false, shared)
+		out, err := repo.push(
+			ref("refs/heads/one", one, noSHA),
+			ref("refs/heads/two", two, noSHA),
+		)
+		Expect(err).To(HaveOccurred())
+		Expect(out).To(ContainSubstring(repo.short(two) + " unsigned two"))
+		Expect(strings.Count(out, "unsigned shared")).To(Equal(1), out)
+	})
+
+	It("ignores a deletion", func() {
+		bad := repo.commit("unsigned", false)
+		out, err := repo.push(ref("refs/heads/topic", noSHA, bad))
+		Expect(err).NotTo(HaveOccurred(), out)
+		Expect(out).To(BeEmpty())
+	})
+
+	It("ignores refs that are neither branches nor tags", func() {
+		bad := repo.commit("unsigned notes", false)
+		out, err := repo.push(ref("refs/notes/commits", bad, noSHA))
+		Expect(err).NotTo(HaveOccurred(), out)
+		Expect(out).To(BeEmpty())
+	})
+
+	Context("pushing a tag", func() {
+		It("refuses a lightweight tag on a new unsigned commit", func() {
+			bad := repo.commit("unsigned release", false)
+			out, err := repo.push(ref("refs/tags/v1.0.0", bad, noSHA))
+			Expect(err).To(HaveOccurred())
+			Expect(out).To(ContainSubstring(repo.short(bad) + " unsigned release"))
+		})
+
+		It("refuses an annotated tag on a new unsigned commit", func() {
+			bad := repo.commit("unsigned release", false)
+			gitIn(repo.dir, "tag", "--no-sign", "-a", "-m", "release", "v1.0.0", bad)
+			tag := gitIn(repo.dir, "rev-parse", "refs/tags/v1.0.0")
+			Expect(tag).NotTo(Equal(bad), "the fixture made a lightweight tag")
+			out, err := repo.push(ref("refs/tags/v1.0.0", tag, noSHA))
+			Expect(err).To(HaveOccurred())
+			Expect(out).To(ContainSubstring(repo.short(bad) + " unsigned release"))
+		})
+
+		It("allows a tag on a commit a remote-tracking ref already reaches", func() {
+			old := repo.commit("unsigned and already on the remote", false)
+			repo.track(old)
+			out, err := repo.push(ref("refs/tags/v1.0.0", old, noSHA))
+			Expect(err).NotTo(HaveOccurred(), out)
+			Expect(out).To(BeEmpty())
+		})
+
+		It("checks the tagged commit only, not its new ancestors", func() {
+			parent := repo.commit("unsigned parent", false)
+			tagged := repo.commit("signed release", true, parent)
+			out, err := repo.push(ref("refs/tags/v1.0.0", tagged, noSHA))
+			Expect(err).NotTo(HaveOccurred(), out)
+			Expect(out).To(BeEmpty())
+		})
+	})
+
+	It("refuses an unsigned commit when git names the repository, as a real hook does", func() {
+		bad := repo.commit("unsigned work", false)
+		out, err := repo.pushAsHook(ref("refs/heads/topic", bad, noSHA))
+		Expect(err).To(HaveOccurred())
+		Expect(out).To(ContainSubstring(repo.short(bad) + " unsigned work"))
+	})
+
+	// A refusal alone cannot detect a leak at the push site: a script reading the
+	// decoy cannot find the pushed commit and refuses for that reason instead.
+	// Only the refusal naming the fixture's commit proves it read the fixture.
+	It("still fails closed under a leaked environment", func() {
+		decoyLeak()
+		bad := repo.commit("unsigned work", false)
+		out, err := repo.push(ref("refs/heads/topic", bad, noSHA))
+		Expect(err).To(HaveOccurred(), "the gate read another repository instead of refusing")
+		Expect(out).To(ContainSubstring(repo.short(bad) + " unsigned work"))
 	})
 })
