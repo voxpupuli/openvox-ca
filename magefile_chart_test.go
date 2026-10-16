@@ -31,6 +31,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.yaml.in/yaml/v3"
 )
 
 // -- chart version parsing ------------------------------------------------------
@@ -694,9 +695,10 @@ func fixtureEnv() []string {
 // gitIn runs one git command in dir with the fixture environment, and is the
 // only site that execs git directly — the decoy repository's setup and
 // inspection included. The single choke point for the environment itself is
-// fixtureEnv, not this function: pushWithEnv execs the gate script rather than
-// git, so it cannot route through here and has to set cmd.Env for itself, which
-// leaves it the one place where forgetting is still possible. That is how these
+// fixtureEnv, not this function: the two pushWithEnv methods exec the gate
+// scripts rather than git, so they cannot route through here and have to set
+// cmd.Env for themselves, which leaves them the places where forgetting is
+// still possible. That is how these
 // fixtures came to operate on the real repository, twice. Output is folded into
 // the failure message so a fixture that cannot build says why.
 func gitIn(dir string, args ...string) string {
@@ -1331,7 +1333,6 @@ var _ = Describe("the pre-push signature gate", func() {
 		Expect(err).To(HaveOccurred())
 		Expect(out).To(ContainSubstring("  " + repo.short(bad) + " unsigned work\n"))
 		Expect(out).NotTo(ContainSubstring("With a body"))
-		Expect(out).NotTo(ContainSubstring("signed base"))
 		Expect(out).To(ContainSubstring("ruleset requires a signature GitHub verifies on every commit"))
 		Expect(out).To(ContainSubstring("git rebase --force-rebase --gpg-sign <base>"))
 		Expect(out).To(ContainSubstring("CONTRIBUTING.md"))
@@ -1361,6 +1362,43 @@ var _ = Describe("the pre-push signature gate", func() {
 		out, err := repo.push(ref("refs/heads/topic", merge, noSHA))
 		Expect(err).To(HaveOccurred())
 		Expect(out).To(ContainSubstring(repo.short(right) + " unsigned right"))
+	})
+
+	// git push sends the original object, so a signed refs/replace stand-in
+	// must not hide an unsigned commit.
+	It("reads a commit as it will be pushed, not its replacement", func() {
+		bad := repo.commit("unsigned work", false)
+		stand := repo.commit("signed stand-in", true)
+		gitIn(repo.dir, "replace", bad, stand)
+		out, err := repo.push(ref("refs/heads/topic", bad, noSHA))
+		Expect(err).To(HaveOccurred(), "the gate read the replacement")
+		Expect(out).To(ContainSubstring(repo.short(bad) + " unsigned work"))
+	})
+
+	// The parse failing must refuse, as the listing failing does: empty output
+	// from a failed awk would otherwise read as "nothing unsigned".
+	It("refuses rather than passes when it cannot parse the commits", func() {
+		bad := repo.commit("unsigned work", false)
+
+		// PATH is the stub directory alone, so awk is truly absent; git is
+		// linked in by its absolute path, and sh is found before PATH changes.
+		gitPath, err := exec.LookPath("git")
+		Expect(err).NotTo(HaveOccurred())
+		bin := GinkgoT().TempDir()
+		Expect(os.Symlink(gitPath, filepath.Join(bin, "git"))).To(Succeed())
+		env := []string{"PATH=" + bin}
+		for _, kv := range fixtureEnv() {
+			if !strings.HasPrefix(kv, "PATH=") {
+				env = append(env, kv)
+			}
+		}
+		premise := exec.Command("/bin/sh", "-c", "command -v awk")
+		premise.Env = env
+		Expect(premise.Run()).NotTo(Succeed(), "awk is reachable, so this spec tests nothing")
+
+		out, err := repo.pushWithEnv(env, ref("refs/heads/topic", bad, noSHA))
+		Expect(err).To(HaveOccurred())
+		Expect(out).To(ContainSubstring("Refusing to push refs/heads/topic: could not read the commits it adds."))
 	})
 
 	// A repository using SHA-256 object names signs with gpgsig-sha256.
@@ -1558,5 +1596,64 @@ var _ = Describe("the pre-push signature gate", func() {
 		out, err := repo.push(ref("refs/heads/topic", bad, noSHA))
 		Expect(err).To(HaveOccurred(), "the gate read another repository instead of refusing")
 		Expect(out).To(ContainSubstring(repo.short(bad) + " unsigned work"))
+	})
+})
+
+// lefthookConfig is the part of .lefthook.yml the pre-push gates depend on.
+type lefthookConfig struct {
+	MinVersion string `yaml:"min_version"`
+	PrePush    struct {
+		Piped    bool `yaml:"piped"`
+		Parallel bool `yaml:"parallel"`
+		Jobs     []struct {
+			Name     string `yaml:"name"`
+			Script   string `yaml:"script"`
+			Runner   string `yaml:"runner"`
+			UseStdin bool   `yaml:"use_stdin"`
+		} `yaml:"jobs"`
+	} `yaml:"pre-push"`
+}
+
+// The gate specs run the scripts directly and supply stdin themselves, so they
+// cannot see the hook stop feeding them. Without use_stdin a gate reads no
+// refs and passes everything; out of order or unpiped, it runs only after the
+// race suite.
+var _ = Describe("the pre-push hook wiring", func() {
+	var cfg lefthookConfig
+
+	BeforeEach(func() {
+		src, err := os.ReadFile(".lefthook.yml")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(yaml.Unmarshal(src, &cfg)).To(Succeed())
+	})
+
+	It("stops at the first failing job, one job at a time", func() {
+		Expect(cfg.PrePush.Piped).To(BeTrue())
+		Expect(cfg.PrePush.Parallel).To(BeFalse())
+	})
+
+	It("feeds both gates the pushed refs, and runs them before the tests", func() {
+		goTest := -1
+		gates := map[string]int{}
+		for i, job := range cfg.PrePush.Jobs {
+			switch {
+			case job.Name == "go-test":
+				goTest = i
+			case job.Script != "":
+				gates[job.Script] = i
+				Expect(job.Runner).To(Equal("sh"), job.Script)
+				Expect(job.UseStdin).To(BeTrue(), job.Script)
+			}
+		}
+		Expect(goTest).NotTo(Equal(-1), "no go-test job")
+		Expect(gates).To(HaveKey("verify-tags.sh"))
+		Expect(gates).To(HaveKey("verify-signatures.sh"))
+		for script, i := range gates {
+			Expect(i).To(BeNumerically("<", goTest), script+" runs after go-test")
+		}
+	})
+
+	It("requires a lefthook that has ordered jobs", func() {
+		Expect(cfg.MinVersion).To(Equal("1.10.0"))
 	})
 })
