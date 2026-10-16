@@ -34,7 +34,26 @@ export GIT_NO_REPLACE_OBJECTS
 
 unsigned=
 tags=
-while read -r _ local_sha remote_ref remote_sha; do
+while IFS= read -r line; do
+	# Read from the right: the local ref is whatever the refspec's left side
+	# said, verbatim, so it can hold spaces ("HEAD^{/fix the bug}"); the other
+	# three fields never do.
+	rest=$line
+	remote_sha=${rest##* }
+	rest=${rest% *}
+	remote_ref=${rest##* }
+	rest=${rest% *}
+	local_sha=${rest##* }
+	case "$local_sha" in
+	*[!0-9a-f]* | "") local_sha=bad ;;
+	esac
+	case ${#local_sha} in
+	40 | 64) ;;
+	*)
+		printf 'Refusing to push: could not read the pushed ref from "%s".\n' "$line"
+		exit 1
+		;;
+	esac
 	case "$local_sha" in *[!0]*) ;; *) continue ;; esac # skip deletions
 	case "$remote_ref" in
 	refs/heads/*)
