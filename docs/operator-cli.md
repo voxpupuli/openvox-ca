@@ -509,14 +509,14 @@ the storage backend**, so on an ephemeral cadir — a container with no persiste
 volume — it is lost at the next restart while its certificate stays live in the
 shared inventory.
 
+`--key-out` is therefore **required** with `--pp-cli-auth` (an administrator
+credential whose key evaporates is the worst version of that problem) and with
+`--force` (see below).
+
 On a platform that may run the CA as a different uid from one run to the next,
 writing into `private/` needs a stable uid, and `--key-out` sidesteps it: see
 [server-side key generation and the
 uid](storage-backends.md#server-side-key-generation-and-the-uid).
-
-`--key-out` is therefore **required** with `--pp-cli-auth` (an administrator
-credential whose key evaporates is the worst version of that problem) and with
-`--force` (see below).
 
 Both `--key-out` and `--cert-out` refuse a path that already exists rather than
 overwriting it, and they refuse before anything is issued — a mint cannot be
