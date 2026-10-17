@@ -24,7 +24,7 @@ single multi-arch manifest per variant, as `ghcr.io/voxpupuli/openvox-ca`.
 | **Push to `main`** | Builds both variants on both architectures and pushes the rolling `edge` (and `main`) tags, plus their `-alpine` counterparts. `edge` always points at the latest default-branch build. |
 | **Release tag** (`git push` of a `v*` tag) | Builds both variants on both architectures and pushes the semver tags (`1.2.3`, `1.2`, and — for v1+ only — `1`), `latest`, and their `-alpine` counterparts. The major-only tag is suppressed for `v0.*` because a `0.x` major carries no compatibility promise. |
 | **Manual** (Actions → *Container images* → *Run workflow*) | Builds everything. Pushes only if you tick the **push** input; otherwise it builds and smoke-tests without publishing. |
-| **Pull request** | Always builds both variants on both architectures as a validation check. Same-repo PRs also push a throwaway `pr-<n>` tag; fork PRs build only and discard the result (their token cannot write packages). |
+| **Pull request** | Always builds both variants on both architectures as a validation check. Same-repo PRs also push a throwaway `pr-<n>` tag; fork PRs build only and discard the result (their token cannot write packages). The *Container images success* job aggregates the run, and `main`'s ruleset requires it, so a PR whose image build fails cannot merge. On a same-repo PR that includes publishing and signing `pr-<n>`, so a GHCR or Sigstore outage blocks it too: re-run the failed jobs once the service is back. Within a day, that is; the digests `merge` reads expire after one, so later re-run all jobs or push again. If the outage will not wait, a maintainer can instead dispatch the workflow on the PR's branch with **push** unticked: that run builds and smoke-tests every leg, skips `merge`, and reports *Container images success* on the same head commit, without publishing or signing `pr-<n>`. |
 
 Architecture builds run on native GitHub-hosted runners — `ubuntu-latest`
 (amd64) and `ubuntu-24.04-arm` (arm64) — and the per-architecture digests are
@@ -131,3 +131,18 @@ validation builds will still work (they don't push).
    workflows from outside collaborators*). Fork PRs still build once approved,
    but their `GITHUB_TOKEN` is read-only, so the build result is discarded
    rather than pushed.
+
+6. **Require both aggregate checks on `main`.**
+   Settings → Rules → Rulesets → the ruleset targeting the default branch →
+   *Require status checks to pass*: add **CI success** and **Container images
+   success**, by job name, and set each one's source to **GitHub Actions**, so
+   that no other app or token can satisfy it by posting a status of the same
+   name. The names must match `requiredCheckAggregates` in
+   `magefile.go`, which `mage dev:check` holds the workflows to. Neither
+   workflow can see the other's jobs, so leaving one out lets a PR merge with
+   that workflow red, which is how #454 merged with its Alpine builds failing.
+
+   Adding a check strands the PRs already open: their existing runs used the
+   old workflow, and re-running them does not pick up the new job. Each needs
+   a fresh event (a push, *Update branch*, or close and reopen) before it can
+   merge.

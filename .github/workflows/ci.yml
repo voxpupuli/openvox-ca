@@ -587,9 +587,12 @@ jobs:
         run: mage "$MAGE_TARGET"
 
   # -- Aggregate result ---------------------------------------------------------
-  # Single fan-in job so branch protection only has to name one required check,
-  # instead of every matrix leg above (which would also have to be updated by
-  # hand each time a leg is added/renamed/removed).
+  # Single fan-in job so branch protection only has to name one required check
+  # for this workflow, instead of every matrix leg above (which would also have
+  # to be updated by hand each time a leg is added/renamed/removed). The image
+  # builds are in container-images.yml, out of reach of `needs`, so it carries
+  # its own aggregate, "Container images success", which is required too.
+  # verifyAggregateJobs keeps both aggregates' `needs` complete.
   ci:
     name: CI success
     if: always()
