@@ -9,11 +9,18 @@
 # PATH prints a SKIP notice and exits 0 rather than blocking. Two exceptions —
 # on Linux `-race` needs a C compiler and fails rather than skipping without one
 # (macOS builds it without cgo), and the
-# verify-tags.sh script has no tool to be missing, so it always runs. Run the
+# verify-tags.sh and verify-signatures.sh scripts are refusals, so they always
+# run, and fail rather than skip if something they need is missing. Run the
 # same checks manually via `mage dev:check` (lint), `go test -race ./...`, and
 # `mage test:magefile` (the build-tagged magefile suite); the pre-push hook
 # additionally refuses v* tags that do not match internal/version (see
-# .lefthook/pre-push/verify-tags.sh).
+# .lefthook/pre-push/verify-tags.sh), and commits that carry no signature (see
+# .lefthook/pre-push/verify-signatures.sh).
+
+# 1.10.0 introduced the `jobs` list that pre-push needs for its order. It also
+# covers 1.6.14, the first release to share pre-push's stdin between jobs:
+# before that, one of the two scripts would read no refs and pass.
+min_version: 1.10.0
 
 pre-commit:
   parallel: false
@@ -41,16 +48,23 @@ pre-commit:
         golangci-lint run ./...
 
 pre-push:
-  parallel: false
-  # verify-tags.sh (in .lefthook/pre-push/) is a script rather than a command:
-  # lefthook skips commands when the push-file list is empty, which is exactly
-  # the tag-push case the check exists for; scripts always run.
-  scripts:
-    "verify-tags.sh":
+  # Jobs run in list order, and piped stops at the first failure, so a refused
+  # tag or an unsigned commit fails the push in seconds instead of after the
+  # race suite. The order needs the jobs list: given scripts and commands,
+  # lefthook runs every command first, whatever their priority.
+  piped: true
+  jobs:
+    # verify-tags.sh and verify-signatures.sh (in .lefthook/pre-push/) are
+    # script jobs rather than run jobs: lefthook skips a run job when the
+    # push-file list is empty, which is exactly the tag-push case, and a rebase
+    # that only re-signs commits changes no files either; scripts always run.
+    - script: "verify-tags.sh"
       runner: sh
       use_stdin: true  # git feeds the pushed refs to the pre-push hook on stdin
-  commands:
-    go-test:
+    - script: "verify-signatures.sh"
+      runner: sh
+      use_stdin: true
+    - name: go-test
       # -race matches the CI gate (mage test:unit): without it the specs that
       # only fail under the detector -- the notifier's locking, the admin
       # allow-list swap -- pass locally and fail after the push. The second
