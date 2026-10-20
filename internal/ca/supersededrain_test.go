@@ -223,7 +223,7 @@ var _ = Describe("drainDueLocked", func() {
 		// The cardinality this PR told operators to expect. Two entries failed
 		// together and the counter moved once, because one re-sign covers the
 		// batch — mixin/alerts.libsonnet and docs/metrics.md both say a rising
-		// puppetca_crl_update_failures_total counts failed CRL amendments
+		// openvoxca_crl_update_failures_total counts failed CRL amendments
 		// rather than certificates left unrevoked, and nothing else pins that.
 		// Equal, not BeNumerically(">"): counting once per entry here is
 		// precisely the pre-batch behaviour, and it would satisfy a
@@ -482,7 +482,7 @@ var _ = Describe("drainDueLocked", func() {
 	// Batching collapsed N revocations into one re-sign, and it must not also
 	// collapse N identities into a count. These certificates are still valid
 	// credentials past the window their supersession granted them, and
-	// PuppetCASupersedeFailing's runbook closes by telling an operator to
+	// OpenVoxCASupersedeFailing's runbook closes by telling an operator to
 	// retire what the sweep will not with `openvox-ca-ctl revoke --serial
 	// <hex>` — a serial the failure line has to carry for that instruction to
 	// be followable. The per-entry loop named each one as it failed.

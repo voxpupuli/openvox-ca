@@ -763,7 +763,7 @@ var _ = Describe("CRL chain read failures", func() {
 		// The other half of the attribution rule. Rounds 3 and 4 spent two
 		// commits separating these two counters; without this assertion the
 		// sentinel check can be deleted and the split collapses back to counting
-		// a file fault twice, firing PuppetCACRLUpdateFailing alongside and
+		// a file fault twice, firing OpenVoxCACRLUpdateFailing alongside and
 		// sending the responder to check storage that is perfectly healthy.
 		ctx := context.Background()
 		store := storage.New(GinkgoT().TempDir())
@@ -835,7 +835,7 @@ var _ = Describe("CRL chain read failures", func() {
 		// cleanup and reissue all reach it through signCRLLocked, which had no
 		// exemption -- so a file the operator had broken moved
 		// crl_update_failures on every revocation, sending whoever answered
-		// PuppetCACRLUpdateFailing to inspect storage that was working
+		// OpenVoxCACRLUpdateFailing to inspect storage that was working
 		// perfectly. The refresh pass alone was exempt, which made the split
 		// look correct from the one path that had a test.
 		ctx := context.Background()

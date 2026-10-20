@@ -121,7 +121,7 @@ openvox-ca-ctl revoke --certname agent.example.com
 #
 # With superseded_cert_revoke_after_sec set, --certname does reach a predecessor
 # still inside its overlap window, so this is for the cases it cannot: a
-# supersession that was never recorded (puppetca_supersede_failures_total is
+# supersession that was never recorded (openvoxca_supersede_failures_total is
 # what tells you one exists), a certificate replaced by signing a request
 # queued under allow_duplicate_certs (nothing counts it; the INFO line
 # "Accepting a duplicate certificate request" names the serial), and cutting an

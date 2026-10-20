@@ -300,7 +300,7 @@ var _ = Describe("startK8sExport", func() {
 			{"Secret", "ns1", "trust"},
 			{"ConfigMap", "", "bundle"},
 		} {
-			v, found := metricValue(reg, "puppetca_k8s_export_applies_total", map[string]string{
+			v, found := metricValue(reg, "openvoxca_k8s_export_applies_total", map[string]string{
 				"kind": want.kind, "namespace": want.ns, "name": want.name, "result": "error",
 			})
 			Expect(found).To(BeTrue(),
@@ -313,7 +313,7 @@ var _ = Describe("startK8sExport", func() {
 		// The hazard InitTargetMetrics' doc comment warns about: publishing the
 		// empty-namespace placeholder on a path where the export does start
 		// would strand a series recordApply never touches, and
-		// PuppetCAKubernetesExportNotRunning would fire on a healthy target for
+		// OpenVoxCAKubernetesExportNotRunning would fire on a healthy target for
 		// ever. The success branch must not call it.
 		c, store := newRefresherTestCA()
 		reg := prometheus.NewRegistry()
@@ -337,14 +337,14 @@ var _ = Describe("startK8sExport", func() {
 		// with the `go runK8sExporter` line deleted -- the single piece of
 		// wiring this half of the spec exists to hold down.
 		Eventually(func() float64 {
-			v, _ := metricValue(reg, "puppetca_k8s_export_applies_total", map[string]string{
+			v, _ := metricValue(reg, "openvoxca_k8s_export_applies_total", map[string]string{
 				"kind": "ConfigMap", "namespace": "pod-ns", "name": "bundle", "result": "success",
 			})
 			return v
 		}).WithTimeout(2*time.Second).Should(BeNumerically(">=", 1),
 			"the job was never started: applies_total stayed at the zero New published")
 
-		_, found := metricValue(reg, "puppetca_k8s_export_applies_total", map[string]string{
+		_, found := metricValue(reg, "openvoxca_k8s_export_applies_total", map[string]string{
 			"kind": "ConfigMap", "namespace": "", "name": "bundle", "result": "error",
 		})
 		Expect(found).To(BeFalse(),

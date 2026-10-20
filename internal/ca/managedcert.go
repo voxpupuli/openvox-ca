@@ -1307,7 +1307,7 @@ func (c *CA) issueManagedUnderSubjectLock(ctx context.Context, m ManagedCert, re
 			// supersedeFailures on the delayed one.
 			//
 			// The wording is the documented one, deliberately: docs/metrics.md
-			// tells an operator responding to PuppetCASupersedeFailing to grep
+			// tells an operator responding to OpenVoxCASupersedeFailing to grep
 			// for "failed to retire replaced certificate" and retire what it
 			// names by serial. Renew and AutoRenew emit that string; a third
 			// caller phrasing it differently is a path the runbook silently

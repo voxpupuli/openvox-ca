@@ -25,7 +25,7 @@ alerting rules for the openvox-ca exporter. It alerts on:
   only where the stored blob holds a CRL this CA did not issue — including a
   chain brought in by `import --crl-chain`, with no `crl_chain_file` in sight.
   The counters are always exported and read zero without one, while
-  `puppetca_crl_chain_last_read_timestamp_seconds` is exported only where
+  `openvoxca_crl_chain_last_read_timestamp_seconds` is exported only where
   `crl_chain_file` is set, which is what makes the never-opened case alertable
   without firing across the whole fleet. None of it is fixable here — this CA
   cannot re-sign another CA's list — so every remedy points at the parent CA, at
@@ -33,10 +33,10 @@ alerting rules for the openvox-ca exporter. It alerts on:
 
   One case has no rule and cannot have one: a `subPath` mount reads successfully
   forever, so it is indistinguishable from a healthy file on every series. It
-  surfaces as `PuppetCAUpstreamCRLExpiringSoon` on a CA that has
+  surfaces as `OpenVoxCAUpstreamCRLExpiringSoon` on a CA that has
   `crl_chain_file` set.
 
-  **`PuppetCAUpstreamCRLRemoved` is a one-shot notification, not a standing
+  **`OpenVoxCAUpstreamCRLRemoved` is a one-shot notification, not a standing
   one.** The counter it watches increments once, at the evaluation where the
   ancestor drops out of the published chain; on every pass after that the
   ancestor is simply absent, so nothing increments again. The alert therefore
@@ -78,13 +78,13 @@ alerting rules for the openvox-ca exporter. It alerts on:
 - **Client trust domains** in three rules, and only where
   [`client_ca`](../docs/configuration.md#trusting-client-certificates-from-another-ca)
   is configured. Two are critical because they mean clients of a foreign issuer
-  are being turned away: `PuppetCAClientCRLUnusable`, where an entry has no currently
+  are being turned away: `OpenVoxCAClientCRLUnusable`, where an entry has no currently
   valid CRL at all — every one expired, every one discarded as unverifiable, or
   every one discarded as partial-scope — which under the default `require`
   policy rejects every client of that issuer;
-  and `PuppetCAClientCRLRefusals`, which counts the refusals themselves rather than
+  and `OpenVoxCAClientCRLRefusals`, which counts the refusals themselves rather than
   inferring them, so it fires on the thing an operator would otherwise learn from
-  an agent-side 403 three layers away. The warning, `PuppetCAClientCRLStale`, is the
+  an agent-side 403 three layers away. The warning, `OpenVoxCAClientCRLStale`, is the
   early one: the entry's `crl_file` has not been applied for three refresh
   intervals, so the CRLs in use are still valid but revocations published since
   are not being honoured. None of it is fixable here — the remedy is at the
@@ -127,7 +127,7 @@ scrape_configs:
       - targets: ['openvox-ca.internal:9140']
 ```
 
-The `job_name` must match `puppetCASelector` in the mixin config (default
+The `job_name` must match `openvoxCASelector` in the mixin config (default
 `job="openvox-ca"`).
 
 ## Rendering the alerts standalone
@@ -136,8 +136,8 @@ With [`jsonnet`](https://github.com/google/go-jsonnet) installed:
 
 ```sh
 jsonnet -S -e "std.manifestYamlDoc((import 'mixin.libsonnet').prometheusAlerts)" \
-  > puppet_ca_alerts.yaml
-promtool check rules puppet_ca_alerts.yaml
+  > openvox_ca_alerts.yaml
+promtool check rules openvox_ca_alerts.yaml
 ```
 
 ## Checking the rules
@@ -161,15 +161,15 @@ Then combine it with your overrides:
 
 ```jsonnet
 // mixin.jsonnet
-local puppetca = (import 'vendor/openvox-ca/mixin.libsonnet') + {
+local openvoxca = (import 'vendor/openvox-ca/mixin.libsonnet') + {
   _config+:: {
-    puppetCASelector: 'job="pki/openvox-ca"',
+    openvoxCASelector: 'job="pki/openvox-ca"',
     caExpiryWarningSeconds: 45 * 24 * 3600,
   },
 };
 
 {
-  'puppet_ca_alerts.yaml': std.manifestYamlDoc(puppetca.prometheusAlerts),
+  'openvox_ca_alerts.yaml': std.manifestYamlDoc(openvoxca.prometheusAlerts),
 }
 ```
 
@@ -181,7 +181,7 @@ jsonnet -J vendor -m . mixin.jsonnet
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `puppetCASelector` | `job="openvox-ca"` | Label selector matching the exporter targets. |
+| `openvoxCASelector` | `job="openvox-ca"` | Label selector matching the exporter targets. |
 | `alertLabels` | `{}` | Extra labels merged onto every alert (e.g. routing labels). |
 | `caExpiryWarningSeconds` | 30 days | CA certificate expiry warning threshold. |
 | `caExpiryCriticalSeconds` | 7 days | CA certificate expiry critical threshold. |
@@ -190,8 +190,8 @@ jsonnet -J vendor -m . mixin.jsonnet
 | `crlChainWindow` | `2h` | Window over which chain-refresh failures, discards, regressions and removals are counted. Twice the CA's default `crl_chain_refresh_interval_sec`, so that two increments are always in range: at exactly one interval a single unchanging fault fires, resolves and re-fires forever, because the older sample ages out before the next increment lands. Keep it at twice the interval if you change that setting. |
 | `crlChainFor` | `15m` | `for:` debounce for the five upstream-chain alerts. |
 | `clientCRLRefusalWindow` | `1h` | Window over which client-CRL refusals are counted. Event-driven, so unlike the gauge it is not coupled to `client_crl_refresh_interval_sec`. |
-| `clientCRLUnusableFor` | `10m` | Shared `for:` debounce for `PuppetCAClientCRLUnusable`, `PuppetCAClientCRLRefusals` and `PuppetCAClientCRLStale`. Raising it to stop the gauge flapping across a refresh pass also delays the event-driven refusals page, which is the immediate one. For the *gauge* rule the detection latency is `client_crl_refresh_interval_sec` **plus** this, since the gauge is only recomputed on the refresh pass; the refusals rule is event-driven and not subject to that. |
-| `clientCRLStaleSeconds` | `3h` | How long an entry may go without its `crl_file` being applied before `PuppetCAClientCRLStale` fires. Three refresh passes at the 1h default, so a single transient read error does not page — which means it assumes that default: **raise it alongside any increase to `client_crl_refresh_interval_sec`**, or the rule fires permanently on a healthy CA. |
+| `clientCRLUnusableFor` | `10m` | Shared `for:` debounce for `OpenVoxCAClientCRLUnusable`, `OpenVoxCAClientCRLRefusals` and `OpenVoxCAClientCRLStale`. Raising it to stop the gauge flapping across a refresh pass also delays the event-driven refusals page, which is the immediate one. For the *gauge* rule the detection latency is `client_crl_refresh_interval_sec` **plus** this, since the gauge is only recomputed on the refresh pass; the refusals rule is event-driven and not subject to that. |
+| `clientCRLStaleSeconds` | `3h` | How long an entry may go without its `crl_file` being applied before `OpenVoxCAClientCRLStale` fires. Three refresh passes at the 1h default, so a single transient read error does not page — which means it assumes that default: **raise it alongside any increase to `client_crl_refresh_interval_sec`**, or the rule fires permanently on a healthy CA. |
 | `leafExpiryWarningSeconds` | 7 days | Leaf certificate expiry warning threshold. |
 | `leafExpiryCriticalSeconds` | 1 day | Leaf certificate expiry critical threshold. |
 | `pendingFor` | `1h` | How long a request may stay pending before alerting. |

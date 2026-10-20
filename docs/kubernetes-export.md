@@ -242,7 +242,7 @@ refuses to create its `rbac.scope: ClusterRole` grant for this reason unless
   longer than the debounce to clear still does. The deliberate gap is a target
   that fails its first attempt but succeeds on retry *every* cycle — it never
   pages, because `last_success` always overtakes `last_error` within two
-  minutes. Watch `puppetca_k8s_export_applies_total{result="error"}`, which
+  minutes. Watch `openvoxca_k8s_export_applies_total{result="error"}`, which
   counts every failed attempt whether or not a retry rescued it; see
   [metrics](metrics.md) for the query.
 - Configuration is validated at startup; an invalid `kubernetes_export` block
@@ -252,16 +252,16 @@ refuses to create its `rbac.scope: ClusterRole` grant for this reason unless
 ## Metrics
 
 When the [Prometheus exporter](metrics.md) is enabled, each apply attempt is
-counted in `puppetca_k8s_export_applies_total{kind,namespace,name,result}`, and
+counted in `openvoxca_k8s_export_applies_total{kind,namespace,name,result}`, and
 per-target `last_success` / `last_error` timestamp gauges record the most
 recent outcomes. Because export failures are only logged, alerting on these
 series is the recommended way to catch a target that persistently fails; the
-[monitoring mixin](../mixin/) ships a `PuppetCAKubernetesExportFailing` alert
+[monitoring mixin](../mixin/) ships an `OpenVoxCAKubernetesExportFailing` alert
 that fires while a target's most recent apply attempt failed.
 
 That alert matches on the `last_error` gauge, so it can only report on a target
 the CA has recorded a result for. The mixin pairs it with
-`PuppetCAKubernetesExportNotRunning`, which fires when a configured target's
+`OpenVoxCAKubernetesExportNotRunning`, which fires when a configured target's
 `applies_total` has stayed at zero for thirty minutes — the export job wedged
 before attempting anything, or never started at all.
 

@@ -830,7 +830,7 @@ var _ = Describe("refreshClientCRLs", func() {
 		metrics = newClientCRLMetrics(reg)
 	})
 
-	// gauge reads puppetca_client_crl_usable for one client_ca label.
+	// gauge reads openvoxca_client_crl_usable for one client_ca label.
 	// gathered lists the metric family names currently registered, so a spec can
 	// assert a series is absent -- which gauge() cannot, since it fails when the
 	// family is missing.
@@ -850,7 +850,7 @@ var _ = Describe("refreshClientCRLs", func() {
 		families, err := reg.Gather()
 		Expect(err).NotTo(HaveOccurred())
 		for _, f := range families {
-			if f.GetName() != "puppetca_client_crl_last_reload_timestamp_seconds" {
+			if f.GetName() != "openvoxca_client_crl_last_reload_timestamp_seconds" {
 				continue
 			}
 			for _, m := range f.GetMetric() {
@@ -861,7 +861,7 @@ var _ = Describe("refreshClientCRLs", func() {
 				}
 			}
 		}
-		Fail("no puppetca_client_crl_last_reload_timestamp_seconds for " + name)
+		Fail("no openvoxca_client_crl_last_reload_timestamp_seconds for " + name)
 		return 0
 	}
 
@@ -870,7 +870,7 @@ var _ = Describe("refreshClientCRLs", func() {
 		families, err := reg.Gather()
 		Expect(err).NotTo(HaveOccurred())
 		for _, f := range families {
-			if f.GetName() != "puppetca_client_crl_usable" {
+			if f.GetName() != "openvoxca_client_crl_usable" {
 				continue
 			}
 			for _, m := range f.GetMetric() {
@@ -881,7 +881,7 @@ var _ = Describe("refreshClientCRLs", func() {
 				}
 			}
 		}
-		Fail("no puppetca_client_crl_usable series for client_ca " + name)
+		Fail("no openvoxca_client_crl_usable series for client_ca " + name)
 		return 0
 	}
 
@@ -1468,7 +1468,7 @@ var _ = Describe("refreshClientCRLs", func() {
 	})
 
 	It("counts a refusal against the entry that refused it", func() {
-		// recordRefusal is the counter behind PuppetCAClientCRLRefusals, the
+		// recordRefusal is the counter behind OpenVoxCAClientCRLRefusals, the
 		// one signal in this feature that reports a fact rather than an
 		// estimate -- these are clients that were actually turned away. It is
 		// wired in main.go as a callback the api package invokes, so nothing
@@ -1484,7 +1484,7 @@ var _ = Describe("refreshClientCRLs", func() {
 			families, err := reg.Gather()
 			Expect(err).NotTo(HaveOccurred())
 			for _, f := range families {
-				if f.GetName() != "puppetca_client_crl_refusals_total" {
+				if f.GetName() != "openvoxca_client_crl_refusals_total" {
 					continue
 				}
 				for _, mm := range f.GetMetric() {
@@ -1495,7 +1495,7 @@ var _ = Describe("refreshClientCRLs", func() {
 					}
 				}
 			}
-			Fail("no puppetca_client_crl_refusals_total for " + name)
+			Fail("no openvoxca_client_crl_refusals_total for " + name)
 			return 0
 		}
 
@@ -1654,8 +1654,8 @@ var _ = Describe("refreshClientCRLs", func() {
 		Expect(err).NotTo(HaveOccurred())
 		refreshClientCRLs(cfg, domains, metrics)
 
-		Expect(gathered()).NotTo(ContainSubstring("puppetca_client_crl_usable"))
-		Expect(gathered()).To(ContainSubstring("puppetca_client_crl_refusals_total"),
+		Expect(gathered()).NotTo(ContainSubstring("openvoxca_client_crl_usable"))
+		Expect(gathered()).To(ContainSubstring("openvoxca_client_crl_refusals_total"),
 			"the refusals series is zero-initialised regardless of policy")
 	})
 

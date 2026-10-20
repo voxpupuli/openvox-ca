@@ -171,8 +171,8 @@ func (c *CA) releaseSigningSlot() {
 //
 // The pair is what makes the gauge readable: in-flight alone cannot tell an
 // operator whether 8 concurrent signatures is comfortable or is the ceiling.
-// The metrics exporter surfaces them as puppetca_ca_signing_in_flight and
-// puppetca_ca_signing_limit.
+// The metrics exporter surfaces them as openvoxca_ca_signing_in_flight and
+// openvoxca_ca_signing_limit.
 func (c *CA) SigningInFlight() (inFlight int, limit int) {
 	if c.signSlots == nil {
 		return 0, 0
@@ -188,7 +188,7 @@ func (c *CA) SigningInFlight() (inFlight int, limit int) {
 // `tryLater` rather than being allowed to grow the signer's queue without
 // limit. It is not by itself a fault: it is the bound doing its job, and the
 // question it poses is whether the limit matches the deployment's signer. The
-// metrics exporter surfaces it as puppetca_ca_signing_shed_total.
+// metrics exporter surfaces it as openvoxca_ca_signing_shed_total.
 func (c *CA) SigningShedTotal() uint64 {
 	return c.signingShed.Load()
 }

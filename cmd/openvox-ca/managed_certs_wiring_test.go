@@ -20,7 +20,7 @@
 // ManagedCerts the spec sets by hand. Neither notices if the line that carries
 // the built entries into the CA is dropped: ca.CA.ManagedCerts stays nil, the
 // reconcile job is never registered, the configured gauge is never emitted,
-// PuppetCAManagedCertificateNeverIssued has nothing to match, and CI stays
+// OpenVoxCAManagedCertificateNeverIssued has nothing to match, and CI stays
 // green while no certificate is ever issued.
 //
 // The sibling of signing_concurrency_wiring_test.go, and the same class of gap.

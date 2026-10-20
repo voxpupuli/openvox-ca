@@ -71,9 +71,9 @@ var _ = Describe("CA-key signing bound metrics", func() {
 	It("reports the configured limit, with nothing in flight and nothing shed", func() {
 		g := gather(metrics.NewCollector(newCA(4)))
 
-		Expect(gaugeValue(g.findByLabels("puppetca_ca_signing_limit", nil))).To(Equal(4.0))
-		Expect(gaugeValue(g.findByLabels("puppetca_ca_signing_in_flight", nil))).To(Equal(0.0))
-		Expect(counterValue(g.findByLabels("puppetca_ca_signing_shed_total", nil))).To(Equal(0.0))
+		Expect(gaugeValue(g.findByLabels("openvoxca_ca_signing_limit", nil))).To(Equal(4.0))
+		Expect(gaugeValue(g.findByLabels("openvoxca_ca_signing_in_flight", nil))).To(Equal(0.0))
+		Expect(counterValue(g.findByLabels("openvoxca_ca_signing_shed_total", nil))).To(Equal(0.0))
 	})
 
 	// Unbounded is a legitimate configured value and is indistinguishable at a
@@ -83,7 +83,7 @@ var _ = Describe("CA-key signing bound metrics", func() {
 	It("still emits the limit as 0 when signing is unbounded", func() {
 		g := gather(metrics.NewCollector(newCA(0)))
 
-		limit := g.findByLabels("puppetca_ca_signing_limit", nil)
+		limit := g.findByLabels("openvoxca_ca_signing_limit", nil)
 		Expect(limit).NotTo(BeNil(), "the limit must be emitted, not omitted, when unbounded")
 		Expect(gaugeValue(limit)).To(Equal(0.0))
 	})
@@ -125,8 +125,8 @@ var _ = Describe("CA-key signing bound metrics", func() {
 		Eventually(gate.entered).Should(Receive())
 
 		g := gather(metrics.NewCollector(myCA))
-		Expect(gaugeValue(g.findByLabels("puppetca_ca_signing_in_flight", nil))).To(Equal(1.0))
-		Expect(gaugeValue(g.findByLabels("puppetca_ca_signing_limit", nil))).To(Equal(1.0))
+		Expect(gaugeValue(g.findByLabels("openvoxca_ca_signing_in_flight", nil))).To(Equal(1.0))
+		Expect(gaugeValue(g.findByLabels("openvoxca_ca_signing_limit", nil))).To(Equal(1.0))
 
 		// A second request behind a full bound is shed, and the counter is the
 		// only signal an operator has that it happened.
@@ -134,13 +134,13 @@ var _ = Describe("CA-key signing bound metrics", func() {
 		Expect(err).To(MatchError(ca.ErrSigningBusy))
 
 		g = gather(metrics.NewCollector(myCA))
-		Expect(counterValue(g.findByLabels("puppetca_ca_signing_shed_total", nil))).To(Equal(1.0))
+		Expect(counterValue(g.findByLabels("openvoxca_ca_signing_shed_total", nil))).To(Equal(1.0))
 
 		close(gate.release)
 		Eventually(firstDone, 5*time.Second).Should(Receive(BeNil()))
 
 		// The slot came back, so in-flight falls again rather than staying high.
 		g = gather(metrics.NewCollector(myCA))
-		Expect(gaugeValue(g.findByLabels("puppetca_ca_signing_in_flight", nil))).To(Equal(0.0))
+		Expect(gaugeValue(g.findByLabels("openvoxca_ca_signing_in_flight", nil))).To(Equal(0.0))
 	})
 })
