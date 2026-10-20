@@ -785,6 +785,18 @@ func (r *tagGateRepo) pushAsHook(remoteRef, localSHA string) (string, error) {
 
 func (r *tagGateRepo) pushWithEnv(remoteRef, localSHA string, env []string) (string, error) {
 	GinkgoHelper()
+	return r.pushLineWithEnv(fmt.Sprintf("%s %s %s %s", remoteRef, localSHA, remoteRef, strings.Repeat("0", 40)), env)
+}
+
+// pushLine runs the script with a raw stdin line, for lines a refspec's left
+// side can shift by holding a space (#528).
+func (r *tagGateRepo) pushLine(line string) (string, error) {
+	GinkgoHelper()
+	return r.pushLineWithEnv(line, fixtureEnv())
+}
+
+func (r *tagGateRepo) pushLineWithEnv(line string, env []string) (string, error) {
+	GinkgoHelper()
 	script, err := filepath.Abs(filepath.Join(".lefthook", "pre-push", "verify-tags.sh"))
 	Expect(err).NotTo(HaveOccurred())
 
@@ -795,7 +807,7 @@ func (r *tagGateRepo) pushWithEnv(remoteRef, localSHA string, env []string) (str
 	// repository an inherited GIT_DIR names, which is what made these specs
 	// assert against the wrong commit.
 	cmd.Env = env
-	cmd.Stdin = strings.NewReader(fmt.Sprintf("%s %s %s %s\n", remoteRef, localSHA, remoteRef, strings.Repeat("0", 40)))
+	cmd.Stdin = strings.NewReader(line + "\n")
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
@@ -1027,6 +1039,28 @@ var _ = Describe("the pre-push tag gate", func() {
 		out, err := repo.pushAsHook("refs/tags/v"+version, repo.sha)
 		Expect(err).To(HaveOccurred())
 		Expect(out).To(ContainSubstring(`internal/version at the tagged commit says "0.8.0"`))
+	})
+
+	// git writes a refspec's left side into the first field verbatim, so
+	// 'HEAD^{/Release 1.2.3}:refs/tags/v0.9.0' shifts every field to the right
+	// of it. Reading fields left-to-right let such a push through without a
+	// word; reading from the right restores the refusal (#528).
+	It("refuses a mismatching tag pushed with a refspec whose left side holds a space", func() {
+		repo := newTagGateRepo("0.8.0", version, version)
+		line := "HEAD^{/Release 1.2.3} " + repo.sha + " refs/tags/v" + version + " " + strings.Repeat("0", 40)
+		out, err := repo.pushLine(line)
+		Expect(err).To(HaveOccurred(), "the gate skipped the tag instead of refusing it")
+		Expect(out).To(ContainSubstring(`internal/version at the tagged commit says "0.8.0"`))
+	})
+
+	// A line whose second-from-left field is not a sha cannot be read at all;
+	// the gate refuses it rather than skipping the push without a word.
+	It("refuses a line it cannot read instead of skipping it", func() {
+		repo := newTagGateRepo(version, version, version)
+		line := "HEAD^{/Release 1.2.3} not-a-sha refs/tags/v" + version + " " + strings.Repeat("0", 40)
+		out, err := repo.pushLine(line)
+		Expect(err).To(HaveOccurred(), "the gate skipped an unreadable line")
+		Expect(out).To(ContainSubstring("could not read the pushed ref"))
 	})
 
 	// The regression that made this suite dangerous rather than merely wrong.
