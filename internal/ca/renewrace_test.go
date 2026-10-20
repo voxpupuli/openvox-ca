@@ -30,6 +30,8 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
+	"fmt"
 	"math/big"
 	"path/filepath"
 	"sync"
@@ -68,6 +70,7 @@ var _ = Describe("A revocation racing a renewal", func() {
 	var (
 		ctx      context.Context
 		storeDir string
+		locks    *announcedLocks
 		store    *storage.StorageService
 		myCA     *CA
 		ownCrt   *x509.Certificate
@@ -143,7 +146,10 @@ var _ = Describe("A revocation racing a renewal", func() {
 	BeforeEach(func() {
 		ctx = context.Background()
 		storeDir = GinkgoT().TempDir()
-		store = storage.New(storeDir)
+		// storage.New's arrangement, with a backend the lock-wait spec can ask
+		// when the renewal reaches the subject lock.
+		locks = &announcedLocks{FilesystemBackend: storage.NewFilesystemBackend(storeDir)}
+		store = storage.NewWithBackend(locks, filepath.Join(storeDir, "private"))
 		myCA = replicaOn(store)
 
 		res, err := myCA.Generate(ctx, "node1.test", nil)
@@ -195,6 +201,11 @@ var _ = Describe("A revocation racing a renewal", func() {
 			}()
 			Eventually(locked).Should(BeClosed())
 
+			// Armed only now the holder has its lock, so the next acquisition
+			// of the subject lock is the renewal's. It is announced before it
+			// blocks, so by then the pre-lock gate has given its answer.
+			reached := locks.nextAcquisition(subjectLockName("node1.test"))
+
 			renewed := make(chan error, 1)
 			finished := make(chan struct{})
 			go func() {
@@ -211,28 +222,45 @@ var _ = Describe("A revocation racing a renewal", func() {
 				Eventually(finished).Should(BeClosed())
 			})
 
+			// Wait for the renewal to reach the lock before revoking. Left to the
+			// scheduler, the revocation could commit before the renewal's
+			// pre-lock gate ran, and the gate would refuse it without ever
+			// waiting: a pass that exercises nothing here, and a failure below
+			// although the code is correct (#483).
+			//
+			// A renewal that returns instead never reached the lock, and ends
+			// the wait at once with what it returned: a refusal by the gate is
+			// one reason, but a bad CSR or a subject check would look the same
+			// to a bare timeout.
+			Eventually(func() error {
+				select {
+				case <-reached:
+					return nil
+				case err := <-renewed:
+					return StopTrying(fmt.Sprintf(
+						"the renewal returned (%v) before it reached the subject lock", err))
+				default:
+					return errors.New("not yet")
+				}
+			}).Should(Succeed(),
+				"the renewal never began acquiring the subject lock: WithLock may no longer "+
+					"reach AcquireSameHostLock on this backend, which is what announces it")
+
 			// The revocation lands mid-wait, through a replica with its own lock
 			// namespace: Revoke takes the per-subject lock now, so one sharing
 			// this store would queue behind the lock held above rather than
 			// commit here.
 			Expect(unlockedReplica().Revoke(ctx, "node1.test")).To(Succeed())
 
-			// Nothing decided yet — and this is the half a re-check hoisted back
-			// above the lock fails. Such a check answers before blocking: either
-			// it has already seen the revocation and refuses here, or it has not
-			// and the renewal succeeds once the lock is free.
-			//
-			// This does assume the renewal reached its pre-lock gate before the
-			// revocation above committed, which nothing enforces — the main
-			// goroutine does far more work first (a second CA's Init, then a CRL
-			// read-modify-write and re-sign) than the renewal's signature check,
-			// so it holds comfortably, but say so in the message rather than let
-			// a scheduling upset read as the defect.
+			// Nothing decided yet: the renewal is still parked, so the revocation
+			// did land during the wait this spec is named for.
 			Consistently(renewed, 100*time.Millisecond).ShouldNot(Receive(),
-				"the renewal must still be parked on the subject lock: receiving here means "+
-					"either the re-check was hoisted back above the lock, or the revocation "+
-					"beat the renewal to its pre-lock gate")
+				"the renewal must still be parked on the subject lock held above")
 
+			// The rest is the half a re-check hoisted back above the lock
+			// fails. Such a check has answered by the time the renewal reaches
+			// the lock, before the revocation, so the renewal would succeed
+			// here once the lock is free.
 			releaseOnce.Do(func() { close(release) })
 			Expect(<-held).To(Succeed())
 
@@ -423,4 +451,43 @@ type noSameHostLocks struct {
 
 func (*noSameHostLocks) AcquireSameHostLock(context.Context, string) (storage.Unlocker, error) {
 	return nil, storage.ErrSameHostLockingUnsupported
+}
+
+// announcedLocks is a filesystem backend that can report when a caller starts
+// acquiring a named lock, before the acquisition blocks. The lock-wait spec
+// needs that to order a revocation after the renewal's pre-lock gate: without
+// it the spec relied on the renewal getting there first, which nothing
+// enforced and a loaded scheduler regularly broke (#483).
+//
+// It delegates every acquisition unchanged, so a store built on it locks
+// exactly as storage.New's does. Embedded for the reason noSameHostLocks gives.
+type announcedLocks struct {
+	*storage.FilesystemBackend
+
+	mu      sync.Mutex
+	pending map[string]chan struct{}
+}
+
+// nextAcquisition returns a channel closed when the next acquisition of name
+// begins. Arm it only once every earlier acquisition of name has begun, or one
+// of those will close it.
+func (b *announcedLocks) nextAcquisition(name string) <-chan struct{} {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	ch := make(chan struct{})
+	if b.pending == nil {
+		b.pending = make(map[string]chan struct{})
+	}
+	b.pending[name] = ch
+	return ch
+}
+
+func (b *announcedLocks) AcquireSameHostLock(ctx context.Context, name string) (storage.Unlocker, error) {
+	b.mu.Lock()
+	if ch, ok := b.pending[name]; ok {
+		delete(b.pending, name)
+		close(ch)
+	}
+	b.mu.Unlock()
+	return b.FilesystemBackend.AcquireSameHostLock(ctx, name)
 }
