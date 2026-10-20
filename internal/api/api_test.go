@@ -1493,6 +1493,10 @@ var _ = Describe("API Workflow", func() {
 			Expect(rr.Body.String()).To(ContainSubstring("found extensions that disallow signing"))
 			Expect(autoStore.HasCert(ctx, "evil-ca-auto")).To(BeFalse(),
 				"a refused CSR must be turned away before anything is issued")
+			// The CSR is saved before autosign decides, and stays pending for
+			// an operator, as OpenVox Server leaves it.
+			Expect(autoStore.HasCSR(ctx, "evil-ca-auto")).To(BeTrue(),
+				"a CSR refused at autosign stays pending, as upstream keeps it")
 		})
 	})
 
