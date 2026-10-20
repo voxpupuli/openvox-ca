@@ -513,6 +513,11 @@ shared inventory.
 credential whose key evaporates is the worst version of that problem) and with
 `--force` (see below).
 
+On a platform that may run the CA as a different uid from one run to the next,
+writing into `private/` needs a stable uid, and `--key-out` sidesteps it: see
+[server-side key generation and the
+uid](storage-backends.md#server-side-key-generation-and-the-uid).
+
 Both `--key-out` and `--cert-out` refuse a path that already exists rather than
 overwriting it, and they refuse before anything is issued — a mint cannot be
 undone, so a path collision has to be caught first. There is no `--overwrite`:
