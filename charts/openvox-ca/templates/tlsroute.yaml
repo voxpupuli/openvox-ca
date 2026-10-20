@@ -6,11 +6,11 @@ agents' client certificates reach openvox-ca intact. It is in the Gateway API
 experimental channel (v1alpha2) and needs a Gateway listener with
 tls.mode: Passthrough.
 */}}
-apiVersion: {{ .Values.gateway.tlsRoute.apiVersion }}
+apiVersion: {{ .Values.gateway.tlsRoute.apiVersion | quote }}
 kind: TLSRoute
 metadata:
-  name: {{ include "openvox-ca.fullname" . }}
-  namespace: {{ include "openvox-ca.namespace" . }}
+  name: {{ include "openvox-ca.fullname" . | quote }}
+  namespace: {{ include "openvox-ca.namespace" . | quote }}
   labels:
     {{- include "openvox-ca.labels" . | nindent 4 }}
     {{- with .Values.gateway.tlsRoute.labels }}
@@ -39,7 +39,7 @@ spec:
     {{- tpl (toYaml .Values.gateway.tlsRoute.rules) $ | nindent 4 }}
     {{- else }}
     - backendRefs:
-        - name: {{ include "openvox-ca.fullname" . }}
+        - name: {{ include "openvox-ca.fullname" . | quote }}
           port: {{ $port }}
     {{- end }}
 {{- end }}

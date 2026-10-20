@@ -347,6 +347,18 @@ The PVC carries `helm.sh/resource-policy: keep`, so `helm uninstall` does not
 take the CA's private key with it. Set `persistence.retain: false` if you
 genuinely want it removed with the release.
 
+The filesystem and sqlite backends support exactly one running instance, so the
+chart refuses `replicaCount` above 1 with either of them, and an autoscaler
+whose `maxReplicas` is above 1. It judges the backend the server will run with —
+`config.storage_backend`, then `PUPPET_CA_STORAGE_BACKEND` in `env` or
+`extraEnv`, then `--storage-backend` in `extraArgs` — and when it cannot see
+that (an `existingConfigMap`, `args`, `envFrom`, a `--config` in `extraArgs`,
+the variable fed in from a Secret or ConfigMap or through a `$(NAME)` reference,
+or the flag with its value as a separate argument) it installs and warns in the
+notes instead. A backend a `command` wrapper exports is invisible to it as well,
+but reads as the unset default and is refused as filesystem; set
+`config.storage_backend` to match.
+
 To run more than one replica, move the state into a shared backend — see
 [storage backends](storage-backends.md) — and turn persistence off, because
 `cadir` then holds nothing durable. Worth knowing before you scale out: a
@@ -691,9 +703,69 @@ networkPolicy:
             protocol: TCP
 ```
 
+**No `apiAccess` mode admits agents outside the cluster.** `any` matches every
+pod in every namespace, and a connection from a VM or another cluster does not
+come from a pod, so the policy drops it: the agents time out, and the CA logs
+nothing because nothing reaches it. Admit them with an `ipBlock`:
+
+```yaml
+networkPolicy:
+  enabled: true
+  extraIngress:
+    - from:
+        - ipBlock:
+            cidr: 192.0.2.0/24   # the agents' network
+      ports:
+        - port: https
+          protocol: TCP
+```
+
+The block has to cover the address the pod sees, and that depends on how the
+connection arrives. Through a LoadBalancer or NodePort Service with
+`service.externalTrafficPolicy: Local` it is the agent's own. With the default,
+`Cluster`, it is usually the address of whichever node forwarded it, so the block
+has to cover the nodes — and then it admits every client the Service forwards,
+and narrows nothing. Filter the source at the Service instead, with
+`service.loadBalancerSourceRanges`, or use `Local`. Through a TLS-passthrough Ingress or Gateway it comes
+from the controller's pods, which `apiAccess: any` admits already and
+`namespace` does not, unless the controller runs in this namespace. The same
+holds for a Prometheus outside the cluster, with `port: metrics`.
+
 Turning egress on means you must enumerate everything **the pod** talks to. DNS
-is always allowed; everything else is yours to list. Two things about that are
-easy to get wrong:
+to the cluster's resolvers is always allowed; everything else is yours to list.
+Four things about that are easy to get wrong:
+
+- **DNS goes only to the resolvers in `egress.dns.to`.** By default that is
+  the pods labelled `k8s-app: kube-dns` in `kube-system`, which is what CoreDNS
+  carries on most distributions. A DNS rule with no destination admits any
+  traffic to any host on port 53, and queries straight to a resolver outside
+  the cluster. The default closes both. It does not stop data leaving as
+  queries the cluster's resolver recurses on: that needs a policy on the
+  resolver itself, such as a CoreDNS forward allowlist. If your
+  resolver is elsewhere — a node-local cache, a provider's resolver, the node's
+  own for `dnsPolicy: Default`, or DNS pods labelled differently — list it
+  instead:
+
+  ```yaml
+  networkPolicy:
+    egress:
+      enabled: true
+      dns:
+        to:
+          - ipBlock:
+              cidr: 169.254.20.10/32   # NodeLocal DNSCache
+  ```
+
+  The chart refuses `dnsPolicy: Default` while `dns.to` names only the
+  kube-dns pods, since every lookup would then be dropped.
+
+  The rule allows port 53, and network plugins generally match it after the
+  DNS Service's address has been translated to a pod's: that is why a pod
+  selector can name CoreDNS at all, and why a resolver listening on another
+  port needs an `egress.rules` entry for that port too. A resolver on the host
+  network, such as a node-local cache or DNS served by the node itself, is not
+  a pod, so no pod selector matches it and it needs an `ipBlock`. An empty
+  list allows DNS to any destination.
 
 - **The policy governs the whole pod, not the server container.** A
   `NetworkPolicy` selects pods, so every `initContainers` and `extraContainers`

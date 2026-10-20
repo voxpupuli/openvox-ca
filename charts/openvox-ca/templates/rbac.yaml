@@ -23,7 +23,7 @@ reads them back — so create and patch are the whole permission set.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ $fullName }}-export
+  name: {{ printf "%s-export" $fullName | quote }}
   labels:
     {{- $labels | nindent 4 }}
   {{- with .Values.commonAnnotations }}
@@ -35,7 +35,7 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ $fullName }}-export
+  name: {{ printf "%s-export" $fullName | quote }}
   labels:
     {{- $labels | nindent 4 }}
   {{- with .Values.commonAnnotations }}
@@ -45,11 +45,11 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ $fullName }}-export
+  name: {{ printf "%s-export" $fullName | quote }}
 subjects:
   - kind: ServiceAccount
-    name: {{ $serviceAccount }}
-    namespace: {{ $namespace }}
+    name: {{ $serviceAccount | quote }}
+    namespace: {{ $namespace | quote }}
 {{- else }}
 {{/*
 One Role/RoleBinding pair per namespace exported into: the release namespace,
@@ -60,8 +60,8 @@ plus whatever rbac.namespaces lists.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ $fullName }}-export
-  namespace: {{ $ns }}
+  name: {{ printf "%s-export" $fullName | quote }}
+  namespace: {{ $ns | quote }}
   labels:
     {{- $labels | nindent 4 }}
   {{- with $.Values.commonAnnotations }}
@@ -73,8 +73,8 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ $fullName }}-export
-  namespace: {{ $ns }}
+  name: {{ printf "%s-export" $fullName | quote }}
+  namespace: {{ $ns | quote }}
   labels:
     {{- $labels | nindent 4 }}
   {{- with $.Values.commonAnnotations }}
@@ -84,11 +84,11 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: {{ $fullName }}-export
+  name: {{ printf "%s-export" $fullName | quote }}
 subjects:
   - kind: ServiceAccount
-    name: {{ $serviceAccount }}
-    namespace: {{ $namespace }}
+    name: {{ $serviceAccount | quote }}
+    namespace: {{ $namespace | quote }}
 {{- end }}
 {{- end }}
 {{- end }}

@@ -3,8 +3,8 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: {{ include "openvox-ca.fullname" . }}
-  namespace: {{ include "openvox-ca.namespace" . }}
+  name: {{ include "openvox-ca.fullname" . | quote }}
+  namespace: {{ include "openvox-ca.namespace" . | quote }}
   labels:
     {{- include "openvox-ca.labels" . | nindent 4 }}
     {{- with .Values.ingress.labels }}
@@ -21,7 +21,7 @@ metadata:
   {{- end }}
 spec:
   {{- with .Values.ingress.className }}
-  ingressClassName: {{ . }}
+  ingressClassName: {{ . | quote }}
   {{- end }}
   {{- with .Values.ingress.tls }}
   tls:
@@ -33,13 +33,13 @@ spec:
       http:
         paths:
           {{- range .paths }}
-          - path: {{ .path }}
-            pathType: {{ .pathType | default "Prefix" }}
+          - path: {{ .path | quote }}
+            pathType: {{ .pathType | default "Prefix" | quote }}
             backend:
               service:
-                name: {{ include "openvox-ca.fullname" $ }}
+                name: {{ include "openvox-ca.fullname" $ | quote }}
                 port:
-                  name: {{ $backend }}
+                  name: {{ $backend | quote }}
           {{- end }}
     {{- end }}
 {{- end }}

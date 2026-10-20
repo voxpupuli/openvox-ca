@@ -294,6 +294,11 @@ networkPolicy:
     - observability
   egress:
     enabled: true
+    # A node-local DNS cache instead of the kube-dns pods.
+    dns:
+      to:
+        - ipBlock:
+            cidr: 169.254.20.10/32
     rules:
       - to:
           - podSelector:
@@ -302,11 +307,16 @@ networkPolicy:
         ports:
           - port: 2379
             protocol: TCP
+  # Agents outside the cluster reach the LoadBalancer with their own source
+  # addresses (externalTrafficPolicy: Local above), which no pod or namespace
+  # selector matches.
   extraIngress:
     - from:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: puppet
+        - ipBlock:
+            cidr: 198.51.100.0/24
       ports:
         - port: https
           protocol: TCP

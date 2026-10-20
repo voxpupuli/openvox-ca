@@ -186,7 +186,7 @@ and [the CA's own serving certificate](https://github.com/voxpupuli/openvox-ca/b
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `replicaCount` | `1` | More than one requires an external storage backend |
+| `replicaCount` | `1` | More than one requires an external storage backend; the chart refuses it on filesystem or sqlite |
 | `strategy` | `{}` | Empty follows `persistence.enabled`: Recreate while the cadir is a ReadWriteOnce PVC, RollingUpdate (maxUnavailable 0, maxSurge 1) once the state is external. Set it explicitly to override either way — a map without `type` is refused, because Kubernetes would read it as RollingUpdate |
 | `revisionHistoryLimit` | `10` | |
 | `command` | `[]` | Overrides the container entrypoint |
@@ -268,11 +268,12 @@ certificate, so the controller **must** pass TLS through untouched.
 | Key | Default | Description |
 | --- | --- | --- |
 | `networkPolicy.enabled` | `false` | |
-| `networkPolicy.apiAccess` | `any` | `any` (agents live anywhere), `namespace`, or `none` |
+| `networkPolicy.apiAccess` | `any` | `any` (every pod in the cluster), `namespace`, or `none`. No mode admits agents outside the cluster: add an `ipBlock` rule to `extraIngress` for them |
 | `networkPolicy.metricsNamespaces` | `[monitoring]` | Namespaces allowed to scrape the exporter |
-| `networkPolicy.egress.enabled` | `false` | Adds an Egress policy; DNS is always allowed |
-| `networkPolicy.egress.rules` | `[]` | Everything the **pod** reaches, sidecars included: your storage backend, OpenBao if the key lives there, anything `initContainers`/`extraContainers` fetch, and the API server when `kubernetesExport` is in use or a managed certificate uses a Secret store (OpenBao's kubernetes auth needs no API egress). DNS is always allowed |
-| `networkPolicy.extraIngress` | `[]` | |
+| `networkPolicy.egress.enabled` | `false` | Adds an Egress policy; DNS to `egress.dns.to` is always allowed |
+| `networkPolicy.egress.dns.to` | the `k8s-app: kube-dns` pods in `kube-system` | NetworkPolicy peers that DNS (port 53, UDP and TCP) may reach. Change it when the resolver is elsewhere: a node-local cache, a provider's resolver, `dnsPolicy: Default` (refused while this names only kube-dns), or DNS pods labelled otherwise. An empty list allows any destination |
+| `networkPolicy.egress.rules` | `[]` | Everything the **pod** reaches, sidecars included: your storage backend, OpenBao if the key lives there, anything `initContainers`/`extraContainers` fetch, and the API server when `kubernetesExport` is in use or a managed certificate uses a Secret store (OpenBao's kubernetes auth needs no API egress). DNS is covered by `egress.dns.to` |
+| `networkPolicy.extraIngress` | `[]` | Further ingress rules, templated: an `ipBlock` for off-cluster agents, for instance |
 
 ### Availability
 
@@ -282,8 +283,8 @@ certificate, so the controller **must** pass TLS through untouched.
 | `podDisruptionBudget.minAvailable` | `1` | Ignored when `maxUnavailable` is set |
 | `podDisruptionBudget.maxUnavailable` | `""` | `0` is honoured (block every voluntary eviction), not treated as unset |
 | `podDisruptionBudget.unhealthyPodEvictionPolicy` | `""` | Kubernetes 1.27+ |
-| `autoscaling.enabled` | `false` | Requires an external storage backend, and at least one of `targetCPUUtilizationPercentage`, `targetMemoryUtilizationPercentage` or `metrics` — the chart refuses an install with none set |
-| `autoscaling.minReplicas` / `.maxReplicas` | `2` / `6` | |
+| `autoscaling.enabled` | `false` | Requires an external storage backend (the chart refuses a `maxReplicas` above 1 on filesystem or sqlite), and at least one of `targetCPUUtilizationPercentage`, `targetMemoryUtilizationPercentage` or `metrics` — the chart refuses an install with none set |
+| `autoscaling.minReplicas` / `.maxReplicas` | `2` / `6` | The chart refuses a `minReplicas` above `maxReplicas` |
 | `autoscaling.targetCPUUtilizationPercentage` | `80` | |
 | `autoscaling.targetMemoryUtilizationPercentage` | `""` | |
 | `autoscaling.metrics` / `.behavior` | `[]` / `{}` | |
