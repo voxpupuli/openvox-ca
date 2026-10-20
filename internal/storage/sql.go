@@ -105,24 +105,23 @@ const (
 	// under 0022, 0600 under 0077 -- so the mode is a ceiling rather than a
 	// decision made for the operator.
 	//
-	// Two things this is NOT for, both because a justification that overreaches
-	// is worse than a narrow one:
+	// One thing this is NOT for, and one it cannot deliver alone, both stated
+	// because a justification that overreaches is worse than a narrow one:
 	//
 	// It is not fsGroup. A Kubernetes fsGroup ORs group access into the volume
 	// at every mount whatever the file was created as, so under fsGroup the
 	// creation mode makes no difference and 0600 would work just as well.
 	//
-	// It does not make an arbitrary-uid platform work. That was the previous
-	// justification here: a platform assigning the pod a fresh uid per start,
-	// where the group bit is what lets the next process read the database this
-	// one created. True of the database and not sufficient, because the same
-	// restart has to reacquire the same-host locks, and those are created at
-	// FilePermPrivate (0600) in a DirPerm (0750) directory -- see
-	// newFileLocks below and instancelock.go. A second uid can neither open an
-	// inherited lock file nor create one, so it fails at the lock whatever the
-	// database mode is. Making that platform work means addressing the lock
-	// files, which is issue #493; it is not something this constant can
-	// deliver, and claiming it did sent an operator looking in the wrong place.
+	// It does not on its own make an arbitrary-uid platform work: a platform
+	// assigning the pod a fresh uid per start, where the group bit is what
+	// lets the next process reach the database this one created. True of the
+	// database and not sufficient, because the same restart has to reacquire
+	// the same-host locks. Those are created group-accessible as well
+	// (lockFilePerm and lockDirPerm in filelock.go, #493), so with a umask that
+	// keeps group write the two agree; under the default 0022 neither the
+	// database (0640) nor the lock files are writable by a second uid. An
+	// earlier version of this comment claimed the platform worked before the
+	// lock files did, which sent an operator looking in the wrong place.
 	//
 	// What it costs is real and worth stating: on a systemd or package install
 	// every member of the owning group can read the key. That is the trade, and
@@ -1151,8 +1150,8 @@ func sqliteDriverDSN(t sqliteTarget) string {
 // other: a store owned by a Unix group is reachable by that group without the
 // CA widening anything later. It is not for fsGroup, which re-applies group
 // access at mount time whatever the file was created as, and it does not on its
-// own make an arbitrary-uid platform work -- the same-host lock files decide
-// that, and they are 0600.
+// own make an arbitrary-uid platform work -- the same-host lock files have to
+// agree, which is why they are created group-accessible too.
 //
 // Nothing here modifies a file that already exists — no chmod, no chown. An
 // existing database keeps whatever mode it has, and world access on it is

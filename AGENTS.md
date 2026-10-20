@@ -323,12 +323,18 @@ Two halves, and both matter:
   asked for the exposure to be fixed and said nothing about how, so it is the
   revision that is the lesson here.
 
-  Do not extend that reasoning into a claim that group access makes an
-  arbitrary-uid platform work. It does not: such a restart also has to
-  reacquire the same-host lock files, which are created 0600 in a 0750
-  directory, so it fails at the lock whatever the data files allow
-  ([#493](https://github.com/voxpupuli/openvox-ca/issues/493)). That claim was
-  in this section, in `internal/storage/sql.go`, in `backend.go`, in
+  Do not extend that reasoning into a claim that group access on the data
+  files makes an arbitrary-uid platform work. Such a restart also has to
+  reacquire the same-host locks, and for as long as their files were created
+  0600 in a 0750 directory it failed there whatever the data files allowed.
+  Since [#493](https://github.com/voxpupuli/openvox-ca/issues/493) they are
+  `lockFilePerm` (0660) in a `lockDirPerm` (0770) directory, ceilings the umask
+  narrows like the database's, and `sql_sqlite_perms_test.go` pins the two
+  together. Even now it holds only for state in the SQLite database and its
+  locks, and only under a umask that keeps group write: every private key
+  written as a file (`ca_key_file`, `private/`) is 0600 whatever the umask. The
+  claim that the data files' group bit was enough was in this section, in
+  `internal/storage/sql.go`, in `backend.go`, in
   `filesystem.go`, in `docs/storage-backends.md` and twice in
   `internal/storage/sql_sqlite_perms_test.go`, and was wrong in all seven —
   which is the more useful lesson: a rationale swept into every site that

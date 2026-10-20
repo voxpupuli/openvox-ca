@@ -53,7 +53,7 @@ itself, which nothing else would write again.
 ├── signed/
 │   └── <subject>.pem               (cert/<subject>)
 └── locks/
-    └── <sha256(name)>.lock         not a logical key   0600
+    └── <sha256(name)>.lock         not a logical key   0660
 ```
 
 `ca_key` is the one key whose path is resolved rather than fixed. It is

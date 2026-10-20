@@ -267,20 +267,23 @@ func (b *FilesystemBackend) EnsureReady(ctx context.Context) error {
 		filepath.Join(b.baseDir, "signed"),
 		filepath.Join(b.baseDir, "requests"),
 		filepath.Join(b.baseDir, "private"),
-		// Created here as well as lazily on first use, so the server owns it
-		// from first boot. Left to the lazy path it would be created by
-		// whichever process first needed a lock, quite possibly a `ctl` command
-		// run under sudo — the root-owned directory AcquireSameHostLock then has
-		// to refuse. Creating it at start also turns a permission problem into a
-		// startup failure an operator is watching for, rather than one that
-		// surfaces weeks later on whichever request first needs that lock.
-		filepath.Join(b.baseDir, fsLockDir),
 	} {
 		if err := os.MkdirAll(d, DirPerm); err != nil {
 			return err
 		}
 	}
-	return nil
+	// The lock directory is created here as well as lazily on first use, so
+	// the server owns it from first boot. Left to the lazy path it would be
+	// created by whichever process first needed a lock, quite possibly a `ctl`
+	// command run under sudo — the root-owned directory AcquireSameHostLock
+	// then has to refuse. Creating it at start also turns a permission problem
+	// into a startup failure an operator is watching for, rather than one that
+	// surfaces weeks later on whichever request first needs that lock.
+	//
+	// Through the lock set rather than in the loop above, so it gets the lock
+	// directory's own mode and not DirPerm: the two paths creating it must
+	// agree, or which one ran first would decide whether the group can lock.
+	return b.locks.makeDir()
 }
 
 func (b *FilesystemBackend) Get(ctx context.Context, key string) ([]byte, error) {
