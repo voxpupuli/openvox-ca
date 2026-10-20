@@ -137,7 +137,7 @@ var _ = Describe("openvox-ca csr", func() {
 		pinnedCfg := "ca_key_algo: ecdsa\nca_key_size: 256\n"
 		emptyCfg := filepath.Join(GinkgoT().TempDir(), "pinned.yaml")
 		Expect(os.WriteFile(emptyCfg, []byte(pinnedCfg), 0o644)).To(Succeed())
-		setEnv("PUPPET_CA_CONFIG", emptyCfg)
+		setEnv("OPENVOX_CA_CONFIG", emptyCfg)
 		clearServerEnv()
 	})
 
@@ -240,7 +240,7 @@ var _ = Describe("openvox-ca csr", func() {
 				"  key_name: openvox-ca\n"+
 				"  auth_method: token\n"+
 				"  token_file: "+tokenFile+"\n"), 0o644)).To(Succeed())
-		setEnv("PUPPET_CA_CONFIG", cfgFile)
+		setEnv("OPENVOX_CA_CONFIG", cfgFile)
 
 		_, err := runCSR("--cadir", caDir, "--hostname", "puppet.example.com", "--create-key")
 		Expect(err).To(MatchError(ContainSubstring("OpenBao")))
@@ -468,7 +468,7 @@ var _ = Describe("openvox-ca csr", func() {
 		Expect(os.WriteFile(cfgPath, []byte(
 			"ca_key_algo: ecdsa\nca_key_size: 256\nencrypt_ca_key: true\n"+
 				"ca_key_passphrase_file: "+ppPath+"\n"), 0o600)).To(Succeed())
-		setEnv("PUPPET_CA_CONFIG", cfgPath)
+		setEnv("OPENVOX_CA_CONFIG", cfgPath)
 
 		_, err := runCSR("--cadir", caDir, "--hostname", "puppet.example.com", "--create-key")
 		Expect(err).NotTo(HaveOccurred())
@@ -482,7 +482,7 @@ var _ = Describe("openvox-ca csr", func() {
 
 	It("leaves the created key unencrypted when encrypt_ca_key is not set", func() {
 		// The counterpart the spec above needs in order to mean anything.
-		// Without it, an ambient PUPPET_CA_ENCRYPT_CA_KEY=true makes that
+		// Without it, an ambient OPENVOX_CA_ENCRYPT_CA_KEY=true makes that
 		// assertion one that cannot fail: the key comes out encrypted either
 		// way, and the config file it exists to prove has no bearing on the
 		// result. This one fails in that environment, which is the point.

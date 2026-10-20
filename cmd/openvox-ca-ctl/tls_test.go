@@ -287,8 +287,8 @@ var _ = Describe("newTLSConfig", func() {
 				Expect(err).To(MatchError(ContainSubstring(missing)))
 				Expect(err).To(MatchError(ContainSubstring(supplied)),
 					"error does not name the path that was supplied")
-				Expect(err).To(MatchError(ContainSubstring("PUPPET_CA_CTL_CLIENT_CERT")),
-					"error does not name the other sources the value could have come from")
+				Expect(err).To(MatchError(ContainSubstring("OPENVOX_CA_CTL_CLIENT_CERT/OPENVOX_CA_CTL_CLIENT_KEY")),
+					"error does not name both environment variables the pair could have come from")
 			},
 			Entry("only --client-cert", func() string {
 				globalClientCert = writeTempPEM("client.pem", caCertPEM)

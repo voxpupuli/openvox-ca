@@ -442,10 +442,10 @@ extraArgs: []
 # Extra environment variables. Map form for literals, list form for anything
 # needing valueFrom.
 env: {}
-# PUPPET_CA_HOSTNAME: ca.example.com
+# OPENVOX_CA_HOSTNAME: ca.example.com
 
 extraEnv: []
-# Simplest is the whole DSN in a Secret, with PUPPET_CA_SQL_DSN given a
+# Simplest is the whole DSN in a Secret, with OPENVOX_CA_SQL_DSN given a
 # valueFrom.secretKeyRef of its own. Spliced in as below, $(POSTGRES_PASSWORD)
 # is substituted verbatim, so for a URL DSN the Secret must hold the password
 # percent-encoded: every character other than a letter, a digit or -._~
@@ -454,14 +454,14 @@ extraEnv: []
 #     secretKeyRef:
 #       name: openvox-ca-db
 #       key: password
-# - name: PUPPET_CA_SQL_DSN
+# - name: OPENVOX_CA_SQL_DSN
 #   value: postgres://openvox-ca:$(POSTGRES_PASSWORD)@db-rw:5432/openvox-ca?sslmode=verify-full&sslrootcert=/run/secrets/openvox-ca-db-ca/ca.crt
 # (mount the database's CA there with extraVolumes; see docs/helm-chart.md)
 
 envFrom: []
 # - configMapRef:
 #     name: openvox-ca-extra
-#   prefix: PUPPET_CA_
+#   prefix: OPENVOX_CA_
 
 # 128Mi is a hard cap, and the server's footprint grows with the size of the
 # fleet: it holds a serial index and a cache of pre-signed OCSP responses, one
@@ -618,7 +618,7 @@ enableServiceLinks: false
 # `config.kubernetes_export.targets`), a managed certificate in a Secret (from
 # `config.managed_certs` or `config.serving_cert` with a `store.secret`; a file
 # store needs nothing), or OpenBao Kubernetes auth (from
-# `config.openbao.auth_method`, PUPPET_CA_OPENBAO_AUTH_METHOD in `env` or
+# `config.openbao.auth_method`, OPENVOX_CA_OPENBAO_AUTH_METHOD in `env` or
 # `extraEnv`, or `--openbao-auth-method` in `extraArgs`) — and also whenever the
 # chart cannot see the whole configuration, because `existingConfigMap`, `args`,
 # `envFrom` and a `--config` in `extraArgs` can each carry those settings
@@ -643,7 +643,7 @@ extraVolumeMounts: []
 # With config.sql_dsn_file: /run/secrets/openvox-ca-db/dsn, the server reads the
 # whole SQL DSN from that Secret key, keeping the password out of the
 # environment as well as the arguments — an alternative to the
-# PUPPET_CA_SQL_DSN example under extraEnv.
+# OPENVOX_CA_SQL_DSN example under extraEnv.
 
 serviceAccount:
   create: true

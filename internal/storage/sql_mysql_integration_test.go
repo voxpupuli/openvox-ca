@@ -38,9 +38,9 @@ import (
 // or skips the test if none is configured. The DSN is the go-sql-driver form,
 // e.g. "user:pass@tcp(127.0.0.1:3306)/puppetca".
 func mysqlDSNFromEnv() string {
-	dsn := os.Getenv("PUPPET_CA_TEST_MYSQL_DSN")
+	dsn := os.Getenv("OPENVOX_CA_TEST_MYSQL_DSN")
 	if dsn == "" {
-		Skip("set PUPPET_CA_TEST_MYSQL_DSN=user:pass@tcp(127.0.0.1:3306)/puppetca to run mysql integration tests")
+		Skip("set OPENVOX_CA_TEST_MYSQL_DSN=user:pass@tcp(127.0.0.1:3306)/puppetca to run mysql integration tests")
 	}
 	return dsn
 }

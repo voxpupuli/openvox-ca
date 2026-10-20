@@ -69,23 +69,23 @@ services:
     entrypoint: ["/bin/bash", "/etc/puppet-ca/entrypoint.sh"]
     environment:
       # Storage backend selection (consumed by cmd/openvox-ca/config.go).
-      - PUPPET_CA_STORAGE_BACKEND=redis
-      - PUPPET_CA_REDIS_ADDRS=redis:6379
+      - OPENVOX_CA_STORAGE_BACKEND=redis
+      - OPENVOX_CA_REDIS_ADDRS=redis:6379
       # Both CA replicas share this prefix -- that's the whole point of the
       # multi-replica test: prove they see the same state.
-      - PUPPET_CA_REDIS_KEY_PREFIX=openvox-ca-integ
+      - OPENVOX_CA_REDIS_KEY_PREFIX=openvox-ca-integ
       # Used by ca-entrypoint-redis.sh.
-      - PUPPET_CA_REDIS_HOST=redis
-      - PUPPET_CA_REDIS_PORT=6379
-      - PUPPET_CA_HOSTNAME=openvox-ca
-      - PUPPET_CA_DNS_ALT_NAMES=openvox-ca,localhost
+      - OPENVOX_CA_REDIS_HOST=redis
+      - OPENVOX_CA_REDIS_PORT=6379
+      - OPENVOX_CA_HOSTNAME=openvox-ca
+      - OPENVOX_CA_DNS_ALT_NAMES=openvox-ca,localhost
       # Authorise replica 2's service cert as a peer admin so cross-replica
       # admin calls work in tests.
-      - PUPPET_CA_PEER_HOSTNAMES=openvox-ca-2
+      - OPENVOX_CA_PEER_HOSTNAMES=openvox-ca-2
       # Prometheus exporter, for the same reason as compose-puppet.yml: the
       # shared puppet-stack.sh asserts on puppetca_supersede_pending, and on
       # this backend there is no superseded.json to read instead.
-      - PUPPET_CA_METRICS_LISTEN=:9140
+      - OPENVOX_CA_METRICS_LISTEN=:9140
     volumes:
       - ../docker/puppet/ca-entrypoint-redis.sh:/etc/puppet-ca/entrypoint.sh:ro,z
       - ca-data-redis:/data
@@ -128,14 +128,14 @@ services:
     hostname: openvox-ca-2
     entrypoint: ["/bin/bash", "/etc/puppet-ca/entrypoint.sh"]
     environment:
-      - PUPPET_CA_STORAGE_BACKEND=redis
-      - PUPPET_CA_REDIS_ADDRS=redis:6379
-      - PUPPET_CA_REDIS_KEY_PREFIX=openvox-ca-integ
-      - PUPPET_CA_REDIS_HOST=redis
-      - PUPPET_CA_REDIS_PORT=6379
-      - PUPPET_CA_HOSTNAME=openvox-ca-2
-      - PUPPET_CA_DNS_ALT_NAMES=openvox-ca-2,localhost
-      - PUPPET_CA_PEER_HOSTNAMES=openvox-ca
+      - OPENVOX_CA_STORAGE_BACKEND=redis
+      - OPENVOX_CA_REDIS_ADDRS=redis:6379
+      - OPENVOX_CA_REDIS_KEY_PREFIX=openvox-ca-integ
+      - OPENVOX_CA_REDIS_HOST=redis
+      - OPENVOX_CA_REDIS_PORT=6379
+      - OPENVOX_CA_HOSTNAME=openvox-ca-2
+      - OPENVOX_CA_DNS_ALT_NAMES=openvox-ca-2,localhost
+      - OPENVOX_CA_PEER_HOSTNAMES=openvox-ca
     volumes:
       - ../docker/puppet/ca-entrypoint-redis.sh:/etc/puppet-ca/entrypoint.sh:ro,z
       # Distinct named volume: per-subject leaf private keys are local on each
@@ -168,8 +168,8 @@ services:
     hostname: puppet-master
     environment:
       - PUPPET_FQDN=puppet-master
-      - PUPPET_CA_HOST=openvox-ca
-      - PUPPET_CA_PORT=8140
+      - OPENVOX_CA_HOST=openvox-ca
+      - OPENVOX_CA_PORT=8140
       - OPENVOXDB_HOST=openvoxdb
       - OPENVOXDB_PORT=8081
     volumes:
@@ -215,8 +215,8 @@ services:
       OPENVOXSERVER_HOSTNAME: puppet-master
       OPENVOXSERVER_PORT: "8140"
       CERTNAME: openvoxdb
-      PUPPET_CA_HOST: openvox-ca
-      PUPPET_CA_PORT: "8140"
+      OPENVOX_CA_HOST: openvox-ca
+      OPENVOX_CA_PORT: "8140"
       OPENVOXDB_POSTGRES_HOSTNAME: postgres
       OPENVOXDB_POSTGRES_PORT: "5432"
       OPENVOXDB_POSTGRES_USER: openvoxdb

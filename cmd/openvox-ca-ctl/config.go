@@ -61,26 +61,26 @@ func loadCtlConfig(configFile string) (*ctlConfig, error) {
 	return cfg, nil
 }
 
-// applyCtlEnv overlays PUPPET_CA_CTL_* environment variables onto cfg.
+// applyCtlEnv overlays OPENVOX_CA_CTL_* environment variables onto cfg.
 func applyCtlEnv(cfg *ctlConfig) {
-	if v := os.Getenv("PUPPET_CA_CTL_SERVER_URL"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_CTL_SERVER_URL"); v != "" {
 		cfg.ServerURL = v
 	}
-	if v := os.Getenv("PUPPET_CA_CTL_CA_CERT"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_CTL_CA_CERT"); v != "" {
 		cfg.CACert = v
 	}
-	if v := os.Getenv("PUPPET_CA_CTL_CLIENT_CERT"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_CTL_CLIENT_CERT"); v != "" {
 		cfg.ClientCert = v
 	}
-	if v := os.Getenv("PUPPET_CA_CTL_CLIENT_KEY"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_CTL_CLIENT_KEY"); v != "" {
 		cfg.ClientKey = v
 	}
-	if v := os.Getenv("PUPPET_CA_CTL_VERBOSE"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_CTL_VERBOSE"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.Verbose = b
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_CTL_INSECURE"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_CTL_INSECURE"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.Insecure = b
 		}

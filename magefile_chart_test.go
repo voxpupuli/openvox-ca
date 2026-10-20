@@ -173,8 +173,8 @@ var _ = Describe("inlineCredentialKeys", func() {
 
 var _ = Describe("uncoveredCredentialKeys", func() {
 	rejects := []chartRejectCase{
-		{wantErr: "config.etcd_password: set PUPPET_CA_ETCD_PASSWORD instead"},
-		{wantErr: "config.redis_sentinel_password: set PUPPET_CA_REDIS_SENTINEL_PASSWORD instead"},
+		{wantErr: "config.etcd_password: set OPENVOX_CA_ETCD_PASSWORD instead"},
+		{wantErr: "config.redis_sentinel_password: set OPENVOX_CA_REDIS_SENTINEL_PASSWORD instead"},
 	}
 
 	It("returns exactly the keys no reject case refuses", func() {
@@ -190,7 +190,7 @@ var _ = Describe("uncoveredCredentialKeys", func() {
 	})
 
 	It("counts a case naming the key under a nested block's path", func() {
-		nested := []chartRejectCase{{wantErr: "config.openbao.client_secret: set PUPPET_CA_OPENBAO_CLIENT_SECRET instead"}}
+		nested := []chartRejectCase{{wantErr: "config.openbao.client_secret: set OPENVOX_CA_OPENBAO_CLIENT_SECRET instead"}}
 		Expect(uncoveredCredentialKeys([]string{"client_secret"}, nested)).To(BeEmpty())
 	})
 

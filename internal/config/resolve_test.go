@@ -37,7 +37,7 @@ func absViaRoot(rel string) string {
 }
 
 var _ = Describe("ResolveConfigFile", func() {
-	const envVar = "PUPPET_CA_TEST_CONFIG"
+	const envVar = "OPENVOX_CA_TEST_CONFIG"
 
 	// Each spec saves and restores the env var so it never leaks into a
 	// sibling; equivalent to GinkgoT().Setenv (see AGENTS.md), since a bare

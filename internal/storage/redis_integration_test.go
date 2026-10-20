@@ -40,9 +40,9 @@ import (
 // redisAddrFromEnv returns the Redis/Valkey address to use for integration
 // tests, or skips the test if none is configured.
 func redisAddrFromEnv() string {
-	addr := os.Getenv("PUPPET_CA_TEST_REDIS_ADDR")
+	addr := os.Getenv("OPENVOX_CA_TEST_REDIS_ADDR")
 	if addr == "" {
-		Skip("set PUPPET_CA_TEST_REDIS_ADDR=host:port to run redis integration tests")
+		Skip("set OPENVOX_CA_TEST_REDIS_ADDR=host:port to run redis integration tests")
 	}
 	return addr
 }

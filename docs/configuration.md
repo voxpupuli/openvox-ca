@@ -58,12 +58,12 @@ are two settings, so neither overrides the other: setting both, from any mix of
 sources, is refused at startup. See
 [keeping the database password private](storage-backends.md#keeping-the-database-password-private).
 
-Key generation and CA subject options are intentionally **not** exposed as CLI flags. They are one-time bootstrap decisions that belong in a config file or environment variable. Use the config file or `PUPPET_CA_CA_KEY_ALGO` / `PUPPET_CA_CA_SUBJECT_*` env vars to set them.
+Key generation and CA subject options are intentionally **not** exposed as CLI flags. They are one-time bootstrap decisions that belong in a config file or environment variable. Use the config file or `OPENVOX_CA_CA_KEY_ALGO` / `OPENVOX_CA_CA_SUBJECT_*` env vars to set them.
 
 The config file is located by checking, in order:
 
 1. `--config /path/to/config.yaml` (explicit flag)
-2. `PUPPET_CA_CONFIG` environment variable
+2. `OPENVOX_CA_CONFIG` environment variable
 3. `/etc/puppet-ca/config.yaml` (auto-detected if the file exists)
 
 ## Config file
@@ -218,41 +218,41 @@ Environment variables mirror the CLI flags:
 
 | Flag | Environment variable |
 | --- | --- |
-| `--cadir` | `PUPPET_CA_CADIR` |
-| `--autosign-config` | `PUPPET_CA_AUTOSIGN_CONFIG` |
-| `--host` | `PUPPET_CA_HOST` |
-| `--port` | `PUPPET_CA_PORT` |
-| `--hostname` | `PUPPET_CA_HOSTNAME` |
-| `--verbosity` | `PUPPET_CA_VERBOSITY` |
-| `--logfile` | `PUPPET_CA_LOGFILE` |
-| `--tls-cert` | `PUPPET_CA_TLS_CERT` |
-| `--tls-key` | `PUPPET_CA_TLS_KEY` |
-| `--puppet-server` | `PUPPET_CA_PUPPET_SERVER` |
-| `--puppet-server-file` | `PUPPET_CA_PUPPET_SERVER_FILE` |
-| `--client-revocation-policy` | `PUPPET_CA_CLIENT_REVOCATION_POLICY` |
-| `--no-pp-cli-auth` | `PUPPET_CA_NO_PP_CLI_AUTH` |
-| `--no-tls-required` | `PUPPET_CA_NO_TLS_REQUIRED` |
-| `--allow-public-status` | `PUPPET_CA_ALLOW_PUBLIC_STATUS` |
-| `--ocsp-url` | `PUPPET_CA_OCSP_URL` |
-| `--crl-url` | `PUPPET_CA_CRL_URL` |
-| `--metrics-listen` | `PUPPET_CA_METRICS_LISTEN` |
-| `--csr-rate-limit` | `PUPPET_CA_CSR_RATE_LIMIT` |
-| `--ca-signing-concurrency` | `PUPPET_CA_SIGNING_CONCURRENCY` |
-| `--encrypt-ca-key` | `PUPPET_CA_ENCRYPT_CA_KEY` |
-| `--insecure-allow-world-readable-keys` | `PUPPET_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS` |
-| `--ca-key-passphrase-file` | `PUPPET_CA_KEY_PASSPHRASE_FILE` |
-| `--storage-backend` | `PUPPET_CA_STORAGE_BACKEND` |
-| `--etcd-endpoints` | `PUPPET_CA_ETCD_ENDPOINTS` |
-| `--etcd-key-prefix` | `PUPPET_CA_ETCD_KEY_PREFIX` |
-| `--sql-dsn` | `PUPPET_CA_SQL_DSN` |
-| `--sql-dsn-file` | `PUPPET_CA_SQL_DSN_FILE` |
-| `--ca-cert-file` | `PUPPET_CA_CA_CERT_FILE` |
-| `--ca-key-file` | `PUPPET_CA_CA_KEY_FILE` |
-| `--ca-key-provider` | `PUPPET_CA_CA_KEY_PROVIDER` |
-| `--openbao-addr` | `PUPPET_CA_OPENBAO_ADDR` |
-| `--openbao-transit-mount` | `PUPPET_CA_OPENBAO_TRANSIT_MOUNT` |
-| `--openbao-key-name` | `PUPPET_CA_OPENBAO_KEY_NAME` |
-| `--openbao-auth-method` | `PUPPET_CA_OPENBAO_AUTH_METHOD` |
+| `--cadir` | `OPENVOX_CA_CADIR` |
+| `--autosign-config` | `OPENVOX_CA_AUTOSIGN_CONFIG` |
+| `--host` | `OPENVOX_CA_HOST` |
+| `--port` | `OPENVOX_CA_PORT` |
+| `--hostname` | `OPENVOX_CA_HOSTNAME` |
+| `--verbosity` | `OPENVOX_CA_VERBOSITY` |
+| `--logfile` | `OPENVOX_CA_LOGFILE` |
+| `--tls-cert` | `OPENVOX_CA_TLS_CERT` |
+| `--tls-key` | `OPENVOX_CA_TLS_KEY` |
+| `--puppet-server` | `OPENVOX_CA_PUPPET_SERVER` |
+| `--puppet-server-file` | `OPENVOX_CA_PUPPET_SERVER_FILE` |
+| `--client-revocation-policy` | `OPENVOX_CA_CLIENT_REVOCATION_POLICY` |
+| `--no-pp-cli-auth` | `OPENVOX_CA_NO_PP_CLI_AUTH` |
+| `--no-tls-required` | `OPENVOX_CA_NO_TLS_REQUIRED` |
+| `--allow-public-status` | `OPENVOX_CA_ALLOW_PUBLIC_STATUS` |
+| `--ocsp-url` | `OPENVOX_CA_OCSP_URL` |
+| `--crl-url` | `OPENVOX_CA_CRL_URL` |
+| `--metrics-listen` | `OPENVOX_CA_METRICS_LISTEN` |
+| `--csr-rate-limit` | `OPENVOX_CA_CSR_RATE_LIMIT` |
+| `--ca-signing-concurrency` | `OPENVOX_CA_SIGNING_CONCURRENCY` |
+| `--encrypt-ca-key` | `OPENVOX_CA_ENCRYPT_CA_KEY` |
+| `--insecure-allow-world-readable-keys` | `OPENVOX_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS` |
+| `--ca-key-passphrase-file` | `OPENVOX_CA_KEY_PASSPHRASE_FILE` |
+| `--storage-backend` | `OPENVOX_CA_STORAGE_BACKEND` |
+| `--etcd-endpoints` | `OPENVOX_CA_ETCD_ENDPOINTS` |
+| `--etcd-key-prefix` | `OPENVOX_CA_ETCD_KEY_PREFIX` |
+| `--sql-dsn` | `OPENVOX_CA_SQL_DSN` |
+| `--sql-dsn-file` | `OPENVOX_CA_SQL_DSN_FILE` |
+| `--ca-cert-file` | `OPENVOX_CA_CA_CERT_FILE` |
+| `--ca-key-file` | `OPENVOX_CA_CA_KEY_FILE` |
+| `--ca-key-provider` | `OPENVOX_CA_CA_KEY_PROVIDER` |
+| `--openbao-addr` | `OPENVOX_CA_OPENBAO_ADDR` |
+| `--openbao-transit-mount` | `OPENVOX_CA_OPENBAO_TRANSIT_MOUNT` |
+| `--openbao-key-name` | `OPENVOX_CA_OPENBAO_KEY_NAME` |
+| `--openbao-auth-method` | `OPENVOX_CA_OPENBAO_AUTH_METHOD` |
 
 The full `--openbao-*` flag/environment-variable reference (TLS, AppRole, token-file, and
 Kubernetes auth settings) is in [OpenBao Transit-engine CA key](openbao-transit.md#configuration).
@@ -262,64 +262,64 @@ override the `openbao` settings; see
 Storage-backend environment variables are documented per backend in
 [storage backends](storage-backends.md).
 
-The CA key passphrase can also be provided via `PUPPET_CA_KEY_PASSPHRASE` (env var only, no CLI flag to avoid `/proc/cmdline` exposure).
+The CA key passphrase can also be provided via `OPENVOX_CA_KEY_PASSPHRASE` (env var only, no CLI flag to avoid `/proc/cmdline` exposure).
 Under the default process split the launcher passes it to the signer child only, not to the frontend; see [process isolation](ca-key-security.md#process-isolation).
 A database password needs the same care. Give it in `--sql-dsn-file`,
-`PUPPET_CA_SQL_DSN` or `sql_dsn` in the config file, never in `--sql-dsn`; see
+`OPENVOX_CA_SQL_DSN` or `sql_dsn` in the config file, never in `--sql-dsn`; see
 [keeping the database password private](storage-backends.md#keeping-the-database-password-private).
 
 **Config file / env var only, no CLI flag:**
 
 | Config key | Environment variable |
 | --- | --- |
-| `client_crl_refresh_interval_sec` | `PUPPET_CA_CLIENT_CRL_REFRESH_INTERVAL_SEC` |
-| `ca_key_algo` | `PUPPET_CA_CA_KEY_ALGO` |
-| `ca_key_size` | `PUPPET_CA_CA_KEY_SIZE` |
-| `leaf_key_algo` | `PUPPET_CA_LEAF_KEY_ALGO` |
-| `leaf_key_size` | `PUPPET_CA_LEAF_KEY_SIZE` |
-| `ca_subject_org` | `PUPPET_CA_CA_SUBJECT_ORG` |
-| `ca_subject_ou` | `PUPPET_CA_CA_SUBJECT_OU` |
-| `ca_subject_country` | `PUPPET_CA_CA_SUBJECT_COUNTRY` |
-| `ca_subject_locality` | `PUPPET_CA_CA_SUBJECT_LOCALITY` |
-| `ca_subject_province` | `PUPPET_CA_CA_SUBJECT_PROVINCE` |
-| `ca_path_length` | `PUPPET_CA_CA_PATH_LENGTH` |
-| `ca_validity_days` | `PUPPET_CA_CA_VALIDITY_DAYS` |
-| `leaf_validity_days` | `PUPPET_CA_LEAF_VALIDITY_DAYS` |
-| `promote_cn_to_san` | `PUPPET_CA_PROMOTE_CN_TO_SAN` |
-| `allow_subject_alt_names` | `PUPPET_CA_ALLOW_SUBJECT_ALT_NAMES` |
-| `allow_duplicate_certs` | `PUPPET_CA_ALLOW_DUPLICATE_CERTS` |
-| `crl_validity_days` | `PUPPET_CA_CRL_VALIDITY_DAYS` |
-| `disable_crl_refresh` | `PUPPET_CA_DISABLE_CRL_REFRESH` |
-| `crl_refresh_interval_sec` | `PUPPET_CA_CRL_REFRESH_INTERVAL_SEC` |
-| `crl_refresh_before_sec` | `PUPPET_CA_CRL_REFRESH_BEFORE_SEC` |
-| `crl_sync_interval_sec` | `PUPPET_CA_CRL_SYNC_INTERVAL_SEC` |
-| `crl_chain_file` | `PUPPET_CA_CRL_CHAIN_FILE` |
-| `crl_chain_refresh_interval_sec` | `PUPPET_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC` |
-| `ocsp_index_sync_interval_sec` | `PUPPET_CA_OCSP_INDEX_SYNC_INTERVAL_SEC` |
-| `enable_expired_cert_cleanup` | `PUPPET_CA_ENABLE_EXPIRED_CERT_CLEANUP` |
-| `expired_cert_retention_sec` | `PUPPET_CA_EXPIRED_CERT_RETENTION_SEC` |
-| `expired_cert_cleanup_interval_sec` | `PUPPET_CA_EXPIRED_CERT_CLEANUP_INTERVAL_SEC` |
-| `shutdown_timeout_sec` | `PUPPET_CA_SHUTDOWN_TIMEOUT_SEC` |
-| `memory_reserve_launcher` | `PUPPET_CA_MEMORY_RESERVE_LAUNCHER` |
-| `memory_reserve_signer` | `PUPPET_CA_MEMORY_RESERVE_SIGNER` |
-| `memory_budget_percent` | `PUPPET_CA_MEMORY_BUDGET_PERCENT` |
-| `etcd_username` | `PUPPET_CA_ETCD_USERNAME` |
-| `etcd_password` | `PUPPET_CA_ETCD_PASSWORD` |
-| `etcd_dial_timeout_sec` | `PUPPET_CA_ETCD_DIAL_TIMEOUT_SEC` |
-| `etcd_request_timeout_sec` | `PUPPET_CA_ETCD_REQUEST_TIMEOUT_SEC` |
-| `etcd_tls_ca_file` | `PUPPET_CA_ETCD_TLS_CA_FILE` |
-| `etcd_tls_cert_file` | `PUPPET_CA_ETCD_TLS_CERT_FILE` |
-| `etcd_tls_key_file` | `PUPPET_CA_ETCD_TLS_KEY_FILE` |
-| `puppet_datetime_format` | `PUPPET_CA_PUPPET_DATETIME_FORMAT` |
-| `serial_number_format` | `PUPPET_CA_SERIAL_NUMBER_FORMAT` |
-| `revoke_on_auto_renew` | `PUPPET_CA_REVOKE_ON_AUTO_RENEW` |
-| `superseded_cert_revoke_after_sec` | `PUPPET_CA_SUPERSEDED_CERT_REVOKE_AFTER_SEC` |
-| `superseded_cert_sweep_interval_sec` | `PUPPET_CA_SUPERSEDED_CERT_SWEEP_INTERVAL_SEC` |
-| `leaf_backdate_sec` | `PUPPET_CA_LEAF_BACKDATE_SEC` |
-| `managed_cert_interval_sec` | `PUPPET_CA_MANAGED_CERT_INTERVAL_SEC` |
+| `client_crl_refresh_interval_sec` | `OPENVOX_CA_CLIENT_CRL_REFRESH_INTERVAL_SEC` |
+| `ca_key_algo` | `OPENVOX_CA_CA_KEY_ALGO` |
+| `ca_key_size` | `OPENVOX_CA_CA_KEY_SIZE` |
+| `leaf_key_algo` | `OPENVOX_CA_LEAF_KEY_ALGO` |
+| `leaf_key_size` | `OPENVOX_CA_LEAF_KEY_SIZE` |
+| `ca_subject_org` | `OPENVOX_CA_CA_SUBJECT_ORG` |
+| `ca_subject_ou` | `OPENVOX_CA_CA_SUBJECT_OU` |
+| `ca_subject_country` | `OPENVOX_CA_CA_SUBJECT_COUNTRY` |
+| `ca_subject_locality` | `OPENVOX_CA_CA_SUBJECT_LOCALITY` |
+| `ca_subject_province` | `OPENVOX_CA_CA_SUBJECT_PROVINCE` |
+| `ca_path_length` | `OPENVOX_CA_CA_PATH_LENGTH` |
+| `ca_validity_days` | `OPENVOX_CA_CA_VALIDITY_DAYS` |
+| `leaf_validity_days` | `OPENVOX_CA_LEAF_VALIDITY_DAYS` |
+| `promote_cn_to_san` | `OPENVOX_CA_PROMOTE_CN_TO_SAN` |
+| `allow_subject_alt_names` | `OPENVOX_CA_ALLOW_SUBJECT_ALT_NAMES` |
+| `allow_duplicate_certs` | `OPENVOX_CA_ALLOW_DUPLICATE_CERTS` |
+| `crl_validity_days` | `OPENVOX_CA_CRL_VALIDITY_DAYS` |
+| `disable_crl_refresh` | `OPENVOX_CA_DISABLE_CRL_REFRESH` |
+| `crl_refresh_interval_sec` | `OPENVOX_CA_CRL_REFRESH_INTERVAL_SEC` |
+| `crl_refresh_before_sec` | `OPENVOX_CA_CRL_REFRESH_BEFORE_SEC` |
+| `crl_sync_interval_sec` | `OPENVOX_CA_CRL_SYNC_INTERVAL_SEC` |
+| `crl_chain_file` | `OPENVOX_CA_CRL_CHAIN_FILE` |
+| `crl_chain_refresh_interval_sec` | `OPENVOX_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC` |
+| `ocsp_index_sync_interval_sec` | `OPENVOX_CA_OCSP_INDEX_SYNC_INTERVAL_SEC` |
+| `enable_expired_cert_cleanup` | `OPENVOX_CA_ENABLE_EXPIRED_CERT_CLEANUP` |
+| `expired_cert_retention_sec` | `OPENVOX_CA_EXPIRED_CERT_RETENTION_SEC` |
+| `expired_cert_cleanup_interval_sec` | `OPENVOX_CA_EXPIRED_CERT_CLEANUP_INTERVAL_SEC` |
+| `shutdown_timeout_sec` | `OPENVOX_CA_SHUTDOWN_TIMEOUT_SEC` |
+| `memory_reserve_launcher` | `OPENVOX_CA_MEMORY_RESERVE_LAUNCHER` |
+| `memory_reserve_signer` | `OPENVOX_CA_MEMORY_RESERVE_SIGNER` |
+| `memory_budget_percent` | `OPENVOX_CA_MEMORY_BUDGET_PERCENT` |
+| `etcd_username` | `OPENVOX_CA_ETCD_USERNAME` |
+| `etcd_password` | `OPENVOX_CA_ETCD_PASSWORD` |
+| `etcd_dial_timeout_sec` | `OPENVOX_CA_ETCD_DIAL_TIMEOUT_SEC` |
+| `etcd_request_timeout_sec` | `OPENVOX_CA_ETCD_REQUEST_TIMEOUT_SEC` |
+| `etcd_tls_ca_file` | `OPENVOX_CA_ETCD_TLS_CA_FILE` |
+| `etcd_tls_cert_file` | `OPENVOX_CA_ETCD_TLS_CERT_FILE` |
+| `etcd_tls_key_file` | `OPENVOX_CA_ETCD_TLS_KEY_FILE` |
+| `puppet_datetime_format` | `OPENVOX_CA_PUPPET_DATETIME_FORMAT` |
+| `serial_number_format` | `OPENVOX_CA_SERIAL_NUMBER_FORMAT` |
+| `revoke_on_auto_renew` | `OPENVOX_CA_REVOKE_ON_AUTO_RENEW` |
+| `superseded_cert_revoke_after_sec` | `OPENVOX_CA_SUPERSEDED_CERT_REVOKE_AFTER_SEC` |
+| `superseded_cert_sweep_interval_sec` | `OPENVOX_CA_SUPERSEDED_CERT_SWEEP_INTERVAL_SEC` |
+| `leaf_backdate_sec` | `OPENVOX_CA_LEAF_BACKDATE_SEC` |
+| `managed_cert_interval_sec` | `OPENVOX_CA_MANAGED_CERT_INTERVAL_SEC` |
 
 > **Note:** `--daemon` is intentionally excluded from config file and environment
-> variable support because `PUPPET_CA_DAEMON` is used internally as the daemon fork
+> variable support because `OPENVOX_CA_DAEMON` is used internally as the daemon fork
 > signal.
 
 Boolean env vars accept any value accepted by `strconv.ParseBool`: `1`, `t`, `true`,
@@ -2251,7 +2251,7 @@ differently, all deliberately:
 
 ### Duplicate certificate requests
 
-`allow_duplicate_certs` (env `PUPPET_CA_ALLOW_DUPLICATE_CERTS`, default `false`)
+`allow_duplicate_certs` (env `OPENVOX_CA_ALLOW_DUPLICATE_CERTS`, default `false`)
 is OpenVox Server's `allow-duplicate-certs`, with the same default and the same
 effect. It decides what happens to a CSR for a subject that already has a
 pending CSR, a signed certificate or a revoked one. The check runs before
@@ -2449,7 +2449,7 @@ operationally a process that collects continuously. A `memory_budget_percent`
 that is non-zero and outside 1-100 is likewise rejected. In each of these cases
 the built-in default is used and **the launcher logs a warning naming the key and
 the value it ignored**, so a mistyped reservation does not pass unnoticed. One
-value escapes that promise: a `PUPPET_CA_MEMORY_BUDGET_PERCENT` that is not an
+value escapes that promise: an `OPENVOX_CA_MEMORY_BUDGET_PERCENT` that is not an
 integer at all is discarded during parsing, before the launcher can see it, like
 every other numeric environment variable here, and the default is used
 silently.
@@ -2486,7 +2486,7 @@ those installs should set `GOMEMLIMIT` in the ordinary per-process way.
 
 On `SIGTERM` or `SIGINT`, the frontend HTTP server calls `http.Server.Shutdown()` with a drain context (wired via `signal.NotifyContext`) so in-flight requests (signing, CRL, OCSP) drain cleanly before the process exits. The request context is cancelled on signal, and the command returns normally rather than calling `os.Exit` on its error paths, so deferred storage and signer cleanup always runs after all connections are done.
 
-The drain budget defaults to **25 seconds** and is configurable via `shutdown_timeout_sec` (config file) or `PUPPET_CA_SHUTDOWN_TIMEOUT_SEC` (environment); a non-positive value falls back to the default.
+The drain budget defaults to **25 seconds** and is configurable via `shutdown_timeout_sec` (config file) or `OPENVOX_CA_SHUTDOWN_TIMEOUT_SEC` (environment); a non-positive value falls back to the default.
 
 In the default isolated-process deployment, the supervisor gives its child processes the drain budget **plus a 3-second headroom** (28 seconds by default) before force-killing anything that has not exited, so the drain is never truncated.
 

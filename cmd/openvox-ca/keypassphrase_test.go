@@ -50,7 +50,7 @@ const realServerChild = "real-server"
 
 // runRealServerChild runs the server exactly as an operator would, with no
 // arguments: spawnChild re-executes with os.Args[1:], which is empty here, so
-// the whole configuration travels as PUPPET_CA_* in the environment, the way an
+// the whole configuration travels as OPENVOX_CA_* in the environment, the way an
 // environment-configured deployment supplies it -- and through frontendEnv for
 // the frontend, which is the point.
 //
@@ -58,7 +58,7 @@ const realServerChild = "real-server"
 // one that finds a launcher already above it refuses instead of starting a
 // second, each of which would re-execute this test binary in turn.
 func runRealServerChild() int {
-	if os.Getenv("PUPPET_CA_ROLE") == "" {
+	if os.Getenv("OPENVOX_CA_ROLE") == "" {
 		if os.Getenv(launcherStartedEnv) != "" {
 			fmt.Fprintln(os.Stderr, "real-server child: a launcher is already running above this process")
 			return 2
@@ -84,14 +84,14 @@ func runRealServerChild() int {
 // and exited 0. The operator is told the CA came up, and it never does.
 var _ = Describe("the server's own startup, on a missing key passphrase", func() {
 	// Same reasoning as the key-permission startup specs: these drive whole
-	// commands, so PUPPET_CA_* from the developer's environment would change
+	// commands, so OPENVOX_CA_* from the developer's environment would change
 	// what they assert without failing them, and an unpinned config file means
 	// a host /etc/puppet-ca/config.yaml decides whether they refuse at all.
 	BeforeEach(func() {
 		clearServerEnv()
 		empty := filepath.Join(GinkgoT().TempDir(), "empty-config.yaml")
 		Expect(os.WriteFile(empty, []byte("{}\n"), 0o600)).To(Succeed(), "pin an empty config")
-		GinkgoT().Setenv("PUPPET_CA_CONFIG", empty)
+		GinkgoT().Setenv("OPENVOX_CA_CONFIG", empty)
 	})
 
 	// encryptedCADir bootstraps a CA whose stored key is encrypted, with the
@@ -459,13 +459,13 @@ var _ = Describe("the real launcher, with the passphrase only in the environment
 		// think it was already a role, already under a launcher, or configured
 		// from a file on this host.
 		cmd.Env = append(filterEnv(os.Environ(), append(append([]string{}, internalEnvKeys...),
-			launcherStartedEnv, ca.DefaultPassphraseEnvVar, "PUPPET_CA_CONFIG", "PUPPET_CA_KEY_PASSPHRASE_FILE")...),
+			launcherStartedEnv, ca.DefaultPassphraseEnvVar, "OPENVOX_CA_CONFIG", "OPENVOX_CA_KEY_PASSPHRASE_FILE")...),
 			pskChildEnv+"="+realServerChild,
-			"PUPPET_CA_CONFIG="+emptyConfig,
-			"PUPPET_CA_CADIR="+cadir,
-			"PUPPET_CA_HOST=127.0.0.1",
-			"PUPPET_CA_PORT="+strconv.Itoa(port),
-			"PUPPET_CA_ENCRYPT_CA_KEY=true",
+			"OPENVOX_CA_CONFIG="+emptyConfig,
+			"OPENVOX_CA_CADIR="+cadir,
+			"OPENVOX_CA_HOST=127.0.0.1",
+			"OPENVOX_CA_PORT="+strconv.Itoa(port),
+			"OPENVOX_CA_ENCRYPT_CA_KEY=true",
 			// The only passphrase source. #477 strips it from the frontend.
 			ca.DefaultPassphraseEnvVar+"=end-to-end-passphrase",
 		)

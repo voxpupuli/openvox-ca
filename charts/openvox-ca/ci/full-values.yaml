@@ -124,9 +124,9 @@ kubernetesExport:
       - monitoring
 
 env:
-  PUPPET_CA_HOSTNAME: ca.example.com
+  OPENVOX_CA_HOSTNAME: ca.example.com
 extraEnv:
-  - name: PUPPET_CA_ETCD_PASSWORD
+  - name: OPENVOX_CA_ETCD_PASSWORD
     valueFrom:
       secretKeyRef:
         name: etcd-auth
@@ -134,7 +134,7 @@ extraEnv:
 envFrom:
   - configMapRef:
       name: openvox-ca-extra
-    prefix: PUPPET_CA_
+    prefix: OPENVOX_CA_
 
 extraVolumes:
   - name: etcd-tls

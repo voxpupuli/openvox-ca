@@ -16,8 +16,10 @@ set -eu
 # ownership and permission branch is unreachable outside a container, and the
 # hardening it applies -- --no-dereference, the symlink refusal, mode 0640 on a
 # file that can hold credentials -- would go untested. Nothing in the packages
-# sets either, and neither dpkg nor rpm passes an environment, so an installed
-# system always takes the defaults.
+# sets either. OPENVOX_CA_CONFIG is also the variable the server reads its
+# configuration file from, so whatever sets it -- a drop-in, or a root shell
+# that exported it -- points this script at the file the service will read,
+# which is the one it has to secure.
 SSLDIR="${OPENVOX_CA_SSLDIR:-/etc/puppetlabs/puppet/ssl}"
 CONFIG="${OPENVOX_CA_CONFIG:-/etc/puppet-ca/config.yaml}"
 
