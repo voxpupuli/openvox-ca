@@ -5285,15 +5285,15 @@ config:
 			// standing limitation of a chart case, not a gap to close.
 			valuesYAML: `
 config:
-  cadir: /var/lib/puppet-ca/ca
+  cadir: /var/lib/openvox-ca/ca
   serving_cert:
     certname: ca.example.com
     names: [ca.example.com]
     renew_before: 720h
     store:
       files:
-        cert: /var/lib/puppet-ca/tls.crt
-        key: /var/lib/puppet-ca/tls.key
+        cert: /var/lib/openvox-ca/tls.crt
+        key: /var/lib/openvox-ca/tls.key
 `,
 			wants: []string{"kind: Deployment", "scheme: HTTPS"},
 			// A file store needs no API access at all, which is the systemd
@@ -5312,13 +5312,13 @@ config:
 			notes: true,
 			valuesYAML: `
 config:
-  cadir: /var/lib/puppet-ca/ca
+  cadir: /var/lib/openvox-ca/ca
   serving_cert:
     certname: ca.example.com
     names: [ca.example.com]
     renew_before: 720h
     store:
-      files: {cert: /var/lib/puppet-ca/tls.crt, key: /var/lib/puppet-ca/tls.key}
+      files: {cert: /var/lib/openvox-ca/tls.crt, key: /var/lib/openvox-ca/tls.key}
   managed_certs:
     - certname: c.example.com
       names: [c]
@@ -6264,7 +6264,7 @@ config:
 			// that a fixed list of names refused — and the remedy that error
 			// offered, existingConfigMap, is a worse posture than what it blocked.
 			name: "a puppet-server file supplied by hand renders when the chart emits none",
-			valuesYAML: "tls:\n  existingSecret: s\nconfig:\n  puppet_server_file: /etc/puppet-ca/puppet-server\n" +
+			valuesYAML: "tls:\n  existingSecret: s\nconfig:\n  puppet_server_file: /etc/openvox-ca/puppet-server\n" +
 				"extraConfigFiles:\n  puppet-server: |\n    compiler.example.com\n",
 			// Quoted, because configMapData quotes every extraConfigFiles key so a
 			// hostile one cannot contribute YAML structure. Same parsed key.
@@ -6280,7 +6280,7 @@ config:
 			// config.autosign_config at it is a working configuration. Removing
 			// the condition on this arm re-refuses it, silently, without this.
 			name: "an autosign.conf supplied by hand renders when the chart emits none",
-			valuesYAML: "tls:\n  existingSecret: s\nconfig:\n  autosign_config: /etc/puppet-ca/autosign.conf\n" +
+			valuesYAML: "tls:\n  existingSecret: s\nconfig:\n  autosign_config: /etc/openvox-ca/autosign.conf\n" +
 				"extraConfigFiles:\n  autosign.conf: |\n    *.agent.example.com\n",
 			wants:    []string{"\"autosign.conf\": |", "*.agent.example.com"},
 			notWants: []string{"\n  autosign.conf: |"},
@@ -6304,13 +6304,44 @@ config:
 			// test refused a trailing slash and the conventional <mount>/ca, with a
 			// message asserting they were outside the volume they were in.
 			name:  "a cadir inside the mounted volume renders",
-			sets:  []string{tls, "config.cadir=/var/lib/puppet-ca/ca"},
-			wants: []string{"cadir: /var/lib/puppet-ca/ca"},
+			sets:  []string{tls, "config.cadir=/var/lib/openvox-ca/ca"},
+			wants: []string{"cadir: /var/lib/openvox-ca/ca"},
 		},
 		{
 			name:  "a cadir equal to the mount point with a trailing slash renders",
-			sets:  []string{tls, "config.cadir=/var/lib/puppet-ca/"},
+			sets:  []string{tls, "config.cadir=/var/lib/openvox-ca/"},
 			wants: []string{"kind: Deployment"},
+		},
+		{
+			// docs/helm-chart.md tells a release whose config spells out paths
+			// under another mount point to pin persistence.mountPath to it. The
+			// volume, the cadir derived from it and the containment check all
+			// have to follow the pin, or the documented remedy is refused or
+			// mounts the volume where nothing looks.
+			name:     "a pinned persistence.mountPath moves the mount and the derived cadir",
+			sets:     []string{tls, "persistence.mountPath=/var/lib/puppet-ca"},
+			wants:    []string{"mountPath: /var/lib/puppet-ca\n", "cadir: /var/lib/puppet-ca\n"},
+			notWants: []string{"/var/lib/openvox-ca"},
+		},
+		{
+			// The documented recipe itself: the release's own cadir and serving
+			// pair under the old mount, kept working by the pin alone.
+			name: "config paths under a pinned persistence.mountPath render",
+			sets: []string{"persistence.mountPath=/var/lib/puppet-ca"},
+			valuesYAML: `
+config:
+  cadir: /var/lib/puppet-ca/ca
+  serving_cert:
+    certname: ca.example.com
+    names: [ca.example.com]
+    renew_before: 720h
+    store:
+      files:
+        cert: /var/lib/puppet-ca/tls.crt
+        key: /var/lib/puppet-ca/tls.key
+`,
+			wants:    []string{"mountPath: /var/lib/puppet-ca\n", "cadir: /var/lib/puppet-ca/ca"},
+			notWants: []string{"/var/lib/openvox-ca"},
 		},
 		{
 			name: "envFrom stops the TLS precondition firing",
@@ -6322,7 +6353,7 @@ config:
 		},
 		{
 			name: "a replaced argv stops the TLS precondition firing",
-			sets: []string{"args[0]=--config=/etc/puppet-ca/config.yaml", "args[1]=--tls-cert=/run/tls/tls.crt", "args[2]=--tls-key=/run/tls/tls.key"},
+			sets: []string{"args[0]=--config=/etc/openvox-ca/config.yaml", "args[1]=--tls-cert=/run/tls/tls.crt", "args[2]=--tls-key=/run/tls/tls.key"},
 			// And the chart stops constructing arguments of its own.
 			wants:    []string{"--tls-cert=/run/tls/tls.crt"},
 			notWants: []string{"--verbosity"},
@@ -6522,8 +6553,8 @@ config:
 		{
 			name:       "a SQLite sql_dsn, which is a file path, stays in config",
 			sets:       []string{tls},
-			valuesYAML: "config:\n  sql_dsn: 'file:/var/lib/puppet-ca/ca.db'\n",
-			wants:      []string{"sql_dsn: file:/var/lib/puppet-ca/ca.db"},
+			valuesYAML: "config:\n  sql_dsn: 'file:/var/lib/openvox-ca/ca.db'\n",
+			wants:      []string{"sql_dsn: file:/var/lib/openvox-ca/ca.db"},
 		},
 		{
 			name:  "an empty backend password is not a credential",
@@ -6542,6 +6573,15 @@ config:
 	}
 
 	rejects := []chartRejectCase{
+		{
+			// The must-fail twin of the pinned-mountPath renders: the same
+			// cadir without the pin is outside the volume, which is what the
+			// pin exists to fix. Without this, a template that ignored the pin
+			// and a containment check that ignored the mount would both pass.
+			name:    "a cadir under another mount point is refused without the pin",
+			sets:    []string{tls, "config.cadir=/var/lib/puppet-ca/ca"},
+			wantErr: "outside the volume mounted at \"/var/lib/openvox-ca\"",
+		},
 		{
 			name:    "no TLS on a non-loopback address, which the server refuses to serve",
 			sets:    []string{},
@@ -6825,7 +6865,7 @@ config:
     names: [ca.example.com]
     renew_before: 720h
     store:
-      files: {cert: /var/lib/puppet-ca/serving/tls.crt, key: /var/lib/puppet-ca/serving/tls.key}
+      files: {cert: /var/lib/openvox-ca/serving/tls.crt, key: /var/lib/openvox-ca/serving/tls.key}
 `,
 			wantErr: "inside the cadir",
 		},
@@ -6886,15 +6926,15 @@ config:
 			name: "a serving_cert key file inside the cadir",
 			valuesYAML: `
 config:
-  cadir: /var/lib/puppet-ca/ca
+  cadir: /var/lib/openvox-ca/ca
   serving_cert:
     certname: ca.example.com
     names: [ca.example.com]
     renew_before: 720h
     store:
       files:
-        cert: /var/lib/puppet-ca/tls.crt
-        key: /var/lib/puppet-ca/ca/tls.key
+        cert: /var/lib/openvox-ca/tls.crt
+        key: /var/lib/openvox-ca/ca/tls.key
 `,
 			wantErr: "inside the cadir",
 		},
@@ -6905,16 +6945,16 @@ config:
 			name: "a serving_cert chain file inside the cadir",
 			valuesYAML: `
 config:
-  cadir: /var/lib/puppet-ca/ca
+  cadir: /var/lib/openvox-ca/ca
   serving_cert:
     certname: ca.example.com
     names: [ca.example.com]
     renew_before: 720h
     store:
       files:
-        cert: /var/lib/puppet-ca/tls.crt
-        key: /var/lib/puppet-ca/tls.key
-        ca: /var/lib/puppet-ca/ca/chain.pem
+        cert: /var/lib/openvox-ca/tls.crt
+        key: /var/lib/openvox-ca/tls.key
+        ca: /var/lib/openvox-ca/ca/chain.pem
 `,
 			wantErr: "inside the cadir",
 		},
@@ -7019,13 +7059,13 @@ config:
 			name: "a serving_cert file store whose key alone escapes the volume",
 			valuesYAML: `
 config:
-  cadir: /var/lib/puppet-ca/ca
+  cadir: /var/lib/openvox-ca/ca
   serving_cert:
     certname: ca.example.com
     names: [ca.example.com]
     renew_before: 720h
     store:
-      files: {cert: /var/lib/puppet-ca/tls.crt, key: /srv/tls.key, ca: /var/lib/puppet-ca/ca.pem}
+      files: {cert: /var/lib/openvox-ca/tls.crt, key: /srv/tls.key, ca: /var/lib/openvox-ca/ca.pem}
 `,
 			wantErr: "outside the volume mounted at",
 		},
@@ -7037,13 +7077,13 @@ config:
 			name: "a serving_cert file store whose chain alone escapes the volume",
 			valuesYAML: `
 config:
-  cadir: /var/lib/puppet-ca/ca
+  cadir: /var/lib/openvox-ca/ca
   serving_cert:
     certname: ca.example.com
     names: [ca.example.com]
     renew_before: 720h
     store:
-      files: {cert: /var/lib/puppet-ca/tls.crt, key: /var/lib/puppet-ca/tls.key, ca: /srv/ca.pem}
+      files: {cert: /var/lib/openvox-ca/tls.crt, key: /var/lib/openvox-ca/tls.key, ca: /srv/ca.pem}
 `,
 			wantErr: "outside the volume mounted at",
 		},

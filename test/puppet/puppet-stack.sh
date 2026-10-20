@@ -518,7 +518,7 @@ _revoke_st=$(exec_master curl -s -o /dev/null -w '%{http_code}' \
 # ═════════════════════════════════════════════════════════════════════════
 printf '\n# Group 1b -- puppet-server-file admin auth\n'
 
-_srv_file=$(exec_ca cat /etc/puppet-ca/servers.txt 2>/dev/null) || true
+_srv_file=$(exec_ca cat /etc/openvox-ca/servers.txt 2>/dev/null) || true
 
 [ -n "$_srv_file" ] \
     && pass "puppet-server-file exists on CA container" \

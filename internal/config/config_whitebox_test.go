@@ -40,7 +40,7 @@ var _ = Describe("absIfSet", func() {
 	})
 
 	It("leaves an already-absolute, clean path unchanged", func() {
-		const p = "/etc/puppet-ca/ca.pem"
+		const p = "/etc/openvox-ca/ca.pem"
 		Expect(absIfSet(p)).To(Equal(p))
 	})
 
@@ -48,8 +48,8 @@ var _ = Describe("absIfSet", func() {
 		// filepath.Abs runs filepath.Clean, so even an absolute input is
 		// normalised — the function is not a pure pass-through for absolute
 		// paths, despite its name implying it only acts when "set".
-		Expect(absIfSet("/etc/puppet-ca/../puppet-ca/ca.pem")).To(Equal("/etc/puppet-ca/ca.pem"))
-		Expect(absIfSet("/etc/puppet-ca/")).To(Equal("/etc/puppet-ca"))
+		Expect(absIfSet("/etc/openvox-ca/../openvox-ca/ca.pem")).To(Equal("/etc/openvox-ca/ca.pem"))
+		Expect(absIfSet("/etc/openvox-ca/")).To(Equal("/etc/openvox-ca"))
 	})
 })
 

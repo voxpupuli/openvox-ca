@@ -18,7 +18,7 @@ TLS_KEY="${CA_DIR}/private/openvox-ca_key.pem"
 # Write the puppet-server admin allow file.  Using --puppet-server-file
 # (rather than --puppet-server) exercises the file-based CN allow list in the
 # integration stack so it is tested end-to-end alongside the inline flag.
-SERVERS_FILE=/etc/puppet-ca/servers.txt
+SERVERS_FILE=/etc/openvox-ca/servers.txt
 mkdir -p "$(dirname "$SERVERS_FILE")"
 cat > "$SERVERS_FILE" <<'EOF'
 # Puppet server CNs allowed CA admin access.

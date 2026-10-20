@@ -50,7 +50,7 @@ var _ = Describe("revoke subcommand", func() {
 		// These are the first specs in the package to run PersistentPreRunE for
 		// real (the others stop at --help, which returns before it). Without
 		// both guards the resolver would fall back to the host's own
-		// /etc/puppet-ca/ctl.yaml and to any PUPPET_CA_CTL_* in the
+		// /etc/openvox-ca/ctl.yaml and to any PUPPET_CA_CTL_* in the
 		// environment — on a machine that actually runs openvox-ca, a
 		// client_cert with no client_key there would fail every spec here for
 		// reasons that have nothing to do with revoke.

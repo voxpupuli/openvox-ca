@@ -28,7 +28,7 @@ import (
 var _ = Describe("StorageConfig.ToBackendSpec", func() {
 	// localDir is an absolute path so it is propagated verbatim into
 	// BackendSpec.LocalDir (ToBackendSpec does not re-resolve it).
-	const localDir = "/var/lib/puppet-ca"
+	const localDir = "/var/lib/openvox-ca"
 
 	Describe("backend kind resolution", func() {
 		// Every accepted alias must resolve to the canonical kind so that

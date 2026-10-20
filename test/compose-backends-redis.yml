@@ -66,7 +66,7 @@ services:
     # in that it captures the TLS cert from openvox-ca-ctl stdout instead of
     # reading <cadir>/signed/openvox-ca.pem (which only exists for the
     # filesystem backend).
-    entrypoint: ["/bin/bash", "/etc/puppet-ca/entrypoint.sh"]
+    entrypoint: ["/bin/bash", "/etc/openvox-ca/entrypoint.sh"]
     environment:
       # Storage backend selection (consumed by cmd/openvox-ca/config.go).
       - PUPPET_CA_STORAGE_BACKEND=redis
@@ -87,7 +87,7 @@ services:
       # this backend there is no superseded.json to read instead.
       - PUPPET_CA_METRICS_LISTEN=:9140
     volumes:
-      - ../docker/puppet/ca-entrypoint-redis.sh:/etc/puppet-ca/entrypoint.sh:ro,z
+      - ../docker/puppet/ca-entrypoint-redis.sh:/etc/openvox-ca/entrypoint.sh:ro,z
       - ca-data-redis:/data
     expose:
       - "8140"
@@ -126,7 +126,7 @@ services:
       dockerfile: test/Dockerfile.run
     image: openvox-ca-integ:latest
     hostname: openvox-ca-2
-    entrypoint: ["/bin/bash", "/etc/puppet-ca/entrypoint.sh"]
+    entrypoint: ["/bin/bash", "/etc/openvox-ca/entrypoint.sh"]
     environment:
       - PUPPET_CA_STORAGE_BACKEND=redis
       - PUPPET_CA_REDIS_ADDRS=redis:6379
@@ -137,7 +137,7 @@ services:
       - PUPPET_CA_DNS_ALT_NAMES=openvox-ca-2,localhost
       - PUPPET_CA_PEER_HOSTNAMES=openvox-ca
     volumes:
-      - ../docker/puppet/ca-entrypoint-redis.sh:/etc/puppet-ca/entrypoint.sh:ro,z
+      - ../docker/puppet/ca-entrypoint-redis.sh:/etc/openvox-ca/entrypoint.sh:ro,z
       # Distinct named volume: per-subject leaf private keys are local on each
       # replica even though public blobs are shared via Redis (see spec.go's
       # localPrivKeyDir handling).

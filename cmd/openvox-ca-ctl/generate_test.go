@@ -51,7 +51,7 @@ var _ = Describe("generate subcommand --dns", func() {
 	BeforeEach(func() {
 		saveCtlGlobals()
 		// As in revoke's specs: without these the resolver falls back to the
-		// host's own /etc/puppet-ca/ctl.yaml and to any PUPPET_CA_CTL_* in the
+		// host's own /etc/openvox-ca/ctl.yaml and to any PUPPET_CA_CTL_* in the
 		// environment, which on a machine that actually runs openvox-ca fails
 		// these for reasons that have nothing to do with --dns.
 		clearCtlEnv()

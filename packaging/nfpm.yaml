@@ -116,7 +116,7 @@ contents:
   # and the service only needs to read it. Getting the mode right now costs
   # nothing; discovering it later means a permissions change on upgrade.
   - src: packaging/config/config.yaml
-    dst: /etc/puppet-ca/config.yaml
+    dst: /etc/openvox-ca/config.yaml
     type: "config|noreplace"
     file_info:
       mode: 0640

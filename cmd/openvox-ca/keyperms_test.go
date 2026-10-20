@@ -99,11 +99,11 @@ var _ = Describe("key-material permissions at startup", func() {
 	// database and its sidecars, each with its own mode. Sharing one path between
 	// the fixtures would make it impossible for any assertion here to catch the
 	// refusal naming the wrong file.
-	worldReadable := storage.KeyPermWarning{Path: "/var/lib/puppet-ca/ca.db-wal", Mode: os.FileMode(0o644)}
+	worldReadable := storage.KeyPermWarning{Path: "/var/lib/openvox-ca/ca.db-wal", Mode: os.FileMode(0o644)}
 	// Deliberately not a prefix of the world-accessible path: "ca.db" is a
 	// substring of "ca.db-wal", so a NotTo(ContainSubstring) over the pair could
 	// never pass and the spec below would be unfailable in the wrong direction.
-	groupReadable := storage.KeyPermWarning{Path: "/var/lib/puppet-ca/private/ca_key.pem", Mode: os.FileMode(0o640)}
+	groupReadable := storage.KeyPermWarning{Path: "/var/lib/openvox-ca/private/ca_key.pem", Mode: os.FileMode(0o640)}
 
 	It("starts with nothing to report", func() {
 		buf := captureAll()
@@ -171,7 +171,7 @@ var _ = Describe("key-material permissions at startup", func() {
 	// "(mode -rwx------)" in the same string, which the mode itself contradicts.
 	It("does not call an owner-only mode group access", func() {
 		buf := captureAll()
-		ownerOnly := storage.KeyPermWarning{Path: "/var/lib/puppet-ca/private/ca_key.pem", Mode: os.FileMode(0o700)}
+		ownerOnly := storage.KeyPermWarning{Path: "/var/lib/openvox-ca/private/ca_key.pem", Mode: os.FileMode(0o700)}
 
 		logKeyPermissions([]storage.KeyPermWarning{ownerOnly}, false)
 
@@ -210,7 +210,7 @@ var _ = Describe("key-material permissions at startup", func() {
 		many := make([]storage.KeyPermWarning, 0, 25)
 		for i := range 25 {
 			many = append(many, storage.KeyPermWarning{
-				Path: fmt.Sprintf("/var/lib/puppet-ca/private/node-%02d_key.pem", i),
+				Path: fmt.Sprintf("/var/lib/openvox-ca/private/node-%02d_key.pem", i),
 				Mode: os.FileMode(0o640),
 			})
 		}
@@ -229,7 +229,7 @@ var _ = Describe("key-material permissions at startup", func() {
 		many := make([]storage.KeyPermWarning, 0, 25)
 		for i := range 25 {
 			many = append(many, storage.KeyPermWarning{
-				Path: fmt.Sprintf("/var/lib/puppet-ca/private/node-%02d_key.pem", i),
+				Path: fmt.Sprintf("/var/lib/openvox-ca/private/node-%02d_key.pem", i),
 				Mode: os.FileMode(0o644),
 			})
 		}
@@ -268,7 +268,7 @@ var _ = Describe("key-material permissions at startup", func() {
 		// and a chmod that clears nothing into the shouting.
 		It("says nothing for an unjudgeable path", func() {
 			unjudgeable := storage.KeyPermWarning{
-				Path:       "/var/lib/puppet-ca/private",
+				Path:       "/var/lib/openvox-ca/private",
 				Unreadable: true,
 				Err:        errors.New("permission denied"),
 			}
@@ -284,7 +284,7 @@ var _ = Describe("key-material permissions at startup", func() {
 			many := make([]storage.KeyPermWarning, 0, n)
 			for i := range n {
 				many = append(many, storage.KeyPermWarning{
-					Path: fmt.Sprintf("/var/lib/puppet-ca/private/node-%02d_key.pem", i),
+					Path: fmt.Sprintf("/var/lib/openvox-ca/private/node-%02d_key.pem", i),
 					Mode: os.FileMode(0o640),
 				})
 			}
@@ -309,7 +309,7 @@ var _ = Describe("key-material permissions at startup", func() {
 	// to iterate was never proven to get past element one.
 	It("shouts about every world-accessible file, not just the first", func() {
 		buf := captureWarnings()
-		second := storage.KeyPermWarning{Path: "/var/lib/puppet-ca/ca.db-shm", Mode: os.FileMode(0o644)}
+		second := storage.KeyPermWarning{Path: "/var/lib/openvox-ca/ca.db-shm", Mode: os.FileMode(0o644)}
 
 		logKeyPermissions([]storage.KeyPermWarning{worldReadable, second}, true)
 
@@ -321,12 +321,12 @@ var _ = Describe("key-material permissions at startup", func() {
 	// name reachable, so the remedy has to survive one. Unquoted, "chmod o-rwx
 	// /var/lib/ca b.db" is a command against two files that do not exist.
 	It("quotes a path with a space so the suggested chmod is runnable", func() {
-		spaced := storage.KeyPermWarning{Path: "/var/lib/puppet-ca/ca b.db", Mode: os.FileMode(0o644)}
+		spaced := storage.KeyPermWarning{Path: "/var/lib/openvox-ca/ca b.db", Mode: os.FileMode(0o644)}
 
 		err := refuseOnKeyPermissions([]storage.KeyPermWarning{spaced}, false)
 
 		Expect(err).To(HaveOccurred(), "world-accessible key material")
-		Expect(err.Error()).To(ContainSubstring(`chmod o-rwx -- '/var/lib/puppet-ca/ca b.db'`),
+		Expect(err.Error()).To(ContainSubstring(`chmod o-rwx -- '/var/lib/openvox-ca/ca b.db'`),
 			"the remedy must be one shell word")
 	})
 
@@ -336,12 +336,12 @@ var _ = Describe("key-material permissions at startup", func() {
 	// continuation prompt rather than erroring. Reachable by the same route a
 	// space is -- the DSN parser decodes escapes, so file:ca%27b.db is ca'b.db.
 	It("escapes an embedded single quote rather than ending the quoted string", func() {
-		quoted := storage.KeyPermWarning{Path: "/var/lib/puppet-ca/ca'b.db", Mode: os.FileMode(0o644)}
+		quoted := storage.KeyPermWarning{Path: "/var/lib/openvox-ca/ca'b.db", Mode: os.FileMode(0o644)}
 
 		err := refuseOnKeyPermissions([]storage.KeyPermWarning{quoted}, false)
 
 		Expect(err).To(HaveOccurred(), "world-accessible key material")
-		Expect(err.Error()).To(ContainSubstring(`chmod o-rwx -- '/var/lib/puppet-ca/ca'\''b.db'`),
+		Expect(err.Error()).To(ContainSubstring(`chmod o-rwx -- '/var/lib/openvox-ca/ca'\''b.db'`),
 			"close the quote, escape the quote, reopen it")
 	})
 
@@ -372,7 +372,7 @@ var _ = Describe("key-material permissions at startup", func() {
 	// can have weighed a risk whose mode is unknown.
 	Describe("a path whose permissions cannot be read", func() {
 		unreadable := storage.KeyPermWarning{
-			Path:       "/var/lib/puppet-ca/private",
+			Path:       "/var/lib/openvox-ca/private",
 			Unreadable: true,
 			Err:        errors.New("permission denied"),
 		}
@@ -460,7 +460,7 @@ var _ = Describe("key-material permissions at startup", func() {
 	// four files whose modes move together, so naming one would have the operator
 	// fix it, restart, and be refused again by the next.
 	It("names every world-accessible file in one refusal", func() {
-		second := storage.KeyPermWarning{Path: "/var/lib/puppet-ca/ca.db-shm", Mode: os.FileMode(0o644)}
+		second := storage.KeyPermWarning{Path: "/var/lib/openvox-ca/ca.db-shm", Mode: os.FileMode(0o644)}
 
 		err := refuseOnKeyPermissions([]storage.KeyPermWarning{worldReadable, second}, false)
 
@@ -485,7 +485,7 @@ var _ = Describe("the server's own startup, on key-material permissions", func()
 	// comment claimed it was. It deliberately keeps PUPPET_CA_CONFIG, because
 	// callers use that to pin a fixture -- and none of the commands below passes
 	// --config, so resolveConfigFile falls through to PUPPET_CA_CONFIG and then
-	// to /etc/puppet-ca/config.yaml. A host with insecure_allow_world_readable_keys
+	// to /etc/openvox-ca/config.yaml. A host with insecure_allow_world_readable_keys
 	// or a non-filesystem storage_backend in that file changes what these
 	// specs do: the refusal specs would start a server and wait out their
 	// Eventually instead. So the pin is set here, to an empty config, the way

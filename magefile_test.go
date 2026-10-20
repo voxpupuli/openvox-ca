@@ -2429,7 +2429,7 @@ contents:
   - src: packaging/scripts/first-boot
     dst: /usr/libexec/openvox-ca/first-boot
   - src: packaging/config/config.yaml
-    dst: /etc/puppet-ca/config.yaml
+    dst: /etc/openvox-ca/config.yaml
 scripts:
   postinstall: packaging/scripts/postinstall
   preremove: packaging/scripts/preremove
@@ -3612,9 +3612,9 @@ var _ = Describe("buildVariantPackages", func() {
 		// package is what gets installed beside OpenVox Server, and Server
 		// binds 8140.
 		It("sets the packaged port in the configuration file, at 0640", func() {
-			Expect(contents).To(HaveKey("/etc/puppet-ca/config.yaml"))
-			Expect(contents["/etc/puppet-ca/config.yaml"]).To(MatchRegexp(`(?m)^port: 8141$`))
-			Expect(modes["/etc/puppet-ca/config.yaml"]).To(Equal(int64(0o640)))
+			Expect(contents).To(HaveKey("/etc/openvox-ca/config.yaml"))
+			Expect(contents["/etc/openvox-ca/config.yaml"]).To(MatchRegexp(`(?m)^port: 8141$`))
+			Expect(modes["/etc/openvox-ca/config.yaml"]).To(Equal(int64(0o640)))
 		})
 
 		// Every setting the server refuses to start without. Missing any one of
@@ -3623,7 +3623,7 @@ var _ = Describe("buildVariantPackages", func() {
 		// than by the file merely being present.
 		DescribeTable("sets the settings a packaged install cannot start without",
 			func(pattern string) {
-				Expect(contents["/etc/puppet-ca/config.yaml"]).To(MatchRegexp(pattern))
+				Expect(contents["/etc/openvox-ca/config.yaml"]).To(MatchRegexp(pattern))
 			},
 			// No built-in default: "cadir is required".
 			Entry("cadir", `(?m)^cadir: /etc/puppetlabs/puppet/ssl/ca$`),
@@ -3637,7 +3637,7 @@ var _ = Describe("buildVariantPackages", func() {
 		// disagree the service starts and exits, so they are checked against
 		// each other rather than each against a literal.
 		It("names serving paths that the provisioning script links", func() {
-			cfg := contents["/etc/puppet-ca/config.yaml"]
+			cfg := contents["/etc/openvox-ca/config.yaml"]
 			script, err := os.ReadFile(firstBootScriptPath)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -3757,7 +3757,7 @@ var _ = Describe("buildVariantPackages", func() {
 					listed = append(listed, line)
 				}
 			}
-			Expect(listed).To(ConsistOf("/etc/puppet-ca/config.yaml"))
+			Expect(listed).To(ConsistOf("/etc/openvox-ca/config.yaml"))
 		})
 	})
 
@@ -3770,7 +3770,7 @@ var _ = Describe("buildVariantPackages", func() {
 		Expect(err).NotTo(HaveOccurred())
 		owners, err := debOwners(filepath.Join(distDir, "openvox-ca_9.9.9-1_amd64.deb"))
 		Expect(err).NotTo(HaveOccurred())
-		Expect(owners).To(HaveKeyWithValue("/etc/puppet-ca/config.yaml", "root:puppet"))
+		Expect(owners).To(HaveKeyWithValue("/etc/openvox-ca/config.yaml", "root:puppet"))
 	})
 
 	// The write side of the build, which nothing reached. Everything else in
@@ -4621,7 +4621,7 @@ var _ = Describe("the rpm's payload", func() {
 		Entry("the provisioning oneshot", "/usr/lib/systemd/system/openvox-ca-first-boot.service", 0o644),
 		Entry("the provisioning script", "/usr/libexec/openvox-ca/first-boot", 0o755),
 		Entry("the sysusers declaration", "/usr/lib/sysusers.d/openvox-ca.conf", 0o644),
-		Entry("the configuration file", "/etc/puppet-ca/config.yaml", 0o640),
+		Entry("the configuration file", "/etc/openvox-ca/config.yaml", 0o640),
 	)
 
 	// The rpm's counterparts to the deb's content assertions, which is what
@@ -4651,7 +4651,7 @@ var _ = Describe("the rpm's payload", func() {
 	// assertion and not the same subject.
 	DescribeTable("sets the settings a packaged install cannot start without",
 		func(pattern string) {
-			Expect(contents["/etc/puppet-ca/config.yaml"]).To(MatchRegexp(pattern))
+			Expect(contents["/etc/openvox-ca/config.yaml"]).To(MatchRegexp(pattern))
 		},
 		// 8141, not the binary's built-in 8140: a package is what gets
 		// installed alongside Server.
@@ -4673,14 +4673,14 @@ var _ = Describe("the rpm's payload", func() {
 	// source. An rpm that installed the config without noreplace would
 	// overwrite an operator's edits on every update.
 	It("marks the configuration file %config(noreplace)", func() {
-		cfg := files["/etc/puppet-ca/config.yaml"]
+		cfg := files["/etc/openvox-ca/config.yaml"]
 		Expect(cfg.config).To(BeTrue(), "config.yaml is not marked %%config")
 		Expect(cfg.noreplace).To(BeTrue(), "config.yaml is %%config but not noreplace")
 	})
 
 	It("marks nothing else as configuration", func() {
 		for path, f := range files {
-			if path == "/etc/puppet-ca/config.yaml" {
+			if path == "/etc/openvox-ca/config.yaml" {
 				continue
 			}
 			Expect(f.config).To(BeFalse(), "%s is marked %%config and should not be", path)
@@ -4688,8 +4688,8 @@ var _ = Describe("the rpm's payload", func() {
 	})
 
 	It("gives the configuration file to root:puppet", func() {
-		Expect(files["/etc/puppet-ca/config.yaml"].owner).To(Equal("root"))
-		Expect(files["/etc/puppet-ca/config.yaml"].group).To(Equal("puppet"))
+		Expect(files["/etc/openvox-ca/config.yaml"].owner).To(Equal("root"))
+		Expect(files["/etc/openvox-ca/config.yaml"].group).To(Equal("puppet"))
 	})
 
 	It("carries the documentation tree", func() {
@@ -4813,13 +4813,12 @@ func firstBootHostPins() []string {
 		"PUPPET_CA_CADIR=",
 		"PUPPET_CA_STORAGE_BACKEND=",
 
-		// Redirected, not cleared. Each of these three names a path the
-		// script falls back to when the variable is unset, and all three
+		// Redirected, not cleared. Each of these two names a path the
+		// script falls back to when the variable is unset, and both
 		// defaults are REAL paths on a developer's machine or a host with a
 		// packaged CA:
 		//
-		//   OPENVOX_CA_CONFIG       /etc/puppet-ca/config.yaml
-		//   OPENVOX_CA_LEGACY_CADIR /var/lib/puppet-ca
+		//   OPENVOX_CA_CONFIG       /etc/openvox-ca/config.yaml
 		//   OPENVOX_CA_PUPPET_CONF  /etc/puppetlabs/puppet/puppet.conf
 		//
 		// Clearing them would therefore hand the script the host's own files,
@@ -4827,17 +4826,17 @@ func firstBootHostPins() []string {
 		// temporary directory instead.
 		//
 		// They live here rather than in the runners because the runners had a
-		// copy each and the copies drifted: runFirstBootScript pinned two of
-		// the three while its comment claimed all three, runFirstBootIn pinned
-		// one, runFirstBootFunc none, and four runners built inside individual
-		// specs none either.
+		// copy each and the copies drifted: when there were three such pins,
+		// runFirstBootScript pinned two of them while its comment claimed all
+		// three, runFirstBootIn pinned one, runFirstBootFunc none, and four
+		// runners built inside individual specs none either.
 		//
 		// That was a live read of the host, not a latent one -- and it is easy
 		// to argue otherwise, which is how an earlier version of this comment
 		// came to say "nothing yet". Which function a spec CALLS does not
 		// matter: sourcing the definitions resolves CADIR from $CONFIG at the
 		// top level, and fails outright on a cadir it cannot read. So every
-		// runner that sourced them read /etc/puppet-ca/config.yaml whenever
+		// runner that sourced them read /etc/openvox-ca/config.yaml whenever
 		// one existed, and on a host whose file sets cadir in a form the
 		// reader refuses, every one of those specs would have failed for a
 		// reason in the machine rather than the code. Ask what the source
@@ -4847,7 +4846,6 @@ func firstBootHostPins() []string {
 		// setting the spec makes itself (a puppet.conf it built) still wins.
 		// One list, every caller, no drift.
 		"OPENVOX_CA_CONFIG=" + filepath.Join(pin, "no-config.yaml"),
-		"OPENVOX_CA_LEGACY_CADIR=" + filepath.Join(pin, "no-legacy-cadir"),
 		"OPENVOX_CA_PUPPET_CONF=" + filepath.Join(pin, "no-puppet.conf"),
 	}
 }
@@ -6034,7 +6032,7 @@ func runFirstBootScript(sslDir, binDir, certname string, extraEnv ...string) fir
 		"OPENVOX_CA_BINDIR="+binDir,
 		"OPENVOX_CA_CERTNAME="+certname,
 	)
-	// The host-path pins -- config.yaml, the legacy cadir and puppet.conf --
+	// The host-path pins -- config.yaml and puppet.conf --
 	// come from firstBootHostPins, which every runner shares. A spec that
 	// wants one of them pointed somewhere real passes it in extraEnv below,
 	// which is appended afterwards and therefore wins.
@@ -6214,8 +6212,8 @@ var _ = Describe("first-boot's provisioning steps", func() {
 			Expect(first.output).To(ContainSubstring("delete the CA this run just created"))
 			Expect(first.output).NotTo(ContainSubstring("was already there before this run"))
 			// "Use the existing CA" means granting its directory, which the
-			// remedy must do with drop-ins for the reason the legacy-cadir
-			// refusal does: an edited unit file does not survive an upgrade.
+			// remedy must do with drop-ins: an edited unit file does not
+			// survive an upgrade.
 			Expect(first.output).To(And(
 				ContainSubstring("systemctl edit openvox-ca "),
 				ContainSubstring("systemctl edit openvox-ca-first-boot"),
@@ -6589,7 +6587,7 @@ var _ = Describe("first-boot's provisioning steps", func() {
 				Expect(strings.TrimRight(r.output, "\n")).To(Equal(want))
 			},
 			// Read.
-			Entry("a plain scalar", "/var/lib/puppet-ca", "/var/lib/puppet-ca"),
+			Entry("a plain scalar", "/var/lib/openvox-ca", "/var/lib/openvox-ca"),
 			Entry("an inline comment, which is ordinary YAML",
 				"/srv/ca  # moved off the default", "/srv/ca"),
 			Entry("the comment form docs/storage-backends.md prints",
@@ -6823,77 +6821,6 @@ var _ = Describe("first-boot's provisioning steps", func() {
 			ContainSubstring("--certname resolved.example.com"),
 			ContainSubstring("--cadir "+filepath.Join(sslDir, "ca")),
 		))
-	})
-
-	// The default cadir moved this release. A host that followed the old
-	// advice has a real CA the new default cannot see, and bootstrapping over
-	// it would mint a second one that every already-enrolled agent distrusts
-	// -- silently, since both CAs then exist and nothing says which is live.
-	Describe("a CA left at the previous default location", func() {
-		var sslDir, binDir, legacy string
-
-		BeforeEach(func() {
-			sslDir = GinkgoT().TempDir()
-			binDir = GinkgoT().TempDir()
-			legacy = GinkgoT().TempDir()
-			Expect(os.MkdirAll(filepath.Join(sslDir, "ca"), 0o755)).To(Succeed())
-			stubCA(binDir)
-		})
-
-		withLegacy := func() string { return "OPENVOX_CA_LEGACY_CADIR=" + legacy }
-
-		It("refuses to bootstrap a second CA, and says how to resolve it", func() {
-			Expect(os.WriteFile(filepath.Join(legacy, "ca_crt.pem"),
-				[]byte("OLD-CA\n"), 0o644)).To(Succeed())
-
-			r := runFirstBootScript(sslDir, binDir, "ca.example.com", withLegacy())
-			Expect(r.ok).To(BeFalse(), "provisioning should have refused: %s", r.output)
-			Expect(r.output).To(And(
-				ContainSubstring("found an existing CA in "+legacy),
-				ContainSubstring("second CA"),
-			))
-			// Both routes out have to be in the message: an operator who is
-			// told only to move it will move a CA the service is using.
-			Expect(r.output).To(And(
-				ContainSubstring("Keep the existing CA where it is"),
-				ContainSubstring("Or move it"),
-			))
-			// And keeping it is granted with a drop-in, for BOTH units, never
-			// by editing them: the packages install the units as plain files
-			// under /usr/lib/systemd/system, so the next upgrade reverts an
-			// edit and restarts the CA unable to write its own store.
-			Expect(r.output).To(And(
-				ContainSubstring("systemctl edit openvox-ca "),
-				ContainSubstring("systemctl edit openvox-ca-first-boot"),
-				ContainSubstring("ReadWritePaths="+legacy),
-			), "the remedy does not grant the kept directory through a drop-in for both units")
-			// And it must stop before creating anything of its own.
-			Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).NotTo(BeAnExistingFile())
-		})
-
-		// The guard is about bootstrapping, not about the old directory
-		// existing. A host that already migrated has both, and must provision
-		// normally rather than be refused for ever.
-		It("provisions normally when the new location already has a CA", func() {
-			Expect(os.WriteFile(filepath.Join(legacy, "ca_crt.pem"),
-				[]byte("OLD-CA\n"), 0o644)).To(Succeed())
-			Expect(os.WriteFile(filepath.Join(sslDir, "ca", "ca_crt.pem"),
-				[]byte("CA-CERT\n"), 0o644)).To(Succeed())
-			Expect(os.WriteFile(filepath.Join(sslDir, "ca", "ca_crl.pem"),
-				[]byte("CA-CRL\n"), 0o644)).To(Succeed())
-
-			r := runFirstBootScript(sslDir, binDir, "ca.example.com", withLegacy())
-			Expect(r.ok).To(BeTrue(), "provisioning failed: %s", r.output)
-			Expect(r.output).To(ContainSubstring("leaving it alone"))
-		})
-
-		// An empty directory at the old path is not a CA. Refusing on its mere
-		// existence would strand anyone who tidied up but left the directory.
-		It("bootstraps normally when the old directory holds no CA", func() {
-			r := runFirstBootScript(sslDir, binDir, "ca.example.com", withLegacy())
-			Expect(r.ok).To(BeTrue(), "provisioning failed: %s", r.output)
-			Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).To(BeAnExistingFile())
-		})
 	})
 
 	// The co-existence case the shared `puppet` account exists for: a host
@@ -8084,4 +8011,101 @@ var _ = Describe("verifyTagWorkflowsCold", func() {
 			Expect(sources).To(HaveKey("b.yaml"))
 		})
 	})
+})
+
+// The packaged service finds its configuration only because four things name
+// the same file: the server's built-in default (cmd/openvox-ca's
+// defaultConfigFile, used by every subcommand that resolves a config), the
+// path the packages install config.yaml to, and the default first-boot and
+// postinstall fall back to. The unit passes no --config, so a disagreement
+// leaves the service starting on built-in defaults, or provisioning checking a
+// file nothing reads -- with every other suite green, because each of the four
+// is otherwise pinned only by a literal of its own.
+//
+// Read as text rather than run, so nothing here touches the host's real /etc.
+var _ = Describe("the packaged configuration path", func() {
+	var want string
+
+	BeforeEach(func() {
+		src, err := os.ReadFile(filepath.Join("cmd", "openvox-ca", "config.go"))
+		Expect(err).NotTo(HaveOccurred())
+		m := regexp.MustCompile(`(?m)^const defaultConfigFile = "([^"]+)"$`).FindAllStringSubmatch(string(src), -1)
+		Expect(m).To(HaveLen(1), "cmd/openvox-ca/config.go must declare defaultConfigFile exactly once")
+		want = m[0][1]
+		Expect(want).To(HavePrefix("/"), "defaultConfigFile is not an absolute path")
+	})
+
+	// A floor as well as an equality: a new subcommand that spelt the path out
+	// again would agree today and drift tomorrow, unseen by the checks below.
+	It("is spelt out once in the server's source, as defaultConfigFile", func() {
+		files, err := filepath.Glob(filepath.Join("cmd", "openvox-ca", "*.go"))
+		Expect(err).NotTo(HaveOccurred())
+		literal := strconv.Quote(want)
+		count := 0
+		for _, f := range files {
+			if strings.HasSuffix(f, "_test.go") {
+				continue
+			}
+			src, err := os.ReadFile(f)
+			Expect(err).NotTo(HaveOccurred())
+			count += strings.Count(string(src), literal)
+		}
+		Expect(count).To(Equal(1), "%s appears %d times in cmd/openvox-ca; every other use should name defaultConfigFile", literal, count)
+	})
+
+	// The same floor for the variable that overrides it. Specs pin and clear
+	// the variable through configEnvVar; a subcommand that spelt the name out
+	// again would survive a rename of it with every such pin left guarding a
+	// name the server no longer reads.
+	It("names its environment variable once in the server's source, as configEnvVar", func() {
+		src, err := os.ReadFile(filepath.Join("cmd", "openvox-ca", "config.go"))
+		Expect(err).NotTo(HaveOccurred())
+		m := regexp.MustCompile(`(?m)^const configEnvVar = ("[A-Z0-9_]+")$`).FindAllStringSubmatch(string(src), -1)
+		Expect(m).To(HaveLen(1), "cmd/openvox-ca/config.go must declare configEnvVar exactly once")
+		literal := m[0][1]
+		files, err := filepath.Glob(filepath.Join("cmd", "openvox-ca", "*.go"))
+		Expect(err).NotTo(HaveOccurred())
+		count := 0
+		for _, f := range files {
+			if strings.HasSuffix(f, "_test.go") {
+				continue
+			}
+			src, err := os.ReadFile(f)
+			Expect(err).NotTo(HaveOccurred())
+			count += strings.Count(string(src), literal)
+		}
+		Expect(count).To(Equal(1), "%s appears %d times in cmd/openvox-ca; every other use should name configEnvVar", literal, count)
+	})
+
+	It("is where the packages install config.yaml", func() {
+		src, err := os.ReadFile(filepath.Join("packaging", "nfpm.yaml"))
+		Expect(err).NotTo(HaveOccurred())
+		var pkg struct {
+			Contents []struct {
+				Src  string `yaml:"src"`
+				Dst  string `yaml:"dst"`
+				Type string `yaml:"type"`
+			} `yaml:"contents"`
+		}
+		Expect(yaml.Unmarshal(src, &pkg)).To(Succeed())
+		var dsts []string
+		for _, c := range pkg.Contents {
+			if c.Src == "packaging/config/config.yaml" {
+				dsts = append(dsts, c.Dst)
+			}
+		}
+		Expect(dsts).To(Equal([]string{want}), "packaging/nfpm.yaml must install packaging/config/config.yaml once, at %s", want)
+	})
+
+	DescribeTable("is the default the maintainer scripts fall back to",
+		func(script string) {
+			src, err := os.ReadFile(filepath.Join("packaging", "scripts", script))
+			Expect(err).NotTo(HaveOccurred())
+			m := regexp.MustCompile(`(?m)^CONFIG="[^"\n]*:-(/[^}"\n]+)\}+"$`).FindAllStringSubmatch(string(src), -1)
+			Expect(m).To(HaveLen(1), "%s must set CONFIG from the environment with a default exactly once", script)
+			Expect(m[0][1]).To(Equal(want), "%s falls back to a different configuration file from the server", script)
+		},
+		Entry("first-boot", "first-boot"),
+		Entry("postinstall", "postinstall"),
+	)
 })

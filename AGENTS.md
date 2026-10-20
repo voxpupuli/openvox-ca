@@ -422,13 +422,14 @@ that does not hold.
 ## Compatibility contracts (do not rename)
 
 openvox-ca is a drop-in for the OpenVox/Puppet Server CA. The following
-identifiers are deliberately preserved for backward compatibility and **must
-not** be rebranded:
+identifiers are contracts and **must not** be rebranded. Some are preserved for
+compatibility with OpenVox/Puppet Server; the rest are this project's own
+published names, which existing deployments are bound to just as firmly:
 
 - HTTP route prefix `/puppet-ca/v1`
 - Environment-variable prefix `PUPPET_CA_` (and `PUPPET_CA_CTL_` for the CLI)
 - Prometheus metric namespace `puppetca_`
-- Storage key prefixes and the config-file location (`puppet-ca`, `/etc/puppet-ca`)
+- Storage key prefixes and the config-file location (`puppet-ca`, `/etc/openvox-ca`)
 
 ## Helm chart
 
@@ -441,7 +442,7 @@ rewrites them together — so never hand-edit one of the version lines on its
 own, and never assume a chart version is `-dev` just because it has a hyphen.
 
 The chart deliberately does **not** enumerate the server's settings as values.
-`config` is written verbatim to `/etc/puppet-ca/config.yaml`, and the
+`config` is written verbatim to `/etc/openvox-ca/config.yaml`, and the
 convenience blocks (`tls`, `ca`, `metrics`, `kubernetesExport`, …) do the
 Kubernetes wiring *and* set the config keys pointing at it, deep-merged with
 `config` winning. Adding a server setting to `docs/configuration.md` therefore

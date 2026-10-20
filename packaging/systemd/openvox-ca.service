@@ -36,7 +36,7 @@ NotifyAccess=all
 # "systemctl reload" wait for the new configuration to be in effect.
 ExecReload=/bin/kill -HUP $MAINPID
 
-# No --config: the binary already auto-detects /etc/puppet-ca/config.yaml when
+# No --config: the binary already auto-detects /etc/openvox-ca/config.yaml when
 # it exists, and pinning the path here would make PUPPET_CA_CONFIG inert and
 # turn an env-only deployment (no YAML on disk) into a start failure.
 ExecStart=@BINDIR@/openvox-ca
@@ -200,7 +200,7 @@ SystemCallErrorNumber=EPERM
 # operator configures instead is unprivileged too or the service could not bind
 # it. So the service needs no capabilities at all. (The number itself is
 # deliberately not repeated here: it is set in one place, the packaged
-# /etc/puppet-ca/config.yaml, and a unit shared with the release tarballs is
+# /etc/openvox-ca/config.yaml, and a unit shared with the release tarballs is
 # not that place.)
 CapabilityBoundingSet=
 AmbientCapabilities=
