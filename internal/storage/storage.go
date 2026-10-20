@@ -1935,7 +1935,8 @@ func (s *StorageService) updateInventoryHMACLocked(ctx context.Context, hmacKey 
 }
 
 // VerifyInventoryHMAC checks the inventory against its stored HMAC. Returns
-// ErrInventoryTampered on mismatch, or initialises a baseline HMAC on first run.
+// ErrInventoryTampered on mismatch, or establishes a baseline HMAC when none is
+// stored (see baselineInventoryHMACLocked for how loudly).
 func (s *StorageService) VerifyInventoryHMAC(ctx context.Context, hmacKey []byte) error {
 	s.inventoryMu.Lock()
 	defer s.inventoryMu.Unlock()
@@ -1946,8 +1947,7 @@ func (s *StorageService) verifyInventoryHMACLocked(ctx context.Context, hmacKey 
 	storedMAC, err := s.backend.Get(ctx, KeyInventoryHMAC)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			slog.Info("No inventory HMAC found; initializing integrity baseline")
-			return s.updateInventoryHMACLocked(ctx, hmacKey)
+			return s.baselineInventoryHMACLocked(ctx, hmacKey)
 		}
 		return fmt.Errorf("reading inventory HMAC: %w", err)
 	}
@@ -1970,6 +1970,66 @@ func (s *StorageService) verifyInventoryHMACLocked(ctx context.Context, hmacKey 
 		return ErrInventoryTampered
 	}
 	return nil
+}
+
+// baselineInventoryHMACLocked writes an integrity value over the inventory as
+// it stands, for a store that has none, and says how unusual that is.
+//
+// Absence is indistinguishable from a first run by the value alone, and
+// deleting it is the cheapest bypass the control has (see the threat model in
+// docs/development/inventory-store.md), so the rest of the store decides. Only
+// a first bootstrap is routine: an empty inventory and no CRL. CA.Init verifies
+// before it bootstraps or seeds a CA, and both of those write the CRL, so on
+// every later start a CRL is stored — including a CA that has signed nothing,
+// whose inventory stays empty because the CA's own certificate is never
+// recorded in it. Any other missing value logs at Warn: either it was removed,
+// or this store was produced by something that never wrote one (a cadir
+// adopted from OpenVox Server, one written by openvox-ca-ctl import, a
+// migration from such a store, or the one start after an etcd or Redis legacy
+// inventory is decomposed), and the new value vouches for an inventory nothing
+// verified.
+//
+// The state is read from the store rather than passed in, because the store is
+// what an attacker who deletes the value has also to leave looking new.
+// Caller must hold inventoryMu.
+func (s *StorageService) baselineInventoryHMACLocked(ctx context.Context, hmacKey []byte) error {
+	// One read serves both the decision and the value, as in
+	// InventoryIntegrityReport.
+	var (
+		entries []InventoryEntry
+		blob    []byte
+	)
+	store, chained := asInventoryStore(s.backend)
+	if chained {
+		got, err := store.Entries(ctx)
+		if err != nil {
+			return fmt.Errorf("computing inventory HMAC: %w", err)
+		}
+		entries = got
+	} else {
+		data, err := s.readInventoryForHMAC(ctx)
+		if err != nil {
+			return fmt.Errorf("computing inventory HMAC: %w", err)
+		}
+		blob = data
+	}
+	hasCRL, err := s.backend.Exists(ctx, KeyCRL)
+	if err != nil {
+		return fmt.Errorf("checking for a CRL before establishing the inventory baseline: %w", err)
+	}
+
+	if len(entries) == 0 && len(blob) == 0 && !hasCRL {
+		slog.Info("No inventory HMAC found; initializing integrity baseline")
+	} else {
+		slog.Warn("No inventory HMAC found on an established CA; establishing a new baseline over "+
+			"the inventory as it stands, without verifying it",
+			"scheme", s.inventoryScheme(), "inventory_empty", len(entries) == 0 && len(blob) == 0,
+			"crl_present", hasCRL,
+			"expected_once_after", "adopting a cadir from OpenVox Server, importing a CA with openvox-ca-ctl "+
+				"import, migrating from a store with no integrity value, or decomposing a legacy etcd/Redis "+
+				"inventory; otherwise the value was removed and the inventory may have been altered")
+	}
+	return s.backend.Put(ctx, KeyInventoryHMAC, foldInventoryHead(hmacKey, entries, blob, chained), BlobPrivate)
 }
 
 // RebuildConfirmFlag is the flag name the offline rebuild requires before it

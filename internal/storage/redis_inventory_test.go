@@ -1060,7 +1060,7 @@ var _ = Describe("RedisLegacyInventoryDecompose", func() {
 	// this replica's read of the legacy head and its delete. Were the guard an
 	// unconditional DEL, that live chained head would be dropped, and the next
 	// verification would find nothing, log "No inventory HMAC found" and
-	// silently adopt whatever it saw. That is the same laundering the two
+	// adopt whatever it saw, with only a warning to show for it. That is the same laundering the two
 	// specs above exist to prevent, in the concurrent case.
 	It("refuses to drop a head that changed since it was read", func() {
 		ctx := context.Background()
