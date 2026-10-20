@@ -25,6 +25,8 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // ErrDistributedLockingUnsupported signals that a backend advertising the
@@ -89,19 +91,64 @@ func CSRKey(subject string) string { return csrPrefix + subject }
 // CertKey returns the logical key addressing subject's signed certificate.
 func CertKey(subject string) string { return certPrefix + subject }
 
-// validateKey is the shared defense-in-depth guard every backend runs on a
+// validateKey is the shared defence-in-depth guard every backend runs on a
 // logical key before translating it to a physical key/path. Per-subject keys
 // are built from a subject that ca.ValidateSubject has already vetted, so in
 // normal operation an unsafe key is impossible; this is the storage layer's
 // own boundary check against a caller that constructs a key by another route,
-// keeping the four backends from each duplicating the same "..", empty-key
-// logic. It rejects an empty key and any key containing ".." (path traversal).
+// keeping the four backends from each duplicating the same logic. It rejects an
+// empty key, and any key whose name -- the subject of a "csr/" or "cert/" key,
+// or the whole of any other -- fails validateKeyName.
 func validateKey(key string) error {
 	if key == "" {
 		return fmt.Errorf("empty key")
 	}
-	if strings.Contains(key, "..") {
-		return fmt.Errorf("invalid key %q: contains '..'", key)
+	name := key
+	for _, prefix := range []string{csrPrefix, certPrefix} {
+		if rest, ok := strings.CutPrefix(key, prefix); ok {
+			name = rest
+			break
+		}
+	}
+	if err := validateKeyName(name); err != nil {
+		return fmt.Errorf("invalid key %q: %w", key, err)
+	}
+	return nil
+}
+
+// validateKeyName checks one name that a backend turns into a single path or
+// key component: a subject, or a singleton key. It rejects an empty name, ".."
+// (path traversal), "/" (on the filesystem backend it would create a
+// subdirectory, and on etcd it nests the key where List does not look), and any
+// control character, which has no business in a file name or a log line.
+//
+// A name that is not valid UTF-8 is refused too, before the control-character
+// check rather than by it: ranging over a raw byte such as 0x9B (the 8-bit CSI)
+// yields U+FFFD, which unicode.IsControl does not flag, so the rune loop alone
+// would let a single-byte C1 control through. Upstream certnames are printable
+// ASCII, so no legitimate name is affected.
+//
+// Whitespace is deliberately allowed. Upstream Puppet permits a space in a
+// certname, so an OpenVox Server cadir can hold one, and refusing it here would
+// make that entry unreadable and stop a migration at it. openvox-ca's own entry
+// points refuse spaces already, through ca.ValidateSubject.
+func validateKeyName(name string) error {
+	if name == "" {
+		return errors.New("empty name")
+	}
+	if strings.Contains(name, "..") {
+		return errors.New("contains '..'")
+	}
+	if strings.Contains(name, "/") {
+		return errors.New("contains '/'")
+	}
+	if !utf8.ValidString(name) {
+		return errors.New("not valid UTF-8")
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("contains control character %U", r)
+		}
 	}
 	return nil
 }
