@@ -162,7 +162,8 @@ openvox-ca-ctl reissue-crl
 # --out-dir is overwritten in place and narrowed to 0600. Anything else at that
 # path, a symbolic link included, is refused rather than written through, and so
 # is a --out-dir that is not an existing directory; both are checked before the
-# server is asked for a key.
+# server is asked for a key. The server refuses the certname "ca" with a 400,
+# and no key file is written (see docs/api.md, "Server-side key generation").
 openvox-ca-ctl generate --certname agent.example.com
 openvox-ca-ctl generate --certname agent.example.com --dns alt.example.com --out-dir /etc/ssl
 
@@ -497,6 +498,13 @@ running to evaluate one.
 certificate and no key, the command stops. A mistyped `--cadir` would otherwise
 mint a brand-new CA and issue under it, leaving you with certificates nothing in
 your fleet trusts and no obvious sign of why.
+
+**It refuses the certname `ca`**, with or without `--key-out`, before opening
+the storage. Without `--key-out` the key would go to `private/ca_key.pem`, which
+on the filesystem backend is where a cadir created by an earlier openvox-ca
+keeps the CA key itself. `POST /generate/ca` and a managed certificate named
+`ca` are refused too, so that the name means one thing on every path that
+generates a key. Submitting a CSR for `ca` is still accepted.
 
 #### Where the private key goes
 
