@@ -97,6 +97,18 @@ var _ = Describe("the serve command with a self-provisioned serving certificate"
 		Expect(body).To(ContainSubstring("client certificate required"))
 	})
 
+	// The twin of "does not announce a drain when it fails to start" below,
+	// so that one cannot pass because the command never announces one at all.
+	It("announces a drain when it is stopped deliberately", func() {
+		_, rec, stop := startServeRecorded(serveConfig(caDir, servingDir, "127.0.0.1", freeLoopbackPort(), true))
+		stop()
+		Eventually(rec.msgs).Should(Receive(SatisfyAll(
+			HavePrefix("STOPPING=1"),
+			ContainSubstring("Shutting down: draining connections"),
+		)), "a deliberate stop must tell the service manager it is draining, "+
+			"or systemd may take the teardown for a crash")
+	})
+
 	Context("on an address that is not loopback", func() {
 		// 192.0.2.1 is TEST-NET-1 (RFC 5737): never assigned to a host, so the
 		// bind fails with EADDRNOTAVAIL and nothing here listens on a real
@@ -133,6 +145,25 @@ var _ = Describe("the serve command with a self-provisioned serving certificate"
 				"precondition: the command must have started its jobs, which it does before binding")
 			Expect(serveCommandGoroutines()).To(BeEmpty(),
 				"the serve command returned while goroutines it started were still running")
+		})
+
+		// A failed start stops the command's goroutines, the shutdown goroutine
+		// among them, but it is not a deliberate teardown. Announcing a drain
+		// there makes "Shutting down" the last status systemd shows, in place
+		// of the failure.
+		It("does not announce a drain when it fails to start", func() {
+			rec, err := runServeRecorded(serveConfig(caDir, servingDir, unassigned, 8140, true))
+			Expect(err).To(MatchError(ContainSubstring("failed to listen on "+unassigned)),
+				"precondition: the command must fail at the bind, after its shutdown goroutine exists")
+
+			var msgs []string
+			Consistently(func() []string {
+				msgs = append(msgs, drainNotifications(rec)...)
+				return msgs
+			}, "250ms").ShouldNot(ContainElement(HavePrefix("STOPPING=1")),
+				"a failed start told the service manager it was draining connections")
+			Expect(msgs).To(ContainElement(ContainSubstring("Starting the HTTP server")),
+				"precondition: the recorder must have heard the command, or the absence above proves nothing")
 		})
 	})
 })
@@ -174,6 +205,15 @@ puppet_server: admin.example.com
 // own error instead of a connection refusal.
 func startServe(configPath string) string {
 	GinkgoHelper()
+	addr, _, _ := startServeRecorded(configPath)
+	return addr
+}
+
+// startServeRecorded is startServe, also returning the recorder the command's
+// notifications reach and a function that stops the command as a signal would,
+// by cancelling its context, and waits for it to return.
+func startServeRecorded(configPath string) (string, *notifyRecorder, func()) {
+	GinkgoHelper()
 	rec := startNotifyRecorder(nil)
 
 	addr, err := readConfigAddr(configPath)
@@ -189,21 +229,23 @@ func startServe(configPath string) string {
 	go func() { done <- cmd.ExecuteContext(ctx) }()
 
 	exited := false
-	DeferCleanup(func() {
+	stop := func() {
 		cancel()
 		if exited {
 			return
 		}
+		exited = true
 		Eventually(done, "60s").Should(Receive(),
 			"the serve command did not stop when its context was cancelled")
-	})
+	}
+	DeferCleanup(stop)
 
 	deadline := time.After(60 * time.Second)
 	for {
 		select {
 		case msg, ok := <-rec.msgs:
 			if ok && strings.Contains(msg, "READY=1") {
-				return addr
+				return addr, rec, stop
 			}
 		case err := <-done:
 			exited = true
@@ -220,9 +262,18 @@ func startServe(configPath string) string {
 // rather than the spec hanging until the binary's own timeout.
 func runServeBounded(configPath string) error {
 	GinkgoHelper()
-	// Not used for its messages, but it pins NOTIFY_SOCKET to a socket this
-	// spec owns, so nothing reaches a real service manager.
-	startNotifyRecorder(nil)
+	// The recorder is not used for its messages here, but it pins
+	// NOTIFY_SOCKET to a socket this spec owns, so nothing reaches a real
+	// service manager.
+	_, err := runServeRecorded(configPath)
+	return err
+}
+
+// runServeRecorded is runServeBounded, also returning the recorder the
+// command's notifications reached.
+func runServeRecorded(configPath string) (*notifyRecorder, error) {
+	GinkgoHelper()
+	rec := startNotifyRecorder(nil)
 
 	cmd := newRootCmd()
 	cmd.SetOut(GinkgoWriter)
@@ -231,7 +282,24 @@ func runServeBounded(configPath string) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	return cmd.ExecuteContext(ctx)
+	return rec, cmd.ExecuteContext(ctx)
+}
+
+// drainNotifications returns every notification rec holds now, without
+// waiting for more.
+func drainNotifications(rec *notifyRecorder) []string {
+	var msgs []string
+	for {
+		select {
+		case msg, ok := <-rec.msgs:
+			if !ok {
+				return msgs
+			}
+			msgs = append(msgs, msg)
+		default:
+			return msgs
+		}
+	}
 }
 
 // serveCommandGoroutines returns the stack of every goroutine the serve

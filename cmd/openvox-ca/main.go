@@ -1474,14 +1474,20 @@ func newRootCmd() *cobra.Command {
 			// well as a signal does, and serveGoroutines.Stop does not wait for
 			// ever on the metrics exporter.
 			shutdownDone := make(chan struct{})
-			serveGoroutines.Go(func(ctx context.Context) {
-				<-ctx.Done()
+			serveGoroutines.Go(func(groupCtx context.Context) {
+				<-groupCtx.Done()
 				drain := cfg.shutdownDrain()
-				slog.Info("Shutting down")
 				// Tell the service manager this is a deliberate teardown, not
 				// a crash, and how long it may take — so it waits for the
-				// drain instead of killing connections mid-flight.
-				notifier.Stopping(fmt.Sprintf("Shutting down: draining connections (up to %s)", drain))
+				// drain instead of killing connections mid-flight. Only when
+				// it is one: the command's own context is cancelled by a
+				// signal, and is still live when an error return stops the
+				// group. Announcing a drain there would make "Shutting down"
+				// the last status systemd shows, in place of the failure.
+				if ctx.Err() != nil {
+					slog.Info("Shutting down")
+					notifier.Stopping(fmt.Sprintf("Shutting down: draining connections (up to %s)", drain))
+				}
 				shutdownCtx, cancel := context.WithTimeout(context.Background(), drain)
 				defer cancel()
 				if metricsServer != nil {
