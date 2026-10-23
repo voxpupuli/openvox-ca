@@ -2484,7 +2484,7 @@ those installs should set `GOMEMLIMIT` in the ordinary per-process way.
 
 ## Graceful shutdown
 
-On `SIGTERM` or `SIGINT`, the frontend HTTP server calls `http.Server.Shutdown()` with a drain context (wired via `signal.NotifyContext`) so in-flight requests (signing, CRL, OCSP) drain cleanly before the process exits. The request context is cancelled on signal, and the command returns normally rather than calling `os.Exit` on its error paths, so deferred storage and signer cleanup always runs after all connections are done.
+On `SIGTERM` or `SIGINT`, the frontend HTTP server calls `http.Server.Shutdown()` with a drain context (wired via `signal.NotifyContext`) so in-flight requests (signing, CRL, OCSP) drain cleanly before the process exits. The request context is cancelled on signal, and the command returns normally rather than calling `os.Exit` on its error paths, so deferred storage and signer cleanup always runs. Before it does, the command stops its background jobs (CRL refresh and sync, the managed-certificate reconcile, the superseded-certificate sweep, the Kubernetes export and the rest) and waits for each to finish, so none of them is still writing to the store when it closes. Connections get the drain budget below: a request still running when it runs out is not waited for.
 
 The drain budget defaults to **25 seconds** and is configurable via `shutdown_timeout_sec` (config file) or `PUPPET_CA_SHUTDOWN_TIMEOUT_SEC` (environment); a non-positive value falls back to the default.
 

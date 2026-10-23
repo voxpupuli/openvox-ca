@@ -1339,9 +1339,11 @@ func newRootCmd() *cobra.Command {
 			// serveGoroutines, and returning by any path stops it: cancels its
 			// context and waits for each goroutine to finish. Deferred here, after
 			// the instance lock, the runtime and the remote signer have deferred
-			// their own teardown, so it runs before any of them. Nothing this
-			// command started can still be writing to the store once the lock
-			// that makes it the only writer has been released (#546).
+			// their own teardown, so it runs before any of them. None of these
+			// goroutines can still be writing to the store once the lock that
+			// makes this process the only writer has been released (#546).
+			// HTTP handlers are not among them: one still running when
+			// server.Shutdown's drain budget runs out is not waited for.
 			serveGoroutines := newGoroutineGroup(ctx)
 			defer serveGoroutines.Stop()
 
