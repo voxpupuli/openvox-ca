@@ -234,10 +234,11 @@ func runServeBounded(configPath string) error {
 	return cmd.ExecuteContext(ctx)
 }
 
-// serveCommandGoroutines returns the stack of every goroutine running code from
-// the serve command's RunE: its closures appear in the stack as
-// main.newRootCmd.func…, whether they are the goroutine's own frames or the
-// function that created it.
+// serveCommandGoroutines returns the stack of every goroutine the serve
+// command's RunE started. Before #546 those were created by RunE itself, a
+// closure named newRootCmd.func…; now they are created by goroutineGroup.Go.
+// Either name in a stack, as a frame or as its creator, counts. The package is
+// named by its import path in a test binary, not as "main".
 func serveCommandGoroutines() []string {
 	buf := make([]byte, 1<<20)
 	for {
@@ -248,9 +249,11 @@ func serveCommandGoroutines() []string {
 		}
 		buf = make([]byte, 2*len(buf))
 	}
+	const pkg = "github.com/voxpupuli/openvox-ca/cmd/openvox-ca."
 	var found []string
 	for _, stack := range strings.Split(string(buf), "\n\n") {
-		if strings.Contains(stack, "main.newRootCmd.") {
+		if strings.Contains(stack, pkg+"newRootCmd.") ||
+			strings.Contains(stack, pkg+"(*goroutineGroup).") {
 			found = append(found, stack)
 		}
 	}
