@@ -30,6 +30,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -138,9 +139,12 @@ var _ = Describe("the serve command with a self-provisioned serving certificate"
 		// cleanup removed it, which failed "does not refuse to start for want
 		// of TLS" in 3 or 4 runs in 150 under load. Checked by stack rather
 		// than by the cleanup, so that a regression fails on an unloaded
-		// machine too.
+		// machine too. The metrics exporter is enabled because it is the one
+		// goroutine that does not watch the group's context: it stops only when
+		// the shutdown goroutine shuts it down, and if that ever stops happening
+		// the command does not return at all, which runServeRecorded reports.
 		It("leaves nothing it started running once it has returned", func() {
-			err := runServeBounded(serveConfig(caDir, servingDir, unassigned, 8140, true))
+			err := runServeBounded(withMetricsListen(serveConfig(caDir, servingDir, unassigned, 8140, true)))
 			Expect(err).To(MatchError(ContainSubstring("failed to listen on "+unassigned)),
 				"precondition: the command must have started its jobs, which it does before binding")
 			Expect(serveCommandGoroutines()).To(BeEmpty(),
@@ -282,7 +286,32 @@ func runServeRecorded(configPath string) (*notifyRecorder, error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	return rec, cmd.ExecuteContext(ctx)
+	done := make(chan error, 1)
+	go func() { done <- cmd.ExecuteContext(ctx) }()
+
+	// The context bounds a command that serves when the spec expected it to
+	// fail. This bounds one that cannot return at all, which no context
+	// reaches: teardown waiting on a goroutine that never stops.
+	select {
+	case err := <-done:
+		return rec, err
+	case <-time.After(90 * time.Second):
+		Fail("the serve command did not return within 90s: its teardown is waiting " +
+			"on a goroutine that never stops")
+		return rec, nil
+	}
+}
+
+// withMetricsListen adds a metrics_listen on a free loopback port to a config
+// file serveConfig wrote, so that the command starts its metrics exporter.
+func withMetricsListen(configPath string) string {
+	GinkgoHelper()
+	f, err := os.OpenFile(configPath, os.O_APPEND|os.O_WRONLY, 0)
+	Expect(err).NotTo(HaveOccurred())
+	_, err = fmt.Fprintf(f, "metrics_listen: 127.0.0.1:%d\n", freeLoopbackPort())
+	Expect(err).NotTo(HaveOccurred())
+	Expect(f.Close()).To(Succeed())
+	return configPath
 }
 
 // drainNotifications returns every notification rec holds now, without
