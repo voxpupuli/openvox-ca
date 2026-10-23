@@ -22,6 +22,8 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -93,14 +95,18 @@ var _ = Describe("goroutineGroup", func() {
 	})
 })
 
-// The serve command's RunE, held to the group by its shape.
+// The serve command's goroutines, held to the group by the shape of the code.
 //
 // servingcert_serve_test.go checks the behaviour: after the command returns,
 // nothing it started is still running. That spec runs the bind-failure path
 // only, and an early return between the group's creation and the bind --
 // a TLS keypair that will not load, say -- is a different path. These pin
-// the two properties every path depends on, so a new goroutine cannot be added
-// to RunE outside the group without failing here.
+// what every path depends on: no go statement in this package's code outside
+// the places accounted for below, the group stopped before any other teardown,
+// and the metrics exporter started only once something will stop it.
+//
+// The go-statement check covers this package only. A helper in another package
+// that RunE calls, and that starts a goroutine of its own, is beyond it.
 var _ = Describe("the serve command's goroutines", func() {
 	var runE *ast.FuncLit
 
@@ -129,18 +135,53 @@ var _ = Describe("the serve command's goroutines", func() {
 		Expect(runE).NotTo(BeNil(), "precondition: no RunE function literal in newRootCmd")
 	})
 
-	It("starts no goroutine with a bare go statement", func() {
-		var bare []string
-		ast.Inspect(runE, func(n ast.Node) bool {
-			if g, ok := n.(*ast.GoStmt); ok {
-				bare = append(bare, exprName(g.Call.Fun))
+	It("starts no goroutine with a bare go statement outside the files accounted for", func() {
+		// The whole package rather than RunE alone, because a helper RunE
+		// calls is where one hides: startK8sExport started its job with a
+		// bare go until #546. Each entry says how its goroutines are joined
+		// instead, which is the claim a reviewer has to check.
+		accounted := map[string]string{
+			"goroutine_group.go": "the group itself: Go is where every serve goroutine starts",
+			"launcher.go": "the launcher's child-exit watchers, joined through the supervisor's " +
+				"exit channel; the launcher never opens the store",
+		}
+
+		entries, err := os.ReadDir(".")
+		Expect(err).NotTo(HaveOccurred())
+		found := map[string][]string{}
+		parsed := 0
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
 			}
-			return true
-		})
-		Expect(bare).To(BeEmpty(),
-			"RunE starts a goroutine outside serveGoroutines, so nothing waits for it "+
-				"and it can still be running after the store's teardown (#546). "+
-				"Start it with serveGoroutines.Go instead")
+			fset := token.NewFileSet()
+			file, err := parser.ParseFile(fset, name, nil, 0)
+			Expect(err).NotTo(HaveOccurred())
+			parsed++
+			ast.Inspect(file, func(n ast.Node) bool {
+				if g, ok := n.(*ast.GoStmt); ok {
+					found[name] = append(found[name], fset.Position(g.Pos()).String())
+				}
+				return true
+			})
+		}
+		Expect(parsed).To(BeNumerically(">", 10),
+			"precondition: the package's source files were not found to parse")
+
+		for name, at := range found {
+			_, ok := accounted[name]
+			Expect(ok).To(BeTrue(),
+				"%s starts a goroutine with a bare go statement (%s), so nothing waits for "+
+					"it and it can still be running after the store's teardown (#546). Start "+
+					"it with the group's Go, or account for it here with how it is joined",
+				name, strings.Join(at, ", "))
+		}
+		for name := range accounted {
+			Expect(found).To(HaveKey(name),
+				"%s is accounted for but starts no goroutine; remove the entry so it "+
+					"cannot excuse one added later", name)
+		}
 	})
 
 	It("defers stopping the group after every other teardown it defers", func() {
@@ -166,6 +207,48 @@ var _ = Describe("the serve command's goroutines", func() {
 		Expect(ok && sel.Sel.Name == "Stop" && exprName(sel.X) == "serveGoroutines").To(BeTrue(),
 			"RunE's last defer is not serveGoroutines.Stop(), so some teardown it "+
 				"defers runs while the command's goroutines may still be using it")
+	})
+
+	It("starts the metrics exporter only once the goroutine that stops it exists", func() {
+		// The exporter's ListenAndServe does not watch the group's context; it
+		// returns when the shutdown goroutine calls Shutdown. Started before
+		// that goroutine exists, an early return in between -- an invalid
+		// kubernetes_export block, say -- would leave Stop waiting on it for
+		// ever.
+		var shutdownAt, metricsAt token.Pos
+		ast.Inspect(runE.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok || exprName(call.Fun) != "serveGoroutines.Go" || len(call.Args) != 1 {
+				return true
+			}
+			lit, ok := call.Args[0].(*ast.FuncLit)
+			if !ok {
+				return true
+			}
+			ast.Inspect(lit.Body, func(m ast.Node) bool {
+				inner, ok := m.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				switch exprName(inner.Fun) {
+				case "close":
+					if len(inner.Args) == 1 && exprName(inner.Args[0]) == "shutdownDone" {
+						shutdownAt = call.Pos()
+					}
+				case "metricsServer.ListenAndServe":
+					metricsAt = call.Pos()
+				}
+				return true
+			})
+			return true
+		})
+		Expect(shutdownAt).NotTo(BeZero(),
+			"precondition: no serveGoroutines.Go call in RunE closes shutdownDone")
+		Expect(metricsAt).NotTo(BeZero(),
+			"precondition: no serveGoroutines.Go call in RunE runs metricsServer.ListenAndServe")
+		Expect(metricsAt > shutdownAt).To(BeTrue(),
+			"RunE starts the metrics exporter before the shutdown goroutine that stops it, "+
+				"so an early return in between leaves serveGoroutines.Stop waiting for ever")
 	})
 })
 
