@@ -1132,6 +1132,9 @@ var _ = Describe("ValidateSubject", func() {
 		Entry("contains slash", "bad/name"),
 		Entry("contains double-dot", "a..b"),
 		Entry("double-dot only", ".."),
+		// A lone dot is the path segment net/http cleans away, so a certificate
+		// issued for it could not be revoked or cleaned by name (#489).
+		Entry("lone dot", "."),
 		Entry("uppercase letters", "BadNode"),
 		Entry("contains space", "bad name"),
 		Entry("empty string", ""),

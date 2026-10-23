@@ -350,6 +350,12 @@ var subjectRegex = regexp.MustCompile(`^[a-z0-9_.][a-z0-9._-]*$`)
 // compatibility tradeoff against strict RFC 1123 hostnames.
 // NIST 800-53: SI-10 (Information Input Validation)
 func ValidateSubject(subject string) error {
+	// A lone dot passes the character check and contains no "..", but it is the
+	// path segment net/http cleans away: a certificate issued for "." cannot be
+	// reached through any {subject} route, so it could never be revoked by name.
+	if subject == "." {
+		return fmt.Errorf("invalid subject name %q: must not be the path segment \".\"", subject)
+	}
 	if !subjectRegex.MatchString(subject) || strings.Contains(subject, "..") {
 		return fmt.Errorf("invalid subject name %q: must match ^[a-z0-9_.][a-z0-9._-]*$ and must not contain path traversal", subject)
 	}
