@@ -290,10 +290,10 @@ var _ = Describe("startK8sExport", func() {
 		c, _ := newRefresherTestCA()
 		reg := prometheus.NewRegistry()
 
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
+		g := newGoroutineGroup(context.Background())
+		defer g.Stop()
 
-		startK8sExport(ctx, c, cfg, k8sexport.NewMetrics(reg),
+		startK8sExport(g, c, cfg, k8sexport.NewMetrics(reg),
 			func() (*k8sexport.Exporter, error) { return nil, errors.New("no service account token") })
 
 		for _, want := range []struct{ kind, ns, name string }{
@@ -319,14 +319,14 @@ var _ = Describe("startK8sExport", func() {
 		reg := prometheus.NewRegistry()
 		client := fake.NewClientset()
 
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
+		g := newGoroutineGroup(context.Background())
+		defer g.Stop()
 
 		// One Metrics for both: registering twice against the same registry
 		// panics, and the exporter must record against the very series
 		// startK8sExport would otherwise have published.
 		m := k8sexport.NewMetrics(reg)
-		startK8sExport(ctx, c, cfg, m,
+		startK8sExport(g, c, cfg, m,
 			func() (*k8sexport.Exporter, error) {
 				return k8sexport.New(client, cfg, store, "pod-ns", m), nil
 			})
@@ -334,8 +334,8 @@ var _ = Describe("startK8sExport", func() {
 		// The counter must reach one, not merely exist. New publishes this
 		// child at zero as it constructs the exporter, so asserting presence
 		// would be satisfied by this spec's own closure and would stay green
-		// with the `go runK8sExporter` line deleted -- the single piece of
-		// wiring this half of the spec exists to hold down.
+		// with the `g.Go` call that starts runK8sExporter deleted -- the
+		// single piece of wiring this half of the spec exists to hold down.
 		Eventually(func() float64 {
 			v, _ := metricValue(reg, "puppetca_k8s_export_applies_total", map[string]string{
 				"kind": "ConfigMap", "namespace": "pod-ns", "name": "bundle", "result": "success",

@@ -31,6 +31,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -116,6 +117,22 @@ var _ = Describe("the serve command with a self-provisioned serving certificate"
 			Expect(err).To(MatchError(ContainSubstring("refusing to start: plain HTTP")),
 				"precondition: without serving_cert this address must be refused, or "+
 					"the spec above could not tell the gate firing from it being absent")
+		})
+
+		// The command starts its background jobs -- the managed-certificate
+		// reconcile among them -- before it binds, so this path returns with
+		// them already running. Until #546 nothing waited for them: a reconcile
+		// pass could still be creating a lock file in cadir while the spec's
+		// cleanup removed it, which failed "does not refuse to start for want
+		// of TLS" in 3 or 4 runs in 150 under load. Checked by stack rather
+		// than by the cleanup, so that a regression fails on an unloaded
+		// machine too.
+		It("leaves nothing it started running once it has returned", func() {
+			err := runServeBounded(serveConfig(caDir, servingDir, unassigned, 8140, true))
+			Expect(err).To(MatchError(ContainSubstring("failed to listen on "+unassigned)),
+				"precondition: the command must have started its jobs, which it does before binding")
+			Expect(serveCommandGoroutines()).To(BeEmpty(),
+				"the serve command returned while goroutines it started were still running")
 		})
 	})
 })
@@ -215,6 +232,29 @@ func runServeBounded(configPath string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	return cmd.ExecuteContext(ctx)
+}
+
+// serveCommandGoroutines returns the stack of every goroutine running code from
+// the serve command's RunE: its closures appear in the stack as
+// main.newRootCmd.func…, whether they are the goroutine's own frames or the
+// function that created it.
+func serveCommandGoroutines() []string {
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	var found []string
+	for _, stack := range strings.Split(string(buf), "\n\n") {
+		if strings.Contains(stack, "main.newRootCmd.") {
+			found = append(found, stack)
+		}
+	}
+	return found
 }
 
 // readConfigAddr reads back the host and port a config file names, so
