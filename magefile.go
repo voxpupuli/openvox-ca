@@ -1240,12 +1240,15 @@ type pullRequestTrigger struct {
 // fix:
 //
 //   - v2.13.2 pins gosec v2.28.0;
-//   - v2.14.0 pins gosec v2.29.0, still maxCallerEdges = 32 with no sort.
+//   - v2.14.0 pins gosec v2.29.0, still maxCallerEdges = 32 with no sort;
+//   - v2.15.0 pins gosec v2.29.0 too. Its only gosec change is the worker
+//     count it passes (runtime.GOMAXPROCS(0) instead of runtime.NumCPU()),
+//     which leaves the taint engine alone.
 //
 // An entry stays after the pin has moved past it: the list records every
 // version that was vetted, not only the one CI installs today. See
 // openvox-ca#313.
-var nolintlintCarveOutPins = []string{"v2.13.2", "v2.14.0"}
+var nolintlintCarveOutPins = []string{"v2.13.2", "v2.14.0", "v2.15.0"}
 
 // nolintlintCarveOutFile is the file the carve-out covers. Exclusion `path`
 // values are regexps, so this is the literal path they are matched against
