@@ -58,7 +58,9 @@ const k8sExportRetryInterval = 2 * time.Minute
 // newExporter is a parameter so a spec can drive both branches. This lived
 // inside a cobra RunE before, which meant the one line closing that alerting
 // gap could be deleted without a single test noticing.
-func startK8sExport(ctx context.Context, c *ca.CA, cfg k8sexport.Config, m *k8sexport.Metrics,
+//
+// The job runs in g, so the serve command waits for it on the way out.
+func startK8sExport(g *goroutineGroup, c *ca.CA, cfg k8sexport.Config, m *k8sexport.Metrics,
 	newExporter func() (*k8sexport.Exporter, error),
 ) {
 	exporter, err := newExporter()
@@ -67,7 +69,9 @@ func startK8sExport(ctx context.Context, c *ca.CA, cfg k8sexport.Config, m *k8se
 		slog.Error("Kubernetes export disabled: failed to initialise client", "error", err)
 		return
 	}
-	go runK8sExporter(ctx, c, exporter, k8sExportRetryInterval)
+	g.Go(func(ctx context.Context) {
+		runK8sExporter(ctx, c, exporter, k8sExportRetryInterval)
+	})
 }
 
 // runK8sExporter publishes the CA certificate and CRL into the configured
