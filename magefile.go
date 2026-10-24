@@ -1972,105 +1972,6 @@ func verifyNodeTTLIn(script, signing []byte) error {
 	return nil
 }
 
-// ciGateJob is the fan-in job branch protection names, and ciGateExempt are
-// the jobs that must NOT be among its dependencies.
-//
-// The gate cannot depend on itself, and it must not depend on automerge: that
-// job runs `gh pr merge` after the gate goes green, so requiring it would be a
-// cycle in intent even where the graph allows it.
-const ciGateJob = "ci"
-
-var ciGateExempt = []string{"ci", "automerge"}
-
-// verifyCIGate checks that every job in ci.yml is a dependency of the fan-in
-// job, so that branch protection naming one check really does cover all of
-// them. verifyAggregateJobs checks the same for every required aggregate,
-// ci.yml's included; see its comment for how the two differ.
-//
-// Written because the omission is silent, and because it was made here: the
-// shellcheck job in .github/workflows/ci.yml went in without its `needs:` entry
-// first time.
-// That produces a workflow that runs the lint,
-// reports it red on the PR, and still reports "CI success" green -- and green
-// is the state the merge button reads. A required check that does not require
-// something is worse than not having it: the job is visibly running, so the
-// gap looks like coverage.
-//
-// The comment above the fan-in job already says it exists so "branch
-// protection only has to name one required check for this workflow, instead
-// of every matrix leg above". That sentence is only true while this holds, and
-// nothing was checking it.
-func verifyCIGate() error {
-	src, err := os.ReadFile(filepath.Join(".github", "workflows", "ci.yml"))
-	if err != nil {
-		return fmt.Errorf("reading ci.yml: %w", err)
-	}
-	return verifyCIGateIn(src)
-}
-
-func verifyCIGateIn(src []byte) error {
-	var doc struct {
-		Jobs map[string]struct {
-			Needs []string `yaml:"needs"`
-		} `yaml:"jobs"`
-	}
-	if err := yaml.Unmarshal(src, &doc); err != nil {
-		return fmt.Errorf("parsing ci.yml: %w", err)
-	}
-
-	gate, ok := doc.Jobs[ciGateJob]
-	if !ok {
-		return fmt.Errorf("ci.yml has no %q job, which is the fan-in check branch "+
-			"protection names; either it was renamed (update ciGateJob) or the gate is gone", ciGateJob)
-	}
-
-	// The floor. Every check below is a set operation over doc.Jobs, so a
-	// parse that yielded one job -- a restructured file, a `jobs:` key that
-	// moved -- would find nothing missing and report full coverage. Two is
-	// the smallest count that cannot be the gate alone.
-	if len(doc.Jobs) < 2 {
-		return fmt.Errorf("parsed %d jobs from ci.yml, which cannot be right: the comparison "+
-			"below is a set difference and would pass vacuously", len(doc.Jobs))
-	}
-
-	needed := map[string]bool{}
-	for _, n := range gate.Needs {
-		needed[n] = true
-	}
-
-	var missing []string
-	for name := range doc.Jobs {
-		if slices.Contains(ciGateExempt, name) || needed[name] {
-			continue
-		}
-		missing = append(missing, name)
-	}
-	slices.Sort(missing)
-	if len(missing) > 0 {
-		return fmt.Errorf("ci.yml job(s) %s are not in the %q job's needs:, so a failure in them "+
-			"leaves \"CI success\" green -- add them to needs:, or to ciGateExempt if "+
-			"they genuinely must not gate a merge",
-			strings.Join(missing, ", "), ciGateJob)
-	}
-
-	// And the other direction: a needs: entry naming a job that no longer
-	// exists. GitHub fails the run outright for this, so it is not silent --
-	// but it fails every CI run on the branch that introduces it, and saying
-	// so here costs one command instead of one round trip.
-	var unknown []string
-	for _, n := range gate.Needs {
-		if _, ok := doc.Jobs[n]; !ok {
-			unknown = append(unknown, n)
-		}
-	}
-	slices.Sort(unknown)
-	if len(unknown) > 0 {
-		return fmt.Errorf("the %q job needs: %s, which ci.yml does not define",
-			ciGateJob, strings.Join(unknown, ", "))
-	}
-	return nil
-}
-
 // verifyMageTargets asserts that every mage target named outside Go resolves
 // to a target that exists: the ones in requiredMageTargets, and every
 // statically resolvable `mage <target>` invocation in the workflows.
@@ -2805,10 +2706,16 @@ type aggregateStep struct {
 // anywhere that reuses a required name posts a check the ruleset matches.
 // Wired into dev:check.
 //
-// For ci.yml its needs rule overlaps verifyCIGate, which came separately and
-// differs in two ways: it lists its exemptions (ciGateExempt) where this
-// derives them from the job graph, and it also refuses a needs entry naming no
-// job. Both run, so a change to either rule should look at the other.
+// It absorbed verifyCIGate, which guarded ci.yml alone and was written after
+// the omission happened here: the shellcheck job went into ci.yml without its
+// `needs:` entry, so it ran, reported red, and left "CI success" green -- the
+// state the merge button reads. A required check that does not require
+// something is worse than not having it, because the job is visibly running
+// and the gap looks like coverage. Its exemptions were a hand list (the gate
+// and automerge); here they come from the job graph, so automerge is exempt
+// because it needs the gate. If automerge ever loses that edge, this asks for
+// it in the gate's needs, and the fix is to restore the edge: automerge runs
+// `gh pr merge` once the gate is green, so gating on it is a cycle in intent.
 func verifyAggregateJobs() error {
 	sources, err := readWorkflowSources(filepath.Join(".github", "workflows"))
 	if err != nil {
@@ -2832,8 +2739,9 @@ func verifyAggregateJobs() error {
 //     nothing stops that decision failing the job: see verifyAggregateDecision.
 //   - Its `needs` lists every other job in the workflow, except jobs that
 //     themselves depend on the aggregate (ci.yml's automerge). A job added
-//     later and left out would gate nothing. It includes every job its
-//     allowed skips name, and no needed job sets continue-on-error.
+//     later and left out would gate nothing. It names no job that does not
+//     exist, includes every job its allowed skips name, and no needed job
+//     sets continue-on-error.
 //   - No other job in any workflow carries its name. The ruleset matches a
 //     check by name alone, so a second job of that name -- a copied block
 //     downstream of the aggregate, say, which the needs rule exempts -- makes
@@ -2881,6 +2789,14 @@ func verifyAggregateJobsIn(sources map[string][]byte) error {
 		}
 		if len(needs) == 0 {
 			errs = append(errs, fmt.Errorf("%s needs no jobs, so it gates nothing", where))
+		}
+		// GitHub fails the run outright for this, so it is not silent; but
+		// it fails every run on the branch that introduces it, and saying so
+		// here costs one command instead of a round trip.
+		for _, id := range needs {
+			if _, ok := doc.Jobs[id]; !ok {
+				errs = append(errs, fmt.Errorf("%s needs job %q, which %s does not define", where, id, agg.workflow))
+			}
 		}
 		for _, id := range agg.allowedSkipJobs {
 			if !slices.Contains(needs, id) {
@@ -8741,10 +8657,6 @@ func (Dev) Check() error {
 	}
 	fmt.Println("Checking mage targets named outside Go...")
 	if err := verifyMageTargets(); err != nil {
-		return err
-	}
-	fmt.Println("Checking every CI job gates CI success...")
-	if err := verifyCIGate(); err != nil {
 		return err
 	}
 	fmt.Println("Checking shellcheck lints every maintainer script the packages ship...")

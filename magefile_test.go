@@ -2308,90 +2308,6 @@ jobs:
 	})
 })
 
-var _ = Describe("verifyCIGate", func() {
-	// Driven over content rather than only against .github/workflows/ci.yml,
-	// for the usual reason: a guard exercised only on a passing tree cannot
-	// tell working from vacuous.
-	full := []byte(`
-jobs:
-  check:
-    runs-on: ubuntu-latest
-  shellcheck:
-    runs-on: ubuntu-latest
-  ci:
-    needs:
-      - check
-      - shellcheck
-  automerge:
-    runs-on: ubuntu-latest
-`)
-
-	// The fixture's automerge job has no needs: edge from ci, so this is also
-	// the pin that automerge stays out. It runs after the gate is green, so
-	// gating on it would be a cycle in intent, and "every job" must never be
-	// simplified into including it.
-	It("accepts a gate that depends on every job but the exempt ones", func() {
-		Expect(verifyCIGateIn(full)).To(Succeed())
-	})
-
-	// The case this guard exists for, and one that has already happened: a new
-	// lint job that runs, reports red, and leaves the required check green.
-	It("rejects a job the gate does not depend on, naming it", func() {
-		bad := []byte(`
-jobs:
-  check:
-    runs-on: ubuntu-latest
-  shellcheck:
-    runs-on: ubuntu-latest
-  ci:
-    needs:
-      - check
-`)
-		Expect(verifyCIGateIn(bad)).To(MatchError(And(
-			ContainSubstring("shellcheck"),
-			ContainSubstring(`leaves "CI success" green`))))
-	})
-
-	It("rejects a needs: entry that names no job", func() {
-		bad := []byte(`
-jobs:
-  check:
-    runs-on: ubuntu-latest
-  other:
-    runs-on: ubuntu-latest
-  ci:
-    needs:
-      - check
-      - other
-      - departed
-`)
-		Expect(verifyCIGateIn(bad)).To(MatchError(ContainSubstring("departed")))
-	})
-
-	It("rejects a workflow with no gate job at all", func() {
-		bad := []byte("jobs:\n  check:\n    runs-on: ubuntu-latest\n  other:\n    runs-on: ubuntu-latest\n")
-		Expect(verifyCIGateIn(bad)).To(MatchError(ContainSubstring(`has no "ci" job`)))
-	})
-
-	// The floor. The check is a set difference over the parsed jobs, so a
-	// parse that returned just the gate would find nothing missing and report
-	// every job covered.
-	It("refuses a parse that yielded too few jobs to be ci.yml", func() {
-		Expect(verifyCIGateIn([]byte("jobs:\n  ci:\n    needs: []\n"))).To(
-			MatchError(ContainSubstring("would pass vacuously")))
-	})
-
-	It("refuses a workflow it cannot parse rather than reporting full coverage", func() {
-		Expect(verifyCIGateIn([]byte("jobs: not-a-mapping\n"))).To(
-			MatchError(ContainSubstring("parsing ci.yml:")))
-	})
-
-	// And the real file, which is what dev:check runs.
-	It("passes against the repository's own ci.yml", func() {
-		Expect(verifyCIGate()).To(Succeed())
-	})
-})
-
 var _ = Describe("sourceDateEpochWarning", func() {
 	// The build carries on with a malformed SOURCE_DATE_EPOCH, as nfpm does;
 	// what it must not do is carry on in silence, because the release job
@@ -2417,7 +2333,7 @@ var _ = Describe("sourceDateEpochWarning", func() {
 })
 
 var _ = Describe("verifyShellcheckCoverage", func() {
-	// Driven over content, both files, like verifyCIGate. The fixtures are
+	// Driven over content, both files, like verifyAggregateJobs. The fixtures are
 	// the smallest shapes the real files take: scriptlets at the top level and
 	// under overrides.rpm, and first-boot shipped as a content src.
 	ci := func(files ...string) []byte {
@@ -8346,6 +8262,22 @@ jobs:
 		src := mutate(goodCI, "  unit:\n    steps:\n      - run: \"true\"\n",
 			"  unit:\n    steps:\n      - run: \"true\"\n        continue-on-error: true\n")
 		Expect(verifyAggregateJobsIn(sources(src, goodImages))).To(Succeed())
+	})
+
+	It("rejects a needs entry that names no job", func() {
+		bad := mutate(goodImages, "needs: [setup, build, merge]", "needs: [setup, build, merge, departed]")
+		Expect(verifyAggregateJobsIn(sources(goodCI, bad))).To(MatchError(
+			ContainSubstring(`container-images.yml job "aggregate" needs job "departed", which container-images.yml does not define`)))
+	})
+
+	// Absorbed from verifyCIGate's specs. automerge runs once the gate is
+	// green, so the gate must never need it; the good fixtures pass because
+	// automerge's own edge to the gate exempts it. Without that edge it is
+	// just another job, and the remedy is to restore the edge.
+	It("asks for automerge only once it loses its edge to the gate", func() {
+		src := mutate(goodCI, "  automerge:\n    needs:\n      - ci\n", "  automerge:\n")
+		Expect(verifyAggregateJobsIn(sources(src, goodImages))).To(MatchError(
+			ContainSubstring(`ci.yml job "ci" does not need job "automerge"`)))
 	})
 
 	It("rejects an aggregate that needs nothing", func() {
