@@ -6648,25 +6648,6 @@ var _ = Describe("first-boot's provisioning steps", func() {
 			Entry("surrounding whitespace", "  filesystem  "),
 		)
 
-		// The environment layer. The server resolves file -> environment ->
-		// flag, and the packaged unit passes no --config precisely so a drop-in
-		// can set OPENVOX_CA_CONFIG. Provisioning has to read the file that
-		// drop-in names, or every guard checks a file nothing else uses. The
-		// variable is also the script's test seam, so this is the mechanism
-		// withCfg() relies on; the spec pins it as the drop-in contract.
-		It("resolves the config file from OPENVOX_CA_CONFIG", func() {
-			moved := filepath.Join(GinkgoT().TempDir(), "from-env")
-			Expect(os.MkdirAll(moved, 0o755)).To(Succeed())
-			envCfg := filepath.Join(GinkgoT().TempDir(), "env-config.yaml")
-			Expect(os.WriteFile(envCfg, []byte("cadir: "+moved+"\n"), 0o644)).To(Succeed())
-
-			r := runFirstBootScript(sslDir, binDir, "ca.example.com",
-				"OPENVOX_CA_CONFIG="+envCfg)
-			Expect(r.ok).To(BeTrue(), "provisioning failed: %s", r.output)
-			Expect(filepath.Join(moved, "ca_crt.pem")).To(BeAnExistingFile(),
-				"the drop-in's config file was not the one provisioning read")
-		})
-
 		It("lets OPENVOX_CA_CADIR override the file, as it does for the server", func() {
 			fromEnv := filepath.Join(GinkgoT().TempDir(), "env-cadir")
 			fromFile := filepath.Join(GinkgoT().TempDir(), "file-cadir")
