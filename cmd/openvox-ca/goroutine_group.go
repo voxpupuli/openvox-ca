@@ -60,12 +60,25 @@ func (g *goroutineGroup) Go(f func(ctx context.Context)) {
 // Go to return. Safe to call more than once.
 //
 // The wait is unbounded on purpose. Everything the serve command runs here
-// returns on cancellation. The slowest is a call to the isolated signer, which
-// gives up after signer.defaultRemoteSignTimeout. Beyond that the process is
-// bounded from outside: the launcher kills the frontend after its drain budget
-// plus headroom, and a service manager stops a single-process server after its
-// own timeout. A timeout here would only bring back the overlap this type
-// exists to prevent.
+// returns on cancellation, but two kinds of wait inside it do not watch the
+// context. Neither is bounded by the remote-sign deadline
+// (signer.defaultRemoteSignTimeout), so that deadline says nothing about how
+// long shutdown takes:
+//
+//   - A signature in flight. Under the launcher, the signer child gets SIGTERM
+//     at the same moment as the frontend and closes its end of the socketpair
+//     at once. net/rpc then fails the pending call with EOF within
+//     milliseconds. Under --single-process, an OpenBao signature takes no
+//     context and runs to its own login timeout.
+//   - A store write that deliberately ignores cancellation: the rollbacks and
+//     write-backs in internal/ca that use context.WithoutCancel, each capped at
+//     ca.LockTimeout/2. Against a healthy store these take milliseconds. Only
+//     a stalled store makes them the worst case.
+//
+// Beyond that the process is bounded from outside: the launcher kills the
+// frontend after its drain budget plus headroom, and a service manager stops a
+// single-process server after its own timeout. A timeout here would only bring
+// back the overlap this type exists to prevent.
 func (g *goroutineGroup) Stop() {
 	g.cancel()
 	g.wg.Wait()
