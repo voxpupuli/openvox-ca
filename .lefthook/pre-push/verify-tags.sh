@@ -15,8 +15,9 @@ while IFS= read -r line; do
 	# git writes the refspec's left side into the first field verbatim, spaces
 	# included ('HEAD^{/Release 1.2.3}:refs/tags/v1.2.3' does), so read the
 	# three right-hand fields from the end, where no field holds a space. A
-	# line whose second-from-left field is not a sha cannot be read, so refuse
-	# it rather than skip a tag push without a word (#528).
+	# line whose local sha (the third field from the right) is not 40 or 64
+	# hex digits cannot be read, so refuse it rather than skip a tag push
+	# without a word (#528).
 	rest=$line
 	remote_sha=${rest##* }
 	rest=${rest% *}

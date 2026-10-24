@@ -1098,15 +1098,22 @@ var _ = Describe("the pre-push tag gate", func() {
 		Expect(out).To(ContainSubstring(`internal/version at the tagged commit says "0.8.0"`))
 	})
 
-	// A line whose second-from-left field is not a sha cannot be read at all;
-	// the gate refuses it rather than skipping the push without a word.
-	It("refuses a line it cannot read instead of skipping it", func() {
-		repo := newTagGateRepo(version, version, version)
-		line := "HEAD^{/Release 1.2.3} not-a-sha refs/tags/v" + version + " " + noSHA
-		out, err := repo.pushLine(line)
-		Expect(err).To(HaveOccurred(), "the gate skipped an unreadable line")
-		Expect(out).To(ContainSubstring("could not read the pushed ref"))
-	})
+	// A line whose local sha (the third field from the right) is not 40 or 64
+	// hex digits cannot be read at all; the gate refuses it rather than
+	// skipping the push without a word. "not-a-sha" fails on its length, so
+	// the second entry is the right length and not hex: without the hex check
+	// it would resolve to no commit, and the tag would be skipped.
+	DescribeTable("refuses a line it cannot read instead of skipping it",
+		func(localSHA string) {
+			repo := newTagGateRepo(version, version, version)
+			line := "HEAD^{/Release 1.2.3} " + localSHA + " refs/tags/v" + version + " " + noSHA
+			out, err := repo.pushLine(line)
+			Expect(err).To(HaveOccurred(), "the gate skipped an unreadable line")
+			Expect(out).To(ContainSubstring("could not read the pushed ref"))
+		},
+		Entry("a local sha that is not a sha", "not-a-sha"),
+		Entry("a local sha of the right length that is not hex", strings.Repeat("g", 40)),
+	)
 
 	It("builds and verifies its fixture in its own repository under a leaked environment", func() {
 		decoyLeak()
