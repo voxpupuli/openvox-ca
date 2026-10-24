@@ -312,7 +312,10 @@ Two halves, and both matter:
   the code names and this rule has to as well: `AppendLine`'s fallback for a
   dangling symlink creates through the link with no chmod, at the umask. The
   umask-narrows rule above is about the paths that pass a mode to `O_CREATE` —
-  the SQLite database and the private-key writes.
+  the SQLite database and the private-key writes, and the same-host lock files
+  and their directory (`lockFilePerm`, `lockDirPerm`), which hold no key
+  material but follow the same rule for the reason the #493 paragraph below
+  gives.
 - **Never correcting.** No `chmod` of an existing file, no `chown`, ever. Group
   access is legitimate — a Kubernetes `fsGroup` ORs it back into the volume at
   every mount, so a store that arrives group-accessible did so without the
