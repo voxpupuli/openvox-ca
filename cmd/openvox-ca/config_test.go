@@ -51,6 +51,9 @@ func setEnv(key, value string) {
 }
 
 // clearServerEnv unsets every OPENVOX_CA_* var and restores them after the spec.
+// It clears PUPPET_CA_* as well. The server reads none of those names, but a
+// developer's shell may still export them, and a spec that pins that they are
+// ignored must not be decided by what the host happened to leave behind.
 //
 // Enumerated from the live environment rather than from serverEnvVars, which is
 // a hand-written list and had fallen well short of the ~90 the server actually
@@ -65,7 +68,7 @@ func clearServerEnv() {
 	GinkgoHelper()
 	for _, entry := range os.Environ() {
 		key, _, found := strings.Cut(entry, "=")
-		if !found || !strings.HasPrefix(key, "OPENVOX_CA_") {
+		if !found || (!strings.HasPrefix(key, "OPENVOX_CA_") && !strings.HasPrefix(key, "PUPPET_CA_")) {
 			continue
 		}
 		// OPENVOX_CA_CONFIG is the pin, not ambient state: callers set it to a
@@ -812,6 +815,34 @@ var _ = Describe("loadServerConfig error cases", func() {
 })
 
 // --- applyServerEnv: each variable ---
+
+// #349 renamed every variable from PUPPET_CA_* to OPENVOX_CA_* as a hard break:
+// an old name is ignored, not read as a fallback and not warned about. The
+// entries are the settings whose silent loss would weaken the CA most. Each
+// sets the old name and requires the config to stay untouched, then sets the
+// same value under the new name and requires it to change. That second half is
+// what makes the first meaningful: it proves the value is one applyServerEnv
+// would act on.
+var _ = Describe("applyServerEnv ignores the pre-rename variable names", func() {
+	DescribeTable("leaves the config alone for the old name, and not for the new one",
+		func(suffix, value string) {
+			clearServerEnv()
+			setEnv("PUPPET_CA_"+suffix, value)
+			cfg := &serverConfig{}
+			applyServerEnv(cfg)
+			Expect(*cfg).To(Equal(serverConfig{}), "PUPPET_CA_%s=%s changed the config; old names must be ignored", suffix, value)
+
+			setEnv("OPENVOX_CA_"+suffix, value)
+			applyServerEnv(cfg)
+			Expect(*cfg).NotTo(Equal(serverConfig{}), "OPENVOX_CA_%s=%s did not change the config, so the first half asserted nothing", suffix, value)
+		},
+		Entry("ENCRYPT_CA_KEY, which would otherwise leave the CA key unencrypted", "ENCRYPT_CA_KEY", "true"),
+		Entry("CADIR", "CADIR", "/some/dir"),
+		Entry("STORAGE_BACKEND", "STORAGE_BACKEND", "postgres"),
+		Entry("SQL_DSN", "SQL_DSN", "postgres://ca@db/ca"),
+		Entry("CLIENT_REVOCATION_POLICY", "CLIENT_REVOCATION_POLICY", "skip"),
+	)
+})
 
 var _ = Describe("applyServerEnv each variable", func() {
 	DescribeTable("applies the variable to the config",

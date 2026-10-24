@@ -198,6 +198,20 @@ var _ = Describe("Key encryption", func() {
 			Expect(string(pp)).To(Equal("env-secret"))
 		})
 
+		// #349's hard break: a passphrase left in the pre-rename variable is not
+		// read. The refusal is the one a missing passphrase gets, so an operator
+		// who renamed nothing is stopped rather than handed a CA that cannot
+		// unlock its key.
+		It("ignores a passphrase left in the pre-rename PUPPET_CA_KEY_PASSPHRASE", func() {
+			GinkgoT().Setenv(DefaultPassphraseEnvVar, "")
+			GinkgoT().Setenv("PUPPET_CA_KEY_PASSPHRASE", "old-secret")
+
+			pp, err := resolvePassphrase(KeyPassphraseConfig{}, tmpDir, needEncryptConfigured)
+			Expect(err).To(HaveOccurred(), "the old variable was read")
+			Expect(pp).To(BeNil())
+			Expect(err.Error()).To(ContainSubstring("no passphrase source is configured"))
+		})
+
 		It("reads the variable EnvVar names when another name is configured", func() {
 			// The launcher withholds cfg.EnvVar() from the frontend, so the
 			// variable resolved here and the one withheld there must be one.
