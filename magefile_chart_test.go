@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -1750,7 +1751,19 @@ var _ = Describe("the pre-push hook wiring", func() {
 		}
 	})
 
+	// A floor, not the literal: raising min_version is fine, but anything
+	// below 1.10.0 lets a lefthook without ordered jobs run, and that one
+	// ignores the jobs list, so neither gate would run at all.
 	It("requires a lefthook that has ordered jobs", func() {
-		Expect(cfg.MinVersion).To(Equal("1.10.0"))
+		parts := strings.Split(cfg.MinVersion, ".")
+		Expect(parts).To(HaveLen(3), "min_version %q is not major.minor.patch", cfg.MinVersion)
+		var v [3]int
+		for i, p := range parts {
+			n, err := strconv.Atoi(p)
+			Expect(err).NotTo(HaveOccurred(), "min_version %q", cfg.MinVersion)
+			v[i] = n
+		}
+		Expect(v[0] > 1 || (v[0] == 1 && v[1] >= 10)).To(BeTrue(),
+			"min_version %q is below 1.10.0, the first lefthook with ordered jobs", cfg.MinVersion)
 	})
 })
