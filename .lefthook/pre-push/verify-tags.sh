@@ -10,30 +10,15 @@
 # git feeds the pushed refs on stdin, one per line:
 #   <local-ref> <local-sha> <remote-ref> <remote-sha>
 
+# The line parser is shared with verify-signatures.sh; a missing helper fails
+# the push, since "." exits a non-interactive shell when it cannot read a file.
+case $0 in */*) here=${0%/*} ;; *) here=. ;; esac # no dirname: PATH may be bare
+# shellcheck source-path=SCRIPTDIR source=../lib/pushed-ref.sh
+. "$here/../lib/pushed-ref.sh"
+
 status=0
 while IFS= read -r line; do
-	# git writes the refspec's left side into the first field verbatim, spaces
-	# included ('HEAD^{/Release 1.2.3}:refs/tags/v1.2.3' does), so read the
-	# three right-hand fields from the end, where no field holds a space. A
-	# line whose local sha (the third field from the right) is not 40 or 64
-	# hex digits cannot be read, so refuse it rather than skip a tag push
-	# without a word (#528).
-	rest=$line
-	remote_sha=${rest##* }
-	rest=${rest% *}
-	remote_ref=${rest##* }
-	rest=${rest% *}
-	local_sha=${rest##* }
-	case "$local_sha" in
-	*[!0-9a-f]* | "") local_sha=bad ;;
-	esac
-	case ${#local_sha} in
-	40 | 64) ;;
-	*)
-		printf 'Refusing to push: could not read the pushed ref from "%s".\n' "$line"
-		exit 1
-		;;
-	esac
+	parse_pushed_ref "$line"
 	case "$remote_ref" in refs/tags/v*) ;; *) continue ;; esac
 	case "$local_sha" in *[!0]*) ;; *) continue ;; esac # skip deletions
 	tag="${remote_ref#refs/tags/}"

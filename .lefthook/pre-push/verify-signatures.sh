@@ -32,28 +32,16 @@
 GIT_NO_REPLACE_OBJECTS=1
 export GIT_NO_REPLACE_OBJECTS
 
+# The line parser is shared with verify-tags.sh; a missing helper fails the
+# push, since "." exits a non-interactive shell when it cannot read a file.
+case $0 in */*) here=${0%/*} ;; *) here=. ;; esac # no dirname: PATH may be bare
+# shellcheck source-path=SCRIPTDIR source=../lib/pushed-ref.sh
+. "$here/../lib/pushed-ref.sh"
+
 unsigned=
 tags=
 while IFS= read -r line; do
-	# Read from the right: the local ref is whatever the refspec's left side
-	# said, verbatim, so it can hold spaces ("HEAD^{/fix the bug}"); the other
-	# three fields never do.
-	rest=$line
-	remote_sha=${rest##* }
-	rest=${rest% *}
-	remote_ref=${rest##* }
-	rest=${rest% *}
-	local_sha=${rest##* }
-	case "$local_sha" in
-	*[!0-9a-f]* | "") local_sha=bad ;;
-	esac
-	case ${#local_sha} in
-	40 | 64) ;;
-	*)
-		printf 'Refusing to push: could not read the pushed ref from "%s".\n' "$line"
-		exit 1
-		;;
-	esac
+	parse_pushed_ref "$line"
 	case "$local_sha" in *[!0]*) ;; *) continue ;; esac # skip deletions
 	case "$remote_ref" in
 	refs/heads/*)

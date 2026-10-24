@@ -696,7 +696,7 @@ func fixtureEnv() []string {
 // gitIn runs one git command in dir with the fixture environment, and is the
 // only site that execs git directly — the decoy repository's setup and
 // inspection included. The single choke point for the environment itself is
-// fixtureEnv, not this function: runGateScript execs the gate scripts rather
+// fixtureEnv, not this function: execGateScript execs the gate scripts rather
 // than git, so it cannot route through here and has to set cmd.Env for itself,
 // which leaves it the one other place where forgetting is still possible. That
 // is how these fixtures came to operate on the real repository, twice. Output
@@ -802,17 +802,22 @@ func (r *tagGateRepo) pushLineWithEnv(line string, env []string) (string, error)
 	return runGateScript("verify-tags.sh", r.dir, env, line+"\n")
 }
 
-// runGateScript runs one of the pre-push gate scripts in dir, with stdin as git
-// would feed it, and is the one site that execs a gate script. The caller
-// chooses the environment, but every caller passes one built from fixtureEnv:
-// the script's own git commands must read the fixture, not whatever repository
-// an inherited GIT_DIR names, which is what made the tag gate's specs assert
-// against the wrong commit.
+// runGateScript runs one of the repository's pre-push gate scripts in dir, with
+// stdin as git would feed it.
 func runGateScript(name, dir string, env []string, stdin string) (string, error) {
 	GinkgoHelper()
 	script, err := filepath.Abs(filepath.Join(".lefthook", "pre-push", name))
 	Expect(err).NotTo(HaveOccurred())
+	return execGateScript(script, dir, env, stdin)
+}
 
+// execGateScript is the one site that execs a gate script, wherever it lives.
+// The caller chooses the environment, but every caller passes one built from
+// fixtureEnv: the script's own git commands must read the fixture, not whatever
+// repository an inherited GIT_DIR names, which is what made the tag gate's
+// specs assert against the wrong commit.
+func execGateScript(script, dir string, env []string, stdin string) (string, error) {
+	GinkgoHelper()
 	cmd := exec.Command("sh", script)
 	cmd.Dir = dir
 	cmd.Env = env
@@ -1773,4 +1778,28 @@ var _ = Describe("the pre-push hook wiring", func() {
 		Expect(v[0] > 1 || (v[0] == 1 && v[1] >= 10)).To(BeTrue(),
 			"min_version %q is below 1.10.0, the first lefthook with ordered jobs", cfg.MinVersion)
 	})
+})
+
+// Both gates source their stdin parser from .lefthook/lib/pushed-ref.sh. If it
+// goes missing, "." stops the script, which refuses the push; a gate that went
+// on without it would read every line as empty, take it for a deletion, and
+// pass. Each gate runs here from a copy with no lib/ beside it.
+var _ = Describe("the pre-push gates' shared line parser", func() {
+	DescribeTable("refuses rather than passes when it is missing",
+		func(name string) {
+			src, err := os.ReadFile(filepath.Join(".lefthook", "pre-push", name))
+			Expect(err).NotTo(HaveOccurred())
+			root := GinkgoT().TempDir()
+			script := filepath.Join(root, ".lefthook", "pre-push", name)
+			Expect(os.MkdirAll(filepath.Dir(script), 0o755)).To(Succeed())
+			Expect(os.WriteFile(script, src, 0o644)).To(Succeed())
+
+			line := "refs/heads/topic " + strings.Repeat("1", 40) + " refs/heads/topic " + noSHA + "\n"
+			out, err := execGateScript(script, root, fixtureEnv(), line)
+			Expect(err).To(HaveOccurred(), "the gate ran on without its parser")
+			Expect(out).To(ContainSubstring("pushed-ref.sh"))
+		},
+		Entry("the tag gate", "verify-tags.sh"),
+		Entry("the signature gate", "verify-signatures.sh"),
+	)
 })
