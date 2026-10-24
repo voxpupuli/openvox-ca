@@ -438,7 +438,8 @@ published names, which existing deployments are bound to just as firmly:
 - HTTP route prefix `/puppet-ca/v1`
 - Environment-variable prefix `OPENVOX_CA_` (and `OPENVOX_CA_CTL_` for the CLI)
 - Prometheus metric namespace `openvoxca_`
-- Storage key prefixes and the config-file location (`puppet-ca`, `/etc/openvox-ca`)
+- Storage key prefixes `puppet-ca`, kept so existing stores stay readable
+- Config-file location `/etc/openvox-ca`
 
 ## Helm chart
 
