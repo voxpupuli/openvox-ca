@@ -8382,7 +8382,9 @@ var _ = Describe("the packaged configuration path", func() {
 	It("is spelt out once in the server's source, as defaultConfigFile", func() {
 		files, err := filepath.Glob(filepath.Join("cmd", "openvox-ca", "*.go"))
 		Expect(err).NotTo(HaveOccurred())
-		literal := strconv.Quote(want)
+		// The bare path, not the quoted literal: a help string that spelt it out
+		// again inside longer text would otherwise not count.
+		literal := want
 		count := 0
 		for _, f := range files {
 			if strings.HasSuffix(f, "_test.go") {
@@ -8432,7 +8434,7 @@ var _ = Describe("the packaged configuration path", func() {
 		Expect(filepath.Dir(ctl)).To(Equal(filepath.Dir(want)), "the CLI's default config is not beside the server's")
 		files, err := filepath.Glob(filepath.Join("cmd", "openvox-ca-ctl", "*.go"))
 		Expect(err).NotTo(HaveOccurred())
-		literal := strconv.Quote(ctl)
+		literal := ctl
 		count := 0
 		for _, f := range files {
 			if strings.HasSuffix(f, "_test.go") {
