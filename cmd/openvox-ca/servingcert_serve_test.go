@@ -170,6 +170,30 @@ var _ = Describe("the serve command with a self-provisioned serving certificate"
 				"precondition: the recorder must have heard the command, or the absence above proves nothing")
 		})
 	})
+
+	// An invalid kubernetes_export block is refused only once the background
+	// jobs are running, and before the shutdown goroutine and the metrics
+	// exporter exist. That is a different return from the failed bind above,
+	// and the one window where the order of those two matters. The order is
+	// pinned by position in goroutine_group_test.go. This drives the window.
+	Context("when the configuration is refused after the background jobs have started", func() {
+		It("leaves nothing it started running once it has returned", func() {
+			configPath := withMetricsListen(serveConfig(caDir, servingDir, "127.0.0.1", freeLoopbackPort(), true))
+			appendConfig(configPath, `kubernetes_export:
+  targets:
+    - kind: Bogus
+      metadata:
+        name: trust
+      cert: true
+`)
+			err := runServeBounded(configPath)
+			Expect(err).To(MatchError(ContainSubstring("invalid kubernetes_export config")),
+				"precondition: the command must be refused at the kubernetes_export check, "+
+					"after its jobs have started and before the bind")
+			Expect(serveCommandGoroutines()).To(BeEmpty(),
+				"the serve command returned while goroutines it started were still running")
+		})
+	})
 })
 
 // serveConfig writes a config file for the serve command. withServing adds a
@@ -306,12 +330,18 @@ func runServeRecorded(configPath string) (*notifyRecorder, error) {
 // file serveConfig wrote, so that the command starts its metrics exporter.
 func withMetricsListen(configPath string) string {
 	GinkgoHelper()
+	appendConfig(configPath, fmt.Sprintf("metrics_listen: 127.0.0.1:%d\n", freeLoopbackPort()))
+	return configPath
+}
+
+// appendConfig appends top-level YAML to a config file serveConfig wrote.
+func appendConfig(configPath, yaml string) {
+	GinkgoHelper()
 	f, err := os.OpenFile(configPath, os.O_APPEND|os.O_WRONLY, 0)
 	Expect(err).NotTo(HaveOccurred())
-	_, err = fmt.Fprintf(f, "metrics_listen: 127.0.0.1:%d\n", freeLoopbackPort())
+	_, err = f.WriteString(yaml)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(f.Close()).To(Succeed())
-	return configPath
 }
 
 // drainNotifications returns every notification rec holds now, without

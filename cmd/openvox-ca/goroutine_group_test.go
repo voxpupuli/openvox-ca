@@ -98,12 +98,14 @@ var _ = Describe("goroutineGroup", func() {
 // The serve command's goroutines, held to the group by the shape of the code.
 //
 // servingcert_serve_test.go checks the behaviour: after the command returns,
-// nothing it started is still running. That spec runs the bind-failure path
-// only, and an early return between the group's creation and the bind --
-// a TLS keypair that will not load, say -- is a different path. These pin
-// what every path depends on: no go statement in this package's code outside
-// the places accounted for below, the group stopped before any other teardown,
-// and the metrics exporter started only once something will stop it.
+// nothing it started is still running. It drives two returns, a failed bind
+// and a kubernetes_export block refused after the jobs have started. RunE has
+// others, a TLS keypair that will not load among them. These pin what every
+// path depends on:
+//   - no go statement in this package's code outside the places accounted for
+//     below
+//   - the group stopped before any other teardown
+//   - the metrics exporter started only once something will stop it
 //
 // The go-statement check covers this package only. A helper in another package
 // that RunE calls, and that starts a goroutine of its own, is beyond it.
@@ -189,6 +191,11 @@ var _ = Describe("the serve command's goroutines", func() {
 		// the instance lock is released and the runtime closed only if it is
 		// deferred after them. Defers inside nested function literals belong
 		// to those functions, not to RunE, so they are not counted.
+		//
+		// No behavioural spec can stand in for this one. Defer Stop ahead of
+		// those and it still joins every goroutine before RunE returns, so
+		// "leaves nothing it started running" stays green. A job would then
+		// write to a closed store with the lock released, which is #546.
 		var defers []*ast.DeferStmt
 		ast.Inspect(runE.Body, func(n ast.Node) bool {
 			switch n := n.(type) {
