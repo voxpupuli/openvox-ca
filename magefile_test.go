@@ -8419,6 +8419,32 @@ var _ = Describe("the packaged configuration path", func() {
 		Expect(count).To(Equal(1), "%s appears %d times in cmd/openvox-ca; every other use should name configEnvVar", literal, count)
 	})
 
+	// openvox-ca-ctl's own default is not installed by the packages, so nothing
+	// has to agree with it byte for byte, but it lives beside the server's and
+	// was spelt out twice in the CLI's source. Pinning the directory against
+	// the server's catches the half-renamed state the two literals allowed.
+	It("has the CLI's default beside it, spelt out once as defaultCtlConfigFile", func() {
+		src, err := os.ReadFile(filepath.Join("cmd", "openvox-ca-ctl", "config.go"))
+		Expect(err).NotTo(HaveOccurred())
+		m := regexp.MustCompile(`(?m)^const defaultCtlConfigFile = "([^"]+)"$`).FindAllStringSubmatch(string(src), -1)
+		Expect(m).To(HaveLen(1), "cmd/openvox-ca-ctl/config.go must declare defaultCtlConfigFile exactly once")
+		ctl := m[0][1]
+		Expect(filepath.Dir(ctl)).To(Equal(filepath.Dir(want)), "the CLI's default config is not beside the server's")
+		files, err := filepath.Glob(filepath.Join("cmd", "openvox-ca-ctl", "*.go"))
+		Expect(err).NotTo(HaveOccurred())
+		literal := strconv.Quote(ctl)
+		count := 0
+		for _, f := range files {
+			if strings.HasSuffix(f, "_test.go") {
+				continue
+			}
+			src, err := os.ReadFile(f)
+			Expect(err).NotTo(HaveOccurred())
+			count += strings.Count(string(src), literal)
+		}
+		Expect(count).To(Equal(1), "%s appears %d times in cmd/openvox-ca-ctl; every other use should name defaultCtlConfigFile", literal, count)
+	})
+
 	It("is where the packages install config.yaml", func() {
 		src, err := os.ReadFile(filepath.Join("packaging", "nfpm.yaml"))
 		Expect(err).NotTo(HaveOccurred())
