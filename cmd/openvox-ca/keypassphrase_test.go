@@ -91,7 +91,7 @@ var _ = Describe("the server's own startup, on a missing key passphrase", func()
 		clearServerEnv()
 		empty := filepath.Join(GinkgoT().TempDir(), "empty-config.yaml")
 		Expect(os.WriteFile(empty, []byte("{}\n"), 0o600)).To(Succeed(), "pin an empty config")
-		GinkgoT().Setenv("OPENVOX_CA_CONFIG", empty)
+		GinkgoT().Setenv(configEnvVar, empty)
 	})
 
 	// encryptedCADir bootstraps a CA whose stored key is encrypted, with the
@@ -459,9 +459,9 @@ var _ = Describe("the real launcher, with the passphrase only in the environment
 		// think it was already a role, already under a launcher, or configured
 		// from a file on this host.
 		cmd.Env = append(filterEnv(os.Environ(), append(append([]string{}, internalEnvKeys...),
-			launcherStartedEnv, ca.DefaultPassphraseEnvVar, "OPENVOX_CA_CONFIG", "OPENVOX_CA_KEY_PASSPHRASE_FILE")...),
+			launcherStartedEnv, ca.DefaultPassphraseEnvVar, configEnvVar, "OPENVOX_CA_KEY_PASSPHRASE_FILE")...),
 			pskChildEnv+"="+realServerChild,
-			"OPENVOX_CA_CONFIG="+emptyConfig,
+			configEnvVar+"="+emptyConfig,
 			"OPENVOX_CA_CADIR="+cadir,
 			"OPENVOX_CA_HOST=127.0.0.1",
 			"OPENVOX_CA_PORT="+strconv.Itoa(port),

@@ -74,7 +74,7 @@ func clearServerEnv() {
 		// OPENVOX_CA_CONFIG is the pin, not ambient state: callers set it to a
 		// fixture config immediately before calling this, and clearing it would
 		// send them to the host's /etc/openvox-ca/config.yaml instead.
-		if key == "OPENVOX_CA_CONFIG" {
+		if key == configEnvVar {
 			continue
 		}
 		setEnv(key, "") // empty string is treated as unset by applyServerEnv
@@ -1457,7 +1457,7 @@ var _ = Describe("serial_number_format at startup", func() {
 
 	BeforeEach(func() {
 		// Pinned to an empty file so a host config cannot influence the run.
-		setEnv("OPENVOX_CA_CONFIG", writeTempConfig(""))
+		setEnv(configEnvVar, writeTempConfig(""))
 		clearServerEnv()
 		setEnv("OPENVOX_CA_SERIAL_NUMBER_FORMAT", "hexx")
 		caDir = GinkgoT().TempDir()

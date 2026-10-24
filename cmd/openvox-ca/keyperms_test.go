@@ -494,7 +494,7 @@ var _ = Describe("the server's own startup, on key-material permissions", func()
 		clearServerEnv()
 		empty := filepath.Join(GinkgoT().TempDir(), "empty-config.yaml")
 		Expect(os.WriteFile(empty, []byte("{}\n"), 0o600)).To(Succeed(), "pin an empty config")
-		GinkgoT().Setenv("OPENVOX_CA_CONFIG", empty)
+		GinkgoT().Setenv(configEnvVar, empty)
 	})
 
 	// worldReadableCADir bootstraps a CA and then widens its private key, which

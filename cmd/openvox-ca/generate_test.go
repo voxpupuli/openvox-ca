@@ -152,7 +152,7 @@ var _ = Describe("openvox-ca generate", func() {
 		pinnedCfg := "ca_key_algo: ecdsa\nca_key_size: 256\nleaf_key_algo: ecdsa\nleaf_key_size: 256\n"
 		cfgPath := filepath.Join(GinkgoT().TempDir(), "pinned.yaml")
 		Expect(os.WriteFile(cfgPath, []byte(pinnedCfg), 0o644)).To(Succeed())
-		setEnv("OPENVOX_CA_CONFIG", cfgPath)
+		setEnv(configEnvVar, cfgPath)
 		clearServerEnv()
 
 		// The command calls setupLogger, which rebinds the process-wide default
@@ -271,7 +271,7 @@ var _ = Describe("openvox-ca generate", func() {
 			cfgPath := filepath.Join(GinkgoT().TempDir(), "badprovider.yaml")
 			Expect(os.WriteFile(cfgPath, []byte(
 				"ca_key_algo: ecdsa\nca_key_size: 256\nca_key_provider: nonesuch\n"), 0o644)).To(Succeed())
-			setEnv("OPENVOX_CA_CONFIG", cfgPath)
+			setEnv(configEnvVar, cfgPath)
 
 			_, _, err := runGenerate("--cadir", caDir, "--certname", "ca", "--ttl", "1h")
 			Expect(err).To(MatchError(ca.ErrReservedSubject))
@@ -566,7 +566,7 @@ var _ = Describe("openvox-ca generate", func() {
 					// false, because true is the default and would not
 					// distinguish a resolved value from an ignored one.
 					"promote_cn_to_san: false\n"), 0o644)).To(Succeed())
-			setEnv("OPENVOX_CA_CONFIG", cfgPath)
+			setEnv(configEnvVar, cfgPath)
 
 			_, stderr, err := runGenerate("--cadir", caDir, "--certname", "web01",
 				"--ttl", "8760h", "--key-out", keyPath("web01"))
@@ -592,7 +592,7 @@ var _ = Describe("openvox-ca generate", func() {
 			cfgPath := filepath.Join(GinkgoT().TempDir(), "denyall.yaml")
 			Expect(os.WriteFile(cfgPath, []byte(
 				"ca_key_algo: ecdsa\nca_key_size: 256\nautosign_config: \"false\"\n"), 0o644)).To(Succeed())
-			setEnv("OPENVOX_CA_CONFIG", cfgPath)
+			setEnv(configEnvVar, cfgPath)
 
 			_, _, err := runGenerate("--cadir", caDir, "--certname", "web01",
 				"--ttl", "8760h", "--key-out", keyPath("web01"))
@@ -706,7 +706,7 @@ var _ = Describe("openvox-ca generate", func() {
 			cfgPath := filepath.Join(GinkgoT().TempDir(), "nopp.yaml")
 			Expect(os.WriteFile(cfgPath, []byte(
 				"ca_key_algo: ecdsa\nca_key_size: 256\nno_pp_cli_auth: true\n"), 0o644)).To(Succeed())
-			setEnv("OPENVOX_CA_CONFIG", cfgPath)
+			setEnv(configEnvVar, cfgPath)
 
 			_, _, err := runGenerate("--cadir", caDir, "--certname", "admin",
 				"--ttl", "8760h", "--pp-cli-auth", "--key-out", keyPath("admin"))
@@ -781,7 +781,7 @@ var _ = Describe("openvox-ca generate", func() {
 			cfgPath := filepath.Join(GinkgoT().TempDir(), "host.yaml")
 			Expect(os.WriteFile(cfgPath, []byte(
 				"ca_key_algo: ecdsa\nca_key_size: 256\nhostname: puppet.example.com\n"), 0o644)).To(Succeed())
-			setEnv("OPENVOX_CA_CONFIG", cfgPath)
+			setEnv(configEnvVar, cfgPath)
 
 			_, _, err := runGenerate("--cadir", caDir, "--certname", "puppet.example.com",
 				"--ttl", "8760h", "--key-out", keyPath("serving"))
@@ -804,7 +804,7 @@ var _ = Describe("openvox-ca generate", func() {
 			cfgPath := filepath.Join(GinkgoT().TempDir(), "log.yaml")
 			Expect(os.WriteFile(cfgPath, []byte(
 				"ca_key_algo: ecdsa\nca_key_size: 256\nlogfile: "+logPath+"\n"), 0o644)).To(Succeed())
-			setEnv("OPENVOX_CA_CONFIG", cfgPath)
+			setEnv(configEnvVar, cfgPath)
 
 			_, _, err := runGenerate("--cadir", caDir, "--certname", "admin",
 				"--ttl", "8760h", "--pp-cli-auth", "--key-out", keyPath("admin"))
@@ -836,7 +836,7 @@ var _ = Describe("openvox-ca generate", func() {
 			cfgPath := filepath.Join(GinkgoT().TempDir(), "log.yaml")
 			Expect(os.WriteFile(cfgPath, []byte(
 				"ca_key_algo: ecdsa\nca_key_size: 256\nlogfile: "+logPath+"\n"), 0o644)).To(Succeed())
-			setEnv("OPENVOX_CA_CONFIG", cfgPath)
+			setEnv(configEnvVar, cfgPath)
 
 			_, stderr, err := runGenerate("--cadir", caDir, "--certname", "web01",
 				"--ttl", "8760h", "--key-out", keyPath("web01"))
@@ -874,7 +874,7 @@ var _ = Describe("openvox-ca generate", func() {
 			cfgPath := filepath.Join(GinkgoT().TempDir(), "log.yaml")
 			Expect(os.WriteFile(cfgPath, []byte(
 				"ca_key_algo: ecdsa\nca_key_size: 256\nlogfile: "+logPath+"\n"), 0o644)).To(Succeed())
-			setEnv("OPENVOX_CA_CONFIG", cfgPath)
+			setEnv(configEnvVar, cfgPath)
 
 			_, stderr, err := runGenerate("--cadir", caDir, "--certname", "web01",
 				"--ttl", "8760h", "--key-out", keyPath("web01"))

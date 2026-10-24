@@ -212,7 +212,7 @@ var _ = Describe("the autosign executable preflight under --daemon", func() {
 		clearServerEnv()
 		empty := filepath.Join(GinkgoT().TempDir(), "empty-config.yaml")
 		Expect(os.WriteFile(empty, []byte("{}\n"), 0o600)).To(Succeed(), "pin an empty config")
-		GinkgoT().Setenv("OPENVOX_CA_CONFIG", empty)
+		GinkgoT().Setenv(configEnvVar, empty)
 	})
 
 	BeforeEach(func() {
@@ -290,7 +290,7 @@ var _ = Describe("the autosign executable check at startup", func() {
 		clearServerEnv()
 		empty := filepath.Join(GinkgoT().TempDir(), "empty-config.yaml")
 		Expect(os.WriteFile(empty, []byte("{}\n"), 0o600)).To(Succeed(), "pin an empty config")
-		GinkgoT().Setenv("OPENVOX_CA_CONFIG", empty)
+		GinkgoT().Setenv(configEnvVar, empty)
 	})
 
 	It("refuses to serve", func(ctx SpecContext) {
