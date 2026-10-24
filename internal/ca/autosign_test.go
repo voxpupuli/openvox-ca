@@ -24,6 +24,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -247,7 +248,9 @@ esac
 			_, err := ca.CheckAutosign(
 				ca.AutosignConfig{Mode: "executable", FileOrPath: "/no/such/plugin.sh"},
 				csr, csrPEM)
-			Expect(err).To(HaveOccurred())
+			// The cause, not merely an error: a refusal of the path would
+			// also be an error, and would pass HaveOccurred.
+			Expect(err).To(MatchError(os.ErrNotExist))
 		})
 
 		It("returns an error when path exists but is not executable", func() {
@@ -257,7 +260,9 @@ esac
 			_, err := ca.CheckAutosign(
 				ca.AutosignConfig{Mode: "executable", FileOrPath: path},
 				csr, csrPEM)
-			Expect(err).To(HaveOccurred())
+			// execve refuses a file with no execute bit with EACCES; the path
+			// itself passes the checks, so this is the exec failing.
+			Expect(err).To(MatchError(fs.ErrPermission))
 		})
 
 		It("does not pass parent process secrets to the executable", func() {
