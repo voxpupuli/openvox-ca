@@ -404,8 +404,11 @@ var _ = Describe("Dev.Vulncheck", func() {
 		Expect(Dev{}.Vulncheck()).To(MatchError(ContainSubstring(govulncheckInstall)))
 	})
 
+	// Driven through vulncheckInto, which is Vulncheck past the PATH lookup,
+	// so the target's log goes to a temporary directory rather than over the
+	// repository's .test-output/govulncheck.log.
 	Context("with a stub govulncheck on PATH", func() {
-		var logPath string
+		var logPath, logDir string
 
 		// The stub records each call's build environment and arguments, and
 		// exits 3 -- govulncheck's status for a reachable finding -- only for
@@ -415,6 +418,7 @@ var _ = Describe("Dev.Vulncheck", func() {
 		BeforeEach(func() {
 			dir := GinkgoT().TempDir()
 			logPath = filepath.Join(dir, "calls.log")
+			logDir = GinkgoT().TempDir()
 			stub := "#!/bin/sh\n" +
 				`printf '%s|%s|%s|%s|%s\n' "$GOOS" "$GOARCH" "$CGO_ENABLED" "$GOEXPERIMENT" "$*" >>"$STUB_LOG"` + "\n" +
 				`if [ "$GOARCH" = amd64 ] && [ "$CGO_ENABLED" = 0 ] && [ -n "$STUB_FAIL" ]; then exit 3; fi` + "\n"
@@ -444,13 +448,28 @@ var _ = Describe("Dev.Vulncheck", func() {
 		}
 
 		It("runs every scan in its own environment and passes when none finds anything", func() {
-			Expect(Dev{}.Vulncheck()).To(Succeed())
+			Expect(vulncheckInto(logDir, runtime.GOOS, runtime.GOARCH)).To(Succeed())
 			Expect(recordedCalls()).To(Equal(expectedCalls()))
+		})
+
+		// The log is where a reader finds which variants this host left
+		// unscanned, so each skip has to reach it along with each scan.
+		It("logs each scan it runs and each variant it skips", func() {
+			Expect(vulncheckInto(logDir, runtime.GOOS, runtime.GOARCH)).To(Succeed())
+			src, err := os.ReadFile(filepath.Join(logDir, "govulncheck.log"))
+			Expect(err).NotTo(HaveOccurred())
+			scans, skipped := vulncheckScans(runtime.GOOS, runtime.GOARCH)
+			for _, sc := range scans {
+				Expect(string(src)).To(ContainSubstring("Running govulncheck over " + sc.what + "...\n"))
+			}
+			for _, name := range skipped {
+				Expect(string(src)).To(ContainSubstring("SKIP: the " + name + " release build "))
+			}
 		})
 
 		It("fails on a reachable finding, naming the scan, and still runs the scans after it", func() {
 			GinkgoT().Setenv("STUB_FAIL", "1")
-			err := Dev{}.Vulncheck()
+			err := vulncheckInto(logDir, runtime.GOOS, runtime.GOARCH)
 			Expect(err).To(MatchError(ContainSubstring("the linux_amd64 release build:")))
 			Expect(err.Error()).NotTo(ContainSubstring("the linux_arm64 release build:"))
 			Expect(err.Error()).NotTo(ContainSubstring("the magefile:"))
@@ -538,21 +557,28 @@ var _ = Describe("vulncheckScans", func() {
 	)
 
 	// A scan that inherited the host's GOARCH would load the wrong files for
-	// the variant it names, which is the gap scanning per variant closes.
+	// the variant it names, which is the gap scanning per variant closes. The
+	// FIPS env is checked key by key: off a linux/amd64 host, distVariants
+	// also gives it the cross compiler the variant builds with, which a scan
+	// on the host this one asks about never has.
 	It("loads each release variant under that variant's own build environment", func() {
 		scans, _ := vulncheckScans("linux", "amd64")
 		Expect(scans[1].env).To(Equal(map[string]string{"CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "arm64"}))
-		Expect(scans[2].env).To(Equal(map[string]string{"CGO_ENABLED": "1", "GOOS": "linux", "GOARCH": "amd64",
-			"GOEXPERIMENT": "boringcrypto"}))
+		Expect(scans[2].env).To(HaveKeyWithValue("GOOS", "linux"))
+		Expect(scans[2].env).To(HaveKeyWithValue("GOARCH", "amd64"))
+		Expect(scans[2].env).To(HaveKeyWithValue("CGO_ENABLED", "1"))
+		Expect(scans[2].env).To(HaveKeyWithValue("GOEXPERIMENT", "boringcrypto"))
 	})
 
-	// Without -show verbose, imported-only and module findings print as
-	// counts, so the advisory IDs never reach the log.
-	It("asks every scan to list findings it does not fail on", func() {
+	// Pinned in full, because a scan whose pattern narrowed would still pass
+	// in CI, scanning less under the same name. -show verbose is what lists
+	// imported-only and module findings by ID rather than as counts.
+	It("scans the whole module for each release build and the magefile by its tag", func() {
 		scans, _ := vulncheckScans("linux", "amd64")
-		for _, sc := range scans {
-			Expect(strings.Join(sc.args, " ")).To(HavePrefix("-show verbose "), sc.what)
+		for _, sc := range scans[:len(scans)-1] {
+			Expect(sc.args).To(Equal([]string{"-show", "verbose", "./..."}), sc.what)
 		}
+		Expect(scans[len(scans)-1].args).To(Equal([]string{"-show", "verbose", "-tags", "mage", "."}))
 	})
 })
 

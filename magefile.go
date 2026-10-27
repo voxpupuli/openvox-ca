@@ -8826,11 +8826,17 @@ func (Dev) Vulncheck() error {
 	if _, err := exec.LookPath("govulncheck"); err != nil {
 		return fmt.Errorf("govulncheck not found on PATH; install it with:\n    %s", govulncheckInstall)
 	}
+	return vulncheckInto(".test-output", runtime.GOOS, runtime.GOARCH)
+}
 
-	if err := os.MkdirAll(".test-output", 0755); err != nil {
+// vulncheckInto is Vulncheck for a hostOS/hostArch host, writing its log to
+// govulncheck.log in logDir. It is separate so a spec can drive it with a stub
+// govulncheck and a temporary logDir, leaving the repository's log alone.
+func vulncheckInto(logDir, hostOS, hostArch string) error {
+	if err := os.MkdirAll(logDir, 0755); err != nil {
 		return err
 	}
-	logFile, err := os.Create(filepath.Join(".test-output", "govulncheck.log"))
+	logFile, err := os.Create(filepath.Join(logDir, "govulncheck.log"))
 	if err != nil {
 		return err
 	}
@@ -8838,7 +8844,7 @@ func (Dev) Vulncheck() error {
 	out := io.MultiWriter(os.Stdout, logFile)
 	errOut := io.MultiWriter(os.Stderr, logFile)
 
-	scans, skipped := vulncheckScans(runtime.GOOS, runtime.GOARCH)
+	scans, skipped := vulncheckScans(hostOS, hostArch)
 	for _, name := range skipped {
 		fmt.Fprintf(out, "SKIP: the %s release build is a cgo build for another platform, "+
 			"which this host cannot load\n", name)
@@ -8878,9 +8884,7 @@ type vulncheckScan struct {
 // linux_amd64_fips and not linux_arm64_fips. The two build the same Go source
 // with GOEXPERIMENT=boringcrypto, and the linux_arm64 scan loads the arm64-only
 // files without it, so what CI leaves unscanned is the combination of the two:
-// a file selected only by arm64 and boringcrypto together. The variant's CC is
-// dropped: a cross compiler is what the variant needs to build, and it is no
-// use where the scan loads it natively.
+// a file selected only by arm64 and boringcrypto together.
 //
 // The magefile builds and packages every release artefact. Its build tag
 // hides it from ./..., and it runs on the host, so it keeps the host's
@@ -8891,11 +8895,9 @@ func vulncheckScans(hostOS, hostArch string) (scans []vulncheckScan, skipped []s
 			skipped = append(skipped, v.name)
 			continue
 		}
-		env := maps.Clone(v.env)
-		delete(env, "CC")
 		scans = append(scans, vulncheckScan{
 			what: "the " + v.name + " release build",
-			env:  env,
+			env:  v.env,
 			args: []string{"-show", "verbose", "./..."},
 		})
 	}
