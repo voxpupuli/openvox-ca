@@ -12,7 +12,7 @@
     "method": "PUT",
     "path": "/puppet-ca/v1/certificate_request/corner-nosan",
     "content_type": "text/plain",
-    "body": "-----BEGIN CERTIFICATE REQUEST-----\nMIHRMHkCAQAwFzEVMBMGA1UEAxMMY29ybmVyLW5vc2FuMFkwEwYHKoZIzj0CAQYI\nKoZIzj0DAQcDQgAERfcQesOvvKh4om1N8VRuNRnJR6fnuXiMcbDlx4yopInxQSTL\nnOnrIkTisKwZHXyxv/gHodJLbmPYYxpKRbiLsKAAMAoGCCqGSM49BAMCA0gAMEUC\nIQCA4QKK5i4yIrLsJl35WcENAChe55/EGbRrmzk7rCynNgIgKE0PL8mNdxFev0KJ\nefTOimlUoIAgPtUDGFHz1OGOgME=\n-----END CERTIFICATE REQUEST-----\n",
+    "body": "-----BEGIN CERTIFICATE REQUEST-----\nMIHSMHkCAQAwFzEVMBMGA1UEAxMMY29ybmVyLW5vc2FuMFkwEwYHKoZIzj0CAQYI\nKoZIzj0DAQcDQgAE7hsacM0vN+A0cH4iKRhZbbseYwsHNxtfVXu93upISi+go2Z4\nmFVnOqCfqa0UcKXwEl2tjpYhw3FIexYmN7aCiaAAMAoGCCqGSM49BAMCA0kAMEYC\nIQDK8yfduL4qgQmf0IXfKvrPB+pdSxlyvoyQWf6CBrTAKQIhAP+F2nj5KEalGlkW\nXjZHbW2pfXwliSLV22fjRENbtQrS\n-----END CERTIFICATE REQUEST-----\n",
     "client": "admin"
   },
   "response": {
