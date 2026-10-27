@@ -155,16 +155,39 @@ See [`AGENTS.md`](AGENTS.md) for the details. The essentials:
 - Keep commits focused: imperative subject ≤ 72 characters, with a body that
   explains *why*. Stage files by name and review `git diff --staged` before
   committing.
+- Every commit in your pull request must carry a signature GitHub verifies
+  (GPG, SSH or S/MIME). `main`'s ruleset requires one on every commit, and
+  merging with a merge commit lands each of your commits on `main` as it is,
+  so one unsigned commit blocks that merge however green the checks are.
+  Set signing up with GitHub's [Signing commits](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits)
+  guide, and add the key to your GitHub account as a *signing* key: an SSH key
+  added for authentication alone does not count. The pull request's commit
+  list marks each one "Verified" once GitHub accepts it. To re-sign a branch
+  you have already pushed unsigned, replay it onto its base (`origin/main`,
+  or the branch a stacked pull request targets) and force-push:
+
+  ```bash
+  git rebase --force-rebase --gpg-sign <base>
+  git push --force-with-lease
+  ```
+
 - Make sure `mage dev:check`, `mage test:unit`, `mage test:magefile`,
   `markdownlint-cli2` and, for a change to `packaging/scripts/`, `shellcheck`
   pass.
-- `lefthook install` adds git hooks that cover *part* of the above: pre-commit
-  runs gofmt and golangci-lint, and pre-push runs `go test -race ./...`, the
-  build-tagged `go test -tags mage .`, and a refusal of any `v*` tag whose
-  version does not match the tree. An untidy `go.mod`, a drifted chart pin or a
+- `lefthook install` (lefthook 1.10.0 or later) adds git hooks that cover
+  *part* of the above: pre-commit runs gofmt and golangci-lint, and pre-push
+  runs `go test -race ./...`, the
+  build-tagged `go test -tags mage .`, a refusal of any `v*` tag whose
+  version does not match the tree, and a refusal of any commit being pushed
+  that carries no signature. That last one checks only that a signature is
+  there, not that GitHub will verify it, which needs the key on your GitHub
+  account; and on a new branch it skips commits a remote-tracking branch
+  already holds. The two refusals run first, and either one stops the push before
+  the tests start. An untidy `go.mod`, a drifted chart pin or a
   markdownlint violation is not among them — those stay with `mage dev:check`,
-  `markdownlint-cli2` and CI. Each hook check stands aside with a SKIP when the
-  tool it drives is absent from `PATH`. On Linux the test run additionally needs a
+  `markdownlint-cli2` and CI. Each hook check that drives a tool stands aside
+  with a SKIP when that tool is absent from `PATH`; the two refusals always
+  run. On Linux the test run additionally needs a
   C compiler, since `-race` requires cgo there, and fails rather than skipping
   without one; macOS builds `-race` without cgo.
 - The pre-push run is a *different environment* from a bare `mage test:magefile`:

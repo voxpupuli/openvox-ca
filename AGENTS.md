@@ -498,3 +498,6 @@ reject case in `chart:test`.
 - Imperative subject ≤ 72 chars; body explains *why*.
 - Stage files by name; never `git add -A`. Review `git diff --staged` first.
 - Commit at logical checkpoints, not one big drop.
+- Sign every commit: `main`'s ruleset requires a signature GitHub verifies on
+  each one, and the pre-push hook refuses a commit that has none. See
+  "Submitting changes" in [CONTRIBUTING.md](CONTRIBUTING.md#submitting-changes).
