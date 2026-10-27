@@ -404,6 +404,60 @@ var _ = Describe("Dev.Vulncheck", func() {
 		Expect(Dev{}.Vulncheck()).To(MatchError(ContainSubstring(govulncheckInstall)))
 	})
 
+	Context("with a stub govulncheck on PATH", func() {
+		var logPath string
+
+		// The stub records each call's build environment and arguments, and
+		// exits 3 -- govulncheck's status for a reachable finding -- only for
+		// the linux_amd64 release scan, which runs first. PATH holds the stub
+		// alone, so no real govulncheck can answer instead, and the stub uses
+		// shell builtins only.
+		BeforeEach(func() {
+			dir := GinkgoT().TempDir()
+			logPath = filepath.Join(dir, "calls.log")
+			stub := "#!/bin/sh\n" +
+				`printf '%s|%s|%s|%s|%s\n' "$GOOS" "$GOARCH" "$CGO_ENABLED" "$GOEXPERIMENT" "$*" >>"$STUB_LOG"` + "\n" +
+				`if [ "$GOARCH" = amd64 ] && [ "$CGO_ENABLED" = 0 ] && [ -n "$STUB_FAIL" ]; then exit 3; fi` + "\n"
+			Expect(os.WriteFile(filepath.Join(dir, "govulncheck"), []byte(stub), 0o755)).To(Succeed())
+			GinkgoT().Setenv("PATH", dir)
+			GinkgoT().Setenv("STUB_LOG", logPath)
+			GinkgoT().Setenv("STUB_FAIL", "")
+			for _, name := range []string{"GOOS", "GOARCH", "CGO_ENABLED", "GOEXPERIMENT"} {
+				GinkgoT().Setenv(name, "")
+			}
+		})
+
+		expectedCalls := func() []string {
+			scans, _ := vulncheckScans(runtime.GOOS, runtime.GOARCH)
+			var lines []string
+			for _, sc := range scans {
+				lines = append(lines, strings.Join([]string{sc.env["GOOS"], sc.env["GOARCH"],
+					sc.env["CGO_ENABLED"], sc.env["GOEXPERIMENT"], strings.Join(sc.args, " ")}, "|"))
+			}
+			return lines
+		}
+
+		recordedCalls := func() []string {
+			src, err := os.ReadFile(logPath)
+			Expect(err).NotTo(HaveOccurred())
+			return strings.Split(strings.TrimSuffix(string(src), "\n"), "\n")
+		}
+
+		It("runs every scan in its own environment and passes when none finds anything", func() {
+			Expect(Dev{}.Vulncheck()).To(Succeed())
+			Expect(recordedCalls()).To(Equal(expectedCalls()))
+		})
+
+		It("fails on a reachable finding, naming the scan, and still runs the scans after it", func() {
+			GinkgoT().Setenv("STUB_FAIL", "1")
+			err := Dev{}.Vulncheck()
+			Expect(err).To(MatchError(ContainSubstring("the linux_amd64 release build:")))
+			Expect(err.Error()).NotTo(ContainSubstring("the linux_arm64 release build:"))
+			Expect(err.Error()).NotTo(ContainSubstring("the magefile:"))
+			Expect(recordedCalls()).To(Equal(expectedCalls()))
+		})
+	})
+
 	// The hint is only worth printing if it installs what CI runs. Renovate
 	// bumps all three copies in one PR only while its manager matches each of
 	// them, so check the copies and the manager together.
@@ -449,6 +503,56 @@ var _ = Describe("Dev.Vulncheck", func() {
 			matched = matched || re.MatchString(govulncheckInstall)
 		}
 		Expect(matched).To(BeTrue(), "renovate's govulncheck manager does not match %q", govulncheckInstall)
+	})
+})
+
+var _ = Describe("vulncheckScans", func() {
+	scanned := func(scans []vulncheckScan) []string {
+		var whats []string
+		for _, sc := range scans {
+			whats = append(whats, sc.what)
+		}
+		return whats
+	}
+
+	// The CI runner is linux/amd64, so the first entry is the coverage CI
+	// gets. Each pure-Go variant is scanned everywhere; a cgo variant only on
+	// a Linux host of its own architecture.
+	DescribeTable("scans each release variant this host can load, and names the rest",
+		func(hostOS, hostArch string, wantScanned, wantSkipped []string) {
+			scans, skipped := vulncheckScans(hostOS, hostArch)
+			Expect(scanned(scans)).To(Equal(wantScanned))
+			Expect(skipped).To(Equal(wantSkipped))
+		},
+		Entry("on linux/amd64, as in CI", "linux", "amd64",
+			[]string{"the linux_amd64 release build", "the linux_arm64 release build",
+				"the linux_amd64_fips release build", "the magefile"},
+			[]string{"linux_arm64_fips"}),
+		Entry("on linux/arm64", "linux", "arm64",
+			[]string{"the linux_amd64 release build", "the linux_arm64 release build",
+				"the linux_arm64_fips release build", "the magefile"},
+			[]string{"linux_amd64_fips"}),
+		Entry("on darwin/arm64", "darwin", "arm64",
+			[]string{"the linux_amd64 release build", "the linux_arm64 release build", "the magefile"},
+			[]string{"linux_amd64_fips", "linux_arm64_fips"}),
+	)
+
+	// A scan that inherited the host's GOARCH would load the wrong files for
+	// the variant it names, which is the gap scanning per variant closes.
+	It("loads each release variant under that variant's own build environment", func() {
+		scans, _ := vulncheckScans("linux", "amd64")
+		Expect(scans[1].env).To(Equal(map[string]string{"CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "arm64"}))
+		Expect(scans[2].env).To(Equal(map[string]string{"CGO_ENABLED": "1", "GOOS": "linux", "GOARCH": "amd64",
+			"GOEXPERIMENT": "boringcrypto"}))
+	})
+
+	// Without -show verbose, imported-only and module findings print as
+	// counts, so the advisory IDs never reach the log.
+	It("asks every scan to list findings it does not fail on", func() {
+		scans, _ := vulncheckScans("linux", "amd64")
+		for _, sc := range scans {
+			Expect(strings.Join(sc.args, " ")).To(HavePrefix("-show verbose "), sc.what)
+		}
 	})
 })
 

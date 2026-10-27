@@ -8806,11 +8806,12 @@ func (Dev) Lint() error {
 // bump moves all three, and a magefile spec fails if they disagree.
 const govulncheckInstall = "go install golang.org/x/vuln/cmd/govulncheck@v1.9.0"
 
-// Vulncheck runs govulncheck over every build that ships or runs a release,
-// teeing its output to .test-output/govulncheck.log. It fails on a
-// vulnerability the code can reach -- govulncheck's own exit status -- and
-// prints, without failing on, one that is only in an imported package or a
-// required module.
+// Vulncheck runs govulncheck over every release variant this host can load
+// and over the magefile, teeing its output to .test-output/govulncheck.log. It
+// fails on a vulnerability the code can reach -- govulncheck's own exit status
+// -- and lists, without failing on, one that is only in an imported package or
+// a required module. -show verbose is what lists those by ID; without it they
+// appear only as counts, and the exit status is the same either way.
 //
 // It is not part of dev:check, which needs no network: govulncheck reads
 // vuln.go.dev, so its verdict on unchanged code changes whenever an advisory
@@ -8820,18 +8821,7 @@ const govulncheckInstall = "go install golang.org/x/vuln/cmd/govulncheck@v1.9.0"
 // target exists only to run it, so a skip would pass having checked nothing,
 // and CI would read that as a clean scan.
 //
-// The builds scanned:
-//
-//   - The module for GOOS=linux with cgo off: the standard release binaries.
-//     The GOOS is set rather than inherited so a workstation scans what ships.
-//   - The magefile, which builds, signs and publishes releases. Its tag hides
-//     it from ./..., and it runs on the host, so it keeps the host's GOOS.
-//   - The FIPS build (cgo, GOEXPERIMENT=boringcrypto), which swaps in a
-//     different set of standard-library crypto packages. Loading it needs a
-//     Linux C toolchain, so other hosts skip it with a message; CI runs on
-//     Linux and always scans it.
-//
-// Test files are not scanned: none of them ship.
+// vulncheckScans says what is scanned. Test files are not: none of them ship.
 func (Dev) Vulncheck() error {
 	if _, err := exec.LookPath("govulncheck"); err != nil {
 		return fmt.Errorf("govulncheck not found on PATH; install it with:\n    %s", govulncheckInstall)
@@ -8848,21 +8838,10 @@ func (Dev) Vulncheck() error {
 	out := io.MultiWriter(os.Stdout, logFile)
 	errOut := io.MultiWriter(os.Stderr, logFile)
 
-	type scan struct {
-		what string
-		env  map[string]string
-		args []string
-	}
-	scans := []scan{
-		{"the release build", map[string]string{"GOOS": "linux", "CGO_ENABLED": "0"}, []string{"./..."}},
-		{"the magefile", nil, []string{"-tags", "mage", "."}},
-	}
-	if runtime.GOOS == "linux" {
-		scans = append(scans, scan{"the FIPS build",
-			map[string]string{"GOOS": "linux", "CGO_ENABLED": "1", "GOEXPERIMENT": "boringcrypto"},
-			[]string{"./..."}})
-	} else {
-		fmt.Fprintf(out, "SKIP: the FIPS build needs a Linux host with a C compiler to load; CI scans it\n")
+	scans, skipped := vulncheckScans(runtime.GOOS, runtime.GOARCH)
+	for _, name := range skipped {
+		fmt.Fprintf(out, "SKIP: the %s release build is a cgo build for another platform, "+
+			"which this host cannot load\n", name)
 	}
 
 	// Every scan runs, so one failure does not hide another's findings.
@@ -8874,6 +8853,57 @@ func (Dev) Vulncheck() error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// vulncheckScan is one govulncheck invocation: what it covers, the build
+// environment it loads the code under, and its arguments.
+type vulncheckScan struct {
+	what string
+	env  map[string]string
+	args []string
+}
+
+// vulncheckScans returns the scans Vulncheck runs on a hostOS/hostArch host,
+// and the release variants it cannot scan there.
+//
+// The release builds come from distVariants(), one scan per variant, so a
+// variant added there is scanned without anyone remembering to add it here.
+// Each scan loads the code under its variant's own GOOS and GOARCH: govulncheck
+// sees only the files those select, so a vulnerable symbol reached through
+// arm64-only files is invisible to an amd64 scan, and the reverse.
+//
+// The pure-Go variants load on any host. The cgo (FIPS) variants load only on
+// a Linux host of their own architecture, because loading runs cgo and that
+// needs a C compiler for the target. CI's runner is linux/amd64, so it scans
+// linux_amd64_fips and not linux_arm64_fips. The two build the same Go source
+// with GOEXPERIMENT=boringcrypto, and the linux_arm64 scan loads the arm64-only
+// files without it, so what CI leaves unscanned is the combination of the two:
+// a file selected only by arm64 and boringcrypto together. The variant's CC is
+// dropped: a cross compiler is what the variant needs to build, and it is no
+// use where the scan loads it natively.
+//
+// The magefile builds and packages every release artefact. Its build tag
+// hides it from ./..., and it runs on the host, so it keeps the host's
+// environment.
+func vulncheckScans(hostOS, hostArch string) (scans []vulncheckScan, skipped []string) {
+	for _, v := range distVariants() {
+		if v.env["CGO_ENABLED"] == "1" && (hostOS != "linux" || hostArch != v.env["GOARCH"]) {
+			skipped = append(skipped, v.name)
+			continue
+		}
+		env := maps.Clone(v.env)
+		delete(env, "CC")
+		scans = append(scans, vulncheckScan{
+			what: "the " + v.name + " release build",
+			env:  env,
+			args: []string{"-show", "verbose", "./..."},
+		})
+	}
+	scans = append(scans, vulncheckScan{
+		what: "the magefile",
+		args: []string{"-show", "verbose", "-tags", "mage", "."},
+	})
+	return scans, skipped
 }
 
 // Tidy runs go mod tidy and go fmt on any files that need it.
