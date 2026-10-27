@@ -203,8 +203,8 @@ linters:
       # Upstream: securego/gosec#1711 and #1712, fixed by securego/gosec#1733
       # ("fix(taint): make wide caller traversal deterministic", merged
       # 2026-09-04), which sorts the edges and raises the cap to 1024. That is
-      # in no gosec release yet: golangci-lint v2.13.2 pins gosec v2.28.0 and
-      # v2.14.0 pins gosec v2.29.0, neither of which carries it.
+      # in no gosec release yet: golangci-lint v2.13.2 pins gosec v2.28.0, and
+      # v2.14.0 and v2.15.0 both pin gosec v2.29.0. None of them carries it.
       # REMOVE THIS RULE once the pinned golangci-lint ships a gosec containing
       # that fix -- and with it verifyNolintlintCarveOut in magefile.go and its
       # specs in magefile_test.go, which exist only to make this rule's removal
