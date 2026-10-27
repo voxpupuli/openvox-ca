@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -58,16 +59,40 @@ const (
 // to avoid a slow/unavailable backend wedging the scrape indefinitely.
 const defaultGatherTimeout = 10 * time.Second
 
-// Collector implements prometheus.Collector, translating the CA's live state
-// into metrics on each scrape. It reads through the CA's StorageService, so it
+// staleSnapshotLimit is how long a failed gather may republish the last
+// successful one. Without it, one failed gather drops every storage-derived
+// series, and the expiry alerts' `for` clocks restart: a CA whose gather fails
+// more than once per clock never pages for an expiring certificate, and a CA
+// under load is the likeliest to be in that state (#435).
+//
+// An hour is the shipped mixin's expiryFor. A stale value cannot carry an
+// alert to firing on its own within that time, so all a stale snapshot can do
+// is keep an alert that is already pending or firing, and that is the purpose.
+// Past it the series drop as before, and absence again means the gather is
+// failing.
+const staleSnapshotLimit = time.Hour
+
+// Collector implements prometheus.Collector, translating the CA's state into
+// metrics on each scrape. It reads through the CA's StorageService, so it
 // observes whichever backend (filesystem, etcd, redis, SQL) the CA is using.
+// The in-process series are always current; the storage-derived ones are this
+// scrape's gather, or after a failed one the last successful gather's, for up
+// to staleSnapshotLimit.
 type Collector struct {
 	ca      *ca.CA
 	timeout time.Duration
+	now     func() time.Time
+
+	// mu guards the last successful gather, which a failed one republishes for
+	// up to staleSnapshotLimit. Collect can run concurrently, once per scraper.
+	mu          sync.Mutex
+	last        *snapshot
+	lastSuccess time.Time
 
 	// Descriptors, built once in NewCollector and reused on every scrape.
 	scrapeSuccess  *prometheus.Desc
 	scrapeDuration *prometheus.Desc
+	lastSuccessAt  *prometheus.Desc
 	caReady        *prometheus.Desc
 
 	crlUpdateFailures *prometheus.Desc
@@ -113,13 +138,23 @@ func NewCollector(c *ca.CA) *Collector {
 	return &Collector{
 		ca:      c,
 		timeout: defaultGatherTimeout,
+		now:     time.Now,
 		scrapeSuccess: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "collector", "scrape_success"),
 			"1 if the most recent CA metrics scrape succeeded, 0 otherwise.",
 			nil, nil),
 		scrapeDuration: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "collector", "scrape_duration_seconds"),
-			"Time taken to gather the CA, CRL and leaf certificate metrics.",
+			"Time taken to gather the storage-derived metrics: the CRL, delayed-revocation and "+
+				"leaf certificate series.",
+			nil, nil),
+		lastSuccessAt: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "collector", "last_success_timestamp_seconds"),
+			"When this replica last gathered its storage-derived metrics: the CRL, "+
+				"delayed-revocation and leaf certificate series. "+
+				"While openvoxca_collector_scrape_success is 0, those series are the ones "+
+				"gathered at this time, republished for up to an hour and then dropped. "+
+				"Absent until the first successful gather.",
 			nil, nil),
 		caReady: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "", "ca_ready"),
@@ -200,8 +235,9 @@ func NewCollector(c *ca.CA) *Collector {
 			prometheus.BuildFQName(namespace, "supersede", "pending"),
 			"Certificates a renewal has replaced that are still inside their overlap window and "+
 				"not yet revoked. Each one is a credential this CA still accepts even though "+
-				"something newer has taken its place, so this is the live measure of the exposure "+
-				"superseded_cert_revoke_after_sec buys. It returns to zero as the sweep drains "+
+				"something newer has taken its place, so this measures the exposure "+
+				"superseded_cert_revoke_after_sec buys. Read from storage, so after a failed gather "+
+				"it is the last successful one's value, for up to an hour. It returns to zero as the sweep drains "+
 				"the list; a value that does not fall means the sweep is not completing — check "+
 				"openvoxca_supersede_failures_total, which a failing pass raises once however many "+
 				"entries were due, and the log for 'Could not revoke superseded certificates'. "+
@@ -335,6 +371,7 @@ func NewCollector(c *ca.CA) *Collector {
 func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.scrapeSuccess
 	ch <- c.scrapeDuration
+	ch <- c.lastSuccessAt
 	ch <- c.caReady
 	ch <- c.crlUpdateFailures
 	ch <- c.crlSyncFailures
@@ -370,7 +407,8 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 // state under its own deadline and emits the corresponding metrics. A gather
 // failure is reported via openvoxca_collector_scrape_success rather than
 // aborting the whole /metrics response, so the Go/process/HTTP metrics still
-// scrape even when storage is momentarily unavailable.
+// scrape even when storage is momentarily unavailable, and the storage-derived
+// series are those of the last successful gather for up to staleSnapshotLimit.
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 	defer cancel()
@@ -460,22 +498,63 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 			c.ca.ManagedCerts[i].Spec.Subject)
 	}
 
-	if err != nil {
-		slog.Warn("Prometheus CA metrics scrape failed", "error", err)
-		ch <- prometheus.MustNewConstMetric(c.scrapeSuccess, prometheus.GaugeValue, 0)
-		return
-	}
-	ch <- prometheus.MustNewConstMetric(c.scrapeSuccess, prometheus.GaugeValue, 1)
-
-	ch <- prometheus.MustNewConstMetric(c.caReady, prometheus.GaugeValue, boolToFloat(snap.caReady))
-
-	if snap.haveCA {
+	// Readiness and the CA certificate are in-process state as well, so they
+	// too are emitted whatever the gather did. Below the error return they
+	// dropped out with the storage series, taking the CA expiry alerts' `for`
+	// clocks with them on every failed gather, for no reason: nothing here can
+	// be out of date. CACert is written once during Init and not mutated
+	// afterwards, so reading it after IsReady reports true is safe without
+	// holding the CA lock.
+	ready := c.ca.IsReady()
+	ch <- prometheus.MustNewConstMetric(c.caReady, prometheus.GaugeValue, boolToFloat(ready))
+	if cert := c.ca.CACert; ready && cert != nil {
 		ch <- prometheus.MustNewConstMetric(c.caInfo, prometheus.GaugeValue, 1,
-			snap.caCommonName, snap.caSerial, snap.caIssuer)
-		ch <- prometheus.MustNewConstMetric(c.caNotBefore, prometheus.GaugeValue, timestamp(snap.caNotBefore))
-		ch <- prometheus.MustNewConstMetric(c.caNotAfter, prometheus.GaugeValue, timestamp(snap.caNotAfter))
+			cert.Subject.CommonName, serialHex(cert.SerialNumber), cert.Issuer.CommonName)
+		ch <- prometheus.MustNewConstMetric(c.caNotBefore, prometheus.GaugeValue, timestamp(cert.NotBefore))
+		ch <- prometheus.MustNewConstMetric(c.caNotAfter, prometheus.GaugeValue, timestamp(cert.NotAfter))
 	}
 
+	published, lastSuccess := c.settle(snap, err)
+	if !lastSuccess.IsZero() {
+		ch <- prometheus.MustNewConstMetric(c.lastSuccessAt, prometheus.GaugeValue, timestamp(lastSuccess))
+	}
+	if err != nil {
+		ch <- prometheus.MustNewConstMetric(c.scrapeSuccess, prometheus.GaugeValue, 0)
+		if published == nil {
+			slog.Warn("Prometheus CA metrics scrape failed", "error", err)
+			return
+		}
+		slog.Warn("Prometheus CA metrics scrape failed; republishing the last successful gather",
+			"error", err, "gathered_at", lastSuccess.UTC().Format(time.RFC3339))
+	} else {
+		ch <- prometheus.MustNewConstMetric(c.scrapeSuccess, prometheus.GaugeValue, 1)
+	}
+	c.collectStored(ch, published)
+}
+
+// settle records a successful gather, or picks what a failed one republishes:
+// the last successful snapshot while it is younger than staleSnapshotLimit,
+// otherwise nothing. Once a snapshot is too old it is released rather than
+// kept, so a long outage does not hold a fleet's worth of rows in memory to no
+// purpose. lastSuccess survives that, being a fact about the past rather than
+// data that can go out of date, and is zero only before the first success.
+func (c *Collector) settle(snap snapshot, err error) (published *snapshot, lastSuccess time.Time) {
+	now := c.now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err == nil {
+		c.last, c.lastSuccess = &snap, now
+		return c.last, now
+	}
+	if c.last != nil && now.Sub(c.lastSuccess) > staleSnapshotLimit {
+		c.last = nil
+	}
+	return c.last, c.lastSuccess
+}
+
+// collectStored emits the series read from storage, from a snapshot that is
+// either this scrape's or, after a failed gather, the last successful one.
+func (c *Collector) collectStored(ch chan<- prometheus.Metric, snap *snapshot) {
 	if snap.haveCRL {
 		ch <- prometheus.MustNewConstMetric(c.crlNumber, prometheus.GaugeValue, snap.crlNumber)
 		ch <- prometheus.MustNewConstMetric(c.crlThisUpdate, prometheus.GaugeValue, timestamp(snap.crlThisUpdate))
@@ -520,17 +599,10 @@ type leafCert struct {
 	hasCert   bool // false for pending requests (no issued certificate)
 }
 
-// snapshot is the immutable view of CA state captured by a single scrape.
+// snapshot is the immutable view of stored CA state captured by a single
+// gather. Immutable matters: a failed gather republishes it, possibly from
+// several concurrent scrapes at once.
 type snapshot struct {
-	caReady bool
-
-	haveCA       bool
-	caCommonName string
-	caSerial     string
-	caIssuer     string
-	caNotBefore  time.Time
-	caNotAfter   time.Time
-
 	haveCRL         bool
 	crlNumber       float64
 	crlThisUpdate   time.Time
@@ -547,26 +619,13 @@ type snapshot struct {
 	leaves []leafCert
 }
 
-// gather reads the CA certificate, CRL and every known leaf certificate from
-// storage and returns them as a snapshot. It returns an error only for failures
-// that prevent enumerating certificates at all (e.g. the signed-cert listing
-// fails); a missing or unparseable CRL is tolerated and simply omits the CRL
-// metrics, since a freshly bootstrapped CA may not have published one yet.
+// gather reads the CRL and every known leaf certificate from storage and
+// returns them as a snapshot. It returns an error only for failures that
+// prevent enumerating certificates at all (e.g. the signed-cert listing fails);
+// a missing or unparseable CRL is tolerated and simply omits the CRL metrics,
+// since a freshly bootstrapped CA may not have published one yet.
 func (c *Collector) gather(ctx context.Context) (snapshot, error) {
 	var snap snapshot
-
-	snap.caReady = c.ca.IsReady()
-	// CACert is written once during Init and not mutated afterwards, so reading
-	// it after IsReady reports true is safe without holding the CA lock.
-	if snap.caReady && c.ca.CACert != nil {
-		cert := c.ca.CACert
-		snap.haveCA = true
-		snap.caCommonName = cert.Subject.CommonName
-		snap.caSerial = serialHex(cert.SerialNumber)
-		snap.caIssuer = cert.Issuer.CommonName
-		snap.caNotBefore = cert.NotBefore
-		snap.caNotAfter = cert.NotAfter
-	}
 
 	// Parse the CRL once. The set of revoked serials drives leaf state below, so
 	// we avoid CA.IsRevoked (which re-reads and re-parses each cert from storage).

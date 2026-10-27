@@ -168,7 +168,10 @@
     managedCertNeverIssuedFor: '1h',
 
     // 'for' durations applied to the expiry alerts to debounce flapping at the
-    // threshold boundary.
+    // threshold boundary. After a failed gather the exporter republishes its
+    // last successful one for up to an hour, so at 1h or more held data cannot
+    // carry an expiry alert to firing on its own. Shorter, it can: a threshold
+    // crossed during an outage may page on a certificate renewed meanwhile.
     expiryFor: '1h',
 
     // --- Client trust domains ---

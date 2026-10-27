@@ -71,8 +71,86 @@ the Unix epoch, the Prometheus convention for `*_timestamp_seconds` gauges.
 | Metric | Description |
 | --- | --- |
 | `openvoxca_ca_ready` | `1` when the CA has finished initialising, else `0`. |
-| `openvoxca_collector_scrape_success` | `1` if the last CA-state gather succeeded, else `0` (e.g. storage unavailable). |
-| `openvoxca_collector_scrape_duration_seconds` | Time taken to gather the CA, CRL and leaf metrics. |
+| `openvoxca_collector_scrape_success` | `1` if the last CA-state gather succeeded, else `0` (e.g. storage unavailable, or the gather overran its 10-second budget). |
+| `openvoxca_collector_scrape_duration_seconds` | Time taken to gather the storage-derived metrics: the CRL, delayed-revocation and leaf certificate series. |
+| `openvoxca_collector_last_success_timestamp_seconds` | When this replica last gathered from storage successfully. Absent until the first success, never `0`. While `scrape_success` is `0`, the storage-derived series below are the ones gathered at this time — see [When a gather fails](#when-a-gather-fails). Per replica: aggregate with `min` to ask whether any replica is stale, `max` whether all are, never `sum`. |
+
+#### When a gather fails
+
+A failed gather does not empty the storage-derived series. For up to an hour
+after the last successful gather, the exporter republishes that gather's values
+unchanged, with `openvoxca_collector_scrape_success` at `0`; after an hour they
+are dropped, as every failed gather dropped them before. The point is the
+expiry alerts: their `for` clocks restart whenever their series is missing from
+one evaluation, so a CA whose gather failed more than once an hour never paged
+for an expiring certificate, and a CA under load is the likeliest to be in that
+state. An hour is the mixin's `expiryFor`, so held data cannot carry a new
+expiry alert to firing on its own.
+
+**Held for up to an hour** (read from storage):
+
+- `openvoxca_crl_number`, `openvoxca_crl_this_update_timestamp_seconds`,
+  `openvoxca_crl_next_update_timestamp_seconds`,
+  `openvoxca_crl_revoked_certificates`
+- `openvoxca_crl_chain_next_update_timestamp_seconds`
+- `openvoxca_supersede_pending`
+- `openvoxca_leaf_certificate_info`,
+  `openvoxca_leaf_certificate_not_before_timestamp_seconds`,
+  `openvoxca_leaf_certificate_not_after_timestamp_seconds`,
+  `openvoxca_leaf_certificates`
+
+**Always live** (in-process state, published whatever the gather did):
+everything else, including `openvoxca_ca_ready`, the three
+`openvoxca_ca_certificate_*` series, `openvoxca_crl_cached_number`, every
+`*_failures_total` counter, the signing-bound and OCSP-index gauges,
+`openvoxca_managed_certificate_configured`, and the three `openvoxca_collector_*`
+series themselves.
+
+A rule that combines a held series with a live one sees mixed freshness during
+an outage, which is why the lists above go series by series. Two consequences
+are worth knowing:
+
+- `openvoxca_crl_number` is held while `openvoxca_crl_cached_number` is live,
+  so the two can appear to disagree during an outage. The stored number only
+  ever rises, so a held one is never above the real one, and
+  `OpenVoxCACRLStale` cannot raise a false alert from it. A lag that begins
+  during the outage stays hidden until it ends, as it did when the series
+  vanished.
+- Aggregating a held gauge across replicas with `max` can mask a live value
+  for up to an hour. One replica failing and holding 29 signed certificates
+  while another is live and genuinely reports 0 gives
+  `max(openvoxca_leaf_certificates{state="signed"})` = 29. This lengthens the
+  blind spot a rolling update already has (a new pod on a broken configuration
+  reports 0 while the old one still reports 29); it does not create one.
+
+**Do not gate alerting rules on freshness.** A held value can raise a false
+alert in only two ways. One is that the value held was already alarming when it
+was gathered, and silencing that is the wrong outcome. The other is a rule that
+compares a held timestamp with `time()` under a `for` shorter than the hour the
+value is held: the threshold can be crossed during the outage although the real
+value has moved on, by a renewal or a re-signed CRL. The shipped expiry rules
+rule that out with `expiryFor`; give a time-relative rule of your own a `for` of
+an hour or more for the same reason. `max(openvoxca_leaf_certificates{state="signed"})
+== 0 and on() max(openvoxca_ca_ready) == 1`, held at zero, keeps paging through
+an outage, because `openvoxca_ca_ready` stays live. Before the hold its left
+side vanished and a firing page resolved itself minutes into the outage. A
+freshness gate would bring that back. The shipped expiry alerts depend on the
+same property to carry their `for` clocks through an outage, while
+`OpenVoxCAScrapeFailing` pages for the outage itself. Where a rule must stay
+quiet for the whole of an outage, qualify it with `and on(instance)
+openvoxca_collector_scrape_success == 1`, as
+`OpenVoxCAManagedCertificateNeverIssued` does below.
+
+Freshness belongs in presentation instead. A dashboard panel showing a held
+gauge should say the data is stale rather than show a plausible number:
+
+```promql
+time() - min(openvoxca_collector_last_success_timestamp_seconds) > 300
+```
+
+`min`, because the question is whether *any* replica is serving held data: in
+the masking case above the live replica's recent timestamp would win a `max`,
+and the panel would read fresh while showing the held value.
 
 ### CA certificate
 
@@ -198,9 +276,14 @@ query, and `openvoxca_crl_sync_failures_total` for why it is stuck.
 > shipped `OpenVoxCACRLExpiringSoon` and `OpenVoxCACRLExpired` rules compare
 > `openvoxca_crl_next_update_timestamp_seconds` against `time()` and match
 > nothing when the series is missing. Pair them with a per-instance presence
-> check, e.g. `openvoxca_ca_ready == 1 unless on(instance)
-> openvoxca_crl_next_update_timestamp_seconds`; bare `absent()` will not fire
-> while any other replica still reports the series.
+> check, e.g. `(openvoxca_ca_ready == 1 unless on(instance)
+> openvoxca_crl_next_update_timestamp_seconds) and on(instance)
+> openvoxca_collector_scrape_success == 1`; bare `absent()` will not fire
+> while any other replica still reports the series. The `scrape_success`
+> qualifier is the one `OpenVoxCACRLStale` uses, for the same reason:
+> `openvoxca_ca_ready` stays published through a failed gather while the CRL
+> gauges are dropped once the hour's hold runs out, so without it the check
+> would page alongside `OpenVoxCAScrapeFailing` for the same outage.
 
 The four CRL gauges above describe the **first block of the stored blob**, which
 is normally this CA's own CRL and not always: a hand-assembled blob can lead with
@@ -481,8 +564,9 @@ found to be wrong without it:
 - `and on(instance) ... scrape_success == 1`, because the two sides come from
   different places. The configured series is built from the CA's own
   configuration and is published even when the gather fails; the leaf series are
-  read from storage and vanish together. Without the qualifier a storage outage
-  matches every configured entry, healthy ones included, an hour into an outage
+  read from storage, held for an hour after the last successful gather and then
+  dropped together. Without the qualifier a storage outage matches every
+  configured entry, healthy ones included, once the hold runs out, in an outage
   `OpenVoxCAScrapeFailing` is already paging for.
 - `state!="revoked"`, because a failed store write does not leave the new
   certificate in place: the CA revokes what it has just issued and restores the
@@ -638,8 +722,9 @@ in it is still admitting certificates the rest of the fleet has revoked.
 The second arm matters as much as the first: a replica whose stored CRL cannot
 be read or parsed publishes no `openvoxca_crl_number` at all, so the subtraction
 alone would go quiet in exactly the case worth paging on. It is qualified on a
-successful scrape so that arm covers only the CRL being unreadable — a storage
-outage drops the same series and is already paged by `OpenVoxCAScrapeFailing`.
+successful scrape so that arm covers only the CRL being unreadable. A storage
+outage holds the stored number for an hour and then drops it too, in an outage
+`OpenVoxCAScrapeFailing` is already paging for.
 This is the expression the mixin's `OpenVoxCACRLStale` rule uses, modulo its
 target selector.
 
