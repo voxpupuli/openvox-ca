@@ -784,7 +784,7 @@ Per-issuer freshness is reported as
 separate from `openvoxca_crl_next_update_timestamp_seconds`, which continues to
 mean *this CA's own* CRL. An expiring upstream CRL is fixed at the parent CA,
 not here, so it gets its own alert with its own runbook — see the
-[mixin](../mixin/). Four counters cover what would otherwise be one warning per
+[mixin](https://github.com/voxpupuli/openvox-ca/tree/main/mixin). Four counters cover what would otherwise be one warning per
 cycle in the log, and they are separate because their remedies are:
 `openvoxca_crl_chain_refresh_failures_total` for a file that could not be read or
 parsed (fix the file or its mount); `openvoxca_crl_chain_discarded_total` for a

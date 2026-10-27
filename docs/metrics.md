@@ -6,7 +6,7 @@ HTTP request metrics expected of a Go web service, plus CA-specific series
 describing the **CA certificate**, its **CRL**, and every known (non-deleted)
 **leaf certificate** — including issue/expiry timestamps and issuance status.
 
-A ready-to-import [Jsonnet alerting mixin](../mixin/) is included; see
+A ready-to-import [Jsonnet alerting mixin](https://github.com/voxpupuli/openvox-ca/tree/main/mixin) is included; see
 [Alerting](#alerting) for what it covers.
 
 ## Enabling the exporter
@@ -656,7 +656,7 @@ is stored. See
 
 ## Alerting
 
-See the [`mixin/`](../mixin/) directory for the Jsonnet monitoring mixin and
+See the [`mixin/`](https://github.com/voxpupuli/openvox-ca/tree/main/mixin) directory for the Jsonnet monitoring mixin and
 instructions for rendering or importing it. It alerts on exporter availability,
 CA/CRL/leaf expiry, pending requests, CRL update failures
 (`openvoxca_crl_update_failures_total`), a replica whose CRL has fallen behind

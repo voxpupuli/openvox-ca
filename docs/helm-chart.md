@@ -1,13 +1,13 @@
 # Deploying with Helm
 
 The `openvox-ca` Helm chart deploys the CA on Kubernetes. It is maintained in
-this repository under [`charts/openvox-ca`](../charts/openvox-ca) and released
+this repository under [`charts/openvox-ca`](https://github.com/voxpupuli/openvox-ca/tree/main/charts/openvox-ca) and released
 in lockstep with the server: the chart's `version` and `appVersion` are always
 the release version, so chart `0.9.0` deploys openvox-ca `0.9.0` and defaults
 to that release's image.
 
 This is the narrative guide. The exhaustive values table is the
-[chart's own README](../charts/openvox-ca/README.md); the settings you place in
+[chart's own README](https://github.com/voxpupuli/openvox-ca/blob/main/charts/openvox-ca/README.md); the settings you place in
 `config` are documented in [configuring the server](configuration.md).
 
 ## Installing
@@ -659,7 +659,7 @@ networkPolicy:
     - monitoring
 ```
 
-A [Jsonnet alerting mixin](../mixin/) ships with the project for the expiry and
+A [Jsonnet alerting mixin](https://github.com/voxpupuli/openvox-ca/tree/main/mixin) ships with the project for the expiry and
 export-failure alerts. Its selector is a fixed `job="openvox-ca"`, and the
 chart leaves `metrics.serviceMonitor.jobLabel` empty so the Prometheus Operator
 derives `job` from the Service name.

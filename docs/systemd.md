@@ -13,7 +13,7 @@ None of it needs configuration. The protocol is driven entirely by `$NOTIFY_SOCK
 
 A ready-to-use unit ships in every [release tarball](../README.md#release-tarballs), alongside the two binaries.
 
-The copy in the repository, [`packaging/systemd/openvox-ca.service`](../packaging/systemd/openvox-ca.service), is a **template** rather than an installable file: its `ExecStart` carries a placeholder that is substituted per channel, because a tarball is extracted by hand into `/usr/local` and a package owns `/usr/bin`. Building from source? `mage build:unit /usr/local/bin` renders it to `dist/openvox-ca.service`; `mage build:all` still puts the binaries in `bin/`.
+The copy in the repository, [`packaging/systemd/openvox-ca.service`](https://github.com/voxpupuli/openvox-ca/blob/main/packaging/systemd/openvox-ca.service), is a **template** rather than an installable file: its `ExecStart` carries a placeholder that is substituted per channel, because a tarball is extracted by hand into `/usr/local` and a package owns `/usr/bin`. Building from source? `mage build:unit /usr/local/bin` renders it to `dist/openvox-ca.service`; `mage build:all` still puts the binaries in `bin/`.
 
 Download, verify and extract a tarball as the README describes, then, from the extracted directory:
 

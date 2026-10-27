@@ -121,7 +121,7 @@ the same treatment as a bind mount.
 
 ### Compose
 
-The [`compose.yml`](../compose.yml) at the repository root is the equivalent
+The [`compose.yml`](https://github.com/voxpupuli/openvox-ca/blob/main/compose.yml) at the repository root is the equivalent
 Docker/Podman Compose deployment: edit `--hostname`, then `docker compose up
 -d` (or `podman-compose up -d`). The `test/compose*.yml` files, by contrast,
 are the integration-test topologies — they build throwaway images from the
