@@ -882,7 +882,8 @@ Group access is deliberately allowed, so that a store owned by a Unix group is
 reachable by that group without the CA widening anything afterwards — which it
 will not do, since it never changes the mode of a file it did not create. If you
 do not want it, set a umask: `0077` gives `0600` and nothing in the server
-objects.
+objects. The shipped systemd unit already does; see
+[systemd](systemd.md#hardening).
 
 That group bit is not what makes a Kubernetes `fsGroup` volume work: the
 kubelet ORs group access in at every mount whatever the file was created as, so

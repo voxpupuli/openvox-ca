@@ -157,6 +157,12 @@ PrivateDevices=yes
 ProtectSystem=strict
 ProtectHome=yes
 ProtectProc=invisible
+# Left off, because hiding the system-wide part of /proc costs two things.
+# Without /proc/sys/net/core/somaxconn, Go gives every listener a backlog of
+# 128 rather than the host's setting (4096 by default). And the exporter's
+# process_start_time_seconds needs the boot time from /proc/stat, so that
+# series disappears without an error.
+#ProcSubset=pid
 ProtectClock=yes
 ProtectHostname=yes
 ProtectKernelLogs=yes
@@ -167,6 +173,19 @@ RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
+# No mapping may be writable and executable, at once or one after the other.
+# Go needs none: it has no JIT, and its binaries carry a non-executable stack
+# -- the FIPS build, which links glibc and BoringCrypto, included.
+MemoryDenyWriteExecute=yes
+# Group and world bits are masked from the mode anything is created with.
+# Most files openvox-ca writes get their mode set after creation, where a
+# umask does not reach, so what this narrows today is the directories it
+# creates under the CA directory, 0750 to 0700, and an SQLite store and its
+# sidecars, 0640 under systemd's default umask to 0600 -- group access that
+# this account, whose uid does not change between starts, has no use for. The CA directory itself exists
+# before the service starts and keeps its mode. This is here for the code
+# path that creates something wider than it should.
+UMask=0077
 # RemoveIPC= is deliberately absent, and must stay absent.
 #
 # It removes every System V and POSIX IPC object owned by the unit's UID when

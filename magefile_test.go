@@ -4834,6 +4834,12 @@ const firstBootUnit = "packaging/systemd/openvox-ca-first-boot.service"
 // occurrence of a key kept: systemd treats a repeated directive as additive
 // for some settings and last-wins for others, and a spec that read only the
 // first would pass for a unit that overrode it two lines later.
+//
+// It parses as systemd does in the two respects a spec can trip over: ';'
+// starts a comment as '#' does, and whitespace around '=' is not part of the
+// key or the value. Without the second, `ProcSubset = pid` -- live to systemd
+// -- would be recorded under "ProcSubset ", and every NotTo(HaveKey) spec here
+// would pass with the directive switched on.
 func unitDirectives(path string) (map[string][]string, error) {
 	body, err := os.ReadFile(path)
 	if err != nil {
@@ -4842,14 +4848,15 @@ func unitDirectives(path string) (map[string][]string, error) {
 	out := map[string][]string{}
 	for _, line := range strings.Split(string(body), "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "[") {
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "[") {
 			continue
 		}
 		k, v, ok := strings.Cut(line, "=")
 		if !ok {
 			continue
 		}
-		out[k] = append(out[k], v)
+		k = strings.TrimSpace(k)
+		out[k] = append(out[k], strings.TrimSpace(v))
 	}
 	return out, nil
 }
@@ -4953,6 +4960,40 @@ var _ = Describe("the provisioning oneshot's unit", func() {
 		Entry("the oneshot", firstBootUnit),
 	)
 
+	// The values themselves, which the drift spec below cannot see: it passes
+	// for two units that both loosen a directive together. UMask=0077 takes
+	// the group access off the directories the CA creates and an SQLite
+	// store, which the service comment accounts for -- so a change here is a
+	// decision to revisit, not a tidy-up.
+	DescribeTable("sets the confinement chosen for a key-holding process",
+		func(path, key, want string) {
+			d, err := unitDirectives(path)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(d).To(HaveKeyWithValue(key, []string{want}), "%s: %s", path, key)
+		},
+		Entry("the service forbids W+X mappings", filepath.Join("packaging", "systemd", distUnitFile), "MemoryDenyWriteExecute", "yes"),
+		Entry("the service masks group and world access at creation", filepath.Join("packaging", "systemd", distUnitFile), "UMask", "0077"),
+		Entry("the oneshot forbids W+X mappings", firstBootUnit, "MemoryDenyWriteExecute", "yes"),
+		Entry("the oneshot masks group and world access at creation", firstBootUnit, "UMask", "0077"),
+	)
+
+	// ProcSubset=pid looks like free hardening and is not. It hides
+	// /proc/sys/net/core/somaxconn, so Go caps every listener's backlog at
+	// 128, and /proc/stat, so the exporter's process_start_time_seconds
+	// vanishes without an error. The service carries it commented out with
+	// those costs beside it; a hardening sweep that switches it on in either
+	// unit is the regression this catches.
+	DescribeTable("leaves ProcSubset unset, which would cost the backlog and a metric",
+		func(path string) {
+			d, err := unitDirectives(path)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(d).NotTo(HaveKey("ProcSubset"),
+				"%s sets ProcSubset, which caps the listen backlog and drops process_start_time_seconds", path)
+		},
+		Entry("the service", filepath.Join("packaging", "systemd", distUnitFile)),
+		Entry("the oneshot", firstBootUnit),
+	)
+
 	// The oneshot handles the CA private key for as long as it takes to sign,
 	// so it is no less sensitive than the service -- and the two hardening
 	// blocks are maintained by hand in two files. Drift here is silent: the
@@ -4966,6 +5007,7 @@ var _ = Describe("the provisioning oneshot's unit", func() {
 			"ProtectHostname", "ProtectKernelLogs", "ProtectKernelModules",
 			"ProtectKernelTunables", "ProtectControlGroups", "RestrictNamespaces",
 			"RestrictRealtime", "RestrictSUIDSGID", "LockPersonality",
+			"MemoryDenyWriteExecute", "UMask",
 			"RestrictAddressFamilies", "SystemCallArchitectures", "SystemCallFilter",
 			"SystemCallErrorNumber", "CapabilityBoundingSet", "AmbientCapabilities",
 		}
