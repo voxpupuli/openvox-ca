@@ -105,10 +105,11 @@ version is `v0.*`, because a `0.x` major carries no compatibility promise.
 ## The machinery
 
 Three workflows fire off the same tag push. None re-runs the CI suite — each
-starts with the shared verify gate described below, which checks that CI
-already passed. Release and Container images then run independently; the Helm
-chart build waits for the alpine image before publishing, so that a published
-chart can never name an image that does not exist.
+starts with the shared verify gate described below, which checks that the
+commit already passed both CI and the container image builds on `main`.
+Release and Container images then run independently; the Helm chart build
+waits for the alpine image before publishing, so that a published chart can
+never name an image that does not exist.
 
 | Workflow | File | What it does on a `v*` tag |
 | --- | --- | --- |
@@ -121,11 +122,14 @@ chart can never name an image that does not exist.
 > [`verify-release-tag`](../../.github/actions/verify-release-tag/action.yml)
 > gate: the tag must equal `"v" +` the `internal/version` constant, the Helm
 > chart's `version` and `appVersion` must equal it too, and the tagged commit
-> must already have a passing *CI success* check run — i.e. it went green on
-> `main`. Tagging an unprepared, unmerged, or red commit fails the gate instead
-> of publishing. (The artefact builds themselves are also exercised on every PR
-> by CI's per-variant *Release artefact build* jobs, and the chart by its
-> *Helm chart* job. **The packaging step is the exception**: nothing runs
+> must be reachable from `main` and already have a passing run of each check
+> `main`'s ruleset requires — *CI success* and *Container images success* —
+> from GitHub Actions' push runs on `main` itself, i.e. it went green on
+> `main`. A merged PR's head commit does not qualify, though it is an ancestor
+> of `main` and passed its own PR runs: `main` never built that tree. Tagging an unprepared,
+> unmerged, or red commit fails the gate instead of publishing. (The artefact
+> builds themselves are also exercised on every PR by CI's per-variant
+> *Release artefact build* jobs, and the chart by its *Helm chart* job. **The packaging step is the exception**: nothing runs
 > `mage build:packages` on a pull request, so a green CI run says nothing
 > about it, and a packaging defect would first appear on a tag. Adding that
 > leg is [#254](https://github.com/voxpupuli/openvox-ca/issues/254).)
@@ -164,13 +168,13 @@ chart can never name an image that does not exist.
    ```
 
    Two aggregate jobs must be green: *CI success* (`ci.yml`) and *Container
-   images success* (`container-images.yml`). The verify gate checks only *CI
-   success* on the tagged commit, so a commit without it cannot be released by
-   accident, but nothing checks the images for you. A commit whose image build
-   failed on `main` passes the gate and fails again in the tag's image build:
-   the Release workflow has published by then, and the Helm chart workflow
-   waits 30 minutes for the Alpine image and fails without publishing, until
-   it is re-run once the images exist. Wait for both before tagging.
+   images success* (`container-images.yml`). The verify gate refuses a tag
+   whose commit lacks a passing run of either. A later merge cancels a commit's
+   CI run on `main` if it has not finished, and replaces a Container images run
+   still waiting to start, leaving the commit without one or both; so tag the
+   commit whose runs completed, normally the tip. A tag pushed before they
+   finish needs no re-tag: once both pass, re-run the tag's failed workflows,
+   and the gate reads the commit's checks afresh.
 
 3. **Check the tree builds the release artefacts.** This catches
    cross-compilation breakage before the workflow does:
@@ -222,6 +226,11 @@ chart can never name an image that does not exist.
    will claim the `latest` container tag.
 
 ## Cutting the release
+
+`<commit-sha>` is the release PR's merge commit on `main`, normally
+`origin/main` itself. Not the release branch's head, which is where
+`mage release:prepare` leaves your checkout: a bare `git tag` there tags a
+commit `main` never built, and the gate refuses it.
 
 ```console
 $ git fetch origin
@@ -429,7 +438,8 @@ process end to end — version-bump PR, merge, green CI, tag:
 $ git push <fork-remote> main            # fork main must match what you'll tag
 $ OPENVOX_CA_RELEASE_REMOTE=<fork-remote> mage release:prepare 0.9.0-test1
 # merge the PR it opens on the fork, wait for CI on the fork's main to go
-# green (the verify gate checks for a passing "CI success" run), then:
+# green (the verify gate checks for passing "CI success" and "Container
+# images success" runs), then:
 $ git fetch <fork-remote>
 $ git tag -a v0.9.0-test1 <fork-remote>/main -m "release rehearsal"
 $ git push <fork-remote> v0.9.0-test1

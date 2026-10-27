@@ -46,6 +46,7 @@ on:
 permissions:
   contents: read
   checks: read  # verify-release-tag reads the tagged commit's check runs
+  actions: read  # ... and the workflow runs that tie them to a push to main
 
 # Cancel superseded PR runs, but never cancel a release/tag build mid-flight.
 concurrency:
@@ -90,10 +91,11 @@ jobs:
 
   # -- Gate release-tag builds like the Release workflow ----------------------─
   # On v* tags only: the tag must match the internal/version constant and the
-  # tagged commit must have gone green in CI, so a bad tag cannot publish
-  # versioned images either. On every other event the steps are skipped and
-  # the job passes in seconds, existing only so `build` can depend on it
-  # unconditionally.
+  # tagged commit must have passed every check main's ruleset requires, this
+  # workflow's own aggregate included, in a push run on main; see the action.
+  # So a bad tag cannot publish versioned images either. On every other event
+  # the steps are skipped and the job passes in seconds, existing only so
+  # `build` can depend on it unconditionally.
   verify-tag:
     name: Verify release tag
     runs-on: ubuntu-latest

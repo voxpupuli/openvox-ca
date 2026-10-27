@@ -54,6 +54,7 @@ on:
 permissions:
   contents: read
   checks: read  # verify-release-tag reads the tagged commit's check runs
+  actions: read  # ... and the workflow runs that tie them to a push to main
 
 # Never cancel a release build mid-flight; superseding a main push is fine.
 concurrency:
@@ -63,7 +64,8 @@ concurrency:
 jobs:
   # -- Gate release-tag publishes like the Release workflow -------------------─
   # On v* tags only: the tag must match internal/version *and* the chart's own
-  # version/appVersion, and the tagged commit must have gone green in CI. On
+  # version/appVersion, and the tagged commit must have passed every check
+  # main's ruleset requires in a push run on main; see the action. On
   # any other event the steps skip and the job passes in seconds, existing only
   # so `publish` can depend on it unconditionally.
   verify-tag:
