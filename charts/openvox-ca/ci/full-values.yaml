@@ -29,7 +29,7 @@ verbosity: 1
 
 config:
   storage_backend: etcd
-  etcd_endpoints: https://etcd-0:2379,https://etcd-1:2379
+  etcd_endpoints: [https://etcd-0:2379, https://etcd-1:2379]
   etcd_tls_ca_file: /run/secrets/etcd/ca.crt
   ca_key_provider: openbao
   openbao:
