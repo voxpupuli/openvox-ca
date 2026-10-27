@@ -100,7 +100,7 @@ func NewInCluster(cfg Config, src MaterialSource, m *Metrics) (*Exporter, error)
 	// Only resolve the pod namespace if some target relies on it; otherwise a
 	// missing namespace file should not block export.
 	var defaultNS string
-	if cfg.needsDefaultNamespace() {
+	if needsDefaultNamespace(&cfg) {
 		ns, err := k8sclient.PodNamespace()
 		if err != nil {
 			return nil, fmt.Errorf("resolving default namespace for a target without an explicit namespace: %w", err)
@@ -112,7 +112,7 @@ func NewInCluster(cfg Config, src MaterialSource, m *Metrics) (*Exporter, error)
 
 // needsDefaultNamespace reports whether any target omits its namespace and so
 // depends on the pod's own namespace being resolvable.
-func (c *Config) needsDefaultNamespace() bool {
+func needsDefaultNamespace(c *Config) bool {
 	for i := range c.Targets {
 		if c.Targets[i].Metadata.Namespace == "" {
 			return true
@@ -247,10 +247,10 @@ func (e *Exporter) applyTarget(ctx context.Context, t *Target, certPEM, crlPEM [
 
 	switch t.Kind {
 	case KindSecret:
-		_, err := e.client.CoreV1().Secrets(ns).Apply(ctx, t.buildSecretApply(ns, certPEM, crlPEM), opts)
+		_, err := e.client.CoreV1().Secrets(ns).Apply(ctx, buildSecretApply(t, ns, certPEM, crlPEM), opts)
 		return err
 	case KindConfigMap:
-		_, err := e.client.CoreV1().ConfigMaps(ns).Apply(ctx, t.buildConfigMapApply(ns, certPEM, crlPEM), opts)
+		_, err := e.client.CoreV1().ConfigMaps(ns).Apply(ctx, buildConfigMapApply(t, ns, certPEM, crlPEM), opts)
 		return err
 	default:
 		// Unreachable after Validate, but fail loudly rather than silently skip.

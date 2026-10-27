@@ -5055,7 +5055,7 @@ type chartRenderCase struct {
 }
 
 // inlineCredentialSources are the files that declare the server's config keys,
-// relative to the repository root. internal/k8sexport/config.go declares the
+// relative to the repository root. internal/k8sexport/exportconfig declares the
 // kubernetes_export block too, but only export targets: the exporter
 // authenticates with the pod's ServiceAccount, so no credential lives there.
 //

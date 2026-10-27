@@ -22,13 +22,13 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-var _ = Describe("Config.needsDefaultNamespace", func() {
+var _ = Describe("needsDefaultNamespace", func() {
 	It("is false when every target sets its own namespace", func() {
 		cfg := Config{Targets: []Target{
 			{Metadata: Metadata{Name: "a", Namespace: "ns1"}},
 			{Metadata: Metadata{Name: "b", Namespace: "ns2"}},
 		}}
-		Expect(cfg.needsDefaultNamespace()).To(BeFalse())
+		Expect(needsDefaultNamespace(&cfg)).To(BeFalse())
 	})
 
 	It("is true when any target omits its namespace", func() {
@@ -36,7 +36,7 @@ var _ = Describe("Config.needsDefaultNamespace", func() {
 			{Metadata: Metadata{Name: "a", Namespace: "ns1"}},
 			{Metadata: Metadata{Name: "b"}},
 		}}
-		Expect(cfg.needsDefaultNamespace()).To(BeTrue())
+		Expect(needsDefaultNamespace(&cfg)).To(BeTrue())
 	})
 })
 

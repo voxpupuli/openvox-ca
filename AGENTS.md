@@ -197,8 +197,8 @@ Conventions:
   not this matrix, and most cells here have no counterpart there.
 - `internal/api/authseam_test.go` is the second structural gate in that package,
   and it no longer covers only that package. It parses the non-test files of
-  every package in `guardedPackages` — `internal/api` and `internal/certstore`
-  today — and fails if any of them names `AuthGrant`, `PpCliAuth`,
+  every package in `guardedPackages` — `internal/api`, `internal/certstore`
+  and `internal/certstore/certconfig` today — and fails if any of them names `AuthGrant`, `PpCliAuth`,
   `GenerateOptions` or `GenerateWithOptions`: the in-process seam for minting a
   `pp_cli_auth` credential, which the CSR path deliberately strips so that no
   request can ask for one. If it fires, revisit the security argument in
