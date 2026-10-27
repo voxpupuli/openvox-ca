@@ -98,8 +98,7 @@ key and code running in the frontend. Both children run as the same user, and
 the frontend opens the same store as the signer, with the same credentials, to
 serve requests. The stored key (`private/ca_key.pem` on the filesystem backend,
 the `ca_key` blob on the others) is readable to it, and so is anything else that
-user can read: a passphrase file, the auto-generated passphrase, and the
-signer's environment.
+user can read: a passphrase file and the signer's environment.
 
 Two things change that:
 
@@ -264,7 +263,35 @@ openvox-ca-ctl setup --cadir /var/lib/puppet-ca --encrypt-ca-key \
 
 Existing CAs with unencrypted keys continue to work without changes, and
 `--encrypt-ca-key` affects new CA bootstraps only: it does not re-encrypt a key
-that already exists.
+that already exists. A CA started with `encrypt_ca_key` set whose stored key is
+plaintext logs a warning saying so, once per start, from the process that loads
+the key. A key held by OpenBao Transit is not in the store, so it never
+triggers one.
+
+There is no way yet to encrypt an existing key in place. `openvox-ca-ctl
+import` writes the plaintext key it is given exactly as given, and `migrate`
+copies the stored key byte for byte. Three options remain:
+
+1. Keep the plaintext key and unset `encrypt_ca_key`. That stops the warning
+   and changes nothing else.
+2. Move the key into OpenBao Transit by importing it there (BYOK; see
+   [provisioning the Transit key](openbao-transit.md#provisioning-the-transit-key))
+   and set `ca_key_provider: openbao`. The CA and every certificate it issued
+   are kept: the server checks at startup that the Transit key matches the CA
+   certificate. Then delete the plaintext key from the store. The server no
+   longer reads it, so nothing warns about it either.
+   [Removing an orphaned CA key](storage-backends.md#removing-an-orphaned-ca-key)
+   shows where it lives on each backend; here, unlike there, removing it does
+   not retire the CA, because Transit holds the same key.
+3. Bootstrap a new CA with the setting on. Its key is created encrypted, but
+   every certificate the old CA signed has to be reissued.
+
+None of these reaches copies already taken: a backup, snapshot or replica made
+while the key was plaintext still holds a usable CA key. Nor does deleting the
+key reach the store's own history on every backend: etcd keeps earlier
+revisions until it is compacted, a Redis append-only file keeps the write until
+it is rewritten, and a database can keep a deleted row's bytes in its log and
+free pages until they are reused.
 
 Loading handles both encrypted and unencrypted PEM files, deciding from the PEM
 itself rather than from the setting. An encrypted key therefore needs its
