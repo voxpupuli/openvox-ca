@@ -104,6 +104,62 @@ var _ = Describe("migrate command", func() {
 		}
 	})
 
+	// The docs promise these are ordinary server config files, so migrate
+	// accepts every server setting even though it uses only the storage ones,
+	// and refuses what the server would refuse (#436).
+	Describe("its config files", func() {
+		It("accepts a whole server config, nested blocks included", func() {
+			cfg := filepath.Join(GinkgoT().TempDir(), "server.yaml")
+			writeFile(cfg, `
+cadir: /var/lib/openvox-ca
+host: 0.0.0.0
+port: 8140
+tls_cert: /etc/openvox-ca/tls.crt
+encrypt_ca_key: true
+storage_backend: sqlite
+sql_dsn: file:/var/lib/openvox-ca/ca.db
+ca_key_provider: openbao
+openbao:
+  addr: https://bao:8200
+kubernetes_export:
+  targets:
+    - kind: Secret
+      cert: true
+      metadata:
+        name: trust
+managed_certs:
+  - certname: db
+    store:
+      files:
+        cert: /tmp/db.crt
+        key: /tmp/db.key
+`)
+			c, err := loadMigrateConfig(cfg)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(c.StorageBackend).To(Equal("sqlite"))
+			Expect(c.SQLDSN).To(Equal("file:/var/lib/openvox-ca/ca.db"))
+			Expect(c.CADir).To(Equal("/var/lib/openvox-ca"))
+		})
+
+		// A misspelt storage_backend used to fall back to the filesystem
+		// backend in silence, so the copy went to cadir instead of the
+		// database the file described.
+		It("refuses a misspelt storage key, naming the file and the key", func() {
+			cfgDir := GinkgoT().TempDir()
+			srcCfg := filepath.Join(cfgDir, "src.yaml")
+			dstCfg := filepath.Join(cfgDir, "dst.yaml")
+			fsConfig(srcCfg, GinkgoT().TempDir())
+			writeFile(dstCfg, "cadir: /tmp/x\nstorage_backnd: postgres\n")
+
+			cmd := newMigrateCmd()
+			cmd.SetArgs([]string{"--source-config", srcCfg, "--dest-config", dstCfg})
+			Expect(cmd.Execute()).To(MatchError(And(
+				ContainSubstring("destination config"),
+				ContainSubstring(dstCfg),
+				ContainSubstring(`line 2: unknown key "storage_backnd"`))))
+		})
+	})
+
 	It("refuses a non-empty destination unless forced", func() {
 		srcDir := GinkgoT().TempDir()
 		dstDir := GinkgoT().TempDir()

@@ -29,7 +29,7 @@ Task. Invoke targets with `go run mage.go <Target>` or the `mage` binary:
 | `mage test:backendsRedisGo` | Redis backend Go integration suite (build tag `redis_integration`), under `-race` — needs cgo and a C compiler |
 | `mage test:backendsOpenBao` | OpenBao Transit signer integration suite (build tag `openbao_integration`, `test/compose-backends-openbao.yml`) |
 | `mage chart:lint` | Run `helm lint --strict` over the Helm chart, once per fixture in `charts/openvox-ca/ci/` |
-| `mage chart:validate` | Lint the Helm chart and check every rendered fixture against the Kubernetes schemas (needs `helm` and `kubeconform`; caches the remote schemas under `.test-output/kubeconform-cache/`, which `mage dev:clean` removes) |
+| `mage chart:validate` | Lint the Helm chart, check every rendered fixture against the Kubernetes schemas, and strict-decode each rendered `config.yaml` against the server's schema with `go run ./test/chartconfig` (needs `helm` and `kubeconform`; caches the remote schemas under `.test-output/kubeconform-cache/`, which `mage dev:clean` removes) |
 | `mage chart:test` | Assert what the chart renders, and that each precondition refuses what it claims to |
 | `mage chart:version` | Assert `charts/openvox-ca/Chart.yaml` still tracks `internal/version` |
 | `mage chart:package` | Package the Helm chart to `dist/openvox-ca-<version>.tgz`, as CI does before the publish workflow pushes it |
@@ -197,8 +197,8 @@ Conventions:
   not this matrix, and most cells here have no counterpart there.
 - `internal/api/authseam_test.go` is the second structural gate in that package,
   and it no longer covers only that package. It parses the non-test files of
-  every package in `guardedPackages` — `internal/api` and `internal/certstore`
-  today — and fails if any of them names `AuthGrant`, `PpCliAuth`,
+  every package in `guardedPackages` — `internal/api`, `internal/certstore`
+  and `internal/certstore/certconfig` today — and fails if any of them names `AuthGrant`, `PpCliAuth`,
   `GenerateOptions` or `GenerateWithOptions`: the in-process seam for minting a
   `pp_cli_auth` credential, which the CSR path deliberately strips so that no
   request can ask for one. If it fires, revisit the security argument in
@@ -473,17 +473,28 @@ is expected until someone sweeps the block deliberately.
 The one exception is a setting that can hold a credential inline. `config`
 lands in a ConfigMap, so `openvox-ca.validate` refuses every such key it lists
 in `$credentials`; a new one needs adding there, with a reject case in
-`chart:test`. `chart:test` enforces that for any key in `internal/config` or
-`cmd/openvox-ca/config.go` whose yaml tag names a password, passphrase,
-secret, token, credential or DSN (`inlineCredentialKeys` in `magefile.go`). It reads tag names, not paths:
+`chart:test`. `chart:test` enforces that for any key in `internal/config`,
+where `config.ServerConfig` and the blocks it embeds are declared, whose yaml
+tag names a password, passphrase, secret, token, credential or DSN
+(`inlineCredentialKeys` in `magefile.go`). It does not scan `managed_certs`,
+`serving_cert` or `kubernetes_export`, which are typed from
+`internal/certstore/certconfig` and `internal/k8sexport/exportconfig`: a
+credential added to one of those needs its refusal and reject case written by
+hand. A magefile spec fails when a credential-shaped key appears there, as a
+reminder, but it cannot check that the refusal was written. The
+`inlineCredentialKeys` scan reads tag names, not paths:
 a key in a nested block such as `openbao` still fails the check, but needs a
 `dig` for its path in `openvox-ca.validate` rather than a top-level entry, and
 a reject case naming that path (`config.openbao.<key>: set …`). A
-credential named otherwise, or declared outside those files, it cannot see,
+credential named otherwise, or declared outside `internal/config`, it cannot see,
 and the chart would render it in clear text without a word.
 
-Every fixture under `charts/openvox-ca/ci/` is linted and schema-checked in CI.
-A new template branch needs a fixture that exercises it, or it is untested —
+Every fixture under `charts/openvox-ca/ci/` is linted and schema-checked in CI,
+and the `config.yaml` it renders is strict-decoded against the server's schema
+with `config.DecodeStrict`, so a key the server does not declare, or a value it
+cannot decode into the field's type, fails there first. Values the server
+refuses after decoding (a negative `leaf_backdate_sec`, a `managed_certs` entry
+that fails validation) are not checked there. A new template branch needs a fixture that exercises it, or it is untested —
 and schema validity is not correctness, so anything a reader has to *trust*
 (tag resolution, merge precedence, which kind a value selects) needs a case in
 `chart:test` as well.

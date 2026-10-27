@@ -1327,7 +1327,9 @@ pair can be combined:
   `filesystem`), e.g. for an offline backup or to revert to a single-node setup.
 
 Both ends are described by ordinary `openvox-ca` config files — the same YAML the
-server reads. `--source-config` is read from; `--dest-config` is written to.
+server reads, checked the same way: `migrate` accepts every server setting, and
+refuses a key the server would refuse, naming the file and the key.
+`--source-config` is read from; `--dest-config` is written to.
 
 ```bash
 # Import a filesystem CA into PostgreSQL.

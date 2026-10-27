@@ -74,6 +74,11 @@ const caImportPath = "github.com/voxpupuli/openvox-ca/internal/ca"
 //     listing -- which is the mechanism, and needs no extension. pp_cli_auth on
 //     a managed certificate was considered and rejected, and this is what holds
 //     that decision in place rather than leaving it to memory.
+//   - "../certstore/certconfig" is the half of that package that turns a
+//     `managed_certs` or `serving_cert` entry into a ca.CertSpec, moved out so
+//     that decoding the server's configuration does not link client-go. It is
+//     the same surface as "../certstore" and is guarded with it, not judged
+//     afresh.
 //
 // Adding a directory is how this gate grows. It is deliberately a list and not
 // a glob: a package arrives here because somebody decided it was reachable, and
@@ -85,7 +90,7 @@ const caImportPath = "github.com/voxpupuli/openvox-ca/internal/ca"
 // The spec below sweeps every package that imports internal/ca and requires
 // each to be either guarded or in exemptPackages, which turns "somebody
 // remembered" into "somebody decided".
-var guardedPackages = []string{".", "../certstore"}
+var guardedPackages = []string{".", "../certstore", "../certstore/certconfig"}
 
 // exemptPackages are the other importers of internal/ca, each with the reason
 // it is not guarded. Being here is a decision, not an oversight; the sweep

@@ -1065,6 +1065,23 @@ CrashLoopBackOff or a Service that silently routes nowhere.
 {{- end -}}
 
 {{/*
+  Service links put a Docker-link variable into the pod for every Service in
+  the namespace, named after the Service: one called openvox-ca yields
+  OPENVOX_CA_PORT=tcp://<clusterIP>:8140. The server reads OPENVOX_CA_PORT as
+  its listen port and refuses a value that is not a number, so the pod would
+  crash-loop on its own Service. That is the release named openvox-ca, which is
+  the obvious name, so it is refused here, at install, rather than at startup.
+  Another Service of that name in the namespace does the same and the chart
+  cannot see it, which is why enableServiceLinks defaults to false.
+*/}}
+{{- if .Values.enableServiceLinks -}}
+{{- $linkPrefix := include "openvox-ca.fullname" . | upper | replace "-" "_" | replace "." "_" -}}
+{{- if eq $linkPrefix "OPENVOX_CA" -}}
+{{- fail (printf "enableServiceLinks is true and this release's Service is named %q, so Kubernetes would set OPENVOX_CA_PORT=tcp://<clusterIP>:<port> in the pod. openvox-ca reads OPENVOX_CA_PORT as its listen port and refuses to start on a value that is not a number. Leave enableServiceLinks false (the default), or give the release another name or a fullnameOverride." (include "openvox-ca.fullname" .)) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
   A route pointed at the metrics port when the exporter is off installs
   cleanly and then routes to a Service port that was never created.
 */}}

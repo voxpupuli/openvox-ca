@@ -4926,6 +4926,12 @@ func (Chart) Lint() error {
 // at the wrong nesting level — neither of which `helm lint` sees, because to
 // Helm the output is just YAML.
 //
+// It then strict-decodes the config.yaml each fixture renders against the
+// server's schema (go run ./test/chartconfig), so a key the server does not
+// declare, or a value it cannot decode into the field's type, fails here
+// rather than at startup. Values the server refuses after decoding are not
+// checked; see that program's documentation.
+//
 // Rendered manifests are kept in .test-output/chart/ for inspection.
 func (Chart) Validate() error {
 	mg.Deps(Chart.Lint)
@@ -4948,6 +4954,7 @@ func (Chart) Validate() error {
 	}
 
 	floorChecked := false
+	var rendered []string
 	for _, f := range values {
 		name := chartFixtureName(f)
 
@@ -4960,6 +4967,7 @@ func (Chart) Validate() error {
 		if err := os.WriteFile(path, []byte(manifest+"\n"), 0644); err != nil {
 			return err
 		}
+		rendered = append(rendered, path)
 
 		// The minimal fixture is the chart's defaults, so it must also hold at
 		// the kubeVersion floor Chart.yaml advertises. The others opt into
@@ -5001,7 +5009,11 @@ func (Chart) Validate() error {
 			"silently drops the check",
 			chartFloorFixture, kubeconformFloorVersion, chartDir)
 	}
-	return nil
+	// Its own program, so that this file does not import internal/config and
+	// every target compile the storage backends behind it. It carries the
+	// floor too: it fails when no fixture rendered a config.yaml at all.
+	fmt.Println("Strict-decoding each fixture's rendered config.yaml...")
+	return sh.RunV("go", append([]string{"run", "./test/chartconfig"}, rendered...)...)
 }
 
 // chartConfigChecksum renders the chart and returns the checksum/config value
@@ -5055,15 +5067,25 @@ type chartRenderCase struct {
 }
 
 // inlineCredentialSources are the files that declare the server's config keys,
-// relative to the repository root. internal/k8sexport/config.go declares the
-// kubernetes_export block too, but only export targets: the exporter
-// authenticates with the pod's ServiceAccount, so no credential lives there.
+// relative to the repository root: config.ServerConfig and the blocks it
+// embeds, all in internal/config.
+//
+// The blocks it types from packages of their own are deliberately not
+// scanned. internal/k8sexport/exportconfig declares kubernetes_export, but only
+// export targets: the exporter authenticates with the pod's ServiceAccount, so
+// no credential lives there. internal/certstore/certconfig declares
+// managed_certs and serving_cert, whose `secret` block names a Kubernetes
+// Secret rather than holding one; the tag pattern below would read it as a
+// credential. So this scan cannot see a credential added to either: it needs
+// an entry in openvox-ca.validate's refusal and a reject case written by hand.
+// What the two packages hold is pinned in magefile_chart_test.go, which fails
+// when a credential-shaped tag appears there, so that this is not forgotten.
 //
 // The scan reads tag names, not paths, so a key in a nested block such as
 // openbao comes back bare. That is enough to fail the check below; the fix is
 // then a dig for its path in openvox-ca.validate, not a top-level entry, and
 // a reject case expecting "config.openbao.<key>: set ".
-var inlineCredentialSources = []string{"internal/config/*.go", "cmd/openvox-ca/config.go"}
+var inlineCredentialSources = []string{"internal/config/*.go"}
 
 // inlineCredentialKeyRe matches a yaml tag whose name says it holds a secret,
 // with or without tag options such as ",omitempty". The words include
@@ -5078,8 +5100,15 @@ var inlineCredentialKeyRe = regexp.MustCompile(`yaml:"([a-z0-9_]*(?:password|pas
 // the list itself is hand-kept, and a key it misses renders into the ConfigMap
 // in clear text.
 func inlineCredentialKeys(root string) ([]string, error) {
+	return inlineCredentialKeysIn(root, inlineCredentialSources)
+}
+
+// inlineCredentialKeysIn is inlineCredentialKeys over a caller-supplied list of
+// sources, so that the packages inlineCredentialSources leaves out can be
+// judged by the same scan rather than by a copy of it.
+func inlineCredentialKeysIn(root string, sources []string) ([]string, error) {
 	seen := map[string]bool{}
-	for _, pattern := range inlineCredentialSources {
+	for _, pattern := range sources {
 		files, err := filepath.Glob(filepath.Join(root, pattern))
 		if err != nil {
 			return nil, err
@@ -5108,7 +5137,7 @@ func inlineCredentialKeys(root string) ([]string, error) {
 	// A scan that finds nothing would pass every key by default, so it fails
 	// instead: the sources have moved or their tags have changed shape.
 	if len(seen) == 0 {
-		return nil, fmt.Errorf("found no inline-credential config keys in %v under %s; update inlineCredentialSources", inlineCredentialSources, root)
+		return nil, fmt.Errorf("found no inline-credential config keys in %v under %s; update inlineCredentialSources", sources, root)
 	}
 	return slices.Sorted(maps.Keys(seen)), nil
 }
@@ -5321,6 +5350,13 @@ func (Chart) Test() error {
 			name:  "probes follow the server: HTTPS when a certificate is configured",
 			sets:  []string{tls},
 			wants: []string{"scheme: HTTPS"},
+		},
+		{
+			// The twin of the service-links reject case: a Service named
+			// anything else sets a variable the server never reads.
+			name:  "service links when the Service would not set OPENVOX_CA_PORT",
+			sets:  []string{tls, "enableServiceLinks=true", "fullnameOverride=ca"},
+			wants: []string{"enableServiceLinks: true"},
 		},
 		{
 			// The recipe values.yaml documents for a provider-held key. It is a
@@ -6875,6 +6911,15 @@ config:
 			name:    "a ServiceMonitor for an exporter that is switched off",
 			sets:    []string{tls, "metrics.serviceMonitor.enabled=true"},
 			wantErr: "nothing to scrape",
+		},
+		{
+			// Rendered as release "openvox-ca", so the Service's link variable
+			// is OPENVOX_CA_PORT, which the server reads as its port and
+			// refuses as not a number. The render case of the same name with a
+			// fullnameOverride is its must-fail twin.
+			name:    "service links when the Service would set OPENVOX_CA_PORT",
+			sets:    []string{tls, "enableServiceLinks=true"},
+			wantErr: "OPENVOX_CA_PORT=tcp://",
 		},
 		{
 			// Worse to hand out by accident than the export's, which this

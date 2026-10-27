@@ -477,7 +477,7 @@ func servingCertDeps(one certstore.Config, caCerts certstore.CACertSource) (cert
 // buildServingCert1 builds the spec and the store for the single validated
 // entry.
 //
-// The spec comes from certstore.Config.Build rather than from reading the
+// The spec comes from certstore.BuildIn rather than from reading the
 // entry's fields here, because the mapping from YAML to spec -- which fields
 // inherit a CA-wide default, how `revoke_after: 0` differs from an absent one,
 // how `usages` becomes an ExtKeyUsage list -- belongs to that package, and a
@@ -488,7 +488,7 @@ func servingCertDeps(one certstore.Config, caCerts certstore.CACertSource) (cert
 // into two function fields; constructing a store touches nothing, so building
 // the same one twice costs a struct.
 func buildServingCert1(one certstore.Config, deps certstore.Deps) (ca.CertSpec, servingCertStore, error) {
-	built, err := one.BuildIn(servingCertBlock, deps)
+	built, err := certstore.BuildIn(one, servingCertBlock, deps)
 	if err != nil {
 		return ca.CertSpec{}, nil, err
 	}

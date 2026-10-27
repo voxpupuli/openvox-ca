@@ -102,7 +102,7 @@ func buildManagedCerts(cfg *serverConfig, absCADir, configPath string,
 		}
 	}
 
-	managed, err := cfg.ManagedCerts.Build(deps)
+	managed, err := certstore.Build(cfg.ManagedCerts, deps)
 	if err != nil {
 		return nil, err
 	}

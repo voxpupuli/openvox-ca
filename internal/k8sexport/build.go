@@ -32,7 +32,7 @@ import (
 // The label itself lives in internal/k8sclient because the managed-certificate
 // stores apply the same one, and a selector finding "everything openvox-ca
 // owns" is a claim that spans both.
-func (t *Target) labelsFor() map[string]string {
+func labelsFor(t *Target) map[string]string {
 	return k8sclient.WithManagedByLabel(t.Metadata.Labels)
 }
 
@@ -89,7 +89,7 @@ func scoped(chain []byte, blockType, scope string) []byte {
 // the request); using data rather than the write-only stringData keeps
 // server-side apply idempotent — a re-apply of unchanged material is a genuine
 // no-op instead of rewriting the object each time.
-func (t *Target) secretDataFor(certPEM, crlPEM []byte) map[string][]byte {
+func secretDataFor(t *Target, certPEM, crlPEM []byte) map[string][]byte {
 	data := make(map[string][]byte, 2)
 	if t.Cert {
 		data[t.CertKey] = scoped(certPEM, "CERTIFICATE", t.CertScope)
@@ -102,7 +102,7 @@ func (t *Target) secretDataFor(certPEM, crlPEM []byte) map[string][]byte {
 
 // configMapDataFor returns the ConfigMap data entries for a target. ConfigMap
 // data is plain text, and PEM is text, so the values are kept as strings.
-func (t *Target) configMapDataFor(certPEM, crlPEM []byte) map[string]string {
+func configMapDataFor(t *Target, certPEM, crlPEM []byte) map[string]string {
 	data := make(map[string]string, 2)
 	if t.Cert {
 		data[t.CertKey] = string(scoped(certPEM, "CERTIFICATE", t.CertScope))
@@ -115,10 +115,10 @@ func (t *Target) configMapDataFor(certPEM, crlPEM []byte) map[string]string {
 
 // buildSecretApply constructs the server-side apply configuration for a Secret
 // target. The namespace must already be resolved (non-empty).
-func (t *Target) buildSecretApply(namespace string, certPEM, crlPEM []byte) *accorev1.SecretApplyConfiguration {
+func buildSecretApply(t *Target, namespace string, certPEM, crlPEM []byte) *accorev1.SecretApplyConfiguration {
 	ac := accorev1.Secret(t.Metadata.Name, namespace).
-		WithLabels(t.labelsFor()).
-		WithData(t.secretDataFor(certPEM, crlPEM))
+		WithLabels(labelsFor(t)).
+		WithData(secretDataFor(t, certPEM, crlPEM))
 	// Only own the type field when one is configured, so openvox-ca can
 	// co-maintain a Secret whose type (e.g. kubernetes.io/tls) is owned by
 	// another manager. An unset type leaves it to the API server default on
@@ -134,10 +134,10 @@ func (t *Target) buildSecretApply(namespace string, certPEM, crlPEM []byte) *acc
 
 // buildConfigMapApply constructs the server-side apply configuration for a
 // ConfigMap target. The namespace must already be resolved (non-empty).
-func (t *Target) buildConfigMapApply(namespace string, certPEM, crlPEM []byte) *accorev1.ConfigMapApplyConfiguration {
+func buildConfigMapApply(t *Target, namespace string, certPEM, crlPEM []byte) *accorev1.ConfigMapApplyConfiguration {
 	ac := accorev1.ConfigMap(t.Metadata.Name, namespace).
-		WithLabels(t.labelsFor()).
-		WithData(t.configMapDataFor(certPEM, crlPEM))
+		WithLabels(labelsFor(t)).
+		WithData(configMapDataFor(t, certPEM, crlPEM))
 	if len(t.Metadata.Annotations) > 0 {
 		ac = ac.WithAnnotations(t.Metadata.Annotations)
 	}

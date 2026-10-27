@@ -770,6 +770,119 @@ kubernetes_export:
 	})
 })
 
+// --- loadServerConfig: unknown keys ---
+
+var _ = Describe("loadServerConfig unknown keys", func() {
+	BeforeEach(func() { clearServerEnv() })
+
+	// The file the .deb and .rpm install. It is a conffile that operators
+	// edit in place, so it has to load under the parser that judges their
+	// edits; it replaces a magefile spec that compared its keys against the
+	// struct's yaml tags by regexp, which this parser now does exactly.
+	It("loads the packaged config.yaml", func() {
+		cfg, err := loadServerConfig(filepath.Join("..", "..", "packaging", "config", "config.yaml"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.CADir).NotTo(BeEmpty(), "the packaged file sets cadir; empty means it was not read")
+	})
+
+	// The issue's own example (#436): one transposed letter, and a CA meant to
+	// encrypt its key bootstraps with a plaintext one, with nothing logged.
+	It("refuses a misspelt key, naming the key, its line and the file", func() {
+		cfgFile := writeTempConfig("cadir: /tmp/ca\nencrypt_ca_kye: true\n")
+
+		cfg, err := loadServerConfig(cfgFile)
+		Expect(err).To(MatchError(And(
+			ContainSubstring(cfgFile),
+			ContainSubstring(`line 2: unknown key "encrypt_ca_kye"`),
+			ContainSubstring("correct the spelling, or remove the key"))))
+		Expect(cfg).To(BeNil(), "a refused configuration must not be returned for use")
+	})
+
+	It("does not name a Go type an operator has never heard of", func() {
+		cfgFile := writeTempConfig("encrypt_ca_kye: true\n")
+		_, err := loadServerConfig(cfgFile)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).NotTo(ContainSubstring("serverConfig"))
+		Expect(err.Error()).NotTo(ContainSubstring("not found in type"))
+	})
+
+	// The nested blocks decode into structs of their own, so strictness has to
+	// reach them too, and the bare key alone would not say which block.
+	DescribeTable("refuses a misspelt key inside a nested block, naming its path",
+		func(content, path string) {
+			_, err := loadServerConfig(writeTempConfig(content))
+			Expect(err).To(MatchError(ContainSubstring("unknown key %q", path)))
+		},
+		Entry("openbao", "ca_key_provider: openbao\nopenbao:\n  adddr: https://bao:8200\n",
+			"openbao.adddr"),
+		Entry("a client_ca entry", "client_ca:\n  - name: x\n    fiel: /x.pem\n",
+			"client_ca[0].fiel"),
+		Entry("a managed_certs store",
+			"managed_certs:\n  - certname: db\n    store:\n      secret:\n        naem: db-tls\n",
+			"managed_certs[0].store.secret.naem"),
+		Entry("a kubernetes_export target",
+			"kubernetes_export:\n  targets:\n    - kind: Secret\n      certs: true\n",
+			"kubernetes_export.targets[0].certs"),
+		Entry("serving_cert", "serving_cert:\n  certname: ca\n  ttll: 720h\n",
+			"serving_cert.ttll"),
+	)
+
+	It("reports every unknown key, not only the first", func() {
+		_, err := loadServerConfig(writeTempConfig("hots: x\nprot: 1\n"))
+		Expect(err).To(MatchError(And(
+			ContainSubstring(`line 1: unknown key "hots"`),
+			ContainSubstring(`line 2: unknown key "prot"`))))
+	})
+
+	// Labels and annotations are maps, whose keys are data rather than
+	// settings, so they must still take anything.
+	It("accepts arbitrary keys in labels and annotations", func() {
+		content := `
+kubernetes_export:
+  targets:
+    - kind: Secret
+      cert: true
+      metadata:
+        name: trust
+        labels:
+          app.kubernetes.io/part-of: anything-at-all
+        annotations:
+          example.com/whatever: "1"
+`
+		cfg, err := loadServerConfig(writeTempConfig(content))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.KubernetesExport.Targets[0].Metadata.Labels).To(
+			HaveKeyWithValue("app.kubernetes.io/part-of", "anything-at-all"))
+	})
+
+	DescribeTable("accepts a file with nothing in it",
+		func(content string) {
+			cfg, err := loadServerConfig(writeTempConfig(content))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Port).To(Equal(8140), "defaults must survive an empty file")
+		},
+		Entry("empty", ""),
+		Entry("only comments", "# nothing set yet\n"),
+	)
+
+	// A value other than the default, so that a decoder which skipped the
+	// first document when a trailing marker followed it would be caught.
+	It("reads the document before a trailing document marker", func() {
+		cfg, err := loadServerConfig(writeTempConfig("port: 9090\n---\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.Port).To(Equal(9090))
+	})
+
+	// yaml.Unmarshal reads only the first document, so a stray `---` used to
+	// drop every setting after it just as silently as a misspelt key.
+	It("refuses a second document rather than ignoring it", func() {
+		_, err := loadServerConfig(writeTempConfig("port: 9090\n---\nencrypt_ca_key: true\n"))
+		Expect(err).To(MatchError(And(
+			ContainSubstring("line 2: a second YAML document starts here"),
+			ContainSubstring("remove the `---`"))))
+	})
+})
+
 // --- loadServerConfig: env vars override YAML ---
 
 var _ = Describe("loadServerConfig env overrides YAML", func() {
@@ -829,11 +942,11 @@ var _ = Describe("applyServerEnv ignores the pre-rename variable names", func() 
 			clearServerEnv()
 			setEnv("PUPPET_CA_"+suffix, value)
 			cfg := &serverConfig{}
-			applyServerEnv(cfg)
+			Expect(applyServerEnv(cfg)).To(Succeed())
 			Expect(*cfg).To(Equal(serverConfig{}), "PUPPET_CA_%s=%s changed the config; old names must be ignored", suffix, value)
 
 			setEnv("OPENVOX_CA_"+suffix, value)
-			applyServerEnv(cfg)
+			Expect(applyServerEnv(cfg)).To(Succeed())
 			Expect(*cfg).NotTo(Equal(serverConfig{}), "OPENVOX_CA_%s=%s did not change the config, so the first half asserted nothing", suffix, value)
 		},
 		Entry("ENCRYPT_CA_KEY, which would otherwise leave the CA key unencrypted", "ENCRYPT_CA_KEY", "true"),
@@ -850,11 +963,34 @@ var _ = Describe("applyServerEnv each variable", func() {
 			clearServerEnv()
 			setEnv(envKey, envVal)
 			cfg := &serverConfig{}
-			applyServerEnv(cfg)
+			Expect(applyServerEnv(cfg)).To(Succeed())
 			Expect(check(cfg)).To(BeTrue(), "%s not applied from %s=%s", desc, envKey, envVal)
 		},
 		Entry("CADIR", "OPENVOX_CA_CADIR", "/some/dir",
 			func(c *serverConfig) bool { return c.CADir == "/some/dir" }, "CADir"),
+		// Ten bindings no other spec named. Each was rewritten onto
+		// config.EnvBool or config.EnvInt, which takes a field pointer, so a
+		// pointer to the wrong field would compile; these pin the field.
+		Entry("ALLOW_PUBLIC_STATUS", "OPENVOX_CA_ALLOW_PUBLIC_STATUS", "true",
+			func(c *serverConfig) bool { return c.AllowPublicStatus }, "AllowPublicStatus"),
+		Entry("PROMOTE_CN_TO_SAN", "OPENVOX_CA_PROMOTE_CN_TO_SAN", "true",
+			func(c *serverConfig) bool { return c.PromoteCNToSAN }, "PromoteCNToSAN"),
+		Entry("PUPPET_DATETIME_FORMAT", "OPENVOX_CA_PUPPET_DATETIME_FORMAT", "true",
+			func(c *serverConfig) bool { return c.PuppetDateTimeFormat }, "PuppetDateTimeFormat"),
+		Entry("CRL_VALIDITY_DAYS", "OPENVOX_CA_CRL_VALIDITY_DAYS", "7",
+			func(c *serverConfig) bool { return c.CRLValidityDays == 7 }, "CRLValidityDays"),
+		Entry("ETCD_DIAL_TIMEOUT_SEC", "OPENVOX_CA_ETCD_DIAL_TIMEOUT_SEC", "11",
+			func(c *serverConfig) bool { return c.EtcdDialTimeoutSec == 11 }, "EtcdDialTimeoutSec"),
+		Entry("ETCD_REQUEST_TIMEOUT_SEC", "OPENVOX_CA_ETCD_REQUEST_TIMEOUT_SEC", "12",
+			func(c *serverConfig) bool { return c.EtcdRequestTimeoutSec == 12 }, "EtcdRequestTimeoutSec"),
+		Entry("REDIS_DB", "OPENVOX_CA_REDIS_DB", "3",
+			func(c *serverConfig) bool { return c.RedisDB == 3 }, "RedisDB"),
+		Entry("REDIS_DIAL_TIMEOUT_SEC", "OPENVOX_CA_REDIS_DIAL_TIMEOUT_SEC", "13",
+			func(c *serverConfig) bool { return c.RedisDialTimeoutSec == 13 }, "RedisDialTimeoutSec"),
+		Entry("REDIS_REQUEST_TIMEOUT_SEC", "OPENVOX_CA_REDIS_REQUEST_TIMEOUT_SEC", "14",
+			func(c *serverConfig) bool { return c.RedisRequestTimeoutSec == 14 }, "RedisRequestTimeoutSec"),
+		Entry("REDIS_LOCK_TTL_SEC", "OPENVOX_CA_REDIS_LOCK_TTL_SEC", "15",
+			func(c *serverConfig) bool { return c.RedisLockTTLSec == 15 }, "RedisLockTTLSec"),
 		// true is the distinguishing value: false is the zero value, so an entry
 		// asserting false would pass with the variable unread or the field
 		// misnamed.
@@ -1009,33 +1145,102 @@ var _ = Describe("applyServerEnv each variable", func() {
 			func(c *serverConfig) bool { return c.OpenBao.KubernetesJWTFile == "/creds/sa.jwt" }, "OpenBao.KubernetesJWTFile"),
 	)
 
-	// Malformed values are silently ignored.
-	It("silently ignores malformed values", func() {
+	// A value that does not parse refuses startup, naming the variable. It
+	// used to be dropped without a word, which for OPENVOX_CA_ENCRYPT_CA_KEY
+	// meant a CA meant to encrypt its key bootstrapping with a plaintext one
+	// (#436). ParseBool does not accept "on", "yes" or "enabled", though YAML
+	// does, so each is exactly the mistake an operator makes.
+	DescribeTable("refuses an encrypt_ca_key value that is not a boolean",
+		func(value string) {
+			clearServerEnv()
+			setEnv("OPENVOX_CA_ENCRYPT_CA_KEY", value)
+
+			cfg, err := loadServerConfig("")
+			Expect(err).To(MatchError(And(
+				ContainSubstring("OPENVOX_CA_ENCRYPT_CA_KEY"),
+				ContainSubstring("%q", value),
+				ContainSubstring("not a boolean"),
+				ContainSubstring("set it to true or false"))))
+			Expect(cfg).To(BeNil(), "a refused configuration must not be returned for use")
+		},
+		Entry("enabled", "enabled"),
+		Entry("on", "on"),
+		Entry("yes", "yes"),
+	)
+
+	It("refuses an integer value that is not a number, naming the variable", func() {
+		clearServerEnv()
+		// 0s reads as "revoke immediately" to a person and as nothing to
+		// Atoi; dropped, it would leave the default 24h overlap window open.
+		setEnv("OPENVOX_CA_SUPERSEDED_CERT_REVOKE_AFTER_SEC", "0s")
+
+		_, err := loadServerConfig("")
+		Expect(err).To(MatchError(And(
+			ContainSubstring("OPENVOX_CA_SUPERSEDED_CERT_REVOKE_AFTER_SEC"),
+			ContainSubstring(`"0s"`),
+			ContainSubstring("not an integer"))))
+	})
+
+	// The range gates were carried over unchanged when every binding moved
+	// onto config.EnvInt, and each binding names its own. One entry per gate
+	// at the value that tells it from the others: 0, which Positive drops and
+	// NonNegative applies, and a negative, which only a nil gate applies.
+	DescribeTable("keeps each binding's range gate",
+		func(envKey, envVal string, field func(*serverConfig) *int, want int) {
+			clearServerEnv()
+			setEnv(envKey, envVal)
+			cfg := &serverConfig{}
+			*field(cfg) = 5
+			Expect(applyServerEnv(cfg)).To(Succeed())
+			Expect(*field(cfg)).To(Equal(want))
+		},
+		Entry("REDIS_DB applies 0 (NonNegative)", "OPENVOX_CA_REDIS_DB", "0",
+			func(c *serverConfig) *int { return &c.RedisDB }, 0),
+		Entry("REDIS_DB ignores -1 (NonNegative)", "OPENVOX_CA_REDIS_DB", "-1",
+			func(c *serverConfig) *int { return &c.RedisDB }, 5),
+		Entry("SQL_MAX_OPEN_CONNS ignores 0 (Positive)", "OPENVOX_CA_SQL_MAX_OPEN_CONNS", "0",
+			func(c *serverConfig) *int { return &c.SQLMaxOpenConns }, 5),
+		Entry("SUPERSEDED_CERT_REVOKE_AFTER_SEC applies 0 (no gate)", "OPENVOX_CA_SUPERSEDED_CERT_REVOKE_AFTER_SEC", "0",
+			func(c *serverConfig) *int { return &c.SupersededCertRevokeAfterSec }, 0),
+		Entry("LEAF_BACKDATE_SEC applies -1 (no gate)", "OPENVOX_CA_LEAF_BACKDATE_SEC", "-1",
+			func(c *serverConfig) *int { return &c.LeafBackdateSec }, -1),
+	)
+
+	// The direction that matters for a setting that defaults to true: the
+	// environment turning it off. An entry above asserting false would pass
+	// with the variable unread, which is why this starts from the default.
+	It("lets the environment turn off a setting that defaults to true", func() {
+		clearServerEnv()
+		setEnv("OPENVOX_CA_REVOKE_ON_AUTO_RENEW", "false")
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.RevokeOnAutoRenew).To(BeFalse())
+	})
+
+	It("reports every malformed variable, not only the first", func() {
 		clearServerEnv()
 		setEnv("OPENVOX_CA_PORT", "not-a-number")
-		setEnv("OPENVOX_CA_VERBOSITY", "bad")
 		setEnv("OPENVOX_CA_NO_TLS_REQUIRED", "maybe")
-		setEnv("OPENVOX_CA_CA_VALIDITY_DAYS", "not-a-number")
-		setEnv("OPENVOX_CA_LEAF_VALIDITY_DAYS", "bad")
-		setEnv("OPENVOX_CA_CA_PATH_LENGTH", "not-a-number")
-		setEnv("OPENVOX_CA_MEMORY_BUDGET_PERCENT", "ninety")
+		setEnv("OPENVOX_CA_CA_VALIDITY_DAYS", "bad")
 
-		// MemoryBudgetPercent is seeded non-zero deliberately. Left at its zero
-		// value the assertion would be vacuous: strconv.Atoi("ninety") also
-		// returns 0, so dropping the error guard would leave the field at 0
-		// either way and correct and incorrect values would coincide.
-		cfg := &serverConfig{Port: 8140, Verbosity: 0, CAPathLength: -1, MemoryBudgetPercent: 42}
-		applyServerEnv(cfg)
-
-		Expect(cfg.MemoryBudgetPercent).To(Equal(42),
-			"MemoryBudgetPercent changed on bad input: got %d, want 42", cfg.MemoryBudgetPercent)
-		Expect(cfg.Port).To(Equal(8140), "Port changed on bad input: got %d, want 8140", cfg.Port)
-		Expect(cfg.Verbosity).To(Equal(0), "Verbosity changed on bad input: got %d, want 0", cfg.Verbosity)
-		Expect(cfg.NoTLSRequired).To(BeFalse(), "NoTLSRequired changed on bad input: want false")
-		Expect(cfg.CAValidityDays).To(Equal(0), "CAValidityDays changed on bad input: got %d, want 0", cfg.CAValidityDays)
-		Expect(cfg.LeafValidityDays).To(Equal(0), "LeafValidityDays changed on bad input: got %d, want 0", cfg.LeafValidityDays)
-		Expect(cfg.CAPathLength).To(Equal(-1), "CAPathLength changed on bad input: got %d, want -1", cfg.CAPathLength)
+		err := applyServerEnv(&serverConfig{})
+		Expect(err).To(MatchError(And(
+			ContainSubstring("OPENVOX_CA_PORT"),
+			ContainSubstring("OPENVOX_CA_NO_TLS_REQUIRED"),
+			ContainSubstring("OPENVOX_CA_CA_VALIDITY_DAYS"))))
 	})
+
+	DescribeTable("still accepts the spellings strconv.ParseBool does",
+		func(value string) {
+			clearServerEnv()
+			setEnv("OPENVOX_CA_ENCRYPT_CA_KEY", value)
+			cfg := &serverConfig{}
+			Expect(applyServerEnv(cfg)).To(Succeed())
+			Expect(cfg.EncryptCAKey).To(BeTrue())
+		},
+		Entry("1", "1"), Entry("t", "t"), Entry("T", "T"),
+		Entry("TRUE", "TRUE"), Entry("true", "true"), Entry("True", "True"),
+	)
 
 	// A zero or negative value for OPENVOX_CA_CA_VALIDITY_DAYS and
 	// OPENVOX_CA_LEAF_VALIDITY_DAYS is silently ignored (only positive values are
@@ -1046,7 +1251,7 @@ var _ = Describe("applyServerEnv each variable", func() {
 		setEnv("OPENVOX_CA_LEAF_VALIDITY_DAYS", "-5")
 
 		cfg := &serverConfig{}
-		applyServerEnv(cfg)
+		Expect(applyServerEnv(cfg)).To(Succeed())
 
 		Expect(cfg.CAValidityDays).To(Equal(0), "CAValidityDays should stay 0 when env is 0, got %d", cfg.CAValidityDays)
 		Expect(cfg.LeafValidityDays).To(Equal(0), "LeafValidityDays should stay 0 when env is negative, got %d", cfg.LeafValidityDays)

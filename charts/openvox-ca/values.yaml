@@ -617,6 +617,11 @@ dnsPolicy: ""
 dnsConfig: {}
 hostAliases: []
 
+# Keep false. Service links set a variable per Service in the namespace, and a
+# Service named openvox-ca sets OPENVOX_CA_PORT=tcp://..., which the server
+# reads as its listen port and refuses as not a number. The chart refuses
+# true when its own Service has that name; one elsewhere in the namespace it
+# cannot see.
 enableServiceLinks: false
 
 # null lets the chart decide: mounted when the pod needs the Kubernetes API —

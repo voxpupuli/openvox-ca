@@ -1,0 +1,67 @@
+# A single replica holding its key in OpenBao and its state in PostgreSQL,
+# publishing its trust bundle with kubernetesExport and scraped by a
+# ServiceMonitor: the shape of a production deployment that sets most of its
+# configuration through the `config` passthrough rather than the convenience
+# blocks. chart:validate strict-decodes the config.yaml it renders against the
+# server's schema, so every key below must stay one the server accepts. Keep
+# this fixture: it is the regression test for that deployment's shape.
+
+listen:
+  host: 0.0.0.0
+  port: 8140
+
+puppetServers:
+  - openvoxserver-0.example.com
+  - openvoxserver-1.example.com
+
+tls:
+  existingSecret: openvox-ca-tls
+
+persistence:
+  enabled: false
+
+config:
+  storage_backend: postgres
+  hostname: ca.example.com
+  ca_key_provider: openbao
+  openbao:
+    addr: https://openbao.pki.svc:8200
+    key_name: openvox-ca
+    tls_ca_file: /run/secrets/openbao-ca/ca.crt
+    auth_method: kubernetes
+    kubernetes_role: openvox-ca
+  ca_cert_file: /run/secrets/openvox-ca-chain/ca_crt.pem
+  crl_chain_file: /run/secrets/openvox-ca-chain/crl_chain.pem
+  crl_chain_refresh_interval_sec: 3600
+  no_pp_cli_auth: true
+  enable_expired_cert_cleanup: true
+  crl_url: https://ca.example.com/puppet-ca/v1/certificate_revocation_list/ca
+  crl_validity_days: 7
+  leaf_validity_days: 365
+  leaf_key_algo: ecdsa
+  leaf_key_size: 256
+
+extraEnv:
+  - name: OPENVOX_CA_SQL_DSN
+    valueFrom:
+      secretKeyRef:
+        name: openvox-ca-db
+        key: dsn
+
+kubernetesExport:
+  enabled: true
+  rbac:
+    create: false
+  targets:
+    - kind: Secret
+      cert: true
+      crl: true
+      metadata:
+        name: openvox-ca-trust
+
+metrics:
+  enabled: true
+  host: 0.0.0.0
+  port: 9140
+  serviceMonitor:
+    enabled: true

@@ -208,7 +208,7 @@ and [the CA's own serving certificate](https://github.com/voxpupuli/openvox-ca/b
 | `topologySpreadConstraints` | one soft constraint per hostname | A constraint with no `labelSelector` gets this release's own selector |
 | `priorityClassName` / `runtimeClassName` / `schedulerName` | `""` | |
 | `dnsPolicy` / `dnsConfig` / `hostAliases` | `""` / `{}` / `[]` | |
-| `enableServiceLinks` | `false` | |
+| `enableServiceLinks` | `false` | Keep false: a Service named `openvox-ca` would set `OPENVOX_CA_PORT=tcp://…`, which the server refuses as a port. Refused at install when it is this release's own Service |
 | `automountServiceAccountToken` | `null` | `null` mounts the token when the pod needs the API — Kubernetes export (`kubernetesExport.enabled` or `config.kubernetes_export.targets`), a managed certificate or the CA's own serving certificate in a Secret (`config.managed_certs` or `config.serving_cert` with a `store.secret`), or OpenBao Kubernetes auth (`config.openbao.auth_method`, `OPENVOX_CA_OPENBAO_AUTH_METHOD` in `env`/`extraEnv`, or `--openbao-auth-method=kubernetes` in `extraArgs`) — and whenever the chart cannot tell: `existingConfigMap`, `args`, `envFrom`, an `extraEnv` `valueFrom` for that variable, or a bare `--openbao-auth-method` in `extraArgs`. See [the guide](https://github.com/voxpupuli/openvox-ca/blob/main/docs/helm-chart.md) for the full table |
 | `initContainers` / `extraContainers` | `[]` | Templated, so they can reference `.Values` |
 | `extraVolumes` | `[]` | Templated |
@@ -297,12 +297,14 @@ certificate, so the controller **must** pass TLS through untouched.
 ## Development
 
 The fixtures in `ci/` are rendered and schema-checked on every pull
-request. They are excluded from the packaged chart.
+request, and the `config.yaml` each renders is strict-decoded against the
+server's schema, which refuses an unknown key. They are excluded from the
+packaged chart.
 
 ```console
 $ mage chart:version    # Chart.yaml tracks internal/version
 $ mage chart:lint       # helm lint, once per fixture
-$ mage chart:validate   # render everything, check against Kubernetes schemas
+$ mage chart:validate   # render everything, check against Kubernetes schemas and the server's config keys
 $ mage chart:test       # assert what it renders, and that the guards refuse
 $ mage chart:package    # write dist/openvox-ca-<version>.tgz
 ```
