@@ -410,18 +410,21 @@ var _ = Describe("Dev.Vulncheck", func() {
 	Context("with a stub govulncheck on PATH", func() {
 		var logPath, logDir string
 
-		// The stub records each call's build environment and arguments, and
-		// exits 3 -- govulncheck's status for a reachable finding -- only for
-		// the linux_amd64 release scan, which runs first. PATH holds the stub
-		// alone, so no real govulncheck can answer instead, and the stub uses
-		// shell builtins only.
+		// The stub records each call's build environment and arguments, writes
+		// a marker to stdout and to stderr as govulncheck writes its report,
+		// and exits 3 -- govulncheck's status for a reachable finding -- for
+		// the pure-Go release scan of each architecture STUB_FAIL lists. PATH
+		// holds the stub alone, so no real govulncheck can answer instead, and
+		// the stub uses shell builtins only.
 		BeforeEach(func() {
 			dir := GinkgoT().TempDir()
 			logPath = filepath.Join(dir, "calls.log")
 			logDir = GinkgoT().TempDir()
 			stub := "#!/bin/sh\n" +
 				`printf '%s|%s|%s|%s|%s\n' "$GOOS" "$GOARCH" "$CGO_ENABLED" "$GOEXPERIMENT" "$*" >>"$STUB_LOG"` + "\n" +
-				`if [ "$GOARCH" = amd64 ] && [ "$CGO_ENABLED" = 0 ] && [ -n "$STUB_FAIL" ]; then exit 3; fi` + "\n"
+				`echo stub-out` + "\n" +
+				`echo stub-err >&2` + "\n" +
+				`if [ -n "$GOARCH" ] && [ "$CGO_ENABLED" = 0 ]; then case " $STUB_FAIL " in *" $GOARCH "*) exit 3;; esac; fi` + "\n"
 			Expect(os.WriteFile(filepath.Join(dir, "govulncheck"), []byte(stub), 0o755)).To(Succeed())
 			GinkgoT().Setenv("PATH", dir)
 			GinkgoT().Setenv("STUB_LOG", logPath)
@@ -452,13 +455,16 @@ var _ = Describe("Dev.Vulncheck", func() {
 			Expect(recordedCalls()).To(Equal(expectedCalls()))
 		})
 
-		// The log is where a reader finds which variants this host left
-		// unscanned, so each skip has to reach it along with each scan.
-		It("logs each scan it runs and each variant it skips", func() {
+		// The log is where a reader finds the advisory IDs, which govulncheck
+		// writes, and which variants this host left unscanned, so each scan's
+		// own output has to reach it, on both streams, along with each skip.
+		It("logs each scan it runs, what each scan prints, and each variant it skips", func() {
 			Expect(vulncheckInto(logDir, runtime.GOOS, runtime.GOARCH)).To(Succeed())
 			src, err := os.ReadFile(filepath.Join(logDir, "govulncheck.log"))
 			Expect(err).NotTo(HaveOccurred())
 			scans, skipped := vulncheckScans(runtime.GOOS, runtime.GOARCH)
+			Expect(strings.Count(string(src), "stub-out\n")).To(Equal(len(scans)))
+			Expect(strings.Count(string(src), "stub-err\n")).To(Equal(len(scans)))
 			for _, sc := range scans {
 				Expect(string(src)).To(ContainSubstring("Running govulncheck over " + sc.what + "...\n"))
 			}
@@ -468,12 +474,20 @@ var _ = Describe("Dev.Vulncheck", func() {
 		})
 
 		It("fails on a reachable finding, naming the scan, and still runs the scans after it", func() {
-			GinkgoT().Setenv("STUB_FAIL", "1")
+			GinkgoT().Setenv("STUB_FAIL", "amd64")
 			err := vulncheckInto(logDir, runtime.GOOS, runtime.GOARCH)
 			Expect(err).To(MatchError(ContainSubstring("the linux_amd64 release build:")))
 			Expect(err.Error()).NotTo(ContainSubstring("the linux_arm64 release build:"))
 			Expect(err.Error()).NotTo(ContainSubstring("the magefile:"))
 			Expect(recordedCalls()).To(Equal(expectedCalls()))
+		})
+
+		It("names every scan that finds something, not only the first", func() {
+			GinkgoT().Setenv("STUB_FAIL", "amd64 arm64")
+			err := vulncheckInto(logDir, runtime.GOOS, runtime.GOARCH)
+			Expect(err).To(MatchError(ContainSubstring("the linux_amd64 release build:")))
+			Expect(err).To(MatchError(ContainSubstring("the linux_arm64 release build:")))
+			Expect(err.Error()).NotTo(ContainSubstring("the magefile:"))
 		})
 	})
 
