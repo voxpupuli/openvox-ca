@@ -696,11 +696,12 @@ func fixtureEnv() []string {
 // gitIn runs one git command in dir with the fixture environment, and is the
 // only site that execs git directly — the decoy repository's setup and
 // inspection included. The single choke point for the environment itself is
-// fixtureEnv, not this function: execGateScript execs the gate scripts rather
-// than git, so it cannot route through here and has to set cmd.Env for itself,
-// which leaves it the one other place where forgetting is still possible. That
-// is how these fixtures came to operate on the real repository, twice. Output
-// is folded into the failure message so a fixture that cannot build says why.
+// fixtureEnv, not this function: execGateScriptWith execs the gate scripts
+// rather than git, so it cannot route through here and has to set cmd.Env for
+// itself, which leaves it the one other place where forgetting is still
+// possible. That is how these fixtures came to operate on the real repository,
+// twice. Output is folded into the failure message so a fixture that cannot
+// build says why.
 func gitIn(dir string, args ...string) string {
 	GinkgoHelper()
 	cmd := exec.Command("git", args...)
@@ -811,14 +812,22 @@ func runGateScript(name, dir string, env []string, stdin string) (string, error)
 	return execGateScript(script, dir, env, stdin)
 }
 
-// execGateScript is the one site that execs a gate script, wherever it lives.
-// The caller chooses the environment, but every caller passes one built from
+// execGateScript runs a pre-push gate script under sh, as git runs the hook.
+func execGateScript(script, dir string, env []string, stdin string) (string, error) {
+	GinkgoHelper()
+	return execGateScriptWith([]string{"sh"}, script, dir, env, stdin)
+}
+
+// execGateScriptWith is the one site that execs a gate script, wherever it
+// lives and whichever shell runs it: the pre-push scripts under sh, and the
+// verify-release-tag step under `bash -eo pipefail`, as GitHub runs it. The
+// caller chooses the environment, but every caller passes one built from
 // fixtureEnv: the script's own git commands must read the fixture, not whatever
 // repository an inherited GIT_DIR names, which is what made the tag gate's
 // specs assert against the wrong commit.
-func execGateScript(script, dir string, env []string, stdin string) (string, error) {
+func execGateScriptWith(shell []string, script, dir string, env []string, stdin string) (string, error) {
 	GinkgoHelper()
-	cmd := exec.Command("sh", script)
+	cmd := exec.Command(shell[0], append(shell[1:], script)...)
 	cmd.Dir = dir
 	cmd.Env = env
 	cmd.Stdin = strings.NewReader(stdin)
