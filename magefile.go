@@ -5055,15 +5055,25 @@ type chartRenderCase struct {
 }
 
 // inlineCredentialSources are the files that declare the server's config keys,
-// relative to the repository root. internal/k8sexport/exportconfig declares the
-// kubernetes_export block too, but only export targets: the exporter
-// authenticates with the pod's ServiceAccount, so no credential lives there.
+// relative to the repository root: config.ServerConfig and the blocks it
+// embeds, all in internal/config.
+//
+// The blocks it types from packages of their own are deliberately not
+// scanned. internal/k8sexport/exportconfig declares kubernetes_export, but only
+// export targets: the exporter authenticates with the pod's ServiceAccount, so
+// no credential lives there. internal/certstore/certconfig declares
+// managed_certs and serving_cert, whose `secret` block names a Kubernetes
+// Secret rather than holding one; the tag pattern below would read it as a
+// credential. So this scan cannot see a credential added to either: it needs
+// an entry in openvox-ca.validate's refusal and a reject case written by hand.
+// What the two packages hold is pinned in magefile_chart_test.go, which fails
+// when a credential-shaped tag appears there, so that this is not forgotten.
 //
 // The scan reads tag names, not paths, so a key in a nested block such as
 // openbao comes back bare. That is enough to fail the check below; the fix is
 // then a dig for its path in openvox-ca.validate, not a top-level entry, and
 // a reject case expecting "config.openbao.<key>: set ".
-var inlineCredentialSources = []string{"internal/config/*.go", "cmd/openvox-ca/config.go"}
+var inlineCredentialSources = []string{"internal/config/*.go"}
 
 // inlineCredentialKeyRe matches a yaml tag whose name says it holds a secret,
 // with or without tag options such as ",omitempty". The words include
@@ -5078,8 +5088,15 @@ var inlineCredentialKeyRe = regexp.MustCompile(`yaml:"([a-z0-9_]*(?:password|pas
 // the list itself is hand-kept, and a key it misses renders into the ConfigMap
 // in clear text.
 func inlineCredentialKeys(root string) ([]string, error) {
+	return inlineCredentialKeysIn(root, inlineCredentialSources)
+}
+
+// inlineCredentialKeysIn is inlineCredentialKeys over a caller-supplied list of
+// sources, so that the packages inlineCredentialSources leaves out can be
+// judged by the same scan rather than by a copy of it.
+func inlineCredentialKeysIn(root string, sources []string) ([]string, error) {
 	seen := map[string]bool{}
-	for _, pattern := range inlineCredentialSources {
+	for _, pattern := range sources {
 		files, err := filepath.Glob(filepath.Join(root, pattern))
 		if err != nil {
 			return nil, err
@@ -5108,7 +5125,7 @@ func inlineCredentialKeys(root string) ([]string, error) {
 	// A scan that finds nothing would pass every key by default, so it fails
 	// instead: the sources have moved or their tags have changed shape.
 	if len(seen) == 0 {
-		return nil, fmt.Errorf("found no inline-credential config keys in %v under %s; update inlineCredentialSources", inlineCredentialSources, root)
+		return nil, fmt.Errorf("found no inline-credential config keys in %v under %s; update inlineCredentialSources", sources, root)
 	}
 	return slices.Sorted(maps.Keys(seen)), nil
 }

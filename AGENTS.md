@@ -473,13 +473,20 @@ is expected until someone sweeps the block deliberately.
 The one exception is a setting that can hold a credential inline. `config`
 lands in a ConfigMap, so `openvox-ca.validate` refuses every such key it lists
 in `$credentials`; a new one needs adding there, with a reject case in
-`chart:test`. `chart:test` enforces that for any key in `internal/config` or
-`cmd/openvox-ca/config.go` whose yaml tag names a password, passphrase,
-secret, token, credential or DSN (`inlineCredentialKeys` in `magefile.go`). It reads tag names, not paths:
+`chart:test`. `chart:test` enforces that for any key in `internal/config`,
+where `config.ServerConfig` and the blocks it embeds are declared, whose yaml
+tag names a password, passphrase, secret, token, credential or DSN
+(`inlineCredentialKeys` in `magefile.go`). It does not scan `managed_certs`,
+`serving_cert` or `kubernetes_export`, which are typed from
+`internal/certstore/certconfig` and `internal/k8sexport/exportconfig`: a
+credential added to one of those needs its refusal and reject case written by
+hand. A magefile spec fails when a credential-shaped key appears there, as a
+reminder, but it cannot check that the refusal was written. The
+`inlineCredentialKeys` scan reads tag names, not paths:
 a key in a nested block such as `openbao` still fails the check, but needs a
 `dig` for its path in `openvox-ca.validate` rather than a top-level entry, and
 a reject case naming that path (`config.openbao.<key>: set …`). A
-credential named otherwise, or declared outside those files, it cannot see,
+credential named otherwise, or declared outside `internal/config`, it cannot see,
 and the chart would render it in clear text without a word.
 
 Every fixture under `charts/openvox-ca/ci/` is linted and schema-checked in CI.
