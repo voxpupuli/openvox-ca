@@ -26,6 +26,11 @@ Two things are true regardless of backend:
   (e.g. a mounted secret volume) independent of the chosen backend — see
   [CA cert/key as local files](#ca-certkey-as-local-files).
 
+Because those per-subject keys are local files, generating them on a platform
+that may start the CA as a different uid from one run to the next needs a stable
+uid or some preparation: see [Server-side key generation and the
+uid](#server-side-key-generation-and-the-uid).
+
 In the HA backends (`etcd`, `redis`, `postgres`, `mysql`), any replica can sign,
 revoke, or refresh the CRL, and everything it writes lands in shared storage and
 is immediately visible to the others; `openvox-ca` coordinates the replicas and
@@ -184,6 +189,104 @@ where the entry and its integrity head are written in one step: SQL in one
 transaction, redis in one atomic script, etcd in one transaction. On those
 backends concurrent writers are the supported case, and this whole section is
 moot.
+
+---
+
+## Server-side key generation and the uid
+
+Server-side key generation keeps the key it generates in `<cadir>/private/`,
+whatever the backend. [`POST /generate/{subject}`](api.md#server-side-key-generation)
+always does; the offline
+[`openvox-ca generate`](operator-cli.md#generate-minting-a-certificate-offline)
+does unless `--key-out` names another file. `openvox-ca` creates that directory
+`0750` and writes each key `0600`, and the umask cannot widen either, so only
+the uid that created `private/` can add a key to it.
+
+On a platform that chooses the uid the CA runs as, and may choose a different
+one from one run to the next, sharing only the store's group with the uid before
+it, **server-side key generation needs a stable uid**. OpenShift is one
+example: there the security context constraint a pod runs under decides both its
+uid and its `fsGroup`, so check what yours assigns against the `fsGroup`
+paragraph below. The first run creates `private/`; once a later run is another
+uid, every `/generate`, and every offline `generate` without `--key-out`, fails
+on the key write. The offline command reports the permission error.
+`/generate` answers `500 Internal Server Error`, and the server logs
+`Generate failed` with an error beginning
+`failed to save private key for <subject>`.
+That failure comes after the certificate is signed: the certificate is deleted
+again, but each failed attempt has used a serial and left an inventory entry.
+Signing never writes to `private/`, so it is not affected by this —
+whether the rest of the store is reachable by a later uid is a question for the
+backend, and [the SQLite backend](#sqlite-backend) says what that one needs.
+Managed certificates do not use `private/` either: each writes its key to its
+own store, a Kubernetes Secret or files you name (see [managed
+certificates](configuration.md#managed-certificates)).
+
+Reading a key back has the same limit, since each key is `0600`: a later uid
+cannot read one an earlier uid wrote. `openvox-ca` reads none back of its own
+accord, but if `tls_key` names a key in `private/` — where [the
+serving-certificate bootstrap](configuration.md#serving-certificate) leaves the
+server's own — the server reads it at every start, and a later uid cannot. Pin
+the uid, or give that key group read and never world access: in place, by the
+uid that owns it or by root, which keeps it under the startup check on
+`private/`; or as a copy outside `private/`, where nothing checks its mode.
+Either has to be redone after every reissue, which writes the key `0600` again.
+Group read lets every member of the group present the server's TLS identity, so
+do it only where the group is the CA's own.
+
+This only bites where nothing restores group access to the volume. Under a
+Kubernetes `fsGroup` with the default `fsGroupChangePolicy: Always`, the kubelet
+gives the volume to that group and ORs group access in at every mount — read and
+write on files, and read, write, search and the setgid bit on directories — so
+`private/` is group-writable again before the next uid starts. The Helm chart
+pins the uid (`runAsUser: 1000`) and sets an `fsGroup` by default, so a chart
+install is affected only where the uid has been unpinned and group access is not
+restored. It is not restored with no `fsGroup`, with
+`fsGroupChangePolicy: OnRootMismatch` (which leaves the volume alone once its
+root matches, so a `private/` created after the first mount keeps `0750`), or on
+a volume whose driver does not apply `fsGroup` at all — whatever the chart's own
+values say.
+
+Where it does bite, you have three options:
+
+1. **Pin the uid.** Nothing else is needed. On a store that is already
+   failing, pin it to the uid that owns `private/` (`stat -c %u
+   <cadir>/private` on Linux) — unless that is root, in which case have root
+   give `private/` to the CA's uid, or use option 2, rather than run the CA as
+   root.
+2. **Create `private/` yourself before the first start**, with the mode your
+   platform needs and no world access: `2770`, owned by the store's group, for
+   instance. `openvox-ca` never changes the mode of a directory that already
+   exists, so it keeps that mode, but it does not check it either. A
+   world-writable `private/` starts without a word and lets every local account
+   add, replace or remove the files in it. A store that is already failing can
+   be given that mode with a one-off `chmod`, run by the uid that owns
+   `private/` or by root (in a pod, a one-off pod or Job running as that uid);
+   the running uid cannot, since `chmod` needs ownership.
+
+   In a pod the CA creates `private/` on its first start, so do it from an init
+   container: with the Helm chart, one in `initContainers` that mounts the
+   chart's `data` volume at `persistence.mountPath`. The chart's cadir is that
+   mount point unless `config.cadir` narrows it to a directory below, so the
+   directory to create is `<cadir>/private` for whichever applies, with the
+   cadir itself created first if it does not exist yet. The init container runs
+   on every start, as whatever uid that run is given, so it must create
+   directories only when they are absent and never `chmod` one that exists: one
+   that changes the mode fails with `EPERM` once the uid changes, and the pod
+   does not start at all.
+
+   Each key is still written `0600`, so this lets a later uid add keys, not read
+   earlier ones (see above). It also lets every member of the group add,
+   replace or remove the files in `private/`, though not read them, so do this
+   only where the group is the CA's own. It is no help on a backend whose other
+   files a later uid cannot reach anyway: the filesystem backend is one, and
+   [the SQLite backend](#sqlite-backend) says what that one needs. On the
+   filesystem backend `private/` also holds the inventory's integrity key and,
+   in a cadir that keeps it there, the CA key (`private/ca_key.pem`), which
+   group write would let the group replace or remove.
+3. **For the offline command only, use `--key-out`.** It writes the key to the
+   file you name and writes none into `private/`. `/generate` has no
+   equivalent: it always keeps a copy.
 
 ---
 
