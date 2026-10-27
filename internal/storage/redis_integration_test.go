@@ -24,6 +24,7 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"sort"
 	"strings"
@@ -111,6 +112,18 @@ var _ = Describe("RedisIntegrationListCSR", func() {
 		sort.Strings(csrs)
 		want := []string{CSRKey("a.example"), CSRKey("b.example"), CSRKey("c.example")}
 		Expect(fmt.Sprint(csrs)).To(Equal(fmt.Sprint(want)), "List = %v, want %v", csrs, want)
+	})
+})
+
+// The miniredis spec in redisglob_test.go runs the same assertions; this one
+// holds them against a real server's glob matcher, which is the one whose
+// escaping rules redisGlobEscape has to agree with.
+var _ = Describe("RedisIntegrationListGlobPrefix", func() {
+	It("scans only its own prefix's keys when the prefix holds glob characters", func() {
+		addr := redisAddrFromEnv()
+		cli := redis.NewClient(&redis.Options{Addr: addr})
+		DeferCleanup(cli.Close)
+		expectListScansOnlyItsOwnPrefix(cli, fmt.Sprintf("openvox-ca-test:glob:%d:", time.Now().UnixNano()))
 	})
 })
 
@@ -227,6 +240,32 @@ func newSharedIntegrationBackends(name string, n int) []*RedisBackend {
 	}
 	return out
 }
+
+// The unit specs in redis_test.go take a lock over in miniredis; this holds
+// the same against a real server, whose script reply type is what Unlock reads
+// the 0 from.
+var _ = Describe("RedisIntegrationUnlockLostLock", func() {
+	It("releases a lock another holder took over without touching it, and warns", func() {
+		b := newIntegrationBackend("lost-lock")
+		ctx := context.Background()
+
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		DeferCleanup(func() { slog.SetDefault(orig) })
+
+		ul, err := b.AcquireLock(ctx, "crl")
+		Expect(err).NotTo(HaveOccurred(), "AcquireLock")
+		lockKey := b.prefix + ":locks:crl"
+		Expect(b.client.Set(ctx, lockKey, "someone-else", time.Minute).Err()).To(Succeed())
+
+		Expect(ul.Unlock()).To(Succeed())
+		Expect(b.client.Get(ctx, lockKey).Val()).To(Equal("someone-else"),
+			"releasing a lost lock must not delete the new holder's")
+		Expect(buf.String()).To(ContainSubstring("Redis lock was no longer held by this replica when released"))
+		Expect(buf.String()).To(ContainSubstring("name=" + lockKey))
+	})
+})
 
 var _ = Describe("RedisIntegrationInventoryStore", func() {
 	It("stores appends as hash fields and renders byte-identical inventory text", func() {

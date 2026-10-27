@@ -428,7 +428,11 @@ func (b *RedisBackend) List(ctx context.Context, prefix string) ([]string, error
 		return nil, fmt.Errorf("unsupported list prefix %q", prefix)
 	}
 	physPrefix := b.prefix + ":" + subDir
-	match := physPrefix + "*"
+	// Escaped, because KeyPrefix is operator-supplied and SCAN's MATCH is a
+	// glob: a prefix containing "*", "?" or "[" would otherwise also match
+	// other prefixes' keys. The loop below would still discard those, but only
+	// after SCAN had returned them, so each one cost a round of work here.
+	match := redisGlobEscape(physPrefix) + "*"
 
 	var (
 		out    []string
@@ -461,6 +465,25 @@ func (b *RedisBackend) List(ctx context.Context, prefix string) ([]string, error
 		cursor = next
 	}
 	return out, nil
+}
+
+// redisGlobEscape escapes s so that a Redis glob (SCAN MATCH, KEYS) matches it
+// literally. Redis's matcher treats "*", "?", "[" and the backslash as
+// special; "]" is escaped too, which is harmless outside a character class and
+// keeps the rule simple to check.
+func redisGlobEscape(s string) string {
+	var buf strings.Builder
+	buf.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; c {
+		case '*', '?', '[', ']', '\\':
+			buf.WriteByte('\\')
+			buf.WriteByte(c)
+		default:
+			buf.WriteByte(c)
+		}
+	}
+	return buf.String()
 }
 
 // AppendLine atomically appends data to key. Concurrent appends from this
@@ -668,13 +691,29 @@ func (u *redisUnlocker) heartbeat() {
 	}
 }
 
+// Unlock releases the Redis lock if this holder still owns it, then the
+// process-local mutex.
+//
+// A lock that had already been lost -- its TTL ran out, or another holder took
+// it over after a failover -- is still a successful release: there is nothing
+// left to delete, and the unlock script's token check leaves the new holder's
+// lock alone. But it means the critical section may have overlapped another
+// replica's, and the script's 0 is the only sign of that, so it is logged at
+// WARN. The log comes after both releases, so it holds neither lock.
 func (u *redisUnlocker) Unlock() error {
 	u.heartbeatOnce.Do(func() { close(u.stopHeartbeat) })
 	ctx, cancel := context.WithTimeout(context.Background(), u.backend.timeout)
 	defer cancel()
-	_, err := u.backend.unlockScript.Run(ctx, u.backend.client, []string{u.lockKey}, u.token).Result()
+	res, err := u.backend.unlockScript.Run(ctx, u.backend.client, []string{u.lockKey}, u.token).Result()
 	u.local.Unlock()
-	return err
+	if err != nil {
+		return err
+	}
+	if n, ok := res.(int64); ok && n == 0 {
+		slog.Warn("Redis lock was no longer held by this replica when released; its critical section may have overlapped another holder's",
+			"name", u.lockKey)
+	}
+	return nil
 }
 
 // Close releases the underlying Redis client when owned by this backend.

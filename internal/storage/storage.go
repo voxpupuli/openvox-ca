@@ -1121,15 +1121,33 @@ func (s *StorageService) PrivateKeyPath(subject string) string {
 	return filepath.Join(s.localPrivateKeyDir, subject+"_key.pem")
 }
 
+// privateKeyWritePath is PrivateKeyPath for a write: it refuses a subject that
+// validateKeyName would refuse in a backend key, since the subject becomes a
+// file name here exactly as it does there. Every caller has run
+// ca.ValidateSubject already; this is the same defence in depth the backends
+// get from validateKey, which never sees this path because private keys bypass
+// the backend. A further refusal on the path itself belongs here too, so that
+// every writer of a per-subject key inherits it.
+func (s *StorageService) privateKeyWritePath(subject string) (string, error) {
+	if err := validateKeyName(subject); err != nil {
+		return "", fmt.Errorf("invalid private key subject %q: %w", subject, err)
+	}
+	return s.PrivateKeyPath(subject), nil
+}
+
 // SavePrivateKey persists a server-generated private key for subject. The
 // key is always written to the local filesystem, never the configured backend.
 func (s *StorageService) SavePrivateKey(ctx context.Context, subject string, pemData []byte) error {
+	p, err := s.privateKeyWritePath(subject)
+	if err != nil {
+		return err
+	}
 	s.fileMu.Lock()
 	defer s.fileMu.Unlock()
 	if err := os.MkdirAll(s.localPrivateKeyDir, DirPerm); err != nil {
 		return err
 	}
-	return AtomicWriteFile(s.PrivateKeyPath(subject), pemData, FilePermPrivate)
+	return AtomicWriteFile(p, pemData, FilePermPrivate)
 }
 
 // CheckKeyPermissions reports every file holding key material whose permissions

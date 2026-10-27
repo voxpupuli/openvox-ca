@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -537,7 +538,7 @@ var _ = Describe("RedisBackend", func() {
 	})
 
 	// RedisPhysicalKey pins the logical→physical key layout (mirrors
-	// EtcdPhysicalKey) and the "../empty-segment rejection contract. The
+	// EtcdPhysicalKey) and the validateKey rejection contract. The
 	// prefix uses ":" as the Redis separator.
 	Describe("RedisPhysicalKey", func() {
 		b := &RedisBackend{prefix: "puppet-ca"}
@@ -566,7 +567,91 @@ var _ = Describe("RedisBackend", func() {
 			Entry(nil, "unknown", "", true),
 			Entry(nil, "../evil", "", true),
 			Entry(nil, CSRKey("../evil"), "", true),
+			Entry(nil, CSRKey("a/b"), "", true),
+			Entry(nil, CertKey("a/b"), "", true),
+			Entry(nil, CSRKey("a\nb"), "", true),
+			Entry(nil, CertKey("a\x7fb"), "", true),
+			Entry(nil, CSRKey("a\rb"), "", true),
+			Entry(nil, CSRKey("a\x9bb"), "", true),
+			Entry(nil, CSRKey(""), "", true),
 		)
+	})
+
+	// A lock lost before its release -- expired, or taken over after a
+	// failover -- is released without error, but the unlock script's 0 is the
+	// only sign that the critical section may have overlapped another holder's,
+	// so Unlock logs it. The TTL is long enough that the heartbeat never runs
+	// during a spec, so the only WARN the buffer can hold is Unlock's.
+	Describe("Unlock of a lock that has already been lost", func() {
+		const lostMsg = "Redis lock was no longer held by this replica when released"
+		var (
+			mr  *miniredis.Miniredis
+			b   *RedisBackend
+			buf *bytes.Buffer
+		)
+
+		BeforeEach(func() {
+			var cli *redis.Client
+			var stop func()
+			mr, cli, stop = newMiniredis()
+			DeferCleanup(stop)
+			b = NewRedisBackendFromClient(cli, "test-lost", 5*time.Second, 30*time.Second)
+			Expect(b.EnsureReady(context.Background())).To(Succeed())
+
+			buf = &bytes.Buffer{}
+			orig := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			DeferCleanup(func() { slog.SetDefault(orig) })
+		})
+
+		It("succeeds, leaves the new holder's lock alone, and warns naming the lock", func() {
+			ul, err := b.AcquireLock(context.Background(), "crl")
+			Expect(err).NotTo(HaveOccurred())
+			// Another holder takes the key over, as after a failover.
+			Expect(mr.Set("test-lost:locks:crl", "someone-else")).To(Succeed())
+
+			Expect(ul.Unlock()).To(Succeed())
+
+			Expect(mr.Get("test-lost:locks:crl")).To(Equal("someone-else"),
+				"releasing a lost lock must not delete the new holder's")
+			Expect(buf.String()).To(ContainSubstring(lostMsg))
+			Expect(buf.String()).To(ContainSubstring("name=test-lost:locks:crl"))
+		})
+
+		It("warns when the lock expired rather than being taken over", func() {
+			ul, err := b.AcquireLock(context.Background(), "crl")
+			Expect(err).NotTo(HaveOccurred())
+			mr.FastForward(time.Minute)
+			Expect(mr.Exists("test-lost:locks:crl")).To(BeFalse(), "the lock must have expired")
+
+			Expect(ul.Unlock()).To(Succeed())
+			Expect(buf.String()).To(ContainSubstring(lostMsg))
+		})
+
+		// Not a lost lock, but the same tail of Unlock: a release that fails
+		// outright must still free the process-local mutex -- the property the
+		// redisUnlocker doc promises, so a transient Redis error cannot wedge
+		// later in-process callers -- and must not be reported as a lost lock.
+		It("returns a failed release's error, still frees the local lock, and does not warn", func() {
+			ul, err := b.AcquireLock(context.Background(), "crl")
+			Expect(err).NotTo(HaveOccurred())
+			mr.Close()
+
+			Expect(ul.Unlock()).NotTo(Succeed(), "the release must report that Redis was unreachable")
+			local := b.localLockFor("crl")
+			Expect(local.TryLock()).To(BeTrue(), "the process-local mutex must have been released")
+			local.Unlock()
+			Expect(buf.String()).NotTo(ContainSubstring(lostMsg))
+		})
+
+		It("says nothing when the lock was still held", func() {
+			ul, err := b.AcquireLock(context.Background(), "crl")
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(ul.Unlock()).To(Succeed())
+			Expect(mr.Exists("test-lost:locks:crl")).To(BeFalse(), "the lock must have been released")
+			Expect(buf.String()).To(BeEmpty())
+		})
 	})
 
 	// TestRedisBackendUnlockIdempotentOnExpiry verifies that Unlock after lock

@@ -609,6 +609,15 @@ leaves a narrow window during which cross-replica coordination is weaker than
 etcd's. For `openvox-ca`'s workloads that window is small and self-healing;
 operators who need the strictest cross-node consistency should prefer `etcd`.
 
+A replica logs `Redis lock was no longer held by this replica when released`
+at `WARN` when a lock it held had expired or been taken over by another
+replica before it released it, so the work done under that lock may have
+overlapped another replica's. A lock is renewed every third of
+`redis_lock_ttl_sec` while held, so this follows either a Sentinel failover or
+a stall, or a loss of contact with Redis, long enough to miss every renewal.
+If it recurs without a failover, look for what is stalling the replica, or
+raise `redis_lock_ttl_sec`.
+
 ### Configuration — direct connection
 
 ```yaml
