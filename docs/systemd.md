@@ -22,9 +22,9 @@ $ getent group puppet >/dev/null || sudo groupadd --system puppet
 $ getent passwd puppet >/dev/null || sudo useradd --system --gid puppet --home-dir /etc/puppetlabs/puppet --shell /usr/sbin/nologin puppet
 $ sudo install -m 0755 openvox-ca openvox-ca-ctl /usr/local/bin/
 $ sudo install -m 0644 openvox-ca.service /etc/systemd/system/
-$ sudo install -d -m 0755 /etc/puppet-ca
-$ sudoedit /etc/puppet-ca/config.yaml   # your own file; see configuration.md
-$ sudo chown root:puppet /etc/puppet-ca/config.yaml && sudo chmod 0640 /etc/puppet-ca/config.yaml
+$ sudo install -d -m 0755 /etc/openvox-ca
+$ sudoedit /etc/openvox-ca/config.yaml   # your own file; see configuration.md
+$ sudo chown root:puppet /etc/openvox-ca/config.yaml && sudo chmod 0640 /etc/openvox-ca/config.yaml
 $ sudo install -d -o puppet -g puppet -m 0770 /etc/puppetlabs/puppet/ssl/ca
 $ sudo systemctl daemon-reload
 $ sudo systemctl enable --now openvox-ca.service
@@ -34,7 +34,7 @@ The first two lines create the `puppet` account only where it does not exist yet
 
 The configuration file is yours to write — it is not in the tarball — and [configuring the server](configuration.md#config-file) has a worked example. Make it **0640 root:puppet**, because it can hold credentials — `etcd_password`, `redis_password`, `redis_sentinel_password`, or a `sql_dsn` with a password in it — and the service only needs to read it. The server auto-detects that path, so the unit passes no `--config` and `OPENVOX_CA_CONFIG` still works in a drop-in.
 
-The unit as rendered for a tarball expects the binary at `/usr/local/bin/openvox-ca` (the packages' copy names `/usr/bin`) and its configuration at `/etc/puppet-ca/config.yaml`. See [configuring the server](configuration.md).
+The unit as rendered for a tarball expects the binary at `/usr/local/bin/openvox-ca` (the packages' copy names `/usr/bin`) and its configuration at `/etc/openvox-ca/config.yaml`. See [configuring the server](configuration.md).
 
 **Set `cadir` to `/etc/puppetlabs/puppet/ssl/ca`**, which is the one writable path the unit grants (`ReadWritePaths=`), or the CA will not be able to write: `ProtectSystem=strict` makes the rest of the filesystem read-only, and a filesystem-backend CA has to write a signed certificate, a serial and a CRL. It is also the Clojure CA's own layout, so a CA migrated from OpenVox/Puppet Server is already there. To use a different directory, make it writable too — see [using a different CA directory](#using-a-different-ca-directory). If OpenVox Server's CA may take that directory back, openvox-ca must run as OpenVox Server's user, which the shipped unit already does (`User=puppet`); see [sharing the cadir with OpenVox Server](storage-backends.md#sharing-the-cadir-with-openvox-server).
 
@@ -51,7 +51,7 @@ and in each, add:
 
 ```ini
 [Service]
-ReadWritePaths=/var/lib/puppet-ca
+ReadWritePaths=/srv/openvox-ca
 ```
 
 A drop-in survives an upgrade; an edit does not. The packages install their units under `/usr/lib/systemd/system`, and every package upgrade replaces those files — so an edited `ReadWritePaths=` is reverted, the upgrade restarts the running CA, and it comes back unable to write its own store, with the upgrade itself reporting success. The same applies to a tarball's unit the next time you install a newer one over it. `ReadWritePaths=` in a drop-in adds to the unit's own rather than replacing it, so nothing else needs restating.
@@ -267,7 +267,7 @@ The `.deb` and `.rpm` install the same unit, rendered for `/usr/bin`, and add a 
 
 It is pulled in by `openvox-ca.service` and runs nowhere else. There is no `WantedBy=multi-user.target` on it, so installing the package provisions nothing and neither does the next reboot — a CA is created the first time you run `systemctl start openvox-ca`. It is ordered `Before=openvox-ca.service` and is required by it, so provisioning that fails stops the service rather than letting it start against a half-provisioned directory.
 
-**You do not have to write a configuration file first.** The package ships `/etc/puppet-ca/config.yaml` already set up: the CA directory, the serving certificate and key, and the port. Review it if you like — it is marked as a configuration file, so your edits survive upgrades — but a default install needs no edit to start.
+**You do not have to write a configuration file first.** The package ships `/etc/openvox-ca/config.yaml` already set up: the CA directory, the serving certificate and key, and the port. Review it if you like — it is marked as a configuration file, so your edits survive upgrades — but a default install needs no edit to start.
 
 Every step it takes is guarded on absence, so it **adopts rather than replaces**: nothing already on disk is overwritten, moved or re-signed. Running it twice does nothing the second time, and on a host that already has a CA it leaves that CA alone — but it does still fill in whatever is missing around it, which is what makes such an install produce a service that starts:
 
@@ -278,20 +278,6 @@ Every step it takes is guarded on absence, so it **adopts rather than replaces**
 5. Link the serving credential the shipped configuration names — `certs/openvox-ca-server.pem` and `private_keys/openvox-ca-server.pem` — to the certificate step 3 produced.
 
 Step 5 is what makes the service able to start at all: it binds `0.0.0.0` and refuses plain HTTP on a non-loopback address, so it needs `tls_cert` and `tls_key`. Those name fixed paths because a file shipped in a package cannot know this host's certificate name, and provisioning points them at the credential it just adopted or minted. Re-minting under a corrected name is then a matter of replacing those two links rather than editing configuration. Like every other step it is guarded on absence, so pointing `tls_cert` at your own certificate keeps it.
-
-**Step 2 stops rather than bootstrap if it finds a CA at `/var/lib/puppet-ca`.**
-That path is where an `openvox-ca` CA commonly lives — it is the Helm chart's
-`persistence.mountPath` default, and a common choice for a hand-built install —
-so provisioning checks it before creating anything. Finding a CA there and none
-in `/etc/puppetlabs/puppet/ssl/ca`, it stops and says so, rather than
-bootstrapping a second CA that every agent already enrolled against the first
-would distrust. The message gives both ways out: point `cadir` at the existing
-directory and [grant it to both units](#using-a-different-ca-directory), or move
-the CA to the shipped one.
-Which is right depends on what you set `cadir` to, and moving a CA is not a
-copy — it takes the private key, the inventory and the CRL, and the service may
-be running against it, which is why provisioning refuses rather than attempting
-the move itself.
 
 Step 3 is the one that can stop rather than warn, and it does so in three cases. If **one half of a credential** is present — a certificate with no key, or the reverse — it refuses to guess and says which file to move aside. If the binary has **no `generate` subcommand** it stops too, because a build that cannot mint leaves the service with no certificate to serve and `openvox-ca` refuses to start without TLS on a non-loopback address; failing here names the cause, where failing at the service would only report that TLS is not configured.
 
@@ -323,7 +309,7 @@ If provisioning needs to write in a directory it cannot, it stops and tells you 
 
 ### The packages listen on 8141
 
-The binary's own default is 8140, and the packages ship `/etc/puppet-ca/config.yaml` setting `port: 8141`. The reason is collision, not preference: 8140 is right for a release tarball, a container and a host running nothing but the CA, but a *package* is what gets installed alongside OpenVox Server, and Server binds 8140 itself. So agents talking to a packaged CA are configured with `ca_port = 8141`.
+The binary's own default is 8140, and the packages ship `/etc/openvox-ca/config.yaml` setting `port: 8141`. The reason is collision, not preference: 8140 is right for a release tarball, a container and a host running nothing but the CA, but a *package* is what gets installed alongside OpenVox Server, and Server binds 8140 itself. So agents talking to a packaged CA are configured with `ca_port = 8141`.
 
 The release tarballs are unaffected and stay on 8140 — they ship no configuration file at all.
 
@@ -345,7 +331,7 @@ are certificate-handling ones. It is `try-restart` rather than `restart`: a CA
 you have deliberately left stopped stays stopped, and an install still never
 starts one.
 
-The one file an upgrade will not overwrite is `/etc/puppet-ca/config.yaml`: it is marked as a configuration file in both formats, so your edits survive and a changed default arrives beside it as `.dpkg-dist` or `.rpmnew`.
+The one file an upgrade will not overwrite is `/etc/openvox-ca/config.yaml`: it is marked as a configuration file in both formats, so your edits survive and a changed default arrives beside it as `.dpkg-dist` or `.rpmnew`.
 
 ### One instance per CA directory
 
@@ -355,7 +341,7 @@ That is also why provisioning is ordered before the service rather than beside i
 
 ### Configuring another backend
 
-[The storage backends](storage-backends.md) are configured in the same `/etc/puppet-ca/config.yaml` the packages ship, so its examples apply to a packaged install — **except that provisioning refuses to run against any of them.** `openvox-ca-ctl setup` is filesystem-only, while `openvox-ca generate` mints through whatever backend the configuration names, so bootstrapping here would write one CA to disk while the service reads another from the store, and then point `certs/ca.pem` — where every agent on this host reads the CA certificate — at the wrong one.
+[The storage backends](storage-backends.md) are configured in the same `/etc/openvox-ca/config.yaml` the packages ship, so its examples apply to a packaged install — **except that provisioning refuses to run against any of them.** `openvox-ca-ctl setup` is filesystem-only, while `openvox-ca generate` mints through whatever backend the configuration names, so bootstrapping here would write one CA to disk while the service reads another from the store, and then point `certs/ca.pem` — where every agent on this host reads the CA certificate — at the wrong one.
 
 Because `openvox-ca-first-boot.service` is `RequiredBy=openvox-ca.service`, that refusal stops the service as well. Moving a packaged install to another backend therefore means provisioning the CA yourself:
 

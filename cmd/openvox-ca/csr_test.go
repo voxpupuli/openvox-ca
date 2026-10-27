@@ -127,7 +127,7 @@ var _ = Describe("openvox-ca csr", func() {
 
 	BeforeEach(func() {
 		caDir = GinkgoT().TempDir()
-		// Pin to an empty config file so the host's /etc/puppet-ca/config.yaml,
+		// Pin to an empty config file so the host's /etc/openvox-ca/config.yaml,
 		// if it exists, cannot influence the result.
 		// ECDSA P-256, not the RSA-4096 default: these specs create a CA key
 		// on nearly every It, and RSA generation at that size dominates the
@@ -137,7 +137,7 @@ var _ = Describe("openvox-ca csr", func() {
 		pinnedCfg := "ca_key_algo: ecdsa\nca_key_size: 256\n"
 		emptyCfg := filepath.Join(GinkgoT().TempDir(), "pinned.yaml")
 		Expect(os.WriteFile(emptyCfg, []byte(pinnedCfg), 0o644)).To(Succeed())
-		setEnv("OPENVOX_CA_CONFIG", emptyCfg)
+		setEnv(configEnvVar, emptyCfg)
 		clearServerEnv()
 	})
 
@@ -240,7 +240,7 @@ var _ = Describe("openvox-ca csr", func() {
 				"  key_name: openvox-ca\n"+
 				"  auth_method: token\n"+
 				"  token_file: "+tokenFile+"\n"), 0o644)).To(Succeed())
-		setEnv("OPENVOX_CA_CONFIG", cfgFile)
+		setEnv(configEnvVar, cfgFile)
 
 		_, err := runCSR("--cadir", caDir, "--hostname", "puppet.example.com", "--create-key")
 		Expect(err).To(MatchError(ContainSubstring("OpenBao")))
@@ -468,7 +468,7 @@ var _ = Describe("openvox-ca csr", func() {
 		Expect(os.WriteFile(cfgPath, []byte(
 			"ca_key_algo: ecdsa\nca_key_size: 256\nencrypt_ca_key: true\n"+
 				"ca_key_passphrase_file: "+ppPath+"\n"), 0o600)).To(Succeed())
-		setEnv("OPENVOX_CA_CONFIG", cfgPath)
+		setEnv(configEnvVar, cfgPath)
 
 		_, err := runCSR("--cadir", caDir, "--hostname", "puppet.example.com", "--create-key")
 		Expect(err).NotTo(HaveOccurred())

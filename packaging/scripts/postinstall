@@ -5,7 +5,7 @@
 #
 # It is shared rather than per-format because nothing in it diverges. Both
 # formats install the same units, the same binaries and the same
-# /etc/puppet-ca/config.yaml, and the one thing that does differ between them
+# /etc/openvox-ca/config.yaml, and the one thing that does differ between them
 # -- the argument contract this script is called under -- is handled by the
 # case below rather than by two scripts.
 
@@ -21,7 +21,7 @@ set -eu
 # that exported it -- points this script at the file the service will read,
 # which is the one it has to secure.
 SSLDIR="${OPENVOX_CA_SSLDIR:-/etc/puppetlabs/puppet/ssl}"
-CONFIG="${OPENVOX_CA_CONFIG:-/etc/puppet-ca/config.yaml}"
+CONFIG="${OPENVOX_CA_CONFIG:-/etc/openvox-ca/config.yaml}"
 
 # The account the ssl-root check below compares owners against. Overridable for
 # the same reason and with the same caveat as the two above: a spec runs as an

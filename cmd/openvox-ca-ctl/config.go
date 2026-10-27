@@ -89,3 +89,9 @@ func applyCtlEnv(cfg *ctlConfig) {
 
 // resolveConfigFile delegates to the shared config.ResolveConfigFile.
 var resolveConfigFile = config.ResolveConfigFile
+
+// defaultCtlConfigFile is the file openvox-ca-ctl reads when neither --config
+// nor OPENVOX_CA_CTL_CONFIG names one. It sits beside the server's own
+// config.yaml; mage test:magefile checks that it does, and that it is spelt
+// out only here.
+const defaultCtlConfigFile = "/etc/openvox-ca/ctl.yaml"

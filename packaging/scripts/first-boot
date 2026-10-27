@@ -45,7 +45,7 @@ SSLDIR="${OPENVOX_CA_SSLDIR:-/etc/puppetlabs/puppet/ssl}"
 # whatever points it elsewhere moves the server's file and provisioning's
 # together -- which is what every guard below relies on, since a guard that
 # checked a file nothing else uses would check nothing.
-CONFIG="${OPENVOX_CA_CONFIG:-/etc/puppet-ca/config.yaml}"
+CONFIG="${OPENVOX_CA_CONFIG:-/etc/openvox-ca/config.yaml}"
 
 # read_config_key prints the value of a top-level scalar key from $CONFIG, or
 # nothing if the file, the key or a readable value is absent.
@@ -230,20 +230,12 @@ if [ -z "$CADIR" ]; then
     $(config_key_line cadir)
 
 Provisioning has to agree with the server about where the CA lives, and it will not guess. Write
-the value as a plain or quoted scalar on one line -- cadir: /var/lib/puppet-ca -- and start again:
+the value as a plain or quoted scalar on one line -- cadir: /srv/openvox-ca -- and start again:
 
     systemctl restart openvox-ca-first-boot"
 	fi
 	CADIR="$SSLDIR/ca"
 fi
-
-# A cadir location openvox-ca CAs are commonly found at: it is the Helm chart's
-# persistence.mountPath default, it is what the unit's StateDirectory=puppet-ca
-# created before the packages moved the default into the ssl tree, and it is a
-# common choice for a hand-built install. Nothing
-# writes here; it is read once, to refuse rather than to migrate. Overridable
-# for the same reason the roots above are.
-LEGACY_CADIR="${OPENVOX_CA_LEGACY_CADIR:-/var/lib/puppet-ca}"
 
 # The package's own binaries, by absolute path rather than through PATH. An
 # operator who tried the release tarball before installing the package has
@@ -534,8 +526,8 @@ not own. Two ways forward:
 # the real one, and step 4 would then point $SSLDIR/certs/ca.pem -- where every
 # agent on this host reads the CA certificate -- at the stray one.
 #
-# So this refuses, in the same spirit as the legacy-cadir block below: the
-# packages default to `filesystem` and provisioning supports exactly that.
+# So this refuses: the packages default to `filesystem` and provisioning
+# supports exactly that.
 # The spellings openvox-ca itself accepts for the filesystem backend, from
 # ParseBackendKind in internal/storage/spec.go. Refusing one the server accepts
 # would stop a service that is configured perfectly well -- and because the
@@ -592,52 +584,6 @@ ensure_ca() {
 	if [ -f "$CADIR/ca_crt.pem" ]; then
 		info "a CA already exists in $CADIR; leaving it alone"
 		return 0
-	fi
-
-	# Before bootstrapping, look where a CA may already be.
-	#
-	# $CADIR is not the only place an openvox-ca CA is found:
-	# /var/lib/puppet-ca is the Helm chart's persistence.mountPath default and
-	# what the unit's StateDirectory=puppet-ca created before the packages
-	# moved the default into the ssl tree, so a host can hold a real CA
-	# there that $CADIR knows nothing about. Bootstrapping regardless would
-	# mint a SECOND CA, and the agents already enrolled against the first would
-	# silently stop verifying. Nothing in the resulting system says which of
-	# the two is the real one.
-	#
-	# It refuses rather than migrating. Moving a CA is not a copy: the cadir
-	# holds the private key, the inventory and the CRL, the service may be
-	# running against it, and the right destination depends on what the
-	# operator set cadir to. A maintainer-script-driven move that got any of
-	# that wrong would be unrecoverable in a way that stopping is not.
-	if [ -f "$LEGACY_CADIR/ca_crt.pem" ]; then
-		fail "found an existing CA in $LEGACY_CADIR, and none in $CADIR, which is where this
-package keeps one. Provisioning has stopped rather than bootstrap a second CA: agents enrolled
-against the one in $LEGACY_CADIR would not trust a new one, and nothing afterwards would say which
-is which.
-
-Choose one, then run 'systemctl restart openvox-ca-first-boot':
-
-  Keep the existing CA where it is -- set cadir to $LEGACY_CADIR in $CONFIG, and make it writable
-  for BOTH units with a drop-in, not by editing the unit files, which every package upgrade
-  replaces:
-
-    systemctl edit openvox-ca              # add the two lines below
-    systemctl edit openvox-ca-first-boot   # and the same two here
-
-        [Service]
-        ReadWritePaths=$LEGACY_CADIR
-
-  Both, because both write there: the service serves from the CA directory and this oneshot creates
-  it, and each runs under ProtectSystem=strict with only its own ReadWritePaths= writable. Widening
-  the service alone leaves provisioning failing on a read-only filesystem the next time it mints.
-
-  Or move it -- stop openvox-ca, move $LEGACY_CADIR to $CADIR with its ownership intact
-  ('mv $LEGACY_CADIR/* $CADIR/' as root, then 'chown -R puppet:puppet $CADIR'), and leave the
-  shipped configuration as it is.
-
-If the CA in $LEGACY_CADIR is genuinely finished with, delete it and provisioning will bootstrap
-a new one. That retires every certificate it ever issued."
 	fi
 
 	info "bootstrapping a new CA in $CADIR as \"$NAME\""

@@ -129,7 +129,7 @@ var _ = Describe("Global flag precedence", func() {
 	// other spec here passes --config, which outranks the variable, so these
 	// run the probe without one. Each names one of two files in turn rather
 	// than comparing set with unset: unset falls back to
-	// /etc/puppet-ca/ctl.yaml, which is the host's to decide.
+	// /etc/openvox-ca/ctl.yaml, which is the host's to decide.
 	DescribeTable("reads the config file named by OPENVOX_CA_CTL_CONFIG",
 		func(pick int) {
 			want := []string{"/from/first.pem", "/from/second.pem"}

@@ -47,9 +47,9 @@ var _ = Describe("resolveSQLDSN", func() {
 	}
 
 	It("returns sql_dsn when only it is set", func() {
-		dsn, err := resolveSQLDSN(SQLSpec{DSN: "file:/var/lib/puppet-ca/ca.db"})
+		dsn, err := resolveSQLDSN(SQLSpec{DSN: "file:/var/lib/openvox-ca/ca.db"})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(dsn).To(Equal("file:/var/lib/puppet-ca/ca.db"))
+		Expect(dsn).To(Equal("file:/var/lib/openvox-ca/ca.db"))
 	})
 
 	It("reads the first line of sql_dsn_file, trimmed, when only it is set", func() {
@@ -161,9 +161,9 @@ var _ = Describe("DSNHasPassword", func() {
 		Entry("MySQL with a password, for a user named unix", "unix:"+secret+"@tcp(db:3306)/ca", true),
 		Entry("MySQL with a user and no password", "ca@tcp(db:3306)/ca", false),
 		Entry("MySQL with no userinfo", "tcp(db:3306)/ca", false),
-		Entry("a SQLite file: URI", "file:/var/lib/puppet-ca/ca.db", false),
-		Entry("a SQLite file: URI with parameters", "file:/var/lib/puppet-ca/ca.db?_pragma=busy_timeout(5000)", false),
-		Entry("a bare SQLite path", "/var/lib/puppet-ca/ca.db", false),
+		Entry("a SQLite file: URI", "file:/var/lib/openvox-ca/ca.db", false),
+		Entry("a SQLite file: URI with parameters", "file:/var/lib/openvox-ca/ca.db?_pragma=busy_timeout(5000)", false),
+		Entry("a bare SQLite path", "/var/lib/openvox-ca/ca.db", false),
 		Entry("an empty DSN", "", false),
 		// A known false negative, pinned so that changing it is a decision:
 		// url.Parse rejects the port, and MySQL's grammar cannot place the

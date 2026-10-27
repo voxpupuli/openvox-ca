@@ -49,7 +49,7 @@ var _ = Describe("the store instance lock", func() {
 
 	// The specs below drive real root commands, which resolve OPENVOX_CA_CONFIG
 	// and the OPENVOX_CA_* environment. Without a pin, an exported
-	// OPENVOX_CA_STORAGE_BACKEND (or a host /etc/puppet-ca/config.yaml) sends
+	// OPENVOX_CA_STORAGE_BACKEND (or a host /etc/openvox-ca/config.yaml) sends
 	// them at a store the holdStore flock does not cover. It covers every
 	// command-driving spec in this file, not only the newest: the hazard is the
 	// same for csr and import-ca-cert, and counting them here would go stale
@@ -57,7 +57,7 @@ var _ = Describe("the store instance lock", func() {
 	BeforeEach(func() {
 		pinned := filepath.Join(GinkgoT().TempDir(), "pinned.yaml")
 		Expect(os.WriteFile(pinned, []byte("ca_key_algo: ecdsa\nca_key_size: 256\n"), 0o644)).To(Succeed())
-		setEnv("OPENVOX_CA_CONFIG", pinned)
+		setEnv(configEnvVar, pinned)
 		clearServerEnv()
 
 		// Every command driven here reaches applySubcommandLogging ->
@@ -410,7 +410,7 @@ var _ = Describe("the store instance lock", func() {
 			// check moved past the fork, the pre-flight above would refuse
 			// first, naming the lock rather than the setting, and nothing
 			// would be forked.
-			setEnv("OPENVOX_CA_CONFIG", writeTempConfig(""))
+			setEnv(configEnvVar, writeTempConfig(""))
 			clearServerEnv()
 			setEnv("OPENVOX_CA_SERIAL_NUMBER_FORMAT", "hexx")
 			caDir := GinkgoT().TempDir()

@@ -68,7 +68,7 @@ type StorageConfig struct {
 
 	// SQL backend (sqlite, postgres, mysql/mariadb). SQLDSN is the
 	// driver-specific data source name: a file path/URI for SQLite
-	// ("file:/var/lib/puppet-ca/ca.db"), or a connection string for the
+	// ("file:/srv/openvox-ca/ca.db"), or a connection string for the
 	// networked engines. SQLDSNFile names a file holding the DSN instead, so
 	// a password need not be on the command line or in the environment; the
 	// two are mutually exclusive. SQLTLS* apply only to the networked dialects.

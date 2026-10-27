@@ -239,24 +239,24 @@ read unattended is a passphrase an attacker who is already that user can read.
 
 ```bash
 # Bootstrap with encryption. A passphrase source is required: this refuses.
-openvox-ca --cadir /var/lib/puppet-ca --encrypt-ca-key
+openvox-ca --cadir /srv/openvox-ca --encrypt-ca-key
 
 # Bootstrap with an explicit passphrase file:
-echo "my-secret-passphrase" > /etc/puppet-ca/key-passphrase
-chmod 600 /etc/puppet-ca/key-passphrase
-openvox-ca --cadir /var/lib/puppet-ca --encrypt-ca-key \
-  --ca-key-passphrase-file /etc/puppet-ca/key-passphrase
+echo "my-secret-passphrase" > /etc/openvox-ca/key-passphrase
+chmod 600 /etc/openvox-ca/key-passphrase
+openvox-ca --cadir /srv/openvox-ca --encrypt-ca-key \
+  --ca-key-passphrase-file /etc/openvox-ca/key-passphrase
 
 # Or via environment variable:
 export OPENVOX_CA_KEY_PASSPHRASE="my-secret-passphrase"
-openvox-ca --cadir /var/lib/puppet-ca --encrypt-ca-key
+openvox-ca --cadir /srv/openvox-ca --encrypt-ca-key
 
 # openvox-ca-ctl setup also supports encryption, and needs a source just the
 # same. It reads OPENVOX_CA_KEY_PASSPHRASE from the environment, so the line
 # above would carry it; named here instead, because a command copied out of a
 # block should not depend on what came before it:
-openvox-ca-ctl setup --cadir /var/lib/puppet-ca --encrypt-ca-key \
-  --ca-key-passphrase-file /etc/puppet-ca/key-passphrase
+openvox-ca-ctl setup --cadir /srv/openvox-ca --encrypt-ca-key \
+  --ca-key-passphrase-file /etc/openvox-ca/key-passphrase
 ```
 
 ### Backward compatibility

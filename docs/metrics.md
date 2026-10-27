@@ -18,7 +18,7 @@ The exporter is **disabled by default**. Enable it by setting a listen address:
 | `--metrics-listen 127.0.0.1:9140` | `OPENVOX_CA_METRICS_LISTEN=127.0.0.1:9140` | `metrics_listen: 127.0.0.1:9140` |
 
 ```sh
-openvox-ca --cadir /var/lib/puppet-ca --metrics-listen 127.0.0.1:9140
+openvox-ca --cadir /srv/openvox-ca --metrics-listen 127.0.0.1:9140
 ```
 
 The exporter runs on a **separate listener** from the Puppet API and always

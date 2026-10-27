@@ -416,7 +416,7 @@ everything is stopped is safe, and backing them up is harmless.
 Default. Nothing to set.
 
 ```yaml
-# /etc/puppet-ca/config.yaml
+# /etc/openvox-ca/config.yaml
 storage_backend: filesystem   # optional; this is the default
 cadir: /etc/puppetlabs/puppet/ssl/ca
 ```
@@ -490,7 +490,7 @@ still required for per-subject generated keys and ancillary local state.
 ### Configuration
 
 ```yaml
-# /etc/puppet-ca/config.yaml
+# /etc/openvox-ca/config.yaml
 storage_backend: etcd
 # still needed for per-subject keys and ancillary local state
 cadir: /etc/puppetlabs/puppet/ssl/ca
@@ -509,9 +509,9 @@ etcd_username: openvox-ca
 etcd_password: "..."                     # prefer OPENVOX_CA_ETCD_PASSWORD
 
 # Optional mTLS to the etcd cluster.
-etcd_tls_ca_file:   /etc/puppet-ca/etcd-ca.pem
-etcd_tls_cert_file: /etc/puppet-ca/etcd-client.pem
-etcd_tls_key_file:  /etc/puppet-ca/etcd-client-key.pem
+etcd_tls_ca_file:   /etc/openvox-ca/etcd-ca.pem
+etcd_tls_cert_file: /etc/openvox-ca/etcd-client.pem
+etcd_tls_key_file:  /etc/openvox-ca/etcd-client-key.pem
 ```
 
 ### CLI flags
@@ -631,7 +631,7 @@ raise `redis_lock_ttl_sec`.
 ### Configuration — direct connection
 
 ```yaml
-# /etc/puppet-ca/config.yaml
+# /etc/openvox-ca/config.yaml
 storage_backend: redis                   # or "valkey"
 # still needed for per-subject keys and ancillary local state
 cadir: /etc/puppetlabs/puppet/ssl/ca
@@ -652,9 +652,9 @@ redis_username: openvox-ca
 redis_password: "..."
 
 # Optional TLS to the Redis primary.
-redis_tls_ca_file:   /etc/puppet-ca/redis-ca.pem
-redis_tls_cert_file: /etc/puppet-ca/redis-client.pem
-redis_tls_key_file:  /etc/puppet-ca/redis-client-key.pem
+redis_tls_ca_file:   /etc/openvox-ca/redis-ca.pem
+redis_tls_cert_file: /etc/openvox-ca/redis-client.pem
+redis_tls_key_file:  /etc/openvox-ca/redis-client-key.pem
 ```
 
 ### Configuration — Sentinel-managed failover
@@ -680,9 +680,9 @@ redis_sentinel_password: "..."
 # Auth / TLS against the primary — same fields as direct mode.
 redis_username: openvox-ca
 redis_password: "..."
-redis_tls_ca_file:   /etc/puppet-ca/redis-ca.pem
-redis_tls_cert_file: /etc/puppet-ca/redis-client.pem
-redis_tls_key_file:  /etc/puppet-ca/redis-client-key.pem
+redis_tls_ca_file:   /etc/openvox-ca/redis-ca.pem
+redis_tls_cert_file: /etc/openvox-ca/redis-client.pem
+redis_tls_key_file:  /etc/openvox-ca/redis-client-key.pem
 ```
 
 ### CLI flags
@@ -829,7 +829,7 @@ directory tree). `sqlite` and `sqlite3` are accepted as aliases. It is
 single-node, not a clustering option.
 
 ```yaml
-# /etc/puppet-ca/config.yaml
+# /etc/openvox-ca/config.yaml
 storage_backend: sqlite
 cadir: /etc/puppetlabs/puppet/ssl/ca     # still needed for per-subject keys
 # the SQLite database file path / URI
@@ -853,7 +853,7 @@ the DSN is not a URI at all, and `reading the database path out of sqlite dsn
 ...` when it is but its escapes cannot be decoded.
 
 `mode=memory` is honoured only in the `file:` form, which is the only place
-SQLite honours it. On a bare path (`/var/lib/puppet-ca/ca.db?mode=memory`) the
+SQLite honours it. On a bare path (`/srv/openvox-ca/ca.db?mode=memory`) the
 driver creates the file anyway, so openvox-ca protects and checks it like any
 other database.
 
@@ -933,9 +933,9 @@ local account:
 
 ```text
 CA key material is world-accessible and readable by every local account
-(/var/lib/puppet-ca/ca.db (mode -rw-r--r--), /var/lib/puppet-ca/ca.db-wal (mode
--rw-r--r--)); refusing to start -- fix with: chmod o-rwx -- /var/lib/puppet-ca/ca.db
-/var/lib/puppet-ca/ca.db-wal, or set insecure_allow_world_readable_keys to start
+(/srv/openvox-ca/ca.db (mode -rw-r--r--), /srv/openvox-ca/ca.db-wal (mode
+-rw-r--r--)); refusing to start -- fix with: chmod o-rwx -- /srv/openvox-ca/ca.db
+/srv/openvox-ca/ca.db-wal, or set insecure_allow_world_readable_keys to start
 anyway. A key that has been world-readable should be treated as exposed and
 rotated
 ```
@@ -994,10 +994,10 @@ Stores the entire CA in a PostgreSQL database; multiple `openvox-ca` replicas
 can share it. `postgres`, `postgresql` and `pg` are accepted as aliases.
 
 ```yaml
-# /etc/puppet-ca/config.yaml
+# /etc/openvox-ca/config.yaml
 storage_backend: postgres
 cadir: /etc/puppetlabs/puppet/ssl/ca     # still needed for per-subject keys
-sql_dsn: "postgres://puppetca:secret@db.example.com:5432/puppetca?sslmode=verify-full&sslrootcert=/etc/puppet-ca/pg-ca.pem"  # prefer OPENVOX_CA_SQL_DSN or sql_dsn_file
+sql_dsn: "postgres://puppetca:secret@db.example.com:5432/puppetca?sslmode=verify-full&sslrootcert=/etc/openvox-ca/pg-ca.pem"  # prefer OPENVOX_CA_SQL_DSN or sql_dsn_file
 
 sql_request_timeout_sec: 10              # per-operation timeout (default 10)
 sql_migration_timeout_sec: 600           # whole schema-migration run (default 600)
@@ -1007,9 +1007,9 @@ sql_max_idle_conns: 0                    # 0 = database/sql default
 # Alternatively, give the CA and a client certificate as files instead of
 # the DSN's sslrootcert, sslcert and sslkey (not as well as them). The DSN's
 # sslmode still decides what is checked; see below.
-# sql_tls_ca_file:   /etc/puppet-ca/pg-ca.pem
-# sql_tls_cert_file: /etc/puppet-ca/pg-client.pem
-# sql_tls_key_file:  /etc/puppet-ca/pg-client-key.pem
+# sql_tls_ca_file:   /etc/openvox-ca/pg-ca.pem
+# sql_tls_cert_file: /etc/openvox-ca/pg-client.pem
+# sql_tls_key_file:  /etc/openvox-ca/pg-client-key.pem
 ```
 
 TLS is driven either by the DSN's `sslmode` and `sslrootcert` parameters or by
@@ -1048,7 +1048,7 @@ in a file (see [keeping the database password private](#keeping-the-database-pas
 
 ```text
 --storage-backend postgres
---sql-dsn-file    /etc/puppet-ca/sql-dsn   # contains postgres://puppetca:secret@db.example.com:5432/puppetca?sslmode=verify-full&sslrootcert=/etc/puppet-ca/pg-ca.pem
+--sql-dsn-file    /etc/openvox-ca/sql-dsn   # contains postgres://puppetca:secret@db.example.com:5432/puppetca?sslmode=verify-full&sslrootcert=/etc/openvox-ca/pg-ca.pem
 ```
 
 **Operational notes.** Back the database up with your normal PostgreSQL tooling.
@@ -1063,7 +1063,7 @@ Stores the entire CA in a MySQL or MariaDB database; multiple `openvox-ca`
 replicas can share it. `mysql` and `mariadb` are accepted as aliases.
 
 ```yaml
-# /etc/puppet-ca/config.yaml
+# /etc/openvox-ca/config.yaml
 storage_backend: mysql                   # or "mariadb"
 cadir: /etc/puppetlabs/puppet/ssl/ca     # still needed for per-subject keys
 sql_dsn: "puppetca:secret@tcp(db.example.com:3306)/puppetca"  # prefer OPENVOX_CA_SQL_DSN or sql_dsn_file
@@ -1073,9 +1073,9 @@ sql_migration_timeout_sec: 600           # whole schema-migration run (default 6
 
 # Optional TLS to the server (registered with the driver automatically;
 # no need to add tls= to the DSN).
-sql_tls_ca_file:   /etc/puppet-ca/mysql-ca.pem
-sql_tls_cert_file: /etc/puppet-ca/mysql-client.pem
-sql_tls_key_file:  /etc/puppet-ca/mysql-client-key.pem
+sql_tls_ca_file:   /etc/openvox-ca/mysql-ca.pem
+sql_tls_cert_file: /etc/openvox-ca/mysql-client.pem
+sql_tls_key_file:  /etc/openvox-ca/mysql-client-key.pem
 ```
 
 The DSN is the [go-sql-driver/mysql](https://github.com/go-sql-driver/mysql)
@@ -1085,7 +1085,7 @@ On the command line, as for PostgreSQL:
 
 ```text
 --storage-backend mysql
---sql-dsn-file    /etc/puppet-ca/sql-dsn   # contains puppetca:secret@tcp(db.example.com:3306)/puppetca
+--sql-dsn-file    /etc/openvox-ca/sql-dsn   # contains puppetca:secret@tcp(db.example.com:3306)/puppetca
 ```
 
 **Operational notes.** The CA private key lives in the database by default;
@@ -1208,15 +1208,15 @@ cadir: /etc/puppetlabs/puppet/ssl/ca
 etcd_endpoints: [https://etcd:2379]
 
 # Keep the CA cert and key out of etcd; mount them from the host.
-ca_cert_file: /etc/puppet-ca/secrets/ca_crt.pem
-ca_key_file:  /etc/puppet-ca/secrets/ca_key.pem
+ca_cert_file: /etc/openvox-ca/secrets/ca_crt.pem
+ca_key_file:  /etc/openvox-ca/secrets/ca_key.pem
 ```
 
 ### CLI flags
 
 ```text
---ca-cert-file /etc/puppet-ca/secrets/ca_crt.pem
---ca-key-file  /etc/puppet-ca/secrets/ca_key.pem
+--ca-cert-file /etc/openvox-ca/secrets/ca_crt.pem
+--ca-key-file  /etc/openvox-ca/secrets/ca_key.pem
 ```
 
 ### Environment variables
@@ -1332,13 +1332,13 @@ server reads. `--source-config` is read from; `--dest-config` is written to.
 ```bash
 # Import a filesystem CA into PostgreSQL.
 openvox-ca-ctl migrate \
-  --source-config /etc/puppet-ca/filesystem.yaml \
-  --dest-config   /etc/puppet-ca/postgres.yaml
+  --source-config /etc/openvox-ca/filesystem.yaml \
+  --dest-config   /etc/openvox-ca/postgres.yaml
 
 # Export it back out to a directory of files.
 openvox-ca-ctl migrate \
-  --source-config /etc/puppet-ca/postgres.yaml \
-  --dest-config   /etc/puppet-ca/filesystem.yaml
+  --source-config /etc/openvox-ca/postgres.yaml \
+  --dest-config   /etc/openvox-ca/filesystem.yaml
 ```
 
 Each config file needs only the storage fields (plus `cadir`); for example a

@@ -1252,6 +1252,19 @@ func loadPuppetServerFile(path string) ([]string, error) {
 // resolveConfigFile delegates to the shared config.ResolveConfigFile.
 var resolveConfigFile = config.ResolveConfigFile
 
+// defaultConfigFile is the configuration file every subcommand reads when
+// neither --config nor OPENVOX_CA_CONFIG names one. The packages install
+// their config.yaml here and the unit passes no --config, so it is also the
+// path packaging/nfpm.yaml, first-boot and postinstall have to agree with.
+// mage test:magefile checks all three against this constant.
+const defaultConfigFile = "/etc/openvox-ca/config.yaml"
+
+// configEnvVar names the environment variable that overrides defaultConfigFile
+// (and is outranked by --config). Specs that pin or clear it go through this
+// constant rather than the literal, so a rename of the variable cannot leave
+// such a pin quietly guarding a name nothing reads any more.
+const configEnvVar = "OPENVOX_CA_CONFIG"
+
 // supersededWindowWarning reports whether the configured sweep interval makes
 // the overlap window meaningfully longer than the operator asked for, and the
 // log line to emit when it does.

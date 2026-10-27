@@ -438,7 +438,8 @@ published names, which existing deployments are bound to just as firmly:
 - HTTP route prefix `/puppet-ca/v1`
 - Environment-variable prefix `OPENVOX_CA_` (and `OPENVOX_CA_CTL_` for the CLI)
 - Prometheus metric namespace `openvoxca_`
-- Storage key prefixes and the config-file location (`puppet-ca`, `/etc/puppet-ca`)
+- Storage key prefixes `puppet-ca`, kept so existing stores stay readable
+- Config-file location `/etc/openvox-ca`
 
 ## Helm chart
 
@@ -451,7 +452,7 @@ rewrites them together — so never hand-edit one of the version lines on its
 own, and never assume a chart version is `-dev` just because it has a hyphen.
 
 The chart deliberately does **not** enumerate the server's settings as values.
-`config` is written verbatim to `/etc/puppet-ca/config.yaml`, and the
+`config` is written verbatim to `/etc/openvox-ca/config.yaml`, and the
 convenience blocks (`tls`, `ca`, `metrics`, `kubernetesExport`, …) do the
 Kubernetes wiring *and* set the config keys pointing at it, deep-merged with
 `config` winning. Adding a server setting to `docs/configuration.md` therefore

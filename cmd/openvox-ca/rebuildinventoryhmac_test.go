@@ -86,7 +86,7 @@ func writeLoggingConfig() string {
 	cfg := filepath.Join(GinkgoT().TempDir(), "logging.yaml")
 	Expect(os.WriteFile(cfg,
 		[]byte("ca_key_algo: ecdsa\nca_key_size: 256\nlogfile: "+logFile+"\n"), 0o644)).To(Succeed())
-	setEnv("OPENVOX_CA_CONFIG", cfg)
+	setEnv(configEnvVar, cfg)
 	return logFile
 }
 
@@ -353,7 +353,7 @@ var _ = Describe("openvox-ca rebuild-inventory-hmac", func() {
 		// Pin the configuration these specs resolve, as csr_test.go,
 		// importcacert_test.go and generate_test.go each do. Every spec here
 		// drives the real root command, so without this an exported
-		// OPENVOX_CA_SQL_DSN, or a host /etc/puppet-ca/config.yaml, silently
+		// OPENVOX_CA_SQL_DSN, or a host /etc/openvox-ca/config.yaml, silently
 		// points them at a real store instead of --cadir. Most would then fail
 		// loudly, but "refuses when no HMAC key is stored" would not: it deletes
 		// the local key and asserts only an error string, so against a
@@ -361,7 +361,7 @@ var _ = Describe("openvox-ca rebuild-inventory-hmac", func() {
 		// deletion it rests on did nothing at all.
 		pinnedCfg := filepath.Join(GinkgoT().TempDir(), "pinned.yaml")
 		Expect(os.WriteFile(pinnedCfg, []byte("ca_key_algo: ecdsa\nca_key_size: 256\n"), 0o644)).To(Succeed())
-		setEnv("OPENVOX_CA_CONFIG", pinnedCfg)
+		setEnv(configEnvVar, pinnedCfg)
 		clearServerEnv()
 
 		// Every spec here drives a command that calls applySubcommandLogging ->
@@ -438,7 +438,7 @@ var _ = Describe("openvox-ca rebuild-inventory-hmac", func() {
 					"  key_name: openvox-ca\n"+
 					"  auth_method: token\n"+
 					"  token_file: "+tokenFile+"\n"), 0o644)).To(Succeed())
-			setEnv("OPENVOX_CA_CONFIG", cfgFile)
+			setEnv(configEnvVar, cfgFile)
 
 			breakInventoryIntegrity(caDir)
 
@@ -1272,7 +1272,7 @@ var _ = Describe("openvox-ca rebuild-inventory-hmac, before it can reach a store
 	It("surfaces an unreadable configuration without reporting anything", func() {
 		bad := filepath.Join(GinkgoT().TempDir(), "broken.yaml")
 		Expect(os.WriteFile(bad, []byte("ca_key_algo: [this is not a string\n"), 0o644)).To(Succeed())
-		setEnv("OPENVOX_CA_CONFIG", bad)
+		setEnv(configEnvVar, bad)
 
 		stdout, _, err := runRebuild("--yes-re-bless")
 

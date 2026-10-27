@@ -1,5 +1,5 @@
 # Configuration for a packaged openvox-ca, installed as
-# /etc/puppet-ca/config.yaml -- the path the server auto-detects, which is why
+# /etc/openvox-ca/config.yaml -- the path the server auto-detects, which is why
 # the unit passes no --config and OPENVOX_CA_CONFIG still works in a drop-in.
 #
 # Yours to edit. Both packages mark it as a configuration file, so neither

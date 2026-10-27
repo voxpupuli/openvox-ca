@@ -75,7 +75,7 @@ software it installs is the container image, which carries its own — see
 openvox-ca has a large configuration surface, and the chart deliberately does
 **not** mirror it key by key. Instead:
 
-- **`config`** is written verbatim to `/etc/puppet-ca/config.yaml`, which the
+- **`config`** is written verbatim to `/etc/openvox-ca/config.yaml`, which the
   server auto-detects and the chart passes explicitly via `--config`. Every key
   in [configuring the server](configuration.md) is valid there, including the
   nested `kubernetes_export` and `openbao` blocks — except a backend
@@ -352,6 +352,33 @@ persistence:
 The PVC carries `helm.sh/resource-policy: keep`, so `helm uninstall` does not
 take the CA's private key with it. Set `persistence.retain: false` if you
 genuinely want it removed with the release.
+
+The volume is mounted at `persistence.mountPath`, `/var/lib/openvox-ca` by
+default, and the chart points `cadir` at that mount point. The CA's files are
+at the root of the volume wherever it is mounted, so the mount point itself is
+not stored anywhere. A path in `config` that names somewhere on the volume is a
+different matter: a `cadir` subdirectory, a serving pair under
+`serving_cert.store.files`, a SQLite `sql_dsn`. Each of those spells out the
+mount point. A release whose `config` names paths under another mount point
+pins `persistence.mountPath` to it, for example:
+
+```yaml
+persistence:
+  enabled: true
+  mountPath: /var/lib/puppet-ca
+```
+
+The same holds for the configuration mount. `configMount`, `/etc/openvox-ca` by
+default, is where the chart mounts `config.yaml` and every `extraConfigFiles`
+entry, and the paths it derives follow it. A path written into `config` by hand
+does not. A release whose `config` names a file under another configuration
+mount, such as `puppet_server_file` or `autosign_config` pointing at an
+`extraConfigFiles` entry, pins `configMount` to it the same way.
+
+Files you mount yourself, such as an upstream CRL bundle or a client CA, are
+best kept outside the CA's own directories, for example under `/run`. A path
+there names nothing the chart owns, so a change to the chart's defaults never
+moves it.
 
 To run more than one replica, move the state into a shared backend — see
 [storage backends](storage-backends.md) — and turn persistence off, because
@@ -886,8 +913,8 @@ three rules — and the chart can enforce only the first two.
    fatal rather than retried.
 
 The layout that satisfies all three with no `initContainer` is
-`config.cadir: /var/lib/puppet-ca/ca` with the pair at the mount root,
-`/var/lib/puppet-ca/tls.crt`, since only the mount point is guaranteed to exist
+`config.cadir: /var/lib/openvox-ca/ca` with the pair at the mount root,
+`/var/lib/openvox-ca/tls.crt`, since only the mount point is guaranteed to exist
 on a fresh volume. A subdirectory works too if something creates it first.
 
 **On an existing release this is a migration, not a settings change.** Narrowing
@@ -950,7 +977,7 @@ section is only that:
   `/etc/puppetlabs/puppet/ssl/ca`; the chart renders the ConfigMap, the
   ServiceAccount and the PVC all as `openvox-ca.fullname` — `<release>-openvox-ca`,
   or just `openvox-ca` when the release name already contains it — and takes
-  `cadir` from `persistence.mountPath`, `/var/lib/puppet-ca` by default. The cadir
+  `cadir` from `persistence.mountPath`, `/var/lib/openvox-ca` by default. The cadir
   one matters most: the Job reads the chart's own `config.yaml`, so a mount at the
   example's path leaves the command looking somewhere else and quietly reproducing
   the wrong CA rather than failing.
@@ -1002,7 +1029,7 @@ read those for the semantics. This section is only what changes in Kubernetes.
 
 Two chart facts apply to both:
 
-- **`/etc/puppet-ca` is not yours to write into.** It is `configMount`, where
+- **`/etc/openvox-ca` is not yours to write into.** It is `configMount`, where
   the chart projects its rendered ConfigMap read-only. The standalone examples
   in [configuration.md](configuration.md) put these files there because that is
   the conventional config directory outside Kubernetes; under the chart you must

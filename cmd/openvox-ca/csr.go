@@ -75,7 +75,7 @@ identically whether the key is a local PEM file or lives in OpenBao Transit.`,
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			resolvedCfgFile := resolveConfigFile(configFile, "OPENVOX_CA_CONFIG", "/etc/puppet-ca/config.yaml")
+			resolvedCfgFile := resolveConfigFile(configFile, configEnvVar, defaultConfigFile)
 			cfg, err := loadServerConfig(resolvedCfgFile)
 			if err != nil {
 				return err
@@ -162,7 +162,7 @@ identically whether the key is a local PEM file or lives in OpenBao Transit.`,
 	}
 
 	f := cmd.Flags()
-	f.StringVar(&configFile, "config", "", "Path to YAML config file (default: /etc/puppet-ca/config.yaml if it exists)")
+	f.StringVar(&configFile, "config", "", "Path to YAML config file (default: "+defaultConfigFile+" if it exists)")
 	f.StringVar(&caDir, "cadir", "", "CA storage directory (overrides the config file)")
 	f.StringVar(&hostname, "hostname", "", "Hostname for the CA subject, when no CA certificate exists yet")
 	f.StringVar(&outFile, "out", "", "Write the request to this file instead of stdout")
