@@ -215,14 +215,14 @@ existingConfigMap — the fourth being a `--config` in `extraArgs`, which points
 the server at a file the chart never rendered. Every one of them can carry the settings this decision turns
 on, because they all outrank or replace the config file the chart renders:
 `--openbao-auth-method=kubernetes` through `args`, and
-PUPPET_CA_OPENBAO_AUTH_METHOD through a ConfigMap or Secret named in `envFrom`
+OPENVOX_CA_OPENBAO_AUTH_METHOD through a ConfigMap or Secret named in `envFrom`
 (see docs/openbao-transit.md). The chart cannot read any of them.
 
 It can read `env`, `extraEnv` and `extraArgs`, though, and each of those carries
 the same setting — so all three are scanned here, the way
-openvox-ca.tlsSources scans them for PUPPET_CA_TLS_CERT/KEY. Without
+openvox-ca.tlsSources scans them for OPENVOX_CA_TLS_CERT/KEY. Without
 that, `config.ca_key_provider: openbao` plus any of
-`env.PUPPET_CA_OPENBAO_AUTH_METHOD: kubernetes`, the same variable in
+`env.OPENVOX_CA_OPENBAO_AUTH_METHOD: kubernetes`, the same variable in
 `extraEnv`, or `extraArgs: [--openbao-auth-method=kubernetes]` would leave the
 config fully known, the merged config's openbao.auth_method empty, and the pod
 without the projected token its key provider needs.
@@ -239,10 +239,10 @@ true
 {{- $config := include "openvox-ca.config" . | fromYaml -}}
 {{- $authMethod := dig "openbao" "auth_method" "" $config -}}
 {{- range $name, $value := .Values.env -}}
-{{- if and (eq $name "PUPPET_CA_OPENBAO_AUTH_METHOD") $value }}{{ $authMethod = $value }}{{ end -}}
+{{- if and (eq $name "OPENVOX_CA_OPENBAO_AUTH_METHOD") $value }}{{ $authMethod = $value }}{{ end -}}
 {{- end -}}
 {{- range .Values.extraEnv -}}
-{{- if and (eq .name "PUPPET_CA_OPENBAO_AUTH_METHOD") .value }}{{ $authMethod = .value }}{{ end -}}
+{{- if and (eq .name "OPENVOX_CA_OPENBAO_AUTH_METHOD") .value }}{{ $authMethod = .value }}{{ end -}}
 {{/*
   A valueFrom reference has no readable value, so its mere presence is the
   signal: the operator is feeding the auth method in from a Secret or ConfigMap
@@ -250,10 +250,10 @@ true
   presence, so neither an explicit `value: ""` nor an entry naming no source at
   all is mistaken for one — the server ignores an empty variable either way,
   which is the precedence stated above. tlsSources discriminates identically for
-  PUPPET_CA_TLS_CERT/KEY — that scan moved out of tlsConfigured when the rule
+  OPENVOX_CA_TLS_CERT/KEY — that scan moved out of tlsConfigured when the rule
   needed one home.
 */}}
-{{- if and (eq .name "PUPPET_CA_OPENBAO_AUTH_METHOD") (hasKey . "valueFrom") }}{{ $authMethod = "kubernetes" }}{{ end -}}
+{{- if and (eq .name "OPENVOX_CA_OPENBAO_AUTH_METHOD") (hasKey . "valueFrom") }}{{ $authMethod = "kubernetes" }}{{ end -}}
 {{- end -}}
 {{/*
   extraArgs is appended to the argument list the chart builds, so unlike `args`
@@ -602,10 +602,10 @@ Call with (dict "backendPort" <value> "root" $).
 Whether the config file the server reads is the one the chart rendered.
 
 Narrower than configFullyKnown on purpose. That one asks whether the chart can
-see every setting, so it counts envFrom — a Secret can carry any PUPPET_CA_*
+see every setting, so it counts envFrom — a Secret can carry any OPENVOX_CA_*
 variable. This one asks only whether the *file* is the chart's, which envFrom
 cannot change: the chart always passes its own --config, and a flag outranks
-PUPPET_CA_CONFIG.
+OPENVOX_CA_CONFIG.
 
 The distinction matters where a decision is about the file's contents rather than
 the configuration as a whole. exportTargetNames is the case: keying it on
@@ -774,7 +774,7 @@ Where the server's TLS certificate and key come from, as {"cert": <source>, "key
 
 Each value is the NAME of the highest-precedence route supplying that half, or
 empty when nothing supplies it. The precedence is the server's own, lowest
-first: the config file, then PUPPET_CA_TLS_CERT/KEY in env or extraEnv which
+first: the config file, then OPENVOX_CA_TLS_CERT/KEY in env or extraEnv which
 outrank the file, then --tls-cert/--tls-key in extraArgs, which the chart
 appends to the argv it builds and which therefore outrank everything.
 `tls.existingSecret` is reported under its own name rather than as
@@ -811,27 +811,27 @@ bug; that was tried and `tls_cert` alone stopped being refused at install.
 {{- end -}}
 {{/*
   Non-empty only, following the server's own precedence: applyServerEnv assigns
-  from PUPPET_CA_* only when the variable is non-empty (cmd/openvox-ca/config.go),
+  from OPENVOX_CA_* only when the variable is non-empty (cmd/openvox-ca/config.go),
   so an empty one leaves whatever the config file said. Assigning
-  unconditionally let `env: {PUPPET_CA_TLS_CERT: ""}` clear a certificate the
+  unconditionally let `env: {OPENVOX_CA_TLS_CERT: ""}` clear a certificate the
   config had set, and the TLS precondition then refused a perfectly good install.
 */}}
 {{- range $name, $value := .Values.env -}}
-{{- if and (eq $name "PUPPET_CA_TLS_CERT") $value }}{{ $cert = "env.PUPPET_CA_TLS_CERT" }}{{ end -}}
-{{- if and (eq $name "PUPPET_CA_TLS_KEY") $value }}{{ $key = "env.PUPPET_CA_TLS_KEY" }}{{ end -}}
+{{- if and (eq $name "OPENVOX_CA_TLS_CERT") $value }}{{ $cert = "env.OPENVOX_CA_TLS_CERT" }}{{ end -}}
+{{- if and (eq $name "OPENVOX_CA_TLS_KEY") $value }}{{ $key = "env.OPENVOX_CA_TLS_KEY" }}{{ end -}}
 {{- end -}}
 {{/*
   A valueFrom reference counts because the chart cannot read it and assuming
   TLS is the fail-open direction. Tested on valueFrom's PRESENCE rather than
-  value's absence: `extraEnv: [{name: PUPPET_CA_TLS_CERT}]` also has no value
+  value's absence: `extraEnv: [{name: OPENVOX_CA_TLS_CERT}]` also has no value
   key, but Kubernetes renders it as the empty string, which the server
   discards -- an absence test counted that as configured and suppressed the
   TLS precondition, the plaintext NOTES warning and the HTTPS probe scheme for
   a pod with no certificate at all.
 */}}
 {{- range .Values.extraEnv -}}
-{{- if and (eq .name "PUPPET_CA_TLS_CERT") (or .value (hasKey . "valueFrom")) }}{{ $cert = "extraEnv PUPPET_CA_TLS_CERT" }}{{ end -}}
-{{- if and (eq .name "PUPPET_CA_TLS_KEY") (or .value (hasKey . "valueFrom")) }}{{ $key = "extraEnv PUPPET_CA_TLS_KEY" }}{{ end -}}
+{{- if and (eq .name "OPENVOX_CA_TLS_CERT") (or .value (hasKey . "valueFrom")) }}{{ $cert = "extraEnv OPENVOX_CA_TLS_CERT" }}{{ end -}}
+{{- if and (eq .name "OPENVOX_CA_TLS_KEY") (or .value (hasKey . "valueFrom")) }}{{ $key = "extraEnv OPENVOX_CA_TLS_KEY" }}{{ end -}}
 {{- end -}}
 {{- range .Values.extraArgs -}}
 {{- $arg := . | toString -}}
@@ -1060,7 +1060,7 @@ CrashLoopBackOff or a Service that silently routes nowhere.
 {{- $host := dig "host" "" $config | toString -}}
 {{- $loopback := or (hasPrefix "127." $host) (eq $host "localhost") -}}
 {{- if and (ne (include "openvox-ca.tlsConfigured" .) "true") (not (dig "no_tls_required" false $config)) (not $loopback) -}}
-{{- fail (printf "openvox-ca will refuse to start: no server TLS certificate is configured and the listen address (%s) is not loopback, which the server rejects as vulnerable to certificate injection.\n\nSet one of:\n  tls.existingSecret       a kubernetes.io/tls Secret holding the server certificate (recommended; Puppet agents require HTTPS)\n  config.tls_cert/tls_key  paths to a certificate you mount yourself\n  config.serving_cert      let the CA issue and renew its own, into a Secret or a file pair\n  env/extraEnv             PUPPET_CA_TLS_CERT and PUPPET_CA_TLS_KEY, to feed those paths in from a Secret\n  config.no_tls_required   true, only behind a trusted TLS proxy that re-originates TLS\n  listen.host              127.0.0.1 or localhost, for a sidecar-only deployment" $host) -}}
+{{- fail (printf "openvox-ca will refuse to start: no server TLS certificate is configured and the listen address (%s) is not loopback, which the server rejects as vulnerable to certificate injection.\n\nSet one of:\n  tls.existingSecret       a kubernetes.io/tls Secret holding the server certificate (recommended; Puppet agents require HTTPS)\n  config.tls_cert/tls_key  paths to a certificate you mount yourself\n  config.serving_cert      let the CA issue and renew its own, into a Secret or a file pair\n  env/extraEnv             OPENVOX_CA_TLS_CERT and OPENVOX_CA_TLS_KEY, to feed those paths in from a Secret\n  config.no_tls_required   true, only behind a trusted TLS proxy that re-originates TLS\n  listen.host              127.0.0.1 or localhost, for a sidecar-only deployment" $host) -}}
 {{- end -}}
 {{- end -}}
 
@@ -1225,7 +1225,7 @@ CrashLoopBackOff or a Service that silently routes nowhere.
   `config` is written verbatim into a ConfigMap, which anyone allowed to read
   ConfigMaps in the namespace can read, and which neither Secret RBAC nor
   Secret encryption at rest covers. So a credential set there is refused rather
-  than rendered. The server also reads each of these from a PUPPET_CA_*
+  than rendered. The server also reads each of these from an OPENVOX_CA_*
   variable, and the environment outranks the config file, so extraEnv with
   valueFrom.secretKeyRef is the remedy.
 
@@ -1245,10 +1245,10 @@ CrashLoopBackOff or a Service that silently routes nowhere.
 */}}
 {{- if not .Values.existingConfigMap -}}
 {{- $credentials := dict -}}
-{{- $_ := set $credentials "etcd_password" "PUPPET_CA_ETCD_PASSWORD" -}}
-{{- $_ := set $credentials "redis_password" "PUPPET_CA_REDIS_PASSWORD" -}}
-{{- $_ := set $credentials "redis_sentinel_password" "PUPPET_CA_REDIS_SENTINEL_PASSWORD" -}}
-{{- $_ := set $credentials "sql_dsn" "PUPPET_CA_SQL_DSN from a Secret holding the whole DSN, or with the password as $(VAR) set from a Secret earlier in extraEnv (percent-encoded, for a URL), or sql_dsn_file pointing at the Secret mounted as a file" -}}
+{{- $_ := set $credentials "etcd_password" "OPENVOX_CA_ETCD_PASSWORD" -}}
+{{- $_ := set $credentials "redis_password" "OPENVOX_CA_REDIS_PASSWORD" -}}
+{{- $_ := set $credentials "redis_sentinel_password" "OPENVOX_CA_REDIS_SENTINEL_PASSWORD" -}}
+{{- $_ := set $credentials "sql_dsn" "OPENVOX_CA_SQL_DSN from a Secret holding the whole DSN, or with the password as $(VAR) set from a Secret earlier in extraEnv (percent-encoded, for a URL), or sql_dsn_file pointing at the Secret mounted as a file" -}}
 {{- $found := list -}}
 {{- range $key, $remedy := $credentials -}}
 {{- $value := index $config $key -}}
@@ -1284,7 +1284,7 @@ server picks the driver from storage_backend, not from the DSN, and to
 go-sql-driver "postgres://x@tcp(db)/ca" is user "postgres" with password "//x".
 Keying on those schemes rather than on any "scheme://" keeps a MySQL password
 that begins with // from being read as a URL when the backend is set some other
-way, such as PUPPET_CA_STORAGE_BACKEND.
+way, such as OPENVOX_CA_STORAGE_BACKEND.
 
 The cost is one class of false refusal: a DSN with an @ after its host, in a
 database name or a query value, is refused when a port or any other colon comes
@@ -1294,7 +1294,7 @@ such a DSN into extraEnv is harmless.
 SQLite's DSN is a file path, which may hold an @ and starts "file:", so with a
 sqlite backend a "file:" DSN faces only the password= check below; a bare path
 needs no exemption, having no colon before its @. Both conditions are needed: the backend comes from
-`config`, which PUPPET_CA_STORAGE_BACKEND outranks, so a postgres or MySQL DSN
+`config`, which OPENVOX_CA_STORAGE_BACKEND outranks, so a postgres or MySQL DSN
 left beside a sqlite backend is still judged as one. Without a sqlite backend,
 a file: path containing @ falls into the class above.
 
@@ -1341,7 +1341,7 @@ anyway.
   over-corrected: it counts envFrom, which cannot carry export targets —
   kubernetes_export exists only as a YAML key, applyServerEnv has no variable for
   it, and the chart always passes its own --config, which outranks
-  PUPPET_CA_CONFIG. So envFrom would have widened patch from the configured names
+  OPENVOX_CA_CONFIG. So envFrom would have widened patch from the configured names
   to every Secret and ConfigMap in scope, including the TLS and CA-key Secrets,
   on the chart's own documented way to feed a DSN in from a Secret.
 

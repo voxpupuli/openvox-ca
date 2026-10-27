@@ -3,7 +3,7 @@
 #
 # Unlike compose-backends-redis.yml — which stands up a full Puppet stack — this
 # file only provides the database the integration tests need. Bring it up,
-# point PUPPET_CA_TEST_POSTGRES_DSN at it, and run:
+# point OPENVOX_CA_TEST_POSTGRES_DSN at it, and run:
 #
 #   go test -tags postgres_integration ./internal/storage/...
 #

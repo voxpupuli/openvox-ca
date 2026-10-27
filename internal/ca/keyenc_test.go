@@ -159,7 +159,7 @@ var _ = Describe("Key encryption", func() {
 			// specs fail on the very assertion meant to prove the refusal, for a
 			// reason that has nothing to do with the code. Empty counts as unset
 			// to the resolver, and GinkgoT restores the original afterwards.
-			GinkgoT().Setenv("PUPPET_CA_KEY_PASSPHRASE", "")
+			GinkgoT().Setenv("OPENVOX_CA_KEY_PASSPHRASE", "")
 
 			var err error
 			tmpDir, err = os.MkdirTemp("", "keyenc-test-*")
@@ -183,19 +183,33 @@ var _ = Describe("Key encryption", func() {
 		})
 
 		It("reads passphrase from environment variable", func() {
-			prev, had := os.LookupEnv("PUPPET_CA_KEY_PASSPHRASE")
+			prev, had := os.LookupEnv("OPENVOX_CA_KEY_PASSPHRASE")
 			DeferCleanup(func() {
 				if had {
-					os.Setenv("PUPPET_CA_KEY_PASSPHRASE", prev)
+					os.Setenv("OPENVOX_CA_KEY_PASSPHRASE", prev)
 				} else {
-					os.Unsetenv("PUPPET_CA_KEY_PASSPHRASE")
+					os.Unsetenv("OPENVOX_CA_KEY_PASSPHRASE")
 				}
 			})
-			os.Setenv("PUPPET_CA_KEY_PASSPHRASE", "env-secret")
+			os.Setenv("OPENVOX_CA_KEY_PASSPHRASE", "env-secret")
 
 			pp, err := resolvePassphrase(KeyPassphraseConfig{}, tmpDir, needEncryptConfigured)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(string(pp)).To(Equal("env-secret"))
+		})
+
+		// #349's hard break: a passphrase left in the pre-rename variable is not
+		// read. The refusal is the one a missing passphrase gets, so an operator
+		// who renamed nothing is stopped rather than handed a CA that cannot
+		// unlock its key.
+		It("ignores a passphrase left in the pre-rename PUPPET_CA_KEY_PASSPHRASE", func() {
+			GinkgoT().Setenv(DefaultPassphraseEnvVar, "")
+			GinkgoT().Setenv("PUPPET_CA_KEY_PASSPHRASE", "old-secret")
+
+			pp, err := resolvePassphrase(KeyPassphraseConfig{}, tmpDir, needEncryptConfigured)
+			Expect(err).To(HaveOccurred(), "the old variable was read")
+			Expect(pp).To(BeNil())
+			Expect(err.Error()).To(ContainSubstring("no passphrase source is configured"))
 		})
 
 		It("reads the variable EnvVar names when another name is configured", func() {
@@ -226,7 +240,7 @@ var _ = Describe("Key encryption", func() {
 				"this call says encryption is configured, so that is what the message must name")
 			Expect(err.Error()).To(ContainSubstring("no passphrase source is configured"))
 			Expect(err.Error()).To(ContainSubstring("ca_key_passphrase_file"), "the remedy")
-			Expect(err.Error()).To(ContainSubstring("PUPPET_CA_KEY_PASSPHRASE"), "or the other one")
+			Expect(err.Error()).To(ContainSubstring("OPENVOX_CA_KEY_PASSPHRASE"), "or the other one")
 
 			Expect(autoPassphrasePath(tmpDir)).NotTo(BeAnExistingFile(),
 				"and nothing was written in the process of refusing")
@@ -333,7 +347,7 @@ var _ = Describe("Key encryption", func() {
 		func(cfg KeyPassphraseConfig, want string) {
 			Expect(cfg.EnvVar()).To(Equal(want))
 		},
-		Entry("defaults to PUPPET_CA_KEY_PASSPHRASE", KeyPassphraseConfig{}, "PUPPET_CA_KEY_PASSPHRASE"),
+		Entry("defaults to OPENVOX_CA_KEY_PASSPHRASE", KeyPassphraseConfig{}, "OPENVOX_CA_KEY_PASSPHRASE"),
 		Entry("names a configured variable", KeyPassphraseConfig{PassphraseEnvVar: "SITE_CA_KEY_PASSPHRASE"}, "SITE_CA_KEY_PASSPHRASE"),
 	)
 
@@ -347,7 +361,7 @@ var _ = Describe("Key encryption", func() {
 		BeforeEach(func() {
 			// As for resolvePassphrase: CheckKeyPassphrase's refusal below needs
 			// the environment empty, not merely assumed empty.
-			GinkgoT().Setenv("PUPPET_CA_KEY_PASSPHRASE", "")
+			GinkgoT().Setenv("OPENVOX_CA_KEY_PASSPHRASE", "")
 
 			var err error
 			tmpDir, err = os.MkdirTemp("", "openvox-ca-need-test")
@@ -420,7 +434,7 @@ var _ = Describe("Key encryption", func() {
 			// file-source spec below would stay green if CheckKeyPassphrase
 			// stopped consulting it.
 			It("passes when the only source is the environment", func() {
-				GinkgoT().Setenv("PUPPET_CA_KEY_PASSPHRASE", "env-secret")
+				GinkgoT().Setenv("OPENVOX_CA_KEY_PASSPHRASE", "env-secret")
 
 				Expect(CheckKeyPassphrase(KeyPassphraseConfig{}, tmpDir, true, nil)).To(Succeed())
 			})
@@ -453,7 +467,7 @@ var _ = Describe("CA encrypted key integration", func() {
 	BeforeEach(func() {
 		// The two refusal specs below depend on there being no passphrase in the
 		// environment; the bootstrap-and-reload spec does not care either way.
-		GinkgoT().Setenv("PUPPET_CA_KEY_PASSPHRASE", "")
+		GinkgoT().Setenv("OPENVOX_CA_KEY_PASSPHRASE", "")
 	})
 
 	// The resolver's refusal is pinned directly above, and the pre-fork

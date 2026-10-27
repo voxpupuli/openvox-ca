@@ -293,7 +293,7 @@ func (c *CA) csrSubject(ctx context.Context, hostname string) (pkix.Name, []byte
 	}
 	if hostname == "" {
 		return pkix.Name{}, nil, fmt.Errorf("hostname is required to build a certificate request when no CA " +
-			"certificate exists yet: set --hostname, PUPPET_CA_HOSTNAME, or hostname in the config file")
+			"certificate exists yet: set --hostname, OPENVOX_CA_HOSTNAME, or hostname in the config file")
 	}
 	return CASubjectName(hostname, c.CASubject), nil, nil
 }

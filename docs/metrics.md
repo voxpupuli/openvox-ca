@@ -15,7 +15,7 @@ The exporter is **disabled by default**. Enable it by setting a listen address:
 
 | Flag | Env | Config (YAML) |
 | --- | --- | --- |
-| `--metrics-listen 127.0.0.1:9140` | `PUPPET_CA_METRICS_LISTEN=127.0.0.1:9140` | `metrics_listen: 127.0.0.1:9140` |
+| `--metrics-listen 127.0.0.1:9140` | `OPENVOX_CA_METRICS_LISTEN=127.0.0.1:9140` | `metrics_listen: 127.0.0.1:9140` |
 
 ```sh
 openvox-ca --cadir /var/lib/puppet-ca --metrics-listen 127.0.0.1:9140

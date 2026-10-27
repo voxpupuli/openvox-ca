@@ -37,15 +37,15 @@ SSLDIR="${OPENVOX_CA_SSLDIR:-/etc/puppetlabs/puppet/ssl}"
 
 # The configuration file the SERVER reads. Provisioning has to resolve the same
 # one, because everything it creates is only useful where openvox-ca will look
-# for it -- so it resolves it the way the binary does, not just the way this
-# script's own test seam does. `openvox-ca` reads PUPPET_CA_CONFIG
-# (resolveConfigFile in cmd/openvox-ca/main.go, and generate's own call), the
-# packaged unit deliberately passes no --config so that a drop-in setting
-# PUPPET_CA_CONFIG still works, and packaging/config/config.yaml advertises
-# exactly that. Honouring only OPENVOX_CA_CONFIG would let such a drop-in point
-# the service at one file while provisioning read another -- and then every
-# guard below would have checked a file nothing else uses.
-CONFIG="${OPENVOX_CA_CONFIG:-${PUPPET_CA_CONFIG:-/etc/puppet-ca/config.yaml}}"
+# for it -- so it resolves it the way the binary does. `openvox-ca` reads
+# OPENVOX_CA_CONFIG (resolveConfigFile in cmd/openvox-ca/main.go, and generate's
+# own call), the packaged unit deliberately passes no --config so that a drop-in
+# setting OPENVOX_CA_CONFIG still works, and packaging/config/config.yaml
+# advertises exactly that. The same variable is this script's test seam, so
+# whatever points it elsewhere moves the server's file and provisioning's
+# together -- which is what every guard below relies on, since a guard that
+# checked a file nothing else uses would check nothing.
+CONFIG="${OPENVOX_CA_CONFIG:-/etc/puppet-ca/config.yaml}"
 
 # read_config_key prints the value of a top-level scalar key from $CONFIG, or
 # nothing if the file, the key or a readable value is absent.
@@ -172,7 +172,7 @@ config_has_unreadable_structure() {
 # require_filesystem_backend exists to refuse.
 #
 # It is not hypothetical: the unit passes no environment, but this script
-# honours PUPPET_CA_CONFIG so a drop-in can redirect it, and nothing chowns a
+# honours OPENVOX_CA_CONFIG so a drop-in can redirect it, and nothing chowns a
 # file named that way. The postinstall also declines to chmod $CONFIG when it
 # is a symlink, and treats a failed chown or chmod as a warning.
 #
@@ -213,11 +213,11 @@ Fix the ownership or the mode, then start again:
 # otherwise still write here -- bootstrapping a second CA and pointing the
 # serving credential at a leaf no agent's trust anchor verifies.
 #
-# PUPPET_CA_CADIR is read first because the server reads it first: config.go
+# OPENVOX_CA_CADIR is read first because the server reads it first: config.go
 # lets it override whatever the file said. A drop-in that moves the cadir for
 # openvox-ca.service and not for this one is precisely the two-CA split the
 # paragraph above is about, so provisioning has to see the same layers.
-CADIR="${PUPPET_CA_CADIR:-$(read_config_key cadir)}"
+CADIR="${OPENVOX_CA_CADIR:-$(read_config_key cadir)}"
 if [ -z "$CADIR" ]; then
 	# "Absent" and "present but unreadable" are different answers and only one
 	# of them permits the default. Falling back on a cadir the operator DID
@@ -545,10 +545,10 @@ not own. Two ways forward:
 FILESYSTEM_BACKEND_ALIASES="filesystem file fs disk local"
 
 require_filesystem_backend() {
-	# PUPPET_CA_STORAGE_BACKEND overrides the file for the server
+	# OPENVOX_CA_STORAGE_BACKEND overrides the file for the server
 	# (cmd/openvox-ca/config.go), so it overrides it here. A guard that read
 	# only the file would pass on a host whose service runs against etcd.
-	backend="${PUPPET_CA_STORAGE_BACKEND:-$(read_config_key storage_backend)}"
+	backend="${OPENVOX_CA_STORAGE_BACKEND:-$(read_config_key storage_backend)}"
 	if [ -z "$backend" ] && config_key_set storage_backend; then
 		fail "$CONFIG sets storage_backend, but not in a form this script can read:
 

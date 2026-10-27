@@ -206,13 +206,13 @@ var _ = Describe("the autosign executable preflight under --daemon", func() {
 
 	// These drive whole commands, so pin the environment and the config file
 	// the way keyperms_test.go's startup specs do, for the reasons given
-	// there: none of them passes --config, and an ambient PUPPET_CA_* or a
+	// there: none of them passes --config, and an ambient OPENVOX_CA_* or a
 	// host /etc/puppet-ca/config.yaml would change what they assert.
 	BeforeEach(func() {
 		clearServerEnv()
 		empty := filepath.Join(GinkgoT().TempDir(), "empty-config.yaml")
 		Expect(os.WriteFile(empty, []byte("{}\n"), 0o600)).To(Succeed(), "pin an empty config")
-		GinkgoT().Setenv("PUPPET_CA_CONFIG", empty)
+		GinkgoT().Setenv("OPENVOX_CA_CONFIG", empty)
 	})
 
 	BeforeEach(func() {
@@ -284,13 +284,13 @@ var _ = Describe("the autosign executable preflight under --daemon", func() {
 var _ = Describe("the autosign executable check at startup", func() {
 	// These drive whole commands, so pin the environment and the config file
 	// the way keyperms_test.go's startup specs do, for the reasons given
-	// there: none of them passes --config, and an ambient PUPPET_CA_* or a
+	// there: none of them passes --config, and an ambient OPENVOX_CA_* or a
 	// host /etc/puppet-ca/config.yaml would change what they assert.
 	BeforeEach(func() {
 		clearServerEnv()
 		empty := filepath.Join(GinkgoT().TempDir(), "empty-config.yaml")
 		Expect(os.WriteFile(empty, []byte("{}\n"), 0o600)).To(Succeed(), "pin an empty config")
-		GinkgoT().Setenv("PUPPET_CA_CONFIG", empty)
+		GinkgoT().Setenv("OPENVOX_CA_CONFIG", empty)
 	})
 
 	It("refuses to serve", func(ctx SpecContext) {

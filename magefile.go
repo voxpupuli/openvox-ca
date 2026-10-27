@@ -5068,7 +5068,7 @@ var inlineCredentialSources = []string{"internal/config/*.go", "cmd/openvox-ca/c
 // inlineCredentialKeyRe matches a yaml tag whose name says it holds a secret,
 // with or without tag options such as ",omitempty". The words include
 // passphrase because this tree already uses it (ca_key_passphrase_file, and
-// PUPPET_CA_KEY_PASSPHRASE inline). A key ending _file names a path to the
+// OPENVOX_CA_KEY_PASSPHRASE inline). A key ending _file names a path to the
 // secret rather than the secret, and inlineCredentialKeys drops those.
 var inlineCredentialKeyRe = regexp.MustCompile(`yaml:"([a-z0-9_]*(?:password|passphrase|secret|token|credential|dsn)[a-z0-9_]*)[",]`)
 
@@ -5376,17 +5376,17 @@ func (Chart) Test() error {
 			// what a valueFrom resolves to, so it assumes TLS rather than refusing
 			// an install that is probably fine.
 			name:     "a TLS certificate fed in by valueFrom counts as configured",
-			sets:     []string{"extraEnv[0].name=PUPPET_CA_TLS_CERT", "extraEnv[0].valueFrom.secretKeyRef.name=tls", "extraEnv[0].valueFrom.secretKeyRef.key=tls.crt", "extraEnv[1].name=PUPPET_CA_TLS_KEY", "extraEnv[1].valueFrom.secretKeyRef.name=tls", "extraEnv[1].valueFrom.secretKeyRef.key=tls.key"},
+			sets:     []string{"extraEnv[0].name=OPENVOX_CA_TLS_CERT", "extraEnv[0].valueFrom.secretKeyRef.name=tls", "extraEnv[0].valueFrom.secretKeyRef.key=tls.crt", "extraEnv[1].name=OPENVOX_CA_TLS_KEY", "extraEnv[1].valueFrom.secretKeyRef.name=tls", "extraEnv[1].valueFrom.secretKeyRef.key=tls.key"},
 			wants:    []string{"scheme: HTTPS"},
 			notWants: []string{"scheme: HTTP\n"},
 		},
 		{
-			// The server ignores an empty PUPPET_CA_* variable and keeps what
+			// The server ignores an empty OPENVOX_CA_* variable and keeps what
 			// the config file said (applyServerEnv in cmd/openvox-ca/config.go).
 			// The chart used to treat one as a deletion and then refuse the
 			// install for having no certificate.
 			name:     "an empty TLS env var does not unset a configured certificate",
-			sets:     []string{tls, "env.PUPPET_CA_TLS_CERT=", "env.PUPPET_CA_TLS_KEY="},
+			sets:     []string{tls, "env.OPENVOX_CA_TLS_CERT=", "env.OPENVOX_CA_TLS_KEY="},
 			wants:    []string{"scheme: HTTPS"},
 			notWants: []string{"scheme: HTTP\n"},
 		},
@@ -5500,7 +5500,7 @@ func (Chart) Test() error {
 			// The must-not-refuse twin for the conflict scan. Every other case
 			// around it asserts that a second certificate source IS detected;
 			// none asserted that a non-source is not. The server discards an
-			// empty PUPPET_CA_* variable, and Kubernetes renders a sourceless
+			// empty OPENVOX_CA_* variable, and Kubernetes renders a sourceless
 			// extraEnv entry as the empty string, so neither supplies a
 			// certificate -- but both are the shape the scan looks at, and a
 			// scan testing presence rather than a usable value would refuse
@@ -5511,8 +5511,8 @@ func (Chart) Test() error {
 			name: "empty and sourceless TLS variables are not a second certificate source",
 			sets: []string{
 				"serviceAccount.create=true",
-				"env.PUPPET_CA_TLS_CERT=",
-				"extraEnv[0].name=PUPPET_CA_TLS_KEY",
+				"env.OPENVOX_CA_TLS_CERT=",
+				"extraEnv[0].name=OPENVOX_CA_TLS_KEY",
 			},
 			valuesYAML: `
 config:
@@ -6199,13 +6199,13 @@ config:
 			// Environment variables outrank the config file, so this is a
 			// documented remedy; the helper has to notice it or the install is
 			// refused and the probes pick the wrong scheme.
-			sets:     []string{"env.PUPPET_CA_TLS_CERT=/run/tls/tls.crt", "env.PUPPET_CA_TLS_KEY=/run/tls/tls.key"},
+			sets:     []string{"env.OPENVOX_CA_TLS_CERT=/run/tls/tls.crt", "env.OPENVOX_CA_TLS_KEY=/run/tls/tls.key"},
 			wants:    []string{"kind: Deployment", "scheme: HTTPS"},
 			notWants: []string{"scheme: HTTP\n"},
 		},
 		{
 			name:     "a certificate supplied through extraEnv satisfies it as well",
-			sets:     []string{"extraEnv[0].name=PUPPET_CA_TLS_CERT", "extraEnv[0].value=/run/tls/tls.crt", "extraEnv[1].name=PUPPET_CA_TLS_KEY", "extraEnv[1].value=/run/tls/tls.key"},
+			sets:     []string{"extraEnv[0].name=OPENVOX_CA_TLS_CERT", "extraEnv[0].value=/run/tls/tls.crt", "extraEnv[1].name=OPENVOX_CA_TLS_KEY", "extraEnv[1].value=/run/tls/tls.key"},
 			wants:    []string{"kind: Deployment", "scheme: HTTPS"},
 			notWants: []string{"scheme: HTTP\n"},
 		},
@@ -6420,13 +6420,13 @@ config:
 			name: "an OpenBao auth method supplied through env still mounts the token",
 			// The chart can read env and extraEnv, so unlike args/envFrom this
 			// is not an uncertainty case — it must be detected outright, the way
-			// tlsConfigured detects PUPPET_CA_TLS_CERT there.
-			sets:  []string{tls, "config.ca_key_provider=openbao", "env.PUPPET_CA_OPENBAO_AUTH_METHOD=kubernetes"},
+			// tlsConfigured detects OPENVOX_CA_TLS_CERT there.
+			sets:  []string{tls, "config.ca_key_provider=openbao", "env.OPENVOX_CA_OPENBAO_AUTH_METHOD=kubernetes"},
 			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
 		},
 		{
 			name:     "a non-Kubernetes auth method through env does not",
-			sets:     []string{tls, "config.ca_key_provider=openbao", "env.PUPPET_CA_OPENBAO_AUTH_METHOD=approle"},
+			sets:     []string{tls, "config.ca_key_provider=openbao", "env.OPENVOX_CA_OPENBAO_AUTH_METHOD=approle"},
 			wants:    []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: false"},
 			notWants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
 		},
@@ -6435,13 +6435,13 @@ config:
 			// The readable arm of the extraEnv scan, distinct from the valueFrom
 			// arm below: only that one is reached by `not .value`.
 			sets: []string{tls, "config.ca_key_provider=openbao",
-				"extraEnv[0].name=PUPPET_CA_OPENBAO_AUTH_METHOD", "extraEnv[0].value=kubernetes"},
+				"extraEnv[0].name=OPENVOX_CA_OPENBAO_AUTH_METHOD", "extraEnv[0].value=kubernetes"},
 			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
 		},
 		{
 			name: "a non-Kubernetes auth method through extraEnv does not",
 			sets: []string{tls, "config.ca_key_provider=openbao",
-				"extraEnv[0].name=PUPPET_CA_OPENBAO_AUTH_METHOD", "extraEnv[0].value=approle"},
+				"extraEnv[0].name=OPENVOX_CA_OPENBAO_AUTH_METHOD", "extraEnv[0].value=approle"},
 			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: false"},
 		},
 		{
@@ -6502,7 +6502,7 @@ config:
 			// unguarded assignment here would withhold the token from a
 			// correctly configured pod.
 			sets: []string{tls, "config.ca_key_provider=openbao", "config.openbao.auth_method=kubernetes",
-				"env.PUPPET_CA_OPENBAO_AUTH_METHOD="},
+				"env.OPENVOX_CA_OPENBAO_AUTH_METHOD="},
 			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
 		},
 		{
@@ -6529,7 +6529,7 @@ config:
 		{
 			name: "an auth method fed from a Secret mounts the token, since the chart cannot read it",
 			sets: []string{tls, "config.ca_key_provider=openbao",
-				"extraEnv[0].name=PUPPET_CA_OPENBAO_AUTH_METHOD",
+				"extraEnv[0].name=OPENVOX_CA_OPENBAO_AUTH_METHOD",
 				"extraEnv[0].valueFrom.secretKeyRef.name=openbao", "extraEnv[0].valueFrom.secretKeyRef.key=method"},
 			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
 		},
@@ -6598,7 +6598,7 @@ config:
 		},
 		{
 			name: "envFrom stops the TLS precondition firing",
-			// envFrom can carry PUPPET_CA_TLS_CERT/KEY from a Secret the chart
+			// envFrom can carry OPENVOX_CA_TLS_CERT/KEY from a Secret the chart
 			// never reads, so the guard has to stand down — with no tls block
 			// set, this rendering succeeding *is* the assertion.
 			sets:  []string{"envFrom[0].secretRef.name=openvox-ca-env"},
@@ -6901,14 +6901,14 @@ config:
 			// variable to "" and the server discards it. Counting it was the
 			// fail-open mirror of the env defect fixed alongside.
 			name:    "a TLS certificate supplied through extraEnv as an explicit empty value",
-			sets:    []string{"extraEnv[0].name=PUPPET_CA_TLS_CERT", "extraEnv[0].value=", "extraEnv[1].name=PUPPET_CA_TLS_KEY", "extraEnv[1].value=/run/tls/tls.key"},
+			sets:    []string{"extraEnv[0].name=OPENVOX_CA_TLS_CERT", "extraEnv[0].value=", "extraEnv[1].name=OPENVOX_CA_TLS_KEY", "extraEnv[1].value=/run/tls/tls.key"},
 			wantErr: "refuse to start",
 		},
 		{
 			// Neither value nor valueFrom: Kubernetes still renders the variable
 			// empty, so this is no more a certificate than the case above.
 			name:    "an extraEnv entry naming no source at all",
-			sets:    []string{"extraEnv[0].name=PUPPET_CA_TLS_CERT", "extraEnv[1].name=PUPPET_CA_TLS_KEY"},
+			sets:    []string{"extraEnv[0].name=OPENVOX_CA_TLS_CERT", "extraEnv[1].name=OPENVOX_CA_TLS_KEY"},
 			wantErr: "refuse to start",
 		},
 		{
@@ -7067,8 +7067,8 @@ config:
 		{
 			// And by the environment, which outranks the config file and which
 			// tlsConfigured already knows how to read.
-			name: "config.serving_cert alongside PUPPET_CA_TLS_KEY in env",
-			sets: []string{"env.PUPPET_CA_TLS_KEY=/etc/tls.key"},
+			name: "config.serving_cert alongside OPENVOX_CA_TLS_KEY in env",
+			sets: []string{"env.OPENVOX_CA_TLS_KEY=/etc/tls.key"},
 			valuesYAML: `
 config:
   serving_cert:
@@ -7078,13 +7078,13 @@ config:
     store:
       secret: {name: ca-tls}
 `,
-			wantErr: "PUPPET_CA_TLS_KEY",
+			wantErr: "OPENVOX_CA_TLS_KEY",
 		},
 		{
 			// Both names in the env arm, because each is an independent route
 			// to the same refusal and the `or` had a case for only one of them.
-			name: "config.serving_cert alongside PUPPET_CA_TLS_CERT in env",
-			sets: []string{"env.PUPPET_CA_TLS_CERT=/etc/tls.crt"},
+			name: "config.serving_cert alongside OPENVOX_CA_TLS_CERT in env",
+			sets: []string{"env.OPENVOX_CA_TLS_CERT=/etc/tls.crt"},
 			valuesYAML: `
 config:
   serving_cert:
@@ -7094,7 +7094,7 @@ config:
     store:
       secret: {name: ca-tls}
 `,
-			wantErr: "PUPPET_CA_TLS_CERT",
+			wantErr: "OPENVOX_CA_TLS_CERT",
 		},
 		{
 			// The trap the chart's own default creates: cadir is the mount, so
@@ -7117,8 +7117,8 @@ config:
 			// The extraEnv arm of the conflict scan, which reads .name/.value
 			// off a list rather than a map and is the most fragile of the four
 			// routes to the same refusal.
-			name: "config.serving_cert alongside PUPPET_CA_TLS_CERT in extraEnv",
-			sets: []string{"extraEnv[0].name=PUPPET_CA_TLS_CERT", "extraEnv[0].value=/run/tls/tls.crt"},
+			name: "config.serving_cert alongside OPENVOX_CA_TLS_CERT in extraEnv",
+			sets: []string{"extraEnv[0].name=OPENVOX_CA_TLS_CERT", "extraEnv[0].value=/run/tls/tls.crt"},
 			valuesYAML: `
 config:
   serving_cert:
@@ -7135,7 +7135,7 @@ config:
 			// must assume supplies a certificate.
 			name: "config.serving_cert alongside an extraEnv valueFrom for the TLS key",
 			sets: []string{
-				"extraEnv[0].name=PUPPET_CA_TLS_KEY",
+				"extraEnv[0].name=OPENVOX_CA_TLS_KEY",
 				"extraEnv[0].valueFrom.secretKeyRef.name=tls",
 				"extraEnv[0].valueFrom.secretKeyRef.key=path",
 			},
@@ -7389,19 +7389,19 @@ config:
 		{
 			name:     "an etcd password in config, which would land in the ConfigMap",
 			sets:     []string{tls, "config.etcd_password=ETCDSECRET"},
-			wantErr:  "config.etcd_password: set PUPPET_CA_ETCD_PASSWORD instead",
+			wantErr:  "config.etcd_password: set OPENVOX_CA_ETCD_PASSWORD instead",
 			notWants: []string{"ETCDSECRET"},
 		},
 		{
 			name:     "a Redis password in config, which would land in the ConfigMap",
 			sets:     []string{tls, "config.redis_password=HUNTER2"},
-			wantErr:  "config.redis_password: set PUPPET_CA_REDIS_PASSWORD instead",
+			wantErr:  "config.redis_password: set OPENVOX_CA_REDIS_PASSWORD instead",
 			notWants: []string{"HUNTER2"},
 		},
 		{
 			name:     "a Redis Sentinel password in config, which would land in the ConfigMap",
 			sets:     []string{tls, "config.redis_sentinel_password=SENTINELSECRET"},
-			wantErr:  "config.redis_sentinel_password: set PUPPET_CA_REDIS_SENTINEL_PASSWORD instead",
+			wantErr:  "config.redis_sentinel_password: set OPENVOX_CA_REDIS_SENTINEL_PASSWORD instead",
 			notWants: []string{"SENTINELSECRET"},
 		},
 		{
@@ -7409,14 +7409,14 @@ config:
 			// Sorted, because the helper ranges over a dict.
 			name:     "two credentials in config, both named in one refusal",
 			sets:     []string{tls, "config.etcd_password=ETCDSECRET", "config.redis_password=HUNTER2"},
-			wantErr:  "config.etcd_password: set PUPPET_CA_ETCD_PASSWORD instead\n  config.redis_password: set PUPPET_CA_REDIS_PASSWORD instead",
+			wantErr:  "config.etcd_password: set OPENVOX_CA_ETCD_PASSWORD instead\n  config.redis_password: set OPENVOX_CA_REDIS_PASSWORD instead",
 			notWants: []string{"ETCDSECRET", "HUNTER2"},
 		},
 		{
 			name:       "a postgres sql_dsn carrying a password",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  sql_dsn: 'postgres://ca:PGSECRET@db:5432/ca?sslmode=verify-full'\n",
-			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			wantErr:    "config.sql_dsn: set OPENVOX_CA_SQL_DSN",
 			notWants:   []string{"PGSECRET"},
 		},
 		{
@@ -7430,7 +7430,7 @@ config:
 			name:       "a MySQL sql_dsn carrying a password",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  sql_dsn: 'ca:MYSECRET@tcp(db:3306)/ca'\n",
-			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			wantErr:    "config.sql_dsn: set OPENVOX_CA_SQL_DSN",
 			notWants:   []string{"MYSECRET"},
 		},
 		{
@@ -7439,7 +7439,7 @@ config:
 			name:       "a MySQL sql_dsn whose password contains a slash",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  sql_dsn: 'ca:MY/SECRET@tcp(db:3306)/ca'\n",
-			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			wantErr:    "config.sql_dsn: set OPENVOX_CA_SQL_DSN",
 			notWants:   []string{"MY/SECRET"},
 		},
 		{
@@ -7448,7 +7448,7 @@ config:
 			name:       "a MySQL sql_dsn whose password begins with //",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  sql_dsn: 'ca://MYSECRET@tcp(db:3306)/ca'\n",
-			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			wantErr:    "config.sql_dsn: set OPENVOX_CA_SQL_DSN",
 			notWants:   []string{"MYSECRET"},
 		},
 		{
@@ -7457,7 +7457,7 @@ config:
 			name:       "a sql_dsn carrying a password= parameter",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  sql_dsn: 'postgres://ca@db/ca?password=PGSECRET'\n",
-			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			wantErr:    "config.sql_dsn: set OPENVOX_CA_SQL_DSN",
 			notWants:   []string{"PGSECRET"},
 		},
 		{
@@ -7466,14 +7466,14 @@ config:
 			name:       "a sql_dsn carrying an sslpassword= parameter",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  sql_dsn: 'postgres://ca@db/ca?sslpassword=KEYSECRET'\n",
-			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			wantErr:    "config.sql_dsn: set OPENVOX_CA_SQL_DSN",
 			notWants:   []string{"KEYSECRET"},
 		},
 		{
 			name:       "a sql_dsn carrying an upper-case PASSWORD= parameter",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  sql_dsn: 'postgres://ca@db/ca?PASSWORD=PGSECRET'\n",
-			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			wantErr:    "config.sql_dsn: set OPENVOX_CA_SQL_DSN",
 			notWants:   []string{"PGSECRET"},
 		},
 		{
@@ -7484,7 +7484,7 @@ config:
 			name:       "a postgres sql_dsn whose password contains an unescaped slash",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  sql_dsn: 'postgres://ca:PG/SECRET@db/ca'\n",
-			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			wantErr:    "config.sql_dsn: set OPENVOX_CA_SQL_DSN",
 			notWants:   []string{"PG/SECRET"},
 		},
 		{
@@ -7493,7 +7493,7 @@ config:
 			name:       "a postgres sql_dsn whose password contains an unescaped question mark",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  sql_dsn: 'postgres://ca:PG?SECRET@db/ca'\n",
-			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			wantErr:    "config.sql_dsn: set OPENVOX_CA_SQL_DSN",
 			notWants:   []string{"PG?SECRET"},
 		},
 		{
@@ -7501,7 +7501,7 @@ config:
 			name:       "a postgres sql_dsn whose password contains an unescaped hash",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  sql_dsn: 'postgres://ca:PG#SECRET@db/ca'\n",
-			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			wantErr:    "config.sql_dsn: set OPENVOX_CA_SQL_DSN",
 			notWants:   []string{"PG#SECRET"},
 		},
 		{
@@ -7511,14 +7511,14 @@ config:
 			name:       "a postgresql sql_dsn carrying a password",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  sql_dsn: 'postgresql://ca:PGSECRET@db/ca'\n",
-			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			wantErr:    "config.sql_dsn: set OPENVOX_CA_SQL_DSN",
 			notWants:   []string{"PGSECRET"},
 		},
 		{
 			name:       "a unix-socket sql_dsn carrying a password",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  sql_dsn: 'unix://ca:PGSECRET@ca/var/run/postgresql/.s.PGSQL.5432'\n",
-			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			wantErr:    "config.sql_dsn: set OPENVOX_CA_SQL_DSN",
 			notWants:   []string{"PGSECRET"},
 		},
 		{
@@ -7529,7 +7529,7 @@ config:
 			name:       "a working sql_dsn with an @ in a query value after a port, refused by design",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  sql_dsn: 'postgres://ca@db:5432/ca?application_name=a@b'\n",
-			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			wantErr:    "config.sql_dsn: set OPENVOX_CA_SQL_DSN",
 		},
 		{
 			// With no database path the last / falls inside the password, so
@@ -7537,7 +7537,7 @@ config:
 			name:       "a pathless postgres sql_dsn whose password contains an unescaped slash",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  sql_dsn: 'postgres://ca:PG/SECRET@db?sslmode=verify-full'\n",
-			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			wantErr:    "config.sql_dsn: set OPENVOX_CA_SQL_DSN",
 			notWants:   []string{"PG/SECRET"},
 		},
 		{
@@ -7545,7 +7545,7 @@ config:
 			name:       "a pathless postgres sql_dsn whose password contains an unescaped question mark",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  sql_dsn: 'postgres://ca:PG?SECRET@db:5432'\n",
-			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			wantErr:    "config.sql_dsn: set OPENVOX_CA_SQL_DSN",
 			notWants:   []string{"PG?SECRET"},
 		},
 		{
@@ -7555,7 +7555,7 @@ config:
 			name:       "a pathless MySQL sql_dsn whose password contains a slash",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  sql_dsn: 'ca:MY/SECRET@tcp(db:3306)'\n",
-			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			wantErr:    "config.sql_dsn: set OPENVOX_CA_SQL_DSN",
 			notWants:   []string{"MY/SECRET"},
 		},
 		{
@@ -7565,7 +7565,7 @@ config:
 			name:       "a postgres sql_dsn with an @ in its user part and a slash in its password",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  sql_dsn: 'postgres://ca@tenant:PG/SECRET@db/ca'\n",
-			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			wantErr:    "config.sql_dsn: set OPENVOX_CA_SQL_DSN",
 			notWants:   []string{"PG/SECRET"},
 		},
 		{
@@ -7574,7 +7574,7 @@ config:
 			name:       "a pathless MySQL sql_dsn with an @ in its user part and a slash in its password",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  sql_dsn: 'ca@tenant:MY/SECRET@tcp(db:3306)'\n",
-			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			wantErr:    "config.sql_dsn: set OPENVOX_CA_SQL_DSN",
 			notWants:   []string{"MY/SECRET"},
 		},
 		{
@@ -7584,17 +7584,17 @@ config:
 			name:       "a postgres-looking sql_dsn under a mysql backend, read as MySQL",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  storage_backend: mysql\n  sql_dsn: 'postgres://MYSECRET@tcp(db:3306)/ca'\n",
-			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			wantErr:    "config.sql_dsn: set OPENVOX_CA_SQL_DSN",
 			notWants:   []string{"MYSECRET"},
 		},
 		{
 			// The SQLite exemption needs the DSN to look like a SQLite path as
 			// well: the backend comes from config, which
-			// PUPPET_CA_STORAGE_BACKEND outranks, so this password may be live.
+			// OPENVOX_CA_STORAGE_BACKEND outranks, so this password may be live.
 			name:       "a postgres sql_dsn with a password under a sqlite backend",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  storage_backend: sqlite\n  sql_dsn: 'postgres://ca:PGSECRET@db/ca'\n",
-			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			wantErr:    "config.sql_dsn: set OPENVOX_CA_SQL_DSN",
 			notWants:   []string{"PGSECRET"},
 		},
 		{
@@ -7604,7 +7604,7 @@ config:
 			name:       "an upper-case FILE: sql_dsn with an @ under a sqlite backend",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  storage_backend: sqlite\n  sql_dsn: 'FILE:ca:SQLSECRET@db/ca'\n",
-			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			wantErr:    "config.sql_dsn: set OPENVOX_CA_SQL_DSN",
 			notWants:   []string{"SQLSECRET"},
 		},
 		{
@@ -7614,7 +7614,7 @@ config:
 			name:       "a file: sql_dsn with a password under a mysql backend",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  storage_backend: mysql\n  sql_dsn: 'file:SQLSECRET@tcp(db:3306)/ca'\n",
-			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			wantErr:    "config.sql_dsn: set OPENVOX_CA_SQL_DSN",
 			notWants:   []string{"SQLSECRET"},
 		},
 		{
@@ -7622,7 +7622,7 @@ config:
 			name:       "a file: sql_dsn with an @ and no storage_backend",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  sql_dsn: 'file:SQLSECRET@tcp(db:3306)/ca'\n",
-			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			wantErr:    "config.sql_dsn: set OPENVOX_CA_SQL_DSN",
 			notWants:   []string{"SQLSECRET"},
 		},
 		{
@@ -7631,7 +7631,7 @@ config:
 			name:       "a keyword/value sql_dsn with spaces around password =",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  sql_dsn: 'host=db user=ca password = PGSECRET'\n",
-			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			wantErr:    "config.sql_dsn: set OPENVOX_CA_SQL_DSN",
 			notWants:   []string{"PGSECRET"},
 		},
 		{
@@ -7639,7 +7639,7 @@ config:
 			name:       "a SQLite sql_dsn carrying a password= parameter under a sqlite backend",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  storage_backend: sqlite\n  sql_dsn: 'file:/srv/ca.db?password=SQLSECRET'\n",
-			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			wantErr:    "config.sql_dsn: set OPENVOX_CA_SQL_DSN",
 			notWants:   []string{"SQLSECRET"},
 		},
 		{
@@ -7648,7 +7648,7 @@ config:
 			name:       "a postgres-looking sql_dsn under a padded mysql backend, read as MySQL",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  storage_backend: ' mysql '\n  sql_dsn: 'postgres://MYSECRET@tcp(db:3306)/ca'\n",
-			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			wantErr:    "config.sql_dsn: set OPENVOX_CA_SQL_DSN",
 			notWants:   []string{"MYSECRET"},
 		},
 		{
@@ -7656,7 +7656,7 @@ config:
 			name:       "a postgres-looking sql_dsn under a MariaDB backend, read as MySQL",
 			sets:       []string{tls},
 			valuesYAML: "config:\n  storage_backend: MariaDB\n  sql_dsn: 'postgres://MYSECRET@tcp(db:3306)/ca'\n",
-			wantErr:    "config.sql_dsn: set PUPPET_CA_SQL_DSN",
+			wantErr:    "config.sql_dsn: set OPENVOX_CA_SQL_DSN",
 			notWants:   []string{"MYSECRET"},
 		},
 		{
@@ -7664,7 +7664,7 @@ config:
 			// strings alone would wave through.
 			name:     "a numeric Redis password in config",
 			sets:     []string{tls, "config.redis_password=123456"},
-			wantErr:  "config.redis_password: set PUPPET_CA_REDIS_PASSWORD instead",
+			wantErr:  "config.redis_password: set OPENVOX_CA_REDIS_PASSWORD instead",
 			notWants: []string{"123456"},
 		},
 		{
@@ -8278,7 +8278,7 @@ func (Test) BackendsRedisGo() error {
 	// needs cgo, hence the explicit CGO_ENABLED override of the repository's
 	// CGO_ENABLED=0 default.
 	return sh.RunWithV(
-		map[string]string{"PUPPET_CA_TEST_REDIS_ADDR": addr, "CGO_ENABLED": "1"},
+		map[string]string{"OPENVOX_CA_TEST_REDIS_ADDR": addr, "CGO_ENABLED": "1"},
 		"go", "test", "-tags", "redis_integration", "-race", "-count=1", "./internal/storage/...",
 	)
 }
@@ -8321,7 +8321,7 @@ func (Test) BackendsPostgres() error {
 
 	fmt.Println("Running PostgreSQL-backend integration tests...")
 	return sh.RunWithV(
-		map[string]string{"PUPPET_CA_TEST_POSTGRES_DSN": dsn, "CGO_ENABLED": "1"},
+		map[string]string{"OPENVOX_CA_TEST_POSTGRES_DSN": dsn, "CGO_ENABLED": "1"},
 		"go", "test", "-tags", "postgres_integration", "-race", "-count=1", "./internal/storage/...",
 	)
 }
@@ -8359,7 +8359,7 @@ func (Test) BackendsMySQL() error {
 
 	fmt.Println("Running MySQL-backend integration tests...")
 	return sh.RunWithV(
-		map[string]string{"PUPPET_CA_TEST_MYSQL_DSN": dsn, "CGO_ENABLED": "1"},
+		map[string]string{"OPENVOX_CA_TEST_MYSQL_DSN": dsn, "CGO_ENABLED": "1"},
 		"go", "test", "-tags", "mysql_integration", "-race", "-count=1", "./internal/storage/...",
 	)
 }
@@ -8421,10 +8421,10 @@ func (Test) BackendsOpenBao() error {
 	fmt.Println("Running OpenBao-backend integration tests...")
 	return sh.RunWithV(
 		map[string]string{
-			"PUPPET_CA_TEST_OPENBAO_ADDR":           addr,
-			"PUPPET_CA_TEST_OPENBAO_ROLE_ID":        roleID,
-			"PUPPET_CA_TEST_OPENBAO_SECRET_ID_FILE": secretIDFile,
-			"PUPPET_CA_TEST_OPENBAO_KEY_NAME":       keyName,
+			"OPENVOX_CA_TEST_OPENBAO_ADDR":           addr,
+			"OPENVOX_CA_TEST_OPENBAO_ROLE_ID":        roleID,
+			"OPENVOX_CA_TEST_OPENBAO_SECRET_ID_FILE": secretIDFile,
+			"OPENVOX_CA_TEST_OPENBAO_KEY_NAME":       keyName,
 		},
 		"go", "test", "-tags", "openbao_integration", "-count=1", "./internal/signer/openbao/...",
 	)

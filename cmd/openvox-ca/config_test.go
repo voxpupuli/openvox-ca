@@ -50,14 +50,17 @@ func setEnv(key, value string) {
 	Expect(os.Setenv(key, value)).To(Succeed())
 }
 
-// clearServerEnv unsets every PUPPET_CA_* var and restores them after the spec.
+// clearServerEnv unsets every OPENVOX_CA_* var and restores them after the spec.
+// It clears PUPPET_CA_* as well. The server reads none of those names, but a
+// developer's shell may still export them, and a spec that pins that they are
+// ignored must not be decided by what the host happened to leave behind.
 //
 // Enumerated from the live environment rather than from serverEnvVars, which is
 // a hand-written list and had fallen well short of the ~90 the server actually
 // reads. The gap mattered once specs began driving whole commands through
-// resolveRuntime: PUPPET_CA_STORAGE_BACKEND or PUPPET_CA_SQL_DSN exported on a
+// resolveRuntime: OPENVOX_CA_STORAGE_BACKEND or OPENVOX_CA_SQL_DSN exported on a
 // developer box would silently point them at a real database instead of the
-// --cadir filesystem backend, and PUPPET_CA_ENCRYPT_CA_KEY would make the
+// --cadir filesystem backend, and OPENVOX_CA_ENCRYPT_CA_KEY would make the
 // "encrypts the created key at rest when configured" spec pass without its
 // config file doing anything — a test that can no longer fail. Reading the
 // environment cannot drift from what the server reads.
@@ -65,13 +68,13 @@ func clearServerEnv() {
 	GinkgoHelper()
 	for _, entry := range os.Environ() {
 		key, _, found := strings.Cut(entry, "=")
-		if !found || !strings.HasPrefix(key, "PUPPET_CA_") {
+		if !found || (!strings.HasPrefix(key, "OPENVOX_CA_") && !strings.HasPrefix(key, "PUPPET_CA_")) {
 			continue
 		}
-		// PUPPET_CA_CONFIG is the pin, not ambient state: callers set it to a
+		// OPENVOX_CA_CONFIG is the pin, not ambient state: callers set it to a
 		// fixture config immediately before calling this, and clearing it would
 		// send them to the host's /etc/puppet-ca/config.yaml instead.
-		if key == "PUPPET_CA_CONFIG" {
+		if key == "OPENVOX_CA_CONFIG" {
 			continue
 		}
 		setEnv(key, "") // empty string is treated as unset by applyServerEnv
@@ -91,7 +94,7 @@ func writeTempConfig(content string) string {
 // --- resolveConfigFile ---
 
 var _ = Describe("resolveConfigFile", func() {
-	const envKey = "PUPPET_CA_CONFIG_TEST_RESOLVE"
+	const envKey = "OPENVOX_CA_CONFIG_TEST_RESOLVE"
 
 	var (
 		existing string
@@ -191,7 +194,7 @@ var _ = Describe("shutdownDrain", func() {
 
 	It("honours the env override", func() {
 		clearServerEnv()
-		setEnv("PUPPET_CA_SHUTDOWN_TIMEOUT_SEC", "45")
+		setEnv("OPENVOX_CA_SHUTDOWN_TIMEOUT_SEC", "45")
 
 		cfg, err := loadServerConfig("")
 		Expect(err).NotTo(HaveOccurred(), "unexpected error")
@@ -204,7 +207,7 @@ var _ = Describe("shutdownDrain", func() {
 	// immediately).
 	It("falls back to the default for a non-positive value", func() {
 		clearServerEnv()
-		setEnv("PUPPET_CA_SHUTDOWN_TIMEOUT_SEC", "0")
+		setEnv("OPENVOX_CA_SHUTDOWN_TIMEOUT_SEC", "0")
 
 		cfg, err := loadServerConfig("")
 		Expect(err).NotTo(HaveOccurred(), "unexpected error")
@@ -226,7 +229,7 @@ var _ = Describe("crlRefreshInterval", func() {
 
 	It("honours the env override", func() {
 		clearServerEnv()
-		setEnv("PUPPET_CA_CRL_REFRESH_INTERVAL_SEC", "900")
+		setEnv("OPENVOX_CA_CRL_REFRESH_INTERVAL_SEC", "900")
 
 		cfg, err := loadServerConfig("")
 		Expect(err).NotTo(HaveOccurred(), "unexpected error")
@@ -236,7 +239,7 @@ var _ = Describe("crlRefreshInterval", func() {
 
 	It("falls back to the default for a non-positive value", func() {
 		clearServerEnv()
-		setEnv("PUPPET_CA_CRL_REFRESH_INTERVAL_SEC", "0")
+		setEnv("OPENVOX_CA_CRL_REFRESH_INTERVAL_SEC", "0")
 
 		cfg, err := loadServerConfig("")
 		Expect(err).NotTo(HaveOccurred(), "unexpected error")
@@ -262,7 +265,7 @@ var _ = Describe("ocspIndexSyncInterval", func() {
 
 	It("honours the env override", func() {
 		clearServerEnv()
-		setEnv("PUPPET_CA_OCSP_INDEX_SYNC_INTERVAL_SEC", "30")
+		setEnv("OPENVOX_CA_OCSP_INDEX_SYNC_INTERVAL_SEC", "30")
 
 		cfg, err := loadServerConfig("")
 		Expect(err).NotTo(HaveOccurred(), "unexpected error")
@@ -272,7 +275,7 @@ var _ = Describe("ocspIndexSyncInterval", func() {
 
 	It("falls back to the default for a non-positive value", func() {
 		clearServerEnv()
-		setEnv("PUPPET_CA_OCSP_INDEX_SYNC_INTERVAL_SEC", "0")
+		setEnv("OPENVOX_CA_OCSP_INDEX_SYNC_INTERVAL_SEC", "0")
 
 		cfg, err := loadServerConfig("")
 		Expect(err).NotTo(HaveOccurred(), "unexpected error")
@@ -286,7 +289,7 @@ var _ = Describe("ocspIndexSyncInterval", func() {
 	// no reason to lengthen the other. Setting one must not move the other.
 	It("is independent of crl_sync_interval_sec", func() {
 		clearServerEnv()
-		setEnv("PUPPET_CA_CRL_SYNC_INTERVAL_SEC", "15")
+		setEnv("OPENVOX_CA_CRL_SYNC_INTERVAL_SEC", "15")
 
 		cfg, err := loadServerConfig("")
 		Expect(err).NotTo(HaveOccurred(), "unexpected error")
@@ -311,7 +314,7 @@ var _ = Describe("crlSyncInterval", func() {
 
 	It("honours the env override", func() {
 		clearServerEnv()
-		setEnv("PUPPET_CA_CRL_SYNC_INTERVAL_SEC", "15")
+		setEnv("OPENVOX_CA_CRL_SYNC_INTERVAL_SEC", "15")
 
 		cfg, err := loadServerConfig("")
 		Expect(err).NotTo(HaveOccurred(), "unexpected error")
@@ -321,7 +324,7 @@ var _ = Describe("crlSyncInterval", func() {
 
 	It("falls back to the default for a non-positive value", func() {
 		clearServerEnv()
-		setEnv("PUPPET_CA_CRL_SYNC_INTERVAL_SEC", "0")
+		setEnv("OPENVOX_CA_CRL_SYNC_INTERVAL_SEC", "0")
 
 		cfg, err := loadServerConfig("")
 		Expect(err).NotTo(HaveOccurred(), "unexpected error")
@@ -335,7 +338,7 @@ var _ = Describe("crlSyncInterval", func() {
 	// that configuration is pinned separately, against backgroundJobs.
 	It("is unaffected by disable_crl_refresh", func() {
 		clearServerEnv()
-		setEnv("PUPPET_CA_DISABLE_CRL_REFRESH", "true")
+		setEnv("OPENVOX_CA_DISABLE_CRL_REFRESH", "true")
 
 		cfg, err := loadServerConfig("")
 		Expect(err).NotTo(HaveOccurred(), "unexpected error")
@@ -362,9 +365,9 @@ var _ = Describe("expired-cert cleanup resolvers", func() {
 
 	It("honours the env overrides", func() {
 		clearServerEnv()
-		setEnv("PUPPET_CA_ENABLE_EXPIRED_CERT_CLEANUP", "true")
-		setEnv("PUPPET_CA_EXPIRED_CERT_RETENTION_SEC", "3600")
-		setEnv("PUPPET_CA_EXPIRED_CERT_CLEANUP_INTERVAL_SEC", "900")
+		setEnv("OPENVOX_CA_ENABLE_EXPIRED_CERT_CLEANUP", "true")
+		setEnv("OPENVOX_CA_EXPIRED_CERT_RETENTION_SEC", "3600")
+		setEnv("OPENVOX_CA_EXPIRED_CERT_CLEANUP_INTERVAL_SEC", "900")
 
 		cfg, err := loadServerConfig("")
 		Expect(err).NotTo(HaveOccurred(), "unexpected error")
@@ -428,8 +431,8 @@ var _ = Describe("expired-cert cleanup resolvers", func() {
 		Expect(cfg.supersededCertSweepInterval()).To(BeNumerically(">", 0))
 
 		clearServerEnv()
-		setEnv("PUPPET_CA_SUPERSEDED_CERT_REVOKE_AFTER_SEC", "3600")
-		setEnv("PUPPET_CA_SUPERSEDED_CERT_SWEEP_INTERVAL_SEC", "60")
+		setEnv("OPENVOX_CA_SUPERSEDED_CERT_REVOKE_AFTER_SEC", "3600")
+		setEnv("OPENVOX_CA_SUPERSEDED_CERT_SWEEP_INTERVAL_SEC", "60")
 		cfg, err = loadServerConfig("")
 		Expect(err).NotTo(HaveOccurred(), "unexpected error")
 		Expect(cfg.supersededCertRevokeAfter()).To(Equal(time.Hour))
@@ -468,7 +471,7 @@ var _ = Describe("expired-cert cleanup resolvers", func() {
 		Expect(err).NotTo(HaveOccurred(), "unexpected error")
 		Expect(cfg.supersededCertRevokeAfter()).To(Equal(time.Hour), "precondition: the file sets a window")
 
-		setEnv("PUPPET_CA_SUPERSEDED_CERT_REVOKE_AFTER_SEC", "0")
+		setEnv("OPENVOX_CA_SUPERSEDED_CERT_REVOKE_AFTER_SEC", "0")
 		cfg, err = loadServerConfig(path)
 		Expect(err).NotTo(HaveOccurred(), "unexpected error")
 		Expect(cfg.supersededCertRevokeAfter()).To(BeZero(),
@@ -478,7 +481,7 @@ var _ = Describe("expired-cert cleanup resolvers", func() {
 		// file value — that is now the case an operator restoring the previous
 		// behaviour on upgrade actually hits.
 		clearServerEnv()
-		setEnv("PUPPET_CA_SUPERSEDED_CERT_REVOKE_AFTER_SEC", "0")
+		setEnv("OPENVOX_CA_SUPERSEDED_CERT_REVOKE_AFTER_SEC", "0")
 		cfg, err = loadServerConfig("")
 		Expect(err).NotTo(HaveOccurred(), "unexpected error")
 		Expect(cfg.supersededCertRevokeAfter()).To(BeZero(),
@@ -490,7 +493,7 @@ var _ = Describe("expired-cert cleanup resolvers", func() {
 		// default — only to some other explicit number.
 		clearServerEnv()
 		Expect(os.WriteFile(path, []byte("superseded_cert_revoke_after_sec: 3600\n"), 0o600)).To(Succeed())
-		setEnv("PUPPET_CA_SUPERSEDED_CERT_REVOKE_AFTER_SEC", "-1")
+		setEnv("OPENVOX_CA_SUPERSEDED_CERT_REVOKE_AFTER_SEC", "-1")
 		cfg, err = loadServerConfig(path)
 		Expect(err).NotTo(HaveOccurred(), "unexpected error")
 		Expect(cfg.supersededCertRevokeAfter()).To(Equal(defaultSupersededCertRevokeAfter),
@@ -499,8 +502,8 @@ var _ = Describe("expired-cert cleanup resolvers", func() {
 
 	It("falls back to defaults for non-positive values", func() {
 		clearServerEnv()
-		setEnv("PUPPET_CA_EXPIRED_CERT_RETENTION_SEC", "0")
-		setEnv("PUPPET_CA_EXPIRED_CERT_CLEANUP_INTERVAL_SEC", "-5")
+		setEnv("OPENVOX_CA_EXPIRED_CERT_RETENTION_SEC", "0")
+		setEnv("OPENVOX_CA_EXPIRED_CERT_CLEANUP_INTERVAL_SEC", "-5")
 
 		cfg, err := loadServerConfig("")
 		Expect(err).NotTo(HaveOccurred(), "unexpected error")
@@ -774,8 +777,8 @@ var _ = Describe("loadServerConfig env overrides YAML", func() {
 		clearServerEnv()
 
 		cfgFile := writeTempConfig("host: 10.0.0.1\nport: 9090\n")
-		setEnv("PUPPET_CA_HOST", "192.168.1.1")
-		setEnv("PUPPET_CA_PORT", "7777")
+		setEnv("OPENVOX_CA_HOST", "192.168.1.1")
+		setEnv("OPENVOX_CA_PORT", "7777")
 
 		cfg, err := loadServerConfig(cfgFile)
 		Expect(err).NotTo(HaveOccurred(), "unexpected error")
@@ -787,7 +790,7 @@ var _ = Describe("loadServerConfig env overrides YAML", func() {
 		clearServerEnv()
 
 		cfgFile := writeTempConfig("ca_key_provider: file\n")
-		setEnv("PUPPET_CA_CA_KEY_PROVIDER", "openbao")
+		setEnv("OPENVOX_CA_CA_KEY_PROVIDER", "openbao")
 
 		cfg, err := loadServerConfig(cfgFile)
 		Expect(err).NotTo(HaveOccurred(), "unexpected error")
@@ -813,6 +816,34 @@ var _ = Describe("loadServerConfig error cases", func() {
 
 // --- applyServerEnv: each variable ---
 
+// #349 renamed every variable from PUPPET_CA_* to OPENVOX_CA_* as a hard break:
+// an old name is ignored, not read as a fallback and not warned about. The
+// entries are the settings whose silent loss would weaken the CA most. Each
+// sets the old name and requires the config to stay untouched, then sets the
+// same value under the new name and requires it to change. That second half is
+// what makes the first meaningful: it proves the value is one applyServerEnv
+// would act on.
+var _ = Describe("applyServerEnv ignores the pre-rename variable names", func() {
+	DescribeTable("leaves the config alone for the old name, and not for the new one",
+		func(suffix, value string) {
+			clearServerEnv()
+			setEnv("PUPPET_CA_"+suffix, value)
+			cfg := &serverConfig{}
+			applyServerEnv(cfg)
+			Expect(*cfg).To(Equal(serverConfig{}), "PUPPET_CA_%s=%s changed the config; old names must be ignored", suffix, value)
+
+			setEnv("OPENVOX_CA_"+suffix, value)
+			applyServerEnv(cfg)
+			Expect(*cfg).NotTo(Equal(serverConfig{}), "OPENVOX_CA_%s=%s did not change the config, so the first half asserted nothing", suffix, value)
+		},
+		Entry("ENCRYPT_CA_KEY, which would otherwise leave the CA key unencrypted", "ENCRYPT_CA_KEY", "true"),
+		Entry("CADIR", "CADIR", "/some/dir"),
+		Entry("STORAGE_BACKEND", "STORAGE_BACKEND", "postgres"),
+		Entry("SQL_DSN", "SQL_DSN", "postgres://ca@db/ca"),
+		Entry("CLIENT_REVOCATION_POLICY", "CLIENT_REVOCATION_POLICY", "skip"),
+	)
+})
+
 var _ = Describe("applyServerEnv each variable", func() {
 	DescribeTable("applies the variable to the config",
 		func(envKey, envVal string, check func(*serverConfig) bool, desc string) {
@@ -822,172 +853,172 @@ var _ = Describe("applyServerEnv each variable", func() {
 			applyServerEnv(cfg)
 			Expect(check(cfg)).To(BeTrue(), "%s not applied from %s=%s", desc, envKey, envVal)
 		},
-		Entry("CADIR", "PUPPET_CA_CADIR", "/some/dir",
+		Entry("CADIR", "OPENVOX_CA_CADIR", "/some/dir",
 			func(c *serverConfig) bool { return c.CADir == "/some/dir" }, "CADir"),
 		// true is the distinguishing value: false is the zero value, so an entry
 		// asserting false would pass with the variable unread or the field
 		// misnamed.
-		Entry("INSECURE_ALLOW_WORLD_READABLE_KEYS", "PUPPET_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS", "true",
+		Entry("INSECURE_ALLOW_WORLD_READABLE_KEYS", "OPENVOX_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS", "true",
 			func(c *serverConfig) bool { return c.InsecureAllowWorldReadableKeys },
 			"InsecureAllowWorldReadableKeys"),
-		Entry("INSECURE_ALLOW_UNSAFE_AUTOSIGN_PATH", "PUPPET_CA_INSECURE_ALLOW_UNSAFE_AUTOSIGN_PATH", "true",
+		Entry("INSECURE_ALLOW_UNSAFE_AUTOSIGN_PATH", "OPENVOX_CA_INSECURE_ALLOW_UNSAFE_AUTOSIGN_PATH", "true",
 			func(c *serverConfig) bool { return c.InsecureAllowUnsafeAutosignPath },
 			"InsecureAllowUnsafeAutosignPath"),
-		Entry("CLIENT_REVOCATION_POLICY", "PUPPET_CA_CLIENT_REVOCATION_POLICY", "check",
+		Entry("CLIENT_REVOCATION_POLICY", "OPENVOX_CA_CLIENT_REVOCATION_POLICY", "check",
 			func(c *serverConfig) bool { return c.ClientRevocationPolicy == "check" }, "ClientRevocationPolicy"),
-		Entry("CLIENT_CRL_REFRESH_INTERVAL_SEC", "PUPPET_CA_CLIENT_CRL_REFRESH_INTERVAL_SEC", "300",
+		Entry("CLIENT_CRL_REFRESH_INTERVAL_SEC", "OPENVOX_CA_CLIENT_CRL_REFRESH_INTERVAL_SEC", "300",
 			func(c *serverConfig) bool { return c.ClientCRLRefreshIntervalSec == 300 },
 			"ClientCRLRefreshIntervalSec"),
-		Entry("AUTOSIGN_CONFIG", "PUPPET_CA_AUTOSIGN_CONFIG", "true",
+		Entry("AUTOSIGN_CONFIG", "OPENVOX_CA_AUTOSIGN_CONFIG", "true",
 			func(c *serverConfig) bool { return c.AutosignConfig == "true" }, "AutosignConfig"),
-		Entry("HOST", "PUPPET_CA_HOST", "1.2.3.4",
+		Entry("HOST", "OPENVOX_CA_HOST", "1.2.3.4",
 			func(c *serverConfig) bool { return c.Host == "1.2.3.4" }, "Host"),
-		Entry("PORT", "PUPPET_CA_PORT", "9999",
+		Entry("PORT", "OPENVOX_CA_PORT", "9999",
 			func(c *serverConfig) bool { return c.Port == 9999 }, "Port"),
-		Entry("HOSTNAME", "PUPPET_CA_HOSTNAME", "puppet.test",
+		Entry("HOSTNAME", "OPENVOX_CA_HOSTNAME", "puppet.test",
 			func(c *serverConfig) bool { return c.Hostname == "puppet.test" }, "Hostname"),
-		Entry("VERBOSITY", "PUPPET_CA_VERBOSITY", "2",
+		Entry("VERBOSITY", "OPENVOX_CA_VERBOSITY", "2",
 			func(c *serverConfig) bool { return c.Verbosity == 2 }, "Verbosity"),
-		Entry("LOGFILE", "PUPPET_CA_LOGFILE", "/var/log/puppet.log",
+		Entry("LOGFILE", "OPENVOX_CA_LOGFILE", "/var/log/puppet.log",
 			func(c *serverConfig) bool { return c.LogFile == "/var/log/puppet.log" }, "LogFile"),
-		Entry("TLS_CERT", "PUPPET_CA_TLS_CERT", "/etc/tls/cert.pem",
+		Entry("TLS_CERT", "OPENVOX_CA_TLS_CERT", "/etc/tls/cert.pem",
 			func(c *serverConfig) bool { return c.TLSCert == "/etc/tls/cert.pem" }, "TLSCert"),
-		Entry("TLS_KEY", "PUPPET_CA_TLS_KEY", "/etc/tls/key.pem",
+		Entry("TLS_KEY", "OPENVOX_CA_TLS_KEY", "/etc/tls/key.pem",
 			func(c *serverConfig) bool { return c.TLSKey == "/etc/tls/key.pem" }, "TLSKey"),
-		Entry("PUPPET_SERVER", "PUPPET_CA_PUPPET_SERVER", "puppet-master",
+		Entry("PUPPET_SERVER", "OPENVOX_CA_PUPPET_SERVER", "puppet-master",
 			func(c *serverConfig) bool { return c.PuppetServer == "puppet-master" }, "PuppetServer"),
-		Entry("PUPPET_SERVER_FILE", "PUPPET_CA_PUPPET_SERVER_FILE", "/etc/puppet-ca/servers.txt",
+		Entry("PUPPET_SERVER_FILE", "OPENVOX_CA_PUPPET_SERVER_FILE", "/etc/puppet-ca/servers.txt",
 			func(c *serverConfig) bool { return c.PuppetServerFile == "/etc/puppet-ca/servers.txt" }, "PuppetServerFile"),
-		Entry("NO_PP_CLI_AUTH_true", "PUPPET_CA_NO_PP_CLI_AUTH", "true",
+		Entry("NO_PP_CLI_AUTH_true", "OPENVOX_CA_NO_PP_CLI_AUTH", "true",
 			func(c *serverConfig) bool { return c.NoPpCliAuth }, "NoPpCliAuth=true"),
-		Entry("NO_TLS_REQUIRED_true", "PUPPET_CA_NO_TLS_REQUIRED", "true",
+		Entry("NO_TLS_REQUIRED_true", "OPENVOX_CA_NO_TLS_REQUIRED", "true",
 			func(c *serverConfig) bool { return c.NoTLSRequired }, "NoTLSRequired=true"),
-		Entry("NO_TLS_REQUIRED_1", "PUPPET_CA_NO_TLS_REQUIRED", "1",
+		Entry("NO_TLS_REQUIRED_1", "OPENVOX_CA_NO_TLS_REQUIRED", "1",
 			func(c *serverConfig) bool { return c.NoTLSRequired }, "NoTLSRequired=1"),
-		Entry("OCSP_URL", "PUPPET_CA_OCSP_URL", "http://ocsp.example.com",
+		Entry("OCSP_URL", "OPENVOX_CA_OCSP_URL", "http://ocsp.example.com",
 			func(c *serverConfig) bool { return c.OCSPUrl == "http://ocsp.example.com" }, "OCSPUrl"),
-		Entry("SHUTDOWN_TIMEOUT_SEC", "PUPPET_CA_SHUTDOWN_TIMEOUT_SEC", "45",
+		Entry("SHUTDOWN_TIMEOUT_SEC", "OPENVOX_CA_SHUTDOWN_TIMEOUT_SEC", "45",
 			func(c *serverConfig) bool { return c.ShutdownTimeoutSec == 45 }, "ShutdownTimeoutSec"),
 		// Distinct values for the two reservations: they are adjacent same-typed
 		// fields with near-identical names, so a transposition would leave both
 		// "working" and silently make the documented remedy for a large fleet
 		// raise the launcher's share instead of the signer's.
-		Entry("MEMORY_RESERVE_LAUNCHER", "PUPPET_CA_MEMORY_RESERVE_LAUNCHER", "16MiB",
+		Entry("MEMORY_RESERVE_LAUNCHER", "OPENVOX_CA_MEMORY_RESERVE_LAUNCHER", "16MiB",
 			func(c *serverConfig) bool { return c.MemoryReserveLauncher == "16MiB" }, "MemoryReserveLauncher"),
-		Entry("MEMORY_RESERVE_SIGNER", "PUPPET_CA_MEMORY_RESERVE_SIGNER", "64MiB",
+		Entry("MEMORY_RESERVE_SIGNER", "OPENVOX_CA_MEMORY_RESERVE_SIGNER", "64MiB",
 			func(c *serverConfig) bool { return c.MemoryReserveSigner == "64MiB" }, "MemoryReserveSigner"),
-		Entry("MEMORY_BUDGET_PERCENT", "PUPPET_CA_MEMORY_BUDGET_PERCENT", "75",
+		Entry("MEMORY_BUDGET_PERCENT", "OPENVOX_CA_MEMORY_BUDGET_PERCENT", "75",
 			func(c *serverConfig) bool { return c.MemoryBudgetPercent == 75 }, "MemoryBudgetPercent"),
-		Entry("CA_KEY_ALGO", "PUPPET_CA_CA_KEY_ALGO", "ecdsa",
+		Entry("CA_KEY_ALGO", "OPENVOX_CA_CA_KEY_ALGO", "ecdsa",
 			func(c *serverConfig) bool { return c.CAKeyAlgo == "ecdsa" }, "CAKeyAlgo"),
-		Entry("CA_KEY_SIZE", "PUPPET_CA_CA_KEY_SIZE", "384",
+		Entry("CA_KEY_SIZE", "OPENVOX_CA_CA_KEY_SIZE", "384",
 			func(c *serverConfig) bool { return c.CAKeySize == 384 }, "CAKeySize"),
-		Entry("LEAF_KEY_ALGO", "PUPPET_CA_LEAF_KEY_ALGO", "rsa",
+		Entry("LEAF_KEY_ALGO", "OPENVOX_CA_LEAF_KEY_ALGO", "rsa",
 			func(c *serverConfig) bool { return c.LeafKeyAlgo == "rsa" }, "LeafKeyAlgo"),
-		Entry("LEAF_KEY_SIZE", "PUPPET_CA_LEAF_KEY_SIZE", "3072",
+		Entry("LEAF_KEY_SIZE", "OPENVOX_CA_LEAF_KEY_SIZE", "3072",
 			func(c *serverConfig) bool { return c.LeafKeySize == 3072 }, "LeafKeySize"),
-		Entry("CA_SUBJECT_ORG", "PUPPET_CA_CA_SUBJECT_ORG", "Example Org",
+		Entry("CA_SUBJECT_ORG", "OPENVOX_CA_CA_SUBJECT_ORG", "Example Org",
 			func(c *serverConfig) bool { return c.CASubjectOrg == "Example Org" }, "CASubjectOrg"),
-		Entry("CA_SUBJECT_OU", "PUPPET_CA_CA_SUBJECT_OU", "IT",
+		Entry("CA_SUBJECT_OU", "OPENVOX_CA_CA_SUBJECT_OU", "IT",
 			func(c *serverConfig) bool { return c.CASubjectOU == "IT" }, "CASubjectOU"),
-		Entry("CA_SUBJECT_COUNTRY", "PUPPET_CA_CA_SUBJECT_COUNTRY", "US",
+		Entry("CA_SUBJECT_COUNTRY", "OPENVOX_CA_CA_SUBJECT_COUNTRY", "US",
 			func(c *serverConfig) bool { return c.CASubjectCountry == "US" }, "CASubjectCountry"),
-		Entry("CA_SUBJECT_LOCALITY", "PUPPET_CA_CA_SUBJECT_LOCALITY", "Springfield",
+		Entry("CA_SUBJECT_LOCALITY", "OPENVOX_CA_CA_SUBJECT_LOCALITY", "Springfield",
 			func(c *serverConfig) bool { return c.CASubjectLocality == "Springfield" }, "CASubjectLocality"),
-		Entry("CA_SUBJECT_PROVINCE", "PUPPET_CA_CA_SUBJECT_PROVINCE", "IL",
+		Entry("CA_SUBJECT_PROVINCE", "OPENVOX_CA_CA_SUBJECT_PROVINCE", "IL",
 			func(c *serverConfig) bool { return c.CASubjectProvince == "IL" }, "CASubjectProvince"),
-		Entry("CA_PATH_LENGTH_0", "PUPPET_CA_CA_PATH_LENGTH", "0",
+		Entry("CA_PATH_LENGTH_0", "OPENVOX_CA_CA_PATH_LENGTH", "0",
 			func(c *serverConfig) bool { return c.CAPathLength == 0 }, "CAPathLength=0"),
-		Entry("CA_PATH_LENGTH_1", "PUPPET_CA_CA_PATH_LENGTH", "1",
+		Entry("CA_PATH_LENGTH_1", "OPENVOX_CA_CA_PATH_LENGTH", "1",
 			func(c *serverConfig) bool { return c.CAPathLength == 1 }, "CAPathLength=1"),
-		Entry("CA_PATH_LENGTH_neg1", "PUPPET_CA_CA_PATH_LENGTH", "-1",
+		Entry("CA_PATH_LENGTH_neg1", "OPENVOX_CA_CA_PATH_LENGTH", "-1",
 			func(c *serverConfig) bool { return c.CAPathLength == -1 }, "CAPathLength=-1 (unconstrained)"),
-		Entry("CA_VALIDITY_DAYS", "PUPPET_CA_CA_VALIDITY_DAYS", "3650",
+		Entry("CA_VALIDITY_DAYS", "OPENVOX_CA_CA_VALIDITY_DAYS", "3650",
 			func(c *serverConfig) bool { return c.CAValidityDays == 3650 }, "CAValidityDays"),
-		Entry("LEAF_VALIDITY_DAYS", "PUPPET_CA_LEAF_VALIDITY_DAYS", "1825",
+		Entry("LEAF_VALIDITY_DAYS", "OPENVOX_CA_LEAF_VALIDITY_DAYS", "1825",
 			func(c *serverConfig) bool { return c.LeafValidityDays == 1825 }, "LeafValidityDays"),
-		Entry("DISABLE_CRL_REFRESH", "PUPPET_CA_DISABLE_CRL_REFRESH", "true",
+		Entry("DISABLE_CRL_REFRESH", "OPENVOX_CA_DISABLE_CRL_REFRESH", "true",
 			func(c *serverConfig) bool { return c.DisableCRLRefresh }, "DisableCRLRefresh"),
-		Entry("CRL_REFRESH_INTERVAL_SEC", "PUPPET_CA_CRL_REFRESH_INTERVAL_SEC", "900",
+		Entry("CRL_REFRESH_INTERVAL_SEC", "OPENVOX_CA_CRL_REFRESH_INTERVAL_SEC", "900",
 			func(c *serverConfig) bool { return c.CRLRefreshIntervalSec == 900 }, "CRLRefreshIntervalSec"),
-		Entry("CRL_REFRESH_BEFORE_SEC", "PUPPET_CA_CRL_REFRESH_BEFORE_SEC", "86400",
+		Entry("CRL_REFRESH_BEFORE_SEC", "OPENVOX_CA_CRL_REFRESH_BEFORE_SEC", "86400",
 			func(c *serverConfig) bool { return c.CRLRefreshBeforeSec == 86400 }, "CRLRefreshBeforeSec"),
-		Entry("CRL_SYNC_INTERVAL_SEC", "PUPPET_CA_CRL_SYNC_INTERVAL_SEC", "15",
+		Entry("CRL_SYNC_INTERVAL_SEC", "OPENVOX_CA_CRL_SYNC_INTERVAL_SEC", "15",
 			func(c *serverConfig) bool { return c.CRLSyncIntervalSec == 15 }, "CRLSyncIntervalSec"),
-		Entry("OCSP_INDEX_SYNC_INTERVAL_SEC", "PUPPET_CA_OCSP_INDEX_SYNC_INTERVAL_SEC", "300",
+		Entry("OCSP_INDEX_SYNC_INTERVAL_SEC", "OPENVOX_CA_OCSP_INDEX_SYNC_INTERVAL_SEC", "300",
 			func(c *serverConfig) bool { return c.OCSPIndexSyncIntervalSec == 300 }, "OCSPIndexSyncIntervalSec"),
 		// The zero value of RevokeOnAutoRenew is already false, so assert the
 		// env var flips it to true — a value distinct from the zero value —
 		// which proves the env key is parsed and wired to the right field. A
 		// typo in the env key would then leave it false and fail this entry.
-		Entry("REVOKE_ON_AUTO_RENEW", "PUPPET_CA_REVOKE_ON_AUTO_RENEW", "true",
+		Entry("REVOKE_ON_AUTO_RENEW", "OPENVOX_CA_REVOKE_ON_AUTO_RENEW", "true",
 			func(c *serverConfig) bool { return c.RevokeOnAutoRenew }, "RevokeOnAutoRenew"),
 		// Same reasoning as above: false is the zero value, so assert the env
 		// var flips it to true. A typo in the key leaves it false and fails.
-		Entry("ALLOW_SUBJECT_ALT_NAMES", "PUPPET_CA_ALLOW_SUBJECT_ALT_NAMES", "true",
+		Entry("ALLOW_SUBJECT_ALT_NAMES", "OPENVOX_CA_ALLOW_SUBJECT_ALT_NAMES", "true",
 			func(c *serverConfig) bool { return c.AllowSubjectAltNames }, "AllowSubjectAltNames"),
-		Entry("SERIAL_NUMBER_FORMAT", "PUPPET_CA_SERIAL_NUMBER_FORMAT", "hex",
+		Entry("SERIAL_NUMBER_FORMAT", "OPENVOX_CA_SERIAL_NUMBER_FORMAT", "hex",
 			func(c *serverConfig) bool { return c.SerialNumberFormat == "hex" }, "SerialNumberFormat"),
-		Entry("ALLOW_DUPLICATE_CERTS", "PUPPET_CA_ALLOW_DUPLICATE_CERTS", "true",
+		Entry("ALLOW_DUPLICATE_CERTS", "OPENVOX_CA_ALLOW_DUPLICATE_CERTS", "true",
 			func(c *serverConfig) bool { return c.AllowDuplicateCerts }, "AllowDuplicateCerts"),
 		// Distinct values, because these two are adjacent ints with adjacent
 		// names: swapping the destinations would turn a 12-hour overlap window
 		// into a 12-hour sweep interval on a 90-second delay, and both would
 		// still "work".
-		Entry("SUPERSEDED_CERT_REVOKE_AFTER_SEC", "PUPPET_CA_SUPERSEDED_CERT_REVOKE_AFTER_SEC", "43200",
+		Entry("SUPERSEDED_CERT_REVOKE_AFTER_SEC", "OPENVOX_CA_SUPERSEDED_CERT_REVOKE_AFTER_SEC", "43200",
 			func(c *serverConfig) bool { return c.SupersededCertRevokeAfterSec == 43200 },
 			"SupersededCertRevokeAfterSec"),
-		Entry("SUPERSEDED_CERT_SWEEP_INTERVAL_SEC", "PUPPET_CA_SUPERSEDED_CERT_SWEEP_INTERVAL_SEC", "90",
+		Entry("SUPERSEDED_CERT_SWEEP_INTERVAL_SEC", "OPENVOX_CA_SUPERSEDED_CERT_SWEEP_INTERVAL_SEC", "90",
 			func(c *serverConfig) bool { return c.SupersededCertSweepIntervalSec == 90 },
 			"SupersededCertSweepIntervalSec"),
 		// CA key provider selection and OpenBao settings. Each entry uses a
 		// distinct value and asserts the specific destination field, so a
 		// wrong target (e.g. role-id <-> secret-id, or tls_cert <-> tls_key —
 		// both security-relevant) fails rather than passing silently.
-		Entry("CA_KEY_PROVIDER", "PUPPET_CA_CA_KEY_PROVIDER", "openbao",
+		Entry("CA_KEY_PROVIDER", "OPENVOX_CA_CA_KEY_PROVIDER", "openbao",
 			func(c *serverConfig) bool { return c.CAKeyProvider == "openbao" }, "CAKeyProvider"),
-		Entry("OPENBAO_ADDR", "PUPPET_CA_OPENBAO_ADDR", "https://bao:8200",
+		Entry("OPENBAO_ADDR", "OPENVOX_CA_OPENBAO_ADDR", "https://bao:8200",
 			func(c *serverConfig) bool { return c.OpenBao.Addr == "https://bao:8200" }, "OpenBao.Addr"),
-		Entry("OPENBAO_TRANSIT_MOUNT", "PUPPET_CA_OPENBAO_TRANSIT_MOUNT", "transit-x",
+		Entry("OPENBAO_TRANSIT_MOUNT", "OPENVOX_CA_OPENBAO_TRANSIT_MOUNT", "transit-x",
 			func(c *serverConfig) bool { return c.OpenBao.TransitMount == "transit-x" }, "OpenBao.TransitMount"),
-		Entry("OPENBAO_KEY_NAME", "PUPPET_CA_OPENBAO_KEY_NAME", "ca-key",
+		Entry("OPENBAO_KEY_NAME", "OPENVOX_CA_OPENBAO_KEY_NAME", "ca-key",
 			func(c *serverConfig) bool { return c.OpenBao.KeyName == "ca-key" }, "OpenBao.KeyName"),
-		Entry("OPENBAO_TLS_CA_FILE", "PUPPET_CA_OPENBAO_TLS_CA_FILE", "/tls/ca.pem",
+		Entry("OPENBAO_TLS_CA_FILE", "OPENVOX_CA_OPENBAO_TLS_CA_FILE", "/tls/ca.pem",
 			func(c *serverConfig) bool { return c.OpenBao.TLSCAFile == "/tls/ca.pem" }, "OpenBao.TLSCAFile"),
-		Entry("OPENBAO_TLS_CERT_FILE", "PUPPET_CA_OPENBAO_TLS_CERT_FILE", "/tls/cert.pem",
+		Entry("OPENBAO_TLS_CERT_FILE", "OPENVOX_CA_OPENBAO_TLS_CERT_FILE", "/tls/cert.pem",
 			func(c *serverConfig) bool { return c.OpenBao.TLSCertFile == "/tls/cert.pem" }, "OpenBao.TLSCertFile"),
-		Entry("OPENBAO_TLS_KEY_FILE", "PUPPET_CA_OPENBAO_TLS_KEY_FILE", "/tls/key.pem",
+		Entry("OPENBAO_TLS_KEY_FILE", "OPENVOX_CA_OPENBAO_TLS_KEY_FILE", "/tls/key.pem",
 			func(c *serverConfig) bool { return c.OpenBao.TLSKeyFile == "/tls/key.pem" }, "OpenBao.TLSKeyFile"),
-		Entry("OPENBAO_AUTH_METHOD", "PUPPET_CA_OPENBAO_AUTH_METHOD", "kubernetes",
+		Entry("OPENBAO_AUTH_METHOD", "OPENVOX_CA_OPENBAO_AUTH_METHOD", "kubernetes",
 			func(c *serverConfig) bool { return c.OpenBao.AuthMethod == "kubernetes" }, "OpenBao.AuthMethod"),
-		Entry("OPENBAO_APPROLE_MOUNT", "PUPPET_CA_OPENBAO_APPROLE_MOUNT", "approle-x",
+		Entry("OPENBAO_APPROLE_MOUNT", "OPENVOX_CA_OPENBAO_APPROLE_MOUNT", "approle-x",
 			func(c *serverConfig) bool { return c.OpenBao.AppRoleMount == "approle-x" }, "OpenBao.AppRoleMount"),
-		Entry("OPENBAO_APPROLE_ROLE_ID", "PUPPET_CA_OPENBAO_APPROLE_ROLE_ID", "role-id-val",
+		Entry("OPENBAO_APPROLE_ROLE_ID", "OPENVOX_CA_OPENBAO_APPROLE_ROLE_ID", "role-id-val",
 			func(c *serverConfig) bool { return c.OpenBao.AppRoleRoleID == "role-id-val" }, "OpenBao.AppRoleRoleID"),
-		Entry("OPENBAO_APPROLE_ROLE_ID_FILE", "PUPPET_CA_OPENBAO_APPROLE_ROLE_ID_FILE", "/creds/role-id",
+		Entry("OPENBAO_APPROLE_ROLE_ID_FILE", "OPENVOX_CA_OPENBAO_APPROLE_ROLE_ID_FILE", "/creds/role-id",
 			func(c *serverConfig) bool { return c.OpenBao.AppRoleRoleIDFile == "/creds/role-id" }, "OpenBao.AppRoleRoleIDFile"),
-		Entry("OPENBAO_APPROLE_SECRET_ID_FILE", "PUPPET_CA_OPENBAO_APPROLE_SECRET_ID_FILE", "/creds/secret-id",
+		Entry("OPENBAO_APPROLE_SECRET_ID_FILE", "OPENVOX_CA_OPENBAO_APPROLE_SECRET_ID_FILE", "/creds/secret-id",
 			func(c *serverConfig) bool { return c.OpenBao.AppRoleSecretIDFile == "/creds/secret-id" }, "OpenBao.AppRoleSecretIDFile"),
-		Entry("OPENBAO_TOKEN_FILE", "PUPPET_CA_OPENBAO_TOKEN_FILE", "/creds/token",
+		Entry("OPENBAO_TOKEN_FILE", "OPENVOX_CA_OPENBAO_TOKEN_FILE", "/creds/token",
 			func(c *serverConfig) bool { return c.OpenBao.TokenFile == "/creds/token" }, "OpenBao.TokenFile"),
-		Entry("OPENBAO_KUBERNETES_MOUNT", "PUPPET_CA_OPENBAO_KUBERNETES_MOUNT", "k8s-x",
+		Entry("OPENBAO_KUBERNETES_MOUNT", "OPENVOX_CA_OPENBAO_KUBERNETES_MOUNT", "k8s-x",
 			func(c *serverConfig) bool { return c.OpenBao.KubernetesMount == "k8s-x" }, "OpenBao.KubernetesMount"),
-		Entry("OPENBAO_KUBERNETES_ROLE", "PUPPET_CA_OPENBAO_KUBERNETES_ROLE", "k8s-role",
+		Entry("OPENBAO_KUBERNETES_ROLE", "OPENVOX_CA_OPENBAO_KUBERNETES_ROLE", "k8s-role",
 			func(c *serverConfig) bool { return c.OpenBao.KubernetesRole == "k8s-role" }, "OpenBao.KubernetesRole"),
-		Entry("OPENBAO_KUBERNETES_JWT_FILE", "PUPPET_CA_OPENBAO_KUBERNETES_JWT_FILE", "/creds/sa.jwt",
+		Entry("OPENBAO_KUBERNETES_JWT_FILE", "OPENVOX_CA_OPENBAO_KUBERNETES_JWT_FILE", "/creds/sa.jwt",
 			func(c *serverConfig) bool { return c.OpenBao.KubernetesJWTFile == "/creds/sa.jwt" }, "OpenBao.KubernetesJWTFile"),
 	)
 
 	// Malformed values are silently ignored.
 	It("silently ignores malformed values", func() {
 		clearServerEnv()
-		setEnv("PUPPET_CA_PORT", "not-a-number")
-		setEnv("PUPPET_CA_VERBOSITY", "bad")
-		setEnv("PUPPET_CA_NO_TLS_REQUIRED", "maybe")
-		setEnv("PUPPET_CA_CA_VALIDITY_DAYS", "not-a-number")
-		setEnv("PUPPET_CA_LEAF_VALIDITY_DAYS", "bad")
-		setEnv("PUPPET_CA_CA_PATH_LENGTH", "not-a-number")
-		setEnv("PUPPET_CA_MEMORY_BUDGET_PERCENT", "ninety")
+		setEnv("OPENVOX_CA_PORT", "not-a-number")
+		setEnv("OPENVOX_CA_VERBOSITY", "bad")
+		setEnv("OPENVOX_CA_NO_TLS_REQUIRED", "maybe")
+		setEnv("OPENVOX_CA_CA_VALIDITY_DAYS", "not-a-number")
+		setEnv("OPENVOX_CA_LEAF_VALIDITY_DAYS", "bad")
+		setEnv("OPENVOX_CA_CA_PATH_LENGTH", "not-a-number")
+		setEnv("OPENVOX_CA_MEMORY_BUDGET_PERCENT", "ninety")
 
 		// MemoryBudgetPercent is seeded non-zero deliberately. Left at its zero
 		// value the assertion would be vacuous: strconv.Atoi("ninety") also
@@ -1006,13 +1037,13 @@ var _ = Describe("applyServerEnv each variable", func() {
 		Expect(cfg.CAPathLength).To(Equal(-1), "CAPathLength changed on bad input: got %d, want -1", cfg.CAPathLength)
 	})
 
-	// A zero or negative value for PUPPET_CA_CA_VALIDITY_DAYS and
-	// PUPPET_CA_LEAF_VALIDITY_DAYS is silently ignored (only positive values are
+	// A zero or negative value for OPENVOX_CA_CA_VALIDITY_DAYS and
+	// OPENVOX_CA_LEAF_VALIDITY_DAYS is silently ignored (only positive values are
 	// applied).
 	It("ignores zero or negative validity-day values", func() {
 		clearServerEnv()
-		setEnv("PUPPET_CA_CA_VALIDITY_DAYS", "0")
-		setEnv("PUPPET_CA_LEAF_VALIDITY_DAYS", "-5")
+		setEnv("OPENVOX_CA_CA_VALIDITY_DAYS", "0")
+		setEnv("OPENVOX_CA_LEAF_VALIDITY_DAYS", "-5")
 
 		cfg := &serverConfig{}
 		applyServerEnv(cfg)
@@ -1128,7 +1159,7 @@ var _ = Describe("crlChainRefreshInterval", func() {
 		// to put a "0" meaning "off" -- could have been let through unnoticed.
 		for _, v := range []string{"0", "-30"} {
 			clearServerEnv()
-			setEnv("PUPPET_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC", v)
+			setEnv("OPENVOX_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC", v)
 			cfg, err := loadServerConfig("")
 			Expect(err).NotTo(HaveOccurred(), "unexpected error")
 			Expect(cfg.crlChainRefreshInterval()).To(Equal(defaultCRLChainRefreshInterval),
@@ -1138,7 +1169,7 @@ var _ = Describe("crlChainRefreshInterval", func() {
 
 	It("honours the env override", func() {
 		clearServerEnv()
-		setEnv("PUPPET_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC", "15")
+		setEnv("OPENVOX_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC", "15")
 
 		cfg, err := loadServerConfig("")
 		Expect(err).NotTo(HaveOccurred(), "unexpected error")
@@ -1151,7 +1182,7 @@ var _ = Describe("crlChainRefreshInterval", func() {
 	// nothing else to notice.
 	It("is independent of crl_sync_interval_sec", func() {
 		clearServerEnv()
-		setEnv("PUPPET_CA_CRL_SYNC_INTERVAL_SEC", "15")
+		setEnv("OPENVOX_CA_CRL_SYNC_INTERVAL_SEC", "15")
 
 		cfg, err := loadServerConfig("")
 		Expect(err).NotTo(HaveOccurred(), "unexpected error")
@@ -1190,7 +1221,7 @@ var _ = Describe("insecure_allow_world_readable_keys wiring", func() {
 
 	It("is read from the environment, which outranks the file", func() {
 		path := writeTempConfig("insecure_allow_world_readable_keys: false\n")
-		setEnv("PUPPET_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS", "true")
+		setEnv("OPENVOX_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS", "true")
 		cfg, err := loadServerConfig(path)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cfg.InsecureAllowWorldReadableKeys).To(BeTrue())
@@ -1279,7 +1310,7 @@ var _ = Describe("allow_subject_alt_names wiring", func() {
 
 	It("is read from the environment, which outranks the file", func() {
 		path := writeTempConfig("allow_subject_alt_names: false\n")
-		setEnv("PUPPET_CA_ALLOW_SUBJECT_ALT_NAMES", "true")
+		setEnv("OPENVOX_CA_ALLOW_SUBJECT_ALT_NAMES", "true")
 		cfg, err := loadServerConfig(path)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cfg.AllowSubjectAltNames).To(BeTrue())
@@ -1323,7 +1354,7 @@ var _ = Describe("allow_duplicate_certs wiring", func() {
 
 	It("is read from the environment, which outranks the file", func() {
 		path := writeTempConfig("allow_duplicate_certs: false\n")
-		setEnv("PUPPET_CA_ALLOW_DUPLICATE_CERTS", "true")
+		setEnv("OPENVOX_CA_ALLOW_DUPLICATE_CERTS", "true")
 		cfg, err := loadServerConfig(path)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cfg.AllowDuplicateCerts).To(BeTrue())
@@ -1403,7 +1434,7 @@ var _ = Describe("crl_chain_file wiring", func() {
 
 	It("is read from the environment, which outranks the file", func() {
 		path := writeTempConfig("crl_chain_file: /from/file.pem\n")
-		setEnv("PUPPET_CA_CRL_CHAIN_FILE", "/from/env.pem")
+		setEnv("OPENVOX_CA_CRL_CHAIN_FILE", "/from/env.pem")
 		cfg, err := loadServerConfig(path)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cfg.CRLChainFile).To(Equal("/from/env.pem"))
@@ -1426,9 +1457,9 @@ var _ = Describe("serial_number_format at startup", func() {
 
 	BeforeEach(func() {
 		// Pinned to an empty file so a host config cannot influence the run.
-		setEnv("PUPPET_CA_CONFIG", writeTempConfig(""))
+		setEnv("OPENVOX_CA_CONFIG", writeTempConfig(""))
 		clearServerEnv()
-		setEnv("PUPPET_CA_SERIAL_NUMBER_FORMAT", "hexx")
+		setEnv("OPENVOX_CA_SERIAL_NUMBER_FORMAT", "hexx")
 		caDir = GinkgoT().TempDir()
 	})
 

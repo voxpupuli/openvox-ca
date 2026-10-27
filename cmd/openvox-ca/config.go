@@ -736,241 +736,241 @@ func (c *serverConfig) supersededCertSweepInterval() time.Duration {
 	return defaultSupersededCertSweepInterval
 }
 
-// applyServerEnv overlays PUPPET_CA_* environment variables onto cfg.
+// applyServerEnv overlays OPENVOX_CA_* environment variables onto cfg.
 func applyServerEnv(cfg *serverConfig) {
-	if v := os.Getenv("PUPPET_CA_CADIR"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_CADIR"); v != "" {
 		cfg.CADir = v
 	}
-	if v := os.Getenv("PUPPET_CA_AUTOSIGN_CONFIG"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_AUTOSIGN_CONFIG"); v != "" {
 		cfg.AutosignConfig = v
 	}
-	if v := os.Getenv("PUPPET_CA_HOST"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_HOST"); v != "" {
 		cfg.Host = v
 	}
-	if v := os.Getenv("PUPPET_CA_PORT"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_PORT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.Port = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_HOSTNAME"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_HOSTNAME"); v != "" {
 		cfg.Hostname = v
 	}
-	if v := os.Getenv("PUPPET_CA_VERBOSITY"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_VERBOSITY"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.Verbosity = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_LOGFILE"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_LOGFILE"); v != "" {
 		cfg.LogFile = v
 	}
-	if v := os.Getenv("PUPPET_CA_TLS_CERT"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_TLS_CERT"); v != "" {
 		cfg.TLSCert = v
 	}
-	if v := os.Getenv("PUPPET_CA_TLS_KEY"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_TLS_KEY"); v != "" {
 		cfg.TLSKey = v
 	}
-	if v := os.Getenv("PUPPET_CA_CRL_CHAIN_FILE"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_CRL_CHAIN_FILE"); v != "" {
 		cfg.CRLChainFile = v
 	}
-	if v := os.Getenv("PUPPET_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.CRLChainRefreshIntervalSec = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_PUPPET_SERVER"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_PUPPET_SERVER"); v != "" {
 		cfg.PuppetServer = v
 	}
-	if v := os.Getenv("PUPPET_CA_PUPPET_SERVER_FILE"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_PUPPET_SERVER_FILE"); v != "" {
 		cfg.PuppetServerFile = v
 	}
-	if v := os.Getenv("PUPPET_CA_NO_PP_CLI_AUTH"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_NO_PP_CLI_AUTH"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.NoPpCliAuth = b
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_NO_TLS_REQUIRED"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_NO_TLS_REQUIRED"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.NoTLSRequired = b
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_CLIENT_REVOCATION_POLICY"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_CLIENT_REVOCATION_POLICY"); v != "" {
 		cfg.ClientRevocationPolicy = v
 	}
-	if v := os.Getenv("PUPPET_CA_CLIENT_CRL_REFRESH_INTERVAL_SEC"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_CLIENT_CRL_REFRESH_INTERVAL_SEC"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.ClientCRLRefreshIntervalSec = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_ALLOW_PUBLIC_STATUS"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_ALLOW_PUBLIC_STATUS"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.AllowPublicStatus = b
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_OCSP_URL"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_OCSP_URL"); v != "" {
 		cfg.OCSPUrl = v
 	}
-	if v := os.Getenv("PUPPET_CA_CRL_URL"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_CRL_URL"); v != "" {
 		cfg.CRLUrl = v
 	}
-	if v := os.Getenv("PUPPET_CA_METRICS_LISTEN"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_METRICS_LISTEN"); v != "" {
 		cfg.MetricsListen = v
 	}
-	if v := os.Getenv("PUPPET_CA_SHUTDOWN_TIMEOUT_SEC"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_SHUTDOWN_TIMEOUT_SEC"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.ShutdownTimeoutSec = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_MEMORY_RESERVE_LAUNCHER"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_MEMORY_RESERVE_LAUNCHER"); v != "" {
 		cfg.MemoryReserveLauncher = v
 	}
-	if v := os.Getenv("PUPPET_CA_MEMORY_RESERVE_SIGNER"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_MEMORY_RESERVE_SIGNER"); v != "" {
 		cfg.MemoryReserveSigner = v
 	}
-	if v := os.Getenv("PUPPET_CA_MEMORY_BUDGET_PERCENT"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_MEMORY_BUDGET_PERCENT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.MemoryBudgetPercent = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_CA_KEY_ALGO"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_CA_KEY_ALGO"); v != "" {
 		cfg.CAKeyAlgo = v
 	}
-	if v := os.Getenv("PUPPET_CA_CA_KEY_SIZE"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_CA_KEY_SIZE"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.CAKeySize = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_LEAF_KEY_ALGO"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_LEAF_KEY_ALGO"); v != "" {
 		cfg.LeafKeyAlgo = v
 	}
-	if v := os.Getenv("PUPPET_CA_LEAF_KEY_SIZE"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_LEAF_KEY_SIZE"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.LeafKeySize = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_CA_SUBJECT_ORG"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_CA_SUBJECT_ORG"); v != "" {
 		cfg.CASubjectOrg = v
 	}
-	if v := os.Getenv("PUPPET_CA_CA_SUBJECT_OU"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_CA_SUBJECT_OU"); v != "" {
 		cfg.CASubjectOU = v
 	}
-	if v := os.Getenv("PUPPET_CA_CA_SUBJECT_COUNTRY"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_CA_SUBJECT_COUNTRY"); v != "" {
 		cfg.CASubjectCountry = v
 	}
-	if v := os.Getenv("PUPPET_CA_CA_SUBJECT_LOCALITY"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_CA_SUBJECT_LOCALITY"); v != "" {
 		cfg.CASubjectLocality = v
 	}
-	if v := os.Getenv("PUPPET_CA_CA_SUBJECT_PROVINCE"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_CA_SUBJECT_PROVINCE"); v != "" {
 		cfg.CASubjectProvince = v
 	}
-	if v := os.Getenv("PUPPET_CA_CA_PATH_LENGTH"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_CA_PATH_LENGTH"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.CAPathLength = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_CA_VALIDITY_DAYS"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_CA_VALIDITY_DAYS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.CAValidityDays = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_LEAF_VALIDITY_DAYS"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_LEAF_VALIDITY_DAYS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.LeafValidityDays = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_CRL_VALIDITY_DAYS"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_CRL_VALIDITY_DAYS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.CRLValidityDays = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_DISABLE_CRL_REFRESH"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_DISABLE_CRL_REFRESH"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.DisableCRLRefresh = b
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_CRL_REFRESH_INTERVAL_SEC"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_CRL_REFRESH_INTERVAL_SEC"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.CRLRefreshIntervalSec = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_CRL_REFRESH_BEFORE_SEC"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_CRL_REFRESH_BEFORE_SEC"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.CRLRefreshBeforeSec = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_CRL_SYNC_INTERVAL_SEC"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_CRL_SYNC_INTERVAL_SEC"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.CRLSyncIntervalSec = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_OCSP_INDEX_SYNC_INTERVAL_SEC"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_OCSP_INDEX_SYNC_INTERVAL_SEC"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.OCSPIndexSyncIntervalSec = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_ENABLE_EXPIRED_CERT_CLEANUP"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_ENABLE_EXPIRED_CERT_CLEANUP"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.EnableExpiredCertCleanup = b
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_EXPIRED_CERT_RETENTION_SEC"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_EXPIRED_CERT_RETENTION_SEC"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.ExpiredCertRetentionSec = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_EXPIRED_CERT_CLEANUP_INTERVAL_SEC"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_EXPIRED_CERT_CLEANUP_INTERVAL_SEC"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.ExpiredCertCleanupIntervalSec = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_CSR_RATE_LIMIT"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_CSR_RATE_LIMIT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.CSRRateLimit = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_SIGNING_CONCURRENCY"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_SIGNING_CONCURRENCY"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.CASigningConcurrency = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_ENCRYPT_CA_KEY"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_ENCRYPT_CA_KEY"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.EncryptCAKey = b
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.InsecureAllowWorldReadableKeys = b
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_INSECURE_ALLOW_UNSAFE_AUTOSIGN_PATH"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_INSECURE_ALLOW_UNSAFE_AUTOSIGN_PATH"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.InsecureAllowUnsafeAutosignPath = b
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_PROMOTE_CN_TO_SAN"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_PROMOTE_CN_TO_SAN"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.PromoteCNToSAN = b
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_ALLOW_SUBJECT_ALT_NAMES"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_ALLOW_SUBJECT_ALT_NAMES"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.AllowSubjectAltNames = b
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_ALLOW_DUPLICATE_CERTS"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_ALLOW_DUPLICATE_CERTS"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.AllowDuplicateCerts = b
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_PUPPET_DATETIME_FORMAT"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_PUPPET_DATETIME_FORMAT"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.PuppetDateTimeFormat = b
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_SERIAL_NUMBER_FORMAT"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_SERIAL_NUMBER_FORMAT"); v != "" {
 		cfg.SerialNumberFormat = v
 	}
-	if v := os.Getenv("PUPPET_CA_REVOKE_ON_AUTO_RENEW"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_REVOKE_ON_AUTO_RENEW"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.RevokeOnAutoRenew = b
 		}
@@ -983,7 +983,7 @@ func applyServerEnv(cfg *serverConfig) {
 	// one direction this must not fail in — the env channel is how a container
 	// or Helm deployment overrides a baked-in config.yaml, and it would be able
 	// to widen the weakening but never close it.
-	if v := os.Getenv("PUPPET_CA_SUPERSEDED_CERT_REVOKE_AFTER_SEC"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_SUPERSEDED_CERT_REVOKE_AFTER_SEC"); v != "" {
 		// Any integer, including negatives. supersededCertRevokeAfter already
 		// reads a negative as unset, so -1 — the value this setting documents
 		// as "unset" — has to reach it rather than being filtered out here. A
@@ -993,12 +993,12 @@ func applyServerEnv(cfg *serverConfig) {
 			cfg.SupersededCertRevokeAfterSec = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_SUPERSEDED_CERT_SWEEP_INTERVAL_SEC"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_SUPERSEDED_CERT_SWEEP_INTERVAL_SEC"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.SupersededCertSweepIntervalSec = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_LEAF_BACKDATE_SEC"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_LEAF_BACKDATE_SEC"); v != "" {
 		// Not gated on n > 0: a negative value has to reach validation to be
 		// refused, and discarding it here would leave the operator with the
 		// default and no error.
@@ -1013,7 +1013,7 @@ func applyServerEnv(cfg *serverConfig) {
 			cfg.LeafBackdateSec = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_MANAGED_CERT_INTERVAL_SEC"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_MANAGED_CERT_INTERVAL_SEC"); v != "" {
 		// Ungated for the same reason as the backdate above, and it used not to
 		// be: with `n > 0` here a negative value was discarded and the server
 		// started on the default, which is exactly the YAML-versus-environment
@@ -1022,183 +1022,183 @@ func applyServerEnv(cfg *serverConfig) {
 			cfg.ManagedCertIntervalSec = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_KEY_PASSPHRASE_FILE"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_KEY_PASSPHRASE_FILE"); v != "" {
 		cfg.CAKeyPassphraseFile = v
 	}
-	if v := os.Getenv("PUPPET_CA_STORAGE_BACKEND"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_STORAGE_BACKEND"); v != "" {
 		cfg.StorageBackend = v
 	}
-	if v := os.Getenv("PUPPET_CA_ETCD_ENDPOINTS"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_ETCD_ENDPOINTS"); v != "" {
 		cfg.EtcdEndpoints = splitAndTrim(v, ",")
 	}
-	if v := os.Getenv("PUPPET_CA_ETCD_KEY_PREFIX"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_ETCD_KEY_PREFIX"); v != "" {
 		cfg.EtcdKeyPrefix = v
 	}
-	if v := os.Getenv("PUPPET_CA_ETCD_USERNAME"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_ETCD_USERNAME"); v != "" {
 		cfg.EtcdUsername = v
 	}
-	if v := os.Getenv("PUPPET_CA_ETCD_PASSWORD"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_ETCD_PASSWORD"); v != "" {
 		cfg.EtcdPassword = v
 	}
-	if v := os.Getenv("PUPPET_CA_ETCD_DIAL_TIMEOUT_SEC"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_ETCD_DIAL_TIMEOUT_SEC"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.EtcdDialTimeoutSec = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_ETCD_REQUEST_TIMEOUT_SEC"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_ETCD_REQUEST_TIMEOUT_SEC"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.EtcdRequestTimeoutSec = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_ETCD_TLS_CA_FILE"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_ETCD_TLS_CA_FILE"); v != "" {
 		cfg.EtcdTLSCAFile = v
 	}
-	if v := os.Getenv("PUPPET_CA_ETCD_TLS_CERT_FILE"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_ETCD_TLS_CERT_FILE"); v != "" {
 		cfg.EtcdTLSCertFile = v
 	}
-	if v := os.Getenv("PUPPET_CA_ETCD_TLS_KEY_FILE"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_ETCD_TLS_KEY_FILE"); v != "" {
 		cfg.EtcdTLSKeyFile = v
 	}
-	if v := os.Getenv("PUPPET_CA_REDIS_ADDRS"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_REDIS_ADDRS"); v != "" {
 		cfg.RedisAddrs = splitAndTrim(v, ",")
 	}
-	if v := os.Getenv("PUPPET_CA_REDIS_SENTINEL_MASTER_NAME"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_REDIS_SENTINEL_MASTER_NAME"); v != "" {
 		cfg.RedisSentinelMasterName = v
 	}
-	if v := os.Getenv("PUPPET_CA_REDIS_SENTINEL_ADDRS"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_REDIS_SENTINEL_ADDRS"); v != "" {
 		cfg.RedisSentinelAddrs = splitAndTrim(v, ",")
 	}
-	if v := os.Getenv("PUPPET_CA_REDIS_SENTINEL_USERNAME"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_REDIS_SENTINEL_USERNAME"); v != "" {
 		cfg.RedisSentinelUsername = v
 	}
-	if v := os.Getenv("PUPPET_CA_REDIS_SENTINEL_PASSWORD"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_REDIS_SENTINEL_PASSWORD"); v != "" {
 		cfg.RedisSentinelPassword = v
 	}
-	if v := os.Getenv("PUPPET_CA_REDIS_DB"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_REDIS_DB"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			cfg.RedisDB = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_REDIS_USERNAME"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_REDIS_USERNAME"); v != "" {
 		cfg.RedisUsername = v
 	}
-	if v := os.Getenv("PUPPET_CA_REDIS_PASSWORD"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_REDIS_PASSWORD"); v != "" {
 		cfg.RedisPassword = v
 	}
-	if v := os.Getenv("PUPPET_CA_REDIS_KEY_PREFIX"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_REDIS_KEY_PREFIX"); v != "" {
 		cfg.RedisKeyPrefix = v
 	}
-	if v := os.Getenv("PUPPET_CA_REDIS_DIAL_TIMEOUT_SEC"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_REDIS_DIAL_TIMEOUT_SEC"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.RedisDialTimeoutSec = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_REDIS_REQUEST_TIMEOUT_SEC"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_REDIS_REQUEST_TIMEOUT_SEC"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.RedisRequestTimeoutSec = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_REDIS_LOCK_TTL_SEC"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_REDIS_LOCK_TTL_SEC"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.RedisLockTTLSec = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_REDIS_TLS_CA_FILE"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_REDIS_TLS_CA_FILE"); v != "" {
 		cfg.RedisTLSCAFile = v
 	}
-	if v := os.Getenv("PUPPET_CA_REDIS_TLS_CERT_FILE"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_REDIS_TLS_CERT_FILE"); v != "" {
 		cfg.RedisTLSCertFile = v
 	}
-	if v := os.Getenv("PUPPET_CA_REDIS_TLS_KEY_FILE"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_REDIS_TLS_KEY_FILE"); v != "" {
 		cfg.RedisTLSKeyFile = v
 	}
-	if v := os.Getenv("PUPPET_CA_SQL_DSN"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_SQL_DSN"); v != "" {
 		cfg.SQLDSN = v
 	}
-	if v := os.Getenv("PUPPET_CA_SQL_DSN_FILE"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_SQL_DSN_FILE"); v != "" {
 		cfg.SQLDSNFile = v
 	}
-	if v := os.Getenv("PUPPET_CA_SQL_REQUEST_TIMEOUT_SEC"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_SQL_REQUEST_TIMEOUT_SEC"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.SQLRequestTimeoutSec = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_SQL_MIGRATION_TIMEOUT_SEC"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_SQL_MIGRATION_TIMEOUT_SEC"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.SQLMigrationTimeoutSec = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_SQL_MAX_OPEN_CONNS"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_SQL_MAX_OPEN_CONNS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.SQLMaxOpenConns = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_SQL_MAX_IDLE_CONNS"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_SQL_MAX_IDLE_CONNS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.SQLMaxIdleConns = n
 		}
 	}
-	if v := os.Getenv("PUPPET_CA_SQL_TLS_CA_FILE"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_SQL_TLS_CA_FILE"); v != "" {
 		cfg.SQLTLSCAFile = v
 	}
-	if v := os.Getenv("PUPPET_CA_SQL_TLS_CERT_FILE"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_SQL_TLS_CERT_FILE"); v != "" {
 		cfg.SQLTLSCertFile = v
 	}
-	if v := os.Getenv("PUPPET_CA_SQL_TLS_KEY_FILE"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_SQL_TLS_KEY_FILE"); v != "" {
 		cfg.SQLTLSKeyFile = v
 	}
-	if v := os.Getenv("PUPPET_CA_CA_CERT_FILE"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_CA_CERT_FILE"); v != "" {
 		cfg.CACertFile = v
 	}
-	if v := os.Getenv("PUPPET_CA_CA_KEY_FILE"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_CA_KEY_FILE"); v != "" {
 		cfg.CAKeyFile = v
 	}
-	if v := os.Getenv("PUPPET_CA_CA_KEY_PROVIDER"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_CA_KEY_PROVIDER"); v != "" {
 		cfg.CAKeyProvider = v
 	}
-	if v := os.Getenv("PUPPET_CA_OPENBAO_ADDR"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_OPENBAO_ADDR"); v != "" {
 		cfg.OpenBao.Addr = v
 	}
-	if v := os.Getenv("PUPPET_CA_OPENBAO_TRANSIT_MOUNT"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_OPENBAO_TRANSIT_MOUNT"); v != "" {
 		cfg.OpenBao.TransitMount = v
 	}
-	if v := os.Getenv("PUPPET_CA_OPENBAO_KEY_NAME"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_OPENBAO_KEY_NAME"); v != "" {
 		cfg.OpenBao.KeyName = v
 	}
-	if v := os.Getenv("PUPPET_CA_OPENBAO_TLS_CA_FILE"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_OPENBAO_TLS_CA_FILE"); v != "" {
 		cfg.OpenBao.TLSCAFile = v
 	}
-	if v := os.Getenv("PUPPET_CA_OPENBAO_TLS_CERT_FILE"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_OPENBAO_TLS_CERT_FILE"); v != "" {
 		cfg.OpenBao.TLSCertFile = v
 	}
-	if v := os.Getenv("PUPPET_CA_OPENBAO_TLS_KEY_FILE"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_OPENBAO_TLS_KEY_FILE"); v != "" {
 		cfg.OpenBao.TLSKeyFile = v
 	}
-	if v := os.Getenv("PUPPET_CA_OPENBAO_AUTH_METHOD"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_OPENBAO_AUTH_METHOD"); v != "" {
 		cfg.OpenBao.AuthMethod = v
 	}
-	if v := os.Getenv("PUPPET_CA_OPENBAO_APPROLE_MOUNT"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_OPENBAO_APPROLE_MOUNT"); v != "" {
 		cfg.OpenBao.AppRoleMount = v
 	}
-	if v := os.Getenv("PUPPET_CA_OPENBAO_APPROLE_ROLE_ID"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_OPENBAO_APPROLE_ROLE_ID"); v != "" {
 		cfg.OpenBao.AppRoleRoleID = v
 	}
-	if v := os.Getenv("PUPPET_CA_OPENBAO_APPROLE_ROLE_ID_FILE"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_OPENBAO_APPROLE_ROLE_ID_FILE"); v != "" {
 		cfg.OpenBao.AppRoleRoleIDFile = v
 	}
-	if v := os.Getenv("PUPPET_CA_OPENBAO_APPROLE_SECRET_ID_FILE"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_OPENBAO_APPROLE_SECRET_ID_FILE"); v != "" {
 		cfg.OpenBao.AppRoleSecretIDFile = v
 	}
-	if v := os.Getenv("PUPPET_CA_OPENBAO_TOKEN_FILE"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_OPENBAO_TOKEN_FILE"); v != "" {
 		cfg.OpenBao.TokenFile = v
 	}
-	if v := os.Getenv("PUPPET_CA_OPENBAO_KUBERNETES_MOUNT"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_OPENBAO_KUBERNETES_MOUNT"); v != "" {
 		cfg.OpenBao.KubernetesMount = v
 	}
-	if v := os.Getenv("PUPPET_CA_OPENBAO_KUBERNETES_ROLE"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_OPENBAO_KUBERNETES_ROLE"); v != "" {
 		cfg.OpenBao.KubernetesRole = v
 	}
-	if v := os.Getenv("PUPPET_CA_OPENBAO_KUBERNETES_JWT_FILE"); v != "" {
+	if v := os.Getenv("OPENVOX_CA_OPENBAO_KUBERNETES_JWT_FILE"); v != "" {
 		cfg.OpenBao.KubernetesJWTFile = v
 	}
 }

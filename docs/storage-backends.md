@@ -506,7 +506,7 @@ etcd_request_timeout_sec: 5
 
 # Optional authentication.
 etcd_username: openvox-ca
-etcd_password: "..."                     # prefer PUPPET_CA_ETCD_PASSWORD
+etcd_password: "..."                     # prefer OPENVOX_CA_ETCD_PASSWORD
 
 # Optional mTLS to the etcd cluster.
 etcd_tls_ca_file:   /etc/puppet-ca/etcd-ca.pem
@@ -526,16 +526,16 @@ etcd_tls_key_file:  /etc/puppet-ca/etcd-client-key.pem
 
 | Config key | Env var |
 | --- | --- |
-| `storage_backend` | `PUPPET_CA_STORAGE_BACKEND` |
-| `etcd_endpoints` | `PUPPET_CA_ETCD_ENDPOINTS` (comma-separated) |
-| `etcd_key_prefix` | `PUPPET_CA_ETCD_KEY_PREFIX` |
-| `etcd_username` | `PUPPET_CA_ETCD_USERNAME` |
-| `etcd_password` | `PUPPET_CA_ETCD_PASSWORD` |
-| `etcd_dial_timeout_sec` | `PUPPET_CA_ETCD_DIAL_TIMEOUT_SEC` |
-| `etcd_request_timeout_sec` | `PUPPET_CA_ETCD_REQUEST_TIMEOUT_SEC` |
-| `etcd_tls_ca_file` | `PUPPET_CA_ETCD_TLS_CA_FILE` |
-| `etcd_tls_cert_file` | `PUPPET_CA_ETCD_TLS_CERT_FILE` |
-| `etcd_tls_key_file` | `PUPPET_CA_ETCD_TLS_KEY_FILE` |
+| `storage_backend` | `OPENVOX_CA_STORAGE_BACKEND` |
+| `etcd_endpoints` | `OPENVOX_CA_ETCD_ENDPOINTS` (comma-separated) |
+| `etcd_key_prefix` | `OPENVOX_CA_ETCD_KEY_PREFIX` |
+| `etcd_username` | `OPENVOX_CA_ETCD_USERNAME` |
+| `etcd_password` | `OPENVOX_CA_ETCD_PASSWORD` |
+| `etcd_dial_timeout_sec` | `OPENVOX_CA_ETCD_DIAL_TIMEOUT_SEC` |
+| `etcd_request_timeout_sec` | `OPENVOX_CA_ETCD_REQUEST_TIMEOUT_SEC` |
+| `etcd_tls_ca_file` | `OPENVOX_CA_ETCD_TLS_CA_FILE` |
+| `etcd_tls_cert_file` | `OPENVOX_CA_ETCD_TLS_CERT_FILE` |
+| `etcd_tls_key_file` | `OPENVOX_CA_ETCD_TLS_KEY_FILE` |
 
 ### Operational notes
 
@@ -647,7 +647,7 @@ redis_dial_timeout_sec: 5
 redis_request_timeout_sec: 5
 redis_lock_ttl_sec: 30
 
-# Optional auth (ACL user + password; use PUPPET_CA_REDIS_PASSWORD for secrets).
+# Optional auth (ACL user + password; use OPENVOX_CA_REDIS_PASSWORD for secrets).
 redis_username: openvox-ca
 redis_password: "..."
 
@@ -699,22 +699,22 @@ redis_tls_key_file:  /etc/puppet-ca/redis-client-key.pem
 
 | Config key | Env var |
 | --- | --- |
-| `storage_backend` | `PUPPET_CA_STORAGE_BACKEND` |
-| `redis_addrs` | `PUPPET_CA_REDIS_ADDRS` (comma-separated) |
-| `redis_sentinel_master_name` | `PUPPET_CA_REDIS_SENTINEL_MASTER_NAME` |
-| `redis_sentinel_addrs` | `PUPPET_CA_REDIS_SENTINEL_ADDRS` (comma-separated) |
-| `redis_sentinel_username` | `PUPPET_CA_REDIS_SENTINEL_USERNAME` |
-| `redis_sentinel_password` | `PUPPET_CA_REDIS_SENTINEL_PASSWORD` |
-| `redis_db` | `PUPPET_CA_REDIS_DB` |
-| `redis_username` | `PUPPET_CA_REDIS_USERNAME` |
-| `redis_password` | `PUPPET_CA_REDIS_PASSWORD` |
-| `redis_key_prefix` | `PUPPET_CA_REDIS_KEY_PREFIX` |
-| `redis_dial_timeout_sec` | `PUPPET_CA_REDIS_DIAL_TIMEOUT_SEC` |
-| `redis_request_timeout_sec` | `PUPPET_CA_REDIS_REQUEST_TIMEOUT_SEC` |
-| `redis_lock_ttl_sec` | `PUPPET_CA_REDIS_LOCK_TTL_SEC` |
-| `redis_tls_ca_file` | `PUPPET_CA_REDIS_TLS_CA_FILE` |
-| `redis_tls_cert_file` | `PUPPET_CA_REDIS_TLS_CERT_FILE` |
-| `redis_tls_key_file` | `PUPPET_CA_REDIS_TLS_KEY_FILE` |
+| `storage_backend` | `OPENVOX_CA_STORAGE_BACKEND` |
+| `redis_addrs` | `OPENVOX_CA_REDIS_ADDRS` (comma-separated) |
+| `redis_sentinel_master_name` | `OPENVOX_CA_REDIS_SENTINEL_MASTER_NAME` |
+| `redis_sentinel_addrs` | `OPENVOX_CA_REDIS_SENTINEL_ADDRS` (comma-separated) |
+| `redis_sentinel_username` | `OPENVOX_CA_REDIS_SENTINEL_USERNAME` |
+| `redis_sentinel_password` | `OPENVOX_CA_REDIS_SENTINEL_PASSWORD` |
+| `redis_db` | `OPENVOX_CA_REDIS_DB` |
+| `redis_username` | `OPENVOX_CA_REDIS_USERNAME` |
+| `redis_password` | `OPENVOX_CA_REDIS_PASSWORD` |
+| `redis_key_prefix` | `OPENVOX_CA_REDIS_KEY_PREFIX` |
+| `redis_dial_timeout_sec` | `OPENVOX_CA_REDIS_DIAL_TIMEOUT_SEC` |
+| `redis_request_timeout_sec` | `OPENVOX_CA_REDIS_REQUEST_TIMEOUT_SEC` |
+| `redis_lock_ttl_sec` | `OPENVOX_CA_REDIS_LOCK_TTL_SEC` |
+| `redis_tls_ca_file` | `OPENVOX_CA_REDIS_TLS_CA_FILE` |
+| `redis_tls_cert_file` | `OPENVOX_CA_REDIS_TLS_CERT_FILE` |
+| `redis_tls_key_file` | `OPENVOX_CA_REDIS_TLS_KEY_FILE` |
 
 ### Operational notes
 
@@ -997,7 +997,7 @@ can share it. `postgres`, `postgresql` and `pg` are accepted as aliases.
 # /etc/puppet-ca/config.yaml
 storage_backend: postgres
 cadir: /etc/puppetlabs/puppet/ssl/ca     # still needed for per-subject keys
-sql_dsn: "postgres://puppetca:secret@db.example.com:5432/puppetca?sslmode=verify-full&sslrootcert=/etc/puppet-ca/pg-ca.pem"  # prefer PUPPET_CA_SQL_DSN or sql_dsn_file
+sql_dsn: "postgres://puppetca:secret@db.example.com:5432/puppetca?sslmode=verify-full&sslrootcert=/etc/puppet-ca/pg-ca.pem"  # prefer OPENVOX_CA_SQL_DSN or sql_dsn_file
 
 sql_request_timeout_sec: 10              # per-operation timeout (default 10)
 sql_migration_timeout_sec: 600           # whole schema-migration run (default 600)
@@ -1066,7 +1066,7 @@ replicas can share it. `mysql` and `mariadb` are accepted as aliases.
 # /etc/puppet-ca/config.yaml
 storage_backend: mysql                   # or "mariadb"
 cadir: /etc/puppetlabs/puppet/ssl/ca     # still needed for per-subject keys
-sql_dsn: "puppetca:secret@tcp(db.example.com:3306)/puppetca"  # prefer PUPPET_CA_SQL_DSN or sql_dsn_file
+sql_dsn: "puppetca:secret@tcp(db.example.com:3306)/puppetca"  # prefer OPENVOX_CA_SQL_DSN or sql_dsn_file
 
 sql_request_timeout_sec: 10              # per-operation timeout (default 10)
 sql_migration_timeout_sec: 600           # whole schema-migration run (default 600)
@@ -1112,7 +1112,7 @@ three processes. It logs a warning at startup when `--sql-dsn` carries one.
 
 Use one of these instead:
 
-- **`sql_dsn_file` / `--sql-dsn-file` / `PUPPET_CA_SQL_DSN_FILE`**: the path to
+- **`sql_dsn_file` / `--sql-dsn-file` / `OPENVOX_CA_SQL_DSN_FILE`**: the path to
   a file whose first line is the DSN. Surrounding whitespace is trimmed. Make
   it readable by the account `openvox-ca` runs as and nobody else: under the
   shipped systemd unit that is `root:puppet` with mode `0640`, as
@@ -1122,7 +1122,7 @@ Use one of these instead:
   changing the password.
 - **`sql_dsn`** in the config file, which should then be readable by the
   same account only, as above.
-- **`PUPPET_CA_SQL_DSN`**. A process's environment is readable only by its own
+- **`OPENVOX_CA_SQL_DSN`**. A process's environment is readable only by its own
   user and root, but child processes inherit it.
 
 `sql_dsn` and `sql_dsn_file` are mutually exclusive, whichever of the config
@@ -1138,16 +1138,16 @@ The SQL backends share one set of config keys and environment variables:
 
 | Config key | Env var |
 | --- | --- |
-| `storage_backend` | `PUPPET_CA_STORAGE_BACKEND` |
-| `sql_dsn` | `PUPPET_CA_SQL_DSN` |
-| `sql_dsn_file` | `PUPPET_CA_SQL_DSN_FILE` |
-| `sql_request_timeout_sec` | `PUPPET_CA_SQL_REQUEST_TIMEOUT_SEC` |
-| `sql_max_open_conns` | `PUPPET_CA_SQL_MAX_OPEN_CONNS` |
-| `sql_max_idle_conns` | `PUPPET_CA_SQL_MAX_IDLE_CONNS` |
-| `sql_migration_timeout_sec` | `PUPPET_CA_SQL_MIGRATION_TIMEOUT_SEC` |
-| `sql_tls_ca_file` | `PUPPET_CA_SQL_TLS_CA_FILE` |
-| `sql_tls_cert_file` | `PUPPET_CA_SQL_TLS_CERT_FILE` |
-| `sql_tls_key_file` | `PUPPET_CA_SQL_TLS_KEY_FILE` |
+| `storage_backend` | `OPENVOX_CA_STORAGE_BACKEND` |
+| `sql_dsn` | `OPENVOX_CA_SQL_DSN` |
+| `sql_dsn_file` | `OPENVOX_CA_SQL_DSN_FILE` |
+| `sql_request_timeout_sec` | `OPENVOX_CA_SQL_REQUEST_TIMEOUT_SEC` |
+| `sql_max_open_conns` | `OPENVOX_CA_SQL_MAX_OPEN_CONNS` |
+| `sql_max_idle_conns` | `OPENVOX_CA_SQL_MAX_IDLE_CONNS` |
+| `sql_migration_timeout_sec` | `OPENVOX_CA_SQL_MIGRATION_TIMEOUT_SEC` |
+| `sql_tls_ca_file` | `OPENVOX_CA_SQL_TLS_CA_FILE` |
+| `sql_tls_cert_file` | `OPENVOX_CA_SQL_TLS_CERT_FILE` |
+| `sql_tls_key_file` | `OPENVOX_CA_SQL_TLS_KEY_FILE` |
 
 The pool-tuning and TLS settings apply only to the networked SQL dialects;
 SQLite ignores them.
@@ -1223,8 +1223,8 @@ ca_key_file:  /etc/puppet-ca/secrets/ca_key.pem
 
 | Config key | Env var |
 | --- | --- |
-| `ca_cert_file` | `PUPPET_CA_CA_CERT_FILE` |
-| `ca_key_file` | `PUPPET_CA_CA_KEY_FILE` |
+| `ca_cert_file` | `OPENVOX_CA_CA_CERT_FILE` |
+| `ca_key_file` | `OPENVOX_CA_CA_KEY_FILE` |
 
 ### Behaviour
 
@@ -1253,7 +1253,7 @@ ca_key_file:  /etc/puppet-ca/secrets/ca_key.pem
 - Existing protections still apply: `encrypt_ca_key` encrypts the key PEM
   before writing, and `ca_key_passphrase_file` is where its passphrase comes
   from. There is no default source: with `encrypt_ca_key` set and neither
-  `ca_key_passphrase_file` nor `PUPPET_CA_KEY_PASSPHRASE` configured, the
+  `ca_key_passphrase_file` nor `OPENVOX_CA_KEY_PASSPHRASE` configured, the
   server refuses to start.
 
 This override also works with the filesystem backend, e.g. to pull the CA

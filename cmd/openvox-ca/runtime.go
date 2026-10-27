@@ -158,7 +158,7 @@ var newKeyProvider keyProviderResolver = func(ctx context.Context, cfg *serverCo
 // The caller must Close the returned runtime.
 func resolveRuntime(ctx context.Context, cfg *serverConfig, withKeyProvider bool) (*caRuntime, error) {
 	if cfg.CADir == "" {
-		return nil, fmt.Errorf("cadir is required (set --cadir, PUPPET_CA_CADIR, or cadir in the config file)")
+		return nil, fmt.Errorf("cadir is required (set --cadir, OPENVOX_CA_CADIR, or cadir in the config file)")
 	}
 	absCADir, err := filepath.Abs(cfg.CADir)
 	if err != nil {
@@ -465,7 +465,7 @@ func roleMayReachCAKey(role string) bool {
 // reportResolvedConfig prints the configuration the offline subcommands actually
 // resolved, before they act on it.
 //
-// These subcommands read the config file and PUPPET_CA_* environment, and
+// These subcommands read the config file and OPENVOX_CA_* environment, and
 // nothing else: the server's storage and key-provider flags are local to the
 // root command, so a server configured entirely by flags — as the shipped
 // container image's own CMD is, and as the systemd examples are — is invisible
@@ -477,7 +477,7 @@ func roleMayReachCAKey(role string) bool {
 func reportResolvedConfig(w io.Writer, resolvedFile string, cfg *serverConfig) {
 	from := resolvedFile
 	if from == "" {
-		from = "none found (defaults, plus any PUPPET_CA_* environment)"
+		from = "none found (defaults, plus any OPENVOX_CA_* environment)"
 	}
 	provider := cfg.CAKeyProvider
 	if provider == "" {

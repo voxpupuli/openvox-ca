@@ -33,13 +33,13 @@ import (
 
 var _ = Describe("applyServerEnv SQL settings", func() {
 	It("applies all SQL-related env vars", func() {
-		setEnv("PUPPET_CA_STORAGE_BACKEND", "sqlite")
-		setEnv("PUPPET_CA_SQL_DSN", "file:/var/lib/puppet-ca/ca.db")
-		setEnv("PUPPET_CA_SQL_REQUEST_TIMEOUT_SEC", "15")
-		setEnv("PUPPET_CA_SQL_MAX_OPEN_CONNS", "8")
-		setEnv("PUPPET_CA_SQL_MAX_IDLE_CONNS", "4")
-		setEnv("PUPPET_CA_SQL_MIGRATION_TIMEOUT_SEC", "1800")
-		setEnv("PUPPET_CA_SQL_DSN_FILE", "/run/secrets/sql-dsn")
+		setEnv("OPENVOX_CA_STORAGE_BACKEND", "sqlite")
+		setEnv("OPENVOX_CA_SQL_DSN", "file:/var/lib/puppet-ca/ca.db")
+		setEnv("OPENVOX_CA_SQL_REQUEST_TIMEOUT_SEC", "15")
+		setEnv("OPENVOX_CA_SQL_MAX_OPEN_CONNS", "8")
+		setEnv("OPENVOX_CA_SQL_MAX_IDLE_CONNS", "4")
+		setEnv("OPENVOX_CA_SQL_MIGRATION_TIMEOUT_SEC", "1800")
+		setEnv("OPENVOX_CA_SQL_DSN_FILE", "/run/secrets/sql-dsn")
 
 		cfg := &serverConfig{}
 		applyServerEnv(cfg)
@@ -71,7 +71,7 @@ var _ = Describe("--sql-dsn and --sql-dsn-file", func() {
 			// Any "user:secret@" shape, not just the old spelling.
 			Expect(usage).NotTo(MatchRegexp(`[^\s'@:/]+:[^\s'@]+@`))
 			Expect(usage).To(ContainSubstring("--sql-dsn-file"))
-			Expect(usage).To(ContainSubstring("PUPPET_CA_SQL_DSN"))
+			Expect(usage).To(ContainSubstring("OPENVOX_CA_SQL_DSN"))
 			Expect(usage).To(ContainSubstring("sql_dsn"))
 		})
 	})
@@ -124,7 +124,7 @@ var _ = Describe("--sql-dsn and --sql-dsn-file", func() {
 		It("is silent when --sql-dsn is not on the command line", func() {
 			// The same DSN arriving by environment or config file is not in
 			// argv, so there is nothing to warn about.
-			setEnv("PUPPET_CA_SQL_DSN", "postgres://ca:"+secret+"@db/ca")
+			setEnv("OPENVOX_CA_SQL_DSN", "postgres://ca:"+secret+"@db/ca")
 			Expect(warnFor("--cadir", "/tmp/x")).To(BeEmpty())
 		})
 
@@ -177,7 +177,7 @@ var _ = Describe("--sql-dsn and --sql-dsn-file", func() {
 			})
 
 			It("is not repeated by the frontend, which carries the same argv", func() {
-				setEnv("PUPPET_CA_ROLE", "frontend")
+				setEnv("OPENVOX_CA_ROLE", "frontend")
 				err := execute("--host", "0.0.0.0", "--port", "0", "--logfile", logFile)
 				Expect(err).To(MatchError(ContainSubstring(plainHTTPRefusal)))
 
@@ -193,7 +193,7 @@ var _ = Describe("--sql-dsn and --sql-dsn-file", func() {
 				// Without a launcher the signer fails for its own reasons --
 				// there is no socket to serve -- after configuring its logger.
 				bootstrapCAInDir(caDir, "puppet.example.com")
-				setEnv("PUPPET_CA_ROLE", "signer")
+				setEnv("OPENVOX_CA_ROLE", "signer")
 				Expect(execute("--host", "127.0.0.1", "--port", "0", "--logfile", logFile)).To(HaveOccurred())
 
 				Expect(buf.String()).NotTo(ContainSubstring(warning))
@@ -276,14 +276,14 @@ var _ = Describe("--sql-dsn and --sql-dsn-file", func() {
 				}
 				Expect(execute(expanded...)).To(MatchError(ContainSubstring("mutually exclusive")))
 			},
-			Entry("config sql_dsn, env PUPPET_CA_SQL_DSN_FILE",
-				"sql_dsn: OTHER\n", map[string]string{"PUPPET_CA_SQL_DSN_FILE": "DSNFILE"}),
-			Entry("env PUPPET_CA_SQL_DSN, --sql-dsn-file",
-				"", map[string]string{"PUPPET_CA_SQL_DSN": "OTHER"}, "--sql-dsn-file", "DSNFILE"),
+			Entry("config sql_dsn, env OPENVOX_CA_SQL_DSN_FILE",
+				"sql_dsn: OTHER\n", map[string]string{"OPENVOX_CA_SQL_DSN_FILE": "DSNFILE"}),
+			Entry("env OPENVOX_CA_SQL_DSN, --sql-dsn-file",
+				"", map[string]string{"OPENVOX_CA_SQL_DSN": "OTHER"}, "--sql-dsn-file", "DSNFILE"),
 			Entry("config sql_dsn_file, --sql-dsn",
 				"sql_dsn_file: DSNFILE\n", nil, "--sql-dsn", "OTHER"),
-			Entry("config sql_dsn_file, env PUPPET_CA_SQL_DSN",
-				"sql_dsn_file: DSNFILE\n", map[string]string{"PUPPET_CA_SQL_DSN": "OTHER"}),
+			Entry("config sql_dsn_file, env OPENVOX_CA_SQL_DSN",
+				"sql_dsn_file: DSNFILE\n", map[string]string{"OPENVOX_CA_SQL_DSN": "OTHER"}),
 		)
 
 		It("is refused alongside --sql-dsn", func() {

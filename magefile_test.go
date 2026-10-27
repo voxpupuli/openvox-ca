@@ -3581,7 +3581,7 @@ var _ = Describe("buildVariantPackages", func() {
 		It("does not set the port anywhere that would outrank the file", func() {
 			unit := contents["/usr/lib/systemd/system/openvox-ca.service"]
 			Expect(unit).NotTo(ContainSubstring("--port"))
-			Expect(unit).NotTo(ContainSubstring("PUPPET_CA_PORT"))
+			Expect(unit).NotTo(ContainSubstring("OPENVOX_CA_PORT"))
 			Expect(contents).NotTo(HaveKey("/usr/lib/systemd/system/openvox-ca.service.d/port.conf"))
 		})
 	})
@@ -4713,21 +4713,25 @@ func firstBootDefs() (string, error) {
 // environment that would otherwise let the developer's own machine decide what
 // a spec asserts.
 //
-// The PUPPET_CA_* three are the ones that matter and the ones that are easiest
-// to miss: first-boot honours them because the SERVER honours them, so a
-// maintainer who happens to export PUPPET_CA_STORAGE_BACKEND=redis in their
-// shell would watch the backend-refusal specs fail against a script that is
-// behaving exactly as designed. Empty rather than absent, because every read
-// site uses ${VAR:-...} and treats empty as unset.
+// The server's own overrides are the ones that matter and the ones that are
+// easiest to miss: first-boot honours OPENVOX_CA_CONFIG, OPENVOX_CA_CADIR and
+// OPENVOX_CA_STORAGE_BACKEND because the SERVER honours them, so a maintainer
+// who happens to export OPENVOX_CA_STORAGE_BACKEND=redis in their shell would
+// watch the backend-refusal specs fail against a script that is behaving
+// exactly as designed. OPENVOX_CA_CADIR and OPENVOX_CA_STORAGE_BACKEND are
+// pinned empty rather than absent, because every read site uses ${VAR:-...}
+// and treats empty as unset; OPENVOX_CA_CONFIG is redirected instead, for the
+// reason given in the list below.
 func firstBootHostPins() []string {
 	GinkgoHelper()
 	pin := GinkgoT().TempDir()
 	return []string{
 		// Cleared, not redirected: these are the server's own environment
 		// overrides, and a spec that wants one sets it in extraEnv.
-		"PUPPET_CA_CONFIG=",
-		"PUPPET_CA_CADIR=",
-		"PUPPET_CA_STORAGE_BACKEND=",
+		// OPENVOX_CA_CONFIG is redirected below instead: it is also the
+		// script's own test seam, and its default is a real path.
+		"OPENVOX_CA_CADIR=",
+		"OPENVOX_CA_STORAGE_BACKEND=",
 
 		// Redirected, not cleared. Each of these three names a path the
 		// script falls back to when the variable is unset, and all three
@@ -6644,26 +6648,7 @@ var _ = Describe("first-boot's provisioning steps", func() {
 			Entry("surrounding whitespace", "  filesystem  "),
 		)
 
-		// The environment layer. The server resolves file -> environment ->
-		// flag, and the packaged unit passes no --config precisely so a drop-in
-		// can set PUPPET_CA_CONFIG. Provisioning that read only its own test
-		// seam would check a file nothing else uses.
-		It("resolves the config file from PUPPET_CA_CONFIG", func() {
-			moved := filepath.Join(GinkgoT().TempDir(), "from-env")
-			Expect(os.MkdirAll(moved, 0o755)).To(Succeed())
-			envCfg := filepath.Join(GinkgoT().TempDir(), "env-config.yaml")
-			Expect(os.WriteFile(envCfg, []byte("cadir: "+moved+"\n"), 0o644)).To(Succeed())
-
-			// OPENVOX_CA_CONFIG is deliberately NOT set here: this asserts the
-			// variable the binary reads, not the test seam that shadows it.
-			r := runFirstBootScript(sslDir, binDir, "ca.example.com",
-				"OPENVOX_CA_CONFIG=", "PUPPET_CA_CONFIG="+envCfg)
-			Expect(r.ok).To(BeTrue(), "provisioning failed: %s", r.output)
-			Expect(filepath.Join(moved, "ca_crt.pem")).To(BeAnExistingFile(),
-				"the drop-in's config file was not the one provisioning read")
-		})
-
-		It("lets PUPPET_CA_CADIR override the file, as it does for the server", func() {
+		It("lets OPENVOX_CA_CADIR override the file, as it does for the server", func() {
 			fromEnv := filepath.Join(GinkgoT().TempDir(), "env-cadir")
 			fromFile := filepath.Join(GinkgoT().TempDir(), "file-cadir")
 			Expect(os.MkdirAll(fromEnv, 0o755)).To(Succeed())
@@ -6671,7 +6656,7 @@ var _ = Describe("first-boot's provisioning steps", func() {
 			Expect(os.WriteFile(cfg, []byte("cadir: "+fromFile+"\n"), 0o644)).To(Succeed())
 
 			r := runFirstBootScript(sslDir, binDir, "ca.example.com",
-				withCfg(), "PUPPET_CA_CADIR="+fromEnv)
+				withCfg(), "OPENVOX_CA_CADIR="+fromEnv)
 			Expect(r.ok).To(BeTrue(), "provisioning failed: %s", r.output)
 			Expect(filepath.Join(fromEnv, "ca_crt.pem")).To(BeAnExistingFile(),
 				"the environment did not override the file, so the service and "+
@@ -6679,7 +6664,7 @@ var _ = Describe("first-boot's provisioning steps", func() {
 			Expect(filepath.Join(fromFile, "ca_crt.pem")).NotTo(BeAnExistingFile())
 		})
 
-		It("refuses when PUPPET_CA_STORAGE_BACKEND names another backend", func() {
+		It("refuses when OPENVOX_CA_STORAGE_BACKEND names another backend", func() {
 			// The file says nothing, so only the environment can make this
 			// refuse -- which is the whole point: a drop-in that moves the
 			// service to etcd must not leave provisioning bootstrapping a
@@ -6687,7 +6672,7 @@ var _ = Describe("first-boot's provisioning steps", func() {
 			Expect(os.WriteFile(cfg, []byte("port: 8141\n"), 0o644)).To(Succeed())
 
 			r := runFirstBootScript(sslDir, binDir, "ca.example.com",
-				withCfg(), "PUPPET_CA_STORAGE_BACKEND=etcd")
+				withCfg(), "OPENVOX_CA_STORAGE_BACKEND=etcd")
 			Expect(r.ok).To(BeFalse(), "provisioning should have refused: %s", r.output)
 			Expect(r.output).To(ContainSubstring("only supports"))
 			Expect(filepath.Join(sslDir, "ca", "ca_crt.pem")).NotTo(BeAnExistingFile())

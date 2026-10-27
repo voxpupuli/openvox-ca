@@ -13,8 +13,8 @@ set -euo pipefail
 export PATH=/opt/puppetlabs/server/bin:/opt/puppetlabs/puppet/bin:$PATH
 
 # -- Configuration --------------------------------------------------------─
-CA_HOST="${PUPPET_CA_HOST:-openvox-ca}"
-CA_PORT="${PUPPET_CA_PORT:-8140}"
+CA_HOST="${OPENVOX_CA_HOST:-openvox-ca}"
+CA_PORT="${OPENVOX_CA_PORT:-8140}"
 CA_URL="https://${CA_HOST}:${CA_PORT}"
 
 # PUPPET_FQDN may be set explicitly (e.g. in compose) to avoid relying on

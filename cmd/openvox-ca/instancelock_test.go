@@ -47,9 +47,9 @@ var _ = Describe("the store instance lock", func() {
 
 	BeforeEach(func() { ctx = context.Background() })
 
-	// The specs below drive real root commands, which resolve PUPPET_CA_CONFIG
-	// and the PUPPET_CA_* environment. Without a pin, an exported
-	// PUPPET_CA_STORAGE_BACKEND (or a host /etc/puppet-ca/config.yaml) sends
+	// The specs below drive real root commands, which resolve OPENVOX_CA_CONFIG
+	// and the OPENVOX_CA_* environment. Without a pin, an exported
+	// OPENVOX_CA_STORAGE_BACKEND (or a host /etc/puppet-ca/config.yaml) sends
 	// them at a store the holdStore flock does not cover. It covers every
 	// command-driving spec in this file, not only the newest: the hazard is the
 	// same for csr and import-ca-cert, and counting them here would go stale
@@ -57,7 +57,7 @@ var _ = Describe("the store instance lock", func() {
 	BeforeEach(func() {
 		pinned := filepath.Join(GinkgoT().TempDir(), "pinned.yaml")
 		Expect(os.WriteFile(pinned, []byte("ca_key_algo: ecdsa\nca_key_size: 256\n"), 0o644)).To(Succeed())
-		setEnv("PUPPET_CA_CONFIG", pinned)
+		setEnv("OPENVOX_CA_CONFIG", pinned)
 		clearServerEnv()
 
 		// Every command driven here reaches applySubcommandLogging ->
@@ -410,9 +410,9 @@ var _ = Describe("the store instance lock", func() {
 			// check moved past the fork, the pre-flight above would refuse
 			// first, naming the lock rather than the setting, and nothing
 			// would be forked.
-			setEnv("PUPPET_CA_CONFIG", writeTempConfig(""))
+			setEnv("OPENVOX_CA_CONFIG", writeTempConfig(""))
 			clearServerEnv()
-			setEnv("PUPPET_CA_SERIAL_NUMBER_FORMAT", "hexx")
+			setEnv("OPENVOX_CA_SERIAL_NUMBER_FORMAT", "hexx")
 			caDir := GinkgoT().TempDir()
 			bootstrapCAInDir(caDir, "puppet.example.com")
 			holdStore(caDir)
@@ -481,7 +481,7 @@ var _ = Describe("the store instance lock", func() {
 
 	Describe("the isolated child roles", func() {
 		// The reason the lock is taken before the role dispatch and not in
-		// resolveRuntime. With PUPPET_CA_ROLE unset the process is either the
+		// resolveRuntime. With OPENVOX_CA_ROLE unset the process is either the
 		// launcher, which forks a signer and a frontend that open the store for
 		// themselves, or the single-process server. If a child took the lock
 		// too, the default topology on the default backend would deadlock
@@ -493,7 +493,7 @@ var _ = Describe("the store instance lock", func() {
 				bootstrapCAInDir(caDir, "puppet.example.com")
 				holdStore(caDir)
 
-				GinkgoT().Setenv("PUPPET_CA_ROLE", role)
+				GinkgoT().Setenv("OPENVOX_CA_ROLE", role)
 
 				cmd := newRootCmd()
 				cmd.SetOut(GinkgoWriter)

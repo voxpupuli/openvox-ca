@@ -105,7 +105,7 @@ var _ = Describe("openvox-ca import-ca-cert", func() {
 		pinnedCfg := "ca_key_algo: ecdsa\nca_key_size: 256\n"
 		emptyCf = filepath.Join(GinkgoT().TempDir(), "pinned.yaml")
 		Expect(os.WriteFile(emptyCf, []byte(pinnedCfg), 0o644)).To(Succeed())
-		setEnv("PUPPET_CA_CONFIG", emptyCf)
+		setEnv("OPENVOX_CA_CONFIG", emptyCf)
 
 		clearServerEnv()
 
@@ -332,7 +332,7 @@ var _ = Describe("openvox-ca import-ca-cert: resolved configuration", func() {
 		caDir := GinkgoT().TempDir()
 		cfgPath := filepath.Join(GinkgoT().TempDir(), "pinned.yaml")
 		Expect(os.WriteFile(cfgPath, []byte("ca_key_algo: ecdsa\nca_key_size: 256\n"), 0o644)).To(Succeed())
-		setEnv("PUPPET_CA_CONFIG", cfgPath)
+		setEnv("OPENVOX_CA_CONFIG", cfgPath)
 		clearServerEnv()
 
 		chain, err := testutil.GenerateTestChain("unused.example.com")

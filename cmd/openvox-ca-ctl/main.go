@@ -141,12 +141,12 @@ func newTLSConfig(notices io.Writer) (*tls.Config, error) {
 		// ctl.yaml or the environment.
 		return nil, fmt.Errorf("--client-cert %s given without --client-key "+
 			"(also settable as client_cert/client_key in the config file, or "+
-			"PUPPET_CA_CTL_CLIENT_CERT/PUPPET_CA_CTL_CLIENT_KEY); both are required for mTLS",
+			"OPENVOX_CA_CTL_CLIENT_CERT/OPENVOX_CA_CTL_CLIENT_KEY); both are required for mTLS",
 			globalClientCert)
 	case globalClientKey != "":
 		return nil, fmt.Errorf("--client-key %s given without --client-cert "+
 			"(also settable as client_cert/client_key in the config file, or "+
-			"PUPPET_CA_CTL_CLIENT_CERT/PUPPET_CA_CTL_CLIENT_KEY); both are required for mTLS",
+			"OPENVOX_CA_CTL_CLIENT_CERT/OPENVOX_CA_CTL_CLIENT_KEY); both are required for mTLS",
 			globalClientKey)
 	}
 
@@ -934,7 +934,7 @@ func newRootCmd() *cobra.Command {
 Global flags may be placed before or after the subcommand name.`,
 		SilenceUsage: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			resolved := resolveConfigFile(globalConfigFile, "PUPPET_CA_CTL_CONFIG", "/etc/puppet-ca/ctl.yaml")
+			resolved := resolveConfigFile(globalConfigFile, "OPENVOX_CA_CTL_CONFIG", "/etc/puppet-ca/ctl.yaml")
 			cfg, err := loadCtlConfig(resolved)
 			if err != nil {
 				return err

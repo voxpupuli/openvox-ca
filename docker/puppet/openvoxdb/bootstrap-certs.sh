@@ -19,8 +19,8 @@ OPENVOXSERVER_HOSTNAME="${OPENVOXSERVER_HOSTNAME:-puppet}"
 OPENVOXSERVER_PORT="${OPENVOXSERVER_PORT:-8140}"
 SSLDIR="${SSLDIR:-/opt/puppetlabs/server/data/puppetdb/certs}"
 
-# PUPPET_CA_HOST / PUPPET_CA_PORT are set via docker-compose environment.
-CA_URL="https://${PUPPET_CA_HOST:-openvox-ca}:${PUPPET_CA_PORT:-8140}"
+# OPENVOX_CA_HOST / OPENVOX_CA_PORT are set via docker-compose environment.
+CA_URL="https://${OPENVOX_CA_HOST:-openvox-ca}:${OPENVOX_CA_PORT:-8140}"
 
 CERTDIR="${SSLDIR}/certs"
 PRIVKEYDIR="${SSLDIR}/private_keys"
