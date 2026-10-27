@@ -297,12 +297,14 @@ certificate, so the controller **must** pass TLS through untouched.
 ## Development
 
 The fixtures in `ci/` are rendered and schema-checked on every pull
-request. They are excluded from the packaged chart.
+request, and the `config.yaml` each renders is strict-decoded against the
+server's schema, which refuses an unknown key. They are excluded from the
+packaged chart.
 
 ```console
 $ mage chart:version    # Chart.yaml tracks internal/version
 $ mage chart:lint       # helm lint, once per fixture
-$ mage chart:validate   # render everything, check against Kubernetes schemas
+$ mage chart:validate   # render everything, check against Kubernetes schemas and the server's config keys
 $ mage chart:test       # assert what it renders, and that the guards refuse
 $ mage chart:package    # write dist/openvox-ca-<version>.tgz
 ```

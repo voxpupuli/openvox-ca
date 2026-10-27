@@ -48,9 +48,10 @@ config:
   #
   # Be clear about how far that goes: values.schema.json types `config` as a
   # bare object, and the block is emitted as an opaque config.yaml string, so
-  # nothing here validates a key name. `crlFile` for `crl_file` would render,
-  # lint and pass kubeconform, and only the server would refuse it, at startup.
-  # The extraVolumes/extraVolumeMounts entries below ARE schema-checked,
+  # helm lint and kubeconform validate no key name in it. chart:validate does:
+  # it strict-decodes the config.yaml this renders against the server's
+  # schema, so `crlFile` for `crl_file` fails there as it would at startup.
+  # The extraVolumes/extraVolumeMounts entries below are schema-checked too,
   # because they render into the pod spec.
   #
   # Each file gets a volume to itself: a subPath mount never receives updates,

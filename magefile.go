@@ -4926,6 +4926,12 @@ func (Chart) Lint() error {
 // at the wrong nesting level — neither of which `helm lint` sees, because to
 // Helm the output is just YAML.
 //
+// It then strict-decodes the config.yaml each fixture renders against the
+// server's schema (go run ./test/chartconfig), so a key the server does not
+// declare, or a value it cannot decode into the field's type, fails here
+// rather than at startup. Values the server refuses after decoding are not
+// checked; see that program's documentation.
+//
 // Rendered manifests are kept in .test-output/chart/ for inspection.
 func (Chart) Validate() error {
 	mg.Deps(Chart.Lint)
@@ -4948,6 +4954,7 @@ func (Chart) Validate() error {
 	}
 
 	floorChecked := false
+	var rendered []string
 	for _, f := range values {
 		name := chartFixtureName(f)
 
@@ -4960,6 +4967,7 @@ func (Chart) Validate() error {
 		if err := os.WriteFile(path, []byte(manifest+"\n"), 0644); err != nil {
 			return err
 		}
+		rendered = append(rendered, path)
 
 		// The minimal fixture is the chart's defaults, so it must also hold at
 		// the kubeVersion floor Chart.yaml advertises. The others opt into
@@ -5001,7 +5009,11 @@ func (Chart) Validate() error {
 			"silently drops the check",
 			chartFloorFixture, kubeconformFloorVersion, chartDir)
 	}
-	return nil
+	// Its own program, so that this file does not import internal/config and
+	// every target compile the storage backends behind it. It carries the
+	// floor too: it fails when no fixture rendered a config.yaml at all.
+	fmt.Println("Strict-decoding each fixture's rendered config.yaml...")
+	return sh.RunV("go", append([]string{"run", "./test/chartconfig"}, rendered...)...)
 }
 
 // chartConfigChecksum renders the chart and returns the checksum/config value

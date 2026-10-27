@@ -29,7 +29,7 @@ Task. Invoke targets with `go run mage.go <Target>` or the `mage` binary:
 | `mage test:backendsRedisGo` | Redis backend Go integration suite (build tag `redis_integration`), under `-race` — needs cgo and a C compiler |
 | `mage test:backendsOpenBao` | OpenBao Transit signer integration suite (build tag `openbao_integration`, `test/compose-backends-openbao.yml`) |
 | `mage chart:lint` | Run `helm lint --strict` over the Helm chart, once per fixture in `charts/openvox-ca/ci/` |
-| `mage chart:validate` | Lint the Helm chart and check every rendered fixture against the Kubernetes schemas (needs `helm` and `kubeconform`; caches the remote schemas under `.test-output/kubeconform-cache/`, which `mage dev:clean` removes) |
+| `mage chart:validate` | Lint the Helm chart, check every rendered fixture against the Kubernetes schemas, and strict-decode each rendered `config.yaml` against the server's schema with `go run ./test/chartconfig` (needs `helm` and `kubeconform`; caches the remote schemas under `.test-output/kubeconform-cache/`, which `mage dev:clean` removes) |
 | `mage chart:test` | Assert what the chart renders, and that each precondition refuses what it claims to |
 | `mage chart:version` | Assert `charts/openvox-ca/Chart.yaml` still tracks `internal/version` |
 | `mage chart:package` | Package the Helm chart to `dist/openvox-ca-<version>.tgz`, as CI does before the publish workflow pushes it |
@@ -489,8 +489,12 @@ a reject case naming that path (`config.openbao.<key>: set …`). A
 credential named otherwise, or declared outside `internal/config`, it cannot see,
 and the chart would render it in clear text without a word.
 
-Every fixture under `charts/openvox-ca/ci/` is linted and schema-checked in CI.
-A new template branch needs a fixture that exercises it, or it is untested —
+Every fixture under `charts/openvox-ca/ci/` is linted and schema-checked in CI,
+and the `config.yaml` it renders is strict-decoded against the server's schema
+with `config.DecodeStrict`, so a key the server does not declare, or a value it
+cannot decode into the field's type, fails there first. Values the server
+refuses after decoding (a negative `leaf_backdate_sec`, a `managed_certs` entry
+that fails validation) are not checked there. A new template branch needs a fixture that exercises it, or it is untested —
 and schema validity is not correctness, so anything a reader has to *trust*
 (tag resolution, merge precedence, which kind a value selects) needs a case in
 `chart:test` as well.
