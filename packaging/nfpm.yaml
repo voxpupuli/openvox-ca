@@ -95,6 +95,15 @@ contents:
     file_info:
       mode: 0755
 
+  # Run as root by the oneshot's ExecStartPost=+, after provisioning, to record
+  # its name in /etc/sysconfig/openvox-ca. In both packages because the unit
+  # that names it is shared; on Debian, which has no /etc/sysconfig, it does
+  # nothing.
+  - src: packaging/scripts/record-environment
+    dst: /usr/libexec/openvox-ca/record-environment
+    file_info:
+      mode: 0755
+
   - src: packaging/sysusers/openvox-ca.conf
     dst: /usr/lib/sysusers.d/openvox-ca.conf
     file_info:

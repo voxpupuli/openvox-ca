@@ -1,8 +1,10 @@
 # First-boot provisioning for a packaged openvox-ca.
 #
 # A unit rather than a maintainer script, for three reasons. It runs under the
-# service's hardening directives rather than as unconfined root -- the one
-# deliberate difference is ReadWritePaths= below, which is wider. It can run
+# service's hardening directives rather than as unconfined root -- the
+# deliberate differences are ReadWritePaths= below, which is wider, and one
+# ExecStartPost=+ step, record-environment, which runs as root outside the
+# sandbox to write /etc/sysconfig/openvox-ca (see there). It can run
 # again after the CA directory is wiped, which a postinst that already ran will
 # not; RemainAfterExit=yes means that is the next boot or an explicit
 # `systemctl restart openvox-ca-first-boot`, not a restart of the service. And
@@ -33,6 +35,24 @@ Before=openvox-ca.service
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/libexec/openvox-ca/first-boot
+
+# The same environment file as openvox-ca.service, because OPENVOX_CA_CERTNAME
+# in it is the first tier of the name this provisions under. See that unit.
+EnvironmentFile=-/etc/sysconfig/openvox-ca
+
+# Records this run's name in that file, once per host, after provisioning has
+# succeeded. `+` runs it as root and outside every directive below:
+# /etc/sysconfig is root's, and a file that grants CA administration must not
+# be writable by the account it grants it to -- so the alternative, widening
+# ReadWritePaths= and handing it to `puppet`, is the one thing this must not
+# do. The script reads only a marker's presence and a symlink's text from the
+# tree `puppet` writes, never a file's content, and never fails the unit.
+ExecStartPost=+/usr/libexec/openvox-ca/record-environment
+
+# Where first-boot leaves that marker. Created afresh by systemd, owned by
+# `puppet`, writable under ProtectSystem=strict, and removed when the unit
+# stops -- so a marker can only ever describe the run that just happened.
+RuntimeDirectory=openvox-ca-first-boot
 
 # The same account the service runs as, so everything provisioning creates is
 # already owned by the process that will read it.

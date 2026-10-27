@@ -106,8 +106,9 @@ under whatever `/bin/sh` the target distribution has. Run it before pushing a
 change under `packaging/scripts/`:
 
 ```bash
-shellcheck -s sh packaging/scripts/first-boot packaging/scripts/preinstall \
-  packaging/scripts/postinstall packaging/scripts/preremove packaging/scripts/postremove
+shellcheck -s sh packaging/scripts/first-boot packaging/scripts/record-environment \
+  packaging/scripts/preinstall packaging/scripts/postinstall \
+  packaging/scripts/preremove packaging/scripts/postremove
 ```
 
 A new maintainer script has to be added to the `shellcheck` job in
