@@ -186,9 +186,9 @@ is the safe way to inspect a CA that will not start.`,
 
 			if rep.StoredHead == nil {
 				// No baseline was ever written. That is not a mismatch and not
-				// tampering: verifyInventoryHMACLocked treats a missing value as
-				// first run, logs "initializing integrity baseline" and writes
-				// one, so the server starts normally. Deleting the stored value
+				// tampering: verifyInventoryHMACLocked establishes a baseline
+				// over a missing value (logging at Warn on any store that is
+				// not brand new), so the server starts. Deleting the stored value
 				// is a documented operator gesture for acknowledging a lost
 				// baseline (docs/development/inventory-store.md), so an operator
 				// who has just done it, or who restored a store without the

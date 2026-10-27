@@ -229,11 +229,16 @@ openvox-ca-ctl import \
 # the parsed CRLs are stored -- so a file with a certificate or a key
 # concatenated into it is refused, for the same reason the certificate bundle
 # rejects keys: the result is world-readable and served to every agent.
+#
+# import writes no inventory integrity value, so the server's next start logs
+# "No inventory HMAC found on an established CA" at WARN, once, as it
+# establishes one. That is expected after an import.
 
 # Migrate an entire CA between storage backends offline (any pair of backends:
 # filesystem, sqlite, postgres, mysql, etcd, redis/valkey). Each backend is
 # described by a normal openvox-ca config file. Refuses a non-empty destination
-# unless --force.
+# unless --force, and a source whose inventory does not verify against its
+# integrity value unless --allow-unverified-source.
 openvox-ca-ctl migrate \
   --source-config /etc/puppet-ca/filesystem.yaml \
   --dest-config   /etc/puppet-ca/postgres.yaml
@@ -557,7 +562,8 @@ issue one. Without an atomic inventory append — `filesystem` alone — the
 integrity record is recomputed from a snapshot, so an interleaved append leaves
 an HMAC covering a state that never existed, after which the server refuses to
 start. Recovery was a cutover: `migrate` rebuilds the integrity value on the
-destination, so it needs a second store. There is now an in-place repair as
+destination, so it needs a second store, and it now refuses such a source unless
+given `--allow-unverified-source`. There is an in-place repair as
 well — see
 [`rebuild-inventory-hmac`](#rebuild-inventory-hmac-re-asserting-inventory-integrity),
 which re-asserts integrity over the inventory as it stands rather than repairing
@@ -1067,7 +1073,8 @@ reporting.
 
 If **no HMAC key is stored and no integrity value is either**, there is nothing
 to rebuild and the command refuses. This CA never initialised integrity;
-starting the server establishes a baseline.
+starting the server establishes a baseline, at `WARN` unless the store is brand
+new (an empty inventory and no CRL).
 
 If **no HMAC key is stored but an integrity value still is**, the command
 refuses differently, and the difference matters: no key can reproduce that
@@ -1084,7 +1091,8 @@ and stops. Nothing has been written that could disagree with the inventory, so
 this is not tampering. Note what happens next, though: the server's next start
 establishes a baseline over the inventory **as it then stands, without verifying
 it**, which is the same act `--yes-re-bless` gates behind an explicit
-acknowledgement. If you are investigating an integrity failure, inspect the
+acknowledgement, and logs `No inventory HMAC found on an established CA` at
+`WARN` as it does. If you are investigating an integrity failure, inspect the
 entries before starting the server.
 
 If the stored key is the **wrong length**, every existing value was computed

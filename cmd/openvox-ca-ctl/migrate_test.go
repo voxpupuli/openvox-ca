@@ -54,6 +54,29 @@ func seedFilesystemCA(dir string) {
 	}
 }
 
+// seedVerifiedFilesystemCA populates a filesystem store at dir as a running
+// server leaves it: a CA certificate and an inventory with entries, under an
+// integrity value that verifies.
+func seedVerifiedFilesystemCA(dir string) {
+	ctx := context.Background()
+	svc := storage.New(dir)
+	Expect(svc.EnsureDirs(ctx)).To(Succeed())
+	Expect(svc.SaveCACert(ctx, []byte("ca-cert"))).To(Succeed())
+	Expect(svc.TouchInventory(ctx)).To(Succeed())
+	Expect(svc.InitHMAC(ctx)).To(Succeed())
+	Expect(svc.AppendInventory(ctx, "0002 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1")).To(Succeed())
+}
+
+// tamperFilesystemInventory appends an entry to the inventory at dir behind
+// the integrity value's back.
+func tamperFilesystemInventory(dir string) {
+	f, err := os.OpenFile(filepath.Join(dir, "inventory.txt"), os.O_APPEND|os.O_WRONLY, 0)
+	Expect(err).NotTo(HaveOccurred())
+	_, err = f.WriteString("0x0099 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /CN=ghost\n")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(f.Close()).To(Succeed())
+}
+
 // fsConfig returns a minimal filesystem-backend config file pointing at dir.
 func fsConfig(configPath, caDir string) {
 	writeFile(configPath, "storage_backend: filesystem\ncadir: "+caDir+"\n")
@@ -157,6 +180,74 @@ var _ = Describe("migrate command", func() {
 		runMigrate("--source-config", sqlCfg, "--dest-config", dstCfg)
 
 		assertTreesEqual(srcDir, dstDir)
+	})
+
+	Describe("source inventory verification", func() {
+		var srcDir, dstDir, srcCfg, dstCfg string
+		var stderr *bytes.Buffer
+
+		BeforeEach(func() {
+			srcDir = GinkgoT().TempDir()
+			dstDir = GinkgoT().TempDir()
+			cfgDir := GinkgoT().TempDir()
+			srcCfg = filepath.Join(cfgDir, "src.yaml")
+			dstCfg = filepath.Join(cfgDir, "dst.yaml")
+			fsConfig(srcCfg, srcDir)
+			fsConfig(dstCfg, dstDir)
+			stderr = &bytes.Buffer{}
+		})
+
+		migrate := func(extra ...string) error {
+			cmd := newMigrateCmd()
+			cmd.SetErr(stderr)
+			cmd.SetArgs(append([]string{"--source-config", srcCfg, "--dest-config", dstCfg}, extra...))
+			return cmd.Execute()
+		}
+
+		It("refuses a source that does not verify, naming the remedy", func() {
+			seedVerifiedFilesystemCA(srcDir)
+			tamperFilesystemInventory(srcDir)
+
+			err := migrate()
+
+			Expect(err).To(MatchError(storage.ErrSourceUnverified))
+			Expect(err.Error()).To(ContainSubstring("openvox-ca rebuild-inventory-hmac"))
+			Expect(err.Error()).To(ContainSubstring("--allow-unverified-source"))
+			_, statErr := os.Stat(filepath.Join(dstDir, "ca_crt.pem"))
+			Expect(os.IsNotExist(statErr)).To(BeTrue(), "a refused migration copied the CA certificate")
+		})
+
+		It("migrates it with --allow-unverified-source, and warns whatever the verbosity", func() {
+			seedVerifiedFilesystemCA(srcDir)
+			tamperFilesystemInventory(srcDir)
+
+			Expect(migrate("--allow-unverified-source")).To(Succeed())
+
+			Expect(stderr.String()).To(ContainSubstring("Warning: the source inventory was not verified: " +
+				"the inventory does not match its stored integrity value (scheme whole-blob-hmac), so it may " +
+				"have been altered. The destination's integrity value, written now or at the server's first " +
+				"start, will vouch for it as copied.\n"))
+			Expect(filepath.Join(dstDir, "ca_crt.pem")).To(BeAnExistingFile())
+		})
+
+		It("migrates a source that never recorded integrity, and warns", func() {
+			seedFilesystemCA(srcDir) // no HMAC key, no value
+
+			Expect(migrate()).To(Succeed())
+
+			Expect(stderr.String()).To(ContainSubstring("Warning: the source inventory was not verified: " +
+				"the source never recorded an inventory integrity value (no HMAC key and no value are " +
+				"stored), so there was nothing to verify it against. The destination's integrity value, " +
+				"written now or at the server's first start, will vouch for it as copied.\n"))
+		})
+
+		It("says nothing about integrity when the source verifies", func() {
+			seedVerifiedFilesystemCA(srcDir)
+
+			Expect(migrate()).To(Succeed())
+
+			Expect(stderr.String()).NotTo(ContainSubstring("Warning"))
+		})
 	})
 
 	It("rejects an unknown source backend", func() {

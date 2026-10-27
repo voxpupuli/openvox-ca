@@ -107,7 +107,10 @@ On its first start it adds what it needs beside OpenVox Server's files:
 for its own key material and lock files. OpenVox Server ignores them. It leaves
 `serial`, `infra_crl.pem`, `infra_inventory.txt`, `infra_serials` and
 `root_key.pem` alone. It warns about a CA key that is readable beyond its
-owner, as OpenVox Server's is, and does not change it.
+owner, as OpenVox Server's is, and does not change it. It also logs `No
+inventory HMAC found on an established CA` at `WARN`, once: it is establishing
+the integrity value over OpenVox Server's `inventory.txt`, which nothing could
+verify before. That is expected here, and later starts do not repeat it.
 
 [Sharing the cadir with OpenVox Server](storage-backends.md#sharing-the-cadir-with-openvox-server)
 has the details, including the one thing to do when going back to openvox-ca
@@ -140,7 +143,9 @@ writes. openvox-ca does not use it, since it generates random serial numbers,
 but OpenVox Server issues from it, and given this directory with a counter of
 `0001` it would issue serial numbers it has already used. The last line gives
 the directory to the user the shipped unit runs openvox-ca as, since the
-commands above ran as root.
+commands above ran as root. As in Step 4, the first start logs `No inventory
+HMAC found on an established CA` at `WARN` once, because `import` writes no
+inventory integrity value.
 
 `--cert-bundle` must be a **complete chain, ordered nearest first**: the CA's own
 certificate, each issuer after it, ending with a self-signed root. A self-signed

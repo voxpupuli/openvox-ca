@@ -173,6 +173,17 @@ recomputes the destination's integrity head from its entries
 (`RebuildInventoryHMAC`). This resolves the otherwise-spurious
 `ErrInventoryTampered` that copying a foreign `inventory_hmac` would cause.
 
+Because that rebuild vouches for whatever was copied, `MigrateService` first
+verifies the source, under the source's lock and before it locks or writes the
+destination (`verifyMigrationSource`). It reads through
+`InventoryIntegrityReport`, so the check works on every backend and scheme and
+writes nothing to the source. Any state other than "verifies" is refused with
+`ErrSourceUnverified` unless `MigrateOptions.AllowUnverifiedSource` is set, with
+one exception: a source with no HMAC key and no stored value never initialised
+integrity, so there is nothing to verify, and it is copied without the
+override. Both of those outcomes are reported in `MigrateReport.UnverifiedSource`,
+which `openvox-ca-ctl migrate` prints as a warning.
+
 `RebuildInventoryHMAC` is no longer reached only from a migration: the offline
 [`openvox-ca rebuild-inventory-hmac`](../operator-cli.md#rebuild-inventory-hmac-re-asserting-inventory-integrity)
 calls it too, as the supported repair for a CA whose stored integrity value has
@@ -648,13 +659,23 @@ recorded so the control is not credited with more than it does.
    protects, behind the same permissions, so an attacker who can write the
    inventory can usually also read the key and recompute a valid MAC.
 
-   The bypass is in fact cheaper than that. `VerifyInventoryHMAC` treats an
-   **absent** `inventory_hmac` as a first run: it logs `No inventory HMAC found;
-   initializing integrity baseline` at `Info` level and computes a fresh value
-   over whatever the inventory currently contains. Tampering with the inventory
-   and unlinking one blob is therefore sufficient — the key need not be read at
-   all, and no restart is strictly needed. Absence is indistinguishable from a
-   first run, so the control's own initialisation path is the bypass.
+   The bypass is in fact cheaper than that. `VerifyInventoryHMAC` meets an
+   **absent** `inventory_hmac` by computing a fresh value over whatever the
+   inventory currently contains. Tampering with the inventory and unlinking one
+   blob is therefore sufficient — the key need not be read at all, and no
+   restart is strictly needed. The value alone cannot tell absence from a first
+   run, so the rest of the store decides how loudly this happens: only an empty
+   inventory with no CRL stored — the state `CA.Init` verifies on its very first
+   start, before it bootstraps or seeds the CA — logs `No inventory HMAC found;
+   initializing integrity baseline` at `Info`. Anything else logs `No inventory
+   HMAC found on an established CA` at `Warn`, a CA that has signed nothing
+   included, since bootstrapping writes the CRL. That makes the bypass visible,
+   not closed: an attacker who also empties the inventory and deletes the CRL
+   gets the `Info` line, and the value is re-baselined either way. The `Warn` is
+   also expected once without any tampering — on the first start after adopting
+   a cadir from OpenVox Server, after `openvox-ca-ctl import` (which writes a
+   CRL but no value), after migrating from a store that never had a value, and
+   after an etcd or Redis legacy inventory is decomposed (below).
 
    Which verifier gets there first matters. `verifyInventoryHMACLocked` — reached
    from `CA.Init`, `ReadInventory`, `SubjectForSerial` and the prune path — is
@@ -678,15 +699,23 @@ recorded so the control is not credited with more than it does.
    row keeps failing every subsequent check.
 
    A third path is a supported operator command rather than an attack.
-   `MigrateService` copies through the raw backend without verifying the source,
-   then calls `RebuildInventoryHMAC` on the destination unconditionally, so
-   `openvox-ca-ctl migrate` recomputes the integrity value over whatever was
-   copied. That clears a mismatch on **either** scheme — it is the rebuild the
-   opening of this section says recovery requires, and it cannot tell a repair
-   from a laundering. It is a cutover rather than an in-place repair: the
-   destination must be a different store (a store cannot be migrated onto
-   itself), one that already holds a CA is refused without `--force`, and the CA
-   must then be served from the destination. Because it only ever reads the
+   `MigrateService` calls `RebuildInventoryHMAC` on the destination after the
+   copy, so `openvox-ca-ctl migrate` recomputes the integrity value over
+   whatever was copied. It verifies the source first and refuses one that does
+   not verify, so this path now needs the operator to say
+   `--allow-unverified-source`; with it, it clears a mismatch on **either**
+   scheme — it is the rebuild the opening of this section says recovery
+   requires, and it cannot tell a repair from a laundering. A source with no
+   HMAC key and no value at all is copied without the flag, with a warning, so
+   deleting both from a store that had them is still a way through. It at least
+   leaves the destination warning on its first start, unless the destination
+   already holds an HMAC key — one a `--force` target had, or one left by a
+   server start that minted it (`CA.Init` does so before it bootstraps) and then
+   failed. The rebuild then uses that key at once, and the warning `migrate`
+   prints is the only trace. It is a cutover rather
+   than an in-place repair: the destination must be a different store (a store
+   cannot be migrated onto itself), one that already holds a CA is refused
+   without `--force`, and the CA must then be served from the destination. Because it only ever reads the
    source, the mismatched pair survives in the store you migrated away from, so
    a cutover does not destroy the evidence — decommissioning or re-forcing into
    that store afterwards is what does. Note that migrating into a scratch
@@ -852,13 +881,14 @@ rather than resolved, and this document does not change the mechanism.
 5. **The absent-integrity-blob path** cannot distinguish "never had one" from
    "had one and it is now missing", which on an established CA means a partial
    restore, a deletion, or the absent-value bypass in out-of-scope item 1. The two verifiers
-   report it differently: `verifyInventoryHMACLocked` re-baselines and logs at
-   `Info`, while `compareInventoryMACLocked` logs at `Warn` and writes nothing.
+   report it differently: `verifyInventoryHMACLocked` re-baselines, logging at
+   `Warn` unless the store looks brand new (out-of-scope item 1 has the test),
+   while `compareInventoryMACLocked` logs at `Warn` and writes nothing.
    So on a shared backend, where the resync tick runs, a deleted integrity blob
    produces a repeating warning worth alerting on. The two backends without a
    tick then diverge in opposite directions: on filesystem, if an issuance
    reaches the store before any verifying read, the append silently rewrites the
-   value and there is no record at all, not even the `Info` line; on SQLite the
+   value and there is no record at all, not even the re-baseline line; on SQLite the
    same issuance chains onto the absent predecessor and leaves the permanent
    mismatch described in out-of-scope item 1. That one fails the next start and
    logs the `inventory HMAC mismatch; integrity check failed` warning with
@@ -868,7 +898,10 @@ rather than resolved, and this document does not change the mechanism.
 6. **Some of this is pinned by a spec and some is not**, and the split is worth
    knowing before relying on any of it. Asserted: both arms of the absent-value
    behaviour — the re-baseline by `storage_test.go`'s "initializes HMAC baseline
-   when no HMAC file exists yet", the non-writing compare by
+   when no HMAC file exists yet", and its `Info` or `Warn` on each branch, on
+   both schemes, by `inventory_baseline_test.go` (and across a real `CA.Init`,
+   the ordering that classification rests on, by `internal/ca`'s
+   `inventorybaseline_test.go`); the non-writing compare by
    `sql_inventory_test.go`'s "accepts a missing stored value without writing
    one" — the backend gate on the resync tick, the periodic path's not failing
    closed, both halves of the ordering gap reporting their failure rather than
@@ -892,7 +925,8 @@ rather than resolved, and this document does not change the mechanism.
    false. Nor is the by-subject half of the CRL-counter claim: nothing pins
    that `LatestSerialForSubject` verifies on a blob backend, so a refactor
    giving it an unverified fast path would leave that paragraph half wrong.
-   Also unasserted: the migration laundering above, the
-   `Info`/`Warn` levels of the quoted messages, and the `scheme` attribute on the
+   The migration's source check is asserted by `migrate_source_test.go`, one
+   spec per refusal and per state it lets through. Also unasserted: the
+   level of the non-writing compare's message, and the `scheme` attribute on the
    mismatch warning. A change to any of these would leave this section quietly
    wrong rather than failing a build.
