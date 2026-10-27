@@ -1337,19 +1337,27 @@ func newRootCmd() *cobra.Command {
 
 			server := newAPIServer(addr, handler)
 
-			// Start the metrics exporter on its own listener. It runs over plain
+			// Every goroutine this command starts from here on runs in
+			// serveGoroutines, and returning by any path stops it: cancels its
+			// context and waits for each goroutine to finish. Deferred here, after
+			// the instance lock, the runtime and the remote signer have deferred
+			// their own teardown, so it runs before any of them. None of these
+			// goroutines can still be writing to the store once the lock that
+			// makes this process the only writer has been released (#546).
+			// HTTP handlers are not among them: one still running when
+			// server.Shutdown's drain budget runs out is not waited for.
+			serveGoroutines := newGoroutineGroup(ctx)
+			defer serveGoroutines.Stop()
+
+			// The metrics exporter, on its own listener. It runs over plain
 			// HTTP regardless of the API's TLS configuration; operators should
 			// bind it to loopback or a trusted management network. A bind failure
 			// is logged but does not stop the CA from serving its primary API.
+			// Started below, once the shutdown goroutine that stops it exists.
 			var metricsServer *http.Server
 			if exporter != nil {
 				metricsServer = exporter.NewServer(cfg.MetricsListen)
 				slog.Info("Prometheus metrics exporter enabled", "address", cfg.MetricsListen, "path", "/metrics")
-				go func() {
-					if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-						slog.Error("Metrics exporter failed", "error", err)
-					}
-				}()
 			}
 
 			// certs holds the operator-supplied TLS keypair, and stays nil in
@@ -1427,25 +1435,28 @@ func newRootCmd() *cobra.Command {
 				// only estimate it. Wired here because the api package holds no
 				// metrics dependency.
 				srv.AuthConfig.OnRevocationRefusal = crlMetrics.recordRefusal
-				go runClientCRLReloader(ctx, cfg, srv.AuthConfig.Domains, crlMetrics,
-					cfg.ClientCRLRefreshInterval())
+				serveGoroutines.Go(func(ctx context.Context) {
+					runClientCRLReloader(ctx, cfg, srv.AuthConfig.Domains, crlMetrics,
+						cfg.ClientCRLRefreshInterval())
+				})
 			}
 
 			// Periodic upkeep. Which jobs a configuration runs is decided by
 			// backgroundJobs, so that it can be asserted rather than inferred
-			// from the shape of this block; each is bound to ctx and stops on
-			// shutdown.
+			// from the shape of this block; each runs in serveGoroutines and
+			// stops on shutdown.
 			for _, job := range backgroundJobs(cfg, myCA) {
-				go job.run(ctx)
+				serveGoroutines.Go(job.run)
 			}
 
 			// Optional Kubernetes export: publish the CA cert/CRL into the
 			// configured Secrets/ConfigMaps. An invalid config block is rejected at
 			// startup (fail-fast, as for StorageConfig); once past validation the
 			// export is auxiliary — a client-init failure or a per-cycle export
-			// error is logged but never stops the CA from serving. Bound to ctx so
-			// it stops on shutdown. Each replica runs its own exporter; server-side
-			// apply makes concurrent writes from multiple replicas idempotent.
+			// error is logged but never stops the CA from serving. Runs in
+			// serveGoroutines, so it stops on shutdown. Each replica runs its own
+			// exporter; server-side apply makes concurrent writes from multiple
+			// replicas idempotent.
 			if cfg.KubernetesExport.Enabled() {
 				if err := cfg.KubernetesExport.Validate(); err != nil {
 					return fmt.Errorf("invalid kubernetes_export config: %w", err)
@@ -1456,21 +1467,31 @@ func newRootCmd() *cobra.Command {
 				if exporter != nil {
 					k8sMetrics = k8sexport.NewMetrics(exporter.Registry())
 				}
-				startK8sExport(ctx, myCA, cfg.KubernetesExport, k8sMetrics,
+				startK8sExport(serveGoroutines, myCA, cfg.KubernetesExport, k8sMetrics,
 					func() (*k8sexport.Exporter, error) {
 						return k8sexport.NewInCluster(cfg.KubernetesExport, store, k8sMetrics)
 					})
 			}
 
+			// Waits on the group's context rather than the command's, so that
+			// returning early -- a failed bind, say -- stops both servers as
+			// well as a signal does, and serveGoroutines.Stop does not wait for
+			// ever on the metrics exporter.
 			shutdownDone := make(chan struct{})
-			go func() {
-				<-ctx.Done()
+			serveGoroutines.Go(func(groupCtx context.Context) {
+				<-groupCtx.Done()
 				drain := cfg.shutdownDrain()
-				slog.Info("Shutting down")
 				// Tell the service manager this is a deliberate teardown, not
 				// a crash, and how long it may take — so it waits for the
-				// drain instead of killing connections mid-flight.
-				notifier.Stopping(fmt.Sprintf("Shutting down: draining connections (up to %s)", drain))
+				// drain instead of killing connections mid-flight. Only when
+				// it is one: the command's own context is cancelled by a
+				// signal, and is still live when an error return stops the
+				// group. Announcing a drain there would make "Shutting down"
+				// the last status systemd shows, in place of the failure.
+				if ctx.Err() != nil {
+					slog.Info("Shutting down")
+					notifier.Stopping(fmt.Sprintf("Shutting down: draining connections (up to %s)", drain))
+				}
 				shutdownCtx, cancel := context.WithTimeout(context.Background(), drain)
 				defer cancel()
 				if metricsServer != nil {
@@ -1482,7 +1503,17 @@ func newRootCmd() *cobra.Command {
 					slog.Warn("HTTP server shutdown error", "error", err)
 				}
 				close(shutdownDone)
-			}()
+			})
+
+			if metricsServer != nil {
+				serveGoroutines.Go(func(context.Context) {
+					// Returns once the shutdown goroutine above has shut the server
+					// down; a Shutdown that comes first makes this return at once.
+					if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+						slog.Error("Metrics exporter failed", "error", err)
+					}
+				})
+			}
 
 			// Bind the listener explicitly rather than letting ListenAndServe
 			// do it, so readiness can be announced at the point the socket is
@@ -1509,9 +1540,13 @@ func newRootCmd() *cobra.Command {
 			}
 			notifier.Ready(status())
 
-			// Both jobs are bound to ctx, so they stop on shutdown.
-			go runNotifyHeartbeat(ctx, notifier, heartbeatInterval(notifier), status)
-			go runReloadWatcher(ctx, hupCh, notifier, reloader, status)
+			// Both run in serveGoroutines, so they stop on shutdown.
+			serveGoroutines.Go(func(ctx context.Context) {
+				runNotifyHeartbeat(ctx, notifier, heartbeatInterval(notifier), status)
+			})
+			serveGoroutines.Go(func(ctx context.Context) {
+				runReloadWatcher(ctx, hupCh, notifier, reloader, status)
+			})
 
 			var serveErr error
 			if tlsConfigured {

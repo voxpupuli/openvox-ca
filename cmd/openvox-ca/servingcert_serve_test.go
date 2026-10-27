@@ -30,7 +30,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -96,6 +98,18 @@ var _ = Describe("the serve command with a self-provisioned serving certificate"
 		Expect(body).To(ContainSubstring("client certificate required"))
 	})
 
+	// The twin of "does not announce a drain when it fails to start" below,
+	// so that one cannot pass because the command never announces one at all.
+	It("announces a drain when it is stopped deliberately", func() {
+		_, rec, stop := startServeRecorded(serveConfig(caDir, servingDir, "127.0.0.1", freeLoopbackPort(), true))
+		stop()
+		Eventually(rec.msgs).Should(Receive(SatisfyAll(
+			HavePrefix("STOPPING=1"),
+			ContainSubstring("Shutting down: draining connections"),
+		)), "a deliberate stop must tell the service manager it is draining, "+
+			"or systemd may take the teardown for a crash")
+	})
+
 	Context("on an address that is not loopback", func() {
 		// 192.0.2.1 is TEST-NET-1 (RFC 5737): never assigned to a host, so the
 		// bind fails with EADDRNOTAVAIL and nothing here listens on a real
@@ -116,6 +130,68 @@ var _ = Describe("the serve command with a self-provisioned serving certificate"
 			Expect(err).To(MatchError(ContainSubstring("refusing to start: plain HTTP")),
 				"precondition: without serving_cert this address must be refused, or "+
 					"the spec above could not tell the gate firing from it being absent")
+		})
+
+		// The command starts its background jobs -- the managed-certificate
+		// reconcile among them -- before it binds, so this path returns with
+		// them already running. Until #546 nothing waited for them: a reconcile
+		// pass could still be creating a lock file in cadir while the spec's
+		// cleanup removed it, which failed "does not refuse to start for want
+		// of TLS" in 3 or 4 runs in 150 under load. Checked by stack rather
+		// than by the cleanup, so that a regression fails on an unloaded
+		// machine too. The metrics exporter is enabled because it is the one
+		// goroutine that does not watch the group's context: it stops only when
+		// the shutdown goroutine shuts it down, and if that ever stops happening
+		// the command does not return at all, which runServeRecorded reports.
+		It("leaves nothing it started running once it has returned", func() {
+			err := runServeBounded(withMetricsListen(serveConfig(caDir, servingDir, unassigned, 8140, true)))
+			Expect(err).To(MatchError(ContainSubstring("failed to listen on "+unassigned)),
+				"precondition: the command must have started its jobs, which it does before binding")
+			Expect(serveCommandGoroutines()).To(BeEmpty(),
+				"the serve command returned while goroutines it started were still running")
+		})
+
+		// A failed start stops the command's goroutines, the shutdown goroutine
+		// among them, but it is not a deliberate teardown. Announcing a drain
+		// there makes "Shutting down" the last status systemd shows, in place
+		// of the failure.
+		It("does not announce a drain when it fails to start", func() {
+			rec, err := runServeRecorded(serveConfig(caDir, servingDir, unassigned, 8140, true))
+			Expect(err).To(MatchError(ContainSubstring("failed to listen on "+unassigned)),
+				"precondition: the command must fail at the bind, after its shutdown goroutine exists")
+
+			var msgs []string
+			Consistently(func() []string {
+				msgs = append(msgs, drainNotifications(rec)...)
+				return msgs
+			}, "250ms").ShouldNot(ContainElement(HavePrefix("STOPPING=1")),
+				"a failed start told the service manager it was draining connections")
+			Expect(msgs).To(ContainElement(ContainSubstring("Starting the HTTP server")),
+				"precondition: the recorder must have heard the command, or the absence above proves nothing")
+		})
+	})
+
+	// An invalid kubernetes_export block is refused only once the background
+	// jobs are running, and before the shutdown goroutine and the metrics
+	// exporter exist. That is a different return from the failed bind above,
+	// and the one window where the order of those two matters. The order is
+	// pinned by position in goroutine_group_test.go. This drives the window.
+	Context("when the configuration is refused after the background jobs have started", func() {
+		It("leaves nothing it started running once it has returned", func() {
+			configPath := withMetricsListen(serveConfig(caDir, servingDir, "127.0.0.1", freeLoopbackPort(), true))
+			appendConfig(configPath, `kubernetes_export:
+  targets:
+    - kind: Bogus
+      metadata:
+        name: trust
+      cert: true
+`)
+			err := runServeBounded(configPath)
+			Expect(err).To(MatchError(ContainSubstring("invalid kubernetes_export config")),
+				"precondition: the command must be refused at the kubernetes_export check, "+
+					"after its jobs have started and before the bind")
+			Expect(serveCommandGoroutines()).To(BeEmpty(),
+				"the serve command returned while goroutines it started were still running")
 		})
 	})
 })
@@ -157,6 +233,15 @@ puppet_server: admin.example.com
 // own error instead of a connection refusal.
 func startServe(configPath string) string {
 	GinkgoHelper()
+	addr, _, _ := startServeRecorded(configPath)
+	return addr
+}
+
+// startServeRecorded is startServe, also returning the recorder the command's
+// notifications reach and a function that stops the command as a signal would,
+// by cancelling its context, and waits for it to return.
+func startServeRecorded(configPath string) (string, *notifyRecorder, func()) {
+	GinkgoHelper()
 	rec := startNotifyRecorder(nil)
 
 	addr, err := readConfigAddr(configPath)
@@ -172,21 +257,23 @@ func startServe(configPath string) string {
 	go func() { done <- cmd.ExecuteContext(ctx) }()
 
 	exited := false
-	DeferCleanup(func() {
+	stop := func() {
 		cancel()
 		if exited {
 			return
 		}
+		exited = true
 		Eventually(done, "60s").Should(Receive(),
 			"the serve command did not stop when its context was cancelled")
-	})
+	}
+	DeferCleanup(stop)
 
 	deadline := time.After(60 * time.Second)
 	for {
 		select {
 		case msg, ok := <-rec.msgs:
 			if ok && strings.Contains(msg, "READY=1") {
-				return addr
+				return addr, rec, stop
 			}
 		case err := <-done:
 			exited = true
@@ -203,9 +290,18 @@ func startServe(configPath string) string {
 // rather than the spec hanging until the binary's own timeout.
 func runServeBounded(configPath string) error {
 	GinkgoHelper()
-	// Not used for its messages, but it pins NOTIFY_SOCKET to a socket this
-	// spec owns, so nothing reaches a real service manager.
-	startNotifyRecorder(nil)
+	// The recorder is not used for its messages here, but it pins
+	// NOTIFY_SOCKET to a socket this spec owns, so nothing reaches a real
+	// service manager.
+	_, err := runServeRecorded(configPath)
+	return err
+}
+
+// runServeRecorded is runServeBounded, also returning the recorder the
+// command's notifications reached.
+func runServeRecorded(configPath string) (*notifyRecorder, error) {
+	GinkgoHelper()
+	rec := startNotifyRecorder(nil)
 
 	cmd := newRootCmd()
 	cmd.SetOut(GinkgoWriter)
@@ -214,7 +310,81 @@ func runServeBounded(configPath string) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	return cmd.ExecuteContext(ctx)
+	done := make(chan error, 1)
+	go func() { done <- cmd.ExecuteContext(ctx) }()
+
+	// The context bounds a command that serves when the spec expected it to
+	// fail. This bounds one that cannot return at all, which no context
+	// reaches: teardown waiting on a goroutine that never stops.
+	select {
+	case err := <-done:
+		return rec, err
+	case <-time.After(90 * time.Second):
+		Fail("the serve command did not return within 90s: its teardown is waiting " +
+			"on a goroutine that never stops")
+		return rec, nil
+	}
+}
+
+// withMetricsListen adds a metrics_listen on a free loopback port to a config
+// file serveConfig wrote, so that the command starts its metrics exporter.
+func withMetricsListen(configPath string) string {
+	GinkgoHelper()
+	appendConfig(configPath, fmt.Sprintf("metrics_listen: 127.0.0.1:%d\n", freeLoopbackPort()))
+	return configPath
+}
+
+// appendConfig appends top-level YAML to a config file serveConfig wrote.
+func appendConfig(configPath, yaml string) {
+	GinkgoHelper()
+	f, err := os.OpenFile(configPath, os.O_APPEND|os.O_WRONLY, 0)
+	Expect(err).NotTo(HaveOccurred())
+	_, err = f.WriteString(yaml)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(f.Close()).To(Succeed())
+}
+
+// drainNotifications returns every notification rec holds now, without
+// waiting for more.
+func drainNotifications(rec *notifyRecorder) []string {
+	var msgs []string
+	for {
+		select {
+		case msg, ok := <-rec.msgs:
+			if !ok {
+				return msgs
+			}
+			msgs = append(msgs, msg)
+		default:
+			return msgs
+		}
+	}
+}
+
+// serveCommandGoroutines returns the stack of every goroutine the serve
+// command's RunE started. Before #546 those were created by RunE itself, a
+// closure named newRootCmd.func…; now they are created by goroutineGroup.Go.
+// Either name in a stack, as a frame or as its creator, counts. The package is
+// named by its import path in a test binary, not as "main".
+func serveCommandGoroutines() []string {
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	const pkg = "github.com/voxpupuli/openvox-ca/cmd/openvox-ca."
+	var found []string
+	for _, stack := range strings.Split(string(buf), "\n\n") {
+		if strings.Contains(stack, pkg+"newRootCmd.") ||
+			strings.Contains(stack, pkg+"(*goroutineGroup).") {
+			found = append(found, stack)
+		}
+	}
+	return found
 }
 
 // readConfigAddr reads back the host and port a config file names, so
