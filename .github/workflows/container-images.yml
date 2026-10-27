@@ -13,6 +13,12 @@ name: Container images
 #     fork PRs build only and discard the result (their GITHUB_TOKEN is
 #     read-only and cannot write packages).
 #
+# The "Container images success" job at the end is a required check on main,
+# so this workflow must report on every pull request: no branch or path filter
+# on the pull_request trigger, and its types must keep opened, synchronize and
+# reopened. A PR it skips waits for the check forever. verifyAggregateJobs in
+# magefile.go enforces both.
+#
 # See docs/container-images.md for the one-time repository setup the owner must
 # perform (enabling GHCR and package visibility).
 
@@ -482,3 +488,44 @@ jobs:
             --certificate-oidc-issuer "$issuer" \
             "${IMAGE}@sha256:${child}" > /dev/null
           echo "signature and provenance verified against $identity"
+
+  # -- Aggregate result ---------------------------------------------------------
+  # The image builds live in this workflow rather than in ci.yml, and GitHub has
+  # no `needs` across workflows, so ci.yml's "CI success" cannot see them. This
+  # is their fan-in instead: main's ruleset requires it by name alongside "CI
+  # success". The name is the contract: rename the job and every PR waits for
+  # a check that never reports, until the ruleset follows. #454 merged with
+  # both Alpine builds red because nothing required them.
+  #
+  # `if: always()` is load-bearing. Without it a failed build skips this job,
+  # and a ruleset counts a skipped check as passing.
+  #
+  # Every other job is in `needs` (verifyAggregateJobs enforces it), so a
+  # failed or cancelled one fails this check. The one legitimate skip is
+  # `merge`, which runs only when the run pushes: fork PRs and unpushed
+  # dispatches skip it by design. It is allowed to skip only then, so a
+  # pull_request run that should have published cannot pass without
+  # publishing; that is also why a same-repo PR's own run stays red while GHCR
+  # or Sigstore is down. The expression is pinned in requiredCheckAggregates.
+  # It binds per run, not per commit: a maintainer who dispatches this
+  # workflow on a PR's branch with push unticked gets a run that skips merge
+  # and reports success on the same head commit. That needs write access and
+  # still builds and smoke-tests every leg, so it is left as the way past an
+  # outage rather than refused. `verify-tag`
+  # has its steps gated rather than the job, so it always reports success
+  # off a tag, and a skipped `build` means one of its needs failed.
+  aggregate:
+    name: Container images success
+    if: always()
+    needs:
+      - setup
+      - verify-tag
+      - build
+      - merge
+    runs-on: ubuntu-latest
+    steps:
+      - name: Decide whether the needed jobs succeeded or failed
+        uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
+        with:
+          allowed-skips: ${{ needs.setup.outputs.push != 'true' && 'merge' || '' }}
+          jobs: ${{ toJSON(needs) }}
