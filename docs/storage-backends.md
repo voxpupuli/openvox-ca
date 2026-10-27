@@ -900,8 +900,8 @@ uid wrote nor add its own. On such a platform that rules out a CA key kept in a
 file through `ca_key_file`, server-side key generation (`/generate`, which
 writes into `<cadir>/private/` on every backend), and the filesystem backend
 altogether. Keep the CA key in the database, or run with a stable uid.
-[#523](https://github.com/voxpupuli/openvox-ca/issues/523) tracks server-side
-generation.
+[Server-side key generation and the uid](#server-side-key-generation-and-the-uid)
+covers server-side generation in full.
 
 Group read on the lock files has a cost of its own. `flock(2)` needs no write
 access, so any member of the group can hold an existing lock, which can stop the
