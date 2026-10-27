@@ -28,25 +28,26 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"go.yaml.in/yaml/v3"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/certstore"
+	"github.com/voxpupuli/openvox-ca/internal/config"
 )
 
-// decode parses a `managed_certs:` document the way the server's own config
-// loader does, so these specs exercise the YAML keys an operator writes rather
-// than the Go fields behind them. A key that was renamed or mistyped fails
-// here, which a struct literal would not notice.
+// decode parses a `managed_certs:` document with the decoder the server's own
+// config loader uses, config.DecodeStrict, so these specs exercise the YAML
+// keys an operator writes rather than the Go fields behind them. A key that was
+// renamed or mistyped fails here, as it would at startup, which a struct
+// literal would not notice.
 func decode(doc string) certstore.Config {
 	GinkgoHelper()
 	var wrapper struct {
 		Certs certstore.Config `yaml:"managed_certs"`
 	}
-	Expect(yaml.Unmarshal([]byte(doc), &wrapper)).To(Succeed())
+	Expect(config.DecodeStrict([]byte(doc), &wrapper, "openvox-ca")).To(Succeed())
 	return wrapper.Certs
 }
 
@@ -54,7 +55,7 @@ func decodeErr(doc string) error {
 	var wrapper struct {
 		Certs certstore.Config `yaml:"managed_certs"`
 	}
-	return yaml.Unmarshal([]byte(doc), &wrapper)
+	return config.DecodeStrict([]byte(doc), &wrapper, "openvox-ca")
 }
 
 // minimal is the smallest entry that validates: a certname, one name, a renew

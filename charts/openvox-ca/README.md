@@ -208,7 +208,7 @@ and [the CA's own serving certificate](https://github.com/voxpupuli/openvox-ca/b
 | `topologySpreadConstraints` | one soft constraint per hostname | A constraint with no `labelSelector` gets this release's own selector |
 | `priorityClassName` / `runtimeClassName` / `schedulerName` | `""` | |
 | `dnsPolicy` / `dnsConfig` / `hostAliases` | `""` / `{}` / `[]` | |
-| `enableServiceLinks` | `false` | |
+| `enableServiceLinks` | `false` | Keep false: a Service named `openvox-ca` would set `OPENVOX_CA_PORT=tcp://…`, which the server refuses as a port. Refused at install when it is this release's own Service |
 | `automountServiceAccountToken` | `null` | `null` mounts the token when the pod needs the API — Kubernetes export (`kubernetesExport.enabled` or `config.kubernetes_export.targets`), a managed certificate or the CA's own serving certificate in a Secret (`config.managed_certs` or `config.serving_cert` with a `store.secret`), or OpenBao Kubernetes auth (`config.openbao.auth_method`, `OPENVOX_CA_OPENBAO_AUTH_METHOD` in `env`/`extraEnv`, or `--openbao-auth-method=kubernetes` in `extraArgs`) — and whenever the chart cannot tell: `existingConfigMap`, `args`, `envFrom`, an `extraEnv` `valueFrom` for that variable, or a bare `--openbao-auth-method` in `extraArgs`. See [the guide](https://github.com/voxpupuli/openvox-ca/blob/main/docs/helm-chart.md) for the full table |
 | `initContainers` / `extraContainers` | `[]` | Templated, so they can reference `.Values` |
 | `extraVolumes` | `[]` | Templated |

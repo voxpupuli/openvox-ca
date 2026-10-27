@@ -5340,6 +5340,13 @@ func (Chart) Test() error {
 			wants: []string{"scheme: HTTPS"},
 		},
 		{
+			// The twin of the service-links reject case: a Service named
+			// anything else sets a variable the server never reads.
+			name:  "service links when the Service would not set OPENVOX_CA_PORT",
+			sets:  []string{tls, "enableServiceLinks=true", "fullnameOverride=ca"},
+			wants: []string{"enableServiceLinks: true"},
+		},
+		{
 			// The recipe values.yaml documents for a provider-held key. It is a
 			// merge-precedence claim, which this repository requires be pinned.
 			name:     "an empty config value clears a path the ca block computed",
@@ -6892,6 +6899,15 @@ config:
 			name:    "a ServiceMonitor for an exporter that is switched off",
 			sets:    []string{tls, "metrics.serviceMonitor.enabled=true"},
 			wantErr: "nothing to scrape",
+		},
+		{
+			// Rendered as release "openvox-ca", so the Service's link variable
+			// is OPENVOX_CA_PORT, which the server reads as its port and
+			// refuses as not a number. The render case of the same name with a
+			// fullnameOverride is its must-fail twin.
+			name:    "service links when the Service would set OPENVOX_CA_PORT",
+			sets:    []string{tls, "enableServiceLinks=true"},
+			wantErr: "OPENVOX_CA_PORT=tcp://",
 		},
 		{
 			// Worse to hand out by accident than the export's, which this

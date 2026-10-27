@@ -61,6 +61,9 @@ func (stubCACerts) GetCACert(context.Context) ([]byte, error) { return []byte("C
 // decode into nothing and every spec below would pass vacuously.
 func writeServerConfig(doc string) *serverConfig {
 	GinkgoHelper()
+	// The file alone: an ambient malformed OPENVOX_CA_* variable would
+	// otherwise refuse the load.
+	clearServerEnv()
 	path := filepath.Join(GinkgoT().TempDir(), "config.yaml")
 	Expect(os.WriteFile(path, []byte(doc), 0o600)).To(Succeed())
 	cfg, err := loadServerConfig(path)

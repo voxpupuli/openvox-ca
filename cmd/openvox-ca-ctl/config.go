@@ -18,12 +18,11 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
-	"strconv"
 
 	"github.com/voxpupuli/openvox-ca/internal/config"
-	"go.yaml.in/yaml/v3"
 )
 
 // ctlConfig holds all configuration for openvox-ca-ctl.
@@ -52,17 +51,22 @@ func loadCtlConfig(configFile string) (*ctlConfig, error) {
 		if err != nil {
 			return nil, fmt.Errorf("reading config file %s: %w", configFile, err)
 		}
-		if err := yaml.Unmarshal(data, cfg); err != nil {
+		// Strict, like the server's: a misspelt key refuses to run rather
+		// than leaving the real setting at its default.
+		if err := config.DecodeStrict(data, cfg, "openvox-ca-ctl"); err != nil {
 			return nil, fmt.Errorf("parsing config file %s: %w", configFile, err)
 		}
 	}
 
-	applyCtlEnv(cfg)
+	if err := applyCtlEnv(cfg); err != nil {
+		return nil, err
+	}
 	return cfg, nil
 }
 
-// applyCtlEnv overlays OPENVOX_CA_CTL_* environment variables onto cfg.
-func applyCtlEnv(cfg *ctlConfig) {
+// applyCtlEnv overlays OPENVOX_CA_CTL_* environment variables onto cfg. A
+// boolean variable whose value does not parse is an error naming it.
+func applyCtlEnv(cfg *ctlConfig) error {
 	if v := os.Getenv("OPENVOX_CA_CTL_SERVER_URL"); v != "" {
 		cfg.ServerURL = v
 	}
@@ -75,16 +79,10 @@ func applyCtlEnv(cfg *ctlConfig) {
 	if v := os.Getenv("OPENVOX_CA_CTL_CLIENT_KEY"); v != "" {
 		cfg.ClientKey = v
 	}
-	if v := os.Getenv("OPENVOX_CA_CTL_VERBOSE"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.Verbose = b
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_CTL_INSECURE"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.Insecure = b
-		}
-	}
+	return errors.Join(
+		config.EnvBool("OPENVOX_CA_CTL_VERBOSE", &cfg.Verbose),
+		config.EnvBool("OPENVOX_CA_CTL_INSECURE", &cfg.Insecure),
+	)
 }
 
 // resolveConfigFile delegates to the shared config.ResolveConfigFile.

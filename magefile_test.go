@@ -3225,64 +3225,6 @@ var _ = Describe("the tarball contract build:dist writes and build:packages read
 	})
 })
 
-var _ = Describe("the shipped configuration file's keys", func() {
-	// Every key the packages ship must be one openvox-ca actually reads.
-	//
-	// Nothing enforced that. loadServerConfig calls a plain yaml.Unmarshal --
-	// no KnownFields, no UnmarshalStrict -- so an unrecognised key is silently
-	// ignored, and the assertions elsewhere in this file check the shipped
-	// file against literal regexps, i.e. against another copy of the same
-	// spelling. A typo in packaging/config/config.yaml would therefore ship a
-	// configuration file that looks right, parses without complaint, and
-	// leaves the setting at its built-in default: `cadir` misspelt puts the CA
-	// somewhere other than where the unit's ReadWritePaths= grants, and the
-	// service fails to start with nothing pointing at the file.
-	//
-	// Derived from both files rather than pinned as a list, for the reason
-	// verifyNodeTTL gives: a hard-coded set has to be edited whenever the
-	// shipped file legitimately gains a key.
-	It("names only keys the server reads", func() {
-		shipped, err := os.ReadFile("packaging/config/config.yaml")
-		Expect(err).NotTo(HaveOccurred())
-		// config.ServerConfig and the blocks it embeds inline. Nested blocks'
-		// keys come along too, which loosens the check slightly; a top-level
-		// typo that happens to spell a nested key is not what this is for.
-		sources, err := filepath.Glob("internal/config/*.go")
-		Expect(err).NotTo(HaveOccurred())
-
-		tags := map[string]bool{}
-		for _, name := range sources {
-			if strings.HasSuffix(name, "_test.go") {
-				continue
-			}
-			src, err := os.ReadFile(name)
-			Expect(err).NotTo(HaveOccurred())
-			for _, m := range regexp.MustCompile(`yaml:"([a-z0-9_]+)"`).FindAllSubmatch(src, -1) {
-				tags[string(m[1])] = true
-			}
-		}
-		// The floor: an empty tag set would make every key below pass.
-		Expect(len(tags)).To(BeNumerically(">", 10),
-			"parsed %d yaml tags from internal/config, which is too few to be the real "+
-				"struct; the pattern is wrong rather than the files", len(tags))
-
-		var keys []string
-		for _, m := range regexp.MustCompile(`(?m)^([a-z0-9_]+):`).FindAllSubmatch(shipped, -1) {
-			keys = append(keys, string(m[1]))
-		}
-		// And the other floor: a shipped file that parsed to no keys would
-		// assert nothing at all.
-		Expect(keys).NotTo(BeEmpty(),
-			"no top-level key parsed out of packaging/config/config.yaml")
-
-		for _, k := range keys {
-			Expect(tags).To(HaveKey(k),
-				"packaging/config/config.yaml sets %q, which openvox-ca does not read: "+
-					"yaml.Unmarshal ignores it silently, so the setting stays at its default", k)
-		}
-	})
-})
-
 var _ = Describe("gitListFiles", func() {
 	// The GIT_* strip is the one guard this changeset added that nothing
 	// exercised. git exports GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE and

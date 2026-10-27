@@ -20,6 +20,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -28,7 +29,6 @@ import (
 
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/config"
-	"go.yaml.in/yaml/v3"
 )
 
 // serverConfig holds all configuration for the openvox-ca server.
@@ -67,12 +67,17 @@ func loadServerConfig(configFile string) (*serverConfig, error) {
 		if err != nil {
 			return nil, fmt.Errorf("reading config file %s: %w", configFile, err)
 		}
-		if err := yaml.Unmarshal(data, cfg); err != nil {
+		// Strict: an unknown key refuses startup rather than being dropped,
+		// so a misspelt setting cannot silently leave the real one at its
+		// default. See config.DecodeStrict.
+		if err := config.DecodeStrict(data, cfg, "openvox-ca"); err != nil {
 			return nil, fmt.Errorf("parsing config file %s: %w", configFile, err)
 		}
 	}
 
-	applyServerEnv(cfg)
+	if err := applyServerEnv(cfg); err != nil {
+		return nil, err
+	}
 
 	// A negative backdate would issue certificates that are not valid until the
 	// future -- every one of them refused by every verifier until the clock
@@ -418,8 +423,12 @@ func (c *serverConfig) supersededCertSweepInterval() time.Duration {
 	return defaultSupersededCertSweepInterval
 }
 
-// applyServerEnv overlays OPENVOX_CA_* environment variables onto cfg.
-func applyServerEnv(cfg *serverConfig) {
+// applyServerEnv overlays OPENVOX_CA_* environment variables onto cfg. A
+// boolean or integer variable whose value does not parse is an error naming it,
+// and every such variable is reported, not just the first, so a deployment
+// with several mistakes learns of them in one restart.
+func applyServerEnv(cfg *serverConfig) error {
+	var errs []error
 	if v := os.Getenv("OPENVOX_CA_CADIR"); v != "" {
 		cfg.CADir = v
 	}
@@ -429,19 +438,11 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("OPENVOX_CA_HOST"); v != "" {
 		cfg.Host = v
 	}
-	if v := os.Getenv("OPENVOX_CA_PORT"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.Port = n
-		}
-	}
+	errs = append(errs, config.EnvInt("OPENVOX_CA_PORT", &cfg.Port, nil))
 	if v := os.Getenv("OPENVOX_CA_HOSTNAME"); v != "" {
 		cfg.Hostname = v
 	}
-	if v := os.Getenv("OPENVOX_CA_VERBOSITY"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.Verbosity = n
-		}
-	}
+	errs = append(errs, config.EnvInt("OPENVOX_CA_VERBOSITY", &cfg.Verbosity, nil))
 	if v := os.Getenv("OPENVOX_CA_LOGFILE"); v != "" {
 		cfg.LogFile = v
 	}
@@ -454,40 +455,20 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("OPENVOX_CA_CRL_CHAIN_FILE"); v != "" {
 		cfg.CRLChainFile = v
 	}
-	if v := os.Getenv("OPENVOX_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.CRLChainRefreshIntervalSec = n
-		}
-	}
+	errs = append(errs, config.EnvInt("OPENVOX_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC", &cfg.CRLChainRefreshIntervalSec, config.Positive))
 	if v := os.Getenv("OPENVOX_CA_PUPPET_SERVER"); v != "" {
 		cfg.PuppetServer = v
 	}
 	if v := os.Getenv("OPENVOX_CA_PUPPET_SERVER_FILE"); v != "" {
 		cfg.PuppetServerFile = v
 	}
-	if v := os.Getenv("OPENVOX_CA_NO_PP_CLI_AUTH"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.NoPpCliAuth = b
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_NO_TLS_REQUIRED"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.NoTLSRequired = b
-		}
-	}
+	errs = append(errs, config.EnvBool("OPENVOX_CA_NO_PP_CLI_AUTH", &cfg.NoPpCliAuth))
+	errs = append(errs, config.EnvBool("OPENVOX_CA_NO_TLS_REQUIRED", &cfg.NoTLSRequired))
 	if v := os.Getenv("OPENVOX_CA_CLIENT_REVOCATION_POLICY"); v != "" {
 		cfg.ClientRevocationPolicy = v
 	}
-	if v := os.Getenv("OPENVOX_CA_CLIENT_CRL_REFRESH_INTERVAL_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.ClientCRLRefreshIntervalSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_ALLOW_PUBLIC_STATUS"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.AllowPublicStatus = b
-		}
-	}
+	errs = append(errs, config.EnvInt("OPENVOX_CA_CLIENT_CRL_REFRESH_INTERVAL_SEC", &cfg.ClientCRLRefreshIntervalSec, config.Positive))
+	errs = append(errs, config.EnvBool("OPENVOX_CA_ALLOW_PUBLIC_STATUS", &cfg.AllowPublicStatus))
 	if v := os.Getenv("OPENVOX_CA_OCSP_URL"); v != "" {
 		cfg.OCSPUrl = v
 	}
@@ -497,38 +478,22 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("OPENVOX_CA_METRICS_LISTEN"); v != "" {
 		cfg.MetricsListen = v
 	}
-	if v := os.Getenv("OPENVOX_CA_SHUTDOWN_TIMEOUT_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.ShutdownTimeoutSec = n
-		}
-	}
+	errs = append(errs, config.EnvInt("OPENVOX_CA_SHUTDOWN_TIMEOUT_SEC", &cfg.ShutdownTimeoutSec, config.Positive))
 	if v := os.Getenv("OPENVOX_CA_MEMORY_RESERVE_LAUNCHER"); v != "" {
 		cfg.MemoryReserveLauncher = v
 	}
 	if v := os.Getenv("OPENVOX_CA_MEMORY_RESERVE_SIGNER"); v != "" {
 		cfg.MemoryReserveSigner = v
 	}
-	if v := os.Getenv("OPENVOX_CA_MEMORY_BUDGET_PERCENT"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.MemoryBudgetPercent = n
-		}
-	}
+	errs = append(errs, config.EnvInt("OPENVOX_CA_MEMORY_BUDGET_PERCENT", &cfg.MemoryBudgetPercent, nil))
 	if v := os.Getenv("OPENVOX_CA_CA_KEY_ALGO"); v != "" {
 		cfg.CAKeyAlgo = v
 	}
-	if v := os.Getenv("OPENVOX_CA_CA_KEY_SIZE"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.CAKeySize = n
-		}
-	}
+	errs = append(errs, config.EnvInt("OPENVOX_CA_CA_KEY_SIZE", &cfg.CAKeySize, nil))
 	if v := os.Getenv("OPENVOX_CA_LEAF_KEY_ALGO"); v != "" {
 		cfg.LeafKeyAlgo = v
 	}
-	if v := os.Getenv("OPENVOX_CA_LEAF_KEY_SIZE"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.LeafKeySize = n
-		}
-	}
+	errs = append(errs, config.EnvInt("OPENVOX_CA_LEAF_KEY_SIZE", &cfg.LeafKeySize, nil))
 	if v := os.Getenv("OPENVOX_CA_CA_SUBJECT_ORG"); v != "" {
 		cfg.CASubjectOrg = v
 	}
@@ -544,119 +509,31 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("OPENVOX_CA_CA_SUBJECT_PROVINCE"); v != "" {
 		cfg.CASubjectProvince = v
 	}
-	if v := os.Getenv("OPENVOX_CA_CA_PATH_LENGTH"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.CAPathLength = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_CA_VALIDITY_DAYS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.CAValidityDays = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_LEAF_VALIDITY_DAYS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.LeafValidityDays = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_CRL_VALIDITY_DAYS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.CRLValidityDays = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_DISABLE_CRL_REFRESH"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.DisableCRLRefresh = b
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_CRL_REFRESH_INTERVAL_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.CRLRefreshIntervalSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_CRL_REFRESH_BEFORE_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.CRLRefreshBeforeSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_CRL_SYNC_INTERVAL_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.CRLSyncIntervalSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_OCSP_INDEX_SYNC_INTERVAL_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.OCSPIndexSyncIntervalSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_ENABLE_EXPIRED_CERT_CLEANUP"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.EnableExpiredCertCleanup = b
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_EXPIRED_CERT_RETENTION_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.ExpiredCertRetentionSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_EXPIRED_CERT_CLEANUP_INTERVAL_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.ExpiredCertCleanupIntervalSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_CSR_RATE_LIMIT"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.CSRRateLimit = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_SIGNING_CONCURRENCY"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.CASigningConcurrency = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_ENCRYPT_CA_KEY"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.EncryptCAKey = b
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.InsecureAllowWorldReadableKeys = b
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_INSECURE_ALLOW_UNSAFE_AUTOSIGN_PATH"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.InsecureAllowUnsafeAutosignPath = b
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_PROMOTE_CN_TO_SAN"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.PromoteCNToSAN = b
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_ALLOW_SUBJECT_ALT_NAMES"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.AllowSubjectAltNames = b
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_ALLOW_DUPLICATE_CERTS"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.AllowDuplicateCerts = b
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_PUPPET_DATETIME_FORMAT"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.PuppetDateTimeFormat = b
-		}
-	}
+	errs = append(errs, config.EnvInt("OPENVOX_CA_CA_PATH_LENGTH", &cfg.CAPathLength, nil))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_CA_VALIDITY_DAYS", &cfg.CAValidityDays, config.Positive))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_LEAF_VALIDITY_DAYS", &cfg.LeafValidityDays, config.Positive))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_CRL_VALIDITY_DAYS", &cfg.CRLValidityDays, config.Positive))
+	errs = append(errs, config.EnvBool("OPENVOX_CA_DISABLE_CRL_REFRESH", &cfg.DisableCRLRefresh))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_CRL_REFRESH_INTERVAL_SEC", &cfg.CRLRefreshIntervalSec, config.Positive))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_CRL_REFRESH_BEFORE_SEC", &cfg.CRLRefreshBeforeSec, config.Positive))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_CRL_SYNC_INTERVAL_SEC", &cfg.CRLSyncIntervalSec, config.Positive))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_OCSP_INDEX_SYNC_INTERVAL_SEC", &cfg.OCSPIndexSyncIntervalSec, config.Positive))
+	errs = append(errs, config.EnvBool("OPENVOX_CA_ENABLE_EXPIRED_CERT_CLEANUP", &cfg.EnableExpiredCertCleanup))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_EXPIRED_CERT_RETENTION_SEC", &cfg.ExpiredCertRetentionSec, config.Positive))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_EXPIRED_CERT_CLEANUP_INTERVAL_SEC", &cfg.ExpiredCertCleanupIntervalSec, config.Positive))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_CSR_RATE_LIMIT", &cfg.CSRRateLimit, nil))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_SIGNING_CONCURRENCY", &cfg.CASigningConcurrency, nil))
+	errs = append(errs, config.EnvBool("OPENVOX_CA_ENCRYPT_CA_KEY", &cfg.EncryptCAKey))
+	errs = append(errs, config.EnvBool("OPENVOX_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS", &cfg.InsecureAllowWorldReadableKeys))
+	errs = append(errs, config.EnvBool("OPENVOX_CA_INSECURE_ALLOW_UNSAFE_AUTOSIGN_PATH", &cfg.InsecureAllowUnsafeAutosignPath))
+	errs = append(errs, config.EnvBool("OPENVOX_CA_PROMOTE_CN_TO_SAN", &cfg.PromoteCNToSAN))
+	errs = append(errs, config.EnvBool("OPENVOX_CA_ALLOW_SUBJECT_ALT_NAMES", &cfg.AllowSubjectAltNames))
+	errs = append(errs, config.EnvBool("OPENVOX_CA_ALLOW_DUPLICATE_CERTS", &cfg.AllowDuplicateCerts))
+	errs = append(errs, config.EnvBool("OPENVOX_CA_PUPPET_DATETIME_FORMAT", &cfg.PuppetDateTimeFormat))
 	if v := os.Getenv("OPENVOX_CA_SERIAL_NUMBER_FORMAT"); v != "" {
 		cfg.SerialNumberFormat = v
 	}
-	if v := os.Getenv("OPENVOX_CA_REVOKE_ON_AUTO_RENEW"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.RevokeOnAutoRenew = b
-		}
-	}
+	errs = append(errs, config.EnvBool("OPENVOX_CA_REVOKE_ON_AUTO_RENEW", &cfg.RevokeOnAutoRenew))
 	// n >= 0, unlike every interval setting around it. Those treat 0 as "unset,
 	// use the built-in default", so refusing it costs nothing. Here 0 is the
 	// feature's off switch and a distinct, meaningful value: with a positive
@@ -665,45 +542,22 @@ func applyServerEnv(cfg *serverConfig) {
 	// one direction this must not fail in — the env channel is how a container
 	// or Helm deployment overrides a baked-in config.yaml, and it would be able
 	// to widen the weakening but never close it.
-	if v := os.Getenv("OPENVOX_CA_SUPERSEDED_CERT_REVOKE_AFTER_SEC"); v != "" {
-		// Any integer, including negatives. supersededCertRevokeAfter already
-		// reads a negative as unset, so -1 — the value this setting documents
-		// as "unset" — has to reach it rather than being filtered out here. A
-		// bound of n >= 0 would silently drop exactly the documented way to say
-		// "go back to the default" when a config file has set a window.
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.SupersededCertRevokeAfterSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_SUPERSEDED_CERT_SWEEP_INTERVAL_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.SupersededCertSweepIntervalSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_LEAF_BACKDATE_SEC"); v != "" {
-		// Not gated on n > 0: a negative value has to reach validation to be
-		// refused, and discarding it here would leave the operator with the
-		// default and no error.
-		//
-		// A non-numeric value IS still discarded, by the err == nil guard that
-		// every numeric setting in this file uses. That is the file's
-		// convention rather than this setting's choice, and changing it means
-		// giving applyServerEnv an error return and altering what a dozen
-		// unrelated variables do with a typo -- a change to shared config
-		// handling, not to this one.
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.LeafBackdateSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_MANAGED_CERT_INTERVAL_SEC"); v != "" {
-		// Ungated for the same reason as the backdate above, and it used not to
-		// be: with `n > 0` here a negative value was discarded and the server
-		// started on the default, which is exactly the YAML-versus-environment
-		// asymmetry the refusal in loadServerConfig was added to end.
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.ManagedCertIntervalSec = n
-		}
-	}
+	// Any integer, including negatives. supersededCertRevokeAfter already
+	// reads a negative as unset, so -1 — the value this setting documents
+	// as "unset" — has to reach it rather than being filtered out here. A
+	// bound of n >= 0 would silently drop exactly the documented way to say
+	// "go back to the default" when a config file has set a window.
+	errs = append(errs, config.EnvInt("OPENVOX_CA_SUPERSEDED_CERT_REVOKE_AFTER_SEC", &cfg.SupersededCertRevokeAfterSec, nil))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_SUPERSEDED_CERT_SWEEP_INTERVAL_SEC", &cfg.SupersededCertSweepIntervalSec, config.Positive))
+	// Not gated on n > 0: a negative value has to reach validation to be
+	// refused, and discarding it here would leave the operator with the
+	// default and no error. A non-numeric one is refused by EnvInt itself.
+	errs = append(errs, config.EnvInt("OPENVOX_CA_LEAF_BACKDATE_SEC", &cfg.LeafBackdateSec, nil))
+	// Ungated for the same reason as the backdate above, and it used not to
+	// be: with `n > 0` here a negative value was discarded and the server
+	// started on the default, which is exactly the YAML-versus-environment
+	// asymmetry the refusal in loadServerConfig was added to end.
+	errs = append(errs, config.EnvInt("OPENVOX_CA_MANAGED_CERT_INTERVAL_SEC", &cfg.ManagedCertIntervalSec, nil))
 	if v := os.Getenv("OPENVOX_CA_KEY_PASSPHRASE_FILE"); v != "" {
 		cfg.CAKeyPassphraseFile = v
 	}
@@ -722,16 +576,8 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("OPENVOX_CA_ETCD_PASSWORD"); v != "" {
 		cfg.EtcdPassword = v
 	}
-	if v := os.Getenv("OPENVOX_CA_ETCD_DIAL_TIMEOUT_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.EtcdDialTimeoutSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_ETCD_REQUEST_TIMEOUT_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.EtcdRequestTimeoutSec = n
-		}
-	}
+	errs = append(errs, config.EnvInt("OPENVOX_CA_ETCD_DIAL_TIMEOUT_SEC", &cfg.EtcdDialTimeoutSec, config.Positive))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_ETCD_REQUEST_TIMEOUT_SEC", &cfg.EtcdRequestTimeoutSec, config.Positive))
 	if v := os.Getenv("OPENVOX_CA_ETCD_TLS_CA_FILE"); v != "" {
 		cfg.EtcdTLSCAFile = v
 	}
@@ -756,11 +602,7 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("OPENVOX_CA_REDIS_SENTINEL_PASSWORD"); v != "" {
 		cfg.RedisSentinelPassword = v
 	}
-	if v := os.Getenv("OPENVOX_CA_REDIS_DB"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			cfg.RedisDB = n
-		}
-	}
+	errs = append(errs, config.EnvInt("OPENVOX_CA_REDIS_DB", &cfg.RedisDB, config.NonNegative))
 	if v := os.Getenv("OPENVOX_CA_REDIS_USERNAME"); v != "" {
 		cfg.RedisUsername = v
 	}
@@ -770,21 +612,9 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("OPENVOX_CA_REDIS_KEY_PREFIX"); v != "" {
 		cfg.RedisKeyPrefix = v
 	}
-	if v := os.Getenv("OPENVOX_CA_REDIS_DIAL_TIMEOUT_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.RedisDialTimeoutSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_REDIS_REQUEST_TIMEOUT_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.RedisRequestTimeoutSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_REDIS_LOCK_TTL_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.RedisLockTTLSec = n
-		}
-	}
+	errs = append(errs, config.EnvInt("OPENVOX_CA_REDIS_DIAL_TIMEOUT_SEC", &cfg.RedisDialTimeoutSec, config.Positive))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_REDIS_REQUEST_TIMEOUT_SEC", &cfg.RedisRequestTimeoutSec, config.Positive))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_REDIS_LOCK_TTL_SEC", &cfg.RedisLockTTLSec, config.Positive))
 	if v := os.Getenv("OPENVOX_CA_REDIS_TLS_CA_FILE"); v != "" {
 		cfg.RedisTLSCAFile = v
 	}
@@ -800,26 +630,10 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("OPENVOX_CA_SQL_DSN_FILE"); v != "" {
 		cfg.SQLDSNFile = v
 	}
-	if v := os.Getenv("OPENVOX_CA_SQL_REQUEST_TIMEOUT_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.SQLRequestTimeoutSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_SQL_MIGRATION_TIMEOUT_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.SQLMigrationTimeoutSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_SQL_MAX_OPEN_CONNS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.SQLMaxOpenConns = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_SQL_MAX_IDLE_CONNS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.SQLMaxIdleConns = n
-		}
-	}
+	errs = append(errs, config.EnvInt("OPENVOX_CA_SQL_REQUEST_TIMEOUT_SEC", &cfg.SQLRequestTimeoutSec, config.Positive))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_SQL_MIGRATION_TIMEOUT_SEC", &cfg.SQLMigrationTimeoutSec, config.Positive))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_SQL_MAX_OPEN_CONNS", &cfg.SQLMaxOpenConns, config.Positive))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_SQL_MAX_IDLE_CONNS", &cfg.SQLMaxIdleConns, config.Positive))
 	if v := os.Getenv("OPENVOX_CA_SQL_TLS_CA_FILE"); v != "" {
 		cfg.SQLTLSCAFile = v
 	}
@@ -883,6 +697,7 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("OPENVOX_CA_OPENBAO_KUBERNETES_JWT_FILE"); v != "" {
 		cfg.OpenBao.KubernetesJWTFile = v
 	}
+	return errors.Join(errs...)
 }
 
 // splitAndTrim splits s on sep, trims whitespace around each element, and
