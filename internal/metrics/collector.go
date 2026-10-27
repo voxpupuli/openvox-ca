@@ -37,6 +37,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/constants"
+	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
 
 // namespace is the common Prometheus metric prefix for every CA-specific
@@ -677,13 +678,64 @@ func (c *Collector) gather(ctx context.Context) (snapshot, error) {
 	// Signed certificates: enumerate the live (non-deleted) signed set. A cleaned
 	// certificate is removed from this listing even though its inventory line
 	// persists, which is exactly the "known (non-deleted)" set the operator wants.
+	//
+	// On a backend with a certificate index, the serial and validity come from
+	// the index -- a listing and one read of the rows -- rather than from
+	// reading and parsing each stored certificate. On a remote backend that read costs a
+	// round trip per certificate, so the gather grew with the fleet until it
+	// overran its budget (#435). This is the join the certificate_statuses
+	// handler makes: the index answers for every subject it has a row for, and
+	// the stored certificate is read only for a subject it has none for (the
+	// window between writing a certificate and its row) or whose row will not
+	// parse. Revocation state comes from the CRL either way, never from the row,
+	// which is a projection maintained on a best-effort basis.
+	//
+	// What the index cannot see is a renewal in that same window: the subject
+	// still has a row, the predecessor's, so its series names the predecessor
+	// until the new row lands. The status API answers from the same row. Reading
+	// every certificate to rule that out is the cost this exists to remove.
+	//
+	// The index is queried before the listing, so a certificate signed between
+	// the two has no row yet and is read from storage, while one cleaned between
+	// them is reported for this one scrape. Statuses lists the signed
+	// certificates itself, to join its rows against them, so the listing runs
+	// twice; on Redis that is a SCAN of the keyspace each time, which is still
+	// far fewer round trips than a read per certificate.
+	records, _, err := c.ca.Storage.CertStatuses(ctx, "")
+	if err != nil {
+		return snapshot{}, fmt.Errorf("reading the certificate index: %w", err)
+	}
 	signed, err := c.ca.Storage.ListCerts(ctx)
 	if err != nil {
 		return snapshot{}, fmt.Errorf("listing signed certificates: %w", err)
 	}
+	indexed := make(map[string]bool, len(records))
+	var unparsed int
+	for _, rec := range records {
+		leaf, ok := leafFromRecord(rec, revoked)
+		if !ok {
+			unparsed++
+			slog.Debug("Prometheus exporter: certificate index row does not parse, reading the certificate",
+				"subject", rec.Subject, "serial", rec.Serial)
+			continue
+		}
+		indexed[rec.Subject] = true
+		snap.leaves = append(snap.leaves, leaf)
+	}
+	// One line per gather rather than per row: each of these costs the round
+	// trip the index exists to save, and a store full of them -- a bad import,
+	// say -- would otherwise slide back towards the per-certificate scan with
+	// nothing but a rising scrape duration to show for it.
+	if unparsed > 0 {
+		slog.Warn("Prometheus exporter: certificate index rows do not parse; reading their certificates instead",
+			"rows", unparsed)
+	}
 	seen := make(map[string]bool, len(signed))
 	for _, subject := range signed {
 		seen[subject] = true
+		if indexed[subject] {
+			continue
+		}
 		certPEM, err := c.ca.Storage.GetCert(ctx, subject)
 		if err != nil {
 			// The cert was deleted between listing and reading, or is briefly
@@ -697,14 +749,10 @@ func (c *Collector) gather(ctx context.Context) (snapshot, error) {
 			continue
 		}
 		serial := serialHex(cert.SerialNumber)
-		state := stateSigned
-		if revoked[serial] {
-			state = stateRevoked
-		}
 		snap.leaves = append(snap.leaves, leafCert{
 			subject:   subject,
 			serial:    serial,
-			state:     state,
+			state:     leafState(serial, revoked),
 			notBefore: cert.NotBefore,
 			notAfter:  cert.NotAfter,
 			hasCert:   true,
@@ -728,6 +776,45 @@ func (c *Collector) gather(ctx context.Context) (snapshot, error) {
 	}
 
 	return snap, nil
+}
+
+// leafFromRecord builds a leaf from a certificate index row. The row's serial
+// is stored verbatim as issued, so a row carried over from OpenVox Server's
+// inventory may spell it "0x0002", zero-padded and prefixed. NormaliseSerial
+// renders it as serialHex renders a parsed certificate's: the series must
+// carry the same labels whichever path produced them. Inventory timestamps
+// have whole-second precision, which is all an X.509 validity time has, so the
+// values match as well. ok is false for a row that does not parse, whose
+// subject the caller then reads from the stored certificate instead.
+func leafFromRecord(rec storage.CertRecord, revoked map[string]bool) (leafCert, bool) {
+	serial, err := storage.NormaliseSerial(rec.Serial)
+	if err != nil {
+		return leafCert{}, false
+	}
+	notBefore, err := time.Parse(storage.InventoryTimeFormat, rec.NotBefore)
+	if err != nil {
+		return leafCert{}, false
+	}
+	notAfter, err := time.Parse(storage.InventoryTimeFormat, rec.NotAfter)
+	if err != nil {
+		return leafCert{}, false
+	}
+	return leafCert{
+		subject:   rec.Subject,
+		serial:    serial,
+		state:     leafState(serial, revoked),
+		notBefore: notBefore,
+		notAfter:  notAfter,
+		hasCert:   true,
+	}, true
+}
+
+// leafState derives an issued certificate's state from the CRL's serials.
+func leafState(serial string, revoked map[string]bool) string {
+	if revoked[serial] {
+		return stateRevoked
+	}
+	return stateSigned
 }
 
 // parseCert decodes a PEM-encoded X.509 certificate.

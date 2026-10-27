@@ -517,6 +517,21 @@ has no `requested` series of its own.
 > To alert on expiry while ignoring revoked certs, filter on `state!="revoked"`,
 > as the mixin does.
 
+On the SQL, etcd and Redis backends the serial and validity times come from the
+certificate index: two listings of the signed certificates (the index joins its
+rows against one of them) and one read of the rows, instead of a read per
+certificate. On Redis each listing is a `SCAN` of the keyspace, about one round
+trip per 100 keys. A stored certificate is read only for a subject the index has
+no usable row for. The filesystem backend
+has no index and reads every certificate on every scrape, which local disk
+makes cheap; on a remote backend a read per certificate costs a round trip each,
+and on a large fleet that pushed the gather past its 10-second budget. Either
+way the `state` comes from the CRL. The values and labels are the same on both
+paths, except briefly around a write. A renewal whose certificate is stored and
+whose row is not yet written is reported under its predecessor's serial until
+the row lands, as `certificate_statuses` reports it, and a certificate cleaned
+while a gather runs can appear in that one scrape.
+
 ### Managed certificates
 
 Only present when [`managed_certs`](configuration.md#managed-certificates) or
