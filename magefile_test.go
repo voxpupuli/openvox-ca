@@ -395,6 +395,63 @@ var _ = Describe("Build.DistVariant", func() {
 	})
 })
 
+var _ = Describe("Dev.Vulncheck", func() {
+	// CI's vulnerability gate is this target, so a skip here would be a gate
+	// that passes having scanned nothing. The lookup is the target's first
+	// statement, so an empty PATH reaches it before any scan or file write.
+	It("fails, naming the pinned install, when govulncheck is not on PATH", func() {
+		GinkgoT().Setenv("PATH", GinkgoT().TempDir())
+		Expect(Dev{}.Vulncheck()).To(MatchError(ContainSubstring(govulncheckInstall)))
+	})
+
+	// The hint is only worth printing if it installs what CI runs. Renovate
+	// bumps all three copies in one PR only while its manager matches each of
+	// them, so check the copies and the manager together.
+	It("names the version ci.yml installs, in every file renovate bumps", func() {
+		renovateSrc, err := os.ReadFile("renovate.json")
+		Expect(err).NotTo(HaveOccurred())
+		var doc struct {
+			CustomManagers []struct {
+				DepNameTemplate     string   `json:"depNameTemplate"`
+				ManagerFilePatterns []string `json:"managerFilePatterns"`
+				MatchStrings        []string `json:"matchStrings"`
+			} `json:"customManagers"`
+		}
+		Expect(json.Unmarshal(renovateSrc, &doc)).To(Succeed())
+
+		var filePatterns, matchStrings []string
+		for _, m := range doc.CustomManagers {
+			if m.DepNameTemplate == "golang.org/x/vuln" {
+				filePatterns = append(filePatterns, m.ManagerFilePatterns...)
+				matchStrings = append(matchStrings, m.MatchStrings...)
+			}
+		}
+		Expect(matchStrings).NotTo(BeEmpty(), "renovate must own the govulncheck pin")
+
+		for _, path := range []string{filepath.Join(".github", "workflows", "ci.yml"), "magefile.go", "CONTRIBUTING.md"} {
+			src, err := os.ReadFile(path)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(src)).To(ContainSubstring(govulncheckInstall), "%s installs another govulncheck", path)
+
+			covered := false
+			for _, p := range filePatterns {
+				re, err := regexp.Compile(strings.Trim(p, "/"))
+				Expect(err).NotTo(HaveOccurred())
+				covered = covered || re.MatchString(path)
+			}
+			Expect(covered).To(BeTrue(), "renovate's govulncheck manager does not read %s", path)
+		}
+
+		matched := false
+		for _, ms := range matchStrings {
+			re, err := regexp.Compile(ms)
+			Expect(err).NotTo(HaveOccurred())
+			matched = matched || re.MatchString(govulncheckInstall)
+		}
+		Expect(matched).To(BeTrue(), "renovate's govulncheck manager does not match %q", govulncheckInstall)
+	})
+})
+
 var _ = Describe("workflowMatrixVariants", func() {
 	yamlSrc := []byte(`
 jobs:

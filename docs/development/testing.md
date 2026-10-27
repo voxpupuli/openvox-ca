@@ -17,6 +17,9 @@ mage test:magefile
 # Format, vet, tidy modules, lint, and check the workflows for drift (the CI gate)
 mage dev:check
 
+# Scan for known vulnerabilities the code can reach (needs network; CI runs it too)
+mage dev:vulncheck
+
 # Run integration tests using the compose stack
 mage test:integCompose
 

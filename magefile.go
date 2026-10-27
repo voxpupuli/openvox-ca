@@ -68,7 +68,7 @@ import (
 
 type Build mg.Namespace   // build:all  build:fips  build:dist  build:distVariant  build:unit  build:packages
 type Test mg.Namespace    // test:unit  test:magefile  test:integcompose  test:integcomposefips  test:loadcompose  test:bench  test:puppet  test:puppetfips  test:migration  test:backendsRedis  test:backendsEtcd
-type Dev mg.Namespace     // dev:check  dev:tidy    dev:clean  dev:container
+type Dev mg.Namespace     // dev:check  dev:vulncheck  dev:tidy  dev:clean  dev:container
 type Release mg.Namespace // release:prepare
 type Chart mg.Namespace   // chart:version  chart:lint  chart:validate  chart:test  chart:package
 
@@ -8799,6 +8799,81 @@ func (Dev) Lint() error {
 		return err
 	}
 	return nil
+}
+
+// govulncheckInstall installs the govulncheck version ci.yml pins. Renovate's
+// custom manager for it reads this file, ci.yml and CONTRIBUTING.md, so one
+// bump moves all three, and a magefile spec fails if they disagree.
+const govulncheckInstall = "go install golang.org/x/vuln/cmd/govulncheck@v1.9.0"
+
+// Vulncheck runs govulncheck over every build that ships or runs a release,
+// teeing its output to .test-output/govulncheck.log. It fails on a
+// vulnerability the code can reach -- govulncheck's own exit status -- and
+// prints, without failing on, one that is only in an imported package or a
+// required module.
+//
+// It is not part of dev:check, which needs no network: govulncheck reads
+// vuln.go.dev, so its verdict on unchanged code changes whenever an advisory
+// is published.
+//
+// A missing govulncheck is an error rather than the skip Lint makes. This
+// target exists only to run it, so a skip would pass having checked nothing,
+// and CI would read that as a clean scan.
+//
+// The builds scanned:
+//
+//   - The module for GOOS=linux with cgo off: the standard release binaries.
+//     The GOOS is set rather than inherited so a workstation scans what ships.
+//   - The magefile, which builds, signs and publishes releases. Its tag hides
+//     it from ./..., and it runs on the host, so it keeps the host's GOOS.
+//   - The FIPS build (cgo, GOEXPERIMENT=boringcrypto), which swaps in a
+//     different set of standard-library crypto packages. Loading it needs a
+//     Linux C toolchain, so other hosts skip it with a message; CI runs on
+//     Linux and always scans it.
+//
+// Test files are not scanned: none of them ship.
+func (Dev) Vulncheck() error {
+	if _, err := exec.LookPath("govulncheck"); err != nil {
+		return fmt.Errorf("govulncheck not found on PATH; install it with:\n    %s", govulncheckInstall)
+	}
+
+	if err := os.MkdirAll(".test-output", 0755); err != nil {
+		return err
+	}
+	logFile, err := os.Create(filepath.Join(".test-output", "govulncheck.log"))
+	if err != nil {
+		return err
+	}
+	defer logFile.Close()
+	out := io.MultiWriter(os.Stdout, logFile)
+	errOut := io.MultiWriter(os.Stderr, logFile)
+
+	type scan struct {
+		what string
+		env  map[string]string
+		args []string
+	}
+	scans := []scan{
+		{"the release build", map[string]string{"GOOS": "linux", "CGO_ENABLED": "0"}, []string{"./..."}},
+		{"the magefile", nil, []string{"-tags", "mage", "."}},
+	}
+	if runtime.GOOS == "linux" {
+		scans = append(scans, scan{"the FIPS build",
+			map[string]string{"GOOS": "linux", "CGO_ENABLED": "1", "GOEXPERIMENT": "boringcrypto"},
+			[]string{"./..."}})
+	} else {
+		fmt.Fprintf(out, "SKIP: the FIPS build needs a Linux host with a C compiler to load; CI scans it\n")
+	}
+
+	// Every scan runs, so one failure does not hide another's findings.
+	var errs []error
+	for _, sc := range scans {
+		fmt.Fprintf(out, "Running govulncheck over %s...\n", sc.what)
+		if _, err := sh.Exec(sc.env, out, errOut, "govulncheck", sc.args...); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", sc.what, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // Tidy runs go mod tidy and go fmt on any files that need it.

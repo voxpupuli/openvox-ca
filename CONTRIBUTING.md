@@ -29,6 +29,9 @@ guide is the human-friendly entry point; where the two overlap, AGENTS.md wins.
   slim container image may not have one. The product build is unaffected — it
   is still `CGO_ENABLED=0`.
 - Docker or Podman with the Compose plugin, for the integration and stack tests
+- Only to run the vulnerability scan locally (CI always runs it):
+  [govulncheck](https://go.dev/doc/tutorial/govulncheck)
+  (`go install golang.org/x/vuln/cmd/govulncheck@v1.9.0`)
 - Only if you are changing the Helm chart under [`charts/`](charts/):
   [Helm](https://helm.sh/docs/intro/install/) and
   [kubeconform](https://github.com/yannh/kubeconform)
@@ -81,6 +84,9 @@ mage test:unit
 
 # Format, vet, tidy modules, lint, and check the workflows for drift (the CI gate)
 mage dev:check
+
+# Scan for known vulnerabilities the code can reach (needs network; CI runs it too)
+mage dev:vulncheck
 
 # Run integration tests using the compose stack
 mage test:integCompose
