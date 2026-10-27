@@ -24,6 +24,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -183,12 +184,18 @@ var _ = Describe("CheckAutosign", func() {
 			// script crashed or is misconfigured rather than a deliberate policy
 			// deny. Behaviour must stay fail-closed (deny, no error), but a
 			// warning should be emitted to aid the operator.
+			script := writeScript("#!/bin/sh\nexit 127\n")
 			ok, err := ca.CheckAutosign(
-				ca.AutosignConfig{Mode: "executable", FileOrPath: writeScript("#!/bin/sh\nexit 127\n")},
+				ca.AutosignConfig{Mode: "executable", FileOrPath: script},
 				csr, csrPEM)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(ok).To(BeFalse())
 			Expect(buf.String()).To(ContainSubstring("misconfigured"))
+			// The file that ran, which a ConfigMap update can change under an
+			// unchanged configured path.
+			real, err := filepath.EvalSymlinks(script)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(buf.String()).To(ContainSubstring("realpath=" + real))
 		})
 
 		It("passes the subject CN as argv[1]", func() {
@@ -241,7 +248,9 @@ esac
 			_, err := ca.CheckAutosign(
 				ca.AutosignConfig{Mode: "executable", FileOrPath: "/no/such/plugin.sh"},
 				csr, csrPEM)
-			Expect(err).To(HaveOccurred())
+			// The cause, not merely an error: a refusal of the path would
+			// also be an error, and would pass HaveOccurred.
+			Expect(err).To(MatchError(os.ErrNotExist))
 		})
 
 		It("returns an error when path exists but is not executable", func() {
@@ -251,7 +260,9 @@ esac
 			_, err := ca.CheckAutosign(
 				ca.AutosignConfig{Mode: "executable", FileOrPath: path},
 				csr, csrPEM)
-			Expect(err).To(HaveOccurred())
+			// execve refuses a file with no execute bit with EACCES; the path
+			// itself passes the checks, so this is the exec failing.
+			Expect(err).To(MatchError(fs.ErrPermission))
 		})
 
 		It("does not pass parent process secrets to the executable", func() {

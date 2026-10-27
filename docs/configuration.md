@@ -31,6 +31,7 @@ re-asserting inventory integrity on a CA that will not start.
 | `--metrics-listen` | `""` | Address for the Prometheus exporter (e.g. `127.0.0.1:9140`); empty disables it. See [metrics & monitoring](metrics.md) |
 | `--encrypt-ca-key` | `false` | Encrypt the CA private key at rest (AES-256-GCM + Argon2id). See [CA key security](ca-key-security.md) |
 | `--insecure-allow-world-readable-keys` | `false` | Start even when CA key material is readable by every local account, warning loudly instead of refusing. Treat the key as compromised if you need this |
+| `--insecure-allow-unsafe-autosign-path` | `false` | Run the autosign executable even when someone other than root or the CA's own user could replace it, warning instead of refusing. See [the autosign executable's path](#the-autosign-executables-path) |
 | `--ca-key-passphrase-file` | `""` | Path to file containing the CA key passphrase (first line used) |
 | `--csr-rate-limit` | `60` | Max CSR submissions per IP per minute on the public `PUT /certificate_request` endpoint (0 disables) |
 | `--ca-signing-concurrency` | `max(4, GOMAXPROCS)` | Max concurrent CA-key signatures across issuance, CRL re-signing and the OCSP responder (0 disables the bound) |
@@ -169,6 +170,7 @@ expired_cert_cleanup_interval_sec: 0     # how often to run; 0 = built-in defaul
 # CA key encryption at rest.
 encrypt_ca_key: false           # encrypt the CA private key (AES-256-GCM + Argon2id)
 insecure_allow_world_readable_keys: false  # start even if key material is world-readable (refuses by default)
+insecure_allow_unsafe_autosign_path: false # run an autosign executable others could replace (refuses by default)
 ca_key_passphrase_file: ""      # path to passphrase file; required with encrypt_ca_key
 # Date/time format in JSON responses.
 puppet_datetime_format: false   # use Puppet CA style "2006-01-02T15:04:05MST" instead of RFC 3339
@@ -240,6 +242,7 @@ Environment variables mirror the CLI flags:
 | `--ca-signing-concurrency` | `PUPPET_CA_SIGNING_CONCURRENCY` |
 | `--encrypt-ca-key` | `PUPPET_CA_ENCRYPT_CA_KEY` |
 | `--insecure-allow-world-readable-keys` | `PUPPET_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS` |
+| `--insecure-allow-unsafe-autosign-path` | `PUPPET_CA_INSECURE_ALLOW_UNSAFE_AUTOSIGN_PATH` |
 | `--ca-key-passphrase-file` | `PUPPET_CA_KEY_PASSPHRASE_FILE` |
 | `--storage-backend` | `PUPPET_CA_STORAGE_BACKEND` |
 | `--etcd-endpoints` | `PUPPET_CA_ETCD_ENDPOINTS` |
@@ -2171,6 +2174,81 @@ csr_pem=$(cat)
 [[ "$subject" == web-* ]] && exit 0 || exit 1
 ```
 
+### The autosign executable's path
+
+Whoever can replace the autosign executable decides which certificates the CA
+signs, so the CA checks the path to it at startup and again before every run.
+It follows the configured path through every symlink, and checks each entry on
+the way — every directory it passes through, every symlink and the executable
+itself — with the rules of OpenSSH's `StrictModes`:
+
+1. **Owned by root or by the CA's own user.** An owner can change the mode of
+   what it owns, or rename it, whatever the mode says now.
+2. **Not group- or world-writable.** This is deliberately stricter than the CA's
+   [key-permission policy](storage-backends.md#filesystem-backend-default), which tolerates group access
+   because a Kubernetes `fsGroup` grants it at every mount. A key is data the CA
+   reads. The autosign executable is code the CA runs, and a group that can
+   write to it can sign certificates.
+3. **Two exemptions from the writable test, for directories only.** A sticky
+   directory such as `/tmp` is accepted, because the sticky bit stops other
+   users renaming or removing entries they do not own (the entries beneath it
+   are still checked). The root of a Kubernetes ConfigMap, Secret, projected or
+   downward API volume is accepted too: the kubelet creates it world-writable
+   and mounts it read-only. Ownership is checked in both cases.
+
+   The CA recognises such a volume as the root of a read-only mount that holds
+   a root-owned `..data` symlink, which the kubelet's atomic writer leaves
+   there. Both halves matter. Whether a mount is read-only is a property of the
+   mount as the CA sees it, not of the directory: under the packaged systemd
+   unit's `ProtectSystem=strict`, every directory, and every separate host
+   mount point, is read-only to the CA while host users can still write it
+   through their own view of it. None of those carries the kubelet's `..data`,
+   so they are judged on their mode bits like any other. What the exemption
+   does trust is that nobody but root writes the volume through another mount.
+   That holds for the kubelet's own volumes, and does not hold for an
+   `emptyDir` or host directory that another container or user mounts
+   read-write: keep the plugin in a ConfigMap or Secret.
+
+   Recognising a mount root needs Linux 5.8 or later. On an older kernel no
+   volume is exempt and a plugin in a ConfigMap directory mount is refused.
+   Mount it with `subPath` into a root-owned directory instead, which keeps the
+   check on, at the cost of a pod restart for every change to the plugin. The opt-out below is the last
+   resort.
+
+A symlink is judged on its owner only. Linux ignores a symlink's mode, which is
+always `rwxrwxrwx`.
+
+At startup a failure refuses to start, naming every entry at fault and what is
+wrong with it. Under `--daemon` the refusal comes before the fork, so it reaches
+the terminal. Before each run a failure refuses to run the executable: the CSR
+is saved but not signed, the agent gets a `500`, and the CA logs an `ERROR`
+naming the entries. Fixing the path does not sign those requests: while one is
+pending, the agent's resubmission is refused as a
+[duplicate](#duplicate-certificate-requests) before autosigning is reached.
+Review them with `openvox-ca-ctl list` and sign or clean each one by certname.
+Do not reach for `sign --all`, which would also sign requests the plugin would
+have denied. The executable that runs is the file that was checked, so
+repointing a symlink — including the `..data` swap the kubelet makes when a
+ConfigMap changes — takes effect on the next CSR, after the new target is
+checked. A CSR that arrives in the moment of that swap, after its file was
+checked and before it ran, finds the file gone; the CA then resolves, checks and
+runs the new one instead, once.
+
+The executable's SHA-256 is logged at startup for change detection. It is not
+enforced; editing the script takes effect on the next CSR.
+
+`insecure_allow_unsafe_autosign_path` (`--insecure-allow-unsafe-autosign-path`,
+`PUPPET_CA_INSECURE_ALLOW_UNSAFE_AUTOSIGN_PATH`) stops the ownership and
+writable findings from refusing anything. The CA logs a `WARN` for each one it
+finds at startup (and under `--daemon` prints them to the terminal), and then
+runs the executable regardless. The check before each run still requires the
+path to lead to a regular file, but with the opt-out set it logs nothing about
+an entry that has become unsafe since startup. Use it only when the entries it
+reports are writable by people you would trust to sign certificates.
+
+The allowlist file (a non-executable `--autosign-config` path) is not checked
+this way.
+
 ### Subject alternative names requested by a CSR
 
 `allow_subject_alt_names` decides whether a submitted CSR may ask for Subject
@@ -2513,7 +2591,7 @@ Withdrawing admin access has a second caveat: a certificate carrying the `pp_cli
 
 Everything else — the listen address, the storage backend, CA key custody, CA properties, which autosign configuration is in use, and every `client_ca` field except `crl_file` — requires a restart.
 
-Two file-backed inputs are consulted live, with no signal needed at all: the autosign allowlist or executable is read on every CSR, and the OpenBao AppRole `role_id`/`secret_id` files are read on every login (see [OpenBao Transit-engine CA key](openbao-transit.md)). Editing those takes effect on the next request; only the settings naming them are fixed at startup.
+Two file-backed inputs are consulted live, with no signal needed at all: the autosign allowlist or executable is read on every CSR (an executable's path is resolved and [checked](#the-autosign-executables-path) again each time), and the OpenBao AppRole `role_id`/`secret_id` files are read on every login (see [OpenBao Transit-engine CA key](openbao-transit.md)). Editing those takes effect on the next request; only the settings naming them are fixed at startup.
 
 **A self-provisioned serving certificate is the third thing that changes without
 a restart, and it needs no signal either.** With

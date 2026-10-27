@@ -629,6 +629,23 @@ autosign:
 development only, and the chart warns), or a path to an executable policy
 plugin you have mounted via `extraVolumes`.
 
+The CA refuses to run a plugin that anyone but root or its own user could
+replace (see [the autosign executable's path](configuration.md#the-autosign-executables-path)).
+A ConfigMap or Secret volume of its own passes, provided the plugin file is not
+group- or world-writable: the kubelet owns the volume as root and mounts it
+read-only, and the CA recognises the volume's root by the kubelet's own
+`..data` symlink (on Linux 5.8 or later). Give the file a `defaultMode` (or
+per-item `mode`) of `0555`, not `0775` or `0777`. Every directory above the
+mount point is checked too, so mount the volume somewhere root owns and
+nobody else can write. Under `persistence.mountPath`, which the default
+`fsGroup` makes group-writable, or under an `emptyDir`, it is refused, and an
+`emptyDir` shared read-write with another container gets no trust of its own.
+A ConfigMap update reaches the CA without a restart, unless the plugin is
+mounted with `subPath`, which the kubelet never updates. On a node kernel older
+than 5.8, a `subPath` mount into a root-owned directory (not under
+`configMount`, itself a ConfigMap volume root) is what keeps the check on: see
+[the autosign executable's path](configuration.md#the-autosign-executables-path).
+
 ## Monitoring
 
 The Prometheus exporter is off by default. Enabling it opens a second,

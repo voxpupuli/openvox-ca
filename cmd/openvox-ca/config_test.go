@@ -830,6 +830,9 @@ var _ = Describe("applyServerEnv each variable", func() {
 		Entry("INSECURE_ALLOW_WORLD_READABLE_KEYS", "PUPPET_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS", "true",
 			func(c *serverConfig) bool { return c.InsecureAllowWorldReadableKeys },
 			"InsecureAllowWorldReadableKeys"),
+		Entry("INSECURE_ALLOW_UNSAFE_AUTOSIGN_PATH", "PUPPET_CA_INSECURE_ALLOW_UNSAFE_AUTOSIGN_PATH", "true",
+			func(c *serverConfig) bool { return c.InsecureAllowUnsafeAutosignPath },
+			"InsecureAllowUnsafeAutosignPath"),
 		Entry("CLIENT_REVOCATION_POLICY", "PUPPET_CA_CLIENT_REVOCATION_POLICY", "check",
 			func(c *serverConfig) bool { return c.ClientRevocationPolicy == "check" }, "ClientRevocationPolicy"),
 		Entry("CLIENT_CRL_REFRESH_INTERVAL_SEC", "PUPPET_CA_CLIENT_CRL_REFRESH_INTERVAL_SEC", "300",
@@ -1228,6 +1231,27 @@ var _ = Describe("insecure_allow_world_readable_keys wiring", func() {
 	// was absent or present-and-false. Neither distinguishes a loader that
 	// ignores the file, which is what it claimed to catch -- the environment and
 	// flag specs above are what pin precedence.
+})
+
+var _ = Describe("insecure_allow_unsafe_autosign_path wiring", func() {
+	// The same three routes as insecure_allow_world_readable_keys above, and
+	// the same silent failure for the one operator who needs it. The
+	// environment route is in the table above; the flag route is driven end to
+	// end by autosign_validation_test.go's --daemon spec, which reaches the
+	// fork only if the overlay copied the flag into cfg.
+	BeforeEach(func() { clearServerEnv() })
+
+	It("is false by default", func() {
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.InsecureAllowUnsafeAutosignPath).To(BeFalse())
+	})
+
+	It("is read from the config file", func() {
+		cfg, err := loadServerConfig(writeTempConfig("insecure_allow_unsafe_autosign_path: true\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.InsecureAllowUnsafeAutosignPath).To(BeTrue())
+	})
 })
 
 var _ = Describe("allow_subject_alt_names wiring", func() {

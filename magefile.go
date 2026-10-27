@@ -8698,11 +8698,12 @@ func (Dev) Check() error {
 	if err := verifyDevCheckWiring(); err != nil {
 		return err
 	}
-	// Vet the two packages with non-Linux build-tagged files. Every CI check
-	// runs on Linux, so internal/sdnotify/monotonic_other.go and
-	// internal/storage/filelock_other.go are otherwise never compiled and can
-	// rot unnoticed — while the comment in each names developer workstations as
-	// the audience it serves. Each is scoped to its own package rather than
+	// Vet the three packages with non-Linux build-tagged files. Every CI check
+	// runs on Linux, so internal/sdnotify/monotonic_other.go,
+	// internal/storage/filelock_other.go and internal/ca's autosignpath_nolinux.go
+	// and autosignpath_nounix.go are otherwise never compiled and can rot
+	// unnoticed — while the comment in each of the first two names developer
+	// workstations as the audience it serves. Each is scoped to its own package rather than
 	// ./...: a module-wide cross-vet would make "every dependency must
 	// type-check on this GOOS" a standing constraint on future dependency
 	// choices, which is a much bigger commitment than these files need.
@@ -8714,14 +8715,18 @@ func (Dev) Check() error {
 	// no flock(2) at all. That does hold internal/storage's dependencies —
 	// bun, the SQLite driver, etcd and redis — to type-checking on windows;
 	// they all do today, and the alternative is a guard that guards nothing.
-	fmt.Println("Vetting the non-Linux build of internal/sdnotify...")
+	//
+	// internal/ca rides on both: darwin selects autosignpath_nolinux.go, and
+	// windows autosignpath_nounix.go as well. go vet compiles a package's tests
+	// too, so its unix-only test files carry a build constraint saying so.
+	fmt.Println("Vetting the non-Linux build of internal/sdnotify and internal/ca...")
 	if err := sh.RunWith(map[string]string{"GOOS": "darwin", "GOARCH": "arm64"},
-		"go", "vet", "./internal/sdnotify/..."); err != nil {
+		"go", "vet", "./internal/sdnotify/...", "./internal/ca/..."); err != nil {
 		return fmt.Errorf("go vet failed for GOOS=darwin: %w", err)
 	}
-	fmt.Println("Vetting the no-flock(2) build of internal/storage...")
+	fmt.Println("Vetting the no-flock(2) build of internal/storage, and the non-unix build of internal/ca...")
 	if err := sh.RunWith(map[string]string{"GOOS": "windows", "GOARCH": "amd64"},
-		"go", "vet", "./internal/storage/..."); err != nil {
+		"go", "vet", "./internal/storage/...", "./internal/ca/..."); err != nil {
 		return fmt.Errorf("go vet failed for GOOS=windows: %w", err)
 	}
 	return Dev{}.Lint()
