@@ -68,7 +68,7 @@ import (
 
 type Build mg.Namespace   // build:all  build:fips  build:dist  build:distVariant  build:unit  build:packages
 type Test mg.Namespace    // test:unit  test:magefile  test:integcompose  test:integcomposefips  test:loadcompose  test:bench  test:puppet  test:puppetfips  test:migration  test:backendsRedis  test:backendsEtcd
-type Dev mg.Namespace     // dev:check  dev:tidy    dev:clean  dev:container
+type Dev mg.Namespace     // dev:check  dev:vulncheck  dev:tidy  dev:clean  dev:container
 type Release mg.Namespace // release:prepare
 type Chart mg.Namespace   // chart:version  chart:lint  chart:validate  chart:test  chart:package
 
@@ -8799,6 +8799,127 @@ func (Dev) Lint() error {
 		return err
 	}
 	return nil
+}
+
+// govulncheckInstall installs the govulncheck version ci.yml pins. Renovate's
+// custom manager for it reads this file, ci.yml and CONTRIBUTING.md, so one
+// bump moves all three, and a magefile spec fails if they disagree.
+const govulncheckInstall = "go install golang.org/x/vuln/cmd/govulncheck@v1.9.0"
+
+// Vulncheck runs govulncheck over every release variant this host can load
+// and over the magefile, teeing its output to .test-output/govulncheck.log. It
+// fails on a vulnerability the code can reach -- govulncheck's own exit status
+// -- and lists, without failing on, one that is only in an imported package or
+// a required module. -show verbose is what lists those by ID; without it they
+// appear only as counts, and the exit status is the same either way.
+//
+// It is not part of dev:check, which needs no network: govulncheck reads
+// vuln.go.dev, so its verdict on unchanged code changes whenever an advisory
+// is published.
+//
+// A missing govulncheck is an error rather than the skip Lint makes. This
+// target exists only to run it, so a skip would pass having checked nothing,
+// and CI would read that as a clean scan.
+//
+// vulncheckScans says what is scanned. Test files are not: none of them ship.
+func (Dev) Vulncheck() error {
+	if _, err := exec.LookPath("govulncheck"); err != nil {
+		return fmt.Errorf("govulncheck not found on PATH; install it with:\n    %s", govulncheckInstall)
+	}
+	return vulncheckInto(".test-output", runtime.GOOS, runtime.GOARCH)
+}
+
+// vulncheckInto is Vulncheck for a hostOS/hostArch host, writing its log to
+// govulncheck.log in logDir. It is separate so a spec can drive it with a stub
+// govulncheck and a temporary logDir, leaving the repository's log alone.
+func vulncheckInto(logDir, hostOS, hostArch string) error {
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		return err
+	}
+	logFile, err := os.Create(filepath.Join(logDir, "govulncheck.log"))
+	if err != nil {
+		return err
+	}
+	defer logFile.Close()
+	out := io.MultiWriter(os.Stdout, logFile)
+	errOut := io.MultiWriter(os.Stderr, logFile)
+
+	scans, skipped := vulncheckScans(hostOS, hostArch)
+	for _, name := range skipped {
+		fmt.Fprintf(out, "SKIP: the %s release build is a cgo build for another platform, "+
+			"which this host cannot load\n", name)
+	}
+
+	// Every scan runs, so one failure does not hide another's findings.
+	var errs []error
+	for _, sc := range scans {
+		fmt.Fprintf(out, "Running govulncheck over %s...\n", sc.what)
+		if _, err := sh.Exec(sc.env, out, errOut, "govulncheck", sc.args...); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", sc.what, err))
+		}
+	}
+	if len(errs) == 0 {
+		return nil
+	}
+	// mage exits with the status of the error a target returns, but only one
+	// that carries ExitStatus itself: it does not unwrap. So the scans'
+	// statuses are lifted here, and the job exits 3 -- govulncheck's status
+	// for a reachable finding -- if any scan found one, and 1 when every
+	// failure was something else, such as vuln.go.dev being unreachable.
+	status := 1
+	for _, err := range errs {
+		if mg.ExitStatus(err) == 3 {
+			status = 3
+		}
+	}
+	return mg.Fatal(status, errors.Join(errs...))
+}
+
+// vulncheckScan is one govulncheck invocation: what it covers, the build
+// environment it loads the code under, and its arguments.
+type vulncheckScan struct {
+	what string
+	env  map[string]string
+	args []string
+}
+
+// vulncheckScans returns the scans Vulncheck runs on a hostOS/hostArch host,
+// and the release variants it cannot scan there.
+//
+// The release builds come from distVariants(), one scan per variant, so a
+// variant added there is scanned without anyone remembering to add it here.
+// Each scan loads the code under its variant's own GOOS and GOARCH: govulncheck
+// sees only the files those select, so a vulnerable symbol reached through
+// arm64-only files is invisible to an amd64 scan, and the reverse.
+//
+// The pure-Go variants load on any host. The cgo (FIPS) variants load only on
+// a Linux host of their own architecture, because loading runs cgo and that
+// needs a C compiler for the target. CI's runner is linux/amd64, so it scans
+// linux_amd64_fips and not linux_arm64_fips. The two build the same Go source
+// with GOEXPERIMENT=boringcrypto, and the linux_arm64 scan loads the arm64-only
+// files without it, so what CI leaves unscanned is the combination of the two:
+// a file selected only by arm64 and boringcrypto together.
+//
+// The magefile builds and packages every release artefact. Its build tag
+// hides it from ./..., and it runs on the host, so it keeps the host's
+// environment.
+func vulncheckScans(hostOS, hostArch string) (scans []vulncheckScan, skipped []string) {
+	for _, v := range distVariants() {
+		if v.env["CGO_ENABLED"] == "1" && (hostOS != "linux" || hostArch != v.env["GOARCH"]) {
+			skipped = append(skipped, v.name)
+			continue
+		}
+		scans = append(scans, vulncheckScan{
+			what: "the " + v.name + " release build",
+			env:  v.env,
+			args: []string{"-show", "verbose", "./..."},
+		})
+	}
+	scans = append(scans, vulncheckScan{
+		what: "the magefile",
+		args: []string{"-show", "verbose", "-tags", "mage", "."},
+	})
+	return scans, skipped
 }
 
 // Tidy runs go mod tidy and go fmt on any files that need it.

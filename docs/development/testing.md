@@ -17,6 +17,9 @@ mage test:magefile
 # Format, vet, tidy modules, lint, and check the workflows for drift (the CI gate)
 mage dev:check
 
+# Scan for known vulnerabilities the code can reach (needs network; CI runs it too)
+mage dev:vulncheck
+
 # Run integration tests using the compose stack
 mage test:integCompose
 
@@ -29,6 +32,16 @@ mage test:puppetFIPS
 # Run k6 load tests (correctness + throughput + saturation) via compose
 mage test:bench
 ```
+
+`dev:vulncheck` reads the advisory database live, so its CI job can go red on a
+tree nobody changed. It exits 3 when a scan finds a vulnerability the code can
+reach: a newly published advisory, listed under `=== Symbol Results ===` in the
+job log. Any other failure, such as vuln.go.dev being unreachable, exits 1, and
+rerunning the job is the first step. For an advisory, the fix is to bump the
+affected module, or the Go toolchain for a standard-library advisory (Renovate's
+"Go toolchain" group). When no fixed release exists yet, the maintainers decide
+between making the vulnerable symbol unreachable and overriding the required
+check, since govulncheck has no per-advisory allowlist.
 
 `test:unit` runs under `-race`. Several specs exist only to prove concurrency
 guarantees — the storage lock serialising CA bootstrap and key creation, the CRL

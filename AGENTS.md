@@ -22,6 +22,7 @@ Task. Invoke targets with `go run mage.go <Target>` or the `mage` binary:
 | `mage test:unit` | Run the unit suite (all packages, coverage to `coverage.out`), under `-race` — needs cgo and a C compiler |
 | `mage test:magefile` | Run the magefile's own build-tagged suite (invisible to `go test ./...`) |
 | `mage dev:lint` | Run `golangci-lint` (gate; see `.golangci.yml`) |
+| `mage dev:vulncheck` | Run `govulncheck` over each release variant and the magefile; fails on a vulnerability the code can reach (its own CI job, outside `dev:check`, since it reads vuln.go.dev). A FIPS variant is scanned only on a Linux host of its own architecture, so CI scans `linux_amd64_fips` and not `linux_arm64_fips` |
 | `mage test:backendsPostgres` | SQL backend integration suite against PostgreSQL, under `-race` — needs cgo and a C compiler |
 | `mage test:backendsMySQL` | SQL backend integration suite against MySQL, under `-race` — needs cgo and a C compiler |
 | `mage test:backendsEtcd` | etcd backend integration suite (embedded etcd), under `-race` — needs cgo and a C compiler |

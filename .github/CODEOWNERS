@@ -1,0 +1,13 @@
+# Code owners for the CI, release-signing and publishing path, and the Helm
+# chart. GitHub requests their review automatically on a pull request that
+# touches these paths; whether that review is *required* is the "Require review
+# from Code Owners" setting on the Main ruleset, not this file.
+#
+# /.github/ covers this file too, and every package Renovate labels
+# review-signing-path (cosign, Syft, actions/attest), since all of them are
+# used only under .github/.
+#
+# An owner without write access to the repository is disregarded.
+
+/.github/ @bootc @trevor-vaughan
+/charts/  @bootc @trevor-vaughan
