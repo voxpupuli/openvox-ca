@@ -304,7 +304,12 @@ if [ ! -e "$ENABLED_MARKER" ]; then
 		# prevent. Causes are mundane and real: a read-only /var during an
 		# image build, a full filesystem, an SELinux denial, something already
 		# occupying $STATEDIR.
-		if mkdir -p "$STATEDIR" 2>/dev/null && : >"$ENABLED_MARKER" 2>/dev/null; then
+		#
+		# printf, not `:`. `:` is a POSIX special built-in, and a redirection
+		# that fails on one exits a non-interactive shell outright -- on dash
+		# and on bash as sh alike -- so the warning below never ran and the
+		# postinstall failed instead, the outcome this block exists to avoid.
+		if mkdir -p "$STATEDIR" 2>/dev/null && printf '' >"$ENABLED_MARKER" 2>/dev/null; then
 			:
 		else
 			warn "enabled openvox-ca-first-boot.service but could not record it at" \

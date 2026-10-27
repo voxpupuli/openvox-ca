@@ -6046,6 +6046,24 @@ var _ = Describe("the packages' maintainer scripts", func() {
 			"the blocking file was replaced, so mkdir -p did not fail as this spec assumes")
 	})
 
+	// The other half of that branch, which the spec above never reached:
+	// mkdir -p succeeds and the create itself fails. The create used to be
+	// `: >file`, and `:` is a POSIX special built-in, so a failed redirection
+	// exited the shell outright -- under `set -e` or not, on dash and on bash
+	// as sh -- and the warning, and the install's success, never happened.
+	It("warns, but still succeeds, when the state directory cannot be written", func() {
+		if os.Geteuid() == 0 {
+			Skip("running as root: every directory is writable, so the guard cannot fire")
+		}
+		Expect(os.Chmod(stateDir, 0o555)).To(Succeed())
+		DeferCleanup(os.Chmod, stateDir, os.FileMode(0o755))
+
+		r, calls := run("packaging/scripts/postinstall", "configure")
+		Expect(r.ok).To(BeTrue(), "a marker that cannot be created must not fail the install: %s", r.output)
+		Expect(r.output).To(ContainSubstring("could not record it"))
+		Expect(calls).To(ContainSubstring("systemctl enable openvox-ca-first-boot.service"))
+	})
+
 	// The abstention docs/systemd.md promises in as many words: installing a
 	// package is not consent to create a certificate authority, so the
 	// postinstall itself never enables or starts openvox-ca.service. Only the
