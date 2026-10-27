@@ -7,26 +7,26 @@
 # These cover the rules whose firing behaviour is not obvious from reading the
 # PromQL:
 #
-#   * PuppetCACRLStale, the only expression in the mixin built from set
+#   * OpenVoxCACRLStale, the only expression in the mixin built from set
 #     operators (`or`, `unless`, `and on(...)`). Its two arms exist for
 #     different failure shapes and the qualifier on the second exists to keep it
 #     quiet during a third.
 #   * The upstream CRL chain rules, which turn on a timing argument rather than
 #     a shape: crlChainWindow must be *twice* crl_chain_refresh_interval_sec, or
 #     a persistent fault flaps.
-#   * PuppetCAKubernetesExportFailing and PuppetCAKubernetesExportNotRunning,
+#   * OpenVoxCAKubernetesExportFailing and OpenVoxCAKubernetesExportNotRunning,
 #     which between them have to cover a target that fails and a target that is
 #     never attempted. The first cannot see the second — every arm of it needs a
 #     last_error series to match on — so the cases below pin which rule owns
 #     which shape, that neither double-pages for the other's, and that a CA not
 #     using the feature at all stays silent under both.
-#   * PuppetCAOCSPIndexSyncFailing, whose `increase(...)` over the window stays
+#   * OpenVoxCAOCSPIndexSyncFailing, whose `increase(...)` over the window stays
 #     true for the whole window after a single failure — so its `for:` delays
 #     the page and then extends it, rather than filtering a transient.
-#   * PuppetCASupersedeFailing, where what needs pinning is the debounce: it is
+#   * OpenVoxCASupersedeFailing, where what needs pinning is the debounce: it is
 #     deliberately slower than its neighbours because the sweep retries on its
 #     own interval, so a case asserts it is quiet at 20m and firing at 40m.
-#   * PuppetCAManagedCertificateNeverIssued, whose two sides come from different
+#   * OpenVoxCAManagedCertificateNeverIssued, whose two sides come from different
 #     places -- the configured series from the in-process configuration, the
 #     leaf series from storage -- so they disagree whenever a gather fails. The
 #     cases pin that it fires for a certificate that never appears, stays quiet
@@ -59,77 +59,77 @@ tests:
   - interval: 1m
     name: cached CRL behind the stored one
     input_series:
-      - series: 'puppetca_crl_number{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_crl_number{job="openvox-ca",instance="ca-1:9140"}'
         values: "7+0x30"
-      - series: 'puppetca_crl_cached_number{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_crl_cached_number{job="openvox-ca",instance="ca-1:9140"}'
         values: "6+0x30"
-      - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
         values: "1+0x30"
     alert_rule_test:
       - eval_time: 5m
-        alertname: PuppetCACRLStale
+        alertname: OpenVoxCACRLStale
         exp_alerts: []
       - eval_time: 15m
-        alertname: PuppetCACRLStale
+        alertname: OpenVoxCACRLStale
         exp_alerts:
           - exp_labels:
               severity: critical
               job: openvox-ca
               instance: ca-1:9140
             exp_annotations:
-              summary: "Puppet CA replica is enforcing an out-of-date CRL."
-              description: "The Puppet CA on ca-1:9140 has not caught up with the CRL in storage for more than 10m, so certificates revoked on another replica are still being accepted here. Either it is behind the stored CRL, or the stored CRL cannot be read at all (in which case puppetca_crl_number is absent for this instance). Check puppetca_crl_sync_failures_total and the CA logs. A restart reloads the CRL, selecting the newest block this CA signed; if the stored chain carries none, startup warns and the re-sign paths refuse it, so check the stored chain rather than restarting repeatedly."
+              summary: "OpenVox CA replica is enforcing an out-of-date CRL."
+              description: "The OpenVox CA on ca-1:9140 has not caught up with the CRL in storage for more than 10m, so certificates revoked on another replica are still being accepted here. Either it is behind the stored CRL, or the stored CRL cannot be read at all (in which case openvoxca_crl_number is absent for this instance). Check openvoxca_crl_sync_failures_total and the CA logs. A restart reloads the CRL, selecting the newest block this CA signed; if the stored chain carries none, startup warns and the re-sign paths refuse it, so check the stored chain rather than restarting repeatedly."
 
   # A replica in step with storage must never fire, however long it runs.
   - interval: 1m
     name: cached CRL level with the stored one
     input_series:
-      - series: 'puppetca_crl_number{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_crl_number{job="openvox-ca",instance="ca-1:9140"}'
         values: "7+0x30"
-      - series: 'puppetca_crl_cached_number{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_crl_cached_number{job="openvox-ca",instance="ca-1:9140"}'
         values: "7+0x30"
-      - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
         values: "1+0x30"
     alert_rule_test:
       - eval_time: 25m
-        alertname: PuppetCACRLStale
+        alertname: OpenVoxCACRLStale
         exp_alerts: []
 
   # The second arm. An unreadable or unparseable stored CRL drops
-  # puppetca_crl_number while the cached number keeps being published, so the
+  # openvoxca_crl_number while the cached number keeps being published, so the
   # subtraction has no left operand — without this arm the alert would go silent
   # in one of the two cases it exists for.
   - interval: 1m
     name: stored CRL unreadable while the scrape still succeeds
     input_series:
-      - series: 'puppetca_crl_cached_number{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_crl_cached_number{job="openvox-ca",instance="ca-1:9140"}'
         values: "6+0x30"
-      - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
         values: "1+0x30"
     alert_rule_test:
       - eval_time: 15m
-        alertname: PuppetCACRLStale
+        alertname: OpenVoxCACRLStale
         exp_alerts:
           - exp_labels:
               severity: critical
               job: openvox-ca
               instance: ca-1:9140
             exp_annotations:
-              summary: "Puppet CA replica is enforcing an out-of-date CRL."
-              description: "The Puppet CA on ca-1:9140 has not caught up with the CRL in storage for more than 10m, so certificates revoked on another replica are still being accepted here. Either it is behind the stored CRL, or the stored CRL cannot be read at all (in which case puppetca_crl_number is absent for this instance). Check puppetca_crl_sync_failures_total and the CA logs. A restart reloads the CRL, selecting the newest block this CA signed; if the stored chain carries none, startup warns and the re-sign paths refuse it, so check the stored chain rather than restarting repeatedly."
+              summary: "OpenVox CA replica is enforcing an out-of-date CRL."
+              description: "The OpenVox CA on ca-1:9140 has not caught up with the CRL in storage for more than 10m, so certificates revoked on another replica are still being accepted here. Either it is behind the stored CRL, or the stored CRL cannot be read at all (in which case openvoxca_crl_number is absent for this instance). Check openvoxca_crl_sync_failures_total and the CA logs. A restart reloads the CRL, selecting the newest block this CA signed; if the stored chain carries none, startup warns and the re-sign paths refuse it, so check the stored chain rather than restarting repeatedly."
 
   # ...and the qualifier on that arm. A storage outage drops the same series,
-  # but is already paged by PuppetCAScrapeFailing, so this must not double-page.
+  # but is already paged by OpenVoxCAScrapeFailing, so this must not double-page.
   - interval: 1m
     name: whole gather failing is left to the scrape alert
     input_series:
-      - series: 'puppetca_crl_cached_number{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_crl_cached_number{job="openvox-ca",instance="ca-1:9140"}'
         values: "6+0x30"
-      - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
         values: "0+0x30"
     alert_rule_test:
       - eval_time: 25m
-        alertname: PuppetCACRLStale
+        alertname: OpenVoxCACRLStale
         exp_alerts: []
 
   # The sync-failure warning is a plain increase() over a restart-resetting
@@ -138,27 +138,27 @@ tests:
   - interval: 1m
     name: sync failures warn before the lag pages
     input_series:
-      - series: 'puppetca_crl_sync_failures_total{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_crl_sync_failures_total{job="openvox-ca",instance="ca-1:9140"}'
         values: "0 1+1x30"
-      - series: 'puppetca_crl_number{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_crl_number{job="openvox-ca",instance="ca-1:9140"}'
         values: "7+0x30"
-      - series: 'puppetca_crl_cached_number{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_crl_cached_number{job="openvox-ca",instance="ca-1:9140"}'
         values: "6+0x30"
-      - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
         values: "1+0x30"
     alert_rule_test:
       - eval_time: 8m
-        alertname: PuppetCACRLSyncFailing
+        alertname: OpenVoxCACRLSyncFailing
         exp_alerts:
           - exp_labels:
               severity: warning
               job: openvox-ca
               instance: ca-1:9140
             exp_annotations:
-              summary: "Puppet CA cannot reload its CRL from storage."
-              description: "The Puppet CA on ca-1:9140 could not reload the stored CRL (puppetca_crl_sync_failures_total is rising), so it is enforcing whichever CRL it already held. A certificate revoked on another replica may still be accepted here. Check CRL storage, and whether the CA certificate was replaced without restarting this replica."
+              summary: "OpenVox CA cannot reload its CRL from storage."
+              description: "The OpenVox CA on ca-1:9140 could not reload the stored CRL (openvoxca_crl_sync_failures_total is rising), so it is enforcing whichever CRL it already held. A certificate revoked on another replica may still be accepted here. Check CRL storage, and whether the CA certificate was replaced without restarting this replica."
       - eval_time: 8m
-        alertname: PuppetCACRLStale
+        alertname: OpenVoxCACRLStale
         exp_alerts: []
 
   # --- Kubernetes export ---
@@ -175,21 +175,21 @@ tests:
   - interval: 1m
     name: a failed material read alerts on every target that wanted it
     input_series:
-      - series: 'puppetca_k8s_export_last_error_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",kind="Secret",namespace="ns1",name="trust"}'
+      - series: 'openvoxca_k8s_export_last_error_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",kind="Secret",namespace="ns1",name="trust"}'
         values: "1000+0x30"
-      - series: 'puppetca_k8s_export_last_error_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",kind="ConfigMap",namespace="ns2",name="bundle"}'
+      - series: 'openvoxca_k8s_export_last_error_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",kind="ConfigMap",namespace="ns2",name="bundle"}'
         values: "1000+0x30"
-      - series: 'puppetca_k8s_export_applies_total{job="openvox-ca",instance="ca-1:9140",kind="Secret",namespace="ns1",name="trust",result="error"}'
+      - series: 'openvoxca_k8s_export_applies_total{job="openvox-ca",instance="ca-1:9140",kind="Secret",namespace="ns1",name="trust",result="error"}'
         values: "1+1x30"
-      - series: 'puppetca_k8s_export_applies_total{job="openvox-ca",instance="ca-1:9140",kind="ConfigMap",namespace="ns2",name="bundle",result="error"}'
+      - series: 'openvoxca_k8s_export_applies_total{job="openvox-ca",instance="ca-1:9140",kind="ConfigMap",namespace="ns2",name="bundle",result="error"}'
         values: "1+1x30"
     alert_rule_test:
       # k8sExportFailingFor (15m) debounces a failure corrected moments later.
       - eval_time: 10m
-        alertname: PuppetCAKubernetesExportFailing
+        alertname: OpenVoxCAKubernetesExportFailing
         exp_alerts: []
       - eval_time: 20m
-        alertname: PuppetCAKubernetesExportFailing
+        alertname: OpenVoxCAKubernetesExportFailing
         exp_alerts:
           - exp_labels:
               severity: warning
@@ -214,7 +214,7 @@ tests:
       # Attempts are being recorded, so this is Failing's business, not
       # NotRunning's. A target that fails every time must not double-page.
       - eval_time: 40m
-        alertname: PuppetCAKubernetesExportNotRunning
+        alertname: OpenVoxCAKubernetesExportNotRunning
         exp_alerts: []
 
   # A CA with no export series at all. Both rules need a series to match on, so
@@ -232,35 +232,35 @@ tests:
   - interval: 1m
     name: a CA not using the export feature is silent
     input_series:
-      - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
         values: "1+0x60"
     alert_rule_test:
       - eval_time: 60m
-        alertname: PuppetCAKubernetesExportFailing
+        alertname: OpenVoxCAKubernetesExportFailing
         exp_alerts: []
       - eval_time: 60m
-        alertname: PuppetCAKubernetesExportNotRunning
+        alertname: OpenVoxCAKubernetesExportNotRunning
         exp_alerts: []
 
-  # PuppetCAManagedCertificateNeverIssued, whose whole job is a shape no
+  # OpenVoxCAManagedCertificateNeverIssued, whose whole job is a shape no
   # comparison over the leaf series can express: a configured certificate that
   # does not exist. Eight cases, because each of them could go wrong on its own
   # and every one of those would look like the rule working.
   - interval: 1m
     name: a managed certificate that never appears
     input_series:
-      - series: 'puppetca_managed_certificate_configured{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local"}'
+      - series: 'openvoxca_managed_certificate_configured{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local"}'
         values: "1+0x90"
-      - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
         values: "1+0x90"
     alert_rule_test:
       # managedCertNeverIssuedFor (1h) rides out a slow start and the first
       # reconcile interval.
       - eval_time: 30m
-        alertname: PuppetCAManagedCertificateNeverIssued
+        alertname: OpenVoxCAManagedCertificateNeverIssued
         exp_alerts: []
       - eval_time: 70m
-        alertname: PuppetCAManagedCertificateNeverIssued
+        alertname: OpenVoxCAManagedCertificateNeverIssued
         exp_alerts:
           - exp_labels:
               severity: warning
@@ -269,7 +269,7 @@ tests:
               subject: puppetserver.openvox.svc.cluster.local
             exp_annotations:
               summary: "A managed certificate has never been issued, or holds only revoked ones."
-              description: "The Puppet CA on ca-1:9140 has puppetserver.openvox.svc.cluster.local configured in managed_certs or serving_cert but no usable certificate for it after 1h: either none was ever issued, or every certificate it has is revoked. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else's material, or a directory that does not exist. If the subject is the CA's own certname it came from serving_cert, and the CA would not have started at all had it never been issued -- so a certificate that existed no longer has a live inventory row. The rule fires on the absence of a non-revoked row, so revocation is the likeliest cause but not the only one -- check the CRL first, then the inventory itself."
+              description: "The OpenVox CA on ca-1:9140 has puppetserver.openvox.svc.cluster.local configured in managed_certs or serving_cert but no usable certificate for it after 1h: either none was ever issued, or every certificate it has is revoked. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else's material, or a directory that does not exist. If the subject is the CA's own certname it came from serving_cert, and the CA would not have started at all had it never been issued -- so a certificate that existed no longer has a live inventory row. The rule fires on the absence of a non-revoked row, so revocation is the likeliest cause but not the only one -- check the CRL first, then the inventory itself."
 
   # The serving_cert subject, which the description spends two sentences on and
   # no case executed. Every other case here uses a component certname, so the
@@ -282,16 +282,16 @@ tests:
   - interval: 1m
     name: the CA's own serving certificate with no live inventory row
     input_series:
-      - series: 'puppetca_managed_certificate_configured{job="openvox-ca",instance="ca-1:9140",subject="ca.example.com"}'
+      - series: 'openvoxca_managed_certificate_configured{job="openvox-ca",instance="ca-1:9140",subject="ca.example.com"}'
         values: "1+0x90"
-      - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
         values: "1+0x90"
     alert_rule_test:
       - eval_time: 30m
-        alertname: PuppetCAManagedCertificateNeverIssued
+        alertname: OpenVoxCAManagedCertificateNeverIssued
         exp_alerts: []
       - eval_time: 70m
-        alertname: PuppetCAManagedCertificateNeverIssued
+        alertname: OpenVoxCAManagedCertificateNeverIssued
         exp_alerts:
           - exp_labels:
               severity: warning
@@ -300,7 +300,7 @@ tests:
               subject: ca.example.com
             exp_annotations:
               summary: "A managed certificate has never been issued, or holds only revoked ones."
-              description: "The Puppet CA on ca-1:9140 has ca.example.com configured in managed_certs or serving_cert but no usable certificate for it after 1h: either none was ever issued, or every certificate it has is revoked. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else's material, or a directory that does not exist. If the subject is the CA's own certname it came from serving_cert, and the CA would not have started at all had it never been issued -- so a certificate that existed no longer has a live inventory row. The rule fires on the absence of a non-revoked row, so revocation is the likeliest cause but not the only one -- check the CRL first, then the inventory itself."
+              description: "The OpenVox CA on ca-1:9140 has ca.example.com configured in managed_certs or serving_cert but no usable certificate for it after 1h: either none was ever issued, or every certificate it has is revoked. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else's material, or a directory that does not exist. If the subject is the CA's own certname it came from serving_cert, and the CA would not have started at all had it never been issued -- so a certificate that existed no longer has a live inventory row. The rule fires on the absence of a non-revoked row, so revocation is the likeliest cause but not the only one -- check the CRL first, then the inventory itself."
 
   # The steady state, and the case that stops the rule being a permanent page
   # for every deployment that uses the feature. The leaf series carries serial
@@ -309,15 +309,15 @@ tests:
   - interval: 1m
     name: a managed certificate that has been issued is silent
     input_series:
-      - series: 'puppetca_managed_certificate_configured{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local"}'
+      - series: 'openvoxca_managed_certificate_configured{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local"}'
         values: "1+0x90"
-      - series: 'puppetca_leaf_certificate_not_after_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local",serial="0a1b",state="signed"}'
+      - series: 'openvoxca_leaf_certificate_not_after_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local",serial="0a1b",state="signed"}'
         values: "9999999999+0x90"
-      - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
         values: "1+0x90"
     alert_rule_test:
       - eval_time: 70m
-        alertname: PuppetCAManagedCertificateNeverIssued
+        alertname: OpenVoxCAManagedCertificateNeverIssued
         exp_alerts: []
 
   # Why the expression keeps the target labels instead of matching on subject
@@ -332,15 +332,15 @@ tests:
   - interval: 1m
     name: one replica configured, the certificate on the other
     input_series:
-      - series: 'puppetca_managed_certificate_configured{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local"}'
+      - series: 'openvoxca_managed_certificate_configured{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local"}'
         values: "1+0x90"
-      - series: 'puppetca_leaf_certificate_not_after_timestamp_seconds{job="openvox-ca",instance="ca-2:9140",subject="puppetserver.openvox.svc.cluster.local",serial="0a1b",state="signed"}'
+      - series: 'openvoxca_leaf_certificate_not_after_timestamp_seconds{job="openvox-ca",instance="ca-2:9140",subject="puppetserver.openvox.svc.cluster.local",serial="0a1b",state="signed"}'
         values: "9999999999+0x90"
-      - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
         values: "1+0x90"
     alert_rule_test:
       - eval_time: 70m
-        alertname: PuppetCAManagedCertificateNeverIssued
+        alertname: OpenVoxCAManagedCertificateNeverIssued
         exp_alerts:
           - exp_labels:
               severity: warning
@@ -349,7 +349,7 @@ tests:
               subject: puppetserver.openvox.svc.cluster.local
             exp_annotations:
               summary: "A managed certificate has never been issued, or holds only revoked ones."
-              description: "The Puppet CA on ca-1:9140 has puppetserver.openvox.svc.cluster.local configured in managed_certs or serving_cert but no usable certificate for it after 1h: either none was ever issued, or every certificate it has is revoked. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else's material, or a directory that does not exist. If the subject is the CA's own certname it came from serving_cert, and the CA would not have started at all had it never been issued -- so a certificate that existed no longer has a live inventory row. The rule fires on the absence of a non-revoked row, so revocation is the likeliest cause but not the only one -- check the CRL first, then the inventory itself."
+              description: "The OpenVox CA on ca-1:9140 has puppetserver.openvox.svc.cluster.local configured in managed_certs or serving_cert but no usable certificate for it after 1h: either none was ever issued, or every certificate it has is revoked. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else's material, or a directory that does not exist. If the subject is the CA's own certname it came from serving_cert, and the CA would not have started at all had it never been issued -- so a certificate that existed no longer has a live inventory row. The rule fires on the absence of a non-revoked row, so revocation is the likeliest cause but not the only one -- check the CRL first, then the inventory itself."
 
   # An ordinary revoke-then-reissue, which must stay silent. The predecessor is
   # revoked and the replacement is signed, both under the same subject, so
@@ -360,17 +360,17 @@ tests:
   - interval: 1m
     name: a revoked predecessor beside a signed certificate is silent
     input_series:
-      - series: 'puppetca_managed_certificate_configured{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local"}'
+      - series: 'openvoxca_managed_certificate_configured{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local"}'
         values: "1+0x90"
-      - series: 'puppetca_leaf_certificate_not_after_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local",serial="0a1b",state="revoked"}'
+      - series: 'openvoxca_leaf_certificate_not_after_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local",serial="0a1b",state="revoked"}'
         values: "9999999999+0x90"
-      - series: 'puppetca_leaf_certificate_not_after_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local",serial="0a1c",state="signed"}'
+      - series: 'openvoxca_leaf_certificate_not_after_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local",serial="0a1c",state="signed"}'
         values: "9999999999+0x90"
-      - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
         values: "1+0x90"
     alert_rule_test:
       - eval_time: 70m
-        alertname: PuppetCAManagedCertificateNeverIssued
+        alertname: OpenVoxCAManagedCertificateNeverIssued
         exp_alerts: []
 
   # The case the rule existed for and could not reach. A store write that fails
@@ -388,20 +388,20 @@ tests:
   - interval: 1m
     name: a subject whose only certificate is revoked pages
     input_series:
-      - series: 'puppetca_managed_certificate_configured{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local"}'
+      - series: 'openvoxca_managed_certificate_configured{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local"}'
         values: "1+0x90"
-      - series: 'puppetca_leaf_certificate_not_after_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local",serial="0a1b",state="revoked"}'
+      - series: 'openvoxca_leaf_certificate_not_after_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local",serial="0a1b",state="revoked"}'
         values: "9999999999+0x90"
-      - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
         values: "1+0x90"
     alert_rule_test:
       # Inside managedCertNeverIssuedFor, which absorbs the moment between a
       # revocation and the reissue that normally follows it.
       - eval_time: 30m
-        alertname: PuppetCAManagedCertificateNeverIssued
+        alertname: OpenVoxCAManagedCertificateNeverIssued
         exp_alerts: []
       - eval_time: 70m
-        alertname: PuppetCAManagedCertificateNeverIssued
+        alertname: OpenVoxCAManagedCertificateNeverIssued
         exp_alerts:
           - exp_labels:
               severity: warning
@@ -410,7 +410,7 @@ tests:
               subject: puppetserver.openvox.svc.cluster.local
             exp_annotations:
               summary: "A managed certificate has never been issued, or holds only revoked ones."
-              description: "The Puppet CA on ca-1:9140 has puppetserver.openvox.svc.cluster.local configured in managed_certs or serving_cert but no usable certificate for it after 1h: either none was ever issued, or every certificate it has is revoked. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else's material, or a directory that does not exist. If the subject is the CA's own certname it came from serving_cert, and the CA would not have started at all had it never been issued -- so a certificate that existed no longer has a live inventory row. The rule fires on the absence of a non-revoked row, so revocation is the likeliest cause but not the only one -- check the CRL first, then the inventory itself."
+              description: "The OpenVox CA on ca-1:9140 has puppetserver.openvox.svc.cluster.local configured in managed_certs or serving_cert but no usable certificate for it after 1h: either none was ever issued, or every certificate it has is revoked. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else's material, or a directory that does not exist. If the subject is the CA's own certname it came from serving_cert, and the CA would not have started at all had it never been issued -- so a certificate that existed no longer has a live inventory row. The rule fires on the absence of a non-revoked row, so revocation is the likeliest cause but not the only one -- check the CRL first, then the inventory itself."
 
   # Two entries on one target, one issued and one not, which pins that the
   # `unless` matches per subject rather than across the whole vector. Nothing
@@ -420,17 +420,17 @@ tests:
   - interval: 1m
     name: one entry issued does not silence another that is not
     input_series:
-      - series: 'puppetca_managed_certificate_configured{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local"}'
+      - series: 'openvoxca_managed_certificate_configured{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local"}'
         values: "1+0x90"
-      - series: 'puppetca_managed_certificate_configured{job="openvox-ca",instance="ca-1:9140",subject="puppetdb.openvox.svc.cluster.local"}'
+      - series: 'openvoxca_managed_certificate_configured{job="openvox-ca",instance="ca-1:9140",subject="puppetdb.openvox.svc.cluster.local"}'
         values: "1+0x90"
-      - series: 'puppetca_leaf_certificate_not_after_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local",serial="0a1b",state="signed"}'
+      - series: 'openvoxca_leaf_certificate_not_after_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local",serial="0a1b",state="signed"}'
         values: "9999999999+0x90"
-      - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
         values: "1+0x90"
     alert_rule_test:
       - eval_time: 70m
-        alertname: PuppetCAManagedCertificateNeverIssued
+        alertname: OpenVoxCAManagedCertificateNeverIssued
         exp_alerts:
           - exp_labels:
               severity: warning
@@ -439,7 +439,7 @@ tests:
               subject: puppetdb.openvox.svc.cluster.local
             exp_annotations:
               summary: "A managed certificate has never been issued, or holds only revoked ones."
-              description: "The Puppet CA on ca-1:9140 has puppetdb.openvox.svc.cluster.local configured in managed_certs or serving_cert but no usable certificate for it after 1h: either none was ever issued, or every certificate it has is revoked. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else's material, or a directory that does not exist. If the subject is the CA's own certname it came from serving_cert, and the CA would not have started at all had it never been issued -- so a certificate that existed no longer has a live inventory row. The rule fires on the absence of a non-revoked row, so revocation is the likeliest cause but not the only one -- check the CRL first, then the inventory itself."
+              description: "The OpenVox CA on ca-1:9140 has puppetdb.openvox.svc.cluster.local configured in managed_certs or serving_cert but no usable certificate for it after 1h: either none was ever issued, or every certificate it has is revoked. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else's material, or a directory that does not exist. If the subject is the CA's own certname it came from serving_cert, and the CA would not have started at all had it never been issued -- so a certificate that existed no longer has a live inventory row. The rule fires on the absence of a non-revoked row, so revocation is the likeliest cause but not the only one -- check the CRL first, then the inventory itself."
 
   # The one shape the rule's own two sides disagree about, and the reason the
   # expression is qualified on a successful scrape.
@@ -449,7 +449,7 @@ tests:
   # and all vanish together. So a storage outage leaves the left side of the
   # `unless` standing with nothing on the right, and every configured entry
   # matches -- healthy ones included. Without the qualifier this fires an hour
-  # into an outage PuppetCAScrapeFailing has already been paging for, and sends
+  # into an outage OpenVoxCAScrapeFailing has already been paging for, and sends
   # an operator to check RBAC for certificates that exist and are fine.
   #
   # Both certificates here are healthy and present up to the outage: the series
@@ -459,25 +459,25 @@ tests:
   - interval: 1m
     name: a storage outage does not page for every managed certificate
     input_series:
-      - series: 'puppetca_managed_certificate_configured{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local"}'
+      - series: 'openvoxca_managed_certificate_configured{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local"}'
         values: "1+0x120"
-      - series: 'puppetca_managed_certificate_configured{job="openvox-ca",instance="ca-1:9140",subject="puppetdb.openvox.svc.cluster.local"}'
+      - series: 'openvoxca_managed_certificate_configured{job="openvox-ca",instance="ca-1:9140",subject="puppetdb.openvox.svc.cluster.local"}'
         values: "1+0x120"
-      - series: 'puppetca_leaf_certificate_not_after_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local",serial="0a1b",state="signed"}'
+      - series: 'openvoxca_leaf_certificate_not_after_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local",serial="0a1b",state="signed"}'
         values: "9999999999+0x40"
-      - series: 'puppetca_leaf_certificate_not_after_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",subject="puppetdb.openvox.svc.cluster.local",serial="0a1c",state="signed"}'
+      - series: 'openvoxca_leaf_certificate_not_after_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",subject="puppetdb.openvox.svc.cluster.local",serial="0a1c",state="signed"}'
         values: "9999999999+0x40"
-      - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
         values: "1+0x40 0+0x80"
     alert_rule_test:
       # Healthy, before the outage.
       - eval_time: 30m
-        alertname: PuppetCAManagedCertificateNeverIssued
+        alertname: OpenVoxCAManagedCertificateNeverIssued
         exp_alerts: []
       # Well past managedCertNeverIssuedFor into the outage: still silent,
       # because the gather is failing rather than the certificates missing.
       - eval_time: 110m
-        alertname: PuppetCAManagedCertificateNeverIssued
+        alertname: OpenVoxCAManagedCertificateNeverIssued
         exp_alerts: []
 
   # A CA not using the feature. The configured series is published from the
@@ -488,11 +488,11 @@ tests:
   - interval: 1m
     name: a CA with no managed certificates is silent
     input_series:
-      - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
         values: "1+0x90"
     alert_rule_test:
       - eval_time: 70m
-        alertname: PuppetCAManagedCertificateNeverIssued
+        alertname: OpenVoxCAManagedCertificateNeverIssued
         exp_alerts: []
 
   # The backstop. The CA creates the apply counters at zero for every configured
@@ -502,17 +502,17 @@ tests:
   - interval: 1m
     name: a configured target that is never attempted
     input_series:
-      - series: 'puppetca_k8s_export_applies_total{job="openvox-ca",instance="ca-1:9140",kind="Secret",namespace="ns1",name="trust",result="success"}'
+      - series: 'openvoxca_k8s_export_applies_total{job="openvox-ca",instance="ca-1:9140",kind="Secret",namespace="ns1",name="trust",result="success"}'
         values: "0+0x60"
-      - series: 'puppetca_k8s_export_applies_total{job="openvox-ca",instance="ca-1:9140",kind="Secret",namespace="ns1",name="trust",result="error"}'
+      - series: 'openvoxca_k8s_export_applies_total{job="openvox-ca",instance="ca-1:9140",kind="Secret",namespace="ns1",name="trust",result="error"}'
         values: "0+0x60"
     alert_rule_test:
       # k8sExportNotRunningFor (30m) rides out a slow start.
       - eval_time: 20m
-        alertname: PuppetCAKubernetesExportNotRunning
+        alertname: OpenVoxCAKubernetesExportNotRunning
         exp_alerts: []
       - eval_time: 40m
-        alertname: PuppetCAKubernetesExportNotRunning
+        alertname: OpenVoxCAKubernetesExportNotRunning
         exp_alerts:
           - exp_labels:
               severity: warning
@@ -523,10 +523,10 @@ tests:
               name: trust
             exp_annotations:
               summary: "A Kubernetes export target has never been attempted."
-              description: "The Puppet CA on ca-1:9140 has Secret/trust in namespace ns1 configured for export but has not attempted a single apply in 30m. The exported object holds whatever it held before, and PuppetCAKubernetesExportFailing cannot report on a target with no apply results. Check the CA logs for the Kubernetes export job starting, and for errors initialising the in-cluster client."
+              description: "The OpenVox CA on ca-1:9140 has Secret/trust in namespace ns1 configured for export but has not attempted a single apply in 30m. The exported object holds whatever it held before, and OpenVoxCAKubernetesExportFailing cannot report on a target with no apply results. Check the CA logs for the Kubernetes export job starting, and for errors initialising the in-cluster client."
       # Nothing has failed, only nothing has happened, so Failing stays quiet.
       - eval_time: 40m
-        alertname: PuppetCAKubernetesExportFailing
+        alertname: OpenVoxCAKubernetesExportFailing
         exp_alerts: []
 
   # A target that succeeded and then failed: the '>' arm, and the proof that a
@@ -537,15 +537,15 @@ tests:
     name: a failure that a retry later clears
     input_series:
       # Fails at t=0, then a retry succeeds at t=25m with a newer timestamp.
-      - series: 'puppetca_k8s_export_last_error_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",kind="Secret",namespace="ns1",name="trust"}'
+      - series: 'openvoxca_k8s_export_last_error_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",kind="Secret",namespace="ns1",name="trust"}'
         values: "1000+0x60"
-      - series: 'puppetca_k8s_export_last_success_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",kind="Secret",namespace="ns1",name="trust"}'
+      - series: 'openvoxca_k8s_export_last_success_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",kind="Secret",namespace="ns1",name="trust"}'
         values: "900+0x24 2000+0x36"
-      - series: 'puppetca_k8s_export_applies_total{job="openvox-ca",instance="ca-1:9140",kind="Secret",namespace="ns1",name="trust",result="error"}'
+      - series: 'openvoxca_k8s_export_applies_total{job="openvox-ca",instance="ca-1:9140",kind="Secret",namespace="ns1",name="trust",result="error"}'
         values: "1+0x60"
     alert_rule_test:
       - eval_time: 20m
-        alertname: PuppetCAKubernetesExportFailing
+        alertname: OpenVoxCAKubernetesExportFailing
         exp_alerts:
           - exp_labels:
               severity: warning
@@ -559,7 +559,7 @@ tests:
               description: "The most recent apply of Secret/trust in namespace ns1 from ca-1:9140 failed; the exported object may hold a stale CA certificate or CRL until the next successful export. Check the CA logs, RBAC, and API server connectivity."
       # The retry succeeded; last_success now leads and the alert resolves.
       - eval_time: 30m
-        alertname: PuppetCAKubernetesExportFailing
+        alertname: OpenVoxCAKubernetesExportFailing
         exp_alerts: []
 
   # Deployment-added labels must not be aggregated away. Under the shipped
@@ -573,18 +573,18 @@ tests:
     name: a sibling target does not mask a never-attempted one
     input_series:
       # ns1 is being exported normally.
-      - series: 'puppetca_k8s_export_applies_total{job="openvox-ca",instance="ca-1:9140",namespace="pki",exported_namespace="ns1",kind="Secret",name="trust",result="success"}'
+      - series: 'openvoxca_k8s_export_applies_total{job="openvox-ca",instance="ca-1:9140",namespace="pki",exported_namespace="ns1",kind="Secret",name="trust",result="success"}'
         values: "5+0x60"
-      - series: 'puppetca_k8s_export_applies_total{job="openvox-ca",instance="ca-1:9140",namespace="pki",exported_namespace="ns1",kind="Secret",name="trust",result="error"}'
+      - series: 'openvoxca_k8s_export_applies_total{job="openvox-ca",instance="ca-1:9140",namespace="pki",exported_namespace="ns1",kind="Secret",name="trust",result="error"}'
         values: "0+0x60"
       # ns2 is configured and has never been attempted.
-      - series: 'puppetca_k8s_export_applies_total{job="openvox-ca",instance="ca-1:9140",namespace="pki",exported_namespace="ns2",kind="Secret",name="trust",result="success"}'
+      - series: 'openvoxca_k8s_export_applies_total{job="openvox-ca",instance="ca-1:9140",namespace="pki",exported_namespace="ns2",kind="Secret",name="trust",result="success"}'
         values: "0+0x60"
-      - series: 'puppetca_k8s_export_applies_total{job="openvox-ca",instance="ca-1:9140",namespace="pki",exported_namespace="ns2",kind="Secret",name="trust",result="error"}'
+      - series: 'openvoxca_k8s_export_applies_total{job="openvox-ca",instance="ca-1:9140",namespace="pki",exported_namespace="ns2",kind="Secret",name="trust",result="error"}'
         values: "0+0x60"
     alert_rule_test:
       - eval_time: 40m
-        alertname: PuppetCAKubernetesExportNotRunning
+        alertname: OpenVoxCAKubernetesExportNotRunning
         exp_alerts:
           - exp_labels:
               severity: warning
@@ -596,7 +596,7 @@ tests:
               name: trust
             exp_annotations:
               summary: "A Kubernetes export target has never been attempted."
-              description: "The Puppet CA on ca-1:9140 has Secret/trust in namespace pki configured for export but has not attempted a single apply in 30m. The exported object holds whatever it held before, and PuppetCAKubernetesExportFailing cannot report on a target with no apply results. Check the CA logs for the Kubernetes export job starting, and for errors initialising the in-cluster client."
+              description: "The OpenVox CA on ca-1:9140 has Secret/trust in namespace pki configured for export but has not attempted a single apply in 30m. The exported object holds whatever it held before, and OpenVoxCAKubernetesExportFailing cannot report on a target with no apply results. Check the CA logs for the Kubernetes export job starting, and for errors initialising the in-cluster client."
 
   # The OCSP index sync failure warning. Its dwell (ocspIndexSyncFor, 15m) is
   # deliberately longer than the CRL one's, because a missed inventory read is
@@ -605,24 +605,24 @@ tests:
   - interval: 1m
     name: OCSP index sync failures page only after the longer dwell
     input_series:
-      - series: 'puppetca_ocsp_index_sync_failures_total{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_ocsp_index_sync_failures_total{job="openvox-ca",instance="ca-1:9140"}'
         values: "0 1+1x40"
-      - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
         values: "1+0x40"
     alert_rule_test:
       - eval_time: 8m
-        alertname: PuppetCAOCSPIndexSyncFailing
+        alertname: OpenVoxCAOCSPIndexSyncFailing
         exp_alerts: []
       - eval_time: 20m
-        alertname: PuppetCAOCSPIndexSyncFailing
+        alertname: OpenVoxCAOCSPIndexSyncFailing
         exp_alerts:
           - exp_labels:
               severity: warning
               job: openvox-ca
               instance: ca-1:9140
             exp_annotations:
-              summary: "Puppet CA cannot reload its OCSP serial index from storage."
-              description: "The Puppet CA on ca-1:9140 could not reload the inventory into its OCSP serial index (puppetca_ocsp_index_sync_failures_total is rising), so it is answering \"unknown\" for certificates its peers have signed since the last successful pass. Check inventory storage, and the inventory integrity MAC if the logs report a mismatch."
+              summary: "OpenVox CA cannot reload its OCSP serial index from storage."
+              description: "The OpenVox CA on ca-1:9140 could not reload the inventory into its OCSP serial index (openvoxca_ocsp_index_sync_failures_total is rising), so it is answering \"unknown\" for certificates its peers have signed since the last successful pass. Check inventory storage, and the inventory integrity MAC if the logs report a mismatch."
 
   # One failure and then nothing: the alert still fires, because increase() over
   # the window stays true until the window rolls past the step. This pins the
@@ -636,37 +636,37 @@ tests:
   - interval: 1m
     name: OCSP index sync latches after a single failure
     input_series:
-      - series: 'puppetca_ocsp_index_sync_failures_total{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_ocsp_index_sync_failures_total{job="openvox-ca",instance="ca-1:9140"}'
         values: "0 1+0x40"
-      - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
         values: "1+0x40"
     alert_rule_test:
       - eval_time: 8m
-        alertname: PuppetCAOCSPIndexSyncFailing
+        alertname: OpenVoxCAOCSPIndexSyncFailing
         exp_alerts: []
       - eval_time: 35m
-        alertname: PuppetCAOCSPIndexSyncFailing
+        alertname: OpenVoxCAOCSPIndexSyncFailing
         exp_alerts:
           - exp_labels:
               severity: warning
               job: openvox-ca
               instance: ca-1:9140
             exp_annotations:
-              summary: "Puppet CA cannot reload its OCSP serial index from storage."
-              description: "The Puppet CA on ca-1:9140 could not reload the inventory into its OCSP serial index (puppetca_ocsp_index_sync_failures_total is rising), so it is answering \"unknown\" for certificates its peers have signed since the last successful pass. Check inventory storage, and the inventory integrity MAC if the logs report a mismatch."
+              summary: "OpenVox CA cannot reload its OCSP serial index from storage."
+              description: "The OpenVox CA on ca-1:9140 could not reload the inventory into its OCSP serial index (openvoxca_ocsp_index_sync_failures_total is rising), so it is answering \"unknown\" for certificates its peers have signed since the last successful pass. Check inventory storage, and the inventory integrity MAC if the logs report a mismatch."
 
   # A replica whose index reads are all succeeding must not appear, or the rule
   # would page on every healthy CA in the fleet.
   - interval: 1m
     name: OCSP index sync quiet when reads succeed
     input_series:
-      - series: 'puppetca_ocsp_index_sync_failures_total{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_ocsp_index_sync_failures_total{job="openvox-ca",instance="ca-1:9140"}'
         values: "0+0x40"
-      - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
         values: "1+0x40"
     alert_rule_test:
       - eval_time: 20m
-        alertname: PuppetCAOCSPIndexSyncFailing
+        alertname: OpenVoxCAOCSPIndexSyncFailing
         exp_alerts: []
 
   # A delayed revocation the CA could not schedule or carry out. The counter is
@@ -679,31 +679,31 @@ tests:
   - interval: 1m
     name: supersede failures warn once debounced
     input_series:
-      - series: 'puppetca_supersede_failures_total{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_supersede_failures_total{job="openvox-ca",instance="ca-1:9140"}'
         values: "0 1+1x60"
-      - series: 'puppetca_crl_update_failures_total{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_crl_update_failures_total{job="openvox-ca",instance="ca-1:9140"}'
         values: "0+0x60"
-      - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
         values: "1+0x60"
     alert_rule_test:
       - eval_time: 20m
-        alertname: PuppetCASupersedeFailing
+        alertname: OpenVoxCASupersedeFailing
         exp_alerts: []
       - eval_time: 40m
-        alertname: PuppetCASupersedeFailing
+        alertname: OpenVoxCASupersedeFailing
         exp_alerts:
           - exp_labels:
               severity: warning
               job: openvox-ca
               instance: ca-1:9140
             exp_annotations:
-              summary: "Puppet CA is failing to revoke superseded certificates."
-              description: "The Puppet CA on ca-1:9140 could not schedule or carry out the revocation of a certificate a renewal replaced (puppetca_supersede_failures_total is rising), so that certificate is still a valid credential. Check the CA logs to tell the causes apart: \"Superseded-certificate revocation sweep failed\" means the sweep could not read the list, take the CRL lock or write the list back, which is the likeliest cause and blocks every pending revocation at once; \"failed to retire replaced certificate\" means the supersession was never recorded and the serial is in the warning; \"Could not revoke superseded certificates\" means they were recorded but the sweep could not amend the CRL; it re-signs once for the whole pass, so every entry that pass attempted stays listed and is retried together; \"Discarding\" means the entry is gone and will never be retried. A store that cannot serve the superseded key raises this even where the overlap window is closed (superseded_cert_revoke_after_sec: 0) — look for \"cannot determine supersession status\" or \"Revoke: could not read pending supersessions\", which also mean renewals are being refused. Retire anything the sweep will not with openvox-ca-ctl revoke --serial <hex>. puppetca_supersede_pending shows how many are still waiting."
+              summary: "OpenVox CA is failing to revoke superseded certificates."
+              description: "The OpenVox CA on ca-1:9140 could not schedule or carry out the revocation of a certificate a renewal replaced (openvoxca_supersede_failures_total is rising), so that certificate is still a valid credential. Check the CA logs to tell the causes apart: \"Superseded-certificate revocation sweep failed\" means the sweep could not read the list, take the CRL lock or write the list back, which is the likeliest cause and blocks every pending revocation at once; \"failed to retire replaced certificate\" means the supersession was never recorded and the serial is in the warning; \"Could not revoke superseded certificates\" means they were recorded but the sweep could not amend the CRL; it re-signs once for the whole pass, so every entry that pass attempted stays listed and is retried together; \"Discarding\" means the entry is gone and will never be retried. A store that cannot serve the superseded key raises this even where the overlap window is closed (superseded_cert_revoke_after_sec: 0) — look for \"cannot determine supersession status\" or \"Revoke: could not read pending supersessions\", which also mean renewals are being refused. Retire anything the sweep will not with openvox-ca-ctl revoke --serial <hex>. openvoxca_supersede_pending shows how many are still waiting."
       - eval_time: 40m
-        alertname: PuppetCACRLUpdateFailing
+        alertname: OpenVoxCACRLUpdateFailing
         exp_alerts: []
 
-  # PuppetCACRLUpdateFailing. Its expression is a plain increase() and needs no
+  # OpenVoxCACRLUpdateFailing. Its expression is a plain increase() and needs no
   # pinning, but this branch rewrote its description — it quotes CA log lines,
   # and the renaming of "failed to revoke replaced certificate" to "failed to
   # retire replaced certificate" had to be propagated here. A test over the
@@ -715,28 +715,28 @@ tests:
   - interval: 1m
     name: CRL update failures warn once debounced
     input_series:
-      - series: 'puppetca_crl_update_failures_total{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_crl_update_failures_total{job="openvox-ca",instance="ca-1:9140"}'
         values: "0 1+1x40"
-      - series: 'puppetca_supersede_failures_total{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_supersede_failures_total{job="openvox-ca",instance="ca-1:9140"}'
         values: "0+0x40"
-      - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
         values: "1+0x40"
     alert_rule_test:
       - eval_time: 10m
-        alertname: PuppetCACRLUpdateFailing
+        alertname: OpenVoxCACRLUpdateFailing
         exp_alerts: []
       - eval_time: 20m
-        alertname: PuppetCACRLUpdateFailing
+        alertname: OpenVoxCACRLUpdateFailing
         exp_alerts:
           - exp_labels:
               severity: warning
               job: openvox-ca
               instance: ca-1:9140
             exp_annotations:
-              summary: "Puppet CA is failing to update its CRL."
-              description: "The Puppet CA on ca-1:9140 could not amend its CRL (puppetca_crl_update_failures_total is rising). Revocations may not have taken effect and superseded certificates may still be valid. Check the CA logs to tell the causes apart: \"Renew:\"/\"AutoRenew:\"/\"ReconcileManaged: failed to retire replaced certificate\"/\"Clean:\" warnings are a real failure to maintain the CRL, and on filesystem or SQLite a \"Revoke failed\" warning on a request that took over a minute is instead a revocation that merely queued too long for its subject lock. The superseded-certificate sweep re-signs once per pass rather than once per due entry, so a failing sweep moves this counter once however many certificates were due: read a rising value as a count of failed CRL amendments, not of certificates left unrevoked, and use puppetca_supersede_pending for those. Then check CRL storage."
+              summary: "OpenVox CA is failing to update its CRL."
+              description: "The OpenVox CA on ca-1:9140 could not amend its CRL (openvoxca_crl_update_failures_total is rising). Revocations may not have taken effect and superseded certificates may still be valid. Check the CA logs to tell the causes apart: \"Renew:\"/\"AutoRenew:\"/\"ReconcileManaged: failed to retire replaced certificate\"/\"Clean:\" warnings are a real failure to maintain the CRL, and on filesystem or SQLite a \"Revoke failed\" warning on a request that took over a minute is instead a revocation that merely queued too long for its subject lock. The superseded-certificate sweep re-signs once per pass rather than once per due entry, so a failing sweep moves this counter once however many certificates were due: read a rising value as a count of failed CRL amendments, not of certificates left unrevoked, and use openvoxca_supersede_pending for those. Then check CRL storage."
       - eval_time: 20m
-        alertname: PuppetCASupersedeFailing
+        alertname: OpenVoxCASupersedeFailing
         exp_alerts: []
 
   # --- Upstream CRL chain ---
@@ -752,7 +752,7 @@ tests:
   - interval: 1m
     name: a persistent chain-refresh fault does not flap
     input_series:
-      - series: 'puppetca_crl_chain_refresh_failures_total{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_crl_chain_refresh_failures_total{job="openvox-ca",instance="ca-1:9140"}'
         values: "0+0x59 1+0x59 2+0x59 3+0x59"
     alert_rule_test:
       # Before the first increment. The counter exists and reads 0, which is the
@@ -760,27 +760,27 @@ tests:
       # state a rule written on the raw counter rather than its increase would
       # not.
       - eval_time: 30m
-        alertname: PuppetCAUpstreamCRLRefreshFailing
+        alertname: OpenVoxCAUpstreamCRLRefreshFailing
         exp_alerts: []
       - eval_time: 119m
-        alertname: PuppetCAUpstreamCRLRefreshFailing
+        alertname: OpenVoxCAUpstreamCRLRefreshFailing
         exp_alerts:
           - exp_labels:
               severity: warning
               job: openvox-ca
               instance: ca-1:9140
             exp_annotations:
-              summary: "The Puppet CA cannot refresh its upstream CRL chain."
+              summary: "The OpenVox CA cannot refresh its upstream CRL chain."
               description: "Refreshing crl_chain_file on ca-1:9140 is failing, so the published ancestor CRLs are ageing with nothing renewing them. The existing chain is left in place; check the file is readable, parseable, ends on a PEM block boundary, and is under 4 MiB. Note this also blocks revocation until it is fixed."
       - eval_time: 179m
-        alertname: PuppetCAUpstreamCRLRefreshFailing
+        alertname: OpenVoxCAUpstreamCRLRefreshFailing
         exp_alerts:
           - exp_labels:
               severity: warning
               job: openvox-ca
               instance: ca-1:9140
             exp_annotations:
-              summary: "The Puppet CA cannot refresh its upstream CRL chain."
+              summary: "The OpenVox CA cannot refresh its upstream CRL chain."
               description: "Refreshing crl_chain_file on ca-1:9140 is failing, so the published ancestor CRLs are ageing with nothing renewing them. The existing chain is left in place; check the file is readable, parseable, ends on a PEM block boundary, and is under 4 MiB. Note this also blocks revocation until it is fixed."
 
   # The other half of the same rule: it must also stop. increase() over a window
@@ -792,41 +792,41 @@ tests:
     name: a chain-refresh fault that stops resolves on its own
     input_series:
       # One failure at ten minutes, then nothing further for four hours.
-      - series: 'puppetca_crl_chain_refresh_failures_total{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_crl_chain_refresh_failures_total{job="openvox-ca",instance="ca-1:9140"}'
         values: "0+0x9 1+0x240"
     alert_rule_test:
       # Fired: the increment is inside the 2h window and the 15m debounce has
       # passed.
       - eval_time: 30m
-        alertname: PuppetCAUpstreamCRLRefreshFailing
+        alertname: OpenVoxCAUpstreamCRLRefreshFailing
         exp_alerts:
           - exp_labels:
               severity: warning
               job: openvox-ca
               instance: ca-1:9140
             exp_annotations:
-              summary: "The Puppet CA cannot refresh its upstream CRL chain."
+              summary: "The OpenVox CA cannot refresh its upstream CRL chain."
               description: "Refreshing crl_chain_file on ca-1:9140 is failing, so the published ancestor CRLs are ageing with nothing renewing them. The existing chain is left in place; check the file is readable, parseable, ends on a PEM block boundary, and is under 4 MiB. Note this also blocks revocation until it is fixed."
       # Resolved: the increment has aged out of the window, and nothing replaced
       # it. A rule keyed on the counter's value rather than its increase would
       # still be firing here, for ever.
       - eval_time: 240m
-        alertname: PuppetCAUpstreamCRLRefreshFailing
+        alertname: OpenVoxCAUpstreamCRLRefreshFailing
         exp_alerts: []
 
-  # PuppetCAUpstreamCRLDiscarded: event-driven, so it must fall silent once the cause stops
+  # OpenVoxCAUpstreamCRLDiscarded: event-driven, so it must fall silent once the cause stops
   # rather than latching on a counter that never descends.
   - interval: 1m
     name: an upstream CRL discarded once stops alerting when it stops happening
     input_series:
-      - series: 'puppetca_crl_chain_discarded_total{job="openvox-ca",instance="ca-1:9140",issuer="Upstream Root CA"}'
+      - series: 'openvoxca_crl_chain_discarded_total{job="openvox-ca",instance="ca-1:9140",issuer="Upstream Root CA"}'
         values: "0+0x5 1+0x300"
     alert_rule_test:
       - eval_time: 10m
-        alertname: PuppetCAUpstreamCRLDiscarded
+        alertname: OpenVoxCAUpstreamCRLDiscarded
         exp_alerts: []
       - eval_time: 30m
-        alertname: PuppetCAUpstreamCRLDiscarded
+        alertname: OpenVoxCAUpstreamCRLDiscarded
         exp_alerts:
           - exp_labels:
               severity: warning
@@ -834,25 +834,25 @@ tests:
               instance: ca-1:9140
               issuer: Upstream Root CA
             exp_annotations:
-              description: "ca-1:9140 dropped a CRL from crl_chain_file because no certificate in its CA bundle signed it, so the published chain is smaller than the file says. Check that the file holds CRLs from this CA's own ancestors and that the bundle is complete. If the file is stale rather than the bundle incomplete, PuppetCAUpstreamCRLRegressed is the alert for that."
-              summary: "The Puppet CA is discarding CRLs from crl_chain_file."
+              description: "ca-1:9140 dropped a CRL from crl_chain_file because no certificate in its CA bundle signed it, so the published chain is smaller than the file says. Check that the file holds CRLs from this CA's own ancestors and that the bundle is complete. If the file is stale rather than the bundle incomplete, OpenVoxCAUpstreamCRLRegressed is the alert for that."
+              summary: "The OpenVox CA is discarding CRLs from crl_chain_file."
       - eval_time: 3h
-        alertname: PuppetCAUpstreamCRLDiscarded
+        alertname: OpenVoxCAUpstreamCRLDiscarded
         exp_alerts: []
 
-  # PuppetCAUpstreamCRLRegressed: event-driven, so it must fall silent once the cause stops
+  # OpenVoxCAUpstreamCRLRegressed: event-driven, so it must fall silent once the cause stops
   # rather than latching on a counter that never descends.
   - interval: 1m
     name: an upstream CRL regressed once stops alerting when it stops happening
     input_series:
-      - series: 'puppetca_crl_chain_regressed_total{job="openvox-ca",instance="ca-1:9140",issuer="Upstream Root CA"}'
+      - series: 'openvoxca_crl_chain_regressed_total{job="openvox-ca",instance="ca-1:9140",issuer="Upstream Root CA"}'
         values: "0+0x5 1+0x300"
     alert_rule_test:
       - eval_time: 10m
-        alertname: PuppetCAUpstreamCRLRegressed
+        alertname: OpenVoxCAUpstreamCRLRegressed
         exp_alerts: []
       - eval_time: 30m
-        alertname: PuppetCAUpstreamCRLRegressed
+        alertname: OpenVoxCAUpstreamCRLRegressed
         exp_alerts:
           - exp_labels:
               severity: warning
@@ -861,24 +861,24 @@ tests:
               issuer: Upstream Root CA
             exp_annotations:
               description: "crl_chain_file on ca-1:9140 carries an upstream CRL older than the one already published, so it was passed over and the newer one kept. Revocation is unaffected. The file is stale, rolled back or being replayed: check whatever refreshes it. If the ancestor legitimately restarted its CRL numbering (a CA rebuilt from backup, still using the same key), drop it from the file for one publish cycle and then add the new CRL back -- with nothing published to compare against, it is accepted. Publishing the older list would have un-revoked, fleet-wide, everything that ancestor revoked in between."
-              summary: "The Puppet CA is being offered stale upstream CRLs."
+              summary: "The OpenVox CA is being offered stale upstream CRLs."
       - eval_time: 3h
-        alertname: PuppetCAUpstreamCRLRegressed
+        alertname: OpenVoxCAUpstreamCRLRegressed
         exp_alerts: []
 
-  # PuppetCAUpstreamCRLRemoved: event-driven, so it must fall silent once the cause stops
+  # OpenVoxCAUpstreamCRLRemoved: event-driven, so it must fall silent once the cause stops
   # rather than latching on a counter that never descends.
   - interval: 1m
     name: an upstream CRL removed once stops alerting when it stops happening
     input_series:
-      - series: 'puppetca_crl_chain_removed_total{job="openvox-ca",instance="ca-1:9140",issuer="Upstream Root CA"}'
+      - series: 'openvoxca_crl_chain_removed_total{job="openvox-ca",instance="ca-1:9140",issuer="Upstream Root CA"}'
         values: "0+0x5 1+0x300"
     alert_rule_test:
       - eval_time: 10m
-        alertname: PuppetCAUpstreamCRLRemoved
+        alertname: OpenVoxCAUpstreamCRLRemoved
         exp_alerts: []
       - eval_time: 30m
-        alertname: PuppetCAUpstreamCRLRemoved
+        alertname: OpenVoxCAUpstreamCRLRemoved
         exp_alerts:
           - exp_labels:
               severity: warning
@@ -887,35 +887,35 @@ tests:
               issuer: Upstream Root CA
             exp_annotations:
               description: "An ancestor CRL has been dropped from the published chain on ca-1:9140. The file is authoritative, so this is honoured -- and it cannot be undone here, because this CA cannot re-sign another CA's list. There are two ways to reach this. Either the file stopped listing the ancestor -- check whatever writes it, since a glob that matched one file fewer produces exactly this -- or the ancestor's own certificate has left the stored CA bundle, so nothing signs its CRL any more and it can no longer be published; the log line says which, and the second is fixed by re-importing the bundle rather than by touching the file. Agents on the default certificate_revocation = chain will stop seeing anything that ancestor revoked. Act on this when you see it rather than waiting: the removal is a single event, so this alert clears after the window closes even though the ancestor stays dropped, a restart zeroes the counter, and that ancestor's own expiry series has simply vanished. Nothing afterwards distinguishes the shrunken chain from a correct one."
-              summary: "The Puppet CA has dropped an ancestor CRL from its published chain."
+              summary: "The OpenVox CA has dropped an ancestor CRL from its published chain."
       - eval_time: 3h
-        alertname: PuppetCAUpstreamCRLRemoved
+        alertname: OpenVoxCAUpstreamCRLRemoved
         exp_alerts: []
 
-  # PuppetCAUpstreamCRLNeverRead: zero means never read, which is a
+  # OpenVoxCAUpstreamCRLNeverRead: zero means never read, which is a
   # configuration fault rather than a stale one -- distinct from the refresh
   # alert, which needs a read to have succeeded at least once.
   - interval: 1m
     name: a chain file that has never been read alerts, and stops once it is
     input_series:
-      - series: 'puppetca_crl_chain_last_read_timestamp_seconds{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_crl_chain_last_read_timestamp_seconds{job="openvox-ca",instance="ca-1:9140"}'
         values: "0+0x40 1000+0x40"
     alert_rule_test:
       - eval_time: 10m
-        alertname: PuppetCAUpstreamCRLNeverRead
+        alertname: OpenVoxCAUpstreamCRLNeverRead
         exp_alerts: []
       - eval_time: 30m
-        alertname: PuppetCAUpstreamCRLNeverRead
+        alertname: OpenVoxCAUpstreamCRLNeverRead
         exp_alerts:
           - exp_labels:
               severity: warning
               job: openvox-ca
               instance: ca-1:9140
             exp_annotations:
-              description: "crl_chain_file is set on ca-1:9140 but has never been opened -- a wrong path, or a Secret that never mounted. The feature is doing nothing, and because an absent file is treated as \"no statement\" rather than an error, nothing else reports it. Note this does not catch a subPath mount: that reads successfully forever, so it looks healthy here and shows up as PuppetCAUpstreamCRLExpiringSoon instead."
-              summary: "The Puppet CA has never read its configured crl_chain_file."
+              description: "crl_chain_file is set on ca-1:9140 but has never been opened -- a wrong path, or a Secret that never mounted. The feature is doing nothing, and because an absent file is treated as \"no statement\" rather than an error, nothing else reports it. Note this does not catch a subPath mount: that reads successfully forever, so it looks healthy here and shows up as OpenVoxCAUpstreamCRLExpiringSoon instead."
+              summary: "The OpenVox CA has never read its configured crl_chain_file."
       - eval_time: 70m
-        alertname: PuppetCAUpstreamCRLNeverRead
+        alertname: OpenVoxCAUpstreamCRLNeverRead
         exp_alerts: []
 
   # The two upstream expiry alerts turn on time(), so the case has to bracket
@@ -927,16 +927,16 @@ tests:
   - interval: 1m
     name: an upstream CRL crosses into the expiry window and then expires
     input_series:
-      - series: 'puppetca_crl_chain_next_update_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",issuer="Upstream Root CA"}'
+      - series: 'openvoxca_crl_chain_next_update_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",issuer="Upstream Root CA"}'
         values: "1216800x400"
     alert_rule_test:
       # Still more than fourteen days out, so neither rule has anything to say.
       - eval_time: 1h
-        alertname: PuppetCAUpstreamCRLExpiringSoon
+        alertname: OpenVoxCAUpstreamCRLExpiringSoon
         exp_alerts: []
       # Past the boundary, and past the 1h debounce.
       - eval_time: 4h
-        alertname: PuppetCAUpstreamCRLExpiringSoon
+        alertname: OpenVoxCAUpstreamCRLExpiringSoon
         exp_alerts:
           - exp_labels:
               severity: warning
@@ -945,25 +945,25 @@ tests:
               issuer: Upstream Root CA
             exp_annotations:
               description: "The CRL issued by Upstream Root CA and republished by ca-1:9140 reaches NextUpdate in 13d 22h 0m 0s. openvox-ca cannot reissue it: refresh crl_chain_file from the issuing CA."
-              summary: "An upstream CRL published by the Puppet CA is approaching its NextUpdate."
+              summary: "An upstream CRL published by the OpenVox CA is approaching its NextUpdate."
       # Expiring-soon is scoped to CRLs that have not yet expired, so it must
       # hand over rather than fire alongside the expired rule.
       - eval_time: 4h
-        alertname: PuppetCAUpstreamCRLExpired
+        alertname: OpenVoxCAUpstreamCRLExpired
         exp_alerts: []
 
   - interval: 1m
     name: an expired upstream CRL pages and stops being merely expiring
     input_series:
       # nextUpdate in the past for the whole window.
-      - series: 'puppetca_crl_chain_next_update_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",issuer="Upstream Root CA"}'
+      - series: 'openvoxca_crl_chain_next_update_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",issuer="Upstream Root CA"}'
         values: "1x400"
     alert_rule_test:
       - eval_time: 30m
-        alertname: PuppetCAUpstreamCRLExpired
+        alertname: OpenVoxCAUpstreamCRLExpired
         exp_alerts: []
       - eval_time: 2h
-        alertname: PuppetCAUpstreamCRLExpired
+        alertname: OpenVoxCAUpstreamCRLExpired
         exp_alerts:
           - exp_labels:
               severity: critical
@@ -972,9 +972,9 @@ tests:
               issuer: Upstream Root CA
             exp_annotations:
               description: "The CRL issued by Upstream Root CA and republished by ca-1:9140 is past its NextUpdate. Agents using the default certificate_revocation = chain will fail verification against the whole chain. Refresh crl_chain_file from the issuing CA."
-              summary: "An upstream CRL published by the Puppet CA has expired."
+              summary: "An upstream CRL published by the OpenVox CA has expired."
       - eval_time: 2h
-        alertname: PuppetCAUpstreamCRLExpiringSoon
+        alertname: OpenVoxCAUpstreamCRLExpiringSoon
         exp_alerts: []
 
   # The handover at nextUpdate itself, which neither case above reaches: one
@@ -988,12 +988,12 @@ tests:
     name: the upstream expiry alerts hand over at nextUpdate itself
     input_series:
       # Constant, so nextUpdate - time() falls through zero at exactly 6h.
-      - series: 'puppetca_crl_chain_next_update_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",issuer="Upstream Root CA"}'
+      - series: 'openvoxca_crl_chain_next_update_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",issuer="Upstream Root CA"}'
         values: "21600x600"
     alert_rule_test:
       # An hour out: still the warning's side of the boundary, and firing.
       - eval_time: 5h
-        alertname: PuppetCAUpstreamCRLExpiringSoon
+        alertname: OpenVoxCAUpstreamCRLExpiringSoon
         exp_alerts:
           - exp_labels:
               severity: warning
@@ -1002,16 +1002,16 @@ tests:
               issuer: Upstream Root CA
             exp_annotations:
               description: "The CRL issued by Upstream Root CA and republished by ca-1:9140 reaches NextUpdate in 1h 0m 0s. openvox-ca cannot reissue it: refresh crl_chain_file from the issuing CA."
-              summary: "An upstream CRL published by the Puppet CA is approaching its NextUpdate."
+              summary: "An upstream CRL published by the OpenVox CA is approaching its NextUpdate."
       - eval_time: 5h
-        alertname: PuppetCAUpstreamCRLExpired
+        alertname: OpenVoxCAUpstreamCRLExpired
         exp_alerts: []
       # Exactly at nextUpdate, and this is the assertion the pair turns on:
       # ExpiringSoon requires "> 0", so it must stop here. With ">= 0" it would
       # still be firing, its condition having held continuously since the start
       # of the window, and it would page alongside the critical below.
       - eval_time: 6h
-        alertname: PuppetCAUpstreamCRLExpiringSoon
+        alertname: OpenVoxCAUpstreamCRLExpiringSoon
         exp_alerts: []
       # One debounce later the critical is up. Expired's condition becomes true
       # at 6h exactly, so "for: 1h" puts its first firing at 7h on the dot; with
@@ -1019,7 +1019,7 @@ tests:
       # and this would still be pending, leaving the gap the handover exists to
       # close.
       - eval_time: 7h
-        alertname: PuppetCAUpstreamCRLExpired
+        alertname: OpenVoxCAUpstreamCRLExpired
         exp_alerts:
           - exp_labels:
               severity: critical
@@ -1028,13 +1028,13 @@ tests:
               issuer: Upstream Root CA
             exp_annotations:
               description: "The CRL issued by Upstream Root CA and republished by ca-1:9140 is past its NextUpdate. Agents using the default certificate_revocation = chain will fail verification against the whole chain. Refresh crl_chain_file from the issuing CA."
-              summary: "An upstream CRL published by the Puppet CA has expired."
+              summary: "An upstream CRL published by the OpenVox CA has expired."
       - eval_time: 7h
-        alertname: PuppetCAUpstreamCRLExpiringSoon
+        alertname: OpenVoxCAUpstreamCRLExpiringSoon
         exp_alerts: []
 
-  # The flap guard for PuppetCAUpstreamCRLDiscarded, mirroring the one on
-  # PuppetCAUpstreamCRLRefreshFailing above. All four chain-health rules share
+  # The flap guard for OpenVoxCAUpstreamCRLDiscarded, mirroring the one on
+  # OpenVoxCAUpstreamCRLRefreshFailing above. All four chain-health rules share
   # the `increase(...[crlChainWindow]) > 0` shape and the same window/for pair,
   # but only RefreshFailing was driven by a *recurring* fault. The sibling cases
   # drive a single increment, which proves fire-then-resolve and cannot
@@ -1048,15 +1048,15 @@ tests:
   - interval: 1m
     name: a persistent discarded fault does not flap
     input_series:
-      - series: 'puppetca_crl_chain_discarded_total{job="openvox-ca",instance="ca-1:9140",issuer="Upstream Root CA"}'
+      - series: 'openvoxca_crl_chain_discarded_total{job="openvox-ca",instance="ca-1:9140",issuer="Upstream Root CA"}'
         values: "0+0x59 1+0x59 2+0x59 3+0x59"
     alert_rule_test:
       # Quiet while the counter exists and reads 0.
       - eval_time: 30m
-        alertname: PuppetCAUpstreamCRLDiscarded
+        alertname: OpenVoxCAUpstreamCRLDiscarded
         exp_alerts: []
       - eval_time: 119m
-        alertname: PuppetCAUpstreamCRLDiscarded
+        alertname: OpenVoxCAUpstreamCRLDiscarded
         exp_alerts:
           - exp_labels:
               severity: warning
@@ -1064,10 +1064,10 @@ tests:
               instance: ca-1:9140
               issuer: Upstream Root CA
             exp_annotations:
-              description: "ca-1:9140 dropped a CRL from crl_chain_file because no certificate in its CA bundle signed it, so the published chain is smaller than the file says. Check that the file holds CRLs from this CA's own ancestors and that the bundle is complete. If the file is stale rather than the bundle incomplete, PuppetCAUpstreamCRLRegressed is the alert for that."
-              summary: "The Puppet CA is discarding CRLs from crl_chain_file."
+              description: "ca-1:9140 dropped a CRL from crl_chain_file because no certificate in its CA bundle signed it, so the published chain is smaller than the file says. Check that the file holds CRLs from this CA's own ancestors and that the bundle is complete. If the file is stale rather than the bundle incomplete, OpenVoxCAUpstreamCRLRegressed is the alert for that."
+              summary: "The OpenVox CA is discarding CRLs from crl_chain_file."
       - eval_time: 179m
-        alertname: PuppetCAUpstreamCRLDiscarded
+        alertname: OpenVoxCAUpstreamCRLDiscarded
         exp_alerts:
           - exp_labels:
               severity: warning
@@ -1075,11 +1075,11 @@ tests:
               instance: ca-1:9140
               issuer: Upstream Root CA
             exp_annotations:
-              description: "ca-1:9140 dropped a CRL from crl_chain_file because no certificate in its CA bundle signed it, so the published chain is smaller than the file says. Check that the file holds CRLs from this CA's own ancestors and that the bundle is complete. If the file is stale rather than the bundle incomplete, PuppetCAUpstreamCRLRegressed is the alert for that."
-              summary: "The Puppet CA is discarding CRLs from crl_chain_file."
+              description: "ca-1:9140 dropped a CRL from crl_chain_file because no certificate in its CA bundle signed it, so the published chain is smaller than the file says. Check that the file holds CRLs from this CA's own ancestors and that the bundle is complete. If the file is stale rather than the bundle incomplete, OpenVoxCAUpstreamCRLRegressed is the alert for that."
+              summary: "The OpenVox CA is discarding CRLs from crl_chain_file."
 
-  # The flap guard for PuppetCAUpstreamCRLRegressed, mirroring the one on
-  # PuppetCAUpstreamCRLRefreshFailing above. All four chain-health rules share
+  # The flap guard for OpenVoxCAUpstreamCRLRegressed, mirroring the one on
+  # OpenVoxCAUpstreamCRLRefreshFailing above. All four chain-health rules share
   # the `increase(...[crlChainWindow]) > 0` shape and the same window/for pair,
   # but only RefreshFailing was driven by a *recurring* fault. The sibling cases
   # drive a single increment, which proves fire-then-resolve and cannot
@@ -1093,15 +1093,15 @@ tests:
   - interval: 1m
     name: a persistent regressed fault does not flap
     input_series:
-      - series: 'puppetca_crl_chain_regressed_total{job="openvox-ca",instance="ca-1:9140",issuer="Upstream Root CA"}'
+      - series: 'openvoxca_crl_chain_regressed_total{job="openvox-ca",instance="ca-1:9140",issuer="Upstream Root CA"}'
         values: "0+0x59 1+0x59 2+0x59 3+0x59"
     alert_rule_test:
       # Quiet while the counter exists and reads 0.
       - eval_time: 30m
-        alertname: PuppetCAUpstreamCRLRegressed
+        alertname: OpenVoxCAUpstreamCRLRegressed
         exp_alerts: []
       - eval_time: 119m
-        alertname: PuppetCAUpstreamCRLRegressed
+        alertname: OpenVoxCAUpstreamCRLRegressed
         exp_alerts:
           - exp_labels:
               severity: warning
@@ -1110,9 +1110,9 @@ tests:
               issuer: Upstream Root CA
             exp_annotations:
               description: "crl_chain_file on ca-1:9140 carries an upstream CRL older than the one already published, so it was passed over and the newer one kept. Revocation is unaffected. The file is stale, rolled back or being replayed: check whatever refreshes it. If the ancestor legitimately restarted its CRL numbering (a CA rebuilt from backup, still using the same key), drop it from the file for one publish cycle and then add the new CRL back -- with nothing published to compare against, it is accepted. Publishing the older list would have un-revoked, fleet-wide, everything that ancestor revoked in between."
-              summary: "The Puppet CA is being offered stale upstream CRLs."
+              summary: "The OpenVox CA is being offered stale upstream CRLs."
       - eval_time: 179m
-        alertname: PuppetCAUpstreamCRLRegressed
+        alertname: OpenVoxCAUpstreamCRLRegressed
         exp_alerts:
           - exp_labels:
               severity: warning
@@ -1121,10 +1121,10 @@ tests:
               issuer: Upstream Root CA
             exp_annotations:
               description: "crl_chain_file on ca-1:9140 carries an upstream CRL older than the one already published, so it was passed over and the newer one kept. Revocation is unaffected. The file is stale, rolled back or being replayed: check whatever refreshes it. If the ancestor legitimately restarted its CRL numbering (a CA rebuilt from backup, still using the same key), drop it from the file for one publish cycle and then add the new CRL back -- with nothing published to compare against, it is accepted. Publishing the older list would have un-revoked, fleet-wide, everything that ancestor revoked in between."
-              summary: "The Puppet CA is being offered stale upstream CRLs."
+              summary: "The OpenVox CA is being offered stale upstream CRLs."
 
-  # The flap guard for PuppetCAUpstreamCRLRemoved, mirroring the one on
-  # PuppetCAUpstreamCRLRefreshFailing above. All four chain-health rules share
+  # The flap guard for OpenVoxCAUpstreamCRLRemoved, mirroring the one on
+  # OpenVoxCAUpstreamCRLRefreshFailing above. All four chain-health rules share
   # the `increase(...[crlChainWindow]) > 0` shape and the same window/for pair,
   # but only RefreshFailing was driven by a *recurring* fault. The sibling cases
   # drive a single increment, which proves fire-then-resolve and cannot
@@ -1138,15 +1138,15 @@ tests:
   - interval: 1m
     name: a persistent removed fault does not flap
     input_series:
-      - series: 'puppetca_crl_chain_removed_total{job="openvox-ca",instance="ca-1:9140",issuer="Upstream Root CA"}'
+      - series: 'openvoxca_crl_chain_removed_total{job="openvox-ca",instance="ca-1:9140",issuer="Upstream Root CA"}'
         values: "0+0x59 1+0x59 2+0x59 3+0x59"
     alert_rule_test:
       # Quiet while the counter exists and reads 0.
       - eval_time: 30m
-        alertname: PuppetCAUpstreamCRLRemoved
+        alertname: OpenVoxCAUpstreamCRLRemoved
         exp_alerts: []
       - eval_time: 119m
-        alertname: PuppetCAUpstreamCRLRemoved
+        alertname: OpenVoxCAUpstreamCRLRemoved
         exp_alerts:
           - exp_labels:
               severity: warning
@@ -1155,9 +1155,9 @@ tests:
               issuer: Upstream Root CA
             exp_annotations:
               description: "An ancestor CRL has been dropped from the published chain on ca-1:9140. The file is authoritative, so this is honoured -- and it cannot be undone here, because this CA cannot re-sign another CA's list. There are two ways to reach this. Either the file stopped listing the ancestor -- check whatever writes it, since a glob that matched one file fewer produces exactly this -- or the ancestor's own certificate has left the stored CA bundle, so nothing signs its CRL any more and it can no longer be published; the log line says which, and the second is fixed by re-importing the bundle rather than by touching the file. Agents on the default certificate_revocation = chain will stop seeing anything that ancestor revoked. Act on this when you see it rather than waiting: the removal is a single event, so this alert clears after the window closes even though the ancestor stays dropped, a restart zeroes the counter, and that ancestor's own expiry series has simply vanished. Nothing afterwards distinguishes the shrunken chain from a correct one."
-              summary: "The Puppet CA has dropped an ancestor CRL from its published chain."
+              summary: "The OpenVox CA has dropped an ancestor CRL from its published chain."
       - eval_time: 179m
-        alertname: PuppetCAUpstreamCRLRemoved
+        alertname: OpenVoxCAUpstreamCRLRemoved
         exp_alerts:
           - exp_labels:
               severity: warning
@@ -1166,12 +1166,12 @@ tests:
               issuer: Upstream Root CA
             exp_annotations:
               description: "An ancestor CRL has been dropped from the published chain on ca-1:9140. The file is authoritative, so this is honoured -- and it cannot be undone here, because this CA cannot re-sign another CA's list. There are two ways to reach this. Either the file stopped listing the ancestor -- check whatever writes it, since a glob that matched one file fewer produces exactly this -- or the ancestor's own certificate has left the stored CA bundle, so nothing signs its CRL any more and it can no longer be published; the log line says which, and the second is fixed by re-importing the bundle rather than by touching the file. Agents on the default certificate_revocation = chain will stop seeing anything that ancestor revoked. Act on this when you see it rather than waiting: the removal is a single event, so this alert clears after the window closes even though the ancestor stays dropped, a restart zeroes the counter, and that ancestor's own expiry series has simply vanished. Nothing afterwards distinguishes the shrunken chain from a correct one."
-              summary: "The Puppet CA has dropped an ancestor CRL from its published chain."
+              summary: "The OpenVox CA has dropped an ancestor CRL from its published chain."
 
   # Every chain-health rule must stay silent on a CA that never configured
   # crl_chain_file. The counters and the last-read gauge are exported only where
   # the feature is on, so silence here is the absence of the series rather than
-  # a zero -- and PuppetCAUpstreamCRLNeverRead is the rule that makes that
+  # a zero -- and OpenVoxCAUpstreamCRLNeverRead is the rule that makes that
   # fragile, because "never read" and "not configured" both look like nothing.
   #
   # This is the guard against closing that gap the wrong way: an `absent()` arm
@@ -1182,23 +1182,23 @@ tests:
   - interval: 1m
     name: a CA not publishing an upstream chain is silent
     input_series:
-      - series: 'puppetca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
         values: "1+0x60"
     alert_rule_test:
       - eval_time: 60m
-        alertname: PuppetCAUpstreamCRLRefreshFailing
+        alertname: OpenVoxCAUpstreamCRLRefreshFailing
         exp_alerts: []
       - eval_time: 60m
-        alertname: PuppetCAUpstreamCRLDiscarded
+        alertname: OpenVoxCAUpstreamCRLDiscarded
         exp_alerts: []
       - eval_time: 60m
-        alertname: PuppetCAUpstreamCRLRegressed
+        alertname: OpenVoxCAUpstreamCRLRegressed
         exp_alerts: []
       - eval_time: 60m
-        alertname: PuppetCAUpstreamCRLRemoved
+        alertname: OpenVoxCAUpstreamCRLRemoved
         exp_alerts: []
       - eval_time: 60m
-        alertname: PuppetCAUpstreamCRLNeverRead
+        alertname: OpenVoxCAUpstreamCRLNeverRead
         exp_alerts: []
 
   # --- Client trust domains ---
@@ -1213,16 +1213,16 @@ tests:
   - interval: 1m
     name: a trust domain with no usable CRL pages, but not before the debounce
     input_series:
-      - series: 'puppetca_client_crl_usable{job="openvox-ca",instance="ca-1:9140",client_ca="server"}'
+      - series: 'openvoxca_client_crl_usable{job="openvox-ca",instance="ca-1:9140",client_ca="server"}'
         values: "0+0x30"
     alert_rule_test:
       # Under `for`, so pending rather than firing: a reload in progress must
       # not page.
       - eval_time: 5m
-        alertname: PuppetCAClientCRLUnusable
+        alertname: OpenVoxCAClientCRLUnusable
         exp_alerts: []
       - eval_time: 11m
-        alertname: PuppetCAClientCRLUnusable
+        alertname: OpenVoxCAClientCRLUnusable
         exp_alerts:
           - exp_labels:
               severity: critical
@@ -1230,24 +1230,24 @@ tests:
               instance: ca-1:9140
               client_ca: server
             exp_annotations:
-              summary: "A Puppet CA client trust domain has no usable CRL."
-              description: "client_ca server on ca-1:9140 holds no currently valid CRL at all — every CRL expired, every one was discarded as unverifiable, or every one was discarded as partial-scope (a delta CRL, or one scoped to an issuing distribution point, which lists only a fraction of what its issuer has revoked). Under client_revocation_policy=require every client of that issuer is rejected. Refresh its crl_file from the issuing CA, and if the delivery was recently changed check the server log for discard warnings — a full CRL is required here, since this CA is handed a file and fetches no distribution points. Note this fires only on total loss: a domain holding one anchor's CRL and not another's reads healthy here, and shows up as PuppetCAClientCRLRefusals instead."
+              summary: "An OpenVox CA client trust domain has no usable CRL."
+              description: "client_ca server on ca-1:9140 holds no currently valid CRL at all — every CRL expired, every one was discarded as unverifiable, or every one was discarded as partial-scope (a delta CRL, or one scoped to an issuing distribution point, which lists only a fraction of what its issuer has revoked). Under client_revocation_policy=require every client of that issuer is rejected. Refresh its crl_file from the issuing CA, and if the delivery was recently changed check the server log for discard warnings — a full CRL is required here, since this CA is handed a file and fetches no distribution points. Note this fires only on total loss: a domain holding one anchor's CRL and not another's reads healthy here, and shows up as OpenVoxCAClientCRLRefusals instead."
 
   - interval: 1m
     name: a domain whose crl_file stopped being applied goes stale, not before
     input_series:
       # The gauge holds the timestamp of the last successful apply, so a domain
       # that never applies again leaves it fixed while time() runs on.
-      - series: 'puppetca_client_crl_last_reload_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",client_ca="server"}'
+      - series: 'openvoxca_client_crl_last_reload_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",client_ca="server"}'
         values: "0+0x240"
     alert_rule_test:
       # clientCRLStaleSeconds is three refresh passes at the 1h default, so two
       # hours of staleness is a missed pass and not yet a fault.
       - eval_time: 2h
-        alertname: PuppetCAClientCRLStale
+        alertname: OpenVoxCAClientCRLStale
         exp_alerts: []
       - eval_time: 3h20m
-        alertname: PuppetCAClientCRLStale
+        alertname: OpenVoxCAClientCRLStale
         exp_alerts:
           - exp_labels:
               severity: warning
@@ -1255,7 +1255,7 @@ tests:
               instance: ca-1:9140
               client_ca: server
             exp_annotations:
-              summary: "The Puppet CA has stopped applying a trust domain's crl_file."
+              summary: "The OpenVox CA has stopped applying a trust domain's crl_file."
               description: "crl_file for client_ca server on ca-1:9140 has not been applied for 3h 20m 0s. The previous CRLs are still in use and still current, so nothing else reports a problem -- but revocations published since are not being honoured. Check the server log for a reload error, or for a reload refused because it would have covered fewer anchors than the set in use, dropped an enforced partial CRL, moved an anchor backwards to an older CRL, or could not be shown to be newer at all because this server will not date the CRLs it holds for that anchor -- check this server's clock and the issuer's."
 
   - interval: 1m
@@ -1264,11 +1264,11 @@ tests:
       # Refusals for the first twenty minutes, then none. Event-driven, so the
       # rule must fall silent on its own once the cause is fixed rather than
       # latching -- the counter never goes down.
-      - series: 'puppetca_client_crl_refusals_total{job="openvox-ca",instance="ca-1:9140",client_ca="server"}'
+      - series: 'openvoxca_client_crl_refusals_total{job="openvox-ca",instance="ca-1:9140",client_ca="server"}'
         values: "0+1x20 21+0x120"
     alert_rule_test:
       - eval_time: 40m
-        alertname: PuppetCAClientCRLRefusals
+        alertname: OpenVoxCAClientCRLRefusals
         exp_alerts:
           - exp_labels:
               severity: critical
@@ -1276,9 +1276,9 @@ tests:
               instance: ca-1:9140
               client_ca: server
             exp_annotations:
-              summary: "The Puppet CA is refusing clients of a trust domain for want of a CRL."
+              summary: "The OpenVox CA is refusing clients of a trust domain for want of a CRL."
               description: "client_ca server on ca-1:9140 is refusing clients because revocation information was missing: an issuer in their chain has no currently valid CRL, or the presented certificate is itself one of the entry's anchors, which nothing can attest to. Unlike the gauge this is a fact rather than an estimate: these are requests that were turned away. The usual cause is an anchor whose CRL is missing or expired while the entry's other anchors are fine, or an entry anchored on a shared root whose intermediates cannot have their CRLs verified — see the crl_file notes in the configuration guide."
       # An hour and the debounce after the last refusal, the window has emptied.
       - eval_time: 2h
-        alertname: PuppetCAClientCRLRefusals
+        alertname: OpenVoxCAClientCRLRefusals
         exp_alerts: []

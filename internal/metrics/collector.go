@@ -15,7 +15,7 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-// Package metrics exposes a Prometheus exporter for the Puppet CA. In addition
+// Package metrics exposes a Prometheus exporter for the OpenVox CA. In addition
 // to the standard Go runtime / process collectors and HTTP request metrics
 // (wired up in metrics.go), it provides a custom collector that, on every
 // scrape, reports the state of the CA certificate, its CRL, and every known
@@ -35,12 +35,13 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/constants"
 )
 
 // namespace is the common Prometheus metric prefix for every CA-specific
 // series. It is deliberately distinct from the Go/process collectors so that
-// puppetca_* groups the exporter's domain metrics together.
-const namespace = "puppetca"
+// openvoxca_* groups the exporter's domain metrics together.
+const namespace = constants.MetricsNamespace
 
 // Leaf certificate issuance states reported via the `state` label. "expired" is
 // intentionally not a state: expiry is derived by alerting rules from the
@@ -106,7 +107,7 @@ type Collector struct {
 }
 
 // NewCollector returns a Collector for the given CA. The CA need not be fully
-// initialised yet: until it is, the exporter reports puppetca_ca_ready 0 and
+// initialised yet: until it is, the exporter reports openvoxca_ca_ready 0 and
 // omits the CA/CRL/leaf series rather than failing the scrape.
 func NewCollector(c *ca.CA) *Collector {
 	return &Collector{
@@ -154,7 +155,7 @@ func NewCollector(c *ca.CA) *Collector {
 			prometheus.BuildFQName(namespace, "ca_signing", "in_flight"),
 			"CA-key signatures in flight right now, across certificate issuance, CRL re-signing and "+
 				"the OCSP responder together — they share one bound because they share one key. "+
-				"Read it against puppetca_ca_signing_limit: what matters is the headroom, not the "+
+				"Read it against openvoxca_ca_signing_limit: what matters is the headroom, not the "+
 				"absolute number. Always 0 when signing is unbounded.",
 			nil, nil),
 		signingLimit: prometheus.NewDesc(
@@ -189,7 +190,7 @@ func NewCollector(c *ca.CA) *Collector {
 				"once however many entries it failed on. Only where "+
 				"superseded_cert_revoke_after_sec is 0 is nothing recorded — the revocation then "+
 				"happens inside the renewal, and a failure there lands in "+
-				"puppetca_crl_update_failures_total instead — so this stays flat there, with one "+
+				"openvoxca_crl_update_failures_total instead — so this stays flat there, with one "+
 				"exception: the sweep, every renewal and every subject revocation read the pending "+
 				"list whatever the setting says, and a store that cannot serve that key raises "+
 				"this even with the window closed. A rising value means a certificate a renewal "+
@@ -202,7 +203,7 @@ func NewCollector(c *ca.CA) *Collector {
 				"something newer has taken its place, so this is the live measure of the exposure "+
 				"superseded_cert_revoke_after_sec buys. It returns to zero as the sweep drains "+
 				"the list; a value that does not fall means the sweep is not completing — check "+
-				"puppetca_supersede_failures_total, which a failing pass raises once however many "+
+				"openvoxca_supersede_failures_total, which a failing pass raises once however many "+
 				"entries were due, and the log for 'Could not revoke superseded certificates'. "+
 				"Absent, "+
 				"rather than zero, when the list could not be read: zero is what a drained list "+
@@ -211,7 +212,7 @@ func NewCollector(c *ca.CA) *Collector {
 		crlCachedNumber: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "crl", "cached_number"),
 			"CRL sequence number of the copy this replica is answering revocation checks from. "+
-				"Lags puppetca_crl_number by at most one sync interval; a persistent gap means this "+
+				"Lags openvoxca_crl_number by at most one sync interval; a persistent gap means this "+
 				"replica is enforcing an out-of-date revocation list.",
 			nil, nil),
 		caInfo: prometheus.NewDesc(
@@ -242,7 +243,7 @@ func NewCollector(c *ca.CA) *Collector {
 			prometheus.BuildFQName(namespace, "crl_chain", "next_update_timestamp_seconds"),
 			"NextUpdate (expiry) time of each upstream CRL published alongside this CA's own, "+
 				"labelled by issuer, in seconds since the Unix epoch. Deliberately a separate series "+
-				"from puppetca_crl_next_update_timestamp_seconds: an expiring upstream CRL is fixed at "+
+				"from openvoxca_crl_next_update_timestamp_seconds: an expiring upstream CRL is fixed at "+
 				"the parent CA, not here, so it needs its own alert and its own runbook.",
 			[]string{"issuer"}, nil),
 		crlChainLastRead: prometheus.NewDesc(
@@ -262,7 +263,7 @@ func NewCollector(c *ca.CA) *Collector {
 				"CRL amendment as well as on each refresh pass, and revocation is blocked until "+
 				"the file is fixed. The published chain is left alone and the next attempt retries. "+
 				"A refresh pass that fails for some other reason -- a lock it could not take, "+
-				"storage it could not read -- moves puppetca_crl_update_failures_total instead, so "+
+				"storage it could not read -- moves openvoxca_crl_update_failures_total instead, so "+
 				"a rise here always means the file.",
 			nil, nil),
 		crlChainDiscarded: prometheus.NewDesc(
@@ -271,7 +272,7 @@ func NewCollector(c *ca.CA) *Collector {
 				"them. The file is authoritative, so a discard means the published chain is smaller "+
 				"than the operator's file says it should be — the one case where it shrinks silently. "+
 				"The remedy is to complete the CA bundle. A CRL passed over for being stale is "+
-				"counted separately, by puppetca_crl_chain_regressed_total, because that one is "+
+				"counted separately, by openvoxca_crl_chain_regressed_total, because that one is "+
 				"fixed at whatever writes the file instead.",
 			nil, nil),
 		crlChainRemoved: prometheus.NewDesc(
@@ -285,7 +286,7 @@ func NewCollector(c *ca.CA) *Collector {
 				"increments it the same way, which is why it is worth an alert. The log line "+
 				"names which cause fired, and the remedies differ: fix whatever writes the file, "+
 				"or re-import the CA bundle. An incomplete bundle moves this counter and "+
-				"puppetca_crl_chain_discarded_total together -- the latter counts CRLs the file does carry "+
+				"openvoxca_crl_chain_discarded_total together -- the latter counts CRLs the file does carry "+
 				"but nothing in the bundle signed.",
 			nil, nil),
 		crlChainRegressed: prometheus.NewDesc(
@@ -367,7 +368,7 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 
 // Collect implements prometheus.Collector. It gathers a fresh snapshot of CA
 // state under its own deadline and emits the corresponding metrics. A gather
-// failure is reported via puppetca_collector_scrape_success rather than
+// failure is reported via openvoxca_collector_scrape_success rather than
 // aborting the whole /metrics response, so the Go/process/HTTP metrics still
 // scrape even when storage is momentarily unavailable.
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
@@ -441,7 +442,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	// configured. Emitting it after the return would give absence a second
 	// meaning, "the last gather failed", which is the ambiguity crlChainLastRead
 	// above is placed here to avoid. It would also reset
-	// PuppetCAManagedCertificateNeverIssued's `for` clock on every storage blip,
+	// OpenVoxCAManagedCertificateNeverIssued's `for` clock on every storage blip,
 	// suppressing the alert during exactly the outages that also stop issuance.
 	//
 	// ManagedCerts is written once during startup, before the listener binds and
@@ -682,7 +683,7 @@ func parseCert(pemData []byte) (*x509.Certificate, error) {
 // parseCRL decodes a PEM-encoded X.509 CRL, taking the first block.
 //
 // The cache reads whichever block this CA signed most recently (ca.selectOwnCRL)
-// rather than block 0, so puppetca_crl_number and puppetca_crl_cached_number
+// rather than block 0, so openvoxca_crl_number and openvoxca_crl_cached_number
 // agree only while block 0 is that block — which it is on any CA whose chain was
 // written by import or a re-sign, both of which put ours first. On a
 // hand-assembled blob that leads with an ancestor the two describe different

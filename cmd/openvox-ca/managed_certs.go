@@ -34,7 +34,7 @@ import (
 // an oversight. Every reconcile outcome an operator can currently reach is
 // either a log line here or an ordinary certificate fact: a managed certificate
 // is a certificate at cert/<subject> with an inventory row, so once one exists
-// puppetca_leaf_certificate_not_after_timestamp_seconds covers its expiry and
+// openvoxca_leaf_certificate_not_after_timestamp_seconds covers its expiry and
 // the shipped expiry alerts cover it with no new series.
 //
 // The outcome that reasoning does not reach: an entry that has never issued at
@@ -42,9 +42,9 @@ import (
 // certificate that does not exist, so no PromQL comparison can match its
 // absence; the Kubernetes exporter has the same hole and closes it with a
 // dedicated "not running" rule. The managed mechanism needs the equivalent, and
-// now has it: the CA publishes puppetca_managed_certificate_configured, one
+// now has it: the CA publishes openvoxca_managed_certificate_configured, one
 // series per configured entry, so that an entry which has never issued is a
-// value rather than an absence. PuppetCAManagedCertificateNeverIssued in
+// value rather than an absence. OpenVoxCAManagedCertificateNeverIssued in
 // mixin/alerts.libsonnet is the rule.
 //
 // It is not the only gap, and the other one is left open deliberately: an entry
@@ -57,12 +57,12 @@ import (
 // is any series saying "this entry's last reconcile failed". Closing it needs
 // one this mechanism does not publish: a per-entry reconcile-failure counter,
 // which is the shape the exporter's
-// puppetca_k8s_export_last_error_timestamp_seconds takes. That is worth doing
+// openvoxca_k8s_export_last_error_timestamp_seconds takes. That is worth doing
 // and is not in #243; in the meantime the failure is in the logs, once and then
 // as withholding notices carrying retry_in, which is what docs/metrics.md tells
 // an operator to grep for.
 //
-// puppetca_managed_certificate_configured is deliberately general -- one label,
+// openvoxca_managed_certificate_configured is deliberately general -- one label,
 // the subject, and nothing about the store -- so that the CA's own serving
 // certificate (#326) can use it for a store with quite different failure
 // semantics.

@@ -1,9 +1,9 @@
 {
   _config+:: {
-    // puppetCASelector matches the Prometheus targets that scrape the
+    // openvoxCASelector matches the Prometheus targets that scrape the
     // openvox-ca exporter. Override it to pin the alerts to a specific job,
     // namespace, or instance — e.g. 'job="openvox-ca",namespace="pki"'.
-    puppetCASelector: 'job="openvox-ca"',
+    openvoxCASelector: 'job="openvox-ca"',
 
     // alertLabels are merged onto every alert (e.g. a team or severity routing
     // label). 'severity' is set per-alert below and should not be put here.
@@ -71,7 +71,7 @@
     // has set superseded_cert_revoke_after_sec to 0 — leaving the old
     // certificate valid for its key. Note the default case is NOT here: with a
     // window configured, a renewal records the supersession instead and its
-    // failures are counted by PuppetCASupersedeFailing. The counter resets on
+    // failures are counted by OpenVoxCASupersedeFailing. The counter resets on
     // restart, so the alert looks at increase() over crlUpdateWindow and
     // debounces with crlUpdateFor.
     crlUpdateWindow: '1h',
@@ -80,7 +80,7 @@
     // --- CRL propagation across replicas ---
     // Each replica decides revocation from its own in-memory copy of the CRL
     // and reloads it on a timer (crl_sync_interval_sec, 60s by default), so
-    // puppetca_crl_cached_number trails puppetca_crl_number for a moment after
+    // openvoxca_crl_cached_number trails openvoxca_crl_number for a moment after
     // every revocation. crlLagFor is how long a replica may keep trailing
     // before that counts as stuck rather than in flight: comfortably longer
     // than the sync interval, and short enough that a revocation is still an
@@ -97,7 +97,7 @@
     crlSyncWindow: '1h',
     crlSyncFor: '5m',
 
-    // Window and dwell for PuppetCAOCSPIndexSyncFailing. Same shape as the CRL
+    // Window and dwell for OpenVoxCAOCSPIndexSyncFailing. Same shape as the CRL
     // sync pair above: the counter resets on restart, so the rule alerts on
     // increase() over a window.
     //
@@ -179,7 +179,7 @@
     // and only needs to ride out a reload.
     clientCRLUnusableFor: '10m',
 
-    // Window for PuppetCAClientCRLRefusals. Unlike the gauge this is
+    // Window for OpenVoxCAClientCRLRefusals. Unlike the gauge this is
     // event-driven -- it moves when a client is actually refused -- so it is
     // sized like the other increase() windows rather than against the
     // refresh interval.

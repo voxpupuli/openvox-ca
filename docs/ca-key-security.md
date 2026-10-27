@@ -172,8 +172,8 @@ where it is reachable by untrusted clients: the cap stops CA-key work growing
 without limit, but it does not stop the connections, handshakes and goroutines
 that carry the requests.
 
-Watch `puppetca_ca_signing_shed_total` and `puppetca_ca_signing_in_flight`
-against `puppetca_ca_signing_limit` — sustained shedding while the signer has
+Watch `openvoxca_ca_signing_shed_total` and `openvoxca_ca_signing_in_flight`
+against `openvoxca_ca_signing_limit` — sustained shedding while the signer has
 capacity to spare means the limit is too low. A rise in issuance latency with
 no rise in issuance *rate* is still the signal that OCSP is crowding issuance
 out. See [metrics.md](metrics.md).

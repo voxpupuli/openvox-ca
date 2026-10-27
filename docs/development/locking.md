@@ -790,8 +790,8 @@ state when the document was last updated and is not guaranteed exhaustive.
   deployment's signer, so an operator with a remote signer is told to lower it
   to that signer's capacity, which openvox-ca cannot discover.
 
-  The metric gap named below is closed with it: `puppetca_ca_signing_in_flight`,
-  `puppetca_ca_signing_limit` and `puppetca_ca_signing_shed_total`.
+  The metric gap named below is closed with it: `openvoxca_ca_signing_in_flight`,
+  `openvoxca_ca_signing_limit` and `openvoxca_ca_signing_shed_total`.
 
   What that does **not** reach: the bound is per process, so N replicas permit
   N × the limit against one shared signer; it caps CA-key work and not the

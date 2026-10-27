@@ -576,7 +576,7 @@ often.
 What a mismatch then does depends on the caller. At `CA.Init` it returns
 `ErrInventoryTampered` and startup fails. On the periodic path it does **not**
 fail closed: `SyncSerialIndex` counts the failure into
-`puppetca_ocsp_index_sync_failures_total`, `syncOCSPIndexOnce` logs `OCSP serial
+`openvoxca_ocsp_index_sync_failures_total`, `syncOCSPIndexOnce` logs `OCSP serial
 index sync failed; continuing with the index already in memory` at `Warn`, and
 the CA keeps answering from the index it already holds.
 
@@ -584,7 +584,7 @@ The signal to alert on is the mismatch warning itself — `inventory HMAC
 mismatch; integrity check failed`, at `Warn`, carrying a `scheme` attribute of
 `whole-blob-hmac` or `hash-chain`. That is the only integrity-specific,
 backend-identifying record the system emits. The counter is the weaker
-secondary: `puppetca_ocsp_index_sync_failures_total` counts *every* failed
+secondary: `openvoxca_ocsp_index_sync_failures_total` counts *every* failed
 inventory read on that path, an unreachable backend included, so a rise in it
 means "this replica is not refreshing its serial index" and only the log line
 says why.
@@ -592,16 +592,16 @@ says why.
 No metric is *specific* to the mismatch, so only the log line identifies it as
 one. What a mismatch moves depends on which path met it, and that differs by
 backend. On the shared backends the tick counts into
-`puppetca_ocsp_index_sync_failures_total`, raising `PuppetCAOCSPIndexSyncFailing`.
+`openvoxca_ocsp_index_sync_failures_total`, raising `OpenVoxCAOCSPIndexSyncFailing`.
 On filesystem the tick does not run, but a revocation that meets the mismatch
 does count: both revoke paths read through a verifying call there, so the failure
-lands in `puppetca_crl_update_failures_total` and can raise
-`PuppetCACRLUpdateFailing` — an alert that fires for a tamper signal while naming
+lands in `openvoxca_crl_update_failures_total` and can raise
+`OpenVoxCACRLUpdateFailing` — an alert that fires for a tamper signal while naming
 it a CRL problem. SQLite is the one backend where neither happens: no tick, and
 the by-subject and by-serial lookups verify nothing, so no metric moves for a
 mismatch at all and the signals are the log line and a failed start. A refused
 start aborts before the metrics listener binds, so it shows up as
-`PuppetCAExporterDown` (or a bare `absent(up)`) rather than `PuppetCANotReady` —
+`OpenVoxCAExporterDown` (or a bare `absent(up)`) rather than `OpenVoxCANotReady` —
 mislabelled in the same way, and on SQLite it is the only alert a mismatch
 produces.
 

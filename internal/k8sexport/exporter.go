@@ -75,7 +75,7 @@ func New(client kubernetes.Interface, cfg Config, src MaterialSource, defaultNS 
 //
 // That case is why this is exported rather than left inside New: it is the one
 // door New cannot cover, and the CA stays up and healthy while the exported
-// objects quietly stop being updated. See PuppetCAKubernetesExportNotRunning in
+// objects quietly stop being updated. See OpenVoxCAKubernetesExportNotRunning in
 // mixin/alerts.libsonnet.
 //
 // Call it only when the export is known not to be starting. Targets without
@@ -83,7 +83,7 @@ func New(client kubernetes.Interface, cfg Config, src MaterialSource, defaultNS 
 // may be exactly what could not be resolved. That placeholder is harmless here
 // only because nothing will ever record an apply for them. On a path where the
 // exporter might still start, it would strand a second series at zero under the
-// wrong label and make PuppetCAKubernetesExportNotRunning fire for a healthy
+// wrong label and make OpenVoxCAKubernetesExportNotRunning fire for a healthy
 // target for ever.
 func InitTargetMetrics(cfg Config, m *Metrics) {
 	m.initTargets(cfg.Targets, "")
@@ -131,7 +131,7 @@ func (c *Config) needsDefaultNamespace() bool {
 // configured target records a result on every cycle, whatever failed upstream.
 // Returning before the loop leaves the export alerts nothing to match on and a
 // stale CA certificate or CRL that nothing can report -- see
-// PuppetCAKubernetesExportNotRunning in mixin/alerts.libsonnet for why.
+// OpenVoxCAKubernetesExportNotRunning in mixin/alerts.libsonnet for why.
 func (e *Exporter) ExportAll(ctx context.Context) error {
 	mats := e.fetchMaterials(ctx)
 

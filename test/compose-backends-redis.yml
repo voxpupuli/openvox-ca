@@ -83,7 +83,7 @@ services:
       # admin calls work in tests.
       - PUPPET_CA_PEER_HOSTNAMES=openvox-ca-2
       # Prometheus exporter, for the same reason as compose-puppet.yml: the
-      # shared puppet-stack.sh asserts on puppetca_supersede_pending, and on
+      # shared puppet-stack.sh asserts on openvoxca_supersede_pending, and on
       # this backend there is no superseded.json to read instead.
       - PUPPET_CA_METRICS_LISTEN=:9140
     volumes:

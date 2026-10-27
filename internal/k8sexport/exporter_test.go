@@ -235,13 +235,13 @@ var _ = Describe("Exporter", func() {
 		exp := k8sexport.New(client, *cfg, src, "", k8sexport.NewMetrics(reg))
 		Expect(exp.ExportAll(ctx)).To(MatchError(ContainSubstring("ConfigMap/bad")))
 
-		v, found := metricValue(reg, "puppetca_k8s_export_applies_total", map[string]string{
+		v, found := metricValue(reg, "openvoxca_k8s_export_applies_total", map[string]string{
 			"kind": "Secret", "namespace": "ns1", "name": "good", "result": "success",
 		})
 		Expect(found).To(BeTrue())
 		Expect(v).To(Equal(1.0))
 
-		v, found = metricValue(reg, "puppetca_k8s_export_applies_total", map[string]string{
+		v, found = metricValue(reg, "openvoxca_k8s_export_applies_total", map[string]string{
 			"kind": "ConfigMap", "namespace": "ns1", "name": "bad", "result": "error",
 		})
 		Expect(found).To(BeTrue())
@@ -249,21 +249,21 @@ var _ = Describe("Exporter", func() {
 
 		// Only the successful target gets a last-success timestamp, and only
 		// the failing target gets a last-error timestamp.
-		v, found = metricValue(reg, "puppetca_k8s_export_last_success_timestamp_seconds",
+		v, found = metricValue(reg, "openvoxca_k8s_export_last_success_timestamp_seconds",
 			map[string]string{"kind": "Secret", "namespace": "ns1", "name": "good"})
 		Expect(found).To(BeTrue())
 		Expect(v).To(BeNumerically(">", 0))
 
-		_, found = metricValue(reg, "puppetca_k8s_export_last_success_timestamp_seconds",
+		_, found = metricValue(reg, "openvoxca_k8s_export_last_success_timestamp_seconds",
 			map[string]string{"kind": "ConfigMap", "namespace": "ns1", "name": "bad"})
 		Expect(found).To(BeFalse())
 
-		v, found = metricValue(reg, "puppetca_k8s_export_last_error_timestamp_seconds",
+		v, found = metricValue(reg, "openvoxca_k8s_export_last_error_timestamp_seconds",
 			map[string]string{"kind": "ConfigMap", "namespace": "ns1", "name": "bad"})
 		Expect(found).To(BeTrue())
 		Expect(v).To(BeNumerically(">", 0))
 
-		_, found = metricValue(reg, "puppetca_k8s_export_last_error_timestamp_seconds",
+		_, found = metricValue(reg, "openvoxca_k8s_export_last_error_timestamp_seconds",
 			map[string]string{"kind": "Secret", "namespace": "ns1", "name": "good"})
 		Expect(found).To(BeFalse())
 	})
@@ -406,8 +406,8 @@ var _ = Describe("Exporter", func() {
 	// The bug this guards: ExportAll used to return as soon as a material read
 	// failed, before the per-target loop. recordApply then never ran, so no
 	// per-target series was written — and every arm of
-	// PuppetCAKubernetesExportFailing has
-	// puppetca_k8s_export_last_error_timestamp_seconds on the left, so with no
+	// OpenVoxCAKubernetesExportFailing has
+	// openvoxca_k8s_export_last_error_timestamp_seconds on the left, so with no
 	// series neither arm could fire. One transient storage blip left every
 	// target holding a stale CA certificate or CRL with nothing alerting.
 	It("still records a per-target error metric when a material cannot be read", func() {
@@ -433,7 +433,7 @@ var _ = Describe("Exporter", func() {
 		} {
 			labels := map[string]string{"kind": want.kind, "namespace": want.ns, "name": want.name}
 
-			v, found := metricValue(reg, "puppetca_k8s_export_last_error_timestamp_seconds", labels)
+			v, found := metricValue(reg, "openvoxca_k8s_export_last_error_timestamp_seconds", labels)
 			Expect(found).To(BeTrue(),
 				"no last_error series for %s/%s: the alert cannot fire", want.kind, want.name)
 			Expect(v).To(BeNumerically(">", 0))
@@ -441,7 +441,7 @@ var _ = Describe("Exporter", func() {
 			counted := map[string]string{
 				"kind": want.kind, "namespace": want.ns, "name": want.name, "result": "error",
 			}
-			v, found = metricValue(reg, "puppetca_k8s_export_applies_total", counted)
+			v, found = metricValue(reg, "openvoxca_k8s_export_applies_total", counted)
 			Expect(found).To(BeTrue())
 			Expect(v).To(Equal(1.0))
 		}
@@ -486,12 +486,12 @@ var _ = Describe("Exporter", func() {
 				Expect(sec.Data).To(HaveKeyWithValue(wantKey, []byte(wantVal)))
 			}
 
-			v, found := metricValue(reg, "puppetca_k8s_export_last_success_timestamp_seconds",
+			v, found := metricValue(reg, "openvoxca_k8s_export_last_success_timestamp_seconds",
 				map[string]string{"kind": survivorKind, "namespace": "ns1", "name": survivor})
 			Expect(found).To(BeTrue())
 			Expect(v).To(BeNumerically(">", 0))
 
-			_, found = metricValue(reg, "puppetca_k8s_export_last_error_timestamp_seconds",
+			_, found = metricValue(reg, "openvoxca_k8s_export_last_error_timestamp_seconds",
 				map[string]string{"kind": survivorKind, "namespace": "ns1", "name": survivor})
 			Expect(found).To(BeFalse(), "%s recorded an error for a material it never requested", survivor)
 
@@ -533,7 +533,7 @@ var _ = Describe("Exporter", func() {
 	It("creates apply counters at zero for every target before the first export", func() {
 		// Prometheus omits a child that was never touched, so an exporter that
 		// records nothing at all looks exactly like one that is not configured.
-		// Pre-creating these gives PuppetCAKubernetesExportNotRunning a series
+		// Pre-creating these gives OpenVoxCAKubernetesExportNotRunning a series
 		// to match on. The timestamp gauges must stay absent — see initTargets.
 		cfg := &k8sexport.Config{Targets: []k8sexport.Target{
 			{Kind: "Secret", Metadata: k8sexport.Metadata{Name: "trust"}, Cert: true},
@@ -546,7 +546,7 @@ var _ = Describe("Exporter", func() {
 		// The resolved default namespace is used, matching what recordApply
 		// will later label the same series with.
 		for _, result := range []string{"success", "error"} {
-			v, found := metricValue(reg, "puppetca_k8s_export_applies_total", map[string]string{
+			v, found := metricValue(reg, "openvoxca_k8s_export_applies_total", map[string]string{
 				"kind": "Secret", "namespace": "pod-ns", "name": "trust", "result": result,
 			})
 			Expect(found).To(BeTrue(), "applies_total{result=%q} was not pre-created", result)
@@ -554,8 +554,8 @@ var _ = Describe("Exporter", func() {
 		}
 
 		for _, name := range []string{
-			"puppetca_k8s_export_last_success_timestamp_seconds",
-			"puppetca_k8s_export_last_error_timestamp_seconds",
+			"openvoxca_k8s_export_last_success_timestamp_seconds",
+			"openvoxca_k8s_export_last_error_timestamp_seconds",
 		} {
 			_, found := metricValue(reg, name, map[string]string{
 				"kind": "Secret", "namespace": "pod-ns", "name": "trust",
@@ -585,7 +585,7 @@ var _ = Describe("Exporter", func() {
 			{"ConfigMap", "", "bundle"},
 		} {
 			for _, result := range []string{"success", "error"} {
-				v, found := metricValue(reg, "puppetca_k8s_export_applies_total", map[string]string{
+				v, found := metricValue(reg, "openvoxca_k8s_export_applies_total", map[string]string{
 					"kind": want.kind, "namespace": want.ns, "name": want.name, "result": result,
 				})
 				Expect(found).To(BeTrue(),

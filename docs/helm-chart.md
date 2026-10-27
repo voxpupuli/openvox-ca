@@ -659,7 +659,7 @@ chart leaves `metrics.serviceMonitor.jobLabel` empty so the Prometheus Operator
 derives `job` from the Service name.
 
 Those two only line up when the Service is named `openvox-ca`. **Set the
-mixin's `puppetCASelector` to match your deployment** rather than reaching for
+mixin's `openvoxCASelector` to match your deployment** rather than reaching for
 `jobLabel` to force the job name: `job` has to stay distinct per release,
 because two releases of this chart may run side by side while a fleet migrates
 from one CA to another, and an alert that cannot say which one is failing is
@@ -1033,11 +1033,11 @@ See [rolling upgrades](configuration.md#publishing-an-upstream-crl-chain).
 > **Never mount it with `subPath`.** A `subPath`-mounted ConfigMap or Secret
 > never receives updates: the file reads successfully forever and never changes,
 > so the whole feature becomes a silent no-op while every metric reports health.
-> `puppetca_crl_chain_last_read_timestamp_seconds` advances exactly as it does on
+> `openvoxca_crl_chain_last_read_timestamp_seconds` advances exactly as it does on
 > a healthy file, because the read genuinely does succeed — it is the *content*
 > that is frozen, and no metric distinguishes that from a file that is simply not
 > changing yet. What eventually catches it is the consequence:
-> `PuppetCAUpstreamCRLExpiringSoon` firing on a CA that *has* `crl_chain_file`
+> `OpenVoxCAUpstreamCRLExpiringSoon` firing on a CA that *has* `crl_chain_file`
 > configured is the `subPath` signature. By then the ancestors' CRLs are already
 > close to expiry.
 >
@@ -1230,9 +1230,9 @@ config:
 ```
 
 Choose `name` for the operator who will meet it in an alert: it is the
-`client_ca` label on `puppetca_client_crl_usable`,
-`puppetca_client_crl_refusals_total` and
-`puppetca_client_crl_last_reload_timestamp_seconds`, and the `client_ca` field
+`client_ca` label on `openvoxca_client_crl_usable`,
+`openvoxca_client_crl_refusals_total` and
+`openvoxca_client_crl_last_reload_timestamp_seconds`, and the `client_ca` field
 on every log line about the entry. Startup refuses a duplicate.
 
 `allow_pp_cli_auth: true` **delegates admin admission to that CA** — every
@@ -1247,9 +1247,9 @@ conditions make one untrustworthy enough to refuse, and [the revocation
 section](configuration.md#revocation) lists them. What matters here is the shape
 they share — the previous set is kept, which is right for availability and
 invisible on every other series, because the retained CRLs are still being
-served. The signal is `puppetca_client_crl_last_reload_timestamp_seconds` going
-stale, which `PuppetCAClientCRLStale` alerts on. Alert on `PuppetCAClientCRLUnusable` and
-`PuppetCAClientCRLRefusals` too: under `require` an entry with no current CRL
+served. The signal is `openvoxca_client_crl_last_reload_timestamp_seconds` going
+stale, which `OpenVoxCAClientCRLStale` alerts on. Alert on `OpenVoxCAClientCRLUnusable` and
+`OpenVoxCAClientCRLRefusals` too: under `require` an entry with no current CRL
 rejects every one of its clients, and the first symptom is otherwise an
 agent-side 403 three layers away.
 

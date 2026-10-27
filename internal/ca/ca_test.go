@@ -644,7 +644,7 @@ var _ = Describe("CA Revocation", func() {
 		//
 		// It matters beyond bookkeeping: a tamper signal answered as an
 		// uncounted "no inventory entry" would report a forged inventory as an
-		// unknown node and leave PuppetCACRLUpdateFailing silent.
+		// unknown node and leave OpenVoxCACRLUpdateFailing silent.
 		csrPEM, err := testutil.GenerateCSR("tampered-node")
 		Expect(err).NotTo(HaveOccurred())
 		_, err = myCA.SaveRequest(context.Background(), "tampered-node", csrPEM)
@@ -852,7 +852,7 @@ var _ = Describe("CA Revocation", func() {
 		// single-node backends there is now one acquisition that *can* reject a
 		// spent deadline -- a wait for another process on this host -- and like
 		// the cross-node rejection it fails ahead of any CRL work, so it must not
-		// move the counter that drives PuppetCACRLUpdateFailing.
+		// move the counter that drives OpenVoxCACRLUpdateFailing.
 		//
 		// A second FilesystemBackend value over the same cadir is a faithful
 		// stand-in for that other process: flock(2) is held per open file

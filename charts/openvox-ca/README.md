@@ -154,7 +154,7 @@ tested floor rather than a ceiling; naming them here would go stale on its own.
 | `metrics.serviceMonitor.path` | `/metrics` | |
 | `metrics.serviceMonitor.scheme` | `http` | |
 | `metrics.serviceMonitor.honorLabels` | `false` | |
-| `metrics.serviceMonitor.jobLabel` | `""` | Which Service label supplies the Prometheus `job` value. Empty leaves it to the Operator, which uses the Service name, keeping `job` distinct per release. Do not point it at `app.kubernetes.io/name`: that is the chart name, so concurrent releases would collide. Match the mixin's `puppetCASelector` to your deployment instead |
+| `metrics.serviceMonitor.jobLabel` | `""` | Which Service label supplies the Prometheus `job` value. Empty leaves it to the Operator, which uses the Service name, keeping `job` distinct per release. Do not point it at `app.kubernetes.io/name`: that is the chart name, so concurrent releases would collide. Match the mixin's `openvoxCASelector` to your deployment instead |
 | `metrics.serviceMonitor.targetLabels` | `[]` | |
 | `metrics.serviceMonitor.relabelings` / `.metricRelabelings` | `[]` | |
 

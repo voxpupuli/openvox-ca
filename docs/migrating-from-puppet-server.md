@@ -186,7 +186,7 @@ CRLs](#refreshing-ancestor-crls) below. The other is
 [`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain), which has
 openvox-ca re-read a PEM bundle on a timer and republish it, so the ancestors
 stay current without an operator remembering to act before each `nextUpdate`.
-Either way, watch `puppetca_crl_chain_next_update_timestamp_seconds{issuer}` —
+Either way, watch `openvoxca_crl_chain_next_update_timestamp_seconds{issuer}` —
 the shipped mixin alerts on it.
 
 Re-import is also not signalled to consumers: the Kubernetes exporter republishes
@@ -331,7 +331,7 @@ Some limits worth knowing before you rely on re-import as a refresh mechanism.
 > **Ancestor CRLs age in place.** This CA cannot re-sign another CA's list, so
 > whatever was imported stays until something replaces it, and it must be replaced
 > before its own `nextUpdate` lapses.
-> `puppetca_crl_chain_next_update_timestamp_seconds{issuer}` reports each
+> `openvoxca_crl_chain_next_update_timestamp_seconds{issuer}` reports each
 > ancestor's deadline and the shipped mixin alerts on it — see
 > [the metrics reference](metrics.md#upstream-crl-chain). Configuring
 > [`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain) is what

@@ -33,7 +33,7 @@ import (
 // certificate or CRL until the CRL next changes.
 //
 // Two minutes sits well inside k8sExportFailingFor (15m), the debounce on
-// PuppetCAKubernetesExportFailing: a cycle that recovers on the first retry or
+// OpenVoxCAKubernetesExportFailing: a cycle that recovers on the first retry or
 // two resolves before the alert would have paged, while one that keeps failing
 // keeps re-stamping last_error and stays firing. A failure that outlasts the
 // debounce still pages, as it should.
@@ -52,7 +52,7 @@ const k8sExportRetryInterval = 2 * time.Minute
 // pod namespace to resolve, and the CA then carries on serving with readiness
 // green while the configured targets silently freeze at whatever they last
 // held. Publishing the apply counters at zero is what turns that into something
-// PuppetCAKubernetesExportNotRunning can match; the log line alone reaches
+// OpenVoxCAKubernetesExportNotRunning can match; the log line alone reaches
 // nobody who is not already reading logs.
 //
 // newExporter is a parameter so a spec can drive both branches. This lived
