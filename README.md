@@ -252,7 +252,10 @@ $ cosign verify ghcr.io/voxpupuli/openvox-ca-charts/openvox-ca:${VERSION} \
 
 ### Building from source
 
-Requires Go 1.25+ and [Mage](https://magefile.org/):
+Requires [Mage](https://magefile.org/) and the Go release named by the `go`
+directive in [`go.mod`](go.mod), or newer. An older Go from 1.21 onwards fetches
+that toolchain itself under its default `GOTOOLCHAIN=auto`; one before 1.21, or a
+distribution package that sets `GOTOOLCHAIN=local`, fails to build instead.
 
 ```bash
 git clone https://github.com/voxpupuli/openvox-ca.git

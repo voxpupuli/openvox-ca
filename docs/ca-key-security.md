@@ -21,7 +21,9 @@ space; when it needs a signature it sends the digest to the signer over a
 pre-connected Unix socketpair and gets the signature back. So a memory-disclosure
 bug in the HTTP layer — the part exposed to agents — cannot leak the key, because
 the key is not there to leak. `--single-process` collapses all three into one and
-gives that up; it exists for containers and debugging.
+gives that up; it is a debugging aid. The container images and the Helm chart run
+the default three processes, because the isolation matters in a container as much
+as anywhere.
 
 The two children inherit two file descriptors from the launcher:
 
@@ -212,13 +214,11 @@ There are two sources, and you must configure one:
    [process isolation](#process-isolation).
 
 With `encrypt_ca_key` set and neither configured, the server **refuses to
-start**. It does not generate a passphrase for you.
-
-It used to, writing a random one to `<cadir>/private/.ca_key_passphrase` — beside
-the key it protects. That made the guarantee at the top of this page false for
-the default configuration: encryption at rest is protection against a copied
-backup, disk image or snapshot, and a copy of the cadir carried the ciphertext
-and the passphrase together. Anyone holding the copy held both halves.
+start**. It does not generate a passphrase for you, because one it generated
+would have to live beside the key it protects. Encryption at rest is protection
+against a copied backup, disk image or snapshot, and a copy of the cadir would
+then carry the ciphertext and the passphrase together: anyone holding the copy
+would hold both halves.
 
 A passphrase file readable by every local account makes the server **refuse to
 start** as well, whichever backend you run: it unlocks the encrypted key, so

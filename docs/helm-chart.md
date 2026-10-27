@@ -464,9 +464,16 @@ runtime cannot parse is not one of these cases: the runtime rejects it during
 startup, before any of this runs, and the process dies with `fatal error:
 malformed GOMEMLIMIT`.
 
-**63Mi** is the smallest whole MiB that divides under the default reservations
-(the exact floor is 65244729 bytes). Below it `resources.limits.memory` is left
-undivided — and then no process gets a limit at all, so the cliff is back.
+Where `resources.limits.memory` is the ceiling, **63Mi** is the smallest whole
+MiB that divides under the default reservations (the exact floor is 65244729
+bytes), because a derived ceiling is scaled to 90% first. An explicit
+`GOMEMLIMIT` is taken at face value, so its floor is lower; see
+[memory budget](configuration.md#memory-budget). A ceiling too small to divide
+is left undivided, and what that leaves depends on where it came from. Derived
+from `resources.limits.memory`, no process gets a limit at all, so the cliff is
+back. Taken from an explicit `GOMEMLIMIT`, it stays in force and all three
+processes apply the whole of it, each — a limit that looks as though it is
+working and is counted three times over.
 
 At the shipped 128Mi default the tree budget is 115.2Mi and the frontend's share
 is **83.2Mi**, the launcher's 8Mi and the signer's 24Mi; the startup log line

@@ -477,10 +477,15 @@ envFrom: []
 # cliff — no GOMEMLIMIT needed. On a cgroup v1 node nothing is derived; set
 # GOMEMLIMIT explicitly there.
 #
-# 63Mi is the smallest whole MiB that divides (the exact floor is 65244729
-# bytes). A smaller ceiling is left undivided, with a warning, and NO process
-# gets a memory limit at all, so the cliff is back — lowering this value past
-# the default disables the mechanism rather than tightening it.
+# Derived from this limit, 63Mi is the smallest whole MiB that divides (the
+# exact floor is 65244729 bytes); an explicit GOMEMLIMIT is taken at face value,
+# so its floor is lower. A ceiling too small to divide is left undivided, with a
+# warning, and what that leaves depends on where it came from. Derived from this
+# limit, NO process gets a memory limit at all, so the cliff is back — lowering
+# this value past the default disables the mechanism rather than tightening it.
+# Taken from a GOMEMLIMIT set via `env`, it stays in force and all three
+# processes apply the whole of it, each — a limit that looks as though it is
+# working and is counted three times over.
 #
 # At this 128Mi default the frontend's share is 83.2Mi, after 8Mi for the
 # launcher and 24Mi for the signer. Every byte above those two fixed

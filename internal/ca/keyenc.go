@@ -255,26 +255,23 @@ func CheckKeyPassphrase(cfg KeyPassphraseConfig, caDir string, encryptCAKey bool
 
 // resolvePassphrase determines the CA key passphrase from the configured
 // sources: PassphraseFile, then the environment variable. There is no third
-// source -- with neither configured, this refuses.
+// source -- with neither configured, this refuses (#432).
 //
-// It used to generate one and write it to <cadir>/private/.ca_key_passphrase,
-// beside the key it protects. docs/ca-key-security.md offers encryption at rest
-// as protection against a copied backup, disk image or snapshot, and that claim
-// is simply false when the passphrase travels in the same directory as the
-// ciphertext: anybody holding the copy holds both halves. The default was the
-// configuration that made the documented guarantee untrue, and nothing told the
-// operator (#432).
+// It does not generate one. A generated passphrase would have to live beside
+// the key it protects, and docs/ca-key-security.md offers encryption at rest as
+// protection against a copied backup, disk image or snapshot: that claim is
+// false when the passphrase travels in the same directory as the ciphertext,
+// because anybody holding the copy holds both halves.
 //
-// Refusing also fixes a second defect of the same code. The load path calls
-// this too, so an operator whose passphrase came from the environment and who
-// restarted without it set did not get an error about the missing passphrase --
-// they got a *freshly generated* one, written over nothing, and then a failure
-// to decrypt the existing key with it. A missing passphrase is now a missing
-// passphrase wherever it is noticed.
+// Refusing matters on the load path too, which calls this as well. An operator
+// whose passphrase came from the environment and who restarts without it set
+// gets an error naming the missing passphrase, not a freshly generated one
+// followed by a failure to decrypt the existing key with it. A missing
+// passphrase is a missing passphrase wherever it is noticed.
 //
-// The error names the remedy, including for a store that already has a
-// generated passphrase: that file is still a perfectly good passphrase, and
-// pointing ca_key_passphrase_file at it keeps the CA working.
+// The error names the remedy, including when a file already exists at
+// autoPassphrasePath: it may still be a perfectly good passphrase, and pointing
+// ca_key_passphrase_file at it keeps the CA working.
 func resolvePassphrase(cfg KeyPassphraseConfig, caDir string, need passphraseNeed) ([]byte, error) {
 	envVar := cfg.EnvVar()
 
@@ -292,14 +289,14 @@ func resolvePassphrase(cfg KeyPassphraseConfig, caDir string, need passphraseNee
 		return []byte(val), nil
 	}
 
-	// 3. Nothing configured. An earlier version would have generated one here.
+	// 3. Nothing configured, and nothing is generated (#432).
 	autoPath := autoPassphrasePath(caDir)
 	if _, err := os.Stat(autoPath); err == nil {
 		return nil, fmt.Errorf("%s and no passphrase source is configured, "+
-			"but an earlier version generated one at %s -- openvox-ca no longer generates or reads "+
-			"it implicitly, because a passphrase stored beside the key it protects defends neither "+
-			"against a copied cadir; set ca_key_passphrase_file to that path to keep using it, or "+
-			"set %s, then move the file somewhere the cadir's backups do not reach",
+			"but %s exists -- openvox-ca does not read a passphrase from it implicitly, "+
+			"because a passphrase stored beside the key it protects defends neither against a "+
+			"copied cadir; set ca_key_passphrase_file to that path to use it, or set %s, then "+
+			"move the file somewhere the cadir's backups do not reach",
 			need.because(), autoPath, envVar)
 	}
 	return nil, fmt.Errorf("%s but no passphrase source is configured; "+
@@ -331,10 +328,10 @@ func readPassphraseFile(path string) ([]byte, error) {
 	return data, nil
 }
 
-// autoPassphrasePath returns the path at which versions before #432 generated
-// a passphrase. Nothing writes it; the sole caller is the refusal above, which
-// stats it so that a store bootstrapped by such a version gets a remedy naming
-// the file it already has.
+// autoPassphrasePath returns <cadir>/private/.ca_key_passphrase, where a
+// passphrase generated beside the key would sit. Nothing writes it; the sole
+// caller is the refusal above, which stats it so that an operator with a file
+// there gets a remedy naming it.
 func autoPassphrasePath(caDir string) string {
 	return filepath.Join(caDir, "private", ".ca_key_passphrase")
 }
