@@ -157,7 +157,7 @@
       "rangeStrategy": "bump"
     },
     {
-      "description": "The 'go' directive in go.mod and the golang builder image are the same toolchain; move them in one PR",
+      "description": "The 'go' directive in go.mod and the golang builder image are the same toolchain; move them in one PR, since the image's GOTOOLCHAIN=local fails the alpine build when it lags. Each half is aged separately against minimumReleaseAge, and Docker Hub re-dates the image on every rebuild. Under the default internalChecksFilter (strict), Renovate dropped the younger half from the branch, so the group opened go.mod-only with nothing on the Dependency Dashboard to tick (#454, #506, #539). flexible keeps both halves. prCreation not-pending holds the group under Pending Status Checks until both have aged, and ticking it there opens the PR early. internalChecksAsSuccess is needed because no CI runs on Renovate branches. A ticked PR may be go.mod-only at first: do not approve it until it touches Dockerfile.alpine",
       "matchDatasources": [
         "golang-version",
         "docker"
@@ -166,7 +166,10 @@
         "go",
         "golang"
       ],
-      "groupName": "Go toolchain"
+      "groupName": "Go toolchain",
+      "internalChecksFilter": "flexible",
+      "prCreation": "not-pending",
+      "internalChecksAsSuccess": true
     },
     {
       "description": "bun's core module and its dialect and driver modules are one release: every submodule is tagged at the core's version, and each one that imports the core (all but driver/sqliteshim) requires exactly that version and replaces it with the in-tree copy (replace github.com/uptrace/bun => ../..), so it is only ever built against the core at the same commit. Taken one at a time they skew — bun v1.3.0 beside mysqldialect v1.2.18 fails every package that links the SQL backend, at init (#418–#423). config:best-practices does not group them: group:monorepos has no bun entry. The bare name is listed because the glob alone does not match the core module",
