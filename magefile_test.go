@@ -413,7 +413,8 @@ var _ = Describe("Dev.Vulncheck", func() {
 		// The stub records each call's build environment and arguments, writes
 		// a marker to stdout and to stderr as govulncheck writes its report,
 		// and exits 3 -- govulncheck's status for a reachable finding -- for
-		// the pure-Go release scan of each architecture STUB_FAIL lists. PATH
+		// the pure-Go release scan of each architecture STUB_FAIL lists, or 1,
+		// its status for any other failure, for each one STUB_OPFAIL lists. PATH
 		// holds the stub alone, so no real govulncheck can answer instead, and
 		// the stub uses shell builtins only.
 		BeforeEach(func() {
@@ -424,11 +425,13 @@ var _ = Describe("Dev.Vulncheck", func() {
 				`printf '%s|%s|%s|%s|%s\n' "$GOOS" "$GOARCH" "$CGO_ENABLED" "$GOEXPERIMENT" "$*" >>"$STUB_LOG"` + "\n" +
 				`echo stub-out` + "\n" +
 				`echo stub-err >&2` + "\n" +
-				`if [ -n "$GOARCH" ] && [ "$CGO_ENABLED" = 0 ]; then case " $STUB_FAIL " in *" $GOARCH "*) exit 3;; esac; fi` + "\n"
+				`if [ -n "$GOARCH" ] && [ "$CGO_ENABLED" = 0 ]; then case " $STUB_FAIL " in *" $GOARCH "*) exit 3;; esac; fi` + "\n" +
+				`if [ -n "$GOARCH" ] && [ "$CGO_ENABLED" = 0 ]; then case " $STUB_OPFAIL " in *" $GOARCH "*) exit 1;; esac; fi` + "\n"
 			Expect(os.WriteFile(filepath.Join(dir, "govulncheck"), []byte(stub), 0o755)).To(Succeed())
 			GinkgoT().Setenv("PATH", dir)
 			GinkgoT().Setenv("STUB_LOG", logPath)
 			GinkgoT().Setenv("STUB_FAIL", "")
+			GinkgoT().Setenv("STUB_OPFAIL", "")
 			for _, name := range []string{"GOOS", "GOARCH", "CGO_ENABLED", "GOEXPERIMENT"} {
 				GinkgoT().Setenv(name, "")
 			}
@@ -488,6 +491,47 @@ var _ = Describe("Dev.Vulncheck", func() {
 			Expect(err).To(MatchError(ContainSubstring("the linux_amd64 release build:")))
 			Expect(err).To(MatchError(ContainSubstring("the linux_arm64 release build:")))
 			Expect(err.Error()).NotTo(ContainSubstring("the magefile:"))
+		})
+
+		// mageExitStatus is the status mage's generated main exits with for
+		// err: it asserts ExitStatus on the error itself and does not unwrap.
+		// mg.ExitStatus unwraps, so it would read 3 off a joined error that
+		// mage itself exits 1 for -- the bug these specs exist to catch.
+		mageExitStatus := func(err error) int {
+			if c, ok := err.(interface{ ExitStatus() int }); ok {
+				return c.ExitStatus()
+			}
+			return 1
+		}
+
+		// That status is the job's own, and docs/development/testing.md tells
+		// a reader to triage a red job by it: 3 for a finding, 1 for anything
+		// else. Each scan's own status stays in the message as well.
+		It("exits 3 when a scan finds something", func() {
+			GinkgoT().Setenv("STUB_FAIL", "amd64")
+			err := vulncheckInto(logDir, runtime.GOOS, runtime.GOARCH)
+			Expect(mageExitStatus(err)).To(Equal(3))
+			Expect(err).To(MatchError(ContainSubstring(
+				`the linux_amd64 release build: running "govulncheck -show verbose ./..." failed with exit code 3`)))
+		})
+
+		It("exits 1 when a scan fails without finding anything", func() {
+			GinkgoT().Setenv("STUB_OPFAIL", "arm64")
+			err := vulncheckInto(logDir, runtime.GOOS, runtime.GOARCH)
+			Expect(mageExitStatus(err)).To(Equal(1))
+			Expect(err).To(MatchError(ContainSubstring(
+				`the linux_arm64 release build: running "govulncheck -show verbose ./..." failed with exit code 1`)))
+		})
+
+		// The finding is in the first scan and the other failure in a later
+		// one, so a status taken from the last failing scan reads 1.
+		It("exits 3 when one scan finds something and another fails otherwise", func() {
+			GinkgoT().Setenv("STUB_FAIL", "amd64")
+			GinkgoT().Setenv("STUB_OPFAIL", "arm64")
+			err := vulncheckInto(logDir, runtime.GOOS, runtime.GOARCH)
+			Expect(mageExitStatus(err)).To(Equal(3))
+			Expect(err).To(MatchError(ContainSubstring("the linux_amd64 release build:")))
+			Expect(err).To(MatchError(ContainSubstring("the linux_arm64 release build:")))
 		})
 	})
 

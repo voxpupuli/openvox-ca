@@ -8858,7 +8858,21 @@ func vulncheckInto(logDir, hostOS, hostArch string) error {
 			errs = append(errs, fmt.Errorf("%s: %w", sc.what, err))
 		}
 	}
-	return errors.Join(errs...)
+	if len(errs) == 0 {
+		return nil
+	}
+	// mage exits with the status of the error a target returns, but only one
+	// that carries ExitStatus itself: it does not unwrap. So the scans'
+	// statuses are lifted here, and the job exits 3 -- govulncheck's status
+	// for a reachable finding -- if any scan found one, and 1 when every
+	// failure was something else, such as vuln.go.dev being unreachable.
+	status := 1
+	for _, err := range errs {
+		if mg.ExitStatus(err) == 3 {
+			status = 3
+		}
+	}
+	return mg.Fatal(status, errors.Join(errs...))
 }
 
 // vulncheckScan is one govulncheck invocation: what it covers, the build

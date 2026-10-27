@@ -34,13 +34,12 @@ mage test:bench
 ```
 
 `dev:vulncheck` reads the advisory database live, so its CI job can go red on a
-tree nobody changed. Read the exit status in the job log first. Status 3, with
-advisory IDs in the log (and in `.test-output/govulncheck.log`), means a newly
-published advisory reaches the code. Any other status, usually 1 with no IDs,
-is an operational failure, such as vuln.go.dev or the module proxy being
-unreachable: rerun the job. For an advisory, the fix is to bump the affected
-module, or the Go toolchain for a standard-library advisory (Renovate's "Go
-toolchain" group). When no fixed release exists yet, the maintainers decide
+tree nobody changed. It exits 3 when a scan finds a vulnerability the code can
+reach: a newly published advisory, listed under `=== Symbol Results ===` in the
+job log. Any other failure, such as vuln.go.dev being unreachable, exits 1, and
+rerunning the job is the first step. For an advisory, the fix is to bump the
+affected module, or the Go toolchain for a standard-library advisory (Renovate's
+"Go toolchain" group). When no fixed release exists yet, the maintainers decide
 between making the vulnerable symbol unreachable and overriding the required
 check, since govulncheck has no per-advisory allowlist.
 
