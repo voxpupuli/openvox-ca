@@ -48,6 +48,63 @@ const (
 	// hand-off quick; the ceiling keeps a long wait from spinning.
 	fileLockRetryInitial = 5 * time.Millisecond
 	fileLockRetryMax     = 250 * time.Millisecond
+
+	// lockFilePerm and lockDirPerm are the modes the lock files and the lock
+	// directory are created with: owner and group, never world. Like
+	// sqliteFilePermCreate they are ceilings, which the operator's umask
+	// narrows and nothing here widens afterwards.
+	//
+	// Group access is what lets a process running as a different uid in the
+	// store's group reacquire these locks: a platform assigning the pod a
+	// fresh uid per start, such as OpenShift, reaches a store the previous uid
+	// created through its group (#493). Both halves are needed. The directory
+	// needs group write as well as the files needing group read and write,
+	// because every subject lock is a file of its own, created the first time
+	// that subject is signed, so a uid that can only reopen the files already
+	// there still cannot sign a new node.
+	//
+	// Under a 0022 umask -- the usual default, and systemd's for a unit that
+	// sets no UMask -- they come out 0640 and 0750: the group cannot open a
+	// lock read-write, nor create, replace or remove one. The same umask
+	// leaves the SQLite database 0640 and so unwritable by a second uid too,
+	// so an arbitrary-uid deployment also needs a umask that keeps group
+	// write, 0002 or 0007. Under a UMask of 0077 both are owner-only, and
+	// nothing below applies.
+	//
+	// What a member of the store's group can do with them follows from the
+	// three bits the umask can leave it, so it is listed by bit rather than by
+	// the attacks anyone has thought of:
+	//
+	//   - Read on a lock file (0022 and anything looser). It can read the
+	//     store-instance lock's holder record: the pid, host and start time of
+	//     whoever holds the store. And it can hold any lock that exists:
+	//     flock(2) needs no write access, so a lock opened read-only takes
+	//     LOCK_EX as well as any. Held on the store-instance lock, that stops
+	//     the CA starting with a StoreLockedError; held on crl or a subject
+	//     lock, it stalls revocation or signing until the caller's deadline.
+	//   - Write on a lock file (0002, 0007). It can also rewrite the holder
+	//     record, so a StoreLockedError can name a process of its choosing.
+	//     acquireInstance checks the file's mode and says so in the error
+	//     whenever the record could have been written by the group.
+	//   - Write on the lock directory (0002, 0007). It can create a lock file
+	//     for a name nobody has locked yet, which is what a second uid needs.
+	//     It can put something else at a lock file's name, a link or a special
+	//     file, which lockOpenFlags and verifyLockFile refuse so that this
+	//     process's privileges cannot be carried through it. And it can unlink
+	//     a lock file, which fileUnlocker below explains defeats the lock for
+	//     anyone waiting on it.
+	//
+	// Search on the directory, which DirPerm already gave the group, adds
+	// nothing. So the group can deny service through the locks and mislead
+	// an operator about who holds one; it cannot use them to read or write
+	// anything but the lock files themselves. On SQLite the same umask gives it the
+	// database, which holds the CA key by default, so the locks add nothing it
+	// lacked. On the filesystem backend its data is 0600 in DirPerm
+	// directories, so there this is a real if small widening: a member of the
+	// group can stop the CA without being able to read the data the locks
+	// protect.
+	lockFilePerm = 0o660
+	lockDirPerm  = 0o770
 )
 
 // tryLock is indirected through a variable so a spec can drive acquire's
@@ -138,7 +195,7 @@ func (l *fileLocks) acquire(ctx context.Context, name string) (Unlocker, error) 
 	local.Lock()
 
 	path := filepath.Join(l.dir, fileLockFileName(name))
-	if err := os.MkdirAll(l.dir, DirPerm); err != nil {
+	if err := l.makeDir(); err != nil {
 		local.Unlock()
 		return nil, l.unwritableStore(err, "creating same-host lock directory "+l.dir)
 	}
@@ -150,10 +207,15 @@ func (l *fileLocks) acquire(ctx context.Context, name string) (Unlocker, error) 
 	// Changing or removing either directive means revisiting all three. See
 	// voxpupuli/openvox-ca#313.
 	//nolint:gosec // G703: filepath.Join of the operator-configured store root and a hex sha256 digest, which cannot contain a separator, so the path cannot leave the lock directory
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, FilePermPrivate)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|lockOpenFlags, lockFilePerm)
 	if err != nil {
 		local.Unlock()
 		return nil, l.inaccessibleLockFile(err, path)
+	}
+	if err := verifyLockFile(f, path); err != nil {
+		_ = f.Close()
+		local.Unlock()
+		return nil, err
 	}
 
 	backoff := fileLockRetryInitial
@@ -248,10 +310,22 @@ func (l *fileLocks) unwritableStore(err error, what string) error {
 // are safe. Failing loudly is recoverable in one chown; a silent downgrade is
 // not detectable from either side.
 //
+// The other way to get here is a platform that starts each run as a different
+// uid, OpenShift for one, against a store a previous uid created under a umask
+// that took group write away. chown is not available to that process, so the
+// message names the umask as well (#493). Only a SQLite store can run that way
+// at all -- the filesystem backend's data is 0600 whatever the umask -- so the
+// message says so rather than offering a remedy that only moves the failure.
+//
 // A read-only filesystem still reports the capability as absent: EROFS says
 // nothing about ownership, and a lock directory left behind on a since-remounted
 // store is exactly the read-only snapshot unwritableStore exists for.
 func (l *fileLocks) inaccessibleLockFile(err error, path string) error {
+	if isSymlinkRefusal(err) {
+		return fmt.Errorf("opening same-host lock file %s: %w (it is a symbolic link; openvox-ca only "+
+			"ever creates lock files as plain files, so something else put this here — remove it, and "+
+			"check who can write %s)", path, err, l.dir)
+	}
 	if isReadOnlyFSError(err) {
 		l.warnOnce.Do(func() {
 			slog.Warn("Same-host locking is unavailable: the store is on a read-only filesystem",
@@ -262,9 +336,46 @@ func (l *fileLocks) inaccessibleLockFile(err error, path string) error {
 	if errors.Is(err, fs.ErrPermission) {
 		return fmt.Errorf("opening same-host lock file %s: %w (%s, and this process runs as uid %d; "+
 			"another user — typically a ctl command run under sudo — owns it, so `chown -R` the lock "+
-			"directory back to the user openvox-ca runs as)", path, err, obstruction(path, l.dir), os.Geteuid())
+			"directory back to the user openvox-ca runs as; on a platform that starts each run as a "+
+			"different uid in the store's group, which only a SQLite store supports, the store must "+
+			"have been created under a umask that keeps group write, such as 0002)",
+			path, err, obstruction(path, l.dir), os.Geteuid())
 	}
 	return fmt.Errorf("opening same-host lock file %s: %w", path, err)
+}
+
+// verifyLockFile refuses a lock file that is not a plain file with a single
+// link, judged through the descriptor just opened so that what is checked is
+// what will be locked and, for the instance lock, written.
+//
+// The lock directory can be group-writable (lockDirPerm), so a member of the
+// store's group can put something at a lock file's name. lockOpenFlags already
+// refuses a symbolic link; this catches the two things that open succeeds on. A
+// hard link to ca_key.pem would otherwise be truncated and overwritten by the
+// instance lock's holder record, and a FIFO or other special file is not
+// something flock(2) and that record belong on. Both refuse rather than
+// recover, and nothing here modifies what it found: the file belongs to whoever
+// planted it, and the operator is the one to remove it.
+//
+// A platform whose FileInfo carries no link count skips that half of the check
+// rather than refusing every lock; statNlink declines only off Unix, where no
+// lock file is ever opened.
+func verifyLockFile(f *os.File, path string) error {
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("checking same-host lock file %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("same-host lock file %s is not a regular file (%s); openvox-ca only ever "+
+			"creates lock files as plain files, so something else put this here — remove it",
+			path, info.Mode().Type())
+	}
+	if n, ok := statNlink(info); ok && n != 1 {
+		return fmt.Errorf("same-host lock file %s has %d hard links; openvox-ca only ever creates "+
+			"lock files with one, so another name for this file exists — remove the lock file, "+
+			"and find what else it is linked to before trusting that file", path, n)
+	}
+	return nil
 }
 
 // obstruction names whichever of the lock file and its directory this process
@@ -316,7 +427,7 @@ func (l *fileLocks) localFor(name string) *sync.Mutex {
 // The lock file itself is deliberately never removed. Unlinking it while
 // another process is blocked on the same path lets a third process create a
 // fresh inode at that name and take a lock the blocked one is still waiting
-// for, so both would believe they hold it. A handful of empty 0600 files, one
+// for, so both would believe they hold it. A handful of small lock files, one
 // per distinct lock name, is the cheaper side of that trade.
 type fileUnlocker struct {
 	f     *os.File

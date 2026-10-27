@@ -96,6 +96,10 @@ type StoreLockedError struct {
 	// Holder describes the process holding it, as that process recorded
 	// itself. Empty when the record was missing or unreadable.
 	Holder string
+	// HolderUnverified is set when the lock file was group-writable, so the
+	// record may have been written by any member of the store's group rather
+	// than by the process holding the lock; see lockFilePerm.
+	HolderUnverified bool
 }
 
 func (e *StoreLockedError) Error() string {
@@ -107,11 +111,18 @@ func (e *StoreLockedError) Error() string {
 		// the process.
 		who = "an unidentified process"
 	}
+	caveat := ""
+	if e.HolderUnverified {
+		// Said in the error rather than left to the docs, because this is the
+		// sentence that tells an operator which process to stop.
+		caveat = "; that description is the lock file's own contents, and the store's group can " +
+			"write the file, so confirm the process is openvox-ca before stopping it"
+	}
 	return fmt.Sprintf(
-		"another openvox-ca process is already running against this store: %s (lock file %s). "+
+		"another openvox-ca process is already running against this store: %s (lock file %s%s). "+
 			"This storage backend has no distributed locking, so exactly one instance may run at a time; "+
 			"stop the running one first",
-		who, e.Path)
+		who, e.Path, caveat)
 }
 
 // InstanceLocker is implemented by backends that can hold a store-wide
@@ -340,14 +351,21 @@ func (l *fileLocks) acquireInstance() (Unlocker, error) {
 	}
 
 	path := filepath.Join(l.dir, fileLockFileName(instanceLockName))
-	if err := os.MkdirAll(l.dir, DirPerm); err != nil {
+	if err := l.makeDir(); err != nil {
 		local.Unlock()
 		return nil, l.unwritableStore(err, "creating same-host lock directory "+l.dir)
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, FilePermPrivate)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|lockOpenFlags, lockFilePerm)
 	if err != nil {
 		local.Unlock()
 		return nil, l.inaccessibleLockFile(err, path)
+	}
+	// Before anything is locked or written: writeHolder truncates this file,
+	// so it must be a lock file and not another name for something else.
+	if err := verifyLockFile(f, path); err != nil {
+		_ = f.Close()
+		local.Unlock()
+		return nil, err
 	}
 
 	locked, lockErr := tryLock(f)
@@ -368,9 +386,17 @@ func (l *fileLocks) acquireInstance() (Unlocker, error) {
 		// needs no lock of its own: whoever holds it wrote its record before
 		// this process could reach here.
 		holder := readInstanceHolder(f)
+		// Judged on the open descriptor, like verifyLockFile, so the mode is
+		// that of the file the record came from. An unreadable mode counts as
+		// unverified: the caveat costs a sentence, and omitting it wrongly
+		// sends an operator to stop a process somebody else named.
+		unverified := true
+		if info, err := f.Stat(); err == nil {
+			unverified = info.Mode().Perm()&0o020 != 0
+		}
 		_ = f.Close()
 		local.Unlock()
-		return nil, &StoreLockedError{Path: path, Holder: holder}
+		return nil, &StoreLockedError{Path: path, Holder: holder, HolderUnverified: unverified}
 	}
 
 	// Record who we are, for the next process that is refused. Best-effort:
@@ -421,7 +447,8 @@ func writeInstanceHolder(f *os.File) error {
 //
 // The command name is the binary's, never its arguments: a command line can
 // carry a passphrase file path or another operational detail, and this record
-// lands in a 0600 file that an error message then prints. The pid, host and
+// lands in a lock file the store's group may read (lockFilePerm, 0660 less the
+// umask) and that an error message then prints. The pid, host and
 // start time are enough to find the process, which is all the reader needs.
 func instanceHolderRecord() string {
 	name := "openvox-ca"

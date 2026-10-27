@@ -139,6 +139,12 @@ unsupported thing is attempted on one host. It cannot do more than that:
   A relative path used from two different working directories, or one store
   reached through two different symlinks, gives two independent locks and no
   mutual exclusion.
+- **A lock file that is not a plain file is refused.** The lock directory can
+  be group-writable (see the SQLite section), so a symbolic link, a hard link or
+  any other special file found at a lock file's name stops the acquisition with
+  an error naming it, and nothing is followed or changed. `openvox-ca` only
+  ever creates lock files as plain files, so remove it by hand and find out who
+  put it there.
 - **Where the store cannot be locked at all** — a filesystem without `flock(2)`,
   a read-only mount — the server logs a warning and starts anyway, because
   refusing over a lock that is unavailable rather than held would take down a CA
@@ -150,8 +156,8 @@ one instance, and the lock catches the case it can.
 ### Running `openvox-ca-ctl` as the service user
 
 - **Run `openvox-ca-ctl` as the user the server runs as**, not under `sudo`.
-  The lock files are `0600` and the directory `0750`, so a command run as root
-  leaves a root-owned lock file in a store the service account owns, and the
+  The lock files are group-accessible at most, but a command run as root still
+  leaves a root-owned lock file the service account cannot open, and the
   server's next acquisition of that name fails — deliberately and loudly, with
   an error naming the file, its owner and `chown -R`, because the alternative is
   it quietly giving up on locking while the root process believes it holds an
@@ -311,7 +317,7 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
 ├── signed/
 │   └── <subject>.pem       issued certificates
 └── locks/
-    └── <hash>.lock         same-host lock files              0600
+    └── <hash>.lock         same-host lock files              0660
 ```
 
 > **`ca_key.pem` is where OpenVox Server keeps its CA key**, so a cadir either
@@ -338,9 +344,13 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
 
 (The directory also holds small internal integrity files; leave them in place.)
 File permissions are fixed: `0600` for `ca_key.pem`, `inventory.txt`, the
-integrity files and `superseded.json`, for anything under `private/` and for
-the lock files under `locks/`; `0644` for certificates, CSRs, `ca_crt.pem`,
-`ca_pub.pem`, `ca_crl.pem` and `serial`. The CRL is world-readable because it is
+integrity files and `superseded.json`, and for anything under `private/`;
+`0660` for the lock files under `locks/`, and `0770` for `locks/` itself;
+`0644` for certificates, CSRs, `ca_crt.pem`, `ca_pub.pem`, `ca_crl.pem` and
+`serial`. Group access to the lock files lets a member of the cadir's group
+hold a lock, and so stop the CA starting or stall signing and revocation;
+a umask of `0077` removes it (see the SQLite section for the detail, which
+applies here too). The CRL is world-readable because it is
 public: it is served without authentication, and OpenVox Server writes it
 `0644` too. The inventory is not, because it names every subject this CA has
 signed. A file openvox-ca rewrites gets its mode, so a cleanup that drops
@@ -874,17 +884,43 @@ will not do, since it never changes the mode of a file it did not create. If you
 do not want it, set a umask: `0077` gives `0600` and nothing in the server
 objects.
 
-Two things that group bit does **not** do, since both have been claimed for it
-here before. It is not what makes a Kubernetes `fsGroup` volume work: the
+That group bit is not what makes a Kubernetes `fsGroup` volume work: the
 kubelet ORs group access in at every mount whatever the file was created as, so
-there the creation mode is irrelevant. And it is not enough to make an
-arbitrary-uid platform work — one assigning the pod a fresh uid per start, such
-as OpenShift. The database would be reachable, but the same restart has to
-reacquire the same-host lock files, and those are created `0600` in a `0750`
-directory, so a new uid fails at the lock before the database mode matters. If
-you run that topology, pin the uid;
-[#493](https://github.com/voxpupuli/openvox-ca/issues/493) tracks what it would
-take to support it.
+there the creation mode is irrelevant.
+
+It is what lets a platform that assigns the pod a fresh uid per start, such as
+OpenShift, reach a SQLite database and its locks that a previous uid created,
+provided the uids share a group, the umask keeps group write, and the directory
+holding the database is group-writable too (SQLite creates its sidecars there,
+and `openvox-ca` creates the lock directory there). The same
+restart has to reacquire the same-host locks, so those are created
+group-accessible too: the files in `.<database>.locks/` at `0660` and the
+directory at `0770`, narrowed by the umask the same way. The directory needs
+group write because each subject's lock is a file of its own, created the first
+time that subject is signed. Under the usual `0022` the database comes out
+`0640` and the locks `0640` in a `0750` directory, which a second uid can
+neither write nor create in, so on such a platform run `openvox-ca` under a
+umask of `0002` or `0007` from the first start.
+
+That covers the database and its locks, and nothing else. Every private key
+`openvox-ca` writes as a file is created `0600` whatever the umask, in
+directories without group write, so a second uid can neither read one an earlier
+uid wrote nor add its own. On such a platform that rules out a CA key kept in a
+file through `ca_key_file`, server-side key generation (`/generate`, which
+writes into `<cadir>/private/` on every backend), and the filesystem backend
+altogether. Keep the CA key in the database, or run with a stable uid.
+[Server-side key generation and the uid](#server-side-key-generation-and-the-uid)
+covers server-side generation in full.
+
+Group read on the lock files has a cost of its own. `flock(2)` needs no write
+access, so any member of the group can hold an existing lock, which can stop the
+CA starting or stall signing and revocation. That is true under `0022` as well,
+which leaves the lock files `0640`; only a umask that removes group read, such
+as `0077`, prevents it. Under the `0002` or `0007` this topology needs, the
+group can also write the store-instance lock's record of who holds it, so when
+the CA refuses to start because another instance holds the store, the error
+says the process it names may not be the real holder: check it before stopping
+it.
 
 **`openvox-ca` never changes the mode of a file it did not create.** Not the
 database, not the sidecars, not the directory holding them. A store whose
