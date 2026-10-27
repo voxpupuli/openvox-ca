@@ -263,9 +263,11 @@ $ sudo systemctl enable --now openvox-ca
 
 **`enable --now`, not `start`.** The package deliberately leaves `openvox-ca.service` disabled — an install is not consent to create a certificate authority — so `start` alone gives you a running CA that does not come back after a reboot. Enabling is the step that says yes.
 
+On EL the rpm applies the systemd preset for `openvox-ca.service` on its first install, as an rpm built with `%systemd_post` would. The distribution's default policy disables a third-party unit, so on most hosts this changes nothing; a site or image whose own preset enables `openvox-ca.service` gets it enabled, which is what presets are for. It is not applied again on upgrade, so an enable or disable you make yourself stands. The first install also prints the command above, where to find this page, and `journalctl -u openvox-ca-first-boot` for a start that fails.
+
 The `.deb` and `.rpm` install the same unit, rendered for `/usr/bin`, and add a second one: `openvox-ca-first-boot.service`, a `Type=oneshot` that provisions the CA the first time you start the service. They also install this documentation tree at `/usr/share/doc/openvox-ca`, which is where the shipped configuration file points you when it says to read the full reference — so the answers are on the host rather than only in the repository.
 
-It is pulled in by `openvox-ca.service` and runs nowhere else. There is no `WantedBy=multi-user.target` on it, so installing the package provisions nothing and neither does the next reboot — a CA is created the first time you run `systemctl start openvox-ca`. It is ordered `Before=openvox-ca.service` and is required by it, so provisioning that fails stops the service rather than letting it start against a half-provisioned directory.
+It is pulled in by `openvox-ca.service` and runs nowhere else. There is no `WantedBy=multi-user.target` on it, so installing the package provisions nothing and neither does the next reboot — a CA is created the first time you run `systemctl start openvox-ca`. The exception is an EL host whose own systemd preset enables `openvox-ca.service`: the rpm applies presets, so there the next boot starts it. It is ordered `Before=openvox-ca.service` and is required by it, so provisioning that fails stops the service rather than letting it start against a half-provisioned directory.
 
 **You do not have to write a configuration file first.** The package ships `/etc/openvox-ca/config.yaml` already set up: the CA directory, the serving certificate and key, and the port. Review it if you like — it is marked as a configuration file, so your edits survive upgrades — but a default install needs no edit to start.
 
@@ -381,7 +383,7 @@ Every spelling of the filesystem backend that `openvox-ca` itself accepts — `f
 
 ### The first-boot enable, and making a disable stick
 
-Installing the package enables `openvox-ca-first-boot.service`. That is symlink work on disk only: the unit has no `WantedBy=multi-user.target`, so nothing is provisioned by the install or by the next reboot, and it still runs at nothing but the first `systemctl start openvox-ca`.
+Installing the package enables `openvox-ca-first-boot.service`. That is symlink work on disk only: the unit has no `WantedBy=multi-user.target`, so nothing is provisioned by the install or by the next reboot, and it still runs at nothing but the first start of `openvox-ca` — which on an EL host whose own preset enables `openvox-ca.service` is the next boot (see [installing from a package](#installing-from-a-package)).
 
 The enable happens **once**, and the package records that it happened at `/var/lib/openvox-ca/first-boot-enabled`. So a later `systemctl disable openvox-ca-first-boot` is not undone by the next upgrade — the marker is what tells the upgrade its enable is already done. Removing the package deletes the marker, and the directory if nothing else is in it, so a subsequent reinstall enables again. On EL the directory usually also holds `environment-recorded`, which is left on purpose: see [the environment file on EL](#the-environment-file-on-el).
 

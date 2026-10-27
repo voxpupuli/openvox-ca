@@ -5855,6 +5855,66 @@ var _ = Describe("the packages' maintainer scripts", func() {
 		Entry("dpkg abort-remove", []string{"abort-remove"}, false),
 	)
 
+	// EL's half of "an install is not consent": a preset, which the default
+	// policy turns into nothing, and a message saying what to run instead. On
+	// rpm's first install only. An upgrade must not re-apply the preset over
+	// an operator's enable or disable, and the deb is #251's to decide.
+	DescribeTable("applies the preset and says what to run, on rpm's first install only",
+		func(args []string, first bool) {
+			r, calls := run("packaging/scripts/postinstall", args...)
+			Expect(r.ok).To(BeTrue(), "postinstall %v exited non-zero: %s", args, r.output)
+			if first {
+				Expect(calls).To(ContainSubstring("systemctl preset openvox-ca.service\n"))
+				Expect(r.output).To(And(
+					ContainSubstring("systemctl enable --now openvox-ca"),
+					ContainSubstring("/usr/share/doc/openvox-ca/docs/systemd.md"),
+					ContainSubstring("journalctl -u openvox-ca-first-boot"),
+				))
+			} else {
+				Expect(calls).NotTo(ContainSubstring("preset"), "postinstall %v applied a preset", args)
+				Expect(r.output).NotTo(ContainSubstring("enable --now"))
+			}
+			// Under the default policy a preset DISABLES the oneshot, undoing
+			// the enable above it, and the first start would then provision
+			// nothing.
+			Expect(calls).NotTo(ContainSubstring("preset openvox-ca-first-boot"))
+		},
+		Entry("rpm install", []string{"1"}, true),
+		Entry("rpm upgrade", []string{"2"}, false),
+		Entry("dpkg first install", []string{"configure"}, false),
+		Entry("dpkg upgrade", []string{"configure", "1.0.0"}, false),
+	)
+
+	// Under `set -eu` the `|| warn` is all that stands between a failed
+	// preset and a failed %post on rpm's first install.
+	It("warns rather than failing when the preset cannot be applied", func() {
+		Expect(os.WriteFile(filepath.Join(stubBin, "systemctl"),
+			[]byte("#!/bin/sh\nexit 1\n"), 0o755)).To(Succeed())
+		r, _ := run("packaging/scripts/postinstall", "1")
+		Expect(r.ok).To(BeTrue(), "a failed preset must not fail the install: %s", r.output)
+		Expect(r.output).To(And(
+			ContainSubstring("could not apply the systemd preset"),
+			ContainSubstring("systemctl enable --now openvox-ca"),
+		))
+	})
+
+	// A preset is on-disk work like the enable, so a chroot or image build
+	// with no running systemd still gets it.
+	It("applies the preset even where systemd is not running", func() {
+		absent := filepath.Join(GinkgoT().TempDir(), "no-such-runtime")
+		cmd := exec.Command("/bin/sh", "packaging/scripts/postinstall", "1")
+		cmd.Env = append(os.Environ(),
+			"PATH="+stubBin,
+			"OPENVOX_CA_SYSTEMD_RUNTIME="+absent,
+			"OPENVOX_CA_STATEDIR="+stateDir,
+		)
+		out, err := cmd.CombinedOutput()
+		Expect(err).NotTo(HaveOccurred(), "postinstall failed: %s", out)
+		calls, readErr := os.ReadFile(log)
+		Expect(readErr).NotTo(HaveOccurred())
+		Expect(string(calls)).To(ContainSubstring("systemctl preset openvox-ca.service\n"))
+	})
+
 	// The finding behind this: without an argument guard, every upgrade
 	// re-enabled the oneshot and silently undid a deliberate
 	// `systemctl disable openvox-ca-first-boot`.
@@ -5988,8 +6048,10 @@ var _ = Describe("the packages' maintainer scripts", func() {
 
 	// The abstention docs/systemd.md promises in as many words: installing a
 	// package is not consent to create a certificate authority, so the
-	// postinstall must never enable or start openvox-ca.service. Only the
+	// postinstall itself never enables or starts openvox-ca.service. Only the
 	// oneshot is enabled, and that is a RequiredBy= symlink and nothing else.
+	// rpm's preset on first install is the one route by which a site's OWN
+	// policy may enable the service, and "applies the preset" pins that.
 	DescribeTable("never enables or starts the service itself",
 		func(args ...string) {
 			_, calls := run("packaging/scripts/postinstall", args...)

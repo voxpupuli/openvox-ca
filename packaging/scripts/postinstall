@@ -1,13 +1,15 @@
 #!/bin/sh
 #
-# Shared postinstall for the deb and the rpm. Two jobs: make sure the `puppet`
-# account exists, and make sure systemd knows about the units.
+# Shared postinstall for the deb and the rpm. Its jobs: make sure the `puppet`
+# account exists and owns what it must, make sure systemd knows about the
+# units, and -- on rpm's first install only -- apply the preset and say what to
+# run next.
 #
-# It is shared rather than per-format because nothing in it diverges. Both
-# formats install the same units, the same binaries and the same
-# /etc/openvox-ca/config.yaml, and the one thing that does differ between them
-# -- the argument contract this script is called under -- is handled by the
-# case below rather than by two scripts.
+# It is shared rather than per-format because the two formats install the same
+# units, the same binaries and the same /etc/openvox-ca/config.yaml. What does
+# differ between them is selected by the argument contract this script is
+# called under -- dpkg's `configure` against rpm's install count -- in the
+# cases below, rather than by two scripts.
 
 set -eu
 
@@ -217,13 +219,16 @@ fi
 
 # openvox-ca.service is neither enabled nor started here: the operator gets a
 # configuration file to review first, and an install is not consent to create a
-# certificate authority.
+# certificate authority. (The one exception is rpm's preset, at the foot of this
+# file: a site preset that enables the unit is that consent, given in advance.)
 #
 # openvox-ca-first-boot.service IS enabled, and that is not the same thing.
 # Its [Install] section carries only RequiredBy=openvox-ca.service, so enabling
 # it installs one symlink into openvox-ca.service.requires/ and nothing that
 # any target pulls in. It therefore runs when the operator first starts
-# openvox-ca and at no other time -- not at install, not on the next boot.
+# openvox-ca and at no other time -- not at install, not on the next boot
+# (unless, on EL, a site preset enables openvox-ca.service itself; see the
+# preset at the foot of this file).
 # Without this the [Install] section is inert, because systemd acts on
 # [Install] at enable time and never merely because a unit file is present.
 #
@@ -314,4 +319,38 @@ if [ ! -e "$ENABLED_MARKER" ]; then
 			"checks have seen. Run 'systemctl enable openvox-ca-first-boot' before starting the" \
 			"service."
 	fi
+fi
+
+# -- EL: presets, and what to do next ----------------------------------------
+
+# rpm's first install only: `1` is the only argument that means it, because
+# rpm passes 2 on an upgrade and dpkg never passes a number. nfpm emits this
+# script verbatim, so %systemd_post -- which is what an rpm built from a spec
+# file would run here -- is not available, and this is its equivalent by hand.
+#
+# A preset, not an enable. The distribution's default policy disables a
+# third-party unit, which is the EL convention: `dnf install` installs and
+# nothing else, and a CA key pair is created by an explicit act. A site or
+# image whose own preset enables openvox-ca.service gets that, which is what
+# presets are for. On-disk work like the enable above, so it is not behind the
+# runtime check either. openvox-ca-first-boot.service is deliberately left out:
+# under the default policy a preset would disable it, undoing the enable above,
+# and then the first start would provision nothing.
+if [ "${1:-}" = 1 ]; then
+	systemctl preset openvox-ca.service >/dev/null 2>&1 || warn \
+		"could not apply the systemd preset for openvox-ca.service. It is left as it was," \
+		"which on a new install is disabled."
+
+	# Since nothing has started, say what does. On stdout, because this is
+	# not a warning: dnf shows a scriptlet's output either way. printf, a
+	# builtin, rather than cat: under `set -e` a message that could fail would
+	# fail the install, and a message is the last thing that should.
+	printf '%s\n' \
+		"openvox-ca is installed but not running. To create the CA and start it:" \
+		"" \
+		"    systemctl enable --now openvox-ca" \
+		"" \
+		"Review /etc/openvox-ca/config.yaml first if you want to; it works unedited." \
+		"Documentation: /usr/share/doc/openvox-ca/docs/systemd.md" \
+		"If the start fails: journalctl -u openvox-ca-first-boot" || :
 fi

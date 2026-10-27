@@ -143,7 +143,9 @@ AmbientCapabilities=
 # WantedBy=multi-user.target, so enabling it at install time does not provision
 # anything -- a CA is minted the first time the operator starts openvox-ca, not
 # the first time the host reboots after an install. Installing a package is not
-# consent to create a certificate authority.
+# consent to create a certificate authority. (On EL a site preset that enables
+# openvox-ca.service is: the rpm applies presets on first install, so on such a
+# host the next boot starts the service and this runs with it.)
 #
 # And provisioning that fails stops the service, rather than letting it start
 # against a CA directory that provisioning did not finish. That edge carries
