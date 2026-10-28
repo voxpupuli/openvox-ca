@@ -1,11 +1,13 @@
 # nfpm configuration for the openvox-ca deb and rpm.
 #
-# ONE configuration for both formats, with per-format entries for the two
-# things that genuinely differ: the dependency naming, where the same tools have
-# different package names on Debian and on EL; and the CA directory's packaged
+# ONE configuration for both formats, with per-format entries for the things
+# that genuinely differ: the dependency naming, where the same tools have
+# different package names on Debian and on EL; the CA directory's packaged
 # owner, because rpm re-applies a directory's owner on every upgrade and dpkg
-# does not (see the ssl-tree entries below). It is not parameterised by format
-# anywhere else, and it should not become so.
+# does not (see the ssl-tree entries below); and where install-time values
+# live -- debconf, ucf and /etc/default on the deb (openvox-ca#251), a file
+# recorded at first boot in /etc/sysconfig on the rpm (openvox-ca#252). It is
+# not parameterised by format anywhere else, and it should not become so.
 #
 # The configuration file IS in this package (see the config|noreplace entry
 # below), which is a change from openvox-ca#250's original payload. That issue
@@ -96,13 +98,34 @@ contents:
       mode: 0755
 
   # Run as root by the oneshot's ExecStartPost=+, after provisioning, to record
-  # its name in /etc/sysconfig/openvox-ca. In both packages because the unit
-  # that names it is shared; on Debian, which has no /etc/sysconfig, it does
-  # nothing.
+  # its name in /etc/sysconfig/openvox-ca. rpm only: the deb renders the same
+  # values from debconf instead, and its drop-in below clears ExecStartPost=.
   - src: packaging/scripts/record-environment
     dst: /usr/libexec/openvox-ca/record-environment
+    packager: rpm
     file_info:
       mode: 0755
+
+  # deb only: point both units at /etc/default/openvox-ca, which the postinst
+  # renders from debconf through ucf, and take record-environment off the
+  # oneshot. Vendor drop-ins rather than lines in the shared units, so the
+  # package format decides and the units, the rpm and the tarballs are unchanged.
+  # 00- so they sort before a drop-in named the usual way (override.conf,
+  # 50-*.conf): systemd reads drop-ins in filename order across /etc, /run and
+  # /usr/lib, so such an operator EnvironmentFile= overrides /etc/default, as on
+  # EL every one overrides /etc/sysconfig, and such an operator ExecStartPost=
+  # survives the reset. One that sorts before 00-debian.conf does not;
+  # docs/systemd.md says so.
+  - src: packaging/systemd/debian/openvox-ca.conf
+    dst: /usr/lib/systemd/system/openvox-ca.service.d/00-debian.conf
+    packager: deb
+    file_info:
+      mode: 0644
+  - src: packaging/systemd/debian/openvox-ca-first-boot.conf
+    dst: /usr/lib/systemd/system/openvox-ca-first-boot.service.d/00-debian.conf
+    packager: deb
+    file_info:
+      mode: 0644
 
   - src: packaging/sysusers/openvox-ca.conf
     dst: /usr/lib/sysusers.d/openvox-ca.conf
@@ -182,6 +205,14 @@ contents:
     expand: true
     type: tree
 
+# The debconf question and its config script (openvox-ca#251). deb only, and
+# top-level because nfpm keeps the deb's control-archive scripts here rather
+# than under overrides.deb.
+deb:
+  scripts:
+    templates: packaging/debian/templates
+    config: packaging/scripts/debian-config
+
 scripts:
   postinstall: packaging/scripts/postinstall
   preremove: packaging/scripts/preremove
@@ -200,6 +231,12 @@ overrides:
       # would fail into /dev/null, both resolver tiers would be skipped, and
       # provisioning would mint a CA under `localhost` that no agent can use.
       - hostname
+      # The postinst renders /etc/default/openvox-ca from debconf and hands it
+      # to ucf, and enables and starts the service with deb-systemd-helper and
+      # deb-systemd-invoke (init-system-helpers).
+      - ucf
+      - debconf (>= 0.5) | debconf-2.0
+      - init-system-helpers
   rpm:
     # Creates the `puppet` account before unpack, so the CA directory above
     # resolves to its declared owner. rpm-only for the reason given there; see

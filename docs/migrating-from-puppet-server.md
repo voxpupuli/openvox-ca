@@ -19,6 +19,24 @@ both; where a path or command is shown, it is identical on each.
   (typically `/etc/puppetlabs/puppet/ssl` or `/etc/puppetlabs/puppetserver/ca`)
 - Maintenance window: agents cannot sign new certs during migration
 
+**On Debian, make sure the package is held back.** The `.deb` starts
+openvox-ca as it installs, and on an OpenVox Server host that would put a second
+writer on Server's CA directory before step 6 has disabled Server's CA. The
+package leaves itself neither enabled nor started when it finds an existing CA
+(in `/etc/puppetlabs/puppet/ssl/ca`, the `cadir` in `config.yaml`, or
+`/etc/puppetlabs/puppetserver/ca`) or an installed OpenVox Server, and prints
+`neither enabled nor started` when it does. If `apt install` did not print
+that, hold it back yourself straight away:
+
+```console
+$ sudo systemctl disable --now openvox-ca
+```
+
+A `policy-rc.d` that refuses starts is not enough on its own: the unit is still
+enabled, so it starts at the next reboot or upgrade. Then, at step 7, start it
+with `sudo systemctl enable --now openvox-ca`, after `sudo systemctl unmask
+openvox-ca` if you masked it. The EL package never starts on install.
+
 ## Quick overview
 
 ```

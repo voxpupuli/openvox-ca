@@ -3472,7 +3472,8 @@ var _ = Describe("buildVariantPackages", func() {
 			Entry("the service unit", "/usr/lib/systemd/system/openvox-ca.service", int64(0o644)),
 			Entry("the provisioning oneshot", "/usr/lib/systemd/system/openvox-ca-first-boot.service", int64(0o644)),
 			Entry("the provisioning script", "/usr/libexec/openvox-ca/first-boot", int64(0o755)),
-			Entry("the environment recorder", "/usr/libexec/openvox-ca/record-environment", int64(0o755)),
+			Entry("the service's Debian drop-in", "/usr/lib/systemd/system/openvox-ca.service.d/00-debian.conf", int64(0o644)),
+			Entry("the oneshot's Debian drop-in", "/usr/lib/systemd/system/openvox-ca-first-boot.service.d/00-debian.conf", int64(0o644)),
 			Entry("the sysusers declaration", "/usr/lib/sysusers.d/openvox-ca.conf", int64(0o644)),
 		)
 
@@ -3495,6 +3496,26 @@ var _ = Describe("buildVariantPackages", func() {
 		// /usr/local/bin. If the package ever shipped that copy instead of
 		// re-rendering, every packaged install would point at a path the
 		// package does not own -- and nothing else would say so.
+		// The format split for install-time values: the deb renders them from
+		// debconf and clears record-environment off the oneshot, so it must
+		// not ship the script -- and its drop-ins are what point the units at
+		// /etc/default instead.
+		It("ships no record-environment, which only the rpm runs", func() {
+			Expect(modes).NotTo(HaveKey("/usr/libexec/openvox-ca/record-environment"))
+		})
+
+		DescribeTable("ships its drop-ins byte for byte",
+			func(path, src string) {
+				want, err := os.ReadFile(src)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(contents).To(HaveKeyWithValue(path, string(want)))
+			},
+			Entry("the service's", "/usr/lib/systemd/system/openvox-ca.service.d/00-debian.conf",
+				"packaging/systemd/debian/openvox-ca.conf"),
+			Entry("the oneshot's", "/usr/lib/systemd/system/openvox-ca-first-boot.service.d/00-debian.conf",
+				"packaging/systemd/debian/openvox-ca-first-boot.conf"),
+		)
+
 		It("ships the unit rendered for /usr/bin, not the tarball's copy", func() {
 			unit := contents["/usr/lib/systemd/system/openvox-ca.service"]
 			Expect(unit).To(ContainSubstring("ExecStart=" + packageUnitBindir + "/openvox-ca"))
@@ -3627,6 +3648,11 @@ var _ = Describe("buildVariantPackages", func() {
 			Entry("postinst", "postinst", "packaging/scripts/postinstall"),
 			Entry("prerm", "prerm", "packaging/scripts/preremove"),
 			Entry("postrm", "postrm", "packaging/scripts/postremove"),
+			// debconf's two control files. Without them the postinst's
+			// db_get has no question to read, and every install takes the
+			// fallback chain with no word.
+			Entry("config", "config", "packaging/scripts/debian-config"),
+			Entry("templates", "templates", "packaging/debian/templates"),
 		)
 
 		// The rpm's preinstall exists for an rpm behaviour dpkg does not
@@ -3669,6 +3695,10 @@ var _ = Describe("buildVariantPackages", func() {
 				}
 			}
 			Expect(listed).To(ContainElements("hostname", "systemd", "passwd"))
+			// And what the postinst uses for #251: ucf for /etc/default,
+			// debconf for the question, deb-systemd-helper and
+			// deb-systemd-invoke for the enable and the policy-rc.d-aware start.
+			Expect(listed).To(ContainElements("ucf", "debconf", "init-system-helpers"))
 		})
 
 		// The dpkg half of the config|noreplace declaration. The rpm half is
@@ -4553,6 +4583,17 @@ var _ = Describe("the rpm's payload", func() {
 
 	// The rpm's counterparts to the deb's content assertions, which is what
 	// makes this block's opening claim true. See rpmContents.
+	// The rpm reads /etc/sysconfig through the units' own line; a Debian
+	// drop-in here would also clear ExecStartPost= and take record-environment
+	// off the oneshot, silently.
+	DescribeTable("ships none of the deb's drop-ins",
+		func(path string) {
+			Expect(files).NotTo(HaveKey(path))
+		},
+		Entry("the service's", "/usr/lib/systemd/system/openvox-ca.service.d/00-debian.conf"),
+		Entry("the oneshot's", "/usr/lib/systemd/system/openvox-ca-first-boot.service.d/00-debian.conf"),
+	)
+
 	It("ships the unit rendered for /usr/bin, not the tarball's copy", func() {
 		unit := contents["/usr/lib/systemd/system/openvox-ca.service"]
 		Expect(unit).To(ContainSubstring("ExecStart=" + packageUnitBindir + "/openvox-ca"))
@@ -5495,6 +5536,29 @@ var _ = Describe("record-environment", func() {
 	})
 })
 
+var _ = Describe("the deb's unit drop-ins", func() {
+	DescribeTable("point the unit at /etc/default/openvox-ca, and start without it",
+		func(path string) {
+			d, err := unitDirectives(path)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(d).To(HaveKeyWithValue("EnvironmentFile", []string{"-/etc/default/openvox-ca"}))
+		},
+		Entry("the service", filepath.Join("packaging", "systemd", "debian", "openvox-ca.conf")),
+		Entry("the oneshot", filepath.Join("packaging", "systemd", "debian", "openvox-ca-first-boot.conf")),
+	)
+
+	// An empty assignment clears the list, which is how the deb takes
+	// record-environment off the oneshot. A value here would add a second
+	// command instead -- running a script the deb does not ship, and failing
+	// the unit.
+	It("clears the oneshot's ExecStartPost=, and sets nothing else", func() {
+		d, err := unitDirectives(filepath.Join("packaging", "systemd", "debian", "openvox-ca-first-boot.conf"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(d).To(HaveKeyWithValue("ExecStartPost", []string{""}))
+		Expect(d).To(HaveLen(2), "the drop-in changes more than its two directives")
+	})
+})
+
 var _ = Describe("the service account the packages create", func() {
 	// The postinstall creates the account twice over: declaratively through
 	// systemd-sysusers, and imperatively through groupadd/useradd where
@@ -5747,12 +5811,20 @@ var _ = Describe("the packages' maintainer scripts", func() {
 
 		for _, name := range []string{
 			"systemctl", "systemd-sysusers", "getent", "groupadd", "useradd", "chown", "chmod",
+			// The deb's own tools, logged rather than reached: on a Debian
+			// runner the real ones are on PATH.
+			"ucf", "ucfr", "deb-systemd-helper", "deb-systemd-invoke",
 			// Not called by anything, and that is the point: they are here so
 			// that a maintainer script which grew a call to one would show up
 			// in the log rather than silently failing to resolve.
 			"userdel", "groupdel",
 		} {
 			body := fmt.Sprintf("#!/bin/sh\necho \"%s $*\" >> %s\nexit 0\n", name, log)
+			// Nothing is running: without this every dpkg first install would
+			// look like a host running OpenVox Server, a takeover (#251).
+			if name == "systemctl" {
+				body = fmt.Sprintf("#!/bin/sh\necho \"systemctl $*\" >> %s\n[ \"$1\" = is-active ] && exit 3\nexit 0\n", log)
+			}
 			// getent must report the account as absent so the creation branch
 			// is the one taken; every other stub succeeds.
 			if name == "getent" {
@@ -5773,6 +5845,7 @@ var _ = Describe("the packages' maintainer scripts", func() {
 			"OPENVOX_CA_SYSTEMD_RUNTIME="+systemdRuntime,
 			"OPENVOX_CA_STATEDIR="+stateDir,
 		)
+		cmd.Env = append(cmd.Env, debHostPins()...)
 		out, err := cmd.CombinedOutput()
 		res := firstBootResult{ok: true, output: string(out)}
 		if err != nil {
@@ -5803,7 +5876,17 @@ var _ = Describe("the packages' maintainer scripts", func() {
 		func(arg string, shouldAct bool) {
 			r, calls := run("packaging/scripts/preremove", arg)
 			Expect(r.ok).To(BeTrue(), "preremove %q exited non-zero: %s", arg, r.output)
-			if shouldAct {
+			if shouldAct && arg == "remove" {
+				// The deb does not disable the service itself: its
+				// enablement is deb-systemd-helper's, and a disable here
+				// would read on reinstall as the operator's choice (#251).
+				// The postremove masks it instead.
+				Expect(strings.Split(strings.TrimSpace(calls), "\n")).To(Equal([]string{
+					"systemctl --no-reload disable openvox-ca-first-boot.service",
+					"systemctl --no-reload stop openvox-ca.service",
+					"systemctl --no-reload stop openvox-ca-first-boot.service",
+				}), "preremove remove did not disable the oneshot then stop both units, in order")
+			} else if shouldAct {
 				// The exact lines, not a substring of each: substrings cannot
 				// tell a disable from a stop, and the split between them is
 				// the whole point of this block.
@@ -5917,6 +6000,7 @@ var _ = Describe("the packages' maintainer scripts", func() {
 			"OPENVOX_CA_SYSTEMD_RUNTIME="+absent,
 			"OPENVOX_CA_STATEDIR="+stateDir,
 		)
+		cmd.Env = append(cmd.Env, debHostPins()...)
 		out, err := cmd.CombinedOutput()
 		Expect(err).NotTo(HaveOccurred(), "postinstall failed: %s", out)
 		calls, readErr := os.ReadFile(log)
@@ -5982,6 +6066,7 @@ var _ = Describe("the packages' maintainer scripts", func() {
 			"OPENVOX_CA_SYSTEMD_RUNTIME="+absent,
 			"OPENVOX_CA_STATEDIR="+stateDir,
 		)
+		cmd.Env = append(cmd.Env, debHostPins()...)
 		out, err := cmd.CombinedOutput()
 		Expect(err).NotTo(HaveOccurred(), "postinstall failed: %s", out)
 
@@ -6029,6 +6114,7 @@ var _ = Describe("the packages' maintainer scripts", func() {
 			"OPENVOX_CA_SYSTEMD_RUNTIME="+systemdRuntime,
 			"OPENVOX_CA_STATEDIR="+blocked,
 		)
+		cmd.Env = append(cmd.Env, debHostPins()...)
 		out, err := cmd.CombinedOutput()
 		Expect(err).NotTo(HaveOccurred(), "a marker that cannot be written must not fail the install: %s", out)
 
@@ -6073,9 +6159,10 @@ var _ = Describe("the packages' maintainer scripts", func() {
 		Expect(calls).To(ContainSubstring("systemctl enable openvox-ca-first-boot.service"))
 	})
 
-	// The abstention docs/systemd.md promises in as many words: installing a
-	// package is not consent to create a certificate authority, so the
-	// postinstall itself never enables or starts openvox-ca.service. Only the
+	// The abstention docs/systemd.md promises for EL in as many words:
+	// installing a package is not consent to create a certificate authority,
+	// so on the rpm the postinstall itself never enables or starts
+	// openvox-ca.service. Only the
 	// oneshot is enabled, and that is a RequiredBy= symlink and nothing else.
 	// rpm's preset on first install is the one route by which a site's OWN
 	// policy may enable the service, and "applies the preset" pins that.
@@ -6089,7 +6176,8 @@ var _ = Describe("the packages' maintainer scripts", func() {
 			// spec that would pass against a script doing nothing at all.
 			Expect(calls).To(ContainSubstring("systemctl enable openvox-ca-first-boot.service"))
 		},
-		Entry("dpkg first install", "configure"),
+		// The rpm only. The deb enables and starts the service on purpose,
+		// Debian's convention (#251); "the deb's postinstall" pins that.
 		Entry("rpm first install", "1"),
 	)
 
@@ -6108,8 +6196,11 @@ var _ = Describe("the packages' maintainer scripts", func() {
 					"a first install has nothing running to restart")
 			}
 		},
-		// dpkg passes the previously-configured version in $2 on an upgrade.
-		Entry("dpkg upgrade", []string{"configure", "1.0.0"}, true),
+		// dpkg passes the previously-configured version in $2 on an upgrade,
+		// but the deb restarts through deb-systemd-invoke, which honours
+		// policy-rc.d (#251) -- see "the deb's postinstall" -- so systemctl's
+		// try-restart is the rpm's alone.
+		Entry("dpkg upgrade", []string{"configure", "1.0.0"}, false),
 		// rpm passes the number of packages that will remain: 2 on upgrade.
 		Entry("rpm upgrade", []string{"2"}, true),
 		Entry("dpkg first install", []string{"configure"}, false),
@@ -6124,8 +6215,11 @@ var _ = Describe("the packages' maintainer scripts", func() {
 	// twice -- and it had no need to: the table above already runs the upgrade
 	// path and captures the systemctl arguments, so the distinction between
 	// `try-restart` and `restart` is observable in the call log.
-	It("uses try-restart so a stopped CA is not started by an upgrade", func() {
-		_, calls := run("packaging/scripts/postinstall", "configure", "1.0.0")
+	//
+	// The rpm's rule. The deb follows dh_installsystemd and restarts through
+	// deb-systemd-invoke instead, as Chris ruled for #251.
+	It("uses try-restart so a stopped CA is not started by an rpm upgrade", func() {
+		_, calls := run("packaging/scripts/postinstall", "2")
 
 		var restarts []string
 		for _, line := range strings.Split(calls, "\n") {
@@ -6190,10 +6284,8 @@ var _ = Describe("the packages' maintainer scripts", func() {
 			Expect(strings.Fields(calls)).To(Equal([]string{"systemctl", "daemon-reload"}),
 				"postremove %q did something other than reloading systemd: %s", arg, calls)
 		},
-		Entry("dpkg remove", "remove"),
-		// purge above all: this is where dpkg would expect a package to delete
-		// what it left behind, and where this one deliberately does not.
-		Entry("dpkg purge", "purge"),
+		// dpkg's remove and purge are not here: a remove masks the service and a
+		// purge asks about the CA's data (#251), and "the deb's purge" pins both.
 		Entry("dpkg upgrade", "upgrade"),
 		Entry("rpm erase", "0"),
 		Entry("rpm upgrade", "1"),
@@ -6211,9 +6303,13 @@ var _ = Describe("the packages' maintainer scripts", func() {
 	// openvox-ca.service.requires/ symlink outlived the unit file it pointed
 	// at -- and docs/systemd.md says a removal leaves the units "stopped and
 	// disabled".
+	//
+	// On the rpm's erase: the deb leaves the service's enablement to
+	// deb-systemd-helper, so on `remove` only the oneshot is disabled -- the
+	// table above pins that.
 	It("still disables both units where systemd is not running", func() {
 		absent := filepath.Join(GinkgoT().TempDir(), "no-such-runtime")
-		cmd := exec.Command("/bin/sh", "packaging/scripts/preremove", "remove")
+		cmd := exec.Command("/bin/sh", "packaging/scripts/preremove", "0")
 		cmd.Env = append(os.Environ(),
 			"PATH="+stubBin,
 			"OPENVOX_CA_SYSTEMD_RUNTIME="+absent,
@@ -6233,13 +6329,15 @@ var _ = Describe("the packages' maintainer scripts", func() {
 		}), "the removal did not undo the install's enable on a host with no systemd running")
 	})
 
+	// The rpm's erase.
 	It("postremove does nothing at all where systemd is not running", func() {
 		absent := filepath.Join(GinkgoT().TempDir(), "no-such-runtime")
-		cmd := exec.Command("/bin/sh", "packaging/scripts/postremove", "remove")
+		cmd := exec.Command("/bin/sh", "packaging/scripts/postremove", "0")
 		cmd.Env = append(os.Environ(),
 			"PATH="+stubBin,
 			"OPENVOX_CA_SYSTEMD_RUNTIME="+absent,
 		)
+		cmd.Env = append(cmd.Env, debHostPins()...)
 		out, err := cmd.CombinedOutput()
 		Expect(err).NotTo(HaveOccurred(), "postremove failed: %s", out)
 		Expect(log).NotTo(BeAnExistingFile(), "postremove called something")
@@ -6648,6 +6746,672 @@ esac
 	It("provisions as before when run outside the unit", func() {
 		provision("ca.example.com", "RUNTIME_DIRECTORY=")
 		Expect(marker).NotTo(BeAnExistingFile())
+	})
+})
+
+// debHostPins points the deb-only seams of the maintainer scripts at scratch
+// paths, for runners that are not about debconf at all. The confmodule is
+// sourced by absolute path, so PATH cannot keep it out: on a Debian or Ubuntu
+// host -- CI's runner is one -- a runner without this sources the real
+// /usr/share/debconf/confmodule, talks to the host's debconf database and
+// reaches its ucf. A path that does not exist makes every host take the
+// no-debconf branch; the drop-in roots are scratch so the host's own units
+// cannot change what the scripts decide.
+func debHostPins() []string {
+	GinkgoHelper()
+	pin := GinkgoT().TempDir()
+	return []string{
+		"OPENVOX_CA_CONFMODULE=" + filepath.Join(pin, "no-confmodule"),
+		"OPENVOX_CA_DEFAULT_FILE=" + filepath.Join(pin, "default-openvox-ca"),
+		"OPENVOX_CA_DROPIN_ROOT=" + filepath.Join(pin, "etc-systemd"),
+		"OPENVOX_CA_VENDOR_UNIT_ROOT=" + filepath.Join(pin, "usr-lib-systemd"),
+		"OPENVOX_CA_LEGACY_UNIT_ROOT=" + filepath.Join(pin, "lib-systemd"),
+		"OPENVOX_CA_SERVER_CADIR=" + filepath.Join(pin, "puppetserver-ca"),
+	}
+}
+
+// debconfStub writes a stand-in for /usr/share/debconf/confmodule into dir and
+// returns its path. It keeps each question's value and seen flag as files
+// under db, logs every db_input, db_stop and db_purge to log, and answers
+// db_input from db/answers, one line per call, for as long as it has lines:
+// with none left it returns 30, which is what debconf returns for a question
+// it did not show. So a spec without an answers file is a non-interactive
+// install, and one with it is an operator typing. After db_stop every other
+// call fails and is logged as "db_after_stop", as the real one has gone by
+// then, so a script that reads an answer too late renders nothing.
+func debconfStub(dir, db, log string) string {
+	GinkgoHelper()
+	body := `
+DB=` + shellQuote(db) + `
+LOG=` + shellQuote(log) + `
+key() { printf '%s' "$1" | tr '/' '_'; }
+live() { [ ! -e "$DB/stopped" ] && return 0; echo "db_after_stop $*" >>"$LOG"; return 1; }
+db_get() { live db_get "$1" || return 1; RET=$(cat "$DB/$(key "$1").value" 2>/dev/null) || RET=; return 0; }
+db_set() { live db_set "$1" || return 1; printf '%s' "$2" >"$DB/$(key "$1").value"; }
+db_fget() { live db_fget "$1" || return 1; RET=$(cat "$DB/$(key "$1").$2" 2>/dev/null) || RET=false; return 0; }
+db_subst() { live db_subst "$1" || return 1; printf '%s=%s\n' "$2" "$3" >>"$LOG.subst"; }
+db_go() { live db_go || return 1; return 0; }
+db_stop() { echo "db_stop" >>"$LOG"; : >"$DB/stopped"; }
+db_purge() { live db_purge || return 1; echo "db_purge" >>"$LOG"; }
+db_input() {
+	live db_input "$2" || return 1
+	echo "db_input $1 $2" >>"$LOG"
+	# A note -- the error template -- is shown and needs no answer.
+	[ "$2" = openvox-ca/ca-name ] || return 0
+	if [ -s "$DB/answers" ]; then
+		answer=$(head -n 1 "$DB/answers")
+		sed -i.bak '1d' "$DB/answers"
+		db_set "$2" "$answer"
+		return 0
+	fi
+	return 30
+}
+`
+	path := filepath.Join(dir, "confmodule")
+	Expect(os.WriteFile(path, []byte(body), 0o644)).To(Succeed())
+	return path
+}
+
+var _ = Describe("the deb's debconf config script", func() {
+	// What the config script decides is what the postinst writes into
+	// /etc/default/openvox-ca, and through it the name this host's CA
+	// certificate is minted under and the account that administers it. Driven
+	// through a stand-in confmodule, because the real one execs debconf's
+	// frontend.
+	var dir, db, log, stubBin, systemdRuntime string
+
+	stubIschroot := func(exit int) {
+		Expect(os.WriteFile(filepath.Join(stubBin, "ischroot"),
+			[]byte(fmt.Sprintf("#!/bin/sh\nexit %d\n", exit)), 0o755)).To(Succeed())
+	}
+
+	BeforeEach(func() {
+		dir = GinkgoT().TempDir()
+		db = GinkgoT().TempDir()
+		log = filepath.Join(GinkgoT().TempDir(), "debconf.log")
+		stubBin = GinkgoT().TempDir()
+		// The host that will run the CA, by default: systemd running, not a
+		// chroot. ischroot is stubbed either way, because a Debian runner
+		// has a real one.
+		systemdRuntime = GinkgoT().TempDir()
+		stubIschroot(1)
+	})
+
+	stubHostnameF := func(fqdn string) {
+		body := "#!/bin/sh\n[ \"${1:-}\" = -f ] && [ -n " + shellQuote(fqdn) + " ] && { printf '%s\\n' " +
+			shellQuote(fqdn) + "; exit 0; }\nexit 1\n"
+		Expect(os.WriteFile(filepath.Join(stubBin, "hostname"), []byte(body), 0o755)).To(Succeed())
+	}
+
+	run := func(extraEnv ...string) (firstBootResult, string, []string) {
+		GinkgoHelper()
+		cmd := exec.Command("sh", "packaging/scripts/debian-config")
+		cmd.Env = append(os.Environ(),
+			"PATH="+stubBin+":/usr/bin:/bin",
+			"OPENVOX_CA_CONFMODULE="+debconfStub(dir, db, log),
+			"OPENVOX_CA_PUPPET_CONF="+filepath.Join(GinkgoT().TempDir(), "no-puppet.conf"),
+			"OPENVOX_CA_SYSTEMD_RUNTIME="+systemdRuntime,
+		)
+		cmd.Env = append(cmd.Env, extraEnv...)
+		out, err := cmd.CombinedOutput()
+		r := firstBootResult{ok: err == nil, output: string(out)}
+		value, _ := os.ReadFile(filepath.Join(db, "openvox-ca_ca-name.value"))
+		calls, _ := os.ReadFile(log)
+		return r, string(value), strings.Split(strings.TrimSpace(string(calls)), "\n")
+	}
+
+	// A usable FQDN is a sane default, so it is asked below debconf's default
+	// threshold and an ordinary install takes it without a prompt.
+	It("defaults to the resolver's FQDN and asks at medium", func() {
+		stubHostnameF("ca.example.com")
+		r, value, calls := run()
+		Expect(r.ok).To(BeTrue(), r.output)
+		Expect(value).To(Equal("ca.example.com"))
+		Expect(calls).To(Equal([]string{"db_input medium openvox-ca/ca-name"}))
+	})
+
+	It("prefers puppet.conf's certname, as first-boot does", func() {
+		stubHostnameF("host.example.com")
+		conf := filepath.Join(GinkgoT().TempDir(), "puppet.conf")
+		Expect(os.WriteFile(conf, []byte("[main]\ncertname = agent.example.com\n"), 0o644)).To(Succeed())
+		r, value, _ := run("OPENVOX_CA_PUPPET_CONF=" + conf)
+		Expect(r.ok).To(BeTrue(), r.output)
+		Expect(value).To(Equal("agent.example.com"))
+	})
+
+	// No usable FQDN means the alternative is a short-name or localhost
+	// certificate, which only the operator can fix, so it is asked where an
+	// ordinary install will show it -- and, unanswered, left empty for
+	// provisioning's own fallback chain.
+	DescribeTable("asks at high, defaulting to nothing, when there is no usable FQDN",
+		func(fqdn string) {
+			stubHostnameF(fqdn)
+			r, value, calls := run()
+			Expect(r.ok).To(BeTrue(), r.output)
+			Expect(value).To(BeEmpty())
+			Expect(calls).To(Equal([]string{"db_input high openvox-ca/ca-name"}))
+		},
+		Entry("an undotted name", "node1"),
+		Entry("a localhost form", "localhost.localdomain"),
+		Entry("no answer at all", ""),
+		Entry("the reserved CA alias", "ca"),
+	)
+
+	It("never replaces an answer already given", func() {
+		stubHostnameF("ca.example.com")
+		Expect(os.WriteFile(filepath.Join(db, "openvox-ca_ca-name.value"), []byte("preseed.example.com"), 0o644)).To(Succeed())
+		r, value, _ := run()
+		Expect(r.ok).To(BeTrue(), r.output)
+		Expect(value).To(Equal("preseed.example.com"))
+	})
+
+	// An operator's own explicit empty answer is a choice too: once seen, the
+	// default is not put back.
+	It("does not reseed an answer the operator cleared", func() {
+		stubHostnameF("ca.example.com")
+		Expect(os.WriteFile(filepath.Join(db, "openvox-ca_ca-name.seen"), []byte("true"), 0o644)).To(Succeed())
+		_, value, _ := run()
+		Expect(value).To(BeEmpty())
+	})
+
+	// The answer becomes a path and a KEY=VALUE line, so the allow-list is
+	// first-boot's. Asked again when someone is there to answer...
+	DescribeTable("re-asks an unusable answer, with the reason",
+		func(bad string) {
+			stubHostnameF("ca.example.com")
+			Expect(os.WriteFile(filepath.Join(db, "answers"), []byte(bad+"\ngood.example.com\n"), 0o644)).To(Succeed())
+			r, value, calls := run()
+			Expect(r.ok).To(BeTrue(), r.output)
+			Expect(value).To(Equal("good.example.com"))
+			Expect(calls).To(ContainElement("db_input critical openvox-ca/ca-name-invalid"))
+			Expect(calls[len(calls)-1]).To(Equal("db_input critical openvox-ca/ca-name"))
+		},
+		Entry("a path", "../etc/x.example.com"),
+		Entry("a reserved alias", "openvox-ca-server"),
+		Entry("an option", "-x.example.com"),
+		Entry("a space", "a b.example.com"),
+	)
+
+	// ...and cleared when nobody is: a preseeded bad value on a
+	// non-interactive install would otherwise loop for ever. Said, though,
+	// with the value's non-printing characters shown as `?`.
+	It("clears an unusable answer nobody is there to correct, and says so", func() {
+		Expect(os.WriteFile(filepath.Join(db, "openvox-ca_ca-name.value"), []byte("bad/name\nX=1"), 0o644)).To(Succeed())
+		r, value, _ := run()
+		Expect(r.ok).To(BeTrue(), r.output)
+		Expect(value).To(BeEmpty())
+		Expect(r.output).To(ContainSubstring(`ignoring openvox-ca/ca-name "bad/name?X=1"`))
+	})
+
+	It("names the refused value in the error it shows", func() {
+		stubHostnameF("ca.example.com")
+		Expect(os.WriteFile(filepath.Join(db, "answers"), []byte("a b\ngood.example.com\n"), 0o644)).To(Succeed())
+		r, _, _ := run()
+		Expect(r.ok).To(BeTrue(), r.output)
+		subst, err := os.ReadFile(log + ".subst")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(subst)).To(Equal("name=a b\n"))
+	})
+
+	// An image build is not the host that will run the CA. A default seeded
+	// there is the builder's name, and every machine booted from the image
+	// would mint under it, so there is none: each instance resolves its own.
+	DescribeTable("seeds no default in an image build",
+		func(setup func()) {
+			stubHostnameF("builder.example.com")
+			setup()
+			r, value, _ := run()
+			Expect(r.ok).To(BeTrue(), r.output)
+			Expect(value).To(BeEmpty())
+		},
+		Entry("no running systemd", func() { Expect(os.RemoveAll(systemdRuntime)).To(Succeed()) }),
+		Entry("a chroot", func() { stubIschroot(0) }),
+	)
+
+	It("still honours a preseeded name in an image build", func() {
+		Expect(os.RemoveAll(systemdRuntime)).To(Succeed())
+		Expect(os.WriteFile(filepath.Join(db, "openvox-ca_ca-name.value"), []byte("ca.example.com"), 0o644)).To(Succeed())
+		_, value, _ := run()
+		Expect(value).To(Equal("ca.example.com"))
+	})
+})
+
+var _ = Describe("the deb's postinstall", func() {
+	// The deb-only half of the shared postinstall: rendering
+	// /etc/default/openvox-ca from debconf through ucf, and enabling and
+	// starting the service the way dh_installsystemd would. Every external
+	// command is a stub that logs its arguments to one file, so the order of
+	// the calls is part of what is asserted.
+	var dir, db, log, stubBin, systemdRuntime, stateDir, dropinRoot, vendorRoot, legacyRoot, serverCADir, defaultFile, config, sslDir string
+
+	answer := func(name string) {
+		Expect(os.WriteFile(filepath.Join(db, "openvox-ca_ca-name.value"), []byte(name), 0o644)).To(Succeed())
+	}
+
+	BeforeEach(func() {
+		dir = GinkgoT().TempDir()
+		db = GinkgoT().TempDir()
+		log = filepath.Join(GinkgoT().TempDir(), "calls.log")
+		stubBin = GinkgoT().TempDir()
+		systemdRuntime = GinkgoT().TempDir()
+		stateDir = GinkgoT().TempDir()
+		dropinRoot = GinkgoT().TempDir()
+		vendorRoot = GinkgoT().TempDir()
+		legacyRoot = GinkgoT().TempDir()
+		serverCADir = filepath.Join(GinkgoT().TempDir(), "puppetserver-ca")
+		defaultFile = filepath.Join(GinkgoT().TempDir(), "openvox-ca")
+		config = filepath.Join(GinkgoT().TempDir(), "config.yaml")
+		sslDir = filepath.Join(GinkgoT().TempDir(), "ssl")
+
+		for _, name := range []string{
+			"systemctl", "systemd-sysusers", "getent", "chown", "chmod",
+			"ucfr", "deb-systemd-helper", "deb-systemd-invoke",
+		} {
+			body := fmt.Sprintf("#!/bin/sh\necho \"%s $*\" >> %s\nexit 0\n", name, log)
+			Expect(os.WriteFile(filepath.Join(stubBin, name), []byte(body), 0o755)).To(Succeed())
+		}
+		// Nothing else is running: is-active answers "inactive", or every
+		// first install here would look like a host running OpenVox Server.
+		Expect(os.WriteFile(filepath.Join(stubBin, "systemctl"), []byte(fmt.Sprintf(
+			"#!/bin/sh\necho \"systemctl $*\" >> %s\n[ \"$1\" = is-active ] && exit 3\nexit 0\n", log)), 0o755)).To(Succeed())
+		// ucf installs the rendering where it is told, keeping its mode, as
+		// the real one does for a new file.
+		Expect(os.WriteFile(filepath.Join(stubBin, "ucf"), []byte(fmt.Sprintf(
+			"#!/bin/sh\necho \"ucf $*\" >> %s\n"+
+				"while [ \"${1#--}\" != \"$1\" ]; do shift; done\ncp -p \"$1\" \"$2\"\n", log)), 0o755)).To(Succeed())
+		answer("ca.example.com")
+	})
+
+	stubCommand := func(name, body string) {
+		Expect(os.WriteFile(filepath.Join(stubBin, name), []byte(
+			"#!/bin/sh\necho \""+name+" $*\" >> "+log+"\n"+body+"\n"), 0o755)).To(Succeed())
+	}
+
+	dropInAt := func(root, dirName, body string) {
+		d := filepath.Join(root, dirName)
+		Expect(os.MkdirAll(d, 0o755)).To(Succeed())
+		Expect(os.WriteFile(filepath.Join(d, "10-local.conf"), []byte("[Service]\n"+body+"\n"), 0o644)).To(Succeed())
+	}
+	dropIn := func(unit, body string) { dropInAt(dropinRoot, unit+".d", body) }
+
+	run := func(args ...string) (firstBootResult, []string) {
+		GinkgoHelper()
+		cmd := exec.Command("sh", append([]string{"packaging/scripts/postinstall"}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"PATH="+stubBin+":/usr/bin:/bin",
+			"OPENVOX_CA_CONFMODULE="+debconfStub(dir, db, log),
+			"OPENVOX_CA_SYSTEMD_RUNTIME="+systemdRuntime,
+			"OPENVOX_CA_STATEDIR="+stateDir,
+			"OPENVOX_CA_DROPIN_ROOT="+dropinRoot,
+			"OPENVOX_CA_VENDOR_UNIT_ROOT="+vendorRoot,
+			"OPENVOX_CA_LEGACY_UNIT_ROOT="+legacyRoot,
+			"OPENVOX_CA_SERVER_CADIR="+serverCADir,
+			"OPENVOX_CA_DEFAULT_FILE="+defaultFile,
+			"OPENVOX_CA_CONFIG="+config,
+			"OPENVOX_CA_SSLDIR="+sslDir,
+		)
+		out, err := cmd.CombinedOutput()
+		calls, _ := os.ReadFile(log)
+		return firstBootResult{ok: err == nil, output: string(out)}, strings.Split(strings.TrimSpace(string(calls)), "\n")
+	}
+
+	assignments := func() []string {
+		GinkgoHelper()
+		body, err := os.ReadFile(defaultFile)
+		Expect(err).NotTo(HaveOccurred())
+		var out []string
+		for _, line := range strings.Split(string(body), "\n") {
+			if line != "" && !strings.HasPrefix(line, "#") {
+				out = append(out, line)
+			}
+		}
+		return out
+	}
+
+	// indexOf is the position of the first call starting with prefix, or -1.
+	indexOf := func(calls []string, prefix string) int {
+		for i, c := range calls {
+			if strings.HasPrefix(c, prefix) {
+				return i
+			}
+		}
+		return -1
+	}
+
+	Describe("rendering /etc/default/openvox-ca", func() {
+		It("renders the answer as the certname and the admin allow-list, through ucf", func() {
+			r, calls := run("configure")
+			Expect(r.ok).To(BeTrue(), r.output)
+			Expect(assignments()).To(Equal([]string{
+				"OPENVOX_CA_CERTNAME=ca.example.com",
+				"OPENVOX_CA_PUPPET_SERVER=ca.example.com",
+			}))
+			// --three-way: without it ucf cannot merge an operator's edit with a
+			// changed rendering, and keeps one or the other wholesale.
+			Expect(calls).To(ContainElement(HavePrefix("ucf --three-way --debconf-ok ")))
+			Expect(calls).To(ContainElement("ucfr openvox-ca " + defaultFile))
+		})
+
+		// ucf creates the file with the rendering's mode and keeps an
+		// operator's from then on, so this is the only mode it ever gets from
+		// the package: root-only, because it is where credentials go.
+		It("hands ucf a root-only rendering", func() {
+			r, _ := run("configure")
+			Expect(r.ok).To(BeTrue(), r.output)
+			info, err := os.Stat(defaultFile)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(info.Mode().Perm()).To(Equal(os.FileMode(0o600)))
+		})
+
+		// Rendered even with nothing to set, so ucf owns the file from the
+		// first install and a later answer arrives as an update.
+		It("renders a file with no assignments when there is no answer", func() {
+			answer("")
+			r, _ := run("configure")
+			Expect(r.ok).To(BeTrue(), r.output)
+			Expect(assignments()).To(BeEmpty())
+		})
+
+		// A preseeded answer never passes through the config script, and the
+		// value is written into a file systemd parses as KEY=VALUE.
+		DescribeTable("writes no name the allow-list refuses",
+			func(bad string) {
+				answer(bad)
+				r, _ := run("configure")
+				Expect(r.ok).To(BeTrue(), r.output)
+				Expect(assignments()).To(BeEmpty())
+			},
+			Entry("a second variable", "ca.example.com\nOPENVOX_CA_CONFIG=x"),
+			Entry("a path", "../x.example.com"),
+			Entry("the CA alias", "ca"),
+		)
+
+		DescribeTable("leaves out the admin list the operator has already chosen",
+			func(setup func()) {
+				setup()
+				r, _ := run("configure")
+				Expect(r.ok).To(BeTrue(), r.output)
+				Expect(assignments()).To(Equal([]string{"OPENVOX_CA_CERTNAME=ca.example.com"}))
+			},
+			Entry("puppet_server in config.yaml", func() {
+				Expect(os.WriteFile(config, []byte("puppet_server: admin.example.com\n"), 0o640)).To(Succeed())
+			}),
+			Entry("a quoted puppet_server_file in config.yaml", func() {
+				Expect(os.WriteFile(config, []byte("\"puppet_server_file\": /etc/openvox-ca/admins\n"), 0o640)).To(Succeed())
+			}),
+			Entry("the list in a service drop-in", func() {
+				dropIn("openvox-ca.service", "Environment=OPENVOX_CA_PUPPET_SERVER=a,b")
+			}),
+			Entry("a quoted list among others", func() {
+				dropIn("openvox-ca.service", `Environment=OPENVOX_CA_PORT=8141 "OPENVOX_CA_PUPPET_SERVER=a, b"`)
+			}),
+			Entry("the service's configuration file moved", func() {
+				dropIn("openvox-ca.service", "Environment=OPENVOX_CA_CONFIG=/etc/openvox-ca/site.yaml")
+			}),
+			// The forms a parser would miss, and the reason the check is a
+			// mention rather than a parse: each one is something systemd
+			// accepts, and a miss records an admin grant over the list.
+			Entry("a single-quoted list", func() {
+				dropIn("openvox-ca.service", `Environment='OPENVOX_CA_PUPPET_SERVER=a, b'`)
+			}),
+			Entry("a list on a continuation line", func() {
+				dropIn("openvox-ca.service", "Environment=OPENVOX_CA_PORT=8141 \\\n  OPENVOX_CA_PUPPET_SERVER=a")
+			}),
+			Entry("a list after a tab", func() {
+				dropIn("openvox-ca.service", "Environment=OPENVOX_CA_PORT=8141\tOPENVOX_CA_PUPPET_SERVER=a")
+			}),
+			Entry("the list in a prefix drop-in directory", func() {
+				dropInAt(dropinRoot, "openvox-.service.d", "Environment=OPENVOX_CA_PUPPET_SERVER=a")
+			}),
+			Entry("the list in service.d", func() {
+				dropInAt(dropinRoot, "service.d", "Environment=OPENVOX_CA_PUPPET_SERVER=a")
+			}),
+			Entry("the list in a vendor drop-in", func() {
+				dropInAt(vendorRoot, "openvox-ca.service.d", "Environment=OPENVOX_CA_PUPPET_SERVER=a")
+			}),
+		)
+
+		// A comment is not a setting -- and the deb's own vendor drop-in
+		// names OPENVOX_CA_CERTNAME in one, so a check that read comments
+		// would never record the name.
+		It("records both values past the deb's own drop-ins and a comment", func() {
+			for unit, src := range map[string]string{
+				"openvox-ca.service":            "packaging/systemd/debian/openvox-ca.conf",
+				"openvox-ca-first-boot.service": "packaging/systemd/debian/openvox-ca-first-boot.conf",
+			} {
+				body, err := os.ReadFile(src)
+				Expect(err).NotTo(HaveOccurred())
+				d := filepath.Join(vendorRoot, unit+".d")
+				Expect(os.MkdirAll(d, 0o755)).To(Succeed())
+				Expect(os.WriteFile(filepath.Join(d, "00-debian.conf"), body, 0o644)).To(Succeed())
+			}
+			dropIn("openvox-ca.service", "# OPENVOX_CA_PUPPET_SERVER is set elsewhere")
+			r, _ := run("configure")
+			Expect(r.ok).To(BeTrue(), r.output)
+			Expect(assignments()).To(Equal([]string{
+				"OPENVOX_CA_CERTNAME=ca.example.com",
+				"OPENVOX_CA_PUPPET_SERVER=ca.example.com",
+			}))
+		})
+
+		It("says so, sanitised, when it discards a preseeded name", func() {
+			answer("bad name\nOPENVOX_CA_CONFIG=x")
+			r, _ := run("configure")
+			Expect(r.ok).To(BeTrue(), r.output)
+			Expect(r.output).To(ContainSubstring(`ignoring openvox-ca/ca-name "bad name?OPENVOX_CA_CONFIG=x"`))
+		})
+
+		It("still records the list against the shipped config.yaml", func() {
+			shipped, err := os.ReadFile("packaging/config/config.yaml")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(os.WriteFile(config, shipped, 0o640)).To(Succeed())
+			r, _ := run("configure")
+			Expect(r.ok).To(BeTrue(), r.output)
+			Expect(assignments()).To(ContainElement("OPENVOX_CA_PUPPET_SERVER=ca.example.com"))
+		})
+
+		It("leaves out the certname a drop-in gives the oneshot", func() {
+			dropIn("openvox-ca-first-boot.service", "Environment=OPENVOX_CA_CERTNAME=chosen.example.com")
+			r, _ := run("configure")
+			Expect(r.ok).To(BeTrue(), r.output)
+			Expect(assignments()).To(Equal([]string{"OPENVOX_CA_PUPPET_SERVER=ca.example.com"}))
+		})
+
+		// /run drop-ins are local too, and systemd reads them.
+		It("reads drop-ins under /run as well as /etc", func() {
+			d := filepath.Join(systemdRuntime, "openvox-ca.service.d")
+			Expect(os.MkdirAll(d, 0o755)).To(Succeed())
+			Expect(os.WriteFile(filepath.Join(d, "x.conf"),
+				[]byte("[Service]\nEnvironment=OPENVOX_CA_PUPPET_SERVER_FILE=/x\n"), 0o644)).To(Succeed())
+			r, _ := run("configure")
+			Expect(r.ok).To(BeTrue(), r.output)
+			Expect(assignments()).To(Equal([]string{"OPENVOX_CA_CERTNAME=ca.example.com"}))
+		})
+
+		It("warns rather than failing when ucf cannot install it", func() {
+			stubCommand("ucf", "exit 1")
+			r, _ := run("configure")
+			Expect(r.ok).To(BeTrue(), "a ucf failure failed the install: %s", r.output)
+			Expect(r.output).To(ContainSubstring("could not update " + defaultFile + " through ucf"))
+		})
+	})
+
+	Describe("enabling and starting the service", func() {
+		// Debian's convention: an install starts the daemon. And debconf is
+		// let go before it does, or the daemon inherits debconf's descriptors
+		// and the package manager waits on it for ever.
+		It("enables, releases debconf, then starts, on a first install", func() {
+			r, calls := run("configure")
+			Expect(r.ok).To(BeTrue(), r.output)
+			enable := indexOf(calls, "deb-systemd-helper enable openvox-ca.service")
+			stop := indexOf(calls, "db_stop")
+			start := indexOf(calls, "deb-systemd-invoke start openvox-ca.service")
+			Expect(enable).To(BeNumerically(">=", 0), "no enable: %v", calls)
+			Expect(stop).To(BeNumerically(">", enable), "db_stop not after the enable: %v", calls)
+			Expect(start).To(BeNumerically(">", stop), "started while debconf was held: %v", calls)
+			// After the oneshot's own enable, so the start pulls it in.
+			Expect(start).To(BeNumerically(">", indexOf(calls, "systemctl enable openvox-ca-first-boot.service")))
+		})
+
+		// dh_installsystemd's default, as Chris ruled for #251: restart, which
+		// deb-systemd-invoke does only for an enabled or running unit. Not
+		// systemctl's try-restart, which would bypass policy-rc.d.
+		It("restarts through deb-systemd-invoke on an upgrade", func() {
+			r, calls := run("configure", "1.0.0")
+			Expect(r.ok).To(BeTrue(), r.output)
+			Expect(calls).To(ContainElement("deb-systemd-invoke restart openvox-ca.service"))
+			Expect(calls).NotTo(ContainElement(ContainSubstring("try-restart")))
+		})
+
+		// An operator's `systemctl disable openvox-ca` survives an upgrade:
+		// deb-systemd-helper's state says it was not enabled, so only the state
+		// is updated.
+		It("keeps an operator's disable across an upgrade", func() {
+			stubCommand("deb-systemd-helper", `[ "$2" = was-enabled ] && exit 1; exit 0`)
+			r, calls := run("configure", "1.0.0")
+			Expect(r.ok).To(BeTrue(), r.output)
+			Expect(calls).To(ContainElement("deb-systemd-helper update-state openvox-ca.service"))
+			Expect(calls).NotTo(ContainElement("deb-systemd-helper enable openvox-ca.service"))
+		})
+
+		// A first install onto a CA that was already there -- an OpenVox
+		// Server host's own, or one a purge of this package kept -- could be a
+		// second writer to it. The unit is neither started nor enabled (an
+		// enabled unit starts at the next boot), and update-state records it as
+		// disabled so an upgrade does not enable it later.
+		unitFile := func(root string) func() {
+			return func() {
+				Expect(os.MkdirAll(root, 0o755)).To(Succeed())
+				Expect(os.WriteFile(filepath.Join(root, "puppetserver.service"), []byte("[Unit]\n"), 0o644)).To(Succeed())
+			}
+		}
+		DescribeTable("neither enables nor starts on a takeover",
+			func(setup func()) {
+				setup()
+				r, calls := run("configure")
+				Expect(r.ok).To(BeTrue(), r.output)
+				Expect(calls).To(ContainElement("deb-systemd-helper update-state openvox-ca.service"))
+				Expect(calls).NotTo(ContainElement("deb-systemd-helper enable openvox-ca.service"))
+				Expect(calls).NotTo(ContainElement(HavePrefix("deb-systemd-invoke")))
+				Expect(r.output).To(And(
+					ContainSubstring("neither enabled nor started"),
+					// Whole, so a break inside the path cannot slip through.
+					ContainSubstring("/usr/share/doc/openvox-ca/docs/migrating-from-puppet-server.md"),
+					ContainSubstring("systemctl enable --now openvox-ca"),
+				))
+			},
+			Entry("a CA in the default directory", func() {
+				Expect(os.MkdirAll(filepath.Join(sslDir, "ca"), 0o755)).To(Succeed())
+				Expect(os.WriteFile(filepath.Join(sslDir, "ca", "ca_crt.pem"), []byte("CA\n"), 0o644)).To(Succeed())
+			}),
+			Entry("a CA in the configured directory", func() {
+				other := GinkgoT().TempDir()
+				Expect(os.WriteFile(filepath.Join(other, "ca_crt.pem"), []byte("CA\n"), 0o644)).To(Succeed())
+				Expect(os.WriteFile(config, []byte("cadir: \""+other+"\"  # moved\n"), 0o640)).To(Succeed())
+			}),
+			Entry("a CA in OpenVox Server 6+'s own directory", func() {
+				Expect(os.MkdirAll(serverCADir, 0o755)).To(Succeed())
+				Expect(os.WriteFile(filepath.Join(serverCADir, "ca_crt.pem"), []byte("CA\n"), 0o644)).To(Succeed())
+			}),
+			// The unit, not anything else that answers is-active: a stub that
+			// says yes to every unit would pass a check of the wrong one.
+			Entry("OpenVox Server running", func() {
+				stubCommand("systemctl", `[ "$1" = is-active ] && [ "$3" = puppetserver.service ] && exit 0
+[ "$1" = is-active ] && exit 3; exit 0`)
+			}),
+			// Installed but stopped, as for step 1's backup, is still Server.
+			Entry("OpenVox Server installed, in /usr/lib", func() { unitFile(vendorRoot)() }),
+			Entry("OpenVox Server installed, in /lib", func() { unitFile(legacyRoot)() }),
+			Entry("OpenVox Server installed, in /etc", func() { unitFile(dropinRoot)() }),
+			Entry("OpenVox Server installed, in /run", func() { unitFile(systemdRuntime)() }),
+		)
+
+		// The must-fail twin: every real install ships an empty ssl/ca, and the
+		// shipped config.yaml names it, so a directory with no CA in it is not
+		// a takeover.
+		It("starts on a first install whose CA directories are empty", func() {
+			Expect(os.MkdirAll(filepath.Join(sslDir, "ca"), 0o755)).To(Succeed())
+			Expect(os.MkdirAll(serverCADir, 0o755)).To(Succeed())
+			Expect(os.WriteFile(config, []byte("cadir: "+filepath.Join(sslDir, "ca")+"\n"), 0o640)).To(Succeed())
+			r, calls := run("configure")
+			Expect(r.ok).To(BeTrue(), r.output)
+			Expect(calls).To(ContainElement("deb-systemd-helper enable openvox-ca.service"))
+			Expect(calls).To(ContainElement("deb-systemd-invoke start openvox-ca.service"))
+			Expect(r.output).NotTo(ContainSubstring("neither enabled nor started"))
+		})
+
+		// The reinstall half of dh's mask-on-remove: the postinst unmasks
+		// before it enables, as dh_installsystemd's does. Without the unmask, a
+		// mask a removal left would make the enable do nothing and the start
+		// fail on a unit linked to /dev/null, behind a warning.
+		DescribeTable("unmasks before it enables or starts",
+			func(args ...string) {
+				r, calls := run(args...)
+				Expect(r.ok).To(BeTrue(), r.output)
+				unmask := indexOf(calls, "deb-systemd-helper unmask openvox-ca.service")
+				Expect(unmask).To(BeNumerically(">=", 0), "no unmask: %v", calls)
+				Expect(indexOf(calls, "deb-systemd-helper --quiet was-enabled openvox-ca.service")).To(BeNumerically(">", unmask))
+				Expect(indexOf(calls, "deb-systemd-helper enable openvox-ca.service")).To(BeNumerically(">", unmask))
+				Expect(indexOf(calls, "deb-systemd-invoke "+map[bool]string{true: "start", false: "restart"}[len(args) == 1]+" openvox-ca.service")).To(BeNumerically(">", unmask))
+			},
+			Entry("a first install", "configure"),
+			Entry("a reinstall after apt remove", "configure", "1.0.0"),
+		)
+
+		// An upgrade or a reinstall finds the package's own CA, which is
+		// not a takeover.
+		It("restarts as usual on an upgrade with a CA present", func() {
+			Expect(os.MkdirAll(filepath.Join(sslDir, "ca"), 0o755)).To(Succeed())
+			Expect(os.WriteFile(filepath.Join(sslDir, "ca", "ca_crt.pem"), []byte("CA\n"), 0o644)).To(Succeed())
+			r, calls := run("configure", "1.0.0")
+			Expect(r.ok).To(BeTrue(), r.output)
+			Expect(calls).To(ContainElement("deb-systemd-invoke restart openvox-ca.service"))
+		})
+
+		// The enable is on-disk work; the start needs a running systemd.
+		It("enables but does not start where systemd is not running", func() {
+			Expect(os.RemoveAll(systemdRuntime)).To(Succeed())
+			r, calls := run("configure")
+			Expect(r.ok).To(BeTrue(), r.output)
+			Expect(calls).To(ContainElement("deb-systemd-helper enable openvox-ca.service"))
+			Expect(calls).NotTo(ContainElement(HavePrefix("deb-systemd-invoke")))
+		})
+
+		It("warns rather than failing when the start fails", func() {
+			stubCommand("deb-systemd-invoke", "exit 1")
+			r, _ := run("configure")
+			Expect(r.ok).To(BeTrue(), "a failed start failed the install: %s", r.output)
+			Expect(r.output).To(ContainSubstring("journalctl -u openvox-ca-first-boot"))
+		})
+
+		// None of it on the rpm, which is preset-and-stop (#252).
+		DescribeTable("does none of it on the rpm",
+			func(arg string) {
+				r, calls := run(arg)
+				Expect(r.ok).To(BeTrue(), r.output)
+				for _, c := range calls {
+					Expect(c).NotTo(Or(HavePrefix("deb-systemd"), HavePrefix("ucf"), HavePrefix("db_")),
+						"rpm %s ran %q", arg, c)
+				}
+				_, err := os.Lstat(defaultFile)
+				Expect(errors.Is(err, os.ErrNotExist)).To(BeTrue())
+			},
+			Entry("install", "1"),
+			Entry("upgrade", "2"),
+		)
+
+		It("still try-restarts on an rpm upgrade", func() {
+			_, calls := run("2")
+			Expect(calls).To(ContainElement("systemctl try-restart openvox-ca.service"))
+		})
+
+		// The rpm's restart failure, reported as before.
+		It("warns rather than failing when the rpm upgrade's restart fails", func() {
+			stubCommand("systemctl", `[ "$1" = try-restart ] && exit 1; exit 0`)
+			r, _ := run("2")
+			Expect(r.ok).To(BeTrue(), r.output)
+			Expect(r.output).To(ContainSubstring("executing the previous binary"))
+		})
 	})
 })
 
@@ -7762,6 +8526,7 @@ var _ = Describe("postinstall's ownership and permission hardening", func() {
 			"OPENVOX_CA_STATEDIR="+stateDir,
 			"OPENVOX_CA_SSL_OWNER="+sslOwner,
 		)
+		cmd.Env = append(cmd.Env, debHostPins()...)
 		out, err := cmd.CombinedOutput()
 		res := firstBootResult{ok: true, output: string(out)}
 		if err != nil {
@@ -7790,8 +8555,15 @@ var _ = Describe("postinstall's ownership and permission hardening", func() {
 		// chown and chmod are stubs: this runs as an ordinary user, and the
 		// question is which arguments the script passes, not whether the
 		// kernel honours them.
-		for _, name := range []string{"systemctl", "systemd-sysusers", "getent", "groupadd", "useradd", "chown", "chmod"} {
+		for _, name := range []string{
+			"systemctl", "systemd-sysusers", "getent", "groupadd", "useradd", "chown", "chmod",
+			"ucf", "ucfr", "deb-systemd-helper", "deb-systemd-invoke",
+		} {
 			body := fmt.Sprintf("#!/bin/sh\necho \"%s $*\" >> %s\nexit 0\n", name, log)
+			// Nothing running, so a dpkg first install is not a takeover.
+			if name == "systemctl" {
+				body = fmt.Sprintf("#!/bin/sh\necho \"systemctl $*\" >> %s\n[ \"$1\" = is-active ] && exit 3\nexit 0\n", log)
+			}
 			if name == "getent" {
 				body = fmt.Sprintf("#!/bin/sh\necho \"getent $*\" >> %s\nexit 2\n", log)
 			}
@@ -8023,8 +8795,8 @@ var _ = Describe("postinstall's ownership and permission hardening", func() {
 		},
 		// The upgrade restart: the binary on disk is already the new one, so a
 		// failure here leaves the old image serving with nothing saying so.
-		Entry("the upgrade restart cannot be attempted", "systemctl",
-			[]string{"1.0.0"}, false, func() string { return "executing the previous binary" }),
+		Entry("the upgrade restart cannot be attempted", "deb-systemd-invoke",
+			[]string{"1.0.0"}, false, func() string { return "could not restart openvox-ca.service" }),
 		// The configuration file holds credentials at 0640; a failure to set
 		// that is worth saying out loud.
 		Entry("the configuration mode cannot be set", "chmod",

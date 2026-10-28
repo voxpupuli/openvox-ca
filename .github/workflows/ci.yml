@@ -144,6 +144,7 @@ jobs:
           shellcheck -s sh \
             packaging/scripts/first-boot \
             packaging/scripts/record-environment \
+            packaging/scripts/debian-config \
             packaging/scripts/preinstall \
             packaging/scripts/postinstall \
             packaging/scripts/preremove \

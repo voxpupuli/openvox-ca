@@ -2,9 +2,10 @@
 #
 # A unit rather than a maintainer script, for three reasons. It runs under the
 # service's hardening directives rather than as unconfined root -- the
-# deliberate differences are ReadWritePaths= below, which is wider, and one
-# ExecStartPost=+ step, record-environment, which runs as root outside the
-# sandbox to write /etc/sysconfig/openvox-ca (see there). It can run
+# deliberate differences are ReadWritePaths= below, which is wider, and, on
+# EL, one ExecStartPost=+ step, record-environment, which runs as root outside
+# the sandbox to write /etc/sysconfig/openvox-ca (see there; the deb's drop-in
+# clears it). It can run
 # again after the CA directory is wiped, which a postinst that already ran will
 # not; RemainAfterExit=yes means that is the next boot or an explicit
 # `systemctl restart openvox-ca-first-boot`, not a restart of the service. And
@@ -141,11 +142,12 @@ AmbientCapabilities=
 #
 # It is pulled in by openvox-ca.service and never on its own. There is no
 # WantedBy=multi-user.target, so enabling it at install time does not provision
-# anything -- a CA is minted the first time the operator starts openvox-ca, not
-# the first time the host reboots after an install. Installing a package is not
-# consent to create a certificate authority. (On EL a site preset that enables
-# openvox-ca.service is: the rpm applies presets on first install, so on such a
-# host the next boot starts the service and this runs with it.)
+# anything by itself -- a CA is minted the first time openvox-ca starts. On EL
+# that is the operator's `enable --now`: installing a package is not consent to
+# create a certificate authority there, except where a site preset enables
+# openvox-ca.service, when the next boot starts it. On Debian it is the
+# install's own start, by Debian's convention (openvox-ca#251), or the next
+# boot where policy-rc.d declined that start.
 #
 # And provisioning that fails stops the service, rather than letting it start
 # against a CA directory that provisioning did not finish. That edge carries
