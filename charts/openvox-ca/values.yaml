@@ -410,6 +410,8 @@ managedCerts:
 
 # -- Workload ------------------------------------------------------------------
 
+# More than one needs an external storage backend: filesystem and sqlite
+# support exactly one running instance, and the chart refuses more on either.
 replicaCount: 1
 
 # Deployment strategy. Empty follows the reason the default exists rather than
@@ -774,9 +776,17 @@ gateway:
 networkPolicy:
   enabled: false
 
-  # Ingress to the API port. "any" admits every pod in the cluster (agents live
-  # anywhere); "namespace" restricts to this namespace; "none" writes no API
+  # Ingress to the API port. "any" admits every pod in the cluster, in any
+  # namespace; "namespace" restricts to this namespace; "none" writes no API
   # rule, leaving `extraIngress` to define access.
+  #
+  # None of them admits anything from outside the cluster: "any" matches pods,
+  # not addresses. Agents on VMs or other clusters, reaching the CA through a
+  # LoadBalancer, NodePort or externalIPs, need an `extraIngress` rule with an
+  # ipBlock for the address the pod sees them arrive from. That is the agent's
+  # own with externalTrafficPolicy: Local, and usually a node's with Cluster,
+  # where a block covering the nodes admits every client the Service forwards;
+  # filter with service.loadBalancerSourceRanges there instead.
   apiAccess: any
 
   # Namespaces allowed to scrape the metrics port, matched on the
@@ -784,16 +794,32 @@ networkPolicy:
   metricsNamespaces:
     - monitoring
 
-  # Egress rules. DNS is always allowed when egress is enabled; everything else
-  # is yours to list. The policy binds the whole POD, so any initContainers or
-  # extraContainers you add are bound by it too and need their own destinations
-  # listed. Typically: your storage backend, OpenBao if the key lives there,
-  # anything your sidecars fetch, and the Kubernetes API when kubernetesExport
-  # is in use or a managed certificate uses a Secret store (a file store needs
-  # none) -- OpenBao's kubernetes auth needs no API egress,
-  # since the pod presents a mounted token and OpenBao does the TokenReview.
+  # Egress rules. DNS to the resolvers in `dns.to` is always allowed when egress
+  # is enabled; everything else is yours to list. The policy binds the whole
+  # POD, so any initContainers or extraContainers you add are bound by it too
+  # and need their own destinations listed. Typically: your storage backend,
+  # OpenBao if the key lives there, anything your sidecars fetch, and the
+  # Kubernetes API when kubernetesExport is in use or a managed certificate uses
+  # a Secret store (a file store needs none) -- OpenBao's kubernetes auth needs
+  # no API egress, since the pod presents a mounted token and OpenBao does the
+  # TokenReview.
   egress:
     enabled: false
+    # Where DNS (port 53, UDP and TCP) may go: the cluster DNS pods, matched by
+    # the k8s-app: kube-dns label most distributions put on CoreDNS. Set it to
+    # your resolvers if they are elsewhere, such as an ipBlock for a node-local
+    # cache or a provider's resolver, or for pods running with dnsPolicy:
+    # Default (the chart refuses that one while this names only kube-dns).
+    # Each entry is a NetworkPolicy peer, templated like `rules`. An empty list
+    # allows DNS to any destination.
+    dns:
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
     rules: []
     # - to:
     #     - podSelector:
@@ -803,6 +829,13 @@ networkPolicy:
     #     - port: 5432
     #       protocol: TCP
 
+  # Further ingress rules, templated. For agents outside the cluster:
+  # - from:
+  #     - ipBlock:
+  #         cidr: 192.0.2.0/24
+  #   ports:
+  #     - port: https
+  #       protocol: TCP
   extraIngress: []
 
 # -- Availability --------------------------------------------------------------
@@ -817,7 +850,8 @@ podDisruptionBudget:
 # At least one metric source is required when enabled: an HPA with nothing to
 # act on holds the replica count at minReplicas while looking like it
 # autoscales, so the chart refuses that combination at install time. Scaling out
-# also needs an external storage backend.
+# also needs an external storage backend: on filesystem or sqlite the chart
+# refuses a maxReplicas above 1.
 autoscaling:
   enabled: false
   minReplicas: 2

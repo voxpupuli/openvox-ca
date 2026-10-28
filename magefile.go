@@ -1815,6 +1815,14 @@ var (
 	shellBackendAliasesRE = regexp.MustCompile(`(?m)^FILESYSTEM_BACKEND_ALIASES="([^"]*)"$`)
 	goBackendAliasesRE    = regexp.MustCompile(`(?m)^\tcase ((?:"[^"]*", )*"[^"]*"):\n\t\treturn BackendFilesystem, nil$`)
 	goQuotedStringRE      = regexp.MustCompile(`"([^"]*)"`)
+
+	// The chart's copy of the whole of ParseBackendKind, read for
+	// verifyChartBackendAliases: every case arm with the constant it returns,
+	// those constants' values, and the template's kind table.
+	goBackendArmRE        = regexp.MustCompile(`(?m)^\tcase ((?:"[^"]*", )*"[^"]*"):\n\t\treturn (Backend\w+), nil$`)
+	goBackendConstRE      = regexp.MustCompile(`(?m)^\t(Backend\w+)\s+BackendKind = "([^"]*)"$`)
+	chartBackendKindRE    = regexp.MustCompile(`(?s)\{\{- define "openvox-ca\.backendKind" -\}\}(.*?)\{\{- end -\}\}\n\n`)
+	chartBackendKindArmRE = regexp.MustCompile(`set \$kinds "([^"]*)" \(list((?: "[^"]*")*)\)`)
 )
 
 // verifyBackendAliases asserts that first-boot accepts exactly the spellings
@@ -1903,6 +1911,108 @@ func verifyBackendAliasesIn(script, spec []byte) error {
 			"ParseBackendKind) does not, so provisioning would bootstrap a filesystem CA for a "+
 			"backend the server will not read it from. Remove them from "+
 			"FILESYSTEM_BACKEND_ALIASES", firstBootScriptPath, extra, storageSpecPath)
+	}
+	return nil
+}
+
+// chartHelpersPath is the template file holding openvox-ca.backendKind.
+const chartHelpersPath = chartDir + "/templates/_helpers.tpl"
+
+// verifyChartBackendAliases asserts that the Helm chart folds storage_backend
+// spellings onto kinds exactly as ParseBackendKind does, kind for kind.
+//
+// The chart refuses several replicas on the filesystem and sqlite backends,
+// and it can only judge a spelling it knows: openvox-ca.backendKind returns an
+// unrecognised name unchanged, which matches no kind, so a spelling the server
+// gains and the chart lacks installs a multi-replica single-instance CA with
+// no refusal and no warning. verifyBackendAliases already guards first-boot's
+// copy for the same reason; this one compares every arm, not only the
+// filesystem one, because the refusal keys on sqlite too and the DSN check
+// keys on mysql and sqlite. Wired into dev:check.
+func verifyChartBackendAliases() error {
+	tpl, err := os.ReadFile(chartHelpersPath)
+	if err != nil {
+		return err
+	}
+	spec, err := os.ReadFile(storageSpecPath)
+	if err != nil {
+		return err
+	}
+	return verifyChartBackendAliasesIn(tpl, spec)
+}
+
+func verifyChartBackendAliasesIn(tpl, spec []byte) error {
+	consts := map[string]string{}
+	for _, m := range goBackendConstRE.FindAllSubmatch(spec, -1) {
+		consts[string(m[1])] = string(m[2])
+	}
+	goKinds := map[string]map[string]bool{}
+	for _, m := range goBackendArmRE.FindAllSubmatch(spec, -1) {
+		kind, ok := consts[string(m[2])]
+		if !ok {
+			return fmt.Errorf("%s: ParseBackendKind returns %s, whose value this check cannot read; "+
+				"update goBackendConstRE rather than deleting the check", storageSpecPath, m[2])
+		}
+		if goKinds[kind] == nil {
+			goKinds[kind] = map[string]bool{}
+		}
+		for _, q := range goQuotedStringRE.FindAllSubmatch(m[1], -1) {
+			goKinds[kind][string(q[1])] = true
+		}
+	}
+	// A floor for each side: one that parsed to nothing would match the other
+	// vacuously, or report every spelling missing for a reason it cannot name.
+	if len(goKinds) == 0 {
+		return fmt.Errorf("%s: found no `case \"a\", \"b\":` arm of ParseBackendKind returning a "+
+			"Backend constant, so the chart's spellings cannot be compared with the server's; "+
+			"update the pattern rather than deleting the check", storageSpecPath)
+	}
+
+	def := chartBackendKindRE.FindSubmatch(tpl)
+	if def == nil {
+		return fmt.Errorf("%s no longer defines openvox-ca.backendKind in the shape this check "+
+			"reads, so its spellings cannot be compared with ParseBackendKind's", chartHelpersPath)
+	}
+	chartKinds := map[string]map[string]bool{}
+	for _, m := range chartBackendKindArmRE.FindAllSubmatch(def[1], -1) {
+		kind := string(m[1])
+		// A second `set` for a kind replaces the first in the template, so
+		// merging the two here would pass a table that has lost spellings.
+		if chartKinds[kind] != nil {
+			return fmt.Errorf("%s: openvox-ca.backendKind sets the %s kind more than once, and the "+
+				"template keeps only the last; give each kind one `set $kinds` line", chartHelpersPath, kind)
+		}
+		chartKinds[kind] = map[string]bool{}
+		for _, q := range goQuotedStringRE.FindAllSubmatch(m[2], -1) {
+			chartKinds[kind][string(q[1])] = true
+		}
+	}
+	if len(chartKinds) == 0 {
+		return fmt.Errorf("%s: openvox-ca.backendKind holds no `set $kinds \"kind\" (list ...)` "+
+			"line, so this check cannot read its spellings; update the pattern rather than "+
+			"deleting the check", chartHelpersPath)
+	}
+
+	var problems []string
+	for _, kind := range slices.Sorted(maps.Keys(goKinds)) {
+		for _, a := range slices.Sorted(maps.Keys(goKinds[kind])) {
+			if !chartKinds[kind][a] {
+				problems = append(problems, fmt.Sprintf("%q is %s to openvox-ca but unknown to the chart", a, kind))
+			}
+		}
+	}
+	for _, kind := range slices.Sorted(maps.Keys(chartKinds)) {
+		for _, a := range slices.Sorted(maps.Keys(chartKinds[kind])) {
+			if !goKinds[kind][a] {
+				problems = append(problems, fmt.Sprintf("%q is %s to the chart but not to openvox-ca", a, kind))
+			}
+		}
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("openvox-ca.backendKind (%s) and ParseBackendKind (%s) disagree: %s. "+
+			"A spelling the chart lacks fails open, because the multi-replica refusal and the "+
+			"NOTES warnings match by kind; change both together",
+			chartHelpersPath, storageSpecPath, strings.Join(problems, "; "))
 	}
 	return nil
 }
@@ -5017,7 +5127,7 @@ func chartConfigChecksum(sets ...string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("rendering the comparison config: %w\n%s", err, out)
 	}
-	m := regexp.MustCompile(`checksum/config: ([0-9a-f]{64})`).FindStringSubmatch(out)
+	m := regexp.MustCompile(`checksum/config: "([0-9a-f]{64})"`).FindStringSubmatch(out)
 	if m == nil {
 		return "", fmt.Errorf("no checksum/config annotation in the comparison render")
 	}
@@ -5289,19 +5399,19 @@ func (Chart) Test() error {
 		{
 			name:  "an unset tag resolves to the Alpine variant of the appVersion",
 			sets:  []string{tls, "image.tag=", "image.digest="},
-			wants: []string{"image: ghcr.io/voxpupuli/openvox-ca:" + defaultTag},
+			wants: []string{"image: \"ghcr.io/voxpupuli/openvox-ca:" + defaultTag + "\""},
 		},
 		{
 			name: "an explicit tag is used verbatim, selecting the CentOS variant",
 			sets: []string{tls, "image.tag=0.9.0"},
 			// The whole point of the rule: no suffix is appended.
-			wants:    []string{"image: ghcr.io/voxpupuli/openvox-ca:0.9.0"},
+			wants:    []string{"image: \"ghcr.io/voxpupuli/openvox-ca:0.9.0\""},
 			notWants: []string{"0.9.0-alpine"},
 		},
 		{
 			name:     "a digest wins over a tag",
 			sets:     []string{tls, "image.tag=0.9.0", "image.digest=sha256:" + strings.Repeat("a", 64)},
-			wants:    []string{"image: ghcr.io/voxpupuli/openvox-ca@sha256:" + strings.Repeat("a", 64)},
+			wants:    []string{"image: \"ghcr.io/voxpupuli/openvox-ca@sha256:" + strings.Repeat("a", 64) + "\""},
 			notWants: []string{":0.9.0"},
 		},
 		{
@@ -5684,7 +5794,7 @@ config:
 			// which contains `namespace: ca-tls-ns` verbatim, so the loose form
 			// passed with the namespace expression mutated away entirely.
 			wants: []string{
-				"  name: openvox-ca-managed-certs\n  namespace: ca-tls-ns\n",
+				"  name: \"openvox-ca-managed-certs\"\n  namespace: \"ca-tls-ns\"\n",
 				"- openvox-ca-serving-tls",
 			},
 		},
@@ -5707,7 +5817,7 @@ config:
         name: openvox-ca-serving-tls
 `,
 			wants: []string{
-				"name: openvox-ca-managed-certs",
+				"name: \"openvox-ca-managed-certs\"",
 				"- openvox-ca-serving-tls",
 				`verbs: ["get", "patch"]`,
 				"automountServiceAccountToken: true",
@@ -5764,8 +5874,9 @@ config:
           namespace: openvox
 `,
 			wants: []string{
-				"name: openvox-ca-managed-certs",
-				"namespace: openvox",
+				// Anchored to the Role's own name: the ConfigMap echoes the
+				// valuesYAML above, so a bare namespace line matches there.
+				"  name: \"openvox-ca-managed-certs\"\n  namespace: \"openvox\"\n",
 				"- puppetserver-tls",
 				`verbs: ["get", "patch"]`,
 				// The unnarrowable half of the grant, which the export's
@@ -5820,7 +5931,7 @@ config:
           namespace: openvox
 `,
 			wants: []string{
-				"name: openvox-ca-managed-certs",
+				"name: \"openvox-ca-managed-certs\"",
 				"  annotations:\n    example.com/owner: platform\nrules:",
 				"  annotations:\n    example.com/owner: platform\nroleRef:",
 			},
@@ -5868,7 +5979,7 @@ config:
 			// readiness green.
 			wants: []string{"kind: Deployment", "automountServiceAccountToken: true"},
 			notWants: []string{
-				"name: openvox-ca-managed-certs",
+				"name: \"openvox-ca-managed-certs\"",
 				"kind: Role\n",
 			},
 		},
@@ -5888,7 +5999,7 @@ config:
       store: {secret: {name: a-tls, namespace: openvox}}
 `,
 			wants:    []string{"kind: Deployment"},
-			notWants: []string{"name: openvox-ca-managed-certs"},
+			notWants: []string{"name: \"openvox-ca-managed-certs\""},
 		},
 		{
 			// The chart cannot read a config it does not render, so it knows
@@ -5937,7 +6048,7 @@ config:
 				// on any rewording, with no regression to show for it.
 				"managedCerts.rbac.create: false",
 			},
-			notWants: []string{"name: openvox-ca-managed-certs"},
+			notWants: []string{"name: \"openvox-ca-managed-certs\""},
 		},
 		{
 			// The other route into configFileKnown false, so the NOTE's cause
@@ -5961,7 +6072,7 @@ config:
 				// rewording of it failed twice.
 				"(args, or a --config in",
 			},
-			notWants: []string{"name: openvox-ca-managed-certs", "(existingConfigMap)"},
+			notWants: []string{"name: \"openvox-ca-managed-certs\"", "(existingConfigMap)"},
 		},
 		{
 			// Every other render case configures exactly one entry, so the
@@ -6005,15 +6116,15 @@ config:
 				// only to a line start it matches the ServiceAccount, the
 				// ConfigMap and everything else in the release namespace. Both
 				// held whether or not the default-namespace resolution ran.
-				"  name: openvox-ca-managed-certs\n  namespace: openvox\n",
-				"  name: openvox-ca-managed-certs\n  namespace: default\n",
+				"  name: \"openvox-ca-managed-certs\"\n  namespace: \"openvox\"\n",
+				"  name: \"openvox-ca-managed-certs\"\n  namespace: \"default\"\n",
 				"      - a-tls",
 				"      - b-tls",
 				"      - c-tls",
 				// The binding's subject is the CA's own namespace, not the
 				// Role's -- a binding that used $ns would be a silent, total
 				// RBAC failure in every namespace but one.
-				"  - kind: ServiceAccount\n    name: openvox-ca\n    namespace: default",
+				"  - kind: ServiceAccount\n    name: \"openvox-ca\"\n    namespace: \"default\"",
 			},
 			// The assertion that actually catches a dropped filter. Both names
 			// appearing somewhere is true either way -- there are two Roles --
@@ -6119,8 +6230,8 @@ config:
 			sets: []string{tls},
 			// Anchored to the pod template: serviceaccount.yaml emits the same
 			// key at column 0 unconditionally, so a bare want cannot fail.
-			wants:    []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: false"},
-			notWants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
+			wants:    []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: false"},
+			notWants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: true"},
 		},
 		{
 			// An unreadable config mounts the token. Asserted against
@@ -6129,12 +6240,12 @@ config:
 			// reached from here. See the note on managedCertsNeedAPI.
 			name:  "an unreadable config mounts the token, because a Secret store may exist",
 			sets:  []string{tls, "existingConfigMap=my-config"},
-			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
+			wants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: true"},
 		},
 		{
 			name:  "OpenBao Kubernetes auth mounts the token too",
 			sets:  []string{tls, "config.ca_key_provider=openbao", "config.openbao.auth_method=kubernetes"},
-			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
+			wants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: true"},
 		},
 		{
 			name: "export targets set through config alone still mount the token",
@@ -6142,7 +6253,7 @@ config:
 			// kubernetesExport.enabled says, so the token decision has to read
 			// the merged config rather than the chart's own flag.
 			sets:  []string{tls, "config.kubernetes_export.targets[0].kind=Secret", "config.kubernetes_export.targets[0].metadata.name=trust", "config.kubernetes_export.targets[0].cert=true"},
-			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
+			wants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: true"},
 		},
 		{
 			name: "a config the chart cannot read mounts the token conservatively",
@@ -6150,7 +6261,7 @@ config:
 			// costs nothing, a missing one fails the export or the key provider
 			// while readiness stays green.
 			sets:  []string{"existingConfigMap=mine"},
-			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
+			wants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: true"},
 		},
 		{
 			name: "a config change rolls the pods",
@@ -6174,9 +6285,9 @@ config:
 			// exists to catch.
 			sets: []string{tls, "ca.existingSecret=ca-material", "caKeyPassphrase.existingSecret=ca-passphrase"},
 			wants: []string{
-				"secretName: openvox-ca-tls\n            defaultMode: 0600",
-				"secretName: ca-material\n            defaultMode: 0600",
-				"secretName: ca-passphrase\n            defaultMode: 0600",
+				"secretName: \"openvox-ca-tls\"\n            defaultMode: 0600",
+				"secretName: \"ca-material\"\n            defaultMode: 0600",
+				"secretName: \"ca-passphrase\"\n            defaultMode: 0600",
 			},
 		},
 		{
@@ -6221,7 +6332,7 @@ config:
 			// The accepted half of the backendPort guard. Ingress references
 			// the Service port by name...
 			sets:  []string{tls, "metrics.enabled=true", "ingress.enabled=true", "ingress.backendPort=metrics"},
-			wants: []string{"port:\n                  name: metrics"},
+			wants: []string{"port:\n                  name: \"metrics\""},
 		},
 		{
 			name: "a TLSRoute routed to the metrics port numbers it",
@@ -6233,7 +6344,7 @@ config:
 			// the route had regressed to the https port.
 			sets: []string{tls, "metrics.enabled=true", "gateway.tlsRoute.enabled=true", "gateway.tlsRoute.backendPort=metrics"},
 			wants: []string{
-				"- backendRefs:\n        - name: openvox-ca\n          port: 9140",
+				"- backendRefs:\n        - name: \"openvox-ca\"\n          port: 9140",
 			},
 		},
 		{
@@ -6242,7 +6353,7 @@ config:
 			// rather than that either number appears somewhere.
 			sets: []string{tls, "metrics.enabled=true", "gateway.tlsRoute.enabled=true"},
 			wants: []string{
-				"- backendRefs:\n        - name: openvox-ca\n          port: 443",
+				"- backendRefs:\n        - name: \"openvox-ca\"\n          port: 443",
 			},
 		},
 		{
@@ -6385,6 +6496,165 @@ config:
 			wants: []string{"leaf-certificate series carry node hostnames"},
 		},
 		{
+			// Every string the chart interpolates into a manifest is quoted, so
+			// a value YAML 1.1 reads as another type stays a string: Kubernetes
+			// decodes manifests with that schema, where on, yes and true are
+			// booleans and a leading zero makes an octal integer. Unquoted,
+			// each of these renders a manifest the API server refuses, or a
+			// label that matches nothing.
+			//
+			// The values reach every template except extra-objects.yaml, which
+			// renders the operator's own manifests, with rbac.yaml at its Role
+			// scope. The notWants refuse an unquoted rendering of any of them
+			// anywhere, which is what pins every site a sentinel reaches rather
+			// than one of each: against the templates before quoting, this
+			// render held 45. Sentinels cover the names and free-form strings;
+			// fields held to an enum, a path or a duration are quoted as well
+			// but carry none here, since nothing they accept is retyped. A new
+			// interpolated free-form value owes a sentinel in this case, which
+			// AGENTS.md says too.
+			name: "interpolated strings are quoted so YAML cannot retype them",
+			valuesYAML: `
+fullnameOverride: "0123"
+nameOverride: "0133"
+namespaceOverride: "0124"
+priorityClassName: "0128"
+runtimeClassName: "0129"
+schedulerName: "0130"
+env:
+  "on": "1"
+tls:
+  existingSecret: "0126"
+config:
+  storage_backend: postgres
+  managed_certs:
+    - certname: a.example.com
+      names: [a]
+      renew_before: 720h
+      store: {secret: {name: a-tls, namespace: "0125"}}
+autoscaling:
+  enabled: true
+podDisruptionBudget:
+  enabled: true
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    namespace: "0127"
+    jobLabel: "0131"
+networkPolicy:
+  enabled: true
+  metricsNamespaces: ["yes"]
+kubernetesExport:
+  enabled: true
+  targets:
+    - kind: Secret
+      metadata: {name: trust}
+      cert: true
+ingress:
+  enabled: true
+  className: "true"
+  hosts:
+    - host: ca.example.com
+      paths:
+        - path: /
+gateway:
+  tlsRoute:
+    enabled: true
+  httpRoute:
+    enabled: true
+`,
+			wants: []string{
+				"  name: \"0123\"\n",
+				"  namespace: \"0124\"\n",
+				"  namespace: \"0125\"\n",
+				"secretName: \"0126\"\n",
+				"  namespace: \"0127\"\n",
+				"priorityClassName: \"0128\"\n",
+				"runtimeClassName: \"0129\"\n",
+				"schedulerName: \"0130\"\n",
+				"jobLabel: \"0131\"\n",
+				"app.kubernetes.io/name: \"0133\"\n",
+				"      - \"0124\"\n",
+				"- name: \"on\"\n",
+				"kubernetes.io/metadata.name: \"yes\"\n",
+				"ingressClassName: \"true\"\n",
+				"app.kubernetes.io/instance: \"openvox-ca\"\n",
+				"- path: \"/\"\n",
+			},
+			// Numeric sentinels only: on, yes and true each have a single
+			// site, pinned above, while ": true" also matches every real
+			// boolean in the render.
+			notWants: []string{": 0123\n", ": 0124\n", ": 0125\n", ": 0126\n", ": 0127\n", "- 0124\n",
+				": 0128\n", ": 0129\n", ": 0130\n", ": 0131\n", ": 0133\n"},
+		},
+		{
+			// A DNS rule with no `to:` admits port 53 to every destination,
+			// which made DNS a way out of the cluster. The peer is asserted
+			// with the ports above it, so a `to:` landing on another rule
+			// does not satisfy it.
+			name:  "restricted egress sends DNS only to kube-dns by default",
+			sets:  []string{tls, "networkPolicy.enabled=true", "networkPolicy.egress.enabled=true"},
+			wants: []string{"protocol: TCP\n      to:\n        - namespaceSelector:\n            matchLabels:\n              kubernetes.io/metadata.name: kube-system\n          podSelector:\n            matchLabels:\n              k8s-app: kube-dns\n"},
+		},
+		{
+			// The override replaces the default rather than merging with it:
+			// a cluster whose resolver is a node-local cache must not keep a
+			// kube-dns peer it does not use.
+			name: "egress.dns.to replaces the kube-dns peer",
+			sets: []string{tls, "networkPolicy.enabled=true", "networkPolicy.egress.enabled=true",
+				"networkPolicy.egress.dns.to[0].ipBlock.cidr=169.254.20.10/32"},
+			wants:    []string{"protocol: TCP\n      to:\n        - ipBlock:\n            cidr: 169.254.20.10/32\n"},
+			notWants: []string{"k8s-app: kube-dns"},
+		},
+		{
+			// Peers are templated like egress.rules, so one can name the
+			// release's own namespace.
+			name: "egress.dns.to is templated",
+			sets: []string{tls, "networkPolicy.enabled=true", "networkPolicy.egress.enabled=true"},
+			valuesYAML: `
+networkPolicy:
+  egress:
+    dns:
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: "{{ .Release.Namespace }}-dns"
+`,
+			// toYaml single-quotes the string because of its braces, and tpl
+			// leaves the quotes.
+			wants: []string{"kubernetes.io/metadata.name: 'default-dns'"},
+		},
+		{
+			// An empty list is the opt-out, by the maintainer's decision, and means
+			// what an empty `to:` means to Kubernetes, every destination. The
+			// rule must keep its ports; only the peer goes.
+			name: "an empty egress.dns.to allows DNS to any destination",
+			sets: []string{tls, "networkPolicy.enabled=true", "networkPolicy.egress.enabled=true"},
+			valuesYAML: `
+networkPolicy:
+  egress:
+    dns:
+      to: []
+`,
+			wants:    []string{"- ports:\n        - port: 53\n          protocol: UDP\n        - port: 53\n          protocol: TCP\n"},
+			notWants: []string{"protocol: TCP\n      to:", "k8s-app: kube-dns"},
+		},
+		{
+			// A null deletes the default from the merged values, and reaches
+			// the template as no key at all. It means the same as an empty
+			// list, and must not abort the render on a nil map.
+			name: "a null egress.dns allows DNS to any destination too",
+			sets: []string{tls, "networkPolicy.enabled=true", "networkPolicy.egress.enabled=true"},
+			valuesYAML: `
+networkPolicy:
+  egress:
+    dns: null
+`,
+			wants:    []string{"- port: 53\n          protocol: TCP\n"},
+			notWants: []string{"protocol: TCP\n      to:", "k8s-app: kube-dns"},
+		},
+		{
 			name:  "NOTES warns that restricted egress may not reach the API server",
 			notes: true,
 			// The second consumer of needsAPIAccess, and the one no case
@@ -6422,13 +6692,13 @@ config:
 			// is not an uncertainty case — it must be detected outright, the way
 			// tlsConfigured detects OPENVOX_CA_TLS_CERT there.
 			sets:  []string{tls, "config.ca_key_provider=openbao", "env.OPENVOX_CA_OPENBAO_AUTH_METHOD=kubernetes"},
-			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
+			wants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: true"},
 		},
 		{
 			name:     "a non-Kubernetes auth method through env does not",
 			sets:     []string{tls, "config.ca_key_provider=openbao", "env.OPENVOX_CA_OPENBAO_AUTH_METHOD=approle"},
-			wants:    []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: false"},
-			notWants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
+			wants:    []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: false"},
+			notWants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: true"},
 		},
 		{
 			name: "an auth method supplied through extraEnv with a readable value mounts the token",
@@ -6436,13 +6706,13 @@ config:
 			// arm below: only that one is reached by `not .value`.
 			sets: []string{tls, "config.ca_key_provider=openbao",
 				"extraEnv[0].name=OPENVOX_CA_OPENBAO_AUTH_METHOD", "extraEnv[0].value=kubernetes"},
-			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
+			wants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: true"},
 		},
 		{
 			name: "a non-Kubernetes auth method through extraEnv does not",
 			sets: []string{tls, "config.ca_key_provider=openbao",
 				"extraEnv[0].name=OPENVOX_CA_OPENBAO_AUTH_METHOD", "extraEnv[0].value=approle"},
-			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: false"},
+			wants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: false"},
 		},
 		{
 			name: "an auth method passed through extraArgs mounts the token",
@@ -6454,13 +6724,13 @@ config:
 			// block dropped from the deployment, the token line alone would still
 			// render, and the chart would be deciding from a flag the container
 			// never receives.
-			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true",
+			wants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: true",
 				"- --openbao-auth-method=kubernetes"},
 		},
 		{
 			name:  "a non-Kubernetes auth method through extraArgs does not",
 			sets:  []string{tls, "config.ca_key_provider=openbao", "extraArgs[0]=--openbao-auth-method=approle"},
-			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: false"},
+			wants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: false"},
 		},
 		{
 			name: "a bare auth-method flag in extraArgs mounts the token",
@@ -6470,7 +6740,7 @@ config:
 			// and mount a token that case asserts stays unmounted.
 			sets: []string{tls, "config.ca_key_provider=openbao",
 				"extraArgs[0]=--openbao-auth-method", "extraArgs[1]=kubernetes"},
-			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
+			wants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: true"},
 		},
 		{
 			name: "a --config in extraArgs makes the whole configuration unknown",
@@ -6480,12 +6750,12 @@ config:
 			// chart's own config there would withhold it from a pod whose real
 			// config configures export or Kubernetes auth.
 			sets:  []string{tls, "extraArgs[0]=--config=/mnt/other/config.yaml"},
-			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
+			wants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: true"},
 		},
 		{
 			name:  "the separated --config spelling counts too",
 			sets:  []string{tls, "extraArgs[0]=--config", "extraArgs[1]=/mnt/other/config.yaml"},
-			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
+			wants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: true"},
 		},
 		{
 			name: "export configured only through config still gets a Role",
@@ -6503,7 +6773,7 @@ config:
 			// correctly configured pod.
 			sets: []string{tls, "config.ca_key_provider=openbao", "config.openbao.auth_method=kubernetes",
 				"env.OPENVOX_CA_OPENBAO_AUTH_METHOD="},
-			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
+			wants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: true"},
 		},
 		{
 			name:  "the egress NOTE names export even when the wider config is unknown",
@@ -6531,7 +6801,7 @@ config:
 			sets: []string{tls, "config.ca_key_provider=openbao",
 				"extraEnv[0].name=OPENVOX_CA_OPENBAO_AUTH_METHOD",
 				"extraEnv[0].valueFrom.secretKeyRef.name=openbao", "extraEnv[0].valueFrom.secretKeyRef.key=method"},
-			wants: []string{"serviceAccountName: openvox-ca\n      automountServiceAccountToken: true"},
+			wants: []string{"serviceAccountName: \"openvox-ca\"\n      automountServiceAccountToken: true"},
 		},
 		{
 			name: "a lowercase export target kind passes through as written",
@@ -6604,7 +6874,7 @@ config:
 			// mounts the volume where nothing looks.
 			name:     "a pinned persistence.mountPath moves the mount and the derived cadir",
 			sets:     []string{tls, "persistence.mountPath=/var/lib/puppet-ca"},
-			wants:    []string{"mountPath: /var/lib/puppet-ca\n", "cadir: /var/lib/puppet-ca\n"},
+			wants:    []string{"mountPath: \"/var/lib/puppet-ca\"\n", "cadir: /var/lib/puppet-ca\n"},
 			notWants: []string{"/var/lib/openvox-ca"},
 		},
 		{
@@ -6624,7 +6894,7 @@ config:
         cert: /var/lib/puppet-ca/tls.crt
         key: /var/lib/puppet-ca/tls.key
 `,
-			wants:    []string{"mountPath: /var/lib/puppet-ca\n", "cadir: /var/lib/puppet-ca/ca"},
+			wants:    []string{"mountPath: \"/var/lib/puppet-ca\"\n", "cadir: /var/lib/puppet-ca/ca"},
 			notWants: []string{"/var/lib/openvox-ca"},
 		},
 		{
@@ -6645,7 +6915,7 @@ config:
 		{
 			name:     "an externally managed ConfigMap cannot be checksummed",
 			sets:     []string{tls, "existingConfigMap=mine"},
-			wants:    []string{"name: mine"},
+			wants:    []string{"name: \"mine\""},
 			notWants: []string{"checksum/config:"},
 		},
 		{
@@ -6737,12 +7007,234 @@ config:
 			wants: []string{"no puppetServers are listed"},
 		},
 		{
-			name:  "NOTES warns about a shared filesystem CA under autoscaling",
+			// Where the chart can see the backend, validate refuses several
+			// replicas outright; the warning is what is left for the
+			// configurations it cannot read. It has to read the autoscaling
+			// ceiling, since that is what the autoscaler may reach.
+			name:  "NOTES warns about several replicas when the backend is out of sight",
 			notes: true,
-			// The replica warning has to read the autoscaling floor, not just
-			// replicaCount.
-			sets:  []string{tls, "autoscaling.enabled=true", "autoscaling.minReplicas=3"},
-			wants: []string{"autoscaling starts at 3 replicas", "not safe to share between replicas"},
+			sets: []string{tls, "autoscaling.enabled=true", "autoscaling.maxReplicas=3",
+				"extraEnv[0].name=OPENVOX_CA_STORAGE_BACKEND",
+				"extraEnv[0].valueFrom.secretKeyRef.name=backend", "extraEnv[0].valueFrom.secretKeyRef.key=kind"},
+			wants: []string{"autoscaling may run up to 3 replicas", "cannot see the backend the server will actually use"},
+		},
+		{
+			// The same warning from the other half of configFullyKnown. The
+			// chart's own config names no backend, so it describes the
+			// filesystem default it would otherwise have rendered.
+			name:  "NOTES warns about several replicas under an existingConfigMap",
+			notes: true,
+			sets:  []string{"existingConfigMap=mine", "replicaCount=2"},
+			wants: []string{"replicaCount is 2", "can see the backend is filesystem"},
+		},
+		{
+			// The warning must not outlive the refusal into configurations the
+			// chart can judge: a replicated external backend is the supported
+			// case, and warning there would teach operators to ignore it.
+			//
+			// The config file is left on the filesystem default and the
+			// environment names etcd, so a warning keyed on the config alone
+			// would fire here. The notWants is the warning's opening, which
+			// stays on one line however the paragraph below it wraps.
+			name:     "NOTES says nothing about replicas on a backend that supports them",
+			notes:    true,
+			sets:     []string{tls, "replicaCount=2", "env.OPENVOX_CA_STORAGE_BACKEND=etcd"},
+			wants:    []string{"Storage backend: etcd"},
+			notWants: []string{"WARNING: replicaCount is 2"},
+		},
+		{
+			// The notes read the backend the server will run with, not only
+			// the config file's: the environment outranks it, so a persistence
+			// warning keyed on the file alone warned a postgres deployment
+			// that its CA lived on an emptyDir.
+			name:     "NOTES reads the backend from the environment when it is set there",
+			notes:    true,
+			sets:     []string{tls, "persistence.enabled=false", "env.OPENVOX_CA_STORAGE_BACKEND=postgres"},
+			wants:    []string{"Storage backend: postgres"},
+			notWants: []string{"persistence is disabled"},
+		},
+		{
+			// And it folds aliases, which a comparison against "filesystem"
+			// let past: "fs" is the filesystem backend to the server.
+			name:  "NOTES warns about an emptyDir CA when the backend is spelled by an alias",
+			notes: true,
+			sets:  []string{tls, "persistence.enabled=false", "config.storage_backend=fs"},
+			wants: []string{"Storage backend: filesystem", "persistence is disabled"},
+		},
+		{
+			name:  "several replicas render on an external backend",
+			sets:  []string{tls, "replicaCount=2", "config.storage_backend=pg"},
+			wants: []string{"replicas: 2"},
+		},
+		{
+			// The environment outranks the config file, so a filesystem
+			// default overridden there is not a filesystem CA.
+			name:  "several replicas render when the environment names an external backend",
+			sets:  []string{tls, "replicaCount=2", "env.OPENVOX_CA_STORAGE_BACKEND=etcd"},
+			wants: []string{"replicas: 2"},
+		},
+		{
+			// A backend fed in from a Secret is one the chart cannot read, so it
+			// must not refuse; the NOTES case above pins the warning instead.
+			name: "several replicas render when the backend comes from a Secret",
+			sets: []string{tls, "replicaCount=2",
+				"extraEnv[0].name=OPENVOX_CA_STORAGE_BACKEND",
+				"extraEnv[0].valueFrom.secretKeyRef.name=backend", "extraEnv[0].valueFrom.secretKeyRef.key=kind"},
+			wants: []string{"replicas: 2"},
+		},
+		{
+			// The separated flag leaves its value in the next element, which
+			// the chart does not reassemble, so it is unreadable too.
+			name:  "several replicas render when the backend flag's value is separate",
+			sets:  []string{tls, "replicaCount=2", "extraArgs[0]=--storage-backend", "extraArgs[1]=redis"},
+			wants: []string{"replicas: 2"},
+		},
+		{
+			// The server ignores an empty variable, so it defers to the config
+			// file rather than reading as the filesystem default.
+			name:  "several replicas render when an empty env variable leaves the config's backend",
+			sets:  []string{tls, "replicaCount=2", "config.storage_backend=postgres", "env.OPENVOX_CA_STORAGE_BACKEND="},
+			wants: []string{"replicas: 2"},
+		},
+		{
+			// An extraEnv entry with neither value nor source is the empty
+			// string to Kubernetes, and so the same as the case above.
+			name:  "several replicas render when a sourceless extraEnv variable leaves the config's backend",
+			sets:  []string{tls, "replicaCount=2", "config.storage_backend=postgres", "extraEnv[0].name=OPENVOX_CA_STORAGE_BACKEND"},
+			wants: []string{"replicas: 2"},
+		},
+		{
+			// env is rendered before extraEnv and Kubernetes keeps the last
+			// entry of a name, so extraEnv wins.
+			name: "several replicas render when extraEnv overrides an env backend",
+			sets: []string{tls, "replicaCount=2", "env.OPENVOX_CA_STORAGE_BACKEND=sqlite",
+				"extraEnv[0].name=OPENVOX_CA_STORAGE_BACKEND", "extraEnv[0].value=postgres"},
+			wants: []string{"replicas: 2"},
+		},
+		{
+			// The fold itself, made visible: an unrecognised name comes back
+			// unchanged, so this is the one place "valkey" reading as redis
+			// rather than as itself can be told apart.
+			name:  "NOTES names an alias by the kind it folds onto",
+			notes: true,
+			sets:  []string{tls, "config.storage_backend=valkey"},
+			wants: []string{"Storage backend: redis"},
+		},
+		{
+			// The remedy the dnsPolicy refusal names: pointing dns.to at the
+			// node's resolver is accepted.
+			name: "dnsPolicy Default renders once DNS egress names the node's resolver",
+			sets: []string{tls, "dnsPolicy=Default",
+				"networkPolicy.enabled=true", "networkPolicy.egress.enabled=true",
+				"networkPolicy.egress.dns.to[0].ipBlock.cidr=10.0.0.2/32"},
+			wants: []string{"dnsPolicy: \"Default\"", "cidr: 10.0.0.2/32"},
+		},
+		{
+			// envFrom is the half of configFullyKnown that configFileKnown
+			// lacks; a Secret named there can carry OPENVOX_CA_STORAGE_BACKEND,
+			// so the chart cannot judge and must not refuse.
+			name:  "several replicas render when envFrom may carry the backend",
+			sets:  []string{tls, "replicaCount=2", "envFrom[0].secretRef.name=ca-env"},
+			wants: []string{"replicas: 2"},
+		},
+		{
+			name:  "NOTES warns about several replicas when envFrom may carry the backend",
+			notes: true,
+			sets:  []string{tls, "replicaCount=2", "envFrom[0].secretRef.name=ca-env"},
+			wants: []string{"WARNING: replicaCount is 2", "cannot see the backend the server will actually use"},
+		},
+		{
+			// args replaces the argv the chart builds, and a --config in
+			// extraArgs points the server at a file the chart never rendered.
+			name:  "several replicas render when args replaces the argv",
+			sets:  []string{tls, "replicaCount=2", "args[0]=--config=/etc/elsewhere/config.yaml"},
+			wants: []string{"replicas: 2"},
+		},
+		{
+			name:  "several replicas render when extraArgs names another config file",
+			sets:  []string{tls, "replicaCount=2", "extraArgs[0]=--config=/etc/elsewhere/config.yaml"},
+			wants: []string{"replicas: 2"},
+		},
+		{
+			// The kubelet expands $(NAME) from a variable set earlier, here
+			// from a Secret, so the chart sees only the reference. Read
+			// literally it matched no kind and silenced both the refusal and
+			// the warning while the pod could run sqlite.
+			name:  "NOTES warns when the backend arrives through a $(NAME) reference",
+			notes: true,
+			sets: []string{tls, "replicaCount=2",
+				"extraEnv[0].name=BACKEND",
+				"extraEnv[0].valueFrom.secretKeyRef.name=backend", "extraEnv[0].valueFrom.secretKeyRef.key=kind",
+				"extraEnv[1].name=OPENVOX_CA_STORAGE_BACKEND", "extraEnv[1].value=$(BACKEND)"},
+			wants: []string{"WARNING: replicaCount is 2", "cannot see the backend the server will actually use"},
+		},
+		{
+			// And through env, whose keys render sorted, so BACKEND is set
+			// before the reference to it and the kubelet expands it.
+			name:  "NOTES warns when an env backend carries a $(NAME) reference",
+			notes: true,
+			sets:  []string{tls, "replicaCount=2", "env.BACKEND=sqlite", "env.OPENVOX_CA_STORAGE_BACKEND=$(BACKEND)"},
+			wants: []string{"WARNING: replicaCount is 2", "cannot see the backend the server will actually use"},
+		},
+		{
+			// The same through the flag, which the kubelet expands in args too.
+			name:  "NOTES warns when the backend flag carries a $(NAME) reference",
+			notes: true,
+			sets: []string{tls, "replicaCount=2",
+				"env.BACKEND=sqlite", "extraArgs[0]=--storage-backend=$(BACKEND)"},
+			wants: []string{"WARNING: replicaCount is 2", "cannot see the backend the server will actually use"},
+		},
+		{
+			// A list naming the node's resolver as well as kube-dns resolves
+			// under dnsPolicy: Default, so it is not refused.
+			name: "dnsPolicy Default renders when DNS egress names kube-dns and the node's resolver",
+			sets: []string{tls, "dnsPolicy=Default", "networkPolicy.enabled=true", "networkPolicy.egress.enabled=true"},
+			valuesYAML: `
+networkPolicy:
+  egress:
+    dns:
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+        - ipBlock:
+            cidr: 10.0.0.2/32
+`,
+			wants: []string{"dnsPolicy: \"Default\"", "cidr: 10.0.0.2/32"},
+		},
+		{
+			// The empty-list remedy the refusal names.
+			name: "dnsPolicy Default renders when DNS egress may go anywhere",
+			sets: []string{tls, "dnsPolicy=Default", "networkPolicy.enabled=true", "networkPolicy.egress.enabled=true"},
+			valuesYAML: `
+networkPolicy:
+  egress:
+    dns:
+      to: []
+`,
+			wants: []string{"dnsPolicy: \"Default\""},
+		},
+		{
+			// No egress policy, so nothing restricts DNS.
+			name:  "dnsPolicy Default renders when egress is not restricted",
+			sets:  []string{tls, "dnsPolicy=Default", "networkPolicy.enabled=true"},
+			wants: []string{"dnsPolicy: \"Default\""},
+		},
+		{
+			name:  "dnsPolicy Default renders with no network policy at all",
+			sets:  []string{tls, "dnsPolicy=Default", "networkPolicy.egress.enabled=true"},
+			wants: []string{"dnsPolicy: \"Default\""},
+		},
+		{
+			// The ceiling is what is refused, so an autoscaler held to one
+			// replica on a filesystem CA is allowed, whatever replicaCount says
+			// (the Deployment omits it under autoscaling).
+			name:  "an autoscaler capped at one replica renders on the filesystem backend",
+			sets:  []string{tls, "replicaCount=5", "autoscaling.enabled=true", "autoscaling.minReplicas=1", "autoscaling.maxReplicas=1"},
+			wants: []string{"kind: HorizontalPodAutoscaler", "maxReplicas: 1"},
 		},
 		{
 			name:     "NOTES does not warn about autosign when patterns override the mode",
@@ -6851,7 +7343,7 @@ config:
 			// control is the volume naming the operator's ConfigMap.
 			name:     "a credential in config is not refused when existingConfigMap replaces the ConfigMap",
 			sets:     []string{"existingConfigMap=mine", "config.redis_password=HUNTER2"},
-			wants:    []string{"name: mine"},
+			wants:    []string{"name: \"mine\""},
 			notWants: []string{"HUNTER2"},
 		},
 	}
@@ -6963,6 +7455,146 @@ config:
 			name:    "an autoscaler with no metric to act on",
 			sets:    []string{tls, "autoscaling.enabled=true", "autoscaling.targetCPUUtilizationPercentage="},
 			wantErr: "no metric is configured",
+		},
+		{
+			// A NOTES warning used to be all this got, and helm template, Argo
+			// CD and Flux never show NOTES.
+			name:    "several replicas on the default filesystem backend",
+			sets:    []string{tls, "replicaCount=2"},
+			wantErr: "replicaCount is 2, but the filesystem storage backend supports exactly one running instance",
+		},
+		{
+			name:    "several replicas on the sqlite backend, spelled by its alias",
+			sets:    []string{tls, "replicaCount=3", "config.storage_backend=sqlite3"},
+			wantErr: "replicaCount is 3, but the sqlite storage backend",
+		},
+		{
+			// The server trims and lowercases the name before matching it, so
+			// the chart has to as well or the refusal is one space away from
+			// being bypassed.
+			name:       "several replicas on a filesystem backend spelled with case and padding",
+			sets:       []string{tls, "replicaCount=2"},
+			valuesYAML: "config:\n  storage_backend: \" Local \"\n",
+			wantErr:    "replicaCount is 2, but the filesystem storage backend",
+		},
+		{
+			// minReplicas: 1 is the case a floor-based check let through: the
+			// autoscaler starts at one and scales to the ceiling under load.
+			// The ceiling is two, the boundary: a refusal of three and up
+			// would pass every larger value this suite tries.
+			name:    "an autoscaler that may scale a filesystem CA past one replica",
+			sets:    []string{tls, "autoscaling.enabled=true", "autoscaling.minReplicas=1", "autoscaling.maxReplicas=2"},
+			wantErr: "autoscaling.maxReplicas is 2, but the filesystem storage backend",
+		},
+		{
+			// The environment outranks the config file in both directions: here
+			// it turns an etcd config back into a single-instance CA.
+			name:    "several replicas when the environment overrides the backend to sqlite",
+			sets:    []string{tls, "replicaCount=2", "config.storage_backend=etcd", "env.OPENVOX_CA_STORAGE_BACKEND=sqlite"},
+			wantErr: "the sqlite storage backend",
+		},
+		{
+			// The flag outranks everything, and an empty one is still given:
+			// the server reads it as the filesystem default.
+			name:    "several replicas when an empty backend flag overrides the config",
+			sets:    []string{tls, "replicaCount=2", "config.storage_backend=redis", "extraArgs[0]=--storage-backend="},
+			wantErr: "the filesystem storage backend",
+		},
+		{
+			// The extraEnv literal outranks the config file like env's does.
+			name: "several replicas when an extraEnv value overrides the backend to sqlite",
+			sets: []string{tls, "replicaCount=2", "config.storage_backend=postgres",
+				"extraEnv[0].name=OPENVOX_CA_STORAGE_BACKEND", "extraEnv[0].value=sqlite"},
+			wantErr: "the sqlite storage backend",
+		},
+		{
+			// Kubernetes gives the pod the last entry of a name, here the empty
+			// one, and the server then ignores the variable and runs the
+			// filesystem default. Taking each non-empty value as it came kept
+			// the earlier postgres and passed two replicas of an emptyDir CA.
+			name: "several replicas when an empty extraEnv duplicate discards an env backend",
+			sets: []string{tls, "replicaCount=2", "env.OPENVOX_CA_STORAGE_BACKEND=postgres"},
+			valuesYAML: `
+extraEnv:
+  - name: OPENVOX_CA_STORAGE_BACKEND
+    value: ""
+`,
+			wantErr: "the filesystem storage backend",
+		},
+		{
+			// A later literal replaces a Secret-fed entry of the same name, so
+			// the chart can judge the backend again.
+			name: "several replicas when a literal extraEnv entry follows a Secret-fed one",
+			sets: []string{tls, "replicaCount=2",
+				"extraEnv[0].name=OPENVOX_CA_STORAGE_BACKEND",
+				"extraEnv[0].valueFrom.secretKeyRef.name=backend", "extraEnv[0].valueFrom.secretKeyRef.key=kind",
+				"extraEnv[1].name=OPENVOX_CA_STORAGE_BACKEND", "extraEnv[1].value=sqlite"},
+			wantErr: "the sqlite storage backend",
+		},
+		{
+			// One case per filesystem spelling not reached elsewhere. The
+			// guard keeps the table in step with the server; these make sure
+			// each entry in it is read.
+			name:    "several replicas on the filesystem backend spelled file",
+			sets:    []string{tls, "replicaCount=2", "config.storage_backend=file"},
+			wantErr: "the filesystem storage backend",
+		},
+		{
+			name:    "several replicas on the filesystem backend spelled disk",
+			sets:    []string{tls, "replicaCount=2", "config.storage_backend=disk"},
+			wantErr: "the filesystem storage backend",
+		},
+		{
+			name:    "several replicas on the filesystem backend spelled out",
+			sets:    []string{tls, "replicaCount=2", "config.storage_backend=filesystem"},
+			wantErr: "the filesystem storage backend",
+		},
+		{
+			name:    "several replicas on the filesystem backend spelled fs",
+			sets:    []string{tls, "replicaCount=2", "config.storage_backend=fs"},
+			wantErr: "the filesystem storage backend",
+		},
+		{
+			// The API server refuses this at apply time, after Helm has
+			// created what came before it; lowering maxReplicas alone reaches
+			// it from the defaults.
+			name:    "an autoscaler whose minimum is above its maximum",
+			sets:    []string{tls, "config.storage_backend=postgres", "autoscaling.enabled=true", "autoscaling.maxReplicas=1"},
+			wantErr: "autoscaling.minReplicas is 2 but autoscaling.maxReplicas is 1",
+		},
+		{
+			// The remedy has to be one the chart then accepts: following a
+			// "set maxReplicas: 1" would only have reached the refusal above.
+			name:     "the filesystem autoscaling refusal leads with a remedy that installs",
+			sets:     []string{tls, "autoscaling.enabled=true"},
+			wantErr:  "Set autoscaling.enabled: false with replicaCount: 1",
+			notWants: []string{"Set autoscaling.maxReplicas: 1"},
+		},
+		{
+			// The refusal names where the chart looked, because a backend a
+			// command wrapper exports is invisible to it and reads as the
+			// filesystem default; the remedy is to say so in config.
+			name:    "the replica refusal says where the chart read the backend",
+			sets:    []string{tls, "replicaCount=2"},
+			wantErr: "an unset one is filesystem; if a command wrapper supplies it some other way, set config.storage_backend too",
+		},
+		{
+			// dnsPolicy: Default resolves through the node, and the default
+			// dns.to sends DNS only to kube-dns, so every lookup is dropped.
+			name: "dnsPolicy Default with DNS egress still pointed at kube-dns",
+			sets: []string{tls, "dnsPolicy=Default",
+				"networkPolicy.enabled=true", "networkPolicy.egress.enabled=true"},
+			wantErr: "dnsPolicy is Default, so the pod resolves names through the node's own resolvers",
+		},
+		{
+			// A flag with its value attached settles the backend even when the
+			// environment feeds it from a Secret, because the flag wins.
+			name: "several replicas when a backend flag overrides a Secret-fed variable",
+			sets: []string{tls, "replicaCount=2",
+				"extraEnv[0].name=OPENVOX_CA_STORAGE_BACKEND",
+				"extraEnv[0].valueFrom.secretKeyRef.name=backend", "extraEnv[0].valueFrom.secretKeyRef.key=kind",
+				"extraArgs[0]=--storage-backend=sqlite"},
+			wantErr: "the sqlite storage backend",
 		},
 		{
 			name:    "export RBAC bound to the namespace's default ServiceAccount",
@@ -7747,7 +8379,7 @@ config:
 	} {
 		name := fmt.Sprintf("appVersion %s resolves to %s", tc.appVersion, tc.wantTag)
 		out, err := renderWithAppVersion(tc.appVersion, []string{tls})
-		want := "image: ghcr.io/voxpupuli/openvox-ca:" + tc.wantTag
+		want := "image: \"ghcr.io/voxpupuli/openvox-ca:" + tc.wantTag + "\""
 		switch {
 		case err != nil:
 			fmt.Printf("FAIL  %s\n      render failed: %v\n", name, err)
@@ -8732,6 +9364,10 @@ func (Dev) Check() error {
 	}
 	fmt.Println("Checking the required-check aggregates...")
 	if err := verifyAggregateJobs(); err != nil {
+		return err
+	}
+	fmt.Println("Checking the chart's backend spellings against the CA's own...")
+	if err := verifyChartBackendAliases(); err != nil {
 		return err
 	}
 	fmt.Println("Checking that every guard claiming dev:check is wired into it...")

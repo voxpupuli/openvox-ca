@@ -2,8 +2,8 @@
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: {{ include "openvox-ca.fullname" . }}
-  namespace: {{ include "openvox-ca.namespace" . }}
+  name: {{ include "openvox-ca.fullname" . | quote }}
+  namespace: {{ include "openvox-ca.namespace" . | quote }}
   labels:
     {{- include "openvox-ca.labels" . | nindent 4 }}
   {{- with .Values.commonAnnotations }}
@@ -24,6 +24,6 @@ spec:
   minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
   {{- end }}
   {{- with .Values.podDisruptionBudget.unhealthyPodEvictionPolicy }}
-  unhealthyPodEvictionPolicy: {{ . }}
+  unhealthyPodEvictionPolicy: {{ . | quote }}
   {{- end }}
 {{- end }}

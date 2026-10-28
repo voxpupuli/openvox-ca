@@ -2,8 +2,8 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "openvox-ca.fullname" . }}
-  namespace: {{ include "openvox-ca.namespace" . }}
+  name: {{ include "openvox-ca.fullname" . | quote }}
+  namespace: {{ include "openvox-ca.namespace" . | quote }}
   labels:
     {{- include "openvox-ca.labels" . | nindent 4 }}
   {{- with .Values.commonAnnotations }}
@@ -54,7 +54,7 @@ spec:
         {{- range .Values.networkPolicy.metricsNamespaces }}
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: {{ . }}
+              kubernetes.io/metadata.name: {{ . | quote }}
         {{- end }}
       ports:
         - port: metrics
@@ -68,11 +68,24 @@ spec:
   egress:
     # DNS is always needed: the CA resolves its storage backend, OpenBao, and
     # the Kubernetes API by name.
+    {{- /*
+      Only to the resolvers in egress.dns.to, kube-dns by default. A rule with
+      no `to:` admits every destination on port 53: any protocol to any host
+      that listens there, and queries straight to a resolver someone outside
+      runs. This closes those. It does not stop data leaving as queries the
+      cluster's own resolver recurses on; that is the resolver's to control.
+      An empty or null list still renders no `to:`, deliberately: that is the
+      opt-out.
+    */}}
     - ports:
         - port: 53
           protocol: UDP
         - port: 53
           protocol: TCP
+      {{- with dig "dns" "to" list .Values.networkPolicy.egress }}
+      to:
+        {{- tpl (toYaml .) $ | nindent 8 }}
+      {{- end }}
     {{- with .Values.networkPolicy.egress.rules }}
     {{- tpl (toYaml .) $ | nindent 4 }}
     {{- end }}

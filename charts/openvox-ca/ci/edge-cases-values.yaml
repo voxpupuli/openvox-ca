@@ -15,8 +15,16 @@
 fullnameOverride: ca-edge
 
 # A terminating proxy in front: plain HTTP, so the probes must follow suit.
+#
+# An external backend, because the autoscaler below may run four replicas and
+# the chart refuses that on filesystem or sqlite. Spelled by its alias, which
+# shows an external backend's alias is not mistaken for a single-instance one;
+# the folding itself is asserted in chart:test.
 config:
   no_tls_required: true
+  storage_backend: valkey
+  redis_addrs:
+    - valkey.ca-edge.svc:6379
 
 # Node-backed disk with an explicit cap: medium cleared, sizeLimit set. (The
 # both-cleared case is a chart:test render assertion rather than a fixture,
@@ -73,6 +81,11 @@ podDisruptionBudget:
 networkPolicy:
   enabled: true
   apiAccess: none
+  # DNS to any resolver: an empty list drops the rule's `to:` altogether.
+  egress:
+    enabled: true
+    dns:
+      to: []
   extraIngress:
     - from:
         - namespaceSelector:

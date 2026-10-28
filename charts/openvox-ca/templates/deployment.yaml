@@ -2,8 +2,8 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "openvox-ca.fullname" . }}
-  namespace: {{ include "openvox-ca.namespace" . }}
+  name: {{ include "openvox-ca.fullname" . | quote }}
+  namespace: {{ include "openvox-ca.namespace" . | quote }}
   labels:
     {{- include "openvox-ca.labels" . | nindent 4 }}
   {{- if or .Values.commonAnnotations .Values.deploymentAnnotations }}
@@ -56,7 +56,7 @@ spec:
       {{- if or $checksum .Values.podAnnotations .Values.commonAnnotations }}
       annotations:
         {{- if $checksum }}
-        checksum/config: {{ include "openvox-ca.configMapData" . | sha256sum }}
+        checksum/config: {{ include "openvox-ca.configMapData" . | sha256sum | quote }}
         {{- end }}
         {{- with .Values.commonAnnotations }}
         {{- toYaml . | nindent 8 }}
@@ -66,7 +66,7 @@ spec:
         {{- end }}
       {{- end }}
     spec:
-      serviceAccountName: {{ include "openvox-ca.serviceAccountName" . }}
+      serviceAccountName: {{ include "openvox-ca.serviceAccountName" . | quote }}
       automountServiceAccountToken: {{ include "openvox-ca.automountServiceAccountToken" . }}
       enableServiceLinks: {{ .Values.enableServiceLinks }}
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
@@ -75,16 +75,16 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.priorityClassName }}
-      priorityClassName: {{ . }}
+      priorityClassName: {{ . | quote }}
       {{- end }}
       {{- with .Values.runtimeClassName }}
-      runtimeClassName: {{ . }}
+      runtimeClassName: {{ . | quote }}
       {{- end }}
       {{- with .Values.schedulerName }}
-      schedulerName: {{ . }}
+      schedulerName: {{ . | quote }}
       {{- end }}
       {{- with .Values.dnsPolicy }}
-      dnsPolicy: {{ . }}
+      dnsPolicy: {{ . | quote }}
       {{- end }}
       {{- with .Values.dnsConfig }}
       dnsConfig:
@@ -133,9 +133,9 @@ spec:
         {{- tpl (toYaml .) $ | nindent 8 }}
       {{- end }}
       containers:
-        - name: {{ .Chart.Name }}
-          image: {{ include "openvox-ca.image" . }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+        - name: {{ .Chart.Name | quote }}
+          image: {{ include "openvox-ca.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy | quote }}
           {{- with .Values.command }}
           command:
             {{- toYaml . | nindent 12 }}
@@ -149,7 +149,7 @@ spec:
               auto-detection so that the image's own CMD (which hard-codes a
               --cadir) is always replaced.
             */}}
-            - --config={{ include "openvox-ca.configFilePath" . }}
+            - {{ printf "--config=%s" (include "openvox-ca.configFilePath" .) | quote }}
             {{- with .Values.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -157,7 +157,7 @@ spec:
           {{- if or .Values.env .Values.extraEnv }}
           env:
             {{- range $name, $value := .Values.env }}
-            - name: {{ $name }}
+            - name: {{ $name | quote }}
               value: {{ $value | quote }}
             {{- end }}
             {{- with .Values.extraEnv }}
@@ -203,23 +203,23 @@ spec:
           {{- end }}
           volumeMounts:
             - name: data
-              mountPath: {{ .Values.persistence.mountPath }}
+              mountPath: {{ .Values.persistence.mountPath | quote }}
             - name: config
-              mountPath: {{ .Values.configMount }}
+              mountPath: {{ .Values.configMount | quote }}
               readOnly: true
             {{- if .Values.tls.existingSecret }}
             - name: tls
-              mountPath: {{ .Values.tls.mountPath }}
+              mountPath: {{ .Values.tls.mountPath | quote }}
               readOnly: true
             {{- end }}
             {{- if .Values.ca.existingSecret }}
             - name: ca
-              mountPath: {{ .Values.ca.mountPath }}
+              mountPath: {{ .Values.ca.mountPath | quote }}
               readOnly: true
             {{- end }}
             {{- if .Values.caKeyPassphrase.existingSecret }}
             - name: ca-key-passphrase
-              mountPath: {{ .Values.caKeyPassphrase.mountPath }}
+              mountPath: {{ .Values.caKeyPassphrase.mountPath | quote }}
               readOnly: true
             {{- end }}
             {{- with .Values.extraVolumeMounts }}
@@ -232,14 +232,14 @@ spec:
         - name: data
           {{- if .Values.persistence.enabled }}
           persistentVolumeClaim:
-            claimName: {{ include "openvox-ca.pvcName" . }}
+            claimName: {{ include "openvox-ca.pvcName" . | quote }}
           {{- else if or .Values.emptyDir.medium .Values.emptyDir.sizeLimit }}
           emptyDir:
             {{- with .Values.emptyDir.medium }}
-            medium: {{ . }}
+            medium: {{ . | quote }}
             {{- end }}
             {{- with .Values.emptyDir.sizeLimit }}
-            sizeLimit: {{ . }}
+            sizeLimit: {{ . | quote }}
             {{- end }}
           {{- else }}
           {{- /* Both cleared: node-backed disk with no size limit. */}}
@@ -247,7 +247,7 @@ spec:
           {{- end }}
         - name: config
           configMap:
-            name: {{ include "openvox-ca.configMapName" . }}
+            name: {{ include "openvox-ca.configMapName" . | quote }}
         {{- /*
           The three key-material volumes below are all mode 0600. Combined with
           the pod's fsGroup the kubelet ORs group access in, so the container
@@ -258,19 +258,19 @@ spec:
         {{- if .Values.tls.existingSecret }}
         - name: tls
           secret:
-            secretName: {{ .Values.tls.existingSecret }}
+            secretName: {{ .Values.tls.existingSecret | quote }}
             defaultMode: 0600
         {{- end }}
         {{- if .Values.ca.existingSecret }}
         - name: ca
           secret:
-            secretName: {{ .Values.ca.existingSecret }}
+            secretName: {{ .Values.ca.existingSecret | quote }}
             defaultMode: 0600
         {{- end }}
         {{- if .Values.caKeyPassphrase.existingSecret }}
         - name: ca-key-passphrase
           secret:
-            secretName: {{ .Values.caKeyPassphrase.existingSecret }}
+            secretName: {{ .Values.caKeyPassphrase.existingSecret | quote }}
             defaultMode: 0600
         {{- end }}
         {{- with .Values.extraVolumes }}
