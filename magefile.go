@@ -2297,9 +2297,11 @@ var packagedScriptRE = regexp.MustCompile(`packaging/scripts/[A-Za-z0-9_.-]+`)
 // would lint nothing and pass. But a hand-written list has its own silent
 // failure, and it happened on this branch within a commit: a preinstall was
 // added to nfpm.yaml, and nothing would have said that the job did not lint
-// it. So the list is held to nfpm.yaml -- every `scripts:` value, top-level
-// and per format under `overrides:`, and every content `src:` under
-// packaging/scripts/ (first-boot ships as a file, not as a scriptlet).
+// it. So the list is held to nfpm.yaml -- every `scripts:` value, top-level,
+// per format under `overrides:` and under `deb:`, and every content `src:`
+// under packaging/scripts/ (first-boot ships as a file, not as a scriptlet).
+// `deb: scripts:` holds the debconf templates too, which are not shell; they
+// live outside packaging/scripts/ and so are not counted.
 //
 // Both directions. A shipped script missing from the job is unlinted; a job
 // entry that ships nowhere is a stale name that will fail the job outright
@@ -2351,6 +2353,11 @@ func verifyShellcheckCoverageIn(ci, nfpmSrc []byte) error {
 		Overrides map[string]struct {
 			Scripts map[string]string `yaml:"scripts"`
 		} `yaml:"overrides"`
+		// The deb's control-archive scripts -- the debconf config script --
+		// live at top level under deb:, not under overrides.
+		Deb struct {
+			Scripts map[string]string `yaml:"scripts"`
+		} `yaml:"deb"`
 		Contents []struct {
 			Src string `yaml:"src"`
 		} `yaml:"contents"`
@@ -2371,6 +2378,9 @@ func verifyShellcheckCoverageIn(ci, nfpmSrc []byte) error {
 		for _, path := range o.Scripts {
 			add(path)
 		}
+	}
+	for _, path := range pkg.Deb.Scripts {
+		add(path)
 	}
 	for _, c := range pkg.Contents {
 		add(c.Src)

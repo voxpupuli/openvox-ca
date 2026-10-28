@@ -2353,10 +2353,15 @@ overrides:
   rpm:
     scripts:
       preinstall: packaging/scripts/preinstall
+deb:
+  scripts:
+    templates: packaging/debian/templates
+    config: packaging/scripts/debian-config
 `)
 	all := []string{
 		"packaging/scripts/first-boot", "packaging/scripts/preinstall",
 		"packaging/scripts/postinstall", "packaging/scripts/preremove",
+		"packaging/scripts/debian-config",
 	}
 
 	It("accepts a job that lints exactly what the packages ship", func() {
@@ -2380,6 +2385,10 @@ overrides:
 		Entry("a per-format scriptlet under overrides", "packaging/scripts/preinstall"),
 		Entry("a top-level scriptlet", "packaging/scripts/postinstall"),
 		Entry("a script shipped as a file rather than a scriptlet", "packaging/scripts/first-boot"),
+		// nfpm keeps the deb's control-archive scripts at top level under
+		// deb:, not under overrides, so a guard reading only those two blocks
+		// would pass the debconf config script unlinted.
+		Entry("the deb's debconf config script", "packaging/scripts/debian-config"),
 	)
 
 	It("rejects a job entry the packages no longer ship, naming it", func() {
