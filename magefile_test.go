@@ -6329,7 +6329,8 @@ var _ = Describe("the packages' maintainer scripts", func() {
 		}), "the removal did not undo the install's enable on a host with no systemd running")
 	})
 
-	// The rpm's erase.
+	// The rpm's erase. A deb remove masks the unit, which is on-disk work and
+	// so happens here too; "the deb's purge" pins it.
 	It("postremove does nothing at all where systemd is not running", func() {
 		absent := filepath.Join(GinkgoT().TempDir(), "no-such-runtime")
 		cmd := exec.Command("/bin/sh", "packaging/scripts/postremove", "0")
@@ -7413,6 +7414,371 @@ var _ = Describe("the deb's postinstall", func() {
 			Expect(r.output).To(ContainSubstring("executing the previous binary"))
 		})
 	})
+})
+
+var _ = Describe("the deb's purge", func() {
+	// The one place the package may delete CA data, and only on an explicit
+	// yes. What it deletes is the CA directory and the links provisioning
+	// made to it, each only if it is still the link provisioning would have
+	// made: the rest of the ssl tree may be an agent's.
+	var dir, db, log, stubBin, sslDir, defaultFile string
+
+	BeforeEach(func() {
+		dir = GinkgoT().TempDir()
+		db = GinkgoT().TempDir()
+		log = filepath.Join(GinkgoT().TempDir(), "calls.log")
+		stubBin = GinkgoT().TempDir()
+		sslDir = GinkgoT().TempDir()
+		defaultFile = filepath.Join(GinkgoT().TempDir(), "openvox-ca")
+		for _, name := range []string{"systemctl", "ucf", "ucfr", "deb-systemd-helper"} {
+			Expect(os.WriteFile(filepath.Join(stubBin, name), []byte(fmt.Sprintf(
+				"#!/bin/sh\necho \"%s $*\" >> %s\nexit 0\n", name, log)), 0o755)).To(Succeed())
+		}
+
+		// What provisioning leaves, plus what it did not make.
+		for _, d := range []string{"ca", "certs", "private_keys"} {
+			Expect(os.MkdirAll(filepath.Join(sslDir, d), 0o755)).To(Succeed())
+		}
+		write := func(rel, body string) {
+			Expect(os.WriteFile(filepath.Join(sslDir, rel), []byte(body), 0o644)).To(Succeed())
+		}
+		write("ca/ca_crt.pem", "CA\n")
+		write("ca/ca_key.pem", "KEY\n")
+		write("certs/ca.example.com.pem", "NODE\n")
+		write("private_keys/ca.example.com.pem", "NODEKEY\n")
+		write("certs/agent.example.com.pem", "AGENT\n")
+		Expect(os.Symlink("../ca/ca_crt.pem", filepath.Join(sslDir, "certs", "ca.pem"))).To(Succeed())
+		Expect(os.Symlink("ca/ca_crl.pem", filepath.Join(sslDir, "crl.pem"))).To(Succeed())
+		Expect(os.Symlink("ca.example.com.pem", filepath.Join(sslDir, "certs", "openvox-ca-server.pem"))).To(Succeed())
+		// The operator's own serving key: a regular file, not provisioning's link.
+		write("private_keys/openvox-ca-server.pem", "MINE\n")
+		Expect(os.WriteFile(defaultFile, []byte("OPENVOX_CA_CERTNAME=ca.example.com\n"), 0o600)).To(Succeed())
+	})
+
+	run := func(purge string, args ...string) (firstBootResult, string) {
+		GinkgoHelper()
+		if purge != "" {
+			Expect(os.WriteFile(filepath.Join(db, "openvox-ca_purge_ca_data.value"), []byte(purge), 0o644)).To(Succeed())
+		}
+		cmd := exec.Command("sh", append([]string{"packaging/scripts/postremove"}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"PATH="+stubBin+":/usr/bin:/bin",
+			"OPENVOX_CA_CONFMODULE="+debconfStub(dir, db, log),
+			"OPENVOX_CA_SYSTEMD_RUNTIME="+filepath.Join(GinkgoT().TempDir(), "no-systemd"),
+			"OPENVOX_CA_SSLDIR="+sslDir,
+			"OPENVOX_CA_DEFAULT_FILE="+defaultFile,
+		)
+		out, err := cmd.CombinedOutput()
+		calls, _ := os.ReadFile(log)
+		return firstBootResult{ok: err == nil, output: string(out)}, string(calls)
+	}
+
+	untouched := func() {
+		GinkgoHelper()
+		Expect(filepath.Join(sslDir, "ca", "ca_key.pem")).To(BeAnExistingFile())
+		Expect(os.Readlink(filepath.Join(sslDir, "certs", "ca.pem"))).To(Equal("../ca/ca_crt.pem"))
+		Expect(os.Readlink(filepath.Join(sslDir, "crl.pem"))).To(Equal("ca/ca_crl.pem"))
+	}
+
+	// The default, which is also what a preseeded or non-interactive purge
+	// takes: false keeps the CA.
+	It("asks, and keeps the CA at the default answer", func() {
+		r, calls := run("false", "purge")
+		Expect(r.ok).To(BeTrue(), r.output)
+		Expect(calls).To(ContainSubstring("db_input high openvox-ca/purge_ca_data"))
+		untouched()
+	})
+
+	It("keeps the CA when debconf has no answer at all", func() {
+		r, _ := run("", "purge")
+		Expect(r.ok).To(BeTrue(), r.output)
+		untouched()
+	})
+
+	Describe("answered yes", func() {
+		var r firstBootResult
+
+		BeforeEach(func() {
+			r, _ = run("true", "purge")
+			Expect(r.ok).To(BeTrue(), r.output)
+		})
+
+		It("removes the CA directory", func() {
+			_, err := os.Lstat(filepath.Join(sslDir, "ca"))
+			Expect(errors.Is(err, os.ErrNotExist)).To(BeTrue())
+		})
+
+		DescribeTable("removes the links provisioning made to it",
+			func(rel string) {
+				_, err := os.Lstat(filepath.Join(sslDir, rel))
+				Expect(errors.Is(err, os.ErrNotExist)).To(BeTrue(), "%s survived", rel)
+			},
+			Entry("the CA certificate alias", "certs/ca.pem"),
+			Entry("the CRL alias", "crl.pem"),
+			Entry("the serving certificate alias", "certs/openvox-ca-server.pem"),
+		)
+
+		// Everything else in the tree may belong to an agent or to Server.
+		DescribeTable("leaves everything it did not make",
+			func(rel string) {
+				Expect(filepath.Join(sslDir, rel)).To(BeAnExistingFile())
+			},
+			Entry("an agent's certificate", "certs/agent.example.com.pem"),
+			Entry("this host's node certificate", "certs/ca.example.com.pem"),
+			Entry("its key", "private_keys/ca.example.com.pem"),
+			Entry("an operator's own file at an alias path", "private_keys/openvox-ca-server.pem"),
+		)
+	})
+
+	It("keeps a CA alias that points somewhere else, even on yes", func() {
+		Expect(os.Remove(filepath.Join(sslDir, "certs", "ca.pem"))).To(Succeed())
+		Expect(os.Symlink("/etc/estate/ca.pem", filepath.Join(sslDir, "certs", "ca.pem"))).To(Succeed())
+		r, _ := run("true", "purge")
+		Expect(r.ok).To(BeTrue(), r.output)
+		Expect(os.Readlink(filepath.Join(sslDir, "certs", "ca.pem"))).To(Equal("/etc/estate/ca.pem"))
+	})
+
+	// The package's own configuration goes on purge whatever the answer.
+	It("purges ucf's file, deb-systemd-helper's state and debconf's answers", func() {
+		r, calls := run("false", "purge")
+		Expect(r.ok).To(BeTrue(), r.output)
+		Expect(calls).To(And(
+			ContainSubstring("ucf --purge "+defaultFile),
+			ContainSubstring("ucfr --purge openvox-ca "+defaultFile),
+			ContainSubstring("deb-systemd-helper purge openvox-ca.service"),
+			ContainSubstring("deb-systemd-helper unmask openvox-ca.service"),
+			ContainSubstring("db_purge"),
+		))
+		_, err := os.Lstat(defaultFile)
+		Expect(errors.Is(err, os.ErrNotExist)).To(BeTrue())
+	})
+
+	// Removal, rpm erasure and rpm upgrade never ask and never delete.
+	DescribeTable("does nothing of the kind outside a deb purge",
+		func(arg string, want []string) {
+			r, calls := run("true", arg)
+			Expect(r.ok).To(BeTrue(), r.output)
+			var got []string
+			for _, c := range strings.Split(strings.TrimSpace(calls), "\n") {
+				if c != "" && !strings.HasPrefix(c, "systemctl ") {
+					got = append(got, c)
+				}
+			}
+			Expect(got).To(Equal(want))
+			untouched()
+			Expect(defaultFile).To(BeAnExistingFile())
+		},
+		// dh_installsystemd's postrm: a removal masks the unit, and its
+		// enablement links stay, so a reinstall enables it again.
+		Entry("dpkg remove masks the service", "remove", []string{"deb-systemd-helper mask openvox-ca.service"}),
+		Entry("rpm erase", "0", []string(nil)),
+		Entry("rpm upgrade", "1", []string(nil)),
+	)
+
+	// The rest of what provisioning makes, and what it does not.
+	Describe("answered yes, at the edges", func() {
+		DescribeTable("keeps a serving alias provisioning would not have made",
+			func(target string) {
+				link := filepath.Join(sslDir, "certs", "openvox-ca-server.pem")
+				Expect(os.Remove(link)).To(Succeed())
+				Expect(os.Symlink(target, link)).To(Succeed())
+				r, _ := run("true", "purge")
+				Expect(r.ok).To(BeTrue(), r.output)
+				Expect(os.Readlink(link)).To(Equal(target))
+			},
+			Entry("a path elsewhere", "/etc/estate/server.pem"),
+			Entry("a relative path out of certs/", "../other/x.pem"),
+			Entry("not a certificate", "ca.example.com"),
+		)
+
+		It("removes provisioning's private-key alias too", func() {
+			key := filepath.Join(sslDir, "private_keys", "openvox-ca-server.pem")
+			Expect(os.Remove(key)).To(Succeed())
+			Expect(os.Symlink("ca.example.com.pem", key)).To(Succeed())
+			r, _ := run("true", "purge")
+			Expect(r.ok).To(BeTrue(), r.output)
+			_, err := os.Lstat(key)
+			Expect(errors.Is(err, os.ErrNotExist)).To(BeTrue())
+		})
+
+		It("removes the unresolved-certname marker", func() {
+			marker := filepath.Join(sslDir, "openvox-ca-certname-unresolved")
+			Expect(os.WriteFile(marker, []byte("x\n"), 0o644)).To(Succeed())
+			r, _ := run("true", "purge")
+			Expect(r.ok).To(BeTrue(), r.output)
+			_, err := os.Lstat(marker)
+			Expect(errors.Is(err, os.ErrNotExist)).To(BeTrue())
+		})
+
+		// Root, deleting, in a tree `puppet` can write: a `ca` that has been
+		// replaced by a symlink is removed as a link, and what it pointed at
+		// is not touched.
+		It("removes a ca that is a symlink as a link, and leaves its target", func() {
+			elsewhere := GinkgoT().TempDir()
+			Expect(os.WriteFile(filepath.Join(elsewhere, "precious"), []byte("KEEP\n"), 0o600)).To(Succeed())
+			Expect(os.RemoveAll(filepath.Join(sslDir, "ca"))).To(Succeed())
+			Expect(os.Symlink(elsewhere, filepath.Join(sslDir, "ca"))).To(Succeed())
+			r, _ := run("true", "purge")
+			Expect(r.ok).To(BeTrue(), r.output)
+			_, err := os.Lstat(filepath.Join(sslDir, "ca"))
+			Expect(errors.Is(err, os.ErrNotExist)).To(BeTrue())
+			Expect(os.ReadFile(filepath.Join(elsewhere, "precious"))).To(Equal([]byte("KEEP\n")))
+		})
+
+		// The same for certs/: find opens it once and does not follow it if
+		// it has become a symlink, so a same-named file elsewhere survives.
+		It("does not reach through a certs/ that is a symlink", func() {
+			elsewhere := GinkgoT().TempDir()
+			Expect(os.Symlink("../ca/ca_crt.pem", filepath.Join(elsewhere, "ca.pem"))).To(Succeed())
+			Expect(os.RemoveAll(filepath.Join(sslDir, "certs"))).To(Succeed())
+			Expect(os.Symlink(elsewhere, filepath.Join(sslDir, "certs"))).To(Succeed())
+			r, _ := run("true", "purge")
+			Expect(r.ok).To(BeTrue(), r.output)
+			Expect(os.Readlink(filepath.Join(elsewhere, "ca.pem"))).To(Equal("../ca/ca_crt.pem"))
+		})
+	})
+})
+
+// templateField returns the value of field in the stanza for question in
+// packaging/debian/templates, and whether the stanza has the field at all.
+func templateField(question, field string) (string, bool) {
+	GinkgoHelper()
+	body, err := os.ReadFile("packaging/debian/templates")
+	Expect(err).NotTo(HaveOccurred())
+	for _, stanza := range strings.Split(string(body), "\n\n") {
+		lines := strings.Split(strings.TrimSpace(stanza), "\n")
+		if len(lines) == 0 || lines[0] != "Template: "+question {
+			continue
+		}
+		for _, l := range lines[1:] {
+			if v, ok := strings.CutPrefix(l, field+":"); ok {
+				return strings.TrimSpace(v), true
+			}
+		}
+		return "", false
+	}
+	Fail("no stanza for " + question)
+	return "", false
+}
+
+var _ = Describe("the deb's debconf templates", func() {
+	// The stub debconf in these specs never reads the templates, so the
+	// defaults debconf really applies are pinned here. purge_ca_data above
+	// all: its default is what every preseeded or non-interactive purge
+	// takes, and a true there deletes the estate's CA key unasked.
+	It("defaults the purge question to keeping the CA", func() {
+		typ, _ := templateField("openvox-ca/purge_ca_data", "Type")
+		Expect(typ).To(Equal("boolean"))
+		v, ok := templateField("openvox-ca/purge_ca_data", "Default")
+		Expect(ok).To(BeTrue(), "purge_ca_data has no Default: debconf would answer empty")
+		Expect(v).To(Equal("false"))
+	})
+
+	// The config script seeds its own default only on the host that will
+	// run the CA; a template default would be seeded everywhere, image
+	// builds included.
+	It("gives the name question no default of its own", func() {
+		typ, _ := templateField("openvox-ca/ca-name", "Type")
+		Expect(typ).To(Equal("string"))
+		v, _ := templateField("openvox-ca/ca-name", "Default")
+		Expect(v).To(BeEmpty())
+	})
+})
+
+// allowListEntries is one list of names for every copy of the certname
+// allow-list: first-boot's, the debconf config script's and the postinstall's
+// rendering check. Each is a maintainer script that must stand alone, so the
+// copies are kept in step by hand, and this list is what holds them to it.
+var allowListEntries = []TableEntry{
+	Entry("an FQDN", "ca.example.com", true),
+	Entry("a short name", "node1", true),
+	Entry("underscores and dashes", "a_b-c.example.com", true),
+	Entry("empty", "", false),
+	Entry("a leading dash", "-x.example.com", false),
+	Entry("the current directory", ".", false),
+	Entry("the parent directory", "..", false),
+	Entry("a path", "../x.example.com", false),
+	Entry("a slash", "a/b", false),
+	Entry("a space", "a b", false),
+	Entry("a quote", `a"b`, false),
+	Entry("an equals sign", "a=b", false),
+	Entry("a newline", "a\nb", false),
+	Entry("a shell metacharacter", "a;b", false),
+	Entry("the CA alias", "ca", false),
+	Entry("the serving alias", "openvox-ca-server", false),
+}
+
+var _ = Describe("the certname allow-list's copies", func() {
+	DescribeTable("first-boot accepts exactly these",
+		func(name string, ok bool) {
+			sslDir, binDir := GinkgoT().TempDir(), GinkgoT().TempDir()
+			Expect(os.MkdirAll(filepath.Join(sslDir, "ca"), 0o755)).To(Succeed())
+			r, err := runFirstBootIn(sslDir, binDir,
+				"is_safe_certname "+shellQuote(name)+" && ! is_reserved_certname "+shellQuote(name))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(r.ok).To(Equal(ok), "first-boot on %q", name)
+		},
+		allowListEntries,
+	)
+
+	// Driven as debconf would: a stored answer nobody can correct is kept
+	// if acceptable and cleared if not.
+	DescribeTable("the debconf config script keeps exactly these",
+		func(name string, ok bool) {
+			db := GinkgoT().TempDir()
+			Expect(os.WriteFile(filepath.Join(db, "openvox-ca_ca-name.value"), []byte(name), 0o644)).To(Succeed())
+			cmd := exec.Command("sh", "packaging/scripts/debian-config")
+			cmd.Env = append(os.Environ(),
+				"OPENVOX_CA_CONFMODULE="+debconfStub(GinkgoT().TempDir(), db, filepath.Join(GinkgoT().TempDir(), "log")),
+				"OPENVOX_CA_PUPPET_CONF="+filepath.Join(GinkgoT().TempDir(), "none"),
+				"OPENVOX_CA_SYSTEMD_RUNTIME="+filepath.Join(GinkgoT().TempDir(), "none"),
+			)
+			out, err := cmd.CombinedOutput()
+			Expect(err).NotTo(HaveOccurred(), string(out))
+			got, _ := os.ReadFile(filepath.Join(db, "openvox-ca_ca-name.value"))
+			if ok {
+				Expect(string(got)).To(Equal(name))
+			} else {
+				Expect(string(got)).To(BeEmpty())
+			}
+		},
+		allowListEntries,
+	)
+
+	DescribeTable("the postinstall renders exactly these",
+		func(name string, ok bool) {
+			db, stubBin := GinkgoT().TempDir(), GinkgoT().TempDir()
+			Expect(os.WriteFile(filepath.Join(db, "openvox-ca_ca-name.value"), []byte(name), 0o644)).To(Succeed())
+			for _, n := range []string{"systemctl", "systemd-sysusers", "getent", "chown", "chmod", "ucfr",
+				"deb-systemd-helper", "deb-systemd-invoke"} {
+				Expect(os.WriteFile(filepath.Join(stubBin, n), []byte("#!/bin/sh\nexit 0\n"), 0o755)).To(Succeed())
+			}
+			Expect(os.WriteFile(filepath.Join(stubBin, "ucf"), []byte(
+				"#!/bin/sh\nwhile [ \"${1#--}\" != \"$1\" ]; do shift; done\ncp -p \"$1\" \"$2\"\n"), 0o755)).To(Succeed())
+			defaultFile := filepath.Join(GinkgoT().TempDir(), "openvox-ca")
+			cmd := exec.Command("sh", "packaging/scripts/postinstall", "configure")
+			cmd.Env = append(os.Environ(), debHostPins()...)
+			cmd.Env = append(cmd.Env,
+				"PATH="+stubBin+":/usr/bin:/bin",
+				"OPENVOX_CA_CONFMODULE="+debconfStub(GinkgoT().TempDir(), db, filepath.Join(GinkgoT().TempDir(), "log")),
+				"OPENVOX_CA_DEFAULT_FILE="+defaultFile,
+				"OPENVOX_CA_SYSTEMD_RUNTIME="+filepath.Join(GinkgoT().TempDir(), "none"),
+				"OPENVOX_CA_STATEDIR="+GinkgoT().TempDir(),
+				"OPENVOX_CA_CONFIG="+filepath.Join(GinkgoT().TempDir(), "none.yaml"),
+				"OPENVOX_CA_SSLDIR="+filepath.Join(GinkgoT().TempDir(), "none"),
+			)
+			out, err := cmd.CombinedOutput()
+			Expect(err).NotTo(HaveOccurred(), string(out))
+			body, err := os.ReadFile(defaultFile)
+			Expect(err).NotTo(HaveOccurred())
+			if ok {
+				Expect(string(body)).To(ContainSubstring("\nOPENVOX_CA_CERTNAME=" + name + "\n"))
+			} else {
+				Expect(string(body)).NotTo(ContainSubstring("OPENVOX_CA_CERTNAME="))
+			}
+		},
+		allowListEntries,
+	)
 })
 
 var _ = Describe("Build.Packages", func() {
