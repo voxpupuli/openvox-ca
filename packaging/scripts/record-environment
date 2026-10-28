@@ -1,0 +1,262 @@
+#!/bin/sh
+#
+# Records the values first-boot provisioning chose in /etc/sysconfig/openvox-ca,
+# once per host. Installed as /usr/libexec/openvox-ca/record-environment and
+# run only by openvox-ca-first-boot.service, as its ExecStartPost=+ -- that is,
+# as root and outside the unit's sandbox, after first-boot has succeeded.
+#
+# Root because /etc/sysconfig is root's, and the file grants CA administration:
+# it must not be writable by `puppet`, the account it grants it to. That is
+# also why this is a separate script and not a step in first-boot, which runs
+# as `puppet` under ProtectSystem=strict and should stay there.
+#
+# It writes:
+#
+#   OPENVOX_CA_CERTNAME       first-boot's top resolution tier, so a later
+#                             re-provision mints under the same name
+#   OPENVOX_CA_PUPPET_SERVER  the server's admin allow-list, so the node
+#                             certificate first-boot just linked is a CA admin
+#
+# leaving out either one an operator has already set -- in a drop-in, because
+# systemd lets EnvironmentFile= outrank Environment= wherever the latter sits,
+# or, for the admin list, in config.yaml, which the environment outranks too.
+# A recorded value would silently override theirs from the next start on.
+#
+# It decides once per host, on the first run where all of these hold:
+#
+#   - first-boot left its marker in $RUNTIME_DIRECTORY, which it does only on
+#     a run that created the serving-credential link, and only when the name
+#     did not come from a fallback tier (the short hostname or localhost: both
+#     are failure states whose remedy is re-minting under a corrected name,
+#     and pinning the wrong one here would outrank puppet.conf, which is where
+#     their warnings tell the operator to put the right one);
+#   - /etc/sysconfig is a directory, which is what makes this EL-only. Debian
+#     has no /etc/sysconfig, and its package records the same values through
+#     debconf instead (openvox-ca#251);
+#   - it has not decided before, which the record under /var/lib/openvox-ca
+#     says.
+#
+# That record is what makes "once" hold. The marker alone cannot: every
+# documented re-mint removes the serving link, so a re-mint or CA rebuild is
+# another run that creates it, and `puppet` can remove the link itself. Keyed
+# on the file's absence, either would bring back a file the operator had
+# deleted -- and with it an OPENVOX_CA_PUPPET_SERVER that replaces the
+# puppet_server list they had moved back into config.yaml. The record is
+# root's, outside the tree `puppet` writes, and survives package removal like
+# the file itself; deleting both is how an operator asks for a fresh one.
+#
+# The file is not packaged, so rpm never compares it and it can never produce
+# an .rpmnew. That is the point: the shipped /etc/openvox-ca/config.yaml is
+# %config(noreplace) and must never be edited by the package, or its operator
+# stops receiving changed defaults on upgrade (see openvox-ca#252).
+#
+# Nothing here fails the unit. A non-zero ExecStartPost= fails
+# openvox-ca-first-boot.service, and the service with it, over values a working
+# CA does not need in order to serve; so every refusal is a warning and the
+# exit status is always 0.
+
+set -u
+
+warn() { echo "openvox-ca record-environment: WARNING: $*" >&2; }
+info() { echo "openvox-ca record-environment: $*" >&2; }
+
+# Overridable for the same reason first-boot's roots are: so a test can run
+# this against a scratch tree. The unit sets none of them. OPENVOX_CA_STATEDIR
+# is the same seam, and the same directory, as the postinstall's.
+SSLDIR="${OPENVOX_CA_SSLDIR:-/etc/puppetlabs/puppet/ssl}"
+SYSCONFIG_DIR="${OPENVOX_CA_SYSCONFIG_DIR:-/etc/sysconfig}"
+STATEDIR="${OPENVOX_CA_STATEDIR:-/var/lib/openvox-ca}"
+TARGET="$SYSCONFIG_DIR/openvox-ca"
+RECORDED="$STATEDIR/environment-recorded"
+
+# The link first-boot creates for tls_cert. Its target is "$NAME.pem".
+SERVING_CERT="$SSLDIR/certs/openvox-ca-server.pem"
+
+# systemd sets RUNTIME_DIRECTORY from the unit's RuntimeDirectory=. Unset means
+# this was not started by the unit, so there is no run to record.
+[ -n "${RUNTIME_DIRECTORY:-}" ] || exit 0
+MARKER="$RUNTIME_DIRECTORY/serving-credential-linked"
+{ [ -e "$MARKER" ] || [ -L "$MARKER" ]; } || exit 0
+
+[ -d "$SYSCONFIG_DIR" ] || exit 0
+
+{ [ -e "$RECORDED" ] || [ -L "$RECORDED" ]; } && exit 0
+
+# record_decision leaves the once-per-host record. Called on every outcome that
+# is a decision -- written, already there, nothing to write -- and on none
+# that is a failure, so a run that could not write is retried by the next one.
+record_decision() {
+	# printf, not `:`. A redirection that fails on `:` -- a POSIX special
+	# built-in -- exits the shell outright, on dash and on bash as sh alike,
+	# so the warning below would never run and the unit would fail.
+	if mkdir -p "$STATEDIR" 2>/dev/null && printf '' >"$RECORDED" 2>/dev/null; then
+		return 0
+	fi
+	warn "could not record at $RECORDED that $TARGET has been decided. A later" \
+		"re-mint may write it again; create that file yourself to stop it."
+}
+
+# Already there: an operator wrote it before the first start, which is how one
+# keeps a puppet_server list in config.yaml from the outset. It is theirs.
+if [ -e "$TARGET" ] || [ -L "$TARGET" ]; then
+	record_decision
+	exit 0
+fi
+
+# The name comes from the link's own text and from nothing else. Everything
+# under $SSLDIR is writable by `puppet`, and this runs as root, so reading a
+# FILE there would let `puppet` point it at anything root can read and have
+# the first line copied into /etc. readlink reads the link and opens nothing.
+#
+# The marker's content is ignored for the same reason; only its presence is
+# read. Both are `puppet`'s to plant, so what `puppet` can choose is which
+# allow-listed name is recorded -- never the syntax of the file.
+if [ ! -L "$SERVING_CERT" ]; then
+	warn "$SERVING_CERT is not a symlink, so there is no name to record; not writing $TARGET."
+	exit 0
+fi
+target=$(readlink "$SERVING_CERT") || {
+	warn "could not read $SERVING_CERT; not writing $TARGET."
+	exit 0
+}
+name=${target%.pem}
+
+# The same allow-list first-boot applies, and for a stronger reason here: the
+# value is written into a file systemd parses as an environment, so a newline,
+# quote or `=` would let it set a variable of its choosing. The `.pem` suffix
+# and the absence of a slash are what first-boot's link looks like; anything
+# else is not a link it made.
+case "$target" in
+*.pem) ;;
+*) name= ;;
+esac
+case "$name" in
+"" | -* | . | .. | ca | openvox-ca-server) name= ;;
+*[!A-Za-z0-9._-]*) name= ;;
+esac
+if [ -z "$name" ]; then
+	warn "$SERVING_CERT does not point at a certificate first-boot would have linked; not" \
+		"writing $TARGET."
+	exit 0
+fi
+
+# What a drop-in already sets, which this must not override.
+#
+# OPENVOX_CA_CERTNAME: this script runs in the oneshot, so a drop-in for it is
+# in this environment already. The file does not exist yet, so nothing else can
+# have put it here.
+record_certname=yes
+if [ -n "${OPENVOX_CA_CERTNAME:-}" ]; then
+	record_certname=no
+	info "OPENVOX_CA_CERTNAME is set for openvox-ca-first-boot.service already; not recording it."
+fi
+
+# The admin list. Recorded only when nothing else has chosen one, and any
+# answer that cannot be read counts as "chosen": recording an admin grant on a
+# guess is the wrong way to fail.
+#
+# First, the service's own Environment= lines, which are the SERVICE's drop-ins
+# and not in this environment, so systemd is asked. `Environment` there is the
+# Environment= lines only, not the files -- exactly the set the file would
+# outrank. Three variables count. OPENVOX_CA_PUPPET_SERVER is the list itself.
+# _FILE is the other way to set it, and the server merges it with
+# OPENVOX_CA_PUPPET_SERVER rather than letting either replace the other, so an
+# operator who uses it has chosen their admins and should not acquire one.
+# OPENVOX_CA_CONFIG points the service at a configuration file this script
+# would otherwise not look at, and whose admin list it cannot see from here.
+#
+# What this does NOT see, by decision rather than oversight: a drop-in's
+# EnvironmentFile= (whose contents would have to be read as root, from a path
+# that may be `puppet`'s) and an ExecStart= override carrying --config,
+# --puppet-server or --puppet-server-file. Enumerating every way a unit can
+# carry an admin list does not converge, so the documented contract is the
+# Environment= lines above plus config.yaml below, and docs/systemd.md tells
+# an operator using the other routes to remove the recorded line by hand.
+record_admin=yes
+if command -v systemctl >/dev/null 2>&1; then
+	if env=$(systemctl show -p Environment openvox-ca.service 2>/dev/null); then
+		# Quotes become spaces: systemd quotes an assignment whose value has
+		# a space in it, so "OPENVOX_CA_PUPPET_SERVER=a, b" arrives quoted.
+		case " $(printf '%s' "${env#Environment=}" | tr '"' ' ')" in
+		*" OPENVOX_CA_PUPPET_SERVER="* | *" OPENVOX_CA_PUPPET_SERVER_FILE="* | *" OPENVOX_CA_CONFIG="*)
+			record_admin=no
+			info "openvox-ca.service sets its admin allow-list or its configuration file in a" \
+				"drop-in already; not recording OPENVOX_CA_PUPPET_SERVER."
+			;;
+		esac
+	else
+		record_admin=no
+		warn "could not ask systemd whether openvox-ca.service sets its admin allow-list, so not" \
+			"recording OPENVOX_CA_PUPPET_SERVER. Its node certificate is not an admin until" \
+			"puppet_server names \"$name\"."
+	fi
+else
+	record_admin=no
+	warn "systemctl is not on PATH, so whether openvox-ca.service sets its admin allow-list" \
+		"cannot be checked; not recording OPENVOX_CA_PUPPET_SERVER. Its node certificate is not" \
+		"an admin until puppet_server names \"$name\"."
+fi
+
+# Then the configuration file. The environment would replace a puppet_server
+# list there and be merged with a puppet_server_file one, so either means the
+# operator has chosen their admins. Only whether the key is present is read --
+# its value never reaches this script -- and the file is root's (0640
+# root:puppet in the package), so `puppet` cannot plant one. OPENVOX_CA_CONFIG
+# here is a drop-in for the oneshot, which first-boot honours too; the
+# service's own is handled above.
+#
+# DELIBERATELY WIDE, for the reason first-boot's config_key_set gives: the
+# server's YAML parser accepts a quoted key and leading whitespace, and a
+# narrower match would report such a key absent -- here, the fail-open
+# direction. A false match costs only an admin grant the operator can add.
+if [ "$record_admin" = yes ]; then
+	CONFIG="${OPENVOX_CA_CONFIG:-/etc/openvox-ca/config.yaml}"
+	if [ -f "$CONFIG" ] &&
+		grep -Eq "^[[:space:]]*['\"]?(puppet_server|puppet_server_file)['\"]?[[:space:]]*:" "$CONFIG" 2>/dev/null; then
+		record_admin=no
+		info "$CONFIG sets its admin allow-list already; not recording OPENVOX_CA_PUPPET_SERVER."
+	fi
+fi
+
+if [ "$record_certname" = no ] && [ "$record_admin" = no ]; then
+	record_decision
+	exit 0
+fi
+
+# Written beside the target and hard-linked into place: ln refuses an existing
+# path, symlinks included, so nothing that appeared since the check above is
+# overwritten or followed, and the file is never visible half-written. Left at
+# mktemp's 0600: systemd reads it as root before dropping to `puppet`, and on
+# EL this is where an operator will put OPENVOX_CA_SQL_DSN and the other
+# credentials the server reads from its environment.
+tmp=$(mktemp "$SYSCONFIG_DIR/.openvox-ca.XXXXXX") || {
+	warn "could not create a temporary file in $SYSCONFIG_DIR; not writing $TARGET."
+	exit 0
+}
+{
+	printf '%s\n' \
+		"# Written by openvox-ca's first-boot provisioning, once for this host, on the" \
+		"# first run that linked its serving certificate. It is not part of the package" \
+		"# and is never rewritten: it is yours to edit. Its values outrank both" \
+		"# /etc/openvox-ca/config.yaml and Environment= in any drop-in, and take effect" \
+		"# on 'systemctl restart openvox-ca', not on reload. Keep it root-only (0600)" \
+		"# if you add credentials to it." \
+		"#" \
+		"# OPENVOX_CA_CERTNAME is the name provisioning mints this host's certificate under." \
+		"# OPENVOX_CA_PUPPET_SERVER is the CA's admin allow-list, and replaces puppet_server" \
+		"# in the configuration file rather than adding to it." \
+		"#" \
+		"# See /usr/share/doc/openvox-ca/docs/systemd.md." &&
+		if [ "$record_certname" = yes ]; then printf 'OPENVOX_CA_CERTNAME=%s\n' "$name"; fi &&
+		if [ "$record_admin" = yes ]; then printf 'OPENVOX_CA_PUPPET_SERVER=%s\n' "$name"; fi
+} >"$tmp" && ln "$tmp" "$TARGET" 2>/dev/null
+written=$?
+rm -f "$tmp"
+if [ "$written" -eq 0 ]; then
+	info "recorded \"$name\" in $TARGET"
+	record_decision
+else
+	warn "could not write $TARGET. The CA serves without it; its node certificate is not an" \
+		"admin until puppet_server names \"$name\"."
+fi
+exit 0
