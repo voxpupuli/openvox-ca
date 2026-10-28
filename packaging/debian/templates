@@ -22,3 +22,15 @@ Description: Unusable certificate name
  "${name}" cannot be used as a certificate name. A name may contain only
  letters, digits, dots, dashes and underscores, and may not begin with a dash.
  "ca" and "openvox-ca-server" are reserved: the package uses them for aliases.
+
+Template: openvox-ca/purge_ca_data
+Type: boolean
+Default: false
+Description: Remove the certificate authority's data?
+ Purging openvox-ca can also delete /etc/puppetlabs/puppet/ssl/ca: the CA's
+ private key, its certificate, and the record of everything it has issued and
+ revoked, along with the links provisioning created to them.
+ .
+ Every certificate this CA has issued stops being verifiable, and this cannot
+ be undone. The rest of /etc/puppetlabs/puppet/ssl, which may belong to
+ openvox-agent or OpenVox Server, is left alone.

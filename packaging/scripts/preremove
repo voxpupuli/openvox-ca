@@ -56,15 +56,16 @@ rmdir "$STATEDIR" 2>/dev/null || :
 # install wrote /etc/systemd/system/openvox-ca.service.requires/, and the
 # removal left it there, so the symlink outlived the unit file it pointed at.
 # docs/systemd.md says removing the package leaves the units stopped and
-# disabled (on Debian, the service's enablement kept); on those hosts only
-# the stop was true.
+# disabled (on Debian, the service masked); on those hosts only the stop was
+# true.
 #
 # The service itself is disabled on the rpm only. On the deb, deb-systemd-helper
 # owns its enablement (openvox-ca#251): the postinst enables it only when
 # was-enabled says the unit's links are all there, so a disable here would read
 # on reinstall as the operator's own choice, and `apt remove` then `apt install`
 # would leave the CA disabled and stopped. dh_installsystemd's prerm does not
-# disable either.
+# disable either; the postremove masks it instead, as dh's postrm does, and the
+# postinst unmasks it.
 if [ "${1:-}" = 0 ]; then
 	systemctl --no-reload disable openvox-ca.service >/dev/null 2>&1 || :
 fi
