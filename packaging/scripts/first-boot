@@ -31,10 +31,11 @@ fail() { echo "openvox-ca first-boot: ERROR: $*" >&2; exit 1; }
 # be exercised against a scratch directory -- and it is: magefile_test.go's
 # "first-boot's certname allow-list" specs run the functions below directly,
 # and "first-boot's provisioning steps" drives the whole script this way.
-# Nothing in the packages sets either. The unit's only environment is
-# /etc/sysconfig/openvox-ca, which provisioning writes with OPENVOX_CA_CERTNAME
-# and OPENVOX_CA_PUPPET_SERVER and nothing else, and RUNTIME_DIRECTORY; so an
-# installed system takes the defaults.
+# Nothing in the packages sets either. The unit's only environment is the
+# install-time file -- /etc/sysconfig/openvox-ca on EL, which provisioning
+# writes, or /etc/default/openvox-ca on Debian, which the package renders --
+# holding OPENVOX_CA_CERTNAME and OPENVOX_CA_PUPPET_SERVER and nothing else,
+# and RUNTIME_DIRECTORY; so an installed system takes the defaults.
 SSLDIR="${OPENVOX_CA_SSLDIR:-/etc/puppetlabs/puppet/ssl}"
 
 # The configuration file the SERVER reads. Provisioning has to resolve the same
@@ -351,8 +352,9 @@ puppet_conf_certname() {
 resolve_certname() {
 	# 1. An explicit answer. OPENVOX_CA_CERTNAME is the operator's override,
 	#    set through a systemd drop-in (Environment= or EnvironmentFile=) or
-	#    recorded in /etc/sysconfig/openvox-ca by an earlier provisioning,
-	#    which outranks a drop-in's Environment= when both set it;
+	#    recorded in the install-time file (/etc/sysconfig/openvox-ca on EL,
+	#    /etc/default/openvox-ca from debconf on Debian), which outranks a
+	#    drop-in's Environment= when both set it;
 	#    puppet.conf is the answer a host running an agent has already given.
 	#    Neither is second-guessed for reachability: an explicit name is taken
 	#    as it stands, dotted or not, because the operator may know something
@@ -366,7 +368,7 @@ resolve_certname() {
 		# it, an earlier provisioning's record that outranks puppet.conf and
 		# the host's name from then on. To stderr: this runs in a command
 		# substitution, and stdout is the answer.
-		info "taking the name from OPENVOX_CA_CERTNAME (/etc/sysconfig/openvox-ca or a drop-in)"
+		info "taking the name from OPENVOX_CA_CERTNAME (/etc/sysconfig/openvox-ca, /etc/default/openvox-ca or a drop-in)"
 		is_safe_certname "$OPENVOX_CA_CERTNAME" ||
 			fail "OPENVOX_CA_CERTNAME=\"$OPENVOX_CA_CERTNAME\" is not a usable certificate name.
 Names may contain only letters, digits, dots, dashes and underscores, and may not begin with a dash."

@@ -360,8 +360,9 @@ common name for years.
 ### Issuing one
 
 **On a packaged install you do not need this procedure.** The `.deb` and
-`.rpm` provision a serving credential on the first `systemctl start openvox-ca`
-and point `tls_cert`/`tls_key` at it — see [installing from a
+`.rpm` provision a serving credential the first time the service starts — at
+install on Debian, at `systemctl enable --now openvox-ca` on EL — and point
+`tls_cert`/`tls_key` at it — see [installing from a
 package](systemd.md#installing-from-a-package). What follows is for a release
 tarball, a container, or a packaged CA whose certificate you are replacing by
 hand.
