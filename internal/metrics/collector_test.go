@@ -18,6 +18,7 @@
 package metrics_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -26,9 +27,15 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"fmt"
+	"log/slog"
 	"math/big"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	dto "github.com/prometheus/client_model/go"
@@ -151,6 +158,29 @@ func upstreamCRLFixture(cn string) (*x509.Certificate, []byte) {
 	GinkgoHelper()
 	cert, key := upstreamCAWithKeyFixture(cn)
 	return cert, numberedCRLFixture(cert, key, 7)
+}
+
+// seriesOf renders a family as label set → value, so two gathers can be
+// compared series for series without depending on emission order.
+func seriesOf(g gathered, name string) map[string]float64 {
+	GinkgoHelper()
+	mf := g[name]
+	Expect(mf).NotTo(BeNil(), "no metric family %q", name)
+	out := make(map[string]float64, len(mf.GetMetric()))
+	for _, m := range mf.GetMetric() {
+		labels := labelsOf(m)
+		keys := make([]string, 0, len(labels))
+		for k := range labels {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		var key strings.Builder
+		for _, k := range keys {
+			fmt.Fprintf(&key, "%s=%q,", k, labels[k])
+		}
+		out[key.String()] = gaugeValue(m)
+	}
+	return out
 }
 
 func gaugeValue(m *dto.Metric) float64 { return m.GetGauge().GetValue() }
@@ -831,6 +861,263 @@ var _ = Describe("Collector", func() {
 		})
 	})
 
+	// The series a failed gather republishes. Every one of them is read from
+	// storage; everything else the collector emits is in-process state and is
+	// published live whatever the gather did. This is the list docs/metrics.md
+	// gives under "When a gather fails"; the context below publishes an upstream
+	// chain so that the chain series is among them.
+	storageDerived := []string{
+		"openvoxca_crl_chain_next_update_timestamp_seconds",
+		"openvoxca_crl_number",
+		"openvoxca_crl_this_update_timestamp_seconds",
+		"openvoxca_crl_next_update_timestamp_seconds",
+		"openvoxca_crl_revoked_certificates",
+		"openvoxca_supersede_pending",
+		"openvoxca_leaf_certificate_info",
+		"openvoxca_leaf_certificate_not_before_timestamp_seconds",
+		"openvoxca_leaf_certificate_not_after_timestamp_seconds",
+		"openvoxca_leaf_certificates",
+	}
+
+	// breakSignedListing replaces the directory ListCerts enumerates with a
+	// plain file, so the listing returns a real error rather than an empty set.
+	breakSignedListing := func() {
+		signedDir := filepath.Join(store.CADir(), "signed")
+		Expect(os.RemoveAll(signedDir)).To(Succeed())
+		Expect(os.WriteFile(signedDir, []byte("not a directory"), 0o600)).To(Succeed())
+	}
+
+	Context("when a gather fails after one has succeeded", func() {
+		var (
+			col  *metrics.Collector
+			t0   time.Time
+			now  time.Time
+			good gathered
+		)
+
+		BeforeEach(func() {
+			signCert("stale-node")
+			signCert("revoked-node")
+			Expect(myCA.Revoke(ctx, "revoked-node")).To(Succeed())
+			requestCert("pending-node")
+
+			// An upstream CRL after ours, so the chain series is in the snapshot.
+			_, upsCRL := upstreamCRLFixture("Upstream Root CA")
+			ours, err := store.GetCRL(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(store.UpdateCRL(ctx, append(append([]byte{}, ours...), upsCRL...))).To(Succeed())
+
+			t0 = time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+			now = t0
+			col = metrics.NewCollector(myCA)
+			col.SetClockForTest(func() time.Time { return now })
+
+			good = gather(col)
+			Expect(gaugeValue(good.findUnlabelled("openvoxca_collector_scrape_success"))).To(Equal(1.0),
+				"precondition: the first gather must succeed")
+			Expect(gaugeValue(good.findUnlabelled("openvoxca_collector_last_success_timestamp_seconds"))).
+				To(Equal(float64(t0.Unix())))
+			for _, name := range storageDerived {
+				Expect(good).To(HaveKey(name), "precondition: %s must be in the successful gather", name)
+			}
+
+			breakSignedListing()
+		})
+
+		It("republishes the last successful gather, unchanged, and says when it was taken", func() {
+			// The `for` clock behind an expiry alert restarts the moment its series
+			// is missing from one evaluation. Thirty minutes is well inside the
+			// mixin's hour, which is the case this exists for.
+			now = t0.Add(30 * time.Minute)
+			failed := gather(col)
+
+			Expect(gaugeValue(failed.findUnlabelled("openvoxca_collector_scrape_success"))).To(Equal(0.0),
+				"a republished gather is still a failed one, so OpenVoxCAScrapeFailing still fires")
+			Expect(gaugeValue(failed.findUnlabelled("openvoxca_collector_last_success_timestamp_seconds"))).
+				To(Equal(float64(t0.Unix())), "the age of what is republished must be readable")
+			for _, name := range storageDerived {
+				Expect(seriesOf(failed, name)).To(Equal(seriesOf(good, name)),
+					"%s must be republished exactly as gathered", name)
+			}
+		})
+
+		// The log line is the only place an operator reading logs learns that
+		// the scrape served held data, and how old it is.
+		It("logs that it is republishing, and when the republished gather was taken", func() {
+			// Captured from here, after the fixture's own gathers, so a line the
+			// setup logged cannot satisfy the assertion.
+			var logged bytes.Buffer
+			orig := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+			DeferCleanup(func() { slog.SetDefault(orig) })
+
+			now = t0.Add(30 * time.Minute)
+			gather(col)
+			Expect(strings.Count(logged.String(), "republishing the last successful gather")).To(Equal(1),
+				"log = %q", logged.String())
+			Expect(logged.String()).To(ContainSubstring("level=WARN"))
+			Expect(logged.String()).To(ContainSubstring("gathered_at=" + t0.Format(time.RFC3339)))
+		})
+
+		It("republishes up to the limit and drops the storage series past it", func() {
+			now = t0.Add(metrics.StaleSnapshotLimit)
+			Expect(gather(col)).To(HaveKey("openvoxca_leaf_certificate_not_after_timestamp_seconds"),
+				"a snapshot exactly at the limit is still republished")
+
+			now = t0.Add(metrics.StaleSnapshotLimit + time.Second)
+			failed := gather(col)
+			for _, name := range storageDerived {
+				Expect(failed).NotTo(HaveKey(name), "%s must be dropped past the limit", name)
+			}
+			Expect(gaugeValue(failed.findUnlabelled("openvoxca_collector_last_success_timestamp_seconds"))).
+				To(Equal(float64(t0.Unix())),
+					"the time of the last success is a fact, not data that ages, so it outlives the snapshot")
+			Expect(gaugeValue(failed.findUnlabelled("openvoxca_collector_scrape_success"))).To(Equal(0.0))
+		})
+
+		It("publishes the fresh gather again once storage recovers", func() {
+			now = t0.Add(10 * time.Minute)
+			Expect(gaugeValue(gather(col).findUnlabelled("openvoxca_collector_scrape_success"))).To(Equal(0.0))
+
+			// An empty signed directory: the listing works again and finds nothing,
+			// so anything still reported for stale-node would be the old snapshot.
+			signedDir := filepath.Join(store.CADir(), "signed")
+			Expect(os.Remove(signedDir)).To(Succeed())
+			Expect(os.Mkdir(signedDir, 0o750)).To(Succeed())
+
+			now = t0.Add(20 * time.Minute)
+			recovered := gather(col)
+			Expect(gaugeValue(recovered.findUnlabelled("openvoxca_collector_scrape_success"))).To(Equal(1.0))
+			Expect(gaugeValue(recovered.findUnlabelled("openvoxca_collector_last_success_timestamp_seconds"))).
+				To(Equal(float64(now.Unix())))
+			Expect(recovered.findByLabels("openvoxca_leaf_certificate_not_after_timestamp_seconds",
+				map[string]string{"subject": "stale-node"})).To(BeNil(),
+				"a successful gather replaces the republished one")
+		})
+
+		// A CA whose gather flaps must hold what it gathered last, and for an
+		// hour from then. Holding the first success instead would republish a
+		// snapshot older than the storage that has answered since, and drop the
+		// series an hour after it -- restarting the expiry alerts' `for` clocks
+		// on a CA whose storage keeps coming back.
+		It("holds the newest successful gather when a later one fails", func() {
+			now = t0.Add(10 * time.Minute)
+			Expect(gaugeValue(gather(col).findUnlabelled("openvoxca_collector_scrape_success"))).To(Equal(0.0))
+
+			// Recover with different content: an empty signed directory, so the
+			// newer snapshot no longer carries stale-node.
+			signedDir := filepath.Join(store.CADir(), "signed")
+			Expect(os.Remove(signedDir)).To(Succeed())
+			Expect(os.Mkdir(signedDir, 0o750)).To(Succeed())
+			recoveredAt := t0.Add(20 * time.Minute)
+			now = recoveredAt
+			recovered := gather(col)
+			Expect(gaugeValue(recovered.findUnlabelled("openvoxca_collector_scrape_success"))).To(Equal(1.0),
+				"precondition: the second gather must succeed")
+
+			breakSignedListing()
+			now = t0.Add(30 * time.Minute)
+			failed := gather(col)
+			Expect(gaugeValue(failed.findUnlabelled("openvoxca_collector_last_success_timestamp_seconds"))).
+				To(Equal(float64(recoveredAt.Unix())))
+			Expect(seriesOf(failed, "openvoxca_leaf_certificate_info")).
+				To(Equal(seriesOf(recovered, "openvoxca_leaf_certificate_info")),
+					"the republished snapshot must be the newer one")
+
+			// Past an hour from the first success, inside an hour from the second.
+			now = recoveredAt.Add(metrics.StaleSnapshotLimit)
+			Expect(gather(col)).To(HaveKey("openvoxca_leaf_certificate_info"),
+				"the hold runs from the latest success, not the first")
+		})
+	})
+
+	// Concurrent scrapes share the last snapshot: one may be replacing it
+	// while another republishes it. So this needs scrapes that succeed and
+	// scrapes that fail at once, which a store whose listing fails on every
+	// other call provides. Only meaningful under -race, which the unit suite
+	// runs.
+	It("serves concurrent succeeding and failing scrapes without racing on the snapshot", func() {
+		signCert("concurrent-node")
+		flaky := &alternatingListBackend{Backend: storage.NewFilesystemBackend(store.CADir())}
+		peer := ca.New(storage.NewWithBackend(flaky, store.CADir()), ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		Expect(peer.Init(ctx)).To(Succeed())
+		flaky.calls.Store(0) // whatever Init listed, the first scrape's listing succeeds
+		col := metrics.NewCollector(peer)
+		// One success before the burst, so every failure in it has a snapshot to
+		// republish -- and so reads one that the successes are replacing.
+		Expect(gaugeValue(gather(col).findUnlabelled("openvoxca_collector_scrape_success"))).To(Equal(1.0))
+
+		const scrapes = 16
+		done := make(chan gathered, scrapes)
+		for range scrapes {
+			go func() {
+				defer GinkgoRecover()
+				done <- gather(col)
+			}()
+		}
+		var succeeded, republished int
+		for range scrapes {
+			var g gathered
+			Eventually(done, 10*time.Second).Should(Receive(&g))
+			if gaugeValue(g.findUnlabelled("openvoxca_collector_scrape_success")) == 1 {
+				succeeded++
+			} else if g.findByLabels("openvoxca_leaf_certificate_info",
+				map[string]string{"subject": "concurrent-node"}) != nil {
+				republished++
+			}
+		}
+		Expect(succeeded).To(BeNumerically(">", 0), "precondition: some scrapes must write the snapshot")
+		Expect(republished).To(BeNumerically(">", 0), "precondition: some scrapes must republish it")
+		Expect(succeeded+republished).To(Equal(scrapes),
+			"with a snapshot in place before the burst, every failed scrape republishes it")
+	})
+
+	// The documented guarantee -- held data cannot carry an expiry alert to
+	// firing on its own -- holds only while the hold is no longer than the
+	// mixin's expiryFor. The boundary specs above are written against the
+	// constant, so they pass at any value; this reads the mixin's default and
+	// fails if either side moves past the other. The hour is stated in prose in
+	// many places -- HELP text, comments, docs/metrics.md, mixin/ and its tests
+	// -- so moving it means grepping internal/metrics, docs/metrics.md and
+	// mixin/ for "an hour" and "1h" first rather than trusting a list here.
+	It("holds no longer than the mixin's expiryFor", func() {
+		config, err := os.ReadFile(filepath.Join("..", "..", "mixin", "config.libsonnet"))
+		Expect(err).NotTo(HaveOccurred())
+		m := regexp.MustCompile(`(?m)^\s*expiryFor:\s*'([^']+)'`).FindSubmatch(config)
+		Expect(m).NotTo(BeNil(), "expiryFor not found in mixin/config.libsonnet")
+		expiryFor, err := time.ParseDuration(string(m[1]))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(metrics.StaleSnapshotLimit).To(BeNumerically("<=", expiryFor),
+			"the hold must not outlast the mixin's expiryFor")
+	})
+
+	It("publishes no storage series and no last-success time when no gather has succeeded", func() {
+		breakSignedListing()
+
+		g := gather(metrics.NewCollector(myCA))
+		Expect(gaugeValue(g.findUnlabelled("openvoxca_collector_scrape_success"))).To(Equal(0.0))
+		Expect(g).NotTo(HaveKey("openvoxca_collector_last_success_timestamp_seconds"),
+			"a zero would claim the last success was in 1970")
+		for _, name := range storageDerived {
+			Expect(g).NotTo(HaveKey(name), "%s has nothing to republish", name)
+		}
+	})
+
+	// The issue (#435) names the CA expiry series as vanishing with the rest.
+	// They are read from memory, so a failed gather has nothing to do with them.
+	It("keeps reporting readiness and the CA certificate when the storage gather fails", func() {
+		breakSignedListing()
+
+		g := gather(metrics.NewCollector(myCA))
+		Expect(gaugeValue(g.findUnlabelled("openvoxca_collector_scrape_success"))).To(Equal(0.0),
+			"precondition: the gather must actually have failed")
+		Expect(gaugeValue(g.findUnlabelled("openvoxca_ca_ready"))).To(Equal(1.0))
+		Expect(gaugeValue(g.findUnlabelled("openvoxca_ca_certificate_not_after_timestamp_seconds"))).
+			To(Equal(float64(myCA.CACert.NotAfter.Unix())))
+		Expect(g.findByLabels("openvoxca_ca_certificate_info",
+			map[string]string{"serial": fmt.Sprintf("%X", myCA.CACert.SerialNumber)})).NotTo(BeNil())
+	})
+
 	It("excludes cleaned (deleted) certificates from the live set", func() {
 		signCert("keep-node")
 		signCert("clean-node")
@@ -871,6 +1158,21 @@ func (b *supersededReadFailBackend) Get(ctx context.Context, key string) ([]byte
 		return nil, errors.New("simulated backend failure reading " + key)
 	}
 	return b.Backend.Get(ctx, key)
+}
+
+// alternatingListBackend fails every other listing of signed certificates,
+// starting with the second, so concurrent scrapes over it both succeed and
+// fail.
+type alternatingListBackend struct {
+	storage.Backend
+	calls atomic.Int64
+}
+
+func (b *alternatingListBackend) List(ctx context.Context, prefix string) ([]string, error) {
+	if prefix == storage.CertKey("") && b.calls.Add(1)%2 == 0 {
+		return nil, errors.New("simulated failure listing " + prefix)
+	}
+	return b.Backend.List(ctx, prefix)
 }
 
 // upstreamCRLNextUpdate reads the NextUpdate out of a PEM-encoded CRL, so a
