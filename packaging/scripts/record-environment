@@ -30,8 +30,9 @@
 #     are failure states whose remedy is re-minting under a corrected name,
 #     and pinning the wrong one here would outrank puppet.conf, which is where
 #     their warnings tell the operator to put the right one);
-#   - /etc/sysconfig is a directory, which is what makes this EL-only. Debian
-#     has no /etc/sysconfig, and its package records the same values through
+#   - /etc/sysconfig is a directory. A second guard, not the one that makes
+#     this EL-only: the deb does not ship this script, and its drop-in clears
+#     the oneshot's ExecStartPost=, because it records the same values through
 #     debconf instead (openvox-ca#251);
 #   - it has not decided before, which the record under /var/lib/openvox-ca
 #     says.

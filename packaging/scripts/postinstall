@@ -1,9 +1,11 @@
 #!/bin/sh
 #
 # Shared postinstall for the deb and the rpm. Its jobs: make sure the `puppet`
-# account exists and owns what it must, make sure systemd knows about the
-# units, and -- on rpm's first install only -- apply the preset and say what to
-# run next.
+# account exists and owns what it must, and make sure systemd knows about the
+# units. Then, per format: on the deb, render /etc/default/openvox-ca from
+# debconf through ucf, and enable and start the service (openvox-ca#251); on
+# rpm's first install, apply the preset and say what to run next
+# (openvox-ca#252).
 #
 # It is shared rather than per-format because the two formats install the same
 # units, the same binaries and the same /etc/openvox-ca/config.yaml. What does
@@ -75,6 +77,34 @@ case "${1:-configure}" in
 configure | 1 | 2) ;;
 *) exit 0 ;;
 esac
+
+# -- debconf (deb) -----------------------------------------------------------
+
+# The deb asks openvox-ca/ca-name in its config script (debian-config) and
+# renders the answer below. Loading the confmodule re-executes this script
+# under debconf's frontend, so it has to come before anything that has an
+# effect: everything above is assignments, a function and the argument check.
+# Once loaded it moves stdout onto stderr, so nothing this script prints can be
+# misread as a debconf command. Not on the rpm, whose arguments are numbers.
+#
+# Overridable for the reason the other paths are: a spec supplies a stand-in.
+# `set +u` around it: the confmodule is debconf's code, not written for -u.
+CONFMODULE="${OPENVOX_CA_CONFMODULE:-/usr/share/debconf/confmodule}"
+DEFAULT_FILE="${OPENVOX_CA_DEFAULT_FILE:-/etc/default/openvox-ca}"
+DROPIN_ROOT="${OPENVOX_CA_DROPIN_ROOT:-/etc/systemd/system}"
+VENDOR_UNIT_ROOT="${OPENVOX_CA_VENDOR_UNIT_ROOT:-/usr/lib/systemd/system}"
+# Where a host that has not merged /usr keeps packaged units, and OpenVox
+# Server 6+'s own CA directory: both only looked at for a takeover, below.
+LEGACY_UNIT_ROOT="${OPENVOX_CA_LEGACY_UNIT_ROOT:-/lib/systemd/system}"
+SERVER_CADIR="${OPENVOX_CA_SERVER_CADIR:-/etc/puppetlabs/puppetserver/ca}"
+debconf=no
+if [ "${1:-}" = configure ] && [ -r "$CONFMODULE" ]; then
+	set +u
+	# shellcheck disable=SC1090 # the confmodule is debconf's, not ours
+	. "$CONFMODULE"
+	set -u
+	debconf=yes
+fi
 
 # -- The service account -----------------------------------------------------
 
@@ -215,20 +245,148 @@ elif [ -f "$CONFIG" ]; then
 	chmod 0640 "$CONFIG" || warn "could not set mode 0640 on $CONFIG; it may be readable by others."
 fi
 
+# -- Install-time values (deb) ----------------------------------------------
+
+# The deb's counterpart of the EL package's /etc/sysconfig/openvox-ca: the same
+# two variables, but rendered here from the debconf answer and handed to ucf,
+# which keeps the operator's edits and, when the rendering has changed too,
+# asks -- offering a three-way merge, which --three-way enables by keeping the
+# previous rendering. Non-interactively it keeps theirs and leaves ours as
+# .ucf-dist. Rendered at every configure, never at runtime: ucf tracks the file
+# by checksum, so a runtime writer would be recorded as operator drift and
+# prompt on the next upgrade about a change the package itself made. Not a
+# dpkg conffile, and not in the package at all -- two managers on one path is
+# the bug this avoids (openvox-ca#251).
+#
+# The same rule as EL's record-environment for what is left out, kept in step
+# with it by hand: a value the operator has already chosen.
+# OPENVOX_CA_CERTNAME when a drop-in for the oneshot mentions it;
+# OPENVOX_CA_PUPPET_SERVER when config.yaml sets puppet_server or
+# puppet_server_file, or a drop-in for the service mentions the list, its file
+# or its configuration file. Re-checked at every configure, so an operator who
+# later moves the list into config.yaml sees the line go on the next upgrade.
+
+# dropins_mention succeeds when any drop-in systemd would apply to the unit
+# mentions any of the named variables outside a comment: the unit's own <unit>.d,
+# its prefix directories (openvox-.service.d and the like) and service.d, under
+# /etc, /run and the vendor tree. Read from the files rather than asked of
+# systemd, because this runs before the daemon-reload below -- systemd has not
+# seen an operator's pre-placed drop-in yet on a first install -- and in
+# chroots and image builds where there is no systemd to ask. The files are
+# root's.
+#
+# A mention, not a parse, on purpose: it fails closed. systemd accepts quoted,
+# single-quoted, continued and tab-separated assignments, an EnvironmentFile=
+# whose file sets the variable, and more; any parser of those here would be one
+# more place to disagree with systemd, and every disagreement would record an
+# admin grant over a list the operator chose. A false match costs only a line
+# the operator can add.
+dropins_mention() {
+	unit=$1
+	shift
+	for root in "$DROPIN_ROOT" "$SYSTEMD_RUNTIME" "$VENDOR_UNIT_ROOT"; do
+		for f in "$root/$unit.d"/*.conf "$root"/openvox-*.service.d/*.conf "$root/service.d"/*.conf; do
+			[ -f "$f" ] || continue
+			for var in "$@"; do
+				if sed -e '/^[[:space:]]*[#;]/d' "$f" | grep -q -- "$var"; then
+					return 0
+				fi
+			done
+		done
+	done
+	return 1
+}
+
+render_default_file() {
+	db_get openvox-ca/ca-name || RET=
+	name=$RET
+	# The config script refuses an unusable name; checked again here, because
+	# a preseeded answer reaches this script without passing through it, and
+	# the value is written into a file systemd parses as KEY=VALUE.
+	case "$name" in
+	"" | -* | . | .. | ca | openvox-ca-server) name= ;;
+	*[!A-Za-z0-9._-]*) name= ;;
+	esac
+	if [ -z "$name" ] && [ -n "$RET" ]; then
+		# Non-printing characters shown as `?`, so a newline in the refused
+		# value cannot forge a second line of output.
+		warn "ignoring openvox-ca/ca-name \"$(printf '%s' "$RET" | tr -c '[:print:]' '?')\": not a" \
+			"usable certificate name. Provisioning will choose the name; to set one, run" \
+			"'dpkg-reconfigure openvox-ca'."
+	fi
+
+	record_certname=no
+	record_admin=no
+	if [ -n "$name" ]; then
+		record_certname=yes
+		if dropins_mention openvox-ca-first-boot.service OPENVOX_CA_CERTNAME; then
+			record_certname=no
+		fi
+		record_admin=yes
+		if [ -f "$CONFIG" ] &&
+			grep -Eq "^[[:space:]]*['\"]?(puppet_server|puppet_server_file)['\"]?[[:space:]]*:" "$CONFIG" 2>/dev/null; then
+			record_admin=no
+		elif dropins_mention openvox-ca.service \
+			OPENVOX_CA_PUPPET_SERVER OPENVOX_CA_PUPPET_SERVER_FILE OPENVOX_CA_CONFIG; then
+			record_admin=no
+		fi
+	fi
+
+	# Rendered whether or not there is anything to set, so ucf always owns the
+	# file and a later answer arrives as an update rather than a new file.
+	# mktemp's 0600 is the mode ucf creates it with, and it keeps an
+	# operator's mode from then on.
+	tmp=$(mktemp) || {
+		warn "could not create a temporary file, so $DEFAULT_FILE was not updated."
+		return 0
+	}
+	if {
+		printf '%s\n' \
+			"# Install-time values for openvox-ca, rendered by the package from debconf and" \
+			"# kept by ucf: once you edit it, a change from the package asks you first, or" \
+			"# unattended keeps yours and leaves its version as .ucf-dist; unedited, it is" \
+			"# replaced. To change the name, run 'dpkg-reconfigure openvox-ca'." \
+			"#" \
+			"# These outrank /etc/openvox-ca/config.yaml and Environment= in any drop-in." \
+			"# OPENVOX_CA_PUPPET_SERVER replaces puppet_server in config.yaml rather than" \
+			"# adding to it, and takes effect on 'systemctl restart openvox-ca'." \
+			"# OPENVOX_CA_CERTNAME takes effect only when the CA re-provisions: see the" \
+			"# re-mint steps in the documentation below. Keep this file root-only (0600)" \
+			"# if you add credentials to it." \
+			"#" \
+			"# See /usr/share/doc/openvox-ca/docs/systemd.md." &&
+			if [ "$record_certname" = yes ]; then printf 'OPENVOX_CA_CERTNAME=%s\n' "$name"; fi &&
+			if [ "$record_admin" = yes ]; then printf 'OPENVOX_CA_PUPPET_SERVER=%s\n' "$name"; fi
+	} >"$tmp" && ucf --three-way --debconf-ok "$tmp" "$DEFAULT_FILE" && ucfr openvox-ca "$DEFAULT_FILE"; then
+		:
+	else
+		warn "could not update $DEFAULT_FILE through ucf. The CA works without it, but" \
+			"provisioning will choose the name itself and the node certificate will not be an" \
+			"admin until puppet_server names it."
+	fi
+	rm -f "$tmp"
+}
+
+if [ "$debconf" = yes ]; then
+	render_default_file
+fi
+
 # -- systemd -----------------------------------------------------------------
 
-# openvox-ca.service is neither enabled nor started here: the operator gets a
-# configuration file to review first, and an install is not consent to create a
-# certificate authority. (The one exception is rpm's preset, at the foot of this
-# file: a site preset that enables the unit is that consent, given in advance.)
+# On the rpm, openvox-ca.service is neither enabled nor started here: the
+# operator gets a configuration file to review first, and an install is not
+# consent to create a certificate authority. (The one exception is rpm's
+# preset, at the foot of this file: a site preset that enables the unit is that
+# consent, given in advance.) The deb follows Debian's convention instead and
+# enables and starts it, in its own block at the foot of this file.
 #
 # openvox-ca-first-boot.service IS enabled, and that is not the same thing.
 # Its [Install] section carries only RequiredBy=openvox-ca.service, so enabling
 # it installs one symlink into openvox-ca.service.requires/ and nothing that
-# any target pulls in. It therefore runs when the operator first starts
-# openvox-ca and at no other time -- not at install, not on the next boot
-# (unless, on EL, a site preset enables openvox-ca.service itself; see the
-# preset at the foot of this file).
+# any target pulls in. It therefore runs when openvox-ca first starts and at no
+# other time -- which on the deb is this install's own start, and on the rpm is
+# the operator's `enable --now` (or the next boot, where a site preset enables
+# openvox-ca.service itself; see the preset at the foot of this file).
 # Without this the [Install] section is inert, because systemd acts on
 # [Install] at enable time and never merely because a unit file is present.
 #
@@ -258,18 +416,15 @@ if [ -d "$SYSTEMD_RUNTIME" ]; then
 	# effect is the wrong default.
 	#
 	# try-restart, not restart: it restarts the unit only if it is already
-	# running, so an install that deliberately left the CA stopped -- which is
-	# every fresh install, because this script never starts it -- stays
-	# stopped. An install is not consent to create a certificate authority, and
-	# that has to remain true on the upgrade path too.
+	# running, so an rpm install that deliberately left the CA stopped -- which
+	# is every fresh rpm install, because this script never starts one there --
+	# stays stopped. An install is not consent to create a certificate
+	# authority on EL, and that has to remain true on the upgrade path too.
 	#
-	# Not on a first install: dpkg passes no $2 and rpm passes 1, and there is
-	# nothing running to restart.
-	case "${1:-configure}" in
-	2) upgrading=yes ;;                         # rpm: 2 packages will remain
-	configure) [ -n "${2:-}" ] && upgrading=yes ;; # dpkg: $2 is the old version
-	esac
-	if [ "${upgrading:-no}" = yes ]; then
+	# Not on a first install: rpm passes 1, and there is nothing running to
+	# restart. And not on the deb at all: Debian restarts through
+	# deb-systemd-invoke, which honours policy-rc.d, at the foot of this file.
+	if [ "${1:-}" = 2 ]; then
 		systemctl try-restart openvox-ca.service >/dev/null 2>&1 || warn \
 			"could not restart openvox-ca.service after the upgrade. If it is running it is still" \
 			"executing the previous binary; run 'systemctl restart openvox-ca' when convenient."
@@ -358,4 +513,105 @@ if [ "${1:-}" = 1 ]; then
 		"Review /etc/openvox-ca/config.yaml first if you want to; it works unedited." \
 		"Documentation: /usr/share/doc/openvox-ca/docs/systemd.md" \
 		"If the start fails: journalctl -u openvox-ca-first-boot" || :
+fi
+
+# -- Debian: enable and start ------------------------------------------------
+
+# Debian's convention is that installing a daemon starts it (openvox-ca#251),
+# and this is what dh_installsystemd would generate for that. Last, because
+# starting the service pulls in the provisioning oneshot only once the enable
+# above has given it its RequiredBy= link -- and because debconf has to be let
+# go first: a daemon started while the confmodule holds its descriptors keeps
+# them, and the package manager waits on it for ever.
+#
+# The enable is deb-systemd-helper's, not systemctl's: it records the state,
+# so an operator's `systemctl disable openvox-ca` survives an upgrade (was-enabled
+# then fails, and only the state is updated), while a first install, where
+# nothing is recorded yet, enables. On-disk work, so not behind the runtime
+# check.
+#
+# The start is deb-systemd-invoke's, which honours policy-rc.d: a chroot, a
+# container or an image build that forbids starting daemons does not get a CA
+# bootstrapped inside it, and the install still succeeds. `restart` on an
+# upgrade, as dh_installsystemd does, so the new binary is the one serving; a
+# disabled unit that is not running is left alone by it.
+#
+# Except on a takeover: a first install onto a host that already has a CA --
+# in the default or configured CA directory, or in OpenVox Server 6+'s own --
+# or that has OpenVox Server installed. Starting there could make this a
+# second writer to a CA directory that is Server's, and live, and the
+# filesystem backend permits exactly one (docs/systemd.md, "One instance per
+# CA directory"). So the unit is neither started nor enabled, and the operator
+# is told what to do first. Not enabled either, because an enabled unit starts
+# at the next boot just the same; update-state records it as disabled, so a
+# later upgrade does not enable it behind their back.
+#
+# "First install" is dpkg's empty $2, so an upgrade, or a reinstall after
+# `apt remove`, finds this package's own CA and is not a takeover. A reinstall
+# after a purge that kept the CA's data is: dpkg has forgotten the package, and
+# nothing on disk says whose the CA is. Failing closed there costs the operator
+# one `systemctl enable --now`, which the warning names.
+existing_ca_dir() {
+	for dir in "$SSLDIR/ca" "$SERVER_CADIR" "$(sed -n "s/^cadir:[[:space:]]*['\"]\{0,1\}\([^'\"#[:space:]]*\).*/\1/p" "$CONFIG" 2>/dev/null | tail -n 1)"; do
+		if [ -n "$dir" ] && [ -e "$dir/ca_crt.pem" ]; then
+			printf '%s\n' "$dir"
+			return 0
+		fi
+	done
+	return 1
+}
+
+# Installed, not only running: Server stopped for a backup is still Server.
+# On-disk, so it works without a running systemd too.
+server_installed() {
+	for root in "$DROPIN_ROOT" "$SYSTEMD_RUNTIME" "$VENDOR_UNIT_ROOT" "$LEGACY_UNIT_ROOT"; do
+		[ -e "$root/puppetserver.service" ] && return 0
+	done
+	return 1
+}
+
+if [ "${1:-}" = configure ]; then
+	takeover=
+	if [ -z "${2:-}" ]; then
+		if dir=$(existing_ca_dir); then
+			takeover="$dir already holds a CA from before this install"
+		elif server_installed; then
+			takeover="OpenVox Server (puppetserver.service) is installed"
+		elif [ -d "$SYSTEMD_RUNTIME" ] && systemctl is-active --quiet puppetserver.service 2>/dev/null; then
+			takeover="OpenVox Server (puppetserver.service) is running"
+		fi
+	fi
+
+	if command -v deb-systemd-helper >/dev/null 2>&1; then
+		deb-systemd-helper unmask openvox-ca.service >/dev/null 2>&1 || :
+		if [ -z "$takeover" ] && deb-systemd-helper --quiet was-enabled openvox-ca.service; then
+			deb-systemd-helper enable openvox-ca.service >/dev/null 2>&1 || warn \
+				"could not enable openvox-ca.service; run 'systemctl enable openvox-ca'."
+		else
+			deb-systemd-helper update-state openvox-ca.service >/dev/null 2>&1 || :
+		fi
+	fi
+
+	if [ "$debconf" = yes ]; then
+		db_stop
+	fi
+
+	if [ -n "$takeover" ]; then
+		warn "openvox-ca was installed but neither enabled nor started: $takeover." \
+			"If OpenVox Server's CA is involved, disable it first, as" \
+			"/usr/share/doc/openvox-ca/docs/migrating-from-puppet-server.md describes," \
+			"or the two would both write to one CA directory. If this is a CA that an" \
+			"earlier purge of openvox-ca kept, nothing else is needed. Then run" \
+			"'systemctl enable --now openvox-ca'."
+	elif [ -d "$SYSTEMD_RUNTIME" ]; then
+		action=start
+		[ -n "${2:-}" ] && action=restart
+		# stderr left alone: it is where deb-systemd-invoke says policy-rc.d
+		# declined the start, which is the answer to "why is it not running".
+		{ command -v deb-systemd-invoke >/dev/null 2>&1 &&
+			deb-systemd-invoke "$action" openvox-ca.service >/dev/null; } || warn \
+			"could not $action openvox-ca.service. If provisioning failed, the reason is in" \
+			"'journalctl -u openvox-ca-first-boot'; fix it and run 'systemctl restart" \
+			"openvox-ca-first-boot openvox-ca'."
+	fi
 fi

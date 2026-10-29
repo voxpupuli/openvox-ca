@@ -7,7 +7,8 @@
 # openvox-agent and openvox-server, and both hold or own the CA's private key
 # and its issued certificates. A package that deleted either would take an
 # estate's trust root with it on an `apt remove`, and might take another
-# product's account while it was there.
+# product's account while it was there. The one exception is a deb purge whose
+# operator answers yes to removing the CA's data -- see the foot of this file.
 
 set -eu
 
@@ -17,6 +18,121 @@ set -eu
 # be self-contained.
 SYSTEMD_RUNTIME="${OPENVOX_CA_SYSTEMD_RUNTIME:-/run/systemd/system}"
 
+# The deb's purge, overridable for the same reason: a spec supplies a stand-in
+# for debconf and a scratch ssl tree. Nothing in the packages sets these.
+CONFMODULE="${OPENVOX_CA_CONFMODULE:-/usr/share/debconf/confmodule}"
+SSLDIR="${OPENVOX_CA_SSLDIR:-/etc/puppetlabs/puppet/ssl}"
+DEFAULT_FILE="${OPENVOX_CA_DEFAULT_FILE:-/etc/default/openvox-ca}"
+
+# Loaded before anything with an effect: the confmodule re-executes this script
+# under debconf's frontend. Only on a deb purge, and only while debconf is
+# still installed -- a purge can outlive it. `set +u` because the confmodule is
+# debconf's code, not written for -u.
+debconf=no
+if [ "${1:-}" = purge ] && [ -r "$CONFMODULE" ]; then
+	set +u
+	# shellcheck disable=SC1090 # the confmodule is debconf's, not ours
+	. "$CONFMODULE"
+	set -u
+	debconf=yes
+fi
+
 if [ -d "$SYSTEMD_RUNTIME" ]; then
 	systemctl daemon-reload >/dev/null 2>&1 || :
+fi
+
+# -- Debian: purge -------------------------------------------------------------
+
+# Removal keeps everything above, on both formats. A deb PURGE is the one place
+# the package may remove the CA's data, and it asks first (openvox-ca#251):
+# openvox-ca/purge_ca_data, high priority, defaulting to false -- the shape
+# mariadb-server uses for its databases, and for the same reason. The data is
+# irreplaceable and the package cannot know whether the operator means it, so
+# the safe answer is the default: a purge nobody answers -- non-interactive, or
+# with nothing preseeded -- keeps the CA. The EL package never offers this (openvox-ca#252).
+#
+# What "the CA's data" means is narrow on purpose: the default CA directory and
+# the aliases provisioning made to it, each only if it is still the link
+# provisioning would have made. The rest of the ssl tree -- certs/,
+# private_keys/, an agent's own credential -- may belong to openvox-agent or
+# OpenVox Server and is never touched. The default directory only, because the
+# configuration that could have moved it is a conffile dpkg has already
+# removed by the time a purge reaches here.
+# delete_link removes the entry NAME in directory DIR only if it is a symlink
+# whose text matches PATTERN (and, if given, not EXCLUDE): only the link
+# provisioning makes, never a regular file or someone else's link.
+#
+# find rather than a test followed by rm. This runs as root in a tree `puppet`
+# can write, and a test-then-rm resolves the path twice: between the two,
+# `puppet` could swap the directory for a symlink to somewhere root-owned and
+# have rm unlink a file of the same name there. find opens DIR once, does not
+# follow it if it is itself a symlink (-P, the default), and -delete unlinks
+# relative to what it opened.
+delete_link() {
+	dir=$1 name=$2 pattern=$3 exclude=${4:-}
+	[ -d "$dir" ] || return 0
+	if [ -n "$exclude" ]; then
+		find "$dir" -maxdepth 1 -name "$name" -type l -lname "$pattern" ! -lname "$exclude" -delete || :
+	else
+		find "$dir" -maxdepth 1 -name "$name" -type l -lname "$pattern" -delete || :
+	fi
+}
+
+remove_ca_data() {
+	# rm -rf does not follow a symlink, so a `ca` that has been replaced by
+	# one is removed as a link and its target left alone.
+	rm -rf -- "$SSLDIR/ca" || warn "could not remove $SSLDIR/ca."
+
+	delete_link "$SSLDIR/certs" ca.pem "../ca/ca_crt.pem"
+	delete_link "$SSLDIR" crl.pem "ca/ca_crl.pem"
+	# The serving-credential aliases name this host's node certificate, which
+	# the CA just removed issued; the certificate itself stays, like the rest
+	# of certs/. Provisioning's link is a bare "<name>.pem" beside it.
+	delete_link "$SSLDIR/certs" openvox-ca-server.pem "*.pem" "*/*"
+	delete_link "$SSLDIR/private_keys" openvox-ca-server.pem "*.pem" "*/*"
+	rm -f -- "$SSLDIR/openvox-ca-certname-unresolved"
+}
+
+warn() {
+	echo "openvox-ca: WARNING: $*" >&2
+}
+
+# A deb removal masks the service, as dh_installsystemd's postrm does: its unit
+# file is gone, but the enablement links stay, so a reinstall's was-enabled
+# finds them and enables it again, while an operator's own disable -- links
+# already gone -- still holds. The postinst unmasks it; a purge forgets it.
+if [ "${1:-}" = remove ] && command -v deb-systemd-helper >/dev/null 2>&1; then
+	deb-systemd-helper mask openvox-ca.service >/dev/null 2>&1 || :
+fi
+
+if [ "${1:-}" = purge ]; then
+	if [ "$debconf" = yes ]; then
+		db_input high openvox-ca/purge_ca_data || :
+		db_go || :
+		if db_get openvox-ca/purge_ca_data && [ "$RET" = true ]; then
+			remove_ca_data
+		fi
+	fi
+
+	# The file ucf owns, and ucf's record of it. Removed on purge whatever the
+	# answer above: it is the package's configuration, not the CA's data.
+	if command -v ucf >/dev/null 2>&1; then
+		ucf --purge "$DEFAULT_FILE" || :
+	fi
+	if command -v ucfr >/dev/null 2>&1; then
+		ucfr --purge openvox-ca "$DEFAULT_FILE" || :
+	fi
+	for f in "$DEFAULT_FILE" "$DEFAULT_FILE".ucf-new "$DEFAULT_FILE".ucf-old "$DEFAULT_FILE".ucf-dist; do
+		rm -f -- "$f"
+	done
+
+	# deb-systemd-helper's own state for the unit the postinst enabled.
+	if command -v deb-systemd-helper >/dev/null 2>&1; then
+		deb-systemd-helper purge openvox-ca.service >/dev/null 2>&1 || :
+		deb-systemd-helper unmask openvox-ca.service >/dev/null 2>&1 || :
+	fi
+
+	if [ "$debconf" = yes ]; then
+		db_purge || :
+	fi
 fi

@@ -1,0 +1,36 @@
+Template: openvox-ca/ca-name
+Type: string
+Default:
+Description: Certificate name for this host:
+ openvox-ca issues this host a node certificate and serves its API with it.
+ Agents check that name against the server name they are configured with, so
+ it should be the fully qualified name they use to reach this host.
+ .
+ Unless an admin list is already configured (puppet_server in
+ /etc/openvox-ca/config.yaml, or a systemd drop-in), the certificate is also
+ made a CA administrator, so that this host can sign, revoke and clean
+ certificates through the API.
+ .
+ Leave this empty to let provisioning choose: the certname in puppet.conf if
+ there is one, otherwise this host's name. This host's certificate is then
+ not made an administrator: it cannot sign, revoke or clean until
+ puppet_server in /etc/openvox-ca/config.yaml names it.
+
+Template: openvox-ca/ca-name-invalid
+Type: error
+Description: Unusable certificate name
+ "${name}" cannot be used as a certificate name. A name may contain only
+ letters, digits, dots, dashes and underscores, and may not begin with a dash.
+ "ca" and "openvox-ca-server" are reserved: the package uses them for aliases.
+
+Template: openvox-ca/purge_ca_data
+Type: boolean
+Default: false
+Description: Remove the certificate authority's data?
+ Purging openvox-ca can also delete /etc/puppetlabs/puppet/ssl/ca: the CA's
+ private key, its certificate, and the record of everything it has issued and
+ revoked, along with the links provisioning created to them.
+ .
+ Every certificate this CA has issued stops being verifiable, and this cannot
+ be undone. The rest of /etc/puppetlabs/puppet/ssl, which may belong to
+ openvox-agent or OpenVox Server, is left alone.
