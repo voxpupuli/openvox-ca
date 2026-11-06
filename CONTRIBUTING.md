@@ -29,6 +29,9 @@ guide is the human-friendly entry point; where the two overlap, AGENTS.md wins.
   slim container image may not have one. The product build is unaffected — it
   is still `CGO_ENABLED=0`.
 - Docker or Podman with the Compose plugin, for the integration and stack tests
+- Only to run the vulnerability scan locally (CI always runs it):
+  [govulncheck](https://go.dev/doc/tutorial/govulncheck)
+  (`go install golang.org/x/vuln/cmd/govulncheck@v1.9.0`)
 - Only if you are changing the Helm chart under [`charts/`](charts/):
   [Helm](https://helm.sh/docs/intro/install/) and
   [kubeconform](https://github.com/yannh/kubeconform)
@@ -81,6 +84,9 @@ mage test:unit
 
 # Format, vet, tidy modules, lint, and check the workflows for drift (the CI gate)
 mage dev:check
+
+# Scan for known vulnerabilities the code can reach (needs network; CI runs it too)
+mage dev:vulncheck
 
 # Run integration tests using the compose stack
 mage test:integCompose
@@ -139,6 +145,9 @@ See [`AGENTS.md`](AGENTS.md) for the details. The essentials:
   `container-images.yml`, which `ci.yml` cannot see). `mage dev:check` keeps
   each one's `needs` covering its whole workflow, so a job you add to either
   file must be added to its aggregate.
+- A pull request that touches `.github/` or `charts/` automatically requests
+  review from the code owners listed in
+  [`.github/CODEOWNERS`](.github/CODEOWNERS).
 - Every Go file carries a GPL-2.0-or-later header, and a **new** one leads with
   your own copyright line, above Vox Pupuli's:
 
