@@ -40,7 +40,7 @@ import (
 
 // The warning CA.Init gives when encrypt_ca_key is set but the key it loads
 // from the store is plaintext (#432): a key from before the setting, which
-// nothing re-encrypts.
+// the server does not re-encrypt.
 var _ = Describe("Plaintext CA key under encrypt_ca_key", func() {
 	const warningText = "the stored CA key is not encrypted"
 

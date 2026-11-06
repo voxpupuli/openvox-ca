@@ -261,16 +261,71 @@ openvox-ca-ctl setup --cadir /srv/openvox-ca --encrypt-ca-key \
 
 ### Backward compatibility
 
-Existing CAs with unencrypted keys continue to work without changes, and
-`--encrypt-ca-key` affects new CA bootstraps only: it does not re-encrypt a key
-that already exists. A CA started with `encrypt_ca_key` set whose stored key is
-plaintext logs a warning saying so, once per start, from the process that loads
-the key. A key held by OpenBao Transit is not in the store, so it never
-triggers one.
+Existing CAs with unencrypted keys continue to work without changes, and the
+server's `--encrypt-ca-key` (`encrypt_ca_key`) affects new CA bootstraps only:
+the server does not re-encrypt a key that already exists. The offline
+`openvox-ca-ctl` commands below can. A CA started with `encrypt_ca_key` set
+whose stored key is plaintext logs a warning saying so, once per start, from
+the process that loads the key. A key held by OpenBao Transit is not in the
+store, so it never triggers one.
 
-There is no way yet to encrypt an existing key in place. `openvox-ca-ctl
-import` writes the plaintext key it is given exactly as given, and `migrate`
-copies the stored key byte for byte. Three options remain:
+To encrypt an existing key where it is, stop the CA and re-import its own
+certificate and key with `openvox-ca-ctl import --encrypt-ca-key`. `import`
+addresses a local directory, so this is the route on the `filesystem` backend.
+It writes the cadir's own key file (`ca_key.pem`, or `private/ca_key.pem` where
+that is where the key is) and does not read the server's configuration. Where
+`ca_key_file` keeps the key somewhere else, `import` does not reach the key the
+server reads.
+
+Copy the plaintext key somewhere offline first. The conversion cannot be
+undone with openvox-ca's own tools: no command writes an encrypted key back in
+plaintext, so going back to a plaintext key, or moving the key into OpenBao
+Transit (option 2 below), needs that copy. So does going back to OpenVox Server
+on a cadir it shares with openvox-ca: OpenVox Server cannot sign with the
+encrypted key (see [sharing the cadir with OpenVox
+Server](storage-backends.md#sharing-the-cadir-with-openvox-server)). Keep the
+copy until the server has started on the encrypted key with its passphrase,
+then destroy it, or keep it as carefully as any other copy of the key.
+
+Run it as the user the server runs as (`puppet` under the shipped unit), so
+the key it writes stays readable by the server; see [running `openvox-ca-ctl`
+as the service
+user](storage-backends.md#running-openvox-ca-ctl-as-the-service-user). The
+passphrase file has to be readable by that user too.
+
+```bash
+# Paths for a cadir that keeps its key at <cadir>/ca_key.pem; use
+# private/ca_key.pem where that is where yours is.
+sudo -u puppet openvox-ca-ctl import --cadir /srv/openvox-ca \
+  --cert-bundle /srv/openvox-ca/ca_crt.pem \
+  --private-key /srv/openvox-ca/ca_key.pem \
+  --encrypt-ca-key --ca-key-passphrase-file /etc/openvox-ca/key-passphrase
+```
+
+The key is written through the same encoder a bootstrap uses, so the result
+cannot be told apart from a key created encrypted. Then set `encrypt_ca_key`
+and the same passphrase source on the server. No `--crl-chain` is needed: the
+stored CRL is left as it is.
+
+If `ca_key.pem` is a symbolic link, `import` replaces the link with a regular
+file holding the encrypted key. The file the link pointed to is not touched and
+still holds the key in plaintext, so remove it yourself.
+
+Once the key is encrypted, `import` keeps it so. It accepts the encrypted key
+as `--private-key`, decrypting it with the passphrase to check it against the
+certificate, and writes it back encrypted. It refuses to replace it with a
+plaintext key unless given `--encrypt-ca-key`, which encrypts that one too, or
+`--allow-plaintext-ca-key`, which is how to go back to a plaintext key on
+purpose.
+
+Only openvox-ca's own encrypted form is accepted as `--private-key`, the one a
+bootstrap or `import --encrypt-ca-key` writes. A key encrypted by OpenSSL also
+has an `ENCRYPTED PRIVATE KEY` header but a different format, and is refused:
+decrypt it first (`openssl pkey -in key.enc.pem -out key.pem`) and import the
+plaintext key with `--encrypt-ca-key`.
+
+On other backends, `migrate` copies the stored key byte for byte, so the
+remaining options are:
 
 1. Keep the plaintext key and unset `encrypt_ca_key`. That stops the warning
    and changes nothing else.
@@ -286,12 +341,15 @@ copies the stored key byte for byte. Three options remain:
 3. Bootstrap a new CA with the setting on. Its key is created encrypted, but
    every certificate the old CA signed has to be reissued.
 
-None of these reaches copies already taken: a backup, snapshot or replica made
-while the key was plaintext still holds a usable CA key. Nor does deleting the
-key reach the store's own history on every backend: etcd keeps earlier
-revisions until it is compacted, a Redis append-only file keeps the write until
-it is rewritten, and a database can keep a deleted row's bytes in its log and
-free pages until they are reused.
+None of the routes in this section reaches copies already taken, encrypting the
+key included: a backup, snapshot or replica made while the key was plaintext
+still holds a usable CA key. Nor does deleting the key reach the store's own
+history on every backend. On the filesystem, `import` replaces `ca_key.pem` by
+renaming a new file over it, so the plaintext file's blocks stay on the device
+until they are reused, and longer on a copy-on-write filesystem. etcd keeps
+earlier revisions until it is compacted, a Redis append-only file keeps the
+write until it is rewritten, and a database can keep a deleted row's bytes in
+its log and free pages until they are reused.
 
 Loading handles both encrypted and unencrypted PEM files, deciding from the PEM
 itself rather than from the setting. An encrypted key therefore needs its

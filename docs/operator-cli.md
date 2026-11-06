@@ -230,6 +230,20 @@ openvox-ca-ctl import \
 # other type (Ed25519, say) is refused here and at startup, because the isolated
 # signer will not make the signatures it needs; see ca-key-security.md.
 #
+# --encrypt-ca-key writes the key encrypted at rest, exactly as a CA bootstrapped
+# with encrypt_ca_key would hold it. The passphrase comes from
+# --ca-key-passphrase-file or OPENVOX_CA_KEY_PASSPHRASE, the sources the server
+# reads, and is required. --private-key may itself be encrypted in openvox-ca's
+# own form (the stored key of such a CA): import decrypts it with the same
+# passphrase to check it against the certificate, and stores it encrypted
+# whether or not --encrypt-ca-key is given. A key encrypted by OpenSSL is not in
+# that form and is refused; decrypt it with `openssl pkey` and import the
+# plaintext key with --encrypt-ca-key. A plaintext key is refused over an
+# encrypted one already stored, unless --encrypt-ca-key encrypts it or
+# --allow-plaintext-ca-key says the CA is meant to keep its key in plaintext
+# from now on. See "Backward compatibility" in
+# ca-key-security.md for encrypting an existing key this way.
+#
 # --crl-chain must contain only X509 CRL blocks. Every one is parsed, and only
 # the parsed CRLs are stored -- so a file with a certificate or a key
 # concatenated into it is refused, for the same reason the certificate bundle

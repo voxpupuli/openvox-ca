@@ -341,6 +341,49 @@ var _ = Describe("Key encryption", func() {
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("empty"))
 		})
+
+		// The two refusals for a missing passphrase name the reason and the
+		// setting for each caller, with and without a file at the
+		// auto-passphrase path, so the remedy points at what the operator can
+		// actually set.
+		DescribeTable("names each caller's reason and setting when no passphrase source is configured",
+			func(need passphraseNeed, because, setting string) {
+				_, err := resolvePassphrase(KeyPassphraseConfig{}, tmpDir, need)
+				Expect(err).To(MatchError(ContainSubstring(because + " but no passphrase source is configured")))
+				Expect(err).To(MatchError(ContainSubstring("set " + setting + " to a file holding the passphrase")))
+
+				autoPath := autoPassphrasePath(tmpDir)
+				Expect(os.WriteFile(autoPath, []byte("a-passphrase-at-the-auto-path"), 0o600)).To(Succeed())
+				_, err = resolvePassphrase(KeyPassphraseConfig{}, tmpDir, need)
+				Expect(err).To(MatchError(ContainSubstring(because + " and no passphrase source is configured")))
+				Expect(err).To(MatchError(ContainSubstring("set " + setting + " to that path")))
+			},
+			Entry("encrypt_ca_key on the server or setup", needEncryptConfigured,
+				"encrypt_ca_key is set", "ca_key_passphrase_file"),
+			Entry("an encrypted stored key", needStoredKeyEncrypted,
+				"the CA key in the store is encrypted", "ca_key_passphrase_file"),
+			Entry("import --encrypt-ca-key", needImportEncrypt,
+				"--encrypt-ca-key is set", "--ca-key-passphrase-file"),
+			Entry("an encrypted --private-key", needImportedKeyEncrypted,
+				"the key given to --private-key is encrypted", "--ca-key-passphrase-file"),
+		)
+
+		// Each caller names the flag or setting its operator actually used.
+		// The server's needs keep the flag's name because setup, which has
+		// that flag, reaches them through Init.
+		DescribeTable("names the passphrase file's source when it cannot be read",
+			func(need passphraseNeed, label string) {
+				missing := filepath.Join(tmpDir, "no-such-passphrase")
+
+				_, err := resolvePassphrase(KeyPassphraseConfig{PassphraseFile: missing}, tmpDir, need)
+
+				Expect(err).To(MatchError(ContainSubstring("reading " + label + " " + missing + ":")))
+			},
+			Entry("encrypt_ca_key on the server or setup", needEncryptConfigured, "--ca-key-passphrase-file"),
+			Entry("an encrypted stored key", needStoredKeyEncrypted, "--ca-key-passphrase-file"),
+			Entry("import --encrypt-ca-key", needImportEncrypt, "--ca-key-passphrase-file"),
+			Entry("an encrypted --private-key", needImportedKeyEncrypted, "--ca-key-passphrase-file"),
+		)
 	})
 
 	DescribeTable("KeyPassphraseConfig.EnvVar",
@@ -398,8 +441,8 @@ var _ = Describe("Key encryption", func() {
 		})
 
 		It("needs none for a plaintext stored key even with encryption on", func() {
-			// The other direction. Nothing re-encrypts a key that already
-			// exists, so refusing here would stop a CA that works today.
+			// The other direction. The server does not re-encrypt a key that
+			// already exists, so refusing here would stop a CA that works today.
 			Expect(PassphraseNeeded(true, plaintextPEM())).To(BeFalse())
 		})
 

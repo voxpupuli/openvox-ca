@@ -27,7 +27,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log/slog"
 )
 
 // ErrKeyProviderKeyNotFound is returned (wrapped) by KeyProvider.Load when the
@@ -178,6 +177,9 @@ func (c *CA) LoadOrCreateCAKey(ctx context.Context, create bool) (crypto.Signer,
 		if err := c.Storage.SaveCAKey(ctx, keyPEM); err != nil {
 			return fmt.Errorf("writing CA key: %w", err)
 		}
+		if c.EncryptCAKey {
+			logCAKeyStoredEncrypted()
+		}
 		created = key
 		return nil
 	}); err != nil {
@@ -200,29 +202,11 @@ func (c *CA) LoadOrCreateCAKey(ctx context.Context, create bool) (crypto.Signer,
 // marshalCAKeyForStorage encodes a freshly generated CA key for persistence,
 // applying at-rest encryption when EncryptCAKey is set.
 //
-// The single encoder for both paths that create a CA key — bootstrapCA and
-// csr --create-key — so a key created by either is indistinguishable from the
-// other. It is shared rather than merely mirrored because the failure mode of a
-// divergence is silent and severe: a CA key written in plaintext despite
-// encrypt_ca_key, discovered whenever someone next reads the file.
+// Used by both paths that create a CA key, bootstrapCA and csr --create-key,
+// and a thin wrapper over encodeCAKey, which import shares; see there for why
+// there is one encoder.
 func (c *CA) marshalCAKeyForStorage(key crypto.Signer) ([]byte, error) {
-	if !c.EncryptCAKey {
-		keyPEM, err := marshalPrivateKeyPEM(key)
-		if err != nil {
-			return nil, fmt.Errorf("marshalling CA key: %w", err)
-		}
-		return keyPEM, nil
-	}
-	passphrase, err := resolvePassphrase(c.KeyPassphrase, c.Storage.CADir(), needEncryptConfigured)
-	if err != nil {
-		return nil, fmt.Errorf("resolving CA key passphrase: %w", err)
-	}
-	keyPEM, err := encryptAndMarshalKey(key, passphrase)
-	if err != nil {
-		return nil, fmt.Errorf("encrypting CA key: %w", err)
-	}
-	slog.Info("CA private key encrypted at rest")
-	return keyPEM, nil
+	return encodeCAKey(key, c.EncryptCAKey, c.KeyPassphrase, c.Storage.CADir(), needEncryptConfigured)
 }
 
 // BuildCSR produces a PKCS#10 certificate signing request for this CA's own

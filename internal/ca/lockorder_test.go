@@ -84,7 +84,8 @@ import (
 //     passive: it records what the operations a spec calls actually do, so a
 //     `WithLock` site no spec reaches contributes no edge and could be inverted
 //     without failing anything here. The driven set is Init, Generate,
-//     SaveRequest, Sign, Renew, AutoRenew, Revoke and Clean; it is a minority of
+//     SaveRequest, Sign, Renew, AutoRenew, Revoke and Clean here, plus ImportCA
+//     in caimportlock_test.go; it is a minority of
 //     the call sites, and the counting rule is `c.Storage.WithLock` in non-test
 //     `internal/ca` plus the sites in caImport.go that lock through a passed-in
 //     store. Derive the totals from the tree rather than trusting a number
@@ -93,7 +94,7 @@ import (
 //     merge that conflicts with nothing and fails no spec. Untouched, among
 //     others:
 //     `SignWithTTL` and `DeleteRequest` (signing.go), `ImportCertificate`
-//     (importcert.go), `ImportCACertificate` and the CRL import (caImport.go),
+//     (importcert.go), `ImportCACertificate` (caImport.go),
 //     `RevokeSerial` (revoke.go), `CleanupExpiredCerts` (cleanup.go),
 //     `seedSupportingState` (init.go), and the CRL refresh paths (crl.go). Extending the coverage
 //     means driving the caller, not editing the table — which is the same kind
@@ -194,10 +195,11 @@ var subjectClass = lockSubjectPrefix + "<name>"
 // where that distinction matters and why it is out of scope here.
 //
 // The table is a list of *permitted* pairs checked against *observed* ones, so
-// an entry no spec exercises is harmless — `bootstrap` → `crl` is one, listed
-// because it is real and documented rather than because anything here drives
-// it. Do not read the table as an inventory of what is tested; the limits above
-// say what is observed.
+// an entry no spec exercises is harmless. `bootstrap` → `crl` was one, listed
+// because it is real and documented; caimportlock_test.go now drives it through
+// ImportCA, while ImportCACertificate's half of it is still driven by nothing.
+// Do not read the table as an inventory of what is tested; the limits above say
+// what is observed.
 //
 // One legitimate edge is knowingly absent, and this is where a future reader
 // should look before concluding something broke.
@@ -231,9 +233,9 @@ var allowedLockNesting = map[[2]string]string{
 		"renewrace_test.go pins the first four per-caller, " +
 		"managedcert_reconcile_test.go the fifth, generate_test.go the sixth.",
 	{lockNameBootstrap, lockNameCRL}: "locking.md, Lock ordering: `bootstrap` → `crl`. " +
-		"ImportCACertificate holds bootstrap across importCAMaterial's CRL rewrite " +
-		"(caImport.go). One-way: nothing takes crl and then bootstrap. Listed but not " +
-		"exercised — no spec here drives ImportCACertificate.",
+		"ImportCACertificate and ImportCAWithOptions hold bootstrap across importCAMaterial's " +
+		"CRL rewrite (caImport.go). One-way: nothing takes crl and then bootstrap. " +
+		"caimportlock_test.go drives ImportCA through it; no spec here drives ImportCACertificate.",
 }
 
 // lockOrderObserver wraps a filesystem backend and records every same-host lock

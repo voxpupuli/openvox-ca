@@ -31,12 +31,49 @@ import (
 	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
 
-// ImportCA imports an external CA cert/key into a storage directory.
-// It validates the cert/key pair, writes the files, and initialises
+// ImportCA imports an external CA cert/key into a storage directory. It is
+// ImportCAWithOptions with no options set, so it never encrypts a plaintext
+// key and refuses one over an encrypted key in storage; see there.
+func ImportCA(ctx context.Context, store *storage.StorageService, certBundlePEM, keyPEM, crlPEM []byte) error {
+	return ImportCAWithOptions(ctx, store, certBundlePEM, keyPEM, crlPEM, ImportCAOptions{})
+}
+
+// ImportCAOptions says how ImportCAWithOptions stores the CA key.
+type ImportCAOptions struct {
+	// EncryptCAKey writes the key encrypted under the passphrase KeyPassphrase
+	// resolves, through the encoder bootstrap uses, whatever form it was given
+	// in.
+	EncryptCAKey bool
+
+	// KeyPassphrase is the passphrase source: for EncryptCAKey, and to decrypt
+	// a key that is given encrypted.
+	KeyPassphrase KeyPassphraseConfig
+
+	// AllowPlaintextOverEncrypted lets a plaintext key replace an encrypted
+	// one in storage. Without it that import is refused with
+	// ErrPlaintextOverEncrypted.
+	AllowPlaintextOverEncrypted bool
+}
+
+// ErrPlaintextOverEncrypted reports an import that would replace an encrypted
+// CA key in storage with a plaintext one.
+var ErrPlaintextOverEncrypted = errors.New("refusing to replace the encrypted CA key in storage with a plaintext one")
+
+// ImportCAWithOptions imports an external CA cert/key into a storage
+// directory. It validates the cert/key pair, writes the files, and initialises
 // the serial and inventory files when they are absent.
 //
 // Supported key formats: RSA PKCS1 ("RSA PRIVATE KEY"), EC SEC1
-// ("EC PRIVATE KEY"), and PKCS8 ("PRIVATE KEY") for both RSA and ECDSA.
+// ("EC PRIVATE KEY"), PKCS8 ("PRIVATE KEY") for both RSA and ECDSA, and this
+// CA's own encrypted form ("ENCRYPTED PRIVATE KEY"), which is decrypted under
+// opts.KeyPassphrase so it can be checked against the certificate.
+//
+// The key is written encrypted when opts.EncryptCAKey is set or it was given
+// encrypted: an encrypted key is never written back in plaintext. Otherwise it
+// is written exactly as given. A plaintext key is refused over an encrypted one
+// already in storage unless opts.AllowPlaintextOverEncrypted is set, because
+// that import used to downgrade the at-rest key silently, and the only sign was
+// the server's warning at its next start.
 //
 // crlPEM may be nil, meaning no --crl-chain was supplied. That leaves the stored
 // CRL chain as it is, reordered so this CA's own block leads; a fresh empty CRL
@@ -45,23 +82,87 @@ import (
 // with a generated CRL unconditionally, which destroyed both the ancestor blocks
 // and every recorded revocation.
 //
+// The writes run under the bootstrap lock, which the stored-key check needs:
+// the check that justifies writing a plaintext key has to see the key that
+// write replaces. ImportCACertificate takes the same lock for the same span.
+//
 // This is a thin wrapper over ImportCAMaterial for the case where the CA's
 // private key is a local PEM blob. When the key lives at a provider (an OpenBao
 // Transit key, a PKCS#11 token) there is no blob to pass and callers use
 // ImportCAMaterial directly with a crypto.Signer.
 //
 // This is an offline operation; no CA daemon is required.
-func ImportCA(ctx context.Context, store *storage.StorageService, certBundlePEM, keyPEM, crlPEM []byte) error {
+func ImportCAWithOptions(ctx context.Context, store *storage.StorageService, certBundlePEM, keyPEM, crlPEM []byte, opts ImportCAOptions) error {
 	keyBlock, _ := pem.Decode(keyPEM)
 	if keyBlock == nil {
 		return fmt.Errorf("private-key does not contain a valid PEM block")
 	}
-	caKey, err := parsePrivateKeyDER(keyBlock.Type, keyBlock.Bytes)
-	if err != nil {
-		return fmt.Errorf("failed to parse CA private key: %w", err)
-	}
 
-	return ImportCAMaterial(ctx, store, certBundlePEM, keyPEM, crlPEM, caKey, CRLValidity)
+	// Encoded before anything is locked or written, so that a missing or
+	// wrong passphrase refuses with storage untouched.
+	var caKey crypto.Signer
+	storedKeyPEM := keyPEM
+	var err error
+	if isEncryptedPEM(keyBlock) {
+		caKey, err = decryptCAKey(keyBlock, opts.KeyPassphrase, store.CADir(), needImportedKeyEncrypted)
+		if errors.Is(err, errNotOwnEnvelope) {
+			return fmt.Errorf("failed to read CA private key: %w: decrypt it with `openssl pkey` "+
+				"and import the plaintext key with --encrypt-ca-key", err)
+		}
+		if err != nil {
+			return fmt.Errorf("failed to read CA private key: %w", err)
+		}
+		if storedKeyPEM, err = encodeCAKey(caKey, true, opts.KeyPassphrase, store.CADir(), needImportedKeyEncrypted); err != nil {
+			return err
+		}
+	} else {
+		caKey, err = parsePrivateKeyDER(keyBlock.Type, keyBlock.Bytes)
+		if err != nil {
+			return fmt.Errorf("failed to parse CA private key: %w", err)
+		}
+		if opts.EncryptCAKey {
+			if storedKeyPEM, err = encodeCAKey(caKey, true, opts.KeyPassphrase, store.CADir(), needImportEncrypt); err != nil {
+				return err
+			}
+		}
+	}
+	writingPlaintext := !opts.EncryptCAKey && !isEncryptedPEM(keyBlock)
+
+	lockCtx, cancel := context.WithTimeout(ctx, LockTimeout)
+	defer cancel()
+	return store.WithLock(lockCtx, lockNameBootstrap, func() error {
+		if writingPlaintext && !opts.AllowPlaintextOverEncrypted {
+			if err := refusePlaintextOverEncrypted(ctx, store, opts.KeyPassphrase); err != nil {
+				return err
+			}
+		}
+		if err := ImportCAMaterial(ctx, store, certBundlePEM, storedKeyPEM, crlPEM, caKey, CRLValidity); err != nil {
+			return err
+		}
+		if !writingPlaintext {
+			logCAKeyStoredEncrypted()
+		}
+		return nil
+	})
+}
+
+// refusePlaintextOverEncrypted returns ErrPlaintextOverEncrypted when storage
+// holds an encrypted CA key. A stored key that cannot be read refuses too: the
+// alternative is to guess it was not encrypted.
+func refusePlaintextOverEncrypted(ctx context.Context, store *storage.StorageService, cfg KeyPassphraseConfig) error {
+	stored, err := store.GetCAKey(ctx)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("reading the stored CA key before replacing it: %w", err)
+	}
+	if block, _ := pem.Decode(stored); !isEncryptedPEM(block) {
+		return nil
+	}
+	return fmt.Errorf("%w: pass --encrypt-ca-key to keep it encrypted, with the passphrase in "+
+		"--ca-key-passphrase-file or %s, or --allow-plaintext-ca-key if the key is meant to be "+
+		"stored in plaintext from now on", ErrPlaintextOverEncrypted, cfg.EnvVar())
 }
 
 // ErrCACertExists reports that storage already holds a CA certificate and the
